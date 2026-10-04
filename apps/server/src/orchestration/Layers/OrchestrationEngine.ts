@@ -99,6 +99,7 @@ function commandToAggregateRef(command: OrchestrationCommand): {
         aggregateId: command.worktreeId,
       };
     case "thread.create":
+    case "thread.delegated.create":
     case "thread.delete":
     case "thread.sidebar.undo":
     case "thread.archive":

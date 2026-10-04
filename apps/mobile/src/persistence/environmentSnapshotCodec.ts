@@ -1,4 +1,5 @@
 import { WorktreeId, type EnvironmentId } from "@ryco/contracts";
+import { isThreadLineage } from "@ryco/client-runtime/state/threads";
 import {
   MAX_WORKSPACE_SNAPSHOT_BYTES_PER_ENVIRONMENT,
   MAX_WORKSPACE_SNAPSHOT_THREADS_PER_ENVIRONMENT,
@@ -261,6 +262,8 @@ export function toWorkspaceMetadataSnapshot(
       hasPendingUserInput: summary.hasPendingUserInput,
       hasActionableProposedPlan: summary.hasActionableProposedPlan,
       deliveryUnknown: false,
+      // Stored shells come from storage: keep lineage only when well formed.
+      ...(isThreadLineage(shell.lineage) ? { lineage: shell.lineage } : {}),
     })),
   };
 }

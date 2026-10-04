@@ -24,7 +24,10 @@ import {
   type AgentControlProposalStatus,
   type AgentControlProposalStreamEvent,
   type ThreadId,
+  type ThreadLineage,
 } from "@ryco/contracts";
+
+import { isDelegatedThreadLineage } from "../threads/threadLineage.ts";
 
 export interface AgentControlQueueState {
   /** Whether a snapshot has been applied since (re)subscribing. */
@@ -226,7 +229,10 @@ export interface AgentControlThreadActivity {
   readonly pending: ReadonlyArray<AgentControlProposal>;
   /** Latest first, including running actions and terminal history. */
   readonly activity: ReadonlyArray<AgentControlProposal>;
+  /** Latest accepted manager, hidden when it is the same thread as `delegatedFromThreadId`. */
   readonly managerThreadId: ThreadId | null;
+  /** Creator: server lineage, else the accepted `createThreads` receipt (pre-lineage threads). */
+  readonly delegatedFromThreadId: ThreadId | null;
 }
 
 /** External clients have no caller thread, so their live requests need an environment surface. */
@@ -246,15 +252,22 @@ export function selectAgentControlExternalActivity(
           right.proposalId.localeCompare(left.proposalId),
       ),
     managerThreadId: null,
+    delegatedFromThreadId: null,
   };
 }
+
+const principalThreadId = (proposal: AgentControlProposal | undefined): ThreadId | null =>
+  proposal?.principal.kind === "provider-session" ? proposal.principal.threadId : null;
 
 /** Thread presentation only; never grants authority or changes server policy. */
 export function selectAgentControlThreadActivity(
   state: AgentControlQueueState,
   threadId: ThreadId | null,
+  lineage?: ThreadLineage | null,
 ): AgentControlThreadActivity {
-  if (threadId === null) return { pending: [], activity: [], managerThreadId: null };
+  if (threadId === null) {
+    return { pending: [], activity: [], managerThreadId: null, delegatedFromThreadId: null };
+  }
   const proposals = Object.values(state.proposalsById).toSorted(
     (left, right) =>
       right.updatedAt.localeCompare(left.updatedAt) ||
@@ -268,7 +281,7 @@ export function selectAgentControlThreadActivity(
   // Device/project operations and unaccepted requests do not establish a manager.
   // Child-return progress updates updatedAt long after the management action.
   // Order accepted work by its stable decision time, not that independent lifecycle.
-  const manager = proposals
+  const managers = proposals
     .filter((proposal) => {
       if (
         proposal.principal.kind !== "provider-session" ||
@@ -296,11 +309,20 @@ export function selectAgentControlThreadActivity(
       (left, right) =>
         (right.decidedAt ?? right.createdAt).localeCompare(left.decidedAt ?? left.createdAt) ||
         right.proposalId.localeCompare(left.proposalId),
-    )[0];
+    );
+  // "Created by" and "currently directed by" are different facts. Server lineage
+  // wins for the creator; the receipt inference covers pre-lineage children.
+  const latestManager = principalThreadId(managers[0]);
+  const inferredCreator = principalThreadId(
+    managers.find((proposal) => proposal.plan.kind === "createThreads"),
+  );
+  const delegatedFromThreadId = isDelegatedThreadLineage(lineage)
+    ? lineage.parentThreadId
+    : inferredCreator;
   return {
     pending: local.filter((proposal) => proposal.status === "pending-user-approval").toReversed(),
     activity: local.filter((proposal) => proposal.status !== "pending-user-approval"),
-    managerThreadId:
-      manager?.principal.kind === "provider-session" ? manager.principal.threadId : null,
+    managerThreadId: latestManager === delegatedFromThreadId ? null : latestManager,
+    delegatedFromThreadId,
   };
 }

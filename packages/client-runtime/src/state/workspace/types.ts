@@ -8,6 +8,7 @@ import type {
   RelayEffectiveRole,
   RepositoryIdentity,
   ThreadId,
+  ThreadLineage,
   ThreadSettlementOverride,
   WorktreeId,
 } from "@ryco/contracts";
@@ -112,6 +113,8 @@ export interface WorkspaceThreadMetadata {
   readonly hasPendingUserInput: boolean;
   readonly hasActionableProposedPlan: boolean;
   readonly deliveryUnknown: boolean;
+  /** Server-owned provenance. Optional: older caches omit it; validate before reuse. */
+  readonly lineage?: ThreadLineage | null;
 }
 
 export const WORKSPACE_METADATA_SNAPSHOT_SCHEMA_VERSION = 1 as const;

@@ -49,6 +49,7 @@ import {
 import { sanitizeThreadErrorMessage } from "../../errors/transportError.ts";
 import { getThreadFromEnvironmentState } from "./threadDerivation.ts";
 import { getThreadsRuntimeConfiguration } from "./runtime.ts";
+import { selectDelegatedChildThreads, threadLineagesEqual } from "./threadLineage.ts";
 
 export interface EnvironmentState {
   projectIds: ProjectId[];
@@ -360,6 +361,7 @@ function mapThread(thread: OrchestrationThread, environmentId: EnvironmentId): T
     manualStatusBucket: thread.manualStatusBucket ?? null,
     manualPosition: thread.manualPosition ?? 0,
     goal: thread.goal ?? null,
+    lineage: thread.lineage ?? null,
     turnDiffSummaries: thread.checkpoints.map(mapTurnDiffSummary),
     activities: thread.activities.map((activity) => ({ ...activity })),
   };
@@ -399,6 +401,7 @@ function mapThreadShell(
     manualStatusBucket: thread.manualStatusBucket ?? null,
     manualPosition: thread.manualPosition ?? 0,
     goal: thread.goal ?? null,
+    lineage: thread.lineage ?? null,
   };
   const session = thread.session ? mapSession(thread.session) : null;
   const turnState: ThreadTurnState = {
@@ -436,6 +439,7 @@ function mapThreadShell(
     hasActionableProposedPlan: thread.hasActionableProposedPlan,
     backgroundLiveness: thread.backgroundLiveness ?? null,
     priority: thread.priority,
+    lineage: thread.lineage ?? null,
   };
   return {
     shell,
@@ -471,6 +475,7 @@ function toThreadShell(thread: Thread): ThreadShell {
     manualStatusBucket: thread.manualStatusBucket,
     manualPosition: thread.manualPosition,
     goal: thread.goal ?? null,
+    lineage: thread.lineage ?? null,
   };
 }
 
@@ -587,7 +592,8 @@ function sidebarThreadSummariesEqual(
     left.hasPendingUserInput === right.hasPendingUserInput &&
     left.hasActionableProposedPlan === right.hasActionableProposedPlan &&
     (left.backgroundLiveness ?? null) === (right.backgroundLiveness ?? null) &&
-    threadPrioritiesEqual(left.priority, right.priority)
+    threadPrioritiesEqual(left.priority, right.priority) &&
+    threadLineagesEqual(left.lineage, right.lineage)
   );
 }
 
@@ -660,7 +666,8 @@ function threadShellsEqual(left: ThreadShell | undefined, right: ThreadShell): b
     left.worktreeId === right.worktreeId &&
     left.manualStatusBucket === right.manualStatusBucket &&
     left.manualPosition === right.manualPosition &&
-    threadGoalsEqual(left.goal, right.goal)
+    threadGoalsEqual(left.goal, right.goal) &&
+    threadLineagesEqual(left.lineage, right.lineage)
   );
 }
 
@@ -2995,6 +3002,31 @@ export function selectSidebarThreadsForProjectRef(
     const thread = environmentState.sidebarThreadSummaryById[threadId];
     return thread ? [thread] : [];
   });
+}
+
+/**
+ * Direct delegated children of a thread, oldest first. Children are always in the
+ * parent's project (the decider enforces it); without a parent shell, fall back
+ * to every summary in the environment.
+ */
+export function selectDelegatedChildThreadsForThreadRef(
+  state: AppState,
+  ref: ScopedThreadRef | null | undefined,
+): SidebarThreadSummary[] {
+  if (!ref) {
+    return [];
+  }
+  const environmentState = selectEnvironmentState(state, ref.environmentId);
+  const parentShell = environmentState.threadShellById[ref.threadId];
+  const candidateIds =
+    parentShell === undefined
+      ? environmentState.threadIds
+      : (environmentState.threadIdsByProjectId[parentShell.projectId] ?? EMPTY_THREAD_IDS);
+  const candidates = candidateIds.flatMap((threadId) => {
+    const thread = environmentState.sidebarThreadSummaryById[threadId];
+    return thread ? [thread] : [];
+  });
+  return selectDelegatedChildThreads(candidates, ref);
 }
 
 export function selectSidebarThreadsForProjectRefs(

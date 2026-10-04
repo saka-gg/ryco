@@ -23,6 +23,7 @@ import {
   type AgentControlProposal,
   type AgentControlResultEnvelope,
   type ClientOrchestrationCommand,
+  type ThreadDelegatedCreateCommand,
 } from "@ryco/contracts";
 import { Cause, Duration, Effect, Layer, Option, Stream } from "effect";
 
@@ -486,11 +487,13 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
 
         const dispatch = (
           step: string,
-          command: ClientOrchestrationCommand,
+          command: ClientOrchestrationCommand | ThreadDelegatedCreateCommand,
           updateState?: (state: AgentControlOperationState) => AgentControlOperationState,
         ) =>
           Effect.gen(function* () {
-            const result = yield* commandApplication.apply(command);
+            const result = yield* command.type === "thread.delegated.create"
+              ? commandApplication.applyInternal(command)
+              : commandApplication.apply(command);
             const state = updateState?.(operation.state) ?? operation.state;
             yield* checkpoint(
               appendStep(
@@ -913,6 +916,12 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
             },
           });
 
+          // Provenance only (spec D4/D5): never authority; automation runs are not children.
+          const delegatedParentThreadId =
+            proposal.plan.kind === "createThreads" && proposal.principal.kind === "provider-session"
+              ? proposal.principal.threadId
+              : null;
+
           const snapshot = yield* projections.getShellSnapshot();
           for (const threadId of plannedThreadIds) {
             const existing = yield* projections.getThreadShellById(threadId);
@@ -1060,22 +1069,29 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
             const createdAt = new Date().toISOString();
             const tokenMode = entry.tokenMode ?? worktreeSettings.defaultAgentTokenMode;
             yield* validator.revalidateExecution(proposal);
+            const createFields = {
+              commandId: commandIdFor(operation.operationId, `thread-create-${index}`),
+              threadId,
+              projectId: project.id,
+              title: entry.title,
+              modelSelection: entry.modelSelection,
+              runtimeMode: entry.runtimeMode,
+              interactionMode: "default" as const,
+              tokenMode,
+              branch: worktree?.branch ?? null,
+              worktreePath: worktree?.checkoutPath ?? null,
+              createdAt,
+            };
+            // The decider owns lineage: it rejects a parent deleted after revalidation.
             yield* dispatch(
               `thread-created:${index}`,
-              {
-                type: "thread.create",
-                commandId: commandIdFor(operation.operationId, `thread-create-${index}`),
-                threadId,
-                projectId: project.id,
-                title: entry.title,
-                modelSelection: entry.modelSelection,
-                runtimeMode: entry.runtimeMode,
-                interactionMode: "default",
-                tokenMode,
-                branch: worktree?.branch ?? null,
-                worktreePath: worktree?.checkoutPath ?? null,
-                createdAt,
-              },
+              delegatedParentThreadId === null
+                ? { type: "thread.create", ...createFields }
+                : {
+                    type: "thread.delegated.create",
+                    ...createFields,
+                    parentThreadId: delegatedParentThreadId,
+                  },
               (state) => ({
                 ...state,
                 resources: {

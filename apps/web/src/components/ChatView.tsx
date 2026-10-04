@@ -228,6 +228,7 @@ import {
 } from "./chat/providerStatusNotice";
 import { ThreadErrorBanner } from "./chat/ThreadErrorBanner";
 import { AgentControlApprovals } from "./agent-control/AgentControlApprovals";
+import { DelegatedThreadsSection } from "./threads/DelegatedThreadsSection";
 import { ComposerBannerStack, type ComposerBannerStackItem } from "./chat/ComposerBannerStack";
 import { useUsageLimitBannerItem } from "./chat/usageLimitBanner";
 import {
@@ -4962,10 +4963,17 @@ export default function ChatView(props: ChatViewProps) {
               {/* Agent Control approvals stay off the frozen phone tier;
                   apps/mobile owns the native surface. */}
               {presentationTier !== "phone" ? (
-                <AgentControlApprovals
-                  environmentId={environmentId}
-                  activeThreadId={activeThreadId}
-                />
+                <>
+                  <DelegatedThreadsSection
+                    key={`${environmentId}:${activeThreadId ?? ""}`}
+                    environmentId={environmentId}
+                    parentThreadId={activeThreadId}
+                  />
+                  <AgentControlApprovals
+                    environmentId={environmentId}
+                    activeThreadId={activeThreadId}
+                  />
+                </>
               ) : null}
               {showNewThreadComposerSpacer ? <div aria-hidden className="mb-2 h-5" /> : null}
               <ComposerQueuedMessages

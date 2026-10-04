@@ -6,6 +6,7 @@ export * from "./threadDerivation.ts";
 export * from "./threadInbox.ts";
 export * from "./threadPriorityRefresh.ts";
 export * from "./threadSort.ts";
+export * from "./threadLineage.ts";
 export * from "./types.ts";
 export * from "./threadActivityStatus.ts";
 

@@ -35,6 +35,7 @@ export {
   removeThreadByRef,
   selectBootstrapCompleteForActiveEnvironment,
   selectBootstrapCompleteForEnvironment,
+  selectDelegatedChildThreadsForThreadRef,
   selectEnvironmentState,
   selectProjectByRef,
   selectProjectsAcrossEnvironments,

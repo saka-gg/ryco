@@ -21,10 +21,25 @@ export interface AgentControlThreadActivityProps {
   readonly onDecide: (proposalId: AgentControlProposalId, decision: "accept" | "reject") => void;
 }
 
+function ThreadLink(props: {
+  readonly environmentId: EnvironmentId;
+  readonly threadId: ThreadId;
+  readonly getThreadTitle: (threadId: ThreadId) => string | undefined;
+}) {
+  return (
+    <a
+      className="truncate text-primary underline-offset-2 hover:underline"
+      href={`/${encodeURIComponent(props.environmentId)}/${encodeURIComponent(props.threadId)}`}
+    >
+      {props.getThreadTitle(props.threadId) || `thread ${props.threadId.slice(0, 8)}…`}
+    </a>
+  );
+}
+
 export function AgentControlThreadActivity({
   scope = "thread",
   environmentId,
-  selection: { pending, activity, managerThreadId },
+  selection: { pending, activity, managerThreadId, delegatedFromThreadId },
   getThreadTitle,
   submittingIds,
   decisionErrorsById,
@@ -51,7 +66,14 @@ export function AgentControlThreadActivity({
         ["blocked", "failed", "uncertain"].includes(result.status),
       ),
   ).length;
-  if (pending.length === 0 && !latest && managerThreadId === null) return null;
+  if (
+    pending.length === 0 &&
+    !latest &&
+    managerThreadId === null &&
+    delegatedFromThreadId === null
+  ) {
+    return null;
+  }
 
   return (
     <div
@@ -60,15 +82,33 @@ export function AgentControlThreadActivity({
         scope === "external" ? "agent-control-external-approvals" : "agent-control-approvals"
       }
     >
-      {managerThreadId !== null ? (
+      {delegatedFromThreadId !== null || managerThreadId !== null ? (
         <p className="flex min-w-0 items-center gap-1 px-2 py-1 text-xs text-muted-foreground">
-          <span className="shrink-0">Managed by</span>
-          <a
-            className="truncate text-primary underline-offset-2 hover:underline"
-            href={`/${encodeURIComponent(environmentId)}/${encodeURIComponent(managerThreadId)}`}
-          >
-            {getThreadTitle(managerThreadId) || `thread ${managerThreadId.slice(0, 8)}…`}
-          </a>
+          {delegatedFromThreadId !== null ? (
+            <>
+              <span className="shrink-0">Delegated from</span>
+              <ThreadLink
+                environmentId={environmentId}
+                getThreadTitle={getThreadTitle}
+                threadId={delegatedFromThreadId}
+              />
+            </>
+          ) : null}
+          {delegatedFromThreadId !== null && managerThreadId !== null ? (
+            <span aria-hidden className="shrink-0">
+              ·
+            </span>
+          ) : null}
+          {managerThreadId !== null ? (
+            <>
+              <span className="shrink-0">Managed by</span>
+              <ThreadLink
+                environmentId={environmentId}
+                getThreadTitle={getThreadTitle}
+                threadId={managerThreadId}
+              />
+            </>
+          ) : null}
         </p>
       ) : null}
       {pending.length > 0 ? (

@@ -55,6 +55,13 @@ export const ProjectionThread = Schema.Struct({
   hasActionableProposedPlan: NonNegativeInt,
   usageLimit: Schema.optional(Schema.NullOr(ThreadUsageLimit)),
   deletedAt: Schema.NullOr(IsoDateTime),
+  /**
+   * Delegation lineage columns. Required on purpose: every SELECT must read them,
+   * otherwise the next `...existingRow` upsert would silently wipe the lineage.
+   */
+  lineageParentThreadId: Schema.NullOr(ThreadId),
+  lineageRootThreadId: Schema.NullOr(ThreadId),
+  lineageRelationship: Schema.NullOr(Schema.String),
 });
 export type ProjectionThread = typeof ProjectionThread.Type;
 

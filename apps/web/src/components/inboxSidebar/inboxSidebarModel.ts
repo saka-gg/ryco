@@ -13,7 +13,12 @@ import type {
   SidebarThreadSummary,
   SidebarWorktreeSummary,
 } from "@ryco/client-runtime/state/threads";
-import { buildThreadInbox, type ThreadInboxEntry } from "@ryco/client-runtime/state/threads";
+import {
+  buildThreadInbox,
+  planDelegatedNesting,
+  type DelegatedNestingItem,
+  type ThreadInboxEntry,
+} from "@ryco/client-runtime/state/threads";
 import {
   describeThreadPriorityFocus,
   type ThreadPriorityFocusMetadata,
@@ -27,6 +32,7 @@ import {
   type ProviderDriverKind,
   type SidebarAutoSettleAfterDays,
   type ThreadId,
+  type ThreadLineage,
 } from "@ryco/contracts";
 
 export type InboxSidebarThreadState =
@@ -130,6 +136,10 @@ export interface InboxSidebarRow {
   readonly settlementDisabledReason: string | null;
   readonly effectiveSettlementTimestamp: string | null;
   readonly focus: ThreadPriorityFocusMetadata | null;
+  /** Server-owned provenance; null on root threads. */
+  readonly lineage: ThreadLineage | null;
+  /** Quiet delegated descendants folded under this host row; empty unless it is a host. */
+  readonly delegatedChildren: ReadonlyArray<InboxSidebarRow>;
 }
 
 export interface InboxSidebarSection {
@@ -165,6 +175,8 @@ export interface BuildInboxSidebarInput {
   readonly pinnedThreadKeys?: ReadonlySet<string>;
   /** The environment rows are implicitly about; other machines are labelled. */
   readonly primaryEnvironmentId?: EnvironmentId | null;
+  /** Fold quiet delegated children under their host (default true; off on the phone tier). */
+  readonly nestDelegated?: boolean;
   readonly nowMs?: number;
 }
 
@@ -321,10 +333,59 @@ export function resolveInboxThreadStatus(
   };
 }
 
-function sectionKey(state: InboxSidebarThreadState): InboxSidebarSectionKey {
+/**
+ * State-derived section. Also the delegated-nesting attention predicate: a state
+ * that must never fold under a host has to map to "active" or "needs-input".
+ */
+function sectionKey(
+  state: InboxSidebarThreadState,
+): Extract<InboxSidebarSectionKey, "needs-input" | "active" | "recent"> {
   if (state === "needs-input") return "needs-input";
   if (state === "idle" || state === "offline") return "recent";
   return "active";
+}
+
+const NO_DELEGATED_CHILDREN: ReadonlyArray<InboxSidebarRow> = [];
+
+/**
+ * Folds quiet delegated children under their topmost visible host (spec D7/D8).
+ * Live, failing and attention children stay top-level, so section counts stay exact.
+ */
+function nestDelegatedRows(
+  rows: ReadonlyArray<InboxSidebarRow>,
+  threads: ReadonlyArray<SidebarThreadSummary>,
+): InboxSidebarRow[] {
+  // All threads, so filtered-out or archived intermediates can still be walked.
+  const lineageByKey = new Map(
+    threads.map((thread) => [
+      scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
+      thread.lineage,
+    ]),
+  );
+  const items = rows.map((row): DelegatedNestingItem => ({
+    key: row.key,
+    environmentId: row.environmentId,
+    threadId: row.threadId,
+    lineage: row.lineage,
+    pinned: row.pinned,
+    focused: row.focus !== null,
+    urgency: row.snoozedUntil ? "snoozed" : row.settled ? "settled" : sectionKey(row.state),
+  }));
+  const plan = planDelegatedNesting(items, { lineageByKey });
+  if (plan.hostByChildKey.size === 0) return [...rows];
+  const rowByKey = new Map(rows.map((row) => [row.key, row]));
+  return rows.flatMap((row) => {
+    if (plan.hostByChildKey.has(row.key)) return [];
+    const childKeys = plan.childKeysByHostKey.get(row.key);
+    if (childKeys === undefined) return [row];
+    const delegatedChildren = childKeys
+      .flatMap((key) => {
+        const child = rowByKey.get(key);
+        return child ? [child] : [];
+      })
+      .toSorted(compareRecent);
+    return [{ ...row, delegatedChildren }];
+  });
 }
 
 function timestamp(thread: SidebarThreadSummary): string {
@@ -569,11 +630,19 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
       settlementDisabledReason: settlementDisabledReason(entry),
       effectiveSettlementTimestamp: entry.lifecycle.effectiveSettlementTimestamp,
       focus: entry.focus,
+      lineage: thread.lineage ?? null,
+      delegatedChildren: NO_DELEGATED_CHILDREN,
     });
   }
 
-  const pinned = rows.filter((row) => row.pinned).toSorted(compareRecent);
-  const unpinnedRows = rows.filter((row) => !row.pinned);
+  // Text search shows every match as its own row. A status filter keeps folding,
+  // but only under hosts that pass the filter themselves.
+  const topLevelRows =
+    input.nestDelegated !== false && input.filters.query.trim() === ""
+      ? nestDelegatedRows(rows, input.threads)
+      : rows;
+  const pinned = topLevelRows.filter((row) => row.pinned).toSorted(compareRecent);
+  const unpinnedRows = topLevelRows.filter((row) => !row.pinned);
   const unsettledRows = unpinnedRows.filter((row) => !row.settled && !row.snoozedUntil);
   const focus = unsettledRows.filter((row) => row.focus !== null);
   const active = unsettledRows

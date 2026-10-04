@@ -73,6 +73,7 @@ import { RepositoryIdentityResolver } from "../../project/Services/RepositoryIde
 import { ORCHESTRATION_PROJECTOR_NAMES } from "./ProjectionPipeline.ts";
 import { ThreadBackgroundLivenessService } from "../ThreadBackgroundLiveness.ts";
 import { pruneStaleContextWindowActivities } from "../contextWindowActivities.ts";
+import { projectionThreadLineage, withThreadLineage } from "../threadLineage.ts";
 import {
   isPendingCheckpointRevertStatus,
   latestCheckpointRevert,
@@ -641,7 +642,10 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           pending_user_input_count AS "pendingUserInputCount",
           has_actionable_proposed_plan AS "hasActionableProposedPlan",
           usage_limit_json AS "usageLimit",
-          deleted_at AS "deletedAt"
+          deleted_at AS "deletedAt",
+          lineage_parent_thread_id AS "lineageParentThreadId",
+          lineage_root_thread_id AS "lineageRootThreadId",
+          lineage_relationship AS "lineageRelationship"
         FROM projection_threads
         ORDER BY created_at ASC, thread_id ASC
       `,
@@ -1122,7 +1126,10 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           pending_user_input_count AS "pendingUserInputCount",
           has_actionable_proposed_plan AS "hasActionableProposedPlan",
           usage_limit_json AS "usageLimit",
-          deleted_at AS "deletedAt"
+          deleted_at AS "deletedAt",
+          lineage_parent_thread_id AS "lineageParentThreadId",
+          lineage_root_thread_id AS "lineageRootThreadId",
+          lineage_relationship AS "lineageRelationship"
         FROM projection_threads
         WHERE thread_id = ${threadId}
           AND deleted_at IS NULL
@@ -1835,41 +1842,46 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     readonly pruneContextActivities?: boolean;
   }) => {
     const activities = input.activityRows.map(mapActivityRow);
-    return decodeThread({
-      id: input.threadRow.threadId,
-      projectId: input.threadRow.projectId,
-      title: input.threadRow.title,
-      modelSelection: input.threadRow.modelSelection,
-      runtimeMode: input.threadRow.runtimeMode,
-      interactionMode: input.threadRow.interactionMode,
-      tokenMode: input.threadRow.tokenMode ?? DEFAULT_AGENT_TOKEN_MODE,
-      branch: input.threadRow.branch,
-      worktreePath: input.threadRow.worktreePath,
-      worktreeId: input.threadRow.worktreeId ?? null,
-      manualStatusBucket: input.threadRow.manualStatusBucket ?? null,
-      manualPosition: input.threadRow.manualPosition ?? 0,
-      latestTurn: Option.isSome(input.latestTurnRow)
-        ? mapLatestTurn(input.latestTurnRow.value)
-        : null,
-      goal: input.threadRow.goal,
-      createdAt: input.threadRow.createdAt,
-      updatedAt: input.threadRow.updatedAt,
-      archivedAt: input.threadRow.archivedAt,
-      settledOverride: input.threadRow.settledOverride,
-      settledAt: input.threadRow.settledAt,
-      snoozedUntil: input.threadRow.snoozedUntil ?? null,
-      snoozedAt: input.threadRow.snoozedAt ?? null,
-      usageLimit: input.threadRow.usageLimit ?? null,
-      deletedAt: null,
-      messages: input.messageRows.map(mapMessageRow),
-      proposedPlans: input.proposedPlanRows.map(mapProposedPlanRow),
-      activities:
-        input.pruneContextActivities === false
-          ? activities
-          : pruneStaleContextWindowActivities(activities),
-      checkpoints: input.checkpointRows.map(mapCheckpointRow),
-      session: Option.isSome(input.sessionRow) ? mapSessionRow(input.sessionRow.value) : null,
-    });
+    return decodeThread(
+      withThreadLineage(
+        {
+          id: input.threadRow.threadId,
+          projectId: input.threadRow.projectId,
+          title: input.threadRow.title,
+          modelSelection: input.threadRow.modelSelection,
+          runtimeMode: input.threadRow.runtimeMode,
+          interactionMode: input.threadRow.interactionMode,
+          tokenMode: input.threadRow.tokenMode ?? DEFAULT_AGENT_TOKEN_MODE,
+          branch: input.threadRow.branch,
+          worktreePath: input.threadRow.worktreePath,
+          worktreeId: input.threadRow.worktreeId ?? null,
+          manualStatusBucket: input.threadRow.manualStatusBucket ?? null,
+          manualPosition: input.threadRow.manualPosition ?? 0,
+          latestTurn: Option.isSome(input.latestTurnRow)
+            ? mapLatestTurn(input.latestTurnRow.value)
+            : null,
+          goal: input.threadRow.goal,
+          createdAt: input.threadRow.createdAt,
+          updatedAt: input.threadRow.updatedAt,
+          archivedAt: input.threadRow.archivedAt,
+          settledOverride: input.threadRow.settledOverride,
+          settledAt: input.threadRow.settledAt,
+          snoozedUntil: input.threadRow.snoozedUntil ?? null,
+          snoozedAt: input.threadRow.snoozedAt ?? null,
+          usageLimit: input.threadRow.usageLimit ?? null,
+          deletedAt: null,
+          messages: input.messageRows.map(mapMessageRow),
+          proposedPlans: input.proposedPlanRows.map(mapProposedPlanRow),
+          activities:
+            input.pruneContextActivities === false
+              ? activities
+              : pruneStaleContextWindowActivities(activities),
+          checkpoints: input.checkpointRows.map(mapCheckpointRow),
+          session: Option.isSome(input.sessionRow) ? mapSessionRow(input.sessionRow.value) : null,
+        },
+        projectionThreadLineage(input.threadRow),
+      ),
+    );
   };
 
   const getSnapshot: ProjectionSnapshotQueryShape["getSnapshot"] = () =>
@@ -2133,38 +2145,43 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 deletedAt: row.deletedAt,
               }));
 
-              const threads: ReadonlyArray<OrchestrationThread> = threadRows.map((row) => ({
-                id: row.threadId,
-                projectId: row.projectId,
-                title: row.title,
-                modelSelection: row.modelSelection,
-                runtimeMode: row.runtimeMode,
-                interactionMode: row.interactionMode,
-                tokenMode: row.tokenMode ?? DEFAULT_AGENT_TOKEN_MODE,
-                branch: row.branch,
-                worktreePath: row.worktreePath,
-                worktreeId: row.worktreeId ?? null,
-                manualStatusBucket: row.manualStatusBucket ?? null,
-                manualPosition: row.manualPosition ?? 0,
-                latestTurn: latestTurnByThread.get(row.threadId) ?? null,
-                goal: row.goal,
-                createdAt: row.createdAt,
-                updatedAt: row.updatedAt,
-                archivedAt: row.archivedAt,
-                settledOverride: row.settledOverride,
-                settledAt: row.settledAt,
-                snoozedUntil: row.snoozedUntil ?? null,
-                snoozedAt: row.snoozedAt ?? null,
-                usageLimit: row.usageLimit ?? null,
-                deletedAt: row.deletedAt,
-                messages: messagesByThread.get(row.threadId) ?? [],
-                proposedPlans: proposedPlansByThread.get(row.threadId) ?? [],
-                activities: pruneStaleContextWindowActivities(
-                  activitiesByThread.get(row.threadId) ?? [],
+              const threads: ReadonlyArray<OrchestrationThread> = threadRows.map((row) =>
+                withThreadLineage(
+                  {
+                    id: row.threadId,
+                    projectId: row.projectId,
+                    title: row.title,
+                    modelSelection: row.modelSelection,
+                    runtimeMode: row.runtimeMode,
+                    interactionMode: row.interactionMode,
+                    tokenMode: row.tokenMode ?? DEFAULT_AGENT_TOKEN_MODE,
+                    branch: row.branch,
+                    worktreePath: row.worktreePath,
+                    worktreeId: row.worktreeId ?? null,
+                    manualStatusBucket: row.manualStatusBucket ?? null,
+                    manualPosition: row.manualPosition ?? 0,
+                    latestTurn: latestTurnByThread.get(row.threadId) ?? null,
+                    goal: row.goal,
+                    createdAt: row.createdAt,
+                    updatedAt: row.updatedAt,
+                    archivedAt: row.archivedAt,
+                    settledOverride: row.settledOverride,
+                    settledAt: row.settledAt,
+                    snoozedUntil: row.snoozedUntil ?? null,
+                    snoozedAt: row.snoozedAt ?? null,
+                    usageLimit: row.usageLimit ?? null,
+                    deletedAt: row.deletedAt,
+                    messages: messagesByThread.get(row.threadId) ?? [],
+                    proposedPlans: proposedPlansByThread.get(row.threadId) ?? [],
+                    activities: pruneStaleContextWindowActivities(
+                      activitiesByThread.get(row.threadId) ?? [],
+                    ),
+                    checkpoints: checkpointsByThread.get(row.threadId) ?? [],
+                    session: sessionsByThread.get(row.threadId) ?? null,
+                  },
+                  projectionThreadLineage(row),
                 ),
-                checkpoints: checkpointsByThread.get(row.threadId) ?? [],
-                session: sessionsByThread.get(row.threadId) ?? null,
-              }));
+              );
 
               const snapshot = {
                 snapshotSequence: computeSnapshotSequence(stateRows),
@@ -2423,36 +2440,42 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 if (!row) {
                   continue;
                 }
-                threads.push({
-                  id: row.threadId,
-                  projectId: row.projectId,
-                  title: row.title,
-                  modelSelection: row.modelSelection,
-                  runtimeMode: row.runtimeMode,
-                  interactionMode: row.interactionMode,
-                  tokenMode: row.tokenMode ?? DEFAULT_AGENT_TOKEN_MODE,
-                  branch: row.branch,
-                  worktreePath: row.worktreePath,
-                  worktreeId: row.worktreeId ?? null,
-                  manualStatusBucket: row.manualStatusBucket ?? null,
-                  manualPosition: row.manualPosition ?? 0,
-                  latestTurn: latestTurnByThread.get(row.threadId) ?? null,
-                  goal: row.goal,
-                  createdAt: row.createdAt,
-                  updatedAt: row.updatedAt,
-                  archivedAt: row.archivedAt,
-                  settledOverride: row.settledOverride,
-                  settledAt: row.settledAt,
-                  snoozedUntil: row.snoozedUntil ?? null,
-                  snoozedAt: row.snoozedAt ?? null,
-                  usageLimit: row.usageLimit ?? null,
-                  deletedAt: row.deletedAt,
-                  messages: userMessageAnchorsByThread.get(row.threadId) ?? [],
-                  proposedPlans: proposedPlansByThread.get(row.threadId) ?? [],
-                  activities: actionableActivitiesByThread.get(row.threadId) ?? [],
-                  checkpoints: [],
-                  session: sessionByThread.get(row.threadId) ?? null,
-                });
+                threads.push(
+                  withThreadLineage(
+                    {
+                      id: row.threadId,
+                      projectId: row.projectId,
+                      title: row.title,
+                      modelSelection: row.modelSelection,
+                      runtimeMode: row.runtimeMode,
+                      interactionMode: row.interactionMode,
+                      tokenMode: row.tokenMode ?? DEFAULT_AGENT_TOKEN_MODE,
+                      branch: row.branch,
+                      worktreePath: row.worktreePath,
+                      worktreeId: row.worktreeId ?? null,
+                      manualStatusBucket: row.manualStatusBucket ?? null,
+                      manualPosition: row.manualPosition ?? 0,
+                      latestTurn: latestTurnByThread.get(row.threadId) ?? null,
+                      goal: row.goal,
+                      createdAt: row.createdAt,
+                      updatedAt: row.updatedAt,
+                      archivedAt: row.archivedAt,
+                      settledOverride: row.settledOverride,
+                      settledAt: row.settledAt,
+                      snoozedUntil: row.snoozedUntil ?? null,
+                      snoozedAt: row.snoozedAt ?? null,
+                      usageLimit: row.usageLimit ?? null,
+                      deletedAt: row.deletedAt,
+                      messages: userMessageAnchorsByThread.get(row.threadId) ?? [],
+                      proposedPlans: proposedPlansByThread.get(row.threadId) ?? [],
+                      activities: actionableActivitiesByThread.get(row.threadId) ?? [],
+                      checkpoints: [],
+                      session: sessionByThread.get(row.threadId) ?? null,
+                    },
+                    // Required after restart: the decider walks lineage for root and cycles.
+                    projectionThreadLineage(row),
+                  ),
+                );
               }
 
               return {
@@ -2616,39 +2639,42 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 threads: threadRows
                   .filter((row) => row.deletedAt === null)
                   .map((row): OrchestrationThreadShell => {
-                    const shell: OrchestrationThreadShell = {
-                      id: row.threadId,
-                      projectId: row.projectId,
-                      title: row.title,
-                      modelSelection: row.modelSelection,
-                      runtimeMode: row.runtimeMode,
-                      interactionMode: row.interactionMode,
-                      tokenMode: row.tokenMode ?? DEFAULT_AGENT_TOKEN_MODE,
-                      branch: row.branch,
-                      worktreePath: row.worktreePath,
-                      worktreeId: row.worktreeId ?? null,
-                      manualStatusBucket: row.manualStatusBucket ?? null,
-                      manualPosition: row.manualPosition ?? 0,
-                      latestTurn: latestTurnByThread.get(row.threadId) ?? null,
-                      goal: row.goal,
-                      createdAt: row.createdAt,
-                      updatedAt: row.updatedAt,
-                      archivedAt: row.archivedAt,
-                      settledOverride: row.settledOverride,
-                      settledAt: row.settledAt,
-                      snoozedUntil: row.snoozedUntil ?? null,
-                      snoozedAt: row.snoozedAt ?? null,
-                      usageLimit: row.usageLimit ?? null,
-                      session: sessionByThread.get(row.threadId) ?? null,
-                      latestUserMessageAt: row.latestUserMessageAt,
-                      latestCompletedTurnAt: row.latestCompletedTurnAt,
-                      hasPendingApprovals: row.pendingApprovalCount > 0,
-                      hasPendingUserInput: row.pendingUserInputCount > 0,
-                      hasActionableProposedPlan: row.hasActionableProposedPlan > 0,
-                      backgroundLiveness: threadBackgroundLiveness.getThreadBackgroundLiveness(
-                        row.threadId,
-                      ),
-                    };
+                    const shell: OrchestrationThreadShell = withThreadLineage(
+                      {
+                        id: row.threadId,
+                        projectId: row.projectId,
+                        title: row.title,
+                        modelSelection: row.modelSelection,
+                        runtimeMode: row.runtimeMode,
+                        interactionMode: row.interactionMode,
+                        tokenMode: row.tokenMode ?? DEFAULT_AGENT_TOKEN_MODE,
+                        branch: row.branch,
+                        worktreePath: row.worktreePath,
+                        worktreeId: row.worktreeId ?? null,
+                        manualStatusBucket: row.manualStatusBucket ?? null,
+                        manualPosition: row.manualPosition ?? 0,
+                        latestTurn: latestTurnByThread.get(row.threadId) ?? null,
+                        goal: row.goal,
+                        createdAt: row.createdAt,
+                        updatedAt: row.updatedAt,
+                        archivedAt: row.archivedAt,
+                        settledOverride: row.settledOverride,
+                        settledAt: row.settledAt,
+                        snoozedUntil: row.snoozedUntil ?? null,
+                        snoozedAt: row.snoozedAt ?? null,
+                        usageLimit: row.usageLimit ?? null,
+                        session: sessionByThread.get(row.threadId) ?? null,
+                        latestUserMessageAt: row.latestUserMessageAt,
+                        latestCompletedTurnAt: row.latestCompletedTurnAt,
+                        hasPendingApprovals: row.pendingApprovalCount > 0,
+                        hasPendingUserInput: row.pendingUserInputCount > 0,
+                        hasActionableProposedPlan: row.hasActionableProposedPlan > 0,
+                        backgroundLiveness: threadBackgroundLiveness.getThreadBackgroundLiveness(
+                          row.threadId,
+                        ),
+                      },
+                      projectionThreadLineage(row),
+                    );
                     const priority = priorityByThread.get(row.threadId);
                     return priority === undefined ? shell : Object.assign(shell, { priority });
                   }),
@@ -2884,39 +2910,44 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         return Option.none<OrchestrationThreadShell>();
       }
 
-      return Option.some({
-        id: threadRow.value.threadId,
-        projectId: threadRow.value.projectId,
-        title: threadRow.value.title,
-        modelSelection: threadRow.value.modelSelection,
-        runtimeMode: threadRow.value.runtimeMode,
-        interactionMode: threadRow.value.interactionMode,
-        tokenMode: threadRow.value.tokenMode ?? DEFAULT_AGENT_TOKEN_MODE,
-        branch: threadRow.value.branch,
-        worktreePath: threadRow.value.worktreePath,
-        worktreeId: threadRow.value.worktreeId ?? null,
-        manualStatusBucket: threadRow.value.manualStatusBucket ?? null,
-        manualPosition: threadRow.value.manualPosition ?? 0,
-        latestTurn: Option.isSome(latestTurnRow) ? mapLatestTurn(latestTurnRow.value) : null,
-        goal: threadRow.value.goal,
-        createdAt: threadRow.value.createdAt,
-        updatedAt: threadRow.value.updatedAt,
-        archivedAt: threadRow.value.archivedAt,
-        settledOverride: threadRow.value.settledOverride,
-        settledAt: threadRow.value.settledAt,
-        snoozedUntil: threadRow.value.snoozedUntil ?? null,
-        snoozedAt: threadRow.value.snoozedAt ?? null,
-        usageLimit: threadRow.value.usageLimit ?? null,
-        session: Option.isSome(sessionRow) ? mapSessionRow(sessionRow.value) : null,
-        latestUserMessageAt: threadRow.value.latestUserMessageAt,
-        latestCompletedTurnAt: threadRow.value.latestCompletedTurnAt,
-        hasPendingApprovals: threadRow.value.pendingApprovalCount > 0,
-        hasPendingUserInput: threadRow.value.pendingUserInputCount > 0,
-        hasActionableProposedPlan: threadRow.value.hasActionableProposedPlan > 0,
-        backgroundLiveness: threadBackgroundLiveness.getThreadBackgroundLiveness(
-          threadRow.value.threadId,
+      return Option.some(
+        withThreadLineage(
+          {
+            id: threadRow.value.threadId,
+            projectId: threadRow.value.projectId,
+            title: threadRow.value.title,
+            modelSelection: threadRow.value.modelSelection,
+            runtimeMode: threadRow.value.runtimeMode,
+            interactionMode: threadRow.value.interactionMode,
+            tokenMode: threadRow.value.tokenMode ?? DEFAULT_AGENT_TOKEN_MODE,
+            branch: threadRow.value.branch,
+            worktreePath: threadRow.value.worktreePath,
+            worktreeId: threadRow.value.worktreeId ?? null,
+            manualStatusBucket: threadRow.value.manualStatusBucket ?? null,
+            manualPosition: threadRow.value.manualPosition ?? 0,
+            latestTurn: Option.isSome(latestTurnRow) ? mapLatestTurn(latestTurnRow.value) : null,
+            goal: threadRow.value.goal,
+            createdAt: threadRow.value.createdAt,
+            updatedAt: threadRow.value.updatedAt,
+            archivedAt: threadRow.value.archivedAt,
+            settledOverride: threadRow.value.settledOverride,
+            settledAt: threadRow.value.settledAt,
+            snoozedUntil: threadRow.value.snoozedUntil ?? null,
+            snoozedAt: threadRow.value.snoozedAt ?? null,
+            usageLimit: threadRow.value.usageLimit ?? null,
+            session: Option.isSome(sessionRow) ? mapSessionRow(sessionRow.value) : null,
+            latestUserMessageAt: threadRow.value.latestUserMessageAt,
+            latestCompletedTurnAt: threadRow.value.latestCompletedTurnAt,
+            hasPendingApprovals: threadRow.value.pendingApprovalCount > 0,
+            hasPendingUserInput: threadRow.value.pendingUserInputCount > 0,
+            hasActionableProposedPlan: threadRow.value.hasActionableProposedPlan > 0,
+            backgroundLiveness: threadBackgroundLiveness.getThreadBackgroundLiveness(
+              threadRow.value.threadId,
+            ),
+          } satisfies OrchestrationThreadShell,
+          projectionThreadLineage(threadRow.value),
         ),
-      } satisfies OrchestrationThreadShell);
+      );
     });
 
   const getWorktreeShellById: NonNullable<ProjectionSnapshotQueryShape["getWorktreeShellById"]> = (

@@ -8,6 +8,7 @@ import type {
   OrchestrationCommand,
   OrchestrationEvent,
   OrchestrationReadModel,
+  ThreadLineage,
   ThreadUsageLimit,
 } from "@ryco/contracts";
 import {
@@ -42,6 +43,7 @@ import {
   requireThreadReadyForCheckpointRevert,
 } from "./checkpointRevertPolicy.ts";
 import { projectEvent } from "./projector.ts";
+import { resolveDelegatedChildLineage } from "./threadLineage.ts";
 import { TURN_FINALIZATION_REASON, resolveReleasedTurn } from "./turnFinalization.ts";
 
 const nowIso = () => new Date().toISOString();
@@ -80,6 +82,61 @@ type PlannedOrchestrationEvent = Omit<OrchestrationEvent, "sequence">;
 
 const normalizeTokenMode = (mode: AgentTokenMode | undefined): AgentTokenMode =>
   mode ?? DEFAULT_AGENT_TOKEN_MODE;
+
+type ThreadCreateFields = Omit<Extract<OrchestrationCommand, { type: "thread.create" }>, "type">;
+
+/**
+ * Shared body of `thread.create` and `thread.delegated.create`. `command` is the
+ * original command (used for invariant-error `commandType`); `lineage` is only
+ * ever computed by the decider, never taken from input.
+ */
+const decideThreadCreated = Effect.fn("decideThreadCreated")(function* ({
+  readModel,
+  command,
+  fields,
+  lineage,
+}: {
+  readonly readModel: OrchestrationReadModel;
+  readonly command: OrchestrationCommand;
+  readonly fields: ThreadCreateFields;
+  readonly lineage: ThreadLineage | null;
+}) {
+  yield* requireProject({
+    readModel,
+    command,
+    projectId: fields.projectId,
+  });
+  yield* requireThreadAbsent({
+    readModel,
+    command,
+    threadId: fields.threadId,
+  });
+  const tokenMode = normalizeTokenMode(fields.tokenMode);
+  const event: PlannedOrchestrationEvent = {
+    ...withEventBase({
+      aggregateKind: "thread",
+      aggregateId: fields.threadId,
+      occurredAt: fields.createdAt,
+      commandId: fields.commandId,
+    }),
+    type: "thread.created",
+    payload: {
+      threadId: fields.threadId,
+      projectId: fields.projectId,
+      title: fields.title,
+      modelSelection: fields.modelSelection,
+      runtimeMode: fields.runtimeMode,
+      interactionMode: fields.interactionMode,
+      tokenMode,
+      branch: fields.branch,
+      worktreePath: fields.worktreePath,
+      createdAt: fields.createdAt,
+      updatedAt: fields.createdAt,
+      ...(lineage === null ? {} : { lineage }),
+    },
+  };
+  return event;
+});
 
 function settlementBlockerDetail(blocker: ThreadSettlementBlocker): string {
   switch (blocker) {
@@ -519,39 +576,52 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "thread.create": {
-      yield* requireProject({
+      const { type: _type, ...fields } = command;
+      return yield* decideThreadCreated({ readModel, command, fields, lineage: null });
+    }
+
+    case "thread.delegated.create": {
+      const { type: _type, parentThreadId, ...fields } = command;
+      if (parentThreadId === fields.threadId) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Thread '${fields.threadId}' cannot be delegated from itself.`,
+        });
+      }
+      const parent = yield* requireThread({
         readModel,
         command,
-        projectId: command.projectId,
+        threadId: parentThreadId,
       });
-      yield* requireThreadAbsent({
+      if (parent.deletedAt !== null) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Parent thread '${parentThreadId}' was deleted.`,
+        });
+      }
+      if (parent.projectId !== fields.projectId) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Parent thread '${parentThreadId}' belongs to a different project than '${fields.projectId}'.`,
+        });
+      }
+      const resolved = resolveDelegatedChildLineage({
+        readModel,
+        parent,
+        childThreadId: fields.threadId,
+      });
+      if (!resolved.ok) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: resolved.detail,
+        });
+      }
+      return yield* decideThreadCreated({
         readModel,
         command,
-        threadId: command.threadId,
+        fields,
+        lineage: resolved.lineage,
       });
-      const tokenMode = normalizeTokenMode(command.tokenMode);
-      return {
-        ...withEventBase({
-          aggregateKind: "thread",
-          aggregateId: command.threadId,
-          occurredAt: command.createdAt,
-          commandId: command.commandId,
-        }),
-        type: "thread.created",
-        payload: {
-          threadId: command.threadId,
-          projectId: command.projectId,
-          title: command.title,
-          modelSelection: command.modelSelection,
-          runtimeMode: command.runtimeMode,
-          interactionMode: command.interactionMode,
-          tokenMode,
-          branch: command.branch,
-          worktreePath: command.worktreePath,
-          createdAt: command.createdAt,
-          updatedAt: command.createdAt,
-        },
-      };
     }
 
     case "thread.delete": {

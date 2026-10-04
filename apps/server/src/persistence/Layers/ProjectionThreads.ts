@@ -68,7 +68,10 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           pending_user_input_count,
           has_actionable_proposed_plan,
           usage_limit_json,
-          deleted_at
+          deleted_at,
+          lineage_parent_thread_id,
+          lineage_root_thread_id,
+          lineage_relationship
         )
         VALUES (
           ${row.threadId},
@@ -97,7 +100,10 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           ${row.pendingUserInputCount},
           ${row.hasActionableProposedPlan},
           ${row.usageLimit == null ? null : JSON.stringify(row.usageLimit)},
-          ${row.deletedAt}
+          ${row.deletedAt},
+          ${row.lineageParentThreadId},
+          ${row.lineageRootThreadId},
+          ${row.lineageRelationship}
         )
         ON CONFLICT (thread_id)
         DO UPDATE SET
@@ -126,7 +132,10 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           pending_user_input_count = excluded.pending_user_input_count,
           has_actionable_proposed_plan = excluded.has_actionable_proposed_plan,
           usage_limit_json = excluded.usage_limit_json,
-          deleted_at = excluded.deleted_at
+          deleted_at = excluded.deleted_at,
+          lineage_parent_thread_id = excluded.lineage_parent_thread_id,
+          lineage_root_thread_id = excluded.lineage_root_thread_id,
+          lineage_relationship = excluded.lineage_relationship
       `,
   });
 
@@ -162,7 +171,10 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           pending_user_input_count AS "pendingUserInputCount",
           has_actionable_proposed_plan AS "hasActionableProposedPlan",
           usage_limit_json AS "usageLimit",
-          deleted_at AS "deletedAt"
+          deleted_at AS "deletedAt",
+          lineage_parent_thread_id AS "lineageParentThreadId",
+          lineage_root_thread_id AS "lineageRootThreadId",
+          lineage_relationship AS "lineageRelationship"
         FROM projection_threads
         WHERE thread_id = ${threadId}
       `,
@@ -200,7 +212,10 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           pending_user_input_count AS "pendingUserInputCount",
           has_actionable_proposed_plan AS "hasActionableProposedPlan",
           usage_limit_json AS "usageLimit",
-          deleted_at AS "deletedAt"
+          deleted_at AS "deletedAt",
+          lineage_parent_thread_id AS "lineageParentThreadId",
+          lineage_root_thread_id AS "lineageRootThreadId",
+          lineage_relationship AS "lineageRelationship"
         FROM projection_threads
         WHERE project_id = ${projectId}
         ORDER BY created_at ASC, thread_id ASC

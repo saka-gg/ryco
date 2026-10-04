@@ -10,7 +10,10 @@ import {
   isWorkspaceMetadataSnapshot,
   type WorkspaceMetadataSnapshot,
 } from "@ryco/client-runtime/state/workspace";
-import type { CachedEnvironmentShellSnapshot } from "@ryco/client-runtime/state/threads";
+import {
+  isThreadLineage,
+  type CachedEnvironmentShellSnapshot,
+} from "@ryco/client-runtime/state/threads";
 
 import { useStore } from "./store";
 
@@ -85,6 +88,8 @@ export function readWorkspaceMetadataSnapshot(
               hasPendingUserInput: thread.hasPendingUserInput,
               hasActionableProposedPlan: thread.hasActionableProposedPlan,
               deliveryUnknown,
+              // Cached so delegated folding does not flicker on a cold start.
+              ...(isThreadLineage(thread.lineage) ? { lineage: thread.lineage } : {}),
             },
           ]
         : [];
@@ -162,6 +167,8 @@ export function workspaceMetadataToCachedShellSnapshot(
         instanceId: defaultInstanceIdForDriver(driver),
         model: DEFAULT_MODEL_BY_PROVIDER[driver] ?? DEFAULT_MODEL,
       };
+      // Cached lineage is untrusted storage: drop it unless it is well formed.
+      const lineage = isThreadLineage(thread.lineage) ? thread.lineage : null;
       const shell = {
         id: thread.id,
         environmentId: thread.environmentId,
@@ -182,6 +189,7 @@ export function workspaceMetadataToCachedShellSnapshot(
         branch: thread.branch,
         worktreePath: null,
         worktreeId: thread.worktreeId,
+        lineage,
       };
       return {
         shell,
@@ -209,6 +217,7 @@ export function workspaceMetadataToCachedShellSnapshot(
           hasPendingApprovals: thread.hasPendingApprovals,
           hasPendingUserInput: thread.hasPendingUserInput,
           hasActionableProposedPlan: thread.hasActionableProposedPlan,
+          lineage,
         },
       };
     }),

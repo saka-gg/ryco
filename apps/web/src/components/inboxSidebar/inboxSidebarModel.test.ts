@@ -140,6 +140,7 @@ function build(input: {
   autoSettleAfterDays?: SidebarAutoSettleAfterDays;
   pinnedThreadKeys?: ReadonlySet<string>;
   primaryEnvironmentId?: EnvironmentId | null;
+  nestDelegated?: boolean;
   nowMs?: number;
 }) {
   return buildInboxSidebarSections({
@@ -156,6 +157,7 @@ function build(input: {
     ...(input.primaryEnvironmentId !== undefined
       ? { primaryEnvironmentId: input.primaryEnvironmentId }
       : {}),
+    ...(input.nestDelegated !== undefined ? { nestDelegated: input.nestDelegated } : {}),
     ...(input.nowMs !== undefined ? { nowMs: input.nowMs } : {}),
   });
 }
@@ -935,5 +937,147 @@ describe("usage-limited rows", () => {
         }),
       })?.label,
     ).toBe("Working");
+  });
+});
+
+describe("delegated thread folding", () => {
+  const delegatedFrom = (parent: string, root: string = parent) => ({
+    parentThreadId: ThreadId.make(parent),
+    rootThreadId: ThreadId.make(root),
+    relationship: "delegated",
+  });
+  const working = { backgroundLiveness: "working" as const };
+  const settled = {
+    settledOverride: "settled" as const,
+    settledAt: "2026-08-23T12:00:00.000Z",
+  };
+  const ids = (rows: ReadonlyArray<{ readonly threadId: string }> | undefined) =>
+    (rows ?? []).map((row) => row.threadId);
+  const section = (sections: ReturnType<typeof build>, key: string) =>
+    sections.find((candidate) => candidate.key === key);
+
+  it("folds an idle child under its idle parent and out of Recent", () => {
+    const sections = build({
+      threads: [thread("parent"), thread("child", { lineage: delegatedFrom("parent") })],
+    });
+    expect(sections.map((candidate) => candidate.key)).toEqual(["recent"]);
+    expect(ids(section(sections, "recent")?.rows)).toEqual(["parent"]);
+    expect(ids(section(sections, "recent")?.rows[0]?.delegatedChildren)).toEqual(["child"]);
+  });
+
+  it("keeps a working child in Active now under a Recent parent", () => {
+    const sections = build({
+      threads: [
+        thread("parent"),
+        thread("child", { lineage: delegatedFrom("parent"), ...working }),
+      ],
+    });
+    expect(ids(section(sections, "active")?.rows)).toEqual(["child"]);
+    expect(ids(section(sections, "recent")?.rows)).toEqual(["parent"]);
+    expect(section(sections, "recent")?.rows[0]?.delegatedChildren).toEqual([]);
+  });
+
+  it("keeps a needs-input child in Needs input under a working parent", () => {
+    const sections = build({
+      threads: [
+        thread("parent", working),
+        thread("child", { lineage: delegatedFrom("parent"), hasPendingApprovals: true }),
+      ],
+    });
+    expect(ids(section(sections, "active")?.rows)).toEqual(["parent"]);
+    expect(ids(section(sections, "needs-input")?.rows)).toEqual(["child"]);
+  });
+
+  it("folds an idle child into a working host in Active now", () => {
+    const sections = build({
+      threads: [thread("parent", working), thread("child", { lineage: delegatedFrom("parent") })],
+    });
+    expect(sections.map((candidate) => candidate.key)).toEqual(["active"]);
+    expect(ids(section(sections, "active")?.rows[0]?.delegatedChildren)).toEqual(["child"]);
+  });
+
+  it("folds a settled child under a Recent parent but not a Recent child under a Settled one", () => {
+    const settledChild = build({
+      threads: [
+        thread("parent"),
+        thread("child", { lineage: delegatedFrom("parent"), ...settled }),
+      ],
+    });
+    expect(settledChild.map((candidate) => candidate.key)).toEqual(["recent"]);
+    expect(ids(section(settledChild, "recent")?.rows[0]?.delegatedChildren)).toEqual(["child"]);
+
+    const recentChild = build({
+      threads: [thread("parent", settled), thread("child", { lineage: delegatedFrom("parent") })],
+    });
+    expect(ids(section(recentChild, "recent")?.rows)).toEqual(["child"]);
+    expect(ids(section(recentChild, "settled")?.rows)).toEqual(["parent"]);
+    expect(section(recentChild, "settled")?.rows[0]?.delegatedChildren).toEqual([]);
+  });
+
+  it("keeps pinned and focused children in Pinned and Focus", () => {
+    const sections = build({
+      aiFocusEnabled: true,
+      pinnedThreadKeys: new Set(["machine-a:pinned-child"]),
+      nowMs: Date.parse("2026-08-25T10:00:00.000Z"),
+      autoSettleAfterDays: null,
+      threads: [
+        thread("parent"),
+        thread("pinned-child", { lineage: delegatedFrom("parent") }),
+        thread("focused-child", {
+          lineage: delegatedFrom("parent"),
+          priority: {
+            tier: "now",
+            confidence: "high",
+            reason: "A release decision is waiting on this task.",
+            inputFingerprint: "fingerprint" as never,
+            batchId: "batch" as never,
+            modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+            rankedAt: "2026-08-25T09:59:00.000Z",
+            usableUntil: "2026-08-25T10:09:00.000Z",
+          },
+        }),
+      ],
+    });
+    expect(ids(section(sections, "pinned")?.rows)).toEqual(["pinned-child"]);
+    expect(ids(section(sections, "focus")?.rows)).toEqual(["focused-child"]);
+    expect(section(sections, "recent")?.rows[0]?.delegatedChildren).toEqual([]);
+  });
+
+  it("flattens a grandchild under the topmost visible host", () => {
+    const sections = build({
+      threads: [
+        thread("parent"),
+        thread("child", { lineage: delegatedFrom("parent") }),
+        thread("grandchild", { lineage: delegatedFrom("child", "parent") }),
+      ],
+    });
+    const recent = section(sections, "recent");
+    expect(ids(recent?.rows)).toEqual(["parent"]);
+    expect(ids(recent?.rows[0]?.delegatedChildren)).toEqual(["child", "grandchild"]);
+    expect(recent?.rows[0]?.delegatedChildren[0]?.delegatedChildren).toEqual([]);
+  });
+
+  it("shows flat rows for a text search and when nesting is off", () => {
+    const threads = [
+      thread("task-parent"),
+      thread("task-child", { lineage: delegatedFrom("task-parent") }),
+    ];
+    const searched = build({ threads, filters: { ...ALL_FILTERS, query: "task" } });
+    expect(ids(section(searched, "recent")?.rows)).toEqual(["task-child", "task-parent"]);
+
+    const flat = build({ threads, nestDelegated: false });
+    expect(ids(section(flat, "recent")?.rows)).toEqual(["task-child", "task-parent"]);
+    expect(section(flat, "recent")?.rows.every((row) => row.delegatedChildren.length === 0)).toBe(
+      true,
+    );
+  });
+
+  it("leaves a child top-level when a status filter hides its host", () => {
+    const sections = build({
+      threads: [thread("parent", working), thread("child", { lineage: delegatedFrom("parent") })],
+      filters: { ...ALL_FILTERS, status: "recent" },
+    });
+    expect(sections.map((candidate) => candidate.key)).toEqual(["recent"]);
+    expect(ids(section(sections, "recent")?.rows)).toEqual(["child"]);
   });
 });

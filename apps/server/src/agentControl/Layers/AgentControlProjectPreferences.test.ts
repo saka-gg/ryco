@@ -13,6 +13,7 @@ import {
   type AgentControlProposal,
   type AgentControlResultEnvelope,
   type ClientOrchestrationCommand,
+  type ThreadDelegatedCreateCommand,
 } from "@ryco/contracts";
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
@@ -104,7 +105,7 @@ for (const { envMode, runSetupScript, setupFails, missingRunner } of [
           updatedAt: now,
         });
         const events: string[] = [];
-        const commands: ClientOrchestrationCommand[] = [];
+        const commands: Array<ClientOrchestrationCommand | ThreadDelegatedCreateCommand> = [];
         const executor = yield* makeAgentControlExecution({ disableBackground: true }).pipe(
           Effect.provideService(AgentControlProposalStore, {
             getById: () => Ref.get(settled).pipe(Effect.map(Option.some)),
@@ -148,6 +149,12 @@ for (const { envMode, runSetupScript, setupFails, missingRunner } of [
           } as never),
           Effect.provideService(OrchestrationCommandApplication, {
             apply: (command: ClientOrchestrationCommand) =>
+              Effect.sync(() => {
+                commands.push(command);
+                events.push(command.type);
+                return { sequence: commands.length };
+              }),
+            applyInternal: (command: ThreadDelegatedCreateCommand) =>
               Effect.sync(() => {
                 commands.push(command);
                 events.push(command.type);
@@ -223,7 +230,7 @@ for (const { envMode, runSetupScript, setupFails, missingRunner } of [
           return;
         }
         assert.deepInclude(
-          commands.find((c) => c.type === "thread.create"),
+          commands.find((c) => c.type === "thread.delegated.create"),
           { modelSelection, runtimeMode: "auto" },
         );
         if (setupFails) {

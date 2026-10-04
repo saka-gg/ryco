@@ -15,6 +15,7 @@ import {
   type OrchestrationEvent,
   type OrchestrationShellStreamEvent,
   type OrchestrationThreadShell,
+  type ThreadLineage,
 } from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -23,6 +24,9 @@ import {
   applyOrchestrationEvents,
   applyShellEvent,
   createShellEventCoalescer,
+  demoteEnvironmentStateToCachedSnapshot,
+  hydrateEnvironmentStateFromCache,
+  selectDelegatedChildThreadsForThreadRef,
   removeEnvironmentState,
   selectEnvironmentState,
   selectProjectsAcrossEnvironments,
@@ -2541,5 +2545,198 @@ describe("usage limits on shell upserts", () => {
       configured.environmentStateById[localEnvironmentId]!.sidebarThreadSummaryById[threadId]
         ?.usageLimit?.autoResume,
     ).toBe(true);
+  });
+});
+
+describe("thread lineage", () => {
+  const projectId = ProjectId.make("project-lineage");
+  const parentId = ThreadId.make("thread-lineage-parent");
+  const childId = ThreadId.make("thread-lineage-child");
+  const lineage: ThreadLineage = {
+    parentThreadId: parentId,
+    rootThreadId: parentId,
+    relationship: "delegated",
+  };
+
+  function shellThread(
+    id: ThreadId,
+    overrides: Partial<OrchestrationThreadShell> = {},
+  ): OrchestrationThreadShell {
+    return {
+      id,
+      projectId,
+      title: `Thread ${id}`,
+      modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      latestTurn: null,
+      goal: null,
+      createdAt: "2026-10-01T00:00:00.000Z",
+      updatedAt: "2026-10-01T00:00:00.000Z",
+      archivedAt: null,
+      settledOverride: null,
+      settledAt: null,
+      session: null,
+      latestUserMessageAt: null,
+      hasPendingApprovals: false,
+      hasPendingUserInput: false,
+      hasActionableProposedPlan: false,
+      ...overrides,
+    };
+  }
+
+  const upsert = (
+    sequence: number,
+    thread: OrchestrationThreadShell,
+  ): OrchestrationShellStreamEvent => ({ kind: "thread-upserted", sequence, thread });
+
+  it("maps shell lineage into the shell and sidebar summary", () => {
+    let state = applyShellEvent(
+      makeEmptyState(),
+      upsert(1, shellThread(parentId)),
+      localEnvironmentId,
+    );
+    state = applyShellEvent(
+      state,
+      upsert(2, shellThread(childId, { lineage })),
+      localEnvironmentId,
+    );
+    const environment = localEnvironmentStateOf(state);
+    expect(environment.threadShellById[childId]?.lineage).toEqual(lineage);
+    expect(environment.sidebarThreadSummaryById[childId]?.lineage).toEqual(lineage);
+    expect(environment.threadShellById[parentId]?.lineage).toBeNull();
+    expect(environment.sidebarThreadSummaryById[parentId]?.lineage).toBeNull();
+  });
+
+  it("replaces a cached pre-lineage shell and summary when only lineage differs", () => {
+    const base = applyShellEvent(
+      makeEmptyState(),
+      upsert(1, shellThread(childId)),
+      localEnvironmentId,
+    );
+    const baseEnvironment = localEnvironmentStateOf(base);
+    const { lineage: _summaryLineage, ...preLineageSummary } =
+      baseEnvironment.sidebarThreadSummaryById[childId]!;
+    const { lineage: _shellLineage, ...preLineageShell } =
+      baseEnvironment.threadShellById[childId]!;
+    const cached = withActiveEnvironmentState({
+      ...baseEnvironment,
+      sidebarThreadSummaryById: {
+        ...baseEnvironment.sidebarThreadSummaryById,
+        [childId]: preLineageSummary,
+      },
+      threadShellById: { ...baseEnvironment.threadShellById, [childId]: preLineageShell },
+    });
+
+    // Absent and null lineage are the same fact: the cached summary is kept.
+    const unchanged = localEnvironmentStateOf(
+      applyShellEvent(cached, upsert(2, shellThread(childId)), localEnvironmentId),
+    );
+    expect(unchanged.sidebarThreadSummaryById[childId]).toBe(preLineageSummary);
+
+    const replaced = localEnvironmentStateOf(
+      applyShellEvent(cached, upsert(3, shellThread(childId, { lineage })), localEnvironmentId),
+    );
+    expect(replaced.sidebarThreadSummaryById[childId]?.lineage).toEqual(lineage);
+    expect(replaced.threadShellById[childId]?.lineage).toEqual(lineage);
+  });
+
+  it("keeps lineage when a thread detail rewrites the shell", () => {
+    const state = syncServerThreadDetail(
+      makeEmptyState(),
+      {
+        ...shellThread(childId, { lineage }),
+        deletedAt: null,
+        messages: [],
+        proposedPlans: [],
+        activities: [],
+        checkpoints: [],
+      },
+      localEnvironmentId,
+    );
+    expect(localEnvironmentStateOf(state).threadShellById[childId]?.lineage).toEqual(lineage);
+    expect(selectThreadByRef(state, scopeThreadRef(localEnvironmentId, childId))?.lineage).toEqual(
+      lineage,
+    );
+  });
+
+  it("keeps lineage through cache hydration and demotion", () => {
+    const live = applyShellEvent(
+      makeEmptyState(),
+      upsert(1, shellThread(childId, { lineage })),
+      localEnvironmentId,
+    );
+    const environment = localEnvironmentStateOf(live);
+    const hydrated = hydrateEnvironmentStateFromCache(
+      { activeEnvironmentId: null, environmentStateById: {} },
+      {
+        capturedAt: 1,
+        projects: [],
+        worktrees: [],
+        threads: [
+          {
+            shell: environment.threadShellById[childId]!,
+            summary: environment.sidebarThreadSummaryById[childId]!,
+          },
+        ],
+      },
+      localEnvironmentId,
+    );
+    expect(
+      environmentStateOf(hydrated, localEnvironmentId).sidebarThreadSummaryById[childId]?.lineage,
+    ).toEqual(lineage);
+    expect(
+      environmentStateOf(hydrated, localEnvironmentId).threadShellById[childId]?.lineage,
+    ).toEqual(lineage);
+
+    const demoted = demoteEnvironmentStateToCachedSnapshot(live, localEnvironmentId, 2);
+    expect(
+      environmentStateOf(demoted, localEnvironmentId).sidebarThreadSummaryById[childId]?.lineage,
+    ).toEqual(lineage);
+  });
+
+  it("selects direct delegated children for a thread ref", () => {
+    const laterChildId = ThreadId.make("thread-lineage-later-child");
+    const grandchildId = ThreadId.make("thread-lineage-grandchild");
+    const threads = [
+      shellThread(parentId),
+      shellThread(laterChildId, { lineage, createdAt: "2026-10-01T00:00:05.000Z" }),
+      shellThread(childId, { lineage, createdAt: "2026-10-01T00:00:01.000Z" }),
+      shellThread(grandchildId, {
+        lineage: { parentThreadId: childId, rootThreadId: parentId, relationship: "delegated" },
+      }),
+    ];
+    let state = makeEmptyState();
+    threads.forEach((thread, index) => {
+      state = applyShellEvent(state, upsert(index + 1, thread), localEnvironmentId);
+    });
+
+    const children = selectDelegatedChildThreadsForThreadRef(
+      state,
+      scopeThreadRef(localEnvironmentId, parentId),
+    );
+    expect(children.map((child) => child.id)).toEqual([childId, laterChildId]);
+    expect(
+      selectDelegatedChildThreadsForThreadRef(
+        state,
+        scopeThreadRef(localEnvironmentId, childId),
+      ).map((child) => child.id),
+    ).toEqual([grandchildId]);
+    expect(selectDelegatedChildThreadsForThreadRef(state, null)).toEqual([]);
+
+    // Without a parent shell, every summary in the environment is a candidate.
+    const withoutParent = applyShellEvent(
+      state,
+      { kind: "thread-removed", sequence: 10, threadId: parentId },
+      localEnvironmentId,
+    );
+    expect(
+      selectDelegatedChildThreadsForThreadRef(
+        withoutParent,
+        scopeThreadRef(localEnvironmentId, parentId),
+      ).map((child) => child.id),
+    ).toEqual([childId, laterChildId]);
   });
 });

@@ -88,13 +88,21 @@ export function AgentControlApprovals({
   const queueState = useAgentControlStore(
     (state) => state.queueByEnvironmentId[environmentId] ?? null,
   );
+  // Server lineage names the creator; proposal history stays the fallback.
+  const activeLineage = useStore((state) =>
+    activeThreadId === null
+      ? null
+      : (state.environmentStateById[environmentId]?.threadShellById[activeThreadId]?.lineage ??
+        null),
+  );
   const selection = useMemo(
     () =>
       selectAgentControlThreadActivity(
         queueState ?? EMPTY_AGENT_CONTROL_QUEUE_STATE,
         activeThreadId,
+        activeLineage,
       ),
-    [queueState, activeThreadId],
+    [queueState, activeThreadId, activeLineage],
   );
   const externalSelection = useMemo(
     () => selectAgentControlExternalActivity(queueState ?? EMPTY_AGENT_CONTROL_QUEUE_STATE),

@@ -110,6 +110,9 @@ projectionRepositoriesLayer("Projection repositories", (it) => {
         pendingUserInputCount: 0,
         hasActionableProposedPlan: 0,
         deletedAt: null,
+        lineageParentThreadId: null,
+        lineageRootThreadId: null,
+        lineageRelationship: null,
       });
 
       const rows = yield* sql<{

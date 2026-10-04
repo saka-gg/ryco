@@ -938,6 +938,20 @@ export const UsageLimitResumeGuard = Schema.Struct({
 });
 export type UsageLimitResumeGuard = typeof UsageLimitResumeGuard.Type;
 
+/**
+ * Server-owned provenance of a thread created on behalf of another thread.
+ * Absent on root threads. Immutable for a thread incarnation. Never authority.
+ * `relationship` is deliberately an open string: a newer server may add kinds
+ * without failing older clients' shell decode. Clients must treat values they
+ * do not know as "no known relationship". Known values: "delegated".
+ */
+export const ThreadLineage = Schema.Struct({
+  parentThreadId: ThreadId,
+  rootThreadId: ThreadId,
+  relationship: TrimmedNonEmptyString.check(Schema.isMaxLength(64)),
+});
+export type ThreadLineage = typeof ThreadLineage.Type;
+
 export const OrchestrationThread = Schema.Struct({
   id: ThreadId,
   projectId: ProjectId,
@@ -957,6 +971,8 @@ export const OrchestrationThread = Schema.Struct({
   goal: Schema.optional(Schema.NullOr(ThreadGoal)).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
+  /** Server-owned provenance; absent on root threads and from older servers. */
+  lineage: Schema.optional(Schema.NullOr(ThreadLineage)),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
   archivedAt: Schema.NullOr(IsoDateTime).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
@@ -1069,6 +1085,8 @@ export const OrchestrationThreadShell = Schema.Struct({
    * live work. Optional so old servers/clients interop; absent = none.
    */
   backgroundLiveness: Schema.optional(Schema.NullOr(Schema.Literals(["working", "monitoring"]))),
+  /** Server-owned provenance; absent on root threads and from older servers. */
+  lineage: Schema.optional(Schema.NullOr(ThreadLineage)),
   priority: Schema.optional(ThreadPriorityProjectedRanking),
 });
 export type OrchestrationThreadShell = typeof OrchestrationThreadShell.Type;
@@ -1360,6 +1378,14 @@ const ThreadCreateCommand = Schema.Struct({
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
   createdAt: IsoDateTime,
 });
+
+/** Server-originated only (Agent Control). Never part of ClientOrchestrationCommand. */
+const ThreadDelegatedCreateCommand = Schema.Struct({
+  ...ThreadCreateCommand.fields,
+  type: Schema.Literal("thread.delegated.create"),
+  parentThreadId: ThreadId,
+});
+export type ThreadDelegatedCreateCommand = typeof ThreadDelegatedCreateCommand.Type;
 
 const ThreadDeleteCommand = Schema.Struct({
   type: Schema.Literal("thread.delete"),
@@ -1996,6 +2022,7 @@ const ThreadGoalProviderClearCommand = Schema.Struct({
 });
 
 const InternalOrchestrationCommand = Schema.Union([
+  ThreadDelegatedCreateCommand,
   Schema.Struct({
     ...ThreadCreateCommand.fields,
     type: Schema.Literal("thread.history.import"),
@@ -2143,6 +2170,7 @@ export const ThreadCreatedPayload = Schema.Struct({
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
+  lineage: Schema.optional(ThreadLineage),
 });
 
 export const ThreadDeletedPayload = Schema.Struct({
