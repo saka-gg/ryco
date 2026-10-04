@@ -2,7 +2,10 @@ import { ProjectionPendingApprovalRepository } from "./persistence/Services/Proj
 import { ProjectionThreadUserInputRequestRepository } from "./persistence/Services/ProjectionThreadUserInputRequests.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
+  CommandId,
+  DEFAULT_SERVER_SETTINGS,
   EventId,
+  MessageId,
   type OrchestrationCommand,
   type OrchestrationThreadActivity,
   DEFAULT_MODEL,
@@ -35,6 +38,31 @@ import {
 import { TestClock } from "effect/testing";
 
 import { ServerConfig } from "./config.ts";
+import { ServerAuth } from "./auth/Services/ServerAuth.ts";
+import { ServerEnvironment } from "./environment/Services/ServerEnvironment.ts";
+import { Keybindings } from "./keybindings.ts";
+import { Open } from "./open.ts";
+import { AdvertisedEndpointRegistry } from "./remote/Services/AdvertisedEndpointRegistry.ts";
+import { HttpServer } from "effect/unstable/http";
+import { ServerLifecycleEvents } from "./serverLifecycleEvents.ts";
+import { WorkspaceAccessPolicy } from "./workspace/Services/WorkspaceAccessPolicy.ts";
+import { CompletionReturnRepository } from "./persistence/Layers/AgentControlCompletionReturns.ts";
+import { OrchestrationCommandReceiptRepositoryLive } from "./persistence/Layers/OrchestrationCommandReceipts.ts";
+import { OrchestrationEventStoreLive } from "./persistence/Layers/OrchestrationEventStore.ts";
+import { ProviderEffectIntentRepositoryLive } from "./persistence/Layers/ProviderEffectIntents.ts";
+import {
+  RestartContinuationRepository,
+  RestartContinuationRepositoryLive,
+} from "./persistence/Layers/RestartContinuations.ts";
+import { SqlitePersistenceMemory } from "./persistence/Layers/Sqlite.ts";
+import { RepositoryIdentityResolverLive } from "./project/Layers/RepositoryIdentityResolver.ts";
+import { ProjectAvatarStore } from "./project/Services/ProjectAvatarStore.ts";
+import { OrchestrationEngineLive } from "./orchestration/Layers/OrchestrationEngine.ts";
+import { OrchestrationProjectionPipelineLive } from "./orchestration/Layers/ProjectionPipeline.ts";
+import { OrchestrationProjectionSnapshotQueryLive } from "./orchestration/Layers/ProjectionSnapshotQuery.ts";
+import { RestartContinuationLive } from "./orchestration/Layers/RestartContinuation.ts";
+import { ORPHANED_TURN_TERMINAL_STATE } from "./orchestration/restartReconciliation.ts";
+import * as ThreadBackgroundLiveness from "./orchestration/ThreadBackgroundLiveness.ts";
 import { ServerSettingsService } from "./serverSettings.ts";
 import { metricNames } from "./observability/Metrics.ts";
 import { hasMetricSnapshot } from "./observability/testMetricSnapshots.ts";
@@ -58,6 +86,7 @@ import { AnalyticsService } from "./telemetry/Services/AnalyticsService.ts";
 import {
   launchStartupHeartbeat,
   makeCommandGate,
+  makeServerRuntimeStartup,
   reconcileOrphanedProviderSessions,
   resolveAutoBootstrapWelcomeTargets,
   startOrchestrationRuntime,
@@ -68,6 +97,10 @@ import {
 import { WorkspaceAccessPolicyLayer } from "./workspace/Layers/WorkspaceAccessPolicy.ts";
 import { OrchestrationReactor } from "./orchestration/Services/OrchestrationReactor.ts";
 import { ProviderSessionReaper } from "./provider/Services/ProviderSessionReaper.ts";
+import {
+  RestartContinuation,
+  type RestartContinuationShape,
+} from "./orchestration/Services/RestartContinuation.ts";
 
 const startupWorkspaceSnapshot = (input: {
   readonly projectRoot: string;
@@ -147,6 +180,14 @@ const orphanedSessionThread = (input: {
     updatedAt: input.sessionUpdatedAt ?? "2026-01-01T00:00:00.000Z",
   },
 });
+
+/** Reconcile tests run with restart continuation off: it captures nothing. */
+const restartContinuationOff: RestartContinuationShape = {
+  capture: () => Effect.succeed([]),
+  publishCaptureEffects: () => Effect.void,
+  recordShutdownHints: Effect.void,
+  dispatchPending: () => Effect.void,
+};
 
 const runOrphanedSessionReconciliation = (input: {
   readonly threads: ReadonlyArray<ReturnType<typeof orphanedSessionThread>>;
@@ -231,6 +272,7 @@ const runOrphanedSessionReconciliation = (input: {
     Effect.provideService(OrchestrationEngineService, {
       dispatch: input.dispatch,
     } as unknown as OrchestrationEngineShape),
+    Effect.provideService(RestartContinuation, restartContinuationOff),
   );
 
 it.effect("repairs orphaned provider sessions while preserving resumable binding state", () => {
@@ -1033,6 +1075,7 @@ it.effect(
         Effect.provideService(OrchestrationEngineService, {
           dispatch: () => Effect.die("unused"),
         } as unknown as OrchestrationEngineShape),
+        Effect.provideService(RestartContinuation, restartContinuationOff),
       );
       yield* Scope.close(reactorScope, Exit.void);
       assert.strictEqual(result, summary);
@@ -1042,4 +1085,365 @@ it.effect(
       );
       assert.isTrue(calls.indexOf("reaper") < calls.indexOf("reconcile"));
     }),
+);
+
+// ── restart continuation through the real startup ─────────────────────────
+
+const emptyIntentRecovery = {
+  replayed: 0,
+  cancelledTurnStarts: [],
+  rejectedSteers: 0,
+  retriedSessionStops: 0,
+  handoffsAbandoned: 0,
+  settledWithoutOutcome: 0,
+};
+
+/** Everything `makeServerRuntimeStartup` needs besides orchestration and restart state. */
+const startupShellStubs = (input: {
+  readonly settings: ServerSettingsService["Service"];
+  readonly reactorStart?: OrchestrationReactor["Service"]["start"];
+}) =>
+  Layer.mergeAll(
+    Layer.succeed(ServerSettingsService, input.settings),
+    Layer.succeed(Keybindings, { start: Effect.void } as unknown as Keybindings["Service"]),
+    Layer.succeed(ServerLifecycleEvents, {
+      publish: () => Effect.succeed({} as never),
+    } as unknown as ServerLifecycleEvents["Service"]),
+    Layer.succeed(ServerEnvironment, {
+      getDescriptor: Effect.succeed({ environmentId: "test-environment" } as never),
+    } as unknown as ServerEnvironment["Service"]),
+    Layer.succeed(WorkspaceAccessPolicy, {
+      isRestricted: false,
+    } as unknown as WorkspaceAccessPolicy["Service"]),
+    Layer.succeed(OrchestrationReactor, {
+      start: input.reactorStart ?? (() => Effect.void),
+      recoverProviderIntents: () => Effect.succeed(emptyIntentRecovery),
+    }),
+    Layer.succeed(ProviderSessionReaper, {
+      start: () => Effect.void,
+    } as unknown as ProviderSessionReaper["Service"]),
+    Layer.succeed(ProviderService, {
+      listSessions: () => Effect.succeed([]),
+      stopSessionBinding: () => Effect.succeed("not-found" as const),
+    } as unknown as ProviderServiceShape),
+    Layer.succeed(AnalyticsService, {
+      record: () => Effect.void,
+    } as unknown as AnalyticsService["Service"]),
+    Layer.succeed(ServerAuth, {
+      issueStartupPairingUrl: (baseUrl: string) => Effect.succeed(baseUrl),
+    } as unknown as ServerAuth["Service"]),
+    Layer.succeed(Open, { openBrowser: () => Effect.void } as unknown as Open["Service"]),
+    // Only read by headless startup output.
+    Layer.succeed(HttpServer.HttpServer, {} as unknown as HttpServer.HttpServer["Service"]),
+    Layer.succeed(
+      AdvertisedEndpointRegistry,
+      {} as unknown as AdvertisedEndpointRegistry["Service"],
+    ),
+  );
+
+const waitUntil = <A, E, R>(read: Effect.Effect<A, E, R>, done: (value: A) => boolean) =>
+  Effect.gen(function* () {
+    for (let attempt = 0; attempt < 300; attempt += 1) {
+      const value = yield* read;
+      if (done(value)) return value;
+      yield* Effect.sleep(Duration.millis(10));
+    }
+    return yield* Effect.die("condition not reached");
+  });
+
+it.live(
+  "captures before reconcile and continues only after the HTTP listener is up",
+  () => {
+    const threadId = ThreadId.make("restart-orphan");
+    const turnId = TurnId.make("restart-orphan-turn");
+    const approvalThreadId = ThreadId.make("restart-approval");
+    const instanceId = ProviderInstanceId.make("codex");
+    const continuationCommands: OrchestrationCommand[] = [];
+    const settings = {
+      start: Effect.void,
+      getSettings: Effect.succeed({
+        ...DEFAULT_SERVER_SETTINGS,
+        continueThreadsAfterRestart: true,
+      }),
+    } as unknown as ServerSettingsService["Service"];
+    const bindings = new Map<string, ProviderRuntimeBinding>([
+      [
+        threadId,
+        {
+          threadId,
+          provider: ProviderDriverKind.make("codex"),
+          providerInstanceId: instanceId,
+          status: "running",
+          resumeCursor: { cursor: "resume" },
+        },
+      ],
+    ]);
+    const orchestration = Layer.mergeAll(
+      OrchestrationEngineLive.pipe(
+        Layer.provide(OrchestrationProjectionSnapshotQueryLive),
+        Layer.provide(OrchestrationProjectionPipelineLive),
+      ),
+      OrchestrationProjectionSnapshotQueryLive,
+    ).pipe(
+      Layer.provideMerge(ThreadBackgroundLiveness.layer),
+      Layer.provide(
+        Layer.succeed(ProjectAvatarStore, {
+          write: () => Effect.die("not implemented"),
+          read: () => Effect.succeed(null),
+          remove: () => Effect.void,
+        }),
+      ),
+      Layer.provide(OrchestrationEventStoreLive),
+      Layer.provideMerge(OrchestrationCommandReceiptRepositoryLive),
+      Layer.provideMerge(RestartContinuationRepositoryLive),
+      Layer.provideMerge(ProviderEffectIntentRepositoryLive),
+      Layer.provide(RepositoryIdentityResolverLive),
+      Layer.provideMerge(SqlitePersistenceMemory),
+      Layer.provideMerge(
+        ServerConfig.layerTest(process.cwd(), { prefix: "ryco-startup-restart-" }),
+      ),
+      Layer.provideMerge(NodeServices.layer),
+    );
+    const restartFakes = Layer.mergeAll(
+      Layer.succeed(ProviderSessionDirectory, {
+        getBinding: (id: ThreadId) => Effect.succeed(Option.fromNullishOr(bindings.get(id))),
+        upsert: (binding: ProviderRuntimeBinding) =>
+          Effect.sync(() => void bindings.set(binding.threadId, binding)),
+      } as unknown as ProviderSessionDirectoryShape),
+      Layer.succeed(CompletionReturnRepository, {
+        get: () => Effect.succeed(undefined),
+      } as unknown as CompletionReturnRepository["Service"]),
+    );
+    const recordingEngine = Layer.effect(
+      OrchestrationEngineService,
+      Effect.map(
+        Effect.service(OrchestrationEngineService),
+        (engine): OrchestrationEngineShape => ({
+          ...engine,
+          dispatch: (command, dispatchOptions) => {
+            continuationCommands.push(command);
+            return engine.dispatch(command, dispatchOptions);
+          },
+        }),
+      ),
+    );
+    const layer = RestartContinuationLive.pipe(
+      Layer.provide(recordingEngine),
+      Layer.provideMerge(startupShellStubs({ settings })),
+      Layer.provideMerge(restartFakes),
+      Layer.provideMerge(orchestration),
+    );
+
+    return Effect.gen(function* () {
+      const engine = yield* OrchestrationEngineService;
+      const repository = yield* RestartContinuationRepository;
+      const at = (secondsAgo: number) => new Date(Date.now() - secondsAgo * 1_000).toISOString();
+      yield* engine.dispatch({
+        type: "project.create",
+        commandId: CommandId.make("restart-project"),
+        projectId: ProjectId.make("restart-project"),
+        title: "Restart",
+        workspaceRoot: "/tmp/ryco-startup-restart",
+        defaultModelSelection: { instanceId, model: "gpt-5" },
+        createdAt: at(60),
+      });
+      for (const [id, turn] of [
+        [threadId, turnId],
+        [approvalThreadId, TurnId.make("restart-approval-turn")],
+      ] as const) {
+        yield* engine.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make(`${id}-create`),
+          threadId: id,
+          projectId: ProjectId.make("restart-project"),
+          title: id,
+          modelSelection: { instanceId, model: "gpt-5" },
+          interactionMode: "default",
+          runtimeMode: "full-access",
+          branch: null,
+          worktreePath: null,
+          createdAt: at(60),
+        });
+        yield* engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make(`${id}-start`),
+          threadId: id,
+          message: {
+            messageId: MessageId.make(`${id}-message`),
+            role: "user",
+            text: "Work",
+            attachments: [],
+          },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          createdAt: at(50),
+        });
+        yield* engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make(`${id}-running`),
+          threadId: id,
+          session: {
+            threadId: id,
+            status: "running",
+            providerName: "codex",
+            providerInstanceId: instanceId,
+            runtimeSessionId: RuntimeSessionId.make(`${id}-runtime`),
+            runtimeMode: "full-access",
+            activeTurnId: turn,
+            lastError: null,
+            updatedAt: at(40),
+          },
+          createdAt: at(40),
+        });
+      }
+      // A final progress message completes the turn row mid-turn (the SQL shape).
+      yield* engine.dispatch({
+        type: "thread.message.assistant.complete",
+        commandId: CommandId.make("restart-progress"),
+        threadId,
+        messageId: MessageId.make("restart-progress"),
+        text: "Halfway there",
+        turnId,
+        createdAt: at(30),
+      });
+      yield* engine.dispatch({
+        type: "thread.activity.append",
+        commandId: CommandId.make("restart-approval"),
+        threadId: approvalThreadId,
+        activity: {
+          id: EventId.make("restart-approval"),
+          kind: "approval.requested",
+          tone: "approval",
+          summary: "Approve the command",
+          payload: {
+            requestId: "restart-approval-request",
+            requestKind: "command",
+            runtimeSessionId: `${approvalThreadId}-runtime`,
+          },
+          turnId: TurnId.make("restart-approval-turn"),
+          createdAt: at(30),
+        },
+        createdAt: at(30),
+      });
+
+      const turnStarts = () =>
+        continuationCommands.filter(
+          (command): command is Extract<OrchestrationCommand, { type: "thread.turn.start" }> =>
+            command.type === "thread.turn.start",
+        );
+      const rowOf = (id: ThreadId, turn: TurnId) =>
+        repository
+          .get({ threadId: id, sourceTurnId: turn })
+          .pipe(Effect.map((row) => Option.getOrUndefined(row)));
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const startup = yield* makeServerRuntimeStartup;
+          yield* startup.awaitCommandReady;
+          const approvalRow = yield* rowOf(approvalThreadId, TurnId.make("restart-approval-turn"));
+          // Reconcile cleared the request in the same pass; capture saw it first.
+          assert.deepInclude(approvalRow, { status: "skipped", reason: "pending-request" });
+          assert.deepInclude(yield* rowOf(threadId, turnId), { status: "pending" });
+
+          yield* Effect.sleep(Duration.millis(50));
+          assert.deepStrictEqual(turnStarts(), []);
+
+          yield* startup.markHttpListening;
+          yield* waitUntil(
+            Effect.sync(() => turnStarts().length),
+            (count) => count > 0,
+          );
+          const row = yield* waitUntil(
+            rowOf(threadId, turnId),
+            (value) => value?.status !== "pending",
+          );
+          assert.deepInclude(row, { status: "dispatched" });
+          const starts = turnStarts();
+          assert.strictEqual(starts.length, 1);
+          assert.strictEqual(starts[0]?.threadId, threadId);
+          // The fence expects exactly what reconciliation left on the turn.
+          assert.strictEqual(
+            starts[0]?.restartContinuationGuard?.expectedLatestTurnState,
+            ORPHANED_TURN_TERMINAL_STATE,
+          );
+        }),
+      );
+    }).pipe(Effect.provide(layer));
+  },
+  30_000,
+);
+
+const shutdownOrderLayer = (input: {
+  readonly order: string[];
+  readonly recordShutdownHints: Effect.Effect<void>;
+}) =>
+  Layer.mergeAll(
+    startupShellStubs({
+      settings: {
+        start: Effect.void,
+        getSettings: Effect.succeed(DEFAULT_SERVER_SETTINGS),
+      } as unknown as ServerSettingsService["Service"],
+      reactorStart: () =>
+        Effect.addFinalizer(() => Effect.sync(() => input.order.push("reactors"))),
+    }),
+    Layer.succeed(RestartContinuation, {
+      ...restartContinuationOff,
+      recordShutdownHints: input.recordShutdownHints,
+    }),
+    Layer.succeed(ProjectionSnapshotQuery, {
+      getCommandReadModel: () =>
+        Effect.succeed({
+          projects: [],
+          worktrees: [],
+          threads: [],
+        } as unknown as OrchestrationReadModel),
+      getCounts: () => Effect.succeed({ threadCount: 0, projectCount: 0 }),
+    } as unknown as ProjectionSnapshotQueryShape),
+    Layer.succeed(ProviderSessionDirectory, {} as ProviderSessionDirectoryShape),
+    Layer.succeed(OrchestrationEngineService, {} as unknown as OrchestrationEngineShape),
+  ).pipe(
+    Layer.provideMerge(SqlitePersistenceMemory),
+    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "ryco-startup-order-" })),
+    Layer.provideMerge(NodeServices.layer),
+  );
+
+it.live("records shutdown hints before the reactors stop", () => {
+  const order: string[] = [];
+  return Effect.gen(function* () {
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        const startup = yield* makeServerRuntimeStartup;
+        yield* startup.awaitCommandReady;
+      }),
+    );
+    assert.deepStrictEqual(order, ["hints", "reactors"]);
+  }).pipe(
+    Effect.provide(
+      shutdownOrderLayer({
+        order,
+        recordShutdownHints: Effect.sync(() => void order.push("hints")),
+      }),
+    ),
+  );
+});
+
+it.live(
+  "cuts a hanging shutdown-hint write off after two seconds",
+  () => {
+    const order: string[] = [];
+    return Effect.gen(function* () {
+      const startedAt = Date.now();
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const startup = yield* makeServerRuntimeStartup;
+          yield* startup.awaitCommandReady;
+        }),
+      );
+      const elapsedMs = Date.now() - startedAt;
+      assert.isAtLeast(elapsedMs, 1_900);
+      assert.isBelow(elapsedMs, 6_000);
+      assert.deepStrictEqual(order, ["reactors"]);
+    }).pipe(Effect.provide(shutdownOrderLayer({ order, recordShutdownHints: Effect.never })));
+  },
+  15_000,
 );

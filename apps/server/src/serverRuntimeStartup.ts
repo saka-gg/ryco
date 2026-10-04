@@ -48,6 +48,8 @@ import { Open } from "./open.ts";
 import { OrchestrationEngineService } from "./orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "./orchestration/Services/ProjectionSnapshotQuery.ts";
 import { OrchestrationReactor } from "./orchestration/Services/OrchestrationReactor.ts";
+import type { ProviderIntentRecoverySummary } from "./orchestration/Services/ProviderCommandReactor.ts";
+import { RestartContinuation } from "./orchestration/Services/RestartContinuation.ts";
 import { ServerLifecycleEvents } from "./serverLifecycleEvents.ts";
 import { ServerSettingsService } from "./serverSettings.ts";
 import { ServerEnvironment } from "./environment/Services/ServerEnvironment.ts";
@@ -74,6 +76,8 @@ import {
 
 export const DEFAULT_STARTUP_COMMAND_GATE_MAX_PENDING = 2_048;
 export const DEFAULT_STARTUP_COMMAND_GATE_READY_TIMEOUT_MS = 30_000;
+/** A hanging shutdown-hint write must never hold up shutdown. */
+export const RESTART_SHUTDOWN_HINT_TIMEOUT = Duration.seconds(2);
 
 export type ServerRuntimeStartupErrorReason = "startup" | "busy" | "timeout";
 
@@ -636,6 +640,10 @@ export const reconcileOrphanedProviderSessions = Effect.gen(function* () {
   }
 
   const liveThreadIds = new Set(liveSessionsExit.value.map((session) => session.threadId));
+  // Capture what the restart cut off before anything below rewrites it: pending
+  // requests are cleared and orphaned turns are released next.
+  const restartContinuation = yield* RestartContinuation;
+  const captured = yield* restartContinuation.capture({ snapshot, liveThreadIds });
   // Provider callbacks are process-local. Even ready/error sessions can retain
   // requests from an earlier process; resolve them through normal events so the
   // inbox summary, conversation and settlement policy all recover together.
@@ -753,6 +761,8 @@ export const reconcileOrphanedProviderSessions = Effect.gen(function* () {
       ),
     );
   }
+  // Background-work boundaries, the stopped-work note and capture-time notices.
+  yield* restartContinuation.publishCaptureEffects(captured);
 }).pipe(
   Effect.catchCause((cause) =>
     Cause.hasInterrupts(cause)
@@ -804,12 +814,22 @@ export const makeServerRuntimeStartup = Effect.gen(function* () {
   const serverSettings = yield* ServerSettingsService;
   const serverEnvironment = yield* ServerEnvironment;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
+  const restartContinuation = yield* RestartContinuation;
 
   const commandGate = yield* makeCommandGate();
   const httpListening = yield* Deferred.make<void>();
   const reactorScope = yield* Scope.make("sequential");
 
   yield* Effect.addFinalizer(() => Scope.close(reactorScope, Exit.void));
+  // Registered after the reactor-scope finalizer, so it runs BEFORE it (finalizers run in
+  // reverse): the in-memory background liveness is still populated, and the projection
+  // still names the running turns a graceful shutdown is about to cut off.
+  yield* Effect.addFinalizer(() =>
+    restartContinuation.recordShutdownHints.pipe(
+      Effect.timeout(RESTART_SHUTDOWN_HINT_TIMEOUT),
+      Effect.ignoreCause({ log: true }),
+    ),
+  );
 
   const startup = Effect.gen(function* () {
     yield* Effect.logDebug("startup phase: validating restricted workspace state");
@@ -853,7 +873,7 @@ export const makeServerRuntimeStartup = Effect.gen(function* () {
       ),
     );
 
-    yield* startOrchestrationRuntime(reactorScope);
+    const intentRecovery = yield* startOrchestrationRuntime(reactorScope);
 
     const welcomeBase = yield* resolveWelcomeBase;
     const environment = yield* serverEnvironment.getDescriptor;
@@ -911,6 +931,7 @@ export const makeServerRuntimeStartup = Effect.gen(function* () {
         ),
       );
     }
+    return intentRecovery;
   }).pipe(
     Effect.annotateSpans({
       "server.mode": serverConfig.mode,
@@ -953,6 +974,18 @@ export const makeServerRuntimeStartup = Effect.gen(function* () {
             environment: yield* serverEnvironment.getDescriptor,
           },
         }),
+      );
+
+      // Every runtime layer is built (http.wait) and provider intent recovery finished
+      // before the gate opened, so continued sessions get the full tool surface.
+      const intentRecovery: ProviderIntentRecoverySummary = startupExit.value;
+      yield* Effect.forkScoped(
+        runStartupPhase(
+          "restart-continuations.dispatch",
+          restartContinuation.dispatchPending({
+            cancelledTurnStarts: intentRecovery.cancelledTurnStarts,
+          }),
+        ),
       );
 
       yield* Effect.logDebug("startup phase: recording startup heartbeat");
