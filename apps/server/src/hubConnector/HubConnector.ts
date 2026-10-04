@@ -280,8 +280,9 @@ export class HubConnector {
    * backing off retries now, with a fresh backoff, rather than when a timer
    * grown during the outage fires. Every other state is left alone — in
    * particular nothing here retries a failure that needs operator action, or
-   * brings forward a slow retry whose spacing is the point of it (a duplicate
-   * process, a refused proof).
+   * brings forward a slow retry whose spacing is the point of it (a copy the
+   * Hub displaced, a refused proof). Waiting out another local copy's lock is
+   * not one of those: checking is a file read, so it is brought forward too.
    */
   nudge(): void {
     if (!this.#started || this.#stopping) return;
@@ -601,7 +602,9 @@ export class HubConnector {
    * nothing, leaving the owning process's live channels under authority that
    * was just withdrawn. Refused while another local process owns the identity.
    * A claim taken for an operation is kept when this connector runs — it will
-   * use the identity next — and handed back afterwards when it does not.
+   * use the identity next, and one waiting out the other copy's lock retries
+   * at once rather than reporting a copy that is gone — and handed back
+   * afterwards when it does not.
    */
   async asIdentityOwner<A>(operation: () => Promise<A>): Promise<A> {
     if (this.#stopping) throw new Error("Hub identity is unavailable while stopping.");
@@ -611,8 +614,14 @@ export class HubConnector {
       await this.#completeIdentityStartup();
       return await operation();
     } finally {
-      if (claim === "claimed" && (!this.#runsConnector() || this.#stopping)) {
-        await this.#handBackIdentity();
+      if (claim === "claimed") {
+        if (!this.#runsConnector() || this.#stopping) {
+          await this.#handBackIdentity();
+        } else if (this.#state.snapshot().failure === "connection_replaced") {
+          // Only the local lock wait is nudgeable; a Hub displacement keeps
+          // its spacing (`nudge`).
+          this.nudge();
+        }
       }
     }
   }

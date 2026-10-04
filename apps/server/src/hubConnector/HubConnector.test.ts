@@ -1625,11 +1625,12 @@ describe("HubConnector", () => {
     otherCopyRunning = false;
     calls.length = 0;
     await expect(connector.asIdentityOwner(ownerOperation)).resolves.toBe("done");
-    expect(calls).toEqual(["acquire", "startup", "operation"]);
-    // A running connector keeps the claim: its next retry connects with it.
-    await clock.advance(33_000);
+    expect(calls.slice(0, 3)).toEqual(["acquire", "startup", "operation"]);
+    // A running connector keeps the claim, and stops waiting out a copy that is
+    // gone: it retries at once rather than when its lock check comes round.
     await settle();
     expect(calls).toEqual(["acquire", "startup", "operation", "startup", "read"]);
+    expect(connector.status().failure).not.toBe("connection_replaced");
     await connector.stop();
 
     // A connector that is switched off hands an operation's claim straight back.

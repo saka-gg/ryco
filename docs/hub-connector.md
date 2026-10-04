@@ -396,8 +396,9 @@ leave, destroy retired keys, repair the prekey or continuity chain, or commit it
 policy, so a narrower policy given to it cannot be committed where the first backend's live
 channels would never be swept. Until then its policy reads as the fail-closed default, which is
 also what it enforces, since it serves no channel. It does not sign with or connect as the identity:
-it reports `connection_replaced`, checks again every 30 seconds to two minutes, and takes over by
-itself once the first one exits, running the deferred work first. Until it holds the lock it also
+it reports `connection_replaced`, checks again every 30 seconds to two minutes — at once when the
+machine wakes, its network changes, or an owner command here takes the identity over — and takes
+over by itself once the first one exits, running the deferred work first. Until it holds the lock it also
 refuses everything that writes what the owning backend relies on — starting or cancelling an
 enrollment, leaving, the desktop's native node claim and local trusted introduction, and every E2EE
 owner command that changes state (client approval, narrowing, revocation and purge, approval QR
@@ -503,7 +504,9 @@ The connector also watches for the two events that silently kill an outbound soc
 waking from sleep (its wall clock jumps past its timers) and its external addresses changing. An
 online connector then sends its own `ping` and reconnects if the matching `pong` does not arrive
 within five seconds; a connector backing off retries at once with a fresh backoff — except a slow
-retry for `connection_replaced` or `authentication_failed`, whose spacing is the point. Only the answer
+retry after the Hub displaced this node (`connection_replaced`) or refused its proof
+(`authentication_failed`), whose spacing is the point. Waiting out another local backend's lock,
+also reported as `connection_replaced`, is a file check and is brought forward too. Only the answer
 to the connector's own outstanding probe is accepted; an unsolicited `pong` remains a protocol
 violation.
 

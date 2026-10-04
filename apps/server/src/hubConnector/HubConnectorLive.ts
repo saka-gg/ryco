@@ -444,8 +444,9 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
     // Taken before the full runtime is built, because building it runs startup
     // work that writes what the identity's owner relies on. A backend that finds
     // the lock held builds the runtime with that work deferred, and its
-    // connector runs it once it takes the lock over. Released last, after the
-    // connector has stopped.
+    // connector runs it once it takes the lock over. The connector hands it back
+    // as it stops, before the §12.5 flush below; releasing it here as well
+    // covers a layer that failed before the connector existed.
     //
     // An unusable lock is asked once more before startup runs without it: that
     // answer lets this backend do the owner's work, so it has to mean the lock
