@@ -88,6 +88,13 @@ it("routes each event only to its explicit projection owners", () => {
   assert.deepEqual(ORCHESTRATION_EVENT_PROJECTORS["thread.usage-limit-cleared"], [
     "projection.threads",
   ]);
+  // Turn starts that end without a turn drop their pending row.
+  assert.deepEqual(ORCHESTRATION_EVENT_PROJECTORS["thread.activity-appended"], [
+    ORCHESTRATION_PROJECTOR_NAMES.threadActivities,
+    ORCHESTRATION_PROJECTOR_NAMES.pendingApprovals,
+    ORCHESTRATION_PROJECTOR_NAMES.threadTurns,
+    ORCHESTRATION_PROJECTOR_NAMES.threads,
+  ]);
   assert.equal(Object.keys(ORCHESTRATION_EVENT_PROJECTORS).length, 46);
 });
 
@@ -3280,6 +3287,134 @@ engineLayer("OrchestrationProjectionPipeline via engine dispatch", (it) => {
       for (const table of incarnationTables) {
         assert.strictEqual(yield* countRowsForThread(table), 0, `${table} should be empty`);
       }
+    }),
+  );
+  it.effect("drops only the pending row of a turn start that ended without a turn", () =>
+    Effect.gen(function* () {
+      const engine = yield* OrchestrationEngineService;
+      const sql = yield* SqlClient.SqlClient;
+      const createdAt = new Date().toISOString();
+      const modelSelection = { instanceId: ProviderInstanceId.make("codex"), model: "gpt" };
+      const threadA = ThreadId.make("thread-ended-a");
+      const threadB = ThreadId.make("thread-ended-b");
+      yield* engine.dispatch({
+        type: "project.create",
+        commandId: CommandId.make("cmd-ended-project"),
+        projectId: ProjectId.make("project-ended"),
+        title: "Ended",
+        workspaceRoot: "/tmp/project-ended",
+        defaultModelSelection: modelSelection,
+        createdAt,
+      });
+      for (const threadId of [threadA, threadB]) {
+        yield* engine.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make(`cmd-create-${threadId}`),
+          threadId,
+          projectId: ProjectId.make("project-ended"),
+          title: threadId,
+          modelSelection,
+          interactionMode: "default",
+          runtimeMode: "full-access",
+          branch: null,
+          worktreePath: null,
+          createdAt,
+        });
+      }
+      const startTurn = (threadId: ThreadId, messageId: string) =>
+        engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make(`cmd-start-${messageId}`),
+          threadId,
+          message: {
+            messageId: MessageId.make(messageId),
+            role: "user",
+            text: messageId,
+            attachments: [],
+          },
+          interactionMode: "default",
+          runtimeMode: "full-access",
+          createdAt,
+        });
+      const session = (status: "running" | "ready", activeTurnId: TurnId | null) => ({
+        threadId: threadA,
+        status,
+        providerName: "codex",
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        runtimeSessionId: RuntimeSessionId.make("runtime-ended"),
+        runtimeMode: "full-access" as const,
+        activeTurnId,
+        lastError: null,
+        updatedAt: createdAt,
+      });
+      const ended = (threadId: ThreadId, messageId: string, kind: string) =>
+        engine.dispatch({
+          type: "thread.activity.append",
+          commandId: CommandId.make(`cmd-${kind}-${threadId}-${messageId}`),
+          threadId,
+          activity: {
+            id: EventId.make(`activity-${kind}-${threadId}-${messageId}`),
+            tone: "error",
+            kind,
+            summary: "Ended",
+            payload: { messageId, detail: "ended" },
+            turnId: null,
+            createdAt,
+          },
+          createdAt,
+        });
+      const rows = () =>
+        sql<{
+          readonly threadId: string;
+          readonly turnId: string | null;
+          readonly messageId: string | null;
+        }>`
+          SELECT thread_id AS "threadId", turn_id AS "turnId", pending_message_id AS "messageId"
+          FROM projection_turns
+          WHERE thread_id IN (${threadA}, ${threadB})
+          ORDER BY thread_id, row_id
+        `;
+
+      // m1 binds a turn on A, then m3 is A's pending start; m2 is B's pending start.
+      yield* startTurn(threadA, "m1");
+      yield* engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-ended-running"),
+        threadId: threadA,
+        session: session("running", TurnId.make("turn-m1")),
+        createdAt,
+      });
+      yield* engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-ended-ready"),
+        threadId: threadA,
+        session: session("ready", null),
+        turnOutcome: {
+          turnId: TurnId.make("turn-m1"),
+          state: "completed",
+          reason: "provider-turn-completed",
+          completedAt: createdAt,
+        },
+        createdAt,
+      });
+      yield* startTurn(threadA, "m3");
+      yield* startTurn(threadB, "m2");
+      const before = [
+        { threadId: threadA, turnId: "turn-m1", messageId: "m1" },
+        { threadId: threadA, turnId: null, messageId: "m3" },
+        { threadId: threadB, turnId: null, messageId: "m2" },
+      ];
+      assert.deepEqual(yield* rows(), before);
+
+      // A stale failure for the bound m1, and m2's failure on the wrong thread: nothing.
+      yield* ended(threadA, "m1", "provider.turn.start.failed");
+      yield* ended(threadA, "m2", "provider.turn.start.failed");
+      yield* ended(threadA, "m3", "provider.turn.interrupt.failed");
+      assert.deepEqual(yield* rows(), before);
+
+      yield* ended(threadA, "m3", "provider.turn.start.cancelled");
+      yield* ended(threadB, "m2", "provider.turn.start.failed");
+      assert.deepEqual(yield* rows(), before.slice(0, 1));
     }),
   );
 });

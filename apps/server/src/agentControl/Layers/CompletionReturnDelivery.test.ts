@@ -1526,3 +1526,35 @@ it.effect("blocks a child whose project scope changed", () =>
     assert.equal(h.sent.length, 0);
   }).pipe(Effect.provide(layer)),
 );
+
+it.effect(
+  "T14 never re-sends a wake whose start a restart cancelled; a held sibling gets its own",
+  () =>
+    Effect.gen(function* () {
+      const h = yield* setup();
+      yield* h.addChild("child-2");
+      h.modelPendingRow();
+      yield* h.ack();
+      yield* h.tick(0);
+      assert.equal(h.sent.length, 1);
+      yield* h.ack("completed", false, "p", "child-2");
+      yield* h.tick(3);
+      assert.equal((yield* h.read("child-2")).status, "ready");
+      // Restart recovery cancels the wake's start: its visible failure removes the
+      // pending row (provider-effect-outbox), exactly like a failed start.
+      const cancelled = h.sent[0]!;
+      yield* h.appendStartFailure("parent", cancelled.message.messageId);
+      yield* h.sql`DELETE FROM projection_turns
+      WHERE thread_id = 'parent' AND turn_id IS NULL AND pending_message_id = ${cancelled.message.messageId}`;
+      const restarted = yield* h.makeWorker;
+      yield* restarted.scan(at(6));
+      yield* restarted.scan(at(200));
+      assert.equal((yield* h.read()).status, "delivered");
+      assert.equal((yield* h.read("child-2")).status, "delivered");
+      assert.deepStrictEqual(
+        h.sent.map((command) => command.commandId),
+        [cancelled.commandId, CommandId.make("delegation-return:child-2")],
+      );
+      assert.include(h.sent[1]!.message.text, "[1/1]");
+    }).pipe(Effect.provide(layer)),
+);

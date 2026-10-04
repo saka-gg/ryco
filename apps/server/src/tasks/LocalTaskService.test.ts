@@ -185,6 +185,13 @@ describe("local task service", () => {
           "interrupted",
         );
         assert.equal((yield* tasks.get("task")).status, "failed");
+        // The projection now drops the cancelled start's pending row; it still reads ended.
+        yield* sql`DELETE FROM projection_turns WHERE pending_message_id = ${messageId}`;
+        assert.equal(
+          yield* readDelegatedRunState(sql, { threadId: "thread", messageId }),
+          "interrupted",
+        );
+        assert.equal((yield* tasks.get("task")).status, "failed");
       }).pipe(Effect.provide(layer)),
   );
 

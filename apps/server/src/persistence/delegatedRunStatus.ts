@@ -93,7 +93,12 @@ export const readDelegatedRunState = (
       WHERE turns.thread_id = ${input.threadId} AND turns.pending_message_id = ${input.messageId}
       ORDER BY turns.row_id DESC LIMIT 1`;
     const turn = turns[0];
-    if (!turn) return "starting" as const;
+    // A start a Stop cancelled loses its pending row (the cancel activity removes it).
+    if (!turn) {
+      return (yield* hasTurnStartCancelled(sql, input))
+        ? ("interrupted" as const)
+        : ("starting" as const);
+    }
     if (turn.state === "error") return "failed" as const;
     if (turn.state === "interrupted") return "interrupted" as const;
     const active = turn.turn_id !== null && turn.active_turn_id === turn.turn_id;
@@ -102,7 +107,7 @@ export const readDelegatedRunState = (
     if (active || turn.state === "running") return "running" as const;
     if (turn.state === "completed") return "completed" as const;
     if (turn.state !== "pending") return "failed" as const;
-    // A start the user's Stop cancelled keeps its pending row, but will never run.
+    // A start a Stop cancelled before the cancel activity removed pending rows.
     return (yield* hasTurnStartCancelled(sql, input))
       ? ("interrupted" as const)
       : ("starting" as const);
