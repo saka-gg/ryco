@@ -33,6 +33,10 @@ vi.mock("../hostedHub/state", () => ({
     (selector: (state: typeof fixture.hosted) => unknown) => selector(fixture.hosted),
     { getState: () => fixture.hosted },
   ),
+  hostedHubController: {
+    acknowledgeDeliveryUnknown: vi.fn(),
+    markEnvironmentDeliveryUnknown: vi.fn(),
+  },
 }));
 vi.mock("../hostedHub/hostedConnectionCoordinator", () => ({
   readHostedNodeMutationLease: (environmentId: string) =>

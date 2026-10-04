@@ -33,6 +33,10 @@ vi.mock("../../env", () => ({ isHostedHubMode: () => mocks.hosted }));
 vi.mock("../../hostedHub/state", () => ({
   useHostedHubStore: (selector: (state: ReturnType<typeof hub.getState>) => unknown) =>
     hub(selector),
+  hostedHubController: {
+    acknowledgeDeliveryUnknown: vi.fn(),
+    markEnvironmentDeliveryUnknown: vi.fn(),
+  },
 }));
 vi.mock("../../hostedHub/hostedConnectionCoordinator", () => ({
   useHostedWorkspaceState: () => workspace(),

@@ -17,6 +17,10 @@ vi.mock("../../env", () => ({ isHostedHubMode: () => false }));
 vi.mock("../../hostedHub/state", () => ({
   useHostedHubStore: (selector: (state: { effectiveRole: string }) => unknown) =>
     selector({ effectiveRole: "owner" }),
+  hostedHubController: {
+    acknowledgeDeliveryUnknown: vi.fn(),
+    markEnvironmentDeliveryUnknown: vi.fn(),
+  },
 }));
 vi.mock("../../hostedHub/hostedConnectionCoordinator", () => ({
   useHostedWorkspaceState: () => ({ machines: [] }),
