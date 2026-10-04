@@ -585,6 +585,29 @@ describe("RestartContinuation", () => {
     });
   });
 
+  it("never dates newer work back to a hint an earlier capture did not consume", async () => {
+    const system = await createSystem();
+    const seeded = await system.seedThread({ id: "rehinted", minutesAgo: 1 });
+    // An earlier shutdown hinted the thread four hours ago and no capture consumed it (that
+    // startup's provider inventory failed); the newer turn then ran up to this shutdown.
+    await system.run(
+      system.repository.recordShutdownHints({
+        liveSessionThreadIds: [seeded.threadId],
+        liveBackgroundThreadIds: [],
+        recordedAt: system.ago(240),
+      }),
+    );
+    await system.run(
+      system.restart.recordShutdownHints({ liveThreadIds: new Set([seeded.threadId]) }),
+    );
+    await system.startup([seeded.threadId]);
+    await system.run(system.restart.dispatchPending());
+    expect(await system.rowOf(seeded.threadId, seeded.turnId)).toMatchObject({
+      status: "dispatched",
+    });
+    expect(await system.activities(seeded.threadId, RESTART_CONTINUATION_SKIPPED_KIND)).toEqual([]);
+  });
+
   it("never lets a graceful shutdown refresh an orphan that process did not run", async () => {
     const system = await createSystem();
     // Crashed three hours ago; the next process never reconciled it (its provider inventory

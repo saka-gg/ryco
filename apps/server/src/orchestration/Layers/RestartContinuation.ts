@@ -332,7 +332,9 @@ export const makeRestartContinuation = (options: RestartContinuationOptions = {}
           runtimeSessionId: session.runtimeSessionId ?? null,
           backgroundWork,
           capturedAt: input.capturedAt,
-          lastObservedAt: input.hint?.recordedAt ?? observedAt(thread, window),
+          // A hint names the thread, not the turn: one an earlier capture never consumed
+          // must not date newer work back past the projection's own evidence for it.
+          lastObservedAt: latestIsoTimestamp(observedAt(thread, window), input.hint?.recordedAt),
         };
         const inserted = yield* repository.insertIfAbsent(
           classification.status === "pending"

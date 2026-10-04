@@ -281,8 +281,9 @@ export const makeRestartContinuationRepository = Effect.gen(function* () {
    * earlier crash it did not reconcile) is never hinted: its hint would restart the
    * freshness clock of work that died long ago.
    *
-   * An existing hint (one no capture consumed yet) keeps its earlier time, so a hint can
-   * only ever make work look older.
+   * An existing hint (one no capture consumed yet) keeps its earlier time, so a re-hint can
+   * never make work look newer than an earlier shutdown did. Capture still takes the later
+   * of a hint and the projection's own evidence, since a hint names the thread, not a turn.
    */
   const recordShutdownHints = (input: {
     readonly liveSessionThreadIds: ReadonlyArray<string>;
