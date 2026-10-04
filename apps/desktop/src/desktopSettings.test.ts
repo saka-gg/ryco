@@ -11,9 +11,11 @@ import {
   desktopHubLaunchNeedsRestart,
   isDesktopHostedIdentitySupported,
   isDesktopHubFileSecretStoreSupported,
+  planDesktopTailscaleServeChange,
   readDesktopSettings,
   resolveDefaultDesktopSettings,
   resolveDesktopHubConnectorLaunch,
+  resolveDesktopTailscaleServeLaunch,
   setDesktopHubPreference,
   setDesktopKeepAwakePreference,
   setDesktopServerExposurePreference,
@@ -204,6 +206,62 @@ describe("desktopSettings", () => {
       hubNodeName: null,
       hubAllowFileSecretStore: false,
     });
+  });
+
+  it("measures a Tailscale Serve request against what the running backend serves", () => {
+    const serving = setDesktopTailscaleServePreference(DEFAULT_DESKTOP_SETTINGS, {
+      enabled: true,
+      port: 443,
+    });
+    const running = resolveDesktopTailscaleServeLaunch(serving);
+
+    // Turns are running: the disable is saved and the backend keeps serving.
+    const deferred = planDesktopTailscaleServeChange({
+      settings: serving,
+      running,
+      requested: { enabled: false, port: 443 },
+      deferRelaunch: true,
+    });
+    expect(deferred.relaunch).toBe(false);
+    expect(deferred.settings.tailscaleServeEnabled).toBe(false);
+
+    // Asking for the saved disable again, now, must still stop serving. It
+    // used to compare with the saved value and silently do nothing.
+    const now = planDesktopTailscaleServeChange({
+      settings: deferred.settings,
+      running,
+      requested: { enabled: false, port: 443 },
+      deferRelaunch: false,
+    });
+    expect(now).toEqual({ settings: deferred.settings, relaunch: true });
+
+    // Asking for what already runs withdraws the saved change in place.
+    const withdrawn = planDesktopTailscaleServeChange({
+      settings: deferred.settings,
+      running,
+      requested: { enabled: true, port: 443 },
+      deferRelaunch: false,
+    });
+    expect(withdrawn.relaunch).toBe(false);
+    expect(resolveDesktopTailscaleServeLaunch(withdrawn.settings)).toEqual(running);
+
+    // A port only matters while serving.
+    expect(
+      planDesktopTailscaleServeChange({
+        settings: DEFAULT_DESKTOP_SETTINGS,
+        running: { enabled: false, port: 8443 },
+        requested: { enabled: false, port: 443 },
+        deferRelaunch: false,
+      }).relaunch,
+    ).toBe(false);
+    expect(
+      planDesktopTailscaleServeChange({
+        settings: serving,
+        running,
+        requested: { enabled: true, port: 8443 },
+        deferRelaunch: false,
+      }).relaunch,
+    ).toBe(true);
   });
 
   it("persists the requested nightly update channel", () => {

@@ -58,15 +58,17 @@ import { DEFAULT_DESKTOP_BACKEND_PORT, resolveDesktopBackendPort } from "./backe
 import {
   type DesktopHubConnectorLaunch,
   type DesktopSettings,
+  type DesktopTailscaleServeLaunch,
   DEFAULT_DESKTOP_SETTINGS,
   desktopHubAllowsBackgroundNodeClaim,
   desktopHubLaunchNeedsRestart,
   isDesktopHostedIdentitySupported,
   isDesktopHubFileSecretStoreSupported,
+  planDesktopTailscaleServeChange,
   readDesktopSettings,
   resolveDesktopHubConnectorLaunch,
+  resolveDesktopTailscaleServeLaunch,
   setDesktopServerExposurePreference,
-  setDesktopTailscaleServePreference,
   setDesktopUpdateChannelPreference,
   resolveDefaultDesktopSettings,
   setDesktopHubPreference,
@@ -403,7 +405,7 @@ let desktopKeepAwake: DesktopKeepAwakeController | null = null;
 let backendHubLaunch: DesktopHubConnectorLaunch | null = null;
 // The Tailscale Serve configuration the running backend was launched with. A
 // change saved for a deferred relaunch must not read as already served.
-let backendTailscaleServe: { readonly enabled: boolean; readonly port: number } | null = null;
+let backendTailscaleServe: DesktopTailscaleServeLaunch | null = null;
 // Retain live turn-complete notifications: Electron GCs Notification objects once
 // the creating scope returns, which would drop their `click`/`close` handlers.
 const activeTurnCompleteNotifications = new Set<Notification>();
@@ -669,13 +671,8 @@ async function prepareDesktopShellEnvironmentForBackend(): Promise<void> {
   await synchronizeDesktopShellEnvironment("cache-miss");
 }
 
-function runningTailscaleServe(): { readonly enabled: boolean; readonly port: number } {
-  return (
-    backendTailscaleServe ?? {
-      enabled: desktopSettings.tailscaleServeEnabled,
-      port: desktopSettings.tailscaleServePort,
-    }
-  );
+function runningTailscaleServe(): DesktopTailscaleServeLaunch {
+  return backendTailscaleServe ?? resolveDesktopTailscaleServeLaunch(desktopSettings);
 }
 
 function getDesktopServerExposureState(): DesktopServerExposureState {
@@ -1156,17 +1153,6 @@ function readDeferRelaunch(raw: unknown, invalid: string): boolean {
   const value = (raw as { readonly deferRelaunch?: unknown }).deferRelaunch;
   if (value !== undefined && typeof value !== "boolean") throw new Error(invalid);
   return value === true;
-}
-
-async function applyDesktopTailscaleServeEnabled(
-  nextSettings: DesktopSettings,
-): Promise<DesktopServerExposureState> {
-  desktopSettings = nextSettings;
-  writeDesktopSettings(DESKTOP_SETTINGS_PATH, desktopSettings);
-  relaunchDesktopApp(
-    desktopSettings.tailscaleServeEnabled ? "tailscale-serve-enabled" : "tailscale-serve-disabled",
-  );
-  return getDesktopServerExposureState();
 }
 
 /** Whether the persisted Hub settings differ from what the running backend serves. */
@@ -2654,10 +2640,7 @@ function startBackend(): void {
   backendControlToken = childControlToken;
   const hubLaunch = resolveDesktopHubConnectorLaunch(desktopSettings);
   backendHubLaunch = hubLaunch;
-  const tailscaleServe = {
-    enabled: desktopSettings.tailscaleServeEnabled,
-    port: desktopSettings.tailscaleServePort,
-  };
+  const tailscaleServe = resolveDesktopTailscaleServeLaunch(desktopSettings);
   backendTailscaleServe = tailscaleServe;
   const backendExecutable = isDevelopment ? resolveDevelopmentBunExecutable() : process.execPath;
   const childEnvironment = backendChildEnv();
@@ -3421,20 +3404,30 @@ function registerIpcHandlers(): void {
       throw new Error("Invalid Tailscale Serve input.");
     }
     const deferRelaunch = readDeferRelaunch(input, "Invalid Tailscale Serve input.");
-    const nextSettings = setDesktopTailscaleServePreference(desktopSettings, {
-      enabled: input.enabled,
-      ...(typeof input.port === "number" ? { port: input.port } : {}),
+    // Measured against what the running backend serves, not only what is
+    // saved: a deferred change leaves the two apart until the relaunch.
+    const plan = planDesktopTailscaleServeChange({
+      settings: desktopSettings,
+      running: runningTailscaleServe(),
+      requested: {
+        enabled: input.enabled,
+        ...(typeof input.port === "number" ? { port: input.port } : {}),
+      },
+      deferRelaunch,
     });
-    if (nextSettings === desktopSettings) {
-      return getDesktopServerExposureState();
+    if (plan.settings !== desktopSettings) {
+      // Saved first; a deferred change keeps the running backend as it is.
+      writeDesktopSettings(DESKTOP_SETTINGS_PATH, plan.settings);
+      desktopSettings = plan.settings;
     }
-    if (deferRelaunch) {
-      // Saved now; the running backend keeps serving what it launched with.
-      writeDesktopSettings(DESKTOP_SETTINGS_PATH, nextSettings);
-      desktopSettings = nextSettings;
-      return getDesktopServerExposureState();
+    if (plan.relaunch) {
+      relaunchDesktopApp(
+        desktopSettings.tailscaleServeEnabled
+          ? "tailscale-serve-enabled"
+          : "tailscale-serve-disabled",
+      );
     }
-    return applyDesktopTailscaleServeEnabled(nextSettings);
+    return getDesktopServerExposureState();
   });
 
   ipcMain.removeHandler(GET_ADVERTISED_ENDPOINTS_CHANNEL);

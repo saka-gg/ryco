@@ -101,6 +101,60 @@ export function setDesktopTailscaleServePreference(
       };
 }
 
+/** The Tailscale Serve configuration a backend is launched with. */
+export interface DesktopTailscaleServeLaunch {
+  readonly enabled: boolean;
+  readonly port: number;
+}
+
+export function resolveDesktopTailscaleServeLaunch(
+  settings: DesktopSettings,
+): DesktopTailscaleServeLaunch {
+  return { enabled: settings.tailscaleServeEnabled, port: settings.tailscaleServePort };
+}
+
+/** Whether two launches serve the same thing; the port only matters while serving. */
+export function desktopTailscaleServeLaunchesMatch(
+  left: DesktopTailscaleServeLaunch,
+  right: DesktopTailscaleServeLaunch,
+): boolean {
+  return left.enabled === right.enabled && (!left.enabled || left.port === right.port);
+}
+
+/**
+ * How a setting that applies only by relaunching Desktop lands.
+ *
+ * A change deferred until running turns finish is saved at once, so the saved
+ * settings and the running backend can differ. A request is measured against
+ * both: asking for what already runs withdraws a saved change without a
+ * relaunch, and asking again for a saved change now still relaunches rather
+ * than reading as already done.
+ */
+export interface DesktopRelaunchSettingPlan {
+  /** The settings to persist; the same object when nothing needs saving. */
+  readonly settings: DesktopSettings;
+  /** Relaunch now: the running backend does not serve the request. */
+  readonly relaunch: boolean;
+}
+
+export function planDesktopTailscaleServeChange(input: {
+  readonly settings: DesktopSettings;
+  readonly running: DesktopTailscaleServeLaunch;
+  readonly requested: { readonly enabled: boolean; readonly port?: number };
+  readonly deferRelaunch: boolean;
+}): DesktopRelaunchSettingPlan {
+  const settings = setDesktopTailscaleServePreference(input.settings, input.requested);
+  return {
+    settings,
+    relaunch:
+      !input.deferRelaunch &&
+      !desktopTailscaleServeLaunchesMatch(
+        resolveDesktopTailscaleServeLaunch(settings),
+        input.running,
+      ),
+  };
+}
+
 export function setDesktopKeepAwakePreference(
   settings: DesktopSettings,
   enabled: boolean,
