@@ -418,6 +418,7 @@ const createDesktopBridgeStub = (overrides?: {
         nodeName: null,
         allowFileSecretStore: false,
         fileSecretStoreFallbackSupported: true,
+        hostedIdentitySupported: true,
       })),
     setHubLaunchConfig: overrides?.setHubLaunchConfig ?? vi.fn().mockResolvedValue(undefined),
     ...(overrides?.restartApp === undefined ? {} : { restartApp: overrides.restartApp }),
@@ -2249,6 +2250,7 @@ describe("ConnectionsSettings Hub section", () => {
         nodeName: null,
         allowFileSecretStore: false,
         fileSecretStoreFallbackSupported: true,
+        hostedIdentitySupported: true,
         ...hubConfig,
       }),
       ...bridgeOverrides,
@@ -2301,12 +2303,35 @@ describe("ConnectionsSettings Hub section", () => {
 
     await expect.element(page.getByText("Ready for account setup")).toBeVisible();
     await expect
-      .element(page.getByText(/register this Mac with this Hub automatically/))
+      .element(page.getByText(/register this computer with this Hub automatically/))
       .toBeVisible();
     await expect
       .element(page.getByRole("button", { name: "Start enrollment" }))
       .not.toBeInTheDocument();
     await expect.element(page.getByRole("button", { name: "Connect account" })).toBeVisible();
+  });
+
+  it("offers device-code enrollment where native account setup cannot run", async () => {
+    stubHubFetch({
+      status: { ...baseStatus, state: "enrolling" },
+      identity: { enrolled: "none" },
+    });
+    await renderHub(
+      { enabled: true, origin: "https://hub.example.com", hostedIdentitySupported: false },
+      {
+        getHostedIdentityState: vi.fn().mockResolvedValue({ status: "unavailable" }),
+        connectHostedIdentity: vi.fn().mockResolvedValue({ status: "unavailable" }),
+      },
+    );
+
+    await expect.element(page.getByText("Ready to enrol")).toBeVisible();
+    await expect.element(page.getByRole("button", { name: "Start enrollment" })).toBeVisible();
+    await expect
+      .element(page.getByRole("heading", { name: "Ryco account", exact: true }))
+      .not.toBeInTheDocument();
+    await expect
+      .element(page.getByRole("button", { name: "Retry secure setup" }))
+      .not.toBeInTheDocument();
   });
 
   it("offers Finish setup when account login completed before the local node claim", async () => {

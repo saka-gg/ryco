@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vite-plus/test";
 import {
   DEFAULT_DESKTOP_SETTINGS,
   DesktopSettingsReadError,
+  isDesktopHostedIdentitySupported,
   isDesktopHubFileSecretStoreSupported,
   readDesktopSettings,
   resolveDefaultDesktopSettings,
@@ -310,6 +311,14 @@ describe("desktopSettings", () => {
     expect(isDesktopHubFileSecretStoreSupported("darwin")).toBe(true);
     expect(isDesktopHubFileSecretStoreSupported("linux")).toBe(true);
     expect(isDesktopHubFileSecretStoreSupported("win32")).toBe(false);
+  });
+
+  it("offers native account setup only where the hardware-backed helper ships", () => {
+    expect(isDesktopHostedIdentitySupported("darwin")).toBe(true);
+    // Linux and Windows desktops are released too; they enrol through the
+    // device-code ceremony and must never wait on native account setup.
+    expect(isDesktopHostedIdentitySupported("linux")).toBe(false);
+    expect(isDesktopHostedIdentitySupported("win32")).toBe(false);
   });
 
   it("defaults legacy Hub settings to OS-protected key storage only", () => {

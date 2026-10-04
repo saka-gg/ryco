@@ -412,6 +412,11 @@ export interface DesktopHubLaunchConfig {
   readonly allowFileSecretStore: boolean;
   /** Whether this host can use the hardened permissioned-file fallback. */
   readonly fileSecretStoreFallbackSupported: boolean;
+  /**
+   * Whether Desktop main can run native Ryco account setup on this host. When
+   * false the node enrols through the Hub's device-code ceremony instead.
+   */
+  readonly hostedIdentitySupported: boolean;
 }
 
 /** Secret-free projection of Desktop main's native Hub identity workflow. */

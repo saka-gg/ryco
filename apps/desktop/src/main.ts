@@ -57,6 +57,7 @@ import { DEFAULT_DESKTOP_BACKEND_PORT, resolveDesktopBackendPort } from "./backe
 import {
   type DesktopSettings,
   DEFAULT_DESKTOP_SETTINGS,
+  isDesktopHostedIdentitySupported,
   isDesktopHubFileSecretStoreSupported,
   readDesktopSettings,
   setDesktopServerExposurePreference,
@@ -690,7 +691,7 @@ function desktopHostedDeviceLabel(): string {
 const ensureDesktopNativeIdentityContext = lazyAsyncResource(
   async (): Promise<NonNullable<typeof desktopNativeIdentityContext>> => {
     if (desktopNativeIdentityContext !== null) return desktopNativeIdentityContext;
-    if (process.platform !== "darwin" || desktopSettings.hubOrigin === null) {
+    if (!isDesktopHostedIdentitySupported(process.platform) || desktopSettings.hubOrigin === null) {
       throw new Error("Desktop native Hub identity is unavailable.");
     }
     const protection = getDesktopSecretStorage();
@@ -2848,6 +2849,7 @@ function registerIpcHandlers(): void {
     nodeName: desktopSettings.hubNodeName,
     allowFileSecretStore: desktopSettings.hubAllowFileSecretStore,
     fileSecretStoreFallbackSupported: isDesktopHubFileSecretStoreSupported(process.platform),
+    hostedIdentitySupported: isDesktopHostedIdentitySupported(process.platform),
   }));
 
   const hostedIdentityView = (): DesktopHostedIdentityState =>

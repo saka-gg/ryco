@@ -9,6 +9,7 @@ const config = (overrides: Partial<DesktopHubLaunchConfig> = {}): DesktopHubLaun
   nodeName: null,
   allowFileSecretStore: false,
   fileSecretStoreFallbackSupported: true,
+  hostedIdentitySupported: true,
   ...overrides,
 });
 

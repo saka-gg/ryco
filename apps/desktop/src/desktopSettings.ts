@@ -134,6 +134,18 @@ export function isDesktopHubFileSecretStoreSupported(platform: NodeJS.Platform):
   return platform !== "win32";
 }
 
+/**
+ * Whether Desktop main can run native Ryco account sign-in.
+ *
+ * Native account setup needs the macOS hardware-backed security helper. Every
+ * other shipped desktop enrols its node through the Hub's device-code ceremony
+ * instead, so the settings panel must not wait on an account flow that can
+ * never start there.
+ */
+export function isDesktopHostedIdentitySupported(platform: NodeJS.Platform): boolean {
+  return platform === "darwin";
+}
+
 export function setDesktopUpdateChannelPreference(
   settings: DesktopSettings,
   requestedChannel: DesktopUpdateChannel,

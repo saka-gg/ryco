@@ -48,6 +48,12 @@ import { Input } from "../ui/input";
 import { HubAdvancedOptions } from "./HubAdvancedOptions";
 import { SettingsRow, SettingsSection, useRelativeTimeTick } from "./settingsLayout";
 import { canEditHubOrigin, presentHubStatus, type HubAction } from "./hubStatus";
+import {
+  clearHubEnrollmentIntent,
+  consumeHubEnrollmentIntent,
+  presentHubSetup,
+  recordHubEnrollmentIntent,
+} from "./hubSetup.logic";
 
 /**
  * Matches the diagnostics panel's cadence.
@@ -80,6 +86,14 @@ const ACTION_LABELS: Record<Exclude<HubAction, "none">, string> = {
 };
 
 const VERIFICATION_METADATA_BOOTSTRAP_MS = 10_000;
+
+function readIntentStorage(): Storage | null {
+  try {
+    return typeof window === "undefined" ? null : window.localStorage;
+  } catch {
+    return null;
+  }
+}
 
 export function HubSection({
   desktopBridge,
@@ -367,6 +381,20 @@ export function HubSection({
     [desktopBridge],
   );
 
+  const presentation =
+    snapshot === null ? null : presentHubStatus(snapshot.status, snapshot.identity, nowMs);
+  const setup = presentHubSetup({
+    config,
+    bridgeOffersAccountSetup:
+      desktopBridge?.getHostedIdentityState !== undefined &&
+      desktopBridge.connectHostedIdentity !== undefined,
+    identity: snapshot?.identity ?? null,
+    action: presentation?.action ?? null,
+  });
+  // Without native account setup, turning the connector on is the first step of
+  // the device-code ceremony, so enrolment continues on its own afterwards.
+  const enrollAfterEnable = setup.path === "device-code" && snapshot?.identity.enrolled === "none";
+
   const runAction = useCallback(
     async (action: HubAction) => {
       setPendingAction(action);
@@ -377,6 +405,7 @@ export function HubSection({
             await startHubEnrollment();
             break;
           case "cancel-enrollment":
+            clearHubEnrollmentIntent(readIntentStorage());
             await cancelHubEnrollment();
             break;
           case "retry":
@@ -387,6 +416,11 @@ export function HubSection({
             break;
           case "enable":
           case "disable":
+            if (action === "enable" && enrollAfterEnable) {
+              recordHubEnrollmentIntent(readIntentStorage(), Date.now());
+            } else {
+              clearHubEnrollmentIntent(readIntentStorage());
+            }
             await desktopBridge?.setHubLaunchConfig({ enabled: action === "enable" });
             return; // The app relaunches; nothing after this runs.
           case "restart":
@@ -412,8 +446,18 @@ export function HubSection({
         if (mountedRef.current) setPendingAction(null);
       }
     },
-    [config, desktopBridge, refreshCurrent],
+    [config, desktopBridge, enrollAfterEnable, refreshCurrent],
   );
+
+  // Turning the connector on relaunched Ryco; finish what the operator started
+  // once the restarted connector is ready to enrol. The intent is taken once,
+  // so a cancelled or failed enrolment never restarts itself.
+  const connectorState = snapshot?.status.state;
+  useEffect(() => {
+    if (connectorState !== "enrolling" || !enrollAfterEnable || pendingAction !== null) return;
+    if (!consumeHubEnrollmentIntent(readIntentStorage(), Date.now())) return;
+    void runAction("enroll");
+  }, [connectorState, enrollAfterEnable, pendingAction, runAction]);
 
   const handleOriginBlur = useCallback(async () => {
     if (!desktopBridge || originDraft.trim() === "") {
@@ -524,20 +568,10 @@ export function HubSection({
   if (!desktopBridge) return null;
 
   const stale = snapshot !== null && nowMs - snapshot.readAt > STALE_AFTER_MS;
-  const presentation =
-    snapshot === null ? null : presentHubStatus(snapshot.status, snapshot.identity, nowMs);
   const editable = snapshot === null ? false : canEditHubOrigin(snapshot.identity);
   const originChanged = originDraft.trim() !== (config?.origin ?? "");
   const nodeNameChanged = nodeNameDraft.trim() !== (config?.nodeName ?? "");
-  const automaticNativeSetup =
-    config !== null &&
-    config.origin !== null &&
-    desktopBridge.getHostedIdentityState !== undefined &&
-    desktopBridge.connectHostedIdentity !== undefined &&
-    snapshot?.identity.enrolled === "none";
-  const automaticNativeSetupWaiting =
-    automaticNativeSetup &&
-    (presentation?.action === "enable" || presentation?.action === "enroll");
+  const automaticNativeSetupWaiting = setup.automaticNativeSetupWaiting;
 
   const renderAction = (action: HubAction, variant: "outline" | "destructive-outline") =>
     action === "none" ? null : (
@@ -563,11 +597,11 @@ export function HubSection({
         title="Connection"
         description={
           automaticNativeSetupWaiting
-            ? "Connect your Ryco account below. Ryco will register this Mac with this Hub automatically."
+            ? "Connect your Ryco account below. Ryco will register this computer with this Hub automatically."
             : presentation === null
               ? "Loading…"
               : presentation.detail === null
-                ? "Reach this Mac from anywhere, including behind NAT or CGNAT, without opening a port."
+                ? "Reach this computer from anywhere, including behind NAT or CGNAT, without opening a port."
                 : presentation.detail
         }
         status={
@@ -659,6 +693,11 @@ export function HubSection({
                   {snapshot.enrollment.deviceCode}
                 </DataListItem>
               </DataList>
+              {config?.origin ? (
+                <p className="pt-2 text-xs text-muted-foreground/80">
+                  {`Approve it at ${config.origin}: open your machines, choose Enroll node, and enter the device code.`}
+                </p>
+              ) : null}
               <p className="pt-2 text-[11px] text-muted-foreground/70">
                 The device code only routes the request. It does not prove which machine you are
                 approving.
@@ -673,9 +712,7 @@ export function HubSection({
         </AnimatedHeight>
       </SettingsRow>
 
-      {config !== null &&
-      config.origin !== null &&
-      desktopBridge.getHostedIdentityState !== undefined ? (
+      {setup.showAccountRow ? (
         <SettingsRow
           title="Ryco account"
           description={

@@ -202,6 +202,7 @@ function makeDesktopBridge(overrides: Partial<DesktopBridge> = {}): DesktopBridg
       nodeName: null,
       allowFileSecretStore: false,
       fileSecretStoreFallbackSupported: true,
+      hostedIdentitySupported: true,
     }),
     setHubLaunchConfig: async () => undefined,
     validateHubOrigin: async () => ({ ok: false as const, reason: "empty" as const }),
