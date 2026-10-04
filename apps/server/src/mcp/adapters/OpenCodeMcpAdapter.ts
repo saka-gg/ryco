@@ -27,6 +27,11 @@ import { runProcess, type ProcessRunResult } from "../../processRunner.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { deriveProviderInstanceConfigMap } from "../../provider/Layers/ProviderInstanceRegistryHydration.ts";
 import { mergeProviderInstanceEnvironment } from "../../provider/ProviderInstanceEnvironment.ts";
+import {
+  classifyOpenCodeGeneration,
+  type OpenCodeGeneration,
+} from "../../provider/openCodeVersion.ts";
+import { parseGenericCliVersion } from "../../provider/providerSnapshot.ts";
 import type { ProviderMcpAdapter } from "../ProviderMcpAdapter.ts";
 import { makeProviderMcpExternalAgentControl } from "../ProviderMcpExternalAgentControl.ts";
 import {
@@ -43,8 +48,21 @@ import {
 const OPENCODE_DRIVER = ProviderDriverKind.make("opencode");
 const VERSION_TIMEOUT_MS = 5_000;
 const OUTPUT_LIMIT = 256 * 1024;
+/**
+ * Ryco does not edit OpenCode 2.x configuration until OpenCode 2 support lands: the 2.x runtime is
+ * gated as unsupported, and a 1.x and a 2.x instance sharing one `opencode.json` would write
+ * incompatible shapes (a V2 `mcp.servers` key reads to 1.x as a server named `servers`).
+ */
+const DEFAULT_MANAGED_GENERATIONS: ReadonlyArray<OpenCodeGeneration> = ["v1"];
+const UNMANAGED_V2_MESSAGE =
+  "OpenCode 2.x detected. Ryco works with OpenCode 1.x and does not edit 2.x configuration yet; 2.x support is coming.";
+const UNKNOWN_GENERATION_MESSAGE =
+  "This OpenCode version is unknown or unavailable, so Ryco will not mutate its config.";
 
-type OpenCodeGeneration = "v1" | "v2";
+export interface OpenCodeMcpAdapterOptions {
+  /** Generations whose native config Ryco may manage. Production default: ["v1"]. */
+  readonly managedGenerations?: ReadonlyArray<OpenCodeGeneration>;
+}
 
 const writableCapabilities = Schema.decodeSync(McpProviderCapabilities)({
   readConfiguration: "available",
@@ -283,8 +301,12 @@ function nativeEntry(
   throw toMcpError("OpenCode does not support this MCP transport.");
 }
 
-export const makeOpenCodeMcpAdapter = (io: OpenCodeMcpAdapterIo = defaultIo) =>
+export const makeOpenCodeMcpAdapter = (
+  io: OpenCodeMcpAdapterIo = defaultIo,
+  options: OpenCodeMcpAdapterOptions = {},
+) =>
   Effect.gen(function* () {
+    const managedGenerations = options.managedGenerations ?? DEFAULT_MANAGED_GENERATIONS;
     const serverSettings = yield* ServerSettingsService;
     const serverConfig = yield* ServerConfig;
 
@@ -299,8 +321,7 @@ export const makeOpenCodeMcpAdapter = (io: OpenCodeMcpAdapterIo = defaultIo) =>
             outputMode: "truncate",
           });
           if (result.timedOut || result.code !== 0) return null;
-          const major = Number.parseInt(result.stdout.trim().split(".")[0] ?? "", 10);
-          return major === 1 ? ("v1" as const) : major === 2 ? ("v2" as const) : null;
+          return classifyOpenCodeGeneration(parseGenericCliVersion(result.stdout));
         },
         catch: () => toMcpError("Failed to probe the OpenCode version."),
       });
@@ -322,11 +343,16 @@ export const makeOpenCodeMcpAdapter = (io: OpenCodeMcpAdapterIo = defaultIo) =>
           continue;
         }
         const processEnv = mergeProviderInstanceEnvironment(instance.environment);
-        const generation = enabled
+        const detectedGeneration = enabled
           ? yield* probeVersion(decoded.value.binaryPath, processEnv).pipe(
               Effect.catch(() => Effect.succeed(null)),
             )
           : null;
+        // A detected but unmanaged generation is handled exactly like an unknown one.
+        const generation =
+          detectedGeneration !== null && managedGenerations.includes(detectedGeneration)
+            ? detectedGeneration
+            : null;
         const homePath = processEnv.HOME?.trim() || os.homedir();
         const configHome = processEnv.XDG_CONFIG_HOME?.trim() || path.join(homePath, ".config");
         const customPath = processEnv.OPENCODE_CONFIG?.trim();
@@ -357,7 +383,9 @@ export const makeOpenCodeMcpAdapter = (io: OpenCodeMcpAdapterIo = defaultIo) =>
             message: !enabled
               ? "This OpenCode provider instance is disabled."
               : !generation
-                ? "This OpenCode version is unknown or unavailable, so Ryco will not mutate its config."
+                ? detectedGeneration === "v2"
+                  ? UNMANAGED_V2_MESSAGE
+                  : UNKNOWN_GENERATION_MESSAGE
                 : globalTarget && "conflict" in globalTarget
                   ? globalTarget.conflict
                   : globalTarget?.readOnly

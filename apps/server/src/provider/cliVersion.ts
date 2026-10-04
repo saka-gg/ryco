@@ -1,3 +1,40 @@
+export interface CliRelease {
+  readonly major: number;
+  readonly minor: number;
+  readonly patch: number;
+}
+
+const CLI_RELEASE_PATTERN = /^[vV]?(\d+)\.(\d+)(?:\.(\d+))?(?:[-+].*)?$/;
+
+/**
+ * major.minor.patch of a CLI version. Ignores surrounding whitespace, one leading "v"/"V",
+ * any "-prerelease"/"+build" suffix, and a missing patch ("2.1" → 2.1.0). Leading zeros are
+ * numeric ("2026.04.09-f2b0fcd" → 2026.4.9). Returns null for anything else.
+ */
+export function parseCliRelease(version: string): CliRelease | null {
+  const match = CLI_RELEASE_PATTERN.exec(version.trim());
+  if (!match) {
+    return null;
+  }
+  const major = Number.parseInt(match[1] ?? "", 10);
+  const minor = Number.parseInt(match[2] ?? "", 10);
+  const patch = match[3] === undefined ? 0 : Number.parseInt(match[3], 10);
+  if (![major, minor, patch].every(Number.isSafeInteger)) {
+    return null;
+  }
+  return { major, minor, patch };
+}
+
+export function compareCliReleases(left: CliRelease, right: CliRelease): number {
+  if (left.major !== right.major) {
+    return left.major - right.major;
+  }
+  if (left.minor !== right.minor) {
+    return left.minor - right.minor;
+  }
+  return left.patch - right.patch;
+}
+
 interface ParsedCliSemver {
   readonly major: number;
   readonly minor: number;

@@ -13,10 +13,12 @@ import {
   OpenCodeRuntimeError,
   type OpenCodeRuntimeShape,
 } from "../opencodeRuntime.ts";
+import { OPENCODE_NON_JSON_HEALTH_MESSAGE } from "../openCodeVersion.ts";
 import { checkOpenCodeProviderStatus } from "./OpenCodeProvider.ts";
 import type { OpenCodeInventory } from "../opencodeRuntime.ts";
 
 const DEFAULT_VERSION_STDOUT = "opencode 1.14.19\n";
+const DEFAULT_HEALTH_DATA = { healthy: true, version: "1.18.18" };
 
 /**
  * The legacy `OpenCodeProviderLive` Layer + `OpenCodeProvider` service tag
@@ -33,6 +35,8 @@ const runtimeMock = {
     versionStdout: DEFAULT_VERSION_STDOUT,
     inventoryError: null as Error | null,
     closeCalls: 0,
+    connectCalls: 0,
+    healthData: DEFAULT_HEALTH_DATA as unknown,
     inventory: {
       providerList: { connected: [] as string[], all: [] as unknown[], default: {} },
       agents: [] as unknown[],
@@ -43,6 +47,8 @@ const runtimeMock = {
     this.state.versionStdout = DEFAULT_VERSION_STDOUT;
     this.state.inventoryError = null;
     this.state.closeCalls = 0;
+    this.state.connectCalls = 0;
+    this.state.healthData = DEFAULT_HEALTH_DATA;
     this.state.inventory = {
       providerList: { connected: [], all: [] as unknown[], default: {} },
       agents: [] as unknown[],
@@ -58,6 +64,7 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
     }),
   connectToOpenCodeServer: ({ serverUrl, serverPassword }) =>
     Effect.gen(function* () {
+      runtimeMock.state.connectCalls += 1;
       if (!serverUrl) {
         yield* Effect.addFinalizer(() =>
           Effect.sync(() => {
@@ -85,7 +92,7 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
   createOpenCodeSdkClient: () =>
     Effect.succeed({
       global: {
-        health: async () => ({ data: { healthy: true, version: "1.18.18" } }),
+        health: async () => ({ data: runtimeMock.state.healthData }),
       },
     } as unknown as OpencodeClient),
   loadOpenCodeInventory: () =>
@@ -128,6 +135,19 @@ it.layer(testLayer)("checkOpenCodeProviderStatus", (it) => {
       assert.equal(snapshot.status, "error");
       assert.equal(snapshot.installed, false);
       assert.equal(snapshot.message, "OpenCode CLI (`opencode`) is not installed or not on PATH.");
+    }),
+  );
+
+  it.effect("explains a 2.x binary without connecting to it", () =>
+    Effect.gen(function* () {
+      runtimeMock.state.versionStdout = "opencode v2.0.18\n";
+      const snapshot = yield* checkOpenCodeProviderStatus(makeOpenCodeSettings(), process.cwd());
+
+      assert.equal(snapshot.status, "error");
+      assert.equal(snapshot.installed, true);
+      assert.equal(snapshot.version, "2.0.18");
+      assert.ok(snapshot.message?.includes("not supported yet"), snapshot.message);
+      assert.equal(runtimeMock.state.connectCalls, 0);
     }),
   );
 
@@ -356,6 +376,32 @@ it.layer(testLayer)("checkOpenCodeProviderStatus with configured server URL", (i
         snapshot.message,
         "OpenCode server rejected authentication. Check the server URL and password.",
       );
+    }),
+  );
+
+  it.effect("explains a 2.x configured server verbatim", () =>
+    Effect.gen(function* () {
+      runtimeMock.state.healthData = { healthy: true, version: "2.0.18" };
+      const snapshot = yield* checkOpenCodeProviderStatus(
+        makeOpenCodeSettings({ serverUrl: "http://127.0.0.1:9999" }),
+        process.cwd(),
+      );
+
+      assert.equal(snapshot.status, "error");
+      assert.ok(snapshot.message?.startsWith("The OpenCode server reports v2.0.18."));
+    }),
+  );
+
+  it.effect("names an HTML health response from a configured server", () =>
+    Effect.gen(function* () {
+      runtimeMock.state.healthData = "<!doctype html>";
+      const snapshot = yield* checkOpenCodeProviderStatus(
+        makeOpenCodeSettings({ serverUrl: "http://127.0.0.1:9999" }),
+        process.cwd(),
+      );
+
+      assert.equal(snapshot.status, "error");
+      assert.equal(snapshot.message, OPENCODE_NON_JSON_HEALTH_MESSAGE);
     }),
   );
 
