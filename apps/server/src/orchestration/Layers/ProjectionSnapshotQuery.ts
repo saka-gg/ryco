@@ -45,6 +45,7 @@ import {
   type RepositoryIdentity,
   ThreadId,
   ThreadGoal,
+  ThreadUsageLimit,
   TurnDispatchMode,
   WorktreeId,
 } from "@ryco/contracts";
@@ -108,6 +109,7 @@ const ProjectionThreadDbRowSchema = ProjectionThread.mapFields(
   Struct.assign({
     modelSelection: Schema.fromJsonString(ModelSelection),
     goal: Schema.NullOr(Schema.fromJsonString(ThreadGoal)),
+    usageLimit: Schema.NullOr(Schema.fromJsonString(ThreadUsageLimit)),
     latestCompletedTurnAt: Schema.NullOr(IsoDateTime),
   }),
 );
@@ -633,6 +635,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           pending_approval_count AS "pendingApprovalCount",
           pending_user_input_count AS "pendingUserInputCount",
           has_actionable_proposed_plan AS "hasActionableProposedPlan",
+          usage_limit_json AS "usageLimit",
           deleted_at AS "deletedAt"
         FROM projection_threads
         ORDER BY created_at ASC, thread_id ASC
@@ -1085,6 +1088,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           pending_approval_count AS "pendingApprovalCount",
           pending_user_input_count AS "pendingUserInputCount",
           has_actionable_proposed_plan AS "hasActionableProposedPlan",
+          usage_limit_json AS "usageLimit",
           deleted_at AS "deletedAt"
         FROM projection_threads
         WHERE thread_id = ${threadId}
@@ -1822,6 +1826,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       settledAt: input.threadRow.settledAt,
       snoozedUntil: input.threadRow.snoozedUntil ?? null,
       snoozedAt: input.threadRow.snoozedAt ?? null,
+      usageLimit: input.threadRow.usageLimit ?? null,
       deletedAt: null,
       messages: input.messageRows.map(mapMessageRow),
       proposedPlans: input.proposedPlanRows.map(mapProposedPlanRow),
@@ -2117,6 +2122,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 settledAt: row.settledAt,
                 snoozedUntil: row.snoozedUntil ?? null,
                 snoozedAt: row.snoozedAt ?? null,
+                usageLimit: row.usageLimit ?? null,
                 deletedAt: row.deletedAt,
                 messages: messagesByThread.get(row.threadId) ?? [],
                 proposedPlans: proposedPlansByThread.get(row.threadId) ?? [],
@@ -2406,6 +2412,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   settledAt: row.settledAt,
                   snoozedUntil: row.snoozedUntil ?? null,
                   snoozedAt: row.snoozedAt ?? null,
+                  usageLimit: row.usageLimit ?? null,
                   deletedAt: row.deletedAt,
                   messages: userMessageAnchorsByThread.get(row.threadId) ?? [],
                   proposedPlans: proposedPlansByThread.get(row.threadId) ?? [],
@@ -2598,6 +2605,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                       settledAt: row.settledAt,
                       snoozedUntil: row.snoozedUntil ?? null,
                       snoozedAt: row.snoozedAt ?? null,
+                      usageLimit: row.usageLimit ?? null,
                       session: sessionByThread.get(row.threadId) ?? null,
                       latestUserMessageAt: row.latestUserMessageAt,
                       latestCompletedTurnAt: row.latestCompletedTurnAt,
@@ -2865,6 +2873,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         settledAt: threadRow.value.settledAt,
         snoozedUntil: threadRow.value.snoozedUntil ?? null,
         snoozedAt: threadRow.value.snoozedAt ?? null,
+        usageLimit: threadRow.value.usageLimit ?? null,
         session: Option.isSome(sessionRow) ? mapSessionRow(sessionRow.value) : null,
         latestUserMessageAt: threadRow.value.latestUserMessageAt,
         latestCompletedTurnAt: threadRow.value.latestCompletedTurnAt,

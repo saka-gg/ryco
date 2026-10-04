@@ -84,6 +84,9 @@ import Migration0051 from "./Migrations/051_AgentControlMcpInstallations.ts";
 import Migration0052 from "./Migrations/052_ProjectionThreadsSettled.ts";
 import Migration0054 from "./Migrations/054_ProjectionThreadsSnoozed.ts";
 import Migration0053 from "./Migrations/053_ThreadPriorityRankings.ts";
+import Migration0074, {
+  ensureProjectionThreadUsageLimitColumn,
+} from "./Migrations/074_ProjectionThreadsUsageLimit.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -165,6 +168,7 @@ export const migrationEntries = [
   [68, "ProjectionMessageSearch", Migration0068],
   [69, "DailyRecapIndexes", Migration0069],
   [70, "LocalTasks", Migration0070],
+  [74, "ProjectionThreadsUsageLimit", Migration0074],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>
@@ -366,6 +370,17 @@ export const repairProjectionThreadSubagentNestingColumns = Effect.fn(
   }
 });
 
+// Not only a numbered migration: the Effect migrator skips ids at or below the latest
+// applied one, so a database that recorded a later migration before 074 landed would
+// never get the column. The migration is idempotent; run it again as a repair.
+export const repairProjectionThreadUsageLimitColumn = Effect.fn(
+  "repairProjectionThreadUsageLimitColumn",
+)(function* () {
+  if (yield* ensureProjectionThreadUsageLimitColumn) {
+    yield* Effect.log("Repaired projection_threads.usage_limit_json column");
+  }
+});
+
 // Development worktrees can share one local database while carrying divergent
 // migration 042 names. The Effect migrator keys progress by numeric id, so a
 // database that already recorded another 042 would otherwise skip this feature's
@@ -502,6 +517,9 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
   }
   if (toMigrationInclusive === undefined || toMigrationInclusive >= 44) {
     yield* repairProjectionThreadReadModelMigrations(toMigrationInclusive ?? 47);
+  }
+  if (toMigrationInclusive === undefined || toMigrationInclusive >= 74) {
+    yield* repairProjectionThreadUsageLimitColumn();
   }
   yield* Effect.log("Migrations ran successfully").pipe(
     Effect.annotateLogs({

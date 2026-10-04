@@ -32,6 +32,7 @@ export interface InboxRowPreviewPayload {
 const STATUS_TONE = {
   "needs-input": "text-warning-foreground",
   completed: "text-success-foreground",
+  limited: "text-warning-foreground",
   error: "text-destructive-foreground",
   working: "text-foreground",
   connecting: "text-muted-foreground",

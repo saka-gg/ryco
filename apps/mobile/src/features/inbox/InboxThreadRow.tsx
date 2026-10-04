@@ -13,6 +13,7 @@ import type { InboxThreadRow as InboxThreadRowModel, InboxThreadState } from "./
 function statusDotClassName(state: InboxThreadState): string {
   switch (state) {
     case "needs-input":
+    case "limited":
       return "bg-warning";
     case "delivery-unknown":
     case "error":
@@ -34,6 +35,7 @@ function statusTextClassName(state: InboxThreadState): string {
   switch (state) {
     case "needs-input":
     case "reconnecting":
+    case "limited":
       return "text-warning";
     case "delivery-unknown":
     case "error":

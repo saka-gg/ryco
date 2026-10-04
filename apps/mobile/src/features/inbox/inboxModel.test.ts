@@ -560,3 +560,53 @@ describe("mobile settlement and attention policy", () => {
     });
   });
 });
+
+describe("inbox usage limits", () => {
+  const limitedThread = (instanceId: string) =>
+    thread(NODE_A, "limited", "project-a", {
+      modelSelection: { instanceId: instanceId as never, model: "sonnet" },
+      session: {
+        provider: "claudeAgent" as never,
+        status: "error",
+        orchestrationStatus: "error",
+        createdAt: "2026-07-26T08:00:00.000Z",
+        updatedAt: "2026-07-26T08:00:00.000Z",
+        lastError: "Claude usage limit reached.",
+      },
+      latestTurn: { state: "error" } as never,
+      usageLimit: {
+        limitId: "usage-limit:limited:turn-1",
+        provider: "claudeAgent" as never,
+        providerInstanceId: "claudeAgent" as never,
+        turnId: "turn-1" as never,
+        message: "Claude usage limit reached.",
+        limitedAt: "2026-07-26T08:00:00.000Z",
+        resetAt: "2026-07-26T13:00:00.000Z",
+        autoResume: null,
+        updatedAt: "2026-07-26T08:00:00.000Z",
+      },
+    });
+  const rowFor = (instanceId: string, nowIso: string) =>
+    buildInboxSections({
+      projects: [project(NODE_A, "project-a", "Ryco")],
+      worktrees: [],
+      environments: [{ environmentId: NODE_A, label: "Mac Studio", connectionState: "connected" }],
+      threads: [limitedThread(instanceId)],
+      nowMs: Date.parse(nowIso),
+    })[0]?.rows[0];
+
+  it("labels a usage-limited thread Limited before Error", () => {
+    expect(rowFor("claudeAgent", "2026-07-26T09:00:00.000Z")).toMatchObject({
+      state: "limited",
+      statusLabel: "Limited",
+    });
+    expect(rowFor("claudeAgent", "2026-07-26T14:00:00.000Z")?.statusLabel).toBe("Limit reset");
+  });
+
+  it("falls back to Error when the thread targets another instance", () => {
+    expect(rowFor("codex", "2026-07-26T09:00:00.000Z")).toMatchObject({
+      state: "error",
+      statusLabel: "Error",
+    });
+  });
+});

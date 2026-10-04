@@ -385,6 +385,12 @@ describe("ProviderRuntimeIngestion", () => {
     });
 
     return {
+      countEvents: (eventType: string) =>
+        Effect.runPromise(
+          sql<{ count: number }>`
+            SELECT count(*) AS count FROM orchestration_events WHERE event_type = ${eventType}
+          `.pipe(Effect.map((rows) => rows[0]!.count)),
+        ),
       chunkCount: () =>
         Effect.runPromise(
           sql<{ count: number }>`SELECT count(*) AS count FROM projection_message_chunks`.pipe(
@@ -5184,5 +5190,169 @@ describe("ProviderRuntimeIngestion", () => {
     );
     expect(thread.session?.status).toBe("error");
     expect(thread.session?.lastError).toBe("runtime still processed");
+  });
+  describe("usage limits", () => {
+    const codexInstance = ProviderInstanceId.make("codex");
+    const limitTurn = asTurnId("turn-usage-limit");
+    const limitId = `usage-limit:thread-1:${limitTurn}`;
+    const resetAt = new Date(Date.now() + 5 * 3_600_000).toISOString();
+
+    async function runningOnCodex(harness: Awaited<ReturnType<typeof createHarness>>) {
+      const now = new Date().toISOString();
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("cmd-session-running-limit"),
+          threadId: ThreadId.make("thread-1"),
+          session: {
+            threadId: ThreadId.make("thread-1"),
+            status: "running",
+            providerName: "codex",
+            providerInstanceId: codexInstance,
+            runtimeMode: "approval-required",
+            activeTurnId: limitTurn,
+            updatedAt: now,
+            lastError: null,
+          },
+          createdAt: now,
+        }),
+      );
+    }
+
+    const usageLimitError = (eventId: string, overrides: Record<string, unknown> = {}) => ({
+      type: "runtime.error" as const,
+      eventId: asEventId(eventId),
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: codexInstance,
+      createdAt: new Date().toISOString(),
+      threadId: asThreadId("thread-1"),
+      turnId: limitTurn,
+      payload: {
+        message: "You've hit your usage limit.",
+        class: "usage_limit" as const,
+        resetAt,
+      },
+      ...overrides,
+    });
+
+    it("records exactly one limit, finalizes the turn and dedupes a duplicate error", async () => {
+      const harness = await createHarness();
+      await runningOnCodex(harness);
+      harness.emit(usageLimitError("evt-usage-limit-1"));
+      harness.emit(usageLimitError("evt-usage-limit-2"));
+      await harness.drain();
+
+      const thread = await waitForThread(
+        harness.readModel,
+        (entry) => entry.usageLimit?.limitId === limitId,
+      );
+      expect(thread.usageLimit).toMatchObject({
+        limitId,
+        providerInstanceId: codexInstance,
+        turnId: limitTurn,
+        resetAt,
+        autoResume: null,
+      });
+      expect(thread.session?.status).toBe("error");
+      expect(thread.session?.activeTurnId).toBeNull();
+      expect(thread.session?.lastError).toBe("You've hit your usage limit.");
+      expect(thread.latestTurn).toMatchObject({ turnId: limitTurn, state: "error" });
+      expect(await harness.countEvents("thread.usage-limit-set")).toBe(1);
+      const activity = thread.activities.find((entry) => entry.id === "evt-usage-limit-1");
+      expect(activity?.summary).toBe("Usage limit reached");
+      expect(activity?.payload).toEqual({
+        message: "You've hit your usage limit.",
+        class: "usage_limit",
+        resetAt,
+      });
+    });
+
+    it("keeps the session error when the record is rejected", async () => {
+      const harness = await createHarness();
+      const now = new Date().toISOString();
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-turn-before-archive"),
+          threadId: ThreadId.make("thread-1"),
+          message: {
+            messageId: asMessageId("message-before-archive"),
+            role: "user",
+            text: "Work",
+            attachments: [],
+          },
+          runtimeMode: "approval-required",
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          createdAt: now,
+        }),
+      );
+      await runningOnCodex(harness);
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.archive",
+          commandId: CommandId.make("cmd-archive-before-limit"),
+          threadId: ThreadId.make("thread-1"),
+        }),
+      );
+      harness.emit(usageLimitError("evt-usage-limit-archived"));
+      await harness.drain();
+
+      const thread = await waitForThread(
+        harness.readModel,
+        (entry) => entry.session?.status === "error",
+      );
+      expect(thread.session?.lastError).toBe("You've hit your usage limit.");
+      expect(thread.usageLimit ?? null).toBeNull();
+      expect(await harness.countEvents("thread.usage-limit-set")).toBe(0);
+    });
+
+    it("records nothing for a provider_error", async () => {
+      const harness = await createHarness();
+      await runningOnCodex(harness);
+      harness.emit(
+        usageLimitError("evt-provider-error", {
+          payload: { message: "boom", class: "provider_error" },
+        }),
+      );
+      await harness.drain();
+      await waitForThread(harness.readModel, (entry) => entry.session?.lastError === "boom");
+      expect(await harness.countEvents("thread.usage-limit-set")).toBe(0);
+    });
+
+    it("fills an unknown reset once from a rate-limit update and ignores other instances", async () => {
+      const harness = await createHarness();
+      await runningOnCodex(harness);
+      harness.emit(
+        usageLimitError("evt-usage-limit-unknown", {
+          payload: { message: "Limited", class: "usage_limit", resetAt: null },
+        }),
+      );
+      await harness.drain();
+      await waitForThread(harness.readModel, (entry) => entry.usageLimit?.limitId === limitId);
+
+      const rateLimits = (eventId: string, providerInstanceId: string, at: string) => ({
+        type: "account.rate-limits.updated" as const,
+        eventId: asEventId(eventId),
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: ProviderInstanceId.make(providerInstanceId),
+        createdAt: new Date().toISOString(),
+        threadId: asThreadId("thread-1"),
+        payload: { rateLimits: {}, usageLimitState: { exhausted: true, resetAt: at } },
+      });
+      // Another instance's event never reaches this session (stale-instance guard), and
+      // a fill for it would be ignored anyway.
+      harness.emit(rateLimits("evt-rate-other", "codex_other", resetAt));
+      harness.emit(rateLimits("evt-rate-fill", "codex", resetAt));
+      const later = new Date(Date.parse(resetAt) + 3_600_000).toISOString();
+      harness.emit(rateLimits("evt-rate-refill", "codex", later));
+      await harness.drain();
+
+      const thread = await waitForThread(
+        harness.readModel,
+        (entry) => entry.usageLimit?.resetAt === resetAt,
+      );
+      expect(thread.usageLimit?.resetAt).toBe(resetAt);
+      expect(await harness.countEvents("thread.usage-limit-set")).toBe(2);
+    });
   });
 });

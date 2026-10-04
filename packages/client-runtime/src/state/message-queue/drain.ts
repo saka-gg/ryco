@@ -4,6 +4,7 @@ import {
   holdQueueForCauses,
   mergeQueueHold,
   partitionNewQueueFailureCauses,
+  releasableUsageLimitCauseKeys,
   type QueueHold,
 } from "./hold.ts";
 import type { QueueThreadView } from "./threadView.ts";
@@ -48,6 +49,8 @@ export type QueueDrainStep =
   | { readonly kind: "dispatch-started"; readonly messageId: string }
   | { readonly kind: "dispatch-failed"; readonly hold: QueueHold }
   | { readonly kind: "acknowledge"; readonly causeKeys: string[] }
+  /** Remove these causes from the hold and acknowledge them (an ended usage limit). */
+  | { readonly kind: "release"; readonly causeKeys: string[] }
   | { readonly kind: "hold"; readonly hold: QueueHold }
   | { readonly kind: "wait"; readonly reason: QueueDrainWaitReason }
   | {
@@ -80,6 +83,7 @@ function headWaitReason(
  */
 export function resolveQueueDrainStep(input: QueueDrainInput): QueueDrainStep {
   const { queue, view, environment } = input;
+  const nowMs = Date.parse(input.nowIso);
   const head = queue[0];
   // 1. Nothing queued.
   if (!head) return IDLE;
@@ -108,6 +112,7 @@ export function resolveQueueDrainStep(input: QueueDrainInput): QueueDrainStep {
       kind: "baseline",
       causeKeys: deriveQueueFailureCauses(view, input.dispatchedMessageIds, {
         includeUnsettled: true,
+        nowMs,
       }).map((cause) => cause.causeKey),
     };
   }
@@ -142,10 +147,20 @@ export function resolveQueueDrainStep(input: QueueDrainInput): QueueDrainStep {
     }
   }
 
-  // 8. New failure causes merge into the hold before the held check, so a
+  // 8. A usage-limit hold ends by itself once the limit no longer holds the queue.
+  const causes = deriveQueueFailureCauses(view, input.dispatchedMessageIds, { nowMs });
+  const released = releasableUsageLimitCauseKeys({
+    hold: input.hold,
+    view,
+    currentCauses: causes,
+    nowMs,
+  });
+  if (released.length > 0) return { kind: "release", causeKeys: released };
+
+  // 9. New failure causes merge into the hold before the held check, so a
   // cause arriving while already held is covered by a single Resume.
   const partition = partitionNewQueueFailureCauses({
-    causes: deriveQueueFailureCauses(view, input.dispatchedMessageIds),
+    causes,
     acknowledgedCauseKeys: input.acknowledgedCauseKeys,
     hold: input.hold,
     headProviderInstanceId: input.headProviderInstanceId,
@@ -157,7 +172,7 @@ export function resolveQueueDrainStep(input: QueueDrainInput): QueueDrainStep {
     return { kind: "hold", hold: holdQueueForCauses(input.hold, partition.hold, input.nowIso)! };
   }
 
-  // 9–16. Waits, in order.
+  // 10–17. Waits, in order.
   if (input.hold !== null) return wait("held");
   if (input.pendingDispatch !== null) return wait("awaiting-ack");
   if (view.archived) return wait("archived");
@@ -168,6 +183,6 @@ export function resolveQueueDrainStep(input: QueueDrainInput): QueueDrainStep {
   const headWait = headWaitReason(head, input.steeringIds);
   if (headWait !== null) return wait(headWait);
 
-  // 17.
+  // 18.
   return { kind: "send", messageId: head.id, sender: input.sender };
 }

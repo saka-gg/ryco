@@ -18,6 +18,7 @@ import {
   ThreadSettlementOverride,
   ThreadId,
   ThreadGoal,
+  ThreadUsageLimit,
   TurnId,
   WorktreeId,
 } from "@ryco/contracts";
@@ -52,6 +53,7 @@ export const ProjectionThread = Schema.Struct({
   pendingApprovalCount: NonNegativeInt,
   pendingUserInputCount: NonNegativeInt,
   hasActionableProposedPlan: NonNegativeInt,
+  usageLimit: Schema.optional(Schema.NullOr(ThreadUsageLimit)),
   deletedAt: Schema.NullOr(IsoDateTime),
 });
 export type ProjectionThread = typeof ProjectionThread.Type;
@@ -136,6 +138,15 @@ export interface ProjectionThreadRepositoryShape {
   readonly setManualPosition: (
     input: SetProjectionThreadManualPositionInput,
   ) => Effect.Effect<void, ProjectionRepositoryError>;
+
+  /**
+   * Live (not archived, not deleted) threads with a recorded usage limit, oldest first.
+   * Bounded; the usage-limit recovery worker sweeps them.
+   */
+  readonly listUsageLimitedThreadIds: () => Effect.Effect<
+    ReadonlyArray<ThreadId>,
+    ProjectionRepositoryError
+  >;
 }
 
 /**

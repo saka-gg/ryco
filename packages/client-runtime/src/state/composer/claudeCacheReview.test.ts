@@ -485,3 +485,28 @@ it("still reviews an existing Claude source when its target model changes", asyn
     claudeResumeGuard: { runtimeSessionId: "runtime-1" },
   });
 });
+
+describe("usage-limit resume through the Claude review", () => {
+  const resume = {
+    commandId: CommandId.make("usage-limit-resume:limit-1"),
+    usageLimitResumeGuard: { limitId: "limit-1", origin: "manual" as const },
+  };
+
+  it("still reviews and a cancel prevents the dispatch", async () => {
+    const f = setup("cancel");
+    await expect(commitSendTurnDispatch({ ...f.input, ...resume })).rejects.toThrow("cancelled");
+    expect(f.review).toHaveBeenCalledTimes(1);
+    expect(f.dispatch).not.toHaveBeenCalled();
+  });
+
+  it("dispatches the reviewed resume with its own command id and guard", async () => {
+    const f = setup("continue");
+    await commitSendTurnDispatch({ ...f.input, ...resume });
+    expect(f.review).toHaveBeenCalledTimes(1);
+    expect(f.dispatch.mock.calls[0]?.[0]).toMatchObject({
+      commandId: "usage-limit-resume:limit-1",
+      usageLimitResumeGuard: { limitId: "limit-1", origin: "manual" },
+      claudeResumeGuard: { runtimeSessionId: "runtime-1" },
+    });
+  });
+});

@@ -1170,6 +1170,60 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("reports a blocking_limit success result as a usage_limit failure", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const runtimeEventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.takeUntil((event) => event.type === "turn.completed"),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      const session = yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("test-claudeadapter-usage-limit"),
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      const turn = yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "hello",
+        attachments: [],
+      });
+
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: true,
+        result: "Claude AI usage limit reached",
+        terminal_reason: "blocking_limit",
+        api_error_status: 429,
+        session_id: "sdk-session-usage-limit",
+        uuid: "result-usage-limit",
+      } as unknown as SDKMessage);
+
+      const runtimeEvents = Array.from(
+        yield* Fiber.join(runtimeEventsFiber).pipe(Effect.timeout("1 second")),
+      );
+      const errorIndex = runtimeEvents.findIndex((event) => event.type === "runtime.error");
+      const completedIndex = runtimeEvents.findIndex((event) => event.type === "turn.completed");
+      assert.notEqual(errorIndex, -1);
+      assert.ok(errorIndex < completedIndex);
+      const error = runtimeEvents[errorIndex];
+      if (error?.type !== "runtime.error") return;
+      assert.equal(String(error.turnId), String(turn.turnId));
+      assert.equal(error.payload.class, "usage_limit");
+      assert.equal(error.payload.message, "Claude AI usage limit reached");
+      assert.equal(error.payload.resetAt, null);
+      const completed = runtimeEvents[completedIndex];
+      if (completed?.type !== "turn.completed") return;
+      assert.equal(completed.payload.state, "failed");
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("maps Claude stream/runtime messages to canonical provider runtime events", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
@@ -6992,5 +7046,175 @@ describe("ClaudeAdapterLive provider wake turns", () => {
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
     );
+  });
+  describe("usage limits", () => {
+    const rateLimitFrame = (id: string, info: Record<string, unknown>): SDKMessage =>
+      ({
+        type: "rate_limit_event",
+        rate_limit_info: info,
+        uuid: `rate-limit-${id}`,
+        session_id: GAUGE_SDK_SESSION,
+      }) as unknown as SDKMessage;
+    // TestClock starts at the epoch, so any positive reset is in the future.
+    const resetsAt = 1_900_000_000;
+    const resetIso = new Date(resetsAt * 1000).toISOString();
+    const usageLimitErrors = (log: EventLog) =>
+      log.events.filter(
+        (event) => event.type === "runtime.error" && event.payload.class === "usage_limit",
+      );
+
+    it.effect("carries the reset of a rejected window seen earlier in the turn", () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const log = yield* makeRuntimeEventLog(adapter);
+        yield* startWakeSession(adapter, "usage-limit-reset");
+        const turn = yield* adapter.sendTurn({ threadId: THREAD_ID, input: "go", attachments: [] });
+        harness.query.emit(
+          rateLimitFrame("rejected", {
+            status: "rejected",
+            rateLimitType: "five_hour",
+            resetsAt,
+          }),
+        );
+        harness.query.emit(
+          resultFrame({
+            subtype: "error_during_execution",
+            is_error: true,
+            user_message_uuids: [turn.turnId],
+          }),
+        );
+        yield* log.waitFor(
+          (event) => event.type === "turn.completed" && event.turnId === turn.turnId,
+        );
+        const [error] = usageLimitErrors(log);
+        assert.equal(error?.turnId, turn.turnId);
+        assert.equal(error?.type === "runtime.error" && error.payload.resetAt, resetIso);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    });
+
+    it.effect("classifies a wake turn opened after the rejection with its reset", () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const log = yield* makeRuntimeEventLog(adapter);
+        yield* startWakeSession(adapter, "usage-limit-wake");
+        yield* completePromptTurn(adapter, harness.query, log);
+        harness.query.emit(
+          rateLimitFrame("idle-rejected", {
+            status: "rejected",
+            rateLimitType: "seven_day",
+            resetsAt,
+          }),
+        );
+        const from = log.events.length;
+        harness.query.emit(
+          rootAssistantFrame("wake-reply", {}, [{ type: "text", text: "Limited." }]),
+        );
+        harness.query.emit(
+          resultFrame({
+            origin: { kind: "task-notification" },
+            is_error: true,
+            terminal_reason: "blocking_limit",
+            result: "Usage limit reached for the week.",
+          }),
+        );
+        yield* settle(harness.query, log, "after-wake-limit");
+        const wakeStart = turnStartsAfter(log, from)[0];
+        assert.ok(wakeStart);
+        const [error] = usageLimitErrors(log);
+        assert.equal(error?.turnId, wakeStart.turnId);
+        assert.equal(error?.type === "runtime.error" && error.payload.resetAt, resetIso);
+        assert.equal(
+          error?.type === "runtime.error" && error.payload.message,
+          "Usage limit reached for the week.",
+        );
+        const completed = lifecycleFor(log, wakeStart.turnId).at(-1);
+        assert.equal(completed?.type === "turn.completed" && completed.payload.state, "failed");
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    });
+
+    it.effect("never records a limit for a result without an open turn", () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const log = yield* makeRuntimeEventLog(adapter);
+        yield* startWakeSession(adapter, "usage-limit-no-turn");
+        harness.query.emit(
+          resultFrame({ is_error: true, terminal_reason: "blocking_limit", result: "Limited" }),
+        );
+        yield* settle(harness.query, log, "after-orphan-result");
+        assert.lengthOf(usageLimitErrors(log), 0);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    });
+
+    it.effect("warns once per rejected window and reports the usage-limit state", () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const log = yield* makeRuntimeEventLog(adapter);
+        yield* startWakeSession(adapter, "usage-limit-warning");
+        yield* adapter.sendTurn({ threadId: THREAD_ID, input: "go", attachments: [] });
+        const rejected = { status: "rejected", rateLimitType: "five_hour", resetsAt };
+        harness.query.emit(rateLimitFrame("first", rejected));
+        harness.query.emit(rateLimitFrame("second", rejected));
+        yield* settle(harness.query, log, "after-rejections");
+        const warnings = log.events.filter(
+          (event) =>
+            event.type === "runtime.warning" &&
+            event.payload.message === "Claude usage limit reached.",
+        );
+        assert.lengthOf(warnings, 1);
+        const update = log.events.findLast((event) => event.type === "account.rate-limits.updated");
+        assert.deepEqual(
+          update?.type === "account.rate-limits.updated" ? update.payload.usageLimitState : null,
+          { exhausted: true, resetAt: resetIso },
+        );
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    });
+
+    it.effect("forgets a window once it is allowed again", () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const log = yield* makeRuntimeEventLog(adapter);
+        yield* startWakeSession(adapter, "usage-limit-allowed");
+        const turn = yield* adapter.sendTurn({ threadId: THREAD_ID, input: "go", attachments: [] });
+        harness.query.emit(
+          rateLimitFrame("rejected", { status: "rejected", rateLimitType: "five_hour", resetsAt }),
+        );
+        harness.query.emit(
+          rateLimitFrame("allowed", { status: "allowed", rateLimitType: "five_hour" }),
+        );
+        harness.query.emit(
+          resultFrame({
+            is_error: true,
+            terminal_reason: "api_error",
+            api_error_status: 500,
+            result: "API Error: 500",
+            user_message_uuids: [turn.turnId],
+          }),
+        );
+        yield* log.waitFor(
+          (event) => event.type === "turn.completed" && event.turnId === turn.turnId,
+        );
+        assert.lengthOf(usageLimitErrors(log), 0);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    });
   });
 });

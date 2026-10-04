@@ -122,6 +122,8 @@ export const ORCHESTRATION_EVENT_PROJECTORS = {
   "thread.unsnoozed": [ORCHESTRATION_PROJECTOR_NAMES.threads],
   "thread.settled": [ORCHESTRATION_PROJECTOR_NAMES.threads],
   "thread.unsettled": [ORCHESTRATION_PROJECTOR_NAMES.threads],
+  "thread.usage-limit-set": [ORCHESTRATION_PROJECTOR_NAMES.threads],
+  "thread.usage-limit-cleared": [ORCHESTRATION_PROJECTOR_NAMES.threads],
   "thread.goal-updated": [ORCHESTRATION_PROJECTOR_NAMES.threads],
   "thread.goal-cleared": [ORCHESTRATION_PROJECTOR_NAMES.threads],
   "thread.context-handoff-requested": [],
@@ -780,9 +782,44 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             pendingApprovalCount: 0,
             pendingUserInputCount: 0,
             hasActionableProposedPlan: 0,
+            usageLimit: null,
             deletedAt: null,
           });
           return;
+
+        case "thread.usage-limit-set": {
+          const existingRow = yield* projectionThreadRepository.getById({
+            threadId: event.payload.threadId,
+          });
+          if (Option.isNone(existingRow)) {
+            return;
+          }
+          yield* projectionThreadRepository.upsert({
+            ...existingRow.value,
+            usageLimit: event.payload.usageLimit,
+            updatedAt: event.payload.usageLimit.updatedAt,
+          });
+          return;
+        }
+
+        case "thread.usage-limit-cleared": {
+          const existingRow = yield* projectionThreadRepository.getById({
+            threadId: event.payload.threadId,
+          });
+          // A clear for an older limit must not drop a newer one.
+          if (
+            Option.isNone(existingRow) ||
+            existingRow.value.usageLimit?.limitId !== event.payload.limitId
+          ) {
+            return;
+          }
+          yield* projectionThreadRepository.upsert({
+            ...existingRow.value,
+            usageLimit: null,
+            updatedAt: event.payload.updatedAt,
+          });
+          return;
+        }
 
         case "thread.archived": {
           const existingRow = yield* projectionThreadRepository.getById({

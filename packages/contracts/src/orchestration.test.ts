@@ -1693,3 +1693,94 @@ it.effect("decodes a turn outcome hint only on the internal thread.session.set c
     assert.strictEqual(fromClient._tag, "Failure");
   }),
 );
+
+const usageLimitShell = {
+  id: "thread-usage-limit",
+  projectId: "project-1",
+  title: "Limited thread",
+  modelSelection: { instanceId: "claudeAgent", model: "claude-sonnet-4-5" },
+  runtimeMode: "full-access",
+  interactionMode: "default",
+  branch: null,
+  worktreePath: null,
+  latestTurn: null,
+  createdAt: "2026-01-01T00:00:00.000Z",
+  updatedAt: "2026-01-01T00:00:00.000Z",
+  archivedAt: null,
+  session: null,
+  latestUserMessageAt: null,
+  hasPendingApprovals: false,
+  hasPendingUserInput: false,
+  hasActionableProposedPlan: false,
+};
+
+it.effect("decodes a thread shell with and without a usage limit", () =>
+  Effect.gen(function* () {
+    const legacy = yield* decodeOrchestrationThreadShell(usageLimitShell);
+    assert.strictEqual(legacy.usageLimit, undefined);
+    const limited = yield* decodeOrchestrationThreadShell({
+      ...usageLimitShell,
+      usageLimit: {
+        limitId: "usage-limit:thread-usage-limit:turn-1",
+        provider: "claudeAgent",
+        providerInstanceId: "claudeAgent",
+        turnId: "turn-1",
+        message: "Claude usage limit reached.",
+        limitedAt: "2026-01-01T00:00:00.000Z",
+        resetAt: null,
+        autoResume: null,
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      },
+    });
+    assert.strictEqual(limited.usageLimit?.turnId, "turn-1");
+  }),
+);
+
+it.effect("accepts a usage-limit resume guard on client turn starts", () =>
+  Effect.gen(function* () {
+    const parsed = yield* decodeClientOrchestrationCommand({
+      ...clientTurnWithAttachments([]),
+      usageLimitResumeGuard: {
+        limitId: "usage-limit:attachment-thread:turn-1",
+        origin: "manual",
+      },
+    });
+    assert.strictEqual(parsed.type, "thread.turn.start");
+    if (parsed.type !== "thread.turn.start") return;
+    assert.deepStrictEqual(parsed.usageLimitResumeGuard, {
+      limitId: "usage-limit:attachment-thread:turn-1",
+      origin: "manual",
+    });
+  }),
+);
+
+it.effect("lets clients configure a usage limit but never record one", () =>
+  Effect.gen(function* () {
+    const configure = yield* decodeClientOrchestrationCommand({
+      type: "thread.usage-limit.configure",
+      commandId: "cmd-configure",
+      threadId: "thread-usage-limit",
+      limitId: "usage-limit:thread-usage-limit:turn-1",
+      autoResume: true,
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    assert.strictEqual(configure.type, "thread.usage-limit.configure");
+
+    const record = {
+      type: "thread.usage-limit.record",
+      commandId: "cmd-record",
+      threadId: "thread-usage-limit",
+      limitId: "usage-limit:thread-usage-limit:turn-1",
+      provider: "claudeAgent",
+      providerInstanceId: "claudeAgent",
+      turnId: "turn-1",
+      message: "Claude usage limit reached.",
+      resetAt: null,
+      createdAt: "2026-01-01T00:00:00.000Z",
+    };
+    const forged = yield* Effect.exit(decodeClientOrchestrationCommand(record));
+    assert.strictEqual(forged._tag, "Failure");
+    const internal = yield* decodeOrchestrationCommand(record);
+    assert.strictEqual(internal.type, "thread.usage-limit.record");
+  }),
+);

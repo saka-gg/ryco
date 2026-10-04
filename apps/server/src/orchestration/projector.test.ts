@@ -1471,3 +1471,111 @@ describe("orchestration projector worktree PR terminal time", () => {
     expect(prTerminalAtOf(reopened)).toBeNull();
   });
 });
+
+describe("orchestration projector usage limits", () => {
+  const now = "2026-10-04T10:00:00.000Z";
+  const later = "2026-10-04T10:05:00.000Z";
+  const usageLimit = {
+    limitId: "usage-limit:thread-1:turn-1",
+    provider: "claudeAgent",
+    providerInstanceId: "claudeAgent",
+    turnId: "turn-1",
+    message: "Claude usage limit reached.",
+    limitedAt: now,
+    resetAt: null,
+    autoResume: null,
+    updatedAt: now,
+  };
+
+  async function limitedThread() {
+    const created = await Effect.runPromise(
+      projectEvent(
+        createEmptyReadModel(now),
+        makeEvent({
+          sequence: 1,
+          type: "thread.created",
+          aggregateKind: "thread",
+          aggregateId: "thread-1",
+          occurredAt: now,
+          commandId: "cmd-thread-create",
+          payload: {
+            threadId: "thread-1",
+            projectId: "project-1",
+            title: "demo",
+            modelSelection: { instanceId: "claudeAgent", model: "claude-sonnet-4-5" },
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: null,
+            createdAt: now,
+            updatedAt: now,
+          },
+        }),
+      ),
+    );
+    return Effect.runPromise(
+      projectEvent(
+        created,
+        makeEvent({
+          sequence: 2,
+          type: "thread.usage-limit-set",
+          aggregateKind: "thread",
+          aggregateId: "thread-1",
+          occurredAt: now,
+          commandId: "cmd-usage-limit-record",
+          payload: { threadId: "thread-1", usageLimit },
+        }),
+      ),
+    );
+  }
+
+  it("applies set and a matching clear", async () => {
+    const limited = await limitedThread();
+    expect(limited.threads[0]?.usageLimit).toEqual(usageLimit);
+    const cleared = await Effect.runPromise(
+      projectEvent(
+        limited,
+        makeEvent({
+          sequence: 3,
+          type: "thread.usage-limit-cleared",
+          aggregateKind: "thread",
+          aggregateId: "thread-1",
+          occurredAt: later,
+          commandId: "cmd-turn-start",
+          payload: {
+            threadId: "thread-1",
+            limitId: usageLimit.limitId,
+            reason: "turn-started",
+            updatedAt: later,
+          },
+        }),
+      ),
+    );
+    expect(cleared.threads[0]?.usageLimit).toBeNull();
+    expect(cleared.threads[0]?.updatedAt).toBe(later);
+  });
+
+  it("ignores a clear for another limit", async () => {
+    const limited = await limitedThread();
+    const ignored = await Effect.runPromise(
+      projectEvent(
+        limited,
+        makeEvent({
+          sequence: 3,
+          type: "thread.usage-limit-cleared",
+          aggregateKind: "thread",
+          aggregateId: "thread-1",
+          occurredAt: later,
+          commandId: "cmd-turn-start",
+          payload: {
+            threadId: "thread-1",
+            limitId: "usage-limit:thread-1:turn-0",
+            reason: "turn-started",
+            updatedAt: later,
+          },
+        }),
+      ),
+    );
+    expect(ignored.threads[0]?.usageLimit).toEqual(usageLimit);
+  });
+});

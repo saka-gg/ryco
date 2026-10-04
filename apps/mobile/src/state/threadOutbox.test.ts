@@ -1,7 +1,15 @@
 import { ClaudeResumeReviewError } from "@ryco/client-runtime/state/composer";
 import { useStore } from "@ryco/client-runtime/state/threads";
 import type { QueueSendHooks, QueueThreadView } from "@ryco/client-runtime/state/message-queue";
-import type { EnvironmentId, MessageId, ThreadId, TurnId } from "@ryco/contracts";
+import type {
+  EnvironmentId,
+  MessageId,
+  ProviderDriverKind,
+  ProviderInstanceId,
+  ThreadId,
+  ThreadUsageLimit,
+  TurnId,
+} from "@ryco/contracts";
 import { describe, expect, it, vi, beforeEach } from "vite-plus/test";
 
 const kv = vi.hoisted(() => new Map<string, string>());
@@ -24,6 +32,7 @@ import {
   holdThreadOutboxForInterrupt,
   hydrateThreadOutbox,
   listThreadOutboxMessages,
+  nextThreadOutboxLimitReleaseAtMs,
   releaseThreadOutboxHold,
   resetThreadOutboxForTests,
   retryThreadOutboxReview,
@@ -600,4 +609,94 @@ it("retains and pauses reviewed sends with attachments until an explicit retry",
   retryThreadOutboxReview(original.messageId);
   await drainThreadOutbox(deps(IDLE, async () => {}));
   expect(listThreadOutboxMessages()).toHaveLength(0);
+});
+
+describe("threadOutbox usage-limit holds", () => {
+  const RESET_MS = Date.parse("2026-07-24T15:00:00.000Z");
+  const limit: ThreadUsageLimit = {
+    limitId: "usage-limit:t1:turn-1",
+    provider: "codex" as ProviderDriverKind,
+    providerInstanceId: "codex" as ProviderInstanceId,
+    turnId: "turn-1" as TurnId,
+    message: "You've hit your usage limit.",
+    limitedAt: "2026-07-24T10:00:00.000Z",
+    resetAt: new Date(RESET_MS).toISOString(),
+    autoResume: null,
+    updatedAt: "2026-07-24T10:00:00.000Z",
+  };
+  const LIMITED = view({
+    session: {
+      status: "error",
+      lastError: "You've hit your usage limit.",
+      providerInstanceId: "codex",
+      activeTurnId: null,
+    },
+    latestTurn: { turnId: "turn-1" as TurnId, state: "error" },
+    usageLimit: limit,
+    modelSelection: { instanceId: "codex" },
+  });
+  const at = (offsetMs: number) => () => RESET_MS + offsetMs;
+
+  it("holds while limited and drains two minutes after the reset", async () => {
+    enqueueThreadOutboxMessage(queued("m1", "2026-07-24T10:00:00.000Z"));
+    const sendQueuedMessage = accepting();
+    await drainThreadOutbox(deps(RUNNING, sendQueuedMessage, { now: at(-3_600_000) }));
+    await drainThreadOutbox(deps(LIMITED, sendQueuedMessage, { now: at(-3_600_000) }));
+    expect(sendQueuedMessage).not.toHaveBeenCalled();
+    expect(getThreadOutboxHold(KEY)).toMatchObject({
+      reason: "limit",
+      detail: "You've hit your usage limit.",
+    });
+    expect(nextThreadOutboxLimitReleaseAtMs(() => LIMITED, RESET_MS)).toBe(RESET_MS + 120_000);
+
+    await drainThreadOutbox(deps(LIMITED, sendQueuedMessage, { now: at(60_000) }));
+    expect(sendQueuedMessage).not.toHaveBeenCalled();
+    await drainThreadOutbox(deps(LIMITED, sendQueuedMessage, { now: at(120_000) }));
+    expect(sendQueuedMessage).toHaveBeenCalledTimes(1);
+    expect(getThreadOutboxHold(KEY)).toBeNull();
+  });
+
+  it("releases on a resume and sends once the resumed turn completes", async () => {
+    enqueueThreadOutboxMessage(queued("m1", "2026-07-24T10:00:00.000Z"));
+    const sendQueuedMessage = accepting();
+    await drainThreadOutbox(deps(RUNNING, sendQueuedMessage, { now: at(-3_600_000) }));
+    await drainThreadOutbox(deps(LIMITED, sendQueuedMessage, { now: at(-3_600_000) }));
+    const resumedRunning = view({
+      running: true,
+      session: {
+        status: "running",
+        lastError: null,
+        providerInstanceId: "codex",
+        activeTurnId: "turn-2" as TurnId,
+      },
+      latestTurn: { turnId: "turn-2" as TurnId, state: "running" },
+      usageLimit: null,
+      modelSelection: { instanceId: "codex" },
+    });
+    await drainThreadOutbox(deps(resumedRunning, sendQueuedMessage, { now: at(30_000) }));
+    expect(sendQueuedMessage).not.toHaveBeenCalled();
+    expect(getThreadOutboxHold(KEY)).toBeNull();
+    const resumedDone = view({
+      latestTurn: { turnId: "turn-2" as TurnId, state: "completed" },
+      usageLimit: null,
+      modelSelection: { instanceId: "codex" },
+    });
+    await drainThreadOutbox(deps(resumedDone, sendQueuedMessage, { now: at(60_000) }));
+    expect(sendQueuedMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it("has no release time without a held limit", () => {
+    enqueueThreadOutboxMessage(queued("m1", "2026-07-24T10:00:00.000Z"));
+    expect(nextThreadOutboxLimitReleaseAtMs(() => IDLE, RESET_MS)).toBeNull();
+    expect(
+      nextThreadOutboxLimitReleaseAtMs(
+        () =>
+          view({
+            usageLimit: { ...limit, resetAt: null },
+            modelSelection: { instanceId: "codex" },
+          }),
+        RESET_MS,
+      ),
+    ).toBeNull();
+  });
 });

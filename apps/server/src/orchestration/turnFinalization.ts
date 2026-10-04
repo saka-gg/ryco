@@ -23,6 +23,8 @@ export const TURN_FINALIZATION_REASON = {
   providerSessionIdle: "provider-session-idle",
   providerSessionExited: "provider-session-exited",
   providerRuntimeError: "provider-runtime-error",
+  /** A provider usage limit stopped the turn (state `error`). */
+  usageLimit: "usage-limit",
   providerHistory: "provider-history",
   turnStartFailed: "turn-start-failed",
   sessionReplaced: "session-replaced",

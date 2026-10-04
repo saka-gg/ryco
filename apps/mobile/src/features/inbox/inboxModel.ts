@@ -1,4 +1,7 @@
-import { deriveThreadActivityStatus } from "@ryco/client-runtime/state/threads";
+import {
+  deriveThreadActivityStatus,
+  deriveUsageLimitStatus,
+} from "@ryco/client-runtime/state/threads";
 import type {
   Project,
   SidebarThreadSummary,
@@ -26,6 +29,7 @@ export type InboxThreadState =
   | "delivery-unknown"
   | "working"
   | "connecting"
+  | "limited"
   | "error"
   | "reconnecting"
   | "offline"
@@ -137,6 +141,7 @@ function threadState(
   thread: SidebarThreadSummary,
   environment: InboxEnvironment | undefined,
   deliveryUnknownThreadIds: ReadonlySet<string>,
+  nowMs: number,
 ): InboxThreadState {
   // A stale environment's rows are last-known state: nothing on them may
   // present as live activity (or as actionable), whatever the cached fields
@@ -154,6 +159,8 @@ function threadState(
   if (environment?.connectionState === "offline") return "offline";
   if (activity === "working") return "working";
   if (activity === "connecting") return "connecting";
+  // Same predicate as web: a usage limit outranks the generic error it ended in.
+  if (deriveUsageLimitStatus(thread, nowMs) !== null) return "limited";
   if (thread.session?.status === "error" || thread.latestTurn?.state === "error") return "error";
   if (environment?.connectionState === "reconnecting") return "reconnecting";
   return "idle";
@@ -169,6 +176,8 @@ function statusLabel(state: InboxThreadState): string {
       return "Working";
     case "connecting":
       return "Connecting";
+    case "limited":
+      return "Limited";
     case "error":
       return "Error";
     case "reconnecting":
@@ -190,6 +199,7 @@ export function buildInboxSections(input: BuildInboxInput): ReadonlyArray<InboxS
   const environmentById = new Map(
     input.environments.map((environment) => [environment.environmentId, environment] as const),
   );
+  const nowMs = input.nowMs ?? Date.now();
   const deliveryUnknown = new Set(input.deliveryUnknownThreadIds);
   for (const thread of input.threads) {
     if (environmentById.get(thread.environmentId)?.deliveryUnknown) {
@@ -218,7 +228,7 @@ export function buildInboxSections(input: BuildInboxInput): ReadonlyArray<InboxS
       ...(input.nodeScope ? { environmentIds: [input.nodeScope] } : {}),
       text: input.query,
     },
-    nowMs: input.nowMs ?? Date.now(),
+    nowMs,
   });
 
   const toRow = (entry: (typeof inbox.active)[number]): InboxThreadRow => {
@@ -235,7 +245,7 @@ export function buildInboxSections(input: BuildInboxInput): ReadonlyArray<InboxS
         ? "offline"
         : entry.lifecycle.classification === "settled"
           ? "settled"
-          : threadState(thread, environment, deliveryUnknown);
+          : threadState(thread, environment, deliveryUnknown, nowMs);
     const providerDriver =
       thread.session?.provider ??
       thread.providerDriver ??
@@ -254,7 +264,11 @@ export function buildInboxSections(input: BuildInboxInput): ReadonlyArray<InboxS
       contextLabel,
       state,
       statusLabel:
-        state === "offline" ? (environment?.staleDetail ?? "Offline") : statusLabel(state),
+        state === "offline"
+          ? (environment?.staleDetail ?? "Offline")
+          : state === "limited"
+            ? (deriveUsageLimitStatus(thread, nowMs)?.label ?? statusLabel(state))
+            : statusLabel(state),
       updatedAt: entry.lifecycle.effectiveSettlementTimestamp ?? timestamp(thread),
       changeRequest: buildChangeRequestBadge(entry.worktree),
       roleLabel: environment?.role === "viewer" ? "Viewer" : null,

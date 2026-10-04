@@ -14,6 +14,7 @@ import {
   WorktreeId,
   type OrchestrationEvent,
   type OrchestrationShellStreamEvent,
+  type OrchestrationThreadShell,
 } from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -2479,5 +2480,66 @@ describe("message attachment mapping", () => {
       name: "opaque-blob",
       sizeBytes: 16,
     });
+  });
+});
+
+describe("usage limits on shell upserts", () => {
+  it("updates the shell and summary when only the usage limit changes", () => {
+    const threadId = ThreadId.make("thread-usage-limit");
+    const upsert = (
+      sequence: number,
+      usageLimit: OrchestrationThreadShell["usageLimit"],
+    ): Extract<OrchestrationShellStreamEvent, { kind: "thread-upserted" }> => ({
+      kind: "thread-upserted",
+      sequence,
+      thread: {
+        id: threadId,
+        projectId: ProjectId.make("project-1"),
+        title: "Limited",
+        modelSelection: { instanceId: ProviderInstanceId.make("claudeAgent"), model: "sonnet" },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        latestTurn: null,
+        createdAt: "2026-10-04T10:00:00.000Z",
+        updatedAt: "2026-10-04T10:00:00.000Z",
+        archivedAt: null,
+        settledOverride: null,
+        settledAt: null,
+        session: null,
+        latestUserMessageAt: null,
+        hasPendingApprovals: false,
+        hasPendingUserInput: false,
+        hasActionableProposedPlan: false,
+        ...(usageLimit !== undefined ? { usageLimit } : {}),
+      },
+    });
+    const first = applyShellEvent(makeEmptyState(), upsert(1, null), localEnvironmentId);
+    const limit = {
+      limitId: "usage-limit:thread-usage-limit:turn-1",
+      provider: ProviderDriverKind.make("claudeAgent"),
+      providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+      turnId: TurnId.make("turn-1"),
+      message: "Claude usage limit reached.",
+      limitedAt: "2026-10-04T10:00:00.000Z",
+      resetAt: null,
+      autoResume: null,
+      updatedAt: "2026-10-04T10:00:00.000Z",
+    };
+    const limited = applyShellEvent(first, upsert(2, limit), localEnvironmentId);
+    const environment = limited.environmentStateById[localEnvironmentId]!;
+    expect(environment.threadShellById[threadId]?.usageLimit).toEqual(limit);
+    expect(environment.sidebarThreadSummaryById[threadId]?.usageLimit).toEqual(limit);
+
+    const configured = applyShellEvent(
+      limited,
+      upsert(3, { ...limit, autoResume: true }),
+      localEnvironmentId,
+    );
+    expect(
+      configured.environmentStateById[localEnvironmentId]!.sidebarThreadSummaryById[threadId]
+        ?.usageLimit?.autoResume,
+    ).toBe(true);
   });
 });

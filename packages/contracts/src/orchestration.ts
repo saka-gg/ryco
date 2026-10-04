@@ -862,6 +862,36 @@ export const OrchestrationLatestTurn = Schema.Struct({
 });
 export type OrchestrationLatestTurn = typeof OrchestrationLatestTurn.Type;
 
+export const ThreadUsageLimitId = TrimmedNonEmptyString.check(Schema.isMaxLength(512));
+export type ThreadUsageLimitId = typeof ThreadUsageLimitId.Type;
+
+/**
+ * A provider usage limit stopped this thread's turn. Durable until a turn starts, the
+ * thread is archived or reverted; it only gates the thread while
+ * `modelSelection.instanceId === providerInstanceId`.
+ */
+export const ThreadUsageLimit = Schema.Struct({
+  /** "usage-limit:<threadId>:<turnId>" */
+  limitId: ThreadUsageLimitId,
+  provider: ProviderDriverKind,
+  providerInstanceId: ProviderInstanceId,
+  turnId: TurnId,
+  message: TrimmedNonEmptyString.check(Schema.isMaxLength(1_000)),
+  limitedAt: IsoDateTime,
+  resetAt: Schema.NullOr(IsoDateTime),
+  /** null follows ServerSettings.autoResumeLimitedThreads; a boolean is an explicit per-thread override. */
+  autoResume: Schema.NullOr(Schema.Boolean),
+  updatedAt: IsoDateTime,
+});
+export type ThreadUsageLimit = typeof ThreadUsageLimit.Type;
+
+/** Accepts the resume turn only while this exact limit is still recorded and idle. */
+export const UsageLimitResumeGuard = Schema.Struct({
+  limitId: ThreadUsageLimitId,
+  origin: Schema.Literals(["auto", "manual"]),
+});
+export type UsageLimitResumeGuard = typeof UsageLimitResumeGuard.Type;
+
 export const OrchestrationThread = Schema.Struct({
   id: ThreadId,
   projectId: ProjectId,
@@ -890,6 +920,8 @@ export const OrchestrationThread = Schema.Struct({
   settledAt: Schema.NullOr(IsoDateTime).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
   snoozedUntil: Schema.optional(Schema.NullOr(IsoDateTime)),
   snoozedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
+  /** Optional so mixed-version snapshots decode; older clients strip it. */
+  usageLimit: Schema.optional(Schema.NullOr(ThreadUsageLimit)),
   deletedAt: Schema.NullOr(IsoDateTime),
   messages: Schema.Array(OrchestrationMessage),
   proposedPlans: Schema.Array(OrchestrationProposedPlan).pipe(
@@ -976,6 +1008,8 @@ export const OrchestrationThreadShell = Schema.Struct({
   settledAt: Schema.NullOr(IsoDateTime).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
   snoozedUntil: Schema.optional(Schema.NullOr(IsoDateTime)),
   snoozedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
+  /** Optional so mixed-version snapshots decode; older clients strip it. */
+  usageLimit: Schema.optional(Schema.NullOr(ThreadUsageLimit)),
   session: Schema.NullOr(OrchestrationSession),
   latestUserMessageAt: Schema.NullOr(IsoDateTime),
   /** Last successful turn that is no longer active; absent on older servers. */
@@ -1319,6 +1353,16 @@ const ThreadUnsnoozeCommand = Schema.Struct({
   threadId: ThreadId,
 });
 
+/** Per-thread auto-resume override for the thread's current usage limit. */
+const ThreadUsageLimitConfigureCommand = Schema.Struct({
+  type: Schema.Literal("thread.usage-limit.configure"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  limitId: ThreadUsageLimitId,
+  autoResume: Schema.NullOr(Schema.Boolean),
+  createdAt: IsoDateTime,
+});
+
 const ThreadSettleCommand = Schema.Struct({
   type: Schema.Literal("thread.settle"),
   commandId: CommandId,
@@ -1437,6 +1481,7 @@ export const ThreadTurnStartCommand = Schema.Struct({
   projectMemory: Schema.optional(Schema.Never),
   type: Schema.Literal("thread.turn.start"),
   delegationReturnGuard: Schema.optional(DelegationReturnGuard),
+  usageLimitResumeGuard: Schema.optional(UsageLimitResumeGuard),
   commandId: CommandId,
   threadId: ThreadId,
   message: Schema.Struct({
@@ -1466,6 +1511,7 @@ export const ClientThreadTurnStartCommand = Schema.Struct({
   projectMemory: Schema.optional(Schema.Never),
   type: Schema.Literal("thread.turn.start"),
   delegationReturnGuard: Schema.optional(DelegationReturnGuard),
+  usageLimitResumeGuard: Schema.optional(UsageLimitResumeGuard),
   commandId: CommandId,
   threadId: ThreadId,
   message: Schema.Struct({
@@ -1687,6 +1733,7 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ThreadUnarchiveCommand,
   ThreadSnoozeCommand,
   ThreadUnsnoozeCommand,
+  ThreadUsageLimitConfigureCommand,
   ThreadSettleCommand,
   ThreadUnsettleCommand,
   ThreadMetaUpdateCommand,
@@ -1728,6 +1775,7 @@ export const ClientOrchestrationCommand = Schema.Union([
   ThreadUnarchiveCommand,
   ThreadSnoozeCommand,
   ThreadUnsnoozeCommand,
+  ThreadUsageLimitConfigureCommand,
   ThreadSettleCommand,
   ThreadUnsettleCommand,
   ThreadMetaUpdateCommand,
@@ -1877,6 +1925,20 @@ const ThreadGoalSyncCommand = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
+/** Internal only: clients must never be able to forge a usage limit. */
+const ThreadUsageLimitRecordCommand = Schema.Struct({
+  type: Schema.Literal("thread.usage-limit.record"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  limitId: ThreadUsageLimitId,
+  provider: ProviderDriverKind,
+  providerInstanceId: ProviderInstanceId,
+  turnId: TurnId,
+  message: TrimmedNonEmptyString.check(Schema.isMaxLength(1_000)),
+  resetAt: Schema.NullOr(IsoDateTime),
+  createdAt: IsoDateTime,
+});
+
 const ThreadGoalProviderClearCommand = Schema.Struct({
   type: Schema.Literal("thread.goal.provider-clear"),
   commandId: CommandId,
@@ -1916,6 +1978,7 @@ const InternalOrchestrationCommand = Schema.Union([
   ThreadRevertCompleteCommand,
   ThreadGoalSyncCommand,
   ThreadGoalProviderClearCommand,
+  ThreadUsageLimitRecordCommand,
 ]);
 export type InternalOrchestrationCommand = typeof InternalOrchestrationCommand.Type;
 
@@ -1938,6 +2001,8 @@ export const OrchestrationEventType = Schema.Literals([
   "thread.unsnoozed",
   "thread.settled",
   "thread.unsettled",
+  "thread.usage-limit-set",
+  "thread.usage-limit-cleared",
   "thread.meta-updated",
   "thread.runtime-mode-set",
   "thread.interaction-mode-set",
@@ -2078,6 +2143,18 @@ export const ThreadUnsettledPayload = Schema.Struct({
   reason: Schema.Literals(["user", "activity"]),
   updatedAt: IsoDateTime,
   restoredSidebarState: Schema.optional(ThreadSidebarRestoreState),
+});
+
+export const ThreadUsageLimitSetPayload = Schema.Struct({
+  threadId: ThreadId,
+  usageLimit: ThreadUsageLimit,
+});
+
+export const ThreadUsageLimitClearedPayload = Schema.Struct({
+  threadId: ThreadId,
+  limitId: ThreadUsageLimitId,
+  reason: Schema.Literals(["turn-started", "archived", "reverted"]),
+  updatedAt: IsoDateTime,
 });
 
 export const ThreadMetaUpdatedPayload = Schema.Struct({
@@ -2430,6 +2507,16 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("thread.unsettled"),
     payload: ThreadUnsettledPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.usage-limit-set"),
+    payload: ThreadUsageLimitSetPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.usage-limit-cleared"),
+    payload: ThreadUsageLimitClearedPayload,
   }),
   Schema.Struct({
     ...EventBaseFields,

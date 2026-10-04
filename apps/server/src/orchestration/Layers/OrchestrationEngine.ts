@@ -105,6 +105,8 @@ function commandToAggregateRef(command: OrchestrationCommand): {
     case "thread.unarchive":
     case "thread.snooze":
     case "thread.unsnooze":
+    case "thread.usage-limit.record":
+    case "thread.usage-limit.configure":
     case "thread.settle":
     case "thread.unsettle":
     case "thread.meta.update":

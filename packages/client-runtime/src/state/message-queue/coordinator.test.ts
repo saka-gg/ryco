@@ -3,6 +3,8 @@ import {
   CommandId,
   EventId,
   MessageId,
+  ProviderDriverKind,
+  ProviderInstanceId,
   ThreadId,
   TurnId,
   type OrchestrationEvent,
@@ -597,5 +599,43 @@ describe("message queue drain coordinator", () => {
     f.queue.getState().remove(KEY, "q-1");
     await flush();
     expect(f.releaseDetail).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("message queue drain coordinator usage limits", () => {
+  const RESET_MS = Date.parse("2026-10-01T15:00:00.000Z");
+  const LIMITED: Omit<ThreadFixture, "id"> = {
+    session: { status: "error", lastError: "You've hit your usage limit." },
+    latestTurn: { turnId: "turn-1", state: "error" },
+    messageIds: ["m-0"],
+    usageLimit: {
+      limitId: "usage-limit:t:turn-1",
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      turnId: TurnId.make("turn-1"),
+      message: "You've hit your usage limit.",
+      limitedAt: "2026-10-01T10:00:00.000Z",
+      resetAt: new Date(RESET_MS).toISOString(),
+      autoResume: null,
+      updatedAt: "2026-10-01T10:00:00.000Z",
+    },
+  };
+
+  it("wakes itself to drain when an unarmed usage-limit hold ends", async () => {
+    vi.setSystemTime(RESET_MS - 3_600_000);
+    const f = setup({ thread: RUNNING });
+    f.queue.getState().enqueue(KEY, entry("q-1"));
+    await flush();
+    f.setThread(LIMITED);
+    await flush();
+    expect(f.queue.getState().holdsByThreadKey[KEY]).toMatchObject({ reason: "limit" });
+    expect(f.sent).toEqual([]);
+
+    await vi.advanceTimersByTimeAsync(3_600_000 + 60_000);
+    await flush();
+    expect(f.sent).toEqual([]);
+    await vi.advanceTimersByTimeAsync(60_000);
+    await flush();
+    expect(f.sent).toEqual(["q-1"]);
   });
 });

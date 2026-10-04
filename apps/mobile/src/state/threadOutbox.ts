@@ -22,6 +22,7 @@ import {
 } from "@ryco/client-runtime/state/session";
 import type { EnvironmentId, ScopedThreadRef, ThreadId } from "@ryco/contracts";
 import { hasRetiredProjectMemory } from "@ryco/shared/retiredFeatures";
+import { usageLimitHoldReleaseAtMs } from "@ryco/shared/usageLimit";
 import { mobileKV } from "../platform/kv";
 import type { DraftComposerFileAttachment } from "../lib/composerFiles";
 import { useMessageQueueStore } from "./messageQueueStore";
@@ -242,7 +243,7 @@ function currentCauseKeys(view: QueueThreadView | null, threadKey: string): stri
 
 /**
  * Keeps {@link seenLive} current from the live rows of every environment.
- * Only threads whose session or latest turn changed are re-derived. Mounted
+ * Only threads whose session, latest turn or shell changed are re-derived. Mounted
  * once next to the drain; returns an unsubscribe.
  */
 export function trackThreadOutboxLiveCauses(): () => void {
@@ -257,10 +258,12 @@ export function trackThreadOutboxLiveCauses(): () => void {
         previous !== null && selectEnvironmentShellLive(previous, environmentId)
           ? previous.environmentStateById[environmentId]
           : undefined;
+      // The shell carries the usage limit, which can land after the session-set.
       if (
         before !== undefined &&
         before.threadSessionById === environmentState.threadSessionById &&
-        before.threadTurnStateById === environmentState.threadTurnStateById
+        before.threadTurnStateById === environmentState.threadTurnStateById &&
+        before.threadShellById === environmentState.threadShellById
       ) {
         continue;
       }
@@ -268,7 +271,8 @@ export function trackThreadOutboxLiveCauses(): () => void {
         if (
           before !== undefined &&
           before.threadSessionById[threadId] === environmentState.threadSessionById[threadId] &&
-          before.threadTurnStateById[threadId] === environmentState.threadTurnStateById[threadId]
+          before.threadTurnStateById[threadId] === environmentState.threadTurnStateById[threadId] &&
+          before.threadShellById[threadId] === environmentState.threadShellById[threadId]
         ) {
           continue;
         }
@@ -598,6 +602,14 @@ export async function drainThreadOutbox(deps: ThreadOutboxDrainDeps): Promise<vo
         persistHolds();
         continue;
       }
+      if (drainStep.kind === "release") {
+        // An ended usage limit: drop its causes and never hold for them again.
+        acknowledged[key] = appendAcknowledgedCauseKeys(acknowledged[key], drainStep.causeKeys);
+        const hold = holds[key];
+        setHold(key, hold ? removeQueueHoldCauses(hold, drainStep.causeKeys) : null);
+        notifyListeners();
+        continue;
+      }
       if (drainStep.kind === "hold" || drainStep.kind === "dispatch-failed") {
         if (drainStep.kind === "dispatch-failed") pendingDispatchByThreadKey.delete(key);
         setHold(key, drainStep.hold);
@@ -681,6 +693,27 @@ async function sendHead(
   } finally {
     inFlightThreadKeys.delete(key);
   }
+}
+
+/**
+ * The earliest end of a usage-limit hold among queued threads. Nothing else changes at
+ * that moment, so the drain must be woken for it.
+ */
+export function nextThreadOutboxLimitReleaseAtMs(
+  readView: (ref: ScopedThreadRef) => QueueThreadView | null,
+  nowMs: number,
+): number | null {
+  let earliest: number | null = null;
+  for (const queue of Object.values(groupQueuedThreadMessages(messages))) {
+    const head = queue[0];
+    if (!head) continue;
+    const view = readView(scopeThreadRef(head.environmentId, head.threadId));
+    const releaseAtMs = view ? usageLimitHoldReleaseAtMs(view, nowMs) : null;
+    if (releaseAtMs !== null && (earliest === null || releaseAtMs < earliest)) {
+      earliest = releaseAtMs;
+    }
+  }
+  return earliest;
 }
 
 export function retryThreadOutboxReview(messageId: string): void {

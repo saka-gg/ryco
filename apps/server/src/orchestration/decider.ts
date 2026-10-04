@@ -8,6 +8,7 @@ import type {
   OrchestrationCommand,
   OrchestrationEvent,
   OrchestrationReadModel,
+  ThreadUsageLimit,
 } from "@ryco/contracts";
 import {
   CONTEXT_HANDOFF_ACTIVITY_KIND,
@@ -151,6 +152,48 @@ function activityUnsettledEvent(input: {
       reason: "activity",
       updatedAt: input.occurredAt,
     },
+  };
+}
+
+function usageLimitClearedEvent(input: {
+  readonly command: OrchestrationCommand;
+  readonly thread: OrchestrationReadModel["threads"][number];
+  readonly reason: "turn-started" | "archived" | "reverted";
+  readonly occurredAt: string;
+}): PlannedOrchestrationEvent | null {
+  const limit = input.thread.usageLimit ?? null;
+  if (limit === null) return null;
+  return {
+    ...withEventBase({
+      aggregateKind: "thread",
+      aggregateId: input.thread.id,
+      occurredAt: input.occurredAt,
+      commandId: input.command.commandId,
+    }),
+    type: "thread.usage-limit-cleared",
+    payload: {
+      threadId: input.thread.id,
+      limitId: limit.limitId,
+      reason: input.reason,
+      updatedAt: input.occurredAt,
+    },
+  };
+}
+
+function usageLimitSetEvent(input: {
+  readonly command: OrchestrationCommand;
+  readonly threadId: OrchestrationReadModel["threads"][number]["id"];
+  readonly usageLimit: ThreadUsageLimit;
+}): PlannedOrchestrationEvent {
+  return {
+    ...withEventBase({
+      aggregateKind: "thread",
+      aggregateId: input.threadId,
+      occurredAt: input.usageLimit.updatedAt,
+      commandId: input.command.commandId,
+    }),
+    type: "thread.usage-limit-set",
+    payload: { threadId: input.threadId, usageLimit: input.usageLimit },
   };
 }
 
@@ -545,7 +588,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         threadId: command.threadId,
       });
       const occurredAt = nowIso();
-      return {
+      const archivedEvent: PlannedOrchestrationEvent = {
         ...withEventBase({
           aggregateKind: "thread",
           aggregateId: command.threadId,
@@ -559,6 +602,16 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           updatedAt: occurredAt,
         },
       };
+      const archivedThread = readModel.threads.find((thread) => thread.id === command.threadId);
+      const limitCleared = archivedThread
+        ? usageLimitClearedEvent({
+            command,
+            thread: archivedThread,
+            reason: "archived",
+            occurredAt,
+          })
+        : null;
+      return limitCleared === null ? archivedEvent : [archivedEvent, limitCleared];
     }
 
     case "thread.unarchive": {
@@ -628,6 +681,80 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         payload: { threadId: command.threadId, updatedAt: occurredAt },
       };
     }
+    case "thread.usage-limit.record": {
+      const thread = yield* requireThread({ readModel, command, threadId: command.threadId });
+      if (thread.archivedAt !== null || thread.deletedAt !== null) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "Thread is archived or deleted.",
+        });
+      }
+      if (
+        thread.session?.status === "running" &&
+        thread.session.activeTurnId !== null &&
+        thread.session.activeTurnId !== command.turnId
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "A newer turn is running; stale usage limit.",
+        });
+      }
+      // Only the thread's latest turn can be limited: a late record or reset fill after
+      // a newer turn (or a revert) must never resurrect a cleared limit.
+      if (thread.latestTurn?.turnId !== command.turnId) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "The usage limit belongs to an earlier turn.",
+        });
+      }
+      const existing = thread.usageLimit ?? null;
+      if (existing?.limitId === command.limitId) {
+        // The only update to a recorded limit: filling a reset that was unknown.
+        if (existing.resetAt === null && command.resetAt !== null) {
+          return usageLimitSetEvent({
+            command,
+            threadId: thread.id,
+            usageLimit: { ...existing, resetAt: command.resetAt, updatedAt: command.createdAt },
+          });
+        }
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "This usage limit is already recorded.",
+        });
+      }
+      return usageLimitSetEvent({
+        command,
+        threadId: thread.id,
+        usageLimit: {
+          limitId: command.limitId,
+          provider: command.provider,
+          providerInstanceId: command.providerInstanceId,
+          turnId: command.turnId,
+          message: command.message,
+          limitedAt: command.createdAt,
+          resetAt: command.resetAt,
+          autoResume: null,
+          updatedAt: command.createdAt,
+        },
+      });
+    }
+
+    case "thread.usage-limit.configure": {
+      const thread = yield* requireThread({ readModel, command, threadId: command.threadId });
+      const existing = thread.usageLimit ?? null;
+      if (existing === null || existing.limitId !== command.limitId) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "The usage limit changed. Refresh and try again.",
+        });
+      }
+      return usageLimitSetEvent({
+        command,
+        threadId: thread.id,
+        usageLimit: { ...existing, autoResume: command.autoResume, updatedAt: nowIso() },
+      });
+    }
+
     case "thread.settle": {
       const thread = yield* requireThread({
         readModel,
@@ -1006,6 +1133,26 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           detail: `Thread '${command.threadId}' already has active turn '${targetThread.session.activeTurnId}' and cannot start another turn until it finishes.`,
         });
       }
+      // At most one guarded resume per limit: every accepted turn start clears the
+      // limit in this same decision, so a second resume finds it gone.
+      const usageLimitGuard = command.usageLimitResumeGuard;
+      const currentUsageLimit = targetThread.usageLimit ?? null;
+      if (
+        usageLimitGuard &&
+        (currentUsageLimit === null ||
+          currentUsageLimit.limitId !== usageLimitGuard.limitId ||
+          targetThread.archivedAt !== null ||
+          targetThread.session?.status === "running" ||
+          targetThread.session?.status === "starting" ||
+          targetThread.latestTurn?.state === "running" ||
+          (command.modelSelection ?? targetThread.modelSelection).instanceId !==
+            currentUsageLimit.providerInstanceId)
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "This usage-limit resume is stale: the thread was resumed, changed, or is busy.",
+        });
+      }
       const guard = command.delegationReturnGuard;
       const latestUserMessage = guard
         ? targetThread.messages.findLast((message) => message.role === "user")
@@ -1215,7 +1362,41 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
                 createdAt: command.createdAt,
               },
             });
+      const limitCleared = usageLimitClearedEvent({
+        command,
+        thread: targetThread,
+        reason: "turn-started",
+        occurredAt: command.createdAt,
+      });
+      const autoResumedActivity: PlannedOrchestrationEvent | null =
+        usageLimitGuard?.origin === "auto" && currentUsageLimit !== null
+          ? {
+              ...withEventBase({
+                aggregateKind: "thread",
+                aggregateId: command.threadId,
+                occurredAt: command.createdAt,
+                commandId: command.commandId,
+              }),
+              type: "thread.activity-appended",
+              payload: {
+                threadId: command.threadId,
+                activity: {
+                  id: EventId.make(`usage-limit-resumed:${command.commandId}`),
+                  tone: "info",
+                  kind: "usage-limit.resumed",
+                  summary: "Resumed automatically after the usage limit reset",
+                  payload: {
+                    limitId: currentUsageLimit.limitId,
+                    resetAt: currentUsageLimit.resetAt,
+                  },
+                  turnId: null,
+                  createdAt: command.createdAt,
+                },
+              },
+            }
+          : null;
       return [
+        ...(limitCleared === null ? [] : [limitCleared]),
         ...(Array.isArray(goalEvents) ? goalEvents : [goalEvents]).map((event) =>
           event.type === "thread.goal-updated"
             ? {
@@ -1234,6 +1415,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             : event,
         ),
         ...(unsettledEvent === null ? turnEvents : [unsettledEvent, ...turnEvents]),
+        ...(autoResumedActivity === null ? [] : [autoResumedActivity]),
       ];
     }
 
@@ -1413,12 +1595,12 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "thread.checkpoint.revert": {
-      yield* requireThread({
+      const thread = yield* requireThread({
         readModel,
         command,
         threadId: command.threadId,
       });
-      return {
+      const revertRequested: PlannedOrchestrationEvent = {
         ...withEventBase({
           aggregateKind: "thread",
           aggregateId: command.threadId,
@@ -1432,6 +1614,14 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           createdAt: command.createdAt,
         },
       };
+      // Never "continue" into a reverted conversation.
+      const limitCleared = usageLimitClearedEvent({
+        command,
+        thread,
+        reason: "reverted",
+        occurredAt: command.createdAt,
+      });
+      return limitCleared === null ? revertRequested : [revertRequested, limitCleared];
     }
 
     case "thread.session.stop": {
@@ -1758,12 +1948,31 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       if (command.session.status !== "starting" && command.session.status !== "running") {
         return sessionEvent;
       }
+      // A different turn running (a provider wake, a send that raced the record) makes the
+      // recorded limit stale.
+      const limitCleared =
+        command.session.status === "running" &&
+        command.session.activeTurnId !== null &&
+        thread.usageLimit != null &&
+        thread.usageLimit.turnId !== command.session.activeTurnId
+          ? usageLimitClearedEvent({
+              command,
+              thread,
+              reason: "turn-started",
+              occurredAt: command.createdAt,
+            })
+          : null;
       const unsettledEvent = activityUnsettledEvent({
         command,
         thread,
         occurredAt: command.createdAt,
       });
-      return unsettledEvent === null ? sessionEvent : [unsettledEvent, sessionEvent];
+      if (limitCleared === null && unsettledEvent === null) return sessionEvent;
+      return [
+        ...(limitCleared === null ? [] : [limitCleared]),
+        ...(unsettledEvent === null ? [] : [unsettledEvent]),
+        sessionEvent,
+      ];
     }
 
     case "thread.history.restore": {

@@ -1,3 +1,9 @@
+import {
+  ProviderDriverKind,
+  ProviderInstanceId,
+  TurnId,
+  type ThreadUsageLimit,
+} from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -13,6 +19,7 @@ import {
   createInterruptQueueHold,
   releaseQueueHoldKeys,
   deriveQueueFailureCauses,
+  removeQueueHoldCauses,
 } from "./hold.ts";
 import { readQueueThreadView } from "./threadView.ts";
 
@@ -318,5 +325,120 @@ describe("resolveQueueDrainStep", () => {
     expect(kinds([resolveQueueDrainStep(input(overrides as Partial<QueueDrainInput>))])).toEqual([
       expected,
     ]);
+  });
+});
+
+describe("usage-limit holds", () => {
+  const RESET = "2026-10-01T15:00:00.000Z";
+  const RESET_MS = Date.parse(RESET);
+  const at = (offsetMs: number) => new Date(RESET_MS + offsetMs).toISOString();
+  const limit: ThreadUsageLimit = {
+    limitId: "usage-limit:t:turn-1",
+    provider: ProviderDriverKind.make("codex"),
+    providerInstanceId: ProviderInstanceId.make("codex"),
+    turnId: TurnId.make("turn-1"),
+    message: "You've hit your usage limit.",
+    limitedAt: "2026-10-01T10:00:00.000Z",
+    resetAt: RESET,
+    autoResume: null,
+    updatedAt: "2026-10-01T10:00:00.000Z",
+  };
+  const LIMITED: Omit<ThreadFixture, "id"> = {
+    session: { status: "error", lastError: "You've hit your usage limit." },
+    latestTurn: { turnId: "turn-1", state: "error" },
+    messageIds: ["m-0"],
+    usageLimit: limit,
+  };
+  const RESUMED_RUNNING: Omit<ThreadFixture, "id"> = {
+    session: { status: "running", activeTurnId: "turn-2" },
+    latestTurn: { turnId: "turn-2", state: "running" },
+    messageIds: ["m-0", "resume"],
+    usageLimit: null,
+  };
+  const RESUMED_DONE: Omit<ThreadFixture, "id"> = {
+    session: { status: "ready" },
+    latestTurn: { turnId: "turn-2", state: "completed" },
+    messageIds: ["m-0", "resume"],
+    usageLimit: null,
+  };
+
+  type DrainState = { -readonly [K in keyof QueueDrainInput]: QueueDrainInput[K] };
+
+  /** Applies bookkeeping steps, including releases, until the drain waits or sends. */
+  function settle(state: DrainState): string {
+    for (let index = 0; index < 8; index += 1) {
+      const step = resolveQueueDrainStep(state);
+      if (step.kind === "baseline" || step.kind === "acknowledge") {
+        state.acknowledgedCauseKeys = (state.acknowledgedCauseKeys ?? []).concat(step.causeKeys);
+      } else if (step.kind === "hold") {
+        state.hold = step.hold;
+      } else if (step.kind === "release") {
+        state.acknowledgedCauseKeys = (state.acknowledgedCauseKeys ?? []).concat(step.causeKeys);
+        state.hold = state.hold ? removeQueueHoldCauses(state.hold, step.causeKeys) : null;
+      } else {
+        return step.kind === "wait" ? `wait:${step.reason}` : step.kind;
+      }
+    }
+    throw new Error("drain did not settle");
+  }
+
+  /** Queued while the limited turn ran, then the limit landed. */
+  function limitedQueue(nowIso: string): DrainState {
+    const state: DrainState = { ...input({ view: viewOf(RUNNING_THREAD), nowIso }) };
+    expect(settle(state)).toBe("wait:busy");
+    state.view = viewOf(LIMITED);
+    return state;
+  }
+
+  it("holds a limited thread's queue with the limit as the reason", () => {
+    const state = limitedQueue(at(-3_600_000));
+    expect(settle(state)).toBe("wait:held");
+    expect(state.hold).toMatchObject({
+      reason: "limit",
+      detail: "You've hit your usage limit.",
+      causeKeys: expect.arrayContaining(["limit:turn-1"]),
+    });
+  });
+
+  it("stays held while a resumed turn runs and drains when it completes", () => {
+    const state = limitedQueue(at(-3_600_000));
+    expect(settle(state)).toBe("wait:held");
+    state.nowIso = at(30_000);
+    state.view = viewOf(RESUMED_RUNNING);
+    expect(settle(state)).toBe("wait:busy");
+    expect(state.hold).toBeNull();
+    state.view = viewOf(RESUMED_DONE);
+    expect(settle(state)).toBe("send");
+  });
+
+  it("releases an unarmed hold two minutes after the reset", () => {
+    const state = limitedQueue(at(-3_600_000));
+    expect(settle(state)).toBe("wait:held");
+    state.nowIso = at(60_000);
+    expect(settle(state)).toBe("wait:held");
+    state.nowIso = at(2 * 60_000);
+    expect(settle(state)).toBe("send");
+    expect(state.hold).toBeNull();
+  });
+
+  it("keeps holding for a newer turn's own error after the limit is released", () => {
+    const state = limitedQueue(at(-3_600_000));
+    expect(settle(state)).toBe("wait:held");
+    state.nowIso = at(30_000);
+    state.view = viewOf({
+      session: { status: "error", lastError: "Crashed" },
+      latestTurn: { turnId: "turn-2", state: "error" },
+      messageIds: ["m-0", "resume"],
+      usageLimit: null,
+    });
+    expect(settle(state)).toBe("wait:held");
+    expect(state.hold).toMatchObject({ reason: "error", causeKeys: ["error:turn-2:Crashed"] });
+  });
+
+  it("never holds for a limit on an instance the thread no longer targets", () => {
+    const state = limitedQueue(at(-3_600_000));
+    state.view = viewOf({ ...LIMITED, modelInstanceId: "claudeAgent" });
+    state.headProviderInstanceId = "claudeAgent";
+    expect(settle(state)).toBe("send");
   });
 });

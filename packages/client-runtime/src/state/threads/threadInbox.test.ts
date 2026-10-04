@@ -14,6 +14,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   buildThreadInbox,
+  deriveThreadSnoozeEligibility,
   scopedInboxWorktreeKey,
   type BuildThreadInboxInput,
   type ThreadInboxDraftSummary,
@@ -660,5 +661,21 @@ describe("snoozed inbox entries", () => {
     const inbox = build({ localQueuedThreadKeys: [key] });
     expect(inbox.snoozed).toHaveLength(0);
     expect(inbox.active[0]?.canSnooze).toBe(false);
+  });
+});
+
+describe("deriveThreadSnoozeEligibility", () => {
+  it("is blocked by a locally queued message, like the inbox", () => {
+    const thread = makeThread(environmentA, "thread-snooze", {
+      latestUserMessageAt: "2026-07-31T10:00:00.000Z",
+    });
+    const environment = makeEnvironment(environmentA);
+    expect(
+      deriveThreadSnoozeEligibility({ thread, environment, hasLocalQueuedMessage: false, nowMs })
+        .canSnooze,
+    ).toBe(true);
+    expect(
+      deriveThreadSnoozeEligibility({ thread, environment, hasLocalQueuedMessage: true, nowMs }),
+    ).toEqual({ canSnooze: false, blocker: "local-queue" });
   });
 });

@@ -11,6 +11,8 @@ const RESTORABLE_SETTINGS = {
   autoOpenPlanSidebar: "Auto-open overview",
   enableLegacyTokenStreaming: "Stream token by token",
   enableProviderUpdateChecks: "Provider update checks",
+  autoResumeLimitedThreads: "Auto-resume limited threads",
+  snoozeLimitedThreads: "Snooze limited threads",
   defaultThreadEnvMode: "New thread mode",
   addProjectBaseDirectory: "Add project base directory",
   confirmThreadArchive: "Archive confirmation",

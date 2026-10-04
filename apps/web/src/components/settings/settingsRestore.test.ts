@@ -28,4 +28,16 @@ describe("settings reset ownership", () => {
   it("does not write defaults for unchanged settings", () => {
     expect(settingsRestorePlan(DEFAULT_UNIFIED_SETTINGS, "system", "node").patch).toEqual({});
   });
+  it("restores the usage-limit recovery settings to off on the node", () => {
+    const plan = settingsRestorePlan(
+      { ...DEFAULT_UNIFIED_SETTINGS, autoResumeLimitedThreads: true, snoozeLimitedThreads: true },
+      "system",
+      "node",
+    );
+    expect(plan).toEqual({
+      labels: ["Auto-resume limited threads", "Snooze limited threads"],
+      resetTheme: false,
+      patch: { autoResumeLimitedThreads: false, snoozeLimitedThreads: false },
+    });
+  });
 });

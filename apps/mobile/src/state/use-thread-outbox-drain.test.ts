@@ -28,7 +28,11 @@ import {
 } from "@ryco/client-runtime/rpc";
 
 import type { QueuedThreadMessage } from "./threadOutboxModel";
-import { createThreadOutboxDetailRetention, readThreadDrainState } from "./use-thread-outbox-drain";
+import {
+  createOutboxLimitWake,
+  createThreadOutboxDetailRetention,
+  readThreadDrainState,
+} from "./use-thread-outbox-drain";
 
 const ENV_A = "env-node-a" as EnvironmentId;
 const ENV_B = "env-node-b" as EnvironmentId;
@@ -290,5 +294,35 @@ describe("outbox thread-detail retention", () => {
     retention.sync();
     expect(retain).toHaveBeenCalledTimes(2);
     retention.dispose();
+  });
+});
+
+describe("outbox usage-limit wake", () => {
+  it("keeps one timer for the earliest release and replaces it on each pass", () => {
+    const run = vi.fn();
+    const timers: Array<{ callback: () => void; ms: number; cleared: boolean }> = [];
+    const wake = createOutboxLimitWake({
+      run,
+      setTimeout: (callback, ms) => {
+        const timer = { callback, ms, cleared: false };
+        timers.push(timer);
+        return timer;
+      },
+      clearTimeout: (handle) => {
+        (handle as { cleared: boolean }).cleared = true;
+      },
+    });
+    wake.sync(10_000, 4_000);
+    expect(timers).toHaveLength(1);
+    expect(timers[0]?.ms).toBe(6_000);
+    wake.sync(10_000, 5_000);
+    expect(timers).toHaveLength(1);
+    wake.sync(8_000, 5_000);
+    expect(timers[0]?.cleared).toBe(true);
+    expect(timers[1]?.ms).toBe(3_000);
+    timers[1]?.callback();
+    expect(run).toHaveBeenCalledTimes(1);
+    wake.sync(null, 9_000);
+    expect(timers).toHaveLength(2);
   });
 });

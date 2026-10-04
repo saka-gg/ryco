@@ -11,6 +11,7 @@ import { OnboardingReplaySetting } from "../onboarding/OnboardingReplaySetting";
 import { SourceControlPreferences } from "./SourceControlPreferences";
 import { ComposerSettings } from "./ComposerSettings";
 import { QuitShortcutSetting } from "./QuitShortcutSetting";
+import { UsageLimitSettings } from "./UsageLimitSettings";
 import { ArchiveIcon, ArchiveX, ChevronRightIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -685,6 +686,7 @@ export function GeneralSettingsPanel({
           }
         />
       </SettingsSection>
+      {!isPhoneTier && <UsageLimitSettings />}
       {!isPhoneTier && editingScope !== "node" && <ComposerSettings />}
       {!isPhoneTier && <ProjectDefaultsSection />}
       {!isPhoneTier && <StorageSettings />}
