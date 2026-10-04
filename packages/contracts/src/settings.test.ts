@@ -9,6 +9,7 @@ import {
   ClientSettingsPatch,
   ClientSettingsSchema,
   DEFAULT_CLIENT_SETTINGS,
+  DEFAULT_FOLLOW_UP_BEHAVIOR,
   DEFAULT_SERVER_SETTINGS,
   SIDEBAR_AUTO_SETTLE_DAY_OPTIONS,
   SidebarAutoSettleAfterDays,
@@ -101,6 +102,20 @@ describe("ClientSettings.sourceControlRefreshMode", () => {
         sourceControlRefreshMode,
       );
     }
+  });
+});
+
+describe("ClientSettings.followUpBehavior", () => {
+  it("defaults existing settings to queueing follow-ups", () => {
+    expect(DEFAULT_FOLLOW_UP_BEHAVIOR).toBe("queue");
+    expect(DEFAULT_CLIENT_SETTINGS.followUpBehavior).toBe("queue");
+    expect(decodeClientSettings({}).followUpBehavior).toBe("queue");
+  });
+
+  it("patches to steer and rejects unknown behaviours", () => {
+    expect(decodeClientSettingsPatch({ followUpBehavior: "steer" }).followUpBehavior).toBe("steer");
+    expect(decodeClientSettings({ followUpBehavior: "steer" }).followUpBehavior).toBe("steer");
+    expect(() => decodeClientSettingsPatch({ followUpBehavior: "interrupt" })).toThrow();
   });
 });
 

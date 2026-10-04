@@ -56,6 +56,15 @@ export const AiFocusRefreshIntervalMs = Schema.Literals([
 export type AiFocusRefreshIntervalMs = typeof AiFocusRefreshIntervalMs.Type;
 export const DEFAULT_AI_FOCUS_REFRESH_INTERVAL_MS: AiFocusRefreshIntervalMs = 600_000;
 
+/**
+ * What Enter does with a message sent while a turn runs: `queue` waits for the turn to finish,
+ * `steer` adds it to the running turn when the provider supports steering. Mod+Enter does the
+ * opposite.
+ */
+export const FollowUpBehavior = Schema.Literals(["queue", "steer"]);
+export type FollowUpBehavior = typeof FollowUpBehavior.Type;
+export const DEFAULT_FOLLOW_UP_BEHAVIOR: FollowUpBehavior = "queue";
+
 /** Missing effort is a legacy model-only preset; provider remains the stable instance id. */
 export const ModelFavorite = Schema.Struct({
   provider: ProviderInstanceId,
@@ -80,6 +89,9 @@ export const ClientSettingsSchema = Schema.Struct({
   ),
   diffIgnoreWhitespace: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   diffWordWrap: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  followUpBehavior: FollowUpBehavior.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_FOLLOW_UP_BEHAVIOR)),
+  ),
   // Model favorites. Historically keyed by provider kind, now
   // widened to `ProviderInstanceId` so users can favorite a specific model
   // on a custom provider instance (e.g. "Codex Personal · gpt-5") without
@@ -812,6 +824,7 @@ export const ClientSettingsPatch = Schema.Struct({
   confirmThreadUnpin: Schema.optionalKey(Schema.Boolean),
   diffIgnoreWhitespace: Schema.optionalKey(Schema.Boolean),
   diffWordWrap: Schema.optionalKey(Schema.Boolean),
+  followUpBehavior: Schema.optionalKey(FollowUpBehavior),
   favorites: Schema.optionalKey(Schema.Array(ModelFavorite)),
   providerModelPreferences: Schema.optionalKey(
     Schema.Record(

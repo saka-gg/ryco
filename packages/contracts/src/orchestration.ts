@@ -706,6 +706,14 @@ export type OrchestrationMessageRole = typeof OrchestrationMessageRole.Type;
 export const TurnDispatchMode = Schema.Literals(["queue", "steer"]);
 export type TurnDispatchMode = typeof TurnDispatchMode.Type;
 
+/**
+ * Why a steer was not applied. `deferred`: the message stays queued and is sent as the next turn
+ * (the turn ended, or the provider could not take it right now). `failed`: a real provider error.
+ * Absent on older events, which read as `failed`.
+ */
+export const TurnSteerRejectionReason = Schema.Literals(["deferred", "failed"]);
+export type TurnSteerRejectionReason = typeof TurnSteerRejectionReason.Type;
+
 export const OrchestrationMessage = Schema.Struct({
   id: MessageId,
   role: OrchestrationMessageRole,
@@ -1855,6 +1863,7 @@ const ThreadTurnSteerResolveCommand = Schema.Union([
     resolution: Schema.Struct({
       status: Schema.Literal("rejected"),
       error: TrimmedNonEmptyString.check(Schema.isMaxLength(1_000)),
+      reason: Schema.optionalKey(TurnSteerRejectionReason),
       resolvedAt: IsoDateTime,
     }),
   }),
@@ -2162,6 +2171,7 @@ export const ThreadTurnSteerRejectedPayload = Schema.Struct({
   messageId: MessageId,
   expectedTurnId: TurnId,
   error: TrimmedNonEmptyString.check(Schema.isMaxLength(1_000)),
+  reason: Schema.optionalKey(TurnSteerRejectionReason),
   resolvedAt: IsoDateTime,
 });
 export type ThreadTurnSteerRejectedPayload = typeof ThreadTurnSteerRejectedPayload.Type;
