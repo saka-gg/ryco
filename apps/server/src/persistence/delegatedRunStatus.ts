@@ -5,7 +5,8 @@ import type { SqlError } from "effect/unstable/sql/SqlError";
 /**
  * State of one delegated run, keyed by the exact delegated user message (never the latest
  * turn of a reused chat). Shared by local Tasks (`LocalTaskService.present`) and Agent
- * Control delegation returns, so start failures are recognised in one place.
+ * Control delegation returns, so start failures and Stop-cancelled starts are recognised in
+ * one place.
  */
 export type DelegatedRunState =
   | "starting"
@@ -29,6 +30,32 @@ export const hasTurnStartFailure = (
     WHERE thread_id = ${input.threadId} AND kind = 'provider.turn.start.failed'
       AND json_valid(payload_json) AND json_extract(payload_json, '$.messageId') = ${input.messageId}
     LIMIT 1`.pipe(Effect.map((rows) => rows.length > 0));
+
+/**
+ * A `provider.turn.start.cancelled` activity for the message: a Stop ended the start
+ * before any turn. It is not covered by the migration-070 partial index (the lookup
+ * scans the thread's activities), so check it only for a start that never bound.
+ */
+export const hasTurnStartCancelled = (
+  sql: SqlClient.SqlClient,
+  input: { readonly threadId: string; readonly messageId: string },
+) =>
+  sql`SELECT 1 FROM projection_thread_activities
+    WHERE thread_id = ${input.threadId} AND kind = 'provider.turn.start.cancelled'
+      AND json_valid(payload_json) AND json_extract(payload_json, '$.messageId') = ${input.messageId}
+    LIMIT 1`.pipe(Effect.map((rows) => rows.length > 0));
+
+/**
+ * The start failed or a Stop cancelled it: it ended without a turn and never binds
+ * one. Callers ask only for starts that have not bound a turn.
+ */
+export const hasTurnStartEnded = (
+  sql: SqlClient.SqlClient,
+  input: { readonly threadId: string; readonly messageId: string },
+) =>
+  hasTurnStartFailure(sql, input).pipe(
+    Effect.flatMap((failed) => (failed ? Effect.succeed(true) : hasTurnStartCancelled(sql, input))),
+  );
 
 export const readDelegatedRunState = (
   sql: SqlClient.SqlClient,
@@ -73,9 +100,10 @@ export const readDelegatedRunState = (
     if (active && (thread.pending_approval_count > 0 || thread.pending_user_input_count > 0))
       return "needs-you" as const;
     if (active || turn.state === "running") return "running" as const;
-    return turn.state === "completed"
-      ? ("completed" as const)
-      : turn.state === "pending"
-        ? ("starting" as const)
-        : ("failed" as const);
+    if (turn.state === "completed") return "completed" as const;
+    if (turn.state !== "pending") return "failed" as const;
+    // A start the user's Stop cancelled keeps its pending row, but will never run.
+    return (yield* hasTurnStartCancelled(sql, input))
+      ? ("interrupted" as const)
+      : ("starting" as const);
   });

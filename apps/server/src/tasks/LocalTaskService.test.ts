@@ -11,6 +11,7 @@ import {
 } from "@ryco/contracts";
 import { LocalTaskService, LocalTaskServiceLive } from "./LocalTaskService.ts";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import { readDelegatedRunState } from "../persistence/delegatedRunStatus.ts";
 
 const layer = LocalTaskServiceLive.pipe(Layer.provideMerge(SqlitePersistenceMemory));
 const create = (taskId = "task") => ({
@@ -153,6 +154,37 @@ describe("local task service", () => {
           })).task.status,
           "starting",
         );
+      }).pipe(Effect.provide(layer)),
+  );
+
+  it.effect(
+    "ends a delegated run whose start a Stop cancelled instead of reporting it starting",
+    () =>
+      Effect.gen(function* () {
+        yield* seed;
+        const tasks = yield* LocalTaskService;
+        const sql = yield* SqlClient.SqlClient;
+        yield* tasks.create(create());
+        yield* tasks.reserveDelegation({ taskId: "task", expectedRevision: 0, command: command() });
+        const messageId = command().message.messageId;
+        // The cancelled start keeps its pending row; no turn ever binds to it.
+        yield* sql`INSERT INTO projection_turns (thread_id, turn_id, pending_message_id, state, requested_at, checkpoint_files_json)
+        VALUES ('thread', NULL, ${messageId}, 'pending', '2026-10-02T00:00:00.000Z', '[]')`;
+        assert.equal((yield* tasks.get("task")).status, "starting");
+        const appendCancel = (id: string, cancelledMessageId: string) =>
+          sql`INSERT INTO projection_thread_activities
+          (activity_id, thread_id, tone, kind, summary, payload_json, created_at)
+          VALUES (${id}, 'thread', 'info', 'provider.turn.start.cancelled', 'Turn start cancelled',
+            ${JSON.stringify({ messageId: cancelledMessageId, reason: "stopped-before-start" })},
+            '2026-10-02T00:00:01.000Z')`;
+        yield* appendCancel("other-cancel", "different-message");
+        assert.equal((yield* tasks.get("task")).status, "starting");
+        yield* appendCancel("own-cancel", messageId);
+        assert.equal(
+          yield* readDelegatedRunState(sql, { threadId: "thread", messageId }),
+          "interrupted",
+        );
+        assert.equal((yield* tasks.get("task")).status, "failed");
       }).pipe(Effect.provide(layer)),
   );
 

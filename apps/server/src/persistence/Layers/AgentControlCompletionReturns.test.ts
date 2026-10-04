@@ -300,6 +300,16 @@ it("reports the newest pending turn start and whether it already failed to start
       });
       expect(yield* repo.wakeStartState(thread, MessageId.make("newer-pending"))).toBe("failed");
       expect(yield* repo.wakeStartState(thread, MessageId.make("absent"))).toBe("absent");
+      // A start the user's Stop cancelled ended without a turn as well.
+      expect(yield* repo.wakeStartState(thread, MessageId.make("older-pending"))).toBe("pending");
+      yield* sql`INSERT INTO projection_thread_activities (activity_id, thread_id, tone, kind, summary, payload_json, created_at)
+        VALUES ('cancel', 'parent', 'info', 'provider.turn.start.cancelled', 'Turn start cancelled', ${JSON.stringify({ messageId: "older-pending" })}, ${completionFixtureTime})`;
+      expect(yield* repo.wakeStartState(thread, MessageId.make("older-pending"))).toBe("failed");
+      yield* sql`DELETE FROM projection_turns WHERE pending_message_id = 'newer-pending'`;
+      expect(yield* repo.pendingTurnStart(thread)).toEqual({
+        messageId: "older-pending",
+        startFailed: true,
+      });
       yield* sql`UPDATE projection_turns SET turn_id = 'bound' WHERE pending_message_id = 'older-pending'`;
       expect(yield* repo.wakeStartState(thread, MessageId.make("older-pending"))).toBe("bound");
     }),
