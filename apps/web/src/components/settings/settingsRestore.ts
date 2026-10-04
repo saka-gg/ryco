@@ -6,6 +6,7 @@ const RESTORABLE_SETTINGS = {
   timestampFormat: "Time format",
   diffWordWrap: "Diff line wrapping",
   diffIgnoreWhitespace: "Diff whitespace changes",
+  followUpBehavior: "Follow-up while working",
   gitStatusPollIntervalMs: "Remote Git status",
   sourceControlRefreshMode: "PR & workflow updates",
   autoOpenPlanSidebar: "Auto-open overview",

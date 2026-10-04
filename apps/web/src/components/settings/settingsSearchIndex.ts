@@ -281,6 +281,14 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
   },
   {
     section: "general",
+    title: "Messages sent while a turn runs",
+    owner: "client",
+    description:
+      "Queue follow-ups or steer them into the running turn; Mod+Enter does the opposite.",
+    keywords: "steer queue follow-up enter",
+  },
+  {
+    section: "general",
     title: "Auto-collapse wide composer labels",
     owner: "client",
     description: "Show long composer mode labels only on hover or focus.",

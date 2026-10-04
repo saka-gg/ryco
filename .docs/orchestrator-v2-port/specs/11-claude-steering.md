@@ -207,7 +207,7 @@ Add it to the `ProviderAdapterError` union, which also makes it part of `Provide
   - `abort` when `terminal_reason ∈ {aborted_streaming, aborted_tools}`, or when `terminal_reason` is absent and `isInterruptedResult(result)` holds.
   - Otherwise `failure`.
 - `claudeResultBelongsToTurn({ echoed, origin, promptUuid, steerPromptUuids }): boolean`. This replaces the inline check at `:3138-3157`. A result belongs to the turn if it echoes the prompt or any steer. Without an echo, it does not belong if its origin is not human. The legacy behaviour for synthetic turns is kept: when `promptUuid` is undefined, the caller skips the check.
-- `decideClaudeTurnResult(input)` returns `{ decision, newlySettled, unsettled }`:
+- `decideClaudeTurnResult(input)` returns `{ decision, newlySettled, unsettled, discardUnsettled, abortedBySteer }`:
 
 ```ts
 export interface ClaudeTurnResultDecisionInput {
@@ -225,6 +225,12 @@ export interface ClaudeTurnResultDecisionInput {
 // otherwise "complete"
 ```
 
+- **Closing status:** `decideClaudeTurnClose({ resultStatus, decision, interruptRequested, echoedPromptUuids, promptUuid, steerPromptUuids, foldedIntoDiscardedCliTurn })` returns `{ status, cause }`. The status follows `turnStatusFromResult` except where that would misstate the turn, checked in this order:
+  - `folded-into-discarded-cli-turn`: the result ends a discarded steer's dropped CLI turn that the CLI folded this turn's prompt or steer into. `failed` (the reply was dropped and, after the discard's re-interrupt, usually never produced), or `interrupted` (cause `stopped`) when Stop was requested. Ryco's own re-interrupt is never reported as a user Stop.
+  - `stopped`: Stop was requested and a result with status `completed` echoes a steer but not the prompt (a steer's CLI turn closes the stopped turn, for example with an API-error reply). `interrupted`.
+  - `failed-segment-dropped-steers`: no Stop, the segment failed and dropped its pending steers (`discardUnsettled`), but the result has status `completed`: the SDK reports a request that failed at the API as `subtype: "success", is_error: true`. `failed`, with the result text as the error and a `runtime.error`, so the queue holds and the dropped steer is explained.
+  - `aborted-by-steer`: `completed` (a steer is never an interrupt).
+  - Otherwise `result`.
 - **Receipt parsing:** `readClaudeInterruptReceipt(value: unknown): { stillQueued: ReadonlyArray<string>; cancelled: ReadonlyArray<string> | undefined } | undefined`. It is defensive and accepts only string arrays.
 - **Stop decision:** `decideClaudeStop({ unsettledSteers, promptUuid, sealedSegmentCount, awaitingSteerContinuation, receipt })` returns `{ forceClose: boolean; discard: ReadonlyArray<string> }`. It implements the §3 Stop table:
 
@@ -287,15 +293,15 @@ receipt present:   outstanding = still_queued ∪ cancelled
 
    `routeSteerFrame` works as follows:
    - **No discard in progress:**
-     - **Pass through** unless the message is a `stream_event` with echo uuids `E` (non-empty).
-     - **Uuids owned by the open turn.** If `context.turnState` owns any uuid in `E` (its prompt or a steer), process the frame normally. If that turn has `interruptRequested`, also fire one plain re-interrupt, recorded once per uuid set (scenario S5).
+     - **Pass through** unless the message is a `stream_event`, a root `assistant` frame or a `result` with echo uuids `E` (non-empty). A CLI turn that streams nothing echoes on its first root assistant frame (`sdk.d.ts:3327-3336`), for example the synthetic error reply of a request that failed at the API.
+     - **Uuids owned by the open turn.** If `context.turnState` owns any uuid in `E` (its prompt or a steer), process the frame normally. If that turn has `interruptRequested`, also fire one plain re-interrupt, recorded once per uuid set (scenario S5), unless the frame is a synthetic API-error reply (`isClaudeApiErrorReply`): that reply ends its CLI turn, so the interrupt could only reach the CLI's next turn.
      - **Only discarded uuids.** Otherwise, if every uuid in `E` is in `discardedSteerPromptUuids`:
        - set `discardingCliTurn = { uuids: E }`;
-       - fork a plain `query.interrupt()` with `runFork`, bounded to 5 s, errors ignored;
+       - fork a plain `query.interrupt()` with `runFork`, bounded to 5 s, errors ignored, unless the frame is a synthetic API-error reply (`isClaudeApiErrorReply`), which ends its CLI turn anyway;
        - log `claude.turn.discarding-cancelled-steer`;
        - drop the frame.
    - **Discard in progress:**
-     - On the next `result`, remove its uuids from the discard set and clear `discardingCliTurn`. Then `emitTokenUsageSnapshot(context, computeResultUsageSnapshot(context, result), undefined)` and drop the result.
+     - On the next `result`, remove its uuids from the discard set and clear `discardingCliTurn`. Then `emitTokenUsageSnapshot(context, computeResultUsageSnapshot(context, result), undefined)` and drop the result. Exception: a result that echoes a uuid the open turn owns (the CLI folded that turn's prompt or steer into the discarded CLI turn) closes that turn through `handleResultMessage` with `foldedIntoDiscardedCliTurn`, so it ends as `failed` with a resend notice (or `interrupted` after Stop), never as Ryco's own re-interrupt.
      - Drop `stream_event`, `assistant`, `user`, `tool_progress` and `tool_use_summary` frames.
      - Let `system` frames (task lifecycle) and `rate_limit_event` frames through.
 
@@ -319,10 +325,12 @@ receipt present:   outstanding = still_queued ∪ cancelled
        yield* Effect.logInfo("claude.turn.awaiting-steer-continuation", { threadId, turnId, queuedTurnCount, unsettled: d.unsettled.length, terminalReason });
        return;
      }
-     if (!turnState.interruptRequested && turnStatusFromResult(message) !== "completed")
+     if (d.discardUnsettled) // Stop, or a failure (including a success flagged as an error)
        for (const u of d.unsettled) rememberDiscardedSteer(context.discardedSteerPromptUuids, u);
    }
-   // unchanged tail: status, errorMessage, emitRuntimeError on failed, completeTurn(...)
+   // close = decideClaudeTurnClose(...) (resultStatus otherwise); a non-`result` cause seals the
+   // segment on resultStatus first unless close.status is failed; errorMessage by cause;
+   // emitRuntimeError on failed; completeTurn(context, close.status, errorMessage, message)
    ```
 
    - **Failure with unsettled steers.** The steers are discarded rather than run as a surprise turn after a failed turn. This is consistent with `queue-hold-drain` holding queued work after a failure.
@@ -703,7 +711,8 @@ Run each focused file with `bun run --cwd <pkg> test <file>`. Never run `bun tes
 - `classifyClaudeResultKind`:
   - `aborted_tools` with no "abort" in the error text → abort;
   - no `terminal_reason` with "Request was aborted" → abort;
-  - success with `is_error: true` → failure.
+  - success with `is_error: true` → failure, including the SDK's API-error shape (`terminal_reason: "api_error"`, `api_error_status`, the error text in `result`), which matrix row 8 then drops.
+- `decideClaudeTurnClose`: each cause in §4.3, its precedence, and that a Stop racing the prompt's own result keeps that result's status.
 - `claudeResultBelongsToTurn`: a steer-only echo belongs; a foreign echo does not; an empty echo with a non-human origin does not.
 - `decideClaudeStop`: every row S1–S8 of §3.
 - `readClaudeInterruptReceipt`: `undefined`, valid input, and garbage.
@@ -743,7 +752,9 @@ Extend `FakeClaudeQuery` so that `interrupt(options?)` records the options and r
   - S's first `stream_event` is processed and triggers a second interrupt.
   - An aborted result echoing `[S]` produces exactly one `turn.completed` (interrupted).
 - **(i) S1.** `interrupt()` is called with no argument. The existing tests "treats user-aborted Claude results as interrupted…" and "interruptTurn settles every acknowledged live task…" stay green.
-- **(j) Failed segment.** A failed segment (`api_error`, count 1) with unsettled S produces `turn.completed` (failed). Then S's frames are discarded.
+- **(j) Failed segment.** A failed segment (`api_error`, count 1) with unsettled S produces `turn.completed` (failed). Then S's frames are discarded. The same holds for the SDK's API-error shape (`subtype: "success", is_error: true`): the turn fails with the result text and one `runtime.error`.
+- **(j2) Stopped steer with an API-error reply.** S3 (stale receipt) and S5 (in transit): S's first reply is an echoed root assistant frame with `error: "server_error"`. No re-interrupt (`interruptCalls` holds only Stop's call), and S's flagged-success result closes the turn once as `interrupted` with no `runtime.error`.
+- **(j3) Prompt folded into a discarded CLI turn.** With the discard's re-interrupt sent, the CLI's result echoes `[S, P2]`, aborted or finished. P2's turn ends once as `failed` with the resend notice and a `runtime.error`, never as `interrupted`, and the dropped reply never streams.
 - **(k) Reasoning fix without steers.** An aborted result while a thinking block is open emits `item.completed` (reasoning) before `turn.completed`.
 - **(l) `terminal_reason` mapping.** An `aborted_tools` result whose error text lacks "abort" produces `turn.completed` (interrupted), with no runtime error.
 - **(m) Correlation.** Extend the existing `foreignResult` table at `:5157-5300`: a result echoing only the turn's steer uuid is accepted, and foreign results are still dropped.
@@ -817,8 +828,16 @@ Extend `FakeClaudeQuery` so that `interrupt(options?)` records the options and r
 - **`cancel_queued` drops more than steers.** It also dequeues uuid-less task notifications. That is why it is sent only when the turn has unsettled steers. In that case dropping pending wakes matches what Stop means.
 - **Two steers close together** may run as one CLI turn. The result lists both uuids and both settle.
 - **Steer during compaction** (`status: compacting`): allowed. The CLI queues S.
-- **Discard path** requires the early echo from `includePartialMessages`, which Ryco always sets. On a CLI that echoes only on the result, a discarded steer's output would leak into a synthetic turn. Steering is gated on `interrupt_receipt_v1`, a modern capability, so this is unlikely.
+- **Discard path** requires the early echo from `includePartialMessages`, which Ryco always sets. On a CLI that echoes only on the result, a discarded steer's output would leak into a synthetic turn. That turn has no other result to close it, so the steer's fully discarded result is routed to it and completes it instead of being dropped. Steering is gated on `interrupt_receipt_v1`, a modern capability, so this is unlikely.
 - **Stop arriving before S reaches the CLI:** handled by scenario S5. The steer is counted as running, so the turn is not force-closed.
+- **Stale receipt (implementation note).** The stream fiber can route S's first echoed frame into the stopped turn before the interrupt fiber handles a receipt that still lists S as queued. A steer whose echo was routed into the turn counts as running whatever the receipt says, so the turn is not force-closed and S's re-interrupted aborted result closes it (S5 behaviour).
+- **Cancelled steers stay settled (implementation note).** With `interrupt_cancel_queued_v1`, the uuids the receipt cancelled are marked settled on the turn, so a stopped turn's closing result handled after the receipt does not put them back into the discard set, where they would defer every later wake signal.
+- **Echo on the assistant reply (implementation note).** A discarded steer's CLI turn that streams nothing carries its echo on its first root assistant frame. That frame starts the discard like the stream echo, so the deferred wake turn never opens. A synthetic API-error reply (`error` set, other than `max_output_tokens`) ends its CLI turn, so it is not re-interrupted: the interrupt would land on the CLI's next turn. The same applies to the S5 re-interrupt.
+- **Prompt folded into a discarded CLI turn (implementation note).** If the CLI folds the next prompt (or a steer of the open turn) into a discarded steer's CLI turn, only the result shows it. That result echoes a uuid the open turn owns, so it closes the turn instead of being dropped (D2). The prompt gets no reply at all: the discard's re-interrupt was sent at the CLI turn's first reply, so the folded result is normally the aborted one, and a folded uuid never runs as its own turn (`sdk.d.ts` `cancel_queued`). Even when the CLI turn finishes first, its reply was already dropped with the discarded frames. The turn therefore ends as `failed` with a notice to send the message again, never as `interrupted`, which would make the client queue hold as "Paused after Stop" for a Stop the user never pressed.
+- **Stopped turn closed by a steer's own result (implementation note).** A steer whose first reply is a synthetic API-error reply counts as started, so a stale receipt does not force-close the stopped turn (S3), and no re-interrupt is sent (S3 and S5). The steer's flagged-success result then closes the turn. Because it echoes only a steer and Stop was requested, the turn ends as `interrupted`, as the S3/S5 rows require, not as `completed`.
+- **Failure flagged as success (implementation note).** The SDK reports a request that failed at the API after its retries as `subtype: "success", is_error: true`, and `turnStatusFromResult` maps that to `completed`. When such a result drops pending steers (matrix row 8), the turn ends as `failed` with the result text and a `runtime.error` instead, so the queue holds as the discard rule assumes and the user sees why the steer got no reply. Without pending steers the existing mapping is unchanged.
+- **Discarded steer batched with the next prompt.** If the CLI runs a discarded steer in the same CLI turn as the next prompt, the echo is not fully discarded, so the CLI turn is kept and the steer is answered inside that prompt's turn. Documented in `docs/providers/claude.md`.
+- **Prompt queued behind its own steer (known edge, deferred).** When `sendTurn` installs P while the CLI is still running another CLI turn (for example a wake turn its stale-turn loop closed locally), P waits in the CLI queue. If the user then steers S and the CLI runs the `"now"` S before the queued P instead of batching them, S's result settles every steer and the turn completes before P ran; P's reply lands in a background turn. Ryco does not track prompt consumption for this. Handling it needs the prompt to be treated like a pending steer in the await rule and in the Stop protocol (cancel, discard, re-interrupt), which waits on manual QA §11 showing how the CLI orders the two. Documented in `docs/providers/claude.md`.
 - **Lost client attempts.** If the server restarts after `thread.turn-steer-requested` was persisted but before it resolved, the attempt stays pending. The row's Remove button stays enabled (`ComposerQueuedMessages.tsx:116-123`). W3 `provider-effect-outbox` must resolve such steers as rejected with `reason: "deferred"`.
 - **Timeline order of a queued-then-steered message.** The steer keeps the queue `createdAt`, the same as for Codex today. A direct composer steer uses "now".
 - **`turn.completed.usage` (main-loop, per CLI turn)** reflects only the last segment. The context meter is updated for every segment, and `totalCostUsd` is cumulative.
@@ -842,7 +861,7 @@ Extend `FakeClaudeQuery` so that `interrupt(options?)` records the options and r
 - **`reactor-errors-switch` (W1).** `classifyTurnSteerFailure` takes the formatter as a parameter, so pass their user-facing formatter.
 - **`usage-limits` (W2, same wave, unavoidable overlap in `handleResultMessage`, `turnStatusFromResult` and the `completeTurn` tail).** Their usage-limit classification applies to results this classifier marks `complete`, because usage-limit results are `failure`, which never waits. Agreed split:
   - this package owns the correlation check and the await branch at the top of `handleResultMessage`, and the `terminal_reason` abort line in `turnStatusFromResult`;
-  - `usage-limits` owns failure classification and the error class.
+  - `usage-limits` owns failure classification and the error class. Their usage-limit result (also `subtype: "success", is_error: true`) takes precedence over this package's `failed-segment-dropped-steers` close; both end the turn as `failed`, and a pending steer is still discarded by `decideClaudeTurnResult`.
 
   Whichever merges second rebases.
 

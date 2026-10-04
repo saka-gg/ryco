@@ -15,6 +15,7 @@ import {
   type QueueHold,
   type QueueSendHooks,
   type QueueThreadView,
+  type QueuedMessageSteerAttempt,
 } from "@ryco/client-runtime/state/message-queue";
 import {
   captureQueuedDispatchSnapshot,
@@ -77,6 +78,40 @@ const pendingDispatchByThreadKey = new Map<string, QueuedDispatchSnapshot>();
 const dispatchedByThreadKey = new Map<string, Set<string>>();
 const failedSnapshots = new Map<string, QueuedDispatchSnapshot>();
 const inFlightThreadKeys = new Set<string>();
+/**
+ * Messages with a live steer attempt, by message id. In memory only: an app kill ends every
+ * attempt, and the message is then sent as a normal turn. The drain never sends one as a turn.
+ */
+const steeringOutboxAttempts = new Map<string, QueuedMessageSteerAttempt>();
+
+/** Marks a queued message as being steered; the drain stops at it, preserving order. */
+export function markThreadOutboxSteering(
+  messageId: string,
+  attempt: QueuedMessageSteerAttempt,
+): void {
+  if (steeringOutboxAttempts.has(messageId)) return;
+  steeringOutboxAttempts.set(messageId, attempt);
+  notifyListeners();
+}
+
+/** Ends a steer attempt; with a `commandId`, only that attempt (a stale outcome is ignored). */
+export function clearThreadOutboxSteering(messageId: string, commandId?: string): void {
+  const attempt = steeringOutboxAttempts.get(messageId);
+  if (!attempt || (commandId !== undefined && attempt.commandId !== commandId)) return;
+  steeringOutboxAttempts.delete(messageId);
+  notifyListeners();
+}
+
+function steerAttemptsFor(
+  queue: ReadonlyArray<QueuedThreadMessage>,
+): Record<string, QueuedMessageSteerAttempt> {
+  const attempts: Record<string, QueuedMessageSteerAttempt> = {};
+  for (const message of queue) {
+    const attempt = steeringOutboxAttempts.get(message.messageId);
+    if (attempt) attempts[message.messageId] = attempt;
+  }
+  return attempts;
+}
 
 function notifyListeners(): void {
   for (const listener of listeners) listener();
@@ -409,6 +444,7 @@ export function enqueueThreadOutboxMessage(message: QueuedThreadMessage): void {
 }
 
 export function removeThreadOutboxMessage(messageId: string): void {
+  steeringOutboxAttempts.delete(messageId);
   const next = messages.filter((m) => m.messageId !== messageId);
   if (next.length === messages.length) return;
   commitMessages(next);
@@ -486,6 +522,7 @@ export function resetThreadOutboxForTests(): void {
   dispatchedByThreadKey.clear();
   failedSnapshots.clear();
   inFlightThreadKeys.clear();
+  steeringOutboxAttempts.clear();
   notifyListeners();
 }
 
@@ -579,8 +616,8 @@ export async function drainThreadOutbox(deps: ThreadOutboxDrainDeps): Promise<vo
             ? { id: message.messageId, deliveryStatus: "failed" as const }
             : { id: message.messageId },
         ),
-        // Mobile steering ids are screen-local (pre-existing).
-        steeringIds: [],
+        // A message being steered stops the drain: later messages keep their order.
+        steerAttempts: steerAttemptsFor(queue),
         hold: holds[key] ?? null,
         acknowledgedCauseKeys: acknowledged[key],
         headProviderInstanceId: head.modelSelection?.instanceId ?? null,
@@ -627,9 +664,15 @@ export async function drainThreadOutbox(deps: ThreadOutboxDrainDeps): Promise<vo
         continue;
       }
       if (drainStep.kind === "reconcile") {
-        commitMessages(
-          messages.filter((message) => !drainStep.removeIds.includes(message.messageId)),
-        );
+        for (const rejection of drainStep.endSteers) {
+          clearThreadOutboxSteering(rejection.messageId, rejection.attempt.commandId);
+        }
+        for (const id of drainStep.removeIds) steeringOutboxAttempts.delete(id);
+        if (drainStep.removeIds.length > 0) {
+          commitMessages(
+            messages.filter((message) => !drainStep.removeIds.includes(message.messageId)),
+          );
+        }
         for (const id of drainStep.removeIds) {
           const failed = failedSnapshots.get(id);
           failedSnapshots.delete(id);

@@ -101,7 +101,9 @@ describe("readQueueThreadView", () => {
     expect(loaded.turnStartFailures).toEqual([
       { activityId: "a-1", messageId: "m-1", detail: "Thread already has active turn" },
     ]);
-    expect([...loaded.steerFailedMessageIds]).toEqual(["m-2"]);
+    expect([...loaded.steerRejectionsByActivityId]).toEqual([
+      ["a-2", { messageId: "m-2", reason: "failed", error: "Steer rejected." }],
+    ]);
   });
 
   it("flags a latest turn whose checkpoint is the provider-diff placeholder", () => {

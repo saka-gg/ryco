@@ -41,8 +41,11 @@ import { scopeProjectRef, scopeThreadRef, scopedThreadKey } from "@ryco/client-r
 import type { TimelineEntry } from "@ryco/client-runtime/state/session";
 import {
   buildQueuedMessageSteerCommand,
+  collectQueuedMessageSteerOutcomes,
   getQueuedThreadKeys,
+  indexTurnSteerRejections,
   resolveQueuedMessageSteerEligibility,
+  type QueuedMessageSteerAttempt,
 } from "@ryco/client-runtime/state/message-queue";
 import { buildThreadInbox } from "@ryco/client-runtime/state/threads";
 import {
@@ -89,10 +92,12 @@ import {
   wsUiStateForEnvironment,
 } from "../../rpc/wsConnectionState";
 import {
+  clearThreadOutboxSteering,
   enqueueThreadOutboxMessage,
   getThreadOutboxHold,
   holdThreadOutboxForInterrupt,
   listThreadOutboxMessages,
+  markThreadOutboxSteering,
   releaseThreadOutboxHold,
   removeThreadOutboxMessage,
   retryThreadOutboxReview,
@@ -276,8 +281,23 @@ export function ThreadDetailScreen(props: {
   const [attachments, setAttachments] = useState<ReadonlyArray<DraftComposerAttachment>>([]);
   const ownedUploadIds = useRef(new Set<string>());
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
-  const [steeringMessageIds, setSteeringMessageIds] = useState<ReadonlySet<string>>(
-    () => new Set(),
+  // Live steer attempts by message id. Each is keyed by its request's commandId, so only that
+  // request's own outcome ends it.
+  const [steerAttempts, setSteerAttempts] = useState<
+    ReadonlyMap<string, QueuedMessageSteerAttempt>
+  >(() => new Map());
+  const steeringMessageIds = useMemo(() => new Set(steerAttempts.keys()), [steerAttempts]);
+  const steerAttemptsRef = useRef(steerAttempts);
+  useEffect(() => {
+    steerAttemptsRef.current = steerAttempts;
+  }, [steerAttempts]);
+  useEffect(
+    () => () => {
+      for (const [messageId, attempt] of steerAttemptsRef.current) {
+        clearThreadOutboxSteering(messageId, attempt.commandId);
+      }
+    },
+    [],
   );
   const [expandedFoldIds, setExpandedFoldIds] = useState<ReadonlySet<string>>(() => new Set());
   const serverConfig = useAtomValue(serverConfigAtom);
@@ -668,21 +688,42 @@ export function ThreadDetailScreen(props: {
     [getSteerEligibility],
   );
 
+  const endSteerAttempt = useCallback((messageId: string, commandId: string) => {
+    clearThreadOutboxSteering(messageId, commandId);
+    setSteerAttempts((current) => {
+      if (current.get(messageId)?.commandId !== commandId) return current;
+      const next = new Map(current);
+      next.delete(messageId);
+      return next;
+    });
+  }, []);
+
   const steerQueuedMessage = useCallback(
     async (message: QueuedThreadMessage) => {
+      if (steerAttemptsRef.current.has(message.messageId)) return;
       const eligibility = getSteerEligibility(message);
       if (!eligibility.allowed) {
         setSendError(eligibility.reason);
         return;
       }
       setSendError(null);
-      setSteeringMessageIds((current) => new Set(current).add(message.messageId));
+      // Minted first and marked before any await, so the outbox drain never sends it as a turn.
+      const commandId = newCommandId();
+      const attempt: QueuedMessageSteerAttempt = {
+        commandId,
+        expectedTurnId: eligibility.expectedTurnId,
+        startedAt: new Date().toISOString(),
+        explicit: true,
+      };
+      markThreadOutboxSteering(message.messageId, attempt);
+      steerAttemptsRef.current = new Map(steerAttemptsRef.current).set(message.messageId, attempt);
+      setSteerAttempts((current) => new Map(current).set(message.messageId, attempt));
       try {
         const attachments = await buildQueuedThreadMessageAttachments(message);
         const requestedAt = new Date().toISOString();
         await ensureEnvironmentApi(environmentId).orchestration.dispatchCommand(
           buildQueuedMessageSteerCommand({
-            commandId: newCommandId(),
+            commandId,
             threadId,
             expectedTurnId: eligibility.expectedTurnId,
             messageId: MessageId.make(message.messageId),
@@ -693,51 +734,32 @@ export function ThreadDetailScreen(props: {
           }),
         );
       } catch (error) {
-        setSteeringMessageIds((current) => {
-          const next = new Set(current);
-          next.delete(message.messageId);
-          return next;
-        });
+        endSteerAttempt(message.messageId, commandId);
         setSendError(error instanceof Error ? error.message : "The steer request failed.");
       }
     },
-    [environmentId, getSteerEligibility, threadId],
+    [endSteerAttempt, environmentId, getSteerEligibility, threadId],
   );
 
+  // Accepted steers are projected into the running turn; a rejection of THIS attempt returns
+  // the message to the queue. Deferred rejections stay quiet: the row stays visibly queued.
   useEffect(() => {
-    if (!thread || steeringMessageIds.size === 0) return;
-    const projectedIds = new Set(thread.messages.map((message) => String(message.id)));
-    const rejected = new Map<string, string>();
-    for (const activity of thread.activities) {
-      if (activity.kind !== "provider.turn.steer.failed" || !activity.payload) continue;
-      const payload = activity.payload as {
-        messageId?: unknown;
-        error?: unknown;
-      };
-      if (typeof payload.messageId === "string") {
-        rejected.set(
-          payload.messageId,
-          typeof payload.error === "string" ? payload.error : "The provider rejected steering.",
-        );
-      }
-    }
-    let rejectionMessage: string | null = null;
-    for (const messageId of steeringMessageIds) {
-      if (projectedIds.has(messageId)) {
-        removeThreadOutboxMessage(messageId);
-      } else if (rejected.has(messageId)) {
-        rejectionMessage = rejected.get(messageId) ?? null;
-      }
-    }
-    setSteeringMessageIds((current) => {
-      const next = new Set(current);
-      for (const messageId of current) {
-        if (projectedIds.has(messageId) || rejected.has(messageId)) next.delete(messageId);
-      }
-      return next.size === current.size ? current : next;
+    if (!thread || steerAttempts.size === 0) return;
+    const outcomes = collectQueuedMessageSteerOutcomes({
+      attempts: steerAttempts,
+      projectedMessageIds: new Set(thread.messages.map((message) => String(message.id))),
+      rejectionsByActivityId: indexTurnSteerRejections(thread.activities),
     });
-    if (rejectionMessage) setSendError(rejectionMessage);
-  }, [steeringMessageIds, thread]);
+    for (const messageId of outcomes.accepted) {
+      removeThreadOutboxMessage(messageId);
+      endSteerAttempt(messageId, steerAttempts.get(messageId)!.commandId);
+    }
+    for (const rejection of outcomes.rejected) {
+      endSteerAttempt(rejection.messageId, rejection.attempt.commandId);
+    }
+    const failed = outcomes.rejected.findLast((rejection) => rejection.reason === "failed");
+    if (failed) setSendError(failed.error);
+  }, [endSteerAttempt, steerAttempts, thread]);
 
   const applyPolicy = useCallback(async (apply: () => Promise<void>) => {
     setPolicyBusy(true);
@@ -1277,12 +1299,8 @@ export function ThreadDetailScreen(props: {
         onSteer={(message) => void steerQueuedMessage(message)}
         onRemove={(messageId) => {
           removeThreadOutboxMessage(messageId);
-          setSteeringMessageIds((current) => {
-            if (!current.has(messageId)) return current;
-            const next = new Set(current);
-            next.delete(messageId);
-            return next;
-          });
+          const attempt = steerAttempts.get(messageId);
+          if (attempt) endSteerAttempt(messageId, attempt.commandId);
         }}
       />
 

@@ -76,6 +76,7 @@ import {
   ProviderAdapterSessionClosedError,
   ProviderAdapterSessionNotFoundError,
   ProviderAdapterValidationError,
+  ProviderTurnNotSteerableError,
   type ProviderAdapterError,
 } from "../Errors.ts";
 import { type CodexAdapterShape } from "../Services/CodexAdapter.ts";
@@ -2370,6 +2371,23 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         })
         .pipe(
           Effect.mapError((cause) => mapCodexRuntimeError(input.threadId, "turn/steer", cause)),
+          // A late steer races the turn's end. Decide by state, not by the error text: if the
+          // runtime no longer runs the expected turn, the message is sent as the next turn.
+          Effect.catchTag("ProviderAdapterRequestError", (error) =>
+            Effect.gen(function* () {
+              const current = yield* session.runtime.getSession;
+              if (current.activeTurnId === input.expectedTurnId) return yield* error;
+              return yield* new ProviderTurnNotSteerableError({
+                provider: PROVIDER,
+                threadId: input.threadId,
+                turnId: input.expectedTurnId,
+                reason: "turn-ended",
+                detail:
+                  "The turn finished before this message could be steered. It stays queued and is sent next.",
+                cause: error,
+              });
+            }),
+          ),
         );
     },
   );

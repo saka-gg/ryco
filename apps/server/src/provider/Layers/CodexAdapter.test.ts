@@ -134,14 +134,23 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
     return Effect.promise(() => this.startImpl());
   }
 
-  getSession = Effect.promise(() => this.startImpl());
+  /** When set, the runtime reports this session instead of the started one. */
+  public sessionOverride: ProviderSession | null = null;
+
+  getSession = Effect.suspend(() =>
+    this.sessionOverride
+      ? Effect.succeed(this.sessionOverride)
+      : Effect.promise(() => this.startImpl()),
+  );
 
   sendTurn(input: CodexSessionRuntimeSendTurnInput) {
     return Effect.promise(() => this.sendTurnImpl(input));
   }
 
+  public steerTurnEffect: ReturnType<CodexSessionRuntimeShape["steerTurn"]> | null = null;
+
   steerTurn(input: CodexSessionRuntimeSteerTurnInput) {
-    return Effect.promise(() => this.steerTurnImpl(input));
+    return this.steerTurnEffect ?? Effect.promise(() => this.steerTurnImpl(input));
   }
 
   interruptTurn(turnId?: TurnId) {
@@ -491,6 +500,83 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
         input: "Check this before continuing",
       });
       assert.equal(result.turnId, expectedTurnId);
+    }),
+  );
+
+  it.effect("defers a Codex steer that lost its race with the end of the turn", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const threadId = asThreadId("sess-steer-late");
+      const expectedTurnId = asTurnId("turn-ended");
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("test-codexadapter-steer-late"),
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const runtime = sessionRuntimeFactory.lastRuntime;
+      assert.ok(runtime);
+      runtime.steerTurnEffect = Effect.fail(
+        new CodexErrors.CodexAppServerRequestError({
+          code: -32600,
+          errorMessage: "no active turn",
+        }),
+      );
+
+      const failure = yield* Effect.flip(
+        adapter.steerTurn!({
+          threadId,
+          expectedTurnId,
+          messageId: MessageId.make("message-steer-late"),
+          input: "Too late",
+          attachments: [],
+        }),
+      );
+      runtime.steerTurnEffect = null;
+
+      assert.equal(failure._tag, "ProviderTurnNotSteerableError");
+      if (failure._tag === "ProviderTurnNotSteerableError") {
+        assert.equal(failure.reason, "turn-ended");
+        assert.equal(failure.turnId, expectedTurnId);
+      }
+    }),
+  );
+
+  it.effect("keeps a Codex steer request error while the expected turn still runs", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const threadId = asThreadId("sess-steer-error");
+      const expectedTurnId = asTurnId("turn-running");
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("test-codexadapter-steer-error"),
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const runtime = sessionRuntimeFactory.lastRuntime;
+      assert.ok(runtime);
+      const started = yield* Effect.promise(() => runtime.startImpl());
+      runtime.sessionOverride = { ...started, status: "running", activeTurnId: expectedTurnId };
+      runtime.steerTurnEffect = Effect.fail(
+        new CodexErrors.CodexAppServerRequestError({
+          code: -32603,
+          errorMessage: "steer exploded",
+        }),
+      );
+
+      const failure = yield* Effect.flip(
+        adapter.steerTurn!({
+          threadId,
+          expectedTurnId,
+          messageId: MessageId.make("message-steer-error"),
+          input: "Check this",
+          attachments: [],
+        }),
+      );
+      runtime.steerTurnEffect = null;
+      runtime.sessionOverride = null;
+
+      assert.equal(failure._tag, "ProviderAdapterRequestError");
     }),
   );
 

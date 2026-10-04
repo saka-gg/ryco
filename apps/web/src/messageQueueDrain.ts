@@ -5,6 +5,7 @@ import {
   type MessageQueueDrainCoordinator,
   type MessageQueueDrainPlatform,
   type MessageQueueSender,
+  type QueueDrainSteerRejection,
   type QueueSendHooks,
   type QueueThreadView,
 } from "@ryco/client-runtime/state/message-queue";
@@ -14,6 +15,7 @@ import { useEffect } from "react";
 import type { SendTurnComposerSnapshot, SendTurnSettings } from "./hooks/executeChatSendTurn";
 import { sendQueuedMessageInBackground } from "./hooks/sendQueuedMessageInBackground";
 import { useComposerDraftStore } from "./composerDraftStore";
+import { stackedThreadToast, toastManager } from "./components/ui/toast";
 import { retainThreadDetailSubscription } from "./environments/runtime/service";
 import {
   readWebQueueEnvironment,
@@ -67,6 +69,21 @@ function revokeQueuedPreviewUrls(_threadKey: string, entry: WebQueuedMessage): v
   }
 }
 
+/**
+ * A steer the user asked for (Steer button, Mod+Enter) reports its outcome; an implicit one
+ * (Enter in steer mode) falls back to the queue silently. Either way the message stays queued.
+ */
+function notifySteerRejected(_threadKey: string, rejection: QueueDrainSteerRejection): void {
+  if (!rejection.attempt.explicit) return;
+  toastManager.add(
+    stackedThreadToast(
+      rejection.reason === "deferred"
+        ? { type: "info", title: "Not steered", description: rejection.error }
+        : { type: "error", title: "Steer failed", description: rejection.error },
+    ),
+  );
+}
+
 const webPlatform: MessageQueueDrainPlatform<SendTurnComposerSnapshot, SendTurnSettings> = {
   threads: { getState: useStore.getState, subscribe: (listener) => useStore.subscribe(listener) },
   readEnvironment: readWebQueueEnvironment,
@@ -79,6 +96,7 @@ const webPlatform: MessageQueueDrainPlatform<SendTurnComposerSnapshot, SendTurnS
   // the selected, connected node and never creates connection demand.
   retainThreadDetail: (ref) => retainThreadDetailSubscription(ref.environmentId, ref.threadId),
   onEntryRemoved: revokeQueuedPreviewUrls,
+  onSteerRejected: notifySteerRejected,
 };
 
 let coordinator: MessageQueueDrainCoordinator | null = null;

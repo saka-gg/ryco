@@ -16,6 +16,7 @@ import {
   makeQueueAppState,
   QUEUE_ENV,
   queueKey,
+  steerFailed,
   turnStartFailed,
   withThread,
   type ThreadFixture,
@@ -177,6 +178,7 @@ function setup(options: { thread?: ThreadFixture; mutationReady?: boolean } = {}
     headProviderInstanceId: () => "codex",
     retainThreadDetail: vi.fn(() => releaseDetail),
     onEntryRemoved: vi.fn(),
+    onSteerRejected: vi.fn(),
   } satisfies MessageQueueDrainPlatform<{ text: string }, Record<string, never>>;
   const coordinator = createMessageQueueDrainCoordinator(queue, platform);
   const release = coordinator.retain();
@@ -214,6 +216,41 @@ afterEach(() => {
 });
 
 describe("message queue drain coordinator", () => {
+  it("ends a steer only on its own rejection and then sends the message as the next turn", async () => {
+    const f = setup({ thread: RUNNING });
+    f.queue.getState().enqueue(KEY, entry("q-1"));
+    const attempt = {
+      commandId: "cmd-new",
+      expectedTurnId: TurnId.make("turn-1"),
+      startedAt: "2026-10-01T10:00:01.000Z",
+      explicit: true,
+    };
+    f.queue.getState().beginSteer(KEY, "q-1", attempt);
+    // A stale rejection of an earlier attempt for the same message.
+    f.setThread({ ...RUNNING, activities: [steerFailed("turn-steer-rejected:cmd-old", "q-1")] });
+    await flush();
+    expect(f.queue.getState().steerAttemptsByThreadKey[KEY]?.["q-1"]).toEqual(attempt);
+    expect(f.platform.onSteerRejected).not.toHaveBeenCalled();
+
+    // The turn ended; the steer is deferred and the message goes as the next turn.
+    f.setThread({
+      ...IDLE,
+      activities: [
+        steerFailed("turn-steer-rejected:cmd-old", "q-1"),
+        steerFailed("turn-steer-rejected:cmd-new", "q-1", "deferred"),
+      ],
+    });
+    await flush();
+    expect(f.platform.onSteerRejected).toHaveBeenCalledWith(KEY, {
+      messageId: "q-1",
+      attempt,
+      reason: "deferred",
+      error: "Steer rejected.",
+    });
+    expect(f.queue.getState().steerAttemptsByThreadKey[KEY]).toBeUndefined();
+    expect(f.sent).toEqual(["q-1"]);
+  });
+
   it("drains an off-screen started thread through the background sender once its turn settles", async () => {
     const f = setup({ thread: RUNNING });
     f.queue.getState().enqueue(KEY, entry("q-1"));

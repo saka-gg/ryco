@@ -40,7 +40,9 @@ import { deriveServerPaths, ServerConfig } from "../../config.ts";
 import { TextGenerationError } from "@ryco/contracts";
 import {
   ProviderAdapterRequestError,
+  ProviderAdapterSessionNotFoundError,
   ProviderSessionNotFoundError,
+  ProviderTurnNotSteerableError,
 } from "../../provider/Errors.ts";
 import { PersistenceSqlError } from "../../persistence/Errors.ts";
 import { STORAGE_FAILURE_DETAIL } from "../userFacingErrors.ts";
@@ -3154,6 +3156,100 @@ describe("ProviderCommandReactor", () => {
     expect(errors.get("steer-defect")).toBe("Provider rejected turn steering.");
   });
 
+  it("defers steers the provider cannot take and fails real provider errors", async () => {
+    const steerTurn = vi
+      .fn<ProviderServiceShape["steerTurn"]>()
+      .mockImplementationOnce(() =>
+        Effect.fail(
+          new ProviderTurnNotSteerableError({
+            provider: "claudeAgent",
+            threadId: "thread-1",
+            turnId: "turn-1",
+            reason: "busy",
+            detail: "Claude is waiting for an approval or answer. The message stays queued.",
+          }),
+        ),
+      )
+      .mockImplementationOnce(() =>
+        Effect.fail(
+          new ProviderAdapterSessionNotFoundError({ provider: "codex", threadId: "thread-1" }),
+        ),
+      )
+      .mockImplementationOnce(() =>
+        Effect.fail(
+          new ProviderAdapterRequestError({
+            provider: "codex",
+            method: "turn/steer",
+            detail: "steer exploded",
+          }),
+        ),
+      );
+    const harness = await createHarness({ steerTurn });
+    const now = new Date().toISOString();
+    const threadId = ThreadId.make("thread-1");
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("steer-deferral-session"),
+        threadId,
+        session: {
+          threadId,
+          status: "running",
+          providerName: "codex",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          runtimeSessionId: RuntimeSessionId.make("runtime-1"),
+          runtimeMode: "approval-required",
+          activeTurnId: asTurnId("turn-1"),
+          lastError: null,
+          updatedAt: now,
+        },
+        createdAt: now,
+      }),
+    );
+    for (const id of ["steer-busy", "steer-gone", "steer-error"]) {
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.steer",
+          commandId: CommandId.make(id),
+          threadId,
+          expectedTurnId: asTurnId("turn-1"),
+          message: { messageId: asMessageId(id), role: "user", text: id, attachments: [] },
+          createdAt: now,
+          requestedAt: now,
+        }),
+      );
+      await waitFor(async () =>
+        ((await readThread(harness))?.activities ?? []).some(
+          (activity) => activity.id === `turn-steer-rejected:${id}`,
+        ),
+      );
+    }
+
+    const rejections = new Map(
+      ((await readThread(harness))?.activities ?? [])
+        .filter((activity) => activity.kind === "provider.turn.steer.failed")
+        .map((activity) => {
+          const payload = activity.payload as {
+            readonly messageId: string;
+            readonly error: string;
+            readonly reason: string;
+          };
+          return [payload.messageId, { ...payload, tone: activity.tone }] as const;
+        }),
+    );
+    expect(rejections.get("steer-busy")).toMatchObject({
+      reason: "deferred",
+      tone: "info",
+      error: "Claude is waiting for an approval or answer. The message stays queued.",
+    });
+    expect(rejections.get("steer-gone")).toMatchObject({ reason: "deferred", tone: "info" });
+    expect(rejections.get("steer-gone")?.error).not.toContain("Unknown");
+    expect(rejections.get("steer-error")).toMatchObject({
+      reason: "failed",
+      tone: "error",
+      error: "steer exploded",
+    });
+  });
   it("interrupted turn preparation appends no failure and keeps the reactor alive", async () => {
     const harness = await createHarness();
     harness.startSession.mockImplementationOnce(() => Effect.interrupt as never);

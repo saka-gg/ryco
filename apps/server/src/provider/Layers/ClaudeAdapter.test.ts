@@ -13,6 +13,7 @@ import type {
 import {
   ApprovalRequestId,
   ClaudeSettings,
+  MessageId,
   ProviderDriverKind,
   ProviderItemId,
   ProviderRuntimeEvent,
@@ -66,7 +67,14 @@ class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
   private done = false;
   private failure: unknown | undefined;
 
-  public readonly interruptCalls: Array<void> = [];
+  /** The arguments of each interrupt call; `[]` is the plain `interrupt()`. */
+  public readonly interruptCalls: Array<ReadonlyArray<unknown>> = [];
+  /** What interrupt resolves to (the CLI's receipt). */
+  public interruptReceipt: unknown = undefined;
+  /** Runs inside interrupt, before it resolves: the CLI writing frames ahead of the receipt. */
+  public onInterrupt: (() => void) | undefined;
+  /** While set, interrupt parks on it before resolving with the receipt. */
+  public interruptGate: Promise<void> | undefined;
   public readonly stopTaskCalls: Array<string> = [];
   public readonly setModelCalls: Array<string | undefined> = [];
   public readonly setPermissionModeCalls: Array<string> = [];
@@ -121,8 +129,12 @@ class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
     }
   }
 
-  readonly interrupt = async (): Promise<void> => {
-    this.interruptCalls.push(undefined);
+  readonly interrupt = async (...args: ReadonlyArray<unknown>): Promise<unknown> => {
+    this.interruptCalls.push(args);
+    const receipt = this.interruptReceipt;
+    this.onInterrupt?.();
+    if (this.interruptGate) await this.interruptGate;
+    return receipt;
   };
 
   readonly stopTask = async (taskId: string): Promise<void> => {
@@ -7877,5 +7889,1499 @@ describe("ClaudeAdapterLive provider wake turns", () => {
         Effect.provide(harness.layer),
       );
     });
+  });
+});
+
+describe("ClaudeAdapterLive steering", () => {
+  type EventLog = Effect.Success<ReturnType<typeof makeRuntimeEventLog>>;
+
+  const startSteerSession = (adapter: ClaudeAdapterShape, runtimeSessionId: string) =>
+    adapter.startSession({
+      runtimeSessionId: RuntimeSessionId.make(runtimeSessionId),
+      threadId: THREAD_ID,
+      provider: ProviderDriverKind.make("claudeAgent"),
+      runtimeMode: "full-access",
+    });
+
+  /** Emits a sentinel and waits for it: every earlier frame has been handled. */
+  const settle = (query: FakeClaudeQuery, log: EventLog, id: string) =>
+    Effect.gen(function* () {
+      query.emit(sentinelFrame(id));
+      yield* log.waitFor(isSentinel(id));
+    });
+
+  const streamFrame = (
+    id: string,
+    event: Record<string, unknown>,
+    echo?: ReadonlyArray<string>,
+  ): SDKMessage =>
+    ({
+      type: "stream_event",
+      uuid: id,
+      session_id: GAUGE_SDK_SESSION,
+      parent_tool_use_id: null,
+      event,
+      ...(echo ? { user_message_uuid: echo[echo.length - 1], user_message_uuids: echo } : {}),
+    }) as unknown as SDKMessage;
+
+  const thinkingStart = (id: string, index: number, echo?: ReadonlyArray<string>) =>
+    streamFrame(
+      id,
+      {
+        type: "content_block_start",
+        index,
+        content_block: { type: "thinking", thinking: "", signature: "" },
+      },
+      echo,
+    );
+
+  const lifecycleFor = (log: EventLog, turnId: unknown) =>
+    log.events.filter(
+      (event) =>
+        (event.type === "turn.started" || isTurnTerminal(event)) && event.turnId === turnId,
+    );
+
+  const BOTH_CAPABILITIES = ["interrupt_receipt_v1", "interrupt_cancel_queued_v1"] as const;
+
+  const initFrame = (capabilities: ReadonlyArray<string>): SDKMessage =>
+    ({ ...systemInitFrame(), capabilities: [...capabilities] }) as unknown as SDKMessage;
+
+  const textStart = (id: string, index: number, echo?: ReadonlyArray<string>) =>
+    streamFrame(
+      id,
+      { type: "content_block_start", index, content_block: { type: "text", text: "" } },
+      echo,
+    );
+  const textDelta = (id: string, index: number, text: string) =>
+    streamFrame(id, { type: "content_block_delta", index, delta: { type: "text_delta", text } });
+  const blockStop = (id: string, index: number) =>
+    streamFrame(id, { type: "content_block_stop", index });
+
+  const abortedResult = (echo: ReadonlyArray<string>, extra: Record<string, unknown> = {}) =>
+    resultFrame({
+      subtype: "error_during_execution",
+      errors: ["Request was aborted."],
+      terminal_reason: "aborted_streaming",
+      user_message_uuids: [...echo],
+      usage: { input_tokens: 12, output_tokens: 3 },
+      contextWindow: 200_000,
+      ...extra,
+    });
+
+  /** Reads the SDK user messages the adapter offered, in order, through one iterator. */
+  const makePromptReader = (harness: ReturnType<typeof makeHarness>) => {
+    let iterator: AsyncIterator<SDKUserMessage> | undefined;
+    return Effect.promise(async () => {
+      iterator ??= harness.getLastCreateQueryInput()?.prompt[Symbol.asyncIterator]();
+      const next = await iterator!.next();
+      assert.isFalse(next.done);
+      return next.value as SDKUserMessage;
+    });
+  };
+
+  const promptText = (message: SDKUserMessage): string | undefined => {
+    const content = message.message.content;
+    if (typeof content === "string") return content;
+    const first = content[0];
+    return first && first.type === "text" ? first.text : undefined;
+  };
+
+  /** Starts a session and one prompt turn on a CLI with the given init capabilities. */
+  const startPromptTurn = (
+    adapter: ClaudeAdapterShape,
+    harness: ReturnType<typeof makeHarness>,
+    log: EventLog,
+    id: string,
+    capabilities: ReadonlyArray<string> = BOTH_CAPABILITIES,
+    runtimeMode: RuntimeMode = "full-access",
+  ) =>
+    Effect.gen(function* () {
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make(id),
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode,
+      });
+      const turn = yield* adapter.sendTurn({
+        threadId: THREAD_ID,
+        input: "prompt",
+        attachments: [],
+      });
+      harness.query.emit(initFrame(capabilities));
+      harness.query.emit(systemStatusFrame("requesting"));
+      yield* settle(harness.query, log, `${id}-started`);
+      return turn;
+    });
+
+  const steer = (adapter: ClaudeAdapterShape, turnId: TurnId, input = "also check the tests") =>
+    adapter.steerTurn!({
+      threadId: THREAD_ID,
+      expectedTurnId: turnId,
+      messageId: MessageId.make(`message-${input.length}`),
+      input,
+    });
+
+  /** P has an open text block (0), thinking block (1) and an in-flight tool (2). */
+  const emitPromptSegment = (query: FakeClaudeQuery, promptUuid: string) => {
+    query.emit(textStart("p-text-start", 0, [promptUuid]));
+    query.emit(textDelta("p-text-delta", 0, "Working on it"));
+    query.emit(thinkingStart("p-thinking-start", 1));
+    query.emit({ ...rootToolStartFrame(2, "tool-p"), session_id: GAUGE_SDK_SESSION } as SDKMessage);
+  };
+
+  /** Emits a discarded steer's CLI turn the way the CLI runs it. */
+  const emitSteerCliTurn = (
+    query: FakeClaudeQuery,
+    steerUuid: string,
+    result: SDKMessage = resultFrame({ user_message_uuids: [steerUuid] }),
+  ) => {
+    query.emit(systemInitFrame());
+    query.emit(systemStatusFrame("requesting"));
+    query.emit(textStart("s-text-start", 0, [steerUuid]));
+    query.emit(textDelta("s-text-delta", 0, "Steered reply"));
+    query.emit(blockStop("s-text-stop", 0));
+    query.emit(rootAssistantFrame("s-assistant", {}, [{ type: "text", text: "Steered reply" }]));
+    query.emit(result);
+  };
+
+  it.effect("offers a steer as a now-priority message on the running turn", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      const readPrompt = makePromptReader(harness);
+      const turn = yield* startPromptTurn(adapter, harness, log, "steer-shape");
+      assert.equal(adapter.capabilities.turnSteering, "native");
+
+      const result = yield* steer(adapter, turn.turnId, "also check the tests");
+      assert.equal(result.turnId, turn.turnId);
+
+      const prompt = yield* readPrompt;
+      assert.equal(String(prompt.uuid), String(turn.turnId));
+      assert.isUndefined(prompt.priority);
+      const steered = yield* readPrompt;
+      assert.equal(steered.priority, "now");
+      assert.isString(steered.uuid);
+      assert.notEqual(String(steered.uuid), String(turn.turnId));
+      assert.equal(promptText(steered), "also check the tests");
+      assert.equal((yield* adapter.listSessions())[0]?.activeTurnId, turn.turnId);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("refuses steers the running turn cannot take", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("steer-refusals"),
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "approval-required",
+      });
+      const turn = yield* adapter.sendTurn({
+        threadId: THREAD_ID,
+        input: "prompt",
+        attachments: [],
+      });
+      const refusal = (turnId: TurnId, input?: string) =>
+        steer(adapter, turnId, input).pipe(Effect.flip);
+
+      const noCapability = yield* refusal(turn.turnId);
+      assert.equal(noCapability._tag, "ProviderTurnNotSteerableError");
+      if (noCapability._tag === "ProviderTurnNotSteerableError") {
+        assert.equal(noCapability.reason, "unsupported");
+      }
+
+      harness.query.emit(initFrame(BOTH_CAPABILITIES));
+      yield* settle(harness.query, log, "refusals-init");
+
+      const wrongTurn = yield* refusal(TurnId.make("another-turn"));
+      assert.equal(
+        wrongTurn._tag === "ProviderTurnNotSteerableError" && wrongTurn.reason,
+        "turn-ended",
+      );
+      const slash = yield* refusal(turn.turnId, "/review x");
+      assert.equal(slash._tag === "ProviderTurnNotSteerableError" && slash.reason, "unsupported");
+
+      const canUseTool = harness.getLastCreateQueryInput()?.options.canUseTool;
+      assert.ok(canUseTool);
+      const permission = canUseTool!(
+        "Bash",
+        { command: "pwd" },
+        { signal: new AbortController().signal, toolUseID: "tool-approval", requestId: "req-1" },
+      );
+      const opened = yield* log.waitFor((event) => event.type === "request.opened");
+      const busy = yield* refusal(turn.turnId);
+      assert.equal(busy._tag === "ProviderTurnNotSteerableError" && busy.reason, "busy");
+      yield* adapter.respondToRequest(
+        THREAD_ID,
+        ApprovalRequestId.make(String(opened.requestId)),
+        "cancel",
+      );
+      yield* Effect.promise(() => permission);
+
+      yield* adapter.interruptTurn(THREAD_ID, turn.turnId);
+      const stopped = yield* refusal(turn.turnId);
+      assert.equal(
+        stopped._tag === "ProviderTurnNotSteerableError" && stopped.reason,
+        "turn-ended",
+      );
+
+      yield* adapter.stopSession(THREAD_ID);
+      const closed = yield* refusal(turn.turnId);
+      assert.equal(closed._tag, "ProviderAdapterSessionNotFoundError");
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("keeps the turn open across a steer's aborted segment and completes it once", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      const readPrompt = makePromptReader(harness);
+      const turn = yield* startPromptTurn(adapter, harness, log, "steer-abort-continue");
+      emitPromptSegment(harness.query, turn.turnId);
+      yield* settle(harness.query, log, "p-open");
+
+      yield* steer(adapter, turn.turnId);
+      yield* readPrompt;
+      const steerUuid = (yield* readPrompt).uuid!;
+
+      const sealFrom = log.events.length;
+      harness.query.emit(abortedResult([turn.turnId], { queued_turn_count: 1 }));
+      yield* settle(harness.query, log, "p-aborted");
+      const sealed = log.events.slice(sealFrom);
+      assert.isFalse(sealed.some(isTurnTerminal));
+      const completedItem = (itemType: string) =>
+        sealed.find(
+          (event) => event.type === "item.completed" && event.payload.itemType === itemType,
+        );
+      const textItem = completedItem("assistant_message");
+      assert.equal(textItem?.type === "item.completed" && textItem.payload.status, "completed");
+      const reasoningItem = completedItem("reasoning");
+      assert.equal(
+        reasoningItem?.type === "item.completed" && reasoningItem.payload.status,
+        "completed",
+      );
+      const toolItem = sealed.find(
+        (event) => event.type === "item.completed" && String(event.itemId) === "tool-p",
+      );
+      assert.equal(toolItem?.type === "item.completed" && toolItem.payload.status, "failed");
+      assert.isTrue(
+        sealed.some(
+          (event) => event.type === "thread.token-usage.updated" && event.turnId === turn.turnId,
+        ),
+      );
+
+      const steerFrom = log.events.length;
+      harness.query.emit(systemInitFrame());
+      harness.query.emit(systemStatusFrame("requesting"));
+      harness.query.emit(textStart("s-text-start", 0, [steerUuid]));
+      harness.query.emit(textDelta("s-text-delta", 0, "Steered reply"));
+      yield* settle(harness.query, log, "s-streaming");
+      const steerDelta = log.events
+        .slice(steerFrom)
+        .find((event) => event.type === "content.delta" && event.payload.delta === "Steered reply");
+      assert.ok(steerDelta?.itemId);
+      assert.notEqual(String(steerDelta?.itemId), String(textItem?.itemId));
+      assert.equal(steerDelta?.turnId, turn.turnId);
+
+      harness.query.emit(resultFrame({ user_message_uuids: [steerUuid], queued_turn_count: 0 }));
+      const completed = yield* log.waitFor(isTurnTerminal);
+      assert.equal(completed.type === "turn.completed" && completed.payload.state, "completed");
+      assert.deepEqual(
+        lifecycleFor(log, turn.turnId).map((event) => event.type),
+        ["turn.started", "turn.completed"],
+      );
+      assert.lengthOf(
+        log.events.filter((event) => event.type === "turn.started"),
+        1,
+      );
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("completes at once when the CLI folds the steer into the running segment", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      const readPrompt = makePromptReader(harness);
+      const turn = yield* startPromptTurn(adapter, harness, log, "steer-folded");
+      yield* steer(adapter, turn.turnId);
+      yield* readPrompt;
+      const steerUuid = (yield* readPrompt).uuid!;
+      harness.query.emit(resultFrame({ user_message_uuids: [turn.turnId, steerUuid] }));
+      const completed = yield* log.waitFor(isTurnTerminal);
+      assert.equal(completed.turnId, turn.turnId);
+      assert.equal(completed.type === "turn.completed" && completed.payload.state, "completed");
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("accepts a result echoing only the steer and still drops foreign results", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      const readPrompt = makePromptReader(harness);
+      const turn = yield* startPromptTurn(adapter, harness, log, "steer-correlation");
+      yield* steer(adapter, turn.turnId);
+      yield* readPrompt;
+      const steerUuid = (yield* readPrompt).uuid!;
+      harness.query.emit(resultFrame({ user_message_uuids: ["another-prompt"] }));
+      harness.query.emit(resultFrame({ origin: { kind: "task-notification" } }));
+      yield* settle(harness.query, log, "foreign-results");
+      assert.isFalse(log.events.some(isTurnTerminal));
+
+      harness.query.emit(resultFrame({ user_message_uuids: [steerUuid] }));
+      const completed = yield* log.waitFor(isTurnTerminal);
+      assert.equal(completed.turnId, turn.turnId);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  /** P's segment aborted by S; the turn now waits for S's segment. */
+  const awaitSteerSegment = (
+    adapter: ClaudeAdapterShape,
+    harness: ReturnType<typeof makeHarness>,
+    log: EventLog,
+    id: string,
+    capabilities: ReadonlyArray<string>,
+  ) =>
+    Effect.gen(function* () {
+      const readPrompt = makePromptReader(harness);
+      const turn = yield* startPromptTurn(adapter, harness, log, id, capabilities);
+      emitPromptSegment(harness.query, turn.turnId);
+      yield* steer(adapter, turn.turnId);
+      yield* readPrompt;
+      const steerUuid = (yield* readPrompt).uuid!;
+      harness.query.emit(abortedResult([turn.turnId], { queued_turn_count: 1 }));
+      yield* settle(harness.query, log, `${id}-awaiting`);
+      assert.isFalse(log.events.some(isTurnTerminal));
+      return { turn, steerUuid };
+    });
+
+  it.effect("S2: Stop cancels a queued steer and closes the waiting turn", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      const { turn, steerUuid } = yield* awaitSteerSegment(
+        adapter,
+        harness,
+        log,
+        "steer-stop-s2",
+        BOTH_CAPABILITIES,
+      );
+      harness.query.interruptReceipt = { still_queued: [], cancelled: [steerUuid] };
+      yield* adapter.interruptTurn(THREAD_ID, turn.turnId);
+      assert.deepEqual(harness.query.interruptCalls, [[{ cancelQueued: true }]]);
+      const completed = yield* log.waitFor(isTurnTerminal);
+      assert.equal(completed.turnId, turn.turnId);
+      assert.equal(completed.type === "turn.completed" && completed.payload.state, "interrupted");
+      assert.equal((yield* adapter.listSessions())[0]?.activeTurnId, undefined);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("S3: Stop closes the waiting turn and drops the still-queued steer's CLI turn", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      const { turn, steerUuid } = yield* awaitSteerSegment(adapter, harness, log, "steer-stop-s3", [
+        "interrupt_receipt_v1",
+      ]);
+      harness.query.interruptReceipt = { still_queued: [steerUuid] };
+      yield* adapter.interruptTurn(THREAD_ID, turn.turnId);
+      assert.deepEqual(harness.query.interruptCalls, [[]]);
+      const completed = yield* log.waitFor(isTurnTerminal);
+      assert.equal(completed.type === "turn.completed" && completed.payload.state, "interrupted");
+
+      const from = log.events.length;
+      harness.query.interruptReceipt = undefined;
+      emitSteerCliTurn(harness.query, steerUuid);
+      yield* settle(harness.query, log, "s3-discarded");
+      const after = log.events.slice(from);
+      assert.isFalse(after.some((event) => event.type === "turn.started"));
+      assert.isFalse(after.some((event) => event.type === "content.delta"));
+      assert.isFalse(after.some(isTurnTerminal));
+      yield* yieldTimes(10);
+      assert.lengthOf(harness.query.interruptCalls, 2);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("S4: Stop during the prompt segment completes once and drops the steer later", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      const readPrompt = makePromptReader(harness);
+      const turn = yield* startPromptTurn(adapter, harness, log, "steer-stop-s4", [
+        "interrupt_receipt_v1",
+      ]);
+      emitPromptSegment(harness.query, turn.turnId);
+      yield* steer(adapter, turn.turnId);
+      yield* readPrompt;
+      const steerUuid = (yield* readPrompt).uuid!;
+      harness.query.interruptReceipt = { still_queued: [steerUuid] };
+      yield* adapter.interruptTurn(THREAD_ID, turn.turnId);
+      yield* settle(harness.query, log, "s4-after-stop");
+      assert.isFalse(log.events.some(isTurnTerminal));
+
+      harness.query.emit(abortedResult([turn.turnId], { queued_turn_count: 1 }));
+      const completed = yield* log.waitFor(isTurnTerminal);
+      assert.equal(completed.type === "turn.completed" && completed.payload.state, "interrupted");
+
+      const from = log.events.length;
+      emitSteerCliTurn(harness.query, steerUuid, abortedResult([steerUuid]));
+      yield* settle(harness.query, log, "s4-discarded");
+      const after = log.events.slice(from);
+      assert.isFalse(after.some((event) => event.type === "turn.started"));
+      assert.isFalse(after.some((event) => event.type === "content.delta"));
+      assert.isFalse(after.some(isTurnTerminal));
+      assert.deepEqual(
+        lifecycleFor(log, turn.turnId).map((event) => event.type),
+        ["turn.started", "turn.completed"],
+      );
+      yield* yieldTimes(10);
+      assert.lengthOf(harness.query.interruptCalls, 2);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect(
+    "S4: Stop drops a still-queued steer when the prompt's result beats the receipt",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const log = yield* makeRuntimeEventLog(adapter);
+        const readPrompt = makePromptReader(harness);
+        const turn = yield* startPromptTurn(adapter, harness, log, "steer-stop-s4-race", [
+          "interrupt_receipt_v1",
+        ]);
+        emitPromptSegment(harness.query, turn.turnId);
+        yield* steer(adapter, turn.turnId);
+        yield* readPrompt;
+        const steerUuid = (yield* readPrompt).uuid!;
+
+        // The CLI writes P's aborted result before Stop's receipt is handled.
+        harness.query.interruptReceipt = { still_queued: [steerUuid] };
+        let releaseReceipt!: () => void;
+        harness.query.interruptGate = new Promise((resolve) => {
+          releaseReceipt = resolve;
+        });
+        harness.query.onInterrupt = () =>
+          harness.query.emit(abortedResult([turn.turnId], { queued_turn_count: 1 }));
+        const stopping = yield* adapter
+          .interruptTurn(THREAD_ID, turn.turnId)
+          .pipe(Effect.forkChild);
+        const completed = yield* log.waitFor(isTurnTerminal);
+        assert.equal(completed.type === "turn.completed" && completed.payload.state, "interrupted");
+        releaseReceipt();
+        yield* Fiber.join(stopping);
+        harness.query.onInterrupt = undefined;
+        harness.query.interruptGate = undefined;
+
+        const from = log.events.length;
+        emitSteerCliTurn(harness.query, steerUuid, abortedResult([steerUuid]));
+        yield* settle(harness.query, log, "s4-race-discarded");
+        const after = log.events.slice(from);
+        assert.isFalse(after.some((event) => event.type === "turn.started"));
+        assert.isFalse(after.some((event) => event.type === "content.delta"));
+        assert.isFalse(after.some(isTurnTerminal));
+        yield* yieldTimes(10);
+        assert.lengthOf(harness.query.interruptCalls, 2);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
+  it.effect("S4 with cancel_queued: a cancelled steer leaves no discard behind", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      const readPrompt = makePromptReader(harness);
+      const turn = yield* startPromptTurn(adapter, harness, log, "steer-stop-s4-cancel");
+      emitPromptSegment(harness.query, turn.turnId);
+      yield* steer(adapter, turn.turnId);
+      yield* readPrompt;
+      const steerUuid = (yield* readPrompt).uuid!;
+
+      harness.query.interruptReceipt = { still_queued: [], cancelled: [steerUuid] };
+      let releaseReceipt!: () => void;
+      harness.query.interruptGate = new Promise((resolve) => {
+        releaseReceipt = resolve;
+      });
+      harness.query.onInterrupt = () => harness.query.emit(abortedResult([turn.turnId]));
+      const stopping = yield* adapter.interruptTurn(THREAD_ID, turn.turnId).pipe(Effect.forkChild);
+      yield* log.waitFor(isTurnTerminal);
+      releaseReceipt();
+      yield* Fiber.join(stopping);
+
+      // Nothing is pending: the next background turn opens at its own signal.
+      const from = log.events.length;
+      harness.query.emit(systemStatusFrame("requesting"));
+      yield* settle(harness.query, log, "s4-cancel-wake");
+      assert.isTrue(log.events.slice(from).some((event) => event.type === "turn.started"));
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("S5: a steer in transit at Stop is interrupted again and closes the turn", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      const { turn, steerUuid } = yield* awaitSteerSegment(adapter, harness, log, "steer-stop-s5", [
+        "interrupt_receipt_v1",
+      ]);
+      harness.query.interruptReceipt = { still_queued: [] };
+      yield* adapter.interruptTurn(THREAD_ID, turn.turnId);
+      yield* settle(harness.query, log, "s5-after-stop");
+      assert.isFalse(log.events.some(isTurnTerminal));
+
+      harness.query.emit(textStart("s-text-start", 0, [steerUuid]));
+      yield* settle(harness.query, log, "s5-steer-started");
+      yield* yieldTimes(10);
+      assert.lengthOf(harness.query.interruptCalls, 2);
+
+      harness.query.emit(abortedResult([steerUuid]));
+      const completed = yield* log.waitFor(isTurnTerminal);
+      assert.equal(completed.type === "turn.completed" && completed.payload.state, "interrupted");
+      assert.deepEqual(
+        lifecycleFor(log, turn.turnId).map((event) => event.type),
+        ["turn.started", "turn.completed"],
+      );
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("S1: Stop without steers stays a plain interrupt", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      const turn = yield* startPromptTurn(adapter, harness, log, "steer-stop-s1");
+      harness.query.interruptReceipt = { still_queued: [] };
+      yield* adapter.interruptTurn(THREAD_ID, turn.turnId);
+      assert.deepEqual(harness.query.interruptCalls, [[]]);
+      yield* settle(harness.query, log, "s1-after-stop");
+      assert.isFalse(log.events.some(isTurnTerminal));
+      harness.query.emit(abortedResult([turn.turnId], { queued_turn_count: 0 }));
+      const completed = yield* log.waitFor(isTurnTerminal);
+      assert.equal(completed.type === "turn.completed" && completed.payload.state, "interrupted");
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("fails the turn on a failed segment and drops its pending steer", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      const readPrompt = makePromptReader(harness);
+      const turn = yield* startPromptTurn(adapter, harness, log, "steer-failed-segment");
+      yield* steer(adapter, turn.turnId);
+      yield* readPrompt;
+      const steerUuid = (yield* readPrompt).uuid!;
+      harness.query.emit(
+        resultFrame({
+          subtype: "error_during_execution",
+          is_error: true,
+          errors: ["Overloaded"],
+          terminal_reason: "api_error",
+          queued_turn_count: 1,
+          user_message_uuids: [turn.turnId],
+        }),
+      );
+      const completed = yield* log.waitFor(isTurnTerminal);
+      assert.equal(completed.type === "turn.completed" && completed.payload.state, "failed");
+
+      const from = log.events.length;
+      emitSteerCliTurn(harness.query, steerUuid);
+      yield* settle(harness.query, log, "failed-discarded");
+      const after = log.events.slice(from);
+      assert.isFalse(after.some((event) => event.type === "turn.started"));
+      assert.isFalse(after.some((event) => event.type === "content.delta"));
+      assert.isFalse(after.some(isTurnTerminal));
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  const apiRetryFrame = (attempt: number): SDKMessage =>
+    ({
+      type: "system",
+      subtype: "api_retry",
+      attempt,
+      max_retries: 10,
+      retry_delay_ms: 500,
+      error_status: 529,
+      error: "server_error",
+      uuid: `api-retry-${attempt}`,
+      session_id: GAUGE_SDK_SESSION,
+    }) as unknown as SDKMessage;
+
+  /** P fails with S pending, so S is discarded. Returns S's uuid. */
+  const failSegmentWithPendingSteer = (
+    adapter: ClaudeAdapterShape,
+    harness: ReturnType<typeof makeHarness>,
+    log: EventLog,
+    id: string,
+  ) =>
+    Effect.gen(function* () {
+      const readPrompt = makePromptReader(harness);
+      const turn = yield* startPromptTurn(adapter, harness, log, id);
+      yield* steer(adapter, turn.turnId);
+      yield* readPrompt;
+      const steerUuid = (yield* readPrompt).uuid!;
+      harness.query.emit(
+        resultFrame({
+          subtype: "error_during_execution",
+          is_error: true,
+          errors: ["Overloaded"],
+          terminal_reason: "api_error",
+          queued_turn_count: 1,
+          user_message_uuids: [turn.turnId],
+        }),
+      );
+      const completed = yield* log.waitFor(isTurnTerminal);
+      assert.equal(completed.type === "turn.completed" && completed.payload.state, "failed");
+      return { turn, steerUuid, readPrompt };
+    });
+
+  /** With no discard pending, a wake signal opens a background turn at once. */
+  const assertWakeOpensAtSignal = (
+    harness: ReturnType<typeof makeHarness>,
+    log: EventLog,
+    id: string,
+  ) =>
+    Effect.gen(function* () {
+      const from = log.events.length;
+      harness.query.emit(systemStatusFrame("requesting"));
+      yield* settle(harness.query, log, id);
+      assert.isTrue(
+        log.events.slice(from).some((event) => event.type === "turn.started"),
+        "the wake signal opened a turn",
+      );
+    });
+
+  it.effect("drops a discarded steer's CLI turn that retries before its first stream", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      const { steerUuid } = yield* failSegmentWithPendingSteer(
+        adapter,
+        harness,
+        log,
+        "steer-discard-retry",
+      );
+
+      const from = log.events.length;
+      harness.query.emit(systemInitFrame());
+      harness.query.emit(systemStatusFrame("requesting"));
+      harness.query.emit(apiRetryFrame(1));
+      harness.query.emit(textStart("s-text-start", 0, [steerUuid]));
+      harness.query.emit(textDelta("s-text-delta", 0, "Steered reply"));
+      harness.query.emit(blockStop("s-text-stop", 0));
+      harness.query.emit(abortedResult([steerUuid]));
+      yield* settle(harness.query, log, "retry-discarded");
+      const after = log.events.slice(from);
+      assert.isFalse(after.some((event) => event.type === "turn.started"));
+      assert.isFalse(after.some((event) => event.type === "content.delta"));
+      assert.isFalse(after.some(isTurnTerminal));
+
+      yield* assertWakeOpensAtSignal(harness, log, "retry-next-wake");
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("drops a discarded steer's CLI turn that fails before streaming anything", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      const { steerUuid } = yield* failSegmentWithPendingSteer(
+        adapter,
+        harness,
+        log,
+        "steer-discard-result-only",
+      );
+
+      const from = log.events.length;
+      harness.query.emit(systemInitFrame());
+      harness.query.emit(systemStatusFrame("requesting"));
+      harness.query.emit(apiRetryFrame(1));
+      harness.query.emit(
+        resultFrame({
+          subtype: "error_during_execution",
+          is_error: true,
+          errors: ["Overloaded"],
+          terminal_reason: "api_error",
+          user_message_uuids: [steerUuid],
+          usage: { input_tokens: 4, output_tokens: 0 },
+          contextWindow: 200_000,
+        }),
+      );
+      yield* settle(harness.query, log, "result-only-discarded");
+      const after = log.events.slice(from);
+      assert.isFalse(after.some((event) => event.type === "turn.started"));
+      assert.isFalse(after.some(isTurnTerminal));
+      assert.isFalse(after.some((event) => event.type === "runtime.error"));
+
+      yield* assertWakeOpensAtSignal(harness, log, "result-only-next-wake");
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("forgets a discarded steer the CLI batched into the next prompt's turn", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      const { steerUuid } = yield* failSegmentWithPendingSteer(
+        adapter,
+        harness,
+        log,
+        "steer-discard-batched",
+      );
+
+      const next = yield* adapter.sendTurn({ threadId: THREAD_ID, input: "next", attachments: [] });
+      harness.query.emit(textStart("p2-text-start", 0, [steerUuid, next.turnId]));
+      harness.query.emit(textDelta("p2-text-delta", 0, "Batched reply"));
+      harness.query.emit(resultFrame({ user_message_uuids: [steerUuid, next.turnId] }));
+      const completed = yield* log.waitFor(
+        (event) => isTurnTerminal(event) && event.turnId === next.turnId,
+      );
+      assert.equal(completed.type === "turn.completed" && completed.payload.state, "completed");
+      assert.isTrue(
+        log.events.some(
+          (event) =>
+            event.type === "content.delta" &&
+            event.turnId === next.turnId &&
+            event.payload.delta === "Batched reply",
+        ),
+      );
+
+      yield* assertWakeOpensAtSignal(harness, log, "batched-next-wake");
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("S4 with cancel_queued: a receipt handled before the prompt's result sticks", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      const readPrompt = makePromptReader(harness);
+      const turn = yield* startPromptTurn(adapter, harness, log, "steer-stop-s4-receipt-first");
+      emitPromptSegment(harness.query, turn.turnId);
+      yield* steer(adapter, turn.turnId);
+      yield* readPrompt;
+      const steerUuid = (yield* readPrompt).uuid!;
+
+      // The receipt takes the turn lock before the stream fiber handles P's aborted result.
+      harness.query.interruptReceipt = { still_queued: [], cancelled: [steerUuid] };
+      yield* adapter.interruptTurn(THREAD_ID, turn.turnId);
+      assert.deepEqual(harness.query.interruptCalls, [[{ cancelQueued: true }]]);
+      yield* settle(harness.query, log, "s4-receipt-first-after-stop");
+      assert.isFalse(log.events.some(isTurnTerminal));
+
+      harness.query.emit(abortedResult([turn.turnId]));
+      const completed = yield* log.waitFor(isTurnTerminal);
+      assert.equal(completed.turnId, turn.turnId);
+      assert.equal(completed.type === "turn.completed" && completed.payload.state, "interrupted");
+
+      // The cancelled steer never runs, so nothing is left to discard.
+      yield* assertWakeOpensAtSignal(harness, log, "s4-receipt-first-wake");
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("S3: a steer that started before the stale receipt closes the turn itself", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      const { turn, steerUuid } = yield* awaitSteerSegment(
+        adapter,
+        harness,
+        log,
+        "steer-stop-s3-started",
+        ["interrupt_receipt_v1"],
+      );
+
+      // The receipt still lists S as queued, but S's CLI turn starts before it is handled.
+      harness.query.interruptReceipt = { still_queued: [steerUuid] };
+      let releaseReceipt!: () => void;
+      harness.query.interruptGate = new Promise((resolve) => {
+        releaseReceipt = resolve;
+      });
+      harness.query.onInterrupt = () => {
+        harness.query.onInterrupt = undefined;
+        harness.query.emit(textStart("s-text-start", 0, [steerUuid]));
+        harness.query.emit(textDelta("s-text-delta", 0, "Steered reply"));
+      };
+      const stopping = yield* adapter.interruptTurn(THREAD_ID, turn.turnId).pipe(Effect.forkChild);
+      yield* log.waitFor(
+        (event) => event.type === "content.delta" && event.payload.delta === "Steered reply",
+      );
+      releaseReceipt();
+      yield* Fiber.join(stopping);
+      harness.query.interruptGate = undefined;
+      yield* settle(harness.query, log, "s3-started-after-stop");
+      assert.isFalse(log.events.some(isTurnTerminal), "a running steer keeps the turn open");
+
+      harness.query.emit(blockStop("s-text-stop", 0));
+      harness.query.emit(
+        rootAssistantFrame("s-assistant", {}, [{ type: "text", text: "Steered reply" }]),
+      );
+      harness.query.emit(abortedResult([steerUuid]));
+      const completed = yield* log.waitFor(isTurnTerminal);
+      assert.equal(completed.turnId, turn.turnId);
+      assert.equal(completed.type === "turn.completed" && completed.payload.state, "interrupted");
+      yield* settle(harness.query, log, "s3-started-closed");
+      assert.lengthOf(
+        log.events.filter((event) => event.type === "turn.started"),
+        1,
+        "no background turn took the steer's output",
+      );
+      assert.lengthOf(log.events.filter(isTurnTerminal), 1);
+      assert.equal((yield* adapter.listSessions())[0]?.activeTurnId, undefined);
+      yield* yieldTimes(10);
+      assert.lengthOf(harness.query.interruptCalls, 2);
+
+      yield* assertWakeOpensAtSignal(harness, log, "s3-started-next-wake");
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("ends the wake turn a discarded steer's echo-less output already reached", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      const { steerUuid } = yield* failSegmentWithPendingSteer(
+        adapter,
+        harness,
+        log,
+        "steer-discard-leaked-wake",
+      );
+
+      // A CLI that echoes only on the result: the first stream event carries no echo.
+      const from = log.events.length;
+      harness.query.emit(systemInitFrame());
+      harness.query.emit(systemStatusFrame("requesting"));
+      harness.query.emit(textStart("s-text-start", 0));
+      harness.query.emit(textDelta("s-text-delta", 0, "Steered reply"));
+      harness.query.emit(blockStop("s-text-stop", 0));
+      harness.query.emit(
+        rootAssistantFrame("s-assistant", {}, [{ type: "text", text: "Steered reply" }]),
+      );
+      harness.query.emit(resultFrame({ user_message_uuids: [steerUuid] }));
+      yield* settle(harness.query, log, "leaked-wake-result");
+      const after = log.events.slice(from);
+      const started = after.find((event) => event.type === "turn.started");
+      assert.ok(started);
+      assert.isTrue(
+        after.some((event) => isTurnTerminal(event) && event.turnId === started?.turnId),
+        "the result ends the turn the output reached",
+      );
+      assert.equal((yield* adapter.listSessions())[0]?.activeTurnId, undefined);
+
+      yield* assertWakeOpensAtSignal(harness, log, "leaked-wake-next-wake");
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("ends the assistant-output turn a discarded steer's echo-less reply opened", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      const { steerUuid } = yield* failSegmentWithPendingSteer(
+        adapter,
+        harness,
+        log,
+        "steer-discard-leaked-output",
+      );
+
+      // An older CLI that echoes only on the result: the reply carries no echo.
+      const from = log.events.length;
+      harness.query.emit(
+        rootAssistantFrame("s-assistant", {}, [{ type: "text", text: "Steered reply" }]),
+      );
+      harness.query.emit(abortedResult([steerUuid]));
+      yield* settle(harness.query, log, "leaked-output-result");
+      const after = log.events.slice(from);
+      const started = after.find((event) => event.type === "turn.started");
+      assert.ok(started);
+      const completed = after.find(
+        (event) => isTurnTerminal(event) && event.turnId === started?.turnId,
+      );
+      assert.ok(completed, "the result ends the turn the output opened");
+      assert.equal((yield* adapter.listSessions())[0]?.activeTurnId, undefined);
+
+      yield* assertWakeOpensAtSignal(harness, log, "leaked-output-next-wake");
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  /** The first reply of a CLI turn that streamed nothing: the assistant frame carries the echo. */
+  const echoedAssistantFrame = (
+    id: string,
+    echo: ReadonlyArray<string>,
+    text: string,
+    extra: Record<string, unknown> = {},
+  ): SDKMessage =>
+    ({
+      ...(rootAssistantFrame(id, {}, [{ type: "text", text }]) as object),
+      user_message_uuid: echo[echo.length - 1],
+      user_message_uuids: [...echo],
+      ...extra,
+    }) as unknown as SDKMessage;
+
+  const API_ERROR_TEXT = "API Error: 529 Overloaded";
+
+  /** The synthetic reply of a request that failed at the API after its retries. */
+  const apiErrorReply = (id: string, echo: ReadonlyArray<string>) =>
+    echoedAssistantFrame(id, echo, API_ERROR_TEXT, { error: "server_error" });
+
+  /** How the SDK reports that request: a success flagged as an error, with the error text. */
+  const apiErrorResult = (echo: ReadonlyArray<string>, extra: Record<string, unknown> = {}) =>
+    resultFrame({
+      is_error: true,
+      result: API_ERROR_TEXT,
+      terminal_reason: "api_error",
+      api_error_status: 529,
+      user_message_uuids: [...echo],
+      usage: { input_tokens: 4, output_tokens: 0 },
+      contextWindow: 200_000,
+      ...extra,
+    });
+
+  it.effect("fails the turn when an API error ends its segment with a steer pending", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      const readPrompt = makePromptReader(harness);
+      const turn = yield* startPromptTurn(adapter, harness, log, "steer-api-error-segment");
+      yield* steer(adapter, turn.turnId);
+      yield* readPrompt;
+      const steerUuid = (yield* readPrompt).uuid!;
+
+      // The CLI promised the steer's turn, but the steer is dropped after a failure, so the turn
+      // must report the failure rather than complete with the steer unanswered.
+      harness.query.emit(apiErrorReply("p-error", [turn.turnId]));
+      harness.query.emit(apiErrorResult([turn.turnId], { queued_turn_count: 1 }));
+      const completed = yield* log.waitFor(isTurnTerminal);
+      assert.equal(completed.turnId, turn.turnId);
+      assert.equal(completed.type === "turn.completed" && completed.payload.state, "failed");
+      assert.equal(
+        completed.type === "turn.completed" && completed.payload.errorMessage,
+        API_ERROR_TEXT,
+      );
+      const errors = log.events.filter((event) => event.type === "runtime.error");
+      assert.deepEqual(
+        errors.map((event) => event.type === "runtime.error" && event.payload.message),
+        [API_ERROR_TEXT],
+      );
+
+      const from = log.events.length;
+      emitSteerCliTurn(harness.query, steerUuid);
+      yield* settle(harness.query, log, "api-error-segment-discarded");
+      const after = log.events.slice(from);
+      assert.isFalse(after.some((event) => event.type === "turn.started"));
+      assert.isFalse(after.some((event) => event.type === "content.delta"));
+      assert.isFalse(after.some(isTurnTerminal));
+
+      yield* assertWakeOpensAtSignal(harness, log, "api-error-segment-next-wake");
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("drops a discarded steer's CLI turn whose echo rides its API-error reply", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      const { steerUuid } = yield* failSegmentWithPendingSteer(
+        adapter,
+        harness,
+        log,
+        "steer-discard-api-error-reply",
+      );
+
+      // The request fails at the API: no stream events, a synthetic error reply, then the result.
+      const from = log.events.length;
+      harness.query.emit(systemInitFrame());
+      harness.query.emit(systemStatusFrame("requesting"));
+      harness.query.emit(apiRetryFrame(1));
+      harness.query.emit(
+        echoedAssistantFrame("s-error", [steerUuid], "API Error: 529 Overloaded", {
+          error: "server_error",
+        }),
+      );
+      harness.query.emit(
+        resultFrame({
+          is_error: true,
+          result: "API Error: 529 Overloaded",
+          errors: ["Overloaded"],
+          user_message_uuids: [steerUuid],
+          usage: { input_tokens: 4, output_tokens: 0 },
+          contextWindow: 200_000,
+        }),
+      );
+      yield* settle(harness.query, log, "api-error-reply-discarded");
+      const after = log.events.slice(from);
+      assert.isFalse(after.some((event) => event.type === "turn.started"));
+      assert.isFalse(after.some((event) => event.type === "content.delta"));
+      assert.isFalse(after.some((event) => event.type === "runtime.error"));
+      assert.isFalse(after.some(isTurnTerminal));
+      // The error reply ends its CLI turn: an interrupt now could only reach the next one.
+      yield* yieldTimes(10);
+      assert.lengthOf(harness.query.interruptCalls, 0);
+
+      yield* assertWakeOpensAtSignal(harness, log, "api-error-reply-next-wake");
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("drops a discarded steer's stream-less reply and interrupts its CLI turn", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      const { steerUuid } = yield* failSegmentWithPendingSteer(
+        adapter,
+        harness,
+        log,
+        "steer-discard-streamless-reply",
+      );
+
+      const from = log.events.length;
+      harness.query.emit(echoedAssistantFrame("s-assistant", [steerUuid], "Steered reply"));
+      harness.query.emit(
+        rootAssistantFrame("s-assistant-2", {}, [{ type: "text", text: "More reply" }]),
+      );
+      harness.query.emit(abortedResult([steerUuid]));
+      yield* settle(harness.query, log, "streamless-reply-discarded");
+      const after = log.events.slice(from);
+      assert.isFalse(after.some((event) => event.type === "turn.started"));
+      assert.isFalse(after.some((event) => event.type === "content.delta"));
+      assert.isFalse(after.some(isTurnTerminal));
+      yield* yieldTimes(10);
+      assert.deepEqual(harness.query.interruptCalls, [[]]);
+
+      yield* assertWakeOpensAtSignal(harness, log, "streamless-reply-next-wake");
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("S3: a steer whose stream-less reply beat the stale receipt closes the turn", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      const { turn, steerUuid } = yield* awaitSteerSegment(
+        adapter,
+        harness,
+        log,
+        "steer-stop-s3-streamless",
+        ["interrupt_receipt_v1"],
+      );
+
+      harness.query.interruptReceipt = { still_queued: [steerUuid] };
+      let releaseReceipt!: () => void;
+      harness.query.interruptGate = new Promise((resolve) => {
+        releaseReceipt = resolve;
+      });
+      harness.query.onInterrupt = () => {
+        harness.query.onInterrupt = undefined;
+        harness.query.emit(echoedAssistantFrame("s-assistant", [steerUuid], "Steered reply"));
+      };
+      const stopping = yield* adapter.interruptTurn(THREAD_ID, turn.turnId).pipe(Effect.forkChild);
+      yield* log.waitFor(
+        (event) => event.type === "content.delta" && event.payload.delta === "Steered reply",
+      );
+      releaseReceipt();
+      yield* Fiber.join(stopping);
+      harness.query.interruptGate = undefined;
+      yield* settle(harness.query, log, "s3-streamless-after-stop");
+      assert.isFalse(log.events.some(isTurnTerminal), "a running steer keeps the turn open");
+
+      harness.query.emit(abortedResult([steerUuid]));
+      const completed = yield* log.waitFor(isTurnTerminal);
+      assert.equal(completed.turnId, turn.turnId);
+      assert.equal(completed.type === "turn.completed" && completed.payload.state, "interrupted");
+      yield* settle(harness.query, log, "s3-streamless-closed");
+      assert.lengthOf(log.events.filter(isTurnTerminal), 1);
+      yield* yieldTimes(10);
+      assert.lengthOf(harness.query.interruptCalls, 2);
+
+      yield* assertWakeOpensAtSignal(harness, log, "s3-streamless-next-wake");
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  /** After Stop, S's first reply is an API error; its own result must close the turn as stopped. */
+  const assertStoppedSteerApiErrorCloses = (
+    harness: ReturnType<typeof makeHarness>,
+    log: EventLog,
+    turnId: TurnId,
+    steerUuid: string,
+    id: string,
+  ) =>
+    Effect.gen(function* () {
+      assert.isFalse(log.events.some(isTurnTerminal), "the running steer keeps the turn open");
+      harness.query.emit(apiErrorResult([steerUuid]));
+      const completed = yield* log.waitFor(isTurnTerminal);
+      assert.equal(completed.turnId, turnId);
+      assert.equal(completed.type === "turn.completed" && completed.payload.state, "interrupted");
+      yield* settle(harness.query, log, `${id}-closed`);
+      assert.lengthOf(log.events.filter(isTurnTerminal), 1);
+      assert.isFalse(log.events.some((event) => event.type === "runtime.error"));
+      // The error reply ended S's CLI turn: an interrupt now could only reach the next one.
+      yield* yieldTimes(10);
+      assert.deepEqual(harness.query.interruptCalls, [[]], "only Stop interrupted");
+
+      yield* assertWakeOpensAtSignal(harness, log, `${id}-next-wake`);
+    });
+
+  it.effect("S3: a steer whose API-error reply beat the stale receipt closes as stopped", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      const { turn, steerUuid } = yield* awaitSteerSegment(
+        adapter,
+        harness,
+        log,
+        "steer-stop-s3-api-error",
+        ["interrupt_receipt_v1"],
+      );
+
+      harness.query.interruptReceipt = { still_queued: [steerUuid] };
+      let releaseReceipt!: () => void;
+      harness.query.interruptGate = new Promise((resolve) => {
+        releaseReceipt = resolve;
+      });
+      harness.query.onInterrupt = () => {
+        harness.query.onInterrupt = undefined;
+        harness.query.emit(apiErrorReply("s-error", [steerUuid]));
+      };
+      const stopping = yield* adapter.interruptTurn(THREAD_ID, turn.turnId).pipe(Effect.forkChild);
+      yield* log.waitFor(
+        (event) => event.type === "content.delta" && event.payload.delta === API_ERROR_TEXT,
+      );
+      releaseReceipt();
+      yield* Fiber.join(stopping);
+      harness.query.interruptGate = undefined;
+      yield* settle(harness.query, log, "s3-api-error-after-stop");
+
+      yield* assertStoppedSteerApiErrorCloses(harness, log, turn.turnId, steerUuid, "s3-api-error");
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect(
+    "S5: a steer in transit whose first reply is an API error is not re-interrupted",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const log = yield* makeRuntimeEventLog(adapter);
+        const { turn, steerUuid } = yield* awaitSteerSegment(
+          adapter,
+          harness,
+          log,
+          "steer-stop-s5-api-error",
+          ["interrupt_receipt_v1"],
+        );
+        harness.query.interruptReceipt = { still_queued: [] };
+        yield* adapter.interruptTurn(THREAD_ID, turn.turnId);
+        yield* settle(harness.query, log, "s5-api-error-after-stop");
+        assert.isFalse(log.events.some(isTurnTerminal));
+
+        harness.query.emit(apiErrorReply("s-error", [steerUuid]));
+        yield* settle(harness.query, log, "s5-api-error-reply");
+        assert.isTrue(
+          log.events.some(
+            (event) =>
+              event.type === "content.delta" &&
+              event.turnId === turn.turnId &&
+              event.payload.delta === API_ERROR_TEXT,
+          ),
+          "the in-transit steer's reply is the stopped turn's",
+        );
+
+        yield* assertStoppedSteerApiErrorCloses(
+          harness,
+          log,
+          turn.turnId,
+          steerUuid,
+          "s5-api-error",
+        );
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
+  it.effect.each<{
+    readonly name: string;
+    readonly result: (echo: ReadonlyArray<string>) => SDKMessage;
+  }>([
+    // Realistic: the discard's re-interrupt aborts the CLI turn the prompt was folded into.
+    { name: "aborted", result: (echo) => abortedResult(echo) },
+    // The re-interrupt lost the race: the CLI turn finished, but its reply was dropped.
+    { name: "finished", result: (echo) => resultFrame({ user_message_uuids: [...echo] }) },
+  ])(
+    "fails the next prompt's turn when the CLI folds it into a dropped CLI turn ($name)",
+    ({ name, result }) => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const log = yield* makeRuntimeEventLog(adapter);
+        const { steerUuid } = yield* failSegmentWithPendingSteer(
+          adapter,
+          harness,
+          log,
+          `steer-discard-folded-prompt-${name}`,
+        );
+
+        harness.query.emit(systemInitFrame());
+        harness.query.emit(systemStatusFrame("requesting"));
+        harness.query.emit(textStart("s-text-start", 0, [steerUuid]));
+        yield* settle(harness.query, log, `folded-prompt-${name}-discarding`);
+
+        // Before the re-interrupt lands, the CLI folds the next prompt into the dropped CLI turn.
+        const next = yield* adapter.sendTurn({
+          threadId: THREAD_ID,
+          input: "next",
+          attachments: [],
+        });
+        harness.query.emit(textDelta("s-text-delta", 0, "Folded reply"));
+        const errorsBefore = log.events.filter((event) => event.type === "runtime.error").length;
+        harness.query.emit(result([steerUuid, next.turnId]));
+        yield* settle(harness.query, log, `folded-prompt-${name}-result`);
+        const completed = log.events.find(
+          (event) => isTurnTerminal(event) && event.turnId === next.turnId,
+        );
+        assert.ok(completed, "the folded prompt's only result ends its turn");
+        // Never a Stop: Ryco's own re-interrupt must not hold the client queue as "Paused".
+        assert.equal(completed?.type === "turn.completed" && completed.payload.state, "failed");
+        const reason =
+          (completed?.type === "turn.completed" ? completed.payload.errorMessage : undefined) ?? "";
+        assert.match(reason, /no reply is shown/);
+        assert.deepEqual(
+          log.events
+            .filter((event) => event.type === "runtime.error")
+            .slice(errorsBefore)
+            .map((event) => event.type === "runtime.error" && event.payload.message),
+          [reason],
+        );
+        assert.isFalse(
+          log.events.some(
+            (event) => event.type === "content.delta" && event.payload.delta === "Folded reply",
+          ),
+        );
+        assert.equal((yield* adapter.listSessions())[0]?.activeTurnId, undefined);
+        yield* yieldTimes(10);
+        assert.deepEqual(harness.query.interruptCalls, [[]], "the discard's re-interrupt");
+
+        yield* assertWakeOpensAtSignal(harness, log, `folded-prompt-${name}-next-wake`);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
+  it.effect(
+    "completes as completed when a steer aborts the segment with no result promised",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const log = yield* makeRuntimeEventLog(adapter);
+        const readPrompt = makePromptReader(harness);
+        const turn = yield* startPromptTurn(adapter, harness, log, "steer-abort-no-count");
+        emitPromptSegment(harness.query, turn.turnId);
+        yield* steer(adapter, turn.turnId);
+        yield* readPrompt;
+        const steerUuid = (yield* readPrompt).uuid!;
+
+        // The steer aborted P, but the CLI reports no queued turn (or omits the count).
+        const sealFrom = log.events.length;
+        harness.query.emit(abortedResult([turn.turnId]));
+        const completed = yield* log.waitFor(isTurnTerminal);
+        assert.equal(completed.turnId, turn.turnId);
+        assert.equal(completed.type === "turn.completed" && completed.payload.state, "completed");
+        assert.isUndefined(completed.type === "turn.completed" && completed.payload.errorMessage);
+        const sealed = log.events.slice(sealFrom);
+        const toolItem = sealed.find(
+          (event) => event.type === "item.completed" && String(event.itemId) === "tool-p",
+        );
+        assert.equal(toolItem?.type === "item.completed" && toolItem.payload.status, "failed");
+        assert.isFalse(log.events.some((event) => event.type === "runtime.error"));
+
+        // The steer is not dropped: it runs next and its reply lands in a background turn.
+        const from = log.events.length;
+        emitSteerCliTurn(harness.query, steerUuid);
+        yield* settle(harness.query, log, "steer-abort-no-count-reply");
+        const after = log.events.slice(from);
+        const started = after.find((event) => event.type === "turn.started");
+        assert.ok(started);
+        assert.notEqual(started?.turnId, turn.turnId);
+        assert.isTrue(
+          after.some(
+            (event) =>
+              event.type === "content.delta" &&
+              event.turnId === started?.turnId &&
+              event.payload.delta === "Steered reply",
+          ),
+        );
+        assert.isTrue(
+          after.some((event) => isTurnTerminal(event) && event.turnId === started?.turnId),
+        );
+        assert.lengthOf(harness.query.interruptCalls, 0);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
+  it.effect("closes an open reasoning block before an aborted turn completes", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      yield* startSteerSession(adapter, "steer-reasoning-abort");
+      const turn = yield* adapter.sendTurn({
+        threadId: THREAD_ID,
+        input: "think",
+        attachments: [],
+      });
+      harness.query.emit(thinkingStart("thinking-start", 0, [turn.turnId]));
+      harness.query.emit(
+        resultFrame({
+          subtype: "error_during_execution",
+          errors: ["Request was aborted."],
+          terminal_reason: "aborted_streaming",
+          user_message_uuids: [turn.turnId],
+        }),
+      );
+      yield* log.waitFor((event) => event.type === "turn.completed");
+
+      const reasoningStarted = log.events.find(
+        (event) => event.type === "item.started" && event.payload.itemType === "reasoning",
+      );
+      const reasoningCompleted = log.events.findIndex(
+        (event) =>
+          event.type === "item.completed" &&
+          event.payload.itemType === "reasoning" &&
+          event.itemId === reasoningStarted?.itemId,
+      );
+      const completed = log.events.findIndex((event) => event.type === "turn.completed");
+      assert.isAbove(reasoningCompleted, -1, "reasoning item completed");
+      assert.isBelow(reasoningCompleted, completed);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("maps an aborted_tools result to interrupted without a runtime error", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      yield* startSteerSession(adapter, "steer-aborted-tools");
+      const turn = yield* adapter.sendTurn({ threadId: THREAD_ID, input: "run", attachments: [] });
+      harness.query.emit(
+        resultFrame({
+          subtype: "error_during_execution",
+          is_error: true,
+          errors: ["Tool execution stopped"],
+          terminal_reason: "aborted_tools",
+          user_message_uuids: [turn.turnId],
+        }),
+      );
+      const completed = yield* log.waitFor((event) => event.type === "turn.completed");
+      assert.equal(
+        completed.type === "turn.completed" ? completed.payload.state : null,
+        "interrupted",
+      );
+      assert.isFalse(log.events.some((event) => event.type === "runtime.error"));
+      assert.deepEqual(
+        lifecycleFor(log, turn.turnId).map((event) => event.type),
+        ["turn.started", "turn.completed"],
+      );
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
   });
 });

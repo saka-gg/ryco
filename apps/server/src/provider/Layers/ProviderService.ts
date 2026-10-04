@@ -16,6 +16,7 @@ import { ASSISTANT_ATTACHMENT_INSTRUCTIONS } from "../../assistantAttachments.ts
 import {
   ModelSelection,
   NonNegativeInt,
+  PROVIDER_DISPLAY_NAMES,
   ThreadId,
   ProviderInterruptTurnInput,
   ProviderRespondToRequestInput,
@@ -68,6 +69,7 @@ import {
   type ProviderAdapterError,
   ProviderOperationUnsupportedError,
   ProviderSessionNotFoundError,
+  ProviderTurnNotSteerableError,
   ProviderUnsupportedError,
   ProviderValidationError,
 } from "../Errors.ts";
@@ -1321,18 +1323,28 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     if (!routed.isActive || routed.session === undefined) {
       return yield* new ProviderSessionNotFoundError({ threadId: input.threadId });
     }
+    // Both refusals defer: the message stays queued and is sent as the next turn.
     if (routed.session.activeTurnId !== input.expectedTurnId) {
-      return yield* toValidationError(
-        "ProviderService.steerTurn",
-        `Expected active turn '${input.expectedTurnId}', found '${routed.session.activeTurnId ?? "none"}'.`,
-      );
+      return yield* new ProviderTurnNotSteerableError({
+        provider: routed.adapter.provider,
+        threadId: input.threadId,
+        turnId: input.expectedTurnId,
+        reason: "turn-ended",
+        detail:
+          "The turn finished before this message could be steered. It stays queued and is sent next.",
+      });
     }
     const steer = routed.adapter.steerTurn;
     if (routed.adapter.capabilities.turnSteering !== "native" || steer === undefined) {
-      return yield* toValidationError(
-        "ProviderService.steerTurn",
-        `Provider '${routed.adapter.provider}' does not support active-turn steering.`,
-      );
+      const displayName =
+        PROVIDER_DISPLAY_NAMES[routed.adapter.provider] ?? routed.adapter.provider;
+      return yield* new ProviderTurnNotSteerableError({
+        provider: routed.adapter.provider,
+        threadId: input.threadId,
+        turnId: input.expectedTurnId,
+        reason: "unsupported",
+        detail: `${displayName} can't steer a running turn. The message stays queued.`,
+      });
     }
     yield* Effect.annotateCurrentSpan({
       "provider.operation": "steer-turn",

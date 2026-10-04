@@ -60,6 +60,7 @@ const clientSettings: ClientSettings = {
   dismissedProviderUpdateNotificationKeys: [],
   diffIgnoreWhitespace: true,
   diffWordWrap: true,
+  followUpBehavior: "queue",
   favorites: [],
   providerModelPreferences: {},
   sidebarProjectGroupingMode: "repository_path",

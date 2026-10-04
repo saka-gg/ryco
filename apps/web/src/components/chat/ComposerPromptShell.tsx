@@ -93,6 +93,8 @@ export interface ComposerPromptShellProps {
     readonly connectionState: "connecting" | "disconnected" | "error";
   } | null;
   phase: SessionPhase;
+  /** While a turn runs: the effective Enter action and its alternate shortcut. */
+  runningFollowUpPlaceholder: string | null;
   isConnecting: boolean;
   /**
    * A disabled editor is not editable, so it cannot take the activating tap.
@@ -161,6 +163,7 @@ export const ComposerPromptShell = memo(function ComposerPromptShell(
     activeProposedPlan,
     environmentUnavailable,
     phase,
+    runningFollowUpPlaceholder,
     isConnecting,
     isEditorDisabled,
     showCollapsedSendAction,
@@ -337,9 +340,13 @@ export const ComposerPromptShell = memo(function ComposerPromptShell(
                         }`
                       : phase === "disconnected"
                         ? "Ask for follow-up changes or attach images"
-                        : isComposerCollapsedMobile
-                          ? "Ask anything..."
-                          : "Ask anything, @tag files/folders, or use / to show available commands"
+                        : phase === "running" &&
+                            !isComposerCollapsedMobile &&
+                            runningFollowUpPlaceholder !== null
+                          ? runningFollowUpPlaceholder
+                          : isComposerCollapsedMobile
+                            ? "Ask anything..."
+                            : "Ask anything, @tag files/folders, or use / to show available commands"
             }
             disabled={isEditorDisabled}
           />

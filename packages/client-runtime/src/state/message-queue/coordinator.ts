@@ -7,9 +7,12 @@ import {
   type QueuedDispatchSnapshot,
 } from "../session/dispatchAck.ts";
 import type { AppState } from "../threads/store.ts";
-import { resolveQueueDrainStep, type QueueDrainStep } from "./drain.ts";
+import {
+  resolveQueueDrainStep,
+  type QueueDrainSteerRejection,
+  type QueueDrainStep,
+} from "./drain.ts";
 import { usageLimitHoldReleaseAtMs } from "@ryco/shared/usageLimit";
-
 import { deriveQueueFailureCauses, releaseQueueHoldKeys, type QueueHold } from "./hold.ts";
 import type { QueuedMessage } from "./logic.ts";
 import type { MessageQueueState } from "./store.ts";
@@ -67,6 +70,8 @@ export interface MessageQueueDrainPlatform<C, S> {
     entry: QueuedMessage<C, S>,
     cause: "accepted" | "projected",
   ) => void;
+  /** A steer attempt was rejected; its message stays queued. Called once per attempt. */
+  readonly onSteerRejected?: (threadKey: string, rejection: QueueDrainSteerRejection) => void;
   readonly now?: () => number;
   readonly timers?: {
     setTimeout: (callback: () => void, ms: number) => unknown;
@@ -105,6 +110,7 @@ const MAX_STEPS_PER_EVALUATION = 8;
 const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
 
 const EMPTY_DISPATCHED: ReadonlySet<string> = new Set();
+const EMPTY_STEER_ATTEMPTS = {} as const;
 
 function setBounded<K, V>(map: Map<K, V>, key: K, value: V, limit: number): void {
   map.delete(key);
@@ -343,7 +349,7 @@ export function createMessageQueueDrainCoordinator<C, S>(
       const step = resolveQueueDrainStep({
         nowIso: nowIso(),
         queue,
-        steeringIds: queueState.steeringIdsByThreadKey[key] ?? [],
+        steerAttempts: queueState.steerAttemptsByThreadKey[key] ?? EMPTY_STEER_ATTEMPTS,
         hold,
         acknowledgedCauseKeys: queueState.acknowledgedCauseKeysByThreadKey[key],
         headProviderInstanceId: platform.headProviderInstanceId(queue[0]!),
@@ -398,7 +404,10 @@ export function createMessageQueueDrainCoordinator<C, S>(
             armPending(key, failed);
           }
         }
-        for (const id of step.endSteerIds) queueStore.getState().endSteer(key, id);
+        for (const rejection of step.endSteers) {
+          queueStore.getState().endSteer(key, rejection.messageId, rejection.attempt.commandId);
+          platform.onSteerRejected?.(key, rejection);
+        }
         return true;
       }
       case "dispatch-started": {
@@ -585,7 +594,7 @@ export function createMessageQueueDrainCoordinator<C, S>(
       if (
         state.queuesByThreadKey[key] !== previous.queuesByThreadKey[key] ||
         state.holdsByThreadKey[key] !== previous.holdsByThreadKey[key] ||
-        state.steeringIdsByThreadKey[key] !== previous.steeringIdsByThreadKey[key] ||
+        state.steerAttemptsByThreadKey[key] !== previous.steerAttemptsByThreadKey[key] ||
         state.acknowledgedCauseKeysByThreadKey[key] !==
           previous.acknowledgedCauseKeysByThreadKey[key]
       ) {

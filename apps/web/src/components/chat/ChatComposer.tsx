@@ -110,6 +110,7 @@ import {
 import type { ModelPickMeta } from "./modelPickerTuningBridge";
 import { type ExpandedImagePreview } from "./ExpandedImagePreview";
 import { ComposerPromptShell } from "./ComposerPromptShell";
+import { describeRunningFollowUp, isFollowUpInvertModifier } from "./composerFollowUp";
 import { PhoneThreadDock, type PhoneThreadDockProps } from "../shell/phone/PhoneThreadDock";
 import { useComposerImageAttachments } from "./useComposerImageAttachments";
 import { cn, randomUUID } from "~/lib/utils";
@@ -360,8 +361,20 @@ export interface ChatComposerProps {
   shouldAutoScrollRef: React.MutableRefObject<boolean>;
   scheduleStickToBottom: () => void;
 
+  // Follow-up while a turn runs (desktop and tablet; the frozen phone tier always queues)
+  followUpSurfaceAllowsSteer: boolean;
+  getFollowUpSteerUnavailableReason: (snapshot: {
+    readonly modelSelection: ModelSelection;
+    readonly runtimeMode: RuntimeMode;
+    readonly interactionMode: ProviderInteractionMode;
+    readonly tokenMode: AgentTokenMode;
+  }) => string | null;
+
   // Callbacks
-  onSend: (e?: { preventDefault: () => void }) => void;
+  onSend: (
+    e?: { preventDefault: () => void },
+    options?: { readonly invertFollowUp?: boolean },
+  ) => void;
   onInterrupt: () => void;
   onImplementPlanInNewThread: () => void;
   onRespondToApproval: (
@@ -457,6 +470,8 @@ export const ChatComposer = memo(
       composerTerminalContextsRef,
       shouldAutoScrollRef,
       scheduleStickToBottom,
+      followUpSurfaceAllowsSteer,
+      getFollowUpSteerUnavailableReason,
       onSend,
       onInterrupt,
       onImplementPlanInNewThread,
@@ -1727,8 +1742,8 @@ export const ChatComposer = memo(
     );
 
     const submitComposer = useCallback(
-      (event?: { preventDefault: () => void }) => {
-        onSend(event);
+      (event?: { preventDefault: () => void }, options?: { readonly invertFollowUp?: boolean }) => {
+        onSend(event, options);
         if (shouldBlurMobileComposerOnSubmit()) {
           blurMobileComposerAfterSend();
         }
@@ -1766,11 +1781,39 @@ export const ChatComposer = memo(
         }
       }
       if (key === "Enter" && !event.shiftKey) {
-        submitComposer();
+        // Mod+Enter does the opposite of the follow-up setting while a turn runs; when no turn
+        // runs the flag is ignored and Enter sends.
+        submitComposer(undefined, { invertFollowUp: isFollowUpInvertModifier(event) });
         return true;
       }
       return false;
     };
+
+    const runningFollowUpPlaceholder = useMemo(
+      () =>
+        phase === "running"
+          ? describeRunningFollowUp({
+              followUpBehavior: settings.followUpBehavior,
+              steerUnavailableReason: getFollowUpSteerUnavailableReason({
+                modelSelection: selectedModelSelection,
+                runtimeMode,
+                interactionMode,
+                tokenMode,
+              }),
+              surfaceAllowsSteer: followUpSurfaceAllowsSteer,
+            }).placeholder
+          : null,
+      [
+        followUpSurfaceAllowsSteer,
+        getFollowUpSteerUnavailableReason,
+        interactionMode,
+        phase,
+        runtimeMode,
+        selectedModelSelection,
+        settings.followUpBehavior,
+        tokenMode,
+      ],
+    );
 
     // ------------------------------------------------------------------
     // Callbacks: images / file attachments / drag / paste
@@ -2713,6 +2756,7 @@ export const ChatComposer = memo(
               activeProposedPlan={activeProposedPlan}
               environmentUnavailable={environmentUnavailable}
               phase={phase}
+              runningFollowUpPlaceholder={runningFollowUpPlaceholder}
               isConnecting={isConnecting}
               isEditorDisabled={isComposerEditorDisabled}
               showCollapsedSendAction={showCollapsedMobileSendAction}

@@ -329,7 +329,11 @@
       "types": "./src/pairingUrl.ts",
       "import": "./src/pairingUrl.ts"
     },
-    "./storageRetention": "./src/storageRetention.ts"
+    "./storageRetention": "./src/storageRetention.ts",
+    "./turnSteer": {
+      "types": "./src/turnSteer.ts",
+      "import": "./src/turnSteer.ts"
+    }
   },
   "scripts": {
     "typecheck": "tsc --noEmit",

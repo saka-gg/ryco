@@ -5,11 +5,16 @@ import {
 import { canSnoozeThread } from "@ryco/shared/threadSnooze";
 import type {
   AgentTokenMode,
+  CommandId,
+  MessageId,
   OrchestrationCommand,
   OrchestrationEvent,
   OrchestrationReadModel,
   ThreadLineage,
   ThreadUsageLimit,
+  ThreadId,
+  TurnId,
+  TurnSteerRejectionReason,
 } from "@ryco/contracts";
 import {
   CONTEXT_HANDOFF_ACTIVITY_KIND,
@@ -21,6 +26,10 @@ import {
 import { modelSelectionRequiresContextHandoff } from "@ryco/shared/model";
 import { threadSettlementInput } from "./threadSettlementInput.ts";
 import { canSettleThread, type ThreadSettlementBlocker } from "@ryco/shared/threadSettlement";
+import {
+  TURN_STEER_FAILED_ACTIVITY_KIND,
+  turnSteerRejectionActivityId,
+} from "@ryco/shared/turnSteer";
 import { Effect } from "effect";
 
 import { OrchestrationCommandInvariantError } from "./Errors.ts";
@@ -138,6 +147,71 @@ const decideThreadCreated = Effect.fn("decideThreadCreated")(function* ({
   };
   return event;
 });
+
+const STEER_TURN_ENDED_ERROR =
+  "The turn finished before this message could be steered. It stays queued and is sent next.";
+
+/**
+ * A steer that did not reach the turn. `deferred` rows are quiet (info tone): the message stays
+ * queued and the client sends it as the next turn. `failed` rows are real provider errors.
+ */
+function planTurnSteerRejection(input: {
+  readonly commandId: CommandId;
+  readonly requestCommandId: CommandId;
+  readonly threadId: ThreadId;
+  readonly expectedTurnId: TurnId;
+  readonly messageId: MessageId;
+  readonly error: string;
+  readonly reason: TurnSteerRejectionReason;
+  readonly occurredAt: string;
+}): ReadonlyArray<PlannedOrchestrationEvent> {
+  const rejectedEvent: PlannedOrchestrationEvent = {
+    ...withEventBase({
+      aggregateKind: "thread",
+      aggregateId: input.threadId,
+      occurredAt: input.occurredAt,
+      commandId: input.commandId,
+    }),
+    type: "thread.turn-steer-rejected",
+    payload: {
+      threadId: input.threadId,
+      messageId: input.messageId,
+      expectedTurnId: input.expectedTurnId,
+      error: input.error,
+      reason: input.reason,
+      resolvedAt: input.occurredAt,
+    },
+  };
+  const deferred = input.reason === "deferred";
+  const activityEvent: PlannedOrchestrationEvent = {
+    ...withEventBase({
+      aggregateKind: "thread",
+      aggregateId: input.threadId,
+      occurredAt: input.occurredAt,
+      commandId: input.commandId,
+    }),
+    causationEventId: rejectedEvent.eventId,
+    type: "thread.activity-appended",
+    payload: {
+      threadId: input.threadId,
+      activity: {
+        id: EventId.make(turnSteerRejectionActivityId(input.requestCommandId)),
+        tone: deferred ? "info" : "error",
+        kind: TURN_STEER_FAILED_ACTIVITY_KIND,
+        summary: deferred ? "Steer deferred" : "Steer failed",
+        payload: {
+          messageId: input.messageId,
+          expectedTurnId: input.expectedTurnId,
+          error: input.error,
+          reason: input.reason,
+        },
+        turnId: input.expectedTurnId,
+        createdAt: input.occurredAt,
+      },
+    },
+  };
+  return [rejectedEvent, activityEvent];
+}
 
 function settlementBlockerDetail(blocker: ThreadSettlementBlocker): string {
   switch (blocker) {
@@ -1505,16 +1579,22 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         threadId: command.threadId,
       });
       const activeTurnId = targetThread.session?.activeTurnId ?? null;
-      if (targetThread.session?.status !== "running" || activeTurnId === null) {
-        return yield* new OrchestrationCommandInvariantError({
-          commandType: command.type,
-          detail: `Thread '${command.threadId}' has no active turn to steer.`,
-        });
-      }
-      if (activeTurnId !== command.expectedTurnId) {
-        return yield* new OrchestrationCommandInvariantError({
-          commandType: command.type,
-          detail: `Thread '${command.threadId}' active turn '${activeTurnId}' does not match expected turn '${command.expectedTurnId}'.`,
+      // A steer arriving after its turn ended is not an error: the message stays queued and is
+      // sent as the next turn.
+      if (
+        targetThread.session?.status !== "running" ||
+        activeTurnId === null ||
+        activeTurnId !== command.expectedTurnId
+      ) {
+        return planTurnSteerRejection({
+          commandId: command.commandId,
+          requestCommandId: command.commandId,
+          threadId: command.threadId,
+          expectedTurnId: command.expectedTurnId,
+          messageId: command.message.messageId,
+          error: STEER_TURN_ENDED_ERROR,
+          reason: "deferred",
+          occurredAt: command.requestedAt,
         });
       }
       return {
@@ -2411,49 +2491,16 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         return [messageEvent, acceptedEvent];
       }
 
-      const rejectedEvent: PlannedOrchestrationEvent = {
-        ...withEventBase({
-          aggregateKind: "thread",
-          aggregateId: command.threadId,
-          occurredAt: resolvedAt,
-          commandId: command.commandId,
-        }),
-        type: "thread.turn-steer-rejected",
-        payload: {
-          threadId: command.threadId,
-          messageId: command.message.messageId,
-          expectedTurnId: command.expectedTurnId,
-          error: command.resolution.error,
-          resolvedAt,
-        },
-      };
-      const activityEvent: PlannedOrchestrationEvent = {
-        ...withEventBase({
-          aggregateKind: "thread",
-          aggregateId: command.threadId,
-          occurredAt: resolvedAt,
-          commandId: command.commandId,
-        }),
-        causationEventId: rejectedEvent.eventId,
-        type: "thread.activity-appended",
-        payload: {
-          threadId: command.threadId,
-          activity: {
-            id: EventId.make(`turn-steer-rejected:${command.requestCommandId}`),
-            tone: "error",
-            kind: "provider.turn.steer.failed",
-            summary: "Steer failed",
-            payload: {
-              messageId: command.message.messageId,
-              expectedTurnId: command.expectedTurnId,
-              error: command.resolution.error,
-            },
-            turnId: command.expectedTurnId,
-            createdAt: resolvedAt,
-          },
-        },
-      };
-      return [rejectedEvent, activityEvent];
+      return planTurnSteerRejection({
+        commandId: command.commandId,
+        requestCommandId: command.requestCommandId,
+        threadId: command.threadId,
+        expectedTurnId: command.expectedTurnId,
+        messageId: command.message.messageId,
+        error: command.resolution.error,
+        reason: command.resolution.reason ?? "failed",
+        occurredAt: resolvedAt,
+      });
     }
 
     default: {

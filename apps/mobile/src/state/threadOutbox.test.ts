@@ -26,6 +26,7 @@ vi.mock("expo-sqlite/kv-store", () => ({
 }));
 
 import {
+  clearThreadOutboxSteering,
   drainThreadOutbox,
   enqueueThreadOutboxMessage,
   getThreadOutboxHold,
@@ -33,6 +34,7 @@ import {
   hydrateThreadOutbox,
   listThreadOutboxMessages,
   nextThreadOutboxLimitReleaseAtMs,
+  markThreadOutboxSteering,
   releaseThreadOutboxHold,
   resetThreadOutboxForTests,
   retryThreadOutboxReview,
@@ -72,7 +74,7 @@ function view(overrides: Partial<QueueThreadView> = {}): QueueThreadView {
     latestTurnPlaceholderCheckpoint: false,
     projectedMessageIds: new Set(),
     turnStartFailures: [],
-    steerFailedMessageIds: new Set(),
+    steerRejectionsByActivityId: new Map(),
     ...overrides,
   };
 }
@@ -180,6 +182,56 @@ describe("threadOutbox store + drain", () => {
 
     expect(sendQueuedMessage).not.toHaveBeenCalled();
     expect(listThreadOutboxMessages()).toHaveLength(0);
+  });
+
+  it("stops at a message being steered and resumes once the steer ends", async () => {
+    enqueueThreadOutboxMessage(queued("m-steer", "2026-08-17T10:00:00.000Z"));
+    enqueueThreadOutboxMessage(queued("m-later", "2026-08-17T10:01:00.000Z"));
+    const attempt = {
+      commandId: "cmd-steer",
+      expectedTurnId: "turn-1" as TurnId,
+      startedAt: "2026-08-17T10:00:01.000Z",
+      explicit: true,
+    };
+    markThreadOutboxSteering("m-steer", attempt);
+    const sendQueuedMessage = accepting();
+
+    await drainThreadOutbox(deps(IDLE, sendQueuedMessage));
+    expect(sendQueuedMessage).not.toHaveBeenCalled();
+    expect(listThreadOutboxMessages().map((m) => m.messageId)).toEqual(["m-steer", "m-later"]);
+
+    // A stale outcome of another attempt does not end this one.
+    clearThreadOutboxSteering("m-steer", "cmd-other");
+    await drainThreadOutbox(deps(IDLE, sendQueuedMessage));
+    expect(sendQueuedMessage).not.toHaveBeenCalled();
+
+    clearThreadOutboxSteering("m-steer", "cmd-steer");
+    await drainThreadOutbox(deps(IDLE, sendQueuedMessage));
+    expect(sendQueuedMessage).toHaveBeenCalledTimes(1);
+    expect(sendQueuedMessage.mock.calls[0]?.[0].messageId).toBe("m-steer");
+  });
+
+  it("ends a steer its own request rejected, then sends the message as the next turn", async () => {
+    enqueueThreadOutboxMessage(queued("m-deferred", "2026-08-17T10:00:00.000Z"));
+    markThreadOutboxSteering("m-deferred", {
+      commandId: "cmd-deferred",
+      expectedTurnId: "turn-1" as TurnId,
+      startedAt: "2026-08-17T10:00:01.000Z",
+      explicit: false,
+    });
+    const sendQueuedMessage = accepting();
+    const rejected = view({
+      steerRejectionsByActivityId: new Map([
+        [
+          "turn-steer-rejected:cmd-deferred",
+          { messageId: "m-deferred", reason: "deferred" as const, error: "The turn finished." },
+        ],
+      ]),
+    });
+
+    await drainThreadOutbox(deps(rejected, sendQueuedMessage));
+    expect(sendQueuedMessage).toHaveBeenCalledTimes(1);
+    expect(sendQueuedMessage.mock.calls[0]?.[0].messageId).toBe("m-deferred");
   });
 
   it("waits for detailed message reconciliation before delivery", async () => {

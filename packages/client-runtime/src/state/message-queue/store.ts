@@ -7,7 +7,19 @@ import {
   removeQueueHoldCauses,
   type QueueHold,
 } from "./hold.ts";
-import { moveQueuedMessage, removeQueuedMessage, type QueuedMessage } from "./logic.ts";
+import {
+  moveQueuedMessage,
+  removeQueuedMessage,
+  type QueuedMessage,
+  type QueuedMessageSteerAttempt,
+} from "./logic.ts";
+
+export type QueuedMessageSteerAttempts = Readonly<Record<string, QueuedMessageSteerAttempt>>;
+
+/** The message ids with a live steer attempt, in start order. */
+export function steeringIdsOf(attempts: QueuedMessageSteerAttempts | undefined): string[] {
+  return attempts ? Object.keys(attempts) : [];
+}
 
 function withDeliveryStatus<Composer, Settings>(
   queue: QueuedMessage<Composer, Settings>[],
@@ -29,9 +41,23 @@ function withoutKey<T>(record: Record<string, T>, key: string): Record<string, T
   return next;
 }
 
+function withoutAttempt(
+  attemptsByThreadKey: Record<string, QueuedMessageSteerAttempts>,
+  threadKey: string,
+  id: string,
+): Record<string, QueuedMessageSteerAttempts> {
+  const attempts = attemptsByThreadKey[threadKey];
+  if (attempts?.[id] === undefined) return attemptsByThreadKey;
+  const next = withoutKey(attempts, id);
+  return Object.keys(next).length === 0
+    ? withoutKey(attemptsByThreadKey, threadKey)
+    : { ...attemptsByThreadKey, [threadKey]: next };
+}
+
 export interface MessageQueueState<Composer = unknown, Settings = unknown> {
   readonly queuesByThreadKey: Record<string, QueuedMessage<Composer, Settings>[]>;
-  readonly steeringIdsByThreadKey: Record<string, string[]>;
+  /** Live steer attempts per thread, keyed by message id. */
+  readonly steerAttemptsByThreadKey: Record<string, QueuedMessageSteerAttempts>;
   /** Recorded, edge-triggered pauses. Present only while the queue is non-empty. */
   readonly holdsByThreadKey: Record<string, QueueHold>;
   /** Failure causes already seen; undefined for a key = no baseline yet. */
@@ -48,8 +74,17 @@ export interface MessageQueueState<Composer = unknown, Settings = unknown> {
   readonly releaseSend: (threadKey: string, id: string) => void;
   readonly dequeue: (threadKey: string) => void;
   readonly clear: (threadKey: string) => void;
-  readonly beginSteer: (threadKey: string, id: string) => void;
-  readonly endSteer: (threadKey: string, id: string) => void;
+  /**
+   * Claims the message for a steer. Refused (false) while it already has a live attempt, while
+   * it is being sent as a turn, or once it left the queue. A failed send may still be steered.
+   */
+  readonly beginSteer: (
+    threadKey: string,
+    id: string,
+    attempt: QueuedMessageSteerAttempt,
+  ) => boolean;
+  /** Ends the attempt only when `commandId` is the live attempt's, so stale outcomes are ignored. */
+  readonly endSteer: (threadKey: string, id: string, commandId: string) => void;
   /** Merges into the thread's hold. No-op (false) when the queue is empty or nothing changed. */
   readonly hold: (threadKey: string, hold: QueueHold) => boolean;
   /** Resume: drops the hold and acknowledges the given causes. */
@@ -65,7 +100,7 @@ export interface MessageQueueState<Composer = unknown, Settings = unknown> {
 type QueueSlices<Composer, Settings> = Pick<
   MessageQueueState<Composer, Settings>,
   | "queuesByThreadKey"
-  | "steeringIdsByThreadKey"
+  | "steerAttemptsByThreadKey"
   | "holdsByThreadKey"
   | "acknowledgedCauseKeysByThreadKey"
 >;
@@ -91,7 +126,7 @@ function withQueue<Composer, Settings>(
 export function createMessageQueueStore<Composer = unknown, Settings = unknown>() {
   return create<MessageQueueState<Composer, Settings>>((set, get) => ({
     queuesByThreadKey: {},
-    steeringIdsByThreadKey: {},
+    steerAttemptsByThreadKey: {},
     holdsByThreadKey: {},
     acknowledgedCauseKeysByThreadKey: {},
     epoch: 0,
@@ -106,13 +141,9 @@ export function createMessageQueueStore<Composer = unknown, Settings = unknown>(
       set((state) => {
         const current = state.queuesByThreadKey[threadKey];
         if (!current) return state;
-        const steeringIds = state.steeringIdsByThreadKey[threadKey] ?? [];
         return {
           ...withQueue(state, threadKey, removeQueuedMessage(current, id)),
-          steeringIdsByThreadKey: {
-            ...state.steeringIdsByThreadKey,
-            [threadKey]: steeringIds.filter((entry) => entry !== id),
-          },
+          steerAttemptsByThreadKey: withoutAttempt(state.steerAttemptsByThreadKey, threadKey, id),
         };
       }),
     move: (threadKey, id, direction) =>
@@ -135,7 +166,7 @@ export function createMessageQueueStore<Composer = unknown, Settings = unknown>(
           !message ||
           message.deliveryStatus ||
           queue?.some((entry) => entry.deliveryStatus === "sending") ||
-          state.steeringIdsByThreadKey[threadKey]?.includes(id)
+          state.steerAttemptsByThreadKey[threadKey]?.[id] !== undefined
         )
           return state;
         claimed = true;
@@ -197,7 +228,7 @@ export function createMessageQueueStore<Composer = unknown, Settings = unknown>(
         if (!(threadKey in state.queuesByThreadKey)) return state;
         return {
           queuesByThreadKey: withoutKey(state.queuesByThreadKey, threadKey),
-          steeringIdsByThreadKey: withoutKey(state.steeringIdsByThreadKey, threadKey),
+          steerAttemptsByThreadKey: withoutKey(state.steerAttemptsByThreadKey, threadKey),
           holdsByThreadKey: withoutKey(state.holdsByThreadKey, threadKey),
           acknowledgedCauseKeysByThreadKey: withoutKey(
             state.acknowledgedCauseKeysByThreadKey,
@@ -205,26 +236,29 @@ export function createMessageQueueStore<Composer = unknown, Settings = unknown>(
           ),
         };
       }),
-    beginSteer: (threadKey, id) =>
+    beginSteer: (threadKey, id, attempt) => {
+      let claimed = false;
       set((state) => {
-        const current = state.steeringIdsByThreadKey[threadKey] ?? [];
-        if (current.includes(id)) return state;
+        const current = state.steerAttemptsByThreadKey[threadKey];
+        const message = state.queuesByThreadKey[threadKey]?.find((entry) => entry.id === id);
+        if (!message || message.deliveryStatus === "sending" || current?.[id] !== undefined) {
+          return state;
+        }
+        claimed = true;
         return {
-          steeringIdsByThreadKey: {
-            ...state.steeringIdsByThreadKey,
-            [threadKey]: [...current, id],
+          steerAttemptsByThreadKey: {
+            ...state.steerAttemptsByThreadKey,
+            [threadKey]: { ...current, [id]: attempt },
           },
         };
-      }),
-    endSteer: (threadKey, id) =>
+      });
+      return claimed;
+    },
+    endSteer: (threadKey, id, commandId) =>
       set((state) => {
-        const current = state.steeringIdsByThreadKey[threadKey];
-        if (!current?.includes(id)) return state;
+        if (state.steerAttemptsByThreadKey[threadKey]?.[id]?.commandId !== commandId) return state;
         return {
-          steeringIdsByThreadKey: {
-            ...state.steeringIdsByThreadKey,
-            [threadKey]: current.filter((entry) => entry !== id),
-          },
+          steerAttemptsByThreadKey: withoutAttempt(state.steerAttemptsByThreadKey, threadKey, id),
         };
       }),
     hold: (threadKey, hold) => {
@@ -286,7 +320,7 @@ export function createMessageQueueStore<Composer = unknown, Settings = unknown>(
     reset: () =>
       set((state) => ({
         queuesByThreadKey: {},
-        steeringIdsByThreadKey: {},
+        steerAttemptsByThreadKey: {},
         holdsByThreadKey: {},
         acknowledgedCauseKeysByThreadKey: {},
         epoch: state.epoch + 1,
