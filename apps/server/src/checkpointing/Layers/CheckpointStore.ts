@@ -60,7 +60,7 @@ const makeCheckpointStore = Effect.gen(function* () {
         }),
       );
 
-  const hasHeadCommit = (cwd: string) =>
+  const hasHeadCommit: CheckpointStoreShape["hasHeadCommit"] = (cwd) =>
     vcs
       .execute({
         operation: "CheckpointStore.hasHeadCommit",
@@ -301,6 +301,7 @@ const makeCheckpointStore = Effect.gen(function* () {
   return {
     isGitRepository,
     captureCheckpoint,
+    hasHeadCommit,
     hasCheckpointRef,
     restoreCheckpoint,
     diffCheckpoints,

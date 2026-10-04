@@ -134,13 +134,24 @@ function threadWithHandoff(input: {
 }
 
 describe("provider rollback epoch safety", () => {
-  it("allows rollback wholly inside the active target epoch", () => {
+  it("allows rollback to the checkpoint of the turn that carried the handoff", () => {
     const thread = threadWithHandoff({
       activeRuntime: "runtime-b1",
       targetRuntime: "runtime-b1",
       boundaryTurnCount: 4,
     });
-    expect(providerRollbackEpochViolation(thread, 3)).toBeNull();
+    expect(providerRollbackEpochViolation(thread, 4)).toBeNull();
+  });
+
+  it("rejects rollback to the epoch baseline, which drops the handoff turn", () => {
+    const thread = threadWithHandoff({
+      activeRuntime: "runtime-b1",
+      targetRuntime: "runtime-b1",
+      boundaryTurnCount: 4,
+    });
+    expect(providerRollbackEpochViolation(thread, 3)).toBe(
+      "Reverting to checkpoint 3 would discard the turn that carried the context handoff (checkpoint 4). Revert to checkpoint 4 or later. Nothing was changed.",
+    );
   });
 
   it("rejects rollback that includes turns from the source epoch", () => {
@@ -150,7 +161,7 @@ describe("provider rollback epoch safety", () => {
       boundaryTurnCount: 4,
     });
     expect(providerRollbackEpochViolation(thread, 2)).toContain(
-      "cannot cross the active context handoff boundary",
+      "would discard the turn that carried the context handoff",
     );
   });
 

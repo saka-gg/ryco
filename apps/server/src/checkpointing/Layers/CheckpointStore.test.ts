@@ -90,6 +90,21 @@ function buildLargeText(lineCount = 5_000): string {
 }
 
 it.layer(TestLayer)("CheckpointStoreLive", (it) => {
+  describe("hasHeadCommit", () => {
+    it.effect("is true on a repository with a commit and false on an empty one", () =>
+      Effect.gen(function* () {
+        const checkpointStore = yield* CheckpointStore;
+        const withCommit = yield* makeTmpDir();
+        yield* initRepoWithCommit(withCommit);
+        expect(yield* checkpointStore.hasHeadCommit(withCommit)).toBe(true);
+
+        const empty = yield* makeTmpDir();
+        yield* git(empty, ["init"]);
+        expect(yield* checkpointStore.hasHeadCommit(empty)).toBe(false);
+      }),
+    );
+  });
+
   describe("diffCheckpoints", () => {
     it.effect("returns full oversized checkpoint diffs without truncation", () =>
       Effect.gen(function* () {

@@ -203,9 +203,11 @@ export interface CodexSessionRuntimeShape {
   ) => Effect.Effect<ProviderTurnSteerResult, CodexSessionRuntimeError>;
   readonly interruptTurn: (turnId?: TurnId) => Effect.Effect<void, CodexSessionRuntimeError>;
   readonly readThread: Effect.Effect<CodexThreadSnapshot, CodexSessionRuntimeError>;
-  readonly rollbackThread: (
-    numTurns: number,
-  ) => Effect.Effect<CodexThreadSnapshot, CodexSessionRuntimeError>;
+  readonly rollbackThread: (input: {
+    readonly numTurns: number;
+    /** The first dropped turn; `thread/revert` keeps the history before it. */
+    readonly beforeTurnId?: string | undefined;
+  }) => Effect.Effect<CodexThreadSnapshot, CodexSessionRuntimeError>;
   readonly setGoal: (
     input: Omit<EffectCodexSchema.V2ThreadGoalSetParams, "threadId">,
   ) => Effect.Effect<EffectCodexSchema.V2ThreadGoalSetResponse, CodexSessionRuntimeError>;
@@ -655,6 +657,84 @@ export const openCodexThread = (input: {
                 "This Codex thread already has an active writer in another process. Its history can still be recovered. Release the thread in that process before continuing it here.",
             })
           : error,
+      ),
+    );
+};
+
+interface CodexThreadRevertClient {
+  readonly raw: {
+    readonly request: (
+      method: string,
+      payload?: unknown,
+    ) => Effect.Effect<unknown, CodexErrors.CodexAppServerError>;
+  };
+  readonly request: (
+    method: "thread/rollback",
+    payload: CodexRpc.ClientRequestParamsByMethod["thread/rollback"],
+  ) => Effect.Effect<
+    CodexRpc.ClientRequestResponsesByMethod["thread/rollback"],
+    CodexErrors.CodexAppServerError
+  >;
+}
+
+// `thread/revert` is newer than the vendored schema; decode only what is used.
+const CodexThreadRevertResponse = Schema.Struct({
+  thread: Schema.Struct({ id: Schema.String }),
+});
+
+function isUnknownCodexMethod(error: CodexErrors.CodexAppServerError): boolean {
+  return (
+    Schema.is(CodexErrors.CodexAppServerRequestError)(error) &&
+    (error.code === -32601 ||
+      (error.code === -32600 && /unknown variant/i.test(error.errorMessage)))
+  );
+}
+
+/**
+ * Makes a Codex thread forget its newest turns. Current binaries replace the
+ * durable history with the prefix before `beforeTurnId` (`thread/revert`); old
+ * binaries only know the deprecated `thread/rollback`. Neither touches files.
+ */
+export const revertCodexThread = (
+  client: CodexThreadRevertClient,
+  input: {
+    readonly threadId: string;
+    readonly beforeTurnId?: string | undefined;
+    readonly numTurns: number;
+  },
+): Effect.Effect<CodexThreadSnapshot, CodexErrors.CodexAppServerError> => {
+  const legacyRollback = (revertError: CodexErrors.CodexAppServerError | undefined) =>
+    client.request("thread/rollback", { threadId: input.threadId, numTurns: input.numTurns }).pipe(
+      Effect.as<CodexThreadSnapshot>({ threadId: input.threadId, turns: [] }),
+      Effect.catch((rollbackError) =>
+        !isUnknownCodexMethod(rollbackError)
+          ? Effect.fail(rollbackError)
+          : // A legacy-history thread on a new binary: report Codex's own reason.
+            Effect.fail(
+              revertError ??
+                new CodexErrors.CodexAppServerRequestError({
+                  code: -32601,
+                  errorMessage: "This Codex version can't rewind threads.",
+                }),
+            ),
+      ),
+    );
+  if (input.beforeTurnId === undefined) return legacyRollback(undefined);
+  return client.raw
+    .request("thread/revert", { threadId: input.threadId, beforeTurnId: input.beforeTurnId })
+    .pipe(
+      Effect.flatMap((raw) =>
+        Schema.decodeUnknownEffect(CodexThreadRevertResponse)(raw).pipe(
+          Effect.mapError((error) =>
+            toProtocolParseError("Invalid thread/revert response payload", error),
+          ),
+        ),
+      ),
+      Effect.as<CodexThreadSnapshot>({ threadId: input.threadId, turns: [] }),
+      Effect.catch((error) =>
+        Schema.is(CodexErrors.CodexAppServerRequestError)(error)
+          ? legacyRollback(error)
+          : Effect.fail(error),
       ),
     );
 };
@@ -2266,18 +2346,19 @@ export const makeCodexSessionRuntime = (
         }
         return parseThreadSnapshot(response);
       }),
-      rollbackThread: (numTurns) =>
+      rollbackThread: (input) =>
         Effect.gen(function* () {
           const providerThreadId = yield* readProviderThreadId;
-          const response = yield* client.request("thread/rollback", {
+          const snapshot = yield* revertCodexThread(client, {
             threadId: providerThreadId,
-            numTurns,
+            numTurns: input.numTurns,
+            beforeTurnId: input.beforeTurnId,
           });
           yield* updateSession(sessionRef, {
             status: "ready",
             activeTurnId: undefined,
           });
-          return parseThreadSnapshot(response);
+          return snapshot;
         }),
       setGoal: (input) =>
         Effect.gen(function* () {

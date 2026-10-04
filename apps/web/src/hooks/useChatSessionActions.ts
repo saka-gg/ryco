@@ -32,6 +32,8 @@ export function revertCheckpointGuardFailureMessage(
       return `Reconnect ${failure.label} before reverting checkpoints.`;
     case "turn-in-progress":
       return "Interrupt the current turn before reverting checkpoints.";
+    case "provider-unsupported":
+      return failure.message;
   }
 }
 
@@ -142,6 +144,7 @@ export function useChatSessionActions(input: {
       environmentUnavailable: boolean;
       environmentUnavailableLabel: string | null;
       turnInProgress: boolean;
+      providerRefusal: string | null;
     }) => {
       const api = readEnvironmentApi(environmentId);
       const localApi = readLocalApi();
@@ -162,9 +165,10 @@ export function useChatSessionActions(input: {
           environmentUnavailable: input.environmentUnavailable,
           environmentUnavailableLabel: input.environmentUnavailableLabel,
           turnInProgress: input.turnInProgress,
+          providerRefusal: input.providerRefusal,
           confirmMessage: [
             `Revert this thread to checkpoint ${input.turnCount}?`,
-            "This will discard newer messages and turn diffs in this thread.",
+            "The agent forgets the newer turns, and the files in this checkout go back to how they were at that checkpoint. Changes made since then, including your own edits, are discarded.",
             "This action cannot be undone.",
           ].join("\n"),
         });

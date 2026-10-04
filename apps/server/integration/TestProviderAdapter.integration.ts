@@ -22,6 +22,7 @@ import {
 } from "../src/provider/Errors.ts";
 import type {
   ProviderAdapterShape,
+  ProviderRollbackInput,
   ProviderThreadSnapshot,
   ProviderThreadTurnSnapshot,
 } from "../src/provider/Services/ProviderAdapter.ts";
@@ -56,7 +57,7 @@ interface SessionState {
   snapshot: ProviderThreadSnapshot;
   turnCount: number;
   readonly queuedResponses: Array<TestTurnResponse>;
-  readonly rollbackCalls: Array<number>;
+  readonly rollbackCalls: Array<ProviderRollbackInput>;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -191,7 +192,7 @@ export interface TestProviderAdapterHarness {
   readonly getStartCount: () => number;
   readonly getStartedRuntimeSessionIds: () => ReadonlyArray<RuntimeSessionId>;
   readonly getSentTurns: () => ReadonlyArray<ProviderSendTurnInput>;
-  readonly getRollbackCalls: (threadId: ThreadId) => ReadonlyArray<number>;
+  readonly getRollbackCalls: (threadId: ThreadId) => ReadonlyArray<ProviderRollbackInput>;
   readonly getInterruptCalls: (threadId: ThreadId) => ReadonlyArray<TurnId | undefined>;
   readonly listActiveSessionIds: () => ReadonlyArray<ThreadId>;
   readonly getApprovalResponses: (threadId: ThreadId) => ReadonlyArray<{
@@ -459,8 +460,9 @@ export const makeTestProviderAdapterHarness = (options?: MakeTestProviderAdapter
 
     const rollbackThread: ProviderAdapterShape<ProviderAdapterError>["rollbackThread"] = (
       threadId,
-      numTurns,
+      input,
     ) => {
+      const numTurns = input.numTurns;
       const state = sessions.get(threadId);
       if (!state) {
         return missingSessionEffect(provider, threadId);
@@ -476,7 +478,7 @@ export const makeTestProviderAdapterHarness = (options?: MakeTestProviderAdapter
       }
 
       return Effect.sync(() => {
-        state.rollbackCalls.push(numTurns);
+        state.rollbackCalls.push(input);
         state.snapshot = {
           threadId: state.snapshot.threadId,
           turns: state.snapshot.turns.slice(0, state.snapshot.turns.length - numTurns),
@@ -495,6 +497,7 @@ export const makeTestProviderAdapterHarness = (options?: MakeTestProviderAdapter
       provider,
       capabilities: {
         sessionModelSwitch: "in-session",
+        conversationRollback: "native",
       },
       startSession,
       sendTurn,
@@ -531,7 +534,7 @@ export const makeTestProviderAdapterHarness = (options?: MakeTestProviderAdapter
         queuedResponsesForNextSession.push(response);
       });
 
-    const getRollbackCalls = (threadId: ThreadId): ReadonlyArray<number> => {
+    const getRollbackCalls = (threadId: ThreadId): ReadonlyArray<ProviderRollbackInput> => {
       const state = sessions.get(threadId);
       if (!state) {
         return [];

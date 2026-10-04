@@ -62,6 +62,7 @@ describe("CheckpointDiffQueryLive", () => {
 
     const checkpointStore: CheckpointStoreShape = {
       isGitRepository: () => Effect.succeed(true),
+      hasHeadCommit: () => Effect.succeed(true),
       captureCheckpoint: () => Effect.void,
       hasCheckpointRef: ({ checkpointRef }) =>
         Effect.sync(() => {
@@ -152,6 +153,7 @@ describe("CheckpointDiffQueryLive", () => {
 
     const checkpointStore: CheckpointStoreShape = {
       isGitRepository: () => Effect.succeed(true),
+      hasHeadCommit: () => Effect.succeed(true),
       captureCheckpoint: () => Effect.void,
       hasCheckpointRef: () => Effect.succeed(true),
       restoreCheckpoint: () => Effect.succeed(true),
@@ -205,6 +207,7 @@ describe("CheckpointDiffQueryLive", () => {
 
     const checkpointStore: CheckpointStoreShape = {
       isGitRepository: () => Effect.succeed(true),
+      hasHeadCommit: () => Effect.succeed(true),
       captureCheckpoint: () => Effect.void,
       hasCheckpointRef: () => Effect.succeed(true),
       restoreCheckpoint: () => Effect.succeed(true),

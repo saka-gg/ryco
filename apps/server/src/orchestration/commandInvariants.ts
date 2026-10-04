@@ -76,7 +76,7 @@ function failedTurnStartMessageIds(thread: OrchestrationThread): ReadonlySet<str
   return messageIds;
 }
 
-function hasActionableContextHandoff(thread: OrchestrationThread): boolean {
+export function hasActionableContextHandoff(thread: OrchestrationThread): boolean {
   const decode = Schema.decodeUnknownOption(ContextHandoffActivityPayload);
   let failedTurnStarts: ReadonlySet<string> | undefined;
   return thread.activities.some((activity) => {

@@ -121,6 +121,24 @@ export class ProviderUnsupportedError extends Schema.TaggedError<ProviderUnsuppo
 }
 
 /**
+ * ProviderOperationUnsupportedError - The provider cannot perform this
+ * operation at all. The message is user-facing.
+ */
+export class ProviderOperationUnsupportedError extends Schema.TaggedError<ProviderOperationUnsupportedError>()(
+  "ProviderOperationUnsupportedError",
+  {
+    provider: Schema.String,
+    operation: Schema.String,
+    detail: Schema.String,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {
+  override get message(): string {
+    return this.detail;
+  }
+}
+
+/**
  * ProviderInstanceNotFoundError - Lookup against the instance registry failed.
  *
  * Distinct from `ProviderUnsupportedError`: the driver is registered, but no
@@ -201,6 +219,7 @@ export type ProviderAdapterError =
 export type ProviderServiceError =
   | ProviderValidationError
   | ProviderUnsupportedError
+  | ProviderOperationUnsupportedError
   | ProviderInstanceNotFoundError
   | ProviderSessionNotFoundError
   | ProviderSessionDirectoryPersistenceError

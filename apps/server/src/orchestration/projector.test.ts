@@ -1,11 +1,16 @@
 import {
+  CheckpointRef,
   CommandId,
   DEFAULT_AGENT_TOKEN_MODE,
   EventId,
+  MessageId,
   ProjectId,
   ProviderDriverKind,
+  ProviderInstanceId,
   ThreadId,
+  TurnId,
   type OrchestrationEvent,
+  type OrchestrationThread,
 } from "@ryco/contracts";
 import { Effect } from "effect";
 import { describe, expect, it } from "vite-plus/test";
@@ -1577,5 +1582,212 @@ describe("orchestration projector usage limits", () => {
       ),
     );
     expect(ignored.threads[0]?.usageLimit).toEqual(usageLimit);
+  });
+});
+
+describe("orchestration projector checkpoint revert", () => {
+  const t = (minute: number) => `2026-02-23T09:${String(minute).padStart(2, "0")}:00.000Z`;
+
+  function hydratedThread(): OrchestrationThread {
+    return {
+      id: ThreadId.make("thread-hydrated"),
+      projectId: ProjectId.make("project-1"),
+      title: "Hydrated",
+      modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.3-codex" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      latestTurn: {
+        turnId: TurnId.make("turn-9"),
+        state: "completed",
+        requestedAt: t(9),
+        startedAt: t(9),
+        completedAt: t(9),
+        assistantMessageId: null,
+      },
+      createdAt: t(0),
+      updatedAt: t(9),
+      archivedAt: null,
+      settledOverride: null,
+      settledAt: null,
+      deletedAt: null,
+      messages: [
+        {
+          id: MessageId.make("user-anchor-1"),
+          role: "user",
+          text: "first",
+          turnId: null,
+          streaming: false,
+          createdAt: t(1),
+          updatedAt: t(1),
+        },
+        {
+          id: MessageId.make("user-anchor-9"),
+          role: "user",
+          text: "latest",
+          turnId: null,
+          streaming: false,
+          createdAt: t(9),
+          updatedAt: t(9),
+        },
+      ],
+      proposedPlans: [
+        {
+          id: "plan-3",
+          turnId: TurnId.make("turn-3"),
+          planMarkdown: "plan 3",
+          implementedAt: null,
+          implementationThreadId: null,
+          createdAt: t(3),
+          updatedAt: t(3),
+        },
+        {
+          id: "plan-9",
+          turnId: TurnId.make("turn-9"),
+          planMarkdown: "plan 9",
+          implementedAt: null,
+          implementationThreadId: null,
+          createdAt: t(9),
+          updatedAt: t(9),
+        },
+      ],
+      activities: [
+        {
+          id: EventId.make("activity-9"),
+          tone: "tool",
+          kind: "tool.completed",
+          summary: "done",
+          payload: {},
+          turnId: TurnId.make("turn-9"),
+          createdAt: t(9),
+        },
+      ],
+      checkpoints: [],
+      session: null,
+    };
+  }
+
+  const latestTurn5 = {
+    turnId: TurnId.make("turn-5"),
+    state: "completed" as const,
+    requestedAt: t(5),
+    startedAt: t(5),
+    completedAt: t(5),
+    assistantMessageId: null,
+  };
+
+  function reverted(payload: Record<string, unknown>, threadId = "thread-hydrated") {
+    return makeEvent({
+      sequence: 50,
+      type: "thread.reverted",
+      aggregateKind: "thread",
+      aggregateId: threadId,
+      occurredAt: t(20),
+      commandId: "cmd-revert",
+      payload: { threadId, ...payload },
+    });
+  }
+
+  it("uses the authoritative latest turn and boundary on the hydrated command model", async () => {
+    const model = { ...createEmptyReadModel(t(0)), threads: [hydratedThread()] };
+    const next = await Effect.runPromise(
+      projectEvent(
+        model,
+        reverted({
+          turnCount: 5,
+          droppedTurnIds: ["turn-6", "turn-7", "turn-8", "turn-9"],
+          latestTurn: latestTurn5,
+        }),
+      ),
+    );
+    const thread = next.threads[0];
+    expect(thread?.latestTurn?.turnId).toBe("turn-5");
+    expect(thread?.messages.map((message) => message.id)).toEqual(["user-anchor-1"]);
+    expect(thread?.proposedPlans.map((plan) => plan.id)).toEqual(["plan-3"]);
+    expect(thread?.activities).toEqual([]);
+  });
+
+  it("projects a full live thread the same with and without the authoritative fields", async () => {
+    const checkpoint = (count: number) => ({
+      turnId: TurnId.make(`turn-${count}`),
+      checkpointTurnCount: count,
+      checkpointRef: CheckpointRef.make(`refs/ryco/checkpoints/thread-live/turn/${count}`),
+      status: "ready" as const,
+      files: [],
+      assistantMessageId: MessageId.make(`assistant-${count}`),
+      completedAt: t(count * 2 + 1),
+    });
+    const live: OrchestrationThread = {
+      ...hydratedThread(),
+      id: ThreadId.make("thread-live"),
+      latestTurn: { ...latestTurn5, turnId: TurnId.make("turn-2"), completedAt: t(5) },
+      checkpoints: [checkpoint(1), checkpoint(2)],
+      messages: [1, 2].flatMap((count) => [
+        {
+          id: MessageId.make(`user-${count}`),
+          role: "user" as const,
+          text: `user ${count}`,
+          turnId: TurnId.make(`turn-${count}`),
+          streaming: false,
+          createdAt: t(count * 2),
+          updatedAt: t(count * 2),
+        },
+        {
+          id: MessageId.make(`assistant-${count}`),
+          role: "assistant" as const,
+          text: `assistant ${count}`,
+          turnId: TurnId.make(`turn-${count}`),
+          streaming: false,
+          createdAt: t(count * 2 + 1),
+          updatedAt: t(count * 2 + 1),
+        },
+      ]),
+      proposedPlans: [],
+      activities: [],
+    };
+    const model = { ...createEmptyReadModel(t(0)), threads: [live] };
+    const legacy = await Effect.runPromise(
+      projectEvent(model, reverted({ turnCount: 1 }, "thread-live")),
+    );
+    const authoritative = await Effect.runPromise(
+      projectEvent(
+        model,
+        reverted(
+          {
+            turnCount: 1,
+            droppedTurnIds: ["turn-2"],
+            latestTurn: {
+              turnId: "turn-1",
+              state: "completed",
+              requestedAt: t(3),
+              startedAt: t(3),
+              completedAt: t(3),
+              assistantMessageId: "assistant-1",
+            },
+          },
+          "thread-live",
+        ),
+      ),
+    );
+    expect(authoritative.threads[0]).toEqual(legacy.threads[0]);
+    expect(legacy.threads[0]?.messages.map((message) => message.id)).toEqual([
+      "user-1",
+      "assistant-1",
+    ]);
+  });
+
+  it("keeps the legacy projection for payloads without the authoritative fields", async () => {
+    const model = { ...createEmptyReadModel(t(0)), threads: [hydratedThread()] };
+    const next = await Effect.runPromise(projectEvent(model, reverted({ turnCount: 5 })));
+    const thread = next.threads[0];
+    // Legacy behaviour on the hydrated shape: no checkpoints, so nothing bound to a turn
+    // survives and the user anchors are kept by count.
+    expect(thread?.latestTurn).toBeNull();
+    expect(thread?.messages.map((message) => message.id)).toEqual([
+      "user-anchor-1",
+      "user-anchor-9",
+    ]);
+    expect(thread?.proposedPlans).toEqual([]);
   });
 });

@@ -26,6 +26,7 @@ import {
   ProviderStopBackgroundTaskInput,
   ProviderStopSessionInput,
   RuntimeSessionId,
+  TurnId,
   type ProviderInstanceId,
   type ProviderDriverKind,
   type ProviderRuntimeEvent,
@@ -65,6 +66,7 @@ import {
 } from "../../observability/Metrics.ts";
 import {
   type ProviderAdapterError,
+  ProviderOperationUnsupportedError,
   ProviderSessionNotFoundError,
   ProviderUnsupportedError,
   ProviderValidationError,
@@ -144,6 +146,8 @@ interface ProviderStartupAdmissionState {
 const ProviderRollbackConversationInput = Schema.Struct({
   threadId: ThreadId,
   numTurns: NonNegativeInt,
+  targetTurnId: Schema.NullOr(TurnId),
+  droppedTurnIds: Schema.Array(TurnId),
 });
 
 function toValidationError(
@@ -316,6 +320,53 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
 
   const withSessionStartLock = <A, E, R>(threadId: ThreadId, effect: Effect.Effect<A, E, R>) =>
     Effect.flatMap(getSessionStartLock(threadId), (semaphore) => semaphore.withPermit(effect));
+
+  const serviceScope = yield* Effect.scope;
+
+  // A completed turn can change the live resume cursor; Claude, for one, drops
+  // its rewind marker on the first completed turn after a revert. Persist it
+  // so a stop, idle reap, crash, or CLI exit resumes the conversation the agent
+  // actually has. Forked under the session lock: it never stalls event
+  // delivery and never interleaves with a rollback's own cursor write.
+  const persistLiveResumeCursor = (instanceId: ProviderInstanceId, threadId: ThreadId) =>
+    withSessionStartLock(
+      threadId,
+      Effect.gen(function* () {
+        const binding = Option.getOrUndefined(yield* directory.getBinding(threadId));
+        if (!binding || binding.providerInstanceId !== instanceId) return;
+        const adapter = yield* registry.getByInstance(instanceId);
+        const session = (yield* adapter.listSessions()).find((candidate) =>
+          sessionMatchesBinding(
+            { ...candidate, providerInstanceId: instanceId },
+            instanceId,
+            binding,
+          ),
+        );
+        if (
+          session?.resumeCursor === undefined ||
+          JSON.stringify(session.resumeCursor) === JSON.stringify(binding.resumeCursor ?? null)
+        ) {
+          return;
+        }
+        yield* directory.upsert({
+          threadId,
+          provider: binding.provider,
+          providerInstanceId: instanceId,
+          resumeCursor: session.resumeCursor,
+        });
+      }),
+    ).pipe(
+      Effect.catchCause((cause) =>
+        Cause.hasInterruptsOnly(cause)
+          ? Effect.void
+          : Effect.logWarning("provider.resume-cursor.persist-failed", {
+              threadId,
+              cause: Cause.pretty(cause),
+            }),
+      ),
+      Effect.forkIn(serviceScope),
+      Effect.asVoid,
+    );
 
   const publishRuntimeEvent = (event: ProviderRuntimeEvent): Effect.Effect<void> =>
     Effect.succeed(event).pipe(
@@ -572,7 +623,14 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         increment(providerRuntimeEventsTotal, {
           provider: canonicalEvent.provider,
           eventType: canonicalEvent.type,
-        }).pipe(Effect.andThen(publishRuntimeEvent(canonicalEvent))),
+        }).pipe(
+          Effect.andThen(publishRuntimeEvent(canonicalEvent)),
+          Effect.andThen(
+            canonicalEvent.type === "turn.completed"
+              ? persistLiveResumeCursor(source.instanceId, canonicalEvent.threadId)
+              : Effect.void,
+          ),
+        ),
       ),
     );
 
@@ -1500,6 +1558,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         if (routed.isActive) {
           yield* routed.adapter.stopSession(routed.threadId);
         }
+        // The live cursor is the newest one (a Claude rewind marker may have been
+        // cleared since the last send); the next start resumes from it.
+        const liveResumeCursor = routed.isActive ? routed.session?.resumeCursor : undefined;
         yield* directory.upsert({
           threadId: input.threadId,
           provider: routed.adapter.provider,
@@ -1507,6 +1568,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           ...(routed.session?.runtimeSessionId
             ? { runtimeSessionId: routed.session.runtimeSessionId }
             : {}),
+          ...(liveResumeCursor !== undefined ? { resumeCursor: liveResumeCursor } : {}),
           status: "stopped",
           runtimePayload: {
             activeTurnId: null,
@@ -1614,25 +1676,90 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     if (input.numTurns === 0) {
       return;
     }
+    const operation = "ProviderService.rollbackConversation";
     let metricProvider = "unknown";
     return yield* Effect.gen(function* () {
-      const routed = yield* resolveRoutableSession({
-        threadId: input.threadId,
-        operation: "ProviderService.rollbackConversation",
-        allowRecovery: true,
-      });
-      metricProvider = routed.adapter.provider;
-      yield* Effect.annotateCurrentSpan({
-        "provider.operation": "rollback-conversation",
-        "provider.kind": routed.adapter.provider,
-        "provider.thread_id": input.threadId,
-        "provider.rollback_turns": input.numTurns,
-      });
-      yield* routed.adapter.rollbackThread(routed.threadId, input.numTurns);
-      yield* analytics.record("provider.conversation.rolled_back", {
-        provider: routed.adapter.provider,
-        turns: input.numTurns,
-      });
+      // Refuse before any recovery: a provider that cannot forget turns must not
+      // get a session (re)started just to learn that.
+      const binding = Option.getOrUndefined(yield* directory.getBinding(input.threadId));
+      if (!binding) {
+        return yield* toValidationError(
+          operation,
+          `Cannot route thread '${input.threadId}' because no persisted provider binding exists.`,
+        );
+      }
+      const instanceId = yield* requireBindingInstanceId(operation, binding);
+      const boundAdapter = yield* registry.getByInstance(instanceId);
+      metricProvider = boundAdapter.provider;
+      if (boundAdapter.capabilities.conversationRollback !== "native") {
+        const displayName = yield* registry.getInstanceInfo(instanceId).pipe(
+          Effect.map((info) => info.displayName),
+          Effect.orElseSucceed(() => undefined),
+        );
+        return yield* new ProviderOperationUnsupportedError({
+          provider: boundAdapter.provider,
+          operation: "rollbackConversation",
+          detail: `${displayName ?? boundAdapter.provider} can't remove turns from its conversation, so this thread can't be reverted. Start a new thread to try a different approach.`,
+        });
+      }
+
+      // The lock serializes the rollback with guarded sendTurn, stale-binding
+      // stops, and recovery. The semaphore is not reentrant: use the unlocked
+      // resolver inside it.
+      yield* withSessionStartLock(
+        input.threadId,
+        Effect.gen(function* () {
+          const routed = yield* resolveRoutableSessionUnlocked({
+            threadId: input.threadId,
+            operation,
+            allowRecovery: true,
+          });
+          metricProvider = routed.adapter.provider;
+          yield* Effect.annotateCurrentSpan({
+            "provider.operation": "rollback-conversation",
+            "provider.kind": routed.adapter.provider,
+            "provider.thread_id": input.threadId,
+            "provider.rollback_turns": input.numTurns,
+          });
+          yield* routed.adapter.rollbackThread(routed.threadId, {
+            numTurns: input.numTurns,
+            targetTurnId: input.targetTurnId,
+            droppedTurnIds: input.droppedTurnIds,
+          });
+          // Persist the adapter's post-rollback cursor (Claude rewind marker,
+          // OpenCode fork session id) so recovery resumes the rewound conversation.
+          // Best-effort: the agent has already forgotten the turns, so failing
+          // here would report "nothing was changed" when something was. The
+          // next send or completed turn persists the live cursor again.
+          yield* Effect.gen(function* () {
+            const sessions = yield* routed.adapter.listSessions();
+            const session = sessions.find((candidate) => candidate.threadId === routed.threadId);
+            if (session) {
+              yield* upsertSessionBinding(
+                { ...session, providerInstanceId: routed.instanceId },
+                input.threadId,
+                {
+                  lastRuntimeEvent: "provider.rollback",
+                  lastRuntimeEventAt: new Date().toISOString(),
+                },
+              );
+            }
+          }).pipe(
+            Effect.catchCause((cause) =>
+              Cause.hasInterruptsOnly(cause)
+                ? Effect.failCause(cause)
+                : Effect.logError("provider.rollback.persist-binding-failed", {
+                    threadId: input.threadId,
+                    cause: Cause.pretty(cause),
+                  }),
+            ),
+          );
+          yield* analytics.record("provider.conversation.rolled_back", {
+            provider: routed.adapter.provider,
+            turns: input.numTurns,
+          });
+        }),
+      );
     }).pipe(
       withMetrics({
         counter: providerTurnsTotal,

@@ -278,6 +278,56 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
     }),
   );
 
+  it.effect("lists the newest pending checkpoint revert per live thread", () =>
+    Effect.gen(function* () {
+      const query = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+      const threads = ["revert-pending", "revert-terminal", "revert-deleted"] as const;
+      for (const threadId of threads) {
+        yield* sql`INSERT INTO projection_threads (
+          thread_id, project_id, title, model_selection_json, runtime_mode,
+          interaction_mode, created_at, updated_at, deleted_at
+        ) VALUES (
+          ${threadId}, 'revert-project', ${threadId},
+          '{"provider":"codex","model":"gpt-5-codex"}', 'full-access', 'default',
+          '2026-09-12T00:00:00.000Z', '2026-09-12T00:00:00.000Z',
+          ${threadId === "revert-deleted" ? "2026-09-12T00:00:00.000Z" : null}
+        )`;
+      }
+      const insertRevert = (threadId: string, id: string, status: string, createdAt: string) =>
+        sql`INSERT INTO projection_thread_activities (activity_id, thread_id, turn_id, tone, kind, summary, payload_json, created_at)
+          VALUES (${`checkpoint-revert:${threadId}-${id}`}, ${threadId}, NULL, 'info', 'checkpoint.revert', 'Revert',
+            ${JSON.stringify({ schemaVersion: 1, revertRequestId: `${threadId}-${id}`, turnCount: 1, status, cwd: "/repo" })},
+            ${createdAt})`;
+      yield* insertRevert("revert-pending", "old", "completed", "2026-09-12T00:00:00.000Z");
+      yield* insertRevert("revert-pending", "new", "restoring-files", "2026-09-12T00:01:00.000Z");
+      yield* insertRevert("revert-terminal", "old", "rolling-back", "2026-09-12T00:00:00.000Z");
+      yield* insertRevert("revert-terminal", "new", "failed", "2026-09-12T00:01:00.000Z");
+      yield* insertRevert("revert-deleted", "gone", "requested", "2026-09-12T00:00:00.000Z");
+
+      const pending = yield* query.listPendingCheckpointReverts!();
+
+      assert.deepStrictEqual(
+        pending.map((entry) => ({
+          threadId: String(entry.threadId),
+          id: String(entry.activity.id),
+          status: entry.payload.status,
+          cwd: entry.payload.cwd,
+        })),
+        [
+          {
+            threadId: "revert-pending",
+            id: "checkpoint-revert:revert-pending-new",
+            status: "restoring-files",
+            cwd: "/repo",
+          },
+        ],
+      );
+      yield* sql`DELETE FROM projection_thread_activities WHERE kind = 'checkpoint.revert'`;
+      yield* sql`DELETE FROM projection_threads WHERE thread_id IN ('revert-pending', 'revert-terminal', 'revert-deleted')`;
+    }),
+  );
+
   it.effect("hydrates read model from projection tables and computes snapshot sequence", () =>
     Effect.gen(function* () {
       const snapshotQuery = yield* ProjectionSnapshotQuery;

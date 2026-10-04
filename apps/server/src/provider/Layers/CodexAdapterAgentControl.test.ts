@@ -112,7 +112,10 @@ class FakeRuntime implements CodexSessionRuntimeShape {
 
   readThread = Effect.succeed<CodexThreadSnapshot>({ threadId: "provider-thread", turns: [] });
 
-  rollbackThread(_numTurns: number) {
+  rollbackThread(_input: {
+    readonly numTurns: number;
+    readonly beforeTurnId?: string | undefined;
+  }) {
     return Effect.succeed<CodexThreadSnapshot>({ threadId: "provider-thread", turns: [] });
   }
 

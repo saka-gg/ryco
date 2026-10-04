@@ -25,6 +25,12 @@ export interface CheckpointReactorShape {
   readonly start: () => Effect.Effect<void, never, Scope.Scope>;
 
   /**
+   * Finish or terminalize checkpoint reverts a previous process left pending.
+   * Runs once at startup, before the reactors start; never fails.
+   */
+  readonly recover: () => Effect.Effect<void>;
+
+  /**
    * Resolves when the internal processing queue is empty and idle.
    * Intended for test use to replace timing-sensitive sleeps.
    */

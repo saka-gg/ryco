@@ -156,7 +156,12 @@ const correlateSnapshotWithSource = (
       ),
     );
   }
-  return Effect.succeed(snapshot);
+  // The adapter capability is the single source of truth for revert support.
+  return Effect.succeed(
+    source.conversationRollback === undefined
+      ? snapshot
+      : { ...snapshot, supportsConversationRollback: source.conversationRollback === "native" },
+  );
 };
 
 /**
@@ -176,6 +181,10 @@ const snapshotInstanceKey = (provider: ServerProvider): ProviderInstanceId => {
 const buildSnapshotSource = (instance: ProviderInstance): ProviderSnapshotSource => ({
   instanceId: instance.instanceId,
   driverKind: instance.driverKind,
+  // Snapshot-only instances carry no adapter; their revert support stays unknown.
+  ...(instance.adapter?.capabilities
+    ? { conversationRollback: instance.adapter.capabilities.conversationRollback ?? "unsupported" }
+    : {}),
   getSnapshot: instance.snapshot.getSnapshot,
   revalidate: instance.snapshot.revalidate,
   refresh: instance.snapshot.refresh,

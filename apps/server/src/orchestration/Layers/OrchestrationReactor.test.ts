@@ -57,6 +57,10 @@ describe("OrchestrationReactor", () => {
               started.push("checkpoint-reactor");
               return Effect.void;
             },
+            recover: () => {
+              started.push("checkpoint-revert-recovery");
+              return Effect.void;
+            },
             drain: Effect.void,
           }),
         ),
@@ -76,14 +80,14 @@ describe("OrchestrationReactor", () => {
     const scope = await Effect.runPromise(Scope.make("sequential"));
     await Effect.runPromise(reactor.start().pipe(Scope.provide(scope)));
 
-    expect(started).toHaveLength(5);
-    expect(new Set(started)).toEqual(
+    expect(started).toHaveLength(6);
+    expect(started.slice(0, 2)).toEqual(["context-handoff-recovery", "checkpoint-revert-recovery"]);
+    expect(new Set(started.slice(2))).toEqual(
       new Set([
         "provider-runtime-ingestion",
         "provider-command-reactor",
         "checkpoint-reactor",
         "thread-deletion-reactor",
-        "context-handoff-recovery",
       ]),
     );
 

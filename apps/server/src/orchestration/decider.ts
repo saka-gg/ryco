@@ -36,6 +36,11 @@ import {
   requireThreadIdleForContextHandoff,
   requireWorktree,
 } from "./commandInvariants.ts";
+import {
+  makeCheckpointRevertActivity,
+  requireNoPendingCheckpointRevert,
+  requireThreadReadyForCheckpointRevert,
+} from "./checkpointRevertPolicy.ts";
 import { projectEvent } from "./projector.ts";
 import { TURN_FINALIZATION_REASON, resolveReleasedTurn } from "./turnFinalization.ts";
 
@@ -1107,6 +1112,11 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
+      yield* requireNoPendingCheckpointRevert({
+        thread: targetThread,
+        command,
+        nowMs: Date.now(),
+      });
       const resumeGuard = command.claudeResumeGuard;
       if (
         resumeGuard &&
@@ -1600,20 +1610,45 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
-      const revertRequested: PlannedOrchestrationEvent = {
-        ...withEventBase({
+      yield* requireThreadReadyForCheckpointRevert({
+        readModel,
+        thread,
+        command,
+        nowMs: Date.now(),
+      });
+      const eventBase = () =>
+        withEventBase({
           aggregateKind: "thread",
           aggregateId: command.threadId,
           occurredAt: command.createdAt,
           commandId: command.commandId,
-        }),
-        type: "thread.checkpoint-revert-requested",
-        payload: {
-          threadId: command.threadId,
-          turnCount: command.turnCount,
-          createdAt: command.createdAt,
+        });
+      const revertEvents: Array<PlannedOrchestrationEvent> = [
+        {
+          ...eventBase(),
+          type: "thread.activity-appended",
+          payload: {
+            threadId: command.threadId,
+            activity: makeCheckpointRevertActivity({
+              revertRequestId: command.commandId,
+              turnCount: command.turnCount,
+              status: "requested",
+              // Server time, like every later phase: the journal orders reverts by
+              // createdAt, so it must not mix the client's clock with the server's.
+              createdAt: nowIso(),
+            }),
+          },
         },
-      };
+        {
+          ...eventBase(),
+          type: "thread.checkpoint-revert-requested",
+          payload: {
+            threadId: command.threadId,
+            turnCount: command.turnCount,
+            createdAt: command.createdAt,
+          },
+        },
+      ];
       // Never "continue" into a reverted conversation.
       const limitCleared = usageLimitClearedEvent({
         command,
@@ -1621,7 +1656,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         reason: "reverted",
         occurredAt: command.createdAt,
       });
-      return limitCleared === null ? revertRequested : [revertRequested, limitCleared];
+      return limitCleared === null ? revertEvents : [...revertEvents, limitCleared];
     }
 
     case "thread.session.stop": {
@@ -2178,6 +2213,10 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         payload: {
           threadId: command.threadId,
           turnCount: command.turnCount,
+          ...(command.droppedTurnIds !== undefined
+            ? { droppedTurnIds: command.droppedTurnIds }
+            : {}),
+          ...(command.latestTurn !== undefined ? { latestTurn: command.latestTurn } : {}),
         },
       };
     }

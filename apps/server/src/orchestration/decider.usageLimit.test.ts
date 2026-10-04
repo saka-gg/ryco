@@ -447,6 +447,7 @@ describe("other usage-limit clears", () => {
       createdAt: limitedAt,
     });
     expect(reverted.events.map((event) => event.type)).toEqual([
+      "thread.activity-appended",
       "thread.checkpoint-revert-requested",
       "thread.usage-limit-cleared",
     ]);

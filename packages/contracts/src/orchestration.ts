@@ -254,6 +254,52 @@ export const ContextHandoffActivityPayload = Schema.Union([
 ]);
 export type ContextHandoffActivityPayload = typeof ContextHandoffActivityPayload.Type;
 
+/**
+ * Lifecycle activity journaling one checkpoint revert. Its id is
+ * `checkpoint-revert:<revertRequestId>`; every phase replaces the same row.
+ */
+export const CHECKPOINT_REVERT_ACTIVITY_KIND = "checkpoint.revert";
+export const CheckpointRevertStatus = Schema.Literals([
+  // pending
+  "requested",
+  "rolling-back",
+  "restoring-files",
+  // terminal
+  "completed",
+  "files-not-restored",
+  "failed",
+  "interrupted",
+]);
+export type CheckpointRevertStatus = typeof CheckpointRevertStatus.Type;
+export const CheckpointRevertFailureReason = Schema.Literals([
+  "thread-busy",
+  "target-unavailable",
+  "handoff-boundary",
+  "not-git",
+  "shared-checkout",
+  "provider-unsupported",
+  "provider-failed",
+  "files-failed",
+  "restart",
+  // Ryco itself failed (journal write, storage, defect), not the provider or files.
+  "internal-error",
+]);
+export type CheckpointRevertFailureReason = typeof CheckpointRevertFailureReason.Type;
+export const CheckpointRevertActivityPayload = Schema.Struct({
+  schemaVersion: Schema.Literal(1),
+  // Not "requestId": that payload key is special-cased for approval routing.
+  revertRequestId: CommandId,
+  /** Target checkpoint K. */
+  turnCount: NonNegativeInt,
+  fromTurnCount: Schema.optional(NonNegativeInt),
+  status: CheckpointRevertStatus,
+  reason: Schema.optional(CheckpointRevertFailureReason),
+  detail: Schema.optional(TrimmedNonEmptyString),
+  /** Restore cwd, recorded from "rolling-back" on so startup recovery can finish. */
+  cwd: Schema.optional(TrimmedNonEmptyString),
+});
+export type CheckpointRevertActivityPayload = typeof CheckpointRevertActivityPayload.Type;
+
 export const ContextHandoffInspectionScope = Schema.Literals(["sent", "complete"]);
 export type ContextHandoffInspectionScope = typeof ContextHandoffInspectionScope.Type;
 
@@ -1913,6 +1959,8 @@ const ThreadRevertCompleteCommand = Schema.Struct({
   commandId: CommandId,
   threadId: ThreadId,
   turnCount: NonNegativeInt,
+  droppedTurnIds: Schema.optional(Schema.Array(TurnId)),
+  latestTurn: Schema.optional(Schema.NullOr(OrchestrationLatestTurn)),
   createdAt: IsoDateTime,
 });
 
@@ -2308,6 +2356,12 @@ export const ThreadCheckpointRevertRequestedPayload = Schema.Struct({
 export const ThreadRevertedPayload = Schema.Struct({
   threadId: ThreadId,
   turnCount: NonNegativeInt,
+  /**
+   * Authoritative revert result read from the projection. Absent on legacy
+   * events, which keep the count-based projection.
+   */
+  droppedTurnIds: Schema.optional(Schema.Array(TurnId)),
+  latestTurn: Schema.optional(Schema.NullOr(OrchestrationLatestTurn)),
 });
 
 export const ThreadSessionStopRequestedPayload = Schema.Struct({

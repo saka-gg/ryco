@@ -84,6 +84,7 @@ export type RevertThreadCheckpointGuardFailure =
   | { type: "missing-thread" }
   | { type: "environment-unavailable"; label: string }
   | { type: "turn-in-progress" }
+  | { type: "provider-unsupported"; message: string }
   | { type: "user-cancelled" };
 
 export type RevertThreadCheckpointResult =
@@ -98,6 +99,8 @@ export async function revertThreadCheckpointWithGuards(input: {
   environmentUnavailable: boolean;
   environmentUnavailableLabel: string | null;
   turnInProgress: boolean;
+  /** Why the thread's provider cannot forget turns (`checkpointRevertUnsupportedMessage`). */
+  providerRefusal: string | null;
   confirmMessage: string;
 }): Promise<RevertThreadCheckpointResult> {
   if (!input.api || !input.localApi || !input.thread) {
@@ -114,6 +117,10 @@ export async function revertThreadCheckpointWithGuards(input: {
   }
   if (input.turnInProgress) {
     return { ok: false, reason: { type: "turn-in-progress" } };
+  }
+  // Refuse before the user confirms anything the provider cannot do.
+  if (input.providerRefusal !== null) {
+    return { ok: false, reason: { type: "provider-unsupported", message: input.providerRefusal } };
   }
   const confirmed = await input.localApi.dialogs.confirm(input.confirmMessage);
   if (!confirmed) {
