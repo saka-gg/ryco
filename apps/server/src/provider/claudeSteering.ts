@@ -111,6 +111,17 @@ export interface ClaudeTurnResultDecision {
   readonly newlySettled: ReadonlyArray<string>;
   /** Steers no result has consumed yet, after this one. */
   readonly unsettled: ReadonlyArray<string>;
+  /**
+   * Completing: the unsettled steers must never reply, so their CLI turn is dropped when it
+   * runs. Stop was requested, or the segment failed.
+   */
+  readonly discardUnsettled: boolean;
+  /**
+   * Completing: no Stop, yet the segment aborted while a steer was pending, so the steer aborted
+   * it. The turn completes as `completed` (a steer is never an interrupt) and the steer runs as
+   * Claude's next request, whose reply lands in a background turn.
+   */
+  readonly abortedBySteer: boolean;
 }
 
 /**
@@ -135,7 +146,15 @@ export function decideClaudeTurnResult(
     (input.kind === "abort" || input.kind === "success") &&
     typeof input.queuedTurnCount === "number" &&
     input.queuedTurnCount > 0;
-  return { decision: awaitSteer ? "await-steer" : "complete", newlySettled, unsettled };
+  const completingWithSteers = !awaitSteer && unsettled.length > 0;
+  return {
+    decision: awaitSteer ? "await-steer" : "complete",
+    newlySettled,
+    unsettled,
+    discardUnsettled:
+      completingWithSteers && (input.interruptRequested || input.kind === "failure"),
+    abortedBySteer: completingWithSteers && !input.interruptRequested && input.kind === "abort",
+  };
 }
 
 export interface ClaudeInterruptReceipt {
@@ -163,21 +182,31 @@ export interface ClaudeStopDecisionInput {
 }
 
 export interface ClaudeStopDecision {
-  /** Close the turn now: no CLI turn of it is running, so no result will close it. */
+  /**
+   * Close the turn now: no CLI turn of it is running, so no result will close it. Applies only
+   * while the stopped turn is still open.
+   */
   readonly forceClose: boolean;
   /** Steer uuids the CLI may still run; their CLI turn is interrupted and dropped. */
   readonly discard: ReadonlyArray<string>;
+  /**
+   * Steers the interrupt cancelled: they never run, so they leave the discard set. A result
+   * handled before the receipt may already have put them there.
+   */
+  readonly release: ReadonlyArray<string>;
 }
 
 /**
  * Stop with steers pending. A steer the receipt does not list as queued or cancelled counts as
- * running (in transit or started), so its own aborted result closes the turn.
+ * running (in transit or started), so its own aborted result closes the turn. The discard and
+ * release lists hold whether or not the stopped turn is still open.
  */
 export function decideClaudeStop(input: ClaudeStopDecisionInput): ClaudeStopDecision {
   if (input.receipt === undefined) {
     return {
       forceClose: input.awaitingSteerContinuation,
       discard: [...input.unsettledSteers],
+      release: [],
     };
   }
   const cancelled = new Set(input.receipt.cancelled ?? []);
@@ -189,6 +218,7 @@ export function decideClaudeStop(input: ClaudeStopDecisionInput): ClaudeStopDeci
   return {
     forceClose: promptDone && runningSteers.length === 0,
     discard: input.unsettledSteers.filter((uuid) => !cancelled.has(uuid)),
+    release: input.unsettledSteers.filter((uuid) => cancelled.has(uuid)),
   };
 }
 
@@ -217,10 +247,20 @@ export function parseClaudeCliCapabilities(initMessage: SDKMessage): ReadonlySet
   );
 }
 
-/** Root model-turn frames: a new CLI segment's output, as opposed to system or subagent frames. */
+/**
+ * Root model-turn content frames: a CLI segment's output, as opposed to system, subagent or
+ * keep-alive frames. A CLI turn's first such frame is the stream event that carries its echo.
+ * System frames (`api_retry`, compaction) carry no echo, so they never qualify.
+ */
 export function isClaudeRootTurnFrame(message: SDKMessage): boolean {
   if (message.type !== "stream_event" && message.type !== "assistant" && message.type !== "user") {
     return false;
+  }
+  if (message.type === "stream_event") {
+    const event: unknown = Reflect.get(message, "event");
+    if (typeof event === "object" && event !== null && Reflect.get(event, "type") === "ping") {
+      return false;
+    }
   }
   const parentToolUseId = Reflect.get(message, "parent_tool_use_id");
   return parentToolUseId === null || parentToolUseId === undefined;

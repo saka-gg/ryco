@@ -47,30 +47,66 @@ describe("decideClaudeTurnResult", () => {
   it.each([
     { row: 1, input: { kind: "abort", count: 1 }, decision: "complete" },
     { row: 2, input: { steers: [S], kind: "abort", count: 1 }, decision: "await-steer" },
-    { row: 3, input: { steers: [S], kind: "abort", count: 0 }, decision: "complete" },
-    { row: 4, input: { steers: [S], kind: "abort" }, decision: "complete" },
+    {
+      row: 3,
+      input: { steers: [S], kind: "abort", count: 0 },
+      decision: "complete",
+      abortedBySteer: true,
+    },
+    { row: 4, input: { steers: [S], kind: "abort" }, decision: "complete", abortedBySteer: true },
     { row: 5, input: { steers: [S], settled: [S], kind: "abort", count: 1 }, decision: "complete" },
     { row: 7, input: { steers: [S], kind: "success", count: 1 }, decision: "await-steer" },
-    { row: 8, input: { steers: [S], kind: "failure", count: 1 }, decision: "complete" },
+    {
+      row: 8,
+      input: { steers: [S], kind: "failure", count: 1 },
+      decision: "complete",
+      discardUnsettled: true,
+    },
     {
       row: 9,
       input: { steers: [S], kind: "abort", count: 1, interruptRequested: true },
       decision: "complete",
+      discardUnsettled: true,
     },
     {
       row: 10,
       input: { steers: [S, S2], settled: [S], kind: "abort", count: 1 },
       decision: "await-steer",
     },
-  ] as const)("row $row → $decision", ({ input, decision }) => {
-    expect(decide(input).decision).toBe(decision);
-  });
+    { row: 11, input: { steers: [S], kind: "success", count: 0 }, decision: "complete" },
+    {
+      row: 12,
+      input: { steers: [S], kind: "success", interruptRequested: true },
+      decision: "complete",
+      discardUnsettled: true,
+    },
+    { row: 13, input: { kind: "abort", interruptRequested: true }, decision: "complete" },
+  ] as const)(
+    "row $row → $decision",
+    ({
+      input,
+      decision,
+      ...flags
+    }: {
+      readonly input: Parameters<typeof decide>[0];
+      readonly decision: string;
+      readonly discardUnsettled?: boolean;
+      readonly abortedBySteer?: boolean;
+    }) => {
+      const result = decide(input);
+      expect(result.decision).toBe(decision);
+      expect(result.discardUnsettled).toBe(flags.discardUnsettled ?? false);
+      expect(result.abortedBySteer).toBe(flags.abortedBySteer ?? false);
+    },
+  );
 
   it("row 6: a folded steer settles and the turn completes", () => {
     expect(decide({ steers: [S], kind: "success", echoed: [P, S] })).toEqual({
       decision: "complete",
       newlySettled: [S],
       unsettled: [],
+      discardUnsettled: false,
+      abortedBySteer: false,
     });
   });
 
@@ -79,6 +115,8 @@ describe("decideClaudeTurnResult", () => {
       decision: "await-steer",
       newlySettled: [S],
       unsettled: [S2],
+      discardUnsettled: false,
+      abortedBySteer: false,
     });
   });
 });
@@ -183,8 +221,9 @@ describe("decideClaudeStop", () => {
     expect(stop({ receipt: { stillQueued: [], cancelled: undefined } })).toEqual({
       forceClose: false,
       discard: [],
+      release: [],
     });
-    expect(stop({})).toEqual({ forceClose: false, discard: [] });
+    expect(stop({})).toEqual({ forceClose: false, discard: [], release: [] });
   });
 
   it("S2: a cancelled steer after the prompt segment force-closes and discards nothing", () => {
@@ -195,7 +234,7 @@ describe("decideClaudeStop", () => {
         awaitingSteerContinuation: true,
         receipt: { stillQueued: [], cancelled: [S] },
       }),
-    ).toEqual({ forceClose: true, discard: [] });
+    ).toEqual({ forceClose: true, discard: [], release: [S] });
   });
 
   it("S3: a still-queued steer after the prompt segment force-closes and is discarded", () => {
@@ -206,13 +245,13 @@ describe("decideClaudeStop", () => {
         awaitingSteerContinuation: true,
         receipt: { stillQueued: [S], cancelled: undefined },
       }),
-    ).toEqual({ forceClose: true, discard: [S] });
+    ).toEqual({ forceClose: true, discard: [S], release: [] });
   });
 
   it("S4: a still-streaming prompt is not force-closed", () => {
     expect(
       stop({ unsettledSteers: [S], receipt: { stillQueued: [S], cancelled: undefined } }),
-    ).toEqual({ forceClose: false, discard: [S] });
+    ).toEqual({ forceClose: false, discard: [S], release: [] });
   });
 
   it("S5: a steer in transit counts as running", () => {
@@ -223,7 +262,7 @@ describe("decideClaudeStop", () => {
         awaitingSteerContinuation: true,
         receipt: { stillQueued: [], cancelled: undefined },
       }),
-    ).toEqual({ forceClose: false, discard: [S] });
+    ).toEqual({ forceClose: false, discard: [S], release: [] });
   });
 
   it("S6: waiting cleared by a wake, steer queued, prompt done → force-close", () => {
@@ -234,7 +273,7 @@ describe("decideClaudeStop", () => {
         awaitingSteerContinuation: false,
         receipt: { stillQueued: [S], cancelled: undefined },
       }),
-    ).toEqual({ forceClose: true, discard: [S] });
+    ).toEqual({ forceClose: true, discard: [S], release: [] });
   });
 
   it("S7: a cancelled prompt counts as done", () => {
@@ -244,16 +283,23 @@ describe("decideClaudeStop", () => {
         sealedSegmentCount: 0,
         receipt: { stillQueued: [], cancelled: [P, S] },
       }),
-    ).toEqual({ forceClose: true, discard: [] });
+    ).toEqual({ forceClose: true, discard: [], release: [S] });
+  });
+
+  it("S4 with cancel_queued: a cancelled steer is released even while the prompt streams", () => {
+    expect(
+      stop({ unsettledSteers: [S, S2], receipt: { stillQueued: [], cancelled: [S] } }),
+    ).toEqual({ forceClose: false, discard: [S2], release: [S] });
   });
 
   it("S8: without a receipt, force-close only while waiting and discard every steer", () => {
     expect(
       stop({ unsettledSteers: [S, S2], awaitingSteerContinuation: true, sealedSegmentCount: 1 }),
-    ).toEqual({ forceClose: true, discard: [S, S2] });
+    ).toEqual({ forceClose: true, discard: [S, S2], release: [] });
     expect(stop({ unsettledSteers: [S], awaitingSteerContinuation: false })).toEqual({
       forceClose: false,
       discard: [S],
+      release: [],
     });
   });
 });
@@ -324,5 +370,19 @@ describe("isClaudeRootTurnFrame", () => {
       false,
     );
     expect(isClaudeRootTurnFrame(frame({ type: "system", subtype: "status" }))).toBe(false);
+    expect(isClaudeRootTurnFrame(frame({ type: "system", subtype: "api_retry" }))).toBe(false);
+  });
+
+  it("skips keep-alive pings, which precede the echo-bearing stream event", () => {
+    expect(
+      isClaudeRootTurnFrame(
+        frame({ type: "stream_event", parent_tool_use_id: null, event: { type: "ping" } }),
+      ),
+    ).toBe(false);
+    expect(
+      isClaudeRootTurnFrame(
+        frame({ type: "stream_event", parent_tool_use_id: null, event: { type: "message_start" } }),
+      ),
+    ).toBe(true);
   });
 });

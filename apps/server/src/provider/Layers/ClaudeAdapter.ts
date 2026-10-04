@@ -211,6 +211,12 @@ interface ClaudeTurnState {
   /** A root frame proved Claude is producing this turn (first-output watchdog liveness). */
   rootOutputObserved: boolean;
   /**
+   * A root content frame (stream event, assistant or user) was routed into this turn. Unlike
+   * `rootOutputObserved`, system frames (`api_retry`, compaction) never set it: they carry no
+   * echo, so a wake turn they opened can still turn out to be a discarded steer's CLI turn.
+   */
+  rootContentObserved: boolean;
+  /**
    * Set while one fiber finishes this turn. Concurrent closes wait on it instead of emitting a
    * second lifecycle event.
    */
@@ -254,6 +260,7 @@ function makeClaudeTurnState(input: {
     reasoningBlocks: new Map(),
     reasoningBlockCount: 0,
     rootOutputObserved: input.openedBy !== "wake-signal",
+    rootContentObserved: input.openedBy !== "wake-signal",
     completion: undefined,
     steerPromptUuids: new Set(),
     settledSteerPromptUuids: new Set(),
@@ -428,13 +435,17 @@ interface ClaudeSessionContext {
   requestingStatusObserved: boolean;
   /** Protocol capabilities from the latest `system/init`; undefined before the first one. */
   cliCapabilities: ReadonlySet<string> | undefined;
-  /** Steer uuids Stop cancelled that the CLI may still run; their CLI turn is dropped. */
+  /**
+   * Steer uuids that must never reply (Stop, or a failed segment) but that the CLI may still
+   * run; their CLI turn is dropped. A uuid leaves the set once a CLI turn consumed it.
+   */
   readonly discardedSteerPromptUuids: Set<string>;
   /** A CLI turn of discarded steers is running; its frames are dropped until its result. */
   discardingCliTurn: { readonly uuids: ReadonlySet<string> } | undefined;
   /**
    * A wake signal arrived while discarded steers were pending. The provider turn opens at the
-   * next root output instead, unless that output is the discarded steer's own CLI turn.
+   * next root content frame instead, whose echo was checked first. System frames carry no echo,
+   * so they never open it; a result ends the signalling CLI turn and clears the deferral.
    */
   wakeSignalDeferred: boolean;
   /** Serializes SDK frame handling against Stop bookkeeping and steer registration. */
@@ -3456,11 +3467,27 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         });
         return;
       }
-      // A failed (or zero-count) segment never runs its pending steers as a surprise turn.
-      if (!turnState.interruptRequested && turnStatusFromResult(message) !== "completed") {
+      // Stop or a failed segment: the pending steers never reply. Recorded here, before the turn
+      // closes, so a steer's CLI turn is dropped even when the result beats Stop's receipt.
+      if (decision.discardUnsettled) {
         for (const uuid of decision.unsettled) {
           rememberDiscardedSteer(context.discardedSteerPromptUuids, uuid);
         }
+      }
+      if (decision.abortedBySteer) {
+        // The steer aborted this segment but the CLI promised no further result. Never report a
+        // steer as an interrupt (that would hold the client queue); the steer runs next on its
+        // own and its reply lands in a background turn.
+        yield* sealTurnSegment(context, turnState, turnStatusFromResult(message), message);
+        yield* Effect.logInfo("claude.turn.completed-by-steer-abort", {
+          threadId: context.session.threadId,
+          turnId: turnState.turnId,
+          queuedTurnCount: message.queued_turn_count,
+          unsettled: decision.unsettled.length,
+          terminalReason: message.terminal_reason,
+        });
+        yield* completeTurn(context, "completed", undefined, message);
+        return;
       }
     }
 
@@ -4328,9 +4355,58 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     );
 
   /**
+   * A discarded steer's CLI turn turned out to be the one a provider turn was opened for (by its
+   * `status: requesting`, legacy `init`, `api_retry` or compaction frame, before its echo). That
+   * turn has routed no content: retract it.
+   */
+  const retractDiscardedSteerWakeTurn = Effect.fn("retractDiscardedSteerWakeTurn")(function* (
+    context: ClaudeSessionContext,
+  ) {
+    const turnState = context.turnState;
+    if (
+      turnState === undefined ||
+      turnState.openedBy !== "wake-signal" ||
+      turnState.rootContentObserved ||
+      turnState.steerPromptUuids.size > 0
+    ) {
+      return;
+    }
+    yield* completeTurn(context, "interrupted", DISCARDED_STEER_TURN_REASON, undefined, {
+      abortReason: DISCARDED_STEER_TURN_REASON,
+      expectedTurnState: turnState,
+    });
+  });
+
+  /** The discarded CLI turn's result: drop it, keep its usage, forget its uuids. */
+  const dropDiscardedSteerResult = Effect.fn("dropDiscardedSteerResult")(function* (
+    context: ClaudeSessionContext,
+    message: SDKResultMessage,
+    uuids: Iterable<string>,
+  ) {
+    let count = 0;
+    for (const uuid of uuids) {
+      context.discardedSteerPromptUuids.delete(uuid);
+      count += 1;
+    }
+    context.discardingCliTurn = undefined;
+    context.wakeSignalDeferred = false;
+    yield* emitTokenUsageSnapshot(
+      context,
+      yield* resolveResultUsageSnapshot(context, message),
+      undefined,
+    );
+    yield* retractDiscardedSteerWakeTurn(context);
+    yield* Effect.logInfo("claude.turn.discarded-cancelled-steer", {
+      threadId: context.session.threadId,
+      uuids: count,
+    });
+  });
+
+  /**
    * Routes frames of CLI segments started by steers. Returns true when the frame was consumed
-   * (dropped). A CLI turn whose early echo holds only steers Stop discarded is interrupted again
-   * and dropped up to and including its result; the open turn owns its own steers' segments.
+   * (dropped). A CLI turn whose echo holds only steers Stop (or a failed segment) discarded is
+   * interrupted again and dropped up to and including its result; a result with such an echo
+   * and no stream before it is dropped alone. The open turn owns its own steers' segments.
    */
   const routeSteerFrame = Effect.fn("routeSteerFrame")(function* (
     context: ClaudeSessionContext,
@@ -4339,22 +4415,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     const discarding = context.discardingCliTurn;
     if (discarding !== undefined) {
       switch (message.type) {
-        case "result": {
-          for (const uuid of [...discarding.uuids, ...claudeEchoedPromptUuids(message)]) {
-            context.discardedSteerPromptUuids.delete(uuid);
-          }
-          context.discardingCliTurn = undefined;
-          yield* emitTokenUsageSnapshot(
-            context,
-            yield* resolveResultUsageSnapshot(context, message),
-            undefined,
-          );
-          yield* Effect.logInfo("claude.turn.discarded-cancelled-steer", {
-            threadId: context.session.threadId,
-            uuids: discarding.uuids.size,
-          });
+        case "result":
+          yield* dropDiscardedSteerResult(context, message, [
+            ...discarding.uuids,
+            ...claudeEchoedPromptUuids(message),
+          ]);
           return true;
-        }
         case "stream_event":
         case "assistant":
         case "user":
@@ -4367,32 +4433,43 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       }
     }
 
-    if (message.type !== "stream_event") return false;
+    if (message.type !== "stream_event" && message.type !== "result") return false;
     const echoed = claudeEchoedPromptUuids(message);
     if (echoed.length === 0) return false;
 
+    const discarded = context.discardedSteerPromptUuids;
     const turnState = context.turnState;
-    if (
+    const owned =
       turnState !== undefined &&
-      echoed.some((uuid) => uuid === turnState.promptUuid || turnState.steerPromptUuids.has(uuid))
-    ) {
-      // S5: a steer that was in transit at Stop started its own segment. End it too.
-      const echoKey = [...echoed].toSorted().join(" ");
-      if (
-        turnState.interruptRequested &&
-        echoed.some(
-          (uuid) =>
-            turnState.steerPromptUuids.has(uuid) && !turnState.settledSteerPromptUuids.has(uuid),
-        ) &&
-        !turnState.reinterruptedEchoKeys.has(echoKey)
-      ) {
-        turnState.reinterruptedEchoKeys.add(echoKey);
-        yield* forkReinterrupt(context, "steer-segment-after-stop");
+      echoed.some((uuid) => uuid === turnState.promptUuid || turnState.steerPromptUuids.has(uuid));
+    if (owned || !echoed.every((uuid) => discarded.has(uuid))) {
+      if (owned && message.type === "stream_event") {
+        // S5: a steer that was in transit at Stop started its own segment. End it too.
+        const echoKey = [...echoed].toSorted().join(" ");
+        if (
+          turnState.interruptRequested &&
+          echoed.some(
+            (uuid) =>
+              turnState.steerPromptUuids.has(uuid) && !turnState.settledSteerPromptUuids.has(uuid),
+          ) &&
+          !turnState.reinterruptedEchoKeys.has(echoKey)
+        ) {
+          turnState.reinterruptedEchoKeys.add(echoKey);
+          yield* forkReinterrupt(context, "steer-segment-after-stop");
+        }
       }
+      // The CLI consumed these uuids in a CLI turn that is not dropped (the open turn's, or one
+      // batched with another prompt), so they never start a CLI turn of their own.
+      for (const uuid of echoed) discarded.delete(uuid);
       return false;
     }
 
-    if (!echoed.every((uuid) => context.discardedSteerPromptUuids.has(uuid))) return false;
+    if (message.type === "result") {
+      // The discarded CLI turn ended before it streamed anything (it failed, or the re-run
+      // aborted at once). Nothing of it reached a turn.
+      yield* dropDiscardedSteerResult(context, message, echoed);
+      return true;
+    }
 
     context.discardingCliTurn = { uuids: new Set(echoed) };
     context.wakeSignalDeferred = false;
@@ -4401,19 +4478,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       threadId: context.session.threadId,
       uuids: echoed.length,
     });
-    // The discarded CLI turn's own `status: requesting` (or legacy `init`) already opened a
-    // provider turn before this first echo arrived. It has produced nothing: retract it.
-    if (
-      turnState !== undefined &&
-      turnState.openedBy === "wake-signal" &&
-      !turnState.rootOutputObserved &&
-      turnState.steerPromptUuids.size === 0
-    ) {
-      yield* completeTurn(context, "interrupted", DISCARDED_STEER_TURN_REASON, undefined, {
-        abortReason: DISCARDED_STEER_TURN_REASON,
-        expectedTurnState: turnState,
-      });
-    }
+    yield* retractDiscardedSteerWakeTurn(context);
     return true;
   });
 
@@ -4424,12 +4489,19 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     yield* logNativeSdkMessage(context, message);
     yield* ensureThreadId(context, message);
     if (yield* routeSteerFrame(context, message)) return;
-    if (context.wakeSignalDeferred && isClaudeRootTurnOutput(message)) {
-      context.wakeSignalDeferred = false;
-      if (context.turnState === undefined) yield* startProviderTurn(context, "wake-signal");
+    const rootContent = isClaudeRootTurnFrame(message);
+    if (context.wakeSignalDeferred) {
+      // Only content can open the deferred turn: its first frame carries the echo, which
+      // routeSteerFrame already checked. A result ends the signalling CLI turn either way.
+      if (rootContent) {
+        context.wakeSignalDeferred = false;
+        if (context.turnState === undefined) yield* startProviderTurn(context, "wake-signal");
+      } else if (message.type === "result") {
+        context.wakeSignalDeferred = false;
+      }
     }
     const waiting = context.turnState;
-    if (waiting?.awaitingSteerContinuation !== undefined && isClaudeRootTurnFrame(message)) {
+    if (waiting?.awaitingSteerContinuation !== undefined && rootContent) {
       waiting.awaitingSteerContinuation = undefined;
     }
     yield* routeSdkMessage(context, message);
@@ -4438,6 +4510,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     if (open && !open.rootOutputObserved && isClaudeRootTurnOutput(message)) {
       open.rootOutputObserved = true;
     }
+    if (open && rootContent) open.rootContentObserved = true;
   });
 
   const routeSdkMessage = Effect.fn("routeSdkMessage")(function* (
@@ -5670,7 +5743,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         });
         yield* context.turnLock.withPermits(1)(
           Effect.gen(function* () {
-            if (context.turnState !== target) return;
+            if (context.stopped) return;
             const stop = decideClaudeStop({
               unsettledSteers: [...target.steerPromptUuids].filter(
                 (uuid) => !target.settledSteerPromptUuids.has(uuid),
@@ -5680,10 +5753,16 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
               awaitingSteerContinuation: target.awaitingSteerContinuation !== undefined,
               receipt,
             });
-            for (const uuid of stop.discard) {
-              rememberDiscardedSteer(context.discardedSteerPromptUuids, uuid);
+            // The stream fiber can take the lock first and close the turn on its result. That
+            // result saw `interruptRequested` and already discarded every unsettled steer, so
+            // only the cancelled ones (which never run) are left to release.
+            if (context.turnState === target) {
+              for (const uuid of stop.discard) {
+                rememberDiscardedSteer(context.discardedSteerPromptUuids, uuid);
+              }
             }
-            if (stop.forceClose) {
+            for (const uuid of stop.release) context.discardedSteerPromptUuids.delete(uuid);
+            if (stop.forceClose && context.turnState === target) {
               // No CLI segment of this turn is running, so no result will close it.
               yield* completeTurn(context, "interrupted", "Interrupted by user.", undefined, {
                 expectedTurnState: target,
