@@ -571,6 +571,28 @@ describe("delegation return atomic origin fence", () => {
       expect((await decide(thread))._tag).toBe("Failure");
     });
   }
+  // usage-limits §5.2: a wake never runs on (or clears) a usage-limited parent. Delivery holds
+  // it until the user or the auto-resume clears the limit.
+  const usageLimit = (instanceId: string) => ({
+    limitId: "usage-limit:thread-handoff:origin-turn",
+    provider: "codex" as never,
+    providerInstanceId: ProviderInstanceId.make(instanceId),
+    turnId: TurnId.make("origin-turn"),
+    message: "Usage limit reached.",
+    limitedAt: now,
+    resetAt: null,
+    autoResume: null,
+    updatedAt: now,
+  });
+  it("rejects a wake while the parent's usage limit applies, leaving the limit recorded", async () => {
+    const result = await decide({ ...parent(), usageLimit: usageLimit("codex_work") });
+    expect(result._tag).toBe("Failure");
+    expect(result._tag === "Failure" ? result.failure.detail : "").toContain("usage limit");
+  });
+  it("accepts a wake once the parent targets a different instance than its limit", async () => {
+    const result = await decide({ ...parent(), usageLimit: usageLimit("other_instance") });
+    expect(result._tag).toBe("Success");
+  });
   it("accepts a later user message whose createdAt is older than the guard's latest", async () => {
     // Order consistency with latestUserMessageIdQuery: max created_at, ties by insertion order.
     const thread = parent();

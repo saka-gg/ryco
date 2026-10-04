@@ -9,7 +9,10 @@ import {
   OrchestrationThreadShell,
   RuntimeSessionId,
   ThreadId,
+  ThreadUsageLimit,
   TurnId,
+  type CheckpointRevertActivityPayload,
+  type CheckpointRevertStatus,
   type ClientOrchestrationCommand,
 } from "@ryco/contracts";
 import {
@@ -28,6 +31,7 @@ import { OrchestrationCommandReceiptRepository } from "../../persistence/Service
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
 import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { OrchestrationCommandApplication } from "../../orchestration/Services/OrchestrationCommandApplication.ts";
+import { makeCheckpointRevertActivity } from "../../orchestration/checkpointRevertPolicy.ts";
 import { AgentControlPolicy } from "../Services/AgentControlPolicy.ts";
 import { AgentControlProposalEventsLive } from "./AgentControlProposalEvents.ts";
 import { completionFixture, completionFixtureTime as now } from "../completionReturnTestSupport.ts";
@@ -171,6 +175,8 @@ const setup = (fixture: Partial<CompletionReturnRecord> = {}) =>
     let failReads = false;
     let applyMode: ApplyMode = "accept";
     let modelPendingRow = false;
+    // Newest pending checkpoint revert per thread (ProjectionSnapshotQuery's journal read).
+    const pendingReverts = new Map<string, ReturnType<typeof makeCheckpointRevertActivity>>();
     const sent: Array<Extract<ClientOrchestrationCommand, { type: "thread.turn.start" }>> = [];
 
     // A delegated child with a completed, ingestion-bound initial turn and a final answer.
@@ -217,6 +223,14 @@ const setup = (fixture: Partial<CompletionReturnRecord> = {}) =>
           failReads
             ? Effect.fail(new Error("fixture transient"))
             : Effect.succeed(Option.fromNullishOr(shells.get(id))),
+        listPendingCheckpointReverts: () =>
+          Effect.sync(() =>
+            [...pendingReverts].map(([threadId, activity]) => ({
+              threadId: ThreadId.make(threadId),
+              activity,
+              payload: activity.payload as CheckpointRevertActivityPayload,
+            })),
+          ),
       } as never),
       Effect.provideService(OrchestrationCommandApplication, {
         apply: (command: ClientOrchestrationCommand) =>
@@ -310,6 +324,23 @@ const setup = (fixture: Partial<CompletionReturnRecord> = {}) =>
       },
       modelPendingRow: () => {
         modelPendingRow = true;
+      },
+      setPendingRevert: (
+        threadId: string,
+        status: CheckpointRevertStatus | null,
+        createdAt: string = now,
+      ) => {
+        if (status === null) pendingReverts.delete(threadId);
+        else
+          pendingReverts.set(
+            threadId,
+            makeCheckpointRevertActivity({
+              revertRequestId: CommandId.make(`revert-${threadId}`),
+              turnCount: 1,
+              status,
+              createdAt,
+            }),
+          );
       },
     };
   });
@@ -825,6 +856,125 @@ it.effect("T11 retries a rejected wake with a new attempt id and blocks after fi
     );
     assert.equal((yield* h.read()).status, "blocked");
     assert.include((yield* h.read()).detail, "rejected repeatedly");
+  }).pipe(Effect.provide(layer)),
+);
+
+// ── parent admission holds: wait, never cancel, never a counted attempt ──
+
+const usageLimitOn = (instanceId: string) =>
+  Schema.decodeUnknownSync(ThreadUsageLimit)({
+    limitId: "usage-limit:parent:parent-turn",
+    provider: "codex",
+    providerInstanceId: instanceId,
+    turnId: "parent-turn",
+    message: "Usage limit reached.",
+    limitedAt: now,
+    resetAt: null,
+    autoResume: null,
+    updatedAt: now,
+  });
+// A limited parent's turn failed, so its session reads as idle.
+const limitedParent = (instanceId = "codex") =>
+  withSession(
+    shell("parent", "parent-turn", "parent-runtime", { usageLimit: usageLimitOn(instanceId) }),
+    { status: "error" },
+  );
+const assertHeldWithoutAttempts = (record: CompletionReturnRecord, detail: string) => {
+  assert.equal(record.status, "ready");
+  assert.include(record.detail, detail);
+  assert.equal(record.deliveryAttempts ?? 0, 0);
+  assert.equal(record.rejections ?? 0, 0);
+};
+
+it.effect(
+  "holds a wake for a usage-limited parent without spending attempts until the limit clears",
+  () =>
+    Effect.gen(function* () {
+      const h = yield* setup();
+      h.setParent(limitedParent());
+      yield* h.ack();
+      for (const seconds of [0, 3, 6, 9, 12, 15, 18]) yield* h.tick(seconds);
+      // A wake would start a turn, and an accepted turn start clears the limit.
+      assert.equal(h.sent.length, 0);
+      assertHeldWithoutAttempts(yield* h.read(), "usage limit");
+      // The user's resume (or the auto-resume after the reset) is the turn that clears it.
+      h.setParent(shell("parent", "resume-turn", "parent-runtime"));
+      yield* h.tick(21);
+      assert.equal((yield* h.read()).status, "delivered");
+      assert.deepStrictEqual(
+        h.sent.map((command) => command.commandId),
+        ["delegation-return:child"],
+      );
+    }).pipe(Effect.provide(layer)),
+);
+
+it.effect("delivers to a parent whose limit is on an instance it no longer targets", () =>
+  Effect.gen(function* () {
+    const h = yield* setup();
+    h.setParent(limitedParent("another-instance"));
+    yield* h.ack();
+    yield* h.tick(0);
+    assert.equal((yield* h.read()).status, "delivered");
+  }).pipe(Effect.provide(layer)),
+);
+
+for (const hold of ["usage limit", "revert"] as const) {
+  it.effect(`releases a lost dispatch to wait out a parent ${hold}, then re-sends its ids`, () =>
+    Effect.gen(function* () {
+      const h = yield* setup();
+      yield* h.ack();
+      h.applyMode("lost");
+      yield* h.tick(0);
+      assert.equal((yield* h.read()).status, "dispatching");
+      h.applyMode("accept");
+      if (hold === "usage limit") h.setParent(limitedParent());
+      else h.setPendingRevert("parent", "restoring-files", at(0));
+      yield* h.tick(3);
+      yield* h.tick(6);
+      // Never applied (no receipt), so waiting as ready cannot duplicate it.
+      assert.equal(h.sent.length, 1);
+      assertHeldWithoutAttempts(yield* h.read(), hold);
+      if (hold === "usage limit") h.setParent(shell("parent", "resume-turn", "parent-runtime"));
+      else h.setPendingRevert("parent", null);
+      yield* h.tick(9);
+      assert.equal((yield* h.read()).status, "delivered");
+      assert.equal(h.sent.length, 2);
+      assert.equal(h.sent[1]!.commandId, h.sent[0]!.commandId);
+    }).pipe(Effect.provide(layer)),
+  );
+}
+
+it.effect(
+  "holds a wake while the parent's checkpoint revert is pending without spending its rejection budget",
+  () =>
+    Effect.gen(function* () {
+      const h = yield* setup();
+      yield* h.ack();
+      // The decider rejects every turn start while a revert is pending.
+      h.applyMode("reject");
+      h.setPendingRevert("parent", "rolling-back", at(0));
+      for (const seconds of [0, 3, 6, 9, 12, 15, 18]) yield* h.tick(seconds);
+      assert.equal(h.sent.length, 0);
+      assertHeldWithoutAttempts(yield* h.read(), "revert");
+      h.applyMode("accept");
+      h.setPendingRevert("parent", "completed", at(20));
+      yield* h.tick(21);
+      assert.equal((yield* h.read()).status, "delivered");
+      assert.deepStrictEqual(
+        h.sent.map((command) => command.commandId),
+        ["delegation-return:child"],
+      );
+    }).pipe(Effect.provide(layer)),
+);
+
+it.effect("ignores another thread's revert and one past the decider's stale backstop", () =>
+  Effect.gen(function* () {
+    const h = yield* setup();
+    yield* h.ack();
+    h.setPendingRevert("child", "rolling-back", at(0));
+    h.setPendingRevert("parent", "requested", at(-11 * 60));
+    yield* h.tick(0);
+    assert.equal((yield* h.read()).status, "delivered");
   }).pipe(Effect.provide(layer)),
 );
 

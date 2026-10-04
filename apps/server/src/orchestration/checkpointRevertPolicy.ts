@@ -130,15 +130,28 @@ export function latestCheckpointRevert(
   });
 }
 
+/**
+ * Whether a thread's newest revert journal entry still blocks turn starts: pending and not
+ * past the stale backstop. Callers that read the journal elsewhere (the delegated-return
+ * worker reads `ProjectionSnapshotQuery.listPendingCheckpointReverts`) use this so they agree
+ * with the decider's admission check.
+ */
+export function isCheckpointRevertEntryPending(
+  entry: CheckpointRevertEntry,
+  nowMs: number,
+): boolean {
+  if (!isPendingCheckpointRevertStatus(entry.payload.status)) return false;
+  const createdAtMs = Date.parse(entry.activity.createdAt);
+  if (!Number.isFinite(createdAtMs) || !Number.isFinite(nowMs)) return true;
+  return nowMs - createdAtMs < CHECKPOINT_REVERT_PENDING_STALE_MS;
+}
+
 export function isCheckpointRevertPending(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
   nowMs: number,
 ): boolean {
   const latest = latestCheckpointRevert(activities);
-  if (latest === null || !isPendingCheckpointRevertStatus(latest.payload.status)) return false;
-  const createdAtMs = Date.parse(latest.activity.createdAt);
-  if (!Number.isFinite(createdAtMs) || !Number.isFinite(nowMs)) return true;
-  return nowMs - createdAtMs < CHECKPOINT_REVERT_PENDING_STALE_MS;
+  return latest !== null && isCheckpointRevertEntryPending(latest, nowMs);
 }
 
 export type ThreadBusyReason =

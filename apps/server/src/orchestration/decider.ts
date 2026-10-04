@@ -3,6 +3,7 @@ import {
   REMOVED_PROJECT_MEMORY_MESSAGE,
 } from "@ryco/shared/retiredFeatures";
 import { canSnoozeThread } from "@ryco/shared/threadSnooze";
+import { applicableUsageLimit } from "@ryco/shared/usageLimit";
 import type {
   AgentTokenMode,
   CommandId,
@@ -1344,6 +1345,16 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           commandType: command.type,
           detail:
             "Delegated result origin changed. Open the child task and return its result manually.",
+        });
+      }
+      // usage-limits §5.2: an accepted turn start clears the limit below, and only the user's
+      // or the auto-resume's turn may do that. CompletionReturnDelivery holds the wake while
+      // the limit applies, so this only fires on a race with a new limit.
+      if (guard && applicableUsageLimit(targetThread) !== null) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail:
+            "The originating chat hit its usage limit. The delegated result waits until it is resumed.",
         });
       }
       const requestedSelection = command.modelSelection ?? targetThread.modelSelection;

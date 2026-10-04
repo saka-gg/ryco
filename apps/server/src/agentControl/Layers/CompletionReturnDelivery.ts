@@ -4,8 +4,8 @@
  * One ledger row per `returnToOrigin` child. A row is captured as a result (untrusted child
  * output) or a server-authored notice once the child reaches a terminal state, then joins one
  * batched wake: a queued `thread.turn.start` on the parent that (re)creates or resumes its
- * session. Wakes need the parent to be idle and in the delegation's scope; they survive the
- * parent advancing, a reaped session and a server restart.
+ * session. Wakes need the parent to be idle, not usage-limited, not reverting and in the
+ * delegation's scope; they survive the parent advancing, a reaped session and a server restart.
  */
 import {
   type AgentControlProposal,
@@ -21,6 +21,7 @@ import {
   queuedTurnIdleBlocker,
   type QueuedTurnIdleInput,
 } from "@ryco/shared/threadSettlement";
+import { applicableUsageLimit } from "@ryco/shared/usageLimit";
 import { Context, Duration, Effect, Layer, Option, Schedule, Semaphore } from "effect";
 import {
   CompletionReturnRepository,
@@ -33,6 +34,7 @@ import {
 import { AgentControlProposalRepository } from "../../persistence/Services/AgentControlProposals.ts";
 import { OrchestrationCommandReceiptRepository } from "../../persistence/Services/OrchestrationCommandReceipts.ts";
 import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { isCheckpointRevertEntryPending } from "../../orchestration/checkpointRevertPolicy.ts";
 import { OrchestrationCommandApplication } from "../../orchestration/Services/OrchestrationCommandApplication.ts";
 import { ServerRuntimeStartup } from "../../serverRuntimeStartup.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
@@ -76,11 +78,14 @@ const DETAIL = {
   disabled: "Agent Control is disabled; delivery resumes when it is re-enabled.",
   scope: "Waiting: the originating chat's permissions or workspace changed since delegation.",
   busy: "Waiting for the originating chat to become idle (queue delivery).",
+  usageLimited:
+    "Waiting: the originating chat hit its usage limit. Delivery resumes once it is resumed.",
+  reverting: "Waiting for the originating chat's checkpoint revert to finish.",
   userStopped:
     "You stopped the delegating chat; this result was not returned automatically. Open the child.",
   cold: "Waiting for another chat's session to start.",
   deliveryExpired:
-    "Not delivered within 24 hours (the originating chat stayed busy, out of scope or Agent Control was disabled). Open the child.",
+    "Not delivered within 24 hours (the originating chat stayed busy, usage-limited or out of scope, or Agent Control was disabled). Open the child.",
   rejectedRetry: "The originating chat rejected the update; retrying with its current state.",
   rejectedRepeatedly:
     "Return was rejected repeatedly. Open the child and send its result manually.",
@@ -164,6 +169,8 @@ interface ScanContext {
   readonly settledCommands: Set<string>;
   /** Parent → oldest capturedAt among its ready rows seen this scan. */
   readonly candidates: Map<ThreadId, string>;
+  /** Threads whose checkpoint revert blocks turn starts; read lazily, once per scan. */
+  pendingReverts?: ReadonlySet<ThreadId>;
 }
 
 export const makeCompletionReturnDelivery = Effect.gen(function* () {
@@ -356,6 +363,38 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
       return queuedTurnIdleBlocker(queuedTurnIdleInputFromShell(parent, nowMs)) === null;
     });
 
+  /** rollback-correctness's revert journal, judged by the decider's own pending rule. */
+  const pendingRevertThreads = (ctx: ScanContext) =>
+    Effect.gen(function* () {
+      if (ctx.pendingReverts !== undefined) return ctx.pendingReverts;
+      const entries = projections.listPendingCheckpointReverts
+        ? yield* projections.listPendingCheckpointReverts()
+        : [];
+      const pending = new Set(
+        entries
+          .filter((entry) => isCheckpointRevertEntryPending(entry, ctx.nowMs))
+          .map((entry) => entry.threadId),
+      );
+      ctx.pendingReverts = pending;
+      return pending;
+    });
+
+  /**
+   * Why the parent cannot take a wake now, or null. Every reason is a wait (save and retry),
+   * never a cancel and never a delivery attempt: the decider would reject the wake for the
+   * same reason, and the reason ends on its own.
+   * - A usage limit (usage-limits §5.2): an accepted turn start clears the limit, which only
+   *   the user's resume or the auto-resume after the reset may do. The decider fences it too.
+   * - A pending checkpoint revert: the decider rejects every turn start until it ends.
+   */
+  const parentHoldDetail = (parent: OrchestrationThreadShell, ctx: ScanContext) =>
+    Effect.gen(function* () {
+      if (applicableUsageLimit(parent) !== null) return DETAIL.usageLimited;
+      if (!(yield* parentIdle(parent, ctx.nowMs))) return DETAIL.busy;
+      if ((yield* pendingRevertThreads(ctx)).has(parent.id)) return DETAIL.reverting;
+      return null;
+    });
+
   const capture = (
     record: CompletionReturnRecord,
     kind: CompletionReturnCapture["kind"],
@@ -498,8 +537,24 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
           );
           return;
         }
-        if (!(yield* policy.isEnabled) || !(yield* parentIdle(parent.value, ctx.nowMs)))
-          return yield* holdAll(rows, now);
+        if (!(yield* policy.isEnabled)) return yield* holdAll(rows, now);
+        const held = yield* parentHoldDetail(parent.value, ctx);
+        if (held === DETAIL.busy) return yield* holdAll(rows, now);
+        if (held !== null) {
+          // The parent's state changes before it can take the wake (a resume adds a user
+          // message, a revert drops some), so the frozen command's guard would go stale and
+          // spend a rejection. It was never applied (no receipt): wait as ready and rebuild.
+          yield* saveAll(
+            rows.map(
+              (row) =>
+                [
+                  row,
+                  patch(row, { status: "ready", detail: held, batch: null, command: null }, now),
+                ] as const,
+            ),
+          );
+          return;
+        }
         // A replay re-joins the wake, so it passes the same user-stop and scope checks as a
         // new batch. The frozen command was never applied (no receipt), so releasing the
         // rows to `ready` cannot duplicate it: user-stopped rows end, the rest re-batch.
@@ -770,8 +825,8 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
         DETAIL.scope,
       );
       if (scoped.length === 0) return;
-      if (!(yield* parentIdle(parent.value, ctx.nowMs)))
-        return yield* holdAll(scoped, now, DETAIL.busy);
+      const held = yield* parentHoldDetail(parent.value, ctx);
+      if (held !== null) return yield* holdAll(scoped, now, held);
 
       // The user-stop decision is persisted as a terminal status, so later event retention
       // cannot undo it. sinceSequence only bounds the scan and is persisted lazily.
