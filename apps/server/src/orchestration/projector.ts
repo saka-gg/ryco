@@ -19,6 +19,7 @@ import { capThreadActivitiesPreservingMilestones } from "@ryco/shared/threadActi
 import { checkpointStatusToTurnState, mergeReleasedTurn } from "@ryco/shared/turnFinalization";
 
 import { toProjectorDecodeError, type OrchestrationProjectorDecodeError } from "./Errors.ts";
+import { resolveEventPullRequestTerminalAt } from "./pullRequestTerminalAt.ts";
 import {
   MessageSentPayloadSchema,
   ProjectAvatarSetPayload,
@@ -402,6 +403,7 @@ export function projectEvent(
             workItemUrl: payload.workItemUrl ?? null,
             prState: null,
             prIsDraft: null,
+            prTerminalAt: null,
             issueState: null,
             createdAt: payload.createdAt,
             updatedAt: payload.updatedAt,
@@ -454,17 +456,23 @@ export function projectEvent(
         event.type,
         "payload",
       ).pipe(
-        Effect.map((payload) => ({
-          ...nextBase,
-          worktrees: updateWorktree(nextBase.worktrees, payload.worktreeId, {
-            ...(payload.prNumber !== undefined ? { prNumber: payload.prNumber } : {}),
-            ...(payload.prTitle !== undefined ? { prTitle: payload.prTitle } : {}),
-            prState: payload.prState,
-            prIsDraft: payload.prIsDraft,
-            issueState: payload.issueState,
-            updatedAt: payload.updatedAt,
-          }),
-        })),
+        Effect.map((payload) => {
+          const existing = nextBase.worktrees?.find(
+            (worktree) => worktree.worktreeId === payload.worktreeId,
+          );
+          return {
+            ...nextBase,
+            worktrees: updateWorktree(nextBase.worktrees, payload.worktreeId, {
+              ...(payload.prNumber !== undefined ? { prNumber: payload.prNumber } : {}),
+              ...(payload.prTitle !== undefined ? { prTitle: payload.prTitle } : {}),
+              prState: payload.prState,
+              prIsDraft: payload.prIsDraft,
+              prTerminalAt: resolveEventPullRequestTerminalAt(payload, existing),
+              issueState: payload.issueState,
+              updatedAt: payload.updatedAt,
+            }),
+          };
+        }),
       );
 
     case "worktree.restored":

@@ -247,6 +247,131 @@ describe("thread inbox", () => {
     );
   });
 
+  describe("automatic settlement signals", () => {
+    const staleActivity = {
+      latestUserMessageAt: "2026-07-20T12:00:00.000Z",
+      updatedAt: "2026-07-20T12:00:00.000Z",
+    };
+
+    it("keeps a pinned thread active past the inactivity boundary", () => {
+      const pinned = makeThread(environmentA, "thread-pinned", staleActivity);
+      const unpinned = makeThread(environmentA, "thread-unpinned", staleActivity);
+      const pinnedKey = scopedThreadKey({ environmentId: environmentA, threadId: pinned.id });
+      const inbox = buildThreadInbox(
+        baseInput({
+          autoSettleAfterDays: 7,
+          threads: [pinned, unpinned],
+          pinnedThreadKeys: [pinnedKey],
+        }),
+      );
+
+      expect(inbox.active.map((entry) => entry.thread?.id)).toEqual([pinned.id]);
+      expect(inbox.active[0]).toMatchObject({
+        pinned: true,
+        lifecycle: { autoSettlementBlocker: "pinned", settlementBlocker: null },
+      });
+      expect(inbox.settled.map((entry) => entry.thread?.id)).toEqual([unpinned.id]);
+      expect(inbox.settled[0]?.lifecycle.autoSettlementBlocker).toBeNull();
+    });
+
+    it("keeps live agent work active and lets watch loops settle", () => {
+      const working = makeThread(environmentA, "thread-working", {
+        ...staleActivity,
+        backgroundLiveness: "working",
+      });
+      const monitoring = makeThread(environmentA, "thread-monitoring", {
+        ...staleActivity,
+        backgroundLiveness: "monitoring",
+      });
+      const inbox = buildThreadInbox(
+        baseInput({ autoSettleAfterDays: 7, threads: [working, monitoring] }),
+      );
+
+      expect(inbox.active.map((entry) => entry.thread?.id)).toEqual([working.id]);
+      expect(inbox.active[0]?.lifecycle.autoSettlementBlocker).toBe("background-work");
+      expect(inbox.settled.map((entry) => entry.thread?.id)).toEqual([monitoring.id]);
+    });
+
+    it("keeps a PR worktree whose state is unknown active", () => {
+      const thread = makeThread(environmentA, "thread-unknown-pr", {
+        ...staleActivity,
+        worktreeId,
+      });
+      const inbox = buildThreadInbox(
+        baseInput({
+          autoSettleAfterDays: 7,
+          threads: [thread],
+          worktrees: [makeWorktree(environmentA, { prNumber: 42, prState: null })],
+        }),
+      );
+
+      expect(inbox.active[0]?.lifecycle.autoSettlementBlocker).toBe("pull-request-unknown");
+      expect(inbox.settled).toEqual([]);
+      expect(inbox.nextSettlementEvaluationAtMs).toBeNull();
+    });
+
+    it("does not settle a merged PR that closed before later activity, and schedules inactivity", () => {
+      const thread = makeThread(environmentA, "thread-merged-earlier", {
+        worktreeId,
+        latestUserMessageAt: "2026-07-31T10:00:00.000Z",
+      });
+      const inbox = buildThreadInbox(
+        baseInput({
+          autoSettleAfterDays: 7,
+          threads: [thread],
+          worktrees: [
+            makeWorktree(environmentA, {
+              prState: "merged",
+              prTerminalAt: "2026-07-31T09:00:00.000Z",
+            }),
+          ],
+        }),
+      );
+
+      expect(inbox.active.map((entry) => entry.thread?.id)).toEqual([thread.id]);
+      expect(inbox.active[0]?.lifecycle.autoSettlementBlocker).toBeNull();
+      expect(inbox.nextSettlementEvaluationAtMs).toBe(Date.parse("2026-08-07T10:00:00.000Z"));
+    });
+
+    it("settles a merged PR that closed after the last activity at its close time", () => {
+      const thread = makeThread(environmentA, "thread-merged-later", {
+        worktreeId,
+        latestUserMessageAt: "2026-07-31T10:00:00.000Z",
+      });
+      const inbox = buildThreadInbox(
+        baseInput({
+          threads: [thread],
+          worktrees: [
+            makeWorktree(environmentA, {
+              prState: "merged",
+              prTerminalAt: "2026-07-31T11:00:00.000Z",
+            }),
+          ],
+        }),
+      );
+
+      expect(inbox.settled.map((entry) => entry.thread?.id)).toEqual([thread.id]);
+      expect(inbox.settled[0]?.lifecycle.effectiveSettlementTimestamp).toBe(
+        "2026-07-31T11:00:00.000Z",
+      );
+    });
+
+    it("keeps the legacy merged rule when the server omits prTerminalAt", () => {
+      const thread = makeThread(environmentA, "thread-legacy-merged", {
+        worktreeId,
+        latestUserMessageAt: "2026-07-31T10:00:00.000Z",
+      });
+      const inbox = buildThreadInbox(
+        baseInput({
+          threads: [thread],
+          worktrees: [makeWorktree(environmentA, { prState: "merged" })],
+        }),
+      );
+
+      expect(inbox.settled.map((entry) => entry.thread?.id)).toEqual([thread.id]);
+    });
+  });
+
   it("excludes archived threads and worktrees before applying filters", () => {
     const archivedThread = makeThread(environmentA, "thread-archived", {
       archivedAt: "2026-07-31T10:00:00.000Z",

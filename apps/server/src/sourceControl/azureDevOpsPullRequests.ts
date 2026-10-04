@@ -130,6 +130,8 @@ export interface NormalizedAzureDevOpsPullRequestRecord {
   readonly author?: string;
   readonly headSha?: string;
   readonly createdAt?: DateTime.Utc;
+  /** Azure's `closedDate`: the completion time for both merged and abandoned PRs. */
+  readonly closedAt?: DateTime.Utc;
   readonly labels?: ReadonlyArray<SourceControlLabel>;
   readonly mergeability?: SourceControlChangeRequestMergeability;
   readonly reviewDecision?: SourceControlChangeRequestReviewDecision | null;
@@ -216,6 +218,7 @@ export function normalizeAzureDevOpsPullRequestRecord(
   const author = azureDevOpsIdentityLogin(raw.createdBy);
   const headSha = trimOptionalString(raw.lastMergeSourceCommit?.commitId);
   const createdAt = raw.creationDate ? Option.getOrUndefined(raw.creationDate) : undefined;
+  const closedAt = raw.closedDate ? Option.getOrUndefined(raw.closedDate) : undefined;
   const labels = (raw.labels ?? [])
     .filter((label) => label.active !== false)
     .map((label) => label.name.trim())
@@ -236,6 +239,7 @@ export function normalizeAzureDevOpsPullRequestRecord(
     ...(author ? { author } : {}),
     ...(headSha ? { headSha } : {}),
     ...(createdAt ? { createdAt } : {}),
+    ...(closedAt ? { closedAt } : {}),
     ...(labels.length > 0 ? { labels } : {}),
     ...(raw.mergeStatus ? { mergeability: azureDevOpsMergeability(raw.mergeStatus) } : {}),
     ...(raw.reviewers && state === "open"

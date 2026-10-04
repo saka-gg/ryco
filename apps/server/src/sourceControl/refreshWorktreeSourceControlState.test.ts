@@ -5,8 +5,8 @@ import {
   type OrchestrationCommand,
   type OrchestrationEvent,
 } from "@ryco/contracts";
-import { assert, it } from "@effect/vitest";
-import { Effect, Option, PubSub, Ref, Stream } from "effect";
+import { assert, describe, it } from "@effect/vitest";
+import { DateTime, Effect, Option, PubSub, Ref, Stream } from "effect";
 
 import type { OrchestrationEngineShape } from "../orchestration/Services/OrchestrationEngine.ts";
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
@@ -265,3 +265,94 @@ it.effect("worktreePath is null → no-op, provider never called", () =>
     assert.equal(providerCalled, false);
   }),
 );
+
+describe("prTerminalAt", () => {
+  const FORGE_MERGED_AT = "2026-05-17T03:00:00.000Z";
+  const runRefresh = (
+    stored: ProjectionWorktree,
+    result: {
+      readonly state: "open" | "merged" | "closed";
+      readonly terminalAt?: DateTime.Utc | null;
+    },
+  ) =>
+    Effect.gen(function* () {
+      const dispatchRef = yield* Ref.make<ReadonlyArray<OrchestrationCommand>>([]);
+      const provider = makeProvider({
+        getPullRequestState: (_input) => Effect.succeed({ isDraft: false, ...result }),
+      });
+      yield* refreshWorktreeSourceControlState({ worktreeId }).pipe(
+        Effect.provideService(ProjectionWorktreeRepository, makeWorktreeRepo(stored)),
+        Effect.provideService(SourceControlProviderRegistry, makeRegistry(provider)),
+        Effect.provideService(OrchestrationEngineService, makeEngine(dispatchRef)),
+      );
+      return (yield* Ref.get(dispatchRef)).filter(
+        (
+          command,
+        ): command is Extract<
+          OrchestrationCommand,
+          { type: "worktree.source-control-state.update" }
+        > => command.type === "worktree.source-control-state.update",
+      );
+    });
+  const openWorktree: ProjectionWorktree = {
+    ...baseWorktree,
+    prState: "open",
+    prIsDraft: false,
+    prTerminalAt: null,
+  };
+
+  it.effect("records the forge close time on open to merged", () =>
+    Effect.gen(function* () {
+      const dispatched = yield* runRefresh(openWorktree, {
+        state: "merged",
+        terminalAt: DateTime.makeUnsafe(FORGE_MERGED_AT),
+      });
+      assert.equal(dispatched.length, 1);
+      assert.equal(dispatched[0]?.prState, "merged");
+      assert.equal(dispatched[0]?.prTerminalAt, FORGE_MERGED_AT);
+    }),
+  );
+
+  it.effect("records the observation time when the forge reports none", () =>
+    Effect.gen(function* () {
+      const dispatched = yield* runRefresh(openWorktree, { state: "merged" });
+      assert.equal(dispatched.length, 1);
+      assert.isString(dispatched[0]?.prTerminalAt);
+      assert.equal(dispatched[0]?.prTerminalAt, dispatched[0]?.updatedAt);
+    }),
+  );
+
+  it.effect("corrects a backfilled time even though the PR state did not change", () =>
+    Effect.gen(function* () {
+      const dispatched = yield* runRefresh(
+        { ...openWorktree, prState: "merged", prTerminalAt: "2026-05-18T00:00:00.000Z" },
+        { state: "merged", terminalAt: DateTime.makeUnsafe(FORGE_MERGED_AT) },
+      );
+      assert.equal(dispatched.length, 1);
+      assert.equal(dispatched[0]?.prState, "merged");
+      assert.equal(dispatched[0]?.prTerminalAt, FORGE_MERGED_AT);
+    }),
+  );
+
+  it.effect("keeps a stored time when the forge reports none", () =>
+    Effect.gen(function* () {
+      const dispatched = yield* runRefresh(
+        { ...openWorktree, prState: "merged", prTerminalAt: "2026-05-18T00:00:00.000Z" },
+        { state: "merged", terminalAt: null },
+      );
+      assert.equal(dispatched.length, 0);
+    }),
+  );
+
+  it.effect("clears the time when a merged PR reopens", () =>
+    Effect.gen(function* () {
+      const dispatched = yield* runRefresh(
+        { ...openWorktree, prState: "merged", prTerminalAt: FORGE_MERGED_AT },
+        { state: "open", terminalAt: null },
+      );
+      assert.equal(dispatched.length, 1);
+      assert.equal(dispatched[0]?.prState, "open");
+      assert.isNull(dispatched[0]?.prTerminalAt);
+    }),
+  );
+});

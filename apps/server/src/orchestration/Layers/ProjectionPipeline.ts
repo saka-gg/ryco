@@ -74,6 +74,7 @@ import {
   pendingStateDelta,
   userInputActivityPendingState,
 } from "../threadShellSummaryProjection.ts";
+import { resolveEventPullRequestTerminalAt } from "../pullRequestTerminalAt.ts";
 
 export const ORCHESTRATION_PROJECTOR_NAMES = {
   projects: "projection.projects",
@@ -1220,6 +1221,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             issueTitle: event.payload.issueTitle,
             prState: null,
             prIsDraft: null,
+            prTerminalAt: null,
             issueState: null,
             workItemProvider: event.payload.workItemProvider ?? null,
             workItemKey: event.payload.workItemKey ?? null,
@@ -1267,6 +1269,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
               ...(event.payload.prTitle !== undefined ? { prTitle: event.payload.prTitle } : {}),
               prState: event.payload.prState,
               prIsDraft: event.payload.prIsDraft,
+              prTerminalAt: resolveEventPullRequestTerminalAt(event.payload, existing.value),
               issueState: event.payload.issueState,
               updatedAt: event.payload.updatedAt,
             });

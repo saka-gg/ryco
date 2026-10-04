@@ -189,6 +189,101 @@ layer("OrchestrationProjectionPipeline worktrees", (it) => {
     }),
   );
 
+  it.effect("projects prTerminalAt from events and derives it for legacy events", () =>
+    Effect.gen(function* () {
+      const eventStore = yield* OrchestrationEventStore;
+      const projectionPipeline = yield* OrchestrationProjectionPipeline;
+      const worktrees = yield* ProjectionWorktreeRepository;
+      const now = "2026-05-19T00:00:00.000Z";
+      const projectId = ProjectId.make("project-pr-terminal");
+      let sequence = 0;
+
+      const createWorktree = (worktreeId: WorktreeId) =>
+        Effect.gen(function* () {
+          sequence += 1;
+          const created = yield* eventStore.append({
+            type: "worktree.created",
+            eventId: EventId.make(`evt-pr-terminal-created-${sequence}`),
+            aggregateKind: "project",
+            aggregateId: projectId,
+            occurredAt: now,
+            commandId: CommandId.make(`cmd-pr-terminal-created-${sequence}`),
+            causationEventId: null,
+            correlationId: CommandId.make(`cmd-pr-terminal-created-${sequence}`),
+            metadata: {},
+            payload: {
+              worktreeId,
+              projectId,
+              branch: `feature/${worktreeId}`,
+              worktreePath: null,
+              origin: "pr",
+              prNumber: 7,
+              issueNumber: null,
+              prTitle: "PR",
+              issueTitle: null,
+              createdAt: now,
+              updatedAt: now,
+            },
+          });
+          yield* projectionPipeline.projectEvent(created);
+        });
+      const updateState = (
+        worktreeId: WorktreeId,
+        payload: {
+          readonly prState: "open" | "merged" | "closed" | null;
+          readonly prTerminalAt?: string | null;
+          readonly updatedAt: string;
+        },
+      ) =>
+        Effect.gen(function* () {
+          sequence += 1;
+          const event = yield* eventStore.append({
+            type: "worktree.sourceControlStateUpdated",
+            eventId: EventId.make(`evt-pr-terminal-updated-${sequence}`),
+            aggregateKind: "worktree",
+            aggregateId: worktreeId,
+            occurredAt: payload.updatedAt,
+            commandId: CommandId.make(`cmd-pr-terminal-updated-${sequence}`),
+            causationEventId: null,
+            correlationId: CommandId.make(`cmd-pr-terminal-updated-${sequence}`),
+            metadata: {},
+            payload: {
+              worktreeId,
+              prState: payload.prState,
+              prIsDraft: false,
+              issueState: null,
+              updatedAt: payload.updatedAt,
+              ...(payload.prTerminalAt !== undefined ? { prTerminalAt: payload.prTerminalAt } : {}),
+            },
+          });
+          yield* projectionPipeline.projectEvent(event);
+        });
+      const prTerminalAtOf = (worktreeId: WorktreeId) =>
+        worktrees
+          .getById({ worktreeId })
+          .pipe(Effect.map((row) => Option.getOrThrow(row).prTerminalAt));
+
+      const explicit = WorktreeId.make("worktree-pr-terminal-explicit");
+      yield* createWorktree(explicit);
+      assert.isNull(yield* prTerminalAtOf(explicit));
+      yield* updateState(explicit, {
+        prState: "merged",
+        prTerminalAt: "2026-05-19T00:30:00.000Z",
+        updatedAt: "2026-05-19T01:00:00.000Z",
+      });
+      assert.equal(yield* prTerminalAtOf(explicit), "2026-05-19T00:30:00.000Z");
+
+      const legacy = WorktreeId.make("worktree-pr-terminal-legacy");
+      yield* createWorktree(legacy);
+      yield* updateState(legacy, { prState: "open", updatedAt: "2026-05-19T01:00:00.000Z" });
+      assert.isNull(yield* prTerminalAtOf(legacy));
+      yield* updateState(legacy, { prState: "merged", updatedAt: "2026-05-19T02:00:00.000Z" });
+      assert.equal(yield* prTerminalAtOf(legacy), "2026-05-19T02:00:00.000Z");
+      yield* updateState(legacy, { prState: "merged", updatedAt: "2026-05-19T03:00:00.000Z" });
+      assert.equal(yield* prTerminalAtOf(legacy), "2026-05-19T02:00:00.000Z");
+    }),
+  );
+
   it.effect("worktree.created projects Jira work item metadata", () =>
     Effect.gen(function* () {
       const eventStore = yield* OrchestrationEventStore;

@@ -209,6 +209,44 @@ export const repairProjectionWorktreeTitleColumn = Effect.fn("repairProjectionWo
   },
 );
 
+// Not a numbered migration: the Effect migrator skips ids at or below the latest
+// applied one, so a late-landing number would be silently skipped on databases
+// that already ran newer migrations. The PRAGMA guard makes this run once.
+export const repairProjectionWorktreePrTerminalAtColumn = Effect.fn(
+  "repairProjectionWorktreePrTerminalAtColumn",
+)(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  const tables = yield* sql<{ readonly name: string }>`
+    SELECT name FROM sqlite_master
+    WHERE type = 'table' AND name = 'projection_worktrees'
+  `;
+  if (tables.length === 0) {
+    return;
+  }
+
+  yield* sql.withTransaction(
+    Effect.gen(function* () {
+      const columns = yield* sql<{ readonly name: string }>`
+        PRAGMA table_info(projection_worktrees)
+      `;
+      if (columns.some((column) => column.name === "pr_terminal_at")) {
+        return;
+      }
+      yield* sql`ALTER TABLE projection_worktrees ADD COLUMN pr_terminal_at TEXT`;
+      // One-time backfill, only in the transaction that adds the column:
+      // updated_at is the last time the row was written, an upper bound on when
+      // the terminal state was first recorded. The next refresh corrects it to
+      // the forge-reported close time where one exists.
+      yield* sql`
+        UPDATE projection_worktrees
+        SET pr_terminal_at = updated_at
+        WHERE pr_state IN ('merged', 'closed')
+      `;
+      yield* Effect.log("Repaired projection_worktrees.pr_terminal_at column");
+    }),
+  );
+});
+
 export const repairProjectionProjectAvatarColumns = Effect.fn(
   "repairProjectionProjectAvatarColumns",
 )(function* () {
@@ -451,6 +489,10 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
   }
   if (toMigrationInclusive === undefined || toMigrationInclusive >= 35) {
     yield* repairProjectionTokenModeColumns();
+  }
+  // 037 introduced pr_state, which the backfill reads.
+  if (toMigrationInclusive === undefined || toMigrationInclusive >= 37) {
+    yield* repairProjectionWorktreePrTerminalAtColumn();
   }
   if (toMigrationInclusive === undefined || toMigrationInclusive >= 41) {
     yield* repairProjectionThreadSubagentNestingColumns();

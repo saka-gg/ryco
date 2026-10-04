@@ -1,6 +1,7 @@
-import { Effect, Option } from "effect";
+import { DateTime, Effect, Option } from "effect";
 import { CommandId, type WorktreeId } from "@ryco/contracts";
 
+import { resolvePullRequestTerminalAt } from "../orchestration/pullRequestTerminalAt.ts";
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionWorktreeRepository } from "../persistence/Services/ProjectionWorktrees.ts";
 import { SourceControlProviderRegistry } from "./SourceControlProviderRegistry.ts";
@@ -22,8 +23,11 @@ export const refreshWorktreeSourceControlState = Effect.fn("refreshWorktreeSourc
     const cwd = existing.worktreePath;
     const provider = yield* registry.resolve({ cwd });
 
+    // One timestamp for both the event time and the first-observation fallback.
+    const observedAt = new Date().toISOString();
     let nextPrState = existing.prState ?? null;
     let nextPrIsDraft = existing.prIsDraft ?? null;
+    let reportedTerminalAt: string | null = null;
     if (existing.prNumber !== null) {
       const pr = yield* provider
         .getPullRequestState({ number: existing.prNumber, cwd })
@@ -35,6 +39,7 @@ export const refreshWorktreeSourceControlState = Effect.fn("refreshWorktreeSourc
       if (pr !== null) {
         nextPrState = pr.state;
         nextPrIsDraft = pr.isDraft;
+        reportedTerminalAt = pr.terminalAt ? DateTime.formatIso(pr.terminalAt) : null;
       }
     }
 
@@ -52,9 +57,18 @@ export const refreshWorktreeSourceControlState = Effect.fn("refreshWorktreeSourc
       }
     }
 
+    const nextPrTerminalAt = resolvePullRequestTerminalAt({
+      previousState: existing.prState ?? null,
+      previousTerminalAt: existing.prTerminalAt ?? null,
+      nextState: nextPrState,
+      reportedTerminalAt,
+      observedAt,
+    });
+
     const changed =
       nextPrState !== (existing.prState ?? null) ||
       nextPrIsDraft !== (existing.prIsDraft ?? null) ||
+      nextPrTerminalAt !== (existing.prTerminalAt ?? null) ||
       nextIssueState !== (existing.issueState ?? null);
     if (!changed) return;
 
@@ -65,8 +79,9 @@ export const refreshWorktreeSourceControlState = Effect.fn("refreshWorktreeSourc
       worktreeId: input.worktreeId,
       prState: nextPrState,
       prIsDraft: nextPrIsDraft,
+      prTerminalAt: nextPrTerminalAt,
       issueState: nextIssueState,
-      updatedAt: new Date().toISOString(),
+      updatedAt: observedAt,
     });
   },
 );

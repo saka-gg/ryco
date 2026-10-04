@@ -13,7 +13,10 @@ import {
   AZURE_THREADS_22,
   azurePolicyEvaluations,
 } from "./azureDevOpsPullRequestPage.fixtures.ts";
-import { decodeAzureDevOpsRawPullRequestJson } from "./azureDevOpsPullRequests.ts";
+import {
+  decodeAzureDevOpsRawPullRequestJson,
+  normalizeAzureDevOpsPullRequestRecord,
+} from "./azureDevOpsPullRequests.ts";
 
 function makeProvider(azure: Partial<AzureDevOpsCli.AzureDevOpsCliShape>) {
   return AzureDevOpsSourceControlProvider.make().pipe(
@@ -319,4 +322,66 @@ describe("AzureDevOpsSourceControlProvider stubs (Phase 1 of issue creation)", (
       assert.include(result.detail, "Not implemented");
     }),
   );
+});
+
+it.effect("reports the PR terminal time from Azure DevOps closedDate", () =>
+  Effect.gen(function* () {
+    const closedAt = DateTime.makeUnsafe("2026-05-01T10:00:05.000Z");
+    const stateOf = (
+      state: "open" | "closed" | "merged",
+      times: { readonly closedAt?: DateTime.Utc },
+    ) =>
+      makeProvider({
+        getPullRequest: () =>
+          Effect.succeed({
+            number: 42,
+            title: "Terminal time",
+            url: "https://dev.azure.com/acme/project/_git/repo/pullrequest/42",
+            baseRefName: "main",
+            headRefName: "feature/terminal-time",
+            state,
+            updatedAt: Option.none(),
+            isDraft: false,
+            ...times,
+          }),
+      }).pipe(
+        Effect.flatMap((provider) => provider.getPullRequestState({ cwd: "/repo", number: 42 })),
+      );
+
+    // Azure's closedDate is the completion time for both merged and abandoned PRs.
+    assert.deepStrictEqual(yield* stateOf("merged", { closedAt }), {
+      state: "merged",
+      isDraft: false,
+      terminalAt: closedAt,
+    });
+    assert.deepStrictEqual(yield* stateOf("closed", { closedAt }), {
+      state: "closed",
+      isDraft: false,
+      terminalAt: closedAt,
+    });
+    assert.deepStrictEqual(yield* stateOf("open", {}), {
+      state: "open",
+      isDraft: false,
+      terminalAt: null,
+    });
+  }),
+);
+
+it("normalizes Azure DevOps closedDate into the PR record", () => {
+  const decoded = decodeAzureDevOpsRawPullRequestJson(
+    JSON.stringify({
+      pullRequestId: 42,
+      title: "Completed",
+      status: "completed",
+      sourceRefName: "refs/heads/feature/terminal-time",
+      targetRefName: "refs/heads/main",
+      creationDate: "2026-05-01T09:00:00Z",
+      closedDate: "2026-05-01T10:00:05Z",
+    }),
+  );
+  assert.isTrue(Result.isSuccess(decoded));
+  if (!Result.isSuccess(decoded)) return;
+  const record = normalizeAzureDevOpsPullRequestRecord(decoded.success);
+  assert.strictEqual(record.state, "merged");
+  assert.deepStrictEqual(record.closedAt, DateTime.makeUnsafe("2026-05-01T10:00:05Z"));
 });

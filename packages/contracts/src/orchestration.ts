@@ -1618,6 +1618,8 @@ const WorktreeSourceControlStateUpdateCommand = Schema.Struct({
   prTitle: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   prState: Schema.NullOr(PullRequestState),
   prIsDraft: Schema.NullOr(Schema.Boolean),
+  /** When the PR reached its current merged/closed state; see `Worktree.prTerminalAt`. */
+  prTerminalAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   issueState: Schema.NullOr(IssueState),
   updatedAt: IsoDateTime,
 });
@@ -2303,6 +2305,8 @@ export const WorktreeSourceControlStateUpdatedPayload = Schema.Struct({
   prTitle: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   prState: Schema.NullOr(PullRequestState),
   prIsDraft: Schema.NullOr(Schema.Boolean),
+  /** When the PR reached its current merged/closed state; see `Worktree.prTerminalAt`. */
+  prTerminalAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   issueState: Schema.NullOr(IssueState),
   updatedAt: IsoDateTime,
 });

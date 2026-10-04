@@ -41,6 +41,12 @@ export const Worktree = Schema.Struct({
   issueState: Schema.optional(Schema.NullOr(IssueState)).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
+  /**
+   * When the PR reached its current merged/closed state (forge time, else first
+   * observation). `null` while open, unknown, or absent. No decoding default:
+   * an absent key means the server predates the field (legacy settlement rule).
+   */
+  prTerminalAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   workItemProvider: Schema.optional(Schema.NullOr(WorkItemProviderKind)).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),

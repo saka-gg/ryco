@@ -1541,6 +1541,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           ...(command.prTitle !== undefined ? { prTitle: command.prTitle } : {}),
           prState: command.prState,
           prIsDraft: command.prIsDraft,
+          ...(command.prTerminalAt !== undefined ? { prTerminalAt: command.prTerminalAt } : {}),
           issueState: command.issueState,
           updatedAt: command.updatedAt,
         },

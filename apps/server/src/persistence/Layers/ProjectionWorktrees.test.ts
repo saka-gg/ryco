@@ -374,4 +374,58 @@ layer("ProjectionWorktreeRepository", (it) => {
       assert.equal(ids.length, 0);
     }),
   );
+
+  it.effect("round-trips prTerminalAt and keeps it across spread upserts", () =>
+    Effect.gen(function* () {
+      yield* runMigrations({ toMigrationInclusive: 39 });
+      const repo = yield* ProjectionWorktreeRepository;
+      const base = {
+        projectId: ProjectId.make("project-pr-terminal"),
+        title: null,
+        branch: "feature/pr",
+        worktreePath: "/tmp/feature-pr",
+        origin: "pr" as const,
+        prNumber: 7,
+        issueNumber: null,
+        prTitle: "PR",
+        issueTitle: null,
+        prIsDraft: false,
+        issueState: null,
+        createdAt: "2026-05-08T00:00:00.000Z",
+        updatedAt: "2026-05-08T01:00:00.000Z",
+        archivedAt: null,
+        manualPosition: 0,
+      };
+
+      const mergedId = WorktreeId.make("worktree-pr-terminal-time");
+      yield* repo.upsert({
+        ...base,
+        worktreeId: mergedId,
+        prState: "merged",
+        prTerminalAt: "2026-05-08T00:30:00.000Z",
+      });
+      const merged = Option.getOrThrow(yield* repo.getById({ worktreeId: mergedId }));
+      assert.equal(merged.prTerminalAt, "2026-05-08T00:30:00.000Z");
+
+      const openId = WorktreeId.make("worktree-pr-terminal-null");
+      yield* repo.upsert({ ...base, worktreeId: openId, prState: "open", prTerminalAt: null });
+      const open = Option.getOrThrow(yield* repo.getById({ worktreeId: openId }));
+      assert.isNull(open.prTerminalAt);
+
+      // NULL-wipe guard: every spread upsert reads through getById first.
+      yield* repo.upsert({ ...merged, title: "Renamed" });
+      const renamed = Option.getOrThrow(yield* repo.getById({ worktreeId: mergedId }));
+      assert.equal(renamed.title, "Renamed");
+      assert.equal(renamed.prTerminalAt, "2026-05-08T00:30:00.000Z");
+
+      const listed = yield* repo.listByProjectId({ projectId: base.projectId });
+      assert.deepStrictEqual(
+        listed.map((row) => [row.worktreeId, row.prTerminalAt]),
+        [
+          [openId, null],
+          [mergedId, "2026-05-08T00:30:00.000Z"],
+        ],
+      );
+    }),
+  );
 });

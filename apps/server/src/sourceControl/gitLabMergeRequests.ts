@@ -59,6 +59,8 @@ export interface NormalizedGitLabMergeRequestRecord {
     "review_required" | "changes_requested"
   >;
   readonly createdAt?: DateTime.Utc;
+  readonly mergedAt?: DateTime.Utc;
+  readonly closedAt?: DateTime.Utc;
 }
 
 const GitLabProjectReferenceSchema = Schema.Struct({
@@ -109,6 +111,8 @@ const GitLabMergeRequestSchema = Schema.Struct({
   detailed_merge_status: Schema.optional(Schema.NullOr(Schema.String)),
   merge_status: Schema.optional(Schema.NullOr(Schema.String)),
   created_at: Schema.optional(Schema.NullOr(Schema.String)),
+  merged_at: Schema.optional(Schema.NullOr(Schema.String)),
+  closed_at: Schema.optional(Schema.NullOr(Schema.String)),
 });
 
 function trimOptionalString(value: string | null | undefined): string | null {
@@ -278,6 +282,8 @@ function normalizeGitLabMergeRequestRecord(
     mergeStatus: raw.merge_status,
   });
   const createdAt = parseGitLabTimestamp(raw.created_at);
+  const mergedAt = parseGitLabTimestamp(raw.merged_at);
+  const closedAt = parseGitLabTimestamp(raw.closed_at);
   const detailedStatus = trimOptionalString(raw.detailed_merge_status)?.toLowerCase();
   const state = normalizeGitLabMergeRequestState(raw.state);
   const mergeStateStatus =
@@ -316,6 +322,8 @@ function normalizeGitLabMergeRequestRecord(
     ...(mergeStateStatus ? { mergeStateStatus } : {}),
     ...(reviewDecision ? { reviewDecision } : {}),
     ...(createdAt ? { createdAt } : {}),
+    ...(mergedAt ? { mergedAt } : {}),
+    ...(closedAt ? { closedAt } : {}),
   };
 }
 
@@ -456,8 +464,6 @@ export const GitLabMergeRequestDetailSchema = Schema.Struct({
   merge_when_pipeline_succeeds: Schema.optional(Schema.NullOr(Schema.Boolean)),
   merge_user: Schema.optional(Schema.NullOr(GitLabUserRefSchema)),
   merged_by: Schema.optional(Schema.NullOr(GitLabUserRefSchema)),
-  merged_at: Schema.optional(Schema.NullOr(Schema.String)),
-  closed_at: Schema.optional(Schema.NullOr(Schema.String)),
   changes_count: Schema.optional(Schema.NullOr(Schema.Union([Schema.String, Schema.Number]))),
   force_remove_source_branch: Schema.optional(Schema.NullOr(Schema.Boolean)),
   discussion_locked: Schema.optional(Schema.NullOr(Schema.Boolean)),

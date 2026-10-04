@@ -129,6 +129,8 @@ function toWorktreeShell(
   return {
     ...row,
     prIsDraft: row.prIsDraft === null ? null : row.prIsDraft === 1,
+    // Always emit the key: its presence tells clients this server tracks close times.
+    prTerminalAt: row.prTerminalAt ?? null,
   };
 }
 const ProjectionCheckpointDbRowSchema = ProjectionCheckpoint.mapFields(
@@ -655,6 +657,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           issue_title AS "issueTitle",
           pr_state AS "prState",
           pr_is_draft AS "prIsDraft",
+          pr_terminal_at AS "prTerminalAt",
           issue_state AS "issueState",
           work_item_provider AS "workItemProvider",
           work_item_key AS "workItemKey",
@@ -689,6 +692,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           issue_title AS "issueTitle",
           pr_state AS "prState",
           pr_is_draft AS "prIsDraft",
+          pr_terminal_at AS "prTerminalAt",
           issue_state AS "issueState",
           work_item_provider AS "workItemProvider",
           work_item_key AS "workItemKey",

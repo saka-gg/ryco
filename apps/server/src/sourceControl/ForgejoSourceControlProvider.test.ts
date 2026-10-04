@@ -453,6 +453,7 @@ describe("pull request page", () => {
       assert.deepStrictEqual(yield* provider.getPullRequestState({ cwd: "/repo", number: 42 }), {
         state: "merged",
         isDraft: false,
+        terminalAt: null,
       });
       // Forgejo's API cannot resolve conversations.
       assert.strictEqual(provider.setReviewThreadResolved, undefined);
@@ -509,5 +510,55 @@ it.effect("is reachable through the registry's lazy provider with the remote con
       resolved: true,
     }).pipe(Effect.flip);
     assert.include(resolve.detail, "does not support resolving review threads");
+  }),
+);
+
+it.effect("reports the PR terminal time from Forgejo mergedAt and closedAt", () =>
+  Effect.gen(function* () {
+    const mergedAt = DateTime.makeUnsafe("2026-05-01T10:00:00.000Z");
+    const closedAt = DateTime.makeUnsafe("2026-05-01T10:00:05.000Z");
+    const stateOf = (
+      state: "open" | "closed" | "merged",
+      times: { readonly mergedAt?: DateTime.Utc; readonly closedAt?: DateTime.Utc },
+    ) =>
+      makeProvider({
+        getPullRequest: () =>
+          Effect.succeed({
+            number: 42,
+            title: "Terminal time",
+            url: "https://codeberg.org/pingdotgg/ryco/pulls/42",
+            baseRefName: "main",
+            headRefName: "feature/terminal-time",
+            headLabel: "feature/terminal-time",
+            state,
+            updatedAt: Option.none(),
+            isDraft: false,
+            author: null,
+            commentsCount: null,
+            headRepositoryNameWithOwner: null,
+            headRepositoryOwnerLogin: null,
+            headRepositoryCloneUrl: null,
+            headRepositorySshUrl: null,
+            ...times,
+          }),
+      }).pipe(
+        Effect.flatMap((provider) => provider.getPullRequestState({ cwd: "/repo", number: 42 })),
+      );
+
+    assert.deepStrictEqual(yield* stateOf("merged", { mergedAt, closedAt }), {
+      state: "merged",
+      isDraft: false,
+      terminalAt: mergedAt,
+    });
+    assert.deepStrictEqual(yield* stateOf("closed", { closedAt }), {
+      state: "closed",
+      isDraft: false,
+      terminalAt: closedAt,
+    });
+    assert.deepStrictEqual(yield* stateOf("open", {}), {
+      state: "open",
+      isDraft: false,
+      terminalAt: null,
+    });
   }),
 );

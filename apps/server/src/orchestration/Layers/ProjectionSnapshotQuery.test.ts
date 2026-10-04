@@ -9,6 +9,7 @@ import {
   ThreadId,
   TurnId,
   ProviderInstanceId,
+  WorktreeId,
 } from "@ryco/contracts";
 import { assert, it } from "@effect/vitest";
 import { Effect, Fiber, Layer, Option } from "effect";
@@ -2424,3 +2425,66 @@ it.effect(
     }).pipe(Effect.provide(layer));
   },
 );
+
+it.effect("ProjectionSnapshotQuery exposes worktree prTerminalAt on every read path", () => {
+  const layer = OrchestrationProjectionSnapshotQueryLive.pipe(
+    Layer.provide(ThreadBackgroundLiveness.layer),
+    Layer.provideMerge(
+      Layer.succeed(RepositoryIdentityResolver, { resolve: () => Effect.succeed(null) }),
+    ),
+    Layer.provideMerge(SqlitePersistenceMemory),
+  );
+
+  return Effect.gen(function* () {
+    const snapshotQuery = yield* ProjectionSnapshotQuery;
+    const sql = yield* SqlClient.SqlClient;
+
+    yield* sql`
+      INSERT INTO projection_projects (
+        project_id, title, workspace_root, default_model_selection_json,
+        scripts_json, created_at, updated_at
+      ) VALUES (
+        'project-pr-terminal', 'Project', '/tmp/project-pr-terminal',
+        '{"provider":"codex","model":"gpt-5-codex"}', '[]',
+        '2026-04-05T00:00:00.000Z', '2026-04-05T00:00:00.000Z'
+      )
+    `;
+    yield* sql`
+      INSERT INTO projection_worktrees (
+        worktree_id, project_id, branch, worktree_path, origin, pr_number,
+        pr_state, pr_terminal_at, created_at, updated_at
+      ) VALUES
+        (
+          'worktree-merged', 'project-pr-terminal', 'feature/merged', '/tmp/merged', 'pr', 7,
+          'merged', '2026-04-05T00:30:00.000Z',
+          '2026-04-05T00:00:00.000Z', '2026-04-05T01:00:00.000Z'
+        ),
+        (
+          'worktree-open', 'project-pr-terminal', 'feature/open', '/tmp/open', 'pr', 8,
+          'open', NULL,
+          '2026-04-05T00:00:01.000Z', '2026-04-05T01:00:00.000Z'
+        )
+    `;
+
+    const byId = (worktrees: ReadonlyArray<{ worktreeId: string }> | undefined, id: string) =>
+      worktrees?.find((worktree) => worktree.worktreeId === id) as
+        | { readonly prTerminalAt?: string | null }
+        | undefined;
+    const assertExposed = (worktrees: ReadonlyArray<{ worktreeId: string }> | undefined) => {
+      assert.equal(byId(worktrees, "worktree-merged")?.prTerminalAt, "2026-04-05T00:30:00.000Z");
+      const open = byId(worktrees, "worktree-open");
+      assert.isTrue(open !== undefined && "prTerminalAt" in open);
+      assert.isNull(open?.prTerminalAt);
+    };
+
+    assertExposed((yield* snapshotQuery.getCommandReadModel()).worktrees);
+    assertExposed((yield* snapshotQuery.getShellSnapshot()).worktrees);
+
+    const getWorktreeShellById = snapshotQuery.getWorktreeShellById;
+    assert.isDefined(getWorktreeShellById);
+    if (getWorktreeShellById === undefined) return;
+    const merged = yield* getWorktreeShellById(WorktreeId.make("worktree-merged"));
+    const open = yield* getWorktreeShellById(WorktreeId.make("worktree-open"));
+    assertExposed([Option.getOrThrow(merged), Option.getOrThrow(open)]);
+  }).pipe(Effect.provide(layer));
+});

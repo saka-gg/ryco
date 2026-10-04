@@ -90,6 +90,7 @@ const GITHUB_PULL_REQUEST_METADATA_JSON_FIELDS = [
 
 export const GITHUB_PULL_REQUEST_SUMMARY_JSON_FIELDS = [
   ...GITHUB_PULL_REQUEST_CORE_JSON_FIELDS,
+  "closedAt",
   "updatedAt",
   ...GITHUB_PULL_REQUEST_METADATA_JSON_FIELDS,
   STATUS_CHECK_ROLLUP_JSON_FIELD,
@@ -177,6 +178,8 @@ export interface GitHubPullRequestSummary {
   readonly checkRollup?: ReadonlyArray<GitHubPullRequests.NormalizedGitHubCheckRollupItem>;
   readonly updatedAt?: Option.Option<DateTime.Utc>;
   readonly createdAt?: DateTime.Utc;
+  readonly mergedAt?: DateTime.Utc;
+  readonly closedAt?: DateTime.Utc;
   readonly reviewDecision?: SourceControlChangeRequestReviewDecision | null;
   readonly additions?: number;
   readonly deletions?: number;
