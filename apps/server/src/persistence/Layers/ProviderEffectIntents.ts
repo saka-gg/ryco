@@ -146,6 +146,18 @@ const makeProviderEffectIntentRepository = Effect.gen(function* () {
       sql`SELECT ${sql.literal(ROW_COLUMNS)} FROM provider_effect_intents WHERE sequence = ${input.sequence}`,
     ).pipe(Effect.map((rows) => Option.fromNullishOr(rows[0])));
 
+  const findOpenTurnStart: ProviderEffectIntentRepositoryShape["findOpenTurnStart"] = (input) =>
+    readRows(
+      "findOpenTurnStart",
+      sql`
+        SELECT ${sql.literal(ROW_COLUMNS)} FROM provider_effect_intents
+        WHERE thread_id = ${input.threadId} AND kind = 'turn-start'
+          AND message_id = ${input.messageId}
+        ORDER BY sequence DESC
+        LIMIT 1
+      `,
+    ).pipe(Effect.map((rows) => Option.fromNullishOr(rows[0])));
+
   const listOpen: ProviderEffectIntentRepositoryShape["listOpen"] = () =>
     readRows(
       "listOpen",
@@ -173,6 +185,7 @@ const makeProviderEffectIntentRepository = Effect.gen(function* () {
     markDispatched,
     settle,
     get,
+    findOpenTurnStart,
     listOpen,
     noteRecoveryAttempt,
   } satisfies ProviderEffectIntentRepositoryShape;

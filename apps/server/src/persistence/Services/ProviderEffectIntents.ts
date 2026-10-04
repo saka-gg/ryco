@@ -9,7 +9,7 @@
  *
  * @module ProviderEffectIntentRepository
  */
-import type { OrchestrationEvent } from "@ryco/contracts";
+import type { MessageId, OrchestrationEvent, ThreadId } from "@ryco/contracts";
 import { Context } from "effect";
 import type { Effect, Option } from "effect";
 
@@ -39,6 +39,18 @@ export interface ProviderEffectIntentRepositoryShape {
   }) => Effect.Effect<void, PersistenceSqlError>;
   readonly get: (input: {
     readonly sequence: number;
+  }) => Effect.Effect<
+    Option.Option<ProviderEffectIntentRow>,
+    PersistenceSqlError | PersistenceDecodeError
+  >;
+  /**
+   * The open turn-start intent caused by this user message, if any: who still owns an
+   * accepted but unbound turn start (this process's live entry, or the next boot's
+   * recovery). None once an outcome settled it.
+   */
+  readonly findOpenTurnStart: (input: {
+    readonly threadId: ThreadId;
+    readonly messageId: MessageId;
   }) => Effect.Effect<
     Option.Option<ProviderEffectIntentRow>,
     PersistenceSqlError | PersistenceDecodeError

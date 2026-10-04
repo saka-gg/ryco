@@ -97,6 +97,18 @@ export const CompletionReturnRecord = Schema.Struct({
 export type CompletionReturnRecord = typeof CompletionReturnRecord.Type;
 const decode = Schema.decodeUnknownSync(Schema.fromJsonString(CompletionReturnRecord));
 
+/**
+ * Statuses in which a child's result is still owed to its parent. The SQL `IN (...)`
+ * lists in `listDue`, `listProposalIds` and `hasOutstandingDelegations` must match.
+ */
+export const PENDING_COMPLETION_RETURN_STATUSES = ["waiting", "ready", "dispatching"] as const;
+const PENDING_COMPLETION_RETURN_STATUS_SET: ReadonlySet<string> = new Set(
+  PENDING_COMPLETION_RETURN_STATUSES,
+);
+export function isPendingCompletionReturn(record: { readonly status: string }): boolean {
+  return PENDING_COMPLETION_RETURN_STATUS_SET.has(record.status);
+}
+
 class CompletionReturnCasConflict {
   readonly _tag = "CompletionReturnCasConflict";
 }

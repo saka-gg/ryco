@@ -22,7 +22,10 @@ import {
 import { Cause, Clock, Duration, Effect, Exit, Layer, Option, Schedule } from "effect";
 
 import type { PersistenceSqlError, ProjectionRepositoryError } from "../../persistence/Errors.ts";
-import { CompletionReturnRepository } from "../../persistence/Layers/AgentControlCompletionReturns.ts";
+import {
+  CompletionReturnRepository,
+  isPendingCompletionReturn,
+} from "../../persistence/Layers/AgentControlCompletionReturns.ts";
 import { ProjectionThreadRepository } from "../../persistence/Services/ProjectionThreads.ts";
 import { usageLimitStateFromServerRateLimits } from "../../provider/usageLimitReset.ts";
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
@@ -45,12 +48,6 @@ const MIN_SNOOZE_MS = 60_000;
 /** Transient dispatch failures are retried this often per command id, then given up. */
 const MAX_TRANSIENT_ATTEMPTS = 5;
 const SWEEP_INTERVAL = Duration.seconds(30);
-/** Delegated-return states in which the child's result can still be delivered. */
-const OPEN_DELEGATED_RETURN_STATUSES: ReadonlySet<string> = new Set([
-  "waiting",
-  "ready",
-  "dispatching",
-]);
 
 export type UsageLimitRecoveryAction =
   | {
@@ -307,7 +304,7 @@ export const makeUsageLimitRecovery = <E>(deps: UsageLimitRecoveryDeps<E>) =>
         candidates.push({
           thread: shell.value,
           delegatedReturnTerminal:
-            returnStatus !== undefined && !OPEN_DELEGATED_RETURN_STATUSES.has(returnStatus),
+            returnStatus !== undefined && !isPendingCompletionReturn({ status: returnStatus }),
         });
       }
       const actions = planUsageLimitRecovery({

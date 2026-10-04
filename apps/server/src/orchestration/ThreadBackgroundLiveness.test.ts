@@ -28,6 +28,31 @@ describe("ThreadBackgroundLiveness", () => {
     expect(liveness.getThreadBackgroundLiveness("thread")).toBeNull();
   });
 
+  it("lists only threads that still have live work", () => {
+    const liveness = ThreadBackgroundLiveness.make();
+    const start = (threadId: string, taskId: string, taskType: string) =>
+      liveness.recordTaskLiveness({
+        threadId,
+        taskId,
+        taskType,
+        status: undefined,
+        kind: "started",
+      });
+    start("t-monitor", "m1", "monitor");
+    start("t-agent", "a1", "subagent");
+    start("t-done", "s1", "local_bash");
+    liveness.recordTaskLiveness({
+      threadId: "t-done",
+      taskId: "s1",
+      taskType: "local_bash",
+      status: "completed",
+      kind: "completed",
+    });
+    expect(liveness.listLiveThreadIds().toSorted()).toEqual(["t-agent", "t-monitor"]);
+    liveness.clearThreadLiveness("t-agent");
+    expect(liveness.listLiveThreadIds()).toEqual(["t-monitor"]);
+  });
+
   it("agents present as working; monitors as monitoring; agents win", () => {
     const liveness = ThreadBackgroundLiveness.make();
     const threadId = "t-live-1";

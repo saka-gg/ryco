@@ -252,6 +252,39 @@ layer("ProviderEffectIntentRepository", (it) => {
     }),
   );
 
+  it.effect("finds the open turn start of a message until its outcome settles it", () =>
+    Effect.gen(function* () {
+      yield* reset;
+      const repository = yield* ProviderEffectIntentRepository;
+      yield* repository.applyEvent(turnStart(3, threadA, "m3"));
+      yield* repository.applyEvent(steer(4, threadA, "m3"));
+      const found = yield* repository.findOpenTurnStart({
+        threadId: threadA,
+        messageId: MessageId.make("m3"),
+      });
+      assert.strictEqual(Option.getOrUndefined(found)?.sequence, 3);
+      assert.isTrue(
+        Option.isNone(
+          yield* repository.findOpenTurnStart({
+            threadId: threadB,
+            messageId: MessageId.make("m3"),
+          }),
+        ),
+      );
+      yield* repository.applyEvent(
+        activity(5, threadA, "provider.turn.start.failed", { messageId: "m3" }),
+      );
+      assert.isTrue(
+        Option.isNone(
+          yield* repository.findOpenTurnStart({
+            threadId: threadA,
+            messageId: MessageId.make("m3"),
+          }),
+        ),
+      );
+    }),
+  );
+
   it.effect("issues no SQL for untracked, non-settling events", () =>
     Effect.gen(function* () {
       yield* reset;
