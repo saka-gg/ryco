@@ -772,10 +772,13 @@ it.effect("T10 replays a claimed batch with the same ids after a lost dispatch",
     h.applyMode("lost");
     yield* h.tick(0);
     assert.equal((yield* h.read()).status, "dispatching");
+    assert.isNotNull((yield* h.read()).command);
     h.applyMode("accept");
     const restarted = yield* h.makeWorker;
     yield* restarted.scan(at(3));
     assert.equal((yield* h.read()).status, "delivered");
+    // The frozen command only served the replay; a delivered row does not keep it.
+    assert.isNull((yield* h.read()).command);
     assert.equal(h.sent.length, 2);
     assert.equal(h.sent[1]!.commandId, h.sent[0]!.commandId);
     assert.equal(h.sent[1]!.message.messageId, h.sent[0]!.message.messageId);
@@ -1294,24 +1297,27 @@ it.effect("T16 sends a stopped notice when the child's own wake failed to start"
   }).pipe(Effect.provide(layer)),
 );
 
-it.effect("T16 stops waiting for the child's own wake that never bound after the grace", () =>
-  Effect.gen(function* () {
-    const h = yield* setup();
-    yield* h.ack();
-    yield* deliveredOwnWake(h);
-    // Accepted, but the reactor work that would start it died with the old process.
-    yield* h.sql`INSERT INTO projection_turns (thread_id, turn_id, pending_message_id, state, requested_at, checkpoint_files_json)
+it.effect(
+  "T16 stops waiting for an earlier process's own wake that never bound after the grace",
+  () =>
+    Effect.gen(function* () {
+      const h = yield* setup();
+      yield* h.ack();
+      yield* deliveredOwnWake(h);
+      // Accepted by an earlier process (not this worker), whose reactor work that would start
+      // it died with it.
+      yield* h.sql`INSERT INTO projection_turns (thread_id, turn_id, pending_message_id, state, requested_at, checkpoint_files_json)
       VALUES ('child', NULL, 'delegation-result:grandchild', 'pending', ${now}, '[]')`;
-    yield* h.tick(0);
-    yield* h.tick(121);
-    // A live child session may still be starting the wake.
-    assert.equal((yield* h.read()).status, "waiting");
-    assert.include((yield* h.read()).detail, "own delegated work");
-    h.live.delete("child");
-    yield* h.tick(124);
-    assert.equal((yield* h.read()).status, "delivered");
-    assert.include(h.sent[0]!.message.text, "Delegated task notice (stopped).");
-  }).pipe(Effect.provide(layer)),
+      yield* h.tick(0);
+      yield* h.tick(121);
+      // A live child session may still be starting the wake.
+      assert.equal((yield* h.read()).status, "waiting");
+      assert.include((yield* h.read()).detail, "own delegated work");
+      h.live.delete("child");
+      yield* h.tick(124);
+      assert.equal((yield* h.read()).status, "delivered");
+      assert.include(h.sent[0]!.message.text, "Delegated task notice (stopped).");
+    }).pipe(Effect.provide(layer)),
 );
 
 it.effect("T16 sends an advanced notice for a follow-up hidden behind the child's own wake", () =>
@@ -1350,6 +1356,96 @@ it.effect("T16 sends an advanced notice for a follow-up hidden behind the child'
     assert.equal((yield* h.read()).status, "delivered");
     assert.include(h.sent[0]!.message.text, "Delegated task notice (advanced).");
     assert.notInclude(h.sent[0]!.message.text, "Final child answer");
+  }).pipe(Effect.provide(layer)),
+);
+
+/**
+ * The child's own wake W1 was cut off by a restart (interrupted, no live session), while one
+ * of its own returns (grandchild-2) is still outstanding. That return is captured and
+ * delivered to the child by this worker as wake W2, which stays unbound past the grace.
+ */
+const restartedNestedChild = (h: Effect.Success<ReturnType<typeof setup>>) =>
+  Effect.gen(function* () {
+    yield* h.ack();
+    yield* deliveredOwnWake(h);
+    yield* h.sql`INSERT INTO projection_turns (thread_id, turn_id, pending_message_id, state, requested_at, checkpoint_files_json)
+      VALUES ('child', 'child-wake-turn', 'delegation-result:grandchild', 'interrupted', ${now}, '[]')`;
+    yield* h.proposals.insert({
+      proposal: proposalFor("nested-proposal-2", "child"),
+      principalScope: AgentControlPrincipalScope.make("fixture"),
+    });
+    yield* h.addChild("grandchild-2", {
+      parent: "child",
+      record: { proposalId: AgentControlProposalId.make("nested-proposal-2") },
+    });
+    h.setChild(
+      withSession(shell("child", "child-wake-turn", "child-runtime"), { status: "error" }),
+    );
+    h.live.delete("child");
+    yield* h.tick(0);
+    // grandchild-2's return will wake the child again: not stopped.
+    assert.equal((yield* h.read()).status, "waiting");
+    assert.include((yield* h.read()).detail, "own delegated work");
+    assert.equal(h.sent.length, 0);
+    h.modelPendingRow();
+    yield* h.ack("completed", false, "process-1", "grandchild-2");
+    yield* h.tick(3);
+    assert.equal((yield* h.read("grandchild-2")).status, "delivered");
+    assert.equal(h.sent.length, 1);
+    const ownWake = h.sent[0]!;
+    assert.equal(ownWake.threadId, "child");
+    // W2 is delivered but not bound; the shell still shows the interrupted W1.
+    yield* h.tick(6);
+    assert.equal((yield* h.read()).status, "waiting");
+    // This process applied W2: its start may be slow, never orphaned by a timer.
+    yield* h.tick(6 + 300);
+    assert.equal((yield* h.read()).status, "waiting");
+    assert.include((yield* h.read()).detail, "own delegated work");
+    assert.equal(h.sent.length, 1);
+    return ownWake;
+  });
+
+it.effect("T16 waits for a restarted child's own returns, then returns its final answer", () =>
+  Effect.gen(function* () {
+    const h = yield* setup();
+    const ownWake = yield* restartedNestedChild(h);
+    yield* h.sql`UPDATE projection_turns SET turn_id = 'child-wake-2', assistant_message_id = 'child-final', state = 'completed'
+      WHERE thread_id = 'child' AND pending_message_id = ${ownWake.message.messageId}`;
+    yield* h.sql`INSERT INTO projection_thread_messages (message_id, thread_id, turn_id, role, text, is_streaming, created_at, updated_at)
+      VALUES ('child-final', 'child', 'child-wake-2', 'assistant', 'Final child answer', 0, ${now}, ${now})`;
+    h.setChild(shell("child", "child-wake-2", "child-runtime"));
+    h.live.set("child", "child-runtime");
+    yield* h.repo.observe({
+      childThreadId: ThreadId.make("child"),
+      runtimeSessionId: RuntimeSessionId.make("child-runtime"),
+      observationEpoch: "process-2",
+      backgroundPending: false,
+      terminal: { turnId: TurnId.make("child-wake-2"), state: "completed" },
+    });
+    yield* h.tick(400);
+    assert.equal((yield* h.read()).status, "delivered");
+    assert.equal(h.sent.length, 2);
+    assert.equal(h.sent[1]!.threadId, "parent");
+    assert.include(h.sent[1]!.message.text, "after 1 delegation update(s)");
+    assert.include(h.sent[1]!.message.text, "Final child answer");
+    assert.notInclude(h.sent[1]!.message.text, "Delegated task notice");
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect("T16 stops waiting for an own wake an earlier process applied and never started", () =>
+  Effect.gen(function* () {
+    const h = yield* setup();
+    yield* restartedNestedChild(h);
+    // Another restart: W2's reactor work died with the process that applied it.
+    const restarted = yield* h.makeWorker;
+    yield* restarted.scan(at(400));
+    assert.equal((yield* h.read()).status, "waiting");
+    yield* restarted.scan(at(521));
+    assert.equal((yield* h.read()).status, "delivered");
+    assert.equal(h.sent.length, 2);
+    assert.equal(h.sent[1]!.threadId, "parent");
+    assert.include(h.sent[1]!.message.text, "Delegated task notice (stopped).");
+    assert.notInclude(h.sent[1]!.message.text, "Result Result");
   }).pipe(Effect.provide(layer)),
 );
 

@@ -181,6 +181,13 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
   const coldInFlight = new Map<ThreadId, { messageId: MessageId; sinceMs: number }>();
   /** Child → its own unbound delegation wake, first seen by this process (nested hold). */
   const ownWakeSeen = new Map<ThreadId, { messageId: MessageId; firstSeenMs: number }>();
+  /**
+   * Wake message ids this process applied → scan time of the apply. The reactor only acts on
+   * live events, so this process's reactor owns those starts; a wake an earlier process
+   * applied and never started died with it. Pruned after CAPTURE_EXPIRY_MS: no waiting row
+   * is older than that, and a row only looks at wakes delivered after it was created.
+   */
+  const wakesAppliedHere = new Map<MessageId, number>();
 
   const publish = (proposalIds: Iterable<AgentControlProposalId>) =>
     Effect.forEach(
@@ -413,12 +420,18 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
         if (Option.isSome(receipt)) {
           if (receipt.value.status === "accepted") {
             const others = batch.childThreadIds.length - 1;
+            // The frozen command only serves replays, which end here: drop it so delivered
+            // rows stay small.
             const saved = yield* saveAll(
               rows.map(
                 (row) =>
                   [
                     row,
-                    patch(row, { status: "delivered", detail: deliveredDetail(row, others) }, now),
+                    patch(
+                      row,
+                      { status: "delivered", detail: deliveredDetail(row, others), command: null },
+                      now,
+                    ),
                   ] as const,
               ),
             );
@@ -526,6 +539,7 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
           ))
         )
           return;
+        wakesAppliedHere.set(frozen.message.messageId, ctx.nowMs);
         yield* commands.apply(frozen).pipe(Effect.catch(() => Effect.void));
         replay = false;
         applied = true;
@@ -580,22 +594,33 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
     });
 
   /**
-   * The child's own newest delegation wake, when `settled` does not reflect it yet:
-   * - `pending`: delivered but not bound yet;
-   * - `stopped`: it failed to start, or it stayed unbound for the queued-start grace of this
-   *   process's scan time while the child has no live or starting session (its start died
-   *   with a restart). The child will not process those results, so waiting is pointless;
+   * The child's own newest delegation wake (delivered after `record` began), when `settled`
+   * does not reflect it yet:
+   * - `pending`: delivered but not bound yet, and its start can still happen;
+   * - `stopped`: it failed to start, or it is orphaned. The child will not process those
+   *   results, so waiting is pointless;
    * - `none`: no such wake, or it bound (the turn checks cover it).
+   *
+   * A wake this process applied stays `pending` until it binds or fails: its start may sit
+   * behind a slow reactor, worktree restore or provider start, and capture expiry bounds the
+   * wait. Only a wake an earlier process applied can be orphaned (its reactor work died with
+   * that process): once it stayed unbound for the queued-start grace of this process's scan
+   * time while the child has no live or starting session.
    */
-  const ownWakeState = (child: OrchestrationThreadShell, ctx: ScanContext) =>
+  const ownWakeState = (
+    record: CompletionReturnRecord,
+    child: OrchestrationThreadShell,
+    ctx: ScanContext,
+  ) =>
     Effect.gen(function* () {
-      const messageId = yield* repository.latestDeliveredWake(child.id);
+      const messageId = yield* repository.latestDeliveredWake(child.id, record.createdAt);
       const state =
         messageId === null ? "absent" : yield* repository.wakeStartState(child.id, messageId);
       if (messageId === null || state === "bound" || state === "failed") {
         ownWakeSeen.delete(child.id);
         return state === "failed" ? ("stopped" as const) : ("none" as const);
       }
+      if (wakesAppliedHere.has(messageId)) return "pending" as const;
       const seen = ownWakeSeen.get(child.id);
       const firstSeenMs = seen?.messageId === messageId ? seen.firstSeenMs : ctx.nowMs;
       if (seen?.messageId !== messageId) ownWakeSeen.set(child.id, { messageId, firstSeenMs });
@@ -634,10 +659,14 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
         // Nested delegation: the child is working through its own delegated results, and
         // ingestion moves `settled` to the wake turn when it ends. A wake that ended without
         // that observation (startup reconciliation interrupted it, or its provider died)
-        // never gets one once no provider session is left.
+        // never gets one once no provider session is left. That ends the child's work only
+        // when nothing can wake it again: none of its own returns is outstanding and no newer
+        // own wake is still pending.
         if (
           (latest?.state === "interrupted" || latest?.state === "error") &&
-          !(yield* sessionLive(child.id))
+          !(yield* sessionLive(child.id)) &&
+          !(yield* repository.hasOutstandingDelegations(child.id)) &&
+          (yield* ownWakeState(record, child, ctx)) !== "pending"
         )
           return yield* notice(record, "stopped", ctx);
         return yield* hold(record, ctx.now, DETAIL.nested);
@@ -645,9 +674,6 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
       // Nested delegation: return the child's output after its own wakes, not "I delegated".
       if (yield* repository.hasOutstandingDelegations(child.id))
         return yield* hold(record, ctx.now, DETAIL.nested);
-      const ownWake = yield* ownWakeState(child, ctx);
-      if (ownWake === "stopped") return yield* notice(record, "stopped", ctx);
-      if (ownWake === "pending") return yield* hold(record, ctx.now, DETAIL.nested);
       const childBusy = child.session?.status === "running" || child.session?.status === "starting";
       const backgroundBusy =
         settled.backgroundPending || Boolean(child.backgroundLiveness) || childBusy;
@@ -655,6 +681,11 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
       if (backgroundBusy && (yield* sessionLive(child.id))) return yield* hold(record, ctx.now);
       const output = yield* repository.output(child.id, settled.turnId);
       if (output.streaming > 0) return yield* hold(record, ctx.now);
+      // Checked last, right before capture: a row held for background work or streaming
+      // output does not re-read the delivered ledger every scan.
+      const ownWake = yield* ownWakeState(record, child, ctx);
+      if (ownWake === "stopped") return yield* notice(record, "stopped", ctx);
+      if (ownWake === "pending") return yield* hold(record, ctx.now, DETAIL.nested);
       return yield* capture(
         record,
         "result",
@@ -801,6 +832,7 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
       // A concurrent acknowledgement or cancel won; the next scan re-reads.
       if (!claimed) return;
       yield* publish(members.map((row) => row.proposalId));
+      wakesAppliedHere.set(command.message.messageId, ctx.nowMs);
       yield* commands.apply(command).pipe(Effect.catch(() => Effect.void));
       yield* settleBatch(command.commandId, ctx, { replay: false, applied: true });
     });
@@ -830,6 +862,8 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
           candidates: new Map(),
         };
         yield* releaseColdSlots(ctx.nowMs);
+        for (const [messageId, appliedMs] of wakesAppliedHere)
+          if (ctx.nowMs - appliedMs > CAPTURE_EXPIRY_MS) wakesAppliedHere.delete(messageId);
         for (const record of yield* repository.listDue(now)) {
           yield* processDue(record, ctx).pipe(
             Effect.catch(() =>

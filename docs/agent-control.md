@@ -54,8 +54,9 @@ chat with one automatic message, a normal queued turn that starts or resumes its
   interrupted, stopped (for example by a restart; it is not resumed), failed to start, received
   someone else's follow-up, was archived or deleted, whose request failed, or that did not finish
   within 24 hours returns a server-written notice instead, with no child text. A task that itself
-  delegated returns its output after its own delegated work came back; if that follow-up run never
-  starts or is cut off by a restart, it returns a stopped notice.
+  delegated returns its output after its own delegated work came back; if that follow-up run fails
+  to start, or a restart cuts it off and none of its own delegated work is left to wake it again,
+  it returns a stopped notice.
 - **When it is delivered.** The chat must be idle: no running or starting session, no pending
   approval or question, no working background agents (a watcher-only "monitoring" state does not
   count) and no turn start waiting to bind. It does not matter whether the chat moved on to other

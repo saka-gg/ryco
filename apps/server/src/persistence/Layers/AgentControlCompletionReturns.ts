@@ -505,17 +505,20 @@ export const makeCompletionReturnRepository = Effect.gen(function* () {
     );
   /**
    * Message id of the newest delegation wake delivered to `parentThreadId` through a batch
-   * (rows acknowledged with ryco_task_status carry no batch and started no wake).
+   * (rows acknowledged with ryco_task_status carry no batch and started no wake), among rows
+   * delivered at or after `since`. A delivered row is never rescheduled, so its
+   * `next_check_at` is its delivery time: the bound keeps the scan an index range over recent
+   * deliveries instead of every delivered row ever, and orders wakes by when they started.
    */
-  const latestDeliveredWake = (parentThreadId: ThreadId) =>
+  const latestDeliveredWake = (parentThreadId: ThreadId, since: string) =>
     safe(
       sql<{ messageId: string }>`
     SELECT json_extract(${recordJson}, '$.batch.messageId') AS "messageId"
     FROM agent_control_completion_returns
-    WHERE status = 'delivered'
+    WHERE status = 'delivered' AND next_check_at >= ${since}
       AND json_extract(${recordJson}, '$.parentThreadId') = ${parentThreadId}
       AND json_extract(${recordJson}, '$.batch.messageId') IS NOT NULL
-    ORDER BY json_extract(${recordJson}, '$.batch.dispatchedAt') DESC,
+    ORDER BY next_check_at DESC, json_extract(${recordJson}, '$.batch.dispatchedAt') DESC,
       json_extract(${recordJson}, '$.batch.messageId') DESC
     LIMIT 1
   `.pipe(Effect.map((rows) => (rows[0] ? MessageId.make(rows[0].messageId) : null))),

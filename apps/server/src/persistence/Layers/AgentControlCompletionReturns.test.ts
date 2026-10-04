@@ -354,16 +354,23 @@ it("advances a settled return only through wake turns that directly follow it", 
     }),
   ));
 
-it("finds the newest delegation wake a chat received through a batch", () =>
+it("finds the newest delegation wake a chat received through a batch since a time", () =>
   run(
     Effect.gen(function* () {
       const repo = yield* CompletionReturnRepository;
       const parent = ThreadId.make("child");
-      const delivered = (childThreadId: string, wake: string | null, dispatchedAt: string) =>
+      // A delivered row's next check is its delivery time; a replay delivers after its claim.
+      const delivered = (
+        childThreadId: string,
+        wake: string | null,
+        deliveredAt: string,
+        dispatchedAt = deliveredAt,
+      ) =>
         completionFixture({
           childThreadId: ThreadId.make(childThreadId),
           parentThreadId: parent,
           status: "delivered",
+          nextCheckAt: deliveredAt,
           capture: {
             kind: "result",
             outcome: "completed",
@@ -384,7 +391,8 @@ it("finds the newest delegation wake a chat received through a batch", () =>
                   cold: false,
                 },
         });
-      expect(yield* repo.latestDeliveredWake(parent)).toBeNull();
+      const since = fixtureAt(0);
+      expect(yield* repo.latestDeliveredWake(parent, since)).toBeNull();
       yield* repo.insert(delivered("older", "older", fixtureAt(1)));
       yield* repo.insert(delivered("newer", "newer", fixtureAt(5)));
       // Acknowledged with ryco_task_status: no batch, so no wake.
@@ -393,8 +401,14 @@ it("finds the newest delegation wake a chat received through a batch", () =>
         ...delivered("claimed", "claimed", fixtureAt(9)),
         status: "dispatching",
       });
-      expect(yield* repo.latestDeliveredWake(parent)).toBe("delegation-result:newer");
-      expect(yield* repo.latestDeliveredWake(ThreadId.make("parent"))).toBeNull();
+      expect(yield* repo.latestDeliveredWake(parent, since)).toBe("delegation-result:newer");
+      expect(yield* repo.latestDeliveredWake(ThreadId.make("parent"), since)).toBeNull();
+      // Only wakes delivered at or after `since` count.
+      expect(yield* repo.latestDeliveredWake(parent, fixtureAt(5))).toBe("delegation-result:newer");
+      expect(yield* repo.latestDeliveredWake(parent, fixtureAt(6))).toBeNull();
+      // A replayed wake is ordered by its delivery, not by its original claim.
+      yield* repo.insert(delivered("replayed", "replayed", fixtureAt(7), fixtureAt(-1)));
+      expect(yield* repo.latestDeliveredWake(parent, since)).toBe("delegation-result:replayed");
     }),
   ));
 
