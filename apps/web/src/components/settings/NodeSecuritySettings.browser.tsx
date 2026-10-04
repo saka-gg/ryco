@@ -818,6 +818,53 @@ describe("§13.2 step 5 an approval waits for the owner to match the number", ()
     expect(applyNodeE2eeAuthorization).not.toHaveBeenCalled();
   });
 
+  it("withdraws the statement when a re-read brings another number for the same key", async () => {
+    // A rotated node identity, or a record purged and introduced again under
+    // the same client key, keeps the row — and its React key — while the number
+    // changes. A tick carried across would approve a number the owner never
+    // compared.
+    await mountLocalPanel();
+    await confirmNumberMatches();
+    expect(buttonsLabelled("Approve as owner")).toHaveLength(1);
+
+    const [phone, approved] = CLIENTS.records;
+    clients = {
+      ...CLIENTS,
+      records: [{ ...phone!, safetyNumber: THIRD_SAFETY_NUMBER }, approved!],
+    };
+    buttonsLabelled("Refresh")[0]!.click();
+    await expect.element(page.getByText(THIRD_SAFETY_NUMBER)).toBeVisible();
+
+    expect(approveButtons()).toHaveLength(0);
+    expect(numberMatchStatements()).toHaveLength(1);
+    expect(numberMatchStatements()[0]!.getAttribute("aria-checked")).toBe("false");
+  });
+
+  it("keeps it withdrawn when a later read brings the matched values back", async () => {
+    // Revoked, then purged and introduced again between two reads: the same
+    // status and number are back, but nobody has compared this request.
+    await mountLocalPanel();
+    await confirmNumberMatches();
+
+    const [phone, approved] = CLIENTS.records;
+    clients = {
+      ...CLIENTS,
+      records: [{ ...phone!, status: "revoked", revokedAt: 1_700_000_000_000 }, approved!],
+    };
+    buttonsLabelled("Refresh")[0]!.click();
+    await vi.waitFor(() => {
+      expect(numberMatchStatements()).toHaveLength(0);
+    });
+
+    clients = CLIENTS;
+    buttonsLabelled("Refresh")[0]!.click();
+    await vi.waitFor(() => {
+      expect(numberMatchStatements()).toHaveLength(1);
+    });
+    expect(numberMatchStatements()[0]!.getAttribute("aria-checked")).toBe("false");
+    expect(approveButtons()).toHaveLength(0);
+  });
+
   it("repeats the whole number in the approval dialog, never a tail of it", async () => {
     await mountLocalPanel();
     await confirmNumberMatches();

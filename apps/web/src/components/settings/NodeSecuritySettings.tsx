@@ -1464,6 +1464,13 @@ function ClientRecordRow({
     matched !== null &&
     matched.status === record.status &&
     matched.safetyNumber === record.safetyNumber;
+  // …and takes it away for good, not only while the values differ. The same
+  // status and number coming back on a later read — a revocation, then a purge
+  // and a fresh introduction, all between two reads of one row — are a request
+  // the owner has not looked at since, so the statement has to be made again.
+  // Cleared during render rather than in an effect, as React's "adjusting state
+  // when a prop changes" pattern does.
+  if (matched !== null && !numberMatches) setMatched(null);
   // No readable number, nothing to compare — and so no approval from here.
   const comparable = approvalRole !== null && nodeSafetyNumberView(record.safetyNumber) !== null;
 
