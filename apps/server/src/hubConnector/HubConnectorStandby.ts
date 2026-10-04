@@ -42,3 +42,19 @@ export async function resolveStandbyHubConnectorConfig(input: {
   }
   return holds ? DEFAULT_HUB_CONNECTOR_CONFIG : { ...input.config, standby: true };
 }
+
+/**
+ * The connector to run when its key custody cannot be built, or `null` to
+ * report the key store as unavailable.
+ *
+ * An operator who turned the connector on needs to hear that the key store
+ * failed. A standby connector nobody asked for, on a host with no usable
+ * credential store (a Linux desktop without a Secret Service, say), stays off
+ * instead: it shows as off rather than greeting the user with a key-store
+ * failure, and turning it on explicitly surfaces the failure then.
+ */
+export function hubConnectorConfigWithoutKeyCustody(
+  config: HubConnectorConfig,
+): HubConnectorConfig | null {
+  return config.standby === true ? { ...config, enabled: false } : null;
+}

@@ -5,7 +5,10 @@ import { join } from "node:path";
 import { describe, expect, it } from "vite-plus/test";
 
 import { DEFAULT_HUB_CONNECTOR_CONFIG, resolveHubConnectorConfig } from "../config.ts";
-import { resolveStandbyHubConnectorConfig } from "./HubConnectorStandby.ts";
+import {
+  hubConnectorConfigWithoutKeyCustody,
+  resolveStandbyHubConnectorConfig,
+} from "./HubConnectorStandby.ts";
 import { hubIdentityHoldsKeyMaterial } from "./HubIdentityRuntime.ts";
 
 const enabled = resolveHubConnectorConfig({
@@ -106,5 +109,18 @@ describe("resolveStandbyHubConnectorConfig", () => {
     expect(await resolveStandbyHubConnectorConfig({ config: enabled, statePath: pending })).toEqual(
       DEFAULT_HUB_CONNECTOR_CONFIG,
     );
+  });
+
+  it("keeps a standby connector off, not failing, where key custody cannot be built", async () => {
+    // A Linux desktop without a Secret Service used to greet a user who never
+    // asked for the Hub with "Can't open a key store for this machine's Hub key".
+    const standby = await resolveStandbyHubConnectorConfig({
+      config: enabled,
+      statePath: "/unused",
+      holdsKeyMaterial: async () => false,
+    });
+    expect(hubConnectorConfigWithoutKeyCustody(standby)).toEqual({ ...standby, enabled: false });
+    // An operator who turned the connector on hears about the key store.
+    expect(hubConnectorConfigWithoutKeyCustody(enabled)).toBeNull();
   });
 });

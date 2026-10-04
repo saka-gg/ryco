@@ -1,11 +1,11 @@
 import { dirname, join } from "node:path";
 
-import { Context, Effect, Exit, Layer, Scope } from "effect";
+import { Context, Effect, Exit, Layer, Option, Scope } from "effect";
 import { WsHostedRpcGroup } from "@ryco/contracts";
 import type { NodeE2eeAdmissionPolicy } from "@ryco/contracts/native-e2ee";
 
 import { AgentControlExternalTopologyService } from "../agentControl/Services/AgentControlExternalTopology.ts";
-import { ServerConfig } from "../config.ts";
+import { DEFAULT_HUB_CONNECTOR_CONFIG, ServerConfig } from "../config.ts";
 import { ServerEnvironment } from "../environment/Services/ServerEnvironment.ts";
 import {
   makeRpcByteSession,
@@ -16,6 +16,7 @@ import { relayRpcPrincipal } from "../ws/RpcPrincipal.ts";
 import { makeDeviceWsRpcLayer } from "../ws/index.ts";
 import { makeServerWsRpcLayer } from "../ws.ts";
 import { HubConnector } from "./HubConnector.ts";
+import { hubConnectorConfigWithoutKeyCustody } from "./HubConnectorStandby.ts";
 import {
   HubIdentityRuntimeError,
   type HubIdentityRuntimeShape,
@@ -427,7 +428,13 @@ export const HubConnectorLive = Layer.effect(
           () => Effect.promise(() => processLock.release()),
         )
       : undefined;
-    const identity = config.hubConnector?.enabled
+    const readOnly = () =>
+      readOnlyIdentity({
+        statePath: config.hubIdentityStatePath,
+        fileSecretRoot: `${config.secretsDir}/hub-node`,
+        allowFileFallback: config.hubConnector?.allowFileSecretStore ?? false,
+      });
+    const custody = config.hubConnector?.enabled
       ? yield* Effect.tryPromise({
           try: () =>
             makeHubIdentityRuntime({
@@ -446,12 +453,19 @@ export const HubConnectorLive = Layer.effect(
               deferStartup: identityClaim === "held",
             }),
           catch: () => new HubIdentityRuntimeError("identity_unavailable"),
-        }).pipe(Effect.orElseSucceed(unavailableIdentity))
-      : readOnlyIdentity({
-          statePath: config.hubIdentityStatePath,
-          fileSecretRoot: `${config.secretsDir}/hub-node`,
-          allowFileFallback: config.hubConnector?.allowFileSecretStore ?? false,
-        });
+        }).pipe(Effect.option)
+      : Option.none();
+    const hubConfig = config.hubConnector ?? DEFAULT_HUB_CONNECTOR_CONFIG;
+    const quietStandby =
+      hubConfig.enabled && Option.isNone(custody)
+        ? hubConnectorConfigWithoutKeyCustody(hubConfig)
+        : null;
+    const connectorConfig = quietStandby ?? hubConfig;
+    const identity = Option.isSome(custody)
+      ? custody.value
+      : connectorConfig.enabled
+        ? unavailableIdentity()
+        : readOnly();
 
     /**
      * The §5.2 advertiser for this connector's origin.
@@ -669,17 +683,7 @@ export const HubConnectorLive = Layer.effect(
     };
 
     connector = new HubConnector({
-      config: config.hubConnector ?? {
-        enabled: false,
-        origin: undefined,
-        nodeName: undefined,
-        reconnectBaseMs: 1_000,
-        reconnectMaxMs: 60_000,
-        reconnectStableMs: 60_000,
-        reconnectJitterRatio: 0.2,
-        allowFileSecretStore: false,
-        configurationIssue: undefined,
-      },
+      config: connectorConfig,
       identity,
       transport: makeHubRelayTransport(),
       channels: channelFactory,
