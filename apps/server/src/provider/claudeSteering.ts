@@ -53,12 +53,25 @@ function readStringArray(value: unknown): ReadonlyArray<string> | undefined {
     : undefined;
 }
 
+function isRootFrame(message: SDKMessage): boolean {
+  const parentToolUseId = Reflect.get(message, "parent_tool_use_id");
+  return parentToolUseId === null || parentToolUseId === undefined;
+}
+
 /**
- * The prompt uuids a frame echoes. Results echo every user message the CLI turn consumed; the
- * first non-ping stream event of a CLI turn echoes the messages that started it (early echo).
+ * The prompt uuids a frame echoes. Results echo every user message the CLI turn consumed. The
+ * CLI turn's first reply frame echoes the messages that started it (early echo): its first
+ * non-ping stream event, or its first root assistant message when it streamed nothing (a request
+ * that failed at the API replies with a synthetic error message).
  */
 export function claudeEchoedPromptUuids(message: SDKMessage): ReadonlyArray<string> {
-  if (message.type !== "result" && message.type !== "stream_event") return [];
+  if (
+    message.type !== "result" &&
+    message.type !== "stream_event" &&
+    !(message.type === "assistant" && isRootFrame(message))
+  ) {
+    return [];
+  }
   const uuids = readStringArray(Reflect.get(message, "user_message_uuids"));
   if (uuids !== undefined && uuids.length > 0) return uuids;
   const uuid = Reflect.get(message, "user_message_uuid");
@@ -76,6 +89,15 @@ export function classifyClaudeResultKind(result: SDKResultMessage): ClaudeResult
   return "failure";
 }
 
+/** Whether an echo names the turn's prompt or one of its steers. */
+export function claudeEchoNamesTurn(input: {
+  readonly echoed: ReadonlyArray<string>;
+  readonly promptUuid: string | undefined;
+  readonly steerPromptUuids: ReadonlySet<string>;
+}): boolean {
+  return input.echoed.some((uuid) => uuid === input.promptUuid || input.steerPromptUuids.has(uuid));
+}
+
 /**
  * Whether a result belongs to the open prompt turn. It does when it echoes the prompt or any of
  * the turn's steers. Without an echo (older CLIs) it belongs unless its origin is not human.
@@ -87,11 +109,7 @@ export function claudeResultBelongsToTurn(input: {
   readonly promptUuid: string;
   readonly steerPromptUuids: ReadonlySet<string>;
 }): boolean {
-  if (input.echoed.length > 0) {
-    return input.echoed.some(
-      (uuid) => uuid === input.promptUuid || input.steerPromptUuids.has(uuid),
-    );
-  }
+  if (input.echoed.length > 0) return claudeEchoNamesTurn(input);
   return input.origin === undefined || input.origin.kind === "human";
 }
 
@@ -259,8 +277,9 @@ export function parseClaudeCliCapabilities(initMessage: SDKMessage): ReadonlySet
 
 /**
  * Root model-turn content frames: a CLI segment's output, as opposed to system, subagent or
- * keep-alive frames. A CLI turn's first such frame is the stream event that carries its echo.
- * System frames (`api_retry`, compaction) carry no echo, so they never qualify.
+ * keep-alive frames. A CLI turn's first such frame carries its echo: a stream event, or the
+ * assistant message when nothing streamed. System frames (`api_retry`, compaction) carry no
+ * echo, so they never qualify.
  */
 export function isClaudeRootTurnFrame(message: SDKMessage): boolean {
   if (message.type !== "stream_event" && message.type !== "assistant" && message.type !== "user") {
@@ -272,6 +291,16 @@ export function isClaudeRootTurnFrame(message: SDKMessage): boolean {
       return false;
     }
   }
-  const parentToolUseId = Reflect.get(message, "parent_tool_use_id");
-  return parentToolUseId === null || parentToolUseId === undefined;
+  return isRootFrame(message);
+}
+
+/**
+ * A synthetic API-error reply: the request failed after its retries and the CLI turn ends with
+ * the next result, so interrupting it again could only reach whatever the CLI runs next.
+ * `max_output_tokens` is excluded because the CLI can continue that turn.
+ */
+export function isClaudeApiErrorReply(message: SDKMessage): boolean {
+  if (message.type !== "assistant") return false;
+  const error = Reflect.get(message, "error");
+  return typeof error === "string" && error !== "max_output_tokens";
 }

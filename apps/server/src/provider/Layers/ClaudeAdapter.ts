@@ -4,12 +4,14 @@ import { claudePostCompactionUsage, selectClaudeResultUsageGauge } from "../clau
 import {
   CLAUDE_CLI_CAPABILITY_INTERRUPT_CANCEL_QUEUED,
   CLAUDE_CLI_CAPABILITY_INTERRUPT_RECEIPT,
+  claudeEchoNamesTurn,
   claudeEchoedPromptUuids,
   claudeResultBelongsToTurn,
   classifyClaudeResultKind,
   decideClaudeStop,
   decideClaudeTurnResult,
   isClaudeAbortTerminalReason,
+  isClaudeApiErrorReply,
   isClaudeRootTurnFrame,
   isInterruptedResult,
   parseClaudeCliCapabilities,
@@ -4385,9 +4387,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
   /**
    * The discarded CLI turn's result: forget its uuids, then drop it (keeping its usage). Returns
-   * whether it was dropped. It is not when the CLI turn's output already reached an open provider
-   * turn (its frames carried no echo, or beat Stop's bookkeeping): only this result can end that
-   * turn, so it is routed on and completes it.
+   * whether it was dropped. It is not when only this result can end the open turn, so it is
+   * routed on and completes it:
+   * - the result echoes the open turn's prompt or steer, which the CLI folded into the discarded
+   *   CLI turn;
+   * - the CLI turn's output already reached an open provider turn (its frames carried no echo,
+   *   or beat Stop's bookkeeping).
    */
   const endDiscardedSteerCliTurn = Effect.fn("endDiscardedSteerCliTurn")(function* (
     context: ClaudeSessionContext,
@@ -4402,14 +4407,26 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     context.discardingCliTurn = undefined;
     context.wakeSignalDeferred = false;
     const open = context.turnState;
-    if (open !== undefined && open.promptUuid === undefined && open.rootContentObserved) {
-      yield* Effect.logInfo("claude.turn.discarded-steer-output-leaked", {
-        threadId: context.session.threadId,
-        turnId: open.turnId,
-        openedBy: open.openedBy,
-        uuids: count,
+    if (open !== undefined) {
+      const folded = claudeEchoNamesTurn({
+        echoed: claudeEchoedPromptUuids(message),
+        promptUuid: open.promptUuid,
+        steerPromptUuids: open.steerPromptUuids,
       });
-      return false;
+      if (folded || (open.promptUuid === undefined && open.rootContentObserved)) {
+        yield* Effect.logInfo(
+          folded
+            ? "claude.turn.discarded-steer-folded-open-turn"
+            : "claude.turn.discarded-steer-output-leaked",
+          {
+            threadId: context.session.threadId,
+            turnId: open.turnId,
+            openedBy: open.openedBy,
+            uuids: count,
+          },
+        );
+        return false;
+      }
     }
     yield* emitTokenUsageSnapshot(
       context,
@@ -4426,10 +4443,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
   /**
    * Routes frames of CLI segments started by steers. Returns true when the frame was consumed
-   * (dropped). A CLI turn whose echo holds only steers Stop (or a failed segment) discarded is
-   * interrupted again and dropped up to and including its result; a result with such an echo
-   * and no stream before it is dropped alone, unless its output already reached an open provider
-   * turn (see `endDiscardedSteerCliTurn`). The open turn owns its own steers' segments.
+   * (dropped). The echo is read on a CLI turn's first reply frame (its first stream event, or its
+   * first root assistant message when it streamed nothing) and on its result. A CLI turn whose
+   * echo holds only steers Stop (or a failed segment) discarded is interrupted again (unless its
+   * reply is an API error, which ends it anyway) and dropped up to and including its result; a
+   * result with such an echo and no reply before it is dropped alone. Either result is routed on
+   * when only it can end the open turn (see `endDiscardedSteerCliTurn`). The open turn owns its
+   * own steers' segments.
    */
   const routeSteerFrame = Effect.fn("routeSteerFrame")(function* (
     context: ClaudeSessionContext,
@@ -4455,7 +4475,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       }
     }
 
-    if (message.type !== "stream_event" && message.type !== "result") return false;
+    if (
+      message.type !== "stream_event" &&
+      message.type !== "assistant" &&
+      message.type !== "result"
+    )
+      return false;
     const echoed = claudeEchoedPromptUuids(message);
     if (echoed.length === 0) return false;
 
@@ -4463,9 +4488,15 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     const turnState = context.turnState;
     const owned =
       turnState !== undefined &&
-      echoed.some((uuid) => uuid === turnState.promptUuid || turnState.steerPromptUuids.has(uuid));
+      claudeEchoNamesTurn({
+        echoed,
+        promptUuid: turnState.promptUuid,
+        steerPromptUuids: turnState.steerPromptUuids,
+      });
+    // An API-error reply ends its CLI turn: an interrupt now would reach the CLI's next turn.
+    const reinterruptable = !isClaudeApiErrorReply(message);
     if (owned || !echoed.every((uuid) => discarded.has(uuid))) {
-      if (owned && message.type === "stream_event") {
+      if (owned && message.type !== "result") {
         // Its output now streams into this turn, so Stop must wait for its result even when a
         // receipt written before it started still lists it as queued.
         for (const uuid of echoed) {
@@ -4474,6 +4505,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         // S5: a steer that was in transit at Stop started its own segment. End it too.
         const echoKey = [...echoed].toSorted().join(" ");
         if (
+          reinterruptable &&
           turnState.interruptRequested &&
           echoed.some(
             (uuid) =>
@@ -4493,13 +4525,15 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
     if (message.type === "result") {
       // The discarded CLI turn ended with no echo before its result: it failed or the re-run
-      // aborted before streaming, or its stream carried no echo.
+      // aborted before replying, or its reply carried no echo.
       return yield* endDiscardedSteerCliTurn(context, message, echoed);
     }
 
+    // The CLI turn's first reply frame: drop it and the rest of the CLI turn. A deferred wake turn
+    // never opens (only content opens it, after this check).
     context.discardingCliTurn = { uuids: new Set(echoed) };
     context.wakeSignalDeferred = false;
-    yield* forkReinterrupt(context, "discarded-steer-segment");
+    if (reinterruptable) yield* forkReinterrupt(context, "discarded-steer-segment");
     yield* Effect.logInfo("claude.turn.discarding-cancelled-steer", {
       threadId: context.session.threadId,
       uuids: echoed.length,

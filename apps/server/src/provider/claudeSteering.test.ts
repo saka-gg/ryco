@@ -4,11 +4,13 @@ import type { SDKMessage, SDKResultMessage } from "@anthropic-ai/claude-agent-sd
 import {
   CLAUDE_CLI_CAPABILITY_INTERRUPT_CANCEL_QUEUED,
   CLAUDE_CLI_CAPABILITY_INTERRUPT_RECEIPT,
+  claudeEchoNamesTurn,
   claudeEchoedPromptUuids,
   claudeResultBelongsToTurn,
   classifyClaudeResultKind,
   decideClaudeStop,
   decideClaudeTurnResult,
+  isClaudeApiErrorReply,
   isClaudeRootTurnFrame,
   parseClaudeCliCapabilities,
   readClaudeInterruptReceipt,
@@ -179,8 +181,53 @@ describe("claudeEchoedPromptUuids", () => {
     expect(
       claudeEchoedPromptUuids(result({ user_message_uuids: [], user_message_uuid: P })),
     ).toEqual([P]);
-    expect(claudeEchoedPromptUuids(frame({ type: "assistant", user_message_uuid: P }))).toEqual([]);
     expect(claudeEchoedPromptUuids(result({}))).toEqual([]);
+    expect(
+      claudeEchoedPromptUuids(frame({ type: "system", subtype: "status", user_message_uuid: P })),
+    ).toEqual([]);
+  });
+
+  it("reads a root assistant reply's echo, which a CLI turn that streamed nothing carries", () => {
+    expect(
+      claudeEchoedPromptUuids(
+        frame({ type: "assistant", parent_tool_use_id: null, user_message_uuids: [S] }),
+      ),
+    ).toEqual([S]);
+    expect(
+      claudeEchoedPromptUuids(
+        frame({ type: "assistant", parent_tool_use_id: "tool-1", user_message_uuid: P }),
+      ),
+    ).toEqual([]);
+  });
+});
+
+describe("claudeEchoNamesTurn", () => {
+  it("matches the prompt or a steer, and nothing for a turn without a prompt uuid", () => {
+    const steers = new Set([S]);
+    expect(claudeEchoNamesTurn({ echoed: [S2, P], promptUuid: P, steerPromptUuids: steers })).toBe(
+      true,
+    );
+    expect(
+      claudeEchoNamesTurn({ echoed: [S], promptUuid: undefined, steerPromptUuids: steers }),
+    ).toBe(true);
+    expect(
+      claudeEchoNamesTurn({ echoed: [S2], promptUuid: undefined, steerPromptUuids: steers }),
+    ).toBe(false);
+    expect(claudeEchoNamesTurn({ echoed: [], promptUuid: P, steerPromptUuids: steers })).toBe(
+      false,
+    );
+  });
+});
+
+describe("isClaudeApiErrorReply", () => {
+  it("matches synthetic API-error replies except the continuable output-token limit", () => {
+    expect(isClaudeApiErrorReply(frame({ type: "assistant", error: "server_error" }))).toBe(true);
+    expect(isClaudeApiErrorReply(frame({ type: "assistant", error: "rate_limit" }))).toBe(true);
+    expect(isClaudeApiErrorReply(frame({ type: "assistant", error: "max_output_tokens" }))).toBe(
+      false,
+    );
+    expect(isClaudeApiErrorReply(frame({ type: "assistant" }))).toBe(false);
+    expect(isClaudeApiErrorReply(result({ error: "server_error" }))).toBe(false);
   });
 });
 
