@@ -378,6 +378,89 @@ describe("worktree sidebar state", () => {
       title: "Renamed Worktree",
     });
   });
+
+  describe("PR terminal time", () => {
+    const worktreeId = WorktreeId.make("worktree-pr");
+    const projectId = ProjectId.make("project-1");
+    const worktreeShell = (
+      overrides: Partial<
+        Extract<OrchestrationShellStreamEvent, { kind: "worktree-upserted" }>["worktree"]
+      > = {},
+    ): Extract<OrchestrationShellStreamEvent, { kind: "worktree-upserted" }>["worktree"] => ({
+      worktreeId,
+      projectId,
+      title: null,
+      branch: "feature/pr",
+      worktreePath: "/tmp/project/pr",
+      origin: "pr",
+      prNumber: 12,
+      issueNumber: null,
+      prTitle: "Feature",
+      issueTitle: null,
+      prState: "merged",
+      prIsDraft: false,
+      issueState: null,
+      workItemProvider: null,
+      workItemKey: null,
+      workItemTitle: null,
+      workItemState: null,
+      workItemStateName: null,
+      workItemUrl: null,
+      createdAt: "2026-02-13T00:00:00.000Z",
+      updatedAt: "2026-02-13T01:00:00.000Z",
+      archivedAt: null,
+      manualPosition: 0,
+      ...overrides,
+    });
+    const upsert = (
+      state: AppState,
+      worktree: Extract<OrchestrationShellStreamEvent, { kind: "worktree-upserted" }>["worktree"],
+      sequence: number,
+    ) =>
+      applyShellEvent(state, { kind: "worktree-upserted", sequence, worktree }, localEnvironmentId);
+
+    it("maps prTerminalAt from a streamed worktree upsert and keeps an absent key absent", () => {
+      const withTime = upsert(
+        makeEmptyState(),
+        worktreeShell({ prTerminalAt: "2026-02-13T00:30:00.000Z" }),
+        1,
+      );
+      expect(localEnvironmentStateOf(withTime).worktreeById?.[worktreeId]?.prTerminalAt).toBe(
+        "2026-02-13T00:30:00.000Z",
+      );
+
+      const withNull = upsert(makeEmptyState(), worktreeShell({ prTerminalAt: null }), 1);
+      const nullWorktree = localEnvironmentStateOf(withNull).worktreeById?.[worktreeId];
+      expect(nullWorktree !== undefined && "prTerminalAt" in nullWorktree).toBe(true);
+      expect(nullWorktree?.prTerminalAt).toBeNull();
+
+      const legacy = upsert(makeEmptyState(), worktreeShell(), 1);
+      const legacyWorktree = localEnvironmentStateOf(legacy).worktreeById?.[worktreeId];
+      expect(legacyWorktree).toBeDefined();
+      expect(legacyWorktree !== undefined && "prTerminalAt" in legacyWorktree).toBe(false);
+    });
+
+    it("replaces the worktree when only prTerminalAt changes", () => {
+      const first = upsert(
+        makeEmptyState(),
+        worktreeShell({ prTerminalAt: "2026-02-13T00:30:00.000Z" }),
+        1,
+      );
+      const same = upsert(first, worktreeShell({ prTerminalAt: "2026-02-13T00:30:00.000Z" }), 2);
+      expect(localEnvironmentStateOf(same).worktreeById?.[worktreeId]).toBe(
+        localEnvironmentStateOf(first).worktreeById?.[worktreeId],
+      );
+
+      const corrected = upsert(
+        first,
+        worktreeShell({ prTerminalAt: "2026-02-13T00:20:00.000Z" }),
+        2,
+      );
+      const correctedWorktree = localEnvironmentStateOf(corrected).worktreeById?.[worktreeId];
+      expect(correctedWorktree).not.toBe(localEnvironmentStateOf(first).worktreeById?.[worktreeId]);
+      expect(correctedWorktree?.prTerminalAt).toBe("2026-02-13T00:20:00.000Z");
+    });
+  });
 });
 
 describe("thread selection memoization", () => {

@@ -269,6 +269,12 @@ export interface SidebarWorktreeSummary {
   issueTitle: string | null;
   prState: "open" | "closed" | "merged" | null;
   prIsDraft: boolean | null;
+  /**
+   * When the PR reached its current merged/closed state. Absent (`undefined`)
+   * when the server predates the field, which keeps the legacy settlement rule;
+   * `null` while the PR is open, unknown, or absent.
+   */
+  prTerminalAt?: string | null | undefined;
   issueState: "open" | "closed" | null;
   workItemProvider: "jira" | null;
   workItemKey: string | null;

@@ -311,6 +311,8 @@ function mapWorktree(
     issueTitle: worktree.issueTitle,
     prState: worktree.prState ?? null,
     prIsDraft: worktree.prIsDraft ?? null,
+    // Absent stays absent: it tells the classifier the server predates the field.
+    ...(worktree.prTerminalAt !== undefined ? { prTerminalAt: worktree.prTerminalAt } : {}),
     issueState: worktree.issueState ?? null,
     workItemProvider: worktree.workItemProvider ?? null,
     workItemKey: worktree.workItemKey ?? null,
@@ -651,6 +653,7 @@ function sidebarWorktreesEqual(
     left.issueTitle === right.issueTitle &&
     left.prState === right.prState &&
     left.prIsDraft === right.prIsDraft &&
+    left.prTerminalAt === right.prTerminalAt &&
     left.issueState === right.issueState &&
     left.workItemProvider === right.workItemProvider &&
     left.workItemKey === right.workItemKey &&

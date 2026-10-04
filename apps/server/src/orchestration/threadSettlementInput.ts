@@ -2,6 +2,12 @@ import type { OrchestrationReadModel } from "@ryco/contracts";
 import { derivePendingThreadRequestState } from "@ryco/shared/threadActivity";
 import { findThreadWorktree as threadWorktree } from "./commandInvariants.ts";
 
+/**
+ * Server-side settlement input. The server only checks manual settle and snooze
+ * eligibility (`canSettleThread`/`canSnoozeThread`); it never auto-settles. Pins
+ * are client-local and liveness is not in the read model, and neither ever gates
+ * manual settlement, so both are passed as neutral values.
+ */
 export function threadSettlementInput(
   readModel: OrchestrationReadModel,
   thread: OrchestrationReadModel["threads"][number],
@@ -26,7 +32,11 @@ export function threadSettlementInput(
     hasPendingUserInput: pendingRequests.hasPendingUserInput,
     hasLocalQueuedMessage: false,
     deliveryUnknown: false,
+    pinned: false,
+    backgroundLiveness: null,
+    prNumber: worktree?.prNumber ?? null,
     prState: worktree?.prState ?? null,
+    prTerminalAt: worktree?.prTerminalAt ?? null,
     worktreeUpdatedAt: worktree?.updatedAt ?? null,
     updatedAt: thread.updatedAt,
     createdAt: thread.createdAt,
