@@ -803,6 +803,157 @@ it.effect("defaults settlement fields on historical thread snapshots", () =>
   }),
 );
 
+const lineageShellFixture = {
+  id: "thread-lineage-child",
+  projectId: "project-1",
+  title: "Delegated child",
+  modelSelection: {
+    instanceId: "codex",
+    model: "gpt-5.4",
+  },
+  runtimeMode: "full-access",
+  interactionMode: "default",
+  branch: null,
+  worktreePath: null,
+  latestTurn: null,
+  createdAt: "2026-01-01T00:00:00.000Z",
+  updatedAt: "2026-01-01T00:00:00.000Z",
+  archivedAt: null,
+  session: null,
+  latestUserMessageAt: null,
+  hasPendingApprovals: false,
+  hasPendingUserInput: false,
+  hasActionableProposedPlan: false,
+};
+
+const threadCreateCommandFixture = {
+  type: "thread.create",
+  commandId: "cmd-thread-create-lineage",
+  threadId: "thread-lineage-child",
+  projectId: "project-1",
+  title: "Delegated child",
+  modelSelection: {
+    instanceId: "codex",
+    model: "gpt-5.4",
+  },
+  runtimeMode: "full-access",
+  interactionMode: "default",
+  branch: null,
+  worktreePath: null,
+  createdAt: "2026-01-01T00:00:00.000Z",
+};
+
+it.effect("decodes thread shells with and without lineage, including unknown relationships", () =>
+  Effect.gen(function* () {
+    const root = yield* decodeOrchestrationThreadShell(lineageShellFixture);
+    assert.notProperty(root, "lineage");
+
+    const child = yield* decodeOrchestrationThreadShell({
+      ...lineageShellFixture,
+      lineage: {
+        parentThreadId: "thread-parent",
+        rootThreadId: "thread-root",
+        relationship: "delegated",
+      },
+    });
+    assert.deepStrictEqual(child.lineage, {
+      parentThreadId: "thread-parent",
+      rootThreadId: "thread-root",
+      relationship: "delegated",
+    });
+
+    const future = yield* decodeOrchestrationThreadShell({
+      ...lineageShellFixture,
+      lineage: {
+        parentThreadId: "thread-parent",
+        rootThreadId: "thread-parent",
+        relationship: "future-kind",
+      },
+    });
+    assert.strictEqual(future.lineage?.relationship, "future-kind");
+
+    const thread = yield* decodeOrchestrationThread({
+      ...lineageShellFixture,
+      lineage: {
+        parentThreadId: "thread-parent",
+        rootThreadId: "thread-root",
+        relationship: "delegated",
+      },
+      deletedAt: null,
+      messages: [],
+      proposedPlans: [],
+      activities: [],
+      checkpoints: [],
+    });
+    assert.strictEqual(thread.lineage?.parentThreadId, "thread-parent");
+  }),
+);
+
+it.effect("keeps thread.delegated.create out of client commands and strips forged lineage", () =>
+  Effect.gen(function* () {
+    const forged = yield* Effect.exit(
+      decodeClientOrchestrationCommand({
+        ...threadCreateCommandFixture,
+        type: "thread.delegated.create",
+        parentThreadId: "thread-parent",
+      }),
+    );
+    assert.strictEqual(forged._tag, "Failure");
+
+    const stripped = yield* decodeClientOrchestrationCommand({
+      ...threadCreateCommandFixture,
+      parentThreadId: "thread-parent",
+      lineage: {
+        parentThreadId: "thread-parent",
+        rootThreadId: "thread-parent",
+        relationship: "delegated",
+      },
+    });
+    assert.strictEqual(stripped.type, "thread.create");
+    assert.notProperty(stripped, "parentThreadId");
+    assert.notProperty(stripped, "lineage");
+  }),
+);
+
+it.effect("accepts internal thread.delegated.create and round-trips thread.created lineage", () =>
+  Effect.gen(function* () {
+    const delegated = yield* decodeOrchestrationCommand({
+      ...threadCreateCommandFixture,
+      type: "thread.delegated.create",
+      parentThreadId: "thread-parent",
+    });
+    if (delegated.type !== "thread.delegated.create") {
+      assert.fail(`Expected thread.delegated.create, got ${delegated.type}`);
+    }
+    assert.strictEqual(delegated.parentThreadId, "thread-parent");
+
+    const payloadBase = {
+      threadId: "thread-lineage-child",
+      projectId: "project-1",
+      title: "Delegated child",
+      modelSelection: { instanceId: "codex", model: "gpt-5.4" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    };
+    const lineage = {
+      parentThreadId: "thread-parent",
+      rootThreadId: "thread-root",
+      relationship: "delegated",
+    };
+    const withLineage = yield* decodeThreadCreatedPayload({ ...payloadBase, lineage });
+    const encodedWithLineage = yield* Schema.encodeEffect(ThreadCreatedPayload)(withLineage);
+    assert.deepStrictEqual(encodedWithLineage.lineage, lineage);
+
+    const withoutLineage = yield* decodeThreadCreatedPayload(payloadBase);
+    const encodedWithoutLineage = yield* Schema.encodeEffect(ThreadCreatedPayload)(withoutLineage);
+    assert.notProperty(encodedWithoutLineage, "lineage");
+  }),
+);
+
 it.effect("decodes settlement commands and rejects client-forged activity resets", () =>
   Effect.gen(function* () {
     const settle = yield* decodeOrchestrationCommand({

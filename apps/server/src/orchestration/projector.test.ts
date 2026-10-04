@@ -107,6 +107,78 @@ describe("orchestration projector", () => {
     ]);
   });
 
+  it("projects thread lineage and resets it when a soft-deleted id is re-created", async () => {
+    const createdAt = "2026-10-01T00:00:00.000Z";
+    const createdPayload = {
+      threadId: "thread-child",
+      projectId: "project-1",
+      title: "Child",
+      modelSelection: {
+        provider: ProviderDriverKind.make("codex"),
+        model: "gpt-5.4",
+      },
+      runtimeMode: "full-access",
+      branch: null,
+      worktreePath: null,
+      createdAt,
+      updatedAt: createdAt,
+    };
+    const lineage = {
+      parentThreadId: "thread-parent",
+      rootThreadId: "thread-root",
+      relationship: "delegated",
+    };
+    const afterCreate = await Effect.runPromise(
+      projectEvent(
+        createEmptyReadModel(createdAt),
+        makeEvent({
+          sequence: 1,
+          type: "thread.created",
+          aggregateKind: "thread",
+          aggregateId: "thread-child",
+          occurredAt: createdAt,
+          commandId: "command-create-child",
+          payload: { ...createdPayload, lineage },
+        }),
+      ),
+    );
+    expect(afterCreate.threads[0]?.lineage).toEqual(lineage);
+
+    const afterDelete = await Effect.runPromise(
+      projectEvent(
+        afterCreate,
+        makeEvent({
+          sequence: 2,
+          type: "thread.deleted",
+          aggregateKind: "thread",
+          aggregateId: "thread-child",
+          occurredAt: createdAt,
+          commandId: "command-delete-child",
+          payload: { threadId: "thread-child", deletedAt: createdAt },
+        }),
+      ),
+    );
+    expect(afterDelete.threads[0]?.lineage).toEqual(lineage);
+
+    const afterRecreate = await Effect.runPromise(
+      projectEvent(
+        afterDelete,
+        makeEvent({
+          sequence: 3,
+          type: "thread.created",
+          aggregateKind: "thread",
+          aggregateId: "thread-child",
+          occurredAt: createdAt,
+          commandId: "command-recreate-child",
+          payload: createdPayload,
+        }),
+      ),
+    );
+    expect(afterRecreate.threads).toHaveLength(1);
+    expect(afterRecreate.threads[0]?.deletedAt).toBeNull();
+    expect(afterRecreate.threads[0]).not.toHaveProperty("lineage");
+  });
+
   it("projects settled and activity-unsettled events", async () => {
     const createdAt = "2026-07-31T00:00:00.000Z";
     const settledAt = "2026-07-31T01:00:00.000Z";

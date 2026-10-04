@@ -39,6 +39,9 @@ const BASE_ROW = {
   pendingUserInputCount: 0,
   hasActionableProposedPlan: 0,
   deletedAt: null,
+  lineageParentThreadId: null,
+  lineageRootThreadId: null,
+  lineageRelationship: null,
 } as const;
 
 layer("ProjectionThreadRepository settlement", (it) => {
@@ -69,6 +72,43 @@ layer("ProjectionThreadRepository settlement", (it) => {
       if (Option.isSome(active)) {
         assert.equal(active.value.settledOverride, "active");
         assert.isNull(active.value.settledAt);
+      }
+    }),
+  );
+});
+
+layer("ProjectionThreadRepository lineage", (it) => {
+  it.effect("round-trips lineage columns and overwrites them on upsert", () =>
+    Effect.gen(function* () {
+      const repository = yield* ProjectionThreadRepository;
+      const threadId = ThreadId.make("thread-lineage-child");
+      const lineageColumns = {
+        lineageParentThreadId: ThreadId.make("thread-lineage-parent"),
+        lineageRootThreadId: ThreadId.make("thread-lineage-root"),
+        lineageRelationship: "delegated",
+      };
+
+      yield* repository.upsert({ ...BASE_ROW, threadId, ...lineageColumns });
+      const child = yield* repository.getById({ threadId });
+      assert.isTrue(Option.isSome(child));
+      if (Option.isSome(child)) {
+        assert.equal(child.value.lineageParentThreadId, "thread-lineage-parent");
+        assert.equal(child.value.lineageRootThreadId, "thread-lineage-root");
+        assert.equal(child.value.lineageRelationship, "delegated");
+      }
+
+      const listed = yield* repository.listByProjectId({ projectId: BASE_ROW.projectId });
+      const listedChild = listed.find((row) => row.threadId === threadId);
+      assert.equal(listedChild?.lineageParentThreadId, "thread-lineage-parent");
+
+      // A re-created id writes null lineage and must reset the columns.
+      yield* repository.upsert({ ...BASE_ROW, threadId });
+      const reset = yield* repository.getById({ threadId });
+      assert.isTrue(Option.isSome(reset));
+      if (Option.isSome(reset)) {
+        assert.isNull(reset.value.lineageParentThreadId);
+        assert.isNull(reset.value.lineageRootThreadId);
+        assert.isNull(reset.value.lineageRelationship);
       }
     }),
   );

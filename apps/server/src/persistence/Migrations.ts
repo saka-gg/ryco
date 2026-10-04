@@ -1,3 +1,6 @@
+import Migration0071, {
+  ensureProjectionThreadLineageColumns,
+} from "./Migrations/071_ProjectionThreadLineage.ts";
 import Migration0070 from "./Migrations/070_LocalTasks.ts";
 import Migration0069 from "./Migrations/069_DailyRecapIndexes.ts";
 import Migration0068 from "./Migrations/068_ProjectionMessageSearch.ts";
@@ -165,6 +168,7 @@ export const migrationEntries = [
   [68, "ProjectionMessageSearch", Migration0068],
   [69, "DailyRecapIndexes", Migration0069],
   [70, "LocalTasks", Migration0070],
+  [71, "ProjectionThreadLineage", Migration0071],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>
@@ -502,6 +506,10 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
   }
   if (toMigrationInclusive === undefined || toMigrationInclusive >= 44) {
     yield* repairProjectionThreadReadModelMigrations(toMigrationInclusive ?? 47);
+  }
+  // Repair: 071 is skipped by the migrator when a later number was recorded first.
+  if (toMigrationInclusive === undefined || toMigrationInclusive >= 71) {
+    yield* ensureProjectionThreadLineageColumns;
   }
   yield* Effect.log("Migrations ran successfully").pipe(
     Effect.annotateLogs({

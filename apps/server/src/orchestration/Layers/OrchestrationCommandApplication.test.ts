@@ -1,15 +1,35 @@
 import {
   CommandId,
+  OrchestrationDispatchCommandError,
+  ProjectId,
+  ProviderInstanceId,
   ThreadId,
+  type InternalOrchestrationCommand,
   type OrchestrationCommand,
   type OrchestrationThreadShell,
 } from "@ryco/contracts";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it, vi } from "@effect/vitest";
-import { Effect, Option } from "effect";
+import { Effect, Layer, Option, Schema } from "effect";
 
-import type { TerminalManagerShape } from "../../terminal/Services/Manager.ts";
-import type { ProjectionSnapshotQueryShape } from "../Services/ProjectionSnapshotQuery.ts";
-import { applyOrchestrationNormalizedCommand } from "./OrchestrationCommandApplication.ts";
+import { ServerConfig } from "../../config.ts";
+import { TerminalManager, type TerminalManagerShape } from "../../terminal/Services/Manager.ts";
+import { WorkspaceAccessPolicy } from "../../workspace/Services/WorkspaceAccessPolicy.ts";
+import { WorkspacePaths } from "../../workspace/Services/WorkspacePaths.ts";
+import { OrchestrationCommandInvariantError } from "../Errors.ts";
+import { OrchestrationCommandApplication } from "../Services/OrchestrationCommandApplication.ts";
+import {
+  OrchestrationEngineService,
+  type OrchestrationEngineShape,
+} from "../Services/OrchestrationEngine.ts";
+import {
+  ProjectionSnapshotQuery,
+  type ProjectionSnapshotQueryShape,
+} from "../Services/ProjectionSnapshotQuery.ts";
+import {
+  OrchestrationCommandApplicationLive,
+  applyOrchestrationNormalizedCommand,
+} from "./OrchestrationCommandApplication.ts";
 
 const threadId = ThreadId.make("thread-archive");
 
@@ -81,4 +101,73 @@ it.effect("does not add archive cleanup to unrelated commands", () =>
     assert.deepStrictEqual(dispatched, [command]);
     assert.strictEqual(close.mock.calls.length, 0);
   }),
+);
+
+const delegatedCreate: InternalOrchestrationCommand = {
+  type: "thread.delegated.create",
+  commandId: CommandId.make("delegated-create-command"),
+  threadId: ThreadId.make("thread-delegated-child"),
+  projectId: ProjectId.make("project-delegated"),
+  title: "Delegated child",
+  modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+  runtimeMode: "full-access",
+  interactionMode: "default",
+  branch: null,
+  worktreePath: null,
+  createdAt: "2026-10-01T00:00:00.000Z",
+  parentThreadId: ThreadId.make("thread-delegated-parent"),
+};
+
+const commandApplicationLayer = (dispatch: OrchestrationEngineShape["dispatch"]) =>
+  OrchestrationCommandApplicationLive.pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        Layer.succeed(OrchestrationEngineService, { dispatch } as OrchestrationEngineShape),
+        Layer.succeed(ProjectionSnapshotQuery, {} as ProjectionSnapshotQueryShape),
+        Layer.succeed(TerminalManager, {} as TerminalManagerShape),
+        Layer.succeed(WorkspaceAccessPolicy, {} as never),
+        Layer.succeed(WorkspacePaths, {} as never),
+        ServerConfig.layerTest(process.cwd(), { prefix: "ryco-command-application-test-" }).pipe(
+          Layer.provideMerge(NodeServices.layer),
+        ),
+      ),
+    ),
+  );
+
+it.effect("applyInternal dispatches an internal command unnormalized through the engine", () => {
+  const dispatched: OrchestrationCommand[] = [];
+  return Effect.gen(function* () {
+    const application = yield* OrchestrationCommandApplication;
+    const result = yield* application.applyInternal(delegatedCreate);
+    assert.strictEqual(result.sequence, 7);
+    assert.strictEqual(dispatched.length, 1);
+    assert.strictEqual(dispatched[0], delegatedCreate);
+  }).pipe(
+    Effect.provide(
+      commandApplicationLayer((command) => {
+        dispatched.push(command);
+        return Effect.succeed({ sequence: 7 });
+      }),
+    ),
+  );
+});
+
+it.effect("applyInternal maps engine failures to OrchestrationDispatchCommandError", () =>
+  Effect.gen(function* () {
+    const application = yield* OrchestrationCommandApplication;
+    const error = yield* Effect.flip(application.applyInternal(delegatedCreate));
+    assert.isTrue(Schema.is(OrchestrationDispatchCommandError)(error));
+    assert.instanceOf(error.cause, OrchestrationCommandInvariantError);
+  }).pipe(
+    Effect.provide(
+      commandApplicationLayer(() =>
+        Effect.fail(
+          new OrchestrationCommandInvariantError({
+            commandType: "thread.delegated.create",
+            detail: "Parent thread 'thread-delegated-parent' was deleted.",
+          }),
+        ),
+      ),
+    ),
+  ),
 );

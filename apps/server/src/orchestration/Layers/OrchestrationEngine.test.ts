@@ -417,6 +417,85 @@ describe("OrchestrationEngine", () => {
     }
   });
 
+  it("hydrates delegated lineage from SQL after closing and reopening the database", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "ryco-lineage-restart-"));
+    const database = path.join(directory, "state.sqlite");
+    const projectId = ProjectId.make("lineage-project");
+    const parentId = ThreadId.make("lineage-parent");
+    const childId = ThreadId.make("lineage-child");
+    const grandchildId = ThreadId.make("lineage-grandchild");
+    const createdAt = now();
+    const modelSelection = { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-codex" };
+    const threadFields = (threadId: ThreadId) => ({
+      commandId: CommandId.make(`create-${threadId}`),
+      threadId,
+      projectId,
+      title: `Thread ${threadId}`,
+      modelSelection,
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "full-access" as const,
+      branch: null,
+      worktreePath: null,
+      createdAt,
+    });
+    let system = await createOrchestrationSystem(database);
+    try {
+      await system.run(
+        system.engine.dispatch({
+          type: "project.create",
+          commandId: CommandId.make("lineage-project-create"),
+          projectId,
+          title: "Lineage",
+          workspaceRoot: directory,
+          defaultModelSelection: modelSelection,
+          createdAt,
+        }),
+      );
+      await system.run(
+        system.engine.dispatch({ type: "thread.create", ...threadFields(parentId) }),
+      );
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.delegated.create",
+          ...threadFields(childId),
+          parentThreadId: parentId,
+        }),
+      );
+      await system.dispose();
+
+      system = await createOrchestrationSystem(database);
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.delegated.create",
+          ...threadFields(grandchildId),
+          parentThreadId: childId,
+        }),
+      );
+      const rows = await system.run(
+        system.sql<{ readonly payload: string }>`
+          SELECT payload_json AS "payload"
+          FROM orchestration_events
+          WHERE event_type = 'thread.created' AND stream_id = ${grandchildId}
+        `,
+      );
+      expect(rows).toHaveLength(1);
+      expect(JSON.parse(rows[0]!.payload).lineage).toEqual({
+        parentThreadId: childId,
+        rootThreadId: parentId,
+        relationship: "delegated",
+      });
+      const shell = await system.readShell();
+      expect(shell.threads.find((thread) => thread.id === grandchildId)?.lineage).toEqual({
+        parentThreadId: childId,
+        rootThreadId: parentId,
+        relationship: "delegated",
+      });
+    } finally {
+      await system.dispose();
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("restores durable approval claims after closing and reopening the database", async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), "ryco-approval-restart-"));
     const database = path.join(directory, "state.sqlite");

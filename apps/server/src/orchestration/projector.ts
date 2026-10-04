@@ -20,6 +20,7 @@ import { checkpointStatusToTurnState, mergeReleasedTurn } from "@ryco/shared/tur
 
 import { toProjectorDecodeError, type OrchestrationProjectorDecodeError } from "./Errors.ts";
 import { resolveEventPullRequestTerminalAt } from "./pullRequestTerminalAt.ts";
+import { withThreadLineage } from "./threadLineage.ts";
 import {
   MessageSentPayloadSchema,
   ProjectAvatarSetPayload,
@@ -334,34 +335,38 @@ export function projectEvent(
           event.type,
           "payload",
         );
+        // Re-creating a soft-deleted id replaces the whole thread, so lineage resets.
         const thread: OrchestrationThread = yield* decodeForEvent(
           OrchestrationThread,
-          {
-            id: payload.threadId,
-            projectId: payload.projectId,
-            title: payload.title,
-            modelSelection: payload.modelSelection,
-            runtimeMode: payload.runtimeMode,
-            interactionMode: payload.interactionMode,
-            tokenMode: payload.tokenMode ?? DEFAULT_AGENT_TOKEN_MODE,
-            branch: payload.branch,
-            worktreePath: payload.worktreePath,
-            worktreeId: null,
-            manualStatusBucket: null,
-            manualPosition: 0,
-            latestTurn: null,
-            goal: null,
-            createdAt: payload.createdAt,
-            updatedAt: payload.updatedAt,
-            archivedAt: null,
-            settledOverride: null,
-            settledAt: null,
-            deletedAt: null,
-            messages: [],
-            activities: [],
-            checkpoints: [],
-            session: null,
-          },
+          withThreadLineage(
+            {
+              id: payload.threadId,
+              projectId: payload.projectId,
+              title: payload.title,
+              modelSelection: payload.modelSelection,
+              runtimeMode: payload.runtimeMode,
+              interactionMode: payload.interactionMode,
+              tokenMode: payload.tokenMode ?? DEFAULT_AGENT_TOKEN_MODE,
+              branch: payload.branch,
+              worktreePath: payload.worktreePath,
+              worktreeId: null,
+              manualStatusBucket: null,
+              manualPosition: 0,
+              latestTurn: null,
+              goal: null,
+              createdAt: payload.createdAt,
+              updatedAt: payload.updatedAt,
+              archivedAt: null,
+              settledOverride: null,
+              settledAt: null,
+              deletedAt: null,
+              messages: [],
+              activities: [],
+              checkpoints: [],
+              session: null,
+            },
+            payload.lineage ?? null,
+          ),
           event.type,
           "thread",
         );

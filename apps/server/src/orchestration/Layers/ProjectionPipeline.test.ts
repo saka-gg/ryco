@@ -1863,6 +1863,140 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
     }),
   );
 
+  it.effect("writes, preserves and resets thread lineage columns", () =>
+    Effect.gen(function* () {
+      const projectionPipeline = yield* OrchestrationProjectionPipeline;
+      const eventStore = yield* OrchestrationEventStore;
+      const sql = yield* SqlClient.SqlClient;
+      const at = (second: number) => `2026-10-01T00:00:${String(second).padStart(2, "0")}.000Z`;
+      const projectId = ProjectId.make("project-lineage-pipeline");
+      const threadId = ThreadId.make("thread-lineage-pipeline-child");
+      let sequence = 0;
+      const base = () => {
+        sequence += 1;
+        return {
+          eventId: EventId.make(`evt-lineage-pipeline-${sequence}`),
+          occurredAt: at(sequence),
+          commandId: CommandId.make(`cmd-lineage-pipeline-${sequence}`),
+          causationEventId: null,
+          correlationId: CorrelationId.make(`cmd-lineage-pipeline-${sequence}`),
+          metadata: {},
+        };
+      };
+      const appendAndProject = (event: Parameters<typeof eventStore.append>[0]) =>
+        eventStore
+          .append(event)
+          .pipe(Effect.flatMap((savedEvent) => projectionPipeline.projectEvent(savedEvent)));
+      const createdPayload = {
+        threadId,
+        projectId,
+        title: "Delegated child",
+        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-codex" },
+        runtimeMode: "full-access" as const,
+        branch: null,
+        worktreePath: null,
+        createdAt: at(0),
+        updatedAt: at(0),
+      };
+      const readLineage = sql<{
+        readonly parent: string | null;
+        readonly root: string | null;
+        readonly relationship: string | null;
+      }>`
+        SELECT
+          lineage_parent_thread_id AS "parent",
+          lineage_root_thread_id AS "root",
+          lineage_relationship AS "relationship"
+        FROM projection_threads
+        WHERE thread_id = ${threadId}
+      `;
+      const delegated = {
+        parent: "thread-lineage-pipeline-parent",
+        root: "thread-lineage-pipeline-root",
+        relationship: "delegated",
+      };
+
+      yield* appendAndProject({
+        ...base(),
+        type: "project.created",
+        aggregateKind: "project",
+        aggregateId: projectId,
+        payload: {
+          projectId,
+          title: "Project",
+          workspaceRoot: "/tmp/project-lineage-pipeline",
+          defaultModelSelection: null,
+          scripts: [],
+          createdAt: at(0),
+          updatedAt: at(0),
+        },
+      });
+      yield* appendAndProject({
+        ...base(),
+        type: "thread.created",
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        payload: {
+          ...createdPayload,
+          lineage: {
+            parentThreadId: ThreadId.make(delegated.parent),
+            rootThreadId: ThreadId.make(delegated.root),
+            relationship: delegated.relationship,
+          },
+        },
+      });
+      assert.deepEqual(yield* readLineage, [delegated]);
+
+      yield* appendAndProject({
+        ...base(),
+        type: "thread.meta-updated",
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        payload: { threadId, title: "Renamed child", updatedAt: at(20) },
+      });
+      yield* appendAndProject({
+        ...base(),
+        type: "thread.message-sent",
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        payload: {
+          threadId,
+          messageId: MessageId.make("message-lineage-pipeline"),
+          role: "user",
+          text: "hello",
+          turnId: null,
+          streaming: false,
+          createdAt: at(21),
+          updatedAt: at(21),
+        },
+      });
+      yield* appendAndProject({
+        ...base(),
+        type: "thread.archived",
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        payload: { threadId, archivedAt: at(22), updatedAt: at(22) },
+      });
+      assert.deepEqual(yield* readLineage, [delegated]);
+
+      yield* appendAndProject({
+        ...base(),
+        type: "thread.deleted",
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        payload: { threadId, deletedAt: at(23) },
+      });
+      yield* appendAndProject({
+        ...base(),
+        type: "thread.created",
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        payload: { ...createdPayload, createdAt: at(24), updatedAt: at(24) },
+      });
+      assert.deepEqual(yield* readLineage, [{ parent: null, root: null, relationship: null }]);
+    }),
+  );
+
   it.effect("keeps accumulated assistant text when completion payload text is empty", () =>
     Effect.gen(function* () {
       const projectionPipeline = yield* OrchestrationProjectionPipeline;

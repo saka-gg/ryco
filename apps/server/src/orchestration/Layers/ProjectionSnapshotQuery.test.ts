@@ -2488,3 +2488,88 @@ it.effect("ProjectionSnapshotQuery exposes worktree prTerminalAt on every read p
     assertExposed([Option.getOrThrow(merged), Option.getOrThrow(open)]);
   }).pipe(Effect.provide(layer));
 });
+
+it.effect("ProjectionSnapshotQuery exposes thread lineage on every read path", () => {
+  const layer = OrchestrationProjectionSnapshotQueryLive.pipe(
+    Layer.provide(ThreadBackgroundLiveness.layer),
+    Layer.provideMerge(
+      Layer.succeed(RepositoryIdentityResolver, { resolve: () => Effect.succeed(null) }),
+    ),
+    Layer.provideMerge(SqlitePersistenceMemory),
+  );
+
+  return Effect.gen(function* () {
+    const snapshotQuery = yield* ProjectionSnapshotQuery;
+    const sql = yield* SqlClient.SqlClient;
+
+    yield* sql`
+      INSERT INTO projection_projects (
+        project_id, title, workspace_root, default_model_selection_json,
+        scripts_json, created_at, updated_at
+      ) VALUES (
+        'project-lineage', 'Project', '/tmp/project-lineage',
+        '{"provider":"codex","model":"gpt-5-codex"}', '[]',
+        '2026-10-01T00:00:00.000Z', '2026-10-01T00:00:00.000Z'
+      )
+    `;
+    yield* sql`
+      INSERT INTO projection_threads (
+        thread_id, project_id, title, model_selection_json, runtime_mode,
+        interaction_mode, branch, worktree_path, latest_turn_id,
+        latest_user_message_at, pending_approval_count, pending_user_input_count,
+        has_actionable_proposed_plan, created_at, updated_at, archived_at, deleted_at,
+        lineage_parent_thread_id, lineage_root_thread_id, lineage_relationship
+      ) VALUES
+        (
+          'thread-lineage-root', 'project-lineage', 'Root',
+          '{"provider":"codex","model":"gpt-5-codex"}', 'full-access', 'default',
+          NULL, NULL, NULL, NULL, 0, 0, 0,
+          '2026-10-01T00:00:01.000Z', '2026-10-01T00:00:01.000Z', NULL, NULL,
+          NULL, NULL, NULL
+        ),
+        (
+          'thread-lineage-child', 'project-lineage', 'Child',
+          '{"provider":"codex","model":"gpt-5-codex"}', 'full-access', 'default',
+          NULL, NULL, NULL, NULL, 0, 0, 0,
+          '2026-10-01T00:00:02.000Z', '2026-10-01T00:00:02.000Z', NULL, NULL,
+          'thread-lineage-root', 'thread-lineage-root', 'delegated'
+        )
+    `;
+
+    const rootId = ThreadId.make("thread-lineage-root");
+    const childId = ThreadId.make("thread-lineage-child");
+    const expected = {
+      parentThreadId: rootId,
+      rootThreadId: rootId,
+      relationship: "delegated",
+    };
+    const assertExposed = (
+      threads: ReadonlyArray<{ readonly id: ThreadId; readonly lineage?: unknown }>,
+      surface: string,
+    ) => {
+      const child = threads.find((thread) => thread.id === childId);
+      const root = threads.find((thread) => thread.id === rootId);
+      assert.deepEqual(child?.lineage, expected, `${surface} child lineage`);
+      assert.isDefined(root, `${surface} root`);
+      assert.notProperty(root, "lineage", `${surface} root has no lineage key`);
+    };
+
+    assertExposed((yield* snapshotQuery.getShellSnapshot()).threads, "getShellSnapshot");
+    assertExposed((yield* snapshotQuery.getSnapshot()).threads, "getSnapshot");
+    assertExposed((yield* snapshotQuery.getCommandReadModel()).threads, "getCommandReadModel");
+    assertExposed(
+      [
+        Option.getOrThrow(yield* snapshotQuery.getThreadShellById(childId)),
+        Option.getOrThrow(yield* snapshotQuery.getThreadShellById(rootId)),
+      ],
+      "getThreadShellById",
+    );
+    assertExposed(
+      [
+        Option.getOrThrow(yield* snapshotQuery.getThreadDetailById(childId)),
+        Option.getOrThrow(yield* snapshotQuery.getThreadDetailById(rootId)),
+      ],
+      "getThreadDetailById",
+    );
+  }).pipe(Effect.provide(layer));
+});

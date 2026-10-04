@@ -75,6 +75,7 @@ import {
   userInputActivityPendingState,
 } from "../threadShellSummaryProjection.ts";
 import { resolveEventPullRequestTerminalAt } from "../pullRequestTerminalAt.ts";
+import { projectionLineageColumns } from "../threadLineage.ts";
 
 export const ORCHESTRATION_PROJECTOR_NAMES = {
   projects: "projection.projects",
@@ -781,6 +782,8 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             pendingUserInputCount: 0,
             hasActionableProposedPlan: 0,
             deletedAt: null,
+            // Always written so re-creating a soft-deleted id resets lineage.
+            ...projectionLineageColumns(event.payload.lineage),
           });
           return;
 
