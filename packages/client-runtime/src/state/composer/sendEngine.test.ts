@@ -234,3 +234,40 @@ describe("send engine — dispatch assembly", () => {
     expect(turnStart).toHaveProperty("sourceControlContexts");
   });
 });
+
+describe("send engine — onBeforeTurnStart", () => {
+  it("runs exactly once, after beginLocalDispatch and immediately before turn.start", async () => {
+    const harness = makeDispatchHarness({ isFirstMessage: true });
+    const input = {
+      ...harness.input,
+      onBeforeTurnStart: () => {
+        harness.calls.push("onBeforeTurnStart");
+      },
+    };
+    await commitSendTurnDispatch(input);
+    expect(harness.calls).toEqual([
+      "dispatch:thread.meta.update",
+      "persist",
+      "beginLocalDispatch",
+      "onBeforeTurnStart",
+      "dispatch:thread.turn.start",
+    ]);
+  });
+
+  it("is not called when the send fails before the turn command", async () => {
+    let called = 0;
+    const harness = makeDispatchHarness({
+      messageId: MessageId.make("message-readiness"),
+      bootstrap: { requireWorktree: true },
+      assertMutationReady: () => {
+        throw new Error("Reconnect before sending.");
+      },
+      onBeforeTurnStart: () => {
+        called += 1;
+      },
+    });
+    await expect(commitSendTurnDispatch(harness.input)).rejects.toThrow("Reconnect");
+    expect(called).toBe(0);
+    expect(harness.calls).not.toContain("dispatch:thread.turn.start");
+  });
+});

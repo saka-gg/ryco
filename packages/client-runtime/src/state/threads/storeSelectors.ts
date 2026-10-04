@@ -142,3 +142,17 @@ export function createEnvironmentFallbackThreadRefSelector(
     return previousResult;
   };
 }
+
+/**
+ * True once a thread-detail window or full-detail snapshot has been applied.
+ * Both detail paths write one of these maps (`syncServerThreadWindow` writes
+ * the history entry, `syncServerThreadDetail` the message ids); the shell
+ * stream writes neither.
+ */
+export function selectThreadDetailLoaded(state: AppState, ref: ScopedThreadRef): boolean {
+  const environmentState = selectEnvironmentState(state, ref.environmentId);
+  return (
+    environmentState.threadHistoryByThreadId?.[ref.threadId] !== undefined ||
+    environmentState.messageIdsByThreadId[ref.threadId] !== undefined
+  );
+}

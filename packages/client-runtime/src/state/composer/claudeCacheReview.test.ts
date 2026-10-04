@@ -255,6 +255,31 @@ describe("held send through native compaction", () => {
     expect(f.input.outgoingMessageText).toBe("Original prompt");
     expect(f.input.persistThreadSettingsForNextTurn).not.toHaveBeenCalled();
   });
+  it("calls onBeforeTurnStart once, after the /compact turn and before the original send", async () => {
+    const f = setup();
+    const order: string[] = [];
+    f.dispatch.mockImplementation(async (command) => {
+      const message = (command as { message?: { text?: string } }).message;
+      order.push(message?.text === "/compact" ? "compact" : String(command.type));
+      if (message?.text === "/compact") f.settle();
+      return { sequence: 1 };
+    });
+    await commitSendTurnDispatch({
+      ...f.input,
+      onBeforeTurnStart: () => {
+        order.push("onBeforeTurnStart");
+      },
+    });
+    expect(order).toEqual(["compact", "onBeforeTurnStart", "thread.turn.start"]);
+  });
+  it("does not call onBeforeTurnStart when the review is cancelled", async () => {
+    const f = setup("cancel");
+    const onBeforeTurnStart = vi.fn();
+    await expect(commitSendTurnDispatch({ ...f.input, onBeforeTurnStart })).rejects.toThrow(
+      "cancelled",
+    );
+    expect(onBeforeTurnStart).not.toHaveBeenCalled();
+  });
   it("cancels without consuming attachments or dispatching", async () => {
     const f = setup("cancel");
     await expect(commitSendTurnDispatch(f.input)).rejects.toThrow("cancelled");

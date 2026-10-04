@@ -1,16 +1,16 @@
 # 06 · reactor-errors-switch: model switches never restart a session, plain-language reactor errors, and visible turn-start failures (bugs 9, 12, t3 #15048)
 
-| Field | Value |
-| --- | --- |
-| id | `reactor-errors-switch` |
-| title | Stop restarting provider sessions on model changes (fixes ACP registry "Agent default" restarts and the silent Grok context loss), map reactor failures to short user-facing text while logging the full cause, and put every turn-start preparation step (reactor and context-handoff coordinator) behind one visible failure boundary that never clobbers a concurrently running turn |
-| wave | 1 (parallel, isolated worktree) |
-| verdict | **partially-confirmed**. **(a) refuted as stated, real defects found.** The reactor drops the cursor, but `ProviderService.startSession` restores it from the persisted binding (`ProviderService.ts:971-976`). The real model-switch defects are: (i) ACP registry agents on "Agent default" restart on **every** turn after the first, because of a false-positive model change. Strict agents without load or resume support then break permanently from turn 2 on. (ii) A real Grok model switch restarts the session, and the non-strict ACP resume fallback can silently start a new, empty conversation. **(b) confirmed.** **(c) confirmed and wider than claimed:** the user-message count read, the context-handoff branch reads and lease, and `ContextHandoffCoordinator.processTurnStart`'s own reads all fail silently |
-| size | M |
-| touched files | `apps/server/src/orchestration/userFacingErrors.ts` (new) · `apps/server/src/orchestration/providerFailureActivity.ts` (new) · `apps/server/src/orchestration/Layers/ProviderCommandReactor.ts` · `apps/server/src/orchestration/Layers/ContextHandoffCoordinator.ts` · `apps/server/src/orchestration/contextHandoff/ContextHandoffBuilder.ts` (import move only) · `apps/server/src/orchestration/contextHandoff/ContextHandoffRenderer.ts` (import move only) · `packages/shared/src/String.ts` · `apps/server/src/provider/Layers/AcpAdapter.ts` (capability default, one line) · `apps/server/src/provider/Services/ProviderAdapter.ts` (doc comment only) · `docs/providers/grok.md` · tests: `apps/server/src/orchestration/userFacingErrors.test.ts` (new), `apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts`, `apps/server/src/orchestration/Layers/ContextHandoffCoordinator.test.ts`, `apps/server/src/provider/Layers/GrokAdapter.test.ts`, `packages/shared/src/String.test.ts` |
-| migrations | none |
-| contract changes | none in `packages/contracts`. Text changes only: `payload.detail` of `provider.*.failed` activities, `OrchestrationSession.lastError`, goal `synchronization.error`, steer rejection `error` and context-handoff `error` now carry short user-facing text instead of `Cause.pretty` dumps, bounded to 1,000 characters (2,000 for handoff). Internal server contract: the meaning of `ProviderSessionModelSwitchMode` changes (see §3.9). `"unsupported"` now means "reject a known model change", no longer "restart the session". The ACP adapter default becomes `"in-session"` |
-| overlaps | `queue-hold-drain` (W1): consumers of `provider.turn.start.failed` / `session.lastError`, `createHarness` options, `appendProviderFailureActivity` (extracted here). `claude-meter-wake` (W1): wake-turn race guarded by `setThreadSessionErrorOnTurnStartFailure`'s new `preserveActiveTurn`. `acp-message-ids` (W1): `AcpAdapter.ts` (capabilities getter only), `GrokAdapter.test.ts` (one added case). `provider-compat` (W1): `ContextHandoffCoordinator.test.ts` `makeHarness`. `settlement-signals` (W1): `packages/shared` (we touch only `src/String.ts`). `claude-steering` (W2): `processTurnSteerRequested` catch block, `ProviderAdapter.ts` capability block. `delegation-returns` (W2): `processTurnStartRequested` return-guard block (moved unchanged). `usage-limits` (W2): extension point in `userFacingErrors.ts`. `reactor-concurrency`, `provider-effect-outbox`, `restart-continuation` (W3): named follow-ups. Details in §8 |
+| Field            | Value                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| id               | `reactor-errors-switch`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| title            | Stop restarting provider sessions on model changes (fixes ACP registry "Agent default" restarts and the silent Grok context loss), map reactor failures to short user-facing text while logging the full cause, and put every turn-start preparation step (reactor and context-handoff coordinator) behind one visible failure boundary that never clobbers a concurrently running turn                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| wave             | 1 (parallel, isolated worktree)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| verdict          | **partially-confirmed**. **(a) refuted as stated, real defects found.** The reactor drops the cursor, but `ProviderService.startSession` restores it from the persisted binding (`ProviderService.ts:971-976`). The real model-switch defects are: (i) ACP registry agents on "Agent default" restart on **every** turn after the first, because of a false-positive model change. Strict agents without load or resume support then break permanently from turn 2 on. (ii) A real Grok model switch restarts the session, and the non-strict ACP resume fallback can silently start a new, empty conversation. **(b) confirmed.** **(c) confirmed and wider than claimed:** the user-message count read, the context-handoff branch reads and lease, and `ContextHandoffCoordinator.processTurnStart`'s own reads all fail silently                                                                                                                                                                             |
+| size             | M                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| touched files    | `apps/server/src/orchestration/userFacingErrors.ts` (new) · `apps/server/src/orchestration/providerFailureActivity.ts` (new) · `apps/server/src/orchestration/Layers/ProviderCommandReactor.ts` · `apps/server/src/orchestration/Layers/ContextHandoffCoordinator.ts` · `apps/server/src/orchestration/contextHandoff/ContextHandoffBuilder.ts` (import move only) · `apps/server/src/orchestration/contextHandoff/ContextHandoffRenderer.ts` (import move only) · `packages/shared/src/String.ts` · `apps/server/src/provider/Layers/AcpAdapter.ts` (capability default, one line) · `apps/server/src/provider/Services/ProviderAdapter.ts` (doc comment only) · `docs/providers/grok.md` · tests: `apps/server/src/orchestration/userFacingErrors.test.ts` (new), `apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts`, `apps/server/src/orchestration/Layers/ContextHandoffCoordinator.test.ts`, `apps/server/src/provider/Layers/GrokAdapter.test.ts`, `packages/shared/src/String.test.ts` |
+| migrations       | none                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| contract changes | none in `packages/contracts`. Text changes only: `payload.detail` of `provider.*.failed` activities, `OrchestrationSession.lastError`, goal `synchronization.error`, steer rejection `error` and context-handoff `error` now carry short user-facing text instead of `Cause.pretty` dumps, bounded to 1,000 characters (2,000 for handoff). Internal server contract: the meaning of `ProviderSessionModelSwitchMode` changes (see §3.9). `"unsupported"` now means "reject a known model change", no longer "restart the session". The ACP adapter default becomes `"in-session"`                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| overlaps         | `queue-hold-drain` (W1): consumers of `provider.turn.start.failed` / `session.lastError`, `createHarness` options, `appendProviderFailureActivity` (extracted here). `claude-meter-wake` (W1): wake-turn race guarded by `setThreadSessionErrorOnTurnStartFailure`'s new `preserveActiveTurn`. `acp-message-ids` (W1): `AcpAdapter.ts` (capabilities getter only), `GrokAdapter.test.ts` (one added case). `provider-compat` (W1): `ContextHandoffCoordinator.test.ts` `makeHarness`. `settlement-signals` (W1): `packages/shared` (we touch only `src/String.ts`). `claude-steering` (W2): `processTurnSteerRequested` catch block, `ProviderAdapter.ts` capability block. `delegation-returns` (W2): `processTurnStartRequested` return-guard block (moved unchanged). `usage-limits` (W2): extension point in `userFacingErrors.ts`. `reactor-concurrency`, `provider-effect-outbox`, `restart-continuation` (W3): named follow-ups. Details in §8                                                            |
 
 ---
 
@@ -19,6 +19,7 @@
 ### 1.1 (a) Model switch: the claim is refuted, but two real defects exist
 
 **The claim does not hold.** On a model change with `sessionModelSwitch: "unsupported"`, the reactor restarts with `resumeCursor = undefined`:
+
 - `ProviderCommandReactor.ts:698` sets `shouldRestartForModelChange`;
 - `:717-719` drops the cursor, then calls `startProviderSession(undefined)`.
 
@@ -27,10 +28,12 @@ But `ProviderService.startSession` reads the persisted binding (`ProviderService
 The `undefined` cursor is left over from the old `"restart-session"` mode for Cursor (`17e6cad47`, renamed in `9c64f12ea`). It became dead intent once the persisted fallback was added.
 
 **Who reports `"unsupported"`.** Only `AcpAdapter` does, and it is used by Grok and the ACP registry (`rg sessionModelSwitch`):
+
 - `AcpAdapter.ts:1074-1076` defaults to `"unsupported"`. Grok passes no override (`GrokAdapter.ts:11-23`).
 - The registry driver computes `"in-session"` only when the agent advertises `models` or a model config option (`AcpRegistryDriver.ts:186,206-208`).
 
 **Defect (i): a false-positive model change on registry "Agent default".**
+
 - The registry catalog offers the slug `"default"` (`AcpRegistryDriver.ts:34-41`).
 - `normalizeModel` maps it to `""` (`:193`).
 - `AcpAdapter.startSession` then binds no model and omits `session.model` (`AcpAdapter.ts:607-627`).
@@ -40,10 +43,12 @@ The `undefined` cursor is left over from the old `"restart-session"` mode for Cu
 Registry agents use `strictResume: true` (`AcpRegistrySupport.ts:54`). An agent that advertises neither `loadSession` nor `resume` therefore fails that restart with "This agent does not advertise session loading or resumption." (`AcpSessionRuntime.ts:473-484`). `ProviderService` has already stopped the live runtime before the start (`ProviderService.ts:957-968`). Every later turn retries the same strict resume, so the thread is permanently broken after turn 1. Agents that do support load pay a full process respawn and reload on every turn.
 
 **Defect (ii): silent context loss on a real Grok model switch.**
+
 - Grok is `"unsupported"`, so picking another model restarts the session.
 - Grok resumes **non-strictly**. If `session/load` fails, the runtime silently creates a new session (`AcpSessionRuntime.ts:500-505`) and the conversation is gone without any signal. This is the brief's "silently loses the conversation".
 
 **The restart gains nothing for any ACP adapter:**
+
 - Neither Grok (`GrokAcpSupport.ts:42`, `args: ["agent", "stdio"]`) nor registry agents (`AcpRegistrySupport.ts:57-63`) put the model into the spawn arguments.
 - After a restart, the model is applied by `applyAcpModelSelection`, which calls `session/set_model` on the resumed session (`AcpAdapter.ts:607-614`).
 - `AcpAdapter.sendTurn` already makes that same call on the live session for every turn that carries a `modelSelection` (`AcpAdapter.ts:802-816`, `AcpModelSelection.ts:21-36`, `AcpSessionRuntime.ts:626-643`).
@@ -65,6 +70,7 @@ So restart, then `load`, then `set_model` is strictly worse than an in-session `
 ### 1.3 (c) Swallowed turn-start failures
 
 In `processTurnStartRequested` (`:1117-1337`), these steps run before or outside the local failure handler:
+
 - `resolveThread` (`:1125`);
 - the "turn start rejected" and "message not found" activity dispatches (`:1129-1153`);
 - `resolveTurnStartMessage` (`:1142`);
@@ -75,6 +81,7 @@ In `processTurnStartRequested` (`:1117-1337`), these steps run before or outside
 A failure in any of them propagates to `processDomainEventSafely` (`:1790-1801`), which only logs it. The user message stays saved, no turn starts and nothing is shown.
 
 The same gap exists inside `ContextHandoffCoordinator.processTurnStart` (`ContextHandoffCoordinator.ts:967-1017`). These steps all run before `prepareAndDispatch`'s `catchCause` (`:813`):
+
 - `resolveThread` (`:274-275`, `:972`);
 - `repository.create` and `getById` (`:983-1000`);
 - inside `runPreparing`: `compareAndSetStatus`, `resolvePresentation` and `providerService.getSession` (`:785-800`).
@@ -82,6 +89,7 @@ The same gap exists inside `ContextHandoffCoordinator.processTurnStart` (`Contex
 The outer catch (`:1008-1016`) logs "context handoff processing failed" **without the cause**. A record whose create succeeded and whose compare-and-set to `preparing` failed stays `requested` forever. A record that reached `preparing` is silently re-dispatched by `recover()` on the next server start (`:1019-1032`, `listRecoverable` picks `preparing` and `dispatching`, `ContextHandoffs.ts:171`), after the user already gave up on it.
 
 The existing handler has two more faults:
+
 1. `setThreadSessionErrorOnTurnStartFailure(...).pipe(Effect.flatMap(() => append activity))` (`:1166-1180`): when the session write fails, the visible activity is never appended.
 2. `setThreadSessionErrorOnTurnStartFailure` (`:343-365`) unconditionally writes `status: "ready", activeTurnId: null`. That is safe only because, today, the active-turn check at `:1128` passed earlier.
 
@@ -95,7 +103,7 @@ The existing handler has two more faults:
    - An unknown active model (`session.model === undefined`) is never treated as a change.
    - The ACP adapter default becomes `"in-session"` because `sendTurn` already applies the model.
    - All remaining restarts (runtime mode, token mode, cwd, instance, Claude selection) pass the active resume cursor explicitly.
-   - This fixes defect (i) and removes the model-switch route into defect (ii). The non-strict fallback on *other* restarts is a named follow-up (§7).
+   - This fixes defect (i) and removes the model-switch route into defect (ii). The non-strict fallback on _other_ restarts is a named follow-up (§7).
 2. **(b) One pure mapping module, `orchestration/userFacingErrors.ts`.**
    - It turns a `Cause` into short, bounded, non-empty text.
    - Known error classes are matched with `Schema.is` against real class imports, so a renamed class fails typecheck.
@@ -117,6 +125,7 @@ The existing handler has two more faults:
 Move `truncateUnicodeSafe(value, maxChars)` from `apps/server/src/orchestration/contextHandoff/ContextHandoffBuilder.ts:219-238` into `String.ts`, next to `truncate`, with the body unchanged. The `./String` subpath export already exists (`packages/shared/package.json:170-173`).
 
 Update the three importers to `import { truncateUnicodeSafe } from "@ryco/shared/String"`:
+
 - `ContextHandoffBuilder.ts`: delete the local definition and import it.
 - `ContextHandoffRenderer.ts:18`: drop it from the `./ContextHandoffBuilder.ts` import list.
 - `ContextHandoffCoordinator.ts:65`.
@@ -127,14 +136,20 @@ Update the three importers to `import { truncateUnicodeSafe } from "@ryco/shared
 import { Cause, Schema } from "effect";
 import { truncateUnicodeSafe } from "@ryco/shared/String";
 import {
-  PersistenceDecodeError, PersistenceSqlError,
-  ProviderSessionRepositoryPersistenceError, ProviderSessionRepositoryValidationError,
+  PersistenceDecodeError,
+  PersistenceSqlError,
+  ProviderSessionRepositoryPersistenceError,
+  ProviderSessionRepositoryValidationError,
 } from "../persistence/Errors.ts";
 import {
-  ProviderAdapterSessionClosedError, ProviderAdapterSessionNotFoundError,
-  ProviderAdapterValidationError, ProviderInstanceNotFoundError,
-  ProviderSessionDirectoryPersistenceError, ProviderSessionNotFoundError,
-  ProviderUnsupportedError, ProviderValidationError,
+  ProviderAdapterSessionClosedError,
+  ProviderAdapterSessionNotFoundError,
+  ProviderAdapterValidationError,
+  ProviderInstanceNotFoundError,
+  ProviderSessionDirectoryPersistenceError,
+  ProviderSessionNotFoundError,
+  ProviderUnsupportedError,
+  ProviderValidationError,
 } from "../provider/Errors.ts";
 
 export const USER_FACING_ERROR_MAX_CHARS = 1_000;
@@ -146,12 +161,26 @@ export const STORAGE_FAILURE_DETAIL =
 /** Ordered, first match wins. Guards use real class imports so renames fail typecheck. */
 const KNOWN_FAILURES: ReadonlyArray<(error: unknown) => string | undefined> = [
   (e) => (isStorageError(e) ? STORAGE_FAILURE_DETAIL : undefined),
-  (e) => (Schema.is(ProviderSessionNotFoundError)(e) || Schema.is(ProviderAdapterSessionNotFoundError)(e)
-    ? "The provider session is no longer running." : undefined),
-  (e) => (Schema.is(ProviderAdapterSessionClosedError)(e) ? "The provider session has closed." : undefined),
-  (e) => (Schema.is(ProviderInstanceNotFoundError)(e) ? `Provider instance '${e.instanceId}' is not configured.` : undefined),
-  (e) => (Schema.is(ProviderUnsupportedError)(e) ? `Provider '${e.provider}' is not available in this build.` : undefined),
-  (e) => (Schema.is(ProviderAdapterValidationError)(e) || Schema.is(ProviderValidationError)(e) ? e.issue : undefined),
+  (e) =>
+    Schema.is(ProviderSessionNotFoundError)(e) || Schema.is(ProviderAdapterSessionNotFoundError)(e)
+      ? "The provider session is no longer running."
+      : undefined,
+  (e) =>
+    Schema.is(ProviderAdapterSessionClosedError)(e)
+      ? "The provider session has closed."
+      : undefined,
+  (e) =>
+    Schema.is(ProviderInstanceNotFoundError)(e)
+      ? `Provider instance '${e.instanceId}' is not configured.`
+      : undefined,
+  (e) =>
+    Schema.is(ProviderUnsupportedError)(e)
+      ? `Provider '${e.provider}' is not available in this build.`
+      : undefined,
+  (e) =>
+    Schema.is(ProviderAdapterValidationError)(e) || Schema.is(ProviderValidationError)(e)
+      ? e.issue
+      : undefined,
 ];
 
 export function userFacingFailureDetail(
@@ -162,6 +191,7 @@ export function failureTag(cause: Cause.Cause<unknown>): string; // _tag | Error
 ```
 
 Rules for `userFacingFailureDetail`:
+
 1. Take the first `Cause.isFailReason` reason. With no Fail reason (defect-only or interrupt-only), return the fallback. Defect messages are internal invariants, so they go to logs only.
 2. For a Fail value, apply the first match:
    - a string as-is;
@@ -210,26 +240,46 @@ const reportTurnStartFailure = (input: {
   return Effect.gen(function* () {
     yield* Effect.annotateCurrentSpan({ "orchestration.failure_tag": failureTag(cause) });
     yield* Effect.logWarning("provider command reactor failed to start turn", {
-      threadId, messageId: event.payload.messageId, commandId: event.commandId,
-      failureTag: failureTag(cause), cause: Cause.pretty(cause),
+      threadId,
+      messageId: event.payload.messageId,
+      commandId: event.commandId,
+      failureTag: failureTag(cause),
+      cause: Cause.pretty(cause),
     });
     if (!event.payload.delegationReturnGuard) {
       yield* setThreadSessionErrorOnTurnStartFailure({
-        threadId, detail, createdAt: event.payload.createdAt,
+        threadId,
+        detail,
+        createdAt: event.payload.createdAt,
         preserveActiveTurn: input.preserveActiveTurn,
-      }).pipe(Effect.catchCause((sessionCause) =>
-        Effect.logWarning("provider command reactor failed to record turn start failure on the session",
-          { threadId, cause: Cause.pretty(sessionCause) })));
+      }).pipe(
+        Effect.catchCause((sessionCause) =>
+          Effect.logWarning(
+            "provider command reactor failed to record turn start failure on the session",
+            { threadId, cause: Cause.pretty(sessionCause) },
+          ),
+        ),
+      );
     }
     yield* appendProviderFailureActivity({
-      threadId, kind: "provider.turn.start.failed", messageId: event.payload.messageId,
-      summary: "Provider turn start failed", detail, turnId: null, createdAt: event.payload.createdAt,
+      threadId,
+      kind: "provider.turn.start.failed",
+      messageId: event.payload.messageId,
+      summary: "Provider turn start failed",
+      detail,
+      turnId: null,
+      createdAt: event.payload.createdAt,
     });
-  }).pipe(Effect.catchCause((recoveryCause) =>
-    Effect.logWarning("provider command reactor failed to recover turn start failure", {
-      eventType: event.type, threadId,
-      cause: Cause.pretty(recoveryCause), originalCause: Cause.pretty(cause),
-    })));
+  }).pipe(
+    Effect.catchCause((recoveryCause) =>
+      Effect.logWarning("provider command reactor failed to recover turn start failure", {
+        eventType: event.type,
+        threadId,
+        cause: Cause.pretty(recoveryCause),
+        originalCause: Cause.pretty(cause),
+      }),
+    ),
+  );
 };
 ```
 
@@ -244,7 +294,9 @@ const processTurnStartRequested = Effect.fn("processTurnStartRequested")(functio
   const key = turnStartKeyForEvent(event);
   if (yield* hasHandledTurnStartRecently(key)) return;
   yield* prepareAndSubmitTurnStart(event).pipe(
-    Effect.catchCause((cause) => reportTurnStartFailure({ event, cause, preserveActiveTurn: true })),
+    Effect.catchCause((cause) =>
+      reportTurnStartFailure({ event, cause, preserveActiveTurn: true }),
+    ),
   );
 });
 const prepareAndSubmitTurnStart = Effect.fn("prepareAndSubmitTurnStart")(function* (event) {
@@ -253,16 +305,24 @@ const prepareAndSubmitTurnStart = Effect.fn("prepareAndSubmitTurnStart")(functio
 ```
 
 Edits inside `prepareAndSubmitTurnStart`:
+
 - **Essential reads stay plain `yield*`**, so their failures reach the boundary: `resolveThread`, the rejection and not-found activity dispatches, and `resolveTurnStartMessage`. The `!thread` early return stays silent (deleted thread).
 - **The user-message count becomes best-effort** (`:1156`):
 
   ```ts
-  const isFirstUserMessageTurn = yield* resolveUserMessageCount(threadId).pipe(
-    Effect.map((count) => count === 1),
-    Effect.catchCause((cause) => Cause.hasInterruptsOnly(cause) ? Effect.failCause(cause)
-      : Effect.logWarning("provider command reactor could not count user messages; skipping first-turn generation",
-          { threadId, cause: Cause.pretty(cause) }).pipe(Effect.as(false))),
-  );
+  const isFirstUserMessageTurn =
+    yield *
+    resolveUserMessageCount(threadId).pipe(
+      Effect.map((count) => count === 1),
+      Effect.catchCause((cause) =>
+        Cause.hasInterruptsOnly(cause)
+          ? Effect.failCause(cause)
+          : Effect.logWarning(
+              "provider command reactor could not count user messages; skipping first-turn generation",
+              { threadId, cause: Cause.pretty(cause) },
+            ).pipe(Effect.as(false)),
+      ),
+    );
   ```
 
 - **Retired memory** (`:1198-1202`): `return yield* Effect.fail(new Error(REMOVED_PROJECT_MEMORY_MESSAGE));`. The boundary reports it; the detail is the same message.
@@ -277,20 +337,30 @@ Edits inside `prepareAndSubmitTurnStart`:
 Replace `modelChanged`, `shouldRestartForModelChange` and the restart condition with:
 
 ```ts
-const sessionModelSwitch = (yield* providerService.getCapabilities(desiredInstanceId)).sessionModelSwitch;
-const instanceChanged = requestedModelSelection !== undefined &&
+const sessionModelSwitch = (yield * providerService.getCapabilities(desiredInstanceId))
+  .sessionModelSwitch;
+const instanceChanged =
+  requestedModelSelection !== undefined &&
   activeSession?.providerInstanceId !== requestedModelSelection.instanceId;
 // A model change never restarts a session. "in-session" adapters apply
 // sendTurn.modelSelection to the live session. A session that cannot switch
 // rejects a *known* change. An unknown active model (undefined) is never a change.
 const activeModel = activeSession?.model;
-if (sessionModelSwitch === "unsupported" && requestedModelSelection !== undefined &&
-    !instanceChanged && activeModel !== undefined && requestedModelSelection.model !== activeModel) {
-  return yield* new ProviderAdapterRequestError({
-    provider: preferredProvider,
-    method: "thread.turn.start",
-    detail: `This provider session cannot switch from model '${activeModel}' to '${requestedModelSelection.model}'. Start a new thread to use '${requestedModelSelection.model}'.`,
-  });
+if (
+  sessionModelSwitch === "unsupported" &&
+  requestedModelSelection !== undefined &&
+  !instanceChanged &&
+  activeModel !== undefined &&
+  requestedModelSelection.model !== activeModel
+) {
+  return (
+    yield *
+    new ProviderAdapterRequestError({
+      provider: preferredProvider,
+      method: "thread.turn.start",
+      detail: `This provider session cannot switch from model '${activeModel}' to '${requestedModelSelection.model}'. Start a new thread to use '${requestedModelSelection.model}'.`,
+    })
+  );
 }
 // The restart condition drops shouldRestartForModelChange. Everything else is unchanged:
 // computerCatalogChanged, runtime mode, token mode, cwd, instance, Claude selection rule.
@@ -301,15 +371,16 @@ In the restart log, remove `modelChanged` and `shouldRestartForModelChange` and 
 
 ### 3.7 `ProviderCommandReactor.ts`: the other failure sites (b)
 
-| Site | Change | Log |
-| --- | --- | --- |
-| `reconcileThreadGoal` catch (`:806`) | `userFacingFailureDetail(cause)` | none (re-raised, logged once by `processDomainEventSafely`) |
-| `processGoalUpdated` session catch (`:1462`) | `userFacingFailureDetail(cause)` | none (re-raised) |
-| `recoverInterruptFailure` (`:1367`) | `userFacingFailureDetail(cause)` | `logWarning("provider command reactor failed to interrupt turn", { threadId, failureTag, cause: Cause.pretty(cause) })` first in the non-interrupt branch, because it swallows the cause today |
-| `processTurnSteerRequested` catch (`:1562-1571`) | `error = userFacingFailureDetail(cause, { fallback: "Provider rejected turn steering." })`. This replaces the manual trim, slice and fallback, with the same bound | `logWarning("provider command reactor failed to steer turn", …)` |
-| `processCallbackResponseRequested` `onFailure` (`:1661`) | the non-stale branch uses `userFacingFailureDetail(cause)`. The stale branch, `stalePendingRequestDetail` and the `responseState` logic stay **unchanged** | `logWarning("provider command reactor failed to deliver <kind> response", …)` |
+| Site                                                     | Change                                                                                                                                                             | Log                                                                                                                                                                                            |
+| -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `reconcileThreadGoal` catch (`:806`)                     | `userFacingFailureDetail(cause)`                                                                                                                                   | none (re-raised, logged once by `processDomainEventSafely`)                                                                                                                                    |
+| `processGoalUpdated` session catch (`:1462`)             | `userFacingFailureDetail(cause)`                                                                                                                                   | none (re-raised)                                                                                                                                                                               |
+| `recoverInterruptFailure` (`:1367`)                      | `userFacingFailureDetail(cause)`                                                                                                                                   | `logWarning("provider command reactor failed to interrupt turn", { threadId, failureTag, cause: Cause.pretty(cause) })` first in the non-interrupt branch, because it swallows the cause today |
+| `processTurnSteerRequested` catch (`:1562-1571`)         | `error = userFacingFailureDetail(cause, { fallback: "Provider rejected turn steering." })`. This replaces the manual trim, slice and fallback, with the same bound | `logWarning("provider command reactor failed to steer turn", …)`                                                                                                                               |
+| `processCallbackResponseRequested` `onFailure` (`:1661`) | the non-stale branch uses `userFacingFailureDetail(cause)`. The stale branch, `stalePendingRequestDetail` and the `responseState` logic stay **unchanged**         | `logWarning("provider command reactor failed to deliver <kind> response", …)`                                                                                                                  |
 
 **Stale-detail invariant (must hold).** Stale detection happens before formatting, on a superset of the displayed text: `error.detail`, or `Cause.pretty` covering every message. So a non-stale detail can never contain the stale phrases. These parsers keep working without changes:
+
 - server: `ProjectionPipeline.ts:222-230`, `threadShellSummaryProjection.ts:58-62`, migration `024_*` (historic);
 - client: `packages/shared/src/threadActivity.ts:101-114`, `packages/client-runtime/src/state/session/session-logic.ts:310-322`.
 
@@ -324,6 +395,7 @@ In the restart log, remove `modelChanged` and `shouldRestartForModelChange` and 
    5. Dispatch `providerFailureActivityCommand({ threadId, kind: "provider.turn.start.failed", messageId: reference.targetMessageId, summary: "Provider turn start failed", detail, turnId: null, createdAt: event.payload.createdAt })`.
 
    `detail` is `userFacingFailureDetail(cause, { maxChars: CONTEXT_HANDOFF_ERROR_MAX_CHARS })`. The source session is not touched: before dispatch, nothing has stopped it.
+
 3. Add `cause: Cause.pretty(cause)` to the `recover()` log (`:1036-1043`), which today drops it too.
 
 ### 3.9 Provider capability semantics
@@ -357,6 +429,7 @@ Run with `bun run --cwd apps/server test <file>` and `bun run --cwd packages/sha
 ### 5.1 `apps/server/src/orchestration/userFacingErrors.test.ts` (new, `@effect/vitest`, pure)
 
 Each case builds a cause with `Cause.fail`, `Cause.die` or `Cause.interrupt`:
+
 1. `ProviderAdapterRequestError` returns `detail`, unchanged.
 2. `PersistenceSqlError` returns `STORAGE_FAILURE_DETAIL`. The text does not contain `"SQL"`, `"PersistenceSqlError"` or the operation name.
 3. `ProviderSessionNotFoundError` and `ProviderAdapterSessionNotFoundError` return the session text. `ProviderInstanceNotFoundError` names the instance id.
@@ -371,6 +444,7 @@ Each case builds a cause with `Cause.fail`, `Cause.die` or `Cause.interrupt`:
 ### 5.2 `packages/shared/src/String.test.ts`
 
 Cases for `truncateUnicodeSafe`:
+
 - a shorter string is unchanged;
 - a long string is cut at `maxChars`;
 - a high surrogate at the boundary is dropped;
@@ -379,11 +453,13 @@ Cases for `truncateUnicodeSafe`:
 ### 5.3 `ProviderCommandReactor.test.ts`
 
 Harness additions to `createHarness`. Keep them additive, because other W1 packages add options too:
+
 - `sessionModel?: (model: string) => string | undefined`. The `startSession` mock uses it for `session.model`, to simulate adapter normalization.
 - `steerTurn?: ProviderServiceShape["steerTurn"]`.
 - `decorateSnapshotQuery?: (live: ProjectionSnapshotQueryShape) => ProjectionSnapshotQueryShape`, implemented as `Layer.effect(ProjectionSnapshotQuery, Effect.map(ProjectionSnapshotQuery.asEffect(), decorate)).pipe(Layer.provide(projectionSnapshotLayer))`. Tests use it for one-shot failure hooks armed after setup. Only the reactor resolves this service: the engine has its own query layer.
 
 **(a) Model switch**
+
 1. **[failing-first] "does not restart a session whose model is unknown when the client resends the agent default".**
    - Setup: `sessionModelSwitch: "unsupported"`, `sessionModel: (m) => (m === "default" ? undefined : m)`, thread model `{codex, "default"}`.
    - Action: two turns, each with `modelSelection {codex, "default"}`.
@@ -506,18 +582,18 @@ Harness additions to `makeHarness`: optional `getThreadDetailById` and `getSessi
 
 ## 9. Review resolution
 
-| # | Severity | Issue | Resolution |
-| --- | --- | --- | --- |
-| — | verdict | (a) refuted as stated | **Verified myself.** `ProviderService.ts:971-976` restores the persisted cursor, and the reactor never sets `resumePolicy`. Verdict text is now "refuted as stated; real defects (i) registry false positive and (ii) Grok silent loss", and both are fixed here. |
-| 1 | major | The turn-start boundary can wipe a running turn's session | **Accepted.** `setThreadSessionErrorOnTurnStartFailure` gets `preserveActiveTurn`, set to true for preparation-phase failures. Test 10 uses an in-read hook, because the decider rejects turn starts while a turn is active, so the literal suggested setup cannot be dispatched. `claude-meter-wake` is named. |
-| 2 | major | `ContextHandoffCoordinator.processTurnStart` is a second silent path | **Accepted.** The coordinator reports pre-dispatch failures itself: it logs the cause, fails a `requested` or `preparing` record so `recover()` cannot re-dispatch it, and appends `provider.turn.start.failed`. It never claims failure for `dispatching` or terminal records. Tests 15-16. The interface stays `Effect<void>`, because the record state lives in the coordinator. |
-| 3 | major | Keeping the model-change restart leaves the Grok silent loss | **Accepted, preferred option.** Model changes never restart. The ACP default is `"in-session"`, because `sendTurn` already issues the same `set_model`. `"unsupported"` rejects known changes visibly. The residual non-strict fallback on *other* restarts is follow-up 1, owned by `restart-continuation`. |
-| 4 | minor | `liveSessionModel` from `threadModelSelections` can be stale | **Accepted in substance.** The final design does not derive the live model from that cache. It uses `activeSession.model` and treats `undefined` as unknown, the critique's own fallback suggestion. Test 1 covers it. |
-| 5 | minor | Best-effort reads must not fail the turn | **Accepted.** The message count and the first-turn project read log and continue. Test 12 asserts `sendTurn` is still called. |
-| 6 | minor | The overlaps list was inaccurate | **Accepted.** `delegation-guard-restart` is removed. `queue-hold-drain`, `claude-meter-wake` and the `createHarness` conflicts are added. The consumer note (`LocalTaskService`, queue guards) says to match kind and state, never text. |
-| 7 | minor | Sibling swallowed paths (callback reads, steer resolve) | **Accepted as named follow-ups.** Callback reads go to `provider-effect-outbox` and steer resolve goes to `claude-steering`, so approval or steer state machines are not redesigned in a W1 package. User-facing text is still applied to respond and steer failures here. |
-| 8 | minor | `userFacingErrors` design | **Accepted.** `Schema.is` guards on imported classes, with no import cycle (verified). `truncateUnicodeSafe` moves to `@ryco/shared/String`. The client stale parsers are listed in §3.7. |
-| 9 | minor | Test plan gaps | **Accepted.** The vacuous `stopSession` assertion is replaced with call counts and the runtime id. Test `:3183` is extended instead of duplicated. Added: steer bound and fallback (7), interrupt (8), handoff-branch read (13; the lease is race-only and behind the same boundary), active-turn preservation (10). The logging rule means swallowers log and re-raisers do not, so nothing is logged twice in the goal paths. **One deliberate deviation:** interrupt-only causes are swallowed (no activity), not propagated, because a propagated interrupt ends `DrainableWorker`'s `Effect.forever` loop and stops the reactor (follow-up 5). |
+| #   | Severity | Issue                                                                | Resolution                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| --- | -------- | -------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| —   | verdict  | (a) refuted as stated                                                | **Verified myself.** `ProviderService.ts:971-976` restores the persisted cursor, and the reactor never sets `resumePolicy`. Verdict text is now "refuted as stated; real defects (i) registry false positive and (ii) Grok silent loss", and both are fixed here.                                                                                                                                                                                                                                                                                                                                                                                   |
+| 1   | major    | The turn-start boundary can wipe a running turn's session            | **Accepted.** `setThreadSessionErrorOnTurnStartFailure` gets `preserveActiveTurn`, set to true for preparation-phase failures. Test 10 uses an in-read hook, because the decider rejects turn starts while a turn is active, so the literal suggested setup cannot be dispatched. `claude-meter-wake` is named.                                                                                                                                                                                                                                                                                                                                     |
+| 2   | major    | `ContextHandoffCoordinator.processTurnStart` is a second silent path | **Accepted.** The coordinator reports pre-dispatch failures itself: it logs the cause, fails a `requested` or `preparing` record so `recover()` cannot re-dispatch it, and appends `provider.turn.start.failed`. It never claims failure for `dispatching` or terminal records. Tests 15-16. The interface stays `Effect<void>`, because the record state lives in the coordinator.                                                                                                                                                                                                                                                                 |
+| 3   | major    | Keeping the model-change restart leaves the Grok silent loss         | **Accepted, preferred option.** Model changes never restart. The ACP default is `"in-session"`, because `sendTurn` already issues the same `set_model`. `"unsupported"` rejects known changes visibly. The residual non-strict fallback on _other_ restarts is follow-up 1, owned by `restart-continuation`.                                                                                                                                                                                                                                                                                                                                        |
+| 4   | minor    | `liveSessionModel` from `threadModelSelections` can be stale         | **Accepted in substance.** The final design does not derive the live model from that cache. It uses `activeSession.model` and treats `undefined` as unknown, the critique's own fallback suggestion. Test 1 covers it.                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| 5   | minor    | Best-effort reads must not fail the turn                             | **Accepted.** The message count and the first-turn project read log and continue. Test 12 asserts `sendTurn` is still called.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| 6   | minor    | The overlaps list was inaccurate                                     | **Accepted.** `delegation-guard-restart` is removed. `queue-hold-drain`, `claude-meter-wake` and the `createHarness` conflicts are added. The consumer note (`LocalTaskService`, queue guards) says to match kind and state, never text.                                                                                                                                                                                                                                                                                                                                                                                                            |
+| 7   | minor    | Sibling swallowed paths (callback reads, steer resolve)              | **Accepted as named follow-ups.** Callback reads go to `provider-effect-outbox` and steer resolve goes to `claude-steering`, so approval or steer state machines are not redesigned in a W1 package. User-facing text is still applied to respond and steer failures here.                                                                                                                                                                                                                                                                                                                                                                          |
+| 8   | minor    | `userFacingErrors` design                                            | **Accepted.** `Schema.is` guards on imported classes, with no import cycle (verified). `truncateUnicodeSafe` moves to `@ryco/shared/String`. The client stale parsers are listed in §3.7.                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| 9   | minor    | Test plan gaps                                                       | **Accepted.** The vacuous `stopSession` assertion is replaced with call counts and the runtime id. Test `:3183` is extended instead of duplicated. Added: steer bound and fallback (7), interrupt (8), handoff-branch read (13; the lease is race-only and behind the same boundary), active-turn preservation (10). The logging rule means swallowers log and re-raisers do not, so nothing is logged twice in the goal paths. **One deliberate deviation:** interrupt-only causes are swallowed (no activity), not propagated, because a propagated interrupt ends `DrainableWorker`'s `Effect.forever` loop and stops the reactor (follow-up 5). |
 
 ---
 

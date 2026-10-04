@@ -248,6 +248,13 @@ export interface CommitSendTurnDispatchInput {
   readonly createdAt: string;
   readonly newCommandId: () => CommandId;
   readonly beginLocalDispatch: (options: { readonly preparingWorktree: boolean }) => void;
+  /**
+   * Runs immediately before the final `thread.turn.start`: after the Claude
+   * resume review (including any `/compact` turn and its wait), the settings
+   * writes and the readiness asserts. Not called when those throw, nor for a
+   * call that joins a pending send of the same message id.
+   */
+  readonly onBeforeTurnStart?: () => void;
   readonly persistThreadSettingsForNextTurn: (input: {
     threadId: ThreadId;
     createdAt: string;
@@ -307,6 +314,7 @@ async function commitSendTurnDispatchOnce(input: CommitSendTurnDispatchInput): P
   }
   if (reviewed || input.bootstrap?.requireWorktree) input.assertMutationReady?.();
   input.beginLocalDispatch({ preparingWorktree: false });
+  input.onBeforeTurnStart?.();
   await input.api.orchestration.dispatchCommand({
     type: "thread.turn.start",
     ...(input.computerUse ? { computerUse: input.computerUse } : {}),

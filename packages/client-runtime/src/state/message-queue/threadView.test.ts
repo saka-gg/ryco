@@ -1,0 +1,123 @@
+import { MessageId } from "@ryco/contracts";
+import { describe, expect, it } from "vite-plus/test";
+
+import {
+  makeQueueAppState,
+  QUEUE_ENV,
+  queueRef,
+  steerFailed,
+  turnStartFailed,
+  type ThreadFixture,
+} from "../../../test/queueThreadFixtures.ts";
+import type { AppState } from "../threads/store.ts";
+import {
+  queueThreadViewInputs,
+  queueThreadViewInputsEqual,
+  readQueueThreadView,
+} from "./threadView.ts";
+
+function viewOf(fixture: Omit<ThreadFixture, "id">) {
+  return readQueueThreadView(makeQueueAppState([{ id: "t", ...fixture }]), queueRef("t"))!;
+}
+
+describe("readQueueThreadView", () => {
+  it("is null without a shell", () => {
+    expect(readQueueThreadView(makeQueueAppState([]), queueRef("missing"))).toBeNull();
+  });
+
+  it.each([
+    ["a starting session", { session: { status: "starting" as const } }],
+    ["an active turn id", { session: { status: "ready" as const, activeTurnId: "turn-1" } }],
+    ["a running latest turn", { latestTurn: { turnId: "turn-1", state: "running" as const } }],
+    ["a running session", { session: { status: "running" as const } }],
+  ])("treats %s as running", (_label, fixture) => {
+    expect(viewOf(fixture).running).toBe(true);
+  });
+
+  it("is idle once the session is ready and the turn settled", () => {
+    expect(
+      viewOf({
+        session: { status: "ready" },
+        latestTurn: { turnId: "turn-1", state: "completed" },
+      }).running,
+    ).toBe(false);
+  });
+
+  it("reads archived from the thread or from its worktree", () => {
+    expect(viewOf({ archivedAt: "2026-10-01T00:00:00.000Z" }).archived).toBe(true);
+    expect(viewOf({ worktreeArchivedAt: "2026-10-01T00:00:00.000Z" }).archived).toBe(true);
+    expect(viewOf({ worktreeArchivedAt: null }).archived).toBe(false);
+  });
+
+  it("ORs pending flags from the summary and the loaded activities", () => {
+    expect(viewOf({ summary: { hasPendingApprovals: true } }).hasPendingApproval).toBe(true);
+    expect(viewOf({ summary: { hasPendingUserInput: true } }).hasPendingUserInput).toBe(true);
+    const approval = viewOf({
+      messageIds: [],
+      activities: [
+        {
+          id: "approval-1",
+          kind: "approval.requested",
+          payload: { requestId: "request-1", requestKind: "command" },
+        },
+      ],
+    });
+    expect(approval.hasPendingApproval).toBe(true);
+    expect(approval.hasPendingUserInput).toBe(false);
+  });
+
+  it("reads start and steer failures with a message id only once detail is loaded", () => {
+    const fixture = {
+      activities: [
+        turnStartFailed("a-1", "m-1", "Thread already has active turn"),
+        steerFailed("a-2", "m-2"),
+        { id: "a-3", kind: "provider.turn.start.failed", payload: { detail: "no id" } },
+      ],
+    };
+    expect(viewOf(fixture).turnStartFailures).toEqual([]);
+    const loaded = viewOf({ ...fixture, messageIds: [] });
+    expect(loaded.detailLoaded).toBe(true);
+    expect(loaded.turnStartFailures).toEqual([
+      { activityId: "a-1", messageId: "m-1", detail: "Thread already has active turn" },
+    ]);
+    expect([...loaded.steerFailedMessageIds]).toEqual(["m-2"]);
+  });
+
+  it("derives started from turns, projected messages, or the sidebar", () => {
+    expect(viewOf({}).started).toBe(false);
+    expect(viewOf({ messageIds: ["m-1"] }).started).toBe(true);
+    expect(viewOf({ summary: { latestUserMessageAt: "2026-10-01T00:00:00.000Z" } }).started).toBe(
+      true,
+    );
+    expect(viewOf({ latestTurn: { turnId: "turn-1", state: "completed" } }).started).toBe(true);
+  });
+
+  it("caches projected ids by ids-array identity across content-only updates", () => {
+    const state = makeQueueAppState([{ id: "t", messageIds: ["m-1", "m-2"] }]);
+    const first = readQueueThreadView(state, queueRef("t"))!;
+    const environment = state.environmentStateById[QUEUE_ENV]!;
+    const threadId = queueRef("t").threadId;
+    // A streaming delta replaces the message record, not the ids array.
+    const streamed: AppState = {
+      ...state,
+      environmentStateById: {
+        [QUEUE_ENV]: {
+          ...environment,
+          messageByThreadId: {
+            ...environment.messageByThreadId,
+            [threadId]: { [MessageId.make("m-2")]: { text: "delta" } as never },
+          },
+        },
+      },
+    };
+    const second = readQueueThreadView(streamed, queueRef("t"))!;
+    expect(second.projectedMessageIds).toBe(first.projectedMessageIds);
+    expect([...second.projectedMessageIds]).toEqual(["m-1", "m-2"]);
+    expect(
+      queueThreadViewInputsEqual(
+        queueThreadViewInputs(state, queueRef("t")),
+        queueThreadViewInputs(streamed, queueRef("t")),
+      ),
+    ).toBe(true);
+  });
+});

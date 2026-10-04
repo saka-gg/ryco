@@ -1,16 +1,16 @@
 # 11 · claude-steering: Claude active-turn steering, follow-up behaviour setting, Mod+Enter inversion
 
-| Field | Value |
-| --- | --- |
-| id | `claude-steering` |
-| title | Claude `steerTurn` with exact-turn attribution and a safe Stop protocol; a `followUpBehavior` (`queue` \| `steer`) client setting where Mod+Enter does the opposite; direct steer from the composer; late steers are deferred into the queue and sent as the next turn |
-| wave | 2 (parallel, isolated worktree). Rebase onto wave-1 `queue-hold-drain`, `claude-meter-wake` and `reactor-errors-switch` before starting |
-| verdict | **feature**. Verified: only Codex steers today. Claude has no `steerTurn`, and `ProviderService.steerTurn` rejects every other adapter |
-| size | **L**. Server adapter work about 45%, orchestration and contracts 15%, client-runtime, web and mobile 40% |
-| touched files | **Server:** `apps/server/src/provider/Errors.ts` · `apps/server/src/provider/claudeSteering.ts` (new) · `apps/server/src/provider/Layers/ClaudeAdapter.ts` · `apps/server/src/provider/Layers/ClaudeProvider.ts` · `apps/server/src/provider/Layers/ProviderService.ts` · `apps/server/src/provider/Layers/CodexAdapter.ts` · `apps/server/src/orchestration/turnSteerFailure.ts` (new) · `apps/server/src/orchestration/Layers/ProviderCommandReactor.ts` · `apps/server/src/orchestration/decider.ts`. **Contracts and shared:** `packages/contracts/src/orchestration.ts` · `packages/contracts/src/settings.ts` · `packages/shared/src/turnSteer.ts` (new) · `packages/shared/package.json`. **Client runtime:** `packages/client-runtime/src/state/message-queue/logic.ts` · `packages/client-runtime/src/state/message-queue/store.ts` · `packages/client-runtime/src/state/session/session-logic.ts`. **Web:** `apps/web/src/components/ChatView.tsx` · `apps/web/src/components/chat/ChatComposer.tsx` · `apps/web/src/components/chat/ComposerPromptShell.tsx` · `apps/web/src/components/chat/composerFollowUp.ts` (new) · `apps/web/src/components/settings/ComposerSettings.tsx` · `apps/web/src/components/settings/settingsSearchIndex.ts` · `apps/web/src/components/settings/settingsRestore.ts` · `apps/web/src/hostedHub/environment.ts`. **Mobile:** `apps/mobile/src/state/threadOutbox.ts` · `apps/mobile/src/features/threads/ThreadDetailScreen.tsx`. **Docs:** `docs/providers/claude.md` · `KEYBINDINGS.md`. **Tests:** `claudeSteering.test.ts` (new) · `ClaudeAdapter.test.ts` · `ProviderService.test.ts` · `CodexAdapter.test.ts` · `turnSteerFailure.test.ts` (new) · `ProviderCommandReactor.test.ts` · `decider.steer.test.ts` · `AgentControlExecution.test.ts` · `packages/contracts/src/settings.test.ts` · `packages/shared/src/turnSteer.test.ts` (new) · `message-queue/logic.test.ts` · `message-queue/store.test.ts` · `session-logic.test.ts` · `composerFollowUp.test.ts` (new) · `settingsRestore.test.ts` · `ChatView.Composer.browser.tsx` · `apps/mobile/src/state/threadOutbox.test.ts` |
-| migrations | none |
-| contract changes | **Contracts:** `orchestration.ts` gains the `TurnSteerRejectionReason` literal (`"deferred" \| "failed"`), plus an `optionalKey` `reason` on the rejected branch of `thread.turn.steer.resolve` and on `ThreadTurnSteerRejectedPayload`. `settings.ts` gains the `FollowUpBehavior` literal (`"queue" \| "steer"`), `DEFAULT_FOLLOW_UP_BEHAVIOR = "queue"`, `ClientSettingsSchema.followUpBehavior` (decoding default `"queue"`) and `ClientSettingsPatch.followUpBehavior` (`optionalKey`). All changes are additive, and older persisted events and settings still decode. **Behaviour:** the decider's `thread.turn.steer` no longer throws when the turn has ended or the expected turn does not match. It now emits a deferred rejection. **Activity payload:** `provider.turn.steer.failed` gains `reason`, and deferred rows use `tone: "info"`. **Server-internal:** a new `ProviderTurnNotSteerableError` joins `ProviderAdapterError`. `ProviderService.steerTurn` maps a turn mismatch to it, and maps an unsupported adapter to it. The Claude adapter declares `turnSteering: "native"`, and the Claude presentation sets `supportsTurnSteering: true`. **Shared:** new subpath export `@ryco/shared/turnSteer` |
-| overlaps | **W1 `queue-hold-drain`:** owns the drain. The steer-attempt exclusion and the reconciliation must run where the drain runs, in ChatView today or in a global client-runtime drain afterwards. Also `message-queue/store.ts` (`beginSend`, steering map) and mobile `threadOutbox.ts` `drainThreadOutbox`. **W1 `claude-meter-wake`:** `ClaudeAdapter.completeTurn` usage computation (extracted here into `computeResultUsageSnapshot` / `emitTokenUsageSnapshot`) and the synthetic-turn creation site in `handleAssistantMessage` (constructed here via `makeClaudeTurnState`). **W1 `reactor-errors-switch`:** `ProviderCommandReactor.formatFailureDetail` and the `catchCause` in `processTurnSteerRequested`. **W2 `usage-limits` (same wave, unavoidable):** `ClaudeAdapter.handleResultMessage`, `turnStatusFromResult` and the `completeTurn` tail. **W2 `rollback-correctness` (same wave):** the `completeTurn` tail (`context.turns.push`, `updateResumeCursor`) and session-context replacement versus the identity re-check in `steerTurn`. **W2 `delegation-returns` (same wave):** steer-based parent-wake delivery will consume Claude steering and the deferred-rejection semantics. **W1 `delegation-guard-restart`:** touches a different decider case, so there is no shared function. **W1 `settlement-signals` / `provider-compat`:** adjacent `packages/shared/package.json` export-map edits. **W3 `provider-effect-outbox`:** a crash-cancelled steer must resolve as rejected with `reason: "deferred"` |
+| Field            | Value                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| id               | `claude-steering`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| title            | Claude `steerTurn` with exact-turn attribution and a safe Stop protocol; a `followUpBehavior` (`queue` \| `steer`) client setting where Mod+Enter does the opposite; direct steer from the composer; late steers are deferred into the queue and sent as the next turn                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| wave             | 2 (parallel, isolated worktree). Rebase onto wave-1 `queue-hold-drain`, `claude-meter-wake` and `reactor-errors-switch` before starting                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| verdict          | **feature**. Verified: only Codex steers today. Claude has no `steerTurn`, and `ProviderService.steerTurn` rejects every other adapter                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| size             | **L**. Server adapter work about 45%, orchestration and contracts 15%, client-runtime, web and mobile 40%                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| touched files    | **Server:** `apps/server/src/provider/Errors.ts` · `apps/server/src/provider/claudeSteering.ts` (new) · `apps/server/src/provider/Layers/ClaudeAdapter.ts` · `apps/server/src/provider/Layers/ClaudeProvider.ts` · `apps/server/src/provider/Layers/ProviderService.ts` · `apps/server/src/provider/Layers/CodexAdapter.ts` · `apps/server/src/orchestration/turnSteerFailure.ts` (new) · `apps/server/src/orchestration/Layers/ProviderCommandReactor.ts` · `apps/server/src/orchestration/decider.ts`. **Contracts and shared:** `packages/contracts/src/orchestration.ts` · `packages/contracts/src/settings.ts` · `packages/shared/src/turnSteer.ts` (new) · `packages/shared/package.json`. **Client runtime:** `packages/client-runtime/src/state/message-queue/logic.ts` · `packages/client-runtime/src/state/message-queue/store.ts` · `packages/client-runtime/src/state/session/session-logic.ts`. **Web:** `apps/web/src/components/ChatView.tsx` · `apps/web/src/components/chat/ChatComposer.tsx` · `apps/web/src/components/chat/ComposerPromptShell.tsx` · `apps/web/src/components/chat/composerFollowUp.ts` (new) · `apps/web/src/components/settings/ComposerSettings.tsx` · `apps/web/src/components/settings/settingsSearchIndex.ts` · `apps/web/src/components/settings/settingsRestore.ts` · `apps/web/src/hostedHub/environment.ts`. **Mobile:** `apps/mobile/src/state/threadOutbox.ts` · `apps/mobile/src/features/threads/ThreadDetailScreen.tsx`. **Docs:** `docs/providers/claude.md` · `KEYBINDINGS.md`. **Tests:** `claudeSteering.test.ts` (new) · `ClaudeAdapter.test.ts` · `ProviderService.test.ts` · `CodexAdapter.test.ts` · `turnSteerFailure.test.ts` (new) · `ProviderCommandReactor.test.ts` · `decider.steer.test.ts` · `AgentControlExecution.test.ts` · `packages/contracts/src/settings.test.ts` · `packages/shared/src/turnSteer.test.ts` (new) · `message-queue/logic.test.ts` · `message-queue/store.test.ts` · `session-logic.test.ts` · `composerFollowUp.test.ts` (new) · `settingsRestore.test.ts` · `ChatView.Composer.browser.tsx` · `apps/mobile/src/state/threadOutbox.test.ts` |
+| migrations       | none                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| contract changes | **Contracts:** `orchestration.ts` gains the `TurnSteerRejectionReason` literal (`"deferred" \| "failed"`), plus an `optionalKey` `reason` on the rejected branch of `thread.turn.steer.resolve` and on `ThreadTurnSteerRejectedPayload`. `settings.ts` gains the `FollowUpBehavior` literal (`"queue" \| "steer"`), `DEFAULT_FOLLOW_UP_BEHAVIOR = "queue"`, `ClientSettingsSchema.followUpBehavior` (decoding default `"queue"`) and `ClientSettingsPatch.followUpBehavior` (`optionalKey`). All changes are additive, and older persisted events and settings still decode. **Behaviour:** the decider's `thread.turn.steer` no longer throws when the turn has ended or the expected turn does not match. It now emits a deferred rejection. **Activity payload:** `provider.turn.steer.failed` gains `reason`, and deferred rows use `tone: "info"`. **Server-internal:** a new `ProviderTurnNotSteerableError` joins `ProviderAdapterError`. `ProviderService.steerTurn` maps a turn mismatch to it, and maps an unsupported adapter to it. The Claude adapter declares `turnSteering: "native"`, and the Claude presentation sets `supportsTurnSteering: true`. **Shared:** new subpath export `@ryco/shared/turnSteer`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| overlaps         | **W1 `queue-hold-drain`:** owns the drain. The steer-attempt exclusion and the reconciliation must run where the drain runs, in ChatView today or in a global client-runtime drain afterwards. Also `message-queue/store.ts` (`beginSend`, steering map) and mobile `threadOutbox.ts` `drainThreadOutbox`. **W1 `claude-meter-wake`:** `ClaudeAdapter.completeTurn` usage computation (extracted here into `computeResultUsageSnapshot` / `emitTokenUsageSnapshot`) and the synthetic-turn creation site in `handleAssistantMessage` (constructed here via `makeClaudeTurnState`). **W1 `reactor-errors-switch`:** `ProviderCommandReactor.formatFailureDetail` and the `catchCause` in `processTurnSteerRequested`. **W2 `usage-limits` (same wave, unavoidable):** `ClaudeAdapter.handleResultMessage`, `turnStatusFromResult` and the `completeTurn` tail. **W2 `rollback-correctness` (same wave):** the `completeTurn` tail (`context.turns.push`, `updateResumeCursor`) and session-context replacement versus the identity re-check in `steerTurn`. **W2 `delegation-returns` (same wave):** steer-based parent-wake delivery will consume Claude steering and the deferred-rejection semantics. **W1 `delegation-guard-restart`:** touches a different decider case, so there is no shared function. **W1 `settlement-signals` / `provider-compat`:** adjacent `packages/shared/package.json` export-map edits. **W3 `provider-effect-outbox`:** a crash-cancelled steer must resolve as rejected with `reason: "deferred"`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 
 ---
 
@@ -35,7 +35,7 @@
 
 ### 1.3 Clients
 
-- **Steer reconciliation is keyed by messageId only.** This applies to web (`ChatView.tsx:3262-3291`) and mobile (`ThreadDetailScreen.tsx:698-731`). Any historical rejection for that id ends a *new* attempt. Mobile shows every rejection in its `sendError` banner.
+- **Steer reconciliation is keyed by messageId only.** This applies to web (`ChatView.tsx:3262-3291`) and mobile (`ThreadDetailScreen.tsx:698-731`). Any historical rejection for that id ends a _new_ attempt. Mobile shows every rejection in its `sendError` banner.
 - **Enter while running enqueues the message** (`ChatView.tsx:3893-3922`). `ChatComposer.tsx:1768-1771` treats Mod+Enter exactly like Enter. There is no follow-up setting: `ClientSettingsSchema` is at `settings.ts:67-136`.
 - **The drains differ.**
   - Web (`ChatView.tsx:3936-3985`) skips the queue head while it is steering.
@@ -81,7 +81,7 @@ These were verified in `apps/server/node_modules/@anthropic-ai/claude-agent-sdk`
   - Agent Control turn authority is unchanged: same `turnId`, and `retireTurn` runs only at final completion.
 - **D2. Turn attribution uses a pure classifier, and no waiting is unbounded.**
   - A result belongs to the turn if it echoes `promptUuid` **or** any steer uuid of that turn.
-  - On such a result, echoed steers become *settled*.
+  - On such a result, echoed steers become _settled_.
   - The turn **waits** instead of completing only when all of these hold:
     - Stop was not requested.
     - At least one steer is still unsettled.
@@ -93,16 +93,16 @@ These were verified in `apps/server/node_modules/@anthropic-ai/claude-agent-sdk`
 - **D4. Stop protocol.**
   - `interruptRequested` is set on the current turn state unconditionally, because Stop is thread-scoped.
   - `cancelQueued` is sent only when the turn has unsettled steers **and** the CLI advertised `interrupt_cancel_queued_v1`. This keeps Stop byte-identical to today when no steer is pending.
-  - The receipt decides whether the turn is force-closed now and which steer uuids go into a session-level *discard set*.
+  - The receipt decides whether the turn is force-closed now and which steer uuids go into a session-level _discard set_.
   - A later CLI turn whose early echo consists only of discarded uuids, and that no open turn owns, is interrupted again and its frames are dropped.
   - A per-session `turnLock` serializes SDK frame handling against the Stop bookkeeping and the steer registration.
-- **D5. Gate.** Claude steering requires `interrupt_receipt_v1` in the session's init capabilities. It is refused, as *deferred* through `ProviderTurnNotSteerableError`, in these cases:
+- **D5. Gate.** Claude steering requires `interrupt_receipt_v1` in the session's init capabilities. It is refused, as _deferred_ through `ProviderTurnNotSteerableError`, in these cases:
   - an approval or question is pending;
   - the input is a slash command;
   - Stop has been requested;
   - the session context changed.
 - **D6. One rejection vocabulary: `reason: "deferred" | "failed"`.**
-  - *Deferred* means the message stays queued and the queue sends it as the next turn. This is Ryco's form of "a steer arriving after the turn ended becomes a new turn".
+  - _Deferred_ means the message stays queued and the queue sends it as the next turn. This is Ryco's form of "a steer arriving after the turn ended becomes a new turn".
   - Deferred rejections are quiet: info tone, excluded from the work log, no mobile banner.
   - The decider no longer throws for an ended or mismatched turn. It emits a deferred rejection.
 - **D7. Client steer attempts are keyed by the steer's request `commandId`.**
@@ -111,7 +111,7 @@ These were verified in `apps/server/node_modules/@anthropic-ai/claude-agent-sdk`
 - **D8. Follow-up behaviour.**
   - New client setting `followUpBehavior`, default `"queue"`. This matches t3's default, so upgrading changes nothing.
   - While a turn runs, Enter applies the setting and Mod+Enter does the opposite.
-  - "Steer" is implemented as *enqueue, then start a steer attempt immediately*, so every failure falls back to the existing queue.
+  - "Steer" is implemented as _enqueue, then start a steer attempt immediately_, so every failure falls back to the existing queue.
   - An ineligible steer becomes a queue entry. This is silent when implicit, and shows a warning toast when the user asked for it explicitly with Mod+Enter.
   - The running-state placeholder shows the effective action and the alternate shortcut.
   - On the web phone tier the message is always queued and no hint is shown, because that tier is frozen.
@@ -124,16 +124,16 @@ Ryco's steer command does not carry the turn-start parameters: model selection, 
 
 ### Stop scenarios (normative; each has a test in §6)
 
-| # | State when Stop lands | Receipt | Result |
-| --- | --- | --- | --- |
-| S1 | No steers | any | `interrupt()` with no argument. Behaviour is unchanged: the aborted result completes the turn as `interrupted` |
-| S2 | Prompt segment ended (waiting), steer S queued, CLI has `cancel_queued` | `{still_queued: [], cancelled: [S]}` | Force-close as `interrupted` now. S never runs |
-| S3 | Same as S2, but the CLI has only the receipt capability | `{still_queued: [S]}` | Force-close now. S goes into the discard set. When S's CLI turn starts, it is interrupted again and its frames and result are dropped. No synthetic turn |
-| S4 | Prompt P still streaming, S queued | `{still_queued: [S]}` | No force-close. P's aborted result completes the turn once. S is discarded later |
-| S5 | Prompt segment ended, S in transit (not yet seen by the CLI) | `{still_queued: []}` | S counts as running, so there is no force-close. S's first frame is owned by the open turn, which is marked `interruptRequested`, so the turn is interrupted again. S's aborted result completes the turn once |
-| S6 | Waiting state cleared by a wake turn's frames, S queued | `{still_queued: [S]}` | No steer is running and the prompt is done, so force-close |
-| S7 | Turn has steers, the prompt is queued behind a wake turn, `cancel_queued` | `cancelled ∋ promptUuid` | Force-close: the prompt never ran |
-| S8 | No receipt (defensive; steering is gated on receipt capability) | `undefined` | Force-close only if `awaitingSteerContinuation` is set. Every unsettled steer goes into the discard set |
+| #   | State when Stop lands                                                     | Receipt                              | Result                                                                                                                                                                                                         |
+| --- | ------------------------------------------------------------------------- | ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| S1  | No steers                                                                 | any                                  | `interrupt()` with no argument. Behaviour is unchanged: the aborted result completes the turn as `interrupted`                                                                                                 |
+| S2  | Prompt segment ended (waiting), steer S queued, CLI has `cancel_queued`   | `{still_queued: [], cancelled: [S]}` | Force-close as `interrupted` now. S never runs                                                                                                                                                                 |
+| S3  | Same as S2, but the CLI has only the receipt capability                   | `{still_queued: [S]}`                | Force-close now. S goes into the discard set. When S's CLI turn starts, it is interrupted again and its frames and result are dropped. No synthetic turn                                                       |
+| S4  | Prompt P still streaming, S queued                                        | `{still_queued: [S]}`                | No force-close. P's aborted result completes the turn once. S is discarded later                                                                                                                               |
+| S5  | Prompt segment ended, S in transit (not yet seen by the CLI)              | `{still_queued: []}`                 | S counts as running, so there is no force-close. S's first frame is owned by the open turn, which is marked `interruptRequested`, so the turn is interrupted again. S's aborted result completes the turn once |
+| S6  | Waiting state cleared by a wake turn's frames, S queued                   | `{still_queued: [S]}`                | No steer is running and the prompt is done, so force-close                                                                                                                                                     |
+| S7  | Turn has steers, the prompt is queued behind a wake turn, `cancel_queued` | `cancelled ∋ promptUuid`             | Force-close: the prompt never ran                                                                                                                                                                              |
+| S8  | No receipt (defensive; steering is gated on receipt capability)           | `undefined`                          | Force-close only if `awaitingSteerContinuation` is set. Every unsettled steer goes into the discard set                                                                                                        |
 
 ## 4. Changes by file
 
@@ -189,7 +189,9 @@ export class ProviderTurnNotSteerableError extends Schema.TaggedError<ProviderTu
     cause: Schema.optional(Schema.Defect()),
   },
 ) {
-  override get message(): string { return this.detail; }
+  override get message(): string {
+    return this.detail;
+  }
 }
 ```
 
@@ -270,14 +272,15 @@ receipt present:   outstanding = still_queued ∪ cancelled
 5. **`runSdkStream`** (`:3995-4001`). Run each message as `context.turnLock.withPermits(1)(handleSdkMessage(context, message))`. Deadlock review:
    - `offerRuntimeEventForContext` backpressure drains independently of the lock.
    - `canUseTool` is an SDK callback outside this path.
-   - `interruptTurn` awaits `query.interrupt()` *outside* the lock.
+   - `interruptTurn` awaits `query.interrupt()` _outside_ the lock.
 
 6. **`handleSdkMessage` prelude**, after `logNativeSdkMessage` and `ensureThreadId`:
 
    ```ts
-   if (yield* routeSteerFrame(context, message)) return; // true = consumed/dropped
+   if (yield * routeSteerFrame(context, message)) return; // true = consumed/dropped
    const ts = context.turnState;
-   if (ts?.awaitingSteerContinuation && isClaudeRootTurnFrame(message)) ts.awaitingSteerContinuation = undefined;
+   if (ts?.awaitingSteerContinuation && isClaudeRootTurnFrame(message))
+     ts.awaitingSteerContinuation = undefined;
    ```
 
    `isClaudeRootTurnFrame` matches `stream_event`, `assistant` and `user` frames with a null or undefined `parent_tool_use_id`.
@@ -340,34 +343,84 @@ receipt present:   outstanding = still_queued ∪ cancelled
 10. **New `steerTurn`**:
 
     ```ts
-    const steerTurn: NonNullable<ClaudeAdapterShape["steerTurn"]> = Effect.fn("steerTurn")(function* (input) {
-      const context = yield* requireSession(input.threadId);
-      const refuse = (reason, detail) => new ProviderTurnNotSteerableError({ provider: PROVIDER, threadId: input.threadId, turnId: input.expectedTurnId, reason, detail });
-      const turnState = context.turnState;
-      if (!turnState || turnState.turnId !== input.expectedTurnId || context.session.activeTurnId !== input.expectedTurnId || turnState.interruptRequested)
-        return yield* refuse("turn-ended", "The turn finished before this message could be steered. It stays queued and is sent next.");
-      if (context.pendingApprovals.size > 0 || context.pendingUserInputs.size > 0)
-        return yield* refuse("busy", "Claude is waiting for an approval or answer. The message stays queued.");
-      if (!context.cliCapabilities?.has(CLAUDE_CLI_CAPABILITY_INTERRUPT_RECEIPT))
-        return yield* refuse("unsupported", "This Claude Code version can't steer a running turn. The message stays queued.");
-      if (input.input?.trimStart().startsWith("/"))
-        return yield* refuse("unsupported", "Slash commands can't be steered into a running turn. The message stays queued.");
-      const message = yield* buildUserMessageEffect(
-        { threadId: input.threadId, ...(input.input ? { input: input.input } : {}), attachments: input.attachments ?? [],
-          ...(context.cacheModelSelection ? { modelSelection: context.cacheModelSelection } : {}) },
-        { fileSystem, attachmentsDir: serverConfig.attachmentsDir, boundInstanceId });
-      const steerUuid = yield* Effect.sync(() => crypto.randomUUID());
-      const registered = yield* context.turnLock.withPermits(1)(Effect.gen(function* () {
-        if (sessions.get(input.threadId) !== context || context.stopped || context.turnState !== turnState || turnState.interruptRequested) return false;
-        turnState.steerPromptUuids.add(steerUuid);
-        const offered = yield* Queue.offer(context.promptQueue, { type: "message", message: { ...message, uuid: steerUuid, priority: "now" } });
-        if (!offered) turnState.steerPromptUuids.delete(steerUuid);
-        return offered;
-      }));
-      if (!registered) return yield* refuse("turn-ended", "The turn finished before this message could be steered. It stays queued and is sent next.");
-      yield* Effect.logInfo("claude.turn.steered", { threadId: input.threadId, turnId: turnState.turnId, awaiting: turnState.awaitingSteerContinuation !== undefined });
-      return { threadId: context.session.threadId, turnId: turnState.turnId };
-    });
+    const steerTurn: NonNullable<ClaudeAdapterShape["steerTurn"]> = Effect.fn("steerTurn")(
+      function* (input) {
+        const context = yield* requireSession(input.threadId);
+        const refuse = (reason, detail) =>
+          new ProviderTurnNotSteerableError({
+            provider: PROVIDER,
+            threadId: input.threadId,
+            turnId: input.expectedTurnId,
+            reason,
+            detail,
+          });
+        const turnState = context.turnState;
+        if (
+          !turnState ||
+          turnState.turnId !== input.expectedTurnId ||
+          context.session.activeTurnId !== input.expectedTurnId ||
+          turnState.interruptRequested
+        )
+          return yield* refuse(
+            "turn-ended",
+            "The turn finished before this message could be steered. It stays queued and is sent next.",
+          );
+        if (context.pendingApprovals.size > 0 || context.pendingUserInputs.size > 0)
+          return yield* refuse(
+            "busy",
+            "Claude is waiting for an approval or answer. The message stays queued.",
+          );
+        if (!context.cliCapabilities?.has(CLAUDE_CLI_CAPABILITY_INTERRUPT_RECEIPT))
+          return yield* refuse(
+            "unsupported",
+            "This Claude Code version can't steer a running turn. The message stays queued.",
+          );
+        if (input.input?.trimStart().startsWith("/"))
+          return yield* refuse(
+            "unsupported",
+            "Slash commands can't be steered into a running turn. The message stays queued.",
+          );
+        const message = yield* buildUserMessageEffect(
+          {
+            threadId: input.threadId,
+            ...(input.input ? { input: input.input } : {}),
+            attachments: input.attachments ?? [],
+            ...(context.cacheModelSelection ? { modelSelection: context.cacheModelSelection } : {}),
+          },
+          { fileSystem, attachmentsDir: serverConfig.attachmentsDir, boundInstanceId },
+        );
+        const steerUuid = yield* Effect.sync(() => crypto.randomUUID());
+        const registered = yield* context.turnLock.withPermits(1)(
+          Effect.gen(function* () {
+            if (
+              sessions.get(input.threadId) !== context ||
+              context.stopped ||
+              context.turnState !== turnState ||
+              turnState.interruptRequested
+            )
+              return false;
+            turnState.steerPromptUuids.add(steerUuid);
+            const offered = yield* Queue.offer(context.promptQueue, {
+              type: "message",
+              message: { ...message, uuid: steerUuid, priority: "now" },
+            });
+            if (!offered) turnState.steerPromptUuids.delete(steerUuid);
+            return offered;
+          }),
+        );
+        if (!registered)
+          return yield* refuse(
+            "turn-ended",
+            "The turn finished before this message could be steered. It stays queued and is sent next.",
+          );
+        yield* Effect.logInfo("claude.turn.steered", {
+          threadId: input.threadId,
+          turnId: turnState.turnId,
+          awaiting: turnState.awaitingSteerContinuation !== undefined,
+        });
+        return { threadId: context.session.threadId, turnId: turnState.turnId };
+      },
+    );
     ```
 
     Notes on `steerTurn`:
@@ -403,6 +456,7 @@ Add `supportsTurnSteering: true` to `CLAUDE_PRESENTATION` (`:52-56`).
 #### `provider/Layers/CodexAdapter.ts` `steerTurn` (`:2307-2329`)
 
 After the existing `mapError`, add `Effect.catchTag("ProviderAdapterRequestError", (error) => …)`:
+
 - read `session.runtime.getSession`;
 - if `activeTurnId !== input.expectedTurnId`, fail with `ProviderTurnNotSteerableError({ reason: "turn-ended", cause: error, … })`;
 - otherwise re-fail with `error`.
@@ -414,7 +468,10 @@ Do not touch `mapCodexRuntimeError`, which `usage-limits` may edit.
 #### `orchestration/turnSteerFailure.ts` (new, pure)
 
 ```ts
-export interface TurnSteerFailureClassification { readonly reason: TurnSteerRejectionReason; readonly error: string }
+export interface TurnSteerFailureClassification {
+  readonly reason: TurnSteerRejectionReason;
+  readonly error: string;
+}
 export function classifyTurnSteerFailure(
   cause: Cause.Cause<unknown>,
   formatFailed: (cause: Cause.Cause<unknown>) => string,
@@ -446,12 +503,13 @@ export function classifyTurnSteerFailure(
 #### Agent Control
 
 `AgentControlExecution.ts:1191-1250` needs **no code change**:
+
 - The pre-dispatch "approved steer target changed" check is unchanged.
 - A target that ends between that check and dispatch now produces a rejection event, which the subscription already handles. That leads to `queued-after-steer-fallback`, then `waitForIdle`, then `revalidateExecution({ allowTurnAdvance: true })`.
 - This is the same path a provider-level rejection takes today. Previously the operation failed with an invariant error.
 - `CompletionReturnDelivery` stays queue-only (`:365`).
 
-Agents still cannot approve anything: steering refuses while approvals are pending. A steer that races an approval aborts the tool, and Ryco settles the aborted `canUseTool` as *cancelled* (`:4304`, `:4476`), never as approved.
+Agents still cannot approve anything: steering refuses while approvals are pending. A steer that races an approval aborts the tool, and Ryco settles the aborted `canUseTool` as _cancelled_ (`:4304`, `:4476`), never as approved.
 
 ### 4.5 `packages/client-runtime`
 
@@ -463,23 +521,38 @@ export function alternateFollowUpBehavior(b: FollowUpBehavior): FollowUpBehavior
 /** Pure resolver: not running → "send"; preferred = invert ? alternate(b) : b;
  *  "steer" degrades to "queue" when !surfaceAllowsSteer or isSlashCommand. */
 export function resolveComposerFollowUpAction(input: {
-  readonly turnRunning: boolean; readonly followUpBehavior: FollowUpBehavior; readonly invert: boolean;
-  readonly surfaceAllowsSteer: boolean; readonly isSlashCommand: boolean;
+  readonly turnRunning: boolean;
+  readonly followUpBehavior: FollowUpBehavior;
+  readonly invert: boolean;
+  readonly surfaceAllowsSteer: boolean;
+  readonly isSlashCommand: boolean;
 }): ComposerFollowUpAction;
 
 export interface QueuedMessageSteerAttempt {
-  readonly commandId: string; readonly expectedTurnId: TurnId; readonly startedAt: string; readonly explicit: boolean;
+  readonly commandId: string;
+  readonly expectedTurnId: TurnId;
+  readonly startedAt: string;
+  readonly explicit: boolean;
 }
 export type QueuedMessageSteerOutcome =
   | { readonly status: "pending" }
   | { readonly status: "accepted" }
-  | { readonly status: "rejected"; readonly reason: TurnSteerRejectionReason; readonly error: string };
+  | {
+      readonly status: "rejected";
+      readonly reason: TurnSteerRejectionReason;
+      readonly error: string;
+    };
 export function indexTurnSteerRejections(
-  activities: ReadonlyArray<{ readonly id: string; readonly kind: string; readonly payload: unknown }>,
+  activities: ReadonlyArray<{
+    readonly id: string;
+    readonly kind: string;
+    readonly payload: unknown;
+  }>,
 ): ReadonlyMap<string, TurnSteerRejectionActivity>; // keyed by activity id
 /** accepted if projected; rejected only for the activity id of THIS attempt's commandId; else pending. */
 export function resolveQueuedMessageSteerOutcome(input: {
-  readonly messageId: string; readonly attempt: QueuedMessageSteerAttempt;
+  readonly messageId: string;
+  readonly attempt: QueuedMessageSteerAttempt;
   readonly projectedMessageIds: ReadonlySet<string>;
   readonly rejectionsByActivityId: ReadonlyMap<string, TurnSteerRejectionActivity>;
 }): QueuedMessageSteerOutcome;
@@ -513,6 +586,7 @@ Return `false` when `readTurnSteerRejectionActivity(activity)?.reason === "defer
    - optionally prepare editors, build text and attachments, then dispatch `buildQueuedMessageSteerCommand({ commandId, … })`.
 
    If the dispatch throws, call `endSteer(id, commandId)` and show the existing error toast. The row's Steer button calls the function with `{ explicit: true, prepareEditors: true }`.
+
 3. **Replace the two reconciliation effects (`:3262-3291`) with one effect:**
    - build `indexTurnSteerRejections(threadActivities)` and the projected-id set;
    - for each attempt, apply `resolveQueuedMessageSteerOutcome`:
@@ -521,6 +595,7 @@ Return `false` when `readTurnSteerRejectionActivity(activity)?.reason === "defer
      - if `attempt.explicit`, also show a toast: info "Not steered" for deferred, error "Steer failed" for failed, using the activity's `error` text.
 
    After `queue-hold-drain`, run this reconciliation wherever the drain lives, before drain eligibility is checked.
+
 4. **Signatures.** `runSend(e?, options?: { readonly invertFollowUp?: boolean })`. `onSend` forwards `options`.
 5. **Running branch (`:3893-3922`).**
    - Compute `action = resolveComposerFollowUpAction({ turnRunning: true, followUpBehavior: settings.followUpBehavior, invert, surfaceAllowsSteer: presentationTier !== "phone", isSlashCommand: trimmed.startsWith("/") })`.
@@ -556,6 +631,7 @@ Return `false` when `readTurnSteerRejectionActivity(activity)?.reason === "defer
   - a reset button when the value differs from `DEFAULT_UNIFIED_SETTINGS.followUpBehavior`.
 
   The section is already hidden on the phone tier (`SettingsPanels.tsx:688`).
+
 - `settingsSearchIndex.ts`: add a `general` / `client` entry with keywords "steer queue follow-up enter".
 - `settingsRestore.ts`: add `followUpBehavior: "Follow-up while working"`.
 
@@ -579,6 +655,7 @@ Also reset `steerAttemptsByThreadKey: {}`.
   - pass `new Set(map.keys())` to `ThreadQueuedMessages`.
 
   Screen logic stays thin, because mobile has no component tests.
+
 - Mobile does **not** get the follow-up setting or the composer inversion. See §8.
 
 ### 4.8 Docs
@@ -608,20 +685,21 @@ Run each focused file with `bun run --cwd <pkg> test <file>`. Never run `bun tes
 
 **`decideClaudeTurnResult` matrix:**
 
-| # | Steers / settled | Result | Expected |
-| --- | --- | --- | --- |
-| 1 | none | abort | complete (regression) |
-| 2 | S unsettled | abort, count 1 | await-steer |
-| 3 | S unsettled | abort, count 0 | complete |
-| 4 | S unsettled | abort, count absent | complete |
-| 5 | S settled earlier | abort, count 1 | complete (critique case: steers all settled) |
-| 6 | S echoed now (folded) | success | complete, newlySettled [S] |
-| 7 | S unsettled | success, count 1 | await-steer |
-| 8 | S unsettled | failure (`api_error`), count 1 | complete |
-| 9 | S unsettled, `interruptRequested` | abort, count 1 | complete |
-| 10 | S1 settled, S2 unsettled | abort, count 1 | await-steer |
+| #   | Steers / settled                  | Result                         | Expected                                     |
+| --- | --------------------------------- | ------------------------------ | -------------------------------------------- |
+| 1   | none                              | abort                          | complete (regression)                        |
+| 2   | S unsettled                       | abort, count 1                 | await-steer                                  |
+| 3   | S unsettled                       | abort, count 0                 | complete                                     |
+| 4   | S unsettled                       | abort, count absent            | complete                                     |
+| 5   | S settled earlier                 | abort, count 1                 | complete (critique case: steers all settled) |
+| 6   | S echoed now (folded)             | success                        | complete, newlySettled [S]                   |
+| 7   | S unsettled                       | success, count 1               | await-steer                                  |
+| 8   | S unsettled                       | failure (`api_error`), count 1 | complete                                     |
+| 9   | S unsettled, `interruptRequested` | abort, count 1                 | complete                                     |
+| 10  | S1 settled, S2 unsettled          | abort, count 1                 | await-steer                                  |
 
 **Other pure cases:**
+
 - `classifyClaudeResultKind`:
   - `aborted_tools` with no "abort" in the error text → abort;
   - no `terminal_reason` with "Request was aborted" → abort;
@@ -696,6 +774,7 @@ Extend `FakeClaudeQuery` so that `interrupt(options?)` records the options and r
   Also cover:
   - resolve rejected with `reason: "deferred"` → info activity;
   - resolve without `reason` → legacy error "Steer failed".
+
 - **`AgentControlExecution.test.ts`:** a variant of "falls back from rejected steering…" (`:675`) whose rejection payload carries `reason: "deferred"` → `delivery: "queued-after-steer-fallback"`, with `thread.turn.start` dispatched after idle.
 
 ### Contracts, shared, client-runtime
@@ -759,13 +838,14 @@ Extend `FakeClaudeQuery` so that `interrupt(options?)` records the options and r
 ## 9. Coordination and overlaps
 
 - **`queue-hold-drain` (W1).** This package rebases on it. The drain owner must skip entries with a live steer attempt, and must run `resolveQueuedMessageSteerOutcome` reconciliation before checking eligibility. Deferred entries are subject to its holds (Stop or failure), which is intended.
-- **`claude-meter-wake` (W1).** Extract `computeResultUsageSnapshot` / `emitTokenUsageSnapshot` from *their* version of the `completeTurn` usage code. If they moved the synthetic-turn creation site (#15055), construct it with `makeClaudeTurnState`. `routeSteerFrame` runs before any synthetic-turn creation.
+- **`claude-meter-wake` (W1).** Extract `computeResultUsageSnapshot` / `emitTokenUsageSnapshot` from _their_ version of the `completeTurn` usage code. If they moved the synthetic-turn creation site (#15055), construct it with `makeClaudeTurnState`. `routeSteerFrame` runs before any synthetic-turn creation.
 - **`reactor-errors-switch` (W1).** `classifyTurnSteerFailure` takes the formatter as a parameter, so pass their user-facing formatter.
 - **`usage-limits` (W2, same wave, unavoidable overlap in `handleResultMessage`, `turnStatusFromResult` and the `completeTurn` tail).** Their usage-limit classification applies to results this classifier marks `complete`, because usage-limit results are `failure`, which never waits. Agreed split:
   - this package owns the correlation check and the await branch at the top of `handleResultMessage`, and the `terminal_reason` abort line in `turnStatusFromResult`;
   - `usage-limits` owns failure classification and the error class.
 
   Whichever merges second rebases.
+
 - **`rollback-correctness` (W2, same wave).** They own the `context.turns.push` / `updateResumeCursor` tail of `completeTurn` and the query or context replacement. This package owns `sealTurnSegment` and the usage extraction at the top. The identity re-check and the offer boolean in `steerTurn` make a replaced context fail as `turn-ended`.
 - **`delegation-returns` (W2, same wave).** If parent wakes are delivered by steer, treat any `thread.turn-steer-rejected` (deferred or failed) as "queue". Do not edit `decider.ts` `thread.turn.steer` or the reactor steer handler. The untrusted-result labelling stays.
 - **`settlement-signals` / `provider-compat` (W1).** Adjacent edits to the `packages/shared/package.json` exports map. Keep all entries.
@@ -773,19 +853,19 @@ Extend `FakeClaudeQuery` so that `interrupt(options?)` records the options and r
 
 ## 10. Review resolution
 
-| # | Severity | Issue | Resolution |
-| --- | --- | --- | --- |
-| 1 | major | Stop does not stop a steer the CLI has queued | **Accepted, extended.** Verified that the 0.3.263 runtime forwards `interrupt({ cancelQueued: true })`. The flag is sent only when steers are pending and the CLI advertises `interrupt_cancel_queued_v1`. The receipt drives force-close and the discard set. The §3 S1–S8 table covers the in-transit and wake cases the critique did not list, and each row has a test |
-| 2 | major | The await step can leave a turn running forever | **Accepted, strengthened.** Waiting requires unsettled steers after subtracting settled ones, an abort or success segment, and a *positive* `queued_turn_count > 0`. An absent or zero count completes the turn. `interruptRequested` is set unconditionally. Matrix rows 3, 4, 5 and 9 pin this down |
-| 3 | major | Rejection reconciliation keyed only by messageId | **Accepted.** Attempts are keyed by `commandId`, and `endSteer` matches the `commandId`. The shared pure helper is used by web and mobile and handles deferred rejections quietly. The mobile drain gets the steering exclusion. Stale-rejection tests are added |
-| 4 | minor | Reasoning blocks are left open on seal or completion | **Accepted.** `sealTurnSegment` closes them, and `completeTurn` inherits the fix. Tests (c) and (k) |
-| 5 | minor | Slash input can be steered mid-turn | **Accepted.** The adapter refuses `unsupported`, which is deferred, and the client resolver queues slash input. Test (b) and resolver matrix |
-| 6 | minor | Codex late steer reads "failed" and shows raw session text | **Accepted.** Codex `steerTurn` checks state to map to `turn-ended`. Session-not-found and closed errors become deferred with a friendly sentence |
-| 7 | minor | Incomplete coordination; `steerTurn` captures a stale context | **Accepted.** §9 names `claude-meter-wake`, `rollback-correctness`, `usage-limits` and `delegation-returns`. `steerTurn` re-checks identity and the offer boolean under `turnLock` |
-| 8 | minor | The deferred activity pollutes the work log | **Accepted.** Deferred rows are info tone and excluded in `session-logic` |
-| 9 | minor | No usage update between segments | **Accepted.** The await branch emits `thread.token-usage.updated` from the segment result. Per-segment accumulation into `turn.completed.usage` is out of scope (§8) |
-| 10 | minor | Ordering, labels, silent fallback and Mod+Enter reservation are under-specified | **Accepted.** D9 lets a direct steer jump ahead, with a test. The running placeholder uses the alternate action. A warning toast appears only for explicit Mod+Enter fallback. KEYBINDINGS.md gets a reservation note |
-| 11 | minor | Test gaps | **Accepted.** Every listed case is in §6: the classifier matrix, receipt fakes, ProviderService and reactor deferral, the client stale-attempt case, the Agent Control deferred variant, and a Claude-shaped adapter in ProviderService |
+| #   | Severity | Issue                                                                           | Resolution                                                                                                                                                                                                                                                                                                                                                                |
+| --- | -------- | ------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | major    | Stop does not stop a steer the CLI has queued                                   | **Accepted, extended.** Verified that the 0.3.263 runtime forwards `interrupt({ cancelQueued: true })`. The flag is sent only when steers are pending and the CLI advertises `interrupt_cancel_queued_v1`. The receipt drives force-close and the discard set. The §3 S1–S8 table covers the in-transit and wake cases the critique did not list, and each row has a test |
+| 2   | major    | The await step can leave a turn running forever                                 | **Accepted, strengthened.** Waiting requires unsettled steers after subtracting settled ones, an abort or success segment, and a _positive_ `queued_turn_count > 0`. An absent or zero count completes the turn. `interruptRequested` is set unconditionally. Matrix rows 3, 4, 5 and 9 pin this down                                                                     |
+| 3   | major    | Rejection reconciliation keyed only by messageId                                | **Accepted.** Attempts are keyed by `commandId`, and `endSteer` matches the `commandId`. The shared pure helper is used by web and mobile and handles deferred rejections quietly. The mobile drain gets the steering exclusion. Stale-rejection tests are added                                                                                                          |
+| 4   | minor    | Reasoning blocks are left open on seal or completion                            | **Accepted.** `sealTurnSegment` closes them, and `completeTurn` inherits the fix. Tests (c) and (k)                                                                                                                                                                                                                                                                       |
+| 5   | minor    | Slash input can be steered mid-turn                                             | **Accepted.** The adapter refuses `unsupported`, which is deferred, and the client resolver queues slash input. Test (b) and resolver matrix                                                                                                                                                                                                                              |
+| 6   | minor    | Codex late steer reads "failed" and shows raw session text                      | **Accepted.** Codex `steerTurn` checks state to map to `turn-ended`. Session-not-found and closed errors become deferred with a friendly sentence                                                                                                                                                                                                                         |
+| 7   | minor    | Incomplete coordination; `steerTurn` captures a stale context                   | **Accepted.** §9 names `claude-meter-wake`, `rollback-correctness`, `usage-limits` and `delegation-returns`. `steerTurn` re-checks identity and the offer boolean under `turnLock`                                                                                                                                                                                        |
+| 8   | minor    | The deferred activity pollutes the work log                                     | **Accepted.** Deferred rows are info tone and excluded in `session-logic`                                                                                                                                                                                                                                                                                                 |
+| 9   | minor    | No usage update between segments                                                | **Accepted.** The await branch emits `thread.token-usage.updated` from the segment result. Per-segment accumulation into `turn.completed.usage` is out of scope (§8)                                                                                                                                                                                                      |
+| 10  | minor    | Ordering, labels, silent fallback and Mod+Enter reservation are under-specified | **Accepted.** D9 lets a direct steer jump ahead, with a test. The running placeholder uses the alternate action. A warning toast appears only for explicit Mod+Enter fallback. KEYBINDINGS.md gets a reservation note                                                                                                                                                     |
+| 11  | minor    | Test gaps                                                                       | **Accepted.** Every listed case is in §6: the classifier matrix, receipt fakes, ProviderService and reactor deferral, the client stale-attempt case, the Agent Control deferred variant, and a Claude-shaped adapter in ProviderService                                                                                                                                   |
 
 The verdict "feature" was re-verified independently; see §1.1.
 
@@ -803,6 +883,7 @@ The verdict "feature" was re-verified independently; see §1.1.
 ## 12. Validation
 
 Run only the focused files listed in §6:
+
 - `bun run --cwd apps/server test <file>`;
 - `bun run --cwd packages/client-runtime test <file>`;
 - `bun run --cwd packages/contracts test src/settings.test.ts`;
