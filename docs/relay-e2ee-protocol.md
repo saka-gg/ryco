@@ -4414,17 +4414,25 @@ data rides in handshake payloads applies with no pairing exception.
    creates no record, and inside a window the eviction target is _selected_ here but not yet
    removed. The node then emits the generic `E2EEHandshakeReject` and closes, and only afterwards
    commits the pending-class mutation — the eviction, where one was selected, and the creation of
-   the new record including its §13.4 safety number — on a best-effort basis, and atomically with
-   respect to itself. The node MUST NOT gate the reject or the close on that commit (§11.2): this
-   is the only pre-key failure path that carries an fsync, and leaving it on the response path
-   would make "this key is not on file" — or "the owner has a pairing window open" — measurable
-   from the wire by latency alone. A pending-class mutation lost to a crash before it commits is a
-   benign availability event; the client re-pairs.
+   the new record including its §13.4 safety number and observed role; or, for a key that already
+   has a `pending` record, the refresh of that record's `observedRole` (§13.6) when this attempt
+   arrived under a different `channel.open` role — on a best-effort basis, and atomically with
+   respect to itself. A key already on file as `approved` or `revoked` never causes a record write
+   here — nor does one the owner approved or revoked between this decision and its commit, which
+   finds the key outside the pending class and leaves it alone: a peer's hello cannot name a
+   record outside the pending class. The node MUST NOT gate the reject or the close on that
+   commit (§11.2): this is the only pre-key failure path that carries an fsync, and leaving it on
+   the response path would make "this key is not on file", "this key is pending under another
+   role" — or "the owner has a pairing window open" — measurable from the wire by latency alone.
+   A pending-class mutation lost to a crash before it commits is a benign availability event; the
+   client re-pairs.
 
 4. Both ends display the safety number (§13.4): the node CLI from the pending record, the
    client computed locally from its own keys and the advertised node identity key. The
-   pending record persists the **derived safety number only** as bounded display metadata —
-   never either raw key.
+   pending record persists the **derived safety number** as its only key-derived display
+   metadata, plus the node's own observed `channel.open` role (§13.6 `observedRole`) — never
+   either raw key. The observed role is Hub-assigned display metadata, never authority: it is at
+   most what an owner surface offers as the role to approve.
 5. The owner compares the safety number and node fingerprint against the local node
    CLI/enrollment surface, approves the client key on the node with an explicit maximum role
    and capability set, and marks the node pin `verified` on the device. Marking it `verified`
