@@ -231,4 +231,11 @@ different API keys, base URLs, or router settings, use Environment variables.
 
 Do not put environment variable assignments in `Launch arguments`.
 
+## Background Wake Turns
+
+Claude can start a turn without a prompt from you, for example when a background command or agent
+finishes. Ryco shows the thread as working from the moment Claude starts that request, and the turn's
+reasoning and text stream like any other turn. Stop ends a background turn too. If a background turn
+starts but produces no output for two minutes, Ryco ends it.
+
 See [observed cache usage and resume review](./claude-cache.md) for evidence scopes, compaction, and recovery behavior.
