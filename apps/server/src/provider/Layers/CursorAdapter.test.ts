@@ -31,6 +31,7 @@ class CursorAdapter extends Context.Service<CursorAdapter, CursorAdapterShape>()
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const mockAgentPath = path.join(__dirname, "../../../scripts/acp-mock-agent.ts");
 const bunExe = "bun";
+const runtimeAssistantItemIdPattern = /^assistant:mock-session-1:runtime:[0-9a-f-]{36}:segment:0$/;
 
 async function makeMockAgentWrapper(
   extraEnv?: Record<string, string>,
@@ -209,7 +210,7 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
       assert.isDefined(delta);
       if (delta?.type === "content.delta") {
         assert.equal(delta.payload.delta, "hello from mock");
-        assert.match(String(delta.itemId), /^assistant:mock-session-1:segment:0$/);
+        assert.match(String(delta.itemId), runtimeAssistantItemIdPattern);
       }
 
       const assistantCompleted = runtimeEvents.find(
@@ -711,7 +712,7 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
           if (contentDelta?.type === "content.delta") {
             assert.equal(String(contentDelta.turnId), String(turn.turnId));
             assert.equal(contentDelta.payload.delta, "hello from mock");
-            assert.equal(String(contentDelta.itemId), "assistant:mock-session-1:segment:0");
+            assert.match(String(contentDelta.itemId), runtimeAssistantItemIdPattern);
           }
         });
 
@@ -972,6 +973,129 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
 
       yield* adapter.stopSession(threadId);
     }),
+  );
+
+  it.effect(
+    "a resumed Cursor session does not re-emit replayed history and mints fresh assistant ids",
+    () =>
+      Effect.gen(function* () {
+        const adapter = yield* CursorAdapter;
+        const serverSettings = yield* ServerSettingsService;
+        const threadId = ThreadId.make("cursor-resume-replay-quarantine");
+        const firstRuntimeSessionId = RuntimeSessionId.make("test-cursoradapter-resume-1");
+        const resumedRuntimeSessionId = RuntimeSessionId.make("test-cursoradapter-resume-2");
+        const runtimeEvents: Array<ProviderRuntimeEvent> = [];
+        const firstTurnSettled = yield* Deferred.make<void>();
+        const resumedTurnSettled = yield* Deferred.make<void>();
+
+        const wrapperPath = yield* Effect.promise(() =>
+          makeMockAgentWrapper({ RYCO_ACP_REPLAY_HISTORY_CHUNKS: "3" }),
+        );
+        yield* serverSettings.updateSettings({
+          providers: { cursor: { binaryPath: wrapperPath } },
+        });
+
+        const eventsOf = (runtimeSessionId: RuntimeSessionId) =>
+          runtimeEvents.filter(
+            (event) => String(event.runtimeSessionId) === String(runtimeSessionId),
+          );
+        // Settled once the turn completed and its assistant segment was closed.
+        const isTurnSettled = (runtimeSessionId: RuntimeSessionId) => {
+          const events = eventsOf(runtimeSessionId);
+          const completed = events.find((event) => event.type === "turn.completed");
+          return (
+            completed !== undefined &&
+            events.some(
+              (event) =>
+                event.type === "item.completed" &&
+                event.payload.itemType === "assistant_message" &&
+                String(event.turnId) === String(completed.turnId),
+            )
+          );
+        };
+        const firstAssistantItemId = (events: ReadonlyArray<ProviderRuntimeEvent>) =>
+          events.find(
+            (event) =>
+              event.type === "item.started" && event.payload.itemType === "assistant_message",
+          )?.itemId;
+
+        const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+          Effect.gen(function* () {
+            if (String(event.threadId) !== String(threadId)) {
+              return;
+            }
+            runtimeEvents.push(event);
+            if (isTurnSettled(firstRuntimeSessionId)) {
+              yield* Deferred.succeed(firstTurnSettled, undefined);
+            }
+            if (isTurnSettled(resumedRuntimeSessionId)) {
+              yield* Deferred.succeed(resumedTurnSettled, undefined);
+            }
+          }),
+        ).pipe(Effect.forkChild);
+
+        yield* adapter.startSession({
+          runtimeSessionId: firstRuntimeSessionId,
+          threadId,
+          provider: ProviderDriverKind.make("cursor"),
+          cwd: process.cwd(),
+          runtimeMode: "full-access",
+          modelSelection: { instanceId: ProviderInstanceId.make("cursor"), model: "default" },
+        });
+        yield* adapter.sendTurn({ threadId, input: "first turn", attachments: [] });
+        yield* Deferred.await(firstTurnSettled);
+        yield* adapter.stopSession(threadId);
+
+        const resumed = yield* adapter.startSession({
+          runtimeSessionId: resumedRuntimeSessionId,
+          threadId,
+          provider: ProviderDriverKind.make("cursor"),
+          cwd: process.cwd(),
+          runtimeMode: "full-access",
+          resumeCursor: { schemaVersion: 1, sessionId: "mock-session-1" },
+          modelSelection: { instanceId: ProviderInstanceId.make("cursor"), model: "default" },
+        });
+        assert.deepStrictEqual(resumed.resumeCursor, {
+          schemaVersion: 1,
+          sessionId: "mock-session-1",
+        });
+        const resumedTurn = yield* adapter.sendTurn({
+          threadId,
+          input: "resumed turn",
+          attachments: [],
+        });
+        yield* Deferred.await(resumedTurnSettled);
+        yield* Fiber.interrupt(runtimeEventsFiber);
+
+        const resumedEvents = eventsOf(resumedRuntimeSessionId);
+        const turnStartedIndex = resumedEvents.findIndex((event) => event.type === "turn.started");
+        assert.isAtLeast(turnStartedIndex, 0);
+        // The session/load replay must not surface as turn-less transcript output.
+        assert.deepStrictEqual(
+          resumedEvents
+            .slice(0, turnStartedIndex)
+            .filter((event) => event.type === "content.delta" || event.type.startsWith("item."))
+            .map((event) => event.type),
+          [],
+        );
+
+        const contentDeltas = resumedEvents.filter((event) => event.type === "content.delta");
+        assert.isAbove(contentDeltas.length, 0);
+        for (const delta of contentDeltas) {
+          assert.equal(String(delta.turnId), String(resumedTurn.turnId));
+          if (delta.type === "content.delta") {
+            assert.notInclude(delta.payload.delta, "replayed");
+          }
+        }
+
+        const idA = String(firstAssistantItemId(eventsOf(firstRuntimeSessionId)));
+        const idB = String(firstAssistantItemId(resumedEvents));
+        assert.match(idA, runtimeAssistantItemIdPattern);
+        assert.match(idB, runtimeAssistantItemIdPattern);
+        assert.notEqual(idB, idA);
+
+        yield* adapter.stopSession(threadId);
+      }),
   );
 
   it.effect("cancels pending ACP approvals and marks the turn cancelled when interrupted", () =>

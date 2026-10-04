@@ -1,4 +1,16 @@
-import { Cause, Deferred, Effect, Exit, Layer, Queue, Ref, Scope, Context, Stream } from "effect";
+import {
+  Cause,
+  Deferred,
+  Effect,
+  Exit,
+  Layer,
+  Queue,
+  Ref,
+  Scope,
+  Semaphore,
+  Context,
+  Stream,
+} from "effect";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import * as EffectAcpClient from "effect-acp/client";
 import * as EffectAcpErrors from "effect-acp/errors";
@@ -142,6 +154,24 @@ interface EnsureActiveAssistantSegmentResult {
   readonly startedEvent?: Extract<AcpParsedSessionEvent, { readonly _tag: "AssistantItemStarted" }>;
 }
 
+/** Session metadata that is still worth surfacing when it arrives during startup. */
+type AcpStartupMetadataEvent = Extract<
+  AcpParsedSessionEvent,
+  { readonly _tag: "CommandsUpdated" | "ModeChanged" | "UsageUpdated" }
+>;
+
+const isStartupMetadataEvent = (event: AcpParsedSessionEvent): event is AcpStartupMetadataEvent =>
+  event._tag === "CommandsUpdated" || event._tag === "ModeChanged" || event._tag === "UsageUpdated";
+
+/** Latest event per tag, ordered by latest arrival. Bounded to 3 entries. */
+const coalesceStartupMetadata = (
+  current: ReadonlyArray<AcpStartupMetadataEvent>,
+  next: AcpStartupMetadataEvent,
+): ReadonlyArray<AcpStartupMetadataEvent> => [
+  ...current.filter((event) => event._tag !== next._tag),
+  next,
+];
+
 export class AcpSessionRuntime extends Context.Service<AcpSessionRuntime, AcpSessionRuntimeShape>()(
   "ryco/provider/acp/AcpSessionRuntime",
 ) {
@@ -172,6 +202,19 @@ const makeAcpSessionRuntime = (
     const assistantSegmentRef = yield* Ref.make<AcpAssistantSegmentState>({ nextSegmentIndex: 0 });
     const configOptionsRef = yield* Ref.make(sessionConfigOptionsFromSetup(undefined));
     const startStateRef = yield* Ref.make<AcpStartState>({ _tag: "NotStarted" });
+    // One id per runtime: the ACP session id is reused across resumes, so a
+    // per-runtime segment counter alone would re-mint ids already in history.
+    const assistantItemRuntimeId = yield* Effect.sync(() => crypto.randomUUID());
+    const startupMetadataRef = yield* Ref.make<ReadonlyArray<AcpStartupMetadataEvent>>([]);
+    // Serialises session/update handling with the Starting -> Started transition so
+    // flushed startup metadata is always queued before any live update.
+    //
+    // DEADLOCK HAZARD: after start, a handler may block on a full `eventQueue`
+    // while it holds this permit. That is safe only because the start transition
+    // is the sole other permit taker and it runs once, before any post-start
+    // handler. Never add a permit user that can run after start.
+    const sessionUpdateLock = yield* Semaphore.make(1);
+    const isStarted = Ref.get(startStateRef).pipe(Effect.map((state) => state._tag === "Started"));
 
     const logRequest = (event: AcpSessionRequestLogEvent) =>
       options.requestLogger ? options.requestLogger(event) : Effect.void;
@@ -251,13 +294,18 @@ const makeAcpSessionRuntime = (
     const acp = yield* Effect.service(EffectAcpClient.AcpClient).pipe(Effect.provide(acpContext));
 
     yield* acp.handleSessionUpdate((notification) =>
-      handleSessionUpdate({
-        queue: eventQueue,
-        modeStateRef,
-        toolCallsRef,
-        assistantSegmentRef,
-        params: notification,
-      }),
+      sessionUpdateLock.withPermit(
+        handleSessionUpdate({
+          queue: eventQueue,
+          modeStateRef,
+          toolCallsRef,
+          assistantSegmentRef,
+          assistantItemRuntimeId,
+          isStarted,
+          startupMetadataRef,
+          params: notification,
+        }),
+      ),
     );
 
     const initializeClientCapabilities = {
@@ -536,13 +584,25 @@ const makeAcpSessionRuntime = (
             return [
               startOnce.pipe(
                 Effect.tap((result) =>
-                  Ref.set(startStateRef, { _tag: "Started", result }).pipe(
-                    Effect.andThen(Deferred.succeed(deferred, result)),
-                  ),
+                  // The flush offers at most 3 events into an empty queue: the
+                  // startup quarantine never offers, so this cannot block.
+                  sessionUpdateLock
+                    .withPermit(
+                      Ref.set(startStateRef, { _tag: "Started", result }).pipe(
+                        Effect.andThen(Ref.getAndSet(startupMetadataRef, [])),
+                        Effect.flatMap((metadata) =>
+                          Effect.forEach(metadata, (event) => Queue.offer(eventQueue, event), {
+                            discard: true,
+                          }),
+                        ),
+                      ),
+                    )
+                    .pipe(Effect.andThen(Deferred.succeed(deferred, result))),
                 ),
                 Effect.onError((cause) =>
                   Deferred.failCause(deferred, cause).pipe(
                     Effect.andThen(Ref.set(startStateRef, { _tag: "NotStarted" })),
+                    Effect.andThen(Ref.set(startupMetadataRef, [])),
                   ),
                 ),
               ),
@@ -677,12 +737,18 @@ const handleSessionUpdate = ({
   modeStateRef,
   toolCallsRef,
   assistantSegmentRef,
+  assistantItemRuntimeId,
+  isStarted,
+  startupMetadataRef,
   params,
 }: {
   readonly queue: Queue.Queue<AcpParsedSessionEvent>;
   readonly modeStateRef: Ref.Ref<AcpSessionModeState | undefined>;
   readonly toolCallsRef: Ref.Ref<Map<string, AcpToolCallState>>;
   readonly assistantSegmentRef: Ref.Ref<AcpAssistantSegmentState>;
+  readonly assistantItemRuntimeId: string;
+  readonly isStarted: Effect.Effect<boolean>;
+  readonly startupMetadataRef: Ref.Ref<ReadonlyArray<AcpStartupMetadataEvent>>;
   readonly params: EffectAcpSchema.SessionNotification;
 }): Effect.Effect<void> =>
   Effect.gen(function* () {
@@ -691,6 +757,21 @@ const handleSessionUpdate = ({
       yield* Ref.update(modeStateRef, (current) =>
         current === undefined ? current : updateModeState(current, parsed.modeId!),
       );
+    }
+    if (!(yield* isStarted)) {
+      // Startup quarantine. `prompt` requires Started, so nothing that arrives before
+      // start() resolves belongs to a Ryco turn: it is session/load history replay or
+      // setup noise. HARD REQUIREMENT: never Queue.offer here and never touch segment
+      // or tool-call state. The adapter drains `eventQueue` only after start() returns,
+      // and effect-acp runs this handler inline in the stdin read loop, so a blocking
+      // offer would stall the session/load response (unbounded replay => hung start).
+      const metadata = parsed.events.filter(isStartupMetadataEvent);
+      if (metadata.length > 0) {
+        yield* Ref.update(startupMetadataRef, (current) =>
+          metadata.reduce(coalesceStartupMetadata, current),
+        );
+      }
+      return;
     }
     for (const event of parsed.events) {
       if (event._tag === "ToolCallUpdated") {
@@ -730,6 +811,7 @@ const handleSessionUpdate = ({
           queue,
           assistantSegmentRef,
           sessionId: params.sessionId,
+          runtimeId: assistantItemRuntimeId,
         });
         yield* Queue.offer(queue, {
           ...event,
@@ -777,17 +859,21 @@ function shouldEmitToolCallUpdate(
   return previous === undefined || previous.title !== next.title || previous.detail !== next.detail;
 }
 
-const assistantItemId = (sessionId: string, segmentIndex: number) =>
-  `assistant:${sessionId}:segment:${segmentIndex}`;
+// Legacy ids (`assistant:<sessionId>:segment:<n>`) have no `:runtime:` part, so
+// runtime-scoped ids can never collide with assistant messages already in history.
+const assistantItemId = (sessionId: string, runtimeId: string, segmentIndex: number) =>
+  `assistant:${sessionId}:runtime:${runtimeId}:segment:${segmentIndex}`;
 
 const ensureActiveAssistantSegment = ({
   queue,
   assistantSegmentRef,
   sessionId,
+  runtimeId,
 }: {
   readonly queue: Queue.Queue<AcpParsedSessionEvent>;
   readonly assistantSegmentRef: Ref.Ref<AcpAssistantSegmentState>;
   readonly sessionId: string;
+  readonly runtimeId: string;
 }) =>
   Ref.modify<AcpAssistantSegmentState, EnsureActiveAssistantSegmentResult>(
     assistantSegmentRef,
@@ -795,7 +881,7 @@ const ensureActiveAssistantSegment = ({
       if (current.activeItemId) {
         return [{ itemId: current.activeItemId }, current] as const;
       }
-      const itemId = assistantItemId(sessionId, current.nextSegmentIndex);
+      const itemId = assistantItemId(sessionId, runtimeId, current.nextSegmentIndex);
       return [
         {
           itemId,
