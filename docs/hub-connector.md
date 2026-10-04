@@ -573,7 +573,9 @@ and the normal server listener follow their existing shutdown path.
   unlock or restore the store and run `ryco hub resume` to retry at once. Do not copy a node ID or
   generate a replacement key manually.
 - `identity_store_unavailable`: the credential store could not be opened at all when this process
-  started, and no retry can repair it. Fix the store, then restart Ryco.
+  started, and no retry can repair it. Fix the store, then restart Ryco. On headless Linux this is
+  usually a missing Secret Service; `ryco setup` detects that and offers the explicit
+  permissioned-file fallback.
 - `enrollment_expired`: the ceremony's own expiry passed. Start a new one.
 - `identity_origin_mismatch`: use the origin to which the identity was enrolled or perform an
   approved re-enrollment.
