@@ -94,13 +94,27 @@ function turnDiffCompleted(
   });
 }
 
-/** `session-set` leaves the latest turn alone unless it starts one. */
+/**
+ * `session-set` leaves the latest turn alone unless it starts one or the server
+ * releases it (`releasedTurn`, decided by the server's turn finalization).
+ */
 function sessionSet(
   sequence: number,
   status: "running" | "ready",
   activeTurnId: string | null,
+  released?: { readonly turnId: string; readonly state: "completed" | "interrupted" | "error" },
 ): OrchestrationEvent {
   return threadEvent(sequence, "thread.session-set", {
+    ...(released
+      ? {
+          releasedTurn: {
+            turnId: TurnId.make(released.turnId),
+            state: released.state,
+            reason: "provider-turn-completed",
+            completedAt: `2026-10-01T10:00:${String(10 + sequence).padStart(2, "0")}.000Z`,
+          },
+        }
+      : {}),
     session: {
       threadId: ThreadId.make("t"),
       status,
@@ -275,9 +289,10 @@ describe("message queue drain coordinator", () => {
     await flush();
     expect(f.coordinator.inspect(KEY).lastStep).toEqual({ kind: "wait", reason: "busy" });
     // A Codex turn in a git repo: the first turn.diff.updated dispatches a
-    // placeholder `missing` checkpoint, which the client maps to `interrupted`.
+    // placeholder `missing` checkpoint. Checkpoints never change an existing turn's
+    // state, so the turn keeps reading as running.
     f.apply(turnDiffCompleted(1, "turn-1", "placeholder"));
-    expect(f.latestTurnState()).toBe("interrupted");
+    expect(f.latestTurnState()).toBe("running");
     await flush();
     expect(f.coordinator.inspect(KEY).lastStep).toEqual({ kind: "wait", reason: "busy" });
     expect(f.queue.getState().holdsByThreadKey[KEY]).toBeUndefined();
@@ -296,8 +311,8 @@ describe("message queue drain coordinator", () => {
     await flush();
     f.apply(turnDiffCompleted(1, "turn-1", "placeholder"));
     // turn.completed settles the session; the capture is still running (or failed).
-    f.apply(sessionSet(2, "ready", null));
-    expect(f.latestTurnState()).toBe("interrupted");
+    f.apply(sessionSet(2, "ready", null, { turnId: "turn-1", state: "completed" }));
+    expect(f.latestTurnState()).toBe("completed");
     await flush();
     expect(f.queue.getState().holdsByThreadKey[KEY]).toBeUndefined();
     expect(f.sent).toEqual(["q-1"]);
@@ -308,13 +323,14 @@ describe("message queue drain coordinator", () => {
     expect(f.coordinator.inspect(KEY).lastStep).toEqual({ kind: "wait", reason: "awaiting-ack" });
   });
 
-  it("holds when a settled turn's real capture shows it was interrupted", async () => {
+  it("holds when the server releases the turn as interrupted", async () => {
     const f = setup({ thread: RUNNING });
     f.queue.getState().enqueue(KEY, entry("q-1"));
     await flush();
     f.apply(turnDiffCompleted(1, "turn-1", "placeholder"));
-    f.apply(sessionSet(2, "ready", null));
+    f.apply(sessionSet(2, "ready", null, { turnId: "turn-1", state: "interrupted" }));
     f.apply(turnDiffCompleted(3, "turn-1", "missing"));
+    expect(f.latestTurnState()).toBe("interrupted");
     await flush();
     expect(f.sent).toEqual([]);
     expect(f.queue.getState().holdsByThreadKey[KEY]).toMatchObject({
