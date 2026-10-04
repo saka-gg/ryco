@@ -106,6 +106,17 @@ export const WS_CONNECTION_ERROR_MESSAGE = "Unable to connect to the Ryco server
 
 class WsUrlProviderError extends Data.TaggedError("WsUrlProviderError") {}
 
+/**
+ * A request this client refused before sending it (`authorizeRequest`).
+ * Nothing reached the server, so the request certainly did not run there.
+ */
+export class RpcRequestRefusedError extends Error {
+  constructor() {
+    super("This action is unavailable for the current hosted role.");
+    this.name = "RpcRequestRefusedError";
+  }
+}
+
 function resolveWsRpcSocketUrl(rawUrl: string, preservePath = false): string {
   const resolved = new URL(rawUrl);
   if (resolved.protocol !== "ws:" && resolved.protocol !== "wss:") {
@@ -321,7 +332,7 @@ export function createWsRpcProtocolLayer(
             return;
           }
           if (handlers?.authorizeRequest && !handlers.authorizeRequest(info)) {
-            throw new Error("This action is unavailable for the current hosted role.");
+            throw new RpcRequestRefusedError();
           }
           handlers?.onRequestStart?.({
             id: String(info.id),

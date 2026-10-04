@@ -25,6 +25,7 @@ import {
 import { Alert, Pressable, ScrollView, View } from "react-native";
 import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 
+import type { HostedDeliveryNotice } from "@ryco/client-runtime/authorization";
 import { serverConfigAtom } from "@ryco/client-runtime/rpc";
 import {
   createSideChatStore,
@@ -62,6 +63,8 @@ import { EmptyState } from "../../components/EmptyState";
 import { ErrorBanner } from "../../components/ErrorBanner";
 import { SymbolView } from "../../components/AppSymbol";
 import { ensureEnvironmentApi, readRpcClient } from "../../connection/environmentApi";
+import { getMobileHostedConnectionCoordinator } from "../../connection/hostedConnectionCoordinator";
+import { useMobileHostedConnectionsStore } from "../../hostedHub/state";
 import {
   loadOlderThreadMessages,
   retainThreadDetailSubscription,
@@ -134,6 +137,11 @@ import { ThreadActionsSheet } from "./ThreadActionsSheet";
 import { ThreadComposer } from "./ThreadComposer";
 import { SideChatCard } from "./SideChatCard";
 import { deriveThreadCachedView } from "./threadCachedViewModel";
+import {
+  acknowledgeThreadDelivery,
+  buildThreadDeliveryNotice,
+  selectThreadDeliveryRecord,
+} from "./threadDeliveryNoticeModel";
 import { ThreadQueuedMessages } from "./ThreadQueuedMessages";
 import { ThreadContextBar } from "./ThreadContextBar";
 import {
@@ -205,6 +213,39 @@ function ThreadCachedBanner(props: { readonly text: string; readonly tone: "info
       >
         {props.text}
       </Text>
+    </View>
+  );
+}
+
+/**
+ * An action sent to this machine may not have arrived before its connection
+ * dropped. Sits with the cached strip so it is seen where a retry would start;
+ * copy and readiness come from threadDeliveryNoticeModel.ts.
+ */
+function ThreadDeliveryBanner(props: {
+  readonly notice: HostedDeliveryNotice;
+  readonly onContinue: () => void;
+}) {
+  const { notice } = props;
+  return (
+    <View
+      accessibilityRole="alert"
+      testID="thread-delivery-banner"
+      className="mx-4 mb-1 rounded-2xl border border-warning-border bg-warning-bg px-3.5 py-3"
+    >
+      <Text className="font-ryco-bold text-sm text-warning">{notice.title}</Text>
+      <Text className="mt-1 font-ryco-medium text-sm text-warning">{notice.description}</Text>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityState={{ disabled: !notice.canAcknowledge }}
+        disabled={!notice.canAcknowledge}
+        onPress={props.onContinue}
+        className={`mt-2 self-start rounded-full px-3 py-1.5 ${
+          notice.canAcknowledge ? "bg-subtle-strong active:opacity-70" : "bg-subtle opacity-60"
+        }`}
+      >
+        <Text className="font-ryco-bold text-sm text-foreground">{notice.actionLabel}</Text>
+      </Pressable>
     </View>
   );
 }
@@ -449,6 +490,10 @@ export function ThreadDetailScreen(props: {
       }),
     [built?.timeline.length, degradedReason, environmentRow?.staleDetail, hydratedFromCacheAt],
   );
+  const deliveryRecord = useMobileHostedConnectionsStore((state) =>
+    selectThreadDeliveryRecord(state.selectedNodes, environmentId),
+  );
+  const deliveryNotice = useMemo(() => buildThreadDeliveryNotice(deliveryRecord), [deliveryRecord]);
   const headerModel = useMemo(
     () =>
       thread
@@ -1158,6 +1203,14 @@ export function ThreadDetailScreen(props: {
       ) : null}
       {cachedView.banner ? (
         <ThreadCachedBanner text={cachedView.banner.text} tone={cachedView.banner.tone} />
+      ) : null}
+      {deliveryNotice ? (
+        <ThreadDeliveryBanner
+          notice={deliveryNotice}
+          onContinue={() =>
+            acknowledgeThreadDelivery(getMobileHostedConnectionCoordinator(), environmentId)
+          }
+        />
       ) : null}
       {visibleError ? <ErrorBanner message={visibleError} /> : null}
 

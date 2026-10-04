@@ -5,6 +5,7 @@ import type * as NativeE2ee from "@ryco/contracts/native-e2ee";
 import { HostedReconnectPolicy } from "../relay/reconnectPolicy.ts";
 import { HostedHubApiError, type HostedAccountStepUp, type HostedHubFailureReason } from "./api.ts";
 import { activateHostedNode, deactivateHostedNode, suspendHostedNode } from "./environment.ts";
+import { getHostedDispatchReplay } from "../relay/dispatchReplay.ts";
 import { NativeHandoffClientError } from "./nativeHandoff.ts";
 import { getHostedHubApi, getHostedRuntimeConfiguration } from "./runtime.ts";
 import type {
@@ -1706,6 +1707,7 @@ class HostedHubController {
     // each one can only remove its own token, which is already gone.
     this.#recoveryCodesLeases.clear();
     this.#publishRecoveryCodeDisplayLease();
+    getHostedDispatchReplay().resetForTests();
     getHostedHubApi().clearSessionMaterial();
     hostedHubStore.setState(initialState, true);
   }
@@ -1855,6 +1857,8 @@ class HostedHubController {
     // `bootstrap()` must start a fresh one rather than join it.
     this.#bootstrapPromise = null;
     this.#clearAccountSurface();
+    // No orchestration command replays into whatever account signs in next.
+    getHostedDispatchReplay().endAccountSession();
     const previousEnvironmentId = hostedHubStore.getState().selectedNode?.environmentId ?? null;
     patchState({
       ...initialState,
@@ -2207,6 +2211,22 @@ class HostedHubController {
     patchState({ sessionStatus: "delivery-unknown", sessionRecoveredAfterUnknown: false });
   }
 
+  /**
+   * A replayed orchestration command could not be confirmed on this
+   * environment. Unlike a drop, this can land on a session that is already
+   * current again; that one only needs the user's acknowledgement, while any
+   * other still waits for its snapshot first.
+   */
+  markEnvironmentDeliveryUnknown(environmentId: EnvironmentId): void {
+    const state = hostedHubStore.getState();
+    if (state.selectedNode?.environmentId !== environmentId) return;
+    if (state.sessionStatus === "delivery-unknown") return;
+    patchState({
+      sessionStatus: "delivery-unknown",
+      sessionRecoveredAfterUnknown: state.sessionStatus === "ready",
+    });
+  }
+
   connectionClosed(generation: number): void {
     const state = hostedHubStore.getState();
     if (state.generation !== generation || state.transportStatus === "terminal-failure") return;
@@ -2241,6 +2261,7 @@ class HostedHubController {
       sessionRecoveredAfterUnknown: false,
       browserStatus: state.browserStatus === "synchronizing" ? "current" : state.browserStatus,
     });
+    getHostedDispatchReplay().markReady(environmentId);
   }
 
   markSessionReplaying(environmentId: EnvironmentId): void {
@@ -2273,6 +2294,7 @@ class HostedHubController {
     const state = hostedHubStore.getState();
     if (state.sessionStatus !== "delivery-unknown" || !state.sessionRecoveredAfterUnknown) return;
     patchState({ sessionStatus: "ready", sessionRecoveredAfterUnknown: false });
+    if (state.selectedNode) getHostedDispatchReplay().markReady(state.selectedNode.environmentId);
   }
 
   #replaceOperation(): AbortController {

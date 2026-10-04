@@ -1,4 +1,5 @@
 import type { ScopedThreadRef } from "@ryco/contracts";
+import { hostedSessionAdmits } from "@ryco/client-runtime/authorization";
 import { loadThreadForExport, THREAD_EXPORT_RETRY } from "@ryco/client-runtime/connection";
 import { getWsConnectionStatusForEnvironment } from "@ryco/client-runtime/rpc";
 import { serializeThreadMarkdown, threadExportFilename } from "@ryco/shared/threadExport";
@@ -30,7 +31,7 @@ export async function exportThreadMarkdown(
         role: hosted.effectiveRole,
         fresh: hosted.directoryStatus === "ready" && hosted.transportStatus === "online",
         browserCurrent: hosted.browserStatus === "current",
-        sessionReady: hosted.sessionStatus === "ready",
+        sessionReady: hostedSessionAdmits(hosted, ORCHESTRATION_WS_METHODS.getThreadWindow),
         method: ORCHESTRATION_WS_METHODS.getThreadWindow,
       }).allowed
     );

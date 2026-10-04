@@ -1,6 +1,8 @@
 export {
+  bindHostedDispatchReplay,
   getHostedRelayAttemptFactory,
   hasHostedRelayPendingRequests,
+  hostedDispatchLineage,
   HostedRelayAttemptFactory,
   resetHostedRelayAttemptFactory,
   ticketFailure,

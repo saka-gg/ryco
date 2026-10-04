@@ -131,6 +131,7 @@ export function initializeMobileRuntime(): MobileConnectionRegistry {
       },
       markSelectedDeliveryUnknown: () =>
         hostedHubController.markDeliveryUnknown(hostedHubStore.getState().generation),
+      acknowledgeSelectedDeliveryUnknown: () => hostedHubController.acknowledgeDeliveryUnknown(),
       listConnections: () => registry.driver.supervisor.list(),
       readConnection: (environmentId) => registry.driver.supervisor.read(environmentId),
       removeConnection: (environmentId) => registry.driver.supervisor.remove(environmentId),

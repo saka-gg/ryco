@@ -283,7 +283,7 @@ import { useComposerHandleContext } from "../composerHandleContext";
 import { useServerAvailableEditors, useServerConfig } from "~/rpc/serverState";
 import { isTerminalFocused } from "../lib/terminalFocus";
 import { sanitizeThreadErrorMessage } from "@ryco/client-runtime/errors";
-import { useHostedRpcCapability } from "../hostedHub/capabilities";
+import { useHostedDeliveryNotice, useHostedRpcCapability } from "../hostedHub/capabilities";
 import {
   loadOlderThreadHistory,
   loadThreadHistoryAroundMessage,
@@ -504,6 +504,7 @@ export default function ChatView(props: ChatViewProps) {
     reserveTitleBarControlInset = true,
   } = props;
   const draftId = routeKind === "draft" ? props.draftId : null;
+  const hostedDeliveryNotice = useHostedDeliveryNotice(environmentId);
   const routeThreadRef = useMemo(
     () => scopeThreadRef(environmentId, threadId),
     [environmentId, threadId],
@@ -1400,7 +1401,26 @@ export default function ChatView(props: ChatViewProps) {
   ]);
   const composerBannerItems = useMemo<ComposerBannerStackItem[]>(() => {
     const items: ComposerBannerStackItem[] = [];
-    if (dispatchCapability.hosted && !dispatchCapability.allowed) {
+    if (hostedDeliveryNotice) {
+      // Shown where the user would retry, not in the connection menu. It also
+      // explains why sending is paused, so it replaces the read-only banner.
+      items.push({
+        id: "hosted-delivery-unconfirmed",
+        variant: "warning",
+        icon: <TriangleAlertIcon />,
+        title: hostedDeliveryNotice.title,
+        description: hostedDeliveryNotice.description,
+        actions: (
+          <Button
+            size="xs"
+            disabled={!hostedDeliveryNotice.canAcknowledge}
+            onClick={hostedDeliveryNotice.acknowledge}
+          >
+            {hostedDeliveryNotice.actionLabel}
+          </Button>
+        ),
+      });
+    } else if (dispatchCapability.hosted && !dispatchCapability.allowed) {
       items.push({
         id: "hosted-dispatch-unavailable",
         variant: "warning",
@@ -1475,6 +1495,7 @@ export default function ChatView(props: ChatViewProps) {
     dispatchCapability.allowed,
     dispatchCapability.hosted,
     dispatchCapability.reason,
+    hostedDeliveryNotice,
     activeEnvironmentUnavailableState,
     handleReconnectActiveEnvironment,
     openSettings,

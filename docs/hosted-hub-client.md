@@ -503,11 +503,44 @@ On reconnect, the existing shell and thread subscriptions resubscribe. Ryco mark
 reconciles thread subscriptions, and then marks it ready. Conversations, running tasks, approvals,
 and terminal projections recover from the node, never from Hub.
 
-RPC reads may be retried by their existing subscription behavior. An unacknowledged request is
-conservatively treated as uncertain, and a non-idempotent request is never automatically replayed
-merely because the relay disconnected. If no response chunk or exit made delivery known, the
-session becomes `delivery unknown`; the UI does not claim that the command was accepted. After the
-authoritative replay finishes, the user can explicitly acknowledge the warning.
+Every RPC method carries an explicit delivery-effect classification beside its access tier
+(`RPC_DELIVERY_EFFECT_POLICY` in `packages/shared/src/rpcAccessPolicy.ts`). The tier is not an
+effect: file, VCS, and source-control reads are operator-tier and still reads. A method nobody
+classified counts as a mutation.
+
+- **Reads** — unary reads and long-lived read streams such as the Agent Control queue or device
+  events — never make delivery uncertain. Losing one is harmless, and subscriptions resubscribe on
+  their own.
+- **Orchestration commands** (`orchestration.dispatchCommand`) are idempotent by receipt: the node
+  persists a receipt for each `commandId` in the same transaction as the command's events and
+  answers a repeated id from it — before normalizing the command again — with the original result
+  or rejection. A repeated id that arrives while its first attempt is still running (a bootstrap
+  turn start creating its thread and worktree has no receipt until its turn starts) waits for that
+  attempt and gets its outcome; the attempt runs detached from the request that started it, so a
+  client disconnecting mid-command does not cut it off halfway.
+- The hosted client holds the caller's promise through a reconnect and sends the identical envelope
+  once more, at most once, after the environment's session has a fresh ticket, a completed
+  handshake, and an accepted snapshot again. Which failures leave a command's delivery unknown is
+  decided by what they are, not by their message: only the node's typed answer and a refusal by the
+  client before sending are definite; any socket or protocol error, interruption, or disposal of
+  the client is replayed. The replay stays inside the same environment and the same account
+  session — readiness is bound to those, not to a hosted generation, because every recovery
+  publishes a new generation and readiness is only published from the current one. Hub session-id
+  rotation on resume is the same account session; leaving the node, signing out, or session expiry
+  fails the replay closed, as does a two-minute horizon after sending. The envelope lives in memory
+  only, and the node re-authorizes the replay under the current role. Receipt retention must always
+  outlive that horizon.
+- A command Ryco cannot confirm — the horizon passed, the replay was lost to a second drop or
+  refused (locally or by the node's role check), or a replayed bootstrap turn start failed on what a
+  node restart left half-created — is reported to the control that issued it as unconfirmed, never
+  as accepted or failed, and the environment becomes `delivery unknown` as below. A client that has
+  not taken over its commands this way keeps them tracked like any other mutation.
+- **Every other mutation** — terminal input, git and file writes, Agent Control decisions — is
+  never automatically replayed merely because the relay disconnected. If no response chunk or exit
+  made its delivery known, the environment's session becomes `delivery unknown`; the UI does not
+  claim that the action was accepted. Once the replacement session has accepted a snapshot, reads
+  work normally again, while new mutations to that environment wait until the user has seen the
+  notice shown inline on the environment's threads and continued.
 
 ## Browser capability adaptation
 
@@ -650,7 +683,9 @@ remain server-enforced.
   seconds and both peers support canonical relay protocol 1.2.
 - **Incompatible or revoked:** an administrator must restore compatible node access. The browser
   will not downgrade the protocol or bypass authorization.
-- **Delivery unknown:** inspect the authoritative node state before issuing the command again.
+- **Delivery unknown:** inspect the authoritative node state — the thread's notice names the
+  machine — before issuing the action again, then continue from the notice. Orchestration commands
+  end up here only when their replay by `commandId` could not confirm them.
 - **Channel says legacy plaintext:** rule out the page first. An origin that is not a secure
   context, or a browser exposing no cryptographic random source, makes this client refuse encryption
   at startup, and the label is then the browser's doing and the node's configuration is untouched.

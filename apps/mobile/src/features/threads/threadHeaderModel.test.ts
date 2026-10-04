@@ -170,6 +170,28 @@ describe("buildThreadHeaderModel", () => {
     });
     expect(settled.settlementAction?.kind).toBe("unsettle");
   });
+
+  it("points an unconfirmed delivery at its notice rather than at reconnecting", () => {
+    const model = buildThreadHeaderModel({
+      thread: thread(),
+      project: { name: "Ryco", cwd: "/repo" },
+      worktree: null,
+      nodeLabel: "Studio",
+      hasPendingApproval: false,
+      hasPendingUserInput: false,
+      settlement: {
+        attentionState: "active",
+        canSettle: false,
+        settlementBlocker: "delivery-unknown",
+        mutationEnabled: true,
+        mutationBlocker: null,
+      },
+    });
+    expect(model.settlementAction).toMatchObject({
+      disabled: true,
+      detail: "Check the unconfirmed action on this machine first.",
+    });
+  });
 });
 
 describe("findThreadWorktree", () => {

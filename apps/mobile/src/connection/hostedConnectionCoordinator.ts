@@ -5,6 +5,7 @@ import type {
   HostedRycoSessionStatus,
 } from "@ryco/client-runtime/authorization";
 import type { EnvironmentConnection } from "@ryco/client-runtime/connection";
+import { getHostedDispatchReplay } from "@ryco/client-runtime/relay";
 import { UNIFIED_WORKSPACE_MAX_CONNECTIONS } from "@ryco/client-runtime/state/workspace";
 import type { EnvironmentId, RelayEffectiveRole } from "@ryco/contracts";
 
@@ -73,6 +74,8 @@ export interface MobileHostedConnectionCoordinatorDeps {
   readonly selectNode: (nodeId: string) => Promise<void>;
   readonly connectSelectedEnvironment: () => void;
   readonly markSelectedDeliveryUnknown: () => void;
+  /** Mirror an acknowledgement into the shared selection cursor's session state. */
+  readonly acknowledgeSelectedDeliveryUnknown: () => void;
   readonly listConnections: () => ReadonlyArray<EnvironmentConnection>;
   readonly readConnection: (environmentId: EnvironmentId) => EnvironmentConnection | null;
   readonly removeConnection: (environmentId: EnvironmentId) => Promise<boolean>;
@@ -119,6 +122,8 @@ export interface MobileHostedConnectionCoordinator {
     failure: HostedRelayFailure,
   ) => void;
   readonly markDeliveryUnknown: (environmentId: EnvironmentId, generation: number) => void;
+  /** A replayed orchestration command could not be confirmed, whatever the generation. */
+  readonly markEnvironmentDeliveryUnknown: (environmentId: EnvironmentId) => void;
   readonly acknowledgeDeliveryUnknown: (environmentId: EnvironmentId) => void;
   readonly connectionClosed: (environmentId: EnvironmentId, generation: number) => void;
   readonly markSessionReady: (environmentId: EnvironmentId, generation: number) => void;
@@ -410,6 +415,20 @@ export function createMobileHostedConnectionCoordinator(
         sessionRecoveredAfterUnknown: false,
       }));
     },
+    markEnvironmentDeliveryUnknown(environmentId) {
+      deliveryUnknownEnvironmentIds.add(environmentId);
+      const current = records.get(environmentId);
+      if (current && current.sessionStatus !== "delivery-unknown") {
+        records.set(environmentId, {
+          ...current,
+          sessionStatus: "delivery-unknown",
+          // A current session only needs the acknowledgement; any other still
+          // waits for its snapshot.
+          sessionRecoveredAfterUnknown: current.sessionStatus === "ready",
+        });
+      }
+      publish();
+    },
     acknowledgeDeliveryUnknown(environmentId) {
       const current = records.get(environmentId);
       if (
@@ -426,6 +445,10 @@ export function createMobileHostedConnectionCoordinator(
       });
       deliveryUnknownEnvironmentIds.delete(environmentId);
       publish();
+      // Any environment can be acknowledged from its own thread, not only the
+      // selected one; the shared cursor follows when it points here.
+      if (deps.selectedEnvironmentId() === environmentId) deps.acknowledgeSelectedDeliveryUnknown();
+      getHostedDispatchReplay().markReady(environmentId);
     },
     connectionClosed: (environmentId, generation) =>
       patch(environmentId, generation, (current) => ({
@@ -451,6 +474,10 @@ export function createMobileHostedConnectionCoordinator(
             },
       );
       resolveAttemptWaiters(environmentId);
+      const ready = records.get(environmentId);
+      if (ready?.generation === generation && ready.sessionStatus === "ready") {
+        getHostedDispatchReplay().markReady(environmentId);
+      }
     },
     markSessionReplaying: (environmentId, generation) =>
       patch(environmentId, generation, (current) =>
@@ -529,6 +556,8 @@ export function createMobileHostedConnectionCoordinator(
       });
     },
     async releaseAll() {
+      // Sign-out: no command may replay into the next account session.
+      for (const environmentId of records.keys()) getHostedDispatchReplay().end(environmentId);
       await Promise.all(Array.from(records.keys(), (environmentId) => release(environmentId)));
       deliveryUnknownEnvironmentIds.clear();
       publish();

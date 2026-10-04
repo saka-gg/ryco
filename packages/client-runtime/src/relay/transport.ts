@@ -1,8 +1,9 @@
 import { ORCHESTRATION_WS_METHODS, type RelayEffectiveRole, WS_METHODS } from "@ryco/contracts";
-import { hostedRoleAllows } from "@ryco/shared/rpcAccessPolicy";
+import { hostedRoleAllows, rpcDeliveryEffectFor } from "@ryco/shared/rpcAccessPolicy";
 
 import type { WsProtocolLifecycleHandlers } from "@ryco/client-runtime/rpc";
 import { HostedHubApiError } from "../authorization/api.ts";
+import { hostedSessionAdmits } from "../authorization/capabilities.ts";
 import { getHostedHubApi, getHostedRuntimeConfiguration } from "../authorization/runtime.ts";
 import { hostedHubController, hostedHubStore } from "../authorization/state.ts";
 import type {
@@ -41,14 +42,14 @@ const HOSTED_SESSION_SYNC_SUBSCRIPTIONS = new Set<string>([
   WS_METHODS.subscribeVcsStatus,
 ]);
 
-const HOSTED_READ_ONLY_STREAMS = new Set<string>([
-  ...HOSTED_SESSION_SYNC_SUBSCRIPTIONS,
-  WS_METHODS.subscribeAuthAccess,
-]);
-
 type HostedRequestAuthorizationState = Pick<
   ReturnType<typeof hostedHubStore.getState>,
-  "effectiveRole" | "directoryStatus" | "transportStatus" | "browserStatus" | "sessionStatus"
+  | "effectiveRole"
+  | "directoryStatus"
+  | "transportStatus"
+  | "browserStatus"
+  | "sessionStatus"
+  | "sessionRecoveredAfterUnknown"
 >;
 
 export function authorizeHostedRequestForState(
@@ -61,7 +62,7 @@ export function authorizeHostedRequestForState(
   if (
     state.transportStatus === "online" &&
     state.browserStatus === "current" &&
-    state.sessionStatus === "ready"
+    hostedSessionAdmits(state, info.tag)
   ) {
     return true;
   }
@@ -234,6 +235,16 @@ export function recoverHostedRelayConnection(generation: number): void {
   });
 }
 
+/**
+ * Whoever answers for a connection's receipted requests after a drop
+ * (`bindHostedDispatchReplay`). Until it claims them they are tracked like any
+ * other mutation, so a client that does not replay them still leaves their
+ * delivery uncertain.
+ */
+export interface HostedReceiptedRequestOwner {
+  readonly ownsReceiptedRequests: () => boolean;
+}
+
 export class HostedRelayAttemptFactory {
   readonly #binding: HostedRelayAttemptBinding;
   readonly #reconnect = new HostedReconnectPolicy();
@@ -379,7 +390,9 @@ export class HostedRelayAttemptFactory {
     }
   }
 
-  lifecycleHandlers(): WsProtocolLifecycleHandlers {
+  lifecycleHandlers(
+    receiptedRequestOwner?: HostedReceiptedRequestOwner,
+  ): WsProtocolLifecycleHandlers {
     return {
       webSocketConstructor: (url) => this.createSocket(url) as WebSocket,
       isSocketCurrent: (socket) => socket === this.#activeSocket,
@@ -404,7 +417,16 @@ export class HostedRelayAttemptFactory {
         this.#binding.connectionClosed(generation);
       },
       onRequestStart: (info) => {
-        if (info.stream && HOSTED_READ_ONLY_STREAMS.has(info.tag)) return;
+        // Only a request that may have changed something can leave its
+        // delivery uncertain. Reads — unary, or long-lived streams such as the
+        // Agent Control queue — are harmless to lose. A receipted command is
+        // left to its client only once that client has claimed it: the client
+        // then replays it, or marks the session itself when it cannot.
+        const effect = rpcDeliveryEffectFor(info.tag);
+        if (effect === "read") return;
+        if (effect === "receipted" && receiptedRequestOwner?.ownsReceiptedRequests() === true) {
+          return;
+        }
         this.#pendingRequests.set(info.id, info.stream ? "exit" : "first-chunk");
       },
       onRequestChunk: (info) => {

@@ -17,6 +17,8 @@ import {
 } from "@ryco/client-runtime/knownEnvironment";
 import {
   authorizeHostedRequestForState,
+  bindHostedDispatchReplay,
+  hostedDispatchLineage,
   HostedRelayAttemptFactory,
   recoverHostedRelayConnection,
 } from "@ryco/client-runtime/relay";
@@ -122,6 +124,7 @@ export function createHostedPrimaryConnection(
           transportStatus: current.transportStatus,
           browserStatus: shared.browserStatus,
           sessionStatus: current.sessionStatus,
+          sessionRecoveredAfterUnknown: current.sessionRecoveredAfterUnknown,
         },
         info,
       );
@@ -179,12 +182,24 @@ export function createHostedPrimaryConnection(
   coordinator.registerPendingRequestReader(descriptor.environmentId, connectionGeneration, () =>
     attemptFactory.hasPendingRequests(),
   );
-  const client = createWsRpcClient(
-    new WsTransport(() => attemptFactory.nextUrl(), {
-      ...attemptFactory.lifecycleHandlers(),
-      getConnectionLabel: () => descriptor.label ?? null,
-      getEnvironmentId: () => descriptor.environmentId,
-    }),
+  const dispatchReplay = bindHostedDispatchReplay({
+    environmentId: descriptor.environmentId,
+    lineage: hostedDispatchLineage(selectedState),
+    // Environment-scoped, not generation-scoped: the replay may give up after
+    // this connection's generation has been replaced.
+    markUncertain: () => {
+      coordinator.markEnvironmentDeliveryUnknown(descriptor.environmentId);
+      hostedHubController.markEnvironmentDeliveryUnknown(descriptor.environmentId);
+    },
+  });
+  const client = dispatchReplay.wrap(
+    createWsRpcClient(
+      new WsTransport(() => attemptFactory.nextUrl(), {
+        ...attemptFactory.lifecycleHandlers(dispatchReplay),
+        getConnectionLabel: () => descriptor.label ?? null,
+        getEnvironmentId: () => descriptor.environmentId,
+      }),
+    ),
   );
 
   // The node is reached only through the relay, so the "target" is the Hub's

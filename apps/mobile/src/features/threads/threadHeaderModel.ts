@@ -86,7 +86,8 @@ function settlementDisabledReason(input: {
     case "local-queue":
       return "Send or remove queued work first.";
     case "delivery-unknown":
-      return "Reconnect to confirm delivery first.";
+      // Reconnecting cannot confirm it; the thread's delivery notice clears it.
+      return "Check the unconfirmed action on this machine first.";
     case "unsupported":
       return "Update this machine before settling tasks.";
     case "thread-archived":

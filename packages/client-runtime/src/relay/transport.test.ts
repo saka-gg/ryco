@@ -1,4 +1,12 @@
-import { EnvironmentId, ORCHESTRATION_WS_METHODS, WS_METHODS } from "@ryco/contracts";
+import {
+  AGENT_CONTROL_WS_METHODS,
+  DEVICE_WS_METHODS,
+  EnvironmentId,
+  ORCHESTRATION_WS_METHODS,
+  WS_METHODS,
+} from "@ryco/contracts";
+import { RpcClientError } from "effect/unstable/rpc/RpcClientError";
+import * as Socket from "effect/unstable/socket/Socket";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import type {
@@ -16,7 +24,14 @@ import {
 } from "../authorization/runtime";
 import { hostedHubController, hostedHubStore } from "../authorization/state";
 import type { HostedHubNode, HostedRelayFailure } from "../authorization/types";
+import type { WsRpcClient } from "../rpc/wsRpcClient";
 import { encodeBase64Url } from "./base64url";
+import {
+  bindHostedDispatchReplay,
+  getHostedDispatchReplay,
+  hostedDispatchLineage,
+  HostedDispatchUnconfirmedError,
+} from "./dispatchReplay";
 import {
   HostedRelayAttemptFactory,
   HostedRelayPreparationError,
@@ -50,6 +65,19 @@ class MockRelaySocket {
 }
 
 const sockets: MockRelaySocket[] = [];
+
+/** What a relay drop surfaces for an in-flight request. */
+const relayDrop = () =>
+  new RpcClientError({ reason: new Socket.SocketReadError({ cause: new Event("error") }) });
+
+const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+function rawClient(): WsRpcClient {
+  return {
+    dispose: async () => undefined,
+    orchestration: { dispatchCommand: async () => ({ sequence: 1 }) },
+  } as unknown as WsRpcClient;
+}
 
 /** A configurable Hub API instance the factory reads via the runtime. */
 const hostedHubApi = {
@@ -507,7 +535,7 @@ describe("HostedRelayAttemptFactory", () => {
     expect(sockets).toHaveLength(0);
   });
 
-  it("marks any unacknowledged request delivery unknown without replaying it", async () => {
+  it("marks an unacknowledged mutation delivery unknown without replaying it", async () => {
     vi.spyOn(hostedHubApi, "issueRelayTicket").mockResolvedValue({
       ticket: encodeBase64Url(new Uint8Array(32).fill(3)),
       expiresAt: Date.now() + 60_000,
@@ -520,7 +548,7 @@ describe("HostedRelayAttemptFactory", () => {
     factory.createSocket(url);
     lifecycle.onRequestStart?.({
       id: "mutation-1",
-      tag: ORCHESTRATION_WS_METHODS.dispatchCommand,
+      tag: WS_METHODS.terminalWrite,
       stream: false,
     });
     expect(factory.hasPendingRequests()).toBe(true);
@@ -532,6 +560,209 @@ describe("HostedRelayAttemptFactory", () => {
       sessionStatus: "delivery-unknown",
     });
     expect(factory.hasPendingRequests()).toBe(false);
+  });
+
+  it("never makes delivery uncertain for an in-flight read", async () => {
+    vi.spyOn(hostedHubApi, "issueRelayTicket").mockResolvedValue({
+      ticket: encodeBase64Url(new Uint8Array(32).fill(12)),
+      expiresAt: Date.now() + 60_000,
+      protocolMajor: 1,
+      protocolMinor: 2,
+    });
+    hostedHubStore.setState({ sessionStatus: "ready" });
+    const factory = new HostedRelayAttemptFactory();
+    const lifecycle = factory.lifecycleHandlers();
+    factory.createSocket(await factory.nextUrl());
+
+    // Operator-tier unary reads, which never answered before the drop.
+    lifecycle.onRequestStart?.({ id: "file-1", tag: WS_METHODS.projectsReadFile, stream: false });
+    lifecycle.onRequestStart?.({
+      id: "diff-1",
+      tag: WS_METHODS.vcsReadLocalChanges,
+      stream: false,
+    });
+    lifecycle.onRequestStart?.({
+      id: "window-1",
+      tag: ORCHESTRATION_WS_METHODS.getThreadWindow,
+      stream: false,
+    });
+    // Long-lived read streams that only end with the channel.
+    lifecycle.onRequestStart?.({
+      id: "proposals-1",
+      tag: AGENT_CONTROL_WS_METHODS.subscribeProposals,
+      stream: true,
+    });
+    lifecycle.onRequestStart?.({
+      id: "device-1",
+      tag: DEVICE_WS_METHODS.subscribeEvents,
+      stream: true,
+    });
+    lifecycle.onRequestChunk?.({
+      id: "proposals-1",
+      tag: AGENT_CONTROL_WS_METHODS.subscribeProposals,
+      chunkCount: 1,
+    });
+    expect(factory.hasPendingRequests()).toBe(false);
+
+    sockets[0]!.fail();
+    expect(hostedHubStore.getState()).toMatchObject({
+      transportStatus: "reconnecting",
+      sessionStatus: "stale",
+    });
+  });
+
+  it("tracks a receipted command until its client has claimed it for replay", () => {
+    const dispatch = {
+      id: "dispatch-1",
+      tag: ORCHESTRATION_WS_METHODS.dispatchCommand,
+      stream: false,
+    } as const;
+    const unclaimed = new HostedRelayAttemptFactory();
+    unclaimed.lifecycleHandlers().onRequestStart?.(dispatch);
+    expect(unclaimed.hasPendingRequests()).toBe(true);
+
+    // A binding that could not attach (no authenticated account) claims nothing.
+    const detached = bindHostedDispatchReplay({
+      environmentId: selectedNode.environmentId,
+      lineage: null,
+      markUncertain: () => undefined,
+    });
+    const unattached = new HostedRelayAttemptFactory();
+    detached.wrap(rawClient());
+    unattached.lifecycleHandlers(detached).onRequestStart?.(dispatch);
+    expect(unattached.hasPendingRequests()).toBe(true);
+
+    const binding = bindHostedDispatchReplay({
+      environmentId: selectedNode.environmentId,
+      lineage: "account-1",
+      markUncertain: () => undefined,
+    });
+    const claimed = new HostedRelayAttemptFactory();
+    const lifecycle = claimed.lifecycleHandlers(binding);
+    binding.wrap(rawClient());
+    lifecycle.onRequestStart?.(dispatch);
+    expect(claimed.hasPendingRequests()).toBe(false);
+    // A mutation without a receipt stays tracked regardless.
+    lifecycle.onRequestStart?.({ id: "write-1", tag: WS_METHODS.terminalWrite, stream: false });
+    expect(claimed.hasPendingRequests()).toBe(true);
+  });
+
+  it("replays a held orchestration command only once the hosted session can accept it", async () => {
+    hostedHubStore.setState({
+      account: { id: "account-1", displayName: "A", role: "owner", createdAt: 1, disabledAt: null },
+      browserStatus: "current",
+      transportStatus: "online",
+      sessionStatus: "delivery-unknown",
+      sessionRecoveredAfterUnknown: false,
+    });
+    const lineage = hostedDispatchLineage(hostedHubStore.getState())!;
+    const markUncertain = vi.fn();
+    const { dispatch } = getHostedDispatchReplay().attach({
+      environmentId: selectedNode.environmentId,
+      lineage,
+      dispatch: () => Promise.reject(relayDrop()),
+      markUncertain,
+    });
+    const replacement = vi.fn(async () => ({ sequence: 5 }));
+    const command = {
+      type: "thread.meta.update",
+      commandId: "cmd-held",
+      threadId: "thread-held",
+      title: "Renamed",
+    } as unknown as Parameters<typeof dispatch>[0];
+    const result = dispatch(command);
+    await flush();
+    getHostedDispatchReplay().attach({
+      environmentId: selectedNode.environmentId,
+      lineage,
+      dispatch: replacement,
+      markUncertain,
+    });
+
+    // Snapshot accepted, but another action's delivery is still unconfirmed:
+    // mutations — the replay included — wait for the acknowledgement.
+    hostedHubController.markSessionReady(selectedNode.environmentId);
+    await flush();
+    expect(replacement).not.toHaveBeenCalled();
+
+    hostedHubController.acknowledgeDeliveryUnknown();
+    await expect(result).resolves.toEqual({ sequence: 5 });
+    expect(replacement).toHaveBeenCalledWith(command);
+    expect(markUncertain).not.toHaveBeenCalled();
+  });
+
+  it("fails a held orchestration command closed when the hosted node is left", async () => {
+    hostedHubStore.setState({
+      account: { id: "account-1", displayName: "A", role: "owner", createdAt: 1, disabledAt: null },
+    });
+    const markUncertain = vi.fn();
+    const { dispatch } = getHostedDispatchReplay().attach({
+      environmentId: selectedNode.environmentId,
+      lineage: hostedDispatchLineage(hostedHubStore.getState())!,
+      dispatch: () => Promise.reject(relayDrop()),
+      markUncertain,
+    });
+    const result = dispatch({} as Parameters<typeof dispatch>[0]);
+    await flush();
+
+    await hostedHubController.returnToDirectory();
+    await expect(result).rejects.toBeInstanceOf(HostedDispatchUnconfirmedError);
+    // Nothing is left to hold: the node is no longer selected.
+    expect(markUncertain).not.toHaveBeenCalled();
+  });
+
+  it("holds a current session for acknowledgement when a replay cannot confirm its command", () => {
+    hostedHubStore.setState({ sessionStatus: "ready", sessionRecoveredAfterUnknown: false });
+    hostedHubController.markEnvironmentDeliveryUnknown(EnvironmentId.make("env_other"));
+    expect(hostedHubStore.getState().sessionStatus).toBe("ready");
+
+    hostedHubController.markEnvironmentDeliveryUnknown(selectedNode.environmentId);
+    expect(hostedHubStore.getState()).toMatchObject({
+      sessionStatus: "delivery-unknown",
+      sessionRecoveredAfterUnknown: true,
+    });
+
+    // A session still recovering waits for its snapshot before it can be acknowledged.
+    hostedHubStore.setState({
+      sessionStatus: "synchronizing",
+      sessionRecoveredAfterUnknown: false,
+    });
+    hostedHubController.markEnvironmentDeliveryUnknown(selectedNode.environmentId);
+    expect(hostedHubStore.getState()).toMatchObject({
+      sessionStatus: "delivery-unknown",
+      sessionRecoveredAfterUnknown: false,
+    });
+    hostedHubController.markSessionReady(selectedNode.environmentId);
+    expect(hostedHubStore.getState().sessionRecoveredAfterUnknown).toBe(true);
+  });
+
+  it("admits reads but not mutations once a session recovers with delivery unknown", () => {
+    const lifecycle = new HostedRelayAttemptFactory().lifecycleHandlers();
+    const readFile = { tag: WS_METHODS.projectsReadFile, stream: false } as const;
+    const proposals = { tag: AGENT_CONTROL_WS_METHODS.subscribeProposals, stream: true } as const;
+    const terminalWrite = { tag: WS_METHODS.terminalWrite, stream: false } as const;
+    const dispatch = { tag: ORCHESTRATION_WS_METHODS.dispatchCommand, stream: false } as const;
+    hostedHubStore.setState({
+      effectiveRole: "owner",
+      transportStatus: "online",
+      browserStatus: "current",
+      sessionStatus: "delivery-unknown",
+      sessionRecoveredAfterUnknown: false,
+    });
+
+    // Before the replacement session accepts a snapshot nothing new is admitted.
+    expect(lifecycle.authorizeRequest?.(readFile)).toBe(false);
+    expect(lifecycle.authorizeRequest?.(proposals)).toBe(false);
+
+    hostedHubStore.setState({ sessionRecoveredAfterUnknown: true });
+    expect(lifecycle.authorizeRequest?.(readFile)).toBe(true);
+    expect(lifecycle.authorizeRequest?.(proposals)).toBe(true);
+    expect(lifecycle.authorizeRequest?.(terminalWrite)).toBe(false);
+    expect(lifecycle.authorizeRequest?.(dispatch)).toBe(false);
+
+    hostedHubController.acknowledgeDeliveryUnknown();
+    expect(hostedHubStore.getState().sessionStatus).toBe("ready");
+    expect(lifecycle.authorizeRequest?.(terminalWrite)).toBe(true);
   });
 
   it("preserves streaming mutation uncertainty through progress until final exit", async () => {

@@ -78,12 +78,17 @@ import { appendVersionMismatchHint, resolveServerConfigVersionMismatch } from ".
 import { markStartupPhase, measureStartupPhase } from "~/perf/startupInstrumentation";
 import { isHostedHubMode } from "~/env";
 import {
+  hostedHubController,
   markHostedSessionReady,
   markHostedSessionReplaying,
   reportHostedShellSnapshotFailure,
   useHostedHubStore,
 } from "~/hostedHub/state";
-import { getHostedRelayAttemptFactory } from "~/hostedHub/transport";
+import {
+  bindHostedDispatchReplay,
+  getHostedRelayAttemptFactory,
+  hostedDispatchLineage,
+} from "~/hostedHub/transport";
 import { createWebEnvironmentStateSink } from "./environmentStateSink";
 import { webSocket } from "../../platform";
 import { DesktopWorkspaceIpcSocketFactory } from "../../platform/desktopWorkspaceSocket";
@@ -826,7 +831,15 @@ function createPrimaryEnvironmentClient(
 
   if (isHostedHubMode()) {
     const attemptFactory = getHostedRelayAttemptFactory();
-    const hostedHandlers = attemptFactory.lifecycleHandlers();
+    const environmentId = knownEnvironment?.environmentId ?? null;
+    const dispatchReplay = bindHostedDispatchReplay({
+      environmentId,
+      lineage: hostedDispatchLineage(useHostedHubStore.getState()),
+      markUncertain: () => {
+        if (environmentId) hostedHubController.markEnvironmentDeliveryUnknown(environmentId);
+      },
+    });
+    const hostedHandlers = attemptFactory.lifecycleHandlers(dispatchReplay);
     const transport = new HostedWsTransport(() => attemptFactory.nextUrl(), {
       ...hostedHandlers,
       getConnectionLabel: () => connectionLabel,
@@ -836,9 +849,8 @@ function createPrimaryEnvironmentClient(
         markStartupPhase("primary-ws-open");
       },
     });
-    return createWsRpcClient(
-      transport,
-      createDeviceRpcClient(transport, { manageTransport: false }),
+    return dispatchReplay.wrap(
+      createWsRpcClient(transport, createDeviceRpcClient(transport, { manageTransport: false })),
     );
   }
 

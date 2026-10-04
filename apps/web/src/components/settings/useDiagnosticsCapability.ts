@@ -1,4 +1,7 @@
-import { resolveHostedRpcCapability } from "@ryco/client-runtime/authorization";
+import {
+  hostedSessionAdmits,
+  resolveHostedRpcCapability,
+} from "@ryco/client-runtime/authorization";
 import { isHostedHubMode } from "../../env";
 import { useSavedEnvironmentRuntimeStore } from "../../environments/runtime";
 import { useHostedWorkspaceState } from "../../hostedHub/hostedConnectionCoordinator";
@@ -28,7 +31,7 @@ export function useDiagnosticsCapability(method: string) {
           machine.presence.online
         : state.transportStatus === "online"),
     browserCurrent: state.browserStatus === "current",
-    sessionReady: state.sessionStatus === "ready",
+    sessionReady: hostedSessionAdmits(state, method),
     method,
   });
   if (
