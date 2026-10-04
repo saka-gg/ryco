@@ -63,18 +63,37 @@ function hasOpenActivityRequest(
   return hasUncorrelatedRequest || open.size > 0;
 }
 
+/** User messages whose turn start already failed visibly. */
+function failedTurnStartMessageIds(thread: OrchestrationThread): ReadonlySet<string> {
+  const messageIds = new Set<string>();
+  for (const activity of thread.activities) {
+    if (activity.kind !== "provider.turn.start.failed") continue;
+    const payload = activity.payload;
+    if (payload === null || typeof payload !== "object" || Array.isArray(payload)) continue;
+    const messageId = Reflect.get(payload, "messageId");
+    if (typeof messageId === "string") messageIds.add(messageId);
+  }
+  return messageIds;
+}
+
 function hasActionableContextHandoff(thread: OrchestrationThread): boolean {
   const decode = Schema.decodeUnknownOption(ContextHandoffActivityPayload);
+  let failedTurnStarts: ReadonlySet<string> | undefined;
   return thread.activities.some((activity) => {
     if (activity.kind !== "context-handoff") {
       return false;
     }
     return Option.match(decode(activity.payload), {
       onNone: () => true,
-      onSome: (payload) =>
-        payload.status === "requested" ||
-        payload.status === "preparing" ||
-        payload.status === "dispatching",
+      onSome: (payload) => {
+        if (payload.status === "dispatching") return true;
+        if (payload.status !== "requested" && payload.status !== "preparing") return false;
+        // Nothing was sent before `dispatching`. A handoff whose target turn
+        // start already failed (for example, preparation failed before the
+        // coordinator created or could finalize its record) never dispatches.
+        failedTurnStarts ??= failedTurnStartMessageIds(thread);
+        return !failedTurnStarts.has(payload.targetMessageId);
+      },
     });
   });
 }

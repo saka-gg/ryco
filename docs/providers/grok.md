@@ -42,7 +42,7 @@ with its own environment and accent color.
 
 Ryco discovers Grok's available models during the provider health check. If discovery returns no
 catalog, the model picker falls back to `grok-build`. Changing the model on an active Grok thread
-requires starting a new thread.
+applies the new model to the same Grok session on the next message; the conversation is kept.
 
 ## What is supported
 

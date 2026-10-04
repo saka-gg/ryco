@@ -19,7 +19,7 @@ import {
 import { matchesApprovalAttempt, questionAsCallback } from "../approvalResponses.ts";
 import { ProjectionPendingApprovalRepository } from "../../persistence/Services/ProjectionPendingApprovals.ts";
 import { ProjectionPendingApprovalRepositoryLive } from "../../persistence/Layers/ProjectionPendingApprovals.ts";
-import type { ApprovalResponseIdentity, ApprovalResponseState } from "@ryco/contracts";
+import type { ApprovalResponseState } from "@ryco/contracts";
 import { lstatSync, realpathSync } from "node:fs";
 import nodePath from "node:path";
 
@@ -81,6 +81,11 @@ import { ServerSettingsService } from "../../serverSettings.ts";
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
 import { withProviderGoalPrompt } from "../../provider/goalMode.ts";
+import {
+  type ProviderFailureActivityInput,
+  providerFailureActivityCommand,
+} from "../providerFailureActivity.ts";
+import { failureTag, userFacingFailureDetail } from "../userFacingErrors.ts";
 
 type ProviderIntentEvent = Extract<
   OrchestrationEvent,
@@ -97,6 +102,11 @@ type ProviderIntentEvent = Extract<
       | "thread.user-input-response-requested"
       | "thread.session-stop-requested";
   }
+>;
+
+type TurnStartRequestedEvent = Extract<
+  ProviderIntentEvent,
+  { type: "thread.turn-start-requested" }
 >;
 
 // Git canonicalizes registered paths, while saved paths can contain symlinked parents.
@@ -272,60 +282,8 @@ const make = Effect.gen(function* () {
 
   const threadModelSelections = new Map<string, ModelSelection>();
 
-  const appendProviderFailureActivity = (input: {
-    readonly threadId: ThreadId;
-    readonly kind:
-      | "provider.goal.update.failed"
-      | "provider.turn.start.failed"
-      | "provider.turn.interrupt.failed"
-      | "provider.approval.respond.failed"
-      | "provider.user-input.respond.failed"
-      | "provider.session.stop.failed";
-    readonly summary: string;
-    readonly detail: string;
-    readonly turnId: TurnId | null;
-    readonly createdAt: string;
-    readonly requestId?: string;
-    readonly messageId?: MessageId;
-    readonly approvalIdentity?: ApprovalResponseIdentity;
-    readonly userInputIdentity?: ApprovalResponseIdentity;
-    readonly responseAttemptId?: CommandId;
-    readonly responseState?: ApprovalResponseState;
-  }) =>
-    orchestrationEngine.dispatch({
-      type: "thread.activity.append",
-      commandId: serverCommandId("provider-failure-activity"),
-      threadId: input.threadId,
-      activity: {
-        id: EventId.make(crypto.randomUUID()),
-        tone: "error",
-        kind: input.kind,
-        summary: input.summary,
-        payload: {
-          detail: input.detail,
-          ...(input.messageId ? { messageId: input.messageId } : {}),
-          ...(input.requestId ? { requestId: input.requestId } : {}),
-          ...(input.approvalIdentity ? { approvalIdentity: input.approvalIdentity } : {}),
-          ...(input.userInputIdentity ? { userInputIdentity: input.userInputIdentity } : {}),
-          ...(input.responseAttemptId ? { responseAttemptId: input.responseAttemptId } : {}),
-          ...(input.responseState ? { responseState: input.responseState } : {}),
-        },
-        turnId: input.turnId,
-        createdAt: input.createdAt,
-      },
-      createdAt: input.createdAt,
-    });
-
-  const formatFailureDetail = (cause: Cause.Cause<unknown>): string => {
-    const failReason = cause.reasons.find(Cause.isFailReason);
-    const providerError = Schema.is(ProviderAdapterRequestError)(failReason?.error)
-      ? failReason.error
-      : undefined;
-    if (providerError) {
-      return providerError.detail;
-    }
-    return Cause.pretty(cause);
-  };
+  const appendProviderFailureActivity = (input: ProviderFailureActivityInput) =>
+    orchestrationEngine.dispatch(providerFailureActivityCommand(input));
 
   const setThreadSession = (input: {
     readonly threadId: ThreadId;
@@ -344,10 +302,19 @@ const make = Effect.gen(function* () {
     readonly threadId: ThreadId;
     readonly detail: string;
     readonly createdAt: string;
+    /**
+     * Set for failures before anything was submitted. A turn that is running
+     * then belongs to someone else (a wake turn, a goal resume, a
+     * provider-originated turn), so its session must not be reset.
+     */
+    readonly preserveActiveTurn: boolean;
   }) {
     const thread = yield* resolveThread(input.threadId);
     const session = thread?.session;
     if (!session) {
+      return;
+    }
+    if (input.preserveActiveTurn && session.status === "running" && session.activeTurnId !== null) {
       return;
     }
     yield* setThreadSession({
@@ -689,13 +656,27 @@ const make = Effect.gen(function* () {
       const cwdChanged = effectiveCwd !== activeSession?.cwd;
       const sessionModelSwitch = (yield* providerService.getCapabilities(desiredInstanceId))
         .sessionModelSwitch;
-      const modelChanged =
-        requestedModelSelection !== undefined &&
-        requestedModelSelection.model !== activeSession?.model;
       const instanceChanged =
         requestedModelSelection !== undefined &&
         activeSession?.providerInstanceId !== requestedModelSelection.instanceId;
-      const shouldRestartForModelChange = modelChanged && sessionModelSwitch === "unsupported";
+      // A model change never restarts a session. "in-session" adapters apply
+      // sendTurn.modelSelection to the live session. A session that cannot
+      // switch rejects a *known* change. An unknown active model (undefined)
+      // is never a change.
+      const activeModel = activeSession?.model;
+      if (
+        sessionModelSwitch === "unsupported" &&
+        requestedModelSelection !== undefined &&
+        !instanceChanged &&
+        activeModel !== undefined &&
+        requestedModelSelection.model !== activeModel
+      ) {
+        return yield* new ProviderAdapterRequestError({
+          provider: preferredProvider,
+          method: "thread.turn.start",
+          detail: `This provider session cannot switch from model '${activeModel}' to '${requestedModelSelection.model}'. Start a new thread to use '${requestedModelSelection.model}'.`,
+        });
+      }
       const previousModelSelection = threadModelSelections.get(threadId);
       const shouldRestartForModelSelectionChange =
         preferredProvider === "claudeAgent" &&
@@ -708,15 +689,13 @@ const make = Effect.gen(function* () {
         !tokenModeChanged &&
         !cwdChanged &&
         !instanceChanged &&
-        !shouldRestartForModelChange &&
         !shouldRestartForModelSelectionChange
       ) {
         return existingSessionThreadId;
       }
 
-      const resumeCursor = shouldRestartForModelChange
-        ? undefined
-        : (activeSession?.resumeCursor ?? undefined);
+      // Every restart resumes the active native session explicitly.
+      const resumeCursor = activeSession?.resumeCursor ?? undefined;
       yield* Effect.logInfo("provider command reactor restarting provider session", {
         threadId,
         existingSessionThreadId,
@@ -734,9 +713,8 @@ const make = Effect.gen(function* () {
         previousCwd: activeSession?.cwd,
         desiredCwd: effectiveCwd,
         cwdChanged,
-        modelChanged,
+        sessionModelSwitch,
         instanceChanged,
-        shouldRestartForModelChange,
         shouldRestartForModelSelectionChange,
         hasResumeCursor: resumeCursor !== undefined,
       });
@@ -803,7 +781,7 @@ const make = Effect.gen(function* () {
             const latest = yield* resolveThread(threadId);
             if (latest?.goal?.synchronization?.requestId !== request.requestId)
               return yield* Effect.failCause(cause);
-            const detail = formatFailureDetail(cause);
+            const detail = userFacingFailureDetail(cause);
             yield* orchestrationEngine
               .dispatch({
                 type: "thread.goal.sync",
@@ -1114,14 +1092,73 @@ const make = Effect.gen(function* () {
     },
   );
 
-  const processTurnStartRequested = Effect.fn("processTurnStartRequested")(function* (
-    event: Extract<ProviderIntentEvent, { type: "thread.turn-start-requested" }>,
-  ) {
-    const key = turnStartKeyForEvent(event);
-    if (yield* hasHandledTurnStartRecently(key)) {
-      return;
-    }
+  /**
+   * Reports a turn start that did not reach the provider: logs the full cause,
+   * records the short text on the session and appends the visible failure
+   * activity. Never fails.
+   */
+  const reportTurnStartFailure = (input: {
+    readonly event: TurnStartRequestedEvent;
+    readonly cause: Cause.Cause<unknown>;
+    readonly preserveActiveTurn: boolean;
+  }): Effect.Effect<void> => {
+    const { event, cause } = input;
+    // Interrupt-only: no activity. Do not re-raise. A propagated interrupt ends the
+    // DrainableWorker loop (packages/shared/src/DrainableWorker.ts) and stops the reactor.
+    if (Cause.hasInterruptsOnly(cause)) return Effect.void;
+    const threadId = event.payload.threadId;
+    const detail = userFacingFailureDetail(cause);
+    const tag = failureTag(cause);
+    return Effect.gen(function* () {
+      yield* Effect.annotateCurrentSpan({ "orchestration.failure_tag": tag });
+      yield* Effect.logWarning("provider command reactor failed to start turn", {
+        threadId,
+        messageId: event.payload.messageId,
+        commandId: event.commandId,
+        failureTag: tag,
+        cause: Cause.pretty(cause),
+      });
+      if (!event.payload.delegationReturnGuard) {
+        yield* setThreadSessionErrorOnTurnStartFailure({
+          threadId,
+          detail,
+          createdAt: event.payload.createdAt,
+          preserveActiveTurn: input.preserveActiveTurn,
+        }).pipe(
+          Effect.catchCause((sessionCause) =>
+            Effect.logWarning(
+              "provider command reactor failed to record turn start failure on the session",
+              { threadId, cause: Cause.pretty(sessionCause) },
+            ),
+          ),
+        );
+      }
+      yield* appendProviderFailureActivity({
+        threadId,
+        kind: "provider.turn.start.failed",
+        messageId: event.payload.messageId,
+        summary: "Provider turn start failed",
+        detail,
+        turnId: null,
+        createdAt: event.payload.createdAt,
+      });
+    }).pipe(
+      Effect.catchCause((recoveryCause) =>
+        Effect.logWarning("provider command reactor failed to recover turn start failure", {
+          eventType: event.type,
+          threadId,
+          cause: Cause.pretty(recoveryCause),
+          originalCause: Cause.pretty(cause),
+        }),
+      ),
+    );
+  };
 
+  const prepareAndSubmitTurnStart = Effect.fn("prepareAndSubmitTurnStart")(function* (
+    event: TurnStartRequestedEvent,
+  ) {
+    // Essential reads fail the turn visibly through the boundary in
+    // processTurnStartRequested. A deleted thread stays silent.
     const thread = yield* resolveThread(event.payload.threadId);
     if (!thread) {
       return;
@@ -1153,52 +1190,21 @@ const make = Effect.gen(function* () {
       return;
     }
 
-    const isFirstUserMessageTurn = (yield* resolveUserMessageCount(event.payload.threadId)) === 1;
-    const handleTurnStartFailure = (cause: Cause.Cause<unknown>) => {
-      if (Cause.hasInterruptsOnly(cause)) {
-        return Effect.void;
-      }
-      const detail = formatFailureDetail(cause);
-      return (
-        event.payload.delegationReturnGuard
-          ? Effect.void
-          : setThreadSessionErrorOnTurnStartFailure({
-              threadId: event.payload.threadId,
-              detail,
-              createdAt: event.payload.createdAt,
-            })
-      ).pipe(
-        Effect.flatMap(() =>
-          appendProviderFailureActivity({
-            threadId: event.payload.threadId,
-            kind: "provider.turn.start.failed",
-            messageId: event.payload.messageId,
-            summary: "Provider turn start failed",
-            detail,
-            turnId: null,
-            createdAt: event.payload.createdAt,
-          }),
-        ),
-        Effect.asVoid,
-      );
-    };
-
-    const recoverTurnStartFailure = (cause: Cause.Cause<unknown>) =>
-      handleTurnStartFailure(cause).pipe(
-        Effect.catchCause((recoveryCause) =>
-          Effect.logWarning("provider command reactor failed to recover turn start failure", {
-            eventType: event.type,
-            threadId: event.payload.threadId,
-            cause: Cause.pretty(recoveryCause),
-            originalCause: Cause.pretty(cause),
-          }),
-        ),
-      );
+    // Best-effort: the count only gates first-turn title and branch generation.
+    const isFirstUserMessageTurn = yield* resolveUserMessageCount(event.payload.threadId).pipe(
+      Effect.map((count) => count === 1),
+      Effect.catchCause((cause) =>
+        Cause.hasInterruptsOnly(cause)
+          ? Effect.failCause(cause)
+          : Effect.logWarning(
+              "provider command reactor could not count user messages; skipping first-turn generation",
+              { threadId: event.payload.threadId, cause: Cause.pretty(cause) },
+            ).pipe(Effect.as(false)),
+      ),
+    );
 
     if (hasRetiredProjectMemory(event.payload)) {
-      return yield* Effect.fail(new Error(REMOVED_PROJECT_MEMORY_MESSAGE)).pipe(
-        Effect.catchCause(recoverTurnStartFailure),
-      );
+      return yield* Effect.fail(new Error(REMOVED_PROJECT_MEMORY_MESSAGE));
     }
 
     const returnGuard = event.payload.delegationReturnGuard;
@@ -1207,7 +1213,9 @@ const make = Effect.gen(function* () {
           .getSession(event.payload.threadId)
           .pipe(
             Effect.catchCause((cause) =>
-              handleTurnStartFailure(cause).pipe(Effect.as(Option.none())),
+              reportTurnStartFailure({ event, cause, preserveActiveTurn: true }).pipe(
+                Effect.as(Option.none()),
+              ),
             ),
           )
       : Option.none();
@@ -1252,13 +1260,7 @@ const make = Effect.gen(function* () {
           createdAt: event.payload.createdAt,
         });
       const project = yield* resolveProject(thread.projectId);
-      const worktreeReady = yield* ensureRecordedWorktreeAvailable(thread, project).pipe(
-        Effect.as(true),
-        Effect.catchCause((cause) => handleTurnStartFailure(cause).pipe(Effect.as(false))),
-      );
-      if (!worktreeReady) {
-        return;
-      }
+      yield* ensureRecordedWorktreeAvailable(thread, project);
       yield* Effect.scoped(
         leaseThreadPath(thread, project).pipe(
           Effect.andThen(contextHandoffCoordinator.processTurnStart(event)),
@@ -1279,43 +1281,49 @@ const make = Effect.gen(function* () {
       interactionMode: event.payload.interactionMode,
       tokenMode: event.payload.tokenMode,
       createdAt: event.payload.createdAt,
-    }).pipe(
-      Effect.map(Option.some),
-      Effect.catchCause((cause) => handleTurnStartFailure(cause).pipe(Effect.as(Option.none()))),
-    );
-
-    if (Option.isNone(sendTurnRequest)) {
-      return;
-    }
+    });
 
     if (isFirstUserMessageTurn) {
-      const project = yield* resolveProject(thread.projectId);
-      const generationCwd =
-        resolveThreadWorkspaceCwd({
-          thread,
-          projects: project ? [project] : [],
-        }) ?? process.cwd();
-      const generationInput = {
-        messageText: message.text,
-        ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
-        ...(event.payload.titleSeed !== undefined ? { titleSeed: event.payload.titleSeed } : {}),
-      };
+      // Title and branch generation are best-effort and must never fail a turn
+      // whose session is already started.
+      yield* Effect.gen(function* () {
+        const project = yield* resolveProject(thread.projectId);
+        const generationCwd =
+          resolveThreadWorkspaceCwd({
+            thread,
+            projects: project ? [project] : [],
+          }) ?? process.cwd();
+        const generationInput = {
+          messageText: message.text,
+          ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
+          ...(event.payload.titleSeed !== undefined ? { titleSeed: event.payload.titleSeed } : {}),
+        };
 
-      yield* maybeGenerateAndRenameWorktreeBranchForFirstTurn({
-        threadId: event.payload.threadId,
-        branch: thread.branch,
-        worktreePath: thread.worktreePath,
-        worktreeId: thread.worktreeId ?? null,
-        ...generationInput,
-      }).pipe(Effect.forkScoped);
-
-      if (canReplaceThreadTitle(thread.title, event.payload.titleSeed)) {
-        yield* maybeGenerateThreadTitleForFirstTurn({
+        yield* maybeGenerateAndRenameWorktreeBranchForFirstTurn({
           threadId: event.payload.threadId,
-          cwd: generationCwd,
+          branch: thread.branch,
+          worktreePath: thread.worktreePath,
+          worktreeId: thread.worktreeId ?? null,
           ...generationInput,
         }).pipe(Effect.forkScoped);
-      }
+
+        if (canReplaceThreadTitle(thread.title, event.payload.titleSeed)) {
+          yield* maybeGenerateThreadTitleForFirstTurn({
+            threadId: event.payload.threadId,
+            cwd: generationCwd,
+            ...generationInput,
+          }).pipe(Effect.forkScoped);
+        }
+      }).pipe(
+        Effect.catchCause((cause) =>
+          Cause.hasInterruptsOnly(cause)
+            ? Effect.failCause(cause)
+            : Effect.logWarning("provider command reactor skipped first-turn generation", {
+                threadId: event.payload.threadId,
+                cause: Cause.pretty(cause),
+              }),
+        ),
+      );
     }
 
     const commitAcceptedModelSelection =
@@ -1329,10 +1337,30 @@ const make = Effect.gen(function* () {
           })
         : Effect.void;
 
-    yield* providerService.sendTurn(sendTurnRequest.value, expectedReturnRuntime).pipe(
+    // Submission failures may follow this request's own turn.started, so they
+    // reset a running session (preserveActiveTurn: false), as before.
+    yield* providerService.sendTurn(sendTurnRequest, expectedReturnRuntime).pipe(
       Effect.tap(() => commitAcceptedModelSelection),
-      Effect.catchCause(recoverTurnStartFailure),
+      Effect.catchCause((cause) =>
+        reportTurnStartFailure({ event, cause, preserveActiveTurn: false }),
+      ),
       Effect.forkScoped,
+    );
+  });
+
+  const processTurnStartRequested = Effect.fn("processTurnStartRequested")(function* (
+    event: TurnStartRequestedEvent,
+  ) {
+    const key = turnStartKeyForEvent(event);
+    if (yield* hasHandledTurnStartRecently(key)) {
+      return;
+    }
+    // One visible failure boundary for every preparation step. Nothing was
+    // submitted yet, so a turn that is running belongs to someone else.
+    yield* prepareAndSubmitTurnStart(event).pipe(
+      Effect.catchCause((cause) =>
+        reportTurnStartFailure({ event, cause, preserveActiveTurn: true }),
+      ),
     );
   });
 
@@ -1364,8 +1392,13 @@ const make = Effect.gen(function* () {
         return Effect.interrupt;
       }
 
-      const detail = formatFailureDetail(cause);
+      const detail = userFacingFailureDetail(cause);
       return Effect.gen(function* () {
+        yield* Effect.logWarning("provider command reactor failed to interrupt turn", {
+          threadId: event.payload.threadId,
+          failureTag: failureTag(cause),
+          cause: Cause.pretty(cause),
+        });
         const latestThread = yield* resolveThread(event.payload.threadId);
         const latestSession = latestThread?.session;
         if (
@@ -1459,7 +1492,7 @@ const make = Effect.gen(function* () {
                 synchronization: {
                   ...goal.synchronization,
                   state: "failed",
-                  error: formatFailureDetail(cause),
+                  error: userFacingFailureDetail(cause),
                 },
               },
               createdAt: new Date().toISOString(),
@@ -1559,17 +1592,23 @@ const make = Effect.gen(function* () {
             resolvedAt: new Date().toISOString(),
           }),
         ),
-        Effect.catchCause((cause) => {
-          const rawDetail = formatFailureDetail(cause).trim();
-          const error = (
-            rawDetail.length > 0 ? rawDetail : "Provider rejected turn steering."
-          ).slice(0, 1_000);
-          return resolve({
-            status: "rejected",
-            error,
-            resolvedAt: new Date().toISOString(),
-          });
-        }),
+        Effect.catchCause((cause) =>
+          Effect.logWarning("provider command reactor failed to steer turn", {
+            threadId: event.payload.threadId,
+            failureTag: failureTag(cause),
+            cause: Cause.pretty(cause),
+          }).pipe(
+            Effect.andThen(
+              resolve({
+                status: "rejected",
+                error: userFacingFailureDetail(cause, {
+                  fallback: "Provider rejected turn steering.",
+                }),
+                resolvedAt: new Date().toISOString(),
+              }),
+            ),
+          ),
+        ),
         Effect.forkScoped,
       );
   });
@@ -1657,9 +1696,20 @@ const make = Effect.gen(function* () {
           const retryable = isApproval
             ? requestError?.approvalResponseNotSent === true
             : requestError?.userInputResponseNotSent === true;
-          return fail(
-            stale ? stalePendingRequestDetail(kind, key.requestId) : Cause.pretty(cause),
-            stale ? "invalidated" : retryable ? "retryable" : "uncertain",
+          return Effect.logWarning(`provider command reactor failed to deliver ${kind} response`, {
+            threadId: key.threadId,
+            requestId: key.requestId,
+            failureTag: failureTag(cause),
+            cause: Cause.pretty(cause),
+          }).pipe(
+            Effect.andThen(
+              fail(
+                stale
+                  ? stalePendingRequestDetail(kind, key.requestId)
+                  : userFacingFailureDetail(cause),
+                stale ? "invalidated" : retryable ? "retryable" : "uncertain",
+              ),
+            ),
           );
         },
         onSuccess: () =>

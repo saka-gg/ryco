@@ -26,14 +26,26 @@ import {
   type ContextHandoffRepositoryShape,
   makeRequestedContextHandoffRecord,
 } from "../../persistence/Services/ContextHandoffs.ts";
-import { ProviderService } from "../../provider/Services/ProviderService.ts";
+import {
+  ProviderService,
+  type ProviderServiceShape,
+} from "../../provider/Services/ProviderService.ts";
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
 import type { ProviderRuntimeBinding } from "../../provider/Services/ProviderSessionDirectory.ts";
-import { ProviderAdapterRequestError, type ProviderServiceError } from "../../provider/Errors.ts";
+import {
+  ProviderAdapterRequestError,
+  ProviderSessionDirectoryPersistenceError,
+  type ProviderServiceError,
+} from "../../provider/Errors.ts";
+import { PersistenceSqlError } from "../../persistence/Errors.ts";
 import type { ProviderFreshSessionStartInput } from "../../provider/Services/ProviderService.ts";
 import { ContextHandoffCoordinator } from "../Services/ContextHandoffCoordinator.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
-import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
+import {
+  ProjectionSnapshotQuery,
+  type ProjectionSnapshotQueryShape,
+} from "../Services/ProjectionSnapshotQuery.ts";
+import { STORAGE_FAILURE_DETAIL } from "../userFacingErrors.ts";
 import {
   ContextHandoffService,
   type ContextHandoffServiceShape,
@@ -212,8 +224,19 @@ function requestedRecord(): ContextHandoffRecord {
   });
 }
 
-function makeRepository(initial?: ContextHandoffRecord) {
+interface RepositoryHooks {
+  /** 1-based `getById` calls that fail with a storage error. */
+  readonly getByIdFailures?: ReadonlyArray<number>;
+  /** Runs after a `getById` call has taken its snapshot, e.g. to simulate a concurrent writer. */
+  readonly afterGetById?: (
+    call: number,
+    current: ContextHandoffRecord | undefined,
+  ) => ContextHandoffRecord | undefined;
+}
+
+function makeRepository(initial?: ContextHandoffRecord, hooks: RepositoryHooks = {}) {
   let record = initial;
+  let getByIdCalls = 0;
   const service: ContextHandoffRepositoryShape = {
     create: (input) =>
       Effect.sync(() => {
@@ -222,7 +245,20 @@ function makeRepository(initial?: ContextHandoffRecord) {
         return true;
       }),
     getById: ({ handoffId: requestedId }) =>
-      Effect.succeed(record?.handoffId === requestedId ? Option.some(record) : Option.none()),
+      Effect.suspend(() => {
+        const call = ++getByIdCalls;
+        if (hooks.getByIdFailures?.includes(call)) {
+          return Effect.fail(
+            new PersistenceSqlError({
+              operation: "ContextHandoffRepository.getById",
+              detail: "Failed to execute ContextHandoffRepository.getById",
+            }),
+          );
+        }
+        const snapshot = record?.handoffId === requestedId ? Option.some(record) : Option.none();
+        if (hooks.afterGetById) record = hooks.afterGetById(call, record);
+        return Effect.succeed(snapshot);
+      }),
     listByThread: () => Effect.succeed(record ? [record] : []),
     listRecoverable: () =>
       Effect.succeed(
@@ -333,8 +369,12 @@ function makeHarness(input?: {
   readonly sendFailure?: ProviderServiceError;
   readonly providerSnapshots?: ReadonlyArray<ServerProvider>;
   readonly artifactSources?: ReadonlyArray<ContextHandoffEndpointSnapshot>;
+  readonly getThreadDetailById?: ProjectionSnapshotQueryShape["getThreadDetailById"];
+  readonly getSession?: ProviderServiceShape["getSession"];
+  readonly startFreshSessionFailure?: ProviderServiceError;
+  readonly repositoryHooks?: RepositoryHooks;
 }) {
-  const repository = makeRepository(input?.initialRecord);
+  const repository = makeRepository(input?.initialRecord, input?.repositoryHooks);
   const thread = input?.thread ?? makeThread();
   const commands: OrchestrationCommand[] = [];
   const deliveryOrder: string[] = [];
@@ -349,9 +389,10 @@ function makeHarness(input?: {
   );
   const startFreshSession = vi.fn(
     (_threadId: ThreadId, freshInput: ProviderFreshSessionStartInput) =>
-      Effect.sync(() => {
+      Effect.suspend(() => {
         deliveryOrder.push("start");
-        return {
+        if (input?.startFreshSessionFailure) return Effect.fail(input.startFreshSessionFailure);
+        return Effect.succeed({
           session: {
             provider: ProviderDriverKind.make("claudeAgent"),
             providerInstanceId: targetSelection.instanceId,
@@ -372,7 +413,7 @@ function makeHarness(input?: {
             runtimeMode: "full-access" as const,
             resumeCursor: { source: "resume-a1" },
           },
-        };
+        });
       }),
   );
   const sendTurn = vi.fn((_input: ProviderSendTurnInput) =>
@@ -384,7 +425,9 @@ function makeHarness(input?: {
       ),
     ),
   );
-  const stopSessionBinding = vi.fn(() => Effect.succeed("stopped" as const));
+  const stopSessionBinding = vi.fn((_binding: ProviderRuntimeBinding) =>
+    Effect.succeed("stopped" as const),
+  );
   const retireSessionBinding = vi.fn(() => Effect.succeed(true));
   const restoreSessionBinding = vi.fn((_binding: ProviderRuntimeBinding) => Effect.succeed(true));
   const contextService: ContextHandoffServiceShape = {
@@ -455,7 +498,8 @@ function makeHarness(input?: {
       streamDomainEvents: Stream.empty,
     }),
     Layer.mock(ProjectionSnapshotQuery)({
-      getThreadDetailById: () => Effect.succeed(Option.some(thread)),
+      getThreadDetailById:
+        input?.getThreadDetailById ?? (() => Effect.succeed(Option.some(thread))),
       getProjectShellById: () =>
         Effect.succeed(
           Option.some({
@@ -497,7 +541,7 @@ function makeHarness(input?: {
                 },
               },
         ),
-      getSession: () => Effect.succeed(Option.some(sourceSession())),
+      getSession: input?.getSession ?? (() => Effect.succeed(Option.some(sourceSession()))),
       startFreshSession,
       sendTurn,
       stopSessionBinding,
@@ -752,6 +796,198 @@ describe("ContextHandoffCoordinator", () => {
       acceptedProviderTurnId: targetTurnId,
     });
     expect(harness.commands.some((command) => command.type === "thread.meta.update")).toBe(true);
+  });
+
+  const turnStartFailureCommands = (commands: ReadonlyArray<OrchestrationCommand>) =>
+    commands.filter(
+      (command) =>
+        command.type === "thread.activity.append" &&
+        command.activity.kind === "provider.turn.start.failed",
+    );
+
+  /** Payloads appended for the decider's handoff activity id. */
+  const handoffActivityPayloads = (commands: ReadonlyArray<OrchestrationCommand>) =>
+    commands.flatMap((command) =>
+      command.type === "thread.activity.append" &&
+      command.activity.kind === "context-handoff" &&
+      command.activity.id === activityId
+        ? [command.activity.payload]
+        : [],
+    );
+
+  it("reports a thread read failure before dispatch", async () => {
+    const harness = makeHarness({
+      getThreadDetailById: () =>
+        Effect.fail(
+          new PersistenceSqlError({
+            operation: "ProjectionThreads.getDetailById",
+            detail: "Failed to execute ProjectionThreads.getDetailById",
+          }),
+        ),
+    });
+    await harness.run(
+      Effect.gen(function* () {
+        const coordinator = yield* ContextHandoffCoordinator;
+        yield* coordinator.processTurnStart(turnStartEvent());
+      }),
+    );
+
+    expect(harness.commands).toHaveLength(1);
+    const failures = turnStartFailureCommands(harness.commands);
+    expect(failures).toHaveLength(1);
+    expect(
+      failures[0]?.type === "thread.activity.append" ? failures[0].activity.payload : null,
+    ).toMatchObject({ messageId: targetMessageId, detail: STORAGE_FAILURE_DETAIL });
+    expect(harness.repository.get()).toBeUndefined();
+    expect(harness.sendTurn).not.toHaveBeenCalled();
+  });
+
+  it("fails a preparing record when pre-dispatch reads fail and never re-dispatches it on recovery", async () => {
+    let sessionReads = 0;
+    const harness = makeHarness({
+      getSession: () =>
+        sessionReads++ === 0
+          ? Effect.fail(
+              new ProviderSessionDirectoryPersistenceError({
+                operation: "ProviderSessionDirectory.getBinding",
+                detail: "Failed to read provider session binding",
+              }),
+            )
+          : Effect.succeed(Option.some(sourceSession())),
+    });
+    await harness.run(
+      Effect.gen(function* () {
+        const coordinator = yield* ContextHandoffCoordinator;
+        yield* coordinator.processTurnStart(turnStartEvent());
+      }),
+    );
+
+    expect(harness.repository.get()).toMatchObject({
+      status: "failed",
+      error: STORAGE_FAILURE_DETAIL,
+    });
+    const failures = turnStartFailureCommands(harness.commands);
+    expect(failures).toHaveLength(1);
+    expect(
+      failures[0]?.type === "thread.activity.append" ? failures[0].activity.payload : null,
+    ).toMatchObject({ messageId: targetMessageId, detail: STORAGE_FAILURE_DETAIL });
+    // The decider's `requested` activity is replaced, so the thread can hand off again.
+    expect(handoffActivityPayloads(harness.commands)).toEqual([
+      expect.objectContaining({
+        handoffId,
+        status: "failed",
+        error: STORAGE_FAILURE_DETAIL,
+        sources: [expect.objectContaining({ providerInstanceId: sourceSelection.instanceId })],
+        target: expect.objectContaining({ providerInstanceId: targetSelection.instanceId }),
+      }),
+    ]);
+    // No target epoch was reserved, so no runtime was touched.
+    expect(harness.stopSessionBinding).not.toHaveBeenCalled();
+    expect(harness.retireSessionBinding).not.toHaveBeenCalled();
+    expect(harness.restoreSessionBinding).not.toHaveBeenCalled();
+
+    await harness.run(
+      Effect.gen(function* () {
+        const coordinator = yield* ContextHandoffCoordinator;
+        yield* coordinator.recover();
+      }),
+    );
+    expect(harness.startFreshSession).not.toHaveBeenCalled();
+    expect(harness.sendTurn).not.toHaveBeenCalled();
+  });
+
+  it("rolls back a reserved target epoch when failure finalization breaks before dispatch", async () => {
+    // startFreshSession fails after the target epoch was reserved and projected
+    // as `starting`; finalizeFailure then fails at its record read (call 2).
+    const harness = makeHarness({
+      startFreshSessionFailure: new ProviderAdapterRequestError({
+        provider: "claudeAgent",
+        method: "session/start",
+        detail: "target failed to start",
+      }),
+      repositoryHooks: { getByIdFailures: [2] },
+    });
+    await harness.run(
+      Effect.gen(function* () {
+        const coordinator = yield* ContextHandoffCoordinator;
+        yield* coordinator.processTurnStart(turnStartEvent());
+      }),
+    );
+
+    const reservedTarget = harness.repository.get().targetRuntimeSessionId;
+    expect(reservedTarget).not.toBeNull();
+    expect(harness.repository.get()).toMatchObject({
+      status: "failed",
+      error: STORAGE_FAILURE_DETAIL,
+    });
+    expect(harness.stopSessionBinding).toHaveBeenCalledTimes(1);
+    expect(harness.stopSessionBinding.mock.calls[0]?.[0]).toMatchObject({
+      providerInstanceId: targetSelection.instanceId,
+      runtimeSessionId: reservedTarget,
+    });
+    expect(harness.retireSessionBinding).toHaveBeenCalledTimes(1);
+    expect(harness.restoreSessionBinding).toHaveBeenCalledTimes(1);
+    expect(harness.restoreSessionBinding.mock.calls[0]?.[0]).toMatchObject({
+      providerInstanceId: sourceSelection.instanceId,
+      runtimeSessionId: sourceRuntimeSessionId,
+    });
+    const sessions = harness.commands.flatMap((command) =>
+      command.type === "thread.session.set" ? [command.session] : [],
+    );
+    expect(sessions.at(-1)).toMatchObject({
+      providerInstanceId: sourceSelection.instanceId,
+      runtimeSessionId: sourceRuntimeSessionId,
+      status: "ready",
+      lastError: null,
+    });
+    expect(handoffActivityPayloads(harness.commands)).toEqual([
+      expect.objectContaining({ status: "failed", targetRuntimeSessionId: reservedTarget }),
+    ]);
+    expect(turnStartFailureCommands(harness.commands)).toHaveLength(1);
+
+    await harness.run(
+      Effect.gen(function* () {
+        const coordinator = yield* ContextHandoffCoordinator;
+        yield* coordinator.recover();
+      }),
+    );
+    expect(harness.startFreshSession).toHaveBeenCalledTimes(1);
+    expect(harness.sendTurn).not.toHaveBeenCalled();
+  });
+
+  it("leaves a record that advanced concurrently to its owner and reports no start failure", async () => {
+    let sessionReads = 0;
+    const harness = makeHarness({
+      getSession: () =>
+        sessionReads++ === 0
+          ? Effect.fail(
+              new ProviderSessionDirectoryPersistenceError({
+                operation: "ProviderSessionDirectory.getBinding",
+                detail: "Failed to read provider session binding",
+              }),
+            )
+          : Effect.succeed(Option.some(sourceSession())),
+      // The reporter reads `preparing` (call 2); another runner then moves the
+      // record to `dispatching` before the reporter's compare-and-set.
+      repositoryHooks: {
+        afterGetById: (call, current) =>
+          call === 2 && current
+            ? { ...current, status: "dispatching", targetRuntimeSessionId }
+            : current,
+      },
+    });
+    await harness.run(
+      Effect.gen(function* () {
+        const coordinator = yield* ContextHandoffCoordinator;
+        yield* coordinator.processTurnStart(turnStartEvent());
+      }),
+    );
+
+    expect(harness.repository.get()).toMatchObject({ status: "dispatching", error: null });
+    expect(turnStartFailureCommands(harness.commands)).toHaveLength(0);
+    expect(handoffActivityPayloads(harness.commands)).toHaveLength(0);
+    expect(harness.stopSessionBinding).not.toHaveBeenCalled();
+    expect(harness.restoreSessionBinding).not.toHaveBeenCalled();
   });
 });
 

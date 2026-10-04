@@ -17,6 +17,7 @@ import {
   TrimmedNonEmptyString,
   TurnId,
 } from "@ryco/contracts";
+import { truncateUnicodeSafe } from "@ryco/shared/String";
 import { Option, Schema } from "effect";
 
 const MESSAGE_TEXT_MAX_CHARS = 32_000;
@@ -213,28 +214,6 @@ function asTrimmedString(value: unknown): string | undefined {
 
 function asInteger(value: unknown): number | undefined {
   return typeof value === "number" && Number.isInteger(value) ? value : undefined;
-}
-
-/** Truncates by UTF-16 code units without leaving an unmatched surrogate. */
-export function truncateUnicodeSafe(value: string, maxChars: number): string {
-  if (value.length <= maxChars) {
-    return value;
-  }
-  if (maxChars <= 0) {
-    return "";
-  }
-  let end = maxChars;
-  const lastCodeUnit = value.charCodeAt(end - 1);
-  const nextCodeUnit = value.charCodeAt(end);
-  if (
-    lastCodeUnit >= 0xd800 &&
-    lastCodeUnit <= 0xdbff &&
-    nextCodeUnit >= 0xdc00 &&
-    nextCodeUnit <= 0xdfff
-  ) {
-    end -= 1;
-  }
-  return value.slice(0, end);
 }
 
 function boundedString(

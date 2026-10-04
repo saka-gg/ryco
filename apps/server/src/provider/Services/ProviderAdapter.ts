@@ -33,7 +33,12 @@ export type ProviderTurnSteeringMode = "native" | "unsupported";
 
 export interface ProviderAdapterCapabilities {
   /**
-   * Declares whether changing the model on an existing session is supported.
+   * Declares whether the model of a live session can change.
+   *
+   * - `"in-session"`: the adapter applies `sendTurn.modelSelection` to the live session.
+   * - `"unsupported"`: the live session cannot change model. Ryco rejects a turn that
+   *   requests a model other than the session's known model, and never restarts a
+   *   session to change model.
    */
   readonly sessionModelSwitch: ProviderSessionModelSwitchMode;
   /** Native in-flight turn steering support. Missing is treated as unsupported. */

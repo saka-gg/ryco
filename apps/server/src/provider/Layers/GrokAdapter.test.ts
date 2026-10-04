@@ -354,6 +354,49 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
     }),
   );
 
+  it.effect("applies a model change to the live session without restarting", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("grok-in-session-model-switch");
+      const tempDir = yield* Effect.promise(() => mkdtemp(path.join(os.tmpdir(), "grok-acp-")));
+      const requestLogPath = path.join(tempDir, "requests.ndjson");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockGrokWrapper({ RYCO_ACP_REQUEST_LOG_PATH: requestLogPath }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath);
+      assert.equal(adapter.capabilities.sessionModelSwitch, "in-session");
+
+      const session = yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("test-grokadapter-model-switch"),
+        threadId,
+        provider: ProviderDriverKind.make("grok"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+        modelSelection: { instanceId: ProviderInstanceId.make("grok"), model: "grok-build" },
+      });
+      yield* adapter.sendTurn({
+        threadId,
+        input: "continue on the other model",
+        attachments: [],
+        modelSelection: { instanceId: ProviderInstanceId.make("grok"), model: "grok-mock-alt" },
+      });
+
+      const [live] = yield* adapter.listSessions();
+      assert.equal(live?.model, "grok-mock-alt");
+      assert.deepStrictEqual(live?.resumeCursor, session.resumeCursor);
+      yield* adapter.stopSession(threadId);
+
+      const requests = yield* Effect.promise(() => readJsonLines(requestLogPath));
+      const methods = requests.map((entry) => entry.method);
+      assert.equal(methods.filter((method) => method === "session/new").length, 1);
+      assert.equal(methods.includes("session/load"), false);
+      const setModel = requests.find((entry) => entry.method === "session/set_model");
+      assert.equal(
+        (setModel?.params as { readonly modelId?: string } | undefined)?.modelId,
+        "grok-mock-alt",
+      );
+    }),
+  );
+
   it.effect("responds to ACP approvals using provider-supplied option ids", () =>
     Effect.gen(function* () {
       const threadId = ThreadId.make("grok-custom-approval-option-id");

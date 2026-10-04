@@ -1072,7 +1072,9 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
       provider: PROVIDER,
       capabilities: {
         get sessionModelSwitch() {
-          return options.getSessionModelSwitch?.() ?? "unsupported";
+          // sendTurn applies the model through applyAcpModelSelection. Drivers
+          // override this only when the agent advertises no model API.
+          return options.getSessionModelSwitch?.() ?? "in-session";
         },
       },
       startSession,
