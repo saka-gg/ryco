@@ -1,10 +1,31 @@
-import { access, mkdtemp, readFile, utimes, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 
 import { makeHubIdentityProcessLock } from "./HubIdentityProcessLock.ts";
+
+/** Runs once, just before the next read of `path`: another process acting between two calls. */
+const readFileInterceptor = vi.hoisted(() => ({
+  path: null as string | null,
+  before: null as (() => Promise<void>) | null,
+}));
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return {
+    ...actual,
+    readFile: async (...args: Parameters<typeof actual.readFile>) => {
+      const before = readFileInterceptor.before;
+      if (before !== null && args[0] === readFileInterceptor.path) {
+        readFileInterceptor.before = null;
+        await before();
+      }
+      return actual.readFile(...args);
+    },
+  };
+});
 
 const BOOT = 1_784_000_000_000;
 
@@ -159,6 +180,21 @@ describe("Hub identity process lock", () => {
     await lock.release();
     await expect(acquiring).resolves.toBe("acquired");
     expect(await exists(path)).toBe(false);
+  });
+
+  it("takes a lock that another process removed while it was being read", async () => {
+    const path = await lockPath();
+    // Left by a process that died; a racing process reclaims it between this
+    // one's `lstat` and its read.
+    await writeFile(path, `100 ${BOOT}\n`, { mode: 0o600 });
+    readFileInterceptor.path = path;
+    readFileInterceptor.before = () => rm(path);
+    const next = lockFor(path, 200, new Set([200]));
+    // A path that is free, not a lock that cannot be used: the racing process
+    // finds this record when it creates its own, and waits.
+    await expect(next.acquire()).resolves.toBe("acquired");
+    expect(readFileInterceptor.before).toBeNull();
+    expect(await readFile(path, "utf8")).toBe(`200 ${BOOT} - -\n`);
   });
 
   it("reports an unusable lock location instead of failing the connector", async () => {

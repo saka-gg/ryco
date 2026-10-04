@@ -410,8 +410,9 @@ A lock left by a process that died — or by one from before a reboot, whose pid
 reused — is reclaimed automatically. The lock records the kernel's boot id where there is one (Linux
 and macOS), so a wall-clock correction cannot make a live holder look like one from an earlier boot,
 and on Linux the holder's start time, so a pid that a container restart handed to another process is
-not mistaken for the holder. If the lock file cannot be written at all the connector proceeds without
-it; the Hub still allows only one connection per identity.
+not mistaken for the holder. If the lock file cannot be read or written at all, the backend asks once
+more, then proceeds without it and asks again each time it next needs the identity; the Hub still
+allows only one connection per identity.
 
 The standalone [relay architecture atlas](./relay-architecture.html) shows enrollment, client relay
 connection, hosted reconnect, actor capabilities, role intersection, and which data each component

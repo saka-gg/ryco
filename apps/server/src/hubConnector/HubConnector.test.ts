@@ -1641,6 +1641,48 @@ describe("HubConnector", () => {
     await disabled.stop();
   });
 
+  it("asks the lock again after one it could not use, rather than keeping the identity for good", async () => {
+    const clock = scheduler();
+    const sockets: FakeSocket[] = [];
+    // Unreadable once; by the next check another process has taken it.
+    const answers = ["unavailable", "held"] as const;
+    let lockChecks = 0;
+    const operations: string[] = [];
+    const connector = new HubConnector({
+      config: enabledConfig,
+      identity: identity(),
+      transport: {
+        open: () => {
+          const socket = new FakeSocket();
+          sockets.push(socket);
+          return socket;
+        },
+      },
+      channels: { open: async () => Promise.reject(new Error("unused")) },
+      enrollmentMetadata,
+      livenessWatch: false,
+      scheduler: clock.value,
+      processLock: {
+        acquire: async () => answers[Math.min(lockChecks++, answers.length - 1)]!,
+        release: async () => undefined,
+      },
+    });
+    const starting = connector.start();
+    await settle();
+    // An unusable lock diagnoses nothing, so this attempt carries on without it.
+    expect(sockets).toHaveLength(1);
+
+    await expect(
+      connector.asIdentityOwner(async () => {
+        operations.push("owner operation");
+      }),
+    ).rejects.toThrow("in use by another Ryco process");
+    expect(lockChecks).toBe(2);
+    expect(operations).toEqual([]);
+    await connector.stop();
+    await starting;
+  });
+
   it("does not let a local duplicate's lock checks stretch the gap before a Hub displacement", async () => {
     const clock = scheduler();
     const sockets: FakeSocket[] = [];

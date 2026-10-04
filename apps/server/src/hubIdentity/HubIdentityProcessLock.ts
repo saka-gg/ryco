@@ -173,7 +173,17 @@ export function makeHubIdentityProcessLock(options: {
         ino: stats.ino,
       };
     }
-    const match = LOCK_FILE_PATTERN.exec(await readFile(path, "utf8"));
+    let content;
+    try {
+      content = await readFile(path, "utf8");
+    } catch (error: unknown) {
+      // Released, or reclaimed by a racing process, since the `lstat`: the path
+      // is free, not unreadable — reporting it as an unusable lock would carry
+      // on without one while the racing process takes it.
+      if (errorCode(error) === "ENOENT") return { kind: "absent" };
+      throw error;
+    }
+    const match = LOCK_FILE_PATTERN.exec(content);
     if (match === null) return { kind: "unparseable", mtimeMs: stats.mtimeMs, ino: stats.ino };
     const optional = (value: string | undefined) =>
       value === undefined || value === "-" ? undefined : value;

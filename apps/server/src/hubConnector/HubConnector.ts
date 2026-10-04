@@ -156,8 +156,9 @@ export class HubConnector {
   readonly #livenessWatchEnabled: boolean;
   readonly #processLock: HubIdentityProcessLock | undefined;
   /**
-   * Whether this process may use the identity: it holds the process lock, the
-   * lock could not be used at all, or no lock is configured.
+   * Whether this process owns the identity: it holds the process lock, or no
+   * lock is configured. A lock that could not be used lets one use proceed
+   * without making this true (`#takeIdentity`).
    */
   #ownsIdentity: boolean;
   readonly #beforeConnect: () => Promise<void>;
@@ -236,10 +237,10 @@ export class HubConnector {
     /** Keeps a second local process off this identity; see `HubIdentityProcessLock`. */
     readonly processLock?: HubIdentityProcessLock;
     /**
-     * The caller already acquired `processLock` — or found it unusable — before
-     * it built the identity runtime, as `HubConnectorLive` does so that a
-     * backend that loses the lock defers its startup work. Otherwise the
-     * connector claims the lock itself, when it first needs the identity.
+     * The caller already acquired `processLock` before it built the identity
+     * runtime, as `HubConnectorLive` does so that a backend that loses the lock
+     * defers its startup work. Otherwise the connector claims the lock itself,
+     * when it first needs the identity.
      */
     readonly ownsIdentity?: boolean;
     /**
@@ -541,11 +542,18 @@ export class HubConnector {
    * will not run can hand it back; ownership is recorded before any caller
    * looks at its own generation, so a superseded caller cannot leave the lock
    * file naming this process while the connector believes it does not.
+   *
+   * `unlocked` means the lock could not be used: the caller carries on, as the
+   * lock's contract says, but ownership is not recorded, so the next caller
+   * asks the lock again. Recording it would keep this process on the identity
+   * for good after one failed read — while another process that read the same
+   * file a moment later holds the lock.
    */
-  async #takeIdentity(): Promise<"owned" | "claimed" | "held"> {
+  async #takeIdentity(): Promise<"owned" | "claimed" | "unlocked" | "held"> {
     const lock = this.#processLock;
     if (lock === undefined || this.#ownsIdentity) return "owned";
-    if ((await lock.acquire()) === "held") return "held";
+    const result = await lock.acquire();
+    if (result !== "acquired") return result === "held" ? "held" : "unlocked";
     this.#ownsIdentity = true;
     return "claimed";
   }

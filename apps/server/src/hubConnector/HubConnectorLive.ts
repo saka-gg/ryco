@@ -422,9 +422,16 @@ export const HubConnectorLive = Layer.effect(
     // the lock held builds the runtime with that work deferred, and its
     // connector runs it once it takes the lock over. Released last, after the
     // connector has stopped.
+    //
+    // An unusable lock is asked once more before startup runs without it: that
+    // answer lets this backend do the owner's work, so it has to mean the lock
+    // cannot be used, not that one filesystem call lost a race.
     const identityClaim = config.hubConnector?.enabled
       ? yield* Effect.acquireRelease(
-          Effect.promise(() => processLock.acquire()),
+          Effect.promise(async () => {
+            const claim = await processLock.acquire();
+            return claim === "unavailable" ? processLock.acquire() : claim;
+          }),
           () => Effect.promise(() => processLock.release()),
         )
       : undefined;
@@ -697,7 +704,9 @@ export const HubConnectorLive = Layer.effect(
         await sessionDirectory.revokeEnrollment(frame);
       },
       processLock,
-      ownsIdentity: identityClaim !== undefined && identityClaim !== "held",
+      // Only a lock actually held: past an unusable one the connector asks
+      // again each time it needs the identity.
+      ownsIdentity: identityClaim === "acquired",
       // A standby connector may gain its identity in this process; external
       // integrations it left running close before this node is reachable.
       beforeConnect: () => runPromise(externalTopology.yieldToHub),
