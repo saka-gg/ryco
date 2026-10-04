@@ -11,6 +11,9 @@ import {
   desktopHubLaunchNeedsRestart,
   isDesktopHostedIdentitySupported,
   isDesktopHubFileSecretStoreSupported,
+  pendingDesktopServerExposureMode,
+  pendingDesktopTailscaleServe,
+  planDesktopServerExposureChange,
   planDesktopTailscaleServeChange,
   readDesktopSettings,
   resolveDefaultDesktopSettings,
@@ -262,6 +265,60 @@ describe("desktopSettings", () => {
         deferRelaunch: false,
       }).relaunch,
     ).toBe(true);
+  });
+
+  it("keeps a saved network access change visible and withdrawable until it applies", () => {
+    // Turns are running: turning network access on is saved for the relaunch.
+    const deferred = planDesktopServerExposureChange({
+      settings: DEFAULT_DESKTOP_SETTINGS,
+      running: "local-only",
+      requested: "network-accessible",
+      deferRelaunch: true,
+    });
+    expect(deferred.relaunch).toBe(false);
+    expect(pendingDesktopServerExposureMode(deferred.settings, "local-only")).toBe(
+      "network-accessible",
+    );
+
+    // Asking for the running mode withdraws it, without a relaunch. It used to
+    // return early and leave the widening armed for whatever launch came next.
+    const withdrawn = planDesktopServerExposureChange({
+      settings: deferred.settings,
+      running: "local-only",
+      requested: "local-only",
+      deferRelaunch: false,
+    });
+    expect(withdrawn).toEqual({ settings: DEFAULT_DESKTOP_SETTINGS, relaunch: false });
+    expect(pendingDesktopServerExposureMode(withdrawn.settings, "local-only")).toBeNull();
+
+    // Asking for the saved change again, now, applies it.
+    expect(
+      planDesktopServerExposureChange({
+        settings: deferred.settings,
+        running: "local-only",
+        requested: "network-accessible",
+        deferRelaunch: false,
+      }),
+    ).toEqual({ settings: deferred.settings, relaunch: true });
+  });
+
+  it("reports a Tailscale Serve change saved for the next launch", () => {
+    const serving = setDesktopTailscaleServePreference(DEFAULT_DESKTOP_SETTINGS, {
+      enabled: true,
+      port: 8443,
+    });
+    expect(pendingDesktopTailscaleServe(serving, { enabled: false, port: 443 })).toEqual({
+      enabled: true,
+      port: 8443,
+    });
+    expect(pendingDesktopTailscaleServe(serving, { enabled: true, port: 443 })).toEqual({
+      enabled: true,
+      port: 8443,
+    });
+    expect(pendingDesktopTailscaleServe(serving, { enabled: true, port: 8443 })).toBeNull();
+    expect(
+      pendingDesktopTailscaleServe(DEFAULT_DESKTOP_SETTINGS, { enabled: false, port: 8443 }),
+    ).toBeNull();
   });
 
   it("persists the requested nightly update channel", () => {

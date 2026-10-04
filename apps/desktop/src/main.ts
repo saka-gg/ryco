@@ -64,6 +64,9 @@ import {
   desktopHubLaunchNeedsRestart,
   isDesktopHostedIdentitySupported,
   isDesktopHubFileSecretStoreSupported,
+  pendingDesktopServerExposureMode,
+  pendingDesktopTailscaleServe,
+  planDesktopServerExposureChange,
   planDesktopTailscaleServeChange,
   readDesktopSettings,
   resolveDesktopHubConnectorLaunch,
@@ -677,12 +680,17 @@ function runningTailscaleServe(): DesktopTailscaleServeLaunch {
 
 function getDesktopServerExposureState(): DesktopServerExposureState {
   const tailscaleServe = runningTailscaleServe();
+  // A change saved for a relaunch stays visible, and so withdrawable, until then.
+  const pendingMode = pendingDesktopServerExposureMode(desktopSettings, desktopServerExposureMode);
+  const pendingTailscaleServe = pendingDesktopTailscaleServe(desktopSettings, tailscaleServe);
   return {
     mode: desktopServerExposureMode,
     endpointUrl: backendEndpointUrl,
     advertisedHost: backendAdvertisedHost,
     tailscaleServeEnabled: tailscaleServe.enabled,
     tailscaleServePort: tailscaleServe.port,
+    ...(pendingMode === null ? {} : { pendingMode }),
+    ...(pendingTailscaleServe === null ? {} : { pendingTailscaleServe }),
   };
 }
 
@@ -1123,27 +1131,21 @@ async function applyDesktopServerExposureMode(
 }
 
 /**
- * Save a network access change for the next launch without touching what the
- * running backend serves. A request that cannot be served right now is refused
- * exactly as an immediate change would be.
+ * Refuse to save network access for a later launch when it cannot be served
+ * right now, exactly as an immediate change would be refused.
  */
-function saveDesktopServerExposurePreference(mode: DesktopServerExposureMode): void {
-  if (mode === "network-accessible") {
-    const advertisedHostOverride = resolveAdvertisedHostOverride();
-    const exposure = resolveDesktopServerExposure({
-      mode,
-      port: backendPort,
-      networkInterfaces: OS.networkInterfaces(),
-      ...(advertisedHostOverride ? { advertisedHostOverride } : {}),
-    });
-    if (exposure.endpointUrl === null) {
-      throw new Error("No reachable network address is available for this desktop right now.");
-    }
+function assertDesktopServerExposureServable(mode: DesktopServerExposureMode): void {
+  if (mode !== "network-accessible") return;
+  const advertisedHostOverride = resolveAdvertisedHostOverride();
+  const exposure = resolveDesktopServerExposure({
+    mode,
+    port: backendPort,
+    networkInterfaces: OS.networkInterfaces(),
+    ...(advertisedHostOverride ? { advertisedHostOverride } : {}),
+  });
+  if (exposure.endpointUrl === null) {
+    throw new Error("No reachable network address is available for this desktop right now.");
   }
-  const nextSettings = setDesktopServerExposurePreference(desktopSettings, mode);
-  if (nextSettings === desktopSettings) return;
-  writeDesktopSettings(DESKTOP_SETTINGS_PATH, nextSettings);
-  desktopSettings = nextSettings;
 }
 
 /** `{ deferRelaunch }` from a renderer: save the change, the caller relaunches later. */
@@ -2997,22 +2999,31 @@ function registerIpcHandlers(): void {
       const deferRelaunch = readDeferRelaunch(rawOptions, "Invalid desktop server exposure input.");
 
       const nextMode = rawMode as DesktopServerExposureMode;
-      if (deferRelaunch) {
-        // Saved now so quitting or crashing before the relaunch cannot drop it;
-        // the running backend keeps its listener until then.
-        saveDesktopServerExposurePreference(nextMode);
-        return getDesktopServerExposureState();
-      }
-      if (nextMode === desktopServerExposureMode) {
-        return getDesktopServerExposureState();
-      }
-
-      const nextState = await applyDesktopServerExposureMode(nextMode, {
-        persist: true,
-        rejectIfUnavailable: true,
+      // Measured against the running mode, not only the saved one: a deferred
+      // change leaves the two apart until the relaunch.
+      const plan = planDesktopServerExposureChange({
+        settings: desktopSettings,
+        running: desktopServerExposureMode,
+        requested: nextMode,
+        deferRelaunch,
       });
-      relaunchDesktopApp(`serverExposureMode=${nextMode}`);
-      return nextState;
+      if (plan.relaunch) {
+        const nextState = await applyDesktopServerExposureMode(nextMode, {
+          persist: true,
+          rejectIfUnavailable: true,
+        });
+        relaunchDesktopApp(`serverExposureMode=${nextMode}`);
+        return nextState;
+      }
+      if (plan.settings !== desktopSettings) {
+        // Saved now so quitting or crashing before the relaunch cannot drop
+        // it; the running backend keeps its listener until then. Asking for
+        // the running mode withdraws a saved change and is always allowed.
+        if (nextMode !== desktopServerExposureMode) assertDesktopServerExposureServable(nextMode);
+        writeDesktopSettings(DESKTOP_SETTINGS_PATH, plan.settings);
+        desktopSettings = plan.settings;
+      }
+      return getDesktopServerExposureState();
     },
   );
 

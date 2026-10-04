@@ -381,12 +381,24 @@ export interface PersistedSavedEnvironmentRecord {
 
 export type DesktopServerExposureMode = "local-only" | "network-accessible";
 
+/**
+ * What the running backend serves. The `pending*` fields describe a change
+ * saved for the next launch, which only a relaunch applies.
+ */
 export interface DesktopServerExposureState {
   mode: DesktopServerExposureMode;
   endpointUrl: string | null;
   advertisedHost: string | null;
   tailscaleServeEnabled: boolean;
   tailscaleServePort: number;
+  /**
+   * The network access mode the next launch binds, while it differs from
+   * `mode`: a change deferred until running turns finish, or one the network
+   * could not serve when Ryco started. Absent when nothing is pending.
+   */
+  pendingMode?: DesktopServerExposureMode;
+  /** What the next launch serves through Tailscale, while it differs from what runs. */
+  pendingTailscaleServe?: { readonly enabled: boolean; readonly port: number };
 }
 
 export interface PickFolderOptions {
@@ -720,8 +732,10 @@ export interface DesktopBridge {
   /**
    * Network access and Tailscale Serve apply by relaunching Desktop. With
    * `deferRelaunch`, the change is only saved: the running backend keeps what
-   * it serves, the returned state still describes it, and the change applies on
-   * the next launch, which the caller schedules.
+   * it serves, the returned state still describes it (with the saved change as
+   * `pending*`), and the change applies on the next launch, which the caller
+   * schedules. Requesting what the backend already serves withdraws a saved
+   * change and never relaunches.
    */
   setServerExposureMode: (
     mode: DesktopServerExposureMode,

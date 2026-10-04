@@ -1761,6 +1761,80 @@ describe("GeneralSettingsPanel observability", () => {
     expect(desktopRelaunchScheduler.pending()).toBe(true);
   });
 
+  it("shows network access saved for the next launch and withdraws it in place", async () => {
+    // Once its waiting notice was dismissed, a deferred change was invisible:
+    // the switch shows the running mode, so nothing could take it back before
+    // a later restart applied it.
+    const restartApp = vi.fn().mockResolvedValue(undefined);
+    const desktopBridge = createDesktopBridgeStub({
+      serverExposureState: {
+        mode: "local-only",
+        endpointUrl: null,
+        advertisedHost: null,
+        tailscaleServeEnabled: false,
+        tailscaleServePort: 443,
+        pendingMode: "network-accessible",
+      },
+      restartApp,
+    });
+    window.desktopBridge = desktopBridge;
+    setServerConfigSnapshot(createBaseServerConfig());
+
+    mounted = await render(
+      <AppAtomRegistryProvider>
+        <ConnectionsSettings />
+      </AppAtomRegistryProvider>,
+    );
+
+    await expect.element(page.getByText("Saved to turn on when Ryco restarts.")).toBeVisible();
+    await expect.element(page.getByLabelText("Enable network access")).not.toBeChecked();
+
+    await page.getByRole("button", { name: "Restart", exact: true }).click();
+    await vi.waitFor(() => expect(restartApp).toHaveBeenCalledOnce());
+
+    await page.getByRole("button", { name: "Undo", exact: true }).click();
+    // The running mode: Desktop withdraws the saved change without relaunching.
+    await vi.waitFor(() =>
+      expect(desktopBridge.setServerExposureMode).toHaveBeenCalledWith("local-only"),
+    );
+    await expect
+      .element(page.getByText("Saved to turn on when Ryco restarts."))
+      .not.toBeInTheDocument();
+  });
+
+  it("shows Tailscale HTTPS saved for the next launch and withdraws it in place", async () => {
+    const desktopBridge = createDesktopBridgeStub({
+      serverExposureState: {
+        mode: "network-accessible",
+        endpointUrl: "http://192.168.1.44:3773",
+        advertisedHost: "192.168.1.44",
+        tailscaleServeEnabled: true,
+        tailscaleServePort: 443,
+        pendingTailscaleServe: { enabled: false, port: 443 },
+      },
+    });
+    window.desktopBridge = desktopBridge;
+    setServerConfigSnapshot(createBaseServerConfig());
+
+    mounted = await render(
+      <AppAtomRegistryProvider>
+        <ConnectionsSettings />
+      </AppAtomRegistryProvider>,
+    );
+
+    await expect.element(page.getByText("Saved to turn off when Ryco restarts.")).toBeVisible();
+    await page.getByRole("button", { name: "Undo", exact: true }).click();
+    await vi.waitFor(() =>
+      expect(desktopBridge.setTailscaleServeEnabled).toHaveBeenCalledWith({
+        enabled: true,
+        port: 443,
+      }),
+    );
+    await expect
+      .element(page.getByText("Saved to turn off when Ryco restarts."))
+      .not.toBeInTheDocument();
+  });
+
   it("adds desktop ssh environments from the add-environment dialog", async () => {
     const discoverSshHosts = vi.fn().mockResolvedValue([
       {

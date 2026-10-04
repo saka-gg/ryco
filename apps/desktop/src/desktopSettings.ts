@@ -137,6 +137,39 @@ export interface DesktopRelaunchSettingPlan {
   readonly relaunch: boolean;
 }
 
+export function planDesktopServerExposureChange(input: {
+  readonly settings: DesktopSettings;
+  readonly running: DesktopServerExposureMode;
+  readonly requested: DesktopServerExposureMode;
+  readonly deferRelaunch: boolean;
+}): DesktopRelaunchSettingPlan {
+  return {
+    settings: setDesktopServerExposurePreference(input.settings, input.requested),
+    relaunch: !input.deferRelaunch && input.requested !== input.running,
+  };
+}
+
+/**
+ * The network access mode the next launch binds, while it differs from the
+ * running one: a change saved for a deferred relaunch, or one the network
+ * could not serve when Ryco started. `null` when nothing is pending.
+ */
+export function pendingDesktopServerExposureMode(
+  settings: DesktopSettings,
+  running: DesktopServerExposureMode,
+): DesktopServerExposureMode | null {
+  return settings.serverExposureMode === running ? null : settings.serverExposureMode;
+}
+
+/** What the next launch serves through Tailscale, while it differs from what runs now. */
+export function pendingDesktopTailscaleServe(
+  settings: DesktopSettings,
+  running: DesktopTailscaleServeLaunch,
+): DesktopTailscaleServeLaunch | null {
+  const saved = resolveDesktopTailscaleServeLaunch(settings);
+  return desktopTailscaleServeLaunchesMatch(saved, running) ? null : saved;
+}
+
 export function planDesktopTailscaleServeChange(input: {
   readonly settings: DesktopSettings;
   readonly running: DesktopTailscaleServeLaunch;

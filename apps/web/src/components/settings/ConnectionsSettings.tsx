@@ -63,7 +63,7 @@ import { Group, GroupSeparator } from "../ui/group";
 import { AnimatedHeight } from "../AnimatedHeight";
 import { HubSection } from "./HubSection";
 import { DesktopKeepAwakeRow } from "./DesktopKeepAwakeRow";
-import { useDesktopRelaunchGuard } from "./useDesktopRelaunchGuard";
+import { savedChangeRelaunch, useDesktopRelaunchGuard } from "./useDesktopRelaunchGuard";
 import {
   savedBackendConnectionActionLabel,
   savedBackendNeedsRepair,
@@ -1258,6 +1258,39 @@ const AdvertisedEndpointListRow = memo(function AdvertisedEndpointListRow({
   );
 });
 
+/**
+ * A network or Tailscale change saved for the next launch.
+ *
+ * The row's switch shows what the running backend serves, so without this a
+ * deferred change would be invisible once its waiting notice was dismissed,
+ * and could not be withdrawn before some later restart applied it.
+ */
+function SavedForRelaunchNotice({
+  message,
+  busy,
+  onRestart,
+  onUndo,
+}: {
+  message: string;
+  busy: boolean;
+  onRestart: (() => void) | null;
+  onUndo: () => void;
+}) {
+  return (
+    <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
+      <span className="text-warning">{message}</span>
+      {onRestart ? (
+        <Button size="xs" variant="outline" disabled={busy} onClick={onRestart}>
+          Restart
+        </Button>
+      ) : null}
+      <Button size="xs" variant="ghost" disabled={busy} onClick={onUndo}>
+        Undo
+      </Button>
+    </span>
+  );
+}
+
 function NetworkAccessDescription({
   endpoint,
   hiddenEndpointCount,
@@ -1740,6 +1773,62 @@ export function ConnectionsSettings() {
   const handleStartTailscaleServeDisable = useCallback((_endpoint: AdvertisedEndpoint) => {
     setDisableTailscaleServeDialogOpen(true);
   }, []);
+
+  // Applies every change saved for the next launch, Hub settings included.
+  const restartForSavedChanges = useMemo(() => {
+    const restartApp = desktopBridge?.restartApp;
+    if (!restartApp) return null;
+    return () => {
+      void guardRelaunch(savedChangeRelaunch(restartApp)).catch((error: unknown) => {
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Ryco could not restart",
+            description: error instanceof Error ? error.message : "Restart Ryco to apply it.",
+          }),
+        );
+      });
+    };
+  }, [desktopBridge, guardRelaunch]);
+
+  // Asking for what the backend already serves withdraws the saved change;
+  // Desktop never relaunches for it.
+  const handleWithdrawSavedNetworkAccess = useCallback(async () => {
+    if (!desktopBridge || !desktopServerExposureState) return;
+    setIsUpdatingDesktopServerExposure(true);
+    setDesktopServerExposureError(null);
+    try {
+      setDesktopServerExposureState(
+        await desktopBridge.setServerExposureMode(desktopServerExposureState.mode),
+      );
+    } catch (error) {
+      setDesktopServerExposureError(
+        error instanceof Error ? error.message : "Failed to update network exposure.",
+      );
+    } finally {
+      setIsUpdatingDesktopServerExposure(false);
+    }
+  }, [desktopBridge, desktopServerExposureState]);
+
+  const handleWithdrawSavedTailscaleServe = useCallback(async () => {
+    if (!desktopBridge || !desktopServerExposureState) return;
+    setIsUpdatingTailscaleServe(true);
+    setDesktopServerExposureError(null);
+    try {
+      setDesktopServerExposureState(
+        await desktopBridge.setTailscaleServeEnabled({
+          enabled: desktopServerExposureState.tailscaleServeEnabled,
+          port: desktopServerExposureState.tailscaleServePort,
+        }),
+      );
+    } catch (error) {
+      setDesktopServerExposureError(
+        error instanceof Error ? error.message : "Failed to update Tailscale HTTPS.",
+      );
+    } finally {
+      setIsUpdatingTailscaleServe(false);
+    }
+  }, [desktopBridge, desktopServerExposureState]);
 
   const handleRevokeDesktopPairingLink = useCallback(async (id: string) => {
     setRevokingDesktopPairingLinkId(id);
@@ -2451,6 +2540,7 @@ export function ConnectionsSettings() {
           );
         })
       : null;
+  const pendingTailscaleServe = desktopServerExposureState?.pendingTailscaleServe;
   const renderTailscaleRow = () => (
     <SettingsRow
       title="Tailscale HTTPS"
@@ -2460,6 +2550,22 @@ export function ConnectionsSettings() {
             ? tailscaleHttpsEndpoint.httpBaseUrl
             : "Use Tailscale Serve to expose this backend through a MagicDNS HTTPS URL."
           : "Start Tailscale to set up HTTPS access through MagicDNS."
+      }
+      status={
+        pendingTailscaleServe ? (
+          <SavedForRelaunchNotice
+            message={
+              !pendingTailscaleServe.enabled
+                ? "Saved to turn off when Ryco restarts."
+                : desktopServerExposureState?.tailscaleServeEnabled
+                  ? `Saved to serve on port ${pendingTailscaleServe.port} when Ryco restarts.`
+                  : "Saved to turn on when Ryco restarts."
+            }
+            busy={isUpdatingTailscaleServe}
+            onRestart={restartForSavedChanges}
+            onUndo={() => void handleWithdrawSavedTailscaleServe()}
+          />
+        ) : null
       }
       control={
         tailscaleHttpsEndpoint ? (
@@ -2526,8 +2632,24 @@ export function ConnectionsSettings() {
         )
       }
       status={
-        desktopServerExposureError ? (
-          <span className="block text-destructive">{desktopServerExposureError}</span>
+        desktopServerExposureState?.pendingMode || desktopServerExposureError ? (
+          <>
+            {desktopServerExposureState?.pendingMode ? (
+              <SavedForRelaunchNotice
+                message={
+                  desktopServerExposureState.pendingMode === "network-accessible"
+                    ? "Saved to turn on when Ryco restarts."
+                    : "Saved to turn off when Ryco restarts."
+                }
+                busy={isUpdatingDesktopServerExposure}
+                onRestart={restartForSavedChanges}
+                onUndo={() => void handleWithdrawSavedNetworkAccess()}
+              />
+            ) : null}
+            {desktopServerExposureError ? (
+              <span className="block text-destructive">{desktopServerExposureError}</span>
+            ) : null}
+          </>
         ) : null
       }
       control={renderNetworkAccessToggle()}
