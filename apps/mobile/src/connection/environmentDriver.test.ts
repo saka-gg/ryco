@@ -188,6 +188,46 @@ describe("mobile environment driver", () => {
     expect(fake.runtime(ENV_ID)?.authState).not.toBe("requires-auth");
   });
 
+  it("lets a cancelled connect fail without touching the connection that replaced it", async () => {
+    const fake = createFakeCatalog();
+    fake.setBearerToken(ENV_ID, "old-bearer-token");
+    fake.upsert(record());
+    let failSessionCheck!: (error: unknown) => void;
+    const driver = createMobileEnvironmentDriver({
+      catalog: fake.catalog,
+      remoteApi: {
+        fetchRemoteSessionState: () =>
+          new Promise<AuthSessionState>((_resolve, reject) => {
+            failSessionCheck = reject;
+          }),
+        resolveRemoteWebSocketConnectionUrl: noopRemoteApi.resolveRemoteWebSocketConnectionUrl,
+      },
+      subscribeResume: () => () => {},
+    });
+    let cancelled = false;
+    const staleConnect = driver.connectSavedEnvironment(record(), () => cancelled);
+    await vi.waitFor(() => expect(failSessionCheck).toBeDefined());
+
+    // A new pairing cancelled the attempt and registered its own connection.
+    cancelled = true;
+    const dispose = vi.fn(async () => undefined);
+    const replacement = driver.supervisor.register(fakeConnection(ENV_ID, { dispose }));
+    fake.catalog.runtimeStore.getState().patch(ENV_ID, {
+      connectionState: "connected",
+      authState: "authenticated",
+    });
+
+    failSessionCheck(new Error("Network request failed"));
+    await expect(staleConnect).rejects.toThrow("Network request failed");
+
+    expect(driver.supervisor.read(ENV_ID)).toBe(replacement);
+    expect(dispose).not.toHaveBeenCalled();
+    expect(fake.runtime(ENV_ID)).toMatchObject({
+      connectionState: "connected",
+      authState: "authenticated",
+    });
+  });
+
   it("constructs the supervisor and wires the registry + resume seams on start (no import side effects)", () => {
     const fake = createFakeCatalog();
     const resumeSubscribe = vi.fn(() => () => {});

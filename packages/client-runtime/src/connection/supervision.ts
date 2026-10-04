@@ -42,8 +42,8 @@ const SAVED_ENVIRONMENT_RETRY_MAX_MS = 60_000;
 /**
  * The longest one saved environment may hold a connect slot. The platform
  * connect bounds its own steps; this is the backstop that keeps one hung connect
- * from stalling every other saved environment — and every later sync — until
- * the app restarts.
+ * — an SSH password prompt, a keychain read — from stalling every other saved
+ * environment, and every later sync, until the app restarts.
  */
 export const SAVED_ENVIRONMENT_CONNECT_TIMEOUT_MS = 60_000;
 
@@ -103,8 +103,8 @@ export interface EnvironmentSupervisorInput<SavedEnvironmentRecord> {
 }
 
 export class SavedEnvironmentConnectionCancelledError extends Error {
-  constructor(environmentId: EnvironmentId) {
-    super(`Saved environment ${environmentId} connection was cancelled.`);
+  constructor(environmentId: EnvironmentId, options?: { readonly cause?: unknown }) {
+    super(`Saved environment ${environmentId} connection was cancelled.`, options);
     this.name = "SavedEnvironmentConnectionCancelledError";
   }
 }
@@ -609,7 +609,22 @@ export function createEnvironmentConnectionSupervisor<
     } = {
       cancelled: false,
       promise: Promise.resolve().then(async () => {
-        const connection = await connect(() => pendingEntry.cancelled);
+        let connection: EnvironmentConnection;
+        try {
+          connection = await connect(() => pendingEntry.cancelled);
+        } catch (error) {
+          // A cancelled attempt's failure is not the environment's: a disconnect
+          // or a new pairing replaced it, and that owner reports the outcome.
+          if (
+            pendingEntry.cancelled &&
+            !(error instanceof SavedEnvironmentConnectionCancelledError)
+          ) {
+            throw new SavedEnvironmentConnectionCancelledError(record.environmentId, {
+              cause: error,
+            });
+          }
+          throw error;
+        }
         if (pendingEntry.cancelled) {
           const removed = await remove(connection.environmentId).catch(() => false);
           if (!removed) await connection.dispose().catch(NOOP);
@@ -637,9 +652,9 @@ export function createEnvironmentConnectionSupervisor<
   ): Promise<EnvironmentConnection> =>
     new Promise((resolve, reject) => {
       const timeoutId = input.setTimeout(() => {
-        // The abandoned attempt disposes whatever it still builds once it
-        // settles; the retry starts a fresh one.
-        cancelPendingSavedEnvironmentConnection(environmentId);
+        // Only the slot gives up; the attempt keeps running. A Connect or a
+        // pairing may have joined it, and the retry joins it as well instead of
+        // racing a second connect for the same environment.
         reject(new Error(`Saved environment ${environmentId} did not connect in time.`));
       }, SAVED_ENVIRONMENT_CONNECT_TIMEOUT_MS);
       connecting.then(

@@ -1249,11 +1249,21 @@ async function connectSavedEnvironment(
 
     const activeBearerToken = bearerToken;
     let credentialRejected = false;
+    let registered = false;
+    // Only the environment's live attempt, or the connection it registered,
+    // reports the environment's state. An attempt a disconnect or a new pairing
+    // cancelled, and a connection something else has since replaced, say
+    // nothing about the credential the environment holds now.
+    const speaksForEnvironment = () => {
+      if (isCancelled()) return false;
+      const current = getEnvironmentSupervisor().read(activeRecord.environmentId);
+      return registered ? current === connection : current === null;
+    };
     const client =
       clientOverride ??
       createSavedEnvironmentClient(activeRecord.environmentId, activeBearerToken, () => {
         credentialRejected = true;
-        if (!activeRecord.desktopSsh) {
+        if (!activeRecord.desktopSsh && speaksForEnvironment()) {
           markSavedEnvironmentCredentialRejected(activeRecord.environmentId, connection);
         }
       });
@@ -1288,7 +1298,9 @@ async function connectSavedEnvironment(
           ) {
             throw error;
           }
-          markSavedEnvironmentCredentialRejected(activeRecord.environmentId, connection);
+          if (speaksForEnvironment()) {
+            markSavedEnvironmentCredentialRejected(activeRecord.environmentId, connection);
+          }
           throw toSavedEnvironmentCredentialError(error);
         }
       },
@@ -1335,7 +1347,7 @@ async function connectSavedEnvironment(
         if (!activeRecord.desktopSsh) {
           // The bearer stays stored: the record keeps its place, and pairing
           // again replaces the credential.
-          setRuntimeRequiresAuth(activeRecord.environmentId);
+          if (speaksForEnvironment()) setRuntimeRequiresAuth(activeRecord.environmentId);
           throw toSavedEnvironmentCredentialError(error);
         }
         // SSH mints a fresh bearer through its own tunnel, once per connect: a
@@ -1360,16 +1372,20 @@ async function connectSavedEnvironment(
         throw new SavedEnvironmentConnectionCancelledError(activeRecord.environmentId);
       }
       registerConnection(connection);
+      registered = true;
       return connection;
     } catch (error) {
       if (error instanceof SavedEnvironmentConnectionCancelledError) {
         throw error;
       }
-      if (!(error instanceof SavedEnvironmentCredentialError)) {
+      if (speaksForEnvironment() && !(error instanceof SavedEnvironmentCredentialError)) {
         setRuntimeError(activeRecord.environmentId, error);
       }
-      const removed = await removeConnection(activeRecord.environmentId).catch(() => false);
-      if (!removed) {
+      // Removal goes by identity: the environment may already hold another
+      // attempt's healthy connection, which this failure must not take down.
+      if (getEnvironmentSupervisor().read(activeRecord.environmentId) === connection) {
+        await removeConnection(activeRecord.environmentId).catch(() => false);
+      } else {
         await connection.dispose().catch(() => undefined);
       }
       throw error;
@@ -1605,6 +1621,9 @@ export async function addSavedEnvironment(input: {
   if (staleDesktopSshRecord) {
     await removeSavedEnvironment(staleDesktopSshRecord.environmentId);
   }
+  // A connect still running started on the credential this pairing replaced;
+  // joining it would answer for the old one.
+  getEnvironmentSupervisor().cancelPendingSavedEnvironmentConnection(environmentId);
   await removeConnection(environmentId).catch(() => false);
   await ensureSavedEnvironmentConnection(record, {
     bearerToken: bearerSession.sessionToken,

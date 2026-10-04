@@ -305,14 +305,27 @@ export function createMobileEnvironmentDriver(
     record: SavedEnvironmentRecord,
     isCancelled: () => boolean = () => false,
   ): Promise<EnvironmentConnection> {
+    let registered: EnvironmentConnection | null = null;
+    // Only this environment's live attempt, or the connection it registered,
+    // reports the environment's state. An attempt a disconnect or a new pairing
+    // cancelled, and a connection something else has since replaced, say
+    // nothing about the credential the environment holds now.
+    const speaksForEnvironment = () => {
+      if (isCancelled()) return false;
+      const current = getSupervisor().read(record.environmentId);
+      return registered !== null ? current === registered : current === null;
+    };
+
     const bearerToken = await catalog.readBearerToken(record.environmentId);
     if (!bearerToken) {
-      patchRuntime(record.environmentId, {
-        authState: "requires-auth",
-        connectionState: "disconnected",
-        lastError: "Saved environment is missing its saved credential. Pair it again.",
-        lastErrorAt: nowIso(),
-      });
+      if (speaksForEnvironment()) {
+        patchRuntime(record.environmentId, {
+          authState: "requires-auth",
+          connectionState: "disconnected",
+          lastError: "Saved environment is missing its saved credential. Pair it again.",
+          lastErrorAt: nowIso(),
+        });
+      }
       throw new SavedEnvironmentCredentialError(
         "Saved environment is missing its saved credential.",
       );
@@ -325,16 +338,16 @@ export function createMobileEnvironmentDriver(
       fetchSessionState: () =>
         remoteApi.fetchRemoteSessionState({ httpBaseUrl: record.httpBaseUrl, bearerToken }),
     }).catch((error: unknown) => {
-      setRuntimeError(record.environmentId, error);
+      if (speaksForEnvironment()) setRuntimeError(record.environmentId, error);
       throw error;
     });
     if (sessionCheck.status === "requires-auth") {
-      setRuntimeRequiresAuth(record.environmentId);
+      if (speaksForEnvironment()) setRuntimeRequiresAuth(record.environmentId);
       throw new SavedEnvironmentCredentialError(SAVED_ENVIRONMENT_REQUIRES_AUTH_MESSAGE);
     }
 
-    let registered: EnvironmentConnection | null = null;
     const client = createSavedEnvironmentClient(record.environmentId, bearerToken, () => {
+      if (!speaksForEnvironment()) return;
       setRuntimeRequiresAuth(record.environmentId);
       // Its transport has stopped; the dead connection leaves the supervisor so
       // a reconnect starts over with a session check. Deferred out of the
@@ -390,7 +403,7 @@ export function createMobileEnvironmentDriver(
       return connection;
     } catch (error) {
       if (!(error instanceof SavedEnvironmentConnectionCancelledError)) {
-        setRuntimeError(record.environmentId, error);
+        if (speaksForEnvironment()) setRuntimeError(record.environmentId, error);
         await connection.dispose().catch(() => undefined);
       }
       throw error;

@@ -3,6 +3,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 
 let mockSavedRecords: Array<Record<string, unknown>> = [];
 
+type SessionStateSettlers = {
+  readonly resolve: (value: Record<string, unknown>) => void;
+  readonly reject: (error: unknown) => void;
+};
+
 const mockResolveRemotePairingTarget = vi.fn();
 const mockFetchRemoteEnvironmentDescriptor = vi.fn();
 const mockBootstrapRemoteBearerSession = vi.fn();
@@ -495,6 +500,101 @@ describe("addSavedEnvironment", () => {
 
     await resetEnvironmentServiceForTests();
   });
+
+  it.each([
+    {
+      outcome: "fails on the network",
+      settle: (session: SessionStateSettlers) => session.reject(new Error("fetch failed")),
+    },
+    {
+      outcome: "is told the old bearer is rejected",
+      settle: (session: SessionStateSettlers) => session.resolve({ authenticated: false }),
+    },
+  ])(
+    "leaves a re-paired environment alone when the connect it replaced $outcome",
+    async ({ settle }) => {
+      const environmentId = EnvironmentId.make("environment-1");
+      mockSavedRecords = [
+        {
+          environmentId,
+          label: "Remote environment",
+          httpBaseUrl: "https://remote.example.com/",
+          wsBaseUrl: "wss://remote.example.com/",
+          createdAt: "2026-04-14T00:00:00.000Z",
+          lastConnectedAt: null,
+        },
+      ];
+      mockReadSavedEnvironmentBearerToken.mockResolvedValue("old-bearer-token");
+      mockWriteSavedEnvironmentBearerToken.mockResolvedValue(true);
+      mockBootstrapRemoteBearerSession.mockResolvedValue({
+        sessionToken: "new-bearer-token",
+        role: "owner",
+      });
+      let oldSession!: SessionStateSettlers;
+      mockFetchRemoteSessionState.mockImplementation((input: { readonly bearerToken: string }) =>
+        input.bearerToken === "old-bearer-token"
+          ? new Promise((resolve, reject) => {
+              oldSession = { resolve, reject };
+            })
+          : Promise.resolve({ authenticated: true, role: "owner" }),
+      );
+      const created: Array<{ readonly dispose: ReturnType<typeof vi.fn> }> = [];
+      mockCreateEnvironmentConnection.mockImplementation(
+        (input: { knownEnvironment: { environmentId: EnvironmentId }; client: unknown }) => {
+          const connection = {
+            kind: "saved" as const,
+            environmentId: input.knownEnvironment.environmentId,
+            knownEnvironment: input.knownEnvironment,
+            client: input.client,
+            ensureBootstrapped: async () => undefined,
+            reconnect: async () => undefined,
+            dispose: vi.fn(async () => undefined),
+          };
+          created.push(connection);
+          return connection;
+        },
+      );
+
+      const {
+        addSavedEnvironment,
+        reconnectSavedEnvironment,
+        listEnvironmentConnections,
+        resetEnvironmentServiceForTests,
+      } = await import("./service");
+
+      // A connect on the old bearer is still waiting when the user pairs again.
+      const staleConnect = reconnectSavedEnvironment(environmentId);
+      await vi.waitFor(() => {
+        expect(oldSession).toBeDefined();
+      });
+      await addSavedEnvironment({
+        label: "Remote environment",
+        host: "remote.example.com",
+        pairingCode: "123456",
+      });
+      const repaired = listEnvironmentConnections();
+      const repairedConnection = created.at(-1);
+      expect(repaired).toEqual([repairedConnection]);
+      mockPatchRuntime.mockClear();
+
+      settle(oldSession);
+      await expect(staleConnect).resolves.toBeUndefined();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(listEnvironmentConnections()).toEqual(repaired);
+      expect(repairedConnection?.dispose).not.toHaveBeenCalled();
+      expect(mockPatchRuntime).not.toHaveBeenCalledWith(
+        environmentId,
+        expect.objectContaining({ connectionState: "error" }),
+      );
+      expect(mockPatchRuntime).not.toHaveBeenCalledWith(
+        environmentId,
+        expect.objectContaining({ authState: "requires-auth" }),
+      );
+
+      await resetEnvironmentServiceForTests();
+    },
+  );
 
   it("fails a connect whose socket never delivers the server config", async () => {
     vi.useFakeTimers();

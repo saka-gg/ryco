@@ -125,21 +125,15 @@ describe("saved environment retry", () => {
     const hungB = "env-hung-b" as EnvironmentId;
     const reachable = "env-reachable" as EnvironmentId;
     const attempts = new Map<EnvironmentId, number>();
-    const cancelled: EnvironmentId[] = [];
+    const settle = new Map<EnvironmentId, (connection: EnvironmentConnection) => void>();
     const { supervisor } = makeSupervisor(
-      (record, isCancelled) => {
+      (record) => {
         attempts.set(record.environmentId, (attempts.get(record.environmentId) ?? 0) + 1);
         if (record.environmentId === reachable) return Promise.resolve(connectionFor(record));
-        // A bearer the node rejects inside the socket's URL provider used to
-        // leave the connect pending forever and hold the worker slot.
-        return new Promise<EnvironmentConnection>(() => {
-          void Promise.resolve().then(function poll(): void {
-            if (isCancelled()) {
-              cancelled.push(record.environmentId);
-              return;
-            }
-            setTimeout(poll, 1_000);
-          });
+        // An SSH password prompt or a keychain read can hold a connect far
+        // longer than any bounded network step.
+        return new Promise<EnvironmentConnection>((resolve) => {
+          settle.set(record.environmentId, resolve);
         });
       },
       {
@@ -159,13 +153,47 @@ describe("saved environment retry", () => {
 
     await vi.advanceTimersByTimeAsync(SAVED_ENVIRONMENT_CONNECT_TIMEOUT_MS);
     expect(attempts.get(reachable)).toBe(1);
-    expect(cancelled).toEqual(expect.arrayContaining([hungA, hungB]));
 
-    // The stalled environments stay on the retry schedule instead of being
-    // abandoned until the app restarts.
+    // The stalled environments stay on the retry schedule, and the retry joins
+    // the attempt still running rather than racing a second one beside it.
     await vi.advanceTimersByTimeAsync(5_000);
-    expect(attempts.get(hungA)).toBe(2);
-    expect(attempts.get(hungB)).toBe(2);
+    expect(attempts.get(hungA)).toBe(1);
+    expect(attempts.get(hungB)).toBe(1);
+
+    const connectionA = connectionFor({ environmentId: hungA });
+    settle.get(hungA)?.(connectionA);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(attempts.get(hungA)).toBe(1);
+    stop();
+  });
+
+  it("keeps a Connect that joined a slow attempt when the slot gives up on it", async () => {
+    let settle: ((connection: EnvironmentConnection) => void) | null = null;
+    let cancelledWhenSettled: boolean | null = null;
+    const { supervisor } = makeSupervisor(
+      (_record, isCancelled) =>
+        new Promise<EnvironmentConnection>((resolve) => {
+          settle = (connection) => {
+            cancelledWhenSettled = isCancelled();
+            resolve(connection);
+          };
+        }),
+    );
+    const stop = supervisor.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(settle).not.toBeNull();
+
+    // The user presses Connect (or pairs again) while the supervisor's attempt
+    // is still waiting; both share the one pending connect.
+    const joined = supervisor.ensureSavedEnvironmentConnection({ environmentId: remote }, () =>
+      Promise.reject(new Error("a joined Connect never starts its own attempt")),
+    );
+    await vi.advanceTimersByTimeAsync(SAVED_ENVIRONMENT_CONNECT_TIMEOUT_MS);
+
+    const connection = connectionFor({ environmentId: remote });
+    settle!(connection);
+    await expect(joined).resolves.toBe(connection);
+    expect(cancelledWhenSettled).toBe(false);
     stop();
   });
 

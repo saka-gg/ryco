@@ -98,6 +98,9 @@ export function createEnvironmentActions(deps: EnvironmentActionsDeps) {
 
     // The upsert auto-persists and fires the supervisor's registry subscription.
     registry.catalog.registryStore.getState().upsert(record);
+    // A connect still running started on the credential this pairing replaced;
+    // joining it would answer for the old one.
+    registry.driver.supervisor.cancelPendingSavedEnvironmentConnection(environmentId);
     await registry.driver.supervisor.remove(environmentId).catch(() => false);
     await connect(record);
     return record;
