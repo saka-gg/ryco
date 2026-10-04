@@ -371,6 +371,67 @@ describe("mobile environment driver", () => {
     await driver.supervisor.remove(ENV_ID);
   });
 
+  it("never presents a bearer a renewal superseded when the stored one cannot be read", async () => {
+    vi.useFakeTimers();
+    try {
+      const fake = createFakeCatalog();
+      fake.setBearerToken(ENV_ID, "bearer-1");
+      fake.upsert(record());
+      const dayMs = 24 * 60 * 60 * 1000;
+      // Each bearer lives thirty days from when it was issued.
+      const issuedAt = new Map([["bearer-1", Date.now()]]);
+      const resolveRemoteWebSocketConnectionUrl = vi.fn(
+        async (input: { readonly bearerToken: string }) =>
+          `ws://node.local/?wsToken=for-${input.bearerToken}`,
+      );
+      const rotateRemoteBearerSession = vi.fn(async () => {
+        issuedAt.set("bearer-2", Date.now());
+        return { sessionToken: "bearer-2", role: "owner" } as unknown as Awaited<
+          ReturnType<(typeof noopRemoteApi)["rotateRemoteBearerSession"]>
+        >;
+      });
+      const driver = createMobileEnvironmentDriver({
+        catalog: fake.catalog,
+        remoteApi: {
+          fetchRemoteSessionState: async (input: { readonly bearerToken: string }) =>
+            ({
+              authenticated: true,
+              role: "owner",
+              sessionMethod: "bearer-session-token",
+              expiresAt: new Date(issuedAt.get(input.bearerToken)! + 30 * dayMs).toISOString(),
+            }) as unknown as AuthSessionState,
+          resolveRemoteWebSocketConnectionUrl,
+          rotateRemoteBearerSession,
+        },
+        subscribeResume: () => () => {},
+      });
+      await driver.connectSavedEnvironment(record());
+      expect(rotateRemoteBearerSession).not.toHaveBeenCalled();
+
+      // The connection stays up for a day: it renews in place, and bearer-1 is
+      // superseded once bearer-2 is used.
+      await vi.advanceTimersByTimeAsync(dayMs + 60_000);
+      expect(rotateRemoteBearerSession).toHaveBeenCalledExactlyOnceWith({
+        httpBaseUrl: "http://node.local:44342/",
+        bearerToken: "bearer-1",
+      });
+      await expect(fake.catalog.readBearerToken(ENV_ID)).resolves.toBe("bearer-2");
+
+      // Later the socket reconnects while the keychain is locked.
+      vi.spyOn(fake.catalog, "readBearerToken").mockRejectedValue(
+        new Error("errSecInteractionNotAllowed"),
+      );
+      resolveRemoteWebSocketConnectionUrl.mockClear();
+      await expect(socketHolder.urls.at(-1)!()).rejects.toThrow(
+        "This environment's saved credential could not be read.",
+      );
+      expect(resolveRemoteWebSocketConnectionUrl).not.toHaveBeenCalled();
+      await driver.supervisor.remove(ENV_ID);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("lets a cancelled connect fail without touching the connection that replaced it", async () => {
     const fake = createFakeCatalog();
     fake.setBearerToken(ENV_ID, "old-bearer-token");

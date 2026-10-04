@@ -2,7 +2,11 @@ import type { AuthBearerBootstrapResult, AuthSessionState, EnvironmentId } from 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { RemoteEnvironmentAuthHttpError } from "./remoteApi.ts";
-import { createSavedSessionRenewal, shouldRenewSavedSession } from "./savedSessionRenewal.ts";
+import {
+  createSavedSessionRenewal,
+  SavedEnvironmentBearerUnavailableError,
+  shouldRenewSavedSession,
+} from "./savedSessionRenewal.ts";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const NOW = Date.parse("2026-10-04T12:00:00.000Z");
@@ -133,6 +137,28 @@ describe("createSavedSessionRenewal", () => {
     expect(outage).toHaveBeenCalledOnce();
     expect(declined).toHaveBeenCalledOnce();
     expect(store.current()).toBe("bearer-1");
+  });
+
+  it("presents only the bearer stored now, never one remembered from earlier", async () => {
+    let read: () => Promise<string | null> = async () => "bearer-2";
+    const renewal = createSavedSessionRenewal({
+      readBearerToken: () => read(),
+      writeBearerToken: async () => true,
+    });
+
+    await expect(renewal.readBearerToken(environmentId)).resolves.toBe("bearer-2");
+    // A locked keychain, a failed decrypt, a pruned browser copy: the attempt
+    // fails and retries rather than presenting a bearer that may be superseded.
+    read = async () => {
+      throw new Error("errSecInteractionNotAllowed");
+    };
+    await expect(renewal.readBearerToken(environmentId)).rejects.toBeInstanceOf(
+      SavedEnvironmentBearerUnavailableError,
+    );
+    read = async () => null;
+    await expect(renewal.readBearerToken(environmentId)).rejects.toBeInstanceOf(
+      SavedEnvironmentBearerUnavailableError,
+    );
   });
 
   describe("keepRenewed", () => {

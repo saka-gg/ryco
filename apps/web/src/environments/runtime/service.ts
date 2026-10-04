@@ -965,21 +965,15 @@ async function resolveSavedEnvironmentSocketUrl(
 
 /**
  * Direct pairings renew their bearer while in use. The renewed bearer replaces
- * the stored one, so every use reads the bearer stored now; the one a connect
- * started with is only the fallback.
+ * the stored one, so every use reads the bearer stored now and nothing else: a
+ * bearer remembered from an earlier read may have been superseded, and the node
+ * revokes the whole pairing when it sees one after its grace.
  */
 const savedSessionRenewal = createSavedSessionRenewal({
   readBearerToken: (environmentId) => readSavedEnvironmentBearerToken(environmentId),
   writeBearerToken: (environmentId, token) =>
     writeSavedEnvironmentBearerToken(environmentId, token),
 });
-
-async function readCurrentSavedEnvironmentBearerToken(
-  environmentId: EnvironmentId,
-  fallback: string,
-): Promise<string> {
-  return (await readSavedEnvironmentBearerToken(environmentId).catch(() => null)) ?? fallback;
-}
 
 /** Keeps a registered direct connection's pairing renewed while it stays connected. */
 function keepSavedEnvironmentSessionRenewed(
@@ -1001,14 +995,13 @@ function keepSavedEnvironmentSessionRenewed(
 
 function createSavedEnvironmentClient(
   environmentId: EnvironmentId,
-  bearerToken: string,
   onCredentialRejected: () => void = NOOP,
 ): WsRpcClient {
   useSavedEnvironmentRuntimeStore.getState().ensure(environmentId);
   const socketUrl = async (pathname: "/ws" | "/ws/device" | "/ws/device-frames") =>
     resolveSavedEnvironmentSocketUrl(
       environmentId,
-      await readCurrentSavedEnvironmentBearerToken(environmentId, bearerToken),
+      await savedSessionRenewal.readBearerToken(environmentId),
       pathname,
     );
 
@@ -1387,7 +1380,7 @@ async function connectSavedEnvironment(
     };
     const client =
       clientOverride ??
-      createSavedEnvironmentClient(activeRecord.environmentId, activeBearerToken, () => {
+      createSavedEnvironmentClient(activeRecord.environmentId, () => {
         credentialRejected = true;
         if (!activeRecord.desktopSsh && speaksForEnvironment()) {
           markSavedEnvironmentCredentialRejected(activeRecord.environmentId, connection);
@@ -1414,10 +1407,7 @@ async function connectSavedEnvironment(
         try {
           await refreshSavedEnvironmentMetadata(
             activeRecord.environmentId,
-            await readCurrentSavedEnvironmentBearerToken(
-              activeRecord.environmentId,
-              activeBearerToken,
-            ),
+            await savedSessionRenewal.readBearerToken(activeRecord.environmentId),
             client,
           );
         } catch (error) {

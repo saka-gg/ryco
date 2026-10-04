@@ -41,6 +41,20 @@ export function shouldRenewSavedSession(session: AuthSessionState, nowMs: number
   return dueAtMs !== null && nowMs > dueAtMs;
 }
 
+/**
+ * A saved environment's bearer could not be read from the platform's secret
+ * store: a locked keychain, a failed decrypt, a pruned browser copy. Nothing is
+ * presented in its place. A bearer held in memory may have been superseded by a
+ * renewal since, here or in another window, and presenting it after its grace
+ * revokes the whole pairing; the socket retries on its schedule instead.
+ */
+export class SavedEnvironmentBearerUnavailableError extends Error {
+  constructor(options?: { readonly cause?: unknown }) {
+    super("This environment's saved credential could not be read.", options);
+    this.name = "SavedEnvironmentBearerUnavailableError";
+  }
+}
+
 export interface SavedSessionRenewalRequest {
   readonly environmentId: EnvironmentId;
   /** The node's answer for `bearerToken`, from the session check just made. */
@@ -51,6 +65,12 @@ export interface SavedSessionRenewalRequest {
 }
 
 export interface SavedSessionRenewal {
+  /**
+   * The bearer to present now: the one stored now, read on every use. Rejects
+   * with a `SavedEnvironmentBearerUnavailableError` when the store cannot be
+   * read, rather than falling back to a bearer remembered from earlier.
+   */
+  readonly readBearerToken: (environmentId: EnvironmentId) => Promise<string>;
   /**
    * Renews the pairing's bearer when it is due and resolves with the bearer to
    * use from now on. Never rejects: the presented bearer stays valid on the
@@ -73,7 +93,8 @@ export interface SavedSessionRenewal {
 /**
  * Proactive renewal of direct pairings, shared by web, desktop and mobile. The
  * bearer lives in the platform's secret store; every use of it reads it from
- * there, so a renewed bearer reaches every socket's next attempt.
+ * there through `readBearerToken`, so a renewed bearer reaches every socket's
+ * next attempt and a superseded one is never presented again.
  */
 export function createSavedSessionRenewal(input: {
   readonly readBearerToken: (environmentId: EnvironmentId) => Promise<string | null>;
@@ -89,6 +110,17 @@ export function createSavedSessionRenewal(input: {
   // Bearers the node declined to renew (renewed recently, a year old, or a node
   // without rotation): not asked again while this client runs.
   const declined = new Set<string>();
+
+  const readBearerToken: SavedSessionRenewal["readBearerToken"] = async (environmentId) => {
+    let stored: string | null;
+    try {
+      stored = await input.readBearerToken(environmentId);
+    } catch (cause) {
+      throw new SavedEnvironmentBearerUnavailableError({ cause });
+    }
+    if (!stored) throw new SavedEnvironmentBearerUnavailableError();
+    return stored;
+  };
 
   const rotateAndStore = async (request: SavedSessionRenewalRequest): Promise<string> => {
     let rotated: AuthBearerBootstrapResult;
@@ -184,5 +216,5 @@ export function createSavedSessionRenewal(input: {
     return stop;
   };
 
-  return { renew, keepRenewed };
+  return { readBearerToken, renew, keepRenewed };
 }

@@ -749,6 +749,78 @@ describe("addSavedEnvironment", () => {
     await resetEnvironmentServiceForTests();
   });
 
+  it("never presents a bearer a renewal superseded when the stored one cannot be read", async () => {
+    vi.useFakeTimers();
+    const dayMs = 24 * 60 * 60 * 1000;
+    const environmentId = EnvironmentId.make("environment-1");
+    mockSavedRecords = [
+      {
+        environmentId,
+        label: "Remote environment",
+        httpBaseUrl: "https://remote.example.com/",
+        wsBaseUrl: "wss://remote.example.com/",
+        createdAt: "2026-04-14T00:00:00.000Z",
+        lastConnectedAt: null,
+      },
+    ];
+    let storedBearer = "bearer-1";
+    mockReadSavedEnvironmentBearerToken.mockImplementation(async () => storedBearer);
+    mockWriteSavedEnvironmentBearerToken.mockImplementation(
+      async (_environmentId: EnvironmentId, token: string) => {
+        storedBearer = token;
+        return true;
+      },
+    );
+    // Each bearer lives thirty days from when it was issued.
+    const issuedAt = new Map([["bearer-1", Date.now()]]);
+    mockFetchRemoteSessionState.mockImplementation(
+      async (input: { readonly bearerToken: string }) => ({
+        authenticated: true,
+        role: "owner",
+        sessionMethod: "bearer-session-token",
+        expiresAt: new Date(issuedAt.get(input.bearerToken)! + 30 * dayMs).toISOString(),
+      }),
+    );
+    mockRotateRemoteBearerSession.mockImplementation(async () => {
+      issuedAt.set("bearer-2", Date.now());
+      return {
+        authenticated: true,
+        role: "owner",
+        sessionMethod: "bearer-session-token",
+        sessionToken: "bearer-2",
+      };
+    });
+    vi.stubGlobal("window", { ...window, location: { origin: "http://localhost:5733" } });
+
+    const { reconnectSavedEnvironment, resetEnvironmentServiceForTests } =
+      await import("./service");
+
+    const connecting = reconnectSavedEnvironment(environmentId);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await connecting;
+    expect(mockRotateRemoteBearerSession).not.toHaveBeenCalled();
+
+    // The connection stays up for a day: it renews in place, and bearer-1 is
+    // superseded once bearer-2 is used.
+    await vi.advanceTimersByTimeAsync(dayMs + 60_000);
+    expect(mockRotateRemoteBearerSession).toHaveBeenCalledExactlyOnceWith({
+      httpBaseUrl: "https://remote.example.com/",
+      bearerToken: "bearer-1",
+    });
+    expect(storedBearer).toBe("bearer-2");
+
+    // Later the socket drops while the stored bearer cannot be read.
+    mockReadSavedEnvironmentBearerToken.mockRejectedValue(new Error("Keychain is locked."));
+    mockResolveRemoteWebSocketConnectionUrl.mockClear();
+    const socketUrl = mockWsTransport.mock.calls.at(-1)?.[0] as () => Promise<string>;
+    await expect(socketUrl()).rejects.toThrow(
+      "This environment's saved credential could not be read.",
+    );
+    expect(mockResolveRemoteWebSocketConnectionUrl).not.toHaveBeenCalled();
+
+    await resetEnvironmentServiceForTests();
+  });
+
   it("fails a connect whose socket never delivers the server config", async () => {
     vi.useFakeTimers();
     mockSavedRecords = [

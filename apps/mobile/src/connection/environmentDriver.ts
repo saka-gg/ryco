@@ -271,7 +271,9 @@ export function createMobileEnvironmentDriver(
     patchRuntime(environmentId, savedEnvironmentRequiresAuthState(nowIso()));
 
   // Direct pairings renew their bearer while in use (shared with web and
-  // desktop). The renewal replaces the stored bearer, so every use reads it.
+  // desktop). The renewal replaces the stored bearer, so every use reads it
+  // from the store and never presents one remembered from earlier: that one may
+  // be superseded, and the node revokes the pairing when it sees it again.
   const savedSessionRenewal = createSavedSessionRenewal({
     readBearerToken: (environmentId) => catalog.readBearerToken(environmentId),
     writeBearerToken: (environmentId, token) => catalog.writeBearerToken(environmentId, token),
@@ -287,7 +289,6 @@ export function createMobileEnvironmentDriver(
 
   function createSavedEnvironmentClient(
     environmentId: EnvironmentId,
-    bearerToken: string,
     onCredentialRejected: () => void,
   ): WsRpcClient {
     catalog.runtimeStore.getState().ensure(environmentId);
@@ -299,8 +300,7 @@ export function createMobileEnvironmentDriver(
           return remoteApi.resolveRemoteWebSocketConnectionUrl({
             wsBaseUrl: record.wsBaseUrl,
             httpBaseUrl: record.httpBaseUrl,
-            bearerToken:
-              (await catalog.readBearerToken(environmentId).catch(() => null)) ?? bearerToken,
+            bearerToken: await savedSessionRenewal.readBearerToken(environmentId),
           });
         },
         {
@@ -374,14 +374,14 @@ export function createMobileEnvironmentDriver(
       });
     }
     // A pairing in use renews its bearer before a socket is built on it.
-    const activeBearerToken = await savedSessionRenewal.renew({
+    await savedSessionRenewal.renew({
       environmentId: record.environmentId,
       session: sessionCheck.session,
       bearerToken,
       ...renewalCalls(record),
     });
 
-    const client = createSavedEnvironmentClient(record.environmentId, activeBearerToken, () => {
+    const client = createSavedEnvironmentClient(record.environmentId, () => {
       if (!speaksForEnvironment()) return;
       setRuntimeRequiresAuth(record.environmentId);
       // Its transport has stopped; the dead connection leaves the supervisor so
