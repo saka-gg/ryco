@@ -6,7 +6,6 @@ import {
   groupQueuedThreadMessages,
   modelSelectionsEqual,
   normalizePersistedQueuedThreadMessageAttachments,
-  resolveThreadOutboxDeliveryAction,
   resolveThreadOutboxFailureAction,
   threadOutboxRetryDelayMs,
   type QueuedThreadMessage,
@@ -26,52 +25,6 @@ function queued(
 }
 
 describe("threadOutboxModel", () => {
-  it("resolves the delivery action for existing threads", () => {
-    expect(
-      resolveThreadOutboxDeliveryAction({
-        threadExists: true,
-        shellStatus: "live",
-        environmentConnected: true,
-        threadBusy: false,
-      }),
-    ).toBe("send");
-    // busy thread waits
-    expect(
-      resolveThreadOutboxDeliveryAction({
-        threadExists: true,
-        shellStatus: "live",
-        environmentConnected: true,
-        threadBusy: true,
-      }),
-    ).toBe("wait");
-    // disconnected waits
-    expect(
-      resolveThreadOutboxDeliveryAction({
-        threadExists: true,
-        shellStatus: "live",
-        environmentConnected: false,
-        threadBusy: false,
-      }),
-    ).toBe("wait");
-    // vanished thread on a live shell is dropped; on a non-live shell it waits
-    expect(
-      resolveThreadOutboxDeliveryAction({
-        threadExists: false,
-        shellStatus: "live",
-        environmentConnected: true,
-        threadBusy: false,
-      }),
-    ).toBe("remove");
-    expect(
-      resolveThreadOutboxDeliveryAction({
-        threadExists: false,
-        shellStatus: "loading",
-        environmentConnected: true,
-        threadBusy: false,
-      }),
-    ).toBe("wait");
-  });
-
   it("backs off retries exponentially, capped", () => {
     expect(threadOutboxRetryDelayMs(1)).toBe(1000);
     expect(threadOutboxRetryDelayMs(2)).toBe(2000);

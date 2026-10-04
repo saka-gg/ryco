@@ -8,16 +8,31 @@
  * registered from a shared helpers module runs after the suite's own static
  * imports have already loaded the real module, so it silently has no effect.
  */
+import type { VcsStatusResult } from "@ryco/contracts";
+
 import type { GitStatusState } from "../src/lib/gitStatusState";
 
 const IDLE_GIT_STATUS: GitStatusState = { data: null, error: null, cause: null, isPending: false };
+
+let localRefName: string | null | undefined;
+
+/** What a one-off `readLocalGitRefName` read returns until the next reset (default: unknown). */
+export function setLocalGitRefNameForTests(refName: string | null | undefined): void {
+  localRefName = refName;
+}
 
 export function useGitStatus(): GitStatusState {
   return IDLE_GIT_STATUS;
 }
 
-export function refreshGitStatus(): Promise<null> {
+export function refreshGitStatus(): Promise<VcsStatusResult | null> {
   return Promise.resolve(null);
 }
 
-export function resetGitStatusStateForTests(): void {}
+export function readLocalGitRefName(): Promise<string | null | undefined> {
+  return Promise.resolve(localRefName);
+}
+
+export function resetGitStatusStateForTests(): void {
+  localRefName = undefined;
+}

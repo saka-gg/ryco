@@ -37,6 +37,7 @@ import { HttpResponse, http, ws } from "msw";
 import { setupWorker } from "msw/browser";
 import { page, userEvent } from "vite-plus/test/browser";
 import { afterAll, afterEach, beforeAll, beforeEach, expect, vi } from "vite-plus/test";
+import { useMessageQueueStore } from "../messageQueueStore";
 import { render } from "vitest-browser-react";
 
 import { useCommandPaletteStore } from "../commandPaletteStore";
@@ -2684,6 +2685,9 @@ export function setupChatViewBrowserSuite() {
   afterEach(() => {
     customWsRpcResolver = null;
     document.body.innerHTML = "";
+    // Queues, holds and baselines are module-level; the epoch bump also drops
+    // completions of any queued send still in flight from this test.
+    useMessageQueueStore.getState().reset();
   });
 }
 

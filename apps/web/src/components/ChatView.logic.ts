@@ -5,15 +5,12 @@ import {
   type ModelSelection,
   type ScopedThreadRef,
   type ThreadId,
-  type TurnId,
 } from "@ryco/contracts";
 import {
   isChatImageAttachment,
   type ChatMessage,
   DEFAULT_AGENT_TOKEN_MODE,
-  type SessionPhase,
   type Thread,
-  type ThreadSession,
 } from "../types";
 import { type ComposerImageAttachment, type DraftThreadState } from "../composerDraftStore";
 import { DateTime, Schema } from "effect";
@@ -389,82 +386,11 @@ export async function waitForStartedServerThread(
   });
 }
 
-export interface LocalDispatchSnapshot {
-  startedAt: string;
-  preparingWorktree: boolean;
-  latestTurnTurnId: TurnId | null;
-  latestTurnRequestedAt: string | null;
-  latestTurnStartedAt: string | null;
-  latestTurnCompletedAt: string | null;
-  sessionOrchestrationStatus: ThreadSession["orchestrationStatus"] | null;
-  sessionUpdatedAt: string | null;
-}
-
-export function createLocalDispatchSnapshot(
-  activeThread: Thread | undefined,
-  options?: { preparingWorktree?: boolean },
-): LocalDispatchSnapshot {
-  const latestTurn = activeThread?.latestTurn ?? null;
-  const session = activeThread?.session ?? null;
-  return {
-    startedAt: new Date().toISOString(),
-    preparingWorktree: Boolean(options?.preparingWorktree),
-    latestTurnTurnId: latestTurn?.turnId ?? null,
-    latestTurnRequestedAt: latestTurn?.requestedAt ?? null,
-    latestTurnStartedAt: latestTurn?.startedAt ?? null,
-    latestTurnCompletedAt: latestTurn?.completedAt ?? null,
-    sessionOrchestrationStatus: session?.orchestrationStatus ?? null,
-    sessionUpdatedAt: session?.updatedAt ?? null,
-  };
-}
-
-export function hasServerAcknowledgedLocalDispatch(input: {
-  localDispatch: LocalDispatchSnapshot | null;
-  phase: SessionPhase;
-  latestTurn: Thread["latestTurn"] | null;
-  session: Thread["session"] | null;
-  hasPendingApproval: boolean;
-  hasPendingUserInput: boolean;
-  threadError: string | null | undefined;
-}): boolean {
-  if (!input.localDispatch) {
-    return false;
-  }
-  if (input.hasPendingApproval || input.hasPendingUserInput || Boolean(input.threadError)) {
-    return true;
-  }
-
-  const latestTurn = input.latestTurn ?? null;
-  const session = input.session ?? null;
-  const latestTurnChanged =
-    input.localDispatch.latestTurnTurnId !== (latestTurn?.turnId ?? null) ||
-    input.localDispatch.latestTurnRequestedAt !== (latestTurn?.requestedAt ?? null) ||
-    input.localDispatch.latestTurnStartedAt !== (latestTurn?.startedAt ?? null) ||
-    input.localDispatch.latestTurnCompletedAt !== (latestTurn?.completedAt ?? null);
-
-  if (input.phase === "running") {
-    if (!latestTurnChanged) {
-      return false;
-    }
-    if (latestTurn?.startedAt === null || latestTurn === null) {
-      return false;
-    }
-    if (
-      session?.activeTurnId !== undefined &&
-      session.activeTurnId !== null &&
-      latestTurn?.turnId !== session.activeTurnId
-    ) {
-      return false;
-    }
-    return true;
-  }
-
-  return (
-    latestTurnChanged ||
-    input.localDispatch.sessionOrchestrationStatus !== (session?.orchestrationStatus ?? null) ||
-    input.localDispatch.sessionUpdatedAt !== (session?.updatedAt ?? null)
-  );
-}
+export {
+  createLocalDispatchSnapshot,
+  hasServerAcknowledgedLocalDispatch,
+  type LocalDispatchSnapshot,
+} from "@ryco/client-runtime/state/session";
 
 /**
  * Whether to replace the timeline with the new-thread surface (hero + "Work in

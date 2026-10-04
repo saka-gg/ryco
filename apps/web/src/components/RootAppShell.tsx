@@ -44,6 +44,7 @@ import {
 } from "../environments/primary";
 import { ServerStateBootstrap } from "./ServerStateBootstrap";
 import { ThreadPriorityRefreshBridge } from "./ThreadPriorityRefreshBridge";
+import { MessageQueueDrainBridge } from "./MessageQueueDrainBridge";
 import { getRoutedHostedNode } from "../hostedHub/nodeRoutes";
 
 export interface RootAppShellProps {
@@ -55,6 +56,9 @@ export interface RootAppShellProps {
 export function RootAppShell({ authGateState }: RootAppShellProps) {
   const primaryEnvironmentAuthenticated =
     authGateState.status === "authenticated" || authGateState.status === "hosted-hub";
+  // Every state with chat routes can queue, including hosted-static, which sends
+  // to saved environments; readiness is per environment.
+  const chatAvailable = primaryEnvironmentAuthenticated || authGateState.status === "hosted-static";
   const localTracingAllowed = authGateState.status === "authenticated";
   // The presentation-tier seam lives inside `AppSidebarLayout`: the provider
   // and the route subtree stay mounted identically for both tiers (a tier
@@ -75,6 +79,7 @@ export function RootAppShell({ authGateState }: RootAppShellProps) {
         {primaryEnvironmentAuthenticated ? <ServerStateBootstrap /> : null}
         <EnvironmentConnectionManagerBootstrap />
         {primaryEnvironmentAuthenticated ? <ThreadPriorityRefreshBridge /> : null}
+        {chatAvailable ? <MessageQueueDrainBridge /> : null}
         <ContextMenuActionSheetHost />
         <SshPasswordPromptDialog />
         {authGateState.status === "hosted-static" ? <HostedStaticEnvironmentBootstrap /> : null}

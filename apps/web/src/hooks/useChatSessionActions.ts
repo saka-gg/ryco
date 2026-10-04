@@ -9,6 +9,7 @@ import { useCallback, useEffect, useState } from "react";
 
 import { readEnvironmentApi } from "../environmentApi";
 import { readLocalApi } from "../localApi";
+import { holdMessageQueueForInterrupt } from "../messageQueueDrain";
 import {
   interruptThreadTurn,
   respondToThreadApproval,
@@ -55,7 +56,15 @@ export function useChatSessionActions(input: {
     if (!api || !activeThreadId) {
       return;
     }
-    await interruptThreadTurn(api, activeThreadId);
+    // Stop means stop: hold the follow-up queue before the turn can settle,
+    // and undo the hold only if the interrupt never reached the server.
+    const held = holdMessageQueueForInterrupt(environmentId, activeThreadId);
+    try {
+      await interruptThreadTurn(api, activeThreadId);
+    } catch (error) {
+      held.undo();
+      throw error;
+    }
   }, [activeThreadId, environmentId]);
 
   const respondToApproval = useCallback(
