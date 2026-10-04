@@ -113,11 +113,24 @@ const orphanedSessionThread = (input: {
   readonly id: string;
   readonly status: "starting" | "running" | "ready" | "stopped" | "error";
   readonly activeTurnId?: TurnId | null;
+  readonly runningLatestTurnId?: TurnId;
+  readonly sessionUpdatedAt?: string;
 }) => ({
   id: ThreadId.make(input.id),
   archivedAt: null,
   deletedAt: null,
   activities: [] as OrchestrationThreadActivity[],
+  latestTurn:
+    input.runningLatestTurnId === undefined
+      ? null
+      : {
+          turnId: input.runningLatestTurnId,
+          state: "running" as const,
+          requestedAt: "2026-01-01T00:00:00.000Z",
+          startedAt: "2026-01-01T00:00:00.000Z",
+          completedAt: null,
+          assistantMessageId: null,
+        },
   session: {
     threadId: ThreadId.make(input.id),
     status: input.status,
@@ -126,13 +139,15 @@ const orphanedSessionThread = (input: {
     runtimeMode: "full-access" as const,
     activeTurnId: input.activeTurnId ?? null,
     lastError: null,
-    updatedAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: input.sessionUpdatedAt ?? "2026-01-01T00:00:00.000Z",
   },
 });
 
 const runOrphanedSessionReconciliation = (input: {
   readonly threads: ReadonlyArray<ReturnType<typeof orphanedSessionThread>>;
   readonly liveThreadIds?: ReadonlyArray<ThreadId>;
+  readonly listSessionsFails?: boolean;
+  readonly onReadModel?: () => void;
   readonly directory: Pick<ProviderSessionDirectoryShape, "getBinding" | "upsert">;
   readonly stopSessionBinding?: ProviderServiceShape["stopSessionBinding"];
   readonly dispatch: OrchestrationEngineShape["dispatch"];
@@ -179,19 +194,33 @@ const runOrphanedSessionReconciliation = (input: {
     } as ProjectionThreadUserInputRequestRepository["Service"]),
     Effect.provideService(ProjectionSnapshotQuery, {
       getCommandReadModel: () =>
-        Effect.succeed({ threads: input.threads } as unknown as OrchestrationReadModel),
+        Effect.sync(() => {
+          input.onReadModel?.();
+          return { threads: input.threads } as unknown as OrchestrationReadModel;
+        }),
     } as unknown as ProjectionSnapshotQueryShape),
     Effect.provideService(ProviderSessionDirectory, {
       ...input.directory,
     } as unknown as ProviderSessionDirectoryShape),
     Effect.provideService(ProviderService, {
       listSessions: () =>
-        Effect.succeed(
-          (input.liveThreadIds ?? []).map(
-            (threadId) =>
-              ({ threadId, runtimeSessionId: RuntimeSessionId.make("test-live-runtime") }) as never,
-          ),
-        ),
+        input.listSessionsFails
+          ? Effect.fail(
+              new ProviderAdapterRequestError({
+                provider: "codex",
+                method: "session.list",
+                detail: "inventory unavailable",
+              }),
+            )
+          : Effect.succeed(
+              (input.liveThreadIds ?? []).map(
+                (threadId) =>
+                  ({
+                    threadId,
+                    runtimeSessionId: RuntimeSessionId.make("test-live-runtime"),
+                  }) as never,
+              ),
+            ),
       stopSessionBinding: input.stopSessionBinding ?? (() => Effect.succeed("not-found" as const)),
     } as unknown as ProviderServiceShape),
     Effect.provideService(OrchestrationEngineService, {
@@ -307,12 +336,7 @@ it.effect("repairs orphaned provider sessions while preserving resumable binding
               command.type === "thread.session.set" ? command.session.activeTurnId : undefined,
           })),
           [
-            {
-              type: "thread.turn.interrupt",
-              threadId: orphan.id,
-              status: undefined,
-              activeTurnId: undefined,
-            },
+            // One session-set per orphan: no separate provider interrupt.
             {
               type: "thread.session.set",
               threadId: orphan.id,
@@ -332,6 +356,170 @@ it.effect("repairs orphaned provider sessions while preserving resumable binding
             assert.match(command.session.lastError ?? "", /did not survive a server restart/);
           }
         }
+        const orphanCommand = dispatches[0];
+        assert.deepStrictEqual(
+          orphanCommand?.type === "thread.session.set" ? orphanCommand.turnOutcome : undefined,
+          {
+            turnId: TurnId.make("turn-startup-orphan"),
+            state: "interrupted",
+            reason: "startup-orphaned-session",
+            completedAt:
+              orphanCommand?.type === "thread.session.set" ? orphanCommand.createdAt : "",
+          },
+        );
+        const startingCommand = dispatches[1];
+        assert.deepStrictEqual(
+          startingCommand?.type === "thread.session.set"
+            ? startingCommand.turnOutcome?.state
+            : undefined,
+          "interrupted",
+        );
+        assert.isUndefined(
+          startingCommand?.type === "thread.session.set"
+            ? startingCommand.turnOutcome?.turnId
+            : "unexpected",
+        );
+      }),
+    ),
+  );
+});
+
+it.effect("settles stale running turns behind released sessions at startup", () => {
+  const behindReady = orphanedSessionThread({
+    id: "thread-stale-ready",
+    status: "ready",
+    runningLatestTurnId: TurnId.make("turn-stale-ready"),
+    sessionUpdatedAt: "2026-01-01T00:05:00.000Z",
+  });
+  const behindError = orphanedSessionThread({
+    id: "thread-stale-error",
+    status: "error",
+    runningLatestTurnId: TurnId.make("turn-stale-error"),
+    sessionUpdatedAt: "2026-01-01T00:06:00.000Z",
+  });
+  const behindStopped = orphanedSessionThread({
+    id: "thread-stale-stopped",
+    status: "stopped",
+    runningLatestTurnId: TurnId.make("turn-stale-stopped"),
+  });
+  // Orphans (running session) and live threads are not stale-turn repairs.
+  const orphan = orphanedSessionThread({
+    id: "thread-stale-orphan",
+    status: "running",
+    activeTurnId: TurnId.make("turn-orphan"),
+    runningLatestTurnId: TurnId.make("turn-orphan"),
+  });
+  const settled = orphanedSessionThread({ id: "thread-settled", status: "ready" });
+  const dispatches: OrchestrationCommand[] = [];
+  let readModelLoads = 0;
+
+  return runOrphanedSessionReconciliation({
+    threads: [behindReady, behindError, behindStopped, orphan, settled],
+    onReadModel: () => {
+      readModelLoads += 1;
+    },
+    directory: {
+      getBinding: () => Effect.succeed(Option.none()),
+      upsert: () => Effect.void,
+    },
+    dispatch: (command) =>
+      Effect.sync(() => dispatches.push(command)).pipe(Effect.as({ sequence: dispatches.length })),
+  }).pipe(
+    Effect.tap(() =>
+      Effect.sync(() => {
+        assert.strictEqual(readModelLoads, 1);
+        assert.isFalse(dispatches.some((command) => command.type === "thread.turn.interrupt"));
+        const sessionSets = dispatches.flatMap((command) =>
+          command.type === "thread.session.set" ? [command] : [],
+        );
+        assert.deepStrictEqual(
+          sessionSets.map((command) => ({
+            threadId: command.threadId,
+            status: command.session.status,
+            turnOutcome: command.turnOutcome,
+          })),
+          [
+            {
+              threadId: behindReady.id,
+              status: "ready",
+              turnOutcome: {
+                turnId: TurnId.make("turn-stale-ready"),
+                state: "interrupted",
+                reason: "startup-stale-turn",
+                completedAt: "2026-01-01T00:05:00.000Z",
+              },
+            },
+            {
+              threadId: behindError.id,
+              status: "error",
+              turnOutcome: {
+                turnId: TurnId.make("turn-stale-error"),
+                state: "error",
+                reason: "startup-stale-turn",
+                completedAt: "2026-01-01T00:06:00.000Z",
+              },
+            },
+            {
+              threadId: behindStopped.id,
+              status: "stopped",
+              turnOutcome: {
+                turnId: TurnId.make("turn-stale-stopped"),
+                state: "interrupted",
+                reason: "startup-stale-turn",
+                completedAt: "2026-01-01T00:00:00.000Z",
+              },
+            },
+            {
+              threadId: orphan.id,
+              status: "error",
+              turnOutcome: {
+                turnId: TurnId.make("turn-orphan"),
+                state: "interrupted",
+                reason: "startup-orphaned-session",
+                completedAt: sessionSets.at(-1)?.createdAt ?? "",
+              },
+            },
+          ],
+        );
+        // The stale-turn repair re-sends the unchanged session.
+        assert.deepStrictEqual(sessionSets[0]?.session, behindReady.session);
+      }),
+    ),
+  );
+});
+
+it.effect("settles stale running turns even when the provider inventory fails", () => {
+  const behindReady = orphanedSessionThread({
+    id: "thread-stale-inventory",
+    status: "ready",
+    runningLatestTurnId: TurnId.make("turn-stale-inventory"),
+  });
+  const orphan = orphanedSessionThread({
+    id: "thread-orphan-inventory",
+    status: "running",
+    activeTurnId: TurnId.make("turn-orphan-inventory"),
+  });
+  const dispatches: OrchestrationCommand[] = [];
+  return runOrphanedSessionReconciliation({
+    threads: [behindReady, orphan],
+    listSessionsFails: true,
+    directory: {
+      getBinding: () => Effect.succeed(Option.none()),
+      upsert: () => Effect.void,
+    },
+    dispatch: (command) =>
+      Effect.sync(() => dispatches.push(command)).pipe(Effect.as({ sequence: dispatches.length })),
+  }).pipe(
+    Effect.tap(() =>
+      Effect.sync(() => {
+        // Without an inventory, orphans cannot be told from live sessions and are left alone.
+        assert.deepStrictEqual(
+          dispatches.map((command) => [
+            command.type,
+            "threadId" in command ? command.threadId : null,
+          ]),
+          [["thread.session.set", behindReady.id]],
+        );
       }),
     ),
   );
