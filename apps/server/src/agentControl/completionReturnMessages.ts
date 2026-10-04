@@ -25,6 +25,36 @@ export const MAX_WAKE_TEXT_CHARS = 100_000;
 export const CAPTURE_EXPIRY_MS = 24 * 60 * 60 * 1000;
 /** A captured return held this long (busy chat, scope change, policy off) fails without a wake. */
 export const DELIVERY_EXPIRY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * When a captured return fails undelivered. The window runs from capture, or from the reset
+ * of a usage limit that held the parent when that is later (usage-limits §5.2): a limit is a
+ * wait, so a seven-day window must not expire the return before the auto-resume (at the
+ * reset, and at most `USAGE_LIMIT_AUTO_RESUME_MAX_LATENESS_MS` = 24 hours after it) or the
+ * user's resume that ends it. An unknown reset leaves the window at capture.
+ */
+export function deliveryExpiresAtMs(
+  capturedAt: string,
+  limitResetAt: string | null | undefined,
+): number {
+  const capturedMs = Date.parse(capturedAt);
+  const resetMs = limitResetAt ? Date.parse(limitResetAt) : Number.NaN;
+  return (
+    (Number.isFinite(resetMs) ? Math.max(capturedMs, resetMs) : capturedMs) + DELIVERY_EXPIRY_MS
+  );
+}
+
+/** The later of two ISO instants; an unparsable or missing one loses. */
+export function laterInstant(
+  left: string | null | undefined,
+  right: string | null | undefined,
+): string | undefined {
+  const leftMs = left ? Date.parse(left) : Number.NaN;
+  const rightMs = right ? Date.parse(right) : Number.NaN;
+  if (!Number.isFinite(rightMs)) return Number.isFinite(leftMs) ? left! : undefined;
+  if (!Number.isFinite(leftMs)) return right!;
+  return rightMs > leftMs ? right! : left!;
+}
 export const MAX_DELIVERY_ATTEMPTS = 5;
 export const MAX_REPLAYS = 2;
 /**

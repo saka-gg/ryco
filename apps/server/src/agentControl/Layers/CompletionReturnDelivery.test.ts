@@ -865,7 +865,7 @@ it.effect("T11 retries a rejected wake with a new attempt id and blocks after fi
 
 // ── parent admission holds: wait, never cancel, never a counted attempt ──
 
-const usageLimitOn = (instanceId: string) =>
+const usageLimitOn = (instanceId: string, resetAt: string | null = null) =>
   Schema.decodeUnknownSync(ThreadUsageLimit)({
     limitId: "usage-limit:parent:parent-turn",
     provider: "codex",
@@ -873,14 +873,16 @@ const usageLimitOn = (instanceId: string) =>
     turnId: "parent-turn",
     message: "Usage limit reached.",
     limitedAt: now,
-    resetAt: null,
-    autoResume: null,
+    resetAt,
+    autoResume: resetAt === null ? null : true,
     updatedAt: now,
   });
 // A limited parent's turn failed, so its session reads as idle.
-const limitedParent = (instanceId = "codex") =>
+const limitedParent = (instanceId = "codex", resetAt: string | null = null) =>
   withSession(
-    shell("parent", "parent-turn", "parent-runtime", { usageLimit: usageLimitOn(instanceId) }),
+    shell("parent", "parent-turn", "parent-runtime", {
+      usageLimit: usageLimitOn(instanceId, resetAt),
+    }),
     { status: "error" },
   );
 const assertHeldWithoutAttempts = (record: CompletionReturnRecord, detail: string) => {
@@ -910,6 +912,56 @@ it.effect(
         ["delegation-return:child"],
       );
     }).pipe(Effect.provide(layer)),
+);
+
+it.effect("keeps a return held by a week-long usage limit until the auto-resume delivers it", () =>
+  Effect.gen(function* () {
+    const h = yield* setup();
+    // A seven-day window: the reset is days past the 24-hour delivery window.
+    h.setParent(limitedParent("codex", at(5 * DAY)));
+    yield* h.ack();
+    yield* h.tick(0);
+    yield* h.tick(DAY + 1);
+    yield* h.tick(5 * DAY);
+    assertHeldWithoutAttempts(yield* h.read(), "usage limit");
+    // The auto-resume after the reset clears the limit; its turn runs, then ends.
+    h.setParent(busyParent());
+    yield* h.tick(5 * DAY + 60);
+    assert.equal((yield* h.read()).status, "ready");
+    h.setParent(shell("parent", "resume-turn", "parent-runtime"));
+    yield* h.tick(5 * DAY + 3600);
+    assert.equal((yield* h.read()).status, "delivered");
+    assert.equal(h.sent.length, 1);
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect("expires a limit-held return 24 hours after the reset, even once the limit cleared", () =>
+  Effect.gen(function* () {
+    const h = yield* setup();
+    h.setParent(limitedParent("codex", at(2 * DAY)));
+    yield* h.ack();
+    yield* h.tick(0);
+    // Resumed, but its turn never ends: the reset it waited for is remembered.
+    h.setParent(busyParent());
+    yield* h.tick(3 * DAY - 10);
+    assert.equal((yield* h.read()).status, "ready");
+    yield* h.tick(3 * DAY + 1);
+    assert.equal((yield* h.read()).status, "failed");
+    assert.include((yield* h.read()).detail, "Not delivered");
+    assert.equal(h.sent.length, 0);
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect("expires a return held by a limit with an unknown reset after 24 hours", () =>
+  Effect.gen(function* () {
+    const h = yield* setup();
+    h.setParent(limitedParent());
+    yield* h.ack();
+    yield* h.tick(0);
+    yield* h.tick(DAY + 1);
+    assert.equal((yield* h.read()).status, "failed");
+    assert.equal(h.sent.length, 0);
+  }).pipe(Effect.provide(layer)),
 );
 
 it.effect("delivers to a parent whose limit is on an instance it no longer targets", () =>

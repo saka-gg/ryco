@@ -44,12 +44,13 @@ import { AgentControlProposalEvents } from "../Services/AgentControlProposalEven
 import {
   CAPTURE_EXPIRY_MS,
   COLD_WAKE_GRACE_MS,
-  DELIVERY_EXPIRY_MS,
   MAX_COLD_WAKES_IN_FLIGHT,
   MAX_DELIVERY_ATTEMPTS,
   MAX_REPLAYS,
   buildDelegationReturnCommand,
   compareCodeUnits,
+  deliveryExpiresAtMs,
+  laterInstant,
   renderCompletionNotice,
   renderCompletionReturn,
   selectWakeBatch,
@@ -88,7 +89,7 @@ const DETAIL = {
     "You stopped the delegating chat; this result was not returned automatically. Open the child.",
   cold: "Waiting for another chat's session to start.",
   deliveryExpired:
-    "Not delivered within 24 hours (the originating chat stayed busy, usage-limited or out of scope, or Agent Control was disabled). Open the child.",
+    "Not delivered within 24 hours of its capture or of the originating chat's usage-limit reset (the chat stayed busy, usage-limited or out of scope, or Agent Control was disabled). Open the child.",
   rejectedRetry: "The originating chat rejected the update; retrying with its current state.",
   rejectedRepeatedly:
     "Return was rejected repeatedly. Open the child and send its result manually.",
@@ -382,6 +383,20 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
     });
 
   /**
+   * usage-limits §5.2: the newest known reset of a limit holding the parent, remembered on the
+   * row so the delivery window still opens at the reset after the resume cleared the limit.
+   */
+  const limitResetFields = (
+    record: CompletionReturnRecord,
+    parent: OrchestrationThreadShell,
+  ): Partial<CompletionReturnRecord> => {
+    const resetAt = laterInstant(record.limitResetAt, applicableUsageLimit(parent)?.resetAt);
+    return resetAt === undefined || resetAt === record.limitResetAt
+      ? {}
+      : { limitResetAt: resetAt };
+  };
+
+  /**
    * rollback-correctness's revert journal for this parent only, judged by the decider's own
    * pending rule: the decider rejects every turn start until the revert ends.
    */
@@ -569,7 +584,17 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
               (row) =>
                 [
                   row,
-                  patch(row, { status: "ready", detail, batch: null, command: null }, now),
+                  patch(
+                    row,
+                    {
+                      status: "ready",
+                      detail,
+                      batch: null,
+                      command: null,
+                      ...limitResetFields(row, parent.value),
+                    },
+                    now,
+                  ),
                 ] as const,
             ),
           ).pipe(Effect.asVoid);
@@ -800,11 +825,17 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
 
   const checkReady = (record: CompletionReturnRecord, ctx: ScanContext) =>
     Effect.gen(function* () {
-      const cancel = yield* parentCancelDetail(yield* readShell(record.parentThreadId));
+      const parent = yield* readShell(record.parentThreadId);
+      const cancel = yield* parentCancelDetail(parent);
       if (cancel) return yield* finish(record, "cancelled", cancel, ctx.now);
       if (!isCaptured(record))
         return yield* finish(record, "failed", DETAIL.payloadMissing, ctx.now);
-      if (ctx.nowMs - Date.parse(record.capture.capturedAt) > DELIVERY_EXPIRY_MS)
+      // A reset not yet remembered (the row was never held, say after a restart) counts too.
+      const limitResetAt = laterInstant(
+        record.limitResetAt,
+        Option.isSome(parent) ? applicableUsageLimit(parent.value)?.resetAt : null,
+      );
+      if (ctx.nowMs > deliveryExpiresAtMs(record.capture.capturedAt, limitResetAt))
         return yield* finish(record, "failed", DETAIL.deliveryExpired, ctx.now);
       noteCandidate(ctx, record.parentThreadId, record.capture.capturedAt);
     });
@@ -840,16 +871,22 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
         for (const row of rows) yield* finish(row, "cancelled", cancel ?? DETAIL.parentGone, now);
         return;
       }
-      if (!(yield* policy.isEnabled)) return yield* holdAll(rows, now, DETAIL.disabled);
+      // Every hold below remembers a limit's reset, whichever reason it shows.
+      const holdRows = (held: ReadonlyArray<CompletionReturnRecord>, detail: string) =>
+        Effect.forEach(
+          held,
+          (row) => save(row, { detail, ...limitResetFields(row, parent.value) }, now),
+          { discard: true },
+        );
+      if (!(yield* policy.isEnabled)) return yield* holdRows(rows, DETAIL.disabled);
       const scoped = rows.filter((row) => inScope(row, parent.value));
-      yield* holdAll(
+      yield* holdRows(
         rows.filter((row) => !inScope(row, parent.value)),
-        now,
         DETAIL.scope,
       );
       if (scoped.length === 0) return;
       const held = yield* parentHoldDetail(parent.value, ctx);
-      if (held !== null) return yield* holdAll(scoped, now, held);
+      if (held !== null) return yield* holdRows(scoped, held);
 
       // The user-stop decision is persisted as a terminal status, so later event retention
       // cannot undo it. sinceSequence only bounds the scan and is persisted lazily.

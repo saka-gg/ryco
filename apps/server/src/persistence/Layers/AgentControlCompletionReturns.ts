@@ -93,6 +93,11 @@ export const CompletionReturnRecord = Schema.Struct({
   sinceSequence: Schema.optional(Schema.NullOr(NonNegativeInt)),
   /** Delegation-wake turns of the child that `settled` advanced through. */
   delegationWakeTurns: Schema.optional(NonNegativeInt),
+  /**
+   * Latest known reset of a usage limit that held this row's parent. Kept after the limit
+   * clears, because the delivery window opens no earlier than the reset (usage-limits §5.2).
+   */
+  limitResetAt: Schema.optional(IsoDateTime),
 });
 export type CompletionReturnRecord = typeof CompletionReturnRecord.Type;
 const decode = Schema.decodeUnknownSync(Schema.fromJsonString(CompletionReturnRecord));
