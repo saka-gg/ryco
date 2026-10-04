@@ -18,6 +18,7 @@ import {
   ProviderRuntimeEvent,
   type RuntimeMode,
   ThreadId,
+  TurnId,
   ProviderInstanceId,
   RuntimeSessionId,
 } from "@ryco/contracts";
@@ -44,7 +45,11 @@ import { installProcessDeviceToolGateway } from "../../providerTools/deviceToolG
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { ProviderAdapterValidationError } from "../Errors.ts";
 import type { ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
-import { makeClaudeAdapter, type ClaudeAdapterLiveOptions } from "./ClaudeAdapter.ts";
+import {
+  makeClaudeAdapter,
+  type ClaudeAdapterLiveOptions,
+  type ClaudeTranscriptEntry,
+} from "./ClaudeAdapter.ts";
 import type { AgentControlProviderBridge } from "../../agentControl/ProviderInjection.ts";
 
 // Test-local service tag so the rest of the file can keep using `yield* ClaudeAdapter`.
@@ -244,6 +249,71 @@ function makeHarness(config?: {
     ),
     query,
     getLastCreateQueryInput: () => createInput,
+  };
+}
+
+class ProbedFakeClaudeQuery extends FakeClaudeQuery {
+  public failInit = false;
+  /** While set, initializationResult waits on it. */
+  public initGate: Promise<void> | undefined;
+
+  readonly initializationResult = async (): Promise<unknown> => {
+    if (this.initGate) await this.initGate;
+    if (this.failInit) throw new Error("Resume rejected by the test CLI.");
+    return {};
+  };
+}
+
+/** Every createQuery returns a new query, so session reopens can be observed. */
+function makeSequencedHarness() {
+  const queries: Array<ProbedFakeClaudeQuery> = [];
+  const inputs: Array<{
+    readonly prompt: AsyncIterable<SDKUserMessage>;
+    readonly options: ClaudeQueryOptions;
+  }> = [];
+  const transcriptReads: Array<{
+    readonly sessionId: string;
+    readonly dir?: string;
+    readonly includeSystemMessages: boolean;
+  }> = [];
+  let transcript: ReadonlyArray<ClaudeTranscriptEntry> = [];
+  let onCreate: ((query: ProbedFakeClaudeQuery, index: number) => void) | undefined;
+
+  const adapterOptions: ClaudeAdapterLiveOptions = {
+    createQuery: (input) => {
+      const query = new ProbedFakeClaudeQuery();
+      queries.push(query);
+      inputs.push(input);
+      onCreate?.(query, queries.length - 1);
+      return query;
+    },
+    readSessionMessages: async (sessionId, options) => {
+      transcriptReads.push({ sessionId, ...options });
+      return transcript;
+    },
+  };
+
+  return {
+    layer: Layer.effect(
+      ClaudeAdapter,
+      Effect.gen(function* () {
+        const claudeConfig = Schema.decodeSync(ClaudeSettings)({});
+        return yield* makeClaudeAdapter(claudeConfig, adapterOptions);
+      }),
+    ).pipe(
+      Layer.provideMerge(ServerConfig.layerTest("/tmp/claude-adapter-test", "/tmp")),
+      Layer.provideMerge(ServerSettingsService.layerTest()),
+      Layer.provideMerge(NodeServices.layer),
+    ),
+    queries,
+    inputs,
+    transcriptReads,
+    setTranscript: (entries: ReadonlyArray<ClaudeTranscriptEntry>) => {
+      transcript = entries;
+    },
+    setOnCreate: (callback: (query: ProbedFakeClaudeQuery, index: number) => void) => {
+      onCreate = callback;
+    },
   };
 }
 
@@ -3813,92 +3883,562 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
-  it.effect(
-    "supports rollbackThread by trimming in-memory turns and preserving earlier turns",
-    () => {
-      const harness = makeHarness();
+  describe("checkpoint rollback", () => {
+    const REWIND_SESSION_ID = "11111111-1111-4111-8111-111111111111";
+    const REWIND_RUNTIME_ID = RuntimeSessionId.make("runtime-claude-rewind");
+    const REWIND_CWD = "/tmp/claude-rewind";
+
+    const startRewindSession = (
+      adapter: ClaudeAdapterShape,
+      runtimeMode: RuntimeMode = "full-access",
+    ) =>
+      adapter.startSession({
+        runtimeSessionId: REWIND_RUNTIME_ID,
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        cwd: REWIND_CWD,
+        runtimeMode,
+        resumeCursor: { threadId: THREAD_ID, resume: REWIND_SESSION_ID, turnCount: 0 },
+      });
+
+    const collectEvents = (adapter: ClaudeAdapterShape) =>
+      Effect.gen(function* () {
+        const events: Array<ProviderRuntimeEvent> = [];
+        yield* Stream.runForEach(adapter.streamEvents, (event) =>
+          Effect.sync(() => events.push(event)),
+        ).pipe(Effect.forkChild);
+        return events;
+      });
+
+    const waitUntil = (predicate: () => boolean) =>
+      Effect.gen(function* () {
+        for (let attempt = 0; attempt < 500; attempt++) {
+          if (predicate()) return;
+          yield* Effect.promise(() => new Promise<void>((resolve) => setTimeout(resolve, 1)));
+        }
+        throw new Error("Timed out waiting for the Claude adapter.");
+      });
+
+    const runTurn = (input: {
+      readonly adapter: ClaudeAdapterShape;
+      readonly harness: ReturnType<typeof makeSequencedHarness>;
+      readonly events: ReadonlyArray<ProviderRuntimeEvent>;
+      readonly text: string;
+      readonly assistantUuid: string;
+      readonly subagentUuid?: string;
+      readonly interrupted?: boolean;
+    }) =>
+      Effect.gen(function* () {
+        const turn = yield* input.adapter.sendTurn({
+          threadId: THREAD_ID,
+          input: input.text,
+          attachments: [],
+        });
+        const query = input.harness.queries.at(-1)!;
+        query.emit({
+          type: "assistant",
+          session_id: REWIND_SESSION_ID,
+          uuid: input.assistantUuid,
+          parent_tool_use_id: null,
+          message: {
+            id: `message-${input.assistantUuid}`,
+            content: [{ type: "text", text: input.text }],
+          },
+        } as unknown as SDKMessage);
+        if (input.subagentUuid) {
+          query.emit({
+            type: "assistant",
+            session_id: REWIND_SESSION_ID,
+            uuid: input.subagentUuid,
+            parent_tool_use_id: "tool-subagent",
+            message: { id: `message-${input.subagentUuid}`, content: [] },
+          } as unknown as SDKMessage);
+        }
+        query.emit(
+          (input.interrupted
+            ? {
+                type: "result",
+                subtype: "error_during_execution",
+                is_error: true,
+                errors: ["Interrupted by user"],
+                session_id: REWIND_SESSION_ID,
+                uuid: `result-${input.assistantUuid}`,
+              }
+            : {
+                type: "result",
+                subtype: "success",
+                is_error: false,
+                errors: [],
+                session_id: REWIND_SESSION_ID,
+                uuid: `result-${input.assistantUuid}`,
+              }) as unknown as SDKMessage,
+        );
+        yield* waitUntil(() =>
+          input.events.some(
+            (event) => event.type === "turn.completed" && event.turnId === turn.turnId,
+          ),
+        );
+        return turn.turnId;
+      });
+
+    const transcriptEntry = (uuid: string, type = "assistant") => ({
+      type,
+      uuid,
+      parent_tool_use_id: null,
+    });
+
+    const exitOrErrorEvents = (events: ReadonlyArray<ProviderRuntimeEvent>) =>
+      events.filter((event) => event.type === "session.exited" || event.type === "runtime.error");
+
+    const currentCursor = (adapter: ClaudeAdapterShape) =>
+      adapter
+        .listSessions()
+        .pipe(
+          Effect.map(
+            (sessions) =>
+              sessions.find((session) => session.threadId === THREAD_ID)?.resumeCursor as
+                | Record<string, unknown>
+                | undefined,
+          ),
+        );
+
+    it.effect("reopens the transcript just before the first dropped prompt", () => {
+      const harness = makeSequencedHarness();
       return Effect.gen(function* () {
         const adapter = yield* ClaudeAdapter;
-
-        const session = yield* adapter.startSession({
-          runtimeSessionId: RuntimeSessionId.make("test-claudeadapter-48"),
-          threadId: THREAD_ID,
-          provider: ProviderDriverKind.make("claudeAgent"),
-          runtimeMode: "full-access",
+        const events = yield* collectEvents(adapter);
+        yield* startRewindSession(adapter);
+        const turn1 = yield* runTurn({
+          adapter,
+          harness,
+          events,
+          text: "one",
+          assistantUuid: "a1",
         });
-
-        const firstTurn = yield* adapter.sendTurn({
-          threadId: session.threadId,
-          input: "first",
-          attachments: [],
+        const turn2 = yield* runTurn({
+          adapter,
+          harness,
+          events,
+          text: "two",
+          assistantUuid: "a2",
         });
+        harness.setTranscript([
+          transcriptEntry(turn1, "user"),
+          transcriptEntry("a1"),
+          transcriptEntry(turn2, "user"),
+          transcriptEntry("a2"),
+        ]);
 
-        const firstCompletedFiber = yield* Stream.filter(
-          adapter.streamEvents,
-          (event) => event.type === "turn.completed",
-        ).pipe(Stream.runHead, Effect.forkChild);
-
-        harness.query.emit({
-          type: "result",
-          subtype: "success",
-          is_error: false,
-          errors: [],
-          session_id: "sdk-session-rollback",
-          uuid: "result-first",
-        } as unknown as SDKMessage);
-
-        const firstCompleted = yield* Fiber.join(firstCompletedFiber);
-        assert.equal(firstCompleted._tag, "Some");
-        if (firstCompleted._tag === "Some" && firstCompleted.value.type === "turn.completed") {
-          assert.equal(String(firstCompleted.value.turnId), String(firstTurn.turnId));
-        }
-
-        const secondTurn = yield* adapter.sendTurn({
-          threadId: session.threadId,
-          input: "second",
-          attachments: [],
-        });
-
-        const secondCompletedFiber = yield* Stream.filter(
-          adapter.streamEvents,
-          (event) => event.type === "turn.completed",
-        ).pipe(Stream.runHead, Effect.forkChild);
-
-        harness.query.emit({
-          type: "result",
-          subtype: "success",
-          is_error: false,
-          errors: [],
-          session_id: "sdk-session-rollback",
-          uuid: "result-second",
-        } as unknown as SDKMessage);
-
-        const secondCompleted = yield* Fiber.join(secondCompletedFiber);
-        assert.equal(secondCompleted._tag, "Some");
-        if (secondCompleted._tag === "Some" && secondCompleted.value.type === "turn.completed") {
-          assert.equal(String(secondCompleted.value.turnId), String(secondTurn.turnId));
-        }
-
-        const threadBeforeRollback = yield* adapter.readThread(session.threadId);
-        assert.equal(threadBeforeRollback.turns.length, 2);
-
-        const rolledBack = yield* adapter.rollbackThread(session.threadId, {
+        yield* adapter.rollbackThread(THREAD_ID, {
           numTurns: 1,
-          targetTurnId: firstTurn.turnId,
-          droppedTurnIds: [secondTurn.turnId],
+          targetTurnId: turn1,
+          droppedTurnIds: [turn2],
         });
-        assert.equal(rolledBack.turns.length, 1);
-        assert.equal(rolledBack.turns[0]?.id, firstTurn.turnId);
 
-        const threadAfterRollback = yield* adapter.readThread(session.threadId);
-        assert.equal(threadAfterRollback.turns.length, 1);
-        assert.equal(threadAfterRollback.turns[0]?.id, firstTurn.turnId);
+        assert.equal(harness.queries[0]?.closeCalls, 1);
+        assert.equal(harness.inputs.length, 2);
+        const options = harness.inputs[1]?.options;
+        assert.equal(options?.resume, REWIND_SESSION_ID);
+        assert.equal(options?.resumeSessionAt, "a1");
+        assert.equal(options?.resumeDropsTurn, undefined);
+        assert.deepEqual(harness.transcriptReads[0], {
+          sessionId: REWIND_SESSION_ID,
+          dir: REWIND_CWD,
+          includeSystemMessages: true,
+        });
+        const [reopened] = yield* adapter.listSessions();
+        assert.equal(reopened?.runtimeSessionId, REWIND_RUNTIME_ID);
+        assert.deepEqual((reopened?.resumeCursor as { rewind?: unknown } | undefined)?.rewind, {
+          at: "a1",
+        });
+        assert.deepEqual(exitOrErrorEvents(events), []);
       }).pipe(
         Effect.provideService(Random.Random, makeDeterministicRandomService()),
         Effect.provide(harness.layer),
       );
-    },
-  );
+    });
+
+    it.effect("opens a fresh session when reverting to checkpoint 0", () => {
+      const harness = makeSequencedHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const events = yield* collectEvents(adapter);
+        yield* startRewindSession(adapter);
+        const turn1 = yield* runTurn({
+          adapter,
+          harness,
+          events,
+          text: "one",
+          assistantUuid: "a1",
+        });
+
+        yield* adapter.rollbackThread(THREAD_ID, {
+          numTurns: 1,
+          targetTurnId: null,
+          droppedTurnIds: [turn1],
+        });
+
+        const options = harness.inputs[1]?.options;
+        assert.equal(typeof options?.sessionId, "string");
+        assert.notEqual(options?.sessionId, REWIND_SESSION_ID);
+        assert.equal(options?.resume, undefined);
+        assert.equal(options?.resumeSessionAt, undefined);
+        assert.equal(harness.transcriptReads.length, 0);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    });
+
+    it.effect("falls back to the target turn's recorded main-chain head", () => {
+      const harness = makeSequencedHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const events = yield* collectEvents(adapter);
+        yield* startRewindSession(adapter);
+        const turn1 = yield* runTurn({
+          adapter,
+          harness,
+          events,
+          text: "one",
+          assistantUuid: "a1",
+          subagentUuid: "subagent-snapshot",
+        });
+        const turn2 = yield* runTurn({
+          adapter,
+          harness,
+          events,
+          text: "two",
+          assistantUuid: "a2",
+        });
+        harness.setTranscript([transcriptEntry("unrelated")]);
+
+        yield* adapter.rollbackThread(THREAD_ID, {
+          numTurns: 1,
+          targetTurnId: turn1,
+          droppedTurnIds: [turn2],
+        });
+
+        assert.equal(harness.inputs[1]?.options.resumeSessionAt, "a1");
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    });
+
+    it.effect("refuses to rewind while Claude is busy or without a transcript position", () => {
+      const harness = makeSequencedHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const events = yield* collectEvents(adapter);
+        yield* startRewindSession(adapter, "approval-required");
+        const turn1 = yield* runTurn({
+          adapter,
+          harness,
+          events,
+          text: "one",
+          assistantUuid: "a1",
+        });
+        const query = harness.queries[0]!;
+        const rollback = (targetTurnId = turn1) =>
+          Effect.flip(
+            adapter.rollbackThread(THREAD_ID, {
+              numTurns: 1,
+              targetTurnId,
+              droppedTurnIds: [TurnId.make("turn-dropped")],
+            }),
+          );
+
+        // Unknown target and no transcript match: no position to fork at.
+        const noPosition = yield* rollback(TurnId.make("turn-unknown"));
+        assert.include(noPosition.message, "no recorded transcript position");
+
+        // A background task is alive.
+        query.emit({
+          type: "system",
+          subtype: "task_started",
+          task_id: "task-live",
+          task_type: "agent",
+          description: "Background work",
+          session_id: REWIND_SESSION_ID,
+          uuid: "task-live-started",
+        } as unknown as SDKMessage);
+        yield* waitUntil(() => events.some((event) => event.type === "task.started"));
+        const liveTask = yield* rollback();
+        assert.include(liveTask.message, "background tasks running");
+        query.emit({
+          type: "system",
+          subtype: "task_notification",
+          task_id: "task-live",
+          status: "completed",
+          summary: "done",
+          output_file: "",
+          session_id: REWIND_SESSION_ID,
+          uuid: "task-live-done",
+        } as unknown as SDKMessage);
+        yield* waitUntil(() => events.some((event) => event.type === "task.completed"));
+
+        // A pending approval.
+        const canUseTool = harness.inputs[0]?.options.canUseTool;
+        void canUseTool?.(
+          "Bash",
+          { command: "pwd" },
+          {
+            signal: new AbortController().signal,
+            requestId: "rewind-approval",
+            toolUseID: "rewind-approval-tool",
+          },
+        );
+        yield* waitUntil(() => events.some((event) => event.type === "request.opened"));
+        const pendingApproval = yield* rollback();
+        assert.include(pendingApproval.message, "waiting for your answer");
+
+        // A running turn.
+        yield* adapter.sendTurn({ threadId: THREAD_ID, input: "still running", attachments: [] });
+        const running = yield* rollback();
+        assert.include(running.message, "A Claude turn is still running.");
+
+        assert.equal(query.closeCalls, 0);
+        assert.equal(harness.inputs.length, 1);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    });
+
+    it.effect("restores the previous conversation silently when the reopen is refused", () => {
+      const harness = makeSequencedHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const events = yield* collectEvents(adapter);
+        yield* startRewindSession(adapter);
+        const turn1 = yield* runTurn({
+          adapter,
+          harness,
+          events,
+          text: "one",
+          assistantUuid: "a1",
+        });
+        const turn2 = yield* runTurn({
+          adapter,
+          harness,
+          events,
+          text: "two",
+          assistantUuid: "a2",
+        });
+        harness.setTranscript([
+          transcriptEntry(turn1, "user"),
+          transcriptEntry("a1"),
+          transcriptEntry(turn2, "user"),
+        ]);
+        harness.setOnCreate((query, index) => {
+          if (index === 1) query.failInit = true;
+        });
+
+        const error = yield* Effect.flip(
+          adapter.rollbackThread(THREAD_ID, {
+            numTurns: 1,
+            targetTurnId: turn1,
+            droppedTurnIds: [turn2],
+          }),
+        );
+
+        assert.include(
+          error.message,
+          "Claude refused to rewind this conversation, so nothing was changed.",
+        );
+        assert.equal(harness.inputs.length, 3);
+        assert.equal(harness.inputs[2]?.options.resume, REWIND_SESSION_ID);
+        assert.equal(harness.inputs[2]?.options.resumeSessionAt, undefined);
+        assert.deepEqual(exitOrErrorEvents(events), []);
+        const cursor = yield* currentCursor(adapter);
+        assert.equal(cursor?.rewind, undefined);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    });
+
+    it.effect("reports the session ended when neither the rewind nor the restore opens", () => {
+      const harness = makeSequencedHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const events = yield* collectEvents(adapter);
+        yield* startRewindSession(adapter);
+        const turn1 = yield* runTurn({
+          adapter,
+          harness,
+          events,
+          text: "one",
+          assistantUuid: "a1",
+        });
+        const turn2 = yield* runTurn({
+          adapter,
+          harness,
+          events,
+          text: "two",
+          assistantUuid: "a2",
+        });
+        harness.setTranscript([
+          transcriptEntry(turn1, "user"),
+          transcriptEntry("a1"),
+          transcriptEntry(turn2, "user"),
+        ]);
+        harness.setOnCreate((query, index) => {
+          if (index === 1) {
+            query.failInit = true;
+            query.fail(new Error("Claude exited"));
+          }
+          if (index === 2) query.failInit = true;
+        });
+
+        const error = yield* Effect.flip(
+          adapter.rollbackThread(THREAD_ID, {
+            numTurns: 1,
+            targetTurnId: turn1,
+            droppedTurnIds: [turn2],
+          }),
+        );
+
+        assert.include(error.message, "Claude refused to rewind this conversation");
+        assert.equal(harness.inputs.length, 3);
+        yield* waitUntil(() => events.some((event) => event.type === "session.exited"));
+        assert.equal(events.filter((event) => event.type === "session.exited").length, 1);
+        assert.equal(events.filter((event) => event.type === "runtime.error").length, 0);
+        assert.deepEqual(yield* adapter.listSessions(), []);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    });
+
+    it.effect("keeps the rewind marker until a turn completes on the rewound branch", () => {
+      const harness = makeSequencedHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const events = yield* collectEvents(adapter);
+        yield* startRewindSession(adapter);
+        const turn1 = yield* runTurn({
+          adapter,
+          harness,
+          events,
+          text: "one",
+          assistantUuid: "a1",
+        });
+        const turn2 = yield* runTurn({
+          adapter,
+          harness,
+          events,
+          text: "two",
+          assistantUuid: "a2",
+        });
+        harness.setTranscript([
+          transcriptEntry(turn1, "user"),
+          transcriptEntry("a1"),
+          transcriptEntry(turn2, "user"),
+        ]);
+        yield* adapter.rollbackThread(THREAD_ID, {
+          numTurns: 1,
+          targetTurnId: turn1,
+          droppedTurnIds: [turn2],
+        });
+
+        yield* runTurn({
+          adapter,
+          harness,
+          events,
+          text: "interrupted",
+          assistantUuid: "a3",
+          interrupted: true,
+        });
+        assert.deepEqual((yield* currentCursor(adapter))?.rewind, { at: "a1" });
+
+        yield* runTurn({ adapter, harness, events, text: "completed", assistantUuid: "a4" });
+        assert.equal((yield* currentCursor(adapter))?.rewind, undefined);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    });
+
+    it.effect("resumes a rewound cursor truncated at the rewind point", () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const session = yield* adapter.startSession({
+          runtimeSessionId: REWIND_RUNTIME_ID,
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+          resumeCursor: {
+            threadId: THREAD_ID,
+            resume: REWIND_SESSION_ID,
+            resumeSessionAt: "a9",
+            rewind: { at: "a1" },
+            turnCount: 1,
+          },
+        });
+        const options = harness.getLastCreateQueryInput()?.options;
+        assert.equal(options?.resume, REWIND_SESSION_ID);
+        assert.equal(options?.resumeSessionAt, "a1");
+        assert.deepEqual((session.resumeCursor as { rewind?: unknown }).rewind, { at: "a1" });
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    });
+
+    it.effect("refuses to start a session while the thread is rewinding", () => {
+      const harness = makeSequencedHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const events = yield* collectEvents(adapter);
+        yield* startRewindSession(adapter);
+        const turn1 = yield* runTurn({
+          adapter,
+          harness,
+          events,
+          text: "one",
+          assistantUuid: "a1",
+        });
+        harness.setTranscript([transcriptEntry("p0", "user"), transcriptEntry(turn1, "user")]);
+        let releaseInit: () => void = () => undefined;
+        harness.setOnCreate((query, index) => {
+          if (index === 1) {
+            query.initGate = new Promise<void>((resolve) => {
+              releaseInit = resolve;
+            });
+          }
+        });
+
+        const rewinding = yield* adapter
+          .rollbackThread(THREAD_ID, {
+            numTurns: 1,
+            targetTurnId: TurnId.make("turn-kept"),
+            droppedTurnIds: [turn1],
+          })
+          .pipe(Effect.forkChild);
+        yield* waitUntil(() => harness.inputs.length === 2);
+
+        const error = yield* Effect.flip(
+          adapter.startSession({
+            runtimeSessionId: RuntimeSessionId.make("runtime-claude-competing"),
+            threadId: THREAD_ID,
+            provider: ProviderDriverKind.make("claudeAgent"),
+            runtimeMode: "full-access",
+          }),
+        );
+        assert.include(error.message, "Claude is rewinding this thread; try again in a moment.");
+
+        releaseInit();
+        yield* Fiber.join(rewinding);
+        assert.equal(harness.inputs[1]?.options.resumeSessionAt, "p0");
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    });
+  });
 
   it.effect("updates model on sendTurn when model override is provided", () => {
     const harness = makeHarness();
