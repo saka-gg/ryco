@@ -25,7 +25,6 @@ import { SideChatPanel } from "./SideChatPanel";
 import { useSideChatStore } from "../sideChatStore";
 import { parseSideQuestionCommand } from "@ryco/client-runtime/state/side-chat";
 import { useDeviceName } from "../deviceName";
-import { resolveBuildModeModelSelection } from "../buildMode";
 import { newWorktreeBaseBranch } from "./chat/NewThreadWorkLocation.logic";
 import {
   DEFAULT_MODEL,
@@ -50,7 +49,6 @@ import {
   type ThreadGoalUpdate,
   THREAD_GOAL_OBJECTIVE_MAX_CHARS,
   ORCHESTRATION_WS_METHODS,
-  PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
   WS_METHODS,
 } from "@ryco/contracts";
 import {
@@ -63,21 +61,15 @@ import {
   buildQueuedMessageSteerCommand,
   resolveQueuedMessageSteerEligibility,
 } from "@ryco/client-runtime/state/message-queue";
-import { applyClaudePromptEffortPrefix, resolvePromptInjectedEffort } from "@ryco/shared/model";
 import { projectScriptCwd } from "@ryco/shared/projectScripts";
 import { truncate } from "@ryco/shared/String";
 import { Debouncer, useDebouncedValue } from "@tanstack/react-pacer";
 import { useQueryClient } from "~/rpc/queryClient";
-import { DateTime } from "effect";
 import { formatSourceControlContextsForAgent } from "@ryco/shared/sourceControlContextFormatter";
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { useShallow } from "zustand/react/shallow";
 import { useGitStatus } from "~/lib/gitStatusState";
-import {
-  issueDetailQueryOptions,
-  changeRequestDetailQueryOptions,
-} from "~/lib/sourceControlContextRpc";
 import { usePrimaryEnvironmentId } from "../environments/primary";
 import { readEnvironmentApi } from "../environmentApi";
 import { isElectron } from "../env";
@@ -152,11 +144,7 @@ import { BackgroundLivenessChip } from "./chat/BackgroundLivenessChip";
 import { cn, randomUUID } from "~/lib/utils";
 import { stackedThreadToast, toastManager } from "./ui/toast";
 import { newCommandId, newDraftId, newMessageId, newThreadId } from "~/lib/utils";
-import {
-  getProviderModelCapabilities,
-  getProviderSupportsAskMode,
-  resolveSelectableProvider,
-} from "../providerModels";
+import { getProviderSupportsAskMode, resolveSelectableProvider } from "../providerModels";
 import { useSettings } from "../hooks/useSettings";
 import { resolveAppModelSelectionForInstance } from "../modelSelection";
 import { deriveLogicalProjectKeyFromSettings } from "../logicalProject";
@@ -174,9 +162,13 @@ import {
 } from "../composerDraftStore";
 import { type TerminalContextDraft, type TerminalContextSelection } from "../lib/terminalContext";
 import {
-  maybeResolveDevicePromptAttachment,
-  type DevicePromptAttachmentResolution,
-} from "../lib/devicePromptContext";
+  applyBuildModeToSend,
+  attachDevicePromptScreenshot,
+  createSourceControlContextFetcher,
+  formatOutgoingPrompt,
+  persistThreadSettingsForNextTurn as persistThreadSettingsForNextTurnShared,
+  type DevicePromptScreenshotNotice,
+} from "../hooks/chatSendShared";
 import { selectThreadTerminalState, useTerminalStateStore } from "../terminalStateStore";
 import type { ModelPickMeta } from "./chat/modelPickerTuningBridge";
 import { ChatComposer, type ChatComposerHandle } from "./chat/ChatComposer";
@@ -251,6 +243,12 @@ import {
   type SendTurnSettings,
 } from "../hooks/executeChatSendTurn";
 import { useMessageQueueStore } from "../messageQueueStore";
+import {
+  resumeMessageQueue,
+  retryQueuedMessage,
+  useForegroundQueueSender,
+  type WebQueueSender,
+} from "../messageQueueDrain";
 import type { QueuedMessage } from "../messageQueue.logic";
 import { deriveComposerFileUploadSendBlock } from "~/composerFileUpload";
 import { ComposerQueuedMessages } from "./chat/ComposerQueuedMessages";
@@ -399,18 +397,6 @@ type EnvironmentUnavailableState = {
   readonly label: string;
   readonly connectionState: "connecting" | "disconnected" | "error";
 };
-
-function formatOutgoingPrompt(params: {
-  provider: ProviderDriverKind;
-  model: string | null;
-  models: ReadonlyArray<ServerProvider["models"][number]>;
-  effort: string | null;
-  text: string;
-}): string {
-  const caps = getProviderModelCapabilities(params.models, params.model, params.provider);
-  const promptEffort = resolvePromptInjectedEffort(caps, params.effort);
-  return applyClaudePromptEffortPrefix(params.text, promptEffort);
-}
 
 type ChatViewProps =
   | {
@@ -867,9 +853,6 @@ export default function ChatView(props: ChatViewProps) {
   const enqueueMessage = useMessageQueueStore((store) => store.enqueue);
   const removeMessageFromQueue = useMessageQueueStore((store) => store.remove);
   const moveMessageInQueue = useMessageQueueStore((store) => store.move);
-  const beginQueuedSend = useMessageQueueStore((store) => store.beginSend);
-  const finishQueuedSend = useMessageQueueStore((store) => store.finishSend);
-  const retryQueuedSend = useMessageQueueStore((store) => store.retrySend);
   const beginQueuedMessageSteer = useMessageQueueStore((store) => store.beginSteer);
   const endQueuedMessageSteer = useMessageQueueStore((store) => store.endSteer);
   const queuedMessages = useMessageQueueStore((store) =>
@@ -881,6 +864,9 @@ export default function ChatView(props: ChatViewProps) {
     activeThreadKey
       ? (store.steeringIdsByThreadKey[activeThreadKey] ?? EMPTY_STEERING_MESSAGE_IDS)
       : EMPTY_STEERING_MESSAGE_IDS,
+  );
+  const queueHold = useMessageQueueStore((store) =>
+    activeThreadKey ? (store.holdsByThreadKey[activeThreadKey] ?? null) : null,
   );
   const handleRemoveQueuedMessage = useCallback(
     (id: string) => {
@@ -2528,36 +2514,7 @@ export default function ChatView(props: ChatViewProps) {
       if (!api) {
         return;
       }
-
-      if (input.runtimeMode !== serverThread.runtimeMode) {
-        await api.orchestration.dispatchCommand({
-          type: "thread.runtime-mode.set",
-          commandId: newCommandId(),
-          threadId: input.threadId,
-          runtimeMode: input.runtimeMode,
-          createdAt: input.createdAt,
-        });
-      }
-
-      if (input.interactionMode !== serverThread.interactionMode) {
-        await api.orchestration.dispatchCommand({
-          type: "thread.interaction-mode.set",
-          commandId: newCommandId(),
-          threadId: input.threadId,
-          interactionMode: input.interactionMode,
-          createdAt: input.createdAt,
-        });
-      }
-
-      if (input.tokenMode !== (serverThread.tokenMode ?? DEFAULT_AGENT_TOKEN_MODE)) {
-        await api.orchestration.dispatchCommand({
-          type: "thread.token-mode.set",
-          commandId: newCommandId(),
-          threadId: input.threadId,
-          tokenMode: input.tokenMode,
-          createdAt: input.createdAt,
-        });
-      }
+      await persistThreadSettingsForNextTurnShared(api, serverThread, input);
     },
     [environmentId, serverThread],
   );
@@ -3072,6 +3029,28 @@ export default function ChatView(props: ChatViewProps) {
     },
     [activeThread, activeThreadStarted, providerSelectionPolicy],
   );
+  const notifyDevicePromptScreenshot = useCallback((notice: DevicePromptScreenshotNotice) => {
+    toastManager.add(
+      stackedThreadToast(
+        notice.kind === "skipped"
+          ? {
+              type: "warning",
+              title: "The simulator screenshot was skipped",
+              description: `This message already has ${notice.maxAttachments} attachments.`,
+            }
+          : {
+              type: "warning",
+              title: "Couldn’t attach the simulator screen",
+              description:
+                notice.reason === "no-attached-device"
+                  ? "Open the Simulator workspace and choose a device first."
+                  : notice.reason === "device-not-booted"
+                    ? "The selected simulator is still starting."
+                    : "The current simulator screen could not be attached.",
+            },
+      ),
+    );
+  }, []);
   const notifySelectionBecameIneligible = useCallback(() => {
     toastManager.add(
       stackedThreadToast({
@@ -3259,37 +3238,6 @@ export default function ChatView(props: ChatViewProps) {
     ],
   );
 
-  useEffect(() => {
-    if (!activeThreadKey || steeringQueuedMessageIds.length === 0) return;
-    const projectedIds = new Set(activeThread?.messages.map((message) => String(message.id)) ?? []);
-    for (const messageId of steeringQueuedMessageIds) {
-      if (projectedIds.has(messageId)) {
-        handleRemoveQueuedMessage(messageId);
-      }
-    }
-  }, [
-    activeThread?.messages,
-    activeThreadKey,
-    handleRemoveQueuedMessage,
-    steeringQueuedMessageIds,
-  ]);
-
-  useEffect(() => {
-    if (!activeThreadKey || steeringQueuedMessageIds.length === 0) return;
-    const rejectedIds = new Set(
-      threadActivities.flatMap((activity) => {
-        if (activity.kind !== "provider.turn.steer.failed" || !activity.payload) return [];
-        const messageId = (activity.payload as { messageId?: unknown }).messageId;
-        return typeof messageId === "string" ? [messageId] : [];
-      }),
-    );
-    for (const messageId of steeringQueuedMessageIds) {
-      if (rejectedIds.has(messageId)) {
-        endQueuedMessageSteer(activeThreadKey, messageId);
-      }
-    }
-  }, [activeThreadKey, endQueuedMessageSteer, steeringQueuedMessageIds, threadActivities]);
-
   // Build the executeChatSendTurn input from a composer snapshot and dispatch it.
   // Shared by direct sends and queue flushes, so a queued message replays exactly
   // like a live send.
@@ -3298,6 +3246,10 @@ export default function ChatView(props: ChatViewProps) {
     composerSnapshot: SendTurnComposerSnapshot,
     settingsSnapshot: SendTurnSettings,
     messageId?: MessageId,
+    hooks?: {
+      readonly onBeforeTurnStart?: () => void;
+      readonly onSendError?: (error: unknown) => void;
+    },
   ): Promise<boolean> => {
     if (!dispatchCapability.allowed || hostedDraftTarget.pending !== null) return false;
     const api = readEnvironmentApi(environmentId);
@@ -3307,62 +3259,23 @@ export default function ChatView(props: ChatViewProps) {
     try {
       rejectRetiredProjectMemory(composerSnapshot);
       if (!(await drainEditorsBeforeSend())) return false;
-      if (enforceBuildMode) {
-        composerSnapshot = {
-          ...composerSnapshot,
-          selectedModelSelection: resolveBuildModeModelSelection(
-            composerSnapshot.selectedProvider,
-            composerSnapshot.selectedModelSelection,
-          ),
-        };
-      }
+      const buildMode = applyBuildModeToSend({
+        composer: composerSnapshot,
+        settings: settingsSnapshot,
+        enforceBuildMode,
+      });
+      composerSnapshot = buildMode.composer;
       if (!canSendModelSelection(composerSnapshot.selectedModelSelection)) {
         notifySelectionBecameIneligible();
         return false;
       }
-      const devicePromptAttachment: DevicePromptAttachmentResolution =
-        await maybeResolveDevicePromptAttachment({
-          api,
-          threadId: activeThread.id,
-          prompt: composerSnapshot.prompt,
-        }).catch(() => ({ requested: false, image: null }));
-      if (devicePromptAttachment.image) {
-        if (composerSnapshot.images.length < PROVIDER_SEND_TURN_MAX_ATTACHMENTS) {
-          composerSnapshot = {
-            ...composerSnapshot,
-            images: [...composerSnapshot.images, devicePromptAttachment.image],
-          };
-        } else {
-          URL.revokeObjectURL(devicePromptAttachment.image.previewUrl);
-          toastManager.add(
-            stackedThreadToast({
-              type: "warning",
-              title: "The simulator screenshot was skipped",
-              description: `This message already has ${PROVIDER_SEND_TURN_MAX_ATTACHMENTS} attachments.`,
-            }),
-          );
-        }
-      } else if (devicePromptAttachment.requested) {
-        const description =
-          devicePromptAttachment.reason === "no-attached-device"
-            ? "Open the Simulator workspace and choose a device first."
-            : devicePromptAttachment.reason === "device-not-booted"
-              ? "The selected simulator is still starting."
-              : "The current simulator screen could not be attached.";
-        toastManager.add(
-          stackedThreadToast({
-            type: "warning",
-            title: "Couldn’t attach the simulator screen",
-            description,
-          }),
-        );
-      }
-      // Queued messages keep the settings snapshot from enqueue time; when the
-      // Build-mode lock is on, every dispatched turn must still run in Build
-      // mode even if it was queued as Plan/Ask before the setting flipped.
-      const effectiveSettingsSnapshot: SendTurnSettings = enforceBuildMode
-        ? { ...settingsSnapshot, interactionMode: DEFAULT_INTERACTION_MODE }
-        : settingsSnapshot;
+      composerSnapshot = await attachDevicePromptScreenshot({
+        api,
+        threadId: activeThread.id,
+        composer: composerSnapshot,
+        notify: notifyDevicePromptScreenshot,
+      });
+      const effectiveSettingsSnapshot: SendTurnSettings = buildMode.settings;
       const threadIdForSend = activeThread.id;
       const isFirstMessage = !isServerThread || activeThread.messages.length === 0;
       const { shouldMaterializeLegacyBranchWorktree, baseBranchForWorktree, shouldCreateWorktree } =
@@ -3429,6 +3342,8 @@ export default function ChatView(props: ChatViewProps) {
 
       const accepted = await executeChatSendTurn({
         ...(messageId !== undefined ? { messageId } : {}),
+        ...(hooks?.onBeforeTurnStart ? { onBeforeTurnStart: hooks.onBeforeTurnStart } : {}),
+        ...(hooks?.onSendError ? { onSendError: hooks.onSendError } : {}),
         preserveComposerDraft: messageId !== undefined || composerChangedDuringPreparation(),
         composer: composerSnapshot,
         thread: {
@@ -3509,35 +3424,7 @@ export default function ChatView(props: ChatViewProps) {
           sendInFlightRef,
         },
         sourceControl: {
-          fetcher: async (ctx) => {
-            const cwd = gitCwd;
-            if (!cwd) return ctx;
-            const now = DateTime.fromDateUnsafe(new Date());
-            const staleAfterDate = DateTime.fromDateUnsafe(new Date(Date.now() + 5 * 60 * 1000));
-            if (ctx.kind === "issue") {
-              const detail = await queryClient.fetchQuery(
-                issueDetailQueryOptions({
-                  environmentId,
-                  cwd,
-                  reference: String(ctx.detail.number),
-                }),
-              );
-              return {
-                ...ctx,
-                detail,
-                fetchedAt: now,
-                staleAfter: staleAfterDate,
-              };
-            }
-            const detail = await queryClient.fetchQuery(
-              changeRequestDetailQueryOptions({
-                environmentId,
-                cwd,
-                reference: String(ctx.detail.number),
-              }),
-            );
-            return { ...ctx, detail, fetchedAt: now, staleAfter: staleAfterDate };
-          },
+          fetcher: createSourceControlContextFetcher({ environmentId, cwd: gitCwd, queryClient }),
         },
         persistSettings: { persistThreadSettingsForNextTurn },
         composerHandle: { readComposer },
@@ -3933,57 +3820,41 @@ export default function ChatView(props: ChatViewProps) {
     });
   }, []);
 
-  // Flush the message queue: when the thread is idle, dispatch the next queued
-  // message. One at a time — the dispatched turn goes running, and the following
-  // item flushes on the next quiescence. Guards prevent firing mid-turn, while an
-  // interrupt or provider error leaves the remaining queue intact.
-  useEffect(() => {
-    if (!activeThreadKey) return;
-    const threadKey = activeThreadKey;
-    const next = queuedMessages[0];
-    if (!next) return;
-    if (!dispatchCapability.allowed) return;
-    // A lost RPC reply is not evidence of a rejected send. Reconcile projected
-    // messages before retrying, including failures retained across reconnects.
-    if (activeThread?.messages.some((message) => message.id === next.id)) {
-      handleRemoveQueuedMessage(next.id);
-      return;
-    }
-    if (next.deliveryStatus) return;
-    if (isWorking || activeEnvironmentUnavailable) return;
-    if (activePendingProgress || activePendingApproval) return;
-    if (sendInFlightRef.current) return;
-    // Claim before asynchronous preparation so rerenders cannot dispatch twice.
-    // A failed attempt waits for explicit retry instead of spinning on idle updates.
-    if (steeringQueuedMessageIds.includes(next.id)) return;
-    if (!beginQueuedSend(threadKey, next.id)) return;
-    void dispatchComposerSnapshotRef
-      .current(next.composer, next.settings, MessageId.make(next.id))
-      .then(
-        (accepted) => {
-          finishQueuedSend(threadKey, next.id, accepted);
-          if (accepted) {
-            for (const image of next.composer.images) {
-              if (image.previewUrl.startsWith("blob:")) URL.revokeObjectURL(image.previewUrl);
-            }
-          }
-        },
-        () => finishQueuedSend(threadKey, next.id, false),
-      );
-  }, [
-    activeThreadKey,
-    queuedMessages,
-    isWorking,
-    activeEnvironmentUnavailable,
-    activePendingProgress,
-    activePendingApproval,
-    dispatchCapability.allowed,
-    beginQueuedSend,
-    finishQueuedSend,
-    activeThread?.messages,
-    handleRemoveQueuedMessage,
-    steeringQueuedMessageIds,
-  ]);
+  // Queued messages drain through the shared coordinator (`messageQueueDrain`),
+  // for every thread with a queue. While this ChatView is mounted it is its
+  // thread's foreground sender, with optimistic UI, the Claude review dialog,
+  // worktree and draft promotion. Busy reads are live refs: a "not now" is
+  // `deferred` (the claim is released and retried), never a failed head.
+  const queueRenderBusyRef = useRef(false);
+  queueRenderBusyRef.current =
+    isSendBusy ||
+    isConnecting ||
+    isRevertingCheckpoint ||
+    hostedDraftTarget.pending !== null ||
+    !dispatchCapability.allowed ||
+    activeEnvironmentUnavailable;
+  const foregroundQueueSender = useMemo<WebQueueSender>(
+    () => ({
+      send: async (entry, hooks) => {
+        if (
+          queueRenderBusyRef.current ||
+          sendInFlightRef.current ||
+          editorSendPreparationRef.current
+        ) {
+          return { kind: "deferred" };
+        }
+        const accepted = await dispatchComposerSnapshotRef.current(
+          entry.composer,
+          entry.settings,
+          MessageId.make(entry.id),
+          { onBeforeTurnStart: hooks.onBeforeTurnStart },
+        );
+        return accepted ? { kind: "accepted" } : { kind: "failed" };
+      },
+    }),
+    [],
+  );
+  useForegroundQueueSender(activeThreadKey, foregroundQueueSender);
 
   const onSubmitPlanFollowUp = useCallback(
     async ({
@@ -5044,12 +4915,16 @@ export default function ChatView(props: ChatViewProps) {
               {showNewThreadComposerSpacer ? <div aria-hidden className="mb-2 h-5" /> : null}
               <ComposerQueuedMessages
                 messages={queuedMessages}
+                hold={queueHold}
+                onResume={() => {
+                  if (activeThreadKey) resumeMessageQueue(activeThreadKey);
+                }}
                 onRemove={handleRemoveQueuedMessage}
                 onMove={handleMoveQueuedMessage}
                 onRetry={
                   presentationTier !== "phone"
                     ? (id) => {
-                        if (activeThreadKey) retryQueuedSend(activeThreadKey, id);
+                        if (activeThreadKey) retryQueuedMessage(activeThreadKey, id);
                       }
                     : undefined
                 }

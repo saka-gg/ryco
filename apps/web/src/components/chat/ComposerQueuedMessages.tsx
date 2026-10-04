@@ -7,11 +7,16 @@ import {
   XIcon,
 } from "lucide-react";
 
+import { describeQueueHold, type QueueHold } from "@ryco/client-runtime/state/message-queue";
+
 import { cn } from "~/lib/utils";
 import { summarizeQueuedMessage, type QueuedMessage } from "~/messageQueue.logic";
 
 interface ComposerQueuedMessagesProps {
   messages: readonly QueuedMessage[];
+  /** A recorded pause (Stop, error, review, stalled start); shown on every tier. */
+  hold?: QueueHold | null | undefined;
+  onResume?: (() => void) | undefined;
   onRemove: (id: string) => void;
   onRetry?: ((id: string) => void) | undefined;
   onMove: (id: string, direction: "up" | "down") => void;
@@ -33,6 +38,8 @@ const iconButtonClass = cn(
  */
 export const ComposerQueuedMessages = memo(function ComposerQueuedMessages({
   messages,
+  hold = null,
+  onResume,
   onRemove,
   onMove,
   onRetry,
@@ -45,11 +52,38 @@ export const ComposerQueuedMessages = memo(function ComposerQueuedMessages({
     return null;
   }
 
+  const held = hold ? describeQueueHold(hold) : null;
+
   return (
     <div className="mb-2 rounded-lg border border-border/60 bg-muted/30 p-1.5">
-      <div className="px-1.5 pb-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-        Queued · {messages.length}
-      </div>
+      {held ? (
+        <div className="flex min-w-0 items-center gap-1.5 px-1.5 pb-1 text-[11px]">
+          <span className="shrink-0 font-medium uppercase tracking-wide text-muted-foreground">
+            {held.title} · {messages.length}
+          </span>
+          {held.detail ? (
+            <span className="min-w-0 flex-1 truncate text-muted-foreground/70" title={held.detail}>
+              {held.detail}
+            </span>
+          ) : (
+            <span className="flex-1" />
+          )}
+          {onResume ? (
+            <button
+              type="button"
+              className={cn(iconButtonClass, "w-auto px-1.5 text-[11px] text-foreground")}
+              onClick={onResume}
+              aria-label="Resume queued messages"
+            >
+              Resume
+            </button>
+          ) : null}
+        </div>
+      ) : (
+        <div className="px-1.5 pb-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+          Queued · {messages.length}
+        </div>
+      )}
       <ul className="flex flex-col gap-0.5">
         {messages.map((message, index) => {
           const summary = summarizeQueuedMessage(message);

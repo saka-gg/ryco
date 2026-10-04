@@ -11,6 +11,8 @@ import {
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import { DraftId } from "../composerDraftStore";
+import { claudeCacheReviewPresentation } from "../components/chat/ClaudeCacheReview";
+import { toastManager } from "../components/ui/toast";
 import type { ChatMessage } from "../types";
 import {
   buildOutgoingTurnAttachments,
@@ -18,6 +20,17 @@ import {
   executeChatSendTurn,
   rollbackSendTurn,
 } from "./executeChatSendTurn";
+
+// Pass-through spy: every test still runs the real send engine.
+const { commitSendTurnDispatchSpy } = vi.hoisted(() => ({
+  commitSendTurnDispatchSpy: { current: null as null | ReturnType<typeof vi.fn> },
+}));
+vi.mock("@ryco/client-runtime/state/composer", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@ryco/client-runtime/state/composer")>();
+  const spy = vi.fn(actual.commitSendTurnDispatch);
+  commitSendTurnDispatchSpy.current = spy;
+  return { ...actual, commitSendTurnDispatch: spy };
+});
 
 // ---------------------------------------------------------------------------
 // buildOutgoingTurnAttachments
@@ -904,4 +917,67 @@ it("rejects a saved memory-dependent composer without dispatching or clearing it
     input.thread.threadId,
     expect.stringContaining("Project memory was intentionally removed"),
   );
+});
+
+describe("background send options", () => {
+  function lastCommitInput() {
+    const calls = commitSendTurnDispatchSpy.current!.mock.calls;
+    return calls.at(-1)?.[0] as Record<string, unknown>;
+  }
+
+  it("uses the dialog review by default and no interactive review for null", async () => {
+    const { input } = makeSendInput();
+    expect(await executeChatSendTurn(input)).toBe(true);
+    expect(lastCommitInput().claudeCacheReview).toBe(claudeCacheReviewPresentation);
+
+    const background = makeSendInput();
+    background.input.claudeCacheReview = null;
+    expect(await executeChatSendTurn(background.input)).toBe(true);
+    expect(lastCommitInput()).not.toHaveProperty("claudeCacheReview");
+  });
+
+  it("forwards onBeforeTurnStart to run right before turn.start", async () => {
+    const { input, dispatchCommand } = makeSendInput();
+    const order: string[] = [];
+    dispatchCommand.mockImplementation(async (command: unknown) => {
+      order.push((command as { type: string }).type);
+      return { sequence: 1 };
+    });
+    input.onBeforeTurnStart = () => order.push("onBeforeTurnStart");
+    expect(await executeChatSendTurn(input)).toBe(true);
+    expect(order.at(-2)).toBe("onBeforeTurnStart");
+    expect(order.at(-1)).toBe("thread.turn.start");
+  });
+
+  it("skips the expired-terminal toast when toasts are suppressed", async () => {
+    const add = vi.spyOn(toastManager, "add");
+    try {
+      const shown = makeSendInput();
+      shown.input.composer.expiredTerminalContextCount = 1;
+      await executeChatSendTurn(shown.input);
+      expect(add).toHaveBeenCalledTimes(1);
+      add.mockClear();
+      const quiet = makeSendInput();
+      quiet.input.composer.expiredTerminalContextCount = 1;
+      quiet.input.suppressToasts = true;
+      await executeChatSendTurn(quiet.input);
+      expect(add).not.toHaveBeenCalled();
+    } finally {
+      add.mockRestore();
+    }
+  });
+
+  it("lets the caller observe the send error before it becomes a thread error", async () => {
+    const { input, dispatchCommand } = makeSendInput();
+    const failure = new Error("Provider unavailable");
+    dispatchCommand.mockRejectedValueOnce(failure);
+    const seen: unknown[] = [];
+    input.onSendError = (error) => seen.push(error);
+    expect(await executeChatSendTurn(input)).toBe(false);
+    expect(seen).toEqual([failure]);
+    expect(input.dispatch.setThreadError).toHaveBeenLastCalledWith(
+      input.thread.threadId,
+      "Provider unavailable",
+    );
+  });
 });

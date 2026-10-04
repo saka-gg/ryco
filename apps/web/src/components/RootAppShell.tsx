@@ -44,6 +44,7 @@ import {
 } from "../environments/primary";
 import { ServerStateBootstrap } from "./ServerStateBootstrap";
 import { ThreadPriorityRefreshBridge } from "./ThreadPriorityRefreshBridge";
+import { MessageQueueDrainBridge } from "./MessageQueueDrainBridge";
 import { getRoutedHostedNode } from "../hostedHub/nodeRoutes";
 
 export interface RootAppShellProps {
@@ -75,6 +76,7 @@ export function RootAppShell({ authGateState }: RootAppShellProps) {
         {primaryEnvironmentAuthenticated ? <ServerStateBootstrap /> : null}
         <EnvironmentConnectionManagerBootstrap />
         {primaryEnvironmentAuthenticated ? <ThreadPriorityRefreshBridge /> : null}
+        {primaryEnvironmentAuthenticated ? <MessageQueueDrainBridge /> : null}
         <ContextMenuActionSheetHost />
         <SshPasswordPromptDialog />
         {authGateState.status === "hosted-static" ? <HostedStaticEnvironmentBootstrap /> : null}
