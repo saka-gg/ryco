@@ -2,6 +2,7 @@ import type { EnvironmentId, RelayEffectiveRole } from "@ryco/contracts";
 import type * as HostedIdentity from "@ryco/contracts/hosted-identity";
 import type * as NativeE2ee from "@ryco/contracts/native-e2ee";
 
+import { HostedReconnectPolicy } from "../relay/reconnectPolicy.ts";
 import { HostedHubApiError, type HostedAccountStepUp, type HostedHubFailureReason } from "./api.ts";
 import { activateHostedNode, deactivateHostedNode, suspendHostedNode } from "./environment.ts";
 import { NativeHandoffClientError } from "./nativeHandoff.ts";
@@ -350,6 +351,35 @@ function isSessionFailure(error: unknown): boolean {
 }
 
 /**
+ * Whether a failed access check is one a later attempt can outlive: no answer
+ * at all (transport loss, the request deadline, a proof a locked device could
+ * not sign), a Hub that is busy or failing (408, 429, 5xx), or a body that is
+ * not the Hub's (a captive portal or proxy page decodes as `invalid_response`).
+ * A definite 4xx answer is not retried on a timer; the next lifecycle signal
+ * still re-checks it.
+ */
+function isTransientAccessFailure(error: unknown): boolean {
+  if (!(error instanceof HostedHubApiError)) return true;
+  if (error.code === "invalid_response") return true;
+  return error.status === 0 || error.status === 408 || error.status === 429 || error.status >= 500;
+}
+
+/**
+ * Whether a lifecycle binding must forward foreground and connectivity signals
+ * to {@link HostedHubController.recoverAfterConnectivity}: an authenticated
+ * account resumes on them, and one whose access check could not reach the Hub
+ * re-runs it. Every other status has nothing a connectivity change can repair.
+ */
+export function hostedAccountRecoversOnConnectivity(status: HostedAccountStatus): boolean {
+  return status === "authenticated" || status === "unavailable";
+}
+
+/** The states the access-recovery backoff exists to leave. */
+function awaitsAccessRecovery(state: HostedHubState): boolean {
+  return state.accountStatus === "unavailable";
+}
+
+/**
  * A monotonic generation fence.
  *
  * `issue()` hands out a predicate that stays true until the next `bump()`. It is
@@ -420,6 +450,16 @@ class HostedHubController {
   #browserResumePromise: Promise<void> | null = null;
   #browserSuspendPromise: Promise<void> | null = null;
   #browserLifecycleGeneration = 0;
+  /**
+   * The bounded, jittered (1s to 60s) backoff that retries a failed access
+   * check on its own — see {@link HostedHubController.recoverAfterConnectivity}.
+   * The attempt count is reset only once the Hub has answered with a session.
+   * Jitter reads `Math.random` per delay rather than capturing it here, so the
+   * one controller instance follows whatever source is current.
+   */
+  #accessRetryPolicy = new HostedReconnectPolicy({ random: () => Math.random() });
+  #accessRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  #accessRetryForeground: (() => void) | null = null;
   #totpEnrollmentFence = createFence();
   #recoveryCodesFence = createFence();
   /**
@@ -452,6 +492,7 @@ class HostedHubController {
     const promise = getHostedHubApi()
       .restoreSession(operation.signal)
       .then(async (result) => {
+        this.#resetAccessRetry();
         patchState({
           accountStatus: "authenticated",
           account: result.account,
@@ -462,8 +503,9 @@ class HostedHubController {
       })
       .catch((error) => {
         if (operation.signal.aborted) return undefined;
-        getHostedHubApi().clearSessionMaterial();
         if (isSessionFailure(error)) {
+          // Only the Hub's own answer that this session is gone ends it.
+          getHostedHubApi().clearSessionMaterial();
           return getHostedHubApi()
             .getBootstrapAvailability(operation.signal)
             .catch(() => false)
@@ -471,11 +513,18 @@ class HostedHubController {
               if (!operation.signal.aborted) patchState({ ...initialState, bootstrapAvailable });
             });
         }
+        // No answer, the request deadline, a busy or failing Hub, or a captive
+        // portal's page says nothing about the session. In bearer mode the
+        // stored token is the only copy of a still-valid DPoP-bound session, so
+        // clearing it here turned every offline launch into a forced sign-in.
+        // The material is kept and the access check retried instead; the
+        // account stays `unavailable`, which grants nothing.
         patchState({
           ...initialState,
           accountStatus: "unavailable",
           ...hostedErrorPatch(error),
         });
+        this.#scheduleAccessRetry(error);
         return undefined;
       })
       .finally(() => {
@@ -484,6 +533,25 @@ class HostedHubController {
       });
     this.#bootstrapPromise = promise;
     return promise;
+  }
+
+  /**
+   * Re-establish hosted access after a foreground or connectivity signal.
+   *
+   * The one entry point every platform lifecycle binding forwards those signals
+   * to, so what "recovery" means stays with this owner rather than being
+   * re-derived per app: an account whose access check could not reach the Hub
+   * re-runs {@link bootstrap}, and an authenticated account runs the full
+   * {@link resumeBrowser} (session, directory, fresh relay attempt, current
+   * snapshot). The access-recovery backoff re-enters here too, so a timed retry
+   * can never publish anything the ordinary resume would not. Every other
+   * status has nothing a connectivity change can repair.
+   */
+  recoverAfterConnectivity(): Promise<void> {
+    const state = hostedHubStore.getState();
+    if (state.accountStatus === "unavailable") return this.bootstrap();
+    if (state.accountStatus === "authenticated") return this.resumeBrowser();
+    return Promise.resolve();
   }
 
   /**
@@ -507,6 +575,7 @@ class HostedHubController {
     });
     try {
       const result = await getHostedHubApi().signIn(operation.signal);
+      this.#resetAccessRetry();
       patchState({
         accountStatus: "authenticated",
         account: result.account,
@@ -533,6 +602,7 @@ class HostedHubController {
     });
     try {
       const result = await getHostedHubApi().signInWithExternalProvider(provider, operation.signal);
+      this.#resetAccessRetry();
       patchState({
         accountStatus: "authenticated",
         account: result.account,
@@ -580,6 +650,7 @@ class HostedHubController {
     this.#operation = null;
     this.#totpEnrollmentFence.bump();
     this.#recoveryCodesFence.bump();
+    this.#resetAccessRetry();
     patchState({
       accountStatus: "authenticated",
       account: {
@@ -618,6 +689,7 @@ class HostedHubController {
     });
     try {
       const result = await register(operation.signal);
+      this.#resetAccessRetry();
       patchState({
         accountStatus: "authenticated",
         account: result.account,
@@ -1535,6 +1607,7 @@ class HostedHubController {
     this.#browserResumePromise = null;
     this.#browserSuspendPromise = null;
     this.#browserLifecycleGeneration += 1;
+    this.#resetAccessRetry();
     this.#clearAccountSurface();
     // Leases are held by surfaces, not by the session, so only a full reset
     // drops them — otherwise a test's leftover lease would keep the next test's
@@ -1660,6 +1733,7 @@ class HostedHubController {
 
   async clearAccount(status: "signed-out" | "session-expired"): Promise<void> {
     this.#browserLifecycleGeneration += 1;
+    this.#resetAccessRetry();
     this.#browserResumeOperation?.abort();
     this.#browserResumeOperation = null;
     this.#browserResumePromise = null;
@@ -2046,9 +2120,71 @@ class HostedHubController {
 
   #replaceOperation(): AbortController {
     this.#operation?.abort();
+    // A new account operation owns access from here; a timed retry armed for
+    // the state it replaces must not fire into it.
+    this.#cancelAccessRetry();
     const operation = new AbortController();
     this.#operation = operation;
     return operation;
+  }
+
+  /**
+   * Arm the access-recovery backoff after a failed access check.
+   *
+   * Without it a failed check is retried only by the next lifecycle signal
+   * (visibility, foreground, online). A Hub deploy, a timeout, or a DNS/TLS
+   * failure while the OS still reports connectivity produces none of those, so
+   * the surface stayed unavailable until the user found a manual repair. Only
+   * transient failures are retried, the delay honors a Hub `retryAfterMs`, and
+   * the retry re-enters through {@link recoverAfterConnectivity} after
+   * re-checking the state it was armed for.
+   */
+  #scheduleAccessRetry(error: unknown): void {
+    this.#cancelAccessRetry();
+    if (!isTransientAccessFailure(error)) return;
+    const delay = this.#accessRetryPolicy.nextDelay(
+      error instanceof HostedHubApiError ? error.retryAfterMs : undefined,
+    );
+    this.#accessRetryTimer = getHostedRuntimeConfiguration().timers.setTimeout(() => {
+      this.#accessRetryTimer = null;
+      this.#runAccessRetry();
+    }, delay);
+  }
+
+  #runAccessRetry(): void {
+    if (!awaitsAccessRecovery(hostedHubStore.getState())) return;
+    const runtime = getHostedRuntimeConfiguration();
+    if (!runtime.isForeground()) {
+      // A background surface retries on its next foreground, not on a timer.
+      let release: (() => void) | null = null;
+      const onForeground = () => {
+        if (this.#accessRetryForeground !== release) return;
+        this.#cancelAccessRetry();
+        this.#runAccessRetry();
+      };
+      release = runtime.subscribeForeground(onForeground);
+      this.#accessRetryForeground = release;
+      return;
+    }
+    void this.recoverAfterConnectivity();
+  }
+
+  #cancelAccessRetry(): void {
+    if (this.#accessRetryTimer)
+      getHostedRuntimeConfiguration().timers.clearTimeout(this.#accessRetryTimer);
+    this.#accessRetryTimer = null;
+    const release = this.#accessRetryForeground;
+    this.#accessRetryForeground = null;
+    release?.();
+  }
+
+  /**
+   * Drop any pending retry and start the backoff over. Called once the Hub has
+   * answered with a session, and when the account it belonged to goes away.
+   */
+  #resetAccessRetry(): void {
+    this.#cancelAccessRetry();
+    this.#accessRetryPolicy.reset();
   }
 
   #scheduleDirectory(delay: number): void {

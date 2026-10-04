@@ -39,6 +39,7 @@ import {
   hostedHubController,
   hostedHubStore,
   useHostedAccountStore,
+  useHostedHubStore,
 } from "../../hostedHub/state";
 import { cn } from "../../lib/cn";
 import { useThemeColor } from "../../lib/useThemeColor";
@@ -60,6 +61,7 @@ import {
   type NativeIdentityCompletionJournal,
 } from "./completionJournal";
 import { cancelVerifiedEmailAttempt } from "./nativeIdentityCancellation";
+import { deriveSavedHubSessionView } from "./savedHubSessionModel";
 import {
   mailboxCodePrompt,
   PRIVATE_MAILBOX_PRESENTATION,
@@ -334,6 +336,26 @@ export function NativeIdentityScreen() {
   );
   const browserSignInAction = deriveHostedBrowserSignInAction();
   const externalProviderActions = deriveHostedProviderSignInActions(externalIdentityConfiguration);
+  const hostedAccountStatus = useHostedHubStore((state) => state.accountStatus);
+  const hostedErrorReason = useHostedHubStore((state) => state.errorReason ?? null);
+  const [signInRequested, setSignInRequested] = useState(false);
+  const [retryingSavedSession, setRetryingSavedSession] = useState(false);
+  // A launch that could not reach the Hub keeps the stored session; the shared
+  // runtime retries it on its own and on foreground/online. Show that instead
+  // of a sign-in form the user does not need. Only the token's presence is
+  // read, and only for presentation.
+  const savedSession = deriveSavedHubSessionView({
+    accountStatus: hostedAccountStatus,
+    errorReason: hostedErrorReason,
+    savedSession: (mobileSessionCredentials.readBearerToken?.() ?? null) !== null,
+    entryScreen: screen.name === "entry",
+    signInRequested,
+  });
+  const retrySavedSession = () => {
+    if (retryingSavedSession) return;
+    setRetryingSavedSession(true);
+    void hostedHubController.bootstrap().finally(() => setRetryingSavedSession(false));
+  };
 
   const origin = profile?.origin ?? buildConfig?.hubOrigin ?? null;
   const nativePolicy = capability?.nativeIdentity;
@@ -778,27 +800,29 @@ export function NativeIdentityScreen() {
   };
 
   const title =
-    screen.name === "entry"
-      ? "Log in or sign up"
-      : screen.name === "reset-request"
-        ? "Reset your password"
-        : screen.name === "mailbox" || screen.name === "reset-mailbox"
-          ? "Check your email"
-          : screen.name === "username"
-            ? "Choose a username"
-            : screen.name === "credential"
-              ? "Secure your account"
-              : screen.name === "factor"
-                ? screen.factor === "totp"
-                  ? "Enter your authenticator code"
-                  : "Enter your email code"
-                : screen.name === "recovery"
-                  ? "Use a recovery code"
-                  : screen.name === "reset-password"
-                    ? "Set a new password"
-                    : screen.name === "recovery-codes"
-                      ? "Save your recovery codes"
-                      : "Enter your password";
+    savedSession.kind === "reconnecting"
+      ? savedSession.title
+      : screen.name === "entry"
+        ? "Log in or sign up"
+        : screen.name === "reset-request"
+          ? "Reset your password"
+          : screen.name === "mailbox" || screen.name === "reset-mailbox"
+            ? "Check your email"
+            : screen.name === "username"
+              ? "Choose a username"
+              : screen.name === "credential"
+                ? "Secure your account"
+                : screen.name === "factor"
+                  ? screen.factor === "totp"
+                    ? "Enter your authenticator code"
+                    : "Enter your email code"
+                  : screen.name === "recovery"
+                    ? "Use a recovery code"
+                    : screen.name === "reset-password"
+                      ? "Set a new password"
+                      : screen.name === "recovery-codes"
+                        ? "Save your recovery codes"
+                        : "Enter your password";
 
   return (
     <KeyboardAvoidingView
@@ -821,16 +845,23 @@ export function NativeIdentityScreen() {
             {title}
           </Text>
           <Text className="mx-auto mt-2 max-w-[330px] text-center text-sm leading-relaxed text-foreground-muted">
-            {screen.name === "recovery-codes"
-              ? "Store these somewhere safe. Each code works once."
-              : screen.name === "reset-request"
-                ? "Verify the account before choosing a new password."
-                : screen.name === "mailbox" || screen.name === "reset-mailbox"
-                  ? mailboxCodePrompt(screen.presentation)
-                  : "Native account access on Ryco Hub"}
+            {savedSession.kind === "reconnecting"
+              ? savedSession.detail
+              : screen.name === "recovery-codes"
+                ? "Store these somewhere safe. Each code works once."
+                : screen.name === "reset-request"
+                  ? "Verify the account before choosing a new password."
+                  : screen.name === "mailbox" || screen.name === "reset-mailbox"
+                    ? mailboxCodePrompt(screen.presentation)
+                    : "Native account access on Ryco Hub"}
           </Text>
+          {savedSession.kind === "reconnecting" ? (
+            <Text className="mx-auto mt-3 max-w-[330px] text-center text-sm leading-relaxed text-foreground-muted">
+              {savedSession.note}
+            </Text>
+          ) : null}
 
-          {error ? (
+          {error && savedSession.kind !== "reconnecting" ? (
             <View className="mt-5">
               <ErrorBanner message={error} />
             </View>
@@ -838,7 +869,26 @@ export function NativeIdentityScreen() {
           {notice ? <Text className="mt-4 text-center text-sm text-success">{notice}</Text> : null}
 
           <View className="mt-7 gap-3">
-            {screen.name === "entry" ? (
+            {savedSession.kind === "reconnecting" ? (
+              <>
+                <Action
+                  label="Try again"
+                  disabled={retryingSavedSession}
+                  onPress={retrySavedSession}
+                />
+                <Action
+                  label="Sign in another way"
+                  quiet
+                  onPress={() => setSignInRequested(true)}
+                />
+                <View className="mt-0.5 items-center">
+                  <EntryOption
+                    label="Add a machine"
+                    onPress={() => navigation.navigate("ConnectionsNew" as never)}
+                  />
+                </View>
+              </>
+            ) : screen.name === "entry" ? (
               <>
                 <AppTextInput
                   accessibilityLabel="Email or username"
@@ -1296,7 +1346,9 @@ export function NativeIdentityScreen() {
             ) : null}
           </View>
 
-          {busy ? <ActivityIndicator className="mt-5" /> : null}
+          {busy || savedSession.kind === "reconnecting" ? (
+            <ActivityIndicator className="mt-5" />
+          ) : null}
         </View>
       </ScrollView>
 

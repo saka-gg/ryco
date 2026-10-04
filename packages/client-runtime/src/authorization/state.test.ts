@@ -50,6 +50,7 @@ import {
   HOSTED_PASSKEY_UNCONFIRMED_MESSAGE,
   HOSTED_RECOVERY_CODES_UNDISPLAYED_MESSAGE,
   HOSTED_TOTP_ENROLLMENT_UNDISPLAYED_MESSAGE,
+  hostedAccountRecoversOnConnectivity,
   hostedAccountStore,
   hostedHubController,
   hostedHubStore,
@@ -244,6 +245,240 @@ describe("hosted account state", () => {
       accountStatus: "signed-out",
       bootstrapAvailable: false,
     });
+  });
+
+  it.each([
+    ["an expired session", new HostedHubApiError("session_invalid", 401)],
+    [
+      "an invalidated native token",
+      new HostedHubApiError(
+        "session_invalid",
+        401,
+        undefined,
+        undefined,
+        undefined,
+        "token-invalidated",
+      ),
+    ],
+  ])("drops session material when bootstrap reports %s", async (_label, failure) => {
+    vi.spyOn(hostedHubApi, "restoreSession").mockRejectedValue(failure);
+    vi.spyOn(hostedHubApi, "getBootstrapAvailability").mockResolvedValue(false);
+
+    await hostedHubController.bootstrap();
+
+    expect(hostedHubApi.clearSessionMaterial).toHaveBeenCalledOnce();
+    expect(hostedHubStore.getState().accountStatus).toBe("signed-out");
+  });
+
+  it.each([
+    [
+      "transport loss",
+      new HostedHubApiError(
+        "unavailable",
+        0,
+        undefined,
+        undefined,
+        undefined,
+        "transport-unavailable",
+      ),
+    ],
+    [
+      "the request deadline",
+      new HostedHubApiError("timeout", 0, undefined, undefined, undefined, "request-timeout"),
+    ],
+    [
+      "a locked device that cannot sign a proof",
+      new HostedHubApiError(
+        "native_session_unavailable",
+        0,
+        undefined,
+        undefined,
+        undefined,
+        "proof-signing-failed",
+      ),
+    ],
+    ["a proxy error page", new HostedHubApiError("invalid_response", 502)],
+    ["a captive portal page", new HostedHubApiError("invalid_response", 200)],
+    ["Hub rate limiting", new HostedHubApiError("rate_limited", 429, 5_000)],
+    ["a failing Hub", new HostedHubApiError("unavailable", 503)],
+  ])("keeps session material when bootstrap fails with %s", async (_label, failure) => {
+    vi.useFakeTimers();
+    vi.spyOn(hostedHubApi, "restoreSession").mockRejectedValue(failure);
+
+    await hostedHubController.bootstrap();
+
+    // The stored native token is the only copy of a DPoP-bound session the Hub
+    // never rejected; discarding it here forced a full sign-in after every
+    // offline launch.
+    expect(hostedHubApi.clearSessionMaterial).not.toHaveBeenCalled();
+    expect(hostedHubApi.getBootstrapAvailability).not.toHaveBeenCalled();
+    expect(hostedHubStore.getState()).toMatchObject({
+      accountStatus: "unavailable",
+      account: null,
+      session: null,
+      effectiveRole: null,
+    });
+  });
+
+  it("re-runs a failed bootstrap on its own once the Hub answers again", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const restoreSession = vi
+      .spyOn(hostedHubApi, "restoreSession")
+      .mockRejectedValueOnce(new HostedHubApiError("unavailable", 0))
+      .mockRejectedValueOnce(new HostedHubApiError("timeout", 0))
+      .mockResolvedValue(sessionResponse);
+    vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([]);
+
+    await hostedHubController.bootstrap();
+    expect(hostedHubStore.getState().accountStatus).toBe("unavailable");
+
+    await vi.advanceTimersByTimeAsync(999);
+    expect(restoreSession).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(restoreSession).toHaveBeenCalledTimes(2);
+    expect(hostedHubStore.getState().accountStatus).toBe("unavailable");
+
+    // Bounded exponential backoff: the second retry waits twice as long.
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(restoreSession).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(restoreSession).toHaveBeenCalledTimes(3);
+    await vi.waitFor(() =>
+      expect(hostedHubStore.getState()).toMatchObject({
+        accountStatus: "authenticated",
+        directoryStatus: "ready",
+      }),
+    );
+    expect(hostedHubApi.clearSessionMaterial).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(restoreSession).toHaveBeenCalledTimes(3);
+  });
+
+  it("waits out a Hub retry-after before re-running bootstrap", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const restoreSession = vi
+      .spyOn(hostedHubApi, "restoreSession")
+      .mockRejectedValueOnce(new HostedHubApiError("rate_limited", 429, 30_000))
+      .mockResolvedValue(sessionResponse);
+    vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([]);
+
+    await hostedHubController.bootstrap();
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(restoreSession).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(restoreSession).toHaveBeenCalledTimes(2);
+    await vi.waitFor(() => expect(hostedHubStore.getState().accountStatus).toBe("authenticated"));
+  });
+
+  it("leaves a definite Hub refusal to the next lifecycle signal instead of a timer", async () => {
+    vi.useFakeTimers();
+    const restoreSession = vi
+      .spyOn(hostedHubApi, "restoreSession")
+      .mockRejectedValue(new HostedHubApiError("forbidden", 403));
+
+    await hostedHubController.bootstrap();
+    await vi.advanceTimersByTimeAsync(300_000);
+
+    expect(restoreSession).toHaveBeenCalledOnce();
+    expect(hostedHubApi.clearSessionMaterial).not.toHaveBeenCalled();
+    expect(hostedHubStore.getState().accountStatus).toBe("unavailable");
+  });
+
+  it("holds a bootstrap retry that comes due in the background until the next foreground", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const listeners = new Set<() => void>();
+    let visibilityState: "hidden" | "visible" = "visible";
+    Object.defineProperty(globalThis, "document", {
+      configurable: true,
+      value: {
+        get visibilityState() {
+          return visibilityState;
+        },
+        addEventListener: (_type: string, listener: () => void) => listeners.add(listener),
+        removeEventListener: (_type: string, listener: () => void) => listeners.delete(listener),
+      },
+    });
+    const restoreSession = vi
+      .spyOn(hostedHubApi, "restoreSession")
+      .mockRejectedValueOnce(new HostedHubApiError("unavailable", 0))
+      .mockResolvedValue(sessionResponse);
+    vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([]);
+
+    await hostedHubController.bootstrap();
+    visibilityState = "hidden";
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(restoreSession).toHaveBeenCalledOnce();
+    expect(listeners).toHaveLength(1);
+
+    visibilityState = "visible";
+    for (const listener of Array.from(listeners)) listener();
+    await vi.waitFor(() => expect(hostedHubStore.getState().accountStatus).toBe("authenticated"));
+    expect(restoreSession).toHaveBeenCalledTimes(2);
+    expect(listeners).toHaveLength(0);
+  });
+
+  it("never lets a pending bootstrap retry interrupt a sign-in the user started", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(hostedHubApi, "restoreSession").mockRejectedValue(
+      new HostedHubApiError("unavailable", 0),
+    );
+    let signInSignal: AbortSignal | undefined;
+    vi.spyOn(hostedHubApi, "signIn").mockImplementation((signal) => {
+      signInSignal = signal;
+      return new Promise(() => undefined);
+    });
+
+    await hostedHubController.bootstrap();
+    void hostedHubController.signIn();
+    await vi.advanceTimersByTimeAsync(300_000);
+
+    expect(hostedHubApi.restoreSession).toHaveBeenCalledOnce();
+    expect(signInSignal?.aborted).toBe(false);
+    expect(hostedHubStore.getState().accountStatus).toBe("authenticating");
+  });
+
+  it("routes a connectivity signal to the recovery the account status calls for", async () => {
+    const bootstrap = vi.spyOn(hostedHubController, "bootstrap").mockResolvedValue();
+    const resumeBrowser = vi.spyOn(hostedHubController, "resumeBrowser").mockResolvedValue();
+
+    for (const accountStatus of [
+      "signed-out",
+      "authenticating",
+      "signing-out",
+      "session-expired",
+    ] as const) {
+      hostedHubStore.setState({ accountStatus });
+      await hostedHubController.recoverAfterConnectivity();
+    }
+    expect(bootstrap).not.toHaveBeenCalled();
+    expect(resumeBrowser).not.toHaveBeenCalled();
+
+    hostedHubStore.setState({ accountStatus: "unavailable" });
+    await hostedHubController.recoverAfterConnectivity();
+    expect(bootstrap).toHaveBeenCalledOnce();
+
+    hostedHubStore.setState({ accountStatus: "authenticated" });
+    await hostedHubController.recoverAfterConnectivity();
+    expect(resumeBrowser).toHaveBeenCalledOnce();
+  });
+
+  it("subscribes lifecycle bindings for exactly the recoverable account statuses", () => {
+    expect(
+      (
+        [
+          "signed-out",
+          "authenticating",
+          "authenticated",
+          "signing-out",
+          "session-expired",
+          "unavailable",
+        ] as const
+      ).filter(hostedAccountRecoversOnConnectivity),
+    ).toEqual(["authenticated", "unavailable"]);
   });
 
   it("restores a session, signs in, signs out, and expires without exposing credentials", async () => {

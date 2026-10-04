@@ -1,3 +1,4 @@
+import { hostedAccountRecoversOnConnectivity } from "@ryco/client-runtime/authorization";
 import { useEffect } from "react";
 
 import { mobileAppLifecycle } from "../platform/appLifecycle";
@@ -10,13 +11,18 @@ import { hostedHubController, useHostedHubStore } from "./state";
  *
  * iOS tears down sockets on background, so the runtime must be told to suspend
  * rather than discovering a dead socket later. Mount this ONCE, above the
- * hosted surfaces.
+ * hosted surfaces — including the locked identity screen: an account whose
+ * launch-time access check could not reach the Hub keeps its stored session,
+ * and foreground/online is what re-runs that check. What a recovery runs is
+ * the controller's decision, not this binding's.
  */
 export function useHostedAppLifecycle(): void {
-  const authenticated = useHostedHubStore((state) => state.accountStatus === "authenticated");
+  const recoverable = useHostedHubStore((state) =>
+    hostedAccountRecoversOnConnectivity(state.accountStatus),
+  );
 
   useEffect(() => {
-    if (!authenticated) return;
+    if (!recoverable) return;
     return mobileAppLifecycle.subscribe((event) => {
       switch (event) {
         case "background":
@@ -31,7 +37,7 @@ export function useHostedAppLifecycle(): void {
         case "foreground":
         case "online":
           void hostedHubController
-            .resumeBrowser()
+            .recoverAfterConnectivity()
             .then(() => getMobileHostedConnectionCoordinator().reconnectRetainedAfterForeground());
           return;
         default:
@@ -39,5 +45,5 @@ export function useHostedAppLifecycle(): void {
           return;
       }
     });
-  }, [authenticated]);
+  }, [recoverable]);
 }
