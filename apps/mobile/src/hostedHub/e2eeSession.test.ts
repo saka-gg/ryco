@@ -77,6 +77,7 @@ function begin(
       nodeLabel: "Studio",
       environmentId: "env_1",
       localNodeHandle: null,
+      localRecordState: null,
       clientIdentityPublicKey: CLIENT_PUBLIC_KEY,
     },
     classification: overrides.classification ?? UNEXPECTED_FRESH,
@@ -102,6 +103,7 @@ describe("the channel's claim", () => {
         nodeLabel: "A",
         environmentId: "env_a",
         localNodeHandle: null,
+        localRecordState: null,
         clientIdentityPublicKey: CLIENT_PUBLIC_KEY,
       },
       classification: { class: "latched" },
@@ -118,6 +120,7 @@ describe("the channel's claim", () => {
         nodeLabel: "B",
         environmentId: "env_b",
         localNodeHandle: null,
+        localRecordState: null,
         clientIdentityPublicKey: CLIENT_PUBLIC_KEY,
       },
       classification: UNEXPECTED_FRESH,
@@ -128,7 +131,7 @@ describe("the channel's claim", () => {
     });
     lockMobileE2eeChannelMode("e2ee", "env_a");
     lockMobileE2eeChannelMode("e2ee", "env_b");
-    attachMobileE2eeLocalNodeHandle("handle-b", "env_b");
+    attachMobileE2eeLocalNodeHandle("handle-b", "unverified", "env_b");
 
     expect(getMobileE2eeSessionState("env_a")).toMatchObject({
       channel: "verified",
@@ -136,7 +139,7 @@ describe("the channel's claim", () => {
     });
     expect(getMobileE2eeSessionState("env_b")).toMatchObject({
       channel: "unverified",
-      selection: { nodeId: "node_b", localNodeHandle: "handle-b" },
+      selection: { nodeId: "node_b", localNodeHandle: "handle-b", localRecordState: "unverified" },
     });
   });
 
@@ -149,6 +152,7 @@ describe("the channel's claim", () => {
         nodeLabel: "Studio",
         environmentId: "env_1",
         localNodeHandle: null,
+        localRecordState: null,
       },
       classification: { class: "unexpected", clause: "ii" },
       legacyPermitted: true,
@@ -225,7 +229,7 @@ describe("the channel's claim", () => {
           anchor: "pin-unchanged",
         });
         sample();
-        attachMobileE2eeLocalNodeHandle("node-handle-1");
+        attachMobileE2eeLocalNodeHandle("node-handle-1", "unverified");
         sample();
         recordMobileE2eeInitiatorDiagnostic({ phase: "pre_key", row: "P14" });
         sample();

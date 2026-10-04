@@ -16,6 +16,7 @@ import {
   E2EE_COMPARISON_AFFIRMATION,
   E2EE_PRESENTED_COLUMN_TITLE,
   E2EE_PREVIOUSLY_VERIFIED_COLUMN_TITLE,
+  isE2eeApprovalRequested,
   requestE2eeApproval,
   shouldShowE2eeApprovalScanner,
   type E2eeApprovalRequestTone,
@@ -50,9 +51,9 @@ export function E2eeNodeVerificationRouteScreen(props: Props) {
   const [scanningApproval, setScanningApproval] = useState(false);
   const [approvalBusy, setApprovalBusy] = useState(false);
   const [recoveryMode, setRecoveryMode] = useState(false);
-  const [approvalRequested, setApprovalRequested] = useState(
-    session.selection?.localNodeHandle !== null && session.selection?.localNodeHandle !== undefined,
-  );
+  // Saved but not yet reconnected: offer Request approval again as the retry.
+  const [requestReconnectFailed, setRequestReconnectFailed] = useState(false);
+  const approvalRequested = isE2eeApprovalRequested(session) && !requestReconnectFailed;
   const [approvalError, setApprovalError] = useState<string | null>(null);
   const scanHandledRef = useRef(false);
   const placeholderColor = useThemeColor("--color-foreground-muted");
@@ -68,10 +69,6 @@ export function E2eeNodeVerificationRouteScreen(props: Props) {
     void coordinator.acquireNode(targetNodeId);
     return release;
   }, [targetEnvironmentId, targetNodeId]);
-
-  useEffect(() => {
-    if (session.selection?.localNodeHandle) setApprovalRequested(true);
-  }, [session.selection?.localNodeHandle]);
 
   const view = deriveE2eeVerificationView({
     session,
@@ -150,9 +147,9 @@ export function E2eeNodeVerificationRouteScreen(props: Props) {
         target.environmentId,
       );
       if (!reconnected) throw new Error("Machine reconnect refused");
-      setApprovalRequested(true);
+      setRequestReconnectFailed(false);
     } catch {
-      setApprovalRequested(false);
+      setRequestReconnectFailed(true);
       setApprovalError(
         "The approval request was saved, but Ryco could not reconnect. Try Request approval again.",
       );

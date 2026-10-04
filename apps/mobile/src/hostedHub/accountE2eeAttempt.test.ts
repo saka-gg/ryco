@@ -55,7 +55,9 @@ vi.mock("./e2eeAttempt", () => ({
   prepareMobileRelayE2eeAttempt: hoisted.localPrepare,
   resolveMobileRelayE2eeProvider: () => hoisted.localProvider,
 }));
-vi.mock("./e2eeSession", () => ({
+vi.mock("./e2eeSession", async (importOriginal) => ({
+  mobileE2eeLocalRecordContext: (await importOriginal<typeof import("./e2eeSession")>())
+    .mobileE2eeLocalRecordContext,
   beginMobileE2eeChannel: hoisted.begin,
   beginMobileE2eeChannelAttempt: vi.fn(),
   lockMobileE2eeChannelMode: vi.fn(),
@@ -208,6 +210,31 @@ describe("mobile account E2EE relay attempt", () => {
     );
     expect(hoisted.resolveTrust).not.toHaveBeenCalled();
     expect(hoisted.begin).not.toHaveBeenCalled();
+  });
+
+  it("publishes a legacy consent's record as no-pin, never as a pending request", async () => {
+    // §12.1.1's no-pin record carries a handle but never sent a pairing hello,
+    // and it takes the account grant. The selection says which record it is so
+    // the verification screen does not claim an approval request it never made.
+    hoisted.record = {
+      state: "none",
+      index: { localNodeHandle: "local-legacy" },
+    };
+    const prepared = await prepareMobileRelaySocketContext();
+    expect(prepared.kind).toBe("account");
+    await issueMobileRelayAttempt({
+      nodeId: `node_${"n".repeat(22)}`,
+      preparedSocketContext: prepared,
+    });
+
+    expect(hoisted.begin).toHaveBeenCalledWith(
+      expect.objectContaining({
+        selection: expect.objectContaining({
+          localNodeHandle: "local-legacy",
+          localRecordState: "unpinned",
+        }),
+      }),
+    );
   });
 
   it("opens no data attempt before enrollment is ready", async () => {

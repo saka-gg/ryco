@@ -1056,6 +1056,62 @@ describe("§12.1.1 owner legacy consent", () => {
   });
 });
 
+describe("§13.2 step 2 for a selection that already has a record", () => {
+  it("moves a legacy consent's no-pin record into pairing, keeping what the owner recorded", async () => {
+    const store = context.create();
+    await store.hydrate();
+    const index = await store.recordUnresolvedLegacyConsent(
+      mintE2eeOwnerUnresolvedLegacyConsentDecision({
+        hubOrigin: HUB,
+        accountId: ACCOUNT,
+        nodeId: "node-9",
+        environmentId: "env-9",
+        decidedAt: 12,
+      }),
+    );
+
+    await store.beginPairingForRecord(index);
+
+    // The same handle, so the session's index stays valid, and §13.1's
+    // pairing shape: no fingerprint, no continuity id, no latch, no approval.
+    expect(store.resolve(handleSelection(index))).toEqual({
+      index,
+      state: "unverified",
+      nodeIdHints: ["node-9"],
+      legacyConsent: { kind: "recorded", recordedAt: 12 },
+      environmentId: "env-9",
+    });
+    expect(store.marker(HUB)).toEqual({ kind: "unset" });
+    const restarted = context.create();
+    await restarted.hydrate();
+    expect(restarted.resolve(handleSelection(index))?.state).toBe("unverified");
+  });
+
+  it("leaves a record already in pairing untouched", async () => {
+    const store = context.create();
+    await store.hydrate();
+    const index = await store.beginPairing({ hubOrigin: HUB, accountId: ACCOUNT });
+    const revision = store.revision();
+    context.log.length = 0;
+
+    await store.beginPairingForRecord(index);
+
+    expect(context.log).toEqual([]);
+    expect(store.revision()).toBe(revision);
+  });
+
+  it("never moves a verified pin back into pairing", async () => {
+    const store = context.create();
+    await store.hydrate();
+    const index = await pairAndVerify(store);
+
+    await expect(store.beginPairingForRecord(index)).rejects.toMatchObject({
+      code: "trust_store_selection_verified",
+    });
+    expect(verifiedPin(store, index).latch.kind).toBe("set");
+  });
+});
+
 describe("§12.1.1 strict legacy policy", () => {
   it("is recorded and evaluated under the Hub origin alone", async () => {
     const store = context.create();

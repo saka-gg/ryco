@@ -18,6 +18,7 @@ import {
   beginMobileE2eeChannel,
   beginMobileE2eeChannelAttempt,
   lockMobileE2eeChannelMode,
+  mobileE2eeLocalRecordContext,
   observeMobileAccountE2eeStatement,
   recordMobileE2eeInitiatorDiagnostic,
 } from "./e2eeSession";
@@ -296,7 +297,7 @@ export async function issueMobileRelayAttempt(input: {
   beginMobileE2eeChannel({
     selection: {
       ...context.selection,
-      localNodeHandle: localRecord?.index.localNodeHandle ?? null,
+      ...mobileE2eeLocalRecordContext(localRecord),
       clientIdentityPublicKey: context.enrollment.identity.publicKey,
     },
     classification,

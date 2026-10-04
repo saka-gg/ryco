@@ -199,6 +199,10 @@ export interface E2eeLoadedTrustState {
 /** Which of §13.1's three record shapes a selection resolved to. */
 export type E2eeResolvedRecordState = "verified" | "unverified" | "unpinned";
 
+export function e2eeResolvedRecordState(record: E2eeTrustRecord): E2eeResolvedRecordState {
+  return record.state === "none" ? "unpinned" : record.state;
+}
+
 /**
  * §12.1.1's three unresolved cases, in the order the specification evaluates
  * them: the pair's own verified pins first, then the origin-wide marker.
@@ -316,7 +320,7 @@ function snapshotForRecord(
     return seal({ kind: "latched" });
   return seal({
     kind: "pinned-unlatched",
-    record: record.state === "none" ? "unpinned" : record.state,
+    record: e2eeResolvedRecordState(record),
     consent,
     scope,
   });
