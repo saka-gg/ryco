@@ -558,6 +558,41 @@ describe("RestartContinuation", () => {
     expect(await system.rowOf(onB.threadId, onB.turnId)).toMatchObject({ status: "dispatched" });
   });
 
+  it("bounds capture IO and settles the overflow as capacity", async () => {
+    const system = await createSystem();
+    const seeds = [];
+    for (let index = 0; index < 65; index += 1) {
+      // The oldest session is the one left over.
+      seeds.push(await system.seedThread({ id: `bulk-${index}`, minutesAgo: 1 + index / 100 }));
+    }
+    const captured = await system.capture();
+    expect(captured.filter((row) => row.status === "pending")).toHaveLength(64);
+    const oldest = seeds.at(-1)!;
+    expect(captured.find((row) => row.threadId === oldest.threadId)).toMatchObject({
+      status: "skipped",
+      reason: "capacity",
+    });
+  });
+
+  it("does not continue a thread whose own turn start recovery just cancelled", async () => {
+    const system = await createSystem();
+    const seeded = await system.seedThread({ id: "cancelled" });
+    await system.startup([seeded.threadId]);
+    await system.run(
+      system.restart.dispatchPending({
+        cancelledTurnStarts: [
+          { threadId: seeded.threadId, messageId: MessageId.make("cancelled-follow-up") },
+        ],
+      }),
+    );
+    expect(await system.rowOf(seeded.threadId, seeded.turnId)).toMatchObject({
+      status: "skipped",
+      reason: "turn-start-cancelled",
+    });
+    expect(system.turnStarts()).toEqual([]);
+    expect(await system.activities(seeded.threadId, RESTART_CONTINUATION_SKIPPED_KIND)).toEqual([]);
+  });
+
   it("drains more pending rows than one page", async () => {
     const system = await createSystem();
     const template = await system.seedThread({ id: "template" });
