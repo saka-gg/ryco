@@ -21,7 +21,13 @@ const presentations = new Map<string, PreviewPresentation>();
 const presentationId = (threadId: string, turnId: string) => JSON.stringify([threadId, turnId]);
 
 /** View-only local pixels. This component has no input forwarding or model attachment path. */
-export function ComputerBetaPreview({ threadId }: { threadId: string }) {
+export function ComputerBetaPreview({
+  threadId,
+  inline = false,
+}: {
+  threadId: string;
+  inline?: boolean;
+}) {
   const api = window.desktopBridge?.computerBeta;
   const [state, setState] = useState<ComputerBetaState | null>(null);
   const [task, setTask] = useState<{ turnId: string; targetId?: string; label: string } | null>(
@@ -34,6 +40,8 @@ export function ComputerBetaPreview({ threadId }: { threadId: string }) {
   const [frame, setFrame] = useState<string | null>(null);
   const [status, setStatus] = useState("Waiting for an exact window or browser tab…");
   const [error, setError] = useState<string | null>(null);
+  const visibilityTarget = useRef<HTMLElement | null>(null);
+  const [inView, setInView] = useState(!inline);
   const retired = useRef(new Set<string>());
   const current = useRef<{ turnId: string; targetId?: string } | null>(null);
   const url = useRef<string | null>(null);
@@ -162,10 +170,26 @@ export function ComputerBetaPreview({ threadId }: { threadId: string }) {
   }, [presentationKey, hidden, large, docked, position]);
   const previewActive = task !== null;
   useEffect(() => {
+    if (!inline) return;
+    const element = visibilityTarget.current;
+    if (!element || !previewActive || hidden) {
+      setInView(false);
+      return;
+    }
+    const observer = new IntersectionObserver(([entry]) =>
+      setInView(entry?.isIntersecting ?? false),
+    );
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [inline, previewActive, hidden]);
+  useEffect(() => {
     if (!api) return;
     const update = () =>
       void api
-        .setPreview(threadId, previewActive && !hidden && document.visibilityState === "visible")
+        .setPreview(
+          threadId,
+          previewActive && !hidden && (!inline || inView) && document.visibilityState === "visible",
+        )
         .catch(() => undefined);
     update();
     document.addEventListener("visibilitychange", update);
@@ -173,12 +197,12 @@ export function ComputerBetaPreview({ threadId }: { threadId: string }) {
       document.removeEventListener("visibilitychange", update);
       void api.setPreview(threadId, false).catch(() => undefined);
     };
-  }, [api, threadId, previewActive, hidden]);
+  }, [api, threadId, previewActive, hidden, inline, inView]);
   if (!api || !task || state?.supported === false) return null;
   if (hidden)
     return (
       <Button
-        className="absolute right-4 top-16 z-20"
+        className={inline ? "mx-3 my-3" : "absolute right-4 top-16 z-20"}
         variant="outline"
         size="sm"
         onClick={() => setHidden(false)}
@@ -189,10 +213,11 @@ export function ComputerBetaPreview({ threadId }: { threadId: string }) {
     );
   return (
     <section
+      ref={visibilityTarget}
       aria-label="Computer preview"
-      className={`${docked ? "relative mx-4 mt-3" : "absolute z-30"} overflow-hidden rounded-xl border bg-background shadow-xl`}
+      className={`${inline ? "relative mx-3 my-3" : docked ? "relative mx-4 mt-3" : "absolute z-30"} overflow-hidden rounded-xl border bg-background ${inline ? "" : "shadow-xl"}`}
       style={
-        docked
+        inline || docked
           ? {}
           : {
               left: position.x,
@@ -203,60 +228,64 @@ export function ComputerBetaPreview({ threadId }: { threadId: string }) {
       }
     >
       <header className="flex items-center gap-1 border-b px-2 py-1.5">
-        <button
-          aria-label="Move preview"
-          className="cursor-grab touch-none p-1"
-          onPointerDown={(event) => {
-            if (docked) return;
-            event.currentTarget.setPointerCapture(event.pointerId);
-            dragging.current = {
-              x: event.clientX,
-              y: event.clientY,
-              left: position.x,
-              top: position.y,
-            };
-          }}
-          onPointerMove={(event) => {
-            const drag = dragging.current;
-            if (!drag) return;
-            const parent = event.currentTarget.closest("section")?.parentElement;
-            setPosition({
-              x: Math.max(
-                0,
-                Math.min(
-                  (parent?.clientWidth ?? window.innerWidth) -
-                    (event.currentTarget.closest("section")?.clientWidth ?? 384),
-                  drag.left + event.clientX - drag.x,
+        {!inline && (
+          <button
+            aria-label="Move preview"
+            className="cursor-grab touch-none p-1"
+            onPointerDown={(event) => {
+              if (docked) return;
+              event.currentTarget.setPointerCapture(event.pointerId);
+              dragging.current = {
+                x: event.clientX,
+                y: event.clientY,
+                left: position.x,
+                top: position.y,
+              };
+            }}
+            onPointerMove={(event) => {
+              const drag = dragging.current;
+              if (!drag) return;
+              const parent = event.currentTarget.closest("section")?.parentElement;
+              setPosition({
+                x: Math.max(
+                  0,
+                  Math.min(
+                    (parent?.clientWidth ?? window.innerWidth) -
+                      (event.currentTarget.closest("section")?.clientWidth ?? 384),
+                    drag.left + event.clientX - drag.x,
+                  ),
                 ),
-              ),
-              y: Math.max(
-                0,
-                Math.min(
-                  (parent?.clientHeight ?? window.innerHeight) -
-                    (event.currentTarget.closest("section")?.clientHeight ?? 300),
-                  drag.top + event.clientY - drag.y,
+                y: Math.max(
+                  0,
+                  Math.min(
+                    (parent?.clientHeight ?? window.innerHeight) -
+                      (event.currentTarget.closest("section")?.clientHeight ?? 300),
+                    drag.top + event.clientY - drag.y,
+                  ),
                 ),
-              ),
-            });
-          }}
-          onPointerUp={() => {
-            dragging.current = null;
-          }}
-          onPointerCancel={() => {
-            dragging.current = null;
-          }}
-        >
-          <MoveIcon className="size-3" />
-        </button>
+              });
+            }}
+            onPointerUp={() => {
+              dragging.current = null;
+            }}
+            onPointerCancel={() => {
+              dragging.current = null;
+            }}
+          >
+            <MoveIcon className="size-3" />
+          </button>
+        )}
         <span className="min-w-0 flex-1 truncate text-xs font-medium">{task.label}</span>
-        <Button
-          size="icon-sm"
-          variant="ghost"
-          aria-label={docked ? "Float preview" : "Dock preview"}
-          onClick={() => setDocked(!docked)}
-        >
-          <PanelBottomIcon className="size-3" />
-        </Button>
+        {!inline && (
+          <Button
+            size="icon-sm"
+            variant="ghost"
+            aria-label={docked ? "Float preview" : "Dock preview"}
+            onClick={() => setDocked(!docked)}
+          >
+            <PanelBottomIcon className="size-3" />
+          </Button>
+        )}
         <Button
           size="icon-sm"
           variant="ghost"
@@ -280,7 +309,7 @@ export function ComputerBetaPreview({ threadId }: { threadId: string }) {
             src={frame}
             alt="Live view of the agent's current target"
             draggable={false}
-            className="max-h-[55vh] w-full object-contain pointer-events-none"
+            className={`${inline && !large ? "max-h-44" : "max-h-[55vh]"} w-full object-contain pointer-events-none`}
           />
         ) : (
           <p className="p-6 text-center text-xs text-muted-foreground">{status}</p>

@@ -163,6 +163,7 @@ export function FloatingOverviewMotionFrame(props: {
 }
 
 export interface ChatOverviewPanelProps {
+  preview?: ReactNode;
   environmentId: EnvironmentId;
   gitCwd: string | null;
   activeWorktreeBranch: string | null;
@@ -791,6 +792,7 @@ export function ChatOverviewPanel(
 
   return (
     <PlanSidebar
+      preview={props.preview}
       activePlan={activePlan}
       activeProposedPlan={sidebarProposedPlan}
       changes={overviewChanges}

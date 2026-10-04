@@ -9,11 +9,14 @@ import type { ExpandedImagePreview } from "./ExpandedImagePreview";
 interface ExpandedImageDialogProps {
   preview: ExpandedImagePreview;
   onClose: () => void;
+  /** Fit the desktop chat column rather than the full window. */
+  contained?: boolean;
 }
 
 export const ExpandedImageDialog = memo(function ExpandedImageDialog({
   preview: initialPreview,
   onClose,
+  contained = false,
 }: ExpandedImageDialogProps) {
   const paneFocused = usePaneFocus();
   const [preview, setPreview] = useState(initialPreview);
@@ -65,7 +68,7 @@ export const ExpandedImageDialog = memo(function ExpandedImageDialog({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 px-4 py-6 [-webkit-app-region:no-drag]"
+      className={`${contained ? "absolute [container-type:size] overflow-hidden" : "fixed"} inset-0 z-50 flex items-center justify-center bg-black/75 ${contained && preview.images.length > 1 ? "px-12 sm:px-16" : "px-4"} py-6 [-webkit-app-region:no-drag]`}
       role="dialog"
       aria-modal="true"
       aria-label="Expanded image preview"
@@ -88,7 +91,9 @@ export const ExpandedImageDialog = memo(function ExpandedImageDialog({
           <ChevronLeftIcon className="size-5" />
         </Button>
       )}
-      <div className="relative isolate z-10 max-h-[92vh] max-w-[92vw]">
+      <div
+        className={`relative isolate z-10 ${contained ? "min-h-0 min-w-0 max-h-full max-w-full" : "max-h-[92vh] max-w-[92vw]"}`}
+      >
         <Button
           type="button"
           size="icon-xs"
@@ -99,8 +104,15 @@ export const ExpandedImageDialog = memo(function ExpandedImageDialog({
         >
           <XIcon />
         </Button>
-        <ExpandedImageContent image={item} />
-        <p className="mt-2 max-w-[92vw] truncate text-center text-xs text-muted-foreground/80">
+        <ExpandedImageContent
+          image={item}
+          {...(contained
+            ? { className: "mx-auto max-h-[calc(100cqh-1.5rem)] max-w-[100cqw]" }
+            : {})}
+        />
+        <p
+          className={`mt-2 ${contained ? "max-w-full" : "max-w-[92vw]"} truncate text-center text-xs text-muted-foreground/80`}
+        >
           {item.name}
           {preview.images.length > 1 ? ` (${preview.index + 1}/${preview.images.length})` : ""}
         </p>

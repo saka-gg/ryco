@@ -8,7 +8,7 @@ import {
   isVideoAttachmentMimeType,
 } from "./AttachmentVideo";
 import { AttachmentPreviewButton } from "./AttachmentDocumentPreview";
-import { formatAttachmentBytes } from "./attachmentPreview";
+import { attachmentPreviewKind, formatAttachmentBytes } from "./attachmentPreview";
 import { buildExpandedImagePreview, type ExpandedImagePreview } from "./ExpandedImagePreview";
 
 const USER_IMAGE_MAX_WIDTH_PX = 360;
@@ -175,11 +175,14 @@ export const MessageAttachments = memo(function MessageAttachments(
                   <AttachmentVideo attachment={attachment} />
                 ) : attachment.mimeType.toLowerCase().startsWith("audio/") ? (
                   <AttachmentAudio attachment={attachment} />
+                ) : attachmentPreviewKind(attachment) && attachment.previewUrl ? (
+                  <AttachmentPreviewButton
+                    attachment={attachment}
+                    initiallyOpen={loaded}
+                    variant="file"
+                  />
                 ) : (
-                  <div>
-                    <AttachmentPreviewButton attachment={attachment} initiallyOpen={loaded} />
-                    <AttachmentFileRow attachment={attachment} />
-                  </div>
+                  <AttachmentFileRow attachment={attachment} />
                 )
               ) : (
                 <div className="px-3 py-3 text-xs text-muted-foreground">

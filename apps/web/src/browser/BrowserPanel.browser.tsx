@@ -10,6 +10,7 @@ import type {
 } from "@ryco/contracts";
 import { BrowserPanel } from "./BrowserPanel";
 import { ProjectBrowserPreview } from "./ProjectBrowserPreview";
+import { BackgroundBrowserPreview } from "./BackgroundBrowserPreview";
 import { useBrowserUi } from "./browserState";
 const previous = window.desktopBridge;
 afterEach(() => {
@@ -55,6 +56,27 @@ function setup() {
   window.desktopBridge = { browser: api } as unknown as DesktopBridge;
   return api;
 }
+
+it("shows a background thumbnail without mounting the page and opens the workspace only on click", async () => {
+  const api = setup();
+  const src = `data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="640" height="400"><rect width="640" height="400" fill="teal"/></svg>')}`;
+  api.capture.mockResolvedValue(src);
+  await api.open({ url: "http://localhost:3000/", project: '[null,"/project"]' });
+  const onOpen = vi.fn();
+  const view = await render(
+    <BackgroundBrowserPreview environmentId={null} cwd="/project" onOpen={onOpen} />,
+  );
+  await expect.element(view.getByRole("img", { name: "Browser preview" })).toBeVisible();
+  expect(api.surface).not.toHaveBeenCalled();
+  expect(api.command).not.toHaveBeenCalled();
+  expect(onOpen).not.toHaveBeenCalled();
+  await view.getByRole("button", { name: "Open browser in workspace" }).click();
+  expect(onOpen).toHaveBeenCalledOnce();
+  const before = api.capture.mock.calls.length;
+  await view.unmount();
+  await new Promise((resolve) => setTimeout(resolve, 2100));
+  expect(api.capture).toHaveBeenCalledTimes(before);
+});
 it("discovers a local site and opens it in the same project browser", async () => {
   await page.viewport(1200, 900);
   const api = setup();

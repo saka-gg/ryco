@@ -122,7 +122,9 @@ export function InboxPullRequestBadges(props: {
               }
               className={cn(
                 "inline-flex shrink-0 items-center gap-0.5 rounded-sm text-[11px] font-medium tabular-nums",
-                variant.textClassName,
+                variant.tone === "violet"
+                  ? "text-violet-600 dark:text-violet-400"
+                  : variant.textClassName,
                 (url || props.onOpenInApp) && "cursor-pointer underline-offset-2 hover:underline",
               )}
               {...(url || props.onOpenInApp

@@ -1,20 +1,14 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { copyFileSync, readFileSync, readdirSync } from "node:fs";
 import {
-  chmodSync,
-  copyFileSync,
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  readdirSync,
-  renameSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
+  buildCachedNativeBinary,
+  fingerprint,
+  nativeBuildEnvironment,
+  swiftModuleCacheDirectory,
+  swiftToolchainIdentity,
+} from "./native-build-cache.mjs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -84,45 +78,6 @@ function run(command, arguments_, options = {}) {
   );
 }
 
-function buildFingerprint({ arch, release, sources, targets }) {
-  const hash = createHash("sha256");
-  hash.update("synara-appsnap-helper-build-v1\0");
-  hash.update(arch);
-  hash.update("\0");
-  hash.update(release ? "release" : "debug");
-  hash.update("\0");
-  hash.update(JSON.stringify(targets));
-  hash.update("\0");
-  hash.update(JSON.stringify(frameworkArguments));
-  hash.update("\0");
-  hash.update(readFileSync(scriptPath));
-  for (const source of sources) {
-    hash.update("\0");
-    hash.update(source);
-    hash.update("\0");
-    hash.update(readFileSync(source));
-  }
-  return hash.digest("hex");
-}
-
-function isUsableCachedBuild(outputPath, metadataPath, fingerprint) {
-  if (!existsSync(outputPath) || !existsSync(metadataPath)) {
-    return false;
-  }
-  try {
-    const metadata = JSON.parse(readFileSync(metadataPath, "utf8"));
-    if (metadata.fingerprint !== fingerprint) {
-      return false;
-    }
-    const verification = spawnSync("codesign", ["--verify", "--strict", outputPath], {
-      encoding: "utf8",
-    });
-    return verification.status === 0;
-  } catch {
-    return false;
-  }
-}
-
 export function buildAppSnapHelper({
   arch = process.arch,
   outputPath = defaultAppSnapHelperPath,
@@ -143,83 +98,69 @@ export function buildAppSnapHelper({
   }
 
   const resolvedOutputPath = resolve(outputPath);
-  const metadataPath = `${resolvedOutputPath}.build.json`;
-  const fingerprint = buildFingerprint({ arch, release, sources, targets });
-  if (isUsableCachedBuild(resolvedOutputPath, metadataPath, fingerprint)) {
-    if (!quiet) {
-      console.error(`[appsnap] Reusing ${arch} Swift helper at ${resolvedOutputPath}`);
-    }
-    return resolvedOutputPath;
-  }
-
-  const temporaryDirectory = mkdtempSync(join(tmpdir(), "synara-appsnap-helper-"));
-  const moduleCacheDirectory = join(temporaryDirectory, "module-cache");
+  const toolchain = swiftToolchainIdentity();
+  const key = fingerprint(
+    "appsnap-v2",
+    arch,
+    release,
+    targets,
+    frameworkArguments,
+    toolchain,
+    nativeBuildEnvironment(),
+    readFileSync(scriptPath),
+    ...sources.flatMap((source) => [source.slice(sourceDirectory.length), readFileSync(source)]),
+  );
+  const moduleCacheDirectory = swiftModuleCacheDirectory(toolchain);
   const buildEnvironment = {
     ...process.env,
     CLANG_MODULE_CACHE_PATH: moduleCacheDirectory,
     SWIFT_MODULECACHE_PATH: moduleCacheDirectory,
   };
+  return buildCachedNativeBinary({
+    name: "appsnap",
+    key,
+    output: resolvedOutputPath,
+    validate: (binary) =>
+      spawnSync("codesign", ["--verify", "--strict", binary], { encoding: "utf8" }).status === 0,
+    build(unsignedBinary, temporaryDirectory) {
+      const thinBinaries = [];
+      for (const target of targets) {
+        const thinBinary = join(temporaryDirectory, `synara-appsnap-helper-${target.arch}`);
+        const optimizationArguments = release
+          ? ["-O", "-whole-module-optimization"]
+          : ["-Onone", "-g"];
+        run(
+          "xcrun",
+          [
+            "swiftc",
+            ...optimizationArguments,
+            "-module-name",
+            "SynaraAppSnapHelper",
+            "-target",
+            target.target,
+            ...frameworkArguments,
+            ...sources,
+            "-o",
+            thinBinary,
+          ],
+          { env: buildEnvironment },
+        );
+        thinBinaries.push(thinBinary);
+      }
 
-  try {
-    const thinBinaries = [];
-    for (const target of targets) {
-      const thinBinary = join(temporaryDirectory, `synara-appsnap-helper-${target.arch}`);
-      const optimizationArguments = release
-        ? ["-O", "-whole-module-optimization"]
-        : ["-Onone", "-g"];
-      run(
-        "xcrun",
-        [
-          "swiftc",
-          ...optimizationArguments,
-          "-module-name",
-          "SynaraAppSnapHelper",
-          "-target",
-          target.target,
-          ...frameworkArguments,
-          ...sources,
-          "-o",
-          thinBinary,
-        ],
-        { env: buildEnvironment },
-      );
-      thinBinaries.push(thinBinary);
-    }
+      if (thinBinaries.length === 1) {
+        copyFileSync(thinBinaries[0], unsignedBinary);
+      } else {
+        run("xcrun", ["lipo", "-create", ...thinBinaries, "-output", unsignedBinary]);
+      }
 
-    const unsignedBinary = join(temporaryDirectory, "synara-appsnap-helper");
-    if (thinBinaries.length === 1) {
-      copyFileSync(thinBinaries[0], unsignedBinary);
-    } else {
-      run("xcrun", ["lipo", "-create", ...thinBinaries, "-output", unsignedBinary]);
-    }
+      // Dev helpers are ad-hoc signed. electron-builder replaces this signature
+      // with the release identity because the packaged path is listed in mac.binaries.
+      run("codesign", ["--force", "--sign", "-", "--timestamp=none", unsignedBinary]);
 
-    // Dev helpers are ad-hoc signed. electron-builder replaces this signature
-    // with the release identity because the packaged path is listed in mac.binaries.
-    run("codesign", ["--force", "--sign", "-", "--timestamp=none", unsignedBinary]);
-
-    mkdirSync(dirname(resolvedOutputPath), { recursive: true });
-    const pendingOutputPath = `${resolvedOutputPath}.tmp-${process.pid}`;
-    rmSync(pendingOutputPath, { force: true });
-    copyFileSync(unsignedBinary, pendingOutputPath);
-    chmodSync(pendingOutputPath, 0o755);
-    rmSync(resolvedOutputPath, { force: true });
-    renameSync(pendingOutputPath, resolvedOutputPath);
-
-    const pendingMetadataPath = `${metadataPath}.tmp-${process.pid}`;
-    rmSync(pendingMetadataPath, { force: true });
-    writeFileSync(pendingMetadataPath, `${JSON.stringify({ fingerprint })}\n`, { mode: 0o600 });
-    rmSync(metadataPath, { force: true });
-    renameSync(pendingMetadataPath, metadataPath);
-
-    if (!quiet) {
-      console.error(
-        `[appsnap] Built ${arch} Swift helper for macOS 12.3+ at ${resolvedOutputPath}`,
-      );
-    }
-    return resolvedOutputPath;
-  } finally {
-    rmSync(temporaryDirectory, { recursive: true, force: true });
-  }
+      if (!quiet) console.error(`[appsnap] Built ${arch} Swift helper for macOS 12.3+`);
+    },
+  });
 }
 
 function parseCommandLine(arguments_) {

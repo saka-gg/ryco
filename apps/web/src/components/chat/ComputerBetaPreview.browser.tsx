@@ -160,3 +160,24 @@ it("restores hidden and expanded presentation when returning to an active task",
   expect(f.stopTask).not.toHaveBeenCalled();
   f.send({ type: "ended", threadId: "thread", turnId: "remount-turn" });
 });
+
+it("renders a compact preview under Overview without floating controls", async () => {
+  const f = fixture(true, "inline-turn");
+  const view = await render(
+    <div style={{ width: 340 }}>
+      <ComputerBetaPreview threadId="thread" inline />
+    </div>,
+  );
+  f.target();
+  f.frame();
+  const preview = view.getByRole("region", { name: "Computer preview" });
+  await expect.element(preview).toBeVisible();
+  expect(getComputedStyle(preview.element()).position).toBe("relative");
+  await expect.element(view.getByRole("button", { name: "Move preview" })).not.toBeInTheDocument();
+  await expect.element(view.getByRole("button", { name: "Float preview" })).not.toBeInTheDocument();
+  await expect.element(view.getByRole("img")).toBeVisible();
+  await view.getByRole("button", { name: "Hide preview" }).click();
+  await expect.element(view.getByRole("button", { name: "Show Computer" })).toBeVisible();
+  expect(f.stopTask).not.toHaveBeenCalled();
+  await view.unmount();
+});

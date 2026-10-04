@@ -327,3 +327,70 @@ it("bounds text previews before fetching and rejects mislabeled binary content",
   expect(fetchSpy).not.toHaveBeenCalled();
   await large.unmount();
 });
+
+it("opens a Markdown card inside Ryco with rendered content and a separate download", async () => {
+  const source =
+    "# Preview report\n\n**Summary**\n\n| Task | State |\n| --- | --- |\n| Preview | Ready |\n\n<script>window.__attachmentExecuted = true</script>\n\n[Local](file:///tmp/report.md)\n\n![Remote](https://example.invalid/tracking.png)";
+  const src = URL.createObjectURL(new Blob([source], { type: "text/markdown" }));
+  const screen = await render(
+    <MessageAttachments
+      onImageExpand={() => undefined}
+      attachments={[
+        {
+          type: "file",
+          id: "markdown",
+          name: "report.md",
+          mimeType: "text/markdown",
+          sizeBytes: source.length,
+          previewUrl: src,
+        },
+      ]}
+    />,
+  );
+  await page.getByRole("button", { name: "Preview report.md" }).click();
+  await expect.element(page.getByRole("dialog")).toBeVisible();
+  await expect.element(page.getByRole("heading", { name: "Preview report" })).toBeVisible();
+  await expect.element(page.getByRole("table")).toBeVisible();
+  expect(document.querySelector('[role="dialog"] strong')?.textContent).toBe("Summary");
+  expect(document.querySelector('[role="dialog"] script')).toBeNull();
+  expect(document.querySelector('[role="dialog"] img')).toBeNull();
+  expect(document.querySelector('[role="dialog"] a[href^="file:"]')).toBeNull();
+  await page.getByRole("button", { name: "Close", exact: true }).click();
+  await expect
+    .element(page.getByRole("link", { name: "Download report.md" }))
+    .toHaveAttribute("download", "report.md");
+  await page.getByRole("button", { name: "Preview report.md" }).click();
+  await expect.element(page.getByRole("heading", { name: "Preview report" })).toBeVisible();
+  await screen.unmount();
+  URL.revokeObjectURL(src);
+});
+
+it("loads an RPC Markdown attachment and opens its rendered preview with one click", async () => {
+  const source = "# Persistent report\n\nAvailable after reconnect.";
+  readChunk.mockResolvedValue({ offset: 0, totalBytes: source.length, dataBase64: btoa(source) });
+  const screen = await render(
+    <MessageAttachments
+      environmentId={EnvironmentId.make("env")}
+      threadId={ThreadId.make("thread")}
+      messageId={MessageId.make("message")}
+      onImageExpand={() => undefined}
+      attachments={[
+        {
+          type: "file",
+          id: "markdown",
+          name: "persistent.md",
+          mimeType: "text/plain",
+          sizeBytes: source.length,
+        },
+      ]}
+    />,
+  );
+  expect(readChunk).not.toHaveBeenCalled();
+  await page.getByRole("button", { name: /persistent.md/ }).click();
+  await expect.element(page.getByRole("heading", { name: "Persistent report" })).toBeVisible();
+  await page.getByRole("button", { name: "Close", exact: true }).click();
+  await page.getByRole("button", { name: "Preview persistent.md" }).click();
+  await expect.element(page.getByRole("heading", { name: "Persistent report" })).toBeVisible();
+  expect(readChunk).toHaveBeenCalledOnce();
+  await screen.unmount();
+});

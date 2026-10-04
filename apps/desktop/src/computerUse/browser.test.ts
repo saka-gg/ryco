@@ -114,3 +114,45 @@ it("opens and navigates background tabs without requesting foreground control", 
   expect(context.authorizeForeground).not.toHaveBeenCalled();
   expect(transport.show).not.toHaveBeenCalled();
 });
+
+it("keeps Ryco visibility requests in the workspace without foreground consent", async () => {
+  const tab = { id: "1", url: "https://example.com/", title: "Test" };
+  const transport: BrowserTransport = {
+    tabs: vi.fn(async () => [tab]),
+    open: vi.fn(async () => tab),
+    show: vi.fn(async () => {}),
+    close: vi.fn(),
+    stop: vi.fn(),
+    send: vi.fn(),
+  };
+  const context: ComputerOperationContext = {
+    request: {
+      sessionId: "s",
+      threadId: "t",
+      turnId: "u",
+      tool: "browser",
+      args: { action: "open", url: tab.url, visible: true },
+    },
+    signal: new AbortController().signal,
+    check: vi.fn(),
+    authorizeApp: vi.fn(),
+    claim: vi.fn(),
+    activity: vi.fn(),
+    authorizeForeground: vi.fn(async () => {
+      throw new Error("Foreground disabled");
+    }),
+  };
+  const driver = new BrowserComputerDriver(new Map([["ryco", transport]]));
+  await driver.execute(context, "ryco");
+  expect(transport.open).toHaveBeenCalledWith(tab.url, false, context.signal);
+  Object.assign(context.request.args, { action: "show", tab: tab.id });
+  const shown = await driver.execute(context, "ryco");
+  expect(shown.content).toContainEqual({
+    type: "text",
+    text: JSON.stringify({ shown: false, presentation: "workspace" }),
+  });
+  expect(context.authorizeForeground).not.toHaveBeenCalled();
+  expect(context.activity).toHaveBeenLastCalledWith(
+    expect.objectContaining({ mode: "background" }),
+  );
+});
