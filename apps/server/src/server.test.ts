@@ -705,6 +705,7 @@ const buildAppUnderTest = (options?: {
       Layer.provide(
         Layer.mergeAll(
           Layer.succeed(HubConnectorService, {
+            connectorEnabled: false,
             status: () => ({
               state: "disabled",
               transitionedAt: TEST_EPOCH.toString(),

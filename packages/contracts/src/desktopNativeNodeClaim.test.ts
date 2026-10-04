@@ -62,12 +62,17 @@ describe("Desktop automatic node-claim local-control contracts", () => {
   it("pins the reachability probe to the same local-control prefix with a bare answer", () => {
     expect(DESKTOP_HUB_REACHABILITY_PATH).toBe("/api/desktop/hub/reachability");
     expect(
-      strictDecode(DesktopHubReachabilityResponse, { protocolVersion: 1, reachable: true }),
-    ).toEqual({ protocolVersion: 1, reachable: true });
+      strictDecode(DesktopHubReachabilityResponse, {
+        protocolVersion: 1,
+        reachable: true,
+        connectorEnabled: true,
+      }),
+    ).toEqual({ protocolVersion: 1, reachable: true, connectorEnabled: true });
     expect(() =>
       strictDecode(DesktopHubReachabilityResponse, {
         protocolVersion: 1,
         reachable: true,
+        connectorEnabled: true,
         hubOrigin: "https://hub.example.test",
       }),
     ).toThrow();

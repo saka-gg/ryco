@@ -429,6 +429,9 @@ const desktopHubControl = createDesktopHubControlClient({
 // Whether the running backend reports other devices can reach it through the
 // Hub. Main has no push channel from the child, so it asks; false until known.
 let backendHubReachable = false;
+// Whether the running backend runs its connector at all: a standby launch can
+// resolve to off. `null` until the backend has answered.
+let backendHubConnectorEnabled: boolean | null = null;
 let desktopHubReachabilityProbe: Promise<void> | null = null;
 let backendWsUrl = "";
 let backendEndpointUrl: string | null = null;
@@ -1162,25 +1165,33 @@ function readDeferRelaunch(raw: unknown, invalid: string): boolean {
 function desktopHubRestartRequired(settings: DesktopSettings = desktopSettings): boolean {
   return (
     backendHubLaunch !== null &&
-    desktopHubLaunchNeedsRestart(resolveDesktopHubConnectorLaunch(settings), backendHubLaunch)
+    desktopHubLaunchNeedsRestart(
+      resolveDesktopHubConnectorLaunch(settings),
+      backendHubLaunch,
+      backendHubConnectorEnabled,
+    )
   );
 }
 
 /**
  * Ask the running backend whether the Hub can reach it: enrolled, and
  * connected or reconnecting. A saved enable, an enrollment nobody approved, or
- * a connector waiting on a restart is not reachable.
+ * a connector waiting on a restart is not reachable. The same answer says
+ * whether the backend runs its connector at all.
  */
 function refreshDesktopHubReachability(): Promise<void> {
   if (desktopHubReachabilityProbe !== null) return desktopHubReachabilityProbe;
   const probe = (async () => {
-    let reachable = false;
-    if (backendHubLaunch?.enabled === true) {
-      reachable = await desktopHubControl
-        .hubReachability()
-        .then((response) => response.reachable)
-        .catch(() => false);
-    }
+    const child = backendControlToken;
+    const response =
+      backendHubLaunch?.enabled === true
+        ? await desktopHubControl.hubReachability().catch(() => null)
+        : null;
+    // An answer from a backend that has since been replaced says nothing.
+    if (child !== backendControlToken) return;
+    // Fixed for a backend's lifetime: a failed probe keeps what it said before.
+    if (response !== null) backendHubConnectorEnabled = response.connectorEnabled;
+    const reachable = response?.reachable ?? false;
     if (reachable === backendHubReachable) return;
     backendHubReachable = reachable;
     desktopKeepAwake?.sync();
@@ -2643,6 +2654,7 @@ function startBackend(): void {
   backendControlToken = childControlToken;
   const hubLaunch = resolveDesktopHubConnectorLaunch(desktopSettings);
   backendHubLaunch = hubLaunch;
+  backendHubConnectorEnabled = null;
   const tailscaleServe = resolveDesktopTailscaleServeLaunch(desktopSettings);
   backendTailscaleServe = tailscaleServe;
   const backendExecutable = isDevelopment ? resolveDevelopmentBunExecutable() : process.execPath;
@@ -3046,15 +3058,21 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.removeHandler(GET_HUB_LAUNCH_CONFIG_CHANNEL);
-  ipcMain.handle(GET_HUB_LAUNCH_CONFIG_CHANNEL, () => ({
-    enabled: desktopSettings.hubConnectorEnabled,
-    origin: desktopSettings.hubOrigin,
-    nodeName: desktopSettings.hubNodeName,
-    allowFileSecretStore: desktopSettings.hubAllowFileSecretStore,
-    fileSecretStoreFallbackSupported: isDesktopHubFileSecretStoreSupported(process.platform),
-    hostedIdentitySupported: isDesktopHostedIdentitySupported(process.platform),
-    restartRequired: desktopHubRestartRequired(),
-  }));
+  ipcMain.handle(GET_HUB_LAUNCH_CONFIG_CHANNEL, async () => {
+    // Whether a standby backend runs its connector decides `restartRequired`.
+    if (backendHubLaunch?.standby === true && backendHubConnectorEnabled === null) {
+      await refreshDesktopHubReachability();
+    }
+    return {
+      enabled: desktopSettings.hubConnectorEnabled,
+      origin: desktopSettings.hubOrigin,
+      nodeName: desktopSettings.hubNodeName,
+      allowFileSecretStore: desktopSettings.hubAllowFileSecretStore,
+      fileSecretStoreFallbackSupported: isDesktopHubFileSecretStoreSupported(process.platform),
+      hostedIdentitySupported: isDesktopHostedIdentitySupported(process.platform),
+      restartRequired: desktopHubRestartRequired(),
+    };
+  });
 
   const hostedIdentityView = (): DesktopHostedIdentityState =>
     desktopHostedIdentityStatus.status === "ready" && desktopHostedIdentityStatus.github
@@ -3116,7 +3134,9 @@ function registerIpcHandlers(): void {
       enableDesktopHubConnectorForAccountSetup();
     }
     // A claim committed in place wakes the connector; keep-awake follows it.
-    void refreshDesktopHubReachability();
+    // Awaited: whether the backend runs its connector at all decides whether
+    // the enable recorded above needs a relaunch, which the renderer asks next.
+    await refreshDesktopHubReachability();
     return hostedIdentityView();
   });
   ipcMain.removeHandler(DISCONNECT_HOSTED_IDENTITY_CHANNEL);

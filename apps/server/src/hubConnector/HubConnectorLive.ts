@@ -161,6 +161,11 @@ export interface HubConnectorE2eeOperator {
 }
 
 export interface HubConnectorServiceShape {
+  /**
+   * Whether this backend runs its connector at all. A standby launch resolves
+   * to off for an existing identity, or where key custody cannot be built.
+   */
+  readonly connectorEnabled: boolean;
   readonly status: HubConnector["status"];
   readonly resume: HubConnector["resume"];
   readonly enroll: HubConnector["enroll"];
@@ -757,6 +762,7 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
         }),
     );
     return {
+      connectorEnabled: connectorConfig.enabled,
       status: () => connector.status(),
       resume: () => connector.resume(),
       enroll: () => connector.enroll(),

@@ -213,6 +213,7 @@ const withLiveHubCliServer = <A, E, R>(
     }).pipe(
       Layer.provide(
         Layer.succeed(HubConnectorService, {
+          connectorEnabled: true,
           status: () => waitingStatus,
           resume: async () => undefined,
           enroll: async () => {

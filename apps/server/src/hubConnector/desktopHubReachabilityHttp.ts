@@ -55,6 +55,7 @@ export const desktopHubReachabilityRouteLayer = HttpRouter.add(
     const body: DesktopHubReachabilityResponse = {
       protocolVersion: DESKTOP_NATIVE_NODE_CLAIM_PROTOCOL_VERSION,
       reachable: hubConnectorIsReachable(status, identity.enrolled),
+      connectorEnabled: connector.connectorEnabled,
     };
     return HttpServerResponse.jsonUnsafe(body, {
       status: 200,

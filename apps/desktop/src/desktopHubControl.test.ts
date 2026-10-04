@@ -39,7 +39,7 @@ describe("Desktop main-only Hub control client", () => {
 
   it("asks the child whether the Hub can reach this node", async () => {
     const fetch = vi.fn(async (_url: string | URL | Request, _init?: RequestInit) =>
-      Response.json({ protocolVersion: 1, reachable: true }),
+      Response.json({ protocolVersion: 1, reachable: true, connectorEnabled: true }),
     );
     const client = createDesktopHubControlClient({
       baseUrl: () => "http://127.0.0.1:13773",
@@ -49,6 +49,7 @@ describe("Desktop main-only Hub control client", () => {
     await expect(client.hubReachability()).resolves.toEqual({
       protocolVersion: 1,
       reachable: true,
+      connectorEnabled: true,
     });
     const [url, init] = fetch.mock.calls[0]!;
     expect(String(url)).toBe("http://127.0.0.1:13773/api/desktop/hub/reachability");

@@ -82,6 +82,11 @@ export const DesktopHubReachabilityResponse = strict(
   Schema.Struct({
     protocolVersion: Schema.Literal(DESKTOP_NATIVE_NODE_CLAIM_PROTOCOL_VERSION),
     reachable: Schema.Boolean,
+    /**
+     * Whether the backend runs its connector at all. A standby launch can
+     * resolve to off, which only a relaunch with an explicit enable changes.
+     */
+    connectorEnabled: Schema.Boolean,
   }),
 );
 export type DesktopHubReachabilityResponse = typeof DesktopHubReachabilityResponse.Type;

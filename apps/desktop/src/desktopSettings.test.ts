@@ -573,23 +573,37 @@ describe("desktopSettings", () => {
       setDesktopHubPreference(DEFAULT_DESKTOP_SETTINGS, { enabled: true }),
     );
     // Account setup or enrollment in standby persists an explicit enable.
-    expect(desktopHubLaunchNeedsRestart(enabled, standby)).toBe(false);
-    expect(desktopHubLaunchNeedsRestart(standby, standby)).toBe(false);
+    expect(desktopHubLaunchNeedsRestart(enabled, standby, true)).toBe(false);
+    expect(desktopHubLaunchNeedsRestart(enabled, standby, null)).toBe(false);
+    expect(desktopHubLaunchNeedsRestart(standby, standby, false)).toBe(false);
 
     const disabled = resolveDesktopHubConnectorLaunch(
       setDesktopHubPreference(DEFAULT_DESKTOP_SETTINGS, { enabled: false }),
     );
-    expect(desktopHubLaunchNeedsRestart(enabled, disabled)).toBe(true);
-    expect(desktopHubLaunchNeedsRestart(disabled, standby)).toBe(true);
+    expect(desktopHubLaunchNeedsRestart(enabled, disabled, false)).toBe(true);
+    expect(desktopHubLaunchNeedsRestart(disabled, standby, true)).toBe(true);
     expect(
-      desktopHubLaunchNeedsRestart({ ...enabled, origin: "https://other.example" }, enabled),
+      desktopHubLaunchNeedsRestart({ ...enabled, origin: "https://other.example" }, enabled, true),
     ).toBe(true);
-    expect(desktopHubLaunchNeedsRestart({ ...enabled, nodeName: "Build node" }, enabled)).toBe(
-      true,
+    expect(
+      desktopHubLaunchNeedsRestart({ ...enabled, nodeName: "Build node" }, enabled, true),
+    ).toBe(true);
+    expect(
+      desktopHubLaunchNeedsRestart({ ...enabled, allowFileSecretStore: true }, enabled, true),
+    ).toBe(true);
+  });
+
+  it("restarts for an explicit enable that a standby backend resolved to off", () => {
+    // Without key custody (or beside an existing identity) the standby
+    // connector runs off. Account setup's explicit enable then read as served,
+    // leaving a signed-in account, an unclaimed node, and no way forward.
+    const standby = resolveDesktopHubConnectorLaunch(DEFAULT_DESKTOP_SETTINGS);
+    const enabled = resolveDesktopHubConnectorLaunch(
+      setDesktopHubPreference(DEFAULT_DESKTOP_SETTINGS, { enabled: true }),
     );
-    expect(desktopHubLaunchNeedsRestart({ ...enabled, allowFileSecretStore: true }, enabled)).toBe(
-      true,
-    );
+    expect(desktopHubLaunchNeedsRestart(enabled, standby, false)).toBe(true);
+    // Saved settings that still ask for standby resolve the same way again.
+    expect(desktopHubLaunchNeedsRestart(standby, standby, false)).toBe(false);
   });
 
   it("keeps a reachable node awake by default and persists an opt-out", () => {

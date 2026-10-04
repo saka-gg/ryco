@@ -81,6 +81,7 @@ const makeConnectorStub = (stub: ConnectorStub) => {
   let resumeCalls = 0;
   let statusIndex = 0;
   const service = {
+    connectorEnabled: true,
     status: () => stub.statuses[Math.min(statusIndex, stub.statuses.length - 1)]!,
     resume: async () => {
       resumeCalls += 1;

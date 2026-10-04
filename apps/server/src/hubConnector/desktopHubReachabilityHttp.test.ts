@@ -72,8 +72,10 @@ const summaryRequests: Array<{ readonly fingerprint?: boolean } | undefined> = [
 function connector(
   current: HubConnectorStatus,
   enrolled: HubIdentitySummary["enrolled"],
+  connectorEnabled = true,
 ): HubConnectorServiceShape {
   return {
+    connectorEnabled,
     status: () => current,
     resume: async () => undefined,
     enroll: async () => {
@@ -145,6 +147,7 @@ it.layer(NodeServices.layer)("Desktop Hub reachability local control", (it) => {
         assert.deepEqual(yield* Effect.promise(() => response.json()), {
           protocolVersion: 1,
           reachable: true,
+          connectorEnabled: true,
         });
         assert.equal((yield* post(origin, "B".repeat(43))).status, 404);
         // The probe never asks for the fingerprint, which opens key custody.
@@ -160,6 +163,23 @@ it.layer(NodeServices.layer)("Desktop Hub reachability local control", (it) => {
         assert.deepEqual(yield* Effect.promise(() => response.json()), {
           protocolVersion: 1,
           reachable: false,
+          connectorEnabled: true,
+        });
+      }),
+    ),
+  );
+
+  it.effect("reports a standby connector the backend resolved to off", () =>
+    // Desktop asks so it can tell a saved explicit enable needs a relaunch:
+    // without key custody a standby connector runs off, quietly, and account
+    // setup's enable otherwise read as already served.
+    withRoute(connector(status({ state: "disabled" }), "none", false), (origin) =>
+      Effect.gen(function* () {
+        const response = yield* post(origin);
+        assert.deepEqual(yield* Effect.promise(() => response.json()), {
+          protocolVersion: 1,
+          reachable: false,
+          connectorEnabled: false,
         });
       }),
     ),

@@ -303,17 +303,25 @@ export function desktopHubAllowsBackgroundNodeClaim(settings: DesktopSettings): 
  *
  * Promoting a standby connector to an explicit enable does not: the running
  * connector already serves the identity created in this process, and the next
- * launch simply stops asking the backend to check first.
+ * launch simply stops asking the backend to check first. Unless the backend
+ * resolved its standby connector to off (an existing identity, or no usable
+ * key store): then nothing runs the enable until a relaunch does.
+ * `runningConnectorEnabled` is what the backend reports, `null` while unknown.
  */
 export function desktopHubLaunchNeedsRestart(
   persisted: DesktopHubConnectorLaunch,
   running: DesktopHubConnectorLaunch,
+  runningConnectorEnabled: boolean | null,
 ): boolean {
   return (
     persisted.enabled !== running.enabled ||
     persisted.origin !== running.origin ||
     persisted.nodeName !== running.nodeName ||
-    persisted.allowFileSecretStore !== running.allowFileSecretStore
+    persisted.allowFileSecretStore !== running.allowFileSecretStore ||
+    (persisted.enabled &&
+      !persisted.standby &&
+      running.standby &&
+      runningConnectorEnabled === false)
   );
 }
 
