@@ -30,6 +30,8 @@ import type * as Terminal from "effect/Terminal";
 import { resolveServerAdvertisedEndpointsWithTailscale } from "../remote/AdvertisedEndpointRegistry.ts";
 import {
   isEphemeralCliInstall,
+  nodeServiceLingerCommand,
+  nodeServiceUser,
   type NodeServicePlatform,
   type NodeServiceStatus,
   readNodeServiceStatus,
@@ -121,6 +123,69 @@ type Reach = "hub" | "tailscale" | "lan";
 interface GuidedAnswers {
   readonly config: NodeConfig;
   readonly background: boolean;
+  /** systemd only: whether the user manager outlives logout, as read before applying. */
+  readonly lingering: boolean | null;
+}
+
+/**
+ * The background question, honest about when the service runs.
+ *
+ * A systemd user unit starts with the user's first session and stops with the
+ * last one unless lingering is on; only then does it start at boot.
+ */
+export function backgroundServicePrompt(
+  platform: NodeServicePlatform,
+  lingering: boolean | null,
+): string {
+  return platform === "systemd" && lingering === true
+    ? "Keep Ryco running in the background? It starts at boot and restarts if it stops."
+    : "Keep Ryco running in the background? It starts when you log in and restarts if it stops.";
+}
+
+/** The summary's "Runs" line. */
+export function describeRuns(input: {
+  readonly background: boolean;
+  readonly preventSleep: boolean | undefined;
+  readonly platform: NodeServicePlatform | null;
+  readonly lingering: boolean | null;
+}): string {
+  if (!input.background) return "when you start it";
+  return [
+    "in the background",
+    ...(input.preventSleep ? ["stays awake on power"] : []),
+    ...(input.platform === "systemd" && input.lingering !== true
+      ? ["only while you are logged in"]
+      : []),
+  ].join(", ");
+}
+
+export type NodeServiceLingerPlan =
+  | { readonly kind: "not-needed" }
+  | {
+      readonly kind: "offer";
+      readonly command: string;
+      readonly args: ReadonlyArray<string>;
+      /** The exact line the user is asked to approve. */
+      readonly display: string;
+    };
+
+/**
+ * Whether to offer `loginctl enable-linger` after installing a systemd unit.
+ *
+ * Only when lingering is known to be off: an unknown answer means loginctl
+ * itself is unavailable, and offering sudo for it would fail anyway.
+ */
+export function planNodeServiceLinger(input: {
+  readonly platform: NodeServicePlatform | null;
+  readonly lingering: boolean | null | undefined;
+  readonly user: string;
+  readonly uid: number | undefined;
+}): NodeServiceLingerPlan {
+  if (input.platform !== "systemd" || input.lingering !== false || input.user === "") {
+    return { kind: "not-needed" };
+  }
+  const { command, args } = nodeServiceLingerCommand(input.user, input.uid);
+  return { kind: "offer", command, args, display: [command, ...args].join(" ") };
 }
 
 /** Ask everything the node needs, starting from what is saved. Changes nothing. */
@@ -217,15 +282,13 @@ const askNodeSettings = (
         ).pipe(Effect.map((value) => value.trim() || machineName))
       : current?.hub?.nodeName;
 
+    const lingering = service?.lingering ?? null;
     const background =
       context.platform === null
         ? false
         : yield* ask(
             Prompt.confirm({
-              message:
-                context.platform === "launchd"
-                  ? "Keep Ryco running in the background? It starts when you log in and restarts if it stops."
-                  : "Keep Ryco running in the background? It starts at boot and restarts if it stops.",
+              message: backgroundServicePrompt(context.platform, lingering),
               initial: true,
             }),
           );
@@ -262,7 +325,7 @@ const askNodeSettings = (
       },
       preventSleep,
     };
-    return { config, background };
+    return { config, background, lingering };
   });
 
 const describeReach = (config: NodeConfig) => {
@@ -342,6 +405,51 @@ const waitForServer = (operations: SetupOperations, seconds: number) =>
     return null;
   });
 
+/**
+ * Offer to let the systemd unit outlive logout and start at boot.
+ *
+ * Never silent: lingering changes system state through sudo, so it runs only
+ * after the user approved the exact command, in this terminal where sudo can
+ * ask for a password. Declining keeps the unit, with a warning that says when
+ * it stops and how to change that later.
+ */
+const offerNodeServiceLinger = (context: SetupContext): SetupEffect<void> =>
+  Effect.gen(function* () {
+    const status = yield* readServiceStatus(context);
+    const plan = planNodeServiceLinger({
+      platform: context.platform,
+      lingering: status?.lingering,
+      user: nodeServiceUser(),
+      uid: process.getuid?.(),
+    });
+    if (plan.kind === "not-needed") return;
+    const approved = yield* ask(
+      Prompt.confirm({
+        message: `Keep Ryco running after you log out and start it at boot? (runs \`${plan.display}\`)`,
+        initial: true,
+      }),
+    );
+    if (approved) {
+      yield* Console.log(dim(`$ ${plan.display}`));
+      const exitCode = yield* runInTerminal(plan.command, plan.args).pipe(
+        Effect.orElseSucceed(() => 1),
+      );
+      const after = yield* readServiceStatus(context);
+      if (exitCode === 0 && after?.lingering === true) {
+        yield* Console.log(
+          statusLine("ok", "Ryco keeps running after you log out and starts at boot"),
+        );
+        return;
+      }
+    }
+    yield* Console.log(
+      statusLine(
+        "warn",
+        `Ryco stops when you log out and starts at your next login. Run \`${plan.display}\` to keep it running.`,
+      ),
+    );
+  });
+
 /** Save the settings and (re)start the node the way the answers asked for. */
 const applyNodeSettings = (
   context: SetupContext,
@@ -372,6 +480,7 @@ const applyNodeSettings = (
       }),
     );
     yield* Console.log(statusLine("ok", "Background service installed"));
+    yield* offerNodeServiceLinger(context);
     yield* Console.log(dim("  Starting Ryco…"));
     const origin = yield* waitForServer(operations, 60);
     yield* Console.log(
@@ -621,11 +730,12 @@ export const runFirstTimeSetup = (
         heading("Ready to set up"),
         `  Projects     ${tildify(answers.config.workspace ?? homedir())}`,
         `  Reachable    ${describeReach(answers.config)}`,
-        `  Runs         ${
-          answers.background
-            ? `in the background${answers.config.preventSleep ? ", stays awake on power" : ""}`
-            : "when you start it"
-        }`,
+        `  Runs         ${describeRuns({
+          background: answers.background,
+          preventSleep: answers.config.preventSleep,
+          platform: context.platform,
+          lingering: answers.lingering,
+        })}`,
         "",
       ].join("\n"),
     );
