@@ -1,11 +1,13 @@
 import type { AuthSessionState, EnvironmentId } from "@ryco/contracts";
 import {
+  RemoteEnvironmentAuthHttpError,
   SAVED_ENVIRONMENT_REQUIRES_AUTH_MESSAGE,
   SavedEnvironmentCredentialError,
   type EnvironmentConnection,
   type SavedEnvironmentRecord,
   type SavedEnvironmentRuntimeState,
 } from "@ryco/client-runtime/connection";
+import type { WsProtocolLifecycleHandlers } from "@ryco/client-runtime/rpc";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 // Native modules are stubbed so the driver/state-sink load under the Node runner.
@@ -33,6 +35,33 @@ vi.mock("expo-sqlite/kv-store", () => ({
 }));
 vi.mock("expo-linking", () => ({ getInitialURL: async () => null }));
 vi.mock("expo-constants", () => ({ default: { expoConfig: { extra: {} } } }));
+
+// The saved-environment socket is replaced by a recorder: tests drive its
+// lifecycle callbacks the way the protocol would.
+const socketHolder = vi.hoisted(() => ({
+  options: [] as Array<WsProtocolLifecycleHandlers>,
+  clientDisposals: 0,
+}));
+vi.mock("../rpc/wsTransport", () => ({
+  WsTransport: class {
+    constructor(_url: unknown, options: WsProtocolLifecycleHandlers) {
+      socketHolder.options.push(options);
+    }
+  },
+}));
+vi.mock("../rpc/wsRpcClient", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../rpc/wsRpcClient")>()),
+  createWsRpcClient: () => ({
+    server: { subscribeLifecycle: () => () => {}, subscribeConfig: () => () => {} },
+    orchestration: { subscribeShell: () => () => {} },
+    terminal: { onEvent: () => () => {} },
+    isHeartbeatFresh: () => false,
+    reconnect: async () => {},
+    dispose: async () => {
+      socketHolder.clientDisposals += 1;
+    },
+  }),
+}));
 
 import { subscribeAppStateResume } from "./appStateResume";
 import { createMobileEnvironmentDriver, type MobileCatalogLike } from "./environmentDriver";
@@ -186,6 +215,42 @@ describe("mobile environment driver", () => {
     await expect(connecting).rejects.not.toBeInstanceOf(SavedEnvironmentCredentialError);
     expect(fake.runtime(ENV_ID)).toMatchObject({ connectionState: "error" });
     expect(fake.runtime(ENV_ID)?.authState).not.toBe("requires-auth");
+  });
+
+  it("asks for a new pairing when a connected node rejects the bearer on reconnect", async () => {
+    const fake = createFakeCatalog();
+    fake.setBearerToken(ENV_ID, "bearer-token");
+    fake.upsert(record());
+    const driver = createMobileEnvironmentDriver({
+      catalog: fake.catalog,
+      remoteApi: noopRemoteApi,
+      subscribeResume: () => () => {},
+    });
+    const connection = await driver.connectSavedEnvironment(record());
+    expect(driver.supervisor.read(ENV_ID)).toBe(connection);
+    const disposalsBefore = socketHolder.clientDisposals;
+
+    const socketOptions = socketHolder.options.at(-1)!;
+    const rejection = new RemoteEnvironmentAuthHttpError("Unauthorized request.", 401);
+    expect(socketOptions.isTerminalUrlError?.(rejection)).toBe(true);
+    expect(socketOptions.isTerminalUrlError?.(new Error("Network request failed"))).toBe(false);
+
+    // The bearer expires (or is revoked) while the app runs: the next
+    // reconnect's ws-token request is rejected. The protocol reports the failed
+    // URL provider first, then that it stopped for good.
+    socketOptions.onError?.("Unable to prepare the Ryco server WebSocket connection.");
+    socketOptions.onTerminalUrlError?.(rejection);
+
+    expect(fake.runtime(ENV_ID)).toMatchObject({
+      authState: "requires-auth",
+      connectionState: "disconnected",
+      lastError: SAVED_ENVIRONMENT_REQUIRES_AUTH_MESSAGE,
+    });
+    await vi.waitFor(() => expect(driver.supervisor.read(ENV_ID)).toBeNull());
+    expect(socketHolder.clientDisposals).toBe(disposalsBefore + 1);
+    expect(fake.runtime(ENV_ID)?.authState).toBe("requires-auth");
+    // The bearer stays; pairing again replaces it in place.
+    await expect(fake.catalog.readBearerToken(ENV_ID)).resolves.toBe("bearer-token");
   });
 
   it("lets a cancelled connect fail without touching the connection that replaced it", async () => {

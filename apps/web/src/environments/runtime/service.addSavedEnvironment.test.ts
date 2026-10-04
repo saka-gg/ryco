@@ -1,3 +1,4 @@
+import type { WsProtocolLifecycleHandlers } from "@ryco/client-runtime/rpc";
 import { EnvironmentId } from "@ryco/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
@@ -54,6 +55,8 @@ const mockDisconnectSshEnvironment = vi.fn();
 const mockFetchSshEnvironmentDescriptor = vi.fn();
 const mockToPersistedSavedEnvironmentRecord = vi.fn((record) => record);
 const mockCreateEnvironmentConnection = vi.fn();
+const mockWsTransport = vi.fn();
+const mockDeviceWsTransport = vi.fn();
 const mockClientGetConfig = vi.fn(async () => ({
   environment: {
     environmentId: EnvironmentId.make("environment-1"),
@@ -101,6 +104,7 @@ vi.mock("./catalog", () => ({
   },
   useSavedEnvironmentRuntimeStore: {
     getState: () => ({
+      byId: {},
       ensure: vi.fn(),
       patch: mockPatchRuntime,
       clear: mockClearRuntime,
@@ -127,9 +131,9 @@ vi.mock("../../rpc/wsRpcClient", () => ({
 }));
 
 vi.mock("../../rpc/wsTransport", () => ({
-  DeviceWsTransport: vi.fn(),
+  DeviceWsTransport: mockDeviceWsTransport,
   HostedWsTransport: vi.fn(),
-  WsTransport: vi.fn(),
+  WsTransport: mockWsTransport,
 }));
 
 describe("addSavedEnvironment", () => {
@@ -595,6 +599,86 @@ describe("addSavedEnvironment", () => {
       await resetEnvironmentServiceForTests();
     },
   );
+
+  it("asks for a new pairing when a connected environment's socket has its bearer rejected", async () => {
+    const environmentId = EnvironmentId.make("environment-1");
+    mockSavedRecords = [
+      {
+        environmentId,
+        label: "Remote environment",
+        httpBaseUrl: "https://remote.example.com/",
+        wsBaseUrl: "wss://remote.example.com/",
+        createdAt: "2026-04-14T00:00:00.000Z",
+        lastConnectedAt: null,
+      },
+    ];
+    mockReadSavedEnvironmentBearerToken.mockResolvedValue("bearer-token");
+    const dispose = vi.fn(async () => undefined);
+    mockCreateEnvironmentConnection.mockImplementation(
+      (input: { knownEnvironment: { environmentId: EnvironmentId }; client: unknown }) => ({
+        kind: "saved" as const,
+        environmentId: input.knownEnvironment.environmentId,
+        knownEnvironment: input.knownEnvironment,
+        client: input.client,
+        ensureBootstrapped: async () => undefined,
+        reconnect: async () => undefined,
+        dispose,
+      }),
+    );
+
+    const {
+      reconnectSavedEnvironment,
+      listEnvironmentConnections,
+      resetEnvironmentServiceForTests,
+    } = await import("./service");
+    // The module graph is fresh per test; the error class must be the service's.
+    const { RemoteEnvironmentAuthHttpError } = await import("@ryco/client-runtime/connection");
+
+    await reconnectSavedEnvironment(environmentId);
+    expect(listEnvironmentConnections()).toHaveLength(1);
+
+    const socketOptions = mockWsTransport.mock.calls.at(-1)?.[1] as WsProtocolLifecycleHandlers;
+    const deviceOptions = mockDeviceWsTransport.mock.calls.at(-1)?.[1] as {
+      readonly isTerminalUrlError?: (error: unknown) => boolean;
+    };
+    const rejection = new RemoteEnvironmentAuthHttpError("Unauthorized request.", 401);
+    // Both sockets stop on a rejected bearer and keep retrying anything else.
+    expect(socketOptions.isTerminalUrlError?.(rejection)).toBe(true);
+    expect(socketOptions.isTerminalUrlError?.(new Error("fetch failed"))).toBe(false);
+    expect(deviceOptions.isTerminalUrlError?.(rejection)).toBe(true);
+
+    // The bearer expires (or is revoked) while the app stays open: the next
+    // reconnect's ws-token request is rejected. The protocol reports the failed
+    // URL provider first, then that it stopped for good.
+    mockPatchRuntime.mockClear();
+    socketOptions.onError?.("Unable to prepare the Ryco server WebSocket connection.");
+    socketOptions.onTerminalUrlError?.(rejection);
+
+    expect(mockPatchRuntime).toHaveBeenLastCalledWith(
+      environmentId,
+      expect.objectContaining({
+        authState: "requires-auth",
+        connectionState: "disconnected",
+        lastError: "This environment no longer accepts its saved pairing. Pair it again.",
+      }),
+    );
+    await vi.waitFor(() => {
+      expect(listEnvironmentConnections()).toHaveLength(0);
+    });
+    expect(dispose).toHaveBeenCalledOnce();
+    const patches = mockPatchRuntime.mock.calls.map(
+      ([, patch]) => patch as Record<string, unknown>,
+    );
+    const requiresAuthAt = patches.findIndex((patch) => patch.authState === "requires-auth");
+    expect(patches.slice(requiresAuthAt + 1)).not.toContainEqual(
+      expect.objectContaining({ connectionState: "error" }),
+    );
+    // The record and its bearer stay; pairing again replaces the credential.
+    expect(mockRemoveSavedEnvironmentBearerToken).not.toHaveBeenCalled();
+    expect(mockRemove).not.toHaveBeenCalled();
+
+    await resetEnvironmentServiceForTests();
+  });
 
   it("fails a connect whose socket never delivers the server config", async () => {
     vi.useFakeTimers();
