@@ -20,7 +20,7 @@ const key = {
 };
 
 describe("node E2EE operator", () => {
-  it("runs every state-changing command as the identity's owner, and no read", async () => {
+  it("runs every command that writes the identity's state as its owner, and leaves pure reads alone", async () => {
     // Any use of the identity is visible: a command the gate refused must not
     // have reached it at all.
     const touched: PropertyKey[] = [];
@@ -55,6 +55,8 @@ describe("node E2EE operator", () => {
       remintContinuityId: () => operator.remintContinuityId(),
       breakContinuityChain: () => operator.breakContinuityChain(),
       resetFallback: () => operator.resetFallback(),
+      // Repairs the continuity chain as it reads it.
+      readContinuity: () => operator.readContinuity(),
     };
     for (const [name, command] of Object.entries(commands)) {
       await expect(command(), name).rejects.toThrow("in use by another Ryco process");
@@ -64,7 +66,7 @@ describe("node E2EE operator", () => {
     // Reads go straight to the identity.
     await expect(operator.listClients()).rejects.toThrow("identity read");
     expect(() => operator.readPolicy()).toThrow("identity read");
-    await expect(operator.readContinuity()).rejects.toThrow("identity read");
+    await expect(operator.readPrekey()).rejects.toThrow("identity read");
   });
 });
 

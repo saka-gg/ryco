@@ -148,6 +148,7 @@ export interface HubConnectorE2eeOperator {
   /** §6.4: the prekey this node holds now, without issuing one. */
   readonly readPrekey: () => Promise<E2eePrekeyView>;
   readonly rotatePrekey: () => Promise<E2eePrekeyView>;
+  /** §7.5's status. Runs the chain's repairs as it reads, so it is an owner operation. */
   readonly readContinuity: () => Promise<E2eeContinuityView>;
   readonly adoptContinuityId: (continuityId: string) => Promise<E2eeContinuityChangeView>;
   readonly remintContinuityId: () => Promise<E2eeContinuityChangeView>;

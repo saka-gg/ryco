@@ -485,10 +485,14 @@ export function makeNodeE2eeOperator(options: {
   };
 
   // Every command that changes durable state, or signs as the node, goes
-  // through the owner gate. The reads, and clearing this process's own
-  // in-memory refusal count, do not.
+  // through the owner gate. So does the continuity read, which runs §7.5's
+  // repairs — a mint, a restore from the anchor, a recorded chain break — as it
+  // reads. The other reads, and clearing this process's own in-memory refusal
+  // count, do not: the prekey read reports the stored certificate without
+  // issuing one.
   return {
     ...operator,
+    readContinuity: () => owned(() => operator.readContinuity()),
     approveClient: (input) => owned(() => operator.approveClient(input)),
     narrowClient: (input) => owned(() => operator.narrowClient(input)),
     revokeClient: (key) => owned(() => operator.revokeClient(key)),
