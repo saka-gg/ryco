@@ -57,6 +57,19 @@ export function directTransportLabel(
   return "Direct";
 }
 
+/**
+ * The connect action of a directly paired machine. A machine that rejected its
+ * saved pairing offers Re-pair first; this action then retries the saved
+ * pairing as it is, for a rejection that was only a passing fault on the node.
+ */
+export function directConnectActionLabel(input: {
+  readonly connectionState: "connecting" | "connected" | "disconnected" | "error";
+  readonly needsRepair: boolean;
+}): "Use" | "Retry" | "Connect" {
+  if (input.connectionState === "connected") return "Use";
+  return input.needsRepair || input.connectionState === "error" ? "Retry" : "Connect";
+}
+
 export function directRoleLabel(
   role: "owner" | "client" | null,
 ): "Owner" | "Client" | "Role pending" {

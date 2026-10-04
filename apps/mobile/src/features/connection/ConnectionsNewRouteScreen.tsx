@@ -1,4 +1,4 @@
-import { useNavigation } from "@react-navigation/native";
+import { useNavigation, type StaticScreenProps } from "@react-navigation/native";
 import { CameraView, useCameraPermissions } from "expo-camera";
 import { useCallback, useState } from "react";
 import { Pressable, ScrollView, TextInput, View } from "react-native";
@@ -9,22 +9,49 @@ import { useThemeColor } from "../../lib/useThemeColor";
 import { DirectConnectionMethods } from "../nodes/DirectConnectionMethods";
 import {
   canSubmitDirectConnection,
+  directRepairPrefill,
   type DirectConnectionMode,
 } from "../nodes/directConnectionMethodsModel";
 import { extractPairingUrlFromQrPayload } from "./pairing";
-import { useConnectionActions } from "./useConnectionController";
+import { useConnectionActions, useSavedEnvironments } from "./useConnectionController";
+
+type ConnectionsNewRouteScreenProps = StaticScreenProps<
+  | {
+      /**
+       * A saved machine to pair again. Only an id is taken, never an address:
+       * the host comes from this device's own saved record, so a link cannot
+       * point the pairing code somewhere else.
+       */
+      readonly repairEnvironmentId?: string;
+    }
+  | undefined
+>;
+
+function firstParam(value: string | string[] | undefined): string | null {
+  if (Array.isArray(value)) return value[0] ?? null;
+  return value ?? null;
+}
 
 // B2 pairing surface — replaces B1's PairingScreen. QR scan (expo-camera) folds
 // the scanned payload into the URL field; URL and host+code both pair through the
 // tested environmentActions.addSavedEnvironment. Direct-node only.
-export function ConnectionsNewRouteScreen() {
+export function ConnectionsNewRouteScreen(props: ConnectionsNewRouteScreenProps) {
   const navigation = useNavigation();
   const actions = useConnectionActions();
+  const { rows } = useSavedEnvironments();
+  const repairEnvironmentId = firstParam(props.route.params?.repairEnvironmentId);
+  const repairRecord =
+    repairEnvironmentId === null
+      ? null
+      : (rows.find((row) => row.record.environmentId === repairEnvironmentId)?.record ?? null);
+  const [repairPrefill] = useState(() =>
+    repairRecord ? directRepairPrefill(repairRecord.httpBaseUrl) : null,
+  );
   const [permission, requestPermission] = useCameraPermissions();
-  const [mode, setMode] = useState<DirectConnectionMode>("url");
+  const [mode, setMode] = useState<DirectConnectionMode>(repairPrefill?.mode ?? "url");
   const [scanning, setScanning] = useState(false);
   const [pairingUrl, setPairingUrl] = useState("");
-  const [host, setHost] = useState("");
+  const [host, setHost] = useState(repairPrefill?.host ?? "");
   const [code, setCode] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [pairing, setPairing] = useState(false);
@@ -90,8 +117,9 @@ export function ConnectionsNewRouteScreen() {
       contentContainerStyle={{ padding: 20, paddingBottom: 44, gap: 18 }}
     >
       <Text className="font-sans text-base leading-normal text-foreground-muted">
-        Pair this device straight to one of your machines. Direct credentials stay separate from
-        your Hub account.
+        {repairRecord
+          ? `${repairRecord.label} no longer accepts this device's saved pairing. Enter a new pairing code from the machine to pair it again.`
+          : "Pair this device straight to one of your machines. Direct credentials stay separate from your Hub account."}
       </Text>
       {error ? <ErrorBanner message={error} /> : null}
 

@@ -1,3 +1,5 @@
+import { directTransportLabel } from "./nodesModel";
+
 export type DirectConnectionMode = "url" | "lan" | "tailscale";
 
 export interface DirectConnectionMethod {
@@ -32,4 +34,23 @@ export function canSubmitDirectConnection(input: {
 }): boolean {
   if (input.mode === "url") return input.pairingUrl.trim().length > 0;
   return input.host.trim().length > 0 && input.code.trim().length > 0;
+}
+
+/**
+ * Pairing a saved machine again starts from the address it was saved with, so
+ * only the new pairing code is missing. The scheme stays: a LAN node usually
+ * serves plain http, and a bare host would be read as https.
+ */
+export function directRepairPrefill(httpBaseUrl: string): {
+  readonly mode: Exclude<DirectConnectionMode, "url">;
+  readonly host: string;
+} {
+  const mode = directTransportLabel(httpBaseUrl) === "Tailscale · Direct" ? "tailscale" : "lan";
+  try {
+    const url = new URL(httpBaseUrl);
+    const atRoot = url.pathname === "/" && url.search === "" && url.hash === "";
+    return { mode, host: atRoot ? url.origin : httpBaseUrl };
+  } catch {
+    return { mode, host: httpBaseUrl };
+  }
 }
