@@ -1,3 +1,4 @@
+import { ORPHANED_PROVIDER_SESSION_ERROR } from "@ryco/shared/restartContinuation";
 import { ClaudeResumeReviewError } from "@ryco/client-runtime/state/composer";
 import { useStore } from "@ryco/client-runtime/state/threads";
 import type { QueueSendHooks, QueueThreadView } from "@ryco/client-runtime/state/message-queue";
@@ -699,5 +700,50 @@ describe("threadOutbox usage-limit holds", () => {
         RESET_MS,
       ),
     ).toBeNull();
+  });
+});
+
+describe("threadOutbox restart holds", () => {
+  it("holds after a restart and sends once the automatic continuation completed", async () => {
+    enqueueThreadOutboxMessage(queued("m1", "2026-07-24T10:00:00.000Z"));
+    const sendQueuedMessage = accepting();
+    await drainThreadOutbox(deps(RUNNING, sendQueuedMessage));
+    const reconciled = view({
+      session: {
+        status: "error",
+        lastError: ORPHANED_PROVIDER_SESSION_ERROR,
+        providerInstanceId: "codex",
+        activeTurnId: null,
+      },
+      latestTurn: { turnId: "turn-1" as TurnId, state: "interrupted" },
+    });
+    await drainThreadOutbox(deps(reconciled, sendQueuedMessage));
+    expect(sendQueuedMessage).not.toHaveBeenCalled();
+    expect(getThreadOutboxHold(KEY)).toMatchObject({
+      reason: "error",
+      detail: ORPHANED_PROVIDER_SESSION_ERROR,
+    });
+
+    const continuationRunning = view({
+      running: true,
+      session: {
+        status: "running",
+        lastError: null,
+        providerInstanceId: "codex",
+        activeTurnId: "turn-2" as TurnId,
+      },
+      latestTurn: { turnId: "turn-2" as TurnId, state: "running" },
+    });
+    await drainThreadOutbox(deps(continuationRunning, sendQueuedMessage));
+    expect(sendQueuedMessage).not.toHaveBeenCalled();
+    expect(getThreadOutboxHold(KEY)).toBeNull();
+
+    await drainThreadOutbox(
+      deps(
+        view({ latestTurn: { turnId: "turn-2" as TurnId, state: "completed" } }),
+        sendQueuedMessage,
+      ),
+    );
+    expect(sendQueuedMessage).toHaveBeenCalledTimes(1);
   });
 });

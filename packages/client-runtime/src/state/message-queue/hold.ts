@@ -1,3 +1,4 @@
+import { ORPHANED_PROVIDER_SESSION_ERROR } from "@ryco/shared/restartContinuation";
 import { applicableUsageLimit, isUsageLimitQueueHeld } from "@ryco/shared/usageLimit";
 
 import type { QueueThreadView } from "./threadView.ts";
@@ -135,8 +136,13 @@ export function deriveQueueFailureCauses(
       providerInstanceId: session.providerInstanceId,
     });
   }
+  // A server restart releases the orphaned turn as interrupted; its `error:` cause
+  // already holds, and nobody stopped it, so it is not a Stop.
+  const releasedByRestart =
+    session?.status === "error" && session.lastError === ORPHANED_PROVIDER_SESSION_ERROR;
   const latestTurnInterrupted =
     view.latestTurn?.state === "interrupted" &&
+    !releasedByRestart &&
     (options.includeUnsettled === true || isLatestTurnInterruptSettled(view));
   if (latestTurnInterrupted || session?.status === "interrupted") {
     causes.push({
@@ -179,6 +185,33 @@ export function releasableUsageLimitCauseKeys(input: {
     );
   }
   return uniqueKeys(keys);
+}
+
+const ERROR_CAUSE_PREFIX = "error:";
+const RESTART_ERROR_CAUSE_SUFFIX = `:${ORPHANED_PROVIDER_SESSION_ERROR}`;
+
+/**
+ * Hold causes a server restart minted (the orphaned session's `error:` cause) once a
+ * later turn exists: an automatic continuation or the user's own message took over.
+ * That turn's own failure or Stop holds again under its own key; a Stop recorded on the
+ * restarted turn is a different key and keeps holding until Resume.
+ */
+export function releasableRestartCauseKeys(input: {
+  readonly hold: QueueHold | null;
+  readonly view: QueueThreadView;
+}): string[] {
+  const latestTurnId = input.view.latestTurn?.turnId ?? null;
+  if (input.hold === null || latestTurnId === null) return [];
+  return input.hold.causeKeys.filter((key) => {
+    if (!key.startsWith(ERROR_CAUSE_PREFIX) || !key.endsWith(RESTART_ERROR_CAUSE_SUFFIX)) {
+      return false;
+    }
+    const turnKey = key.slice(
+      ERROR_CAUSE_PREFIX.length,
+      key.length - RESTART_ERROR_CAUSE_SUFFIX.length,
+    );
+    return turnKey !== latestTurnId;
+  });
 }
 
 /** Causes not yet acknowledged nor covered by the current hold, split by provider exemption. */

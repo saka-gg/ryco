@@ -4,6 +4,7 @@ import {
   TurnId,
   type ThreadUsageLimit,
 } from "@ryco/contracts";
+import { ORPHANED_PROVIDER_SESSION_ERROR } from "@ryco/shared/restartContinuation";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -461,5 +462,95 @@ describe("usage-limit holds", () => {
     state.view = viewOf({ ...LIMITED, modelInstanceId: "claudeAgent" });
     state.headProviderInstanceId = "claudeAgent";
     expect(settle(state)).toBe("send");
+  });
+});
+
+describe("restart holds", () => {
+  type DrainState = { -readonly [K in keyof QueueDrainInput]: QueueDrainInput[K] };
+  /** Applies bookkeeping steps, including releases, until the drain waits or sends. */
+  function settle(state: DrainState): string {
+    for (let index = 0; index < 8; index += 1) {
+      const step = resolveQueueDrainStep(state);
+      if (step.kind === "baseline" || step.kind === "acknowledge") {
+        state.acknowledgedCauseKeys = (state.acknowledgedCauseKeys ?? []).concat(step.causeKeys);
+      } else if (step.kind === "hold") {
+        state.hold = step.hold;
+      } else if (step.kind === "release") {
+        state.acknowledgedCauseKeys = (state.acknowledgedCauseKeys ?? []).concat(step.causeKeys);
+        state.hold = state.hold ? removeQueueHoldCauses(state.hold, step.causeKeys) : null;
+      } else {
+        return step.kind === "wait" ? `wait:${step.reason}` : step.kind;
+      }
+    }
+    throw new Error("drain did not settle");
+  }
+
+  /** What startup reconciliation leaves on a turn the restart cut off. */
+  const RECONCILED: Omit<ThreadFixture, "id"> = {
+    session: { status: "error", lastError: ORPHANED_PROVIDER_SESSION_ERROR },
+    latestTurn: { turnId: "turn-1", state: "interrupted" },
+    messageIds: ["m-0"],
+  };
+
+  /** Queued while the turn ran, then the server restarted. */
+  function restartedQueue(): DrainState {
+    const state: DrainState = { ...input({ view: viewOf(RUNNING_THREAD) }) };
+    expect(settle(state)).toBe("wait:busy");
+    state.view = viewOf(RECONCILED);
+    return state;
+  }
+
+  it("holds after a restart until the continuation takes over, then drains when it completes", () => {
+    const state = restartedQueue();
+    // (a) The released session holds, as an error rather than as a Stop.
+    expect(settle(state)).toBe("wait:held");
+    expect(state.hold).toMatchObject({
+      reason: "error",
+      detail: ORPHANED_PROVIDER_SESSION_ERROR,
+      causeKeys: [`error:turn-1:${ORPHANED_PROVIDER_SESSION_ERROR}`],
+    });
+    // (b) The continuation message is accepted; its turn has not started yet.
+    state.view = viewOf({ ...RECONCILED, messageIds: ["m-0", "restart-continuation"] });
+    expect(settle(state)).toBe("wait:held");
+    // (c) The continuation turn runs.
+    state.view = viewOf({
+      session: { status: "running", activeTurnId: "turn-2" },
+      latestTurn: { turnId: "turn-2", state: "running" },
+      messageIds: ["m-0", "restart-continuation"],
+    });
+    expect(settle(state)).toBe("wait:busy");
+    expect(state.hold).toBeNull();
+    // (d) It completed normally: the queue drains.
+    state.view = viewOf({
+      session: { status: "ready" },
+      latestTurn: { turnId: "turn-2", state: "completed" },
+      messageIds: ["m-0", "restart-continuation", "assistant-2"],
+    });
+    expect(settle(state)).toBe("send");
+  });
+
+  it("holds again when the continuation itself fails", () => {
+    const state = restartedQueue();
+    expect(settle(state)).toBe("wait:held");
+    state.view = viewOf({
+      session: { status: "error", lastError: "Crashed" },
+      latestTurn: { turnId: "turn-2", state: "error" },
+      messageIds: ["m-0", "restart-continuation"],
+    });
+    expect(settle(state)).toBe("wait:held");
+    expect(state.hold).toMatchObject({ causeKeys: ["error:turn-2:Crashed"] });
+  });
+
+  it("keeps a Stop recorded before the restart held until Resume", () => {
+    const state = restartedQueue();
+    state.hold = createInterruptQueueHold("turn-1", NOW);
+    expect(settle(state)).toBe("wait:held");
+    state.view = viewOf({
+      session: { status: "ready" },
+      latestTurn: { turnId: "turn-2", state: "completed" },
+      messageIds: ["m-0", "direct-send", "assistant-2"],
+    });
+    expect(settle(state)).toBe("wait:held");
+    expect(state.hold?.causeKeys).toEqual(["interrupt:turn-1"]);
   });
 });
