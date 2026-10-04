@@ -39,6 +39,26 @@ export type TurnLivenessVerdict =
 const NOT_APPLICABLE: TurnLivenessVerdict = { kind: "not-applicable" };
 const HEALTHY: TurnLivenessVerdict = { kind: "healthy" };
 
+/**
+ * Rules 1 and 2 of `classifyTurnLiveness`: only a running turn on a known
+ * runtime, with an activity record for that runtime, can be classified. Callers
+ * check it first to skip the live-runtime lookup for every other thread.
+ */
+export function turnLivenessApplies(input: {
+  readonly session: OrchestrationSession | null;
+  readonly activity: ProviderRuntimeActivity | null;
+}): boolean {
+  const session = input.session;
+  return (
+    session !== null &&
+    session.status === "running" &&
+    session.activeTurnId !== null &&
+    session.runtimeSessionId !== undefined &&
+    input.activity !== null &&
+    input.activity.runtimeSessionId === session.runtimeSessionId
+  );
+}
+
 export function classifyTurnLiveness(input: {
   readonly session: OrchestrationSession | null;
   readonly hasPendingRequest: boolean;
@@ -52,23 +72,20 @@ export function classifyTurnLiveness(input: {
   readonly sweepIntervalMs: number;
   readonly unresponsiveAfterMs: number;
 }): TurnLivenessVerdict {
-  const session = input.session;
+  const { session, activity } = input;
   // 1. Only a running turn on a known runtime can be lost or stuck.
+  // 2. No activity record for this runtime: nothing to measure against.
   if (
-    session === null ||
-    session.status !== "running" ||
-    session.activeTurnId === null ||
-    session.runtimeSessionId === undefined
+    !turnLivenessApplies(input) ||
+    session?.activeTurnId == null ||
+    session.runtimeSessionId === undefined ||
+    activity === null
   ) {
     return NOT_APPLICABLE;
   }
   const runtimeSessionId = session.runtimeSessionId;
   const turnId = session.activeTurnId;
-  // 2. No activity record for this runtime: nothing to measure against.
-  if (input.activity === null || input.activity.runtimeSessionId !== runtimeSessionId) {
-    return NOT_APPLICABLE;
-  }
-  const silentForMs = Math.max(0, input.nowMs - input.activity.lastActivityAtMs);
+  const silentForMs = Math.max(0, input.nowMs - activity.lastActivityAtMs);
   // 3. No live runtime.
   if (input.liveRuntimeSessionId === null) {
     if (silentForMs < input.sweepIntervalMs) return HEALTHY;
@@ -93,7 +110,7 @@ export function classifyTurnLiveness(input: {
       runtimeSessionId,
       turnId,
       silentForMs,
-      lastActivityAtMs: input.activity.lastActivityAtMs,
+      lastActivityAtMs: activity.lastActivityAtMs,
     };
   }
   // 7.

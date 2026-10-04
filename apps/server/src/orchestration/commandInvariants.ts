@@ -63,11 +63,20 @@ function hasOpenActivityRequest(
   return hasUncorrelatedRequest || open.size > 0;
 }
 
-/** User messages whose turn start already failed visibly. */
-function failedTurnStartMessageIds(thread: OrchestrationThread): ReadonlySet<string> {
+/**
+ * Turn starts that ended before anything was submitted: those that failed
+ * visibly, and those a Stop cancelled. Neither will ever dispatch.
+ */
+const ENDED_TURN_START_KINDS: ReadonlySet<string> = new Set([
+  "provider.turn.start.failed",
+  "provider.turn.start.cancelled",
+]);
+
+/** User messages whose turn start already failed or was cancelled. */
+function endedTurnStartMessageIds(thread: OrchestrationThread): ReadonlySet<string> {
   const messageIds = new Set<string>();
   for (const activity of thread.activities) {
-    if (activity.kind !== "provider.turn.start.failed") continue;
+    if (!ENDED_TURN_START_KINDS.has(activity.kind)) continue;
     const payload = activity.payload;
     if (payload === null || typeof payload !== "object" || Array.isArray(payload)) continue;
     const messageId = Reflect.get(payload, "messageId");
@@ -78,7 +87,7 @@ function failedTurnStartMessageIds(thread: OrchestrationThread): ReadonlySet<str
 
 export function hasActionableContextHandoff(thread: OrchestrationThread): boolean {
   const decode = Schema.decodeUnknownOption(ContextHandoffActivityPayload);
-  let failedTurnStarts: ReadonlySet<string> | undefined;
+  let endedTurnStarts: ReadonlySet<string> | undefined;
   return thread.activities.some((activity) => {
     if (activity.kind !== "context-handoff") {
       return false;
@@ -89,10 +98,11 @@ export function hasActionableContextHandoff(thread: OrchestrationThread): boolea
         if (payload.status === "dispatching") return true;
         if (payload.status !== "requested" && payload.status !== "preparing") return false;
         // Nothing was sent before `dispatching`. A handoff whose target turn
-        // start already failed (for example, preparation failed before the
-        // coordinator created or could finalize its record) never dispatches.
-        failedTurnStarts ??= failedTurnStartMessageIds(thread);
-        return !failedTurnStarts.has(payload.targetMessageId);
+        // start already failed or was cancelled by a Stop (for example,
+        // preparation ended before the coordinator created or could finalize
+        // its record) never dispatches.
+        endedTurnStarts ??= endedTurnStartMessageIds(thread);
+        return !endedTurnStarts.has(payload.targetMessageId);
       },
     });
   });

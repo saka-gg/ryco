@@ -182,12 +182,45 @@ describe("threadLaneControl turn ownership", () => {
   it.effect("refuses ownership after a user stop past the fence", () =>
     Effect.gen(function* () {
       const control = yield* makeThreadLaneControl;
-      yield* control.noteEvent(interrupt(8, { turnId: "turn-1" }));
+      yield* control.noteEvent(interrupt(8));
       const error = yield* control.beginTurnOwnership(threadId, 5).pipe(Effect.flip);
       assert.instanceOf(error, ProviderSessionStartCancelledError);
       assert.isTrue(yield* control.stopRequestedSince(threadId, 5));
       // An older stop does not block a later handoff.
       yield* control.beginTurnOwnership(threadId, 9);
+      yield* control.endTurnOwnership(threadId);
+    }),
+  );
+
+  it.effect("an interrupt aimed at a turn never refuses a handoff's ownership", () =>
+    Effect.gen(function* () {
+      const control = yield* makeThreadLaneControl;
+      // Agent Control interrupts always carry the turn id they target.
+      yield* control.noteEvent(
+        interrupt(8, { turnId: "turn-0", commandId: "agent-control:op-1:turn-interrupt" }),
+      );
+      yield* control.beginTurnOwnership(threadId, 5);
+      assert.isFalse(yield* control.stopRequestedSince(threadId, 5));
+      yield* control.endTurnOwnership(threadId);
+    }),
+  );
+
+  it.effect("an Agent Control interrupt reaches the owned turn without stopping the thread", () =>
+    Effect.gen(function* () {
+      const control = yield* makeThreadLaneControl;
+      yield* control.beginTurnOwnership(threadId, 5);
+      assert.deepEqual(
+        yield* control.noteEvent(
+          interrupt(6, { turnId: "turn-1", commandId: "agent-control:op-2:turn-interrupt" }),
+        ),
+        { outOfBand: true },
+      );
+      assert.isFalse(yield* control.stopRequestedSince(threadId, 5));
+      // The composer's Stop during the turn carries the turn id the decider filled in.
+      assert.deepEqual(yield* control.noteEvent(interrupt(7, { turnId: "turn-1" })), {
+        outOfBand: true,
+      });
+      assert.isTrue(yield* control.stopRequestedSince(threadId, 5));
       yield* control.endTurnOwnership(threadId);
     }),
   );

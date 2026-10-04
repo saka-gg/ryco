@@ -76,7 +76,10 @@ import { ProviderAdapterRequestError } from "../../provider/Errors.ts";
 import type { ProviderServiceError } from "../../provider/Errors.ts";
 import { resolveProviderOperationTimeouts } from "../../provider/providerOperationPolicy.ts";
 import { TextGeneration } from "../../textGeneration/TextGeneration.ts";
-import { ProviderService } from "../../provider/Services/ProviderService.ts";
+import {
+  ProviderService,
+  type ProviderRuntimeActivity,
+} from "../../provider/Services/ProviderService.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import { ContextHandoffCoordinator } from "../Services/ContextHandoffCoordinator.ts";
@@ -97,6 +100,7 @@ import {
 import {
   classifyTurnLiveness,
   TURN_LOST_DETAIL,
+  turnLivenessApplies,
   type TurnLivenessVerdict,
   unresponsiveTurnDetail,
 } from "../providerTurnLiveness.ts";
@@ -1237,9 +1241,32 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
   );
 
   /**
+   * The exact live runtime of a thread, or `unknown` when ProviderService could
+   * not tell (a directory or adapter lookup failed). Only a successful lookup that
+   * finds nothing means "no live runtime".
+   */
+  const readLiveRuntime = (threadId: ThreadId) =>
+    providerService.getSession(threadId).pipe(
+      Effect.map((live) => ({ known: true as const, live: Option.getOrUndefined(live) })),
+      Effect.catchCause((cause) =>
+        Cause.hasInterruptsOnly(cause)
+          ? Effect.failCause(cause)
+          : Effect.logWarning("provider command reactor could not read the live runtime", {
+              threadId,
+              failureTag: failureTag(cause),
+              cause: Cause.pretty(cause),
+            }).pipe(Effect.as({ known: false as const, live: undefined })),
+      ),
+    );
+
+  /**
    * Settles the projection after a Stop cancelled a session start. Status follows
    * liveness: if the exact projected runtime is still live, keep it (a starting
    * or running status becomes `ready`); otherwise `stopped`. `lastError` is kept.
+   * A turn that the projected runtime is still running was never killed by the
+   * cancelled start (it had not replaced the runtime yet), and a runtime whose
+   * liveness is unknown is not claimed stopped: both keep the session as it is,
+   * and the interrupt's own lane item interrupts the turn.
    * With `force`, always dispatches (it acknowledges a local dispatch, even when
    * no session was projected yet); without it, only an inconsistent projection
    * is corrected.
@@ -1251,17 +1278,22 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     const thread = yield* resolveThread(threadId);
     if (!thread) return;
     const session = thread.session;
-    const live = yield* providerService.getSession(threadId).pipe(
-      Effect.map(Option.getOrUndefined),
-      Effect.catchCause((cause) =>
-        Cause.hasInterruptsOnly(cause) ? Effect.failCause(cause) : Effect.succeed(undefined),
-      ),
-    );
+    const { known, live } = yield* readLiveRuntime(threadId);
     const liveMatches =
       live !== undefined &&
       session !== null &&
       session.runtimeSessionId !== undefined &&
       live.runtimeSessionId === session.runtimeSessionId;
+    if (session !== null && (!known || (liveMatches && session.activeTurnId !== null))) {
+      if (!input.force) return;
+      // Acknowledge the cancelled dispatch without releasing anyone's turn.
+      const now = new Date().toISOString();
+      return yield* setThreadSession({
+        threadId,
+        session: { ...session, updatedAt: now },
+        createdAt: now,
+      });
+    }
     if (!input.force) {
       const inconsistent =
         session !== null &&
@@ -1611,14 +1643,40 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
 
   type InterruptEvent = Extract<ProviderIntentEvent, { type: "thread.turn-interrupt-requested" }>;
 
+  const appendInterruptFailure = (event: InterruptEvent, detail: string) =>
+    appendProviderFailureActivity({
+      threadId: event.payload.threadId,
+      kind: "provider.turn.interrupt.failed",
+      summary: "Provider turn interrupt failed",
+      detail,
+      turnId: event.payload.turnId ?? null,
+      createdAt: event.payload.createdAt,
+    });
+
+  /** The stop an interrupt failure escalated to failed as well. */
+  const appendEscalatedStopFailure = (event: InterruptEvent, stopFailed: string | undefined) =>
+    stopFailed === undefined
+      ? Effect.void
+      : appendProviderFailureActivity({
+          threadId: event.payload.threadId,
+          kind: "provider.session.stop.failed",
+          summary: "Provider session stop failed",
+          detail: stopFailed,
+          turnId: null,
+          createdAt: event.payload.createdAt,
+        });
+
   /**
    * The projection write after an interrupt failed and the session was stopped:
    * session `stopped` with the failure text, and the interrupt failure activity.
-   * Skips sessions that settled on their own meanwhile.
+   * Skips sessions that settled on their own meanwhile. With `alwaysReport` (the
+   * out-of-band path, whose handoff may already have projected its source
+   * `stopped`), the failures are shown whatever the projection says.
    */
   const projectInterruptFailure = Effect.fnUntraced(function* (
     event: InterruptEvent,
     detail: string,
+    options?: { readonly alwaysReport?: boolean; readonly stopFailed?: string | undefined },
   ) {
     const stoppedThread = yield* resolveThread(event.payload.threadId);
     const stoppedSession = stoppedThread?.session;
@@ -1629,6 +1687,10 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
       stoppedSession.activeTurnId === null ||
       (event.payload.turnId !== undefined && stoppedSession.activeTurnId !== event.payload.turnId)
     ) {
+      if (options?.alwaysReport) {
+        yield* appendInterruptFailure(event, detail);
+        yield* appendEscalatedStopFailure(event, options.stopFailed);
+      }
       return;
     }
 
@@ -1649,14 +1711,8 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
       },
       createdAt: event.payload.createdAt,
     });
-    yield* appendProviderFailureActivity({
-      threadId: event.payload.threadId,
-      kind: "provider.turn.interrupt.failed",
-      summary: "Provider turn interrupt failed",
-      detail,
-      turnId: event.payload.turnId ?? null,
-      createdAt: event.payload.createdAt,
-    });
+    yield* appendInterruptFailure(event, detail);
+    yield* appendEscalatedStopFailure(event, options?.stopFailed);
   });
 
   /**
@@ -1710,19 +1766,28 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
           return;
         case "nothing-live":
           return yield* settleAfterInterruptWithoutRuntime(event);
+        case "interrupt-failed-turn-not-current":
+          // As in lane: the targeted turn already ended; nothing to settle or show.
+          return;
         case "stopped-after-interrupt-failure":
-          return yield* projectInterruptFailure(event, outcome.detail);
-        case "stopped":
+          // Always shown: the handoff may already have projected its source stopped.
+          return yield* projectInterruptFailure(event, outcome.detail, {
+            alwaysReport: true,
+            stopFailed: outcome.stopFailed,
+          });
         case "stop-failed":
+          // Only an unexpected out-of-band failure reports this for an interrupt.
+          return yield* appendInterruptFailure(event, outcome.detail);
+        case "stopped":
           return;
       }
     }
 
-    // This interrupt cancelled a start; that item settled the projection and no
-    // provider call is needed (and no dead runtime is resurrected).
-    if (yield* laneControl.cancelledAStart(threadId, event.eventId)) {
-      return;
-    }
+    // This interrupt cancelled a start, whose item already settled the projection.
+    // It still interrupts whatever runtime is live: the cancelled start may not
+    // have replaced the running turn's runtime yet. ProviderService never
+    // recovers a runtime to interrupt it, so nothing dead is resurrected.
+    const cancelledAStart = yield* laneControl.cancelledAStart(threadId, event.eventId);
 
     const thread = yield* resolveThread(threadId);
     if (!thread) {
@@ -1730,6 +1795,8 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     }
     const session = thread.session;
     if (!session || session.status === "stopped") {
+      // The cancelled start found no live runtime and settled the session stopped.
+      if (cancelledAStart) return;
       return yield* appendProviderFailureActivity({
         threadId,
         kind: "provider.turn.interrupt.failed",
@@ -1843,6 +1910,8 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     if (session === "cancelled") return;
     const result = yield* reconcileThreadGoal(threadId);
     if (event.payload.goal.synchronization?.startTurn && result.goal?.status === "active") {
+      // A Stop noted while the goal was reconciled wins: no new agent turn after it.
+      if (yield* laneControl.cancelsStart({ threadId, fenceSequence, kind: "restart" })) return;
       const sessions = yield* providerService.listSessions();
       if (sessions.some((session) => session.threadId === threadId && session.status === "running"))
         return;
@@ -2191,12 +2260,10 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
       const thread = yield* resolveThread(threadId);
       const session = thread?.session;
       if (!session || session.status === "stopped") return;
-      const live = Option.getOrUndefined(
-        yield* providerService
-          .getSession(threadId)
-          .pipe(Effect.orElseSucceed(() => Option.none<ProviderSession>())),
-      );
-      if (live !== undefined && live.runtimeSessionId === session.runtimeSessionId) return;
+      const { known, live } = yield* readLiveRuntime(threadId);
+      // Unknown liveness is not "gone": leave the session as it is.
+      if (!known || (live !== undefined && live.runtimeSessionId === session.runtimeSessionId))
+        return;
       yield* setThreadSession({
         threadId,
         session: {
@@ -2291,20 +2358,25 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
   const livenessSuspects = new Map<ThreadId, TurnLivenessVerdict>();
   const livenessWarned = new Map<ThreadId, TurnId>();
 
+  /**
+   * Classifies one thread's turn. The live-runtime lookup runs only for a running
+   * turn whose runtime has an activity record. A `null` verdict means liveness is
+   * unknown (the lookup failed): never act on it, and keep any suspicion as is.
+   */
   const classifyThreadLiveness = Effect.fnUntraced(function* (input: {
     readonly threadId: ThreadId;
+    readonly activity: ProviderRuntimeActivity | null;
     readonly previous: TurnLivenessVerdict | null;
   }) {
     const nowMs = yield* Clock.currentTimeMillis;
     const thread = yield* resolveThread(input.threadId);
     const session = thread?.session ?? null;
-    const activities = yield* providerService.listRuntimeActivity?.() ?? Effect.succeed([]);
-    const activity = activities.find((entry) => entry.threadId === input.threadId) ?? null;
-    const live = Option.getOrUndefined(
-      yield* providerService
-        .getSession(input.threadId)
-        .pipe(Effect.orElseSucceed(() => Option.none<ProviderSession>())),
-    );
+    const activity = input.activity;
+    if (!turnLivenessApplies({ session, activity })) {
+      return { verdict: { kind: "not-applicable" } as TurnLivenessVerdict, session };
+    }
+    const { known, live } = yield* readLiveRuntime(input.threadId);
+    if (!known) return { verdict: null, session };
     const verdict = classifyTurnLiveness({
       session,
       hasPendingRequest: Boolean(thread?.hasPendingApprovals || thread?.hasPendingUserInput),
@@ -2327,11 +2399,14 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     threadId: ThreadId,
     verdict: LivenessVerdict,
   ) {
+    const activities = yield* providerService.listRuntimeActivity?.() ?? Effect.succeed([]);
     const { verdict: current, session } = yield* classifyThreadLiveness({
       threadId,
+      activity: activities.find((entry) => entry.threadId === threadId) ?? null,
       previous: verdict,
     });
     if (
+      current === null ||
       session === null ||
       current.kind !== verdict.kind ||
       current.runtimeSessionId !== verdict.runtimeSessionId ||
@@ -2445,13 +2520,36 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
    */
   const runOutOfBandControl = (job: OutOfBandJob): Effect.Effect<void> => {
     const threadId = job.event.payload.threadId;
-    const stop = providerService.stopSession({ threadId }).pipe(Effect.exit);
+    // Built only when it runs: an escalation is conditional.
+    const stop = Effect.suspend(() => providerService.stopSession({ threadId })).pipe(Effect.exit);
     const resolveOutcome: Effect.Effect<OutOfBandOutcome> = Effect.gen(function* () {
       if (job.event.type === "thread.turn-interrupt-requested") {
         const interruptExit = yield* Effect.exit(providerService.interruptTurn({ threadId }));
         if (Exit.isSuccess(interruptExit)) return { kind: "interrupted" } as const;
         if (isSessionNotFound(interruptExit.cause)) return { kind: "nothing-live" } as const;
         const detail = userFacingFailureDetail(interruptExit.cause);
+        yield* Effect.logWarning("provider command reactor failed to interrupt a handoff turn", {
+          threadId,
+          failureTag: failureTag(interruptExit.cause),
+          cause: Cause.pretty(interruptExit.cause),
+        });
+        // The in-lane rule: an interrupt aimed at a turn that is no longer the
+        // active one never escalates to stopping the whole session.
+        // When the projection cannot be read, the user's Stop still escalates.
+        const targetTurnId = job.event.payload.turnId;
+        if (targetTurnId !== undefined) {
+          const latest = yield* resolveThread(threadId).pipe(
+            Effect.map((thread) => ({ known: true as const, thread })),
+            Effect.catchCause((cause) =>
+              Cause.hasInterruptsOnly(cause)
+                ? Effect.interrupt
+                : Effect.succeed({ known: false as const, thread: undefined }),
+            ),
+          );
+          if (latest.known && latest.thread?.session?.activeTurnId !== targetTurnId) {
+            return { kind: "interrupt-failed-turn-not-current", detail } as const;
+          }
+        }
         const stopExit = yield* stop;
         return {
           kind: "stopped-after-interrupt-failure",
@@ -2542,8 +2640,11 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
       if (!(yield* lifecycleLanes.isIdle(threadId))) continue;
       const { verdict } = yield* classifyThreadLiveness({
         threadId,
+        activity,
         previous: livenessSuspects.get(threadId) ?? null,
       });
+      // Unknown this sweep: keep the suspicion for the next one.
+      if (verdict === null) continue;
       switch (verdict.kind) {
         case "suspect-lost":
           livenessSuspects.set(threadId, verdict);

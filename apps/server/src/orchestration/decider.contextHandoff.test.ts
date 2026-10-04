@@ -268,6 +268,26 @@ describe("context handoff decider", () => {
       );
     });
 
+    it("stops blocking once a Stop cancelled its target turn start before the coordinator ran", async () => {
+      const result = await decide([
+        earlierHandoffActivity,
+        {
+          id: EventId.make("turn-start-cancelled:message-before"),
+          tone: "info" as const,
+          kind: "provider.turn.start.cancelled",
+          summary: "Turn start cancelled",
+          payload: {
+            messageId: "message-before",
+            detail: "Stopped before the provider session started.",
+            reason: "stopped-before-start",
+          },
+          turnId: null,
+          createdAt: now,
+        },
+      ]);
+      expect(result._tag).toBe("Success");
+    });
+
     it("keeps blocking when only another message's turn start failed", async () => {
       const result = await decide([earlierHandoffActivity, turnStartFailure("some-other-message")]);
       expect(result._tag).toBe("Failure");

@@ -17,9 +17,18 @@
  * - Provider-originated events (`provider:` command ids) are ignored.
  *
  * A context-handoff lane item *owns a running turn* from the moment it
- * persists `dispatching` until it returns. A user stop or interrupt noted
- * during ownership reports `outOfBand: true`, so the reactor delivers its
- * provider-side action right away instead of queueing it behind the turn.
+ * persists `dispatching` until it returns. Only a stop that would cancel a
+ * turn start (a session stop or a `turnId`-less interrupt) refuses ownership.
+ * A user stop or interrupt noted during ownership reports `outOfBand: true`,
+ * so the reactor delivers its provider-side action right away instead of
+ * queueing it behind the turn. It also marks the handoff stop-requested,
+ * except for an Agent Control interrupt (`agent-control:` command ids): that
+ * interrupts the turn, but is not the user stopping the thread.
+ *
+ * Cancelling a start never stands in for an interrupt: the interrupt's own
+ * lane item still interrupts whatever runtime is live (a cancelled restart
+ * may not have touched the running turn yet). `cancelledAStart` only tells it
+ * that the projection was already settled by the cancelled item.
  *
  * All per-thread state lives in one Ref; every operation is one
  * `Ref.modify`, so registering a start is atomic with noting a stop.
@@ -74,6 +83,8 @@ export type StartKind = "turn" | "restart";
 export type OutOfBandOutcome =
   | { readonly kind: "interrupted" }
   | { readonly kind: "nothing-live" }
+  /** The interrupt failed, but its turn is no longer the active one: nothing escalated. */
+  | { readonly kind: "interrupt-failed-turn-not-current"; readonly detail: string }
   | {
       readonly kind: "stopped-after-interrupt-failure";
       readonly detail: string;
@@ -94,12 +105,12 @@ interface CancelSignal {
 }
 
 interface LaneState {
+  /** Session stops and `turnId`-less user interrupts: cancel every start kind. */
   readonly stopAllSeq: number;
   readonly stopAllEventId: EventId | null;
+  /** Every user stop intent: cancels restarts. Always >= stopAllSeq. */
   readonly stopRestartsSeq: number;
   readonly stopRestartsEventId: EventId | null;
-  readonly userStopSeq: number;
-  readonly userStopEventId: EventId | null;
   readonly currentStart?: {
     readonly fenceSequence: number;
     readonly kind: StartKind;
@@ -117,8 +128,6 @@ const EMPTY_LANE: LaneState = {
   stopAllEventId: null,
   stopRestartsSeq: 0,
   stopRestartsEventId: null,
-  userStopSeq: 0,
-  userStopEventId: null,
   outOfBand: new Map(),
   cancelled: new Set(),
   retained: 0,
@@ -144,15 +153,25 @@ export interface ThreadLaneControl {
   ) => Effect.Effect<void, ProviderSessionStartCancelledError>;
   /** Whether a noted stop cancels this start. Records nothing. */
   readonly cancelsStart: (at: StartFence) => Effect.Effect<boolean>;
-  /** Consumes the record that this stop/interrupt event cancelled a start. */
+  /**
+   * Consumes the record that this stop/interrupt event cancelled a start, so its
+   * item settled the projection. It does not mean no runtime is left to interrupt.
+   */
   readonly cancelledAStart: (threadId: ThreadId, eventId: EventId) => Effect.Effect<boolean>;
-  /** Handoff: fails Cancelled if a user stop/interrupt was noted after the fence; else records ownership. */
+  /**
+   * Handoff: fails Cancelled if a stop that cancels turn starts (a session stop or
+   * a `turnId`-less interrupt) was noted after the fence; else records ownership.
+   */
   readonly beginTurnOwnership: (
     threadId: ThreadId,
     fenceSequence: number,
   ) => Effect.Effect<void, ProviderSessionStartCancelledError>;
   readonly endTurnOwnership: (threadId: ThreadId) => Effect.Effect<void>;
-  /** A user stop or interrupt was noted after the fence (before or during ownership). */
+  /**
+   * The user stopped the thread after the fence: a session stop or `turnId`-less
+   * interrupt, or any user stop or interrupt during ownership except an Agent
+   * Control interrupt.
+   */
   readonly stopRequestedSince: (
     threadId: ThreadId,
     fenceSequence: number,
@@ -181,6 +200,10 @@ export interface ThreadLaneControl {
 
 const isProviderOriginated = (event: ProviderIntentEvent): boolean =>
   event.commandId !== null && String(event.commandId).startsWith("provider:");
+
+/** An agent's approved interrupt: it interrupts a turn, it does not stop the thread. */
+const isAgentControlOriginated = (event: ProviderIntentEvent): boolean =>
+  event.commandId !== null && String(event.commandId).startsWith("agent-control:");
 
 /** A session stop, or an interrupt that a user (not the provider) requested. */
 export const isUserStopIntent = (event: ProviderIntentEvent): boolean =>
@@ -238,8 +261,6 @@ export const makeThreadLaneControl: Effect.Effect<ThreadLaneControl> = Effect.ge
         ...lane,
         stopRestartsSeq: Math.max(lane.stopRestartsSeq, seq),
         stopRestartsEventId: seq >= lane.stopRestartsSeq ? event.eventId : lane.stopRestartsEventId,
-        userStopSeq: Math.max(lane.userStopSeq, seq),
-        userStopEventId: seq >= lane.userStopSeq ? event.eventId : lane.userStopEventId,
         ...(stopsAll
           ? {
               stopAllSeq: Math.max(lane.stopAllSeq, seq),
@@ -260,7 +281,10 @@ export const makeThreadLaneControl: Effect.Effect<ThreadLaneControl> = Effect.ge
       }
       let outOfBand = false;
       if (lane.owner !== undefined && seq > lane.owner.fenceSequence) {
-        next = { ...next, owner: { ...lane.owner, stopRequested: true } };
+        // An agent's interrupt reaches the running turn too, but only the user's
+        // stop keeps a failed handoff from restoring its source as ready.
+        const stopRequested = lane.owner.stopRequested || !isAgentControlOriginated(event);
+        next = { ...next, owner: { ...lane.owner, stopRequested } };
         outOfBand = true;
       }
       return [{ fire, outOfBand }, next] as const;
@@ -326,10 +350,10 @@ export const makeThreadLaneControl: Effect.Effect<ThreadLaneControl> = Effect.ge
 
   const beginTurnOwnership: ThreadLaneControl["beginTurnOwnership"] = (threadId, fenceSequence) =>
     modifyLane(threadId, (lane) => {
-      if (lane.userStopSeq > fenceSequence && lane.userStopEventId !== null) {
-        const signal = { eventId: lane.userStopEventId, seq: lane.userStopSeq };
-        return [signal, withCancelled(lane, signal.eventId)] as const;
-      }
+      // The same rule as a turn start: an interrupt aimed at some turn (every
+      // Agent Control interrupt) never cancels the user's handoff turn.
+      const signal = cancellingSignal(lane, { threadId, fenceSequence, kind: "turn" });
+      if (signal !== null) return [signal, withCancelled(lane, signal.eventId)] as const;
       return [null, { ...lane, owner: { fenceSequence, stopRequested: false } }] as const;
     }).pipe(
       Effect.flatMap((signal) =>
@@ -344,9 +368,13 @@ export const makeThreadLaneControl: Effect.Effect<ThreadLaneControl> = Effect.ge
     });
 
   const stopRequestedSince: ThreadLaneControl["stopRequestedSince"] = (threadId, fenceSequence) =>
-    // noteEvent raises userStopSeq for every user stop, including those that
-    // flag the owner, so the sequence alone answers "since the fence".
-    readLane(threadId).pipe(Effect.map((lane) => lane.userStopSeq > fenceSequence));
+    readLane(threadId).pipe(
+      Effect.map(
+        (lane) =>
+          // noteEvent flags the owner only for stops past its own fence.
+          lane.stopAllSeq > fenceSequence || lane.owner?.stopRequested === true,
+      ),
+    );
 
   const registerOutOfBand: ThreadLaneControl["registerOutOfBand"] = (threadId, eventId) =>
     Deferred.make<OutOfBandOutcome>().pipe(
@@ -390,7 +418,7 @@ export const makeThreadLaneControl: Effect.Effect<ThreadLaneControl> = Effect.ge
         lane.currentStart !== undefined ||
         lane.outOfBand.size > 0 ||
         lane.retained > 0 ||
-        Math.max(lane.stopAllSeq, lane.stopRestartsSeq, lane.userStopSeq) > processedSequence
+        Math.max(lane.stopAllSeq, lane.stopRestartsSeq) > processedSequence
       ) {
         return current;
       }
