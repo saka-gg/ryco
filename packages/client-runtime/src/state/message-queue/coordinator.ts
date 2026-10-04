@@ -8,6 +8,8 @@ import {
 } from "../session/dispatchAck.ts";
 import type { AppState } from "../threads/store.ts";
 import { resolveQueueDrainStep, type QueueDrainStep } from "./drain.ts";
+import { usageLimitHoldReleaseAtMs } from "@ryco/shared/usageLimit";
+
 import { deriveQueueFailureCauses, releaseQueueHoldKeys, type QueueHold } from "./hold.ts";
 import type { QueuedMessage } from "./logic.ts";
 import type { MessageQueueState } from "./store.ts";
@@ -99,6 +101,8 @@ const MAX_SNAPSHOTS = 64;
 const MAX_DISPATCHED_PER_THREAD = 16;
 /** Bookkeeping steps re-evaluate in place; this bounds a misbehaving loop. */
 const MAX_STEPS_PER_EVALUATION = 8;
+/** setTimeout's largest delay; a later usage-limit release re-arms on the next evaluation. */
+const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
 
 const EMPTY_DISPATCHED: ReadonlySet<string> = new Set();
 
@@ -146,6 +150,8 @@ export function createMessageQueueDrainCoordinator<C, S>(
   const lastInputs = new Map<string, readonly unknown[]>();
   const lastSteps = new Map<string, QueueDrainStep>();
   const deferTimers = new Map<string, unknown>();
+  // One wake per thread at the end of its usage-limit hold: nothing else changes then.
+  const limitWakeTimers = new Map<string, { readonly atMs: number; readonly handle: unknown }>();
   let environmentRecheckTimer: unknown = null;
   const dirty = new Set<string>();
   let flushScheduled = false;
@@ -209,8 +215,34 @@ export function createMessageQueueDrainCoordinator<C, S>(
     clearAckTimer(key);
   }
 
+  function clearLimitWake(key: string): void {
+    const wake = limitWakeTimers.get(key);
+    if (wake === undefined) return;
+    timers.clearTimeout(wake.handle);
+    limitWakeTimers.delete(key);
+  }
+
+  function syncLimitWake(key: string, view: QueueThreadView | null): void {
+    const releaseAtMs = view ? usageLimitHoldReleaseAtMs(view, now()) : null;
+    if (releaseAtMs === null) {
+      clearLimitWake(key);
+      return;
+    }
+    if (limitWakeTimers.get(key)?.atMs === releaseAtMs) return;
+    clearLimitWake(key);
+    const delay = Math.min(Math.max(0, releaseAtMs - now()), MAX_TIMER_DELAY_MS);
+    limitWakeTimers.set(key, {
+      atMs: releaseAtMs,
+      handle: timers.setTimeout(() => {
+        limitWakeTimers.delete(key);
+        markDirty(key);
+      }, delay),
+    });
+  }
+
   function cleanupKey(key: string): void {
     clearPending(key);
+    clearLimitWake(key);
     dispatched.delete(key);
     const deferTimer = deferTimers.get(key);
     if (deferTimer !== undefined) {
@@ -224,6 +256,8 @@ export function createMessageQueueDrainCoordinator<C, S>(
   function clearAllBookkeeping(): void {
     for (const timer of ackTimers.values()) timers.clearTimeout(timer);
     for (const timer of deferTimers.values()) timers.clearTimeout(timer);
+    for (const wake of limitWakeTimers.values()) timers.clearTimeout(wake.handle);
+    limitWakeTimers.clear();
     if (environmentRecheckTimer !== null) timers.clearTimeout(environmentRecheckTimer);
     environmentRecheckTimer = null;
     for (const release of retains.values()) release();
@@ -304,6 +338,7 @@ export function createMessageQueueDrainCoordinator<C, S>(
         (platform.isLocalDraftKey?.(key) ?? false) &&
         sender?.kind === "foreground";
       syncDetailRetention(key, ref, view, environment.mutationReady);
+      syncLimitWake(key, view);
       const hold = queueState.holdsByThreadKey[key] ?? null;
       const step = resolveQueueDrainStep({
         nowIso: nowIso(),
@@ -344,6 +379,10 @@ export function createMessageQueueDrainCoordinator<C, S>(
       case "baseline":
       case "acknowledge":
         store.acknowledgeCauses(key, step.causeKeys);
+        return true;
+      case "release":
+        store.acknowledgeCauses(key, step.causeKeys);
+        queueStore.getState().removeHoldCauses(key, step.causeKeys);
         return true;
       case "reconcile": {
         for (const id of step.removeIds) {
@@ -531,6 +570,7 @@ export function createMessageQueueDrainCoordinator<C, S>(
             view
               ? deriveQueueFailureCauses(view, dispatchedFor(key), {
                   includeUnsettled: true,
+                  nowMs: now(),
                 }).map((cause) => cause.causeKey)
               : [],
           );
@@ -600,7 +640,10 @@ export function createMessageQueueDrainCoordinator<C, S>(
       releaseQueueHoldKeys(
         state.holdsByThreadKey[threadKey] ?? null,
         view
-          ? deriveQueueFailureCauses(view, dispatchedFor(threadKey), { includeUnsettled: true })
+          ? deriveQueueFailureCauses(view, dispatchedFor(threadKey), {
+              includeUnsettled: true,
+              nowMs: now(),
+            })
           : [],
       ),
     );

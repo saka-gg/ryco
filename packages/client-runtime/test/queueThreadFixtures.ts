@@ -13,6 +13,7 @@ import {
   type OrchestrationSessionStatus,
   type OrchestrationThreadActivity,
   type ScopedThreadRef,
+  type ThreadUsageLimit,
 } from "@ryco/contracts";
 
 import type { AppState, EnvironmentState } from "../src/state/threads/store.ts";
@@ -71,6 +72,9 @@ export interface ThreadFixture {
   readonly worktreeArchivedAt?: string | null;
   readonly summary?: Partial<SidebarThreadSummary>;
   readonly history?: boolean;
+  readonly usageLimit?: ThreadUsageLimit | null;
+  /** The thread's model target instance; defaults to "codex". */
+  readonly modelInstanceId?: string;
 }
 
 function toSession(fixture: SessionFixture): ThreadSession {
@@ -151,7 +155,10 @@ export function withThread(state: AppState, fixture: ThreadFixture): AppState {
     codexThreadId: null,
     projectId: PROJECT,
     title: fixture.id,
-    modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" },
+    modelSelection: {
+      instanceId: ProviderInstanceId.make(fixture.modelInstanceId ?? "codex"),
+      model: "gpt-5",
+    },
     runtimeMode: "full-access",
     interactionMode: "default",
     error: null,
@@ -160,6 +167,7 @@ export function withThread(state: AppState, fixture: ThreadFixture): AppState {
     branch: null,
     worktreePath: null,
     worktreeId,
+    ...(fixture.usageLimit !== undefined ? { usageLimit: fixture.usageLimit } : {}),
   };
   const latestTurn = fixture.latestTurn
     ? {

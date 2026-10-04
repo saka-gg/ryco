@@ -1,3 +1,5 @@
+import { applicableUsageLimit, isUsageLimitQueueHeld } from "@ryco/shared/usageLimit";
+
 import type { QueueThreadView } from "./threadView.ts";
 
 /**
@@ -52,6 +54,20 @@ export interface DeriveQueueFailureCausesOptions {
    * once its turn settles.
    */
   readonly includeUnsettled?: boolean;
+  /** The usage-limit hold is time-bound (it ends after the reset). Defaults to now. */
+  readonly nowMs?: number;
+}
+
+const USAGE_LIMIT_CAUSE_PREFIX = "limit:";
+
+/** One limit per turn, so the turn id keys it and names its paired `error:` causes. */
+export function usageLimitCauseKey(turnId: string): string {
+  return `${USAGE_LIMIT_CAUSE_PREFIX}${turnId}`;
+}
+
+/** The usage limit that holds the queue now, if any (see `isUsageLimitQueueHeld`). */
+function heldUsageLimit(view: QueueThreadView, nowMs: number) {
+  return isUsageLimitQueueHeld(view, nowMs) ? applicableUsageLimit(view) : null;
 }
 
 /**
@@ -77,9 +93,8 @@ export function isLatestTurnInterruptSettled(view: QueueThreadView): boolean {
 }
 
 /**
- * Derived, current failure causes for a thread.
- *
- * Usage-limits adds its `limit:` rule HERE, ranked before `error`.
+ * Derived, current failure causes for a thread. A usage limit (`limit:`) outranks
+ * the `error:` cause of the same failed turn.
  */
 export function deriveQueueFailureCauses(
   view: QueueThreadView,
@@ -87,6 +102,17 @@ export function deriveQueueFailureCauses(
   options: DeriveQueueFailureCausesOptions = {},
 ): QueueFailureCause[] {
   const causes: QueueFailureCause[] = [];
+  // Derived, never sticky: it stops being a cause when the limit is cleared, the
+  // thread targets another instance, or the hold window after the reset passes.
+  const limit = heldUsageLimit(view, options.nowMs ?? Date.now());
+  if (limit !== null) {
+    causes.push({
+      reason: "limit",
+      causeKey: usageLimitCauseKey(limit.turnId),
+      detail: limit.message,
+      providerInstanceId: limit.providerInstanceId,
+    });
+  }
   for (const failure of view.turnStartFailures) {
     if (!dispatchedMessageIds.has(failure.messageId)) continue;
     causes.push({
@@ -121,6 +147,38 @@ export function deriveQueueFailureCauses(
     });
   }
   return causes;
+}
+
+/**
+ * Hold causes a usage limit no longer justifies: its `limit:` cause and the `error:`
+ * causes of the same limited turn, once the limit is cleared (a newer turn started),
+ * targets another instance, or its hold window ended. The caller removes them from the
+ * hold and acknowledges them, so the same failure never holds the queue again, while a
+ * newer turn's own error still does.
+ */
+export function releasableUsageLimitCauseKeys(input: {
+  readonly hold: QueueHold | null;
+  readonly view: QueueThreadView;
+  readonly currentCauses: readonly QueueFailureCause[];
+  readonly nowMs: number;
+}): string[] {
+  if (input.hold === null) return [];
+  const heldTurnId = heldUsageLimit(input.view, input.nowMs)?.turnId ?? null;
+  const keys: string[] = [];
+  for (const key of input.hold.causeKeys) {
+    if (!key.startsWith(USAGE_LIMIT_CAUSE_PREFIX)) continue;
+    const turnId = key.slice(USAGE_LIMIT_CAUSE_PREFIX.length);
+    if (turnId === heldTurnId) continue;
+    const errorPrefix = `error:${turnId}:`;
+    keys.push(
+      key,
+      ...input.hold.causeKeys.filter((candidate) => candidate.startsWith(errorPrefix)),
+      ...input.currentCauses
+        .map((cause) => cause.causeKey)
+        .filter((candidate) => candidate.startsWith(errorPrefix)),
+    );
+  }
+  return uniqueKeys(keys);
 }
 
 /** Causes not yet acknowledged nor covered by the current hold, split by provider exemption. */

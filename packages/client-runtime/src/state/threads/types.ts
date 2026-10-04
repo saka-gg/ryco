@@ -23,6 +23,7 @@ import type {
   WorktreeId,
   WorktreeOrigin,
   ThreadGoal,
+  ThreadUsageLimit,
   ThreadPriorityProjectedRanking,
 } from "@ryco/contracts";
 import { DEFAULT_AGENT_TOKEN_MODE as CONTRACT_DEFAULT_AGENT_TOKEN_MODE } from "@ryco/contracts";
@@ -166,6 +167,8 @@ export interface Thread {
   settledAt?: string | null | undefined;
   snoozedUntil?: string | null | undefined;
   snoozedAt?: string | null | undefined;
+  /** Provider usage limit that stopped the thread; absent on older servers. */
+  usageLimit?: ThreadUsageLimit | null | undefined;
   updatedAt?: string | undefined;
   latestTurn: OrchestrationLatestTurn | null;
   goal?: ThreadGoal | null;
@@ -198,6 +201,8 @@ export interface ThreadShell {
   settledAt?: string | null | undefined;
   snoozedUntil?: string | null | undefined;
   snoozedAt?: string | null | undefined;
+  /** Provider usage limit that stopped the thread; absent on older servers. */
+  usageLimit?: ThreadUsageLimit | null | undefined;
   updatedAt?: string | undefined;
   branch: string | null;
   worktreePath: string | null;
@@ -232,6 +237,8 @@ export interface SidebarThreadSummary {
   settledAt?: string | null | undefined;
   snoozedUntil?: string | null | undefined;
   snoozedAt?: string | null | undefined;
+  /** Provider usage limit that stopped the thread; absent on older servers. */
+  usageLimit?: ThreadUsageLimit | null | undefined;
   updatedAt?: string | undefined;
   latestTurn: OrchestrationLatestTurn | null;
   branch: string | null;

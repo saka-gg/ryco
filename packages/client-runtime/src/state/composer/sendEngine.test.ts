@@ -271,3 +271,27 @@ describe("send engine — onBeforeTurnStart", () => {
     expect(harness.calls).not.toContain("dispatch:thread.turn.start");
   });
 });
+
+describe("send engine — usage-limit resume", () => {
+  it("passes a commandId override and the usage-limit guard to turn.start", async () => {
+    const harness = makeDispatchHarness({
+      isFirstMessage: false,
+      commandId: CommandId.make("usage-limit-resume:limit-1"),
+      usageLimitResumeGuard: { limitId: "limit-1", origin: "manual" },
+    });
+    await commitSendTurnDispatch(harness.input);
+    const turnStart = harness.commands.find((command) => command.type === "thread.turn.start");
+    expect(turnStart).toMatchObject({
+      commandId: "usage-limit-resume:limit-1",
+      usageLimitResumeGuard: { limitId: "limit-1", origin: "manual" },
+    });
+  });
+
+  it("keeps the default command id and omits the guard otherwise", async () => {
+    const harness = makeDispatchHarness();
+    await commitSendTurnDispatch(harness.input);
+    const turnStart = harness.commands.find((command) => command.type === "thread.turn.start");
+    expect(turnStart?.commandId).toBe("composer-send:thread-1:message-1");
+    expect(turnStart).not.toHaveProperty("usageLimitResumeGuard");
+  });
+});

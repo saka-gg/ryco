@@ -350,6 +350,7 @@ function mapThread(thread: OrchestrationThread, environmentId: EnvironmentId): T
     settledAt: thread.settledAt,
     snoozedUntil: thread.snoozedUntil ?? null,
     snoozedAt: thread.snoozedAt ?? null,
+    usageLimit: thread.usageLimit ?? null,
     updatedAt: thread.updatedAt,
     latestTurn: thread.latestTurn,
     pendingSourceProposedPlan: thread.latestTurn?.sourceProposedPlan,
@@ -390,6 +391,7 @@ function mapThreadShell(
     settledAt: thread.settledAt,
     snoozedUntil: thread.snoozedUntil ?? null,
     snoozedAt: thread.snoozedAt ?? null,
+    usageLimit: thread.usageLimit ?? null,
     updatedAt: thread.updatedAt,
     branch: thread.branch,
     worktreePath: thread.worktreePath,
@@ -419,6 +421,7 @@ function mapThreadShell(
     settledAt: thread.settledAt,
     snoozedUntil: thread.snoozedUntil ?? null,
     snoozedAt: thread.snoozedAt ?? null,
+    usageLimit: thread.usageLimit ?? null,
     updatedAt: thread.updatedAt,
     latestTurn: thread.latestTurn,
     branch: thread.branch,
@@ -460,6 +463,7 @@ function toThreadShell(thread: Thread): ThreadShell {
     settledAt: thread.settledAt,
     snoozedUntil: thread.snoozedUntil ?? null,
     snoozedAt: thread.snoozedAt ?? null,
+    usageLimit: thread.usageLimit ?? null,
     updatedAt: thread.updatedAt,
     branch: thread.branch,
     worktreePath: thread.worktreePath,
@@ -569,6 +573,7 @@ function sidebarThreadSummariesEqual(
     left.settledAt === right.settledAt &&
     left.snoozedUntil === right.snoozedUntil &&
     left.snoozedAt === right.snoozedAt &&
+    threadUsageLimitsEqual(left.usageLimit, right.usageLimit) &&
     left.updatedAt === right.updatedAt &&
     latestTurnsEqual(left.latestTurn, right.latestTurn) &&
     left.branch === right.branch &&
@@ -583,6 +588,28 @@ function sidebarThreadSummariesEqual(
     left.hasActionableProposedPlan === right.hasActionableProposedPlan &&
     (left.backgroundLiveness ?? null) === (right.backgroundLiveness ?? null) &&
     threadPrioritiesEqual(left.priority, right.priority)
+  );
+}
+
+function threadUsageLimitsEqual(
+  left: ThreadShell["usageLimit"],
+  right: ThreadShell["usageLimit"],
+): boolean {
+  const a = left ?? null;
+  const b = right ?? null;
+  if (a === b) return true;
+  return (
+    a !== null &&
+    b !== null &&
+    a.limitId === b.limitId &&
+    a.provider === b.provider &&
+    a.providerInstanceId === b.providerInstanceId &&
+    a.turnId === b.turnId &&
+    a.message === b.message &&
+    a.limitedAt === b.limitedAt &&
+    a.resetAt === b.resetAt &&
+    a.autoResume === b.autoResume &&
+    a.updatedAt === b.updatedAt
   );
 }
 
@@ -626,6 +653,7 @@ function threadShellsEqual(left: ThreadShell | undefined, right: ThreadShell): b
     left.settledAt === right.settledAt &&
     left.snoozedUntil === right.snoozedUntil &&
     left.snoozedAt === right.snoozedAt &&
+    threadUsageLimitsEqual(left.usageLimit, right.usageLimit) &&
     left.updatedAt === right.updatedAt &&
     left.branch === right.branch &&
     left.worktreePath === right.worktreePath &&

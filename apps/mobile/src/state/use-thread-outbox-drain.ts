@@ -29,6 +29,7 @@ import {
   drainThreadOutbox,
   hydrateThreadOutbox,
   listThreadOutboxMessages,
+  nextThreadOutboxLimitReleaseAtMs,
   subscribeThreadOutbox,
   trackThreadOutboxLiveCauses,
   type ThreadOutboxDrainState,
@@ -121,10 +122,54 @@ export function readThreadDrainState(ref: ScopedThreadRef): ThreadOutboxDrainSta
   };
 }
 
+/** setTimeout's largest delay; a later release re-arms after the next pass. */
+const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
+
+/**
+ * Keeps ONE wake timer for the earliest usage-limit hold release among queued threads:
+ * the hold ends by time alone, with no store change to trigger a drain. Exported for
+ * testing.
+ */
+export function createOutboxLimitWake(deps: {
+  readonly run: () => void;
+  readonly setTimeout: (callback: () => void, ms: number) => unknown;
+  readonly clearTimeout: (handle: unknown) => void;
+}): { sync(releaseAtMs: number | null, nowMs: number): void } {
+  let current: { readonly atMs: number; readonly handle: unknown } | null = null;
+  return {
+    sync(releaseAtMs, nowMs) {
+      if (current !== null && current.atMs === releaseAtMs) return;
+      if (current !== null) deps.clearTimeout(current.handle);
+      current = null;
+      if (releaseAtMs === null) return;
+      const delay = Math.min(Math.max(0, releaseAtMs - nowMs), MAX_TIMER_DELAY_MS);
+      current = {
+        atMs: releaseAtMs,
+        handle: deps.setTimeout(() => {
+          current = null;
+          deps.run();
+        }, delay),
+      };
+    },
+  };
+}
+
+const outboxLimitWake = createOutboxLimitWake({
+  run: () => runOutboxDrain(),
+  setTimeout: (callback, ms) => setTimeout(callback, ms),
+  clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+});
+
 export function runOutboxDrain(): void {
   void drainThreadOutbox({
     readThreadDrainState,
     sendQueuedMessage: sendQueuedThreadMessage,
+  }).then(() => {
+    const nowMs = Date.now();
+    outboxLimitWake.sync(
+      nextThreadOutboxLimitReleaseAtMs((ref) => readThreadDrainState(ref).view, nowMs),
+      nowMs,
+    );
   });
 }
 

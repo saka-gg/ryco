@@ -190,7 +190,7 @@ function mutationBlocker(
 function settlementInput(input: {
   readonly thread: SidebarThreadSummary;
   readonly worktree: SidebarWorktreeSummary | null;
-  readonly environment: ThreadInboxEnvironment;
+  readonly environment: Pick<ThreadInboxEnvironment, "threadSettlementSupported">;
   readonly pinned: boolean;
   readonly hasLocalQueuedMessage: boolean;
   readonly deliveryUnknown: boolean;
@@ -227,6 +227,34 @@ function settlementInput(input: {
     autoSettleAfterDays: input.autoSettleAfterDays,
     nowMs: input.nowMs,
   };
+}
+
+export interface ThreadSnoozeEligibilityInput {
+  readonly thread: SidebarThreadSummary;
+  readonly worktree?: SidebarWorktreeSummary | null | undefined;
+  readonly environment: Pick<ThreadInboxEnvironment, "threadSettlementSupported">;
+  /** A locally queued follow-up blocks snoozing, as in the inbox. */
+  readonly hasLocalQueuedMessage: boolean;
+  readonly deliveryUnknown?: boolean | undefined;
+  readonly nowMs: number;
+}
+
+/** The inbox's snooze eligibility for one thread, for surfaces outside the inbox. */
+export function deriveThreadSnoozeEligibility(
+  input: ThreadSnoozeEligibilityInput,
+): ReturnType<typeof canSnoozeThread> {
+  return canSnoozeThread(
+    settlementInput({
+      thread: input.thread,
+      worktree: input.worktree ?? null,
+      environment: input.environment,
+      pinned: false,
+      hasLocalQueuedMessage: input.hasLocalQueuedMessage,
+      deliveryUnknown: input.deliveryUnknown ?? false,
+      autoSettleAfterDays: resolveAutoSettleAfterDays(undefined),
+      nowMs: input.nowMs,
+    }),
+  );
 }
 
 function filterEntry(entry: ThreadInboxEntry, filters: ThreadInboxFilters | undefined): boolean {

@@ -3,6 +3,7 @@ import type {
   OrchestrationSessionStatus,
   OrchestrationThreadActivity,
   ScopedThreadRef,
+  ThreadUsageLimit,
   TurnId,
 } from "@ryco/contracts";
 
@@ -49,6 +50,9 @@ export interface QueueThreadView {
   readonly projectedMessageIds: ReadonlySet<string>;
   readonly turnStartFailures: ReadonlyArray<QueueTurnStartFailure>;
   readonly steerFailedMessageIds: ReadonlySet<string>;
+  /** The projected usage limit; it only holds while `modelSelection` targets its instance. */
+  readonly usageLimit?: ThreadUsageLimit | null | undefined;
+  readonly modelSelection?: { readonly instanceId: string } | null | undefined;
 }
 
 export interface QueueTurnStartFailure {
@@ -227,6 +231,8 @@ export function readQueueThreadView(state: AppState, ref: ScopedThreadRef): Queu
     projectedMessageIds: readProjectedMessageIds(messageIds),
     turnStartFailures: activityView.turnStartFailures,
     steerFailedMessageIds: activityView.steerFailedMessageIds,
+    usageLimit: shell.usageLimit ?? null,
+    modelSelection: shell.modelSelection,
   };
 }
 
