@@ -811,6 +811,38 @@ export function GeneralSettingsPanel({
           </>
         )}
 
+        {!isPhoneTier && (
+          <SettingsRow
+            title="Continue after restart"
+            description="When Ryco restarts while an agent is working, send “Continue where you left off.” automatically. Threads you stopped, threads waiting for your approval, and restarts more than 30 minutes later are not continued."
+            owner="node"
+            scope={nodeScopeLabel}
+            resetAction={
+              settings.continueThreadsAfterRestart !==
+              DEFAULT_UNIFIED_SETTINGS.continueThreadsAfterRestart ? (
+                <SettingResetButton
+                  label="continue after restart"
+                  onClick={() =>
+                    updateSettings({
+                      continueThreadsAfterRestart:
+                        DEFAULT_UNIFIED_SETTINGS.continueThreadsAfterRestart,
+                    })
+                  }
+                />
+              ) : null
+            }
+            control={
+              <Switch
+                checked={settings.continueThreadsAfterRestart}
+                onCheckedChange={(checked) =>
+                  updateSettings({ continueThreadsAfterRestart: Boolean(checked) })
+                }
+                aria-label="Continue threads automatically after a restart"
+              />
+            }
+          />
+        )}
+
         <SettingsRow
           title="Add project starts in"
           description='Leave empty to use "~/" when the Add Project browser opens.'
