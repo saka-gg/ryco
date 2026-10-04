@@ -1171,6 +1171,21 @@ const make = Effect.gen(function* () {
       );
       if (rolledBack._tag === "Failure") {
         const error = rolledBack.failure;
+        // Ryco stopped waiting during the rewind itself: the agent may already
+        // have forgotten the turns, so this is never "nothing was changed".
+        if (
+          error._tag === "ProviderOperationTimeoutError" &&
+          error.operation === "conversation.rollback"
+        ) {
+          return yield* updateRevert({
+            threadId,
+            revertRequestId,
+            turnCount,
+            status: "interrupted",
+            reason: "provider-failed",
+            detail: `${asSentence(error.detail)} The agent may already have forgotten the newer turns, but files and history were not changed. Revert to checkpoint ${turnCount} again to finish.`,
+          });
+        }
         return yield* error._tag === "ProviderOperationUnsupportedError"
           ? fail("provider-unsupported", error.message)
           : fail(

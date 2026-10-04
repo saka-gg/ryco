@@ -398,26 +398,52 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       });
     });
 
-  // The last provider activity per thread, for turn liveness. Process-local.
-  const runtimeActivity = yield* Ref.make(new Map<ThreadId, ProviderRuntimeActivity>());
+  /**
+   * Runs `effect` under the thread's start lock with the lock wait and the body
+   * bounded together by the control deadline, detached. A start that never
+   * releases the lock (an adapter start that cannot be interrupted) then makes a
+   * binding update fail at its deadline instead of pinning its caller forever.
+   */
+  const withBoundedSessionStartLock = <A, E>(
+    binding: ProviderRuntimeBinding,
+    effect: Effect.Effect<A, E>,
+  ): Effect.Effect<A, E | ProviderOperationTimeoutError> =>
+    Effect.gen(function* () {
+      const label =
+        binding.providerInstanceId === undefined
+          ? String(binding.provider)
+          : yield* operationLabel(binding.providerInstanceId);
+      return yield* runDetachedWithDeadline(withSessionStartLock(binding.threadId, effect), {
+        scope: serviceScope,
+        timeoutMs: timeouts.controlRequestMs,
+        onTimeout: () =>
+          operationTimeoutError({
+            provider: binding.provider,
+            label,
+            operation: "session.lock",
+            timeoutMs: timeouts.controlRequestMs,
+          }),
+      });
+    });
+
+  // The last provider activity per thread, for turn liveness. Process-local and
+  // written on every runtime event (streaming deltas included), so it is a plain
+  // map mutated in place inside Effect.sync; readers get a snapshot.
+  const runtimeActivity = new Map<ThreadId, ProviderRuntimeActivity>();
   const recordRuntimeActivity = (threadId: ThreadId, runtimeSessionId: RuntimeSessionId) =>
     Clock.currentTimeMillis.pipe(
       Effect.flatMap((lastActivityAtMs) =>
-        Ref.update(runtimeActivity, (current) => {
-          const next = new Map(current);
-          next.set(threadId, { threadId, runtimeSessionId, lastActivityAtMs });
-          return next;
+        Effect.sync(() => {
+          runtimeActivity.set(threadId, { threadId, runtimeSessionId, lastActivityAtMs });
         }),
       ),
     );
   const forgetRuntimeActivity = (threadId: ThreadId, runtimeSessionId?: RuntimeSessionId) =>
-    Ref.update(runtimeActivity, (current) => {
-      const entry = current.get(threadId);
+    Effect.sync(() => {
+      const entry = runtimeActivity.get(threadId);
       if (!entry || (runtimeSessionId !== undefined && entry.runtimeSessionId !== runtimeSessionId))
-        return current;
-      const next = new Map(current);
-      next.delete(threadId);
-      return next;
+        return;
+      runtimeActivity.delete(threadId);
     });
 
   // `turn.started` waiters for "completion" adapters, keyed `threadId:runtimeSessionId`.
@@ -857,8 +883,16 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     return "stopped" as ProviderSessionBindingStopResult;
   });
 
+  // A lock held past the control deadline counts as a stop that timed out: the
+  // binding stays queued for the reaper's stale retry.
   const stopSessionBinding: ProviderServiceShape["stopSessionBinding"] = (binding) =>
-    withSessionStartLock(binding.threadId, stopExactBinding(binding, true));
+    withBoundedSessionStartLock(binding, stopExactBinding(binding, true)).pipe(
+      Effect.catchIf(Schema.is(ProviderOperationTimeoutError), () =>
+        rememberStaleBinding(binding).pipe(
+          Effect.as("timed-out" as ProviderSessionBindingStopResult),
+        ),
+      ),
+    );
 
   const listStaleSessionBindings: ProviderServiceShape["listStaleSessionBindings"] = () =>
     Ref.get(staleSessionBindings).pipe(Effect.map((bindings) => [...bindings.values()]));
@@ -1113,8 +1147,8 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const restoreSessionBinding: ProviderServiceShape["restoreSessionBinding"] = Effect.fn(
     "restoreSessionBinding",
   )((binding) =>
-    withSessionStartLock(
-      binding.threadId,
+    withBoundedSessionStartLock(
+      binding,
       Effect.gen(function* () {
         const exact = yield* findExactAdapterSession(binding);
         if (!exact.session) {
@@ -1132,8 +1166,8 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     if (binding.providerInstanceId === undefined || binding.runtimeSessionId === undefined) {
       return false;
     }
-    return yield* withSessionStartLock(
-      binding.threadId,
+    return yield* withBoundedSessionStartLock(
+      binding,
       Effect.gen(function* () {
         const current = Option.getOrUndefined(yield* directory.getBinding(binding.threadId));
         if (!current || !bindingIdentityMatches(current, binding)) {
@@ -1308,9 +1342,11 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           ...(effectiveCwd !== undefined ? { cwd: effectiveCwd } : {}),
           ...(effectiveResumeCursor !== undefined ? { resumeCursor: effectiveResumeCursor } : {}),
         };
-        // An interrupt from here on (a deadline or a Stop) must not leave the
-        // new runtime behind: stop exactly that runtime.
-        const sessionWithInstance = yield* Effect.gen(function* () {
+        // An interrupt from here to the end of the start (a deadline or a Stop)
+        // must not leave the new runtime behind: stop exactly that runtime. An
+        // interrupted fiber exits Interrupted, never Success, so onAbandon below
+        // cannot undo it; this region must reach the last step.
+        return yield* Effect.gen(function* () {
           const session = yield* withProviderStartupAdmission({
             operation: "ProviderService.startSession",
             provider: resolvedProvider,
@@ -1343,31 +1379,32 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           yield* upsertSessionBinding(started, threadId, {
             modelSelection: input.modelSelection,
           });
+          yield* recordRuntimeActivity(threadId, runtimeSessionId);
+          if (
+            !freshStart &&
+            persistedBinding !== undefined &&
+            (persistedBinding.providerInstanceId !== resolvedInstanceId ||
+              persistedBinding.runtimeSessionId !== input.runtimeSessionId)
+          ) {
+            // Compatible starts retain replacement cleanup, but it is bounded and
+            // retryable. Fresh handoffs defer cleanup until target acceptance so
+            // the exact source binding remains available for rollback. Cut short,
+            // the reaper's stale retry finishes it.
+            yield* stopExactBinding(persistedBinding, true).pipe(
+              Effect.onInterrupt(() => rememberStaleBinding(persistedBinding)),
+            );
+          }
+          yield* analytics.record("provider.session.started", {
+            provider: started.provider,
+            runtimeMode: input.runtimeMode,
+            hasResumeCursor: started.resumeCursor !== undefined,
+            hasCwd: typeof effectiveCwd === "string" && effectiveCwd.trim().length > 0,
+            hasModel:
+              typeof input.modelSelection?.model === "string" &&
+              input.modelSelection.model.trim().length > 0,
+          });
           return started;
         }).pipe(Effect.onInterrupt(() => stopAbandonedStart(startedBinding)));
-        yield* recordRuntimeActivity(threadId, runtimeSessionId);
-        if (
-          !freshStart &&
-          persistedBinding !== undefined &&
-          (persistedBinding.providerInstanceId !== resolvedInstanceId ||
-            persistedBinding.runtimeSessionId !== input.runtimeSessionId)
-        ) {
-          // Compatible starts retain replacement cleanup, but it is bounded and
-          // retryable. Fresh handoffs defer cleanup until target acceptance so
-          // the exact source binding remains available for rollback.
-          yield* stopExactBinding(persistedBinding, true);
-        }
-        yield* analytics.record("provider.session.started", {
-          provider: sessionWithInstance.provider,
-          runtimeMode: input.runtimeMode,
-          hasResumeCursor: sessionWithInstance.resumeCursor !== undefined,
-          hasCwd: typeof effectiveCwd === "string" && effectiveCwd.trim().length > 0,
-          hasModel:
-            typeof input.modelSelection?.model === "string" &&
-            input.modelSelection.model.trim().length > 0,
-        });
-
-        return sessionWithInstance;
       }).pipe(
         Effect.scoped,
         withMetrics({
@@ -1461,7 +1498,11 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           scope: serviceScope,
           timeoutMs,
           onTimeout: turnTimeout,
-          // A turn accepted after Ryco gave up is cancelled.
+          // The request may already have reached the provider: give it one more
+          // acceptance window to answer, so a late acceptance is seen and its
+          // turn interrupted ("Ryco cancelled the request" stays true), instead
+          // of cutting the call and leaving a turn nobody waits for.
+          abandonGraceMs: timeoutMs,
           onAbandon: (exit) =>
             Exit.isSuccess(exit) ? interruptLateTurn(routed, exit.value.turnId) : Effect.void,
         });
@@ -1954,12 +1995,10 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           },
         });
         if (Exit.isFailure(stopExit)) {
-          const timedOut = stopExit.cause.reasons.some(
-            (reason) =>
-              Cause.isFailReason(reason) && Schema.is(ProviderOperationTimeoutError)(reason.error),
-          );
-          if (timedOut && routed.session?.runtimeSessionId) {
-            // The reaper's stale-binding retry keeps trying to stop it.
+          // Timed out or failed: the binding is now `stopped`, so the reaper's idle
+          // sweep skips it; its stale-binding retry keeps trying to stop the exact
+          // runtime instead (and forgets it once that runtime is gone).
+          if (routed.session?.runtimeSessionId) {
             yield* rememberStaleBinding({
               threadId: input.threadId,
               provider: routed.adapter.provider,
@@ -2099,63 +2138,82 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         });
       }
 
-      // The lock serializes the rollback with guarded sendTurn, stale-binding
-      // stops, and recovery. The semaphore is not reentrant: use the unlocked
-      // resolver inside it.
-      yield* withSessionStartLock(
-        input.threadId,
-        Effect.gen(function* () {
-          const routed = yield* resolveRoutableSessionUnlocked({
-            threadId: input.threadId,
-            operation,
-            allowRecovery: true,
-          });
-          metricProvider = routed.adapter.provider;
-          yield* Effect.annotateCurrentSpan({
-            "provider.operation": "rollback-conversation",
-            "provider.kind": routed.adapter.provider,
-            "provider.thread_id": input.threadId,
-            "provider.rollback_turns": input.numTurns,
-          });
-          yield* routed.adapter.rollbackThread(routed.threadId, {
-            numTurns: input.numTurns,
-            targetTurnId: input.targetTurnId,
-            droppedTurnIds: input.droppedTurnIds,
-          });
-          // Persist the adapter's post-rollback cursor (Claude rewind marker,
-          // OpenCode fork session id) so recovery resumes the rewound conversation.
-          // Best-effort: the agent has already forgotten the turns, so failing
-          // here would report "nothing was changed" when something was. The
-          // next send or completed turn persists the live cursor again.
-          yield* Effect.gen(function* () {
-            const sessions = yield* routed.adapter.listSessions();
-            const session = sessions.find((candidate) => candidate.threadId === routed.threadId);
-            if (session) {
-              yield* upsertSessionBinding(
-                { ...session, providerInstanceId: routed.instanceId },
-                input.threadId,
-                {
-                  lastRuntimeEvent: "provider.rollback",
-                  lastRuntimeEventAt: new Date().toISOString(),
-                },
-              );
-            }
-          }).pipe(
-            Effect.catchCause((cause) =>
-              Cause.hasInterruptsOnly(cause)
-                ? Effect.failCause(cause)
-                : Effect.logError("provider.rollback.persist-binding-failed", {
-                    threadId: input.threadId,
-                    cause: Cause.pretty(cause),
-                  }),
-            ),
-          );
-          yield* analytics.record("provider.conversation.rolled_back", {
-            provider: routed.adapter.provider,
-            turns: input.numTurns,
-          });
-        }),
-      );
+      // The lock serializes the rollback with starts, stale-binding stops and
+      // recovery. The semaphore is not reentrant: use the unlocked resolver
+      // inside it. Lock wait, recovery and the rollback call share one deadline,
+      // detached like a start: the caller stops waiting at the deadline, and the
+      // abandoned work is interrupted in the background, which releases the lock.
+      // Where it was waiting decides the text: before the rollback call nothing
+      // was changed; during it the agent may or may not have forgotten the turns.
+      const label = yield* operationLabel(instanceId);
+      const timeoutMs = timeouts.sessionStartMs(binding.provider) + timeouts.controlRequestMs;
+      const progress: { phase: "session.lock" | "session.recover" | "conversation.rollback" } = {
+        phase: "session.lock",
+      };
+      const rollbackLocked = Effect.gen(function* () {
+        progress.phase = "session.recover";
+        const routed = yield* resolveRoutableSessionUnlocked({
+          threadId: input.threadId,
+          operation,
+          allowRecovery: true,
+        });
+        metricProvider = routed.adapter.provider;
+        yield* Effect.annotateCurrentSpan({
+          "provider.operation": "rollback-conversation",
+          "provider.kind": routed.adapter.provider,
+          "provider.thread_id": input.threadId,
+          "provider.rollback_turns": input.numTurns,
+        });
+        progress.phase = "conversation.rollback";
+        yield* routed.adapter.rollbackThread(routed.threadId, {
+          numTurns: input.numTurns,
+          targetTurnId: input.targetTurnId,
+          droppedTurnIds: input.droppedTurnIds,
+        });
+        // Persist the adapter's post-rollback cursor (Claude rewind marker,
+        // OpenCode fork session id) so recovery resumes the rewound conversation.
+        // Best-effort: the agent has already forgotten the turns, so failing
+        // here would report "nothing was changed" when something was. The
+        // next send or completed turn persists the live cursor again.
+        yield* Effect.gen(function* () {
+          const sessions = yield* routed.adapter.listSessions();
+          const session = sessions.find((candidate) => candidate.threadId === routed.threadId);
+          if (session) {
+            yield* upsertSessionBinding(
+              { ...session, providerInstanceId: routed.instanceId },
+              input.threadId,
+              {
+                lastRuntimeEvent: "provider.rollback",
+                lastRuntimeEventAt: new Date().toISOString(),
+              },
+            );
+          }
+        }).pipe(
+          Effect.catchCause((cause) =>
+            Cause.hasInterruptsOnly(cause)
+              ? Effect.failCause(cause)
+              : Effect.logError("provider.rollback.persist-binding-failed", {
+                  threadId: input.threadId,
+                  cause: Cause.pretty(cause),
+                }),
+          ),
+        );
+        yield* analytics.record("provider.conversation.rolled_back", {
+          provider: routed.adapter.provider,
+          turns: input.numTurns,
+        });
+      });
+      yield* runDetachedWithDeadline(withSessionStartLock(input.threadId, rollbackLocked), {
+        scope: serviceScope,
+        timeoutMs,
+        onTimeout: () =>
+          operationTimeoutError({
+            provider: binding.provider,
+            label,
+            operation: progress.phase,
+            timeoutMs,
+          }),
+      });
     }).pipe(
       withMetrics({
         counter: providerTurnsTotal,
@@ -2187,7 +2245,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       }),
     ).pipe(Effect.asVoid);
     yield* Effect.forEach(currentAdapters, ([, adapter]) => adapter.stopAll()).pipe(Effect.asVoid);
-    yield* Ref.set(runtimeActivity, new Map());
+    yield* Effect.sync(() => runtimeActivity.clear());
     const bindings = yield* directory.listBindings().pipe(Effect.orElseSucceed(() => []));
     yield* Effect.forEach(bindings, (binding) => {
       const providerInstanceId = dieOnMissingBindingInstanceId("ProviderService.stopAll", binding);
@@ -2255,8 +2313,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     getCapabilities,
     getInstanceInfo,
     rollbackConversation,
-    listRuntimeActivity: () =>
-      Ref.get(runtimeActivity).pipe(Effect.map((map) => [...map.values()])),
+    listRuntimeActivity: () => Effect.sync(() => [...runtimeActivity.values()]),
     readRecentEventSummaries: (input) =>
       Ref.get(recentRuntimeEvents).pipe(
         Effect.map((events) =>

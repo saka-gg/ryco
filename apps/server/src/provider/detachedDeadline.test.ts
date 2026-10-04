@@ -118,6 +118,63 @@ it.effect("undoes work that completes after the deadline inside an uninterruptib
   }),
 );
 
+it.effect("with an abandon grace, an interruptible late success still reaches onAbandon", () =>
+  Effect.gen(function* () {
+    const scope = yield* Scope.make();
+    const finish = yield* Deferred.make<void>();
+    const interrupted = yield* Deferred.make<void>();
+    const abandoned = yield* Deferred.make<Exit.Exit<string, never>>();
+    const caller = yield* runDetachedWithDeadline(
+      Deferred.await(finish).pipe(
+        Effect.as("late-turn"),
+        Effect.onInterrupt(() => Deferred.succeed(interrupted, undefined)),
+      ),
+      {
+        scope,
+        timeoutMs: 50,
+        abandonGraceMs: 50,
+        onTimeout: () => new DeadlineError(),
+        onAbandon: (exit) => Deferred.succeed(abandoned, exit).pipe(Effect.asVoid),
+      },
+    ).pipe(Effect.forkChild({ startImmediately: true }));
+    yield* Effect.yieldNow;
+    yield* TestClock.adjust(Duration.millis(50));
+    assert.instanceOf(yield* Fiber.join(caller).pipe(Effect.flip), DeadlineError);
+    // Within the grace the operation is left running, so its late answer is seen.
+    assert.isFalse(yield* Deferred.isDone(interrupted));
+    yield* Deferred.succeed(finish, undefined);
+    const exit = yield* Deferred.await(abandoned);
+    assert.isTrue(Exit.isSuccess(exit) && exit.value === "late-turn");
+    assert.isFalse(yield* Deferred.isDone(interrupted));
+  }),
+);
+
+it.effect("an operation still running after the abandon grace is interrupted", () =>
+  Effect.gen(function* () {
+    const scope = yield* Scope.make();
+    const interrupted = yield* Deferred.make<void>();
+    const abandoned = yield* Deferred.make<Exit.Exit<never, never>>();
+    const caller = yield* runDetachedWithDeadline(
+      Effect.never.pipe(Effect.onInterrupt(() => Deferred.succeed(interrupted, undefined))),
+      {
+        scope,
+        timeoutMs: 50,
+        abandonGraceMs: 100,
+        onTimeout: () => new DeadlineError(),
+        onAbandon: (exit) => Deferred.succeed(abandoned, exit).pipe(Effect.asVoid),
+      },
+    ).pipe(Effect.forkChild({ startImmediately: true }));
+    yield* Effect.yieldNow;
+    yield* TestClock.adjust(Duration.millis(50));
+    assert.instanceOf(yield* Fiber.join(caller).pipe(Effect.flip), DeadlineError);
+    yield* TestClock.adjust(Duration.millis(99));
+    assert.isFalse(yield* Deferred.isDone(interrupted));
+    yield* TestClock.adjust(Duration.millis(1));
+    assert.isTrue(Exit.hasInterrupts(yield* Deferred.await(abandoned)));
+    assert.isTrue(yield* Deferred.isDone(interrupted));
+  }),
+);
+
 it.effect("the option variant yields None at the deadline", () =>
   Effect.gen(function* () {
     const scope = yield* Scope.make();

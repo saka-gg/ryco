@@ -2679,6 +2679,42 @@ describe("provider operation deadlines", () => {
         }).pipe(Layer.provideMerge(NodeServices.layer)),
       ),
     );
+  /** Polls until ProviderService processed the runtime event (it crosses a real async boundary). */
+  const eventProcessed = (threadId: ThreadId, eventId: EventId) =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        const events = yield* provider.readRecentEventSummaries!({
+          since: "1970-01-01T00:00:00.000Z",
+          threadId,
+          limit: 50,
+        });
+        if (events.some((event) => event.eventId === eventId)) return true;
+        yield* sleep(1);
+      }
+      return false;
+    });
+  /** Emits probe events until one is processed: the adapter's event subscription is live. */
+  const awaitEventSubscription = (
+    codex: ReturnType<typeof makeFakeCodexAdapter>,
+    threadId: ThreadId,
+  ) =>
+    Effect.gen(function* () {
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        const eventId = asEventId(`subscription-probe-${attempt}`);
+        codex.emit({
+          type: "content.delta",
+          eventId,
+          provider: CODEX_DRIVER,
+          createdAt: new Date().toISOString(),
+          threadId,
+          turnId: "subscription-probe",
+          payload: { streamKind: "assistant_text", delta: "" },
+        });
+        if (yield* eventProcessed(threadId, eventId)) return;
+      }
+      assert.fail("the adapter event subscription never delivered a probe event");
+    });
   const expectTimeout = (
     error: unknown,
     operation: ProviderOperationTimeoutError["operation"],
@@ -2869,6 +2905,154 @@ describe("provider operation deadlines", () => {
     },
   );
 
+  it.effect("keeps retrying a stop the provider rejected, not only one that timed out", () => {
+    const codex = makeFakeCodexAdapter();
+    return withService(
+      [codex],
+      Effect.gen(function* () {
+        const provider = yield* ProviderService;
+        const directory = yield* ProviderSessionDirectory;
+        const threadId = asThreadId("stop-rejected");
+        const session = yield* provider.startSession(threadId, startInput(threadId));
+        codex.stopSession.mockImplementationOnce(() =>
+          Effect.fail(
+            new ProviderAdapterRequestError({
+              provider: CODEX_DRIVER,
+              method: "session/stop",
+              detail: "stop rejected",
+            }),
+          ),
+        );
+        const error = yield* provider.stopSession({ threadId }).pipe(Effect.flip);
+        assert.instanceOf(error, ProviderAdapterRequestError);
+        // The binding is stopped, so the idle sweep skips it; the stale retry does not.
+        assert.equal(Option.getOrThrow(yield* directory.getBinding(threadId)).status, "stopped");
+        const stale = yield* provider.listStaleSessionBindings();
+        assert.deepEqual(
+          stale.map((binding) => [binding.threadId, binding.runtimeSessionId]),
+          [[threadId, session.runtimeSessionId]],
+        );
+        // The retry stops the exact runtime that is still live, then forgets it.
+        assert.equal(yield* provider.stopSessionBinding(stale[0]!), "stopped");
+        assert.deepEqual(yield* codex.listSessions(), []);
+        assert.deepEqual(yield* provider.listStaleSessionBindings(), []);
+      }),
+    );
+  });
+
+  it.effect(
+    "stops the new runtime when a start is abandoned while it still cleans up the replaced one",
+    () => {
+      const codex = makeFakeCodexAdapter();
+      const claude = makeFakeCodexAdapter(CLAUDE_AGENT_DRIVER);
+      return withService(
+        [codex, claude],
+        Effect.gen(function* () {
+          const provider = yield* ProviderService;
+          const directory = yield* ProviderSessionDirectory;
+          const threadId = asThreadId("abandoned-during-cleanup");
+          const original = yield* provider.startSession(threadId, startInput(threadId));
+          // Stopping the replaced runtime outlasts the start deadline.
+          codex.stopSession.mockImplementation(() => Effect.never);
+          const replacing = yield* provider
+            .startSession(threadId, {
+              provider: CLAUDE_AGENT_DRIVER,
+              providerInstanceId: claudeAgentInstanceId,
+              threadId,
+              runtimeMode: "full-access",
+            })
+            .pipe(Effect.forkChild({ startImmediately: true }));
+          yield* Effect.yieldNow;
+          yield* TestClock.adjust(Duration.millis(timeouts.sessionStartMs));
+          expectTimeout(yield* Fiber.join(replacing).pipe(Effect.flip), "session.start");
+          for (let attempt = 0; attempt < 50; attempt += 1) {
+            if (claude.stopSession.mock.calls.length > 0) break;
+            yield* Effect.yieldNow;
+          }
+          // The new runtime did not outlive the start that nobody waits for.
+          assert.deepEqual(yield* claude.listSessions(), []);
+          const binding = Option.getOrThrow(yield* directory.getBinding(threadId));
+          assert.equal(binding.providerInstanceId, claudeAgentInstanceId);
+          assert.equal(binding.status, "stopped");
+          // The replaced runtime is left to the reaper's stale retry.
+          assert.include(
+            (yield* provider.listStaleSessionBindings()).map((stale) => stale.runtimeSessionId),
+            original.runtimeSessionId,
+          );
+        }),
+      );
+    },
+  );
+
+  it.effect("bounds a rollback whose provider never confirms the rewind", () => {
+    const codex = makeFakeCodexAdapter();
+    codex.rollbackThread.mockImplementation(() => Effect.never);
+    return withService(
+      [codex],
+      Effect.gen(function* () {
+        const provider = yield* ProviderService;
+        const threadId = asThreadId("rollback-never");
+        yield* provider.startSession(threadId, startInput(threadId));
+        const rolling = yield* provider
+          .rollbackConversation({ threadId, numTurns: 1, targetTurnId: null, droppedTurnIds: [] })
+          .pipe(Effect.forkChild({ startImmediately: true }));
+        yield* Effect.yieldNow;
+        yield* TestClock.adjust(
+          Duration.millis(timeouts.sessionStartMs + timeouts.controlRequestMs),
+        );
+        const error = expectTimeout(
+          yield* Fiber.join(rolling).pipe(Effect.flip),
+          "conversation.rollback",
+        );
+        assert.include(error.detail, "it may or may not have been applied");
+        // The abandoned rollback released the thread's start lock.
+        const other = yield* provider.startSession(threadId, startInput(threadId));
+        assert.equal(other.threadId, threadId);
+      }),
+    );
+  });
+
+  it.effect("bounds a binding restore that waits behind a start that never finishes", () => {
+    const release = Effect.runSync(Deferred.make<void>());
+    const codex = makeFakeCodexAdapter(CODEX_DRIVER, {
+      startSessionEffect: (input, makeSession) =>
+        input.runtimeSessionId === RuntimeSessionId.make("zombie-runtime")
+          ? Effect.uninterruptible(Deferred.await(release)).pipe(Effect.as(makeSession(input)))
+          : Effect.sync(() => makeSession(input)),
+    });
+    return withService(
+      [codex],
+      Effect.gen(function* () {
+        const provider = yield* ProviderService;
+        const threadId = asThreadId("restore-behind-zombie");
+        const original = yield* provider.startSession(threadId, startInput(threadId));
+        const zombie = yield* provider
+          .startSession(threadId, {
+            ...startInput(threadId),
+            runtimeSessionId: RuntimeSessionId.make("zombie-runtime"),
+          })
+          .pipe(Effect.forkChild({ startImmediately: true }));
+        yield* Effect.yieldNow;
+        yield* TestClock.adjust(Duration.millis(timeouts.sessionStartMs));
+        expectTimeout(yield* Fiber.join(zombie).pipe(Effect.flip), "session.start");
+        // The zombie still holds the thread's start lock.
+        const restoring = yield* provider
+          .restoreSessionBinding({
+            threadId,
+            provider: CODEX_DRIVER,
+            providerInstanceId: codexInstanceId,
+            runtimeSessionId: original.runtimeSessionId!,
+          })
+          .pipe(Effect.forkChild({ startImmediately: true }));
+        yield* Effect.yieldNow;
+        yield* TestClock.adjust(Duration.millis(timeouts.controlRequestMs));
+        const error = expectTimeout(yield* Fiber.join(restoring).pipe(Effect.flip), "session.lock");
+        assert.include(error.detail, "still finishing a previous start for this thread");
+        yield* Deferred.succeed(release, undefined);
+      }),
+    );
+  });
+
   it.effect(
     "waits for a completion-style turn past the acceptance deadline once it started",
     () => {
@@ -2895,13 +3079,12 @@ describe("provider operation deadlines", () => {
           const provider = yield* ProviderService;
           const threadId = asThreadId("completion-accepted");
           yield* provider.startSession(threadId, startInput(threadId));
-          // Let the adapter event subscription start (a real async boundary).
-          yield* sleep(50);
+          yield* awaitEventSubscription(codex, threadId);
           const sending = yield* provider
             .sendTurn({ threadId, input: "long turn" })
             .pipe(Effect.forkChild({ startImmediately: true }));
-          // Event delivery crosses a real async boundary; let turn.started land first.
-          yield* sleep(20);
+          // turn.started must be processed before the deadline is reached.
+          assert.isTrue(yield* eventProcessed(threadId, asEventId("completion-turn-started")));
           assert.equal(codex.sendTurn.mock.calls.length, 1);
           yield* TestClock.adjust(Duration.millis(timeouts.turnAcceptanceMs * 2));
           assert.isUndefined(sending.pollUnsafe());
@@ -2958,9 +3141,43 @@ describe("provider operation deadlines", () => {
         yield* TestClock.adjust(Duration.millis(timeouts.turnAcceptanceMs));
         const error = expectTimeout(yield* Fiber.join(sending).pipe(Effect.flip), "turn.start");
         assert.include(error.detail, "did not accept the turn within 0.5s");
+        // The call gets one more acceptance window to answer late, then is cut.
+        assert.isFalse(yield* Deferred.isDone(interrupted));
+        yield* TestClock.adjust(Duration.millis(timeouts.turnAcceptanceMs));
         yield* Deferred.await(interrupted);
         // Without a turn id there is nothing to interrupt precisely; nothing else is touched.
         assert.equal(codex.interruptTurn.mock.calls.length, 0);
+      }),
+    );
+  });
+
+  it.effect("interrupts the exact turn of an acceptance-style send that answers late", () => {
+    const codex = makeFakeCodexAdapter();
+    const accept = Effect.runSync(Deferred.make<void>());
+    codex.sendTurn.mockImplementation((input) =>
+      Deferred.await(accept).pipe(
+        Effect.as({ threadId: input.threadId, turnId: asTurnId("late-turn") }),
+      ),
+    );
+    return withService(
+      [codex],
+      Effect.gen(function* () {
+        const provider = yield* ProviderService;
+        const threadId = asThreadId("acceptance-late");
+        yield* provider.startSession(threadId, startInput(threadId));
+        const sending = yield* provider
+          .sendTurn({ threadId, input: "answers late" })
+          .pipe(Effect.forkChild({ startImmediately: true }));
+        yield* Effect.yieldNow;
+        yield* TestClock.adjust(Duration.millis(timeouts.turnAcceptanceMs));
+        expectTimeout(yield* Fiber.join(sending).pipe(Effect.flip), "turn.start");
+        // The provider accepted the request after Ryco stopped waiting.
+        yield* Deferred.succeed(accept, undefined);
+        for (let attempt = 0; attempt < 50; attempt += 1) {
+          if (codex.interruptTurn.mock.calls.length > 0) break;
+          yield* Effect.yieldNow;
+        }
+        assert.deepEqual(codex.interruptTurn.mock.calls, [[threadId, asTurnId("late-turn")]]);
       }),
     );
   });
@@ -2978,8 +3195,8 @@ describe("provider operation deadlines", () => {
           started.map((entry) => [entry.threadId, entry.runtimeSessionId]),
           [[threadId, session.runtimeSessionId]],
         );
-        // Let the adapter event subscription start (a real async boundary).
-        yield* sleep(50);
+        yield* awaitEventSubscription(codex, threadId);
+        const subscribedAt = (yield* provider.listRuntimeActivity!())[0]!.lastActivityAtMs;
         yield* TestClock.adjust(Duration.millis(5_000));
         codex.emit({
           type: "content.delta",
@@ -2990,12 +3207,9 @@ describe("provider operation deadlines", () => {
           turnId: "activity-turn",
           payload: { streamKind: "assistant_text", delta: "hi" },
         });
-        let latest = started[0]!.lastActivityAtMs;
-        for (let attempt = 0; attempt < 20 && latest === started[0]!.lastActivityAtMs; attempt++) {
-          yield* sleep(5);
-          latest = (yield* provider.listRuntimeActivity!())[0]?.lastActivityAtMs ?? latest;
-        }
-        assert.equal(latest - started[0]!.lastActivityAtMs, 5_000);
+        assert.isTrue(yield* eventProcessed(threadId, asEventId("activity-delta")));
+        const latest = (yield* provider.listRuntimeActivity!())[0]!.lastActivityAtMs;
+        assert.equal(latest - subscribedAt, 5_000);
         yield* provider.stopSession({ threadId });
         assert.deepEqual(yield* provider.listRuntimeActivity!(), []);
       }),

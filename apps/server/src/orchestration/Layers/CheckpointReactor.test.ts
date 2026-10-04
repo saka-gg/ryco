@@ -60,6 +60,7 @@ import {
 import { checkpointRefForThreadTurn } from "../../checkpointing/Utils.ts";
 import {
   ProviderAdapterRequestError,
+  ProviderOperationTimeoutError,
   ProviderOperationUnsupportedError,
 } from "../../provider/Errors.ts";
 import { makeCheckpointRevertActivity } from "../checkpointRevertPolicy.ts";
@@ -1544,6 +1545,36 @@ describe("CheckpointReactor", () => {
     expect(activity.detail).toBe(
       "Ryco could not rewind the agent's conversation. Claude refused to rewind this conversation, so nothing was changed. Resume rejected.",
     );
+  });
+
+  it("never says nothing was changed when Ryco stopped waiting for the rewind itself", async () => {
+    const harness = await createHarness();
+    await seedCheckpoints(harness, { sessionStatus: "ready" });
+    harness.provider.rollbackConversation.mockImplementationOnce(() =>
+      Effect.fail(
+        new ProviderOperationTimeoutError({
+          provider: "codex",
+          operation: "conversation.rollback",
+          timeoutMs: 150_000,
+          detail:
+            "Provider 'codex' did not confirm the conversation rewind within 150s; it may or may not have been applied.",
+        }),
+      ),
+    );
+
+    await requestRevert(harness, "cmd-revert-provider-times-out", 1);
+    const activity = await waitForRevertStatus(
+      harness.engine,
+      "cmd-revert-provider-times-out",
+      "interrupted",
+    );
+
+    expect(activity.reason).toBe("provider-failed");
+    expect(activity.detail).toContain("it may or may not have been applied.");
+    expect(activity.detail).toContain("The agent may already have forgotten the newer turns");
+    expect(activity.detail).not.toContain("Nothing was changed");
+    expect(readme(harness.cwd)).toBe("v3\n");
+    expect(await hasReverted(harness.engine)).toBe(false);
   });
 
   it("marks the revert interrupted when the provider rollback dies midway", async () => {

@@ -19,7 +19,8 @@
  *   and the operation is abandoned the same way.
  * - in both cases `onAbandon(exit)` runs once the operation fiber has really
  *   exited, so a late success can be undone (stop the new runtime, interrupt
- *   the late turn).
+ *   the late turn). With `abandonGraceMs`, the operation first gets that long to
+ *   finish on its own, so a late success is observable at all.
  *
  * Locks and permits taken *inside* the operation are released only when its
  * fiber exits, so "one adapter start per thread at a time" still holds.
@@ -37,15 +38,29 @@ export interface DetachedDeadlineOptions<A, E, E2> {
   readonly onTimeout: () => E2;
   /** Runs in the background once an abandoned operation has really exited. */
   readonly onAbandon?: (exit: Exit.Exit<A, E>) => Effect.Effect<void>;
+  /**
+   * Lets an abandoned operation run this much longer before it is interrupted.
+   * An interrupted fiber exits Interrupted, never Success, so without a grace a
+   * request that already reached the provider can never be seen succeeding late
+   * (and undone by `onAbandon`).
+   */
+  readonly abandonGraceMs?: number;
 }
 
 const abandonIn = <A, E>(
   fiber: Fiber.Fiber<A, E>,
-  options: Pick<DetachedDeadlineOptions<A, E, unknown>, "scope" | "onAbandon">,
+  options: Pick<DetachedDeadlineOptions<A, E, unknown>, "scope" | "onAbandon" | "abandonGraceMs">,
 ): Effect.Effect<void> =>
   Effect.forkIn(
-    Fiber.interrupt(fiber).pipe(
-      Effect.andThen(Fiber.await(fiber)),
+    (options.abandonGraceMs === undefined
+      ? Effect.succeed(Option.none<Exit.Exit<A, E>>())
+      : Fiber.await(fiber).pipe(Effect.timeoutOption(Duration.millis(options.abandonGraceMs)))
+    ).pipe(
+      Effect.flatMap((settled) =>
+        Option.isSome(settled)
+          ? Effect.succeed(settled.value)
+          : Fiber.interrupt(fiber).pipe(Effect.andThen(Fiber.await(fiber))),
+      ),
       Effect.flatMap((exit) => options.onAbandon?.(exit) ?? Effect.void),
       Effect.catchCause((cause) =>
         Effect.logWarning("provider.detached-abandon-failed", { cause: Cause.pretty(cause) }),

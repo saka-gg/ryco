@@ -91,12 +91,15 @@ export type ProviderStartPhase = "lock" | "admission" | "adapter";
 export type ProviderTimedOperation =
   | "session.start"
   | "session.recover"
+  /** Waiting on the thread's start lock outside a start (binding updates, rollback). */
+  | "session.lock"
   | "turn.start"
   | "turn.interrupt"
   | "session.stop"
   | "request.respond"
   | "user-input.respond"
-  | "goal.sync";
+  | "goal.sync"
+  | "conversation.rollback";
 
 function formatSeconds(ms: number): string {
   const seconds = ms / 1000;
@@ -126,6 +129,8 @@ export function providerOperationTimeoutDetail(input: {
       }
     case "session.recover":
       return `${label} did not resume this thread within ${s}s.`;
+    case "session.lock":
+      return `${label} is still finishing a previous start for this thread (waited ${s}s). Try again shortly.`;
     case "turn.start":
       return `${label} did not accept the turn within ${s}s. Ryco cancelled the request; send it again to retry.`;
     case "turn.interrupt":
@@ -137,5 +142,7 @@ export function providerOperationTimeoutDetail(input: {
       return `${label} did not acknowledge the response within ${s}s; it may or may not have been delivered.`;
     case "goal.sync":
       return `${label} did not confirm the goal change within ${s}s.`;
+    case "conversation.rollback":
+      return `${label} did not confirm the conversation rewind within ${s}s; it may or may not have been applied.`;
   }
 }

@@ -110,6 +110,12 @@ describe("providerOperationTimeoutDetail", () => {
     expect(detail("goal.sync")).toBe(
       "Provider 'cursor' did not confirm the goal change within 30s.",
     );
+    expect(detail("session.lock")).toBe(
+      "Provider 'cursor' is still finishing a previous start for this thread (waited 30s). Try again shortly.",
+    );
+    expect(detail("conversation.rollback")).toBe(
+      "Provider 'cursor' did not confirm the conversation rewind within 30s; it may or may not have been applied.",
+    );
     expect(
       providerOperationTimeoutDetail({ operation: "turn.start", label: "x", timeoutMs: 1_500 }),
     ).toContain("within 1.5s");
