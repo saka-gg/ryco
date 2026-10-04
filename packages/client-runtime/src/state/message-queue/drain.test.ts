@@ -541,6 +541,73 @@ describe("restart holds", () => {
     expect(state.hold).toMatchObject({ causeKeys: ["error:turn-2:Crashed"] });
   });
 
+  /** The restarted turn's session left `error` without a new turn (e.g. a session stop). */
+  const STOPPED_AFTER_RESTART: Omit<ThreadFixture, "id"> = {
+    session: { status: "stopped", lastError: ORPHANED_PROVIDER_SESSION_ERROR },
+    latestTurn: { turnId: "turn-1", state: "interrupted" },
+    messageIds: ["m-0"],
+  };
+
+  it("does not read the restarted turn as a Stop after Resume once its session stops", () => {
+    const state = restartedQueue();
+    expect(settle(state)).toBe("wait:held");
+    // Resume acknowledges the hold and every current cause, the restarted turn's included.
+    state.acknowledgedCauseKeys = (state.acknowledgedCauseKeys ?? []).concat(
+      releaseQueueHoldKeys(
+        state.hold,
+        deriveQueueFailureCauses(state.view!, new Set(), { includeUnsettled: true }),
+      ),
+    );
+    state.hold = null;
+    state.view = viewOf(STOPPED_AFTER_RESTART);
+    expect(settle(state)).toBe("send");
+  });
+
+  it("keeps a restart hold an error hold when its session stops, and releases it later", () => {
+    const state = restartedQueue();
+    expect(settle(state)).toBe("wait:held");
+    state.view = viewOf(STOPPED_AFTER_RESTART);
+    expect(settle(state)).toBe("wait:held");
+    expect(state.hold).toMatchObject({
+      reason: "error",
+      causeKeys: [`error:turn-1:${ORPHANED_PROVIDER_SESSION_ERROR}`],
+    });
+    // The user's own message runs and completes: nothing is left that reads as a Stop.
+    state.view = viewOf({
+      session: { status: "ready" },
+      latestTurn: { turnId: "turn-2", state: "completed" },
+      messageIds: ["m-0", "direct-send", "assistant-2"],
+    });
+    expect(settle(state)).toBe("send");
+  });
+
+  it("baselines the restarted turn so a later session stop does not hold", () => {
+    const state: DrainState = {
+      ...input({ acknowledgedCauseKeys: undefined, view: viewOf(RECONCILED) }),
+    };
+    expect(resolveQueueDrainStep(state)).toEqual({
+      kind: "baseline",
+      causeKeys: [`error:turn-1:${ORPHANED_PROVIDER_SESSION_ERROR}`, "interrupt:turn-1"],
+    });
+    expect(settle(state)).toBe("send");
+    state.view = viewOf(STOPPED_AFTER_RESTART);
+    expect(settle(state)).toBe("send");
+  });
+
+  // Known limit: the projection records no Stop, so another client's Stop the provider had
+  // not acknowledged before the restart reads exactly like the restart on this client.
+  it("cannot tell another client's unacknowledged Stop from the restart", () => {
+    const state = restartedQueue();
+    expect(settle(state)).toBe("wait:held");
+    expect(state.hold?.reason).toBe("error");
+    state.view = viewOf({
+      session: { status: "ready" },
+      latestTurn: { turnId: "turn-2", state: "completed" },
+      messageIds: ["m-0", "direct-send", "assistant-2"],
+    });
+    expect(settle(state)).toBe("send");
+  });
+
   it("keeps a Stop recorded before the restart held until Resume", () => {
     const state = restartedQueue();
     state.hold = createInterruptQueueHold("turn-1", NOW);
