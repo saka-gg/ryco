@@ -6142,17 +6142,26 @@ describe("ProviderCommandReactor", () => {
         const summary = await recover(second);
         expect(summary.rejectedSteers).toBe(1);
         const events = await Effect.runPromise(second.engine.readEventsPage(0, 1_000));
-        expect(
-          events.events.filter(
-            (event) =>
-              event.type === "thread.turn-steer-rejected" &&
-              event.payload.messageId === asMessageId("steer-lost"),
-          ),
-        ).toHaveLength(1);
+        const rejected = events.events.filter(
+          (event) =>
+            event.type === "thread.turn-steer-rejected" &&
+            event.payload.messageId === asMessageId("steer-lost"),
+        );
+        expect(rejected).toHaveLength(1);
+        // Only a steer that provably never reached the provider defers (stays
+        // queued, sent next). One that may have reached it is a visible failure,
+        // so the client neither hides it nor silently re-sends it.
+        const reason = dispatched ? "failed" : "deferred";
+        expect(rejected[0]?.payload).toMatchObject({ reason });
         const failures = await activitiesOf(second, "provider.turn.steer.failed");
         expect(failures).toHaveLength(1);
+        expect(failures[0]).toMatchObject({
+          tone: dispatched ? "error" : "info",
+          summary: dispatched ? "Steer failed" : "Steer deferred",
+        });
         expect(failures[0]?.payload).toMatchObject({
           messageId: "steer-lost",
+          reason,
           error: dispatched
             ? "Ryco restarted while delivering this steer message. It may have reached the provider. Check the turn before sending it again."
             : "Ryco restarted before this steer message reached the provider. It was not sent.",

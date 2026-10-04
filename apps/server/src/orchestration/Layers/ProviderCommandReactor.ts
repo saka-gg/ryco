@@ -3111,8 +3111,10 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
                   status: "rejected",
                   error: recoveryCopy({ kind: "turn-steer", deliveryState, delegatedReturn: false })
                     .detail,
-                  // A restart cut it off: the message stays queued and is sent next.
-                  reason: "deferred",
+                  // Only a steer that provably never reached the provider defers
+                  // (stays queued, sent next). One that may have reached it fails
+                  // visibly so the client does not silently send it twice.
+                  reason: deliveryState === "not-sent" ? "deferred" : "failed",
                   resolvedAt: new Date().toISOString(),
                 },
                 providerIntentRecoveryIds(row.sequence).commandId,

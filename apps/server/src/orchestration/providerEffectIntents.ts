@@ -244,7 +244,7 @@ export const recoveryCopy = (input: {
   const notSent = input.deliveryState === "not-sent";
   if (input.kind === "turn-steer") {
     return {
-      // The decider titles every rejected steer "Steer failed"; only the error is ours.
+      // The decider titles the activity from the rejection reason; only the error is ours.
       summary: "Steer failed",
       detail: notSent
         ? "Ryco restarted before this steer message reached the provider. It was not sent."
