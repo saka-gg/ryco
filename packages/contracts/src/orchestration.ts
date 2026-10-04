@@ -1411,16 +1411,19 @@ const ThreadTurnStartBootstrap = Schema.Struct({
 
 export type ThreadTurnStartBootstrap = typeof ThreadTurnStartBootstrap.Type;
 
-/** Optimistic identity fence for delayed delegated-result queue delivery. */
+/**
+ * Delegated-result wake fence. Legacy fields (`turnMessageId`, `turnId`, `runtimeSessionId`,
+ * `providerInstanceId`) are decoded for stored events and ledger commands and ignored.
+ */
 export const DelegationReturnGuard = Schema.Struct({
-  turnMessageId: MessageId,
   latestUserMessageId: Schema.NullOr(MessageId),
   projectId: ProjectId,
-  turnId: TurnId,
-  runtimeSessionId: RuntimeSessionId,
-  providerInstanceId: ProviderInstanceId,
   runtimeMode: RuntimeMode,
   worktreePath: Schema.NullOr(Schema.String),
+  turnMessageId: Schema.optional(MessageId),
+  turnId: Schema.optional(TurnId),
+  runtimeSessionId: Schema.optional(RuntimeSessionId),
+  providerInstanceId: Schema.optional(ProviderInstanceId),
 });
 export const ClaudeResumeGuard = Schema.Struct({
   requireReady: Schema.Boolean,

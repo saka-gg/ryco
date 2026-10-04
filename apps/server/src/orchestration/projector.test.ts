@@ -11,6 +11,7 @@ import { Effect } from "effect";
 import { describe, expect, it } from "vite-plus/test";
 
 import { createEmptyReadModel, projectEvent } from "./projector.ts";
+import { latestUserMessage } from "./userMessageOrder.ts";
 
 function makeEvent(input: {
   sequence: number;
@@ -1059,8 +1060,8 @@ describe("orchestration projector", () => {
       sequence: number,
       messageId: string,
       role: "user" | "assistant",
+      at = new Date(Date.parse(createdAt) + sequence * 1000).toISOString(),
     ): OrchestrationEvent => {
-      const at = new Date(Date.parse(createdAt) + sequence * 1000).toISOString();
       return makeEvent({
         sequence,
         type: "thread.message-sent",
@@ -1129,6 +1130,26 @@ describe("orchestration projector", () => {
       expect(messages[2]?.id).toBe("msg-102");
       expect(messages.at(-1)?.id).toBe("msg-2099");
       expect(messages.findLast((message) => message.role === "user")?.id).toBe("u-latest");
+    });
+
+    it("keeps the user message with the greatest createdAt even when it is not the last user message", async () => {
+      // The fence's latest user message is max(createdAt), ties by insertion order
+      // (latestUserMessage / latestUserMessageIdQuery), not findLast(user).
+      const state = await reduceEvents([
+        messageEvent(2, "u-first", "user"),
+        messageEvent(3, "u-max", "user", "2026-03-02T10:00:00.000Z"),
+        messageEvent(4, "u-skewed", "user", "2026-03-01T10:00:01.000Z"),
+        ...assistantEvents(5),
+      ]);
+
+      const messages = state.threads[0]?.messages ?? [];
+      expect(messages).toHaveLength(2_000);
+      expect(messages.slice(0, 3).map((message) => message.id)).toEqual([
+        "u-first",
+        "u-max",
+        "msg-102",
+      ]);
+      expect(latestUserMessage(messages)?.id).toBe("u-max");
     });
 
     it("caps exactly like slice when the only user message is in the newest window", async () => {

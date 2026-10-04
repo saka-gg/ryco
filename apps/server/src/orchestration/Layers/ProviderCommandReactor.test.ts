@@ -576,153 +576,189 @@ describe("ProviderCommandReactor", () => {
     };
   }
 
-  for (const liveRuntime of [null, "replacement-runtime", "runtime-1"]) {
-    it(`fences delegated provider submission against live runtime ${liveRuntime}`, async () => {
+  // delegation-returns §4.14: a delegated wake is a normal queued turn start. It goes through
+  // ensureSessionForThread (create or resume) and is never fenced on the origin runtime.
+  const startOriginatingTurn = async (
+    harness: Awaited<ReturnType<typeof createHarness>>,
+    threadId: ThreadId,
+    createdAt: string,
+  ) => {
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("origin-start"),
+        threadId,
+        message: {
+          messageId: MessageId.make("origin-message"),
+          role: "user",
+          text: "Fixture origin",
+          attachments: [],
+        },
+        runtimeMode: "approval-required",
+        interactionMode: "default",
+        createdAt,
+      }),
+    );
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("origin-running"),
+        threadId,
+        session: {
+          threadId,
+          status: "running",
+          providerName: "codex",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          runtimeSessionId: RuntimeSessionId.make("runtime-1"),
+          runtimeMode: "approval-required",
+          activeTurnId: TurnId.make("turn-1"),
+          lastError: null,
+          updatedAt: createdAt,
+        },
+        createdAt,
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.message.assistant.complete",
+        commandId: CommandId.make("origin-complete"),
+        threadId,
+        messageId: MessageId.make("origin-answer"),
+        turnId: TurnId.make("turn-1"),
+        text: "Fixture answer",
+        createdAt,
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("origin-idle"),
+        threadId,
+        session: {
+          threadId,
+          status: "ready",
+          providerName: "codex",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          runtimeSessionId: RuntimeSessionId.make("runtime-1"),
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: createdAt,
+        },
+        // What ingestion sends for the provider's turn.completed; a release without
+        // a provider verdict fails closed and would block the delegated return.
+        turnOutcome: {
+          turnId: TurnId.make("turn-1"),
+          state: "completed",
+          reason: "provider-turn-completed",
+          completedAt: createdAt,
+        },
+        createdAt,
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.diff.complete",
+        commandId: CommandId.make("origin-settled"),
+        threadId,
+        turnId: TurnId.make("turn-1"),
+        completedAt: createdAt,
+        checkpointRef: CheckpointRef.make("fixture-checkpoint"),
+        status: "ready",
+        files: [],
+        checkpointTurnCount: 1,
+        createdAt,
+      }),
+    );
+  };
+  const dispatchDelegatedWake = (
+    harness: Awaited<ReturnType<typeof createHarness>>,
+    threadId: ThreadId,
+    createdAt: string,
+  ) =>
+    Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("delegation-return:child-1"),
+        threadId,
+        message: {
+          messageId: MessageId.make("delegation-result:child-1"),
+          role: "user",
+          text: "Fixture result",
+          attachments: [],
+        },
+        runtimeMode: "approval-required",
+        interactionMode: "default",
+        createdAt,
+        delegationReturnGuard: {
+          latestUserMessageId: MessageId.make("origin-message"),
+          projectId: ProjectId.make("project-1"),
+          runtimeMode: "approval-required",
+          worktreePath: null,
+        },
+      }),
+    );
+  for (const liveRuntime of [null, "replacement-runtime"]) {
+    it(`submits a delegated wake through the normal session path when the live runtime is ${liveRuntime}`, async () => {
       let liveSession: ProviderSession | undefined;
       const harness = await createHarness({
         getSession: () => Effect.succeed(Option.fromNullishOr(liveSession)),
       });
       const createdAt = new Date().toISOString();
       const threadId = ThreadId.make("thread-1");
-      await Effect.runPromise(
-        harness.engine.dispatch({
-          type: "thread.turn.start",
-          commandId: CommandId.make("origin-start"),
-          threadId,
-          message: {
-            messageId: MessageId.make("origin-message"),
-            role: "user",
-            text: "Fixture origin",
-            attachments: [],
-          },
-          runtimeMode: "approval-required",
-          interactionMode: "default",
-          createdAt,
-        }),
-      );
-      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
-      await Effect.runPromise(
-        harness.engine.dispatch({
-          type: "thread.session.set",
-          commandId: CommandId.make("origin-running"),
-          threadId,
-          session: {
-            threadId,
-            status: "running",
-            providerName: "codex",
-            providerInstanceId: ProviderInstanceId.make("codex"),
-            runtimeSessionId: RuntimeSessionId.make("runtime-1"),
-            runtimeMode: "approval-required",
-            activeTurnId: TurnId.make("turn-1"),
-            lastError: null,
-            updatedAt: createdAt,
-          },
-          createdAt,
-        }),
-      );
-      await Effect.runPromise(
-        harness.engine.dispatch({
-          type: "thread.message.assistant.complete",
-          commandId: CommandId.make("origin-complete"),
-          threadId,
-          messageId: MessageId.make("origin-answer"),
-          turnId: TurnId.make("turn-1"),
-          text: "Fixture answer",
-          createdAt,
-        }),
-      );
-      await Effect.runPromise(
-        harness.engine.dispatch({
-          type: "thread.session.set",
-          commandId: CommandId.make("origin-idle"),
-          threadId,
-          session: {
-            threadId,
-            status: "ready",
-            providerName: "codex",
-            providerInstanceId: ProviderInstanceId.make("codex"),
-            runtimeSessionId: RuntimeSessionId.make("runtime-1"),
-            runtimeMode: "approval-required",
-            activeTurnId: null,
-            lastError: null,
-            updatedAt: createdAt,
-          },
-          // What ingestion sends for the provider's turn.completed; a release without
-          // a provider verdict fails closed and would block the delegated return.
-          turnOutcome: {
-            turnId: TurnId.make("turn-1"),
-            state: "completed",
-            reason: "provider-turn-completed",
-            completedAt: createdAt,
-          },
-          createdAt,
-        }),
-      );
-      await Effect.runPromise(
-        harness.engine.dispatch({
-          type: "thread.turn.diff.complete",
-          commandId: CommandId.make("origin-settled"),
-          threadId,
-          turnId: TurnId.make("turn-1"),
-          completedAt: createdAt,
-          checkpointRef: CheckpointRef.make("fixture-checkpoint"),
-          status: "ready",
-          files: [],
-          checkpointTurnCount: 1,
-          createdAt,
-        }),
-      );
-      liveSession = liveRuntime
-        ? { ...harness.runtimeSessions[0]!, runtimeSessionId: RuntimeSessionId.make(liveRuntime) }
-        : undefined;
+      await startOriginatingTurn(harness, threadId, createdAt);
+      if (liveRuntime === null) {
+        // Restart or reaper: no provider runtime for the parent.
+        harness.runtimeSessions.splice(0);
+      } else {
+        liveSession = {
+          ...harness.runtimeSessions[0]!,
+          runtimeSessionId: RuntimeSessionId.make(liveRuntime),
+        };
+        harness.runtimeSessions.splice(0, 1, liveSession);
+      }
       harness.sendTurn.mockClear();
       harness.startSession.mockClear();
-      await Effect.runPromise(
-        harness.engine.dispatch({
-          type: "thread.turn.start",
-          commandId: CommandId.make("delegated-start"),
-          threadId,
-          message: {
-            messageId: MessageId.make("delegated-message"),
-            role: "user",
-            text: "Fixture result",
-            attachments: [],
-          },
-          runtimeMode: "approval-required",
-          interactionMode: "default",
-          createdAt,
-          delegationReturnGuard: {
-            turnMessageId: MessageId.make("origin-message"),
-            latestUserMessageId: MessageId.make("origin-message"),
-            projectId: ProjectId.make("project-1"),
-            turnId: TurnId.make("turn-1"),
-            runtimeSessionId: RuntimeSessionId.make("runtime-1"),
-            providerInstanceId: ProviderInstanceId.make("codex"),
-            runtimeMode: "approval-required",
-            worktreePath: null,
-          },
-        }),
-      );
-      if (liveRuntime === "runtime-1") {
-        await waitFor(() => harness.sendTurn.mock.calls.length === 1);
-        expect(harness.sendTurn.mock.calls[0]?.[1]).toEqual({
-          provider: "codex",
-          providerInstanceId: "codex",
-          runtimeSessionId: "runtime-1",
-        });
-      } else {
-        await waitFor(
-          async () =>
-            (await harness.readModel()).threads[0]?.activities.some(
-              (entry) => entry.summary === "Delegated return was not submitted",
-            ) ?? false,
-        );
-        expect(harness.sendTurn).not.toHaveBeenCalled();
-        expect((await harness.readModel()).threads[0]?.session?.status).toBe("ready");
-      }
-      expect(harness.startSession).not.toHaveBeenCalled();
+      await dispatchDelegatedWake(harness, threadId, createdAt);
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      expect(harness.sendTurn.mock.calls[0]).toHaveLength(1);
+      if (liveRuntime === null) expect(harness.startSession).toHaveBeenCalledTimes(1);
+      expect(
+        (await harness.readModel()).threads[0]?.activities.some(
+          (entry) => entry.summary === "Delegated return was not submitted",
+        ),
+      ).toBe(false);
     });
   }
+  it("records the session lastError when a delegated wake fails to start", async () => {
+    const harness = await createHarness();
+    const createdAt = new Date().toISOString();
+    const threadId = ThreadId.make("thread-1");
+    await startOriginatingTurn(harness, threadId, createdAt);
+    harness.sendTurn.mockImplementationOnce(
+      () =>
+        Effect.fail(
+          new ProviderAdapterRequestError({
+            provider: "codex",
+            method: "turn/start",
+            detail: "wake start failed",
+          }),
+        ) as never,
+    );
+    await dispatchDelegatedWake(harness, threadId, createdAt);
+    await waitFor(
+      async () =>
+        (await harness.readModel()).threads[0]?.activities.some(
+          (entry) =>
+            entry.kind === "provider.turn.start.failed" &&
+            (entry.payload as { messageId?: string } | null)?.messageId ===
+              "delegation-result:child-1",
+        ) ?? false,
+    );
+    await harness.drain();
+    expect((await harness.readModel()).threads[0]?.session?.lastError).toBe("wake start failed");
+  });
   it("keeps Claude native compaction exact even with a prompt-managed goal", async () => {
     const harness = await createHarness({
       threadModelSelection: createModelSelection(

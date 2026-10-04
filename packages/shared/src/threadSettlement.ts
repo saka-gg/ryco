@@ -90,7 +90,12 @@ function timestampMs(value: string | null | undefined): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-export function hasQueuedTurnStart(input: ThreadSettlementInput): boolean {
+export function hasQueuedTurnStart(
+  input: Pick<
+    ThreadSettlementInput,
+    "latestTurnState" | "sessionStatus" | "latestUserMessageAt" | "latestTurnRequestedAt" | "nowMs"
+  >,
+): boolean {
   if (input.latestTurnState === "error" || input.sessionStatus === "error") {
     return false;
   }
@@ -129,6 +134,45 @@ export function canSettleThread(input: ThreadSettlementInput): CanSettleThreadRe
   if (input.deliveryUnknown) return blocked("delivery-unknown");
   if (hasQueuedTurnStart(input)) return blocked("queued-turn");
   return { canSettle: true, blocker: null };
+}
+
+export type QueuedTurnIdleBlocker =
+  | "thread-archived"
+  | "pending-approval"
+  | "pending-user-input"
+  | "session-starting"
+  | "session-running"
+  | "background-working"
+  | "queued-turn";
+
+export interface QueuedTurnIdleInput {
+  readonly archivedAt: string | null;
+  readonly sessionStatus: OrchestrationSessionStatus | null;
+  readonly latestTurnState: OrchestrationLatestTurnState | null;
+  readonly latestTurnRequestedAt: string | null;
+  readonly latestUserMessageAt: string | null;
+  readonly hasPendingApprovals: boolean;
+  readonly hasPendingUserInput: boolean;
+  readonly backgroundLiveness: "working" | "monitoring" | null;
+  readonly nowMs: number;
+}
+
+/**
+ * Whether a server-initiated queued turn (delegation wake) may start now. Same order as
+ * `canSettleThread`. Monitoring-only background work (e.g. a dev server watcher) does not
+ * block: a chat that leaves one running would otherwise never be woken. A stopped, errored
+ * or missing session does not block either; the turn start (re)creates it.
+ */
+export function queuedTurnIdleBlocker(input: QueuedTurnIdleInput): QueuedTurnIdleBlocker | null {
+  if (input.archivedAt !== null) return "thread-archived";
+  if (input.hasPendingApprovals) return "pending-approval";
+  if (input.hasPendingUserInput) return "pending-user-input";
+  if (input.sessionStatus === "starting") return "session-starting";
+  if (input.sessionStatus === "running" || input.latestTurnState === "running")
+    return "session-running";
+  if (input.backgroundLiveness === "working") return "background-working";
+  if (hasQueuedTurnStart(input)) return "queued-turn";
+  return null;
 }
 
 function newestValidTimestamp(candidates: ReadonlyArray<string | null>): string | null {

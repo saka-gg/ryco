@@ -880,7 +880,6 @@ const make = Effect.gen(function* () {
   const buildSendTurnRequestForThread = Effect.fnUntraced(function* (input: {
     readonly threadId: ThreadId;
     readonly messageText: string;
-    readonly preserveRuntime?: boolean;
     readonly computerUse?: ComputerTurnIntent;
     readonly attachments?: ReadonlyArray<ChatAttachment>;
     readonly modelSelection?: ModelSelection;
@@ -930,11 +929,10 @@ const make = Effect.gen(function* () {
           }
         : undefined,
     );
-    if (!input.preserveRuntime)
-      yield* ensureSessionForThread(input.threadId, input.createdAt, {
-        ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
-        computerCatalogChanged,
-      });
+    yield* ensureSessionForThread(input.threadId, input.createdAt, {
+      ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
+      computerCatalogChanged,
+    });
     const { goal, native } = yield* reconcileThreadGoal(input.threadId);
     if (input.modelSelection !== undefined) {
       threadModelSelections.set(input.threadId, input.modelSelection);
@@ -1147,22 +1145,22 @@ const make = Effect.gen(function* () {
         failureTag: tag,
         cause: Cause.pretty(cause),
       });
-      if (!event.payload.delegationReturnGuard) {
-        yield* setThreadSessionErrorOnTurnStartFailure({
-          threadId,
-          messageId: event.payload.messageId,
-          detail,
-          createdAt: event.payload.createdAt,
-          preserveActiveTurn: input.preserveActiveTurn,
-        }).pipe(
-          Effect.catchCause((sessionCause) =>
-            Effect.logWarning(
-              "provider command reactor failed to record turn start failure on the session",
-              { threadId, cause: Cause.pretty(sessionCause) },
-            ),
+      // Delegated wakes included: they cold-start sessions, so a failed wake must leave
+      // lastError on the parent like any other turn start.
+      yield* setThreadSessionErrorOnTurnStartFailure({
+        threadId,
+        messageId: event.payload.messageId,
+        detail,
+        createdAt: event.payload.createdAt,
+        preserveActiveTurn: input.preserveActiveTurn,
+      }).pipe(
+        Effect.catchCause((sessionCause) =>
+          Effect.logWarning(
+            "provider command reactor failed to record turn start failure on the session",
+            { threadId, cause: Cause.pretty(sessionCause) },
           ),
-        );
-      }
+        ),
+      );
       yield* appendProviderFailureActivity({
         threadId,
         kind: "provider.turn.start.failed",
@@ -1237,45 +1235,22 @@ const make = Effect.gen(function* () {
       return yield* Effect.fail(new Error(REMOVED_PROJECT_MEMORY_MESSAGE));
     }
 
-    const returnGuard = event.payload.delegationReturnGuard;
-    const liveReturnSession = returnGuard
-      ? yield* providerService
-          .getSession(event.payload.threadId)
-          .pipe(
-            Effect.catchCause((cause) =>
-              reportTurnStartFailure({ event, cause, preserveActiveTurn: true }).pipe(
-                Effect.as(Option.none()),
-              ),
-            ),
-          )
-      : Option.none();
-    if (
-      returnGuard &&
-      (Option.isNone(liveReturnSession) ||
-        liveReturnSession.value.runtimeSessionId !== returnGuard.runtimeSessionId ||
-        liveReturnSession.value.providerInstanceId !== returnGuard.providerInstanceId ||
-        event.payload.contextHandoff !== undefined)
-    ) {
+    // A delegated wake is a normal queued turn start: ensureSessionForThread creates or
+    // resumes the session. The decider requires an unchanged model selection, so a handoff
+    // is unreachable here; keep the defensive check (never hand off on untrusted input).
+    if (event.payload.delegationReturnGuard && event.payload.contextHandoff !== undefined) {
       yield* appendProviderFailureActivity({
         threadId: event.payload.threadId,
         kind: "provider.turn.start.failed",
         messageId: event.payload.messageId,
         summary: "Delegated return was not submitted",
         detail:
-          "The originating runtime is no longer live. Inspect this result before sending it manually.",
+          "A delegated result cannot start a model handoff. Inspect this result before sending it manually.",
         turnId: null,
         createdAt: event.payload.createdAt,
       });
       return;
     }
-    const expectedReturnRuntime =
-      returnGuard && Option.isSome(liveReturnSession)
-        ? {
-            provider: liveReturnSession.value.provider,
-            providerInstanceId: returnGuard.providerInstanceId,
-            runtimeSessionId: returnGuard.runtimeSessionId,
-          }
-        : undefined;
 
     if (event.payload.contextHandoff !== undefined) {
       // Handoff owns a separate session-start path. Its current human request
@@ -1302,7 +1277,6 @@ const make = Effect.gen(function* () {
     const sendTurnRequest = yield* buildSendTurnRequestForThread({
       threadId: event.payload.threadId,
       messageText: message.text,
-      ...(returnGuard ? { preserveRuntime: true } : {}),
       ...(event.payload.computerUse ? { computerUse: event.payload.computerUse } : {}),
       ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
       ...(event.payload.modelSelection !== undefined
@@ -1369,7 +1343,7 @@ const make = Effect.gen(function* () {
 
     // Submission failures may follow this request's own turn.started, so they
     // reset a running session (preserveActiveTurn: false), as before.
-    yield* providerService.sendTurn(sendTurnRequest, expectedReturnRuntime).pipe(
+    yield* providerService.sendTurn(sendTurnRequest).pipe(
       Effect.tap(() => commitAcceptedModelSelection),
       Effect.catchCause((cause) =>
         reportTurnStartFailure({ event, cause, preserveActiveTurn: false }),

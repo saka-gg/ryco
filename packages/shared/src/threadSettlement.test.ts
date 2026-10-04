@@ -11,6 +11,8 @@ import {
   getThreadAutoSettlementBlocker,
   getThreadLastActivityTimestamp,
   hasQueuedTurnStart,
+  queuedTurnIdleBlocker,
+  type QueuedTurnIdleInput,
   type ThreadSettlementInput,
 } from "./threadSettlement.ts";
 
@@ -47,6 +49,64 @@ function input(overrides: Partial<ThreadSettlementInput> = {}): ThreadSettlement
     ...overrides,
   };
 }
+
+function idleInput(overrides: Partial<QueuedTurnIdleInput> = {}): QueuedTurnIdleInput {
+  return {
+    archivedAt: null,
+    sessionStatus: "ready",
+    latestTurnState: "completed",
+    latestTurnRequestedAt: "2026-07-31T10:00:00.000Z",
+    latestUserMessageAt: "2026-07-31T10:00:00.000Z",
+    hasPendingApprovals: false,
+    hasPendingUserInput: false,
+    backgroundLiveness: null,
+    nowMs: NOW,
+    ...overrides,
+  };
+}
+
+describe("queuedTurnIdleBlocker", () => {
+  it("lets a server-queued turn start on a ready thread with monitoring-only work", () => {
+    expect(queuedTurnIdleBlocker(idleInput())).toBeNull();
+    expect(queuedTurnIdleBlocker(idleInput({ backgroundLiveness: "monitoring" }))).toBeNull();
+    expect(queuedTurnIdleBlocker(idleInput({ sessionStatus: null }))).toBeNull();
+    expect(queuedTurnIdleBlocker(idleInput({ sessionStatus: "stopped" }))).toBeNull();
+    expect(queuedTurnIdleBlocker(idleInput({ sessionStatus: "error" }))).toBeNull();
+  });
+
+  it.each([
+    [{ archivedAt: "2026-07-31T11:00:00.000Z" }, "thread-archived"],
+    [{ hasPendingApprovals: true }, "pending-approval"],
+    [{ hasPendingUserInput: true }, "pending-user-input"],
+    [{ sessionStatus: "starting" as const }, "session-starting"],
+    [{ sessionStatus: "running" as const }, "session-running"],
+    [{ latestTurnState: "running" as const }, "session-running"],
+    [{ backgroundLiveness: "working" as const }, "background-working"],
+    [
+      {
+        latestTurnRequestedAt: "2026-07-31T11:55:00.000Z",
+        latestUserMessageAt: "2026-07-31T11:59:00.000Z",
+      },
+      "queued-turn",
+    ],
+  ] satisfies ReadonlyArray<[Partial<QueuedTurnIdleInput>, string]>)(
+    "blocks on %o",
+    (overrides, blocker) => {
+      expect(queuedTurnIdleBlocker(idleInput(overrides))).toBe(blocker);
+    },
+  );
+
+  it("stops treating an unadopted user message as queued after the grace", () => {
+    expect(
+      queuedTurnIdleBlocker(
+        idleInput({
+          latestTurnRequestedAt: "2026-07-31T11:50:00.000Z",
+          latestUserMessageAt: "2026-07-31T11:55:00.000Z",
+        }),
+      ),
+    ).toBeNull();
+  });
+});
 
 describe("hasQueuedTurnStart", () => {
   it("blocks a recent user message not adopted by a latest turn", () => {
