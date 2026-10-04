@@ -22,7 +22,10 @@ export interface QueueThreadView {
   readonly archived: boolean;
   /** A thread-detail window or full-detail snapshot has been applied. */
   readonly detailLoaded: boolean;
-  /** Same overlap window as mobile's `threadBusy`, plus a `starting` session. */
+  /**
+   * Same overlap window as mobile's `threadBusy`, plus a `starting` session; a
+   * `running` turn row the session has already released does not count.
+   */
   readonly running: boolean;
   readonly hasPendingApproval: boolean;
   readonly hasPendingUserInput: boolean;
@@ -126,6 +129,22 @@ function readActivityView(
   return next;
 }
 
+/**
+ * A turn row can stay `running` after its session has settled (`ready` or
+ * `error` with no active turn): non-git tool-only turns, a failed checkpoint
+ * capture and ACP prompt failures leave it unfinalized. Waiting on such a turn
+ * would strand the queue as `busy`, where no Resume can move it. The session
+ * counts as having released the turn only when it was updated after the turn
+ * started; an older session update is stale ordering, not a release.
+ */
+function sessionReleasedTurn(
+  session: { readonly updatedAt: string } | null,
+  latestTurn: { readonly requestedAt: string; readonly startedAt: string | null },
+): boolean {
+  if (session === null) return false;
+  return Date.parse(session.updatedAt) > Date.parse(latestTurn.startedAt ?? latestTurn.requestedAt);
+}
+
 /** null when the environment has no shell for the thread. */
 export function readQueueThreadView(state: AppState, ref: ScopedThreadRef): QueueThreadView | null {
   const environmentState = selectEnvironmentState(state, ref.environmentId);
@@ -163,7 +182,7 @@ export function readQueueThreadView(state: AppState, ref: ScopedThreadRef): Queu
       orchestrationStatus === "running" ||
       orchestrationStatus === "starting" ||
       Boolean(session?.activeTurnId) ||
-      latestTurn?.state === "running",
+      (latestTurn?.state === "running" && !sessionReleasedTurn(session, latestTurn)),
     hasPendingApproval: Boolean(summary?.hasPendingApprovals) || activityView.pendingApproval,
     hasPendingUserInput: Boolean(summary?.hasPendingUserInput) || activityView.pendingUserInput,
     session: session

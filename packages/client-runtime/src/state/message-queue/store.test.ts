@@ -115,6 +115,22 @@ describe("queue holds", () => {
     store.getState().removeHoldCauses("env:thread", ["error:turn-1:boom"]);
     expect(store.getState().holdsByThreadKey["env:thread"]).toBeUndefined();
 
+    // A released stall leaves the Stop's reason, not the stall copy.
+    store.getState().hold("env:thread", createInterruptQueueHold(null, NOW));
+    store.getState().hold("env:thread", {
+      reason: "stalled",
+      detail: null,
+      causeKeys: ["stalled:q-1"],
+      heldAt: NOW,
+    });
+    expect(store.getState().holdsByThreadKey["env:thread"]?.reason).toBe("stalled");
+    store.getState().removeHoldCauses("env:thread", ["stalled:q-1"]);
+    expect(store.getState().holdsByThreadKey["env:thread"]).toMatchObject({
+      reason: "interrupted",
+      causeKeys: [`interrupt:user:${NOW}`],
+    });
+    store.getState().removeHoldCauses("env:thread", [`interrupt:user:${NOW}`]);
+
     store.getState().hold("env:thread", errorHold);
     store.getState().release("env:thread", ["error:turn-1:boom", "interrupt:turn-1"]);
     expect(store.getState().holdsByThreadKey["env:thread"]).toBeUndefined();

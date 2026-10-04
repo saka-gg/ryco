@@ -14,7 +14,9 @@ import {
   MAX_ACKNOWLEDGED_CAUSE_KEYS,
   mergeQueueHold,
   partitionNewQueueFailureCauses,
+  queueHoldReasonForCauseKey,
   releaseQueueHoldKeys,
+  removeQueueHoldCauses,
   type QueueFailureCause,
 } from "./hold.ts";
 import { readQueueThreadView } from "./threadView.ts";
@@ -74,6 +76,18 @@ describe("deriveQueueFailureCauses", () => {
     expect(
       causesFor({ session: { status: "interrupted" } }).map((cause) => cause.causeKey),
     ).toEqual(["interrupt:session"]);
+  });
+
+  it.each([
+    ["running on that turn", { status: "running" as const, activeTurnId: "turn-1" }],
+    ["starting", { status: "starting" as const }],
+    ["ready with the turn still active", { status: "ready" as const, activeTurnId: "turn-1" }],
+  ])("derives no interrupt from a live turn's latest state while %s", (_label, session) => {
+    // A Codex turn in a git repo flips latestTurn to `interrupted` mid-turn
+    // through a placeholder `missing` checkpoint.
+    expect(causesFor({ session, latestTurn: { turnId: "turn-1", state: "interrupted" } })).toEqual(
+      [],
+    );
   });
 
   it("raises a start failure only for a message this client dispatched", () => {
@@ -191,6 +205,38 @@ describe("hold merge and release", () => {
         },
       ]),
     ).toEqual(["interrupt:turn-1", "error:turn-1:boom"]);
+  });
+
+  it("recomputes the reason and drops a stale detail when causes are removed", () => {
+    // Stop, then a stall outranks it; the stalled message later starts.
+    const stalled = mergeQueueHold(
+      createInterruptQueueHold(null, NOW),
+      { reason: "stalled", causeKeys: ["stalled:q-1"], detail: "not started" },
+      NOW,
+    );
+    expect(stalled.reason).toBe("stalled");
+    expect(removeQueueHoldCauses(stalled, ["stalled:q-1"])).toEqual({
+      reason: "interrupted",
+      detail: null,
+      causeKeys: [`interrupt:user:${NOW}`],
+      heldAt: NOW,
+    });
+    // An undone Stop leaves the error and its detail intact.
+    const errored = mergeQueueHold(
+      { reason: "error", detail: "Rate limited", causeKeys: ["error:t:Rate limited"], heldAt: NOW },
+      createInterruptQueueHold("t", NOW),
+      NOW,
+    );
+    expect(removeQueueHoldCauses(errored, ["interrupt:t"])).toEqual({
+      reason: "error",
+      detail: "Rate limited",
+      causeKeys: ["error:t:Rate limited"],
+      heldAt: NOW,
+    });
+    expect(removeQueueHoldCauses(errored, ["unrelated"])).toBe(errored);
+    expect(removeQueueHoldCauses(errored, errored.causeKeys)).toBeNull();
+    expect(queueHoldReasonForCauseKey("start-failed:a-1")).toBe("error");
+    expect(queueHoldReasonForCauseKey("custom:x")).toBeNull();
   });
 
   it("creates a user-scoped interrupt when no turn is active", () => {

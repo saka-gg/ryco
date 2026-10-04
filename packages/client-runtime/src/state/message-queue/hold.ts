@@ -76,7 +76,20 @@ export function deriveQueueFailureCauses(
       providerInstanceId: session.providerInstanceId,
     });
   }
-  if (view.latestTurn?.state === "interrupted" || session?.status === "interrupted") {
+  // `latestTurn.state` is not a stable signal while its turn is live: a Codex
+  // turn in a git repo flips it to `interrupted` mid-turn through a placeholder
+  // `missing` checkpoint, and an edge-triggered hold would outlive the flip. A
+  // local Stop is recorded explicitly, so only a settled interrupted turn (for
+  // example a Stop from another client) is derived here.
+  const turnLive =
+    session !== null &&
+    (session.status === "running" ||
+      session.status === "starting" ||
+      session.activeTurnId !== null);
+  if (
+    (view.latestTurn?.state === "interrupted" && !turnLive) ||
+    session?.status === "interrupted"
+  ) {
     causes.push({
       reason: "interrupted",
       causeKey: `interrupt:${turnKey}`,
@@ -171,6 +184,54 @@ export function queueHoldsEqual(left: QueueHold | null, right: QueueHold | null)
     left.causeKeys.length === right.causeKeys.length &&
     left.causeKeys.every((key, index) => right.causeKeys[index] === key)
   );
+}
+
+const CAUSE_KEY_REASONS: ReadonlyArray<readonly [prefix: string, reason: QueueHoldReason]> = [
+  ["interrupt:", "interrupted"],
+  ["review:", "review"],
+  ["stalled:", "stalled"],
+  ["error:", "error"],
+  ["start-failed:", "error"],
+  ["limit:", "limit"],
+];
+
+/** The reason a cause key holds for; null for a prefix this module does not mint. */
+export function queueHoldReasonForCauseKey(causeKey: string): QueueHoldReason | null {
+  for (const [prefix, reason] of CAUSE_KEY_REASONS) {
+    if (causeKey.startsWith(prefix)) return reason;
+  }
+  return null;
+}
+
+/**
+ * Removes causes without acknowledging them (an undone Stop, an auto-released
+ * stall). The reason is recomputed from the remaining causes, and a detail that
+ * belonged to a reason no longer present is dropped, so the copy never names a
+ * cause that is gone. Returns the same hold when nothing matched and null when
+ * no cause remains.
+ */
+export function removeQueueHoldCauses(
+  hold: QueueHold,
+  causeKeys: readonly string[],
+): QueueHold | null {
+  const remaining = hold.causeKeys.filter((key) => !causeKeys.includes(key));
+  if (remaining.length === hold.causeKeys.length) return hold;
+  if (remaining.length === 0) return null;
+  let reason: QueueHoldReason | null = null;
+  for (const key of remaining) {
+    // An unrecognised cause (a newer package's) keeps the hold's own reason.
+    const candidate = queueHoldReasonForCauseKey(key) ?? hold.reason;
+    if (reason === null || QUEUE_HOLD_RANK[candidate] > QUEUE_HOLD_RANK[reason]) {
+      reason = candidate;
+    }
+  }
+  const nextReason = reason ?? hold.reason;
+  return {
+    reason: nextReason,
+    detail: nextReason === hold.reason ? hold.detail : null,
+    causeKeys: remaining,
+    heldAt: hold.heldAt,
+  };
 }
 
 /** Keys a Resume acknowledges: the hold's own keys plus every current cause. */

@@ -4,6 +4,7 @@ import {
   appendAcknowledgedCauseKeys,
   mergeQueueHold,
   queueHoldsEqual,
+  removeQueueHoldCauses,
   type QueueHold,
 } from "./hold.ts";
 import { moveQueuedMessage, removeQueuedMessage, type QueuedMessage } from "./logic.ts";
@@ -258,13 +259,14 @@ export function createMessageQueueStore<Composer = unknown, Settings = unknown>(
     removeHoldCauses: (threadKey, causeKeys) =>
       set((state) => {
         const hold = state.holdsByThreadKey[threadKey];
-        if (!hold || !causeKeys.some((key) => hold.causeKeys.includes(key))) return state;
-        const remaining = hold.causeKeys.filter((key) => !causeKeys.includes(key));
+        if (!hold) return state;
+        const next = removeQueueHoldCauses(hold, causeKeys);
+        if (next === hold) return state;
         return {
           holdsByThreadKey:
-            remaining.length === 0
+            next === null
               ? withoutKey(state.holdsByThreadKey, threadKey)
-              : { ...state.holdsByThreadKey, [threadKey]: { ...hold, causeKeys: remaining } },
+              : { ...state.holdsByThreadKey, [threadKey]: next },
         };
       }),
     acknowledgeCauses: (threadKey, causeKeys) =>

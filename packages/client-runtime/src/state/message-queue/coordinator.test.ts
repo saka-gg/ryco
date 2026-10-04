@@ -1,14 +1,24 @@
+import {
+  CheckpointRef,
+  CommandId,
+  EventId,
+  MessageId,
+  ThreadId,
+  TurnId,
+  type OrchestrationEvent,
+} from "@ryco/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { createStore } from "zustand/vanilla";
 
 import {
   makeQueueAppState,
+  QUEUE_ENV,
   queueKey,
   turnStartFailed,
   withThread,
   type ThreadFixture,
 } from "../../../test/queueThreadFixtures.ts";
-import type { AppState } from "../threads/store.ts";
+import { applyOrchestrationEvent, type AppState } from "../threads/store.ts";
 import {
   createMessageQueueDrainCoordinator,
   type MessageQueueDrainPlatform,
@@ -38,6 +48,36 @@ const RUNNING: ThreadFixture = {
 
 function entry(id: string): Entry {
   return { id, composer: { text: id }, settings: {} };
+}
+
+function turnDiffCompleted(
+  sequence: number,
+  turnId: string,
+  status: "ready" | "missing",
+): OrchestrationEvent {
+  const threadId = ThreadId.make("t");
+  return {
+    sequence,
+    eventId: EventId.make(`event-diff-${sequence}`),
+    aggregateKind: "thread",
+    aggregateId: threadId,
+    occurredAt: "2026-10-01T10:00:02.000Z",
+    commandId: CommandId.make(`command-diff-${sequence}`),
+    causationEventId: null,
+    correlationId: null,
+    metadata: {},
+    type: "thread.turn-diff-completed",
+    payload: {
+      threadId,
+      turnId: TurnId.make(turnId),
+      checkpointTurnCount: 1,
+      checkpointRef: CheckpointRef.make(`checkpoint-${sequence}`),
+      status,
+      files: [],
+      assistantMessageId: MessageId.make(`assistant:${turnId}`),
+      completedAt: "2026-10-01T10:00:02.000Z",
+    },
+  } as OrchestrationEvent;
 }
 
 async function flush(): Promise<void> {
@@ -179,6 +219,85 @@ describe("message queue drain coordinator", () => {
     expect(f.sent).toEqual([]);
     expect(f.coordinator.inspect(KEY).lastStep).toEqual({ kind: "wait", reason: "held" });
     f.coordinator.resume(KEY);
+    await flush();
+    expect(f.sent).toEqual(["q-1"]);
+  });
+
+  it("does not hold on a mid-turn placeholder checkpoint that reads as interrupted", async () => {
+    const f = setup({ thread: RUNNING });
+    f.queue.getState().enqueue(KEY, entry("q-1"));
+    await flush();
+    expect(f.coordinator.inspect(KEY).lastStep).toEqual({ kind: "wait", reason: "busy" });
+    // A Codex turn in a git repo: the first turn.diff.updated dispatches a
+    // placeholder `missing` checkpoint, which the client maps to `interrupted`.
+    f.threads.setState((state) =>
+      applyOrchestrationEvent(state, turnDiffCompleted(1, "turn-1", "missing"), QUEUE_ENV),
+    );
+    expect(
+      f.threads.getState().environmentStateById[QUEUE_ENV]?.threadTurnStateById[ThreadId.make("t")]
+        ?.latestTurn?.state,
+    ).toBe("interrupted");
+    await flush();
+    expect(f.coordinator.inspect(KEY).lastStep).toEqual({ kind: "wait", reason: "busy" });
+    expect(f.queue.getState().holdsByThreadKey[KEY]).toBeUndefined();
+    // The real capture lands and the turn settles normally.
+    f.threads.setState((state) =>
+      applyOrchestrationEvent(state, turnDiffCompleted(2, "turn-1", "ready"), QUEUE_ENV),
+    );
+    f.setThread(IDLE);
+    await flush();
+    expect(f.queue.getState().holdsByThreadKey[KEY]).toBeUndefined();
+    expect(f.sent).toEqual(["q-1"]);
+  });
+
+  it("arms the ack when a send is projected before its reply is lost", async () => {
+    const f = setup();
+    let rejectSend!: (error: Error) => void;
+    f.respondWith(
+      (_entry, hooks) =>
+        new Promise<QueueSendResult>((_resolve, reject) => {
+          hooks.onBeforeTurnStart();
+          rejectSend = reject;
+        }),
+    );
+    f.queue.getState().enqueue(KEY, entry("q-1"));
+    f.queue.getState().enqueue(KEY, entry("q-2"));
+    await flush();
+    expect(f.coordinator.inspect(KEY).inFlightMessageId).toBe("q-1");
+    // thread.message-sent lands first: reconcile removes the in-flight head.
+    f.setThread({ ...IDLE, messageIds: ["m-0", "q-1"] });
+    await flush();
+    expect(f.queue.getState().queuesByThreadKey[KEY]!.map((queued) => queued.id)).toEqual(["q-2"]);
+    f.respondWith(async () => ({ kind: "accepted" }));
+    rejectSend(new Error("socket closed"));
+    await flush();
+    // startSession's bind: ready, no turn yet. q-2 must wait for q-1's turn.
+    f.setThread({
+      session: { status: "ready", updatedAt: "2026-10-01T10:00:05.000Z" },
+      latestTurn: { turnId: "turn-1", state: "completed" },
+      messageIds: ["m-0", "q-1"],
+    });
+    await flush();
+    expect(f.coordinator.inspect(KEY).pendingDispatch?.messageId).toBe("q-1");
+    expect(f.sent).toEqual(["q-1"]);
+    f.setThread({
+      session: { status: "ready" },
+      latestTurn: { turnId: "turn-2", state: "completed" },
+      messageIds: ["m-0", "q-1"],
+    });
+    await flush();
+    expect(f.sent).toEqual(["q-1", "q-2"]);
+  });
+
+  it("sends past a running turn row its session already released", async () => {
+    const f = setup({ thread: RUNNING });
+    f.queue.getState().enqueue(KEY, entry("q-1"));
+    await flush();
+    f.setThread({
+      session: { status: "ready", updatedAt: "2026-10-01T10:00:05.000Z" },
+      latestTurn: { turnId: "turn-1", state: "running" },
+      messageIds: ["m-0"],
+    });
     await flush();
     expect(f.sent).toEqual(["q-1"]);
   });

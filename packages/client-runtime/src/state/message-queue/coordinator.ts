@@ -423,14 +423,21 @@ export function createMessageQueueDrainCoordinator<C, S>(
     void Promise.resolve()
       .then(() => sender.send(entry, hooks))
       .catch((): QueueSendResult => ({ kind: "failed" }))
-      .then((result) => complete(key, entry, result, { sendRunId, epoch, startSnapshot }));
+      .then((result) =>
+        complete(key, entry, result, { ref: context.ref, sendRunId, epoch, startSnapshot }),
+      );
   }
 
   function complete(
     key: string,
     entry: QueuedMessage<C, S>,
     result: QueueSendResult,
-    context: { sendRunId: number; epoch: number; startSnapshot: QueuedDispatchSnapshot },
+    context: {
+      ref: ScopedThreadRef;
+      sendRunId: number;
+      epoch: number;
+      startSnapshot: QueuedDispatchSnapshot;
+    },
   ): void {
     const messageId = entry.id;
     const current = inFlight.get(key);
@@ -454,15 +461,28 @@ export function createMessageQueueDrainCoordinator<C, S>(
         }
         break;
       }
-      case "failed":
+      case "failed": {
+        const stillQueued = queueOf(key).some((candidate) => candidate.id === messageId);
         store.finishSend(key, messageId, false);
         // The turn command may have reached the server before the reply was
         // lost; keep enough to recognise its start or failure later.
         if (hookSnapshot && sameRun) {
           addDispatched(key, messageId);
-          setBounded(failedSnapshots, messageId, hookSnapshot, MAX_SNAPSHOTS);
+          if (stillQueued) {
+            setBounded(failedSnapshots, messageId, hookSnapshot, MAX_SNAPSHOTS);
+          } else if (
+            queueOf(key).length > 0 &&
+            readQueueThreadView(platform.threads.getState(), context.ref)?.projectedMessageIds.has(
+              messageId,
+            )
+          ) {
+            // Projected before the reply was lost: reconcile already removed it,
+            // so arm its ack here or the next head could land in its bind window.
+            armPending(key, hookSnapshot);
+          }
         }
         break;
+      }
       case "deferred":
         store.releaseSend(key, messageId);
         if (sameRun && !deferTimers.has(key)) {

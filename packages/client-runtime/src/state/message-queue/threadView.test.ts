@@ -34,6 +34,27 @@ describe("readQueueThreadView", () => {
     expect(viewOf(fixture).running).toBe(true);
   });
 
+  it("does not wait on a running turn row its settled session already released", () => {
+    // Unfinalized turns (non-git tool-only, capture failure, ACP prompt failure)
+    // stay `running` after session-set(ready|error); waiting on them is a stall
+    // with no Resume.
+    for (const status of ["ready", "error"] as const) {
+      expect(
+        viewOf({
+          session: { status, updatedAt: "2026-10-01T10:00:05.000Z" },
+          latestTurn: { turnId: "turn-1", state: "running" },
+        }).running,
+      ).toBe(false);
+    }
+    // A session update from before the turn started is stale ordering.
+    expect(
+      viewOf({
+        session: { status: "ready", updatedAt: "2026-10-01T09:59:59.000Z" },
+        latestTurn: { turnId: "turn-1", state: "running" },
+      }).running,
+    ).toBe(true);
+  });
+
   it("is idle once the session is ready and the turn settled", () => {
     expect(
       viewOf({
