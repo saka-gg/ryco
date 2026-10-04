@@ -151,6 +151,10 @@
       "types": "./src/threadActivity.ts",
       "import": "./src/threadActivity.ts"
     },
+    "./turnFinalization": {
+      "types": "./src/turnFinalization.ts",
+      "import": "./src/turnFinalization.ts"
+    },
     "./composerInlineTokens": {
       "types": "./src/composerInlineTokens.ts",
       "import": "./src/composerInlineTokens.ts"

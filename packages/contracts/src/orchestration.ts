@@ -819,6 +819,37 @@ const OrchestrationLatestTurnState = Schema.Literals([
 ]);
 export type OrchestrationLatestTurnState = typeof OrchestrationLatestTurnState.Type;
 
+/**
+ * Frozen set of states a turn can end in. New outcomes (for example usage limits)
+ * go into `reason` or a separate field, never into this literal set.
+ */
+export const OrchestrationTerminalTurnState = Schema.Literals([
+  "completed",
+  "error",
+  "interrupted",
+]);
+export type OrchestrationTerminalTurnState = typeof OrchestrationTerminalTurnState.Type;
+
+/** Server-internal: what the caller knows about how the active turn ended. */
+export const OrchestrationTurnOutcome = Schema.Struct({
+  /** Omitted = "the turn this release ends", whichever it is. */
+  turnId: Schema.optional(TurnId),
+  state: OrchestrationTerminalTurnState,
+  /** Open diagnostic string (see TURN_FINALIZATION_REASON). Never a closed literal set. */
+  reason: TrimmedNonEmptyString,
+  completedAt: Schema.optional(IsoDateTime),
+});
+export type OrchestrationTurnOutcome = typeof OrchestrationTurnOutcome.Type;
+
+/** Decided by the server: the turn this session-set releases, and how it ended. */
+export const OrchestrationReleasedTurn = Schema.Struct({
+  turnId: TurnId,
+  state: OrchestrationTerminalTurnState,
+  completedAt: IsoDateTime,
+  reason: TrimmedNonEmptyString,
+});
+export type OrchestrationReleasedTurn = typeof OrchestrationReleasedTurn.Type;
+
 export const OrchestrationLatestTurn = Schema.Struct({
   userMessageId: Schema.optional(MessageId),
   turnId: TurnId,
@@ -1728,6 +1759,8 @@ const ThreadSessionSetCommand = Schema.Struct({
   commandId: CommandId,
   threadId: ThreadId,
   session: OrchestrationSession,
+  /** Internal hint: how the turn this session-set releases ended, when the caller knows. */
+  turnOutcome: Schema.optional(OrchestrationTurnOutcome),
   createdAt: IsoDateTime,
 });
 
@@ -2206,6 +2239,8 @@ export const ThreadSessionStopRequestedPayload = Schema.Struct({
 export const ThreadSessionSetPayload = Schema.Struct({
   threadId: ThreadId,
   session: OrchestrationSession,
+  /** Decided by the server: the turn this session-set releases and its terminal state. */
+  releasedTurn: Schema.optional(OrchestrationReleasedTurn),
 });
 
 export const ThreadProposedPlanUpsertedPayload = Schema.Struct({

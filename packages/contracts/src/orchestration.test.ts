@@ -38,6 +38,7 @@ import {
   ThreadTurnDiff,
   ThreadTurnStartRequestedPayload,
 } from "./orchestration.ts";
+import { TurnId } from "./baseSchemas.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
 import { THREAD_GOAL_OBJECTIVE_MAX_CHARS } from "./threadGoal.ts";
 
@@ -1564,5 +1565,131 @@ it.effect("decodes server-owned sidebar undo requests without client restoration
       }),
     );
     assert.strictEqual(missingReceipt._tag, "Failure");
+  }),
+);
+
+it.effect("decodes thread.session-set with and without a released turn", () =>
+  Effect.gen(function* () {
+    const session = {
+      threadId: "thread-1",
+      status: "ready",
+      providerName: "codex",
+      runtimeMode: "full-access",
+      activeTurnId: null,
+      lastError: null,
+      updatedAt: "2026-01-02T00:00:00.000Z",
+    } as const;
+    const eventBase = {
+      aggregateKind: "thread",
+      aggregateId: "thread-1",
+      occurredAt: "2026-01-02T00:00:00.000Z",
+      causationEventId: null,
+      metadata: {},
+      type: "thread.session-set",
+      commandId: "cmd-session-1",
+      correlationId: "cmd-session-1",
+    } as const;
+
+    const legacy = yield* decodeOrchestrationEvent({
+      ...eventBase,
+      sequence: 1,
+      eventId: "event-session-legacy",
+      payload: { threadId: "thread-1", session },
+    });
+    if (legacy.type !== "thread.session-set") {
+      assert.fail(`Expected thread.session-set, got ${legacy.type}`);
+    }
+    assert.strictEqual(legacy.payload.releasedTurn, undefined);
+
+    const released = yield* decodeOrchestrationEvent({
+      ...eventBase,
+      sequence: 2,
+      eventId: "event-session-released",
+      payload: {
+        threadId: "thread-1",
+        session,
+        releasedTurn: {
+          turnId: "turn-1",
+          state: "interrupted",
+          completedAt: "2026-01-02T00:00:00.000Z",
+          // `reason` is an open string, so a value this build does not know still decodes.
+          reason: "some-future-reason",
+        },
+      },
+    });
+    if (released.type !== "thread.session-set") {
+      assert.fail(`Expected thread.session-set, got ${released.type}`);
+    }
+    assert.deepEqual(released.payload.releasedTurn, {
+      turnId: TurnId.make("turn-1"),
+      state: "interrupted",
+      completedAt: "2026-01-02T00:00:00.000Z",
+      reason: "some-future-reason",
+    });
+
+    const runningIsNotTerminal = yield* Effect.exit(
+      decodeOrchestrationEvent({
+        ...eventBase,
+        sequence: 3,
+        eventId: "event-session-invalid",
+        payload: {
+          threadId: "thread-1",
+          session,
+          releasedTurn: {
+            turnId: "turn-1",
+            state: "running",
+            completedAt: "2026-01-02T00:00:00.000Z",
+            reason: "provider-turn-completed",
+          },
+        },
+      }),
+    );
+    assert.strictEqual(runningIsNotTerminal._tag, "Failure");
+  }),
+);
+
+it.effect("decodes a turn outcome hint only on the internal thread.session.set command", () =>
+  Effect.gen(function* () {
+    const session = {
+      threadId: "thread-1",
+      status: "ready",
+      providerName: "codex",
+      runtimeMode: "full-access",
+      activeTurnId: null,
+      lastError: null,
+      updatedAt: "2026-01-02T00:00:00.000Z",
+    } as const;
+    const command = yield* decodeOrchestrationCommand({
+      type: "thread.session.set",
+      commandId: "cmd-session-1",
+      threadId: "thread-1",
+      session,
+      turnOutcome: {
+        state: "completed",
+        reason: "provider-turn-completed",
+        completedAt: "2026-01-02T00:00:00.000Z",
+      },
+      createdAt: "2026-01-02T00:00:00.000Z",
+    });
+    if (command.type !== "thread.session.set") {
+      assert.fail(`Expected thread.session.set, got ${command.type}`);
+    }
+    assert.deepEqual(command.turnOutcome, {
+      state: "completed",
+      reason: "provider-turn-completed",
+      completedAt: "2026-01-02T00:00:00.000Z",
+    });
+
+    const fromClient = yield* Effect.exit(
+      decodeClientOrchestrationCommand({
+        type: "thread.session.set",
+        commandId: "cmd-session-2",
+        threadId: "thread-1",
+        session,
+        turnOutcome: { state: "completed", reason: "forged" },
+        createdAt: "2026-01-02T00:00:00.000Z",
+      }),
+    );
+    assert.strictEqual(fromClient._tag, "Failure");
   }),
 );
