@@ -129,7 +129,7 @@ export function providerRollbackEpochViolation(
     targetRuntimeSessionId === undefined ||
     activeRuntimeSessionId !== targetRuntimeSessionId
   ) {
-    return "Provider conversation rollback was not applied because the active runtime epoch could not be verified after a context handoff. Filesystem state was left unchanged.";
+    return "Provider conversation rollback was not applied because the active runtime epoch could not be verified after a context handoff. Nothing was changed.";
   }
 
   const targetMessage = thread.messages.find(
@@ -147,7 +147,7 @@ export function providerRollbackEpochViolation(
           .toSorted((left, right) => left.checkpointTurnCount - right.checkpointTurnCount)[0]
       : undefined);
   if (!firstEpochCheckpoint) {
-    return "Provider conversation rollback was not applied because the active handoff boundary could not be mapped to a checkpoint. Filesystem state was left unchanged.";
+    return "Provider conversation rollback was not applied because the active handoff boundary could not be mapped to a checkpoint. Nothing was changed.";
   }
 
   // The handoff transcript is the provider input of the first epoch turn, so the
@@ -894,7 +894,7 @@ const make = Effect.gen(function* () {
         fromTurnCount,
         status: "failed",
         reason: filesNotRestoredReason.reason,
-        detail: `Files were not restored: ${filesNotRestoredReason.text} Nothing was changed.`,
+        detail: `Files were not restored: ${filesNotRestoredReason.text.replace(/[.\s]+$/, "")}. Nothing was changed.`,
         cwd,
       });
       return;
