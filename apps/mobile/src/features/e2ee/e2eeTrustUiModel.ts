@@ -697,6 +697,58 @@ export async function requestE2eeApproval(session: MobileE2eeSessionState): Prom
   }
 }
 
+/**
+ * The §13.4 number this phone shows once it has asked for approval.
+ *
+ * Desktop lists every pending row with its full number and tells the owner to
+ * compare it with the device. Without this the phone showed nothing to compare,
+ * so a row the Hub minted from a key of its own — it issues the tickets — looked
+ * the same as this phone's, and approving it would hand the Hub an approved
+ * record (§2.3). The WHOLE number or nothing: the Hub holds this phone's enrolled
+ * identity key and can grind a key whose fingerprint shares any short tail, so a
+ * partial value is no check at all.
+ */
+export interface E2eeApprovalComparison {
+  readonly groups: readonly string[];
+  readonly value: string;
+  readonly caption: string;
+}
+
+export const E2EE_APPROVAL_REQUESTED_MESSAGE =
+  "Approval requested. In Ryco Desktop, approve only the row for this phone whose safety number matches the one below.";
+
+/** Approval was requested, but no channel has presented the node's identity yet. */
+export const E2EE_APPROVAL_AWAITING_NUMBER_MESSAGE =
+  "Approval requested. This phone's safety number appears here once the node answers; do not approve a Desktop row before you can compare it.";
+
+export const E2EE_APPROVAL_SAFETY_NUMBER_CAPTION =
+  `This phone's safety number. The row you approve on Desktop must show all ${E2EE_SAFETY_NUMBER_DIGITS.groups} groups, in this order. ` +
+  "If any group differs, do not approve it.";
+
+export function deriveE2eeApprovalComparison(
+  session: MobileE2eeSessionState,
+): E2eeApprovalComparison | null {
+  const selection = session.selection;
+  const presented = session.presented;
+  if (
+    selection === null ||
+    // "Request approval" minted the handle; before that there is no pending row.
+    selection.localNodeHandle === null ||
+    selection.clientIdentityPublicKey === null ||
+    presented === null ||
+    session.pinVerified
+  ) {
+    return null;
+  }
+  const groups = e2eeSafetyNumberGroups(presented.display.safetyNumber);
+  if (groups.length === 0) return null;
+  return {
+    groups,
+    value: presented.display.safetyNumber,
+    caption: E2EE_APPROVAL_SAFETY_NUMBER_CAPTION,
+  };
+}
+
 export const E2EE_APPROVAL_QR_INVALID =
   "That approval code does not match this phone, node, account, or current node security state. Ask the node to show a new code and scan it again.";
 

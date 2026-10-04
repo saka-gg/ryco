@@ -11,7 +11,10 @@ import { E2EE_ACKNOWLEDGEMENT_SYMBOLS } from "./e2eeTrustSymbols";
 import {
   createE2eeVerificationDraft,
   confirmE2eeApprovalQr,
+  deriveE2eeApprovalComparison,
   deriveE2eeVerificationView,
+  E2EE_APPROVAL_AWAITING_NUMBER_MESSAGE,
+  E2EE_APPROVAL_REQUESTED_MESSAGE,
   E2EE_COMPARISON_AFFIRMATION,
   E2EE_PRESENTED_COLUMN_TITLE,
   E2EE_PREVIOUSLY_VERIFIED_COLUMN_TITLE,
@@ -72,6 +75,7 @@ export function E2eeNodeVerificationRouteScreen(props: Props) {
     onCompleted: () => navigation.goBack(),
     now: () => Date.now(),
   });
+  const approvalComparison = approvalRequested ? deriveE2eeApprovalComparison(session) : null;
 
   const openApprovalScanner = useCallback(async () => {
     setApprovalError(null);
@@ -182,8 +186,9 @@ export function E2eeNodeVerificationRouteScreen(props: Props) {
         <View className="mx-5 mt-4 rounded-2xl border border-border bg-card p-4">
           <Text className="font-ryco-bold text-base text-foreground">Fastest: scan one code</Text>
           <Text className="mt-1 font-sans text-xs leading-relaxed text-foreground-muted">
-            Request approval here, approve this phone in Ryco Desktop under Node Security, then scan
-            the code Desktop shows. The code works only for this phone.
+            Request approval here, approve this phone in Ryco Desktop under Node Security once its
+            safety number matches the one shown here, then scan the code Desktop shows. The code
+            works only for this phone.
           </Text>
           {!approvalRequested ? (
             <Pressable
@@ -199,7 +204,9 @@ export function E2eeNodeVerificationRouteScreen(props: Props) {
             </Pressable>
           ) : (
             <Text className="mt-3 font-ryco-bold text-sm text-success">
-              Approval requested — select this phone in Desktop.
+              {approvalComparison
+                ? E2EE_APPROVAL_REQUESTED_MESSAGE
+                : E2EE_APPROVAL_AWAITING_NUMBER_MESSAGE}
             </Text>
           )}
           {scanningApproval ? (
@@ -240,6 +247,16 @@ export function E2eeNodeVerificationRouteScreen(props: Props) {
             </Text>
           ) : null}
         </View>
+      ) : null}
+
+      {/* §13.2 step 4 on the fast path: the full number the owner matches against
+          the Desktop row before approving it. Never a fingerprint tail. */}
+      {shouldShowE2eeApprovalScanner(view.stage) && !recoveryMode && approvalComparison ? (
+        <E2eeSafetyNumberCard
+          groups={approvalComparison.groups}
+          caption={approvalComparison.caption}
+          value={approvalComparison.value}
+        />
       ) : null}
 
       {/* §13.2.1 situation 2 alone: the previously verified pair beside the newly

@@ -185,6 +185,31 @@ describe("mobile account E2EE relay attempt", () => {
     expect(hoisted.resolveTrust).not.toHaveBeenCalled();
   });
 
+  it("sends Request approval's pairing hello over suite 0x01, never the account grant", async () => {
+    // `beginPairing` leaves exactly this record; the local attempt it resolves
+    // to is pairing-only (§13.2 step 2), so the node sees one authenticated
+    // 0x01 hello it can list for approval, and no application payload.
+    hoisted.record = {
+      state: "unverified",
+      index: { localNodeHandle: "local-pairing" },
+    };
+    const prepared = await prepareMobileRelaySocketContext();
+    const issued = await issueMobileRelayAttempt({
+      nodeId: `node_${"n".repeat(22)}`,
+      preparedSocketContext: prepared,
+    });
+
+    expect(prepared.kind).toBe("local");
+    expect(hoisted.localPrepare).toHaveBeenCalledOnce();
+    expect(hoisted.issueRelayTicket).toHaveBeenCalledOnce();
+    expect(issued.ticket).toBe("legacy-ticket");
+    expect(providerForMobileRelaySocketContext(issued.preparedSocketContext)).toBe(
+      hoisted.localProvider,
+    );
+    expect(hoisted.resolveTrust).not.toHaveBeenCalled();
+    expect(hoisted.begin).not.toHaveBeenCalled();
+  });
+
   it("opens no data attempt before enrollment is ready", async () => {
     setMobileNativeE2eeEnrollmentCoordinator({
       getState: () => ({ status: "securing", generation: 5, ready: null, errorCode: null }),

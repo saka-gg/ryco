@@ -37,10 +37,12 @@ import {
   CHANNEL_MESSAGES,
   createE2eeVerificationDraft,
   confirmE2eeApprovalQr,
+  deriveE2eeApprovalComparison,
   deriveE2eeSecurityView,
   deriveE2eeVerificationView,
   e2eeSafetyNumberGroups,
   isE2eeSafetyNumberDisplay,
+  E2EE_APPROVAL_SAFETY_NUMBER_CAPTION,
   E2EE_COMPARISON_AFFIRMATION,
   E2EE_ENROLLMENT_FINGERPRINT_MISMATCH,
   E2EE_IDENTITY_CHANGE_MESSAGE,
@@ -899,6 +901,57 @@ describe("one-scan cross-device approval", () => {
       continuityId: `nct_${"C".repeat(22)}`,
     });
     vi.restoreAllMocks();
+  });
+
+  it("shows nothing to compare before approval is requested", () => {
+    expect(deriveE2eeApprovalComparison(qrSession())).toBeNull();
+  });
+
+  it("shows the full §13.4 number once approval is requested, never a fingerprint tail", () => {
+    const requested = session({
+      selection: { ...session().selection!, localNodeHandle: "handle-qr" },
+    });
+    const comparison = deriveE2eeApprovalComparison(requested);
+
+    // Exactly the number the node lists for this phone's pending row: the same
+    // derivation over (node key, this phone's key, Hub origin, account).
+    const nodeSide = deriveE2eeSafetyNumber({
+      nodeIdentityPublicKey: NODE_PUBLIC_KEY,
+      clientIdentityPublicKey: CLIENT_PUBLIC_KEY,
+      hubOrigin: HUB,
+      accountId: ACCOUNT,
+    }).display;
+    expect(comparison?.value).toBe(nodeSide);
+    expect(comparison?.groups).toHaveLength(E2EE_SAFETY_NUMBER_DIGITS.groups);
+    expect(comparison?.groups.join("")).toHaveLength(
+      E2EE_SAFETY_NUMBER_DIGITS.groups * E2EE_SAFETY_NUMBER_DIGITS.digitsPerGroup,
+    );
+    expect(comparison?.caption).toBe(E2EE_APPROVAL_SAFETY_NUMBER_CAPTION);
+    expect(comparison?.caption).not.toContain(PRESENTED.fingerprint.slice(-8));
+  });
+
+  it("withholds the number without an identity to derive it from, or once verified", () => {
+    const requested = session({
+      selection: { ...session().selection!, localNodeHandle: "handle-qr" },
+    });
+    expect(deriveE2eeApprovalComparison({ ...requested, presented: null })).toBeNull();
+    expect(
+      deriveE2eeApprovalComparison({
+        ...requested,
+        selection: { ...requested.selection!, clientIdentityPublicKey: null },
+      }),
+    ).toBeNull();
+    expect(deriveE2eeApprovalComparison({ ...requested, pinVerified: true })).toBeNull();
+    // A malformed number is not shortened into something comparable.
+    expect(
+      deriveE2eeApprovalComparison({
+        ...requested,
+        presented: {
+          ...requested.presented!,
+          display: { ...PRESENTED, safetyNumber: "12345 67890" },
+        },
+      }),
+    ).toBeNull();
   });
 
   it("rejects a copied code for another phone or stale statement before any trust write", async () => {

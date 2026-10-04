@@ -120,7 +120,12 @@ export async function prepareMobileRelaySocketContext(): Promise<MobileRelaySock
   }
 
   const record = trustedRecord(selection);
-  if (record !== null && isE2eeVerifiedPinRecord(record)) {
+  // Suite 0x01 for a verified pin, and for a record "Request approval" moved
+  // into §13.2 pairing. Only a 0x01 hello reaches the node's §13.6 admission,
+  // so it is the only channel that puts this phone's key on the pending list
+  // Desktop approves from; the attempt it resolves to is pairing-only and
+  // releases nothing. A 0x02 account-grant channel never creates that record.
+  if (record !== null && (isE2eeVerifiedPinRecord(record) || record.state === "unverified")) {
     await prepareMobileRelayE2eeAttempt();
     if (!isCurrent(selection)) throw new Error("Hosted node selection changed.");
     const provider = resolveMobileRelayE2eeProvider();
