@@ -500,9 +500,63 @@ class HostedHubController {
   bootstrap(): Promise<void> {
     if (this.#bootstrapPromise) return this.#bootstrapPromise;
     const operation = this.#replaceOperation();
-    const promise = getHostedHubApi()
+    const promise = this.#restoreAccess(operation).finally(() => {
+      if (this.#operation === operation) this.#operation = null;
+      if (this.#bootstrapPromise === promise) this.#bootstrapPromise = null;
+    });
+    this.#bootstrapPromise = promise;
+    return promise;
+  }
+
+  /**
+   * Adopt a session credential committed outside this controller, then
+   * re-check access with it.
+   *
+   * The native identity ceremonies (password, email, recovery code, and the
+   * completion journal that survives a restart) mint their credential through
+   * the API directly and commit it to the platform store themselves. While
+   * they run, the access-recovery backoff and the lifecycle bindings keep
+   * re-running {@link bootstrap} with the credential being replaced, and the
+   * answer to such a check is about that old credential: a `401` would clear
+   * the new one, a timeout would leave the account `unavailable` after a
+   * successful sign-in, and a plain `bootstrap()` after the commit would only
+   * join it. So the check in flight is aborted and the pending retry cancelled
+   * before the commit starts, any `bootstrap()` requested while the commit
+   * runs joins this adoption instead of reading a credential mid-write, and
+   * the check that follows is always a fresh one.
+   *
+   * Access is re-checked whether or not the commit succeeded — against
+   * whatever credential the store holds once it has settled — because the
+   * check this aborted must be replaced by something. Resolves to the
+   * commit's own result once that check has settled.
+   */
+  adoptSessionCredential(commit: () => Promise<boolean>): Promise<boolean> {
+    const operation = this.#replaceOperation();
+    this.#resetAccessRetry();
+    let committed = false;
+    const promise = commit()
+      .catch(() => false)
+      .then((result) => {
+        committed = result;
+        if (operation.signal.aborted) return undefined;
+        return this.#restoreAccess(operation);
+      })
+      .finally(() => {
+        if (this.#operation === operation) this.#operation = null;
+        if (this.#bootstrapPromise === promise) this.#bootstrapPromise = null;
+      });
+    this.#bootstrapPromise = promise;
+    return promise.then(() => committed);
+  }
+
+  /** The access check behind {@link bootstrap} and {@link adoptSessionCredential}. */
+  #restoreAccess(operation: AbortController): Promise<void> {
+    return getHostedHubApi()
       .restoreSession(operation.signal)
       .then(async (result) => {
+        // An answer for a check that a newer account operation replaced is
+        // about the credential that check was sent with, not the current one.
+        if (operation.signal.aborted) return;
         this.#resetAccessRetry();
         patchState({
           accountStatus: "authenticated",
@@ -537,13 +591,7 @@ class HostedHubController {
         });
         this.#scheduleAccessRetry(error);
         return undefined;
-      })
-      .finally(() => {
-        if (this.#operation === operation) this.#operation = null;
-        if (this.#bootstrapPromise === promise) this.#bootstrapPromise = null;
       });
-    this.#bootstrapPromise = promise;
-    return promise;
   }
 
   /**

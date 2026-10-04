@@ -442,6 +442,113 @@ describe("hosted account state", () => {
     expect(hostedHubStore.getState().accountStatus).toBe("authenticating");
   });
 
+  it("keeps an adopted credential when the replaced session's check is rejected mid-commit", async () => {
+    let rejectReplaced: (error: unknown) => void = () => undefined;
+    let replacedSignal: AbortSignal | undefined;
+    const restoreSession = vi
+      .spyOn(hostedHubApi, "restoreSession")
+      .mockImplementationOnce((signal) => {
+        replacedSignal = signal;
+        // The Hub's answer for the revoked credential is already on its way
+        // and lands regardless of the abort.
+        return new Promise((_resolve, reject) => {
+          rejectReplaced = reject;
+        });
+      })
+      .mockResolvedValue(sessionResponse);
+    vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([]);
+    let finishCommit: (committed: boolean) => void = () => undefined;
+    const commit = vi.fn(
+      () =>
+        new Promise<boolean>((resolve) => {
+          finishCommit = resolve;
+        }),
+    );
+
+    const replaced = hostedHubController.bootstrap();
+    const adopted = hostedHubController.adoptSessionCredential(commit);
+    expect(replacedSignal?.aborted).toBe(true);
+
+    // A lifecycle signal during the commit joins the adoption rather than
+    // reading the credential mid-write.
+    void hostedHubController.recoverAfterConnectivity();
+    rejectReplaced(new HostedHubApiError("session_invalid", 401));
+    await replaced;
+    expect(hostedHubApi.clearSessionMaterial).not.toHaveBeenCalled();
+    expect(restoreSession).toHaveBeenCalledOnce();
+
+    finishCommit(true);
+
+    await expect(adopted).resolves.toBe(true);
+    expect(commit).toHaveBeenCalledOnce();
+    expect(restoreSession).toHaveBeenCalledTimes(2);
+    expect(hostedHubApi.clearSessionMaterial).not.toHaveBeenCalled();
+    expect(hostedHubApi.getBootstrapAvailability).not.toHaveBeenCalled();
+    expect(hostedHubStore.getState()).toMatchObject({
+      accountStatus: "authenticated",
+      account: sessionResponse.account,
+    });
+  });
+
+  it("does not wait out a stalled check of the replaced credential", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const restoreSession = vi
+      .spyOn(hostedHubApi, "restoreSession")
+      // A dead route: the check only ends at the request deadline.
+      .mockImplementationOnce(
+        () =>
+          new Promise((_resolve, reject) => {
+            globalThis.setTimeout(
+              () =>
+                reject(
+                  new HostedHubApiError(
+                    "timeout",
+                    0,
+                    undefined,
+                    undefined,
+                    undefined,
+                    "request-timeout",
+                  ),
+                ),
+              30_000,
+            );
+          }),
+      )
+      .mockResolvedValue(sessionResponse);
+    vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([]);
+
+    void hostedHubController.bootstrap();
+    await expect(hostedHubController.adoptSessionCredential(async () => true)).resolves.toBe(true);
+    expect(hostedHubStore.getState().accountStatus).toBe("authenticated");
+
+    // The stalled check settles later and publishes nothing, nor re-arms a retry.
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(restoreSession).toHaveBeenCalledTimes(2);
+    expect(hostedHubStore.getState()).toMatchObject({
+      accountStatus: "authenticated",
+      errorMessage: null,
+    });
+  });
+
+  it("re-checks the stored credential when an adopted one could not be committed", async () => {
+    vi.useFakeTimers();
+    const restoreSession = vi
+      .spyOn(hostedHubApi, "restoreSession")
+      .mockRejectedValueOnce(new HostedHubApiError("unavailable", 0))
+      .mockResolvedValue(sessionResponse);
+    vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([]);
+
+    await hostedHubController.bootstrap();
+    await expect(hostedHubController.adoptSessionCredential(async () => false)).resolves.toBe(
+      false,
+    );
+
+    // The adoption cancelled the pending retry, so it owes the account a check.
+    expect(restoreSession).toHaveBeenCalledTimes(2);
+    expect(hostedHubStore.getState().accountStatus).toBe("authenticated");
+  });
+
   it("routes a connectivity signal to the recovery the account status calls for", async () => {
     const bootstrap = vi.spyOn(hostedHubController, "bootstrap").mockResolvedValue();
     const resumeBrowser = vi.spyOn(hostedHubController, "resumeBrowser").mockResolvedValue();

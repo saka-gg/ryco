@@ -426,9 +426,10 @@ export function NativeIdentityScreen() {
         if (journal?.phase === "recovery-pending") {
           setScreen({ name: "recovery-codes", journal });
         } else if (journal?.phase === "credential-committed") {
-          if (await completionJournal.commitCredential(journal)) {
-            await hostedHubController.bootstrap();
-          } else if (active) {
+          const committed = await hostedHubController.adoptSessionCredential(() =>
+            completionJournal.commitCredential(journal),
+          );
+          if (!committed && active) {
             setError("Ryco could not save the Hub credential. Try again.");
           }
         } else {
@@ -539,10 +540,15 @@ export function NativeIdentityScreen() {
       setScreen({ name: "recovery-codes", journal });
       return;
     }
-    if (!(await completionJournal.commitCredential(journal))) {
+    // Committed through the controller: an access check of the session this
+    // replaces may still be in flight, and its answer must not land on this one.
+    if (
+      !(await hostedHubController.adoptSessionCredential(() =>
+        completionJournal.commitCredential(journal),
+      ))
+    ) {
       throw new Error("credential persistence failed");
     }
-    await hostedHubController.bootstrap();
   };
 
   const antiBotAssertion = (): string | null => {
@@ -1335,10 +1341,14 @@ export function NativeIdentityScreen() {
                     void run(async () => {
                       if (screen.name !== "recovery-codes") return;
                       const committed = await completionJournal.acknowledgeRecovery(screen.journal);
-                      if (!committed || !(await completionJournal.commitCredential(committed))) {
+                      if (
+                        !committed ||
+                        !(await hostedHubController.adoptSessionCredential(() =>
+                          completionJournal.commitCredential(committed),
+                        ))
+                      ) {
                         throw new Error("credential persistence failed");
                       }
-                      await hostedHubController.bootstrap();
                     })
                   }
                 />
