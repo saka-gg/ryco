@@ -230,6 +230,42 @@ describe("HostedDispatchReplay", () => {
     expect(markUncertain).not.toHaveBeenCalled();
   });
 
+  it("never replays a command still in flight when the environment is left", async () => {
+    const pending = deferred<{ readonly sequence: number }>();
+    const { dispatch, detach } = attach(() => pending.promise);
+    const result = dispatch(command);
+
+    // The node is left first; disposing its client cuts the command off after.
+    replay.end(environmentId);
+    detach();
+    pending.reject(disposed());
+    expect(await settled(result)).toBe("rejected");
+
+    // Returning to the node within the horizon is a new visit.
+    const returned = vi.fn<Dispatch>(async () => ({ sequence: 1 }));
+    attach(returned);
+    replay.markReady(environmentId);
+    await expect(result).rejects.toBeInstanceOf(HostedDispatchUnconfirmedError);
+    expect(returned).not.toHaveBeenCalled();
+    expect(markUncertain).not.toHaveBeenCalled();
+  });
+
+  it("does not mark an environment it left when a replay in flight there fails", async () => {
+    const { dispatch } = attach(() => Promise.reject(relayDrop()));
+    const result = dispatch(command);
+    expect(await settled(result)).toBe("pending");
+    const replayed = deferred<{ readonly sequence: number }>();
+    const { detach } = attach(() => replayed.promise);
+    replay.markReady(environmentId);
+    await vi.advanceTimersByTimeAsync(0);
+
+    replay.end(environmentId);
+    detach();
+    replayed.reject(disposed());
+    await expect(result).rejects.toBeInstanceOf(HostedDispatchUnconfirmedError);
+    expect(markUncertain).not.toHaveBeenCalled();
+  });
+
   it("never replays into a different account", async () => {
     const { dispatch } = attach(() => Promise.reject(relayDrop()));
     const result = dispatch(command);

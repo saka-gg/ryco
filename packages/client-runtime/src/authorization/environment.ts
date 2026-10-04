@@ -38,7 +38,8 @@ async function deactivateCurrentHostedNode(environmentId: EnvironmentId): Promis
   // this queue to deactivate and must not reset the attempt factory independently.
   getHostedRuntimeConfiguration().resetRelayAttemptFactory();
   // Leaving the node — a switch, the directory, or sign-out — ends any command
-  // still waiting to replay there. A reconnect to the same node does not.
+  // waiting to replay there, and any still in flight that the disconnect below
+  // cuts off, even if the node is selected again. A reconnect to it does not.
   getHostedDispatchReplay().end(environmentId);
   await lifecycle.disconnectPrimaryEnvironment();
   clearHostedNodeScopedState(environmentId);

@@ -104,6 +104,8 @@ interface Attempt {
   readonly lineage: string;
   /** The account session the attempt was bound in; see `endAccountSession`. */
   readonly accountSession: number;
+  /** The visit to its environment the attempt was bound in; see `end`. */
+  readonly visit: number;
   readonly dispatch: DispatchCommand;
   readonly markUncertain: () => void;
   /** How often its connection was lost, dropped or replaced; see `isDeliveryUnknown`. */
@@ -125,8 +127,13 @@ interface Waiter {
 const ENDED: Replacement = { kind: "ended" };
 const EXPIRED: Replacement = { kind: "expired" };
 
-function sameAccountSession(left: Attempt, right: Attempt): boolean {
-  return left.lineage === right.lineage && left.accountSession === right.accountSession;
+/** Bound in the same account session and the same visit to the environment. */
+function sameVisit(left: Attempt, right: Attempt): boolean {
+  return (
+    left.lineage === right.lineage &&
+    left.accountSession === right.accountSession &&
+    left.visit === right.visit
+  );
 }
 
 /**
@@ -144,12 +151,12 @@ function sameAccountSession(left: Attempt, right: Attempt): boolean {
  * neither reports a failure nor invites a resend under a new id. The replay is
  * sent only after the environment's session has completed the hosted lifecycle
  * again — fresh ticket, handshake, and accepted snapshot — since the failure,
- * which `markReady` signals, and only within the same account session. The
- * session's own request authorization still applies, and the node
- * re-authorizes the replay under the current role. Envelopes are held in memory
- * only. When the replay cannot settle the outcome, the caller gets
- * `HostedDispatchUnconfirmedError` and the environment is marked delivery
- * unknown, exactly as an untracked mutation would have left it.
+ * which `markReady` signals, and only within the same account session and the
+ * same visit to the environment. The session's own request authorization still
+ * applies, and the node re-authorizes the replay under the current role.
+ * Envelopes are held in memory only. When the replay cannot settle the outcome,
+ * the caller gets `HostedDispatchUnconfirmedError` and the environment is
+ * marked delivery unknown, exactly as an untracked mutation would have left it.
  *
  * Readiness is bound to the environment and account session rather than to a
  * hosted generation: every recovery publishes a new generation, and readiness
@@ -160,6 +167,8 @@ export class HostedDispatchReplay {
   readonly #latest = new Map<EnvironmentId, Attempt>();
   readonly #readySequence = new Map<EnvironmentId, number>();
   readonly #waiters = new Map<EnvironmentId, Set<Waiter>>();
+  /** How often each environment was left; every return to it is a new visit. */
+  readonly #departures = new Map<EnvironmentId, number>();
   #accountSession = 0;
 
   constructor(timers: () => HostedRuntimeTimers) {
@@ -187,6 +196,7 @@ export class HostedDispatchReplay {
     const attempt: Attempt = {
       lineage: input.lineage,
       accountSession: this.#accountSession,
+      visit: this.#visit(environmentId),
       dispatch: input.dispatch,
       markUncertain: input.markUncertain,
       losses: 0,
@@ -194,7 +204,7 @@ export class HostedDispatchReplay {
     this.#latest.set(environmentId, attempt);
     // A different account took the environment over.
     this.#settleWaiters(environmentId, (waiter) =>
-      sameAccountSession(waiter.origin, attempt) ? undefined : ENDED,
+      sameVisit(waiter.origin, attempt) ? undefined : ENDED,
     );
     const lost = () => {
       attempt.losses += 1;
@@ -216,13 +226,19 @@ export class HostedDispatchReplay {
     const latest = this.#latest.get(environmentId);
     this.#settleWaiters(environmentId, (waiter) => {
       if (!latest) return undefined;
-      if (!sameAccountSession(latest, waiter.origin)) return ENDED;
+      if (!sameVisit(latest, waiter.origin)) return ENDED;
       return sequence > waiter.readyAfter ? { kind: "ready", attempt: latest } : undefined;
     });
   }
 
-  /** The environment left this client (switch, release, sign-out): pending replays fail closed. */
+  /**
+   * The client left the environment (switch, directory, sign-out). Pending
+   * replays fail closed, and so does every command of this visit still in
+   * flight — its client is disposed only after this — even when the client
+   * returns to the environment within the horizon: returning is a new visit.
+   */
   end(environmentId: EnvironmentId): void {
+    this.#departures.set(environmentId, this.#visit(environmentId) + 1);
     this.#settleWaiters(environmentId, () => ENDED);
   }
 
@@ -240,6 +256,19 @@ export class HostedDispatchReplay {
   resetForTests(): void {
     this.endAccountSession();
     this.#readySequence.clear();
+    this.#departures.clear();
+  }
+
+  #visit(environmentId: EnvironmentId): number {
+    return this.#departures.get(environmentId) ?? 0;
+  }
+
+  /** The account session or the visit the attempt was bound in is over. */
+  #isOver(environmentId: EnvironmentId, attempt: Attempt): boolean {
+    return (
+      attempt.accountSession !== this.#accountSession ||
+      attempt.visit !== this.#visit(environmentId)
+    );
   }
 
   async #dispatch(
@@ -265,7 +294,7 @@ export class HostedDispatchReplay {
         deadline,
       );
       if (replacement.kind === "ended") throw new HostedDispatchUnconfirmedError();
-      if (replacement.kind === "expired") return this.#unconfirmed(attempt);
+      if (replacement.kind === "expired") return this.#unconfirmed(environmentId, attempt);
       readyAfter = this.#readySequence.get(environmentId) ?? 0;
       try {
         return await replacement.attempt.dispatch(command);
@@ -278,12 +307,14 @@ export class HostedDispatchReplay {
         // One replay only: anything but the command's own answer leaves the
         // first attempt's outcome unknown.
         if (isReplayAnswer(command, error)) throw error;
-        return this.#unconfirmed(attempt);
+        return this.#unconfirmed(environmentId, attempt);
       }
     }
   }
 
-  #unconfirmed(origin: Attempt): never {
+  #unconfirmed(environmentId: EnvironmentId, origin: Attempt): never {
+    // An environment the client has left has no session left to hold.
+    if (this.#isOver(environmentId, origin)) throw new HostedDispatchUnconfirmedError();
     try {
       origin.markUncertain();
     } catch {
@@ -298,9 +329,9 @@ export class HostedDispatchReplay {
     readyAfter: number,
     deadline: number,
   ): Promise<Replacement> {
-    if (origin.accountSession !== this.#accountSession) return Promise.resolve(ENDED);
+    if (this.#isOver(environmentId, origin)) return Promise.resolve(ENDED);
     const latest = this.#latest.get(environmentId);
-    if (latest && !sameAccountSession(latest, origin)) return Promise.resolve(ENDED);
+    if (latest && !sameVisit(latest, origin)) return Promise.resolve(ENDED);
     const timers = this.#timers();
     const remaining = deadline - timers.now();
     if (remaining <= 0) return Promise.resolve(EXPIRED);

@@ -531,13 +531,14 @@ classified counts as a mutation.
   send. Whatever the node answered on a live connection is the command's outcome and reaches the
   caller at once: its typed rejection, its role check, or the defect it returns for a payload it
   cannot decode (a hosted bundle newer than the node). So does a refusal by the client before
-  sending. The replay stays inside the same environment and the same account
-  session — readiness is bound to those, not to a hosted generation, because every recovery
-  publishes a new generation and readiness is only published from the current one. Hub session-id
-  rotation on resume is the same account session; leaving the node, signing out, or session expiry
-  fails the replay closed, as does a two-minute horizon after sending. The envelope lives in memory
-  only, and the node re-authorizes the replay under the current role. Receipt retention must always
-  outlive that horizon.
+  sending. The replay stays inside the same environment and the same account session — readiness
+  is bound to those, not to a hosted generation, because every recovery publishes a new generation
+  and readiness is only published from the current one. Hub session-id rotation on resume is the
+  same account session. Leaving the node, signing out, or session expiry fails the command closed,
+  as does a two-minute horizon after sending. Leaving covers a command still in flight when the
+  node was left, too: returning to that node within the horizon is a new visit, and nothing
+  replays across visits. The envelope lives in memory only, and the node re-authorizes the replay
+  under the current role. Receipt retention must always outlive that horizon.
 - A command Ryco cannot confirm — the horizon passed, the replay was lost to a second drop or
   refused (locally or by the node's role check), or a replayed bootstrap turn start failed on what a
   node restart left half-created — is reported to the control that issued it as unconfirmed, never

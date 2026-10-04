@@ -750,18 +750,48 @@ describe("HostedRelayAttemptFactory", () => {
     hostedHubStore.setState({
       account: { id: "account-1", displayName: "A", role: "owner", createdAt: 1, disabledAt: null },
     });
+    const lineage = hostedDispatchLineage(hostedHubStore.getState())!;
     const markUncertain = vi.fn();
-    const { dispatch } = getHostedDispatchReplay().attach({
+    const held = getHostedDispatchReplay().attach({
       environmentId: selectedNode.environmentId,
-      lineage: hostedDispatchLineage(hostedHubStore.getState())!,
+      lineage,
       dispatch: () => Promise.reject(relayDrop()),
       markUncertain,
     });
-    const result = dispatch({} as Parameters<typeof dispatch>[0]);
+    const heldResult = held.dispatch({} as Parameters<typeof held.dispatch>[0]);
     await flush();
+    // A slow bootstrap turn start still in flight when the user leaves.
+    let cutOff!: (error: unknown) => void;
+    const inFlight = getHostedDispatchReplay().attach({
+      environmentId: selectedNode.environmentId,
+      lineage,
+      dispatch: () => new Promise((_, reject) => (cutOff = reject)),
+      markUncertain,
+    });
+    const inFlightOutcome = inFlight
+      .dispatch({} as Parameters<typeof inFlight.dispatch>[0])
+      .catch((error: unknown) => error);
+    // Leaving disposes the node's client, which interrupts what it has in flight.
+    vi.mocked(nodeLifecycle.disconnectPrimaryEnvironment).mockImplementationOnce(async () => {
+      inFlight.detach();
+      cutOff(new Error("All fibers interrupted without error"));
+    });
 
     await hostedHubController.returnToDirectory();
-    await expect(result).rejects.toBeInstanceOf(HostedDispatchUnconfirmedError);
+    await expect(heldResult).rejects.toBeInstanceOf(HostedDispatchUnconfirmedError);
+
+    // Selecting the node again within the horizon replays nothing into it.
+    const returned = vi.fn(async () => ({ sequence: 1 }));
+    getHostedDispatchReplay().attach({
+      environmentId: selectedNode.environmentId,
+      lineage,
+      dispatch: returned,
+      markUncertain,
+    });
+    getHostedDispatchReplay().markReady(selectedNode.environmentId);
+    await flush();
+    expect(returned).not.toHaveBeenCalled();
+    expect(await inFlightOutcome).toBeInstanceOf(HostedDispatchUnconfirmedError);
     // Nothing is left to hold: the node is no longer selected.
     expect(markUncertain).not.toHaveBeenCalled();
   });
