@@ -122,4 +122,50 @@ describe("ServerProvider", () => {
 
     expect(parsed.rateLimits).toBeUndefined();
   });
+
+  describe("compatibilityAdvisory", () => {
+    const base = {
+      instanceId: "codex",
+      driver: "codex",
+      enabled: true,
+      installed: true,
+      version: "0.199.0",
+      status: "ready",
+      auth: { status: "authenticated" },
+      checkedAt: "2026-04-10T00:00:00.000Z",
+      models: [],
+    };
+
+    it("decodes a compatibility advisory with both ratings", () => {
+      const parsed = decodeServerProvider({
+        ...base,
+        compatibilityAdvisory: {
+          status: "broken",
+          latestVersionStatus: "unsupported",
+          message: "x",
+        },
+      });
+
+      expect(parsed.compatibilityAdvisory).toEqual({
+        status: "broken",
+        latestVersionStatus: "unsupported",
+        message: "x",
+      });
+    });
+
+    it("leaves the key absent when a snapshot has no advisory", () => {
+      const parsed = decodeServerProvider(base);
+
+      expect("compatibilityAdvisory" in parsed).toBe(false);
+    });
+
+    it("rejects an unknown status because the status set is frozen", () => {
+      expect(() =>
+        decodeServerProvider({
+          ...base,
+          compatibilityAdvisory: { status: "weird", message: null },
+        }),
+      ).toThrow();
+    });
+  });
 });

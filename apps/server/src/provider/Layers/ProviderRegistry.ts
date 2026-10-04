@@ -29,7 +29,7 @@ import {
   type ServerProvider,
   type ServerProviderUpdateState,
 } from "@ryco/contracts";
-import { Cause, Effect, Equal, FileSystem, Layer, Path, PubSub, Ref, Stream } from "effect";
+import { Cause, Effect, Equal, FileSystem, Layer, Option, Path, PubSub, Ref, Stream } from "effect";
 import * as Semaphore from "effect/Semaphore";
 
 import { ServerConfig } from "../../config.ts";
@@ -47,6 +47,8 @@ import type { ProviderInstance } from "../ProviderDriver.ts";
 import { makeManualOnlyProviderMaintenanceCapabilities } from "../providerMaintenance.ts";
 import type { ProviderSnapshotSource } from "../builtInProviderCatalog.ts";
 import { ignoreProviderBackgroundCause } from "../ignoreProviderBackgroundCause.ts";
+import { BUNDLED_MODEL_MANIFEST, ModelManifest } from "../ModelManifest.ts";
+import { applyProviderCompatibility } from "../providerCompatibility.ts";
 
 const PROVIDER_REFRESH_CONCURRENCY = 4;
 
@@ -187,6 +189,15 @@ export const ProviderRegistryLive = Layer.effect(
     const config = yield* ServerConfig;
     const fileSystem = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
+    // Compatibility ratings read the manifest already in memory (never the network). Without the
+    // service (tests) the bundled policies and the code-owned floors still apply.
+    const manifestService = yield* Effect.serviceOption(ModelManifest);
+    const currentManifest = Option.match(manifestService, {
+      onNone: () => Effect.succeed(BUNDLED_MODEL_MANIFEST),
+      onSome: (service) => service.current,
+    });
+    const registryScope = yield* Effect.scope;
+    const compatibilityRefreshRunning = yield* Ref.make(false);
 
     // Aggregator PubSub — consumers (WS gateway, etc.) subscribe here for
     // coalesced updates across every instance.
@@ -336,6 +347,7 @@ export const ProviderRegistryLive = Layer.effect(
           concurrency: "unbounded",
         },
       );
+      const manifest = yield* currentManifest;
       const [previousProviders, providers, providersToPersist] = yield* Ref.modify(
         providersRef,
         (previousProviders) => {
@@ -355,7 +367,11 @@ export const ProviderRegistryLive = Layer.effect(
             );
           }
 
-          const providers = orderProviderSnapshots([...mergedProviders.values()]);
+          // Re-rate every provider, not just the updated ones: the manifest may have changed
+          // since the others were rated. Structural equality keeps a no-op re-rating silent.
+          const providers = orderProviderSnapshots([...mergedProviders.values()]).map((provider) =>
+            applyProviderCompatibility(provider, manifest),
+          );
           const providersToPersist = providers.filter((provider) =>
             updatedKeys.has(snapshotInstanceKey(provider)),
           );
@@ -378,13 +394,38 @@ export const ProviderRegistryLive = Layer.effect(
       return providers;
     }, publicationSemaphore.withPermits(1));
 
+    /**
+     * TTL-gated manifest refresh after a provider sync, then a re-rating of every snapshot.
+     * `syncProvider` is the funnel for every driver, so users without Claude (whose probe is
+     * the other refresh trigger) still pick up remote compatibility policies, and a manifest
+     * swapped by any refresh is applied without waiting for each provider to re-probe. At most
+     * one runs at a time; a sync skipped meanwhile is covered by the running re-rate.
+     */
+    const scheduleCompatibilityRefresh = Effect.gen(function* () {
+      if (Option.isNone(manifestService)) {
+        return;
+      }
+      if (yield* Ref.getAndSet(compatibilityRefreshRunning, true)) {
+        return;
+      }
+      yield* manifestService.value.refreshIfStale.pipe(
+        Effect.andThen(upsertProviders([], { persist: false })),
+        Effect.ensuring(Ref.set(compatibilityRefreshRunning, false)),
+        ignoreProviderBackgroundCause("provider compatibility reclassification failed"),
+        // syncProvider also runs from RPC fibers; the refresh must outlive them.
+        Effect.forkIn(registryScope),
+      );
+    });
+
     const syncProvider = Effect.fn("syncProvider")(function* (
       provider: ServerProvider,
       options?: {
         readonly publish?: boolean;
       },
     ) {
-      return yield* upsertProviders([provider], options);
+      const providers = yield* upsertProviders([provider], options);
+      yield* scheduleCompatibilityRefresh;
+      return providers;
     });
 
     const setProviderMaintenanceActionState = Effect.fn("setProviderMaintenanceActionState")(

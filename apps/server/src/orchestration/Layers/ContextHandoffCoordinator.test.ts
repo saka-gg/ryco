@@ -445,6 +445,7 @@ function makeHarness(input?: {
     Layer.succeed(ModelManifest, {
       current: input?.manifestCurrent ?? Effect.succeed(BUNDLED_MODEL_MANIFEST),
       refresh: Effect.succeed(BUNDLED_MODEL_MANIFEST),
+      refreshIfStale: Effect.succeed(BUNDLED_MODEL_MANIFEST),
       refreshInBackground: Effect.void,
     }),
     Layer.succeed(ContextHandoffRepository, repository.service),

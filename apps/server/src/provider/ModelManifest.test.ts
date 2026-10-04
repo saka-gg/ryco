@@ -54,6 +54,46 @@ describe("ModelManifest", () => {
     assert.equal(requests, 2);
   });
 
+  it("refreshes at most once per TTL when callers await refreshIfStale", async () => {
+    let requests = 0;
+    const httpClient = HttpClient.make((request) => {
+      requests++;
+      return Effect.succeed(
+        HttpClientResponse.fromWeb(request, Response.json(bundledManifestJson)),
+      );
+    });
+
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const manifest = yield* make;
+          yield* manifest.refreshIfStale;
+          yield* manifest.refreshIfStale;
+        }),
+      ).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            NodeServices.layer,
+            ServerSettingsService.layerTest({ enableProviderUpdateChecks: true }),
+            Layer.succeed(ServerConfig, {
+              stateDir: `/tmp/ryco-model-manifest-test-${crypto.randomUUID()}`,
+            } as ServerConfig["Service"]),
+            Layer.succeed(HttpClient.HttpClient, httpClient),
+          ),
+        ),
+      ),
+    );
+
+    assert.equal(requests, 1);
+  });
+
+  it("never rejects the manifest because of a malformed compatibility field", () => {
+    const manifest = cloneManifest();
+    manifest["compatibility"] = { bogus: true };
+    const decoded = decodeManifestOrThrow(manifest) as typeof BUNDLED_MODEL_MANIFEST;
+    assert.notEqual(resolveProviderCatalog(decoded, CLAUDE), null);
+  });
+
   it("decodes the bundled manifest", () => {
     // `BUNDLED_MODEL_MANIFEST` decodes at module load; reaching this line
     // with the expected shape proves the bundled JSON passes the schema and

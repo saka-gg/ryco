@@ -10,6 +10,20 @@
       "claude-sonnet-5"
     ]
   },
+  "compatibility": [
+    {
+      "driver": "opencode",
+      "rycoRange": ">=0.1.30",
+      "ranges": [
+        {
+          "range": ">=2.0.0",
+          "status": "unsupported",
+          "message": "Ryco works with OpenCode 1.x; 2.x support is coming."
+        },
+        { "range": ">=1.14.19 <2.0.0", "status": "supported" }
+      ]
+    }
+  ],
   "providers": {
     "claudeAgent": {
       "defaults": {

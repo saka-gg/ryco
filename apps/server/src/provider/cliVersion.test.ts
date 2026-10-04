@@ -3,8 +3,10 @@ import { assert, describe, it } from "@effect/vitest";
 import {
   compareCliReleases,
   compareCliVersions,
+  isCliVersionRange,
   normalizeCliVersion,
   parseCliRelease,
+  satisfiesCliVersionRange,
 } from "./cliVersion.ts";
 
 describe("cliVersion", () => {
@@ -49,5 +51,52 @@ describe("parseCliRelease", () => {
     assert.isTrue(compare("1.18.34", "2.0.0") < 0);
     assert.isTrue(compare("1.14.19", "1.14.18") > 0);
     assert.strictEqual(compare("2.0.0-beta.1", "2.0.0"), 0);
+  });
+});
+
+describe("isCliVersionRange", () => {
+  it("accepts comparator groups joined by ||", () => {
+    for (const range of [
+      ">=2.0.0",
+      ">=1.14.19 <2.0.0",
+      "=1.18.40",
+      "1.18.40",
+      ">=1",
+      "<v2.1",
+      "<1.0.0 || >=2.0.0",
+    ]) {
+      assert.isTrue(isCliVersionRange(range), range);
+    }
+  });
+
+  it("rejects caret, tilde, x-ranges, empty groups and junk", () => {
+    for (const range of ["^1", "~1.2.3", "1.x", "", "||", ">=1.0.0 ||", ">= 1.0.0", "latest"]) {
+      assert.isFalse(isCliVersionRange(range), range);
+    }
+  });
+});
+
+describe("satisfiesCliVersionRange", () => {
+  it("ANDs comparators within a group and ORs groups", () => {
+    assert.isTrue(satisfiesCliVersionRange("1.18.34", ">=1.14.19 <2.0.0"));
+    assert.isFalse(satisfiesCliVersionRange("2.0.0", ">=1.14.19 <2.0.0"));
+    assert.isFalse(satisfiesCliVersionRange("1.14.18", ">=1.14.19 <2.0.0"));
+    assert.isTrue(satisfiesCliVersionRange("2.5.0", "<1.0.0 || >=2.0.0"));
+    assert.isTrue(satisfiesCliVersionRange("1.18.40", "=1.18.40"));
+    assert.isTrue(satisfiesCliVersionRange("1.18.40", "1.18.40"));
+    assert.isFalse(satisfiesCliVersionRange("1.18.41", "=1.18.40"));
+    assert.isTrue(satisfiesCliVersionRange("1.0.0", ">=1"));
+  });
+
+  it("rates a prerelease or build by its release triple", () => {
+    assert.isTrue(satisfiesCliVersionRange("2.0.0-beta.1", ">=2.0.0"));
+    assert.isTrue(satisfiesCliVersionRange("0.1.31-nightly.20260413.321", ">=0.1.30"));
+    assert.isTrue(satisfiesCliVersionRange("v2.0.18", ">=2.0.0"));
+    assert.isTrue(satisfiesCliVersionRange("2026.04.09-f2b0fcd", ">=2026.4.1"));
+  });
+
+  it("is false for an unparseable version or an invalid range", () => {
+    assert.isFalse(satisfiesCliVersionRange("local", ">=0.0.0"));
+    assert.isFalse(satisfiesCliVersionRange("1.0.0", "^1"));
   });
 });
