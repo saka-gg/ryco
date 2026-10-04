@@ -13,7 +13,10 @@ import { e2eeSha256 } from "@ryco/shared/relayE2eeKeys";
 import { stripRelayChunkCapabilityPrelude } from "@ryco/shared/relayMessageChunks";
 
 import { DEFAULT_HUB_CONNECTOR_CONFIG, type HubConnectorConfig } from "../config.ts";
-import type { NodeE2eeAdvertisement } from "../hubIdentity/NodeE2eeCapabilityStatement.ts";
+import type {
+  NodeE2eeAdvertisement,
+  NodeE2eeAdvertisementResult,
+} from "../hubIdentity/NodeE2eeCapabilityStatement.ts";
 import { NODE_E2EE_FAIL_CLOSED_POLICY } from "../hubIdentity/NodeE2eePolicyStore.ts";
 import {
   HubIdentityRuntimeError,
@@ -668,6 +671,70 @@ describe("HubConnector", () => {
       await clock.advance(2_000);
       await settle();
       expect(connector.status()).toMatchObject({ state: "degraded", failure: "internal_error" });
+      await connector.stop();
+    });
+
+    /** Answers each advertisement read from `script` in turn; `throw` is a republish that threw. */
+    const scripted =
+      (script: ("available" | "unavailable" | "throw")[]) =>
+      async (): Promise<NodeE2eeAdvertisementResult> => {
+        const next = script.shift() ?? "available";
+        if (next === "throw") throw new Error("send queue full");
+        return next === "unavailable"
+          ? { kind: "unavailable", reason: "identity_unavailable" }
+          : { kind: "available", advertisement: e2eeAdvertisement(script.length, 2_000_000) };
+      };
+
+    it("rebuilds the connection only for failures that are consecutive", async () => {
+      // Each throw is followed by an attempt that completed — it found the
+      // statement could not be built yet — so no two of them are a run.
+      const script: ("available" | "unavailable" | "throw")[] = [
+        "available",
+        "throw",
+        "unavailable",
+        "throw",
+        "unavailable",
+        "throw",
+        "available",
+      ];
+      const { connector, statementsSent, advance } = await minor3Connector(scripted(script));
+      await expect(connector.refreshE2eeState()).rejects.toThrow();
+      for (let step = 0; step < 40 && script.length > 0; step += 1) {
+        expect(connector.status().state).toBe("online");
+        await advance(30_000);
+      }
+      expect(script).toEqual([]);
+      expect(connector.status().state).toBe("online");
+      expect(statementsSent()).toBe(2);
+      await connector.stop();
+    });
+
+    it("keeps the unavailable and failure schedules from stretching each other", async () => {
+      const script: ("available" | "unavailable" | "throw")[] = [
+        "available",
+        "throw",
+        "unavailable",
+        "unavailable",
+        "throw",
+        "available",
+      ];
+      const { clock, connector, statementsSent, advance } = await minor3Connector(scripted(script));
+      await expect(connector.refreshE2eeState()).rejects.toThrow();
+      await clock.advance(1_000);
+      await settle();
+      expect(script).toHaveLength(3);
+      // The first unavailable retry, not one a step further for the throw before it.
+      await advance(30_000);
+      expect(script).toHaveLength(2);
+      await advance(30_000);
+      await advance(30_000);
+      expect(script).toHaveLength(1);
+      // The first failure retry, not one stretched by the unavailable ones.
+      await clock.advance(1_000);
+      await settle();
+      expect(script).toEqual([]);
+      expect(statementsSent()).toBe(2);
+      expect(connector.status().state).toBe("online");
       await connector.stop();
     });
   });

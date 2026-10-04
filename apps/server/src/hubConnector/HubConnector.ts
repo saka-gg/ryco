@@ -213,9 +213,17 @@ export class HubConnector {
   #heartbeatTimer: unknown;
   #drainTimer: unknown;
   #e2eeStatementTimer: unknown;
-  /** Backoff position for republishing a statement this generation could not publish. */
-  #e2eeStatementAttempt = 0;
-  /** Consecutive republishes that threw, this generation; reset by a publish. */
+  /**
+   * Backoff position for rebuilding a statement this generation could not
+   * build; reset by a publish. Apart from the failure count below, so neither
+   * schedule stretches the other.
+   */
+  #e2eeStatementUnavailableAttempts = 0;
+  /**
+   * Consecutive republishes that threw, this generation, which is also the
+   * failure schedule's backoff position; reset by any attempt that does not
+   * throw, including one that finds the statement cannot be built yet.
+   */
   #e2eeStatementFailures = 0;
   #frameChain: Promise<void> = Promise.resolve();
   #e2eeRefreshChain: Promise<void> = Promise.resolve();
@@ -426,7 +434,11 @@ export class HubConnector {
       void this.#handleFailure(generation, "internal_error");
       return;
     }
-    this.#scheduleE2eeStatementRetry(generation, E2EE_STATEMENT_FAILURE_RETRY);
+    this.#scheduleE2eeStatementRetry(
+      generation,
+      E2EE_STATEMENT_FAILURE_RETRY,
+      this.#e2eeStatementFailures - 1,
+    );
   }
 
   async start(): Promise<void> {
@@ -926,7 +938,7 @@ export class HubConnector {
       }
       const socket = session.socket;
       if (socket === undefined) throw new RelayConnectionError("internal_error");
-      this.#e2eeStatementAttempt = 0;
+      this.#e2eeStatementUnavailableAttempts = 0;
       this.#e2eeStatementFailures = 0;
       this.#e2eeState.begin(generation, origin, {
         protocolMajor: ready.protocolMajor,
@@ -1107,7 +1119,14 @@ export class HubConnector {
       // account-grant channels stay refused until the next reconnect — the
       // Hub drops a statement that is not renewed.
       this.#e2eeState.clearStatement(generation);
-      this.#scheduleE2eeStatementRetry(generation, E2EE_STATEMENT_UNAVAILABLE_RETRY);
+      // The attempt completed: a throw before it is not part of a run.
+      this.#e2eeStatementFailures = 0;
+      this.#scheduleE2eeStatementRetry(
+        generation,
+        E2EE_STATEMENT_UNAVAILABLE_RETRY,
+        this.#e2eeStatementUnavailableAttempts,
+      );
+      this.#e2eeStatementUnavailableAttempts += 1;
       return;
     }
     if (this.#e2eeState.publish(generation, result.advertisement) !== "accepted") {
@@ -1128,7 +1147,7 @@ export class HubConnector {
     ) {
       throw new RelayConnectionError("internal_error");
     }
-    this.#e2eeStatementAttempt = 0;
+    this.#e2eeStatementUnavailableAttempts = 0;
     this.#e2eeStatementFailures = 0;
     this.#flushAndScheduleDrain(generation);
     this.#scheduleE2eeStatementRefresh(generation, result.advertisement.expiresAt);
@@ -1143,11 +1162,14 @@ export class HubConnector {
     }, delay);
   }
 
-  /** Try again later, in the same generation, on the given backoff; reset by a publish. */
-  #scheduleE2eeStatementRetry(generation: number, policy: ReconnectPolicyConfig): void {
+  /** Try again later, in the same generation, at `attempt` on the given backoff. */
+  #scheduleE2eeStatementRetry(
+    generation: number,
+    policy: ReconnectPolicyConfig,
+    attempt: number,
+  ): void {
     this.#clearTimer("e2eeStatement");
-    const decision = reconnectDelay(policy, this.#e2eeStatementAttempt, this.#scheduler.random());
-    this.#e2eeStatementAttempt += 1;
+    const decision = reconnectDelay(policy, attempt, this.#scheduler.random());
     this.#e2eeStatementTimer = this.#scheduler.setTimeout(() => {
       this.#e2eeStatementTimer = undefined;
       this.#refreshE2eeStatementInBackground(generation);
