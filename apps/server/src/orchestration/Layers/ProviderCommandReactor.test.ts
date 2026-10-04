@@ -42,6 +42,8 @@ import {
   ProviderAdapterRequestError,
   ProviderSessionNotFoundError,
 } from "../../provider/Errors.ts";
+import { PersistenceSqlError } from "../../persistence/Errors.ts";
+import { STORAGE_FAILURE_DETAIL } from "../userFacingErrors.ts";
 import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
@@ -67,7 +69,10 @@ import {
   type ContextHandoffCoordinatorShape,
 } from "../Services/ContextHandoffCoordinator.ts";
 import { ProviderCommandReactor } from "../Services/ProviderCommandReactor.ts";
-import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
+import {
+  ProjectionSnapshotQuery,
+  type ProjectionSnapshotQueryShape,
+} from "../Services/ProjectionSnapshotQuery.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
@@ -171,6 +176,13 @@ describe("ProviderCommandReactor", () => {
     readonly sessionModelSwitch?: "unsupported" | "in-session";
     readonly interruptTurnEffect?: () => Effect.Effect<void, ProviderAdapterRequestError>;
     readonly stopSessionEffect?: () => Effect.Effect<void, ProviderAdapterRequestError>;
+    /** Simulates adapter model normalization for `session.model` (undefined = unknown). */
+    readonly sessionModel?: (model: string) => string | undefined;
+    readonly steerTurn?: ProviderServiceShape["steerTurn"];
+    /** Wraps the reactor's projection query, e.g. to arm one-shot read failures. */
+    readonly decorateSnapshotQuery?: (
+      live: ProjectionSnapshotQueryShape,
+    ) => ProjectionSnapshotQueryShape;
   }) {
     const now = new Date().toISOString();
     const baseDir = input?.baseDir ?? fs.mkdtempSync(path.join(os.tmpdir(), "ryco-reactor-"));
@@ -184,6 +196,7 @@ describe("ProviderCommandReactor", () => {
       instanceId: ProviderInstanceId.make("codex"),
       model: "gpt-5-codex",
     };
+    const normalizeSessionModel = input?.sessionModel ?? ((model: string) => model);
     const startSession = vi.fn((_: unknown, input: unknown) => {
       const sessionIndex = nextSessionIndex++;
       const resumeCursor =
@@ -230,8 +243,8 @@ describe("ProviderCommandReactor", () => {
         typeof input.cwd === "string"
           ? { cwd: input.cwd }
           : {}),
-        ...((inputModelSelection?.model ?? modelSelection.model)
-          ? { model: inputModelSelection?.model ?? modelSelection.model }
+        ...(normalizeSessionModel(inputModelSelection?.model ?? modelSelection.model)
+          ? { model: normalizeSessionModel(inputModelSelection?.model ?? modelSelection.model) }
           : {}),
         threadId,
         resumeCursor: resumeCursor ?? { opaque: `resume-${sessionIndex}` },
@@ -351,7 +364,7 @@ describe("ProviderCommandReactor", () => {
       stopSessionBinding: () => Effect.succeed("not-found"),
       listStaleSessionBindings: () => Effect.succeed([]),
       sendTurn: sendTurn as ProviderServiceShape["sendTurn"],
-      steerTurn: () => unsupported(),
+      steerTurn: input?.steerTurn ?? (() => unsupported()),
       interruptTurn: interruptTurn as ProviderServiceShape["interruptTurn"],
       stopBackgroundTask: () => Effect.die(new Error("Unsupported provider call in test")) as never,
       respondToRequest: respondToRequest as ProviderServiceShape["respondToRequest"],
@@ -403,11 +416,19 @@ describe("ProviderCommandReactor", () => {
       Layer.provide(RepositoryIdentityResolverLive),
       Layer.provide(SqlitePersistenceMemory),
     );
-    const projectionSnapshotLayer = OrchestrationProjectionSnapshotQueryLive.pipe(
+    const liveProjectionSnapshotLayer = OrchestrationProjectionSnapshotQueryLive.pipe(
       Layer.provide(ThreadBackgroundLiveness.layer),
       Layer.provide(RepositoryIdentityResolverLive),
       Layer.provide(SqlitePersistenceMemory),
     );
+    // Only the reactor resolves this service; the engine has its own query layer.
+    const decorateSnapshotQuery = input?.decorateSnapshotQuery;
+    const projectionSnapshotLayer = decorateSnapshotQuery
+      ? Layer.effect(
+          ProjectionSnapshotQuery,
+          Effect.map(Effect.service(ProjectionSnapshotQuery), decorateSnapshotQuery),
+        ).pipe(Layer.provide(liveProjectionSnapshotLayer))
+      : liveProjectionSnapshotLayer;
     const layer = ProviderCommandReactorLive.pipe(
       Layer.provideMerge(
         ProjectionThreadUserInputRequestRepositoryLive.pipe(Layer.provide(SqlitePersistenceMemory)),
@@ -2858,6 +2879,371 @@ describe("ProviderCommandReactor", () => {
     });
   });
 
+  type ReactorHarness = Awaited<ReturnType<typeof createHarness>>;
+
+  const dispatchTurnStart = (
+    harness: ReactorHarness,
+    messageId: string,
+    modelSelection?: ModelSelection,
+  ) =>
+    Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make(`cmd-${messageId}`),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId(messageId),
+          role: "user",
+          text: messageId,
+          attachments: [],
+        },
+        ...(modelSelection ? { modelSelection } : {}),
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: new Date().toISOString(),
+      }),
+    );
+
+  const readThread = async (harness: ReactorHarness) =>
+    (await harness.readModel()).threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+
+  const failureDetail = (activity: { readonly payload: unknown } | undefined) =>
+    (activity?.payload as { readonly detail?: string } | undefined)?.detail;
+
+  const turnStartFailures = async (harness: ReactorHarness, messageId?: string) =>
+    ((await readThread(harness))?.activities ?? []).filter(
+      (activity) =>
+        activity.kind === "provider.turn.start.failed" &&
+        (messageId === undefined ||
+          (activity.payload as { readonly messageId?: string }).messageId === messageId),
+    );
+
+  const storageFailure = () =>
+    new PersistenceSqlError({
+      operation: "ProjectionThreads.getById",
+      detail: "Failed to execute ProjectionThreads.getById",
+    });
+
+  /** Arms one-shot failures for the reactor's projection reads. */
+  function makeReadFailureHooks() {
+    const armed: {
+      threadShell?: Effect.Effect<never, PersistenceSqlError>;
+      message?: Effect.Effect<never, PersistenceSqlError>;
+      userMessageCount?: Effect.Effect<never, PersistenceSqlError>;
+      projectShell?: Effect.Effect<never, PersistenceSqlError>;
+    } = {};
+    const take = (key: keyof typeof armed) => {
+      const failure = armed[key];
+      delete armed[key];
+      return failure;
+    };
+    const decorateSnapshotQuery = (
+      live: ProjectionSnapshotQueryShape,
+    ): ProjectionSnapshotQueryShape => ({
+      ...live,
+      getThreadShellById: (threadId) => take("threadShell") ?? live.getThreadShellById(threadId),
+      getThreadMessageById: (messageInput) =>
+        take("message") ??
+        (live.getThreadMessageById
+          ? live.getThreadMessageById(messageInput)
+          : Effect.die("getThreadMessageById is not implemented")),
+      countThreadUserMessages: (threadId) =>
+        take("userMessageCount") ??
+        (live.countThreadUserMessages
+          ? live.countThreadUserMessages(threadId)
+          : Effect.die("countThreadUserMessages is not implemented")),
+      getProjectShellById: (projectId) =>
+        take("projectShell") ?? live.getProjectShellById(projectId),
+    });
+    return { armed, decorateSnapshotQuery };
+  }
+
+  it("does not restart a session whose model is unknown when the client resends the agent default", async () => {
+    const agentDefault = { instanceId: ProviderInstanceId.make("codex"), model: "default" };
+    const harness = await createHarness({
+      sessionModelSwitch: "unsupported",
+      sessionModel: (model) => (model === "default" ? undefined : model),
+      threadModelSelection: agentDefault,
+    });
+
+    await dispatchTurnStart(harness, "agent-default-1", agentDefault);
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await dispatchTurnStart(harness, "agent-default-2", agentDefault);
+    await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+    await harness.drain();
+
+    expect(harness.startSession).toHaveBeenCalledTimes(1);
+    expect(harness.sendTurn).toHaveBeenCalledTimes(2);
+    expect(await turnStartFailures(harness)).toHaveLength(0);
+    expect((await readThread(harness))?.session?.runtimeSessionId).toBe("runtime-1");
+  });
+
+  it("rejects a genuine model switch on a session that cannot switch models, without restarting", async () => {
+    const harness = await createHarness({ sessionModelSwitch: "unsupported" });
+
+    await dispatchTurnStart(harness, "model-switch-1");
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await dispatchTurnStart(harness, "model-switch-2", {
+      instanceId: ProviderInstanceId.make("codex"),
+      model: "gpt-5.1-codex",
+    });
+    await waitFor(async () => (await turnStartFailures(harness, "model-switch-2")).length === 1);
+    await harness.drain();
+
+    expect(harness.startSession).toHaveBeenCalledTimes(1);
+    expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+    const failures = await turnStartFailures(harness);
+    expect(failures).toHaveLength(1);
+    const detail = failureDetail(failures[0]);
+    expect(detail).toContain("cannot switch");
+    expect(detail).toContain("Start a new thread");
+    const session = (await readThread(harness))?.session;
+    expect(session?.runtimeSessionId).toBe("runtime-1");
+    expect(session?.lastError).toBe(detail);
+  });
+
+  it("applies an in-session model switch on the next turn without restarting", async () => {
+    const harness = await createHarness();
+
+    await dispatchTurnStart(harness, "in-session-switch-1");
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await dispatchTurnStart(harness, "in-session-switch-2", {
+      instanceId: ProviderInstanceId.make("codex"),
+      model: "gpt-5.1-codex",
+    });
+    await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+
+    expect(harness.startSession).toHaveBeenCalledTimes(1);
+    expect(harness.sendTurn.mock.calls[1]?.[0]).toMatchObject({
+      modelSelection: { model: "gpt-5.1-codex" },
+    });
+  });
+
+  it("shows a short storage message instead of a raw cause when session start fails", async () => {
+    const harness = await createHarness();
+    harness.startSession.mockImplementationOnce(
+      () =>
+        Effect.fail(
+          new PersistenceSqlError({
+            operation: "ProviderSessionDirectory.upsert",
+            detail: "Failed to execute ProviderSessionDirectory.upsert",
+          }),
+        ) as never,
+    );
+
+    await dispatchTurnStart(harness, "storage-start");
+    await waitFor(async () => (await turnStartFailures(harness, "storage-start")).length === 1);
+
+    const detail = failureDetail((await turnStartFailures(harness))[0]);
+    expect(detail).toBe(STORAGE_FAILURE_DETAIL);
+    expect(detail).not.toContain("PersistenceSqlError");
+    expect(harness.sendTurn).not.toHaveBeenCalled();
+  });
+
+  it("bounds steer rejection text and falls back for defects", async () => {
+    const steerTurn = vi
+      .fn<ProviderServiceShape["steerTurn"]>()
+      .mockImplementationOnce(() =>
+        Effect.fail(
+          new ProviderAdapterRequestError({
+            provider: "codex",
+            method: "turn/steer",
+            detail: "x".repeat(1_500),
+          }),
+        ),
+      )
+      .mockImplementationOnce(() => Effect.die(new Error("boom")));
+    const harness = await createHarness({ steerTurn });
+    const now = new Date().toISOString();
+    const threadId = ThreadId.make("thread-1");
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("steer-session-running"),
+        threadId,
+        session: {
+          threadId,
+          status: "running",
+          providerName: "codex",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          runtimeSessionId: RuntimeSessionId.make("runtime-1"),
+          runtimeMode: "approval-required",
+          activeTurnId: asTurnId("turn-1"),
+          lastError: null,
+          updatedAt: now,
+        },
+        createdAt: now,
+      }),
+    );
+    for (const id of ["steer-long", "steer-defect"]) {
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.steer",
+          commandId: CommandId.make(id),
+          threadId,
+          expectedTurnId: asTurnId("turn-1"),
+          message: { messageId: asMessageId(id), role: "user", text: id, attachments: [] },
+          createdAt: now,
+          requestedAt: now,
+        }),
+      );
+    }
+
+    const steerErrors = async () =>
+      new Map(
+        ((await readThread(harness))?.activities ?? [])
+          .filter((activity) => activity.kind === "provider.turn.steer.failed")
+          .map((activity) => {
+            const payload = activity.payload as {
+              readonly messageId: string;
+              readonly error: string;
+            };
+            return [payload.messageId, payload.error] as const;
+          }),
+      );
+    await waitFor(async () => (await steerErrors()).size === 2);
+
+    const errors = await steerErrors();
+    const bounded = errors.get("steer-long")!;
+    expect(bounded.length).toBeLessThanOrEqual(1_000);
+    expect(bounded).toBe(bounded.trim());
+    expect(errors.get("steer-defect")).toBe("Provider rejected turn steering.");
+  });
+
+  it("interrupted turn preparation appends no failure and keeps the reactor alive", async () => {
+    const harness = await createHarness();
+    harness.startSession.mockImplementationOnce(() => Effect.interrupt as never);
+
+    await dispatchTurnStart(harness, "interrupted-preparation");
+    await harness.drain();
+    expect(await turnStartFailures(harness)).toHaveLength(0);
+    expect(harness.sendTurn).not.toHaveBeenCalled();
+
+    await dispatchTurnStart(harness, "after-interrupt");
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    expect(await turnStartFailures(harness)).toHaveLength(0);
+  });
+
+  it("surfaces a thread read failure during turn start", async () => {
+    const hooks = makeReadFailureHooks();
+    const harness = await createHarness({ decorateSnapshotQuery: hooks.decorateSnapshotQuery });
+
+    await dispatchTurnStart(harness, "thread-read-1");
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await harness.drain();
+
+    hooks.armed.threadShell = Effect.fail(storageFailure());
+    await dispatchTurnStart(harness, "thread-read-2");
+    await waitFor(async () => (await turnStartFailures(harness, "thread-read-2")).length === 1);
+    await harness.drain();
+
+    const failure = (await turnStartFailures(harness, "thread-read-2"))[0];
+    expect(failure?.payload).toMatchObject({ detail: STORAGE_FAILURE_DETAIL });
+    expect((await readThread(harness))?.session).toMatchObject({
+      status: "ready",
+      lastError: STORAGE_FAILURE_DETAIL,
+    });
+    expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a concurrently started turn running when turn-start preparation fails", async () => {
+    const hooks = makeReadFailureHooks();
+    const harness = await createHarness({ decorateSnapshotQuery: hooks.decorateSnapshotQuery });
+    const threadId = ThreadId.make("thread-1");
+
+    await dispatchTurnStart(harness, "concurrent-1");
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await harness.drain();
+
+    // The decider rejects a turn start while a turn is active, so the
+    // concurrent turn (for example a wake turn) starts inside the failing read.
+    const wakeAt = new Date().toISOString();
+    hooks.armed.threadShell = harness.engine
+      .dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("concurrent-wake-turn"),
+        threadId,
+        session: {
+          threadId,
+          status: "running",
+          providerName: "codex",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          runtimeSessionId: RuntimeSessionId.make("runtime-1"),
+          runtimeMode: "approval-required",
+          activeTurnId: asTurnId("turn-wake"),
+          lastError: null,
+          updatedAt: wakeAt,
+        },
+        createdAt: wakeAt,
+      })
+      .pipe(Effect.orDie, Effect.andThen(Effect.fail(storageFailure())));
+    await dispatchTurnStart(harness, "concurrent-2");
+    await waitFor(async () => (await turnStartFailures(harness, "concurrent-2")).length === 1);
+    await harness.drain();
+
+    expect((await readThread(harness))?.session).toMatchObject({
+      status: "running",
+      activeTurnId: "turn-wake",
+      lastError: null,
+    });
+    expect(await turnStartFailures(harness, "concurrent-2")).toHaveLength(1);
+    expect(harness.startSession).toHaveBeenCalledTimes(1);
+    expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+  });
+
+  it("surfaces a message read failure during turn start", async () => {
+    const hooks = makeReadFailureHooks();
+    const harness = await createHarness({ decorateSnapshotQuery: hooks.decorateSnapshotQuery });
+
+    hooks.armed.message = Effect.fail(storageFailure());
+    await dispatchTurnStart(harness, "message-read");
+    await waitFor(async () => (await turnStartFailures(harness, "message-read")).length === 1);
+
+    expect((await turnStartFailures(harness, "message-read"))[0]?.payload).toMatchObject({
+      detail: STORAGE_FAILURE_DETAIL,
+    });
+    expect(harness.sendTurn).not.toHaveBeenCalled();
+  });
+
+  it("still sends the turn when the first-turn message count cannot be read", async () => {
+    const hooks = makeReadFailureHooks();
+    const harness = await createHarness({ decorateSnapshotQuery: hooks.decorateSnapshotQuery });
+
+    hooks.armed.userMessageCount = Effect.fail(storageFailure());
+    await dispatchTurnStart(harness, "count-read");
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await harness.drain();
+
+    expect(await turnStartFailures(harness)).toHaveLength(0);
+    expect(harness.generateThreadTitle).not.toHaveBeenCalled();
+    expect(harness.generateBranchName).not.toHaveBeenCalled();
+  });
+
+  it("surfaces a project read failure on the context-handoff branch", async () => {
+    const hooks = makeReadFailureHooks();
+    const harness = await createHarness({ decorateSnapshotQuery: hooks.decorateSnapshotQuery });
+
+    await dispatchTurnStart(harness, "handoff-read-1", {
+      instanceId: ProviderInstanceId.make("codex"),
+      model: "gpt-5-codex",
+    });
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await harness.drain();
+
+    hooks.armed.projectShell = Effect.fail(storageFailure());
+    await dispatchTurnStart(harness, "handoff-read-2", {
+      instanceId: ProviderInstanceId.make("codex_work"),
+      model: "gpt-5-codex",
+    });
+    await waitFor(async () => (await turnStartFailures(harness, "handoff-read-2")).length === 1);
+    await harness.drain();
+
+    expect((await turnStartFailures(harness, "handoff-read-2"))[0]?.payload).toMatchObject({
+      detail: STORAGE_FAILURE_DETAIL,
+    });
+    expect(harness.processContextHandoff).not.toHaveBeenCalled();
+  });
+
   async function prepareApproval() {
     const harness = await createHarness();
     const createdAt = new Date().toISOString();
@@ -3198,6 +3584,14 @@ describe("ProviderCommandReactor", () => {
           (activity) => activity.kind === "provider.approval.respond.failed",
         ) ?? false,
     );
+    expect(
+      (await harness.readModel()).threads[0]?.activities.find(
+        (activity) => activity.kind === "provider.approval.respond.failed",
+      )?.payload,
+    ).toMatchObject({
+      detail: "Connection lost after sending the decision",
+      responseState: "uncertain",
+    });
     expect.soft((await harness.readShell()).threads[0]?.hasPendingApprovals).toBe(true);
     await expect.soft(harness.respond("approval-ambiguous-retry")).rejects.toThrow();
     await harness.drain();
