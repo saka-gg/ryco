@@ -1,6 +1,10 @@
 import { useEffect, useState } from "react";
 import { useDesktopWorkspaceState } from "../platform/desktopWorkspace";
 import { useSettingsDialogStore } from "../settingsDialogStore";
+import {
+  relaunchIfHubRestartRequired,
+  useDesktopRelaunchGuard,
+} from "./settings/useDesktopRelaunchGuard";
 import { Button } from "./ui/button";
 
 /** Native main owns sign-in, protected storage, and automatic node setup. */
@@ -11,6 +15,7 @@ export function DesktopAccountConnect() {
   // Native account setup only exists where main can run it. Elsewhere the node
   // enrols from Connection settings, and this prompt would fail on every click.
   const [supported, setSupported] = useState<boolean | null>(null);
+  const { guardRelaunch, dialog: relaunchGuardDialog } = useDesktopRelaunchGuard();
   const bridge = window.desktopBridge;
   const connect = bridge?.connectHostedIdentity;
   useEffect(() => {
@@ -44,6 +49,9 @@ export function DesktopAccountConnect() {
             try {
               const state = await connect();
               setFailed(state.status === "unavailable");
+              if (state.status === "ready" && bridge) {
+                await relaunchIfHubRestartRequired({ bridge, guardRelaunch });
+              }
             } catch {
               setFailed(true);
             } finally {
@@ -65,6 +73,7 @@ export function DesktopAccountConnect() {
           Account setup is temporarily unavailable. Retry or open Connection settings for details.
         </p>
       ) : null}
+      {relaunchGuardDialog}
     </div>
   );
 }

@@ -184,7 +184,19 @@ desktop settings, removes matching `RYCO_HUB_*` variables from the backend child
 passes the values over the private bootstrap channel. This keeps the visible desktop controls
 authoritative. The Hub card keeps the address and pre-enrollment node name visible and puts key
 fallback, startup ownership, CLI equivalents, and bounded relay counters behind **Show advanced
-options**. Changing a desktop launch value restarts Ryco.
+options**. Changing a desktop launch value restarts Ryco; when agent turns are running on the
+desktop's own backend, Ryco first asks whether to restart now, after they finish, or not at all.
+
+Until the operator turns the desktop connector on or off, a configured Hub launches it in
+**standby**: the backend runs the connector only when its own state files show no Hub identity
+(`resolveStandbyHubConnectorConfig`). An identity-less connector parks in `enrolling`, opens no
+socket, and selects key custody without reading the credential store, so device-code enrollment
+and native account sign-in complete in the running process instead of after an onboarding restart.
+Any existing identity, which may have been switched off on purpose or may belong to another runner
+sharing the state directory, resolves standby to disabled without opening key custody. An explicit
+flag or environment value is never refined by standby. Because a standby connector can become
+Hub-connected in place, external Agent Control integrations treat it as Hub-connected; turn the
+connector off to use them.
 
 For example:
 

@@ -7,10 +7,12 @@ import { afterEach, describe, expect, it } from "vite-plus/test";
 import {
   DEFAULT_DESKTOP_SETTINGS,
   DesktopSettingsReadError,
+  desktopHubLaunchNeedsRestart,
   isDesktopHostedIdentitySupported,
   isDesktopHubFileSecretStoreSupported,
   readDesktopSettings,
   resolveDefaultDesktopSettings,
+  resolveDesktopHubConnectorLaunch,
   setDesktopHubPreference,
   setDesktopKeepAwakePreference,
   setDesktopServerExposurePreference,
@@ -57,6 +59,7 @@ describe("desktopSettings", () => {
       updateChannel: "nightly",
       updateChannelConfiguredByUser: false,
       hubConnectorEnabled: false,
+      hubConnectorDisabledByUser: false,
       hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
       hubNodeName: null,
       hubAllowFileSecretStore: false,
@@ -75,6 +78,7 @@ describe("desktopSettings", () => {
       updateChannel: "latest",
       updateChannelConfiguredByUser: true,
       hubConnectorEnabled: false,
+      hubConnectorDisabledByUser: false,
       hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
       hubNodeName: null,
       hubAllowFileSecretStore: false,
@@ -89,6 +93,7 @@ describe("desktopSettings", () => {
       updateChannel: "latest",
       updateChannelConfiguredByUser: true,
       hubConnectorEnabled: false,
+      hubConnectorDisabledByUser: false,
       hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
       hubNodeName: null,
       hubAllowFileSecretStore: false,
@@ -107,6 +112,7 @@ describe("desktopSettings", () => {
           updateChannel: "latest",
           updateChannelConfiguredByUser: false,
           hubConnectorEnabled: false,
+          hubConnectorDisabledByUser: false,
           hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
           hubNodeName: null,
           hubAllowFileSecretStore: false,
@@ -122,6 +128,7 @@ describe("desktopSettings", () => {
       updateChannel: "latest",
       updateChannelConfiguredByUser: false,
       hubConnectorEnabled: false,
+      hubConnectorDisabledByUser: false,
       hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
       hubNodeName: null,
       hubAllowFileSecretStore: false,
@@ -140,6 +147,7 @@ describe("desktopSettings", () => {
           updateChannel: "latest",
           updateChannelConfiguredByUser: false,
           hubConnectorEnabled: false,
+          hubConnectorDisabledByUser: false,
           hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
           hubNodeName: null,
           hubAllowFileSecretStore: false,
@@ -155,6 +163,7 @@ describe("desktopSettings", () => {
       updateChannel: "latest",
       updateChannelConfiguredByUser: false,
       hubConnectorEnabled: false,
+      hubConnectorDisabledByUser: false,
       hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
       hubNodeName: null,
       hubAllowFileSecretStore: false,
@@ -173,6 +182,7 @@ describe("desktopSettings", () => {
           updateChannel: "latest",
           updateChannelConfiguredByUser: false,
           hubConnectorEnabled: false,
+          hubConnectorDisabledByUser: false,
           hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
           hubNodeName: null,
           hubAllowFileSecretStore: false,
@@ -188,6 +198,7 @@ describe("desktopSettings", () => {
       updateChannel: "latest",
       updateChannelConfiguredByUser: false,
       hubConnectorEnabled: false,
+      hubConnectorDisabledByUser: false,
       hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
       hubNodeName: null,
       hubAllowFileSecretStore: false,
@@ -206,6 +217,7 @@ describe("desktopSettings", () => {
           updateChannel: "latest",
           updateChannelConfiguredByUser: false,
           hubConnectorEnabled: false,
+          hubConnectorDisabledByUser: false,
           hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
           hubNodeName: null,
           hubAllowFileSecretStore: false,
@@ -221,6 +233,7 @@ describe("desktopSettings", () => {
       updateChannel: "nightly",
       updateChannelConfiguredByUser: true,
       hubConnectorEnabled: false,
+      hubConnectorDisabledByUser: false,
       hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
       hubNodeName: null,
       hubAllowFileSecretStore: false,
@@ -325,6 +338,88 @@ describe("desktopSettings", () => {
     expect(isDesktopHubFileSecretStoreSupported("win32")).toBe(false);
   });
 
+  it("launches a configured Hub connector in standby until the operator chooses", () => {
+    // Fresh installs used to launch the connector disabled, so the first
+    // account sign-in had to enable it and relaunch Desktop mid-turn.
+    expect(resolveDesktopHubConnectorLaunch(DEFAULT_DESKTOP_SETTINGS)).toEqual({
+      enabled: true,
+      standby: true,
+      origin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
+      nodeName: null,
+      allowFileSecretStore: false,
+    });
+
+    const turnedOn = setDesktopHubPreference(DEFAULT_DESKTOP_SETTINGS, { enabled: true });
+    expect(resolveDesktopHubConnectorLaunch(turnedOn)).toMatchObject({
+      enabled: true,
+      standby: false,
+    });
+
+    const turnedOff = setDesktopHubPreference(turnedOn, { enabled: false });
+    expect(turnedOff).toMatchObject({
+      hubConnectorEnabled: false,
+      hubConnectorDisabledByUser: true,
+    });
+    expect(resolveDesktopHubConnectorLaunch(turnedOff)).toMatchObject({
+      enabled: false,
+      standby: false,
+    });
+
+    // Turning it back on, or choosing a Hub, clears the explicit opt-out.
+    expect(setDesktopHubPreference(turnedOff, { enabled: true })).toMatchObject({
+      hubConnectorDisabledByUser: false,
+    });
+    expect(setDesktopHubPreference(turnedOff, { origin: "https://hub.example.com" })).toMatchObject(
+      { hubConnectorEnabled: true, hubConnectorDisabledByUser: false },
+    );
+    // An unrelated launch value keeps the operator's choice.
+    expect(setDesktopHubPreference(turnedOff, { nodeName: "Build node" })).toMatchObject({
+      hubConnectorDisabledByUser: true,
+    });
+
+    expect(
+      resolveDesktopHubConnectorLaunch({ ...DEFAULT_DESKTOP_SETTINGS, hubOrigin: null }),
+    ).toMatchObject({ enabled: false, standby: false });
+  });
+
+  it("reads settings written before the connector choice existed as not chosen", () => {
+    const settingsPath = makeSettingsPath();
+    // A legacy false may be an explicit opt-out; the backend's identity check
+    // keeps standby from ever connecting an identity that already exists.
+    fs.writeFileSync(settingsPath, JSON.stringify({ hubConnectorEnabled: false }));
+    const legacy = readDesktopSettings(settingsPath, "0.1.21");
+    expect(legacy.hubConnectorDisabledByUser).toBe(false);
+    expect(resolveDesktopHubConnectorLaunch(legacy).standby).toBe(true);
+
+    writeDesktopSettings(settingsPath, setDesktopHubPreference(legacy, { enabled: false }));
+    expect(readDesktopSettings(settingsPath, "0.1.21").hubConnectorDisabledByUser).toBe(true);
+  });
+
+  it("restarts only for launch changes the running backend cannot already serve", () => {
+    const standby = resolveDesktopHubConnectorLaunch(DEFAULT_DESKTOP_SETTINGS);
+    const enabled = resolveDesktopHubConnectorLaunch(
+      setDesktopHubPreference(DEFAULT_DESKTOP_SETTINGS, { enabled: true }),
+    );
+    // Account setup or enrollment in standby persists an explicit enable.
+    expect(desktopHubLaunchNeedsRestart(enabled, standby)).toBe(false);
+    expect(desktopHubLaunchNeedsRestart(standby, standby)).toBe(false);
+
+    const disabled = resolveDesktopHubConnectorLaunch(
+      setDesktopHubPreference(DEFAULT_DESKTOP_SETTINGS, { enabled: false }),
+    );
+    expect(desktopHubLaunchNeedsRestart(enabled, disabled)).toBe(true);
+    expect(desktopHubLaunchNeedsRestart(disabled, standby)).toBe(true);
+    expect(
+      desktopHubLaunchNeedsRestart({ ...enabled, origin: "https://other.example" }, enabled),
+    ).toBe(true);
+    expect(desktopHubLaunchNeedsRestart({ ...enabled, nodeName: "Build node" }, enabled)).toBe(
+      true,
+    );
+    expect(desktopHubLaunchNeedsRestart({ ...enabled, allowFileSecretStore: true }, enabled)).toBe(
+      true,
+    );
+  });
+
   it("keeps a reachable node awake by default and persists an opt-out", () => {
     expect(DEFAULT_DESKTOP_SETTINGS.keepAwakeWhileReachable).toBe(true);
     const settingsPath = makeSettingsPath();
@@ -378,6 +473,7 @@ describe("desktopSettings", () => {
       updateChannel: "nightly",
       updateChannelConfiguredByUser: false,
       hubConnectorEnabled: false,
+      hubConnectorDisabledByUser: false,
       hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
       hubNodeName: null,
       hubAllowFileSecretStore: false,
@@ -405,6 +501,7 @@ describe("desktopSettings", () => {
       updateChannel: "nightly",
       updateChannelConfiguredByUser: false,
       hubConnectorEnabled: false,
+      hubConnectorDisabledByUser: false,
       hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
       hubNodeName: null,
       hubAllowFileSecretStore: false,
@@ -421,6 +518,7 @@ describe("desktopSettings", () => {
         updateChannel: "latest",
         updateChannelConfiguredByUser: true,
         hubConnectorEnabled: false,
+        hubConnectorDisabledByUser: false,
         hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
         hubNodeName: null,
         hubAllowFileSecretStore: false,
@@ -437,6 +535,7 @@ describe("desktopSettings", () => {
       updateChannel: "latest",
       updateChannelConfiguredByUser: true,
       hubConnectorEnabled: false,
+      hubConnectorDisabledByUser: false,
       hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
       hubNodeName: null,
       hubAllowFileSecretStore: false,
@@ -463,6 +562,7 @@ describe("desktopSettings", () => {
       updateChannel: "latest",
       updateChannelConfiguredByUser: false,
       hubConnectorEnabled: false,
+      hubConnectorDisabledByUser: false,
       hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
       hubNodeName: null,
       hubAllowFileSecretStore: false,

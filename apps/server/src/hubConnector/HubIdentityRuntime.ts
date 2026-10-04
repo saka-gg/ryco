@@ -706,6 +706,35 @@ async function selectProtectedSecretStore(options: {
   };
 }
 
+/**
+ * Whether this node's identity state references anything in key custody.
+ *
+ * Reads only the owner-only state files and never opens a protected store.
+ * When it returns false, building the runtime selects a store without reading
+ * from it, because `selectProtectedSecretStore` only probes keys the state
+ * names; that is what lets a Desktop standby connector start without a
+ * credential-store prompt.
+ */
+export async function hubIdentityHoldsKeyMaterial(options: {
+  readonly statePath: string;
+  readonly retirementStatePath?: string;
+}): Promise<boolean> {
+  const stateStore = await makeLocalHubIdentityStateStore(options.statePath);
+  const retirementStore = await makeNodeIdentityKeyRetirementStore({
+    path:
+      options.retirementStatePath ??
+      join(dirname(options.statePath), "hub-identity-retirement.json"),
+  });
+  const state = await stateStore.readOrCreate();
+  return (
+    state.activeNode !== null ||
+    state.pendingEnrollment !== null ||
+    state.stagedRotation !== null ||
+    state.pendingTeardown !== null ||
+    identitySecretNames(state, await retirementStore.names()).length > 0
+  );
+}
+
 export async function makeHubIdentityRuntime(options: {
   readonly statePath: string;
   /**

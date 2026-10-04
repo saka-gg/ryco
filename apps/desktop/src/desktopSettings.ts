@@ -27,6 +27,13 @@ export interface DesktopSettings {
    * this machine can be reached.
    */
   readonly hubConnectorEnabled: boolean;
+  /**
+   * The operator turned the connector off. Until they choose either way, a
+   * configured Hub launches its connector in standby (see
+   * `resolveDesktopHubConnectorLaunch`), so account sign-in and enrollment
+   * need no relaunch.
+   */
+  readonly hubConnectorDisabledByUser: boolean;
   readonly hubOrigin: string | null;
   readonly hubNodeName: string | null;
   readonly hubAllowFileSecretStore: boolean;
@@ -47,6 +54,7 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   quitShortcutMode: "press-twice",
   serverExposureMode: "local-only",
   hubConnectorEnabled: false,
+  hubConnectorDisabledByUser: false,
   hubOrigin: DEFAULT_HOSTED_APP_ORIGIN,
   hubNodeName: null,
   hubAllowFileSecretStore: false,
@@ -123,26 +131,89 @@ export function setDesktopHubPreference(
       : input.nodeName === null
         ? null
         : normalizeHubNodeName(input.nodeName);
+  // A newly selected Hub is an onboarding action, not a dormant launch
+  // preference. Start its connector on the same relaunch so native account
+  // sign-in can claim the colocated node without a second Enable step.
+  // Callers can still preserve an intentionally disabled connector by
+  // passing `enabled: false` explicitly.
+  const choosesConnector =
+    input.enabled !== undefined || (input.origin !== undefined && input.origin !== null);
+  const hubConnectorEnabled =
+    input.enabled ??
+    (input.origin !== undefined && input.origin !== null ? true : settings.hubConnectorEnabled);
   const next = {
     ...settings,
-    // A newly selected Hub is an onboarding action, not a dormant launch
-    // preference. Start its connector on the same relaunch so native account
-    // sign-in can claim the colocated node without a second Enable step.
-    // Callers can still preserve an intentionally disabled connector by
-    // passing `enabled: false` explicitly.
-    hubConnectorEnabled:
-      input.enabled ??
-      (input.origin !== undefined && input.origin !== null ? true : settings.hubConnectorEnabled),
+    hubConnectorEnabled,
+    hubConnectorDisabledByUser: choosesConnector
+      ? !hubConnectorEnabled
+      : settings.hubConnectorDisabledByUser,
     hubOrigin: input.origin === undefined ? settings.hubOrigin : input.origin,
     hubNodeName: nodeName,
     hubAllowFileSecretStore: input.allowFileSecretStore ?? settings.hubAllowFileSecretStore,
   };
   return next.hubConnectorEnabled === settings.hubConnectorEnabled &&
+    next.hubConnectorDisabledByUser === settings.hubConnectorDisabledByUser &&
     next.hubOrigin === settings.hubOrigin &&
     next.hubNodeName === settings.hubNodeName &&
     next.hubAllowFileSecretStore === settings.hubAllowFileSecretStore
     ? settings
     : next;
+}
+
+/** The Hub connector configuration a backend is launched with. */
+export interface DesktopHubConnectorLaunch {
+  readonly enabled: boolean;
+  /**
+   * Run the connector only while the node holds no Hub identity. The backend
+   * decides at launch from its own state files and resolves to disabled for
+   * any existing identity, which may have been switched off on purpose.
+   */
+  readonly standby: boolean;
+  readonly origin: string | null;
+  readonly nodeName: string | null;
+  readonly allowFileSecretStore: boolean;
+}
+
+/**
+ * Enabled-but-idle unless the operator chose otherwise.
+ *
+ * An enabled connector with no identity parks in `enrolling` without opening a
+ * socket or reading key custody, so a configured Hub no longer needs the
+ * operator to turn it on, and a relaunch, before account sign-in can claim
+ * the node. Settings written before the choice was recorded read as "not
+ * chosen", which the backend's identity check keeps safe.
+ */
+export function resolveDesktopHubConnectorLaunch(
+  settings: DesktopSettings,
+): DesktopHubConnectorLaunch {
+  const shared = {
+    origin: settings.hubOrigin,
+    nodeName: settings.hubNodeName,
+    allowFileSecretStore: settings.hubAllowFileSecretStore,
+  };
+  if (settings.hubOrigin === null) return { ...shared, enabled: false, standby: false };
+  if (settings.hubConnectorEnabled) return { ...shared, enabled: true, standby: false };
+  if (settings.hubConnectorDisabledByUser) return { ...shared, enabled: false, standby: false };
+  return { ...shared, enabled: true, standby: true };
+}
+
+/**
+ * Whether persisted Hub settings need a relaunch to take effect.
+ *
+ * Promoting a standby connector to an explicit enable does not: the running
+ * connector already serves the identity created in this process, and the next
+ * launch simply stops asking the backend to check first.
+ */
+export function desktopHubLaunchNeedsRestart(
+  persisted: DesktopHubConnectorLaunch,
+  running: DesktopHubConnectorLaunch,
+): boolean {
+  return (
+    persisted.enabled !== running.enabled ||
+    persisted.origin !== running.origin ||
+    persisted.nodeName !== running.nodeName ||
+    persisted.allowFileSecretStore !== running.allowFileSecretStore
+  );
 }
 
 export function isDesktopHubFileSecretStoreSupported(platform: NodeJS.Platform): boolean {
@@ -198,6 +269,7 @@ export function readDesktopSettings(settingsPath: string, appVersion: string): D
       readonly updateChannel?: unknown;
       readonly updateChannelConfiguredByUser?: unknown;
       readonly hubConnectorEnabled?: unknown;
+      readonly hubConnectorDisabledByUser?: unknown;
       readonly hubOrigin?: unknown;
       readonly hubNodeName?: unknown;
       readonly hubAllowFileSecretStore?: unknown;
@@ -239,6 +311,8 @@ export function readDesktopSettings(settingsPath: string, appVersion: string): D
           : defaultSettings.updateChannel,
       updateChannelConfiguredByUser,
       hubConnectorEnabled: parsed.hubConnectorEnabled === true,
+      // Absent in settings written before the choice was recorded: not chosen.
+      hubConnectorDisabledByUser: parsed.hubConnectorDisabledByUser === true,
       hubOrigin:
         typeof parsed.hubOrigin === "string" && parsed.hubOrigin.length > 0
           ? parsed.hubOrigin

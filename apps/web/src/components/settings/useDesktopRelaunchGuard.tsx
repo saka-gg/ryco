@@ -1,4 +1,5 @@
 import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
+import type { DesktopBridge, DesktopHubLaunchConfig } from "@ryco/contracts";
 
 import {
   countActiveDesktopTurns,
@@ -71,6 +72,33 @@ export const desktopRelaunchScheduler = createDesktopRelaunchScheduler({
 
 export type DesktopRelaunchOutcome = "relaunched" | "scheduled" | "cancelled";
 
+type GuardRelaunch = (
+  relaunch: DesktopRelaunch,
+  options?: { readonly beforePrompt?: () => void },
+) => Promise<DesktopRelaunchOutcome>;
+
+/**
+ * Finish account setup when it saved Hub settings the running backend lacks.
+ *
+ * A standby connector serves account setup in place, so this is normally a
+ * no-op. Only a connector the operator had turned off needs a relaunch, and it
+ * goes through the same running-turn question as every other relaunch.
+ */
+export async function relaunchIfHubRestartRequired(input: {
+  readonly bridge: Pick<DesktopBridge, "getHubLaunchConfig" | "restartApp">;
+  readonly guardRelaunch: GuardRelaunch;
+}): Promise<DesktopHubLaunchConfig | null> {
+  let config: DesktopHubLaunchConfig;
+  try {
+    config = await input.bridge.getHubLaunchConfig();
+  } catch {
+    return null;
+  }
+  const restartApp = input.bridge.restartApp;
+  if (config.restartRequired === true && restartApp) await input.guardRelaunch(restartApp);
+  return config;
+}
+
 interface PendingRelaunch {
   readonly activeTurns: number;
   readonly relaunch: DesktopRelaunch;
@@ -88,10 +116,7 @@ interface PendingRelaunch {
  * Render `dialog` once in the calling component.
  */
 export function useDesktopRelaunchGuard(): {
-  readonly guardRelaunch: (
-    relaunch: DesktopRelaunch,
-    options?: { readonly beforePrompt?: () => void },
-  ) => Promise<DesktopRelaunchOutcome>;
+  readonly guardRelaunch: GuardRelaunch;
   readonly dialog: ReactNode;
 } {
   const [pending, setPendingState] = useState<PendingRelaunch | null>(null);

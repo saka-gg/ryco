@@ -47,7 +47,7 @@ import { DataList, DataListItem } from "../ui/data-list";
 import { Input } from "../ui/input";
 import { HubAdvancedOptions } from "./HubAdvancedOptions";
 import { SettingsRow, SettingsSection, useRelativeTimeTick } from "./settingsLayout";
-import { useDesktopRelaunchGuard } from "./useDesktopRelaunchGuard";
+import { relaunchIfHubRestartRequired, useDesktopRelaunchGuard } from "./useDesktopRelaunchGuard";
 import { canEditHubOrigin, presentHubStatus, type HubAction } from "./hubStatus";
 import {
   clearHubEnrollmentIntent,
@@ -242,6 +242,13 @@ export function HubSection({
         const next = await invoke();
         if (!mountedRef.current) return;
         setHostedIdentity(next);
+        if (action === "connect" && desktopBridge) {
+          const latest = await relaunchIfHubRestartRequired({
+            bridge: desktopBridge,
+            guardRelaunch,
+          });
+          if (latest !== null && mountedRef.current) setConfig(latest);
+        }
       } catch {
         if (!mountedRef.current) return;
         setHostedIdentity({ status: "unavailable" });
@@ -254,7 +261,7 @@ export function HubSection({
         if (mountedRef.current) setHostedIdentityPending(false);
       }
     },
-    [desktopBridge],
+    [desktopBridge, guardRelaunch],
   );
 
   const refreshDesktopWorkspace = useCallback(async () => {
@@ -404,6 +411,18 @@ export function HubSection({
       try {
         switch (action) {
           case "enroll":
+            // A standby connector only runs while no identity exists. Record
+            // that this installation now enrols, so the next launch keeps the
+            // connector on for the identity it is about to create, without
+            // restarting the backend that already serves it.
+            if (config !== null && !config.enabled && desktopBridge) {
+              await desktopBridge
+                .setHubLaunchConfig({ enabled: true, applyOnNextLaunch: true })
+                .then(() => {
+                  if (mountedRef.current) setConfig({ ...config, enabled: true });
+                })
+                .catch(() => undefined);
+            }
             await startHubEnrollment();
             break;
           case "cancel-enrollment":
@@ -647,11 +666,19 @@ export function HubSection({
               </span>
             )}
             {error ? <span className="block text-destructive">{error}</span> : null}
+            {config?.restartRequired === true ? (
+              <span className="block text-warning">
+                Saved Hub settings apply after Ryco restarts.
+              </span>
+            ) : null}
           </>
         }
         control={
           presentation === null ? null : (
             <>
+              {config?.restartRequired === true && presentation.action !== "restart"
+                ? renderAction("restart", "outline")
+                : null}
               {renderAction(
                 automaticNativeSetupWaiting ? "none" : presentation.action,
                 presentation.action === "leave" ? "destructive-outline" : "outline",

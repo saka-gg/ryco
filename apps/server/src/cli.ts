@@ -125,6 +125,7 @@ import {
   describeAccountLinkFailure,
   startPasswordSignIn,
 } from "./hubConnector/cliAccountLink.ts";
+import { resolveStandbyHubConnectorConfig } from "./hubConnector/HubConnectorStandby.ts";
 import {
   nodeServiceLabel,
   nodeServicePlatform,
@@ -183,6 +184,12 @@ const BootstrapEnvelopeSchema = Schema.Struct({
   tailscaleServeEnabled: Schema.optional(Schema.Boolean),
   tailscaleServePort: Schema.optional(PortSchema),
   hubConnectorEnabled: Schema.optional(Schema.Boolean),
+  /**
+   * Desktop only: run the connector only while this node holds no Hub
+   * identity (`resolveStandbyHubConnectorConfig`). Honoured only when the
+   * envelope is what enabled the connector.
+   */
+  hubConnectorStandby: Schema.optional(Schema.Boolean),
   hubOrigin: Schema.optional(Schema.String),
   hubNodeName: Schema.optional(Schema.String),
   hubAllowFileSecretStore: Schema.optional(Schema.Boolean),
@@ -686,7 +693,7 @@ export const resolveServerConfig = (
     // matching every other option here. In the desktop that contest never
     // happens: `backendChildEnv()` strips the Hub variables, so the envelope is
     // the only source. A headless `ryco serve` sends no envelope.
-    const hubConnector = resolveHubConnectorConfig({
+    const configuredHubConnector = resolveHubConnectorConfig({
       enabled: Option.getOrUndefined(
         resolveOptionPrecedence(
           Option.map(normalizedFlags.hubConnectorEnabled, String),
@@ -727,6 +734,20 @@ export const resolveServerConfig = (
         ),
       ),
     });
+    // An explicit flag or environment value is the operator's statement for
+    // this run, so standby only refines an envelope-enabled Desktop connector.
+    const hubConnector =
+      mode === "desktop" &&
+      bootstrap?.hubConnectorStandby === true &&
+      Option.isNone(normalizedFlags.hubConnectorEnabled) &&
+      env.hubConnectorEnabled === undefined
+        ? yield* Effect.promise(() =>
+            resolveStandbyHubConnectorConfig({
+              config: configuredHubConnector,
+              statePath: derivedPaths.hubIdentityStatePath,
+            }),
+          )
+        : configuredHubConnector;
     // Same flag > env > envelope precedence as everything above. An option left
     // unset by all three stays unset all the way through to
     // `NodeE2eePolicyStore`, where it means "leave the committed policy alone" —

@@ -406,6 +406,11 @@ export interface DesktopTurnCompleteNotification {
 }
 
 export interface DesktopHubLaunchConfig {
+  /**
+   * The operator (or account setup) explicitly turned the connector on. When
+   * false and not turned off, a configured Hub still runs its connector in
+   * standby for a node with no Hub identity yet.
+   */
   readonly enabled: boolean;
   readonly origin: string | null;
   readonly nodeName: string | null;
@@ -417,6 +422,11 @@ export interface DesktopHubLaunchConfig {
    * false the node enrols through the Hub's device-code ceremony instead.
    */
   readonly hostedIdentitySupported: boolean;
+  /**
+   * The saved launch configuration differs from what the running backend
+   * serves, so it applies only after a relaunch. Absent means false.
+   */
+  readonly restartRequired?: boolean;
 }
 
 /** Whether Desktop main is holding this machine awake for the devices that reach it. */
@@ -789,12 +799,18 @@ export interface DesktopBridge {
    * The connector is built during server startup, so a change cannot take effect
    * in the running process — the same reason network access and Tailscale Serve
    * relaunch. Callers must confirm with the operator first.
+   *
+   * `applyOnNextLaunch` is accepted only with `enabled: true` and nothing else,
+   * and only while the running backend runs its connector in standby: it
+   * records that enrollment started here without restarting a backend that
+   * already serves it.
    */
   setHubLaunchConfig: (input: {
     readonly enabled?: boolean;
     readonly origin?: string | null;
     readonly nodeName?: string | null;
     readonly allowFileSecretStore?: boolean;
+    readonly applyOnNextLaunch?: boolean;
   }) => Promise<void>;
   /** Validate a typed Hub address without persisting it. */
   validateHubOrigin: (raw: string) => Promise<DesktopHubOriginValidation>;

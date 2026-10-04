@@ -2383,6 +2383,89 @@ describe("ConnectionsSettings Hub section", () => {
     await vi.waitFor(() => expect(setHubLaunchConfig).toHaveBeenCalledWith({ enabled: true }));
   });
 
+  it("finishes account setup in place when the backend runs a standby connector", async () => {
+    // Account sign-in used to enable the connector and relaunch Desktop,
+    // killing running turns. A standby connector claims the node in place.
+    activeDesktopTurns.count = 1;
+    const restartApp = vi.fn().mockResolvedValue(undefined);
+    const connectHostedIdentity = vi.fn().mockResolvedValue({ status: "ready" as const });
+    stubHubFetch({
+      status: { ...baseStatus, state: "enrolling" },
+      identity: { enrolled: "none" },
+    });
+    await renderHub(
+      { enabled: false, origin: "https://hub.example.com", restartRequired: false },
+      {
+        getHostedIdentityState: vi.fn().mockResolvedValue({ status: "signed-out" }),
+        connectHostedIdentity,
+        restartApp,
+      },
+    );
+
+    await page.getByRole("button", { name: "Connect account" }).click();
+    await vi.waitFor(() => expect(connectHostedIdentity).toHaveBeenCalledOnce());
+    // The status poll is a static stub here; the account side is what settles.
+    await expect.element(page.getByText("Signed in · Node setup needed")).toBeVisible();
+    expect(restartApp).not.toHaveBeenCalled();
+    await expect
+      .element(page.getByText("Restart while agents are working?"))
+      .not.toBeInTheDocument();
+  });
+
+  it("asks before account setup relaunches a connector that was turned off", async () => {
+    activeDesktopTurns.count = 1;
+    const restartApp = vi.fn().mockResolvedValue(undefined);
+    let restartRequired = false;
+    const connectHostedIdentity = vi.fn().mockImplementation(async () => {
+      // Main persisted the enable; the running backend has the connector off.
+      restartRequired = true;
+      return { status: "ready" as const };
+    });
+    stubHubFetch({
+      status: { ...baseStatus, state: "disabled" },
+      identity: { enrolled: "none" },
+    });
+    await renderHub(undefined, {
+      getHubLaunchConfig: async () => ({
+        enabled: false,
+        origin: "https://hub.example.com",
+        nodeName: null,
+        allowFileSecretStore: false,
+        fileSecretStoreFallbackSupported: true,
+        hostedIdentitySupported: true,
+        restartRequired,
+      }),
+      getHostedIdentityState: vi.fn().mockResolvedValue({ status: "signed-out" }),
+      connectHostedIdentity,
+      restartApp,
+    });
+
+    await page.getByRole("button", { name: "Connect account" }).click();
+    await expect.element(page.getByText("Restart while agents are working?")).toBeVisible();
+    expect(restartApp).not.toHaveBeenCalled();
+    await page.getByRole("button", { name: "Restart now" }).click();
+    await vi.waitFor(() => expect(restartApp).toHaveBeenCalledOnce());
+  });
+
+  it("records enrollment from a standby connector without restarting", async () => {
+    const setHubLaunchConfig = vi.fn().mockResolvedValue(undefined);
+    const fetchMock = stubHubFetch({
+      status: { ...baseStatus, state: "enrolling" },
+      identity: { enrolled: "none" },
+    });
+    await renderHub({ enabled: false, origin: "https://hub.example.com" }, { setHubLaunchConfig });
+
+    await page.getByRole("button", { name: "Start enrollment" }).click();
+    await vi.waitFor(() =>
+      expect(setHubLaunchConfig).toHaveBeenCalledWith({ enabled: true, applyOnNextLaunch: true }),
+    );
+    await vi.waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some(([input]) => String(input).endsWith("/api/hub/enrollment")),
+      ).toBe(true),
+    );
+  });
+
   it("offers device-code enrollment where native account setup cannot run", async () => {
     stubHubFetch({
       status: { ...baseStatus, state: "enrolling" },
