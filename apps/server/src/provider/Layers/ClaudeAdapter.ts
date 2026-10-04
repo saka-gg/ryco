@@ -1,5 +1,6 @@
 import { isClaudeNativeCompaction } from "../claudeNativeCompaction.ts";
 import { observeClaudeCache, readClaudeCacheCounts } from "../claudeCacheObservation.ts";
+import { claudePostCompactionUsage, selectClaudeResultUsageGauge } from "../claudeContextUsage.ts";
 import type { ClaudeCacheObservation, ModelSelection } from "@ryco/contracts";
 /**
  * ClaudeAdapterLive - Scoped live implementation for the Claude Agent provider adapter.
@@ -306,6 +307,17 @@ interface ClaudeSessionContext {
   lastKnownContextWindow: number | undefined;
   lastKnownTokenUsage: ThreadTokenUsageSnapshot | undefined;
   cacheObservation: ClaudeCacheObservation | undefined;
+  /**
+   * Sticky: a root assistant frame reported main-loop usage on this runtime. Legacy task
+   * telemetry must never feed the gauge after that, even when a compaction boundary cleared
+   * `cacheObservation`.
+   */
+  mainLoopUsageObserved: boolean;
+  /**
+   * A compaction boundary was crossed since the last result. That result's cumulative usage
+   * includes the pre-compaction input, so it must not become the gauge.
+   */
+  cumulativeUsageSpansCompaction: boolean;
   cacheModelSelection: ModelSelection | undefined;
   compactionPolicy: ContextCompactionPolicyState;
   readonly supportsAutomaticCompaction: boolean;
@@ -2212,11 +2224,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
   });
 
-  const completeTurn = Effect.fn("completeTurn")(function* (
+  /** The context gauge a result (or a local close without one) publishes. */
+  const resolveResultUsageSnapshot = Effect.fn("resolveResultUsageSnapshot")(function* (
     context: ClaudeSessionContext,
-    status: ProviderRuntimeTurnStatus,
-    errorMessage?: string,
-    result?: SDKResultMessage,
+    result: SDKResultMessage | undefined,
   ) {
     const resultCounts = readClaudeCacheCounts(result?.usage);
     if (context.cacheObservation && resultCounts?.outputTokens !== undefined) {
@@ -2243,30 +2254,19 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     // This does NOT represent the current context window size.
     // Prefer the last main-loop request gauge (legacy main-task telemetry is
     // a fallback) and keep cumulative totals separate as totalProcessedTokens.
-    const accumulatedSnapshot = normalizeClaudeTokenUsage(
-      result?.usage,
-      resultContextWindow ?? context.lastKnownContextWindow,
-    );
-    const accumulatedTotalProcessedTokens =
-      accumulatedSnapshot?.totalProcessedTokens ?? accumulatedSnapshot?.usedTokens;
-    const lastGoodUsage = context.lastKnownTokenUsage;
-    const maxTokens = resultContextWindow ?? context.lastKnownContextWindow;
-    const rawUsageSnapshot: ThreadTokenUsageSnapshot | undefined = lastGoodUsage
-      ? {
-          ...lastGoodUsage,
-          ...(typeof maxTokens === "number" && Number.isFinite(maxTokens) && maxTokens > 0
-            ? { maxTokens }
-            : {}),
-          ...(typeof accumulatedTotalProcessedTokens === "number" &&
-          Number.isFinite(accumulatedTotalProcessedTokens) &&
-          accumulatedTotalProcessedTokens > lastGoodUsage.usedTokens
-            ? {
-                totalProcessedTokens: accumulatedTotalProcessedTokens,
-              }
-            : {}),
-        }
-      : accumulatedSnapshot;
-    const usageSnapshot = rawUsageSnapshot
+    const rawUsageSnapshot = selectClaudeResultUsageGauge({
+      lastGauge: context.lastKnownTokenUsage,
+      cumulative: normalizeClaudeTokenUsage(
+        result?.usage,
+        resultContextWindow ?? context.lastKnownContextWindow,
+      ),
+      maxTokens: resultContextWindow ?? context.lastKnownContextWindow,
+      cumulativeIsGauge: !context.cumulativeUsageSpansCompaction,
+    });
+    // Only a real result consumes the boundary: a local close must not re-enable the
+    // cumulative fallback for the CLI's late result of the same turn.
+    if (result !== undefined) context.cumulativeUsageSpansCompaction = false;
+    return rawUsageSnapshot
       ? withAutomaticCompactionCapability(
           {
             ...rawUsageSnapshot,
@@ -2275,6 +2275,15 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           context.supportsAutomaticCompaction,
         )
       : undefined;
+  });
+
+  const completeTurn = Effect.fn("completeTurn")(function* (
+    context: ClaudeSessionContext,
+    status: ProviderRuntimeTurnStatus,
+    errorMessage?: string,
+    result?: SDKResultMessage,
+  ) {
+    const usageSnapshot = yield* resolveResultUsageSnapshot(context, result);
 
     const turnState = context.turnState;
     if (!turnState) {
@@ -3020,6 +3029,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       observedAt: cacheStamp.createdAt,
       ...(previousCache ? { previous: previousCache } : {}),
     });
+    if (context.cacheObservation) context.mainLoopUsageObserved = true;
     if (context.cacheObservation && context.cacheObservation !== previousCache) {
       const observation = context.cacheObservation;
       const usedTokens =
@@ -3462,13 +3472,20 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           },
         });
         return;
-      case "compact_boundary":
+      case "compact_boundary": {
         context.compactionPolicy = settleContextCompaction(
           context.compactionPolicy,
           context.generation,
         );
-        context.lastKnownTokenUsage = undefined;
+        const postCompactionUsage = claudePostCompactionUsage(
+          message.compact_metadata,
+          context.lastKnownContextWindow,
+        );
+        // The pre-compaction gauge is gone either way; post_tokens is its only honest
+        // replacement until the next main-loop request reports real usage.
+        context.lastKnownTokenUsage = postCompactionUsage;
         context.cacheObservation = undefined;
+        context.cumulativeUsageSpansCompaction = true;
         yield* offerRuntimeEventForContext(context, {
           ...base,
           type: "thread.state.changed",
@@ -3477,7 +3494,23 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             detail: message,
           },
         });
+        if (postCompactionUsage) {
+          const usageStamp = yield* makeEventStamp();
+          yield* offerRuntimeEventForContext(context, {
+            ...base,
+            eventId: usageStamp.eventId,
+            createdAt: usageStamp.createdAt,
+            type: "thread.token-usage.updated",
+            payload: {
+              usage: withAutomaticCompactionCapability(
+                postCompactionUsage,
+                context.supportsAutomaticCompaction,
+              ),
+            },
+          });
+        }
         return;
+      }
       case "hook_started":
         yield* offerRuntimeEventForContext(context, {
           ...base,
@@ -3632,7 +3665,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       case "task_progress": {
         if (
           message.usage &&
-          !context.cacheObservation &&
+          !context.mainLoopUsageObserved &&
           !isClaudeSubagentTaskMessage(message) &&
           !context.taskAgents.get(message.task_id)?.toolUseId
         ) {
@@ -3763,7 +3796,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         context.backgroundedTaskIds.delete(message.task_id);
         if (
           message.usage &&
-          !context.cacheObservation &&
+          !context.mainLoopUsageObserved &&
           !isClaudeSubagentTaskMessage(message) &&
           !context.taskAgents.get(message.task_id)?.toolUseId
         ) {
@@ -4765,6 +4798,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         lastKnownContextWindow: undefined,
         lastKnownTokenUsage: undefined,
         cacheObservation: undefined,
+        mainLoopUsageObserved: false,
+        cumulativeUsageSpansCompaction: false,
         cacheModelSelection: modelSelection,
         compactionPolicy: initialContextCompactionPolicyState(generation),
         supportsAutomaticCompaction,

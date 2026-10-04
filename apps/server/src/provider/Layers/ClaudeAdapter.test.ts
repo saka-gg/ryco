@@ -23,7 +23,18 @@ import {
 } from "@ryco/contracts";
 import { createModelSelection } from "@ryco/shared/model";
 import { assert, describe, it, vi } from "@effect/vitest";
-import { Context, Effect, Fiber, Layer, Option, Random, Redacted, Schema, Stream } from "effect";
+import {
+  Context,
+  Effect,
+  Fiber,
+  Layer,
+  Option,
+  Queue,
+  Random,
+  Redacted,
+  Schema,
+  Stream,
+} from "effect";
 
 import { attachmentRelativePath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
@@ -5902,4 +5913,411 @@ describe("ClaudeAdapterLive", () => {
       );
     },
   );
+});
+
+const GAUGE_MODEL = "claude-sonnet-4-6";
+const GAUGE_SDK_SESSION = "sdk-session-gauge";
+
+function rootAssistantFrame(
+  id: string,
+  usage: Record<string, number> = {},
+  content: ReadonlyArray<unknown> = [],
+): SDKMessage {
+  return {
+    type: "assistant",
+    uuid: id,
+    session_id: GAUGE_SDK_SESSION,
+    parent_tool_use_id: null,
+    message: { id, model: GAUGE_MODEL, content, usage },
+  } as unknown as SDKMessage;
+}
+
+function resultFrame(
+  input: {
+    readonly usage?: Record<string, number>;
+    readonly contextWindow?: number;
+    readonly subtype?: "success" | "error_during_execution";
+  } & Record<string, unknown> = {},
+): SDKMessage {
+  const { usage, contextWindow, subtype = "success", ...extra } = input;
+  return {
+    type: "result",
+    subtype,
+    is_error: false,
+    num_turns: 1,
+    session_id: GAUGE_SDK_SESSION,
+    ...(subtype === "success" ? { result: "done" } : { errors: ["Claude turn failed."] }),
+    ...(usage ? { usage } : {}),
+    ...(contextWindow
+      ? { modelUsage: { [GAUGE_MODEL]: { contextWindow, maxOutputTokens: 64_000 } } }
+      : {}),
+    ...extra,
+  } as unknown as SDKMessage;
+}
+
+function compactBoundaryFrame(compactMetadata: Record<string, unknown>): SDKMessage {
+  return {
+    type: "system",
+    subtype: "compact_boundary",
+    compact_metadata: compactMetadata,
+    uuid: "compact-boundary",
+    session_id: GAUGE_SDK_SESSION,
+  } as unknown as SDKMessage;
+}
+
+function systemStatusFrame(status: "requesting" | "compacting" | null): SDKMessage {
+  return {
+    type: "system",
+    subtype: "status",
+    status,
+    uuid: `status-${String(status)}`,
+    session_id: GAUGE_SDK_SESSION,
+  } as unknown as SDKMessage;
+}
+
+function systemInitFrame(): SDKMessage {
+  return {
+    type: "system",
+    subtype: "init",
+    model: GAUGE_MODEL,
+    cwd: "/tmp/claude-adapter-test",
+    tools: [],
+    mcp_servers: [],
+    slash_commands: [],
+    permissionMode: "bypassPermissions",
+    apiKeySource: "none",
+    claude_code_version: "2.1.288",
+    uuid: "init",
+    session_id: GAUGE_SDK_SESSION,
+  } as unknown as SDKMessage;
+}
+
+/**
+ * A frame that produces exactly one `hook.started` event and changes no turn state. The stream
+ * fiber handles frames in order, so waiting for it proves every earlier frame was handled.
+ */
+function sentinelFrame(id: string): SDKMessage {
+  return {
+    type: "system",
+    subtype: "hook_started",
+    hook_id: id,
+    hook_name: "sentinel",
+    hook_event: "Notification",
+    uuid: `sentinel-${id}`,
+    session_id: GAUGE_SDK_SESSION,
+  } as unknown as SDKMessage;
+}
+
+const isSentinel = (id: string) => (event: ProviderRuntimeEvent) =>
+  event.type === "hook.started" && event.payload.hookId === id;
+
+/** Collects every runtime event while letting a test wait for a specific one. */
+function makeRuntimeEventLog(adapter: ClaudeAdapterShape) {
+  return Effect.gen(function* () {
+    const events: Array<ProviderRuntimeEvent> = [];
+    const pending = yield* Queue.unbounded<ProviderRuntimeEvent>();
+    yield* adapter.streamEvents.pipe(
+      Stream.runForEach((event) => Queue.offer(pending, event)),
+      Effect.forkChild,
+    );
+    const waitFor = (predicate: (event: ProviderRuntimeEvent) => boolean) =>
+      Effect.gen(function* () {
+        while (true) {
+          const event = yield* Queue.take(pending);
+          events.push(event);
+          if (predicate(event)) return event;
+        }
+      });
+    /** Moves already-delivered events into the log without waiting. */
+    const drain = Effect.gen(function* () {
+      for (let round = 0; round < 8; round += 1) yield* Effect.yieldNow;
+      while (true) {
+        const next = yield* Queue.poll(pending);
+        if (Option.isNone(next)) return;
+        events.push(next.value);
+      }
+    });
+    return { events, waitFor, drain };
+  });
+}
+
+const isUsageEvent = (event: ProviderRuntimeEvent) => event.type === "thread.token-usage.updated";
+
+function lastUsageBefore(events: ReadonlyArray<ProviderRuntimeEvent>, index: number) {
+  const usage = events.slice(0, index).findLast(isUsageEvent);
+  return usage?.type === "thread.token-usage.updated" ? usage.payload.usage : undefined;
+}
+
+describe("ClaudeAdapterLive context meter across compaction", () => {
+  const startGaugeSession = (adapter: ClaudeAdapterShape, runtimeSessionId: string) =>
+    adapter.startSession({
+      runtimeSessionId: RuntimeSessionId.make(runtimeSessionId),
+      threadId: THREAD_ID,
+      provider: ProviderDriverKind.make("claudeAgent"),
+      runtimeMode: "full-access",
+    });
+
+  /** One completed prompt turn whose main loop reported usage and a 200k window. */
+  const completeFirstTurn = (
+    adapter: ClaudeAdapterShape,
+    query: FakeClaudeQuery,
+    log: Effect.Success<ReturnType<typeof makeRuntimeEventLog>>,
+  ) =>
+    Effect.gen(function* () {
+      const first = yield* adapter.sendTurn({
+        threadId: THREAD_ID,
+        input: "fill",
+        attachments: [],
+      });
+      query.emit(
+        rootAssistantFrame("assistant-first", {
+          input_tokens: 12,
+          cache_read_input_tokens: 160_000,
+          cache_creation_input_tokens: 8_000,
+          output_tokens: 1,
+        }),
+      );
+      query.emit(
+        resultFrame({
+          usage: { input_tokens: 12, cache_read_input_tokens: 160_000, output_tokens: 900 },
+          contextWindow: 200_000,
+        }),
+      );
+      yield* log.waitFor(
+        (event) => event.type === "turn.completed" && event.turnId === first.turnId,
+      );
+      return first;
+    });
+
+  it.effect("publishes post_tokens at a /compact boundary and never the cumulative total", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      yield* startGaugeSession(adapter, "gauge-compact-post");
+      yield* completeFirstTurn(adapter, harness.query, log);
+
+      const compact = yield* adapter.sendTurn({
+        threadId: THREAD_ID,
+        input: "/compact",
+        attachments: [],
+      });
+      harness.query.emit(systemStatusFrame("compacting"));
+      harness.query.emit(
+        compactBoundaryFrame({ trigger: "manual", pre_tokens: 168_012, post_tokens: 41_999.6 }),
+      );
+      harness.query.emit(sentinelFrame("after-boundary"));
+      const sentinelStart = log.events.length;
+      yield* log.waitFor(isSentinel("after-boundary"));
+      const boundaryUsage = log.events.slice(sentinelStart).find(isUsageEvent);
+      assert.equal(boundaryUsage?.turnId, compact.turnId);
+      if (boundaryUsage?.type === "thread.token-usage.updated") {
+        assert.deepEqual(boundaryUsage.payload.usage, { usedTokens: 42_000, maxTokens: 200_000 });
+      }
+
+      harness.query.emit(
+        resultFrame({
+          user_message_uuids: [compact.turnId],
+          usage: { input_tokens: 3, cache_read_input_tokens: 168_000, output_tokens: 4_000 },
+          contextWindow: 200_000,
+        }),
+      );
+      harness.query.finish();
+      yield* log.waitFor((event) => event.type === "session.exited");
+
+      const events = log.events;
+      const completedIndex = events.findIndex(
+        (event) => event.type === "turn.completed" && event.turnId === compact.turnId,
+      );
+      assert.isAbove(completedIndex, -1);
+      const finalGauge = lastUsageBefore(events, completedIndex);
+      assert.equal(finalGauge?.usedTokens, 42_000);
+      assert.equal(finalGauge?.totalProcessedTokens, 172_003);
+      assert.isUndefined(finalGauge?.claudeCache);
+      const boundaryIndex = events.findIndex(
+        (event) => event.type === "thread.state.changed" && event.payload.state === "compacted",
+      );
+      for (const event of events.slice(boundaryIndex)) {
+        if (event.type === "thread.token-usage.updated") {
+          assert.isBelow(event.payload.usage.usedTokens, 168_000);
+        }
+      }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("publishes no gauge after a boundary that has no post_tokens", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      yield* startGaugeSession(adapter, "gauge-compact-no-post");
+      yield* completeFirstTurn(adapter, harness.query, log);
+
+      const compact = yield* adapter.sendTurn({
+        threadId: THREAD_ID,
+        input: "/compact",
+        attachments: [],
+      });
+      harness.query.emit(systemStatusFrame("compacting"));
+      harness.query.emit(compactBoundaryFrame({ trigger: "manual", pre_tokens: 168_012 }));
+      harness.query.emit(
+        resultFrame({
+          user_message_uuids: [compact.turnId],
+          usage: { input_tokens: 3, cache_read_input_tokens: 168_000, output_tokens: 4_000 },
+          contextWindow: 200_000,
+        }),
+      );
+      harness.query.finish();
+      yield* log.waitFor((event) => event.type === "session.exited");
+
+      const boundaryIndex = log.events.findIndex(
+        (event) => event.type === "thread.state.changed" && event.payload.state === "compacted",
+      );
+      assert.isAbove(boundaryIndex, -1);
+      assert.isFalse(log.events.slice(boundaryIndex).some(isUsageEvent));
+      assert.isTrue(
+        log.events.some(
+          (event) => event.type === "turn.completed" && event.turnId === compact.turnId,
+        ),
+      );
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("lets the next main-loop request replace the post-compaction gauge", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      yield* startGaugeSession(adapter, "gauge-auto-compact");
+      yield* completeFirstTurn(adapter, harness.query, log);
+
+      const turn = yield* adapter.sendTurn({ threadId: THREAD_ID, input: "more", attachments: [] });
+      harness.query.emit(systemStatusFrame("compacting"));
+      harness.query.emit(
+        compactBoundaryFrame({ trigger: "auto", pre_tokens: 175_000, post_tokens: 42_000 }),
+      );
+      harness.query.emit(
+        rootAssistantFrame("assistant-after-compact", {
+          input_tokens: 7,
+          cache_read_input_tokens: 40_000,
+          cache_creation_input_tokens: 6_993,
+          output_tokens: 1,
+        }),
+      );
+      harness.query.emit(
+        resultFrame({
+          user_message_uuids: [turn.turnId],
+          usage: { input_tokens: 10, cache_read_input_tokens: 215_000, output_tokens: 2_000 },
+          contextWindow: 200_000,
+        }),
+      );
+      harness.query.finish();
+      yield* log.waitFor((event) => event.type === "session.exited");
+
+      const completedIndex = log.events.findIndex(
+        (event) => event.type === "turn.completed" && event.turnId === turn.turnId,
+      );
+      assert.equal(lastUsageBefore(log.events, completedIndex)?.usedTokens, 47_000);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("keeps legacy task telemetry off the gauge after a boundary", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      yield* startGaugeSession(adapter, "gauge-legacy-telemetry");
+      yield* completeFirstTurn(adapter, harness.query, log);
+
+      const turn = yield* adapter.sendTurn({ threadId: THREAD_ID, input: "more", attachments: [] });
+      harness.query.emit(systemStatusFrame("compacting"));
+      harness.query.emit(
+        compactBoundaryFrame({ trigger: "auto", pre_tokens: 175_000, post_tokens: 42_000 }),
+      );
+      harness.query.emit({
+        type: "system",
+        subtype: "task_notification",
+        task_id: "task-never-started",
+        status: "completed",
+        output_file: "/tmp/task-never-started.jsonl",
+        summary: "done",
+        usage: { total_tokens: 150_000 },
+        uuid: "task-never-started-done",
+        session_id: GAUGE_SDK_SESSION,
+      } as unknown as SDKMessage);
+      harness.query.emit(
+        resultFrame({
+          user_message_uuids: [turn.turnId],
+          usage: { input_tokens: 10, cache_read_input_tokens: 190_000, output_tokens: 2_000 },
+          contextWindow: 200_000,
+        }),
+      );
+      harness.query.finish();
+      yield* log.waitFor((event) => event.type === "session.exited");
+
+      assert.isFalse(
+        log.events.some(
+          (event) =>
+            event.type === "thread.token-usage.updated" &&
+            event.payload.usage.usedTokens === 150_000,
+        ),
+      );
+      const completedIndex = log.events.findIndex(
+        (event) => event.type === "turn.completed" && event.turnId === turn.turnId,
+      );
+      assert.equal(lastUsageBefore(log.events, completedIndex)?.usedTokens, 42_000);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("publishes a boundary that arrives while no turn is open", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      yield* startGaugeSession(adapter, "gauge-idle-boundary");
+      yield* completeFirstTurn(adapter, harness.query, log);
+
+      harness.query.emit(
+        compactBoundaryFrame({ trigger: "auto", pre_tokens: 175_000, post_tokens: 42_000 }),
+      );
+      harness.query.emit(sentinelFrame("after-idle-boundary"));
+      const sentinelStart = log.events.length;
+      yield* log.waitFor(isSentinel("after-idle-boundary"));
+      const boundaryUsage = log.events.slice(sentinelStart).find(isUsageEvent);
+      assert.isDefined(boundaryUsage);
+      assert.isUndefined(boundaryUsage?.turnId);
+      if (boundaryUsage?.type === "thread.token-usage.updated") {
+        assert.equal(boundaryUsage.payload.usage.usedTokens, 42_000);
+      }
+
+      harness.query.emit(
+        resultFrame({
+          origin: { kind: "task-notification" },
+          usage: { input_tokens: 10, cache_read_input_tokens: 189_990 },
+          contextWindow: 200_000,
+        }),
+      );
+      const resultUsage = yield* log.waitFor(isUsageEvent);
+      assert.isUndefined(resultUsage.turnId);
+      if (resultUsage.type === "thread.token-usage.updated") {
+        assert.equal(resultUsage.payload.usage.usedTokens, 42_000);
+        assert.equal(resultUsage.payload.usage.totalProcessedTokens, 190_000);
+      }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
 });
