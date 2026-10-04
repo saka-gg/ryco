@@ -52,13 +52,22 @@ import {
   ProviderAdapterRequestError,
   ProviderOperationTimeoutError,
   ProviderSessionNotFoundError,
+  ProviderValidationError,
   type ProviderServiceError,
 } from "../../provider/Errors.ts";
 import { PersistenceSqlError } from "../../persistence/Errors.ts";
 import { STORAGE_FAILURE_DETAIL } from "../userFacingErrors.ts";
 import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
-import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
+import {
+  makeSqlitePersistenceLive,
+  SqlitePersistenceMemory,
+} from "../../persistence/Layers/Sqlite.ts";
+import { ProviderEffectIntentRepositoryLive } from "../../persistence/Layers/ProviderEffectIntents.ts";
+import {
+  ProviderEffectIntentRepository,
+  type ProviderEffectIntentRepositoryShape,
+} from "../../persistence/Services/ProviderEffectIntents.ts";
 import {
   ProviderService,
   type ProviderServiceShape,
@@ -71,12 +80,16 @@ import { OrchestrationProjectionPipelineLive } from "./ProjectionPipeline.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
 import * as ThreadBackgroundLiveness from "../ThreadBackgroundLiveness.ts";
 import {
+  makeProviderCommandReactorLayer,
   makeProviderCommandReactorLive,
   type ProviderCommandReactorOptions,
   providerErrorLabel,
   providerErrorLabelFromInstanceHint,
 } from "./ProviderCommandReactor.ts";
-import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
+import {
+  OrchestrationEngineService,
+  type OrchestrationEngineShape,
+} from "../Services/OrchestrationEngine.ts";
 import {
   ContextHandoffCoordinator,
   type ContextHandoffCoordinatorShape,
@@ -132,6 +145,14 @@ describe("ProviderCommandReactor", () => {
   let scope: Scope.Closeable | null = null;
   const createdStateDirs = new Set<string>();
   const createdBaseDirs = new Set<string>();
+
+  /** Stops the current harness like a process exit: reactor fibers are interrupted. */
+  const disposeHarness = async () => {
+    if (scope) await Effect.runPromise(Scope.close(scope, Exit.void));
+    scope = null;
+    if (runtime) await runtime.dispose();
+    runtime = null;
+  };
 
   afterEach(async () => {
     if (scope) {
@@ -189,7 +210,7 @@ describe("ProviderCommandReactor", () => {
     readonly threadModelSelection?: ModelSelection;
     readonly sessionModelSwitch?: "unsupported" | "in-session";
     readonly interruptTurnEffect?: () => Effect.Effect<void, ProviderAdapterRequestError>;
-    readonly stopSessionEffect?: () => Effect.Effect<void, ProviderAdapterRequestError>;
+    readonly stopSessionEffect?: () => Effect.Effect<void, ProviderServiceError>;
     /** Simulates adapter model normalization for `session.model` (undefined = unknown). */
     readonly sessionModel?: (model: string) => string | undefined;
     readonly steerTurn?: ProviderServiceShape["steerTurn"];
@@ -209,6 +230,16 @@ describe("ProviderCommandReactor", () => {
     /** Additional threads created in project-1 next to thread-1. */
     readonly extraThreadIds?: ReadonlyArray<string>;
     readonly reactorOptions?: ProviderCommandReactorOptions;
+    /** A file database, so sequential harnesses share state across a simulated restart. */
+    readonly dbPath?: string;
+    /** Wraps the engine dispatch the reactor sees (fault injection); the engine is shared. */
+    readonly decorateDispatch?: (
+      live: OrchestrationEngineShape["dispatch"],
+    ) => OrchestrationEngineShape["dispatch"];
+    /** Wraps the reactor's intent repository (fault injection); the engine keeps its own. */
+    readonly decorateIntents?: (
+      live: ProviderEffectIntentRepositoryShape,
+    ) => ProviderEffectIntentRepositoryShape;
   }) {
     const now = new Date().toISOString();
     const baseDir = input?.baseDir ?? fs.mkdtempSync(path.join(os.tmpdir(), "ryco-reactor-"));
@@ -442,6 +473,9 @@ describe("ProviderCommandReactor", () => {
       },
     };
 
+    const persistence = input?.dbPath
+      ? makeSqlitePersistenceLive(input.dbPath)
+      : SqlitePersistenceMemory;
     const orchestrationLayer = OrchestrationEngineLive.pipe(
       Layer.provide(OrchestrationProjectionSnapshotQueryLive),
       Layer.provide(ThreadBackgroundLiveness.layer),
@@ -456,12 +490,12 @@ describe("ProviderCommandReactor", () => {
       Layer.provide(OrchestrationEventStoreLive),
       Layer.provide(OrchestrationCommandReceiptRepositoryLive),
       Layer.provide(RepositoryIdentityResolverLive),
-      Layer.provide(SqlitePersistenceMemory),
+      Layer.provide(persistence),
     );
     const liveProjectionSnapshotLayer = OrchestrationProjectionSnapshotQueryLive.pipe(
       Layer.provide(ThreadBackgroundLiveness.layer),
       Layer.provide(RepositoryIdentityResolverLive),
-      Layer.provide(SqlitePersistenceMemory),
+      Layer.provide(persistence),
     );
     // Only the reactor resolves this service; the engine has its own query layer.
     const decorateSnapshotQuery = input?.decorateSnapshotQuery;
@@ -471,14 +505,40 @@ describe("ProviderCommandReactor", () => {
           Effect.map(Effect.service(ProjectionSnapshotQuery), decorateSnapshotQuery),
         ).pipe(Layer.provide(liveProjectionSnapshotLayer))
       : liveProjectionSnapshotLayer;
-    const layer = makeProviderCommandReactorLive(input?.reactorOptions).pipe(
+    const decorateIntents = input?.decorateIntents;
+    const reactorWithIntents = decorateIntents
+      ? makeProviderCommandReactorLayer(input?.reactorOptions).pipe(
+          Layer.provide(
+            Layer.effect(
+              ProviderEffectIntentRepository,
+              Effect.map(Effect.service(ProviderEffectIntentRepository), decorateIntents),
+            ).pipe(Layer.provide(ProviderEffectIntentRepositoryLive)),
+          ),
+        )
+      : makeProviderCommandReactorLive(input?.reactorOptions);
+    const decorateDispatch = input?.decorateDispatch;
+    const reactorLayer = decorateDispatch
+      ? reactorWithIntents.pipe(
+          Layer.provide(
+            Layer.effect(
+              OrchestrationEngineService,
+              Effect.map(
+                Effect.service(OrchestrationEngineService),
+                (live): OrchestrationEngineShape => ({
+                  ...live,
+                  dispatch: decorateDispatch(live.dispatch),
+                }),
+              ),
+            ),
+          ),
+        )
+      : reactorWithIntents;
+    const layer = reactorLayer.pipe(
       Layer.provideMerge(
-        ProjectionThreadUserInputRequestRepositoryLive.pipe(Layer.provide(SqlitePersistenceMemory)),
+        ProjectionThreadUserInputRequestRepositoryLive.pipe(Layer.provide(persistence)),
       ),
-      Layer.provideMerge(
-        ProjectionPendingApprovalRepositoryLive.pipe(Layer.provide(SqlitePersistenceMemory)),
-      ),
-      Layer.provideMerge(SqlitePersistenceMemory),
+      Layer.provideMerge(ProjectionPendingApprovalRepositoryLive.pipe(Layer.provide(persistence))),
+      Layer.provideMerge(persistence),
       Layer.provideMerge(orchestrationLayer),
       Layer.provideMerge(projectionSnapshotLayer),
       Layer.provideMerge(Layer.succeed(ProviderService, service)),
@@ -5726,6 +5786,666 @@ describe("ProviderCommandReactor", () => {
 
       expect(harness.stopSession).not.toHaveBeenCalled();
       expect(await activitiesOf(harness, "provider.turn.interrupt.failed")).toHaveLength(0);
+    });
+  });
+
+  describe("provider effect intents", () => {
+    const T = ThreadId.make("thread-1");
+    type Harness = Awaited<ReturnType<typeof createHarness>>;
+    const OLD = "2026-01-01T00:00:00.000Z";
+
+    const makeDbPath = () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ryco-intents-"));
+      createdBaseDirs.add(dir);
+      return path.join(dir, "state.sqlite");
+    };
+    const openIntents = (harness: Harness) =>
+      Effect.runPromise(
+        harness.sql<{
+          readonly sequence: number;
+          readonly kind: string;
+          readonly messageId: string | null;
+          readonly dispatchedAt: string | null;
+          readonly recoveryAttempts: number;
+        }>`
+          SELECT sequence, kind, message_id AS "messageId", dispatched_at AS "dispatchedAt",
+            recovery_attempts AS "recoveryAttempts"
+          FROM provider_effect_intents ORDER BY sequence
+        `,
+      );
+    const threadOf = async (harness: Harness) =>
+      (await harness.readModel()).threads.find((entry) => entry.id === T);
+    const activitiesOf = async (harness: Harness, kind: string) =>
+      ((await threadOf(harness))?.activities ?? []).filter((activity) => activity.kind === kind);
+    const recover = (harness: Harness) => Effect.runPromise(harness.reactor.recoverIntents());
+    const startTurn = (
+      harness: Harness,
+      messageId: string,
+      extra: { readonly modelSelection?: ModelSelection; readonly delegated?: true } = {},
+    ) =>
+      Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make(`cmd-${messageId}`),
+          threadId: T,
+          message: {
+            messageId: asMessageId(messageId),
+            role: "user",
+            text: messageId,
+            attachments: [],
+          },
+          ...(extra.modelSelection ? { modelSelection: extra.modelSelection } : {}),
+          ...(extra.delegated
+            ? {
+                delegationReturnGuard: {
+                  latestUserMessageId: null,
+                  projectId: asProjectId("project-1"),
+                  runtimeMode: "approval-required" as const,
+                  worktreePath: null,
+                },
+              }
+            : {}),
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: new Date().toISOString(),
+        }),
+      );
+    const setSession = (
+      harness: Harness,
+      status: "ready" | "running",
+      activeTurnId: TurnId | null = null,
+    ) =>
+      Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make(`cmd-session-${status}-${crypto.randomUUID()}`),
+          threadId: T,
+          session: {
+            threadId: T,
+            status,
+            providerName: "codex",
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            runtimeSessionId: RuntimeSessionId.make("runtime-1"),
+            runtimeMode: "approval-required",
+            activeTurnId,
+            lastError: null,
+            updatedAt: OLD,
+          },
+          createdAt: OLD,
+        }),
+      );
+    const requestStop = (harness: Harness, id = "stop") =>
+      Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.stop",
+          commandId: CommandId.make(`cmd-${id}`),
+          threadId: T,
+          createdAt: OLD,
+        }),
+      );
+    const requestSteer = (harness: Harness, messageId: string) =>
+      Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.steer",
+          commandId: CommandId.make(`cmd-${messageId}`),
+          threadId: T,
+          expectedTurnId: asTurnId("turn-1"),
+          message: {
+            messageId: asMessageId(messageId),
+            role: "user",
+            text: messageId,
+            attachments: [],
+          },
+          createdAt: OLD,
+          requestedAt: OLD,
+        }),
+      );
+
+    it("cancels a turn start an earlier process committed but never sent", async () => {
+      const dbPath = makeDbPath();
+      const first = await createHarness({ dbPath, startReactor: false });
+      await startTurn(first, "lost-before-send");
+      expect(await openIntents(first)).toMatchObject([
+        { kind: "turn-start", messageId: "lost-before-send", dispatchedAt: null },
+      ]);
+      await disposeHarness();
+
+      const second = await createHarness({ dbPath });
+      const summary = await recover(second);
+      await second.drain();
+      expect(summary).toMatchObject({
+        replayed: 0,
+        cancelledTurnStarts: [
+          { threadId: T, messageId: "lost-before-send", deliveryState: "not-sent" },
+        ],
+      });
+      const failures = await activitiesOf(second, "provider.turn.start.failed");
+      expect(failures).toHaveLength(1);
+      expect(failures[0]).toMatchObject({
+        tone: "error",
+        summary: "Message was not sent",
+        payload: {
+          messageId: "lost-before-send",
+          deliveryState: "not-sent",
+          detail:
+            "Ryco restarted before this message reached the provider. Nothing was sent. Send it again to continue.",
+        },
+      });
+      expect(second.sendTurn).not.toHaveBeenCalled();
+      expect(second.startSession).not.toHaveBeenCalled();
+      expect(await openIntents(second)).toEqual([]);
+      expect((await threadOf(second))?.session ?? null).toBeNull();
+    });
+
+    for (const liveSession of [false, true]) {
+      it(`reports a turn start cut off mid-send as unconfirmed (live session: ${liveSession})`, async () => {
+        const dbPath = makeDbPath();
+        const first = await createHarness({ dbPath });
+        let dispatchedAtSeen: string | null | undefined;
+        first.sendTurn.mockImplementation(() =>
+          first.sql<{ readonly dispatchedAt: string | null }>`
+            SELECT dispatched_at AS "dispatchedAt" FROM provider_effect_intents
+          `.pipe(
+            Effect.tap((rows) =>
+              Effect.sync(() => {
+                dispatchedAtSeen = rows[0]?.dispatchedAt ?? null;
+              }),
+            ),
+            Effect.orDie,
+            Effect.andThen(Effect.never),
+          ),
+        );
+        await startTurn(first, "lost-mid-send");
+        await waitFor(() => dispatchedAtSeen !== undefined);
+        expect(dispatchedAtSeen).toEqual(expect.any(String));
+        await disposeHarness();
+
+        const second = await createHarness({ dbPath });
+        if (liveSession) {
+          second.runtimeSessions.push({
+            provider: ProviderDriverKind.make("codex"),
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            status: "running",
+            runtimeSessionId: RuntimeSessionId.make("runtime-1"),
+            runtimeMode: "approval-required",
+            threadId: T,
+            createdAt: OLD,
+            updatedAt: OLD,
+          });
+        }
+        expect(await openIntents(second)).toMatchObject([
+          { messageId: "lost-mid-send", dispatchedAt: dispatchedAtSeen },
+        ]);
+        const summary = await recover(second);
+        await second.drain();
+        expect(summary.cancelledTurnStarts).toEqual([
+          { threadId: T, messageId: "lost-mid-send", deliveryState: "uncertain" },
+        ]);
+        const failures = await activitiesOf(second, "provider.turn.start.failed");
+        expect(failures).toHaveLength(1);
+        expect(failures[0]).toMatchObject({
+          summary: "Message delivery unconfirmed",
+          payload: {
+            messageId: "lost-mid-send",
+            deliveryState: "uncertain",
+            detail:
+              "Ryco restarted after handing this message to the provider but before the provider confirmed it. It may have been received. Check the thread before sending it again.",
+          },
+        });
+        expect(second.sendTurn).not.toHaveBeenCalled();
+        expect(second.interruptTurn).not.toHaveBeenCalled();
+        expect(second.startSession).not.toHaveBeenCalled();
+        expect(await openIntents(second)).toEqual([]);
+      });
+    }
+
+    it("cancels a delegated return start with the delegated wording and never re-sends it", async () => {
+      const dbPath = makeDbPath();
+      const first = await createHarness({ dbPath, startReactor: false });
+      await startTurn(first, "delegation-result:child-lost", { delegated: true });
+      await disposeHarness();
+
+      const second = await createHarness({ dbPath });
+      await recover(second);
+      await second.drain();
+      const failures = await activitiesOf(second, "provider.turn.start.failed");
+      expect(failures).toHaveLength(1);
+      expect(failures[0]).toMatchObject({
+        summary: "Delegated return was not submitted",
+        payload: {
+          messageId: "delegation-result:child-lost",
+          deliveryState: "not-sent",
+          detail:
+            "Ryco restarted before this delegated result reached the provider. Inspect the result before sending it manually.",
+        },
+      });
+      expect(second.sendTurn).not.toHaveBeenCalled();
+      expect(second.startSession).not.toHaveBeenCalled();
+    });
+
+    for (const dispatched of [false, true]) {
+      it(`rejects a steer an earlier process left unresolved (dispatched: ${dispatched})`, async () => {
+        const dbPath = makeDbPath();
+        const firstSteer = vi.fn<ProviderServiceShape["steerTurn"]>(() => Effect.never);
+        const first = await createHarness({
+          dbPath,
+          startReactor: dispatched,
+          steerTurn: firstSteer,
+        });
+        await setSession(first, "running", asTurnId("turn-1"));
+        await requestSteer(first, "steer-lost");
+        if (dispatched) {
+          await waitFor(() => firstSteer.mock.calls.length === 1);
+        }
+        await disposeHarness();
+
+        const secondSteer = vi.fn<ProviderServiceShape["steerTurn"]>(() =>
+          Effect.die("never re-sent"),
+        );
+        const second = await createHarness({ dbPath, steerTurn: secondSteer });
+        const summary = await recover(second);
+        expect(summary.rejectedSteers).toBe(1);
+        const events = await Effect.runPromise(second.engine.readEventsPage(0, 1_000));
+        expect(
+          events.events.filter(
+            (event) =>
+              event.type === "thread.turn-steer-rejected" &&
+              event.payload.messageId === asMessageId("steer-lost"),
+          ),
+        ).toHaveLength(1);
+        const failures = await activitiesOf(second, "provider.turn.steer.failed");
+        expect(failures).toHaveLength(1);
+        expect(failures[0]?.payload).toMatchObject({
+          messageId: "steer-lost",
+          error: dispatched
+            ? "Ryco restarted while delivering this steer message. It may have reached the provider. Check the turn before sending it again."
+            : "Ryco restarted before this steer message reached the provider. It was not sent.",
+        });
+        expect(secondSteer).not.toHaveBeenCalled();
+        expect(await openIntents(second)).toEqual([]);
+      });
+    }
+
+    it("retries an earlier process's session stop and stamps the recovery time", async () => {
+      const dbPath = makeDbPath();
+      const first = await createHarness({ dbPath, startReactor: false });
+      await setSession(first, "ready");
+      await requestStop(first);
+      await disposeHarness();
+
+      const second = await createHarness({ dbPath });
+      const recoveredAfter = new Date().toISOString();
+      const summary = await recover(second);
+      await second.drain();
+      expect(summary.retriedSessionStops).toBe(1);
+      expect(second.stopSession).toHaveBeenCalledTimes(1);
+      const session = (await threadOf(second))?.session;
+      expect(session?.status).toBe("stopped");
+      expect(session?.updatedAt).not.toBe(OLD);
+      expect(session!.updatedAt >= recoveredAfter).toBe(true);
+      expect(await openIntents(second)).toEqual([]);
+    });
+
+    const stopOutcomes = [
+      {
+        name: "no runtime",
+        error: () => new ProviderSessionNotFoundError({ threadId: "thread-1" }),
+        visible: false,
+      },
+      {
+        name: "no binding",
+        error: () =>
+          new ProviderValidationError({
+            operation: "ProviderService.stopSession",
+            issue: "Cannot route thread 'thread-1' because no persisted provider binding exists.",
+          }),
+        visible: false,
+      },
+      {
+        name: "a provider error",
+        error: () =>
+          new ProviderAdapterRequestError({
+            provider: "codex",
+            method: "session.stop",
+            detail: "stop refused",
+          }),
+        visible: true,
+      },
+    ] as const;
+    for (const outcome of stopOutcomes) {
+      for (const path of ["live", "recovered"] as const) {
+        it(`settles a ${path} session stop that meets ${outcome.name}`, async () => {
+          const dbPath = makeDbPath();
+          const stopSessionEffect = () => Effect.fail(outcome.error());
+          let harness: Harness;
+          if (path === "live") {
+            harness = await createHarness({ dbPath, stopSessionEffect });
+            await setSession(harness, "ready");
+            await requestStop(harness);
+            await harness.drain();
+          } else {
+            const first = await createHarness({ dbPath, startReactor: false });
+            await setSession(first, "ready");
+            await requestStop(first);
+            await disposeHarness();
+            harness = await createHarness({ dbPath, stopSessionEffect });
+            await recover(harness);
+            await harness.drain();
+          }
+          expect(harness.stopSession).toHaveBeenCalledTimes(1);
+          const failures = await activitiesOf(harness, "provider.session.stop.failed");
+          expect(failures).toHaveLength(outcome.visible ? 1 : 0);
+          const session = (await threadOf(harness))?.session;
+          // reactor-concurrency: the user's Stop always settles the projection.
+          expect(session?.status).toBe("stopped");
+          expect(session?.lastError ?? null).toBe(
+            outcome.visible
+              ? (failures[0]?.payload as { readonly detail?: string } | undefined)?.detail
+              : null,
+          );
+          expect(await openIntents(harness)).toEqual([]);
+        });
+      }
+    }
+
+    for (const result of ["owned", "unrecognized"] as const) {
+      it(`resolves an earlier process's handoff start the coordinator reports ${result}`, async () => {
+        const dbPath = makeDbPath();
+        const first = await createHarness({ dbPath });
+        await startOriginatingTurn(first, T, new Date().toISOString());
+        await startTurn(first, "handoff-lost", {
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("codex_work"),
+            model: "gpt-5-codex",
+          },
+        });
+        await waitFor(() => first.processContextHandoff.mock.calls.length === 1);
+        await first.drain();
+        expect(await openIntents(first)).toMatchObject([
+          { kind: "turn-start", messageId: "handoff-lost", dispatchedAt: null },
+        ]);
+        await disposeHarness();
+
+        const second = await createHarness({ dbPath });
+        second.abandonUnstartedTurnStart.mockImplementation(() => Effect.succeed(result));
+        const summary = await recover(second);
+        await second.drain();
+        expect(second.abandonUnstartedTurnStart).toHaveBeenCalledTimes(1);
+        const [event, detail] = second.abandonUnstartedTurnStart.mock.calls[0]!;
+        expect(event.payload.contextHandoff?.targetMessageId).toBe("handoff-lost");
+        expect(detail).toBe(
+          "Ryco restarted before this message reached the provider. Nothing was sent. Send it again to continue.",
+        );
+        const failures = await activitiesOf(second, "provider.turn.start.failed");
+        if (result === "owned") {
+          expect(failures).toHaveLength(0);
+          expect(summary.settledWithoutOutcome).toBe(1);
+        } else {
+          expect(failures).toHaveLength(1);
+          expect(failures[0]?.payload).toMatchObject({
+            messageId: "handoff-lost",
+            deliveryState: "not-sent",
+          });
+        }
+        expect(second.sendTurn).not.toHaveBeenCalled();
+        expect(await openIntents(second)).toEqual([]);
+      });
+    }
+
+    it("replays a request committed before the reactor subscribed, exactly once", async () => {
+      const harness = await createHarness({ startReactor: false });
+      await startTurn(harness, "before-subscribe");
+      await harness.startReactor();
+      const summary = await recover(harness);
+      expect(summary).toMatchObject({ replayed: 1, cancelledTurnStarts: [] });
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      await harness.drain();
+      expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+      expect(await activitiesOf(harness, "provider.turn.start.failed")).toHaveLength(0);
+    });
+
+    it("delivers a request seen both live and by recovery once", async () => {
+      const harness = await createHarness();
+      await startTurn(harness, "seen-twice");
+      const summary = await recover(harness);
+      expect(summary.replayed).toBe(1);
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      await harness.drain();
+      expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+      expect(await activitiesOf(harness, "provider.turn.start.failed")).toHaveLength(0);
+    });
+
+    const failingThreadReads = () => {
+      let armed = false;
+      return {
+        arm: () => {
+          armed = true;
+        },
+        decorateSnapshotQuery: (
+          live: ProjectionSnapshotQueryShape,
+        ): ProjectionSnapshotQueryShape => ({
+          ...live,
+          getThreadShellById: (threadId) => {
+            if (!armed) return live.getThreadShellById(threadId);
+            armed = false;
+            return Effect.fail(
+              new PersistenceSqlError({ operation: "test.threadShell", detail: "read failed" }),
+            );
+          },
+        }),
+      };
+    };
+
+    it("shows a session stop whose handler failed, which settles its intent", async () => {
+      const reads = failingThreadReads();
+      const harness = await createHarness({ decorateSnapshotQuery: reads.decorateSnapshotQuery });
+      await setSession(harness, "ready");
+      reads.arm();
+      const { sequence } = await requestStop(harness);
+      await harness.drain();
+      const failures = await activitiesOf(harness, "provider.session.stop.failed");
+      expect(failures).toHaveLength(1);
+      expect(failures[0]).toMatchObject({
+        id: `provider-intent-failure:${sequence}`,
+        payload: { detail: STORAGE_FAILURE_DETAIL },
+      });
+      expect(await openIntents(harness)).toEqual([]);
+    });
+
+    it("shows a turn start whose message read failed, which settles its intent", async () => {
+      let failMessageRead = true;
+      const harness = await createHarness({
+        decorateSnapshotQuery: (live) => ({
+          ...live,
+          getThreadMessageById: (input) => {
+            if (!failMessageRead) return live.getThreadMessageById!(input);
+            failMessageRead = false;
+            return Effect.fail(
+              new PersistenceSqlError({ operation: "test.message", detail: "read failed" }),
+            );
+          },
+        }),
+      });
+      await startTurn(harness, "unreadable-message");
+      await harness.drain();
+      const failures = await activitiesOf(harness, "provider.turn.start.failed");
+      expect(failures).toHaveLength(1);
+      expect(failures[0]?.payload).toMatchObject({
+        messageId: "unreadable-message",
+        detail: STORAGE_FAILURE_DETAIL,
+      });
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+      expect(await openIntents(harness)).toEqual([]);
+    });
+
+    it("leaves a failed intent that was handed to the provider to its provider outcome", async () => {
+      const reads = failingThreadReads();
+      const harness = await createHarness({
+        startReactor: false,
+        decorateSnapshotQuery: reads.decorateSnapshotQuery,
+      });
+      await setSession(harness, "ready");
+      const { sequence } = await requestStop(harness);
+      await Effect.runPromise(
+        harness.sql`UPDATE provider_effect_intents SET dispatched_at = ${OLD} WHERE sequence = ${sequence}`,
+      );
+      await harness.startReactor();
+      reads.arm();
+      await recover(harness);
+      await harness.drain();
+      expect(await activitiesOf(harness, "provider.session.stop.failed")).toHaveLength(0);
+      expect(await openIntents(harness)).toMatchObject([{ sequence, kind: "session-stop" }]);
+    });
+
+    it("keeps a turn start open when its failure cannot be shown; the next boot reports it", async () => {
+      const dbPath = makeDbPath();
+      let rejectedAppends = 0;
+      const first = await createHarness({
+        dbPath,
+        decorateDispatch: (dispatch) => (command, options) => {
+          if (
+            command.type === "thread.activity.append" &&
+            command.activity.kind === "provider.turn.start.failed"
+          ) {
+            // Counted per execution: the reactor retries the same command effect.
+            return Effect.suspend(() => {
+              rejectedAppends += 1;
+              return Effect.fail(
+                new PersistenceSqlError({ operation: "test.append", detail: "append failed" }),
+              );
+            });
+          }
+          return dispatch(command, options);
+        },
+      });
+      first.sendTurn.mockImplementation(
+        () =>
+          Effect.fail(
+            new ProviderAdapterRequestError({
+              provider: "codex",
+              method: "turn/start",
+              detail: "provider refused",
+            }),
+          ) as never,
+      );
+      await startTurn(first, "unshown-failure");
+      await waitFor(() => rejectedAppends === 2);
+      await first.drain();
+      expect(await activitiesOf(first, "provider.turn.start.failed")).toHaveLength(0);
+      expect(await openIntents(first)).toMatchObject([
+        { messageId: "unshown-failure", dispatchedAt: expect.any(String) },
+      ]);
+      await disposeHarness();
+
+      const second = await createHarness({ dbPath });
+      await recover(second);
+      const failures = await activitiesOf(second, "provider.turn.start.failed");
+      expect(failures).toHaveLength(1);
+      expect(failures[0]?.payload).toMatchObject({
+        messageId: "unshown-failure",
+        deliveryState: "uncertain",
+      });
+      expect(await openIntents(second)).toEqual([]);
+    });
+
+    it("never reports a failed start for a turn the provider accepted", async () => {
+      let metaUpdates = 0;
+      const harness = await createHarness({
+        decorateDispatch: (dispatch) => (command, options) => {
+          if (command.type === "thread.meta.update" && command.modelSelection !== undefined) {
+            return Effect.suspend(() => {
+              metaUpdates += 1;
+              return Effect.fail(
+                new PersistenceSqlError({ operation: "test.meta", detail: "meta update failed" }),
+              );
+            });
+          }
+          return dispatch(command, options);
+        },
+      });
+      await startTurn(harness, "accepted-turn", {
+        modelSelection: createModelSelection(ProviderInstanceId.make("codex"), "gpt-5-codex", [
+          { id: "reasoningEffort", value: "high" },
+        ]),
+      });
+      await waitFor(() => metaUpdates === 1);
+      await harness.drain();
+      // A failure path would follow the rejected commit right away; give it the chance.
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+      expect(await activitiesOf(harness, "provider.turn.start.failed")).toHaveLength(0);
+      expect((await threadOf(harness))?.session?.lastError ?? null).toBeNull();
+    });
+
+    it("fails a turn start visibly when its dispatch cannot be recorded, and never sends it", async () => {
+      const harness = await createHarness({
+        decorateIntents: (live) => ({
+          ...live,
+          markDispatched: () =>
+            Effect.fail(new PersistenceSqlError({ operation: "test.mark", detail: "mark failed" })),
+        }),
+      });
+      await startTurn(harness, "unmarked");
+      await waitFor(
+        async () => (await activitiesOf(harness, "provider.turn.start.failed")).length === 1,
+      );
+      const [failure] = await activitiesOf(harness, "provider.turn.start.failed");
+      expect(failure?.payload).toMatchObject({
+        messageId: "unmarked",
+        detail: STORAGE_FAILURE_DETAIL,
+      });
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+      expect(await openIntents(harness)).toEqual([]);
+    });
+
+    it("reports a recovered start once when recovery runs again", async () => {
+      const dbPath = makeDbPath();
+      const first = await createHarness({ dbPath, startReactor: false });
+      await startTurn(first, "recovered-twice");
+      const [row] = await openIntents(first);
+      await disposeHarness();
+
+      const second = await createHarness({ dbPath });
+      await recover(second);
+      expect(await activitiesOf(second, "provider.turn.start.failed")).toHaveLength(1);
+      // A restart before the settle committed would leave the row behind.
+      await Effect.runPromise(
+        second.sql`
+          INSERT INTO provider_effect_intents (sequence, event_id, thread_id, kind, message_id, recorded_at)
+          SELECT sequence, event_id, ${T}, 'turn-start', ${row!.messageId}, occurred_at
+          FROM orchestration_events WHERE sequence = ${row!.sequence}
+        `,
+      );
+      await disposeHarness();
+
+      const third = await createHarness({ dbPath });
+      await recover(third);
+      expect(await activitiesOf(third, "provider.turn.start.failed")).toHaveLength(1);
+      expect(await openIntents(third)).toEqual([]);
+    });
+
+    it("settles an intent whose recovery keeps failing with only a log after five boots", async () => {
+      const dbPath = makeDbPath();
+      const first = await createHarness({ dbPath, startReactor: false });
+      await startTurn(first, "poison");
+      await disposeHarness();
+
+      const second = await createHarness({
+        dbPath,
+        decorateDispatch: (dispatch) => (command, options) =>
+          command.type === "thread.activity.append"
+            ? Effect.fail(new PersistenceSqlError({ operation: "test.append", detail: "down" }))
+            : dispatch(command, options),
+      });
+      await recover(second);
+      expect(await openIntents(second)).toMatchObject([
+        { messageId: "poison", recoveryAttempts: 1 },
+      ]);
+      await Effect.runPromise(second.sql`UPDATE provider_effect_intents SET recovery_attempts = 5`);
+      const summary = await recover(second);
+      expect(summary.settledWithoutOutcome).toBe(1);
+      expect(await openIntents(second)).toEqual([]);
+      expect(await activitiesOf(second, "provider.turn.start.failed")).toHaveLength(0);
     });
   });
 });

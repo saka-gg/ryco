@@ -15,7 +15,27 @@ import {
   ProviderSessionNotFoundError,
   ProviderAdapterSessionNotFoundError,
   ProviderAdapterSessionClosedError,
+  ProviderValidationError,
 } from "../../provider/Errors.ts";
+import { ProviderEffectIntentRepository } from "../../persistence/Services/ProviderEffectIntents.ts";
+import type { ProviderEffectIntentRow } from "../../persistence/Services/ProviderEffectIntents.ts";
+import { ProviderEffectIntentRepositoryLive } from "../../persistence/Layers/ProviderEffectIntents.ts";
+import { PersistenceDecodeError } from "../../persistence/Errors.ts";
+import {
+  OrchestrationCommandInvariantError,
+  OrchestrationCommandPreviouslyRejectedError,
+  type OrchestrationDispatchError,
+} from "../Errors.ts";
+import {
+  deliveryStateOf,
+  isTrackedProviderIntentEvent,
+  MAX_PROVIDER_INTENT_RECOVERY_ATTEMPTS,
+  providerIntentFailureIds,
+  providerIntentKindOf,
+  providerIntentRecoveryIds,
+  recoveryCopy,
+  type TrackedProviderIntentEvent,
+} from "../providerEffectIntents.ts";
 import { matchesApprovalAttempt, questionAsCallback } from "../approvalResponses.ts";
 import { ProjectionPendingApprovalRepository } from "../../persistence/Services/ProjectionPendingApprovals.ts";
 import { ProjectionPendingApprovalRepositoryLive } from "../../persistence/Layers/ProjectionPendingApprovals.ts";
@@ -87,6 +107,7 @@ import { TURN_FINALIZATION_REASON } from "../turnFinalization.ts";
 import {
   ProviderCommandReactor,
   type ProviderCommandReactorShape,
+  type ProviderIntentRecoverySummary,
 } from "../Services/ProviderCommandReactor.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
@@ -140,6 +161,8 @@ type LaneItem =
       /** Sequence a stop must exceed to cancel this item; 0 for synthetic recovery. */
       readonly fenceSequence: number;
       readonly recovery?: true;
+      /** An earlier process committed this event (startup intent recovery). */
+      readonly priorProcess?: true;
     }
   | {
       readonly kind: "liveness";
@@ -345,6 +368,7 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const providerService = yield* ProviderService;
   const contextHandoffCoordinator = yield* ContextHandoffCoordinator;
+  const providerEffectIntents = yield* ProviderEffectIntentRepository;
   const gitWorkflow = yield* GitWorkflowService;
   const vcsStatusBroadcaster = yield* VcsStatusBroadcaster;
   const textGeneration = yield* TextGeneration;
@@ -355,7 +379,7 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     lookup: () => Effect.succeed(true),
   });
 
-  const hasHandledTurnStartRecently = (key: string) =>
+  const hasHandledRecently = (key: string) =>
     Cache.getOption(handledTurnStartKeys, key).pipe(
       Effect.flatMap((cached) =>
         Cache.set(handledTurnStartKeys, key, true).pipe(Effect.as(Option.isSome(cached))),
@@ -1412,6 +1436,8 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
           ),
         ),
       );
+      // One command, so a retry dedups on its receipt. If both attempts fail, the
+      // intent row stays open and the next boot reports the start.
       yield* appendProviderFailureActivity({
         threadId,
         kind: "provider.turn.start.failed",
@@ -1420,7 +1446,7 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
         detail,
         turnId: null,
         createdAt: event.payload.createdAt,
-      });
+      }).pipe(Effect.retry(Schedule.recurs(1)));
     }).pipe(
       Effect.catchCause((recoveryCause) =>
         Effect.logWarning("provider command reactor failed to recover turn start failure", {
@@ -1440,10 +1466,11 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     const threadId = event.payload.threadId;
     const turnFence = { threadId, fenceSequence, kind: "turn" as const };
     // Essential reads fail the turn visibly through the boundary in
-    // processTurnStartRequested. A deleted thread stays silent.
+    // processTurnStartRequested. A deleted thread stays silent: no outcome can
+    // be shown, so its intent is settled explicitly.
     const thread = yield* resolveThread(event.payload.threadId);
     if (!thread) {
-      return;
+      return yield* providerEffectIntents.settle({ sequence: event.sequence });
     }
     if (thread.session?.status === "running" && thread.session.activeTurnId !== null) {
       yield* appendProviderFailureActivity({
@@ -1594,7 +1621,7 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
       );
     }
 
-    const commitAcceptedModelSelection =
+    const commitAcceptedModelSelection: Effect.Effect<unknown, OrchestrationDispatchError> =
       event.payload.modelSelection !== undefined &&
       !Equal.equals(thread.modelSelection, event.payload.modelSelection)
         ? orchestrationEngine.dispatch({
@@ -1610,18 +1637,42 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     yield* laneControl.failIfCancelled(turnFence);
 
     // Submission failures may follow this request's own turn.started, so they
-    // reset a running session (preserveActiveTurn: false), as before. The
-    // thread's fence state is retained until the send settles, so a failure
-    // after a Stop is still recognised as a cancel.
-    const releaseFenceState = yield* laneControl.retain(threadId);
-    yield* providerService.sendTurn(sendTurnRequest).pipe(
-      Effect.tap(() => commitAcceptedModelSelection),
-      Effect.catchCause((cause) =>
-        reportTurnStartFailure({ event, fenceSequence, cause, preserveActiveTurn: false }),
-      ),
-      Effect.ensuring(releaseFenceState),
-      Effect.forkScoped,
+    // reset a running session (preserveActiveTurn: false), as before. A turn the
+    // provider accepted is never reported as a failed start: the model-selection
+    // commit after it only logs. The thread's fence state is retained until the
+    // send settles, so a failure after a Stop is still recognised as a cancel.
+    const send = Effect.suspend(() => providerService.sendTurn(sendTurnRequest)).pipe(
+      Effect.matchCauseEffect({
+        onFailure: (cause) =>
+          reportTurnStartFailure({ event, fenceSequence, cause, preserveActiveTurn: false }),
+        onSuccess: () =>
+          commitAcceptedModelSelection.pipe(
+            Effect.catchCause((cause) =>
+              Cause.hasInterruptsOnly(cause)
+                ? Effect.interrupt
+                : Effect.logWarning(
+                    "provider command reactor failed to commit accepted model selection",
+                    { threadId, cause: Cause.pretty(cause) },
+                  ),
+            ),
+          ),
+      }),
     );
+    const releaseFenceState = yield* laneControl.retain(threadId);
+    // Marked immediately before the provider call: from here the provider may
+    // have received the turn, so recovery reports it as unconfirmed, not unsent.
+    // A failed mark is a start failure before anything was submitted.
+    yield* providerEffectIntents
+      .markDispatched({ sequence: event.sequence, dispatchedAt: new Date().toISOString() })
+      .pipe(
+        Effect.matchCauseEffect({
+          onFailure: (cause) =>
+            reportTurnStartFailure({ event, fenceSequence, cause, preserveActiveTurn: true }),
+          onSuccess: () => send,
+        }),
+        Effect.ensuring(releaseFenceState),
+        Effect.forkScoped,
+      );
   });
 
   const processTurnStartRequested = Effect.fn("processTurnStartRequested")(function* (
@@ -1629,7 +1680,7 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     fenceSequence: number,
   ) {
     const key = turnStartKeyForEvent(event);
-    if (yield* hasHandledTurnStartRecently(key)) {
+    if (yield* hasHandledRecently(key)) {
       return;
     }
     // One visible failure boundary for every preparation step. Nothing was
@@ -1944,44 +1995,54 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     );
   });
 
+  type SteerEvent = Extract<ProviderIntentEvent, { type: "thread.turn-steer-requested" }>;
+
+  /** The steer request a resolution answers; shared by live resolution and recovery. */
+  const steerRequestCommandId = (event: SteerEvent): CommandId =>
+    event.commandId ?? CommandId.make(`event:${event.eventId}:turn-steer-request`);
+
+  /**
+   * Resolves a steer request. A rejection makes the decider append the visible
+   * `provider.turn.steer.failed` activity; either outcome settles the intent.
+   */
+  const resolveSteer = (
+    event: SteerEvent,
+    resolution:
+      | {
+          readonly status: "accepted";
+          readonly turnId: TurnId;
+          readonly resolvedAt: string;
+        }
+      | {
+          readonly status: "rejected";
+          readonly error: string;
+          readonly resolvedAt: string;
+        },
+    commandId: CommandId = serverCommandId("turn-steer-resolve"),
+  ) => {
+    const commandBase = {
+      type: "thread.turn.steer.resolve" as const,
+      commandId,
+      requestCommandId: steerRequestCommandId(event),
+      threadId: event.payload.threadId,
+      expectedTurnId: event.payload.expectedTurnId,
+      message: event.payload.message,
+      createdAt: event.payload.createdAt,
+      requestedAt: event.payload.requestedAt,
+    };
+    if (resolution.status === "accepted") {
+      return orchestrationEngine.dispatch({ ...commandBase, resolution });
+    }
+    return orchestrationEngine.dispatch({ ...commandBase, resolution });
+  };
+
   const processTurnSteerRequested = Effect.fn("processTurnSteerRequested")(function* (
-    event: Extract<ProviderIntentEvent, { type: "thread.turn-steer-requested" }>,
+    event: SteerEvent,
   ) {
     const key = turnStartKeyForEvent(event);
-    if (yield* hasHandledTurnStartRecently(key)) return;
-    const requestCommandId =
-      event.commandId ?? CommandId.make(`event:${event.eventId}:turn-steer-request`);
-    const resolve = (
-      resolution:
-        | {
-            readonly status: "accepted";
-            readonly turnId: TurnId;
-            readonly resolvedAt: string;
-          }
-        | {
-            readonly status: "rejected";
-            readonly error: string;
-            readonly resolvedAt: string;
-          },
-    ) => {
-      const commandBase = {
-        type: "thread.turn.steer.resolve" as const,
-        commandId: serverCommandId("turn-steer-resolve"),
-        requestCommandId,
-        threadId: event.payload.threadId,
-        expectedTurnId: event.payload.expectedTurnId,
-        message: event.payload.message,
-        createdAt: event.payload.createdAt,
-        requestedAt: event.payload.requestedAt,
-      };
-      if (resolution.status === "accepted") {
-        return orchestrationEngine.dispatch({ ...commandBase, resolution });
-      }
-      return orchestrationEngine.dispatch({ ...commandBase, resolution });
-    };
-
-    yield* providerService
-      .steerTurn({
+    if (yield* hasHandledRecently(key)) return;
+    const steer = Effect.suspend(() =>
+      providerService.steerTurn({
         threadId: event.payload.threadId,
         expectedTurnId: event.payload.expectedTurnId,
         messageId: event.payload.message.messageId,
@@ -1991,31 +2052,40 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
         ...(event.payload.message.attachments.length > 0
           ? { attachments: event.payload.message.attachments }
           : {}),
-      })
+      }),
+    );
+
+    // Marked immediately before the provider call, as for a turn start.
+    yield* providerEffectIntents
+      .markDispatched({ sequence: event.sequence, dispatchedAt: new Date().toISOString() })
       .pipe(
+        Effect.andThen(steer),
         Effect.flatMap((result) =>
-          resolve({
+          resolveSteer(event, {
             status: "accepted",
             turnId: result.turnId,
             resolvedAt: new Date().toISOString(),
           }),
         ),
         Effect.catchCause((cause) =>
-          Effect.logWarning("provider command reactor failed to steer turn", {
-            threadId: event.payload.threadId,
-            failureTag: failureTag(cause),
-            cause: Cause.pretty(cause),
-          }).pipe(
-            Effect.andThen(
-              resolve({
-                status: "rejected",
-                error: userFacingFailureDetail(cause, {
-                  fallback: "Provider rejected turn steering.",
-                }),
-                resolvedAt: new Date().toISOString(),
-              }),
-            ),
-          ),
+          // Shutdown: the intent stays open and the next boot reports it.
+          Cause.hasInterruptsOnly(cause)
+            ? Effect.interrupt
+            : Effect.logWarning("provider command reactor failed to steer turn", {
+                threadId: event.payload.threadId,
+                failureTag: failureTag(cause),
+                cause: Cause.pretty(cause),
+              }).pipe(
+                Effect.andThen(
+                  resolveSteer(event, {
+                    status: "rejected",
+                    error: userFacingFailureDetail(cause, {
+                      fallback: "Provider rejected turn steering.",
+                    }),
+                    resolvedAt: new Date().toISOString(),
+                  }),
+                ),
+              ),
         ),
         Effect.forkScoped,
       );
@@ -2147,9 +2217,32 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     );
   });
 
-  const processSessionStopRequested = Effect.fn("processSessionStopRequested")(function* (
-    event: Extract<ProviderIntentEvent, { type: "thread.session-stop-requested" }>,
-  ) {
+  /**
+   * The provider has nothing left to stop: no runtime (gone with an earlier
+   * process, or reaped) or no persisted binding at all, which `stopSession`
+   * reports as a validation error.
+   */
+  const isNothingLeftToStop = (cause: Cause.Cause<unknown>): boolean =>
+    cause.reasons.some(
+      (reason) =>
+        Cause.isFailReason(reason) &&
+        (Schema.is(ProviderSessionNotFoundError)(reason.error) ||
+          Schema.is(ProviderAdapterSessionNotFoundError)(reason.error) ||
+          Schema.is(ProviderAdapterSessionClosedError)(reason.error) ||
+          Schema.is(ProviderValidationError)(reason.error)),
+    );
+
+  /**
+   * The user's Stop: stops the provider session and always projects `stopped`,
+   * so the thread never stays busy. A failed stop is shown. The live path stamps
+   * the request's time; startup recovery of an earlier process's stop stamps the
+   * recovery time (`at: "now"`). Idempotent, so recovery may retry it.
+   */
+  const stopThreadSession = Effect.fn("stopThreadSession")(function* (input: {
+    readonly event: Extract<ProviderIntentEvent, { type: "thread.session-stop-requested" }>;
+    readonly at: "requested" | "now";
+  }) {
+    const { event } = input;
     const threadId = event.payload.threadId;
     let stopFailure: string | undefined;
     // The provider stop already ran out of band (the lane was busy with a
@@ -2162,21 +2255,29 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
 
     const thread = yield* resolveThread(threadId);
     if (!thread) {
-      return;
+      // No outcome can be shown for a thread that is gone.
+      return yield* providerEffectIntents.settle({ sequence: event.sequence });
     }
 
-    const now = event.payload.createdAt;
+    const now = input.at === "now" ? new Date().toISOString() : event.payload.createdAt;
     if (Option.isNone(outOfBand) && thread.session && thread.session.status !== "stopped") {
       // Bounded inside ProviderService; a timed-out stop is retried by the reaper.
       const stopExit = yield* Effect.exit(providerService.stopSession({ threadId: thread.id }));
       if (Exit.isFailure(stopExit)) {
         if (Cause.hasInterruptsOnly(stopExit.cause)) return yield* stopExit;
-        yield* Effect.logWarning("provider command reactor failed to stop session", {
-          threadId,
-          failureTag: failureTag(stopExit.cause),
-          cause: Cause.pretty(stopExit.cause),
-        });
-        stopFailure = userFacingFailureDetail(stopExit.cause);
+        if (isNothingLeftToStop(stopExit.cause)) {
+          yield* Effect.logDebug("provider command reactor found no provider session to stop", {
+            threadId,
+            failureTag: failureTag(stopExit.cause),
+          });
+        } else {
+          yield* Effect.logWarning("provider command reactor failed to stop session", {
+            threadId,
+            failureTag: failureTag(stopExit.cause),
+            cause: Cause.pretty(stopExit.cause),
+          });
+          stopFailure = userFacingFailureDetail(stopExit.cause);
+        }
       }
     }
     if (stopFailure !== undefined) {
@@ -2325,6 +2426,7 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
   const processLifecycleEvent = Effect.fn("processLifecycleEvent")(function* (
     event: LifecycleIntentEvent,
     fenceSequence: number,
+    options: { readonly priorProcess?: true } = {},
   ) {
     yield* annotateIntentEvent(event);
     switch (event.type) {
@@ -2348,7 +2450,7 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
         yield* processTurnInterruptRequested(event);
         return;
       case "thread.session-stop-requested":
-        yield* processSessionStopRequested(event);
+        yield* stopThreadSession({ event, at: options.priorProcess ? "now" : "requested" });
         return;
     }
   });
@@ -2466,13 +2568,84 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
   });
 
   /**
+   * A failure that escaped a tracked handler becomes a visible outcome, which
+   * settles its intent. An intent already handed to the provider is left to the
+   * provider's outcome (or to the next boot's "unconfirmed"): a failure here
+   * cannot prove the provider never received it. Never fails; if the outcome
+   * cannot be appended, the intent stays open for the next boot.
+   */
+  const surfaceIntentFailure = (
+    event: TrackedProviderIntentEvent,
+    cause: Cause.Cause<unknown>,
+  ): Effect.Effect<void> =>
+    Effect.gen(function* () {
+      const row = yield* providerEffectIntents.get({ sequence: event.sequence });
+      if (Option.isNone(row)) return;
+      const threadId = event.payload.threadId;
+      if (row.value.dispatchedAt !== null) {
+        return yield* Effect.logWarning(
+          "provider command reactor left a dispatched intent to its provider outcome",
+          { threadId, eventType: event.type, sequence: event.sequence },
+        );
+      }
+      const detail = userFacingFailureDetail(cause);
+      const ids = providerIntentFailureIds(event.sequence);
+      const createdAt = new Date().toISOString();
+      switch (event.type) {
+        case "thread.turn-start-requested":
+          return yield* appendProviderFailureActivity({
+            threadId,
+            kind: "provider.turn.start.failed",
+            messageId: event.payload.messageId,
+            summary: "Provider turn start failed",
+            detail,
+            turnId: null,
+            createdAt,
+            ...ids,
+          });
+        case "thread.turn-steer-requested":
+          return yield* resolveSteer(
+            event,
+            { status: "rejected", error: detail, resolvedAt: createdAt },
+            ids.commandId,
+          );
+        case "thread.session-stop-requested":
+          return yield* appendProviderFailureActivity({
+            threadId,
+            kind: "provider.session.stop.failed",
+            summary: "Provider session stop failed",
+            detail,
+            turnId: null,
+            createdAt,
+            ...ids,
+          });
+      }
+    }).pipe(
+      Effect.catchCause((surfaceCause) =>
+        Cause.hasInterruptsOnly(surfaceCause)
+          ? Effect.interrupt
+          : Effect.logWarning("provider command reactor could not surface an intent failure", {
+              eventType: event.type,
+              sequence: event.sequence,
+              cause: Cause.pretty(surfaceCause),
+            }),
+      ),
+    );
+
+  /**
    * The one per-item failure wrapper of the lifecycle lanes. Interrupt-only
-   * causes (from inner fibers) are logged and not re-raised.
+   * causes (from inner fibers) are logged and not re-raised; their intents stay
+   * open for the next boot. Any other failure of a tracked request is surfaced
+   * visibly before it is logged.
    */
   const processLaneItemSafely = (item: LaneItem) => {
     const run =
       item.kind === "event"
-        ? processLifecycleEvent(item.event, item.fenceSequence)
+        ? processLifecycleEvent(
+            item.event,
+            item.fenceSequence,
+            item.priorProcess ? { priorProcess: true } : {},
+          )
         : applyLivenessVerdict(item.threadId, item.verdict);
     const threadId = item.kind === "event" ? item.event.payload.threadId : item.threadId;
     const guarded =
@@ -2484,11 +2657,18 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
               itemKind: item.kind,
               threadId,
             })
-          : Effect.logWarning("provider command reactor failed to process event", {
-              eventType: item.kind === "event" ? item.event.type : "liveness-check",
-              threadId,
-              cause: Cause.pretty(cause),
-            }),
+          : (item.kind === "event" && isTrackedProviderIntentEvent(item.event)
+              ? surfaceIntentFailure(item.event, cause)
+              : Effect.void
+            ).pipe(
+              Effect.andThen(
+                Effect.logWarning("provider command reactor failed to process event", {
+                  eventType: item.kind === "event" ? item.event.type : "liveness-check",
+                  threadId,
+                  cause: Cause.pretty(cause),
+                }),
+              ),
+            ),
       ),
       Effect.andThen(
         item.kind === "event" ? laneControl.prune(threadId, item.fenceSequence) : Effect.void,
@@ -2603,7 +2783,11 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
    */
   const routeProviderIntentEvent = (
     event: ProviderIntentEvent,
-    route: { readonly fenceSequence?: number; readonly recovery?: true } = {},
+    route: {
+      readonly fenceSequence?: number;
+      readonly recovery?: true;
+      readonly priorProcess?: true;
+    } = {},
   ): Effect.Effect<void> => {
     const threadId = event.payload.threadId;
     // Pure deliveries to one exact runtime: they cannot overtake into the wrong
@@ -2612,6 +2796,14 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
       return callbackLanes.enqueue(threadId, event);
     }
     return Effect.gen(function* () {
+      // Once per process: startup intent recovery and the live subscription may
+      // both deliver a request committed while the reactor was subscribing.
+      if (
+        isTrackedProviderIntentEvent(event) &&
+        (yield* hasHandledRecently(`route:${event.eventId}`))
+      ) {
+        return;
+      }
       const { outOfBand } = yield* laneControl.noteEvent(event);
       if (
         outOfBand &&
@@ -2626,6 +2818,7 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
         event,
         fenceSequence: route.fenceSequence ?? event.sequence,
         ...(route.recovery ? { recovery: true as const } : {}),
+        ...(route.priorProcess ? { priorProcess: true as const } : {}),
       });
     });
   };
@@ -2682,8 +2875,11 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     const processEvent = (event: OrchestrationEvent) =>
       isProviderIntentEvent(event) ? routeProviderIntentEvent(event) : Effect.void;
 
+    // Subscribed synchronously: every request committed after this point is
+    // delivered live, and startup intent recovery replays the ones before it.
+    const subscription = yield* orchestrationEngine.subscribeDomainEvents;
     yield* Effect.forkScoped(
-      Stream.runForEach(orchestrationEngine.streamDomainEvents, processEvent),
+      Stream.runForEach(Stream.fromSubscription(subscription), processEvent),
     );
     yield* Effect.forkScoped(
       sweepLiveness.pipe(
@@ -2719,8 +2915,249 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     }
   });
 
+  /**
+   * The request event of an intent row, or undefined when it is unreadable:
+   * missing at its sequence, a different event, or undecodable.
+   */
+  const readIntentEvent = (row: ProviderEffectIntentRow) =>
+    orchestrationEngine.readEventsPage(row.sequence - 1, 1).pipe(
+      Effect.map(({ events }): TrackedProviderIntentEvent | undefined => {
+        const event = events[0];
+        return event !== undefined &&
+          event.sequence === row.sequence &&
+          isTrackedProviderIntentEvent(event) &&
+          providerIntentKindOf(event.type) === row.kind
+          ? event
+          : undefined;
+      }),
+      Effect.catch((error) =>
+        Schema.is(PersistenceDecodeError)(error) ? Effect.succeed(undefined) : Effect.fail(error),
+      ),
+    );
+
+  const isTerminalDispatchError = (error: unknown): boolean =>
+    Schema.is(OrchestrationCommandInvariantError)(error) ||
+    Schema.is(OrchestrationCommandPreviouslyRejectedError)(error);
+
+  /**
+   * One recovery outcome: deterministic ids, retried once. A decider rejection
+   * is terminal (the row is settled and logged); any other failure keeps the row
+   * for the next boot. Settling after a success is idempotent: the outcome event
+   * normally settled the row already, and a receipt replay commits no event.
+   */
+  const commitRecoveryOutcome = (
+    row: ProviderEffectIntentRow,
+    outcome: Effect.Effect<unknown, OrchestrationDispatchError>,
+  ) =>
+    outcome.pipe(
+      Effect.retry({ times: 1, while: (error) => !isTerminalDispatchError(error) }),
+      Effect.as("committed" as const),
+      Effect.catch((error) =>
+        isTerminalDispatchError(error)
+          ? Effect.logWarning("provider intent recovery outcome was rejected; settling", {
+              threadId: row.threadId,
+              kind: row.kind,
+              sequence: row.sequence,
+              detail: error.message,
+            }).pipe(Effect.as("rejected" as const))
+          : Effect.fail(error),
+      ),
+      Effect.tap(() => providerEffectIntents.settle({ sequence: row.sequence })),
+    );
+
+  /** The visible end of a prior-process turn start; never re-sent. */
+  const cancelTurnStart = (input: {
+    readonly row: ProviderEffectIntentRow;
+    readonly messageId: MessageId;
+    readonly delegatedReturn: boolean;
+    readonly deliveryState: "not-sent" | "uncertain";
+  }) => {
+    const copy = recoveryCopy({
+      kind: "turn-start",
+      deliveryState: input.deliveryState,
+      delegatedReturn: input.delegatedReturn,
+    });
+    return commitRecoveryOutcome(
+      input.row,
+      appendProviderFailureActivity({
+        threadId: input.row.threadId,
+        kind: "provider.turn.start.failed",
+        messageId: input.messageId,
+        summary: copy.summary,
+        detail: copy.detail,
+        deliveryState: input.deliveryState,
+        turnId: null,
+        createdAt: new Date().toISOString(),
+        ...providerIntentRecoveryIds(input.row.sequence),
+      }),
+    );
+  };
+
+  const recoverIntents: ProviderCommandReactorShape["recoverIntents"] = () =>
+    Effect.gen(function* () {
+      const bootSequence = orchestrationEngine.bootSequence;
+      const cancelledTurnStarts: Array<
+        ProviderIntentRecoverySummary["cancelledTurnStarts"][number]
+      > = [];
+      const counts = {
+        replayed: 0,
+        rejectedSteers: 0,
+        retriedSessionStops: 0,
+        handoffsAbandoned: 0,
+        settledWithoutOutcome: 0,
+      };
+      const settleWithoutOutcome = (row: ProviderEffectIntentRow, reason: string) =>
+        Effect.logWarning("provider intent recovery settled an intent without an outcome", {
+          threadId: row.threadId,
+          kind: row.kind,
+          sequence: row.sequence,
+          reason,
+        }).pipe(
+          Effect.andThen(providerEffectIntents.settle({ sequence: row.sequence })),
+          Effect.tap(() =>
+            Effect.sync(() => {
+              counts.settledWithoutOutcome += 1;
+            }),
+          ),
+        );
+
+      const recoverRow = Effect.fnUntraced(function* (row: ProviderEffectIntentRow) {
+        const event = yield* readIntentEvent(row);
+        if (row.sequence > bootSequence) {
+          // Committed by this process before the reactor subscribed: deliver it
+          // through the live entry, whose dedup absorbs a live copy.
+          if (event === undefined) {
+            return yield* Effect.logWarning("provider intent recovery could not read an event", {
+              threadId: row.threadId,
+              sequence: row.sequence,
+            });
+          }
+          yield* routeProviderIntentEvent(event);
+          counts.replayed += 1;
+          return;
+        }
+
+        const attempts = yield* providerEffectIntents.noteRecoveryAttempt({
+          sequence: row.sequence,
+        });
+        if (attempts > MAX_PROVIDER_INTENT_RECOVERY_ATTEMPTS) {
+          yield* Effect.logError("provider intent recovery gave up on an intent", {
+            threadId: row.threadId,
+            kind: row.kind,
+            sequence: row.sequence,
+            attempts,
+          });
+          return yield* settleWithoutOutcome(row, "recovery-attempts-exhausted");
+        }
+        if ((yield* resolveThread(row.threadId)) === undefined) {
+          return yield* settleWithoutOutcome(row, "thread-missing");
+        }
+        const deliveryState = deliveryStateOf(row.dispatchedAt);
+
+        switch (row.kind) {
+          case "turn-start": {
+            const turnStart = event?.type === "thread.turn-start-requested" ? event : undefined;
+            const messageId = turnStart?.payload.messageId ?? row.messageId;
+            if (messageId === null) return yield* settleWithoutOutcome(row, "event-unreadable");
+            if (turnStart?.payload.contextHandoff !== undefined) {
+              const result = yield* contextHandoffCoordinator.abandonUnstartedTurnStart(
+                turnStart,
+                recoveryCopy({ kind: "turn-start", deliveryState, delegatedReturn: false }).detail,
+              );
+              if (result === "owned") return yield* settleWithoutOutcome(row, "handoff-owned");
+              if (result === "abandoned") {
+                counts.handoffsAbandoned += 1;
+                cancelledTurnStarts.push({ threadId: row.threadId, messageId, deliveryState });
+                return;
+              }
+            }
+            yield* cancelTurnStart({
+              row,
+              messageId,
+              delegatedReturn: turnStart?.payload.delegationReturnGuard !== undefined,
+              // An unreadable request cannot prove it was never sent.
+              deliveryState: turnStart === undefined ? "uncertain" : deliveryState,
+            });
+            cancelledTurnStarts.push({
+              threadId: row.threadId,
+              messageId,
+              deliveryState: turnStart === undefined ? "uncertain" : deliveryState,
+            });
+            return;
+          }
+          case "turn-steer": {
+            if (event?.type !== "thread.turn-steer-requested") {
+              return yield* settleWithoutOutcome(row, "event-unreadable");
+            }
+            yield* commitRecoveryOutcome(
+              row,
+              resolveSteer(
+                event,
+                {
+                  status: "rejected",
+                  error: recoveryCopy({ kind: "turn-steer", deliveryState, delegatedReturn: false })
+                    .detail,
+                  resolvedAt: new Date().toISOString(),
+                },
+                providerIntentRecoveryIds(row.sequence).commandId,
+              ),
+            );
+            counts.rejectedSteers += 1;
+            return;
+          }
+          case "session-stop": {
+            if (event?.type !== "thread.session-stop-requested") {
+              return yield* settleWithoutOutcome(row, "event-unreadable");
+            }
+            // Idempotent: retried through the thread's lane, so it orders with the
+            // thread's other startup work and its fence cancels startup restarts.
+            yield* routeProviderIntentEvent(event, { priorProcess: true });
+            counts.retriedSessionStops += 1;
+            return;
+          }
+        }
+      });
+
+      const rows = yield* providerEffectIntents.listOpen().pipe(
+        Effect.catchCause((cause) =>
+          Cause.hasInterruptsOnly(cause)
+            ? Effect.interrupt
+            : Effect.logWarning("provider intent recovery could not list open intents", {
+                cause: Cause.pretty(cause),
+              }).pipe(Effect.as([] as ReadonlyArray<ProviderEffectIntentRow>)),
+        ),
+      );
+      for (const row of rows) {
+        yield* recoverRow(row).pipe(
+          Effect.catchCause((cause) =>
+            Cause.hasInterruptsOnly(cause)
+              ? Effect.interrupt
+              : Effect.logWarning("provider intent recovery kept an intent for the next boot", {
+                  threadId: row.threadId,
+                  kind: row.kind,
+                  sequence: row.sequence,
+                  cause: Cause.pretty(cause),
+                }),
+          ),
+        );
+      }
+      const summary: ProviderIntentRecoverySummary = { ...counts, cancelledTurnStarts };
+      yield* Effect.logInfo("provider intent recovery finished", {
+        open: rows.length,
+        bootSequence,
+        replayed: summary.replayed,
+        cancelledTurnStarts: summary.cancelledTurnStarts.length,
+        rejectedSteers: summary.rejectedSteers,
+        retriedSessionStops: summary.retriedSessionStops,
+        handoffsAbandoned: summary.handoffsAbandoned,
+        settledWithoutOutcome: summary.settledWithoutOutcome,
+      });
+      return summary;
+    }).pipe(Effect.withSpan("ProviderCommandReactor.recoverIntents"));
+
   return {
     start,
+    recoverIntents,
     // Forked sendTurn and steer stay untracked, as before.
     drain: Effect.all([lifecycleLanes.drain, callbackLanes.drain, outOfBandLanes.drain], {
       discard: true,
@@ -2729,10 +3166,14 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
   } satisfies ProviderCommandReactorShape;
 });
 
-export const makeProviderCommandReactorLive = (options?: ProviderCommandReactorOptions) =>
+/** The reactor without its intent ledger, for tests that decorate the repository. */
+export const makeProviderCommandReactorLayer = (options?: ProviderCommandReactorOptions) =>
   Layer.effect(ProviderCommandReactor, makeProviderCommandReactor(options)).pipe(
     Layer.provide(ProjectionPendingApprovalRepositoryLive),
     Layer.provide(ProjectionThreadUserInputRequestRepositoryLive),
   );
+
+export const makeProviderCommandReactorLive = (options?: ProviderCommandReactorOptions) =>
+  makeProviderCommandReactorLayer(options).pipe(Layer.provide(ProviderEffectIntentRepositoryLive));
 
 export const ProviderCommandReactorLive = makeProviderCommandReactorLive();

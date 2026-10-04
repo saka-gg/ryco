@@ -6,8 +6,28 @@
  *
  * @module ProviderCommandReactor
  */
+import type { MessageId, ThreadId } from "@ryco/contracts";
 import { Context } from "effect";
 import type { Effect, Scope } from "effect";
+
+import type { IntentDeliveryState } from "../providerEffectIntents.ts";
+
+/** What startup recovery did with the provider intents it found open. */
+export interface ProviderIntentRecoverySummary {
+  /** This-process rows (above the boot sequence) re-entered through the live entry. */
+  readonly replayed: number;
+  /** Turn starts an earlier process never confirmed, now cancelled visibly (never re-sent). */
+  readonly cancelledTurnStarts: ReadonlyArray<{
+    readonly threadId: ThreadId;
+    readonly messageId: MessageId;
+    readonly deliveryState: IntentDeliveryState;
+  }>;
+  readonly rejectedSteers: number;
+  readonly retriedSessionStops: number;
+  readonly handoffsAbandoned: number;
+  /** Rows settled with only a log line: thread gone, unreadable, owned elsewhere, poison. */
+  readonly settledWithoutOutcome: number;
+}
 
 /**
  * ProviderCommandReactorShape - Service API for provider command reactors.
@@ -36,6 +56,15 @@ export interface ProviderCommandReactorShape {
    * Runs periodically after `start`; exposed for tests.
    */
   readonly sweepLiveness: Effect.Effect<void>;
+
+  /**
+   * Resolves the provider intents left open at startup. Rows committed by this
+   * process before the reactor subscribed are replayed through the live entry;
+   * rows of earlier processes are cancelled visibly (turn start, steer, never
+   * re-sent) or retried (session stop). Runs after `start` and orphan session
+   * reconciliation. Never fails.
+   */
+  readonly recoverIntents: () => Effect.Effect<ProviderIntentRecoverySummary>;
 }
 
 /**

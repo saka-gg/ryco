@@ -51,6 +51,7 @@ describe("OrchestrationReactor", () => {
             },
             drain: Effect.void,
             sweepLiveness: Effect.void,
+            recoverIntents: () => Effect.die("unused"),
           }),
         ),
         Layer.provideMerge(
@@ -94,5 +95,39 @@ describe("OrchestrationReactor", () => {
     );
 
     await Effect.runPromise(Scope.close(scope, Exit.void));
+  });
+
+  it("delegates provider intent recovery to the provider command reactor", async () => {
+    const summary = {
+      replayed: 1,
+      cancelledTurnStarts: [],
+      rejectedSteers: 2,
+      retriedSessionStops: 3,
+      handoffsAbandoned: 4,
+      settledWithoutOutcome: 5,
+    };
+    let recoveries = 0;
+    runtime = ManagedRuntime.make(
+      Layer.effect(OrchestrationReactor, makeOrchestrationReactor).pipe(
+        Layer.provideMerge(Layer.mock(ContextHandoffCoordinator)({})),
+        Layer.provideMerge(Layer.mock(ProviderRuntimeIngestionService)({ drain: Effect.void })),
+        Layer.provideMerge(
+          Layer.mock(ProviderCommandReactor)({
+            drain: Effect.void,
+            sweepLiveness: Effect.void,
+            recoverIntents: () =>
+              Effect.sync(() => {
+                recoveries += 1;
+                return summary;
+              }),
+          }),
+        ),
+        Layer.provideMerge(Layer.mock(CheckpointReactor)({ drain: Effect.void })),
+        Layer.provideMerge(Layer.mock(ThreadDeletionReactor)({})),
+      ),
+    );
+    const reactor = await runtime.runPromise(Effect.service(OrchestrationReactor));
+    expect(await runtime.runPromise(reactor.recoverProviderIntents())).toBe(summary);
+    expect(recoveries).toBe(1);
   });
 });

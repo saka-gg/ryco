@@ -17,6 +17,8 @@ import {
   type TurnId,
 } from "@ryco/contracts";
 
+import type { IntentDeliveryState } from "./providerEffectIntents.ts";
+
 export type ProviderFailureActivityKind =
   | "provider.goal.update.failed"
   | "provider.turn.start.failed"
@@ -40,6 +42,11 @@ export interface ProviderFailureActivityInput {
   readonly userInputIdentity?: ApprovalResponseIdentity;
   readonly responseAttemptId?: CommandId;
   readonly responseState?: ApprovalResponseState;
+  /** Deterministic ids (recovery, escaped failures) so a repeat dedups on the receipt. */
+  readonly commandId?: CommandId;
+  readonly activityId?: EventId;
+  /** Informational: whether the provider may have received the intent. */
+  readonly deliveryState?: IntentDeliveryState;
 }
 
 export function providerFailureActivityCommand(
@@ -47,10 +54,11 @@ export function providerFailureActivityCommand(
 ): Extract<OrchestrationCommand, { type: "thread.activity.append" }> {
   return {
     type: "thread.activity.append",
-    commandId: CommandId.make(`server:provider-failure-activity:${crypto.randomUUID()}`),
+    commandId:
+      input.commandId ?? CommandId.make(`server:provider-failure-activity:${crypto.randomUUID()}`),
     threadId: input.threadId,
     activity: {
-      id: EventId.make(crypto.randomUUID()),
+      id: input.activityId ?? EventId.make(crypto.randomUUID()),
       tone: "error",
       kind: input.kind,
       summary: input.summary,
@@ -62,6 +70,7 @@ export function providerFailureActivityCommand(
         ...(input.userInputIdentity ? { userInputIdentity: input.userInputIdentity } : {}),
         ...(input.responseAttemptId ? { responseAttemptId: input.responseAttemptId } : {}),
         ...(input.responseState ? { responseState: input.responseState } : {}),
+        ...(input.deliveryState ? { deliveryState: input.deliveryState } : {}),
       },
       turnId: input.turnId,
       createdAt: input.createdAt,
