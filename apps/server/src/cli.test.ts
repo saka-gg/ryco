@@ -616,8 +616,14 @@ it.layer(NodeServices.layer)("cli log-level parsing", (it) => {
             assert.include(listHuman.output, "Status: pending");
             assert.include(listHuman.output, "Max role: operator");
             // The role the pending device connects with is the `--max-role` an owner
-            // must approve it at; a record that predates the field prints none.
+            // must approve it at. The node stops following it once the record
+            // leaves pending, so an approved record says when it was read.
             assert.equal(listHuman.output.split("Connects as: owner").length - 1, 1);
+            assert.equal(
+              listHuman.output.split("Connected as (when introduced): operator").length - 1,
+              1,
+            );
+            assert.notInclude(listHuman.output, "Connects as: operator");
             // §13.6's display duty names the safety number among the LISTING's
             // fields, and §13.4 makes it the value an owner compares before
             // trusting a record. Both records carry it, so an owner comparing a
@@ -676,7 +682,7 @@ it.layer(NodeServices.layer)("cli log-level parsing", (it) => {
           listClients: async () =>
             stubClientListing({
               records: [
-                stubClientRecord(),
+                stubClientRecord({ observedRole: "operator" }),
                 stubClientRecord({
                   status: "pending",
                   fingerprint: `SHA256:${"D".repeat(42)}A`,

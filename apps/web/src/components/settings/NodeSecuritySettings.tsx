@@ -89,7 +89,7 @@ import {
 import { cn } from "../../lib/utils";
 import {
   nodeApprovalRole,
-  nodeApprovalRoleUnknownNotice,
+  nodeApprovalWithheldNotice,
   nodeApproveConfirmation,
   nodeClientListingNotices,
   nodeClientRows,
@@ -1442,7 +1442,7 @@ function ClientRecordRow({
   };
   const tone = nodeClientStatusTone(record.status);
   const approvalRole = nodeApprovalRole(record);
-  const approvalRoleUnknown = nodeApprovalRoleUnknownNotice(record);
+  const approvalWithheld = nodeApprovalWithheldNotice(record);
   const partitionWarning = nodePendingPartitionWarning(pendingInPartition);
   // §13.2 step 5's comparison, as a per-row statement the owner makes. It is
   // tied to the exact status and number it was made about, so a re-read that
@@ -1477,8 +1477,9 @@ function ClientRecordRow({
               device connects with (`nodeApprovalRole`): §8.3 makes a native
               client's intended role equal its `channel.open` role, so a smaller
               ceiling refuses the device instead of limiting it. No button at all
-              when the record does not say which role that is — the row explains
-              why instead of guessing.
+              when the record does not say which role that is, or when it is a
+              revoked record whose role dates from its introduction — the row
+              explains why instead of guessing.
 
               The capability set is NOT the owner's to pick here and is not left
               empty: §8.6 step 6 admits a native handshake only if the record's
@@ -1564,12 +1565,12 @@ function ClientRecordRow({
     >
       <div className="space-y-3 pb-3.5">
         <FactRows rows={nodeClientRows(record)} />
-        {approvalRoleUnknown === null ? null : (
+        {approvalWithheld === null ? null : (
           <p
-            data-testid="node-approval-role-unknown"
+            data-testid="node-approval-withheld"
             className="text-[11px] leading-relaxed text-muted-foreground"
           >
-            {approvalRoleUnknown}
+            {approvalWithheld}
           </p>
         )}
         {partitionWarning === null ? null : (

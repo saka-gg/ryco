@@ -2148,7 +2148,15 @@ const formatE2eeClientRecord = (record: E2eeClientRecordView): readonly string[]
   `Max role: ${record.maxRole}`,
   // The role the device connects with. An approval below it refuses the device
   // rather than limiting it (§8.3), so this is the `--max-role` an owner wants.
-  ...(record.observedRole === undefined ? [] : [`Connects as: ${record.observedRole}`]),
+  // The node follows it only while the record is pending; once approved or
+  // revoked it is the role from the device's introduction, and says so.
+  ...(record.observedRole === undefined
+    ? []
+    : [
+        record.status === "pending"
+          ? `Connects as: ${record.observedRole}`
+          : `Connected as (when introduced): ${record.observedRole}`,
+      ]),
   `Capabilities: ${record.capabilitySet.length === 0 ? "none" : record.capabilitySet.join(", ")}`,
   ...(record.displayLabel === undefined ? [] : [`Label: ${record.displayLabel}`]),
   // §13.6's display duty enumerates the safety number among the fields the

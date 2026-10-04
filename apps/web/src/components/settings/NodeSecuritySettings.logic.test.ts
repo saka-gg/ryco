@@ -11,8 +11,9 @@ import {
   everyNodeSecurityString,
   formatNodeEpoch,
   nodeApprovalRole,
-  nodeApprovalRoleUnknownNotice,
+  nodeApprovalWithheldNotice,
   nodeApproveConfirmation,
+  nodeClientRows,
   nodeClientRowTitle,
   nodeConnectionStatement,
   nodeContinuityRows,
@@ -40,8 +41,8 @@ import {
   nodeSecurityMode,
   nodeSessionRows,
   nodeSessionVerificationView,
+  NODE_APPROVAL_REVOKED_NOTICE,
   NODE_APPROVAL_ROLE_UNKNOWN_PENDING,
-  NODE_APPROVAL_ROLE_UNKNOWN_REVOKED,
   NODE_APPROVE_NUMBER_PROMPT,
   NODE_E2EE_ACTION_IDS,
   NODE_E2EE_APPROVABLE_ROLES,
@@ -335,7 +336,7 @@ describe("prohibited claims", () => {
       "nodeSessionSasAdvisory",
       "policyNoWithdrawal",
       "policyValueUnreadable",
-      "approvalRoleUnknown",
+      "approvalWithheld",
       "pendingPartitionWarning",
       "safetyNumberMatchLabel",
       "approveNumberPrompt",
@@ -437,12 +438,11 @@ describe("owner actions carry a confirmation proportionate to the consequence", 
     });
     for (const role of NODE_E2EE_APPROVABLE_ROLES) {
       expect(nodeApprovalRole(record(role)), role).toBe(role);
-      expect(nodeApprovalRole(record(role, "revoked")), role).toBe(role);
-      expect(nodeApprovalRoleUnknownNotice(record(role)), role).toBeNull();
+      expect(nodeApprovalWithheldNotice(record(role)), role).toBeNull();
     }
     // Nothing to approve on an approved record.
     expect(nodeApprovalRole(record("owner", "approved"))).toBeNull();
-    expect(nodeApprovalRoleUnknownNotice(record(undefined, "approved"))).toBeNull();
+    expect(nodeApprovalWithheldNotice(record(undefined, "approved"))).toBeNull();
 
     // A record that does not say which role is offered NONE — never a guess,
     // and in particular never `owner` because the account looks like the
@@ -450,12 +450,47 @@ describe("owner actions carry a confirmation proportionate to the consequence", 
     for (const observedRole of [undefined, "superuser"]) {
       expect(nodeApprovalRole(record(observedRole)), String(observedRole)).toBeNull();
     }
-    expect(nodeApprovalRoleUnknownNotice(record(undefined))).toBe(
-      NODE_APPROVAL_ROLE_UNKNOWN_PENDING,
-    );
-    expect(nodeApprovalRoleUnknownNotice(record(undefined, "revoked"))).toBe(
-      NODE_APPROVAL_ROLE_UNKNOWN_REVOKED,
-    );
+    expect(nodeApprovalWithheldNotice(record(undefined))).toBe(NODE_APPROVAL_ROLE_UNKNOWN_PENDING);
+
+    // A revoked record's role is the one the device introduced itself with —
+    // frozen there, since a peer's hello never rewrites it — and the Hub may
+    // assign another now. Re-approving at it widens authority on a value the
+    // panel can no longer vouch for, so a revoked key is re-approved nowhere
+    // here, whether or not it carries a role, and the row says what to do.
+    for (const observedRole of [...NODE_E2EE_APPROVABLE_ROLES, undefined]) {
+      const revoked = record(observedRole, "revoked");
+      expect(nodeApprovalRole(revoked), String(observedRole)).toBeNull();
+      expect(nodeApprovalWithheldNotice(revoked), String(observedRole)).toBe(
+        NODE_APPROVAL_REVOKED_NOTICE,
+      );
+    }
+    expect(NODE_APPROVAL_REVOKED_NOTICE).toContain("introduce itself again");
+    expect(NODE_APPROVAL_REVOKED_NOTICE).toContain("ryco e2ee client approve --max-role");
+  });
+
+  it("says when the role it shows was read, once the node stopped following it", () => {
+    // The node refreshes the observed role only while a record is pending; an
+    // approved or revoked one keeps the role from its introduction, which the
+    // Hub may have changed since.
+    const record = (status: NodeE2eeClientRecord["status"]): NodeE2eeClientRecord => ({
+      status,
+      hubOrigin: "https://hub.example.test",
+      accountId: "acct_reader",
+      fingerprint: "SHA256:AAAAphone0",
+      maxRole: "owner",
+      capabilitySet: [],
+      createdAt: 0,
+      safetyNumber: SAFETY_NUMBER,
+      pairingReserved: false,
+      observedRole: "owner",
+    });
+    const labels = (status: NodeE2eeClientRecord["status"]) =>
+      nodeClientRows(record(status)).map((row) => row.label);
+    expect(labels("pending")).toContain("Connects as");
+    for (const status of ["approved", "revoked"] as const) {
+      expect(labels(status), status).toContain("Connected as (when introduced)");
+      expect(labels(status), status).not.toContain("Connects as");
+    }
   });
 
   it("offers a narrowing only when the device would still get in", () => {
@@ -572,6 +607,9 @@ describe("owner actions carry a confirmation proportionate to the consequence", 
     const lower = nodeE2eeActionConfirmation("narrow").body.toLowerCase();
     expect(lower).not.toContain("the device reconnects with the smaller role ceiling");
     expect(lower).toContain("refused, not limited");
+    // The role it was offered on is the one from its introduction, which the
+    // Hub may have raised since — the sentence says that case is refused too.
+    expect(lower).toContain("if the hub has raised its account's role since");
   });
 
   it("says that approving takes effect only on a fresh connection", () => {

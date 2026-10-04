@@ -163,6 +163,7 @@ import {
   nodeE2eeActionConfirmation,
   nodeE2eeRecordConfirmation,
   nodePolicyPreviewWarnings,
+  NODE_APPROVAL_REVOKED_NOTICE,
   NODE_APPROVE_NUMBER_PROMPT,
   NODE_E2EE_APPROVAL_CAPABILITY_SET,
   NODE_SAFETY_NUMBER_MATCH_LABEL,
@@ -685,7 +686,7 @@ describe("§13.6 the request an approval builds is the one the owner was shown",
       expect(buttonsLabelled(`Approve as ${role}`), role).toHaveLength(0);
     }
     expect(buttonsLabelled("Approve as owner")).toHaveLength(1);
-    expect(document.querySelector('[data-testid="node-approval-role-unknown"]')).toBeNull();
+    expect(document.querySelector('[data-testid="node-approval-withheld"]')).toBeNull();
   });
 
   it("offers no approval at all for a request that does not say its role", async () => {
@@ -698,11 +699,33 @@ describe("§13.6 the request an approval builds is the one the owner was shown",
         (element.textContent ?? "").trim().startsWith("Approve as"),
       ),
     ).toHaveLength(0);
-    expect(
-      document.querySelector('[data-testid="node-approval-role-unknown"]')?.textContent,
-    ).toContain("Have the device try again");
+    expect(document.querySelector('[data-testid="node-approval-withheld"]')?.textContent).toContain(
+      "Have the device try again",
+    );
     // …and no comparison is asked for an approval that is not on offer.
     expect(numberMatchStatements()).toHaveLength(0);
+  });
+
+  it("re-approves no revoked key, and says how to bring it back", async () => {
+    // A revoked record keeps the role the device introduced itself with; the
+    // Hub may assign another now, so a re-approval at it could lock the device
+    // out or grant what the Hub no longer assigns.
+    const [phone, approved] = CLIENTS.records;
+    clients = {
+      ...CLIENTS,
+      records: [{ ...phone!, status: "revoked", revokedAt: 1_700_000_000_000 }, approved!],
+    };
+    await mountLocalPanel();
+    expect(
+      [...document.querySelectorAll<HTMLElement>("button")].filter((element) =>
+        (element.textContent ?? "").trim().startsWith("Approve as"),
+      ),
+    ).toHaveLength(0);
+    expect(numberMatchStatements()).toHaveLength(0);
+    expect(document.querySelector('[data-testid="node-approval-withheld"]')?.textContent).toBe(
+      NODE_APPROVAL_REVOKED_NOTICE,
+    );
+    expect(document.body.textContent).toContain("Connected as (when introduced)");
   });
 
   it("offers Reduce to viewer only where the device would still get in", async () => {

@@ -583,8 +583,13 @@ export function nodeClientRows(record: NodeE2eeClientRecord): ReadonlyArray<Node
     { label: "Account", value: record.accountId },
     { label: "Maximum role", value: record.maxRole === "" ? "none granted" : record.maxRole },
     // The role the device introduced itself under — what an approval has to
-    // name for it to connect at all (see `nodeApprovalRole`).
-    { label: "Connects as", value: record.observedRole ?? "not recorded" },
+    // name for it to connect at all (see `nodeApprovalRole`). The node follows
+    // it only while the record is pending; once it is approved or revoked, a
+    // peer's hello never rewrites it, so the label says when it was read.
+    {
+      label: record.status === "pending" ? "Connects as" : "Connected as (when introduced)",
+      value: record.observedRole ?? "not recorded",
+    },
     {
       label: "Capabilities",
       value: record.capabilitySet.length === 0 ? "none" : record.capabilitySet.join(", "),
@@ -1117,8 +1122,10 @@ const ACTION_CONFIRMATIONS = {
     // that refuses it rather than limiting it. The old sentence — "The device
     // reconnects with the smaller role ceiling" — promised a reconnect the node
     // then refused on every handshake. The panel offers this action only when
-    // the role the device connects with already fits (`nodeNarrowOffered`).
-    body: "Anything this device has open under the wider authority closes immediately — the node will not confirm the change until those channels are shut. It can reconnect only while the role it connects with fits under the new ceiling; a device that connects with more is refused, not limited. Its capability grant is left exactly as it is; only the ceiling drops, and changing the capabilities is a separate command on the node.",
+    // the role the device connects with already fits (`nodeNarrowOffered`) —
+    // as the node recorded it when the device introduced itself, which nothing
+    // refreshes once the record is approved, so the sentence says that too.
+    body: "Anything this device has open under the wider authority closes immediately — the node will not confirm the change until those channels are shut. It can reconnect only while the role it connects with fits under the new ceiling. The role it introduced itself with does; if the Hub has raised its account's role since, it is refused, not limited. Its capability grant is left exactly as it is; only the ceiling drops, and changing the capabilities is a separate command on the node.",
     confirmLabel: "Reduce authority",
     destructive: true,
   },
@@ -1285,10 +1292,19 @@ function nodeRoleRank(role: string | undefined): number {
  * can do, and the account it is for, and approving is their action. `null` when
  * the record carries no role it can rank — it predates the field, or came from a
  * Local Trusted Introduction — because offering one then is a guess, and a wrong
- * guess is the lockout. `nodeApprovalRoleUnknownNotice` says what to do instead.
+ * guess is the lockout. `nodeApprovalWithheldNotice` says what to do instead.
+ *
+ * PENDING RECORDS ONLY. The node follows the observed role while a record is
+ * pending and freezes it once the owner acts, because a peer's hello never
+ * rewrites an `approved` or `revoked` record. On a revoked record it is the role
+ * the device had when it introduced itself, and the Hub may assign another now:
+ * re-approving at it could lock the device out, or grant headroom the Hub no
+ * longer assigns. So a revoked key comes back the way it first arrived — a fresh
+ * introduction this panel can compare and approve — or at a role the owner
+ * names on the node.
  */
 export function nodeApprovalRole(record: NodeE2eeClientRecord): NodeE2eeApprovableRole | null {
-  if (record.status === "approved") return null;
+  if (record.status !== "pending") return null;
   const rank = nodeRoleRank(record.observedRole);
   return rank < 0 ? null : NODE_E2EE_APPROVABLE_ROLES[rank]!;
 }
@@ -1298,22 +1314,30 @@ export const NODE_APPROVAL_ROLE_UNKNOWN_PENDING =
   "let it in. Have the device try again: its next attempt records the role, and the approve " +
   "action appears on this row.";
 
-export const NODE_APPROVAL_ROLE_UNKNOWN_REVOKED =
-  "This record does not say which role the device connects with, so re-approving it here could " +
-  "leave it unable to connect. Delete the record and let the device introduce itself again.";
+export const NODE_APPROVAL_REVOKED_NOTICE =
+  "A revoked key is not re-approved from here. The role on this record is the one the device " +
+  "introduced itself with, and the Hub may open its channels under another now — a smaller " +
+  "ceiling would refuse the device, a larger one would grant what the Hub no longer assigns. " +
+  "Delete the record and let the device introduce itself again, then approve the new request " +
+  "here, or name the role on the node with `ryco e2ee client approve --max-role`.";
 
 /**
  * Why a record that is not approved offers no approval, or `null` when it does.
  *
  * A pending record recovers on its own — the node refreshes its observed role on
  * the device's next attempt. A revoked one does not, because a peer's hello never
- * rewrites a record the owner revoked, so the way back is a fresh introduction.
+ * rewrites a record the owner revoked, so the way back is a fresh introduction
+ * (see `nodeApprovalRole`).
  */
-export function nodeApprovalRoleUnknownNotice(record: NodeE2eeClientRecord): string | null {
-  if (record.status === "approved" || nodeApprovalRole(record) !== null) return null;
-  return record.status === "pending"
-    ? NODE_APPROVAL_ROLE_UNKNOWN_PENDING
-    : NODE_APPROVAL_ROLE_UNKNOWN_REVOKED;
+export function nodeApprovalWithheldNotice(record: NodeE2eeClientRecord): string | null {
+  switch (record.status) {
+    case "approved":
+      return null;
+    case "revoked":
+      return NODE_APPROVAL_REVOKED_NOTICE;
+    case "pending":
+      return nodeApprovalRole(record) === null ? NODE_APPROVAL_ROLE_UNKNOWN_PENDING : null;
+  }
 }
 
 /**
@@ -1365,6 +1389,13 @@ export function nodePendingPartitionWarning(pendingInPartition: number): string 
  * the device is refused on its next handshake, not narrowed — and Revoke already
  * says that honestly. A record that does not carry the role offers nothing,
  * for the same reason `nodeApprovalRole` does not guess one.
+ *
+ * The role is the one the device introduced itself with, frozen when the owner
+ * approved it, so the Hub may have raised it since. That is still offered: a
+ * narrowing only ever withdraws authority, so the worst a stale role costs is a
+ * refusal the owner asked for, and the confirmation says it can happen. A
+ * re-approval widens, which is why `nodeApprovalRole` does not offer one on a
+ * record whose role it can no longer vouch for.
  */
 export function nodeNarrowOffered(
   record: NodeE2eeClientRecord,
@@ -1599,8 +1630,8 @@ export function everyNodeSecurityString(): ReadonlyArray<{
   push("recordSubjectPrompt", NODE_E2EE_RECORD_SUBJECT_PROMPT);
   for (const status of ["pending", "revoked"] as const) {
     push(
-      `approvalRoleUnknown(${status})`,
-      nodeApprovalRoleUnknownNotice({
+      `approvalWithheld(${status})`,
+      nodeApprovalWithheldNotice({
         status,
         hubOrigin: "https://hub.example",
         accountId: "acct_example",
