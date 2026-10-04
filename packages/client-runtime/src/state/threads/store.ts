@@ -2653,6 +2653,10 @@ function applyEnvironmentOrchestrationEvent(
             ...(event.payload.prTitle !== undefined ? { prTitle: event.payload.prTitle } : {}),
             prState: event.payload.prState,
             prIsDraft: event.payload.prIsDraft,
+            // Absent on legacy events: keep the stored value.
+            ...(event.payload.prTerminalAt !== undefined
+              ? { prTerminalAt: event.payload.prTerminalAt }
+              : {}),
             issueState: event.payload.issueState,
             updatedAt: event.payload.updatedAt,
           })

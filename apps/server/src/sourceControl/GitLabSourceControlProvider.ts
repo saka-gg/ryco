@@ -346,10 +346,19 @@ export const make = Effect.fn("makeGitLabSourceControlProvider")(function* () {
       run("listAssignees", GitLabMergeRequestPage.listGitLabAssignees(callIn(input.cwd))),
     getPullRequestState: (input) =>
       gitlab.getMergeRequest({ cwd: input.cwd, reference: String(input.number) }).pipe(
-        Effect.map((summary) => ({
-          state: summary.state ?? "open",
-          isDraft: summary.isDraft ?? false,
-        })),
+        Effect.map((summary) => {
+          const state = summary.state ?? "open";
+          return {
+            state,
+            isDraft: summary.isDraft ?? false,
+            terminalAt:
+              state === "merged"
+                ? (summary.mergedAt ?? summary.closedAt ?? null)
+                : state === "closed"
+                  ? (summary.closedAt ?? null)
+                  : null,
+          };
+        }),
         Effect.mapError((error) => providerError("getPullRequestState", error)),
       ),
     getIssueState: () =>

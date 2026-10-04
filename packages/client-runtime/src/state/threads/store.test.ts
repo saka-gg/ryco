@@ -460,6 +460,42 @@ describe("worktree sidebar state", () => {
       expect(correctedWorktree).not.toBe(localEnvironmentStateOf(first).worktreeById?.[worktreeId]);
       expect(correctedWorktree?.prTerminalAt).toBe("2026-02-13T00:20:00.000Z");
     });
+
+    it("carries prTerminalAt through the source-control domain event", () => {
+      const seeded = upsert(
+        makeEmptyState(),
+        worktreeShell({ prState: "open", prTerminalAt: null }),
+        1,
+      );
+      const sourceControlEvent = (prTerminalAt?: string | null) =>
+        makeEvent(
+          "worktree.sourceControlStateUpdated",
+          {
+            worktreeId,
+            prState: "merged",
+            prIsDraft: false,
+            issueState: null,
+            updatedAt: "2026-02-13T02:00:00.000Z",
+            ...(prTerminalAt !== undefined ? { prTerminalAt } : {}),
+          },
+          { aggregateKind: "worktree", aggregateId: worktreeId },
+        );
+
+      const merged = applyOrchestrationEvent(
+        seeded,
+        sourceControlEvent("2026-02-13T01:30:00.000Z"),
+        localEnvironmentId,
+      );
+      expect(localEnvironmentStateOf(merged).worktreeById?.[worktreeId]).toMatchObject({
+        prState: "merged",
+        prTerminalAt: "2026-02-13T01:30:00.000Z",
+      });
+
+      const legacy = applyOrchestrationEvent(merged, sourceControlEvent(), localEnvironmentId);
+      expect(localEnvironmentStateOf(legacy).worktreeById?.[worktreeId]?.prTerminalAt).toBe(
+        "2026-02-13T01:30:00.000Z",
+      );
+    });
   });
 });
 

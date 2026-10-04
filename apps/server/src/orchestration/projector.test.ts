@@ -1052,3 +1052,101 @@ describe("orchestration projector", () => {
     expect(thread?.checkpoints.at(-1)?.turnId).toBe("turn-599");
   });
 });
+
+describe("orchestration projector worktree PR terminal time", () => {
+  const createdAt = "2026-05-19T00:00:00.000Z";
+  const worktreeId = "worktree-pr-terminal";
+
+  const project = (
+    events: ReadonlyArray<OrchestrationEvent>,
+  ): Promise<ReturnType<typeof createEmptyReadModel>> =>
+    events.reduce<Promise<ReturnType<typeof createEmptyReadModel>>>(
+      (statePromise, event) =>
+        statePromise.then((state) => Effect.runPromise(projectEvent(state, event))),
+      Promise.resolve(createEmptyReadModel(createdAt)),
+    );
+  const created = makeEvent({
+    sequence: 1,
+    type: "worktree.created",
+    aggregateKind: "project",
+    aggregateId: "project-1",
+    occurredAt: createdAt,
+    commandId: "cmd-worktree-created",
+    payload: {
+      worktreeId,
+      projectId: "project-1",
+      branch: "feature/pr",
+      worktreePath: "/tmp/feature-pr",
+      origin: "pr",
+      prNumber: 7,
+      issueNumber: null,
+      prTitle: "PR",
+      issueTitle: null,
+      createdAt,
+      updatedAt: createdAt,
+    },
+  });
+  const stateUpdated = (
+    sequence: number,
+    payload: {
+      readonly prState: "open" | "merged" | "closed" | null;
+      readonly prTerminalAt?: string | null;
+      readonly updatedAt: string;
+    },
+  ) =>
+    makeEvent({
+      sequence,
+      type: "worktree.sourceControlStateUpdated",
+      aggregateKind: "worktree",
+      aggregateId: worktreeId,
+      occurredAt: payload.updatedAt,
+      commandId: `cmd-source-control-${sequence}`,
+      payload: { worktreeId, prIsDraft: false, issueState: null, ...payload },
+    });
+  const prTerminalAtOf = (model: ReturnType<typeof createEmptyReadModel>) =>
+    model.worktrees?.find((worktree) => worktree.worktreeId === worktreeId)?.prTerminalAt;
+
+  it("creates worktrees with an explicit null prTerminalAt", async () => {
+    const model = await project([created]);
+    const worktree = model.worktrees?.find((entry) => entry.worktreeId === worktreeId);
+    expect(worktree !== undefined && "prTerminalAt" in worktree).toBe(true);
+    expect(prTerminalAtOf(model)).toBeNull();
+  });
+
+  it("takes prTerminalAt from the event when present", async () => {
+    const model = await project([
+      created,
+      stateUpdated(2, {
+        prState: "merged",
+        prTerminalAt: "2026-05-19T00:30:00.000Z",
+        updatedAt: "2026-05-19T01:00:00.000Z",
+      }),
+    ]);
+    expect(prTerminalAtOf(model)).toBe("2026-05-19T00:30:00.000Z");
+  });
+
+  it("derives prTerminalAt for legacy events without the field", async () => {
+    const merged = await project([
+      created,
+      stateUpdated(2, { prState: "open", updatedAt: "2026-05-19T01:00:00.000Z" }),
+      stateUpdated(3, { prState: "merged", updatedAt: "2026-05-19T02:00:00.000Z" }),
+    ]);
+    expect(prTerminalAtOf(merged)).toBe("2026-05-19T02:00:00.000Z");
+
+    const stillMerged = await Effect.runPromise(
+      projectEvent(
+        merged,
+        stateUpdated(4, { prState: "merged", updatedAt: "2026-05-19T03:00:00.000Z" }),
+      ),
+    );
+    expect(prTerminalAtOf(stillMerged)).toBe("2026-05-19T02:00:00.000Z");
+
+    const reopened = await Effect.runPromise(
+      projectEvent(
+        stillMerged,
+        stateUpdated(5, { prState: "open", updatedAt: "2026-05-19T04:00:00.000Z" }),
+      ),
+    );
+    expect(prTerminalAtOf(reopened)).toBeNull();
+  });
+});
