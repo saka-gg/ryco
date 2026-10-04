@@ -2624,6 +2624,13 @@ async function seedDelegationParent(databasePath?: string) {
             activeTurnId: null,
             updatedAt: delegationAt(t + 3),
           },
+          // Mirrors ingestion: a provider turn.completed releases the turn with its outcome.
+          turnOutcome: {
+            turnId,
+            state: "completed",
+            reason: "provider-turn-completed",
+            completedAt: delegationAt(t + 3),
+          },
           createdAt: delegationAt(t + 3),
         }),
       );
