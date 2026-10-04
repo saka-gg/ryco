@@ -247,7 +247,11 @@ function scheduler() {
       await Promise.resolve();
     }
   };
-  return { value, timers, advance };
+  /** Move the clock without firing timers — time spent inside an awaited call. */
+  const skip = (milliseconds: number) => {
+    now += milliseconds;
+  };
+  return { value, timers, advance, skip };
 }
 
 const enabledConfig: HubConnectorConfig = {
@@ -1203,6 +1207,70 @@ describe("HubConnector", () => {
       degradedMode: "operator_action_required",
       failure: "authentication_failed",
     });
+    await connector.stop();
+  });
+
+  it("retries a rejected proof that may have outlived its challenge exactly once", async () => {
+    const clock = scheduler();
+    const sockets: FakeSocket[] = [];
+    const activeIdentity = identity();
+    const connector = new HubConnector({
+      config: enabledConfig,
+      identity: {
+        ...activeIdentity,
+        createRelayAuthenticationFrame: async (...input) => {
+          // A keychain prompt the owner took 25 seconds to answer.
+          clock.skip(25_000);
+          return activeIdentity.createRelayAuthenticationFrame(...input);
+        },
+      },
+      transport: {
+        open: () => {
+          const socket = new FakeSocket();
+          sockets.push(socket);
+          return socket;
+        },
+      },
+      channels: { open: async () => Promise.reject(new Error("unused")) },
+      enrollmentMetadata,
+      livenessWatch: false,
+      scheduler: clock.value,
+    });
+    const rejectLatest = () => {
+      const socket = sockets.at(-1)!;
+      socket.emit("open", {} as Event);
+      socket.emit("message", {
+        data: encoded({
+          type: "error",
+          protocolMajor: 1,
+          protocolMinor: 2,
+          code: "authentication_failed",
+          fatal: true,
+        }),
+      } as MessageEvent);
+    };
+
+    const starting = connector.start();
+    await settle();
+    rejectLatest();
+    await starting;
+    await settle();
+    expect(connector.status()).toMatchObject({
+      state: "degraded",
+      degradedMode: "backing_off",
+      failure: "authentication_timeout",
+    });
+
+    await clock.advance(1_000);
+    await settle();
+    expect(sockets).toHaveLength(2);
+    rejectLatest();
+    await settle();
+    expect(connector.status()).toMatchObject({
+      state: "degraded",
+      failure: "authentication_failed",
+    });
+    expect(connector.status().degradedMode).not.toBe("backing_off");
     await connector.stop();
   });
 

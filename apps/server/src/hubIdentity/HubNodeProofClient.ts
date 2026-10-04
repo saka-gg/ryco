@@ -65,6 +65,22 @@ function proofError(failure: HubNodeProofFailure): never {
 }
 
 /**
+ * How long a challenge may take to sign before it is no longer worth sending.
+ *
+ * The Hub honours a challenge for 30 seconds from issue, and after signing the
+ * node still has to open the socket and send the proof — bounded by the relay's
+ * own five-second deadline. Measured on the local clock from before the
+ * request, so it overstates the challenge's age and is unaffected by skew
+ * between this machine's clock and the Hub's: comparing `challengeExpiresAt`
+ * with local time would refetch forever on a node whose clock runs ahead.
+ * Slow signing is real — a keychain access prompt, a slow custody backend, a
+ * machine suspended mid-handshake.
+ */
+const CHALLENGE_SIGNING_BUDGET_MS = 15_000;
+/** One refetch: a second slow signature is not cured by a third challenge. */
+const MAX_CHALLENGE_ATTEMPTS = 2;
+
+/**
  * Map a proof-preflight HTTP status to the connector's retry policy.
  *
  * The Hub's challenge route never refuses a node by status: it answers 201 for
@@ -150,45 +166,60 @@ export function makeHubNodeProofClient(dependencies: {
         if (error instanceof HubNodeProofClientError) throw error;
         return proofError("identity_unavailable");
       }
-      let challenge: HubNodeChallenge;
-      try {
-        challenge = validateChallenge(
-          await dependencies.transport.request({
-            hubOrigin,
-            nodeId: active.nodeId,
-            activeKeyId: selected.keyId,
-            ...protocol,
-          }),
-          protocol,
-          now(),
-        );
-      } catch (error) {
-        if (error instanceof HubNodeProofClientError) throw error;
-        return proofError("network");
-      }
-      const transcript = encodeNodeAuthenticationTranscript({
-        hubOrigin,
-        ...protocol,
-        nodeId: active.nodeId,
-        activeKeyId: selected.keyId,
-        challengeExpiresAt: challenge.challengeExpiresAt,
-        challenge: challenge.challenge,
-      });
-      try {
-        const signature = await dependencies.signingIdentity.sign(selected.secretName, transcript);
-        return {
-          type: "auth",
-          peer: "node",
+      for (let attempt = 1; ; attempt += 1) {
+        const requestedAt = now();
+        let challenge: HubNodeChallenge;
+        try {
+          challenge = validateChallenge(
+            await dependencies.transport.request({
+              hubOrigin,
+              nodeId: active.nodeId,
+              activeKeyId: selected.keyId,
+              ...protocol,
+            }),
+            protocol,
+            now(),
+          );
+        } catch (error) {
+          if (error instanceof HubNodeProofClientError) throw error;
+          return proofError("network");
+        }
+        const transcript = encodeNodeAuthenticationTranscript({
+          hubOrigin,
           ...protocol,
-          nodeId: active.nodeId as RelayNodeAuthHandshake["nodeId"],
-          nonce: Uint8Array.from(challenge.challenge),
-          signature,
-        };
-      } catch {
-        return proofError("identity_unavailable");
-      } finally {
-        challenge.challenge.fill(0);
-        transcript.fill(0);
+          nodeId: active.nodeId,
+          activeKeyId: selected.keyId,
+          challengeExpiresAt: challenge.challengeExpiresAt,
+          challenge: challenge.challenge,
+        });
+        let signature: Uint8Array;
+        try {
+          signature = await dependencies.signingIdentity.sign(selected.secretName, transcript);
+        } catch {
+          return proofError("identity_unavailable");
+        } finally {
+          transcript.fill(0);
+        }
+        try {
+          if (now() - requestedAt < CHALLENGE_SIGNING_BUDGET_MS) {
+            return {
+              type: "auth",
+              peer: "node",
+              ...protocol,
+              nodeId: active.nodeId as RelayNodeAuthHandshake["nodeId"],
+              nonce: Uint8Array.from(challenge.challenge),
+              signature,
+            };
+          }
+        } finally {
+          challenge.challenge.fill(0);
+        }
+        // The proof would reach the Hub after its challenge expired, and be
+        // rejected as an authentication failure that looks exactly like a
+        // revoked key. A fresh challenge is free; a second slow signature is
+        // left to the connector's ordinary backoff rather than looped on.
+        signature.fill(0);
+        if (attempt >= MAX_CHALLENGE_ATTEMPTS) return proofError("network");
       }
     },
   };

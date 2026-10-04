@@ -369,6 +369,13 @@ canonical node-authentication transcript with the selected local key, then opens
 `wss://<configured-origin>/v1/relay/node`. The signed `auth` frame is the first WebSocket frame and
 must complete within the negotiated five-second deadline.
 
+The Hub honours a challenge for 30 seconds and rejects an expired one exactly as it rejects a wrong
+key. Signing can be slow — a keychain access prompt, a slow custody backend, a machine suspended
+mid-handshake — so a challenge that took 15 seconds or more to sign, measured on the local clock
+from before it was requested, is discarded and replaced once before the socket opens. A relay
+rejection of a proof that was 20 seconds or more old when sent is retried once with a fresh
+challenge before it counts as a rejection.
+
 Node WebSockets do not use cookies, Authorization headers, URL credentials, query parameters, or
 bearer subprotocols. A challenge is single-use and in memory only. Replayed proofs, copied node IDs,
 wrong or rotated keys, and ordinary authentication failures require operator action. Successful

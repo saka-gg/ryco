@@ -232,6 +232,70 @@ describe("Hub node proof client", () => {
     expect(challengeRequests).toBe(1);
   });
 
+  it("refetches a challenge that went stale while signing, once", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ryco-node-proof-stale-"));
+    const stateStore = await makeLocalHubIdentityStateStore(join(root, "identity.json"));
+    const realSigningIdentity = makeNodeSigningIdentity(memoryStore());
+    await realSigningIdentity.generate("node-key.active");
+    await stateStore.readOrCreate();
+    await stateStore.update((state) => ({
+      ...state,
+      revision: state.revision + 1,
+      activeNode: {
+        hubOrigin,
+        nodeId,
+        activeKeyId: keyId,
+        activeKeySecretName: "node-key.active",
+        cleanupPollingSecretName: null,
+        enrolledAt: now,
+      },
+    }));
+    let clock = now;
+    let challengeRequests = 0;
+    // Each signature takes as long as the next entry says — a keychain prompt
+    // the owner answers slowly, then a fast one.
+    let signingDelays: number[] = [];
+    const client = makeHubNodeProofClient({
+      transport: {
+        request: async () => {
+          challengeRequests += 1;
+          return {
+            protocolMajor: 1,
+            protocolMinor: 1,
+            challenge: new Uint8Array(32).fill(challengeRequests),
+            challengeExpiresAt: clock + 30_000,
+          };
+        },
+      },
+      stateStore,
+      signingIdentity: {
+        ...realSigningIdentity,
+        sign: async (...input: Parameters<typeof realSigningIdentity.sign>) => {
+          clock += signingDelays.shift() ?? 0;
+          return realSigningIdentity.sign(...input);
+        },
+      },
+      keySelector: { authenticationKey: async () => ({ keyId, secretName: "node-key.active" }) },
+      now: () => clock,
+    });
+
+    signingDelays = [16_000, 100];
+    const frame = await client.createRelayAuthenticationFrame(hubOrigin, {
+      protocolMajor: 1,
+      protocolMinor: 1,
+    });
+    expect(challengeRequests).toBe(2);
+    expect(frame.nonce).toEqual(new Uint8Array(32).fill(2));
+
+    // A second slow signature is the connector's backoff to handle, not a loop.
+    challengeRequests = 0;
+    signingDelays = [16_000, 16_000];
+    await expect(
+      client.createRelayAuthenticationFrame(hubOrigin, { protocolMajor: 1, protocolMinor: 1 }),
+    ).rejects.toMatchObject({ code: "node_proof_failed", failure: "network" });
+    expect(challengeRequests).toBe(2);
+  });
+
   it("uses a credential-free HTTP preflight", async () => {
     let requestInit: RequestInit | undefined;
     const transport = makeHubNodeChallengeHttpTransport(async (_input, init) => {

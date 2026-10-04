@@ -251,6 +251,16 @@ describe("classifyConnectorFailure", () => {
     expect(classifyConnectorFailure("protocol_invalid", 0).action).toBe("retry");
     expect(classifyConnectorFailure("protocol_invalid", 1).action).toBe("operator");
   });
+
+  it("retries one stale-proof rejection and treats the next as a real rejection", () => {
+    expect(classifyConnectorFailure("authentication_stale", 0, 0)).toEqual({
+      action: "retry",
+      failure: "authentication_timeout",
+    });
+    expect(classifyConnectorFailure("authentication_stale", 0, 1)).toEqual(
+      classifyConnectorFailure("authentication_failed", 0),
+    );
+  });
   it("keeps expiry distinguishable from denial, and a dead store from a locked one", () => {
     // Each pair needs opposite operator instructions, so collapsing either into
     // one code would make the panel give the wrong advice half the time.

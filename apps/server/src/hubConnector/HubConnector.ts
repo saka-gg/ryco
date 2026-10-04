@@ -128,6 +128,7 @@ export class HubConnector {
     | undefined;
   #attempt = 0;
   #protocolViolations = 0;
+  #staleProofRetries = 0;
   #started = false;
   #stopping = false;
   #connecting = false;
@@ -651,6 +652,7 @@ export class HubConnector {
       transport: this.#transport,
       hubOrigin: origin,
       scheduler: this.#scheduler,
+      now: this.#scheduler.now,
       onFrame: (frame) => {
         this.#frameChain = this.#frameChain
           .then(() => this.#handleFrame(generation, frame))
@@ -970,8 +972,13 @@ export class HubConnector {
     this.#sendQueue = undefined;
     this.#session?.close();
     this.#session = undefined;
-    const disposition = classifyConnectorFailure(kind, this.#protocolViolations);
+    const disposition = classifyConnectorFailure(
+      kind,
+      this.#protocolViolations,
+      this.#staleProofRetries,
+    );
     if (kind === "protocol_invalid") this.#protocolViolations += 1;
+    if (kind === "authentication_stale") this.#staleProofRetries += 1;
     if (disposition.action === "operator") {
       if (disposition.terminalState !== undefined) {
         this.#state.transition(disposition.terminalState, { failure: disposition.failure });
@@ -1015,6 +1022,7 @@ export class HubConnector {
       if (!this.#state.isCurrent(generation) || this.#state.snapshot().state !== "online") return;
       this.#attempt = 0;
       this.#protocolViolations = 0;
+      this.#staleProofRetries = 0;
     }, this.#config.reconnectStableMs);
   }
 

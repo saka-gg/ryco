@@ -525,6 +525,48 @@ describe("RelayConnectionSession", () => {
     expect(String(error)).toBe("RelayConnectionError: Hub relay connection failed.");
   });
 
+  it("marks a rejection of a proof old enough to have expired as stale", async () => {
+    const rejection = async (proofTakesMs: number) => {
+      let clock = 1_000_000;
+      const socket = new FakeSocket();
+      const base = identity();
+      const session = new RelayConnectionSession({
+        identity: {
+          ...base,
+          createRelayAuthenticationFrame: async (...input) => {
+            clock += proofTakesMs;
+            return base.createRelayAuthenticationFrame(...input);
+          },
+        },
+        transport: { open: () => socket },
+        hubOrigin: "https://relay.example",
+        now: () => clock,
+        onFrame: () => undefined,
+        onTerminal: () => undefined,
+      });
+      const authenticating = session.authenticate();
+      for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();
+      socket.emit("open", {} as Event);
+      socket.emit("message", {
+        data: encoded({
+          type: "error",
+          protocolMajor: 1,
+          protocolMinor: 2,
+          code: "authentication_failed",
+          fatal: true,
+        }),
+      } as MessageEvent);
+      return authenticating.then(
+        () => "ready",
+        (error: unknown) => (error instanceof RelayConnectionError ? error.kind : "unknown"),
+      );
+    };
+    // The Hub cannot say why it refused, but a proof this old may simply have
+    // outlived its 30-second challenge.
+    await expect(rejection(25_000)).resolves.toBe("authentication_stale");
+    await expect(rejection(100)).resolves.toBe("authentication_failed");
+  });
+
   it("does not open a socket when shutdown wins the proof-preflight race", async () => {
     let releaseProof: ((frame: RelayNodeAuthHandshake) => void) | undefined;
     const proof = new Promise<RelayNodeAuthHandshake>((resolve) => {

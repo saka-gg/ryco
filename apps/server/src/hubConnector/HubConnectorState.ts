@@ -32,6 +32,8 @@ export type ConnectorFailureKind =
   | "tls"
   | "authentication_timeout"
   | "authentication_failed"
+  /** An `authentication_failed` for a proof old enough that its challenge may have expired. */
+  | "authentication_stale"
   | "connection_replaced"
   | "server_draining"
   | "rate_limited"
@@ -53,8 +55,17 @@ export type ConnectorFailureDisposition =
 export function classifyConnectorFailure(
   kind: ConnectorFailureKind,
   protocolViolationsBeforeStability: number,
+  staleProofRetriesBeforeStability = 0,
 ): ConnectorFailureDisposition {
   switch (kind) {
+    case "authentication_stale":
+      // A fresh challenge is enough when the old one simply expired, so one
+      // retry is free. A second stale rejection before the connection proves
+      // stable is no longer evidence of a slow signature, and is treated as the
+      // rejection it may well be.
+      return staleProofRetriesBeforeStability === 0
+        ? { action: "retry", failure: "authentication_timeout" }
+        : classifyConnectorFailure("authentication_failed", protocolViolationsBeforeStability);
     case "dns":
     case "network":
       return { action: "retry", failure: "network_unavailable" };
