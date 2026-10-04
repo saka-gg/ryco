@@ -132,7 +132,8 @@ export function resolveQueueDrainStep(input: QueueDrainInput): QueueDrainStep {
 
   // 6. Projected queued messages were delivered (including a lost reply or an
   // accepted steer); a steer rejected by its own request returns its message to
-  // the queue. Runs before any eligibility check.
+  // the queue, failed (explicit retry) when the provider may already have it.
+  // Runs before any eligibility check.
   if (view.detailLoaded) {
     const removeIds = queue
       .filter((entry) => view.projectedMessageIds.has(entry.id))

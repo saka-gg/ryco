@@ -6149,16 +6149,25 @@ describe("ProviderCommandReactor", () => {
         );
         expect(rejected).toHaveLength(1);
         // Only a steer that provably never reached the provider defers (stays
-        // queued, sent next). One that may have reached it is a visible failure,
-        // so the client neither hides it nor silently re-sends it.
+        // queued, sent next). One that may have reached it is a visible failure
+        // marked uncertain, so clients hold it for an explicit retry instead of
+        // sending it again as the next turn.
         const reason = dispatched ? "failed" : "deferred";
         expect(rejected[0]?.payload).toMatchObject({ reason });
+        expect(
+          rejected[0]?.type === "thread.turn-steer-rejected"
+            ? rejected[0].payload.deliveryUncertain
+            : "not a rejection",
+        ).toBe(dispatched ? true : undefined);
         const failures = await activitiesOf(second, "provider.turn.steer.failed");
         expect(failures).toHaveLength(1);
         expect(failures[0]).toMatchObject({
           tone: dispatched ? "error" : "info",
           summary: dispatched ? "Steer failed" : "Steer deferred",
         });
+        expect(
+          (failures[0]?.payload as { deliveryUncertain?: unknown } | undefined)?.deliveryUncertain,
+        ).toBe(dispatched ? true : undefined);
         expect(failures[0]?.payload).toMatchObject({
           messageId: "steer-lost",
           reason,

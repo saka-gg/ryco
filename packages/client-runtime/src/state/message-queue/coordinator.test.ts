@@ -246,8 +246,65 @@ describe("message queue drain coordinator", () => {
       attempt,
       reason: "deferred",
       error: "Steer rejected.",
+      deliveryUncertain: false,
     });
     expect(f.queue.getState().steerAttemptsByThreadKey[KEY]).toBeUndefined();
+    expect(f.sent).toEqual(["q-1"]);
+  });
+
+  it("holds a steer the provider may have received for an explicit retry, never re-sending it", async () => {
+    const f = setup({ thread: RUNNING });
+    f.queue.getState().enqueue(KEY, entry("q-1"));
+    f.queue.getState().enqueue(KEY, entry("q-2"));
+    const attempt = {
+      commandId: "cmd-lost",
+      expectedTurnId: TurnId.make("turn-1"),
+      startedAt: "2026-10-01T10:00:01.000Z",
+      // Enter in steer mode: no toast, so only the held row tells the user.
+      explicit: false,
+    };
+    f.queue.getState().beginSteer(KEY, "q-1", attempt);
+    // A restart cut off the steer after it was handed to the provider.
+    f.setThread({
+      ...IDLE,
+      activities: [
+        steerFailed("turn-steer-rejected:cmd-lost", "q-1", "failed", { deliveryUncertain: true }),
+      ],
+    });
+    await flush();
+    expect(f.platform.onSteerRejected).toHaveBeenCalledWith(KEY, {
+      messageId: "q-1",
+      attempt,
+      reason: "failed",
+      error: "Steer rejected.",
+      deliveryUncertain: true,
+    });
+    expect(f.queue.getState().steerAttemptsByThreadKey[KEY]).toBeUndefined();
+    expect(f.queue.getState().queuesByThreadKey[KEY]?.[0]).toMatchObject({
+      id: "q-1",
+      deliveryStatus: "failed",
+    });
+    // Neither the possibly-delivered message nor anything behind it drains on its own.
+    expect(f.sent).toEqual([]);
+    f.coordinator.retry(KEY, "q-1");
+    await flush();
+    expect(f.sent).toEqual(["q-1"]);
+  });
+
+  it("sends a steer that failed without reaching the provider as the next turn", async () => {
+    const f = setup({ thread: RUNNING });
+    f.queue.getState().enqueue(KEY, entry("q-1"));
+    f.queue.getState().beginSteer(KEY, "q-1", {
+      commandId: "cmd-failed",
+      expectedTurnId: TurnId.make("turn-1"),
+      startedAt: "2026-10-01T10:00:01.000Z",
+      explicit: true,
+    });
+    f.setThread({
+      ...IDLE,
+      activities: [steerFailed("turn-steer-rejected:cmd-failed", "q-1", "failed")],
+    });
+    await flush();
     expect(f.sent).toEqual(["q-1"]);
   });
 

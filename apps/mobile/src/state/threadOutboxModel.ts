@@ -25,6 +25,11 @@ const THREAD_OUTBOX_MAX_RETRY_DELAY_MS = 16_000;
 
 export interface QueuedThreadMessage {
   readonly resumeReviewError?: string;
+  /**
+   * A steer of this message was cut off after the provider may have received it. The message
+   * no longer drains: it waits for an explicit retry or removal, so it is never sent twice.
+   */
+  readonly uncertainSteerError?: string;
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
   readonly messageId: MessageId;

@@ -109,6 +109,7 @@ import {
   registerForegroundQueueSender,
   resolveWebQueueSender,
   retainMessageQueueDrain,
+  steerRejectionToast,
   useForegroundQueueSender,
   type WebQueueSender,
 } from "./messageQueueDrain";
@@ -246,6 +247,41 @@ afterEach(() => {
   releaseDrain?.();
   releaseDrain = null;
   useMessageQueueStore.getState().reset();
+});
+
+describe("steerRejectionToast", () => {
+  const rejection = (explicit: boolean, reason: "deferred" | "failed", uncertain = false) => ({
+    messageId: "q-1",
+    attempt: {
+      commandId: "cmd-1",
+      expectedTurnId: TurnId.make("turn-1"),
+      startedAt: AT,
+      explicit,
+    },
+    reason,
+    error: "Steer rejected.",
+    deliveryUncertain: uncertain,
+  });
+
+  it("reports an explicit steer's outcome and keeps an implicit one quiet", () => {
+    expect(steerRejectionToast(rejection(true, "deferred"))).toMatchObject({
+      type: "info",
+      title: "Not steered",
+    });
+    expect(steerRejectionToast(rejection(true, "failed"))).toMatchObject({
+      type: "error",
+      title: "Steer failed",
+    });
+    expect(steerRejectionToast(rejection(false, "failed"))).toBeNull();
+  });
+
+  it("always reports a steer the provider may have received: it now waits on Retry", () => {
+    expect(steerRejectionToast(rejection(false, "failed", true))).toEqual({
+      type: "error",
+      title: "Steer delivery unconfirmed",
+      description: "Steer rejected. The message stays queued until you retry or remove it.",
+    });
+  });
 });
 
 describe("readWebQueueEnvironment", () => {

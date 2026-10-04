@@ -760,6 +760,14 @@ export type TurnDispatchMode = typeof TurnDispatchMode.Type;
 export const TurnSteerRejectionReason = Schema.Literals(["deferred", "failed"]);
 export type TurnSteerRejectionReason = typeof TurnSteerRejectionReason.Type;
 
+/**
+ * Set on a `failed` steer rejection the provider may still have received (a restart cut off its
+ * delivery). Clients hold such a message for an explicit retry or removal instead of sending it
+ * again as the next turn. An optional flag rather than a third reason, so older clients that
+ * decode the event keep working and read it as a plain failure.
+ */
+export const TurnSteerDeliveryUncertain = Schema.optionalKey(Schema.Boolean);
+
 export const OrchestrationMessage = Schema.Struct({
   id: MessageId,
   role: OrchestrationMessageRole,
@@ -2004,6 +2012,7 @@ const ThreadTurnSteerResolveCommand = Schema.Union([
       status: Schema.Literal("rejected"),
       error: TrimmedNonEmptyString.check(Schema.isMaxLength(1_000)),
       reason: Schema.optionalKey(TurnSteerRejectionReason),
+      deliveryUncertain: TurnSteerDeliveryUncertain,
       resolvedAt: IsoDateTime,
     }),
   }),
@@ -2345,6 +2354,7 @@ export const ThreadTurnSteerRejectedPayload = Schema.Struct({
   expectedTurnId: TurnId,
   error: TrimmedNonEmptyString.check(Schema.isMaxLength(1_000)),
   reason: Schema.optionalKey(TurnSteerRejectionReason),
+  deliveryUncertain: TurnSteerDeliveryUncertain,
   resolvedAt: IsoDateTime,
 });
 export type ThreadTurnSteerRejectedPayload = typeof ThreadTurnSteerRejectedPayload.Type;

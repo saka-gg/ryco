@@ -70,7 +70,10 @@ export interface MessageQueueDrainPlatform<C, S> {
     entry: QueuedMessage<C, S>,
     cause: "accepted" | "projected",
   ) => void;
-  /** A steer attempt was rejected; its message stays queued. Called once per attempt. */
+  /**
+   * A steer attempt was rejected; its message stays queued (marked failed, for an explicit
+   * retry, when `deliveryUncertain`). Called once per attempt.
+   */
   readonly onSteerRejected?: (threadKey: string, rejection: QueueDrainSteerRejection) => void;
   readonly now?: () => number;
   readonly timers?: {
@@ -405,7 +408,9 @@ export function createMessageQueueDrainCoordinator<C, S>(
           }
         }
         for (const rejection of step.endSteers) {
-          queueStore.getState().endSteer(key, rejection.messageId, rejection.attempt.commandId);
+          queueStore.getState().endSteer(key, rejection.messageId, rejection.attempt.commandId, {
+            failed: rejection.deliveryUncertain,
+          });
           platform.onSteerRejected?.(key, rejection);
         }
         return true;

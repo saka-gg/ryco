@@ -29,6 +29,7 @@ vi.mock("expo-sqlite/kv-store", () => ({
 import {
   clearThreadOutboxSteering,
   drainThreadOutbox,
+  endThreadOutboxSteer,
   enqueueThreadOutboxMessage,
   getThreadOutboxHold,
   holdThreadOutboxForInterrupt,
@@ -38,6 +39,7 @@ import {
   markThreadOutboxSteering,
   releaseThreadOutboxHold,
   resetThreadOutboxForTests,
+  retryThreadOutboxMessage,
   retryThreadOutboxReview,
   trackThreadOutboxLiveCauses,
   type ThreadOutboxDrainDeps,
@@ -226,7 +228,12 @@ describe("threadOutbox store + drain", () => {
       steerRejectionsByActivityId: new Map([
         [
           "turn-steer-rejected:cmd-deferred",
-          { messageId: "m-deferred", reason: "deferred" as const, error: "The turn finished." },
+          {
+            messageId: "m-deferred",
+            reason: "deferred" as const,
+            error: "The turn finished.",
+            deliveryUncertain: false,
+          },
         ],
       ]),
     });
@@ -235,6 +242,48 @@ describe("threadOutbox store + drain", () => {
     expect(sendQueuedMessage).toHaveBeenCalledTimes(1);
     expect(sendQueuedMessage.mock.calls[0]?.[0].messageId).toBe("m-deferred");
   });
+
+  for (const endedBy of ["drain", "screen"] as const) {
+    it(`holds a steer the provider may have received for an explicit retry (ended by the ${endedBy})`, async () => {
+      enqueueThreadOutboxMessage(queued("m-uncertain", "2026-08-17T10:00:00.000Z"));
+      enqueueThreadOutboxMessage(queued("m-later", "2026-08-17T10:01:00.000Z"));
+      const attempt = {
+        commandId: "cmd-uncertain",
+        expectedTurnId: "turn-1" as TurnId,
+        startedAt: "2026-08-17T10:00:01.000Z",
+        explicit: true,
+      };
+      markThreadOutboxSteering("m-uncertain", attempt);
+      const rejection = {
+        messageId: "m-uncertain",
+        reason: "failed" as const,
+        error: "Ryco restarted while delivering this steer message.",
+        deliveryUncertain: true,
+      };
+      // The screen's own outcome effect can end the attempt before the drain sees it.
+      if (endedBy === "screen") endThreadOutboxSteer({ ...rejection, attempt });
+      const sendQueuedMessage = accepting();
+      const rejected = view({
+        steerRejectionsByActivityId: new Map([["turn-steer-rejected:cmd-uncertain", rejection]]),
+      });
+
+      await drainThreadOutbox(deps(rejected, sendQueuedMessage));
+      await drainThreadOutbox(deps(rejected, sendQueuedMessage));
+      // Never re-sent on its own, and nothing behind it overtakes it.
+      expect(sendQueuedMessage).not.toHaveBeenCalled();
+      expect(listThreadOutboxMessages().map((m) => [m.messageId, m.uncertainSteerError])).toEqual([
+        ["m-uncertain", "Ryco restarted while delivering this steer message."],
+        ["m-later", undefined],
+      ]);
+      // Survives an app restart: the hold is persisted with the message.
+      expect(kv.get("ryco.threadOutbox.v1")).toContain("uncertainSteerError");
+
+      retryThreadOutboxMessage("m-uncertain");
+      await drainThreadOutbox(deps(rejected, sendQueuedMessage));
+      expect(sendQueuedMessage).toHaveBeenCalledTimes(1);
+      expect(sendQueuedMessage.mock.calls[0]?.[0].messageId).toBe("m-uncertain");
+    });
+  }
 
   it("waits for detailed message reconciliation before delivery", async () => {
     enqueueThreadOutboxMessage(queued("m-unknown", "2026-08-17T10:00:00.000Z"));

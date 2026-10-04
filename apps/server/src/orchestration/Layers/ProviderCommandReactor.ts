@@ -2019,6 +2019,7 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
           readonly status: "rejected";
           readonly error: string;
           readonly reason: TurnSteerRejectionReason;
+          readonly deliveryUncertain?: boolean;
           readonly resolvedAt: string;
         },
     commandId: CommandId = serverCommandId("turn-steer-resolve"),
@@ -3113,8 +3114,11 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
                     .detail,
                   // Only a steer that provably never reached the provider defers
                   // (stays queued, sent next). One that may have reached it fails
-                  // visibly so the client does not silently send it twice.
-                  reason: deliveryState === "not-sent" ? "deferred" : "failed",
+                  // visibly and is marked uncertain: clients hold the message for an
+                  // explicit retry or removal instead of sending it again as a turn.
+                  ...(deliveryState === "not-sent"
+                    ? { reason: "deferred" as const }
+                    : { reason: "failed" as const, deliveryUncertain: true }),
                   resolvedAt: new Date().toISOString(),
                 },
                 providerIntentRecoveryIds(row.sequence).commandId,

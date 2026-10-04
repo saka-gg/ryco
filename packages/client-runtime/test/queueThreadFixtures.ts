@@ -297,15 +297,24 @@ export function turnStartCancelled(id: string, messageId: string): ActivityFixtu
   };
 }
 
-/** A steer rejection row; `id` is the activity id, `turn-steer-rejected:<commandId>` in production. */
+/**
+ * A steer rejection row; `id` is the activity id, `turn-steer-rejected:<commandId>` in production.
+ * `deliveryUncertain`: a restart cut off a steer the provider may have received.
+ */
 export function steerFailed(
   id: string,
   messageId: string,
   reason?: "deferred" | "failed",
+  options: { readonly deliveryUncertain?: boolean } = {},
 ): ActivityFixture {
   return {
     id,
     kind: "provider.turn.steer.failed",
-    payload: { messageId, error: "Steer rejected.", ...(reason ? { reason } : {}) },
+    payload: {
+      messageId,
+      error: "Steer rejected.",
+      ...(reason ? { reason } : {}),
+      ...(options.deliveryUncertain ? { deliveryUncertain: true } : {}),
+    },
   };
 }

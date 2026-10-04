@@ -24,7 +24,31 @@ describe("readTurnSteerRejectionActivity", () => {
           reason: "deferred",
         },
       }),
-    ).toEqual({ messageId: "message-1", reason: "deferred", error: "The turn finished." });
+    ).toEqual({
+      messageId: "message-1",
+      reason: "deferred",
+      error: "The turn finished.",
+      deliveryUncertain: false,
+    });
+  });
+
+  it("reads a rejection the provider may have received as delivery-uncertain", () => {
+    expect(
+      readTurnSteerRejectionActivity({
+        kind: TURN_STEER_FAILED_ACTIVITY_KIND,
+        payload: {
+          messageId: "message-1",
+          error: "Ryco restarted while delivering this steer message.",
+          reason: "failed",
+          deliveryUncertain: true,
+        },
+      }),
+    ).toEqual({
+      messageId: "message-1",
+      reason: "failed",
+      error: "Ryco restarted while delivering this steer message.",
+      deliveryUncertain: true,
+    });
   });
 
   it("reads a legacy row without a reason as failed", () => {
@@ -33,13 +57,23 @@ describe("readTurnSteerRejectionActivity", () => {
         kind: TURN_STEER_FAILED_ACTIVITY_KIND,
         payload: { messageId: "message-1", error: "Provider exploded." },
       }),
-    ).toEqual({ messageId: "message-1", reason: "failed", error: "Provider exploded." });
+    ).toEqual({
+      messageId: "message-1",
+      reason: "failed",
+      error: "Provider exploded.",
+      deliveryUncertain: false,
+    });
   });
 
   it("tolerates a malformed payload", () => {
     expect(
       readTurnSteerRejectionActivity({ kind: TURN_STEER_FAILED_ACTIVITY_KIND, payload: null }),
-    ).toEqual({ messageId: null, reason: "failed", error: "Provider rejected turn steering." });
+    ).toEqual({
+      messageId: null,
+      reason: "failed",
+      error: "Provider rejected turn steering.",
+      deliveryUncertain: false,
+    });
   });
 
   it("returns null for other activity kinds", () => {

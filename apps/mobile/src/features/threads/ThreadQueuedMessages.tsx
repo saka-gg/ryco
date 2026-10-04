@@ -27,6 +27,8 @@ export function ThreadQueuedMessages(props: {
   readonly getSteerUnavailableReason: (message: QueuedThreadMessage) => string | null;
   readonly onSteer: (message: QueuedThreadMessage) => void;
   readonly onRetryReview?: (messageId: string) => void;
+  /** Retries a message held after a steer the provider may have received. */
+  readonly onRetryHeld?: (messageId: string) => void;
   readonly onRemove: (messageId: string) => void;
 }) {
   const iconColor = String(useThemeColor("--color-icon"));
@@ -77,6 +79,18 @@ export function ThreadQueuedMessages(props: {
                   onPress={() => props.onRetryReview?.(message.messageId)}
                 >
                   <Text className="text-sm font-ryco-bold text-foreground">Review and retry</Text>
+                </Pressable>
+              </View>
+            )}
+            {message.uncertainSteerError && (
+              <View className="flex-1 gap-1">
+                <Text className="text-xs text-foreground-muted">{message.uncertainSteerError}</Text>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Send the held queued message again"
+                  onPress={() => props.onRetryHeld?.(message.messageId)}
+                >
+                  <Text className="text-sm font-ryco-bold text-foreground">Send again</Text>
                 </Pressable>
               </View>
             )}

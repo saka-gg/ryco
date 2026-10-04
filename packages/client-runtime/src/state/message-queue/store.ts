@@ -83,8 +83,17 @@ export interface MessageQueueState<Composer = unknown, Settings = unknown> {
     id: string,
     attempt: QueuedMessageSteerAttempt,
   ) => boolean;
-  /** Ends the attempt only when `commandId` is the live attempt's, so stale outcomes are ignored. */
-  readonly endSteer: (threadKey: string, id: string, commandId: string) => void;
+  /**
+   * Ends the attempt only when `commandId` is the live attempt's, so stale outcomes are ignored.
+   * `failed`: the provider may already have the message (a delivery-uncertain rejection), so it
+   * is marked failed and waits for an explicit retry or removal instead of draining as a turn.
+   */
+  readonly endSteer: (
+    threadKey: string,
+    id: string,
+    commandId: string,
+    options?: { readonly failed?: boolean },
+  ) => void;
   /** Merges into the thread's hold. No-op (false) when the queue is empty or nothing changed. */
   readonly hold: (threadKey: string, hold: QueueHold) => boolean;
   /** Resume: drops the hold and acknowledges the given causes. */
@@ -254,11 +263,23 @@ export function createMessageQueueStore<Composer = unknown, Settings = unknown>(
       });
       return claimed;
     },
-    endSteer: (threadKey, id, commandId) =>
+    endSteer: (threadKey, id, commandId, options) =>
       set((state) => {
         if (state.steerAttemptsByThreadKey[threadKey]?.[id]?.commandId !== commandId) return state;
+        const steerAttemptsByThreadKey = withoutAttempt(
+          state.steerAttemptsByThreadKey,
+          threadKey,
+          id,
+        );
+        const queue = state.queuesByThreadKey[threadKey];
+        // A steered message is never being sent as a turn (beginSend refuses it).
+        if (options?.failed !== true || !queue) return { steerAttemptsByThreadKey };
         return {
-          steerAttemptsByThreadKey: withoutAttempt(state.steerAttemptsByThreadKey, threadKey, id),
+          steerAttemptsByThreadKey,
+          queuesByThreadKey: {
+            ...state.queuesByThreadKey,
+            [threadKey]: withDeliveryStatus(queue, id, "failed"),
+          },
         };
       }),
     hold: (threadKey, hold) => {

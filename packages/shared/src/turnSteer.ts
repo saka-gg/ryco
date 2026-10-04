@@ -14,6 +14,11 @@ export interface TurnSteerRejectionActivity {
   readonly messageId: string | null;
   readonly reason: TurnSteerRejectionReason;
   readonly error: string;
+  /**
+   * The provider may have received the steer (a restart cut off its delivery). The queue holds
+   * the message for an explicit retry or removal instead of sending it again as a turn.
+   */
+  readonly deliveryUncertain: boolean;
 }
 
 function readRecord(value: unknown): Record<string, unknown> | null {
@@ -40,5 +45,7 @@ export function readTurnSteerRejectionActivity(activity: {
       : reason === "deferred"
         ? "The message stays queued and is sent next."
         : "Provider rejected turn steering.";
-  return { messageId, reason, error };
+  // Only a failure can be uncertain; a deferred steer provably never reached the provider.
+  const deliveryUncertain = reason === "failed" && payload?.deliveryUncertain === true;
+  return { messageId, reason, error, deliveryUncertain };
 }

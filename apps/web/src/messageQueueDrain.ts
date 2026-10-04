@@ -72,16 +72,30 @@ function revokeQueuedPreviewUrls(_threadKey: string, entry: WebQueuedMessage): v
 /**
  * A steer the user asked for (Steer button, Mod+Enter) reports its outcome; an implicit one
  * (Enter in steer mode) falls back to the queue silently. Either way the message stays queued.
+ * A steer the provider may have received is always reported: its message no longer drains and
+ * waits on the row's Retry or remove.
  */
+export function steerRejectionToast(rejection: QueueDrainSteerRejection): {
+  readonly type: "info" | "error";
+  readonly title: string;
+  readonly description: string;
+} | null {
+  if (rejection.deliveryUncertain) {
+    return {
+      type: "error",
+      title: "Steer delivery unconfirmed",
+      description: `${rejection.error} The message stays queued until you retry or remove it.`,
+    };
+  }
+  if (!rejection.attempt.explicit) return null;
+  return rejection.reason === "deferred"
+    ? { type: "info", title: "Not steered", description: rejection.error }
+    : { type: "error", title: "Steer failed", description: rejection.error };
+}
+
 function notifySteerRejected(_threadKey: string, rejection: QueueDrainSteerRejection): void {
-  if (!rejection.attempt.explicit) return;
-  toastManager.add(
-    stackedThreadToast(
-      rejection.reason === "deferred"
-        ? { type: "info", title: "Not steered", description: rejection.error }
-        : { type: "error", title: "Steer failed", description: rejection.error },
-    ),
-  );
+  const toast = steerRejectionToast(rejection);
+  if (toast !== null) toastManager.add(stackedThreadToast(toast));
 }
 
 const webPlatform: MessageQueueDrainPlatform<SendTurnComposerSnapshot, SendTurnSettings> = {

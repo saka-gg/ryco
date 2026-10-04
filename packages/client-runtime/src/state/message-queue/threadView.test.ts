@@ -103,7 +103,10 @@ describe("readQueueThreadView", () => {
       { activityId: "a-1", messageId: "m-1", detail: "Thread already has active turn" },
     ]);
     expect([...loaded.steerRejectionsByActivityId]).toEqual([
-      ["a-2", { messageId: "m-2", reason: "failed", error: "Steer rejected." }],
+      [
+        "a-2",
+        { messageId: "m-2", reason: "failed", error: "Steer rejected.", deliveryUncertain: false },
+      ],
     ]);
   });
 

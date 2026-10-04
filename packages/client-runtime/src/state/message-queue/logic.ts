@@ -172,6 +172,7 @@ export type QueuedMessageSteerOutcome =
       readonly status: "rejected";
       readonly reason: TurnSteerRejectionReason;
       readonly error: string;
+      readonly deliveryUncertain: boolean;
     };
 
 const EMPTY_STEER_REJECTIONS: ReadonlyMap<string, TurnSteerRejectionActivity> = new Map();
@@ -209,15 +210,25 @@ export function resolveQueuedMessageSteerOutcome(input: {
   if (rejection.messageId !== null && rejection.messageId !== input.messageId) {
     return { status: "pending" };
   }
-  return { status: "rejected", reason: rejection.reason, error: rejection.error };
+  return {
+    status: "rejected",
+    reason: rejection.reason,
+    error: rejection.error,
+    deliveryUncertain: rejection.deliveryUncertain,
+  };
 }
 
-/** A steer attempt its own request rejected: the message stays queued for the next turn. */
+/**
+ * A steer attempt its own request rejected. The message stays queued for the next turn, unless
+ * `deliveryUncertain`: the provider may already have it, so sending it again could duplicate
+ * it. Such a message is marked failed and waits for an explicit retry or removal.
+ */
 export interface QueuedMessageSteerRejection {
   readonly messageId: string;
   readonly attempt: QueuedMessageSteerAttempt;
   readonly reason: TurnSteerRejectionReason;
   readonly error: string;
+  readonly deliveryUncertain: boolean;
 }
 
 /** Settled steer attempts: accepted (projected) message ids and rejections, in attempt order. */
@@ -237,7 +248,13 @@ export function collectQueuedMessageSteerOutcomes(input: {
     });
     if (outcome.status === "accepted") accepted.push(messageId);
     else if (outcome.status === "rejected") {
-      rejected.push({ messageId, attempt, reason: outcome.reason, error: outcome.error });
+      rejected.push({
+        messageId,
+        attempt,
+        reason: outcome.reason,
+        error: outcome.error,
+        deliveryUncertain: outcome.deliveryUncertain,
+      });
     }
   }
   return { accepted, rejected };

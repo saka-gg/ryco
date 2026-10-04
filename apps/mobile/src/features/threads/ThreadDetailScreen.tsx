@@ -93,6 +93,7 @@ import {
 } from "../../rpc/wsConnectionState";
 import {
   clearThreadOutboxSteering,
+  endThreadOutboxSteer,
   enqueueThreadOutboxMessage,
   getThreadOutboxHold,
   holdThreadOutboxForInterrupt,
@@ -100,6 +101,7 @@ import {
   markThreadOutboxSteering,
   releaseThreadOutboxHold,
   removeThreadOutboxMessage,
+  retryThreadOutboxMessage,
   retryThreadOutboxReview,
   subscribeThreadOutbox,
 } from "../../state/threadOutbox";
@@ -742,7 +744,8 @@ export function ThreadDetailScreen(props: {
   );
 
   // Accepted steers are projected into the running turn; a rejection of THIS attempt returns
-  // the message to the queue. Deferred rejections stay quiet: the row stays visibly queued.
+  // the message to the queue (held for an explicit retry when the provider may have it).
+  // Deferred rejections stay quiet: the row stays visibly queued.
   useEffect(() => {
     if (!thread || steerAttempts.size === 0) return;
     const outcomes = collectQueuedMessageSteerOutcomes({
@@ -755,6 +758,8 @@ export function ThreadDetailScreen(props: {
       endSteerAttempt(messageId, steerAttempts.get(messageId)!.commandId);
     }
     for (const rejection of outcomes.rejected) {
+      // Holds a message the provider may have received for an explicit retry.
+      endThreadOutboxSteer(rejection);
       endSteerAttempt(rejection.messageId, rejection.attempt.commandId);
     }
     const failed = outcomes.rejected.findLast((rejection) => rejection.reason === "failed");
@@ -1292,6 +1297,10 @@ export function ThreadDetailScreen(props: {
         }}
         onRetryReview={(messageId) => {
           retryThreadOutboxReview(messageId);
+          runOutboxDrain();
+        }}
+        onRetryHeld={(messageId) => {
+          retryThreadOutboxMessage(messageId);
           runOutboxDrain();
         }}
         steeringIds={steeringMessageIds}

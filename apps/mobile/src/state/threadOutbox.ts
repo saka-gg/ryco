@@ -11,6 +11,7 @@ import {
   removeQueueHoldCauses,
   resolveQueueDrainStep,
   mergeQueueHold,
+  type QueueDrainSteerRejection,
   type QueueEnvironmentReadiness,
   type QueueHold,
   type QueueSendHooks,
@@ -99,6 +100,25 @@ export function clearThreadOutboxSteering(messageId: string, commandId?: string)
   const attempt = steeringOutboxAttempts.get(messageId);
   if (!attempt || (commandId !== undefined && attempt.commandId !== commandId)) return;
   steeringOutboxAttempts.delete(messageId);
+  notifyListeners();
+}
+
+/**
+ * Ends a steer attempt its own request rejected (stale outcomes are ignored). A rejection the
+ * provider may have received holds the message in place for an explicit retry or removal.
+ * Both the drain and the thread screen's outcome effect call this, so whichever sees the
+ * rejection first applies it and the other finds no attempt.
+ */
+export function endThreadOutboxSteer(rejection: QueueDrainSteerRejection): void {
+  const attempt = steeringOutboxAttempts.get(rejection.messageId);
+  if (!attempt || attempt.commandId !== rejection.attempt.commandId) return;
+  steeringOutboxAttempts.delete(rejection.messageId);
+  if (rejection.deliveryUncertain) {
+    updateThreadOutboxMessage(rejection.messageId, (message) => ({
+      ...message,
+      uncertainSteerError: rejection.error,
+    }));
+  }
   notifyListeners();
 }
 
@@ -450,6 +470,22 @@ export function removeThreadOutboxMessage(messageId: string): void {
   commitMessages(next);
 }
 
+/** Rewrites one message in place, keeping its queue position. */
+function updateThreadOutboxMessage(
+  messageId: string,
+  update: (message: QueuedThreadMessage) => QueuedThreadMessage,
+): void {
+  if (!messages.some((message) => message.messageId === messageId)) return;
+  commitMessages(
+    messages.map((message) => (message.messageId === messageId ? update(message) : message)),
+  );
+}
+
+/** The user's explicit retry of a message held after a delivery-uncertain steer. */
+export function retryThreadOutboxMessage(messageId: string): void {
+  updateThreadOutboxMessage(messageId, ({ uncertainSteerError: _held, ...message }) => message);
+}
+
 export function listThreadOutboxMessages(): ReadonlyArray<QueuedThreadMessage> {
   return messages;
 }
@@ -612,7 +648,9 @@ export async function drainThreadOutbox(deps: ThreadOutboxDrainDeps): Promise<vo
       const drainStep = resolveQueueDrainStep({
         nowIso,
         queue: queue.map((message) =>
-          message.resumeReviewError || hasRetiredProjectMemory(message)
+          message.resumeReviewError ||
+          message.uncertainSteerError ||
+          hasRetiredProjectMemory(message)
             ? { id: message.messageId, deliveryStatus: "failed" as const }
             : { id: message.messageId },
         ),
@@ -664,9 +702,7 @@ export async function drainThreadOutbox(deps: ThreadOutboxDrainDeps): Promise<vo
         continue;
       }
       if (drainStep.kind === "reconcile") {
-        for (const rejection of drainStep.endSteers) {
-          clearThreadOutboxSteering(rejection.messageId, rejection.attempt.commandId);
-        }
+        for (const rejection of drainStep.endSteers) endThreadOutboxSteer(rejection);
         for (const id of drainStep.removeIds) steeringOutboxAttempts.delete(id);
         if (drainStep.removeIds.length > 0) {
           commitMessages(

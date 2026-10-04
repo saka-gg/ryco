@@ -165,6 +165,16 @@ describe("resolveQueuedMessageSteerOutcome", () => {
       status: "rejected",
       reason: "deferred",
       error: "Not now.",
+      deliveryUncertain: false,
+    });
+  });
+
+  it("carries a rejection whose delivery to the provider is uncertain", () => {
+    expect(outcome([rejection("cmd-new", { reason: "failed", deliveryUncertain: true })])).toEqual({
+      status: "rejected",
+      reason: "failed",
+      error: "Not now.",
+      deliveryUncertain: true,
     });
   });
 
@@ -177,6 +187,7 @@ describe("resolveQueuedMessageSteerOutcome", () => {
       status: "rejected",
       reason: "failed",
       error: "Not now.",
+      deliveryUncertain: false,
     });
   });
 });

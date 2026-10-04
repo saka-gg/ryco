@@ -300,6 +300,7 @@ describe("resolveQueueDrainStep", () => {
           attempt: steerAttempt("cmd-2"),
           reason: "deferred",
           error: "Steer rejected.",
+          deliveryUncertain: false,
         },
       ],
     });
