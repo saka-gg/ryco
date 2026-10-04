@@ -39,7 +39,11 @@ import {
 } from "../../provider/Errors.ts";
 import { PersistenceSqlError } from "../../persistence/Errors.ts";
 import type { ProviderFreshSessionStartInput } from "../../provider/Services/ProviderService.ts";
-import { ContextHandoffCoordinator } from "../Services/ContextHandoffCoordinator.ts";
+import {
+  ContextHandoffCoordinator,
+  type ContextHandoffLaneControl,
+} from "../Services/ContextHandoffCoordinator.ts";
+import { ProviderSessionStartCancelledError } from "../threadLaneControl.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import {
   ProjectionSnapshotQuery,
@@ -429,7 +433,17 @@ function makeHarness(input?: {
     Effect.succeed("stopped" as const),
   );
   const retireSessionBinding = vi.fn(() => Effect.succeed(true));
-  const restoreSessionBinding = vi.fn((_binding: ProviderRuntimeBinding) => Effect.succeed(true));
+  const restoreSessionBinding = vi.fn((_binding: ProviderRuntimeBinding) =>
+    Effect.sync(() => {
+      deliveryOrder.push("restore");
+      return true;
+    }),
+  );
+  const stopSession = vi.fn((_input: { readonly threadId: ThreadId }) =>
+    Effect.sync(() => {
+      deliveryOrder.push("stop-session");
+    }),
+  );
   const contextService: ContextHandoffServiceShape = {
     buildAndStore: ({ source, target }) =>
       Effect.succeed({
@@ -547,6 +561,7 @@ function makeHarness(input?: {
       stopSessionBinding,
       retireSessionBinding,
       restoreSessionBinding,
+      stopSession,
       streamEvents: Stream.empty,
     }),
     Layer.mock(ProviderRegistry)({
@@ -565,6 +580,7 @@ function makeHarness(input?: {
     stopSessionBinding,
     retireSessionBinding,
     restoreSessionBinding,
+    stopSession,
     run: (effect: Effect.Effect<void, never, ContextHandoffCoordinator>) =>
       Effect.runPromise(effect.pipe(Effect.provide(layer))),
   };
@@ -988,6 +1004,182 @@ describe("ContextHandoffCoordinator", () => {
     expect(handoffActivityPayloads(harness.commands)).toHaveLength(0);
     expect(harness.stopSessionBinding).not.toHaveBeenCalled();
     expect(harness.restoreSessionBinding).not.toHaveBeenCalled();
+  });
+});
+
+describe("ContextHandoffCoordinator lane control", () => {
+  const sessionSets = (commands: ReadonlyArray<OrchestrationCommand>) =>
+    commands.flatMap((command) => (command.type === "thread.session.set" ? [command.session] : []));
+  const terminalActivity = (commands: ReadonlyArray<OrchestrationCommand>) =>
+    commands.find(
+      (command) =>
+        command.type === "thread.activity.append" &&
+        command.activity.kind === "context-handoff" &&
+        (command.activity.payload as { status?: string }).status === "failed",
+    );
+  const recordingControl = (
+    deliveryOrder: string[],
+    overrides: Partial<ContextHandoffLaneControl> = {},
+  ): ContextHandoffLaneControl => ({
+    guardStart: (effect) => effect,
+    onDispatchStarted: Effect.sync(() => {
+      deliveryOrder.push("dispatch-started");
+    }),
+    stopRequested: Effect.succeed(false),
+    ...overrides,
+  });
+
+  it("announces dispatch once, after dispatching is persisted and before the turn is sent", async () => {
+    const harness = makeHarness();
+    await harness.run(
+      Effect.gen(function* () {
+        const coordinator = yield* ContextHandoffCoordinator;
+        yield* coordinator.processTurnStart(
+          turnStartEvent(),
+          recordingControl(harness.deliveryOrder),
+        );
+      }),
+    );
+    expect(harness.deliveryOrder).toEqual(["persist", "start", "dispatch-started", "send"]);
+    expect(harness.repository.get()?.status).toBe("consumed");
+  });
+
+  it("does not announce dispatch when the target session fails to start", async () => {
+    const harness = makeHarness({
+      startFreshSessionFailure: new ProviderAdapterRequestError({
+        provider: "claudeAgent",
+        method: "session/start",
+        detail: "target unavailable",
+      }),
+    });
+    await harness.run(
+      Effect.gen(function* () {
+        const coordinator = yield* ContextHandoffCoordinator;
+        yield* coordinator.processTurnStart(
+          turnStartEvent(),
+          recordingControl(harness.deliveryOrder),
+        );
+      }),
+    );
+    expect(harness.deliveryOrder).not.toContain("dispatch-started");
+    expect(harness.sendTurn).not.toHaveBeenCalled();
+  });
+
+  it("recovery never announces dispatch", async () => {
+    const harness = makeHarness({
+      initialRecord: { ...requestedRecord(), status: "preparing" },
+    });
+    await harness.run(
+      Effect.gen(function* () {
+        const coordinator = yield* ContextHandoffCoordinator;
+        yield* coordinator.recover();
+      }),
+    );
+    expect(harness.deliveryOrder).toEqual(["persist", "start", "send"]);
+  });
+
+  it("puts the source back stopped, never ready, when the user stopped the handoff turn", async () => {
+    const harness = makeHarness({
+      sendFailure: new ProviderAdapterRequestError({
+        provider: "claudeAgent",
+        method: "session/prompt",
+        detail: "session closed",
+      }),
+    });
+    await harness.run(
+      Effect.gen(function* () {
+        const coordinator = yield* ContextHandoffCoordinator;
+        yield* coordinator.processTurnStart(
+          turnStartEvent(),
+          recordingControl(harness.deliveryOrder, { stopRequested: Effect.succeed(true) }),
+        );
+      }),
+    );
+    expect(harness.repository.get()).toMatchObject({
+      status: "failed",
+      error: "Stopped before the handoff turn was accepted.",
+    });
+    const finalSession = sessionSets(harness.commands).at(-1);
+    expect(finalSession).toMatchObject({
+      status: "stopped",
+      providerInstanceId: sourceSelection.instanceId,
+      runtimeSessionId: sourceRuntimeSessionId,
+      lastError: null,
+    });
+    expect(
+      sessionSets(harness.commands).some(
+        (session) =>
+          session.providerInstanceId === sourceSelection.instanceId && session.status === "ready",
+      ),
+    ).toBe(false);
+    // The binding is restored for its resume cursor, then the source is stopped.
+    expect(harness.deliveryOrder.slice(-2)).toEqual(["restore", "stop-session"]);
+    const terminal = terminalActivity(harness.commands);
+    expect(
+      terminal?.type === "thread.activity.append"
+        ? (terminal.activity.payload as { error?: string }).error
+        : undefined,
+    ).toBe("Stopped before the handoff turn was accepted.");
+  });
+
+  it("cancels the target start through the lane guard without sending the turn", async () => {
+    const harness = makeHarness();
+    await harness.run(
+      Effect.gen(function* () {
+        const coordinator = yield* ContextHandoffCoordinator;
+        yield* coordinator.processTurnStart(
+          turnStartEvent(),
+          recordingControl(harness.deliveryOrder, {
+            guardStart: () =>
+              Effect.fail(
+                new ProviderSessionStartCancelledError({
+                  threadId: "thread-handoff",
+                  stopSequence: 9,
+                  detail: "Stopped before the provider session started.",
+                }),
+              ),
+          }),
+        );
+      }),
+    );
+    expect(harness.sendTurn).not.toHaveBeenCalled();
+    expect(harness.deliveryOrder).not.toContain("dispatch-started");
+    expect(harness.repository.get()).toMatchObject({
+      status: "failed",
+      error: "Stopped before the handoff turn was accepted.",
+    });
+    expect(terminalActivity(harness.commands)).toBeDefined();
+    expect(sessionSets(harness.commands).at(-1)).toMatchObject({
+      status: "stopped",
+      runtimeSessionId: sourceRuntimeSessionId,
+    });
+  });
+
+  it("fails the dispatch without sending when a stop was noted before ownership", async () => {
+    const harness = makeHarness();
+    await harness.run(
+      Effect.gen(function* () {
+        const coordinator = yield* ContextHandoffCoordinator;
+        yield* coordinator.processTurnStart(
+          turnStartEvent(),
+          recordingControl(harness.deliveryOrder, {
+            onDispatchStarted: Effect.fail(
+              new ProviderSessionStartCancelledError({
+                threadId: "thread-handoff",
+                stopSequence: 9,
+                detail: "Stopped before the provider session started.",
+              }),
+            ),
+          }),
+        );
+      }),
+    );
+    expect(harness.sendTurn).not.toHaveBeenCalled();
+    expect(harness.repository.get()).toMatchObject({
+      status: "failed",
+      error: "Stopped before the handoff turn was accepted.",
+    });
+    expect(sessionSets(harness.commands).at(-1)?.status).toBe("stopped");
   });
 });
 
