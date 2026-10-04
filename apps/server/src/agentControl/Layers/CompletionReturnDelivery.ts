@@ -24,7 +24,6 @@ import {
 import { Context, Duration, Effect, Layer, Option, Schedule, Semaphore } from "effect";
 import {
   CompletionReturnRepository,
-  DELEGATION_WAKE_COMMAND_PREFIX,
   DELEGATION_WAKE_MESSAGE_PREFIX,
   type CompletionReturnBatch,
   type CompletionReturnCapture,
@@ -177,9 +176,11 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
   const policy = yield* AgentControlPolicy;
   const providers = yield* ProviderService;
   const lock = yield* Semaphore.make(1);
-  // Both mutated only under `lock`.
+  // All mutated only under `lock`.
   const pendingStartSeen = new Map<ThreadId, { messageId: string; firstSeenMs: number }>();
   const coldInFlight = new Map<ThreadId, { messageId: MessageId; sinceMs: number }>();
+  /** Child → its own unbound delegation wake, first seen by this process (nested hold). */
+  const ownWakeSeen = new Map<ThreadId, { messageId: MessageId; firstSeenMs: number }>();
 
   const publish = (proposalIds: Iterable<AgentControlProposalId>) =>
     Effect.forEach(
@@ -244,14 +245,87 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
         return DETAIL.parentWorktreeArchived;
       return null;
     });
+  const isWakeMessage = (messageId: string | null | undefined) =>
+    messageId?.startsWith(DELEGATION_WAKE_MESSAGE_PREFIX) ?? false;
   const isWakeTurn = (threadId: ThreadId, turnId: TurnId) =>
     repository
       .turnInfo(threadId, turnId)
-      .pipe(
-        Effect.map(
-          (turn) => turn?.pendingMessageId?.startsWith(DELEGATION_WAKE_MESSAGE_PREFIX) ?? false,
-        ),
-      );
+      .pipe(Effect.map((turn) => isWakeMessage(turn?.pendingMessageId)));
+  /** A live provider session in this process. A failed read counts as live: never release on uncertainty. */
+  const sessionLive = (threadId: ThreadId) =>
+    providers.getSession(threadId).pipe(
+      Effect.map(Option.isSome),
+      Effect.catch(() => Effect.succeed(true)),
+    );
+  /** §3.4: a wake is cold when the parent has no live session; a failed read counts as cold. */
+  const parentCold = (threadId: ThreadId) =>
+    providers.getSession(threadId).pipe(
+      Effect.map(Option.isNone),
+      Effect.catch(() => Effect.succeed(true)),
+    );
+  const coldBudgetFull = () => coldInFlight.size >= MAX_COLD_WAKES_IN_FLIGHT;
+  const inScope = (record: CompletionReturnRecord, parent: OrchestrationThreadShell) =>
+    // An unattended, untrusted-content-triggered turn never runs with more privilege or in a
+    // different checkout than the delegation had. Lowering privilege is fine.
+    agentControlRuntimeRank[parent.runtimeMode] <=
+      agentControlRuntimeRank[record.parentRuntimeMode] &&
+    parent.worktreePath === record.parentWorktreePath;
+
+  /** The delegating message of a row's parent turn, cached per delivery pass. */
+  const delegatingMessage = (
+    cache: Map<TurnId, MessageId | null>,
+    record: CompletionReturnRecord,
+  ) =>
+    Effect.gen(function* () {
+      const known = cache.get(record.parentTurnId);
+      if (known !== undefined) return known;
+      const messageId = yield* repository.turnMessageId(record.parentThreadId, record.parentTurnId);
+      cache.set(record.parentTurnId, messageId);
+      return messageId;
+    });
+  /**
+   * Fill `sinceSequence` lazily with the delegating turn's own start, so a Stop pressed before
+   * the child existed (an approval-gated request, say) still counts. Without a known start,
+   * only wakes after the row's creation can be cohort turns, so the child's first event bounds
+   * the scan just as well. Persisted with the row's next save.
+   */
+  const withStopBound = <R extends CompletionReturnRecord>(
+    record: R,
+    cache: Map<TurnId, MessageId | null>,
+  ) =>
+    Effect.gen(function* () {
+      if (record.sinceSequence !== undefined && record.sinceSequence !== null) return record;
+      const delegating = yield* delegatingMessage(cache, record);
+      const start =
+        delegating === null
+          ? null
+          : yield* repository.turnStartSequence(record.parentThreadId, delegating);
+      const sinceSequence =
+        start ?? (yield* repository.firstEventSequence(record.childThreadId)) ?? 0;
+      return { ...record, sinceSequence };
+    });
+  /** §3.1 user stop, decided per row in SQL (no shared limit can hide a matching stop). */
+  const userStoppedRows = (
+    parentThreadId: ThreadId,
+    rows: ReadonlyArray<CompletionReturnRecord>,
+    cache: Map<TurnId, MessageId | null>,
+  ) =>
+    Effect.gen(function* () {
+      const stopped = new Set<ThreadId>();
+      for (const row of rows) {
+        const delegatingMessageId = yield* delegatingMessage(cache, row);
+        if (
+          yield* repository.cohortUserStop({
+            threadId: parentThreadId,
+            sinceSequence: row.sinceSequence ?? 0,
+            delegatingMessageId,
+            wakesSince: row.createdAt,
+          })
+        )
+          stopped.add(row.childThreadId);
+      }
+      return stopped;
+    });
 
   /**
    * §3.1 parent idle: the shared queued-turn predicate plus no observed pending start. A
@@ -309,11 +383,17 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
   const settleBatch = (
     commandId: CommandId,
     ctx: ScanContext,
-    options: { readonly replay: boolean; readonly trigger?: CompletionReturnRecord },
+    options: {
+      readonly replay: boolean;
+      /** The batch command was applied during this scan, so an accepted wake starts now. */
+      readonly applied: boolean;
+      readonly trigger?: CompletionReturnRecord;
+    },
   ) =>
     Effect.gen(function* () {
       const now = ctx.now;
       let replay = options.replay;
+      let applied = options.applied;
       let trigger = options.trigger;
       while (true) {
         const listed = (yield* repository.listBatch(commandId)).map(
@@ -342,33 +422,38 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
                   ] as const,
               ),
             );
+            // The cold slot's grace runs from the apply that started the wake: a replay or
+            // a late settle must not inherit the original claim time.
             if (saved && batch.cold)
               coldInFlight.set(rows[0]!.parentThreadId, {
                 messageId: batch.messageId,
-                sinceMs: Date.parse(batch.dispatchedAt),
+                sinceMs: applied ? ctx.nowMs : Date.parse(batch.dispatchedAt),
               });
             return;
           }
+          // Every member moves past the batch attempt, so any later batch with this anchor has
+          // a fresh id. Blocking counts only the rejections a row itself took part in.
           const attempts = batch.attempt + 1;
           yield* saveAll(
-            rows.map(
-              (row) =>
-                [
+            rows.map((row) => {
+              const rejections = (row.rejections ?? 0) + 1;
+              return [
+                row,
+                patch(
                   row,
-                  patch(
-                    row,
-                    {
-                      ...(attempts >= MAX_DELIVERY_ATTEMPTS
-                        ? { status: "blocked" as const, detail: DETAIL.rejectedRepeatedly }
-                        : { status: "ready" as const, detail: DETAIL.rejectedRetry }),
-                      batch: null,
-                      command: null,
-                      deliveryAttempts: attempts,
-                    },
-                    now,
-                  ),
-                ] as const,
-            ),
+                  {
+                    ...(rejections >= MAX_DELIVERY_ATTEMPTS
+                      ? { status: "blocked" as const, detail: DETAIL.rejectedRepeatedly }
+                      : { status: "ready" as const, detail: DETAIL.rejectedRetry }),
+                    batch: null,
+                    command: null,
+                    deliveryAttempts: attempts,
+                    rejections,
+                  },
+                  now,
+                ),
+              ] as const;
+            }),
           );
           return;
         }
@@ -402,13 +487,48 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
         }
         if (!(yield* policy.isEnabled) || !(yield* parentIdle(parent.value, ctx.nowMs)))
           return yield* holdAll(rows, now);
-        const replayed: CompletionReturnBatch = { ...batch, replays: batch.replays + 1 };
+        // A replay re-joins the wake, so it passes the same user-stop and scope checks as a
+        // new batch. The frozen command was never applied (no receipt), so releasing the
+        // rows to `ready` cannot duplicate it: user-stopped rows end, the rest re-batch.
+        const cache = new Map<TurnId, MessageId | null>();
+        const bounded: CompletionReturnRecord[] = [];
+        for (const row of rows) bounded.push(yield* withStopBound(row, cache));
+        const stopped = yield* userStoppedRows(parent.value.id, bounded, cache);
+        if (stopped.size > 0 || bounded.some((row) => !inScope(row, parent.value))) {
+          yield* saveAll(
+            bounded.map(
+              (row) =>
+                [
+                  row,
+                  patch(
+                    row,
+                    {
+                      ...(stopped.has(row.childThreadId)
+                        ? { status: "cancelled" as const, detail: DETAIL.userStopped }
+                        : { status: "ready" as const, detail: DETAIL.captured }),
+                      batch: null,
+                      command: null,
+                    },
+                    now,
+                  ),
+                ] as const,
+            ),
+          );
+          return;
+        }
+        // §3.4: a replay that cold-starts the parent counts against the same budget.
+        const cold = yield* parentCold(parent.value.id);
+        if (cold && coldBudgetFull()) return yield* holdAll(bounded, now, DETAIL.cold);
+        const replayed: CompletionReturnBatch = { ...batch, replays: batch.replays + 1, cold };
         if (
-          !(yield* saveAll(rows.map((row) => [row, patch(row, { batch: replayed }, now)] as const)))
+          !(yield* saveAll(
+            bounded.map((row) => [row, patch(row, { batch: replayed }, now)] as const),
+          ))
         )
           return;
         yield* commands.apply(frozen).pipe(Effect.catch(() => Effect.void));
         replay = false;
+        applied = true;
         trigger = undefined;
       }
     });
@@ -459,6 +579,38 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
       return yield* hold(record, ctx.now);
     });
 
+  /**
+   * The child's own newest delegation wake, when `settled` does not reflect it yet:
+   * - `pending`: delivered but not bound yet;
+   * - `stopped`: it failed to start, or it stayed unbound for the queued-start grace of this
+   *   process's scan time while the child has no live or starting session (its start died
+   *   with a restart). The child will not process those results, so waiting is pointless;
+   * - `none`: no such wake, or it bound (the turn checks cover it).
+   */
+  const ownWakeState = (child: OrchestrationThreadShell, ctx: ScanContext) =>
+    Effect.gen(function* () {
+      const messageId = yield* repository.latestDeliveredWake(child.id);
+      const state =
+        messageId === null ? "absent" : yield* repository.wakeStartState(child.id, messageId);
+      if (messageId === null || state === "bound" || state === "failed") {
+        ownWakeSeen.delete(child.id);
+        return state === "failed" ? ("stopped" as const) : ("none" as const);
+      }
+      const seen = ownWakeSeen.get(child.id);
+      const firstSeenMs = seen?.messageId === messageId ? seen.firstSeenMs : ctx.nowMs;
+      if (seen?.messageId !== messageId) ownWakeSeen.set(child.id, { messageId, firstSeenMs });
+      const childStarting =
+        child.session?.status === "running" || child.session?.status === "starting";
+      if (
+        ctx.nowMs - firstSeenMs < QUEUED_TURN_START_GRACE_MS ||
+        childStarting ||
+        (yield* sessionLive(child.id))
+      )
+        return "pending" as const;
+      ownWakeSeen.delete(child.id);
+      return "stopped" as const;
+    });
+
   const advanceSettled = (
     record: CompletionReturnRecord & {
       readonly settled: NonNullable<CompletionReturnRecord["settled"]>;
@@ -470,29 +622,37 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
       const settled = record.settled;
       if (settled.state === "interrupted") return yield* notice(record, "interrupted", ctx);
       const latestTurnId = child.latestTurn?.turnId ?? null;
-      const latestIsOther = latestTurnId !== null && latestTurnId !== settled.turnId;
-      const latestIsWake = latestIsOther && (yield* isWakeTurn(child.id, latestTurnId));
-      const pending = yield* repository.pendingTurnStart(child.id);
-      const pendingWake =
-        pending !== null &&
-        !pending.startFailed &&
-        pending.messageId.startsWith(DELEGATION_WAKE_MESSAGE_PREFIX);
-      // Nested delegation: return the child's output after its own wakes, not "I delegated".
-      if (latestIsWake || pendingWake || (yield* repository.hasOutstandingDelegations(child.id)))
+      if (latestTurnId !== null && latestTurnId !== settled.turnId) {
+        const latest = yield* repository.turnInfo(child.id, latestTurnId);
+        // Someone else's follow-up is not returned (§7), even when a later wake of the
+        // child's own hides it.
+        if (
+          !isWakeMessage(latest?.pendingMessageId) ||
+          (yield* repository.nonWakeTurnBetween(child.id, settled.turnId, null))
+        )
+          return yield* notice(record, "advanced", ctx);
+        // Nested delegation: the child is working through its own delegated results, and
+        // ingestion moves `settled` to the wake turn when it ends. A wake that ended without
+        // that observation (startup reconciliation interrupted it, or its provider died)
+        // never gets one once no provider session is left.
+        if (
+          (latest?.state === "interrupted" || latest?.state === "error") &&
+          !(yield* sessionLive(child.id))
+        )
+          return yield* notice(record, "stopped", ctx);
         return yield* hold(record, ctx.now, DETAIL.nested);
-      if (latestIsOther) return yield* notice(record, "advanced", ctx);
+      }
+      // Nested delegation: return the child's output after its own wakes, not "I delegated".
+      if (yield* repository.hasOutstandingDelegations(child.id))
+        return yield* hold(record, ctx.now, DETAIL.nested);
+      const ownWake = yield* ownWakeState(child, ctx);
+      if (ownWake === "stopped") return yield* notice(record, "stopped", ctx);
+      if (ownWake === "pending") return yield* hold(record, ctx.now, DETAIL.nested);
       const childBusy = child.session?.status === "running" || child.session?.status === "starting";
       const backgroundBusy =
         settled.backgroundPending || Boolean(child.backgroundLiveness) || childBusy;
-      if (backgroundBusy) {
-        // Background work cannot outlive the provider session (this covers a restart). A
-        // failed read counts as live: never release on uncertainty.
-        const live = yield* providers.getSession(child.id).pipe(
-          Effect.map(Option.isSome),
-          Effect.catch(() => Effect.succeed(true)),
-        );
-        if (live) return yield* hold(record, ctx.now);
-      }
+      // Background work cannot outlive the provider session (this covers a restart).
+      if (backgroundBusy && (yield* sessionLive(child.id))) return yield* hold(record, ctx.now);
       const output = yield* repository.output(child.id, settled.turnId);
       if (output.streaming > 0) return yield* hold(record, ctx.now);
       return yield* capture(
@@ -547,49 +707,17 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
         if (!record.batch) return yield* finish(record, "uncertain", DETAIL.uncertain, ctx.now);
         if (ctx.settledCommands.has(record.batch.commandId)) return;
         ctx.settledCommands.add(record.batch.commandId);
-        return yield* settleBatch(record.batch.commandId, ctx, { replay: true, trigger: record });
+        return yield* settleBatch(record.batch.commandId, ctx, {
+          replay: true,
+          applied: false,
+          trigger: record,
+        });
       }
       if (record.status === "waiting") return yield* advanceWaiting(record, ctx);
       if (record.status === "ready") return yield* checkReady(record, ctx);
     });
 
   // ── delivery ───────────────────────────────────────────────────────────
-  const inScope = (record: CompletionReturnRecord, parent: OrchestrationThreadShell) =>
-    // An unattended, untrusted-content-triggered turn never runs with more privilege or in a
-    // different checkout than the delegation had. Lowering privilege is fine.
-    agentControlRuntimeRank[parent.runtimeMode] <=
-      agentControlRuntimeRank[record.parentRuntimeMode] &&
-    parent.worktreePath === record.parentWorktreePath;
-
-  const userStopped = (parentThreadId: ThreadId, rows: ReadonlyArray<CapturedRecord>) =>
-    Effect.gen(function* () {
-      const stopped = new Set<ThreadId>();
-      if (rows.length === 0) return stopped;
-      const since = Math.min(...rows.map((row) => row.sinceSequence ?? 0));
-      const stops = yield* repository.userStopAttributions(parentThreadId, since);
-      if (stops.length === 0) return stopped;
-      const delegatingMessages = new Map<TurnId, MessageId | null>();
-      for (const row of rows) {
-        let delegating = delegatingMessages.get(row.parentTurnId);
-        if (delegating === undefined) {
-          delegating = yield* repository.turnMessageId(parentThreadId, row.parentTurnId);
-          delegatingMessages.set(row.parentTurnId, delegating);
-        }
-        const rowSince = row.sinceSequence ?? 0;
-        if (
-          stops.some(
-            (stop) =>
-              stop.stopSequence > rowSince &&
-              ((delegating !== null && stop.startMessageId === delegating) ||
-                (stop.startCommandId?.startsWith(DELEGATION_WAKE_COMMAND_PREFIX) === true &&
-                  stop.startOccurredAt >= row.createdAt)),
-          )
-        )
-          stopped.add(row.childThreadId);
-      }
-      return stopped;
-    });
-
   const deliverParent = (parentThreadId: ThreadId, ctx: ScanContext) =>
     Effect.gen(function* () {
       const now = ctx.now;
@@ -616,29 +744,18 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
 
       // The user-stop decision is persisted as a terminal status, so later event retention
       // cannot undo it. sinceSequence only bounds the scan and is persisted lazily.
+      const cache = new Map<TurnId, MessageId | null>();
       const bounded: CapturedRecord[] = [];
-      for (const row of scoped)
-        bounded.push(
-          row.sinceSequence === undefined || row.sinceSequence === null
-            ? {
-                ...row,
-                sinceSequence: (yield* repository.firstEventSequence(row.childThreadId)) ?? 0,
-              }
-            : row,
-        );
-      const stopped = yield* userStopped(parentThreadId, bounded);
+      for (const row of scoped) bounded.push(yield* withStopBound(row, cache));
+      const stopped = yield* userStoppedRows(parentThreadId, bounded, cache);
       for (const row of bounded)
         if (stopped.has(row.childThreadId))
           yield* finish(row, "cancelled", DETAIL.userStopped, now);
       const remaining = bounded.filter((row) => !stopped.has(row.childThreadId));
       if (remaining.length === 0) return;
 
-      const cold = yield* providers.getSession(parentThreadId).pipe(
-        Effect.map(Option.isNone),
-        Effect.catch(() => Effect.succeed(true)),
-      );
-      if (cold && coldInFlight.size >= MAX_COLD_WAKES_IN_FLIGHT)
-        return yield* holdAll(remaining, now, DETAIL.cold);
+      const cold = yield* parentCold(parentThreadId);
+      if (cold && coldBudgetFull()) return yield* holdAll(remaining, now, DETAIL.cold);
 
       const members = selectWakeBatch(remaining);
       const anchor = members
@@ -685,7 +802,7 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
       if (!claimed) return;
       yield* publish(members.map((row) => row.proposalId));
       yield* commands.apply(command).pipe(Effect.catch(() => Effect.void));
-      yield* settleBatch(command.commandId, ctx, { replay: false });
+      yield* settleBatch(command.commandId, ctx, { replay: false, applied: true });
     });
 
   const releaseColdSlots = (nowMs: number) =>

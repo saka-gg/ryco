@@ -33,6 +33,7 @@ import { AgentControlProposalEventsLive } from "./AgentControlProposalEvents.ts"
 import { completionFixture, completionFixtureTime as now } from "../completionReturnTestSupport.ts";
 import {
   MAX_WAKE_TEXT_CHARS,
+  buildDelegationReturnCommand,
   delegationWakeIds,
   renderCompletionReturn,
   renderDelegationWake,
@@ -1004,6 +1005,351 @@ it.effect("T16 returns a nested child's output after its own delegation wake", (
     assert.include(h.sent[0]!.message.text, "after 1 delegation update(s)");
     assert.include(h.sent[0]!.message.text, "Final child answer");
     assert.notInclude(h.sent[0]!.message.text, "Result Result");
+  }).pipe(Effect.provide(layer)),
+);
+
+// ── review regressions ───────────────────────────────────────────────────
+
+const RESULT_CAPTURE = {
+  kind: "result",
+  outcome: "completed",
+  capturedAt: now,
+  section: "Captured section",
+} as const;
+
+it.effect("T6g counts a stop of the delegating turn pressed before the child existed", () =>
+  Effect.gen(function* () {
+    const h = yield* setup();
+    // The delegating turn starts, the user stops it while the (approval-gated) request is
+    // pending, and only then is the child created.
+    yield* h.appendEvent({
+      stream: "parent",
+      type: "thread.turn-start-requested",
+      commandId: "web:send",
+      payload: { messageId: "parent-initial" },
+    });
+    yield* h.appendEvent({
+      stream: "parent",
+      type: "thread.turn-interrupt-requested",
+      commandId: "web:stop",
+    });
+    yield* h.appendEvent({
+      stream: "child",
+      type: "thread.created",
+      commandId: "agent-control:create",
+    });
+    yield* h.ack();
+    yield* h.tick(3);
+    const record = yield* h.read();
+    assert.equal(record.status, "cancelled");
+    assert.include(record.detail, "You stopped the delegating chat");
+    // The persisted scan bound is the delegating turn's own start, not the child's first event.
+    assert.equal(record.sinceSequence, 1);
+    assert.equal(h.sent.length, 0);
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect("T6h finds a stop of a wake behind more than fifty unrelated stops", () =>
+  Effect.gen(function* () {
+    const h = yield* setup();
+    for (let index = 0; index < 60; index += 1) {
+      yield* h.appendEvent({
+        stream: "parent",
+        type: "thread.turn-start-requested",
+        commandId: "web:send",
+        payload: { messageId: `unrelated-${index}` },
+      });
+      yield* h.appendEvent({
+        stream: "parent",
+        type: "thread.turn-interrupt-requested",
+        commandId: "web:stop",
+      });
+    }
+    yield* h.appendEvent({
+      stream: "parent",
+      type: "thread.turn-start-requested",
+      commandId: "delegation-return:earlier-sibling",
+      payload: { messageId: "delegation-result:earlier-sibling" },
+    });
+    yield* h.appendEvent({
+      stream: "parent",
+      type: "thread.turn-interrupt-requested",
+      commandId: "web:stop",
+    });
+    yield* h.ack();
+    yield* h.tick(3);
+    assert.equal((yield* h.read()).status, "cancelled");
+    assert.equal(h.sent.length, 0);
+  }).pipe(Effect.provide(layer)),
+);
+
+/** Leave `rows` claimed into one batch whose apply never happened (a crash before it). */
+const claimLost = (
+  h: Effect.Success<ReturnType<typeof setup>>,
+  parent: OrchestrationThreadShell,
+  rows: ReadonlyArray<CompletionReturnRecord>,
+  dispatchedAt: string,
+  cold: boolean,
+) =>
+  Effect.gen(function* () {
+    const anchor = rows.map((row) => row.childThreadId).toSorted()[0]!;
+    const command = buildDelegationReturnCommand({
+      parent,
+      latestUserMessageId: null,
+      sections: rows.map(() => RESULT_CAPTURE.section),
+      anchorChildThreadId: anchor,
+      attempt: 0,
+      now: dispatchedAt,
+    });
+    for (const row of rows) {
+      const claimed: CompletionReturnRecord = {
+        ...row,
+        status: "dispatching",
+        capture: RESULT_CAPTURE,
+        command: row.childThreadId === anchor ? command : null,
+        batch: {
+          commandId: command.commandId,
+          messageId: command.message.messageId,
+          anchorChildThreadId: anchor,
+          childThreadIds: rows.map((member) => member.childThreadId),
+          attempt: 0,
+          replays: 0,
+          dispatchedAt,
+          cold,
+        },
+      };
+      const stored = yield* h.repo.get(row.childThreadId);
+      if (stored) yield* h.repo.save(stored, claimed);
+      else yield* h.repo.insert(claimed);
+    }
+    return command;
+  });
+
+it.effect("T10 replays count against the cold budget and start the grace at the replay", () =>
+  Effect.gen(function* () {
+    const h = yield* setup();
+    const lost: Array<{ readonly commandId: CommandId }> = [];
+    for (const parent of ["p1", "p2"]) {
+      h.shells.set(parent, shell(parent, `${parent}-turn`, null));
+      const row = completionFixture({
+        childThreadId: ThreadId.make(`${parent}-child`),
+        initialMessageId: MessageId.make(`${parent}-child-initial`),
+        parentThreadId: ThreadId.make(parent),
+      });
+      lost.push(yield* claimLost(h, h.shells.get(parent)!, [row], at(-300), true));
+    }
+    // A restarted worker finds both cold batches without receipts.
+    const restarted = yield* h.makeWorker;
+    yield* restarted.scan(at(0));
+    assert.deepStrictEqual(
+      h.sent.map((command) => command.commandId),
+      [lost[0]!.commandId],
+    );
+    assert.include((yield* h.read("p2-child")).detail, "another chat's session");
+    // The slot's grace runs from the replay, not from the original claim 300 s earlier.
+    yield* restarted.scan(at(3));
+    assert.equal(h.sent.length, 1);
+    yield* restarted.scan(at(121));
+    assert.deepStrictEqual(
+      h.sent.map((command) => command.commandId),
+      [lost[0]!.commandId, lost[1]!.commandId],
+    );
+    assert.equal((yield* h.read("p2-child")).status, "delivered");
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect("T10 never replays a claimed wake the user stopped meanwhile", () =>
+  Effect.gen(function* () {
+    const h = yield* setup();
+    yield* claimLost(h, h.shells.get("parent")!, [yield* h.read()], at(0), false);
+    yield* h.appendEvent({
+      stream: "parent",
+      type: "thread.turn-start-requested",
+      commandId: "web:send",
+      payload: { messageId: "parent-initial" },
+    });
+    yield* h.appendEvent({
+      stream: "parent",
+      type: "thread.turn-interrupt-requested",
+      commandId: "web:stop",
+    });
+    const restarted = yield* h.makeWorker;
+    yield* restarted.scan(at(3));
+    assert.equal((yield* h.read()).status, "cancelled");
+    assert.include((yield* h.read()).detail, "You stopped the delegating chat");
+    assert.equal(h.sent.length, 0);
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect(
+  "T10 releases an out-of-scope claimed wake to the scope hold instead of replaying it",
+  () =>
+    Effect.gen(function* () {
+      const h = yield* setup();
+      yield* claimLost(h, h.shells.get("parent")!, [yield* h.read()], at(0), false);
+      h.setParent({
+        ...shell("parent", "parent-turn", "parent-runtime"),
+        runtimeMode: "full-access",
+      });
+      const restarted = yield* h.makeWorker;
+      yield* restarted.scan(at(3));
+      assert.equal((yield* h.read()).status, "ready");
+      assert.equal(h.sent.length, 0);
+      yield* restarted.scan(at(6));
+      assert.include((yield* h.read()).detail, "permissions or workspace changed");
+      h.setParent(shell("parent", "parent-turn", "parent-runtime"));
+      yield* restarted.scan(at(9));
+      assert.equal((yield* h.read()).status, "delivered");
+      assert.equal(h.sent.length, 1);
+    }).pipe(Effect.provide(layer)),
+);
+
+it.effect("T11 blocks only the rows that were themselves rejected five times", () =>
+  Effect.gen(function* () {
+    const h = yield* setup();
+    yield* h.addChild("child-2");
+    const veteran = yield* h.read();
+    yield* h.repo.save(veteran, {
+      ...veteran,
+      status: "ready",
+      capture: RESULT_CAPTURE,
+      deliveryAttempts: 4,
+      rejections: 4,
+    });
+    const fresh = yield* h.read("child-2");
+    yield* h.repo.save(fresh, { ...fresh, status: "ready", capture: RESULT_CAPTURE });
+    h.applyMode("reject");
+    yield* h.tick(0);
+    assert.equal(h.sent[0]!.commandId, "delegation-return:child:4");
+    assert.equal((yield* h.read()).status, "blocked");
+    const survivor = yield* h.read("child-2");
+    assert.equal(survivor.status, "ready");
+    assert.equal(survivor.rejections, 1);
+    assert.equal(survivor.deliveryAttempts, 5);
+    h.applyMode("accept");
+    yield* h.tick(3);
+    assert.equal(h.sent[1]!.commandId, "delegation-return:child-2:5");
+    assert.equal((yield* h.read("child-2")).status, "delivered");
+  }).pipe(Effect.provide(layer)),
+);
+
+/** The child delegated a grandchild whose result was already delivered to it in a wake. */
+const deliveredOwnWake = (h: Effect.Success<ReturnType<typeof setup>>) =>
+  h.repo.insert(
+    completionFixture({
+      childThreadId: ThreadId.make("grandchild"),
+      initialMessageId: MessageId.make("grandchild-initial"),
+      parentThreadId: ThreadId.make("child"),
+      proposalId: AgentControlProposalId.make("nested-proposal"),
+      status: "delivered",
+      capture: RESULT_CAPTURE,
+      batch: {
+        commandId: CommandId.make("delegation-return:grandchild"),
+        messageId: MessageId.make("delegation-result:grandchild"),
+        anchorChildThreadId: ThreadId.make("grandchild"),
+        childThreadIds: [ThreadId.make("grandchild")],
+        attempt: 0,
+        replays: 0,
+        dispatchedAt: now,
+        cold: false,
+      },
+    }),
+  );
+
+it.effect("T16 sends a stopped notice when the child's own wake ended at a restart", () =>
+  Effect.gen(function* () {
+    const h = yield* setup();
+    yield* h.ack();
+    yield* deliveredOwnWake(h);
+    // Startup reconciliation interrupted the child's wake turn; ingestion never observed it.
+    yield* h.sql`INSERT INTO projection_turns (thread_id, turn_id, pending_message_id, state, requested_at, checkpoint_files_json)
+      VALUES ('child', 'child-wake-turn', 'delegation-result:grandchild', 'interrupted', ${now}, '[]')`;
+    h.setChild(
+      withSession(shell("child", "child-wake-turn", "child-runtime"), { status: "error" }),
+    );
+    yield* h.tick(0);
+    assert.equal((yield* h.read()).status, "waiting");
+    assert.include((yield* h.read()).detail, "own delegated work");
+    h.live.delete("child");
+    yield* h.tick(3);
+    assert.equal((yield* h.read()).status, "delivered");
+    assert.include(h.sent[0]!.message.text, "Delegated task notice (stopped).");
+    assert.notInclude(h.sent[0]!.message.text, "Result Result");
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect("T16 sends a stopped notice when the child's own wake failed to start", () =>
+  Effect.gen(function* () {
+    const h = yield* setup();
+    yield* h.ack();
+    yield* deliveredOwnWake(h);
+    yield* h.sql`INSERT INTO projection_turns (thread_id, turn_id, pending_message_id, state, requested_at, checkpoint_files_json)
+      VALUES ('child', NULL, 'delegation-result:grandchild', 'pending', ${now}, '[]')`;
+    yield* h.appendStartFailure("child", "delegation-result:grandchild");
+    yield* h.tick(0);
+    assert.equal((yield* h.read()).status, "delivered");
+    assert.include(h.sent[0]!.message.text, "Delegated task notice (stopped).");
+    // Never the child's "I delegated" output from before its wake.
+    assert.notInclude(h.sent[0]!.message.text, "Result Result");
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect("T16 stops waiting for the child's own wake that never bound after the grace", () =>
+  Effect.gen(function* () {
+    const h = yield* setup();
+    yield* h.ack();
+    yield* deliveredOwnWake(h);
+    // Accepted, but the reactor work that would start it died with the old process.
+    yield* h.sql`INSERT INTO projection_turns (thread_id, turn_id, pending_message_id, state, requested_at, checkpoint_files_json)
+      VALUES ('child', NULL, 'delegation-result:grandchild', 'pending', ${now}, '[]')`;
+    yield* h.tick(0);
+    yield* h.tick(121);
+    // A live child session may still be starting the wake.
+    assert.equal((yield* h.read()).status, "waiting");
+    assert.include((yield* h.read()).detail, "own delegated work");
+    h.live.delete("child");
+    yield* h.tick(124);
+    assert.equal((yield* h.read()).status, "delivered");
+    assert.include(h.sent[0]!.message.text, "Delegated task notice (stopped).");
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect("T16 sends an advanced notice for a follow-up hidden behind the child's own wake", () =>
+  Effect.gen(function* () {
+    const h = yield* setup();
+    yield* h.ack();
+    const grandchild = completionFixture({
+      childThreadId: ThreadId.make("grandchild"),
+      initialMessageId: MessageId.make("grandchild-initial"),
+      parentThreadId: ThreadId.make("child"),
+      proposalId: AgentControlProposalId.make("nested-proposal"),
+      nextCheckAt: at(DAY * 30),
+    });
+    yield* h.repo.insert(grandchild);
+    yield* h.tick(0);
+    assert.include((yield* h.read()).detail, "own delegated work");
+    // Someone sends the child a follow-up; then the grandchild's wake runs after it.
+    yield* h.sql`INSERT INTO projection_turns (thread_id, turn_id, pending_message_id, state, requested_at, checkpoint_files_json)
+      VALUES ('child', 'follow-up-turn', 'user-follow-up', 'completed', ${now}, '[]')`;
+    const stored = yield* h.read("grandchild");
+    yield* h.repo.save(stored, { ...stored, status: "delivered" });
+    yield* h.sql`INSERT INTO projection_turns (thread_id, turn_id, pending_message_id, assistant_message_id, state, requested_at, checkpoint_files_json)
+      VALUES ('child', 'child-wake-turn', 'delegation-result:grandchild', 'child-final', 'completed', ${now}, '[]')`;
+    yield* h.sql`INSERT INTO projection_thread_messages (message_id, thread_id, turn_id, role, text, is_streaming, created_at, updated_at)
+      VALUES ('child-final', 'child', 'child-wake-turn', 'assistant', 'Final child answer', 0, ${now}, ${now})`;
+    h.setChild(shell("child", "child-wake-turn", "child-runtime"));
+    yield* h.repo.observe({
+      childThreadId: ThreadId.make("child"),
+      runtimeSessionId: RuntimeSessionId.make("child-runtime"),
+      observationEpoch: "process-1",
+      backgroundPending: false,
+      terminal: { turnId: TurnId.make("child-wake-turn"), state: "completed" },
+    });
+    assert.equal((yield* h.read()).settled?.turnId, "child-turn");
+    yield* h.tick(3);
+    assert.equal((yield* h.read()).status, "delivered");
+    assert.include(h.sent[0]!.message.text, "Delegated task notice (advanced).");
+    assert.notInclude(h.sent[0]!.message.text, "Final child answer");
   }).pipe(Effect.provide(layer)),
 );
 

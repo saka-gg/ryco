@@ -17,6 +17,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import {
   CompletionReturnRepository,
   CompletionReturnRepositoryLive,
+  cancelOwnedCompletionReturn,
 } from "../../persistence/Layers/AgentControlCompletionReturns.ts";
 import { AgentControlProposalRepositoryLive } from "../../persistence/Layers/AgentControlProposals.ts";
 import {
@@ -33,6 +34,7 @@ import { AgentControlProposalEvents } from "../Services/AgentControlProposalEven
 import type { AgentControlSessionRecord } from "../Services/AgentControlSessionRegistry.ts";
 import { AgentControlProposalEventsLive } from "../Layers/AgentControlProposalEvents.ts";
 import { makeCompletionReturnDelivery } from "../Layers/CompletionReturnDelivery.ts";
+import { renderCompletionNotice } from "../completionReturnMessages.ts";
 import { completionFixture, completionFixtureTime as now } from "../completionReturnTestSupport.ts";
 import { makeDelegatedTaskControl } from "../delegatedTaskControl.ts";
 import { withDelegationTools } from "./delegationTools.ts";
@@ -111,155 +113,178 @@ const session = (
   injectionMode: "codex-http",
 });
 
-const setup = Effect.gen(function* () {
-  const repo = yield* CompletionReturnRepository;
-  const sql = yield* SqlClient.SqlClient;
-  const proposals = yield* AgentControlProposalRepository;
-  const events = yield* AgentControlProposalEvents;
-  yield* repo.insert(completionFixture());
-  yield* proposals.insert({
-    proposal: Schema.decodeUnknownSync(AgentControlProposal)({
-      proposalId: "delegation-proposal",
-      requestId: "request",
-      principal: {
-        kind: "provider-session",
-        threadId: "parent",
-        providerInstanceId: "codex",
-        runtimeSessionId: "parent-runtime",
-        turnId: "parent-turn",
-      },
-      planVersion: 1,
-      plan: {
-        kind: "createThreads",
-        entries: [
-          {
-            projectId: "project-1",
-            title: "Fixture",
-            prompt: "Fixture task",
-            modelSelection: { instanceId: "codex", model: "fixture" },
-            runtimeMode: "approval-required",
-            envMode: "local",
-            returnToOrigin: true,
-          },
-        ],
-      },
-      planDigest: "a".repeat(64),
-      riskTags: [],
-      promptSummary: null,
-      status: "completed",
-      createdAt: now,
-      updatedAt: now,
-      expiresAt: now,
-      decidedAt: now,
-      result: null,
-    }),
-    principalScope: AgentControlPrincipalScope.make("fixture"),
-  });
-  yield* sql`INSERT INTO projection_threads (thread_id, project_id, title, model_selection_json, runtime_mode, interaction_mode, created_at, updated_at)
+/** `cancelRaces`: a concurrent writer wins that many of the cancel's revision CASes. */
+const setupWith = (options: { readonly cancelRaces?: number } = {}) =>
+  Effect.gen(function* () {
+    const repo = yield* CompletionReturnRepository;
+    const sql = yield* SqlClient.SqlClient;
+    const proposals = yield* AgentControlProposalRepository;
+    const events = yield* AgentControlProposalEvents;
+    yield* repo.insert(completionFixture());
+    yield* proposals.insert({
+      proposal: Schema.decodeUnknownSync(AgentControlProposal)({
+        proposalId: "delegation-proposal",
+        requestId: "request",
+        principal: {
+          kind: "provider-session",
+          threadId: "parent",
+          providerInstanceId: "codex",
+          runtimeSessionId: "parent-runtime",
+          turnId: "parent-turn",
+        },
+        planVersion: 1,
+        plan: {
+          kind: "createThreads",
+          entries: [
+            {
+              projectId: "project-1",
+              title: "Fixture",
+              prompt: "Fixture task",
+              modelSelection: { instanceId: "codex", model: "fixture" },
+              runtimeMode: "approval-required",
+              envMode: "local",
+              returnToOrigin: true,
+            },
+          ],
+        },
+        planDigest: "a".repeat(64),
+        riskTags: [],
+        promptSummary: null,
+        status: "completed",
+        createdAt: now,
+        updatedAt: now,
+        expiresAt: now,
+        decidedAt: now,
+        result: null,
+      }),
+      principalScope: AgentControlPrincipalScope.make("fixture"),
+    });
+    yield* sql`INSERT INTO projection_threads (thread_id, project_id, title, model_selection_json, runtime_mode, interaction_mode, created_at, updated_at)
     VALUES ('child', 'project-1', 'Child', '{"instanceId":"codex","model":"fixture"}', 'approval-required', 'default', ${now}, ${now})`;
-  yield* sql`INSERT INTO projection_turns (thread_id, turn_id, pending_message_id, assistant_message_id, state, requested_at, started_at, completed_at, checkpoint_files_json)
+    yield* sql`INSERT INTO projection_turns (thread_id, turn_id, pending_message_id, assistant_message_id, state, requested_at, started_at, completed_at, checkpoint_files_json)
     VALUES ('child', 'child-turn', 'child-initial', 'answer', 'completed', ${now}, ${now}, ${now}, '[]')`;
-  yield* sql`INSERT INTO projection_thread_messages (message_id, thread_id, turn_id, role, text, is_streaming, created_at, updated_at)
+    yield* sql`INSERT INTO projection_thread_messages (message_id, thread_id, turn_id, role, text, is_streaming, created_at, updated_at)
     VALUES ('answer', 'child', 'child-turn', 'assistant', ${`Done. Token ${TOKEN} found.`}, 0, ${now}, ${now})`;
 
-  let child: OrchestrationThreadShell = childShell();
-  let enabled = true;
-  let authorityThread: string | null = "parent";
-  const baseCalls: Array<{ name: string; args: unknown; returnStatus: string | undefined }> = [];
-  const projections = {
-    getThreadShellById: (id: ThreadId) =>
-      Effect.succeed(
-        id === "child"
-          ? Option.some(child)
-          : id === "parent"
-            ? Option.some({ ...childShell(), id, title: "Parent", hasPendingUserInput: false })
-            : Option.none(),
-      ),
-  };
-  const base: AgentControlMcpTools = {
-    descriptors: [],
-    descriptorsFor: () => Effect.succeed([]),
-    hasTool: (name) => name === AGENT_CONTROL_MCP_TOOLS.interruptThread,
-    isWriteTool: (name) => name === AGENT_CONTROL_MCP_TOOLS.interruptThread,
-    callTool: (_session, name, args) =>
-      repo.get(ThreadId.make("child")).pipe(
-        Effect.orDie,
-        Effect.map((record): AgentControlMcpToolResult => {
-          baseCalls.push({ name, args, returnStatus: record?.status });
-          return {
-            content: [{ type: "text", text: "{}" }],
-            structuredContent: { proposalId: "interrupt-proposal", status: "executing" },
-          };
-        }),
-      ),
-  };
-  const policy = {
-    isEnabled: Effect.sync(() => enabled),
-    authorize: (input: {
-      readonly grantedCapabilities: ReadonlyArray<AgentControlCapability>;
-      readonly requiredCapability: AgentControlCapability;
-    }) =>
-      enabled && input.grantedCapabilities.includes(input.requiredCapability)
-        ? Effect.void
-        : (Effect.fail(new Error("denied")) as never),
-  };
-  const tools = withDelegationTools(base, {
-    policy: policy as never,
-    registry: {
-      getTurnAuthority: (sessionId: string) =>
+    let child: OrchestrationThreadShell = childShell();
+    let enabled = true;
+    let authorityThread: string | null = "parent";
+    const baseCalls: Array<{ name: string; args: unknown; returnStatus: string | undefined }> = [];
+    const projections = {
+      getThreadShellById: (id: ThreadId) =>
         Effect.succeed(
-          authorityThread === null || sessionId !== `lease-${authorityThread}`
-            ? Option.none()
-            : Option.some({
-                sessionId,
-                threadId: ThreadId.make(authorityThread),
-                turnId: TurnId.make("parent-turn-2"),
-                boundAt: now,
-              }),
+          id === "child"
+            ? Option.some(child)
+            : id === "parent"
+              ? Option.some({ ...childShell(), id, title: "Parent", hasPendingUserInput: false })
+              : Option.none(),
         ),
-    },
-    control: makeDelegatedTaskControl({ repository: repo, proposals, events, projections, sql }),
-  });
-  const call = (name: string, args: unknown, caller = session()) =>
-    tools.callTool(caller, name, args);
-  const read = () => repo.get(ThreadId.make("child")).pipe(Effect.map((record) => record!));
-  const ack = (state: "completed" | "error" | "interrupted" = "completed") =>
-    repo.observe({
-      childThreadId: ThreadId.make("child"),
-      runtimeSessionId: RuntimeSessionId.make("child-runtime"),
-      observationEpoch: "process-1",
-      backgroundPending: false,
-      terminal: { turnId: TurnId.make("child-turn"), state },
+    };
+    const base: AgentControlMcpTools = {
+      descriptors: [],
+      descriptorsFor: () => Effect.succeed([]),
+      hasTool: (name) => name === AGENT_CONTROL_MCP_TOOLS.interruptThread,
+      isWriteTool: (name) => name === AGENT_CONTROL_MCP_TOOLS.interruptThread,
+      callTool: (_session, name, args) =>
+        repo.get(ThreadId.make("child")).pipe(
+          Effect.orDie,
+          Effect.map((record): AgentControlMcpToolResult => {
+            baseCalls.push({ name, args, returnStatus: record?.status });
+            return {
+              content: [{ type: "text", text: "{}" }],
+              structuredContent: { proposalId: "interrupt-proposal", status: "executing" },
+            };
+          }),
+        ),
+    };
+    const policy = {
+      isEnabled: Effect.sync(() => enabled),
+      authorize: (input: {
+        readonly grantedCapabilities: ReadonlyArray<AgentControlCapability>;
+        readonly requiredCapability: AgentControlCapability;
+      }) =>
+        enabled && input.grantedCapabilities.includes(input.requiredCapability)
+          ? Effect.void
+          : (Effect.fail(new Error("denied")) as never),
+    };
+    let reads = 0;
+    const racingCancel = cancelOwnedCompletionReturn({
+      get: (childThreadId: ThreadId) =>
+        repo.get(childThreadId).pipe(
+          Effect.tap((current) => {
+            reads += 1;
+            return current && reads <= (options.cancelRaces ?? 0)
+              ? repo.save(current, { ...current, detail: `Concurrent write ${reads}.` })
+              : Effect.void;
+          }),
+        ),
+      save: repo.save,
     });
-  const toReady = Effect.gen(function* () {
-    yield* ack();
-    const record = yield* read();
-    yield* repo.save(record, {
-      ...record,
-      status: "ready",
-      capture: { kind: "result", outcome: "completed", capturedAt: now, section: "Section" },
+    const tools = withDelegationTools(base, {
+      policy: policy as never,
+      registry: {
+        getTurnAuthority: (sessionId: string) =>
+          Effect.succeed(
+            authorityThread === null || sessionId !== `lease-${authorityThread}`
+              ? Option.none()
+              : Option.some({
+                  sessionId,
+                  threadId: ThreadId.make(authorityThread),
+                  turnId: TurnId.make("parent-turn-2"),
+                  boundAt: now,
+                }),
+          ),
+      },
+      control: makeDelegatedTaskControl({
+        repository: { ...repo, cancelOwned: racingCancel },
+        proposals,
+        events,
+        projections,
+        sql,
+      }),
     });
+    const call = (name: string, args: unknown, caller = session()) =>
+      tools.callTool(caller, name, args);
+    const read = () => repo.get(ThreadId.make("child")).pipe(Effect.map((record) => record!));
+    const ack = (state: "completed" | "error" | "interrupted" = "completed") =>
+      repo.observe({
+        childThreadId: ThreadId.make("child"),
+        runtimeSessionId: RuntimeSessionId.make("child-runtime"),
+        observationEpoch: "process-1",
+        backgroundPending: false,
+        terminal: { turnId: TurnId.make("child-turn"), state },
+      });
+    const toReady = Effect.gen(function* () {
+      yield* ack();
+      const record = yield* read();
+      yield* repo.save(record, {
+        ...record,
+        status: "ready",
+        capture: { kind: "result", outcome: "completed", capturedAt: now, section: "Section" },
+      });
+    });
+    return {
+      repo,
+      sql,
+      projections,
+      tools,
+      call,
+      read,
+      ack,
+      toReady,
+      baseCalls,
+      setChild: (value: OrchestrationThreadShell) => {
+        child = value;
+      },
+      setEnabled: (value: boolean) => {
+        enabled = value;
+      },
+      setAuthority: (threadId: string | null) => {
+        authorityThread = threadId;
+      },
+    };
   });
-  return {
-    repo,
-    sql,
-    tools,
-    call,
-    read,
-    ack,
-    toReady,
-    baseCalls,
-    setChild: (value: OrchestrationThreadShell) => {
-      child = value;
-    },
-    setEnabled: (value: boolean) => {
-      enabled = value;
-    },
-    setAuthority: (threadId: string | null) => {
-      authorityThread = threadId;
-    },
-  };
-});
+const setup = setupWith();
 
 const structured = (result: AgentControlMcpToolResult) => {
   assert.isUndefined(result.isError, JSON.stringify(result.content));
@@ -370,9 +395,8 @@ it.effect("acknowledges a ready task read during the exact turn, so no wake is s
       Effect.provideService(ProviderService, {
         getSession: () => Effect.succeed(Option.none()),
       } as never),
-      Effect.provideService(ProjectionSnapshotQuery, {
-        getThreadShellById: () => Effect.succeed(Option.none()),
-      } as never),
+      // A real idle parent: without the acknowledgement this scan would send a wake.
+      Effect.provideService(ProjectionSnapshotQuery, h.projections as never),
       Effect.provideService(OrchestrationCommandApplication, {
         apply: (command: unknown) => Effect.sync(() => sent.push(command)),
       } as never),
@@ -381,6 +405,43 @@ it.effect("acknowledges a ready task read during the exact turn, so no wake is s
     yield* worker.scan(new Date(Date.parse(now) + 10_000).toISOString());
     assert.deepStrictEqual(sent, []);
     assert.equal((yield* h.read()).status, "delivered");
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect("acknowledges a notice only when read by id and keeps its outcome readable", () =>
+  Effect.gen(function* () {
+    const h = yield* setup;
+    const record = yield* h.read();
+    const text = renderCompletionNotice(record, "request-failed");
+    yield* h.repo.save(record, {
+      ...record,
+      status: "ready",
+      capture: { kind: "notice", outcome: "request-failed", capturedAt: now, section: text },
+    });
+    type Entry = {
+      readonly acknowledged: boolean;
+      readonly notice: unknown;
+      readonly result: unknown;
+      readonly return: { readonly status: string; readonly detail: string };
+    };
+    const read = (args: unknown) =>
+      h
+        .call(AGENT_CONTROL_DELEGATION_MCP_TOOLS.taskStatus, args)
+        .pipe(Effect.map((result) => (structured(result).tasks as unknown as Entry[])[0]!));
+    // A list may not reach the model in full, so it never acknowledges.
+    const listed = yield* read({});
+    assert.isFalse(listed.acknowledged);
+    assert.deepStrictEqual(listed.notice, { outcome: "request-failed", text });
+    assert.equal((yield* h.read()).status, "ready");
+    const task = yield* read({ taskId: "child" });
+    assert.isTrue(task.acknowledged);
+    assert.deepStrictEqual(task.notice, { outcome: "request-failed", text });
+    assert.isNull(task.result);
+    assert.equal(task.return.status, "delivered");
+    assert.include(task.return.detail, "Notice (request-failed) read by the originating chat");
+    const again = yield* read({ taskId: "child" });
+    assert.isFalse(again.acknowledged);
+    assert.deepStrictEqual(again.notice, { outcome: "request-failed", text });
   }).pipe(Effect.provide(layer)),
 );
 
@@ -450,6 +511,21 @@ it.effect("cancels the return before forwarding an interrupt for the child's act
       proposalId: "interrupt-proposal",
       status: "executing",
     });
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect("never interrupts a task whose return lost the cancel race twice", () =>
+  Effect.gen(function* () {
+    const h = yield* setupWith({ cancelRaces: 2 });
+    h.setChild(runningChild());
+    const result = yield* h.call(AGENT_CONTROL_DELEGATION_MCP_TOOLS.taskCancel, {
+      requestId: "cancel-1",
+      taskId: "child",
+    });
+    assert.isTrue(result.isError);
+    assert.equal(result.content[0]?.text, "Task is changing; retry ryco_task_cancel.");
+    assert.equal((yield* h.read()).status, "waiting");
+    assert.deepStrictEqual(h.baseCalls, []);
   }).pipe(Effect.provide(layer)),
 );
 

@@ -735,10 +735,12 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   // user-message anchors per thread:
   // - first: the thread has accepted a user turn, so a provider/model change after
   //   a restart still takes the atomic context-handoff path;
-  // - latest: the delegated-return fence (decider thread.turn.start) and settlement
-  //   read messages.findLast(user). It MUST be the row CompletionReturnDelivery
-  //   reads, hence the shared latestUserMessageIdQuery.
-  // Rows are ordered so a thread's latest anchor is always its last row.
+  // - latest: the delegated-return fence (decider thread.turn.start) and the projector's
+  //   message cap read latestUserMessage (orchestration/userMessageOrder.ts), the
+  //   in-memory twin of latestUserMessageIdQuery. It MUST be the row
+  //   CompletionReturnDelivery reads, hence the shared query.
+  // Rows are ordered (created_at, rowid) like that query, so a thread's latest anchor is
+  // always its last row.
   // Do NOT add `messages.thread_id = threads.thread_id`: it flips the plan to a
   // full SCAN of projection_thread_messages (guarded by a test).
   const listUserMessageAnchorRows = SqlSchema.findAll({
@@ -2291,7 +2293,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   continue;
                 }
                 updatedAt = maxIso(updatedAt, row.updatedAt);
-                // SQL order keeps each thread's latest anchor last (findLast(user)).
+                // SQL order keeps each thread's latest anchor last, where latestUserMessage finds it.
                 const anchors = userMessageAnchorsByThread.get(row.threadId) ?? [];
                 anchors.push(mapMessageRow(row));
                 userMessageAnchorsByThread.set(row.threadId, anchors);

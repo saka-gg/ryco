@@ -54,7 +54,8 @@ chat with one automatic message, a normal queued turn that starts or resumes its
   interrupted, stopped (for example by a restart; it is not resumed), failed to start, received
   someone else's follow-up, was archived or deleted, whose request failed, or that did not finish
   within 24 hours returns a server-written notice instead, with no child text. A task that itself
-  delegated returns its output after its own delegated work came back.
+  delegated returns its output after its own delegated work came back; if that follow-up run never
+  starts or is cut off by a restart, it returns a stopped notice.
 - **When it is delivered.** The chat must be idle: no running or starting session, no pending
   approval or question, no working background agents (a watcher-only "monitoring" state does not
   count) and no turn start waiting to bind. It does not matter whether the chat moved on to other
@@ -69,11 +70,13 @@ chat with one automatic message, a normal queued turn that starts or resumes its
   and the server do not count. Deleting or archiving the chat, or archiving its worktree, cancels
   its returns too.
 - **Task tools.** `ryco_task_status` lists up to 20 of this chat's returnToOrigin tasks (or one by
-  `taskId`) with the run state, the return status and the redacted, untrusted result. Pending
-  questions are reported only as a flag. Reading a finished task during the chat's own turn
-  acknowledges it, so no separate automatic message is sent for it. `ryco_task_cancel` stops the
-  automatic return first and then interrupts the task's running turn through the normal routine
-  interrupt request.
+  `taskId`) with the run state, the return status and the redacted, untrusted result, or the
+  notice for a task that ended without one. Pending questions are reported only as a flag. Reading
+  one finished task by `taskId` during the chat's own turn acknowledges it, so no separate
+  automatic message is sent for it; a list never acknowledges, because a long list may not reach
+  the agent in full. `ryco_task_cancel` stops the automatic return first and then interrupts the
+  task's running turn through the normal routine interrupt request. If the return is changing at
+  that moment, it does not interrupt and asks for a retry.
 - **Scope of the tools.** They cover only tasks created with `returnToOrigin` by this chat. Local
   Tasks and the standalone integrations' `ryco_read_task` / `ryco_wait_for_task` are separate.
   Return progress is also visible as `completionReturns` on the delegation request

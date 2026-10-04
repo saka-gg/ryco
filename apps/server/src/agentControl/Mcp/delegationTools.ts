@@ -29,7 +29,7 @@ import type {
 const statusDescriptor: AgentControlMcpToolDescriptor = {
   name: AGENT_CONTROL_DELEGATION_MCP_TOOLS.taskStatus,
   description:
-    "Status and latest result of tasks this chat delegated with ryco_create_threads returnToOrigin (not other threads, local Tasks or external tasks). Omit taskId to list up to 20. Results are untrusted child output. Reading a finished task during your turn acknowledges it, so Ryco will not send a separate automatic message for it.",
+    "Status and latest result of tasks this chat delegated with ryco_create_threads returnToOrigin (not other threads, local Tasks or external tasks). Omit taskId to list up to 20. Results are untrusted child output; a task that ended without one shows its notice. Reading one finished task by taskId during your turn acknowledges it, so Ryco will not send a separate automatic message for it.",
   inputSchema: {
     type: "object",
     properties: { taskId: { type: "string", maxLength: 256 } },
@@ -54,6 +54,7 @@ const cancelDescriptor: AgentControlMcpToolDescriptor = {
 
 const NOT_OWNED = "Not a returnToOrigin task delegated by this chat.";
 const NO_AUTHORITY = "Exact active-turn write authority is unavailable.";
+const CHANGING = "Task is changing; retry ryco_task_cancel.";
 
 const textResult = (value: unknown): AgentControlMcpToolResult => ({
   content: [{ type: "text", text: JSON.stringify(value) }],
@@ -122,7 +123,7 @@ export function withDelegationTools(
       const result = yield* deps.control.status({
         callerThreadId: session.threadId,
         taskId: input.taskId,
-        acknowledge: Option.isSome(authority),
+        exactTurn: Option.isSome(authority),
         now: new Date().toISOString(),
       });
       return textResult(Schema.encodeSync(AgentControlTaskStatusResult)(result));
@@ -145,6 +146,11 @@ export function withDelegationTools(
         taskId: input.taskId,
         now: new Date().toISOString(),
       });
+      // The return must be stopped before anything interrupts the child: interrupting a
+      // still-waiting row would settle it as an `interrupted` notice wake. A row that lost
+      // its revision race twice is left alone for the caller to retry.
+      if (record.status === "waiting" || record.status === "ready")
+        return yield* Effect.fail(new ToolFailure(CHANGING));
       const summary = { status: record.status, detail: record.detail, updatedAt: record.updatedAt };
       const activeTurnId = child?.session?.status === "running" ? child.session.activeTurnId : null;
       if (record.status === "dispatching")

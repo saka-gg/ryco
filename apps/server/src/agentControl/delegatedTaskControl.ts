@@ -7,8 +7,10 @@
  * working after a restart.
  */
 import {
+  AGENT_CONTROL_TASK_NOTICE_MAX_CHARS,
   AGENT_CONTROL_TASK_RESULT_MAX_CHARS,
   AGENT_CONTROL_TASK_STATUS_MAX_TASKS,
+  AgentControlTaskNoticeOutcome,
   type AgentControlTaskRunState,
   type AgentControlTaskStatusEntry,
   type AgentControlTaskStatusResult,
@@ -16,7 +18,7 @@ import {
   type ThreadId,
 } from "@ryco/contracts";
 import { redactDiagnosticText } from "@ryco/shared/diagnosticRedaction";
-import { Effect, Option } from "effect";
+import { Effect, Option, Schema } from "effect";
 import type * as SqlClient from "effect/unstable/sql/SqlClient";
 import {
   DELEGATION_WAKE_MESSAGE_PREFIX,
@@ -37,6 +39,11 @@ export class DelegatedTaskNotOwned {
 
 export const DELEGATED_TASK_ACK_DETAIL =
   "Read by the originating chat with ryco_task_status; no automatic message needed.";
+const ackDetail = (record: CompletionReturnRecord) =>
+  record.capture?.kind === "notice"
+    ? `Notice (${record.capture.outcome}) read by the originating chat with ryco_task_status; no automatic message needed.`
+    : DELEGATED_TASK_ACK_DETAIL;
+const isNoticeOutcome = Schema.is(AgentControlTaskNoticeOutcome);
 export const DELEGATED_TASK_CANCEL_DETAIL =
   "Cancelled by the delegating chat with ryco_task_cancel. No result will be returned automatically.";
 
@@ -106,6 +113,16 @@ export const makeDelegatedTaskControl = (deps: DelegatedTaskControlDeps) => {
               })),
             )
           : null;
+      // The server-authored notice a wake would carry (no child text). It stays on the row,
+      // so an acknowledged notice remains readable.
+      const capture = record.capture;
+      const notice =
+        capture?.kind === "notice" && isNoticeOutcome(capture.outcome)
+          ? {
+              outcome: capture.outcome,
+              text: capture.section.slice(0, AGENT_CONTROL_TASK_NOTICE_MAX_CHARS),
+            }
+          : null;
       return {
         taskId: record.childThreadId,
         proposalId: record.proposalId,
@@ -121,13 +138,15 @@ export const makeDelegatedTaskControl = (deps: DelegatedTaskControlDeps) => {
           advanced: yield* advanced(record, child),
         },
         result,
+        notice,
         acknowledged,
       } satisfies AgentControlTaskStatusEntry;
     });
 
   /**
-   * A finished task read during the caller's own exact turn needs no separate wake: its
-   * `ready` row becomes `delivered`. A lost race with the delivery claim just reports it.
+   * A finished task read by id during the caller's own exact turn needs no separate wake: its
+   * `ready` row becomes `delivered`. The status entry carries the same result or notice the
+   * wake would have, so nothing is lost. A lost race with the delivery claim just reports it.
    */
   const acknowledge = (record: CompletionReturnRecord, now: string) =>
     Effect.gen(function* () {
@@ -135,7 +154,7 @@ export const makeDelegatedTaskControl = (deps: DelegatedTaskControlDeps) => {
       const next: CompletionReturnRecord = {
         ...record,
         status: "delivered",
-        detail: DELEGATED_TASK_ACK_DETAIL,
+        detail: ackDetail(record),
         updatedAt: now,
         nextCheckAt: now,
       };
@@ -150,10 +169,15 @@ export const makeDelegatedTaskControl = (deps: DelegatedTaskControlDeps) => {
   const status = (input: {
     readonly callerThreadId: ThreadId;
     readonly taskId?: ThreadId | undefined;
-    readonly acknowledge: boolean;
+    /** The caller holds exact active-turn authority for its own thread. */
+    readonly exactTurn: boolean;
     readonly now: string;
   }) =>
     Effect.gen(function* () {
+      // Only a read of one task acknowledges it. A list can exceed what a provider shows of
+      // one tool result, so marking every listed row read could drop content unseen; its
+      // tasks still arrive in a wake.
+      const acknowledges = input.exactTurn && input.taskId !== undefined;
       let rows: ReadonlyArray<CompletionReturnRecord>;
       if (input.taskId !== undefined) {
         const row = yield* deps.repository.get(input.taskId);
@@ -168,7 +192,7 @@ export const makeDelegatedTaskControl = (deps: DelegatedTaskControlDeps) => {
       }
       const tasks: AgentControlTaskStatusEntry[] = [];
       for (const row of rows) {
-        const acked = input.acknowledge
+        const acked = acknowledges
           ? yield* acknowledge(row, input.now)
           : { record: row, acknowledged: false };
         tasks.push(yield* describe(acked.record, acked.acknowledged));

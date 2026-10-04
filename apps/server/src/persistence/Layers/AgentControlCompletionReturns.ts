@@ -1,6 +1,7 @@
 import {
   AgentControlCompletionReturn,
   AgentControlProposalId,
+  AgentControlTaskNoticeOutcome,
   ClientOrchestrationCommand,
   CommandId,
   MessageId,
@@ -27,13 +28,7 @@ export const DELEGATION_WAKE_COMMAND_PREFIX = "delegation-return:";
 export const CompletionReturnOutcome = Schema.Literals([
   "completed",
   "error",
-  "interrupted",
-  "stopped",
-  "start-failed",
-  "advanced",
-  "archived",
-  "request-failed",
-  "expired",
+  ...AgentControlTaskNoticeOutcome.literals,
 ]);
 export type CompletionReturnOutcome = typeof CompletionReturnOutcome.Type;
 
@@ -86,8 +81,15 @@ export const CompletionReturnRecord = Schema.Struct({
   command: Schema.NullOr(ClientOrchestrationCommand),
   capture: Schema.optional(Schema.NullOr(CompletionReturnCapture)),
   batch: Schema.optional(Schema.NullOr(CompletionReturnBatch)),
+  /** Wake id attempt: the batch maximum plus one after each rejection, so ids stay unique. */
   deliveryAttempts: Schema.optional(NonNegativeInt),
-  /** First event sequence of the child stream; bounds the user-stop scan. */
+  /** Rejected wakes this row itself was part of; blocking is decided per row from it. */
+  rejections: Schema.optional(NonNegativeInt),
+  /**
+   * Lower bound of the user-stop scan on the parent stream: the delegating turn's own
+   * `thread.turn-start-requested` sequence (the child's first event when that is unknown).
+   * Every stop attributable to a cohort turn comes after it, so it is a performance bound only.
+   */
   sinceSequence: Schema.optional(Schema.NullOr(NonNegativeInt)),
   /** Delegation-wake turns of the child that `settled` advanced through. */
   delegationWakeTurns: Schema.optional(NonNegativeInt),
@@ -98,6 +100,42 @@ const decode = Schema.decodeUnknownSync(Schema.fromJsonString(CompletionReturnRe
 class CompletionReturnCasConflict {
   readonly _tag = "CompletionReturnCasConflict";
 }
+
+/**
+ * The delegating chat's own cancel: `waiting|ready → cancelled`, retried once on a concurrent
+ * write. Null when the row does not belong to `parentThreadId`; otherwise the resulting
+ * record, which is still `waiting`/`ready` when both attempts lost the revision race.
+ */
+export const cancelOwnedCompletionReturn =
+  <E>(ops: {
+    readonly get: (childThreadId: ThreadId) => Effect.Effect<CompletionReturnRecord | undefined, E>;
+    readonly save: (
+      previous: CompletionReturnRecord,
+      next: CompletionReturnRecord,
+    ) => Effect.Effect<boolean, E>;
+  }) =>
+  (input: {
+    readonly childThreadId: ThreadId;
+    readonly parentThreadId: ThreadId;
+    readonly detail: string;
+    readonly now: string;
+  }) =>
+    Effect.gen(function* () {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const record = yield* ops.get(input.childThreadId);
+        if (!record || record.parentThreadId !== input.parentThreadId) return null;
+        if (record.status !== "waiting" && record.status !== "ready") return record;
+        const next: CompletionReturnRecord = {
+          ...record,
+          status: "cancelled",
+          detail: input.detail,
+          updatedAt: input.now,
+          nextCheckAt: input.now,
+        };
+        if (yield* ops.save(record, next)) return { ...next, revision: record.revision + 1 };
+      }
+      return (yield* ops.get(input.childThreadId)) ?? null;
+    });
 
 export const makeCompletionReturnRepository = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
@@ -239,10 +277,17 @@ export const makeCompletionReturnRepository = Effect.gen(function* () {
             terminal.turnId !== record.settled.turnId &&
             (yield* turnInfo(input.childThreadId, terminal.turnId))?.pendingMessageId?.startsWith(
               DELEGATION_WAKE_MESSAGE_PREFIX,
-            )
+            ) &&
+            !(yield* nonWakeTurnBetween(
+              input.childThreadId,
+              record.settled.turnId,
+              terminal.turnId,
+            ))
           ) {
             // Nested delegation: the child woke for its own delegated work and finished
-            // again. Its final output, not "I delegated", is what the parent gets.
+            // again. Its final output, not "I delegated", is what the parent gets. A
+            // follow-up someone else sent in between is never skipped over: delivery
+            // turns it into an `advanced` notice instead.
             yield* save(record, {
               ...record,
               settled: {
@@ -322,32 +367,7 @@ export const makeCompletionReturnRepository = Effect.gen(function* () {
         ),
     );
   const claimBatch = saveAll;
-  /**
-   * The delegating chat's own cancel: `waiting|ready → cancelled`, retried once on a
-   * concurrent write. Null when the row does not belong to `parentThreadId`.
-   */
-  const cancelOwned = (input: {
-    readonly childThreadId: ThreadId;
-    readonly parentThreadId: ThreadId;
-    readonly detail: string;
-    readonly now: string;
-  }) =>
-    Effect.gen(function* () {
-      for (let attempt = 0; attempt < 2; attempt += 1) {
-        const record = yield* get(input.childThreadId);
-        if (!record || record.parentThreadId !== input.parentThreadId) return null;
-        if (record.status !== "waiting" && record.status !== "ready") return record;
-        const next: CompletionReturnRecord = {
-          ...record,
-          status: "cancelled",
-          detail: input.detail,
-          updatedAt: input.now,
-          nextCheckAt: input.now,
-        };
-        if (yield* save(record, next)) return { ...next, revision: record.revision + 1 };
-      }
-      return (yield* get(input.childThreadId)) ?? null;
-    });
+  const cancelOwned = cancelOwnedCompletionReturn({ get, save });
   const hasOutstandingDelegations = (threadId: ThreadId) =>
     safe(
       sql`
@@ -411,22 +431,22 @@ export const makeCompletionReturnRepository = Effect.gen(function* () {
   `.pipe(Effect.map((rows) => (rows[0]?.archivedAt ?? null) !== null)),
     );
   /**
-   * Client interrupts of the thread after `sinceSequence`, each attributed to the latest
-   * turn start that precedes it in the same stream. Agent Control interrupts
-   * (`agent-control:*`), provider (startup reconciliation) and server interrupts never count.
+   * Whether the user stopped a cohort turn of a return on `threadId` after `sinceSequence`.
+   * A client interrupt is attributed to the latest turn start that precedes it in the same
+   * stream; it counts when that start is the delegating message's or a delegation wake
+   * requested at or after `wakesSince`. Agent Control interrupts (`agent-control:*`),
+   * provider (startup reconciliation) and server interrupts never count. The cohort filter
+   * runs in SQL, so no number of unrelated stops can hide a matching one.
    */
-  const userStopAttributions = (threadId: ThreadId, sinceSequence: number) =>
+  const cohortUserStop = (input: {
+    readonly threadId: ThreadId;
+    readonly sinceSequence: number;
+    readonly delegatingMessageId: MessageId | null;
+    readonly wakesSince: string;
+  }) =>
     safe(
-      sql<{
-        stopSequence: number;
-        startCommandId: string | null;
-        startMessageId: string | null;
-        startOccurredAt: string;
-      }>`
-    SELECT stop.sequence AS "stopSequence",
-           start.command_id AS "startCommandId",
-           json_extract(start.payload_json, '$.messageId') AS "startMessageId",
-           start.occurred_at AS "startOccurredAt"
+      sql`
+    SELECT 1
     FROM orchestration_events stop
     JOIN orchestration_events start
       ON start.aggregate_kind = 'thread' AND start.stream_id = stop.stream_id
@@ -434,16 +454,72 @@ export const makeCompletionReturnRepository = Effect.gen(function* () {
        SELECT max(prev.sequence) FROM orchestration_events prev
        WHERE prev.aggregate_kind = 'thread' AND prev.stream_id = stop.stream_id
          AND prev.event_type = 'thread.turn-start-requested' AND prev.sequence < stop.sequence)
-    WHERE stop.aggregate_kind = 'thread' AND stop.stream_id = ${threadId}
-      AND stop.sequence > ${sinceSequence}
+    WHERE stop.aggregate_kind = 'thread' AND stop.stream_id = ${input.threadId}
+      AND stop.sequence > ${input.sinceSequence}
       AND stop.event_type = 'thread.turn-interrupt-requested'
       AND stop.actor_kind = 'client'
       AND (stop.command_id IS NULL OR stop.command_id NOT LIKE 'agent-control:%')
-    ORDER BY stop.sequence LIMIT 50
-  `,
+      AND ((${input.delegatingMessageId} IS NOT NULL
+            AND json_extract(start.payload_json, '$.messageId') = ${input.delegatingMessageId})
+        OR (substr(start.command_id, 1, ${DELEGATION_WAKE_COMMAND_PREFIX.length}) = ${DELEGATION_WAKE_COMMAND_PREFIX}
+            AND start.occurred_at >= ${input.wakesSince}))
+    LIMIT 1
+  `.pipe(Effect.map((rows) => rows.length > 0)),
     );
   const startFailed = (threadId: ThreadId, messageId: MessageId) =>
     safe(hasTurnStartFailure(sql, { threadId, messageId }));
+  /** Sequence of the first `thread.turn-start-requested` event for `messageId` on the thread. */
+  const turnStartSequence = (threadId: ThreadId, messageId: MessageId) =>
+    safe(
+      sql<{ sequence: number }>`
+    SELECT sequence FROM orchestration_events
+    WHERE aggregate_kind = 'thread' AND stream_id = ${threadId}
+      AND event_type = 'thread.turn-start-requested'
+      AND json_extract(payload_json, '$.messageId') = ${messageId}
+    ORDER BY sequence ASC LIMIT 1
+  `.pipe(Effect.map((rows) => rows[0]?.sequence ?? null)),
+    );
+  /**
+   * Whether a bound turn that is not a delegation wake (someone else's follow-up, or a turn
+   * with no user message) sits after `afterTurnId`, and before `beforeTurnId` when given.
+   * Turn rows are ordered by `row_id` (start order).
+   */
+  const nonWakeTurnBetween = (
+    threadId: ThreadId,
+    afterTurnId: TurnId,
+    beforeTurnId: TurnId | null,
+  ) =>
+    safe(
+      sql`
+    SELECT 1 FROM projection_turns turn
+    WHERE turn.thread_id = ${threadId} AND turn.turn_id IS NOT NULL
+      AND turn.row_id > (SELECT lower_turn.row_id FROM projection_turns lower_turn
+        WHERE lower_turn.thread_id = ${threadId} AND lower_turn.turn_id = ${afterTurnId})
+      AND (${beforeTurnId} IS NULL OR turn.row_id < (SELECT upper_turn.row_id
+        FROM projection_turns upper_turn
+        WHERE upper_turn.thread_id = ${threadId} AND upper_turn.turn_id = ${beforeTurnId}))
+      AND (turn.pending_message_id IS NULL
+        OR substr(turn.pending_message_id, 1, ${DELEGATION_WAKE_MESSAGE_PREFIX.length}) <> ${DELEGATION_WAKE_MESSAGE_PREFIX})
+    LIMIT 1
+  `.pipe(Effect.map((rows) => rows.length > 0)),
+    );
+  /**
+   * Message id of the newest delegation wake delivered to `parentThreadId` through a batch
+   * (rows acknowledged with ryco_task_status carry no batch and started no wake).
+   */
+  const latestDeliveredWake = (parentThreadId: ThreadId) =>
+    safe(
+      sql<{ messageId: string }>`
+    SELECT json_extract(${recordJson}, '$.batch.messageId') AS "messageId"
+    FROM agent_control_completion_returns
+    WHERE status = 'delivered'
+      AND json_extract(${recordJson}, '$.parentThreadId') = ${parentThreadId}
+      AND json_extract(${recordJson}, '$.batch.messageId') IS NOT NULL
+    ORDER BY json_extract(${recordJson}, '$.batch.dispatchedAt') DESC,
+      json_extract(${recordJson}, '$.batch.messageId') DESC
+    LIMIT 1
+  `.pipe(Effect.map((rows) => (rows[0] ? MessageId.make(rows[0].messageId) : null))),
+    );
   return {
     insert,
     listDue,
@@ -468,8 +544,11 @@ export const makeCompletionReturnRepository = Effect.gen(function* () {
     wakeStartState,
     firstEventSequence,
     worktreeArchived,
-    userStopAttributions,
+    cohortUserStop,
     startFailed,
+    turnStartSequence,
+    nonWakeTurnBetween,
+    latestDeliveredWake,
   };
 });
 export class CompletionReturnRepository extends Context.Service<
