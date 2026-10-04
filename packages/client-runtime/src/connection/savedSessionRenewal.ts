@@ -2,7 +2,11 @@ import type { AuthBearerBootstrapResult, AuthSessionState, EnvironmentId } from 
 import { DateTime } from "effect";
 
 import { isRemoteEnvironmentAuthHttpError } from "./remoteApi.ts";
-import { checkSavedEnvironmentSession } from "./savedEnvironmentSession.ts";
+import {
+  checkSavedEnvironmentSession,
+  SAVED_ENVIRONMENT_SESSION_CHECK_TIMEOUT_MS,
+  withSavedEnvironmentTimeout,
+} from "./savedEnvironmentSession.ts";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -123,9 +127,17 @@ export function createSavedSessionRenewal(input: {
   };
 
   const rotateAndStore = async (request: SavedSessionRenewalRequest): Promise<string> => {
+    // A renewal sits on the connect path, so neither of its requests may hold a
+    // connect longer than a session check would. A rotation that runs out of
+    // time keeps the presented bearer: the node keeps it valid, and asking again
+    // hands out the successor it may have issued meanwhile.
     let rotated: AuthBearerBootstrapResult;
     try {
-      rotated = await request.rotate(request.bearerToken);
+      rotated = await withSavedEnvironmentTimeout(
+        request.rotate(request.bearerToken),
+        SAVED_ENVIRONMENT_SESSION_CHECK_TIMEOUT_MS,
+        "The environment did not answer its session renewal in time.",
+      );
     } catch (error) {
       if (isRemoteEnvironmentAuthHttpError(error) && error.status !== 401 && error.status < 500) {
         declined.add(request.bearerToken);
@@ -140,8 +152,13 @@ export function createSavedSessionRenewal(input: {
     if (!written) return request.bearerToken;
     const stored = await input.readBearerToken(request.environmentId).catch(() => null);
     if (stored !== rotated.sessionToken) return request.bearerToken;
-    // Its first use supersedes the presented bearer on the node.
-    await request.fetchSessionState(rotated.sessionToken).catch(() => undefined);
+    // Its first use supersedes the presented bearer on the node. Unanswered, the
+    // socket's next ws-token request is that first use instead.
+    await withSavedEnvironmentTimeout(
+      request.fetchSessionState(rotated.sessionToken),
+      SAVED_ENVIRONMENT_SESSION_CHECK_TIMEOUT_MS,
+      "The environment did not answer its session check in time.",
+    ).catch(() => undefined);
     return rotated.sessionToken;
   };
 

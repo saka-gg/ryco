@@ -2,6 +2,7 @@ import type { AuthBearerBootstrapResult, AuthSessionState, EnvironmentId } from 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { RemoteEnvironmentAuthHttpError } from "./remoteApi.ts";
+import { SAVED_ENVIRONMENT_SESSION_CHECK_TIMEOUT_MS } from "./savedEnvironmentSession.ts";
 import {
   createSavedSessionRenewal,
   SavedEnvironmentBearerUnavailableError,
@@ -137,6 +138,47 @@ describe("createSavedSessionRenewal", () => {
     expect(outage).toHaveBeenCalledOnce();
     expect(declined).toHaveBeenCalledOnce();
     expect(store.current()).toBe("bearer-1");
+  });
+
+  it("never holds a connect on a renewal the node does not answer", async () => {
+    vi.useFakeTimers();
+    try {
+      const store = createStore("bearer-1");
+      const renewal = createSavedSessionRenewal({
+        readBearerToken: store.read,
+        writeBearerToken: store.write,
+        now: () => NOW,
+      });
+      const request = {
+        environmentId,
+        session: bearerSession(20 * DAY_MS),
+        bearerToken: "bearer-1",
+        fetchSessionState: async () => bearerSession(20 * DAY_MS),
+      };
+      const hungRotate = vi.fn(() => new Promise<AuthBearerBootstrapResult>(() => undefined));
+
+      // The rotation never answers: the connect goes on with the presented
+      // bearer, which the node keeps valid.
+      const stalled = renewal.renew({ ...request, rotate: hungRotate });
+      await vi.advanceTimersByTimeAsync(SAVED_ENVIRONMENT_SESSION_CHECK_TIMEOUT_MS);
+      await expect(stalled).resolves.toBe("bearer-1");
+      expect(store.current()).toBe("bearer-1");
+
+      // An unanswered rotation is not a refusal: the next connect asks again,
+      // and its unanswered activation does not hold it either.
+      const rotate = vi.fn(async () => rotation("bearer-2"));
+      const renewed = renewal.renew({
+        ...request,
+        rotate,
+        fetchSessionState: () => new Promise<AuthSessionState>(() => undefined),
+      });
+      await vi.advanceTimersByTimeAsync(SAVED_ENVIRONMENT_SESSION_CHECK_TIMEOUT_MS);
+      await expect(renewed).resolves.toBe("bearer-2");
+      expect(rotate).toHaveBeenCalledOnce();
+      expect(store.current()).toBe("bearer-2");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("presents only the bearer stored now, never one remembered from earlier", async () => {
