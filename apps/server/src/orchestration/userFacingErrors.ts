@@ -105,13 +105,20 @@ function describeFailure(error: unknown): string | undefined {
   return undefined;
 }
 
-const STACK_FRAME = /\r?\n\s*at\s/;
+/**
+ * A V8 stack frame line: indented `at`, then a location in parentheses
+ * (`fn (file:1:2)`, `new Promise (<anonymous>)`, `Promise.all (index 0)`) or a
+ * bare `file:line:col`. Prose lines that merely start with "at" are kept.
+ */
+const STACK_FRAME_LINE =
+  /^[ \t]+at[ \t]+(?:[^\r\n]*\((?:[^\r\n()]*:\d+(?::\d+)?|native|<anonymous>|index \d+)\)|[^\s()]+:\d+(?::\d+)?|<anonymous>|native)[ \t]*$/m;
 
 function bound(text: string | undefined, maxChars: number): string | undefined {
   if (text === undefined) {
     return undefined;
   }
-  const frameIndex = text.search(STACK_FRAME);
+  // The first frame and everything after it are dropped.
+  const frameIndex = text.search(STACK_FRAME_LINE);
   const withoutFrames = frameIndex === -1 ? text : text.slice(0, frameIndex);
   const bounded = truncateUnicodeSafe(withoutFrames.trim(), maxChars).trimEnd();
   return bounded.length > 0 ? bounded : undefined;

@@ -158,6 +158,32 @@ describe("userFacingFailureDetail", () => {
       assert.isAbove(detail.length, 0);
     }
   });
+
+  it("strips frame-shaped lines in every common V8 form", () => {
+    const frames = [
+      "    at handler (file.ts:1:1)",
+      "    at file:///srv/ryco/bin.mjs:10:5",
+      "    at async Promise.all (index 0)",
+      "    at new Promise (<anonymous>)",
+      "\tat Module._compile (node:internal/modules/cjs/loader:1256:14)",
+    ];
+    for (const frame of frames) {
+      assert.equal(
+        userFacingFailureDetail(Cause.fail(requestError(`provider died\r\n${frame}\r\n`))),
+        "provider died",
+      );
+    }
+  });
+
+  it("keeps prose lines that merely start with 'at'", () => {
+    for (const detail of [
+      "Rate limit reached. Try again\nat 14:05 UTC.",
+      "The provider is busy, please retry\n  at a later time",
+      "Quota exceeded\n  at noon (UTC)",
+    ]) {
+      assert.equal(userFacingFailureDetail(Cause.fail(requestError(detail))), detail);
+    }
+  });
 });
 
 describe("failureTag", () => {
