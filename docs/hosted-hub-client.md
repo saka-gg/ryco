@@ -519,10 +519,13 @@ classified counts as a mutation.
 - **Orchestration commands** (`orchestration.dispatchCommand`) are idempotent by receipt: the node
   persists a receipt for each `commandId` in the same transaction as the command's events and
   answers a repeated id from it — before normalizing the command again — with the original result
-  or rejection. A repeated id that arrives while its first attempt is still running (a bootstrap
-  turn start creating its thread and worktree has no receipt until its turn starts) waits for that
-  attempt and gets its outcome; the attempt runs detached from the request that started it, so a
-  client disconnecting mid-command does not cut it off halfway.
+  or rejection. `thread.archive` is the exception: a repeated archive is normalized again and its
+  follow-ups (stopping the session, closing terminals) run again, since a first attempt may have
+  been cut off between committing and cleaning up, while the engine still answers the archive
+  itself from its receipt. A repeated id that arrives while its first attempt is still running (a
+  bootstrap turn start creating its thread and worktree has no receipt until its turn starts) waits
+  for that attempt and gets its outcome; the attempt runs detached from the request that started
+  it, so a client disconnecting mid-command does not cut it off halfway.
 - The hosted client holds the caller's promise through a reconnect and sends the identical envelope
   once more, at most once, after the environment's session has a fresh ticket, a completed
   handshake, and an accepted snapshot again. Which failures leave a command's delivery unknown is
