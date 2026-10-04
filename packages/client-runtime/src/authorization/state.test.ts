@@ -574,6 +574,64 @@ describe("hosted account state", () => {
     expect(hostedHubStore.getState().accountStatus).toBe("authenticated");
   });
 
+  it("publishes nothing for the replaced credential when its check succeeds after an adoption", async () => {
+    const replacedAccountId = "acct_bbbbbbbbbbbbbbbbbbbbbb";
+    const replacedResponse: HostedHubSessionResponse = {
+      ...sessionResponse,
+      account: { ...sessionResponse.account, id: replacedAccountId, displayName: "Grace" },
+      session: { ...sessionResponse.session, accountId: replacedAccountId },
+    };
+    let resolveReplaced: (response: HostedHubSessionResponse) => void = () => undefined;
+    const restoreSession = vi
+      .spyOn(hostedHubApi, "restoreSession")
+      // The Hub's answer for the replaced credential was already read and
+      // lands regardless of the abort.
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveReplaced = resolve;
+          }),
+      )
+      .mockResolvedValue(sessionResponse);
+    const listNodes = vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([]);
+    let finishCommit: (committed: boolean) => void = () => undefined;
+    const publishedAccountIds = new Set<string>();
+    const unsubscribe = hostedHubStore.subscribe(() => {
+      const accountId = hostedHubStore.getState().account?.id;
+      if (accountId) publishedAccountIds.add(accountId);
+    });
+
+    try {
+      const replaced = hostedHubController.bootstrap();
+      const adopted = hostedHubController.adoptSessionCredential(
+        () =>
+          new Promise<boolean>((resolve) => {
+            finishCommit = resolve;
+          }),
+      );
+      resolveReplaced(replacedResponse);
+      await replaced;
+
+      expect(hostedHubStore.getState()).toMatchObject({
+        accountStatus: "signed-out",
+        account: null,
+      });
+      expect(listNodes).not.toHaveBeenCalled();
+
+      finishCommit(true);
+      await expect(adopted).resolves.toBe(true);
+    } finally {
+      unsubscribe();
+    }
+
+    expect(restoreSession).toHaveBeenCalledTimes(2);
+    expect(publishedAccountIds).toEqual(new Set([sessionResponse.account.id]));
+    expect(hostedHubStore.getState()).toMatchObject({
+      accountStatus: "authenticated",
+      account: sessionResponse.account,
+    });
+  });
+
   it("signs in with a recovery code without joining the replaced session's check", async () => {
     vi.useFakeTimers();
     vi.spyOn(Math, "random").mockReturnValue(0.5);
