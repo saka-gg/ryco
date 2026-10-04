@@ -243,7 +243,7 @@ function currentCauseKeys(view: QueueThreadView | null, threadKey: string): stri
 
 /**
  * Keeps {@link seenLive} current from the live rows of every environment.
- * Only threads whose session or latest turn changed are re-derived. Mounted
+ * Only threads whose session, latest turn or shell changed are re-derived. Mounted
  * once next to the drain; returns an unsubscribe.
  */
 export function trackThreadOutboxLiveCauses(): () => void {
@@ -258,10 +258,12 @@ export function trackThreadOutboxLiveCauses(): () => void {
         previous !== null && selectEnvironmentShellLive(previous, environmentId)
           ? previous.environmentStateById[environmentId]
           : undefined;
+      // The shell carries the usage limit, which can land after the session-set.
       if (
         before !== undefined &&
         before.threadSessionById === environmentState.threadSessionById &&
-        before.threadTurnStateById === environmentState.threadTurnStateById
+        before.threadTurnStateById === environmentState.threadTurnStateById &&
+        before.threadShellById === environmentState.threadShellById
       ) {
         continue;
       }
@@ -269,7 +271,8 @@ export function trackThreadOutboxLiveCauses(): () => void {
         if (
           before !== undefined &&
           before.threadSessionById[threadId] === environmentState.threadSessionById[threadId] &&
-          before.threadTurnStateById[threadId] === environmentState.threadTurnStateById[threadId]
+          before.threadTurnStateById[threadId] === environmentState.threadTurnStateById[threadId] &&
+          before.threadShellById[threadId] === environmentState.threadShellById[threadId]
         ) {
           continue;
         }
