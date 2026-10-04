@@ -699,6 +699,14 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           detail: "A newer turn is running; stale usage limit.",
         });
       }
+      // Only the thread's latest turn can be limited: a late record or reset fill after
+      // a newer turn (or a revert) must never resurrect a cleared limit.
+      if (thread.latestTurn?.turnId !== command.turnId) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "The usage limit belongs to an earlier turn.",
+        });
+      }
       const existing = thread.usageLimit ?? null;
       if (existing?.limitId === command.limitId) {
         // The only update to a recorded limit: filling a reset that was unknown.

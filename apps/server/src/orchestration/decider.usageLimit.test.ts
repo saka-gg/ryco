@@ -294,6 +294,30 @@ describe("thread.usage-limit.record", () => {
   });
 });
 
+describe("stale usage-limit records", () => {
+  it("never resurrects a limit cleared by a newer turn with a late reset fill", async () => {
+    const unknown = await seedLimited({ resetAt: null });
+    const resumed = await dispatch(unknown, turnStart("user-turn"));
+    const running = await dispatch(
+      resumed.readModel,
+      sessionSet(
+        "command-running-y",
+        session({ status: "running", activeTurnId: turnY, updatedAt: startedAt }),
+      ),
+    );
+    const settled = await dispatch(
+      running.readModel,
+      sessionSet("command-ready-y", session({ status: "ready", updatedAt: limitedAt })),
+    );
+    expect(threadOf(settled.readModel)?.usageLimit ?? null).toBeNull();
+    const fill = await decide(
+      settled.readModel,
+      record({ commandId: CommandId.make(`usage-limit-reset:${limitId}`) }),
+    );
+    expect(fill._tag).toBe("Failure");
+  });
+});
+
 describe("thread.usage-limit.configure", () => {
   it("requires the current limit and stores the override", async () => {
     const readModel = await seedLimited();
