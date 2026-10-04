@@ -41,7 +41,12 @@ import {
   uninstallNodeService,
 } from "../service/nodeService.ts";
 import { renderTerminalQrCode, resolveHeadlessServeLinks } from "../startupAccess.ts";
-import { detectMachineName, detectProviders, detectTailscale } from "./machine.ts";
+import {
+  detectMachineName,
+  detectMissingOsKeyStore,
+  detectProviders,
+  detectTailscale,
+} from "./machine.ts";
 import { type NodeConfig, parseNodeConfig, readNodeConfig, writeNodeConfig } from "./nodeConfig.ts";
 import { installServiceForNode } from "./nodeSetup.ts";
 import { bold, cyan, dim, heading, statusLine } from "./ui.ts";
@@ -159,6 +164,13 @@ export function describeRuns(input: {
   ].join(", ");
 }
 
+/** The summary's Hub key line, shown only when the key leaves the OS store. */
+export function describeHubKeyStore(config: NodeConfig): string | null {
+  return config.hub?.enabled === true && config.hub.allowFileSecretStore === true
+    ? "owner-only file (no system keyring)"
+    : null;
+}
+
 export type NodeServiceLingerPlan =
   | { readonly kind: "not-needed" }
   | {
@@ -187,6 +199,48 @@ export function planNodeServiceLinger(input: {
   const { command, args } = nodeServiceLingerCommand(input.user, input.uid);
   return { kind: "offer", command, args, display: [command, ...args].join(" ") };
 }
+
+/**
+ * Offer the permissioned-file Hub key store when no OS store can hold the key.
+ *
+ * On a headless Linux node the connector would otherwise fail every enrollment
+ * with a key-store error the operator cannot fix from the panel. The fallback
+ * is never chosen silently: it is offered only after a real probe failed, it
+ * defaults to no, and declining says how to fix the host instead.
+ */
+const askFileKeyStore = (
+  context: SetupContext,
+  current: NodeConfig | null,
+): SetupEffect<boolean | undefined> =>
+  Effect.gen(function* () {
+    const saved = current?.hub?.allowFileSecretStore;
+    if (saved === true) return saved;
+    const missing = yield* promise(() => detectMissingOsKeyStore()).pipe(
+      Effect.orElseSucceed(() => false),
+    );
+    if (!missing) return saved;
+    yield* Console.log(
+      statusLine(
+        "warn",
+        "No system keyring answers on this computer (no Secret Service), so it cannot hold the Hub key.",
+      ),
+    );
+    const allow = yield* ask(
+      Prompt.confirm({
+        message:
+          "Keep this node's Hub key in an owner-only file in Ryco's state directory instead? Anything running as your user can read it.",
+        initial: false,
+      }),
+    );
+    if (allow) return true;
+    yield* Console.log(
+      statusLine(
+        "warn",
+        `Hub enrollment needs a key store. Start a Secret Service such as gnome-keyring, or run \`${context.commandPrefix} config set hub-allow-file-secret-store true\`.`,
+      ),
+    );
+    return saved;
+  });
 
 /** Ask everything the node needs, starting from what is saved. Changes nothing. */
 const askNodeSettings = (
@@ -282,6 +336,10 @@ const askNodeSettings = (
         ).pipe(Effect.map((value) => value.trim() || machineName))
       : current?.hub?.nodeName;
 
+    const allowFileSecretStore = reach.includes("hub")
+      ? yield* askFileKeyStore(context, current)
+      : current?.hub?.allowFileSecretStore;
+
     const lingering = service?.lingering ?? null;
     const background =
       context.platform === null
@@ -322,6 +380,7 @@ const askNodeSettings = (
         ...current?.hub,
         enabled: reach.includes("hub"),
         ...(nodeName === undefined ? {} : { nodeName }),
+        ...(allowFileSecretStore === undefined ? {} : { allowFileSecretStore }),
       },
       preventSleep,
     };
@@ -730,6 +789,9 @@ export const runFirstTimeSetup = (
         heading("Ready to set up"),
         `  Projects     ${tildify(answers.config.workspace ?? homedir())}`,
         `  Reachable    ${describeReach(answers.config)}`,
+        ...(describeHubKeyStore(answers.config) === null
+          ? []
+          : [`  Hub key      ${describeHubKeyStore(answers.config)}`]),
         `  Runs         ${describeRuns({
           background: answers.background,
           preventSleep: answers.config.preventSleep,

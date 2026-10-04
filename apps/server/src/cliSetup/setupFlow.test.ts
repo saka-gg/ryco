@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { backgroundServicePrompt, describeRuns, planNodeServiceLinger } from "./setupFlow.ts";
+import { detectMissingOsKeyStore } from "./machine.ts";
+import {
+  backgroundServicePrompt,
+  describeHubKeyStore,
+  describeRuns,
+  planNodeServiceLinger,
+} from "./setupFlow.ts";
 
 describe("ryco setup background service copy", () => {
   it("only promises a start at boot when a systemd user unit can outlive logout", () => {
@@ -57,5 +63,32 @@ describe("planNodeServiceLinger", () => {
     ]) {
       expect(planNodeServiceLinger(input)).toEqual({ kind: "not-needed" });
     }
+  });
+});
+
+describe("ryco setup Hub key store", () => {
+  it("shows the file fallback in the summary only when the operator chose it", () => {
+    expect(
+      describeHubKeyStore({ version: 1, hub: { enabled: true, allowFileSecretStore: true } }),
+    ).toBe("owner-only file (no system keyring)");
+    expect(describeHubKeyStore({ version: 1, hub: { enabled: true } })).toBeNull();
+    expect(
+      describeHubKeyStore({ version: 1, hub: { enabled: false, allowFileSecretStore: true } }),
+    ).toBeNull();
+  });
+
+  it("probes for a missing keyring only on Linux and never decides by itself", async () => {
+    let probes = 0;
+    const failingProbe = async () => {
+      probes += 1;
+      return false;
+    };
+    expect(await detectMissingOsKeyStore({ platform: "darwin", probe: failingProbe })).toBe(false);
+    expect(await detectMissingOsKeyStore({ platform: "win32", probe: failingProbe })).toBe(false);
+    expect(probes).toBe(0);
+    expect(await detectMissingOsKeyStore({ platform: "linux", probe: failingProbe })).toBe(true);
+    expect(await detectMissingOsKeyStore({ platform: "linux", probe: async () => true })).toBe(
+      false,
+    );
   });
 });

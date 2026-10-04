@@ -10,6 +10,7 @@ import {
   makeOsProtectedSecretStore,
   makePermissionedFileSecretStore,
   makeProtectedSecretStore,
+  probeOsProtectedSecretStore,
   ProtectedSecretStoreError,
 } from "./ProtectedSecretStore.ts";
 
@@ -30,6 +31,63 @@ class MemoryCredentials {
 }
 
 describe("protected node secret stores", () => {
+  it("probes the OS store with one read that writes nothing", async () => {
+    const credentials = new MemoryCredentials();
+    const reads: string[] = [];
+    const available = await probeOsProtectedSecretStore({
+      service: "dev.ryco.node",
+      makeOsStore: async (service) => {
+        const store = makeKeytarProtectedSecretStore(service, credentials);
+        return {
+          ...store,
+          get: async (name) => {
+            reads.push(name);
+            return store.get(name);
+          },
+        };
+      },
+    });
+    expect(available).toBe(true);
+    expect(reads).toHaveLength(1);
+    expect(credentials.values.size).toBe(0);
+  });
+
+  it("reports an OS store that loads but cannot answer as unavailable", async () => {
+    // Headless Linux: keytar imports, construction succeeds, and every read
+    // fails because no Secret Service is running.
+    const noSecretService = makeKeytarProtectedSecretStore("dev.ryco.node", {
+      getPassword: async () => {
+        throw new Error("Cannot autolaunch D-Bus without X11 $DISPLAY");
+      },
+      setPassword: async () => undefined,
+      deletePassword: async () => false,
+    });
+    expect(
+      await probeOsProtectedSecretStore({
+        service: "dev.ryco.node",
+        makeOsStore: async () => noSecretService,
+      }),
+    ).toBe(false);
+    expect(
+      await probeOsProtectedSecretStore({
+        service: "dev.ryco.node",
+        makeOsStore: async () => {
+          throw new ProtectedSecretStoreError("protected_store_unavailable");
+        },
+      }),
+    ).toBe(false);
+    expect(
+      await probeOsProtectedSecretStore({
+        service: "dev.ryco.node",
+        timeoutMs: 10,
+        makeOsStore: async () => ({
+          ...noSecretService,
+          get: () => new Promise<never>(() => undefined),
+        }),
+      }),
+    ).toBe(false);
+  });
+
   it("loads packaged keytar when available and otherwise fails closed", async () => {
     if ((globalThis as { readonly Bun?: unknown }).Bun !== undefined) return;
     try {

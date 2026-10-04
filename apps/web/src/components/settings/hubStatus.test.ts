@@ -112,6 +112,22 @@ describe("presentHubStatus", () => {
     ).toBe("restart");
   });
 
+  it("names the key-store fixes instead of only suggesting a restart", () => {
+    // On a headless Linux node with no Secret Service a restart repeats the
+    // failure; the copy must point at the store and the explicit fallback.
+    const detail = presentHubStatus(
+      status({
+        state: "degraded",
+        degradedMode: "operator_action_required",
+        failure: "identity_store_unavailable",
+      }),
+      identity("none"),
+      NOW,
+    ).detail;
+    expect(detail).toMatch(/Secret Service/);
+    expect(detail).toMatch(/permissioned-file fallback/);
+  });
+
   it("distinguishes a never-enrolled node from an enrolled one that is switched off", () => {
     const off = status({ state: "disabled" });
     expect(presentHubStatus(off, identity("none"), NOW)).toMatchObject({

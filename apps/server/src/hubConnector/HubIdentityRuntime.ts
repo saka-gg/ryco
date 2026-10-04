@@ -93,6 +93,7 @@ import { makeNodeIdentityKeyRetirementStore } from "../hubIdentity/NodeIdentityK
 import { makeNodeSigningIdentity } from "../hubIdentity/NodeSigningIdentity.ts";
 import {
   makeOsProtectedSecretStore,
+  NODE_IDENTITY_SECRET_SERVICE,
   makePermissionedFileSecretStore,
   type ProtectedSecretStore,
   type ProtectedSecretStoreBackend,
@@ -580,7 +581,8 @@ async function selectProtectedSecretStore(options: {
       };
     });
   };
-  const makeOs = () => (options.makeOsStore ?? makeOsProtectedSecretStore)("ryco.node.identity");
+  const makeOs = () =>
+    (options.makeOsStore ?? makeOsProtectedSecretStore)(NODE_IDENTITY_SECRET_SERVICE);
   const makeFile = () => {
     if (!options.allowFileFallback) return protectedStoreUnavailable();
     return (options.makeFileStore ?? makePermissionedFileSecretStore)(options.fileSecretRoot, {

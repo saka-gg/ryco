@@ -330,6 +330,53 @@ export async function makeOsProtectedSecretStore(service: string): Promise<Prote
   }
 }
 
+/** The OS credential-store service that holds a node's Hub identity keys. */
+export const NODE_IDENTITY_SECRET_SERVICE = "ryco.node.identity";
+
+/** A name nothing ever writes: probing reads it and expects absence. */
+const PROBE_SECRET_NAME = "ryco-store-probe";
+const PROBE_TIMEOUT_MS = 5_000;
+
+/**
+ * Whether the platform credential store answers a real read.
+ *
+ * Constructing an OS store touches nothing: keytar loads its native module and
+ * returns. On a host where that succeeds but no Secret Service runs (headless
+ * Linux), every later read and write fails, so construction alone cannot say
+ * the store is usable. One read of a name that is never written can, and it
+ * creates and changes nothing.
+ *
+ * Deliberately not part of `makeOsProtectedSecretStore`: on macOS a read can
+ * raise a Keychain prompt, and the runtime must not open the store before the
+ * operator acts. Only an explicit operator step such as `ryco setup` probes.
+ * A failed probe never selects the file fallback by itself; it only lets the
+ * caller ask.
+ */
+export async function probeOsProtectedSecretStore(options: {
+  readonly service: string;
+  readonly makeOsStore?: (service: string) => Promise<ProtectedSecretStore>;
+  readonly timeoutMs?: number;
+}): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const store = await (options.makeOsStore ?? makeOsProtectedSecretStore)(options.service);
+    await Promise.race([
+      store.get(PROBE_SECRET_NAME),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new ProtectedSecretStoreError("protected_store_unavailable")),
+          options.timeoutMs ?? PROBE_TIMEOUT_MS,
+        );
+      }),
+    ]);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 export async function makeProtectedSecretStore(options: {
   readonly service: string;
   readonly fileRoot: string;

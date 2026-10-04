@@ -61,9 +61,12 @@ const OPERATOR_FAILURES = {
     detail: "The system keychain is locked or unavailable. Unlock it, then try again.",
     action: "retry",
   },
+  // A restart alone repeats the failure when the host has no credential store
+  // at all, which is the common headless-Linux cause, so name the fixes first.
   identity_store_unavailable: {
-    headline: "Can't read this machine's Hub key",
-    detail: "The keychain was unavailable when Ryco started. Restart Ryco to try again.",
+    headline: "Can't open a key store for this machine's Hub key",
+    detail:
+      "No system credential store answered when Ryco started. Unlock or start it (on Linux, a Secret Service such as GNOME Keyring), or allow the permissioned-file fallback in advanced options, then restart Ryco.",
     action: "restart",
   },
   identity_origin_mismatch: {
