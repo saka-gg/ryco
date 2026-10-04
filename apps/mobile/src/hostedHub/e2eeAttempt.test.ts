@@ -95,6 +95,7 @@ const custody = vi.hoisted(() => ({
 const relayProvider = vi.hoisted(() => ({
   attempt: null as RelayE2eeInitiatorAttempt | null,
 }));
+const hubApi = vi.hoisted(() => ({ ticketsIssued: 0 }));
 
 vi.mock("expo-secure-store", () => ({
   WHEN_UNLOCKED_THIS_DEVICE_ONLY: 0xd,
@@ -182,6 +183,18 @@ vi.mock("../platform/e2eeRelayProvider", async (importOriginal) => {
     },
   };
 });
+// The relay socket routing issues the suite-0x01 ticket itself; the account
+// grant's resolver and key custody are never reached on that path.
+vi.mock("@ryco/client-runtime/authorization", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@ryco/client-runtime/authorization")>()),
+  getHostedHubApi: () => ({
+    issueRelayTicket: async () => {
+      hubApi.ticketsIssued += 1;
+      return { ticket: "local-ticket", expiresAt: 2_000 };
+    },
+  }),
+}));
+vi.mock("../platform/nativeE2ee", () => ({ mobileNativeE2eePlatform: {} }));
 vi.mock("./runtimeConfig", () => ({
   getMobileHostedConfig: () => ({
     hubOrigin: HUB,
@@ -207,6 +220,12 @@ import {
   resetMobileRelayE2eeAttemptForTests,
   resolveMobileRelayE2eeProvider,
 } from "./e2eeAttempt";
+import {
+  issueMobileRelayAttempt,
+  prepareMobileRelaySocketContext,
+  providerForMobileRelaySocketContext,
+} from "./accountE2eeAttempt";
+import { setMobileNativeE2eeEnrollmentCoordinator } from "./e2eeEnrollment";
 
 function selectNode(
   nodeId = "node_1",
@@ -293,6 +312,8 @@ beforeEach(() => {
   custody.prekeyPending = null;
   custody.onPrekeyStart = null;
   relayProvider.attempt = null;
+  hubApi.ticketsIssued = 0;
+  setMobileNativeE2eeEnrollmentCoordinator(null);
   resetMobileRelayE2eeAttemptForTests();
   resetMobileE2eeSessionForTests();
   signOut();
@@ -875,13 +896,15 @@ describe("what the resolved §4.4 attempt actually carries", () => {
 describe("Request approval's pairing channel, end to end", () => {
   /**
    * The routing test in `accountE2eeAttempt.test.ts` proves an `unverified`
-   * record takes the local suite-0x01 provider; the initiator suite proves a
-   * pairing-only attempt sends one hello and closes for good. Neither alone
-   * stops a change that drops `pairingOnly` for this record, or makes its close
-   * retryable, from turning one pairing request into repeated hellos or a
-   * released payload. This drives the record's own attempt through the real
-   * provider: one 0x01 hello, nothing else, and a close the transport will not
-   * retry.
+   * record takes the local suite-0x01 provider against mocked attempt modules;
+   * the initiator suite proves a pairing-only attempt sends one hello and closes
+   * for good. Neither alone stops a change that routes this record to the
+   * account grant, drops `pairingOnly` for it, or makes its close retryable,
+   * from turning one pairing request into an account-grant channel, repeated
+   * hellos or a released payload. This enters where the relay socket does —
+   * routing, ticket, then the provider bound to that context — with the real
+   * attempt behind it: one 0x01 hello, nothing else, and a close the transport
+   * will not retry.
    */
   const NODE_ID = `node_${"P".repeat(22)}`;
   const NOW = 1_784_160_030_000;
@@ -927,8 +950,8 @@ describe("Request approval's pairing channel, end to end", () => {
       suiteRegistry: [E2EE_SUITE_25519_CHACHAPOLY_SHA256],
       prekeyCertificate: { ...prekey, crossSignature: Uint8Array.from(crossSignature) },
       continuityChain: [],
-      // A strict node: the one that admits nothing over the account grant and
-      // so the one Request approval exists for.
+      // A node requiring locally approved clients: it lists this phone for
+      // approval from the 0x01 hello and refuses the channel.
       requireE2EE: true,
       requireApprovedClientE2EE: true,
       policyGeneration: 7,
@@ -955,15 +978,33 @@ describe("Request approval's pairing channel, end to end", () => {
       nodeId: NODE_ID,
     });
     selectNode(NODE_ID);
-    await prepareMobileRelayE2eeAttempt();
+    // The account enrollment is ready, so only the record keeps this channel
+    // off the account grant.
+    setMobileNativeE2eeEnrollmentCoordinator({
+      getState: () => ({
+        status: "ready",
+        generation: 1,
+        ready: { namespace: { hubOrigin: HUB, accountId: ACCOUNT } },
+        errorCode: null,
+      }),
+      subscribe: () => () => undefined,
+    } as never);
+
+    const prepared = await prepareMobileRelaySocketContext();
+    expect(prepared.kind).toBe("local");
+    const issued = await issueMobileRelayAttempt({
+      nodeId: NODE_ID,
+      preparedSocketContext: prepared,
+    });
+    expect(issued.ticket).toBe("local-ticket");
+    expect(hubApi.ticketsIssued).toBe(1);
     expect(inspectMobileRelayE2eeAttemptForTests()?.pairingOnly).toBe(true);
 
     const sent: Uint8Array[] = [];
     const locked: string[] = [];
     const closes: (HostedRelayFailure | undefined)[] = [];
-    const provider = resolveMobileRelayE2eeProvider();
-    expect(provider).not.toBeUndefined();
-    const channel = provider!({
+    const provider = providerForMobileRelaySocketContext(issued.preparedSocketContext);
+    const channel = provider({
       limits: RELAY_INITIAL_LIMITS,
       channel: {
         channelId: "ch_cccccccccccccccccccccc",
