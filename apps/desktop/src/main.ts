@@ -38,6 +38,7 @@ import {
   type DesktopAppBranding,
   type DesktopHostedIdentityActionResult,
   type DesktopHostedIdentityState,
+  type DesktopHubLaunchConfigResult,
   type DesktopServerExposureMode,
   type DesktopServerExposureState,
   type DesktopUpdateChannel,
@@ -3282,119 +3283,126 @@ function registerIpcHandlers(): void {
   );
 
   ipcMain.removeHandler(SET_HUB_LAUNCH_CONFIG_CHANNEL);
-  ipcMain.handle(SET_HUB_LAUNCH_CONFIG_CHANNEL, async (_event, rawInput: unknown) => {
-    if (typeof rawInput !== "object" || rawInput === null) {
-      throw new Error("Invalid Hub launch configuration input.");
-    }
-    const input = rawInput as {
-      readonly enabled?: unknown;
-      readonly origin?: unknown;
-      readonly nodeName?: unknown;
-      readonly allowFileSecretStore?: unknown;
-      readonly applyOnNextLaunch?: unknown;
-      readonly deferRelaunch?: unknown;
-    };
-    if (input.enabled !== undefined && typeof input.enabled !== "boolean") {
-      throw new Error("Invalid Hub launch configuration input.");
-    }
-    const deferRelaunch = readDeferRelaunch(input, "Invalid Hub launch configuration input.");
-    if (input.applyOnNextLaunch !== undefined && typeof input.applyOnNextLaunch !== "boolean") {
-      throw new Error("Invalid Hub launch configuration input.");
-    }
-    if (input.applyOnNextLaunch === true) {
-      // Only an explicit enable of a connector the running backend already
-      // runs in standby may skip the relaunch. Anything else changes what the
-      // running backend serves, so it must still restart.
+  ipcMain.handle(
+    SET_HUB_LAUNCH_CONFIG_CHANNEL,
+    async (_event, rawInput: unknown): Promise<DesktopHubLaunchConfigResult> => {
+      if (typeof rawInput !== "object" || rawInput === null) {
+        throw new Error("Invalid Hub launch configuration input.");
+      }
+      const input = rawInput as {
+        readonly enabled?: unknown;
+        readonly origin?: unknown;
+        readonly nodeName?: unknown;
+        readonly allowFileSecretStore?: unknown;
+        readonly applyOnNextLaunch?: unknown;
+        readonly deferRelaunch?: unknown;
+      };
+      if (input.enabled !== undefined && typeof input.enabled !== "boolean") {
+        throw new Error("Invalid Hub launch configuration input.");
+      }
+      const deferRelaunch = readDeferRelaunch(input, "Invalid Hub launch configuration input.");
+      if (input.applyOnNextLaunch !== undefined && typeof input.applyOnNextLaunch !== "boolean") {
+        throw new Error("Invalid Hub launch configuration input.");
+      }
+      if (input.applyOnNextLaunch === true) {
+        // Only an explicit enable of a connector the running backend already
+        // runs in standby may skip the relaunch. Anything else changes what the
+        // running backend serves, so it must still restart.
+        if (
+          input.enabled !== true ||
+          input.origin !== undefined ||
+          input.nodeName !== undefined ||
+          input.allowFileSecretStore !== undefined ||
+          deferRelaunch
+        ) {
+          throw new Error("Invalid Hub launch configuration input.");
+        }
+        // Already explicit: nothing is left to record.
+        if (desktopSettings.hubOrigin !== null && desktopSettings.hubConnectorEnabled) {
+          return { relaunching: false };
+        }
+        if (backendHubLaunch?.standby !== true) {
+          throw new Error("Invalid Hub launch configuration input.");
+        }
+        const nextSettings = setDesktopHubPreference(desktopSettings, { enabled: true });
+        if (nextSettings !== desktopSettings) {
+          writeDesktopSettings(DESKTOP_SETTINGS_PATH, nextSettings);
+          desktopSettings = nextSettings;
+          desktopKeepAwake?.sync();
+        }
+        return { relaunching: false };
+      }
       if (
-        input.enabled !== true ||
-        input.origin !== undefined ||
-        input.nodeName !== undefined ||
-        input.allowFileSecretStore !== undefined ||
-        deferRelaunch
+        input.allowFileSecretStore !== undefined &&
+        typeof input.allowFileSecretStore !== "boolean"
       ) {
         throw new Error("Invalid Hub launch configuration input.");
       }
-      // Already explicit: nothing is left to record.
-      if (desktopSettings.hubOrigin !== null && desktopSettings.hubConnectorEnabled) return;
-      if (backendHubLaunch?.standby !== true) {
+      if (
+        input.allowFileSecretStore === true &&
+        !isDesktopHubFileSecretStoreSupported(process.platform)
+      ) {
+        throw new Error("Permissioned-file Hub key storage is unavailable on this platform.");
+      }
+
+      let origin: string | null | undefined;
+      if (input.origin === null) {
+        origin = null;
+      } else if (typeof input.origin === "string") {
+        // Validate in main, not in the renderer: the renderer cannot import
+        // `@ryco/shared/nodeIdentity` because it pulls in `node:crypto`, and a
+        // value that reaches the connector unvalidated fails closed at startup
+        // with an opaque `configuration_invalid`.
+        const validation = validateHubOrigin(input.origin);
+        if (!validation.ok) throw new Error("Invalid Hub address.");
+        origin = validation.origin;
+      } else if (input.origin !== undefined) {
         throw new Error("Invalid Hub launch configuration input.");
       }
-      const nextSettings = setDesktopHubPreference(desktopSettings, { enabled: true });
+
+      let nodeName: string | null | undefined;
+      if (input.nodeName === null) {
+        nodeName = null;
+      } else if (typeof input.nodeName === "string") {
+        try {
+          nodeName = normalizeHubNodeName(input.nodeName);
+        } catch {
+          throw new Error("Invalid Hub node name.");
+        }
+      } else if (input.nodeName !== undefined) {
+        throw new Error("Invalid Hub launch configuration input.");
+      }
+
+      const nextSettings = setDesktopHubPreference(desktopSettings, {
+        ...(input.enabled === undefined ? {} : { enabled: input.enabled }),
+        ...(origin === undefined ? {} : { origin }),
+        ...(nodeName === undefined ? {} : { nodeName }),
+        ...(input.allowFileSecretStore === undefined
+          ? {}
+          : { allowFileSecretStore: input.allowFileSecretStore }),
+      });
+      // An explicit enable of a standby backend still restarts: the renderer
+      // only offers Enable when the connector reports itself off, which for a
+      // standby launch means an existing identity kept it disabled.
+      const restart =
+        desktopHubRestartRequired(nextSettings) ||
+        (input.enabled === true && backendHubLaunch?.standby === true);
+      if (nextSettings === desktopSettings && !restart) return { relaunching: false };
+
+      // Persist before publishing the new in-memory value. If the atomic write
+      // fails, an identical retry must still attempt the write and relaunch.
       if (nextSettings !== desktopSettings) {
         writeDesktopSettings(DESKTOP_SETTINGS_PATH, nextSettings);
         desktopSettings = nextSettings;
-        desktopKeepAwake?.sync();
       }
-      return;
-    }
-    if (
-      input.allowFileSecretStore !== undefined &&
-      typeof input.allowFileSecretStore !== "boolean"
-    ) {
-      throw new Error("Invalid Hub launch configuration input.");
-    }
-    if (
-      input.allowFileSecretStore === true &&
-      !isDesktopHubFileSecretStoreSupported(process.platform)
-    ) {
-      throw new Error("Permissioned-file Hub key storage is unavailable on this platform.");
-    }
-
-    let origin: string | null | undefined;
-    if (input.origin === null) {
-      origin = null;
-    } else if (typeof input.origin === "string") {
-      // Validate in main, not in the renderer: the renderer cannot import
-      // `@ryco/shared/nodeIdentity` because it pulls in `node:crypto`, and a
-      // value that reaches the connector unvalidated fails closed at startup
-      // with an opaque `configuration_invalid`.
-      const validation = validateHubOrigin(input.origin);
-      if (!validation.ok) throw new Error("Invalid Hub address.");
-      origin = validation.origin;
-    } else if (input.origin !== undefined) {
-      throw new Error("Invalid Hub launch configuration input.");
-    }
-
-    let nodeName: string | null | undefined;
-    if (input.nodeName === null) {
-      nodeName = null;
-    } else if (typeof input.nodeName === "string") {
-      try {
-        nodeName = normalizeHubNodeName(input.nodeName);
-      } catch {
-        throw new Error("Invalid Hub node name.");
-      }
-    } else if (input.nodeName !== undefined) {
-      throw new Error("Invalid Hub launch configuration input.");
-    }
-
-    const nextSettings = setDesktopHubPreference(desktopSettings, {
-      ...(input.enabled === undefined ? {} : { enabled: input.enabled }),
-      ...(origin === undefined ? {} : { origin }),
-      ...(nodeName === undefined ? {} : { nodeName }),
-      ...(input.allowFileSecretStore === undefined
-        ? {}
-        : { allowFileSecretStore: input.allowFileSecretStore }),
-    });
-    // An explicit enable of a standby backend still restarts: the renderer
-    // only offers Enable when the connector reports itself off, which for a
-    // standby launch means an existing identity kept it disabled.
-    const restart =
-      desktopHubRestartRequired(nextSettings) ||
-      (input.enabled === true && backendHubLaunch?.standby === true);
-    if (nextSettings === desktopSettings && !restart) return;
-
-    // Persist before publishing the new in-memory value. If the atomic write
-    // fails, an identical retry must still attempt the write and relaunch.
-    if (nextSettings !== desktopSettings) {
-      writeDesktopSettings(DESKTOP_SETTINGS_PATH, nextSettings);
-      desktopSettings = nextSettings;
-    }
-    // Never log the origin or node name: together they identify this machine.
-    // A deferred change is saved now and applies with the relaunch the
-    // renderer schedules once running turns finish, or on the next launch.
-    if (restart && !deferRelaunch) relaunchDesktopApp("hub-launch-config-changed");
-  });
+      // Never log the origin or node name: together they identify this machine.
+      // A deferred change is saved now and applies with the relaunch the
+      // renderer schedules once running turns finish, or on the next launch.
+      const relaunching = restart && !deferRelaunch;
+      if (relaunching) relaunchDesktopApp("hub-launch-config-changed");
+      return { relaunching };
+    },
+  );
 
   ipcMain.removeHandler(RESTART_APP_CHANNEL);
   ipcMain.handle(RESTART_APP_CHANNEL, () => {

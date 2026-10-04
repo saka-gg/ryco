@@ -13,17 +13,20 @@
 export type DesktopRelaunchTiming = "now" | "deferred";
 
 /**
- * Save a launch change. With `now` it also relaunches Desktop to apply it; with
- * `deferred` it only saves it, and the scheduler relaunches later.
+ * Save a launch change. With `now` it also relaunches Desktop to apply it,
+ * unless the running backend already serves the change, which it reports as
+ * `"applied"`; with `deferred` it only saves it, and the scheduler relaunches
+ * later.
  */
-export type DesktopRelaunchChange = (timing: DesktopRelaunchTiming) => Promise<void>;
+export type DesktopRelaunchChange = (timing: DesktopRelaunchTiming) => Promise<void | "applied">;
 
 export interface DesktopRelaunchScheduler {
   /**
    * Apply `change` and relaunch now. Without one, relaunch for the changes
-   * already saved.
+   * already saved. Resolves whether Desktop is relaunching: a change the
+   * running backend already serves, with nothing else saved, needs none.
    */
-  readonly relaunchNow: (change?: DesktopRelaunchChange) => Promise<void>;
+  readonly relaunchNow: (change?: DesktopRelaunchChange) => Promise<boolean>;
   /**
    * Save `change` now and relaunch once no interruptible local turn remains.
    * Rejects, without arming anything, when the change could not be saved.
@@ -61,16 +64,20 @@ export function createDesktopRelaunchScheduler(input: {
     }
   };
 
-  const relaunchNow = async (change?: DesktopRelaunchChange): Promise<void> => {
+  const relaunchNow = async (change?: DesktopRelaunchChange): Promise<boolean> => {
     const carriesSaved = armed;
     armed = false;
     stopWatching();
     running = true;
     try {
-      if (change !== undefined) await change("now");
+      const result = change === undefined ? undefined : await change("now");
       // A change that turns out to need no relaunch must not strand the ones
       // saved earlier; Desktop collapses a second relaunch request into one.
-      if (change === undefined || carriesSaved) await input.restart();
+      if (change === undefined || carriesSaved) {
+        await input.restart();
+        return true;
+      }
+      return result !== "applied";
     } finally {
       running = false;
     }

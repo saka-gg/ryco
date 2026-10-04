@@ -101,6 +101,22 @@ describe("createDesktopRelaunchScheduler", () => {
     expect(alone.restart).toHaveBeenCalledOnce();
   });
 
+  it("reports a change the running backend already serves as not relaunching", async () => {
+    // Reverting a deferred change is saved without a relaunch; reporting it as
+    // one left the caller waiting on a restart that never came.
+    const alone = makeHarness(0);
+    const applied = vi.fn(async () => "applied" as const);
+    await expect(alone.scheduler.relaunchNow(applied)).resolves.toBe(false);
+    expect(alone.restart).not.toHaveBeenCalled();
+    await expect(alone.scheduler.relaunchNow(recordingChange().change)).resolves.toBe(true);
+
+    // Changes saved earlier still relaunch.
+    const carrying = makeHarness(1);
+    await carrying.scheduler.scheduleAfterActiveTurns(recordingChange().change);
+    await expect(carrying.scheduler.relaunchNow(applied)).resolves.toBe(true);
+    expect(carrying.restart).toHaveBeenCalledOnce();
+  });
+
   it("stops waiting on cancel; the saved change stays saved", async () => {
     const harness = makeHarness(1);
     const { change, timings } = recordingChange();

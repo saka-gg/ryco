@@ -428,7 +428,8 @@ const createDesktopBridgeStub = (overrides?: {
         fileSecretStoreFallbackSupported: true,
         hostedIdentitySupported: true,
       })),
-    setHubLaunchConfig: overrides?.setHubLaunchConfig ?? vi.fn().mockResolvedValue(undefined),
+    setHubLaunchConfig:
+      overrides?.setHubLaunchConfig ?? vi.fn().mockResolvedValue({ relaunching: true }),
     ...(overrides?.restartApp === undefined ? {} : { restartApp: overrides.restartApp }),
     ...(overrides?.getHostedIdentityState === undefined
       ? {}
@@ -2421,7 +2422,7 @@ describe("ConnectionsSettings Hub section", () => {
   });
 
   it("relaunches at once when no agent turn would be stopped", async () => {
-    const setHubLaunchConfig = vi.fn().mockResolvedValue(undefined);
+    const setHubLaunchConfig = vi.fn().mockResolvedValue({ relaunching: true });
     stubHubFetch({
       status: { ...baseStatus, state: "disabled" },
       identity: { enrolled: "none" },
@@ -2439,7 +2440,7 @@ describe("ConnectionsSettings Hub section", () => {
     // Relaunching stopped the backend and killed in-flight provider turns
     // without a word; now the operator chooses.
     activeDesktopTurns.count = 2;
-    const setHubLaunchConfig = vi.fn().mockResolvedValue(undefined);
+    const setHubLaunchConfig = vi.fn().mockResolvedValue({ relaunching: true });
     stubHubFetch({
       status: { ...baseStatus, state: "disabled" },
       identity: { enrolled: "none" },
@@ -2465,7 +2466,7 @@ describe("ConnectionsSettings Hub section", () => {
   it("asks before a relaunch while running turns cannot be counted yet", async () => {
     // An unknown local environment used to count as no running turns.
     activeDesktopTurns.count = null;
-    const setHubLaunchConfig = vi.fn().mockResolvedValue(undefined);
+    const setHubLaunchConfig = vi.fn().mockResolvedValue({ relaunching: true });
     stubHubFetch({
       status: { ...baseStatus, state: "disabled" },
       identity: { enrolled: "none" },
@@ -2482,7 +2483,7 @@ describe("ConnectionsSettings Hub section", () => {
     // A deferred change used to live only in renderer memory, so quitting or
     // crashing before the turns finished silently dropped it.
     activeDesktopTurns.count = 1;
-    const setHubLaunchConfig = vi.fn().mockResolvedValue(undefined);
+    const setHubLaunchConfig = vi.fn().mockResolvedValue({ relaunching: true });
     const restartApp = vi.fn().mockResolvedValue(undefined);
     stubHubFetch({
       status: { ...baseStatus, state: "disabled" },
@@ -2570,7 +2571,7 @@ describe("ConnectionsSettings Hub section", () => {
   });
 
   it("records enrollment from a standby connector without restarting", async () => {
-    const setHubLaunchConfig = vi.fn().mockResolvedValue(undefined);
+    const setHubLaunchConfig = vi.fn().mockResolvedValue({ relaunching: false });
     const fetchMock = stubHubFetch({
       status: { ...baseStatus, state: "enrolling" },
       identity: { enrolled: "none" },
@@ -2591,7 +2592,7 @@ describe("ConnectionsSettings Hub section", () => {
   it("records the enrollment enable before the launch configuration has loaded", async () => {
     // Skipping the record left the new identity to standby, which turns any
     // existing identity off at the next launch.
-    const setHubLaunchConfig = vi.fn().mockResolvedValue(undefined);
+    const setHubLaunchConfig = vi.fn().mockResolvedValue({ relaunching: false });
     const fetchMock = stubHubFetch({
       status: { ...baseStatus, state: "enrolling" },
       identity: { enrolled: "none" },
@@ -2793,7 +2794,7 @@ describe("ConnectionsSettings Hub section", () => {
   });
 
   it("saves a trimmed pre-enrollment node name", async () => {
-    const setHubLaunchConfig = vi.fn().mockResolvedValue(undefined);
+    const setHubLaunchConfig = vi.fn().mockResolvedValue({ relaunching: true });
     stubHubFetch({
       status: { ...baseStatus, state: "disabled" },
       identity: { enrolled: "none" },
@@ -2809,8 +2810,51 @@ describe("ConnectionsSettings Hub section", () => {
     });
   });
 
+  it("settles a reverted change that the running backend already serves", async () => {
+    // Desktop saves a change back to what runs without relaunching. The panel
+    // used to keep saving and keep the stale restart notice until remount.
+    const config = {
+      enabled: false,
+      origin: null,
+      nodeName: "Release node",
+      allowFileSecretStore: false,
+      fileSecretStoreFallbackSupported: true,
+      hostedIdentitySupported: true,
+      restartRequired: true,
+    };
+    const setHubLaunchConfig = vi.fn().mockImplementation(async () => {
+      config.nodeName = "Build node";
+      config.restartRequired = false;
+      return { relaunching: false };
+    });
+    stubHubFetch({
+      status: { ...baseStatus, state: "disabled" },
+      identity: { enrolled: "none" },
+    });
+    await renderHub(undefined, {
+      setHubLaunchConfig,
+      getHubLaunchConfig: async () => ({ ...config }),
+    });
+
+    await expect
+      .element(page.getByText("Saved Hub settings apply after Ryco restarts."))
+      .toBeVisible();
+    const input = page.getByRole("textbox", { name: "Hub node name" });
+    await expect.element(input).toHaveValue("Release node");
+    await input.fill("Build node");
+    await page.getByRole("button", { name: "Save and restart" }).click();
+    await vi.waitFor(() =>
+      expect(setHubLaunchConfig).toHaveBeenCalledWith({ nodeName: "Build node" }),
+    );
+    await expect
+      .element(page.getByText("Saved Hub settings apply after Ryco restarts."))
+      .not.toBeInTheDocument();
+    await expect.element(input).toBeEnabled();
+    await expect.element(page.getByRole("button", { name: "Saving…" })).not.toBeInTheDocument();
+  });
+
   it("resets a configured node name to automatic", async () => {
-    const setHubLaunchConfig = vi.fn().mockResolvedValue(undefined);
+    const setHubLaunchConfig = vi.fn().mockResolvedValue({ relaunching: true });
     stubHubFetch({
       status: { ...baseStatus, state: "disabled" },
       identity: { enrolled: "none" },
@@ -2824,7 +2868,7 @@ describe("ConnectionsSettings Hub section", () => {
   });
 
   it("rejects an overlong node name before it reaches the desktop bridge", async () => {
-    const setHubLaunchConfig = vi.fn().mockResolvedValue(undefined);
+    const setHubLaunchConfig = vi.fn().mockResolvedValue({ relaunching: true });
     stubHubFetch({
       status: { ...baseStatus, state: "disabled" },
       identity: { enrolled: "none" },
@@ -3019,7 +3063,7 @@ describe("ConnectionsSettings Hub section", () => {
 
   it("confirms and restarts before enabling permissioned-file key storage", async () => {
     const confirm = vi.fn().mockResolvedValue(true);
-    const setHubLaunchConfig = vi.fn().mockResolvedValue(undefined);
+    const setHubLaunchConfig = vi.fn().mockResolvedValue({ relaunching: true });
     stubHubFetch({
       status: { ...baseStatus, state: "disabled" },
       identity: { enrolled: "none" },

@@ -441,6 +441,15 @@ export interface DesktopHubLaunchConfig {
   readonly restartRequired?: boolean;
 }
 
+/** What `setHubLaunchConfig` did with a change. */
+export interface DesktopHubLaunchConfigResult {
+  /**
+   * Desktop is relaunching to apply it. False when the change was only saved
+   * for a later launch, or when the running backend already serves it.
+   */
+  readonly relaunching: boolean;
+}
+
 /** Whether Desktop main is holding this machine awake for the devices that reach it. */
 export interface DesktopKeepAwakeState {
   /** The operator's preference. On by default. */
@@ -832,6 +841,9 @@ export interface DesktopBridge {
    * `deferRelaunch` saves any other change without relaunching; it applies on
    * the next launch, which the caller schedules. `restartRequired` reports it
    * meanwhile.
+   *
+   * A change the running backend already serves, such as reverting a deferred
+   * change, is saved without a relaunch; the result says which happened.
    */
   setHubLaunchConfig: (input: {
     readonly enabled?: boolean;
@@ -840,7 +852,7 @@ export interface DesktopBridge {
     readonly allowFileSecretStore?: boolean;
     readonly applyOnNextLaunch?: boolean;
     readonly deferRelaunch?: boolean;
-  }) => Promise<void>;
+  }) => Promise<DesktopHubLaunchConfigResult>;
   /** Validate a typed Hub address without persisting it. */
   validateHubOrigin: (raw: string) => Promise<DesktopHubOriginValidation>;
   getAdvertisedEndpoints: () => Promise<readonly AdvertisedEndpoint[]>;

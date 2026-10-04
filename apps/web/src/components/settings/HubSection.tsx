@@ -462,7 +462,8 @@ export function HubSection({
           case "disable": {
             if (!desktopBridge) return;
             // A relaunch ends this renderer. A cancelled one changed nothing; a
-            // deferred one saved the change, which the panel then shows.
+            // deferred one saved the change, which the panel then shows, as it
+            // does one the running backend already served without a relaunch.
             const save = hubLaunchChange(desktopBridge, { enabled: action === "enable" });
             const outcome = await guardRelaunch(async (timing) => {
               if (action === "enable" && enrollAfterEnable) {
@@ -472,7 +473,7 @@ export function HubSection({
               }
               await save(timing);
             });
-            if (outcome === "scheduled") await reloadConfig();
+            if (outcome === "scheduled" || outcome === "applied") await reloadConfig();
             return;
           }
           case "restart": {
@@ -547,7 +548,7 @@ export function HubSection({
       setPendingAction("enable");
       try {
         const outcome = await guardRelaunch(hubLaunchChange(desktopBridge, { origin }));
-        if (outcome === "scheduled") await reloadConfig();
+        if (outcome === "scheduled" || outcome === "applied") await reloadConfig();
         if (outcome !== "relaunched" && mountedRef.current) setPendingAction(null);
       } catch (cause) {
         if (!mountedRef.current) return;
@@ -577,7 +578,7 @@ export function HubSection({
       const outcome = await guardRelaunch(
         hubLaunchChange(desktopBridge, { nodeName: nodeName === "" ? null : nodeName }),
       );
-      if (outcome === "scheduled") await reloadConfig();
+      if (outcome === "scheduled" || outcome === "applied") await reloadConfig();
       if (outcome !== "relaunched" && mountedRef.current) setSavingNodeName(false);
     } catch (cause) {
       if (!mountedRef.current) return;
@@ -603,7 +604,7 @@ export function HubSection({
         const outcome = await guardRelaunch(
           hubLaunchChange(desktopBridge, { allowFileSecretStore: enabled }),
         );
-        if (outcome === "scheduled") await reloadConfig();
+        if (outcome === "scheduled" || outcome === "applied") await reloadConfig();
         if (outcome !== "relaunched" && mountedRef.current) setSavingFileFallback(false);
       } catch (cause) {
         if (!mountedRef.current) return;

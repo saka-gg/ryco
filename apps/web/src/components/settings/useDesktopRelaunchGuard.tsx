@@ -104,7 +104,12 @@ export const desktopRelaunchScheduler = createDesktopRelaunchScheduler({
   onError: reportRelaunchFailure,
 });
 
-export type DesktopRelaunchOutcome = "relaunched" | "scheduled" | "cancelled";
+/**
+ * `applied`: the running backend already served the change, so it was saved
+ * and nothing relaunched. The caller is still alive and must settle its own
+ * pending state.
+ */
+export type DesktopRelaunchOutcome = "relaunched" | "applied" | "scheduled" | "cancelled";
 
 /** The relaunch for changes Desktop has already saved: nothing is left to save. */
 export function savedChangeRelaunch(restartApp: () => Promise<void>): DesktopRelaunchChange {
@@ -113,13 +118,21 @@ export function savedChangeRelaunch(restartApp: () => Promise<void>): DesktopRel
   };
 }
 
-/** Save a Hub launch change; Desktop relaunches now, or waits when deferred. */
+/**
+ * Save a Hub launch change; Desktop relaunches now, or waits when deferred. A
+ * change the running backend already serves, such as reverting a deferred
+ * one, relaunches nothing.
+ */
 export function hubLaunchChange(
   bridge: Pick<DesktopBridge, "setHubLaunchConfig">,
   input: Omit<Parameters<DesktopBridge["setHubLaunchConfig"]>[0], "deferRelaunch">,
 ): DesktopRelaunchChange {
-  return (timing) =>
-    bridge.setHubLaunchConfig(timing === "deferred" ? { ...input, deferRelaunch: true } : input);
+  return async (timing) => {
+    const result = await bridge.setHubLaunchConfig(
+      timing === "deferred" ? { ...input, deferRelaunch: true } : input,
+    );
+    if (timing === "now" && !result.relaunching) return "applied";
+  };
 }
 
 type GuardRelaunch = (
@@ -193,8 +206,7 @@ export function useDesktopRelaunchGuard(): {
     ): Promise<DesktopRelaunchOutcome> => {
       const activeTurns = readActiveDesktopTurnCount();
       if (activeTurns === 0) {
-        await desktopRelaunchScheduler.relaunchNow(change);
-        return "relaunched";
+        return (await desktopRelaunchScheduler.relaunchNow(change)) ? "relaunched" : "applied";
       }
       options?.beforePrompt?.();
       return new Promise<DesktopRelaunchOutcome>((resolve, reject) => {
@@ -218,8 +230,8 @@ export function useDesktopRelaunchGuard(): {
     setAnswering(timing);
     try {
       if (timing === "now") {
-        await desktopRelaunchScheduler.relaunchNow(current.change);
-        current.resolve("relaunched");
+        const relaunching = await desktopRelaunchScheduler.relaunchNow(current.change);
+        current.resolve(relaunching ? "relaunched" : "applied");
       } else {
         // Saved before waiting, so quitting or crashing first cannot drop it.
         await desktopRelaunchScheduler.scheduleAfterActiveTurns(current.change);
