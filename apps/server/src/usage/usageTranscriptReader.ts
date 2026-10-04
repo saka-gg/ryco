@@ -19,8 +19,8 @@ export const USAGE_TRANSCRIPT_LIMITS = {
   entries: 50_000,
   files: 10_000,
   depth: 16,
-  fileBytes: 64 * 1024 * 1024,
-  lineBytes: 1024 * 1024,
+  fileBytes: 512 * 1024 * 1024,
+  lineBytes: 16 * 1024 * 1024,
   records: 100_000,
 } as const;
 
@@ -223,7 +223,10 @@ async function readTranscript(
       else if (isJson(line)) skippedLineCount++;
       else malformedLineCount++;
     } else {
-      const carriesContext = line.includes('"turn_context"') || line.includes('"session_meta"');
+      const carriesContext =
+        line.includes('"turn_context"') ||
+        line.includes('"session_meta"') ||
+        line.includes('"thread_settings_applied"');
       if (!carriesUsage && !carriesContext) {
         skippedLineCount++;
         return;
@@ -328,7 +331,8 @@ async function readTranscript(
           pending = pending.length === 0 ? Buffer.from(segment) : Buffer.concat([pending, segment]);
         }
         if (newline !== -1) {
-          if (++lineCount > USAGE_TRANSCRIPT_LIMITS.records) {
+          lineCount++;
+          if (records.length >= USAGE_TRANSCRIPT_LIMITS.records) {
             limited = true;
             break;
           }
@@ -343,7 +347,10 @@ async function readTranscript(
         cursor = end + (newline === -1 ? 0 : 1);
       }
       offset += bytesRead;
-      if (lineCount > USAGE_TRANSCRIPT_LIMITS.records) break;
+      if (records.length >= USAGE_TRANSCRIPT_LIMITS.records) {
+        if (offset < before.size || pending.length > 0) limited = true;
+        break;
+      }
     }
     // The checkpoint ends at the last newline. A final line can be valid JSON today
     // and receive more bytes tomorrow, so its result and parser state are provisional.

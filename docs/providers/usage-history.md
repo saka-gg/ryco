@@ -8,9 +8,45 @@ The usage contract is version 2. The shared transport checks the node’s advert
 usage version before sending a request; older connected nodes show an update
 instruction instead of a decoding error. Update Ryco on both clients and nodes.
 
+## Pricing and history coverage
+
+Automatic prices preserve LiteLLM's full provider/model keys. Canonical model prices
+cannot be overwritten by a gateway or regional entry; a bare alias is created only
+when qualified entries agree. Explicit native `openai/` and `anthropic/` prefixes and
+Claude context suffixes such as `[1m]` resolve to their model rates. Unknown model
+generations remain unpriced rather than being guessed.
+
+Recorded Codex `priority` / `ultrafast` settings and Claude fast usage select their
+published billing rates, including cache rates. Without a separate cache price, the
+input rate is used; cached tokens are never silently free. Cache savings measure the
+discount on cache reads. Cache writes are charged, and a missing write rate cannot
+hide known read savings. Provider-reported model cost still takes precedence.
+This arithmetic is checked against [T3 Code's pricing implementation](https://github.com/pingdotgg/t3code/blob/main/apps/server/src/usage/usagePricing.ts).
+
+History includes disabled configured accounts. Codex and Claude instances resolve
+stores with the same home and environment precedence as their runtime, including
+`CODEX_HOME`, `CLAUDE_CONFIG_DIR`, and `HOME`; shared stores count once.
+
+JSONL scans stream files up to 512 MiB with a 16 MiB line bound. Ordinary message
+lines do not consume the 100,000 usage-record limit. A source can read up to 4 GiB
+within five seconds; cached files do not spend its read budget. Budget-limited scans
+continue looking for reusable/smaller files and report partial coverage. Refreshing
+can finish remaining files instead of repeatedly stopping at the same cached prefix.
+Old pricing caches and transcript caches that lost billing speed are invalidated and
+rebuilt automatically. Updated pricing can be reused offline after a successful fetch.
+
+Project/activity statistics use processed counters separately from context-window
+gauges: Codex session totals are differenced, Claude completed-turn totals are retained,
+and OpenCode request snapshots are deduplicated by message identity. Indexed durable
+activity history recovers turns whose live projection was overwritten. New events
+retain their provider/model attribution. Historical counters without a full split or
+model attribution remain approximate; unavailable history cannot be reconstructed.
+The provider-history cost view continues to include sessions outside Ryco and is not
+attributed to projects.
+
 ## OpenCode
 
-For a local enabled OpenCode instance, Ryco reads that instance's `HOME` /
+For a local configured OpenCode instance, Ryco reads that instance's `HOME` /
 `USERPROFILE`, `XDG_DATA_HOME` and `OPENCODE_DB` path settings. The default is
 `$XDG_DATA_HOME/opencode/opencode.db` (or `$HOME/.local/share/opencode/opencode.db`).
 An explicit `OPENCODE_DB` is authoritative; there is no fallback to another account,

@@ -20,6 +20,7 @@ const statisticsLayer = it.layer(
 
 const clean = (sql: SqlClient.SqlClient) =>
   Effect.gen(function* () {
+    yield* sql`DELETE FROM orchestration_events`;
     yield* sql`DELETE FROM projection_projects`;
     yield* sql`DELETE FROM projection_threads`;
     yield* sql`DELETE FROM projection_thread_sessions`;
@@ -627,3 +628,211 @@ it.effect("invalidates statistics after another SQLite connection commits", () =
     }).pipe(Effect.provide(StatisticsQueryLive.pipe(Layer.provideMerge(persistence))));
   }).pipe(Effect.scoped),
 );
+
+statisticsLayer("usage billing counters", (it) => {
+  it.effect(
+    "recovers overwritten Claude turns from indexed history and avoids counting its projection copy",
+    () =>
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        const statistics = yield* StatisticsQuery;
+        yield* clean(sql);
+        yield* insertProject(sql, "billing-project", "Billing");
+        yield* insertThread(
+          sql,
+          "billing-thread",
+          "billing-project",
+          "claudeAgent",
+          "claude-opus-5-5",
+          "2026-06-10T00:00:00.000Z",
+        );
+        for (const [index, total] of [1000, 2000].entries()) {
+          const createdAt = `2026-06-${10 + index}T00:00:01.000Z`;
+          const payload = {
+            usedTokens: 100,
+            statisticsProvider: "claudeAgent",
+            processedUsage: {
+              scope: "turn",
+              inputTokens: total - 100,
+              cachedInputTokens: 400,
+              outputTokens: 100,
+              reasoningOutputTokens: 0,
+              totalTokens: total,
+            },
+          };
+          const activity = {
+            id: "claude-context-usage:billing-thread",
+            turnId: `turn-${index}`,
+            sequence: index,
+            kind: "context-window.updated",
+            createdAt,
+            payload,
+          };
+          yield* sql`INSERT INTO orchestration_events (event_id,aggregate_kind,stream_id,stream_version,event_type,occurred_at,actor_kind,payload_json,metadata_json)
+        VALUES (${`usage-event-${index}`},'thread','billing-thread',${index},'thread.activity-appended',${createdAt},'system',${JSON.stringify({ threadId: "billing-thread", activity })},'{}')`;
+          if (index === 1)
+            yield* insertActivity(
+              sql,
+              activity.id,
+              "billing-thread",
+              activity.turnId,
+              activity.kind,
+              JSON.stringify(payload),
+              createdAt,
+              index,
+            );
+        }
+        const snapshot = yield* statistics.getStatistics();
+        assert.equal(snapshot.totals.totalTokens, 3000);
+        assert.equal(snapshot.totals.inputTokens, 2800);
+        assert.equal(
+          snapshot.dailyBuckets.find((bucket) => bucket.date === "2026-06-10")?.totalTokens,
+          1000,
+        );
+        assert.equal(
+          snapshot.dailyBuckets.find((bucket) => bucket.date === "2026-06-11")?.totalTokens,
+          2000,
+        );
+        const plan = yield* sql<{
+          detail: string;
+        }>`EXPLAIN QUERY PLAN SELECT stream_id FROM orchestration_events WHERE event_type = 'thread.activity-appended' AND json_extract(payload_json, '$.activity.kind') = 'context-window.updated'`;
+        assert.ok(plan.some((row) => row.detail.includes("idx_orch_events_statistics_usage")));
+      }),
+  );
+  it.effect("counts all Codex requests in a turn, not just its final context gauge", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const statistics = yield* StatisticsQuery;
+      yield* clean(sql);
+      yield* insertProject(sql, "codex-project", "Codex");
+      yield* insertThread(
+        sql,
+        "codex-thread",
+        "codex-project",
+        "codex",
+        "gpt-6-astra",
+        "2026-06-10T00:00:00.000Z",
+      );
+      for (const [index, total] of [1000, 5000, 5000, 9000].entries()) {
+        yield* insertActivity(
+          sql,
+          `usage-${index}`,
+          "codex-thread",
+          index < 3 ? "turn-a" : "turn-b",
+          "context-window.updated",
+          JSON.stringify({
+            usedTokens: 100,
+            lastUsedTokens: 100,
+            lastInputTokens: 90,
+            lastOutputTokens: 10,
+            totalProcessedTokens: total,
+          }),
+          `2026-06-${index < 3 ? 10 : 11}T00:00:0${index}.000Z`,
+          index,
+        );
+      }
+      const snapshot = yield* statistics.getStatistics();
+      assert.equal(snapshot.totals.totalTokens, 9000);
+      assert.equal(
+        snapshot.dailyBuckets.find((bucket) => bucket.date === "2026-06-10")?.totalTokens,
+        5000,
+      );
+      assert.equal(
+        snapshot.dailyBuckets.find((bucket) => bucket.date === "2026-06-11")?.totalTokens,
+        4000,
+      );
+      assert.equal(snapshot.tokenAttribution, "thread-cumulative");
+    }),
+  );
+});
+
+statisticsLayer("recorded usage attribution", (it) => {
+  it.effect("keeps usage in its original provider/model/project when a thread changes models", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const statistics = yield* StatisticsQuery;
+      yield* clean(sql);
+      yield* insertProject(sql, "project-a", "A");
+      yield* insertProject(sql, "project-b", "B");
+      yield* insertThread(
+        sql,
+        "changing",
+        "project-a",
+        "codex",
+        "model-b",
+        "2026-06-10T00:00:00.000Z",
+      );
+      yield* insertThread(
+        sql,
+        "other",
+        "project-b",
+        "opencode",
+        "model-c",
+        "2026-06-10T00:00:00.000Z",
+      );
+      for (const [index, total] of [1000, 3000].entries()) {
+        yield* insertActivity(
+          sql,
+          `changing-${index}`,
+          "changing",
+          `turn-${index}`,
+          "context-window.updated",
+          JSON.stringify({
+            statisticsProvider: "codex",
+            statisticsModel: index === 0 ? "model-a" : "model-b",
+            processedUsage: {
+              scope: "session",
+              sessionId: "provider-session",
+              inputTokens: total - 100,
+              cachedInputTokens: 0,
+              outputTokens: 100,
+              reasoningOutputTokens: 0,
+              totalTokens: total,
+            },
+          }),
+          `2026-06-10T00:00:0${index}.000Z`,
+          index,
+        );
+      }
+      yield* insertActivity(
+        sql,
+        "other-usage",
+        "other",
+        "turn-other",
+        "context-window.updated",
+        JSON.stringify({
+          statisticsProvider: "opencode",
+          statisticsModel: "model-c",
+          processedUsage: {
+            scope: "request",
+            requestId: "message",
+            inputTokens: 450,
+            cachedInputTokens: 0,
+            outputTokens: 50,
+            reasoningOutputTokens: 0,
+            totalTokens: 500,
+          },
+        }),
+        "2026-06-10T00:00:03.000Z",
+        3,
+      );
+      const snapshot = yield* statistics.getStatistics();
+      assert.equal(snapshot.totals.totalTokens, 3500);
+      assert.equal(
+        snapshot.dailyBuckets.find((bucket) => bucket.model === "model-a")?.totalTokens,
+        1000,
+      );
+      assert.equal(
+        snapshot.dailyBuckets.find((bucket) => bucket.model === "model-b")?.totalTokens,
+        2000,
+      );
+      assert.equal(
+        snapshot.dailyBuckets.find((bucket) => bucket.projectId === "project-b")?.totalTokens,
+        500,
+      );
+      assert.ok(
+        snapshot.models.some((model) => model.model === "model-a" && model.provider === "codex"),
+      );
+    }),
+  );
+});

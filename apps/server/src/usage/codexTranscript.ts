@@ -1,8 +1,9 @@
-import type { UsageRecord } from "./usageRecord.ts";
+import type { UsageRecord, UsageSpeed } from "./usageRecord.ts";
 import { parseTimestampMs, positiveInteger, withTokenTotal } from "./usageRecord.ts";
 
 export interface CodexTranscriptState {
   model: string;
+  speed: UsageSpeed;
   sessionId: string;
   lastUsageSignature: string | null;
   sawSessionMeta: boolean;
@@ -13,6 +14,7 @@ export interface CodexTranscriptState {
 export function initialCodexTranscriptState(): CodexTranscriptState {
   return {
     model: "",
+    speed: "standard",
     sessionId: "",
     lastUsageSignature: null,
     sawSessionMeta: false,
@@ -74,6 +76,20 @@ export function parseCodexTranscriptLine(
     return null;
   }
 
+  if (payloadRecord["type"] === "thread_settings_applied") {
+    const settings = payloadRecord["thread_settings"];
+    if (typeof settings === "object" && settings !== null) {
+      const tier = (settings as Record<string, unknown>)["service_tier"];
+      state.speed =
+        tier === "ultrafast"
+          ? "ultrafast"
+          : tier === "priority" || tier === "fast"
+            ? "fast"
+            : "standard";
+    }
+    return null;
+  }
+
   if (payloadRecord["type"] !== "token_count") return null;
   const info = payloadRecord["info"];
   if (typeof info !== "object" || info === null) return null;
@@ -115,6 +131,7 @@ export function parseCodexTranscriptLine(
 
   return {
     provider: "codex",
+    speed: state.speed,
     timestampMs,
     model: state.model,
     sessionId: state.sessionId,

@@ -51,6 +51,7 @@ export function parseClaudeTranscriptLine(line: string): UsageRecord | null {
 
   return {
     provider: "claude",
+    speed: usageRecord["speed"] === "fast" ? "fast" : "standard",
     timestampMs,
     model,
     sessionId,

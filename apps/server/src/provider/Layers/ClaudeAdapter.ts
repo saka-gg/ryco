@@ -2270,6 +2270,19 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       ? withAutomaticCompactionCapability(
           {
             ...rawUsageSnapshot,
+            ...(accumulatedSnapshot
+              ? {
+                  processedUsage: {
+                    scope: "turn" as const,
+                    inputTokens: accumulatedSnapshot.inputTokens ?? 0,
+                    cachedInputTokens: accumulatedSnapshot.cachedInputTokens ?? 0,
+                    outputTokens: accumulatedSnapshot.outputTokens ?? 0,
+                    reasoningOutputTokens: accumulatedSnapshot.reasoningOutputTokens ?? 0,
+                    totalTokens:
+                      accumulatedSnapshot.totalProcessedTokens ?? accumulatedSnapshot.usedTokens,
+                  },
+                }
+              : {}),
             ...(context.cacheObservation ? { claudeCache: context.cacheObservation } : {}),
           },
           context.supportsAutomaticCompaction,

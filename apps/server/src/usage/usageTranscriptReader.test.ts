@@ -195,3 +195,50 @@ describe("incremental transcript parsing", () => {
     expect((await reader(join(root, "0.jsonl"), "claude"))?.reusedLineCount).toBe(0);
   });
 });
+
+it("streams histories over 64 MiB and does not spend the usage-record budget on message lines", async () => {
+  const root = await setup(),
+    path = join(root, "large.jsonl");
+  // Ordinary transcript lines dominate bytes/line counts but do not add usage.
+  const chunk = ('{"type":"user","padding":"' + "x".repeat(640) + '"}\n').repeat(1000);
+  await writeFile(path, "");
+  for (let index = 0; index < 110; index++) await appendFile(path, chunk);
+  await appendFile(path, claude + "\n");
+  const read = await readUsageTranscript(path, "claude");
+  expect(read?.limited).toBe(false);
+  expect(read?.records).toHaveLength(1);
+  expect(read?.skippedLineCount).toBe(110000);
+});
+it("reads Codex settings events through incremental checkpoints", async () => {
+  const root = await setup(),
+    path = join(root, "speed.jsonl");
+  const context = JSON.stringify({ type: "turn_context", payload: { model: "gpt-5.6-sol" } });
+  const settings = JSON.stringify({
+    type: "event_msg",
+    payload: { type: "thread_settings_applied", thread_settings: { service_tier: "priority" } },
+  });
+  const usage = JSON.stringify({
+    type: "event_msg",
+    timestamp: "2026-08-07T04:05:13.944Z",
+    payload: {
+      type: "token_count",
+      info: { last_token_usage: { input_tokens: 100, output_tokens: 10 } },
+    },
+  });
+  const reader = createUsageTranscriptReader();
+  await writeFile(path, context + "\n" + settings + "\n");
+  await reader(path, "codex");
+  await appendFile(path, usage + "\n");
+  const read = await reader(path, "codex");
+  expect(read?.reusedLineCount).toBe(2);
+  expect(read?.records[0]?.speed).toBe("fast");
+});
+
+it("marks a remaining tail partial when the usage-record limit is reached", async () => {
+  const root = await setup(),
+    path = join(root, "record-limit.jsonl");
+  await writeFile(path, (claude + "\n").repeat(USAGE_TRANSCRIPT_LIMITS.records) + claude);
+  const result = await readUsageTranscript(path, "claude");
+  expect(result?.limited).toBe(true);
+  expect(result?.records.length).toBeLessThanOrEqual(USAGE_TRANSCRIPT_LIMITS.records);
+});

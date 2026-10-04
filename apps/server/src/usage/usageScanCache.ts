@@ -6,7 +6,7 @@ import type { UsageProviderKind } from "@ryco/contracts";
 import type { UsageRecord } from "./usageRecord.ts";
 import { withTokenTotal } from "./usageRecord.ts";
 
-export const USAGE_SCAN_CACHE_VERSION = 3 as const;
+export const USAGE_SCAN_CACHE_VERSION = 4 as const;
 
 export interface CachedUsageFile {
   readonly rootKey: string;
@@ -18,6 +18,20 @@ export interface CachedUsageFile {
 }
 
 export type UsageScanCache = Map<string, CachedUsageFile>;
+
+export function matchesUsageFileCache(
+  cached: CachedUsageFile | undefined,
+  file: { readonly size: number; readonly mtimeMs: number; readonly fingerprint?: string },
+  provider: UsageProviderKind,
+): cached is CachedUsageFile {
+  return (
+    cached !== undefined &&
+    cached.provider === provider &&
+    cached.size === file.size &&
+    cached.mtimeMs === file.mtimeMs &&
+    cached.fingerprint === file.fingerprint
+  );
+}
 
 type SerializedRecord = readonly [
   timestampMs: number,
@@ -31,6 +45,7 @@ type SerializedRecord = readonly [
   dedupeKey: string | null,
   reportedCostUsd: number | null,
   authoritativeTotal?: number,
+  speed?: "standard" | "fast" | "ultrafast" | null,
 ];
 
 interface SerializedFile {
@@ -125,6 +140,7 @@ export function encodeUsageScanCache(cache: UsageScanCache): SerializedCache {
         record.dedupeKey,
         record.reportedCostUsd,
         record.totals.totalTokens,
+        record.speed ?? null,
       ]),
     };
   }
@@ -140,7 +156,7 @@ export function decodeUsageScanCache(document: unknown): UsageScanCache {
   if (typeof document !== "object" || document === null) return cache;
   const root = document as Partial<SerializedCache>;
   if (
-    (root.version !== USAGE_SCAN_CACHE_VERSION && root.version !== 2) ||
+    (root.version !== USAGE_SCAN_CACHE_VERSION && root.version !== 2 && root.version !== 3) ||
     !isArray(root.models) ||
     !root.models.every((value) => typeof value === "string") ||
     !isArray(root.sessions) ||
@@ -163,6 +179,9 @@ export function decodeUsageScanCache(document: unknown): UsageScanCache {
   for (const [fileKey, rawEntry] of Object.entries(root.files)) {
     if (typeof rawEntry !== "object" || rawEntry === null) continue;
     const entry = rawEntry as Partial<SerializedFile>;
+    // Old transcript rows did not retain speed; rescan them rather than price as standard.
+    if (root.version !== USAGE_SCAN_CACHE_VERSION && (entry.p === "codex" || entry.p === "claude"))
+      continue;
     if (
       typeof entry.o !== "string" ||
       entry.o.length === 0 ||
@@ -197,6 +216,7 @@ export function decodeUsageScanCache(document: unknown): UsageScanCache {
         dedupeKey,
         reportedCostUsd,
         authoritativeTotal,
+        rawSpeed,
       ] = rawRow as SerializedRecord;
       const model = typeof modelIndex === "number" ? models[modelIndex] : undefined;
       const sessionId = typeof sessionIndex === "number" ? sessions[sessionIndex] : undefined;
@@ -225,7 +245,18 @@ export function decodeUsageScanCache(document: unknown): UsageScanCache {
         break;
       }
 
+      const speed = rawSpeed ?? undefined;
+      if (
+        speed !== undefined &&
+        speed !== "standard" &&
+        speed !== "fast" &&
+        speed !== "ultrafast"
+      ) {
+        corrupt = true;
+        break;
+      }
       records.push({
+        ...(speed === undefined ? {} : { speed }),
         provider: entry.p as UsageProviderKind,
         timestampMs,
         model,
