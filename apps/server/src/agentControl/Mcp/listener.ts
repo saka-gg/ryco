@@ -60,7 +60,8 @@ export const AGENT_CONTROL_MCP_INITIALIZE_INSTRUCTIONS =
   "Ryco Agent Control tools over a private local connection. Read tools inspect Ryco state. " +
   "During an exact active turn, control tools submit durable operations. Routine actions execute automatically; " +
   "destructive and security-sensitive actions wait for user approval. Never approve your own requests. " +
-  "Use ryco_wait_for_control_request for dispatch receipts and ryco_wait_threads for task completion. " +
+  "Use ryco_wait_for_control_request for dispatch receipts. After delegating with returnToOrigin, end your turn; " +
+  "Ryco wakes you with the results (use ryco_task_status instead of polling). " +
   "When available, ryco_computer and ryco_browser execute under separate opt-in desktop/app permissions; " +
   "these tools act directly and require an exact active turn. " +
   "When available, ryco_attach_file directly delivers a workspace file to this thread's timeline under exact active-turn authority. " +

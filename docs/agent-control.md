@@ -30,11 +30,54 @@ called. This matters for clients such as Codex that cache the initial MCP catalo
   allowlist. Provider credentials, connection settings and Agent Control policy are excluded.
 - `ryco_browser`, `ryco_computer`: browser tabs and native app interaction when the desktop bridge
   and the corresponding user permissions are available. Browser `open` accepts `visible: true`.
+- `ryco_task_status`, `ryco_task_cancel`: status, results and cancel for tasks this chat delegated
+  with `returnToOrigin` (see [Delegated tasks](#delegated-tasks)).
 
 Mutation calls return a durable receipt. Reuse `requestId` when retrying the same action, then use
 `ryco_wait_for_control_request` with `waitFor: "terminal"` to get dispatch results and created thread
-IDs. Use `ryco_wait_threads` to follow the actual provider work; successful dispatch is not task
-completion. An agent must never approve its own pending requests.
+IDs. Successful dispatch is not task completion: for delegated work, end the turn and let Ryco
+wake the chat (below); use `ryco_wait_threads` only to follow other threads. An agent must never
+approve its own pending requests.
+
+## Delegated tasks
+
+An agent delegates by calling `ryco_create_threads` with `returnToOrigin: true` on each entry,
+confirms the request with `ryco_wait_for_control_request` (`waitFor: "terminal"`), and ends its
+turn. It does not poll. When a delegated task reaches a terminal state, Ryco wakes the delegating
+chat with one automatic message, a normal queued turn that starts or resumes its session.
+
+- **Batching.** Tasks that finish while the chat is busy, or together, arrive in one message with
+  one section per task (at most 10 sections and 100,000 characters; the rest follow in the next
+  message). Each section links the child and the originating chat.
+- **Results and notices.** A finished task returns its final answer as JSON-escaped, untrusted
+  reference data (8,000 characters at most), never as instructions or approval. A task that was
+  interrupted, stopped (for example by a restart; it is not resumed), failed to start, received
+  someone else's follow-up, was archived or deleted, whose request failed, or that did not finish
+  within 24 hours returns a server-written notice instead, with no child text. A task that itself
+  delegated returns its output after its own delegated work came back.
+- **When it is delivered.** The chat must be idle: no running or starting session, no pending
+  approval or question, no working background agents (a watcher-only "monitoring" state does not
+  count) and no turn start waiting to bind. It does not matter whether the chat moved on to other
+  work, its session was stopped by the idle reaper, or the server restarted. Starting a cold session
+  for a wake is limited to one at a time.
+- **Scope.** A wake never runs with more privilege or in a different checkout than the delegation
+  had: if the chat's runtime mode was raised or its worktree changed, delivery waits. It also waits
+  while Agent Control is disabled. A captured return that cannot be delivered within 24 hours fails
+  without a message; open the child instead.
+- **Stopping.** If you stop the chat while it is delegating or processing a delegation message,
+  the remaining results are not sent automatically. Interrupts from agents, startup reconciliation
+  and the server do not count. Deleting or archiving the chat, or archiving its worktree, cancels
+  its returns too.
+- **Task tools.** `ryco_task_status` lists up to 20 of this chat's returnToOrigin tasks (or one by
+  `taskId`) with the run state, the return status and the redacted, untrusted result. Pending
+  questions are reported only as a flag. Reading a finished task during the chat's own turn
+  acknowledges it, so no separate automatic message is sent for it. `ryco_task_cancel` stops the
+  automatic return first and then interrupts the task's running turn through the normal routine
+  interrupt request.
+- **Scope of the tools.** They cover only tasks created with `returnToOrigin` by this chat. Local
+  Tasks and the standalone integrations' `ryco_read_task` / `ryco_wait_for_task` are separate.
+  Return progress is also visible as `completionReturns` on the delegation request
+  (`ryco_read_control_request`) and on its proposal card.
 
 ## Ryco sessions versus standalone clients
 
