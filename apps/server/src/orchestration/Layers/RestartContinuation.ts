@@ -363,11 +363,11 @@ export const makeRestartContinuation = (options: RestartContinuationOptions = {}
       Effect.gen(function* () {
         const capturedAt = yield* nowIso;
         const settingEnabled = yield* continuationEnabled;
-        const hints = yield* repository.listShutdownHints().pipe(
-          logFailure("restart capture could not read shutdown hints"),
-          Effect.map((rows) => rows ?? []),
-        );
-        const hintByThread = new Map(hints.map((hint) => [hint.threadId as string, hint]));
+        // Unread hints stay for the next capture: clearing them would consume them unseen.
+        const hints = yield* repository
+          .listShutdownHints()
+          .pipe(logFailure("restart capture could not read shutdown hints"));
+        const hintByThread = new Map((hints ?? []).map((hint) => [hint.threadId as string, hint]));
         const candidates = snapshot.threads
           .flatMap((thread) => {
             const hint = hintByThread.get(thread.id);
@@ -395,9 +395,11 @@ export const makeRestartContinuation = (options: RestartContinuationOptions = {}
           if (result) captured.push(result);
         }
 
-        yield* repository
-          .clearShutdownHints(capturedAt)
-          .pipe(logFailure("restart capture could not clear shutdown hints"));
+        if (hints !== undefined) {
+          yield* repository
+            .clearShutdownHints(capturedAt)
+            .pipe(logFailure("restart capture could not clear shutdown hints"));
+        }
         const pruneBefore = new Date(Date.parse(capturedAt) - SETTLED_RETENTION_MS).toISOString();
         yield* repository
           .pruneSettled(pruneBefore)
@@ -472,14 +474,16 @@ export const makeRestartContinuation = (options: RestartContinuationOptions = {}
 
     // ── shutdown ───────────────────────────────────────────────────────────
 
-    const recordShutdownHints: RestartContinuationShape["recordShutdownHints"] = Effect.gen(
-      function* () {
+    const recordShutdownHints: RestartContinuationShape["recordShutdownHints"] = ({
+      liveThreadIds,
+    }) =>
+      Effect.gen(function* () {
         yield* repository.recordShutdownHints({
+          liveSessionThreadIds: [...liveThreadIds],
           liveBackgroundThreadIds: liveness.listLiveThreadIds(),
           recordedAt: yield* nowIso,
         });
-      },
-    ).pipe(logFailure("restart continuation could not record shutdown hints"), Effect.asVoid);
+      }).pipe(logFailure("restart continuation could not record shutdown hints"), Effect.asVoid);
 
     // ── dispatch ───────────────────────────────────────────────────────────
 

@@ -3,7 +3,7 @@
  * "continue" turn for it.
  *
  * Lifecycle: `recordShutdownHints` runs in the startup layer's finalizer (before the
- * reactors stop) on a graceful shutdown. At startup, `capture` runs inside orphan
+ * reactors stop) on a graceful shutdown, for the provider sessions still live then. At startup, `capture` runs inside orphan
  * reconciliation before it clears pending requests, `publishCaptureEffects` after it,
  * and `dispatchPending` once the server is ready. Every effect logs and swallows
  * non-interrupt failures, so it can never fail startup or shutdown.
@@ -54,8 +54,14 @@ export interface RestartContinuationShape {
   readonly publishCaptureEffects: (
     captured: ReadonlyArray<CapturedRestartThread>,
   ) => Effect.Effect<void>;
-  /** Graceful shutdown: which threads were running or had live background work. */
-  readonly recordShutdownHints: Effect.Effect<void>;
+  /**
+   * Graceful shutdown: which threads this process was still running (`liveThreadIds`, the
+   * threads with a live provider session) or had live background work for. A thread
+   * outside `liveThreadIds` gets no running-turn hint, whatever its projection says.
+   */
+  readonly recordShutdownHints: (input: {
+    readonly liveThreadIds: ReadonlySet<ThreadId>;
+  }) => Effect.Effect<void>;
   /** Sends at most one continuation per pending row; every processed row leaves pending. */
   readonly dispatchPending: (input?: RestartContinuationDispatchInput) => Effect.Effect<void>;
 }

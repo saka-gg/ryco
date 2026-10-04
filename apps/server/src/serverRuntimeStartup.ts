@@ -815,6 +815,7 @@ export const makeServerRuntimeStartup = Effect.gen(function* () {
   const serverEnvironment = yield* ServerEnvironment;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const restartContinuation = yield* RestartContinuation;
+  const providerService = yield* ProviderService;
 
   const commandGate = yield* makeCommandGate();
   const httpListening = yield* Deferred.make<void>();
@@ -823,9 +824,20 @@ export const makeServerRuntimeStartup = Effect.gen(function* () {
   yield* Effect.addFinalizer(() => Scope.close(reactorScope, Exit.void));
   // Registered after the reactor-scope finalizer, so it runs BEFORE it (finalizers run in
   // reverse): the in-memory background liveness is still populated, and the projection
-  // still names the running turns a graceful shutdown is about to cut off.
+  // still names the running turns a graceful shutdown is about to cut off. Only threads
+  // with a live provider session are hinted as running: a projection this process never
+  // ran (an orphan it did not reconcile) must not look freshly cut off.
   yield* Effect.addFinalizer(() =>
-    restartContinuation.recordShutdownHints.pipe(
+    providerService.listSessions().pipe(
+      Effect.map((sessions) => new Set(sessions.map((session) => session.threadId))),
+      Effect.catchCause((cause) =>
+        Cause.hasInterruptsOnly(cause)
+          ? Effect.failCause(cause)
+          : Effect.logWarning("shutdown provider session inventory failed", {
+              cause: Cause.pretty(cause),
+            }).pipe(Effect.as(new Set<ThreadId>())),
+      ),
+      Effect.flatMap((liveThreadIds) => restartContinuation.recordShutdownHints({ liveThreadIds })),
       Effect.timeout(RESTART_SHUTDOWN_HINT_TIMEOUT),
       Effect.ignoreCause({ log: true }),
     ),

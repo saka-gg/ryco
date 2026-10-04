@@ -531,6 +531,41 @@ describe("RestartContinuation", () => {
     expect(system.turnStarts()).toEqual([]);
   });
 
+  it("measures freshness from a graceful shutdown that cut the turn off", async () => {
+    const system = await createSystem();
+    const seeded = await system.seedThread({ id: "hinted", minutesAgo: 45 });
+    // The process that ran the turn quit gracefully just now.
+    await system.run(
+      system.restart.recordShutdownHints({ liveThreadIds: new Set([seeded.threadId]) }),
+    );
+    await system.startup([seeded.threadId]);
+    const row = await system.rowOf(seeded.threadId, seeded.turnId);
+    expect(
+      row?.invalid === false && Date.now() - Date.parse(row.record.lastObservedAt),
+    ).toBeLessThan(60_000);
+    await system.run(system.restart.dispatchPending());
+    expect(await system.rowOf(seeded.threadId, seeded.turnId)).toMatchObject({
+      status: "dispatched",
+    });
+  });
+
+  it("never lets a graceful shutdown refresh an orphan that process did not run", async () => {
+    const system = await createSystem();
+    // Crashed three hours ago; the next process never reconciled it (its provider inventory
+    // failed) and then quit gracefully, so the projection still says running.
+    const seeded = await system.seedThread({ id: "orphan", minutesAgo: 180 });
+    await system.run(system.restart.recordShutdownHints({ liveThreadIds: new Set() }));
+    expect(await system.run(system.repository.listShutdownHints())).toEqual([]);
+
+    await system.startup([seeded.threadId]);
+    await system.run(system.restart.dispatchPending());
+    expect(await system.rowOf(seeded.threadId, seeded.turnId)).toMatchObject({
+      status: "skipped",
+      reason: "expired",
+    });
+    expect(system.turnStarts()).toEqual([]);
+  });
+
   it("caps continuations per provider instance", async () => {
     const system = await createSystem();
     const onA = [];
@@ -829,6 +864,7 @@ describe("RestartContinuation", () => {
     );
     await system.run(
       system.repository.recordShutdownHints({
+        liveSessionThreadIds: [seeded.threadId],
         liveBackgroundThreadIds: [seeded.threadId],
         recordedAt: system.ago(0.5),
       }),

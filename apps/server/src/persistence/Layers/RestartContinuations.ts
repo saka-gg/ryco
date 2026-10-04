@@ -274,29 +274,41 @@ export const makeRestartContinuationRepository = Effect.gen(function* () {
     );
 
   /**
-   * At a graceful shutdown: every thread whose session still runs (or names an active
-   * turn) and every thread with live background work, in one transaction.
+   * At a graceful shutdown, in one transaction: every thread this process has a live
+   * provider session for whose projected session still runs (or names an active turn),
+   * and every thread with live background work. A hint is evidence that this process ran
+   * the work up to now, so a projected session the process never ran (an orphan of an
+   * earlier crash it did not reconcile) is never hinted: its hint would restart the
+   * freshness clock of work that died long ago.
+   *
+   * An existing hint (one no capture consumed yet) keeps its earlier time, so a hint can
+   * only ever make work look older.
    */
   const recordShutdownHints = (input: {
+    readonly liveSessionThreadIds: ReadonlyArray<string>;
     readonly liveBackgroundThreadIds: ReadonlyArray<string>;
     readonly recordedAt: string;
   }) =>
     sql
       .withTransaction(
         Effect.gen(function* () {
-          yield* sql`
-            INSERT INTO restart_shutdown_hints (thread_id, has_background_work, recorded_at)
-            SELECT thread_id, 0, ${input.recordedAt} FROM projection_thread_sessions
-            WHERE status IN ('running', 'starting') OR active_turn_id IS NOT NULL
-            ON CONFLICT (thread_id) DO UPDATE SET recorded_at = excluded.recorded_at
-          `;
-          for (const threadId of input.liveBackgroundThreadIds) {
+          for (const threadId of new Set(input.liveSessionThreadIds)) {
+            yield* sql`
+              INSERT INTO restart_shutdown_hints (thread_id, has_background_work, recorded_at)
+              SELECT thread_id, 0, ${input.recordedAt} FROM projection_thread_sessions
+              WHERE thread_id = ${threadId}
+                AND (status IN ('running', 'starting') OR active_turn_id IS NOT NULL)
+              ON CONFLICT (thread_id) DO UPDATE SET
+                recorded_at = MIN(recorded_at, excluded.recorded_at)
+            `;
+          }
+          for (const threadId of new Set(input.liveBackgroundThreadIds)) {
             yield* sql`
               INSERT INTO restart_shutdown_hints (thread_id, has_background_work, recorded_at)
               VALUES (${threadId}, 1, ${input.recordedAt})
               ON CONFLICT (thread_id) DO UPDATE SET
                 has_background_work = 1,
-                recorded_at = excluded.recorded_at
+                recorded_at = MIN(recorded_at, excluded.recorded_at)
             `;
           }
         }),

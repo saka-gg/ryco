@@ -185,7 +185,7 @@ const orphanedSessionThread = (input: {
 const restartContinuationOff: RestartContinuationShape = {
   capture: () => Effect.succeed([]),
   publishCaptureEffects: () => Effect.void,
-  recordShutdownHints: Effect.void,
+  recordShutdownHints: () => Effect.void,
   dispatchPending: () => Effect.void,
 };
 
@@ -1102,6 +1102,7 @@ const emptyIntentRecovery = {
 const startupShellStubs = (input: {
   readonly settings: ServerSettingsService["Service"];
   readonly reactorStart?: OrchestrationReactor["Service"]["start"];
+  readonly listSessions?: ProviderServiceShape["listSessions"];
 }) =>
   Layer.mergeAll(
     Layer.succeed(ServerSettingsService, input.settings),
@@ -1123,7 +1124,7 @@ const startupShellStubs = (input: {
       start: () => Effect.void,
     } as unknown as ProviderSessionReaper["Service"]),
     Layer.succeed(ProviderService, {
-      listSessions: () => Effect.succeed([]),
+      listSessions: input.listSessions ?? (() => Effect.succeed([])),
       stopSessionBinding: () => Effect.succeed("not-found" as const),
     } as unknown as ProviderServiceShape),
     Layer.succeed(AnalyticsService, {
@@ -1151,6 +1152,149 @@ const waitUntil = <A, E, R>(read: Effect.Effect<A, E, R>, done: (value: A) => bo
     return yield* Effect.die("condition not reached");
   });
 
+/**
+ * The real orchestration, restart ledger and restart continuation behind a real startup,
+ * with provider, settings and shell stubs. Records every command the continuation sends.
+ */
+const restartStartupLayer = (input: {
+  readonly continueThreadsAfterRestart: boolean;
+  readonly bindings: Map<string, ProviderRuntimeBinding>;
+  readonly commands: OrchestrationCommand[];
+  readonly listSessions?: ProviderServiceShape["listSessions"];
+}) => {
+  const settings = {
+    start: Effect.void,
+    getSettings: Effect.succeed({
+      ...DEFAULT_SERVER_SETTINGS,
+      continueThreadsAfterRestart: input.continueThreadsAfterRestart,
+    }),
+  } as unknown as ServerSettingsService["Service"];
+  const orchestration = Layer.mergeAll(
+    OrchestrationEngineLive.pipe(
+      Layer.provide(OrchestrationProjectionSnapshotQueryLive),
+      Layer.provide(OrchestrationProjectionPipelineLive),
+    ),
+    OrchestrationProjectionSnapshotQueryLive,
+  ).pipe(
+    Layer.provideMerge(ThreadBackgroundLiveness.layer),
+    Layer.provide(
+      Layer.succeed(ProjectAvatarStore, {
+        write: () => Effect.die("not implemented"),
+        read: () => Effect.succeed(null),
+        remove: () => Effect.void,
+      }),
+    ),
+    Layer.provide(OrchestrationEventStoreLive),
+    Layer.provideMerge(OrchestrationCommandReceiptRepositoryLive),
+    Layer.provideMerge(RestartContinuationRepositoryLive),
+    Layer.provideMerge(ProviderEffectIntentRepositoryLive),
+    Layer.provide(RepositoryIdentityResolverLive),
+    Layer.provideMerge(SqlitePersistenceMemory),
+    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "ryco-startup-restart-" })),
+    Layer.provideMerge(NodeServices.layer),
+  );
+  const restartFakes = Layer.mergeAll(
+    Layer.succeed(ProviderSessionDirectory, {
+      getBinding: (id: ThreadId) => Effect.succeed(Option.fromNullishOr(input.bindings.get(id))),
+      upsert: (binding: ProviderRuntimeBinding) =>
+        Effect.sync(() => void input.bindings.set(binding.threadId, binding)),
+    } as unknown as ProviderSessionDirectoryShape),
+    Layer.succeed(CompletionReturnRepository, {
+      get: () => Effect.succeed(undefined),
+    } as unknown as CompletionReturnRepository["Service"]),
+  );
+  const recordingEngine = Layer.effect(
+    OrchestrationEngineService,
+    Effect.map(Effect.service(OrchestrationEngineService), (engine): OrchestrationEngineShape => ({
+      ...engine,
+      dispatch: (command, dispatchOptions) => {
+        input.commands.push(command);
+        return engine.dispatch(command, dispatchOptions);
+      },
+    })),
+  );
+  return RestartContinuationLive.pipe(
+    Layer.provide(recordingEngine),
+    Layer.provideMerge(
+      startupShellStubs({
+        settings,
+        ...(input.listSessions ? { listSessions: input.listSessions } : {}),
+      }),
+    ),
+    Layer.provideMerge(restartFakes),
+    Layer.provideMerge(orchestration),
+  );
+};
+
+/** A project and a thread whose turn the provider was running (the pre-restart projection). */
+const seedRunningRestartThread = (input: {
+  readonly threadId: ThreadId;
+  readonly turnId: TurnId;
+  readonly instanceId: ProviderInstanceId;
+  readonly createProject: boolean;
+  readonly at: (secondsAgo: number) => string;
+  readonly secondsAgo: number;
+}) =>
+  Effect.gen(function* () {
+    const engine = yield* OrchestrationEngineService;
+    const { threadId: id, turnId: turn, instanceId, at } = input;
+    if (input.createProject) {
+      yield* engine.dispatch({
+        type: "project.create",
+        commandId: CommandId.make("restart-project"),
+        projectId: ProjectId.make("restart-project"),
+        title: "Restart",
+        workspaceRoot: "/tmp/ryco-startup-restart",
+        defaultModelSelection: { instanceId, model: "gpt-5" },
+        createdAt: at(input.secondsAgo + 20),
+      });
+    }
+    yield* engine.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make(`${id}-create`),
+      threadId: id,
+      projectId: ProjectId.make("restart-project"),
+      title: id,
+      modelSelection: { instanceId, model: "gpt-5" },
+      interactionMode: "default",
+      runtimeMode: "full-access",
+      branch: null,
+      worktreePath: null,
+      createdAt: at(input.secondsAgo + 20),
+    });
+    yield* engine.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make(`${id}-start`),
+      threadId: id,
+      message: {
+        messageId: MessageId.make(`${id}-message`),
+        role: "user",
+        text: "Work",
+        attachments: [],
+      },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      createdAt: at(input.secondsAgo + 10),
+    });
+    yield* engine.dispatch({
+      type: "thread.session.set",
+      commandId: CommandId.make(`${id}-running`),
+      threadId: id,
+      session: {
+        threadId: id,
+        status: "running",
+        providerName: "codex",
+        providerInstanceId: instanceId,
+        runtimeSessionId: RuntimeSessionId.make(`${id}-runtime`),
+        runtimeMode: "full-access",
+        activeTurnId: turn,
+        lastError: null,
+        updatedAt: at(input.secondsAgo),
+      },
+      createdAt: at(input.secondsAgo),
+    });
+  });
+
 it.live(
   "captures before reconcile and continues only after the HTTP listener is up",
   () => {
@@ -1159,13 +1303,6 @@ it.live(
     const approvalThreadId = ThreadId.make("restart-approval");
     const instanceId = ProviderInstanceId.make("codex");
     const continuationCommands: OrchestrationCommand[] = [];
-    const settings = {
-      start: Effect.void,
-      getSettings: Effect.succeed({
-        ...DEFAULT_SERVER_SETTINGS,
-        continueThreadsAfterRestart: true,
-      }),
-    } as unknown as ServerSettingsService["Service"];
     const bindings = new Map<string, ProviderRuntimeBinding>([
       [
         threadId,
@@ -1178,122 +1315,28 @@ it.live(
         },
       ],
     ]);
-    const orchestration = Layer.mergeAll(
-      OrchestrationEngineLive.pipe(
-        Layer.provide(OrchestrationProjectionSnapshotQueryLive),
-        Layer.provide(OrchestrationProjectionPipelineLive),
-      ),
-      OrchestrationProjectionSnapshotQueryLive,
-    ).pipe(
-      Layer.provideMerge(ThreadBackgroundLiveness.layer),
-      Layer.provide(
-        Layer.succeed(ProjectAvatarStore, {
-          write: () => Effect.die("not implemented"),
-          read: () => Effect.succeed(null),
-          remove: () => Effect.void,
-        }),
-      ),
-      Layer.provide(OrchestrationEventStoreLive),
-      Layer.provideMerge(OrchestrationCommandReceiptRepositoryLive),
-      Layer.provideMerge(RestartContinuationRepositoryLive),
-      Layer.provideMerge(ProviderEffectIntentRepositoryLive),
-      Layer.provide(RepositoryIdentityResolverLive),
-      Layer.provideMerge(SqlitePersistenceMemory),
-      Layer.provideMerge(
-        ServerConfig.layerTest(process.cwd(), { prefix: "ryco-startup-restart-" }),
-      ),
-      Layer.provideMerge(NodeServices.layer),
-    );
-    const restartFakes = Layer.mergeAll(
-      Layer.succeed(ProviderSessionDirectory, {
-        getBinding: (id: ThreadId) => Effect.succeed(Option.fromNullishOr(bindings.get(id))),
-        upsert: (binding: ProviderRuntimeBinding) =>
-          Effect.sync(() => void bindings.set(binding.threadId, binding)),
-      } as unknown as ProviderSessionDirectoryShape),
-      Layer.succeed(CompletionReturnRepository, {
-        get: () => Effect.succeed(undefined),
-      } as unknown as CompletionReturnRepository["Service"]),
-    );
-    const recordingEngine = Layer.effect(
-      OrchestrationEngineService,
-      Effect.map(
-        Effect.service(OrchestrationEngineService),
-        (engine): OrchestrationEngineShape => ({
-          ...engine,
-          dispatch: (command, dispatchOptions) => {
-            continuationCommands.push(command);
-            return engine.dispatch(command, dispatchOptions);
-          },
-        }),
-      ),
-    );
-    const layer = RestartContinuationLive.pipe(
-      Layer.provide(recordingEngine),
-      Layer.provideMerge(startupShellStubs({ settings })),
-      Layer.provideMerge(restartFakes),
-      Layer.provideMerge(orchestration),
-    );
+    const layer = restartStartupLayer({
+      continueThreadsAfterRestart: true,
+      bindings,
+      commands: continuationCommands,
+    });
 
     return Effect.gen(function* () {
       const engine = yield* OrchestrationEngineService;
       const repository = yield* RestartContinuationRepository;
       const at = (secondsAgo: number) => new Date(Date.now() - secondsAgo * 1_000).toISOString();
-      yield* engine.dispatch({
-        type: "project.create",
-        commandId: CommandId.make("restart-project"),
-        projectId: ProjectId.make("restart-project"),
-        title: "Restart",
-        workspaceRoot: "/tmp/ryco-startup-restart",
-        defaultModelSelection: { instanceId, model: "gpt-5" },
-        createdAt: at(60),
-      });
-      for (const [id, turn] of [
+      const seeds = [
         [threadId, turnId],
         [approvalThreadId, TurnId.make("restart-approval-turn")],
-      ] as const) {
-        yield* engine.dispatch({
-          type: "thread.create",
-          commandId: CommandId.make(`${id}-create`),
+      ] as const;
+      for (const [index, [id, turn]] of seeds.entries()) {
+        yield* seedRunningRestartThread({
           threadId: id,
-          projectId: ProjectId.make("restart-project"),
-          title: id,
-          modelSelection: { instanceId, model: "gpt-5" },
-          interactionMode: "default",
-          runtimeMode: "full-access",
-          branch: null,
-          worktreePath: null,
-          createdAt: at(60),
-        });
-        yield* engine.dispatch({
-          type: "thread.turn.start",
-          commandId: CommandId.make(`${id}-start`),
-          threadId: id,
-          message: {
-            messageId: MessageId.make(`${id}-message`),
-            role: "user",
-            text: "Work",
-            attachments: [],
-          },
-          runtimeMode: "full-access",
-          interactionMode: "default",
-          createdAt: at(50),
-        });
-        yield* engine.dispatch({
-          type: "thread.session.set",
-          commandId: CommandId.make(`${id}-running`),
-          threadId: id,
-          session: {
-            threadId: id,
-            status: "running",
-            providerName: "codex",
-            providerInstanceId: instanceId,
-            runtimeSessionId: RuntimeSessionId.make(`${id}-runtime`),
-            runtimeMode: "full-access",
-            activeTurnId: turn,
-            lastError: null,
-            updatedAt: at(40),
-          },
-          createdAt: at(40),
+          turnId: turn,
+          instanceId,
+          createProject: index === 0,
+          at,
+          secondsAgo: 40,
         });
       }
       // A final progress message completes the turn row mid-turn (the SQL shape).
@@ -1373,9 +1416,84 @@ it.live(
   30_000,
 );
 
+it.live(
+  "hints only the sessions it runs at a graceful shutdown, never an orphan it did not reconcile",
+  () => {
+    const orphanId = ThreadId.make("restart-unreconciled");
+    const orphanTurnId = TurnId.make("restart-unreconciled-turn");
+    const liveId = ThreadId.make("restart-live");
+    const liveTurnId = TurnId.make("restart-live-turn");
+    const instanceId = ProviderInstanceId.make("codex");
+    let inventoryCalls = 0;
+    const layer = restartStartupLayer({
+      continueThreadsAfterRestart: true,
+      bindings: new Map(),
+      commands: [],
+      // The startup inventory fails, so reconcile (and capture) never runs; at shutdown
+      // the provider reports the one session this process started.
+      listSessions: () => {
+        inventoryCalls += 1;
+        return inventoryCalls === 1
+          ? Effect.die(new Error("inventory unavailable"))
+          : Effect.succeed([
+              {
+                threadId: liveId,
+                runtimeSessionId: RuntimeSessionId.make("restart-live-runtime"),
+              } as never,
+            ]);
+      },
+    });
+
+    return Effect.gen(function* () {
+      const repository = yield* RestartContinuationRepository;
+      const at = (secondsAgo: number) => new Date(Date.now() - secondsAgo * 1_000).toISOString();
+      // An earlier process crashed three hours ago mid-turn.
+      yield* seedRunningRestartThread({
+        threadId: orphanId,
+        turnId: orphanTurnId,
+        instanceId,
+        createProject: true,
+        at,
+        secondsAgo: 3 * 3_600,
+      });
+      // This process runs a turn of its own.
+      yield* seedRunningRestartThread({
+        threadId: liveId,
+        turnId: liveTurnId,
+        instanceId,
+        createProject: false,
+        at,
+        secondsAgo: 5,
+      });
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const startup = yield* makeServerRuntimeStartup;
+          yield* startup.awaitCommandReady;
+          assert.isTrue(
+            Option.isNone(
+              yield* repository.get({
+                threadId: orphanId,
+                sourceTurnId: orphanTurnId,
+              }),
+            ),
+          );
+        }),
+      );
+
+      // Graceful shutdown: the orphan still projects running but gets no fresh hint.
+      assert.deepStrictEqual(
+        (yield* repository.listShutdownHints()).map((hint) => hint.threadId),
+        [liveId],
+      );
+    }).pipe(Effect.provide(layer));
+  },
+  30_000,
+);
+
 const shutdownOrderLayer = (input: {
   readonly order: string[];
-  readonly recordShutdownHints: Effect.Effect<void>;
+  readonly recordShutdownHints: RestartContinuationShape["recordShutdownHints"];
 }) =>
   Layer.mergeAll(
     startupShellStubs({
@@ -1421,7 +1539,7 @@ it.live("records shutdown hints before the reactors stop", () => {
     Effect.provide(
       shutdownOrderLayer({
         order,
-        recordShutdownHints: Effect.sync(() => void order.push("hints")),
+        recordShutdownHints: () => Effect.sync(() => void order.push("hints")),
       }),
     ),
   );
@@ -1443,7 +1561,7 @@ it.live(
       assert.isAtLeast(elapsedMs, 1_900);
       assert.isBelow(elapsedMs, 6_000);
       assert.deepStrictEqual(order, ["reactors"]);
-    }).pipe(Effect.provide(shutdownOrderLayer({ order, recordShutdownHints: Effect.never })));
+    }).pipe(Effect.provide(shutdownOrderLayer({ order, recordShutdownHints: () => Effect.never })));
   },
   15_000,
 );

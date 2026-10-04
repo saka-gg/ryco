@@ -284,7 +284,7 @@ layer("RestartContinuationRepository", (it) => {
     }),
   );
 
-  it.effect("records running sessions and live background work as shutdown hints", () =>
+  it.effect("records live running sessions and live background work as shutdown hints", () =>
     Effect.gen(function* () {
       yield* reset;
       const sql = yield* SqlClient.SqlClient;
@@ -293,9 +293,12 @@ layer("RestartContinuationRepository", (it) => {
         INSERT INTO projection_thread_sessions (thread_id, status, active_turn_id, updated_at)
         VALUES ('thread-running', 'running', 'turn-r', '2026-10-04T10:00:00.000Z'),
           ('thread-ready', 'ready', NULL, '2026-10-04T10:00:00.000Z'),
-          ('thread-starting', 'starting', NULL, '2026-10-04T10:00:00.000Z')
+          ('thread-starting', 'starting', NULL, '2026-10-04T10:00:00.000Z'),
+          ('thread-orphan', 'running', 'turn-o', '2026-10-04T07:00:00.000Z')
       `;
       yield* repository.recordShutdownHints({
+        // thread-orphan still projects running, but this process has no session for it.
+        liveSessionThreadIds: ["thread-running", "thread-starting", "thread-ready"],
         liveBackgroundThreadIds: ["thread-ready", "thread-running"],
         recordedAt: "2026-10-04T10:20:00.000Z",
       });
@@ -316,21 +319,46 @@ layer("RestartContinuationRepository", (it) => {
           recordedAt: "2026-10-04T10:20:00.000Z",
         },
       ]);
+    }),
+  );
 
+  it.effect("never moves an unconsumed hint forward", () =>
+    Effect.gen(function* () {
+      yield* reset;
+      const sql = yield* SqlClient.SqlClient;
+      const repository = yield* RestartContinuationRepository;
+      yield* sql`
+        INSERT INTO projection_thread_sessions (thread_id, status, active_turn_id, updated_at)
+        VALUES ('thread-running', 'running', 'turn-r', '2026-10-04T10:00:00.000Z'),
+          ('thread-starting', 'starting', NULL, '2026-10-04T10:00:00.000Z')
+      `;
       yield* repository.recordShutdownHints({
+        liveSessionThreadIds: ["thread-running"],
         liveBackgroundThreadIds: [],
+        recordedAt: "2026-10-04T10:20:00.000Z",
+      });
+      // A later shutdown before any capture consumed the first hint.
+      yield* repository.recordShutdownHints({
+        liveSessionThreadIds: ["thread-running", "thread-starting"],
+        liveBackgroundThreadIds: ["thread-running"],
         recordedAt: "2026-10-04T10:30:00.000Z",
       });
-      yield* repository.clearShutdownHints("2026-10-04T10:20:00.000Z");
       assert.deepStrictEqual(
         (yield* repository.listShutdownHints()).map((hint) => [
           hint.threadId,
           hint.hasBackgroundWork,
+          hint.recordedAt,
         ]),
         [
-          ["thread-running", true],
-          ["thread-starting", false],
+          ["thread-running", true, "2026-10-04T10:20:00.000Z"],
+          ["thread-starting", false, "2026-10-04T10:30:00.000Z"],
         ],
+      );
+
+      yield* repository.clearShutdownHints("2026-10-04T10:20:00.000Z");
+      assert.deepStrictEqual(
+        (yield* repository.listShutdownHints()).map((hint) => hint.threadId),
+        ["thread-starting"],
       );
     }),
   );
