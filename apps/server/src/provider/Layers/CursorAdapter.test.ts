@@ -974,6 +974,120 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
     }),
   );
 
+  /** Collects turn lifecycle events; `terminal` resolves on the first turn.completed. */
+  const collectTurnEvents = (adapter: CursorAdapterShape, threadId: ThreadId) =>
+    Effect.gen(function* () {
+      const events: Array<ProviderRuntimeEvent> = [];
+      const terminal = yield* Deferred.make<ProviderRuntimeEvent>();
+      const fiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.gen(function* () {
+          if (String(event.threadId) !== String(threadId)) return;
+          if (event.type === "turn.started" || event.type === "turn.completed") {
+            events.push(event);
+          }
+          if (event.type === "turn.completed") {
+            yield* Deferred.succeed(terminal, event).pipe(Effect.ignore);
+          }
+        }),
+      ).pipe(Effect.forkChild);
+      return { events, terminal, fiber };
+    });
+
+  it.effect("closes a started turn as failed when the ACP prompt fails", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CursorAdapter;
+      const serverSettings = yield* ServerSettingsService;
+      const threadId = ThreadId.make("cursor-prompt-failure-probe");
+      const runtimeSessionId = RuntimeSessionId.make("test-cursoradapter-prompt-failure");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockAgentWrapper({ RYCO_ACP_FAIL_PROMPT: "1" }),
+      );
+      yield* serverSettings.updateSettings({ providers: { cursor: { binaryPath: wrapperPath } } });
+      const collected = yield* collectTurnEvents(adapter, threadId);
+
+      yield* adapter.startSession({
+        runtimeSessionId,
+        threadId,
+        provider: ProviderDriverKind.make("cursor"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+        modelSelection: { instanceId: ProviderInstanceId.make("cursor"), model: "default" },
+      });
+      const sendExit = yield* adapter
+        .sendTurn({ threadId, input: "this prompt fails", attachments: [] })
+        .pipe(Effect.exit);
+      yield* Deferred.await(collected.terminal);
+      yield* Fiber.interrupt(collected.fiber);
+      yield* adapter.stopSession(threadId);
+      const events = collected.events;
+
+      assert.equal(sendExit._tag, "Failure");
+      const started = events.find((event) => event.type === "turn.started");
+      const completed = events.filter((event) => event.type === "turn.completed");
+      assert.isDefined(started);
+      assert.equal(completed.length, 1);
+      const terminal = completed[0]!;
+      assert.equal(terminal.turnId, started?.turnId);
+      assert.equal(terminal.runtimeSessionId, runtimeSessionId);
+      if (terminal.type === "turn.completed") {
+        assert.equal(terminal.payload.state, "failed");
+        assert.include(terminal.payload.errorMessage ?? "", "Mock failure for session/prompt");
+      }
+    }),
+  );
+
+  it.effect("closes a started turn as failed when an image attachment cannot be read", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CursorAdapter;
+      const serverSettings = yield* ServerSettingsService;
+      const threadId = ThreadId.make("cursor-missing-image-probe");
+      const runtimeSessionId = RuntimeSessionId.make("test-cursoradapter-missing-image");
+      const wrapperPath = yield* Effect.promise(() => makeMockAgentWrapper());
+      yield* serverSettings.updateSettings({ providers: { cursor: { binaryPath: wrapperPath } } });
+      const collected = yield* collectTurnEvents(adapter, threadId);
+
+      yield* adapter.startSession({
+        runtimeSessionId,
+        threadId,
+        provider: ProviderDriverKind.make("cursor"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+        modelSelection: { instanceId: ProviderInstanceId.make("cursor"), model: "default" },
+      });
+      const sendExit = yield* adapter
+        .sendTurn({
+          threadId,
+          input: "look at this",
+          attachments: [
+            {
+              type: "image",
+              id: "cursor-missing-image-12345678-1234-1234-1234-123456789abc",
+              name: "missing.png",
+              mimeType: "image/png",
+              sizeBytes: 12,
+            },
+          ],
+        })
+        .pipe(Effect.exit);
+      yield* Deferred.await(collected.terminal);
+      yield* Fiber.interrupt(collected.fiber);
+      yield* adapter.stopSession(threadId);
+      const events = collected.events;
+
+      assert.equal(sendExit._tag, "Failure");
+      const started = events.find((event) => event.type === "turn.started");
+      const completed = events.filter((event) => event.type === "turn.completed");
+      assert.isDefined(started);
+      assert.equal(completed.length, 1);
+      assert.equal(completed[0]?.turnId, started?.turnId);
+      assert.equal(completed[0]?.runtimeSessionId, runtimeSessionId);
+      if (completed[0]?.type === "turn.completed") {
+        assert.equal(completed[0].payload.state, "failed");
+        assert.isAbove((completed[0].payload.errorMessage ?? "").length, 0);
+      }
+    }),
+  );
+
   it.effect("cancels pending ACP approvals and marks the turn cancelled when interrupted", () =>
     Effect.gen(function* () {
       const adapter = yield* CursorAdapter;
@@ -991,6 +1105,7 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
       const requestResolvedReady = yield* Deferred.make<ProviderRuntimeEvent>();
       const turnCompletedReady = yield* Deferred.make<ProviderRuntimeEvent>();
       let interrupted = false;
+      let turnCompletedCount = 0;
 
       const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
         Effect.gen(function* () {
@@ -1007,6 +1122,7 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
             return;
           }
           if (event.type === "turn.completed") {
+            turnCompletedCount += 1;
             yield* Deferred.succeed(turnCompletedReady, event).pipe(Effect.ignore);
           }
         }),
@@ -1044,6 +1160,8 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
         assert.equal(turnCompleted.payload.state, "cancelled");
         assert.equal(turnCompleted.payload.stopReason, "cancelled");
       }
+      // A cancelled stop reason is the turn's only terminal; no failed one follows.
+      assert.equal(turnCompletedCount, 1);
 
       const requests = yield* Effect.promise(() => readJsonLines(requestLogPath));
       assert.isTrue(requests.some((entry) => entry.method === "session/cancel"));

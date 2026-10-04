@@ -3,7 +3,7 @@ import {
   type ProviderDriverKind,
   type ThreadId,
 } from "@ryco/contracts";
-import { Schema } from "effect";
+import { Cause, Effect, Option, Schema } from "effect";
 import * as EffectAcpErrors from "effect-acp/errors";
 
 import {
@@ -51,4 +51,50 @@ export function acpPermissionOutcome(decision: ProviderApprovalDecision): string
     default:
       return "reject-once";
   }
+}
+
+const STARTED_TURN_FAILURE_FALLBACK_MESSAGE = "Provider turn failed";
+
+function nonEmptyTrimmed(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+/**
+ * Human-readable message for a started turn's failure: the adapter error's
+ * `detail`/`issue`/`message`, then `Cause.pretty`, never empty (the runtime
+ * `turn.completed.errorMessage` must be a non-empty trimmed string).
+ */
+export function startedTurnFailureMessage(cause: Cause.Cause<unknown>): string {
+  const error = Option.getOrUndefined(Cause.findErrorOption(cause));
+  const fromError =
+    typeof error === "object" && error !== null
+      ? (nonEmptyTrimmed((error as { readonly detail?: unknown }).detail) ??
+        nonEmptyTrimmed((error as { readonly issue?: unknown }).issue) ??
+        nonEmptyTrimmed((error as { readonly message?: unknown }).message))
+      : nonEmptyTrimmed(error);
+  return fromError ?? nonEmptyTrimmed(Cause.pretty(cause)) ?? STARTED_TURN_FAILURE_FALLBACK_MESSAGE;
+}
+
+/**
+ * Close a started turn when the rest of the send fails: emit one
+ * `turn.completed {state: "failed"}` for the turn whose `turn.started` was already
+ * offered, so ingestion settles it on the same runtime stream no matter how it races
+ * the command reactor. Interrupt-only causes and turns whose terminal was already
+ * emitted are skipped. Emission failures are ignored and the original failure is
+ * re-raised unchanged.
+ */
+export function failStartedTurnOnError(input: {
+  readonly isTerminalEmitted: () => boolean;
+  readonly emitFailed: (errorMessage: string) => Effect.Effect<void>;
+}): <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R> {
+  return (effect) =>
+    Effect.onError(effect, (cause) =>
+      Cause.hasInterruptsOnly(cause) || input.isTerminalEmitted()
+        ? Effect.void
+        : input
+            .emitFailed(startedTurnFailureMessage(cause))
+            .pipe(Effect.catchCause(() => Effect.void)),
+    );
 }

@@ -57,7 +57,11 @@ import {
   ProviderAdapterSessionNotFoundError,
   ProviderAdapterValidationError,
 } from "../Errors.ts";
-import { acpPermissionOutcome, mapAcpToAdapterError } from "../acp/AcpAdapterSupport.ts";
+import {
+  acpPermissionOutcome,
+  failStartedTurnOnError,
+  mapAcpToAdapterError,
+} from "../acp/AcpAdapterSupport.ts";
 import { type AcpSessionRuntimeShape } from "../acp/AcpSessionRuntime.ts";
 import {
   makeAcpAssistantItemEvent,
@@ -1046,7 +1050,8 @@ export function makeCursorAdapter(
           updatedAt: yield* nowIso,
         };
 
-        yield* offerRuntimeEventForRuntime(ctx.session.runtimeSessionId!, {
+        const runtimeSessionId = ctx.session.runtimeSessionId!;
+        yield* offerRuntimeEventForRuntime(runtimeSessionId, {
           type: "turn.started",
           ...(yield* makeEventStamp()),
           provider: PROVIDER,
@@ -1055,119 +1060,140 @@ export function makeCursorAdapter(
           payload: { model: resolvedModel },
         });
 
-        const promptParts: Array<EffectAcpSchema.ContentBlock> = [];
-        if (!ctx.agentControlHostContextDelivered && ctx.agentControlHostContext.length > 0) {
-          promptParts.push({
-            type: "text",
-            text: `<ryco_host_context>${ctx.agentControlHostContext}</ryco_host_context>`,
-          });
-          ctx.agentControlHostContextDelivered = true;
-        }
-        const pathLineEntries: AttachmentPathLineEntry[] = [];
-        const imageParts: Array<EffectAcpSchema.ContentBlock> = [];
-        for (const attachment of input.attachments ?? []) {
-          if (!isPersistableChatAttachment(attachment) || attachment.type !== "image") {
-            pathLineEntries.push({
+        // Once turn.started is out, every failure (attachments, validation, bindTurn,
+        // prompt) must also close the turn on the runtime stream.
+        let terminalEmitted = false;
+        return yield* Effect.gen(function* () {
+          const promptParts: Array<EffectAcpSchema.ContentBlock> = [];
+          if (!ctx.agentControlHostContextDelivered && ctx.agentControlHostContext.length > 0) {
+            promptParts.push({
+              type: "text",
+              text: `<ryco_host_context>${ctx.agentControlHostContext}</ryco_host_context>`,
+            });
+            ctx.agentControlHostContextDelivered = true;
+          }
+          const pathLineEntries: AttachmentPathLineEntry[] = [];
+          const imageParts: Array<EffectAcpSchema.ContentBlock> = [];
+          for (const attachment of input.attachments ?? []) {
+            if (!isPersistableChatAttachment(attachment) || attachment.type !== "image") {
+              pathLineEntries.push({
+                attachment,
+                ...(attachment.id === undefined
+                  ? {}
+                  : {
+                      resolvedPath:
+                        resolveAttachmentPath({
+                          attachmentsDir: serverConfig.attachmentsDir,
+                          attachment,
+                        }) ?? undefined,
+                    }),
+              });
+              continue;
+            }
+            const attachmentPath = resolveAttachmentPath({
+              attachmentsDir: serverConfig.attachmentsDir,
               attachment,
-              ...(attachment.id === undefined
-                ? {}
-                : {
-                    resolvedPath:
-                      resolveAttachmentPath({
-                        attachmentsDir: serverConfig.attachmentsDir,
-                        attachment,
-                      }) ?? undefined,
+            });
+            if (!attachmentPath) {
+              return yield* new ProviderAdapterRequestError({
+                provider: PROVIDER,
+                method: "session/prompt",
+                detail: `Invalid attachment id '${attachment.id}'.`,
+              });
+            }
+            const bytes = yield* fileSystem.readFile(attachmentPath).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderAdapterRequestError({
+                    provider: PROVIDER,
+                    method: "session/prompt",
+                    detail: cause.message,
+                    cause,
                   }),
+              ),
+            );
+            imageParts.push({
+              type: "image",
+              data: Buffer.from(bytes).toString("base64"),
+              mimeType: attachment.mimeType,
             });
-            continue;
           }
-          const attachmentPath = resolveAttachmentPath({
-            attachmentsDir: serverConfig.attachmentsDir,
-            attachment,
-          });
-          if (!attachmentPath) {
-            return yield* new ProviderAdapterRequestError({
+          const promptText = appendAttachmentPathLines(
+            input.input?.trim(),
+            formatAttachmentPathLines(pathLineEntries),
+          );
+          if (promptText?.trim()) {
+            promptParts.push({ type: "text", text: promptText });
+          }
+          promptParts.push(...imageParts);
+
+          if (
+            (!promptText || promptText.trim().length === 0) &&
+            (!input.attachments || input.attachments.length === 0)
+          ) {
+            return yield* new ProviderAdapterValidationError({
               provider: PROVIDER,
-              method: "session/prompt",
-              detail: `Invalid attachment id '${attachment.id}'.`,
+              operation: "sendTurn",
+              issue: "Turn requires non-empty text or attachments.",
             });
           }
-          const bytes = yield* fileSystem.readFile(attachmentPath).pipe(
-            Effect.mapError(
-              (cause) =>
-                new ProviderAdapterRequestError({
-                  provider: PROVIDER,
-                  method: "session/prompt",
-                  detail: cause.message,
-                  cause,
-                }),
-            ),
-          );
-          imageParts.push({
-            type: "image",
-            data: Buffer.from(bytes).toString("base64"),
-            mimeType: attachment.mimeType,
-          });
-        }
-        const promptText = appendAttachmentPathLines(
-          input.input?.trim(),
-          formatAttachmentPathLines(pathLineEntries),
-        );
-        if (promptText?.trim()) {
-          promptParts.push({ type: "text", text: promptText });
-        }
-        promptParts.push(...imageParts);
 
-        if (
-          (!promptText || promptText.trim().length === 0) &&
-          (!input.attachments || input.attachments.length === 0)
-        ) {
-          return yield* new ProviderAdapterValidationError({
+          if (ctx.agentControl) yield* ctx.agentControl.bindTurn(turnId);
+          const result = yield* ctx.acp
+            .prompt({
+              prompt: promptParts,
+            })
+            .pipe(
+              Effect.mapError((error) =>
+                mapAcpToAdapterError(PROVIDER, input.threadId, "session/prompt", error),
+              ),
+            )
+            .pipe(
+              Effect.ensuring(ctx.agentControl ? ctx.agentControl.retireTurn(turnId) : Effect.void),
+            );
+
+          ctx.turns.push({ id: turnId, items: [{ prompt: promptParts, result }] });
+          ctx.session = {
+            ...ctx.session,
+            activeTurnId: turnId,
+            updatedAt: yield* nowIso,
+            model: resolvedModel,
+          };
+
+          yield* offerRuntimeEventForRuntime(ctx.session.runtimeSessionId!, {
+            type: "turn.completed",
+            ...(yield* makeEventStamp()),
             provider: PROVIDER,
-            operation: "sendTurn",
-            issue: "Turn requires non-empty text or attachments.",
+            threadId: input.threadId,
+            turnId,
+            payload: {
+              state: result.stopReason === "cancelled" ? "cancelled" : "completed",
+              stopReason: result.stopReason ?? null,
+            },
           });
-        }
+          terminalEmitted = true;
 
-        if (ctx.agentControl) yield* ctx.agentControl.bindTurn(turnId);
-        const result = yield* ctx.acp
-          .prompt({
-            prompt: promptParts,
-          })
-          .pipe(
-            Effect.mapError((error) =>
-              mapAcpToAdapterError(PROVIDER, input.threadId, "session/prompt", error),
-            ),
-          )
-          .pipe(
-            Effect.ensuring(ctx.agentControl ? ctx.agentControl.retireTurn(turnId) : Effect.void),
-          );
-
-        ctx.turns.push({ id: turnId, items: [{ prompt: promptParts, result }] });
-        ctx.session = {
-          ...ctx.session,
-          activeTurnId: turnId,
-          updatedAt: yield* nowIso,
-          model: resolvedModel,
-        };
-
-        yield* offerRuntimeEventForRuntime(ctx.session.runtimeSessionId!, {
-          type: "turn.completed",
-          ...(yield* makeEventStamp()),
-          provider: PROVIDER,
-          threadId: input.threadId,
-          turnId,
-          payload: {
-            state: result.stopReason === "cancelled" ? "cancelled" : "completed",
-            stopReason: result.stopReason ?? null,
-          },
-        });
-
-        return {
-          threadId: input.threadId,
-          turnId,
-          resumeCursor: ctx.session.resumeCursor,
-        };
+          return {
+            threadId: input.threadId,
+            turnId,
+            resumeCursor: ctx.session.resumeCursor,
+          };
+        }).pipe(
+          failStartedTurnOnError({
+            isTerminalEmitted: () => terminalEmitted,
+            emitFailed: (errorMessage) =>
+              Effect.gen(function* () {
+                yield* offerRuntimeEventForRuntime(runtimeSessionId, {
+                  type: "turn.completed",
+                  ...(yield* makeEventStamp()),
+                  provider: PROVIDER,
+                  threadId: input.threadId,
+                  turnId,
+                  payload: { state: "failed", errorMessage },
+                });
+              }),
+          }),
+        );
       });
 
     const interruptTurn: CursorAdapterShape["interruptTurn"] = (threadId) =>
