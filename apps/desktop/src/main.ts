@@ -59,6 +59,7 @@ import {
   type DesktopHubConnectorLaunch,
   type DesktopSettings,
   DEFAULT_DESKTOP_SETTINGS,
+  desktopHubAllowsBackgroundNodeClaim,
   desktopHubLaunchNeedsRestart,
   isDesktopHostedIdentitySupported,
   isDesktopHubFileSecretStoreSupported,
@@ -441,7 +442,19 @@ let backendObservabilitySettings = readPersistedBackendObservabilitySettings();
 let desktopSettingsUnreadable = false;
 let desktopSettings = ((): DesktopSettings => {
   try {
-    return readDesktopSettings(DESKTOP_SETTINGS_PATH, app.getVersion());
+    return readDesktopSettings(DESKTOP_SETTINGS_PATH, app.getVersion(), {
+      hasRetainedHubSession: () => {
+        try {
+          return desktopProtectedRecordExists({
+            directory: NATIVE_SECURITY_DIR,
+            name: "hub-session-token",
+          });
+        } catch {
+          // Unreadable: assume a session, which only keeps the connector off.
+          return true;
+        }
+      },
+    });
   } catch {
     desktopSettingsUnreadable = true;
     return resolveDefaultDesktopSettings(app.getVersion());
@@ -789,6 +802,7 @@ const ensureDesktopHostedIdentityCoordinator = lazyAsyncResource(
       trust: context.trust,
       nativeE2eePlatform: context.nativeE2eePlatform,
       relayDpopSigner: await createDesktopDpopSigner(context.security),
+      allowsBackgroundNodeClaim: () => desktopHubAllowsBackgroundNodeClaim(desktopSettings),
       control: createDesktopHubControlClient({
         baseUrl: () => backendHttpUrl,
         controlToken: () => backendControlToken,

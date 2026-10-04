@@ -24,7 +24,10 @@ import type {
 import { createDpopProofSigner } from "@ryco/client-runtime/relay";
 import type { HostedRelayTicket } from "@ryco/client-runtime/authorization";
 
-import { runDesktopAutomaticNodeClaim } from "./automaticNodeClaim.ts";
+import {
+  DesktopAutomaticNodeClaimError,
+  runDesktopAutomaticNodeClaim,
+} from "./automaticNodeClaim.ts";
 import type { DesktopHubControlClient } from "./desktopHubControl.ts";
 import { DesktopE2eeTrustStore } from "./desktopE2eeTrust.ts";
 import type { DesktopHostedSessionCredentials } from "./hostedCredentials.ts";
@@ -100,7 +103,11 @@ export type DesktopHostedIdentityStatus =
     }
   | { readonly status: "unavailable" };
 
-export type DesktopHostedIdentitySetup = (input: { readonly accountId: string }) => Promise<{
+export type DesktopHostedIdentitySetup = (input: {
+  readonly accountId: string;
+  /** The user asked for this run with Connect; a background resume did not. */
+  readonly interactive: boolean;
+}) => Promise<{
   readonly nodeId: string;
   readonly localNodeHandle: string;
 }>;
@@ -129,6 +136,7 @@ export class DesktopHostedIdentityCoordinator {
   readonly #records: DesktopProtectedRecordStore;
   readonly #trust: DesktopE2eeTrustStore;
   readonly #setup: DesktopHostedIdentitySetup;
+  readonly #allowsBackgroundNodeClaim: () => boolean;
   readonly #relayDpopSigner: DpopSignerService | undefined;
   readonly #nativeE2eeEnrollment: NativeE2eeEnrollmentCoordinator | undefined;
   readonly #resolveNativeE2eeTrust: ReturnType<typeof createNativeE2eeTrustResolver> | undefined;
@@ -145,10 +153,18 @@ export class DesktopHostedIdentityCoordinator {
     readonly records: DesktopProtectedRecordStore;
     readonly trust?: DesktopE2eeTrustStore;
     readonly setup?: DesktopHostedIdentitySetup;
+    /**
+     * Whether a background resume may claim the colocated node. A claim puts
+     * this machine on the Hub and wakes its connector, so without this only
+     * the user's own Connect claims it. Desktop allows it only for a connector
+     * the operator turned on, never for one launched in standby.
+     */
+    readonly allowsBackgroundNodeClaim?: () => boolean;
     readonly relayDpopSigner?: DpopSignerService;
     readonly nativeE2eePlatform?: NativeE2eePlatformService;
   }) {
     this.#origin = input.origin;
+    this.#allowsBackgroundNodeClaim = input.allowsBackgroundNodeClaim ?? (() => false);
     this.#installationId = input.installationId;
     this.#api = input.api;
     this.#credentials = input.credentials;
@@ -177,7 +193,16 @@ export class DesktopHostedIdentityCoordinator {
       : undefined;
     this.#setup =
       input.setup ??
-      (async ({ accountId }) => {
+      (async ({ accountId, interactive }) => {
+        // Claiming puts this machine on the Hub. A background resume does that
+        // only for a connector the operator turned on; otherwise it waits for
+        // the user's own Connect, and a prior local introduction stands in.
+        if (!interactive && !this.#allowsBackgroundNodeClaim()) {
+          return this.#retainedLocalNode(
+            accountId,
+            new DesktopAutomaticNodeClaimError("claim_unavailable"),
+          );
+        }
         try {
           const claimed = await runDesktopAutomaticNodeClaim({
             api: this.#api,
@@ -201,19 +226,28 @@ export class DesktopHostedIdentityCoordinator {
             localNodeHandle: pin.localNodeHandle,
           };
         } catch (cause) {
-          // Client identity is independent of node-connector uptime. A prior
-          // local introduction remains the exact local tie-break when the node
-          // plane is intentionally disabled or temporarily unavailable.
-          const localPins = (await this.#trust.list(this.#origin, accountId)).filter(
-            (pin) => pin.verificationMethod === "local-trusted-introduction-v1",
-          );
-          if (localPins.length !== 1) throw cause;
-          return {
-            nodeId: localPins[0]!.nodeId,
-            localNodeHandle: localPins[0]!.localNodeHandle,
-          };
+          return this.#retainedLocalNode(accountId, cause);
         }
       });
+  }
+
+  /**
+   * Client identity is independent of node-connector uptime. A prior local
+   * introduction remains the exact local tie-break when the node plane is
+   * intentionally disabled, not claimed yet, or temporarily unavailable.
+   */
+  async #retainedLocalNode(
+    accountId: string,
+    cause: unknown,
+  ): Promise<{ readonly nodeId: string; readonly localNodeHandle: string }> {
+    const localPins = (await this.#trust.list(this.#origin, accountId)).filter(
+      (pin) => pin.verificationMethod === "local-trusted-introduction-v1",
+    );
+    if (localPins.length !== 1) throw cause;
+    return {
+      nodeId: localPins[0]!.nodeId,
+      localNodeHandle: localPins[0]!.localNodeHandle,
+    };
   }
 
   resume(): Promise<DesktopHostedIdentityStatus> {
@@ -353,7 +387,11 @@ export class DesktopHostedIdentityCoordinator {
     const current = this.#operation;
     if (current !== undefined) {
       if (!interactive || this.#operationInteractive) return current;
-      return current.then((status) => (status.status === "ready" ? status : this.#serialize(true)));
+      // A background resume may have left the node unclaimed on purpose; the
+      // user's Connect is what claims it, so only a finished setup satisfies it.
+      return current.then((status) =>
+        status.status === "ready" && status.nodeId !== null ? status : this.#serialize(true),
+      );
     }
 
     let operation: Promise<DesktopHostedIdentityStatus>;
@@ -414,7 +452,7 @@ export class DesktopHostedIdentityCoordinator {
       // mutation-blocked; this is a compatibility fallback, not an E2EE
       // downgrade.
       const [setupResult, enrollmentResult] = await Promise.allSettled([
-        this.#setup({ accountId: session.account.id }),
+        this.#setup({ accountId: session.account.id, interactive }),
         this.#nativeE2eeEnrollment?.ensure(session.account.id),
       ]);
       // A local node can be offline or awaiting connector restart while this

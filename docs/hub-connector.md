@@ -194,7 +194,11 @@ socket, and selects key custody without reading the credential store, so device-
 and native account sign-in complete in the running process instead of after an onboarding restart.
 Any existing identity, which may have been switched off on purpose or may belong to another runner
 sharing the state directory, resolves standby to disabled without opening key custody. An explicit
-flag or environment value is never refined by standby. Because a standby connector can become
+flag or environment value is never refined by standby. Standby is not consent to join the Hub:
+only the user's own account sign-in or device-code enrollment puts a standby node on the Hub, and
+the background account resume at startup claims the node only for a connector the operator turned
+on. Settings written before the choice was recorded keep a connector that is off beside a retained
+account session off. Because a standby connector can become
 Hub-connected in place, external Agent Control integrations treat it as Hub-connected; turn the
 connector off to use them.
 

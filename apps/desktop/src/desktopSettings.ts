@@ -181,7 +181,9 @@ export interface DesktopHubConnectorLaunch {
  * socket or reading key custody, so a configured Hub no longer needs the
  * operator to turn it on, and a relaunch, before account sign-in can claim
  * the node. Settings written before the choice was recorded read as "not
- * chosen", which the backend's identity check keeps safe.
+ * chosen" unless they kept a connector off beside an account session (see
+ * `readDesktopSettings`). Standby never claims the node by itself either:
+ * only the user's own sign-in does (`desktopHubAllowsBackgroundNodeClaim`).
  */
 export function resolveDesktopHubConnectorLaunch(
   settings: DesktopSettings,
@@ -195,6 +197,18 @@ export function resolveDesktopHubConnectorLaunch(
   if (settings.hubConnectorEnabled) return { ...shared, enabled: true, standby: false };
   if (settings.hubConnectorDisabledByUser) return { ...shared, enabled: false, standby: false };
   return { ...shared, enabled: true, standby: true };
+}
+
+/**
+ * Whether a background resume may claim this machine's node onto the Hub.
+ *
+ * Standby only parks the connector so the user's own sign-in can claim the
+ * node in place. Claiming without that action would put the machine on the Hub
+ * against a choice the operator may have made before it was recorded, so only
+ * a connector they turned on is claimed without asking.
+ */
+export function desktopHubAllowsBackgroundNodeClaim(settings: DesktopSettings): boolean {
+  return settings.hubOrigin !== null && settings.hubConnectorEnabled;
 }
 
 /**
@@ -251,7 +265,17 @@ export class DesktopSettingsReadError extends Error {
   }
 }
 
-export function readDesktopSettings(settingsPath: string, appVersion: string): DesktopSettings {
+export function readDesktopSettings(
+  settingsPath: string,
+  appVersion: string,
+  legacy?: {
+    /**
+     * Whether this installation retains a Hub account session. Asked only for
+     * settings written before the connector choice was recorded.
+     */
+    readonly hasRetainedHubSession: () => boolean;
+  },
+): DesktopSettings {
   const defaultSettings = resolveDefaultDesktopSettings(appVersion);
 
   try {
@@ -311,8 +335,15 @@ export function readDesktopSettings(settingsPath: string, appVersion: string): D
           : defaultSettings.updateChannel,
       updateChannelConfiguredByUser,
       hubConnectorEnabled: parsed.hubConnectorEnabled === true,
-      // Absent in settings written before the choice was recorded: not chosen.
-      hubConnectorDisabledByUser: parsed.hubConnectorDisabledByUser === true,
+      hubConnectorDisabledByUser:
+        typeof parsed.hubConnectorDisabledByUser === "boolean"
+          ? parsed.hubConnectorDisabledByUser
+          : // Written before the choice was recorded. A connector that is off
+            // beside a retained account session was turned off after sign-in,
+            // or predates sign-in turning it on; either way the backend ran it
+            // disabled, so standby must not start it now. Otherwise nothing
+            // was chosen yet.
+            parsed.hubConnectorEnabled !== true && (legacy?.hasRetainedHubSession() ?? false),
       hubOrigin:
         typeof parsed.hubOrigin === "string" && parsed.hubOrigin.length > 0
           ? parsed.hubOrigin

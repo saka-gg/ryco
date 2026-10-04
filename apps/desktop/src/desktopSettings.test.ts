@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vite-plus/test";
 import {
   DEFAULT_DESKTOP_SETTINGS,
   DesktopSettingsReadError,
+  desktopHubAllowsBackgroundNodeClaim,
   desktopHubLaunchNeedsRestart,
   isDesktopHostedIdentitySupported,
   isDesktopHubFileSecretStoreSupported,
@@ -393,6 +394,62 @@ describe("desktopSettings", () => {
 
     writeDesktopSettings(settingsPath, setDesktopHubPreference(legacy, { enabled: false }));
     expect(readDesktopSettings(settingsPath, "0.1.21").hubConnectorDisabledByUser).toBe(true);
+  });
+
+  it("keeps a legacy connector off beside a retained account session", () => {
+    // Connect account, Leave Hub (identity erased, session kept), Turn off:
+    // the backend has no identity, so only the session says this was chosen.
+    const settingsPath = makeSettingsPath();
+    fs.writeFileSync(settingsPath, JSON.stringify({ hubConnectorEnabled: false }));
+    let asked = 0;
+    const withSession = readDesktopSettings(settingsPath, "0.1.21", {
+      hasRetainedHubSession: () => {
+        asked += 1;
+        return true;
+      },
+    });
+    expect(withSession.hubConnectorDisabledByUser).toBe(true);
+    expect(resolveDesktopHubConnectorLaunch(withSession)).toMatchObject({
+      enabled: false,
+      standby: false,
+    });
+    expect(desktopHubAllowsBackgroundNodeClaim(withSession)).toBe(false);
+
+    expect(
+      readDesktopSettings(settingsPath, "0.1.21", { hasRetainedHubSession: () => false })
+        .hubConnectorDisabledByUser,
+    ).toBe(false);
+
+    // A legacy enabled connector, and any recorded choice, never ask.
+    fs.writeFileSync(settingsPath, JSON.stringify({ hubConnectorEnabled: true }));
+    readDesktopSettings(settingsPath, "0.1.21", {
+      hasRetainedHubSession: () => {
+        asked += 1;
+        return true;
+      },
+    });
+    writeDesktopSettings(settingsPath, DEFAULT_DESKTOP_SETTINGS);
+    expect(
+      readDesktopSettings(settingsPath, "0.1.21", {
+        hasRetainedHubSession: () => {
+          asked += 1;
+          return true;
+        },
+      }).hubConnectorDisabledByUser,
+    ).toBe(false);
+    expect(asked).toBe(1);
+  });
+
+  it("claims the node in the background only for a connector the operator turned on", () => {
+    // Standby runs the connector so the user's own sign-in can claim the node;
+    // it is not consent to claim it at startup.
+    expect(desktopHubAllowsBackgroundNodeClaim(DEFAULT_DESKTOP_SETTINGS)).toBe(false);
+    const turnedOn = setDesktopHubPreference(DEFAULT_DESKTOP_SETTINGS, { enabled: true });
+    expect(desktopHubAllowsBackgroundNodeClaim(turnedOn)).toBe(true);
+    expect(
+      desktopHubAllowsBackgroundNodeClaim(setDesktopHubPreference(turnedOn, { enabled: false })),
+    ).toBe(false);
+    expect(desktopHubAllowsBackgroundNodeClaim({ ...turnedOn, hubOrigin: null })).toBe(false);
   });
 
   it("restarts only for launch changes the running backend cannot already serve", () => {

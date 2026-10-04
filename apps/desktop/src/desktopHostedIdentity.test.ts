@@ -32,6 +32,7 @@ function coordinator(input: {
   readonly trust?: DesktopE2eeTrustStore;
   readonly control?: DesktopHubControlClient;
   readonly nativeE2eePlatform?: NativeE2eePlatformService;
+  readonly allowsBackgroundNodeClaim?: () => boolean;
 }) {
   return new DesktopHostedIdentityCoordinator({
     origin: "https://hub.example.test",
@@ -48,6 +49,9 @@ function coordinator(input: {
     records: {} as DesktopProtectedRecordStore,
     ...(input.trust === undefined ? {} : { trust: input.trust }),
     ...(input.setup === undefined ? {} : { setup: input.setup }),
+    ...(input.allowsBackgroundNodeClaim === undefined
+      ? {}
+      : { allowsBackgroundNodeClaim: input.allowsBackgroundNodeClaim }),
     ...(input.nativeE2eePlatform === undefined
       ? {}
       : { nativeE2eePlatform: input.nativeE2eePlatform }),
@@ -324,7 +328,7 @@ describe("Desktop hosted identity coordinator", () => {
       nodeId: "node-local",
       localNodeHandle: "local-node-handle",
     });
-    expect(setup).toHaveBeenCalledWith({ accountId });
+    expect(setup).toHaveBeenCalledWith({ accountId, interactive: false });
     expect(identity.nativeE2eeEnrollmentState).toMatchObject({
       status: "unavailable",
       errorCode: "enrollment_unavailable",
@@ -364,7 +368,91 @@ describe("Desktop hosted identity coordinator", () => {
     });
     expect(hydrate).toHaveBeenCalledTimes(2);
     expect(signIn).toHaveBeenCalledTimes(1);
-    expect(setup).toHaveBeenCalledWith({ accountId: "account-1" });
+    expect(setup).toHaveBeenCalledWith({ accountId: "account-1", interactive: true });
+  });
+
+  it("never claims the node in a background resume unless the connector was turned on", async () => {
+    // A legacy desktop whose operator left the Hub and turned the connector off
+    // still holds an account session; standby runs its identity-less connector,
+    // and startup resumes that session without anyone asking for a claim.
+    const nodeClaimDescriptor = vi.fn().mockRejectedValue(new Error("claim attempted"));
+    const control = { nodeClaimDescriptor } as unknown as DesktopHubControlClient;
+    const trust = { list: vi.fn().mockResolvedValue([]) } as unknown as DesktopE2eeTrustStore;
+    const api = {
+      hasSessionMaterial: true,
+      restoreSession: vi.fn().mockResolvedValue({ account: { id: "account-1" } }),
+    };
+    let explicitlyEnabled = false;
+    const identity = coordinator({
+      api,
+      control,
+      trust,
+      allowsBackgroundNodeClaim: () => explicitlyEnabled,
+    });
+
+    await expect(identity.resume()).resolves.toEqual({
+      status: "ready",
+      accountId: "account-1",
+      nodeId: null,
+      localNodeHandle: null,
+    });
+    expect(nodeClaimDescriptor).not.toHaveBeenCalled();
+
+    // The user's own Connect is what claims a standby node.
+    await identity.connect();
+    expect(nodeClaimDescriptor).toHaveBeenCalledTimes(1);
+
+    // An operator-enabled connector resumes its claim after a relaunch.
+    explicitlyEnabled = true;
+    await identity.resume();
+    expect(nodeClaimDescriptor).toHaveBeenCalledTimes(2);
+  });
+
+  it("defaults to no background claim", async () => {
+    const nodeClaimDescriptor = vi.fn().mockRejectedValue(new Error("claim attempted"));
+    const identity = coordinator({
+      api: {
+        hasSessionMaterial: true,
+        restoreSession: vi.fn().mockResolvedValue({ account: { id: "account-1" } }),
+      },
+      control: { nodeClaimDescriptor } as unknown as DesktopHubControlClient,
+      trust: { list: vi.fn().mockResolvedValue([]) } as unknown as DesktopE2eeTrustStore,
+    });
+    await identity.resume();
+    expect(nodeClaimDescriptor).not.toHaveBeenCalled();
+  });
+
+  it("lets Connect claim a node a concurrent background resume left unclaimed", async () => {
+    let releaseFirstHydrate!: () => void;
+    const firstHydrate = new Promise<void>((resolve) => {
+      releaseFirstHydrate = resolve;
+    });
+    const hydrate = vi
+      .fn<DesktopHostedSessionCredentials["hydrate"]>()
+      .mockImplementationOnce(async () => await firstHydrate)
+      .mockResolvedValue(undefined);
+    const setup = vi.fn<NonNullable<Parameters<typeof coordinator>[0]["setup"]>>(
+      async ({ interactive }) => {
+        if (!interactive) throw new Error("background claim refused");
+        return { nodeId: "node-1", localNodeHandle: "local-node-1" };
+      },
+    );
+    const identity = coordinator({
+      api: {
+        hasSessionMaterial: true,
+        restoreSession: vi.fn().mockResolvedValue({ account: { id: "account-1" } }),
+      },
+      credentials: { hydrate },
+      setup,
+    });
+
+    const resumed = identity.resume();
+    const connected = identity.connect();
+    releaseFirstHydrate();
+
+    await expect(resumed).resolves.toMatchObject({ status: "ready", nodeId: null });
+    await expect(connected).resolves.toMatchObject({ status: "ready", nodeId: "node-1" });
+    expect(setup).toHaveBeenLastCalledWith({ accountId: "account-1", interactive: true });
   });
 
   it("does not let an in-flight setup restore credentials after disconnect", async () => {
