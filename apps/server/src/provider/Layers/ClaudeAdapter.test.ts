@@ -9337,6 +9337,50 @@ describe("ClaudeAdapterLive steering", () => {
     },
   );
 
+  it.effect(
+    "never records a usage limit for a steer-aborted segment that omits terminal_reason",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const log = yield* makeRuntimeEventLog(adapter);
+        const readPrompt = makePromptReader(harness);
+        const turn = yield* startPromptTurn(adapter, harness, log, "steer-abort-limit-window");
+        emitPromptSegment(harness.query, turn.turnId);
+        // A rejected window is open, so any classified error result would read as a limit.
+        harness.query.emit({
+          type: "rate_limit_event",
+          rate_limit_info: { status: "rejected", rateLimitType: "five_hour", resetsAt: 1.9e9 },
+          uuid: "rate-limit-steer-abort",
+          session_id: GAUGE_SDK_SESSION,
+        } as unknown as SDKMessage);
+        yield* steer(adapter, turn.turnId);
+        yield* readPrompt;
+        yield* readPrompt;
+
+        // The steer aborted P; an older CLI reports the abort only in its error text.
+        harness.query.emit(
+          resultFrame({
+            subtype: "error_during_execution",
+            errors: ["Request was aborted."],
+            user_message_uuids: [turn.turnId],
+          }),
+        );
+        const completed = yield* log.waitFor(isTurnTerminal);
+        assert.equal(completed.turnId, turn.turnId);
+        assert.equal(completed.type === "turn.completed" && completed.payload.state, "completed");
+        assert.isFalse(
+          log.events.some(
+            (event) => event.type === "runtime.error" && event.payload.class === "usage_limit",
+          ),
+        );
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
   it.effect("closes an open reasoning block before an aborted turn completes", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {

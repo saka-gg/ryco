@@ -3692,9 +3692,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     // A usage-limit stop can arrive as `subtype: "success", is_error: true`, which would
     // otherwise complete the turn with no error. Only an open turn can record a limit, so
     // a stale or late result never marks the thread Limited. It takes precedence over a
-    // failed-segment close; pending steers were already discarded above.
+    // failed-segment close; pending steers were already discarded above. Both the result's own
+    // status and the close must rule out an interrupt: a steer's abort closes as completed, and
+    // an older CLI reports that abort only in its error text, with no terminal reason.
+    const notInterrupted = (status: ProviderRuntimeTurnStatus) =>
+      status !== "interrupted" && status !== "cancelled";
     const usageLimit =
-      context.turnState && close.status !== "interrupted" && close.status !== "cancelled"
+      context.turnState && notInterrupted(resultStatus) && notInterrupted(close.status)
         ? classifyClaudeUsageLimitResult({
             result: message,
             windows: context.rejectedRateLimitWindows,
