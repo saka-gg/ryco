@@ -21,6 +21,7 @@ import {
   Deferred,
   Duration,
   Effect,
+  Exit,
   Fiber,
   FileSystem,
   Layer,
@@ -28,6 +29,7 @@ import {
   Option,
   PubSub,
   Ref,
+  Scope,
   Stream,
 } from "effect";
 import { TestClock } from "effect/testing";
@@ -58,11 +60,14 @@ import {
   makeCommandGate,
   reconcileOrphanedProviderSessions,
   resolveAutoBootstrapWelcomeTargets,
+  startOrchestrationRuntime,
   resolveWelcomeBase,
   ServerRuntimeStartupError,
   validateRestrictedWorkspaceSnapshot,
 } from "./serverRuntimeStartup.ts";
 import { WorkspaceAccessPolicyLayer } from "./workspace/Layers/WorkspaceAccessPolicy.ts";
+import { OrchestrationReactor } from "./orchestration/Services/OrchestrationReactor.ts";
+import { ProviderSessionReaper } from "./provider/Services/ProviderSessionReaper.ts";
 
 const startupWorkspaceSnapshot = (input: {
   readonly projectRoot: string;
@@ -984,3 +989,57 @@ it.effect("clears orphaned requests in inactive sessions but preserves live call
     ),
   );
 });
+
+it.effect(
+  "starts reactors, then reconciles orphaned sessions, then recovers provider intents",
+  () =>
+    Effect.gen(function* () {
+      const calls: string[] = [];
+      const summary = {
+        replayed: 0,
+        cancelledTurnStarts: [],
+        rejectedSteers: 0,
+        retriedSessionStops: 0,
+        handoffsAbandoned: 0,
+        settledWithoutOutcome: 0,
+      };
+      const reactorScope = yield* Scope.make("sequential");
+      const result = yield* startOrchestrationRuntime(reactorScope).pipe(
+        Effect.provideService(OrchestrationReactor, {
+          start: () => Effect.sync(() => void calls.push("start")),
+          recoverProviderIntents: () =>
+            Effect.sync(() => {
+              calls.push("recover");
+              return summary;
+            }),
+        }),
+        Effect.provideService(ProviderSessionReaper, {
+          start: () => Effect.sync(() => void calls.push("reaper")),
+        } as unknown as ProviderSessionReaper["Service"]),
+        Effect.provideService(ProjectionPendingApprovalRepository, {
+          getByRequestId: () => Effect.succeed(Option.none()),
+        } as unknown as ProjectionPendingApprovalRepository["Service"]),
+        Effect.provideService(ProjectionThreadUserInputRequestRepository, {
+          getByRequestId: () => Effect.succeed(Option.none()),
+        } as unknown as ProjectionThreadUserInputRequestRepository["Service"]),
+        Effect.provideService(ProjectionSnapshotQuery, {
+          getCommandReadModel: () =>
+            Effect.succeed({ threads: [] } as unknown as OrchestrationReadModel),
+        } as unknown as ProjectionSnapshotQueryShape),
+        Effect.provideService(ProviderSessionDirectory, {} as ProviderSessionDirectoryShape),
+        Effect.provideService(ProviderService, {
+          listSessions: () => Effect.sync(() => (calls.push("reconcile"), [])),
+        } as unknown as ProviderServiceShape),
+        Effect.provideService(OrchestrationEngineService, {
+          dispatch: () => Effect.die("unused"),
+        } as unknown as OrchestrationEngineShape),
+      );
+      yield* Scope.close(reactorScope, Exit.void);
+      assert.strictEqual(result, summary);
+      assert.deepStrictEqual(
+        calls.filter((call) => call !== "reaper"),
+        ["start", "reconcile", "recover"],
+      );
+      assert.isTrue(calls.indexOf("reaper") < calls.indexOf("reconcile"));
+    }),
+);

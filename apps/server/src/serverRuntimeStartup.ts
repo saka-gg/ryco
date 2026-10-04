@@ -766,12 +766,43 @@ export const reconcileOrphanedProviderSessions = Effect.gen(function* () {
   ),
 );
 
+/**
+ * The orchestration startup phases, in order: reactors subscribe, orphaned
+ * provider sessions are reconciled (that owns session and turn state), then the
+ * provider intents left open by an earlier process are resolved. Returns the
+ * intent recovery summary for later phases.
+ */
+export const startOrchestrationRuntime = (reactorScope: Scope.Closeable) =>
+  Effect.gen(function* () {
+    const orchestrationReactor = yield* OrchestrationReactor;
+    const providerSessionReaper = yield* ProviderSessionReaper;
+
+    yield* Effect.logDebug("startup phase: starting orchestration reactors");
+    yield* runStartupPhase(
+      "reactors.start",
+      Effect.all(
+        [
+          orchestrationReactor.start().pipe(Scope.provide(reactorScope)),
+          providerSessionReaper.start().pipe(Scope.provide(reactorScope)),
+        ],
+        { concurrency: "unbounded", discard: true },
+      ),
+    );
+
+    yield* Effect.logDebug("startup phase: reconciling orphaned provider sessions");
+    yield* runStartupPhase("provider-sessions.reconcile", reconcileOrphanedProviderSessions);
+
+    yield* Effect.logDebug("startup phase: recovering provider intents");
+    return yield* runStartupPhase(
+      "provider-intents.recover",
+      orchestrationReactor.recoverProviderIntents(),
+    );
+  });
+
 export const makeServerRuntimeStartup = Effect.gen(function* () {
   const runtimeStartedAt = Date.now();
   const serverConfig = yield* ServerConfig;
   const keybindings = yield* Keybindings;
-  const orchestrationReactor = yield* OrchestrationReactor;
-  const providerSessionReaper = yield* ProviderSessionReaper;
   const lifecycleEvents = yield* ServerLifecycleEvents;
   const serverSettings = yield* ServerSettingsService;
   const serverEnvironment = yield* ServerEnvironment;
@@ -825,20 +856,7 @@ export const makeServerRuntimeStartup = Effect.gen(function* () {
       ),
     );
 
-    yield* Effect.logDebug("startup phase: starting orchestration reactors");
-    yield* runStartupPhase(
-      "reactors.start",
-      Effect.all(
-        [
-          orchestrationReactor.start().pipe(Scope.provide(reactorScope)),
-          providerSessionReaper.start().pipe(Scope.provide(reactorScope)),
-        ],
-        { concurrency: "unbounded", discard: true },
-      ),
-    );
-
-    yield* Effect.logDebug("startup phase: reconciling orphaned provider sessions");
-    yield* runStartupPhase("provider-sessions.reconcile", reconcileOrphanedProviderSessions);
+    yield* startOrchestrationRuntime(reactorScope);
 
     const welcomeBase = yield* resolveWelcomeBase;
     const environment = yield* serverEnvironment.getDescriptor;
