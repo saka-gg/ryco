@@ -119,3 +119,50 @@ describe("mapEvent", () => {
     );
   });
 });
+
+describe("mapEvent session.error usage limits", () => {
+  const session = {
+    activeTurnId: TurnId.make("turn-limit"),
+    threadId: ThreadId.make("thread-limit"),
+    providerInstanceId: ProviderInstanceId.make("copilot"),
+    lastUsage: undefined,
+  } as ActiveCopilotSession;
+  const mapError = (data: Record<string, unknown>) =>
+    Effect.runPromise(
+      mapEvent(
+        {
+          makeEventStamp: () =>
+            Effect.succeed({
+              eventId: EventId.make("event-error"),
+              createdAt: "2026-10-04T10:00:00.000Z",
+            }),
+          nextEventId: Effect.succeed(EventId.make("event-error-2")),
+        },
+        session,
+        {
+          type: "session.error",
+          timestamp: "2026-10-04T10:00:00.000Z",
+          data: { message: "Limited", ...data },
+        } as SessionEvent,
+      ),
+    );
+
+  it("maps quota exhaustion to usage_limit with an unknown reset", async () => {
+    const [error] = await mapError({ errorType: "quota", errorCode: "quota_exceeded" });
+    expect(error?.type === "runtime.error" && error.payload).toMatchObject({
+      class: "usage_limit",
+      resetAt: null,
+    });
+    const [weekly] = await mapError({
+      errorType: "rate_limit",
+      errorCode: "user_weekly_rate_limited",
+    });
+    expect(weekly?.type === "runtime.error" && weekly.payload.class).toBe("usage_limit");
+  });
+
+  it("keeps a generic rate limit a provider error", async () => {
+    const [error] = await mapError({ errorType: "rate_limit", errorCode: "rate_limited" });
+    expect(error?.type === "runtime.error" && error.payload.class).toBe("provider_error");
+    expect(error?.type === "runtime.error" && "resetAt" in error.payload).toBe(false);
+  });
+});

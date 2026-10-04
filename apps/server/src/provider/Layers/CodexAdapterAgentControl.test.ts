@@ -404,6 +404,52 @@ it.live("binds write authority to the exact started turn and retires it on compl
   }),
 );
 
+it.live("retires turn authority when a failed turn carries an unknown codexErrorInfo literal", () =>
+  Effect.gen(function* () {
+    const { bridge, retireTurnAuthority } = makeBridge();
+    const runtimeFactory = makeRuntimeFactory();
+
+    yield* Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      yield* adapter.startSession(startInput);
+      yield* adapter.sendTurn({ threadId, input: "Start" });
+
+      const runtime = runtimeFactory.lastRuntime;
+      assert.ok(runtime);
+      yield* runtime.emit({
+        id: crypto.randomUUID(),
+        provider: ProviderDriverKind.make("codex"),
+        method: "turn/completed",
+        threadId,
+        turnId: TurnId.make("turn-1"),
+        createdAt: new Date().toISOString(),
+        payload: {
+          threadId: "provider-thread",
+          turn: {
+            id: "turn-1",
+            status: "failed",
+            items: [],
+            error: { message: "Rate limit reached", codexErrorInfo: "rateLimitExceeded" },
+          },
+        },
+      } as unknown as ProviderEvent);
+
+      for (
+        let attempt = 0;
+        attempt < 100 && retireTurnAuthority.mock.calls.length === 0;
+        attempt += 1
+      ) {
+        yield* Effect.sleep("10 millis");
+      }
+      assert.deepStrictEqual(retireTurnAuthority.mock.calls[0]?.[0], {
+        threadId,
+        turnId: TurnId.make("turn-1"),
+      });
+      yield* adapter.stopSession(threadId);
+    }).pipe(Effect.provide(makeAdapterLayer({ bridge, runtimeFactory })));
+  }),
+);
+
 it.effect("revokes the lease when runtime construction fails", () =>
   Effect.gen(function* () {
     const { bridge, revokeLease } = makeBridge();

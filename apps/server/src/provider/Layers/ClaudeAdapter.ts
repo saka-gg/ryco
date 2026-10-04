@@ -51,6 +51,7 @@ import {
   ProviderItemId,
   type ProviderRuntimeEvent,
   type ProviderRuntimeTurnStatus,
+  type RuntimeErrorClass,
   type ProviderSendTurnInput,
   type ProviderSession,
   type ThreadTokenUsageSnapshot,
@@ -82,6 +83,7 @@ import { formatSourceControlContextsForAgent } from "@ryco/shared/sourceControlC
 import { classifyTaskAgentKind } from "@ryco/shared/taskClassification";
 import {
   Cause,
+  Clock,
   DateTime,
   Deferred,
   Duration,
@@ -140,6 +142,12 @@ import {
   type AgentControlProviderBridge,
   type AgentControlRuntimeLease,
 } from "../../agentControl/ProviderInjection.ts";
+import {
+  applyClaudeRateLimitInfo,
+  classifyClaudeUsageLimitResult,
+  CLAUDE_USAGE_LIMIT_FALLBACK_MESSAGE,
+  claudeUsageLimitState,
+} from "./claudeUsageLimits.ts";
 
 const PROVIDER = ProviderDriverKind.make("claudeAgent");
 const WAKE_NO_OUTPUT_REASON = "Claude started a background turn but produced no output.";
@@ -194,6 +202,8 @@ interface ClaudeTurnState {
    * second lifecycle event.
    */
   completion: Deferred.Deferred<void> | undefined;
+  /** Rejected rate-limit windows already warned about in this turn; created lazily. */
+  announcedUsageLimitKeys?: Set<string>;
 }
 
 /** The only turn-state constructor: prompt and provider turns must share one shape. */
@@ -331,6 +341,12 @@ interface ClaudeSessionContext {
    * even when nothing changed for most members.
    */
   readonly workflowMemberFingerprints: Map<string, string>;
+  /**
+   * Rejected rate-limit windows by limit type (reset ISO time, or null when unknown).
+   * Account-scoped, so they outlive turns: a wake turn opened after the rejection still
+   * classifies its limit stop with the reset. Allowed events clear them.
+   */
+  readonly rejectedRateLimitWindows: Map<string, string | null>;
   /**
    * Last complete workflow phase roster per coordinator task. Claude only
    * includes workflow_progress on some task_progress heartbeats, while the
@@ -2126,6 +2142,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     context: ClaudeSessionContext,
     message: string,
     cause?: unknown,
+    options?: { readonly class?: RuntimeErrorClass; readonly resetAt?: string | null },
   ) {
     if (cause !== undefined) {
       void cause;
@@ -2141,8 +2158,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       ...(turnState ? { turnId: asCanonicalTurnId(turnState.turnId) } : {}),
       payload: {
         message,
-        class: "provider_error",
+        class: options?.class ?? "provider_error",
         ...(cause !== undefined ? { detail: cause } : {}),
+        ...(options?.resetAt !== undefined ? { resetAt: options.resetAt } : {}),
       },
       providerRefs: nativeProviderRefs(context),
     });
@@ -3333,6 +3351,26 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
 
     const status = turnStatusFromResult(message);
+    // A usage-limit stop can arrive as `subtype: "success", is_error: true`, which would
+    // otherwise complete the turn with no error. Only an open turn can record a limit, so
+    // a stale or late result never marks the thread Limited.
+    const usageLimit =
+      context.turnState && status !== "interrupted" && status !== "cancelled"
+        ? classifyClaudeUsageLimitResult({
+            result: message,
+            windows: context.rejectedRateLimitWindows,
+            nowMs: yield* Clock.currentTimeMillis,
+          })
+        : null;
+    if (usageLimit) {
+      yield* emitRuntimeError(context, usageLimit.message, undefined, {
+        class: "usage_limit",
+        resetAt: usageLimit.resetAt,
+      });
+      yield* completeTurn(context, "failed", usageLimit.message, message);
+      return;
+    }
+
     const errorMessage = message.subtype === "success" ? undefined : message.errors[0];
 
     if (status === "failed") {
@@ -4159,13 +4197,30 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
 
     if (message.type === "rate_limit_event") {
+      const transition = message.rate_limit_info
+        ? applyClaudeRateLimitInfo(context.rejectedRateLimitWindows, message.rate_limit_info)
+        : undefined;
       yield* offerRuntimeEventForContext(context, {
         ...base,
         type: "account.rate-limits.updated",
         payload: {
           rateLimits: message,
+          usageLimitState: claudeUsageLimitState(
+            context.rejectedRateLimitWindows,
+            yield* Clock.currentTimeMillis,
+          ),
         },
       });
+      const turnState = context.turnState;
+      if (transition?.blocked && turnState) {
+        const announced = (turnState.announcedUsageLimitKeys ??= new Set());
+        if (!announced.has(transition.key)) {
+          announced.add(transition.key);
+          yield* emitRuntimeWarning(context, CLAUDE_USAGE_LIMIT_FALLBACK_MESSAGE, {
+            usageLimit: { limitType: transition.limitType, resetAt: transition.resetAt },
+          });
+        }
+      }
       return;
     }
   });
@@ -4986,6 +5041,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         subagentModelByToolUseId: new Map(),
         subagentParentByToolUseId: new Map(),
         workflowMemberFingerprints: new Map(),
+        rejectedRateLimitWindows: new Map(),
         workflowPhasesByTaskId: new Map(),
         liveTaskIds: new Set(),
         backgroundedTaskIds: new Set(),
