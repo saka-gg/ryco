@@ -413,6 +413,8 @@ function createFence(): {
 }
 
 const DIRECTORY_REFRESH_MS = 20_000;
+/** Directory cadence while a surface waits for an offline node to come back. */
+export const DIRECTORY_PRESENCE_REFRESH_MS = 5_000;
 const DIRECTORY_RETRY_MAX_MS = 60_000;
 const HOSTED_SESSION_SYNC_DEADLINE_MS = 30_000;
 export const HOSTED_SESSION_SYNC_FAILURE_MESSAGE = "Ryco state could not be synchronized.";
@@ -447,6 +449,8 @@ class HostedHubController {
   #operation: AbortController | null = null;
   #directoryTimer: ReturnType<typeof setTimeout> | null = null;
   #directoryRetry = 0;
+  /** One token per surface waiting on node presence; see `watchDirectoryPresence`. */
+  #directoryPresenceWatches = new Set<symbol>();
   #directoryOperation: AbortController | null = null;
   #directoryPromise: Promise<void> | null = null;
   #bootstrapPromise: Promise<void> | null = null;
@@ -1601,6 +1605,7 @@ class HostedHubController {
     this.#operation = null;
     this.#clearDirectoryTimer();
     this.#directoryRetry = 0;
+    this.#directoryPresenceWatches.clear();
     this.#directoryOperation?.abort();
     this.#directoryOperation = null;
     this.#directoryPromise = null;
@@ -1787,6 +1792,29 @@ class HostedHubController {
     return promise;
   }
 
+  /**
+   * Poll the node directory at {@link DIRECTORY_PRESENCE_REFRESH_MS} instead of
+   * the 20s cadence for as long as the returned release has not been called.
+   *
+   * For a surface holding connection demand for a node the directory reports
+   * offline: presence is only learned from this poll, so at the normal cadence
+   * a node that came back could wait 20s to be seen. Watches are tokens, one
+   * per caller, and the release is idempotent. The poll stays foreground-only
+   * and a failure backoff is never shortened; a pending normal-cadence refresh
+   * is pulled in when the first watch starts.
+   */
+  watchDirectoryPresence(): () => void {
+    const watch = Symbol("hosted-directory-presence-watch");
+    const first = this.#directoryPresenceWatches.size === 0;
+    this.#directoryPresenceWatches.add(watch);
+    if (first && this.#directoryTimer !== null && this.#directoryRetry === 0) {
+      this.#scheduleDirectory(DIRECTORY_PRESENCE_REFRESH_MS);
+    }
+    return () => {
+      this.#directoryPresenceWatches.delete(watch);
+    };
+  }
+
   async #refreshDirectory(operation: AbortController): Promise<void> {
     const state = hostedHubStore.getState();
     if (state.accountStatus !== "authenticated") return;
@@ -1838,7 +1866,11 @@ class HostedHubController {
             : {}),
         });
       }
-      this.#scheduleDirectory(DIRECTORY_REFRESH_MS);
+      this.#scheduleDirectory(
+        this.#directoryPresenceWatches.size > 0
+          ? DIRECTORY_PRESENCE_REFRESH_MS
+          : DIRECTORY_REFRESH_MS,
+      );
       if (resumeStaleBrowser) {
         getHostedRuntimeConfiguration().timers.queueMicrotask(() => {
           const recovered = hostedHubStore.getState();

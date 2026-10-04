@@ -45,6 +45,7 @@ import {
   type HostedRuntimeConfiguration,
 } from "./runtime";
 import {
+  DIRECTORY_PRESENCE_REFRESH_MS,
   HOSTED_ACCOUNT_BUSY_MESSAGE,
   HOSTED_ACCOUNT_SIGNED_OUT_MESSAGE,
   HOSTED_PASSKEY_UNCONFIRMED_MESSAGE,
@@ -893,6 +894,66 @@ describe("hosted registration and directory state", () => {
     await Promise.resolve();
     expect(listNodes).toHaveBeenCalledTimes(2);
     Object.defineProperty(globalThis, "document", { configurable: true, value: originalDocument });
+  });
+
+  it("polls presence faster only while a surface is waiting on an offline node", async () => {
+    vi.useFakeTimers();
+    hostedHubStore.setState({
+      accountStatus: "authenticated",
+      account: sessionResponse.account,
+      session: sessionResponse.session,
+      directoryStatus: "ready",
+    });
+    const listNodes = vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([]);
+
+    await hostedHubController.refreshDirectory();
+    expect(listNodes).toHaveBeenCalledOnce();
+
+    // A watch pulls the pending 20s refresh in to the presence cadence.
+    const release = hostedHubController.watchDirectoryPresence();
+    const second = hostedHubController.watchDirectoryPresence();
+    await vi.advanceTimersByTimeAsync(DIRECTORY_PRESENCE_REFRESH_MS);
+    expect(listNodes).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(DIRECTORY_PRESENCE_REFRESH_MS);
+    expect(listNodes).toHaveBeenCalledTimes(3);
+
+    // Releases are per watch and idempotent: one live watch keeps the cadence.
+    release();
+    release();
+    await vi.advanceTimersByTimeAsync(DIRECTORY_PRESENCE_REFRESH_MS);
+    expect(listNodes).toHaveBeenCalledTimes(4);
+
+    second();
+    await vi.advanceTimersByTimeAsync(DIRECTORY_PRESENCE_REFRESH_MS);
+    expect(listNodes).toHaveBeenCalledTimes(5);
+    await vi.advanceTimersByTimeAsync(19_999);
+    expect(listNodes).toHaveBeenCalledTimes(5);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(listNodes).toHaveBeenCalledTimes(6);
+  });
+
+  it("never shortens a directory failure backoff for a presence watch", async () => {
+    vi.useFakeTimers();
+    hostedHubStore.setState({
+      accountStatus: "authenticated",
+      account: sessionResponse.account,
+      session: sessionResponse.session,
+      directoryStatus: "ready",
+    });
+    const listNodes = vi
+      .spyOn(hostedHubApi, "listNodes")
+      .mockRejectedValueOnce(new HostedHubApiError("unavailable", 503))
+      .mockRejectedValueOnce(new HostedHubApiError("unavailable", 503))
+      .mockResolvedValue([]);
+
+    await hostedHubController.refreshDirectory();
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(listNodes).toHaveBeenCalledTimes(2);
+    hostedHubController.watchDirectoryPresence();
+    await vi.advanceTimersByTimeAsync(3_999);
+    expect(listNodes).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(listNodes).toHaveBeenCalledTimes(3);
   });
 
   it("keeps mutations stale until browser resume revalidates access and node state", async () => {
