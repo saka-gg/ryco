@@ -152,6 +152,21 @@ export function isE2eeVerifiedPinRecord(record: E2eeTrustRecord): record is E2ee
 }
 
 /**
+ * §13.1 between §13.2 step 2 and step 5: the record "Request approval" opened.
+ *
+ * Every channel to its selection is pairing-only — one suite-0x01 hello so the
+ * node lists this phone for approval, then a close, and nothing released —
+ * whatever the classification or a legacy consent says. The relay routing, the
+ * attempt and Home's workspace eligibility all read it here, so no surface can
+ * call a node usable while its channels are ceremony-only.
+ */
+export function isE2eePairingRecord(
+  record: E2eeTrustRecord | null,
+): record is E2eeUnverifiedPinRecord {
+  return record !== null && record.state === "unverified";
+}
+
+/**
  * §13.1's device-level `anyNodeVerified(hubOrigin)` marker, read under the Hub
  * origin ALONE. `unobtainable` is not `unset`: §4.4 forbids treating one as the
  * other, and the marker is exactly the guard that rule protects.

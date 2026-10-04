@@ -12,7 +12,7 @@ import {
 import { E2EE_SUITE_ACCOUNT_GRANT_25519_CHACHAPOLY_SHA256 } from "@ryco/shared/relayE2eeWire";
 
 import { mobileNativeE2eePlatform } from "../platform/nativeE2ee";
-import { isE2eeVerifiedPinRecord } from "../platform/e2eeTrustModel";
+import { isE2eePairingRecord, isE2eeVerifiedPinRecord } from "../platform/e2eeTrustModel";
 import { mobileE2eeTrustStore } from "../platform/e2eeTrustStore";
 import {
   beginMobileE2eeChannel,
@@ -125,7 +125,7 @@ export async function prepareMobileRelaySocketContext(): Promise<MobileRelaySock
   // so it is the only channel that puts this phone's key on the pending list
   // Desktop approves from; the attempt it resolves to is pairing-only and
   // releases nothing. A 0x02 account-grant channel never creates that record.
-  if (record !== null && (isE2eeVerifiedPinRecord(record) || record.state === "unverified")) {
+  if (record !== null && (isE2eeVerifiedPinRecord(record) || isE2eePairingRecord(record))) {
     await prepareMobileRelayE2eeAttempt();
     if (!isCurrent(selection)) throw new Error("Hosted node selection changed.");
     const provider = resolveMobileRelayE2eeProvider();

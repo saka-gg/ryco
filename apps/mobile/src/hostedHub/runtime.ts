@@ -13,6 +13,7 @@ import {
 
 import { mobileAppLifecycle } from "../platform/appLifecycle";
 import { createMobileDpopSigner } from "../platform/dpopSigner";
+import { isE2eePairingRecord } from "../platform/e2eeTrustModel";
 import { mobileE2eeTrustStore } from "../platform/e2eeTrustStore";
 import { mobileKV } from "../platform/kv";
 import { mobileNativeAuthorization } from "../platform/nativeAuthorization";
@@ -51,6 +52,7 @@ import {
 configureAuthoritativeNodeTrustSource({
   hubOrigin: () => getMobileHostedEndpoint()?.origin() ?? null,
   classify: (selection) => mobileE2eeTrustStore.classify(selection),
+  pairing: (selection) => isE2eePairingRecord(mobileE2eeTrustStore.resolve(selection)),
   subscribe: mobileE2eeTrustStore.subscribe,
 });
 

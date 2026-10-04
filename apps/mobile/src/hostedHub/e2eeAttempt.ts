@@ -17,6 +17,7 @@ import { mobileE2eeAgreementKey } from "../platform/e2eeAgreementKey";
 import { mobileClientE2eePrekey } from "../platform/e2eeClientPrekey";
 import { makeMobileRelayE2eeProvider } from "../platform/e2eeRelayProvider";
 import {
+  isE2eePairingRecord,
   isE2eeVerifiedPinRecord,
   type E2eeTrustClassification,
   type E2eeVerifiedPinRecord,
@@ -460,7 +461,7 @@ async function runPreparationPass(): Promise<boolean> {
     // the initiator refuses the `e2ee` lock to any native attempt that resolved
     // to no verified pin, so genuine first contact is still free to fall back to
     // legacy under §12.1.1 branch (a) while releasing nothing over E2EE.
-    pairingOnly: record !== null && record.state === "unverified",
+    pairingOnly: isE2eePairingRecord(record),
     localSuitePreference: LOCAL_SUITE_PREFERENCE,
     credentials: {
       tier: "native",
