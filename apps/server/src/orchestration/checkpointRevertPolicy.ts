@@ -178,6 +178,11 @@ export function requireThreadReadyForCheckpointRevert(input: {
   readonly readModel: OrchestrationReadModel;
   readonly thread: OrchestrationThread;
   readonly command: Extract<OrchestrationCommand, { type: "thread.checkpoint.revert" }>;
+  /**
+   * Server time. Journal phases are server-stamped, so a client clock running
+   * ahead must not age a pending revert out early.
+   */
+  readonly nowMs: number;
 }): Effect.Effect<void, OrchestrationCommandInvariantError> {
   const { readModel, thread, command } = input;
   const fail = (detail: string) =>
@@ -187,7 +192,7 @@ export function requireThreadReadyForCheckpointRevert(input: {
   if (hasActionableContextHandoff(thread)) {
     return fail("This thread is switching models. Wait for the switch to finish before reverting.");
   }
-  if (isCheckpointRevertPending(thread.activities, Date.parse(command.createdAt))) {
+  if (isCheckpointRevertPending(thread.activities, input.nowMs)) {
     return fail("A revert is already in progress for this thread.");
   }
   return Effect.void;
@@ -195,9 +200,11 @@ export function requireThreadReadyForCheckpointRevert(input: {
 
 export function requireNoPendingCheckpointRevert(input: {
   readonly thread: OrchestrationThread;
-  readonly command: OrchestrationCommand & { readonly createdAt: string };
+  readonly command: OrchestrationCommand;
+  /** Server time, for the same reason as `requireThreadReadyForCheckpointRevert`. */
+  readonly nowMs: number;
 }): Effect.Effect<void, OrchestrationCommandInvariantError> {
-  if (!isCheckpointRevertPending(input.thread.activities, Date.parse(input.command.createdAt))) {
+  if (!isCheckpointRevertPending(input.thread.activities, input.nowMs)) {
     return Effect.void;
   }
   return Effect.fail(

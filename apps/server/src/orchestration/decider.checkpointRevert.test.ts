@@ -18,6 +18,8 @@ import { describe, expect, it } from "vite-plus/test";
 import { decideOrchestrationCommand } from "./decider.ts";
 
 const now = "2026-08-04T00:10:00.000Z";
+/** Server time `ms` ago (negative: in the future); revert phases are server-stamped. */
+const serverAgo = (ms: number) => new Date(Date.now() - ms).toISOString();
 const threadId = ThreadId.make("thread-revert");
 
 function makeThread(overrides: Partial<OrchestrationThread> = {}): OrchestrationThread {
@@ -217,9 +219,7 @@ describe("checkpoint revert admission", () => {
     await expectRejected(
       revertCommand(),
       makeThread({
-        activities: [
-          revertActivity({ status: "requested", createdAt: "2026-08-04T00:09:00.000Z" }),
-        ],
+        activities: [revertActivity({ status: "requested", createdAt: serverAgo(60_000) })],
       }),
       "A revert is already in progress",
     );
@@ -227,12 +227,22 @@ describe("checkpoint revert admission", () => {
     const stale = await decide(
       revertCommand(),
       makeThread({
-        activities: [
-          revertActivity({ status: "rolling-back", createdAt: "2026-08-04T00:00:00.000Z" }),
-        ],
+        activities: [revertActivity({ status: "rolling-back", createdAt: serverAgo(11 * 60_000) })],
       }),
     );
     expect(Exit.isSuccess(stale)).toBe(true);
+  });
+
+  it("ages a pending revert by server time, not the client's clock", async () => {
+    // Journal phases are server-stamped; a client clock 15 minutes ahead must
+    // not make a revert that is still running look stale.
+    await expectRejected(
+      revertCommand({ createdAt: serverAgo(-15 * 60_000) }),
+      makeThread({
+        activities: [revertActivity({ status: "restoring-files", createdAt: serverAgo(1_000) })],
+      }),
+      "A revert is already in progress",
+    );
   });
 
   it("emits the pending revert activity before the revert request on an idle thread", async () => {
@@ -302,21 +312,39 @@ describe("turn start during a pending revert", () => {
     await expectRejected(
       turnStart,
       makeThread({
-        activities: [
-          revertActivity({ status: "restoring-files", createdAt: "2026-08-04T00:09:00.000Z" }),
-        ],
+        activities: [revertActivity({ status: "restoring-files", createdAt: serverAgo(60_000) })],
       }),
       "A checkpoint revert is in progress for this thread",
     );
+  });
+
+  it("rejects a turn start from a client clock running ahead of a pending revert", async () => {
+    await expectRejected(
+      { ...turnStart, createdAt: serverAgo(-15 * 60_000) },
+      makeThread({
+        activities: [revertActivity({ status: "restoring-files", createdAt: serverAgo(1_000) })],
+      }),
+      "A checkpoint revert is in progress for this thread",
+    );
+  });
+
+  it("accepts a turn start once the pending revert went stale on the server", async () => {
+    const exit = await decide(
+      turnStart,
+      makeThread({
+        activities: [
+          revertActivity({ status: "restoring-files", createdAt: serverAgo(11 * 60_000) }),
+        ],
+      }),
+    );
+    expect(Exit.isSuccess(exit)).toBe(true);
   });
 
   it("accepts a turn start once the revert completed", async () => {
     const exit = await decide(
       turnStart,
       makeThread({
-        activities: [
-          revertActivity({ status: "completed", createdAt: "2026-08-04T00:09:00.000Z" }),
-        ],
+        activities: [revertActivity({ status: "completed", createdAt: serverAgo(60_000) })],
       }),
     );
     expect(Exit.isSuccess(exit)).toBe(true);

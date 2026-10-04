@@ -985,7 +985,11 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
-      yield* requireNoPendingCheckpointRevert({ thread: targetThread, command });
+      yield* requireNoPendingCheckpointRevert({
+        thread: targetThread,
+        command,
+        nowMs: Date.now(),
+      });
       const resumeGuard = command.claudeResumeGuard;
       if (
         resumeGuard &&
@@ -1424,7 +1428,12 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
-      yield* requireThreadReadyForCheckpointRevert({ readModel, thread, command });
+      yield* requireThreadReadyForCheckpointRevert({
+        readModel,
+        thread,
+        command,
+        nowMs: Date.now(),
+      });
       const eventBase = () =>
         withEventBase({
           aggregateKind: "thread",
