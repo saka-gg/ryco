@@ -814,6 +814,7 @@ const ensureDesktopHostedIdentityCoordinator = lazyAsyncResource(
       nativeE2eePlatform: context.nativeE2eePlatform,
       relayDpopSigner: await createDesktopDpopSigner(context.security),
       allowsBackgroundNodeClaim: () => desktopHubAllowsBackgroundNodeClaim(desktopSettings),
+      beforeInteractiveNodeClaim: enableDesktopHubConnectorForAccountSetup,
       control: createDesktopHubControlClient({
         baseUrl: () => backendHttpUrl,
         controlToken: () => backendControlToken,
@@ -1027,6 +1028,21 @@ async function runDesktopHostedIdentity(
   }
   writeDesktopLogHeader(`native hosted identity status=${desktopHostedIdentityStatus.status}`);
   return desktopHostedIdentityStatus;
+}
+
+/**
+ * Interactive account sign-in is the Desktop onboarding action: once it holds
+ * a durable session, the colocated node connector becomes an explicit part of
+ * this installation. Recorded before the node claim, because a standby launch
+ * resolves to disabled for any existing identity: a claim that outlived an
+ * unrecorded enable would leave the node off after the next restart.
+ */
+function enableDesktopHubConnectorForAccountSetup(): void {
+  if (desktopSettings.hubOrigin === null || desktopSettings.hubConnectorEnabled) return;
+  const nextSettings = setDesktopHubPreference(desktopSettings, { enabled: true });
+  writeDesktopSettings(DESKTOP_SETTINGS_PATH, nextSettings);
+  desktopSettings = nextSettings;
+  desktopKeepAwake?.sync();
 }
 
 function resumeDesktopHostedIdentityForBackend(): void {
@@ -3047,14 +3063,13 @@ function registerIpcHandlers(): void {
     } catch {
       await runDesktopHostedIdentity(true);
     }
-    // Interactive account connection is the Desktop onboarding action: once
-    // browser sign-in produced a retained session, the colocated node
-    // connector becomes an explicit part of this installation. A standby
-    // backend already runs it, so the claim above committed in place and
-    // nothing restarts. Only a connector the operator had turned off needs a
-    // relaunch, which the renderer asks about (running turns would stop) via
-    // `restartRequired`. A cancelled sign-in or failed credential write never
-    // enables or restarts anything.
+    // Setup recorded the enable before its node claim; this covers a sign-in
+    // whose setup did not reach the claim. A standby backend already runs the
+    // connector, so the claim committed in place and nothing restarts. Only a
+    // connector the operator had turned off needs a relaunch, which the
+    // renderer asks about (running turns would stop) via `restartRequired`. A
+    // cancelled sign-in or failed credential write never enables or restarts
+    // anything.
     if (
       shouldEnableDesktopHubConnectorForAccountSetup({
         hubOrigin: desktopSettings.hubOrigin,
@@ -3064,12 +3079,7 @@ function registerIpcHandlers(): void {
           desktopHostedIdentityStatus.status === "ready",
       })
     ) {
-      const nextSettings = setDesktopHubPreference(desktopSettings, {
-        enabled: true,
-      });
-      writeDesktopSettings(DESKTOP_SETTINGS_PATH, nextSettings);
-      desktopSettings = nextSettings;
-      desktopKeepAwake?.sync();
+      enableDesktopHubConnectorForAccountSetup();
     }
     return hostedIdentityView();
   });
@@ -3265,9 +3275,13 @@ function registerIpcHandlers(): void {
         input.origin !== undefined ||
         input.nodeName !== undefined ||
         input.allowFileSecretStore !== undefined ||
-        deferRelaunch ||
-        backendHubLaunch?.standby !== true
+        deferRelaunch
       ) {
+        throw new Error("Invalid Hub launch configuration input.");
+      }
+      // Already explicit: nothing is left to record.
+      if (desktopSettings.hubOrigin !== null && desktopSettings.hubConnectorEnabled) return;
+      if (backendHubLaunch?.standby !== true) {
         throw new Error("Invalid Hub launch configuration input.");
       }
       const nextSettings = setDesktopHubPreference(desktopSettings, { enabled: true });

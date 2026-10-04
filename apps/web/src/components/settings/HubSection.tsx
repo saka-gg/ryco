@@ -430,14 +430,21 @@ export function HubSection({
             // A standby connector only runs while no identity exists. Record
             // that this installation now enrols, so the next launch keeps the
             // connector on for the identity it is about to create, without
-            // restarting the backend that already serves it.
-            if (config !== null && !config.enabled && desktopBridge) {
+            // restarting the backend that already serves it. Main validates
+            // standby itself, so this does not wait for the launch config to
+            // load, and an enable it cannot record stops the enrollment: the
+            // new identity would otherwise go offline at the next restart.
+            if (config?.enabled !== true && desktopBridge) {
               await desktopBridge
                 .setHubLaunchConfig({ enabled: true, applyOnNextLaunch: true })
-                .then(() => {
-                  if (mountedRef.current) setConfig({ ...config, enabled: true });
-                })
-                .catch(() => undefined);
+                .catch(() => {
+                  throw new Error(
+                    "Ryco couldn't save the Hub connection setting, so enrollment didn't start.",
+                  );
+                });
+              if (mountedRef.current) {
+                setConfig((current) => (current === null ? null : { ...current, enabled: true }));
+              }
             }
             await startHubEnrollment();
             break;

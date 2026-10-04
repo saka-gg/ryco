@@ -33,6 +33,7 @@ function coordinator(input: {
   readonly control?: DesktopHubControlClient;
   readonly nativeE2eePlatform?: NativeE2eePlatformService;
   readonly allowsBackgroundNodeClaim?: () => boolean;
+  readonly beforeInteractiveNodeClaim?: () => void | Promise<void>;
 }) {
   return new DesktopHostedIdentityCoordinator({
     origin: "https://hub.example.test",
@@ -52,6 +53,9 @@ function coordinator(input: {
     ...(input.allowsBackgroundNodeClaim === undefined
       ? {}
       : { allowsBackgroundNodeClaim: input.allowsBackgroundNodeClaim }),
+    ...(input.beforeInteractiveNodeClaim === undefined
+      ? {}
+      : { beforeInteractiveNodeClaim: input.beforeInteractiveNodeClaim }),
     ...(input.nativeE2eePlatform === undefined
       ? {}
       : { nativeE2eePlatform: input.nativeE2eePlatform }),
@@ -406,6 +410,41 @@ describe("Desktop hosted identity coordinator", () => {
     explicitlyEnabled = true;
     await identity.resume();
     expect(nodeClaimDescriptor).toHaveBeenCalledTimes(2);
+  });
+
+  it("records the connector enable before an interactive claim, and skips the claim without it", async () => {
+    // A claim that outlived an unrecorded enable came back disabled at the next
+    // launch, because standby turns any existing identity off.
+    const order: string[] = [];
+    const nodeClaimDescriptor = vi.fn(async () => {
+      order.push("claim");
+      throw new Error("claim stops here");
+    });
+    let failRecord = false;
+    const identity = coordinator({
+      api: {
+        hasSessionMaterial: true,
+        restoreSession: vi.fn().mockResolvedValue({ account: { id: "account-1" } }),
+      },
+      control: { nodeClaimDescriptor } as unknown as DesktopHubControlClient,
+      trust: { list: vi.fn().mockResolvedValue([]) } as unknown as DesktopE2eeTrustStore,
+      allowsBackgroundNodeClaim: () => true,
+      beforeInteractiveNodeClaim: () => {
+        order.push("record");
+        if (failRecord) throw new Error("settings write failed");
+      },
+    });
+
+    await identity.connect();
+    expect(order).toEqual(["record", "claim"]);
+
+    // A background resume has nothing to record.
+    await identity.resume();
+    expect(order).toEqual(["record", "claim", "claim"]);
+
+    failRecord = true;
+    await expect(identity.connect()).resolves.toMatchObject({ status: "ready", nodeId: null });
+    expect(order).toEqual(["record", "claim", "claim", "record"]);
   });
 
   it("defaults to no background claim", async () => {

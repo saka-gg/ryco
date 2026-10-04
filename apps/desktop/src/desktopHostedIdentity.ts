@@ -137,6 +137,7 @@ export class DesktopHostedIdentityCoordinator {
   readonly #trust: DesktopE2eeTrustStore;
   readonly #setup: DesktopHostedIdentitySetup;
   readonly #allowsBackgroundNodeClaim: () => boolean;
+  readonly #beforeInteractiveNodeClaim: () => void | Promise<void>;
   readonly #relayDpopSigner: DpopSignerService | undefined;
   readonly #nativeE2eeEnrollment: NativeE2eeEnrollmentCoordinator | undefined;
   readonly #resolveNativeE2eeTrust: ReturnType<typeof createNativeE2eeTrustResolver> | undefined;
@@ -160,11 +161,19 @@ export class DesktopHostedIdentityCoordinator {
      * the operator turned on, never for one launched in standby.
      */
     readonly allowsBackgroundNodeClaim?: () => boolean;
+    /**
+     * Runs once an interactive sign-in holds a durable session, before the
+     * node claim. Desktop records the explicit connector enable here, so a
+     * claimed node never comes back on a launch that leaves its connector off.
+     * A failure skips the claim.
+     */
+    readonly beforeInteractiveNodeClaim?: () => void | Promise<void>;
     readonly relayDpopSigner?: DpopSignerService;
     readonly nativeE2eePlatform?: NativeE2eePlatformService;
   }) {
     this.#origin = input.origin;
     this.#allowsBackgroundNodeClaim = input.allowsBackgroundNodeClaim ?? (() => false);
+    this.#beforeInteractiveNodeClaim = input.beforeInteractiveNodeClaim ?? (() => undefined);
     this.#installationId = input.installationId;
     this.#api = input.api;
     this.#credentials = input.credentials;
@@ -204,6 +213,7 @@ export class DesktopHostedIdentityCoordinator {
           );
         }
         try {
+          if (interactive) await this.#beforeInteractiveNodeClaim();
           const claimed = await runDesktopAutomaticNodeClaim({
             api: this.#api,
             control: this.#control,

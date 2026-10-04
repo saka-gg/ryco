@@ -2498,6 +2498,45 @@ describe("ConnectionsSettings Hub section", () => {
     );
   });
 
+  it("records the enrollment enable before the launch configuration has loaded", async () => {
+    // Skipping the record left the new identity to standby, which turns any
+    // existing identity off at the next launch.
+    const setHubLaunchConfig = vi.fn().mockResolvedValue(undefined);
+    const fetchMock = stubHubFetch({
+      status: { ...baseStatus, state: "enrolling" },
+      identity: { enrolled: "none" },
+    });
+    await renderHub(undefined, {
+      setHubLaunchConfig,
+      getHubLaunchConfig: () => new Promise(() => undefined),
+    });
+
+    await page.getByRole("button", { name: "Start enrollment" }).click();
+    await vi.waitFor(() =>
+      expect(setHubLaunchConfig).toHaveBeenCalledWith({ enabled: true, applyOnNextLaunch: true }),
+    );
+    await vi.waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some(([input]) => String(input).endsWith("/api/hub/enrollment")),
+      ).toBe(true),
+    );
+  });
+
+  it("does not start enrollment when the enable cannot be recorded", async () => {
+    const setHubLaunchConfig = vi.fn().mockRejectedValue(new Error("write failed"));
+    const fetchMock = stubHubFetch({
+      status: { ...baseStatus, state: "enrolling" },
+      identity: { enrolled: "none" },
+    });
+    await renderHub({ enabled: false, origin: "https://hub.example.com" }, { setHubLaunchConfig });
+
+    await page.getByRole("button", { name: "Start enrollment" }).click();
+    await expect.element(page.getByText(/couldn't save the Hub connection setting/)).toBeVisible();
+    expect(
+      fetchMock.mock.calls.some(([input]) => String(input).endsWith("/api/hub/enrollment")),
+    ).toBe(false);
+  });
+
   it("offers device-code enrollment where native account setup cannot run", async () => {
     stubHubFetch({
       status: { ...baseStatus, state: "enrolling" },
