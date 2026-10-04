@@ -25,6 +25,7 @@ import {
 import {
   SessionCredentialError,
   SessionCredentialService,
+  type SessionRotationRefusal,
 } from "../Services/SessionCredentialService.ts";
 import { AuthControlPlaneLive, AuthCoreLive } from "./AuthControlPlane.ts";
 
@@ -153,6 +154,14 @@ export function toBootstrapExchangeAuthError(cause: BootstrapCredentialError): A
     cause,
   });
 }
+
+const ROTATION_REFUSAL_STATUS = {
+  "not-bearer": 403,
+  superseded: 409,
+  "renewed-recently": 409,
+  "renewal-limit": 409,
+  idle: 401,
+} as const satisfies Record<SessionRotationRefusal, 401 | 403 | 409>;
 
 function parseBearerToken(request: HttpServerRequest.HttpServerRequest): string | null {
   const header = request.headers["authorization"];
@@ -448,6 +457,51 @@ export const makeServerAuth = Effect.gen(function* () {
       ),
     );
 
+  const rotateBearerSession: ServerAuthShape["rotateBearerSession"] = (request) =>
+    Effect.gen(function* () {
+      // Only the bearer itself renews: a cookie on the same request is ignored.
+      const bearerToken = parseBearerToken(request);
+      if (!bearerToken) {
+        return yield* new AuthError({
+          message: "A bearer session is required.",
+          status: 401,
+        });
+      }
+      const session = yield* authenticateToken(bearerToken);
+      if (session.method !== "bearer-session-token") {
+        return yield* new AuthError({
+          message: "Only bearer sessions renew by rotation.",
+          status: 403,
+        });
+      }
+      const rotated = yield* sessions.rotate(session.sessionId).pipe(
+        Effect.catchTags({
+          SessionRotationError: (cause) =>
+            Effect.fail(
+              new AuthError({
+                message: cause.message,
+                status: ROTATION_REFUSAL_STATUS[cause.reason],
+                cause,
+              }),
+            ),
+          SessionCredentialError: (cause) =>
+            Effect.fail(
+              new AuthError({
+                message: "Failed to renew the session.",
+                cause,
+              }),
+            ),
+        }),
+      );
+      return {
+        authenticated: true,
+        role: rotated.role,
+        sessionMethod: "bearer-session-token",
+        expiresAt: DateTime.toUtc(rotated.expiresAt),
+        sessionToken: rotated.token,
+      } satisfies AuthBearerBootstrapResult;
+    });
+
   const authenticateWebSocketUpgrade: ServerAuthShape["authenticateWebSocketUpgrade"] = (request) =>
     Effect.gen(function* () {
       if (
@@ -511,6 +565,7 @@ export const makeServerAuth = Effect.gen(function* () {
     authenticateHttpRequest: authenticateRequest,
     authenticateWebSocketUpgrade,
     issueWebSocketToken,
+    rotateBearerSession,
     issueStartupPairingUrl,
   } satisfies ServerAuthShape;
 });

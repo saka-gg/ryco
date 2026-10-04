@@ -1661,6 +1661,37 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
+  it.effect("serves bearer rotation only to a request carrying its bearer", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest();
+
+      const bearerToken = yield* getAuthenticatedBearerSessionToken();
+      const rotateUrl = yield* getHttpServerUrl("/api/auth/bearer/rotate");
+      const rotate = (headers: Record<string, string>) =>
+        Effect.promise(async () => {
+          const response = await fetch(rotateUrl, { method: "POST", headers });
+          return {
+            response,
+            body: (await response.json()) as { readonly error?: string },
+          };
+        });
+
+      // A pairing made a moment ago has nothing to renew yet; the route answers
+      // cross-origin callers like the other remote auth routes.
+      const fresh = yield* rotate({
+        origin: "http://192.168.86.35:3773",
+        authorization: `Bearer ${bearerToken}`,
+      });
+      assert.equal(fresh.response.status, 409);
+      assert.equal(fresh.response.headers.get("access-control-allow-origin"), "*");
+      assert.equal(fresh.body.error, "This session was renewed recently.");
+
+      const anonymous = yield* rotate({ origin: "http://192.168.86.35:3773" });
+      assert.equal(anonymous.response.status, 401);
+      assert.equal(anonymous.body.error, "A bearer session is required.");
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
   it.effect(
     "responds to remote auth websocket-token preflight requests with authorization CORS headers",
     () =>

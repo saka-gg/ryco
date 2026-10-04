@@ -1,6 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
-import { Effect, Layer } from "effect";
+import { Duration, Effect, Layer } from "effect";
+import { TestClock } from "effect/testing";
 
 import type { ServerConfigShape } from "../../config.ts";
 import { ServerConfig } from "../../config.ts";
@@ -199,5 +200,51 @@ it.layer(NodeServices.layer)("ServerAuthLive", (it) => {
         }),
       ),
     ),
+  );
+
+  it.effect("renews a direct bearer pairing over its own bearer only", () =>
+    Effect.gen(function* () {
+      const serverAuth = yield* ServerAuth;
+      const pairing = yield* serverAuth.issuePairingCredential({ label: "Julius iPhone" });
+      const paired = yield* serverAuth.exchangeBootstrapCredentialForBearerSession(
+        pairing.credential,
+        { ...requestMetadata, deviceType: "mobile" },
+      );
+
+      // Renewed right after pairing: nothing to renew yet.
+      const tooSoon = yield* Effect.flip(
+        serverAuth.rotateBearerSession(makeBearerRequest(paired.sessionToken)),
+      );
+      expect(tooSoon.status).toBe(409);
+
+      yield* TestClock.adjust(Duration.days(2));
+      const renewed = yield* serverAuth.rotateBearerSession(makeBearerRequest(paired.sessionToken));
+      expect(renewed).toMatchObject({
+        authenticated: true,
+        role: "client",
+        sessionMethod: "bearer-session-token",
+      });
+      expect(renewed.sessionToken).not.toBe(paired.sessionToken);
+      const verified = yield* serverAuth.authenticateHttpRequest(
+        makeBearerRequest(renewed.sessionToken),
+      );
+      expect(verified.subject).toBe("one-time-token");
+
+      // A browser session cookie never renews into anything, as a cookie or
+      // presented as a bearer.
+      const ownerPairing = yield* serverAuth.issuePairingCredential({ role: "owner" });
+      const browser = yield* serverAuth.exchangeBootstrapCredential(
+        ownerPairing.credential,
+        requestMetadata,
+      );
+      const cookieOnly = yield* Effect.flip(
+        serverAuth.rotateBearerSession(makeCookieRequest(browser.sessionToken)),
+      );
+      expect(cookieOnly.status).toBe(401);
+      const cookieAsBearer = yield* Effect.flip(
+        serverAuth.rotateBearerSession(makeBearerRequest(browser.sessionToken)),
+      );
+      expect(cookieAsBearer.status).toBe(403);
+    }).pipe(Effect.provide(Layer.merge(makeServerAuthLayer(), TestClock.layer()))),
   );
 });

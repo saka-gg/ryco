@@ -27,7 +27,7 @@ export interface AuthenticatedSession {
 
 export class AuthError extends Data.TaggedError("AuthError")<{
   readonly message: string;
-  readonly status?: 400 | 401 | 403 | 500;
+  readonly status?: 400 | 401 | 403 | 409 | 500;
   readonly cause?: unknown;
 }> {}
 
@@ -76,6 +76,14 @@ export interface ServerAuthShape {
   readonly issueWebSocketToken: (
     session: AuthenticatedSession,
   ) => Effect.Effect<AuthWebSocketTokenResult, AuthError>;
+  /**
+   * Renews the request's bearer session by rotation. Direct transport only: it
+   * reads the `Authorization` bearer, never a cookie, and no relay path reaches
+   * this node's HTTP auth routes.
+   */
+  readonly rotateBearerSession: (
+    request: HttpServerRequest.HttpServerRequest,
+  ) => Effect.Effect<AuthBearerBootstrapResult, AuthError>;
   readonly issueStartupPairingUrl: (baseUrl: string) => Effect.Effect<string, AuthError>;
 }
 

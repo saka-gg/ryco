@@ -43,6 +43,23 @@ export class SessionCredentialError extends Data.TaggedError("SessionCredentialE
   readonly cause?: unknown;
 }> {}
 
+/**
+ * Why a bearer session could not rotate. `superseded`, `renewed-recently` and
+ * `renewal-limit` leave the presented session as valid as it was; `idle` and
+ * `not-bearer` say it can never rotate.
+ */
+export type SessionRotationRefusal =
+  | "not-bearer"
+  | "superseded"
+  | "renewed-recently"
+  | "renewal-limit"
+  | "idle";
+
+export class SessionRotationError extends Data.TaggedError("SessionRotationError")<{
+  readonly reason: SessionRotationRefusal;
+  readonly message: string;
+}> {}
+
 export interface SessionCredentialServiceShape {
   readonly cookieName: string;
   readonly legacyCookieNames: readonly string[];
@@ -53,7 +70,21 @@ export interface SessionCredentialServiceShape {
     readonly role?: SessionRole;
     readonly client?: AuthClientMetadata;
   }) => Effect.Effect<IssuedSession, SessionCredentialError>;
+  /**
+   * Verifies a session token. A rotated session's first use supersedes the
+   * session it replaced; a superseded session presented after its grace revokes
+   * its whole pairing.
+   */
   readonly verify: (token: string) => Effect.Effect<VerifiedSession, SessionCredentialError>;
+  /**
+   * Issues the successor of a bearer session: same subject, role and client,
+   * never past a year from the original pairing. The presented session stays
+   * valid until the successor is first used, and asking again before that
+   * returns the same successor.
+   */
+  readonly rotate: (
+    sessionId: AuthSessionId,
+  ) => Effect.Effect<IssuedSession, SessionCredentialError | SessionRotationError>;
   readonly issueWebSocketToken: (
     sessionId: AuthSessionId,
     input?: {

@@ -185,6 +185,24 @@ export const authWebSocketTokenRouteLayer = HttpRouter.add(
   }).pipe(Effect.catchTag("AuthError", (error) => respondToAuthError(error))),
 );
 
+/**
+ * Renews a direct pairing's bearer by rotation. Bearer-only and served on the
+ * node's own HTTP listener, which no relay path reaches: a relay or hosted
+ * client can never mint or extend a direct credential through it.
+ */
+export const authBearerRotateRouteLayer = HttpRouter.add(
+  "POST",
+  "/api/auth/bearer/rotate",
+  Effect.gen(function* () {
+    const request = yield* HttpServerRequest.HttpServerRequest;
+    const serverAuth = yield* ServerAuth;
+    const result = yield* serverAuth.rotateBearerSession(request);
+    return HttpServerResponse.jsonUnsafe(result satisfies AuthBearerBootstrapResult, {
+      status: 200,
+    });
+  }).pipe(Effect.catchTag("AuthError", (error) => respondToAuthError(error))),
+);
+
 export const authPairingCredentialRouteLayer = HttpRouter.add(
   "POST",
   "/api/auth/pairing-token",

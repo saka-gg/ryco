@@ -24,6 +24,16 @@ export const AuthSessionRecord = Schema.Struct({
   expiresAt: Schema.DateTimeUtcFromString,
   lastConnectedAt: Schema.NullOr(Schema.DateTimeUtcFromString),
   revokedAt: Schema.NullOr(Schema.DateTimeUtcFromString),
+  /** The session this one replaced by bearer rotation; `null` for a pairing. */
+  rotatedFrom: Schema.NullOr(AuthSessionId),
+  /** The pairing's first session: every rotation of one pairing shares it. */
+  chainId: AuthSessionId,
+  /** When the pairing was made. Rotation never moves it; it caps the chain. */
+  chainIssuedAt: Schema.DateTimeUtcFromString,
+  /** Set once this session's successor first authenticated. */
+  supersededAt: Schema.NullOr(Schema.DateTimeUtcFromString),
+  /** The predecessor's `supersededAt`: `null` while this successor is unused. */
+  predecessorSupersededAt: Schema.NullOr(Schema.DateTimeUtcFromString),
 });
 export type AuthSessionRecord = typeof AuthSessionRecord.Type;
 
@@ -35,8 +45,35 @@ export const CreateAuthSessionInput = Schema.Struct({
   client: AuthSessionClientMetadataRecord,
   issuedAt: Schema.DateTimeUtcFromString,
   expiresAt: Schema.DateTimeUtcFromString,
+  /** Omitted for a new pairing, which starts its own chain. */
+  rotation: Schema.optionalKey(
+    Schema.Struct({
+      rotatedFrom: AuthSessionId,
+      chainId: AuthSessionId,
+      chainIssuedAt: Schema.DateTimeUtcFromString,
+      lastConnectedAt: Schema.NullOr(Schema.DateTimeUtcFromString),
+    }),
+  ),
 });
 export type CreateAuthSessionInput = typeof CreateAuthSessionInput.Type;
+
+export const FindPendingAuthSessionSuccessorInput = Schema.Struct({
+  sessionId: AuthSessionId,
+  now: Schema.DateTimeUtcFromString,
+});
+export type FindPendingAuthSessionSuccessorInput = typeof FindPendingAuthSessionSuccessorInput.Type;
+
+export const SupersedeAuthSessionInput = Schema.Struct({
+  sessionId: AuthSessionId,
+  supersededAt: Schema.DateTimeUtcFromString,
+});
+export type SupersedeAuthSessionInput = typeof SupersedeAuthSessionInput.Type;
+
+export const GetAuthSessionChainHeadInput = Schema.Struct({
+  chainId: AuthSessionId,
+  now: Schema.DateTimeUtcFromString,
+});
+export type GetAuthSessionChainHeadInput = typeof GetAuthSessionChainHeadInput.Type;
 
 export const GetAuthSessionByIdInput = Schema.Struct({
   sessionId: AuthSessionId,
@@ -76,12 +113,26 @@ export interface AuthSessionRepositoryShape {
   readonly listActive: (
     input: ListActiveAuthSessionsInput,
   ) => Effect.Effect<ReadonlyArray<AuthSessionRecord>, AuthSessionRepositoryError>;
+  /** Revokes the session's whole rotation chain; returns every session revoked. */
   readonly revoke: (
     input: RevokeAuthSessionInput,
-  ) => Effect.Effect<boolean, AuthSessionRepositoryError>;
+  ) => Effect.Effect<ReadonlyArray<AuthSessionId>, AuthSessionRepositoryError>;
+  /** Revokes every session outside the current session's rotation chain. */
   readonly revokeAllExcept: (
     input: RevokeOtherAuthSessionsInput,
   ) => Effect.Effect<ReadonlyArray<AuthSessionId>, AuthSessionRepositoryError>;
+  /** The unused successor a rotation already issued for this session, if any. */
+  readonly findPendingSuccessor: (
+    input: FindPendingAuthSessionSuccessorInput,
+  ) => Effect.Effect<Option.Option<AuthSessionRecord>, AuthSessionRepositoryError>;
+  /** Marks the session superseded unless it already is; `true` when this call did. */
+  readonly supersede: (
+    input: SupersedeAuthSessionInput,
+  ) => Effect.Effect<boolean, AuthSessionRepositoryError>;
+  /** The chain's current session: the one a client list shows for the pairing. */
+  readonly getChainHead: (
+    input: GetAuthSessionChainHeadInput,
+  ) => Effect.Effect<Option.Option<AuthSessionRecord>, AuthSessionRepositoryError>;
   readonly setLastConnectedAt: (
     input: SetAuthSessionLastConnectedAtInput,
   ) => Effect.Effect<void, AuthSessionRepositoryError>;

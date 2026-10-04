@@ -95,6 +95,7 @@ import { AdvertisedEndpointRegistryLive } from "./remote/AdvertisedEndpointRegis
 import { SleepInhibitorLive } from "./service/sleepInhibitor.ts";
 import {
   authBearerBootstrapRouteLayer,
+  authBearerRotateRouteLayer,
   authBootstrapRouteLayer,
   authClientsRevokeOthersRouteLayer,
   authClientsRevokeRouteLayer,
@@ -512,6 +513,7 @@ const RuntimeServicesLive = Layer.mergeAll(
 
 const authRoutesLayer = Layer.mergeAll(
   authBearerBootstrapRouteLayer,
+  authBearerRotateRouteLayer,
   authBootstrapRouteLayer,
   authClientsRevokeOthersRouteLayer,
   authClientsRevokeRouteLayer,
