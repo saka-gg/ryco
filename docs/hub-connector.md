@@ -358,6 +358,17 @@ starts instead of silently switching because another backend became available. A
 without the marker is migrated only when all required material is found in exactly one eligible
 store. Missing, split, or ambiguous custody fails closed as `identity_store_unavailable`.
 
+One node identity belongs to one running backend. The desktop app's backend and a default
+`ryco serve` both keep their state in `~/.ryco`, so when its connector starts each backend takes a
+process lock, `hub-connector.lock`, beside the identity state. A second backend whose connector finds
+the lock held by a live process does not read, sign with, or connect as the identity: it reports
+`connection_replaced`, checks again every 30 seconds to two minutes, and takes over by itself once
+the first one exits. It also refuses to start or cancel an enrollment, or to leave, while the other
+process holds the identity. A lock left by a process that died — or by one from before a reboot,
+whose pid may since have been reused — is reclaimed automatically. If the lock file cannot be
+written at all the connector proceeds without it; the Hub still allows only one connection per
+identity.
+
 The standalone [relay architecture atlas](./relay-architecture.html) shows enrollment, client relay
 connection, hosted reconnect, actor capabilities, role intersection, and which data each component
 retains.
@@ -538,9 +549,11 @@ and the normal server listener follow their existing shutdown path.
   node status with the Hub operator. A node that was removed at the Hub needs `ryco hub leave` and a
   new enrollment.
 - `revoked`: retries are intentionally stopped. `ryco hub resume` will not restart a revoked identity.
-- `connection_replaced`: another process authenticated as this node. Ryco retries a few times an
-  hour and then stops so the other copy keeps the connection. Stop the copy you do not want, then
-  run `ryco hub resume`.
+- `connection_replaced`: another process is using this node's identity — locally, another Ryco
+  backend on the same state directory holds its lock; remotely, a copy of the identity
+  authenticated elsewhere. A local copy is waited out automatically. A remote one is retried a few
+  times an hour, then Ryco stops so the other copy keeps the connection. Stop the copy you do not
+  want, then run `ryco hub resume`.
 - `protocol_invalid` or `version_incompatible`: upgrade the incompatible endpoint. Do not modify
   relay schemas or fixtures locally.
 - Repeated `network_unavailable`, `tls_unavailable`, or `heartbeat_timeout`: check DNS, egress, TLS

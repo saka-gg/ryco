@@ -1,3 +1,5 @@
+import { dirname, join } from "node:path";
+
 import { Context, Effect, Exit, Layer, Scope } from "effect";
 import { WsHostedRpcGroup } from "@ryco/contracts";
 import type { NodeE2eeAdmissionPolicy } from "@ryco/contracts/native-e2ee";
@@ -18,6 +20,7 @@ import {
   type HubIdentityRuntimeShape,
   makeHubIdentityRuntime,
 } from "./HubIdentityRuntime.ts";
+import { makeHubIdentityProcessLock } from "../hubIdentity/HubIdentityProcessLock.ts";
 import { makeLocalHubIdentityStateStore } from "../hubIdentity/LocalHubIdentityState.ts";
 import type { NodeE2eeAdvertisementResult } from "../hubIdentity/NodeE2eeCapabilityStatement.ts";
 import type { NodeE2eeFallbackState } from "../hubIdentity/NodeE2eeFallbackCounter.ts";
@@ -669,6 +672,12 @@ export const HubConnectorLive = Layer.effect(
       onE2eeEnrollmentRevoked: async (frame) => {
         await sessionDirectory.revokeEnrollment(frame);
       },
+      // Beside the identity it guards, so every backend sharing that identity —
+      // the desktop's child and a `ryco serve` on the same state directory —
+      // contends for the same file.
+      processLock: makeHubIdentityProcessLock({
+        path: join(dirname(config.hubIdentityStatePath), "hub-connector.lock"),
+      }),
     });
     yield* Effect.acquireRelease(
       Effect.sync(() => {

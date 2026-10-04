@@ -23,6 +23,7 @@ import { E2EE_MAX_CLOCK_SKEW } from "@ryco/shared/relayE2eeConstants";
 import {
   AUTHENTICATION_FAILED_RETRY,
   CONNECTION_REPLACED_RETRY,
+  IDENTITY_IN_USE_RETRY,
   IDENTITY_UNAVAILABLE_RETRY,
   type SlowRetryPolicy,
 } from "./ReconnectPolicy.ts";
@@ -31,6 +32,8 @@ export type ConnectorFailureKind =
   | "configuration_invalid"
   | "identity_unavailable"
   | "identity_store_unavailable"
+  /** Another local process holds this node identity's process lock. */
+  | "identity_in_use"
   | "identity_origin_mismatch"
   | "enrollment_unavailable"
   | "enrollment_expired"
@@ -127,6 +130,16 @@ export function classifyConnectorFailure(
         failure: kind,
         policy: CONNECTION_REPLACED_RETRY,
         nudgeable: false,
+      };
+    case "identity_in_use":
+      // The same condition as a Hub-side replacement, caught locally before it
+      // displaced anything — so it is reported the same way, and checked often:
+      // the check is a file read, and the other copy may exit at any moment.
+      return {
+        action: "slow_retry",
+        failure: "connection_replaced",
+        policy: IDENTITY_IN_USE_RETRY,
+        nudgeable: true,
       };
     case "authentication_failed":
       return {

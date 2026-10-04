@@ -72,6 +72,17 @@ export const IDENTITY_UNAVAILABLE_RETRY: SlowRetryPolicy = {
 };
 
 /**
+ * Another local process holds this identity's process lock. Nothing reaches
+ * the Hub until the lock is free, so checking is a file read and costs no one
+ * anything; it only needs to notice promptly when the other copy exits.
+ */
+export const IDENTITY_IN_USE_RETRY: SlowRetryPolicy = {
+  baseDelayMs: 30_000,
+  maxDelayMs: 120_000,
+  jitterRatio: 0.2,
+};
+
+/**
  * Another process authenticated as this node. Retrying displaces it, and its
  * retry displaces this one, so the gap is long and the budget is small: two
  * duplicates converge on one connected copy within the hour instead of

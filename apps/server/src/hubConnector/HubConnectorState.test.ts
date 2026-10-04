@@ -267,6 +267,15 @@ describe("classifyConnectorFailure", () => {
       policy: { baseDelayMs: 900_000, maxDelayMs: 3_600_000 },
       nudgeable: false,
     });
+    // A local duplicate caught by the process lock reads like the replacement
+    // it prevented, but costs the Hub nothing to re-check, so it has no budget.
+    const local = classifyConnectorFailure("identity_in_use", 0);
+    expect(local).toMatchObject({
+      action: "slow_retry",
+      failure: "connection_replaced",
+      policy: { baseDelayMs: 30_000, maxDelayMs: 120_000 },
+    });
+    expect(local.action === "slow_retry" && local.policy.maxPerHour).toBeUndefined();
   });
 
   it("allows one backed-off canonical violation and stops the second before stability", () => {

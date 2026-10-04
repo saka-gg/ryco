@@ -20,6 +20,7 @@ import { E2EE_MAX_CLOCK_SKEW } from "@ryco/shared/relayE2eeConstants";
 
 import type { HubConnectorConfig } from "../config.ts";
 import type { HubEnrollmentMetadata } from "../hubIdentity/HubEnrollmentClient.ts";
+import type { HubIdentityProcessLock } from "../hubIdentity/HubIdentityProcessLock.ts";
 import type { NodeE2eeAdvertisement } from "../hubIdentity/NodeE2eeCapabilityStatement.ts";
 import type { E2eeAccountGrantNodeVerificationInput } from "@ryco/shared/relayE2eeHandshake";
 import {
@@ -123,6 +124,12 @@ export class HubConnector {
   ) => void | Promise<void>;
   readonly #networkFingerprint: () => string;
   readonly #livenessWatchEnabled: boolean;
+  readonly #processLock: HubIdentityProcessLock | undefined;
+  /**
+   * Whether this process may use the identity: it holds the process lock, the
+   * lock could not be used at all, or no lock is configured.
+   */
+  #ownsIdentity: boolean;
   #watchTimer: unknown;
   #watchLastTickAt: number | undefined;
   #watchLastNetwork: string | undefined;
@@ -185,6 +192,8 @@ export class HubConnector {
     readonly networkFingerprint?: () => string;
     /** Watch for wake and network changes; see `nudge`. On unless a test opts out. */
     readonly livenessWatch?: boolean;
+    /** Keeps a second local process off this identity; see `HubIdentityProcessLock`. */
+    readonly processLock?: HubIdentityProcessLock;
   }) {
     this.#config = options.config;
     this.#identity = options.identity;
@@ -203,6 +212,8 @@ export class HubConnector {
     this.#onE2eeEnrollmentRevoked = options.onE2eeEnrollmentRevoked ?? (() => undefined);
     this.#networkFingerprint = options.networkFingerprint ?? defaultNetworkFingerprint;
     this.#livenessWatchEnabled = options.livenessWatch ?? true;
+    this.#processLock = options.processLock;
+    this.#ownsIdentity = options.processLock === undefined;
   }
 
   /**
@@ -390,6 +401,7 @@ export class HubConnector {
    * parking the node until someone runs `ryco hub resume`.
    */
   async #establish(generation: number): Promise<void> {
+    if (!(await this.#claimIdentity(generation))) return;
     let identity;
     try {
       identity = await this.#identity.readState();
@@ -416,8 +428,40 @@ export class HubConnector {
     await this.#connect();
   }
 
+  /**
+   * Take this identity's process lock before anything reads or uses it.
+   *
+   * A held lock is reported as `connection_replaced` — the condition it
+   * prevents — and retried on a short local schedule, so the second copy takes
+   * over on its own once the first one exits. False means the caller must stop.
+   */
+  async #claimIdentity(generation: number): Promise<boolean> {
+    const lock = this.#processLock;
+    if (lock === undefined || this.#ownsIdentity) return true;
+    const result = await lock.acquire();
+    if (this.#stopping) {
+      await lock.release();
+      return false;
+    }
+    if (!this.#state.isCurrent(generation)) return false;
+    if (result === "held") {
+      await this.#handleFailure(generation, "identity_in_use");
+      return false;
+    }
+    this.#ownsIdentity = true;
+    return true;
+  }
+
+  /** Mutating an identity another local process is connected with would pull it out from under it. */
+  #requireIdentityOwnership(): void {
+    if (!this.#ownsIdentity) {
+      throw new Error("Hub identity is in use by another Ryco process.");
+    }
+  }
+
   async enroll(): Promise<HubEnrollmentStartResult> {
     const origin = this.#enrollmentOrigin();
+    this.#requireIdentityOwnership();
     const initialGeneration = this.#state.generation;
     const state = await this.#identity.readState();
     if (!this.#state.isCurrent(initialGeneration) || this.#stopping) {
@@ -546,6 +590,7 @@ export class HubConnector {
 
   async cancelEnrollment(): Promise<HubConnectorStatus> {
     const origin = this.#enrollmentOrigin();
+    this.#requireIdentityOwnership();
     const initialGeneration = this.#state.generation;
     const identity = await this.#identity.readState();
     if (!this.#state.isCurrent(initialGeneration) || this.#stopping) {
@@ -603,6 +648,10 @@ export class HubConnector {
     this.#state.invalidateGeneration();
     if (this.#state.snapshot().state !== "disabled") this.#state.transition("stopping");
     await this.#teardownConnection();
+    if (this.#processLock !== undefined) {
+      this.#ownsIdentity = false;
+      await this.#processLock.release();
+    }
     this.#state.transition("disabled");
     this.#started = false;
   }
@@ -624,6 +673,29 @@ export class HubConnector {
    */
   async leave(): Promise<HubConnectorStatus> {
     if (this.#stopping) throw new Error("Hub identity cannot be erased while stopping.");
+    // A connector that never started — switched off here, perhaps while another
+    // copy runs with it on — has not claimed the identity yet. Claim it now, and
+    // refuse rather than erase keys a running process is authenticating with.
+    const lock = this.#processLock;
+    const claimedForLeave = lock !== undefined && !this.#ownsIdentity;
+    if (claimedForLeave) {
+      if ((await lock.acquire()) === "held") {
+        throw new Error("Hub identity is in use by another Ryco process.");
+      }
+      this.#ownsIdentity = true;
+    }
+    // A connector that will not run afterwards hands the claim back, so a copy
+    // that does run can take the identity — fresh or not — without waiting.
+    const releaseLeaveClaim = async () => {
+      if (
+        !claimedForLeave ||
+        (this.#config.enabled && this.#config.configurationIssue === undefined)
+      ) {
+        return;
+      }
+      this.#ownsIdentity = false;
+      await lock.release();
+    };
     await this.#teardownConnection();
     this.#started = false;
     // Budgets earned by the identity being erased say nothing about the next one.
@@ -636,6 +708,7 @@ export class HubConnector {
         degradedMode: "operator_action_required",
         failure: identityFailure(error),
       });
+      await releaseLeaveClaim();
       // The cause aids local diagnosis; it never reaches a caller, because the
       // route replaces this error with a bounded message.
       throw new Error("Hub identity could not be erased.", { cause: error });
@@ -649,6 +722,7 @@ export class HubConnector {
       this.#state.transition("enrolling");
       this.#started = true;
     }
+    await releaseLeaveClaim();
     return this.status();
   }
 

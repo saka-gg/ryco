@@ -3685,16 +3685,16 @@ configureAppIdentity();
 /**
  * Refuse to run a second copy of this app against the same state directory.
  *
- * Two backends sharing one `RYCO_HOME` contend over a single node identity, and
- * the loser can land in `connection_replaced` — an operator-action failure with
- * no retry timer, so it never clears on its own.
- *
  * This is a UX guard, not the correctness fix. It coordinates only instances of
- * this Electron application: a headless `ryco serve` or any other process
- * sharing the state directory is unaffected, and the identity writer lock
- * remains the actual arbiter. Desktop Dev also owns this lock so a macOS
- * `ryco-dev://` callback is delivered to the running broker instead of turning
- * the raw callback Electron process into a second hidden primary instance.
+ * this Electron application: a headless `ryco serve` sharing the state
+ * directory is unaffected. Two backends sharing one `RYCO_HOME` would contend
+ * over a single node identity, and the Hub displaces one with a bare close
+ * rather than an error, so the server arbitrates locally instead: whichever
+ * backend's Hub connector starts first holds the identity's process lock, and
+ * the other reports `connection_replaced` and takes over on its own once the
+ * first exits. Desktop Dev also owns this lock so a macOS `ryco-dev://`
+ * callback is delivered to the running broker instead of turning the raw
+ * callback Electron process into a second hidden primary instance.
  */
 if (!isDesktopAuthorizationCallbackRelay && !app.requestSingleInstanceLock()) {
   writeDesktopLogHeader("second instance refused; focusing the existing window");

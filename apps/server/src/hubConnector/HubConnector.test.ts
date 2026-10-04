@@ -1328,6 +1328,65 @@ describe("HubConnector", () => {
     await connector.stop();
   });
 
+  it("stays off an identity another local process holds, and takes it over when that one exits", async () => {
+    const clock = scheduler();
+    const sockets: FakeSocket[] = [];
+    let otherCopyRunning = true;
+    let identityReads = 0;
+    const lockCalls: string[] = [];
+    const activeIdentity = identity();
+    const connector = new HubConnector({
+      config: enabledConfig,
+      identity: {
+        ...activeIdentity,
+        readState: async () => {
+          identityReads += 1;
+          return activeIdentity.readState();
+        },
+      },
+      transport: {
+        open: () => {
+          const socket = new FakeSocket();
+          sockets.push(socket);
+          return socket;
+        },
+      },
+      channels: { open: async () => Promise.reject(new Error("unused")) },
+      enrollmentMetadata,
+      livenessWatch: false,
+      scheduler: clock.value,
+      processLock: {
+        acquire: async () => {
+          lockCalls.push("acquire");
+          return otherCopyRunning ? "held" : "acquired";
+        },
+        release: async () => {
+          lockCalls.push("release");
+        },
+      },
+    });
+    await connector.start();
+    // Diagnosed locally: nothing was read, signed, or sent to the Hub.
+    expect(connector.status()).toMatchObject({
+      state: "degraded",
+      degradedMode: "backing_off",
+      failure: "connection_replaced",
+      nextRetryAt: new Date(clock.value.now() + 30_000).toISOString(),
+    });
+    expect(identityReads).toBe(0);
+    expect(sockets).toHaveLength(0);
+    await expect(connector.leave()).rejects.toThrow("in use by another Ryco process");
+
+    otherCopyRunning = false;
+    await clock.advance(30_000);
+    await settle();
+    expect(identityReads).toBe(1);
+    expect(sockets).toHaveLength(1);
+
+    await connector.stop();
+    expect(lockCalls.at(-1)).toBe("release");
+  });
+
   it("spaces out a connection the Hub displaced with a bare close", async () => {
     const clock = scheduler();
     const sockets: FakeSocket[] = [];
