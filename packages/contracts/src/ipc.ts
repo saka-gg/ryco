@@ -419,6 +419,17 @@ export interface DesktopHubLaunchConfig {
   readonly hostedIdentitySupported: boolean;
 }
 
+/** Whether Desktop main is holding this machine awake for the devices that reach it. */
+export interface DesktopKeepAwakeState {
+  /** The operator's preference. On by default. */
+  readonly enabled: boolean;
+  /** Other devices can reach this node through the Hub, the network, or Tailscale. */
+  readonly reachable: boolean;
+  readonly onBattery: boolean;
+  /** Ryco currently holds the system awake. Only ever true on AC power. */
+  readonly active: boolean;
+}
+
 /** Secret-free projection of Desktop main's native Hub identity workflow. */
 export interface DesktopHostedIdentityState {
   readonly status: "signed-out" | "ready" | "unavailable";
@@ -702,6 +713,9 @@ export interface DesktopBridge {
     readonly port?: number;
   }) => Promise<DesktopServerExposureState>;
   getHubLaunchConfig: () => Promise<DesktopHubLaunchConfig>;
+  /** Keep a reachable desktop node awake while it is plugged in. Applies live. */
+  getKeepAwakeState?: () => Promise<DesktopKeepAwakeState>;
+  setKeepAwakeEnabled?: (enabled: boolean) => Promise<DesktopKeepAwakeState>;
   /** Relaunch the Desktop shell without changing persisted launch configuration. */
   restartApp?: () => Promise<void>;
   /** Native account setup is available only in Desktop builds that support hardware-backed keys. */

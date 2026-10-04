@@ -12,6 +12,7 @@ import {
   readDesktopSettings,
   resolveDefaultDesktopSettings,
   setDesktopHubPreference,
+  setDesktopKeepAwakePreference,
   setDesktopServerExposurePreference,
   setDesktopTailscaleServePreference,
   setDesktopUpdateChannelPreference,
@@ -52,6 +53,7 @@ describe("desktopSettings", () => {
       serverExposureMode: "local-only",
       tailscaleServeEnabled: false,
       tailscaleServePort: 443,
+      keepAwakeWhileReachable: true,
       updateChannel: "nightly",
       updateChannelConfiguredByUser: false,
       hubConnectorEnabled: false,
@@ -69,6 +71,7 @@ describe("desktopSettings", () => {
       serverExposureMode: "network-accessible",
       tailscaleServeEnabled: true,
       tailscaleServePort: 8443,
+      keepAwakeWhileReachable: true,
       updateChannel: "latest",
       updateChannelConfiguredByUser: true,
       hubConnectorEnabled: false,
@@ -82,6 +85,7 @@ describe("desktopSettings", () => {
       serverExposureMode: "network-accessible",
       tailscaleServeEnabled: true,
       tailscaleServePort: 8443,
+      keepAwakeWhileReachable: true,
       updateChannel: "latest",
       updateChannelConfiguredByUser: true,
       hubConnectorEnabled: false,
@@ -99,6 +103,7 @@ describe("desktopSettings", () => {
           serverExposureMode: "local-only",
           tailscaleServeEnabled: false,
           tailscaleServePort: 443,
+          keepAwakeWhileReachable: true,
           updateChannel: "latest",
           updateChannelConfiguredByUser: false,
           hubConnectorEnabled: false,
@@ -113,6 +118,7 @@ describe("desktopSettings", () => {
       serverExposureMode: "network-accessible",
       tailscaleServeEnabled: false,
       tailscaleServePort: 443,
+      keepAwakeWhileReachable: true,
       updateChannel: "latest",
       updateChannelConfiguredByUser: false,
       hubConnectorEnabled: false,
@@ -130,6 +136,7 @@ describe("desktopSettings", () => {
           serverExposureMode: "local-only",
           tailscaleServeEnabled: false,
           tailscaleServePort: 443,
+          keepAwakeWhileReachable: true,
           updateChannel: "latest",
           updateChannelConfiguredByUser: false,
           hubConnectorEnabled: false,
@@ -144,6 +151,7 @@ describe("desktopSettings", () => {
       serverExposureMode: "local-only",
       tailscaleServeEnabled: true,
       tailscaleServePort: 8443,
+      keepAwakeWhileReachable: true,
       updateChannel: "latest",
       updateChannelConfiguredByUser: false,
       hubConnectorEnabled: false,
@@ -161,6 +169,7 @@ describe("desktopSettings", () => {
           serverExposureMode: "local-only",
           tailscaleServeEnabled: false,
           tailscaleServePort: 8443,
+          keepAwakeWhileReachable: true,
           updateChannel: "latest",
           updateChannelConfiguredByUser: false,
           hubConnectorEnabled: false,
@@ -175,6 +184,7 @@ describe("desktopSettings", () => {
       serverExposureMode: "local-only",
       tailscaleServeEnabled: true,
       tailscaleServePort: 8443,
+      keepAwakeWhileReachable: true,
       updateChannel: "latest",
       updateChannelConfiguredByUser: false,
       hubConnectorEnabled: false,
@@ -192,6 +202,7 @@ describe("desktopSettings", () => {
           serverExposureMode: "local-only",
           tailscaleServeEnabled: false,
           tailscaleServePort: 443,
+          keepAwakeWhileReachable: true,
           updateChannel: "latest",
           updateChannelConfiguredByUser: false,
           hubConnectorEnabled: false,
@@ -206,6 +217,7 @@ describe("desktopSettings", () => {
       serverExposureMode: "local-only",
       tailscaleServeEnabled: false,
       tailscaleServePort: 443,
+      keepAwakeWhileReachable: true,
       updateChannel: "nightly",
       updateChannelConfiguredByUser: true,
       hubConnectorEnabled: false,
@@ -313,6 +325,19 @@ describe("desktopSettings", () => {
     expect(isDesktopHubFileSecretStoreSupported("win32")).toBe(false);
   });
 
+  it("keeps a reachable node awake by default and persists an opt-out", () => {
+    expect(DEFAULT_DESKTOP_SETTINGS.keepAwakeWhileReachable).toBe(true);
+    const settingsPath = makeSettingsPath();
+    // Settings written before the preference existed keep the default.
+    fs.writeFileSync(settingsPath, JSON.stringify({ hubConnectorEnabled: true }));
+    expect(readDesktopSettings(settingsPath, "0.1.21").keepAwakeWhileReachable).toBe(true);
+
+    const optedOut = setDesktopKeepAwakePreference(DEFAULT_DESKTOP_SETTINGS, false);
+    writeDesktopSettings(settingsPath, optedOut);
+    expect(readDesktopSettings(settingsPath, "0.1.21").keepAwakeWhileReachable).toBe(false);
+    expect(setDesktopKeepAwakePreference(optedOut, false)).toBe(optedOut);
+  });
+
   it("offers native account setup only where the hardware-backed helper ships", () => {
     expect(isDesktopHostedIdentitySupported("darwin")).toBe(true);
     // Linux and Windows desktops are released too; they enrol through the
@@ -349,6 +374,7 @@ describe("desktopSettings", () => {
       serverExposureMode: "local-only",
       tailscaleServeEnabled: false,
       tailscaleServePort: 443,
+      keepAwakeWhileReachable: true,
       updateChannel: "nightly",
       updateChannelConfiguredByUser: false,
       hubConnectorEnabled: false,
@@ -375,6 +401,7 @@ describe("desktopSettings", () => {
       serverExposureMode: "local-only",
       tailscaleServeEnabled: false,
       tailscaleServePort: 443,
+      keepAwakeWhileReachable: true,
       updateChannel: "nightly",
       updateChannelConfiguredByUser: false,
       hubConnectorEnabled: false,
@@ -406,6 +433,7 @@ describe("desktopSettings", () => {
       serverExposureMode: "local-only",
       tailscaleServeEnabled: false,
       tailscaleServePort: 443,
+      keepAwakeWhileReachable: true,
       updateChannel: "latest",
       updateChannelConfiguredByUser: true,
       hubConnectorEnabled: false,
@@ -431,6 +459,7 @@ describe("desktopSettings", () => {
       serverExposureMode: "local-only",
       tailscaleServeEnabled: true,
       tailscaleServePort: 443,
+      keepAwakeWhileReachable: true,
       updateChannel: "latest",
       updateChannelConfiguredByUser: false,
       hubConnectorEnabled: false,

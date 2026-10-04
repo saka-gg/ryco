@@ -24,6 +24,7 @@ import {
   nativeImage,
   nativeTheme,
   powerMonitor,
+  powerSaveBlocker,
   Notification,
   protocol,
   safeStorage,
@@ -65,8 +66,10 @@ import {
   setDesktopUpdateChannelPreference,
   resolveDefaultDesktopSettings,
   setDesktopHubPreference,
+  setDesktopKeepAwakePreference,
   writeDesktopSettings,
 } from "./desktopSettings.ts";
+import { DesktopKeepAwakeController, isDesktopNodeReachable } from "./desktopKeepAwake.ts";
 import {
   readClientSettings,
   readAppKeybindings,
@@ -218,6 +221,8 @@ const SET_TAILSCALE_SERVE_ENABLED_CHANNEL = "desktop:set-tailscale-serve-enabled
 const GET_HUB_LAUNCH_CONFIG_CHANNEL = "desktop:get-hub-launch-config";
 const SET_HUB_LAUNCH_CONFIG_CHANNEL = "desktop:set-hub-launch-config";
 const RESTART_APP_CHANNEL = "desktop:restart-app";
+const GET_KEEP_AWAKE_STATE_CHANNEL = "desktop:get-keep-awake-state";
+const SET_KEEP_AWAKE_ENABLED_CHANNEL = "desktop:set-keep-awake-enabled";
 const VALIDATE_HUB_ORIGIN_CHANNEL = "desktop:validate-hub-origin";
 const GET_ADVERTISED_ENDPOINTS_CHANNEL = "desktop:get-advertised-endpoints";
 const NOTIFY_TURN_COMPLETE_CHANNEL = "desktop:notify-turn-complete";
@@ -385,6 +390,7 @@ let desktopNativeE2eeHandshakeService: DesktopNativeE2eeHandshakeService | null 
 let desktopWorkspaceClient: DesktopWorkspaceClient | null = null;
 let desktopWorkspaceRelayManager: DesktopWorkspaceRelayManager | null = null;
 let disposeDesktopWorkspaceSubscription: (() => void) | null = null;
+let desktopKeepAwake: DesktopKeepAwakeController | null = null;
 // Retain live turn-complete notifications: Electron GCs Notification objects once
 // the creating scope returns, which would drop their `click`/`close` handlers.
 const activeTurnCompleteNotifications = new Set<Notification>();
@@ -1072,6 +1078,41 @@ async function applyDesktopTailscaleServeEnabled(
     desktopSettings.tailscaleServeEnabled ? "tailscale-serve-enabled" : "tailscale-serve-disabled",
   );
   return getDesktopServerExposureState();
+}
+
+function readDesktopKeepAwakeInputs() {
+  return {
+    enabled: desktopSettings.keepAwakeWhileReachable,
+    reachable: isDesktopNodeReachable({
+      hubConnectorEnabled:
+        desktopSettings.hubOrigin !== null && desktopSettings.hubConnectorEnabled,
+      effectiveServerExposureMode: desktopServerExposureMode,
+      tailscaleServeEnabled: desktopSettings.tailscaleServeEnabled,
+    }),
+  };
+}
+
+function startDesktopKeepAwake(): void {
+  if (desktopKeepAwake !== null) return;
+  desktopKeepAwake = new DesktopKeepAwakeController({
+    blocker: powerSaveBlocker,
+    power: powerMonitor,
+    read: readDesktopKeepAwakeInputs,
+    onChange: (active) => {
+      writeDesktopLogHeader(`keep-awake ${active ? "acquired" : "released"}`);
+    },
+  });
+  desktopKeepAwake.start();
+}
+
+function desktopKeepAwakeState() {
+  return (
+    desktopKeepAwake?.state() ?? {
+      ...readDesktopKeepAwakeInputs(),
+      onBattery: false,
+      active: false,
+    }
+  );
 }
 
 function relaunchDesktopApp(reason: string): void {
@@ -2842,6 +2883,23 @@ function registerIpcHandlers(): void {
     return nextState;
   });
 
+  ipcMain.removeHandler(GET_KEEP_AWAKE_STATE_CHANNEL);
+  ipcMain.handle(GET_KEEP_AWAKE_STATE_CHANNEL, () => desktopKeepAwakeState());
+
+  ipcMain.removeHandler(SET_KEEP_AWAKE_ENABLED_CHANNEL);
+  ipcMain.handle(SET_KEEP_AWAKE_ENABLED_CHANNEL, (_event, rawEnabled: unknown) => {
+    if (typeof rawEnabled !== "boolean") {
+      throw new Error("Invalid keep-awake input.");
+    }
+    const nextSettings = setDesktopKeepAwakePreference(desktopSettings, rawEnabled);
+    if (nextSettings !== desktopSettings) {
+      writeDesktopSettings(DESKTOP_SETTINGS_PATH, nextSettings);
+      desktopSettings = nextSettings;
+    }
+    // Live: holding or releasing the assertion needs no backend restart.
+    return desktopKeepAwake?.sync() ?? desktopKeepAwakeState();
+  });
+
   ipcMain.removeHandler(GET_HUB_LAUNCH_CONFIG_CHANNEL);
   ipcMain.handle(GET_HUB_LAUNCH_CONFIG_CHANNEL, () => ({
     enabled: desktopSettings.hubConnectorEnabled,
@@ -3781,6 +3839,7 @@ async function bootstrap(): Promise<void> {
 
   registerIpcHandlers();
   forwardSystemResumeToRenderers();
+  startDesktopKeepAwake();
   try {
     computerUseRuntime = new DesktopComputerUseRuntime({
       stateDir: STATE_DIR,
@@ -3833,6 +3892,7 @@ app.on(
       isQuitting = true;
       shellEnvironmentAbortController.abort();
       computerUseRuntime?.dispose();
+      desktopKeepAwake?.dispose();
       updateInstallInFlight = false;
       writeDesktopLogHeader("before-quit received");
       clearUpdatePollTimer();

@@ -32,6 +32,11 @@ export interface DesktopSettings {
   readonly hubAllowFileSecretStore: boolean;
   readonly tailscaleServeEnabled: boolean;
   readonly tailscaleServePort: number;
+  /**
+   * Hold the machine awake while it is plugged in and other devices can reach
+   * it. On by default; it has no effect until the node is reachable.
+   */
+  readonly keepAwakeWhileReachable: boolean;
   readonly updateChannel: DesktopUpdateChannel;
   readonly updateChannelConfiguredByUser: boolean;
 }
@@ -47,6 +52,7 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   hubAllowFileSecretStore: false,
   tailscaleServeEnabled: false,
   tailscaleServePort: DEFAULT_TAILSCALE_SERVE_PORT,
+  keepAwakeWhileReachable: true,
   updateChannel: "latest",
   updateChannelConfiguredByUser: false,
 };
@@ -85,6 +91,15 @@ export function setDesktopTailscaleServePreference(
         tailscaleServeEnabled: input.enabled,
         tailscaleServePort: port,
       };
+}
+
+export function setDesktopKeepAwakePreference(
+  settings: DesktopSettings,
+  enabled: boolean,
+): DesktopSettings {
+  return settings.keepAwakeWhileReachable === enabled
+    ? settings
+    : { ...settings, keepAwakeWhileReachable: enabled };
 }
 
 export function normalizeTailscaleServePort(value: unknown): number {
@@ -179,6 +194,7 @@ export function readDesktopSettings(settingsPath: string, appVersion: string): D
       readonly serverExposureMode?: unknown;
       readonly tailscaleServeEnabled?: unknown;
       readonly tailscaleServePort?: unknown;
+      readonly keepAwakeWhileReachable?: unknown;
       readonly updateChannel?: unknown;
       readonly updateChannelConfiguredByUser?: unknown;
       readonly hubConnectorEnabled?: unknown;
@@ -215,6 +231,8 @@ export function readDesktopSettings(settingsPath: string, appVersion: string): D
         parsed.serverExposureMode === "network-accessible" ? "network-accessible" : "local-only",
       tailscaleServeEnabled: parsed.tailscaleServeEnabled === true,
       tailscaleServePort: normalizeTailscaleServePort(parsed.tailscaleServePort),
+      // Absent in settings written before the preference existed: keep the default.
+      keepAwakeWhileReachable: parsed.keepAwakeWhileReachable !== false,
       updateChannel:
         updateChannelConfiguredByUser && parsedUpdateChannel !== null
           ? parsedUpdateChannel
