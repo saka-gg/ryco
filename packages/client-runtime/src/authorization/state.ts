@@ -543,7 +543,9 @@ class HostedHubController {
    *
    * The native identity ceremonies (password, email, recovery code, and the
    * completion journal that survives a restart) mint their credential through
-   * the API directly and commit it to the platform store themselves. While
+   * the API directly and commit it to the platform store themselves, and a
+   * browser recovery-code sign-in has the Hub commit it as a cookie with its
+   * answer (see {@link signInWithRecoveryCode}). While
    * they run, the access-recovery backoff and the lifecycle bindings keep
    * re-running {@link bootstrap} with the credential being replaced, and the
    * answer to such a check is about that old credential: a `401` would clear
@@ -578,6 +580,35 @@ class HostedHubController {
       });
     this.#bootstrapPromise = promise;
     return promise.then(() => committed);
+  }
+
+  /**
+   * Sign in with a single-use recovery code on the browser transport.
+   *
+   * The Hub commits the new session with its answer, so the sign-in itself is
+   * the commit an adoption fences. While the account is `unavailable` the
+   * access-recovery backoff routinely has a check of the replaced session in
+   * flight, and joining it after the sign-in let its `401` clear the new
+   * session and publish `signed-out` for a code already spent. Running the
+   * sign-in inside {@link adoptSessionCredential} aborts that check before the
+   * code is sent, so its answer publishes nothing, and access is re-checked
+   * with the new session afterwards.
+   *
+   * Rejects with the sign-in's own failure, once access has been re-checked,
+   * for the form to show.
+   */
+  async signInWithRecoveryCode(code: string): Promise<void> {
+    let signInFailure: unknown = null;
+    const signedIn = await this.adoptSessionCredential(async () => {
+      try {
+        await getHostedHubApi().signInWithRecoveryCode(code);
+        return true;
+      } catch (error) {
+        signInFailure = error;
+        return false;
+      }
+    });
+    if (!signedIn) throw signInFailure;
   }
 
   /** The access check behind {@link bootstrap} and {@link adoptSessionCredential}. */

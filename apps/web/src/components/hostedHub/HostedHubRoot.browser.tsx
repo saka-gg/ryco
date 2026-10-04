@@ -510,11 +510,9 @@ describe("HostedHubRoot accessibility and responsive flows", () => {
       .spyOn(hostedHubApi, "finishPasswordLogin")
       .mockResolvedValue(publicIdentity);
     const adopt = vi.spyOn(hostedHubController, "adoptPublicBrowserIdentity").mockResolvedValue();
-    const recoverySignIn = vi.spyOn(hostedHubApi, "signInWithRecoveryCode").mockResolvedValue({
-      account,
-      session,
-    });
-    const bootstrap = vi.spyOn(hostedHubController, "bootstrap").mockResolvedValue();
+    const recoverySignIn = vi
+      .spyOn(hostedHubController, "signInWithRecoveryCode")
+      .mockResolvedValue();
     mounted = await render(<HostedHubRoot />);
 
     await page.getByRole("button", { name: "Password, recovery code, or reset" }).click();
@@ -562,7 +560,6 @@ describe("HostedHubRoot accessibility and responsive flows", () => {
     await page.getByLabelText("Recovery code").fill("recovery-sensitive-browser-canary");
     await page.getByRole("button", { name: "Use recovery code" }).click();
     expect(recoverySignIn).toHaveBeenCalledWith("recovery-sensitive-browser-canary");
-    expect(bootstrap).toHaveBeenCalledOnce();
     await expect.element(page.getByLabelText("Recovery code")).toHaveValue("");
 
     for (const sensitive of [

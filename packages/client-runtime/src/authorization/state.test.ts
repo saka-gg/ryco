@@ -68,6 +68,7 @@ const hostedHubApi = {
   getBootstrapAvailability: vi.fn(),
   signIn: vi.fn(),
   signInWithExternalProvider: vi.fn(),
+  signInWithRecoveryCode: vi.fn(),
   signOut: vi.fn(),
   bootstrapOwner: vi.fn(),
   redeemInvitation: vi.fn(),
@@ -571,6 +572,71 @@ describe("hosted account state", () => {
     // The adoption cancelled the pending retry, so it owes the account a check.
     expect(restoreSession).toHaveBeenCalledTimes(2);
     expect(hostedHubStore.getState().accountStatus).toBe("authenticated");
+  });
+
+  it("signs in with a recovery code without joining the replaced session's check", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    let replacedSignal: AbortSignal | undefined;
+    let rejectReplaced: (error: unknown) => void = () => undefined;
+    const restoreSession = vi
+      .spyOn(hostedHubApi, "restoreSession")
+      // The page loaded during a Hub deploy.
+      .mockRejectedValueOnce(new HostedHubApiError("unavailable", 0))
+      // The access-recovery retry, sent with the session the code replaces.
+      .mockImplementationOnce((signal) => {
+        replacedSignal = signal;
+        return new Promise((_resolve, reject) => {
+          rejectReplaced = reject;
+        });
+      })
+      .mockResolvedValue(sessionResponse);
+    vi.spyOn(hostedHubApi, "getBootstrapAvailability").mockResolvedValue(false);
+    vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([]);
+    let replacedCheckEndedBeforeSignIn: boolean | undefined;
+    let finishSignIn: () => void = () => undefined;
+    const signIn = vi.spyOn(hostedHubApi, "signInWithRecoveryCode").mockImplementation(() => {
+      replacedCheckEndedBeforeSignIn = replacedSignal?.aborted;
+      return new Promise((resolve) => {
+        finishSignIn = () => resolve(sessionResponse);
+      });
+    });
+
+    await hostedHubController.bootstrap();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(restoreSession).toHaveBeenCalledTimes(2);
+    expect(hostedHubStore.getState().accountStatus).toBe("unavailable");
+
+    const signedIn = hostedHubController.signInWithRecoveryCode("recovery-code");
+    expect(signIn).toHaveBeenCalledWith("recovery-code");
+    // The Hub commits the new session, and only then answers the check of the
+    // one it replaced.
+    finishSignIn();
+    await vi.advanceTimersByTimeAsync(0);
+    rejectReplaced(new HostedHubApiError("session_invalid", 401));
+    await signedIn;
+
+    expect(replacedCheckEndedBeforeSignIn).toBe(true);
+    expect(restoreSession).toHaveBeenCalledTimes(3);
+    expect(hostedHubApi.clearSessionMaterial).not.toHaveBeenCalled();
+    expect(hostedHubStore.getState()).toMatchObject({
+      accountStatus: "authenticated",
+      account: sessionResponse.account,
+      accessRecoveryPending: false,
+    });
+  });
+
+  it("reports a refused recovery code once the session it left in place is re-checked", async () => {
+    const restoreSession = vi
+      .spyOn(hostedHubApi, "restoreSession")
+      .mockRejectedValue(new HostedHubApiError("session_invalid", 401));
+    vi.spyOn(hostedHubApi, "getBootstrapAvailability").mockResolvedValue(false);
+    const refused = new HostedHubApiError("forbidden", 403);
+    vi.spyOn(hostedHubApi, "signInWithRecoveryCode").mockRejectedValue(refused);
+
+    await expect(hostedHubController.signInWithRecoveryCode("spent-code")).rejects.toBe(refused);
+    expect(restoreSession).toHaveBeenCalledOnce();
+    expect(hostedHubStore.getState().accountStatus).toBe("signed-out");
   });
 
   it("routes a connectivity signal to the recovery the account status calls for", async () => {
