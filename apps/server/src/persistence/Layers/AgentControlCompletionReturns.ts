@@ -482,6 +482,29 @@ export const makeCompletionReturnRepository = Effect.gen(function* () {
     LIMIT 1
   `.pipe(Effect.map((rows) => rows.length > 0)),
     );
+  /**
+   * Whether a checkpoint revert on `threadId` after `sinceSequence` dropped `turnId`
+   * (rollback-correctness: `thread.reverted` names the turns it dropped). The delegating
+   * turn starts after `sinceSequence`, so every revert that could drop it is in range.
+   */
+  const turnDroppedByRevert = (input: {
+    readonly threadId: ThreadId;
+    readonly turnId: TurnId;
+    readonly sinceSequence: number;
+  }) =>
+    safe(
+      sql`
+    SELECT 1 FROM orchestration_events reverted
+    WHERE reverted.aggregate_kind = 'thread' AND reverted.stream_id = ${input.threadId}
+      AND reverted.sequence > ${input.sinceSequence}
+      AND reverted.event_type = 'thread.reverted'
+      AND EXISTS (SELECT 1 FROM json_each(
+          CASE WHEN json_valid(reverted.payload_json) THEN reverted.payload_json ELSE '{}' END,
+          '$.droppedTurnIds') dropped
+        WHERE dropped.value = ${input.turnId})
+    LIMIT 1
+  `.pipe(Effect.map((rows) => rows.length > 0)),
+    );
   const startFailed = (threadId: ThreadId, messageId: MessageId) =>
     safe(hasTurnStartFailure(sql, { threadId, messageId }));
   /** Sequence of the first `thread.turn-start-requested` event for `messageId` on the thread. */
@@ -564,6 +587,7 @@ export const makeCompletionReturnRepository = Effect.gen(function* () {
     firstEventSequence,
     worktreeArchived,
     cohortUserStop,
+    turnDroppedByRevert,
     startFailed,
     turnStartSequence,
     nonWakeTurnBetween,

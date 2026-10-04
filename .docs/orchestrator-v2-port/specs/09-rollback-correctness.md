@@ -560,7 +560,9 @@ Run focused files only, e.g. `bun run --cwd apps/server test src/orchestration/d
 
 1. **Revert to K = current** (`dropped` empty). This restores files only and makes no provider call. It works for every provider, with safety applied. It is the API-level recovery after `files-not-restored`. The UI has no affordance for it (follow-up).
 2. **Steering.** A steer adds a `role: user` message after `requestedAt`, so `hasQueuedTurnStart` blocks a revert for up to 2 minutes after a steer. This fails safe; `claude-steering` may refine `latestUserMessageAt`.
-3. **Delegated returns and queued sends during a revert.** `thread.turn.start` is rejected. The web queue holds the message for manual retry (`queue-hold-drain`). `CompletionReturnDelivery` marks the return `blocked`, and the user returns it manually. There is no typed rejection code: no client branches on it, and the prose is user-facing.
+3. **Delegated returns and queued sends during a revert.** `thread.turn.start` is rejected. The web queue holds the message for manual retry (`queue-hold-drain`). There is no typed rejection code: no client branches on it, and the prose is user-facing.
+   - **Reconciled with `delegation-returns` (integration).** `CompletionReturnDelivery` does not send a wake while the parent's revert is pending, so a revert never spends a return's rejection budget. It reads the parent's newest journal entry (`ProjectionSnapshotQuery.getLatestCheckpointRevert`) with the decider's own rule (`isCheckpointRevertEntryPending`), last, right before it claims a wake. The hold is a wait, not a delivery attempt.
+   - Once the revert ends, delivery checks the `thread.reverted` events after the delegation for the delegating turn (`record.parentTurnId` in `droppedTurnIds`). If a revert dropped it, the user rolled the request back: the return ends `blocked` and the user returns it manually, as originally specified. If the delegating turn survived, the return is delivered as usual.
 4. **Claude `rewind` marker.**
    - It is kept through failed or interrupted post-rewind turns. A restart then truncates those too, which is consistent with "until a turn completes".
    - It is cleared on the first `completed` turn. After that, the newest transcript leaf is the new branch.
@@ -614,7 +616,7 @@ Run focused files only, e.g. `bun run --cwd apps/server test src/orchestration/d
   Also `ProviderAdapter.ts` `ProviderAdapterCapabilities` (adjacent field).
 
 - **`usage-limits` (W2).** `ClaudeAdapter.ts` `handleResultMessage` (the probing hook is 3 lines at the top); `decider.ts` `thread.turn.start` (one line); `packages/contracts/src/server.ts` `ServerProvider` (adjacent optional field); possibly `ProviderRegistry.ts`.
-- **`delegation-returns` (W2).** `decider.ts` `thread.turn.start`: the pending-revert check sits before the fence at `:1008-1033`. Semantic: returns are blocked during a revert.
+- **`delegation-returns` (W2).** `decider.ts` `thread.turn.start`: the pending-revert check sits before the fence at `:1008-1033`. Semantic: returns wait out a pending revert and end `blocked` (manual return) when the revert dropped the delegating turn (§6.3).
 - **`delegation-guard-restart` (W1).** Semantic dependency: this package implements its handoff (§A5) on top of the 2-anchor hydration. No overlap in `getCommandReadModel`.
 - **`turn-finalization` (W1).** Semantic dependency: revert admission and the TOCTOU re-check rely on `latestTurn` leaving `running` for turns without checkpoints.
 - **`reactor-errors-switch` (W1).** Line overlap in `CheckpointReactor.processDomainEvent` (`:808-821`) and the removed `appendRevertFailureActivity`. Rebase onto its error-handling helpers if it introduces any.

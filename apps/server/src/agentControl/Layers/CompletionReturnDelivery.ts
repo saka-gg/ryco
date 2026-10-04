@@ -6,6 +6,7 @@
  * batched wake: a queued `thread.turn.start` on the parent that (re)creates or resumes its
  * session. Wakes need the parent to be idle, not usage-limited, not reverting and in the
  * delegation's scope; they survive the parent advancing, a reaped session and a server restart.
+ * A revert that dropped the delegating turn ends the return for a manual hand-off instead.
  */
 import {
   type AgentControlProposal,
@@ -81,6 +82,8 @@ const DETAIL = {
   usageLimited:
     "Waiting: the originating chat hit its usage limit. Delivery resumes once it is resumed.",
   reverting: "Waiting for the originating chat's checkpoint revert to finish.",
+  revertedPastDelegation:
+    "The originating chat was reverted to before this task was delegated; this result was not returned automatically. Open the child and send its result manually.",
   userStopped:
     "You stopped the delegating chat; this result was not returned automatically. Open the child.",
   cold: "Waiting for another chat's session to start.",
@@ -387,6 +390,31 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
       if (!projections.getLatestCheckpointRevert) return false;
       const latest = yield* projections.getLatestCheckpointRevert(parentThreadId);
       return latest !== null && isCheckpointRevertEntryPending(latest, ctx.nowMs);
+    });
+
+  /**
+   * rollback-correctness §6.3: a revert that dropped the delegating turn rolled the request
+   * back, so its return never wakes the parent; the row ends `blocked` and the user returns
+   * it manually. A revert that kept the delegating turn only delays delivery (the
+   * `parentReverting` hold). Decided per row: a batch may span delegating turns.
+   */
+  const withoutRevertedDelegations = <R extends CompletionReturnRecord>(
+    parentThreadId: ThreadId,
+    rows: ReadonlyArray<R>,
+    now: string,
+  ) =>
+    Effect.gen(function* () {
+      const kept: R[] = [];
+      for (const row of rows) {
+        const dropped = yield* repository.turnDroppedByRevert({
+          threadId: parentThreadId,
+          turnId: row.parentTurnId,
+          sinceSequence: row.sinceSequence ?? 0,
+        });
+        if (dropped) yield* finish(row, "blocked", DETAIL.revertedPastDelegation, now);
+        else kept.push(row);
+      }
+      return kept;
     });
 
   const capture = (
@@ -840,8 +868,10 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
       // Last before the claim: a journal read per wake, never per held scan.
       if (yield* parentReverting(parentThreadId, ctx))
         return yield* holdAll(remaining, now, DETAIL.reverting);
+      const kept = yield* withoutRevertedDelegations(parentThreadId, remaining, now);
+      if (kept.length === 0) return;
 
-      const members = selectWakeBatch(remaining);
+      const members = selectWakeBatch(kept);
       const anchor = members
         .map((row) => row.childThreadId)
         .reduce((min, id) => (compareCodeUnits(id, min) < 0 ? id : min));

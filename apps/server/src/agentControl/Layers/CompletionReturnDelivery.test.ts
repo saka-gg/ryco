@@ -971,6 +971,50 @@ it.effect(
     }).pipe(Effect.provide(layer)),
 );
 
+for (const observed of [true, false]) {
+  for (const droppedTurn of ["parent-turn", "later-turn"]) {
+    const outcome = droppedTurn === "parent-turn" ? "blocks for a manual return" : "delivers";
+    it.effect(
+      `${outcome} after a revert dropped ${droppedTurn}${observed ? " (hold observed)" : ""}`,
+      () =>
+        Effect.gen(function* () {
+          const h = yield* setup();
+          yield* h.appendEvent({
+            stream: "parent",
+            type: "thread.turn-start-requested",
+            commandId: "web:send",
+            payload: { messageId: "parent-initial" },
+          });
+          yield* h.ack();
+          if (observed) {
+            h.setPendingRevert("parent", "rolling-back", at(0));
+            yield* h.tick(0);
+            assertHeldWithoutAttempts(yield* h.read(), "revert");
+          }
+          yield* h.appendEvent({
+            stream: "parent",
+            type: "thread.reverted",
+            commandId: "server:checkpoint-revert",
+            actor: "server",
+            payload: { turnCount: 0, droppedTurnIds: [droppedTurn] },
+          });
+          if (observed) h.setPendingRevert("parent", "completed", at(2));
+          yield* h.tick(3);
+          const record = yield* h.read();
+          if (droppedTurn === "parent-turn") {
+            // rollback-correctness §6.3: the user rolled the request back; never wake it.
+            assert.equal(record.status, "blocked");
+            assert.include(record.detail, "reverted to before");
+            assert.equal(h.sent.length, 0);
+          } else {
+            assert.equal(record.status, "delivered");
+            assert.equal(h.sent.length, 1);
+          }
+        }).pipe(Effect.provide(layer)),
+    );
+  }
+}
+
 it.effect(
   "reads only the parent's own revert journal, and only right before it claims a wake",
   () =>
