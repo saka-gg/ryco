@@ -123,6 +123,7 @@ export interface SessionCredentialServiceShape {
   >;
   readonly streamChanges: Stream.Stream<SessionCredentialChange>;
   readonly revoke: (sessionId: AuthSessionId) => Effect.Effect<boolean, SessionCredentialError>;
+  /** Revokes every pairing but this session's own; returns how many pairings it revoked. */
   readonly revokeAllExcept: (
     sessionId: AuthSessionId,
   ) => Effect.Effect<number, SessionCredentialError>;

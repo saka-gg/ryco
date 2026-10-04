@@ -688,10 +688,11 @@ export const makeSessionCredentialService = Effect.gen(function* () {
   const revokeAllExcept: SessionCredentialServiceShape["revokeAllExcept"] = (sessionId) =>
     Effect.gen(function* () {
       const revokedAt = yield* DateTime.now;
-      const revokedSessionIds = yield* authSessions.revokeAllExcept({
+      const revoked = yield* authSessions.revokeAllExcept({
         currentSessionId: sessionId,
         revokedAt,
       });
+      const revokedSessionIds = revoked.map((session) => session.sessionId);
       if (revokedSessionIds.length > 0) {
         yield* Ref.update(connectedSessionsRef, (current) => {
           const next = new Map(current);
@@ -709,7 +710,9 @@ export const makeSessionCredentialService = Effect.gen(function* () {
           },
         );
       }
-      return revokedSessionIds.length;
+      // Clients revoked, not sessions: each pairing counts once, however many
+      // times it rotated.
+      return new Set(revoked.map((session) => session.chainId)).size;
     }).pipe(Effect.mapError(toSessionCredentialError("Failed to revoke other sessions.")));
 
   return {

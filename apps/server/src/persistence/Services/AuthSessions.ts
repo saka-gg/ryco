@@ -103,6 +103,12 @@ export const SetAuthSessionLastConnectedAtInput = Schema.Struct({
 });
 export type SetAuthSessionLastConnectedAtInput = typeof SetAuthSessionLastConnectedAtInput.Type;
 
+/** A session a revocation ended, and the pairing (rotation chain) it belonged to. */
+export interface RevokedAuthSession {
+  readonly sessionId: AuthSessionId;
+  readonly chainId: AuthSessionId;
+}
+
 export interface AuthSessionRepositoryShape {
   readonly create: (
     input: CreateAuthSessionInput,
@@ -117,10 +123,10 @@ export interface AuthSessionRepositoryShape {
   readonly revoke: (
     input: RevokeAuthSessionInput,
   ) => Effect.Effect<ReadonlyArray<AuthSessionId>, AuthSessionRepositoryError>;
-  /** Revokes every session outside the current session's rotation chain. */
+  /** Revokes every session outside the current session's rotation chain; returns each one revoked. */
   readonly revokeAllExcept: (
     input: RevokeOtherAuthSessionsInput,
-  ) => Effect.Effect<ReadonlyArray<AuthSessionId>, AuthSessionRepositoryError>;
+  ) => Effect.Effect<ReadonlyArray<RevokedAuthSession>, AuthSessionRepositoryError>;
   /** The unused successor a rotation already issued for this session, if any. */
   readonly findPendingSuccessor: (
     input: FindPendingAuthSessionSuccessorInput,

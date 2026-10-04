@@ -367,7 +367,8 @@ it.layer(NodeServices.layer)("SessionCredentialServiceLive", (it) => {
       const phoneRotated = yield* sessions.rotate(phone.sessionId);
       yield* sessions.verify(phoneRotated.token);
 
-      expect(yield* sessions.revokeAllExcept(ownerRotated.sessionId)).toBe(2);
+      // One other pairing, however many times it renewed.
+      expect(yield* sessions.revokeAllExcept(ownerRotated.sessionId)).toBe(1);
       yield* sessions.verify(ownerRotated.token);
       const phoneError = yield* Effect.flip(sessions.verify(phoneRotated.token));
       expect(phoneError.message).toContain("revoked");
