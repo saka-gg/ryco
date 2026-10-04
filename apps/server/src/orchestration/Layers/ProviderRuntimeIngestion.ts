@@ -17,6 +17,7 @@ import {
   DEFAULT_AGENT_TOKEN_MODE,
   EventId,
   MessageId,
+  type OrchestrationCommand,
   type OrchestrationEvent,
   type OrchestrationMessage,
   type OrchestrationProposedPlanId,
@@ -64,6 +65,11 @@ import {
   type ReasoningSegment,
 } from "../reasoningActivity.ts";
 import { TURN_FINALIZATION_REASON, runtimeTerminalTurnState } from "../turnFinalization.ts";
+import {
+  usageLimitIdForTurn,
+  usageLimitRecordCommandId,
+  usageLimitResetFillCommandId,
+} from "@ryco/shared/usageLimit";
 
 const providerTurnKey = (threadId: ThreadId, turnId: TurnId) => `${threadId}:${turnId}`;
 const providerTaskKey = (threadId: ThreadId, taskId: string) => `${threadId}:${taskId}`;
@@ -280,6 +286,11 @@ function maxCheckpointTurnCount(
 
 function truncateDetail(value: string, limit = 180): string {
   return value.length > limit ? `${value.slice(0, limit - 3)}...` : value;
+}
+
+/** The recorded limit message is bounded by the contract (1,000 characters). */
+function truncateUsageLimitMessage(value: string): string {
+  return value.length > 1_000 ? `${value.slice(0, 997)}...` : value;
 }
 
 function truncateActivityText(value: string, limit = 24_000): string {
@@ -603,16 +614,23 @@ export function runtimeEventToActivities(
     }
 
     case "runtime.error": {
+      const usageLimit = event.payload.class === "usage_limit";
       return [
         {
           id: event.eventId,
           createdAt: event.createdAt,
           tone: "error",
           kind: "runtime.error",
-          summary: "Runtime error",
-          payload: {
-            message: truncateDetail(event.payload.message),
-          },
+          summary: usageLimit ? "Usage limit reached" : "Runtime error",
+          payload: usageLimit
+            ? {
+                message: truncateDetail(event.payload.message),
+                class: "usage_limit",
+                resetAt: event.payload.resetAt ?? null,
+              }
+            : {
+                message: truncateDetail(event.payload.message),
+              },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
         },
@@ -2224,6 +2242,22 @@ const make = Effect.gen(function* () {
       ),
     );
 
+  const dispatchUsageLimitRecord = (
+    command: Omit<Extract<OrchestrationCommand, { type: "thread.usage-limit.record" }>, "type">,
+  ) =>
+    orchestrationEngine.dispatch({ type: "thread.usage-limit.record", ...command }).pipe(
+      Effect.asVoid,
+      Effect.catchCause((cause) =>
+        Cause.hasInterruptsOnly(cause)
+          ? Effect.failCause(cause)
+          : Effect.logDebug("provider runtime ingestion skipped usage-limit record", {
+              threadId: command.threadId,
+              limitId: command.limitId,
+              cause: Cause.pretty(cause),
+            }),
+      ),
+    );
+
   const processRuntimeEvent = (event: ProviderRuntimeEvent) =>
     Effect.gen(function* () {
       if (
@@ -2922,6 +2956,9 @@ const make = Effect.gen(function* () {
           ? true
           : activeTurnId === null || eventTurnId === undefined || sameId(activeTurnId, eventTurnId);
 
+        // A usage limit ends its turn: release it here with the limit as the reason, so
+        // the turn is finalized even when no terminal turn event follows.
+        const usageLimitTurnId = event.payload.class === "usage_limit" ? eventTurnId : undefined;
         if (shouldApplyRuntimeError) {
           yield* orchestrationEngine.dispatch({
             type: "thread.session.set",
@@ -2939,20 +2976,74 @@ const make = Effect.gen(function* () {
                 : {}),
               runtimeMode: thread.session?.runtimeMode ?? "full-access",
               tokenMode: thread.session?.tokenMode ?? DEFAULT_AGENT_TOKEN_MODE,
-              activeTurnId: eventTurnId ?? null,
+              activeTurnId: usageLimitTurnId !== undefined ? null : (eventTurnId ?? null),
               lastError: runtimeErrorMessage,
               updatedAt: now,
             },
             // Turn-less: it only applies when this session-set actually releases a turn.
-            turnOutcome: {
-              state: "error",
-              reason: TURN_FINALIZATION_REASON.providerRuntimeError,
-              completedAt: now,
-            },
+            turnOutcome:
+              usageLimitTurnId !== undefined
+                ? {
+                    turnId: usageLimitTurnId,
+                    state: "error",
+                    reason: TURN_FINALIZATION_REASON.usageLimit,
+                    completedAt: now,
+                  }
+                : {
+                    state: "error",
+                    reason: TURN_FINALIZATION_REASON.providerRuntimeError,
+                    completedAt: now,
+                  },
             createdAt: now,
           });
         }
         yield* clearSubagentMessageBuffersForThread(thread.id);
+        // After the session-set and the buffer clear: a failed or duplicate record must
+        // never skip them. Duplicates dedupe on the deterministic command id.
+        if (shouldApplyRuntimeError && usageLimitTurnId !== undefined) {
+          const instanceId = event.providerInstanceId ?? thread.session?.providerInstanceId;
+          const limitId = usageLimitIdForTurn(thread.id, usageLimitTurnId);
+          if (instanceId !== undefined && thread.usageLimit?.limitId !== limitId) {
+            yield* dispatchUsageLimitRecord({
+              commandId: usageLimitRecordCommandId(limitId),
+              threadId: thread.id,
+              limitId,
+              provider: event.provider,
+              providerInstanceId: instanceId,
+              turnId: usageLimitTurnId,
+              message: truncateUsageLimitMessage(runtimeErrorMessage),
+              resetAt: event.payload.resetAt ?? null,
+              createdAt: now,
+            });
+          }
+        }
+      }
+
+      // A rate-limit update can name the reset of a limit recorded without one.
+      if (event.type === "account.rate-limits.updated") {
+        const state = event.payload.usageLimitState;
+        const limit = thread.usageLimit ?? null;
+        const instanceId = event.providerInstanceId ?? thread.session?.providerInstanceId;
+        if (
+          state?.exhausted === true &&
+          state.resetAt !== null &&
+          limit !== null &&
+          limit.resetAt === null &&
+          limit.providerInstanceId === instanceId &&
+          Date.parse(state.resetAt) > Date.parse(limit.limitedAt)
+        ) {
+          yield* dispatchUsageLimitRecord({
+            commandId: usageLimitResetFillCommandId(limit.limitId),
+            threadId: thread.id,
+            limitId: limit.limitId,
+            provider: limit.provider,
+            providerInstanceId: limit.providerInstanceId,
+            turnId: limit.turnId,
+            message: limit.message,
+            resetAt: state.resetAt,
+            createdAt: now,
+          });
+        }
       }
 
       if (event.type === "session.state.changed" && event.payload.state === "error") {
