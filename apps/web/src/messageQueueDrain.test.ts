@@ -56,6 +56,8 @@ import { useSavedEnvironmentRuntimeStore } from "./environments/runtime";
 import { hostedWebConnectionScopes } from "./hostedHub/hostedConnectionScopes";
 import { useHostedHubStore } from "./hostedHub/state";
 import {
+  createForegroundQueueSender,
+  hasOutstandingQueuedDispatch,
   inspectMessageQueueDrain,
   readWebQueueEnvironment,
   registerForegroundQueueSender,
@@ -229,6 +231,73 @@ describe("web queue senders", () => {
     expect(resolveWebQueueSender(KEY, { started: true } as never)?.kind).toBe("background");
     expect(resolveWebQueueSender(KEY, { started: false } as never)).toBeNull();
     expect(resolveWebQueueSender(KEY, null)).toBeNull();
+  });
+
+  it("binds a foreground sender to its thread key", async () => {
+    const dispatch = vi.fn(async () => true);
+    let target: { threadKey: string | null; busy: boolean } = { threadKey: KEY, busy: false };
+    const sender = createForegroundQueueSender(KEY, () => ({
+      threadKey: target.threadKey,
+      isBusy: () => target.busy,
+      dispatch,
+    }));
+    const hooks = { onBeforeTurnStart: vi.fn() };
+    // The ChatView moved to another thread before its registration was swapped.
+    target = { threadKey: `${ENV}:other`, busy: false };
+    expect(await sender.send(queued("q-1"), hooks)).toEqual({ kind: "deferred" });
+    target = { threadKey: KEY, busy: true };
+    expect(await sender.send(queued("q-1"), hooks)).toEqual({ kind: "deferred" });
+    expect(dispatch).not.toHaveBeenCalled();
+    target = { threadKey: KEY, busy: false };
+    expect(await sender.send(queued("q-1"), hooks)).toEqual({ kind: "accepted" });
+    expect(dispatch).toHaveBeenCalledWith(queued("q-1"), hooks);
+    dispatch.mockResolvedValueOnce(false);
+    expect(await sender.send(queued("q-2"), hooks)).toEqual({ kind: "failed" });
+    expect(await createForegroundQueueSender(KEY, () => null).send(queued("q-1"), hooks)).toEqual({
+      kind: "deferred",
+    });
+  });
+
+  it("reports a background send as outstanding until its turn starts", async () => {
+    recordWsConnectionOpened({ environmentId: ENV });
+    releaseDrain = retainMessageQueueDrain();
+    const detail = {
+      ...shellSnapshot(true).threads[0],
+      messages: [],
+      activities: [],
+      proposedPlans: [],
+      checkpoints: [],
+      deletedAt: null,
+    };
+    useStore.getState().syncServerThreadDetail(detail as never, ENV);
+    let resolveSend!: (result: { kind: "accepted" }) => void;
+    harness.background.mockImplementation(
+      (_key: string, _entry: unknown, hooks: { onBeforeTurnStart: () => void }) =>
+        new Promise((resolve) => {
+          hooks.onBeforeTurnStart();
+          resolveSend = resolve;
+        }),
+    );
+    expect(hasOutstandingQueuedDispatch(KEY)).toBe(false);
+    useMessageQueueStore.getState().enqueue(KEY, queued("q-1"));
+    useMessageQueueStore.getState().enqueue(KEY, queued("q-2"));
+    await flush();
+    expect(inspectMessageQueueDrain(KEY).inFlightMessageId).toBe("q-1");
+    expect(hasOutstandingQueuedDispatch(KEY)).toBe(true);
+    resolveSend({ kind: "accepted" });
+    await flush();
+    // Accepted, but q-1's turn has not started: still outstanding.
+    expect(inspectMessageQueueDrain(KEY).pendingDispatch?.messageId).toBe("q-1");
+    expect(hasOutstandingQueuedDispatch(KEY)).toBe(true);
+    useStore.getState().syncServerThreadDetail(
+      {
+        ...detail,
+        session: { ...detail.session, status: "running", activeTurnId: TurnId.make("turn-2") },
+      } as never,
+      ENV,
+    );
+    await flush();
+    expect(hasOutstandingQueuedDispatch(KEY)).toBe(false);
   });
 
   it("drains a started off-screen thread through the background sender", async () => {

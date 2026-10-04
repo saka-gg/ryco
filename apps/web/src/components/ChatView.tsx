@@ -66,7 +66,15 @@ import { truncate } from "@ryco/shared/String";
 import { Debouncer, useDebouncedValue } from "@tanstack/react-pacer";
 import { useQueryClient } from "~/rpc/queryClient";
 import { formatSourceControlContextsForAgent } from "@ryco/shared/sourceControlContextFormatter";
-import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useDeferredValue,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { useShallow } from "zustand/react/shallow";
 import { useGitStatus } from "~/lib/gitStatusState";
@@ -244,10 +252,12 @@ import {
 } from "../hooks/executeChatSendTurn";
 import { useMessageQueueStore } from "../messageQueueStore";
 import {
+  createForegroundQueueSender,
+  hasOutstandingQueuedDispatch,
   resumeMessageQueue,
   retryQueuedMessage,
   useForegroundQueueSender,
-  type WebQueueSender,
+  type ForegroundQueueTarget,
 } from "../messageQueueDrain";
 import type { QueuedMessage } from "../messageQueue.logic";
 import { deriveComposerFileUploadSendBlock } from "~/composerFileUpload";
@@ -3776,8 +3786,10 @@ export default function ChatView(props: ChatViewProps) {
     }
 
     // A turn is already running: queue this message instead of sending it. Queued
-    // messages auto-dispatch, in order, once the thread reaches quiescence.
-    if (phase === "running" && activeThreadKey) {
+    // messages auto-dispatch, in order, once the thread reaches quiescence. A
+    // queued send whose turn has not started yet (an off-screen background send
+    // included) counts too: a direct send would race it into the bind window.
+    if (activeThreadKey && (phase === "running" || hasOutstandingQueuedDispatch(activeThreadKey))) {
       if (editorSendPreparationRef.current) return;
       editorSendPreparationRef.current = true;
       const composerChangedDuringPreparation = captureComposerContentGuard();
@@ -3825,34 +3837,34 @@ export default function ChatView(props: ChatViewProps) {
   // thread's foreground sender, with optimistic UI, the Claude review dialog,
   // worktree and draft promotion. Busy reads are live refs: a "not now" is
   // `deferred` (the claim is released and retried), never a failed head.
-  const queueRenderBusyRef = useRef(false);
-  queueRenderBusyRef.current =
+  // The sender is bound to its thread key and reads only what the last
+  // committed render showed (written in a layout effect, never during render),
+  // so a ChatView that moves to another thread defers the old key's entries
+  // until its registration is swapped instead of dispatching them here.
+  const queueRenderBusy =
     isSendBusy ||
     isConnecting ||
     isRevertingCheckpoint ||
     hostedDraftTarget.pending !== null ||
     !dispatchCapability.allowed ||
     activeEnvironmentUnavailable;
-  const foregroundQueueSender = useMemo<WebQueueSender>(
-    () => ({
-      send: async (entry, hooks) => {
-        if (
-          queueRenderBusyRef.current ||
-          sendInFlightRef.current ||
-          editorSendPreparationRef.current
-        ) {
-          return { kind: "deferred" };
-        }
-        const accepted = await dispatchComposerSnapshotRef.current(
-          entry.composer,
-          entry.settings,
-          MessageId.make(entry.id),
-          { onBeforeTurnStart: hooks.onBeforeTurnStart },
-        );
-        return accepted ? { kind: "accepted" } : { kind: "failed" };
-      },
-    }),
-    [],
+  const foregroundQueueTargetRef = useRef<ForegroundQueueTarget | null>(null);
+  useLayoutEffect(() => {
+    foregroundQueueTargetRef.current = {
+      threadKey: activeThreadKey,
+      isBusy: () => queueRenderBusy || sendInFlightRef.current || editorSendPreparationRef.current,
+      dispatch: (entry, hooks) =>
+        dispatchComposerSnapshot(entry.composer, entry.settings, MessageId.make(entry.id), {
+          onBeforeTurnStart: hooks.onBeforeTurnStart,
+        }),
+    };
+  });
+  const foregroundQueueSender = useMemo(
+    () =>
+      activeThreadKey
+        ? createForegroundQueueSender(activeThreadKey, () => foregroundQueueTargetRef.current)
+        : null,
+    [activeThreadKey],
   );
   useForegroundQueueSender(activeThreadKey, foregroundQueueSender);
 

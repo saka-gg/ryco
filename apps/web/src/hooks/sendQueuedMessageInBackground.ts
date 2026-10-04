@@ -4,11 +4,13 @@ import {
   selectionAllowedAtSendBoundary,
 } from "@ryco/client-runtime/state/composer";
 import type { QueueSendHooks, QueueSendResult } from "@ryco/client-runtime/state/message-queue";
-import { MessageId } from "@ryco/contracts";
+import { MessageId, type EnvironmentId } from "@ryco/contracts";
 import { projectScriptCwd } from "@ryco/shared/projectScripts";
 import { rejectRetiredProjectMemory } from "@ryco/shared/retiredFeatures";
 
+import { resolveChatSendWorktreePlan } from "../components/ChatView.logic";
 import { readEnvironmentApi } from "../environmentApi";
+import { refreshGitStatus } from "../lib/gitStatusState";
 import { readWebQueueEnvironment } from "../messageQueueEnvironment";
 import type { WebQueuedMessage } from "../messageQueueStore";
 import { defaultQueryClient } from "../rpc/queryClient";
@@ -21,12 +23,48 @@ import {
   persistThreadSettingsForNextTurn,
   resolveEnforceBuildMode,
 } from "./chatSendShared";
-import { executeChatSendTurn } from "./executeChatSendTurn";
+import { executeChatSendTurn, type SendTurnWorktreePlan } from "./executeChatSendTurn";
 
 export const QUEUED_SELECTION_NEEDS_HANDOFF_MESSAGE =
   "The queued provider or model needs a context handoff. Open the conversation to send it.";
 
 const noop = () => {};
+
+const NO_WORKTREE_PLAN: SendTurnWorktreePlan = {
+  shouldMaterializeLegacyBranchWorktree: false,
+  baseBranchForWorktree: null,
+  shouldCreateWorktree: false,
+};
+
+/**
+ * The same worktree plan the foreground ChatView computes for a started thread.
+ * A legacy branch thread (a branch, no worktree) whose branch is not the one
+ * checked out in the project root gets that branch's worktree materialized
+ * first, so the agent never edits the root checkout on the wrong branch. null
+ * when that check needs a git status that cannot be read now.
+ */
+export async function resolveBackgroundWorktreePlan(input: {
+  readonly environmentId: EnvironmentId;
+  readonly projectCwd: string;
+  readonly branch: string | null;
+  readonly worktreePath: string | null;
+}): Promise<SendTurnWorktreePlan | null> {
+  if (input.branch === null || input.worktreePath !== null) return NO_WORKTREE_PLAN;
+  const status = await refreshGitStatus({
+    environmentId: input.environmentId,
+    cwd: input.projectCwd,
+  }).catch(() => null);
+  if (status === null) return null;
+  return resolveChatSendWorktreePlan({
+    isServerThread: true,
+    isFirstMessage: false,
+    threadWorktreePath: null,
+    activeThreadBranch: input.branch,
+    currentGitRefName: status.refName ?? null,
+    // Only a first message reads the env mode.
+    sendEnvMode: "local",
+  });
+}
 
 /**
  * Headless sender for a queued message on a started server thread whose
@@ -81,6 +119,15 @@ export async function sendQueuedMessageInBackground(
     setThreadError(QUEUED_SELECTION_NEEDS_HANDOFF_MESSAGE);
     return { kind: "failed" };
   }
+  const worktree = await resolveBackgroundWorktreePlan({
+    environmentId: ref.environmentId,
+    projectCwd: project.cwd,
+    branch: thread.branch,
+    worktreePath: thread.worktreePath,
+  });
+  // The checkout's branch is unknown right now: sending could run the agent on
+  // whatever branch the project root has checked out, so try again shortly.
+  if (worktree === null) return { kind: "deferred" };
   const composer = await attachDevicePromptScreenshot({
     api,
     threadId: thread.id,
@@ -109,11 +156,7 @@ export async function sendQueuedMessageInBackground(
       createdAt: thread.createdAt,
       projectId: thread.projectId,
     },
-    worktree: {
-      shouldMaterializeLegacyBranchWorktree: false,
-      baseBranchForWorktree: null,
-      shouldCreateWorktree: false,
-    },
+    worktree,
     settings: buildMode.settings,
     project: { projectId: project.id, projectCwd: project.cwd },
     scroll: { scrollToEndBeforeOptimistic: async () => {}, scrollToEndAfterOptimistic: noop },

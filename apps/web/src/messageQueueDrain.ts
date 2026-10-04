@@ -5,6 +5,7 @@ import {
   type MessageQueueDrainCoordinator,
   type MessageQueueDrainPlatform,
   type MessageQueueSender,
+  type QueueSendHooks,
   type QueueThreadView,
 } from "@ryco/client-runtime/state/message-queue";
 import type { EnvironmentId, ThreadId } from "@ryco/contracts";
@@ -105,6 +106,17 @@ export function inspectMessageQueueDrain(threadKey: string) {
 }
 
 /**
+ * A queued send for this thread is in flight, or accepted while its turn has
+ * not started. A background send is invisible to the composer's busy state, so
+ * a direct send now could land in that turn's startSession bind window and be
+ * orphaned; the composer queues it behind the outstanding send instead.
+ */
+export function hasOutstandingQueuedDispatch(threadKey: string): boolean {
+  const { inFlightMessageId, pendingDispatch } = getCoordinator().inspect(threadKey);
+  return inFlightMessageId !== null || pendingDispatch !== null;
+}
+
+/**
  * Records the explicit Stop hold before the interrupt is dispatched. `undo`
  * removes only causes this call added, without acknowledging them.
  */
@@ -144,14 +156,47 @@ export function registerForegroundQueueSender(
   };
 }
 
+/** What a mounted ChatView last committed: the thread it shows and how it sends. */
+export interface ForegroundQueueTarget {
+  readonly threadKey: string | null;
+  /** The composer cannot send right now; the send is retried shortly. */
+  readonly isBusy: () => boolean;
+  readonly dispatch: (entry: WebQueuedMessage, hooks: QueueSendHooks) => Promise<boolean>;
+}
+
+/**
+ * A foreground sender bound to one thread key. A ChatView instance can move to
+ * another thread (a reused draft route) while this sender is still registered
+ * for the old key; it defers unless the committed target still shows its key,
+ * so an entry is never dispatched through another thread's closures.
+ */
+export function createForegroundQueueSender(
+  threadKey: string,
+  readTarget: () => ForegroundQueueTarget | null,
+): WebQueueSender {
+  return {
+    send: async (entry, hooks) => {
+      const target = readTarget();
+      if (!target || target.threadKey !== threadKey || target.isBusy()) {
+        return { kind: "deferred" };
+      }
+      return (await target.dispatch(entry, hooks)) ? { kind: "accepted" } : { kind: "failed" };
+    },
+  };
+}
+
 /**
  * Registers the mounted ChatView as its thread's sender and retains the drain,
  * so a ChatView mounted on its own (browser suites) still drains.
  */
-export function useForegroundQueueSender(threadKey: string | null, sender: WebQueueSender): void {
+export function useForegroundQueueSender(
+  threadKey: string | null,
+  sender: WebQueueSender | null,
+): void {
   useEffect(() => {
     const release = retainMessageQueueDrain();
-    const unregister = threadKey ? registerForegroundQueueSender(threadKey, sender) : null;
+    const unregister =
+      threadKey && sender ? registerForegroundQueueSender(threadKey, sender) : null;
     return () => {
       unregister?.();
       release();

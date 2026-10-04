@@ -14,6 +14,7 @@ import type { ExecuteChatSendTurnInput } from "./executeChatSendTurn";
 const harness = vi.hoisted(() => ({
   mutationReady: true,
   execute: vi.fn(),
+  gitStatus: vi.fn(),
 }));
 
 vi.mock("./executeChatSendTurn", () => ({
@@ -24,6 +25,9 @@ vi.mock("../environmentApi", () => ({
 }));
 vi.mock("../messageQueueEnvironment", () => ({
   readWebQueueEnvironment: () => ({ shellLive: true, mutationReady: harness.mutationReady }),
+}));
+vi.mock("../lib/gitStatusState", () => ({
+  refreshGitStatus: (target: unknown) => harness.gitStatus(target),
 }));
 
 import { toastManager } from "../components/ui/toast";
@@ -40,7 +44,7 @@ const THREAD = ThreadId.make("thread-background");
 const KEY = `${ENV}:${THREAD}`;
 const AT = "2026-10-01T10:00:00.000Z";
 
-function seedThread(): void {
+function seedThread(branch: string | null = null): void {
   useStore.setState({ activeEnvironmentId: null, environmentStateById: {} });
   useStore.getState().syncServerShellSnapshot(
     {
@@ -64,7 +68,7 @@ function seedThread(): void {
           modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" },
           runtimeMode: "full-access",
           interactionMode: "default",
-          branch: null,
+          branch,
           worktreePath: null,
           latestTurn: null,
           createdAt: AT,
@@ -107,6 +111,8 @@ const lastInput = () => harness.execute.mock.calls.at(-1)?.[0] as ExecuteChatSen
 
 beforeEach(() => {
   harness.mutationReady = true;
+  harness.gitStatus.mockReset();
+  harness.gitStatus.mockResolvedValue({ isRepo: true, refName: "main" });
   harness.execute.mockReset();
   harness.execute.mockImplementation(async (input: ExecuteChatSendTurnInput) => {
     input.onBeforeTurnStart?.();
@@ -195,5 +201,41 @@ describe("sendQueuedMessageInBackground", () => {
       }),
     ).toEqual({ kind: "deferred" });
     expect(harness.execute).not.toHaveBeenCalled();
+  });
+
+  it("materializes a legacy branch thread's worktree when the root has another branch checked out", async () => {
+    seedThread("feature/queued");
+    harness.gitStatus.mockResolvedValue({ isRepo: true, refName: "main" });
+    await sendQueuedMessageInBackground(KEY, queued(), { onBeforeTurnStart: vi.fn() });
+    expect(harness.gitStatus).toHaveBeenCalledWith({ environmentId: ENV, cwd: "/repo" });
+    expect(lastInput().worktree).toEqual({
+      shouldMaterializeLegacyBranchWorktree: true,
+      baseBranchForWorktree: "feature/queued",
+      shouldCreateWorktree: true,
+    });
+  });
+
+  it("sends a branch thread in place when its branch is the one checked out", async () => {
+    seedThread("main");
+    await sendQueuedMessageInBackground(KEY, queued(), { onBeforeTurnStart: vi.fn() });
+    expect(lastInput().worktree).toEqual({
+      shouldMaterializeLegacyBranchWorktree: false,
+      baseBranchForWorktree: null,
+      shouldCreateWorktree: false,
+    });
+  });
+
+  it("defers a branch thread while the checked-out branch cannot be read", async () => {
+    seedThread("feature/queued");
+    harness.gitStatus.mockRejectedValue(new Error("socket closed"));
+    expect(
+      await sendQueuedMessageInBackground(KEY, queued(), { onBeforeTurnStart: vi.fn() }),
+    ).toEqual({ kind: "deferred" });
+    expect(harness.execute).not.toHaveBeenCalled();
+  });
+
+  it("never reads git status for a thread without a branch", async () => {
+    await sendQueuedMessageInBackground(KEY, queued(), { onBeforeTurnStart: vi.fn() });
+    expect(harness.gitStatus).not.toHaveBeenCalled();
   });
 });
