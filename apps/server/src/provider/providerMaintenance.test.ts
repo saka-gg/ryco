@@ -14,6 +14,7 @@ import {
   makeProviderMaintenanceCapabilities,
   makeStaticProviderMaintenanceResolver,
   normalizeCommandPath,
+  resolveLatestProviderVersion,
   resolveProviderMaintenanceCapabilitiesEffect,
 } from "./providerMaintenance.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
@@ -529,4 +530,41 @@ describe("providerMaintenance", () => {
       update: null,
     });
   });
+
+  it.effect("re-fetches a fresh latest version despite a warm cache and refreshes the cache", () =>
+    Effect.gen(function* () {
+      clearLatestProviderVersionCacheForTests();
+      const capabilities = makeProviderMaintenanceCapabilities({
+        provider: driver("packageTool"),
+        packageName: "@example/fresh-latest-tool",
+        updateExecutable: "npm",
+        updateArgs: ["install", "-g", "@example/fresh-latest-tool@latest"],
+        updateLockKey: "npm-global",
+      });
+      let registryVersion = "1.0.0";
+      let requests = 0;
+      const httpClient = HttpClient.make((request) => {
+        requests += 1;
+        return Effect.succeed(
+          HttpClientResponse.fromWeb(request, Response.json({ version: registryVersion })),
+        );
+      });
+      const resolve = (options?: { readonly fresh?: boolean }) =>
+        resolveLatestProviderVersion(capabilities, options).pipe(
+          Effect.provideService(HttpClient.HttpClient, httpClient),
+        );
+
+      expect(yield* resolve()).toBe("1.0.0");
+      registryVersion = "1.1.0";
+      expect(yield* resolve()).toBe("1.0.0");
+      expect(requests).toBe(1);
+
+      expect(yield* resolve({ fresh: true })).toBe("1.1.0");
+      expect(requests).toBe(2);
+
+      expect(yield* resolve()).toBe("1.1.0");
+      expect(requests).toBe(2);
+      clearLatestProviderVersionCacheForTests();
+    }),
+  );
 });

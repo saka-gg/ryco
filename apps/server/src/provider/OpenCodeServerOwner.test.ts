@@ -5,15 +5,26 @@ import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 import { Duration, Effect, Exit, Layer, Scope } from "effect";
 import { TestClock } from "effect/testing";
 
-import { OpenCodeRuntime, type OpenCodeRuntimeShape } from "./opencodeRuntime.ts";
+import {
+  OpenCodeRuntime,
+  OpenCodeRuntimeError,
+  type OpenCodeRuntimeShape,
+} from "./opencodeRuntime.ts";
 import { makeOpenCodeServerOwner } from "./OpenCodeServerOwner.ts";
 
-const state = { starts: 0, closes: 0 };
+const state = { starts: 0, closes: 0, refuseNextStart: false };
 
 const runtime: OpenCodeRuntimeShape = {
   startOpenCodeServerProcess: () =>
     Effect.gen(function* () {
       state.starts += 1;
+      if (state.refuseNextStart) {
+        state.refuseNextStart = false;
+        return yield* new OpenCodeRuntimeError({
+          operation: "startOpenCodeServerProcess",
+          detail: "OpenCode v2.0.18 is not supported yet.",
+        });
+      }
       const url = `http://127.0.0.1:${4_300 + state.starts}`;
       yield* Effect.addFinalizer(() =>
         Effect.sync(() => {
@@ -60,6 +71,30 @@ it.layer(Layer.succeed(OpenCodeRuntime, runtime).pipe(Layer.provideMerge(TestClo
           yield* Effect.yieldNow;
 
           assert.equal(state.closes, 1);
+        }),
+      ),
+    );
+
+    it.effect("never caches a refused start, so a fixed binary recovers without a restart", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          state.starts = 0;
+          state.closes = 0;
+          state.refuseNextStart = true;
+          const owner = yield* makeOpenCodeServerOwner({
+            binaryPath: "opencode",
+            serverPassword: "",
+          });
+
+          const refused = yield* owner.acquire.pipe(Effect.scoped, Effect.flip);
+          assert.ok(refused.detail.includes("not supported yet"));
+          assert.equal(state.starts, 1);
+
+          const leaseScope = yield* Scope.make();
+          const server = yield* owner.acquire.pipe(Effect.provideService(Scope.Scope, leaseScope));
+          assert.equal(state.starts, 2);
+          assert.ok(server.url.startsWith("http://127.0.0.1:"));
+          yield* Scope.close(leaseScope, Exit.void);
         }),
       ),
     );

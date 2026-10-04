@@ -164,6 +164,31 @@ export const ServerProviderRateLimits = Schema.Struct({
 });
 export type ServerProviderRateLimits = typeof ServerProviderRateLimits.Type;
 
+/**
+ * How a provider version fits this Ryco release, per the server's compatibility policy
+ * (code-owned floors + bundled defaults + remote model manifest).
+ * FROZEN: mobile/desktop clients ship separately and decode whole provider lists with this
+ * schema, so an unknown literal would fail the entire `ServerProvider` list. Never add a member —
+ * put new meanings in a new optional field.
+ */
+export const ServerProviderCompatibilityStatus = Schema.Literals([
+  "unknown",
+  "supported",
+  "graceful",
+  "unsupported",
+  "broken",
+]);
+export type ServerProviderCompatibilityStatus = typeof ServerProviderCompatibilityStatus.Type;
+
+export const ServerProviderCompatibilityAdvisory = Schema.Struct({
+  /** Rating of `ServerProvider.version`. */
+  status: ServerProviderCompatibilityStatus,
+  /** Rating of `versionAdvisory.latestVersion`; absent when no latest version is known. */
+  latestVersionStatus: Schema.optionalKey(ServerProviderCompatibilityStatus),
+  message: Schema.NullOr(TrimmedNonEmptyString),
+});
+export type ServerProviderCompatibilityAdvisory = typeof ServerProviderCompatibilityAdvisory.Type;
+
 export const ServerProviderVersionAdvisoryStatus = Schema.Literals([
   "unknown",
   "current",
@@ -259,6 +284,8 @@ export const ServerProvider = Schema.Struct({
   // limits configured".
   rateLimits: Schema.optional(ServerProviderRateLimits),
   versionAdvisory: Schema.optionalKey(ServerProviderVersionAdvisory),
+  // Server-computed on every registry upsert; older clients drop the unknown key on decode.
+  compatibilityAdvisory: Schema.optionalKey(ServerProviderCompatibilityAdvisory),
   updateState: Schema.optionalKey(ServerProviderUpdateState),
 });
 export type ServerProvider = typeof ServerProvider.Type;

@@ -6,6 +6,7 @@ import {
   type ProviderInstanceId,
   type ServerProvider,
 } from "@ryco/contracts";
+import { isBlockingProviderCompatibilityStatus } from "@ryco/shared/providerCapabilities";
 
 export type ProviderUpdateCandidate = ServerProvider & {
   readonly versionAdvisory: NonNullable<ServerProvider["versionAdvisory"]> & {
@@ -128,6 +129,21 @@ export function isProviderUpdateCandidate(
   );
 }
 
+/**
+ * An update candidate Ryco actually offers: its latest version is not rated unsupported/broken
+ * for this Ryco release (the server refuses to install those). Deliberately separate from
+ * `isProviderUpdateCandidate`, which the progress view uses to detect "no longer outdated" — a
+ * re-rating during an update must not read as a successful update.
+ */
+export function isProviderUpdateOffered(
+  provider: ServerProvider,
+): provider is ProviderUpdateCandidate {
+  return (
+    isProviderUpdateCandidate(provider) &&
+    !isBlockingProviderCompatibilityStatus(provider.compatibilityAdvisory?.latestVersionStatus)
+  );
+}
+
 export function isProviderUpdateActive(provider: Pick<ServerProvider, "updateState">): boolean {
   return provider.updateState?.status === "queued" || provider.updateState?.status === "running";
 }
@@ -135,13 +151,16 @@ export function isProviderUpdateActive(provider: Pick<ServerProvider, "updateSta
 export function collectProviderUpdateCandidates(
   providers: ReadonlyArray<ServerProvider>,
 ): ProviderUpdateCandidate[] {
-  return dedupeProvidersByDriver(providers.filter(isProviderUpdateCandidate));
+  return dedupeProvidersByDriver(providers.filter(isProviderUpdateOffered));
 }
 
 export function hasOneClickUpdateProviderCandidate(
   candidate: ProviderUpdateCandidate,
   providers: ReadonlyArray<ServerProvider>,
 ): boolean {
+  if (!isProviderUpdateOffered(candidate)) {
+    return false;
+  }
   if (
     candidate.versionAdvisory.canUpdate !== true ||
     candidate.versionAdvisory.updateCommand === null

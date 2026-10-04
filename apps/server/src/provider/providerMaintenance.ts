@@ -423,8 +423,14 @@ const fetchNpmLatestVersion = Effect.fn("fetchNpmLatestVersion")(function* (pack
   return payload ? nonEmptyString(payload.version) : null;
 });
 
+/**
+ * Latest published version of the provider's npm package, cached for an hour. `fresh` skips the
+ * cache read (a click-time update check must rate what `<pkg>@latest` installs right now) but still
+ * writes the cache, so the fetch also refreshes the hourly advisory data.
+ */
 export const resolveLatestProviderVersion = Effect.fn("resolveLatestProviderVersion")(function* (
   maintenanceCapabilities: ProviderMaintenanceCapabilities,
+  options?: { readonly fresh?: boolean },
 ) {
   const packageName = maintenanceCapabilities.packageName;
   if (!packageName) {
@@ -433,7 +439,7 @@ export const resolveLatestProviderVersion = Effect.fn("resolveLatestProviderVers
 
   const cached = latestVersionCache.get(packageName);
   const now = DateTime.toEpochMillis(yield* DateTime.now);
-  if (cached && cached.expiresAt > now) {
+  if (options?.fresh !== true && cached && cached.expiresAt > now) {
     return cached.version;
   }
 
