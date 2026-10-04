@@ -441,16 +441,16 @@ describe("delegation return atomic origin fence", () => {
     makeCommand({
       modelSelection: parent().modelSelection,
       delegationReturnGuard: {
-        turnMessageId: MessageId.make("message-before"),
         projectId: parent().projectId,
-        turnId: TurnId.make("origin-turn"),
-        runtimeSessionId: RuntimeSessionId.make("runtime-a1"),
-        providerInstanceId: ProviderInstanceId.make("codex_work"),
         runtimeMode: "full-access",
         worktreePath: "/tmp/worktree",
         latestUserMessageId: MessageId.make("message-before"),
       },
     });
+  const decide = (thread: OrchestrationThread, command = queuedReturn()) =>
+    Effect.runPromise(
+      decideOrchestrationCommand({ command, readModel: makeReadModel(thread) }).pipe(Effect.result),
+    );
   it("accepts the exact idle origin through normal turn-start processing", async () => {
     const result = await Effect.runPromise(
       decideOrchestrationCommand({ command: queuedReturn(), readModel: makeReadModel(parent()) }),
@@ -466,19 +466,21 @@ describe("delegation return atomic origin fence", () => {
       )?.payload,
     ).toMatchObject({ delegationReturnGuard: queuedReturn().delegationReturnGuard });
   });
+  // A wake goes through a normal turn start that (re)creates or resumes the session, so the
+  // parent's turn, runtime, provider instance and a stopped/errored/missing session no longer
+  // fence it (delegation-returns §3.5). Legacy guard fields are decoded and ignored.
   for (const change of [
     "turn",
     "runtime",
-    "archive",
-    "project",
-    "mode",
-    "worktree",
     "provider",
-    "pending-user-start",
-    "model",
+    "session-stopped",
+    "session-error",
+    "session-null",
+    "legacy-guard-fields",
   ] as const) {
-    it(`rejects ${change} changed between outbox check and authoritative dispatch`, async () => {
+    it(`accepts ${change} changed since delegation`, async () => {
       let thread = parent();
+      let command = queuedReturn();
       if (change === "turn")
         thread = {
           ...thread,
@@ -489,15 +491,47 @@ describe("delegation return atomic origin fence", () => {
           ...thread,
           session: { ...thread.session!, runtimeSessionId: RuntimeSessionId.make("new-runtime") },
         };
-      if (change === "archive") thread = { ...thread, archivedAt: now };
-      if (change === "project") thread = { ...thread, projectId: ProjectId.make("other") };
-      if (change === "mode") thread = { ...thread, runtimeMode: "approval-required" };
-      if (change === "worktree") thread = { ...thread, worktreePath: "/other" };
       if (change === "provider")
         thread = {
           ...thread,
           session: { ...thread.session!, providerInstanceId: ProviderInstanceId.make("other") },
         };
+      if (change === "session-stopped")
+        thread = { ...thread, session: { ...thread.session!, status: "stopped" } };
+      if (change === "session-error")
+        thread = { ...thread, session: { ...thread.session!, status: "error" } };
+      if (change === "session-null") thread = { ...thread, session: null };
+      if (change === "legacy-guard-fields")
+        command = {
+          ...command,
+          delegationReturnGuard: {
+            ...command.delegationReturnGuard!,
+            turnMessageId: MessageId.make("stale-message"),
+            turnId: TurnId.make("stale-turn"),
+            runtimeSessionId: RuntimeSessionId.make("stale-runtime"),
+            providerInstanceId: ProviderInstanceId.make("stale-provider"),
+          },
+        };
+      expect((await decide(thread, command))._tag).toBe("Success");
+    });
+  }
+  for (const change of [
+    "archive",
+    "project",
+    "mode",
+    "worktree",
+    "pending-user-start",
+    "model",
+    "session-starting",
+    "session-running",
+    "latest-turn-running",
+  ] as const) {
+    it(`rejects ${change} changed between outbox check and authoritative dispatch`, async () => {
+      let thread = parent();
+      if (change === "archive") thread = { ...thread, archivedAt: now };
+      if (change === "project") thread = { ...thread, projectId: ProjectId.make("other") };
+      if (change === "mode") thread = { ...thread, runtimeMode: "approval-required" };
+      if (change === "worktree") thread = { ...thread, worktreePath: "/other" };
       if (change === "pending-user-start")
         thread = {
           ...thread,
@@ -508,18 +542,33 @@ describe("delegation return atomic origin fence", () => {
         };
       if (change === "model")
         thread = { ...thread, modelSelection: { ...thread.modelSelection, model: "another" } };
-      const result = await Effect.runPromise(
-        decideOrchestrationCommand({
-          command: queuedReturn(),
-          readModel: makeReadModel(thread),
-        }).pipe(Effect.result),
-      );
-      expect(result._tag).toBe("Failure");
+      if (change === "session-starting")
+        thread = { ...thread, session: { ...thread.session!, status: "starting" } };
+      if (change === "session-running")
+        thread = { ...thread, session: { ...thread.session!, status: "running" } };
+      if (change === "latest-turn-running")
+        thread = { ...thread, latestTurn: { ...thread.latestTurn!, state: "running" } };
+      expect((await decide(thread))._tag).toBe("Failure");
     });
   }
+  it("accepts a later user message whose createdAt is older than the guard's latest", async () => {
+    // Order consistency with latestUserMessageIdQuery: max created_at, ties by insertion order.
+    const thread = parent();
+    const skewed = {
+      ...thread.messages[0]!,
+      id: MessageId.make("skewed-user-message"),
+      createdAt: "2026-08-03T23:59:00.000Z",
+      updatedAt: "2026-08-03T23:59:00.000Z",
+    };
+    expect((await decide({ ...thread, messages: [...thread.messages, skewed] }))._tag).toBe(
+      "Success",
+    );
+  });
 });
 
-it("does not adopt a newer pending user start even if the outbox observed that message before dispatch", async () => {
+it("accepts when the guard observed the latest user message; pending-start detection belongs to delivery", async () => {
+  // delegation-returns §3.5: the decider cannot see pending starts; CompletionReturnDelivery's
+  // parent-idle rule owns them.
   const thread = makeThread({
     latestTurn: {
       turnId: TurnId.make("origin-turn"),
@@ -535,12 +584,8 @@ it("does not adopt a newer pending user start even if the outbox observed that m
     modelSelection: thread.modelSelection,
     delegationReturnGuard: {
       projectId: thread.projectId,
-      turnId: TurnId.make("origin-turn"),
-      runtimeSessionId: RuntimeSessionId.make("runtime-a1"),
-      providerInstanceId: ProviderInstanceId.make("codex_work"),
       runtimeMode: "full-access",
       worktreePath: "/tmp/worktree",
-      turnMessageId: MessageId.make("message-before"),
       latestUserMessageId: pending.id,
     },
   });
@@ -550,5 +595,5 @@ it("does not adopt a newer pending user start even if the outbox observed that m
       readModel: makeReadModel({ ...thread, messages: [...thread.messages, pending] }),
     }).pipe(Effect.result),
   );
-  expect(result._tag).toBe("Failure");
+  expect(result._tag).toBe("Success");
 });

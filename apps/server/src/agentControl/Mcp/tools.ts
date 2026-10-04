@@ -574,7 +574,7 @@ const TOOL_DESCRIPTORS: ReadonlyArray<AgentControlMcpToolDescriptor> = [
   {
     name: AGENT_CONTROL_MCP_TOOLS.createThreads,
     description:
-      "Create a bounded batch of Ryco threads, including isolated worktrees. Routine requests execute asynchronously. Keep requestId stable on retries; wait for the returned receipt to obtain created thread IDs. A completed receipt means dispatch, not task completion. Opt in per entry with returnToOrigin to durably queue a bounded initial-run result to this exact parent turn after settled output/background work. New parent turns/runtime replacement block delivery; inspect completionReturns with ryco_read_control_request. No self-approval or exactly-once provider delivery is implied.",
+      "Create a bounded batch of Ryco threads, including isolated worktrees. Routine requests execute asynchronously. Keep requestId stable on retries; wait for the returned receipt to obtain created thread IDs. A completed receipt means dispatch, not task completion. Opt in per entry with returnToOrigin to have Ryco wake this chat with the task's result, or a failure/stop notice, when it reaches a terminal state; results of tasks finishing together arrive in one automatic message, even after a restart or after this chat moved on. Confirm creation with ryco_wait_for_control_request, then end your turn instead of polling. Inspect completionReturns with ryco_read_control_request. No self-approval or exactly-once provider delivery is implied.",
     inputSchema: {
       type: "object",
       properties: {
@@ -600,7 +600,7 @@ const TOOL_DESCRIPTORS: ReadonlyArray<AgentControlMcpToolDescriptor> = [
               returnToOrigin: {
                 type: "boolean",
                 description:
-                  "Queue this initial run result to the exact originating turn; defaults to false.",
+                  "Wake this chat with this task's result or a failure/stop notice; defaults to false.",
               },
             },
             required: ["projectId", "title", "prompt", "modelSelection", "runtimeMode", "envMode"],

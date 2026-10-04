@@ -40,6 +40,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { OrchestrationCommandAdmissionError } from "../Errors.ts";
 import { PersistenceSqlError } from "../../persistence/Errors.ts";
 import { makeCompletionReturnRepository } from "../../persistence/Layers/AgentControlCompletionReturns.ts";
+import { buildDelegationReturnCommand } from "../../agentControl/completionReturnMessages.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
 import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
 import {
@@ -2607,7 +2608,6 @@ const delegationAt = (seconds: number) =>
 
 type DelegationSystem = Awaited<ReturnType<typeof createOrchestrationSystem>>;
 type DelegationReturnCommand = Extract<OrchestrationCommand, { type: "thread.turn.start" }>;
-type DelegationReturnGuardFields = NonNullable<DelegationReturnCommand["delegationReturnGuard"]>;
 
 // Engine commands only (no provider reactors): a parent with two completed turns,
 // each bound to its own user message through projection_turns.pending_message_id.
@@ -2743,47 +2743,31 @@ function delegationRepository(system: DelegationSystem) {
   );
 }
 
-// Mirrors CompletionReturnDelivery's guard construction. If delegation-returns extracts a
-// shared guard builder, call it here instead.
+// The command CompletionReturnDelivery dispatches, built by the shared builder.
 async function buildDelegatedReturn(
   system: DelegationSystem,
-  overrides: Partial<DelegationReturnGuardFields> = {},
+  options: {
+    readonly latestUserMessageId?: MessageId | null;
+    readonly anchorChildThreadId?: string;
+    readonly now?: string;
+  } = {},
 ): Promise<DelegationReturnCommand> {
   const shell = (await system.readShell()).threads.find(
     (thread) => thread.id === DELEGATION_PARENT_ID,
   );
-  if (!shell?.latestTurn || !shell.session) throw new Error("Delegation parent fixture missing");
+  if (!shell) throw new Error("Delegation parent fixture missing");
   const repository = await delegationRepository(system);
-  const turnId = shell.latestTurn.turnId;
-  const turnMessageId = await system.run(repository.turnMessageId(DELEGATION_PARENT_ID, turnId));
-  expect(turnMessageId).not.toBeNull();
-  return {
-    type: "thread.turn.start",
-    commandId: CommandId.make("delegation-return:child-1"),
-    threadId: DELEGATION_PARENT_ID,
-    delegationReturnGuard: {
-      turnMessageId: turnMessageId!,
-      latestUserMessageId: await system.run(repository.latestUserMessageId(DELEGATION_PARENT_ID)),
-      projectId: shell.projectId,
-      turnId,
-      runtimeSessionId: shell.session.runtimeSessionId!,
-      providerInstanceId: shell.session.providerInstanceId!,
-      runtimeMode: shell.runtimeMode,
-      worktreePath: shell.worktreePath,
-      ...overrides,
-    },
-    message: {
-      messageId: MessageId.make("delegation-result:child-1"),
-      role: "user",
-      text: "Fixture delegated result",
-      attachments: [],
-    },
-    modelSelection: shell.modelSelection,
-    runtimeMode: shell.runtimeMode,
-    interactionMode: shell.interactionMode,
-    ...(shell.tokenMode === undefined ? {} : { tokenMode: shell.tokenMode }),
-    createdAt: delegationAt(30),
-  };
+  return buildDelegationReturnCommand({
+    parent: shell,
+    latestUserMessageId:
+      options.latestUserMessageId !== undefined
+        ? options.latestUserMessageId
+        : await system.run(repository.latestUserMessageId(DELEGATION_PARENT_ID)),
+    sections: ["Fixture delegated result"],
+    anchorChildThreadId: ThreadId.make(options.anchorChildThreadId ?? "child-1"),
+    attempt: 0,
+    now: options.now ?? delegationAt(30),
+  });
 }
 
 describe("delegated return fence across restarts", () => {
@@ -2847,15 +2831,85 @@ describe("delegated return fence across restarts", () => {
       // adds rejections.
       const command = await buildDelegatedReturn(system, {
         latestUserMessageId: MessageId.make("msg-1"),
-        turnMessageId: MessageId.make("msg-1"),
       });
-      expect(command.delegationReturnGuard?.turnId).toBe("turn-2");
       await expect(system.run(system.engine.dispatch(command))).rejects.toThrow(
         "Delegated result origin changed",
       );
     } finally {
       await system.dispose();
       await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts the minimal guard after a restart when the reaper stopped the parent session", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "ryco-delegation-reaped-"));
+    const database = path.join(directory, "state.sqlite");
+    let system = await seedDelegationParent(database);
+    try {
+      await system.dispose();
+      system = await createOrchestrationSystem(database);
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("reaped"),
+          threadId: DELEGATION_PARENT_ID,
+          session: {
+            threadId: DELEGATION_PARENT_ID,
+            status: "stopped",
+            providerName: "codex",
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            runtimeSessionId: RuntimeSessionId.make("runtime-1"),
+            runtimeMode: "full-access",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: delegationAt(20),
+          },
+          createdAt: delegationAt(20),
+        }),
+      );
+      const command = await buildDelegatedReturn(system);
+      expect(command.delegationReturnGuard).toEqual({
+        latestUserMessageId: "msg-2",
+        projectId: "delegation-project",
+        runtimeMode: "full-access",
+        worktreePath: null,
+      });
+      await expect(system.run(system.engine.dispatch(command))).resolves.toBeDefined();
+    } finally {
+      await system.dispose();
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts the next return after a user message whose createdAt predates the delivered wake", async () => {
+    // Both fence sides order by max(createdAt), ties by insertion order (review major #2).
+    const system = await seedDelegationParent();
+    try {
+      await system.run(system.engine.dispatch(await buildDelegatedReturn(system)));
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("skewed-user-start"),
+          threadId: DELEGATION_PARENT_ID,
+          message: {
+            messageId: MessageId.make("skewed-user-message"),
+            role: "user",
+            text: "Sent from a client whose clock is behind",
+            attachments: [],
+          },
+          runtimeMode: "full-access",
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          createdAt: delegationAt(20),
+        }),
+      );
+      const next = await buildDelegatedReturn(system, {
+        anchorChildThreadId: "child-2",
+        now: delegationAt(40),
+      });
+      expect(next.delegationReturnGuard?.latestUserMessageId).toBe("delegation-result:child-1");
+      await expect(system.run(system.engine.dispatch(next))).resolves.toBeDefined();
+    } finally {
+      await system.dispose();
     }
   });
 });

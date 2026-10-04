@@ -22,6 +22,7 @@ import { checkpointStatusToTurnState, mergeReleasedTurn } from "@ryco/shared/tur
 import { toProjectorDecodeError, type OrchestrationProjectorDecodeError } from "./Errors.ts";
 import { resolveEventPullRequestTerminalAt } from "./pullRequestTerminalAt.ts";
 import { withThreadLineage } from "./threadLineage.ts";
+import { latestUserMessage } from "./userMessageOrder.ts";
 import {
   MessageSentPayloadSchema,
   ProjectAvatarSetPayload,
@@ -98,10 +99,11 @@ function decodeForEvent<A>(
 }
 
 /**
- * Caps in-memory history without evicting the thread's first or latest user message.
- * The command model depends on both: some(user) (thread started → context handoff,
- * archive) and findLast(user) (delegated-return fence, settlement). Identical to
- * slice(-MAX_THREAD_MESSAGES) whenever both anchors lie within the newest window.
+ * Caps in-memory history without evicting the thread's first user message or the fence's
+ * latest user message. The command model depends on both: some(user) (thread started →
+ * context handoff, archive) and latestUserMessage (delegated-return fence: max createdAt,
+ * ties by insertion order). Identical to slice(-MAX_THREAD_MESSAGES) whenever both anchors
+ * lie within the newest window.
  */
 function capThreadMessagesPreservingUserAnchors(
   messages: ReadonlyArray<OrchestrationMessage>,
@@ -109,7 +111,7 @@ function capThreadMessagesPreservingUserAnchors(
   let excess = messages.length - MAX_THREAD_MESSAGES;
   if (excess <= 0) return messages;
   const firstUserId = messages.find((message) => message.role === "user")?.id;
-  const latestUserId = messages.findLast((message) => message.role === "user")?.id;
+  const latestUserId = latestUserMessage(messages)?.id;
   return messages.filter((message) => {
     if (excess === 0 || message.id === firstUserId || message.id === latestUserId) return true;
     excess -= 1;

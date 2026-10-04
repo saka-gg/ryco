@@ -164,7 +164,7 @@ function planPresentation(proposal: AgentControlProposal): {
             `Runtime: ${entry.runtimeMode} · ${entry.envMode}`,
             ...(entry.returnToOrigin
               ? [
-                  "Completion return: initial run only, queued to the exact originating turn; blocked if that origin changes.",
+                  "Completion return: result or stop notice is sent back to the originating chat automatically, batched with sibling tasks.",
                 ]
               : []),
             ...(entry.tokenMode === undefined ? [] : [`Token mode: ${entry.tokenMode}`]),

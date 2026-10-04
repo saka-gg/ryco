@@ -1,5 +1,6 @@
 import {
   AGENT_CONTROL_CAPABILITIES,
+  AGENT_CONTROL_DELEGATION_MCP_TOOLS,
   AGENT_CONTROL_MCP_TOOLS,
   AgentControlProposalId,
   AgentControlRequestId,
@@ -7,6 +8,7 @@ import {
   RuntimeSessionId,
   ServerSettings,
   ThreadId,
+  type AgentControlCapability,
   type AgentControlProposal,
   type AgentControlProposalStreamProposalEvent,
 } from "@ryco/contracts";
@@ -29,6 +31,9 @@ import {
 import type { ProjectionSnapshotQueryShape } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
+import { CompletionReturnRepositoryLive } from "../../persistence/Layers/AgentControlCompletionReturns.ts";
+import { AgentControlProposalRepositoryLive } from "../../persistence/Layers/AgentControlProposals.ts";
+import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
 import { ServerSettingsService, type ServerSettingsShape } from "../../serverSettings.ts";
 import { AGENT_CONTROL_MCP_MAX_BODY_BYTES, AGENT_CONTROL_MCP_PATH } from "../Mcp/transportGuard.ts";
 import { makeAgentControlMcpListener } from "../Mcp/listener.ts";
@@ -516,6 +521,53 @@ it.live("enabled mode starts a loopback listener and publishes its endpoint", ()
       // The listener is really up: an unauthenticated probe gets 401.
       const probe = yield* post(url, { body: "{}" });
       assert.strictEqual(probe.status, 401);
+    }),
+  ),
+);
+
+it.live("installs the delegated-task tools when the completion-return ledger is available", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const context = yield* Layer.build(
+        makeMcpServerLayer(
+          ServerSettingsService.layerTest({ agentControl: { enabled: true } }),
+        ).pipe(
+          Layer.provideMerge(
+            Layer.mergeAll(CompletionReturnRepositoryLive, AgentControlProposalRepositoryLive).pipe(
+              Layer.provideMerge(SqlitePersistenceMemory),
+            ),
+          ),
+        ),
+      );
+      const registry = Context.get(context, AgentControlSessionRegistry);
+      const endpoint = yield* registry.currentEndpoint;
+      const url = (endpoint as Option.Some<{ url: string }>).value.url;
+      const listFor = (capabilities: ReadonlyArray<AgentControlCapability>) =>
+        Effect.gen(function* () {
+          const lease = yield* registry.issueLease({
+            threadId: callerThreadId,
+            providerInstanceId: codexInstance,
+            runtimeSessionId: RuntimeSessionId.make(`runtime-${capabilities.length}`),
+            capabilities,
+            injectionMode: "codex-http",
+          });
+          const bearer = Redacted.value(
+            (lease as Option.Some<AgentControlIssuedLease>).value.credential,
+          );
+          const response = yield* rpc(url, bearer, "tools/list");
+          return (
+            parseBody(response).result as { tools: ReadonlyArray<{ name: string }> }
+          ).tools.map((tool) => tool.name);
+        });
+      const granted = yield* listFor([
+        AGENT_CONTROL_CAPABILITIES.read,
+        AGENT_CONTROL_CAPABILITIES.interruptThread,
+      ]);
+      assert.include(granted, AGENT_CONTROL_DELEGATION_MCP_TOOLS.taskStatus);
+      assert.include(granted, AGENT_CONTROL_DELEGATION_MCP_TOOLS.taskCancel);
+      const readOnly = yield* listFor([AGENT_CONTROL_CAPABILITIES.read]);
+      assert.include(readOnly, AGENT_CONTROL_DELEGATION_MCP_TOOLS.taskStatus);
+      assert.notInclude(readOnly, AGENT_CONTROL_DELEGATION_MCP_TOOLS.taskCancel);
     }),
   ),
 );

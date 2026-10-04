@@ -19,7 +19,9 @@ export const firstUserMessageIdQuery = (sql: SqlClient.SqlClient, thread: Thread
  * insertion order (rowid). The delegated-return fence compares the engine's hydrated anchor
  * (ProjectionSnapshotQuery.getCommandReadModel) with CompletionReturnDelivery's read
  * (CompletionReturnRepository.latestUserMessageId). Any divergence rejects valid returns or
- * weakens the fence. Never inline this ordering elsewhere.
+ * weakens the fence. Never inline this ordering elsewhere. The in-memory twin used by the
+ * decider and the projector's message cap is `latestUserMessage`
+ * (orchestration/userMessageOrder.ts), not `findLast(user)`.
  */
 export const latestUserMessageIdQuery = (sql: SqlClient.SqlClient, thread: ThreadRef) =>
   sql<{ readonly messageId: string }>`

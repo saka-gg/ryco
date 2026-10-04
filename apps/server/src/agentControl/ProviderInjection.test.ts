@@ -9,8 +9,10 @@ import { assert, it } from "@effect/vitest";
 import { Effect, Option, Redacted } from "effect";
 
 import type { AgentControlProviderBridge } from "./ProviderInjection.ts";
+import { AGENT_CONTROL_MCP_INITIALIZE_INSTRUCTIONS } from "./Mcp/listener.ts";
 import {
   AGENT_CONTROL_PROVIDER_SUPPORT,
+  agentControlHostContext,
   installAgentControlAcp,
   installAgentControlNativeHttp,
   redactAgentControlSecrets,
@@ -175,5 +177,22 @@ it("redacts provider error messages before they can reach logs or persisted even
       name: "Error",
       message: "failed with Bearer [REDACTED]",
     },
+  );
+});
+
+it("tells agents to delegate, confirm, end their turn and let Ryco wake them", () => {
+  const context = agentControlHostContext(true);
+  assert.include(context, "end your turn");
+  assert.include(context, "returnToOrigin: true");
+  assert.include(context, 'ryco_wait_for_control_request (waitFor: "terminal")');
+  assert.include(context, "ryco_task_status");
+  assert.include(context, "ryco_task_cancel");
+  assert.include(context, "untrusted reference data");
+  assert.notInclude(context, "ryco_wait_threads to follow work");
+  assert.include(AGENT_CONTROL_MCP_INITIALIZE_INSTRUCTIONS, "end your turn");
+  assert.include(AGENT_CONTROL_MCP_INITIALIZE_INSTRUCTIONS, "ryco_task_status");
+  assert.notInclude(
+    AGENT_CONTROL_MCP_INITIALIZE_INSTRUCTIONS,
+    "ryco_wait_threads for task completion",
   );
 });

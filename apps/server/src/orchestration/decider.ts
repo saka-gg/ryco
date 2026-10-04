@@ -45,6 +45,7 @@ import {
 import { projectEvent } from "./projector.ts";
 import { resolveDelegatedChildLineage } from "./threadLineage.ts";
 import { TURN_FINALIZATION_REASON, resolveReleasedTurn } from "./turnFinalization.ts";
+import { latestUserMessage } from "./userMessageOrder.ts";
 
 const nowIso = () => new Date().toISOString();
 const defaultMetadata: Omit<OrchestrationEvent, "sequence" | "type" | "payload"> = {
@@ -1233,24 +1234,22 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           detail: "This usage-limit resume is stale: the thread was resumed, changed, or is busy.",
         });
       }
+
+      // Delegated-result wake fence (delegation-returns §3.5). A wake is a normal queued turn
+      // start that (re)creates or resumes the session, so the parent's turn, runtime and
+      // provider instance are not fenced and legacy guard fields are ignored. Pending starts
+      // are invisible here; CompletionReturnDelivery's parent-idle rule owns them.
       const guard = command.delegationReturnGuard;
-      const latestUserMessage = guard
-        ? targetThread.messages.findLast((message) => message.role === "user")
-        : undefined;
       if (
         guard &&
         (targetThread.archivedAt !== null ||
-          !["ready", "idle"].includes(targetThread.session?.status ?? "") ||
-          (latestUserMessage?.id ?? null) !== guard.latestUserMessageId ||
-          (latestUserMessage?.id !== guard.turnMessageId &&
-            latestUserMessage?.turnId !== guard.turnId) ||
+          targetThread.session?.status === "running" ||
+          targetThread.session?.status === "starting" ||
+          targetThread.latestTurn?.state === "running" ||
+          (latestUserMessage(targetThread.messages)?.id ?? null) !== guard.latestUserMessageId ||
           JSON.stringify(command.modelSelection ?? targetThread.modelSelection) !==
             JSON.stringify(targetThread.modelSelection) ||
           targetThread.projectId !== guard.projectId ||
-          targetThread.latestTurn?.turnId !== guard.turnId ||
-          targetThread.latestTurn.state !== "completed" ||
-          targetThread.session?.runtimeSessionId !== guard.runtimeSessionId ||
-          targetThread.session.providerInstanceId !== guard.providerInstanceId ||
           targetThread.runtimeMode !== guard.runtimeMode ||
           targetThread.worktreePath !== guard.worktreePath)
       ) {

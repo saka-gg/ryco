@@ -14,6 +14,7 @@ import {
 } from "@ryco/contracts";
 import { Context, Effect, Layer, Schema } from "effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
+import { readDelegatedRunState } from "../persistence/delegatedRunStatus.ts";
 
 type TaskEffect<A> = Effect.Effect<A, LocalTaskError>;
 export interface LocalTaskServiceShape {
@@ -86,54 +87,17 @@ export const makeLocalTaskService = Effect.gen(function* () {
       }
       const delegation = task.delegation;
       if (!delegation) return { ...task, status: "todo" as const };
-      const receipts = yield* sql<{
-        status: string;
-      }>`SELECT status FROM orchestration_command_receipts WHERE command_id = ${delegation.commandId}`;
-      if (receipts[0]?.status === "rejected") return { ...task, status: "failed" as const };
-      const threads = yield* sql<{
-        deleted_at: string | null;
-        pending_approval_count: number;
-        pending_user_input_count: number;
-      }>`
-      SELECT deleted_at, pending_approval_count, pending_user_input_count FROM projection_threads WHERE thread_id = ${delegation.threadId}`;
-      const thread = threads[0];
-      if (!thread)
-        return {
-          ...task,
-          status: delegation.dispatched ? ("unavailable" as const) : ("starting" as const),
-        };
-      if (thread.deleted_at !== null) return { ...task, status: "unavailable" as const };
-      const startFailures = yield* sql`SELECT 1 FROM projection_thread_activities
-        WHERE thread_id = ${delegation.threadId} AND kind = 'provider.turn.start.failed'
-          AND json_valid(payload_json) AND json_extract(payload_json, '$.messageId') = ${delegation.messageId} LIMIT 1`;
-      if (startFailures.length) return { ...task, status: "failed" as const };
-      // Query the exact delegated message, not the latest turn in a reused chat.
-      const turns = yield* sql<{
-        state: string;
-        turn_id: string | null;
-        active_turn_id: string | null;
-      }>`
-      SELECT turns.state, turns.turn_id, sessions.active_turn_id
-      FROM projection_turns turns LEFT JOIN projection_thread_sessions sessions ON sessions.thread_id = turns.thread_id
-      WHERE turns.thread_id = ${delegation.threadId} AND turns.pending_message_id = ${delegation.messageId}
-      ORDER BY turns.row_id DESC LIMIT 1`;
-      const turn = turns[0];
-      if (!turn) return { ...task, status: "starting" as const };
-      if (turn.state === "error" || turn.state === "interrupted")
-        return { ...task, status: "failed" as const };
-      const active = turn.turn_id !== null && turn.active_turn_id === turn.turn_id;
-      if (active && (thread.pending_approval_count > 0 || thread.pending_user_input_count > 0))
-        return { ...task, status: "needs-you" as const };
-      if (active || turn.state === "running") return { ...task, status: "running" as const };
-      return {
-        ...task,
-        status:
-          turn.state === "completed"
-            ? ("review" as const)
-            : turn.state === "pending"
-              ? ("starting" as const)
-              : ("failed" as const),
-      };
+      const run = yield* readDelegatedRunState(sql, delegation);
+      switch (run) {
+        case "rejected":
+        case "failed":
+        case "interrupted":
+          return { ...task, status: "failed" as const };
+        case "completed":
+          return { ...task, status: "review" as const };
+        default:
+          return { ...task, status: run };
+      }
     });
   const save = (row: Row, task: LocalTask, command?: LocalTaskDelegateInput["command"]) =>
     Effect.gen(function* () {
