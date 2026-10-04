@@ -22,4 +22,19 @@ describe("Agent Control settings allowlist", () => {
     expect(() => decodeChange({ kind: "autoResumeLimitedThreads", value: true })).toThrow();
     expect(() => decodeChange({ kind: "snoozeLimitedThreads", value: true })).toThrow();
   });
+
+  // An agent must never grant itself unattended continuation after a restart.
+  it("never exposes continue-after-restart", () => {
+    const summary = agentControlSettingsSummary({
+      ...DEFAULT_SERVER_SETTINGS,
+      continueThreadsAfterRestart: true,
+    });
+    expect(summary.settings.map((setting) => setting.kind as string)).not.toContain(
+      "continueThreadsAfterRestart",
+    );
+  });
+
+  it("cannot change continue-after-restart", () => {
+    expect(() => decodeChange({ kind: "continueThreadsAfterRestart", value: true })).toThrow();
+  });
 });
