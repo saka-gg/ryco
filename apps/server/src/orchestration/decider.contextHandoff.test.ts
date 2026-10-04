@@ -210,6 +210,70 @@ describe("context handoff decider", () => {
     ]);
   });
 
+  describe("an earlier handoff that never dispatched", () => {
+    const earlierHandoffActivity = {
+      id: EventId.make("context-handoff-activity:command-earlier"),
+      tone: "info" as const,
+      kind: "context-handoff",
+      summary: "Context handoff requested",
+      payload: {
+        schemaVersion: 1,
+        handoffId: "context-handoff:command-earlier",
+        mode: "full-context-fresh-session",
+        status: "requested",
+        targetMessageId: "message-before",
+        sourceSelection: { instanceId: "codex_work", model: "gpt-5.6" },
+        targetSelection: { instanceId: "grok_work", model: "grok-4.5" },
+      },
+      turnId: null,
+      createdAt: now,
+    };
+    const turnStartFailure = (messageId: string) => ({
+      id: EventId.make(`turn-start-failed:${messageId}`),
+      tone: "error" as const,
+      kind: "provider.turn.start.failed",
+      summary: "Provider turn start failed",
+      payload: { messageId, detail: "Ryco could not read or save its local state." },
+      turnId: null,
+      createdAt: now,
+    });
+    const decide = (activities: OrchestrationThread["activities"]) =>
+      Effect.runPromise(
+        Effect.result(
+          decideOrchestrationCommand({
+            command: makeCommand(),
+            readModel: makeReadModel(makeThread({ activities })),
+          }),
+        ),
+      );
+
+    it("blocks a new handoff while it is still requested", async () => {
+      const result = await decide([earlierHandoffActivity]);
+      expect(result._tag).toBe("Failure");
+      expect(result._tag === "Failure" ? result.failure.message : "").toContain(
+        "already has an actionable context handoff",
+      );
+    });
+
+    it("stops blocking once its target turn start failed", async () => {
+      const result = await decide([
+        earlierHandoffActivity,
+        turnStartFailure("some-other-message"),
+        turnStartFailure("message-before"),
+      ]);
+      expect(result._tag).toBe("Success");
+      const events = result._tag === "Success" ? result.success : [];
+      expect((Array.isArray(events) ? events : [events]).map((event) => event.type)).toContain(
+        "thread.context-handoff-requested",
+      );
+    });
+
+    it("keeps blocking when only another message's turn start failed", async () => {
+      const result = await decide([earlierHandoffActivity, turnStartFailure("some-other-message")]);
+      expect(result._tag).toBe("Failure");
+    });
+  });
+
   it("derives stable correlation ids and captures repeated A→B→A source selection", async () => {
     const command = makeCommand({
       commandId: CommandId.make("command-return-to-a"),
