@@ -27,15 +27,20 @@ export interface AuthenticatedSession {
 
 export class AuthError extends Data.TaggedError("AuthError")<{
   readonly message: string;
-  readonly status?: 400 | 401 | 403 | 409 | 500;
+  /** `503`: the credential could not be checked right now; retrying may succeed. */
+  readonly status?: 400 | 401 | 403 | 409 | 500 | 503;
   readonly cause?: unknown;
 }> {}
 
 export interface ServerAuthShape {
   readonly getDescriptor: () => Effect.Effect<ServerAuthDescriptor>;
+  /**
+   * The request's session, or `authenticated: false` for a missing or rejected
+   * credential. Fails only when the credential could not be checked at all.
+   */
   readonly getSessionState: (
     request: HttpServerRequest.HttpServerRequest,
-  ) => Effect.Effect<AuthSessionState, never>;
+  ) => Effect.Effect<AuthSessionState, AuthError>;
   readonly exchangeBootstrapCredential: (
     credential: string,
     requestMetadata: AuthClientMetadata,

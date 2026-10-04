@@ -14,6 +14,7 @@ import { ServerSecretStore } from "../Services/ServerSecretStore.ts";
 import {
   SessionCredentialError,
   SessionCredentialService,
+  SessionCredentialUnavailableError,
   SessionRotationError,
   type IssuedSession,
   type SessionCredentialChange,
@@ -164,6 +165,16 @@ export const makeSessionCredentialService = Effect.gen(function* () {
       message,
       cause,
     });
+
+  // A verification rejects a credential only for what the credential is. A
+  // session store that failed to answer is a passing fault on this node: read
+  // as a rejection, it would send a valid pairing to be made again.
+  const toVerificationFailure =
+    (message: string) =>
+    (cause: unknown): SessionCredentialError | SessionCredentialUnavailableError =>
+      cause instanceof SessionCredentialError
+        ? cause
+        : new SessionCredentialUnavailableError({ message, cause });
 
   const signSessionClaims = (claims: SessionClaims) => {
     const encodedPayload = base64UrlEncode(JSON.stringify(claims));
@@ -444,16 +455,7 @@ export const makeSessionCredentialService = Effect.gen(function* () {
         subject: claims.sub,
         role: claims.role,
       } satisfies VerifiedSession;
-    }).pipe(
-      Effect.mapError((cause) =>
-        cause instanceof SessionCredentialError
-          ? cause
-          : new SessionCredentialError({
-              message: "Failed to verify session credential.",
-              cause,
-            }),
-      ),
-    );
+    }).pipe(Effect.mapError(toVerificationFailure("Failed to verify session credential.")));
 
   const issueWebSocketToken: SessionCredentialServiceShape["issueWebSocketToken"] = (
     sessionId,
@@ -538,16 +540,7 @@ export const makeSessionCredentialService = Effect.gen(function* () {
         subject: row.value.subject,
         role: row.value.role,
       } satisfies VerifiedSession;
-    }).pipe(
-      Effect.mapError((cause) =>
-        cause instanceof SessionCredentialError
-          ? cause
-          : new SessionCredentialError({
-              message: "Failed to verify websocket token.",
-              cause,
-            }),
-      ),
-    );
+    }).pipe(Effect.mapError(toVerificationFailure("Failed to verify websocket token.")));
 
   const listActive: SessionCredentialServiceShape["listActive"] = () =>
     Effect.gen(function* () {

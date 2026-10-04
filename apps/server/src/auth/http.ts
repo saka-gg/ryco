@@ -90,7 +90,7 @@ export const authSessionRouteLayer = HttpRouter.add(
     const serverAuth = yield* ServerAuth;
     const session = yield* serverAuth.getSessionState(request);
     return HttpServerResponse.jsonUnsafe(session, { status: 200 });
-  }),
+  }).pipe(Effect.catchTag("AuthError", (error) => respondToAuthError(error))),
 );
 
 const PairingCredentialRequestHeaders = Schema.Struct({

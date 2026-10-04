@@ -44,6 +44,18 @@ export class SessionCredentialError extends Data.TaggedError("SessionCredentialE
 }> {}
 
 /**
+ * The credential could not be checked at all: the session store failed to
+ * answer. Says nothing about the credential, which may be perfectly valid, so a
+ * caller answers it as a passing fault to retry, never as a rejection.
+ */
+export class SessionCredentialUnavailableError extends Data.TaggedError(
+  "SessionCredentialUnavailableError",
+)<{
+  readonly message: string;
+  readonly cause?: unknown;
+}> {}
+
+/**
  * Why a bearer session could not rotate. `superseded`, `renewed-recently` and
  * `renewal-limit` leave the presented session as valid as it was; `idle` and
  * `not-bearer` say it can never rotate.
@@ -73,9 +85,13 @@ export interface SessionCredentialServiceShape {
   /**
    * Verifies a session token. A rotated session's first use supersedes the
    * session it replaced; a superseded session presented after its grace revokes
-   * its whole pairing.
+   * its whole pairing. Fails with `SessionCredentialError` only for a credential
+   * it rejected, and with `SessionCredentialUnavailableError` when the session
+   * store could not be read or written.
    */
-  readonly verify: (token: string) => Effect.Effect<VerifiedSession, SessionCredentialError>;
+  readonly verify: (
+    token: string,
+  ) => Effect.Effect<VerifiedSession, SessionCredentialError | SessionCredentialUnavailableError>;
   /**
    * Issues the successor of a bearer session: same subject, role and client,
    * never past a year from the original pairing. The presented session stays
@@ -97,9 +113,10 @@ export interface SessionCredentialServiceShape {
     },
     SessionCredentialError
   >;
+  /** Fails like `verify`: a rejection, or a session store that did not answer. */
   readonly verifyWebSocketToken: (
     token: string,
-  ) => Effect.Effect<VerifiedSession, SessionCredentialError>;
+  ) => Effect.Effect<VerifiedSession, SessionCredentialError | SessionCredentialUnavailableError>;
   readonly listActive: () => Effect.Effect<
     ReadonlyArray<AuthClientSession>,
     SessionCredentialError

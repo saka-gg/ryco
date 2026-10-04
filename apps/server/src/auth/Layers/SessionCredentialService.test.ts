@@ -5,13 +5,19 @@ import { TestClock } from "effect/testing";
 
 import type { ServerConfigShape } from "../../config.ts";
 import { ServerConfig } from "../../config.ts";
+import { PersistenceSqlError } from "../../persistence/Errors.ts";
+import { AuthSessionRepositoryLive } from "../../persistence/Layers/AuthSessions.ts";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
+import { AuthSessionRepository } from "../../persistence/Services/AuthSessions.ts";
 import {
   SessionCredentialService,
   SessionRotationError,
 } from "../Services/SessionCredentialService.ts";
 import { ServerSecretStoreLive } from "./ServerSecretStore.ts";
-import { SessionCredentialServiceLive } from "./SessionCredentialService.ts";
+import {
+  makeSessionCredentialService,
+  SessionCredentialServiceLive,
+} from "./SessionCredentialService.ts";
 
 const makeServerConfigLayer = (
   overrides?: Partial<Pick<ServerConfigShape, "desktopBootstrapToken">>,
@@ -38,7 +44,57 @@ const makeSessionCredentialLayer = (
     Layer.provide(makeServerConfigLayer(overrides)),
   );
 
+/** A session store whose reads fail while `failing` is set: a busy or broken database. */
+const makeFaultySessionCredentialLayer = (store: { failing: boolean }) =>
+  Layer.effect(SessionCredentialService, makeSessionCredentialService).pipe(
+    Layer.provide(
+      Layer.effect(
+        AuthSessionRepository,
+        Effect.gen(function* () {
+          const repository = yield* AuthSessionRepository;
+          return {
+            ...repository,
+            getById: (input) =>
+              store.failing
+                ? Effect.fail(
+                    new PersistenceSqlError({
+                      operation: "AuthSessionRepository.getById:query",
+                      detail: "database is locked",
+                    }),
+                  )
+                : repository.getById(input),
+          };
+        }),
+      ).pipe(Layer.provide(AuthSessionRepositoryLive)),
+    ),
+    Layer.provide(SqlitePersistenceMemory),
+    Layer.provide(ServerSecretStoreLive),
+    Layer.provide(makeServerConfigLayer()),
+  );
+
 it.layer(NodeServices.layer)("SessionCredentialServiceLive", (it) => {
+  it.effect("tells a session store that did not answer apart from a rejected credential", () => {
+    const store = { failing: false };
+    return Effect.gen(function* () {
+      const sessions = yield* SessionCredentialService;
+      const issued = yield* sessions.issue({ method: "bearer-session-token", subject: "phone" });
+      const websocket = yield* sessions.issueWebSocketToken(issued.sessionId);
+
+      store.failing = true;
+      const sessionFault = yield* Effect.flip(sessions.verify(issued.token));
+      expect(sessionFault._tag).toBe("SessionCredentialUnavailableError");
+      const websocketFault = yield* Effect.flip(sessions.verifyWebSocketToken(websocket.token));
+      expect(websocketFault._tag).toBe("SessionCredentialUnavailableError");
+      // What the credential itself says is still a rejection.
+      const malformed = yield* Effect.flip(sessions.verify("not-a-session-token"));
+      expect(malformed._tag).toBe("SessionCredentialError");
+
+      // The credential was fine all along.
+      store.failing = false;
+      expect((yield* sessions.verify(issued.token)).sessionId).toBe(issued.sessionId);
+    }).pipe(Effect.provide(makeFaultySessionCredentialLayer(store)));
+  });
+
   it.effect("issues and verifies signed browser session tokens", () =>
     Effect.gen(function* () {
       const sessions = yield* SessionCredentialService;
