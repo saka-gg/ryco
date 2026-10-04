@@ -8,6 +8,7 @@ import {
   QUEUE_HOLD_RANK,
   readQueueThreadView,
   releaseQueueHoldKeys,
+  removeQueueHoldCauses,
   resolveQueueDrainStep,
   mergeQueueHold,
   type QueueEnvironmentReadiness,
@@ -263,21 +264,18 @@ export function enqueueThreadOutboxMessage(message: QueuedThreadMessage): void {
   if (wasEmpty && acknowledged[key] === undefined) {
     // The thread as the user saw it while composing: causes current now are
     // already acknowledged, so an offline message composed in response to an
-    // error is not held by it. Cached rows are not what the node holds; their
-    // baseline is recorded at the first live drain instead.
-    const state = useStore.getState();
+    // error is not held by it. Cached or demoted rows carry no session, so a
+    // failure that happened while offline is new on reconnect and holds
+    // (conservative: one Resume clears an error the user had already seen).
     const view = readQueueThreadView(
-      state,
+      useStore.getState(),
       scopeThreadRef(message.environmentId, message.threadId),
     );
-    const cached = state.environmentStateById[message.environmentId]?.hydratedFromCacheAt;
-    if (view && cached === undefined) {
-      acknowledged[key] = appendAcknowledgedCauseKeys(
-        undefined,
-        deriveQueueFailureCauses(view, dispatchedFor(key)).map((cause) => cause.causeKey),
-      );
-      persistHolds();
-    }
+    acknowledged[key] = appendAcknowledgedCauseKeys(
+      undefined,
+      view ? deriveQueueFailureCauses(view, dispatchedFor(key)).map((cause) => cause.causeKey) : [],
+    );
+    persistHolds();
   }
   commitMessages([...messages.filter((m) => m.messageId !== message.messageId), message]);
 }
@@ -319,8 +317,7 @@ export function holdThreadOutboxForInterrupt(
     undo: () => {
       const current = holds[threadKey];
       if (!current) return;
-      const remaining = current.causeKeys.filter((key) => !added.includes(key));
-      setHold(threadKey, remaining.length > 0 ? { ...current, causeKeys: remaining } : null);
+      setHold(threadKey, removeQueueHoldCauses(current, added));
       notifyListeners();
     },
   };
@@ -485,8 +482,7 @@ export async function drainThreadOutbox(deps: ThreadOutboxDrainDeps): Promise<vo
         const stalledKey = `stalled:${drainStep.messageId}`;
         const hold = holds[key];
         if (hold?.causeKeys.includes(stalledKey)) {
-          const remaining = hold.causeKeys.filter((causeKey) => causeKey !== stalledKey);
-          setHold(key, remaining.length > 0 ? { ...hold, causeKeys: remaining } : null);
+          setHold(key, removeQueueHoldCauses(hold, [stalledKey]));
           notifyListeners();
         }
         continue;

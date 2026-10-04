@@ -227,65 +227,91 @@ describe("threadOutbox store + drain", () => {
   });
 });
 
+function syncShell(session: { status: string; lastError: string | null }, turnState: string) {
+  const AT = "2026-07-24T09:00:00.000Z";
+  useStore.getState().syncServerShellSnapshot(
+    {
+      snapshotSequence: 1,
+      projects: [],
+      worktrees: [],
+      threads: [
+        {
+          id: THREAD,
+          projectId: "p1",
+          title: "Thread",
+          modelSelection: { instanceId: "codex", model: "gpt-5" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          latestTurn: {
+            turnId: "turn-1",
+            state: turnState,
+            requestedAt: AT,
+            startedAt: AT,
+            completedAt: turnState === "running" ? null : AT,
+            assistantMessageId: null,
+          },
+          createdAt: AT,
+          updatedAt: AT,
+          archivedAt: null,
+          session: {
+            threadId: THREAD,
+            status: session.status,
+            providerName: "codex",
+            providerInstanceId: "codex",
+            runtimeMode: "full-access",
+            activeTurnId: session.status === "running" ? "turn-1" : null,
+            lastError: session.lastError,
+            updatedAt: AT,
+          },
+          latestUserMessageAt: AT,
+          hasPendingApprovals: false,
+          hasPendingUserInput: false,
+          hasActionableProposedPlan: false,
+        },
+      ],
+      updatedAt: AT,
+    } as never,
+    ENV,
+  );
+}
+
 describe("threadOutbox holds", () => {
-  it("sends an offline message composed on an errored thread", async () => {
-    enqueueThreadOutboxMessage(queued("m1", "2026-07-24T10:00:00.000Z"));
+  it("baselines a legacy persisted outbox at its first live drain and sends", async () => {
+    // Persisted before holds existed: no baseline, so the first live
+    // evaluation records one and an error already there does not hold.
+    kv.set("ryco.threadOutbox.v1", JSON.stringify([queued("m1", "2026-07-24T10:00:00.000Z")]));
+    await hydrateThreadOutbox();
     const sendQueuedMessage = accepting();
-    // The first live evaluation records the baseline: the error was already there.
     await drainThreadOutbox(
       deps(errored("Provider session did not survive a server restart."), sendQueuedMessage),
     );
     expect(sendQueuedMessage).toHaveBeenCalledTimes(1);
   });
 
+  it("holds a failure first seen on reconnect when the message was queued against cached rows", async () => {
+    // The user saw the turn running, then the phone went offline: the rows are
+    // demoted to last-known state (no session) while they compose.
+    syncShell({ status: "running", lastError: null }, "running");
+    useStore.getState().demoteEnvironmentStateToCachedSnapshot(ENV, Date.now());
+    try {
+      enqueueThreadOutboxMessage(queued("m1", "2026-07-24T10:00:00.000Z"));
+      const sendQueuedMessage = accepting();
+      // On reconnect the turn had ended in an error the user never saw.
+      await drainThreadOutbox(deps(errored("Usage limit reached"), sendQueuedMessage));
+      expect(sendQueuedMessage).not.toHaveBeenCalled();
+      expect(getThreadOutboxHold(KEY)).toMatchObject({
+        reason: "error",
+        detail: "Usage limit reached",
+      });
+    } finally {
+      useStore.getState().removeEnvironmentState(ENV);
+    }
+  });
+
   it("records the baseline at enqueue from the live thread the user saw", async () => {
-    const AT = "2026-07-24T09:00:00.000Z";
-    useStore.getState().syncServerShellSnapshot(
-      {
-        snapshotSequence: 1,
-        projects: [],
-        worktrees: [],
-        threads: [
-          {
-            id: THREAD,
-            projectId: "p1",
-            title: "Errored",
-            modelSelection: { instanceId: "codex", model: "gpt-5" },
-            runtimeMode: "full-access",
-            interactionMode: "default",
-            branch: null,
-            worktreePath: null,
-            latestTurn: {
-              turnId: "turn-1",
-              state: "error",
-              requestedAt: AT,
-              startedAt: AT,
-              completedAt: AT,
-              assistantMessageId: null,
-            },
-            createdAt: AT,
-            updatedAt: AT,
-            archivedAt: null,
-            session: {
-              threadId: THREAD,
-              status: "error",
-              providerName: "codex",
-              providerInstanceId: "codex",
-              runtimeMode: "full-access",
-              activeTurnId: null,
-              lastError: "Rate limited",
-              updatedAt: AT,
-            },
-            latestUserMessageAt: AT,
-            hasPendingApprovals: false,
-            hasPendingUserInput: false,
-            hasActionableProposedPlan: false,
-          },
-        ],
-        updatedAt: AT,
-      } as never,
-      ENV,
-    );
+    syncShell({ status: "error", lastError: "Rate limited" }, "error");
     try {
       enqueueThreadOutboxMessage(queued("m1", "2026-07-24T10:00:00.000Z"));
       const sendQueuedMessage = accepting();
@@ -416,6 +442,27 @@ describe("threadOutbox holds", () => {
     );
     expect(getThreadOutboxHold(KEY)).toBeNull();
     expect(sendQueuedMessage).toHaveBeenCalledTimes(2);
+  });
+
+  it("returns to the Stop copy when a stalled send starts late", async () => {
+    enqueueThreadOutboxMessage(queued("m1", "2026-07-24T10:00:00.000Z"));
+    enqueueThreadOutboxMessage(queued("m2", "2026-07-24T11:00:00.000Z"));
+    const sendQueuedMessage = accepting();
+    let now = Date.parse("2026-07-24T12:00:00.000Z");
+    await drainThreadOutbox(deps(IDLE, sendQueuedMessage, { now: () => now }));
+    holdThreadOutboxForInterrupt(KEY, null);
+    now += 91_000;
+    await drainThreadOutbox(deps(IDLE, sendQueuedMessage, { now: () => now }));
+    expect(getThreadOutboxHold(KEY)?.reason).toBe("stalled");
+    await drainThreadOutbox(
+      deps(
+        view({ latestTurn: { turnId: "turn-2" as TurnId, state: "completed" } }),
+        sendQueuedMessage,
+        { now: () => now },
+      ),
+    );
+    expect(getThreadOutboxHold(KEY)).toMatchObject({ reason: "interrupted", detail: null });
+    expect(sendQueuedMessage).toHaveBeenCalledTimes(1);
   });
 });
 
