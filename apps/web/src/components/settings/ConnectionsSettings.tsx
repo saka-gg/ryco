@@ -62,6 +62,7 @@ import { Button } from "../ui/button";
 import { Group, GroupSeparator } from "../ui/group";
 import { AnimatedHeight } from "../AnimatedHeight";
 import { HubSection } from "./HubSection";
+import { savedBackendNeedsRepair, savedBackendRepairHost } from "./ConnectionsSettings.logic";
 import {
   Menu,
   MenuGroup,
@@ -176,6 +177,10 @@ function getSavedBackendStatusTooltip(
   nowMs: number,
 ) {
   const connectionState = runtime?.connectionState ?? "disconnected";
+
+  if (savedBackendNeedsRepair(runtime, record)) {
+    return runtime?.lastError ?? "This environment no longer accepts its saved pairing.";
+  }
 
   if (connectionState === "connected") {
     const connectedAt = runtime?.connectedAt ?? record.lastConnectedAt;
@@ -1311,6 +1316,7 @@ type SavedBackendListRowProps = {
   removingEnvironmentId: EnvironmentId | null;
   onConnect: (environmentId: EnvironmentId) => void;
   onDisconnect: (environmentId: EnvironmentId) => void;
+  onRepair: (environmentId: EnvironmentId) => void;
   onRemove: (environmentId: EnvironmentId) => void;
 };
 
@@ -1321,6 +1327,7 @@ function SavedBackendListRow({
   removingEnvironmentId,
   onConnect,
   onDisconnect,
+  onRepair,
   onRemove,
 }: SavedBackendListRowProps) {
   const nowMs = useRelativeTimeTick(1_000);
@@ -1336,12 +1343,13 @@ function SavedBackendListRow({
   const isConnecting =
     connectionState === "connecting" || reconnectingEnvironmentId === environmentId;
   const isDisconnecting = disconnectingEnvironmentId === environmentId;
+  const needsRepair = !isConnecting && savedBackendNeedsRepair(runtime, record);
   const stateDotClassName =
     connectionState === "connected"
       ? "bg-success"
       : connectionState === "connecting"
         ? "bg-warning"
-        : connectionState === "error"
+        : connectionState === "error" || needsRepair
           ? "bg-destructive"
           : "bg-muted-foreground/40";
   const roleLabel = runtime?.role ? (runtime.role === "owner" ? "Owner" : "Client") : null;
@@ -1385,22 +1393,28 @@ function SavedBackendListRow({
           ) : null}
         </div>
         <div className="flex w-full shrink-0 items-center gap-2 sm:w-auto sm:justify-end">
-          <Button
-            size="xs"
-            variant="outline"
-            disabled={isConnected ? isDisconnecting : isConnecting}
-            onClick={() =>
-              void (isConnected ? onDisconnect(environmentId) : onConnect(environmentId))
-            }
-          >
-            {isConnected
-              ? isDisconnecting
-                ? "Disconnecting…"
-                : "Disconnect"
-              : isConnecting
-                ? "Connecting…"
-                : "Connect"}
-          </Button>
+          {needsRepair ? (
+            <Button size="xs" variant="outline" onClick={() => onRepair(environmentId)}>
+              Re-pair
+            </Button>
+          ) : (
+            <Button
+              size="xs"
+              variant="outline"
+              disabled={isConnected ? isDisconnecting : isConnecting}
+              onClick={() =>
+                void (isConnected ? onDisconnect(environmentId) : onConnect(environmentId))
+              }
+            >
+              {isConnected
+                ? isDisconnecting
+                  ? "Disconnecting…"
+                  : "Disconnect"
+                : isConnecting
+                  ? "Connecting…"
+                  : "Connect"}
+            </Button>
+          )}
           <Button
             size="xs"
             variant="destructive-outline"
@@ -1867,6 +1881,18 @@ export function ConnectionsSettings() {
     }
   }, []);
 
+  const handleRepairSavedBackend = useCallback((environmentId: EnvironmentId) => {
+    const record = useSavedEnvironmentRegistryStore.getState().byId[environmentId];
+    if (!record) return;
+    // Pairing the same node again replaces the rejected credential in place:
+    // the record, its label, and its threads stay.
+    setSavedBackendMode("remote");
+    setSavedBackendHost(savedBackendRepairHost(record));
+    setSavedBackendPairingCode("");
+    setSavedBackendError(null);
+    setAddBackendDialogOpen(true);
+  }, []);
+
   const handleDisconnectSavedBackend = useCallback(async (environmentId: EnvironmentId) => {
     setDisconnectingSavedEnvironmentId(environmentId);
     setSavedBackendError(null);
@@ -2257,7 +2283,7 @@ export function ConnectionsSettings() {
       <div>
         <span className="mt-1 block text-[11px] text-muted-foreground">
           Paste a full pairing URL here to fill both fields automatically. The pairing code is not
-          kept; the browser stores a bearer token for 7 days.
+          kept; this client stores a session token that expires 30 days after pairing.
         </span>
       </div>
     </div>
@@ -2786,6 +2812,7 @@ export function ConnectionsSettings() {
             removingEnvironmentId={removingSavedEnvironmentId}
             onConnect={handleConnectSavedBackend}
             onDisconnect={handleDisconnectSavedBackend}
+            onRepair={handleRepairSavedBackend}
             onRemove={handleRemoveSavedBackend}
           />
         ))}

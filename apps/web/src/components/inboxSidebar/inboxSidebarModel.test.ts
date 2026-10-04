@@ -1,4 +1,5 @@
 import { Schema } from "effect";
+import type { SavedEnvironmentRuntimeState } from "@ryco/client-runtime/connection";
 import { ServerProvider } from "@ryco/contracts";
 import { resolveThreadStatusPill } from "../Sidebar.logic";
 import type {
@@ -22,6 +23,7 @@ import {
   applyInboxServerConfig,
   buildInboxSidebarSections,
   buildPrimaryInboxSidebarEnvironment,
+  buildSavedInboxSidebarEnvironment,
   describeInboxFocus,
   type InboxSidebarEnvironment,
   type InboxSidebarFilters,
@@ -128,6 +130,63 @@ describe("buildPrimaryInboxSidebarEnvironment", () => {
       stale: true,
       staleDetail: "Offline · last known",
     });
+  });
+});
+
+describe("buildSavedInboxSidebarEnvironment", () => {
+  const runtime = (
+    overrides: Partial<SavedEnvironmentRuntimeState>,
+  ): SavedEnvironmentRuntimeState => ({
+    connectionState: "connected",
+    authState: "authenticated",
+    lastError: null,
+    lastErrorAt: null,
+    role: "owner",
+    descriptor: null,
+    serverConfig: null,
+    connectedAt: null,
+    disconnectedAt: null,
+    ...overrides,
+  });
+
+  it("tells the user to pair again instead of reconnecting forever", () => {
+    const environment = buildSavedInboxSidebarEnvironment({
+      environmentId: ENV_A,
+      label: "Studio Mac",
+      runtime: runtime({ connectionState: "error", authState: "requires-auth", role: null }),
+      hydratedFromCache: true,
+    });
+
+    expect(environment).toMatchObject({
+      connectionState: "offline",
+      stale: true,
+      staleDetail: "Needs re-pair",
+      mutationReady: false,
+    });
+    const sections = build({ environments: [environment], threads: [thread("paired")] });
+    expect(sections[0]?.rows[0]).toMatchObject({ state: "offline", statusLabel: "Needs re-pair" });
+  });
+
+  it("keeps a transport error on the reconnecting path", () => {
+    expect(
+      buildSavedInboxSidebarEnvironment({
+        environmentId: ENV_A,
+        label: "Studio Mac",
+        runtime: runtime({ connectionState: "error" }),
+        hydratedFromCache: false,
+      }),
+    ).toMatchObject({ connectionState: "reconnecting", staleDetail: "Offline · last known" });
+  });
+
+  it("is mutation-ready only while connected with a known role", () => {
+    expect(
+      buildSavedInboxSidebarEnvironment({
+        environmentId: ENV_A,
+        label: "Studio Mac",
+        runtime: runtime({}),
+        hydratedFromCache: false,
+      }),
+    ).toMatchObject({ connectionState: "connected", stale: false, mutationReady: true });
   });
 });
 

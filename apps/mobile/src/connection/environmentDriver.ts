@@ -1,9 +1,13 @@
 import type { EnvironmentId, OrchestrationEvent, ThreadId } from "@ryco/contracts";
 import {
+  checkSavedEnvironmentSession,
   createEnvironmentConnection,
   createEnvironmentConnectionSupervisor,
+  isSavedEnvironmentCredentialRejection,
+  SAVED_ENVIRONMENT_REQUIRES_AUTH_MESSAGE,
   SavedEnvironmentConnectionCancelledError,
   SavedEnvironmentCredentialError,
+  savedEnvironmentRequiresAuthState,
   type EnvironmentConnection,
   type EnvironmentConnectionSupervisor,
   type EnvironmentStateSink,
@@ -144,7 +148,10 @@ export interface MobileCatalogLike {
 
 export interface MobileEnvironmentDriverDeps {
   readonly catalog: MobileCatalogLike;
-  readonly remoteApi: Pick<MobileRemoteEnvironmentApi, "resolveRemoteWebSocketConnectionUrl">;
+  readonly remoteApi: Pick<
+    MobileRemoteEnvironmentApi,
+    "fetchRemoteSessionState" | "resolveRemoteWebSocketConnectionUrl"
+  >;
   readonly stateSink?: EnvironmentStateSink;
   readonly subscribeResume?: (listener: (reason: string) => void) => () => void;
   /**
@@ -256,10 +263,13 @@ export function createMobileEnvironmentDriver(
       lastError: error instanceof Error ? error.message : String(error),
       lastErrorAt: nowIso(),
     });
+  const setRuntimeRequiresAuth = (environmentId: EnvironmentId) =>
+    patchRuntime(environmentId, savedEnvironmentRequiresAuthState(nowIso()));
 
   function createSavedEnvironmentClient(
     environmentId: EnvironmentId,
     bearerToken: string,
+    onCredentialRejected: () => void,
   ): WsRpcClient {
     catalog.runtimeStore.getState().ensure(environmentId);
     return createWsRpcClient(
@@ -277,6 +287,9 @@ export function createMobileEnvironmentDriver(
           getConnectionLabel: () => catalog.get(environmentId)?.label ?? null,
           getEnvironmentId: () => environmentId,
           persistentReconnect: true,
+          // A rejected bearer is not an outage the backoff can wait out.
+          isTerminalUrlError: isSavedEnvironmentCredentialRejection,
+          onTerminalUrlError: onCredentialRejected,
           onAttempt: () => setRuntimeConnecting(environmentId),
           onOpen: () => setRuntimeConnected(environmentId),
           onError: (message) => setRuntimeError(environmentId, new Error(message)),
@@ -305,7 +318,35 @@ export function createMobileEnvironmentDriver(
       );
     }
 
-    const client = createSavedEnvironmentClient(record.environmentId, bearerToken);
+    // Asked before any socket exists: the node answers an expired or revoked
+    // bearer with `authenticated: false`, and a socket built on it would retry
+    // its ws-token request forever.
+    const sessionCheck = await checkSavedEnvironmentSession({
+      fetchSessionState: () =>
+        remoteApi.fetchRemoteSessionState({ httpBaseUrl: record.httpBaseUrl, bearerToken }),
+    }).catch((error: unknown) => {
+      setRuntimeError(record.environmentId, error);
+      throw error;
+    });
+    if (sessionCheck.status === "requires-auth") {
+      setRuntimeRequiresAuth(record.environmentId);
+      throw new SavedEnvironmentCredentialError(SAVED_ENVIRONMENT_REQUIRES_AUTH_MESSAGE);
+    }
+
+    let registered: EnvironmentConnection | null = null;
+    const client = createSavedEnvironmentClient(record.environmentId, bearerToken, () => {
+      setRuntimeRequiresAuth(record.environmentId);
+      // Its transport has stopped; the dead connection leaves the supervisor so
+      // a reconnect starts over with a session check. Deferred out of the
+      // transport callback that reported it.
+      globalThis.setTimeout(() => {
+        if (registered !== null && getSupervisor().read(record.environmentId) === registered) {
+          void getSupervisor()
+            .remove(record.environmentId)
+            .catch(() => false);
+        }
+      }, 0);
+    });
     const knownEnvironment = createKnownEnvironment({
       id: record.environmentId,
       label: record.label,
@@ -345,7 +386,7 @@ export function createMobileEnvironmentDriver(
         await connection.dispose().catch(() => undefined);
         throw new SavedEnvironmentConnectionCancelledError(record.environmentId);
       }
-      getSupervisor().register(connection);
+      registered = getSupervisor().register(connection);
       return connection;
     } catch (error) {
       if (!(error instanceof SavedEnvironmentConnectionCancelledError)) {

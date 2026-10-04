@@ -21,11 +21,17 @@ import {
   getKnownEnvironmentWsBaseUrl,
 } from "@ryco/client-runtime/knownEnvironment";
 import {
+  checkSavedEnvironmentSession,
   createEnvironmentConnectionSupervisor,
   createDeviceFrameSource,
+  isSavedEnvironmentCredentialRejection,
   type ReleaseThreadDetailSubscription,
+  SAVED_ENVIRONMENT_INITIAL_CONFIG_TIMEOUT_MS,
+  SAVED_ENVIRONMENT_REQUIRES_AUTH_MESSAGE,
   SavedEnvironmentConnectionCancelledError,
   SavedEnvironmentCredentialError,
+  savedEnvironmentRequiresAuthState,
+  withSavedEnvironmentTimeout,
 } from "@ryco/client-runtime/connection";
 export {
   classifyProjectionSnapshot,
@@ -611,6 +617,37 @@ function setRuntimeError(environmentId: EnvironmentId, error: unknown) {
   });
 }
 
+function setRuntimeRequiresAuth(environmentId: EnvironmentId) {
+  useSavedEnvironmentRuntimeStore
+    .getState()
+    .patch(environmentId, savedEnvironmentRequiresAuthState(isoNow()));
+}
+
+function toSavedEnvironmentCredentialError(error: unknown): SavedEnvironmentCredentialError {
+  return error instanceof SavedEnvironmentCredentialError
+    ? error
+    : new SavedEnvironmentCredentialError(SAVED_ENVIRONMENT_REQUIRES_AUTH_MESSAGE, {
+        cause: error,
+      });
+}
+
+/**
+ * The node rejected a registered connection's bearer. Its transport has stopped,
+ * so it leaves the supervisor too: Connect then starts over with a session check
+ * and answers "pair it again" instead of reusing a dead socket.
+ */
+function markSavedEnvironmentCredentialRejected(
+  environmentId: EnvironmentId,
+  connection: EnvironmentConnection,
+) {
+  setRuntimeRequiresAuth(environmentId);
+  // Deferred out of the transport callback that reported the rejection.
+  globalThis.setTimeout(() => {
+    if (getEnvironmentSupervisor().read(environmentId) !== connection) return;
+    void removeConnection(environmentId).catch(() => false);
+  }, 0);
+}
+
 function coalesceOrchestrationUiEvents(
   events: ReadonlyArray<OrchestrationEvent>,
 ): OrchestrationEvent[] {
@@ -921,6 +958,7 @@ async function resolveSavedEnvironmentSocketUrl(
 function createSavedEnvironmentClient(
   environmentId: EnvironmentId,
   bearerToken: string,
+  onCredentialRejected: () => void = NOOP,
 ): WsRpcClient {
   useSavedEnvironmentRuntimeStore.getState().ensure(environmentId);
 
@@ -931,6 +969,10 @@ function createSavedEnvironmentClient(
       // A remote machine can be asleep or offline for hours; keep trying on a
       // capped backoff, and keep its status out of the primary's.
       persistentReconnect: true,
+      // An expired or revoked bearer is not one of those outages: no retry can
+      // bring it back, so the socket stops and its pending requests fail.
+      isTerminalUrlError: isSavedEnvironmentCredentialRejection,
+      onTerminalUrlError: onCredentialRejected,
       recordGlobalConnectionState: false,
       getVersionMismatchHint: () =>
         resolveServerConfigVersionMismatch(
@@ -975,6 +1017,7 @@ function createSavedEnvironmentClient(
         () => resolveSavedEnvironmentSocketUrl(environmentId, bearerToken, "/ws/device"),
         {
           getConnectionLabel: () => getSavedEnvironmentRecord(environmentId)?.label ?? null,
+          isTerminalUrlError: isSavedEnvironmentCredentialRejection,
         },
       ),
       {
@@ -1003,21 +1046,34 @@ async function refreshSavedEnvironmentMetadata(
     throw new Error(`Saved environment ${environmentId} not found.`);
   }
 
-  const [serverConfig, sessionState] = await Promise.all([
-    configHint ? Promise.resolve(configHint) : client.server.getConfig(),
-    record.desktopSsh
-      ? fetchDesktopSshSessionState(record.httpBaseUrl, bearerToken)
-      : fetchRemoteSessionState({
-          httpBaseUrl: record.httpBaseUrl,
-          bearerToken,
-        }),
-  ]);
+  // The bearer is checked before anything waits on the socket: the node answers
+  // an expired or revoked one with `authenticated: false`, while the socket's
+  // ws-token request for it would fail on every reconnect attempt.
+  const sessionCheck = await checkSavedEnvironmentSession({
+    fetchSessionState: () =>
+      record.desktopSsh
+        ? fetchDesktopSshSessionState(record.httpBaseUrl, bearerToken)
+        : fetchRemoteSessionState({
+            httpBaseUrl: record.httpBaseUrl,
+            bearerToken,
+          }),
+  });
+  if (sessionCheck.status === "requires-auth") {
+    throw new SavedEnvironmentCredentialError(SAVED_ENVIRONMENT_REQUIRES_AUTH_MESSAGE);
+  }
+  const serverConfig =
+    configHint ??
+    (await withSavedEnvironmentTimeout(
+      client.server.getConfig(),
+      SAVED_ENVIRONMENT_INITIAL_CONFIG_TIMEOUT_MS,
+      "The environment answered but did not finish connecting in time.",
+    ));
 
   useSavedEnvironmentRuntimeStore.getState().patch(record.environmentId, {
-    authState: sessionState.authenticated ? "authenticated" : "requires-auth",
+    authState: "authenticated",
     descriptor: serverConfig.environment,
     serverConfig,
-    role: sessionState.authenticated ? (sessionState.role ?? roleHint ?? null) : null,
+    role: sessionCheck.session.role ?? roleHint ?? null,
   });
   useSavedEnvironmentRegistryStore
     .getState()
@@ -1165,6 +1221,7 @@ async function connectSavedEnvironment(
   let bearerToken =
     options?.bearerToken ?? (await readSavedEnvironmentBearerToken(record.environmentId));
   let clientOverride = options?.client;
+  let reissuedDesktopSshBearer = false;
 
   for (;;) {
     if (!bearerToken) {
@@ -1191,8 +1248,15 @@ async function connectSavedEnvironment(
     activeRecord = prepared.record;
 
     const activeBearerToken = bearerToken;
+    let credentialRejected = false;
     const client =
-      clientOverride ?? createSavedEnvironmentClient(activeRecord.environmentId, activeBearerToken);
+      clientOverride ??
+      createSavedEnvironmentClient(activeRecord.environmentId, activeBearerToken, () => {
+        credentialRejected = true;
+        if (!activeRecord.desktopSsh) {
+          markSavedEnvironmentCredentialRejected(activeRecord.environmentId, connection);
+        }
+      });
     const initialConfigSnapshot = createDeferredPromise<ServerConfig>();
     const knownEnvironment = createKnownEnvironment({
       id: activeRecord.environmentId,
@@ -1211,11 +1275,22 @@ async function connectSavedEnvironment(
       },
       client,
       refreshMetadata: async () => {
-        await refreshSavedEnvironmentMetadata(
-          activeRecord.environmentId,
-          activeBearerToken,
-          client,
-        );
+        try {
+          await refreshSavedEnvironmentMetadata(
+            activeRecord.environmentId,
+            activeBearerToken,
+            client,
+          );
+        } catch (error) {
+          if (
+            activeRecord.desktopSsh ||
+            !(error instanceof SavedEnvironmentCredentialError || credentialRejected)
+          ) {
+            throw error;
+          }
+          markSavedEnvironmentCredentialRejected(activeRecord.environmentId, connection);
+          throw toSavedEnvironmentCredentialError(error);
+        }
       },
       onConfigUpdated: (config) => {
         initialConfigSnapshot.resolve(config);
@@ -1248,19 +1323,29 @@ async function connectSavedEnvironment(
           initialServerConfig,
         );
       } catch (error) {
-        const isAuthError = activeRecord.desktopSsh
-          ? isSshHttpAuthError(error, 401)
-          : isRemoteEnvironmentAuthHttpError(error) && error.status === 401;
+        const isAuthError =
+          error instanceof SavedEnvironmentCredentialError ||
+          credentialRejected ||
+          (activeRecord.desktopSsh
+            ? isSshHttpAuthError(error, 401)
+            : isRemoteEnvironmentAuthHttpError(error) && error.status === 401);
         if (!isAuthError) {
           throw error;
         }
         if (!activeRecord.desktopSsh) {
-          await removeSavedEnvironmentBearerToken(activeRecord.environmentId);
-          throw new SavedEnvironmentCredentialError(
-            "Saved environment credential expired. Pair it again.",
-            { cause: error },
-          );
+          // The bearer stays stored: the record keeps its place, and pairing
+          // again replaces the credential.
+          setRuntimeRequiresAuth(activeRecord.environmentId);
+          throw toSavedEnvironmentCredentialError(error);
         }
+        // SSH mints a fresh bearer through its own tunnel, once per connect: a
+        // node that rejects the fresh one too fails instead of looping.
+        if (reissuedDesktopSshBearer) {
+          throw new Error("The SSH environment rejected its freshly issued credential.", {
+            cause: error,
+          });
+        }
+        reissuedDesktopSshBearer = true;
 
         const issued = await issueDesktopSshBearerSession(activeRecord);
         activeRecord = issued.record;
@@ -1280,7 +1365,9 @@ async function connectSavedEnvironment(
       if (error instanceof SavedEnvironmentConnectionCancelledError) {
         throw error;
       }
-      setRuntimeError(activeRecord.environmentId, error);
+      if (!(error instanceof SavedEnvironmentCredentialError)) {
+        setRuntimeError(activeRecord.environmentId, error);
+      }
       const removed = await removeConnection(activeRecord.environmentId).catch(() => false);
       if (!removed) {
         await connection.dispose().catch(() => undefined);
@@ -1412,7 +1499,9 @@ export async function reconnectSavedEnvironment(environmentId: EnvironmentId): P
       if (isSavedEnvironmentConnectionCancelledError(error)) {
         return;
       }
-      setRuntimeError(environmentId, error);
+      if (!(error instanceof SavedEnvironmentCredentialError)) {
+        setRuntimeError(environmentId, error);
+      }
       throw error;
     }
   }
@@ -1443,7 +1532,9 @@ export async function reconnectSavedEnvironment(environmentId: EnvironmentId): P
         throw recoveryError;
       }
     }
-    setRuntimeError(environmentId, error);
+    if (!(error instanceof SavedEnvironmentCredentialError)) {
+      setRuntimeError(environmentId, error);
+    }
     throw error;
   }
 }

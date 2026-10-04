@@ -1,8 +1,10 @@
-import type { EnvironmentId } from "@ryco/contracts";
-import type {
-  EnvironmentConnection,
-  SavedEnvironmentRecord,
-  SavedEnvironmentRuntimeState,
+import type { AuthSessionState, EnvironmentId } from "@ryco/contracts";
+import {
+  SAVED_ENVIRONMENT_REQUIRES_AUTH_MESSAGE,
+  SavedEnvironmentCredentialError,
+  type EnvironmentConnection,
+  type SavedEnvironmentRecord,
+  type SavedEnvironmentRuntimeState,
 } from "@ryco/client-runtime/connection";
 import { describe, expect, it, vi } from "vite-plus/test";
 
@@ -127,11 +129,65 @@ function fakeConnection(
   };
 }
 
+const sessionState = (authenticated: boolean) =>
+  ({ authenticated, ...(authenticated ? { role: "owner" } : {}) }) as unknown as AuthSessionState;
+
 const noopRemoteApi = {
+  fetchRemoteSessionState: async () => sessionState(true),
   resolveRemoteWebSocketConnectionUrl: async () => "ws://node.local/?wsToken=t",
 };
 
 describe("mobile environment driver", () => {
+  it("asks for a new pairing before opening a socket on a bearer the node rejects", async () => {
+    const fake = createFakeCatalog();
+    fake.setBearerToken(ENV_ID, "expired-bearer-token");
+    fake.upsert(record());
+    const resolveRemoteWebSocketConnectionUrl = vi.fn(async () => "ws://node.local/?wsToken=t");
+    const driver = createMobileEnvironmentDriver({
+      catalog: fake.catalog,
+      // An expired or revoked bearer: the node answers 200 authenticated:false.
+      remoteApi: {
+        fetchRemoteSessionState: async () => sessionState(false),
+        resolveRemoteWebSocketConnectionUrl,
+      },
+      subscribeResume: () => () => {},
+    });
+
+    await expect(driver.connectSavedEnvironment(record())).rejects.toBeInstanceOf(
+      SavedEnvironmentCredentialError,
+    );
+
+    expect(fake.runtime(ENV_ID)).toMatchObject({
+      authState: "requires-auth",
+      connectionState: "disconnected",
+      lastError: SAVED_ENVIRONMENT_REQUIRES_AUTH_MESSAGE,
+    });
+    expect(resolveRemoteWebSocketConnectionUrl).not.toHaveBeenCalled();
+    expect(driver.supervisor.read(ENV_ID)).toBeNull();
+  });
+
+  it("leaves an unreachable node on the retry schedule rather than asking to pair", async () => {
+    const fake = createFakeCatalog();
+    fake.setBearerToken(ENV_ID, "bearer-token");
+    fake.upsert(record());
+    const driver = createMobileEnvironmentDriver({
+      catalog: fake.catalog,
+      remoteApi: {
+        fetchRemoteSessionState: async () => {
+          throw new Error("Network request failed");
+        },
+        resolveRemoteWebSocketConnectionUrl: noopRemoteApi.resolveRemoteWebSocketConnectionUrl,
+      },
+      subscribeResume: () => () => {},
+    });
+
+    const connecting = driver.connectSavedEnvironment(record());
+    await expect(connecting).rejects.toThrow("Network request failed");
+    await expect(connecting).rejects.not.toBeInstanceOf(SavedEnvironmentCredentialError);
+    expect(fake.runtime(ENV_ID)).toMatchObject({ connectionState: "error" });
+    expect(fake.runtime(ENV_ID)?.authState).not.toBe("requires-auth");
+  });
+
   it("constructs the supervisor and wires the registry + resume seams on start (no import side effects)", () => {
     const fake = createFakeCatalog();
     const resumeSubscribe = vi.fn(() => () => {});

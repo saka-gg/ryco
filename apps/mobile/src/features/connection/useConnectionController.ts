@@ -63,7 +63,7 @@ export function useSavedEnvironments(): {
       getWsConnectionStatusForEnvironment(record.environmentId),
     );
     const tone = connectionToneForEnvironment(runtime.connectionState, wsUiState);
-    const statusLabel = runtime.authState === "requires-auth" ? "Needs pairing" : tone.label;
+    const statusLabel = runtime.authState === "requires-auth" ? "Needs re-pair" : tone.label;
     return { record, runtime, tone, statusLabel };
   });
   // Hermes in the supported development client does not yet expose `toSorted`.

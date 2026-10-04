@@ -425,13 +425,109 @@ describe("addSavedEnvironment", () => {
         host: "remote.example.com",
         pairingCode: "123456",
       }),
-    ).rejects.toThrow("Saved environment credential expired. Pair it again.");
+    ).rejects.toThrow("This environment no longer accepts its saved pairing. Pair it again.");
 
     expect(mockEnsureSshEnvironment).not.toHaveBeenCalled();
     expect(mockBootstrapSshBearerSession).not.toHaveBeenCalled();
-    expect(mockRemoveSavedEnvironmentBearerToken).toHaveBeenCalledWith(
+    expect(mockPatchRuntime).toHaveBeenCalledWith(
       EnvironmentId.make("environment-1"),
+      expect.objectContaining({ authState: "requires-auth", connectionState: "disconnected" }),
     );
+
+    await resetEnvironmentServiceForTests();
+  });
+
+  it("asks for a new pairing when the node no longer accepts a saved bearer", async () => {
+    mockSavedRecords = [
+      {
+        environmentId: EnvironmentId.make("environment-1"),
+        label: "Remote environment",
+        httpBaseUrl: "https://remote.example.com/",
+        wsBaseUrl: "wss://remote.example.com/",
+        createdAt: "2026-04-14T00:00:00.000Z",
+        lastConnectedAt: null,
+      },
+    ];
+    mockReadSavedEnvironmentBearerToken.mockResolvedValue("expired-bearer-token");
+    // What the node really answers for an expired or revoked bearer. Its socket
+    // never opens, so a config read over it would wait forever.
+    mockFetchRemoteSessionState.mockResolvedValue({ authenticated: false });
+    mockClientGetConfig.mockReturnValue(new Promise(() => undefined));
+    const dispose = vi.fn(async () => undefined);
+    mockCreateEnvironmentConnection.mockImplementation(
+      (input: { knownEnvironment: { environmentId: EnvironmentId }; client: unknown }) => ({
+        kind: "saved" as const,
+        environmentId: input.knownEnvironment.environmentId,
+        knownEnvironment: input.knownEnvironment,
+        client: input.client,
+        ensureBootstrapped: async () => undefined,
+        reconnect: async () => undefined,
+        dispose,
+      }),
+    );
+
+    const {
+      reconnectSavedEnvironment,
+      listEnvironmentConnections,
+      resetEnvironmentServiceForTests,
+    } = await import("./service");
+
+    await expect(reconnectSavedEnvironment(EnvironmentId.make("environment-1"))).rejects.toThrow(
+      "This environment no longer accepts its saved pairing. Pair it again.",
+    );
+
+    expect(mockPatchRuntime).toHaveBeenLastCalledWith(
+      EnvironmentId.make("environment-1"),
+      expect.objectContaining({
+        authState: "requires-auth",
+        connectionState: "disconnected",
+        lastError: "This environment no longer accepts its saved pairing. Pair it again.",
+      }),
+    );
+    expect(mockPatchRuntime).not.toHaveBeenCalledWith(
+      EnvironmentId.make("environment-1"),
+      expect.objectContaining({ connectionState: "error" }),
+    );
+    expect(listEnvironmentConnections()).toHaveLength(0);
+    expect(dispose).toHaveBeenCalledOnce();
+    // The record and its bearer stay; pairing again replaces the credential.
+    expect(mockRemoveSavedEnvironmentBearerToken).not.toHaveBeenCalled();
+
+    await resetEnvironmentServiceForTests();
+  });
+
+  it("fails a connect whose socket never delivers the server config", async () => {
+    vi.useFakeTimers();
+    mockSavedRecords = [
+      {
+        environmentId: EnvironmentId.make("environment-1"),
+        label: "Remote environment",
+        httpBaseUrl: "https://remote.example.com/",
+        wsBaseUrl: "wss://remote.example.com/",
+        createdAt: "2026-04-14T00:00:00.000Z",
+        lastConnectedAt: null,
+      },
+    ];
+    mockReadSavedEnvironmentBearerToken.mockResolvedValue("bearer-token");
+    mockClientGetConfig.mockReturnValue(new Promise(() => undefined));
+
+    const {
+      reconnectSavedEnvironment,
+      listEnvironmentConnections,
+      resetEnvironmentServiceForTests,
+    } = await import("./service");
+
+    const reconnecting = expect(
+      reconnectSavedEnvironment(EnvironmentId.make("environment-1")),
+    ).rejects.toThrow("The environment answered but did not finish connecting in time.");
+    await vi.advanceTimersByTimeAsync(30_000);
+    await reconnecting;
+
+    expect(mockPatchRuntime).toHaveBeenCalledWith(
+      EnvironmentId.make("environment-1"),
+      expect.objectContaining({ connectionState: "error" }),
+    );
+    expect(listEnvironmentConnections()).toHaveLength(0);
 
     await resetEnvironmentServiceForTests();
   });

@@ -252,7 +252,12 @@ describe("two-plane isolation guard", () => {
     const subscribeResume = vi.fn(() => () => {});
     const driver = createMobileEnvironmentDriver({
       catalog,
-      remoteApi: { resolveRemoteWebSocketConnectionUrl: async () => "ws://node.local/?wsToken=t" },
+      remoteApi: {
+        fetchRemoteSessionState: async () => {
+          throw new Error("The guard never reaches a real connect.");
+        },
+        resolveRemoteWebSocketConnectionUrl: async () => "ws://node.local/?wsToken=t",
+      },
       subscribeResume,
       connectSavedEnvironment: async (record: SavedEnvironmentRecord) =>
         ({ environmentId: record.environmentId }) as unknown as EnvironmentConnection,

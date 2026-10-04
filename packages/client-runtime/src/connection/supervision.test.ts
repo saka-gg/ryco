@@ -6,17 +6,18 @@ import type { EnvironmentConnection } from "./connection.ts";
 import {
   createEnvironmentConnectionSupervisor,
   type EnvironmentSupervisorInput,
+  SAVED_ENVIRONMENT_CONNECT_TIMEOUT_MS,
   SavedEnvironmentCredentialError,
   savedEnvironmentRetryDelayMs,
 } from "./supervision.ts";
 
-type Record = { readonly environmentId: EnvironmentId };
+type Record = { readonly environmentId: EnvironmentId; readonly lastConnectedAt?: string };
 
 const remote = "env-remote" as EnvironmentId;
 
 function makeSupervisor(
-  connect: (record: Record) => Promise<EnvironmentConnection>,
-  overrides: { readonly isHostedMode?: boolean } = {},
+  connect: (record: Record, isCancelled: () => boolean) => Promise<EnvironmentConnection>,
+  overrides: { readonly isHostedMode?: boolean; readonly records?: ReadonlyArray<Record> } = {},
 ) {
   let resume: ((reason: string) => void) | null = null;
   const input = {
@@ -31,11 +32,12 @@ function makeSupervisor(
     createInvalidationThrottle: () => ({ maybeExecute: () => undefined, cancel: () => undefined }),
     resetProviderInvalidation: () => undefined,
     createPrimaryConnection: () => null,
-    listSavedEnvironmentRecords: () => [{ environmentId: remote }],
+    listSavedEnvironmentRecords: () => overrides.records ?? [{ environmentId: remote }],
     hasSavedEnvironmentRegistryHydrated: () => true,
     waitForSavedEnvironmentRegistryHydration: () => Promise.resolve(),
     subscribeSavedEnvironmentRegistry: () => () => undefined,
-    connectSavedEnvironment: (record: Record) => connect(record),
+    connectSavedEnvironment: (record: Record, isCancelled: () => boolean) =>
+      connect(record, isCancelled),
     disconnectSavedEnvironment: () => Promise.resolve(),
     waitForPrimaryShellSnapshotApplied: () => Promise.resolve(),
     subscribeBrowserResume: (listener: (reason: string) => void) => {
@@ -115,6 +117,55 @@ describe("saved environment retry", () => {
     resume("online");
     await vi.advanceTimersByTimeAsync(0);
     expect(attempts).toBe(3);
+    stop();
+  });
+
+  it("does not let connects that never settle stall the other saved environments", async () => {
+    const hungA = "env-hung-a" as EnvironmentId;
+    const hungB = "env-hung-b" as EnvironmentId;
+    const reachable = "env-reachable" as EnvironmentId;
+    const attempts = new Map<EnvironmentId, number>();
+    const cancelled: EnvironmentId[] = [];
+    const { supervisor } = makeSupervisor(
+      (record, isCancelled) => {
+        attempts.set(record.environmentId, (attempts.get(record.environmentId) ?? 0) + 1);
+        if (record.environmentId === reachable) return Promise.resolve(connectionFor(record));
+        // A bearer the node rejects inside the socket's URL provider used to
+        // leave the connect pending forever and hold the worker slot.
+        return new Promise<EnvironmentConnection>(() => {
+          void Promise.resolve().then(function poll(): void {
+            if (isCancelled()) {
+              cancelled.push(record.environmentId);
+              return;
+            }
+            setTimeout(poll, 1_000);
+          });
+        });
+      },
+      {
+        records: [
+          { environmentId: hungA, lastConnectedAt: "2026-10-03T00:00:02.000Z" },
+          { environmentId: hungB, lastConnectedAt: "2026-10-03T00:00:01.000Z" },
+          { environmentId: reachable, lastConnectedAt: "2026-10-03T00:00:00.000Z" },
+        ],
+      },
+    );
+    const stop = supervisor.start();
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(attempts.get(hungA)).toBe(1);
+    expect(attempts.get(hungB)).toBe(1);
+    expect(attempts.get(reachable)).toBeUndefined();
+
+    await vi.advanceTimersByTimeAsync(SAVED_ENVIRONMENT_CONNECT_TIMEOUT_MS);
+    expect(attempts.get(reachable)).toBe(1);
+    expect(cancelled).toEqual(expect.arrayContaining([hungA, hungB]));
+
+    // The stalled environments stay on the retry schedule instead of being
+    // abandoned until the app restarts.
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(attempts.get(hungA)).toBe(2);
+    expect(attempts.get(hungB)).toBe(2);
     stop();
   });
 

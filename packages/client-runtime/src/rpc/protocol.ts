@@ -76,6 +76,14 @@ export interface WsProtocolLifecycleHandlers {
    */
   readonly persistentReconnect?: boolean;
   /**
+   * Marks a URL provider failure that no retry can fix, such as a saved
+   * credential the server rejected. The socket then stops reconnecting and every
+   * pending request fails, instead of waiting on a schedule that never succeeds.
+   */
+  readonly isTerminalUrlError?: (error: unknown) => boolean;
+  /** Runs once when a terminal URL provider failure stopped this socket. */
+  readonly onTerminalUrlError?: (error: unknown) => void;
+  /**
    * `false` keeps this socket's status out of the global status, which the app
    * reads as its primary connection's. Its environment slot is still written.
    */
@@ -107,7 +115,11 @@ export type HostedRpcProtocolClient =
 const WS_URL_PROVIDER_ERROR_MESSAGE = "Unable to prepare the Ryco server WebSocket connection.";
 export const WS_CONNECTION_ERROR_MESSAGE = "Unable to connect to the Ryco server WebSocket.";
 
-class WsUrlProviderError extends Data.TaggedError("WsUrlProviderError") {}
+class WsUrlProviderError extends Data.TaggedError("WsUrlProviderError")<{
+  readonly cause: unknown;
+}> {}
+
+class WsUrlProviderInactiveError extends Data.TaggedError("WsUrlProviderInactiveError") {}
 
 /**
  * Whether a connection admits a request right now. `awaiting-session` means
@@ -254,14 +266,16 @@ export function createWsRpcProtocolLayer(
         ),
       ),
   ).pipe(Schedule.while(() => lifecycle.isActive() && (handlers?.shouldReconnect?.() ?? true)));
+  const isTerminalUrlError = (error: WsUrlProviderError) =>
+    handlers?.isTerminalUrlError?.(error.cause) === true;
   const resolvedUrl =
     typeof url === "function"
       ? Effect.tryPromise({
           try: () => {
-            if (!lifecycle.isActive()) throw new WsUrlProviderError();
+            if (!lifecycle.isActive()) throw new WsUrlProviderInactiveError();
             return url();
           },
-          catch: () => new WsUrlProviderError(),
+          catch: (cause) => new WsUrlProviderError({ cause }),
         }).pipe(
           Effect.map((rawUrl) => resolveWsRpcSocketUrl(rawUrl, handlers?.preserveSocketPath)),
           Effect.tapError(() =>
@@ -269,7 +283,16 @@ export function createWsRpcProtocolLayer(
               lifecycle.onError(WS_URL_PROVIDER_ERROR_MESSAGE);
             }),
           ),
-          Effect.retry(retryPolicy),
+          Effect.retry({ schedule: retryPolicy, while: (error) => !isTerminalUrlError(error) }),
+          // Dying fails every pending request through the protocol's error
+          // broadcast and ends the socket's reconnect loop.
+          Effect.tapError((error) =>
+            Effect.sync(() => {
+              if (isTerminalUrlError(error) && lifecycle.isActive()) {
+                handlers?.onTerminalUrlError?.(error.cause);
+              }
+            }),
+          ),
           Effect.orDie,
         )
       : resolveWsRpcSocketUrl(url, handlers?.preserveSocketPath);

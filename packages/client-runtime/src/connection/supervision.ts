@@ -39,6 +39,13 @@ const SAVED_ENVIRONMENT_CONNECT_CONCURRENCY = 2;
  */
 const SAVED_ENVIRONMENT_RETRY_BASE_MS = 5_000;
 const SAVED_ENVIRONMENT_RETRY_MAX_MS = 60_000;
+/**
+ * The longest one saved environment may hold a connect slot. The platform
+ * connect bounds its own steps; this is the backstop that keeps one hung connect
+ * from stalling every other saved environment — and every later sync — until
+ * the app restarts.
+ */
+export const SAVED_ENVIRONMENT_CONNECT_TIMEOUT_MS = 60_000;
 
 export interface EnvironmentSupervisorThrottle {
   readonly maybeExecute: () => void;
@@ -624,6 +631,28 @@ export function createEnvironmentConnectionSupervisor<
     pending.cancelled = true;
     pendingSavedEnvironmentConnections.delete(environmentId);
   };
+  const connectWithinSlot = (
+    environmentId: EnvironmentId,
+    connecting: Promise<EnvironmentConnection>,
+  ): Promise<EnvironmentConnection> =>
+    new Promise((resolve, reject) => {
+      const timeoutId = input.setTimeout(() => {
+        // The abandoned attempt disposes whatever it still builds once it
+        // settles; the retry starts a fresh one.
+        cancelPendingSavedEnvironmentConnection(environmentId);
+        reject(new Error(`Saved environment ${environmentId} did not connect in time.`));
+      }, SAVED_ENVIRONMENT_CONNECT_TIMEOUT_MS);
+      connecting.then(
+        (connection) => {
+          input.clearTimeout(timeoutId);
+          resolve(connection);
+        },
+        (error: unknown) => {
+          input.clearTimeout(timeoutId);
+          reject(error);
+        },
+      );
+    });
   const applyShellEvent = (event: OrchestrationShellStreamEvent, environmentId: EnvironmentId) => {
     if (
       !shouldApplyProjectionEvent({
@@ -688,8 +717,11 @@ export function createEnvironmentConnectionSupervisor<
       concurrency: SAVED_ENVIRONMENT_CONNECT_CONCURRENCY,
       connect: async (record) => {
         try {
-          await ensureSavedEnvironmentConnection(record, (isCancelled) =>
-            input.connectSavedEnvironment(record, isCancelled),
+          await connectWithinSlot(
+            record.environmentId,
+            ensureSavedEnvironmentConnection(record, (isCancelled) =>
+              input.connectSavedEnvironment(record, isCancelled),
+            ),
           );
           clearSavedRetry(record.environmentId);
         } catch (error) {
