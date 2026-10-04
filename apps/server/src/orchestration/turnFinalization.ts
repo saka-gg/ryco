@@ -30,6 +30,12 @@ export const TURN_FINALIZATION_REASON = {
   sessionReplaced: "session-replaced",
   sessionStopped: "session-stopped",
   interruptFailed: "interrupt-failed",
+  /** A Stop cancelled a turn start before the provider took it. */
+  turnStartCancelled: "turn-start-cancelled",
+  /** Turn liveness found no runtime behind a running turn. */
+  providerRuntimeLost: "provider-runtime-lost",
+  /** An interrupt found no live runtime; the turn is released as interrupted. */
+  interruptWithoutRuntime: "interrupt-without-runtime",
   startupOrphanedSession: "startup-orphaned-session",
   startupStaleTurn: "startup-stale-turn",
   /** Fallback when a release carries no matching hint. */

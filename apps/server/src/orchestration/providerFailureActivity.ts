@@ -1,5 +1,6 @@
 /**
- * Builds the `thread.activity.append` command for a provider failure. Shared
+ * Builds the `thread.activity.append` command for a provider failure (and, with
+ * `providerNoticeActivityCommand`, for an informational provider notice). Shared
  * by the provider command reactor and the context-handoff coordinator so both
  * surface turn-start failures with the same activity shape.
  *
@@ -22,7 +23,9 @@ export type ProviderFailureActivityKind =
   | "provider.turn.interrupt.failed"
   | "provider.approval.respond.failed"
   | "provider.user-input.respond.failed"
-  | "provider.session.stop.failed";
+  | "provider.session.stop.failed"
+  | "provider.session.restart.failed"
+  | "provider.turn.lost";
 
 export interface ProviderFailureActivityInput {
   readonly threadId: ThreadId;
@@ -60,6 +63,36 @@ export function providerFailureActivityCommand(
         ...(input.responseAttemptId ? { responseAttemptId: input.responseAttemptId } : {}),
         ...(input.responseState ? { responseState: input.responseState } : {}),
       },
+      turnId: input.turnId,
+      createdAt: input.createdAt,
+    },
+    createdAt: input.createdAt,
+  };
+}
+
+/** Informational provider notices: same command shape, tone `info`. */
+export type ProviderNoticeActivityKind =
+  | "provider.turn.start.cancelled"
+  | "provider.turn.unresponsive";
+
+export function providerNoticeActivityCommand(input: {
+  readonly threadId: ThreadId;
+  readonly kind: ProviderNoticeActivityKind;
+  readonly summary: string;
+  readonly payload: Record<string, unknown>;
+  readonly turnId: TurnId | null;
+  readonly createdAt: string;
+}): Extract<OrchestrationCommand, { type: "thread.activity.append" }> {
+  return {
+    type: "thread.activity.append",
+    commandId: CommandId.make(`server:provider-notice-activity:${crypto.randomUUID()}`),
+    threadId: input.threadId,
+    activity: {
+      id: EventId.make(crypto.randomUUID()),
+      tone: "info",
+      kind: input.kind,
+      summary: input.summary,
+      payload: input.payload,
       turnId: input.turnId,
       createdAt: input.createdAt,
     },
