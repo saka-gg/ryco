@@ -256,6 +256,20 @@ export interface ProjectionSnapshotQueryShape {
   >;
 
   /**
+   * One thread's newest `checkpoint.revert` activity (any status), or null. Reads only
+   * that thread's journal through its thread index, so per-delivery callers (the
+   * delegated-return worker) never scan every thread's activities. Judge it with
+   * `isCheckpointRevertEntryPending`. Optional so hand-written fakes need no edits.
+   */
+  readonly getLatestCheckpointRevert?: (threadId: ThreadId) => Effect.Effect<
+    {
+      readonly activity: OrchestrationThreadActivity;
+      readonly payload: CheckpointRevertActivityPayload;
+    } | null,
+    ProjectionRepositoryError
+  >;
+
+  /**
    * Search active projected user/assistant messages across threads.
    */
   readonly searchThreadMessages: (

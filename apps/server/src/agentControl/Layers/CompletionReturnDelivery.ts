@@ -169,8 +169,6 @@ interface ScanContext {
   readonly settledCommands: Set<string>;
   /** Parent → oldest capturedAt among its ready rows seen this scan. */
   readonly candidates: Map<ThreadId, string>;
-  /** Threads whose checkpoint revert blocks turn starts; read lazily, once per scan. */
-  pendingReverts?: ReadonlySet<ThreadId>;
 }
 
 export const makeCompletionReturnDelivery = Effect.gen(function* () {
@@ -363,36 +361,32 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
       return queuedTurnIdleBlocker(queuedTurnIdleInputFromShell(parent, nowMs)) === null;
     });
 
-  /** rollback-correctness's revert journal, judged by the decider's own pending rule. */
-  const pendingRevertThreads = (ctx: ScanContext) =>
-    Effect.gen(function* () {
-      if (ctx.pendingReverts !== undefined) return ctx.pendingReverts;
-      const entries = projections.listPendingCheckpointReverts
-        ? yield* projections.listPendingCheckpointReverts()
-        : [];
-      const pending = new Set(
-        entries
-          .filter((entry) => isCheckpointRevertEntryPending(entry, ctx.nowMs))
-          .map((entry) => entry.threadId),
-      );
-      ctx.pendingReverts = pending;
-      return pending;
-    });
-
   /**
    * Why the parent cannot take a wake now, or null. Every reason is a wait (save and retry),
    * never a cancel and never a delivery attempt: the decider would reject the wake for the
    * same reason, and the reason ends on its own.
    * - A usage limit (usage-limits §5.2): an accepted turn start clears the limit, which only
    *   the user's resume or the auto-resume after the reset may do. The decider fences it too.
-   * - A pending checkpoint revert: the decider rejects every turn start until it ends.
+   * - Busy: the shared queued-turn idle predicate.
+   * A pending checkpoint revert is the third such wait, checked by `parentReverting` last,
+   * right before a claim, because it reads the journal.
    */
   const parentHoldDetail = (parent: OrchestrationThreadShell, ctx: ScanContext) =>
     Effect.gen(function* () {
       if (applicableUsageLimit(parent) !== null) return DETAIL.usageLimited;
       if (!(yield* parentIdle(parent, ctx.nowMs))) return DETAIL.busy;
-      if ((yield* pendingRevertThreads(ctx)).has(parent.id)) return DETAIL.reverting;
       return null;
+    });
+
+  /**
+   * rollback-correctness's revert journal for this parent only, judged by the decider's own
+   * pending rule: the decider rejects every turn start until the revert ends.
+   */
+  const parentReverting = (parentThreadId: ThreadId, ctx: ScanContext) =>
+    Effect.gen(function* () {
+      if (!projections.getLatestCheckpointRevert) return false;
+      const latest = yield* projections.getLatestCheckpointRevert(parentThreadId);
+      return latest !== null && isCheckpointRevertEntryPending(latest, ctx.nowMs);
     });
 
   const capture = (
@@ -538,23 +532,22 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
           return;
         }
         if (!(yield* policy.isEnabled)) return yield* holdAll(rows, now);
-        const held = yield* parentHoldDetail(parent.value, ctx);
-        if (held === DETAIL.busy) return yield* holdAll(rows, now);
-        if (held !== null) {
-          // The parent's state changes before it can take the wake (a resume adds a user
-          // message, a revert drops some), so the frozen command's guard would go stale and
-          // spend a rejection. It was never applied (no receipt): wait as ready and rebuild.
-          yield* saveAll(
-            rows.map(
+        // The parent's state changes before it can take the wake (a resume adds a user
+        // message, a revert drops some), so the frozen command's guard would go stale and
+        // spend a rejection. It was never applied (no receipt): wait as ready and rebuild.
+        const releaseToReady = (members: ReadonlyArray<CompletionReturnRecord>, detail: string) =>
+          saveAll(
+            members.map(
               (row) =>
                 [
                   row,
-                  patch(row, { status: "ready", detail: held, batch: null, command: null }, now),
+                  patch(row, { status: "ready", detail, batch: null, command: null }, now),
                 ] as const,
             ),
-          );
-          return;
-        }
+          ).pipe(Effect.asVoid);
+        const held = yield* parentHoldDetail(parent.value, ctx);
+        if (held === DETAIL.busy) return yield* holdAll(rows, now);
+        if (held !== null) return yield* releaseToReady(rows, held);
         // A replay re-joins the wake, so it passes the same user-stop and scope checks as a
         // new batch. The frozen command was never applied (no receipt), so releasing the
         // rows to `ready` cannot duplicate it: user-stopped rows end, the rest re-batch.
@@ -587,6 +580,8 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
         // §3.4: a replay that cold-starts the parent counts against the same budget.
         const cold = yield* parentCold(parent.value.id);
         if (cold && coldBudgetFull()) return yield* holdAll(bounded, now, DETAIL.cold);
+        if (yield* parentReverting(parent.value.id, ctx))
+          return yield* releaseToReady(bounded, DETAIL.reverting);
         const replayed: CompletionReturnBatch = { ...batch, replays: batch.replays + 1, cold };
         if (
           !(yield* saveAll(
@@ -842,6 +837,9 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
 
       const cold = yield* parentCold(parentThreadId);
       if (cold && coldBudgetFull()) return yield* holdAll(remaining, now, DETAIL.cold);
+      // Last before the claim: a journal read per wake, never per held scan.
+      if (yield* parentReverting(parentThreadId, ctx))
+        return yield* holdAll(remaining, now, DETAIL.reverting);
 
       const members = selectWakeBatch(remaining);
       const anchor = members

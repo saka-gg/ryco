@@ -175,8 +175,9 @@ const setup = (fixture: Partial<CompletionReturnRecord> = {}) =>
     let failReads = false;
     let applyMode: ApplyMode = "accept";
     let modelPendingRow = false;
-    // Newest pending checkpoint revert per thread (ProjectionSnapshotQuery's journal read).
+    // Newest checkpoint revert per thread (ProjectionSnapshotQuery's per-thread journal read).
     const pendingReverts = new Map<string, ReturnType<typeof makeCheckpointRevertActivity>>();
+    const revertReads: string[] = [];
     const sent: Array<Extract<ClientOrchestrationCommand, { type: "thread.turn.start" }>> = [];
 
     // A delegated child with a completed, ingestion-bound initial turn and a final answer.
@@ -223,14 +224,16 @@ const setup = (fixture: Partial<CompletionReturnRecord> = {}) =>
           failReads
             ? Effect.fail(new Error("fixture transient"))
             : Effect.succeed(Option.fromNullishOr(shells.get(id))),
-        listPendingCheckpointReverts: () =>
-          Effect.sync(() =>
-            [...pendingReverts].map(([threadId, activity]) => ({
-              threadId: ThreadId.make(threadId),
-              activity,
-              payload: activity.payload as CheckpointRevertActivityPayload,
-            })),
-          ),
+        // The startup-only whole-journal scan never belongs on the delivery path.
+        listPendingCheckpointReverts: () => Effect.die("delivery scanned every thread's journal"),
+        getLatestCheckpointRevert: (threadId: ThreadId) =>
+          Effect.sync(() => {
+            revertReads.push(threadId);
+            const activity = pendingReverts.get(threadId);
+            return activity === undefined
+              ? null
+              : { activity, payload: activity.payload as CheckpointRevertActivityPayload };
+          }),
       } as never),
       Effect.provideService(OrchestrationCommandApplication, {
         apply: (command: ClientOrchestrationCommand) =>
@@ -325,6 +328,7 @@ const setup = (fixture: Partial<CompletionReturnRecord> = {}) =>
       modelPendingRow: () => {
         modelPendingRow = true;
       },
+      revertReads,
       setPendingRevert: (
         threadId: string,
         status: CheckpointRevertStatus | null,
@@ -965,6 +969,55 @@ it.effect(
         ["delegation-return:child"],
       );
     }).pipe(Effect.provide(layer)),
+);
+
+it.effect(
+  "reads only the parent's own revert journal, and only right before it claims a wake",
+  () =>
+    Effect.gen(function* () {
+      const h = yield* setup();
+      yield* h.ack();
+      h.setParent(busyParent());
+      yield* h.tick(0);
+      h.setParent(limitedParent());
+      yield* h.tick(3);
+      h.setParent({
+        ...shell("parent", "parent-turn", "parent-runtime"),
+        worktreePath: "/elsewhere",
+      });
+      yield* h.tick(6);
+      // Busy, limited and out-of-scope holds never reach the journal.
+      assert.deepStrictEqual(h.revertReads, []);
+      h.setParent(shell("parent", "parent-turn", "parent-runtime"));
+      yield* h.tick(9);
+      assert.equal((yield* h.read()).status, "delivered");
+      assert.deepStrictEqual(h.revertReads, ["parent"]);
+    }).pipe(Effect.provide(layer)),
+);
+
+it.effect("does not re-read the revert journal of a parent held for the cold-wake budget", () =>
+  Effect.gen(function* () {
+    const h = yield* setup();
+    // Five cold parents: four fill the budget, the fifth waits for a slot.
+    const parents = ["p1", "p2", "p3", "p4", "p5"];
+    for (const parent of parents) {
+      h.shells.set(parent, shell(parent, `${parent}-turn`, null));
+      yield* h.repo.insert(
+        completionFixture({
+          childThreadId: ThreadId.make(`${parent}-child`),
+          initialMessageId: MessageId.make(`${parent}-child-initial`),
+          parentThreadId: ThreadId.make(parent),
+          status: "ready",
+          capture: { kind: "result", outcome: "completed", capturedAt: now, section: parent },
+        }),
+      );
+    }
+    yield* h.tick(0);
+    yield* h.tick(3);
+    yield* h.tick(6);
+    assert.include((yield* h.read("p5-child")).detail, "another chat's session");
+    assert.deepStrictEqual(h.revertReads, ["p1", "p2", "p3", "p4"]);
+  }).pipe(Effect.provide(layer)),
 );
 
 it.effect("ignores another thread's revert and one past the decider's stale backstop", () =>

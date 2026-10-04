@@ -852,6 +852,28 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       `,
   });
 
+  // One thread's revert journal: `thread_id = ?` keeps it on the thread index.
+  const listThreadCheckpointRevertActivityRows = SqlSchema.findAll({
+    Request: ThreadIdLookupInput,
+    Result: ProjectionThreadActivityDbRowSchema,
+    execute: ({ threadId }) =>
+      sql`
+        SELECT
+          activity_id AS "activityId",
+          thread_id AS "threadId",
+          turn_id AS "turnId",
+          tone,
+          kind,
+          summary,
+          payload_json AS "payload",
+          sequence,
+          created_at AS "createdAt"
+        FROM projection_thread_activities
+        WHERE thread_id = ${threadId}
+          AND kind = ${CHECKPOINT_REVERT_ACTIVITY_KIND}
+      `,
+  });
+
   // Idle-only command invariants need the lifecycle pairs that can block a
   // handoff even after restart. Keep this intentionally narrow instead of
   // hydrating arbitrary activity history into the command read model.
@@ -3744,6 +3766,20 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       }),
     );
 
+  const getLatestCheckpointRevert: NonNullable<
+    ProjectionSnapshotQueryShape["getLatestCheckpointRevert"]
+  > = (threadId) =>
+    listThreadCheckpointRevertActivityRows({ threadId }).pipe(
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "ProjectionSnapshotQuery.getLatestCheckpointRevert:query",
+          "ProjectionSnapshotQuery.getLatestCheckpointRevert:decodeRows",
+        ),
+      ),
+      // Ordered by the same rule as every other journal reader.
+      Effect.map((rows) => latestCheckpointRevert(rows.map(mapActivityRow))),
+    );
+
   const getThreadProposedPlanById: NonNullable<
     ProjectionSnapshotQueryShape["getThreadProposedPlanById"]
   > = (input) =>
@@ -3786,6 +3822,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     getThreadProposedPlanById,
     listThreadTaskPathRefs,
     listPendingCheckpointReverts,
+    getLatestCheckpointRevert,
     searchThreadMessages,
   } satisfies ProjectionSnapshotQueryShape;
 });

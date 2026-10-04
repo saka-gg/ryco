@@ -328,6 +328,47 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
     }),
   );
 
+  it.effect("reads one thread's newest checkpoint revert, whatever its status", () =>
+    Effect.gen(function* () {
+      const query = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+      const insertRevert = (
+        threadId: string,
+        id: string,
+        status: string,
+        createdAt: string,
+        sequence: number | null,
+      ) =>
+        sql`INSERT INTO projection_thread_activities (activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at)
+          VALUES (${`checkpoint-revert:${threadId}-${id}`}, ${threadId}, NULL, 'info', 'checkpoint.revert', 'Revert',
+            ${JSON.stringify({ schemaVersion: 1, revertRequestId: `${threadId}-${id}`, turnCount: 1, status })},
+            ${sequence}, ${createdAt})`;
+      // The sequenced entry is newer than an unsequenced one with a later timestamp.
+      yield* insertRevert(
+        "revert-own",
+        "unsequenced",
+        "requested",
+        "2026-09-12T00:05:00.000Z",
+        null,
+      );
+      yield* insertRevert("revert-own", "old", "rolling-back", "2026-09-12T00:00:00.000Z", 4);
+      yield* insertRevert("revert-own", "new", "completed", "2026-09-12T00:01:00.000Z", 9);
+      yield* insertRevert("revert-other", "pending", "requested", "2026-09-12T00:02:00.000Z", 12);
+      yield* sql`INSERT INTO projection_thread_activities (activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at)
+        VALUES ('revert-own-tool', 'revert-own', NULL, 'tool', 'tool', 'Tool', '{}', 20, '2026-09-12T00:03:00.000Z')`;
+
+      const own = yield* query.getLatestCheckpointRevert!(ThreadId.make("revert-own"));
+      const none = yield* query.getLatestCheckpointRevert!(ThreadId.make("revert-none"));
+
+      assert.deepStrictEqual(
+        own === null ? null : { id: String(own.activity.id), status: own.payload.status },
+        { id: "checkpoint-revert:revert-own-new", status: "completed" },
+      );
+      assert.equal(none, null);
+      yield* sql`DELETE FROM projection_thread_activities WHERE thread_id IN ('revert-own', 'revert-other')`;
+    }),
+  );
+
   it.effect("hydrates read model from projection tables and computes snapshot sequence", () =>
     Effect.gen(function* () {
       const snapshotQuery = yield* ProjectionSnapshotQuery;

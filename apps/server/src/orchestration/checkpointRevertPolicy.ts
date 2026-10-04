@@ -133,7 +133,7 @@ export function latestCheckpointRevert(
 /**
  * Whether a thread's newest revert journal entry still blocks turn starts: pending and not
  * past the stale backstop. Callers that read the journal elsewhere (the delegated-return
- * worker reads `ProjectionSnapshotQuery.listPendingCheckpointReverts`) use this so they agree
+ * worker reads `ProjectionSnapshotQuery.getLatestCheckpointRevert`) use this so they agree
  * with the decider's admission check.
  */
 export function isCheckpointRevertEntryPending(
