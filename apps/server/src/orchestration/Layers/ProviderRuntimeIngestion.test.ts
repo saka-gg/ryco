@@ -4548,6 +4548,7 @@ describe("ProviderRuntimeIngestion", () => {
     );
     expect(usageActivity).toBeDefined();
     expect(usageActivity?.payload).toMatchObject({
+      statisticsProvider: "codex",
       usedTokens: 1075,
       totalProcessedTokens: 10_200,
       maxTokens: 128_000,

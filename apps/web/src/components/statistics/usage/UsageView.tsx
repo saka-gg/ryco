@@ -199,8 +199,8 @@ export function UsageView({
                   {formatCost(totals.estimatedCostUsd)}
                 </div>
                 <p className="mt-3 max-w-sm text-xs leading-relaxed text-muted-foreground">
-                  Estimate based on base API rates. Subscription, credits, batch, negotiated, and
-                  provider billing may differ.
+                  Estimate based on published API rates and recorded billing speed. Subscription,
+                  credits, batch, negotiated, and provider billing may differ.
                 </p>
               </div>
               <div className="space-y-4 border-t border-border/65 pt-5">

@@ -18,7 +18,8 @@ import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 import { writeFileStringAtomically } from "../atomicWrite.ts";
 import { ServerConfig } from "../config.ts";
 import { ServerEnvironment } from "../environment/Services/ServerEnvironment.ts";
-import { resolveClaudeHomePath } from "../provider/Drivers/ClaudeHome.ts";
+import { resolveProviderSourceLayout } from "../provider/ProviderSourceLayout.ts";
+import { resolveClaudeHomePath, resolveClaudeSourceRoot } from "../provider/Drivers/ClaudeHome.ts";
 import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import { UsageAggregator } from "./usageAggregation.ts";
@@ -31,6 +32,7 @@ import {
 } from "./usagePricing.ts";
 import {
   anonymizeUsageRecord,
+  matchesUsageFileCache,
   decodeUsageScanCache,
   deduplicateUsageRecordsWithinFile,
   encodeUsageScanCache,
@@ -60,7 +62,8 @@ export const LITELLM_USAGE_RATES_URL =
 
 const RATES_TTL_MS = 24 * 60 * 60 * 1000;
 const MTIME_WINDOW_SLACK_MS = 36 * 60 * 60 * 1000;
-const SOURCE_SCAN_BYTES = 256 * 1024 * 1024;
+const SOURCE_SCAN_BYTES = 4 * 1024 * 1024 * 1024;
+const PRICING_CACHE_VERSION = 2;
 const SOURCE_SCAN_RECORDS = 100_000;
 const SOURCE_SCAN_DURATION_MS = 5_000;
 const SUMMARY_SCAN_DURATION_MS = 30_000;
@@ -68,6 +71,7 @@ const SUMMARY_SOURCE_LIMIT = 128;
 const SCAN_CACHE_RETENTION_MS = 120 * 24 * 60 * 60 * 1000;
 
 interface PersistedRates {
+  readonly version: number;
   readonly fetchedAtMs: number;
   readonly revision: string;
   readonly document: unknown;
@@ -152,14 +156,6 @@ function ratesRevision(document: unknown): string {
   return `litellm-${(hash >>> 0).toString(16).padStart(8, "0")}`;
 }
 
-function configuredHomePath(config: unknown): string | undefined {
-  if (typeof config !== "object" || config === null || !("homePath" in config)) {
-    return undefined;
-  }
-  const homePath = config.homePath;
-  return typeof homePath === "string" ? homePath : undefined;
-}
-
 const makeUsageService = Effect.gen(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -229,6 +225,7 @@ const makeUsageService = Effect.gen(function* () {
     if (typeof parsed !== "object" || parsed === null) return;
     const cache = parsed as Partial<PersistedRates>;
     if (
+      cache.version !== PRICING_CACHE_VERSION ||
       typeof cache.fetchedAtMs !== "number" ||
       !Number.isFinite(cache.fetchedAtMs) ||
       typeof cache.revision !== "string"
@@ -271,6 +268,7 @@ const makeUsageService = Effect.gen(function* () {
     yield* writeFileStringAtomically({
       filePath: ratesCachePath,
       contents: `${JSON.stringify({
+        version: PRICING_CACHE_VERSION,
         fetchedAtMs: now,
         revision,
         document: encodeUsageRateTable(rates),
@@ -304,23 +302,29 @@ const makeUsageService = Effect.gen(function* () {
       )).sharedHomePath,
     ];
 
-    for (const instance of Object.values(settings.providerInstances)) {
-      if (instance.enabled === false) continue;
-      const homePath = configuredHomePath(instance.config);
-      if (instance.driver === "claudeAgent") {
-        claudeHomes.push(
-          yield* resolveClaudeHomePath({
-            homePath: homePath ?? settings.providers.claudeAgent.homePath,
-          }).pipe(Effect.provideService(Path.Path, path)),
-        );
-      } else if (instance.driver === "codex") {
-        codexHomes.push(
-          (yield* resolveCodexHomeLayout({
-            ...settings.providers.codex,
-            homePath: homePath ?? settings.providers.codex.homePath,
-          }).pipe(Effect.provideService(Path.Path, path))).sharedHomePath,
-        );
+    const instanceClaudeRoots: string[] = [];
+    const invalidSources: ResolvedTranscriptSource[] = [];
+    for (const [instanceId, instance] of Object.entries(settings.providerInstances)) {
+      if (instance.driver !== "codex" && instance.driver !== "claudeAgent") continue;
+      // Discovery shares the runtime's path/env precedence, including disabled accounts.
+      const layout = yield* resolveProviderSourceLayout(
+        instance.driver === "codex" ? "codex" : "claudeAgent",
+        instance,
+      ).pipe(
+        Effect.provideService(Path.Path, path),
+        Effect.catch(() => Effect.succeed(null)),
+      );
+      if (layout === null) {
+        invalidSources.push({
+          provider: instance.driver === "codex" ? "codex" : "claude",
+          identityRoot: `unsupported:${instance.driver}:${instanceId}`,
+          scanRoots: [],
+          unsupportedCode: "history-config-invalid",
+        });
+        continue;
       }
+      if (instance.driver === "codex") codexHomes.push(layout.root);
+      else instanceClaudeRoots.push(path.join(layout.root, "projects"));
     }
 
     const sources = new Map<string, ResolvedTranscriptSource>();
@@ -329,13 +333,28 @@ const makeUsageService = Effect.gen(function* () {
       const nestedClaudeExists = yield* fileSystem
         .exists(nestedClaudeRoot)
         .pipe(Effect.catchCause(() => Effect.succeed(false)));
-      const claudeRoot = nestedClaudeExists ? nestedClaudeRoot : path.join(claudeHome, "projects");
+      const claudeRoot = process.env.CLAUDE_CONFIG_DIR?.trim()
+        ? path.join(
+            yield* resolveClaudeSourceRoot(settings.providers.claudeAgent).pipe(
+              Effect.provideService(Path.Path, path),
+            ),
+            "projects",
+          )
+        : nestedClaudeExists
+          ? nestedClaudeRoot
+          : path.join(claudeHome, "projects");
       sources.set(`claude\0${claudeRoot}`, {
         provider: "claude",
         identityRoot: claudeRoot,
         scanRoots: [claudeRoot],
       });
     }
+    for (const claudeRoot of instanceClaudeRoots)
+      sources.set(`claude\0${claudeRoot}`, {
+        provider: "claude",
+        identityRoot: claudeRoot,
+        scanRoots: [claudeRoot],
+      });
     for (const codexHome of codexHomes) {
       sources.set(`codex\0${codexHome}`, {
         provider: "codex",
@@ -343,7 +362,11 @@ const makeUsageService = Effect.gen(function* () {
         scanRoots: [path.join(codexHome, "sessions"), path.join(codexHome, "archived_sessions")],
       });
     }
-    return [...sources.values(), ...resolveNativeUsageSources(settings.providerInstances)];
+    return [
+      ...sources.values(),
+      ...invalidSources,
+      ...resolveNativeUsageSources(settings.providerInstances, undefined, undefined, true),
+    ];
   });
 
   const readFileRecords = Effect.fn("UsageService.readFileRecords")(function* (
@@ -353,13 +376,7 @@ const makeUsageService = Effect.gen(function* () {
   ): Effect.fn.Return<CachedReadResult> {
     const fileKey = usageCacheFileKey(provider, file.path);
     const cached = scanCache.get(fileKey);
-    if (
-      cached !== undefined &&
-      cached.size === file.size &&
-      cached.mtimeMs === file.mtimeMs &&
-      cached.provider === provider &&
-      cached.fingerprint === file.fingerprint
-    ) {
+    if (matchesUsageFileCache(cached, file, provider)) {
       return {
         records: cached.records,
         reused: true,
@@ -580,16 +597,23 @@ const makeUsageService = Effect.gen(function* () {
         for (const file of listing.files)
           liveFileKeys.add(usageCacheFileKey(source.provider, file.path));
         for (const file of listing.files) {
+          const cached = scanCache.get(usageCacheFileKey(source.provider, file.path));
+          const reusable = matchesUsageFileCache(cached, file, source.provider);
           const now = yield* Clock.currentTimeMillis;
           if (
-            scannedBytes + file.size > SOURCE_SCAN_BYTES ||
-            scannedRecords >= SOURCE_SCAN_RECORDS ||
-            now - sourceStartedAtMs >= SOURCE_SCAN_DURATION_MS
+            !reusable &&
+            (scannedBytes + file.size > SOURCE_SCAN_BYTES ||
+              now - sourceStartedAtMs >= SOURCE_SCAN_DURATION_MS)
           ) {
+            failedFileCount++;
+            // Later files may already be cached or small enough to fit.
+            continue;
+          }
+          if (scannedRecords >= SOURCE_SCAN_RECORDS) {
             failedFileCount++;
             break;
           }
-          scannedBytes += file.size;
+          if (!reusable) scannedBytes += file.size;
           const read = yield* readFileRecords(file, source.provider, rootKey);
           if (read.reused) reusedCacheFileCount += 1;
           else if (!read.failed) parsedFileCount += 1;

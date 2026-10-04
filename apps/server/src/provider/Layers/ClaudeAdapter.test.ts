@@ -2422,6 +2422,14 @@ describe("ClaudeAdapterLive", () => {
       if (usageEvent?.type === "thread.token-usage.updated") {
         assert.deepEqual(usageEvent.payload, {
           usage: {
+            processedUsage: {
+              scope: "turn",
+              inputTokens: 23863,
+              cachedInputTokens: 21144,
+              outputTokens: 679,
+              reasoningOutputTokens: 0,
+              totalTokens: 24542,
+            },
             usedTokens: 24542,
             lastUsedTokens: 24542,
             inputTokens: 23863,
@@ -2488,6 +2496,14 @@ describe("ClaudeAdapterLive", () => {
       if (usageEvent?.type === "thread.token-usage.updated") {
         assert.deepEqual(usageEvent.payload, {
           usage: {
+            processedUsage: {
+              scope: "turn",
+              inputTokens: 0,
+              cachedInputTokens: 0,
+              outputTokens: 0,
+              reasoningOutputTokens: 0,
+              totalTokens: 535000,
+            },
             usedTokens: 200000,
             lastUsedTokens: 200000,
             totalProcessedTokens: 535000,
@@ -2767,6 +2783,14 @@ describe("ClaudeAdapterLive", () => {
         if (finalUsageEvent?.type === "thread.token-usage.updated") {
           assert.deepEqual(finalUsageEvent.payload, {
             usage: {
+              processedUsage: {
+                scope: "turn",
+                inputTokens: 0,
+                cachedInputTokens: 0,
+                outputTokens: 0,
+                reasoningOutputTokens: 0,
+                totalTokens: 535000,
+              },
               usedTokens: 190000,
               lastUsedTokens: 190000,
               totalProcessedTokens: 535000,

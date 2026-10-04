@@ -285,6 +285,7 @@ function readTokenReductionInstructions(tokenMode: AgentTokenMode) {
 
 function normalizeCodexTokenUsage(
   usage: EffectCodexSchema.V2ThreadTokenUsageUpdatedNotification["tokenUsage"],
+  sessionId: string,
 ): ThreadTokenUsageSnapshot | undefined {
   const totalProcessedTokens = usage.total.totalTokens;
   const usedTokens = usage.last.totalTokens;
@@ -299,6 +300,15 @@ function normalizeCodexTokenUsage(
   const reasoningOutputTokens = usage.last.reasoningOutputTokens;
 
   return {
+    processedUsage: {
+      scope: "session",
+      sessionId,
+      inputTokens: usage.total.inputTokens,
+      cachedInputTokens: usage.total.cachedInputTokens,
+      outputTokens: usage.total.outputTokens,
+      reasoningOutputTokens: usage.total.reasoningOutputTokens,
+      totalTokens: usage.total.totalTokens,
+    },
     usedTokens,
     ...(totalProcessedTokens !== undefined && totalProcessedTokens > usedTokens
       ? { totalProcessedTokens }
@@ -1180,7 +1190,9 @@ function mapToRuntimeEvents(
       EffectCodexSchema.V2ThreadTokenUsageUpdatedNotification,
       event.payload,
     );
-    const normalizedUsage = payload ? normalizeCodexTokenUsage(payload.tokenUsage) : undefined;
+    const normalizedUsage = payload
+      ? normalizeCodexTokenUsage(payload.tokenUsage, payload.threadId)
+      : undefined;
     if (!normalizedUsage) {
       return [];
     }

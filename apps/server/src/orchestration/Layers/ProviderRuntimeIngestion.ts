@@ -1031,7 +1031,10 @@ export function runtimeEventToActivities(
           tone: "info",
           kind: "context-window.updated",
           summary: "Context window updated",
-          payload,
+          payload: {
+            ...payload,
+            statisticsProvider: event.provider,
+          },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
         },
@@ -3071,7 +3074,16 @@ const make = Effect.gen(function* () {
           type: "thread.activity.append",
           commandId: providerCommandId(event, "thread-activity-append", String(activity.id)),
           threadId: thread.id,
-          activity,
+          activity:
+            activity.kind === "context-window.updated"
+              ? {
+                  ...activity,
+                  payload: {
+                    ...(activity.payload as Record<string, unknown>),
+                    statisticsModel: thread.modelSelection.model,
+                  },
+                }
+              : activity,
           createdAt: activity.createdAt,
         }),
       ).pipe(Effect.asVoid);

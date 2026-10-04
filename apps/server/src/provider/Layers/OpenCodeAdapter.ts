@@ -426,7 +426,10 @@ function mapPermissionDecision(reply: "once" | "always" | "reject"): string {
  * other apps derive by summing buckets when the server reports no total.
  * Reads defensively: older servers and partial event payloads may omit fields.
  */
-function threadTokenUsageFromOpenCodeTokens(tokens: unknown): ThreadTokenUsageSnapshot | undefined {
+function threadTokenUsageFromOpenCodeTokens(
+  tokens: unknown,
+  requestId: string,
+): ThreadTokenUsageSnapshot | undefined {
   if (typeof tokens !== "object" || tokens === null) {
     return undefined;
   }
@@ -447,6 +450,15 @@ function threadTokenUsageFromOpenCodeTokens(tokens: unknown): ThreadTokenUsageSn
     return undefined;
   }
   return {
+    processedUsage: {
+      scope: "request",
+      requestId,
+      inputTokens,
+      cachedInputTokens: nonNegative(record.cache?.read),
+      outputTokens: outputTokens + reasoningTokens,
+      reasoningOutputTokens: reasoningTokens,
+      totalTokens: usedTokens,
+    },
     usedTokens,
     lastUsedTokens: usedTokens,
     ...(inputTokens > 0 ? { inputTokens } : {}),
@@ -1503,7 +1515,10 @@ export function makeOpenCodeAdapter(
           );
           if (event.properties.info.role === "assistant") {
             if (event.properties.sessionID === context.openCodeSessionId) {
-              const usage = threadTokenUsageFromOpenCodeTokens(event.properties.info.tokens);
+              const usage = threadTokenUsageFromOpenCodeTokens(
+                event.properties.info.tokens,
+                event.properties.info.id,
+              );
               if (usage) {
                 yield* emitForContext(context, {
                   ...(yield* buildEventBase({

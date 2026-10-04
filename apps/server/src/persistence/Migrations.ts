@@ -1,3 +1,4 @@
+import Migration0071 from "./Migrations/071_StatisticsUsageHistory.ts";
 import Migration0070 from "./Migrations/070_LocalTasks.ts";
 import Migration0069 from "./Migrations/069_DailyRecapIndexes.ts";
 import Migration0068 from "./Migrations/068_ProjectionMessageSearch.ts";
@@ -165,6 +166,7 @@ export const migrationEntries = [
   [68, "ProjectionMessageSearch", Migration0068],
   [69, "DailyRecapIndexes", Migration0069],
   [70, "LocalTasks", Migration0070],
+  [71, "StatisticsUsageHistory", Migration0071],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>
