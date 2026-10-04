@@ -390,9 +390,29 @@ describe("HostedRelayEngine", () => {
     });
 
     expect(handlers.onFailure).toHaveBeenCalledWith(
-      expect.objectContaining({ kind: "revoked", retryable: false, closeReason: "revoked" }),
+      expect.objectContaining({
+        kind: "revoked",
+        retryable: false,
+        closeReason: "revoked",
+        enrollmentRevoked: { enrollmentId: `enr_${"e".repeat(22)}`, enrollmentRevision: 2 },
+      }),
     );
   });
+
+  it.each(["revoked", "node_revoked", "grant_revoked"] as const)(
+    "never reports a %s channel close as an enrollment revocation",
+    (reason) => {
+      const handlers = callbacks();
+      const { socket } = create(handlers);
+      authenticate(socket);
+      socket.frame({ type: "channel.close", ...VERSION, channelId: CHANNEL_ID, reason });
+
+      expect(handlers.onFailure).toHaveBeenCalledOnce();
+      const [reported] = handlers.onFailure.mock.calls[0]!;
+      expect(reported).toMatchObject({ kind: "revoked", retryable: false, closeReason: reason });
+      expect(reported).not.toHaveProperty("enrollmentRevoked");
+    },
+  );
 
   it("advertises chunk support on fitting outbound RPC messages", () => {
     const { engine, socket } = create();

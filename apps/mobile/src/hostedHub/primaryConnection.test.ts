@@ -6,6 +6,14 @@ const hostedLifecycle = vi.hoisted(() => ({
   markReady: vi.fn(),
   markReplaying: vi.fn(),
   reportFailure: vi.fn(),
+  failure: vi.fn(),
+}));
+const enrollment = vi.hoisted(() => ({
+  applyRevocation: vi.fn(() => true),
+  invalidate: vi.fn(async () => undefined),
+}));
+vi.mock("./e2eeEnrollment", () => ({
+  getMobileNativeE2eeEnrollmentCoordinator: () => enrollment,
 }));
 const connectionFactory = vi.hoisted(() => ({
   input: null as Record<string, unknown> | null,
@@ -52,7 +60,7 @@ vi.mock("@ryco/client-runtime/authorization", async (importOriginal) => ({
       },
     }),
   },
-  hostedHubController: {},
+  hostedHubController: { failure: hostedLifecycle.failure },
   markHostedSessionReady: hostedLifecycle.markReady,
   markHostedSessionReplaying: hostedLifecycle.markReplaying,
   reportHostedShellSnapshotFailure: hostedLifecycle.reportFailure,
@@ -160,6 +168,9 @@ beforeEach(() => {
   hostedLifecycle.markReady.mockReset();
   hostedLifecycle.markReplaying.mockReset();
   hostedLifecycle.reportFailure.mockReset();
+  hostedLifecycle.failure.mockReset();
+  enrollment.applyRevocation.mockClear();
+  enrollment.invalidate.mockClear();
   coordinator.current = true;
   coordinator.markReady.mockReset();
   coordinator.markReplaying.mockReset();
@@ -181,6 +192,41 @@ describe("hosted primary connection", () => {
     coordinator.current = false;
     relay.binding?.connectionRecovered?.(coordinator.generation);
     expect(relay.recover).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["revoked", "node_revoked", "grant_revoked"] as const)(
+    "keeps the device enrollment when a %s close ends one node's channel",
+    (closeReason) => {
+      writePrimaryEnvironmentDescriptor(descriptor);
+      createHostedPrimaryConnection(deps());
+
+      relay.binding?.failure(coordinator.generation, {
+        kind: "revoked",
+        retryable: false,
+        closeReason,
+      });
+
+      expect(enrollment.applyRevocation).not.toHaveBeenCalled();
+      expect(enrollment.invalidate).not.toHaveBeenCalled();
+      // The node itself still reports the revocation.
+      expect(hostedLifecycle.failure).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("hands only the Hub's enrollment frame to the enrollment coordinator", () => {
+    writePrimaryEnvironmentDescriptor(descriptor);
+    createHostedPrimaryConnection(deps());
+    const enrollmentRevoked = { enrollmentId: `enr_${"e".repeat(22)}`, enrollmentRevision: 2 };
+
+    relay.binding?.failure(coordinator.generation, {
+      kind: "revoked",
+      retryable: false,
+      closeReason: "revoked",
+      enrollmentRevoked,
+    });
+
+    expect(enrollment.applyRevocation).toHaveBeenCalledExactlyOnceWith(enrollmentRevoked);
+    expect(enrollment.invalidate).not.toHaveBeenCalled();
   });
 
   it("returns null when no hosted node is selected", () => {

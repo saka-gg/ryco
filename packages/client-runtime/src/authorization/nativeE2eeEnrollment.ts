@@ -17,6 +17,7 @@ import type {
   NativeE2eePrekeyDescriptor,
 } from "../platform/index.ts";
 import type { HostedHubApi } from "./api.ts";
+import type { HostedRelayEnrollmentRevocation } from "./types.ts";
 
 export type NativeE2eeEnrollmentStatus =
   | "idle"
@@ -75,6 +76,13 @@ export interface NativeE2eeEnrollmentCoordinator {
   readonly ensure: (accountId: string) => Promise<NativeE2eeReadyEnrollment>;
   readonly retry: (accountId: string) => Promise<NativeE2eeReadyEnrollment>;
   readonly invalidate: (reason: "account-switch" | "revoked" | "signed-out") => Promise<void>;
+  /**
+   * The Hub's `e2ee.enrollment-revoked` relay frame. Revokes only when it names
+   * the enrollment this device currently holds, at or after the revision it
+   * holds; a frame for another enrollment or an older revision is ignored.
+   * Returns whether this device's enrollment was revoked.
+   */
+  readonly applyRevocation: (revocation: HostedRelayEnrollmentRevocation) => boolean;
 }
 
 const decodeEnrollmentRequest = Schema.decodeUnknownSync(NativeE2eeEnrollmentUpsertRequest);
@@ -270,6 +278,13 @@ export function createNativeE2eeEnrollmentCoordinator(
     return pending;
   };
 
+  const invalidate: NativeE2eeEnrollmentCoordinator["invalidate"] = async (reason) => {
+    const previous = namespace;
+    namespace = null;
+    invalidateCurrent(reason === "revoked" ? "revoked" : "idle");
+    if (previous) await input.platform.clearEnrollment(previous).catch(() => undefined);
+  };
+
   return {
     getState: () => state,
     subscribe: (listener) => {
@@ -278,11 +293,18 @@ export function createNativeE2eeEnrollmentCoordinator(
     },
     ensure: (accountId) => start(accountId, false),
     retry: (accountId) => start(accountId, true),
-    invalidate: async (reason) => {
-      const previous = namespace;
-      namespace = null;
-      invalidateCurrent(reason === "revoked" ? "revoked" : "idle");
-      if (previous) await input.platform.clearEnrollment(previous).catch(() => undefined);
+    invalidate,
+    applyRevocation: (revocation) => {
+      const held = state.status === "ready" ? state.ready?.enrollment : undefined;
+      if (
+        held === undefined ||
+        held.enrollmentId !== revocation.enrollmentId ||
+        held.enrollmentRevision > revocation.enrollmentRevision
+      ) {
+        return false;
+      }
+      void invalidate("revoked");
+      return true;
     },
   };
 }

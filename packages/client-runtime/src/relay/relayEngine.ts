@@ -861,7 +861,16 @@ export class HostedRelayEngine {
         ? this.#fail(failure(frame.reason ?? "channel_rejected"))
         : this.#fail(failure("channel_rejected"));
     if (frame.type === "e2ee.enrollment-revoked") {
-      return this.#fail(failure("revoked"));
+      // The only relay signal about the device's account enrollment, so it
+      // carries the enrollment it names. A bare `revoked` close is per channel
+      // and stays indistinguishable from node removal or key rotation.
+      return this.#fail({
+        ...failure("revoked"),
+        enrollmentRevoked: {
+          enrollmentId: frame.enrollmentId,
+          enrollmentRevision: frame.enrollmentRevision,
+        },
+      });
     }
     if (frame.type === "flow.pause" || frame.type === "flow.resume") {
       if (frame.channelId !== this.#channel) return this.#fail(failure("channel_rejected"));

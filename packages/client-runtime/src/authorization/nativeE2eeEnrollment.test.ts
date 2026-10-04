@@ -212,6 +212,35 @@ describe("native E2EE enrollment coordinator", () => {
     expect(invalidateHostedGeneration).toHaveBeenCalled();
   });
 
+  it("revokes on the Hub's enrollment frame only for this device's current enrollment", async () => {
+    const { coordinator, invalidateHostedGeneration } = harness();
+    await coordinator.ensure(ACCOUNT_ID);
+    invalidateHostedGeneration.mockClear();
+
+    expect(
+      coordinator.applyRevocation({ enrollmentId: `enr_${"f".repeat(22)}`, enrollmentRevision: 1 }),
+    ).toBe(false);
+    expect(coordinator.getState().status).toBe("ready");
+    expect(invalidateHostedGeneration).not.toHaveBeenCalled();
+
+    expect(
+      coordinator.applyRevocation({ enrollmentId: ENROLLMENT_ID, enrollmentRevision: 1 }),
+    ).toBe(true);
+    expect(coordinator.getState()).toMatchObject({ status: "revoked", ready: null });
+    expect(invalidateHostedGeneration).toHaveBeenCalledOnce();
+  });
+
+  it("ignores an enrollment frame for a revision this device already replaced", async () => {
+    const { coordinator, api } = harness();
+    vi.mocked(api.upsertE2eeDeviceEnrollment).mockResolvedValueOnce(summary(3));
+    await coordinator.ensure(ACCOUNT_ID);
+
+    expect(
+      coordinator.applyRevocation({ enrollmentId: ENROLLMENT_ID, enrollmentRevision: 2 }),
+    ).toBe(false);
+    expect(coordinator.getState().status).toBe("ready");
+  });
+
   it("rejects mismatched device material without reflecting it in the error", async () => {
     const { coordinator, platform } = harness();
     vi.mocked(platform.ensureIdentity).mockResolvedValue({
