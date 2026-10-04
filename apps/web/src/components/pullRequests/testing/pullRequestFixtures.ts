@@ -126,6 +126,7 @@ export const fixtureRepositoryOption: PullRequestRepositoryOption = {
   cwd: FIXTURE_CWD,
   name: "ryco",
   environmentLabel: null,
+  customAvatarContentHash: null,
   repositoryKey: "github.com/ryco-labs/ryco",
   isRepresentative: true,
 };

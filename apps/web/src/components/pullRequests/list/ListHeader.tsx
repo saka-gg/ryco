@@ -37,13 +37,17 @@ import {
   MenuSubTrigger,
   MenuTrigger,
 } from "../../ui/menu";
+import { ProjectFavicon } from "../../ProjectFavicon";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../../ui/tooltip";
 import { CreatePullRequestDialog } from "../create/CreatePullRequestDialog";
 import type { CreatePullRequestTarget } from "../create/createPullRequestDialogStore";
 import { PULL_REQUESTS_BAR_CLASS, usePullRequestsLeadingInsetClass } from "../PullRequestBar";
 import { KeyHint } from "../primitives";
 import { usePullRequestsPage } from "../PullRequestsPageContext";
-import { pullRequestRepositoryQualifier } from "../pullRequestRepositories.logic";
+import {
+  pullRequestRepositoryQualifier,
+  type PullRequestRepositoryOption,
+} from "../pullRequestRepositories.logic";
 import {
   resolvePullRequestsSort,
   resolvePullRequestsStateFilter,
@@ -313,8 +317,9 @@ function RepositorySwitcher() {
         ref={triggerRef}
         aria-label={`Repository: ${repository?.name ?? "none"}`}
         render={<button type="button" />}
-        className="ml-1 inline-flex h-6 max-w-[42%] shrink-0 items-center gap-1 rounded-md pr-1 pl-1.5 text-xs font-medium text-foreground/80 outline-hidden transition-colors duration-(--app-motion-duration-chip) hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring data-popup-open:bg-accent"
+        className="ml-1 inline-flex h-6 max-w-[42%] shrink-0 items-center gap-1.5 rounded-md pr-1 pl-1.5 text-xs font-medium text-foreground/80 outline-hidden transition-colors duration-(--app-motion-duration-chip) hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring data-popup-open:bg-accent"
       >
+        {repository ? <RepositoryLogo option={repository} className="size-3.5" /> : null}
         <span className="truncate">{repository?.name ?? "Repository"}</span>
         <ChevronDownIcon aria-hidden className="size-3 shrink-0 opacity-60" />
       </ComboboxTrigger>
@@ -339,15 +344,18 @@ function RepositorySwitcher() {
             const environment = pullRequestRepositoryQualifier(option, repositories);
             return (
               <ComboboxItem key={key} index={index} value={key} onClick={() => choose(key)}>
-                <span className="flex min-w-0 flex-col py-0.5">
-                  <span className="truncate text-sm">
-                    {option.name}
-                    {environment ? (
-                      <span className="text-muted-foreground"> · {environment}</span>
-                    ) : null}
-                  </span>
-                  <span className="truncate font-mono text-[11px] text-muted-foreground">
-                    {option.cwd}
+                <span className="flex min-w-0 items-center gap-2.5">
+                  <RepositoryLogo option={option} className="size-5" />
+                  <span className="flex min-w-0 flex-col py-0.5">
+                    <span className="truncate text-sm">
+                      {option.name}
+                      {environment ? (
+                        <span className="text-muted-foreground"> · {environment}</span>
+                      ) : null}
+                    </span>
+                    <span className="truncate font-mono text-[11px] text-muted-foreground">
+                      {option.cwd}
+                    </span>
                   </span>
                 </span>
               </ComboboxItem>
@@ -356,6 +364,23 @@ function RepositorySwitcher() {
         </ComboboxList>
       </ComboboxPopup>
     </Combobox>
+  );
+}
+
+/** The checkout's project artwork, or its colored initials when it has none. */
+function RepositoryLogo(props: {
+  readonly option: PullRequestRepositoryOption;
+  readonly className: string;
+}) {
+  return (
+    <ProjectFavicon
+      environmentId={props.option.environmentId}
+      cwd={props.option.cwd}
+      projectId={props.option.projectId}
+      customAvatarContentHash={props.option.customAvatarContentHash}
+      fallbackName={props.option.name}
+      className={cn("shrink-0", props.className)}
+    />
   );
 }
 
