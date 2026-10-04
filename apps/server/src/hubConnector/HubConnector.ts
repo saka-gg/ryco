@@ -169,14 +169,20 @@ export class HubConnector {
   #attempt = 0;
   #protocolViolations = 0;
   #staleProofRetries = 0;
-  /** Per-failure attempt counters for `slow_retry`; reset by stability or an explicit resume. */
-  readonly #slowAttempts = new Map<HubConnectorFailureCode, number>();
+  /**
+   * Attempt counters for `slow_retry`, one per schedule rather than per reported
+   * failure: a duplicate caught by the local lock and one the Hub displaced are
+   * both reported as `connection_replaced`, and checking a lock file must not
+   * stretch the gap before displacing a remote copy. Reset by stability or an
+   * explicit resume.
+   */
+  readonly #slowAttempts = new Map<SlowRetryPolicy, number>();
   /**
    * When each capped slow retry was scheduled, for its rolling-hour budget.
    * Deliberately not reset by stability: two duplicates that swap every few
    * minutes each look stable in between.
    */
-  readonly #slowRetryLog = new Map<HubConnectorFailureCode, number[]>();
+  readonly #slowRetryLog = new Map<SlowRetryPolicy, number[]>();
   /**
    * What `nudge` runs in place of the scheduled retry, or undefined when that
    * retry must keep its own schedule.
@@ -446,6 +452,9 @@ export class HubConnector {
     this.#clearTimer("retry");
     this.#slowAttempts.clear();
     this.#slowRetryLog.clear();
+    // The free retry for a proof that outlived its challenge is part of the
+    // same budget: a Retry after a slow keychain prompt gets it back.
+    this.#staleProofRetries = 0;
     if (!this.#runsConnector()) {
       this.#state.transition("degraded", {
         degradedMode: "operator_action_required",
@@ -1270,21 +1279,21 @@ export class HubConnector {
   ): void {
     const now = this.#scheduler.now();
     if (policy.maxPerHour !== undefined) {
-      const recent = (this.#slowRetryLog.get(failure) ?? []).filter(
+      const recent = (this.#slowRetryLog.get(policy) ?? []).filter(
         (scheduledAt) => now - scheduledAt < SLOW_RETRY_BUDGET_WINDOW_MS,
       );
       if (recent.length >= policy.maxPerHour) {
-        this.#slowRetryLog.set(failure, recent);
+        this.#slowRetryLog.set(policy, recent);
         this.#state.transition("degraded", {
           degradedMode: "operator_action_required",
           failure,
         });
         return;
       }
-      this.#slowRetryLog.set(failure, [...recent, now]);
+      this.#slowRetryLog.set(policy, [...recent, now]);
     }
-    const attempt = this.#slowAttempts.get(failure) ?? 0;
-    this.#slowAttempts.set(failure, attempt + 1);
+    const attempt = this.#slowAttempts.get(policy) ?? 0;
+    this.#slowAttempts.set(policy, attempt + 1);
     const decision = slowRetryDelay(policy, attempt, this.#scheduler.random());
     const retryGeneration = this.#state.generation;
     this.#state.transition("degraded", {

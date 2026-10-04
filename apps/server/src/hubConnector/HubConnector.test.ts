@@ -1579,6 +1579,58 @@ describe("HubConnector", () => {
     await disabled.stop();
   });
 
+  it("does not let a local duplicate's lock checks stretch the gap before a Hub displacement", async () => {
+    const clock = scheduler();
+    const sockets: FakeSocket[] = [];
+    let lockChecks = 0;
+    const connector = new HubConnector({
+      config: enabledConfig,
+      identity: identity(),
+      transport: {
+        open: () => {
+          const socket = new FakeSocket();
+          sockets.push(socket);
+          return socket;
+        },
+      },
+      channels: { open: async () => Promise.reject(new Error("unused")) },
+      enrollmentMetadata,
+      livenessWatch: false,
+      scheduler: clock.value,
+      processLock: {
+        // Held for the first three checks, then the other copy exits.
+        acquire: async () => (++lockChecks <= 3 ? "held" : "acquired"),
+        release: async () => undefined,
+      },
+    });
+    await connector.start();
+    for (const delayMs of [33_000, 60_000, 120_000]) {
+      expect(connector.status()).toMatchObject({ failure: "connection_replaced" });
+      await clock.advance(delayMs);
+      await settle();
+    }
+    expect(sockets).toHaveLength(1);
+    sockets[0]!.emit("open", {} as Event);
+    sockets[0]!.emit("message", {
+      data: encoded({
+        type: "error",
+        protocolMajor: 1,
+        protocolMinor: 2,
+        code: "connection_replaced",
+        fatal: true,
+      }),
+    } as MessageEvent);
+    await settle();
+    // The Hub-side schedule starts at its own first step.
+    expect(connector.status()).toMatchObject({
+      degradedMode: "backing_off",
+      failure: "connection_replaced",
+      reconnectAttempt: 0,
+      nextRetryAt: new Date(clock.value.now() + 337_500).toISOString(),
+    });
+    await connector.stop();
+  });
+
   it("spaces out a connection the Hub displaced with a bare close", async () => {
     const clock = scheduler();
     const sockets: FakeSocket[] = [];
@@ -1775,6 +1827,19 @@ describe("HubConnector", () => {
       degradedMode: "backing_off",
       failure: "authentication_failed",
       nextRetryAt: new Date(clock.value.now() + 1_012_500).toISOString(),
+    });
+
+    // An owner who answered the prompt and pressed Retry gets the free retry
+    // back, rather than going straight to the quarter-hour schedule.
+    const resuming = connector.resume();
+    await settle();
+    expect(sockets).toHaveLength(3);
+    rejectLatest();
+    await resuming;
+    await settle();
+    expect(connector.status()).toMatchObject({
+      degradedMode: "backing_off",
+      failure: "authentication_timeout",
     });
     await connector.stop();
   });
