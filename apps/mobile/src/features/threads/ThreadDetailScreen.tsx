@@ -37,7 +37,7 @@ import {
   normalizeInteractionModeForProviderTarget,
   selectionAllowedAtSendBoundary,
 } from "@ryco/client-runtime/state/composer";
-import { scopeProjectRef, scopeThreadRef } from "@ryco/client-runtime/scoped";
+import { scopeProjectRef, scopeThreadRef, scopedThreadKey } from "@ryco/client-runtime/scoped";
 import type { TimelineEntry } from "@ryco/client-runtime/state/session";
 import {
   buildQueuedMessageSteerCommand,
@@ -90,7 +90,10 @@ import {
 } from "../../rpc/wsConnectionState";
 import {
   enqueueThreadOutboxMessage,
+  getThreadOutboxHold,
+  holdThreadOutboxForInterrupt,
   listThreadOutboxMessages,
+  releaseThreadOutboxHold,
   removeThreadOutboxMessage,
   retryThreadOutboxReview,
   subscribeThreadOutbox,
@@ -338,6 +341,12 @@ export function ThreadDetailScreen(props: {
         (message) => message.environmentId === environmentId && message.threadId === threadId,
       ),
     [environmentId, outboxMessages, threadId],
+  );
+  const outboxThreadKey = scopedThreadKey(scopeThreadRef(environmentId, threadId));
+  const queueHold = useSyncExternalStore(
+    subscribeThreadOutbox,
+    () => getThreadOutboxHold(outboxThreadKey),
+    () => getThreadOutboxHold(outboxThreadKey),
   );
   const messageHistory = useStore(
     (state) =>
@@ -1254,6 +1263,11 @@ export function ThreadDetailScreen(props: {
 
       <ThreadQueuedMessages
         messages={queuedMessages}
+        hold={queueHold}
+        onResume={() => {
+          releaseThreadOutboxHold(outboxThreadKey);
+          runOutboxDrain();
+        }}
         onRetryReview={(messageId) => {
           retryThreadOutboxReview(messageId);
           runOutboxDrain();
@@ -1362,9 +1376,23 @@ export function ThreadDetailScreen(props: {
           onRename={(title) =>
             void runAction(() => renameThread(ensureEnvironmentApi(environmentId), threadId, title))
           }
-          onStop={() =>
-            void runAction(() => interruptThreadTurn(ensureEnvironmentApi(environmentId), threadId))
-          }
+          onStop={() => {
+            // Stop means stop: hold the queue before the turn can settle, and
+            // undo only if the interrupt never reached the server.
+            const held = holdThreadOutboxForInterrupt(
+              outboxThreadKey,
+              selectThreadByRef(useStore.getState(), scopeThreadRef(environmentId, threadId))
+                ?.session?.activeTurnId ?? null,
+            );
+            void runAction(async () => {
+              try {
+                await interruptThreadTurn(ensureEnvironmentApi(environmentId), threadId);
+              } catch (error) {
+                held.undo();
+                throw error;
+              }
+            });
+          }}
           onToggleSettlement={() => {
             const action = headerModel.settlementAction;
             if (!action || action.disabled) return;
