@@ -67,7 +67,8 @@ function isDeliveryUnknown(error: unknown): boolean {
  * receipt exists, so a first attempt cut off halfway by a node restart makes
  * the replay fail on what that attempt already created. A replay refused by
  * the node's role check, refused locally, or lost to a second drop says
- * nothing about the first attempt.
+ * nothing about the first attempt. (A replay refused only until the session
+ * is current again was never sent, and waits for the next readiness instead.)
  */
 function isReplayAnswer(command: ClientOrchestrationCommand, error: unknown): boolean {
   if (!hasTag(error, "OrchestrationDispatchCommandError")) return false;
@@ -215,17 +216,30 @@ export class HostedDispatchReplay {
     }
     // Only a readiness published after the failure belongs to a session that
     // replaced the one that lost the command.
-    const readyAfter = this.#readySequence.get(environmentId) ?? 0;
-    const replacement = await this.#awaitReplacement(environmentId, attempt, readyAfter, deadline);
-    if (replacement.kind === "ended") throw new HostedDispatchUnconfirmedError();
-    if (replacement.kind === "expired") return this.#unconfirmed(attempt);
-    try {
-      return await replacement.attempt.dispatch(command);
-    } catch (error) {
-      // One replay only: anything but the command's own answer leaves the
-      // first attempt's outcome unknown.
-      if (isReplayAnswer(command, error)) throw error;
-      return this.#unconfirmed(attempt);
+    let readyAfter = this.#readySequence.get(environmentId) ?? 0;
+    for (;;) {
+      const replacement = await this.#awaitReplacement(
+        environmentId,
+        attempt,
+        readyAfter,
+        deadline,
+      );
+      if (replacement.kind === "ended") throw new HostedDispatchUnconfirmedError();
+      if (replacement.kind === "expired") return this.#unconfirmed(attempt);
+      readyAfter = this.#readySequence.get(environmentId) ?? 0;
+      try {
+        return await replacement.attempt.dispatch(command);
+      } catch (error) {
+        // Refused before sending because the session stopped being current
+        // again: nothing was sent, so wait for its next readiness.
+        if (error instanceof RpcRequestRefusedError && error.admission === "awaiting-session") {
+          continue;
+        }
+        // One replay only: anything but the command's own answer leaves the
+        // first attempt's outcome unknown.
+        if (isReplayAnswer(command, error)) throw error;
+        return this.#unconfirmed(attempt);
+      }
     }
   }
 

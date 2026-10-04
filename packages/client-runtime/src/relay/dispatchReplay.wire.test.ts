@@ -5,15 +5,14 @@ import {
   ThreadId,
   type ClientOrchestrationCommand,
 } from "@ryco/contracts";
-import { Layer } from "effect";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import type { HostedRuntimeTimers } from "../authorization/runtime";
-import type { ObservabilityService } from "../platform/index";
 import { resetRequestLatencyStateForTests } from "../rpc/requestLatencyState";
 import { resetWsConnectionStateForTests } from "../rpc/wsConnectionState";
 import { createWsRpcClient, type WsRpcClient } from "../rpc/wsRpcClient";
 import { WsTransport } from "../rpc/wsTransport";
+import { fakeSocketPlatform, type FakeWebSocket } from "../../test/fakeWebSocket";
 import { bindHostedDispatchReplay, HostedDispatchReplay } from "./dispatchReplay";
 
 /**
@@ -22,73 +21,8 @@ import { bindHostedDispatchReplay, HostedDispatchReplay } from "./dispatchReplay
  * are the ones a dropped relay or a disposed client actually produce.
  */
 
-type Listener = (event: { code?: number; reason?: string; data?: unknown }) => void;
-
-class FakeSocket {
-  readyState = 0;
-  binaryType = "blob";
-  readonly sent: string[] = [];
-  readonly #listeners = new Map<string, Set<Listener>>();
-
-  constructor(readonly url: string) {
-    sockets.push(this);
-  }
-
-  addEventListener(type: string, listener: Listener) {
-    const listeners = this.#listeners.get(type) ?? new Set<Listener>();
-    listeners.add(listener);
-    this.#listeners.set(type, listeners);
-  }
-
-  removeEventListener(type: string, listener: Listener) {
-    this.#listeners.get(type)?.delete(listener);
-  }
-
-  send(data: string) {
-    this.sent.push(data);
-  }
-
-  close(code = 1000, reason = "") {
-    if (this.readyState === 3) return;
-    this.readyState = 3;
-    this.#emit("close", { code, reason });
-  }
-
-  open() {
-    this.readyState = 1;
-    this.#emit("open", {});
-  }
-
-  /** The hosted relay facades' failure order: `error`, then `close`. */
-  drop() {
-    this.#emit("error", {});
-    this.close(1006, "relay closed");
-  }
-
-  reply(data: unknown) {
-    this.#emit("message", { data: JSON.stringify(data) });
-  }
-
-  requests(): Array<{ readonly id: string; readonly tag: string; readonly payload: unknown }> {
-    return this.sent
-      .map(
-        (frame) => JSON.parse(frame) as { _tag: string; id: string; tag: string; payload: unknown },
-      )
-      .filter((message) => message._tag === "Request");
-  }
-
-  #emit(type: string, event: Parameters<Listener>[0]) {
-    for (const listener of Array.from(this.#listeners.get(type) ?? [])) listener(event);
-  }
-}
-
-const sockets: FakeSocket[] = [];
-
-const observability: ObservabilityService = {
-  tracingLayer: Layer.empty,
-  performanceEnabled: () => false,
-  recordPerformance: () => undefined,
-};
+const sockets: FakeWebSocket[] = [];
+const platform = fakeSocketPlatform(sockets);
 
 const timers: HostedRuntimeTimers = {
   now: () => Date.now(),
@@ -111,11 +45,11 @@ const clients: WsRpcClient[] = [];
 /** One hosted connection attempt: its own transport and socket, like a client rebuild. */
 async function connect(
   options: { readonly replayed?: boolean } = {},
-): Promise<{ readonly client: WsRpcClient; readonly socket: FakeSocket }> {
+): Promise<{ readonly client: WsRpcClient; readonly socket: FakeWebSocket }> {
   const before = sockets.length;
   const transport = new WsTransport(
     "ws://relay.test/relay",
-    { observability, socket: { webSocketConstructor: (url) => new FakeSocket(url) } },
+    platform,
     // A dropped attempt is replaced by a new client, never reconnected in place.
     { preserveSocketPath: true, shouldReconnect: () => false, recordConnectionState: false },
   );
@@ -133,12 +67,12 @@ async function connect(
   return { client, socket: await socketAfter(before) };
 }
 
-async function socketAfter(count: number): Promise<FakeSocket> {
+async function socketAfter(count: number): Promise<FakeWebSocket> {
   await vi.waitFor(() => expect(sockets.length).toBeGreaterThan(count));
   return sockets[count]!;
 }
 
-async function sentDispatch(socket: FakeSocket) {
+async function sentDispatch(socket: FakeWebSocket) {
   await vi.waitFor(() =>
     expect(
       socket.requests().some((request) => request.tag === ORCHESTRATION_WS_METHODS.dispatchCommand),

@@ -15,6 +15,7 @@ import type { ObservabilityService, SocketService } from "../platform/index.ts";
 import { clearAllTrackedRpcRequests } from "./requestLatencyState.ts";
 import {
   createWsRpcProtocolLayer,
+  RpcRequestRefusedError,
   makeHostedRpcProtocolClient,
   makeDeviceRpcProtocolClient,
   makeWsRpcProtocolClient,
@@ -38,6 +39,13 @@ interface RequestOptions {
 }
 
 const DEFAULT_SUBSCRIPTION_RETRY_DELAY_MS = Duration.millis(250);
+/**
+ * Ceiling for re-checking a subscription its connection refused only because
+ * the session is not current yet. Nothing is sent while it waits, so the cost
+ * is a local check; the cap bounds how late the stream starts after the
+ * session becomes ready.
+ */
+export const AWAITING_SESSION_SUBSCRIPTION_MAX_DELAY_MS = 4_000;
 const NOOP: () => void = () => undefined;
 export const THREAD_NOT_FOUND_ERROR_RE = /^Thread\s.+\swas not found$/u;
 export const SUBSCRIPTION_STREAM_DONE_SCHEMA_ERROR_FRAGMENT = "SchemaError(Expected array";
@@ -59,6 +67,11 @@ function formatErrorMessage(error: unknown): string {
     return error.message;
   }
   return String(error);
+}
+
+/** The connection refused the stream locally until its session is current. */
+function isAwaitingSessionRefusal(error: unknown): boolean {
+  return error instanceof RpcRequestRefusedError && error.admission === "awaiting-session";
 }
 
 function isRetryableSubscriptionError(message: string): boolean {
@@ -154,6 +167,7 @@ class RpcTransport<Client> {
 
     let active = true;
     let hasReceivedValue = false;
+    let awaitingSessionRetries = 0;
     const retryDelayMs = Duration.toMillis(
       Duration.fromInputUnsafe(options?.retryDelay ?? DEFAULT_SUBSCRIPTION_RETRY_DELAY_MS),
     );
@@ -190,6 +204,7 @@ class RpcTransport<Client> {
             () => {
               this.hasReportedTransportDisconnect = false;
               hasReceivedValue = true;
+              awaitingSessionRetries = 0;
             },
           );
           cancelCurrentStream = runningStream.cancel;
@@ -202,6 +217,19 @@ class RpcTransport<Client> {
           }
 
           if (session !== this.session) {
+            continue;
+          }
+
+          if (isAwaitingSessionRefusal(error)) {
+            // Expected while a rebuilt hosted client's session synchronizes;
+            // the stream starts once the session is current.
+            await sleep(
+              Math.min(
+                Math.max(retryDelayMs, 1) * 2 ** Math.min(awaitingSessionRetries, 16),
+                AWAITING_SESSION_SUBSCRIPTION_MAX_DELAY_MS,
+              ),
+            );
+            awaitingSessionRetries += 1;
             continue;
           }
 

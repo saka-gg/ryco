@@ -14,7 +14,7 @@ interface CapturedTransport {
     readonly authorizeRequest?: (request: {
       readonly tag: string;
       readonly stream: boolean;
-    }) => boolean;
+    }) => string;
     readonly onOpen?: () => void;
   };
 }
@@ -231,7 +231,7 @@ describe("hosted node route restore integration", () => {
         tag: ORCHESTRATION_WS_METHODS.dispatchCommand,
         stream: false,
       }),
-    ).toBe(false);
+    ).not.toBe("allowed");
     capturedClients[0]!.emitShellSnapshot(shellSnapshot(1));
     expect(useHostedHubStore.getState()).toMatchObject({
       sessionStatus: "ready",
@@ -242,7 +242,7 @@ describe("hosted node route restore integration", () => {
         tag: ORCHESTRATION_WS_METHODS.dispatchCommand,
         stream: false,
       }),
-    ).toBe(true);
+    ).toBe("allowed");
 
     // The nested thread and panel URL survives the restore.
     history.flush();

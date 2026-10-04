@@ -33,6 +33,7 @@ import {
   HostedDispatchUnconfirmedError,
 } from "./dispatchReplay";
 import {
+  admitHostedRequestForState,
   HostedRelayAttemptFactory,
   HostedRelayPreparationError,
   ticketFailure,
@@ -183,7 +184,7 @@ describe("HostedRelayAttemptFactory", () => {
           closeReason: "channel_rejected",
         });
       },
-      authorizeRequest: () => false,
+      authorizeRequest: () => "forbidden",
       shouldReconnect: () => false,
       transportStatus: () => undefined,
       sessionStatus: () => undefined,
@@ -228,7 +229,7 @@ describe("HostedRelayAttemptFactory", () => {
         created.push(input.preparedSocketContext);
         return new MockRelaySocket(input.callbacks as RelaySocketCallbacks);
       },
-      authorizeRequest: () => true,
+      authorizeRequest: () => "allowed",
       shouldReconnect: () => true,
       transportStatus: () => undefined,
       sessionStatus: () => undefined,
@@ -292,25 +293,25 @@ describe("HostedRelayAttemptFactory", () => {
         tag: ORCHESTRATION_WS_METHODS.subscribeShell,
         stream: true,
       }),
-    ).toBe(true);
+    ).toBe("allowed");
     expect(
       lifecycle.authorizeRequest?.({
         tag: WS_METHODS.subscribeTerminalEvents,
         stream: true,
       }),
-    ).toBe(true);
+    ).toBe("allowed");
     expect(
       lifecycle.authorizeRequest?.({
         tag: ORCHESTRATION_WS_METHODS.dispatchCommand,
         stream: false,
       }),
-    ).toBe(false);
+    ).not.toBe("allowed");
     expect(
       lifecycle.authorizeRequest?.({
         tag: WS_METHODS.gitRunStackedAction,
         stream: true,
       }),
-    ).toBe(false);
+    ).not.toBe("allowed");
 
     hostedHubStore.setState({ directoryStatus: "stale" });
     expect(
@@ -318,7 +319,50 @@ describe("HostedRelayAttemptFactory", () => {
         tag: ORCHESTRATION_WS_METHODS.subscribeShell,
         stream: true,
       }),
-    ).toBe(false);
+    ).not.toBe("allowed");
+  });
+
+  it("tells a request that waits for the session from one that is refused for good", () => {
+    const proposals = { tag: AGENT_CONTROL_WS_METHODS.subscribeProposals, stream: true } as const;
+    const ready = {
+      effectiveRole: "owner",
+      directoryStatus: "ready",
+      transportStatus: "online",
+      browserStatus: "current",
+      sessionStatus: "ready",
+      sessionRecoveredAfterUnknown: false,
+    } as const;
+    expect(admitHostedRequestForState(ready, proposals)).toBe("allowed");
+
+    // A rebuilt client whose replacement session is still synchronizing: the
+    // Agent Control queue must wait, not end.
+    for (const recovering of [
+      { ...ready, sessionStatus: "synchronizing" },
+      { ...ready, sessionStatus: "stale", transportStatus: "reconnecting" },
+      { ...ready, sessionStatus: "delivery-unknown" },
+      { ...ready, browserStatus: "synchronizing" },
+      { ...ready, directoryStatus: "loading", effectiveRole: null },
+    ] as const) {
+      expect(admitHostedRequestForState(recovering, proposals)).toBe("awaiting-session");
+    }
+
+    // A known role below the method's tier, a method no hosted role may call,
+    // or a terminally failed transport.
+    expect(
+      admitHostedRequestForState(
+        { ...ready, effectiveRole: "viewer" },
+        { tag: WS_METHODS.terminalWrite, stream: false },
+      ),
+    ).toBe("forbidden");
+    expect(
+      admitHostedRequestForState(ready, { tag: WS_METHODS.subscribeAuthAccess, stream: true }),
+    ).toBe("forbidden");
+    expect(
+      admitHostedRequestForState(
+        { ...ready, transportStatus: "terminal-failure", sessionStatus: "stale" },
+        proposals,
+      ),
+    ).toBe("forbidden");
   });
 
   it("retains only session-sync authority across a retryable socket close", async () => {
@@ -352,8 +396,8 @@ describe("HostedRelayAttemptFactory", () => {
       transportStatus: "reconnecting",
       sessionStatus: "stale",
     });
-    expect(lifecycle.authorizeRequest?.(subscribeShell)).toBe(true);
-    expect(lifecycle.authorizeRequest?.(dispatch)).toBe(false);
+    expect(lifecycle.authorizeRequest?.(subscribeShell)).toBe("allowed");
+    expect(lifecycle.authorizeRequest?.(dispatch)).not.toBe("allowed");
   });
 
   it("re-enters the selected-node lifecycle only after the relay channel recovers", async () => {
@@ -418,7 +462,7 @@ describe("HostedRelayAttemptFactory", () => {
       browserStatus: "current",
     });
 
-    expect(lifecycle.authorizeRequest?.(dispatch)).toBe(true);
+    expect(lifecycle.authorizeRequest?.(dispatch)).toBe("allowed");
     hostedHubController.suspendBrowser("hidden");
     expect(hostedHubStore.getState()).toMatchObject({
       directoryStatus: "ready",
@@ -426,18 +470,18 @@ describe("HostedRelayAttemptFactory", () => {
       browserStatus: "suspended",
       sessionStatus: "stale",
     });
-    expect(lifecycle.authorizeRequest?.(dispatch)).toBe(false);
-    expect(lifecycle.authorizeRequest?.(subscribeShell)).toBe(false);
+    expect(lifecycle.authorizeRequest?.(dispatch)).not.toBe("allowed");
+    expect(lifecycle.authorizeRequest?.(subscribeShell)).not.toBe("allowed");
 
     hostedHubStore.setState({
       browserStatus: "synchronizing",
       sessionStatus: "stale",
     });
-    expect(lifecycle.authorizeRequest?.(dispatch)).toBe(false);
-    expect(lifecycle.authorizeRequest?.(subscribeShell)).toBe(true);
+    expect(lifecycle.authorizeRequest?.(dispatch)).not.toBe("allowed");
+    expect(lifecycle.authorizeRequest?.(subscribeShell)).toBe("allowed");
 
     hostedHubStore.setState({ browserStatus: "current", sessionStatus: "ready" });
-    expect(lifecycle.authorizeRequest?.(dispatch)).toBe(true);
+    expect(lifecycle.authorizeRequest?.(dispatch)).toBe("allowed");
   });
 
   it("requests and consumes one memory-only ticket per connection attempt", async () => {
@@ -751,18 +795,18 @@ describe("HostedRelayAttemptFactory", () => {
     });
 
     // Before the replacement session accepts a snapshot nothing new is admitted.
-    expect(lifecycle.authorizeRequest?.(readFile)).toBe(false);
-    expect(lifecycle.authorizeRequest?.(proposals)).toBe(false);
+    expect(lifecycle.authorizeRequest?.(readFile)).not.toBe("allowed");
+    expect(lifecycle.authorizeRequest?.(proposals)).not.toBe("allowed");
 
     hostedHubStore.setState({ sessionRecoveredAfterUnknown: true });
-    expect(lifecycle.authorizeRequest?.(readFile)).toBe(true);
-    expect(lifecycle.authorizeRequest?.(proposals)).toBe(true);
-    expect(lifecycle.authorizeRequest?.(terminalWrite)).toBe(false);
-    expect(lifecycle.authorizeRequest?.(dispatch)).toBe(false);
+    expect(lifecycle.authorizeRequest?.(readFile)).toBe("allowed");
+    expect(lifecycle.authorizeRequest?.(proposals)).toBe("allowed");
+    expect(lifecycle.authorizeRequest?.(terminalWrite)).not.toBe("allowed");
+    expect(lifecycle.authorizeRequest?.(dispatch)).not.toBe("allowed");
 
     hostedHubController.acknowledgeDeliveryUnknown();
     expect(hostedHubStore.getState().sessionStatus).toBe("ready");
-    expect(lifecycle.authorizeRequest?.(terminalWrite)).toBe(true);
+    expect(lifecycle.authorizeRequest?.(terminalWrite)).toBe("allowed");
   });
 
   it("preserves streaming mutation uncertainty through progress until final exit", async () => {

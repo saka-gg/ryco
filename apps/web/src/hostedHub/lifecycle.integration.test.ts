@@ -13,7 +13,7 @@ interface CapturedTransport {
     readonly authorizeRequest?: (request: {
       readonly tag: string;
       readonly stream: boolean;
-    }) => boolean;
+    }) => string;
     readonly onOpen?: () => void;
   };
 }
@@ -278,7 +278,7 @@ describe("hosted browser lifecycle integration", () => {
         tag: ORCHESTRATION_WS_METHODS.dispatchCommand,
         stream: false,
       }),
-    ).toBe(true);
+    ).toBe("allowed");
 
     hostedHubController.suspendBrowser("offline");
     expect(
@@ -286,7 +286,7 @@ describe("hosted browser lifecycle integration", () => {
         tag: ORCHESTRATION_WS_METHODS.dispatchCommand,
         stream: false,
       }),
-    ).toBe(false);
+    ).not.toBe("allowed");
     await vi.waitFor(() => expect(capturedClients[0]!.dispose).toHaveBeenCalledOnce());
 
     await hostedHubController.resumeBrowser();
@@ -305,7 +305,7 @@ describe("hosted browser lifecycle integration", () => {
         tag: ORCHESTRATION_WS_METHODS.dispatchCommand,
         stream: false,
       }),
-    ).toBe(false);
+    ).not.toBe("allowed");
 
     capturedClients[0]!.emitShellSnapshot(shellSnapshot(2));
     expect(useHostedHubStore.getState().sessionEstablished).toBe(false);
@@ -321,7 +321,7 @@ describe("hosted browser lifecycle integration", () => {
         tag: ORCHESTRATION_WS_METHODS.dispatchCommand,
         stream: false,
       }),
-    ).toBe(true);
+    ).toBe("allowed");
     expect(issueRelayTicket).toHaveBeenCalledTimes(2);
   });
 

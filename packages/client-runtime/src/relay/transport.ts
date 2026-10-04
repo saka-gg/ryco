@@ -1,7 +1,7 @@
 import { ORCHESTRATION_WS_METHODS, type RelayEffectiveRole, WS_METHODS } from "@ryco/contracts";
 import { hostedRoleAllows, rpcDeliveryEffectFor } from "@ryco/shared/rpcAccessPolicy";
 
-import type { WsProtocolLifecycleHandlers } from "@ryco/client-runtime/rpc";
+import type { RpcRequestAdmission, WsProtocolLifecycleHandlers } from "@ryco/client-runtime/rpc";
 import { HostedHubApiError } from "../authorization/api.ts";
 import { hostedSessionAdmits } from "../authorization/capabilities.ts";
 import { getHostedHubApi, getHostedRuntimeConfiguration } from "../authorization/runtime.ts";
@@ -52,34 +52,60 @@ type HostedRequestAuthorizationState = Pick<
   | "sessionRecoveredAfterUnknown"
 >;
 
+/**
+ * Whether the hosted session admits a request now, not yet, or not at all.
+ *
+ * A method no hosted role may call, a role this session already knows that
+ * does not reach the method's tier, or a terminally failed transport refuses
+ * for good. Everything else that is refused is only waiting for the session —
+ * a role still being validated, a transport reconnecting, a replacement
+ * session that has not accepted its snapshot — and a subscription retries it
+ * rather than giving up: the client is rebuilt while its session synchronizes,
+ * and a long-lived read stream started then must survive that.
+ */
+export function admitHostedRequestForState(
+  state: HostedRequestAuthorizationState,
+  info: { readonly tag: string; readonly stream: boolean },
+): RpcRequestAdmission {
+  const roleFresh = state.directoryStatus === "ready";
+  if (hostedRoleAllows(state.effectiveRole, info.tag, roleFresh)) {
+    if (
+      state.transportStatus === "online" &&
+      state.browserStatus === "current" &&
+      hostedSessionAdmits(state, info.tag)
+    ) {
+      return "allowed";
+    }
+    if (
+      info.stream &&
+      (state.browserStatus === "current" || state.browserStatus === "synchronizing") &&
+      (state.sessionStatus === "synchronizing" ||
+        state.sessionStatus === "replaying" ||
+        state.sessionStatus === "delivery-unknown" ||
+        state.sessionStatus === "stale" ||
+        state.sessionStatus === "closed") &&
+      HOSTED_SESSION_SYNC_SUBSCRIPTIONS.has(info.tag)
+    ) {
+      return "allowed";
+    }
+  } else if (!hostedRoleAllows("owner", info.tag) || (roleFresh && state.effectiveRole !== null)) {
+    return "forbidden";
+  }
+  return state.transportStatus === "terminal-failure" ? "forbidden" : "awaiting-session";
+}
+
 export function authorizeHostedRequestForState(
   state: HostedRequestAuthorizationState,
   info: { readonly tag: string; readonly stream: boolean },
 ): boolean {
-  if (!hostedRoleAllows(state.effectiveRole, info.tag, state.directoryStatus === "ready")) {
-    return false;
-  }
-  if (
-    state.transportStatus === "online" &&
-    state.browserStatus === "current" &&
-    hostedSessionAdmits(state, info.tag)
-  ) {
-    return true;
-  }
-  return (
-    info.stream &&
-    (state.browserStatus === "current" || state.browserStatus === "synchronizing") &&
-    (state.sessionStatus === "synchronizing" ||
-      state.sessionStatus === "replaying" ||
-      state.sessionStatus === "delivery-unknown" ||
-      state.sessionStatus === "stale" ||
-      state.sessionStatus === "closed") &&
-    HOSTED_SESSION_SYNC_SUBSCRIPTIONS.has(info.tag)
-  );
+  return admitHostedRequestForState(state, info) === "allowed";
 }
 
-function authorizeHostedRequest(info: { readonly tag: string; readonly stream: boolean }): boolean {
-  return authorizeHostedRequestForState(hostedHubStore.getState(), info);
+function admitHostedRequest(info: {
+  readonly tag: string;
+  readonly stream: boolean;
+}): RpcRequestAdmission {
+  return admitHostedRequestForState(hostedHubStore.getState(), info);
 }
 
 export function ticketFailure(error: HostedHubApiError): HostedRelayFailure {
@@ -155,7 +181,10 @@ export interface HostedRelayAttemptBinding {
     };
     readonly preparedSocketContext: unknown;
   }) => unknown;
-  readonly authorizeRequest: (info: { readonly tag: string; readonly stream: boolean }) => boolean;
+  readonly authorizeRequest: (info: {
+    readonly tag: string;
+    readonly stream: boolean;
+  }) => RpcRequestAdmission;
   readonly shouldReconnect: (generation: number) => boolean;
   readonly transportStatus: (generation: number, status: HostedRelayTransportStatus) => void;
   readonly sessionStatus: (generation: number, status: HostedRycoSessionStatus) => void;
@@ -186,7 +215,7 @@ function defaultBinding(): HostedRelayAttemptBinding {
     },
     disposeSocketContext: (context) =>
       getHostedRuntimeConfiguration().disposeRelaySocketContext?.(context),
-    authorizeRequest: authorizeHostedRequest,
+    authorizeRequest: admitHostedRequest,
     shouldReconnect: (generation) => {
       const state = hostedHubStore.getState();
       return (

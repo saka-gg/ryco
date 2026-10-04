@@ -510,7 +510,12 @@ classified counts as a mutation.
 
 - **Reads** — unary reads and long-lived read streams such as the Agent Control queue or device
   events — never make delivery uncertain. Losing one is harmless, and subscriptions resubscribe on
-  their own.
+  their own. The client tells a request refused only until its session is current (the role is
+  still being validated, the transport is reconnecting, or the rebuilt client's session has not
+  accepted its snapshot) from one refused for good (a role below the method's tier, a method no
+  hosted role may call, or a terminally failed transport). A subscription refused only for now —
+  such as the Agent Control queue on a client rebuilt during recovery — keeps re-checking locally
+  with a capped backoff and starts once the session is current, instead of ending.
 - **Orchestration commands** (`orchestration.dispatchCommand`) are idempotent by receipt: the node
   persists a receipt for each `commandId` in the same transaction as the command's events and
   answers a repeated id from it — before normalizing the command again — with the original result

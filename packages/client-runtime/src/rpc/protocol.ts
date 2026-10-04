@@ -80,7 +80,10 @@ export interface WsProtocolLifecycleHandlers {
    * reads as its primary connection's. Its environment slot is still written.
    */
   readonly recordGlobalConnectionState?: boolean;
-  readonly authorizeRequest?: (info: { readonly tag: string; readonly stream: boolean }) => boolean;
+  readonly authorizeRequest?: (info: {
+    readonly tag: string;
+    readonly stream: boolean;
+  }) => RpcRequestAdmission;
   /** Secondary feature channels must not replace the app's primary status. */
   readonly recordConnectionState?: boolean;
 }
@@ -107,13 +110,28 @@ export const WS_CONNECTION_ERROR_MESSAGE = "Unable to connect to the Ryco server
 class WsUrlProviderError extends Data.TaggedError("WsUrlProviderError") {}
 
 /**
+ * Whether a connection admits a request right now. `awaiting-session` means
+ * only "not yet": the connection's session is still being established or
+ * recovered, and the same request will be admitted once it is current. A
+ * `forbidden` request will not be admitted on this connection at all.
+ */
+export type RpcRequestAdmission = "allowed" | "awaiting-session" | "forbidden";
+
+/**
  * A request this client refused before sending it (`authorizeRequest`).
  * Nothing reached the server, so the request certainly did not run there.
  */
 export class RpcRequestRefusedError extends Error {
-  constructor() {
-    super("This action is unavailable for the current hosted role.");
+  readonly admission: Exclude<RpcRequestAdmission, "allowed">;
+
+  constructor(admission: Exclude<RpcRequestAdmission, "allowed">) {
+    super(
+      admission === "awaiting-session"
+        ? "Ryco is still synchronizing with this machine. Try again in a moment."
+        : "This action is unavailable for the current hosted role.",
+    );
     this.name = "RpcRequestRefusedError";
+    this.admission = admission;
   }
 }
 
@@ -331,9 +349,8 @@ export function createWsRpcProtocolLayer(
           if (!lifecycle.isActive()) {
             return;
           }
-          if (handlers?.authorizeRequest && !handlers.authorizeRequest(info)) {
-            throw new RpcRequestRefusedError();
-          }
+          const admission = handlers?.authorizeRequest?.(info) ?? "allowed";
+          if (admission !== "allowed") throw new RpcRequestRefusedError(admission);
           handlers?.onRequestStart?.({
             id: String(info.id),
             tag: info.tag,

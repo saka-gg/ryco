@@ -16,7 +16,7 @@ import {
   createKnownEnvironment,
 } from "@ryco/client-runtime/knownEnvironment";
 import {
-  authorizeHostedRequestForState,
+  admitHostedRequestForState,
   bindHostedDispatchReplay,
   hostedDispatchLineage,
   HostedRelayAttemptFactory,
@@ -116,8 +116,9 @@ export function createHostedPrimaryConnection(
     authorizeRequest: (info) => {
       const shared = hostedHubStore.getState();
       const current = coordinator.read(descriptor.environmentId);
-      if (!current || current.generation !== connectionGeneration) return false;
-      return authorizeHostedRequestForState(
+      // A superseded connection never becomes current again.
+      if (!current || current.generation !== connectionGeneration) return "forbidden";
+      return admitHostedRequestForState(
         {
           effectiveRole: current.effectiveRole,
           directoryStatus: shared.directoryStatus,
