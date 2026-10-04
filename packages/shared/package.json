@@ -11,6 +11,10 @@
       "types": "./src/backgroundWork.ts",
       "import": "./src/backgroundWork.ts"
     },
+    "./claudeCacheReview": {
+      "types": "./src/claudeCacheReview.ts",
+      "import": "./src/claudeCacheReview.ts"
+    },
     "./lruCache": {
       "types": "./src/lruCache.ts",
       "import": "./src/lruCache.ts"
