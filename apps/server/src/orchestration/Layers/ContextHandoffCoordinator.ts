@@ -25,7 +25,6 @@ import {
   type TurnId,
 } from "@ryco/contracts";
 import { DEFAULT_CONTEXT_HANDOFF_INPUT_BUDGET } from "@ryco/shared/contextWindow";
-import { truncateUnicodeSafe } from "@ryco/shared/String";
 import { getModelDisplayLabel } from "@ryco/shared/model";
 import { Cause, Effect, Layer, Option, Ref, Schema } from "effect";
 
@@ -52,6 +51,7 @@ import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import {
   ContextHandoffCoordinator,
   type ContextHandoffCoordinatorShape,
+  type ContextHandoffTurnStartEvent,
 } from "../Services/ContextHandoffCoordinator.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
@@ -63,6 +63,8 @@ import {
   ContextHandoffService,
   type PreparedContextHandoffArtifact,
 } from "../contextHandoff/ContextHandoffService.ts";
+import { providerFailureActivityCommand } from "../providerFailureActivity.ts";
+import { failureTag, userFacingFailureDetail } from "../userFacingErrors.ts";
 
 interface HandoffPresentation {
   readonly source: ContextHandoffEndpointSnapshot;
@@ -115,19 +117,15 @@ const serverCommandId = (tag: string): CommandId =>
 
 const nowIso = () => new Date().toISOString();
 
+type ContextHandoffReference = NonNullable<
+  ContextHandoffTurnStartEvent["payload"]["contextHandoff"]
+>;
+
 function boundedFailureDetail(cause: Cause.Cause<unknown>): string {
-  const failure = cause.reasons.find(Cause.isFailReason)?.error;
-  const candidate =
-    failure && typeof failure === "object" && "detail" in failure
-      ? (failure as { readonly detail?: unknown }).detail
-      : failure instanceof Error
-        ? failure.message
-        : undefined;
-  const detail =
-    typeof candidate === "string" && candidate.trim().length > 0
-      ? candidate.trim()
-      : "The target provider did not accept the context handoff.";
-  return truncateUnicodeSafe(detail, CONTEXT_HANDOFF_ERROR_MAX_CHARS);
+  return userFacingFailureDetail(cause, {
+    fallback: "The target provider did not accept the context handoff.",
+    maxChars: CONTEXT_HANDOFF_ERROR_MAX_CHARS,
+  });
 }
 
 function runtimeBindingFromSession(
@@ -964,6 +962,107 @@ export const makeContextHandoffCoordinator = Effect.gen(function* () {
       return next;
     });
 
+  /**
+   * Reports a failure that escaped before the target turn could be dispatched
+   * (reads, record creation, the preparing transition, or an incomplete
+   * failure finalization). Never fails: every step logs and continues.
+   */
+  const reportPreDispatchFailure = Effect.fn("ContextHandoffCoordinator.reportPreDispatchFailure")(
+    function* (input: {
+      readonly event: ContextHandoffTurnStartEvent;
+      readonly reference: ContextHandoffReference;
+      readonly cause: Cause.Cause<unknown>;
+    }) {
+      const { event, reference, cause } = input;
+      const threadId = event.payload.threadId;
+      const handoffId = reference.handoffId;
+      const detail = userFacingFailureDetail(cause, { maxChars: CONTEXT_HANDOFF_ERROR_MAX_CHARS });
+      yield* Effect.logWarning("context handoff processing failed", {
+        operation: "context-handoff-processing",
+        handoffId,
+        threadId,
+        failureTag: failureTag(cause),
+        cause: Cause.pretty(cause),
+      });
+      // A failed read leaves the state unknown: the activity is appended anyway.
+      const record = yield* repository.getById({ handoffId }).pipe(
+        Effect.map(Option.getOrUndefined),
+        Effect.catchCause((readCause) =>
+          Effect.logWarning("context handoff failure report could not read the handoff record", {
+            operation: "context-handoff-processing",
+            handoffId,
+            threadId,
+            cause: Cause.pretty(readCause),
+          }).pipe(Effect.as(undefined)),
+        ),
+      );
+      // Delivery may have happened from `dispatching` on. The record lifecycle
+      // owns that signal (finalize, or reconcile on recovery); never claim the
+      // start failed.
+      if (
+        record?.status === "dispatching" ||
+        record?.status === "consumed" ||
+        record?.status === "failed" ||
+        record?.status === "delivery-uncertain"
+      ) {
+        return;
+      }
+      // `dispatching` is persisted before sendTurn, so `requested` and
+      // `preparing` were never sent. Failing them stops recover() from
+      // re-dispatching a turn the user already saw fail.
+      if (record?.status === "requested" || record?.status === "preparing") {
+        yield* repository
+          .compareAndSetStatus({
+            handoffId,
+            expectedStatus: record.status,
+            nextStatus: "failed",
+            targetRuntimeSessionId: record.targetRuntimeSessionId,
+            acceptedProviderTurnId: record.acceptedProviderTurnId,
+            error: detail,
+            updatedAt: nowIso(),
+          })
+          .pipe(
+            Effect.flatMap((transitioned) =>
+              transitioned ? increment(contextHandoffsTotal, { status: "failed" }) : Effect.void,
+            ),
+            Effect.catchCause((updateCause) =>
+              Effect.logWarning(
+                "context handoff failure report could not fail the handoff record",
+                {
+                  operation: "context-handoff-processing",
+                  handoffId,
+                  threadId,
+                  cause: Cause.pretty(updateCause),
+                },
+              ),
+            ),
+          );
+      }
+      yield* orchestrationEngine
+        .dispatch(
+          providerFailureActivityCommand({
+            threadId,
+            kind: "provider.turn.start.failed",
+            messageId: reference.targetMessageId,
+            summary: "Provider turn start failed",
+            detail,
+            turnId: null,
+            createdAt: event.payload.createdAt,
+          }),
+        )
+        .pipe(
+          Effect.catchCause((dispatchCause) =>
+            Effect.logWarning("context handoff failure report could not append the failure", {
+              operation: "context-handoff-processing",
+              handoffId,
+              threadId,
+              cause: Cause.pretty(dispatchCause),
+            }),
+          ),
+        );
+    },
+  );
+
   const processTurnStart: ContextHandoffCoordinatorShape["processTurnStart"] = (event) => {
     const reference = event.payload.contextHandoff;
     if (!reference) return Effect.void;
@@ -1009,9 +1108,7 @@ export const makeContextHandoffCoordinator = Effect.gen(function* () {
       Effect.catchCause((cause) =>
         Cause.hasInterruptsOnly(cause)
           ? Effect.interrupt
-          : Effect.logWarning("context handoff processing failed", {
-              operation: "context-handoff-processing",
-            }),
+          : reportPreDispatchFailure({ event, reference, cause }),
       ),
     );
   };
@@ -1036,6 +1133,8 @@ export const makeContextHandoffCoordinator = Effect.gen(function* () {
           ? Effect.interrupt
           : Effect.logWarning("context handoff recovery failed", {
               operation: "context-handoff-recovery",
+              failureTag: failureTag(cause),
+              cause: Cause.pretty(cause),
             }),
       ),
     );

@@ -26,14 +26,26 @@ import {
   type ContextHandoffRepositoryShape,
   makeRequestedContextHandoffRecord,
 } from "../../persistence/Services/ContextHandoffs.ts";
-import { ProviderService } from "../../provider/Services/ProviderService.ts";
+import {
+  ProviderService,
+  type ProviderServiceShape,
+} from "../../provider/Services/ProviderService.ts";
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
 import type { ProviderRuntimeBinding } from "../../provider/Services/ProviderSessionDirectory.ts";
-import { ProviderAdapterRequestError, type ProviderServiceError } from "../../provider/Errors.ts";
+import {
+  ProviderAdapterRequestError,
+  ProviderSessionDirectoryPersistenceError,
+  type ProviderServiceError,
+} from "../../provider/Errors.ts";
+import { PersistenceSqlError } from "../../persistence/Errors.ts";
 import type { ProviderFreshSessionStartInput } from "../../provider/Services/ProviderService.ts";
 import { ContextHandoffCoordinator } from "../Services/ContextHandoffCoordinator.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
-import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
+import {
+  ProjectionSnapshotQuery,
+  type ProjectionSnapshotQueryShape,
+} from "../Services/ProjectionSnapshotQuery.ts";
+import { STORAGE_FAILURE_DETAIL } from "../userFacingErrors.ts";
 import {
   ContextHandoffService,
   type ContextHandoffServiceShape,
@@ -333,6 +345,8 @@ function makeHarness(input?: {
   readonly sendFailure?: ProviderServiceError;
   readonly providerSnapshots?: ReadonlyArray<ServerProvider>;
   readonly artifactSources?: ReadonlyArray<ContextHandoffEndpointSnapshot>;
+  readonly getThreadDetailById?: ProjectionSnapshotQueryShape["getThreadDetailById"];
+  readonly getSession?: ProviderServiceShape["getSession"];
 }) {
   const repository = makeRepository(input?.initialRecord);
   const thread = input?.thread ?? makeThread();
@@ -454,7 +468,8 @@ function makeHarness(input?: {
       streamDomainEvents: Stream.empty,
     }),
     Layer.mock(ProjectionSnapshotQuery)({
-      getThreadDetailById: () => Effect.succeed(Option.some(thread)),
+      getThreadDetailById:
+        input?.getThreadDetailById ?? (() => Effect.succeed(Option.some(thread))),
       getProjectShellById: () =>
         Effect.succeed(
           Option.some({
@@ -496,7 +511,7 @@ function makeHarness(input?: {
                 },
               },
         ),
-      getSession: () => Effect.succeed(Option.some(sourceSession())),
+      getSession: input?.getSession ?? (() => Effect.succeed(Option.some(sourceSession()))),
       startFreshSession,
       sendTurn,
       stopSessionBinding,
@@ -751,6 +766,80 @@ describe("ContextHandoffCoordinator", () => {
       acceptedProviderTurnId: targetTurnId,
     });
     expect(harness.commands.some((command) => command.type === "thread.meta.update")).toBe(true);
+  });
+
+  const turnStartFailureCommands = (commands: ReadonlyArray<OrchestrationCommand>) =>
+    commands.filter(
+      (command) =>
+        command.type === "thread.activity.append" &&
+        command.activity.kind === "provider.turn.start.failed",
+    );
+
+  it("reports a thread read failure before dispatch", async () => {
+    const harness = makeHarness({
+      getThreadDetailById: () =>
+        Effect.fail(
+          new PersistenceSqlError({
+            operation: "ProjectionThreads.getDetailById",
+            detail: "Failed to execute ProjectionThreads.getDetailById",
+          }),
+        ),
+    });
+    await harness.run(
+      Effect.gen(function* () {
+        const coordinator = yield* ContextHandoffCoordinator;
+        yield* coordinator.processTurnStart(turnStartEvent());
+      }),
+    );
+
+    expect(harness.commands).toHaveLength(1);
+    const failures = turnStartFailureCommands(harness.commands);
+    expect(failures).toHaveLength(1);
+    expect(
+      failures[0]?.type === "thread.activity.append" ? failures[0].activity.payload : null,
+    ).toMatchObject({ messageId: targetMessageId, detail: STORAGE_FAILURE_DETAIL });
+    expect(harness.repository.get()).toBeUndefined();
+    expect(harness.sendTurn).not.toHaveBeenCalled();
+  });
+
+  it("fails a preparing record when pre-dispatch reads fail and never re-dispatches it on recovery", async () => {
+    let sessionReads = 0;
+    const harness = makeHarness({
+      getSession: () =>
+        sessionReads++ === 0
+          ? Effect.fail(
+              new ProviderSessionDirectoryPersistenceError({
+                operation: "ProviderSessionDirectory.getBinding",
+                detail: "Failed to read provider session binding",
+              }),
+            )
+          : Effect.succeed(Option.some(sourceSession())),
+    });
+    await harness.run(
+      Effect.gen(function* () {
+        const coordinator = yield* ContextHandoffCoordinator;
+        yield* coordinator.processTurnStart(turnStartEvent());
+      }),
+    );
+
+    expect(harness.repository.get()).toMatchObject({
+      status: "failed",
+      error: STORAGE_FAILURE_DETAIL,
+    });
+    const failures = turnStartFailureCommands(harness.commands);
+    expect(failures).toHaveLength(1);
+    expect(
+      failures[0]?.type === "thread.activity.append" ? failures[0].activity.payload : null,
+    ).toMatchObject({ messageId: targetMessageId, detail: STORAGE_FAILURE_DETAIL });
+
+    await harness.run(
+      Effect.gen(function* () {
+        const coordinator = yield* ContextHandoffCoordinator;
+        yield* coordinator.recover();
+      }),
+    );
+    expect(harness.startFreshSession).not.toHaveBeenCalled();
+    expect(harness.sendTurn).not.toHaveBeenCalled();
   });
 });
 
