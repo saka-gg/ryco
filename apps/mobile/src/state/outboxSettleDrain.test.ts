@@ -67,6 +67,7 @@ describe("outbox settle-edge drain (MAJOR 4)", () => {
             latestTurnPlaceholderCheckpoint: false,
             projectedMessageIds: new Set(),
             turnStartFailures: [],
+            turnStartCancelledMessageIds: new Set(),
             steerFailedMessageIds: new Set(),
           },
           environment: { shellLive: true, mutationReady: true },

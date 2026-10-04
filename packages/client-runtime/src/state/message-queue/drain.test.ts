@@ -10,6 +10,7 @@ import {
   makeQueueAppState,
   queueRef,
   steerFailed,
+  turnStartCancelled,
   turnStartFailed,
   type ThreadFixture,
 } from "../../../test/queueThreadFixtures.ts";
@@ -250,6 +251,26 @@ describe("resolveQueueDrainStep", () => {
         causeKeys: ["start-failed:a-1"],
       },
     });
+  });
+
+  it("settles a send whose start a Stop cancelled without an error hold", () => {
+    const snapshot = captureQueuedDispatchSnapshot(viewOf(IDLE_THREAD), "q-0", NOW);
+    const steps = drive(
+      input({
+        pendingDispatch: snapshot,
+        dispatchedMessageIds: new Set(["q-0"]),
+        view: viewOf({
+          session: { status: "stopped" },
+          latestTurn: IDLE_THREAD.latestTurn,
+          messageIds: ["m-0"],
+          activities: [turnStartCancelled("c-1", "q-0")],
+        }),
+      }),
+    );
+    expect(steps[0]).toEqual({ kind: "dispatch-started", messageId: "q-0" });
+    expect(steps.some((step) => step.kind === "hold" || step.kind === "dispatch-failed")).toBe(
+      false,
+    );
   });
 
   it("reconciles a projected sending head and ends a steer the provider rejected", () => {

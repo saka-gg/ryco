@@ -132,7 +132,8 @@ export function resolveQueueDrainStep(input: QueueDrainInput): QueueDrainStep {
   // 7. The previous queued send is acknowledged by its own turn or failure.
   if (input.pendingDispatch !== null) {
     const ack = resolveQueuedDispatchAck({ snapshot: input.pendingDispatch, view });
-    if (ack.kind === "started") {
+    // A start a Stop cancelled is settled the same way: the Stop holds the queue.
+    if (ack.kind === "started" || ack.kind === "settled") {
       return { kind: "dispatch-started", messageId: input.pendingDispatch.messageId };
     }
     if (ack.kind === "failed") {

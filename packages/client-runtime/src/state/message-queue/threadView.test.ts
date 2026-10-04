@@ -6,6 +6,7 @@ import {
   QUEUE_ENV,
   queueRef,
   steerFailed,
+  turnStartCancelled,
   turnStartFailed,
   type ThreadFixture,
 } from "../../../test/queueThreadFixtures.ts";
@@ -102,6 +103,20 @@ describe("readQueueThreadView", () => {
       { activityId: "a-1", messageId: "m-1", detail: "Thread already has active turn" },
     ]);
     expect([...loaded.steerFailedMessageIds]).toEqual(["m-2"]);
+  });
+
+  it("reads Stop-cancelled turn starts with a message id only once detail is loaded", () => {
+    const fixture = {
+      activities: [
+        turnStartCancelled("c-1", "m-1"),
+        { id: "c-2", kind: "provider.turn.start.cancelled", payload: { detail: "no id" } },
+      ],
+    };
+    expect([...viewOf(fixture).turnStartCancelledMessageIds]).toEqual([]);
+    const loaded = viewOf({ ...fixture, messageIds: [] });
+    expect([...loaded.turnStartCancelledMessageIds]).toEqual(["m-1"]);
+    // A cancel is not a failure.
+    expect(loaded.turnStartFailures).toEqual([]);
   });
 
   it("flags a latest turn whose checkpoint is the provider-diff placeholder", () => {

@@ -72,6 +72,7 @@ function view(overrides: Partial<QueueThreadView> = {}): QueueThreadView {
     latestTurnPlaceholderCheckpoint: false,
     projectedMessageIds: new Set(),
     turnStartFailures: [],
+    turnStartCancelledMessageIds: new Set(),
     steerFailedMessageIds: new Set(),
     ...overrides,
   };

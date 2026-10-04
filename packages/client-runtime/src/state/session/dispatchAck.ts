@@ -92,8 +92,9 @@ export function hasServerAcknowledgedLocalDispatch(input: {
 // ---------------------------------------------------------------------------
 // Strict, message-scoped queued-dispatch gate.
 //
-// A queued send is acknowledged only by a turn that is not the snapshot's, or
-// by a `provider.turn.start.failed` naming the dispatched message. Session
+// A queued send is acknowledged only by a turn that is not the snapshot's, by
+// a `provider.turn.start.failed` naming the dispatched message, or by a
+// `provider.turn.start.cancelled` naming it (a Stop settled it). Session
 // churn (`session-set(ready)` from the startSession bind, `lastError`,
 // `updatedAt`) is never an acknowledgement: a second `thread.turn.start` sent
 // in that window is accepted by the decider and orphaned by the reactor.
@@ -125,15 +126,27 @@ export function captureQueuedDispatchSnapshot(
 export type QueuedDispatchAck =
   | { readonly kind: "pending" }
   | { readonly kind: "started"; readonly turnId: TurnId }
+  /**
+   * A Stop cancelled the start before any turn existed. Settled like a
+   * started-then-interrupted turn, never failed: the Stop placed its own hold.
+   */
+  | { readonly kind: "settled" }
   | { readonly kind: "failed"; readonly causeKey: string; readonly detail: string | null };
 
 const PENDING_ACK: QueuedDispatchAck = { kind: "pending" };
+const SETTLED_ACK: QueuedDispatchAck = { kind: "settled" };
 
 export function resolveQueuedDispatchAck(input: {
   readonly snapshot: QueuedDispatchSnapshot;
-  readonly view: Pick<QueueThreadView, "turnStartFailures" | "session" | "latestTurn">;
+  readonly view: Pick<
+    QueueThreadView,
+    "turnStartFailures" | "turnStartCancelledMessageIds" | "session" | "latestTurn"
+  >;
 }): QueuedDispatchAck {
   const { snapshot, view } = input;
+  if (view.turnStartCancelledMessageIds.has(snapshot.messageId)) {
+    return SETTLED_ACK;
+  }
   const failure = view.turnStartFailures.find((entry) => entry.messageId === snapshot.messageId);
   if (failure) {
     return {
