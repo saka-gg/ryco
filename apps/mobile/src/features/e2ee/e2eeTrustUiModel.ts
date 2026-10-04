@@ -749,6 +749,60 @@ export function deriveE2eeApprovalComparison(
   };
 }
 
+/** The fast path's lead line before this phone has asked for approval. */
+export const E2EE_APPROVAL_INTRO_MESSAGE =
+  "Ask an already trusted owner to approve this phone, then scan the one-time code it shows.";
+
+/**
+ * Before any request, with no node identity presented yet. "Request approval"
+ * needs that identity, so this line must not invite an approval either.
+ */
+export const E2EE_APPROVAL_AWAITING_NODE_MESSAGE =
+  "Waiting for the node to present its identity. This phone can ask for approval once it does; do not approve a Desktop row for it before then.";
+
+export type E2eeApprovalRequestTone = "neutral" | "success" | "warning";
+
+/** The fast path's lead line and the number it is read against. */
+export interface E2eeApprovalRequestStatus {
+  readonly message: string;
+  readonly tone: E2eeApprovalRequestTone;
+  /** The full §13.4 number to match on Desktop, or `null` while there is none. */
+  readonly comparison: E2eeApprovalComparison | null;
+}
+
+/**
+ * What the fast path tells the owner, decided apart from the ceremony stage.
+ *
+ * A request outlives the identity it was made against. It bumps the trust
+ * revision, the re-prepared channel starts with nothing presented, and until the
+ * node's statement validates again the stage is `no-evidence` — indefinitely, if
+ * the node is offline or the Hub withholds the statement (rows K23/K24). The
+ * phone then has no number to compare, while the Hub, which issues the tickets,
+ * can still put a row of its own on Desktop. So a pending request without a
+ * number says "do not approve yet", whatever the stage, and never falls back to
+ * the generic invitation.
+ */
+export function deriveE2eeApprovalRequestStatus(input: {
+  readonly session: MobileE2eeSessionState;
+  readonly stage: E2eeVerificationStage;
+  readonly approvalRequested: boolean;
+}): E2eeApprovalRequestStatus {
+  if (!input.approvalRequested) {
+    return {
+      message:
+        input.stage === "no-evidence"
+          ? E2EE_APPROVAL_AWAITING_NODE_MESSAGE
+          : E2EE_APPROVAL_INTRO_MESSAGE,
+      tone: "neutral",
+      comparison: null,
+    };
+  }
+  const comparison = deriveE2eeApprovalComparison(input.session);
+  return comparison === null
+    ? { message: E2EE_APPROVAL_AWAITING_NUMBER_MESSAGE, tone: "warning", comparison: null }
+    : { message: E2EE_APPROVAL_REQUESTED_MESSAGE, tone: "success", comparison };
+}
+
 export const E2EE_APPROVAL_QR_INVALID =
   "That approval code does not match this phone, node, account, or current node security state. Ask the node to show a new code and scan it again.";
 

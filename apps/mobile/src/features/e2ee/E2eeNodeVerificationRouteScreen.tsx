@@ -11,15 +11,14 @@ import { E2EE_ACKNOWLEDGEMENT_SYMBOLS } from "./e2eeTrustSymbols";
 import {
   createE2eeVerificationDraft,
   confirmE2eeApprovalQr,
-  deriveE2eeApprovalComparison,
+  deriveE2eeApprovalRequestStatus,
   deriveE2eeVerificationView,
-  E2EE_APPROVAL_AWAITING_NUMBER_MESSAGE,
-  E2EE_APPROVAL_REQUESTED_MESSAGE,
   E2EE_COMPARISON_AFFIRMATION,
   E2EE_PRESENTED_COLUMN_TITLE,
   E2EE_PREVIOUSLY_VERIFIED_COLUMN_TITLE,
   requestE2eeApproval,
   shouldShowE2eeApprovalScanner,
+  type E2eeApprovalRequestTone,
 } from "./e2eeTrustUiModel";
 import { useMobileE2eeSession } from "./useMobileE2eeSession";
 import { getMobileHostedConnectionCoordinator } from "../../connection/hostedConnectionCoordinator";
@@ -34,6 +33,12 @@ import { resolveExactNodeRoute } from "./exactNodeRouteModel";
  * `e2eeTrustUiModel.ts`'s.
  */
 type Props = StaticScreenProps<{ readonly nodeId: string; readonly environmentId: string }>;
+
+const APPROVAL_TONE_CLASS: Record<E2eeApprovalRequestTone, string> = {
+  neutral: "text-foreground",
+  success: "text-success",
+  warning: "text-warning",
+};
 
 export function E2eeNodeVerificationRouteScreen(props: Props) {
   const navigation = useNavigation();
@@ -75,7 +80,11 @@ export function E2eeNodeVerificationRouteScreen(props: Props) {
     onCompleted: () => navigation.goBack(),
     now: () => Date.now(),
   });
-  const approvalComparison = approvalRequested ? deriveE2eeApprovalComparison(session) : null;
+  const approval = deriveE2eeApprovalRequestStatus({
+    session,
+    stage: view.stage,
+    approvalRequested,
+  });
 
   const openApprovalScanner = useCallback(async () => {
     setApprovalError(null);
@@ -176,10 +185,14 @@ export function E2eeNodeVerificationRouteScreen(props: Props) {
       {view.nodeLabel ? (
         <Text className="mx-5 mt-1 font-sans text-sm text-foreground-muted">{view.nodeLabel}</Text>
       ) : null}
-      <Text className="mx-5 mt-3 font-sans text-sm leading-relaxed text-foreground">
-        {recoveryMode
-          ? view.message
-          : "Ask an already trusted owner to approve this phone, then scan the one-time code it shows."}
+      {/* The request's status, whatever the stage: a request whose node identity
+          has not arrived yet must say "do not approve yet", not invite approval. */}
+      <Text
+        className={`mx-5 mt-3 font-sans text-sm leading-relaxed ${
+          recoveryMode ? "text-foreground" : APPROVAL_TONE_CLASS[approval.tone]
+        }`}
+      >
+        {recoveryMode ? view.message : approval.message}
       </Text>
 
       {shouldShowE2eeApprovalScanner(view.stage) && !recoveryMode ? (
@@ -202,13 +215,7 @@ export function E2eeNodeVerificationRouteScreen(props: Props) {
                 {approvalBusy ? "Requesting…" : "Request approval"}
               </Text>
             </Pressable>
-          ) : (
-            <Text className="mt-3 font-ryco-bold text-sm text-success">
-              {approvalComparison
-                ? E2EE_APPROVAL_REQUESTED_MESSAGE
-                : E2EE_APPROVAL_AWAITING_NUMBER_MESSAGE}
-            </Text>
-          )}
+          ) : null}
           {scanningApproval ? (
             <View className="mt-3 overflow-hidden rounded-2xl" style={{ height: 280 }}>
               <CameraView
@@ -251,11 +258,11 @@ export function E2eeNodeVerificationRouteScreen(props: Props) {
 
       {/* §13.2 step 4 on the fast path: the full number the owner matches against
           the Desktop row before approving it. Never a fingerprint tail. */}
-      {shouldShowE2eeApprovalScanner(view.stage) && !recoveryMode && approvalComparison ? (
+      {!recoveryMode && approval.comparison ? (
         <E2eeSafetyNumberCard
-          groups={approvalComparison.groups}
-          caption={approvalComparison.caption}
-          value={approvalComparison.value}
+          groups={approval.comparison.groups}
+          caption={approval.comparison.caption}
+          value={approval.comparison.value}
         />
       ) : null}
 

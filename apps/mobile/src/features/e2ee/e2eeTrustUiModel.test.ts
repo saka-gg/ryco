@@ -38,10 +38,15 @@ import {
   createE2eeVerificationDraft,
   confirmE2eeApprovalQr,
   deriveE2eeApprovalComparison,
+  deriveE2eeApprovalRequestStatus,
   deriveE2eeSecurityView,
   deriveE2eeVerificationView,
   e2eeSafetyNumberGroups,
   isE2eeSafetyNumberDisplay,
+  E2EE_APPROVAL_AWAITING_NODE_MESSAGE,
+  E2EE_APPROVAL_AWAITING_NUMBER_MESSAGE,
+  E2EE_APPROVAL_INTRO_MESSAGE,
+  E2EE_APPROVAL_REQUESTED_MESSAGE,
   E2EE_APPROVAL_SAFETY_NUMBER_CAPTION,
   E2EE_COMPARISON_AFFIRMATION,
   E2EE_ENROLLMENT_FINGERPRINT_MISMATCH,
@@ -952,6 +957,68 @@ describe("one-scan cross-device approval", () => {
         },
       }),
     ).toBeNull();
+  });
+
+  it("warns against approving while a request waits for the node's identity", () => {
+    // Request approval bumps the trust revision and the re-prepared channel
+    // starts with nothing presented, so the ceremony is at `no-evidence` until
+    // the node's statement validates again, and stays there for as long as the
+    // node is offline or the Hub withholds it (rows K23/K24). The scanner card is
+    // hidden at that stage; the request's status must not be.
+    const waiting = session({
+      selection: { ...session().selection!, localNodeHandle: "handle-qr" },
+      presented: null,
+    });
+    const stage = verificationView(waiting).view.stage;
+    expect(stage).toBe("no-evidence");
+    expect(shouldShowE2eeApprovalScanner(stage)).toBe(false);
+
+    const status = deriveE2eeApprovalRequestStatus({
+      session: waiting,
+      stage,
+      approvalRequested: true,
+    });
+    expect(status.message).toBe(E2EE_APPROVAL_AWAITING_NUMBER_MESSAGE);
+    expect(status.message).toMatch(/do not approve/i);
+    expect(status.message).not.toBe(E2EE_APPROVAL_INTRO_MESSAGE);
+    expect(status.tone).toBe("warning");
+    expect(status.comparison).toBeNull();
+  });
+
+  it("invites no approval before the node has presented an identity to request against", () => {
+    const unpresented = session({ presented: null });
+    const status = deriveE2eeApprovalRequestStatus({
+      session: unpresented,
+      stage: verificationView(unpresented).view.stage,
+      approvalRequested: false,
+    });
+    expect(status.message).toBe(E2EE_APPROVAL_AWAITING_NODE_MESSAGE);
+    expect(status.message).toMatch(/do not approve/i);
+    expect(status.comparison).toBeNull();
+  });
+
+  it("offers the request, then names the full number to match once it is made", () => {
+    const before = qrSession();
+    expect(
+      deriveE2eeApprovalRequestStatus({
+        session: before,
+        stage: verificationView(before).view.stage,
+        approvalRequested: false,
+      }),
+    ).toEqual({ message: E2EE_APPROVAL_INTRO_MESSAGE, tone: "neutral", comparison: null });
+
+    const requested = session({
+      selection: { ...session().selection!, localNodeHandle: "handle-qr" },
+    });
+    const status = deriveE2eeApprovalRequestStatus({
+      session: requested,
+      stage: verificationView(requested).view.stage,
+      approvalRequested: true,
+    });
+    expect(status.message).toBe(E2EE_APPROVAL_REQUESTED_MESSAGE);
+    expect(status.tone).toBe("success");
+    expect(status.comparison).not.toBeNull();
+    expect(status.comparison).toEqual(deriveE2eeApprovalComparison(requested));
   });
 
   it("rejects a copied code for another phone or stale statement before any trust write", async () => {
