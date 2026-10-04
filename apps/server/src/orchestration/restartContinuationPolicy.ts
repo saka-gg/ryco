@@ -26,7 +26,6 @@ import {
   ORPHANED_TURN_TERMINAL_STATE,
   isOrphanedProviderSession,
 } from "./restartReconciliation.ts";
-import { latestUserMessage } from "./userMessageOrder.ts";
 
 /** A continuation is never sent for work last observed longer ago than this. */
 export const RESTART_CONTINUATION_MAX_AGE_MS = 30 * 60_000;
@@ -216,6 +215,21 @@ export interface RestartContinuationTarget {
   readonly providerInstanceId: ProviderInstanceId;
 }
 
+/**
+ * The user message the user-acted-first fence compares: the last user message in array
+ * order. The decider's in-memory model appends every accepted message, so one accepted
+ * after capture is last there even when its client `createdAt` is older than the captured
+ * one. In the hydrated command model (capture and the dispatch pre-check) the user anchors
+ * are ordered by `created_at`, so this is the latest one there. Deliberately not
+ * `latestUserMessage` (the delegated-return fence's SQL twin): a lagging clock would hide
+ * the newer message behind the captured one.
+ */
+export function restartFenceUserMessageId(
+  messages: OrchestrationThread["messages"],
+): MessageId | null {
+  return messages.findLast((message) => message.role === "user")?.id ?? null;
+}
+
 /** The decider fence for a captured record. */
 export function restartContinuationGuardOf(
   record: RestartContinuationTarget,
@@ -241,9 +255,10 @@ export type RestartTargetBlocker =
 
 /**
  * Whether the thread still is exactly what was captured. Run by the dispatcher as a
- * pre-check and by the decider as the atomic fence. The latest user message is the only
- * interleaving fence: a turn start, steer or delegated return accepted after capture adds
- * one, while `latestTurn` only moves once the provider reports the new turn running.
+ * pre-check and by the decider as the atomic fence. The last user message
+ * ({@link restartFenceUserMessageId}) is the only interleaving fence: a turn start, steer
+ * or delegated return accepted after capture adds one, while `latestTurn` only moves once
+ * the provider reports the new turn running.
  */
 export function restartContinuationTargetBlocker(
   thread: OrchestrationThread | undefined,
@@ -267,7 +282,7 @@ export function restartContinuationTargetBlocker(
   ) {
     return "thread-changed";
   }
-  if ((latestUserMessage(thread.messages)?.id ?? null) !== guard.latestUserMessageId) {
+  if (restartFenceUserMessageId(thread.messages) !== guard.latestUserMessageId) {
     return "thread-changed";
   }
   if (

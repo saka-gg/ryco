@@ -52,6 +52,7 @@ import {
   restartContinuationPrompt,
   restartContinuationTargetBlocker,
   restartFailureNotice,
+  restartFenceUserMessageId,
   restartSkipNotice,
   type RestartCandidateShape,
   type RestartFailureReason,
@@ -68,7 +69,6 @@ import {
 } from "../Services/RestartContinuation.ts";
 import * as ThreadBackgroundLiveness from "../ThreadBackgroundLiveness.ts";
 import { buildRestartContinuationTurnStart } from "../threadContinuation.ts";
-import { latestUserMessage } from "../userMessageOrder.ts";
 
 /** Settled rows are kept this long for diagnostics, then pruned at capture. */
 const SETTLED_RETENTION_MS = 30 * 24 * 3_600_000;
@@ -322,8 +322,7 @@ export const makeRestartContinuation = (options: RestartContinuationOptions = {}
           kind: shape.kind,
           threadId: thread.id,
           sourceTurnId: shape.sourceTurnId,
-          // The decider fence compares the same view (`latestUserMessage`).
-          latestUserMessageId: latestUserMessage(thread.messages)?.id ?? null,
+          latestUserMessageId: restartFenceUserMessageId(thread.messages),
           modelSelection: thread.modelSelection,
           runtimeMode: thread.runtimeMode,
           interactionMode: thread.interactionMode,

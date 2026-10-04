@@ -156,6 +156,24 @@ describe("restart continuation guard", () => {
     expect(error.message).toContain("Restart continuation target changed (thread-changed).");
   });
 
+  it("rejects a user message accepted after capture whose client clock lags", async () => {
+    const thread = reconciledThread();
+    const error = await decide({
+      ...thread,
+      // Appended by the projector after the captured message, but stamped earlier.
+      messages: [
+        ...thread.messages,
+        {
+          ...thread.messages[0]!,
+          id: MessageId.make("message-lagging-clock"),
+          createdAt: "2026-10-04T09:58:00.000Z",
+        },
+      ],
+    });
+    expect(error._tag).toBe("OrchestrationCommandInvariantError");
+    expect(error.message).toContain("Restart continuation target changed (thread-changed).");
+  });
+
   it("rejects after a model change", async () => {
     const thread = reconciledThread();
     const error = await decide({

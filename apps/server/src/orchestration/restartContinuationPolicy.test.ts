@@ -311,6 +311,21 @@ describe("restartContinuationTargetBlocker", () => {
     ).toBe("thread-changed");
   });
 
+  it("rejects a user message appended after capture even when its clock lags", () => {
+    // The decider's model appends accepted messages; a lagging client stamps an older time.
+    expect(
+      restartContinuationTargetBlocker(
+        reconciled({
+          messages: [
+            { id: "message-1", createdAt: "2026-10-04T10:00:00.000Z" },
+            { id: "message-late-clock", createdAt: "2026-10-04T09:55:00.000Z" },
+          ],
+        }),
+        guard,
+      ),
+    ).toBe("thread-changed");
+  });
+
   it("rejects a model, mode or worktree change", () => {
     const subject = reconciled();
     for (const changed of [
