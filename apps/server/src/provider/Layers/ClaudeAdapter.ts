@@ -157,10 +157,17 @@ interface ClaudeResumeState {
   readonly turnCount?: number;
 }
 
+/**
+ * Who opened a turn. Anything but "prompt" is a provider turn: Claude started it without a
+ * prompt (a background "wake"), so it has no prompt UUID and no Agent Control binding.
+ */
+type ClaudeTurnOpener = "prompt" | "wake-signal" | "assistant-output";
+
 interface ClaudeTurnState {
   readonly turnId: TurnId;
-  /** Only user-initiated turns have a prompt UUID; synthetic turns preserve legacy completion. */
+  /** Only user-initiated turns have a prompt UUID; provider turns preserve legacy completion. */
   readonly promptUuid?: string;
+  readonly openedBy: ClaudeTurnOpener;
   readonly startedAt: string;
   readonly items: Array<unknown>;
   readonly assistantTextBlocks: Map<number, AssistantTextBlockState>;
@@ -170,6 +177,37 @@ interface ClaudeTurnState {
   /** Open thinking blocks by stream index; each one is a reasoning item. */
   readonly reasoningBlocks: Map<number, { readonly itemId: string }>;
   reasoningBlockCount: number;
+  /** A root frame proved Claude is producing this turn (first-output watchdog liveness). */
+  rootOutputObserved: boolean;
+  /**
+   * Set while one fiber finishes this turn. Concurrent closes wait on it instead of emitting a
+   * second lifecycle event.
+   */
+  completion: Deferred.Deferred<void> | undefined;
+}
+
+/** The only turn-state constructor: prompt and provider turns must share one shape. */
+function makeClaudeTurnState(input: {
+  readonly turnId: TurnId;
+  readonly startedAt: string;
+  readonly openedBy: ClaudeTurnOpener;
+  readonly promptUuid?: string;
+}): ClaudeTurnState {
+  return {
+    turnId: input.turnId,
+    ...(input.promptUuid !== undefined ? { promptUuid: input.promptUuid } : {}),
+    openedBy: input.openedBy,
+    startedAt: input.startedAt,
+    items: [],
+    assistantTextBlocks: new Map(),
+    assistantTextBlockOrder: [],
+    capturedProposedPlanKeys: new Set(),
+    nextSyntheticAssistantBlockIndex: -1,
+    reasoningBlocks: new Map(),
+    reasoningBlockCount: 0,
+    rootOutputObserved: input.openedBy !== "wake-signal",
+    completion: undefined,
+  };
 }
 
 interface AssistantTextBlockState {
@@ -328,6 +366,10 @@ interface ClaudeSessionContext {
   readonly startedSubagentIds: Set<string>;
   readonly completedSubagentIds: Set<string>;
   stopped: boolean;
+  /** A prompt turn was installed on this runtime; earlier signals are startup/resume handshakes. */
+  promptSent: boolean;
+  /** sendTurn calls between entry and install. A provider turn must not open under them. */
+  turnInstallsInFlight: number;
 }
 
 interface ClaudeQueryRuntime extends AsyncIterable<SDKMessage> {
@@ -360,6 +402,8 @@ export interface ClaudeAdapterLiveOptions {
   }) => ClaudeQueryRuntime;
   readonly nativeEventLogPath?: string;
   readonly nativeEventLogger?: EventNdjsonLogger;
+  /** Test seam: a small capacity makes runtime-event backpressure deterministic. */
+  readonly runtimeEventQueueCapacity?: number;
 }
 
 const CLAUDE_SUBAGENT_ATTRIBUTION_CACHE_CAP = 256;
@@ -1604,7 +1648,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
   const sessions = new Map<ThreadId, ClaudeSessionContext>();
   let nextSessionGeneration = 0;
-  const runtimeEventQueue = yield* Queue.bounded<ProviderRuntimeEvent>(2_048);
+  const runtimeEventQueue = yield* Queue.bounded<ProviderRuntimeEvent>(
+    options?.runtimeEventQueueCapacity ?? 2_048,
+  );
   const runtimeEventQueueMetrics = yield* makeServerQueueMetrics({
     queue: "provider.adapter.runtimeEvents",
     component: "ClaudeAdapter",
@@ -1833,21 +1879,18 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   const updateResumeCursor = Effect.fn("updateResumeCursor")(function* (
     context: ClaudeSessionContext,
   ) {
+    if (!context.session.threadId) return;
+    // Yield before reading the session: a spread taken across a yield would write back a
+    // stale status/activeTurnId over a concurrent turn install.
+    const updatedAt = yield* nowIso;
     const threadId = context.session.threadId;
-    if (!threadId) return;
-
     const resumeCursor = {
       threadId,
       ...(context.resumeSessionId ? { resume: context.resumeSessionId } : {}),
       ...(context.lastAssistantUuid ? { resumeSessionAt: context.lastAssistantUuid } : {}),
       turnCount: context.turns.length,
     };
-
-    context.session = {
-      ...context.session,
-      resumeCursor,
-      updatedAt: yield* nowIso,
-    };
+    context.session = { ...context.session, resumeCursor, updatedAt };
   });
 
   const ensureAssistantTextBlock = Effect.fn("ensureAssistantTextBlock")(function* (
@@ -2277,44 +2320,54 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       : undefined;
   });
 
-  const completeTurn = Effect.fn("completeTurn")(function* (
+  /** A result (or local close) with no open turn: keep usage, never publish a lifecycle event. */
+  const publishTurnlessResult = Effect.fn("publishTurnlessResult")(function* (
     context: ClaudeSessionContext,
     status: ProviderRuntimeTurnStatus,
-    errorMessage?: string,
-    result?: SDKResultMessage,
+    errorMessage: string | undefined,
+    result: SDKResultMessage | undefined,
   ) {
     const usageSnapshot = yield* resolveResultUsageSnapshot(context, result);
-
-    const turnState = context.turnState;
-    if (!turnState) {
-      if (usageSnapshot) {
-        const usageStamp = yield* makeEventStamp();
-        yield* offerRuntimeEventForContext(context, {
-          type: "thread.token-usage.updated",
-          eventId: usageStamp.eventId,
-          provider: PROVIDER,
-          createdAt: usageStamp.createdAt,
-          threadId: context.session.threadId,
-          payload: {
-            usage: usageSnapshot,
-          },
-          providerRefs: {},
-        });
-      }
-
-      // Real turns always receive local turnState when sent, and out-of-turn
-      // assistant messages create a synthetic turn. What remains is a resume
-      // handshake, a late duplicate result, or a no-turn stream failure. Keep
-      // usage, but never publish an untargeted lifecycle completion.
-      yield* Effect.logInfo("claude.turn.result-without-active-turn", {
+    if (usageSnapshot) {
+      const usageStamp = yield* makeEventStamp();
+      yield* offerRuntimeEventForContext(context, {
+        type: "thread.token-usage.updated",
+        eventId: usageStamp.eventId,
+        provider: PROVIDER,
+        createdAt: usageStamp.createdAt,
         threadId: context.session.threadId,
-        status,
-        numTurns: result?.num_turns,
-        hasUsage: result?.usage !== undefined,
-        ...(errorMessage ? { errorMessage } : {}),
+        payload: {
+          usage: usageSnapshot,
+        },
+        providerRefs: {},
       });
-      return;
     }
+
+    // Real turns always receive local turnState when sent, and out-of-turn
+    // assistant messages create a provider turn. What remains is a resume
+    // handshake, an empty notification turn, a late duplicate result, or a
+    // no-turn stream failure. Keep usage, but never publish an untargeted
+    // lifecycle completion.
+    yield* Effect.logInfo("claude.turn.result-without-active-turn", {
+      threadId: context.session.threadId,
+      status,
+      numTurns: result?.num_turns,
+      hasUsage: result?.usage !== undefined,
+      ...(errorMessage ? { errorMessage } : {}),
+    });
+  });
+
+  /** Finishes a turn this fiber claimed in `completeTurn`. Never call it directly. */
+  const finishClaimedTurn = Effect.fn("finishClaimedTurn")(function* (
+    context: ClaudeSessionContext,
+    turnState: ClaudeTurnState,
+    completion: Deferred.Deferred<void>,
+    status: ProviderRuntimeTurnStatus,
+    errorMessage: string | undefined,
+    result: SDKResultMessage | undefined,
+    options: { readonly abortReason?: string } | undefined,
+  ) {
+    const usageSnapshot = yield* resolveResultUsageSnapshot(context, result);
 
     for (const [index, tool] of context.inFlightTools.entries()) {
       const toolStamp = yield* makeEventStamp();
@@ -2383,40 +2436,110 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
 
     const stamp = yield* makeEventStamp();
-    yield* offerRuntimeEventForContext(context, {
-      type: "turn.completed",
-      eventId: stamp.eventId,
-      provider: PROVIDER,
-      createdAt: stamp.createdAt,
-      threadId: context.session.threadId,
-      turnId: turnState.turnId,
-      payload: {
-        state: status,
-        ...(result?.stop_reason !== undefined ? { stopReason: result.stop_reason } : {}),
-        ...(result?.usage ? { usage: result.usage } : {}),
-        ...(result?.modelUsage ? { modelUsage: result.modelUsage } : {}),
-        ...(typeof result?.total_cost_usd === "number"
-          ? { totalCostUsd: result.total_cost_usd }
-          : {}),
-        ...(errorMessage ? { errorMessage } : {}),
-      },
-      providerRefs: nativeProviderRefs(context),
-    });
+    if (options?.abortReason !== undefined) {
+      // Aborted turns settle through thread.turn.interrupt and capture no checkpoint.
+      yield* offerRuntimeEventForContext(context, {
+        type: "turn.aborted",
+        eventId: stamp.eventId,
+        provider: PROVIDER,
+        createdAt: stamp.createdAt,
+        threadId: context.session.threadId,
+        turnId: turnState.turnId,
+        payload: { reason: options.abortReason },
+        providerRefs: nativeProviderRefs(context),
+      });
+    } else {
+      yield* offerRuntimeEventForContext(context, {
+        type: "turn.completed",
+        eventId: stamp.eventId,
+        provider: PROVIDER,
+        createdAt: stamp.createdAt,
+        threadId: context.session.threadId,
+        turnId: turnState.turnId,
+        payload: {
+          state: status,
+          ...(result?.stop_reason !== undefined ? { stopReason: result.stop_reason } : {}),
+          ...(result?.usage ? { usage: result.usage } : {}),
+          ...(result?.modelUsage ? { modelUsage: result.modelUsage } : {}),
+          ...(typeof result?.total_cost_usd === "number"
+            ? { totalCostUsd: result.total_cost_usd }
+            : {}),
+          ...(errorMessage ? { errorMessage } : {}),
+        },
+        providerRefs: nativeProviderRefs(context),
+      });
+    }
 
     const updatedAt = yield* nowIso;
-    context.turnState = undefined;
-    context.session = {
-      ...context.session,
-      status: "ready",
-      activeTurnId: undefined,
-      updatedAt,
-      ...(status === "failed" && errorMessage ? { lastError: errorMessage } : {}),
-    };
+    if (context.turnState === turnState) {
+      context.turnState = undefined;
+      context.session = {
+        ...context.session,
+        status: "ready",
+        activeTurnId: undefined,
+        updatedAt,
+        ...(status === "failed" && errorMessage ? { lastError: errorMessage } : {}),
+      };
+    }
+    // Release waiters before the tail effects: the turn is detached.
+    Deferred.doneUnsafe(completion, Effect.void);
     if (context.agentControl) yield* context.agentControl.retireTurn(turnState.turnId);
     yield* updateResumeCursor(context);
     if (status === "completed" && usageSnapshot) {
       yield* maybeEnableAutomaticCompaction(context, usageSnapshot);
     }
+  });
+
+  /**
+   * The single owner of turn completion. The open turn is claimed synchronously at entry, so a
+   * concurrent close (sendTurn, Stop grace, watchdog, stream exit) waits for the claimer instead
+   * of emitting a second lifecycle event.
+   */
+  const completeTurn = Effect.fn("completeTurn")(function* (
+    context: ClaudeSessionContext,
+    status: ProviderRuntimeTurnStatus,
+    errorMessage?: string,
+    result?: SDKResultMessage,
+    options?: { readonly abortReason?: string },
+  ) {
+    // Must stay the first statement: the claim is only atomic before any yield.
+    const turnState = context.turnState;
+    if (turnState?.completion !== undefined) {
+      // Another fiber is finishing this turn; never emit a second lifecycle event. A result that
+      // arrives now only loses its usage: a local close already finished the turn.
+      if (result !== undefined) {
+        yield* Effect.logInfo("claude.turn.result-during-completion", {
+          threadId: context.session.threadId,
+          turnId: turnState.turnId,
+          status,
+        });
+      }
+      yield* Deferred.await(turnState.completion);
+      return;
+    }
+    if (turnState === undefined) {
+      return yield* publishTurnlessResult(context, status, errorMessage, result);
+    }
+    const completion = Deferred.makeUnsafe<void>();
+    turnState.completion = completion;
+    yield* finishClaimedTurn(
+      context,
+      turnState,
+      completion,
+      status,
+      errorMessage,
+      result,
+      options,
+    ).pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          // Failed or interrupted before the turn was detached: release the claim so a later
+          // close can retry.
+          if (context.turnState === turnState) turnState.completion = undefined;
+          Deferred.doneUnsafe(completion, Effect.void);
+        }),
+      ),
+    );
   });
 
   const handleStreamEvent = Effect.fn("handleStreamEvent")(function* (
@@ -2943,6 +3066,50 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
   });
 
+  /**
+   * Opens a provider turn: one Claude started without a prompt. Never bound to Agent Control
+   * authority; exact-turn binding stays prompt-only.
+   */
+  const startProviderTurn = Effect.fn("startProviderTurn")(function* (
+    context: ClaudeSessionContext,
+    openedBy: Exclude<ClaudeTurnOpener, "prompt">,
+  ) {
+    const turnId = TurnId.make(yield* Effect.sync(() => crypto.randomUUID()));
+    const startedAt = yield* nowIso;
+    // Synchronous from here to the install: re-check after the yields above.
+    if (context.turnState !== undefined || context.stopped) return;
+    if (openedBy === "wake-signal" && (context.turnInstallsInFlight > 0 || !context.promptSent)) {
+      return;
+    }
+    const turnState = makeClaudeTurnState({ turnId, startedAt, openedBy });
+    context.turnState = turnState;
+    context.session = {
+      ...context.session,
+      status: "running",
+      activeTurnId: turnId,
+      updatedAt: startedAt,
+    };
+    const turnStartedStamp = yield* makeEventStamp();
+    yield* offerRuntimeEventForContext(context, {
+      type: "turn.started",
+      eventId: turnStartedStamp.eventId,
+      provider: PROVIDER,
+      createdAt: turnStartedStamp.createdAt,
+      threadId: context.session.threadId,
+      turnId,
+      payload: {},
+      providerRefs: {
+        ...nativeProviderRefs(context),
+        providerTurnId: turnId,
+      },
+      raw: {
+        source: "claude.sdk.message",
+        method: "claude/synthetic-turn-start",
+        payload: { openedBy },
+      },
+    });
+  });
+
   const handleAssistantMessage = Effect.fn("handleAssistantMessage")(function* (
     context: ClaudeSessionContext,
     message: SDKMessage,
@@ -3056,47 +3223,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       });
     }
 
-    // Auto-start a synthetic turn for assistant messages that arrive without
-    // an active turn (e.g., background agent/subagent responses between user prompts).
+    // Fallback opener for root assistant output that arrives while no turn is
+    // open and no wake signal opened one (e.g., a background reply on a CLI
+    // that emits neither status frames nor init). Ungated on purpose: output
+    // must never land outside a turn.
     if (!context.turnState) {
-      const turnId = TurnId.make(yield* Effect.sync(() => crypto.randomUUID()));
-      const startedAt = yield* nowIso;
-      context.turnState = {
-        turnId,
-        startedAt,
-        items: [],
-        assistantTextBlocks: new Map(),
-        assistantTextBlockOrder: [],
-        capturedProposedPlanKeys: new Set(),
-        nextSyntheticAssistantBlockIndex: -1,
-        reasoningBlocks: new Map(),
-        reasoningBlockCount: 0,
-      };
-      context.session = {
-        ...context.session,
-        status: "running",
-        activeTurnId: turnId,
-        updatedAt: startedAt,
-      };
-      const turnStartedStamp = yield* makeEventStamp();
-      yield* offerRuntimeEventForContext(context, {
-        type: "turn.started",
-        eventId: turnStartedStamp.eventId,
-        provider: PROVIDER,
-        createdAt: turnStartedStamp.createdAt,
-        threadId: context.session.threadId,
-        turnId,
-        payload: {},
-        providerRefs: {
-          ...nativeProviderRefs(context),
-          providerTurnId: turnId,
-        },
-        raw: {
-          source: "claude.sdk.message",
-          method: "claude/synthetic-turn-start",
-          payload: {},
-        },
-      });
+      yield* startProviderTurn(context, "assistant-output");
     }
 
     const content = message.message?.content;
@@ -4810,6 +4942,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         startedSubagentIds: new Set(),
         completedSubagentIds: new Set(),
         stopped: false,
+        promptSent: false,
+        turnInstallsInFlight: 0,
       };
       deviceToolContext = context;
       yield* Ref.set(contextRef, context);
@@ -4885,18 +5019,14 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     },
   );
 
-  const sendTurn: ClaudeAdapterShape["sendTurn"] = Effect.fn("sendTurn")(function* (input) {
-    const context = yield* requireSession(input.threadId);
+  const sendTurnOnContext = Effect.fn("sendTurnOnContext")(function* (
+    context: ClaudeSessionContext,
+    input: ProviderSendTurnInput,
+  ) {
     const modelSelection =
       input.modelSelection !== undefined && input.modelSelection.instanceId === boundInstanceId
         ? input.modelSelection
         : undefined;
-
-    if (context.turnState) {
-      // Auto-close a stale synthetic turn (from background agent responses
-      // between user prompts) to prevent blocking the user's next turn.
-      yield* completeTurn(context, "completed");
-    }
 
     if (modelSelection?.model) {
       const apiModelId = resolveClaudeApiModelId(modelSelection);
@@ -4942,27 +5072,23 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
     const promptUuid = yield* Effect.sync(() => crypto.randomUUID());
     const turnId = TurnId.make(promptUuid);
-    const turnState: ClaudeTurnState = {
-      turnId,
-      promptUuid,
-      startedAt: yield* nowIso,
-      items: [],
-      assistantTextBlocks: new Map(),
-      assistantTextBlockOrder: [],
-      capturedProposedPlanKeys: new Set(),
-      nextSyntheticAssistantBlockIndex: -1,
-      reasoningBlocks: new Map(),
-      reasoningBlockCount: 0,
-    };
+    const startedAt = yield* nowIso;
 
-    const updatedAt = yield* nowIso;
+    // Closes a stale provider turn, one opened while the awaits above yielded,
+    // or waits for an in-flight completion. Re-checks until no turn is open.
+    while (context.turnState !== undefined) {
+      yield* completeTurn(context, "completed");
+    }
+    // No yield between the last check and the install.
+    const turnState = makeClaudeTurnState({ turnId, promptUuid, startedAt, openedBy: "prompt" });
     context.turnState = turnState;
     context.session = {
       ...context.session,
       status: "running",
       activeTurnId: turnId,
-      updatedAt,
+      updatedAt: startedAt,
     };
+    context.promptSent = true;
 
     const turnStartedStamp = yield* makeEventStamp();
     yield* offerRuntimeEventForContext(context, {
@@ -5021,6 +5147,22 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         ? { resumeCursor: context.session.resumeCursor }
         : {}),
     };
+  });
+
+  const sendTurn: ClaudeAdapterShape["sendTurn"] = Effect.fn("sendTurn")(function* (input) {
+    const context = yield* requireSession(input.threadId);
+    // Counted from entry to install, so no provider turn opens under a send in flight; the
+    // release also runs when the send fails or is interrupted.
+    return yield* Effect.acquireUseRelease(
+      Effect.sync(() => {
+        context.turnInstallsInFlight += 1;
+      }),
+      () => sendTurnOnContext(context, input),
+      () =>
+        Effect.sync(() => {
+          context.turnInstallsInFlight -= 1;
+        }),
+    );
   });
 
   const interruptTurn: ClaudeAdapterShape["interruptTurn"] = Effect.fn("interruptTurn")(

@@ -25,6 +25,7 @@ import { createModelSelection } from "@ryco/shared/model";
 import { assert, describe, it, vi } from "@effect/vitest";
 import {
   Context,
+  Deferred,
   Effect,
   Fiber,
   Layer,
@@ -68,6 +69,9 @@ class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
   public readonly applyFlagSettings?: (settings: Record<string, unknown>) => Promise<void>;
   public closeCalls = 0;
   public mcpStatuses: ReadonlyArray<{ readonly name: string; readonly status: string }> = [];
+  /** While set, setPermissionMode parks on it before recording the call. */
+  public permissionModeGate: Promise<void> | undefined;
+  private readonly permissionModeWaiters: Array<() => void> = [];
 
   constructor(supportsAutomaticCompaction = false) {
     if (supportsAutomaticCompaction) {
@@ -124,8 +128,15 @@ class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
   };
 
   readonly setPermissionMode = async (mode: PermissionMode): Promise<void> => {
+    for (const notify of this.permissionModeWaiters.splice(0)) notify();
+    if (this.permissionModeGate) await this.permissionModeGate;
     this.setPermissionModeCalls.push(mode);
   };
+
+  /** Resolves once the next setPermissionMode call has started. */
+  permissionModeEntered(): Promise<void> {
+    return new Promise((resolve) => this.permissionModeWaiters.push(resolve));
+  }
 
   readonly setMaxThinkingTokens = async (maxThinkingTokens: number | null): Promise<void> => {
     this.setMaxThinkingTokensCalls.push(maxThinkingTokens);
@@ -181,6 +192,7 @@ function makeHarness(config?: {
   readonly instanceId?: ProviderInstanceId;
   readonly agentControl?: AgentControlProviderBridge;
   readonly supportsAutomaticCompaction?: boolean;
+  readonly runtimeEventQueueCapacity?: number;
 }) {
   const query = new FakeClaudeQuery(config?.supportsAutomaticCompaction);
   let createInput:
@@ -193,6 +205,9 @@ function makeHarness(config?: {
   const adapterOptions: ClaudeAdapterLiveOptions = {
     ...(config?.instanceId ? { instanceId: config.instanceId } : {}),
     ...(config?.agentControl ? { agentControl: config.agentControl } : {}),
+    ...(config?.runtimeEventQueueCapacity !== undefined
+      ? { runtimeEventQueueCapacity: config.runtimeEventQueueCapacity }
+      : {}),
     createQuery: (input) => {
       createInput = input;
       return query;
@@ -6011,15 +6026,31 @@ function sentinelFrame(id: string): SDKMessage {
 const isSentinel = (id: string) => (event: ProviderRuntimeEvent) =>
   event.type === "hook.started" && event.payload.hookId === id;
 
-/** Collects every runtime event while letting a test wait for a specific one. */
+/**
+ * Collects every runtime event while letting a test wait for a specific one. A closed gate parks
+ * the consumer after each event, so (with a tiny adapter queue) the adapter blocks mid-emit.
+ */
 function makeRuntimeEventLog(adapter: ClaudeAdapterShape) {
   return Effect.gen(function* () {
     const events: Array<ProviderRuntimeEvent> = [];
     const pending = yield* Queue.unbounded<ProviderRuntimeEvent>();
+    let gate: Deferred.Deferred<void> | undefined;
     yield* adapter.streamEvents.pipe(
-      Stream.runForEach((event) => Queue.offer(pending, event)),
+      Stream.runForEach((event) =>
+        Queue.offer(pending, event).pipe(
+          Effect.andThen(Effect.suspend(() => (gate ? Deferred.await(gate) : Effect.void))),
+        ),
+      ),
       Effect.forkChild,
     );
+    const closeGate = Effect.sync(() => {
+      gate ??= Deferred.makeUnsafe<void>();
+    });
+    const openGate = Effect.suspend(() => {
+      const closed = gate;
+      gate = undefined;
+      return closed ? Deferred.succeed(closed, undefined) : Effect.void;
+    });
     const waitFor = (predicate: (event: ProviderRuntimeEvent) => boolean) =>
       Effect.gen(function* () {
         while (true) {
@@ -6037,9 +6068,42 @@ function makeRuntimeEventLog(adapter: ClaudeAdapterShape) {
         events.push(next.value);
       }
     });
-    return { events, waitFor, drain };
+    return { events, waitFor, drain, closeGate, openGate };
   });
 }
+
+function rootToolStartFrame(index: number, toolUseId: string): SDKMessage {
+  return {
+    type: "stream_event",
+    parent_tool_use_id: null,
+    uuid: `tool-start-${toolUseId}`,
+    session_id: GAUGE_SDK_SESSION,
+    event: {
+      type: "content_block_start",
+      index,
+      content_block: { type: "tool_use", id: toolUseId, name: "Bash", input: {} },
+    },
+  } as unknown as SDKMessage;
+}
+
+const isTurnTerminal = (event: ProviderRuntimeEvent) =>
+  event.type === "turn.completed" || event.type === "turn.aborted";
+
+function assertEveryTurnTerminatesOnce(events: ReadonlyArray<ProviderRuntimeEvent>) {
+  const started = events.filter((event) => event.type === "turn.started");
+  assert.isAbove(started.length, 0);
+  for (const turn of started) {
+    const terminals = events.filter(
+      (event) => isTurnTerminal(event) && event.turnId === turn.turnId,
+    );
+    assert.equal(terminals.length, 1, `turn ${String(turn.turnId)} terminal events`);
+  }
+}
+
+const yieldTimes = (times: number) =>
+  Effect.gen(function* () {
+    for (let round = 0; round < times; round += 1) yield* Effect.yieldNow;
+  });
 
 const isUsageEvent = (event: ProviderRuntimeEvent) => event.type === "thread.token-usage.updated";
 
@@ -6315,6 +6379,130 @@ describe("ClaudeAdapterLive context meter across compaction", () => {
         assert.equal(resultUsage.payload.usage.usedTokens, 42_000);
         assert.equal(resultUsage.payload.usage.totalProcessedTokens, 190_000);
       }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+});
+
+describe("ClaudeAdapterLive turn ownership", () => {
+  it.effect("closes a provider turn opened while sendTurn awaited the SDK", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("ownership-send-orphan"),
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      let releaseGate: () => void = () => undefined;
+      harness.query.permissionModeGate = new Promise((resolve) => {
+        releaseGate = resolve;
+      });
+      const entered = harness.query.permissionModeEntered();
+      const sendFiber = yield* adapter
+        .sendTurn({ threadId: THREAD_ID, input: "user prompt", interactionMode: "default" })
+        .pipe(Effect.forkChild);
+      yield* Effect.promise(() => entered);
+
+      harness.query.emit(
+        rootAssistantFrame("background-reply", {}, [{ type: "text", text: "Bg" }]),
+      );
+      const providerStarted = yield* log.waitFor((event) => event.type === "turn.started");
+      const providerTurnId = providerStarted.turnId;
+
+      releaseGate();
+      const userTurn = yield* Fiber.join(sendFiber);
+      assert.notEqual(userTurn.turnId, providerTurnId);
+      harness.query.emit(resultFrame({ user_message_uuids: [userTurn.turnId] }));
+      harness.query.emit(sentinelFrame("after-user-result"));
+      yield* log.waitFor(isSentinel("after-user-result"));
+      harness.query.finish();
+      yield* log.waitFor((event) => event.type === "session.exited");
+
+      const events = log.events;
+      const providerCompleted = events.findIndex(
+        (event) => event.type === "turn.completed" && event.turnId === providerTurnId,
+      );
+      const userStarted = events.findIndex(
+        (event) => event.type === "turn.started" && event.turnId === userTurn.turnId,
+      );
+      assert.isAbove(providerCompleted, -1);
+      assert.isBelow(providerCompleted, userStarted);
+      const userCompleted = events.find(
+        (event) => event.type === "turn.completed" && event.turnId === userTurn.turnId,
+      );
+      assert.equal(
+        userCompleted?.type === "turn.completed" && userCompleted.payload.state,
+        "completed",
+      );
+      assertEveryTurnTerminatesOnce(events);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("never closes a turn twice when sendTurn races the stream's completion", () => {
+    const harness = makeHarness({ runtimeEventQueueCapacity: 1 });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("ownership-double-close"),
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      harness.query.emit(rootAssistantFrame("background-reply"));
+      const providerStarted = yield* log.waitFor((event) => event.type === "turn.started");
+      const providerTurnId = providerStarted.turnId;
+      harness.query.emit(rootToolStartFrame(0, "tool-a"));
+      harness.query.emit(rootToolStartFrame(1, "tool-b"));
+      yield* log.waitFor(
+        (event) => event.type === "item.started" && String(event.itemId) === "tool-b",
+      );
+
+      // With the consumer parked, completeTurn(S) blocks on its second or third emit.
+      yield* log.closeGate;
+      harness.query.emit(
+        resultFrame({
+          origin: { kind: "task-notification" },
+          usage: { input_tokens: 10, cache_read_input_tokens: 20_000, output_tokens: 30 },
+        }),
+      );
+      yield* log.waitFor((event) => event.type === "item.completed");
+      const sendFiber = yield* adapter
+        .sendTurn({ threadId: THREAD_ID, input: "user prompt" })
+        .pipe(Effect.forkChild);
+      yield* yieldTimes(20);
+      yield* log.openGate;
+
+      const userTurn = yield* Fiber.join(sendFiber);
+      harness.query.emit(resultFrame({ user_message_uuids: [userTurn.turnId] }));
+      harness.query.emit(sentinelFrame("after-user-result"));
+      yield* log.waitFor(isSentinel("after-user-result"));
+
+      const events = log.events;
+      const providerCompletions = events.filter(
+        (event) => event.type === "turn.completed" && event.turnId === providerTurnId,
+      );
+      assert.equal(providerCompletions.length, 1);
+      const providerCompleted = events.indexOf(providerCompletions[0]!);
+      const userStarted = events.findIndex(
+        (event) => event.type === "turn.started" && event.turnId === userTurn.turnId,
+      );
+      assert.isBelow(providerCompleted, userStarted);
+      assert.isTrue(
+        events.some((event) => event.type === "turn.completed" && event.turnId === userTurn.turnId),
+      );
+      const [session] = yield* adapter.listSessions();
+      assert.isUndefined(session?.activeTurnId);
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
