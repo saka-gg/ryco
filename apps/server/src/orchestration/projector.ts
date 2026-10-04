@@ -6,6 +6,7 @@ import type {
   ThreadId,
   WorktreeId,
 } from "@ryco/contracts";
+import type { OrchestrationLatestTurn } from "@ryco/contracts";
 import {
   DEFAULT_AGENT_TOKEN_MODE,
   OrchestrationCheckpointSummary,
@@ -113,10 +114,24 @@ function capThreadMessagesPreservingUserAnchors(
   });
 }
 
+/**
+ * Decides whether an item bound to a turn survives a revert. The legacy rule
+ * keeps only turns with a retained checkpoint; the authoritative rule (events
+ * that carry `latestTurn`) also keeps items of turns that are not dropped and
+ * predate the kept boundary, which the hydrated command model has no
+ * checkpoints for.
+ */
+type RevertTurnItemFilter = (item: {
+  readonly turnId: string;
+  readonly createdAt: string;
+}) => boolean;
+
 function retainThreadMessagesAfterRevert(
   messages: ReadonlyArray<OrchestrationMessage>,
-  retainedTurnIds: ReadonlySet<string>,
+  keepTurnItem: RevertTurnItemFilter,
   turnCount: number,
+  /** Authoritative boundary: fallback candidates must not postdate it. Null keeps none. */
+  boundaryAt?: string | null,
 ): ReadonlyArray<OrchestrationMessage> {
   const retainedMessageIds = new Set<string>();
   for (const message of messages) {
@@ -124,10 +139,17 @@ function retainThreadMessagesAfterRevert(
       retainedMessageIds.add(message.id);
       continue;
     }
-    if (message.turnId !== null && retainedTurnIds.has(message.turnId)) {
+    if (
+      message.turnId !== null &&
+      keepTurnItem({ turnId: message.turnId, createdAt: message.createdAt })
+    ) {
       retainedMessageIds.add(message.id);
     }
   }
+  const isFallbackCandidate = (message: OrchestrationMessage) =>
+    (message.turnId === null ||
+      keepTurnItem({ turnId: message.turnId, createdAt: message.createdAt })) &&
+    (boundaryAt === undefined || (boundaryAt !== null && message.createdAt <= boundaryAt));
 
   const retainedUserCount = messages.filter(
     (message) => message.role === "user" && retainedMessageIds.has(message.id),
@@ -139,7 +161,7 @@ function retainThreadMessagesAfterRevert(
         (message) =>
           message.role === "user" &&
           !retainedMessageIds.has(message.id) &&
-          (message.turnId === null || retainedTurnIds.has(message.turnId)),
+          isFallbackCandidate(message),
       )
       .toSorted(
         (left, right) =>
@@ -161,7 +183,7 @@ function retainThreadMessagesAfterRevert(
         (message) =>
           message.role === "assistant" &&
           !retainedMessageIds.has(message.id) &&
-          (message.turnId === null || retainedTurnIds.has(message.turnId)),
+          isFallbackCandidate(message),
       )
       .toSorted(
         (left, right) =>
@@ -176,22 +198,27 @@ function retainThreadMessagesAfterRevert(
   return messages.filter((message) => retainedMessageIds.has(message.id));
 }
 
-function retainThreadActivitiesAfterRevert(
-  activities: ReadonlyArray<OrchestrationThread["activities"][number]>,
-  retainedTurnIds: ReadonlySet<string>,
-): ReadonlyArray<OrchestrationThread["activities"][number]> {
-  return activities.filter(
-    (activity) => activity.turnId === null || retainedTurnIds.has(activity.turnId),
+function retainTurnItemsAfterRevert<
+  T extends { readonly turnId: string | null; readonly createdAt: string },
+>(items: ReadonlyArray<T>, keepTurnItem: RevertTurnItemFilter): ReadonlyArray<T> {
+  return items.filter(
+    (item) =>
+      item.turnId === null || keepTurnItem({ turnId: item.turnId, createdAt: item.createdAt }),
   );
 }
 
-function retainThreadProposedPlansAfterRevert(
-  proposedPlans: ReadonlyArray<OrchestrationThread["proposedPlans"][number]>,
-  retainedTurnIds: ReadonlySet<string>,
-): ReadonlyArray<OrchestrationThread["proposedPlans"][number]> {
-  return proposedPlans.filter(
-    (proposedPlan) => proposedPlan.turnId === null || retainedTurnIds.has(proposedPlan.turnId),
-  );
+/** The latest-turn entry a revert to `checkpoint` leaves behind. */
+export function latestTurnFromCheckpoint(
+  checkpoint: OrchestrationCheckpointSummary,
+): OrchestrationLatestTurn {
+  return {
+    turnId: checkpoint.turnId,
+    state: checkpointStatusToTurnState(checkpoint.status),
+    requestedAt: checkpoint.completedAt,
+    startedAt: checkpoint.completedAt,
+    completedAt: checkpoint.completedAt,
+    assistantMessageId: checkpoint.assistantMessageId,
+  };
 }
 
 function compareThreadActivities(
@@ -944,30 +971,44 @@ export function projectEvent(
             .filter((entry) => entry.checkpointTurnCount <= payload.turnCount)
             .toSorted((left, right) => left.checkpointTurnCount - right.checkpointTurnCount)
             .slice(-MAX_THREAD_CHECKPOINTS);
-          const retainedTurnIds = new Set(checkpoints.map((checkpoint) => checkpoint.turnId));
+          const retainedTurnIds = new Set<string>(
+            checkpoints.map((checkpoint) => checkpoint.turnId),
+          );
+
+          // Events carrying `latestTurn` are authoritative (read from SQL by the
+          // reactor). Legacy events and replays keep the count-based rule.
+          const authoritative = payload.latestTurn !== undefined;
+          let latestTurn: OrchestrationLatestTurn | null;
+          let keepTurnItem: RevertTurnItemFilter;
+          let boundaryAt: string | null | undefined;
+          if (authoritative) {
+            latestTurn = payload.latestTurn ?? null;
+            if (latestTurn !== null) retainedTurnIds.add(latestTurn.turnId);
+            const dropped = new Set<string>(payload.droppedTurnIds ?? []);
+            const boundary = latestTurn?.completedAt ?? null;
+            boundaryAt = boundary;
+            keepTurnItem = (item) =>
+              retainedTurnIds.has(item.turnId) ||
+              (!dropped.has(item.turnId) && boundary !== null && item.createdAt <= boundary);
+          } else {
+            const latestCheckpoint = checkpoints.at(-1) ?? null;
+            latestTurn =
+              latestCheckpoint === null ? null : latestTurnFromCheckpoint(latestCheckpoint);
+            keepTurnItem = (item) => retainedTurnIds.has(item.turnId);
+            boundaryAt = undefined;
+          }
+
           const messages = retainThreadMessagesAfterRevert(
             thread.messages,
-            retainedTurnIds,
+            keepTurnItem,
             payload.turnCount,
+            boundaryAt,
           ).slice(-MAX_THREAD_MESSAGES);
-          const proposedPlans = retainThreadProposedPlansAfterRevert(
+          const proposedPlans = retainTurnItemsAfterRevert(
             thread.proposedPlans,
-            retainedTurnIds,
+            keepTurnItem,
           ).slice(-200);
-          const activities = retainThreadActivitiesAfterRevert(thread.activities, retainedTurnIds);
-
-          const latestCheckpoint = checkpoints.at(-1) ?? null;
-          const latestTurn =
-            latestCheckpoint === null
-              ? null
-              : {
-                  turnId: latestCheckpoint.turnId,
-                  state: checkpointStatusToTurnState(latestCheckpoint.status),
-                  requestedAt: latestCheckpoint.completedAt,
-                  startedAt: latestCheckpoint.completedAt,
-                  completedAt: latestCheckpoint.completedAt,
-                  assistantMessageId: latestCheckpoint.assistantMessageId,
-                };
+          const activities = retainTurnItemsAfterRevert(thread.activities, keepTurnItem);
 
           return {
             ...nextBase,

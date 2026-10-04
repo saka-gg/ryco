@@ -30,6 +30,7 @@ import type { Stream } from "effect";
 
 export type ProviderSessionModelSwitchMode = "in-session" | "unsupported";
 export type ProviderTurnSteeringMode = "native" | "unsupported";
+export type ProviderConversationRollbackMode = "native" | "unsupported";
 
 export interface ProviderAdapterCapabilities {
   /**
@@ -43,6 +44,25 @@ export interface ProviderAdapterCapabilities {
   readonly sessionModelSwitch: ProviderSessionModelSwitchMode;
   /** Native in-flight turn steering support. Missing is treated as unsupported. */
   readonly turnSteering?: ProviderTurnSteeringMode;
+  /**
+   * Whether the provider can make its conversation forget turns. Missing is
+   * treated as unsupported: Ryco refuses a checkpoint revert before touching
+   * the session or any files.
+   */
+  readonly conversationRollback?: ProviderConversationRollbackMode;
+}
+
+/**
+ * A precise rollback target. Turn ids are orchestration turn ids, which equal
+ * provider turn ids (Claude prompt uuid, Codex native turn id).
+ */
+export interface ProviderRollbackInput {
+  /** Number of turns to drop from the end of the conversation (>= 1). */
+  readonly numTurns: number;
+  /** The newest kept turn, or null when reverting to checkpoint 0. */
+  readonly targetTurnId: TurnId | null;
+  /** Dropped turns, oldest first. */
+  readonly droppedTurnIds: ReadonlyArray<TurnId>;
 }
 
 export interface ProviderThreadTurnSnapshot {
@@ -158,11 +178,12 @@ export interface ProviderAdapterShape<TError> {
   }) => Effect.Effect<ProviderThreadHistory, TError>;
 
   /**
-   * Roll back a provider thread by N turns.
+   * Make the provider conversation forget the newest turns. Only called when
+   * `capabilities.conversationRollback === "native"`.
    */
   readonly rollbackThread: (
     threadId: ThreadId,
-    numTurns: number,
+    input: ProviderRollbackInput,
   ) => Effect.Effect<ProviderThreadSnapshot, TError>;
 
   /** Native thread-goal integration. Providers without it use prompt injection. */

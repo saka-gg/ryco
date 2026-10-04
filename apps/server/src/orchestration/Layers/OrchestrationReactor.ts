@@ -19,6 +19,7 @@ export const makeOrchestrationReactor = Effect.gen(function* () {
 
   const start: OrchestrationReactorShape["start"] = Effect.fn("start")(function* () {
     yield* contextHandoffCoordinator.recover();
+    yield* checkpointReactor.recover();
     yield* Effect.all(
       [
         providerRuntimeIngestion.start(),

@@ -26,6 +26,7 @@ import type {
   ProviderStopBackgroundTaskInput,
   ProviderStopSessionInput,
   ThreadId,
+  TurnId,
   ProviderTurnStartResult,
   ProviderTurnSteerResult,
 } from "@ryco/contracts";
@@ -195,11 +196,15 @@ export interface ProviderServiceShape {
   ) => Effect.Effect<ProviderInstanceRoutingInfo, ProviderServiceError>;
 
   /**
-   * Roll back provider conversation state by a number of turns.
+   * Make the bound provider conversation forget its newest turns. Fails with
+   * `ProviderOperationUnsupportedError` before any session recovery when the
+   * provider cannot roll back, and persists the adapter's new resume cursor.
    */
   readonly rollbackConversation: (input: {
     readonly threadId: ThreadId;
     readonly numTurns: number;
+    readonly targetTurnId: TurnId | null;
+    readonly droppedTurnIds: ReadonlyArray<TurnId>;
   }) => Effect.Effect<void, ProviderServiceError>;
 
   /**

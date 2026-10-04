@@ -26,6 +26,7 @@ import { createModelSelection } from "@ryco/shared/model";
 import { it, assert, vi } from "@effect/vitest";
 
 import {
+  Cause,
   Deferred,
   Effect,
   Exit,
@@ -43,11 +44,12 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import {
   ProviderAdapterRequestError,
   ProviderAdapterSessionNotFoundError,
+  ProviderOperationUnsupportedError,
   ProviderUnsupportedError,
   ProviderValidationError,
   type ProviderAdapterError,
 } from "../Errors.ts";
-import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
+import type { ProviderAdapterShape, ProviderRollbackInput } from "../Services/ProviderAdapter.ts";
 import {
   ProviderAdapterRegistry,
   type ProviderAdapterRegistryShape,
@@ -102,6 +104,8 @@ function makeFakeCodexAdapter(
       input: ProviderSessionStartInput,
       makeSession: (input: ProviderSessionStartInput) => ProviderSession,
     ) => Effect.Effect<ProviderSession, ProviderAdapterError>;
+    /** "none" omits the capability, which ProviderService treats as unsupported. */
+    readonly conversationRollback?: "native" | "none";
   } = {},
 ) {
   const sessions = new Map<ThreadId, ProviderSession>();
@@ -227,7 +231,7 @@ function makeFakeCodexAdapter(
   const rollbackThread = vi.fn(
     (
       threadId: ThreadId,
-      _numTurns: number,
+      _input: ProviderRollbackInput,
     ): Effect.Effect<{ threadId: ThreadId; turns: readonly [] }, ProviderAdapterError> =>
       Effect.succeed({ threadId, turns: [] }),
   );
@@ -243,6 +247,9 @@ function makeFakeCodexAdapter(
     capabilities: {
       sessionModelSwitch: "in-session",
       turnSteering: provider === CODEX_DRIVER ? "native" : "unsupported",
+      ...(options.conversationRollback === "none"
+        ? {}
+        : { conversationRollback: "native" as const }),
     },
     startSession,
     sendTurn,
@@ -337,7 +344,7 @@ const sleep = (ms: number) =>
 function makeProviderServiceLayer() {
   const codex = makeFakeCodexAdapter();
   const claude = makeFakeCodexAdapter(CLAUDE_AGENT_DRIVER);
-  const cursor = makeFakeCodexAdapter(CURSOR_DRIVER);
+  const cursor = makeFakeCodexAdapter(CURSOR_DRIVER, { conversationRollback: "none" });
   const registry = makeAdapterRegistryMock({
     [ProviderDriverKind.make("codex")]: codex.adapter,
     [ProviderDriverKind.make("claudeAgent")]: claude.adapter,
@@ -908,6 +915,8 @@ it.effect(
         yield* provider.rollbackConversation({
           threadId: startedSession.threadId,
           numTurns: 1,
+          targetTurnId: asTurnId("turn-kept"),
+          droppedTurnIds: [asTurnId("turn-dropped")],
         });
       }).pipe(Effect.provide(secondProviderLayer));
 
@@ -929,7 +938,11 @@ it.effect(
       assert.equal(secondCodex.rollbackThread.mock.calls.length, 1);
       const rollbackCall = secondCodex.rollbackThread.mock.calls[0];
       assert.equal(typeof rollbackCall?.[0], "string");
-      assert.equal(rollbackCall?.[1], 1);
+      assert.deepEqual(rollbackCall?.[1], {
+        numTurns: 1,
+        targetTurnId: asTurnId("turn-kept"),
+        droppedTurnIds: [asTurnId("turn-dropped")],
+      });
 
       fs.rmSync(tempDir, { recursive: true, force: true });
     }).pipe(Effect.provide(NodeServices.layer)),
@@ -1111,6 +1124,8 @@ routing.layer("ProviderServiceLive routing", (it) => {
       yield* provider.rollbackConversation({
         threadId: session.threadId,
         numTurns: 0,
+        targetTurnId: null,
+        droppedTurnIds: [],
       });
 
       yield* provider.stopSession({ threadId: session.threadId });
@@ -1160,6 +1175,8 @@ routing.layer("ProviderServiceLive routing", (it) => {
       yield* provider.rollbackConversation({
         threadId: initial.threadId,
         numTurns: 1,
+        targetTurnId: null,
+        droppedTurnIds: [asTurnId("turn-1")],
       });
 
       assert.equal(routing.codex.startSession.mock.calls.length, 1);
@@ -1179,7 +1196,139 @@ routing.layer("ProviderServiceLive routing", (it) => {
       }
       assert.equal(routing.codex.rollbackThread.mock.calls.length, 1);
       const rollbackCall = routing.codex.rollbackThread.mock.calls[0];
-      assert.equal(rollbackCall?.[1], 1);
+      assert.deepEqual(rollbackCall?.[1], {
+        numTurns: 1,
+        targetTurnId: null,
+        droppedTurnIds: [asTurnId("turn-1")],
+      });
+    }),
+  );
+
+  it.effect("refuses rollback for providers without native rollback before any recovery", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const threadId = asThreadId("thread-rollback-unsupported");
+      yield* provider.startSession(threadId, {
+        provider: CURSOR_DRIVER,
+        providerInstanceId: ProviderInstanceId.make("cursor"),
+        threadId,
+        cwd: "/tmp/project",
+        runtimeMode: "full-access",
+      });
+      yield* routing.cursor.stopSession(threadId);
+      routing.cursor.startSession.mockClear();
+      routing.cursor.rollbackThread.mockClear();
+
+      const exit = yield* Effect.exit(
+        provider.rollbackConversation({
+          threadId,
+          numTurns: 1,
+          targetTurnId: null,
+          droppedTurnIds: [asTurnId("turn-1")],
+        }),
+      );
+
+      assert.isTrue(Exit.isFailure(exit));
+      const error = Exit.isFailure(exit) ? Cause.squash(exit.cause) : null;
+      assert.instanceOf(error, ProviderOperationUnsupportedError);
+      assert.include(
+        (error as ProviderOperationUnsupportedError).message,
+        "can't remove turns from its conversation, so this thread can't be reverted.",
+      );
+      assert.equal(routing.cursor.startSession.mock.calls.length, 0);
+      assert.equal(routing.cursor.rollbackThread.mock.calls.length, 0);
+    }),
+  );
+
+  it.effect("persists the adapter's post-rollback resume cursor", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const runtimeRepository = yield* ProviderSessionRuntimeRepository;
+      const threadId = asThreadId("thread-rollback-cursor");
+      yield* provider.startSession(threadId, {
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: codexInstanceId,
+        threadId,
+        cwd: "/tmp/project",
+        runtimeMode: "full-access",
+      });
+      const rewoundCursor = { resume: "session-1", rewind: { at: "assistant-1" } };
+      routing.codex.rollbackThread.mockImplementationOnce((rolledBackThreadId) =>
+        Effect.sync(() => {
+          routing.codex.updateSession(rolledBackThreadId, (existing) => ({
+            ...existing,
+            resumeCursor: rewoundCursor,
+          }));
+          return { threadId: rolledBackThreadId, turns: [] as const };
+        }),
+      );
+
+      yield* provider.rollbackConversation({
+        threadId,
+        numTurns: 1,
+        targetTurnId: asTurnId("turn-1"),
+        droppedTurnIds: [asTurnId("turn-2")],
+      });
+
+      const persisted = yield* runtimeRepository.getByThreadId({ threadId });
+      assert.isTrue(Option.isSome(persisted));
+      if (Option.isSome(persisted)) {
+        assert.deepEqual(persisted.value.resumeCursor, rewoundCursor);
+      }
+    }),
+  );
+
+  it.effect("serializes a guarded sendTurn behind an in-flight rollback", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const threadId = asThreadId("thread-rollback-lock");
+      const original = yield* provider.startSession(threadId, {
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: codexInstanceId,
+        threadId,
+        cwd: "/tmp/project",
+        runtimeMode: "full-access",
+      });
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const sent = yield* Deferred.make<void>();
+      routing.codex.rollbackThread.mockImplementationOnce((rolledBackThreadId) =>
+        Effect.gen(function* () {
+          yield* Deferred.succeed(entered, undefined);
+          yield* Deferred.await(release);
+          return { threadId: rolledBackThreadId, turns: [] as const };
+        }),
+      );
+
+      const rollingBack = yield* provider
+        .rollbackConversation({
+          threadId,
+          numTurns: 1,
+          targetTurnId: null,
+          droppedTurnIds: [asTurnId("turn-1")],
+        })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(entered);
+      const sending = yield* provider
+        .sendTurn(
+          { threadId, input: "after rollback" },
+          {
+            provider: original.provider,
+            providerInstanceId: codexInstanceId,
+            runtimeSessionId: original.runtimeSessionId!,
+          },
+        )
+        .pipe(
+          Effect.tap(() => Deferred.succeed(sent, undefined)),
+          Effect.forkChild,
+        );
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      assert.isFalse(yield* Deferred.isDone(sent));
+      yield* Deferred.succeed(release, undefined);
+      yield* Fiber.join(rollingBack);
+      yield* Fiber.join(sending);
+      assert.isTrue(yield* Deferred.isDone(sent));
     }),
   );
 
@@ -1929,6 +2078,8 @@ fanout.layer("ProviderServiceLive fanout", (it) => {
       yield* provider.rollbackConversation({
         threadId: session.threadId,
         numTurns: 1,
+        targetTurnId: null,
+        droppedTurnIds: [asTurnId("turn-1")],
       });
       yield* provider.stopSession({ threadId: session.threadId });
 

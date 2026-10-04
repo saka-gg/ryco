@@ -11,6 +11,7 @@ import {
   latestUserMessageIdQuery,
 } from "../../persistence/userMessageAnchors.ts";
 import {
+  CHECKPOINT_REVERT_ACTIVITY_KIND,
   ChatAttachment,
   DEFAULT_AGENT_TOKEN_MODE,
   IsoDateTime,
@@ -71,6 +72,10 @@ import { RepositoryIdentityResolver } from "../../project/Services/RepositoryIde
 import { ORCHESTRATION_PROJECTOR_NAMES } from "./ProjectionPipeline.ts";
 import { ThreadBackgroundLivenessService } from "../ThreadBackgroundLiveness.ts";
 import { pruneStaleContextWindowActivities } from "../contextWindowActivities.ts";
+import {
+  isPendingCheckpointRevertStatus,
+  latestCheckpointRevert,
+} from "../checkpointRevertPolicy.ts";
 import {
   decodeThreadHistoryCursor,
   encodeThreadHistoryCursor,
@@ -807,6 +812,34 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           sequence ASC,
           created_at ASC,
           activity_id ASC
+      `,
+  });
+
+  const listCheckpointRevertActivityRows = SqlSchema.findAll({
+    Request: Schema.Void,
+    Result: ProjectionThreadActivityDbRowSchema,
+    execute: () =>
+      sql`
+        SELECT
+          activities.activity_id AS "activityId",
+          activities.thread_id AS "threadId",
+          activities.turn_id AS "turnId",
+          activities.tone,
+          activities.kind,
+          activities.summary,
+          activities.payload_json AS "payload",
+          activities.sequence,
+          activities.created_at AS "createdAt"
+        FROM projection_thread_activities AS activities
+        INNER JOIN projection_threads AS threads
+          ON threads.thread_id = activities.thread_id
+        WHERE activities.kind = ${CHECKPOINT_REVERT_ACTIVITY_KIND}
+          AND threads.deleted_at IS NULL
+        ORDER BY
+          activities.thread_id ASC,
+          activities.sequence ASC,
+          activities.created_at ASC,
+          activities.activity_id ASC
       `,
   });
 
@@ -3643,6 +3676,32 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       Effect.map((row) => row.userMessages),
     );
 
+  const listPendingCheckpointReverts: NonNullable<
+    ProjectionSnapshotQueryShape["listPendingCheckpointReverts"]
+  > = () =>
+    listCheckpointRevertActivityRows(undefined).pipe(
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "ProjectionSnapshotQuery.listPendingCheckpointReverts:query",
+          "ProjectionSnapshotQuery.listPendingCheckpointReverts:decodeRows",
+        ),
+      ),
+      Effect.map((rows) => {
+        const byThread = new Map<ThreadId, OrchestrationThreadActivity[]>();
+        for (const row of rows) {
+          const activities = byThread.get(row.threadId) ?? [];
+          activities.push(mapActivityRow(row));
+          byThread.set(row.threadId, activities);
+        }
+        return Array.from(byThread, ([threadId, activities]) => {
+          const latest = latestCheckpointRevert(activities);
+          return latest !== null && isPendingCheckpointRevertStatus(latest.payload.status)
+            ? [{ threadId, activity: latest.activity, payload: latest.payload }]
+            : [];
+        }).flat();
+      }),
+    );
+
   const getThreadProposedPlanById: NonNullable<
     ProjectionSnapshotQueryShape["getThreadProposedPlanById"]
   > = (input) =>
@@ -3684,6 +3743,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     countThreadUserMessages,
     getThreadProposedPlanById,
     listThreadTaskPathRefs,
+    listPendingCheckpointReverts,
     searchThreadMessages,
   } satisfies ProjectionSnapshotQueryShape;
 });

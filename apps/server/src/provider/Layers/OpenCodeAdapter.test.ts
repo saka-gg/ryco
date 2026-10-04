@@ -1432,7 +1432,11 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         },
       ];
 
-      const snapshot = yield* adapter.rollbackThread(threadId, 2);
+      const snapshot = yield* adapter.rollbackThread(threadId, {
+        numTurns: 2,
+        targetTurnId: null,
+        droppedTurnIds: [],
+      });
 
       assert.deepEqual(runtimeMock.state.revertCalls, [
         { sessionID: "http://127.0.0.1:9999/session" },

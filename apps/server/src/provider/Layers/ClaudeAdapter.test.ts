@@ -3882,7 +3882,11 @@ describe("ClaudeAdapterLive", () => {
         const threadBeforeRollback = yield* adapter.readThread(session.threadId);
         assert.equal(threadBeforeRollback.turns.length, 2);
 
-        const rolledBack = yield* adapter.rollbackThread(session.threadId, 1);
+        const rolledBack = yield* adapter.rollbackThread(session.threadId, {
+          numTurns: 1,
+          targetTurnId: firstTurn.turnId,
+          droppedTurnIds: [secondTurn.turnId],
+        });
         assert.equal(rolledBack.turns.length, 1);
         assert.equal(rolledBack.turns[0]?.id, firstTurn.turnId);
 

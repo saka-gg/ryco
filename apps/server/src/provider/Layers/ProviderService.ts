@@ -26,6 +26,7 @@ import {
   ProviderStopBackgroundTaskInput,
   ProviderStopSessionInput,
   RuntimeSessionId,
+  TurnId,
   type ProviderInstanceId,
   type ProviderDriverKind,
   type ProviderRuntimeEvent,
@@ -65,6 +66,7 @@ import {
 } from "../../observability/Metrics.ts";
 import {
   type ProviderAdapterError,
+  ProviderOperationUnsupportedError,
   ProviderSessionNotFoundError,
   ProviderUnsupportedError,
   ProviderValidationError,
@@ -144,6 +146,8 @@ interface ProviderStartupAdmissionState {
 const ProviderRollbackConversationInput = Schema.Struct({
   threadId: ThreadId,
   numTurns: NonNegativeInt,
+  targetTurnId: Schema.NullOr(TurnId),
+  droppedTurnIds: Schema.Array(TurnId),
 });
 
 function toValidationError(
@@ -1614,25 +1618,76 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     if (input.numTurns === 0) {
       return;
     }
+    const operation = "ProviderService.rollbackConversation";
     let metricProvider = "unknown";
     return yield* Effect.gen(function* () {
-      const routed = yield* resolveRoutableSession({
-        threadId: input.threadId,
-        operation: "ProviderService.rollbackConversation",
-        allowRecovery: true,
-      });
-      metricProvider = routed.adapter.provider;
-      yield* Effect.annotateCurrentSpan({
-        "provider.operation": "rollback-conversation",
-        "provider.kind": routed.adapter.provider,
-        "provider.thread_id": input.threadId,
-        "provider.rollback_turns": input.numTurns,
-      });
-      yield* routed.adapter.rollbackThread(routed.threadId, input.numTurns);
-      yield* analytics.record("provider.conversation.rolled_back", {
-        provider: routed.adapter.provider,
-        turns: input.numTurns,
-      });
+      // Refuse before any recovery: a provider that cannot forget turns must not
+      // get a session (re)started just to learn that.
+      const binding = Option.getOrUndefined(yield* directory.getBinding(input.threadId));
+      if (!binding) {
+        return yield* toValidationError(
+          operation,
+          `Cannot route thread '${input.threadId}' because no persisted provider binding exists.`,
+        );
+      }
+      const instanceId = yield* requireBindingInstanceId(operation, binding);
+      const boundAdapter = yield* registry.getByInstance(instanceId);
+      metricProvider = boundAdapter.provider;
+      if (boundAdapter.capabilities.conversationRollback !== "native") {
+        const displayName = yield* registry.getInstanceInfo(instanceId).pipe(
+          Effect.map((info) => info.displayName),
+          Effect.orElseSucceed(() => undefined),
+        );
+        return yield* new ProviderOperationUnsupportedError({
+          provider: boundAdapter.provider,
+          operation: "rollbackConversation",
+          detail: `${displayName ?? boundAdapter.provider} can't remove turns from its conversation, so this thread can't be reverted. Start a new thread to try a different approach.`,
+        });
+      }
+
+      // The lock serializes the rollback with guarded sendTurn, stale-binding
+      // stops, and recovery. The semaphore is not reentrant: use the unlocked
+      // resolver inside it.
+      yield* withSessionStartLock(
+        input.threadId,
+        Effect.gen(function* () {
+          const routed = yield* resolveRoutableSessionUnlocked({
+            threadId: input.threadId,
+            operation,
+            allowRecovery: true,
+          });
+          metricProvider = routed.adapter.provider;
+          yield* Effect.annotateCurrentSpan({
+            "provider.operation": "rollback-conversation",
+            "provider.kind": routed.adapter.provider,
+            "provider.thread_id": input.threadId,
+            "provider.rollback_turns": input.numTurns,
+          });
+          yield* routed.adapter.rollbackThread(routed.threadId, {
+            numTurns: input.numTurns,
+            targetTurnId: input.targetTurnId,
+            droppedTurnIds: input.droppedTurnIds,
+          });
+          // Persist the adapter's post-rollback cursor (Claude rewind marker,
+          // OpenCode fork session id) so recovery resumes the rewound conversation.
+          const sessions = yield* routed.adapter.listSessions();
+          const session = sessions.find((candidate) => candidate.threadId === routed.threadId);
+          if (session) {
+            yield* upsertSessionBinding(
+              { ...session, providerInstanceId: routed.instanceId },
+              input.threadId,
+              {
+                lastRuntimeEvent: "provider.rollback",
+                lastRuntimeEventAt: new Date().toISOString(),
+              },
+            );
+          }
+          yield* analytics.record("provider.conversation.rolled_back", {
+            provider: routed.adapter.provider,
+            turns: input.numTurns,
+          });
+        }),
+      );
     }).pipe(
       withMetrics({
         counter: providerTurnsTotal,

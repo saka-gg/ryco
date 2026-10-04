@@ -287,10 +287,12 @@ it.live("rolls back provider conversation state only", () =>
       yield* provider.rollbackConversation({
         threadId: session.threadId,
         numTurns: 1,
+        targetTurnId: null,
+        droppedTurnIds: [],
       });
 
       const rollbackCalls = fixture.harness.getRollbackCalls(session.threadId);
-      assert.deepEqual(rollbackCalls, [1]);
+      assert.deepEqual(rollbackCalls, [{ numTurns: 1, targetTurnId: null, droppedTurnIds: [] }]);
 
       const readme = yield* readFileString(join(fixture.cwd, "README.md"));
       assert.equal(readme, "v3\n");

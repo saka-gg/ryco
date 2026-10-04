@@ -7,6 +7,7 @@
  * @module ProjectionSnapshotQuery
  */
 import type {
+  CheckpointRevertActivityPayload,
   MessageId,
   OrchestrationCheckpointSummary,
   OrchestrationMessage,
@@ -21,6 +22,7 @@ import type {
   OrchestrationGetThreadWindowInput,
   OrchestrationThreadHistoryError,
   OrchestrationThreadHistoryPage,
+  OrchestrationThreadActivity,
   OrchestrationThreadShell,
   OrchestrationThreadWindowSnapshot,
   OrchestrationWorktreeShell,
@@ -235,6 +237,20 @@ export interface ProjectionSnapshotQueryShape {
       readonly createdAt: string;
       readonly implementedAt: string | null;
       readonly implementationThreadId: ThreadId | null;
+    }>,
+    ProjectionRepositoryError
+  >;
+
+  /**
+   * Newest `checkpoint.revert` activity per live thread whose status is still
+   * pending. Read once at startup so checkpoint revert recovery can finish or
+   * terminalize interrupted reverts. Optional so hand-written fakes need no edits.
+   */
+  readonly listPendingCheckpointReverts?: () => Effect.Effect<
+    ReadonlyArray<{
+      readonly threadId: ThreadId;
+      readonly activity: OrchestrationThreadActivity;
+      readonly payload: CheckpointRevertActivityPayload;
     }>,
     ProjectionRepositoryError
   >;

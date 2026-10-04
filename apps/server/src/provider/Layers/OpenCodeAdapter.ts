@@ -2762,7 +2762,7 @@ export function makeOpenCodeAdapter(
     );
 
     const rollbackThread: OpenCodeAdapterShape["rollbackThread"] = Effect.fn("rollbackThread")(
-      function* (threadId, numTurns) {
+      function* (threadId, { numTurns }) {
         const context = ensureSessionContext(sessions, threadId);
         const messages = yield* runOpenCodeSdk("session.messages", () =>
           context.client.session.messages({

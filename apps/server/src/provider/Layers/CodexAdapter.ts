@@ -2521,7 +2521,8 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       return { messages, items, completedTurnIds, failedTurnIds };
     });
 
-  const rollbackThread: CodexAdapterShape["rollbackThread"] = (threadId, numTurns) => {
+  const rollbackThread: CodexAdapterShape["rollbackThread"] = (threadId, input) => {
+    const numTurns = input.numTurns;
     if (!Number.isInteger(numTurns) || numTurns < 1) {
       return Effect.fail(
         new ProviderAdapterValidationError({
@@ -2681,6 +2682,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     capabilities: {
       sessionModelSwitch: "in-session",
       turnSteering: "native",
+      conversationRollback: "native",
     },
     startSession,
     sendTurn,

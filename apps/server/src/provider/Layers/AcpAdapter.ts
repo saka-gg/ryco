@@ -1047,7 +1047,7 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
         return { threadId, turns: ctx.turns };
       });
 
-    const rollbackThread: AcpAdapterShape["rollbackThread"] = (threadId, numTurns) =>
+    const rollbackThread: AcpAdapterShape["rollbackThread"] = (threadId, { numTurns }) =>
       Effect.gen(function* () {
         yield* requireSession(threadId);
         if (!Number.isInteger(numTurns) || numTurns < 1) {

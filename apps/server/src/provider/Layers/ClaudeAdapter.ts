@@ -5381,9 +5381,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   );
 
   const rollbackThread: ClaudeAdapterShape["rollbackThread"] = Effect.fn("rollbackThread")(
-    function* (threadId, numTurns) {
+    function* (threadId, input) {
       const context = yield* requireSession(threadId);
-      const nextLength = Math.max(0, context.turns.length - numTurns);
+      const nextLength = Math.max(0, context.turns.length - input.numTurns);
       context.turns.splice(nextLength);
       yield* updateResumeCursor(context);
       return yield* snapshotThread(context);
@@ -5470,6 +5470,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     provider: PROVIDER,
     capabilities: {
       sessionModelSwitch: "in-session",
+      conversationRollback: "native",
     },
     startSession,
     sendTurn,
