@@ -8,6 +8,7 @@ import type {
   OrchestrationMessage,
   OrchestrationProposedPlan,
   OrchestrationReadModel,
+  OrchestrationReleasedTurn,
   OrchestrationShellSnapshot,
   OrchestrationShellStreamEvent,
   OrchestrationSession,
@@ -30,6 +31,7 @@ import type { ThreadId, TurnId } from "@ryco/contracts";
 import { Schema } from "effect";
 import { resolveModelSlugForProvider } from "@ryco/shared/model";
 import { capThreadActivitiesPreservingMilestones } from "@ryco/shared/threadActivity";
+import { checkpointStatusToTurnState, mergeReleasedTurn } from "@ryco/shared/turnFinalization";
 import { create } from "zustand";
 import {
   type ChatMessage,
@@ -1199,16 +1201,6 @@ function removeWorktreeState(state: EnvironmentState, worktreeId: WorktreeId): E
   };
 }
 
-function checkpointStatusToLatestTurnState(status: "ready" | "missing" | "error") {
-  if (status === "error") {
-    return "error" as const;
-  }
-  if (status === "missing") {
-    return "interrupted" as const;
-  }
-  return "completed" as const;
-}
-
 function compareActivities(
   left: Thread["activities"][number],
   right: Thread["activities"][number],
@@ -1224,6 +1216,25 @@ function compareActivities(
   }
 
   return left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id);
+}
+
+/** Apply a server-decided release to the latest turn it names; other turns are untouched. */
+function settleReleasedLatestTurn(
+  latestTurn: Thread["latestTurn"],
+  releasedTurn: OrchestrationReleasedTurn | undefined,
+): Thread["latestTurn"] {
+  if (latestTurn === null || releasedTurn === undefined) return latestTurn;
+  if (latestTurn.turnId !== releasedTurn.turnId) return latestTurn;
+  const merged = mergeReleasedTurn(latestTurn, releasedTurn);
+  return buildLatestTurn({
+    previous: latestTurn,
+    turnId: latestTurn.turnId,
+    state: merged.state,
+    requestedAt: latestTurn.requestedAt,
+    startedAt: latestTurn.startedAt,
+    completedAt: merged.completedAt,
+    assistantMessageId: latestTurn.assistantMessageId,
+  });
 }
 
 function buildLatestTurn(params: {
@@ -2422,6 +2433,8 @@ function applyEnvironmentOrchestrationEvent(
         ...thread,
         session: mapSession(event.payload.session),
         error: sanitizeThreadErrorMessage(event.payload.session.lastError),
+        // The server decided which turn this release ends; settle only that turn, in
+        // the same frame as the session, so the open view never flashes Working.
         latestTurn:
           event.payload.session.status === "running" && event.payload.session.activeTurnId !== null
             ? buildLatestTurn({
@@ -2443,7 +2456,7 @@ function applyEnvironmentOrchestrationEvent(
                     : null,
                 sourceProposedPlan: thread.pendingSourceProposedPlan,
               })
-            : thread.latestTurn,
+            : settleReleasedLatestTurn(thread.latestTurn, event.payload.releasedTurn),
         updatedAt: event.occurredAt,
       }));
 
@@ -2510,19 +2523,38 @@ function applyEnvironmentOrchestrationEvent(
               (right.checkpointTurnCount ?? Number.MAX_SAFE_INTEGER),
           )
           .slice(-MAX_THREAD_CHECKPOINTS);
+        // A checkpoint never changes an existing turn's state; it only decides the
+        // state of a latest-turn entry it creates.
+        const sameTurn =
+          thread.latestTurn !== null && thread.latestTurn.turnId === event.payload.turnId
+            ? thread.latestTurn
+            : null;
         const latestTurn =
-          thread.latestTurn === null || thread.latestTurn.turnId === event.payload.turnId
+          sameTurn !== null
             ? buildLatestTurn({
-                previous: thread.latestTurn,
-                turnId: event.payload.turnId,
-                state: checkpointStatusToLatestTurnState(event.payload.status),
-                requestedAt: thread.latestTurn?.requestedAt ?? event.payload.completedAt,
-                startedAt: thread.latestTurn?.startedAt ?? event.payload.completedAt,
-                completedAt: event.payload.completedAt,
+                previous: sameTurn,
+                turnId: sameTurn.turnId,
+                state: sameTurn.state,
+                requestedAt: sameTurn.requestedAt,
+                startedAt: sameTurn.startedAt ?? event.payload.completedAt,
+                completedAt:
+                  sameTurn.state === "running"
+                    ? sameTurn.completedAt
+                    : (sameTurn.completedAt ?? event.payload.completedAt),
                 assistantMessageId: event.payload.assistantMessageId,
-                sourceProposedPlan: thread.pendingSourceProposedPlan,
               })
-            : thread.latestTurn;
+            : thread.latestTurn === null
+              ? buildLatestTurn({
+                  previous: null,
+                  turnId: event.payload.turnId,
+                  state: checkpointStatusToTurnState(event.payload.status),
+                  requestedAt: event.payload.completedAt,
+                  startedAt: event.payload.completedAt,
+                  completedAt: event.payload.completedAt,
+                  assistantMessageId: event.payload.assistantMessageId,
+                  sourceProposedPlan: thread.pendingSourceProposedPlan,
+                })
+              : thread.latestTurn;
         return {
           ...thread,
           turnDiffSummaries,
@@ -2570,7 +2602,7 @@ function applyEnvironmentOrchestrationEvent(
               ? null
               : {
                   turnId: latestCheckpoint.turnId,
-                  state: checkpointStatusToLatestTurnState(
+                  state: checkpointStatusToTurnState(
                     (latestCheckpoint.status ?? "ready") as "ready" | "missing" | "error",
                   ),
                   requestedAt: latestCheckpoint.completedAt,
