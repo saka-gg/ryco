@@ -5,8 +5,10 @@ import {
   type EnvironmentApi,
   type MessageId,
   type OrchestrationReadModel,
+  ORCHESTRATION_WS_METHODS,
   ProviderDriverKind,
   ProviderInstanceId,
+  ThreadId,
   type TurnId,
   WS_METHODS,
   DEFAULT_AGENT_TOKEN_MODE,
@@ -28,6 +30,10 @@ import {
   DEFAULT_VIEWPORT,
   LOCAL_ENVIRONMENT_ID,
   PROJECT_ID,
+  addThreadToSnapshot,
+  rpcHarness,
+  threadKeyFor,
+  toThreadWindowSnapshot,
   PROJECT_LOGICAL_KEY,
   THREAD_ID,
   THREAD_KEY,
@@ -54,6 +60,71 @@ import {
   waitForSendButton,
   wsRequests,
 } from "./ChatView.browser.helpers";
+
+type SnapshotThread = OrchestrationReadModel["threads"][number];
+
+function queuedBrowserMessage(id: string, thread: SnapshotThread) {
+  return {
+    id,
+    composer: {
+      prompt: id,
+      trimmedPrompt: id,
+      images: [],
+      sendableTerminalContexts: [],
+      sourceControlContexts: [],
+      selectedProvider: ProviderDriverKind.make("codex"),
+      selectedModel: thread.modelSelection.model,
+      selectedProviderModels: [],
+      selectedPromptEffort: null,
+      selectedModelSelection: thread.modelSelection,
+      expiredTerminalContextCount: 0,
+    },
+    settings: {
+      runtimeMode: "full-access" as const,
+      interactionMode: "default" as const,
+      tokenMode: DEFAULT_AGENT_TOKEN_MODE,
+    },
+  };
+}
+
+let windowSequence = 100;
+/** Delivers a new session state over the live thread-detail subscriptions. */
+function emitThreadSession(
+  thread: SnapshotThread,
+  session: Partial<NonNullable<SnapshotThread["session"]>>,
+): void {
+  windowSequence += 1;
+  rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeThreadWindow, {
+    kind: "snapshot",
+    snapshot: toThreadWindowSnapshot(windowSequence, {
+      ...thread,
+      session: {
+        ...thread.session!,
+        ...session,
+        updatedAt: new Date(Date.parse(thread.session!.updatedAt) + windowSequence).toISOString(),
+      },
+    }),
+  });
+}
+
+function recordingDispatch(snapshot: OrchestrationReadModel) {
+  const commands: Array<{ type: string; threadId?: unknown }> = [];
+  const api = readEnvironmentApi(LOCAL_ENVIRONMENT_ID)!;
+  __setEnvironmentApiOverrideForTests(LOCAL_ENVIRONMENT_ID, {
+    ...api,
+    orchestration: {
+      ...api.orchestration,
+      dispatchCommand: async (command) => {
+        commands.push(command as { type: string; threadId?: unknown });
+        return { sequence: snapshot.snapshotSequence + 1 };
+      },
+    },
+  });
+  return {
+    turnStarts: () => commands.filter((command) => command.type === "thread.turn.start"),
+    commands,
+  };
+}
 
 // Hoisted per suite: a mock registered from the shared helpers runs after this file's static imports.
 vi.mock("../lib/gitStatusState", () => import("../../test/gitStatusStateMock"));
@@ -851,6 +922,108 @@ describe("ChatView Conversation (full app)", () => {
     } finally {
       useMessageQueueStore.getState().clear(THREAD_KEY);
       resetPreviewFileSessionsForTests();
+      __resetEnvironmentApiOverridesForTests();
+      await mounted.cleanup();
+    }
+  });
+
+  it("Stop holds the queue and Resume sends it", async () => {
+    const snapshot = createSnapshotForTargetUser({
+      targetMessageId: "stop-hold-existing" as MessageId,
+      targetText: "Existing turn",
+      sessionStatus: "running",
+    });
+    const thread = snapshot.threads[0]!;
+    const mounted = await mountChatView({ viewport: DEFAULT_VIEWPORT, snapshot });
+    try {
+      await waitForComposerEditor();
+      const dispatch = recordingDispatch(snapshot);
+      useMessageQueueStore
+        .getState()
+        .enqueue(THREAD_KEY, queuedBrowserMessage("queued-after-stop", thread));
+      await page.getByRole("button", { name: "Stop generation" }).click();
+      await vi.waitFor(() =>
+        expect(dispatch.commands.map((command) => command.type)).toContain("thread.turn.interrupt"),
+      );
+      emitThreadSession(thread, { status: "ready", activeTurnId: null });
+      await expect.element(page.getByText(/Paused after Stop/)).toBeVisible();
+      await waitForLayout();
+      expect(dispatch.turnStarts()).toEqual([]);
+      await page.getByRole("button", { name: "Resume queued messages" }).click();
+      await vi.waitFor(() => expect(dispatch.turnStarts()).toHaveLength(1));
+      await vi.waitFor(() =>
+        expect(useMessageQueueStore.getState().queuesByThreadKey[THREAD_KEY]).toHaveLength(0),
+      );
+    } finally {
+      __resetEnvironmentApiOverridesForTests();
+      await mounted.cleanup();
+    }
+  });
+
+  it("an error end holds the queue", async () => {
+    const snapshot = createSnapshotForTargetUser({
+      targetMessageId: "error-hold-existing" as MessageId,
+      targetText: "Existing turn",
+      sessionStatus: "running",
+    });
+    const thread = snapshot.threads[0]!;
+    const mounted = await mountChatView({ viewport: DEFAULT_VIEWPORT, snapshot });
+    try {
+      await waitForComposerEditor();
+      const dispatch = recordingDispatch(snapshot);
+      useMessageQueueStore
+        .getState()
+        .enqueue(THREAD_KEY, queuedBrowserMessage("queued-after-error", thread));
+      await waitForLayout();
+      emitThreadSession(thread, { status: "error", lastError: "Usage limit reached" });
+      await expect.element(page.getByText(/Paused after an error/)).toBeVisible();
+      await expect.element(page.getByTitle("Usage limit reached")).toBeVisible();
+      await waitForLayout();
+      expect(dispatch.turnStarts()).toEqual([]);
+      expect(useMessageQueueStore.getState().queuesByThreadKey[THREAD_KEY]).toHaveLength(1);
+    } finally {
+      __resetEnvironmentApiOverridesForTests();
+      await mounted.cleanup();
+    }
+  });
+
+  it("a queued message on a thread that is not on screen sends when its turn settles", async () => {
+    const otherThreadId = ThreadId.make("thread-off-screen-target");
+    const snapshot = addThreadToSnapshot(
+      createSnapshotForTargetUser({
+        targetMessageId: "off-screen-existing" as MessageId,
+        targetText: "Existing turn",
+        sessionStatus: "running",
+      }),
+      otherThreadId,
+    );
+    const thread = snapshot.threads.find((entry) => entry.id === THREAD_ID)!;
+    const mounted = await mountChatView({ viewport: DEFAULT_VIEWPORT, snapshot });
+    try {
+      await waitForComposerEditor();
+      const dispatch = recordingDispatch(snapshot);
+      useMessageQueueStore
+        .getState()
+        .enqueue(THREAD_KEY, queuedBrowserMessage("queued-off-screen", thread));
+      await mounted.router.navigate({
+        to: "/$environmentId/$threadId",
+        params: { environmentId: LOCAL_ENVIRONMENT_ID, threadId: otherThreadId },
+      });
+      await vi.waitFor(() =>
+        expect(mounted.router.state.location.pathname).toBe(
+          `/${LOCAL_ENVIRONMENT_ID}/${otherThreadId}`,
+        ),
+      );
+      await waitForLayout();
+      expect(dispatch.turnStarts()).toEqual([]);
+      emitThreadSession(thread, { status: "ready", activeTurnId: null });
+      await vi.waitFor(() => expect(dispatch.turnStarts()).toHaveLength(1), { timeout: 8_000 });
+      expect(dispatch.turnStarts()[0]?.threadId).toBe(THREAD_ID);
+      expect(useMessageQueueStore.getState().queuesByThreadKey[THREAD_KEY]).toHaveLength(0);
+      expect(useMessageQueueStore.getState().queuesByThreadKey[threadKeyFor(otherThreadId)]).toBe(
+        undefined,
+      );
+    } finally {
       __resetEnvironmentApiOverridesForTests();
       await mounted.cleanup();
     }
