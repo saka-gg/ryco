@@ -133,7 +133,10 @@ export function deriveQueueFailureCauses(
       reason: "error",
       causeKey: `error:${turnKey}:${session.lastError ?? ""}`,
       detail: session.lastError,
-      providerInstanceId: session.providerInstanceId,
+      // A restart is not a provider failure, so a message queued for another instance
+      // is no recovery from it: the restart cause holds until a later turn takes over.
+      providerInstanceId:
+        session.lastError === ORPHANED_PROVIDER_SESSION_ERROR ? null : session.providerInstanceId,
     });
   }
   // A turn a server restart released also reads interrupted. Its `interrupt:` cause is

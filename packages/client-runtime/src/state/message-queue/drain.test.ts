@@ -493,8 +493,8 @@ describe("restart holds", () => {
   };
 
   /** Queued while the turn ran, then the server restarted. */
-  function restartedQueue(): DrainState {
-    const state: DrainState = { ...input({ view: viewOf(RUNNING_THREAD) }) };
+  function restartedQueue(overrides: Partial<QueueDrainInput> = {}): DrainState {
+    const state: DrainState = { ...input({ view: viewOf(RUNNING_THREAD), ...overrides }) };
     expect(settle(state)).toBe("wait:busy");
     state.view = viewOf(RECONCILED);
     return state;
@@ -539,6 +539,31 @@ describe("restart holds", () => {
     });
     expect(settle(state)).toBe("wait:held");
     expect(state.hold).toMatchObject({ causeKeys: ["error:turn-2:Crashed"] });
+  });
+
+  it("holds a message queued for another instance until the continuation takes over", () => {
+    // The restarted session ran on codex; the queued message targets another instance.
+    const state = restartedQueue({ headProviderInstanceId: "claudeAgent" });
+    expect(settle(state)).toBe("wait:held");
+    expect(state.hold).toMatchObject({
+      reason: "error",
+      causeKeys: [`error:turn-1:${ORPHANED_PROVIDER_SESSION_ERROR}`],
+    });
+    state.view = viewOf({ ...RECONCILED, messageIds: ["m-0", "restart-continuation"] });
+    expect(settle(state)).toBe("wait:held");
+    state.view = viewOf({
+      session: { status: "running", activeTurnId: "turn-2" },
+      latestTurn: { turnId: "turn-2", state: "running" },
+      messageIds: ["m-0", "restart-continuation"],
+    });
+    expect(settle(state)).toBe("wait:busy");
+    expect(state.hold).toBeNull();
+    state.view = viewOf({
+      session: { status: "ready" },
+      latestTurn: { turnId: "turn-2", state: "completed" },
+      messageIds: ["m-0", "restart-continuation", "assistant-2"],
+    });
+    expect(settle(state)).toBe("send");
   });
 
   /** The restarted turn's session left `error` without a new turn (e.g. a session stop). */
