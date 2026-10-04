@@ -15,6 +15,10 @@
       "types": "./src/claudeCacheReview.ts",
       "import": "./src/claudeCacheReview.ts"
     },
+    "./restartContinuation": {
+      "types": "./src/restartContinuation.ts",
+      "import": "./src/restartContinuation.ts"
+    },
     "./lruCache": {
       "types": "./src/lruCache.ts",
       "import": "./src/lruCache.ts"

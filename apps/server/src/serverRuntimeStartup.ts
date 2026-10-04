@@ -8,6 +8,11 @@ import {
   fallbackReleasedTurnState,
 } from "./orchestration/turnFinalization.ts";
 import {
+  ORPHANED_PROVIDER_SESSION_ERROR,
+  ORPHANED_TURN_TERMINAL_STATE,
+  isOrphanedProviderSession,
+} from "./orchestration/restartReconciliation.ts";
+import {
   CommandId,
   EventId,
   DEFAULT_PROVIDER_INTERACTION_MODE,
@@ -530,9 +535,6 @@ export const validateRestrictedWorkspaceSnapshot = (snapshot: OrchestrationReadM
     );
   }).pipe(Effect.mapError(incompatibleWorkspaceStateError));
 
-const ORPHANED_PROVIDER_SESSION_ERROR =
-  "Provider session did not survive a server restart. Send a new message to continue.";
-
 function clearRuntimePayloadActiveTurn(runtimePayload: unknown): unknown {
   if (
     typeof runtimePayload === "object" &&
@@ -679,13 +681,8 @@ export const reconcileOrphanedProviderSessions = Effect.gen(function* () {
       });
     }
   }
-  const orphanedThreads = snapshot.threads.filter(
-    (thread) =>
-      thread.session !== null &&
-      (thread.session.status === "starting" ||
-        thread.session.status === "running" ||
-        thread.session.activeTurnId !== null) &&
-      !liveThreadIds.has(thread.id),
+  const orphanedThreads = snapshot.threads.filter((thread) =>
+    isOrphanedProviderSession(thread, liveThreadIds),
   );
 
   for (const thread of orphanedThreads) {
@@ -738,7 +735,7 @@ export const reconcileOrphanedProviderSessions = Effect.gen(function* () {
       },
       turnOutcome: {
         ...(session.activeTurnId !== null ? { turnId: session.activeTurnId } : {}),
-        state: "interrupted" as const,
+        state: ORPHANED_TURN_TERMINAL_STATE,
         reason: TURN_FINALIZATION_REASON.startupOrphanedSession,
         completedAt: reconciledAt,
       },
