@@ -35,6 +35,7 @@ import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQu
 import * as ThreadBackgroundLiveness from "../ThreadBackgroundLiveness.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { OrchestrationProjectionPipeline } from "../Services/ProjectionPipeline.ts";
+import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import { ServerConfig } from "../../config.ts";
 
 const MockProjectAvatarStoreLive = Layer.succeed(ProjectAvatarStore, {
@@ -3053,148 +3054,154 @@ engineLayer("OrchestrationProjectionPipeline via engine dispatch", (it) => {
   );
 });
 
-it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("ryco-turn-finalization-")))(
-  "OrchestrationProjectionPipeline turn finalization",
-  (it) => {
-    const at = (second: number) => `2026-03-01T00:00:${String(second).padStart(2, "0")}.000Z`;
-    let sequence = 0;
+it.layer(
+  Layer.fresh(
+    OrchestrationProjectionSnapshotQueryLive.pipe(
+      Layer.provide(ThreadBackgroundLiveness.layer),
+      Layer.provide(RepositoryIdentityResolverLive),
+      Layer.provideMerge(makeProjectionPipelinePrefixedTestLayer("ryco-turn-finalization-")),
+    ),
+  ),
+)("OrchestrationProjectionPipeline turn finalization", (it) => {
+  const at = (second: number) => `2026-03-01T00:00:${String(second).padStart(2, "0")}.000Z`;
+  let sequence = 0;
 
-    const makeScenario = (key: string) => {
-      const threadId = ThreadId.make(`thread-${key}`);
-      const projectId = ProjectId.make(`project-${key}`);
-      const turnId = TurnId.make(`turn-${key}`);
-      const base = (second: number) => {
-        sequence += 1;
-        return {
-          sequence,
-          eventId: EventId.make(`evt-${key}-${sequence}`),
-          occurredAt: at(second),
-          commandId: CommandId.make(`cmd-${key}-${sequence}`),
-          causationEventId: null,
-          correlationId: CorrelationId.make(`cmd-${key}-${sequence}`),
-          metadata: {},
-          aggregateKind: "thread" as const,
-          aggregateId: threadId,
-        };
-      };
-      const session = (status: "running" | "ready" | "error", second: number) => ({
-        threadId,
-        status,
-        providerName: "codex",
-        runtimeMode: "full-access" as const,
-        activeTurnId: status === "running" ? turnId : null,
-        lastError: status === "error" ? "boom" : null,
-        updatedAt: at(second),
-      });
+  const makeScenario = (key: string) => {
+    const threadId = ThreadId.make(`thread-${key}`);
+    const projectId = ProjectId.make(`project-${key}`);
+    const turnId = TurnId.make(`turn-${key}`);
+    const base = (second: number) => {
+      sequence += 1;
       return {
-        threadId,
-        turnId,
-        setup: () =>
-          Effect.gen(function* () {
-            const projectionPipeline = yield* OrchestrationProjectionPipeline;
-            yield* projectionPipeline.projectEvent({
-              ...base(0),
-              aggregateKind: "project",
-              aggregateId: projectId,
-              type: "project.created",
-              payload: {
-                projectId,
-                title: "Project",
-                workspaceRoot: `/tmp/${key}`,
-                defaultModelSelection: null,
-                scripts: [],
-                createdAt: at(0),
-                updatedAt: at(0),
-              },
-            });
-            yield* projectionPipeline.projectEvent({
-              ...base(0),
-              type: "thread.created",
-              payload: {
-                threadId,
-                projectId,
-                title: "Thread",
-                modelSelection: {
-                  instanceId: ProviderInstanceId.make("codex"),
-                  model: "gpt-5-codex",
-                },
-                runtimeMode: "full-access",
-                interactionMode: "default",
-                branch: null,
-                worktreePath: null,
-                createdAt: at(0),
-                updatedAt: at(0),
-              },
-            });
-            yield* projectionPipeline.projectEvent({
-              ...base(1),
-              type: "thread.session-set",
-              payload: { threadId, session: session("running", 1) },
-            });
-          }),
-        finalMessage: (second: number) => ({
-          ...base(second),
-          type: "thread.message-sent" as const,
-          payload: {
-            threadId,
-            messageId: MessageId.make(`assistant-${key}`),
-            role: "assistant" as const,
-            text: "done",
-            turnId,
-            streaming: false,
-            createdAt: at(second),
-            updatedAt: at(second),
-          },
-        }),
-        interrupt: (second: number) => ({
-          ...base(second),
-          type: "thread.turn-interrupt-requested" as const,
-          payload: { threadId, turnId, createdAt: at(second) },
-        }),
-        release: (
-          second: number,
-          state: "completed" | "error" | "interrupted",
-          releasedTurnId: TurnId = turnId,
-        ) => ({
-          ...base(second),
-          type: "thread.session-set" as const,
-          payload: {
-            threadId,
-            session: session(state === "error" ? "error" : "ready", second),
-            releasedTurn: {
-              turnId: releasedTurnId,
-              state,
-              completedAt: at(second),
-              reason: "provider-turn-completed",
-            },
-          },
-        }),
-        diff: (second: number, status: "ready" | "missing" | "error") => ({
-          ...base(second),
-          type: "thread.turn-diff-completed" as const,
-          payload: {
-            threadId,
-            turnId,
-            checkpointTurnCount: 1,
-            checkpointRef: CheckpointRef.make(`refs/ryco/checkpoints/${key}/1`),
-            status,
-            files: [],
-            assistantMessageId: null,
-            completedAt: at(second),
-          },
-        }),
+        sequence,
+        eventId: EventId.make(`evt-${key}-${sequence}`),
+        occurredAt: at(second),
+        commandId: CommandId.make(`cmd-${key}-${sequence}`),
+        causationEventId: null,
+        correlationId: CorrelationId.make(`cmd-${key}-${sequence}`),
+        metadata: {},
+        aggregateKind: "thread" as const,
+        aggregateId: threadId,
       };
     };
+    const session = (status: "running" | "ready" | "error", second: number) => ({
+      threadId,
+      status,
+      providerName: "codex",
+      runtimeMode: "full-access" as const,
+      activeTurnId: status === "running" ? turnId : null,
+      lastError: status === "error" ? "boom" : null,
+      updatedAt: at(second),
+    });
+    return {
+      threadId,
+      turnId,
+      setup: () =>
+        Effect.gen(function* () {
+          const projectionPipeline = yield* OrchestrationProjectionPipeline;
+          yield* projectionPipeline.projectEvent({
+            ...base(0),
+            aggregateKind: "project",
+            aggregateId: projectId,
+            type: "project.created",
+            payload: {
+              projectId,
+              title: "Project",
+              workspaceRoot: `/tmp/${key}`,
+              defaultModelSelection: null,
+              scripts: [],
+              createdAt: at(0),
+              updatedAt: at(0),
+            },
+          });
+          yield* projectionPipeline.projectEvent({
+            ...base(0),
+            type: "thread.created",
+            payload: {
+              threadId,
+              projectId,
+              title: "Thread",
+              modelSelection: {
+                instanceId: ProviderInstanceId.make("codex"),
+                model: "gpt-5-codex",
+              },
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              branch: null,
+              worktreePath: null,
+              createdAt: at(0),
+              updatedAt: at(0),
+            },
+          });
+          yield* projectionPipeline.projectEvent({
+            ...base(1),
+            type: "thread.session-set",
+            payload: { threadId, session: session("running", 1) },
+          });
+        }),
+      finalMessage: (second: number) => ({
+        ...base(second),
+        type: "thread.message-sent" as const,
+        payload: {
+          threadId,
+          messageId: MessageId.make(`assistant-${key}`),
+          role: "assistant" as const,
+          text: "done",
+          turnId,
+          streaming: false,
+          createdAt: at(second),
+          updatedAt: at(second),
+        },
+      }),
+      interrupt: (second: number) => ({
+        ...base(second),
+        type: "thread.turn-interrupt-requested" as const,
+        payload: { threadId, turnId, createdAt: at(second) },
+      }),
+      release: (
+        second: number,
+        state: "completed" | "error" | "interrupted",
+        releasedTurnId: TurnId = turnId,
+      ) => ({
+        ...base(second),
+        type: "thread.session-set" as const,
+        payload: {
+          threadId,
+          session: session(state === "error" ? "error" : "ready", second),
+          releasedTurn: {
+            turnId: releasedTurnId,
+            state,
+            completedAt: at(second),
+            reason: "provider-turn-completed",
+          },
+        },
+      }),
+      diff: (second: number, status: "ready" | "missing" | "error") => ({
+        ...base(second),
+        type: "thread.turn-diff-completed" as const,
+        payload: {
+          threadId,
+          turnId,
+          checkpointTurnCount: 1,
+          checkpointRef: CheckpointRef.make(`refs/ryco/checkpoints/${key}/1`),
+          status,
+          files: [],
+          assistantMessageId: null,
+          completedAt: at(second),
+        },
+      }),
+    };
+  };
 
-    const readTurns = (threadId: ThreadId) =>
-      Effect.gen(function* () {
-        const sql = yield* SqlClient.SqlClient;
-        return yield* sql<{
-          readonly turnId: string;
-          readonly state: string;
-          readonly completedAt: string | null;
-          readonly checkpointStatus: string | null;
-        }>`
+  const readTurns = (threadId: ThreadId) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      return yield* sql<{
+        readonly turnId: string;
+        readonly state: string;
+        readonly completedAt: string | null;
+        readonly checkpointStatus: string | null;
+      }>`
           SELECT
             turn_id AS "turnId",
             state,
@@ -3204,134 +3211,150 @@ it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("ryco-turn-finaliza
           WHERE thread_id = ${threadId} AND turn_id IS NOT NULL
           ORDER BY turn_id
         `;
-      });
+    });
 
-    it.effect("finalizes the released turn row", () =>
-      Effect.gen(function* () {
-        const projectionPipeline = yield* OrchestrationProjectionPipeline;
-        const scenario = makeScenario("release-completed");
-        yield* scenario.setup();
-        yield* projectionPipeline.projectEvent(scenario.release(10, "completed"));
-        assert.deepEqual(yield* readTurns(scenario.threadId), [
-          {
-            turnId: scenario.turnId,
-            state: "completed",
-            completedAt: at(10),
-            checkpointStatus: null,
-          },
-        ]);
-      }),
-    );
+  it.effect("finalizes the released turn row", () =>
+    Effect.gen(function* () {
+      const projectionPipeline = yield* OrchestrationProjectionPipeline;
+      const scenario = makeScenario("release-completed");
+      yield* scenario.setup();
+      yield* projectionPipeline.projectEvent(scenario.release(10, "completed"));
+      assert.deepEqual(yield* readTurns(scenario.threadId), [
+        {
+          turnId: scenario.turnId,
+          state: "completed",
+          completedAt: at(10),
+          checkpointStatus: null,
+        },
+      ]);
+    }),
+  );
 
-    it.effect("corrects a premature completed from a final message to error", () =>
-      Effect.gen(function* () {
-        const projectionPipeline = yield* OrchestrationProjectionPipeline;
-        const scenario = makeScenario("release-error");
-        yield* scenario.setup();
-        yield* projectionPipeline.projectEvent(scenario.finalMessage(5));
-        assert.strictEqual((yield* readTurns(scenario.threadId))[0]?.state, "completed");
-        yield* projectionPipeline.projectEvent(scenario.release(10, "error"));
-        assert.deepEqual(yield* readTurns(scenario.threadId), [
-          {
-            turnId: scenario.turnId,
-            state: "error",
-            completedAt: at(10),
-            checkpointStatus: null,
-          },
-        ]);
-      }),
-    );
+  it.effect("corrects a premature completed from a final message to error", () =>
+    Effect.gen(function* () {
+      const projectionPipeline = yield* OrchestrationProjectionPipeline;
+      const scenario = makeScenario("release-error");
+      yield* scenario.setup();
+      yield* projectionPipeline.projectEvent(scenario.finalMessage(5));
+      assert.strictEqual((yield* readTurns(scenario.threadId))[0]?.state, "completed");
+      yield* projectionPipeline.projectEvent(scenario.release(10, "error"));
+      assert.deepEqual(yield* readTurns(scenario.threadId), [
+        {
+          turnId: scenario.turnId,
+          state: "error",
+          completedAt: at(10),
+          checkpointStatus: null,
+        },
+      ]);
+    }),
+  );
 
-    it.effect("keeps an interrupted turn sticky across a completed release", () =>
-      Effect.gen(function* () {
-        const projectionPipeline = yield* OrchestrationProjectionPipeline;
-        const scenario = makeScenario("release-sticky");
-        yield* scenario.setup();
-        yield* projectionPipeline.projectEvent(scenario.interrupt(5));
-        yield* projectionPipeline.projectEvent(scenario.release(10, "completed"));
-        assert.deepEqual(yield* readTurns(scenario.threadId), [
-          {
-            turnId: scenario.turnId,
-            state: "interrupted",
-            completedAt: at(5),
-            checkpointStatus: null,
-          },
-        ]);
-      }),
-    );
+  it.effect("keeps an interrupted turn sticky across a completed release", () =>
+    Effect.gen(function* () {
+      const projectionPipeline = yield* OrchestrationProjectionPipeline;
+      const scenario = makeScenario("release-sticky");
+      yield* scenario.setup();
+      yield* projectionPipeline.projectEvent(scenario.interrupt(5));
+      yield* projectionPipeline.projectEvent(scenario.release(10, "completed"));
+      assert.deepEqual(yield* readTurns(scenario.threadId), [
+        {
+          turnId: scenario.turnId,
+          state: "interrupted",
+          completedAt: at(5),
+          checkpointStatus: null,
+        },
+      ]);
+    }),
+  );
 
-    it.effect("creates no row for a release naming an unknown turn", () =>
-      Effect.gen(function* () {
-        const projectionPipeline = yield* OrchestrationProjectionPipeline;
-        const scenario = makeScenario("release-unknown");
-        yield* scenario.setup();
-        yield* projectionPipeline.projectEvent(
-          scenario.release(10, "completed", TurnId.make("turn-release-unknown-other")),
-        );
-        assert.deepEqual(yield* readTurns(scenario.threadId), [
-          {
-            turnId: scenario.turnId,
-            state: "running",
-            completedAt: null,
-            checkpointStatus: null,
-          },
-        ]);
-      }),
-    );
+  it.effect("creates no row for a release naming an unknown turn", () =>
+    Effect.gen(function* () {
+      const projectionPipeline = yield* OrchestrationProjectionPipeline;
+      const scenario = makeScenario("release-unknown");
+      yield* scenario.setup();
+      yield* projectionPipeline.projectEvent(
+        scenario.release(10, "completed", TurnId.make("turn-release-unknown-other")),
+      );
+      assert.deepEqual(yield* readTurns(scenario.threadId), [
+        {
+          turnId: scenario.turnId,
+          state: "running",
+          completedAt: null,
+          checkpointStatus: null,
+        },
+      ]);
+    }),
+  );
 
-    it.effect("keeps interrupted when a late missing diff lands after an interrupt", () =>
-      Effect.gen(function* () {
-        const projectionPipeline = yield* OrchestrationProjectionPipeline;
-        const scenario = makeScenario("late-missing");
-        yield* scenario.setup();
-        yield* projectionPipeline.projectEvent(scenario.interrupt(5));
-        yield* projectionPipeline.projectEvent(scenario.release(6, "interrupted"));
-        yield* projectionPipeline.projectEvent(scenario.diff(20, "missing"));
-        assert.deepEqual(yield* readTurns(scenario.threadId), [
-          {
-            turnId: scenario.turnId,
-            state: "interrupted",
-            completedAt: at(5),
-            checkpointStatus: "missing",
-          },
-        ]);
-      }),
-    );
+  it.effect("keeps interrupted when a late missing diff lands after an interrupt", () =>
+    Effect.gen(function* () {
+      const projectionPipeline = yield* OrchestrationProjectionPipeline;
+      const scenario = makeScenario("late-missing");
+      yield* scenario.setup();
+      yield* projectionPipeline.projectEvent(scenario.interrupt(5));
+      yield* projectionPipeline.projectEvent(scenario.release(6, "interrupted"));
+      yield* projectionPipeline.projectEvent(scenario.diff(20, "missing"));
+      assert.deepEqual(yield* readTurns(scenario.threadId), [
+        {
+          turnId: scenario.turnId,
+          state: "interrupted",
+          completedAt: at(5),
+          checkpointStatus: "missing",
+        },
+      ]);
+    }),
+  );
 
-    it.effect("keeps error when a late ready diff lands after an error release", () =>
-      Effect.gen(function* () {
-        const projectionPipeline = yield* OrchestrationProjectionPipeline;
-        const scenario = makeScenario("late-ready");
-        yield* scenario.setup();
-        yield* projectionPipeline.projectEvent(scenario.release(10, "error"));
-        yield* projectionPipeline.projectEvent(scenario.diff(20, "ready"));
-        assert.deepEqual(yield* readTurns(scenario.threadId), [
-          {
-            turnId: scenario.turnId,
-            state: "error",
-            completedAt: at(10),
-            checkpointStatus: "ready",
-          },
-        ]);
-      }),
-    );
+  it.effect("keeps error when a late ready diff lands after an error release", () =>
+    Effect.gen(function* () {
+      const projectionPipeline = yield* OrchestrationProjectionPipeline;
+      const scenario = makeScenario("late-ready");
+      yield* scenario.setup();
+      yield* projectionPipeline.projectEvent(scenario.release(10, "error"));
+      yield* projectionPipeline.projectEvent(scenario.diff(20, "ready"));
+      assert.deepEqual(yield* readTurns(scenario.threadId), [
+        {
+          turnId: scenario.turnId,
+          state: "error",
+          completedAt: at(10),
+          checkpointStatus: "ready",
+        },
+      ]);
+    }),
+  );
 
-    it.effect("keeps a running row running and attaches checkpoint fields", () =>
-      Effect.gen(function* () {
-        const projectionPipeline = yield* OrchestrationProjectionPipeline;
-        const scenario = makeScenario("mid-turn-diff");
-        yield* scenario.setup();
-        yield* projectionPipeline.projectEvent(scenario.diff(5, "missing"));
-        yield* projectionPipeline.projectEvent(scenario.diff(6, "ready"));
-        assert.deepEqual(yield* readTurns(scenario.threadId), [
-          {
-            turnId: scenario.turnId,
-            state: "running",
-            completedAt: null,
-            checkpointStatus: "ready",
-          },
-        ]);
-      }),
-    );
-  },
-);
+  it.effect("keeps a running row running and attaches checkpoint fields", () =>
+    Effect.gen(function* () {
+      const projectionPipeline = yield* OrchestrationProjectionPipeline;
+      const scenario = makeScenario("mid-turn-diff");
+      yield* scenario.setup();
+      yield* projectionPipeline.projectEvent(scenario.diff(5, "missing"));
+      yield* projectionPipeline.projectEvent(scenario.diff(6, "ready"));
+      // completed_at doubles as the checkpoint summary's timestamp, so it is filled
+      // from the first diff; the state stays running until the release.
+      assert.deepEqual(yield* readTurns(scenario.threadId), [
+        {
+          turnId: scenario.turnId,
+          state: "running",
+          completedAt: at(5),
+          checkpointStatus: "ready",
+        },
+      ]);
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const snapshot = yield* snapshotQuery.getSnapshot();
+      const thread = snapshot.threads.find((entry) => entry.id === scenario.threadId);
+      assert.strictEqual(thread?.latestTurn?.state, "running");
+      assert.strictEqual(thread?.checkpoints[0]?.status, "ready");
+
+      yield* projectionPipeline.projectEvent(scenario.release(10, "completed"));
+      assert.deepEqual(yield* readTurns(scenario.threadId), [
+        {
+          turnId: scenario.turnId,
+          state: "completed",
+          completedAt: at(10),
+          checkpointStatus: "ready",
+        },
+      ]);
+    }),
+  );
+});

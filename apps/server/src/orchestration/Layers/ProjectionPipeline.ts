@@ -1902,11 +1902,11 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           });
 
           // A checkpoint never changes an existing turn's state: it only attaches
-          // checkpoint fields. A still-open turn keeps its null completedAt; a finished
-          // one keeps the completedAt its release (or final message) recorded.
+          // checkpoint fields, and a finished turn keeps the completedAt its release (or
+          // final message) recorded. `completed_at` doubles as the checkpoint summary's
+          // non-null timestamp for every checkpoint reader, so a null one is filled from
+          // the diff even while the turn runs; the release then takes the later time.
           if (Option.isSome(existingTurn)) {
-            const turnOpen =
-              existingTurn.value.state === "running" || existingTurn.value.state === "pending";
             yield* projectionTurnRepository.upsertByTurnId({
               ...existingTurn.value,
               assistantMessageId: event.payload.assistantMessageId,
@@ -1916,9 +1916,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
               checkpointFiles: event.payload.files,
               startedAt: existingTurn.value.startedAt ?? event.payload.completedAt,
               requestedAt: existingTurn.value.requestedAt ?? event.payload.completedAt,
-              completedAt: turnOpen
-                ? existingTurn.value.completedAt
-                : (existingTurn.value.completedAt ?? event.payload.completedAt),
+              completedAt: existingTurn.value.completedAt ?? event.payload.completedAt,
             });
             return;
           }
