@@ -74,8 +74,15 @@ export interface MessageQueueState<Composer = unknown, Settings = unknown> {
   readonly releaseSend: (threadKey: string, id: string) => void;
   readonly dequeue: (threadKey: string) => void;
   readonly clear: (threadKey: string) => void;
-  /** No-op while the message already has a live attempt. */
-  readonly beginSteer: (threadKey: string, id: string, attempt: QueuedMessageSteerAttempt) => void;
+  /**
+   * Claims the message for a steer. Refused (false) while it already has a live attempt, while
+   * it is being sent as a turn, or once it left the queue. A failed send may still be steered.
+   */
+  readonly beginSteer: (
+    threadKey: string,
+    id: string,
+    attempt: QueuedMessageSteerAttempt,
+  ) => boolean;
   /** Ends the attempt only when `commandId` is the live attempt's, so stale outcomes are ignored. */
   readonly endSteer: (threadKey: string, id: string, commandId: string) => void;
   /** Merges into the thread's hold. No-op (false) when the queue is empty or nothing changed. */
@@ -229,17 +236,24 @@ export function createMessageQueueStore<Composer = unknown, Settings = unknown>(
           ),
         };
       }),
-    beginSteer: (threadKey, id, attempt) =>
+    beginSteer: (threadKey, id, attempt) => {
+      let claimed = false;
       set((state) => {
         const current = state.steerAttemptsByThreadKey[threadKey];
-        if (current?.[id] !== undefined) return state;
+        const message = state.queuesByThreadKey[threadKey]?.find((entry) => entry.id === id);
+        if (!message || message.deliveryStatus === "sending" || current?.[id] !== undefined) {
+          return state;
+        }
+        claimed = true;
         return {
           steerAttemptsByThreadKey: {
             ...state.steerAttemptsByThreadKey,
             [threadKey]: { ...current, [id]: attempt },
           },
         };
-      }),
+      });
+      return claimed;
+    },
     endSteer: (threadKey, id, commandId) =>
       set((state) => {
         if (state.steerAttemptsByThreadKey[threadKey]?.[id]?.commandId !== commandId) return state;

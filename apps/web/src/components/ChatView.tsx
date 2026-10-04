@@ -3234,22 +3234,17 @@ export default function ChatView(props: ChatViewProps) {
       }
       const api = readEnvironmentApi(environmentId);
       if (!api) return;
-      const queued = useMessageQueueStore
-        .getState()
-        .queuesByThreadKey[activeThreadKey]?.find((entry) => entry.id === message.id);
-      if (!queued || queued.deliveryStatus !== undefined) return;
 
-      // Claimed synchronously, before any await, so the drain never sends it as a turn.
+      // Claimed synchronously, before any await, so the drain never sends it as a turn. The
+      // store refuses a message already being sent or steered, or no longer queued.
       const commandId = newCommandId();
-      beginQueuedMessageSteer(activeThreadKey, message.id, {
-        commandId,
-        expectedTurnId: eligibility.expectedTurnId,
-        startedAt: new Date().toISOString(),
-        explicit: options.explicit,
-      });
       if (
-        useMessageQueueStore.getState().steerAttemptsByThreadKey[activeThreadKey]?.[message.id]
-          ?.commandId !== commandId
+        !beginQueuedMessageSteer(activeThreadKey, message.id, {
+          commandId,
+          expectedTurnId: eligibility.expectedTurnId,
+          startedAt: new Date().toISOString(),
+          explicit: options.explicit,
+        })
       ) {
         return;
       }

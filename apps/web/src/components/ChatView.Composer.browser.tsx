@@ -2086,6 +2086,35 @@ describe("ChatView Composer (full app)", () => {
       }
     });
 
+    it("steers a queued message whose send failed from its row", async () => {
+      const harness = await mountSteerableRunningThread("queue");
+      try {
+        await submitFollowUp("Retry by steering", { invert: false });
+        const messageId = queuedEntry().id;
+        const queue = useMessageQueueStore.getState();
+        expect(queue.beginSend(THREAD_KEY, messageId)).toBe(true);
+        queue.finishSend(THREAD_KEY, messageId, false);
+        await vi.waitFor(() => expect(queuedEntry().deliveryStatus).toBe("failed"));
+
+        await page
+          .getByRole("button", { name: /Steer queued message.*into the active turn/ })
+          .click();
+        await vi.waitFor(() => expect(harness.steers()).toHaveLength(1), {
+          timeout: 8_000,
+          interval: 16,
+        });
+        expect(harness.steers()[0]).toMatchObject({
+          message: { messageId, text: "Retry by steering" },
+        });
+        expect(steerAttempt()).toMatchObject({
+          commandId: harness.steers()[0]!.commandId,
+          explicit: true,
+        });
+      } finally {
+        await harness.cleanup();
+      }
+    });
+
     it("does not end a re-steer on a stale deferred rejection of an earlier attempt", async () => {
       const harness = await mountSteerableRunningThread("steer");
       try {

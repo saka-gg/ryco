@@ -255,13 +255,19 @@ How it works:
   (`queued_turn_count > 0`). It never waits on a timer.
 - A steer that cannot be applied stays in the queue and is sent as the next turn. This happens
   when the turn has already finished, while Claude waits for an approval or an answer, for slash
-  commands, and on Claude Code versions without the `interrupt_receipt_v1` capability. These
-  deferrals are quiet: no error and no work-log row.
+  commands, and on Claude Code versions without the `interrupt_receipt_v1` capability. A deferral
+  never adds an error or a work-log row. A steer sent automatically by the follow-up setting is
+  deferred silently; an explicit steer (the Steer button or ⌘↵ / Ctrl+Enter) shows a "Not
+  steered" notice saying why.
+- If a steer stops Claude's current request but Claude Code reports no further queued work, the
+  turn completes normally rather than as interrupted, so the queue keeps draining. The steered
+  message then runs as its own request and its reply appears in a background turn.
 
 Stop also stops pending steers. On Claude Code versions with `interrupt_cancel_queued_v1`, Stop
 cancels the queued steer with the interrupt. On versions with only `interrupt_receipt_v1`, Ryco
 uses the interrupt receipt: if Claude Code still runs the steer later, Ryco interrupts it again
-and drops its output, so no new turn appears.
+and drops its output, so no new turn appears. A request that fails also drops its pending steers
+the same way, instead of running them as a surprise turn after the failure.
 
 Known edges:
 
@@ -271,8 +277,15 @@ Known edges:
   the steered turn.
 - The token usage shown on the completed turn covers the last request only. The context meter is
   updated after every request.
-- Dropping a stopped steer relies on Claude Code echoing message ids on its first streamed frame.
-  Ryco always enables partial messages, and every Claude Code version with the interrupt receipt
-  echoes them.
+- Ryco recognises a dropped steer's request by the message ids Claude Code echoes on its first
+  streamed frame (Ryco always enables partial messages) or, when nothing streamed, on its result.
+  While a dropped steer is pending, a background turn opens at its first streamed output instead
+  of at Claude's "requesting" status.
+
+Not yet verified against a live Claude Code: whether a `priority: "now"` message aborts the
+running request or folds into it, which `terminal_reason` an abort reports, and which
+`queued_turn_count` the aborted result carries. Ryco handles every combination above. The manual
+checks that settle them (steer mid-stream, steer during a Bash tool, Stop right after a steer on
+each capability level) still need to be run and their findings recorded here.
 
 See [observed cache usage and resume review](./claude-cache.md) for evidence scopes, compaction, and recovery behavior.

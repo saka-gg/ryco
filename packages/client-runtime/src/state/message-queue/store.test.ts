@@ -96,6 +96,22 @@ describe("steer attempts", () => {
     expect(store.getState().beginSend("env:thread", "first")).toBe(true);
   });
 
+  it("claims only queued messages that are not being sent", () => {
+    const store = setup();
+    expect(store.getState().beginSteer("env:thread", "missing", attempt("cmd-0"))).toBe(false);
+
+    store.getState().beginSend("env:thread", "first");
+    expect(store.getState().beginSteer("env:thread", "first", attempt("cmd-1"))).toBe(false);
+
+    // A failed send keeps its Steer button: steering it is a fresh delivery.
+    store.getState().finishSend("env:thread", "first", false);
+    expect(store.getState().beginSteer("env:thread", "first", attempt("cmd-2"))).toBe(true);
+    expect(store.getState().beginSteer("env:thread", "first", attempt("cmd-3"))).toBe(false);
+    expect(store.getState().steerAttemptsByThreadKey["env:thread"]).toEqual({
+      first: attempt("cmd-2"),
+    });
+  });
+
   it("drops attempts with their message and with the thread's queue", () => {
     const store = setup();
     store.getState().beginSteer("env:thread", "first", attempt("cmd-1"));
