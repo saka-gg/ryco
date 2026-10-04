@@ -11,6 +11,14 @@
       "types": "./src/backgroundWork.ts",
       "import": "./src/backgroundWork.ts"
     },
+    "./claudeCacheReview": {
+      "types": "./src/claudeCacheReview.ts",
+      "import": "./src/claudeCacheReview.ts"
+    },
+    "./restartContinuation": {
+      "types": "./src/restartContinuation.ts",
+      "import": "./src/restartContinuation.ts"
+    },
     "./lruCache": {
       "types": "./src/lruCache.ts",
       "import": "./src/lruCache.ts"
@@ -131,6 +139,14 @@
       "types": "./src/KeyedCoalescingWorker.ts",
       "import": "./src/KeyedCoalescingWorker.ts"
     },
+    "./KeyedSerialWorker": {
+      "types": "./src/KeyedSerialWorker.ts",
+      "import": "./src/KeyedSerialWorker.ts"
+    },
+    "./KeyedSerialExecutor": {
+      "types": "./src/KeyedSerialExecutor.ts",
+      "import": "./src/KeyedSerialExecutor.ts"
+    },
     "./QueuePolicy": {
       "types": "./src/QueuePolicy.ts",
       "import": "./src/QueuePolicy.ts"
@@ -150,6 +166,10 @@
     "./threadActivity": {
       "types": "./src/threadActivity.ts",
       "import": "./src/threadActivity.ts"
+    },
+    "./turnFinalization": {
+      "types": "./src/turnFinalization.ts",
+      "import": "./src/turnFinalization.ts"
     },
     "./composerInlineTokens": {
       "types": "./src/composerInlineTokens.ts",
@@ -239,6 +259,10 @@
       "types": "./src/threadSnooze.ts",
       "import": "./src/threadSnooze.ts"
     },
+    "./usageLimit": {
+      "types": "./src/usageLimit.ts",
+      "import": "./src/usageLimit.ts"
+    },
     "./threadSettlement": {
       "types": "./src/threadSettlement.ts",
       "import": "./src/threadSettlement.ts"
@@ -321,7 +345,11 @@
       "types": "./src/pairingUrl.ts",
       "import": "./src/pairingUrl.ts"
     },
-    "./storageRetention": "./src/storageRetention.ts"
+    "./storageRetention": "./src/storageRetention.ts",
+    "./turnSteer": {
+      "types": "./src/turnSteer.ts",
+      "import": "./src/turnSteer.ts"
+    }
   },
   "scripts": {
     "typecheck": "tsc --noEmit",

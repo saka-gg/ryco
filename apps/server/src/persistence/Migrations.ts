@@ -1,4 +1,13 @@
 import Migration0071 from "./Migrations/071_StatisticsUsageHistory.ts";
+import Migration0072, {
+  ensureProjectionThreadLineageColumns,
+} from "./Migrations/072_ProjectionThreadLineage.ts";
+import Migration0073, {
+  ensureProviderEffectIntentsTable,
+} from "./Migrations/073_ProviderEffectIntents.ts";
+import Migration0074, {
+  ensureRestartContinuationTables,
+} from "./Migrations/074_RestartContinuations.ts";
 import Migration0070 from "./Migrations/070_LocalTasks.ts";
 import Migration0069 from "./Migrations/069_DailyRecapIndexes.ts";
 import Migration0068 from "./Migrations/068_ProjectionMessageSearch.ts";
@@ -85,6 +94,9 @@ import Migration0051 from "./Migrations/051_AgentControlMcpInstallations.ts";
 import Migration0052 from "./Migrations/052_ProjectionThreadsSettled.ts";
 import Migration0054 from "./Migrations/054_ProjectionThreadsSnoozed.ts";
 import Migration0053 from "./Migrations/053_ThreadPriorityRankings.ts";
+import Migration0075, {
+  ensureProjectionThreadUsageLimitColumn,
+} from "./Migrations/075_ProjectionThreadsUsageLimit.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -167,6 +179,10 @@ export const migrationEntries = [
   [69, "DailyRecapIndexes", Migration0069],
   [70, "LocalTasks", Migration0070],
   [71, "StatisticsUsageHistory", Migration0071],
+  [72, "ProjectionThreadLineage", Migration0072],
+  [73, "ProviderEffectIntents", Migration0073],
+  [74, "RestartContinuations", Migration0074],
+  [75, "ProjectionThreadsUsageLimit", Migration0075],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>
@@ -210,6 +226,44 @@ export const repairProjectionWorktreeTitleColumn = Effect.fn("repairProjectionWo
     yield* Effect.log("Repaired projection_worktrees.title column");
   },
 );
+
+// Not a numbered migration: the Effect migrator skips ids at or below the latest
+// applied one, so a late-landing number would be silently skipped on databases
+// that already ran newer migrations. The PRAGMA guard makes this run once.
+export const repairProjectionWorktreePrTerminalAtColumn = Effect.fn(
+  "repairProjectionWorktreePrTerminalAtColumn",
+)(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  const tables = yield* sql<{ readonly name: string }>`
+    SELECT name FROM sqlite_master
+    WHERE type = 'table' AND name = 'projection_worktrees'
+  `;
+  if (tables.length === 0) {
+    return;
+  }
+
+  yield* sql.withTransaction(
+    Effect.gen(function* () {
+      const columns = yield* sql<{ readonly name: string }>`
+        PRAGMA table_info(projection_worktrees)
+      `;
+      if (columns.some((column) => column.name === "pr_terminal_at")) {
+        return;
+      }
+      yield* sql`ALTER TABLE projection_worktrees ADD COLUMN pr_terminal_at TEXT`;
+      // One-time backfill, only in the transaction that adds the column:
+      // updated_at is the last time the row was written, an upper bound on when
+      // the terminal state was first recorded. The next refresh corrects it to
+      // the forge-reported close time where one exists.
+      yield* sql`
+        UPDATE projection_worktrees
+        SET pr_terminal_at = updated_at
+        WHERE pr_state IN ('merged', 'closed')
+      `;
+      yield* Effect.log("Repaired projection_worktrees.pr_terminal_at column");
+    }),
+  );
+});
 
 export const repairProjectionProjectAvatarColumns = Effect.fn(
   "repairProjectionProjectAvatarColumns",
@@ -327,6 +381,17 @@ export const repairProjectionThreadSubagentNestingColumns = Effect.fn(
       ADD COLUMN parent_subagent_id TEXT
     `;
     yield* Effect.log("Repaired projection_threads.parent_subagent_id column");
+  }
+});
+
+// Not only a numbered migration: the Effect migrator skips ids at or below the latest
+// applied one, so a database that recorded a later migration before 075 landed would
+// never get the column. The migration is idempotent; run it again as a repair.
+export const repairProjectionThreadUsageLimitColumn = Effect.fn(
+  "repairProjectionThreadUsageLimitColumn",
+)(function* () {
+  if (yield* ensureProjectionThreadUsageLimitColumn) {
+    yield* Effect.log("Repaired projection_threads.usage_limit_json column");
   }
 });
 
@@ -454,6 +519,10 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
   if (toMigrationInclusive === undefined || toMigrationInclusive >= 35) {
     yield* repairProjectionTokenModeColumns();
   }
+  // 037 introduced pr_state, which the backfill reads.
+  if (toMigrationInclusive === undefined || toMigrationInclusive >= 37) {
+    yield* repairProjectionWorktreePrTerminalAtColumn();
+  }
   if (toMigrationInclusive === undefined || toMigrationInclusive >= 41) {
     yield* repairProjectionThreadSubagentNestingColumns();
   }
@@ -462,6 +531,21 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
   }
   if (toMigrationInclusive === undefined || toMigrationInclusive >= 44) {
     yield* repairProjectionThreadReadModelMigrations(toMigrationInclusive ?? 47);
+  }
+  // Repair: 072 is skipped by the migrator when a later number was recorded first.
+  if (toMigrationInclusive === undefined || toMigrationInclusive >= 72) {
+    yield* ensureProjectionThreadLineageColumns;
+  }
+  // Repair: 073 is skipped by the migrator when a later number was recorded first.
+  if (toMigrationInclusive === undefined || toMigrationInclusive >= 73) {
+    yield* ensureProviderEffectIntentsTable;
+  }
+  // Repair: 074 is skipped by the migrator when a later number was recorded first.
+  if (toMigrationInclusive === undefined || toMigrationInclusive >= 74) {
+    yield* ensureRestartContinuationTables;
+  }
+  if (toMigrationInclusive === undefined || toMigrationInclusive >= 75) {
+    yield* repairProjectionThreadUsageLimitColumn();
   }
   yield* Effect.log("Migrations ran successfully").pipe(
     Effect.annotateLogs({

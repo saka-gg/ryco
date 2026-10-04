@@ -26,6 +26,7 @@ import type {
   ProviderStopBackgroundTaskInput,
   ProviderStopSessionInput,
   ThreadId,
+  TurnId,
   ProviderTurnStartResult,
   ProviderTurnSteerResult,
 } from "@ryco/contracts";
@@ -59,6 +60,13 @@ export interface ProviderRuntimeEventSummary {
   readonly providerInstanceId: ProviderInstanceId;
   readonly turnId: ProviderRuntimeEvent["turnId"] | null;
   readonly occurredAt: string;
+}
+
+/** The last time a live runtime showed any activity, by `Clock` milliseconds. */
+export interface ProviderRuntimeActivity {
+  readonly threadId: ThreadId;
+  readonly runtimeSessionId: RuntimeSessionId;
+  readonly lastActivityAtMs: number;
 }
 
 /**
@@ -114,14 +122,13 @@ export interface ProviderServiceShape {
   readonly listStaleSessionBindings: () => Effect.Effect<ReadonlyArray<ProviderRuntimeBinding>>;
 
   /**
-   * Send a provider turn.
+   * Send a provider turn. Recovers a dead runtime from its persisted resume
+   * state. Fails `ProviderOperationTimeoutError` when the provider does not
+   * accept the turn within the acceptance deadline (for `"completion"`
+   * adapters, until their `turn.started`).
    */
   readonly sendTurn: (
     input: ProviderSendTurnInput,
-    expectedRuntime?: Pick<
-      ProviderRuntimeBinding,
-      "provider" | "providerInstanceId" | "runtimeSessionId"
-    > & { readonly beforeSubmit?: Effect.Effect<void, ProviderServiceError> },
   ) => Effect.Effect<ProviderTurnStartResult, ProviderServiceError>;
 
   /** Synchronize a goal and return the provider-confirmed state; false means unsupported. Inactive sessions fail. */
@@ -140,7 +147,8 @@ export interface ProviderServiceShape {
   ) => Effect.Effect<ProviderTurnSteerResult, ProviderServiceError>;
 
   /**
-   * Interrupt a running provider turn.
+   * Interrupt a running provider turn. Never recovers a runtime. Fails
+   * `ProviderSessionNotFoundError` when no runtime is live for the thread.
    */
   readonly interruptTurn: (
     input: ProviderInterruptTurnInput,
@@ -195,11 +203,15 @@ export interface ProviderServiceShape {
   ) => Effect.Effect<ProviderInstanceRoutingInfo, ProviderServiceError>;
 
   /**
-   * Roll back provider conversation state by a number of turns.
+   * Make the bound provider conversation forget its newest turns. Fails with
+   * `ProviderOperationUnsupportedError` before any session recovery when the
+   * provider cannot roll back, and persists the adapter's new resume cursor.
    */
   readonly rollbackConversation: (input: {
     readonly threadId: ThreadId;
     readonly numTurns: number;
+    readonly targetTurnId: TurnId | null;
+    readonly droppedTurnIds: ReadonlyArray<TurnId>;
   }) => Effect.Effect<void, ProviderServiceError>;
 
   /**
@@ -208,6 +220,12 @@ export interface ProviderServiceShape {
    * Fan-out is owned by ProviderService (not by a standalone event-bus service).
    */
   readonly streamEvents: Stream.Stream<ProviderRuntimeEvent>;
+
+  /**
+   * The last provider activity per thread (runtime events, start, accepted
+   * send, steer), from the process clock. In memory only; cleared on stop.
+   */
+  readonly listRuntimeActivity?: () => Effect.Effect<ReadonlyArray<ProviderRuntimeActivity>>;
 
   /** Newest-first bounded metadata only; never includes payload/raw/session data. */
   readonly readRecentEventSummaries?: (input: {

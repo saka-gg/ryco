@@ -11,6 +11,11 @@ import {
   ThreadId,
 } from "@ryco/contracts";
 import { derivePendingThreadRequestState } from "@ryco/shared/threadActivity";
+import {
+  checkpointStatusToTurnState,
+  laterIsoTimestamp,
+  mergeReleasedTurn,
+} from "@ryco/shared/turnFinalization";
 import { Effect, FileSystem, Layer, Option, Path, Stream, Schema } from "effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
@@ -69,6 +74,9 @@ import {
   pendingStateDelta,
   userInputActivityPendingState,
 } from "../threadShellSummaryProjection.ts";
+import { resolveEventPullRequestTerminalAt } from "../pullRequestTerminalAt.ts";
+import { projectionLineageColumns } from "../threadLineage.ts";
+import { turnStartEndedMessageId } from "../providerEffectIntents.ts";
 
 export const ORCHESTRATION_PROJECTOR_NAMES = {
   projects: "projection.projects",
@@ -116,6 +124,8 @@ export const ORCHESTRATION_EVENT_PROJECTORS = {
   "thread.unsnoozed": [ORCHESTRATION_PROJECTOR_NAMES.threads],
   "thread.settled": [ORCHESTRATION_PROJECTOR_NAMES.threads],
   "thread.unsettled": [ORCHESTRATION_PROJECTOR_NAMES.threads],
+  "thread.usage-limit-set": [ORCHESTRATION_PROJECTOR_NAMES.threads],
+  "thread.usage-limit-cleared": [ORCHESTRATION_PROJECTOR_NAMES.threads],
   "thread.goal-updated": [ORCHESTRATION_PROJECTOR_NAMES.threads],
   "thread.goal-cleared": [ORCHESTRATION_PROJECTOR_NAMES.threads],
   "thread.context-handoff-requested": [],
@@ -165,6 +175,7 @@ export const ORCHESTRATION_EVENT_PROJECTORS = {
   "thread.activity-appended": [
     ORCHESTRATION_PROJECTOR_NAMES.threadActivities,
     ORCHESTRATION_PROJECTOR_NAMES.pendingApprovals,
+    ORCHESTRATION_PROJECTOR_NAMES.threadTurns,
     ORCHESTRATION_PROJECTOR_NAMES.threads,
   ],
   "worktree.created": [ORCHESTRATION_PROJECTOR_NAMES.worktrees],
@@ -199,16 +210,6 @@ const materializeAttachmentsForProjection = Effect.fn("materializeAttachmentsFor
   (input: { readonly attachments: ReadonlyArray<ChatAttachment> }) =>
     Effect.succeed(input.attachments.length === 0 ? [] : input.attachments),
 );
-
-/** The later of two ISO timestamps (null-tolerant). */
-function laterIsoTimestamp(current: string | null, next: string): string {
-  if (current === null) return next;
-  const currentMs = Date.parse(current);
-  const nextMs = Date.parse(next);
-  if (!Number.isFinite(currentMs)) return next;
-  if (!Number.isFinite(nextMs)) return current;
-  return nextMs > currentMs ? next : current;
-}
 
 function extractActivityRequestId(payload: unknown): ApprovalRequestId | null {
   if (typeof payload !== "object" || payload === null) {
@@ -784,9 +785,46 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             pendingApprovalCount: 0,
             pendingUserInputCount: 0,
             hasActionableProposedPlan: 0,
+            usageLimit: null,
             deletedAt: null,
+            // Always written so re-creating a soft-deleted id resets lineage.
+            ...projectionLineageColumns(event.payload.lineage),
           });
           return;
+
+        case "thread.usage-limit-set": {
+          const existingRow = yield* projectionThreadRepository.getById({
+            threadId: event.payload.threadId,
+          });
+          if (Option.isNone(existingRow)) {
+            return;
+          }
+          yield* projectionThreadRepository.upsert({
+            ...existingRow.value,
+            usageLimit: event.payload.usageLimit,
+            updatedAt: event.payload.usageLimit.updatedAt,
+          });
+          return;
+        }
+
+        case "thread.usage-limit-cleared": {
+          const existingRow = yield* projectionThreadRepository.getById({
+            threadId: event.payload.threadId,
+          });
+          // A clear for an older limit must not drop a newer one.
+          if (
+            Option.isNone(existingRow) ||
+            existingRow.value.usageLimit?.limitId !== event.payload.limitId
+          ) {
+            return;
+          }
+          yield* projectionThreadRepository.upsert({
+            ...existingRow.value,
+            usageLimit: null,
+            updatedAt: event.payload.updatedAt,
+          });
+          return;
+        }
 
         case "thread.archived": {
           const existingRow = yield* projectionThreadRepository.getById({
@@ -1225,6 +1263,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             issueTitle: event.payload.issueTitle,
             prState: null,
             prIsDraft: null,
+            prTerminalAt: null,
             issueState: null,
             workItemProvider: event.payload.workItemProvider ?? null,
             workItemKey: event.payload.workItemKey ?? null,
@@ -1272,6 +1311,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
               ...(event.payload.prTitle !== undefined ? { prTitle: event.payload.prTitle } : {}),
               prState: event.payload.prState,
               prIsDraft: event.payload.prIsDraft,
+              prTerminalAt: resolveEventPullRequestTerminalAt(event.payload, existing.value),
               issueState: event.payload.issueState,
               updatedAt: event.payload.updatedAt,
             });
@@ -1703,6 +1743,20 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           });
           return;
 
+        case "thread.activity-appended": {
+          // A start that ended without a turn (failed, or cancelled by a Stop) never
+          // binds its pending row. Keyed by message, so an older outcome never removes
+          // a newer pending start, and bound rows are untouched.
+          const messageId = turnStartEndedMessageId(event.payload.activity);
+          if (messageId !== null) {
+            yield* projectionTurnRepository.deletePendingTurnStartByMessage({
+              threadId: event.payload.threadId,
+              messageId,
+            });
+          }
+          return;
+        }
+
         case "thread.turn-start-requested": {
           yield* projectionTurnRepository.replacePendingTurnStart({
             threadId: event.payload.threadId,
@@ -1715,6 +1769,22 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         }
 
         case "thread.session-set": {
+          // The decider decided which turn this release ends and how. Apply it to that
+          // row only; an unknown turn creates no row.
+          const released = event.payload.releasedTurn;
+          if (released !== undefined) {
+            const releasedRow = yield* projectionTurnRepository.getByTurnId({
+              threadId: event.payload.threadId,
+              turnId: released.turnId,
+            });
+            if (Option.isSome(releasedRow)) {
+              yield* projectionTurnRepository.upsertByTurnId({
+                ...releasedRow.value,
+                ...mergeReleasedTurn(releasedRow.value, released),
+              });
+            }
+          }
+
           const turnId = event.payload.session.activeTurnId;
           if (turnId === null || event.payload.session.status !== "running") {
             return;
@@ -1884,25 +1954,28 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             threadId: event.payload.threadId,
             turnId: event.payload.turnId,
           });
-          const nextState = event.payload.status === "error" ? "error" : "completed";
           yield* projectionTurnRepository.clearCheckpointTurnConflict({
             threadId: event.payload.threadId,
             turnId: event.payload.turnId,
             checkpointTurnCount: event.payload.checkpointTurnCount,
           });
 
+          // A checkpoint never changes an existing turn's state: it only attaches
+          // checkpoint fields, and a finished turn keeps the completedAt its release (or
+          // final message) recorded. `completed_at` doubles as the checkpoint summary's
+          // non-null timestamp for every checkpoint reader, so a null one is filled from
+          // the diff even while the turn runs; the release then takes the later time.
           if (Option.isSome(existingTurn)) {
             yield* projectionTurnRepository.upsertByTurnId({
               ...existingTurn.value,
               assistantMessageId: event.payload.assistantMessageId,
-              state: nextState,
               checkpointTurnCount: event.payload.checkpointTurnCount,
               checkpointRef: event.payload.checkpointRef,
               checkpointStatus: event.payload.status,
               checkpointFiles: event.payload.files,
               startedAt: existingTurn.value.startedAt ?? event.payload.completedAt,
               requestedAt: existingTurn.value.requestedAt ?? event.payload.completedAt,
-              completedAt: event.payload.completedAt,
+              completedAt: existingTurn.value.completedAt ?? event.payload.completedAt,
             });
             return;
           }
@@ -1913,7 +1986,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             sourceProposedPlanThreadId: null,
             sourceProposedPlanId: null,
             assistantMessageId: event.payload.assistantMessageId,
-            state: nextState,
+            state: checkpointStatusToTurnState(event.payload.status),
             requestedAt: event.payload.completedAt,
             startedAt: event.payload.completedAt,
             completedAt: event.payload.completedAt,

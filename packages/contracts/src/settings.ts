@@ -56,6 +56,15 @@ export const AiFocusRefreshIntervalMs = Schema.Literals([
 export type AiFocusRefreshIntervalMs = typeof AiFocusRefreshIntervalMs.Type;
 export const DEFAULT_AI_FOCUS_REFRESH_INTERVAL_MS: AiFocusRefreshIntervalMs = 600_000;
 
+/**
+ * What Enter does with a message sent while a turn runs: `queue` waits for the turn to finish,
+ * `steer` adds it to the running turn when the provider supports steering. Mod+Enter does the
+ * opposite.
+ */
+export const FollowUpBehavior = Schema.Literals(["queue", "steer"]);
+export type FollowUpBehavior = typeof FollowUpBehavior.Type;
+export const DEFAULT_FOLLOW_UP_BEHAVIOR: FollowUpBehavior = "queue";
+
 /** Missing effort is a legacy model-only preset; provider remains the stable instance id. */
 export const ModelFavorite = Schema.Struct({
   provider: ProviderInstanceId,
@@ -80,6 +89,9 @@ export const ClientSettingsSchema = Schema.Struct({
   ),
   diffIgnoreWhitespace: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   diffWordWrap: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  followUpBehavior: FollowUpBehavior.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_FOLLOW_UP_BEHAVIOR)),
+  ),
   // Model favorites. Historically keyed by provider kind, now
   // widened to `ProviderInstanceId` so users can favorite a specific model
   // on a custom provider instance (e.g. "Codex Personal · gpt-5") without
@@ -587,6 +599,15 @@ export const ServerSettings = Schema.Struct({
   // entirely (no npm registry contact) instead of merely hiding the update
   // notification — for users who install providers via Nix/nixpkgs/etc.
   enableProviderUpdateChecks: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  // Opt-in automatic "continue" turn after a server restart. Node-scoped; never part of
+  // Agent Control's settings allowlist (an agent must not grant itself unattended resumption).
+  continueThreadsAfterRestart: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(false)),
+  ),
+  // Usage limits: when a provider usage limit stops a thread, resume it at the reported
+  // reset and/or snooze it until then. Both off by default; limits are account-wide.
+  autoResumeLimitedThreads: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  snoozeLimitedThreads: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   storageRetention: StorageRetentionPolicy.pipe(
     Schema.withDecodingDefault(
       Effect.succeed({ automatic: false, completedWorktreeDays: null, temporaryDataDays: null }),
@@ -755,6 +776,9 @@ export const ServerSettingsPatch = Schema.Struct({
   // Server settings
   enableLegacyTokenStreaming: Schema.optionalKey(Schema.Boolean),
   enableProviderUpdateChecks: Schema.optionalKey(Schema.Boolean),
+  continueThreadsAfterRestart: Schema.optionalKey(Schema.Boolean),
+  autoResumeLimitedThreads: Schema.optionalKey(Schema.Boolean),
+  snoozeLimitedThreads: Schema.optionalKey(Schema.Boolean),
   storageRetention: Schema.optionalKey(StorageRetentionPolicy),
   projectStorageRetention: Schema.optionalKey(
     Schema.Record(Schema.String, Schema.NullOr(StorageRetentionPolicy)),
@@ -812,6 +836,7 @@ export const ClientSettingsPatch = Schema.Struct({
   confirmThreadUnpin: Schema.optionalKey(Schema.Boolean),
   diffIgnoreWhitespace: Schema.optionalKey(Schema.Boolean),
   diffWordWrap: Schema.optionalKey(Schema.Boolean),
+  followUpBehavior: Schema.optionalKey(FollowUpBehavior),
   favorites: Schema.optionalKey(Schema.Array(ModelFavorite)),
   providerModelPreferences: Schema.optionalKey(
     Schema.Record(

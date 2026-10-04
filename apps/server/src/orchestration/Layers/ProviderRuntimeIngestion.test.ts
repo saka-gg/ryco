@@ -19,7 +19,6 @@ import {
 } from "@ryco/contracts";
 import {
   ApprovalRequestId,
-  CheckpointRef,
   CommandId,
   DEFAULT_PROVIDER_INTERACTION_MODE,
   EventId,
@@ -386,6 +385,12 @@ describe("ProviderRuntimeIngestion", () => {
     });
 
     return {
+      countEvents: (eventType: string) =>
+        Effect.runPromise(
+          sql<{ count: number }>`
+            SELECT count(*) AS count FROM orchestration_events WHERE event_type = ${eventType}
+          `.pipe(Effect.map((rows) => rows[0]!.count)),
+        ),
       chunkCount: () =>
         Effect.runPromise(
           sql<{ count: number }>`SELECT count(*) AS count FROM projection_message_chunks`.pipe(
@@ -678,6 +683,9 @@ describe("ProviderRuntimeIngestion", () => {
     expect(recovered.messages.every((message) => !message.streaming)).toBe(true);
     expect(recovered.session?.activeTurnId).toBeNull();
     expect(recovered.session?.status).toBe("ready");
+    // The restore's session-set finalizes the recovered turn with the provider's verdict.
+    expect(recovered.latestTurn).toMatchObject({ turnId, state: "completed" });
+    expect(recovered.latestTurn?.completedAt).not.toBeNull();
     expect(derivePendingThreadRequestState(recovered.activities).pendingUserInputCount).toBe(0);
     for (const itemId of ["partial", "missing"]) {
       harness.emit({
@@ -918,33 +926,12 @@ describe("ProviderRuntimeIngestion", () => {
         responseAttemptId: "pending-question-attempt",
       });
       expect(thread.session?.status).toBe("ready");
-      if (type === "turn.completed") {
-        // CheckpointReactor owns turn finalization and is not part of this harness.
-        // A ready session alone must not allow settlement before its diff finishes.
-        await expect(
-          Effect.runPromise(
-            harness.engine.dispatch({
-              type: "thread.settle",
-              commandId: CommandId.make("settle-before-checkpoint"),
-              threadId,
-            }),
-          ),
-        ).rejects.toThrow("provider session is running");
-        await Effect.runPromise(
-          harness.engine.dispatch({
-            type: "thread.turn.diff.complete",
-            commandId: CommandId.make("complete-pending-checkpoint"),
-            threadId,
-            turnId,
-            completedAt: "2026-01-01T00:00:03.000Z",
-            checkpointRef: CheckpointRef.make("refs/ryco/checkpoints/pending/1"),
-            status: "ready",
-            files: [],
-            checkpointTurnCount: 1,
-            createdAt: "2026-01-01T00:00:03.000Z",
-          }),
-        );
-      }
+      // The releasing session-set finalizes the turn; settlement no longer waits for a
+      // checkpoint capture (CheckpointReactor is not part of this harness).
+      expect(thread.latestTurn).toMatchObject({
+        turnId,
+        state: type === "turn.completed" ? "completed" : "interrupted",
+      });
       expect(derivePendingThreadRequestState(thread.activities)).toMatchObject({
         hasPendingApprovals: false,
         hasPendingUserInput: false,
@@ -1258,8 +1245,8 @@ describe("ProviderRuntimeIngestion", () => {
       (entry) => entry.session?.status === "ready" && entry.session?.activeTurnId === null,
     );
     expect(thread.session?.lastError).toBeNull();
+    expect(thread.latestTurn).toMatchObject({ turnId, state: "interrupted" });
 
-    // The ready session can be visible before the interrupt event is stored.
     await harness.drain();
 
     const events = await Effect.runPromise(
@@ -1267,15 +1254,17 @@ describe("ProviderRuntimeIngestion", () => {
         Effect.map((chunk) => Array.from(chunk)),
       ),
     );
-    const interruptedTurnEvent = events.find(
+    // The releasing session-set carries the interrupted outcome atomically.
+    const releasingSessionSet = events.find(
       (event) =>
-        event.type === "thread.turn-interrupt-requested" && event.payload.turnId === turnId,
+        event.type === "thread.session-set" && event.payload.releasedTurn?.turnId === turnId,
     );
-    expect(interruptedTurnEvent?.commandId).toBe(
-      CommandId.make(
-        "provider:evt-turn-aborted-provider-aborted:thread-turn-interrupt:turn-provider-aborted",
-      ),
-    );
+    expect(
+      releasingSessionSet?.type === "thread.session-set"
+        ? releasingSessionSet.payload.releasedTurn
+        : undefined,
+    ).toMatchObject({ turnId, state: "interrupted", reason: "provider-turn-aborted" });
+    expect(events.some((event) => event.type === "thread.turn-interrupt-requested")).toBe(false);
   });
 
   it("applies provider session.state.changed transitions directly", async () => {
@@ -1409,12 +1398,266 @@ describe("ProviderRuntimeIngestion", () => {
         Effect.map((chunk) => Array.from(chunk)),
       ),
     );
+    // One event releases the session and settles the turn, so there is no ordering gap.
+    const releasingSessionSet = events.find(
+      (event) =>
+        event.type === "thread.session-set" &&
+        event.payload.session.activeTurnId === null &&
+        event.payload.releasedTurn?.turnId === turnId,
+    );
     expect(
-      events.some(
-        (event) =>
-          event.type === "thread.turn-interrupt-requested" && event.payload.turnId === turnId,
+      releasingSessionSet?.type === "thread.session-set"
+        ? releasingSessionSet.payload.releasedTurn
+        : undefined,
+    ).toMatchObject({ turnId, state: "interrupted", reason: "provider-session-idle" });
+    expect(events.some((event) => event.type === "thread.turn-interrupt-requested")).toBe(false);
+  });
+
+  const readStoredEvents = (harness: Awaited<ReturnType<typeof createHarness>>) =>
+    Effect.runPromise(
+      Stream.runCollect(harness.engine.readEvents(0)).pipe(
+        Effect.map((chunk) => Array.from(chunk)),
       ),
-    ).toBe(true);
+    );
+
+  const startProviderTurn = async (
+    harness: Awaited<ReturnType<typeof createHarness>>,
+    turnId: TurnId,
+  ) => {
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId(`evt-turn-started-${turnId}`),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId("thread-1"),
+      turnId,
+      createdAt: new Date().toISOString(),
+    });
+    await waitForThread(
+      harness.readModel,
+      (thread) => thread.session?.status === "running" && thread.session.activeTurnId === turnId,
+    );
+  };
+
+  it.each([
+    ["turn.completed completed", { type: "turn.completed", state: "completed" }, "completed"],
+    ["turn.completed failed", { type: "turn.completed", state: "failed" }, "error"],
+    ["turn.completed interrupted", { type: "turn.completed", state: "interrupted" }, "interrupted"],
+    ["turn.completed cancelled", { type: "turn.completed", state: "cancelled" }, "interrupted"],
+    ["turn.aborted", { type: "turn.aborted" }, "interrupted"],
+  ] as const)(
+    "finalizes a %s turn without assistant text or checkpoint",
+    async (name, terminal, expectedState) => {
+      const harness = await createHarness();
+      const turnId = asTurnId(`turn-finalize-${name.replaceAll(" ", "-")}`);
+      await startProviderTurn(harness, turnId);
+
+      const base = {
+        eventId: asEventId(`evt-terminal-${turnId}`),
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        turnId,
+        createdAt: new Date().toISOString(),
+      } as const;
+      harness.emit(
+        terminal.type === "turn.aborted"
+          ? { ...base, type: "turn.aborted", payload: { reason: "stopped" } }
+          : { ...base, type: "turn.completed", payload: { state: terminal.state } },
+      );
+      await waitForThread(
+        harness.readModel,
+        (thread) => thread.session?.status !== "running" && thread.session?.activeTurnId === null,
+      );
+      await harness.drain();
+
+      const thread = (await harness.readModel()).threads[0]!;
+      expect(thread.latestTurn).toMatchObject({ turnId, state: expectedState });
+      expect(thread.latestTurn?.completedAt).not.toBeNull();
+
+      const events = await readStoredEvents(harness);
+      const released = events.flatMap((event) =>
+        event.type === "thread.session-set" && event.payload.releasedTurn
+          ? [event.payload.releasedTurn]
+          : [],
+      );
+      expect(released).toEqual([
+        expect.objectContaining({
+          turnId,
+          state: expectedState,
+          reason:
+            terminal.type === "turn.aborted" ? "provider-turn-aborted" : "provider-turn-completed",
+        }),
+      ]);
+      expect(events.some((event) => event.type === "thread.turn-interrupt-requested")).toBe(false);
+    },
+  );
+
+  it.each([
+    [
+      "session.exited",
+      {
+        type: "session.exited",
+        payload: { exitKind: "error", reason: "process exited" },
+      },
+      "provider-session-exited",
+    ],
+    [
+      "session.state.changed stopped",
+      { type: "session.state.changed", payload: { state: "stopped" } },
+      "provider-session-idle",
+    ],
+  ] as const)("finalizes a running turn as interrupted on %s", async (_name, event, reason) => {
+    const harness = await createHarness();
+    const turnId = asTurnId(`turn-finalize-${event.type}`);
+    await startProviderTurn(harness, turnId);
+
+    harness.emit({
+      ...event,
+      eventId: asEventId(`evt-${event.type}-${turnId}`),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId("thread-1"),
+      createdAt: new Date().toISOString(),
+    } as LegacyProviderRuntimeEvent);
+    const thread = await waitForThread(
+      harness.readModel,
+      (entry) => entry.session?.activeTurnId === null && entry.latestTurn?.state !== "running",
+    );
+    expect(thread.latestTurn).toMatchObject({ turnId, state: "interrupted" });
+    expect(thread.latestTurn?.completedAt).not.toBeNull();
+    await harness.drain();
+    const events = await readStoredEvents(harness);
+    expect(
+      events.flatMap((entry) =>
+        entry.type === "thread.session-set" && entry.payload.releasedTurn
+          ? [entry.payload.releasedTurn]
+          : [],
+      ),
+    ).toEqual([expect.objectContaining({ turnId, state: "interrupted", reason })]);
+  });
+
+  it.each(["turn.completed", "turn.aborted"] as const)(
+    "ignores a late %s for an older turn without moving the latest turn",
+    async (terminalType) => {
+      const harness = await createHarness();
+      const turnY = asTurnId("turn-latest-y");
+      const turnX = asTurnId("turn-older-x");
+      await startProviderTurn(harness, turnY);
+      harness.emit({
+        type: "turn.completed",
+        eventId: asEventId("evt-turn-completed-y"),
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        turnId: turnY,
+        createdAt: new Date().toISOString(),
+        payload: { state: "completed" },
+      });
+      await waitForThread(
+        harness.readModel,
+        (thread) => thread.latestTurn?.turnId === turnY && thread.latestTurn.state === "completed",
+      );
+
+      const base = {
+        eventId: asEventId(`evt-late-${terminalType}-x`),
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        turnId: turnX,
+        createdAt: new Date().toISOString(),
+      } as const;
+      harness.emit(
+        terminalType === "turn.aborted"
+          ? { ...base, type: "turn.aborted", payload: { reason: "late" } }
+          : { ...base, type: "turn.completed", payload: { state: "interrupted" } },
+      );
+      await harness.drain();
+
+      const thread = (await harness.readModel()).threads[0]!;
+      expect(thread.latestTurn).toMatchObject({ turnId: turnY, state: "completed" });
+      const sql = await runtime!.runPromise(Effect.service(SqlClient.SqlClient));
+      const rows = await runtime!.runPromise(
+        sql<{ readonly turnId: string }>`
+          SELECT turn_id AS "turnId" FROM projection_turns WHERE turn_id = ${turnX}
+        `,
+      );
+      expect(rows).toEqual([]);
+    },
+  );
+
+  it("finalizes a turn that started after the reactor already released the session", async () => {
+    // ACP/Cursor race: the reactor's turn-start failure released the session before
+    // ingestion projected turn.started; the adapter's own terminal still closes the turn.
+    const harness = await createHarness();
+    const turnId = asTurnId("turn-acp-race");
+    await startProviderTurn(harness, turnId);
+    harness.emit({
+      type: "turn.completed",
+      eventId: asEventId("evt-turn-completed-acp-race"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId("thread-1"),
+      turnId,
+      createdAt: new Date().toISOString(),
+      payload: { state: "failed", errorMessage: "prompt failed" },
+    });
+    const thread = await waitForThread(
+      harness.readModel,
+      (entry) => entry.session?.status !== "running" && entry.latestTurn?.state !== "running",
+    );
+    expect(thread.latestTurn).toMatchObject({ turnId, state: "error" });
+    expect(thread.session).toMatchObject({ status: "error", activeTurnId: null });
+  });
+
+  it("finalizes a failed turn as error after a final assistant message", async () => {
+    const harness = await createHarness();
+    const turnId = asTurnId("turn-failed-after-commentary");
+    await startProviderTurn(harness, turnId);
+    const now = new Date().toISOString();
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-commentary-delta"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId,
+      itemId: asItemId("item-commentary"),
+      payload: { streamKind: "assistant_text", delta: "Working on it" },
+    });
+    harness.emit({
+      type: "item.completed",
+      eventId: asEventId("evt-commentary-completed"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId,
+      itemId: asItemId("item-commentary"),
+      payload: { itemType: "assistant_message", status: "completed" },
+    });
+    await waitForThread(
+      harness.readModel,
+      (entry) => entry.latestTurn?.turnId === turnId && entry.latestTurn.state === "completed",
+    );
+
+    harness.emit({
+      type: "turn.completed",
+      eventId: asEventId("evt-turn-failed-after-commentary"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId("thread-1"),
+      turnId,
+      createdAt: new Date().toISOString(),
+      payload: { state: "failed", errorMessage: "provider failed" },
+    });
+    const thread = await waitForThread(
+      harness.readModel,
+      (entry) => entry.session?.status === "error" && entry.session.activeTurnId === null,
+    );
+    await harness.drain();
+    expect((await harness.readModel()).threads[0]?.latestTurn).toMatchObject({
+      turnId,
+      state: "error",
+    });
+    expect(thread.session?.lastError).toBe("provider failed");
+    const shell = await harness.readShell();
+    expect(shell.threads.find((entry) => entry.id === "thread-1")?.latestTurn).toMatchObject({
+      turnId,
+      state: "error",
+    });
   });
 
   it("preserves an active turn across incidental provider ready notifications", async () => {
@@ -4948,5 +5191,169 @@ describe("ProviderRuntimeIngestion", () => {
     );
     expect(thread.session?.status).toBe("error");
     expect(thread.session?.lastError).toBe("runtime still processed");
+  });
+  describe("usage limits", () => {
+    const codexInstance = ProviderInstanceId.make("codex");
+    const limitTurn = asTurnId("turn-usage-limit");
+    const limitId = `usage-limit:thread-1:${limitTurn}`;
+    const resetAt = new Date(Date.now() + 5 * 3_600_000).toISOString();
+
+    async function runningOnCodex(harness: Awaited<ReturnType<typeof createHarness>>) {
+      const now = new Date().toISOString();
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("cmd-session-running-limit"),
+          threadId: ThreadId.make("thread-1"),
+          session: {
+            threadId: ThreadId.make("thread-1"),
+            status: "running",
+            providerName: "codex",
+            providerInstanceId: codexInstance,
+            runtimeMode: "approval-required",
+            activeTurnId: limitTurn,
+            updatedAt: now,
+            lastError: null,
+          },
+          createdAt: now,
+        }),
+      );
+    }
+
+    const usageLimitError = (eventId: string, overrides: Record<string, unknown> = {}) => ({
+      type: "runtime.error" as const,
+      eventId: asEventId(eventId),
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: codexInstance,
+      createdAt: new Date().toISOString(),
+      threadId: asThreadId("thread-1"),
+      turnId: limitTurn,
+      payload: {
+        message: "You've hit your usage limit.",
+        class: "usage_limit" as const,
+        resetAt,
+      },
+      ...overrides,
+    });
+
+    it("records exactly one limit, finalizes the turn and dedupes a duplicate error", async () => {
+      const harness = await createHarness();
+      await runningOnCodex(harness);
+      harness.emit(usageLimitError("evt-usage-limit-1"));
+      harness.emit(usageLimitError("evt-usage-limit-2"));
+      await harness.drain();
+
+      const thread = await waitForThread(
+        harness.readModel,
+        (entry) => entry.usageLimit?.limitId === limitId,
+      );
+      expect(thread.usageLimit).toMatchObject({
+        limitId,
+        providerInstanceId: codexInstance,
+        turnId: limitTurn,
+        resetAt,
+        autoResume: null,
+      });
+      expect(thread.session?.status).toBe("error");
+      expect(thread.session?.activeTurnId).toBeNull();
+      expect(thread.session?.lastError).toBe("You've hit your usage limit.");
+      expect(thread.latestTurn).toMatchObject({ turnId: limitTurn, state: "error" });
+      expect(await harness.countEvents("thread.usage-limit-set")).toBe(1);
+      const activity = thread.activities.find((entry) => entry.id === "evt-usage-limit-1");
+      expect(activity?.summary).toBe("Usage limit reached");
+      expect(activity?.payload).toEqual({
+        message: "You've hit your usage limit.",
+        class: "usage_limit",
+        resetAt,
+      });
+    });
+
+    it("keeps the session error when the record is rejected", async () => {
+      const harness = await createHarness();
+      const now = new Date().toISOString();
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-turn-before-archive"),
+          threadId: ThreadId.make("thread-1"),
+          message: {
+            messageId: asMessageId("message-before-archive"),
+            role: "user",
+            text: "Work",
+            attachments: [],
+          },
+          runtimeMode: "approval-required",
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          createdAt: now,
+        }),
+      );
+      await runningOnCodex(harness);
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.archive",
+          commandId: CommandId.make("cmd-archive-before-limit"),
+          threadId: ThreadId.make("thread-1"),
+        }),
+      );
+      harness.emit(usageLimitError("evt-usage-limit-archived"));
+      await harness.drain();
+
+      const thread = await waitForThread(
+        harness.readModel,
+        (entry) => entry.session?.status === "error",
+      );
+      expect(thread.session?.lastError).toBe("You've hit your usage limit.");
+      expect(thread.usageLimit ?? null).toBeNull();
+      expect(await harness.countEvents("thread.usage-limit-set")).toBe(0);
+    });
+
+    it("records nothing for a provider_error", async () => {
+      const harness = await createHarness();
+      await runningOnCodex(harness);
+      harness.emit(
+        usageLimitError("evt-provider-error", {
+          payload: { message: "boom", class: "provider_error" },
+        }),
+      );
+      await harness.drain();
+      await waitForThread(harness.readModel, (entry) => entry.session?.lastError === "boom");
+      expect(await harness.countEvents("thread.usage-limit-set")).toBe(0);
+    });
+
+    it("fills an unknown reset once from a rate-limit update and ignores other instances", async () => {
+      const harness = await createHarness();
+      await runningOnCodex(harness);
+      harness.emit(
+        usageLimitError("evt-usage-limit-unknown", {
+          payload: { message: "Limited", class: "usage_limit", resetAt: null },
+        }),
+      );
+      await harness.drain();
+      await waitForThread(harness.readModel, (entry) => entry.usageLimit?.limitId === limitId);
+
+      const rateLimits = (eventId: string, providerInstanceId: string, at: string) => ({
+        type: "account.rate-limits.updated" as const,
+        eventId: asEventId(eventId),
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: ProviderInstanceId.make(providerInstanceId),
+        createdAt: new Date().toISOString(),
+        threadId: asThreadId("thread-1"),
+        payload: { rateLimits: {}, usageLimitState: { exhausted: true, resetAt: at } },
+      });
+      // Another instance's event never reaches this session (stale-instance guard), and
+      // a fill for it would be ignored anyway.
+      harness.emit(rateLimits("evt-rate-other", "codex_other", resetAt));
+      harness.emit(rateLimits("evt-rate-fill", "codex", resetAt));
+      const later = new Date(Date.parse(resetAt) + 3_600_000).toISOString();
+      harness.emit(rateLimits("evt-rate-refill", "codex", later));
+      await harness.drain();
+
+      const thread = await waitForThread(
+        harness.readModel,
+        (entry) => entry.usageLimit?.resetAt === resetAt,
+      );
+      expect(thread.usageLimit?.resetAt).toBe(resetAt);
+      expect(await harness.countEvents("thread.usage-limit-set")).toBe(2);
+    });
   });
 });

@@ -9,6 +9,7 @@ import {
   ClientSettingsPatch,
   ClientSettingsSchema,
   DEFAULT_CLIENT_SETTINGS,
+  DEFAULT_FOLLOW_UP_BEHAVIOR,
   DEFAULT_SERVER_SETTINGS,
   SIDEBAR_AUTO_SETTLE_DAY_OPTIONS,
   SidebarAutoSettleAfterDays,
@@ -104,6 +105,20 @@ describe("ClientSettings.sourceControlRefreshMode", () => {
   });
 });
 
+describe("ClientSettings.followUpBehavior", () => {
+  it("defaults existing settings to queueing follow-ups", () => {
+    expect(DEFAULT_FOLLOW_UP_BEHAVIOR).toBe("queue");
+    expect(DEFAULT_CLIENT_SETTINGS.followUpBehavior).toBe("queue");
+    expect(decodeClientSettings({}).followUpBehavior).toBe("queue");
+  });
+
+  it("patches to steer and rejects unknown behaviours", () => {
+    expect(decodeClientSettingsPatch({ followUpBehavior: "steer" }).followUpBehavior).toBe("steer");
+    expect(decodeClientSettings({ followUpBehavior: "steer" }).followUpBehavior).toBe("steer");
+    expect(() => decodeClientSettingsPatch({ followUpBehavior: "interrupt" })).toThrow();
+  });
+});
+
 describe("ServerSettings.enableLegacyTokenStreaming", () => {
   it("defaults to buffered output and deliberately ignores the retired key", () => {
     expect(DEFAULT_SERVER_SETTINGS.enableLegacyTokenStreaming).toBe(false);
@@ -148,6 +163,22 @@ describe("ServerSettings.enableProviderUpdateChecks", () => {
     expect(
       decodeServerSettingsPatch({ enableProviderUpdateChecks: false }).enableProviderUpdateChecks,
     ).toBe(false);
+  });
+});
+
+describe("ServerSettings.continueThreadsAfterRestart", () => {
+  it("defaults off, so old settings files decode without auto-continuation", () => {
+    expect(DEFAULT_SERVER_SETTINGS.continueThreadsAfterRestart).toBe(false);
+    expect(decodeServerSettings({}).continueThreadsAfterRestart).toBe(false);
+  });
+
+  it("can be enabled and round-trips through the settings patch", () => {
+    expect(
+      decodeServerSettings({ continueThreadsAfterRestart: true }).continueThreadsAfterRestart,
+    ).toBe(true);
+    expect(
+      decodeServerSettingsPatch({ continueThreadsAfterRestart: true }).continueThreadsAfterRestart,
+    ).toBe(true);
   });
 });
 
@@ -450,4 +481,23 @@ it("preserves explicit Cursor export settings through node settings patches", ()
   expect(decodeServerSettingsPatch({ providers: { cursor } }).providers?.cursor).toEqual(cursor);
   expect(decodeServerSettings({ providers: { cursor } }).providers.cursor).toMatchObject(cursor);
   expect(decodeServerSettings({}).providers.cursor.usageExportPath).toBeUndefined();
+});
+
+describe("ServerSettings usage-limit recovery", () => {
+  it("defaults both usage-limit settings off", () => {
+    expect(DEFAULT_SERVER_SETTINGS.autoResumeLimitedThreads).toBe(false);
+    expect(DEFAULT_SERVER_SETTINGS.snoozeLimitedThreads).toBe(false);
+    const decoded = decodeServerSettings({});
+    expect(decoded.autoResumeLimitedThreads).toBe(false);
+    expect(decoded.snoozeLimitedThreads).toBe(false);
+  });
+
+  it("accepts both keys in a settings patch", () => {
+    const patch = decodeServerSettingsPatch({
+      autoResumeLimitedThreads: true,
+      snoozeLimitedThreads: true,
+    });
+    expect(patch.autoResumeLimitedThreads).toBe(true);
+    expect(patch.snoozeLimitedThreads).toBe(true);
+  });
 });

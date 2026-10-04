@@ -1,4 +1,5 @@
 export * from "./contextHandoff.ts";
+export * from "./dispatchAck.ts";
 export * from "./session-logic.ts";
 export * from "./subagentIdentity.ts";
 export * from "./subagentRuntime.ts";

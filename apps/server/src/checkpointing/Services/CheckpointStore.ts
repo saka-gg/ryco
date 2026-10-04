@@ -59,6 +59,11 @@ export interface CheckpointStoreShape {
   ) => Effect.Effect<void, CheckpointStoreError>;
 
   /**
+   * Check whether the repository at cwd has a `HEAD` commit (false on an empty repository).
+   */
+  readonly hasHeadCommit: (cwd: string) => Effect.Effect<boolean, CheckpointStoreError>;
+
+  /**
    * Check whether a checkpoint ref exists.
    */
   readonly hasCheckpointRef: (

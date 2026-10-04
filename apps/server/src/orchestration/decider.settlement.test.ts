@@ -525,3 +525,115 @@ describe("thread snooze commands", () => {
     ).rejects.toThrow("future wake time");
   });
 });
+
+describe("pull request settlement signals in the decider", () => {
+  const worktreeId = WorktreeId.make("worktree-pr-signal");
+
+  async function seedPullRequestThread(input: {
+    readonly prState: "open" | "merged" | "closed" | null;
+  }): Promise<OrchestrationReadModel> {
+    const readModel = await seedThread();
+    const thread = readModel.threads[0]!;
+    return {
+      ...readModel,
+      worktrees: [
+        {
+          worktreeId,
+          projectId: thread.projectId,
+          title: null,
+          branch: "feature/pr-signal",
+          worktreePath: "/tmp/pr-signal",
+          origin: "pr",
+          prNumber: 12,
+          issueNumber: null,
+          prTitle: "Signal",
+          issueTitle: null,
+          workItemProvider: null,
+          workItemKey: null,
+          workItemTitle: null,
+          workItemState: null,
+          workItemStateName: null,
+          workItemUrl: null,
+          prState: input.prState,
+          prIsDraft: false,
+          prTerminalAt: null,
+          issueState: null,
+          createdAt: "2026-07-31T00:00:00.000Z",
+          updatedAt: "2026-07-31T00:00:00.000Z",
+          archivedAt: null,
+          manualPosition: 0,
+        },
+      ],
+      threads: [{ ...thread, worktreeId }],
+    };
+  }
+
+  const sourceControlUpdate = (
+    prTerminalAt?: string | null,
+  ): Extract<OrchestrationCommand, { type: "worktree.source-control-state.update" }> => ({
+    type: "worktree.source-control-state.update",
+    commandId: asCommandId(`command-source-control-${prTerminalAt ?? "absent"}`),
+    worktreeId,
+    prState: "merged",
+    prIsDraft: false,
+    issueState: null,
+    updatedAt: "2026-07-31T01:00:00.000Z",
+    ...(prTerminalAt !== undefined ? { prTerminalAt } : {}),
+  });
+
+  it("passes prTerminalAt through and leaves it out when absent", async () => {
+    const readModel = await seedPullRequestThread({ prState: "open" });
+    const withTime = asEvents(
+      await Effect.runPromise(
+        decideOrchestrationCommand({
+          command: sourceControlUpdate("2026-07-31T00:30:00.000Z"),
+          readModel,
+        }),
+      ),
+    );
+    expect(withTime[0]?.type).toBe("worktree.sourceControlStateUpdated");
+    if (withTime[0]?.type === "worktree.sourceControlStateUpdated") {
+      expect(withTime[0].payload.prTerminalAt).toBe("2026-07-31T00:30:00.000Z");
+    }
+
+    const withNull = asEvents(
+      await Effect.runPromise(
+        decideOrchestrationCommand({ command: sourceControlUpdate(null), readModel }),
+      ),
+    );
+    if (withNull[0]?.type === "worktree.sourceControlStateUpdated") {
+      expect("prTerminalAt" in withNull[0].payload).toBe(true);
+      expect(withNull[0].payload.prTerminalAt).toBeNull();
+    }
+
+    const absent = asEvents(
+      await Effect.runPromise(
+        decideOrchestrationCommand({ command: sourceControlUpdate(), readModel }),
+      ),
+    );
+    expect(absent[0]?.type).toBe("worktree.sourceControlStateUpdated");
+    if (absent[0]?.type === "worktree.sourceControlStateUpdated") {
+      expect("prTerminalAt" in absent[0].payload).toBe(false);
+    }
+  });
+
+  it.each(["open", null] as const)(
+    "allows manual settlement while the worktree PR is %s",
+    async (prState) => {
+      const readModel = await seedPullRequestThread({ prState });
+      const settled = asEvents(
+        await Effect.runPromise(
+          decideOrchestrationCommand({
+            command: {
+              type: "thread.settle",
+              commandId: asCommandId(`command-settle-pr-${prState ?? "unknown"}`),
+              threadId: readModel.threads[0]!.id,
+            },
+            readModel,
+          }),
+        ),
+      );
+      expect(settled[0]?.type).toBe("thread.settled");
+    },
+  );
+});

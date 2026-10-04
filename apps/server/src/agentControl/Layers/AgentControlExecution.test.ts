@@ -7,6 +7,9 @@ import { GitVcsDriver } from "../../vcs/GitVcsDriver.ts";
 import { workspacePlan } from "../workspaceLifecycle.testSupport.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import {
+  AgentControlAutomationId,
+  AgentControlAutomationRunId,
+  AgentControlIntegrationId,
   AgentControlOperationId,
   AgentControlProposalId,
   AgentControlRequestId,
@@ -21,6 +24,7 @@ import {
   type AgentControlProposal,
   type AgentControlResultEnvelope,
   type ClientOrchestrationCommand,
+  type ThreadDelegatedCreateCommand,
 } from "@ryco/contracts";
 import { assert, it, vi } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -123,6 +127,14 @@ const invalidTransition = (from: string, to: string) =>
     detail: "lost test CAS",
   });
 
+type DispatchedCommand = ClientOrchestrationCommand | ThreadDelegatedCreateCommand;
+
+// Older stubs only implement `apply`; delegated creates fall back to it.
+const withApplyInternal = (commandApplication: unknown) => {
+  const stub = commandApplication as { readonly apply?: unknown; readonly applyInternal?: unknown };
+  return { ...stub, applyInternal: stub.applyInternal ?? stub.apply };
+};
+
 const makeTestExecution = (input: {
   readonly proposalStore: unknown;
   readonly operationStore: unknown;
@@ -146,7 +158,10 @@ const makeTestExecution = (input: {
         revalidateExecution: () => Effect.void,
       }) as never,
     ),
-    Effect.provideService(OrchestrationCommandApplication, input.commandApplication as never),
+    Effect.provideService(
+      OrchestrationCommandApplication,
+      withApplyInternal(input.commandApplication) as never,
+    ),
     Effect.provideService(OrchestrationEngineService, (input.engine ?? {}) as never),
     Effect.provideService(ProjectionSnapshotQuery, input.projections as never),
     Effect.provideService(GitWorkflowService, (input.git ?? {}) as never),
@@ -672,96 +687,101 @@ it.effect(
     }),
 );
 
-it.effect("falls back from rejected steering to queueing and records the delivery", () =>
-  Effect.scoped(
-    Effect.gen(function* () {
-      const targetTurnId = TurnId.make("turn-target");
-      const runningTarget = {
-        ...target,
-        session: {
-          threadId,
-          status: "running" as const,
-          providerName: "codex",
-          providerInstanceId: ProviderInstanceId.make("codex"),
-          runtimeSessionId: RuntimeSessionId.make("runtime-target"),
-          runtimeMode: "auto" as const,
-          activeTurnId: targetTurnId,
-          lastError: null,
-          updatedAt: now,
-        },
-      };
-      const steerPlan = { ...plan, delivery: "steer" as const };
-      const proposal: AgentControlProposal = {
-        ...approvedProposal,
-        proposalId: AgentControlProposalId.make("proposal-steer-fallback"),
-        requestId: AgentControlRequestId.make("request-steer-fallback"),
-        principal:
-          approvedProposal.principal.kind === "provider-session"
-            ? {
-                ...approvedProposal.principal,
-                targetSnapshots: [
-                  {
-                    threadId,
-                    projectId,
-                    runtimeMode: "auto",
-                    envMode: "local",
-                    archived: false,
-                    activeTurnId: targetTurnId,
-                  },
-                ],
-              }
-            : approvedProposal.principal,
-        plan: steerPlan,
-        planDigest: computeAgentControlPlanDigest(steerPlan),
-      };
-      const stores = yield* makeExecutionStores(proposal);
-      const events = yield* PubSub.unbounded<never>();
-      const commands = yield* Ref.make<ReadonlyArray<ClientOrchestrationCommand>>([]);
-      let reads = 0;
+for (const reason of [undefined, "deferred"] as const) {
+  it.effect(
+    `falls back from rejected steering to queueing and records the delivery (reason: ${String(reason)})`,
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const targetTurnId = TurnId.make("turn-target");
+          const runningTarget = {
+            ...target,
+            session: {
+              threadId,
+              status: "running" as const,
+              providerName: "codex",
+              providerInstanceId: ProviderInstanceId.make("codex"),
+              runtimeSessionId: RuntimeSessionId.make("runtime-target"),
+              runtimeMode: "auto" as const,
+              activeTurnId: targetTurnId,
+              lastError: null,
+              updatedAt: now,
+            },
+          };
+          const steerPlan = { ...plan, delivery: "steer" as const };
+          const proposal: AgentControlProposal = {
+            ...approvedProposal,
+            proposalId: AgentControlProposalId.make("proposal-steer-fallback"),
+            requestId: AgentControlRequestId.make("request-steer-fallback"),
+            principal:
+              approvedProposal.principal.kind === "provider-session"
+                ? {
+                    ...approvedProposal.principal,
+                    targetSnapshots: [
+                      {
+                        threadId,
+                        projectId,
+                        runtimeMode: "auto",
+                        envMode: "local",
+                        archived: false,
+                        activeTurnId: targetTurnId,
+                      },
+                    ],
+                  }
+                : approvedProposal.principal,
+            plan: steerPlan,
+            planDigest: computeAgentControlPlanDigest(steerPlan),
+          };
+          const stores = yield* makeExecutionStores(proposal);
+          const events = yield* PubSub.unbounded<never>();
+          const commands = yield* Ref.make<ReadonlyArray<ClientOrchestrationCommand>>([]);
+          let reads = 0;
 
-      const execution = yield* makeTestExecution({
-        proposalStore: stores.proposalStore,
-        operationStore: stores.operationStore,
-        engine: { subscribeDomainEvents: PubSub.subscribe(events) },
-        commandApplication: {
-          apply: (command: ClientOrchestrationCommand) =>
-            Effect.gen(function* () {
-              yield* Ref.update(commands, (current) => [...current, command]);
-              if (command.type === "thread.turn.steer") {
-                yield* PubSub.publish(events, {
-                  type: "thread.turn-steer-rejected",
-                  payload: {
-                    threadId,
-                    messageId: command.message.messageId,
-                  },
-                } as never);
-              }
-              return { sequence: (yield* Ref.get(commands)).length };
-            }),
-          applyWithDispatcher: () => Effect.die("unused"),
-        },
-        projections: {
-          getThreadShellById: () =>
-            Effect.sync(() => {
-              reads += 1;
-              return Option.some(reads === 1 ? runningTarget : target);
-            }),
-        },
-      });
+          const execution = yield* makeTestExecution({
+            proposalStore: stores.proposalStore,
+            operationStore: stores.operationStore,
+            engine: { subscribeDomainEvents: PubSub.subscribe(events) },
+            commandApplication: {
+              apply: (command: ClientOrchestrationCommand) =>
+                Effect.gen(function* () {
+                  yield* Ref.update(commands, (current) => [...current, command]);
+                  if (command.type === "thread.turn.steer") {
+                    yield* PubSub.publish(events, {
+                      type: "thread.turn-steer-rejected",
+                      payload: {
+                        threadId,
+                        messageId: command.message.messageId,
+                        ...(reason !== undefined ? { reason } : {}),
+                      },
+                    } as never);
+                  }
+                  return { sequence: (yield* Ref.get(commands)).length };
+                }),
+              applyWithDispatcher: () => Effect.die("unused"),
+            },
+            projections: {
+              getThreadShellById: () =>
+                Effect.sync(() => {
+                  reads += 1;
+                  return Option.some(reads === 1 ? runningTarget : target);
+                }),
+            },
+          });
 
-      yield* execution.executeApproved(proposal.proposalId);
+          yield* execution.executeApproved(proposal.proposalId);
 
-      assert.deepStrictEqual(
-        (yield* Ref.get(commands)).map((command) => command.type),
-        ["thread.turn.steer", "thread.turn.start"],
-      );
-      const settled = yield* Ref.get(stores.proposalRef);
-      assert.strictEqual(settled.result?.outcome, "completed");
-      if (settled.result?.outcome !== "completed") return;
-      assert.strictEqual(settled.result.execution?.delivery, "queued-after-steer-fallback");
-    }),
-  ),
-);
+          assert.deepStrictEqual(
+            (yield* Ref.get(commands)).map((command) => command.type),
+            ["thread.turn.steer", "thread.turn.start"],
+          );
+          const settled = yield* Ref.get(stores.proposalRef);
+          assert.strictEqual(settled.result?.outcome, "completed");
+          if (settled.result?.outcome !== "completed") return;
+          assert.strictEqual(settled.result.execution?.delivery, "queued-after-steer-fallback");
+        }),
+      ),
+  );
+}
 
 it.effect("records the requested turn and observed settled state for interrupts", () =>
   Effect.gen(function* () {
@@ -1062,7 +1082,7 @@ it.effect(
         planDigest: computeAgentControlPlanDigest(nextPlan),
       };
       const stores = yield* makeExecutionStores(proposal);
-      const commands: ClientOrchestrationCommand[] = [];
+      const commands: DispatchedCommand[] = [];
       const executor = yield* makeTestExecution({
         ...stores,
         projections: {
@@ -1071,7 +1091,7 @@ it.effect(
           getThreadShellById: () => Effect.succeed(Option.none()),
         },
         commandApplication: {
-          apply: (command: ClientOrchestrationCommand) => {
+          apply: (command: DispatchedCommand) => {
             commands.push(command);
             return Effect.succeed({ sequence: commands.length });
           },
@@ -1080,7 +1100,7 @@ it.effect(
       yield* executor.executeApproved(proposal.proposalId);
       assert.strictEqual((yield* Ref.get(stores.proposalRef)).status, "completed");
       assert.deepInclude(
-        commands.find((c) => c.type === "thread.create"),
+        commands.find((c) => c.type === "thread.delegated.create"),
         { title: "Named worker" },
       );
       assert.notProperty(
@@ -1088,7 +1108,7 @@ it.effect(
         "titleSeed",
       );
       assert.deepInclude(
-        commands.find((c) => c.type === "thread.create"),
+        commands.find((c) => c.type === "thread.delegated.create"),
         {
           tokenMode: "off",
         },
@@ -1100,6 +1120,133 @@ it.effect(
         },
       );
     }),
+);
+
+const runCreateThreadsWithPrincipal = (proposal: AgentControlProposal) =>
+  Effect.gen(function* () {
+    const stores = yield* makeExecutionStores(proposal);
+    const viaApply: DispatchedCommand[] = [];
+    const viaApplyInternal: DispatchedCommand[] = [];
+    const executor = yield* makeTestExecution({
+      ...stores,
+      projections: {
+        getShellSnapshot: () =>
+          Effect.succeed({ projects: [{ id: projectId, workspaceRoot: "/workspace/project" }] }),
+        getThreadShellById: () => Effect.succeed(Option.none()),
+      },
+      commandApplication: {
+        apply: (command: DispatchedCommand) =>
+          Effect.sync(() => {
+            viaApply.push(command);
+            return { sequence: viaApply.length + viaApplyInternal.length };
+          }),
+        applyInternal: (command: DispatchedCommand) =>
+          Effect.sync(() => {
+            viaApplyInternal.push(command);
+            return { sequence: viaApply.length + viaApplyInternal.length };
+          }),
+      },
+    });
+    yield* executor.executeApproved(proposal.proposalId);
+    assert.strictEqual((yield* Ref.get(stores.proposalRef)).status, "completed");
+    const operation = Option.getOrThrow(yield* Ref.get(stores.operationRef));
+    return { viaApply, viaApplyInternal, operation };
+  });
+
+const createThreadsPlan = {
+  kind: "createThreads" as const,
+  entries: [
+    {
+      projectId,
+      title: "Worker",
+      prompt: "Reply ready",
+      envMode: "local" as const,
+      runtimeMode: "auto" as const,
+      modelSelection: target.modelSelection,
+    },
+  ],
+};
+
+it.effect("records provider-session createThreads children as delegated creates", () =>
+  Effect.gen(function* () {
+    const proposal: AgentControlProposal = {
+      ...approvedProposal,
+      plan: createThreadsPlan,
+      planDigest: computeAgentControlPlanDigest(createThreadsPlan),
+    };
+    const { viaApply, viaApplyInternal, operation } =
+      yield* runCreateThreadsWithPrincipal(proposal);
+    assert.lengthOf(viaApplyInternal, 1);
+    const delegated = viaApplyInternal[0]!;
+    assert.strictEqual(delegated.type, "thread.delegated.create");
+    if (delegated.type !== "thread.delegated.create") return;
+    assert.strictEqual(delegated.parentThreadId, "thread-origin");
+    assert.strictEqual(
+      delegated.commandId,
+      `agent-control:${operation.operationId}:thread-create-0`,
+    );
+    assert.isFalse(viaApply.some((command) => command.type === "thread.create"));
+    assert.include(operation.state.completedSteps, "thread-created:0");
+    assert.deepInclude(operation.state.commandReceipts, {
+      commandId: delegated.commandId,
+      commandType: "thread.delegated.create",
+      sequence: 1,
+    });
+    assert.include(operation.state.resources.ownedThreadIds, delegated.threadId);
+  }),
+);
+
+it.effect("keeps automation runs as plain thread creates even for provider-session owners", () =>
+  Effect.gen(function* () {
+    const automationPlan = {
+      kind: "automationRun" as const,
+      automationId: AgentControlAutomationId.make("automation-lineage"),
+      runId: AgentControlAutomationRunId.make("automation-lineage-run"),
+      automationRevision: 1,
+      scheduledFor: now,
+      coalescedOccurrences: 0,
+      execution: {
+        projectId,
+        title: "Scheduled worker",
+        prompt: "Reply ready",
+        modelSelection: target.modelSelection,
+        runtimeMode: "auto" as const,
+        envMode: "local" as const,
+      },
+    };
+    const proposal: AgentControlProposal = {
+      ...approvedProposal,
+      plan: automationPlan,
+      planDigest: computeAgentControlPlanDigest(automationPlan),
+    };
+    const { viaApply, viaApplyInternal } = yield* runCreateThreadsWithPrincipal(proposal);
+    assert.lengthOf(viaApplyInternal, 0);
+    const created = viaApply.find((command) => command.type === "thread.create");
+    assert.isDefined(created);
+    assert.notProperty(created, "parentThreadId");
+  }),
+);
+
+it.effect("keeps external-integration createThreads children as plain thread creates", () =>
+  Effect.gen(function* () {
+    const proposal: AgentControlProposal = {
+      ...approvedProposal,
+      principal: {
+        kind: "external-integration",
+        integrationId: AgentControlIntegrationId.make("integration-lineage"),
+        projectId,
+        runtimeMode: "auto",
+        envMode: "local",
+      },
+      plan: createThreadsPlan,
+      planDigest: computeAgentControlPlanDigest(createThreadsPlan),
+    };
+    const { viaApply, viaApplyInternal } = yield* runCreateThreadsWithPrincipal(proposal);
+    assert.lengthOf(viaApplyInternal, 0);
+    const created = viaApply.find((command) => command.type === "thread.create");
+    assert.isDefined(created);
+    assert.notProperty(created, "parentThreadId");
+  }),
 );
 
 it.effect("uses the server worktree prefix for agent-created worktrees", () =>
@@ -1125,7 +1272,7 @@ it.effect("uses the server worktree prefix for agent-created worktrees", () =>
     };
     const stores = yield* makeExecutionStores(proposal);
     const createdBranches: string[] = [];
-    const commands: ClientOrchestrationCommand[] = [];
+    const commands: DispatchedCommand[] = [];
     const executor = yield* makeTestExecution({
       ...stores,
       projections: {
@@ -1145,7 +1292,7 @@ it.effect("uses the server worktree prefix for agent-created worktrees", () =>
       },
       engine: { dispatch: () => Effect.succeed({ sequence: 1 }) },
       commandApplication: {
-        apply: (command: ClientOrchestrationCommand) => {
+        apply: (command: DispatchedCommand) => {
           commands.push(command);
           return Effect.succeed({ sequence: 1 });
         },
@@ -1156,7 +1303,7 @@ it.effect("uses the server worktree prefix for agent-created worktrees", () =>
     assert.lengthOf(createdBranches, 1);
     assert.match(createdBranches[0]!, /^team\/tasks\/agent-control-/);
     assert.deepInclude(
-      commands.find((command) => command.type === "thread.create"),
+      commands.find((command) => command.type === "thread.delegated.create"),
       {
         tokenMode: "balanced",
       },

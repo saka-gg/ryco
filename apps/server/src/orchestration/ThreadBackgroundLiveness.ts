@@ -70,6 +70,9 @@ export class ThreadBackgroundLivenessService extends Context.Service<
      * "monitoring" only when watch loops are the ONLY live work.
      */
     readonly getThreadBackgroundLiveness: (threadId: string) => ThreadBackgroundLiveness;
+
+    /** Threads with at least one live agent or watch loop (graceful-shutdown hints). */
+    readonly listLiveThreadIds: () => ReadonlyArray<string>;
   }
 >()("ryco/orchestration/ThreadBackgroundLiveness/ThreadBackgroundLivenessService") {}
 
@@ -203,6 +206,9 @@ export function make(): ThreadBackgroundLivenessService["Service"] {
       stateByThreadId.delete(threadId);
       history.delete(threadId);
     },
+
+    // `drop` prunes empty threads, so every key has live work.
+    listLiveThreadIds: () => [...stateByThreadId.keys()],
 
     getThreadBackgroundLiveness: (threadId) => {
       const state = stateByThreadId.get(threadId);

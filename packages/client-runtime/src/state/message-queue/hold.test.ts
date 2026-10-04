@@ -1,0 +1,300 @@
+import { describe, expect, it } from "vite-plus/test";
+
+import {
+  makeQueueAppState,
+  queueRef,
+  turnStartFailed,
+  type ThreadFixture,
+} from "../../../test/queueThreadFixtures.ts";
+import {
+  appendAcknowledgedCauseKeys,
+  createInterruptQueueHold,
+  deriveQueueFailureCauses,
+  describeQueueHold,
+  isLatestTurnInterruptSettled,
+  MAX_ACKNOWLEDGED_CAUSE_KEYS,
+  mergeQueueHold,
+  partitionNewQueueFailureCauses,
+  queueHoldReasonForCauseKey,
+  releaseQueueHoldKeys,
+  removeQueueHoldCauses,
+  type QueueFailureCause,
+} from "./hold.ts";
+import { readQueueThreadView } from "./threadView.ts";
+
+const NOW = "2026-10-01T12:00:00.000Z";
+const NONE: ReadonlySet<string> = new Set();
+
+function causesFor(fixture: Omit<ThreadFixture, "id">, dispatched: ReadonlySet<string> = NONE) {
+  const view = readQueueThreadView(makeQueueAppState([{ id: "t", ...fixture }]), queueRef("t"))!;
+  return deriveQueueFailureCauses(view, dispatched);
+}
+
+describe("deriveQueueFailureCauses", () => {
+  it("raises one stable error cause that repeated session-sets and a later stop cannot re-key", () => {
+    const first = causesFor({
+      session: { status: "error", lastError: "Rate limited", updatedAt: NOW },
+      latestTurn: { turnId: "turn-1", state: "error" },
+    });
+    expect(first).toEqual([
+      {
+        reason: "error",
+        causeKey: "error:turn-1:Rate limited",
+        detail: "Rate limited",
+        providerInstanceId: "codex",
+      },
+    ]);
+    const repeated = causesFor({
+      session: {
+        status: "error",
+        lastError: "Rate limited",
+        updatedAt: "2026-10-01T12:05:00.000Z",
+      },
+      latestTurn: { turnId: "turn-1", state: "error" },
+    });
+    expect(repeated.map((cause) => cause.causeKey)).toEqual([first[0]!.causeKey]);
+  });
+
+  it.each(["running", "stopped", "ready"] as const)(
+    "ignores a stale lastError while %s",
+    (status) => {
+      expect(
+        causesFor({
+          session: { status, lastError: "Old failure" },
+          latestTurn: { turnId: "turn-1", state: "completed" },
+        }),
+      ).toEqual([]);
+    },
+  );
+
+  it("raises an interrupt cause from a settled latest turn or the session", () => {
+    expect(
+      causesFor({
+        session: { status: "ready" },
+        latestTurn: { turnId: "turn-2", state: "interrupted" },
+        messageIds: [],
+      }).map((cause) => cause.causeKey),
+    ).toEqual(["interrupt:turn-2"]);
+    // A real capture of an interrupted turn is `missing` too, but not the placeholder.
+    expect(
+      causesFor({
+        session: { status: "ready" },
+        latestTurn: { turnId: "turn-2", state: "interrupted" },
+        latestCheckpoint: { status: "missing", checkpointRef: "refs/ryco/checkpoints/2" },
+        messageIds: [],
+      }).map((cause) => cause.causeKey),
+    ).toEqual(["interrupt:turn-2"]);
+    expect(
+      causesFor({ session: { status: "interrupted" } }).map((cause) => cause.causeKey),
+    ).toEqual(["interrupt:session"]);
+  });
+
+  const placeholder = { status: "missing" as const, checkpointRef: "provider-diff:event-1" };
+  it.each([
+    [
+      "running on that turn",
+      { session: { status: "running" as const, activeTurnId: "turn-1" }, messageIds: [] },
+    ],
+    ["starting", { session: { status: "starting" as const }, messageIds: [] }],
+    [
+      "ready with the turn still active",
+      { session: { status: "ready" as const, activeTurnId: "turn-1" }, messageIds: [] },
+    ],
+    [
+      "settled on a placeholder checkpoint",
+      { session: { status: "ready" as const }, latestCheckpoint: placeholder, messageIds: [] },
+    ],
+    ["settled before detail is loaded", { session: { status: "ready" as const } }],
+  ])("holds no interrupt for a latest turn %s, but a baseline includes it", (_label, fixture) => {
+    // A Codex turn in a git repo reads `interrupted` from its first diff update
+    // through a placeholder `missing` checkpoint, live or settled.
+    const view = readQueueThreadView(
+      makeQueueAppState([
+        { id: "t", ...fixture, latestTurn: { turnId: "turn-1", state: "interrupted" } },
+      ]),
+      queueRef("t"),
+    )!;
+    expect(isLatestTurnInterruptSettled(view)).toBe(false);
+    expect(deriveQueueFailureCauses(view, NONE)).toEqual([]);
+    expect(
+      deriveQueueFailureCauses(view, NONE, { includeUnsettled: true }).map(
+        (cause) => cause.causeKey,
+      ),
+    ).toEqual(["interrupt:turn-1"]);
+  });
+
+  it("raises a start failure only for a message this client dispatched", () => {
+    const fixture = {
+      session: { status: "ready" as const },
+      messageIds: [],
+      activities: [
+        turnStartFailed("activity-1", "mine", "Thread already has active turn"),
+        turnStartFailed("activity-2", "someone-else"),
+      ],
+    };
+    expect(causesFor(fixture)).toEqual([]);
+    expect(causesFor(fixture, new Set(["mine"]))).toEqual([
+      {
+        reason: "error",
+        causeKey: "start-failed:activity-1",
+        detail: "Thread already has active turn",
+        providerInstanceId: null,
+      },
+    ]);
+  });
+});
+
+describe("partitionNewQueueFailureCauses", () => {
+  const error: QueueFailureCause = {
+    reason: "error",
+    causeKey: "error:t:x",
+    detail: "x",
+    providerInstanceId: "claude",
+  };
+  const interrupt: QueueFailureCause = {
+    reason: "interrupted",
+    causeKey: "interrupt:t",
+    detail: null,
+    providerInstanceId: "claude",
+  };
+
+  it("exempts an error from another provider but never an interrupt", () => {
+    expect(
+      partitionNewQueueFailureCauses({
+        causes: [error, interrupt],
+        acknowledgedCauseKeys: [],
+        hold: null,
+        headProviderInstanceId: "codex",
+      }),
+    ).toEqual({ hold: [interrupt], exempt: [error] });
+    expect(
+      partitionNewQueueFailureCauses({
+        causes: [error],
+        acknowledgedCauseKeys: [],
+        hold: null,
+        headProviderInstanceId: "claude",
+      }),
+    ).toEqual({ hold: [error], exempt: [] });
+  });
+
+  it("skips acknowledged causes and causes the hold already covers", () => {
+    expect(
+      partitionNewQueueFailureCauses({
+        causes: [error, interrupt],
+        acknowledgedCauseKeys: [error.causeKey],
+        hold: createInterruptQueueHold("t", NOW),
+        headProviderInstanceId: null,
+      }),
+    ).toEqual({ hold: [], exempt: [] });
+  });
+});
+
+describe("hold merge and release", () => {
+  it("unions keys, keeps heldAt, and takes reason and detail from the higher rank", () => {
+    const stop = createInterruptQueueHold("turn-1", NOW);
+    const merged = mergeQueueHold(
+      stop,
+      { reason: "error", causeKeys: ["error:turn-1:boom"], detail: "boom" },
+      "2026-10-01T13:00:00.000Z",
+    );
+    expect(merged).toEqual({
+      reason: "error",
+      detail: "boom",
+      causeKeys: ["interrupt:turn-1", "error:turn-1:boom"],
+      heldAt: NOW,
+    });
+    // A lower or equal rank keeps the existing reason.
+    expect(
+      mergeQueueHold(
+        merged,
+        { reason: "interrupted", causeKeys: ["interrupt:x"], detail: null },
+        NOW,
+      ).reason,
+    ).toBe("error");
+    expect(
+      mergeQueueHold(merged, { reason: "error", causeKeys: ["error:y"], detail: "other" }, NOW)
+        .detail,
+    ).toBe("boom");
+    expect(
+      mergeQueueHold(merged, { reason: "limit", causeKeys: ["limit:z"], detail: "cap" }, NOW),
+    ).toMatchObject({ reason: "limit", detail: "cap" });
+  });
+
+  it("releases the hold's own keys plus every current cause", () => {
+    const hold = createInterruptQueueHold("turn-1", NOW);
+    expect(
+      releaseQueueHoldKeys(hold, [
+        {
+          reason: "error",
+          causeKey: "error:turn-1:boom",
+          detail: "boom",
+          providerInstanceId: null,
+        },
+        {
+          reason: "interrupted",
+          causeKey: "interrupt:turn-1",
+          detail: null,
+          providerInstanceId: null,
+        },
+      ]),
+    ).toEqual(["interrupt:turn-1", "error:turn-1:boom"]);
+  });
+
+  it("recomputes the reason and drops a stale detail when causes are removed", () => {
+    // Stop, then a stall outranks it; the stalled message later starts.
+    const stalled = mergeQueueHold(
+      createInterruptQueueHold(null, NOW),
+      { reason: "stalled", causeKeys: ["stalled:q-1"], detail: "not started" },
+      NOW,
+    );
+    expect(stalled.reason).toBe("stalled");
+    expect(removeQueueHoldCauses(stalled, ["stalled:q-1"])).toEqual({
+      reason: "interrupted",
+      detail: null,
+      causeKeys: [`interrupt:user:${NOW}`],
+      heldAt: NOW,
+    });
+    // An undone Stop leaves the error and its detail intact.
+    const errored = mergeQueueHold(
+      { reason: "error", detail: "Rate limited", causeKeys: ["error:t:Rate limited"], heldAt: NOW },
+      createInterruptQueueHold("t", NOW),
+      NOW,
+    );
+    expect(removeQueueHoldCauses(errored, ["interrupt:t"])).toEqual({
+      reason: "error",
+      detail: "Rate limited",
+      causeKeys: ["error:t:Rate limited"],
+      heldAt: NOW,
+    });
+    expect(removeQueueHoldCauses(errored, ["unrelated"])).toBe(errored);
+    expect(removeQueueHoldCauses(errored, errored.causeKeys)).toBeNull();
+    expect(queueHoldReasonForCauseKey("start-failed:a-1")).toBe("error");
+    expect(queueHoldReasonForCauseKey("custom:x")).toBeNull();
+  });
+
+  it("creates a user-scoped interrupt when no turn is active", () => {
+    expect(createInterruptQueueHold(null, NOW).causeKeys).toEqual([`interrupt:user:${NOW}`]);
+  });
+
+  it("keeps the newest acknowledged keys", () => {
+    const keys = Array.from({ length: MAX_ACKNOWLEDGED_CAUSE_KEYS + 3 }, (_, index) => `k${index}`);
+    const next = appendAcknowledgedCauseKeys(undefined, keys);
+    expect(next).toHaveLength(MAX_ACKNOWLEDGED_CAUSE_KEYS);
+    expect(next.at(-1)).toBe(keys.at(-1));
+    expect(next[0]).toBe("k3");
+    expect(appendAcknowledgedCauseKeys(next, ["k5"])).toBe(next);
+  });
+
+  it("describes every reason with shared copy", () => {
+    expect(describeQueueHold(createInterruptQueueHold("t", NOW))).toEqual({
+      title: "Paused after Stop",
+      detail: null,
+    });
+    expect(
+      describeQueueHold({ reason: "error", detail: "boom", causeKeys: [], heldAt: NOW }),
+    ).toEqual({ title: "Paused after an error", detail: "boom" });
+    expect(
+      describeQueueHold({ reason: "stalled", detail: null, causeKeys: [], heldAt: NOW }).title,
+    ).toBe("Paused: the last queued message has not started");
+  });
+});

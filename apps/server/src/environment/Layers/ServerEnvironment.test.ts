@@ -66,6 +66,7 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
       expect(second.capabilities.worktreeSubmoduleSettings).toBe(true);
       expect(second.capabilities.requiredWorktreeBootstrap).toBe(true);
       expect(second.capabilities.threadPriorityRanking).toBe(true);
+      expect(second.capabilities.usageLimitRecovery).toBe(true);
     }),
   );
 

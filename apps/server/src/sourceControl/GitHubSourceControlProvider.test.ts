@@ -1860,3 +1860,46 @@ it.effect("returns a fresh uncapped detail after a lifecycle update", () =>
     assert.equal(result.detail.truncated, false);
   }),
 );
+
+it.effect("reports the PR terminal time from mergedAt and closedAt", () =>
+  Effect.gen(function* () {
+    const mergedAt = DateTime.makeUnsafe("2026-05-01T10:00:00.000Z");
+    const closedAt = DateTime.makeUnsafe("2026-05-01T10:00:05.000Z");
+    const pullRequest = (
+      state: "open" | "closed" | "merged",
+      times: { readonly mergedAt?: DateTime.Utc; readonly closedAt?: DateTime.Utc },
+    ) =>
+      makeProvider({
+        getPullRequest: () =>
+          Effect.succeed({
+            number: 42,
+            title: "Terminal time",
+            url: "https://github.com/owner/repo/pull/42",
+            baseRefName: "main",
+            headRefName: "feature/terminal-time",
+            state,
+            isDraft: false,
+            ...times,
+          }),
+      }).pipe(
+        Effect.flatMap((provider) => provider.getPullRequestState({ cwd: "/repo", number: 42 })),
+      );
+
+    const merged = yield* pullRequest("merged", { mergedAt, closedAt });
+    assert.strictEqual(merged.state, "merged");
+    assert.isTrue(merged.terminalAt !== null && merged.terminalAt !== undefined);
+    assert.strictEqual(
+      merged.terminalAt && DateTime.formatIso(merged.terminalAt),
+      "2026-05-01T10:00:00.000Z",
+    );
+
+    const closed = yield* pullRequest("closed", { closedAt });
+    assert.strictEqual(
+      closed.terminalAt && DateTime.formatIso(closed.terminalAt),
+      "2026-05-01T10:00:05.000Z",
+    );
+
+    const open = yield* pullRequest("open", {});
+    assert.isNull(open.terminalAt);
+  }),
+);

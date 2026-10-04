@@ -56,6 +56,7 @@ import type { ProviderInstance } from "../ProviderDriver.ts";
 import { ProviderInstanceRegistry } from "../Services/ProviderInstanceRegistry.ts";
 import { ProviderRegistry } from "../Services/ProviderRegistry.ts";
 import { makeManualOnlyProviderMaintenanceCapabilities } from "../providerMaintenance.ts";
+import { BUNDLED_MODEL_MANIFEST, ModelManifest, type ModelManifestData } from "../ModelManifest.ts";
 
 // A registry-only fixture keeps inventory races independent of provider subprocesses.
 const makeInventoryRegistry = Effect.fn("makeInventoryRegistry")(function* (
@@ -1565,6 +1566,16 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             assert.strictEqual(ghost?.driver, "ghostDriver");
             assert.strictEqual(ghost?.availability, "unavailable");
             assert.match(ghost?.unavailableReason ?? "", /ghostDriver/);
+            // Unavailable shadows have no adapter, so revert support stays unknown.
+            assert.strictEqual(ghost?.supportsConversationRollback, undefined);
+            // Every live snapshot carries its adapter's rollback capability.
+            const rollbackSupport = (instanceId: string) =>
+              providers.find((provider) => provider.instanceId === instanceId)
+                ?.supportsConversationRollback;
+            assert.strictEqual(rollbackSupport("claudeAgent"), true);
+            assert.strictEqual(rollbackSupport("codex"), true);
+            assert.strictEqual(rollbackSupport("opencode"), true);
+            assert.strictEqual(rollbackSupport("cursor"), false);
           }).pipe(Effect.provide(runtimeServices));
         }),
       );
@@ -2472,3 +2483,175 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
     });
   },
 );
+
+/**
+ * A registry over one inline instance. `manifest` is the optional `ModelManifest` service; without
+ * it the registry rates against the bundled policies and the code-owned floors.
+ */
+const buildSingleInstanceRegistry = Effect.fn("buildSingleInstanceRegistry")(function* (
+  provider: ServerProvider,
+  manifest?: ModelManifest["Service"],
+) {
+  const probes = yield* Ref.make(0);
+  const instance = {
+    instanceId: provider.instanceId,
+    driverKind: provider.driver,
+    continuationIdentity: {
+      driverKind: provider.driver,
+      continuationKey: `${provider.driver}:instance:${provider.instanceId}`,
+    },
+    displayName: undefined,
+    enabled: true,
+    snapshot: {
+      maintenanceCapabilities: makeManualOnlyProviderMaintenanceCapabilities({
+        provider: provider.driver,
+        packageName: null,
+      }),
+      getSnapshot: Effect.succeed(provider),
+      revalidate: Effect.succeed(provider),
+      refresh: Ref.update(probes, (count) => count + 1).pipe(Effect.as(provider)),
+      streamChanges: Stream.empty,
+    },
+    adapter: {} as ProviderInstance["adapter"],
+    textGeneration: {} as ProviderInstance["textGeneration"],
+  } satisfies ProviderInstance;
+  const instanceRegistryLayer = Layer.succeed(ProviderInstanceRegistry, {
+    getInstance: (instanceId) =>
+      Effect.succeed(instanceId === provider.instanceId ? instance : undefined),
+    listInstances: Effect.succeed([instance]),
+    listUnavailable: Effect.succeed([]),
+    streamChanges: Stream.empty,
+    subscribeChanges: Effect.flatMap(PubSub.unbounded<void>(), (pubsub) =>
+      PubSub.subscribe(pubsub),
+    ),
+  });
+  const registryLayer = ProviderRegistryLive.pipe(
+    Layer.provideMerge(instanceRegistryLayer),
+    Layer.provideMerge(
+      ServerConfig.layerTest(process.cwd(), { prefix: "ryco-provider-registry-compat-" }),
+    ),
+    Layer.provideMerge(NodeServices.layer),
+  );
+  const scope = yield* Scope.make();
+  yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
+  const runtimeServices = yield* Layer.build(
+    manifest === undefined
+      ? registryLayer
+      : registryLayer.pipe(Layer.provide(Layer.succeed(ModelManifest, manifest))),
+  ).pipe(Scope.provide(scope));
+  return { runtimeServices, probes };
+});
+
+const waitForProvider = (
+  instanceId: ProviderInstanceId,
+  predicate: (provider: ServerProvider | undefined) => boolean,
+) =>
+  Effect.gen(function* () {
+    const registry = yield* ProviderRegistry;
+    let provider = (yield* registry.getProviders).find((entry) => entry.instanceId === instanceId);
+    for (let attempt = 0; attempt < 200 && !predicate(provider); attempt += 1) {
+      yield* Effect.yieldNow;
+      provider = (yield* registry.getProviders).find((entry) => entry.instanceId === instanceId);
+    }
+    return provider;
+  });
+
+describe("ProviderRegistry compatibility advisories", () => {
+  it.effect("rates an installed OpenCode 2.x as unsupported from the code floor", () =>
+    Effect.gen(function* () {
+      const instanceId = ProviderInstanceId.make("opencode");
+      const { runtimeServices } = yield* buildSingleInstanceRegistry({
+        instanceId,
+        driver: ProviderDriverKind.make("opencode"),
+        enabled: true,
+        installed: true,
+        version: "2.0.18",
+        status: "error",
+        auth: { status: "unknown" },
+        checkedAt: "2026-10-04T00:00:00.000Z",
+        message: "OpenCode v2.0.18 is not supported yet.",
+        models: [],
+        slashCommands: [],
+        skills: [],
+      });
+
+      const provider = yield* waitForProvider(
+        instanceId,
+        (candidate) => candidate?.compatibilityAdvisory !== undefined,
+      ).pipe(Effect.provide(runtimeServices));
+
+      assert.strictEqual(provider?.compatibilityAdvisory?.status, "unsupported");
+    }),
+  );
+
+  it.effect(
+    "refreshes the manifest without a Claude instance and re-rates existing snapshots",
+    () =>
+      Effect.gen(function* () {
+        const instanceId = ProviderInstanceId.make("codex");
+        const manifestRef = yield* Ref.make<ModelManifestData>(BUNDLED_MODEL_MANIFEST);
+        const refreshes = yield* Ref.make(0);
+        const codexPolicyManifest: ModelManifestData = {
+          ...BUNDLED_MODEL_MANIFEST,
+          compatibility: [
+            {
+              driver: "codex",
+              rycoRange: ">=0.0.0",
+              ranges: [
+                { range: ">=0.200.0", status: "broken", message: "Codex 0.200 breaks approvals." },
+                { range: "<0.200.0", status: "supported" },
+              ],
+            },
+          ],
+        };
+        const { runtimeServices, probes } = yield* buildSingleInstanceRegistry(
+          {
+            instanceId,
+            driver: ProviderDriverKind.make("codex"),
+            enabled: true,
+            installed: true,
+            version: "0.199.0",
+            status: "ready",
+            auth: { status: "authenticated" },
+            checkedAt: "2026-10-04T00:00:00.000Z",
+            models: [],
+            slashCommands: [],
+            skills: [],
+            versionAdvisory: {
+              status: "behind_latest",
+              currentVersion: "0.199.0",
+              latestVersion: "0.200.1",
+              updateCommand: "npm install -g @openai/codex@latest",
+              canUpdate: true,
+              checkedAt: "2026-10-04T00:00:00.000Z",
+              message: null,
+            },
+          },
+          {
+            current: Ref.get(manifestRef),
+            refresh: Ref.get(manifestRef),
+            refreshIfStale: Ref.update(refreshes, (count) => count + 1).pipe(
+              Effect.andThen(Ref.set(manifestRef, codexPolicyManifest)),
+              Effect.as(codexPolicyManifest),
+            ),
+            refreshInBackground: Effect.void,
+          },
+        );
+
+        const provider = yield* waitForProvider(
+          instanceId,
+          (candidate) => candidate?.compatibilityAdvisory?.latestVersionStatus === "broken",
+        ).pipe(Effect.provide(runtimeServices));
+
+        assert.deepStrictEqual(provider?.compatibilityAdvisory, {
+          status: "supported",
+          latestVersionStatus: "broken",
+          message: null,
+        });
+        assert.isAtLeast(yield* Ref.get(refreshes), 1);
+        // The snapshot was probed once, before the manifest changed: the rating came from the
+        // registry re-rating it, not from a new probe.
+        assert.strictEqual(yield* Ref.get(probes), 1);
+      }),
+  );
+});

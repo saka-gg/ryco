@@ -6,6 +6,7 @@ import {
   EventId,
   MessageId,
   ProjectId,
+  ProviderDriverKind,
   ProviderInstanceId,
   OrchestrationThreadHistoryCursor,
   ThreadId,
@@ -13,6 +14,8 @@ import {
   WorktreeId,
   type OrchestrationEvent,
   type OrchestrationShellStreamEvent,
+  type OrchestrationThreadShell,
+  type ThreadLineage,
 } from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -21,6 +24,9 @@ import {
   applyOrchestrationEvents,
   applyShellEvent,
   createShellEventCoalescer,
+  demoteEnvironmentStateToCachedSnapshot,
+  hydrateEnvironmentStateFromCache,
+  selectDelegatedChildThreadsForThreadRef,
   removeEnvironmentState,
   selectEnvironmentState,
   selectProjectsAcrossEnvironments,
@@ -36,6 +42,7 @@ import {
   type AppState,
   type EnvironmentState,
 } from "./store";
+import { deriveThreadActivityStatus } from "./threadActivityStatus";
 import { DEFAULT_INTERACTION_MODE, DEFAULT_RUNTIME_MODE, type Thread } from "./types";
 
 const localEnvironmentId = EnvironmentId.make("environment-local");
@@ -376,6 +383,125 @@ describe("worktree sidebar state", () => {
     expect(localEnvironmentStateOf(branchUpdated).worktreeById?.[worktreeId]).toMatchObject({
       branch: "feature/renamed",
       title: "Renamed Worktree",
+    });
+  });
+
+  describe("PR terminal time", () => {
+    const worktreeId = WorktreeId.make("worktree-pr");
+    const projectId = ProjectId.make("project-1");
+    const worktreeShell = (
+      overrides: Partial<
+        Extract<OrchestrationShellStreamEvent, { kind: "worktree-upserted" }>["worktree"]
+      > = {},
+    ): Extract<OrchestrationShellStreamEvent, { kind: "worktree-upserted" }>["worktree"] => ({
+      worktreeId,
+      projectId,
+      title: null,
+      branch: "feature/pr",
+      worktreePath: "/tmp/project/pr",
+      origin: "pr",
+      prNumber: 12,
+      issueNumber: null,
+      prTitle: "Feature",
+      issueTitle: null,
+      prState: "merged",
+      prIsDraft: false,
+      issueState: null,
+      workItemProvider: null,
+      workItemKey: null,
+      workItemTitle: null,
+      workItemState: null,
+      workItemStateName: null,
+      workItemUrl: null,
+      createdAt: "2026-02-13T00:00:00.000Z",
+      updatedAt: "2026-02-13T01:00:00.000Z",
+      archivedAt: null,
+      manualPosition: 0,
+      ...overrides,
+    });
+    const upsert = (
+      state: AppState,
+      worktree: Extract<OrchestrationShellStreamEvent, { kind: "worktree-upserted" }>["worktree"],
+      sequence: number,
+    ) =>
+      applyShellEvent(state, { kind: "worktree-upserted", sequence, worktree }, localEnvironmentId);
+
+    it("maps prTerminalAt from a streamed worktree upsert and keeps an absent key absent", () => {
+      const withTime = upsert(
+        makeEmptyState(),
+        worktreeShell({ prTerminalAt: "2026-02-13T00:30:00.000Z" }),
+        1,
+      );
+      expect(localEnvironmentStateOf(withTime).worktreeById?.[worktreeId]?.prTerminalAt).toBe(
+        "2026-02-13T00:30:00.000Z",
+      );
+
+      const withNull = upsert(makeEmptyState(), worktreeShell({ prTerminalAt: null }), 1);
+      const nullWorktree = localEnvironmentStateOf(withNull).worktreeById?.[worktreeId];
+      expect(nullWorktree !== undefined && "prTerminalAt" in nullWorktree).toBe(true);
+      expect(nullWorktree?.prTerminalAt).toBeNull();
+
+      const legacy = upsert(makeEmptyState(), worktreeShell(), 1);
+      const legacyWorktree = localEnvironmentStateOf(legacy).worktreeById?.[worktreeId];
+      expect(legacyWorktree).toBeDefined();
+      expect(legacyWorktree !== undefined && "prTerminalAt" in legacyWorktree).toBe(false);
+    });
+
+    it("replaces the worktree when only prTerminalAt changes", () => {
+      const first = upsert(
+        makeEmptyState(),
+        worktreeShell({ prTerminalAt: "2026-02-13T00:30:00.000Z" }),
+        1,
+      );
+      const same = upsert(first, worktreeShell({ prTerminalAt: "2026-02-13T00:30:00.000Z" }), 2);
+      expect(localEnvironmentStateOf(same).worktreeById?.[worktreeId]).toBe(
+        localEnvironmentStateOf(first).worktreeById?.[worktreeId],
+      );
+
+      const corrected = upsert(
+        first,
+        worktreeShell({ prTerminalAt: "2026-02-13T00:20:00.000Z" }),
+        2,
+      );
+      const correctedWorktree = localEnvironmentStateOf(corrected).worktreeById?.[worktreeId];
+      expect(correctedWorktree).not.toBe(localEnvironmentStateOf(first).worktreeById?.[worktreeId]);
+      expect(correctedWorktree?.prTerminalAt).toBe("2026-02-13T00:20:00.000Z");
+    });
+
+    it("carries prTerminalAt through the source-control domain event", () => {
+      const seeded = upsert(
+        makeEmptyState(),
+        worktreeShell({ prState: "open", prTerminalAt: null }),
+        1,
+      );
+      const sourceControlEvent = (prTerminalAt?: string | null) =>
+        makeEvent(
+          "worktree.sourceControlStateUpdated",
+          {
+            worktreeId,
+            prState: "merged",
+            prIsDraft: false,
+            issueState: null,
+            updatedAt: "2026-02-13T02:00:00.000Z",
+            ...(prTerminalAt !== undefined ? { prTerminalAt } : {}),
+          },
+          { aggregateKind: "worktree", aggregateId: worktreeId },
+        );
+
+      const merged = applyOrchestrationEvent(
+        seeded,
+        sourceControlEvent("2026-02-13T01:30:00.000Z"),
+        localEnvironmentId,
+      );
+      expect(localEnvironmentStateOf(merged).worktreeById?.[worktreeId]).toMatchObject({
+        prState: "merged",
+        prTerminalAt: "2026-02-13T01:30:00.000Z",
+      });
+
+      const legacy = applyOrchestrationEvent(merged, sourceControlEvent(), localEnvironmentId);
+      expect(localEnvironmentStateOf(legacy).worktreeById?.[worktreeId]?.prTerminalAt).toBe(
+        "2026-02-13T01:30:00.000Z",
+      );
     });
   });
 });
@@ -1183,6 +1309,165 @@ describe("incremental orchestration updates", () => {
 
     expect(threadsOf(next)[0]?.turnDiffSummaries).toHaveLength(1);
     expect(threadsOf(next)[0]?.latestTurn).toEqual(threadsOf(state)[0]?.latestTurn);
+  });
+
+  describe("turn finalization", () => {
+    const runningTurn = {
+      turnId: TurnId.make("turn-1"),
+      state: "running" as const,
+      requestedAt: "2026-02-27T00:00:01.000Z",
+      startedAt: "2026-02-27T00:00:02.000Z",
+      completedAt: null,
+      assistantMessageId: null,
+    };
+    const runningSession = {
+      provider: ProviderDriverKind.make("codex"),
+      status: "running" as const,
+      orchestrationStatus: "running" as const,
+      activeTurnId: TurnId.make("turn-1"),
+      createdAt: "2026-02-27T00:00:01.000Z",
+      updatedAt: "2026-02-27T00:00:02.000Z",
+    };
+    const releasingSessionSet = (releasedTurn: {
+      turnId: TurnId;
+      state: "completed" | "error" | "interrupted";
+      completedAt: string;
+      reason: string;
+    }) =>
+      makeEvent("thread.session-set", {
+        threadId: ThreadId.make("thread-1"),
+        session: {
+          threadId: ThreadId.make("thread-1"),
+          status: "ready",
+          providerName: "codex",
+          runtimeMode: DEFAULT_RUNTIME_MODE,
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: releasedTurn.completedAt,
+        },
+        releasedTurn,
+      });
+
+    it("settles the released latest turn in the same frame as the session", () => {
+      const state = makeState(makeThread({ latestTurn: runningTurn, session: runningSession }));
+      const next = applyOrchestrationEvent(
+        state,
+        releasingSessionSet({
+          turnId: TurnId.make("turn-1"),
+          state: "completed",
+          completedAt: "2026-02-27T00:00:09.000Z",
+          reason: "provider-turn-completed",
+        }),
+        localEnvironmentId,
+      );
+      const thread = threadsOf(next)[0]!;
+      expect(thread.latestTurn).toMatchObject({
+        turnId: "turn-1",
+        state: "completed",
+        startedAt: "2026-02-27T00:00:02.000Z",
+        completedAt: "2026-02-27T00:00:09.000Z",
+      });
+      expect(
+        deriveThreadActivityStatus({
+          session: thread.session,
+          latestTurn: thread.latestTurn,
+          interactionMode: thread.interactionMode,
+          hasPendingApprovals: false,
+          hasPendingUserInput: false,
+          hasActionableProposedPlan: false,
+          backgroundLiveness: null,
+        }),
+      ).toBe("idle");
+    });
+
+    it("keeps an interrupted turn sticky across a completed release", () => {
+      const interrupted = {
+        ...runningTurn,
+        state: "interrupted" as const,
+        completedAt: "2026-02-27T00:00:05.000Z",
+      };
+      const state = makeState(makeThread({ latestTurn: interrupted, session: runningSession }));
+      const next = applyOrchestrationEvent(
+        state,
+        releasingSessionSet({
+          turnId: TurnId.make("turn-1"),
+          state: "completed",
+          completedAt: "2026-02-27T00:00:09.000Z",
+          reason: "provider-turn-completed",
+        }),
+        localEnvironmentId,
+      );
+      expect(threadsOf(next)[0]?.latestTurn).toMatchObject({
+        state: "interrupted",
+        completedAt: "2026-02-27T00:00:05.000Z",
+      });
+    });
+
+    it("ignores a release that names another turn", () => {
+      const state = makeState(makeThread({ latestTurn: runningTurn, session: runningSession }));
+      const next = applyOrchestrationEvent(
+        state,
+        releasingSessionSet({
+          turnId: TurnId.make("turn-other"),
+          state: "completed",
+          completedAt: "2026-02-27T00:00:09.000Z",
+          reason: "provider-turn-completed",
+        }),
+        localEnvironmentId,
+      );
+      expect(threadsOf(next)[0]?.latestTurn).toEqual(threadsOf(state)[0]?.latestTurn);
+    });
+
+    it("keeps the turn state when a diff for the same turn lands", () => {
+      const diff = (status: "ready" | "missing", completedAt: string, sequence: number) =>
+        makeEvent(
+          "thread.turn-diff-completed",
+          {
+            threadId: ThreadId.make("thread-1"),
+            turnId: TurnId.make("turn-1"),
+            checkpointTurnCount: 1,
+            checkpointRef: CheckpointRef.make("checkpoint-1"),
+            status,
+            files: [],
+            assistantMessageId: MessageId.make("assistant-1"),
+            completedAt,
+          },
+          { sequence },
+        );
+      // Mid-turn placeholder: the running turn stays running.
+      const running = applyOrchestrationEvent(
+        makeState(makeThread({ latestTurn: runningTurn, session: runningSession })),
+        diff("missing", "2026-02-27T00:00:04.000Z", 1),
+        localEnvironmentId,
+      );
+      expect(threadsOf(running)[0]?.latestTurn).toMatchObject({
+        state: "running",
+        completedAt: null,
+      });
+
+      // Late capture after an error release keeps the error and its completedAt.
+      const released = applyOrchestrationEvent(
+        running,
+        releasingSessionSet({
+          turnId: TurnId.make("turn-1"),
+          state: "error",
+          completedAt: "2026-02-27T00:00:09.000Z",
+          reason: "provider-turn-completed",
+        }),
+        localEnvironmentId,
+      );
+      const late = applyOrchestrationEvent(
+        released,
+        diff("ready", "2026-02-27T00:00:20.000Z", 3),
+        localEnvironmentId,
+      );
+      expect(threadsOf(late)[0]?.latestTurn).toMatchObject({
+        state: "error",
+        completedAt: "2026-02-27T00:00:09.000Z",
+        assistantMessageId: "assistant-1",
+      });
+      expect(threadsOf(late)[0]?.turnDiffSummaries[0]?.status).toBe("ready");
+    });
   });
 
   it("filters placeholder modified zero-change files from completed turn diffs", () => {
@@ -2199,5 +2484,259 @@ describe("message attachment mapping", () => {
       name: "opaque-blob",
       sizeBytes: 16,
     });
+  });
+});
+
+describe("usage limits on shell upserts", () => {
+  it("updates the shell and summary when only the usage limit changes", () => {
+    const threadId = ThreadId.make("thread-usage-limit");
+    const upsert = (
+      sequence: number,
+      usageLimit: OrchestrationThreadShell["usageLimit"],
+    ): Extract<OrchestrationShellStreamEvent, { kind: "thread-upserted" }> => ({
+      kind: "thread-upserted",
+      sequence,
+      thread: {
+        id: threadId,
+        projectId: ProjectId.make("project-1"),
+        title: "Limited",
+        modelSelection: { instanceId: ProviderInstanceId.make("claudeAgent"), model: "sonnet" },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        latestTurn: null,
+        createdAt: "2026-10-04T10:00:00.000Z",
+        updatedAt: "2026-10-04T10:00:00.000Z",
+        archivedAt: null,
+        settledOverride: null,
+        settledAt: null,
+        session: null,
+        latestUserMessageAt: null,
+        hasPendingApprovals: false,
+        hasPendingUserInput: false,
+        hasActionableProposedPlan: false,
+        ...(usageLimit !== undefined ? { usageLimit } : {}),
+      },
+    });
+    const first = applyShellEvent(makeEmptyState(), upsert(1, null), localEnvironmentId);
+    const limit = {
+      limitId: "usage-limit:thread-usage-limit:turn-1",
+      provider: ProviderDriverKind.make("claudeAgent"),
+      providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+      turnId: TurnId.make("turn-1"),
+      message: "Claude usage limit reached.",
+      limitedAt: "2026-10-04T10:00:00.000Z",
+      resetAt: null,
+      autoResume: null,
+      updatedAt: "2026-10-04T10:00:00.000Z",
+    };
+    const limited = applyShellEvent(first, upsert(2, limit), localEnvironmentId);
+    const environment = limited.environmentStateById[localEnvironmentId]!;
+    expect(environment.threadShellById[threadId]?.usageLimit).toEqual(limit);
+    expect(environment.sidebarThreadSummaryById[threadId]?.usageLimit).toEqual(limit);
+
+    const configured = applyShellEvent(
+      limited,
+      upsert(3, { ...limit, autoResume: true }),
+      localEnvironmentId,
+    );
+    expect(
+      configured.environmentStateById[localEnvironmentId]!.sidebarThreadSummaryById[threadId]
+        ?.usageLimit?.autoResume,
+    ).toBe(true);
+  });
+});
+
+describe("thread lineage", () => {
+  const projectId = ProjectId.make("project-lineage");
+  const parentId = ThreadId.make("thread-lineage-parent");
+  const childId = ThreadId.make("thread-lineage-child");
+  const lineage: ThreadLineage = {
+    parentThreadId: parentId,
+    rootThreadId: parentId,
+    relationship: "delegated",
+  };
+
+  function shellThread(
+    id: ThreadId,
+    overrides: Partial<OrchestrationThreadShell> = {},
+  ): OrchestrationThreadShell {
+    return {
+      id,
+      projectId,
+      title: `Thread ${id}`,
+      modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      latestTurn: null,
+      goal: null,
+      createdAt: "2026-10-01T00:00:00.000Z",
+      updatedAt: "2026-10-01T00:00:00.000Z",
+      archivedAt: null,
+      settledOverride: null,
+      settledAt: null,
+      session: null,
+      latestUserMessageAt: null,
+      hasPendingApprovals: false,
+      hasPendingUserInput: false,
+      hasActionableProposedPlan: false,
+      ...overrides,
+    };
+  }
+
+  const upsert = (
+    sequence: number,
+    thread: OrchestrationThreadShell,
+  ): OrchestrationShellStreamEvent => ({ kind: "thread-upserted", sequence, thread });
+
+  it("maps shell lineage into the shell and sidebar summary", () => {
+    let state = applyShellEvent(
+      makeEmptyState(),
+      upsert(1, shellThread(parentId)),
+      localEnvironmentId,
+    );
+    state = applyShellEvent(
+      state,
+      upsert(2, shellThread(childId, { lineage })),
+      localEnvironmentId,
+    );
+    const environment = localEnvironmentStateOf(state);
+    expect(environment.threadShellById[childId]?.lineage).toEqual(lineage);
+    expect(environment.sidebarThreadSummaryById[childId]?.lineage).toEqual(lineage);
+    expect(environment.threadShellById[parentId]?.lineage).toBeNull();
+    expect(environment.sidebarThreadSummaryById[parentId]?.lineage).toBeNull();
+  });
+
+  it("replaces a cached pre-lineage shell and summary when only lineage differs", () => {
+    const base = applyShellEvent(
+      makeEmptyState(),
+      upsert(1, shellThread(childId)),
+      localEnvironmentId,
+    );
+    const baseEnvironment = localEnvironmentStateOf(base);
+    const { lineage: _summaryLineage, ...preLineageSummary } =
+      baseEnvironment.sidebarThreadSummaryById[childId]!;
+    const { lineage: _shellLineage, ...preLineageShell } =
+      baseEnvironment.threadShellById[childId]!;
+    const cached = withActiveEnvironmentState({
+      ...baseEnvironment,
+      sidebarThreadSummaryById: {
+        ...baseEnvironment.sidebarThreadSummaryById,
+        [childId]: preLineageSummary,
+      },
+      threadShellById: { ...baseEnvironment.threadShellById, [childId]: preLineageShell },
+    });
+
+    // Absent and null lineage are the same fact: the cached summary is kept.
+    const unchanged = localEnvironmentStateOf(
+      applyShellEvent(cached, upsert(2, shellThread(childId)), localEnvironmentId),
+    );
+    expect(unchanged.sidebarThreadSummaryById[childId]).toBe(preLineageSummary);
+
+    const replaced = localEnvironmentStateOf(
+      applyShellEvent(cached, upsert(3, shellThread(childId, { lineage })), localEnvironmentId),
+    );
+    expect(replaced.sidebarThreadSummaryById[childId]?.lineage).toEqual(lineage);
+    expect(replaced.threadShellById[childId]?.lineage).toEqual(lineage);
+  });
+
+  it("keeps lineage when a thread detail rewrites the shell", () => {
+    const state = syncServerThreadDetail(
+      makeEmptyState(),
+      {
+        ...shellThread(childId, { lineage }),
+        deletedAt: null,
+        messages: [],
+        proposedPlans: [],
+        activities: [],
+        checkpoints: [],
+      },
+      localEnvironmentId,
+    );
+    expect(localEnvironmentStateOf(state).threadShellById[childId]?.lineage).toEqual(lineage);
+    expect(selectThreadByRef(state, scopeThreadRef(localEnvironmentId, childId))?.lineage).toEqual(
+      lineage,
+    );
+  });
+
+  it("keeps lineage through cache hydration and demotion", () => {
+    const live = applyShellEvent(
+      makeEmptyState(),
+      upsert(1, shellThread(childId, { lineage })),
+      localEnvironmentId,
+    );
+    const environment = localEnvironmentStateOf(live);
+    const hydrated = hydrateEnvironmentStateFromCache(
+      { activeEnvironmentId: null, environmentStateById: {} },
+      {
+        capturedAt: 1,
+        projects: [],
+        worktrees: [],
+        threads: [
+          {
+            shell: environment.threadShellById[childId]!,
+            summary: environment.sidebarThreadSummaryById[childId]!,
+          },
+        ],
+      },
+      localEnvironmentId,
+    );
+    expect(
+      environmentStateOf(hydrated, localEnvironmentId).sidebarThreadSummaryById[childId]?.lineage,
+    ).toEqual(lineage);
+    expect(
+      environmentStateOf(hydrated, localEnvironmentId).threadShellById[childId]?.lineage,
+    ).toEqual(lineage);
+
+    const demoted = demoteEnvironmentStateToCachedSnapshot(live, localEnvironmentId, 2);
+    expect(
+      environmentStateOf(demoted, localEnvironmentId).sidebarThreadSummaryById[childId]?.lineage,
+    ).toEqual(lineage);
+  });
+
+  it("selects direct delegated children for a thread ref", () => {
+    const laterChildId = ThreadId.make("thread-lineage-later-child");
+    const grandchildId = ThreadId.make("thread-lineage-grandchild");
+    const threads = [
+      shellThread(parentId),
+      shellThread(laterChildId, { lineage, createdAt: "2026-10-01T00:00:05.000Z" }),
+      shellThread(childId, { lineage, createdAt: "2026-10-01T00:00:01.000Z" }),
+      shellThread(grandchildId, {
+        lineage: { parentThreadId: childId, rootThreadId: parentId, relationship: "delegated" },
+      }),
+    ];
+    let state = makeEmptyState();
+    threads.forEach((thread, index) => {
+      state = applyShellEvent(state, upsert(index + 1, thread), localEnvironmentId);
+    });
+
+    const children = selectDelegatedChildThreadsForThreadRef(
+      state,
+      scopeThreadRef(localEnvironmentId, parentId),
+    );
+    expect(children.map((child) => child.id)).toEqual([childId, laterChildId]);
+    expect(
+      selectDelegatedChildThreadsForThreadRef(
+        state,
+        scopeThreadRef(localEnvironmentId, childId),
+      ).map((child) => child.id),
+    ).toEqual([grandchildId]);
+    expect(selectDelegatedChildThreadsForThreadRef(state, null)).toEqual([]);
+
+    // Without a parent shell, every summary in the environment is a candidate.
+    const withoutParent = applyShellEvent(
+      state,
+      { kind: "thread-removed", sequence: 10, threadId: parentId },
+      localEnvironmentId,
+    );
+    expect(
+      selectDelegatedChildThreadsForThreadRef(
+        withoutParent,
+        scopeThreadRef(localEnvironmentId, parentId),
+      ).map((child) => child.id),
+    ).toEqual([childId, laterChildId]);
   });
 });

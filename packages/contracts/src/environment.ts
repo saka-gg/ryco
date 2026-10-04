@@ -57,6 +57,8 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   threadSettlement: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   threadPriorityRanking: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   worktreeSubmoduleSettings: Schema.optionalKey(Schema.Boolean),
+  /** Usage-limit settings and the resume/snooze worker; absent on older servers. */
+  usageLimitRecovery: Schema.optionalKey(Schema.Boolean),
   fileAttachments: Schema.optional(Schema.Struct({ maxUploadBytes: NonNegativeInt })),
 });
 export type ExecutionEnvironmentCapabilities = typeof ExecutionEnvironmentCapabilities.Type;

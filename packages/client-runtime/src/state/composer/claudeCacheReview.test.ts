@@ -255,6 +255,31 @@ describe("held send through native compaction", () => {
     expect(f.input.outgoingMessageText).toBe("Original prompt");
     expect(f.input.persistThreadSettingsForNextTurn).not.toHaveBeenCalled();
   });
+  it("calls onBeforeTurnStart once, after the /compact turn and before the original send", async () => {
+    const f = setup();
+    const order: string[] = [];
+    f.dispatch.mockImplementation(async (command) => {
+      const message = (command as { message?: { text?: string } }).message;
+      order.push(message?.text === "/compact" ? "compact" : String(command.type));
+      if (message?.text === "/compact") f.settle();
+      return { sequence: 1 };
+    });
+    await commitSendTurnDispatch({
+      ...f.input,
+      onBeforeTurnStart: () => {
+        order.push("onBeforeTurnStart");
+      },
+    });
+    expect(order).toEqual(["compact", "onBeforeTurnStart", "thread.turn.start"]);
+  });
+  it("does not call onBeforeTurnStart when the review is cancelled", async () => {
+    const f = setup("cancel");
+    const onBeforeTurnStart = vi.fn();
+    await expect(commitSendTurnDispatch({ ...f.input, onBeforeTurnStart })).rejects.toThrow(
+      "cancelled",
+    );
+    expect(onBeforeTurnStart).not.toHaveBeenCalled();
+  });
   it("cancels without consuming attachments or dispatching", async () => {
     const f = setup("cancel");
     await expect(commitSendTurnDispatch(f.input)).rejects.toThrow("cancelled");
@@ -458,5 +483,30 @@ it("still reviews an existing Claude source when its target model changes", asyn
   expect(f.dispatch.mock.calls[0]?.[0]).toMatchObject({
     modelSelection: { model: "opus" },
     claudeResumeGuard: { runtimeSessionId: "runtime-1" },
+  });
+});
+
+describe("usage-limit resume through the Claude review", () => {
+  const resume = {
+    commandId: CommandId.make("usage-limit-resume:limit-1"),
+    usageLimitResumeGuard: { limitId: "limit-1", origin: "manual" as const },
+  };
+
+  it("still reviews and a cancel prevents the dispatch", async () => {
+    const f = setup("cancel");
+    await expect(commitSendTurnDispatch({ ...f.input, ...resume })).rejects.toThrow("cancelled");
+    expect(f.review).toHaveBeenCalledTimes(1);
+    expect(f.dispatch).not.toHaveBeenCalled();
+  });
+
+  it("dispatches the reviewed resume with its own command id and guard", async () => {
+    const f = setup("continue");
+    await commitSendTurnDispatch({ ...f.input, ...resume });
+    expect(f.review).toHaveBeenCalledTimes(1);
+    expect(f.dispatch.mock.calls[0]?.[0]).toMatchObject({
+      commandId: "usage-limit-resume:limit-1",
+      usageLimitResumeGuard: { limitId: "limit-1", origin: "manual" },
+      claudeResumeGuard: { runtimeSessionId: "runtime-1" },
+    });
   });
 });

@@ -83,3 +83,12 @@ it("requires explicit required-worktree bootstrap support from the node", () => 
       .requiredWorktreeBootstrap,
   ).toBe(true);
 });
+
+describe("ExecutionEnvironmentCapabilities.usageLimitRecovery", () => {
+  it("stays absent for older servers and decodes when advertised", () => {
+    expect(decodeDescriptor(descriptor({})).capabilities.usageLimitRecovery).toBeUndefined();
+    expect(
+      decodeDescriptor(descriptor({ usageLimitRecovery: true })).capabilities.usageLimitRecovery,
+    ).toBe(true);
+  });
+});

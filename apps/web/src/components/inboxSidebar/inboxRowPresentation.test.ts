@@ -157,3 +157,46 @@ describe("row hints", () => {
     );
   });
 });
+
+describe("usage-limited rows", () => {
+  const RESET = "2026-08-23T15:40:00.000Z";
+  const resetLabel = new Intl.DateTimeFormat(undefined, {
+    weekday: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).format(new Date(RESET));
+  const limited = (usageLimit: InboxSidebarRow["usageLimit"]) => ({
+    ...row({ state: "limited", statusLabel: "Limited" }),
+    usageLimit,
+  });
+
+  it("uses a static limited glyph", () => {
+    expect(resolveInboxGlyph(row({ state: "limited" }), false)).toBe("limited");
+    expect(resolveInboxGlyph(row({ state: "limited" }), true)).toBe("limited");
+  });
+
+  it("says when the limit resets, or that it is unknown or passed", () => {
+    expect(resolveInboxStateLine(limited({ phase: "limited", resetAt: RESET }))).toEqual({
+      kind: "status",
+      text: `Resets ${resetLabel}`,
+    });
+    expect(resolveInboxStateLine(limited({ phase: "limited", resetAt: null }))).toEqual({
+      kind: "status",
+      text: "Reset time unknown",
+    });
+    expect(resolveInboxStateLine(limited({ phase: "reset", resetAt: RESET }))).toEqual({
+      kind: "status",
+      text: "Limit reset · resume to continue",
+    });
+  });
+
+  it("explains the state in the glyph hint", () => {
+    const hintRow = {
+      ...limited({ phase: "limited", resetAt: RESET }),
+      runningSince: null,
+      latestTurnCompletedAt: null,
+    };
+    expect(inboxGlyphHint(hintRow, false)).toBe(`Limited · Resets ${resetLabel}`);
+  });
+});

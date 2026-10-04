@@ -254,6 +254,52 @@ export const ContextHandoffActivityPayload = Schema.Union([
 ]);
 export type ContextHandoffActivityPayload = typeof ContextHandoffActivityPayload.Type;
 
+/**
+ * Lifecycle activity journaling one checkpoint revert. Its id is
+ * `checkpoint-revert:<revertRequestId>`; every phase replaces the same row.
+ */
+export const CHECKPOINT_REVERT_ACTIVITY_KIND = "checkpoint.revert";
+export const CheckpointRevertStatus = Schema.Literals([
+  // pending
+  "requested",
+  "rolling-back",
+  "restoring-files",
+  // terminal
+  "completed",
+  "files-not-restored",
+  "failed",
+  "interrupted",
+]);
+export type CheckpointRevertStatus = typeof CheckpointRevertStatus.Type;
+export const CheckpointRevertFailureReason = Schema.Literals([
+  "thread-busy",
+  "target-unavailable",
+  "handoff-boundary",
+  "not-git",
+  "shared-checkout",
+  "provider-unsupported",
+  "provider-failed",
+  "files-failed",
+  "restart",
+  // Ryco itself failed (journal write, storage, defect), not the provider or files.
+  "internal-error",
+]);
+export type CheckpointRevertFailureReason = typeof CheckpointRevertFailureReason.Type;
+export const CheckpointRevertActivityPayload = Schema.Struct({
+  schemaVersion: Schema.Literal(1),
+  // Not "requestId": that payload key is special-cased for approval routing.
+  revertRequestId: CommandId,
+  /** Target checkpoint K. */
+  turnCount: NonNegativeInt,
+  fromTurnCount: Schema.optional(NonNegativeInt),
+  status: CheckpointRevertStatus,
+  reason: Schema.optional(CheckpointRevertFailureReason),
+  detail: Schema.optional(TrimmedNonEmptyString),
+  /** Restore cwd, recorded from "rolling-back" on so startup recovery can finish. */
+  cwd: Schema.optional(TrimmedNonEmptyString),
+});
+export type CheckpointRevertActivityPayload = typeof CheckpointRevertActivityPayload.Type;
+
 export const ContextHandoffInspectionScope = Schema.Literals(["sent", "complete"]);
 export type ContextHandoffInspectionScope = typeof ContextHandoffInspectionScope.Type;
 
@@ -706,6 +752,22 @@ export type OrchestrationMessageRole = typeof OrchestrationMessageRole.Type;
 export const TurnDispatchMode = Schema.Literals(["queue", "steer"]);
 export type TurnDispatchMode = typeof TurnDispatchMode.Type;
 
+/**
+ * Why a steer was not applied. `deferred`: the message stays queued and is sent as the next turn
+ * (the turn ended, or the provider could not take it right now). `failed`: a real provider error.
+ * Absent on older events, which read as `failed`.
+ */
+export const TurnSteerRejectionReason = Schema.Literals(["deferred", "failed"]);
+export type TurnSteerRejectionReason = typeof TurnSteerRejectionReason.Type;
+
+/**
+ * Set on a `failed` steer rejection the provider may still have received (a restart cut off its
+ * delivery). Clients hold such a message for an explicit retry or removal instead of sending it
+ * again as the next turn. An optional flag rather than a third reason, so older clients that
+ * decode the event keep working and read it as a plain failure.
+ */
+export const TurnSteerDeliveryUncertain = Schema.optionalKey(Schema.Boolean);
+
 export const OrchestrationMessage = Schema.Struct({
   id: MessageId,
   role: OrchestrationMessageRole,
@@ -819,6 +881,37 @@ const OrchestrationLatestTurnState = Schema.Literals([
 ]);
 export type OrchestrationLatestTurnState = typeof OrchestrationLatestTurnState.Type;
 
+/**
+ * Frozen set of states a turn can end in. New outcomes (for example usage limits)
+ * go into `reason` or a separate field, never into this literal set.
+ */
+export const OrchestrationTerminalTurnState = Schema.Literals([
+  "completed",
+  "error",
+  "interrupted",
+]);
+export type OrchestrationTerminalTurnState = typeof OrchestrationTerminalTurnState.Type;
+
+/** Server-internal: what the caller knows about how the active turn ended. */
+export const OrchestrationTurnOutcome = Schema.Struct({
+  /** Omitted = "the turn this release ends", whichever it is. */
+  turnId: Schema.optional(TurnId),
+  state: OrchestrationTerminalTurnState,
+  /** Open diagnostic string (see TURN_FINALIZATION_REASON). Never a closed literal set. */
+  reason: TrimmedNonEmptyString,
+  completedAt: Schema.optional(IsoDateTime),
+});
+export type OrchestrationTurnOutcome = typeof OrchestrationTurnOutcome.Type;
+
+/** Decided by the server: the turn this session-set releases, and how it ended. */
+export const OrchestrationReleasedTurn = Schema.Struct({
+  turnId: TurnId,
+  state: OrchestrationTerminalTurnState,
+  completedAt: IsoDateTime,
+  reason: TrimmedNonEmptyString,
+});
+export type OrchestrationReleasedTurn = typeof OrchestrationReleasedTurn.Type;
+
 export const OrchestrationLatestTurn = Schema.Struct({
   userMessageId: Schema.optional(MessageId),
   turnId: TurnId,
@@ -830,6 +923,50 @@ export const OrchestrationLatestTurn = Schema.Struct({
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
 });
 export type OrchestrationLatestTurn = typeof OrchestrationLatestTurn.Type;
+
+export const ThreadUsageLimitId = TrimmedNonEmptyString.check(Schema.isMaxLength(512));
+export type ThreadUsageLimitId = typeof ThreadUsageLimitId.Type;
+
+/**
+ * A provider usage limit stopped this thread's turn. Durable until a turn starts, the
+ * thread is archived or reverted; it only gates the thread while
+ * `modelSelection.instanceId === providerInstanceId`.
+ */
+export const ThreadUsageLimit = Schema.Struct({
+  /** "usage-limit:<threadId>:<turnId>" */
+  limitId: ThreadUsageLimitId,
+  provider: ProviderDriverKind,
+  providerInstanceId: ProviderInstanceId,
+  turnId: TurnId,
+  message: TrimmedNonEmptyString.check(Schema.isMaxLength(1_000)),
+  limitedAt: IsoDateTime,
+  resetAt: Schema.NullOr(IsoDateTime),
+  /** null follows ServerSettings.autoResumeLimitedThreads; a boolean is an explicit per-thread override. */
+  autoResume: Schema.NullOr(Schema.Boolean),
+  updatedAt: IsoDateTime,
+});
+export type ThreadUsageLimit = typeof ThreadUsageLimit.Type;
+
+/** Accepts the resume turn only while this exact limit is still recorded and idle. */
+export const UsageLimitResumeGuard = Schema.Struct({
+  limitId: ThreadUsageLimitId,
+  origin: Schema.Literals(["auto", "manual"]),
+});
+export type UsageLimitResumeGuard = typeof UsageLimitResumeGuard.Type;
+
+/**
+ * Server-owned provenance of a thread created on behalf of another thread.
+ * Absent on root threads. Immutable for a thread incarnation. Never authority.
+ * `relationship` is deliberately an open string: a newer server may add kinds
+ * without failing older clients' shell decode. Clients must treat values they
+ * do not know as "no known relationship". Known values: "delegated".
+ */
+export const ThreadLineage = Schema.Struct({
+  parentThreadId: ThreadId,
+  rootThreadId: ThreadId,
+  relationship: TrimmedNonEmptyString.check(Schema.isMaxLength(64)),
+});
+export type ThreadLineage = typeof ThreadLineage.Type;
 
 export const OrchestrationThread = Schema.Struct({
   id: ThreadId,
@@ -850,6 +987,8 @@ export const OrchestrationThread = Schema.Struct({
   goal: Schema.optional(Schema.NullOr(ThreadGoal)).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
+  /** Server-owned provenance; absent on root threads and from older servers. */
+  lineage: Schema.optional(Schema.NullOr(ThreadLineage)),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
   archivedAt: Schema.NullOr(IsoDateTime).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
@@ -859,6 +998,8 @@ export const OrchestrationThread = Schema.Struct({
   settledAt: Schema.NullOr(IsoDateTime).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
   snoozedUntil: Schema.optional(Schema.NullOr(IsoDateTime)),
   snoozedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
+  /** Optional so mixed-version snapshots decode; older clients strip it. */
+  usageLimit: Schema.optional(Schema.NullOr(ThreadUsageLimit)),
   deletedAt: Schema.NullOr(IsoDateTime),
   messages: Schema.Array(OrchestrationMessage),
   proposedPlans: Schema.Array(OrchestrationProposedPlan).pipe(
@@ -945,6 +1086,8 @@ export const OrchestrationThreadShell = Schema.Struct({
   settledAt: Schema.NullOr(IsoDateTime).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
   snoozedUntil: Schema.optional(Schema.NullOr(IsoDateTime)),
   snoozedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
+  /** Optional so mixed-version snapshots decode; older clients strip it. */
+  usageLimit: Schema.optional(Schema.NullOr(ThreadUsageLimit)),
   session: Schema.NullOr(OrchestrationSession),
   latestUserMessageAt: Schema.NullOr(IsoDateTime),
   /** Last successful turn that is no longer active; absent on older servers. */
@@ -958,6 +1101,8 @@ export const OrchestrationThreadShell = Schema.Struct({
    * live work. Optional so old servers/clients interop; absent = none.
    */
   backgroundLiveness: Schema.optional(Schema.NullOr(Schema.Literals(["working", "monitoring"]))),
+  /** Server-owned provenance; absent on root threads and from older servers. */
+  lineage: Schema.optional(Schema.NullOr(ThreadLineage)),
   priority: Schema.optional(ThreadPriorityProjectedRanking),
 });
 export type OrchestrationThreadShell = typeof OrchestrationThreadShell.Type;
@@ -1250,6 +1395,14 @@ const ThreadCreateCommand = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
+/** Server-originated only (Agent Control). Never part of ClientOrchestrationCommand. */
+const ThreadDelegatedCreateCommand = Schema.Struct({
+  ...ThreadCreateCommand.fields,
+  type: Schema.Literal("thread.delegated.create"),
+  parentThreadId: ThreadId,
+});
+export type ThreadDelegatedCreateCommand = typeof ThreadDelegatedCreateCommand.Type;
+
 const ThreadDeleteCommand = Schema.Struct({
   type: Schema.Literal("thread.delete"),
   commandId: CommandId,
@@ -1286,6 +1439,16 @@ const ThreadUnsnoozeCommand = Schema.Struct({
   type: Schema.Literal("thread.unsnooze"),
   commandId: CommandId,
   threadId: ThreadId,
+});
+
+/** Per-thread auto-resume override for the thread's current usage limit. */
+const ThreadUsageLimitConfigureCommand = Schema.Struct({
+  type: Schema.Literal("thread.usage-limit.configure"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  limitId: ThreadUsageLimitId,
+  autoResume: Schema.NullOr(Schema.Boolean),
+  createdAt: IsoDateTime,
 });
 
 const ThreadSettleCommand = Schema.Struct({
@@ -1380,16 +1543,19 @@ const ThreadTurnStartBootstrap = Schema.Struct({
 
 export type ThreadTurnStartBootstrap = typeof ThreadTurnStartBootstrap.Type;
 
-/** Optimistic identity fence for delayed delegated-result queue delivery. */
+/**
+ * Delegated-result wake fence. Legacy fields (`turnMessageId`, `turnId`, `runtimeSessionId`,
+ * `providerInstanceId`) are decoded for stored events and ledger commands and ignored.
+ */
 export const DelegationReturnGuard = Schema.Struct({
-  turnMessageId: MessageId,
   latestUserMessageId: Schema.NullOr(MessageId),
   projectId: ProjectId,
-  turnId: TurnId,
-  runtimeSessionId: RuntimeSessionId,
-  providerInstanceId: ProviderInstanceId,
   runtimeMode: RuntimeMode,
   worktreePath: Schema.NullOr(Schema.String),
+  turnMessageId: Schema.optional(MessageId),
+  turnId: Schema.optional(TurnId),
+  runtimeSessionId: Schema.optional(RuntimeSessionId),
+  providerInstanceId: Schema.optional(ProviderInstanceId),
 });
 export const ClaudeResumeGuard = Schema.Struct({
   requireReady: Schema.Boolean,
@@ -1399,13 +1565,31 @@ export const ClaudeResumeGuard = Schema.Struct({
 });
 export type ClaudeResumeGuard = typeof ClaudeResumeGuard.Type;
 
+/**
+ * Server-only optimistic fence for an automatic continuation after a restart. Never part
+ * of `ClientThreadTurnStartCommand`: client decode strips it, so it cannot be forged.
+ */
+export const RestartContinuationGuard = Schema.Struct({
+  sourceTurnId: TurnId,
+  expectedLatestTurnState: Schema.Literals(["interrupted", "completed"]),
+  latestUserMessageId: Schema.NullOr(MessageId),
+  modelSelection: ModelSelection,
+  runtimeMode: RuntimeMode,
+  interactionMode: ProviderInteractionMode,
+  worktreePath: Schema.NullOr(Schema.String),
+  providerInstanceId: ProviderInstanceId,
+});
+export type RestartContinuationGuard = typeof RestartContinuationGuard.Type;
+
 export const ThreadTurnStartCommand = Schema.Struct({
   claudeResumeGuard: Schema.optional(ClaudeResumeGuard),
+  restartContinuationGuard: Schema.optional(RestartContinuationGuard),
   computerUse: Schema.optionalKey(ComputerTurnIntent),
   // Reject retired recall requests instead of silently stripping their context.
   projectMemory: Schema.optional(Schema.Never),
   type: Schema.Literal("thread.turn.start"),
   delegationReturnGuard: Schema.optional(DelegationReturnGuard),
+  usageLimitResumeGuard: Schema.optional(UsageLimitResumeGuard),
   commandId: CommandId,
   threadId: ThreadId,
   message: Schema.Struct({
@@ -1435,6 +1619,7 @@ export const ClientThreadTurnStartCommand = Schema.Struct({
   projectMemory: Schema.optional(Schema.Never),
   type: Schema.Literal("thread.turn.start"),
   delegationReturnGuard: Schema.optional(DelegationReturnGuard),
+  usageLimitResumeGuard: Schema.optional(UsageLimitResumeGuard),
   commandId: CommandId,
   threadId: ThreadId,
   message: Schema.Struct({
@@ -1587,6 +1772,8 @@ const WorktreeSourceControlStateUpdateCommand = Schema.Struct({
   prTitle: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   prState: Schema.NullOr(PullRequestState),
   prIsDraft: Schema.NullOr(Schema.Boolean),
+  /** When the PR reached its current merged/closed state; see `Worktree.prTerminalAt`. */
+  prTerminalAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   issueState: Schema.NullOr(IssueState),
   updatedAt: IsoDateTime,
 });
@@ -1654,6 +1841,7 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ThreadUnarchiveCommand,
   ThreadSnoozeCommand,
   ThreadUnsnoozeCommand,
+  ThreadUsageLimitConfigureCommand,
   ThreadSettleCommand,
   ThreadUnsettleCommand,
   ThreadMetaUpdateCommand,
@@ -1695,6 +1883,7 @@ export const ClientOrchestrationCommand = Schema.Union([
   ThreadUnarchiveCommand,
   ThreadSnoozeCommand,
   ThreadUnsnoozeCommand,
+  ThreadUsageLimitConfigureCommand,
   ThreadSettleCommand,
   ThreadUnsettleCommand,
   ThreadMetaUpdateCommand,
@@ -1728,6 +1917,8 @@ const ThreadSessionSetCommand = Schema.Struct({
   commandId: CommandId,
   threadId: ThreadId,
   session: OrchestrationSession,
+  /** Internal hint: how the turn this session-set releases ended, when the caller knows. */
+  turnOutcome: Schema.optional(OrchestrationTurnOutcome),
   createdAt: IsoDateTime,
 });
 
@@ -1820,6 +2011,8 @@ const ThreadTurnSteerResolveCommand = Schema.Union([
     resolution: Schema.Struct({
       status: Schema.Literal("rejected"),
       error: TrimmedNonEmptyString.check(Schema.isMaxLength(1_000)),
+      reason: Schema.optionalKey(TurnSteerRejectionReason),
+      deliveryUncertain: TurnSteerDeliveryUncertain,
       resolvedAt: IsoDateTime,
     }),
   }),
@@ -1830,6 +2023,8 @@ const ThreadRevertCompleteCommand = Schema.Struct({
   commandId: CommandId,
   threadId: ThreadId,
   turnCount: NonNegativeInt,
+  droppedTurnIds: Schema.optional(Schema.Array(TurnId)),
+  latestTurn: Schema.optional(Schema.NullOr(OrchestrationLatestTurn)),
   createdAt: IsoDateTime,
 });
 
@@ -1842,6 +2037,20 @@ const ThreadGoalSyncCommand = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
+/** Internal only: clients must never be able to forge a usage limit. */
+const ThreadUsageLimitRecordCommand = Schema.Struct({
+  type: Schema.Literal("thread.usage-limit.record"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  limitId: ThreadUsageLimitId,
+  provider: ProviderDriverKind,
+  providerInstanceId: ProviderInstanceId,
+  turnId: TurnId,
+  message: TrimmedNonEmptyString.check(Schema.isMaxLength(1_000)),
+  resetAt: Schema.NullOr(IsoDateTime),
+  createdAt: IsoDateTime,
+});
+
 const ThreadGoalProviderClearCommand = Schema.Struct({
   type: Schema.Literal("thread.goal.provider-clear"),
   commandId: CommandId,
@@ -1851,6 +2060,7 @@ const ThreadGoalProviderClearCommand = Schema.Struct({
 });
 
 const InternalOrchestrationCommand = Schema.Union([
+  ThreadDelegatedCreateCommand,
   Schema.Struct({
     ...ThreadCreateCommand.fields,
     type: Schema.Literal("thread.history.import"),
@@ -1881,6 +2091,7 @@ const InternalOrchestrationCommand = Schema.Union([
   ThreadRevertCompleteCommand,
   ThreadGoalSyncCommand,
   ThreadGoalProviderClearCommand,
+  ThreadUsageLimitRecordCommand,
 ]);
 export type InternalOrchestrationCommand = typeof InternalOrchestrationCommand.Type;
 
@@ -1903,6 +2114,8 @@ export const OrchestrationEventType = Schema.Literals([
   "thread.unsnoozed",
   "thread.settled",
   "thread.unsettled",
+  "thread.usage-limit-set",
+  "thread.usage-limit-cleared",
   "thread.meta-updated",
   "thread.runtime-mode-set",
   "thread.interaction-mode-set",
@@ -1995,6 +2208,7 @@ export const ThreadCreatedPayload = Schema.Struct({
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
+  lineage: Schema.optional(ThreadLineage),
 });
 
 export const ThreadDeletedPayload = Schema.Struct({
@@ -2043,6 +2257,18 @@ export const ThreadUnsettledPayload = Schema.Struct({
   reason: Schema.Literals(["user", "activity"]),
   updatedAt: IsoDateTime,
   restoredSidebarState: Schema.optional(ThreadSidebarRestoreState),
+});
+
+export const ThreadUsageLimitSetPayload = Schema.Struct({
+  threadId: ThreadId,
+  usageLimit: ThreadUsageLimit,
+});
+
+export const ThreadUsageLimitClearedPayload = Schema.Struct({
+  threadId: ThreadId,
+  limitId: ThreadUsageLimitId,
+  reason: Schema.Literals(["turn-started", "archived", "reverted"]),
+  updatedAt: IsoDateTime,
 });
 
 export const ThreadMetaUpdatedPayload = Schema.Struct({
@@ -2127,6 +2353,8 @@ export const ThreadTurnSteerRejectedPayload = Schema.Struct({
   messageId: MessageId,
   expectedTurnId: TurnId,
   error: TrimmedNonEmptyString.check(Schema.isMaxLength(1_000)),
+  reason: Schema.optionalKey(TurnSteerRejectionReason),
+  deliveryUncertain: TurnSteerDeliveryUncertain,
   resolvedAt: IsoDateTime,
 });
 export type ThreadTurnSteerRejectedPayload = typeof ThreadTurnSteerRejectedPayload.Type;
@@ -2196,6 +2424,12 @@ export const ThreadCheckpointRevertRequestedPayload = Schema.Struct({
 export const ThreadRevertedPayload = Schema.Struct({
   threadId: ThreadId,
   turnCount: NonNegativeInt,
+  /**
+   * Authoritative revert result read from the projection. Absent on legacy
+   * events, which keep the count-based projection.
+   */
+  droppedTurnIds: Schema.optional(Schema.Array(TurnId)),
+  latestTurn: Schema.optional(Schema.NullOr(OrchestrationLatestTurn)),
 });
 
 export const ThreadSessionStopRequestedPayload = Schema.Struct({
@@ -2206,6 +2440,8 @@ export const ThreadSessionStopRequestedPayload = Schema.Struct({
 export const ThreadSessionSetPayload = Schema.Struct({
   threadId: ThreadId,
   session: OrchestrationSession,
+  /** Decided by the server: the turn this session-set releases and its terminal state. */
+  releasedTurn: Schema.optional(OrchestrationReleasedTurn),
 });
 
 export const ThreadProposedPlanUpsertedPayload = Schema.Struct({
@@ -2268,6 +2504,8 @@ export const WorktreeSourceControlStateUpdatedPayload = Schema.Struct({
   prTitle: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   prState: Schema.NullOr(PullRequestState),
   prIsDraft: Schema.NullOr(Schema.Boolean),
+  /** When the PR reached its current merged/closed state; see `Worktree.prTerminalAt`. */
+  prTerminalAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   issueState: Schema.NullOr(IssueState),
   updatedAt: IsoDateTime,
 });
@@ -2391,6 +2629,16 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("thread.unsettled"),
     payload: ThreadUnsettledPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.usage-limit-set"),
+    payload: ThreadUsageLimitSetPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.usage-limit-cleared"),
+    payload: ThreadUsageLimitClearedPayload,
   }),
   Schema.Struct({
     ...EventBaseFields,

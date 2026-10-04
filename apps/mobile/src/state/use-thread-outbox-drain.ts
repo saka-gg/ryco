@@ -3,35 +3,49 @@ import { createMobileConnectionRegistry } from "../runtime/bootstrap";
 import { useEffect } from "react";
 
 import {
+  appAtomRegistry,
   getWsConnectionStatusForEnvironment,
   getWsConnectionUiState,
+  wsConnectionOpenedCountAtom,
+  wsConnectionStatusAtom,
 } from "@ryco/client-runtime/rpc";
-import { scopeThreadRef } from "@ryco/client-runtime/scoped";
-import { DEFAULT_AGENT_TOKEN_MODE } from "@ryco/contracts";
+import { scopeThreadRef, scopedThreadKey } from "@ryco/client-runtime/scoped";
+import { DEFAULT_AGENT_TOKEN_MODE, type ScopedThreadRef } from "@ryco/contracts";
 import {
   ATTACHMENT_ONLY_BOOTSTRAP_PROMPT,
   commitSendTurnDispatch,
   captureReviewedSendReadiness,
 } from "@ryco/client-runtime/state/composer";
+import {
+  readQueueThreadView,
+  type QueueEnvironmentReadiness,
+  type QueueSendHooks,
+} from "@ryco/client-runtime/state/message-queue";
 
 import { ensureEnvironmentApi } from "../connection/environmentApi";
+import { retainThreadDetailSubscription } from "../connection/threadDetail";
 import { newCommandId } from "../lib/ids";
-import { drainThreadOutbox, hydrateThreadOutbox } from "./threadOutbox";
-import { buildQueuedThreadMessageAttachments } from "./queuedThreadMessageAttachments";
-import type { EnvironmentShellStatus, QueuedThreadMessage } from "./threadOutboxModel";
 import {
-  selectBootstrapCompleteForEnvironment,
-  selectEnvironmentHydratedFromCacheAt,
-  selectSidebarThreadSummaryByRef,
-  selectThreadByRef,
-  useStore,
-} from "./threadsRuntime";
+  drainThreadOutbox,
+  hydrateThreadOutbox,
+  listThreadOutboxMessages,
+  nextThreadOutboxLimitReleaseAtMs,
+  subscribeThreadOutbox,
+  trackThreadOutboxLiveCauses,
+  type ThreadOutboxDrainState,
+} from "./threadOutbox";
+import { buildQueuedThreadMessageAttachments } from "./queuedThreadMessageAttachments";
+import type { QueuedThreadMessage } from "./threadOutboxModel";
+import { selectEnvironmentShellLive, selectThreadByRef, useStore } from "./threadsRuntime";
 import { useWsConnectionOpenedCount } from "../rpc/wsConnectionState";
 
 // §3-14: dispatch a queued turn for an EXISTING thread through the runtime send
 // path. The queued item carries its own composer settings (captured at enqueue);
 // a message missing them cannot be sent and is dropped by the drain caller.
-async function sendQueuedThreadMessage(message: QueuedThreadMessage): Promise<void> {
+async function sendQueuedThreadMessage(
+  message: QueuedThreadMessage,
+  hooks: QueueSendHooks,
+): Promise<void> {
   if (!message.modelSelection || !message.runtimeMode || !message.interactionMode) {
     throw new Error("Queued message is missing composer settings.");
   }
@@ -73,58 +87,89 @@ async function sendQueuedThreadMessage(message: QueuedThreadMessage): Promise<vo
     createdAt: message.createdAt,
     newCommandId,
     beginLocalDispatch: () => {},
+    onBeforeTurnStart: hooks.onBeforeTurnStart,
     persistThreadSettingsForNextTurn: () => Promise.resolve(),
   });
 }
 
-// Exported for testing: the drain gate's per-message delivery snapshot.
-export function readThreadDeliveryState(message: QueuedThreadMessage): {
-  readonly threadExists: boolean;
-  readonly shellStatus: EnvironmentShellStatus;
-  readonly environmentConnected: boolean;
-  readonly threadBusy: boolean;
-  readonly alreadyDelivered: boolean;
-  readonly deliveryReconciled: boolean;
-} {
+/**
+ * Whether the drain may trust this environment's rows and mutate it. The gate
+ * consults the THREAD's environment: with several nodes connected, the global
+ * status reflects whichever socket wrote last, and a queued message for an
+ * offline node would be judged drainable because a different node happens to
+ * be connected.
+ */
+export function readThreadOutboxEnvironment(
+  environmentId: ScopedThreadRef["environmentId"],
+): QueueEnvironmentReadiness {
   const state = useStore.getState();
-  const ref = scopeThreadRef(message.environmentId, message.threadId);
-  const summary = selectSidebarThreadSummaryByRef(state, ref);
-  const thread = selectThreadByRef(state, ref);
-  // The gate must consult the MESSAGE's environment: with several nodes
-  // connected, the global status reflects whichever socket wrote last, and a
-  // queued message for an offline node would be judged drainable because a
-  // different node happens to be connected.
-  const connected =
-    getWsConnectionUiState(getWsConnectionStatusForEnvironment(message.environmentId)) ===
-    "connected";
   // Wave 2: rows hydrated from the snapshot cache (or demoted after a
   // disconnect) are last-known state, not evidence of what the node holds now.
-  // A cached thread must not count as delivery-reconciled — the socket can open
-  // one RTT before the live shell snapshot lands, and in that window a cached
-  // idle row would read as "exists, not busy" and dispatch a queued message
-  // into a thread that is actually mid-turn on the node.
-  const cacheProvenance =
-    selectEnvironmentHydratedFromCacheAt(state, message.environmentId) !== null;
+  // The socket can open one RTT before the live shell snapshot lands, and in
+  // that window a cached idle row would read as "exists, not busy" and
+  // dispatch a queued message into a thread that is actually mid-turn.
+  const shellLive = selectEnvironmentShellLive(state, environmentId);
+  const connected =
+    getWsConnectionUiState(getWsConnectionStatusForEnvironment(environmentId)) === "connected";
+  return { shellLive, mutationReady: shellLive && connected };
+}
+
+// Exported for testing: the drain gate's per-thread snapshot.
+export function readThreadDrainState(ref: ScopedThreadRef): ThreadOutboxDrainState {
   return {
-    threadExists: Boolean(summary ?? thread),
-    shellStatus: selectBootstrapCompleteForEnvironment(state, message.environmentId)
-      ? "live"
-      : "loading",
-    environmentConnected: connected,
-    threadBusy:
-      summary?.latestTurn?.state === "running" ||
-      thread?.latestTurn?.state === "running" ||
-      Boolean(summary?.session?.activeTurnId ?? thread?.session?.activeTurnId) ||
-      thread?.session?.status === "running",
-    alreadyDelivered: thread?.messages.some((entry) => entry.id === message.messageId) ?? false,
-    deliveryReconciled: thread !== undefined && !cacheProvenance,
+    view: readQueueThreadView(useStore.getState(), ref),
+    environment: readThreadOutboxEnvironment(ref.environmentId),
   };
 }
 
+/** setTimeout's largest delay; a later release re-arms after the next pass. */
+const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
+
+/**
+ * Keeps ONE wake timer for the earliest usage-limit hold release among queued threads:
+ * the hold ends by time alone, with no store change to trigger a drain. Exported for
+ * testing.
+ */
+export function createOutboxLimitWake(deps: {
+  readonly run: () => void;
+  readonly setTimeout: (callback: () => void, ms: number) => unknown;
+  readonly clearTimeout: (handle: unknown) => void;
+}): { sync(releaseAtMs: number | null, nowMs: number): void } {
+  let current: { readonly atMs: number; readonly handle: unknown } | null = null;
+  return {
+    sync(releaseAtMs, nowMs) {
+      if (current !== null && current.atMs === releaseAtMs) return;
+      if (current !== null) deps.clearTimeout(current.handle);
+      current = null;
+      if (releaseAtMs === null) return;
+      const delay = Math.min(Math.max(0, releaseAtMs - nowMs), MAX_TIMER_DELAY_MS);
+      current = {
+        atMs: releaseAtMs,
+        handle: deps.setTimeout(() => {
+          current = null;
+          deps.run();
+        }, delay),
+      };
+    },
+  };
+}
+
+const outboxLimitWake = createOutboxLimitWake({
+  run: () => runOutboxDrain(),
+  setTimeout: (callback, ms) => setTimeout(callback, ms),
+  clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+});
+
 export function runOutboxDrain(): void {
   void drainThreadOutbox({
-    readThreadDeliveryState,
+    readThreadDrainState,
     sendQueuedMessage: sendQueuedThreadMessage,
+  }).then(() => {
+    const nowMs = Date.now();
+    outboxLimitWake.sync(
+      nextThreadOutboxLimitReleaseAtMs((ref) => readThreadDrainState(ref).view, nowMs),
+      nowMs,
+    );
   });
 }
 
@@ -148,6 +193,65 @@ export function subscribeOutboxSettleDrain(runDrain: () => void, debounceMs = 50
     if (timer !== null) clearTimeout(timer);
     unsubscribe();
   };
+}
+
+/**
+ * Keeps a thread-detail subscription for every thread with outbox messages
+ * whose environment is mutation-ready. Detail is required for dedupe (a
+ * projected queued message) and for start-failure acks, so without it an
+ * off-screen queue would wait on `detail`. Released when the thread has no
+ * messages or its environment is not ready. Exported for testing.
+ */
+export function createThreadOutboxDetailRetention(deps: {
+  readonly listMessages: () => ReadonlyArray<QueuedThreadMessage>;
+  readonly isEnvironmentReady: (environmentId: ScopedThreadRef["environmentId"]) => boolean;
+  readonly retain: (ref: ScopedThreadRef) => () => void;
+}): { sync(): void; dispose(): void } {
+  const retains = new Map<string, () => void>();
+  return {
+    sync() {
+      const wanted = new Map<string, ScopedThreadRef>();
+      for (const message of deps.listMessages()) {
+        if (!deps.isEnvironmentReady(message.environmentId)) continue;
+        const ref = scopeThreadRef(message.environmentId, message.threadId);
+        wanted.set(scopedThreadKey(ref), ref);
+      }
+      for (const [key, release] of retains) {
+        if (wanted.has(key)) continue;
+        retains.delete(key);
+        release();
+      }
+      for (const [key, ref] of wanted) {
+        if (!retains.has(key)) retains.set(key, deps.retain(ref));
+      }
+    },
+    dispose() {
+      for (const release of retains.values()) release();
+      retains.clear();
+    },
+  };
+}
+
+function useThreadOutboxDetailRetention(): void {
+  useEffect(() => {
+    const retention = createThreadOutboxDetailRetention({
+      listMessages: listThreadOutboxMessages,
+      isEnvironmentReady: (environmentId) =>
+        readThreadOutboxEnvironment(environmentId).mutationReady,
+      retain: (ref) => retainThreadDetailSubscription(ref.environmentId, ref.threadId),
+    });
+    retention.sync();
+    const unsubscribers = [
+      subscribeThreadOutbox(retention.sync),
+      useStore.subscribe(retention.sync),
+      appAtomRegistry.subscribe(wsConnectionOpenedCountAtom, retention.sync),
+      appAtomRegistry.subscribe(wsConnectionStatusAtom, retention.sync),
+    ];
+    return () => {
+      for (const unsubscribe of unsubscribers) unsubscribe();
+      retention.dispose();
+    };
+  }, []);
 }
 
 /**
@@ -176,4 +280,10 @@ export function useThreadOutboxDrain(): void {
 
   // Settle-edge: drain when a thread's turn settles while queued messages wait.
   useEffect(() => subscribeOutboxSettleDrain(runOutboxDrain), []);
+
+  // The failures each thread showed live baseline a message composed later
+  // against cached rows.
+  useEffect(() => trackThreadOutboxLiveCauses(), []);
+
+  useThreadOutboxDetailRetention();
 }

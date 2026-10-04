@@ -618,6 +618,30 @@ describe("findSidebarProposedPlan", () => {
 });
 
 describe("deriveWorkLogEntries", () => {
+  it("hides deferred steer rows and keeps failed ones", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "turn-steer-rejected:cmd-deferred",
+        createdAt: "2026-02-23T00:00:02.000Z",
+        summary: "Steer deferred",
+        tone: "info",
+        kind: "provider.turn.steer.failed",
+        payload: { messageId: "message-1", error: "The turn finished.", reason: "deferred" },
+      }),
+      makeActivity({
+        id: "turn-steer-rejected:cmd-failed",
+        createdAt: "2026-02-23T00:00:03.000Z",
+        summary: "Steer failed",
+        tone: "error",
+        kind: "provider.turn.steer.failed",
+        payload: { messageId: "message-2", error: "Provider exploded.", reason: "failed" },
+      }),
+    ];
+
+    const entries = deriveWorkLogEntries(activities, undefined);
+    expect(entries.map((entry) => entry.id)).toEqual(["turn-steer-rejected:cmd-failed"]);
+  });
+
   it("omits tool started entries and keeps completed entries", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({

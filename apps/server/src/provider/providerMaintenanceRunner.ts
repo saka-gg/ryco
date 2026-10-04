@@ -7,14 +7,20 @@ import {
   type ServerProviderUpdatedPayload,
   type ServerProviderUpdateState,
 } from "@ryco/contracts";
+import { isBlockingProviderCompatibilityStatus } from "@ryco/shared/providerCapabilities";
 import { Cause, Context, DateTime, Duration, Effect, Layer, Option, Ref, Schema } from "effect";
 import { HttpClient } from "effect/unstable/http";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 import { ProviderRegistry } from "./Services/ProviderRegistry.ts";
 import { makeProviderMaintenanceCommandCoordinator } from "./providerMaintenanceCommandCoordinator.ts";
-import { enrichProviderSnapshotWithVersionAdvisory } from "./providerMaintenance.ts";
+import {
+  enrichProviderSnapshotWithVersionAdvisory,
+  resolveLatestProviderVersion,
+} from "./providerMaintenance.ts";
 import type { ProviderMaintenanceCapabilities } from "./providerMaintenance.ts";
+import { BUNDLED_MODEL_MANIFEST, ModelManifest } from "./ModelManifest.ts";
+import { rateProviderVersion } from "./providerCompatibility.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import { collectUint8StreamText } from "../stream/collectUint8StreamText.ts";
 
@@ -175,6 +181,11 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const httpClient = yield* HttpClient.HttpClient;
   const serverSettings = yield* ServerSettingsService;
+  const manifestService = yield* Effect.serviceOption(ModelManifest);
+  const currentManifest = Option.match(manifestService, {
+    onNone: () => Effect.succeed(BUNDLED_MODEL_MANIFEST),
+    onSome: (service) => service.current,
+  });
   const runMaintenanceCommand = (command: string, args: ReadonlyArray<string>) =>
     runProviderMaintenanceCommandWithSpawner({
       spawner,
@@ -301,6 +312,34 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
 
         const runCommandAndVerify = Effect.fn("ProviderMaintenanceRunner.runCommandAndVerify")(
           function* () {
+            // Compatibility gate, inside the command lock so a queued update re-checks after
+            // its wait. It rates the version `<pkg>@latest` installs right now (a fresh fetch,
+            // never the snapshot's cached rating) against the current manifest, bundled
+            // policies and code-owned floors. The fetch runs even with provider update checks
+            // disabled: the user asked for this update, and the install contacts the registry
+            // anyway. An unknown latest version (no package, offline) is not blocked.
+            const latestVersion = yield* resolveLatestProviderVersion(capabilities, {
+              fresh: true,
+            }).pipe(Effect.provideService(HttpClient.HttpClient, httpClient));
+            if (latestVersion !== null) {
+              const rating = rateProviderVersion({
+                manifest: yield* currentManifest,
+                driver: provider,
+                version: latestVersion,
+              });
+              if (isBlockingProviderCompatibilityStatus(rating?.status)) {
+                const label = latestVersion.startsWith("v") ? latestVersion : `v${latestVersion}`;
+                return yield* finish(
+                  makeUpdateState({
+                    status: "failed",
+                    startedAt: null,
+                    finishedAt: yield* nowIso,
+                    message: `Ryco did not install ${label}: ${rating?.message ?? "it is not compatible with this Ryco release."}`,
+                  }),
+                );
+              }
+            }
+
             const startedAt = yield* nowIso;
             yield* Ref.set(startedAtRef, startedAt);
             yield* setUpdateState(

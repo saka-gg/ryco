@@ -44,6 +44,7 @@ import {
 } from "@ryco/contracts";
 import {
   Cause,
+  Clock,
   Effect,
   Exit,
   Fiber,
@@ -75,6 +76,7 @@ import {
   ProviderAdapterSessionClosedError,
   ProviderAdapterSessionNotFoundError,
   ProviderAdapterValidationError,
+  ProviderTurnNotSteerableError,
   type ProviderAdapterError,
 } from "../Errors.ts";
 import { type CodexAdapterShape } from "../Services/CodexAdapter.ts";
@@ -103,6 +105,7 @@ import {
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import { requireRuntimeSessionId, stampRuntimeEvent } from "../runtimeSession.ts";
 import type { ProviderThreadHistory } from "../Services/ProviderAdapter.ts";
+import { makeCodexUsageLimitTracker } from "./codexUsageLimits.ts";
 
 const PROVIDER = ProviderDriverKind.make("codex");
 const PROVIDER_SEND_TURN_MAX_ATTACHMENT_TOTAL_BYTES =
@@ -341,6 +344,38 @@ function toTurnStatus(
     default:
       return "completed";
   }
+}
+
+/**
+ * Fallback for a `turn/completed` that strict decoding rejects (for example a
+ * `codexErrorInfo` literal newer than the pinned schema). Dropping it would leave the
+ * turn running and its Agent Control authority bound.
+ */
+function readTurnCompletedStructurally(
+  payload: unknown,
+):
+  | { readonly status: ReturnType<typeof toTurnStatus>; readonly errorMessage?: string }
+  | undefined {
+  const turn =
+    payload !== null && typeof payload === "object"
+      ? (payload as { readonly turn?: unknown }).turn
+      : undefined;
+  if (turn === null || typeof turn !== "object") return undefined;
+  const { status, error } = turn as { readonly status?: unknown; readonly error?: unknown };
+  const errorRecord =
+    error !== null && typeof error === "object" ? (error as { readonly message?: unknown }) : null;
+  const errorMessage = trimText(
+    typeof errorRecord?.message === "string" ? errorRecord.message : undefined,
+  );
+  const known =
+    status === "completed" ||
+    status === "failed" ||
+    status === "cancelled" ||
+    status === "interrupted";
+  return {
+    status: known ? status : errorRecord !== null ? "failed" : "completed",
+    ...(errorMessage ? { errorMessage } : {}),
+  };
 }
 
 function normalizeItemType(raw: string | undefined | null): string {
@@ -1252,17 +1287,22 @@ function mapToRuntimeEvents(
 
   if (event.method === "turn/completed") {
     const payload = readPayload(EffectCodexSchema.V2TurnCompletedNotification, event.payload);
-    if (!payload) {
+    const completed = payload
+      ? {
+          status: toTurnStatus(payload.turn.status),
+          errorMessage: trimText(payload.turn.error?.message),
+        }
+      : readTurnCompletedStructurally(event.payload);
+    if (!completed) {
       return [];
     }
-    const errorMessage = trimText(payload.turn.error?.message);
     return [
       {
         ...runtimeEventBase(event, canonicalThreadId),
         type: "turn.completed",
         payload: {
-          state: toTurnStatus(payload.turn.status),
-          ...(errorMessage ? { errorMessage } : {}),
+          state: completed.status,
+          ...(completed.errorMessage ? { errorMessage: completed.errorMessage } : {}),
         },
       },
     ];
@@ -1987,15 +2027,23 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           const current = sessions.get(input.threadId);
           if (current?.runtime === runtime) yield* stopSessionInternal(current);
         });
+        // Per-session: the rate-limit snapshot and limited turns belong to this runtime.
+        const usageLimits = makeCodexUsageLimitTracker();
         const eventFiber = yield* Stream.runForEach(runtime.events, (event) =>
           Effect.gen(function* () {
             yield* writeNativeEvent(event);
-            const runtimeEvents = mapToRuntimeEvents(event, event.threadId).map((runtimeEvent) =>
-              stampRuntimeEvent(runtimeEvent, {
-                providerInstanceId: boundInstanceId,
-                runtimeSessionId,
-              }),
-            );
+            const runtimeEvents = usageLimits
+              .annotate(
+                event,
+                mapToRuntimeEvents(event, event.threadId),
+                yield* Clock.currentTimeMillis,
+              )
+              .map((runtimeEvent) =>
+                stampRuntimeEvent(runtimeEvent, {
+                  providerInstanceId: boundInstanceId,
+                  runtimeSessionId,
+                }),
+              );
             // A dead codex process cannot use its lease, but the read tools
             // must not outlive the runtime either — revoke on exit even
             // before anything calls stopSession on the stale record. By
@@ -2335,6 +2383,23 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         })
         .pipe(
           Effect.mapError((cause) => mapCodexRuntimeError(input.threadId, "turn/steer", cause)),
+          // A late steer races the turn's end. Decide by state, not by the error text: if the
+          // runtime no longer runs the expected turn, the message is sent as the next turn.
+          Effect.catchTag("ProviderAdapterRequestError", (error) =>
+            Effect.gen(function* () {
+              const current = yield* session.runtime.getSession;
+              if (current.activeTurnId === input.expectedTurnId) return yield* error;
+              return yield* new ProviderTurnNotSteerableError({
+                provider: PROVIDER,
+                threadId: input.threadId,
+                turnId: input.expectedTurnId,
+                reason: "turn-ended",
+                detail:
+                  "The turn finished before this message could be steered. It stays queued and is sent next.",
+                cause: error,
+              });
+            }),
+          ),
         );
     },
   );
@@ -2533,7 +2598,8 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       return { messages, items, completedTurnIds, failedTurnIds };
     });
 
-  const rollbackThread: CodexAdapterShape["rollbackThread"] = (threadId, numTurns) => {
+  const rollbackThread: CodexAdapterShape["rollbackThread"] = (threadId, input) => {
+    const numTurns = input.numTurns;
     if (!Number.isInteger(numTurns) || numTurns < 1) {
       return Effect.fail(
         new ProviderAdapterValidationError({
@@ -2545,7 +2611,12 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     }
 
     return requireSession(threadId).pipe(
-      Effect.flatMap((session) => session.runtime.rollbackThread(numTurns)),
+      Effect.flatMap((session) =>
+        session.runtime.rollbackThread({
+          numTurns,
+          beforeTurnId: input.droppedTurnIds[0],
+        }),
+      ),
       Effect.mapError((cause) =>
         cause._tag === "ProviderAdapterSessionNotFoundError"
           ? cause
@@ -2693,6 +2764,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     capabilities: {
       sessionModelSwitch: "in-session",
       turnSteering: "native",
+      conversationRollback: "native",
     },
     startSession,
     sendTurn,

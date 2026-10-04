@@ -3,7 +3,7 @@ import {
   revalidateClaudeResumeBeforeCommit,
   type ClaudeCacheReviewPresentation,
 } from "./claudeCacheReview.ts";
-import type { ComputerTurnIntent } from "@ryco/contracts";
+import type { ComputerTurnIntent, UsageLimitResumeGuard } from "@ryco/contracts";
 import { rejectRetiredProjectMemory } from "@ryco/shared/retiredFeatures";
 import {
   DEFAULT_MODEL,
@@ -233,6 +233,10 @@ export interface CommitSendTurnDispatchInput {
   readonly isServerThread: boolean;
   readonly title: string;
   readonly messageId: MessageId;
+  /** Overrides the default `composer-send:<threadId>:<messageId>` turn-start command id. */
+  readonly commandId?: CommandId;
+  /** Fences a usage-limit resume to the limit it continues (see the decider). */
+  readonly usageLimitResumeGuard?: UsageLimitResumeGuard;
   readonly outgoingMessageText: string;
   readonly turnAttachments: readonly SendTurnDispatchAttachment[];
   /** The composer's staged target, committed atomically by `thread.turn.start`. */
@@ -248,6 +252,13 @@ export interface CommitSendTurnDispatchInput {
   readonly createdAt: string;
   readonly newCommandId: () => CommandId;
   readonly beginLocalDispatch: (options: { readonly preparingWorktree: boolean }) => void;
+  /**
+   * Runs immediately before the final `thread.turn.start`: after the Claude
+   * resume review (including any `/compact` turn and its wait), the settings
+   * writes and the readiness asserts. Not called when those throw, nor for a
+   * call that joins a pending send of the same message id.
+   */
+  readonly onBeforeTurnStart?: () => void;
   readonly persistThreadSettingsForNextTurn: (input: {
     threadId: ThreadId;
     createdAt: string;
@@ -307,11 +318,14 @@ async function commitSendTurnDispatchOnce(input: CommitSendTurnDispatchInput): P
   }
   if (reviewed || input.bootstrap?.requireWorktree) input.assertMutationReady?.();
   input.beginLocalDispatch({ preparingWorktree: false });
+  input.onBeforeTurnStart?.();
   await input.api.orchestration.dispatchCommand({
     type: "thread.turn.start",
     ...(input.computerUse ? { computerUse: input.computerUse } : {}),
-    commandId: CommandId.make(`composer-send:${input.threadId}:${input.messageId}`),
+    commandId:
+      input.commandId ?? CommandId.make(`composer-send:${input.threadId}:${input.messageId}`),
     ...(reviewed ? { claudeResumeGuard: reviewed.guard } : {}),
+    ...(input.usageLimitResumeGuard ? { usageLimitResumeGuard: input.usageLimitResumeGuard } : {}),
     threadId: input.threadId,
     message: {
       messageId: input.messageId,

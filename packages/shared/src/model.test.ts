@@ -23,6 +23,7 @@ import {
   normalizeModelSlug,
   resolveModelSlugForProvider,
   resolveSelectableModel,
+  sameModelSelection,
   trimOrNull,
 } from "./model.ts";
 
@@ -53,6 +54,53 @@ describe("model presentation", () => {
         { preferShortName: true },
       ),
     ).toBe("Vendor · vendor/model");
+  });
+});
+
+describe("sameModelSelection", () => {
+  const instanceId = ProviderInstanceId.make("claude_work");
+
+  it("ignores key order and option order", () => {
+    expect(
+      sameModelSelection(
+        {
+          instanceId,
+          model: "claude-opus-5",
+          options: [
+            { id: "effort", value: "high" },
+            { id: "fastMode", value: true },
+          ],
+        },
+        JSON.parse(
+          '{"options":[{"value":true,"id":"fastMode"},{"value":"high","id":"effort"}],"model":"claude-opus-5","instanceId":"claude_work"}',
+        ),
+      ),
+    ).toBe(true);
+  });
+
+  it("treats absent options as an empty list", () => {
+    expect(
+      sameModelSelection(
+        { instanceId, model: "claude-opus-5" },
+        {
+          instanceId,
+          model: "claude-opus-5",
+          options: [],
+        },
+      ),
+    ).toBe(true);
+  });
+
+  it("detects a different model, instance or option value", () => {
+    const base = { instanceId, model: "claude-opus-5", options: [{ id: "effort", value: "high" }] };
+    expect(sameModelSelection(base, { ...base, model: "claude-fable-5" })).toBe(false);
+    expect(
+      sameModelSelection(base, { ...base, instanceId: ProviderInstanceId.make("claude_personal") }),
+    ).toBe(false);
+    expect(sameModelSelection(base, { ...base, options: [{ id: "effort", value: "low" }] })).toBe(
+      false,
+    );
+    expect(sameModelSelection(base, { ...base, options: [] })).toBe(false);
   });
 });
 

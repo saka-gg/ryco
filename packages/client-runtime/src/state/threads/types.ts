@@ -23,6 +23,8 @@ import type {
   WorktreeId,
   WorktreeOrigin,
   ThreadGoal,
+  ThreadLineage,
+  ThreadUsageLimit,
   ThreadPriorityProjectedRanking,
 } from "@ryco/contracts";
 import { DEFAULT_AGENT_TOKEN_MODE as CONTRACT_DEFAULT_AGENT_TOKEN_MODE } from "@ryco/contracts";
@@ -166,6 +168,8 @@ export interface Thread {
   settledAt?: string | null | undefined;
   snoozedUntil?: string | null | undefined;
   snoozedAt?: string | null | undefined;
+  /** Provider usage limit that stopped the thread; absent on older servers. */
+  usageLimit?: ThreadUsageLimit | null | undefined;
   updatedAt?: string | undefined;
   latestTurn: OrchestrationLatestTurn | null;
   goal?: ThreadGoal | null;
@@ -175,6 +179,8 @@ export interface Thread {
   worktreeId?: string | null | undefined;
   manualStatusBucket?: StatusBucket | null | undefined;
   manualPosition?: number | undefined;
+  /** Server-owned provenance; absent/null on root threads and from older servers. */
+  lineage?: ThreadLineage | null | undefined;
   turnDiffSummaries: TurnDiffSummary[];
   activities: OrchestrationThreadActivity[];
 }
@@ -198,6 +204,8 @@ export interface ThreadShell {
   settledAt?: string | null | undefined;
   snoozedUntil?: string | null | undefined;
   snoozedAt?: string | null | undefined;
+  /** Provider usage limit that stopped the thread; absent on older servers. */
+  usageLimit?: ThreadUsageLimit | null | undefined;
   updatedAt?: string | undefined;
   branch: string | null;
   worktreePath: string | null;
@@ -205,6 +213,8 @@ export interface ThreadShell {
   manualStatusBucket?: StatusBucket | null | undefined;
   manualPosition?: number | undefined;
   goal?: ThreadGoal | null;
+  /** Server-owned provenance; absent/null on root threads and from older servers. */
+  lineage?: ThreadLineage | null | undefined;
 }
 
 export interface ThreadTurnState {
@@ -232,6 +242,8 @@ export interface SidebarThreadSummary {
   settledAt?: string | null | undefined;
   snoozedUntil?: string | null | undefined;
   snoozedAt?: string | null | undefined;
+  /** Provider usage limit that stopped the thread; absent on older servers. */
+  usageLimit?: ThreadUsageLimit | null | undefined;
   updatedAt?: string | undefined;
   latestTurn: OrchestrationLatestTurn | null;
   branch: string | null;
@@ -253,6 +265,8 @@ export interface SidebarThreadSummary {
   hasActionableProposedPlan: boolean;
   /** Optional environment-local derived ranking projected by supporting servers. */
   priority?: ThreadPriorityProjectedRanking | undefined;
+  /** Server-owned provenance; absent/null on root threads and from older servers. */
+  lineage?: ThreadLineage | null | undefined;
 }
 
 export interface SidebarWorktreeSummary {
@@ -269,6 +283,12 @@ export interface SidebarWorktreeSummary {
   issueTitle: string | null;
   prState: "open" | "closed" | "merged" | null;
   prIsDraft: boolean | null;
+  /**
+   * When the PR reached its current merged/closed state. Absent (`undefined`)
+   * when the server predates the field, which keeps the legacy settlement rule;
+   * `null` while the PR is open, unknown, or absent.
+   */
+  prTerminalAt?: string | null | undefined;
   issueState: "open" | "closed" | null;
   workItemProvider: "jira" | null;
   workItemKey: string | null;

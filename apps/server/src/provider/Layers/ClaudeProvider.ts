@@ -53,6 +53,7 @@ const CLAUDE_PRESENTATION = {
   displayName: "Claude",
   showInteractionModeToggle: true,
   supportsAskMode: true,
+  supportsTurnSteering: true,
 } as const;
 // ── Model catalog ───────────────────────────────────────────────────
 //

@@ -9,6 +9,7 @@ import {
   ThreadId,
   TurnId,
   ProviderInstanceId,
+  WorktreeId,
 } from "@ryco/contracts";
 import { assert, it } from "@effect/vitest";
 import { Effect, Fiber, Layer, Option } from "effect";
@@ -16,6 +17,7 @@ import { TestClock } from "effect/testing";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as SqlStatement from "effect/unstable/sql/Statement";
 
+import { makeCompletionReturnRepository } from "../../persistence/Layers/AgentControlCompletionReturns.ts";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
 import { RepositoryIdentityResolver } from "../../project/Services/RepositoryIdentityResolver.ts";
 import { RepositoryIdentityResolverLive } from "../../project/Layers/RepositoryIdentityResolver.ts";
@@ -273,6 +275,97 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
       yield* sql`DELETE FROM projection_thread_messages WHERE thread_id = 'side-context-thread'`;
       yield* sql`DELETE FROM projection_thread_activities WHERE thread_id = 'side-context-thread'`;
       yield* sql`DELETE FROM projection_turns WHERE thread_id IN ('side-context-thread', 'another-side-thread')`;
+    }),
+  );
+
+  it.effect("lists the newest pending checkpoint revert per live thread", () =>
+    Effect.gen(function* () {
+      const query = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+      const threads = ["revert-pending", "revert-terminal", "revert-deleted"] as const;
+      for (const threadId of threads) {
+        yield* sql`INSERT INTO projection_threads (
+          thread_id, project_id, title, model_selection_json, runtime_mode,
+          interaction_mode, created_at, updated_at, deleted_at
+        ) VALUES (
+          ${threadId}, 'revert-project', ${threadId},
+          '{"provider":"codex","model":"gpt-5-codex"}', 'full-access', 'default',
+          '2026-09-12T00:00:00.000Z', '2026-09-12T00:00:00.000Z',
+          ${threadId === "revert-deleted" ? "2026-09-12T00:00:00.000Z" : null}
+        )`;
+      }
+      const insertRevert = (threadId: string, id: string, status: string, createdAt: string) =>
+        sql`INSERT INTO projection_thread_activities (activity_id, thread_id, turn_id, tone, kind, summary, payload_json, created_at)
+          VALUES (${`checkpoint-revert:${threadId}-${id}`}, ${threadId}, NULL, 'info', 'checkpoint.revert', 'Revert',
+            ${JSON.stringify({ schemaVersion: 1, revertRequestId: `${threadId}-${id}`, turnCount: 1, status, cwd: "/repo" })},
+            ${createdAt})`;
+      yield* insertRevert("revert-pending", "old", "completed", "2026-09-12T00:00:00.000Z");
+      yield* insertRevert("revert-pending", "new", "restoring-files", "2026-09-12T00:01:00.000Z");
+      yield* insertRevert("revert-terminal", "old", "rolling-back", "2026-09-12T00:00:00.000Z");
+      yield* insertRevert("revert-terminal", "new", "failed", "2026-09-12T00:01:00.000Z");
+      yield* insertRevert("revert-deleted", "gone", "requested", "2026-09-12T00:00:00.000Z");
+
+      const pending = yield* query.listPendingCheckpointReverts!();
+
+      assert.deepStrictEqual(
+        pending.map((entry) => ({
+          threadId: String(entry.threadId),
+          id: String(entry.activity.id),
+          status: entry.payload.status,
+          cwd: entry.payload.cwd,
+        })),
+        [
+          {
+            threadId: "revert-pending",
+            id: "checkpoint-revert:revert-pending-new",
+            status: "restoring-files",
+            cwd: "/repo",
+          },
+        ],
+      );
+      yield* sql`DELETE FROM projection_thread_activities WHERE kind = 'checkpoint.revert'`;
+      yield* sql`DELETE FROM projection_threads WHERE thread_id IN ('revert-pending', 'revert-terminal', 'revert-deleted')`;
+    }),
+  );
+
+  it.effect("reads one thread's newest checkpoint revert, whatever its status", () =>
+    Effect.gen(function* () {
+      const query = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+      const insertRevert = (
+        threadId: string,
+        id: string,
+        status: string,
+        createdAt: string,
+        sequence: number | null,
+      ) =>
+        sql`INSERT INTO projection_thread_activities (activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at)
+          VALUES (${`checkpoint-revert:${threadId}-${id}`}, ${threadId}, NULL, 'info', 'checkpoint.revert', 'Revert',
+            ${JSON.stringify({ schemaVersion: 1, revertRequestId: `${threadId}-${id}`, turnCount: 1, status })},
+            ${sequence}, ${createdAt})`;
+      // The sequenced entry is newer than an unsequenced one with a later timestamp.
+      yield* insertRevert(
+        "revert-own",
+        "unsequenced",
+        "requested",
+        "2026-09-12T00:05:00.000Z",
+        null,
+      );
+      yield* insertRevert("revert-own", "old", "rolling-back", "2026-09-12T00:00:00.000Z", 4);
+      yield* insertRevert("revert-own", "new", "completed", "2026-09-12T00:01:00.000Z", 9);
+      yield* insertRevert("revert-other", "pending", "requested", "2026-09-12T00:02:00.000Z", 12);
+      yield* sql`INSERT INTO projection_thread_activities (activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at)
+        VALUES ('revert-own-tool', 'revert-own', NULL, 'tool', 'tool', 'Tool', '{}', 20, '2026-09-12T00:03:00.000Z')`;
+
+      const own = yield* query.getLatestCheckpointRevert!(ThreadId.make("revert-own"));
+      const none = yield* query.getLatestCheckpointRevert!(ThreadId.make("revert-none"));
+
+      assert.deepStrictEqual(
+        own === null ? null : { id: String(own.activity.id), status: own.payload.status },
+        { id: "checkpoint-revert:revert-own-new", status: "completed" },
+      );
+      assert.equal(none, null);
+      yield* sql`DELETE FROM projection_thread_activities WHERE thread_id IN ('revert-own', 'revert-other')`;
     }),
   );
 
@@ -566,6 +659,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           settledAt: "2026-02-24T00:00:02.500Z",
           snoozedUntil: null,
           snoozedAt: null,
+          usageLimit: null,
           deletedAt: null,
           messages: [
             {
@@ -697,6 +791,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           settledAt: "2026-02-24T00:00:02.500Z",
           snoozedUntil: null,
           snoozedAt: null,
+          usageLimit: null,
           session: {
             threadId: ThreadId.make("thread-1"),
             status: "running",
@@ -1850,9 +1945,10 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
       const commandReadModel = yield* snapshotQuery.getCommandReadModel();
       assert.equal(commandReadModel.threads[0]?.latestTurn?.turnId, asTurnId("turn-running"));
       assert.equal(commandReadModel.threads[0]?.latestTurn?.state, "running");
+      // Intended: the command model hydrates the first AND latest user message anchors.
       assert.deepEqual(
         commandReadModel.threads[0]?.messages.map((message) => message.id),
-        [asMessageId("message-user-first")],
+        [asMessageId("message-user-first"), asMessageId("message-user-second")],
       );
       assert.deepEqual(
         commandReadModel.threads[0]?.activities.map((activity) => activity.id),
@@ -1882,6 +1978,132 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
       const fullSnapshot = yield* snapshotQuery.getSnapshot();
       assert.equal(fullSnapshot.threads[0]?.latestTurn?.turnId, asTurnId("turn-running"));
       assert.equal(fullSnapshot.threads[0]?.latestTurn?.state, "running");
+    }),
+  );
+
+  it.effect("hydrates first and latest user message anchors for the command read model", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+      const repository = yield* makeCompletionReturnRepository;
+
+      yield* sql`DELETE FROM projection_projects`;
+      yield* sql`DELETE FROM projection_threads`;
+      yield* sql`DELETE FROM projection_thread_messages`;
+      yield* sql`DELETE FROM projection_thread_activities`;
+      yield* sql`DELETE FROM projection_turns`;
+      yield* sql`DELETE FROM projection_state`;
+
+      const at = (second: number) => `2026-05-01T00:00:0${second}.000Z`;
+      const expectedAnchors: Record<string, ReadonlyArray<string>> = {
+        "t-many": ["m1", "m3"],
+        "t-single": ["s1"],
+        "t-none": [],
+        // First by message_id among equal created_at, latest by insertion order (rowid).
+        "t-tie": ["tie-a", "tie-b"],
+        // First and latest resolve to the same row, which is hydrated once.
+        "t-tie-same": ["tie2-a"],
+      };
+      for (const threadId of Object.keys(expectedAnchors)) {
+        yield* sql`INSERT INTO projection_threads (
+          thread_id, project_id, title, model_selection_json, runtime_mode,
+          interaction_mode, created_at, updated_at, latest_turn_id, deleted_at
+        ) VALUES (
+          ${threadId}, 'anchor-project', ${threadId},
+          '{"provider":"codex","model":"gpt-5-codex"}', 'full-access', 'default',
+          ${at(0)}, ${at(0)}, NULL, NULL
+        )`;
+      }
+      // Insert order sets rowid, which breaks created_at ties for the latest anchor.
+      const messageRows: ReadonlyArray<
+        readonly [threadId: string, messageId: string, role: "user" | "assistant", second: number]
+      > = [
+        ["t-many", "m1", "user", 1],
+        ["t-many", "a1", "assistant", 2],
+        ["t-many", "m2", "user", 3],
+        ["t-many", "m3", "user", 5],
+        ["t-many", "a3", "assistant", 6],
+        ["t-single", "s1", "user", 1],
+        ["t-single", "sa", "assistant", 2],
+        ["t-none", "na", "assistant", 2],
+        ["t-tie", "tie-c", "user", 4],
+        ["t-tie", "tie-a", "user", 4],
+        ["t-tie", "tie-b", "user", 4],
+        ["t-tie-same", "tie2-b", "user", 4],
+        ["t-tie-same", "tie2-c", "user", 4],
+        ["t-tie-same", "tie2-a", "user", 4],
+      ];
+      for (const [threadId, messageId, role, second] of messageRows) {
+        yield* sql`INSERT INTO projection_thread_messages (
+          message_id, thread_id, turn_id, role, text, is_streaming, created_at, updated_at
+        ) VALUES (
+          ${messageId}, ${threadId}, NULL, ${role}, ${`text ${messageId}`}, 0,
+          ${at(second)}, ${at(second)}
+        )`;
+      }
+
+      const anchorQueries: Array<readonly [string, ReadonlyArray<unknown>]> = [];
+      const capture: SqlStatement.Transformer = (statement) =>
+        Effect.sync(() => {
+          const compiled = statement.compile();
+          // Not just "latest_user": listThreadRows selects latest_user_message_at.
+          if (compiled[0].includes("projection_thread_messages latest_user")) {
+            anchorQueries.push(compiled);
+          }
+          return statement;
+        });
+      const commandReadModel = yield* snapshotQuery
+        .getCommandReadModel()
+        .pipe(Effect.provideService(SqlStatement.CurrentTransformer, capture));
+
+      // A1: exactly the first and latest user message anchors, in order.
+      assert.deepEqual(
+        Object.fromEntries(
+          commandReadModel.threads.map((thread) => [
+            thread.id,
+            thread.messages.map((message) => message.id),
+          ]),
+        ),
+        expectedAnchors,
+      );
+
+      // A2: lockstep with CompletionReturnDelivery's latest-user-message read.
+      assert.equal(commandReadModel.threads.length, Object.keys(expectedAnchors).length);
+      for (const thread of commandReadModel.threads) {
+        assert.equal(
+          thread.messages.findLast((message) => message.role === "user")?.id ?? null,
+          yield* repository.latestUserMessageId(thread.id),
+          thread.id,
+        );
+      }
+
+      // A3: the anchor query probes per thread and never scans message history.
+      assert.equal(anchorQueries.length, 1);
+      const [anchorStatement, anchorParams] = anchorQueries[0]!;
+      const plan = yield* sql.unsafe<{ detail: string }>(
+        `EXPLAIN QUERY PLAN ${anchorStatement}`,
+        anchorParams,
+      );
+      const planText = JSON.stringify(plan);
+      assert.isFalse(
+        plan.some((row) => /SCAN (messages|first_user|latest_user)\b/.test(row.detail)),
+        planText,
+      );
+      assert.isTrue(
+        plan.some((row) => /SEARCH messages .*\(message_id=\?\)/.test(row.detail)),
+        planText,
+      );
+      assert.isTrue(
+        plan.some((row) => /SEARCH first_user .*\(thread_id=\?\)/.test(row.detail)),
+        planText,
+      );
+      assert.isTrue(
+        plan.some((row) => /SEARCH latest_user .*\(thread_id=\?\)/.test(row.detail)),
+        planText,
+      );
+
+      yield* sql`DELETE FROM projection_thread_messages`;
+      yield* sql`DELETE FROM projection_threads`;
     }),
   );
 
@@ -2296,3 +2518,151 @@ it.effect(
     }).pipe(Effect.provide(layer));
   },
 );
+
+it.effect("ProjectionSnapshotQuery exposes worktree prTerminalAt on every read path", () => {
+  const layer = OrchestrationProjectionSnapshotQueryLive.pipe(
+    Layer.provide(ThreadBackgroundLiveness.layer),
+    Layer.provideMerge(
+      Layer.succeed(RepositoryIdentityResolver, { resolve: () => Effect.succeed(null) }),
+    ),
+    Layer.provideMerge(SqlitePersistenceMemory),
+  );
+
+  return Effect.gen(function* () {
+    const snapshotQuery = yield* ProjectionSnapshotQuery;
+    const sql = yield* SqlClient.SqlClient;
+
+    yield* sql`
+      INSERT INTO projection_projects (
+        project_id, title, workspace_root, default_model_selection_json,
+        scripts_json, created_at, updated_at
+      ) VALUES (
+        'project-pr-terminal', 'Project', '/tmp/project-pr-terminal',
+        '{"provider":"codex","model":"gpt-5-codex"}', '[]',
+        '2026-04-05T00:00:00.000Z', '2026-04-05T00:00:00.000Z'
+      )
+    `;
+    yield* sql`
+      INSERT INTO projection_worktrees (
+        worktree_id, project_id, branch, worktree_path, origin, pr_number,
+        pr_state, pr_terminal_at, created_at, updated_at
+      ) VALUES
+        (
+          'worktree-merged', 'project-pr-terminal', 'feature/merged', '/tmp/merged', 'pr', 7,
+          'merged', '2026-04-05T00:30:00.000Z',
+          '2026-04-05T00:00:00.000Z', '2026-04-05T01:00:00.000Z'
+        ),
+        (
+          'worktree-open', 'project-pr-terminal', 'feature/open', '/tmp/open', 'pr', 8,
+          'open', NULL,
+          '2026-04-05T00:00:01.000Z', '2026-04-05T01:00:00.000Z'
+        )
+    `;
+
+    const byId = (worktrees: ReadonlyArray<{ worktreeId: string }> | undefined, id: string) =>
+      worktrees?.find((worktree) => worktree.worktreeId === id) as
+        | { readonly prTerminalAt?: string | null }
+        | undefined;
+    const assertExposed = (worktrees: ReadonlyArray<{ worktreeId: string }> | undefined) => {
+      assert.equal(byId(worktrees, "worktree-merged")?.prTerminalAt, "2026-04-05T00:30:00.000Z");
+      const open = byId(worktrees, "worktree-open");
+      assert.isTrue(open !== undefined && "prTerminalAt" in open);
+      assert.isNull(open?.prTerminalAt);
+    };
+
+    assertExposed((yield* snapshotQuery.getCommandReadModel()).worktrees);
+    assertExposed((yield* snapshotQuery.getShellSnapshot()).worktrees);
+
+    const getWorktreeShellById = snapshotQuery.getWorktreeShellById;
+    assert.isDefined(getWorktreeShellById);
+    if (getWorktreeShellById === undefined) return;
+    const merged = yield* getWorktreeShellById(WorktreeId.make("worktree-merged"));
+    const open = yield* getWorktreeShellById(WorktreeId.make("worktree-open"));
+    assertExposed([Option.getOrThrow(merged), Option.getOrThrow(open)]);
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("ProjectionSnapshotQuery exposes thread lineage on every read path", () => {
+  const layer = OrchestrationProjectionSnapshotQueryLive.pipe(
+    Layer.provide(ThreadBackgroundLiveness.layer),
+    Layer.provideMerge(
+      Layer.succeed(RepositoryIdentityResolver, { resolve: () => Effect.succeed(null) }),
+    ),
+    Layer.provideMerge(SqlitePersistenceMemory),
+  );
+
+  return Effect.gen(function* () {
+    const snapshotQuery = yield* ProjectionSnapshotQuery;
+    const sql = yield* SqlClient.SqlClient;
+
+    yield* sql`
+      INSERT INTO projection_projects (
+        project_id, title, workspace_root, default_model_selection_json,
+        scripts_json, created_at, updated_at
+      ) VALUES (
+        'project-lineage', 'Project', '/tmp/project-lineage',
+        '{"provider":"codex","model":"gpt-5-codex"}', '[]',
+        '2026-10-01T00:00:00.000Z', '2026-10-01T00:00:00.000Z'
+      )
+    `;
+    yield* sql`
+      INSERT INTO projection_threads (
+        thread_id, project_id, title, model_selection_json, runtime_mode,
+        interaction_mode, branch, worktree_path, latest_turn_id,
+        latest_user_message_at, pending_approval_count, pending_user_input_count,
+        has_actionable_proposed_plan, created_at, updated_at, archived_at, deleted_at,
+        lineage_parent_thread_id, lineage_root_thread_id, lineage_relationship
+      ) VALUES
+        (
+          'thread-lineage-root', 'project-lineage', 'Root',
+          '{"provider":"codex","model":"gpt-5-codex"}', 'full-access', 'default',
+          NULL, NULL, NULL, NULL, 0, 0, 0,
+          '2026-10-01T00:00:01.000Z', '2026-10-01T00:00:01.000Z', NULL, NULL,
+          NULL, NULL, NULL
+        ),
+        (
+          'thread-lineage-child', 'project-lineage', 'Child',
+          '{"provider":"codex","model":"gpt-5-codex"}', 'full-access', 'default',
+          NULL, NULL, NULL, NULL, 0, 0, 0,
+          '2026-10-01T00:00:02.000Z', '2026-10-01T00:00:02.000Z', NULL, NULL,
+          'thread-lineage-root', 'thread-lineage-root', 'delegated'
+        )
+    `;
+
+    const rootId = ThreadId.make("thread-lineage-root");
+    const childId = ThreadId.make("thread-lineage-child");
+    const expected = {
+      parentThreadId: rootId,
+      rootThreadId: rootId,
+      relationship: "delegated",
+    };
+    const assertExposed = (
+      threads: ReadonlyArray<{ readonly id: ThreadId; readonly lineage?: unknown }>,
+      surface: string,
+    ) => {
+      const child = threads.find((thread) => thread.id === childId);
+      const root = threads.find((thread) => thread.id === rootId);
+      assert.deepEqual(child?.lineage, expected, `${surface} child lineage`);
+      assert.isDefined(root, `${surface} root`);
+      assert.notProperty(root, "lineage", `${surface} root has no lineage key`);
+    };
+
+    assertExposed((yield* snapshotQuery.getShellSnapshot()).threads, "getShellSnapshot");
+    assertExposed((yield* snapshotQuery.getSnapshot()).threads, "getSnapshot");
+    assertExposed((yield* snapshotQuery.getCommandReadModel()).threads, "getCommandReadModel");
+    assertExposed(
+      [
+        Option.getOrThrow(yield* snapshotQuery.getThreadShellById(childId)),
+        Option.getOrThrow(yield* snapshotQuery.getThreadShellById(rootId)),
+      ],
+      "getThreadShellById",
+    );
+    assertExposed(
+      [
+        Option.getOrThrow(yield* snapshotQuery.getThreadDetailById(childId)),
+        Option.getOrThrow(yield* snapshotQuery.getThreadDetailById(rootId)),
+      ],
+      "getThreadDetailById",
+    );
+  }).pipe(Effect.provide(layer));
+});

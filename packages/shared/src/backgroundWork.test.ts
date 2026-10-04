@@ -100,6 +100,33 @@ describe("background work", () => {
     ).toHaveLength(1);
   });
 
+  it("reopens an ended epoch when the same runtime starts again (recovered session)", () => {
+    const boundary = (n: number, state: "started" | "stopped") =>
+      activity(n, "background-work.session-boundary", { runtimeSessionId: "epoch", state });
+    const reopened = [
+      boundary(1, "started"),
+      start(2, "old"),
+      boundary(3, "stopped"),
+      boundary(4, "started"),
+      start(5, "new"),
+    ];
+    expect(deriveBackgroundWork(reopened).tasks.map((task) => task.id)).toEqual(["new"]);
+    expect(deriveBackgroundWork(reopened, "epoch").tasks.map((task) => task.id)).toEqual(["new"]);
+  });
+
+  it("keeps a repeated start boundary of an open epoch a no-op", () => {
+    const boundary = (n: number) =>
+      activity(n, "background-work.session-boundary", {
+        runtimeSessionId: "epoch",
+        state: "started",
+      });
+    expect(
+      deriveBackgroundWork([boundary(1), start(2, "first"), boundary(3)]).tasks.map(
+        (task) => task.id,
+      ),
+    ).toEqual(["first"]);
+  });
+
   it("retains compact background evidence beyond the normal tail and settles after trimming", () => {
     let rows = [
       start(1),

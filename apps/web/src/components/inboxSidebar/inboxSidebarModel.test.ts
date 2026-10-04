@@ -140,6 +140,7 @@ function build(input: {
   autoSettleAfterDays?: SidebarAutoSettleAfterDays;
   pinnedThreadKeys?: ReadonlySet<string>;
   primaryEnvironmentId?: EnvironmentId | null;
+  nestDelegated?: boolean;
   nowMs?: number;
 }) {
   return buildInboxSidebarSections({
@@ -156,6 +157,7 @@ function build(input: {
     ...(input.primaryEnvironmentId !== undefined
       ? { primaryEnvironmentId: input.primaryEnvironmentId }
       : {}),
+    ...(input.nestDelegated !== undefined ? { nestDelegated: input.nestDelegated } : {}),
     ...(input.nowMs !== undefined ? { nowMs: input.nowMs } : {}),
   });
 }
@@ -833,5 +835,249 @@ describe("glyph row facts", () => {
       filters: ALL_FILTERS,
     });
     expect(sections.flatMap((section) => section.rows).every((row) => row.showProject)).toBe(true);
+  });
+});
+
+describe("usage-limited rows", () => {
+  const rows = (input: Parameters<typeof build>[0]) =>
+    build(input).flatMap((section) => section.rows);
+  const BEFORE_RESET = Date.parse("2026-08-23T12:00:00.000Z");
+  const AFTER_RESET = Date.parse("2026-08-23T16:00:00.000Z");
+  const limitedThread = (id: string, overrides: Partial<SidebarThreadSummary> = {}) =>
+    thread(id, {
+      modelSelection: { instanceId: ProviderInstanceId.make("claudeAgent"), model: "sonnet" },
+      session: {
+        provider: ProviderDriverKind.make("claudeAgent"),
+        status: "error",
+        orchestrationStatus: "error",
+        lastError: "Claude usage limit reached.",
+        createdAt: "2026-08-23T10:00:00.000Z",
+        updatedAt: "2026-08-23T10:00:00.000Z",
+      },
+      usageLimit: {
+        limitId: `usage-limit:${id}:turn-1`,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+        turnId: TurnId.make("turn-1"),
+        message: "Claude usage limit reached.",
+        limitedAt: "2026-08-23T10:00:00.000Z",
+        resetAt: "2026-08-23T15:00:00.000Z",
+        autoResume: null,
+        updatedAt: "2026-08-23T10:00:00.000Z",
+      },
+      ...overrides,
+    });
+
+  it("shows a limited thread as Limited in Active, ranked with errors and before working", () => {
+    const sections = build({
+      threads: [
+        thread("working", {
+          latestTurn: {
+            turnId: TurnId.make("turn-working"),
+            state: "running",
+            requestedAt: "2026-08-23T09:00:00.000Z",
+            startedAt: "2026-08-23T09:00:00.000Z",
+            completedAt: null,
+            assistantMessageId: null,
+          },
+        }),
+        limitedThread("limited"),
+      ],
+      nowMs: BEFORE_RESET,
+    });
+    const active = sections.find((section) => section.key === "active");
+    expect(active?.rows.map((row) => [row.title, row.state])).toEqual([
+      ["limited", "limited"],
+      ["working", "working"],
+    ]);
+    expect(active?.rows[0]).toMatchObject({
+      statusLabel: "Limited",
+      errorDetail: null,
+      usageLimit: { phase: "limited", resetAt: "2026-08-23T15:00:00.000Z" },
+    });
+  });
+
+  it("falls back to Error when the thread targets another instance", () => {
+    const [row] = rows({
+      threads: [
+        limitedThread("switched", {
+          modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" },
+        }),
+      ],
+      nowMs: BEFORE_RESET,
+    });
+    expect(row).toMatchObject({ state: "error", statusLabel: "Error" });
+  });
+
+  it("labels the row Limit reset after the reset", () => {
+    const [row] = rows({ threads: [limitedThread("reset")], nowMs: AFTER_RESET });
+    expect(row).toMatchObject({
+      state: "limited",
+      statusLabel: "Limit reset",
+      usageLimit: { phase: "reset" },
+    });
+  });
+
+  it("gives the sidebar a Limited pill unless the thread is working", () => {
+    expect(resolveThreadStatusPill({ thread: limitedThread("pill") })).toMatchObject({
+      label: "Limited",
+      pulse: false,
+    });
+    expect(
+      resolveThreadStatusPill({
+        thread: limitedThread("pill-working", {
+          latestTurn: {
+            turnId: TurnId.make("turn-2"),
+            state: "running",
+            requestedAt: "2026-08-23T11:00:00.000Z",
+            startedAt: "2026-08-23T11:00:00.000Z",
+            completedAt: null,
+            assistantMessageId: null,
+          },
+        }),
+      })?.label,
+    ).toBe("Working");
+  });
+});
+
+describe("delegated thread folding", () => {
+  const delegatedFrom = (parent: string, root: string = parent) => ({
+    parentThreadId: ThreadId.make(parent),
+    rootThreadId: ThreadId.make(root),
+    relationship: "delegated",
+  });
+  const working = { backgroundLiveness: "working" as const };
+  const settled = {
+    settledOverride: "settled" as const,
+    settledAt: "2026-08-23T12:00:00.000Z",
+  };
+  const ids = (rows: ReadonlyArray<{ readonly threadId: string }> | undefined) =>
+    (rows ?? []).map((row) => row.threadId);
+  const section = (sections: ReturnType<typeof build>, key: string) =>
+    sections.find((candidate) => candidate.key === key);
+
+  it("folds an idle child under its idle parent and out of Recent", () => {
+    const sections = build({
+      threads: [thread("parent"), thread("child", { lineage: delegatedFrom("parent") })],
+    });
+    expect(sections.map((candidate) => candidate.key)).toEqual(["recent"]);
+    expect(ids(section(sections, "recent")?.rows)).toEqual(["parent"]);
+    expect(ids(section(sections, "recent")?.rows[0]?.delegatedChildren)).toEqual(["child"]);
+  });
+
+  it("keeps a working child in Active now under a Recent parent", () => {
+    const sections = build({
+      threads: [
+        thread("parent"),
+        thread("child", { lineage: delegatedFrom("parent"), ...working }),
+      ],
+    });
+    expect(ids(section(sections, "active")?.rows)).toEqual(["child"]);
+    expect(ids(section(sections, "recent")?.rows)).toEqual(["parent"]);
+    expect(section(sections, "recent")?.rows[0]?.delegatedChildren).toEqual([]);
+  });
+
+  it("keeps a needs-input child in Needs input under a working parent", () => {
+    const sections = build({
+      threads: [
+        thread("parent", working),
+        thread("child", { lineage: delegatedFrom("parent"), hasPendingApprovals: true }),
+      ],
+    });
+    expect(ids(section(sections, "active")?.rows)).toEqual(["parent"]);
+    expect(ids(section(sections, "needs-input")?.rows)).toEqual(["child"]);
+  });
+
+  it("folds an idle child into a working host in Active now", () => {
+    const sections = build({
+      threads: [thread("parent", working), thread("child", { lineage: delegatedFrom("parent") })],
+    });
+    expect(sections.map((candidate) => candidate.key)).toEqual(["active"]);
+    expect(ids(section(sections, "active")?.rows[0]?.delegatedChildren)).toEqual(["child"]);
+  });
+
+  it("folds a settled child under a Recent parent but not a Recent child under a Settled one", () => {
+    const settledChild = build({
+      threads: [
+        thread("parent"),
+        thread("child", { lineage: delegatedFrom("parent"), ...settled }),
+      ],
+    });
+    expect(settledChild.map((candidate) => candidate.key)).toEqual(["recent"]);
+    expect(ids(section(settledChild, "recent")?.rows[0]?.delegatedChildren)).toEqual(["child"]);
+
+    const recentChild = build({
+      threads: [thread("parent", settled), thread("child", { lineage: delegatedFrom("parent") })],
+    });
+    expect(ids(section(recentChild, "recent")?.rows)).toEqual(["child"]);
+    expect(ids(section(recentChild, "settled")?.rows)).toEqual(["parent"]);
+    expect(section(recentChild, "settled")?.rows[0]?.delegatedChildren).toEqual([]);
+  });
+
+  it("keeps pinned and focused children in Pinned and Focus", () => {
+    const sections = build({
+      aiFocusEnabled: true,
+      pinnedThreadKeys: new Set(["machine-a:pinned-child"]),
+      nowMs: Date.parse("2026-08-25T10:00:00.000Z"),
+      autoSettleAfterDays: null,
+      threads: [
+        thread("parent"),
+        thread("pinned-child", { lineage: delegatedFrom("parent") }),
+        thread("focused-child", {
+          lineage: delegatedFrom("parent"),
+          priority: {
+            tier: "now",
+            confidence: "high",
+            reason: "A release decision is waiting on this task.",
+            inputFingerprint: "fingerprint" as never,
+            batchId: "batch" as never,
+            modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+            rankedAt: "2026-08-25T09:59:00.000Z",
+            usableUntil: "2026-08-25T10:09:00.000Z",
+          },
+        }),
+      ],
+    });
+    expect(ids(section(sections, "pinned")?.rows)).toEqual(["pinned-child"]);
+    expect(ids(section(sections, "focus")?.rows)).toEqual(["focused-child"]);
+    expect(section(sections, "recent")?.rows[0]?.delegatedChildren).toEqual([]);
+  });
+
+  it("flattens a grandchild under the topmost visible host", () => {
+    const sections = build({
+      threads: [
+        thread("parent"),
+        thread("child", { lineage: delegatedFrom("parent") }),
+        thread("grandchild", { lineage: delegatedFrom("child", "parent") }),
+      ],
+    });
+    const recent = section(sections, "recent");
+    expect(ids(recent?.rows)).toEqual(["parent"]);
+    expect(ids(recent?.rows[0]?.delegatedChildren)).toEqual(["child", "grandchild"]);
+    expect(recent?.rows[0]?.delegatedChildren[0]?.delegatedChildren).toEqual([]);
+  });
+
+  it("shows flat rows for a text search and when nesting is off", () => {
+    const threads = [
+      thread("task-parent"),
+      thread("task-child", { lineage: delegatedFrom("task-parent") }),
+    ];
+    const searched = build({ threads, filters: { ...ALL_FILTERS, query: "task" } });
+    expect(ids(section(searched, "recent")?.rows)).toEqual(["task-child", "task-parent"]);
+
+    const flat = build({ threads, nestDelegated: false });
+    expect(ids(section(flat, "recent")?.rows)).toEqual(["task-child", "task-parent"]);
+    expect(section(flat, "recent")?.rows.every((row) => row.delegatedChildren.length === 0)).toBe(
+      true,
+    );
+  });
+
+  it("leaves a child top-level when a status filter hides its host", () => {
+    const sections = build({
+      threads: [thread("parent", working), thread("child", { lineage: delegatedFrom("parent") })],
+      filters: { ...ALL_FILTERS, status: "recent" },
+    });
+    expect(sections.map((candidate) => candidate.key)).toEqual(["recent"]);
+    expect(ids(section(sections, "recent")?.rows)).toEqual(["child"]);
   });
 });

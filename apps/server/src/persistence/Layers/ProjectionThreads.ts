@@ -14,14 +14,24 @@ import {
   SetProjectionThreadManualPositionInput,
   type ProjectionThreadRepositoryShape,
 } from "../Services/ProjectionThreads.ts";
-import { DEFAULT_AGENT_TOKEN_MODE, ModelSelection, ThreadGoal } from "@ryco/contracts";
+import {
+  DEFAULT_AGENT_TOKEN_MODE,
+  ModelSelection,
+  ThreadGoal,
+  ThreadId,
+  ThreadUsageLimit,
+} from "@ryco/contracts";
 
 const ProjectionThreadDbRow = ProjectionThread.mapFields(
   Struct.assign({
     modelSelection: Schema.fromJsonString(ModelSelection),
     goal: Schema.NullOr(Schema.fromJsonString(ThreadGoal)),
+    usageLimit: Schema.NullOr(Schema.fromJsonString(ThreadUsageLimit)),
   }),
 );
+
+/** Bounds one recovery sweep; the oldest limits are swept first. */
+const USAGE_LIMITED_THREAD_SWEEP_LIMIT = 500;
 type ProjectionThreadDbRow = typeof ProjectionThreadDbRow.Type;
 
 const makeProjectionThreadRepository = Effect.gen(function* () {
@@ -57,7 +67,11 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           pending_approval_count,
           pending_user_input_count,
           has_actionable_proposed_plan,
-          deleted_at
+          usage_limit_json,
+          deleted_at,
+          lineage_parent_thread_id,
+          lineage_root_thread_id,
+          lineage_relationship
         )
         VALUES (
           ${row.threadId},
@@ -85,7 +99,11 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           ${row.pendingApprovalCount},
           ${row.pendingUserInputCount},
           ${row.hasActionableProposedPlan},
-          ${row.deletedAt}
+          ${row.usageLimit == null ? null : JSON.stringify(row.usageLimit)},
+          ${row.deletedAt},
+          ${row.lineageParentThreadId},
+          ${row.lineageRootThreadId},
+          ${row.lineageRelationship}
         )
         ON CONFLICT (thread_id)
         DO UPDATE SET
@@ -113,7 +131,11 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           pending_approval_count = excluded.pending_approval_count,
           pending_user_input_count = excluded.pending_user_input_count,
           has_actionable_proposed_plan = excluded.has_actionable_proposed_plan,
-          deleted_at = excluded.deleted_at
+          usage_limit_json = excluded.usage_limit_json,
+          deleted_at = excluded.deleted_at,
+          lineage_parent_thread_id = excluded.lineage_parent_thread_id,
+          lineage_root_thread_id = excluded.lineage_root_thread_id,
+          lineage_relationship = excluded.lineage_relationship
       `,
   });
 
@@ -148,7 +170,11 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           pending_approval_count AS "pendingApprovalCount",
           pending_user_input_count AS "pendingUserInputCount",
           has_actionable_proposed_plan AS "hasActionableProposedPlan",
-          deleted_at AS "deletedAt"
+          usage_limit_json AS "usageLimit",
+          deleted_at AS "deletedAt",
+          lineage_parent_thread_id AS "lineageParentThreadId",
+          lineage_root_thread_id AS "lineageRootThreadId",
+          lineage_relationship AS "lineageRelationship"
         FROM projection_threads
         WHERE thread_id = ${threadId}
       `,
@@ -185,7 +211,11 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           pending_approval_count AS "pendingApprovalCount",
           pending_user_input_count AS "pendingUserInputCount",
           has_actionable_proposed_plan AS "hasActionableProposedPlan",
-          deleted_at AS "deletedAt"
+          usage_limit_json AS "usageLimit",
+          deleted_at AS "deletedAt",
+          lineage_parent_thread_id AS "lineageParentThreadId",
+          lineage_root_thread_id AS "lineageRootThreadId",
+          lineage_relationship AS "lineageRelationship"
         FROM projection_threads
         WHERE project_id = ${projectId}
         ORDER BY created_at ASC, thread_id ASC
@@ -231,6 +261,21 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
       `,
   });
 
+  const listUsageLimitedThreadRows = SqlSchema.findAll({
+    Request: Schema.Void,
+    Result: Schema.Struct({ threadId: ThreadId }),
+    execute: () =>
+      sql`
+        SELECT thread_id AS "threadId"
+        FROM projection_threads
+        WHERE usage_limit_json IS NOT NULL
+          AND deleted_at IS NULL
+          AND archived_at IS NULL
+        ORDER BY updated_at ASC, thread_id ASC
+        LIMIT ${USAGE_LIMITED_THREAD_SWEEP_LIMIT}
+      `,
+  });
+
   const upsert: ProjectionThreadRepositoryShape["upsert"] = (row) =>
     upsertProjectionThreadRow(row).pipe(
       Effect.mapError(toPersistenceSqlError("ProjectionThreadRepository.upsert:query")),
@@ -266,6 +311,15 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
       Effect.mapError(toPersistenceSqlError("ProjectionThreadRepository.setManualPosition:query")),
     );
 
+  const listUsageLimitedThreadIds: ProjectionThreadRepositoryShape["listUsageLimitedThreadIds"] =
+    () =>
+      listUsageLimitedThreadRows(undefined).pipe(
+        Effect.map((rows) => rows.map((row) => row.threadId)),
+        Effect.mapError(
+          toPersistenceSqlError("ProjectionThreadRepository.listUsageLimitedThreadIds:query"),
+        ),
+      );
+
   return {
     upsert,
     getById,
@@ -274,6 +328,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
     attachToWorktree,
     setManualBucket,
     setManualPosition,
+    listUsageLimitedThreadIds,
   } satisfies ProjectionThreadRepositoryShape;
 });
 

@@ -38,6 +38,7 @@ import {
   ThreadTurnDiff,
   ThreadTurnStartRequestedPayload,
 } from "./orchestration.ts";
+import { TurnId } from "./baseSchemas.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
 import { THREAD_GOAL_OBJECTIVE_MAX_CHARS } from "./threadGoal.ts";
 
@@ -799,6 +800,157 @@ it.effect("defaults settlement fields on historical thread snapshots", () =>
     assert.strictEqual(parsedShell.settledAt, null);
     assert.strictEqual(parsedThread.settledOverride, null);
     assert.strictEqual(parsedThread.settledAt, null);
+  }),
+);
+
+const lineageShellFixture = {
+  id: "thread-lineage-child",
+  projectId: "project-1",
+  title: "Delegated child",
+  modelSelection: {
+    instanceId: "codex",
+    model: "gpt-5.4",
+  },
+  runtimeMode: "full-access",
+  interactionMode: "default",
+  branch: null,
+  worktreePath: null,
+  latestTurn: null,
+  createdAt: "2026-01-01T00:00:00.000Z",
+  updatedAt: "2026-01-01T00:00:00.000Z",
+  archivedAt: null,
+  session: null,
+  latestUserMessageAt: null,
+  hasPendingApprovals: false,
+  hasPendingUserInput: false,
+  hasActionableProposedPlan: false,
+};
+
+const threadCreateCommandFixture = {
+  type: "thread.create",
+  commandId: "cmd-thread-create-lineage",
+  threadId: "thread-lineage-child",
+  projectId: "project-1",
+  title: "Delegated child",
+  modelSelection: {
+    instanceId: "codex",
+    model: "gpt-5.4",
+  },
+  runtimeMode: "full-access",
+  interactionMode: "default",
+  branch: null,
+  worktreePath: null,
+  createdAt: "2026-01-01T00:00:00.000Z",
+};
+
+it.effect("decodes thread shells with and without lineage, including unknown relationships", () =>
+  Effect.gen(function* () {
+    const root = yield* decodeOrchestrationThreadShell(lineageShellFixture);
+    assert.notProperty(root, "lineage");
+
+    const child = yield* decodeOrchestrationThreadShell({
+      ...lineageShellFixture,
+      lineage: {
+        parentThreadId: "thread-parent",
+        rootThreadId: "thread-root",
+        relationship: "delegated",
+      },
+    });
+    assert.deepStrictEqual(child.lineage, {
+      parentThreadId: "thread-parent",
+      rootThreadId: "thread-root",
+      relationship: "delegated",
+    });
+
+    const future = yield* decodeOrchestrationThreadShell({
+      ...lineageShellFixture,
+      lineage: {
+        parentThreadId: "thread-parent",
+        rootThreadId: "thread-parent",
+        relationship: "future-kind",
+      },
+    });
+    assert.strictEqual(future.lineage?.relationship, "future-kind");
+
+    const thread = yield* decodeOrchestrationThread({
+      ...lineageShellFixture,
+      lineage: {
+        parentThreadId: "thread-parent",
+        rootThreadId: "thread-root",
+        relationship: "delegated",
+      },
+      deletedAt: null,
+      messages: [],
+      proposedPlans: [],
+      activities: [],
+      checkpoints: [],
+    });
+    assert.strictEqual(thread.lineage?.parentThreadId, "thread-parent");
+  }),
+);
+
+it.effect("keeps thread.delegated.create out of client commands and strips forged lineage", () =>
+  Effect.gen(function* () {
+    const forged = yield* Effect.exit(
+      decodeClientOrchestrationCommand({
+        ...threadCreateCommandFixture,
+        type: "thread.delegated.create",
+        parentThreadId: "thread-parent",
+      }),
+    );
+    assert.strictEqual(forged._tag, "Failure");
+
+    const stripped = yield* decodeClientOrchestrationCommand({
+      ...threadCreateCommandFixture,
+      parentThreadId: "thread-parent",
+      lineage: {
+        parentThreadId: "thread-parent",
+        rootThreadId: "thread-parent",
+        relationship: "delegated",
+      },
+    });
+    assert.strictEqual(stripped.type, "thread.create");
+    assert.notProperty(stripped, "parentThreadId");
+    assert.notProperty(stripped, "lineage");
+  }),
+);
+
+it.effect("accepts internal thread.delegated.create and round-trips thread.created lineage", () =>
+  Effect.gen(function* () {
+    const delegated = yield* decodeOrchestrationCommand({
+      ...threadCreateCommandFixture,
+      type: "thread.delegated.create",
+      parentThreadId: "thread-parent",
+    });
+    if (delegated.type !== "thread.delegated.create") {
+      assert.fail(`Expected thread.delegated.create, got ${delegated.type}`);
+    }
+    assert.strictEqual(delegated.parentThreadId, "thread-parent");
+
+    const payloadBase = {
+      threadId: "thread-lineage-child",
+      projectId: "project-1",
+      title: "Delegated child",
+      modelSelection: { instanceId: "codex", model: "gpt-5.4" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    };
+    const lineage = {
+      parentThreadId: "thread-parent",
+      rootThreadId: "thread-root",
+      relationship: "delegated",
+    };
+    const withLineage = yield* decodeThreadCreatedPayload({ ...payloadBase, lineage });
+    const encodedWithLineage = yield* Schema.encodeEffect(ThreadCreatedPayload)(withLineage);
+    assert.deepStrictEqual(encodedWithLineage.lineage, lineage);
+
+    const withoutLineage = yield* decodeThreadCreatedPayload(payloadBase);
+    const encodedWithoutLineage = yield* Schema.encodeEffect(ThreadCreatedPayload)(withoutLineage);
+    assert.notProperty(encodedWithoutLineage, "lineage");
   }),
 );
 
@@ -1564,5 +1716,222 @@ it.effect("decodes server-owned sidebar undo requests without client restoration
       }),
     );
     assert.strictEqual(missingReceipt._tag, "Failure");
+  }),
+);
+
+it.effect("decodes thread.session-set with and without a released turn", () =>
+  Effect.gen(function* () {
+    const session = {
+      threadId: "thread-1",
+      status: "ready",
+      providerName: "codex",
+      runtimeMode: "full-access",
+      activeTurnId: null,
+      lastError: null,
+      updatedAt: "2026-01-02T00:00:00.000Z",
+    } as const;
+    const eventBase = {
+      aggregateKind: "thread",
+      aggregateId: "thread-1",
+      occurredAt: "2026-01-02T00:00:00.000Z",
+      causationEventId: null,
+      metadata: {},
+      type: "thread.session-set",
+      commandId: "cmd-session-1",
+      correlationId: "cmd-session-1",
+    } as const;
+
+    const legacy = yield* decodeOrchestrationEvent({
+      ...eventBase,
+      sequence: 1,
+      eventId: "event-session-legacy",
+      payload: { threadId: "thread-1", session },
+    });
+    if (legacy.type !== "thread.session-set") {
+      assert.fail(`Expected thread.session-set, got ${legacy.type}`);
+    }
+    assert.strictEqual(legacy.payload.releasedTurn, undefined);
+
+    const released = yield* decodeOrchestrationEvent({
+      ...eventBase,
+      sequence: 2,
+      eventId: "event-session-released",
+      payload: {
+        threadId: "thread-1",
+        session,
+        releasedTurn: {
+          turnId: "turn-1",
+          state: "interrupted",
+          completedAt: "2026-01-02T00:00:00.000Z",
+          // `reason` is an open string, so a value this build does not know still decodes.
+          reason: "some-future-reason",
+        },
+      },
+    });
+    if (released.type !== "thread.session-set") {
+      assert.fail(`Expected thread.session-set, got ${released.type}`);
+    }
+    assert.deepEqual(released.payload.releasedTurn, {
+      turnId: TurnId.make("turn-1"),
+      state: "interrupted",
+      completedAt: "2026-01-02T00:00:00.000Z",
+      reason: "some-future-reason",
+    });
+
+    const runningIsNotTerminal = yield* Effect.exit(
+      decodeOrchestrationEvent({
+        ...eventBase,
+        sequence: 3,
+        eventId: "event-session-invalid",
+        payload: {
+          threadId: "thread-1",
+          session,
+          releasedTurn: {
+            turnId: "turn-1",
+            state: "running",
+            completedAt: "2026-01-02T00:00:00.000Z",
+            reason: "provider-turn-completed",
+          },
+        },
+      }),
+    );
+    assert.strictEqual(runningIsNotTerminal._tag, "Failure");
+  }),
+);
+
+it.effect("decodes a turn outcome hint only on the internal thread.session.set command", () =>
+  Effect.gen(function* () {
+    const session = {
+      threadId: "thread-1",
+      status: "ready",
+      providerName: "codex",
+      runtimeMode: "full-access",
+      activeTurnId: null,
+      lastError: null,
+      updatedAt: "2026-01-02T00:00:00.000Z",
+    } as const;
+    const command = yield* decodeOrchestrationCommand({
+      type: "thread.session.set",
+      commandId: "cmd-session-1",
+      threadId: "thread-1",
+      session,
+      turnOutcome: {
+        state: "completed",
+        reason: "provider-turn-completed",
+        completedAt: "2026-01-02T00:00:00.000Z",
+      },
+      createdAt: "2026-01-02T00:00:00.000Z",
+    });
+    if (command.type !== "thread.session.set") {
+      assert.fail(`Expected thread.session.set, got ${command.type}`);
+    }
+    assert.deepEqual(command.turnOutcome, {
+      state: "completed",
+      reason: "provider-turn-completed",
+      completedAt: "2026-01-02T00:00:00.000Z",
+    });
+
+    const fromClient = yield* Effect.exit(
+      decodeClientOrchestrationCommand({
+        type: "thread.session.set",
+        commandId: "cmd-session-2",
+        threadId: "thread-1",
+        session,
+        turnOutcome: { state: "completed", reason: "forged" },
+        createdAt: "2026-01-02T00:00:00.000Z",
+      }),
+    );
+    assert.strictEqual(fromClient._tag, "Failure");
+  }),
+);
+
+const usageLimitShell = {
+  id: "thread-usage-limit",
+  projectId: "project-1",
+  title: "Limited thread",
+  modelSelection: { instanceId: "claudeAgent", model: "claude-sonnet-4-5" },
+  runtimeMode: "full-access",
+  interactionMode: "default",
+  branch: null,
+  worktreePath: null,
+  latestTurn: null,
+  createdAt: "2026-01-01T00:00:00.000Z",
+  updatedAt: "2026-01-01T00:00:00.000Z",
+  archivedAt: null,
+  session: null,
+  latestUserMessageAt: null,
+  hasPendingApprovals: false,
+  hasPendingUserInput: false,
+  hasActionableProposedPlan: false,
+};
+
+it.effect("decodes a thread shell with and without a usage limit", () =>
+  Effect.gen(function* () {
+    const legacy = yield* decodeOrchestrationThreadShell(usageLimitShell);
+    assert.strictEqual(legacy.usageLimit, undefined);
+    const limited = yield* decodeOrchestrationThreadShell({
+      ...usageLimitShell,
+      usageLimit: {
+        limitId: "usage-limit:thread-usage-limit:turn-1",
+        provider: "claudeAgent",
+        providerInstanceId: "claudeAgent",
+        turnId: "turn-1",
+        message: "Claude usage limit reached.",
+        limitedAt: "2026-01-01T00:00:00.000Z",
+        resetAt: null,
+        autoResume: null,
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      },
+    });
+    assert.strictEqual(limited.usageLimit?.turnId, "turn-1");
+  }),
+);
+
+it.effect("accepts a usage-limit resume guard on client turn starts", () =>
+  Effect.gen(function* () {
+    const parsed = yield* decodeClientOrchestrationCommand({
+      ...clientTurnWithAttachments([]),
+      usageLimitResumeGuard: {
+        limitId: "usage-limit:attachment-thread:turn-1",
+        origin: "manual",
+      },
+    });
+    assert.strictEqual(parsed.type, "thread.turn.start");
+    if (parsed.type !== "thread.turn.start") return;
+    assert.deepStrictEqual(parsed.usageLimitResumeGuard, {
+      limitId: "usage-limit:attachment-thread:turn-1",
+      origin: "manual",
+    });
+  }),
+);
+
+it.effect("lets clients configure a usage limit but never record one", () =>
+  Effect.gen(function* () {
+    const configure = yield* decodeClientOrchestrationCommand({
+      type: "thread.usage-limit.configure",
+      commandId: "cmd-configure",
+      threadId: "thread-usage-limit",
+      limitId: "usage-limit:thread-usage-limit:turn-1",
+      autoResume: true,
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    assert.strictEqual(configure.type, "thread.usage-limit.configure");
+
+    const record = {
+      type: "thread.usage-limit.record",
+      commandId: "cmd-record",
+      threadId: "thread-usage-limit",
+      limitId: "usage-limit:thread-usage-limit:turn-1",
+      provider: "claudeAgent",
+      providerInstanceId: "claudeAgent",
+      turnId: "turn-1",
+      message: "Claude usage limit reached.",
+      resetAt: null,
+      createdAt: "2026-01-01T00:00:00.000Z",
+    };
+    const forged = yield* Effect.exit(decodeClientOrchestrationCommand(record));
+    assert.strictEqual(forged._tag, "Failure");
+    const internal = yield* decodeOrchestrationCommand(record);
+    assert.strictEqual(internal.type, "thread.usage-limit.record");
   }),
 );

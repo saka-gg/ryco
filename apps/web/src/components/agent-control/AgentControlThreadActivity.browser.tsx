@@ -187,3 +187,52 @@ it("keeps pending child results and uncertain delivery visible in the compact su
     .toHaveAccessibleDescription("1 child result pending 1 needs attention");
   await expect.element(screen.getByTestId("agent-control-proposal-card")).not.toBeInTheDocument();
 });
+
+it("names the creating thread from server lineage alone", async () => {
+  const screen = await render(
+    <AgentControlThreadActivity
+      environmentId={environmentId}
+      selection={selectAgentControlThreadActivity(EMPTY_AGENT_CONTROL_QUEUE_STATE, child, {
+        parentThreadId: parent,
+        rootThreadId: parent,
+        relationship: "delegated",
+      })}
+      getThreadTitle={getThreadTitle}
+      submittingIds={[]}
+      decisionErrorsById={{}}
+      disabledReason={null}
+      onDecide={() => {}}
+    />,
+  );
+  await expect.element(screen.getByText("Delegated from")).toBeVisible();
+  await expect
+    .element(screen.getByRole("link", { name: "Coordinator" }))
+    .toHaveAttribute("href", "/fixture-env/parent-uuid");
+  await expect.element(screen.getByText("Managed by")).not.toBeInTheDocument();
+});
+
+it("shows the creator and a different current manager on one line", async () => {
+  const reviewer = ThreadId.make("reviewer-uuid");
+  const screen = await render(
+    <AgentControlThreadActivity
+      environmentId={environmentId}
+      selection={{
+        pending: [],
+        activity: [],
+        delegatedFromThreadId: parent,
+        managerThreadId: reviewer,
+      }}
+      getThreadTitle={(id) => (id === reviewer ? "Reviewer" : getThreadTitle(id))}
+      submittingIds={[]}
+      decisionErrorsById={{}}
+      disabledReason={null}
+      onDecide={() => {}}
+    />,
+  );
+  await expect
+    .element(screen.getByTestId("agent-control-approvals"))
+    .toHaveTextContent(/Delegated from\s*Coordinator\s*·\s*Managed by\s*Reviewer/);
+  await expect
+    .element(screen.getByRole("link", { name: "Reviewer" }))
+    .toHaveAttribute("href", "/fixture-env/reviewer-uuid");
+});

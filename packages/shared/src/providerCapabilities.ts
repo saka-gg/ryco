@@ -1,4 +1,4 @@
-import type { ProviderDriverKind } from "@ryco/contracts";
+import type { ProviderDriverKind, ServerProviderCompatibilityStatus } from "@ryco/contracts";
 
 /**
  * Every driver now accepts general file attachments. Providers without a
@@ -9,4 +9,11 @@ import type { ProviderDriverKind } from "@ryco/contracts";
  */
 export function providerSupportsGeneralFileAttachments(_provider: ProviderDriverKind): boolean {
   return true;
+}
+
+/** Ratings for which Ryco refuses to install a version and stops offering it as an update. */
+export function isBlockingProviderCompatibilityStatus(
+  status: ServerProviderCompatibilityStatus | null | undefined,
+): boolean {
+  return status === "unsupported" || status === "broken";
 }

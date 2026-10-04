@@ -70,6 +70,27 @@ describe("decodeGitHubPullRequestJson", () => {
     expect(result.success.number).toBe(42);
     expect(result.success.state).toBe("open");
     expect(result.success.mergeability).toBe("conflicting");
+    expect(result.success.mergedAt).toBeUndefined();
+    expect(result.success.closedAt).toBeUndefined();
+  });
+
+  it("decodes merge and close times", () => {
+    const raw = JSON.stringify({
+      number: 42,
+      title: "My PR",
+      url: "https://github.com/owner/repo/pull/42",
+      baseRefName: "main",
+      headRefName: "feature/my-pr",
+      state: "MERGED",
+      mergedAt: "2026-05-01T10:00:00Z",
+      closedAt: "2026-05-01T10:00:05Z",
+    });
+    const result = decodeGitHubPullRequestJson(raw);
+    expect(Result.isSuccess(result)).toBe(true);
+    if (!Result.isSuccess(result)) return;
+    expect(result.success.state).toBe("merged");
+    expect(result.success.mergedAt?.epochMilliseconds).toBe(Date.parse("2026-05-01T10:00:00Z"));
+    expect(result.success.closedAt?.epochMilliseconds).toBe(Date.parse("2026-05-01T10:00:05Z"));
   });
 });
 

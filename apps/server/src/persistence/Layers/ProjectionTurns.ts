@@ -6,6 +6,7 @@ import { Effect, Layer, Option, Schema, Struct } from "effect";
 import { toPersistenceDecodeError, toPersistenceSqlError } from "../Errors.ts";
 import {
   ClearCheckpointTurnConflictInput,
+  DeleteProjectionPendingTurnStartByMessageInput,
   DeleteProjectionTurnsByThreadInput,
   GetProjectionPendingTurnStartInput,
   GetProjectionTurnByTurnIdInput,
@@ -98,6 +99,20 @@ const makeProjectionTurnRepository = Effect.gen(function* () {
       sql`
         DELETE FROM projection_turns
         WHERE thread_id = ${threadId}
+          AND turn_id IS NULL
+          AND state = 'pending'
+          AND checkpoint_turn_count IS NULL
+      `,
+  });
+
+  const clearPendingProjectionTurnByMessage = SqlSchema.void({
+    Request: DeleteProjectionPendingTurnStartByMessageInput,
+    // Served by the projection_turns_user_message index (migration 070).
+    execute: ({ threadId, messageId }) =>
+      sql`
+        DELETE FROM projection_turns
+        WHERE thread_id = ${threadId}
+          AND pending_message_id = ${messageId}
           AND turn_id IS NULL
           AND state = 'pending'
           AND checkpoint_turn_count IS NULL
@@ -292,6 +307,14 @@ const makeProjectionTurnRepository = Effect.gen(function* () {
         ),
       );
 
+  const deletePendingTurnStartByMessage: ProjectionTurnRepositoryShape["deletePendingTurnStartByMessage"] =
+    (input) =>
+      clearPendingProjectionTurnByMessage(input).pipe(
+        Effect.mapError(
+          toPersistenceSqlError("ProjectionTurnRepository.deletePendingTurnStartByMessage:query"),
+        ),
+      );
+
   const listByThreadId: ProjectionTurnRepositoryShape["listByThreadId"] = (input) =>
     listProjectionTurnsByThread(input).pipe(
       Effect.mapError(
@@ -338,6 +361,7 @@ const makeProjectionTurnRepository = Effect.gen(function* () {
     replacePendingTurnStart,
     getPendingTurnStartByThreadId,
     deletePendingTurnStartByThreadId,
+    deletePendingTurnStartByMessage,
     listByThreadId,
     getByTurnId,
     clearCheckpointTurnConflict,

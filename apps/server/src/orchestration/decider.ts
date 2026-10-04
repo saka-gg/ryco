@@ -3,11 +3,19 @@ import {
   REMOVED_PROJECT_MEMORY_MESSAGE,
 } from "@ryco/shared/retiredFeatures";
 import { canSnoozeThread } from "@ryco/shared/threadSnooze";
+import { applicableUsageLimit } from "@ryco/shared/usageLimit";
 import type {
   AgentTokenMode,
+  CommandId,
+  MessageId,
   OrchestrationCommand,
   OrchestrationEvent,
   OrchestrationReadModel,
+  ThreadLineage,
+  ThreadUsageLimit,
+  ThreadId,
+  TurnId,
+  TurnSteerRejectionReason,
 } from "@ryco/contracts";
 import {
   CONTEXT_HANDOFF_ACTIVITY_KIND,
@@ -19,6 +27,10 @@ import {
 import { modelSelectionRequiresContextHandoff } from "@ryco/shared/model";
 import { threadSettlementInput } from "./threadSettlementInput.ts";
 import { canSettleThread, type ThreadSettlementBlocker } from "@ryco/shared/threadSettlement";
+import {
+  TURN_STEER_FAILED_ACTIVITY_KIND,
+  turnSteerRejectionActivityId,
+} from "@ryco/shared/turnSteer";
 import { Effect } from "effect";
 
 import { OrchestrationCommandInvariantError } from "./Errors.ts";
@@ -35,7 +47,16 @@ import {
   requireThreadIdleForContextHandoff,
   requireWorktree,
 } from "./commandInvariants.ts";
+import {
+  makeCheckpointRevertActivity,
+  requireNoPendingCheckpointRevert,
+  requireThreadReadyForCheckpointRevert,
+} from "./checkpointRevertPolicy.ts";
 import { projectEvent } from "./projector.ts";
+import { restartContinuationTargetBlocker } from "./restartContinuationPolicy.ts";
+import { resolveDelegatedChildLineage } from "./threadLineage.ts";
+import { TURN_FINALIZATION_REASON, resolveReleasedTurn } from "./turnFinalization.ts";
+import { latestUserMessage } from "./userMessageOrder.ts";
 
 const nowIso = () => new Date().toISOString();
 const defaultMetadata: Omit<OrchestrationEvent, "sequence" | "type" | "payload"> = {
@@ -73,6 +94,131 @@ type PlannedOrchestrationEvent = Omit<OrchestrationEvent, "sequence">;
 
 const normalizeTokenMode = (mode: AgentTokenMode | undefined): AgentTokenMode =>
   mode ?? DEFAULT_AGENT_TOKEN_MODE;
+
+type ThreadCreateFields = Omit<Extract<OrchestrationCommand, { type: "thread.create" }>, "type">;
+
+/**
+ * Shared body of `thread.create` and `thread.delegated.create`. `command` is the
+ * original command (used for invariant-error `commandType`); `lineage` is only
+ * ever computed by the decider, never taken from input.
+ */
+const decideThreadCreated = Effect.fn("decideThreadCreated")(function* ({
+  readModel,
+  command,
+  fields,
+  lineage,
+}: {
+  readonly readModel: OrchestrationReadModel;
+  readonly command: OrchestrationCommand;
+  readonly fields: ThreadCreateFields;
+  readonly lineage: ThreadLineage | null;
+}) {
+  yield* requireProject({
+    readModel,
+    command,
+    projectId: fields.projectId,
+  });
+  yield* requireThreadAbsent({
+    readModel,
+    command,
+    threadId: fields.threadId,
+  });
+  const tokenMode = normalizeTokenMode(fields.tokenMode);
+  const event: PlannedOrchestrationEvent = {
+    ...withEventBase({
+      aggregateKind: "thread",
+      aggregateId: fields.threadId,
+      occurredAt: fields.createdAt,
+      commandId: fields.commandId,
+    }),
+    type: "thread.created",
+    payload: {
+      threadId: fields.threadId,
+      projectId: fields.projectId,
+      title: fields.title,
+      modelSelection: fields.modelSelection,
+      runtimeMode: fields.runtimeMode,
+      interactionMode: fields.interactionMode,
+      tokenMode,
+      branch: fields.branch,
+      worktreePath: fields.worktreePath,
+      createdAt: fields.createdAt,
+      updatedAt: fields.createdAt,
+      ...(lineage === null ? {} : { lineage }),
+    },
+  };
+  return event;
+});
+
+const STEER_TURN_ENDED_ERROR =
+  "The turn finished before this message could be steered. It stays queued and is sent next.";
+
+/**
+ * A steer that did not reach the turn. `deferred` rows are quiet (info tone): the message stays
+ * queued and the client sends it as the next turn. `failed` rows are real provider errors.
+ */
+function planTurnSteerRejection(input: {
+  readonly commandId: CommandId;
+  readonly requestCommandId: CommandId;
+  readonly threadId: ThreadId;
+  readonly expectedTurnId: TurnId;
+  readonly messageId: MessageId;
+  readonly error: string;
+  readonly reason: TurnSteerRejectionReason;
+  /** The provider may have received it: clients hold the message for an explicit retry. */
+  readonly deliveryUncertain?: boolean | undefined;
+  readonly occurredAt: string;
+}): ReadonlyArray<PlannedOrchestrationEvent> {
+  const deliveryUncertain = input.deliveryUncertain === true ? { deliveryUncertain: true } : {};
+  const rejectedEvent: PlannedOrchestrationEvent = {
+    ...withEventBase({
+      aggregateKind: "thread",
+      aggregateId: input.threadId,
+      occurredAt: input.occurredAt,
+      commandId: input.commandId,
+    }),
+    type: "thread.turn-steer-rejected",
+    payload: {
+      threadId: input.threadId,
+      messageId: input.messageId,
+      expectedTurnId: input.expectedTurnId,
+      error: input.error,
+      reason: input.reason,
+      ...deliveryUncertain,
+      resolvedAt: input.occurredAt,
+    },
+  };
+  const deferred = input.reason === "deferred";
+  const activityEvent: PlannedOrchestrationEvent = {
+    ...withEventBase({
+      aggregateKind: "thread",
+      aggregateId: input.threadId,
+      occurredAt: input.occurredAt,
+      commandId: input.commandId,
+    }),
+    causationEventId: rejectedEvent.eventId,
+    type: "thread.activity-appended",
+    payload: {
+      threadId: input.threadId,
+      activity: {
+        id: EventId.make(turnSteerRejectionActivityId(input.requestCommandId)),
+        tone: deferred ? "info" : "error",
+        kind: TURN_STEER_FAILED_ACTIVITY_KIND,
+        summary: deferred ? "Steer deferred" : "Steer failed",
+        payload: {
+          messageId: input.messageId,
+          expectedTurnId: input.expectedTurnId,
+          error: input.error,
+          reason: input.reason,
+          ...deliveryUncertain,
+        },
+        turnId: input.expectedTurnId,
+        createdAt: input.occurredAt,
+      },
+    },
+  };
+  return [rejectedEvent, activityEvent];
+}
 
 function settlementBlockerDetail(blocker: ThreadSettlementBlocker): string {
   switch (blocker) {
@@ -150,6 +296,48 @@ function activityUnsettledEvent(input: {
       reason: "activity",
       updatedAt: input.occurredAt,
     },
+  };
+}
+
+function usageLimitClearedEvent(input: {
+  readonly command: OrchestrationCommand;
+  readonly thread: OrchestrationReadModel["threads"][number];
+  readonly reason: "turn-started" | "archived" | "reverted";
+  readonly occurredAt: string;
+}): PlannedOrchestrationEvent | null {
+  const limit = input.thread.usageLimit ?? null;
+  if (limit === null) return null;
+  return {
+    ...withEventBase({
+      aggregateKind: "thread",
+      aggregateId: input.thread.id,
+      occurredAt: input.occurredAt,
+      commandId: input.command.commandId,
+    }),
+    type: "thread.usage-limit-cleared",
+    payload: {
+      threadId: input.thread.id,
+      limitId: limit.limitId,
+      reason: input.reason,
+      updatedAt: input.occurredAt,
+    },
+  };
+}
+
+function usageLimitSetEvent(input: {
+  readonly command: OrchestrationCommand;
+  readonly threadId: OrchestrationReadModel["threads"][number]["id"];
+  readonly usageLimit: ThreadUsageLimit;
+}): PlannedOrchestrationEvent {
+  return {
+    ...withEventBase({
+      aggregateKind: "thread",
+      aggregateId: input.threadId,
+      occurredAt: input.usageLimit.updatedAt,
+      commandId: input.command.commandId,
+    }),
+    type: "thread.usage-limit-set",
+    payload: { threadId: input.threadId, usageLimit: input.usageLimit },
   };
 }
 
@@ -470,39 +658,52 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "thread.create": {
-      yield* requireProject({
+      const { type: _type, ...fields } = command;
+      return yield* decideThreadCreated({ readModel, command, fields, lineage: null });
+    }
+
+    case "thread.delegated.create": {
+      const { type: _type, parentThreadId, ...fields } = command;
+      if (parentThreadId === fields.threadId) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Thread '${fields.threadId}' cannot be delegated from itself.`,
+        });
+      }
+      const parent = yield* requireThread({
         readModel,
         command,
-        projectId: command.projectId,
+        threadId: parentThreadId,
       });
-      yield* requireThreadAbsent({
+      if (parent.deletedAt !== null) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Parent thread '${parentThreadId}' was deleted.`,
+        });
+      }
+      if (parent.projectId !== fields.projectId) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Parent thread '${parentThreadId}' belongs to a different project than '${fields.projectId}'.`,
+        });
+      }
+      const resolved = resolveDelegatedChildLineage({
+        readModel,
+        parent,
+        childThreadId: fields.threadId,
+      });
+      if (!resolved.ok) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: resolved.detail,
+        });
+      }
+      return yield* decideThreadCreated({
         readModel,
         command,
-        threadId: command.threadId,
+        fields,
+        lineage: resolved.lineage,
       });
-      const tokenMode = normalizeTokenMode(command.tokenMode);
-      return {
-        ...withEventBase({
-          aggregateKind: "thread",
-          aggregateId: command.threadId,
-          occurredAt: command.createdAt,
-          commandId: command.commandId,
-        }),
-        type: "thread.created",
-        payload: {
-          threadId: command.threadId,
-          projectId: command.projectId,
-          title: command.title,
-          modelSelection: command.modelSelection,
-          runtimeMode: command.runtimeMode,
-          interactionMode: command.interactionMode,
-          tokenMode,
-          branch: command.branch,
-          worktreePath: command.worktreePath,
-          createdAt: command.createdAt,
-          updatedAt: command.createdAt,
-        },
-      };
     }
 
     case "thread.delete": {
@@ -544,7 +745,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         threadId: command.threadId,
       });
       const occurredAt = nowIso();
-      return {
+      const archivedEvent: PlannedOrchestrationEvent = {
         ...withEventBase({
           aggregateKind: "thread",
           aggregateId: command.threadId,
@@ -558,6 +759,16 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           updatedAt: occurredAt,
         },
       };
+      const archivedThread = readModel.threads.find((thread) => thread.id === command.threadId);
+      const limitCleared = archivedThread
+        ? usageLimitClearedEvent({
+            command,
+            thread: archivedThread,
+            reason: "archived",
+            occurredAt,
+          })
+        : null;
+      return limitCleared === null ? archivedEvent : [archivedEvent, limitCleared];
     }
 
     case "thread.unarchive": {
@@ -627,6 +838,80 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         payload: { threadId: command.threadId, updatedAt: occurredAt },
       };
     }
+    case "thread.usage-limit.record": {
+      const thread = yield* requireThread({ readModel, command, threadId: command.threadId });
+      if (thread.archivedAt !== null || thread.deletedAt !== null) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "Thread is archived or deleted.",
+        });
+      }
+      if (
+        thread.session?.status === "running" &&
+        thread.session.activeTurnId !== null &&
+        thread.session.activeTurnId !== command.turnId
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "A newer turn is running; stale usage limit.",
+        });
+      }
+      // Only the thread's latest turn can be limited: a late record or reset fill after
+      // a newer turn (or a revert) must never resurrect a cleared limit.
+      if (thread.latestTurn?.turnId !== command.turnId) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "The usage limit belongs to an earlier turn.",
+        });
+      }
+      const existing = thread.usageLimit ?? null;
+      if (existing?.limitId === command.limitId) {
+        // The only update to a recorded limit: filling a reset that was unknown.
+        if (existing.resetAt === null && command.resetAt !== null) {
+          return usageLimitSetEvent({
+            command,
+            threadId: thread.id,
+            usageLimit: { ...existing, resetAt: command.resetAt, updatedAt: command.createdAt },
+          });
+        }
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "This usage limit is already recorded.",
+        });
+      }
+      return usageLimitSetEvent({
+        command,
+        threadId: thread.id,
+        usageLimit: {
+          limitId: command.limitId,
+          provider: command.provider,
+          providerInstanceId: command.providerInstanceId,
+          turnId: command.turnId,
+          message: command.message,
+          limitedAt: command.createdAt,
+          resetAt: command.resetAt,
+          autoResume: null,
+          updatedAt: command.createdAt,
+        },
+      });
+    }
+
+    case "thread.usage-limit.configure": {
+      const thread = yield* requireThread({ readModel, command, threadId: command.threadId });
+      const existing = thread.usageLimit ?? null;
+      if (existing === null || existing.limitId !== command.limitId) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "The usage limit changed. Refresh and try again.",
+        });
+      }
+      return usageLimitSetEvent({
+        command,
+        threadId: thread.id,
+        usageLimit: { ...existing, autoResume: command.autoResume, updatedAt: nowIso() },
+      });
+    }
+
     case "thread.settle": {
       const thread = yield* requireThread({
         readModel,
@@ -979,6 +1264,11 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
+      yield* requireNoPendingCheckpointRevert({
+        thread: targetThread,
+        command,
+        nowMs: Date.now(),
+      });
       const resumeGuard = command.claudeResumeGuard;
       if (
         resumeGuard &&
@@ -996,6 +1286,18 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             "Claude resume review is stale. The session, model, context settings, or latest turn changed. Review and send again.",
         });
       }
+      // Server-only fence of an automatic restart continuation: the decider runs serially
+      // on the engine's model, so this is atomic against anything accepted after capture.
+      const restartGuard = command.restartContinuationGuard;
+      if (restartGuard) {
+        const blocker = restartContinuationTargetBlocker(targetThread, restartGuard);
+        if (blocker !== null) {
+          return yield* new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail: `Restart continuation target changed (${blocker}).`,
+          });
+        }
+      }
       if (
         targetThread.session?.status === "running" &&
         targetThread.session.activeTurnId !== null
@@ -1005,24 +1307,42 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           detail: `Thread '${command.threadId}' already has active turn '${targetThread.session.activeTurnId}' and cannot start another turn until it finishes.`,
         });
       }
+      // At most one guarded resume per limit: every accepted turn start clears the
+      // limit in this same decision, so a second resume finds it gone.
+      const usageLimitGuard = command.usageLimitResumeGuard;
+      const currentUsageLimit = targetThread.usageLimit ?? null;
+      if (
+        usageLimitGuard &&
+        (currentUsageLimit === null ||
+          currentUsageLimit.limitId !== usageLimitGuard.limitId ||
+          targetThread.archivedAt !== null ||
+          targetThread.session?.status === "running" ||
+          targetThread.session?.status === "starting" ||
+          targetThread.latestTurn?.state === "running" ||
+          (command.modelSelection ?? targetThread.modelSelection).instanceId !==
+            currentUsageLimit.providerInstanceId)
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "This usage-limit resume is stale: the thread was resumed, changed, or is busy.",
+        });
+      }
+
+      // Delegated-result wake fence (delegation-returns §3.5). A wake is a normal queued turn
+      // start that (re)creates or resumes the session, so the parent's turn, runtime and
+      // provider instance are not fenced and legacy guard fields are ignored. Pending starts
+      // are invisible here; CompletionReturnDelivery's parent-idle rule owns them.
       const guard = command.delegationReturnGuard;
-      const latestUserMessage = guard
-        ? targetThread.messages.findLast((message) => message.role === "user")
-        : undefined;
       if (
         guard &&
         (targetThread.archivedAt !== null ||
-          !["ready", "idle"].includes(targetThread.session?.status ?? "") ||
-          (latestUserMessage?.id ?? null) !== guard.latestUserMessageId ||
-          (latestUserMessage?.id !== guard.turnMessageId &&
-            latestUserMessage?.turnId !== guard.turnId) ||
+          targetThread.session?.status === "running" ||
+          targetThread.session?.status === "starting" ||
+          targetThread.latestTurn?.state === "running" ||
+          (latestUserMessage(targetThread.messages)?.id ?? null) !== guard.latestUserMessageId ||
           JSON.stringify(command.modelSelection ?? targetThread.modelSelection) !==
             JSON.stringify(targetThread.modelSelection) ||
           targetThread.projectId !== guard.projectId ||
-          targetThread.latestTurn?.turnId !== guard.turnId ||
-          targetThread.latestTurn.state !== "completed" ||
-          targetThread.session?.runtimeSessionId !== guard.runtimeSessionId ||
-          targetThread.session.providerInstanceId !== guard.providerInstanceId ||
           targetThread.runtimeMode !== guard.runtimeMode ||
           targetThread.worktreePath !== guard.worktreePath)
       ) {
@@ -1030,6 +1350,16 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           commandType: command.type,
           detail:
             "Delegated result origin changed. Open the child task and return its result manually.",
+        });
+      }
+      // usage-limits §5.2: an accepted turn start clears the limit below, and only the user's
+      // or the auto-resume's turn may do that. CompletionReturnDelivery holds the wake while
+      // the limit applies, so this only fires on a race with a new limit.
+      if (guard && applicableUsageLimit(targetThread) !== null) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail:
+            "The originating chat hit its usage limit. The delegated result waits until it is resumed.",
         });
       }
       const requestedSelection = command.modelSelection ?? targetThread.modelSelection;
@@ -1214,7 +1544,41 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
                 createdAt: command.createdAt,
               },
             });
+      const limitCleared = usageLimitClearedEvent({
+        command,
+        thread: targetThread,
+        reason: "turn-started",
+        occurredAt: command.createdAt,
+      });
+      const autoResumedActivity: PlannedOrchestrationEvent | null =
+        usageLimitGuard?.origin === "auto" && currentUsageLimit !== null
+          ? {
+              ...withEventBase({
+                aggregateKind: "thread",
+                aggregateId: command.threadId,
+                occurredAt: command.createdAt,
+                commandId: command.commandId,
+              }),
+              type: "thread.activity-appended",
+              payload: {
+                threadId: command.threadId,
+                activity: {
+                  id: EventId.make(`usage-limit-resumed:${command.commandId}`),
+                  tone: "info",
+                  kind: "usage-limit.resumed",
+                  summary: "Resumed automatically after the usage limit reset",
+                  payload: {
+                    limitId: currentUsageLimit.limitId,
+                    resetAt: currentUsageLimit.resetAt,
+                  },
+                  turnId: null,
+                  createdAt: command.createdAt,
+                },
+              },
+            }
+          : null;
       return [
+        ...(limitCleared === null ? [] : [limitCleared]),
         ...(Array.isArray(goalEvents) ? goalEvents : [goalEvents]).map((event) =>
           event.type === "thread.goal-updated"
             ? {
@@ -1233,6 +1597,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             : event,
         ),
         ...(unsettledEvent === null ? turnEvents : [unsettledEvent, ...turnEvents]),
+        ...(autoResumedActivity === null ? [] : [autoResumedActivity]),
       ];
     }
 
@@ -1243,16 +1608,22 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         threadId: command.threadId,
       });
       const activeTurnId = targetThread.session?.activeTurnId ?? null;
-      if (targetThread.session?.status !== "running" || activeTurnId === null) {
-        return yield* new OrchestrationCommandInvariantError({
-          commandType: command.type,
-          detail: `Thread '${command.threadId}' has no active turn to steer.`,
-        });
-      }
-      if (activeTurnId !== command.expectedTurnId) {
-        return yield* new OrchestrationCommandInvariantError({
-          commandType: command.type,
-          detail: `Thread '${command.threadId}' active turn '${activeTurnId}' does not match expected turn '${command.expectedTurnId}'.`,
+      // A steer arriving after its turn ended is not an error: the message stays queued and is
+      // sent as the next turn.
+      if (
+        targetThread.session?.status !== "running" ||
+        activeTurnId === null ||
+        activeTurnId !== command.expectedTurnId
+      ) {
+        return planTurnSteerRejection({
+          commandId: command.commandId,
+          requestCommandId: command.commandId,
+          threadId: command.threadId,
+          expectedTurnId: command.expectedTurnId,
+          messageId: command.message.messageId,
+          error: STEER_TURN_ENDED_ERROR,
+          reason: "deferred",
+          occurredAt: command.requestedAt,
         });
       }
       return {
@@ -1412,25 +1783,58 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "thread.checkpoint.revert": {
-      yield* requireThread({
+      const thread = yield* requireThread({
         readModel,
         command,
         threadId: command.threadId,
       });
-      return {
-        ...withEventBase({
+      yield* requireThreadReadyForCheckpointRevert({
+        readModel,
+        thread,
+        command,
+        nowMs: Date.now(),
+      });
+      const eventBase = () =>
+        withEventBase({
           aggregateKind: "thread",
           aggregateId: command.threadId,
           occurredAt: command.createdAt,
           commandId: command.commandId,
-        }),
-        type: "thread.checkpoint-revert-requested",
-        payload: {
-          threadId: command.threadId,
-          turnCount: command.turnCount,
-          createdAt: command.createdAt,
+        });
+      const revertEvents: Array<PlannedOrchestrationEvent> = [
+        {
+          ...eventBase(),
+          type: "thread.activity-appended",
+          payload: {
+            threadId: command.threadId,
+            activity: makeCheckpointRevertActivity({
+              revertRequestId: command.commandId,
+              turnCount: command.turnCount,
+              status: "requested",
+              // Server time, like every later phase: the journal orders reverts by
+              // createdAt, so it must not mix the client's clock with the server's.
+              createdAt: nowIso(),
+            }),
+          },
         },
-      };
+        {
+          ...eventBase(),
+          type: "thread.checkpoint-revert-requested",
+          payload: {
+            threadId: command.threadId,
+            turnCount: command.turnCount,
+            createdAt: command.createdAt,
+          },
+        },
+      ];
+      // Never "continue" into a reverted conversation.
+      const limitCleared = usageLimitClearedEvent({
+        command,
+        thread,
+        reason: "reverted",
+        occurredAt: command.createdAt,
+      });
+      return limitCleared === null ? revertEvents : [...revertEvents, limitCleared];
     }
 
     case "thread.session.stop": {
@@ -1540,6 +1944,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           ...(command.prTitle !== undefined ? { prTitle: command.prTitle } : {}),
           prState: command.prState,
           prIsDraft: command.prIsDraft,
+          ...(command.prTerminalAt !== undefined ? { prTerminalAt: command.prTerminalAt } : {}),
           issueState: command.issueState,
           updatedAt: command.updatedAt,
         },
@@ -1723,6 +2128,13 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
+      // The decider is the one place that decides which turn a release ends and how,
+      // using the authoritative in-memory model; every reducer applies `releasedTurn`.
+      const releasedTurn = resolveReleasedTurn({
+        thread,
+        nextSession: command.session,
+        outcome: command.turnOutcome,
+      });
       const sessionEvent: PlannedOrchestrationEvent = {
         ...withEventBase({
           aggregateKind: "thread",
@@ -1735,6 +2147,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         payload: {
           threadId: command.threadId,
           session: command.session,
+          ...(releasedTurn ? { releasedTurn } : {}),
         },
       };
       if (command.session.status === "error") {
@@ -1748,12 +2161,31 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       if (command.session.status !== "starting" && command.session.status !== "running") {
         return sessionEvent;
       }
+      // A different turn running (a provider wake, a send that raced the record) makes the
+      // recorded limit stale.
+      const limitCleared =
+        command.session.status === "running" &&
+        command.session.activeTurnId !== null &&
+        thread.usageLimit != null &&
+        thread.usageLimit.turnId !== command.session.activeTurnId
+          ? usageLimitClearedEvent({
+              command,
+              thread,
+              reason: "turn-started",
+              occurredAt: command.createdAt,
+            })
+          : null;
       const unsettledEvent = activityUnsettledEvent({
         command,
         thread,
         occurredAt: command.createdAt,
       });
-      return unsettledEvent === null ? sessionEvent : [unsettledEvent, sessionEvent];
+      if (limitCleared === null && unsettledEvent === null) return sessionEvent;
+      return [
+        ...(limitCleared === null ? [] : [limitCleared]),
+        ...(unsettledEvent === null ? [] : [unsettledEvent]),
+        sessionEvent,
+      ];
     }
 
     case "thread.history.restore": {
@@ -1807,18 +2239,30 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command.completedTurnIds.includes(thread.session.activeTurnId)
       ) {
         const failed = command.failedTurnIds.includes(thread.session.activeTurnId);
+        const restoredSession = {
+          ...thread.session,
+          status: failed ? ("error" as const) : ("ready" as const),
+          activeTurnId: null,
+          lastError: failed ? "Codex reported that the recovered turn failed." : null,
+          updatedAt: command.createdAt,
+        };
+        const releasedTurn = resolveReleasedTurn({
+          thread,
+          nextSession: restoredSession,
+          outcome: {
+            turnId: thread.session.activeTurnId,
+            state: failed ? "error" : "completed",
+            reason: TURN_FINALIZATION_REASON.providerHistory,
+            completedAt: command.createdAt,
+          },
+        });
         events.push({
           ...base(),
           type: "thread.session-set",
           payload: {
             threadId: command.threadId,
-            session: {
-              ...thread.session,
-              status: failed ? "error" : "ready",
-              activeTurnId: null,
-              lastError: failed ? "Codex reported that the recovered turn failed." : null,
-              updatedAt: command.createdAt,
-            },
+            session: restoredSession,
+            ...(releasedTurn ? { releasedTurn } : {}),
           },
         });
       }
@@ -1947,6 +2391,10 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         payload: {
           threadId: command.threadId,
           turnCount: command.turnCount,
+          ...(command.droppedTurnIds !== undefined
+            ? { droppedTurnIds: command.droppedTurnIds }
+            : {}),
+          ...(command.latestTurn !== undefined ? { latestTurn: command.latestTurn } : {}),
         },
       };
     }
@@ -2072,49 +2520,17 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         return [messageEvent, acceptedEvent];
       }
 
-      const rejectedEvent: PlannedOrchestrationEvent = {
-        ...withEventBase({
-          aggregateKind: "thread",
-          aggregateId: command.threadId,
-          occurredAt: resolvedAt,
-          commandId: command.commandId,
-        }),
-        type: "thread.turn-steer-rejected",
-        payload: {
-          threadId: command.threadId,
-          messageId: command.message.messageId,
-          expectedTurnId: command.expectedTurnId,
-          error: command.resolution.error,
-          resolvedAt,
-        },
-      };
-      const activityEvent: PlannedOrchestrationEvent = {
-        ...withEventBase({
-          aggregateKind: "thread",
-          aggregateId: command.threadId,
-          occurredAt: resolvedAt,
-          commandId: command.commandId,
-        }),
-        causationEventId: rejectedEvent.eventId,
-        type: "thread.activity-appended",
-        payload: {
-          threadId: command.threadId,
-          activity: {
-            id: EventId.make(`turn-steer-rejected:${command.requestCommandId}`),
-            tone: "error",
-            kind: "provider.turn.steer.failed",
-            summary: "Steer failed",
-            payload: {
-              messageId: command.message.messageId,
-              expectedTurnId: command.expectedTurnId,
-              error: command.resolution.error,
-            },
-            turnId: command.expectedTurnId,
-            createdAt: resolvedAt,
-          },
-        },
-      };
-      return [rejectedEvent, activityEvent];
+      return planTurnSteerRejection({
+        commandId: command.commandId,
+        requestCommandId: command.requestCommandId,
+        threadId: command.threadId,
+        expectedTurnId: command.expectedTurnId,
+        messageId: command.message.messageId,
+        error: command.resolution.error,
+        reason: command.resolution.reason ?? "failed",
+        deliveryUncertain: command.resolution.deliveryUncertain,
+        occurredAt: resolvedAt,
+      });
     }
 
     default: {

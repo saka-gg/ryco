@@ -25,7 +25,47 @@ describe("settings reset ownership", () => {
       patch: { enableProviderUpdateChecks: true, addProjectBaseDirectory: "" },
     });
   });
+  it("restores the follow-up behaviour as a local preference", () => {
+    const plan = settingsRestorePlan(
+      { ...DEFAULT_UNIFIED_SETTINGS, followUpBehavior: "steer" },
+      "system",
+      "client",
+    );
+    expect(plan).toEqual({
+      labels: ["Follow-up while working"],
+      resetTheme: false,
+      patch: { followUpBehavior: "queue" },
+    });
+    expect(
+      settingsRestorePlan(
+        { ...DEFAULT_UNIFIED_SETTINGS, followUpBehavior: "steer" },
+        "system",
+        "node",
+      ).patch,
+    ).toEqual({});
+  });
   it("does not write defaults for unchanged settings", () => {
     expect(settingsRestorePlan(DEFAULT_UNIFIED_SETTINGS, "system", "node").patch).toEqual({});
+  });
+  it("restores the usage-limit recovery settings to off on the node", () => {
+    const plan = settingsRestorePlan(
+      { ...DEFAULT_UNIFIED_SETTINGS, autoResumeLimitedThreads: true, snoozeLimitedThreads: true },
+      "system",
+      "node",
+    );
+    expect(plan).toEqual({
+      labels: ["Auto-resume limited threads", "Snooze limited threads"],
+      resetTheme: false,
+      patch: { autoResumeLimitedThreads: false, snoozeLimitedThreads: false },
+    });
+  });
+  it("restores continue-after-restart to off on the node only", () => {
+    const settings = { ...DEFAULT_UNIFIED_SETTINGS, continueThreadsAfterRestart: true };
+    expect(settingsRestorePlan(settings, "system", "node")).toEqual({
+      labels: ["Continue after restart"],
+      resetTheme: false,
+      patch: { continueThreadsAfterRestart: false },
+    });
+    expect(settingsRestorePlan(settings, "system", "client").patch).toEqual({});
   });
 });

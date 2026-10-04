@@ -364,17 +364,24 @@ describe("thread activity", () => {
       pending: [],
       activity: [],
       managerThreadId: null,
+      delegatedFromThreadId: null,
     });
     expect(selectAgentControlThreadActivity(state, null)).toEqual({
       pending: [],
       activity: [],
       managerThreadId: null,
+      delegatedFromThreadId: null,
     });
   });
 
   it("shows only a manager notice in the target and preserves it across a snapshot", () => {
     const state = queue(makeProposal("accepted", { status: "completed" }));
-    const expected = { pending: [], activity: [], managerThreadId: callerThreadId };
+    const expected = {
+      pending: [],
+      activity: [],
+      managerThreadId: callerThreadId,
+      delegatedFromThreadId: null,
+    };
     expect(selectAgentControlThreadActivity(state, target)).toEqual(expected);
     const reconnected = applyAgentControlStreamEvent(
       state,
@@ -427,9 +434,10 @@ describe("thread activity", () => {
         completedAt: "2026-08-17T00:00:00.000Z",
       },
     });
-    expect(selectAgentControlThreadActivity(queue(created), target).managerThreadId).toBe(
-      callerThreadId,
-    );
+    expect(selectAgentControlThreadActivity(queue(created), target)).toMatchObject({
+      delegatedFromThreadId: callerThreadId,
+      managerThreadId: null,
+    });
     const withReturn = {
       ...created,
       result: null,
@@ -447,9 +455,10 @@ describe("thread activity", () => {
         },
       ],
     };
-    expect(selectAgentControlThreadActivity(queue(withReturn), target).managerThreadId).toBe(
-      callerThreadId,
-    );
+    expect(selectAgentControlThreadActivity(queue(withReturn), target)).toMatchObject({
+      delegatedFromThreadId: callerThreadId,
+      managerThreadId: null,
+    });
     const newManager = ThreadId.make("new-manager");
     const newer = makeProposal("newer", {
       status: "executing",
@@ -461,9 +470,10 @@ describe("thread activity", () => {
         providerInstanceId: ProviderInstanceId.make("codex"),
       },
     });
-    expect(selectAgentControlThreadActivity(queue(created, newer), target).managerThreadId).toBe(
-      newManager,
-    );
+    expect(selectAgentControlThreadActivity(queue(created, newer), target)).toMatchObject({
+      delegatedFromThreadId: callerThreadId,
+      managerThreadId: newManager,
+    });
   });
 
   it("does not replace a newer manager when an older action receives a delayed child return", () => {
@@ -535,12 +545,79 @@ describe("thread activity", () => {
     expect(selectAgentControlThreadActivity(state, callerThreadId).activity[0]?.proposalId).toBe(
       "older",
     );
-    expect(selectAgentControlThreadActivity(state, target).managerThreadId).toBe(newManager);
+    expect(selectAgentControlThreadActivity(state, target)).toMatchObject({
+      managerThreadId: newManager,
+      delegatedFromThreadId: callerThreadId,
+    });
     const reconnected = applyAgentControlStreamEvent(
       state,
       snapshotEvent({ revision: 0, recent: Object.values(state.proposalsById) }),
     );
     expect(selectAgentControlThreadActivity(reconnected, target).managerThreadId).toBe(newManager);
+  });
+
+  it("prefers server lineage for the creator and hides a manager that is the same thread", () => {
+    const lineageParent = ThreadId.make("lineage-parent");
+    const lineage = {
+      parentThreadId: lineageParent,
+      rootThreadId: lineageParent,
+      relationship: "delegated",
+    };
+    const created = makeProposal("created", {
+      status: "completed",
+      plan: {
+        kind: "createThreads",
+        entries: [
+          {
+            projectId: ProjectId.make("project"),
+            title: "Child task",
+            prompt: "Work on the task",
+            modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "fixture" },
+            runtimeMode: "approval-required",
+            envMode: "local",
+          },
+        ],
+      },
+      result: {
+        outcome: "completed",
+        createdThreadIds: [target],
+        completedAt: "2026-08-17T00:00:00.000Z",
+      },
+    });
+    // Server lineage wins over a different inferred creator.
+    expect(selectAgentControlThreadActivity(queue(created), target, lineage)).toMatchObject({
+      delegatedFromThreadId: lineageParent,
+      managerThreadId: callerThreadId,
+    });
+    // Only lineage (no proposal history): the creator is still known.
+    expect(
+      selectAgentControlThreadActivity(EMPTY_AGENT_CONTROL_QUEUE_STATE, target, lineage),
+    ).toEqual({
+      pending: [],
+      activity: [],
+      managerThreadId: null,
+      delegatedFromThreadId: lineageParent,
+    });
+    // A manager equal to the lineage parent is suppressed.
+    const parentManaged = makeProposal("parent-managed", {
+      status: "completed",
+      principal: {
+        kind: "provider-session",
+        threadId: lineageParent,
+        providerInstanceId: ProviderInstanceId.make("codex"),
+      },
+    });
+    expect(selectAgentControlThreadActivity(queue(parentManaged), target, lineage)).toMatchObject({
+      delegatedFromThreadId: lineageParent,
+      managerThreadId: null,
+    });
+    // An unknown relationship falls back to receipt inference.
+    expect(
+      selectAgentControlThreadActivity(queue(created), target, {
+        ...lineage,
+        relationship: "future-kind",
+      }),
+    ).toMatchObject({ delegatedFromThreadId: callerThreadId, managerThreadId: null });
   });
 
   it("does not treat affected threads of a project operation as managed children", () => {

@@ -2,6 +2,7 @@ import {
   CONTEXT_HANDOFF_CONTEXT_VERSION,
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
 } from "@ryco/contracts";
+import { truncateUnicodeSafe } from "@ryco/shared/String";
 import { Data } from "effect";
 
 import {
@@ -15,7 +16,6 @@ import {
   type ContextHandoffToolEntry,
   countContextHandoffEntries,
   stableStringifyContextHandoff,
-  truncateUnicodeSafe,
 } from "./ContextHandoffBuilder.ts";
 import type { ContextHandoffRenderedDocument } from "./ContextHandoffArtifacts.ts";
 

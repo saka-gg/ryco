@@ -75,6 +75,12 @@ const ModelManifestEnvelopeSchema = Schema.Struct({
   version: Schema.Literal(1),
   currentModels: Schema.Record(Schema.String, Schema.Array(Schema.String)),
   providers: Schema.optional(Schema.Record(Schema.String, ManifestProviderCatalog)),
+  /**
+   * Provider compatibility policies. Deliberately `Unknown`: a malformed or future-shaped
+   * `compatibility` on main must never reject the whole manifest (and with it the remote Claude
+   * catalog). Per-entry validation is lenient and lives in `providerCompatibility.ts`.
+   */
+  compatibility: Schema.optional(Schema.Unknown),
 });
 
 const hasValidProviderCatalogReferences = (
@@ -190,6 +196,8 @@ export class ModelManifest extends Context.Service<
     readonly current: Effect.Effect<ModelManifestData>;
     /** Manifest after an explicit remote refresh, bypassing the TTL; never fails. */
     readonly refresh: Effect.Effect<ModelManifestData>;
+    /** TTL-gated refresh that the caller awaits (same gating as refreshInBackground); never fails. */
+    readonly refreshIfStale: Effect.Effect<ModelManifestData>;
     /** Forks a TTL-gated refresh into the service's own scope. Drivers call
      * this from provider checks: the fetch is process-shared state, so it must
      * survive the teardown of whichever instance happened to trigger it. */
@@ -201,6 +209,7 @@ export class ModelManifest extends Context.Service<
 export const BundledOnlyModelManifest: ModelManifest["Service"] = {
   current: Effect.succeed(BUNDLED_MODEL_MANIFEST),
   refresh: Effect.succeed(BUNDLED_MODEL_MANIFEST),
+  refreshIfStale: Effect.succeed(BUNDLED_MODEL_MANIFEST),
   refreshInBackground: Effect.void,
 };
 
@@ -282,6 +291,7 @@ export const make = Effect.gen(function* () {
   return ModelManifest.of({
     current: ensureDiskCacheLoaded.pipe(Effect.map(() => manifest)),
     refresh: guardedForcedRefresh,
+    refreshIfStale: guardedRefresh,
     refreshInBackground: Effect.forkIn(guardedRefresh, serviceScope).pipe(Effect.asVoid),
   });
 });

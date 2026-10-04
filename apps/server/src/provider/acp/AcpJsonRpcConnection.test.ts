@@ -6,16 +6,132 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
 import { Effect, Stream } from "effect";
+import type { ChildProcessSpawner } from "effect/unstable/process";
 import { describe, expect } from "vite-plus/test";
 
-import { AcpSessionRuntime, type AcpSessionRequestLogEvent } from "./AcpSessionRuntime.ts";
+import {
+  AcpSessionRuntime,
+  type AcpSessionRequestLogEvent,
+  type AcpSessionRuntimeOptions,
+} from "./AcpSessionRuntime.ts";
+import type * as EffectAcpErrors from "effect-acp/errors";
 import type * as EffectAcpProtocol from "effect-acp/protocol";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const mockAgentPath = path.join(__dirname, "../../../scripts/acp-mock-agent.ts");
 const bunExe = "bun";
 
+const runtimeAssistantItemIdPattern = (segmentIndex: number) =>
+  new RegExp(`^assistant:mock-session-1:runtime:[0-9a-f-]{36}:segment:${segmentIndex}$`);
+
+const assistantItemRuntimePrefix = (itemId: string) => itemId.replace(/:segment:\d+$/, ":");
+
+/** Starts a scoped runtime, prompts once and returns the first assistant item id. */
+const firstAssistantItemIdOfRuntime = (
+  options: Pick<AcpSessionRuntimeOptions, "resumeSessionId">,
+): Effect.Effect<string, EffectAcpErrors.AcpError, ChildProcessSpawner.ChildProcessSpawner> =>
+  Effect.gen(function* () {
+    const runtime = yield* AcpSessionRuntime;
+    yield* runtime.start();
+    yield* runtime.prompt({ prompt: [{ type: "text", text: "hi" }] });
+    const started = Array.from(
+      yield* Stream.runCollect(
+        runtime.getEvents().pipe(
+          Stream.filter((event) => event._tag === "AssistantItemStarted"),
+          Stream.take(1),
+        ),
+      ),
+    )[0];
+    if (started?._tag !== "AssistantItemStarted") {
+      return yield* Effect.die(new Error("expected an AssistantItemStarted event"));
+    }
+    return started.itemId;
+  }).pipe(
+    Effect.provide(
+      AcpSessionRuntime.layer({
+        spawn: { command: bunExe, args: [mockAgentPath] },
+        cwd: process.cwd(),
+        clientInfo: { name: "ryco-test", version: "0.0.0" },
+        authMethodId: "test",
+        ...options,
+      }),
+    ),
+    Effect.scoped,
+  );
+
 describe("AcpSessionRuntime", () => {
+  it.live("quarantines session/load history replay without blocking start", () =>
+    Effect.gen(function* () {
+      const runtime = yield* AcpSessionRuntime;
+      // The replay produces more parsed events than the runtime's event queue
+      // holds, and nothing drains that queue until start() resolves.
+      const started = yield* runtime.start().pipe(Effect.timeout("10 seconds"));
+      expect(started.sessionId).toBe("mock-session-1");
+
+      yield* runtime.prompt({ prompt: [{ type: "text", text: "hi" }] });
+      const notes = Array.from(
+        yield* Stream.runCollect(Stream.take(runtime.getEvents(), 6)).pipe(
+          Effect.timeout("5 seconds"),
+        ),
+      );
+
+      // Startup metadata is coalesced to the latest event per kind.
+      const metadata = notes.slice(0, 2);
+      expect(metadata.map((note) => note._tag).toSorted()).toEqual([
+        "CommandsUpdated",
+        "UsageUpdated",
+      ]);
+      const usage = metadata.find((note) => note._tag === "UsageUpdated");
+      expect(usage?._tag === "UsageUpdated" ? usage.usage.usedTokens : undefined).toBe(2500);
+
+      // No replayed transcript output precedes the prompt's own events.
+      expect(notes.slice(2).map((note) => note._tag)).toEqual([
+        "PlanUpdated",
+        "AssistantItemStarted",
+        "ContentDelta",
+        "AssistantItemCompleted",
+      ]);
+      const assistantStarted = notes[3];
+      expect(assistantStarted?._tag).toBe("AssistantItemStarted");
+      if (assistantStarted?._tag === "AssistantItemStarted") {
+        // The replay consumed no segment indices.
+        expect(assistantStarted.itemId).toMatch(runtimeAssistantItemIdPattern(0));
+      }
+      const assistantDelta = notes[4];
+      if (assistantDelta?._tag === "ContentDelta") {
+        expect(assistantDelta.text).toBe("hello from mock");
+      }
+    }).pipe(
+      Effect.provide(
+        AcpSessionRuntime.layer({
+          spawn: {
+            command: bunExe,
+            args: [mockAgentPath],
+            env: { RYCO_ACP_REPLAY_HISTORY_CHUNKS: "2500" },
+          },
+          cwd: process.cwd(),
+          resumeSessionId: "mock-session-1",
+          clientInfo: { name: "ryco-test", version: "0.0.0" },
+          authMethodId: "test",
+        }),
+      ),
+      Effect.scoped,
+      Effect.provide(NodeServices.layer),
+    ),
+  );
+
+  it.effect("mints distinct assistant item ids for each runtime of the same session", () =>
+    Effect.gen(function* () {
+      // Runtime A creates the session; runtime B resumes it via session/load.
+      const idA = yield* firstAssistantItemIdOfRuntime({});
+      const idB = yield* firstAssistantItemIdOfRuntime({ resumeSessionId: "mock-session-1" });
+
+      expect(idA).toMatch(runtimeAssistantItemIdPattern(0));
+      expect(idB).toMatch(runtimeAssistantItemIdPattern(0));
+      expect(idB).not.toBe(idA);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
   it.effect("passes resolved MCP servers to session/new after initialize negotiation", () => {
     const requestEvents: Array<AcpSessionRequestLogEvent> = [];
     return Effect.gen(function* () {
@@ -275,6 +391,12 @@ describe("AcpSessionRuntime", () => {
         expect(firstCompleted.itemId).toBe(firstStarted.itemId);
         expect(secondStarted.itemId).not.toBe(firstStarted.itemId);
         expect(secondDelta.itemId).toBe(secondStarted.itemId);
+        expect(firstStarted.itemId).toMatch(runtimeAssistantItemIdPattern(0));
+        expect(secondStarted.itemId).toMatch(runtimeAssistantItemIdPattern(1));
+        // Both segments belong to one runtime, so they share its runtime prefix.
+        expect(assistantItemRuntimePrefix(secondStarted.itemId)).toBe(
+          assistantItemRuntimePrefix(firstStarted.itemId),
+        );
       }
     }).pipe(
       Effect.provide(

@@ -163,6 +163,92 @@ export const offerOrchestrationThreadLiveEventOrFail = (input: {
     return true;
   });
 
+/**
+ * Maps one domain event to the shell stream item it implies. Upserts re-read
+ * the projected SQL row, so the row stays the source of truth and a replayed
+ * old event sends the current state.
+ */
+export const toShellStreamEvent = (
+  projectionSnapshotQuery: Pick<
+    ProjectionSnapshotQueryShape,
+    "getProjectShellById" | "getThreadShellById" | "getWorktreeShellById"
+  >,
+  event: OrchestrationEvent,
+): Effect.Effect<Option.Option<OrchestrationShellStreamEvent>, never, never> => {
+  switch (event.type) {
+    case "project.created":
+    case "project.meta-updated":
+      return projectionSnapshotQuery.getProjectShellById(event.payload.projectId).pipe(
+        Effect.map((project) =>
+          Option.map(project, (nextProject) => ({
+            kind: "project-upserted" as const,
+            sequence: event.sequence,
+            project: nextProject,
+          })),
+        ),
+        Effect.catch(() => Effect.succeed(Option.none())),
+      );
+    case "project.deleted":
+      return Effect.succeed(
+        Option.some({
+          kind: "project-removed" as const,
+          sequence: event.sequence,
+          projectId: event.payload.projectId,
+        }),
+      );
+    case "thread.deleted":
+      return Effect.succeed(
+        Option.some({
+          kind: "thread-removed" as const,
+          sequence: event.sequence,
+          threadId: event.payload.threadId,
+        }),
+      );
+    case "worktree.created":
+    case "worktree.archived":
+    case "worktree.metaUpdated":
+    case "worktree.sourceControlStateUpdated":
+    case "worktree.restored": {
+      const getWorktreeShellById = projectionSnapshotQuery.getWorktreeShellById;
+      if (getWorktreeShellById === undefined) {
+        return Effect.succeed(Option.none());
+      }
+      return getWorktreeShellById(WorktreeId.make(event.payload.worktreeId)).pipe(
+        Effect.map((worktree) =>
+          Option.map(worktree, (nextWorktree) => ({
+            kind: "worktree-upserted" as const,
+            sequence: event.sequence,
+            worktree: nextWorktree,
+          })),
+        ),
+        Effect.catch(() => Effect.succeed(Option.none())),
+      );
+    }
+    case "worktree.deleted":
+      return Effect.succeed(
+        Option.some({
+          kind: "worktree-removed" as const,
+          sequence: event.sequence,
+          worktreeId: event.payload.worktreeId,
+        }),
+      );
+    default:
+      if (event.aggregateKind !== "thread") {
+        return Effect.succeed(Option.none());
+      }
+      return projectionSnapshotQuery.getThreadShellById(ThreadId.make(event.aggregateId)).pipe(
+        Effect.map((thread) =>
+          Option.map(thread, (nextThread) => ({
+            kind: "thread-upserted" as const,
+            sequence: event.sequence,
+            thread: nextThread,
+          })),
+        ),
+        Effect.catch(() => Effect.succeed(Option.none())),
+      );
+  }
+};
+
 export const makeOrchestrationStreamHelpers = (deps: {
   readonly orchestrationEngine: OrchestrationEngineShape;
   readonly projectionSnapshotQuery: ProjectionSnapshotQueryShape;
@@ -218,82 +304,6 @@ export const makeOrchestrationStreamHelpers = (deps: {
 
   const enrichOrchestrationEvents = (events: ReadonlyArray<OrchestrationEvent>) =>
     Effect.forEach(events, enrichProjectEvent, { concurrency: 4 });
-
-  const toShellStreamEvent = (
-    event: OrchestrationEvent,
-  ): Effect.Effect<Option.Option<OrchestrationShellStreamEvent>, never, never> => {
-    switch (event.type) {
-      case "project.created":
-      case "project.meta-updated":
-        return projectionSnapshotQuery.getProjectShellById(event.payload.projectId).pipe(
-          Effect.map((project) =>
-            Option.map(project, (nextProject) => ({
-              kind: "project-upserted" as const,
-              sequence: event.sequence,
-              project: nextProject,
-            })),
-          ),
-          Effect.catch(() => Effect.succeed(Option.none())),
-        );
-      case "project.deleted":
-        return Effect.succeed(
-          Option.some({
-            kind: "project-removed" as const,
-            sequence: event.sequence,
-            projectId: event.payload.projectId,
-          }),
-        );
-      case "thread.deleted":
-        return Effect.succeed(
-          Option.some({
-            kind: "thread-removed" as const,
-            sequence: event.sequence,
-            threadId: event.payload.threadId,
-          }),
-        );
-      case "worktree.created":
-      case "worktree.archived":
-      case "worktree.metaUpdated":
-      case "worktree.restored": {
-        const getWorktreeShellById = projectionSnapshotQuery.getWorktreeShellById;
-        if (getWorktreeShellById === undefined) {
-          return Effect.succeed(Option.none());
-        }
-        return getWorktreeShellById(WorktreeId.make(event.payload.worktreeId)).pipe(
-          Effect.map((worktree) =>
-            Option.map(worktree, (nextWorktree) => ({
-              kind: "worktree-upserted" as const,
-              sequence: event.sequence,
-              worktree: nextWorktree,
-            })),
-          ),
-          Effect.catch(() => Effect.succeed(Option.none())),
-        );
-      }
-      case "worktree.deleted":
-        return Effect.succeed(
-          Option.some({
-            kind: "worktree-removed" as const,
-            sequence: event.sequence,
-            worktreeId: event.payload.worktreeId,
-          }),
-        );
-      default:
-        if (event.aggregateKind !== "thread") {
-          return Effect.succeed(Option.none());
-        }
-        return projectionSnapshotQuery.getThreadShellById(ThreadId.make(event.aggregateId)).pipe(
-          Effect.map((thread) =>
-            Option.map(thread, (nextThread) => ({
-              kind: "thread-upserted" as const,
-              sequence: event.sequence,
-              thread: nextThread,
-            })),
-          ),
-          Effect.catch(() => Effect.succeed(Option.none())),
-        );
-    }
-  };
 
   const dedupeBySequence =
     <A>(getSequence: (item: A) => number, sequenceRef: Ref.Ref<number>) =>
@@ -395,7 +405,7 @@ export const makeOrchestrationStreamHelpers = (deps: {
     stream: Stream.Stream<OrchestrationEvent, E, R>,
   ): Stream.Stream<OrchestrationShellStreamEvent, E, R> =>
     stream.pipe(
-      Stream.mapEffect(toShellStreamEvent),
+      Stream.mapEffect((event) => toShellStreamEvent(projectionSnapshotQuery, event)),
       Stream.flatMap((event) =>
         Option.isSome(event) ? Stream.succeed(event.value) : Stream.empty,
       ),

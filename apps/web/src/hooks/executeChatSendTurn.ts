@@ -2,6 +2,7 @@ import { readEffectiveProjectPreferences } from "@ryco/client-runtime/state/sett
 import { readEnvironmentConnection } from "../environments/runtime";
 import { claudeCacheReviewPresentation } from "../components/chat/ClaudeCacheReview";
 import type { ComputerTurnIntent } from "@ryco/contracts";
+import type { ClaudeCacheReviewPresentation } from "@ryco/client-runtime/state/composer";
 import { rejectRetiredProjectMemory } from "@ryco/shared/retiredFeatures";
 import {
   type AgentTokenMode,
@@ -176,6 +177,14 @@ export interface SendTurnReadComposer {
 export interface ExecuteChatSendTurnInput {
   /** Queued sends own their snapshot independently of the live composer. */
   preserveComposerDraft?: boolean;
+  /** undefined = the dialog presentation (default); null = never review interactively. */
+  claudeCacheReview?: ClaudeCacheReviewPresentation | null;
+  /** Background sends never toast. */
+  suppressToasts?: boolean;
+  /** Runs immediately before the final `thread.turn.start`. */
+  onBeforeTurnStart?: () => void;
+  /** Observes the caught error before it becomes a thread error (classification only). */
+  onSendError?: (error: unknown) => void;
   /** Stable client id; queued sends reuse the id assigned at enqueue time. */
   messageId?: MessageId;
   composer: SendTurnComposerSnapshot;
@@ -424,7 +433,7 @@ export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Prom
       }
     }
 
-    if (composer.expiredTerminalContextCount > 0) {
+    if (composer.expiredTerminalContextCount > 0 && !input.suppressToasts) {
       const toastCopy = buildExpiredTerminalContextToastCopy(
         composer.expiredTerminalContextCount,
         "omitted",
@@ -518,8 +527,13 @@ export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Prom
 
     // Provider-independent dispatch assembly (title update, next-turn settings,
     // and `thread.turn.start`).
+    const claudeCacheReview =
+      input.claudeCacheReview === undefined
+        ? claudeCacheReviewPresentation
+        : (input.claudeCacheReview ?? undefined);
     await commitSendTurnDispatch({
-      claudeCacheReview: claudeCacheReviewPresentation,
+      ...(claudeCacheReview ? { claudeCacheReview } : {}),
+      ...(input.onBeforeTurnStart ? { onBeforeTurnStart: input.onBeforeTurnStart } : {}),
       providerDriver: composer.selectedProvider,
       sourceProviderDriver: thread.sourceProviderDriver,
       assertMutationReady: captureReviewedSendReadiness(draft.environmentId, () =>
@@ -566,6 +580,7 @@ export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Prom
       }
     }
   } catch (err: unknown) {
+    input.onSendError?.(err);
     if (composerCleared) {
       rollbackSendTurn({
         refs,

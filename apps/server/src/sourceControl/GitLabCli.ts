@@ -66,6 +66,8 @@ export interface GitLabMergeRequestSummary {
   readonly mergeStateStatus?: SourceControlChangeRequestMergeStateStatus;
   readonly reviewDecision?: "review_required" | "changes_requested";
   readonly createdAt?: DateTime.Utc;
+  readonly mergedAt?: DateTime.Utc;
+  readonly closedAt?: DateTime.Utc;
 }
 
 export interface GitLabApiOutput {

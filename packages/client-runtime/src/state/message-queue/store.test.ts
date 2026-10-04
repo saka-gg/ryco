@@ -1,6 +1,15 @@
+import { TurnId } from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { createMessageQueueStore } from "./store.ts";
+import { createInterruptQueueHold, type QueueHold } from "./hold.ts";
+import { createMessageQueueStore, steeringIdsOf } from "./store.ts";
+
+const attempt = (commandId: string) => ({
+  commandId,
+  expectedTurnId: TurnId.make("turn-1"),
+  startedAt: "2026-10-01T12:00:00.000Z",
+  explicit: true,
+});
 
 function setup() {
   const store = createMessageQueueStore();
@@ -59,7 +68,207 @@ describe("queued send ownership", () => {
 
   it("does not send a message already being steered", () => {
     const store = setup();
-    store.getState().beginSteer("env:thread", "first");
+    store.getState().beginSteer("env:thread", "first", attempt("cmd-1"));
     expect(store.getState().beginSend("env:thread", "first")).toBe(false);
+  });
+});
+
+describe("steer attempts", () => {
+  it("stores one attempt per message and ends it only by its own command id", () => {
+    const store = setup();
+    store.getState().beginSteer("env:thread", "first", attempt("cmd-1"));
+    store.getState().beginSteer("env:thread", "first", attempt("cmd-2"));
+    expect(store.getState().steerAttemptsByThreadKey["env:thread"]).toEqual({
+      first: attempt("cmd-1"),
+    });
+    expect(steeringIdsOf(store.getState().steerAttemptsByThreadKey["env:thread"])).toEqual([
+      "first",
+    ]);
+
+    store.getState().endSteer("env:thread", "first", "cmd-stale");
+    expect(store.getState().steerAttemptsByThreadKey["env:thread"]?.first).toEqual(
+      attempt("cmd-1"),
+    );
+    expect(store.getState().beginSend("env:thread", "first")).toBe(false);
+
+    store.getState().endSteer("env:thread", "first", "cmd-1");
+    expect(store.getState().steerAttemptsByThreadKey).toEqual({});
+    expect(store.getState().beginSend("env:thread", "first")).toBe(true);
+  });
+
+  it("claims only queued messages that are not being sent", () => {
+    const store = setup();
+    expect(store.getState().beginSteer("env:thread", "missing", attempt("cmd-0"))).toBe(false);
+
+    store.getState().beginSend("env:thread", "first");
+    expect(store.getState().beginSteer("env:thread", "first", attempt("cmd-1"))).toBe(false);
+
+    // A failed send keeps its Steer button: steering it is a fresh delivery.
+    store.getState().finishSend("env:thread", "first", false);
+    expect(store.getState().beginSteer("env:thread", "first", attempt("cmd-2"))).toBe(true);
+    expect(store.getState().beginSteer("env:thread", "first", attempt("cmd-3"))).toBe(false);
+    expect(store.getState().steerAttemptsByThreadKey["env:thread"]).toEqual({
+      first: attempt("cmd-2"),
+    });
+  });
+
+  it("drops attempts with their message and with the thread's queue", () => {
+    const store = setup();
+    store.getState().beginSteer("env:thread", "first", attempt("cmd-1"));
+    store.getState().beginSteer("env:thread", "second", attempt("cmd-2"));
+    store.getState().remove("env:thread", "first");
+    expect(steeringIdsOf(store.getState().steerAttemptsByThreadKey["env:thread"])).toEqual([
+      "second",
+    ]);
+    store.getState().clear("env:thread");
+    expect(store.getState().steerAttemptsByThreadKey).toEqual({});
+  });
+});
+
+const NOW = "2026-10-01T12:00:00.000Z";
+const errorHold: QueueHold = {
+  reason: "error",
+  detail: "boom",
+  causeKeys: ["error:turn-1:boom"],
+  heldAt: NOW,
+};
+
+describe("queue holds", () => {
+  it("does not hold an empty queue", () => {
+    const store = createMessageQueueStore();
+    expect(store.getState().hold("env:thread", createInterruptQueueHold("turn-1", NOW))).toBe(
+      false,
+    );
+    expect(store.getState().holdsByThreadKey).toEqual({});
+  });
+
+  it("merges into the existing hold and does not notify for an identical merge", () => {
+    const store = setup();
+    const stop = createInterruptQueueHold("turn-1", NOW);
+    expect(store.getState().hold("env:thread", stop)).toBe(true);
+    expect(store.getState().hold("env:thread", errorHold)).toBe(true);
+    expect(store.getState().holdsByThreadKey["env:thread"]).toEqual({
+      reason: "error",
+      detail: "boom",
+      causeKeys: ["interrupt:turn-1", "error:turn-1:boom"],
+      heldAt: NOW,
+    });
+    let notifications = 0;
+    const unsubscribe = store.subscribe(() => {
+      notifications += 1;
+    });
+    expect(store.getState().hold("env:thread", errorHold)).toBe(false);
+    expect(store.getState().hold("env:thread", stop)).toBe(false);
+    unsubscribe();
+    expect(notifications).toBe(0);
+  });
+
+  it("releases by acknowledging, and removes causes without acknowledging", () => {
+    const store = setup();
+    store.getState().hold("env:thread", createInterruptQueueHold("turn-1", NOW));
+    store.getState().hold("env:thread", errorHold);
+    store.getState().removeHoldCauses("env:thread", ["interrupt:turn-1"]);
+    expect(store.getState().holdsByThreadKey["env:thread"]?.causeKeys).toEqual([
+      "error:turn-1:boom",
+    ]);
+    expect(store.getState().acknowledgedCauseKeysByThreadKey["env:thread"]).toBeUndefined();
+    store.getState().removeHoldCauses("env:thread", ["error:turn-1:boom"]);
+    expect(store.getState().holdsByThreadKey["env:thread"]).toBeUndefined();
+
+    // A released stall leaves the Stop's reason, not the stall copy.
+    store.getState().hold("env:thread", createInterruptQueueHold(null, NOW));
+    store.getState().hold("env:thread", {
+      reason: "stalled",
+      detail: null,
+      causeKeys: ["stalled:q-1"],
+      heldAt: NOW,
+    });
+    expect(store.getState().holdsByThreadKey["env:thread"]?.reason).toBe("stalled");
+    store.getState().removeHoldCauses("env:thread", ["stalled:q-1"]);
+    expect(store.getState().holdsByThreadKey["env:thread"]).toMatchObject({
+      reason: "interrupted",
+      causeKeys: [`interrupt:user:${NOW}`],
+    });
+    store.getState().removeHoldCauses("env:thread", [`interrupt:user:${NOW}`]);
+
+    store.getState().hold("env:thread", errorHold);
+    store.getState().release("env:thread", ["error:turn-1:boom", "interrupt:turn-1"]);
+    expect(store.getState().holdsByThreadKey["env:thread"]).toBeUndefined();
+    expect(store.getState().acknowledgedCauseKeysByThreadKey["env:thread"]).toEqual([
+      "error:turn-1:boom",
+      "interrupt:turn-1",
+    ]);
+  });
+
+  it("records an empty baseline and appends acknowledged causes", () => {
+    const store = setup();
+    store.getState().acknowledgeCauses("env:thread", []);
+    expect(store.getState().acknowledgedCauseKeysByThreadKey["env:thread"]).toEqual([]);
+    store.getState().acknowledgeCauses("env:thread", ["a", "a", "b"]);
+    expect(store.getState().acknowledgedCauseKeysByThreadKey["env:thread"]).toEqual(["a", "b"]);
+  });
+
+  it.each([
+    [
+      "remove",
+      (store: ReturnType<typeof setup>) => {
+        store.getState().remove("env:thread", "first");
+        store.getState().remove("env:thread", "second");
+      },
+    ],
+    [
+      "accepted sends",
+      (store: ReturnType<typeof setup>) => {
+        for (const id of ["first", "second"]) {
+          store.getState().beginSend("env:thread", id);
+          store.getState().finishSend("env:thread", id, true);
+        }
+      },
+    ],
+    [
+      "dequeue",
+      (store: ReturnType<typeof setup>) => {
+        store.getState().dequeue("env:thread");
+        store.getState().dequeue("env:thread");
+      },
+    ],
+    ["clear", (store: ReturnType<typeof setup>) => store.getState().clear("env:thread")],
+  ] as const)("drops the hold and baseline when %s empties the queue", (_label, empty) => {
+    const store = setup();
+    store.getState().acknowledgeCauses("env:thread", ["seen"]);
+    store.getState().hold("env:thread", errorHold);
+    empty(store);
+    expect(store.getState().holdsByThreadKey["env:thread"]).toBeUndefined();
+    expect(store.getState().acknowledgedCauseKeysByThreadKey["env:thread"]).toBeUndefined();
+  });
+
+  it("keeps the hold while messages remain", () => {
+    const store = setup();
+    store.getState().hold("env:thread", errorHold);
+    store.getState().remove("env:thread", "first");
+    expect(store.getState().holdsByThreadKey["env:thread"]).toEqual(errorHold);
+  });
+
+  it("releases a send claim back to no status", () => {
+    const store = setup();
+    store.getState().beginSend("env:thread", "first");
+    store.getState().releaseSend("env:thread", "first");
+    expect(store.getState().queuesByThreadKey["env:thread"]![0]!.deliveryStatus).toBeUndefined();
+    expect(store.getState().beginSend("env:thread", "first")).toBe(true);
+  });
+
+  it("resets everything and bumps the epoch", () => {
+    const store = setup();
+    store.getState().beginSteer("env:thread", "second", attempt("cmd-2"));
+    store.getState().acknowledgeCauses("env:thread", ["seen"]);
+    store.getState().hold("env:thread", errorHold);
+    const epoch = store.getState().epoch;
+    store.getState().reset();
+    const state = store.getState();
+    expect(state.queuesByThreadKey).toEqual({});
+    expect(state.steerAttemptsByThreadKey).toEqual({});
+    expect(state.holdsByThreadKey).toEqual({});
+    expect(state.acknowledgedCauseKeysByThreadKey).toEqual({});
+    expect(state.epoch).toBe(epoch + 1);
   });
 });

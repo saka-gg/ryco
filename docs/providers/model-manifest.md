@@ -72,6 +72,79 @@ Semantics of the Claude adapter payloads:
   model on incompatible Claude Code versions. The provider check surfaces an
   upgrade message naming the model with the lowest unmet minimum.
 
+## Provider compatibility (`compatibility`)
+
+The optional top-level `compatibility` array rates provider versions against
+the running Ryco release. The bundled file seeds OpenCode:
+
+```jsonc
+"compatibility": [
+  {
+    "driver": "opencode",          // provider driver kind
+    "rycoRange": ">=0.1.30",       // Ryco releases this policy applies to
+    "ranges": [
+      {
+        "range": ">=2.0.0",
+        "status": "unsupported",
+        "message": "Ryco works with OpenCode 1.x; 2.x support is coming."
+      },
+      { "range": ">=1.14.19 <2.0.0", "status": "supported" }
+    ]
+  }
+]
+```
+
+- **Ranges.** Comparator groups joined by `||`; whitespace-separated
+  comparators in a group are ANDed. A comparator is `>=`, `>`, `<=`, `<`, `=`
+  or no operator (meaning `=`) followed by `major[.minor[.patch]]`; missing
+  segments are 0. Caret, tilde and x-ranges are not supported.
+- **Policy order.** For each driver the first policy whose `rycoRange` contains
+  the running Ryco version wins, so list the newest `rycoRange` first. Inside
+  a policy the first matching `range` wins; a version no range matches is
+  rated `unknown`.
+- **Statuses.** `unknown`, `supported`, `graceful`, `unsupported`, `broken`.
+  An `unsupported` or `broken` rating of a provider's **latest** version stops
+  Ryco from offering that update and the server refuses to install it (it
+  rates a fresh registry fetch at click time). A rating of the **installed**
+  version is informational: `graceful`, `unsupported` and `broken` show their
+  message as one line on the provider's settings card. The status set is
+  frozen — clients decode provider lists with it — so new meanings need a new
+  field, never a new status.
+- **Messages.** A range's optional `message` (at most 300 characters) is
+  rendered verbatim; without one Ryco uses a generic line for `graceful`,
+  `unsupported` and `broken`.
+- **Version normalisation.** A leading `v` and any `-prerelease` / `+build`
+  suffix are ignored, so a version is rated by its release triple
+  (`2.0.0-beta.1` matches `>=2.0.0`). Cursor's date versions
+  (`2026.04.09-f2b0fcd`) work the same way.
+- **Ryco version.** `rycoRange` is matched against the
+  `apps/server/package.json` version with any nightly suffix stripped. Desktop
+  and web release in lockstep with it.
+- **Remote overrides.** A policy in the remote manifest replaces the bundled
+  policy for the same driver only when its `rycoRange` matches the running
+  release; omitting a driver keeps the bundled policy. To retract a bundled
+  rating, publish an explicit overriding policy for that `rycoRange`.
+- **Code-owned floors.** Limits of a build that no manifest can lift are rated
+  before any policy, for both the installed and the latest version. In this
+  build that is OpenCode `>=2.0.0` (always `unsupported`). The bundled
+  OpenCode `>=2.0.0` range only repeats the floor for readers; a test pins the
+  two together.
+- **Lenient decoding.** Invalid entries are dropped one by one, and a malformed
+  or non-array `compatibility` is ignored; it never rejects the manifest (and
+  with it the remote Claude catalog). Older releases ignore the field.
+- **Refresh.** After any provider check (not only Claude's), the server runs
+  the same TTL-gated manifest refresh and re-rates every provider snapshot when
+  it returns.
+- **OpenCode latest versions** always come from npm `opencode-ai`, which has
+  no 2.x releases (2.x ships as `@opencode/cli`). In practice an OpenCode
+  policy only blocks updates when it marks a specific 1.x release.
+  Homebrew and native updaters are rated from the same npm number, as a
+  best-effort proxy.
+
+Code map: `providerCompatibility.ts` (policy schema, selection, floors,
+rating), `Layers/ProviderRegistry.ts` (rates snapshots, post-sync refresh),
+`providerMaintenanceRunner.ts` (install refusal).
+
 ## Adding a model
 
 1. Add a profile (or reuse one) and a `models` entry with the version gate.

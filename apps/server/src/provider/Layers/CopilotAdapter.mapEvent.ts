@@ -20,6 +20,20 @@ function nonNegativeCount(value: number | undefined): number | undefined {
   return value !== undefined && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
 }
 
+/**
+ * Copilot quota and weekly-limit stops are durable usage limits. Its reset time is not
+ * reported, and a generic `rate_limited` stays a transient provider error.
+ */
+function isCopilotUsageLimitError(data: {
+  readonly errorType: string;
+  readonly errorCode?: string | undefined;
+}): boolean {
+  if (data.errorType === "quota") {
+    return data.errorCode === "quota_exceeded" || data.errorCode === "session_quota_exceeded";
+  }
+  return data.errorType === "rate_limit" && data.errorCode === "user_weekly_rate_limited";
+}
+
 export interface MapEventDeps {
   readonly makeEventStamp: () => Effect.Effect<{ eventId: EventId; createdAt: string }>;
   readonly nextEventId: Effect.Effect<EventId>;
@@ -320,7 +334,9 @@ export const mapEvent = (
             type: "runtime.error",
             payload: {
               message: event.data.message,
-              class: "provider_error",
+              ...(isCopilotUsageLimitError(event.data)
+                ? { class: "usage_limit" as const, resetAt: null }
+                : { class: "provider_error" as const }),
               detail: event.data,
             },
           },

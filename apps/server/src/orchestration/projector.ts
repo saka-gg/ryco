@@ -6,6 +6,7 @@ import type {
   ThreadId,
   WorktreeId,
 } from "@ryco/contracts";
+import type { OrchestrationLatestTurn } from "@ryco/contracts";
 import {
   DEFAULT_AGENT_TOKEN_MODE,
   OrchestrationCheckpointSummary,
@@ -16,8 +17,12 @@ import {
 } from "@ryco/contracts";
 import { Effect, Schema } from "effect";
 import { capThreadActivitiesPreservingMilestones } from "@ryco/shared/threadActivity";
+import { checkpointStatusToTurnState, mergeReleasedTurn } from "@ryco/shared/turnFinalization";
 
 import { toProjectorDecodeError, type OrchestrationProjectorDecodeError } from "./Errors.ts";
+import { resolveEventPullRequestTerminalAt } from "./pullRequestTerminalAt.ts";
+import { withThreadLineage } from "./threadLineage.ts";
+import { latestUserMessage } from "./userMessageOrder.ts";
 import {
   MessageSentPayloadSchema,
   ProjectAvatarSetPayload,
@@ -35,6 +40,8 @@ import {
   ThreadSettledPayload,
   ThreadSnoozedPayload,
   ThreadUnsnoozedPayload,
+  ThreadUsageLimitClearedPayload,
+  ThreadUsageLimitSetPayload,
   ThreadTokenModeSetPayload,
   ThreadGoalUpdatedPayload,
   ThreadGoalClearedPayload,
@@ -60,12 +67,6 @@ type WorktreePatch = Partial<Omit<OrchestrationWorktreeShell, "worktreeId" | "pr
 const MAX_THREAD_MESSAGES = 2_000;
 const MAX_THREAD_CHECKPOINTS = 500;
 const MAX_THREAD_ACTIVITIES = 500;
-
-function checkpointStatusToLatestTurnState(status: "ready" | "missing" | "error") {
-  if (status === "error") return "error" as const;
-  if (status === "missing") return "interrupted" as const;
-  return "completed" as const;
-}
 
 function updateThread(
   threads: ReadonlyArray<OrchestrationThread>,
@@ -97,10 +98,45 @@ function decodeForEvent<A>(
   });
 }
 
+/**
+ * Caps in-memory history without evicting the thread's first user message or the fence's
+ * latest user message. The command model depends on both: some(user) (thread started →
+ * context handoff, archive) and latestUserMessage (delegated-return fence: max createdAt,
+ * ties by insertion order). Identical to slice(-MAX_THREAD_MESSAGES) whenever both anchors
+ * lie within the newest window.
+ */
+function capThreadMessagesPreservingUserAnchors(
+  messages: ReadonlyArray<OrchestrationMessage>,
+): ReadonlyArray<OrchestrationMessage> {
+  let excess = messages.length - MAX_THREAD_MESSAGES;
+  if (excess <= 0) return messages;
+  const firstUserId = messages.find((message) => message.role === "user")?.id;
+  const latestUserId = latestUserMessage(messages)?.id;
+  return messages.filter((message) => {
+    if (excess === 0 || message.id === firstUserId || message.id === latestUserId) return true;
+    excess -= 1;
+    return false;
+  });
+}
+
+/**
+ * Decides whether an item bound to a turn survives a revert. The legacy rule
+ * keeps only turns with a retained checkpoint; the authoritative rule (events
+ * that carry `latestTurn`) also keeps items of turns that are not dropped and
+ * predate the kept boundary, which the hydrated command model has no
+ * checkpoints for.
+ */
+type RevertTurnItemFilter = (item: {
+  readonly turnId: string;
+  readonly createdAt: string;
+}) => boolean;
+
 function retainThreadMessagesAfterRevert(
   messages: ReadonlyArray<OrchestrationMessage>,
-  retainedTurnIds: ReadonlySet<string>,
+  keepTurnItem: RevertTurnItemFilter,
   turnCount: number,
+  /** Authoritative boundary: fallback candidates must not postdate it. Null keeps none. */
+  boundaryAt?: string | null,
 ): ReadonlyArray<OrchestrationMessage> {
   const retainedMessageIds = new Set<string>();
   for (const message of messages) {
@@ -108,10 +144,17 @@ function retainThreadMessagesAfterRevert(
       retainedMessageIds.add(message.id);
       continue;
     }
-    if (message.turnId !== null && retainedTurnIds.has(message.turnId)) {
+    if (
+      message.turnId !== null &&
+      keepTurnItem({ turnId: message.turnId, createdAt: message.createdAt })
+    ) {
       retainedMessageIds.add(message.id);
     }
   }
+  const isFallbackCandidate = (message: OrchestrationMessage) =>
+    (message.turnId === null ||
+      keepTurnItem({ turnId: message.turnId, createdAt: message.createdAt })) &&
+    (boundaryAt === undefined || (boundaryAt !== null && message.createdAt <= boundaryAt));
 
   const retainedUserCount = messages.filter(
     (message) => message.role === "user" && retainedMessageIds.has(message.id),
@@ -123,7 +166,7 @@ function retainThreadMessagesAfterRevert(
         (message) =>
           message.role === "user" &&
           !retainedMessageIds.has(message.id) &&
-          (message.turnId === null || retainedTurnIds.has(message.turnId)),
+          isFallbackCandidate(message),
       )
       .toSorted(
         (left, right) =>
@@ -145,7 +188,7 @@ function retainThreadMessagesAfterRevert(
         (message) =>
           message.role === "assistant" &&
           !retainedMessageIds.has(message.id) &&
-          (message.turnId === null || retainedTurnIds.has(message.turnId)),
+          isFallbackCandidate(message),
       )
       .toSorted(
         (left, right) =>
@@ -160,22 +203,27 @@ function retainThreadMessagesAfterRevert(
   return messages.filter((message) => retainedMessageIds.has(message.id));
 }
 
-function retainThreadActivitiesAfterRevert(
-  activities: ReadonlyArray<OrchestrationThread["activities"][number]>,
-  retainedTurnIds: ReadonlySet<string>,
-): ReadonlyArray<OrchestrationThread["activities"][number]> {
-  return activities.filter(
-    (activity) => activity.turnId === null || retainedTurnIds.has(activity.turnId),
+function retainTurnItemsAfterRevert<
+  T extends { readonly turnId: string | null; readonly createdAt: string },
+>(items: ReadonlyArray<T>, keepTurnItem: RevertTurnItemFilter): ReadonlyArray<T> {
+  return items.filter(
+    (item) =>
+      item.turnId === null || keepTurnItem({ turnId: item.turnId, createdAt: item.createdAt }),
   );
 }
 
-function retainThreadProposedPlansAfterRevert(
-  proposedPlans: ReadonlyArray<OrchestrationThread["proposedPlans"][number]>,
-  retainedTurnIds: ReadonlySet<string>,
-): ReadonlyArray<OrchestrationThread["proposedPlans"][number]> {
-  return proposedPlans.filter(
-    (proposedPlan) => proposedPlan.turnId === null || retainedTurnIds.has(proposedPlan.turnId),
-  );
+/** The latest-turn entry a revert to `checkpoint` leaves behind. */
+export function latestTurnFromCheckpoint(
+  checkpoint: OrchestrationCheckpointSummary,
+): OrchestrationLatestTurn {
+  return {
+    turnId: checkpoint.turnId,
+    state: checkpointStatusToTurnState(checkpoint.status),
+    requestedAt: checkpoint.completedAt,
+    startedAt: checkpoint.completedAt,
+    completedAt: checkpoint.completedAt,
+    assistantMessageId: checkpoint.assistantMessageId,
+  };
 }
 
 function compareThreadActivities(
@@ -318,34 +366,38 @@ export function projectEvent(
           event.type,
           "payload",
         );
+        // Re-creating a soft-deleted id replaces the whole thread, so lineage resets.
         const thread: OrchestrationThread = yield* decodeForEvent(
           OrchestrationThread,
-          {
-            id: payload.threadId,
-            projectId: payload.projectId,
-            title: payload.title,
-            modelSelection: payload.modelSelection,
-            runtimeMode: payload.runtimeMode,
-            interactionMode: payload.interactionMode,
-            tokenMode: payload.tokenMode ?? DEFAULT_AGENT_TOKEN_MODE,
-            branch: payload.branch,
-            worktreePath: payload.worktreePath,
-            worktreeId: null,
-            manualStatusBucket: null,
-            manualPosition: 0,
-            latestTurn: null,
-            goal: null,
-            createdAt: payload.createdAt,
-            updatedAt: payload.updatedAt,
-            archivedAt: null,
-            settledOverride: null,
-            settledAt: null,
-            deletedAt: null,
-            messages: [],
-            activities: [],
-            checkpoints: [],
-            session: null,
-          },
+          withThreadLineage(
+            {
+              id: payload.threadId,
+              projectId: payload.projectId,
+              title: payload.title,
+              modelSelection: payload.modelSelection,
+              runtimeMode: payload.runtimeMode,
+              interactionMode: payload.interactionMode,
+              tokenMode: payload.tokenMode ?? DEFAULT_AGENT_TOKEN_MODE,
+              branch: payload.branch,
+              worktreePath: payload.worktreePath,
+              worktreeId: null,
+              manualStatusBucket: null,
+              manualPosition: 0,
+              latestTurn: null,
+              goal: null,
+              createdAt: payload.createdAt,
+              updatedAt: payload.updatedAt,
+              archivedAt: null,
+              settledOverride: null,
+              settledAt: null,
+              deletedAt: null,
+              messages: [],
+              activities: [],
+              checkpoints: [],
+              session: null,
+            },
+            payload.lineage ?? null,
+          ),
           event.type,
           "thread",
         );
@@ -387,6 +439,7 @@ export function projectEvent(
             workItemUrl: payload.workItemUrl ?? null,
             prState: null,
             prIsDraft: null,
+            prTerminalAt: null,
             issueState: null,
             createdAt: payload.createdAt,
             updatedAt: payload.updatedAt,
@@ -439,17 +492,23 @@ export function projectEvent(
         event.type,
         "payload",
       ).pipe(
-        Effect.map((payload) => ({
-          ...nextBase,
-          worktrees: updateWorktree(nextBase.worktrees, payload.worktreeId, {
-            ...(payload.prNumber !== undefined ? { prNumber: payload.prNumber } : {}),
-            ...(payload.prTitle !== undefined ? { prTitle: payload.prTitle } : {}),
-            prState: payload.prState,
-            prIsDraft: payload.prIsDraft,
-            issueState: payload.issueState,
-            updatedAt: payload.updatedAt,
-          }),
-        })),
+        Effect.map((payload) => {
+          const existing = nextBase.worktrees?.find(
+            (worktree) => worktree.worktreeId === payload.worktreeId,
+          );
+          return {
+            ...nextBase,
+            worktrees: updateWorktree(nextBase.worktrees, payload.worktreeId, {
+              ...(payload.prNumber !== undefined ? { prNumber: payload.prNumber } : {}),
+              ...(payload.prTitle !== undefined ? { prTitle: payload.prTitle } : {}),
+              prState: payload.prState,
+              prIsDraft: payload.prIsDraft,
+              prTerminalAt: resolveEventPullRequestTerminalAt(payload, existing),
+              issueState: payload.issueState,
+              updatedAt: payload.updatedAt,
+            }),
+          };
+        }),
       );
 
     case "worktree.restored":
@@ -561,6 +620,38 @@ export function projectEvent(
             ...payload.restoredSidebarState,
           }),
         })),
+      );
+
+    case "thread.usage-limit-set":
+      return decodeForEvent(ThreadUsageLimitSetPayload, event.payload, event.type, "payload").pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          threads: updateThread(nextBase.threads, payload.threadId, {
+            usageLimit: payload.usageLimit,
+            updatedAt: payload.usageLimit.updatedAt,
+          }),
+        })),
+      );
+
+    case "thread.usage-limit-cleared":
+      return decodeForEvent(
+        ThreadUsageLimitClearedPayload,
+        event.payload,
+        event.type,
+        "payload",
+      ).pipe(
+        Effect.map((payload) => {
+          const thread = nextBase.threads.find((entry) => entry.id === payload.threadId);
+          // A clear for an older limit must not drop a newer one.
+          if (thread?.usageLimit?.limitId !== payload.limitId) return nextBase;
+          return {
+            ...nextBase,
+            threads: updateThread(nextBase.threads, payload.threadId, {
+              usageLimit: null,
+              updatedAt: payload.updatedAt,
+            }),
+          };
+        }),
       );
 
     case "thread.meta-updated":
@@ -693,7 +784,7 @@ export function projectEvent(
                 : entry,
             )
           : [...thread.messages, message];
-        const cappedMessages = messages.slice(-MAX_THREAD_MESSAGES);
+        const cappedMessages = capThreadMessagesPreservingUserAnchors(messages);
 
         return {
           ...nextBase,
@@ -727,6 +818,14 @@ export function projectEvent(
           ...session,
           tokenMode: session.tokenMode ?? DEFAULT_AGENT_TOKEN_MODE,
         };
+        // The decider decided which turn this release ends; apply it only to that turn.
+        const released = payload.releasedTurn;
+        const settledLatestTurn =
+          released !== undefined &&
+          thread.latestTurn !== null &&
+          thread.latestTurn.turnId === released.turnId
+            ? { ...thread.latestTurn, ...mergeReleasedTurn(thread.latestTurn, released) }
+            : thread.latestTurn;
 
         return {
           ...nextBase,
@@ -751,7 +850,7 @@ export function projectEvent(
                         ? thread.latestTurn.assistantMessageId
                         : null,
                   }
-                : thread.latestTurn,
+                : settledLatestTurn,
             updatedAt: event.occurredAt,
           }),
         };
@@ -864,24 +963,38 @@ export function projectEvent(
           .toSorted((left, right) => left.checkpointTurnCount - right.checkpointTurnCount)
           .slice(-MAX_THREAD_CHECKPOINTS);
 
+        // A checkpoint never changes an existing turn's state: it only attaches checkpoint
+        // fields. The state comes from the shared mapping only when the diff creates the
+        // latest-turn entry (no entry for this turn yet).
+        const sameTurn =
+          thread.latestTurn !== null && thread.latestTurn.turnId === payload.turnId
+            ? thread.latestTurn
+            : null;
+        const latestTurn =
+          sameTurn !== null
+            ? {
+                ...sameTurn,
+                startedAt: sameTurn.startedAt ?? payload.completedAt,
+                completedAt:
+                  sameTurn.state === "running"
+                    ? sameTurn.completedAt
+                    : (sameTurn.completedAt ?? payload.completedAt),
+                assistantMessageId: payload.assistantMessageId,
+              }
+            : {
+                turnId: payload.turnId,
+                state: checkpointStatusToTurnState(payload.status),
+                requestedAt: payload.completedAt,
+                startedAt: payload.completedAt,
+                completedAt: payload.completedAt,
+                assistantMessageId: payload.assistantMessageId,
+              };
+
         return {
           ...nextBase,
           threads: updateThread(nextBase.threads, payload.threadId, {
             checkpoints,
-            latestTurn: {
-              turnId: payload.turnId,
-              state: checkpointStatusToLatestTurnState(payload.status),
-              requestedAt:
-                thread.latestTurn?.turnId === payload.turnId
-                  ? thread.latestTurn.requestedAt
-                  : payload.completedAt,
-              startedAt:
-                thread.latestTurn?.turnId === payload.turnId
-                  ? (thread.latestTurn.startedAt ?? payload.completedAt)
-                  : payload.completedAt,
-              completedAt: payload.completedAt,
-              assistantMessageId: payload.assistantMessageId,
-            },
+            latestTurn,
             updatedAt: event.occurredAt,
           }),
         };
@@ -899,30 +1012,44 @@ export function projectEvent(
             .filter((entry) => entry.checkpointTurnCount <= payload.turnCount)
             .toSorted((left, right) => left.checkpointTurnCount - right.checkpointTurnCount)
             .slice(-MAX_THREAD_CHECKPOINTS);
-          const retainedTurnIds = new Set(checkpoints.map((checkpoint) => checkpoint.turnId));
+          const retainedTurnIds = new Set<string>(
+            checkpoints.map((checkpoint) => checkpoint.turnId),
+          );
+
+          // Events carrying `latestTurn` are authoritative (read from SQL by the
+          // reactor). Legacy events and replays keep the count-based rule.
+          const authoritative = payload.latestTurn !== undefined;
+          let latestTurn: OrchestrationLatestTurn | null;
+          let keepTurnItem: RevertTurnItemFilter;
+          let boundaryAt: string | null | undefined;
+          if (authoritative) {
+            latestTurn = payload.latestTurn ?? null;
+            if (latestTurn !== null) retainedTurnIds.add(latestTurn.turnId);
+            const dropped = new Set<string>(payload.droppedTurnIds ?? []);
+            const boundary = latestTurn?.completedAt ?? null;
+            boundaryAt = boundary;
+            keepTurnItem = (item) =>
+              retainedTurnIds.has(item.turnId) ||
+              (!dropped.has(item.turnId) && boundary !== null && item.createdAt <= boundary);
+          } else {
+            const latestCheckpoint = checkpoints.at(-1) ?? null;
+            latestTurn =
+              latestCheckpoint === null ? null : latestTurnFromCheckpoint(latestCheckpoint);
+            keepTurnItem = (item) => retainedTurnIds.has(item.turnId);
+            boundaryAt = undefined;
+          }
+
           const messages = retainThreadMessagesAfterRevert(
             thread.messages,
-            retainedTurnIds,
+            keepTurnItem,
             payload.turnCount,
+            boundaryAt,
           ).slice(-MAX_THREAD_MESSAGES);
-          const proposedPlans = retainThreadProposedPlansAfterRevert(
+          const proposedPlans = retainTurnItemsAfterRevert(
             thread.proposedPlans,
-            retainedTurnIds,
+            keepTurnItem,
           ).slice(-200);
-          const activities = retainThreadActivitiesAfterRevert(thread.activities, retainedTurnIds);
-
-          const latestCheckpoint = checkpoints.at(-1) ?? null;
-          const latestTurn =
-            latestCheckpoint === null
-              ? null
-              : {
-                  turnId: latestCheckpoint.turnId,
-                  state: checkpointStatusToLatestTurnState(latestCheckpoint.status),
-                  requestedAt: latestCheckpoint.completedAt,
-                  startedAt: latestCheckpoint.completedAt,
-                  completedAt: latestCheckpoint.completedAt,
-                  assistantMessageId: latestCheckpoint.assistantMessageId,
-                };
+          const activities = retainTurnItemsAfterRevert(thread.activities, keepTurnItem);
 
           return {
             ...nextBase,

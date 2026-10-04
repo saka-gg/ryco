@@ -1,4 +1,6 @@
 import {
+  type OrchestrationThread,
+  type OrchestrationThreadHistoryState,
   EnvironmentId,
   ProjectId,
   ProviderInstanceId,
@@ -7,8 +9,17 @@ import {
 } from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { createEnvironmentFallbackThreadRefSelector } from "./storeSelectors.ts";
-import type { AppState, EnvironmentState } from "./store.ts";
+import {
+  createEnvironmentFallbackThreadRefSelector,
+  selectEnvironmentShellLive,
+  selectThreadDetailLoaded,
+} from "./storeSelectors.ts";
+import {
+  syncServerThreadDetail,
+  syncServerThreadWindow,
+  type AppState,
+  type EnvironmentState,
+} from "./store.ts";
 import {
   DEFAULT_AGENT_TOKEN_MODE,
   DEFAULT_INTERACTION_MODE,
@@ -151,5 +162,87 @@ describe("createEnvironmentFallbackThreadRefSelector", () => {
     const selector = createEnvironmentFallbackThreadRefSelector(environmentId, "updated_at");
 
     expect(selector(state)).toEqual({ environmentId, threadId: threadA });
+  });
+});
+
+describe("selectThreadDetailLoaded", () => {
+  const ref = { environmentId, threadId: threadA } satisfies ScopedThreadRef;
+  const detail: OrchestrationThread = {
+    id: threadA,
+    projectId,
+    title: "Detail",
+    modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" },
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    branch: null,
+    worktreePath: null,
+    worktreeId: null,
+    manualStatusBucket: null,
+    manualPosition: 0,
+    latestTurn: null,
+    createdAt: "2026-06-12T10:00:00.000Z",
+    updatedAt: "2026-06-12T10:00:00.000Z",
+    archivedAt: null,
+    settledOverride: null,
+    settledAt: null,
+    deletedAt: null,
+    messages: [],
+    proposedPlans: [],
+    activities: [],
+    checkpoints: [],
+    session: null,
+  } as OrchestrationThread;
+  const page = { cursor: null, hasMore: false } as never;
+  const history = {
+    messages: page,
+    proposedPlans: page,
+    activities: page,
+    checkpoints: page,
+  } as OrchestrationThreadHistoryState;
+
+  it("is false for a shell-only thread", () => {
+    const state = makeState(
+      makeEnvironmentState({
+        threadIds: [threadA],
+        threadShellById: { [threadA]: makeShell(threadA) },
+        sidebarThreadSummaryById: { [threadA]: makeSummary(threadA) },
+      }),
+    );
+    expect(selectThreadDetailLoaded(state, ref)).toBe(false);
+  });
+
+  it("is true after a full-detail snapshot", () => {
+    const state = syncServerThreadDetail(makeState(makeEnvironmentState()), detail, environmentId);
+    expect(selectThreadDetailLoaded(state, ref)).toBe(true);
+  });
+
+  it("is true after a thread-detail window", () => {
+    const state = syncServerThreadWindow(
+      makeState(makeEnvironmentState()),
+      { snapshotSequence: 1, thread: detail, history },
+      environmentId,
+    );
+    expect(selectThreadDetailLoaded(state, ref)).toBe(true);
+  });
+});
+
+describe("selectEnvironmentShellLive", () => {
+  it("is true only for a bootstrapped environment that is not cache provenance", () => {
+    expect(selectEnvironmentShellLive(makeState(makeEnvironmentState()), environmentId)).toBe(true);
+    expect(
+      selectEnvironmentShellLive(
+        makeState(makeEnvironmentState({ bootstrapComplete: false })),
+        environmentId,
+      ),
+    ).toBe(false);
+    expect(
+      selectEnvironmentShellLive(
+        makeState(makeEnvironmentState({ hydratedFromCacheAt: 1 })),
+        environmentId,
+      ),
+    ).toBe(false);
+    expect(
+      selectEnvironmentShellLive(makeState(makeEnvironmentState()), EnvironmentId.make("other")),
+    ).toBe(false);
   });
 });

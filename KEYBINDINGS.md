@@ -157,6 +157,10 @@ Currently available context keys:
 - `commandPaletteOpen` — the command palette is open
 - `composerFocus` — the message composer (main chat input) is focused
 
+Mod+Enter in the focused composer is reserved: while a turn runs it does the opposite of the
+follow-up setting. Do not bind `mod+enter` to commands that can fire while the composer is
+focused.
+
 Supported operators:
 
 - `!` (not)

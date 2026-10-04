@@ -67,6 +67,7 @@ const gitStatusRefreshInFlight = new Map<string, Promise<VcsStatusResult>>();
 const gitStatusLastRefreshAtByKey = new Map<string, number>();
 
 const GIT_STATUS_REFRESH_DEBOUNCE_MS = 1_000;
+const LOCAL_GIT_REF_READ_TIMEOUT_MS = 5_000;
 
 const gitStatusStateAtom = Atom.family((key: string) => {
   knownGitStatusKeys.add(key);
@@ -84,8 +85,12 @@ function getGitStatusTargetKey(target: GitStatusTarget): string | null {
   return `${target.environmentId}:${target.cwd}`;
 }
 
+function getGitStatusWatchKeyPrefix(targetKey: string): string {
+  return `${targetKey}:remote-poll=`;
+}
+
 function getGitStatusWatchKey(targetKey: string, options?: GitStatusWatchOptions): string {
-  return `${targetKey}:remote-poll=${options?.automaticRemoteRefreshIntervalMs ?? 0}`;
+  return `${getGitStatusWatchKeyPrefix(targetKey)}${options?.automaticRemoteRefreshIntervalMs ?? 0}`;
 }
 
 function readResolvedGitStatusClient(target: GitStatusTarget): ResolvedGitStatusClient | null {
@@ -146,6 +151,63 @@ export function refreshGitStatus(
     }
     return status;
   });
+}
+
+/**
+ * The ref checked out in `target.cwd`, read from local status only: the live
+ * snapshot when the cwd is already watched, otherwise the first snapshot of a
+ * short-lived status subscription, which the server answers from its local
+ * `git status`. Never `vcs.refreshStatus`, which also refreshes the remote and
+ * change-request state and fails offline or without provider auth. Resolves the
+ * ref name (null when detached or not a repository), or undefined when it could
+ * not be read within the timeout.
+ */
+export function readLocalGitRefName(
+  target: GitStatusTarget,
+  options?: { readonly client?: GitStatusClient; readonly timeoutMs?: number },
+): Promise<string | null | undefined> {
+  const targetKey = getGitStatusTargetKey(target);
+  if (targetKey === null) return Promise.resolve(undefined);
+  const atom = gitStatusStateAtom(targetKey);
+  const current = appAtomRegistry.get(atom);
+  // A watched cwd's atom is streamed live, whatever its remote-poll interval.
+  if (isGitStatusTargetWatched(targetKey) && !current.isPending && current.data !== null) {
+    return Promise.resolve(current.data.refName ?? null);
+  }
+  // A new subscription marks the atom pending until its first snapshot lands,
+  // so stale data from an earlier watch never counts.
+  const release = watchGitStatus(target, options?.client);
+  return new Promise((resolve) => {
+    let done = false;
+    let unsubscribe: () => void = NOOP;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const finish = (refName: string | null | undefined) => {
+      if (done) return;
+      done = true;
+      if (timer !== undefined) clearTimeout(timer);
+      unsubscribe();
+      release();
+      resolve(refName);
+    };
+    const read = (state: GitStatusState) => {
+      if (!state.isPending && state.data !== null) finish(state.data.refName ?? null);
+    };
+    read(appAtomRegistry.get(atom));
+    if (done) return;
+    unsubscribe = appAtomRegistry.subscribe(atom, read);
+    timer = setTimeout(
+      () => finish(undefined),
+      options?.timeoutMs ?? LOCAL_GIT_REF_READ_TIMEOUT_MS,
+    );
+  });
+}
+
+function isGitStatusTargetWatched(targetKey: string): boolean {
+  const prefix = getGitStatusWatchKeyPrefix(targetKey);
+  for (const watchKey of watchedGitStatuses.keys()) {
+    if (watchKey.startsWith(prefix)) return true;
+  }
+  return false;
 }
 
 function requestGitStatusRefresh(

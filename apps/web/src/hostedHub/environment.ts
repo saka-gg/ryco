@@ -71,7 +71,9 @@ export function clearWebHostedAccountScopedState(): void {
     terminalEventEntriesByKey: {},
     nextTerminalEventId: 1,
   });
-  useMessageQueueStore.setState({ queuesByThreadKey: {} });
+  // `reset` bumps the queue epoch; the drain coordinator observes it and drops
+  // in-flight completions from the previous account.
+  useMessageQueueStore.getState().reset();
   useCommandPaletteStore.getState().setOpen(false);
   useSettingsDialogStore.getState().closeSettings();
   setModelPickerOpen(false);

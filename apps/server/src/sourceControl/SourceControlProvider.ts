@@ -1,4 +1,4 @@
-import { Context, Effect } from "effect";
+import { Context, Effect, type DateTime } from "effect";
 import {
   SourceControlProviderError,
   type ChangeRequestActivity,
@@ -334,7 +334,15 @@ export interface SourceControlProviderShape {
     readonly cwd: string;
     readonly context?: SourceControlProviderContext;
   }) => Effect.Effect<
-    { readonly state: PullRequestState; readonly isDraft: boolean },
+    {
+      readonly state: PullRequestState;
+      readonly isDraft: boolean;
+      /**
+       * Forge-reported time the PR reached its current merged/closed state;
+       * `null` while open. Absent when the forge reports no close time.
+       */
+      readonly terminalAt?: DateTime.Utc | null;
+    },
     SourceControlProviderError
   >;
   readonly getIssueState: (input: {

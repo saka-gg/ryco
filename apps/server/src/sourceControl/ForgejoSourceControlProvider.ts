@@ -378,7 +378,16 @@ export const make = Effect.fn("makeForgejoSourceControlProvider")(function* () {
           reference: String(input.number),
         })
         .pipe(
-          Effect.map((summary) => ({ state: summary.state, isDraft: summary.isDraft ?? false })),
+          Effect.map((summary) => ({
+            state: summary.state,
+            isDraft: summary.isDraft ?? false,
+            terminalAt:
+              summary.state === "merged"
+                ? (summary.mergedAt ?? summary.closedAt ?? null)
+                : summary.state === "closed"
+                  ? (summary.closedAt ?? null)
+                  : null,
+          })),
           Effect.mapError((error) => providerError("getPullRequestState", error)),
         ),
     getIssueState: () => notImplemented("getIssueState"),

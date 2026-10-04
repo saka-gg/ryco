@@ -58,6 +58,16 @@ describe("clearWebHostedNodeScopedState", () => {
     useComposerDraftStore.getState().setPrompt(DraftId.make("accountDraft"), "private prompt");
     useUiStateStore.setState({ pinnedThreadKeys: { accountThread: true } });
     useCommandPaletteStore.getState().openAddProject();
+    useMessageQueueStore
+      .getState()
+      .enqueue("accountThread", { id: "queued", composer: {} as never, settings: {} as never });
+    useMessageQueueStore.getState().hold("accountThread", {
+      reason: "error",
+      detail: "boom",
+      causeKeys: ["error:turn:boom"],
+      heldAt: "2026-10-01T00:00:00.000Z",
+    });
+    const epoch = useMessageQueueStore.getState().epoch;
 
     clearWebHostedAccountScopedState();
 
@@ -66,5 +76,12 @@ describe("clearWebHostedNodeScopedState", () => {
     ).toBeNull();
     expect(useUiStateStore.getState().pinnedThreadKeys).toEqual({});
     expect(useCommandPaletteStore.getState().open).toBe(false);
+    // The queue reset bumps the epoch so in-flight queued sends are dropped.
+    expect(useMessageQueueStore.getState()).toMatchObject({
+      queuesByThreadKey: {},
+      holdsByThreadKey: {},
+      acknowledgedCauseKeysByThreadKey: {},
+      epoch: epoch + 1,
+    });
   });
 });

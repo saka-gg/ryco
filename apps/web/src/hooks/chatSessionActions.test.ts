@@ -85,6 +85,7 @@ describe("chatSessionActions", () => {
       environmentUnavailable: false,
       environmentUnavailableLabel: null,
       turnInProgress: false,
+      providerRefusal: null,
       confirmMessage: "Revert?",
     });
 
@@ -112,6 +113,7 @@ describe("chatSessionActions", () => {
       environmentUnavailable: false,
       environmentUnavailableLabel: null,
       turnInProgress: false,
+      providerRefusal: null,
       confirmMessage: "Revert?",
     });
 
@@ -128,10 +130,37 @@ describe("chatSessionActions", () => {
       environmentUnavailable: false,
       environmentUnavailableLabel: null,
       turnInProgress: true,
+      providerRefusal: null,
       confirmMessage: "Revert?",
     });
 
     expect(result).toEqual({ ok: false, reason: { type: "turn-in-progress" } });
+  });
+
+  it("refuses providers that cannot forget turns before asking for confirmation", async () => {
+    const dispatchCommand = vi.fn(async () => undefined);
+    const confirm = vi.fn(async () => true);
+    const result = await revertThreadCheckpointWithGuards({
+      api: { orchestration: { dispatchCommand } } as never,
+      localApi: { dialogs: { confirm } },
+      thread: { id: ThreadId.make("thr_1") },
+      turnCount: 2,
+      environmentUnavailable: false,
+      environmentUnavailableLabel: null,
+      turnInProgress: false,
+      providerRefusal: "Cursor can't remove turns from its conversation.",
+      confirmMessage: "Revert?",
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      reason: {
+        type: "provider-unsupported",
+        message: "Cursor can't remove turns from its conversation.",
+      },
+    });
+    expect(confirm).not.toHaveBeenCalled();
+    expect(dispatchCommand).not.toHaveBeenCalled();
   });
 });
 
@@ -164,5 +193,11 @@ describe("revertCheckpointGuardFailureMessage", () => {
         label: "Office Mac",
       }),
     ).toBe("Reconnect Office Mac before reverting checkpoints.");
+    expect(
+      revertCheckpointGuardFailureMessage({
+        type: "provider-unsupported",
+        message: "Cursor can't remove turns from its conversation.",
+      }),
+    ).toBe("Cursor can't remove turns from its conversation.");
   });
 });
