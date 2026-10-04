@@ -405,6 +405,11 @@ describe("hosted account surface", () => {
     expect(view.statusIndicator?.shortLabel).toBe("Removed");
     expect(view.detail).toBe(HOSTED_DEVICE_REMOVED_MESSAGE);
     expect(view.rows.map((row) => row.id)).toEqual(["sign-out"]);
+    // The app ships apart from the Hub: a Hub that cannot re-enroll a removed
+    // installation answers every fresh sign-in with `Device encryption
+    // unavailable`, so the copy must not promise that signing in is enough.
+    expect(view.detail).toMatch(/Device encryption unavailable/);
+    expect(view.detail).toMatch(/reinstall/i);
   });
 
   it("acknowledges rotated recovery codes only from the explicit action", () => {

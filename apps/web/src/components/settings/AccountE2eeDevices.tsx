@@ -243,8 +243,9 @@ export function AccountE2eeDevices() {
             <AlertDialogTitle>Revoke this encrypted device?</AlertDialogTitle>
             <AlertDialogDescription>
               {revokeDevice?.deviceLabel ?? "The selected device"} will lose account-authorized
-              native connections. It can enroll again only after signing in again; this enrollment
-              cannot be restored.
+              native connections, and this enrollment cannot be restored. Enrolling it again takes a
+              fresh sign-in on that device, and on a Hub that cannot re-enroll a removed
+              installation, a reinstall of Ryco there.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

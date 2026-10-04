@@ -211,11 +211,16 @@ export interface HostedAccountViewInput {
 
 /**
  * The Hub revoked this device's encrypted enrollment (`Device removed`). The
- * revoked enrollment cannot be restored from this session; a new sign-in is
- * what enrolls fresh keys, so that is the one step the copy names.
+ * revoked enrollment cannot be restored from this session; a new sign-in is the
+ * step that enrolls fresh keys. It works only against a Hub that re-enrolls a
+ * removed installation: an older Hub refuses the same installation's enrollment
+ * after every sign-in, which this app sees as `Device encryption unavailable`
+ * and which only a reinstall (a new installation) gets past. This app ships
+ * independently of the Hub, so the copy names both outcomes rather than
+ * promising the first.
  */
 export const HOSTED_DEVICE_REMOVED_MESSAGE =
-  "This device was removed from your Hub's encrypted devices, so it cannot reach your nodes. Sign out, then sign in again to set it up again.";
+  "This device was removed from your Hub's encrypted devices, so it cannot reach your nodes. Sign out, then sign in again to set it up again. If it still shows Device encryption unavailable after that, your Hub cannot re-enroll this installation; reinstalling Ryco sets it up with new keys.";
 
 const DELIVERY_UNKNOWN_MESSAGE =
   "A request may or may not have reached the node. Ryco did not resend it automatically.";
