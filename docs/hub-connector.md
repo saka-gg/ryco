@@ -372,7 +372,10 @@ the lock held by a live process does not read, sign with, or connect as the iden
 `connection_replaced`, checks again every 30 seconds to two minutes, and takes over by itself once
 the first one exits. It also refuses to start or cancel an enrollment, or to leave, while the other
 process holds the identity. A lock left by a process that died — or by one from before a reboot,
-whose pid may since have been reused — is reclaimed automatically. If the lock file cannot be
+whose pid may since have been reused — is reclaimed automatically. The lock records the kernel's
+boot id where there is one (Linux and macOS), so a wall-clock correction cannot make a live holder
+look like one from an earlier boot, and on Linux the holder's start time, so a pid that a container
+restart handed to another process is not mistaken for the holder. If the lock file cannot be
 written at all the connector proceeds without it; the Hub still allows only one connection per
 identity.
 
@@ -561,7 +564,11 @@ and the normal server listener follow their existing shutdown path.
   backend on the same state directory holds its lock; remotely, a copy of the identity
   authenticated elsewhere. A local copy is waited out automatically. A remote one is retried a few
   times an hour, then Ryco stops so the other copy keeps the connection. Stop the copy you do not
-  want, then run `ryco hub resume`.
+  want, then run `ryco hub resume`. If no other Ryco backend uses this state directory and status
+  still reports a local copy, the lock outlived its holder in a way Ryco could not detect: delete
+  `hub-connector.lock` beside `hub-identity.json` in the state directory, then run
+  `ryco hub resume`. Never delete it while another backend runs — both would then connect, and the
+  Hub would displace one of them.
 - `protocol_invalid` or `version_incompatible`: upgrade the incompatible endpoint. Do not modify
   relay schemas or fixtures locally.
 - Repeated `network_unavailable`, `tls_unavailable`, or `heartbeat_timeout`: check DNS, egress, TLS
