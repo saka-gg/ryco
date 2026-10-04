@@ -305,19 +305,25 @@ const TAB_LIKE_CONTROLS = /[\t\n\v\f\r\u0085\u2028\u2029]/g;
 // C0 and C1 control characters.
 // eslint-disable-next-line no-control-regex
 const CONTROL_CHARACTERS = /[\u0000-\u001F\u007F-\u009F]/g;
-const BIDI_CONTROLS = /[\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/g;
-const ZERO_WIDTH = /[\u200B-\u200D\u2060\uFEFF]/g;
+/**
+ * Every Unicode format character (bidi controls, zero-width characters, the soft hyphen,
+ * invisible operators and the tag block that "ASCII smuggling" hides text in).
+ */
+const FORMAT_CHARACTERS = /\p{Cf}/gu;
+/** Variation selectors and the rest of the tag block (its unassigned code points). */
+const INVISIBLE_SELECTORS = /[\p{Variation_Selector}\u{E0000}-\u{E007F}]/gu;
 
 /**
- * One background task label, made safe to show inside a code span: no control, bidi or
- * zero-width characters, collapsed whitespace, no backticks, at most 120 characters.
+ * One background task label, made safe to show inside a code span: no control, format or
+ * other invisible characters the model would read but the user would not see, collapsed
+ * whitespace, no backticks, at most 120 characters.
  */
 export function sanitizeBackgroundLabel(text: string): string {
   const cleaned = text
     .replace(TAB_LIKE_CONTROLS, " ")
     .replace(CONTROL_CHARACTERS, "")
-    .replace(BIDI_CONTROLS, "")
-    .replace(ZERO_WIDTH, "")
+    .replace(FORMAT_CHARACTERS, "")
+    .replace(INVISIBLE_SELECTORS, "")
     .replace(/\s+/g, " ")
     .trim()
     .replaceAll("`", "'");
