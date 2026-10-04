@@ -408,6 +408,10 @@ describe("owner actions carry a confirmation proportionate to the consequence", 
       // locks the device out, and pointed at the action that says so honestly.
       expect(confirmation.body, role).toContain("would refuse the device rather than limit it");
       expect(confirmation.body, role).toContain("revoke the key instead");
+      // The role is stated as a fact about the device, not as a sentence that
+      // opens on a lowercase role, and nothing implies it was chosen here.
+      expect(confirmation.body, role).toContain(`This device connects as ${role},`);
+      expect(confirmation.body, role).not.toContain("you grant here");
     }
     // Three distinct confirmations, so no two roles read the same.
     const labels = NODE_E2EE_APPROVABLE_ROLES.map(
@@ -547,8 +551,12 @@ describe("owner actions carry a confirmation proportionate to the consequence", 
         (fact) => fact.label,
       ),
     ).not.toContain("Comparison number");
-    // The statement that gates the action is about all the digits.
+    // The statement that gates the action is about all the digits — and says
+    // the fingerprint tail in the row's title is not something to compare.
     expect(NODE_SAFETY_NUMBER_MATCH_HINT).toContain(String(E2EE_SAFETY_NUMBER_DIGITS.digits));
+    expect(NODE_SAFETY_NUMBER_MATCH_HINT).toContain(
+      "title only tell rows apart and are no comparison",
+    );
   });
 
   it("warns when an account has more than one request waiting, on the row and in the dialog", () => {
@@ -592,6 +600,8 @@ describe("owner actions carry a confirmation proportionate to the consequence", 
     const warning = nodePendingPartitionWarning(2)!;
     expect(warning).toContain("2 requests are waiting under this account");
     expect(warning.toLowerCase()).toContain("matches the phone in your hand");
+    // The partition may be any account at the Hub, not only the owner's own.
+    expect(warning).not.toContain("your account");
 
     const dialog = nodeApproveConfirmation("owner", {
       fingerprint: phone.fingerprint,

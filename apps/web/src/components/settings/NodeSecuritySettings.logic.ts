@@ -368,7 +368,8 @@ export const NODE_SAFETY_NUMBER_MATCH_LABEL = "This number matches the phone";
 
 export const NODE_SAFETY_NUMBER_MATCH_HINT =
   `Read all ${E2EE_SAFETY_NUMBER_DIGITS.digits} digits off the phone's own screen and tick this ` +
-  "only if every group is the same. The approve action appears once you have.";
+  "only if every group is the same; the approve action appears once you have. The characters " +
+  "in this row's title only tell rows apart and are no comparison.";
 
 export function nodeSafetyNumberView(value: string): NodeSafetyNumberView | null {
   const groups = nodeSafetyNumberGroups(value);
@@ -556,6 +557,9 @@ export function nodeClientStatusTone(
  * Enough to tell two devices apart at a glance, and never offered as a substitute
  * for the full value: the row's own `FactRows` and every per-record confirmation
  * carry all of it, because §13.2 step 5's comparison is character for character.
+ * It is not a comparison either — a Hub that knows the phone's enrolled key can
+ * grind one whose tail matches — so the statement that gates an approval says
+ * so next to the number (`NODE_SAFETY_NUMBER_MATCH_HINT`).
  */
 const CLIENT_TITLE_FINGERPRINT_TAIL = 8;
 
@@ -1104,7 +1108,7 @@ const ACTION_CONFIRMATIONS = {
     title: "Approve this client key?",
     // §13.6: a first approval is authority-widening, so it takes effect only on
     // a fresh ticket, channel, and handshake — never on one already open.
-    body: "The device holding this key may then reach this node, up to the role and capabilities you grant here. Compare its number against the device first. It takes effect on its next connection, not on anything open now.",
+    body: "The device holding this key may then reach this node, at most with the role and capability this approval names. Compare its number against the device first. It takes effect on its next connection, not on anything open now.",
     confirmLabel: "Approve key",
     destructive: false,
   },
@@ -1364,17 +1368,18 @@ export function nodePendingInPartition(
 /**
  * The warning for a partition holding more than one pending request.
  *
- * One request under the owner's account is the ordinary case: the phone they
- * are holding. A second is either another device of theirs or a key the Hub
- * introduced under their account — and the two read identically here except
- * for the fingerprint and the number. That is the moment an owner most needs to
- * compare rather than pick, so it is said on the row and again in the dialog.
+ * One request under an account is the ordinary case: the phone being held. A
+ * second is either another device on that account or a key the Hub introduced
+ * under it — the account need not be the owner's own, hence "this account" —
+ * and the two read identically here except for the fingerprint and the number.
+ * That is the moment an owner most needs to compare rather than pick, so it is
+ * said on the row and again in the dialog.
  */
 export function nodePendingPartitionWarning(pendingInPartition: number): string | null {
   if (pendingInPartition <= 1) return null;
   return (
     `${pendingInPartition} requests are waiting under this account at this Hub. A Hub can open ` +
-    "one under your account from a key of its own, and it reads exactly like your phone's except " +
+    "one under this account from a key of its own, and it reads exactly like the phone's except " +
     "for the fingerprint and the number. Approve only the row whose number matches the phone in " +
     "your hand, and delete any you cannot account for."
   );
@@ -1481,10 +1486,10 @@ export function nodeApproveConfirmation(
   return {
     title: `Approve this client key as ${role}?`,
     body: [
-      `${base.body} ${role} is the role this device connects with, so it is the ceiling it is ` +
-        `approved at: at most it will be able to ${APPROVAL_ROLE_MEANINGS[role]}. A smaller ` +
-        `ceiling would refuse the device rather than limit it — if this account should not hold ` +
-        `that much on this node, revoke the key instead.`,
+      `${base.body} This device connects as ${role}, so that is the ceiling it is approved at: ` +
+        `at most it will be able to ${APPROVAL_ROLE_MEANINGS[role]}. A smaller ceiling would ` +
+        `refuse the device rather than limit it — if this account should not hold that much on ` +
+        `this node, revoke the key instead.`,
       `It is granted the one capability a relay channel carries, ${capabilities} — a key ` +
         `approved with none is admitted by nothing and could not connect at all.`,
       ...subjectSentences,
