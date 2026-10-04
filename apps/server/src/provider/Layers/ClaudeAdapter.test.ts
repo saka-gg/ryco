@@ -23,7 +23,20 @@ import {
 } from "@ryco/contracts";
 import { createModelSelection } from "@ryco/shared/model";
 import { assert, describe, it, vi } from "@effect/vitest";
-import { Context, Effect, Fiber, Layer, Option, Random, Redacted, Schema, Stream } from "effect";
+import { TestClock } from "effect/testing";
+import {
+  Context,
+  Deferred,
+  Effect,
+  Fiber,
+  Layer,
+  Option,
+  Queue,
+  Random,
+  Redacted,
+  Schema,
+  Stream,
+} from "effect";
 
 import { attachmentRelativePath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
@@ -57,6 +70,9 @@ class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
   public readonly applyFlagSettings?: (settings: Record<string, unknown>) => Promise<void>;
   public closeCalls = 0;
   public mcpStatuses: ReadonlyArray<{ readonly name: string; readonly status: string }> = [];
+  /** While set, setPermissionMode parks on it before recording the call. */
+  public permissionModeGate: Promise<void> | undefined;
+  private readonly permissionModeWaiters: Array<() => void> = [];
 
   constructor(supportsAutomaticCompaction = false) {
     if (supportsAutomaticCompaction) {
@@ -113,8 +129,15 @@ class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
   };
 
   readonly setPermissionMode = async (mode: PermissionMode): Promise<void> => {
+    for (const notify of this.permissionModeWaiters.splice(0)) notify();
+    if (this.permissionModeGate) await this.permissionModeGate;
     this.setPermissionModeCalls.push(mode);
   };
+
+  /** Resolves once the next setPermissionMode call has started. */
+  permissionModeEntered(): Promise<void> {
+    return new Promise((resolve) => this.permissionModeWaiters.push(resolve));
+  }
 
   readonly setMaxThinkingTokens = async (maxThinkingTokens: number | null): Promise<void> => {
     this.setMaxThinkingTokensCalls.push(maxThinkingTokens);
@@ -170,6 +193,7 @@ function makeHarness(config?: {
   readonly instanceId?: ProviderInstanceId;
   readonly agentControl?: AgentControlProviderBridge;
   readonly supportsAutomaticCompaction?: boolean;
+  readonly runtimeEventQueueCapacity?: number;
 }) {
   const query = new FakeClaudeQuery(config?.supportsAutomaticCompaction);
   let createInput:
@@ -182,6 +206,9 @@ function makeHarness(config?: {
   const adapterOptions: ClaudeAdapterLiveOptions = {
     ...(config?.instanceId ? { instanceId: config.instanceId } : {}),
     ...(config?.agentControl ? { agentControl: config.agentControl } : {}),
+    ...(config?.runtimeEventQueueCapacity !== undefined
+      ? { runtimeEventQueueCapacity: config.runtimeEventQueueCapacity }
+      : {}),
     createQuery: (input) => {
       createInput = input;
       return query;
@@ -5902,4 +5929,1068 @@ describe("ClaudeAdapterLive", () => {
       );
     },
   );
+});
+
+const GAUGE_MODEL = "claude-sonnet-4-6";
+const GAUGE_SDK_SESSION = "sdk-session-gauge";
+
+function rootAssistantFrame(
+  id: string,
+  usage: Record<string, number> = {},
+  content: ReadonlyArray<unknown> = [],
+): SDKMessage {
+  return {
+    type: "assistant",
+    uuid: id,
+    session_id: GAUGE_SDK_SESSION,
+    parent_tool_use_id: null,
+    message: { id, model: GAUGE_MODEL, content, usage },
+  } as unknown as SDKMessage;
+}
+
+function resultFrame(
+  input: {
+    readonly usage?: Record<string, number>;
+    readonly contextWindow?: number;
+    readonly subtype?: "success" | "error_during_execution";
+  } & Record<string, unknown> = {},
+): SDKMessage {
+  const { usage, contextWindow, subtype = "success", ...extra } = input;
+  return {
+    type: "result",
+    subtype,
+    is_error: false,
+    num_turns: 1,
+    session_id: GAUGE_SDK_SESSION,
+    ...(subtype === "success" ? { result: "done" } : { errors: ["Claude turn failed."] }),
+    ...(usage ? { usage } : {}),
+    ...(contextWindow
+      ? { modelUsage: { [GAUGE_MODEL]: { contextWindow, maxOutputTokens: 64_000 } } }
+      : {}),
+    ...extra,
+  } as unknown as SDKMessage;
+}
+
+function compactBoundaryFrame(compactMetadata: Record<string, unknown>): SDKMessage {
+  return {
+    type: "system",
+    subtype: "compact_boundary",
+    compact_metadata: compactMetadata,
+    uuid: "compact-boundary",
+    session_id: GAUGE_SDK_SESSION,
+  } as unknown as SDKMessage;
+}
+
+function systemStatusFrame(status: "requesting" | "compacting" | null): SDKMessage {
+  return {
+    type: "system",
+    subtype: "status",
+    status,
+    uuid: `status-${String(status)}`,
+    session_id: GAUGE_SDK_SESSION,
+  } as unknown as SDKMessage;
+}
+
+function systemInitFrame(): SDKMessage {
+  return {
+    type: "system",
+    subtype: "init",
+    model: GAUGE_MODEL,
+    cwd: "/tmp/claude-adapter-test",
+    tools: [],
+    mcp_servers: [],
+    slash_commands: [],
+    permissionMode: "bypassPermissions",
+    apiKeySource: "none",
+    claude_code_version: "2.1.288",
+    uuid: "init",
+    session_id: GAUGE_SDK_SESSION,
+  } as unknown as SDKMessage;
+}
+
+/**
+ * A frame that produces exactly one `hook.started` event and changes no turn state. The stream
+ * fiber handles frames in order, so waiting for it proves every earlier frame was handled.
+ */
+function sentinelFrame(id: string): SDKMessage {
+  return {
+    type: "system",
+    subtype: "hook_started",
+    hook_id: id,
+    hook_name: "sentinel",
+    hook_event: "Notification",
+    uuid: `sentinel-${id}`,
+    session_id: GAUGE_SDK_SESSION,
+  } as unknown as SDKMessage;
+}
+
+const isSentinel = (id: string) => (event: ProviderRuntimeEvent) =>
+  event.type === "hook.started" && event.payload.hookId === id;
+
+/**
+ * Collects every runtime event while letting a test wait for a specific one. A closed gate parks
+ * the consumer after each event, so (with a tiny adapter queue) the adapter blocks mid-emit.
+ */
+function makeRuntimeEventLog(adapter: ClaudeAdapterShape) {
+  return Effect.gen(function* () {
+    const events: Array<ProviderRuntimeEvent> = [];
+    const pending = yield* Queue.unbounded<ProviderRuntimeEvent>();
+    let gate: Deferred.Deferred<void> | undefined;
+    yield* adapter.streamEvents.pipe(
+      Stream.runForEach((event) =>
+        Queue.offer(pending, event).pipe(
+          Effect.andThen(Effect.suspend(() => (gate ? Deferred.await(gate) : Effect.void))),
+        ),
+      ),
+      Effect.forkChild,
+    );
+    const closeGate = Effect.sync(() => {
+      gate ??= Deferred.makeUnsafe<void>();
+    });
+    const openGate = Effect.suspend(() => {
+      const closed = gate;
+      gate = undefined;
+      return closed ? Deferred.succeed(closed, undefined) : Effect.void;
+    });
+    const waitFor = (predicate: (event: ProviderRuntimeEvent) => boolean) =>
+      Effect.gen(function* () {
+        while (true) {
+          const event = yield* Queue.take(pending);
+          events.push(event);
+          if (predicate(event)) return event;
+        }
+      });
+    /** Moves already-delivered events into the log without waiting. */
+    const drain = Effect.gen(function* () {
+      for (let round = 0; round < 8; round += 1) yield* Effect.yieldNow;
+      while (true) {
+        const next = yield* Queue.poll(pending);
+        if (Option.isNone(next)) return;
+        events.push(next.value);
+      }
+    });
+    return { events, waitFor, drain, closeGate, openGate };
+  });
+}
+
+function rootToolStartFrame(index: number, toolUseId: string): SDKMessage {
+  return {
+    type: "stream_event",
+    parent_tool_use_id: null,
+    uuid: `tool-start-${toolUseId}`,
+    session_id: GAUGE_SDK_SESSION,
+    event: {
+      type: "content_block_start",
+      index,
+      content_block: { type: "tool_use", id: toolUseId, name: "Bash", input: {} },
+    },
+  } as unknown as SDKMessage;
+}
+
+const isTurnTerminal = (event: ProviderRuntimeEvent) =>
+  event.type === "turn.completed" || event.type === "turn.aborted";
+
+function assertEveryTurnTerminatesOnce(events: ReadonlyArray<ProviderRuntimeEvent>) {
+  const started = events.filter((event) => event.type === "turn.started");
+  assert.isAbove(started.length, 0);
+  for (const turn of started) {
+    const terminals = events.filter(
+      (event) => isTurnTerminal(event) && event.turnId === turn.turnId,
+    );
+    assert.equal(terminals.length, 1, `turn ${String(turn.turnId)} terminal events`);
+  }
+}
+
+const yieldTimes = (times: number) =>
+  Effect.gen(function* () {
+    for (let round = 0; round < times; round += 1) yield* Effect.yieldNow;
+  });
+
+const isUsageEvent = (event: ProviderRuntimeEvent) => event.type === "thread.token-usage.updated";
+
+function lastUsageBefore(events: ReadonlyArray<ProviderRuntimeEvent>, index: number) {
+  const usage = events.slice(0, index).findLast(isUsageEvent);
+  return usage?.type === "thread.token-usage.updated" ? usage.payload.usage : undefined;
+}
+
+describe("ClaudeAdapterLive context meter across compaction", () => {
+  const startGaugeSession = (adapter: ClaudeAdapterShape, runtimeSessionId: string) =>
+    adapter.startSession({
+      runtimeSessionId: RuntimeSessionId.make(runtimeSessionId),
+      threadId: THREAD_ID,
+      provider: ProviderDriverKind.make("claudeAgent"),
+      runtimeMode: "full-access",
+    });
+
+  /** One completed prompt turn whose main loop reported usage and a 200k window. */
+  const completeFirstTurn = (
+    adapter: ClaudeAdapterShape,
+    query: FakeClaudeQuery,
+    log: Effect.Success<ReturnType<typeof makeRuntimeEventLog>>,
+  ) =>
+    Effect.gen(function* () {
+      const first = yield* adapter.sendTurn({
+        threadId: THREAD_ID,
+        input: "fill",
+        attachments: [],
+      });
+      query.emit(
+        rootAssistantFrame("assistant-first", {
+          input_tokens: 12,
+          cache_read_input_tokens: 160_000,
+          cache_creation_input_tokens: 8_000,
+          output_tokens: 1,
+        }),
+      );
+      query.emit(
+        resultFrame({
+          usage: { input_tokens: 12, cache_read_input_tokens: 160_000, output_tokens: 900 },
+          contextWindow: 200_000,
+        }),
+      );
+      yield* log.waitFor(
+        (event) => event.type === "turn.completed" && event.turnId === first.turnId,
+      );
+      return first;
+    });
+
+  it.effect("publishes post_tokens at a /compact boundary and never the cumulative total", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      yield* startGaugeSession(adapter, "gauge-compact-post");
+      yield* completeFirstTurn(adapter, harness.query, log);
+
+      const compact = yield* adapter.sendTurn({
+        threadId: THREAD_ID,
+        input: "/compact",
+        attachments: [],
+      });
+      harness.query.emit(systemStatusFrame("compacting"));
+      harness.query.emit(
+        compactBoundaryFrame({ trigger: "manual", pre_tokens: 168_012, post_tokens: 41_999.6 }),
+      );
+      harness.query.emit(sentinelFrame("after-boundary"));
+      const sentinelStart = log.events.length;
+      yield* log.waitFor(isSentinel("after-boundary"));
+      const boundaryUsage = log.events.slice(sentinelStart).find(isUsageEvent);
+      assert.equal(boundaryUsage?.turnId, compact.turnId);
+      if (boundaryUsage?.type === "thread.token-usage.updated") {
+        assert.deepEqual(boundaryUsage.payload.usage, { usedTokens: 42_000, maxTokens: 200_000 });
+      }
+
+      harness.query.emit(
+        resultFrame({
+          user_message_uuids: [compact.turnId],
+          usage: { input_tokens: 3, cache_read_input_tokens: 168_000, output_tokens: 4_000 },
+          contextWindow: 200_000,
+        }),
+      );
+      harness.query.finish();
+      yield* log.waitFor((event) => event.type === "session.exited");
+
+      const events = log.events;
+      const completedIndex = events.findIndex(
+        (event) => event.type === "turn.completed" && event.turnId === compact.turnId,
+      );
+      assert.isAbove(completedIndex, -1);
+      const finalGauge = lastUsageBefore(events, completedIndex);
+      assert.equal(finalGauge?.usedTokens, 42_000);
+      assert.equal(finalGauge?.totalProcessedTokens, 172_003);
+      assert.isUndefined(finalGauge?.claudeCache);
+      const boundaryIndex = events.findIndex(
+        (event) => event.type === "thread.state.changed" && event.payload.state === "compacted",
+      );
+      for (const event of events.slice(boundaryIndex)) {
+        if (event.type === "thread.token-usage.updated") {
+          assert.isBelow(event.payload.usage.usedTokens, 168_000);
+        }
+      }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("publishes no gauge after a boundary that has no post_tokens", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      yield* startGaugeSession(adapter, "gauge-compact-no-post");
+      yield* completeFirstTurn(adapter, harness.query, log);
+
+      const compact = yield* adapter.sendTurn({
+        threadId: THREAD_ID,
+        input: "/compact",
+        attachments: [],
+      });
+      harness.query.emit(systemStatusFrame("compacting"));
+      harness.query.emit(compactBoundaryFrame({ trigger: "manual", pre_tokens: 168_012 }));
+      harness.query.emit(
+        resultFrame({
+          user_message_uuids: [compact.turnId],
+          usage: { input_tokens: 3, cache_read_input_tokens: 168_000, output_tokens: 4_000 },
+          contextWindow: 200_000,
+        }),
+      );
+      harness.query.finish();
+      yield* log.waitFor((event) => event.type === "session.exited");
+
+      const boundaryIndex = log.events.findIndex(
+        (event) => event.type === "thread.state.changed" && event.payload.state === "compacted",
+      );
+      assert.isAbove(boundaryIndex, -1);
+      assert.isFalse(log.events.slice(boundaryIndex).some(isUsageEvent));
+      assert.isTrue(
+        log.events.some(
+          (event) => event.type === "turn.completed" && event.turnId === compact.turnId,
+        ),
+      );
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("lets the next main-loop request replace the post-compaction gauge", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      yield* startGaugeSession(adapter, "gauge-auto-compact");
+      yield* completeFirstTurn(adapter, harness.query, log);
+
+      const turn = yield* adapter.sendTurn({ threadId: THREAD_ID, input: "more", attachments: [] });
+      harness.query.emit(systemStatusFrame("compacting"));
+      harness.query.emit(
+        compactBoundaryFrame({ trigger: "auto", pre_tokens: 175_000, post_tokens: 42_000 }),
+      );
+      harness.query.emit(
+        rootAssistantFrame("assistant-after-compact", {
+          input_tokens: 7,
+          cache_read_input_tokens: 40_000,
+          cache_creation_input_tokens: 6_993,
+          output_tokens: 1,
+        }),
+      );
+      harness.query.emit(
+        resultFrame({
+          user_message_uuids: [turn.turnId],
+          usage: { input_tokens: 10, cache_read_input_tokens: 215_000, output_tokens: 2_000 },
+          contextWindow: 200_000,
+        }),
+      );
+      harness.query.finish();
+      yield* log.waitFor((event) => event.type === "session.exited");
+
+      const completedIndex = log.events.findIndex(
+        (event) => event.type === "turn.completed" && event.turnId === turn.turnId,
+      );
+      assert.equal(lastUsageBefore(log.events, completedIndex)?.usedTokens, 47_000);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("keeps legacy task telemetry off the gauge after a boundary", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      yield* startGaugeSession(adapter, "gauge-legacy-telemetry");
+      yield* completeFirstTurn(adapter, harness.query, log);
+
+      const turn = yield* adapter.sendTurn({ threadId: THREAD_ID, input: "more", attachments: [] });
+      harness.query.emit(systemStatusFrame("compacting"));
+      harness.query.emit(
+        compactBoundaryFrame({ trigger: "auto", pre_tokens: 175_000, post_tokens: 42_000 }),
+      );
+      harness.query.emit({
+        type: "system",
+        subtype: "task_notification",
+        task_id: "task-never-started",
+        status: "completed",
+        output_file: "/tmp/task-never-started.jsonl",
+        summary: "done",
+        usage: { total_tokens: 150_000 },
+        uuid: "task-never-started-done",
+        session_id: GAUGE_SDK_SESSION,
+      } as unknown as SDKMessage);
+      harness.query.emit(
+        resultFrame({
+          user_message_uuids: [turn.turnId],
+          usage: { input_tokens: 10, cache_read_input_tokens: 190_000, output_tokens: 2_000 },
+          contextWindow: 200_000,
+        }),
+      );
+      harness.query.finish();
+      yield* log.waitFor((event) => event.type === "session.exited");
+
+      assert.isFalse(
+        log.events.some(
+          (event) =>
+            event.type === "thread.token-usage.updated" &&
+            event.payload.usage.usedTokens === 150_000,
+        ),
+      );
+      const completedIndex = log.events.findIndex(
+        (event) => event.type === "turn.completed" && event.turnId === turn.turnId,
+      );
+      assert.equal(lastUsageBefore(log.events, completedIndex)?.usedTokens, 42_000);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("publishes a boundary that arrives while no turn is open", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      yield* startGaugeSession(adapter, "gauge-idle-boundary");
+      yield* completeFirstTurn(adapter, harness.query, log);
+
+      harness.query.emit(
+        compactBoundaryFrame({ trigger: "auto", pre_tokens: 175_000, post_tokens: 42_000 }),
+      );
+      harness.query.emit(sentinelFrame("after-idle-boundary"));
+      const sentinelStart = log.events.length;
+      yield* log.waitFor(isSentinel("after-idle-boundary"));
+      const boundaryUsage = log.events.slice(sentinelStart).find(isUsageEvent);
+      assert.isDefined(boundaryUsage);
+      assert.isUndefined(boundaryUsage?.turnId);
+      if (boundaryUsage?.type === "thread.token-usage.updated") {
+        assert.equal(boundaryUsage.payload.usage.usedTokens, 42_000);
+      }
+
+      harness.query.emit(
+        resultFrame({
+          origin: { kind: "task-notification" },
+          usage: { input_tokens: 10, cache_read_input_tokens: 189_990 },
+          contextWindow: 200_000,
+        }),
+      );
+      const resultUsage = yield* log.waitFor(isUsageEvent);
+      assert.isUndefined(resultUsage.turnId);
+      if (resultUsage.type === "thread.token-usage.updated") {
+        assert.equal(resultUsage.payload.usage.usedTokens, 42_000);
+        assert.equal(resultUsage.payload.usage.totalProcessedTokens, 190_000);
+      }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+});
+
+describe("ClaudeAdapterLive turn ownership", () => {
+  it.effect("closes a provider turn opened while sendTurn awaited the SDK", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("ownership-send-orphan"),
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      let releaseGate: () => void = () => undefined;
+      harness.query.permissionModeGate = new Promise((resolve) => {
+        releaseGate = resolve;
+      });
+      const entered = harness.query.permissionModeEntered();
+      const sendFiber = yield* adapter
+        .sendTurn({ threadId: THREAD_ID, input: "user prompt", interactionMode: "default" })
+        .pipe(Effect.forkChild);
+      yield* Effect.promise(() => entered);
+
+      harness.query.emit(
+        rootAssistantFrame("background-reply", {}, [{ type: "text", text: "Bg" }]),
+      );
+      const providerStarted = yield* log.waitFor((event) => event.type === "turn.started");
+      const providerTurnId = providerStarted.turnId;
+
+      releaseGate();
+      const userTurn = yield* Fiber.join(sendFiber);
+      assert.notEqual(userTurn.turnId, providerTurnId);
+      harness.query.emit(resultFrame({ user_message_uuids: [userTurn.turnId] }));
+      harness.query.emit(sentinelFrame("after-user-result"));
+      yield* log.waitFor(isSentinel("after-user-result"));
+      harness.query.finish();
+      yield* log.waitFor((event) => event.type === "session.exited");
+
+      const events = log.events;
+      const providerCompleted = events.findIndex(
+        (event) => event.type === "turn.completed" && event.turnId === providerTurnId,
+      );
+      const userStarted = events.findIndex(
+        (event) => event.type === "turn.started" && event.turnId === userTurn.turnId,
+      );
+      assert.isAbove(providerCompleted, -1);
+      assert.isBelow(providerCompleted, userStarted);
+      const userCompleted = events.find(
+        (event) => event.type === "turn.completed" && event.turnId === userTurn.turnId,
+      );
+      assert.equal(
+        userCompleted?.type === "turn.completed" && userCompleted.payload.state,
+        "completed",
+      );
+      assertEveryTurnTerminatesOnce(events);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("never closes a turn twice when sendTurn races the stream's completion", () => {
+    const harness = makeHarness({ runtimeEventQueueCapacity: 1 });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("ownership-double-close"),
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      harness.query.emit(rootAssistantFrame("background-reply"));
+      const providerStarted = yield* log.waitFor((event) => event.type === "turn.started");
+      const providerTurnId = providerStarted.turnId;
+      harness.query.emit(rootToolStartFrame(0, "tool-a"));
+      harness.query.emit(rootToolStartFrame(1, "tool-b"));
+      yield* log.waitFor(
+        (event) => event.type === "item.started" && String(event.itemId) === "tool-b",
+      );
+
+      // With the consumer parked, completeTurn(S) blocks on its second or third emit.
+      yield* log.closeGate;
+      harness.query.emit(
+        resultFrame({
+          origin: { kind: "task-notification" },
+          usage: { input_tokens: 10, cache_read_input_tokens: 20_000, output_tokens: 30 },
+        }),
+      );
+      yield* log.waitFor((event) => event.type === "item.completed");
+      const sendFiber = yield* adapter
+        .sendTurn({ threadId: THREAD_ID, input: "user prompt" })
+        .pipe(Effect.forkChild);
+      yield* yieldTimes(20);
+      yield* log.openGate;
+
+      const userTurn = yield* Fiber.join(sendFiber);
+      harness.query.emit(resultFrame({ user_message_uuids: [userTurn.turnId] }));
+      harness.query.emit(sentinelFrame("after-user-result"));
+      yield* log.waitFor(isSentinel("after-user-result"));
+
+      const events = log.events;
+      const providerCompletions = events.filter(
+        (event) => event.type === "turn.completed" && event.turnId === providerTurnId,
+      );
+      assert.equal(providerCompletions.length, 1);
+      const providerCompleted = events.indexOf(providerCompletions[0]!);
+      const userStarted = events.findIndex(
+        (event) => event.type === "turn.started" && event.turnId === userTurn.turnId,
+      );
+      assert.isBelow(providerCompleted, userStarted);
+      assert.isTrue(
+        events.some((event) => event.type === "turn.completed" && event.turnId === userTurn.turnId),
+      );
+      const [session] = yield* adapter.listSessions();
+      assert.isUndefined(session?.activeTurnId);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+});
+
+function rootStreamFrame(uuid: string, event: Record<string, unknown>): SDKMessage {
+  return {
+    type: "stream_event",
+    parent_tool_use_id: null,
+    uuid,
+    session_id: GAUGE_SDK_SESSION,
+    event,
+  } as unknown as SDKMessage;
+}
+
+function taskNotificationFrame(taskId: string): SDKMessage {
+  return {
+    type: "system",
+    subtype: "task_notification",
+    task_id: taskId,
+    status: "completed",
+    output_file: `/tmp/${taskId}.jsonl`,
+    summary: "Background command finished",
+    uuid: `task-notification-${taskId}`,
+    session_id: GAUGE_SDK_SESSION,
+  } as unknown as SDKMessage;
+}
+
+const WAKE_NO_OUTPUT_REASON = "Claude started a background turn but produced no output.";
+
+describe("ClaudeAdapterLive provider wake turns", () => {
+  const startWakeSession = (
+    adapter: ClaudeAdapterShape,
+    runtimeSessionId: string,
+    resumeCursor?: Record<string, unknown>,
+  ) =>
+    adapter.startSession({
+      runtimeSessionId: RuntimeSessionId.make(runtimeSessionId),
+      threadId: THREAD_ID,
+      provider: ProviderDriverKind.make("claudeAgent"),
+      runtimeMode: "full-access",
+      ...(resumeCursor ? { resumeCursor } : {}),
+    });
+
+  type EventLog = Effect.Success<ReturnType<typeof makeRuntimeEventLog>>;
+
+  /** Emits a sentinel and waits for it: every earlier frame has been handled. */
+  const settle = (query: FakeClaudeQuery, log: EventLog, id: string) =>
+    Effect.gen(function* () {
+      query.emit(sentinelFrame(id));
+      yield* log.waitFor(isSentinel(id));
+    });
+
+  /** One prompt turn shaped like a real CLI turn (init, optionally status, output, result). */
+  const completePromptTurn = (
+    adapter: ClaudeAdapterShape,
+    query: FakeClaudeQuery,
+    log: EventLog,
+    options: { readonly emitsStatus: boolean } = { emitsStatus: true },
+  ) =>
+    Effect.gen(function* () {
+      const turn = yield* adapter.sendTurn({
+        threadId: THREAD_ID,
+        input: "prompt",
+        attachments: [],
+      });
+      query.emit(systemInitFrame());
+      if (options.emitsStatus) query.emit(systemStatusFrame("requesting"));
+      query.emit(
+        rootAssistantFrame(`assistant-${String(turn.turnId)}`, {}, [{ type: "text", text: "Ok" }]),
+      );
+      query.emit(resultFrame({ user_message_uuids: [turn.turnId] }));
+      yield* log.waitFor(
+        (event) => event.type === "turn.completed" && event.turnId === turn.turnId,
+      );
+      return turn;
+    });
+
+  const turnStartsAfter = (log: EventLog, from: number) =>
+    log.events.slice(from).filter((event) => event.type === "turn.started");
+
+  /** Opens a wake turn through the idle `status: requesting` signal and returns its id. */
+  const openWakeTurn = (query: FakeClaudeQuery, log: EventLog, id: string) =>
+    Effect.gen(function* () {
+      const from = log.events.length;
+      query.emit(systemInitFrame());
+      query.emit(systemStatusFrame("requesting"));
+      yield* settle(query, log, id);
+      const started = turnStartsAfter(log, from);
+      assert.equal(started.length, 1, "wake turn opened at status: requesting");
+      return started[0]!.turnId!;
+    });
+
+  const lifecycleFor = (log: EventLog, turnId: unknown) =>
+    log.events.filter(
+      (event) =>
+        (event.type === "turn.started" || isTurnTerminal(event)) && event.turnId === turnId,
+    );
+
+  it.effect("opens a wake turn at the idle status: requesting, before any output", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      yield* startWakeSession(adapter, "wake-requesting");
+      yield* completePromptTurn(adapter, harness.query, log);
+      const idleFrom = log.events.length;
+
+      harness.query.emit(taskNotificationFrame("bg-sleep"));
+      harness.query.emit(systemInitFrame());
+      yield* settle(harness.query, log, "after-idle-init");
+      assert.lengthOf(turnStartsAfter(log, idleFrom), 0);
+
+      harness.query.emit(systemStatusFrame("requesting"));
+      yield* settle(harness.query, log, "after-requesting");
+      const started = turnStartsAfter(log, idleFrom);
+      assert.lengthOf(started, 1);
+      const wakeStart = started[0]!;
+      const wakeTurnId = wakeStart.turnId;
+      assert.equal(
+        (wakeStart.raw?.payload as { readonly openedBy?: string } | undefined)?.openedBy,
+        "wake-signal",
+      );
+      const requesting = log.events.findLast(
+        (event) =>
+          event.type === "session.state.changed" && event.payload.reason === "status:requesting",
+      );
+      assert.equal(requesting?.turnId, wakeTurnId);
+      assert.isAbove(log.events.indexOf(requesting!), log.events.indexOf(wakeStart));
+      assert.equal((yield* adapter.listSessions())[0]?.activeTurnId, wakeTurnId);
+
+      harness.query.emit(
+        rootStreamFrame("wake-message-start", {
+          type: "message_start",
+          message: { id: "wake-message", model: GAUGE_MODEL, content: [], usage: {} },
+        }),
+      );
+      harness.query.emit(
+        rootStreamFrame("wake-thinking-start", {
+          type: "content_block_start",
+          index: 0,
+          content_block: { type: "thinking", thinking: "", signature: "" },
+        }),
+      );
+      harness.query.emit(
+        rootStreamFrame("wake-thinking-delta", {
+          type: "content_block_delta",
+          index: 0,
+          delta: { type: "thinking_delta", thinking: "The sleep finished." },
+        }),
+      );
+      yield* settle(harness.query, log, "after-thinking");
+      const wakeEvents = log.events.slice(idleFrom);
+      const reasoning = wakeEvents.find(
+        (event) => event.type === "item.started" && event.payload.itemType === "reasoning",
+      );
+      assert.equal(reasoning?.turnId, wakeTurnId);
+      const delta = wakeEvents.find((event) => event.type === "content.delta");
+      assert.equal(delta?.turnId, wakeTurnId);
+      assert.equal(
+        delta?.type === "content.delta" ? delta.payload.streamKind : undefined,
+        "reasoning_text",
+      );
+
+      harness.query.emit(
+        rootAssistantFrame("wake-reply", {}, [{ type: "text", text: "The sleep finished." }]),
+      );
+      harness.query.emit(resultFrame({ origin: { kind: "task-notification" } }));
+      yield* settle(harness.query, log, "after-wake-result");
+      assert.deepEqual(
+        lifecycleFor(log, wakeTurnId).map((event) => event.type),
+        ["turn.started", "turn.completed"],
+      );
+      assert.isUndefined((yield* adapter.listSessions())[0]?.activeTurnId);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("opens no wake turn before the first prompt of a resumed session", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      yield* startWakeSession(adapter, "wake-resume-handshake", {
+        threadId: THREAD_ID,
+        resume: "11111111-1111-4111-8111-111111111111",
+        turnCount: 2,
+      });
+      harness.query.emit(systemInitFrame());
+      harness.query.emit(systemStatusFrame("requesting"));
+      yield* settle(harness.query, log, "after-handshake");
+      assert.lengthOf(turnStartsAfter(log, 0), 0);
+      assert.isUndefined((yield* adapter.listSessions())[0]?.activeTurnId);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("opens no turn for an empty notification turn or an init on a modern CLI", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      yield* startWakeSession(adapter, "wake-empty-notification");
+      yield* completePromptTurn(adapter, harness.query, log);
+      const idleFrom = log.events.length;
+
+      harness.query.emit(systemInitFrame());
+      yield* settle(harness.query, log, "after-idle-init");
+      assert.lengthOf(turnStartsAfter(log, idleFrom), 0);
+      harness.query.emit(resultFrame({ num_turns: 0, origin: { kind: "task-notification" } }));
+      yield* settle(harness.query, log, "after-empty-result");
+      assert.isFalse(
+        log.events
+          .slice(idleFrom)
+          .some((event) => event.type === "turn.started" || isTurnTerminal(event)),
+      );
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("opens no wake turn while a send is installing its turn", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      yield* startWakeSession(adapter, "wake-install-in-flight");
+      yield* completePromptTurn(adapter, harness.query, log);
+      const idleFrom = log.events.length;
+
+      let releaseGate: () => void = () => undefined;
+      harness.query.permissionModeGate = new Promise((resolve) => {
+        releaseGate = resolve;
+      });
+      const entered = harness.query.permissionModeEntered();
+      const sendFiber = yield* adapter
+        .sendTurn({ threadId: THREAD_ID, input: "user prompt", interactionMode: "default" })
+        .pipe(Effect.forkChild);
+      yield* Effect.promise(() => entered);
+      harness.query.emit(systemStatusFrame("requesting"));
+      yield* settle(harness.query, log, "after-gated-requesting");
+      releaseGate();
+      const userTurn = yield* Fiber.join(sendFiber);
+      yield* settle(harness.query, log, "after-install");
+
+      const started = turnStartsAfter(log, idleFrom);
+      assert.deepEqual(
+        started.map((event) => event.turnId),
+        [userTurn.turnId],
+      );
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("falls back to init on CLIs that never emit status: requesting", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      yield* startWakeSession(adapter, "wake-legacy-init");
+      yield* completePromptTurn(adapter, harness.query, log, { emitsStatus: false });
+      const idleFrom = log.events.length;
+
+      harness.query.emit(systemInitFrame());
+      yield* settle(harness.query, log, "after-legacy-init");
+      const started = turnStartsAfter(log, idleFrom);
+      assert.lengthOf(started, 1);
+      assert.equal(
+        (started[0]!.raw?.payload as { readonly openedBy?: string } | undefined)?.openedBy,
+        "wake-signal",
+      );
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("aborts a wake turn that produces no output for two minutes", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      yield* startWakeSession(adapter, "wake-watchdog");
+      yield* completePromptTurn(adapter, harness.query, log);
+      const wakeTurnId = yield* openWakeTurn(harness.query, log, "after-wake-open");
+      yield* yieldTimes(10);
+
+      yield* TestClock.adjust("119 seconds");
+      yield* log.drain;
+      assert.deepEqual(
+        lifecycleFor(log, wakeTurnId).map((event) => event.type),
+        ["turn.started"],
+      );
+
+      yield* TestClock.adjust("1 second");
+      const aborted = yield* log.waitFor(isTurnTerminal);
+      assert.equal(aborted.type, "turn.aborted");
+      assert.equal(aborted.turnId, wakeTurnId);
+      if (aborted.type === "turn.aborted") {
+        assert.equal(aborted.payload.reason, WAKE_NO_OUTPUT_REASON);
+      }
+      yield* log.drain;
+      const [session] = yield* adapter.listSessions();
+      assert.equal(session?.status, "ready");
+      assert.isUndefined(session?.activeTurnId);
+
+      harness.query.finish();
+      yield* log.waitFor((event) => event.type === "session.exited");
+      assert.deepEqual(
+        lifecycleFor(log, wakeTurnId).map((event) => event.type),
+        ["turn.started", "turn.aborted"],
+      );
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  for (const [label, liveness] of [
+    ["the compacting heartbeat", systemStatusFrame("compacting")],
+    [
+      "a root message_start",
+      rootStreamFrame("wake-message-start", {
+        type: "message_start",
+        message: { id: "wake-message", model: GAUGE_MODEL, content: [], usage: {} },
+      }),
+    ],
+  ] as const) {
+    it.effect(`keeps a wake turn alive after ${label}`, () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const log = yield* makeRuntimeEventLog(adapter);
+        yield* startWakeSession(adapter, "wake-watchdog-alive");
+        yield* completePromptTurn(adapter, harness.query, log);
+        const wakeTurnId = yield* openWakeTurn(harness.query, log, "after-wake-open");
+        harness.query.emit(liveness);
+        yield* settle(harness.query, log, "after-liveness");
+        yield* yieldTimes(10);
+
+        yield* TestClock.adjust("130 seconds");
+        yield* log.drain;
+        assert.deepEqual(
+          lifecycleFor(log, wakeTurnId).map((event) => event.type),
+          ["turn.started"],
+        );
+
+        harness.query.emit(resultFrame({ origin: { kind: "task-notification" } }));
+        yield* settle(harness.query, log, "after-wake-result");
+        const terminal = lifecycleFor(log, wakeTurnId).slice(1);
+        assert.lengthOf(terminal, 1);
+        assert.equal(terminal[0]?.type, "turn.completed");
+        assert.equal(
+          terminal[0]?.type === "turn.completed" ? terminal[0].payload.state : undefined,
+          "completed",
+        );
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    });
+  }
+
+  it.effect("finishes a provider turn locally when Stop gets no result within the grace", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      yield* startWakeSession(adapter, "wake-stop-grace");
+      yield* completePromptTurn(adapter, harness.query, log);
+      const wakeTurnId = yield* openWakeTurn(harness.query, log, "after-wake-open");
+
+      yield* adapter.interruptTurn(THREAD_ID);
+      assert.equal(harness.query.interruptCalls.length, 1);
+      yield* log.drain;
+      assert.deepEqual(
+        lifecycleFor(log, wakeTurnId).map((event) => event.type),
+        ["turn.started"],
+      );
+
+      yield* yieldTimes(10);
+      yield* TestClock.adjust("5 seconds");
+      const completed = yield* log.waitFor(isTurnTerminal);
+      assert.equal(completed.type, "turn.completed");
+      assert.equal(completed.turnId, wakeTurnId);
+      assert.equal(
+        completed.type === "turn.completed" ? completed.payload.state : undefined,
+        "interrupted",
+      );
+      yield* log.drain;
+      assert.isUndefined((yield* adapter.listSessions())[0]?.activeTurnId);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("lets the CLI's own result end a stopped provider turn exactly once", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      yield* startWakeSession(adapter, "wake-stop-result");
+      yield* completePromptTurn(adapter, harness.query, log);
+      const wakeTurnId = yield* openWakeTurn(harness.query, log, "after-wake-open");
+
+      yield* adapter.interruptTurn(THREAD_ID);
+      harness.query.emit(
+        resultFrame({
+          subtype: "error_during_execution",
+          errors: ["Interrupted by user"],
+          origin: { kind: "task-notification" },
+        }),
+      );
+      yield* settle(harness.query, log, "after-stop-result");
+      yield* yieldTimes(10);
+      yield* TestClock.adjust("5 seconds");
+      yield* log.drain;
+      assert.deepEqual(
+        lifecycleFor(log, wakeTurnId).map((event) => event.type),
+        ["turn.started", "turn.completed"],
+      );
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("schedules no Stop grace for a prompt turn", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      yield* startWakeSession(adapter, "wake-stop-prompt");
+      const turn = yield* adapter.sendTurn({ threadId: THREAD_ID, input: "work", attachments: [] });
+      harness.query.emit(systemStatusFrame("requesting"));
+      yield* settle(harness.query, log, "after-prompt-requesting");
+
+      yield* adapter.interruptTurn(THREAD_ID);
+      yield* yieldTimes(10);
+      yield* TestClock.adjust("5 seconds");
+      yield* log.drain;
+      assert.deepEqual(
+        lifecycleFor(log, turn.turnId).map((event) => event.type),
+        ["turn.started"],
+      );
+      assert.equal((yield* adapter.listSessions())[0]?.activeTurnId, turn.turnId);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("never binds Agent Control authority to a provider wake turn", () => {
+    const state = makeAgentControlBridge();
+    const harness = makeHarness({ agentControl: state.bridge });
+    harness.query.mcpStatuses = [{ name: "ryco", status: "connected" }];
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      yield* startWakeSession(adapter, "wake-agent-control");
+      const promptTurn = yield* completePromptTurn(adapter, harness.query, log);
+      const wakeTurnId = yield* openWakeTurn(harness.query, log, "after-wake-open");
+      harness.query.emit(rootAssistantFrame("wake-reply", {}, [{ type: "text", text: "Done" }]));
+      harness.query.emit(resultFrame({ origin: { kind: "task-notification" } }));
+      yield* settle(harness.query, log, "after-wake-result");
+
+      assert.deepEqual(
+        lifecycleFor(log, wakeTurnId).map((event) => event.type),
+        ["turn.started", "turn.completed"],
+      );
+      assert.deepEqual(
+        state.bindTurnAuthority.mock.calls.map(([input]) => String(input.turnId)),
+        [String(promptTurn.turnId)],
+      );
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
 });
