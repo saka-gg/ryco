@@ -125,6 +125,7 @@ function harness() {
   let visible = true;
   let now = 1;
   let tick = () => {};
+  let visibility = () => {};
   const stateListeners = new Set<() => void>();
   const routeListeners = new Set<() => void>();
   const readShell = vi.fn(async (_nodeId: string, _signal: AbortSignal) => shell);
@@ -150,6 +151,10 @@ function harness() {
         },
         readShell,
         readThread,
+        subscribeVisibility: (listener) => {
+          visibility = listener;
+          return () => {};
+        },
         onSnapshot,
         now: () => now,
         isVisible: () => visible,
@@ -176,6 +181,7 @@ function harness() {
     },
     visible(value: boolean) {
       visible = value;
+      visibility();
     },
   };
 }
@@ -194,6 +200,226 @@ describe("hosted cloud thread read cache", () => {
     });
     expect(test.onSnapshot.mock.calls.at(-1)?.[0].threads).toHaveLength(1);
   });
+
+  it("fills an unopened body after live Inbox demotion without replacing the newer local shell", async () => {
+    const test = harness();
+    test.route({ nodeId: node.id, malformed: false, logicalPathname: "/" });
+    useStore.getState().syncServerShellSnapshot(
+      {
+        ...shell.snapshot,
+        threads: [{ ...shell.snapshot.threads[0]!, title: "Newer live title" }],
+      },
+      environmentId,
+    );
+    test.start();
+    await settle();
+    useStore.getState().demoteEnvironmentStateToCachedSnapshot(environmentId, 500);
+    test.route({
+      nodeId: node.id,
+      malformed: false,
+      logicalPathname: `/${environmentId}/${threadId}`,
+    });
+    await settle();
+    const thread = selectThreadByRef(useStore.getState(), { environmentId, threadId });
+    expect(thread?.messages[0]?.text).toBe(detail.snapshot.messages[0]?.text);
+    expect(thread?.title).toBe("Newer live title");
+    expect(useStore.getState().environmentStateById[environmentId]).toMatchObject({
+      bootstrapComplete: false,
+      hydratedFromCacheAt: 500,
+    });
+    expect(test.onSnapshot).not.toHaveBeenCalled();
+  });
+
+  it.each(["stale", "delivery-unknown"] as const)(
+    "fills buffered history on canonical %s connection loss without disposal or reload",
+    async (sessionStatus) => {
+      const test = harness();
+      test.patch({
+        selectedNode: { ...node, presence: { online: true, lastHeartbeatAt: 1 } },
+        sessionStatus: "ready",
+        transportStatus: "online",
+      });
+      useStore.getState().syncServerShellSnapshot(shell.snapshot, environmentId);
+      test.start();
+      await settle();
+      expect(selectThreadByRef(useStore.getState(), { environmentId, threadId })?.messages).toEqual(
+        [],
+      );
+      // A stale presence projection alone must not override the current channel.
+      test.patch({ selectedNode: node });
+      expect(useStore.getState().environmentStateById[environmentId]?.bootstrapComplete).toBe(true);
+      test.patch({
+        sessionStatus,
+        sessionRecoveredAfterUnknown: false,
+        transportStatus: "reconnecting",
+      });
+      expect(
+        selectThreadByRef(useStore.getState(), { environmentId, threadId })?.messages[0]?.text,
+      ).toBe(detail.snapshot.messages[0]?.text);
+      expect(useStore.getState().environmentStateById[environmentId]?.bootstrapComplete).toBe(
+        false,
+      );
+      expect(test.readThread).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each([false, true])(
+    "reapplies a body fetched while live after demotion (hidden: %s)",
+    async (hidden) => {
+      const test = harness();
+      useStore.getState().syncServerShellSnapshot(shell.snapshot, environmentId);
+      test.start();
+      await settle();
+      expect(selectThreadByRef(useStore.getState(), { environmentId, threadId })?.messages).toEqual(
+        [],
+      );
+      test.visible(!hidden);
+      useStore.getState().demoteEnvironmentStateToCachedSnapshot(environmentId, 500);
+      if (hidden) {
+        expect(
+          selectThreadByRef(useStore.getState(), { environmentId, threadId })?.messages,
+        ).toEqual([]);
+        test.visible(true);
+      }
+      expect(
+        selectThreadByRef(useStore.getState(), { environmentId, threadId })?.messages[0]?.text,
+      ).toBe(detail.snapshot.messages[0]?.text);
+      expect(test.readThread).toHaveBeenCalledOnce();
+      const state = useStore.getState().environmentStateById[environmentId];
+      test.route({ nodeId: node.id, malformed: false, logicalPathname: "/" });
+      test.route({
+        nodeId: node.id,
+        malformed: false,
+        logicalPathname: `/${environmentId}/${threadId}`,
+      });
+      await settle();
+      expect(useStore.getState().environmentStateById[environmentId]).toBe(state);
+      test.readThread.mockResolvedValue({
+        ...detail,
+        revision: 2,
+        snapshot: { messages: [{ ...detail.snapshot.messages[0]!, text: "Newer cloud content" }] },
+      });
+      test.tick();
+      await settle();
+      expect(
+        selectThreadByRef(useStore.getState(), { environmentId, threadId })?.messages[0]?.text,
+      ).toBe("Newer cloud content");
+    },
+  );
+
+  it.each([false, true])(
+    "preserves an authoritative live body, including known-empty (empty: %s)",
+    async (empty) => {
+      const test = harness();
+      useStore.getState().syncServerShellSnapshot(shell.snapshot, environmentId);
+      useStore.getState().syncServerThreadDetail(
+        {
+          ...shell.snapshot.threads[0]!,
+          deletedAt: null,
+          messages: empty
+            ? []
+            : [
+                {
+                  ...detail.snapshot.messages[0]!,
+                  text: "Newer live body",
+                  updatedAt: date,
+                  streaming: false,
+                  turnId: null,
+                },
+              ],
+          activities: [],
+          proposedPlans: [],
+          checkpoints: [],
+        },
+        environmentId,
+      );
+      test.start();
+      await settle();
+      useStore.getState().demoteEnvironmentStateToCachedSnapshot(environmentId, 500);
+      expect(
+        selectThreadByRef(useStore.getState(), { environmentId, threadId })?.messages.map(
+          (message) => message.text,
+        ),
+      ).toEqual(empty ? [] : ["Newer live body"]);
+    },
+  );
+
+  it("keeps a live message event newer than an earlier Hub-filled body", async () => {
+    const test = harness();
+    test.start();
+    await settle();
+    useStore.getState().syncServerShellSnapshot(shell.snapshot, environmentId);
+    useStore.getState().applyOrchestrationEvent(
+      {
+        type: "thread.message-sent",
+        sequence: 2,
+        eventId: "event-live",
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: date,
+        commandId: null,
+        causationEventId: null,
+        correlationId: null,
+        metadata: {},
+        payload: {
+          threadId,
+          messageId: detail.snapshot.messages[0]!.id,
+          role: "assistant",
+          text: "Authoritative live update",
+          turnId: null,
+          streaming: false,
+          createdAt: date,
+          updatedAt: date,
+        },
+      } as never,
+      environmentId,
+    );
+    useStore.getState().demoteEnvironmentStateToCachedSnapshot(environmentId, 500);
+    expect(
+      selectThreadByRef(useStore.getState(), { environmentId, threadId })?.messages[0]?.text,
+    ).toBe("Authoritative live update");
+  });
+
+  it("does not fill a retained shell with a body from an older Hub generation", async () => {
+    const test = harness();
+    useStore.getState().syncServerShellSnapshot(shell.snapshot, environmentId);
+    test.start();
+    await settle();
+    test.readShell.mockResolvedValue({ ...shell, generation: 2 });
+    test.tick(30_000);
+    await settle();
+    useStore.getState().demoteEnvironmentStateToCachedSnapshot(environmentId, 500);
+    expect(selectThreadByRef(useStore.getState(), { environmentId, threadId })?.messages).toEqual(
+      [],
+    );
+  });
+
+  it.each(["account", "session", "space", "revoked", "authorization-removed"])(
+    "does not reapply buffered bodies across %s changes",
+    async (change) => {
+      const test = harness();
+      test.patch({
+        selectedNode: node,
+        session: { id: "session-a" } as never,
+        sessionStatus: "ready",
+        transportStatus: "online",
+      });
+      useStore.getState().syncServerShellSnapshot(shell.snapshot, environmentId);
+      test.start();
+      await settle();
+      test.readThread.mockImplementation(() => new Promise(() => {}));
+      if (change === "account") test.patch({ account: { id: "account-b" } as never });
+      else if (change === "session") test.patch({ session: { id: "session-b" } as never });
+      else if (change === "space")
+        test.patch({ session: { id: "session-a", activeSpaceId: "space-b" } as never });
+      else test.patch({ selectionStatus: change as "revoked" | "authorization-removed" });
+      useStore.getState().demoteEnvironmentStateToCachedSnapshot(environmentId, 500);
+      await settle();
+      expect(selectThreadByRef(useStore.getState(), { environmentId, threadId })?.messages).toEqual(
+        [],
+      );
+    },
+  );
 
   it("rejects a late response after account change or directory revocation", async () => {
     const test = harness();

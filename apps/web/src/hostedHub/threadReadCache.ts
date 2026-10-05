@@ -49,9 +49,56 @@ function readTarget(route: RoutedHostedNode): HostedThreadReadCacheRoute {
 
 /** Browser routing and display projection adapt the shared cache controller. */
 export function startHostedThreadReadCache(ports: HostedThreadReadCachePorts): () => void {
+  const demoteUnavailableProjection = () => {
+    const state = ports.readState();
+    const node = state.selectedNode;
+    // Canonical connection loss removes display readiness. Directory presence
+    // alone cannot demote a current channel, whose accepted live data wins.
+    if (
+      !node ||
+      state.accountStatus !== "authenticated" ||
+      !(
+        state.sessionStatus === "stale" ||
+        state.sessionStatus === "closed" ||
+        (state.sessionStatus === "delivery-unknown" && !state.sessionRecoveredAfterUnknown)
+      ) ||
+      !(
+        state.transportStatus === "idle" ||
+        state.transportStatus === "reconnecting" ||
+        state.transportStatus === "terminal-failure"
+      )
+    )
+      return;
+    if (useStore.getState().environmentStateById[node.environmentId]?.bootstrapComplete) {
+      useStore.getState().demoteEnvironmentStateToCachedSnapshot(node.environmentId, ports.now());
+    }
+  };
+  demoteUnavailableProjection();
   return startSharedHostedThreadReadCache({
     ...ports,
     readRoute: () => readTarget(ports.readRoute()),
+    subscribeState: (listener) =>
+      ports.subscribeState(() => {
+        demoteUnavailableProjection();
+        listener();
+      }),
+    subscribeProjection:
+      ports.subscribeProjection ??
+      ((listener) =>
+        useStore.subscribe((state, previous) => {
+          const nodeId = ports.readRoute().nodeId;
+          const node = ports.readState().nodes.find((candidate) => candidate.id === nodeId);
+          if (!node) return;
+          const before = previous.environmentStateById[node.environmentId];
+          const after = state.environmentStateById[node.environmentId];
+          if (
+            before?.bootstrapComplete &&
+            after &&
+            !after.bootstrapComplete &&
+            after.retainedLiveSnapshot
+          )
+            listener();
+        })),
     applySnapshot: (node, response, details) => {
       const isLive = () =>
         useStore.getState().environmentStateById[node.environmentId]?.bootstrapComplete === true;
@@ -77,7 +124,11 @@ export function startHostedThreadReadCache(ports: HostedThreadReadCachePorts): (
         );
       // Hydration flushes queued shell events before applying its cache. That
       // flush can establish live state, which must also win this projection.
-      if (isLive()) return;
+      if (
+        isLive() ||
+        useStore.getState().environmentStateById[node.environmentId]?.retainedLiveSnapshot
+      )
+        return;
       // The isolated projection supplies metadata only; it never publishes
       // live readiness or a replay cursor into the application store.
       const metadata = readWorkspaceMetadataSnapshot(

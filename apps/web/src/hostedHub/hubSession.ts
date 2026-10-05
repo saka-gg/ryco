@@ -42,7 +42,11 @@ export function watchWebHostedHubSession(): () => void {
       return;
     }
     if (state.accountStatus !== "authenticated" || !state.account || !state.session) return;
-    const nextAuthority = JSON.stringify([state.account.id, state.session.id]);
+    const nextAuthority = JSON.stringify([
+      state.account.id,
+      state.session.id,
+      state.session.activeSpaceId ?? null,
+    ]);
     if (authority === nextAuthority && session) return;
     disposeSession();
     authority = nextAuthority;
