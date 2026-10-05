@@ -7,6 +7,8 @@ import {
   type RelayFrame,
   WsRpcGroup,
 } from "@ryco/contracts";
+import { type HubSessionFrame } from "@ryco/contracts/hub-session";
+import { decodeHubSessionFrame, encodeHubSessionFrame } from "@ryco/shared/hubSessionCodec";
 import { decodeRelayFrame, encodeRelayFrame } from "@ryco/shared/relayCodec";
 import { Effect, Exit, Scope, Stream } from "effect";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
@@ -27,7 +29,11 @@ interface HostedWebTestModules {
   readonly hostedHubApi: {
     issueRelayTicket: (nodeId: string) => Promise<unknown>;
   };
-  readonly hostedHubController: { readonly resetForTests: () => void };
+  readonly hostedHubController: {
+    readonly resetForTests: () => void;
+    readonly notifyDirectoryInvalidated: () => void;
+  };
+  readonly watchWebHostedHubSession: () => () => void;
   readonly useHostedHubStore: {
     readonly setState: (state: Record<string, unknown>) => void;
     readonly getState: () => Record<string, unknown>;
@@ -44,19 +50,33 @@ async function loadHostedWebTestModules(): Promise<HostedWebTestModules> {
     (await import(
       /* @vite-ignore */ new URL(`../../../web/src/${relativePath}`, import.meta.url).href
     )) as T;
-  const [client, transport, base64url, api, state, hostedTransport] = await Promise.all([
-    load<{ createWsRpcClient: HostedWebTestModules["createWsRpcClient"] }>("rpc/wsRpcClient.ts"),
-    load<{ WsTransport: HostedWebTestModules["WsTransport"] }>("rpc/wsTransport.ts"),
-    load<{ encodeBase64Url: HostedWebTestModules["encodeBase64Url"] }>("hostedHub/base64url.ts"),
-    load<{ hostedHubApi: HostedWebTestModules["hostedHubApi"] }>("hostedHub/api.ts"),
-    load<Pick<HostedWebTestModules, "hostedHubController" | "useHostedHubStore">>(
-      "hostedHub/state.ts",
-    ),
-    load<
-      Pick<HostedWebTestModules, "getHostedRelayAttemptFactory" | "resetHostedRelayAttemptFactory">
-    >("hostedHub/transport.ts"),
-  ]);
-  return { ...client, ...transport, ...base64url, ...api, ...state, ...hostedTransport };
+  const [client, transport, base64url, api, state, hostedTransport, hubSession] = await Promise.all(
+    [
+      load<{ createWsRpcClient: HostedWebTestModules["createWsRpcClient"] }>("rpc/wsRpcClient.ts"),
+      load<{ WsTransport: HostedWebTestModules["WsTransport"] }>("rpc/wsTransport.ts"),
+      load<{ encodeBase64Url: HostedWebTestModules["encodeBase64Url"] }>("hostedHub/base64url.ts"),
+      load<{ hostedHubApi: HostedWebTestModules["hostedHubApi"] }>("hostedHub/api.ts"),
+      load<Pick<HostedWebTestModules, "hostedHubController" | "useHostedHubStore">>(
+        "hostedHub/state.ts",
+      ),
+      load<
+        Pick<
+          HostedWebTestModules,
+          "getHostedRelayAttemptFactory" | "resetHostedRelayAttemptFactory"
+        >
+      >("hostedHub/transport.ts"),
+      load<Pick<HostedWebTestModules, "watchWebHostedHubSession">>("hostedHub/hubSession.ts"),
+    ],
+  );
+  return {
+    ...client,
+    ...transport,
+    ...base64url,
+    ...api,
+    ...state,
+    ...hostedTransport,
+    ...hubSession,
+  };
 }
 
 const {
@@ -68,6 +88,7 @@ const {
   useHostedHubStore,
   getHostedRelayAttemptFactory,
   resetHostedRelayAttemptFactory,
+  watchWebHostedHubSession,
 } = await loadHostedWebTestModules();
 
 const VERSION = { protocolMajor: 1, protocolMinor: 2 } as const;
@@ -79,6 +100,7 @@ const testGlobals = globalThis as unknown as {
 const originalWindow = testGlobals.window;
 const originalWebSocket = testGlobals.WebSocket;
 const physicalSockets: PhysicalRelaySocket[] = [];
+let stopWatchingSession: (() => void) | undefined;
 
 function toBytes(value: string | ArrayBufferLike | Blob | ArrayBufferView): Uint8Array {
   if (typeof value === "string") return new TextEncoder().encode(value);
@@ -98,6 +120,9 @@ class PhysicalRelaySocket extends EventTarget {
   bufferedAmount = 0;
   binaryType = "blob";
   readonly receivedFromClient: RelayFrame[] = [];
+  readonly receivedOuterFrames: HubSessionFrame[] = [];
+  readonly activeStreams = new Set<number>();
+  private streamId: number | null = null;
   private readonly registry: RelayChannelRegistry;
 
   constructor(registry: RelayChannelRegistry) {
@@ -109,10 +134,30 @@ class PhysicalRelaySocket extends EventTarget {
   open(): void {
     this.readyState = PhysicalRelaySocket.OPEN;
     this.dispatchEvent(new Event("open"));
+    this.deliverOuter({ type: "ready", protocolVersion: 1, maxChannels: 8 });
   }
 
   send(value: string | ArrayBufferLike | Blob | ArrayBufferView): void {
-    const decoded = decodeRelayFrame(toBytes(value));
+    const outer = decodeHubSessionFrame(toBytes(value));
+    if (!outer.ok) throw new Error("Hosted client emitted an invalid Hub session envelope.");
+    this.receivedOuterFrames.push(outer.value);
+    if (outer.value.type === "open") {
+      this.streamId = outer.value.streamId;
+      this.activeStreams.add(outer.value.streamId);
+      return;
+    }
+    if (outer.value.type === "close") {
+      this.activeStreams.delete(outer.value.streamId);
+      return;
+    }
+    if (outer.value.type === "ping") {
+      this.deliverOuter({ type: "pong", nonce: outer.value.nonce });
+      return;
+    }
+    if (outer.value.type !== "data" || !this.activeStreams.has(outer.value.streamId)) {
+      throw new Error("Hosted client used an unopened Hub session stream.");
+    }
+    const decoded = decodeRelayFrame(outer.value.payload);
     if (!decoded.ok) throw new Error("Hosted client emitted an invalid relay frame.");
     const frame = decoded.value;
     this.receivedFromClient.push(frame);
@@ -145,7 +190,14 @@ class PhysicalRelaySocket extends EventTarget {
   }
 
   deliverBytes(bytes: Uint8Array): void {
-    const owned = Uint8Array.from(bytes);
+    if (this.streamId === null) throw new Error("No logical relay channel is open.");
+    this.deliverOuter({ type: "data", streamId: this.streamId, payload: bytes });
+  }
+
+  deliverOuter(frame: HubSessionFrame): void {
+    const encoded = encodeHubSessionFrame(frame);
+    if (!encoded.ok) throw new Error("Test Hub session envelope could not be encoded.");
+    const owned = Uint8Array.from(encoded.value);
     this.dispatchEvent(new MessageEvent("message", { data: owned.buffer }));
   }
 }
@@ -160,6 +212,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  stopWatchingSession?.();
+  stopWatchingSession = undefined;
   resetHostedRelayAttemptFactory();
   hostedHubController.resetForTests();
   Object.defineProperty(testGlobals, "window", { configurable: true, value: originalWindow });
@@ -255,14 +309,33 @@ describe("hosted relay session integration", () => {
       effectiveRole: "operator",
       presence: { online: true, lastHeartbeatAt: 1 },
     };
+    // The outer socket is account-owned before any node ticket is consumed.
+    vi.spyOn(hostedHubController, "notifyDirectoryInvalidated").mockImplementation(() => undefined);
     useHostedHubStore.setState({
       accountStatus: "authenticated",
+      account: {
+        id: "account-public-test",
+        displayName: "Test",
+        role: "owner",
+        createdAt: 1,
+        disabledAt: null,
+      },
+      session: {
+        id: "session-public-test",
+        accountId: "account-public-test",
+        createdAt: 1,
+        expiresAt: Date.now() + 60_000,
+        lastSeenAt: 1,
+        revokedAt: null,
+        revocationReasonCode: null,
+      },
       directoryStatus: "ready",
       selectedNode,
       selectionStatus: "online",
       effectiveRole: "operator",
       generation: 1,
     });
+    stopWatchingSession = watchWebHostedHubSession();
     vi.spyOn(hostedHubApi, "issueRelayTicket").mockResolvedValue({
       ticket: encodeBase64Url(new Uint8Array(32).fill(7)),
       expiresAt: Date.now() + 60_000,
@@ -292,6 +365,18 @@ describe("hosted relay session integration", () => {
     ).toBeGreaterThanOrEqual(2);
     unsubscribe();
     await client.dispose();
+    await vi.waitFor(() => expect(activePhysicalSocket.activeStreams.size).toBe(0));
+    expect(physicalSockets).toHaveLength(1);
+    expect(activePhysicalSocket.readyState).toBe(PhysicalRelaySocket.OPEN);
+    expect(
+      activePhysicalSocket.receivedOuterFrames.filter((frame) => frame.type === "open"),
+    ).toHaveLength(1);
+    expect(activePhysicalSocket.receivedOuterFrames.some((frame) => frame.type === "close")).toBe(
+      true,
+    );
+    stopWatchingSession();
+    stopWatchingSession = undefined;
+    expect(activePhysicalSocket.readyState).toBe(PhysicalRelaySocket.CLOSED);
     await registry.closeAll();
     for (const scope of sessionScopes) {
       await Effect.runPromise(Scope.close(scope, Exit.void));
