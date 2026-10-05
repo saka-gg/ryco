@@ -171,6 +171,17 @@ afterEach(() => {
 });
 
 describe("HostedRelayAttemptFactory", () => {
+  it("exposes authoritative admission changes and releases their listener", () => {
+    const factory = new HostedRelayAttemptFactory();
+    const changed = vi.fn();
+    const unsubscribe = factory.lifecycleHandlers().subscribeAdmissionChanges!(changed);
+    hostedHubStore.setState({ sessionStatus: "ready" });
+    expect(changed).toHaveBeenCalledOnce();
+    unsubscribe();
+    hostedHubStore.setState({ sessionStatus: "stale" });
+    expect(changed).toHaveBeenCalledOnce();
+  });
+
   it("publishes a bounded native grant failure before reconnect policy runs", async () => {
     const failure = vi.fn();
     const binding: HostedRelayAttemptBinding = {

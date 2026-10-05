@@ -910,14 +910,22 @@ export class HubConnector {
       scheduler: this.#scheduler,
       now: this.#scheduler.now,
       onFrame: (frame) => {
+        const handleFailure = (error: unknown) =>
+          this.#handleFailure(
+            generation,
+            error instanceof RelayChannelProtocolError ? "protocol_invalid" : "internal_error",
+          );
+        // Heartbeats describe this socket, not a channel. Key custody during
+        // channel setup and asynchronous channel teardown must not delay a
+        // received pong past the probe deadline or prevent answering Hub pings.
+        // All channel and authorization frames retain their wire order below.
+        if (frame.type === "ping" || frame.type === "pong") {
+          void this.#handleFrame(generation, frame).catch(handleFailure);
+          return;
+        }
         this.#frameChain = this.#frameChain
           .then(() => this.#handleFrame(generation, frame))
-          .catch((error: unknown) =>
-            this.#handleFailure(
-              generation,
-              error instanceof RelayChannelProtocolError ? "protocol_invalid" : "internal_error",
-            ),
-          );
+          .catch(handleFailure);
       },
       onTerminal: (error) => {
         void this.#handleFailure(generation, error.kind, error.retryAfterMs);

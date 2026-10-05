@@ -31,6 +31,7 @@ import {
 } from "../workspaceMetadataProjection";
 import { hostedHubController, hostedHubStore } from "./state";
 import { clearWebHostedAccountScopedState } from "./environment";
+import { startBrowserHostedThreadReadCache } from "./threadReadCache";
 import {
   canShowHostedReadPreview,
   readHostedReadCache,
@@ -60,6 +61,8 @@ export const HOSTED_WEB_WAKE_STAGGER_MS = 750;
 
 export interface HostedConnectionCoordinatorDeps {
   readonly scopes: HostedWebScopeStore;
+  /** A navigation intent takes precedence over scopes from the outgoing shell. */
+  readonly foregroundEnvironmentId?: () => EnvironmentId | null;
   readonly now: () => number;
   readonly connect: (environmentId: EnvironmentId, delayMs: number) => Promise<void>;
   readonly release: (environmentId: EnvironmentId) => Promise<void>;
@@ -98,7 +101,16 @@ export function createHostedConnectionCoordinator(
   };
 
   const reconcileScopes = () => {
-    const active = new Map(deps.scopes.list().map((entry) => [entry.key, entry] as const));
+    const foregroundEnvironmentId = deps.foregroundEnvironmentId?.() ?? null;
+    const active = new Map(
+      deps.scopes
+        .list()
+        .filter(
+          (entry) =>
+            foregroundEnvironmentId === null || entry.environmentId === foregroundEnvironmentId,
+        )
+        .map((entry) => [entry.key, entry] as const),
+    );
     for (const [key, leaseId] of Array.from(leaseIdByScopeKey)) {
       if (active.has(key)) continue;
       leaseIdByScopeKey.delete(key);
@@ -298,7 +310,9 @@ function isHostedWebConnectableNode(node: HostedHubNode): boolean {
 /**
  * The parts of the hosted state that decide whether held connection demand can
  * be served: the coordinator's `connect` refuses anything while the directory
- * or browser is not current, and refuses a node that is not connectable.
+ * is not authorized, and refuses a node that is not connectable. Synchronizing
+ * has already passed the account and directory checks; another node's shell
+ * snapshot does not need to finish before a navigation can replace it.
  */
 export interface HostedDemandReadiness {
   readonly connectable: boolean;
@@ -317,7 +331,7 @@ export function readHostedDemandReadiness(state: HostedHubState): HostedDemandRe
     connectable:
       state.accountStatus === "authenticated" &&
       state.directoryStatus === "ready" &&
-      state.browserStatus === "current",
+      (state.browserStatus === "current" || state.browserStatus === "synchronizing"),
     relayFailed: state.selectedNode !== null && state.transportStatus === "terminal-failure",
     eligible: new Set(
       state.nodes.filter(isHostedWebConnectableNode).map((node) => node.environmentId),
@@ -420,6 +434,7 @@ export function startHostedWorkspaceCoordinator(input?: {
   readonly hubOrigin?: string;
   /** The root can show a route-error directory at `/` instead of the workspace. */
   readonly canDiscoverHome?: () => boolean;
+  readonly startReadCache?: typeof startBrowserHostedThreadReadCache;
 }): () => void {
   const cache = input?.cache ?? getBrowserWorkspaceMetadataCache();
   const now = input?.now ?? Date.now;
@@ -450,6 +465,16 @@ export function startHostedWorkspaceCoordinator(input?: {
 
   const coordinator = createHostedConnectionCoordinator({
     scopes: hostedWebConnectionScopes,
+    foregroundEnvironmentId: () => {
+      const route = getRoutedHostedNode();
+      if (route.malformed || route.nodeId === null) return null;
+      return (
+        hostedHubStore
+          .getState()
+          .nodes.find((node) => node.id === route.nodeId && isHostedWebConnectableNode(node))
+          ?.environmentId ?? null
+      );
+    },
     now,
     setInterval: repeat,
     clearInterval: cancelRepeat,
@@ -460,7 +485,7 @@ export function startHostedWorkspaceCoordinator(input?: {
         disposed ||
         state.accountStatus !== "authenticated" ||
         state.directoryStatus !== "ready" ||
-        state.browserStatus !== "current" ||
+        (state.browserStatus !== "current" && state.browserStatus !== "synchronizing") ||
         !hostedWebConnectionScopes.list().some((scope) => scope.environmentId === environmentId)
       ) {
         throw new Error("Hosted Web directory is not current.");
@@ -708,7 +733,9 @@ export function startHostedWorkspaceCoordinator(input?: {
           await cache.purgeEnvironment(record.namespace).catch(() => undefined);
           continue;
         }
-        snapshots.set(record.namespace.environmentId, record.snapshot);
+        const current = snapshots.get(record.namespace.environmentId);
+        if (!current || current.capturedAt <= record.snapshot.capturedAt)
+          snapshots.set(record.namespace.environmentId, record.snapshot);
         useStore
           .getState()
           .hydrateEnvironmentStateFromCache(
@@ -756,7 +783,9 @@ export function startHostedWorkspaceCoordinator(input?: {
   };
 
   const scheduleLiveSnapshotPublish = () => {
-    if (publishTimer !== null) cancel(publishTimer);
+    // A busy stream must not postpone metadata discovery indefinitely. Read
+    // the latest store at a bounded cadence instead of waiting for silence.
+    if (publishTimer !== null) return;
     publishTimer = schedule(() => {
       publishTimer = null;
       if (disposed || !activeAccountId) return;
@@ -815,7 +844,10 @@ export function startHostedWorkspaceCoordinator(input?: {
   });
   const unsubscribeDemandScopes = hostedWebConnectionScopes.subscribe(observeDemand);
   const unsubscribeReadCache = subscribeHostedReadCache(() => void synchronize());
-  const unsubscribeRoute = subscribeRoutedHostedNode(scheduleHomeDiscovery);
+  const unsubscribeRoute = subscribeRoutedHostedNode(() => {
+    scheduleHomeDiscovery();
+    void coordinator.reconcile();
+  });
   const unsubscribeScopes = hostedWebConnectionScopes.subscribe(scheduleHomeDiscovery);
   const unsubscribeStore = useStore.subscribe(scheduleLiveSnapshotPublish);
   const unsubscribeCoordinator = coordinator.subscribe(() => {
@@ -823,6 +855,13 @@ export function startHostedWorkspaceCoordinator(input?: {
     scheduleHomeDiscovery();
   });
   const resetRouteResolver = setHostedNodeRouteEnvironmentResolver(nodeIdForHostedEnvironment);
+  const stopReadCache = (input?.startReadCache ?? startBrowserHostedThreadReadCache)((snapshot) => {
+    const previous = snapshots.get(snapshot.environmentId);
+    if (previous && previous.capturedAt > snapshot.capturedAt) return;
+    snapshots.set(snapshot.environmentId, snapshot);
+    publish(hostedWorkspaceSnapshot.machines);
+    scheduleHomeDiscovery();
+  });
   void coordinator.reconcile();
   observeDemand();
   void synchronize();
@@ -840,6 +879,7 @@ export function startHostedWorkspaceCoordinator(input?: {
     releaseDiscovery();
     if (retryHomeDiscovery === retryDiscovery) retryHomeDiscovery = null;
     unsubscribeStore();
+    stopReadCache();
     unsubscribeCoordinator();
     resetRouteResolver();
     coordinator.dispose();

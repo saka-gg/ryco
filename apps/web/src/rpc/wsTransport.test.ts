@@ -1641,6 +1641,8 @@ describe("WsTransport", () => {
     };
     const transport = {
       disposed: false,
+      intentionalCloseDepth: 0,
+      subscriptionRetryWakeups: new Set<() => void>(),
       session: {
         clientScope: {} as never,
         runtime,

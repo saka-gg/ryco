@@ -3211,10 +3211,32 @@ export interface CachedEnvironmentShellSnapshot {
   }>;
 }
 
+/** Project canonical Hub read data through the same mapping as live shell data. */
+export function projectThreadReadCacheShell(
+  snapshot: OrchestrationShellSnapshot,
+  environmentId: EnvironmentId,
+  capturedAt: number,
+  contents?: ReadonlyMap<ThreadId, import("./readCache.ts").CachedThreadContent>,
+): CachedEnvironmentShellSnapshot {
+  return {
+    capturedAt,
+    projects: snapshot.projects.map((project) => mapProject(project, environmentId)),
+    worktrees: (snapshot.worktrees ?? []).map((worktree) => mapWorktree(worktree, environmentId)),
+    threads: snapshot.threads.map((thread) => {
+      const mapped = mapThreadShell(thread, environmentId);
+      return {
+        shell: mapped.shell,
+        summary: { ...mapped.summary, session: null, backgroundLiveness: null },
+        content: contents?.get(thread.id),
+      };
+    }),
+  };
+}
+
 /**
  * Populate an environment from a persisted snapshot. A no-op whenever the
- * environment already has state — live data (or an earlier hydration) always
- * wins, which makes hydration safe to race against connection startup. Leaves
+ * environment already has state unless replacing an equal/newer cached view is
+ * explicitly requested. Live data always wins the connection-startup race. Leaves
  * `bootstrapComplete` false so every "is this environment synced" consumer
  * keeps treating it as not live, and stamps `hydratedFromCacheAt` so rows can
  * be presented as last-known state.
@@ -3223,12 +3245,20 @@ export function hydrateEnvironmentStateFromCache(
   state: AppState,
   cached: CachedEnvironmentShellSnapshot,
   environmentId: EnvironmentId,
+  options?: { readonly replaceCached?: boolean },
 ): AppState {
-  if (state.environmentStateById[environmentId]) {
+  const previous = state.environmentStateById[environmentId];
+  if (
+    previous &&
+    (!options?.replaceCached ||
+      previous.bootstrapComplete ||
+      previous.hydratedFromCacheAt === undefined ||
+      cached.capturedAt < previous.hydratedFromCacheAt)
+  ) {
     return state;
   }
 
-  let environmentState: EnvironmentState = {
+  const environmentState: EnvironmentState = {
     ...initialEnvironmentState,
     ...buildProjectState(
       cached.projects.filter((project) => project.environmentId === environmentId),
@@ -3237,6 +3267,14 @@ export function hydrateEnvironmentStateFromCache(
       cached.worktrees.filter((worktree) => worktree.environmentId === environmentId),
     ),
     hydratedFromCacheAt: cached.capturedAt,
+    threadIds: [],
+    threadIdsByProjectId: Object.create(null) as EnvironmentState["threadIdsByProjectId"],
+    threadShellById: Object.create(null) as EnvironmentState["threadShellById"],
+    threadSessionById: Object.create(null) as EnvironmentState["threadSessionById"],
+    threadTurnStateById: Object.create(null) as EnvironmentState["threadTurnStateById"],
+    sidebarThreadSummaryById: Object.create(null) as EnvironmentState["sidebarThreadSummaryById"],
+    messageIdsByThreadId: Object.create(null) as EnvironmentState["messageIdsByThreadId"],
+    messageByThreadId: Object.create(null) as EnvironmentState["messageByThreadId"],
   };
   for (const thread of cached.threads) {
     if (
@@ -3245,42 +3283,40 @@ export function hydrateEnvironmentStateFromCache(
     ) {
       continue;
     }
-    environmentState = writeThreadShellState(environmentState, {
-      shell: thread.shell,
+    const id = thread.shell.id;
+    if (!Object.hasOwn(environmentState.threadShellById, id)) environmentState.threadIds.push(id);
+    environmentState.threadShellById[id] = thread.shell;
+    environmentState.threadSessionById[id] = null;
+    environmentState.threadTurnStateById[id] = {
+      latestTurn: thread.summary.latestTurn,
+      pendingSourceProposedPlan: thread.summary.latestTurn?.sourceProposedPlan,
+    };
+    environmentState.sidebarThreadSummaryById[id] = {
+      ...thread.summary,
+      modelSelection: thread.summary.modelSelection ?? thread.shell.modelSelection,
       session: null,
-      turnState: {
-        latestTurn: thread.summary.latestTurn,
-        pendingSourceProposedPlan: thread.summary.latestTurn?.sourceProposedPlan,
-      },
-      summary: {
-        ...thread.summary,
-        // Older mobile snapshot records predate modelSelection on the sidebar
-        // summary, but their paired shell always carried it. Backfill so a
-        // cached Inbox row can still show the correct provider identity.
-        modelSelection: thread.summary.modelSelection ?? thread.shell.modelSelection,
-        session: null,
-        backgroundLiveness: null,
-      },
-    });
-    if (thread.content) {
-      const id = thread.shell.id;
-      environmentState = {
-        ...environmentState,
-        messageIdsByThreadId: {
-          ...environmentState.messageIdsByThreadId,
-          [id]: thread.content.messages.map((message) => message.id),
-        },
-        messageByThreadId: {
-          ...environmentState.messageByThreadId,
-          [id]: Object.fromEntries(
-            thread.content.messages.map((message) => [
-              message.id,
-              { ...message, streaming: false },
-            ]),
-          ),
-        },
-      };
+      backgroundLiveness: null,
+    };
+    const content =
+      thread.content ??
+      (previous
+        ? {
+            messages: (previous.messageIdsByThreadId[id] ?? []).flatMap((messageId) => {
+              const message = previous.messageByThreadId[id]?.[messageId];
+              return message ? [message] : [];
+            }),
+          }
+        : undefined);
+    if (content) {
+      environmentState.messageIdsByThreadId[id] = content.messages.map((message) => message.id);
+      environmentState.messageByThreadId[id] = Object.fromEntries(
+        content.messages.map((message) => [message.id, { ...message, streaming: false }]),
+      );
     }
+  }
+  for (const id of environmentState.threadIds) {
+    const projectId = environmentState.threadShellById[id]!.projectId;
+    (environmentState.threadIdsByProjectId[projectId] ??= []).push(id);
   }
   return commitEnvironmentState(state, environmentId, environmentState);
 }
@@ -3472,6 +3508,7 @@ interface AppStore extends AppState {
   hydrateEnvironmentStateFromCache: (
     cached: CachedEnvironmentShellSnapshot,
     environmentId: EnvironmentId,
+    options?: { readonly replaceCached?: boolean },
   ) => void;
   demoteEnvironmentStateToCachedSnapshot: (environmentId: EnvironmentId, demotedAt: number) => void;
   syncServerShellSnapshot: (
@@ -3533,9 +3570,9 @@ export const useStore = create<AppStore>((set, get) => {
       shellCoalescer.flush();
       set((state) => removeEnvironmentState(state, environmentId));
     },
-    hydrateEnvironmentStateFromCache: (cached, environmentId) => {
+    hydrateEnvironmentStateFromCache: (cached, environmentId, options) => {
       shellCoalescer.flush();
-      set((state) => hydrateEnvironmentStateFromCache(state, cached, environmentId));
+      set((state) => hydrateEnvironmentStateFromCache(state, cached, environmentId, options));
     },
     demoteEnvironmentStateToCachedSnapshot: (environmentId, demotedAt) => {
       shellCoalescer.flush();

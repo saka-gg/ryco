@@ -647,8 +647,27 @@ invitation secrets, tickets, native device grants, Hub keysets, node proofs, enc
 handshake or session-key state,
 session verification codes, provider data, source code, conversations, terminal output, files,
 attachments, or relay payloads to errors, diagnostics, metrics, or exports. The remembered-browser
-text projection above is the only conversation-persistence exception; it never stores relay frames,
+text projection and the opt-in cloud history projection below are the conversation-persistence exceptions; neither stores relay frames,
 authentication or relay encryption material, terminal output, files, or attachment bodies.
+
+## Cloud thread history
+
+Nodes can opt into bounded Hub-backed history with `RYCO_HUB_THREAD_CACHE_ENABLED=true`.
+The Hub then holds readable project/thread metadata and recent message text. This is an explicit
+privacy change from an opaque relay: encryption on the execution channel does not conceal the
+separately uploaded history from the Hub. Existing nodes do not upload content by default.
+
+After account and directory authorization, the hosted app loads each authorized node's saved
+index and the routed thread's saved text without waiting for that node's relay. This works in a
+fresh browser, independently of Remember this browser, and can show a read-only preview while a
+node is offline. Hidden pages stop polling; stale account/directory responses cannot populate the
+next account's state. Live synchronized state wins over cached data. A saved projection never
+publishes transport readiness, an effective role, or mutation authority.
+
+The preview includes at most 150 recent messages per thread. Full history, sending messages,
+terminals, files, and git still use the node. Compatible old Hubs without this API fall back to the
+existing relay and local preview paths. See [connector configuration](hub-connector.md#optional-cloud-thread-history)
+for upload bounds and removal behavior.
 
 ## Accessibility and layout
 

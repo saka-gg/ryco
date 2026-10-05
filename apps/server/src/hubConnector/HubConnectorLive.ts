@@ -1,6 +1,6 @@
 import { dirname, join } from "node:path";
 
-import { Context, Effect, Exit, Layer, Option, Scope } from "effect";
+import { Config, Context, Effect, Exit, Layer, Option, Scope } from "effect";
 import { WsHostedRpcGroup } from "@ryco/contracts";
 import type { NodeE2eeAdmissionPolicy } from "@ryco/contracts/native-e2ee";
 
@@ -63,6 +63,8 @@ import type {
   E2eeSessionListView,
 } from "./e2eeOperatorContract.ts";
 import type { RelayChannelSessionFactory } from "./RelayChannelRegistry.ts";
+import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { startThreadReadCacheSync } from "./ThreadReadCacheSync.ts";
 
 /**
  * One §12.6 policy proposal, as an owner states it.
@@ -761,6 +763,30 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
           await identity.stopE2eeInstrumentation();
         }),
     );
+    const cloudHistoryEnabled = yield* Config.boolean("RYCO_HUB_THREAD_CACHE_ENABLED").pipe(
+      Config.withDefault(false),
+    );
+    if (cloudHistoryEnabled && connectorConfig.enabled && connectorConfig.origin) {
+      const query = yield* Effect.serviceOption(ProjectionSnapshotQuery);
+      if (Option.isSome(query)) {
+        yield* Effect.acquireRelease(
+          Effect.sync(() =>
+            startThreadReadCacheSync({
+              hubOrigin: connectorConfig.origin!,
+              identity,
+              connector,
+              query: query.value,
+              reportFailure: () => {
+                void runPromise(
+                  Effect.logWarning("Cloud thread history synchronization is retrying."),
+                );
+              },
+            }),
+          ),
+          (stop) => Effect.promise(stop),
+        );
+      }
+    }
     return {
       connectorEnabled: connectorConfig.enabled,
       status: () => connector.status(),

@@ -92,6 +92,8 @@ export interface WsProtocolLifecycleHandlers {
     readonly tag: string;
     readonly stream: boolean;
   }) => RpcRequestAdmission;
+  /** Wake subscriptions when the authoritative connection admission state changes. */
+  readonly subscribeAdmissionChanges?: (listener: () => void) => () => void;
   /** Secondary feature channels must not replace the app's primary status. */
   readonly recordConnectionState?: boolean;
 }

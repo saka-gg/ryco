@@ -805,6 +805,90 @@ describe("HubConnector", () => {
     expect(clock.timers.size).toBe(0);
   });
 
+  it.each(["ping", "pong"] as const)(
+    "handles %s while another channel is waiting for its session to open",
+    async (type) => {
+      const clock = scheduler();
+      const socket = new FakeSocket();
+      let finishOpen!: () => void;
+      const opening = new Promise<void>((resolve) => {
+        finishOpen = resolve;
+      });
+      const open = vi.fn(async () => {
+        await opening;
+        return {
+          receive: async () => true,
+          queuedBytes: async () => 0,
+          supportsChunkedMessages: () => false,
+          close: async () => undefined,
+        };
+      });
+      const connector = new HubConnector({
+        config: enabledConfig,
+        identity: identity(),
+        transport: { open: () => socket },
+        channels: { open },
+        enrollmentMetadata,
+        livenessWatch: false,
+        scheduler: clock.value,
+      });
+      const starting = connector.start();
+      await settle();
+      socket.emit("open", {} as Event);
+      socket.emit("message", {
+        data: encoded({
+          type: "ready",
+          protocolMajor: 1,
+          protocolMinor: 2,
+          limits: RELAY_INITIAL_LIMITS,
+        }),
+      } as MessageEvent);
+      await starting;
+      try {
+        socket.emit("message", {
+          data: encoded({
+            type: "channel.open",
+            protocolMajor: 1,
+            protocolMinor: 2,
+            channelId: `ch_${"W".repeat(22)}` as RelayChannelId,
+            capability: "ryco.rpc",
+            effectiveRole: "operator",
+          }),
+        } as MessageEvent);
+        await settle();
+        expect(open).toHaveBeenCalledTimes(1);
+
+        let nonce = new Uint8Array(8).fill(4);
+        if (type === "pong") {
+          connector.nudge();
+          const probe = decodeRelayFrame(socket.sent.at(-1)!);
+          if (!probe.ok || probe.value.type !== "ping") throw new Error("expected probe");
+          nonce = Uint8Array.from(probe.value.nonce);
+        }
+        socket.emit("message", {
+          data: encoded({ type, protocolMajor: 1, protocolMinor: 2, nonce }),
+        } as MessageEvent);
+        await settle();
+        if (type === "ping") {
+          expect(decodeRelayFrame(socket.sent.at(-1)!)).toMatchObject({
+            ok: true,
+            value: { type: "pong", nonce },
+          });
+        } else {
+          await clock.advance(5_000);
+          await settle();
+          expect(connector.status().state).toBe("online");
+          expect(socket.closeCalls).toBe(0);
+        }
+      } finally {
+        finishOpen();
+        await settle();
+        await connector.stop();
+      }
+      expect(clock.timers.size).toBe(0);
+    },
+  );
+
   it("flushes asynchronous channel output without waiting for another inbound frame", async () => {
     const socket = new FakeSocket();
     const channelId = `ch_${"W".repeat(22)}` as RelayChannelId;

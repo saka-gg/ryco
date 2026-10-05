@@ -200,6 +200,7 @@ export function HostedHubRoot() {
   const errorMessage = useHostedHubStore((state) => state.errorMessage);
   const recoveryCodesLeased = useHostedRecoveryCodeDisplayStore((state) => state.leased);
   const routedNode = useRoutedHostedNode();
+  const draftTarget = useHostedDraftTargetSelection();
   const routedThreadRef = useMemo(
     () => parseHostedScopedThreadPath(routedNode.logicalPathname),
     [routedNode.logicalPathname],
@@ -270,6 +271,16 @@ export function HostedHubRoot() {
             node.environmentId === routedThreadRef.environmentId,
         )));
   const canReadCachedRoute = hasCachedRoutedThread && cachedNodeMatchesRoute;
+  const canReadPendingDraft =
+    draftTarget !== null &&
+    routedNode.logicalPathname === `/draft/${encodeURIComponent(draftTarget.draftId)}` &&
+    directoryNodes.some(
+      (node) =>
+        node.id === routedNode.nodeId &&
+        node.environmentId === draftTarget.environmentId &&
+        node.revokedAt === null &&
+        !node.capabilities?.nativeClientRequired,
+    );
   if (accountStatus !== "authenticated") {
     if (
       canShowHostedReadPreview() &&
@@ -310,6 +321,9 @@ export function HostedHubRoot() {
     }
     return <RootAppShell authGateState={{ status: "hosted-cached" }} />;
   }
+  // Keep the draft and its cached project picker mounted while the target's
+  // relay connects. The controller still requires a fresh lease to commit it.
+  if (canReadPendingDraft) return <RootAppShell authGateState={{ status: "hosted-cached" }} />;
   // A routed node segment is pending fail-closed validation/acquisition. Never
   // render another environment merely because it remains the compatibility
   // `selectedNode` while the scoped coordinator switches targets.

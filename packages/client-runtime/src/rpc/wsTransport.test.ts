@@ -2,7 +2,7 @@ import { AGENT_CONTROL_WS_METHODS } from "@ryco/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { fakeSocketPlatform, type FakeWebSocket } from "../../test/fakeWebSocket";
-import type { RpcRequestAdmission } from "./protocol";
+import type { RpcRequestAdmission, WsProtocolLifecycleHandlers } from "./protocol";
 import { resetRequestLatencyStateForTests } from "./requestLatencyState";
 import { resetWsConnectionStateForTests } from "./wsConnectionState";
 import { WsTransport } from "./wsTransport";
@@ -10,22 +10,30 @@ import { WsTransport } from "./wsTransport";
 const sockets: FakeWebSocket[] = [];
 const transports: WsTransport[] = [];
 
-function connect(admit: () => RpcRequestAdmission): WsTransport {
+function connect(
+  admit: () => RpcRequestAdmission,
+  subscribeAdmissionChanges?: WsProtocolLifecycleHandlers["subscribeAdmissionChanges"],
+): WsTransport {
   const transport = new WsTransport("ws://relay.test/relay", fakeSocketPlatform(sockets), {
     preserveSocketPath: true,
     shouldReconnect: () => false,
     recordConnectionState: false,
     authorizeRequest: () => admit(),
+    ...(subscribeAdmissionChanges ? { subscribeAdmissionChanges } : {}),
   });
   transports.push(transport);
   return transport;
 }
 
-function subscribeProposals(transport: WsTransport, onError: () => void): () => void {
+function subscribeProposals(
+  transport: WsTransport,
+  onError: () => void,
+  retryDelay = 5,
+): () => void {
   return transport.subscribe(
     (client) => client[AGENT_CONTROL_WS_METHODS.subscribeProposals]({}),
     () => undefined,
-    { onError, retryDelay: 5, tag: AGENT_CONTROL_WS_METHODS.subscribeProposals },
+    { onError, retryDelay, tag: AGENT_CONTROL_WS_METHODS.subscribeProposals },
   );
 }
 
@@ -70,6 +78,74 @@ describe("WsTransport subscriptions refused before sending", () => {
       await vi.waitFor(() => expect(proposalRequests(sockets[0]!)).toHaveLength(1));
       expect(onError).not.toHaveBeenCalled();
       stop();
+    },
+  );
+
+  it("wakes immediately when admission changes without bypassing the request gate", async () => {
+    let admission: RpcRequestAdmission = "awaiting-session";
+    const listeners = new Set<() => void>();
+    const admit = vi.fn(() => admission);
+    const transport = connect(admit, (listener) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    });
+    await vi.waitFor(() => expect(sockets).toHaveLength(1));
+    sockets[0]!.open();
+    const stop = subscribeProposals(transport, vi.fn(), 4_000);
+    await vi.waitFor(() => expect(admit).toHaveBeenCalledOnce());
+
+    for (const listener of listeners) listener();
+    await vi.waitFor(() => expect(admit).toHaveBeenCalledTimes(2));
+    expect(proposalRequests(sockets[0]!)).toHaveLength(0);
+
+    admission = "allowed";
+    for (const listener of listeners) listener();
+    await vi.waitFor(() => expect(proposalRequests(sockets[0]!)).toHaveLength(1));
+    stop();
+    await vi.waitFor(() => expect(listeners.size).toBe(0));
+  });
+
+  it("does not lose an admission change before the refusal is observed", async () => {
+    const listeners = new Set<() => void>();
+    let admission: RpcRequestAdmission = "awaiting-session";
+    const transport = connect(
+      () => {
+        const current = admission;
+        if (current === "awaiting-session") {
+          admission = "allowed";
+          for (const listener of listeners) listener();
+        }
+        return current;
+      },
+      (listener) => {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+    );
+    await vi.waitFor(() => expect(sockets).toHaveLength(1));
+    sockets[0]!.open();
+    const stop = subscribeProposals(transport, vi.fn(), 4_000);
+    await vi.waitFor(() => expect(proposalRequests(sockets[0]!)).toHaveLength(1));
+    stop();
+  });
+
+  it.each(["unsubscribe", "dispose"] as const)(
+    "releases an admission wait on %s",
+    async (action) => {
+      const listeners = new Set<() => void>();
+      const admit = vi.fn((): RpcRequestAdmission => "awaiting-session");
+      const transport = connect(admit, (listener) => {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      });
+      await vi.waitFor(() => expect(sockets).toHaveLength(1));
+      sockets[0]!.open();
+      const stop = subscribeProposals(transport, vi.fn(), 4_000);
+      await vi.waitFor(() => expect(admit).toHaveBeenCalledOnce());
+      if (action === "unsubscribe") stop();
+      else await transport.dispose();
+      await vi.waitFor(() => expect(listeners.size).toBe(0));
+      expect(proposalRequests(sockets[0]!)).toHaveLength(0);
     },
   );
 

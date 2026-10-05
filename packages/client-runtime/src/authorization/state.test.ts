@@ -1879,6 +1879,58 @@ describe("hosted registration and directory state", () => {
     expect(hostedHubStore.getState().sessionStatus).toBe("ready");
   });
 
+  it("switches away from a synchronizing node and fences its unfinished recovery", async () => {
+    const first = node();
+    const second = node("node_bbbbbbbbbbbbbbbbbbbbbb", "owner");
+    hostedHubStore.setState({
+      accountStatus: "authenticated",
+      account: sessionResponse.account,
+      session: sessionResponse.session,
+      directoryStatus: "ready",
+      nodes: [first, second],
+      selectedNode: first,
+      effectiveRole: first.effectiveRole,
+      generation: 4,
+    });
+    vi.spyOn(hostedHubApi, "restoreSession").mockResolvedValue(sessionResponse);
+    vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([first, second]);
+    let failPrevious!: (error: Error) => void;
+    activateHostedNode.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          failPrevious = reject;
+        }),
+    );
+    const resume = hostedHubController.resumeBrowser();
+    await vi.waitFor(() => expect(activateHostedNode).toHaveBeenCalledOnce());
+    expect(hostedHubStore.getState().browserStatus).toBe("synchronizing");
+    const previousSignal = activateHostedNode.mock.calls[0]![2]!;
+
+    await hostedHubController.selectNode(second.id);
+    expect(previousSignal.aborted).toBe(true);
+    expect(activateHostedNode).toHaveBeenLastCalledWith(second, first.environmentId);
+    expect(hostedHubStore.getState()).toMatchObject({
+      selectedNode: second,
+      browserStatus: "synchronizing",
+      sessionStatus: "synchronizing",
+      sessionEstablished: false,
+      generation: 6,
+    });
+    // Neither late readiness nor failure from the previous node may finish or
+    // fail the new node's synchronization.
+    hostedHubController.markSessionReady(first.environmentId);
+    failPrevious(new Error("Previous node disconnected"));
+    await resume;
+    expect(hostedHubStore.getState()).toMatchObject({
+      selectedNode: second,
+      browserStatus: "synchronizing",
+      sessionStatus: "synchronizing",
+      errorMessage: null,
+    });
+    hostedHubController.markSessionReady(second.environmentId);
+    expect(hostedHubStore.getState().browserStatus).toBe("current");
+  });
+
   it("rejects node selection while browser access is being revalidated", async () => {
     const selected = node();
     hostedHubStore.setState({

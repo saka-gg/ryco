@@ -6,9 +6,36 @@ listener. Direct LAN, desktop-local, SSH-assisted, and Tailscale access continue
 server listener and are independent of the connector.
 
 The connector consumes relay protocol 1.2 and negotiates 1.3 when the Hub supports account-enrolled
-native E2EE. It does not provide a generic tunnel and does not move
-projects, files, terminals, conversations, provider sessions, orchestration state, attachments, or
-payload persistence into Hub. The Ryco node remains authoritative for all application state.
+native E2EE. It does not provide a generic tunnel. The Ryco node remains authoritative for
+application state and execution. Optional cloud thread history stores a bounded read-only index
+and recent message text in Hub; it is separate from the encrypted relay described below.
+
+## Optional cloud thread history
+
+Set `RYCO_HUB_THREAD_CACHE_ENABLED=true` on an enrolled node to publish its project/thread index
+and recent conversation text to a compatible Hub. This is off by default: enabling it explicitly
+allows Hub to read and persist that content, even when execution traffic uses end-to-end encryption.
+It does not change the node's relay encryption or admission policy.
+
+The node publishes at most one batch every five seconds, with up to 16 snapshots and two MiB per
+batch. Initial synchronization starts with the most recently updated threads and retains at most
+512 thread bodies, each containing at most 150 messages and one MiB of UTF-8 JSON. Attachments,
+tool output, credentials, terminal data, pending actions, and relay frames are excluded. An
+unchanged node makes no upload requests; snapshots are refreshed daily. Full older history and
+execution still require the node. The browser labels this data as saved cloud history, and waits
+for a fresh authorized node session before enabling mutations.
+
+Each batch uses a fresh node proof. A generation fences superseded publishers, revisions prevent
+stale overwrites, and uploading a new index removes bodies for deleted threads. Retries reuse the
+same batch; temporary Hub failures do not restart the relay or delay local execution. An older Hub
+returns an unsupported endpoint response and the node backs off. Browser reads use current Hub
+authorization, including when the node is offline, and never establish node readiness.
+
+Disabling the environment setting stops future uploads; it does not erase previously saved
+history. The authenticated node endpoint `POST /api/node/thread-cache/clear` purges the saved
+projection. Hub retention and removal also apply to these snapshots. Deploy a Hub that supports
+these endpoints before enabling this setting. A cloud history read must never be cached by the
+service worker or an HTTP intermediary.
 
 ## Configuration
 

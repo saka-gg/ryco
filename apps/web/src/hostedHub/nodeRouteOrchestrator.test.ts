@@ -202,6 +202,32 @@ afterEach(() => {
 });
 
 describe("hosted node route restore pipeline", () => {
+  it("switches routes while the previous node is synchronizing its shell", async () => {
+    const first = node();
+    const second = node("node_bbbbbbbbbbbbbbbbbbbbbb");
+    vi.spyOn(hostedHubApi, "restoreSession").mockResolvedValue(sessionResponse);
+    vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([first, second]);
+    const { history, flush } = setup(`/node/${first.id}/${first.environmentId}/t_1`);
+    await hostedHubController.bootstrap();
+    await settle();
+    expect(useHostedHubStore.getState().selectedNode?.id).toBe(first.id);
+    useHostedHubStore.setState({ browserStatus: "checking-access" });
+
+    selectHostedNodeRoute(second.id);
+    history.push(`/${second.environmentId}/t_2`);
+    flush();
+    await settle();
+    expect(useHostedHubStore.getState().selectedNode?.id).toBe(first.id);
+
+    // The account and directory checks finished, but A's shell has not. B
+    // must use the same lifecycle owner immediately rather than waiting for A.
+    useHostedHubStore.setState({ browserStatus: "synchronizing" });
+    await settle();
+    expect(useHostedHubStore.getState().selectedNode?.id).toBe(second.id);
+    expect(useHostedHubStore.getState().sessionEstablished).toBe(false);
+    expect(activateHostedNode).toHaveBeenCalledTimes(2);
+  });
+
   it("restores a routed node strictly through session, directory, and activation", async () => {
     const target = node();
     const restoreSession = vi

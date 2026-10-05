@@ -5,6 +5,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   demoteEnvironmentStateToCachedSnapshot,
   hydrateEnvironmentStateFromCache,
+  projectThreadReadCacheShell,
   selectBootstrapCompleteForEnvironment,
   selectCacheHydratedEnvironmentIds,
   selectProjectsAcrossEnvironments,
@@ -150,6 +151,79 @@ describe("cache hydration", () => {
     const hydrated = hydrateEnvironmentStateFromCache(live, cachedSnapshot(ENV_A), ENV_A);
     expect(hydrated).toBe(live);
     expect(selectProjectsAcrossEnvironments(hydrated)).toEqual([]);
+  });
+
+  it("refreshes cached metadata and adds same-revision detail without claiming readiness", () => {
+    const cached = cachedSnapshot(ENV_A);
+    let state = hydrateEnvironmentStateFromCache(EMPTY_STATE, cached, ENV_A);
+    const content = {
+      messages: [
+        {
+          id: "message-1" as never,
+          role: "assistant" as const,
+          text: "Hub cached answer",
+          createdAt: "2026-10-04T00:00:00.000Z",
+          streaming: true,
+        },
+      ],
+    };
+    const updated = {
+      ...cached,
+      threads: cached.threads.map((thread) => ({
+        ...thread,
+        content,
+        shell: { ...thread.shell, title: "Updated title" },
+      })),
+    };
+    state = hydrateEnvironmentStateFromCache(state, updated, ENV_A, { replaceCached: true });
+    expect(selectBootstrapCompleteForEnvironment(state, ENV_A)).toBe(false);
+    expect(selectThreadByRef(state, scopeThreadRef(ENV_A, "thread-1" as never))).toMatchObject({
+      title: "Updated title",
+      session: null,
+      messages: [{ text: "Hub cached answer", streaming: false }],
+    });
+    state = hydrateEnvironmentStateFromCache(
+      state,
+      { ...cached, capturedAt: cached.capturedAt + 1 },
+      ENV_A,
+      { replaceCached: true },
+    );
+    expect(
+      selectThreadByRef(state, scopeThreadRef(ENV_A, "thread-1" as never))?.messages,
+    ).toHaveLength(1);
+    expect(hydrateEnvironmentStateFromCache(state, cached, ENV_A, { replaceCached: true })).toBe(
+      state,
+    );
+    const live = syncServerShellSnapshot(state, EMPTY_WIRE_SNAPSHOT, ENV_A);
+    expect(
+      hydrateEnvironmentStateFromCache(
+        live,
+        { ...updated, capturedAt: Number.MAX_SAFE_INTEGER },
+        ENV_A,
+        { replaceCached: true },
+      ),
+    ).toBe(live);
+  });
+
+  it("removes deleted cached threads and their content on a newer shell", () => {
+    const cached = cachedSnapshot(ENV_A);
+    const state = hydrateEnvironmentStateFromCache(EMPTY_STATE, cached, ENV_A);
+    const next = hydrateEnvironmentStateFromCache(
+      state,
+      { ...cached, capturedAt: cached.capturedAt + 1, threads: [] },
+      ENV_A,
+      { replaceCached: true },
+    );
+    expect(selectSidebarThreadsAcrossEnvironments(next)).toEqual([]);
+    expect(selectSidebarThreadsAcrossEnvironments(state)).toHaveLength(1);
+    expect(next.environmentStateById[ENV_A]?.messageByThreadId).toEqual({});
+  });
+
+  it("projects a canonical shell into explicitly cached display state", () => {
+    const projected = projectThreadReadCacheShell(EMPTY_WIRE_SNAPSHOT, ENV_A, 123);
+    expect(projected).toEqual({ capturedAt: 123, projects: [], worktrees: [], threads: [] });
+    const state = hydrateEnvironmentStateFromCache(EMPTY_STATE, projected, ENV_A);
+    expect(selectBootstrapCompleteForEnvironment(state, ENV_A)).toBe(false);
   });
 
   it("drops rows whose embedded environmentId does not match the hydration target", () => {

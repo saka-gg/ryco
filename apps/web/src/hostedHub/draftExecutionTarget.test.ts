@@ -36,6 +36,7 @@ function harness() {
   let eligible = true;
   let readyLease: NodeMutationLease | null = lease();
   let projects = [project(target, "other")];
+  let previewProjects = false;
   const waiters: Array<(value: NodeMutationLease | null) => void> = [];
   const routeListeners = new Set<() => void>();
   const release = vi.fn();
@@ -59,6 +60,7 @@ function harness() {
     waitForLease: () => new Promise((resolve) => waiters.push(resolve)),
     readLease,
     readProjects: () => projects,
+    canPreviewProjects: () => previewProjects,
     move,
     retry,
   });
@@ -82,6 +84,9 @@ function harness() {
     setProjects: (values: Project[]) => {
       projects = values;
     },
+    setPreviewProjects: (value: boolean) => {
+      previewProjects = value;
+    },
     setLease: (value: NodeMutationLease | null) => {
       readyLease = value;
     },
@@ -103,6 +108,35 @@ const settle = async () => {
 };
 
 describe("hosted draft device switching", () => {
+  it("shows cached projects immediately but commits the choice only after a fresh lease", async () => {
+    const test = harness();
+    test.setPreviewProjects(true);
+    test.setLease(null);
+    test.begin();
+    expect(test.controller.getSnapshot()?.phase).toBe("project");
+    test.controller.selectProject(ProjectId.make("other"));
+    expect(test.move).not.toHaveBeenCalled();
+    expect(test.controller.getSnapshot()?.phase).toBe("connecting");
+    test.setLease(lease());
+    test.waiters[0]!(lease());
+    await settle();
+    expect(test.move).toHaveBeenCalledWith(draftId, project(target, "other"), "other");
+  });
+
+  it("does not commit a cached project removed from the fresh shell", async () => {
+    const test = harness();
+    test.setPreviewProjects(true);
+    test.setLease(null);
+    test.begin();
+    test.controller.selectProject(ProjectId.make("other"));
+    test.setProjects([]);
+    test.setLease(lease());
+    test.waiters[0]!(lease());
+    await settle();
+    expect(test.move).not.toHaveBeenCalled();
+    expect(test.controller.getSnapshot()?.phase).toBe("error");
+  });
+
   it("waits for a current shell before opening the target project picker", async () => {
     const test = harness();
     test.begin();

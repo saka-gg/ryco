@@ -49,6 +49,10 @@ import {
   type NativeE2eeEnrollmentUpsertRequest as NativeE2eeEnrollmentUpsertRequestType,
 } from "@ryco/contracts/native-e2ee";
 import * as HostedIdentity from "@ryco/contracts/hosted-identity";
+import {
+  ThreadReadCacheShellResponse,
+  ThreadReadCacheThreadResponse,
+} from "@ryco/contracts/thread-read-cache";
 import { Schema } from "effect";
 import { assertE2eeAccountId } from "@ryco/shared/relayE2eeTranscripts";
 
@@ -2382,6 +2386,35 @@ export class HostedHubApi {
     this.clearSessionMaterial();
   }
 
+  async readThreadCacheShell(
+    nodeId: string,
+    signal?: AbortSignal,
+  ): Promise<typeof ThreadReadCacheShellResponse.Type> {
+    if (!HUB_NODE_ID_PATTERN.test(nodeId)) throw new HostedHubApiError("invalid_request", 400);
+    return decodeContract(
+      ThreadReadCacheShellResponse,
+      await this.#request(`/api/nodes/${nodeId}/thread-cache/shell`, signal ? { signal } : {}),
+      "invalid_response",
+    );
+  }
+
+  async readThreadCacheThread(
+    nodeId: string,
+    threadId: string,
+    signal?: AbortSignal,
+  ): Promise<typeof ThreadReadCacheThreadResponse.Type> {
+    if (!HUB_NODE_ID_PATTERN.test(nodeId) || !/^[A-Za-z0-9_-]{1,128}$/u.test(threadId))
+      throw new HostedHubApiError("invalid_request", 400);
+    return decodeContract(
+      ThreadReadCacheThreadResponse,
+      await this.#request(
+        `/api/nodes/${nodeId}/thread-cache/threads/${threadId}`,
+        signal ? { signal } : {},
+      ),
+      "invalid_response",
+    );
+  }
+
   async listNodes(signal?: AbortSignal): Promise<ReadonlyArray<HostedHubNode>> {
     const result = await this.#request("/api/nodes", signal ? { signal } : {});
     if (!Array.isArray(result.nodes)) throw new HostedHubApiError("invalid_response", 502);
@@ -2933,7 +2966,7 @@ export class HostedHubApi {
     if (callerSignal?.aborted) deadline.abort();
     else callerSignal?.addEventListener("abort", forwardAbort);
 
-    let response: Awaited<ReturnType<HttpClientService["fetch"]>>;
+    let response: Awaited<ReturnType<HttpClientService["fetch"]>> | undefined;
     try {
       response = await this.#httpClient.fetch(target, {
         method,
@@ -2943,10 +2976,12 @@ export class HostedHubApi {
         ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
         signal: deadline.signal,
       });
+      // Headers do not complete the request: keep the deadline and caller's
+      // cancellation wired until the response body has also been consumed.
+      return await responseJson(response, options.intent, options.narrowForbidden !== false);
     } catch (error) {
-      // Our own deadline is not the caller's cancellation: surfacing it as an
-      // `AbortError` would let it be mistaken for a user-cancelled action and
-      // reported as no error at all.
+      // responseJson deliberately bounds malformed-body errors. Classify our
+      // cancellation first so an aborted body is not mislabeled invalid JSON.
       if (timedOut) {
         throw new HostedHubApiError(
           "timeout",
@@ -2957,6 +2992,11 @@ export class HostedHubApi {
           "request-timeout",
         );
       }
+      if (deadline.signal.aborted) {
+        const aborted = new Error("The Hub request was cancelled.");
+        aborted.name = "AbortError";
+        throw aborted;
+      }
       if (
         typeof error === "object" &&
         error !== null &&
@@ -2964,21 +3004,16 @@ export class HostedHubApi {
         error.name === "AbortError"
       )
         throw error;
-      throw new HostedHubApiError(
-        "unavailable",
-        0,
-        undefined,
-        options.intent,
-        undefined,
-        "transport-unavailable",
-      );
-    } finally {
-      clearTimeout(timer);
-      callerSignal?.removeEventListener("abort", forwardAbort);
-    }
-    try {
-      return await responseJson(response, options.intent, options.narrowForbidden !== false);
-    } catch (error) {
+      if (response === undefined) {
+        throw new HostedHubApiError(
+          "unavailable",
+          0,
+          undefined,
+          options.intent,
+          undefined,
+          "transport-unavailable",
+        );
+      }
       if (
         this.#isBearer &&
         options.dpop !== "mint" &&
@@ -2995,6 +3030,9 @@ export class HostedHubApi {
         );
       }
       throw error;
+    } finally {
+      clearTimeout(timer);
+      callerSignal?.removeEventListener("abort", forwardAbort);
     }
   }
 }

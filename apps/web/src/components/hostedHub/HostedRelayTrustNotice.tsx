@@ -39,7 +39,13 @@ export function HostedRelayTrustNotice({ compact = false }: { readonly compact?:
       data-tone={tone}
     >
       <Icon aria-hidden className={`mt-0.5 size-4 shrink-0 ${iconClassName}`} />
-      <p>{body}</p>
+      <div className="space-y-2">
+        <p>{body}</p>
+        <p>
+          Cloud history keeps a readable copy of recent conversation text on the Hub so threads can
+          open before a device connects. This copy is separate from the live node channel.
+        </p>
+      </div>
     </div>
   );
 }

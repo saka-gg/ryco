@@ -134,9 +134,13 @@ function RememberBrowserPanel() {
         Remember this browser
       </label>
       <p className="mt-3 text-xs text-muted-foreground">
+        Cloud history stores recent conversation text on the Hub for quick access across devices.
+        This setting adds a separate offline copy in this browser.
+      </p>
+      <p className="mt-3 text-xs text-muted-foreground">
         Only text is saved; draft attachments need to be added again. Anyone with access to this
         browser profile can read the saved copy, including offline. Sending work still requires a
-        fresh connection. Turning this off or signing out removes the saved copy.
+        fresh connection. Turning this off or signing out removes the browser copy.
       </p>
     </HubPanel>
   );

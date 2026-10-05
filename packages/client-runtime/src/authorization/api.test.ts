@@ -15,6 +15,74 @@ import { encodeBase64Url } from "../relay/base64url";
 
 const PASSKEY_ID = "pkey_aaaaaaaaaaaaaaaaaaaaaa";
 
+describe("Hub thread read cache API", () => {
+  it("loads authenticated shell and bounded display content through the shared no-store request", async () => {
+    const nodeId = "node_aaaaaaaaaaaaaaaaaaaaaa";
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValueOnce(
+        response({
+          protocolVersion: 1,
+          generation: 1,
+          revision: 2,
+          storedAt: 3,
+          snapshot: {
+            snapshotSequence: 0,
+            updatedAt: "2026-10-04T12:00:00.000Z",
+            projects: [],
+            worktrees: [],
+            threads: [],
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        response({
+          protocolVersion: 1,
+          generation: 1,
+          revision: 2,
+          storedAt: 3,
+          threadId: "thread-a",
+          snapshot: {
+            messages: [
+              {
+                id: "message-a",
+                role: "assistant",
+                text: "Saved",
+                createdAt: "2026-10-04T12:00:00.000Z",
+              },
+            ],
+          },
+        }),
+      );
+    globalThis.fetch = fetch;
+    const api = createApi();
+    expect((await api.readThreadCacheShell(nodeId)).snapshot.threads).toEqual([]);
+    const detail = await api.readThreadCacheThread(nodeId, "thread-a");
+    expect(detail.snapshot.messages[0]).not.toHaveProperty("streaming");
+    expect(detail.snapshot.messages[0]).not.toHaveProperty("attachments");
+    expect(fetch.mock.calls[1]?.[0]).toBe(`/api/nodes/${nodeId}/thread-cache/threads/thread-a`);
+    expect(fetch.mock.calls[1]?.[1]).toMatchObject({
+      credentials: "same-origin",
+      cache: "no-store",
+    });
+  });
+
+  it("rejects invalid path identifiers before sending and preserves missing cache status", async () => {
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValue(response({ error: "not_found" }, 404));
+    globalThis.fetch = fetch;
+    const api = createApi();
+    await expect(
+      api.readThreadCacheThread("node_aaaaaaaaaaaaaaaaaaaaaa", "../admin"),
+    ).rejects.toMatchObject({ code: "invalid_request" });
+    expect(fetch).not.toHaveBeenCalled();
+    await expect(api.readThreadCacheShell("node_aaaaaaaaaaaaaaaaaaaaaa")).rejects.toMatchObject({
+      status: 404,
+    });
+  });
+});
+
 const originalFetch = globalThis.fetch;
 const originalWindow = globalThis.window;
 
@@ -785,6 +853,55 @@ describe("HostedHubApi", () => {
       vi.useRealTimers();
     }
   });
+
+  it.each(["deadline", "caller"] as const)(
+    "aborts a stalled cloud response body after headers for %s cancellation",
+    async (cancellation) => {
+      vi.useFakeTimers();
+      try {
+        const api = createApi();
+        const caller = new AbortController();
+        const removeListener = vi.spyOn(caller.signal, "removeEventListener");
+        let bodyStarted = false;
+        let requestSignal: AbortSignal | undefined;
+        globalThis.fetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+          requestSignal = init?.signal ?? undefined;
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                bodyStarted = true;
+                controller.enqueue(new TextEncoder().encode('{"protocolVersion":1,'));
+                requestSignal!.addEventListener(
+                  "abort",
+                  () => {
+                    controller.error(new DOMException("interrupted", "AbortError"));
+                  },
+                  { once: true },
+                );
+              },
+            }),
+          );
+        });
+        const pending = api.readThreadCacheShell("node_aaaaaaaaaaaaaaaaaaaaaa", caller.signal);
+        const rejection = expect(pending).rejects.toMatchObject(
+          cancellation === "deadline"
+            ? { code: "timeout", reason: "request-timeout" }
+            : { name: "AbortError" },
+        );
+        await vi.advanceTimersByTimeAsync(0);
+        expect(bodyStarted).toBe(true);
+        expect(removeListener).not.toHaveBeenCalled();
+        if (cancellation === "deadline") await vi.advanceTimersByTimeAsync(30_000);
+        else caller.abort();
+        await rejection;
+        expect(requestSignal?.aborted).toBe(true);
+        expect(removeListener).toHaveBeenCalledOnce();
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
 
   it("looks up, approves, and denies enrollments with session-bound CSRF", async () => {
     const requests: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
