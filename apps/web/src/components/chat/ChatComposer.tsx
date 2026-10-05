@@ -1,4 +1,3 @@
-import { ClaudeCacheDetails } from "./ClaudeCacheReview";
 import { isHostedHubMode } from "../../env";
 import type { ProviderOptionSelection } from "@ryco/contracts";
 import { usePaneEffect, usePaneFocusRef } from "./PaneFocus";
@@ -50,6 +49,7 @@ import { serializeComposerMentionPath } from "../../composerMentionSyntax";
 import {
   composerDraftImageDedupKey,
   encodeComposerAttachmentDataUrl,
+  latestClaudeCacheObservation,
   PROMPT_STASH_MAX_ENTRIES,
   stripInlineTerminalContextPlaceholders,
   type PromptStashEntry,
@@ -779,6 +779,13 @@ export const ChatComposer = memo(
       [activeThreadActivities, selectedContextWindow, selectedModelMaxContextTokens],
     );
     const contextWindowRateLimits = selectedProviderStatus?.rateLimits;
+    const claudeCacheObservation = useMemo(
+      () =>
+        selectedProvider === "claudeAgent"
+          ? latestClaudeCacheObservation(activeThreadActivities ?? [])
+          : null,
+      [activeThreadActivities, selectedProvider],
+    );
 
     // ------------------------------------------------------------------
     // Composer-local state
@@ -2770,10 +2777,6 @@ export const ChatComposer = memo(
               onImplementPlanInNewThread={handleImplementPlanInNewThreadPrimaryAction}
             />
 
-            {!isMobileViewport && selectedProvider === "claudeAgent" && (
-              <ClaudeCacheDetails activities={activeThreadActivities ?? []} />
-            )}
-
             {/* Bottom toolbar. During a pending approval the approval card
                 above the editor carries the single action set, so the footer
                 stays hidden exactly as before. */}
@@ -2838,6 +2841,7 @@ export const ChatComposer = memo(
                     ? selectedProviderStatus?.checkedAt
                     : undefined
                 }
+                claudeCacheObservation={claudeCacheObservation}
                 pendingAction={pendingPrimaryAction}
                 isRunning={phase === "running"}
                 showPlanFollowUpPrompt={pendingUserInputs.length === 0 && showPlanFollowUpPrompt}

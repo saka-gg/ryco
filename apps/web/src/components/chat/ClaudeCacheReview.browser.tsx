@@ -3,11 +3,9 @@ import { page } from "vite-plus/test/browser";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
 import { ProviderInstanceId, RuntimeSessionId } from "@ryco/contracts";
-import {
-  ClaudeCacheDetails,
-  ClaudeCacheEvidence,
-  claudeCacheReviewPresentation,
-} from "./ClaudeCacheReview";
+import { deriveContextWindowUsage } from "../../lib/contextWindow";
+import { ClaudeCacheEvidence, claudeCacheReviewPresentation } from "./ClaudeCacheReview";
+import { ContextWindowMeter } from "./ContextWindowMeter";
 
 const observation = {
   source: "assistant-usage" as const,
@@ -30,12 +28,17 @@ describe("Claude cache review", () => {
     await expect.element(screen.getByText(/Subagent usage is separate/)).toBeVisible();
     await screen.unmount();
   });
-  it("labels missing evidence as unknown", async () => {
-    const screen = await render(<ClaudeCacheDetails activities={[]} />);
-    await screen.getByText("Observed Claude cache usage", { exact: true }).click();
-    await expect
-      .element(screen.getByText(/No authoritative cache usage is available/))
-      .toBeVisible();
+  it("summarizes the last observed request in the context meter popover", async () => {
+    const screen = await render(
+      <ContextWindowMeter
+        usage={deriveContextWindowUsage([], "200k")}
+        claudeCache={{ ...observation, observedTtlSeconds: 3_600 }}
+      />,
+    );
+    await screen.getByRole("button", { name: /Context window/ }).click();
+    await expect.element(page.getByText("Prompt cache", { exact: true })).toBeVisible();
+    await expect.element(page.getByText(/50k read/)).toBeVisible();
+    await expect.element(page.getByText(/60m write lifetime/)).toBeVisible();
     await screen.unmount();
   });
   it.each([
