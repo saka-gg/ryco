@@ -1,8 +1,20 @@
-import { type ScopedProjectRef, type ScopedThreadRef, type ThreadId } from "@ryco/contracts";
+import {
+  type EnvironmentId,
+  type ScopedProjectRef,
+  type ScopedThreadRef,
+  type ThreadId,
+  type WorktreeId,
+} from "@ryco/contracts";
 import type { SidebarThreadSortOrder } from "@ryco/contracts/settings";
 import { sortThreads, type ThreadSortInput } from "./threadSort.ts";
 import { selectEnvironmentState, type AppState, type EnvironmentState } from "./store.ts";
-import { type Project, type SidebarThreadSummary, type Thread, type ThreadShell } from "./types.ts";
+import {
+  type Project,
+  type SidebarThreadSummary,
+  type SidebarWorktreeSummary,
+  type Thread,
+  type ThreadShell,
+} from "./types.ts";
 import { getThreadFromEnvironmentState } from "./threadDerivation.ts";
 
 export function createProjectSelectorByRef(
@@ -10,6 +22,21 @@ export function createProjectSelectorByRef(
 ): (state: AppState) => Project | undefined {
   return (state) =>
     ref ? selectEnvironmentState(state, ref.environmentId).projectById[ref.projectId] : undefined;
+}
+
+/**
+ * A thread's worktree summary (branch, linked change request), when it has
+ * one. Threads carry the worktree id unbranded, hence the plain string.
+ */
+export function createWorktreeSelector(
+  environmentId: EnvironmentId | null | undefined,
+  worktreeId: string | null | undefined,
+): (state: AppState) => SidebarWorktreeSummary | null {
+  return (state) =>
+    environmentId && worktreeId
+      ? (selectEnvironmentState(state, environmentId).worktreeById?.[worktreeId as WorktreeId] ??
+        null)
+      : null;
 }
 
 function createScopedThreadSelector(

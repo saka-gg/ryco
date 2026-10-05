@@ -7,7 +7,7 @@ import {
 
 export type WorkspaceTab =
   | {
-      key: "files" | "review" | "terminal" | "simulator" | "browser" | "agents";
+      key: "files" | "review" | "terminal" | "simulator" | "browser" | "pullRequest" | "agents";
       label: string;
       mode: Exclude<RightPanelMode, "agent">;
     }
@@ -26,6 +26,8 @@ export function buildTabs(input: {
   openedAgentKeys: ReadonlyArray<string>;
   openedPanelModes: ReadonlyArray<RightPanelMode>;
   groupAgents?: boolean;
+  /** Names the pull request tab after the change request it shows. */
+  pullRequestNumber?: number | null;
 }): WorkspaceTab[] {
   const tabs: WorkspaceTab[] = [];
   const openedModes = new Set(input.openedPanelModes);
@@ -41,6 +43,13 @@ export function buildTabs(input: {
   if (openedModes.has("browser")) tabs.push({ key: "browser", label: "Browser", mode: "browser" });
   if (openedModes.has("simulator")) {
     tabs.push({ key: "simulator", label: "Simulator", mode: "simulator" });
+  }
+  if (openedModes.has("pullRequest")) {
+    tabs.push({
+      key: "pullRequest",
+      label: input.pullRequestNumber != null ? `PR #${input.pullRequestNumber}` : "Pull request",
+      mode: "pullRequest",
+    });
   }
   if (openedModes.has("agents") || (input.groupAgents && input.activeAgentKey)) {
     tabs.push({ key: "agents", label: "Agents", mode: "agents" });

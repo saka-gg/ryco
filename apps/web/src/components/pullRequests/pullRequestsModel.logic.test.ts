@@ -216,6 +216,28 @@ describe("derivePullRequestsLayoutMetrics", () => {
       leadingRegion: "list",
     });
   });
+
+  it("gives a listless reader (the workspace panel) every breakpoint at its full width", () => {
+    expect(
+      derivePullRequestsLayoutMetrics({
+        pageWidth: 880,
+        listWidth: 304,
+        listHidden: false,
+        hasSelection: true,
+        tab: "conversation",
+        listless: true,
+      }),
+    ).toMatchObject({
+      listDocked: false,
+      listVisible: false,
+      listFillsPage: false,
+      readerWidth: 880,
+      railDocked: true,
+      treeDocked: true,
+      barCompact: false,
+      leadingRegion: "reader",
+    });
+  });
 });
 
 describe("describePullRequestsListError", () => {

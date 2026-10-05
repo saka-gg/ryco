@@ -337,14 +337,17 @@ export function derivePullRequestsLayoutMetrics(input: {
   readonly listHidden: boolean;
   readonly hasSelection: boolean;
   readonly tab: PullRequestsTab;
+  /** A reader with no list at all (a thread's workspace panel): it owns the whole width. */
+  readonly listless?: boolean | undefined;
 }): PullRequestsLayoutMetrics {
   // Files takes the full width; the list is a drawer there (`\`).
   const listDocked =
+    !input.listless &&
     input.pageWidth >= PULL_REQUESTS_LIST_DOCK_MIN_PAGE_WIDTH &&
     !(input.hasSelection && input.tab === "files");
   const listVisible = listDocked && !input.listHidden;
   // Without a selection on a narrow page, the list itself fills the page.
-  const listFillsPage = !input.hasSelection && !listDocked;
+  const listFillsPage = !input.listless && !input.hasSelection && !listDocked;
   const readerWidth = Math.max(0, input.pageWidth - (listVisible ? input.listWidth + 1 : 0));
   return {
     listDocked,

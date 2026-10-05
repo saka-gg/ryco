@@ -90,10 +90,6 @@ export interface BuildOverviewItemsInput {
    */
   changedFiles: ReadonlyArray<OverviewChangedFile>;
   overviewPullRequestNumber: number | null;
-  activeEnvironmentUnavailableState: {
-    label: string;
-    connectionState: string;
-  } | null;
 }
 
 export function buildOverviewItems(input: BuildOverviewItemsInput): OverviewPanelItem[] {
@@ -110,15 +106,6 @@ export function buildOverviewItems(input: BuildOverviewItemsInput): OverviewPane
     });
     items.push({ ...changesItem, action: "review", icon: "changes" });
   }
-
-  items.push({
-    label: "Environment",
-    value: input.activeEnvironmentUnavailableState?.label ?? "Local",
-    ...(input.activeEnvironmentUnavailableState
-      ? { detail: input.activeEnvironmentUnavailableState.connectionState }
-      : {}),
-    icon: "environment",
-  });
 
   return items;
 }

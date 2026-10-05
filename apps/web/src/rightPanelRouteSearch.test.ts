@@ -116,6 +116,25 @@ describe("isRightPanelOpen", () => {
   });
 });
 
+it("parses pull request tabs with an optional pinned change request", () => {
+  expect(parseRightPanelRouteSearch({ workspaceTab: "pullRequest", diff: "1" })).toEqual({
+    workspaceOpen: "1",
+    workspaceTab: "pullRequest",
+  });
+  const pinned = parseRightPanelRouteSearch({ workspaceTab: "pullRequest", workspacePr: "42" });
+  expect(pinned).toEqual({ workspaceOpen: "1", workspaceTab: "pullRequest", workspacePr: 42 });
+  expect(getRightPanelMode(pinned)).toBe("pullRequest");
+  expect(parseRightPanelRouteSearch({ workspaceTab: "pullRequest", workspacePr: "-3" })).toEqual({
+    workspaceOpen: "1",
+    workspaceTab: "pullRequest",
+  });
+  // The pinned number belongs to the pull request tab only.
+  expect(parseRightPanelRouteSearch({ workspaceTab: "terminal", workspacePr: "42" })).toEqual({
+    workspaceOpen: "1",
+    workspaceTab: "terminal",
+  });
+});
+
 it("preserves an agent selection within Agents and reports the shared panel mode", () => {
   const search = parseRightPanelRouteSearch({
     workspaceTab: "agents",

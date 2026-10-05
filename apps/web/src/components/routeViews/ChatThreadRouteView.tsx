@@ -4,7 +4,7 @@ import { ChatPanes, PaneThreadAvailability } from "../chat/ChatPanes";
 import type { ScopedThreadRef } from "@ryco/contracts";
 import { useDeviceStateStore } from "@ryco/client-runtime/state/device";
 import { useNavigate } from "@tanstack/react-router";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo } from "react";
 
 import { finalizePromotedDraftThreadByRef } from "../../composerDraftStore";
 import {
@@ -16,6 +16,7 @@ import { useAppSidebarCollapsed } from "../../hooks/useAppSidebarCollapsed";
 import { useMediaQuery } from "../../hooks/useMediaQuery";
 import { usePresentationTier } from "../../hooks/usePresentationTier";
 import { useRightPanelMaximized } from "../../hooks/useRightPanelMaximized";
+import { type RightPanelSearchUpdate, useRightPanelTabs } from "../../hooks/useRightPanelTabs";
 import { useThreadRightPanelRouteState } from "../../hooks/useThreadRightPanelRouteState";
 import { useSettings } from "../../hooks/useSettings";
 import { usePerfMark } from "../../perf/tabSwitchInstrumentation";
@@ -33,19 +34,10 @@ import {
   createThreadSelectorByRef,
 } from "../../storeSelectors";
 import { buildThreadRouteParams } from "../../threadRoutes";
-import {
-  buildOpenAgentSearch,
-  buildOpenAgentsSearch,
-  buildOpenFilesSearch,
-  buildOpenReviewSearch,
-  buildOpenSimulatorSearch,
-  buildOpenBrowserSearch,
-  buildOpenTerminalSearch,
-  buildOpenWorkspaceSearch,
-} from "../../workspaceRouteSearch";
+import { buildOpenSimulatorSearch } from "../../workspaceRouteSearch";
 import ChatView from "../ChatView";
 import { threadHasStarted } from "../ChatView.logic";
-import { LazyRightPanel, RightPanelInlineSidebar, closeRightPanelSearch } from "../ChatRightPanel";
+import { LazyRightPanel, RightPanelInlineSidebar } from "../ChatRightPanel";
 import { RightPanelSheet } from "../RightPanelSheet";
 import { PhoneWorkSurfaceSheet } from "../shell/phone/PhoneWorkSurface";
 import { SidebarInset } from "~/components/ui/sidebar";
@@ -121,8 +113,6 @@ export function ChatThreadRouteView({
   const canRenderRouteThread =
     routeInPanes ||
     (routeThreadExists && (draftThreadExists || bootstrapComplete || serverThread !== undefined));
-  const diffOpen = threadSearch.diff === "1";
-  const previewOpen = threadSearch.preview === "1";
   const rightPanelMode: RightPanelMode | null = getRightPanelMode(threadSearch);
   const rightPanelOpen = isRightPanelOpen(threadSearch);
   const activeAgentKey =
@@ -143,16 +133,6 @@ export function ChatThreadRouteView({
       open: rightPanelOpen,
       canMaximize: !shouldUseDiffSheet && presentationTier !== "phone",
     });
-  const [diffPanelMountState, setDiffPanelMountState] = useState(() => ({
-    threadKey: currentThreadKey,
-    hasOpenedDiff: diffOpen,
-    hasOpenedPreview: previewOpen,
-    hasOpenedTerminal: rightPanelMode === "terminal",
-    hasOpenedSimulator: rightPanelMode === "simulator",
-    hasOpenedBrowser: rightPanelMode === "browser",
-    hasOpenedAgents: rightPanelMode === "agents",
-    openedAgentKeys: activeAgentKey ? [activeAgentKey] : [],
-  }));
   // Cached Desktop rows intentionally are not bootstrap-complete. Acquire the
   // route's node before the ChatView guard below so opening a last-known thread
   // can establish its live shell snapshot without a node picker or retry.
@@ -169,416 +149,38 @@ export function ChatThreadRouteView({
       search: (previous) => buildOpenSimulatorSearch(previous),
     });
   }, [consumeDeviceOpenRequest, navigate, pendingDeviceOpenRequest, presentationTier, threadRef]);
-  const hasOpenedDiff =
-    diffPanelMountState.threadKey === currentThreadKey
-      ? diffPanelMountState.hasOpenedDiff
-      : diffOpen;
-  const hasOpenedPreview =
-    diffPanelMountState.threadKey === currentThreadKey
-      ? diffPanelMountState.hasOpenedPreview
-      : previewOpen;
-  const hasOpenedTerminal =
-    diffPanelMountState.threadKey === currentThreadKey
-      ? diffPanelMountState.hasOpenedTerminal
-      : rightPanelMode === "terminal";
-  const hasOpenedSimulator =
-    diffPanelMountState.threadKey === currentThreadKey
-      ? diffPanelMountState.hasOpenedSimulator
-      : rightPanelMode === "simulator";
-  const hasOpenedBrowser =
-    diffPanelMountState.threadKey === currentThreadKey
-      ? diffPanelMountState.hasOpenedBrowser
-      : rightPanelMode === "browser";
-  const hasOpenedAgents =
-    diffPanelMountState.threadKey === currentThreadKey
-      ? diffPanelMountState.hasOpenedAgents
-      : rightPanelMode === "agents";
-  const openedAgentKeys = useMemo(() => {
-    const keys =
-      diffPanelMountState.threadKey === currentThreadKey
-        ? diffPanelMountState.openedAgentKeys
-        : activeAgentKey
-          ? [activeAgentKey]
-          : [];
-    return activeAgentKey && !keys.includes(activeAgentKey) ? [...keys, activeAgentKey] : keys;
-  }, [activeAgentKey, currentThreadKey, diffPanelMountState]);
-  const [lastOpenedRightPanelMode, setLastOpenedRightPanelMode] = useState<RightPanelMode>(
-    () => rightPanelMode ?? "review",
-  );
-  const openedPanelModes = useMemo(() => {
-    const modes: RightPanelMode[] = [];
-    if (hasOpenedPreview || rightPanelMode === "files") {
-      modes.push("files");
-    }
-    if (hasOpenedDiff || rightPanelMode === "review") {
-      modes.push("review");
-    }
-    if (hasOpenedTerminal || rightPanelMode === "terminal") {
-      modes.push("terminal");
-    }
-    if (hasOpenedSimulator || rightPanelMode === "simulator") {
-      modes.push("simulator");
-    }
-    if (hasOpenedBrowser || rightPanelMode === "browser") {
-      modes.push("browser");
-    }
-    if (hasOpenedAgents || rightPanelMode === "agents") {
-      modes.push("agents");
-    }
-    return modes;
-  }, [
-    hasOpenedAgents,
-    hasOpenedDiff,
-    hasOpenedPreview,
-    hasOpenedSimulator,
-    hasOpenedBrowser,
-    hasOpenedTerminal,
-    rightPanelMode,
-  ]);
-  const markRightPanelOpened = useCallback(
-    (panelMode: RightPanelMode) => {
-      setLastOpenedRightPanelMode(panelMode);
-      setDiffPanelMountState((previous) => {
-        const nextState = {
-          threadKey: currentThreadKey,
-          hasOpenedDiff:
-            (previous.threadKey === currentThreadKey ? previous.hasOpenedDiff : diffOpen) ||
-            panelMode === "review",
-          hasOpenedPreview:
-            (previous.threadKey === currentThreadKey ? previous.hasOpenedPreview : previewOpen) ||
-            panelMode === "files",
-          hasOpenedTerminal:
-            (previous.threadKey === currentThreadKey
-              ? previous.hasOpenedTerminal
-              : rightPanelMode === "terminal") || panelMode === "terminal",
-          hasOpenedSimulator:
-            (previous.threadKey === currentThreadKey
-              ? previous.hasOpenedSimulator
-              : rightPanelMode === "simulator") || panelMode === "simulator",
-          hasOpenedBrowser:
-            (previous.threadKey === currentThreadKey
-              ? previous.hasOpenedBrowser
-              : rightPanelMode === "browser") || panelMode === "browser",
-          hasOpenedAgents:
-            (previous.threadKey === currentThreadKey
-              ? previous.hasOpenedAgents
-              : rightPanelMode === "agents") || panelMode === "agents",
-          openedAgentKeys:
-            previous.threadKey === currentThreadKey ? previous.openedAgentKeys : openedAgentKeys,
-        };
-        if (
-          previous.threadKey === nextState.threadKey &&
-          previous.hasOpenedDiff === nextState.hasOpenedDiff &&
-          previous.hasOpenedPreview === nextState.hasOpenedPreview &&
-          previous.hasOpenedTerminal === nextState.hasOpenedTerminal &&
-          previous.hasOpenedSimulator === nextState.hasOpenedSimulator &&
-          previous.hasOpenedBrowser === nextState.hasOpenedBrowser &&
-          previous.hasOpenedAgents === nextState.hasOpenedAgents &&
-          previous.openedAgentKeys === nextState.openedAgentKeys
-        ) {
-          return previous;
-        }
-        return nextState;
-      });
-    },
-    [currentThreadKey, diffOpen, openedAgentKeys, previewOpen, rightPanelMode],
-  );
-  const closeRightPanel = useCallback(() => {
-    if (!threadRef) {
-      return;
-    }
-    void navigate({
-      to: "/$environmentId/$threadId",
-      params: buildThreadRouteParams(threadRef),
-      search: (previous) => closeRightPanelSearch(previous),
-    });
-  }, [navigate, threadRef]);
-  const openRightPanel = useCallback(() => {
-    if (!threadRef) {
-      return;
-    }
-    const nextSearch = (previous: Record<string, unknown>) => {
-      const lastAgentKey = openedAgentKeys[openedAgentKeys.length - 1];
-      if (lastOpenedRightPanelMode === "agent" && lastAgentKey) {
-        return buildOpenAgentSearch(previous, lastAgentKey);
-      }
-      if (lastOpenedRightPanelMode === "files" && hasOpenedPreview) {
-        return buildOpenFilesSearch(previous);
-      }
-      if (lastOpenedRightPanelMode === "review" && hasOpenedDiff) {
-        return buildOpenReviewSearch(previous);
-      }
-      if (lastOpenedRightPanelMode === "terminal" && hasOpenedTerminal) {
-        return buildOpenTerminalSearch(previous);
-      }
-      if (lastOpenedRightPanelMode === "simulator" && hasOpenedSimulator) {
-        return buildOpenSimulatorSearch(previous);
-      }
-      if (lastOpenedRightPanelMode === "browser" && hasOpenedBrowser) {
-        return buildOpenBrowserSearch(previous);
-      }
-      if (lastOpenedRightPanelMode === "agents" && hasOpenedAgents) {
-        return buildOpenAgentsSearch(previous);
-      }
-      if (hasOpenedPreview) {
-        return buildOpenFilesSearch(previous);
-      }
-      if (hasOpenedDiff) {
-        return buildOpenReviewSearch(previous);
-      }
-      if (hasOpenedTerminal) {
-        return buildOpenTerminalSearch(previous);
-      }
-      if (hasOpenedSimulator) {
-        return buildOpenSimulatorSearch(previous);
-      }
-      if (hasOpenedBrowser) {
-        return buildOpenBrowserSearch(previous);
-      }
-      if (hasOpenedAgents) {
-        return buildOpenAgentsSearch(previous);
-      }
-      if (lastAgentKey) {
-        return buildOpenAgentSearch(previous, lastAgentKey);
-      }
-      return buildOpenWorkspaceSearch(previous);
-    };
-    void navigate({
-      to: "/$environmentId/$threadId",
-      params: buildThreadRouteParams(threadRef),
-      search: nextSearch,
-    });
-  }, [
-    hasOpenedAgents,
-    hasOpenedDiff,
-    hasOpenedPreview,
-    hasOpenedSimulator,
-    hasOpenedBrowser,
-    hasOpenedTerminal,
-    lastOpenedRightPanelMode,
-    navigate,
-    openedAgentKeys,
-    threadRef,
-  ]);
-  const toggleRightPanel = useCallback(() => {
-    if (rightPanelOpen) {
-      closeRightPanel();
-      return;
-    }
-    openRightPanel();
-  }, [closeRightPanel, openRightPanel, rightPanelOpen]);
-  const closePanelTab = useCallback(
-    (input: { mode: RightPanelMode; agentKey?: string }) => {
+  const navigateThreadSearch = useCallback(
+    (update: RightPanelSearchUpdate) => {
       if (!threadRef) {
         return;
       }
-      if (input.mode === "agent") {
-        const nextOpenedAgentKeys = openedAgentKeys.filter((key) => key !== input.agentKey);
-        setDiffPanelMountState((previous) => ({
-          threadKey: currentThreadKey,
-          hasOpenedDiff:
-            previous.threadKey === currentThreadKey ? previous.hasOpenedDiff : hasOpenedDiff,
-          hasOpenedPreview:
-            previous.threadKey === currentThreadKey ? previous.hasOpenedPreview : hasOpenedPreview,
-          hasOpenedTerminal:
-            previous.threadKey === currentThreadKey
-              ? previous.hasOpenedTerminal
-              : hasOpenedTerminal,
-          hasOpenedSimulator:
-            previous.threadKey === currentThreadKey
-              ? previous.hasOpenedSimulator
-              : hasOpenedSimulator,
-          hasOpenedBrowser:
-            previous.threadKey === currentThreadKey ? previous.hasOpenedBrowser : hasOpenedBrowser,
-          hasOpenedAgents:
-            previous.threadKey === currentThreadKey ? previous.hasOpenedAgents : hasOpenedAgents,
-          openedAgentKeys: nextOpenedAgentKeys,
-        }));
-
-        if (rightPanelMode === "agent" && activeAgentKey === input.agentKey) {
-          void navigate({
-            to: "/$environmentId/$threadId",
-            params: buildThreadRouteParams(threadRef),
-            search: (previous) => {
-              const nextAgentKey = nextOpenedAgentKeys[nextOpenedAgentKeys.length - 1];
-              if (nextAgentKey) {
-                return buildOpenAgentSearch(previous, nextAgentKey);
-              }
-              if (hasOpenedPreview) {
-                return buildOpenFilesSearch(previous);
-              }
-              if (hasOpenedDiff) {
-                return buildOpenReviewSearch(previous);
-              }
-              if (hasOpenedTerminal) {
-                return buildOpenTerminalSearch(previous);
-              }
-              if (hasOpenedSimulator) {
-                return buildOpenSimulatorSearch(previous);
-              }
-              if (hasOpenedBrowser) {
-                return buildOpenBrowserSearch(previous);
-              }
-              if (hasOpenedAgents) {
-                return buildOpenAgentsSearch(previous);
-              }
-              return buildOpenWorkspaceSearch(previous);
-            },
-          });
-        }
-        return;
-      }
-
-      const nextHasOpenedDiff =
-        input.mode === "review" ? false : hasOpenedDiff || rightPanelMode === "review";
-      const nextHasOpenedPreview =
-        input.mode === "files" ? false : hasOpenedPreview || rightPanelMode === "files";
-      const nextHasOpenedTerminal =
-        input.mode === "terminal" ? false : hasOpenedTerminal || rightPanelMode === "terminal";
-      const nextHasOpenedSimulator =
-        input.mode === "simulator" ? false : hasOpenedSimulator || rightPanelMode === "simulator";
-      const nextHasOpenedBrowser =
-        input.mode === "browser" ? false : hasOpenedBrowser || rightPanelMode === "browser";
-      const nextHasOpenedAgents =
-        input.mode === "agents" ? false : hasOpenedAgents || rightPanelMode === "agents";
-      setDiffPanelMountState((previous) => {
-        const nextState = {
-          threadKey: currentThreadKey,
-          hasOpenedDiff: nextHasOpenedDiff,
-          hasOpenedPreview: nextHasOpenedPreview,
-          hasOpenedTerminal: nextHasOpenedTerminal,
-          hasOpenedSimulator: nextHasOpenedSimulator,
-          hasOpenedBrowser: nextHasOpenedBrowser,
-          hasOpenedAgents: nextHasOpenedAgents,
-          openedAgentKeys:
-            previous.threadKey === currentThreadKey ? previous.openedAgentKeys : openedAgentKeys,
-        };
-        if (
-          previous.threadKey === nextState.threadKey &&
-          previous.hasOpenedDiff === nextState.hasOpenedDiff &&
-          previous.hasOpenedPreview === nextState.hasOpenedPreview &&
-          previous.hasOpenedTerminal === nextState.hasOpenedTerminal &&
-          previous.hasOpenedSimulator === nextState.hasOpenedSimulator &&
-          previous.hasOpenedBrowser === nextState.hasOpenedBrowser &&
-          previous.hasOpenedAgents === nextState.hasOpenedAgents &&
-          previous.openedAgentKeys === nextState.openedAgentKeys
-        ) {
-          return previous;
-        }
-        return nextState;
-      });
-
-      if (rightPanelMode !== input.mode) {
-        return;
-      }
-
-      const nextSearch = (previous: Record<string, unknown>) => {
-        if (input.mode !== "files" && nextHasOpenedPreview) {
-          return buildOpenFilesSearch(previous);
-        }
-        if (input.mode !== "review" && nextHasOpenedDiff) {
-          return buildOpenReviewSearch(previous);
-        }
-        if (input.mode !== "terminal" && nextHasOpenedTerminal) {
-          return buildOpenTerminalSearch(previous);
-        }
-        if (input.mode !== "simulator" && nextHasOpenedSimulator) {
-          return buildOpenSimulatorSearch(previous);
-        }
-        if (input.mode !== "browser" && nextHasOpenedBrowser) {
-          return buildOpenBrowserSearch(previous);
-        }
-        if (input.mode !== "agents" && nextHasOpenedAgents) {
-          return buildOpenAgentsSearch(previous);
-        }
-        return buildOpenWorkspaceSearch(previous);
-      };
       void navigate({
         to: "/$environmentId/$threadId",
         params: buildThreadRouteParams(threadRef),
-        search: nextSearch,
+        search: update,
       });
     },
-    [
-      currentThreadKey,
-      activeAgentKey,
-      hasOpenedAgents,
-      hasOpenedDiff,
-      hasOpenedPreview,
-      hasOpenedSimulator,
-      hasOpenedBrowser,
-      hasOpenedTerminal,
-      navigate,
-      openedAgentKeys,
-      rightPanelMode,
-      threadRef,
-    ],
+    [navigate, threadRef],
   );
-
-  useEffect(() => {
-    if (rightPanelMode !== null) {
-      setLastOpenedRightPanelMode(rightPanelMode);
-      markRightPanelOpened(rightPanelMode);
-    }
-  }, [markRightPanelOpened, rightPanelMode]);
-
-  useEffect(() => {
-    if (!currentThreadKey || !activeAgentKey) {
-      return;
-    }
-    setDiffPanelMountState((previous) => {
-      const baseAgentKeys = previous.threadKey === currentThreadKey ? previous.openedAgentKeys : [];
-      if (baseAgentKeys.includes(activeAgentKey)) {
-        return previous.threadKey === currentThreadKey
-          ? previous
-          : {
-              threadKey: currentThreadKey,
-              hasOpenedDiff,
-              hasOpenedPreview,
-              hasOpenedTerminal,
-              hasOpenedSimulator,
-              hasOpenedBrowser,
-              hasOpenedAgents,
-              openedAgentKeys: baseAgentKeys,
-            };
-      }
-      return {
-        threadKey: currentThreadKey,
-        hasOpenedDiff: previous.threadKey === currentThreadKey ? previous.hasOpenedDiff : diffOpen,
-        hasOpenedPreview:
-          previous.threadKey === currentThreadKey ? previous.hasOpenedPreview : previewOpen,
-        hasOpenedTerminal:
-          previous.threadKey === currentThreadKey
-            ? previous.hasOpenedTerminal
-            : rightPanelMode === "terminal",
-        hasOpenedSimulator:
-          previous.threadKey === currentThreadKey
-            ? previous.hasOpenedSimulator
-            : rightPanelMode === "simulator",
-        hasOpenedBrowser:
-          previous.threadKey === currentThreadKey
-            ? previous.hasOpenedBrowser
-            : rightPanelMode === "browser",
-        hasOpenedAgents:
-          previous.threadKey === currentThreadKey
-            ? previous.hasOpenedAgents
-            : rightPanelMode === "agents",
-        openedAgentKeys: [...baseAgentKeys, activeAgentKey],
-      };
-    });
-  }, [
-    activeAgentKey,
-    currentThreadKey,
-    diffOpen,
-    hasOpenedAgents,
-    hasOpenedDiff,
-    hasOpenedPreview,
-    hasOpenedSimulator,
-    hasOpenedBrowser,
-    hasOpenedTerminal,
-    previewOpen,
+  const {
+    openedPanelModes,
+    openedAgentKeys,
+    lastOpenedRightPanelMode,
+    markRightPanelOpened,
+    openRightPanel,
+    closeRightPanel,
+    toggleRightPanel,
+    closePanelTab,
+    shouldRenderRightPanelContent,
+    shouldRenderPhoneRightPanelContent,
+  } = useRightPanelTabs({
+    scopeKey: currentThreadKey,
     rightPanelMode,
-  ]);
+    rightPanelOpen,
+    activeAgentKey,
+    defaultLastMode: "review",
+    navigateSearch: navigateThreadSearch,
+  });
 
   useEffect(() => {
     if (!threadRef || !bootstrapComplete) {
@@ -617,34 +219,6 @@ export function ChatThreadRouteView({
     return null;
   }
 
-  const shouldRenderRightPanelContent =
-    rightPanelOpen ||
-    rightPanelMode === "review" ||
-    hasOpenedDiff ||
-    rightPanelMode === "files" ||
-    hasOpenedPreview ||
-    rightPanelMode === "terminal" ||
-    hasOpenedTerminal ||
-    rightPanelMode === "simulator" ||
-    hasOpenedSimulator ||
-    rightPanelMode === "browser" ||
-    hasOpenedBrowser ||
-    rightPanelMode === "agents" ||
-    hasOpenedAgents ||
-    rightPanelMode === "agent" ||
-    openedAgentKeys.length > 0;
-  // The frozen phone tier has no Agents workspace: agents state neither
-  // mounts nor retains the phone work surface.
-  const shouldRenderPhoneRightPanelContent =
-    rightPanelOpen ||
-    rightPanelMode === "review" ||
-    hasOpenedDiff ||
-    rightPanelMode === "files" ||
-    hasOpenedPreview ||
-    rightPanelMode === "terminal" ||
-    hasOpenedTerminal ||
-    rightPanelMode === "agent" ||
-    openedAgentKeys.length > 0;
   const mountedRightPanelMode: RightPanelMode | null = rightPanelOpen
     ? rightPanelMode
     : lastOpenedRightPanelMode;

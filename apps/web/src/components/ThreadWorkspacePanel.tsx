@@ -13,6 +13,7 @@ import {
   FolderIcon,
   GlobeIcon,
   GitCompareIcon,
+  GitPullRequestIcon,
   Maximize2Icon,
   MessageSquarePlusIcon,
   MessageSquareTextIcon,
@@ -46,14 +47,11 @@ import {
 import {
   buildOpenAgentSearch,
   buildOpenAgentsSearch,
-  buildOpenFilesSearch,
-  buildOpenReviewSearch,
-  buildOpenSimulatorSearch,
-  buildOpenBrowserSearch,
-  buildOpenTerminalSearch,
+  buildOpenPullRequestSearch,
   buildOpenWorkspaceSearch,
-  stripWorkspacePanelSearchParams,
+  buildCloseWorkspacePanelSearch,
 } from "../workspaceRouteSearch";
+import { buildOpenRightPanelTabSearch, isRightPanelTabMode } from "../rightPanelTabs.logic";
 import {
   derivePhase,
   deriveThreadAgentPanelModel,
@@ -63,13 +61,18 @@ import {
   type ThreadSubagentView,
 } from "../threadWorkspaceViewModel";
 import { AgentsPanel } from "./AgentsPanel";
+import { useThreadChangeRequest } from "./chat/useThreadChangeRequest";
 import { formatLiveAgentCount, LiveAgentCountBadge } from "./LiveAgentCountBadge";
 import { buildTabs, type WorkspaceTab } from "../threadWorkspaceTabs";
 import { readEnvironmentApi } from "../environmentApi";
 import { shortcutLabelForCommand } from "../keybindings";
 import type { TerminalContextSelection } from "../lib/terminalContext";
 import { useStore } from "../store";
-import { createProjectSelectorByRef, createThreadSelectorByRef } from "../storeSelectors";
+import {
+  createProjectSelectorByRef,
+  createThreadSelectorByRef,
+  createWorktreeSelector,
+} from "../storeSelectors";
 import { selectThreadTerminalState, useTerminalStateStore } from "../terminalStateStore";
 import { buildThreadRouteParams, resolveThreadRouteRef } from "../threadRoutes";
 import { DraftId, useComposerDraftStore } from "../composerDraftStore";
@@ -90,6 +93,9 @@ const DiffPanel = lazy(() => import("./DiffPanel"));
 const PreviewPanel = lazy(() => import("./PreviewPanel"));
 const ThreadTerminalDrawer = lazy(() => import("./ThreadTerminalDrawer"));
 const SimulatorPanel = lazy(() => import("./device/SimulatorPanel"));
+const WorkspacePullRequestPanel = lazy(
+  () => import("./pullRequests/workspace/WorkspacePullRequestPanel"),
+);
 
 function statusBucket(status: ThreadSubagentStatus): "idle" | "in_progress" | "review" | "done" {
   if (status === "running") return "in_progress";
@@ -138,6 +144,7 @@ function TabIcon(props: { tab: WorkspaceTab; active: boolean }) {
     return <TerminalIcon className={className} />;
   }
   if (props.tab.key === "browser") return <GlobeIcon className={className} />;
+  if (props.tab.key === "pullRequest") return <GitPullRequestIcon className={className} />;
   if (props.tab.key === "simulator") {
     return <SmartphoneIcon className={className} />;
   }
@@ -341,6 +348,42 @@ function useWorkspaceProjectContext() {
       : null;
   const project = useStore(useMemo(() => createProjectSelectorByRef(projectRef), [projectRef]));
   return { threadRef, serverThread, draftThread, project };
+}
+
+/**
+ * The thread's change request, resolved as the overview resolves it (worktree
+ * link, git status, then an open change request for the branch). A change
+ * request only a fresh push knows arrives pinned in the URL instead.
+ */
+function useWorkspaceThreadChangeRequest(enabled: boolean) {
+  const { threadRef, serverThread, draftThread, project } = useWorkspaceProjectContext();
+  const thread = serverThread ?? draftThread ?? null;
+  const worktree = useStore(
+    useMemo(
+      () => createWorktreeSelector(threadRef?.environmentId, serverThread?.worktreeId),
+      [serverThread?.worktreeId, threadRef?.environmentId],
+    ),
+  );
+  const gitCwd = project
+    ? projectScriptCwd({
+        project: { cwd: project.cwd },
+        worktreePath: thread?.worktreePath ?? null,
+      })
+    : null;
+  const changeRequest = useThreadChangeRequest({
+    environmentId: threadRef?.environmentId ?? null,
+    gitCwd,
+    worktreeBranch: worktree?.branch ?? null,
+    threadBranch: thread?.branch ?? null,
+    worktreePrNumber: worktree?.prNumber ?? null,
+    enabled,
+  });
+  return {
+    environmentId: threadRef?.environmentId ?? null,
+    project: project ?? null,
+    number: changeRequest.number,
+    resolving: changeRequest.resolving,
+  };
 }
 
 function WorkspaceBrowserPanel() {
@@ -624,6 +667,8 @@ function WorkspaceLauncher(props: {
   onSelectTab: (tab: WorkspaceTab) => void;
   /** The frozen phone tier has no Agents workspace (AGENTS.md). */
   showAgents: boolean;
+  /** The thread's change request, when it has one (desktop only). */
+  pullRequestNumber: number | null;
   showSimulator: boolean;
   isPhoneSurface: boolean;
   liveAgentCount: number;
@@ -700,6 +745,17 @@ function WorkspaceLauncher(props: {
         compact={compact}
         onClick={() => props.onSelectTab(terminalTab)}
       />
+      {props.pullRequestNumber !== null ? (
+        <LauncherCard
+          label="Pull request"
+          description={`Review #${props.pullRequestNumber} here`}
+          icon={GitPullRequestIcon}
+          compact={compact}
+          onClick={() =>
+            props.onSelectTab({ key: "pullRequest", label: "Pull request", mode: "pullRequest" })
+          }
+        />
+      ) : null}
       {props.showSimulator ? (
         <LauncherCard
           label="Simulator"
@@ -869,20 +925,16 @@ export default function ThreadWorkspacePanel(props: {
     [activeThread?.activities, agentSessionLive, subagents],
   );
   const openedPanelModes = useMemo(() => {
-    if (
-      activeMode === "files" ||
-      activeMode === "review" ||
-      activeMode === "terminal" ||
-      activeMode === "simulator" ||
-      activeMode === "browser" ||
-      activeMode === "agents"
-    ) {
+    if (isRightPanelTabMode(activeMode)) {
       return props.openedPanelModes.includes(activeMode)
         ? props.openedPanelModes
         : [...props.openedPanelModes, activeMode];
     }
     return props.openedPanelModes;
   }, [activeMode, props.openedPanelModes]);
+  // The frozen phone tier has no pull request tab: resolve nothing there.
+  const threadChangeRequest = useWorkspaceThreadChangeRequest(!isPhoneSurface);
+  const pullRequestNumber = search.workspacePr ?? threadChangeRequest.number;
   const tabs = useMemo(() => {
     const built = buildTabs({
       subagents,
@@ -890,21 +942,34 @@ export default function ThreadWorkspacePanel(props: {
       openedAgentKeys: props.openedAgentKeys,
       openedPanelModes,
       groupAgents: !isPhoneSurface,
+      pullRequestNumber,
     });
     // The web phone tier is frozen; native mobile owns future phone surfaces.
     return isPhoneSurface
       ? built.filter(
-          (tab) => tab.mode !== "agents" && tab.mode !== "simulator" && tab.mode !== "browser",
+          (tab) =>
+            tab.mode !== "agents" &&
+            tab.mode !== "simulator" &&
+            tab.mode !== "browser" &&
+            tab.mode !== "pullRequest",
         )
       : built;
-  }, [agentKey, isPhoneSurface, openedPanelModes, props.openedAgentKeys, subagents]);
+  }, [
+    agentKey,
+    isPhoneSurface,
+    openedPanelModes,
+    props.openedAgentKeys,
+    pullRequestNumber,
+    subagents,
+  ]);
   // A phone agents deep link falls back to the launcher with the agents tab
   // filtered out — no tab is active then, so aria-labelledby never points
   // at a tab id that is not in the DOM.
   const activeTabKey =
     activeMode === "agent"
       ? agentKey
-      : isPhoneSurface && (activeMode === "agents" || activeMode === "browser")
+      : isPhoneSurface &&
+          (activeMode === "agents" || activeMode === "browser" || activeMode === "pullRequest")
         ? null
         : activeMode;
 
@@ -940,35 +1005,18 @@ export default function ThreadWorkspacePanel(props: {
 
   const selectTab = useCallback(
     (tab: WorkspaceTab) => {
-      if (tab.mode === "review") {
-        navigateSearch((previous) => buildOpenReviewSearch(previous));
-        return;
-      }
-      if (tab.mode === "files") {
-        navigateSearch((previous) => buildOpenFilesSearch(previous));
-        return;
-      }
-      if (tab.mode === "terminal") {
-        navigateSearch((previous) => buildOpenTerminalSearch(previous));
-        return;
-      }
-      if (tab.mode === "browser") {
-        navigateSearch((previous) => buildOpenBrowserSearch(previous));
-        return;
-      }
-      if (tab.mode === "simulator") {
-        navigateSearch((previous) => buildOpenSimulatorSearch(previous));
-        return;
-      }
-      if (tab.mode === "agents") {
-        navigateSearch((previous) => buildOpenAgentsSearch(previous));
+      // Re-selecting the pull request tab must not drop a pinned change
+      // request (a stack layer) back to the thread's own.
+      if (tab.mode === "pullRequest" && activeMode === "pullRequest") {
         return;
       }
       if (tab.mode === "agent") {
         navigateSearch((previous) => buildOpenAgentSearch(previous, tab.agentKey));
+        return;
       }
+      navigateSearch((previous) => buildOpenRightPanelTabSearch(previous, tab.mode));
     },
-    [navigateSearch],
+    [activeMode, navigateSearch],
   );
   const openLauncher = useCallback(() => {
     navigateSearch((previous) => buildOpenWorkspaceSearch(previous));
@@ -1033,16 +1081,7 @@ export default function ThreadWorkspacePanel(props: {
   );
 
   const closePanel = useCallback(() => {
-    navigateSearch((previous) => ({
-      ...stripWorkspacePanelSearchParams(previous),
-      diff: undefined,
-      diffTurnId: undefined,
-      diffFilePath: undefined,
-      preview: undefined,
-      workspaceOpen: undefined,
-      workspaceTab: undefined,
-      workspaceAgentKey: undefined,
-    }));
+    navigateSearch((previous) => buildCloseWorkspacePanelSearch(previous));
   }, [navigateSearch]);
 
   return (
@@ -1228,6 +1267,16 @@ export default function ThreadWorkspacePanel(props: {
             <WorkspaceTerminalPanel />
           ) : activeMode === "browser" && !isPhoneSurface ? (
             <WorkspaceBrowserPanel />
+          ) : activeMode === "pullRequest" && !isPhoneSurface ? (
+            <WorkspacePullRequestPanel
+              environmentId={threadChangeRequest.environmentId}
+              project={threadChangeRequest.project}
+              number={pullRequestNumber}
+              resolving={threadChangeRequest.resolving}
+              onSelectNumber={(number) =>
+                navigateSearch((previous) => buildOpenPullRequestSearch(previous, number))
+              }
+            />
           ) : activeMode === "simulator" && !isPhoneSurface ? (
             <SimulatorPanel
               environmentId={workspaceThreadRef?.environmentId ?? null}
@@ -1259,6 +1308,7 @@ export default function ThreadWorkspacePanel(props: {
               activeThread={activeThread}
               onSelectTab={selectTab}
               showAgents={!isPhoneSurface}
+              pullRequestNumber={isPhoneSurface ? null : threadChangeRequest.number}
               showSimulator={
                 !isPhoneSurface &&
                 Boolean(

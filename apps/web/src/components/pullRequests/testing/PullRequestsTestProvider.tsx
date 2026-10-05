@@ -72,6 +72,7 @@ import {
   type PullRequestSelectionMotion,
   type PullRequestsLayout,
   type PullRequestsNavigation,
+  PULL_REQUESTS_PAGE_SURFACE,
   type PullRequestsPageContextValue,
   type PullRequestsRepositoryStatus,
 } from "../PullRequestsPageContext";
@@ -507,6 +508,7 @@ export function PullRequestsTestProvider(props: PullRequestsTestProviderProps) {
     : null;
   const value = useMemo<PullRequestsPageContextValue>(
     () => ({
+      surface: PULL_REQUESTS_PAGE_SURFACE,
       repository: repositoryReady ? fixtureRepositoryOption : null,
       repositoryStatus: repositoryStatus ?? READY,
       repositories: [fixtureRepositoryOption],

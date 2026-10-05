@@ -123,7 +123,23 @@ export type PullRequestsRepositoryStatus =
       readonly reason: "offline" | "missing";
     };
 
+/**
+ * Where the reader is mounted: the `/pull-requests` page (list, window chrome,
+ * page-wide keys) or a thread's workspace panel (one change request, no list,
+ * keys scoped to the panel).
+ */
+export type PullRequestsSurface =
+  | { readonly kind: "page" }
+  | {
+      readonly kind: "workspace";
+      /** Continue on the full page with the same change request and tab. */
+      readonly openOnPage: () => void;
+    };
+
+export const PULL_REQUESTS_PAGE_SURFACE: PullRequestsSurface = { kind: "page" };
+
 export interface PullRequestsPageContextValue {
+  readonly surface: PullRequestsSurface;
   readonly repository: PullRequestRepositoryOption | null;
   readonly repositoryStatus: PullRequestsRepositoryStatus;
   readonly repositories: ReadonlyArray<PullRequestRepositoryOption>;

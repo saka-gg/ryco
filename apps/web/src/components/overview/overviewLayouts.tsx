@@ -14,7 +14,6 @@ import {
   PlanExplanation,
   PlanSteps,
   pickChangesItem,
-  pickEnvironmentItem,
   ProposedPlanDisclosure,
   PullRequestContent,
   SECTION_ICON,
@@ -36,29 +35,9 @@ function plural(count: number, word: string): string {
   return `${count} ${word}${count === 1 ? "" : "s"}`;
 }
 
-/** Display environment status: warning detail if present, otherwise success indicator. */
-function environmentSummaryBadge(detail: string | undefined) {
-  if (detail) return <OverviewBadge tone="warning">{detail}</OverviewBadge>;
-  return (
-    <OverviewBadge tone="success">
-      <span className="size-1.5 rounded-full bg-current" /> ready
-    </OverviewBadge>
-  );
-}
-
-/** Suppress environment status text that only repeats the target with different casing. */
-function distinctEnvironmentStatus(target: string, detail: string | undefined): string | undefined {
-  const normalizedDetail = detail?.trim();
-  if (!normalizedDetail) return undefined;
-  return normalizedDetail.toLocaleLowerCase() === target.trim().toLocaleLowerCase()
-    ? undefined
-    : normalizedDetail;
-}
-
 export function StatusBoardLayout(props: OverviewLayoutProps) {
   const summary = getOverviewSummary(props);
   const changesItem = pickChangesItem(props.overviewItems);
-  const envItem = pickEnvironmentItem(props.overviewItems);
   const subagents = props.subagents ?? [];
   const activeStep =
     props.activePlan?.steps.find((step) => step.status === "inProgress")?.step ??
@@ -70,9 +49,6 @@ export function StatusBoardLayout(props: OverviewLayoutProps) {
     .join(", ");
   const changesFileLabel =
     summary.fileCount > 0 ? plural(summary.fileCount, "file") : changesItem?.value;
-  const environmentStatus = envItem
-    ? distinctEnvironmentStatus(envItem.value, envItem.detail)
-    : undefined;
 
   return (
     <div>
@@ -220,15 +196,6 @@ export function StatusBoardLayout(props: OverviewLayoutProps) {
             showReviews
           />
         </SectionLane>
-      ) : null}
-
-      {envItem ? (
-        <SectionLane
-          icon={SECTION_ICON.env}
-          title="Environment"
-          subtitle={envItem.value}
-          summary={environmentSummaryBadge(environmentStatus)}
-        />
       ) : null}
     </div>
   );

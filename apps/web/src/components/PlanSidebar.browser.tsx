@@ -232,9 +232,7 @@ describe("PlanSidebar overview panel", () => {
           </button>
         }
         sourceControlActions={<button type="button">Existing Git actions</button>}
-        overviewItems={[
-          { label: "Environment", value: "Local", detail: "local", icon: "environment" },
-        ]}
+        overviewItems={[]}
         environmentId={EnvironmentId.make("environment-local")}
         markdownCwd={undefined}
         workspaceRoot={undefined}
@@ -291,12 +289,8 @@ describe("PlanSidebar overview panel", () => {
       expect(Math.round(pullRequestButton!.getBoundingClientRect().height)).toBe(40);
       expect(pullRequestButton!.textContent).toContain("Make the status board compact");
 
-      expect(environmentHeader).not.toBeUndefined();
-      expect(environmentHeader!.dataset.expandable).toBe("false");
-      expect(environmentHeader!.querySelector("button")).toBeNull();
-      expect(Math.round(environmentHeader!.getBoundingClientRect().height)).toBe(40);
-      expect(environmentHeader!.textContent).toContain("Local");
-      expect(environmentHeader!.textContent).not.toContain("local");
+      // The chat's connection banner owns environment state; the overview has no lane for it.
+      expect(environmentHeader).toBeUndefined();
 
       expect(pullRequestLink).not.toBeNull();
       expect(pullRequestLink!.target).toBe("_blank");

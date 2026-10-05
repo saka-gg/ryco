@@ -1,5 +1,5 @@
 import type { EnvironmentId } from "@ryco/contracts";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
   usePrimaryEnvironmentDescriptor,
@@ -10,6 +10,7 @@ import {
   useSavedEnvironmentRegistryStore,
   useSavedEnvironmentRuntimeStore,
 } from "../../environments/runtime";
+import { useElementWidth } from "../../hooks/useElementWidth";
 import { useEvent } from "../../hooks/useEvent";
 import { useLogicalProjectSnapshots } from "../../hooks/useLogicalProjectSnapshots";
 import {
@@ -21,6 +22,7 @@ import {
 import { readMotionDurationMs } from "../../lib/perf/motion";
 import { SidebarInset } from "../ui/sidebar";
 import {
+  PULL_REQUESTS_PAGE_SURFACE,
   PullRequestsPageContext,
   type PullRequestSelectionMotion,
   type PullRequestsNavigation,
@@ -63,24 +65,6 @@ export interface PullRequestsPageProps {
  * offers other repositories (its environment may never finish connecting).
  */
 const REPOSITORY_WAIT_GRACE_MS = 8_000;
-
-function useElementWidth(ref: React.RefObject<HTMLElement | null>): number {
-  const [width, setWidth] = useState(() =>
-    typeof window === "undefined" ? 1200 : Math.max(0, window.innerWidth - 260),
-  );
-  useLayoutEffect(() => {
-    const element = ref.current;
-    if (!element) return;
-    setWidth(element.getBoundingClientRect().width);
-    const observer = new ResizeObserver((entries) => {
-      const next = entries[0]?.contentRect.width;
-      if (next !== undefined) setWidth(next);
-    });
-    observer.observe(element);
-    return () => observer.disconnect();
-  }, [ref]);
-  return width;
-}
 
 function supportsViewTransitions(): boolean {
   return typeof document !== "undefined" && "startViewTransition" in document;
@@ -234,7 +218,9 @@ export function PullRequestsPage({ search, onSearchChange }: PullRequestsPagePro
 
   // ── Layout ────────────────────────────────────────────────────────
   const rootRef = useRef<HTMLDivElement>(null);
-  const pageWidth = useElementWidth(rootRef);
+  const pageWidth = useElementWidth(rootRef, () =>
+    typeof window === "undefined" ? 1200 : Math.max(0, window.innerWidth - 260),
+  );
   const layout = usePullRequestsLayout({
     pageWidth,
     hasSelection: model.selection !== null,
@@ -292,6 +278,7 @@ export function PullRequestsPage({ search, onSearchChange }: PullRequestsPagePro
 
   const value = useMemo<PullRequestsPageContextValue>(
     () => ({
+      surface: PULL_REQUESTS_PAGE_SURFACE,
       repository,
       repositoryStatus,
       repositories,

@@ -14,7 +14,6 @@ import {
   LoaderIcon,
   MessageSquareIcon,
   SparklesIcon,
-  TerminalIcon,
   TriangleAlertIcon,
   XIcon,
 } from "lucide-react";
@@ -149,13 +148,6 @@ export function pickChangesItem(
   overviewItems: ReadonlyArray<OverviewPanelItem> | undefined,
 ): OverviewPanelItem | undefined {
   return overviewItems?.find((item) => item.icon === "changes");
-}
-
-/** Extract the environment item from the overview items array. */
-export function pickEnvironmentItem(
-  overviewItems: ReadonlyArray<OverviewPanelItem> | undefined,
-): OverviewPanelItem | undefined {
-  return overviewItems?.find((item) => item.icon === "environment");
 }
 
 /** Calculate plan completion percentage (0–100). */
@@ -982,24 +974,6 @@ export function PullRequestHeading({
 }
 
 /* ================================================================== *
- * Environment
- * ================================================================== */
-
-// TODO: Node version and shell type are not tracked in ExecutionEnvironmentDescriptor,
-// so the lab's "Node" / "Shell" rows have no real data source. We render the
-// environment target + connection status, which are the values that actually exist.
-export function EnvironmentContent({ overviewItems }: Pick<OverviewLayoutProps, "overviewItems">) {
-  const envItem = pickEnvironmentItem(overviewItems);
-  if (!envItem) return null;
-  return (
-    <div>
-      <KeyValueRow label="Target" value={envItem.value} />
-      {envItem.detail ? <KeyValueRow label="Status" value={envItem.detail} /> : null}
-    </div>
-  );
-}
-
-/* ================================================================== *
  * Empty state + shared icons
  * ================================================================== */
 
@@ -1020,5 +994,4 @@ export const SECTION_ICON = {
   agents: <BotIcon />,
   pr: <GitPullRequestIcon />,
   checks: <GitPullRequestIcon />,
-  env: <TerminalIcon />,
 } as const;

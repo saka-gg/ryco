@@ -9,6 +9,7 @@ export type RightPanelMode =
   | "terminal"
   | "simulator"
   | "browser"
+  | "pullRequest"
   | "agent"
   | "agents";
 
@@ -65,6 +66,16 @@ export function parseRightPanelRouteSearch(search: Record<string, unknown>): Rig
   }
   if (workspaceSearch.workspaceTab === "browser")
     return { ...messageSearch, workspaceOpen: "1", workspaceTab: "browser" };
+  if (workspaceSearch.workspaceTab === "pullRequest") {
+    return {
+      ...messageSearch,
+      workspaceOpen: "1",
+      workspaceTab: "pullRequest",
+      ...(workspaceSearch.workspacePr !== undefined
+        ? { workspacePr: workspaceSearch.workspacePr }
+        : {}),
+    };
+  }
   if (workspaceSearch.workspaceTab === "simulator") {
     return {
       ...messageSearch,
@@ -116,6 +127,7 @@ export function getRightPanelMode(search: RightPanelRouteSearch): RightPanelMode
   if (search.workspaceTab === "terminal") return "terminal";
   if (search.workspaceTab === "simulator") return "simulator";
   if (search.workspaceTab === "browser") return "browser";
+  if (search.workspaceTab === "pullRequest") return "pullRequest";
   return null;
 }
 
