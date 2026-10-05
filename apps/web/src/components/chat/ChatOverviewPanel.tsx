@@ -15,11 +15,9 @@ import {
   type CSSProperties,
   type ReactNode,
 } from "react";
-import { useGitStatus } from "~/lib/gitStatusState";
 import { useSettings } from "~/hooks/useSettings";
 import { invalidateSourceControl } from "~/rpc/useSourceControl";
 import {
-  useOverviewChangeRequestList,
   useOverviewPullRequestDetail,
   useOverviewWorkflowRunJobs,
   useOverviewWorkflowRuns,
@@ -48,14 +46,12 @@ import {
   buildOverviewCheckRollupRows,
   buildOverviewItems,
   buildOverviewWorkflowCheckRows,
-  findChangeRequestForBranch,
   getPrCheckStatusForQuery,
   getPrCheckStatusFromChangeRequest,
   getPrCheckStatusFromWorkflowRuns,
   hasDiscoveredPostPushWorkflowRun,
   isOverviewActiveCheckKind,
   isOverviewActiveWorkflowRun,
-  resolveOverviewPullRequestNumber,
   resolveWorkflowDetailRunIds,
   resolveWorkflowRunsRefetchInterval,
   selectActivePostPushWorkflowDiscoveryWatch,
@@ -64,6 +60,7 @@ import {
   sourceControlOptionValue,
   summarizeActiveWorkflowJob,
 } from "./ChatOverviewPanel.logic";
+import { useThreadChangeRequest } from "./useThreadChangeRequest";
 
 export const OVERVIEW_FLOATING_EXIT_DURATION_MS = 260;
 export const OVERVIEW_SIDEBAR_EXIT_DURATION_MS = 320;
@@ -173,10 +170,6 @@ export interface ChatOverviewPanelProps {
   activeWorktreePrIsDraft: boolean | null | undefined;
   activeWorktreeTitle: string | null | undefined;
   activeThreadKey: string | null;
-  activeEnvironmentUnavailableState: {
-    label: string;
-    connectionState: string;
-  } | null;
   activePlan: ActivePlanState | null;
   sidebarProposedPlan: LatestProposedPlanState | null;
   threadSubagents: ReadonlyArray<ThreadSubagentView>;
@@ -191,8 +184,11 @@ export interface ChatOverviewPanelProps {
   onOpenFiles: () => void;
   onOpenReview: () => void;
   onOpenSubagent: (subagent: ThreadSubagentView) => void;
-  /** Opens a change request on the pull requests page (desktop). */
-  onOpenPullRequestInApp?: ((number: number) => void) | undefined;
+  /**
+   * Opens the thread's change request in the workspace panel's pull request
+   * tab (desktop). A number pins one the panel cannot resolve on its own yet.
+   */
+  onOpenPullRequestInApp?: ((pinnedNumber?: number) => void) | undefined;
 }
 
 export function usePostPushWorkflowWatch() {
@@ -341,7 +337,6 @@ export function ChatOverviewPanel(
     activeWorktreeTitle,
     postPushWorkflowWatch,
     activeThreadKey,
-    activeEnvironmentUnavailableState,
     activePlan,
     sidebarProposedPlan,
     threadSubagents,
@@ -359,24 +354,6 @@ export function ChatOverviewPanel(
   } = props;
 
   const sourceControlRefreshMode = useSettings((settings) => settings.sourceControlRefreshMode);
-  const gitStatusQuery = useGitStatus({ environmentId, cwd: gitCwd });
-  const overviewBranchName =
-    activeWorktreeBranch ?? activeThreadBranch ?? gitStatusQuery.data?.refName ?? null;
-
-  const overviewBranchPullRequestList = useOverviewChangeRequestList({
-    environmentId,
-    cwd: gitCwd,
-    enabled:
-      overviewBranchName !== null &&
-      activeWorktreePrNumber == null &&
-      gitStatusQuery.data?.pr == null,
-  });
-
-  const overviewBranchPullRequest = useMemo(
-    () => findChangeRequestForBranch(overviewBranchPullRequestList.data, overviewBranchName),
-    [overviewBranchName, overviewBranchPullRequestList.data],
-  );
-
   const postPushWorkflowWatchForContext = selectActivePostPushWorkflowDiscoveryWatch({
     watch: postPushWorkflowWatch,
     environmentId,
@@ -386,11 +363,18 @@ export function ChatOverviewPanel(
     nowMs: Date.now(),
   });
 
-  const overviewPullRequestNumber = resolveOverviewPullRequestNumber({
-    activeWorktreePrNumber,
-    gitStatusPrNumber: gitStatusQuery.data?.pr?.number ?? null,
-    overviewBranchPullRequestNumber: overviewBranchPullRequest?.number ?? null,
-    postPushWatchPullRequestNumber: postPushWorkflowWatchForContext?.pullRequestNumber ?? null,
+  const {
+    gitStatusQuery,
+    branchChangeRequest: overviewBranchPullRequest,
+    number: overviewPullRequestNumber,
+    fromPush: overviewPullRequestFromPush,
+  } = useThreadChangeRequest({
+    environmentId,
+    gitCwd,
+    worktreeBranch: activeWorktreeBranch,
+    threadBranch: activeThreadBranch,
+    worktreePrNumber: activeWorktreePrNumber,
+    pushedPullRequestNumber: postPushWorkflowWatchForContext?.pullRequestNumber ?? null,
   });
 
   const activePostPushWorkflowWatch = selectActivePostPushWorkflowDiscoveryWatch({
@@ -753,14 +737,8 @@ export function ChatOverviewPanel(
         gitStatusData: gitStatusQuery.data,
         changedFiles,
         overviewPullRequestNumber,
-        activeEnvironmentUnavailableState,
       }),
-    [
-      activeEnvironmentUnavailableState,
-      gitStatusQuery.data,
-      changedFiles,
-      overviewPullRequestNumber,
-    ],
+    [gitStatusQuery.data, changedFiles, overviewPullRequestNumber],
   );
 
   const overviewChanges = useMemo<OverviewChanges | undefined>(() => {
@@ -813,7 +791,12 @@ export function ChatOverviewPanel(
       onOpenSubagent={onOpenSubagent}
       onOpenPullRequestInApp={
         props.onOpenPullRequestInApp && overviewPullRequest?.number != null
-          ? () => props.onOpenPullRequestInApp?.(overviewPullRequest.number as number)
+          ? () =>
+              // The panel resolves the thread's change request itself; only a
+              // number the push watch alone knows has to travel in the URL.
+              props.onOpenPullRequestInApp?.(
+                overviewPullRequestFromPush ? (overviewPullRequest.number as number) : undefined,
+              )
           : undefined
       }
     />

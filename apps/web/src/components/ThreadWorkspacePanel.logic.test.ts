@@ -66,3 +66,23 @@ it("groups legacy agent links into one Agents tab on the shared desktop surface"
     }).map((tab) => tab.key),
   ).toEqual(["files", "agents"]);
 });
+
+it("names the pull request tab after the change request it shows", () => {
+  const tabsFor = (pullRequestNumber: number | null) =>
+    buildTabs({
+      subagents: [],
+      activeAgentKey: null,
+      openedAgentKeys: [],
+      openedPanelModes: ["review", "pullRequest"],
+      groupAgents: true,
+      pullRequestNumber,
+    }).map((tab) => [tab.key, tab.label]);
+  expect(tabsFor(42)).toEqual([
+    ["review", "Review"],
+    ["pullRequest", "PR #42"],
+  ]);
+  expect(tabsFor(null)).toEqual([
+    ["review", "Review"],
+    ["pullRequest", "Pull request"],
+  ]);
+});

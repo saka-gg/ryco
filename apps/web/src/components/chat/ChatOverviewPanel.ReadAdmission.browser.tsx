@@ -116,7 +116,6 @@ function overview() {
       activeWorktreePrIsDraft={false}
       activeWorktreeTitle="Cached pull request"
       activeThreadKey="thread-1"
-      activeEnvironmentUnavailableState={null}
       activePlan={null}
       sidebarProposedPlan={null}
       threadSubagents={[]}

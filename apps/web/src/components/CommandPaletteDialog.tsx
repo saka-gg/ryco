@@ -159,6 +159,7 @@ import { getPresentationTier } from "../lib/presentationTier";
 import { buildPullRequestsPageLocation } from "../pullRequestsRoute";
 import { useSettingsDialogStore } from "../settingsDialogStore";
 import { useThreadSelectionStore } from "../threadSelectionStore";
+import { stripWorkspacePullRequestPin } from "../workspaceRouteSearch";
 import { resolveThreadPinCommandPresentation, toggleThreadPin } from "../threadPinning";
 
 const EMPTY_BROWSE_ENTRIES: FilesystemBrowseResult["entries"] = [];
@@ -686,8 +687,10 @@ function OpenCommandPaletteDialog() {
       await navigate({
         to: "/$environmentId/$threadId",
         params: buildThreadRouteParams(scopeThreadRef(result.environmentId, result.threadId)),
+        // The open panel follows to the result's thread, minus a pin that
+        // only means something in the thread it came from.
         search: (previous: Record<string, unknown>) => ({
-          ...previous,
+          ...stripWorkspacePullRequestPin(previous),
           messageId: result.messageId,
         }),
       });

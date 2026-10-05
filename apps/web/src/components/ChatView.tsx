@@ -113,7 +113,11 @@ import {
   selectThreadsAcrossEnvironments,
   useStore,
 } from "../store";
-import { createProjectSelectorByRef, createThreadSelectorByRef } from "../storeSelectors";
+import {
+  createProjectSelectorByRef,
+  createThreadSelectorByRef,
+  createWorktreeSelector,
+} from "../storeSelectors";
 import { useUiStateStore } from "../uiStateStore";
 import { useSettingsDialogStore } from "../settingsDialogStore";
 import {
@@ -137,7 +141,6 @@ import { useDelayedUnmount } from "../hooks/useDelayedUnmount";
 import { useMediaQuery } from "../hooks/useMediaQuery";
 import { useAppSidebarCollapsed } from "../hooks/useAppSidebarCollapsed";
 import { usePresentationTier } from "../hooks/usePresentationTier";
-import { buildPullRequestLocation } from "../pullRequestsRoute";
 import {
   APP_SIDEBAR_CHROME_INSET_TRANSITION_CLASS,
   COLLAPSED_APP_SIDEBAR_CHROME_INSET_CLASS,
@@ -491,6 +494,10 @@ function shouldIgnoreThreadMessageSearchShortcut(
 }
 
 export default function ChatView(props: ChatViewProps) {
+  // React Compiler cannot preserve this component's manual memoization, so it
+  // stays uncompiled; say so explicitly rather than through a stray hooks
+  // lint suppression (which is how it was skipped before).
+  "use no memo";
   usePerfMark("ChatView");
   const paneFocused = usePaneFocus();
   const paneThreadRef = usePaneThreadRef();
@@ -966,40 +973,9 @@ export default function ChatView(props: ChatViewProps) {
   const activeProject = useStore(
     useMemo(() => createProjectSelectorByRef(activeProjectRef), [activeProjectRef]),
   );
-  const openPullRequestInApp = useMemo(
-    () =>
-      activeProject && presentationTier !== "phone"
-        ? (number: number) =>
-            void routerNavigate(
-              buildPullRequestLocation({
-                environmentId: activeProject.environmentId,
-                projectId: activeProject.id,
-                number,
-              }),
-            )
-        : undefined,
-    [activeProject, presentationTier, routerNavigate],
-  );
-
   const activeWorktreeSummary = useStore(
     useMemo(
-      () => (state: Parameters<typeof selectSidebarThreadsForProjectRef>[0]) => {
-        if (!activeThread || !activeThread.environmentId) return null;
-        const wid = activeThread.worktreeId;
-        if (!wid) return null;
-        const env = state.environmentStateById[activeThread.environmentId];
-        if (!env?.worktreeById) return null;
-        return (
-          (
-            env.worktreeById as Record<
-              string,
-              (typeof env.worktreeById)[keyof typeof env.worktreeById]
-            >
-          )[wid] ?? null
-        );
-      },
-      // Re-create the selector only when the identity inputs change.
-      // eslint-disable-next-line react-hooks/exhaustive-deps
+      () => createWorktreeSelector(activeThread?.environmentId, activeThread?.worktreeId),
       [activeThread?.environmentId, activeThread?.worktreeId],
     ),
   );
@@ -2232,6 +2208,7 @@ export default function ChatView(props: ChatViewProps) {
     onToggleDiff,
     onOpenFilesPanel,
     onOpenBrowserPanel,
+    onOpenPullRequestPanel,
     onOpenTerminalPanel,
     onOpenSimulatorPanel,
     onToggleWorkspacePanel,
@@ -2256,6 +2233,10 @@ export default function ChatView(props: ChatViewProps) {
     onSimulatorPanelOpen,
     onAgentPanelOpen,
   });
+  // The overview's change request opens beside the chat in the workspace
+  // panel; the full page stays one click away from the panel's own bar.
+  const openPullRequestInApp =
+    activeProject && presentationTier !== "phone" ? onOpenPullRequestPanel : undefined;
   const envLocked = Boolean(
     activeThread &&
     (activeThread.messages.length > 0 ||
@@ -4923,7 +4904,6 @@ export default function ChatView(props: ChatViewProps) {
                   activeWorktreeTitle={activeWorktreeSummary?.title}
                   postPushWorkflowWatch={postPushWorkflowWatch}
                   activeThreadKey={activeThreadKey}
-                  activeEnvironmentUnavailableState={activeEnvironmentUnavailableState}
                   activePlan={activePlan}
                   sidebarProposedPlan={sidebarProposedPlan}
                   threadSubagents={threadSubagents}
@@ -5336,7 +5316,6 @@ export default function ChatView(props: ChatViewProps) {
               activeWorktreeTitle={activeWorktreeSummary?.title}
               postPushWorkflowWatch={postPushWorkflowWatch}
               activeThreadKey={activeThreadKey}
-              activeEnvironmentUnavailableState={activeEnvironmentUnavailableState}
               activePlan={activePlan}
               sidebarProposedPlan={sidebarProposedPlan}
               threadSubagents={threadSubagents}
@@ -5425,7 +5404,6 @@ export default function ChatView(props: ChatViewProps) {
               activeWorktreeTitle={activeWorktreeSummary?.title}
               postPushWorkflowWatch={postPushWorkflowWatch}
               activeThreadKey={activeThreadKey}
-              activeEnvironmentUnavailableState={activeEnvironmentUnavailableState}
               activePlan={activePlan}
               sidebarProposedPlan={sidebarProposedPlan}
               threadSubagents={threadSubagents}
@@ -5456,7 +5434,6 @@ export default function ChatView(props: ChatViewProps) {
             activeWorktreeTitle={activeWorktreeSummary?.title}
             postPushWorkflowWatch={postPushWorkflowWatch}
             activeThreadKey={activeThreadKey}
-            activeEnvironmentUnavailableState={activeEnvironmentUnavailableState}
             activePlan={activePlan}
             sidebarProposedPlan={sidebarProposedPlan}
             threadSubagents={threadSubagents}

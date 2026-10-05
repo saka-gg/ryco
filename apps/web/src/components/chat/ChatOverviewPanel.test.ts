@@ -182,27 +182,13 @@ describe("resolveWorkflowDetailRunIds", () => {
 });
 
 describe("buildOverviewItems", () => {
-  it("returns environment item when no git status", () => {
+  it("returns no items before git status or tracked changes exist", () => {
     const items = buildOverviewItems({
       gitStatusData: null,
       changedFiles: [],
       overviewPullRequestNumber: null,
-      activeEnvironmentUnavailableState: null,
     });
-    expect(items).toHaveLength(1);
-    expect(items[0]).toEqual(expect.objectContaining({ label: "Environment", value: "Local" }));
-  });
-
-  it("shows environment unavailable state", () => {
-    const items = buildOverviewItems({
-      gitStatusData: null,
-      changedFiles: [],
-      overviewPullRequestNumber: null,
-      activeEnvironmentUnavailableState: { label: "Remote", connectionState: "disconnected" },
-    });
-    expect(items[0]).toEqual(
-      expect.objectContaining({ label: "Environment", value: "Remote", detail: "disconnected" }),
-    );
+    expect(items).toEqual([]);
   });
 
   it("builds the changes item from the file list even without git status", () => {
@@ -213,7 +199,6 @@ describe("buildOverviewItems", () => {
         { path: "src/b.ts", insertions: 3, deletions: 1, category: "local" },
       ],
       overviewPullRequestNumber: 7,
-      activeEnvironmentUnavailableState: null,
     });
     expect(items[0]).toEqual(
       expect.objectContaining({

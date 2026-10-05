@@ -13,7 +13,10 @@ import {
   resolveInactivePanelContentVisibilityStyle,
 } from "../lib/perf/motion";
 import type { RightPanelMode, RightPanelRouteSearch } from "../rightPanelRouteSearch";
-import { stripWorkspacePanelSearchParams } from "../workspaceRouteSearch";
+import {
+  buildCloseWorkspacePanelSearch,
+  type WorkspacePanelSearchKey,
+} from "../workspaceRouteSearch";
 import { Sidebar, SidebarProvider, SidebarRail } from "~/components/ui/sidebar";
 import { cn } from "~/lib/utils";
 import { useDelayedUnmount } from "~/hooks/useDelayedUnmount";
@@ -39,37 +42,8 @@ const COMPOSER_COMPACT_MIN_LEFT_CONTROLS_WIDTH_PX = 208;
 
 export function closeRightPanelSearch<T extends Record<string, unknown>>(
   params: T,
-): Omit<
-  T,
-  | "diff"
-  | "diffTurnId"
-  | "diffFilePath"
-  | "preview"
-  | "workspaceOpen"
-  | "workspaceTab"
-  | "workspaceAgentKey"
-> &
-  RightPanelRouteSearch {
-  return {
-    ...stripWorkspacePanelSearchParams(params),
-    diff: undefined,
-    diffTurnId: undefined,
-    diffFilePath: undefined,
-    preview: undefined,
-    workspaceOpen: undefined,
-    workspaceTab: undefined,
-    workspaceAgentKey: undefined,
-  } as Omit<
-    T,
-    | "diff"
-    | "diffTurnId"
-    | "diffFilePath"
-    | "preview"
-    | "workspaceOpen"
-    | "workspaceTab"
-    | "workspaceAgentKey"
-  > &
-    RightPanelRouteSearch;
+): Omit<T, WorkspacePanelSearchKey> & RightPanelRouteSearch {
+  return buildCloseWorkspacePanelSearch(params);
 }
 
 const RightPanelLoadingFallback = (props: { mode: DiffPanelMode; label: string }) => {
@@ -143,11 +117,13 @@ export const LazyRightPanel = (props: {
                     ? "Loading terminal..."
                     : props.panelMode === "simulator"
                       ? "Loading simulator..."
-                      : props.panelMode === "agents"
-                        ? "Loading agents..."
-                        : props.panelMode === "agent"
-                          ? "Loading subagent thread..."
-                          : "Loading workspace..."
+                      : props.panelMode === "pullRequest"
+                        ? "Loading pull request..."
+                        : props.panelMode === "agents"
+                          ? "Loading agents..."
+                          : props.panelMode === "agent"
+                            ? "Loading subagent thread..."
+                            : "Loading workspace..."
             }
           />
         }

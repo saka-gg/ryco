@@ -181,7 +181,7 @@ describe("AgentsPanel", () => {
     const initialHeights = [...document.querySelectorAll<HTMLElement>("[data-agent-row]")].map(
       (row) => row.getBoundingClientRect().height,
     );
-    expect(initialHeights.every((height) => Math.abs(height - 72) <= 1)).toBe(true);
+    expect(initialHeights.every((height) => Math.abs(height - 40) <= 1)).toBe(true);
 
     await mounted.rerender(
       <div className="h-[420px] w-[440px]">
@@ -213,6 +213,64 @@ describe("AgentsPanel", () => {
     expect(onOpenAgent).toHaveBeenCalledWith("reviewer-1");
   });
 
+  it("leads workflow rows with their functional label instead of a codename", async () => {
+    const workflow = agent("workflow-labels", {
+      kind: "workflow",
+      title: "Ship it",
+      workflowName: "Ship it",
+      phases: [{ index: 0, title: "Verify" }],
+    });
+    const verifier = agent("workflow-labels:wf:0", {
+      kind: "workflow_agent",
+      title: "verify:implementor",
+      progress: "Running the focused suite",
+      parentAgentId: workflow.id,
+      agentIndex: 0,
+      phaseIndex: 0,
+      phaseTitle: "Verify",
+    });
+
+    mounted = await render(
+      <div className="h-[420px] w-[440px]">
+        <AgentsPanel model={deriveAgentPanelModel({ agents: [workflow, verifier] })} />
+      </div>,
+    );
+
+    const row = document.querySelector<HTMLElement>(`[data-agent-id="${verifier.id}"]`);
+    expect(row?.textContent).toContain("verify:implementor");
+    expect(row?.textContent).toContain("Running the focused suite");
+    expect(row?.querySelector('[title="verify:implementor"]')?.textContent).toBe(
+      "verify:implementor",
+    );
+    // Model and token metadata belong to the detail view, not the row.
+    expect(row?.textContent).not.toContain("tok");
+    expect(row?.textContent).not.toContain("gpt-5.6-sol");
+  });
+
+  it("names quiet statuses in the row and tells same-labelled agents apart", async () => {
+    const first = agent("explore-1", {
+      title: "Explore",
+      status: "interrupted",
+      progress: "Reading",
+    });
+    const second = agent("explore-2", {
+      title: "Explore",
+      status: "failed",
+      error: "Boom",
+      firstSeenAt: "2026-08-10T10:00:01.000Z",
+    });
+    mounted = await render(
+      <div className="h-[420px] w-[440px]">
+        <AgentsPanel model={deriveAgentPanelModel({ agents: [first, second] })} />
+      </div>,
+    );
+    const rows = [...document.querySelectorAll<HTMLElement>("[data-agent-row]")];
+    expect(rows[0]?.textContent).toContain("Interrupted");
+    expect(rows[1]?.textContent).toContain("Failed");
+    expect(rows[1]?.textContent).toContain("Explore 2");
+    expect(rows[0]?.textContent).not.toContain("Explore 2");
+  });
+
   it("preserves workflow expansion across member updates and settlement", async () => {
     const workflow = agent("workflow-1", {
       kind: "workflow",
@@ -236,10 +294,10 @@ describe("AgentsPanel", () => {
       </div>,
     );
 
-    await page.getByRole("button", { name: "Collapse workflow" }).click();
-    await expect
-      .element(page.getByRole("button", { name: "Collapse workflow" }))
-      .not.toBeInTheDocument();
+    const header = page.getByRole("button", { name: /Release readiness/ });
+    await expect.element(header).toHaveAttribute("aria-expanded", "true");
+    await header.click();
+    await expect.element(header).toHaveAttribute("aria-expanded", "false");
 
     await mounted.rerender(
       <div className="h-[420px] w-[440px]">
@@ -250,12 +308,10 @@ describe("AgentsPanel", () => {
         />
       </div>,
     );
-    await expect
-      .element(page.getByRole("button", { name: "Collapse workflow" }))
-      .not.toBeInTheDocument();
+    await expect.element(header).toHaveAttribute("aria-expanded", "false");
 
-    await page.getByRole("button", { name: /Release readiness/ }).click();
-    await expect.element(page.getByRole("button", { name: "Collapse workflow" })).toBeVisible();
+    await header.click();
+    await expect.element(header).toHaveAttribute("aria-expanded", "true");
 
     await mounted.rerender(
       <div className="h-[420px] w-[440px]">
@@ -277,7 +333,7 @@ describe("AgentsPanel", () => {
         />
       </div>,
     );
-    await expect.element(page.getByRole("button", { name: "Collapse workflow" })).toBeVisible();
+    await expect.element(header).toHaveAttribute("aria-expanded", "true");
   });
 
   it("shows every future workflow phase as pending until its agent slot arrives", async () => {

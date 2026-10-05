@@ -218,12 +218,16 @@ function isVisibleDialogElement(element: Element): boolean {
 // screen must not switch off every app shortcut. Focus inside one still does.
 const NON_MODAL_DIALOG_SELECTOR = '[data-slot="toast-root"]';
 
-export function hasOpenDialogShortcutTarget(): boolean {
+export function hasOpenDialogShortcutTarget(
+  /** Dialogs that do not count (e.g. the sheet hosting a scoped surface). */
+  ignoreDialog?: (dialog: Element) => boolean,
+): boolean {
   if (typeof document === "undefined") return false;
+  const counts = (dialog: Element) => !ignoreDialog?.(dialog) && isVisibleDialogElement(dialog);
   const activeDialog = dialogShortcutElementForTarget(document.activeElement);
-  if (activeDialog && isVisibleDialogElement(activeDialog)) return true;
+  if (activeDialog && counts(activeDialog)) return true;
   return Array.from(document.querySelectorAll(DIALOG_TARGET_SELECTOR)).some(
-    (element) => !element.matches(NON_MODAL_DIALOG_SELECTOR) && isVisibleDialogElement(element),
+    (element) => !element.matches(NON_MODAL_DIALOG_SELECTOR) && counts(element),
   );
 }
 
@@ -252,6 +256,29 @@ export function shouldIgnoreGlobalNavigationShortcut(
   if (isBareModifierKeyEvent(event)) return true;
   if (isEditableShortcutTarget(event.target)) return true;
   return isDialogShortcutTarget(event.target) || hasOpenDialogShortcutTarget();
+}
+
+/**
+ * Keys owned by one surface (a pull request reader inside the workspace
+ * panel). They follow the global navigation rules, except that a dialog
+ * hosting the surface itself (the narrow-viewport workspace sheet) does not
+ * silence them; any other dialog still does.
+ */
+export function shouldIgnoreScopedNavigationShortcut(
+  event: ShortcutEventLike & {
+    isComposing?: boolean;
+    target?: EventTarget | null;
+  },
+  scope: Element,
+): boolean {
+  if (event.type !== undefined && event.type !== "keydown") return true;
+  if (event.isComposing) return true;
+  if (isBareModifierKeyEvent(event)) return true;
+  if (isEditableShortcutTarget(event.target)) return true;
+  const hostsScope = (dialog: Element) => dialog.contains(scope);
+  const targetDialog = dialogShortcutElementForTarget(event.target);
+  if (targetDialog && !hostsScope(targetDialog)) return true;
+  return hasOpenDialogShortcutTarget(hostsScope);
 }
 
 /**

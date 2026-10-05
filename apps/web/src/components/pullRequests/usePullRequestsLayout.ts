@@ -14,10 +14,12 @@ export function usePullRequestsLayout(input: {
   readonly pageWidth: number;
   readonly hasSelection: boolean;
   readonly tab: PullRequestsTab;
-  /** Test-only: pin individual facts (e.g. `{ railDocked: false }`). */
+  /** No list exists (the workspace panel): every breakpoint reads the full width. */
+  readonly listless?: boolean | undefined;
+  /** Pin individual facts (tests: `{ railDocked: false }`; the workspace panel: no drawer). */
   readonly overrides?: Partial<PullRequestsLayout> | undefined;
 }): PullRequestsLayout {
-  const { pageWidth, hasSelection, tab, overrides } = input;
+  const { pageWidth, hasSelection, tab, listless, overrides } = input;
   const listWidth = usePullRequestsLayoutStore((state) => state.listWidth);
   const listHidden = usePullRequestsLayoutStore((state) => state.listHidden);
   const drawerOpen = usePullRequestsLayoutStore((state) => state.drawerOpen);
@@ -27,6 +29,7 @@ export function usePullRequestsLayout(input: {
     listHidden,
     hasSelection,
     tab,
+    listless,
   });
   const {
     listDocked,

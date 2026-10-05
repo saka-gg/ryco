@@ -22,7 +22,7 @@ export interface OverviewPanelItem {
     muted?: boolean;
   }>;
   action?: "files" | "review";
-  icon?: "changes" | "environment";
+  icon?: "changes";
 }
 
 export type OverviewPullRequestCheckRun = OverviewWorkflowCheckRow;
@@ -105,7 +105,7 @@ export interface OverviewLayoutProps {
   overviewItems?: ReadonlyArray<OverviewPanelItem> | undefined;
   pullRequest?: OverviewPullRequestState | null | undefined;
   onRefreshPullRequest?: (() => void) | undefined;
-  /** Opens the pull request on the pull requests page; ⌘/Ctrl-click keeps the host link. */
+  /** Opens the pull request in the workspace panel; ⌘/Ctrl-click keeps the host link. */
   onOpenPullRequestInApp?: (() => void) | undefined;
   isRefreshingPullRequest?: boolean | undefined;
   subagents?: ReadonlyArray<ThreadSubagentView> | undefined;

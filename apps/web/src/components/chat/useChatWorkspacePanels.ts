@@ -10,11 +10,12 @@ import {
   buildOpenAgentsSearch,
   buildOpenBrowserSearch,
   buildOpenFilesSearch,
+  buildOpenPullRequestSearch,
   buildOpenReviewSearch,
   buildOpenSimulatorSearch,
   buildOpenTerminalSearch,
   buildOpenWorkspaceSearch,
-  stripWorkspacePanelSearchParams,
+  buildCloseWorkspacePanelSearch,
 } from "../../workspaceRouteSearch";
 
 export interface UseChatWorkspacePanelsInput {
@@ -40,6 +41,8 @@ export interface UseChatWorkspacePanelsResult {
   onToggleDiff: () => void;
   onOpenFilesPanel: () => void;
   onOpenBrowserPanel: () => void;
+  /** Desktop: the thread's (or a given) change request in the workspace panel. */
+  onOpenPullRequestPanel: (pullRequestNumber?: number) => void;
   onOpenTerminalPanel: () => void;
   onOpenSimulatorPanel: () => void;
   onToggleWorkspacePanel: () => void;
@@ -48,17 +51,6 @@ export interface UseChatWorkspacePanelsResult {
   onOpenAgentsPanel: () => void;
   onOpenSubagentPanel: (subagent: ThreadSubagentView) => void;
 }
-
-const CLOSE_WORKSPACE_PANEL_SEARCH = (previous: Record<string, unknown>) => ({
-  ...stripWorkspacePanelSearchParams(previous),
-  diff: undefined,
-  diffTurnId: undefined,
-  diffFilePath: undefined,
-  preview: undefined,
-  workspaceOpen: undefined,
-  workspaceTab: undefined,
-  workspaceAgentKey: undefined,
-});
 
 /**
  * Owns the right-panel / workspace routing glue: opening and closing the diff,
@@ -118,7 +110,7 @@ export function useChatWorkspacePanels(
       },
       replace: true,
       search: (previous) =>
-        diffOpen ? CLOSE_WORKSPACE_PANEL_SEARCH(previous) : buildOpenReviewSearch(previous),
+        diffOpen ? buildCloseWorkspacePanelSearch(previous) : buildOpenReviewSearch(previous),
     });
   });
   const onOpenFilesPanel = useEvent(() => {
@@ -149,6 +141,21 @@ export function useChatWorkspacePanels(
   const onOpenBrowserPanel = useEvent(() => {
     if (!hasActiveProject || isPhoneTier) return;
     const search = (previous: Record<string, unknown>) => buildOpenBrowserSearch(previous);
+    if (routeKind === "draft" && draftId) {
+      void navigate({ to: "/draft/$draftId", params: { draftId }, replace: true, search });
+    } else {
+      void navigate({
+        to: "/$environmentId/$threadId",
+        params: { environmentId, threadId },
+        replace: true,
+        search,
+      });
+    }
+  });
+  const onOpenPullRequestPanel = useEvent((pullRequestNumber?: number) => {
+    if (!hasActiveProject || isPhoneTier) return;
+    const search = (previous: Record<string, unknown>) =>
+      buildOpenPullRequestSearch(previous, pullRequestNumber);
     if (routeKind === "draft" && draftId) {
       void navigate({ to: "/draft/$draftId", params: { draftId }, replace: true, search });
     } else {
@@ -213,7 +220,7 @@ export function useChatWorkspacePanels(
     }
     const nextSearch = (previous: Record<string, unknown>) =>
       workspacePanelOpen
-        ? CLOSE_WORKSPACE_PANEL_SEARCH(previous)
+        ? buildCloseWorkspacePanelSearch(previous)
         : buildOpenWorkspaceSearch(previous);
 
     if (routeKind === "draft" && draftId) {
@@ -270,7 +277,7 @@ export function useChatWorkspacePanels(
         environmentId,
         threadId,
       },
-      search: (previous) => CLOSE_WORKSPACE_PANEL_SEARCH(previous),
+      search: (previous) => buildCloseWorkspacePanelSearch(previous),
     });
   }, [environmentId, isServerThread, navigate, threadId]);
   const onOpenAgentsPanel = useEvent(() => {
@@ -337,6 +344,7 @@ export function useChatWorkspacePanels(
     onToggleDiff,
     onOpenFilesPanel,
     onOpenBrowserPanel,
+    onOpenPullRequestPanel,
     onOpenTerminalPanel,
     onOpenSimulatorPanel,
     onToggleWorkspacePanel,

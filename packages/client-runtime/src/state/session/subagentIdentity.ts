@@ -113,6 +113,74 @@ export function subagentRoleDuplicatesLabel(
   return left !== undefined && left !== null && left === right;
 }
 
+/** Titles the runtime fold invents when the provider reported none. */
+const GENERIC_TASK_LABELS: ReadonlySet<string> = new Set([...GENERIC_ROLE_LABELS, "agent task"]);
+
+/**
+ * The name a fleet row leads with. Providers that label agents functionally
+ * (Claude workflow members such as `verify:implementor`, Agent-tool spawns by
+ * their description) keep that label; the stable codename is only the
+ * fallback for agents that arrive without one.
+ */
+export function resolveSubagentDisplayLabel(input: {
+  readonly id: string;
+  readonly title: string | null | undefined;
+  readonly codename: string;
+}): string {
+  const title = cleanText(input.title);
+  if (
+    !title ||
+    GENERIC_TASK_LABELS.has(title.toLocaleLowerCase()) ||
+    canonicalSubagentIdentityKey(title) === canonicalSubagentIdentityKey(input.id)
+  ) {
+    return input.codename;
+  }
+  return title;
+}
+
+/**
+ * Display labels for a whole roster, in spawn order. Functional labels can
+ * repeat (two `Explore` spawns, a retried `review:bugs` slot), and rows must
+ * stay tellable apart, so only labels that collide gain an ordinal
+ * (`Explore`, `Explore 2`); unique labels are left alone.
+ */
+export function resolveSubagentDisplayLabels(
+  agents: ReadonlyArray<{
+    readonly id: string;
+    readonly title: string | null | undefined;
+    readonly codename: string;
+  }>,
+): ReadonlyMap<string, string> {
+  const base = agents.map((agent) => [agent.id, resolveSubagentDisplayLabel(agent)] as const);
+  const totals = new Map<string, number>();
+  for (const [, label] of base) totals.set(label, (totals.get(label) ?? 0) + 1);
+  const seen = new Map<string, number>();
+  const labels = new Map<string, string>();
+  for (const [id, label] of base) {
+    if ((totals.get(label) ?? 0) < 2) {
+      labels.set(id, label);
+      continue;
+    }
+    const ordinal = (seen.get(label) ?? 0) + 1;
+    seen.set(label, ordinal);
+    labels.set(id, ordinal === 1 ? label : `${label} ${ordinal}`);
+  }
+  return labels;
+}
+
+/**
+ * Splits a workflow label's `scope:name` convention (`verify:implementor`,
+ * `review:src/app.ts`) so the scope can be set back. Labels without a short,
+ * space-free scope come back whole.
+ */
+export function splitSubagentLabelScope(label: string): {
+  readonly scope: string | null;
+  readonly name: string;
+} {
+  const match = /^([^\s:]{1,24}):(?!\/\/)(\S.*)$/u.exec(label.trim());
+  return match ? { scope: match[1]!, name: match[2]! } : { scope: null, name: label.trim() };
+}
+
 /** Runtime task ids are raw while transcript keys use `subagent:<id>`. */
 export function canonicalSubagentIdentityKey(key: string): string {
   const trimmed = key.trim();

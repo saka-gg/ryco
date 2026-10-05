@@ -71,47 +71,7 @@ describe("overview panel Status Board", () => {
     expect(markup).toContain("min-h-10");
     expect(markup).toContain("Changes");
     expect(markup).toContain("3 files");
-  });
-
-  it("renders environment metadata once without an empty disclosure", () => {
-    const markup = renderToStaticMarkup(
-      <PlanSidebar
-        {...baseProps}
-        activePlan={null}
-        overviewItems={[
-          { label: "Environment", value: "Local", detail: "local", icon: "environment" },
-        ]}
-      />,
-    );
-
-    expect(markup.match(/>Local</g)).toHaveLength(1);
-    expect(markup).not.toContain(">local<");
-    expect(markup).not.toContain(">Target<");
-    expect(markup).not.toContain(">Status<");
-    expect(markup).toContain('data-expandable="false"');
-    expect(markup).not.toContain("aria-expanded");
-  });
-
-  it("keeps a distinct environment status visible once", () => {
-    const markup = renderToStaticMarkup(
-      <PlanSidebar
-        {...baseProps}
-        activePlan={null}
-        overviewItems={[
-          {
-            label: "Environment",
-            value: "Remote",
-            detail: "disconnected",
-            icon: "environment",
-          },
-        ]}
-      />,
-    );
-
-    expect(markup.match(/>Remote</g)).toHaveLength(1);
-    expect(markup.match(/>disconnected</g)).toHaveLength(1);
-    expect(markup).toContain('data-expandable="false"');
-    expect(markup).not.toContain("aria-expanded");
+    expect(markup).not.toContain("Environment");
   });
 
   it("renders an independent pull request link only when a URL exists", () => {

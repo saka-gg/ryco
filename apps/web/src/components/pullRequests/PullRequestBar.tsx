@@ -13,6 +13,7 @@ import {
   MessageSquareTextIcon,
   MoreHorizontalIcon,
   PanelLeftIcon,
+  PanelsTopLeftIcon,
   PencilIcon,
   SparklesIcon,
 } from "lucide-react";
@@ -65,6 +66,10 @@ export const PULL_REQUESTS_BAR_CLASS = cn(
   isElectron ? "drag-region h-[52px] wco:h-[env(titlebar-area-height)]" : "h-[52px]",
 );
 
+/** Inside a workspace panel the bar sits under the panel's tabs: no window chrome. */
+const WORKSPACE_PULL_REQUEST_BAR_CLASS =
+  "flex h-11 shrink-0 items-center gap-1.5 border-b border-border/70 pl-1.5";
+
 /** Leading inset for whichever bar owns the window's top-left corner. */
 export function usePullRequestsLeadingInsetClass(owns: boolean, fallback: string): string {
   const collapsed = useAppSidebarCollapsed();
@@ -80,6 +85,13 @@ export function usePullRequestsLeadingInsetClass(owns: boolean, fallback: string
  * next action — never leave the bar; the title truncates instead (spec §1).
  */
 const BAR_FOLD_SECONDARY_MAX_READER = 900;
+
+/**
+ * A workspace panel narrower than this keeps its bar to the tabs and actions:
+ * the stack position and the next action stay on Conversation's facts, and
+ * "Open in Pull requests" moves into the overflow menu.
+ */
+const WORKSPACE_BAR_FOLD_FACTS_MAX_READER = 520;
 
 const ICON_BUTTON_CLASS =
   "inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground outline-hidden transition-colors duration-(--app-motion-duration-chip) hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50";
@@ -141,9 +153,12 @@ export function PullRequestBar(props: {
    */
   readonly titleRollFrom?: TitleRollFrom | null | undefined;
 }) {
-  const { layout, nav, readerKey, model } = usePullRequestsPage();
+  const { layout, nav, readerKey, model, surface } = usePullRequestsPage();
   const selection = usePullRequestSelection();
   const tab = nav.tab;
+  const onPage = surface.kind === "page";
+  const foldFacts = !onPage && layout.readerWidth < WORKSPACE_BAR_FOLD_FACTS_MAX_READER;
+  const openOnPage = surface.kind === "workspace" ? surface.openOnPage : null;
   const detail = selection.detail.data;
   const summary = selection.summary;
   const title = detail?.title ?? summary?.title ?? `#${selection.number}`;
@@ -158,7 +173,7 @@ export function PullRequestBar(props: {
   const dense = layout.barCompact;
   const agent = useAgentPromptItems();
   const hostName = usePullRequestHostName();
-  const owner = layout.leadingRegion === "reader";
+  const owner = onPage && layout.leadingRegion === "reader";
   const insetClass = usePullRequestsLeadingInsetClass(owner, "pl-3");
   const setShortcutsOpen = usePullRequestsLayoutStore((state) => state.setShortcutsOpen);
   const rolled = useRolledTitle(selection.number, title, props.titleRollFrom ?? null);
@@ -220,9 +235,12 @@ export function PullRequestBar(props: {
   return (
     <header
       {...{ [READER_TAB_SELECTOR_ATTRIBUTE]: "" }}
-      className={cn(PULL_REQUESTS_BAR_CLASS, insetClass, "pr-3")}
+      className={cn(
+        onPage ? cn(PULL_REQUESTS_BAR_CLASS, insetClass) : WORKSPACE_PULL_REQUEST_BAR_CLASS,
+        onPage ? "pr-3" : "pr-2",
+      )}
     >
-      {!layout.listVisible ? <ListToggleButton /> : null}
+      {onPage && !layout.listVisible ? <ListToggleButton /> : null}
       <SlidingTabs
         aria-label="Pull request sections"
         variant="underline"
@@ -252,7 +270,7 @@ export function PullRequestBar(props: {
         />
       </div>
       <div className="flex shrink-0 items-center gap-1.5">
-        {tab !== "conversation" ? (
+        {tab !== "conversation" && !foldFacts ? (
           <>
             <StackChip />
             <NextActionButton size="sm" />
@@ -270,8 +288,14 @@ export function PullRequestBar(props: {
             <ExternalLinkIcon className="size-3.5" />
           </BarIconButton>
         ) : null}
+        {openOnPage && !foldFacts ? (
+          <BarIconButton label="Open in Pull requests" onClick={openOnPage}>
+            <PanelsTopLeftIcon className="size-3.5" />
+          </BarIconButton>
+        ) : null}
         <OverflowMenu
-          onShowShortcuts={() => setShortcutsOpen(true)}
+          onShowShortcuts={onPage ? () => setShortcutsOpen(true) : null}
+          foldedOpenOnPage={foldFacts ? openOnPage : null}
           foldedAgent={foldSecondary ? agent : null}
           foldedExternalUrl={foldSecondary ? url : null}
           hostName={hostName}
@@ -410,7 +434,10 @@ function AgentMenu(props: { readonly agent: ReturnType<typeof useAgentPromptItem
 }
 
 function OverflowMenu(props: {
-  readonly onShowShortcuts: () => void;
+  /** Null where the shortcuts dialog is not mounted (the workspace panel). */
+  readonly onShowShortcuts: (() => void) | null;
+  /** A narrow workspace panel folds its "Open in Pull requests" in here. */
+  readonly foldedOpenOnPage: (() => void) | null;
   /** Narrow bars fold the agent menu and the external link in here. */
   readonly foldedAgent: ReturnType<typeof useAgentPromptItems> | null;
   readonly foldedExternalUrl: string | null;
@@ -478,6 +505,15 @@ function OverflowMenu(props: {
           }
         />
         <MenuPopup align="end" className="min-w-60">
+          {props.foldedOpenOnPage ? (
+            <>
+              <MenuItem onClick={props.foldedOpenOnPage}>
+                <PanelsTopLeftIcon aria-hidden />
+                Open in Pull requests
+              </MenuItem>
+              <MenuSeparator />
+            </>
+          ) : null}
           {props.foldedAgent && props.foldedAgent.available ? (
             <>
               {props.foldedAgent.items.map((item) => (
@@ -567,12 +603,16 @@ function OverflowMenu(props: {
               ) : null}
             </>
           ) : null}
-          <MenuSeparator />
-          <MenuItem onClick={props.onShowShortcuts}>
-            <KeyboardIcon aria-hidden />
-            Keyboard shortcuts
-            <MenuShortcut>?</MenuShortcut>
-          </MenuItem>
+          {props.onShowShortcuts ? (
+            <>
+              <MenuSeparator />
+              <MenuItem onClick={props.onShowShortcuts}>
+                <KeyboardIcon aria-hidden />
+                Keyboard shortcuts
+                <MenuShortcut>?</MenuShortcut>
+              </MenuItem>
+            </>
+          ) : null}
         </MenuPopup>
       </Menu>
       <AlertDialog

@@ -64,8 +64,14 @@ function errorMessage(error: unknown): string | null {
 export function usePullRequestsModel(input: {
   readonly repository: PullRequestRepositoryOption | null;
   readonly search: PullRequestsSearch;
+  /**
+   * Read the repository's lists (default). A reader of one change request
+   * (the workspace panel) skips them; the selection reads its own detail.
+   */
+  readonly includeList?: boolean | undefined;
 }): PullRequestsModel {
   const { repository, search } = input;
+  const listEnabled = repository !== null && (input.includeList ?? true);
   const environmentId = repository?.environmentId ?? null;
   const cwd = repository?.cwd ?? null;
   const refreshMode = useSettings((settings) => settings.sourceControlRefreshMode);
@@ -87,11 +93,11 @@ export function usePullRequestsModel(input: {
   const state = resolvePullRequestsStateFilter(search);
   const pollInterval = useMemo(() => listPollInterval(refreshMode), [refreshMode]);
   const listInput = { environmentId, cwd, state, limit: PULL_REQUESTS_LIST_LIMIT } as const;
-  const involvementEnabled = repository !== null && capabilities.involvementFilters;
+  const involvementEnabled = listEnabled && capabilities.involvementFilters;
   const foldedGroups = usePullRequestsLayoutStore((state) => state.foldedGroups);
 
   const stateList = useSourceControlChangeRequestList(
-    { ...listInput, enabled: repository !== null },
+    { ...listInput, enabled: listEnabled },
     pollInterval,
   );
   const authoredList = useSourceControlChangeRequestList(

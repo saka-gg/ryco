@@ -6,9 +6,13 @@ import {
   useMemo,
   useRef,
   type ReactNode,
+  type RefObject,
 } from "react";
 
-import { shouldIgnoreGlobalNavigationShortcut } from "../../keybindings";
+import {
+  shouldIgnoreGlobalNavigationShortcut,
+  shouldIgnoreScopedNavigationShortcut,
+} from "../../keybindings";
 import type { PullRequestsTab } from "./pullRequestsSearch";
 
 /**
@@ -67,6 +71,11 @@ export function shortcutToken(event: Pick<KeyboardEvent, "key" | "shiftKey">): s
 export function PullRequestsShortcutsProvider(props: {
   readonly tab: PullRequestsTab;
   readonly enabled: boolean;
+  /**
+   * Only keys pressed inside this element count (a reader embedded beside a
+   * chat must not take `1`–`4` or `J`/`K` from it). Absent: the whole window.
+   */
+  readonly scope?: RefObject<HTMLElement | null> | undefined;
   readonly children: ReactNode;
 }) {
   const shortcutsRef = useRef<PullRequestsShortcut[]>([]);
@@ -87,12 +96,23 @@ export function PullRequestsShortcutsProvider(props: {
     [],
   );
 
+  const scope = props.scope;
   useEffect(() => {
     if (!props.enabled) return;
+    // A scoped surface listens on its own root, so keys pressed elsewhere never
+    // reach it and a hosting sheet that stops propagation cannot swallow them.
+    const scopeElement = scope ? scope.current : null;
+    if (scope && !scopeElement) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.defaultPrevented) return;
       if (!isPageShortcutKeystroke(event)) return;
-      if (shouldIgnoreGlobalNavigationShortcut(event)) return;
+      if (
+        scopeElement
+          ? shouldIgnoreScopedNavigationShortcut(event, scopeElement)
+          : shouldIgnoreGlobalNavigationShortcut(event)
+      ) {
+        return;
+      }
       const token = shortcutToken(event);
       const candidates = shortcutsRef.current;
       // Most recently mounted handlers (deeper areas) win over page defaults.
@@ -106,9 +126,10 @@ export function PullRequestsShortcutsProvider(props: {
         return;
       }
     };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [props.enabled]);
+    const target: HTMLElement | Window = scopeElement ?? window;
+    target.addEventListener("keydown", onKeyDown as EventListener);
+    return () => target.removeEventListener("keydown", onKeyDown as EventListener);
+  }, [props.enabled, scope]);
 
   return (
     <ShortcutRegistryContext.Provider value={registry}>
