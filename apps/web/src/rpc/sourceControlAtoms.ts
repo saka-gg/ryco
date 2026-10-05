@@ -55,6 +55,10 @@ import {
   setReviewThreadResolvedInActivity,
   type ChangeRequestMutation,
 } from "@ryco/client-runtime/state/pull-request-review";
+import {
+  sourceControlReadAdmission,
+  subscribeSourceControlReadAdmission,
+} from "./sourceControlReadAdmission";
 import { webAppLifecycle } from "~/platform/appLifecycle";
 import {
   AUTOMATIC_ACTIVE_REFRESH_MS,
@@ -124,6 +128,34 @@ const sourceControlRegistry = createKeyedQueryRegistry<SourceControlQueryState<u
   gcTime: DEFAULT_QUERY_GC_TIME_MS,
   maxEntries: 192,
   lifecycle: webAppLifecycle,
+  admission: {
+    readState: (controller) => sourceControlReadAdmission(controller.environmentId),
+    subscribe: (listener) =>
+      subscribeSourceControlReadAdmission(() => {
+        detailCache.reconcileAuthority();
+        fileContentsCache.reconcileAuthority();
+        listener();
+      }),
+    buildPausedState: (current, controller, retainData) => {
+      controller.fetching = false;
+      controller.consecutiveFailures = 0;
+      if (!retainData) {
+        for (const [key, entry] of sharedChangeRequestDetails) {
+          if (
+            sourceControlRegistry.controllers.get(entry.sourceKey)?.environmentId ===
+            controller.environmentId
+          )
+            sharedChangeRequestDetails.delete(key);
+        }
+      }
+      return {
+        data: retainData ? current.data : null,
+        error: null,
+        isLoading: false,
+        isFetching: false,
+      };
+    },
+  },
   pollJitterRatio: 0.08,
   buildFetchingState: (current) => ({
     data: current.data,
@@ -852,6 +884,8 @@ interface ImperativeCacheEntry<T> {
 }
 
 interface ImperativeCacheSlot {
+  readonly authorityScope: string | null;
+  readonly authorityLease: { revoked: boolean };
   readonly environmentId: EnvironmentId;
   readonly cwd: string;
   promise?: Promise<unknown>;
@@ -881,6 +915,10 @@ function createImperativeCache(config: {
   readonly estimateBytes?: (value: unknown) => number;
 }) {
   const slots = new Map<string, ImperativeCacheSlot>();
+  const activeLeases = new Map<
+    { revoked: boolean },
+    { environmentId: EnvironmentId; scope: string | null }
+  >();
   let totalBytes = 0;
   const estimateBytes = config.estimateBytes ?? estimatePayloadBytes;
 
@@ -918,6 +956,9 @@ function createImperativeCache(config: {
     readonly staleTime: number;
     readonly run: () => Promise<T>;
   }): Promise<T> {
+    reconcileAuthority();
+    const authorityScope = sourceControlReadAdmission(params.environmentId).scope;
+    const authorityLease = { revoked: false };
     const existing = slots.get(params.cacheKey);
     if (existing?.entry && Date.now() - existing.entry.fetchedAt < params.staleTime) {
       existing.lastAccessedAt = Date.now();
@@ -928,9 +969,26 @@ function createImperativeCache(config: {
       return existing.promise as Promise<T>;
     }
 
-    const promise: Promise<T> = params
-      .run()
+    activeLeases.set(authorityLease, {
+      environmentId: params.environmentId,
+      scope: authorityScope,
+    });
+    let request: Promise<T>;
+    try {
+      request = params.run();
+    } catch (error) {
+      activeLeases.delete(authorityLease);
+      throw error;
+    }
+    const promise: Promise<T> = request
       .then((value) => {
+        if (
+          authorityLease.revoked ||
+          sourceControlReadAdmission(params.environmentId).scope !== authorityScope ||
+          authorityScope === null
+        ) {
+          throw new DOMException("Source-control read authority changed.", "AbortError");
+        }
         const current = slots.get(params.cacheKey);
         // Invalidated (or replaced) while in flight: hand the value to this
         // caller but do not resurrect a cache entry the invalidation dropped.
@@ -939,6 +997,8 @@ function createImperativeCache(config: {
         const bytes = estimateBytes(value);
         totalBytes = Math.max(0, totalBytes - current.bytes) + bytes;
         const slot: ImperativeCacheSlot = {
+          authorityScope,
+          authorityLease,
           environmentId: params.environmentId,
           cwd: params.cwd,
           entry: { value, fetchedAt: Date.now() },
@@ -954,9 +1014,12 @@ function createImperativeCache(config: {
       .catch((error: unknown) => {
         if (slots.get(params.cacheKey)?.promise === promise) remove(params.cacheKey);
         throw error;
-      });
+      })
+      .finally(() => activeLeases.delete(authorityLease));
 
     slots.set(params.cacheKey, {
+      authorityScope,
+      authorityLease,
       environmentId: params.environmentId,
       cwd: params.cwd,
       promise,
@@ -981,9 +1044,27 @@ function createImperativeCache(config: {
   function reset(): void {
     // Deleting the current entry while iterating a Map is safe.
     for (const cacheKey of slots.keys()) remove(cacheKey);
+    for (const lease of activeLeases.keys()) lease.revoked = true;
+    activeLeases.clear();
   }
 
-  return { fetch, invalidate, invalidateKey: remove, reset };
+  function reconcileAuthority(): void {
+    // An ordinary invalidation may already have removed an in-flight slot.
+    // Keep fencing its direct consumer until the promise itself has settled.
+    for (const [lease, authority] of activeLeases) {
+      const scope = sourceControlReadAdmission(authority.environmentId).scope;
+      if (scope === null || scope !== authority.scope) lease.revoked = true;
+    }
+    for (const [key, slot] of slots) {
+      const scope = sourceControlReadAdmission(slot.environmentId).scope;
+      if (scope === null || scope !== slot.authorityScope) {
+        slot.authorityLease.revoked = true;
+        remove(key);
+      }
+    }
+  }
+
+  return { fetch, invalidate, invalidateKey: remove, reset, reconcileAuthority };
 }
 
 const detailCache = createImperativeCache({

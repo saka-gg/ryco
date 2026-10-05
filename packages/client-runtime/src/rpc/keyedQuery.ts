@@ -62,6 +62,13 @@ export interface KeyedQueryControllerBase {
   lastLocalWriteAt?: number;
 }
 
+export interface KeyedQueryAdmission {
+  /** Null pauses reads; a changed key fences in-flight work. */
+  readonly key: string | null;
+  /** Null forbids retained data; a changed scope clears the old authority's data. */
+  readonly scope: string | null;
+}
+
 export interface KeyedQueryRegistryConfig<TState> {
   readonly labelPrefix: string;
   readonly initialState: TState;
@@ -73,6 +80,18 @@ export interface KeyedQueryRegistryConfig<TState> {
   readonly gcTime?: number;
   readonly maxEntries?: number;
   readonly lifecycle?: AppLifecycleService;
+  /** Platform-owned read authority; a changed key fences every older result. */
+  readonly admission?: {
+    readonly readState: (
+      controller: KeyedQueryControllerBase & Record<string, unknown>,
+    ) => KeyedQueryAdmission;
+    readonly subscribe: (listener: () => void) => () => void;
+    readonly buildPausedState: (
+      current: TState,
+      controller: KeyedQueryControllerBase & Record<string, unknown>,
+      retainData: boolean,
+    ) => TState;
+  };
   readonly pollJitterRatio?: number;
   readonly random?: () => number;
   readonly adjustPollDelay?: (
@@ -178,6 +197,8 @@ export function createKeyedQueryRegistry<TState>(
   const pollJitterRatio = Math.max(0, Math.min(0.5, config.pollJitterRatio ?? 0));
   const random = config.random ?? Math.random;
   let disposed = false;
+  const admissionStates = new WeakMap<KeyedQueryControllerBase, KeyedQueryAdmission>();
+  const pendingAdmissionRefresh = new WeakSet<KeyedQueryControllerBase>();
 
   const queryStateAtom = Atom.family((compositeKey: string) => {
     knownStateKeys.add(compositeKey);
@@ -275,6 +296,7 @@ export function createKeyedQueryRegistry<TState>(
     controller: KeyedQueryControllerBase & Record<string, unknown>,
   ): void {
     controllers.set(controller.compositeKey, controller);
+    if (config.admission) admissionStates.set(controller, config.admission.readState(controller));
     const environmentKeys = controllerKeysByEnvironment.get(controller.environmentId) ?? new Set();
     environmentKeys.add(controller.compositeKey);
     controllerKeysByEnvironment.set(controller.environmentId, environmentKeys);
@@ -310,6 +332,9 @@ export function createKeyedQueryRegistry<TState>(
   async function runController(
     controller: KeyedQueryControllerBase & Record<string, unknown>,
   ): Promise<void> {
+    const admissionState = synchronizeAdmission(controller);
+    if (admissionState?.key === null) return;
+    pendingAdmissionRefresh.delete(controller);
     const localWriteEpoch = controller.localWriteEpoch ?? 0;
     // Join an in-flight read only when no local write happened since it began;
     // otherwise its result predates that write and a fresh read is needed. The
@@ -323,7 +348,13 @@ export function createKeyedQueryRegistry<TState>(
     touchController(controller);
     const token = ++controller.fetchToken;
     const isFenced = () =>
-      token !== controller.fetchToken || controllers.get(controller.compositeKey) !== controller;
+      token !== controller.fetchToken ||
+      controllers.get(controller.compositeKey) !== controller ||
+      (config.admission !== undefined &&
+        (() => {
+          const current = config.admission.readState(controller);
+          return current.key !== admissionState?.key || current.scope !== admissionState?.scope;
+        })());
     const isSupersededByLocalWrite = () => (controller.localWriteEpoch ?? 0) !== localWriteEpoch;
     const promise = (async () => {
       config.onRunStart?.(controller);
@@ -405,6 +436,7 @@ export function createKeyedQueryRegistry<TState>(
     if (
       disposed ||
       controller.subscriberCount <= 0 ||
+      config.admission?.readState(controller).key === null ||
       (config.lifecycle && (!config.lifecycle.isForeground() || !config.lifecycle.isOnline()))
     ) {
       return;
@@ -468,7 +500,10 @@ export function createKeyedQueryRegistry<TState>(
     for (const controller of controllers.values()) {
       if (controller.subscriberCount <= 0) continue;
       clearControllerPollTimer(controller);
-      if (shouldRefreshControllerOnLifecycle(controller)) {
+      if (
+        pendingAdmissionRefresh.has(controller) ||
+        shouldRefreshControllerOnLifecycle(controller)
+      ) {
         void runController(controller);
       } else {
         scheduleControllerPoll(controller);
@@ -491,12 +526,53 @@ export function createKeyedQueryRegistry<TState>(
     knownStateKeys.clear();
   }
 
+  function synchronizeAdmission(controller: KeyedQueryControllerBase & Record<string, unknown>) {
+    const admission = config.admission;
+    if (!admission) return undefined;
+    const next = admission.readState(controller);
+    const previous = admissionStates.get(controller);
+    if (previous?.key === next.key && previous.scope === next.scope)
+      return { ...next, changed: false };
+    admissionStates.set(controller, next);
+    cancelController(controller);
+    controller.lastFetchedAt = 0;
+    controller.hasData = false;
+    pendingAdmissionRefresh.delete(controller);
+    setQueryState(
+      controller.compositeKey,
+      admission.buildPausedState(
+        getQueryState(controller.compositeKey),
+        controller,
+        next.scope !== null && previous?.scope === next.scope,
+      ),
+    );
+    scheduleControllerGc(controller);
+    return { ...next, changed: true };
+  }
+
+  const unsubscribeAdmission =
+    config.admission?.subscribe(() => {
+      if (disposed) return;
+      for (const controller of controllers.values()) {
+        const admission = synchronizeAdmission(controller);
+        if (!admission?.changed || admission.key === null || controller.subscriberCount <= 0)
+          continue;
+        if (
+          config.lifecycle &&
+          (!config.lifecycle.isForeground() || !config.lifecycle.isOnline())
+        ) {
+          pendingAdmissionRefresh.add(controller);
+        } else void runController(controller);
+      }
+    }) ?? NOOP;
+
   const unsubscribeLifecycle = config.lifecycle?.subscribe(handleLifecycleEvent) ?? NOOP;
 
   function dispose(): void {
     if (disposed) return;
     disposed = true;
     unsubscribeLifecycle();
+    unsubscribeAdmission();
     resetForTests();
     keyedQueryEnvironmentCleanups.delete(registry);
   }

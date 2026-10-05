@@ -2,7 +2,11 @@ import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { EnvironmentId } from "@ryco/contracts";
 import type { AppLifecycleEvent, AppLifecycleService } from "../platform/index.ts";
 
-import { createKeyedQueryRegistry, defineKeyedQueryByInput } from "./keyedQuery.ts";
+import {
+  createKeyedQueryRegistry,
+  defineKeyedQueryByInput,
+  type KeyedQueryRegistryConfig,
+} from "./keyedQuery.ts";
 
 interface State {
   readonly data: string | null;
@@ -17,6 +21,7 @@ function makeRegistry(input?: {
   readonly gcTime?: number;
   readonly maxEntries?: number;
   readonly lifecycle?: AppLifecycleService;
+  readonly admission?: KeyedQueryRegistryConfig<State>["admission"];
 }) {
   return createKeyedQueryRegistry<State>({
     labelPrefix: "keyed-query-test",
@@ -24,6 +29,7 @@ function makeRegistry(input?: {
     gcTime: input?.gcTime ?? 20,
     maxEntries: input?.maxEntries ?? 16,
     lifecycle: input?.lifecycle,
+    ...(input?.admission ? { admission: input.admission } : {}),
     buildFetchingState: (current) => ({ ...current, fetching: true, error: null }),
     buildSuccessState: (data) => ({ data: data as string, fetching: false, error: null }),
     buildErrorState: (current, error) => ({ ...current, fetching: false, error }),
@@ -474,4 +480,232 @@ describe("keyed query state tracking", () => {
     expect(binding.snapshotFor(input).data).toBeNull();
     registry.dispose();
   });
+});
+
+describe("keyed query read admission", () => {
+  it("pauses watch, refresh and lifecycle reads, resumes mounted reads, and releases the authority listener", async () => {
+    vi.useFakeTimers();
+    const lifecycle = createLifecycleHarness();
+    let key: string | null = null;
+    let notify = () => {};
+    const unsubscribe = vi.fn();
+    const registry = makeRegistry({
+      lifecycle: lifecycle.lifecycle,
+      admission: {
+        readState: () => ({ key, scope: "test-scope" }),
+        subscribe: (listener) => {
+          notify = listener;
+          return unsubscribe;
+        },
+        buildPausedState: (current) => ({ ...current, fetching: false, error: null }),
+      },
+    });
+    const run = vi.fn(async () => "fresh");
+    const binding = makeBinding(registry, run);
+    const input = { key: "admitted" };
+    const release = binding.watch(input, () => 1_000);
+    binding.refresh(input);
+    lifecycle.emit("online");
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(run).not.toHaveBeenCalled();
+    key = "generation-1";
+    notify();
+    await registry.controllers.get(binding.targetKey(input)!)!.inFlightPromise;
+    expect(run).toHaveBeenCalledOnce();
+    key = null;
+    notify();
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(run).toHaveBeenCalledOnce();
+    expect(binding.snapshotFor(input)).toEqual({ data: "fresh", fetching: false, error: null });
+    release();
+    registry.dispose();
+    expect(unsubscribe).toHaveBeenCalledOnce();
+  });
+
+  it("clears data when retention authority changes even while reads remain paused", async () => {
+    let key: string | null = "generation-1";
+    let scope: string | null = "account-1";
+    let notify = () => {};
+    const registry = makeRegistry({
+      admission: {
+        readState: () => ({ key, scope }),
+        subscribe: (listener) => {
+          notify = listener;
+          return () => {};
+        },
+        buildPausedState: (current, _controller, retainData) => ({
+          data: retainData ? current.data : null,
+          fetching: false,
+          error: null,
+        }),
+      },
+    });
+    const run = vi.fn(async () => "private");
+    const binding = makeBinding(registry, run);
+    const input = { key: "retention" };
+    const release = binding.watch(input);
+    await registry.controllers.get(binding.targetKey(input)!)!.inFlightPromise;
+    key = null;
+    notify();
+    expect(binding.snapshotFor(input).data).toBe("private");
+    scope = null;
+    notify();
+    expect(binding.snapshotFor(input).data).toBeNull();
+    expect(run).toHaveBeenCalledOnce();
+    release();
+    registry.dispose();
+  });
+
+  it("processes an authority change before joining an old read when notification is delayed", async () => {
+    let key: string | null = "generation-1";
+    let notify = () => {};
+    const registry = makeRegistry({
+      admission: {
+        readState: () => ({ key, scope: "test-scope" }),
+        subscribe: (listener) => {
+          notify = listener;
+          return () => {};
+        },
+        buildPausedState: (current) => ({ ...current, fetching: false, error: null }),
+      },
+    });
+    let finish = (_value: string) => {};
+    const run = vi
+      .fn()
+      .mockImplementationOnce(
+        () =>
+          new Promise<string>((resolve) => {
+            finish = resolve;
+          }),
+      )
+      .mockResolvedValue("new");
+    const binding = makeBinding(registry, run);
+    const input = { key: "delayed-notification" };
+    const release = binding.watch(input);
+    const old = registry.controllers.get(binding.targetKey(input)!)!.inFlightPromise;
+    key = "generation-2";
+    await binding.refreshAsync(input);
+    notify();
+    finish("old");
+    await old;
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(binding.snapshotFor(input).data).toBe("new");
+    key = null;
+    await binding.refreshAsync(input);
+    notify();
+    expect(binding.snapshotFor(input)).toEqual({ data: "new", fetching: false, error: null });
+    release();
+    registry.dispose();
+  });
+
+  it("defers resumed non-polling reads until the browser is foreground and online", async () => {
+    const lifecycle = createLifecycleHarness();
+    let key: string | null = null;
+    let notify = () => {};
+    const registry = makeRegistry({
+      lifecycle: lifecycle.lifecycle,
+      admission: {
+        readState: () => ({ key, scope: "test-scope" }),
+        subscribe: (listener) => {
+          notify = listener;
+          return () => {};
+        },
+        buildPausedState: (current) => ({ ...current, fetching: false, error: null }),
+      },
+    });
+    const run = vi.fn(async () => "fresh");
+    const binding = makeBinding(registry, run);
+    const input = { key: "background" };
+    const release = binding.watch(input, { shouldRefreshOnLifecycle: () => false });
+    lifecycle.emit("background");
+    lifecycle.emit("offline");
+    key = "generation-1";
+    notify();
+    lifecycle.emit("foreground");
+    expect(run).not.toHaveBeenCalled();
+    lifecycle.emit("online");
+    await registry.controllers.get(binding.targetKey(input)!)!.inFlightPromise;
+    expect(run).toHaveBeenCalledOnce();
+    release();
+    registry.dispose();
+  });
+
+  it("collects an unwatched pending read after admission cancels it", async () => {
+    vi.useFakeTimers();
+    let key: string | null = "generation-1";
+    let notify = () => {};
+    const registry = makeRegistry({
+      admission: {
+        readState: () => ({ key, scope: "test-scope" }),
+        subscribe: (listener) => {
+          notify = listener;
+          return () => {};
+        },
+        buildPausedState: (current) => ({ ...current, fetching: false, error: null }),
+      },
+    });
+    let finish = (_value: string) => {};
+    const binding = makeBinding(
+      registry,
+      () =>
+        new Promise<string>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const input = { key: "unwatched" };
+    const release = binding.watch(input);
+    release();
+    key = null;
+    notify();
+    await vi.advanceTimersByTimeAsync(21);
+    expect(registry.controllers.size).toBe(0);
+    finish("old");
+    await Promise.resolve();
+    expect(binding.snapshotFor(input)).toEqual(initialState);
+    registry.dispose();
+  });
+
+  it.each(["success", "failure"] as const)(
+    "fences an old %s when the authority generation changes while still admitted",
+    async (outcome) => {
+      let key = "generation-1";
+      let notify = () => {};
+      const registry = makeRegistry({
+        admission: {
+          readState: () => ({ key, scope: "test-scope" }),
+          subscribe: (listener) => {
+            notify = listener;
+            return () => {};
+          },
+          buildPausedState: (current) => ({ ...current, fetching: false, error: null }),
+        },
+      });
+      let resolve = (_value: string) => {};
+      let reject = (_error: Error) => {};
+      const run = vi
+        .fn()
+        .mockImplementationOnce(
+          () =>
+            new Promise<string>((accept, refuse) => {
+              resolve = accept;
+              reject = refuse;
+            }),
+        )
+        .mockResolvedValue("new");
+      const binding = makeBinding(registry, run);
+      const input = { key: "generation" };
+      const release = binding.watch(input);
+      const old = registry.controllers.get(binding.targetKey(input)!)!.inFlightPromise;
+      key = "generation-2";
+      notify();
+      await registry.controllers.get(binding.targetKey(input)!)!.inFlightPromise;
+      if (outcome === "success") resolve("old");
+      else reject(new Error("old failure"));
+      await old;
+      expect(binding.snapshotFor(input)).toEqual({ data: "new", fetching: false, error: null });
+      expect(run).toHaveBeenCalledTimes(2);
+      release();
+      registry.dispose();
+    },
+  );
 });

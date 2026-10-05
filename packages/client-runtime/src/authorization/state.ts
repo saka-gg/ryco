@@ -805,6 +805,7 @@ class HostedHubController {
       session: {
         id: identity.session.id,
         accountId: identity.session.accountId,
+        activeSpaceId: identity.session.activeSpaceId,
         createdAt: identity.session.createdAt,
         expiresAt: identity.session.expiresAt,
         lastSeenAt: identity.session.lastSeenAt,

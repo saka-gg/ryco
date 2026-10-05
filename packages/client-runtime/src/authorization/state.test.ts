@@ -1004,7 +1004,10 @@ describe("hosted registration and directory state", () => {
     expect(hostedHubStore.getState()).toMatchObject({
       accountStatus: "authenticated",
       account: { id: "acct_aaaaaaaaaaaaaaaaaaaaaa", role: "owner" },
-      session: { id: "sess_aaaaaaaaaaaaaaaaaaaaaa" },
+      session: {
+        id: "sess_aaaaaaaaaaaaaaaaaaaaaa",
+        activeSpaceId: "space_aaaaaaaaaaaaaaaaaaaaaa",
+      },
       recoveryCodes: ["recovery-sensitive-canary"],
       bootstrapAvailable: false,
     });
