@@ -16,6 +16,7 @@ import { useStore } from "../store";
 import { readWorkspaceMetadataSnapshot } from "../workspaceMetadataProjection";
 import { hostedHubApi } from "./api";
 import { hostedHubStore } from "./state";
+import { isWebHubSessionOnline, subscribeWebHubInvalidation } from "./hubSession";
 import {
   getRoutedHostedNode,
   subscribeRoutedHostedNode,
@@ -102,6 +103,16 @@ export function startBrowserHostedThreadReadCache(
     subscribeState: hostedHubStore.subscribe,
     readRoute: getRoutedHostedNode,
     subscribeRoute: subscribeRoutedHostedNode,
+    subscribeInvalidation: (listener) =>
+      subscribeWebHubInvalidation((event) => {
+        if (event.threadCache) listener();
+      }),
+    isSubscriptionOnline: isWebHubSessionOnline,
+    subscribeVisibility: (listener) => {
+      if (typeof document === "undefined") return () => {};
+      document.addEventListener("visibilitychange", listener);
+      return () => document.removeEventListener("visibilitychange", listener);
+    },
     readShell: (nodeId, signal) => hostedHubApi.readThreadCacheShell(nodeId, signal),
     readThread: (nodeId, threadId, signal) =>
       hostedHubApi.readThreadCacheThread(nodeId, threadId, signal),

@@ -22,6 +22,10 @@ export interface HostedThreadReadCachePorts {
   readonly subscribeState: (listener: () => void) => () => void;
   readonly readRoute: () => HostedThreadReadCacheRoute;
   readonly subscribeRoute: (listener: () => void) => () => void;
+  /** Account-scoped Hub subscription. Notifications contain no thread content. */
+  readonly subscribeInvalidation?: (listener: () => void) => () => void;
+  readonly isSubscriptionOnline?: () => boolean;
+  readonly subscribeVisibility?: (listener: () => void) => () => void;
   readonly readShell: (
     nodeId: string,
     signal: AbortSignal,
@@ -62,6 +66,8 @@ export function startHostedThreadReadCache(ports: HostedThreadReadCachePorts): (
   let nextShellRefresh = 0;
   let routeKey = "";
   let activeShellRequests = 0;
+  let invalidationVersion = 0;
+  let threadInvalidated = false;
   const shells = new Map<string, ThreadReadCacheShellResponse>();
   const details = new Map<string, Map<ThreadId, ThreadReadCacheThreadResponse>>();
   const requests = new Map<string, AbortController>();
@@ -99,6 +105,7 @@ export function startHostedThreadReadCache(ports: HostedThreadReadCachePorts): (
       if (requests.has(key)) continue;
       const controller = new AbortController();
       const epoch = requestEpoch;
+      const version = invalidationVersion;
       requests.set(key, controller);
       activeShellRequests++;
       void ports
@@ -120,6 +127,12 @@ export function startHostedThreadReadCache(ports: HostedThreadReadCachePorts): (
         .finally(() => {
           if (requests.get(key) === controller) requests.delete(key);
           if (epoch === requestEpoch) activeShellRequests--;
+          if (
+            version !== invalidationVersion &&
+            current(node, epoch, controller.signal) &&
+            !queue.some((entry) => entry.id === node.id)
+          )
+            queue.push(node);
           pump();
         });
     }
@@ -144,8 +157,10 @@ export function startHostedThreadReadCache(ports: HostedThreadReadCachePorts): (
     if (!node || route.environmentId !== node.environmentId || threadId === null) return;
     const key = `thread:${node.id}:${threadId}`;
     if (requests.has(key)) return;
+    threadInvalidated = false;
     const controller = new AbortController();
     const epoch = requestEpoch;
+    const version = invalidationVersion;
     requests.set(key, controller);
     void ports
       .readThread(node.id, threadId, controller.signal)
@@ -168,6 +183,8 @@ export function startHostedThreadReadCache(ports: HostedThreadReadCachePorts): (
       .catch(() => undefined)
       .finally(() => {
         if (requests.get(key) === controller) requests.delete(key);
+        if (version !== invalidationVersion && current(node, epoch, controller.signal))
+          refreshThread();
       });
   };
   const abort = () => {
@@ -207,7 +224,11 @@ export function startHostedThreadReadCache(ports: HostedThreadReadCachePorts): (
       routeKey = "";
     }
     if (!ports.isVisible()) return;
-    if (nextShellRefresh <= ports.now()) refreshShells();
+    if (
+      nextShellRefresh === 0 ||
+      (!ports.isSubscriptionOnline?.() && nextShellRefresh <= ports.now())
+    )
+      refreshShells();
     const nextRouteKey = JSON.stringify(ports.readRoute());
     if (routeKey !== nextRouteKey) {
       routeKey = nextRouteKey;
@@ -217,20 +238,32 @@ export function startHostedThreadReadCache(ports: HostedThreadReadCachePorts): (
         requests.delete(key);
       }
       refreshThread();
+    } else if (threadInvalidated) {
+      refreshThread();
     }
   };
   const unsubscribeState = ports.subscribeState(reconcile);
   const unsubscribeRoute = ports.subscribeRoute(reconcile);
+  const unsubscribeVisibility = ports.subscribeVisibility?.(reconcile);
+  const unsubscribeInvalidation = ports.subscribeInvalidation?.(() => {
+    invalidationVersion++;
+    nextShellRefresh = 0;
+    threadInvalidated = true;
+    reconcile();
+  });
   const timer = ports.setInterval(() => {
     reconcile();
-    if (ports.isVisible()) refreshThread();
+    if (ports.isVisible() && !ports.isSubscriptionOnline?.()) refreshThread();
   }, THREAD_REFRESH_MS);
   reconcile();
   return () => {
+    if (disposed) return;
     disposed = true;
     abort();
     unsubscribeState();
     unsubscribeRoute();
+    unsubscribeInvalidation?.();
+    unsubscribeVisibility?.();
     ports.clearInterval(timer);
   };
 }

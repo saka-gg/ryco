@@ -28,7 +28,7 @@ VITE_RYCO_CLIENT_MODE=hosted-hub bun --cwd apps/web run build
 ```
 
 A compatible Hub serves the resulting assets from its own public origin. The page, authentication
-HTTP APIs, node directory, relay-ticket endpoint, and `/v1/relay/client` WebSocket therefore share
+HTTP APIs, node directory, relay-ticket endpoint, and `/v1/relay/session` WebSocket therefore share
 one origin:
 
 ```text
@@ -37,6 +37,7 @@ https://hub.example/
   /api/auth/*
   /api/nodes
   /api/relay/tickets
+  /v1/relay/session
   /v1/relay/client
 ```
 
@@ -138,10 +139,10 @@ built, before any channel exists, and stands until the node is torn down or the 
 signed native tier's two states are not in this client's state type at all, so the browser cannot
 report them even by mistake.
 
-Directory refresh runs on a bounded 20-second visible-page cadence. While connection demand waits
-on a node the directory reports offline, the poll runs every 5 seconds instead, for at most five
-minutes per wait before it falls back to 20 seconds; the faster cadence never shortens a failure
-backoff and stops with the page. Failures retain the last bounded directory as stale, clear role
+The account-scoped Hub session pushes directory changes immediately. Directory refresh retains
+a two-minute visible-page backstop while the subscription is online. Without a live subscription,
+it runs every 20 seconds, or every 5 seconds while demand waits on an offline node for at most five
+minutes. The faster cadence never shortens a failure backoff. Failures retain the last bounded directory as stale, clear role
 authority, disable selection/actions, and retry with a capped delay.
 Machine-detail focus is preserved only while both node ID and environment ID match. Authorization
 removal or an identity change closes that exact environment's live demand.
@@ -178,8 +179,10 @@ environment to close, teardown is ordered:
 Hosted Web keeps the shared absolute ceiling of three but uses a qualified platform ceiling of one.
 Cached directory, Inbox, Projects, and search hydration acquire no relay connection. A mounted
 thread detail, VCS status, or provider status scope acquires its owner automatically. Excess demand
-waits without evicting retained work or exceeding the bound. Hiding the page releases non-retained
-connections; restoring visibility reconnects retained demand only.
+waits without evicting retained work or exceeding the bound. This ceiling counts logical node
+channels; the account-owned Hub socket remains open across selections. Ordinary tab hiding
+preserves live channels. Offline, freeze, and page history suspension invalidate readiness;
+restoration uses the authoritative hosted recovery path.
 
 Tabs do not share tickets, sockets, queues, reconnect timers, or store instances. Closing a hosted
 channel cannot close direct clients or another tab.
@@ -235,12 +238,13 @@ The existing `WsTransport` and Effect RPC client accept a WebSocket-compatible h
 feature components do not know whether their ordered bytes use the direct WebSocket, desktop-local
 transport, or Hub relay.
 
-For every browser connection attempt the adapter requests the existing grant-free short-lived ticket
+The browser establishes one persistent account subscription independently of node selection, using
+the [Hub session protocol](./hub-session-protocol.md). For every logical node connection attempt the adapter requests the existing grant-free short-lived ticket
 over authenticated Hub HTTP. A ticket exists only in a per-tab in-memory attempt object, is consumed
 once, and is discarded before another attempt. Cookie/browser sessions cannot request native ticket
-mode, and a response that mixes browser and native fields is rejected. The relay WebSocket has no
-query credentials, cookies added by application code, or Authorization header. Its first binary frame
-is canonical protocol 1.2 client authentication and must complete within five seconds. Native
+mode, and a response that mixes browser and native fields is rejected. The physical Hub WebSocket has no
+query credentials, cookies added by application code, or Authorization header. Each logical stream's first relay frame
+is canonical client authentication and must complete within five seconds. Native
 account-grant attempts negotiate relay 1.3 through the separate DPoP-bound API described above.
 
 The adapter consumes canonical `ready`, authorized `channel.open`, `channel.accept/reject`, data,

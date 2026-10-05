@@ -10,6 +10,8 @@ import {
   type RelaySocket,
 } from "@ryco/client-runtime/relay";
 
+import { HUB_SESSION_PATH } from "@ryco/contracts/hub-session";
+
 export type { HostedRelaySocketCallbacks };
 export interface HostedRelaySocketOptions {
   readonly url: string;
@@ -17,6 +19,8 @@ export interface HostedRelaySocketOptions {
   readonly ticketExpiresAt: number;
   readonly callbacks: HostedRelaySocketCallbacks;
   readonly createSocket?: (url: string) => WebSocket;
+  /** Logical channel supplied by the account-scoped Hub connection. */
+  readonly createRelaySocket?: () => RelaySocket;
   /**
    * docs/relay-e2ee-protocol.md §4.4: the channel's mode machine, built at
    * `channel.accept` from the negotiated limits.
@@ -61,6 +65,43 @@ function classifyInboundMessage(data: unknown): InboundMessage {
     };
   if (isSharedArrayBuffer(data)) return { fail: "protocol_invalid" };
   return { fail: "frame_too_large" };
+}
+
+/** Browser framing only; shared runtime owns session routing and reconnect policy. */
+export function createBrowserRelaySocket(
+  url: string,
+  createSocket: (url: string) => WebSocket = (url) => new WebSocket(url),
+  onInvalidMessage?: (reason: "frame_too_large" | "protocol_invalid") => void,
+): RelaySocket & { onClose(listener: (reason?: string, code?: number) => void): void } {
+  const ws = createSocket(url);
+  ws.binaryType = "arraybuffer";
+  return {
+    get bufferedAmount() {
+      return ws.bufferedAmount;
+    },
+    get readyState() {
+      return ws.readyState;
+    },
+    send: (bytes) => ws.send(Uint8Array.from(bytes).buffer),
+    close: (code, reason) => ws.close(code, reason),
+    onOpen: (listener) => ws.addEventListener("open", listener),
+    onBinaryMessage: (listener) =>
+      ws.addEventListener("message", (event) => {
+        const message = classifyInboundMessage(event.data);
+        if ("bytes" in message) listener(message.bytes);
+        else if (onInvalidMessage) onInvalidMessage(message.fail);
+        else ws.close(1002, message.fail);
+      }),
+    onClose: (listener) =>
+      ws.addEventListener("close", (event) => listener(event.reason, event.code)),
+    onError: (listener) => ws.addEventListener("error", listener),
+  };
+}
+
+export function hostedHubSessionWebSocketUrl(): string {
+  const url = new URL(hostedRelayWebSocketUrl());
+  url.pathname = HUB_SESSION_PATH;
+  return url.toString();
 }
 
 /**
@@ -130,27 +171,11 @@ export class BrowserHostedRelaySocket extends EventTarget {
     if (options.url !== hostedRelayWebSocketUrl() || options.ticketExpiresAt <= Date.now()) {
       throw new Error("Relay attempt is no longer valid.");
     }
-    const ws = (options.createSocket ?? ((url) => new WebSocket(url)))(options.url);
-    ws.binaryType = "arraybuffer";
-    const socket: RelaySocket = {
-      get bufferedAmount() {
-        return ws.bufferedAmount;
-      },
-      get readyState() {
-        return ws.readyState;
-      },
-      send: (b) => ws.send(Uint8Array.from(b).buffer),
-      close: (c, r) => ws.close(c, r),
-      onOpen: (f) => ws.addEventListener("open", f),
-      onBinaryMessage: (f) =>
-        ws.addEventListener("message", (e) => {
-          const message = classifyInboundMessage(e.data);
-          if ("bytes" in message) f(message.bytes);
-          else this.#engine.reportUndecodableMessage(message.fail);
-        }),
-      onClose: (f) => ws.addEventListener("close", (event) => f(event.reason)),
-      onError: (f) => ws.addEventListener("error", f),
-    };
+    const socket =
+      options.createRelaySocket?.() ??
+      createBrowserRelaySocket(options.url, options.createSocket, (reason) =>
+        this.#engine.reportUndecodableMessage(reason),
+      );
     try {
       this.#engine = new HostedRelayEngine({
         ticket: options.ticket,
@@ -186,7 +211,7 @@ export class BrowserHostedRelaySocket extends EventTarget {
       });
     } catch (error) {
       try {
-        ws.close();
+        socket.close();
       } catch {
         // The underlying socket may already be closing.
       }

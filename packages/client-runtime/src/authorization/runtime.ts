@@ -62,6 +62,8 @@ export interface HostedRuntimeConfiguration {
   readonly isForeground: () => boolean;
   readonly subscribeForeground: (listener: () => void) => () => void;
   readonly hasPendingRelayRequests: () => boolean;
+  /** A live account subscription pushes directory changes independently of node channels. */
+  readonly hasLiveHubSubscription?: () => boolean;
   readonly resetRelayAttemptFactory: () => void;
   readonly relayUrl: () => string;
   /** Native-only public trust preparation before the atomic ticket/grant request. */

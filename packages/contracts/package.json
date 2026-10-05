@@ -10,6 +10,11 @@
   "module": "./dist/index.mjs",
   "types": "./src/index.ts",
   "exports": {
+    "./hub-session": {
+      "types": "./src/hubSession.ts",
+      "import": "./src/hubSession.ts",
+      "require": "./src/hubSession.ts"
+    },
     "./thread-read-cache": {
       "types": "./src/threadReadCache.ts",
       "import": "./src/threadReadCache.ts",

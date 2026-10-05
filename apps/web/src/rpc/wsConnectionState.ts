@@ -25,7 +25,11 @@ export function useWsConnectionOpenedCount(): number {
 }
 
 export function useWsConnectionStatusForEnvironment(
-  environmentId: EnvironmentId,
+  environmentId: EnvironmentId | null,
 ): WsConnectionStatus {
-  return useAtomValue(wsConnectionStatusForEnvironmentAtom(environmentId));
+  return useAtomValue(
+    environmentId === null
+      ? wsConnectionStatusAtom
+      : wsConnectionStatusForEnvironmentAtom(environmentId),
+  );
 }

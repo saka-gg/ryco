@@ -436,6 +436,7 @@ function createFence(): {
 }
 
 const DIRECTORY_REFRESH_MS = 20_000;
+export const DIRECTORY_SUBSCRIBED_REFRESH_MS = 120_000;
 /** Directory cadence while a surface waits for an offline node to come back. */
 export const DIRECTORY_PRESENCE_REFRESH_MS = 5_000;
 /**
@@ -477,6 +478,8 @@ export const HOSTED_TOTP_ENROLLMENT_UNDISPLAYED_MESSAGE =
 class HostedHubController {
   #operation: AbortController | null = null;
   #directoryTimer: ReturnType<typeof setTimeout> | null = null;
+  #directoryForeground: (() => void) | null = null;
+  #directoryInvalidationFollowup: Promise<void> | null = null;
   #directoryRetry = 0;
   /**
    * One token per surface waiting on node presence, mapped to when it started;
@@ -666,16 +669,30 @@ class HostedHubController {
    * The one entry point every platform lifecycle binding forwards those signals
    * to, so what "recovery" means stays with this owner rather than being
    * re-derived per app: an account whose access check could not reach the Hub
-   * re-runs {@link bootstrap}, and an authenticated account runs the full
-   * {@link resumeBrowser} (session, directory, fresh relay attempt, current
-   * snapshot). The access-recovery backoff re-enters here too, so a timed retry
+   * re-runs {@link bootstrap}, and a suspended or unhealthy authenticated
+   * account runs {@link resumeBrowser} (session, directory, fresh relay attempt,
+   * current snapshot). A foreground signal does not replace a healthy live
+   * connection or interrupt the initial synchronization. The access-recovery
+   * backoff re-enters here too, so a timed retry
    * can never publish anything the ordinary resume would not. Every other
    * status has nothing a connectivity change can repair.
    */
   recoverAfterConnectivity(): Promise<void> {
     const state = hostedHubStore.getState();
     if (state.accountStatus === "unavailable") return this.bootstrap();
-    if (state.accountStatus === "authenticated") return this.resumeBrowser();
+    if (state.accountStatus === "authenticated") {
+      const healthy =
+        state.directoryStatus === "ready" &&
+        (state.browserStatus === "current" || state.browserStatus === "synchronizing") &&
+        (state.selectedNode === null ||
+          (state.selectedNode.presence.online &&
+            state.transportStatus !== "idle" &&
+            state.transportStatus !== "reconnecting" &&
+            state.transportStatus !== "draining" &&
+            state.transportStatus !== "terminal-failure" &&
+            (state.sessionStatus === "ready" || state.sessionStatus === "synchronizing")));
+      return healthy ? Promise.resolve() : this.resumeBrowser();
+    }
     return Promise.resolve();
   }
 
@@ -1723,6 +1740,7 @@ class HostedHubController {
     this.#directoryOperation?.abort();
     this.#directoryOperation = null;
     this.#directoryPromise = null;
+    this.#directoryInvalidationFollowup = null;
     this.#bootstrapPromise = null;
     this.#clearSessionSyncTimer();
     this.#retrySelectedNodeOperation?.abort();
@@ -1790,6 +1808,7 @@ class HostedHubController {
     this.#directoryOperation?.abort();
     this.#directoryOperation = null;
     this.#directoryPromise = null;
+    this.#directoryInvalidationFollowup = null;
     patchState({
       browserStatus: reason === "offline" ? "offline" : "suspended",
       sessionStatus: state.sessionStatus === "delivery-unknown" ? "delivery-unknown" : "stale",
@@ -1885,6 +1904,7 @@ class HostedHubController {
     this.#directoryOperation?.abort();
     this.#directoryOperation = null;
     this.#directoryPromise = null;
+    this.#directoryInvalidationFollowup = null;
     this.#operation?.abort();
     this.#operation = null;
     // The access check that abort just ended can publish nothing, so the next
@@ -1916,6 +1936,42 @@ class HostedHubController {
     return promise;
   }
 
+  /** A push received during a directory read needs one read after that snapshot. */
+  notifyDirectoryInvalidated(): void {
+    const state = hostedHubStore.getState();
+    if (
+      state.accountStatus !== "authenticated" ||
+      this.#directoryRetry > 0 ||
+      state.browserStatus === "offline" ||
+      state.browserStatus === "suspended"
+    )
+      return;
+    const pending = this.#directoryPromise;
+    if (!pending) {
+      void this.refreshDirectory();
+      return;
+    }
+    if (this.#directoryInvalidationFollowup === pending) return;
+    this.#directoryInvalidationFollowup = pending;
+    const accountId = state.account?.id;
+    const sessionId = state.session?.id;
+    void pending.then(() => {
+      if (this.#directoryInvalidationFollowup !== pending) return;
+      this.#directoryInvalidationFollowup = null;
+      const current = hostedHubStore.getState();
+      if (
+        current.accountStatus !== "authenticated" ||
+        current.account?.id !== accountId ||
+        current.session?.id !== sessionId ||
+        this.#directoryRetry > 0 ||
+        current.browserStatus === "offline" ||
+        current.browserStatus === "suspended"
+      )
+        return;
+      void this.refreshDirectory();
+    });
+  }
+
   /**
    * Poll the node directory at {@link DIRECTORY_PRESENCE_REFRESH_MS} instead of
    * the 20s cadence for as long as the returned release has not been called.
@@ -1933,7 +1989,12 @@ class HostedHubController {
     const watch = Symbol("hosted-directory-presence-watch");
     const wasFast = this.#directoryPresenceCadenceActive();
     this.#directoryPresenceWatches.set(watch, getHostedRuntimeConfiguration().timers.now());
-    if (!wasFast && this.#directoryTimer !== null && this.#directoryRetry === 0) {
+    if (
+      !wasFast &&
+      this.#directoryTimer !== null &&
+      this.#directoryRetry === 0 &&
+      !getHostedRuntimeConfiguration().hasLiveHubSubscription?.()
+    ) {
       this.#scheduleDirectory(DIRECTORY_PRESENCE_REFRESH_MS);
     }
     return () => {
@@ -2002,9 +2063,11 @@ class HostedHubController {
         });
       }
       this.#scheduleDirectory(
-        this.#directoryPresenceCadenceActive()
-          ? DIRECTORY_PRESENCE_REFRESH_MS
-          : DIRECTORY_REFRESH_MS,
+        getHostedRuntimeConfiguration().hasLiveHubSubscription?.()
+          ? DIRECTORY_SUBSCRIBED_REFRESH_MS
+          : this.#directoryPresenceCadenceActive()
+            ? DIRECTORY_PRESENCE_REFRESH_MS
+            : DIRECTORY_REFRESH_MS,
       );
       if (resumeStaleBrowser) {
         getHostedRuntimeConfiguration().timers.queueMicrotask(() => {
@@ -2429,13 +2492,16 @@ class HostedHubController {
         this.#clearDirectoryTimer();
         void this.refreshDirectory();
       };
-      runtime.subscribeForeground(onVisibilityChange);
+      this.#directoryForeground = runtime.subscribeForeground(onVisibilityChange);
       return;
     }
     this.#directoryTimer = runtime.timers.setTimeout(() => void this.refreshDirectory(), delay);
   }
 
   #clearDirectoryTimer(): void {
+    const unsubscribe = this.#directoryForeground;
+    this.#directoryForeground = null;
+    unsubscribe?.();
     if (this.#directoryTimer)
       getHostedRuntimeConfiguration().timers.clearTimeout(this.#directoryTimer);
     this.#directoryTimer = null;

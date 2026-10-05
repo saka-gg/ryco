@@ -17,8 +17,9 @@ and recent conversation text to a compatible Hub. This is off by default: enabli
 allows Hub to read and persist that content, even when execution traffic uses end-to-end encryption.
 It does not change the node's relay encryption or admission policy.
 
-The node publishes at most one batch every five seconds, with up to 16 snapshots and two MiB per
-batch. Initial synchronization starts with the most recently updated threads and retains at most
+The node coalesces orchestration changes for 250 milliseconds and starts at most one upload per
+second, with a five-second reconciliation fallback and up to 16 snapshots and two MiB per batch.
+Initial synchronization starts with the most recently updated threads and retains at most
 512 thread bodies, each containing at most 150 messages and one MiB of UTF-8 JSON. Attachments,
 tool output, credentials, terminal data, pending actions, and relay frames are excluded. An
 unchanged node makes no upload requests; snapshots are refreshed daily. Full older history and

@@ -3,15 +3,19 @@ import { type ReactNode, useEffect, useEffectEvent, useRef } from "react";
 import { type SlowRpcAckRequest, useSlowRpcAckRequests } from "../rpc/requestLatencyState";
 import {
   getWsConnectionStatus,
+  getWsConnectionStatusForEnvironment,
   getWsConnectionUiState,
   setBrowserOnlineStatus,
   type WsConnectionStatus,
-  type WsConnectionUiState,
   useWsConnectionStatus,
+  useWsConnectionStatusForEnvironment,
   WS_RECONNECT_MAX_ATTEMPTS,
 } from "../rpc/wsConnectionState";
 import { stackedThreadToast, toastManager } from "./ui/toast";
 import { getPrimaryEnvironmentConnection } from "../environments/runtime";
+
+import { usePrimaryEnvironmentId } from "../environments/primary";
+import { createConnectionNoticeGate } from "./connectionNoticeGate";
 
 const FORCED_WS_RECONNECT_DEBOUNCE_MS = 5_000;
 type WsAutoReconnectTrigger = "focus" | "online";
@@ -182,12 +186,15 @@ export function WebSocketConnectionCoordinator({
 }: {
   readonly recoveryOwner?: ConnectionRecoveryOwner;
 }) {
-  const status = useWsConnectionStatus();
   const genericRecoveryEnabled = allowsGenericConnectionRecovery(recoveryOwner);
+  const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const status = useWsConnectionStatusForEnvironment(
+    genericRecoveryEnabled ? null : primaryEnvironmentId,
+  );
   const lastForcedReconnectAtRef = useRef(0);
   const toastIdRef = useRef<ReturnType<typeof toastManager.add> | null>(null);
   const toastResetTimerRef = useRef<number | null>(null);
-  const previousUiStateRef = useRef<WsConnectionUiState>(getWsConnectionUiState(status));
+  const noticeGateRef = useRef<ReturnType<typeof createConnectionNoticeGate> | null>(null);
   const previousDisconnectedAtRef = useRef<string | null>(status.disconnectedAt);
 
   const runReconnect = useEffectEvent((showFailureToast: boolean) => {
@@ -264,11 +271,14 @@ export function WebSocketConnectionCoordinator({
     }
 
     const updateReconnectToastCountdown = () => {
-      if (!toastIdRef.current) {
+      if (!toastIdRef.current || !noticeGateRef.current?.isOutageVisible()) {
         return;
       }
 
-      const currentStatus = getWsConnectionStatus();
+      const currentStatus =
+        !genericRecoveryEnabled && primaryEnvironmentId
+          ? getWsConnectionStatusForEnvironment(primaryEnvironmentId)
+          : getWsConnectionStatus();
       if (
         getWsConnectionUiState(currentStatus) !== "reconnecting" ||
         currentStatus.nextRetryAt === null
@@ -292,7 +302,7 @@ export function WebSocketConnectionCoordinator({
     return () => {
       window.clearInterval(intervalId);
     };
-  }, [genericRecoveryEnabled, status.nextRetryAt, status.reconnectPhase]);
+  }, [genericRecoveryEnabled, primaryEnvironmentId, status.nextRetryAt, status.reconnectPhase]);
 
   useEffect(() => {
     if (
@@ -324,13 +334,11 @@ export function WebSocketConnectionCoordinator({
     status.hasConnected,
     status.nextRetryAt,
     status.online,
-    status.reconnectAttemptCount,
     status.reconnectPhase,
   ]);
 
-  useEffect(() => {
+  const publishNotice = useEffectEvent((recovered: boolean) => {
     const uiState = getWsConnectionUiState(status);
-    const previousUiState = previousUiStateRef.current;
     const previousDisconnectedAt = previousDisconnectedAtRef.current;
     const shouldShowReconnectToast = status.hasConnected && uiState === "reconnecting";
     const shouldShowOfflineToast = uiState === "offline" && status.disconnectedAt !== null;
@@ -389,11 +397,7 @@ export function WebSocketConnectionCoordinator({
       toastIdRef.current = null;
     }
 
-    if (
-      uiState === "connected" &&
-      (previousUiState === "offline" || previousUiState === "reconnecting") &&
-      previousDisconnectedAt !== null
-    ) {
+    if (recovered) {
       const successToast = {
         description: describeRecoveredToast(previousDisconnectedAt, status.connectedAt),
         title: buildRecoveredTitle(status),
@@ -417,15 +421,38 @@ export function WebSocketConnectionCoordinator({
       }, 8_250);
     }
 
-    previousUiStateRef.current = uiState;
     previousDisconnectedAtRef.current = status.disconnectedAt;
-  }, [genericRecoveryEnabled, status]);
+  });
+
+  useEffect(() => {
+    const gate = (noticeGateRef.current ??= createConnectionNoticeGate({
+      showOutage: () => publishNotice(false),
+      showRecovery: () => publishNotice(true),
+      close: () => {
+        if (toastIdRef.current !== null) toastManager.close(toastIdRef.current);
+        toastIdRef.current = null;
+        if (toastResetTimerRef.current !== null) window.clearTimeout(toastResetTimerRef.current);
+        toastResetTimerRef.current = null;
+      },
+      setTimeout: (callback, delayMs) => window.setTimeout(callback, delayMs),
+      clearTimeout: (timer) => window.clearTimeout(timer as number),
+    }));
+    const uiState = getWsConnectionUiState(status);
+    const offline = uiState === "offline" && status.disconnectedAt !== null;
+    const exhausted = status.hasConnected && status.reconnectPhase === "exhausted";
+    gate.update({
+      key: `${genericRecoveryEnabled ? "" : (primaryEnvironmentId ?? "")}:${status.socketUrl ?? ""}:${status.connectionLabel ?? ""}`,
+      requireObservedConnection: !genericRecoveryEnabled,
+      outage: offline || exhausted || (status.hasConnected && uiState === "reconnecting"),
+      connected: uiState === "connected",
+      delayMs: genericRecoveryEnabled || offline || exhausted ? 0 : 4_000,
+    });
+  }, [genericRecoveryEnabled, primaryEnvironmentId, status]);
 
   useEffect(() => {
     return () => {
-      if (toastResetTimerRef.current !== null) {
-        window.clearTimeout(toastResetTimerRef.current);
-      }
+      noticeGateRef.current?.dispose();
+      noticeGateRef.current = null;
     };
   }, []);
 

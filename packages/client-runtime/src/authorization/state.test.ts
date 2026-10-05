@@ -47,6 +47,7 @@ import {
 import {
   DIRECTORY_PRESENCE_REFRESH_MS,
   DIRECTORY_PRESENCE_WINDOW_MS,
+  DIRECTORY_SUBSCRIBED_REFRESH_MS,
   HOSTED_ACCOUNT_BUSY_MESSAGE,
   HOSTED_ACCOUNT_SIGNED_OUT_MESSAGE,
   HOSTED_PASSKEY_UNCONFIRMED_MESSAGE,
@@ -142,9 +143,12 @@ function fakeRuntime(): HostedRuntimeConfiguration {
           }
         | undefined;
       const onVisibility = () => {
-        if (doc?.visibilityState === "visible") listener();
+        if (doc?.visibilityState === "visible") {
+          doc.removeEventListener("visibilitychange", onVisibility);
+          listener();
+        }
       };
-      doc?.addEventListener("visibilitychange", onVisibility, { once: true });
+      doc?.addEventListener("visibilitychange", onVisibility);
       return () => doc?.removeEventListener("visibilitychange", onVisibility);
     },
     hasPendingRelayRequests: hasHostedRelayPendingRequests,
@@ -722,6 +726,38 @@ describe("hosted account state", () => {
     expect(resumeBrowser).toHaveBeenCalledOnce();
   });
 
+  it("keeps a healthy live channel and an initial handshake on a foreground signal", async () => {
+    const resumeBrowser = vi.spyOn(hostedHubController, "resumeBrowser").mockResolvedValue();
+    const selectedNode = node();
+    hostedHubStore.setState({
+      accountStatus: "authenticated",
+      directoryStatus: "ready",
+      browserStatus: "current",
+      selectedNode,
+      transportStatus: "online",
+      sessionStatus: "ready",
+    });
+    const generation = hostedHubStore.getState().generation;
+    await hostedHubController.recoverAfterConnectivity();
+    hostedHubStore.setState({
+      browserStatus: "synchronizing",
+      sessionStatus: "synchronizing",
+      transportStatus: "opening-channel",
+    });
+    await hostedHubController.recoverAfterConnectivity();
+    expect(resumeBrowser).not.toHaveBeenCalled();
+    expect(hostedHubStore.getState().generation).toBe(generation);
+
+    for (const browserStatus of ["suspended", "offline", "stale"] as const) {
+      hostedHubStore.setState({ browserStatus });
+      await hostedHubController.recoverAfterConnectivity();
+    }
+    expect(resumeBrowser).toHaveBeenCalledTimes(3);
+    hostedHubStore.setState({ browserStatus: "current", transportStatus: "reconnecting" });
+    await hostedHubController.recoverAfterConnectivity();
+    expect(resumeBrowser).toHaveBeenCalledTimes(4);
+  });
+
   it("subscribes lifecycle bindings for exactly the recoverable account statuses", () => {
     expect(
       (
@@ -1149,6 +1185,142 @@ describe("hosted registration and directory state", () => {
     await Promise.resolve();
     expect(listNodes).toHaveBeenCalledTimes(2);
     Object.defineProperty(globalThis, "document", { configurable: true, value: originalDocument });
+  });
+
+  it("coalesces directory pushes during an older snapshot into one subsequent read", async () => {
+    const latest = node();
+    const old = { ...latest, presence: { online: false, lastHeartbeatAt: null } };
+    hostedHubStore.setState({
+      accountStatus: "authenticated",
+      account: sessionResponse.account,
+      session: sessionResponse.session,
+      directoryStatus: "ready",
+      nodes: [old],
+    });
+    let finish = (_nodes: ReadonlyArray<HostedHubNode>) => {};
+    const listNodes = vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([latest]);
+    listNodes.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const first = hostedHubController.refreshDirectory();
+    for (let i = 0; i < 20; i++) hostedHubController.notifyDirectoryInvalidated();
+    expect(listNodes).toHaveBeenCalledOnce();
+    finish([old]);
+    await first;
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(listNodes).toHaveBeenCalledTimes(2);
+    expect(hostedHubStore.getState().nodes[0]?.presence.online).toBe(true);
+  });
+
+  it("does not let directory notifications bypass failed-read backoff", async () => {
+    vi.useFakeTimers();
+    hostedHubStore.setState({
+      accountStatus: "authenticated",
+      account: sessionResponse.account,
+      session: sessionResponse.session,
+      directoryStatus: "ready",
+      nodes: [node()],
+    });
+    let fail = (_error: unknown) => {};
+    const listNodes = vi.spyOn(hostedHubApi, "listNodes").mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          fail = reject;
+        }),
+    );
+    const first = hostedHubController.refreshDirectory();
+    hostedHubController.notifyDirectoryInvalidated();
+    fail(new HostedHubApiError("unavailable", 0));
+    await first;
+    await Promise.resolve();
+    for (let i = 0; i < 20; i++) hostedHubController.notifyDirectoryInvalidated();
+    expect(listNodes).toHaveBeenCalledOnce();
+    expect(hostedHubStore.getState().directoryStatus).toBe("stale");
+  });
+
+  it.each(["session-change", "suspension", "sign-out"] as const)(
+    "discards a pushed followup after %s",
+    async (change) => {
+      hostedHubStore.setState({
+        accountStatus: "authenticated",
+        account: sessionResponse.account,
+        session: sessionResponse.session,
+        directoryStatus: "ready",
+        nodes: [node()],
+      });
+      let finish = (_nodes: ReadonlyArray<HostedHubNode>) => {};
+      const listNodes = vi.spyOn(hostedHubApi, "listNodes").mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finish = resolve;
+          }),
+      );
+      const first = hostedHubController.refreshDirectory();
+      hostedHubController.notifyDirectoryInvalidated();
+      if (change === "session-change")
+        hostedHubStore.setState({ session: { ...sessionResponse.session, id: "session-b" } });
+      else if (change === "suspension") hostedHubController.suspendBrowser("offline");
+      else await hostedHubController.clearAccount("signed-out");
+      finish([node()]);
+      await first;
+      await Promise.resolve();
+      expect(listNodes).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("uses a slow backstop with a live Hub subscription and restores polling when it goes away", async () => {
+    vi.useFakeTimers();
+    let live = true;
+    configureHostedRuntime({ ...fakeRuntime(), hasLiveHubSubscription: () => live }, hostedHubApi);
+    hostedHubStore.setState({
+      accountStatus: "authenticated",
+      account: sessionResponse.account,
+      session: sessionResponse.session,
+      directoryStatus: "ready",
+    });
+    const listNodes = vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([]);
+    await hostedHubController.refreshDirectory();
+    const release = hostedHubController.watchDirectoryPresence();
+    await vi.advanceTimersByTimeAsync(DIRECTORY_SUBSCRIBED_REFRESH_MS - 1);
+    expect(listNodes).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(listNodes).toHaveBeenCalledTimes(2);
+    live = false;
+    await hostedHubController.refreshDirectory();
+    await vi.advanceTimersByTimeAsync(DIRECTORY_PRESENCE_REFRESH_MS);
+    expect(listNodes).toHaveBeenCalledTimes(4);
+    release();
+  });
+
+  it("owns exactly one foreground directory listener and removes it on sign-out", async () => {
+    const listeners = new Set<() => void>();
+    const runtime = {
+      ...fakeRuntime(),
+      isForeground: () => false,
+      subscribeForeground: (listener: () => void) => {
+        listeners.add(listener);
+        return () => {
+          listeners.delete(listener);
+        };
+      },
+    };
+    configureHostedRuntime(runtime, hostedHubApi);
+    hostedHubStore.setState({
+      accountStatus: "authenticated",
+      account: sessionResponse.account,
+      session: sessionResponse.session,
+      directoryStatus: "ready",
+    });
+    vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([]);
+    await hostedHubController.refreshDirectory();
+    await hostedHubController.refreshDirectory();
+    expect(listeners.size).toBe(1);
+    await hostedHubController.clearAccount("signed-out");
+    expect(listeners.size).toBe(0);
   });
 
   it("polls presence faster only while a surface is waiting on an offline node", async () => {
