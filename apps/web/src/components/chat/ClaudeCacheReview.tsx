@@ -1,9 +1,8 @@
 import { createRoot } from "react-dom/client";
-import type { OrchestrationThreadActivity, ClaudeCacheObservation } from "@ryco/contracts";
-import {
-  latestClaudeCacheObservation,
-  type ClaudeCacheReviewPresentation,
-  type ClaudeCacheReviewChoice,
+import type { ClaudeCacheObservation } from "@ryco/contracts";
+import type {
+  ClaudeCacheReviewPresentation,
+  ClaudeCacheReviewChoice,
 } from "@ryco/client-runtime/state/composer";
 import { Dialog, DialogPopup, DialogTitle, DialogDescription } from "../ui/dialog";
 import { Button } from "../ui/button";
@@ -40,30 +39,6 @@ export function ClaudeCacheEvidence({ observation }: { observation: ClaudeCacheO
           : "No cache lifetime was reported for this observation."}
       </p>
     </div>
-  );
-}
-
-export function ClaudeCacheDetails({
-  activities,
-}: {
-  activities: readonly OrchestrationThreadActivity[];
-}) {
-  const observation = latestClaudeCacheObservation(activities);
-
-  return (
-    <details className="mx-3 my-2 text-xs text-muted-foreground">
-      <summary className="cursor-pointer">Observed Claude cache usage</summary>
-      <div className="py-2">
-        {observation ? (
-          <ClaudeCacheEvidence observation={observation} />
-        ) : (
-          <p>
-            No authoritative cache usage is available for this context. Next-request cache
-            availability is unknown.
-          </p>
-        )}
-      </div>
-    </details>
   );
 }
 

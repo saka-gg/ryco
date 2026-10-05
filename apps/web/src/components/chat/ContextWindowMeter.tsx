@@ -1,9 +1,14 @@
 import { ProviderLimitWindow } from "../usage/ProviderLimitWindow";
 import { useRelativeTimeTick } from "../settings/settingsLayout";
-import type { ServerProviderRateLimits, ServerProviderRateLimitWindow } from "@ryco/contracts";
+import type {
+  ClaudeCacheObservation,
+  ServerProviderRateLimits,
+  ServerProviderRateLimitWindow,
+} from "@ryco/contracts";
 
 import { cn } from "~/lib/utils";
 import { type ContextWindowUsage, formatContextWindowTokens } from "~/lib/contextWindow";
+import { formatRelativeTimeLabel } from "~/timestampFormat";
 import { describeRateLimitWindow } from "../settings/codexUsageLimits";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 
@@ -49,11 +54,38 @@ function UsageLimitRow(props: {
   return <ProviderLimitWindow {...props} label={label} compact />;
 }
 
+/** Observed counters from Claude's last main-loop request; no future-hit claim. */
+function PromptCacheSection(props: { readonly observation: ClaudeCacheObservation }) {
+  const { observation } = props;
+  const lifetimeMinutes = observation.observedTtlSeconds
+    ? Math.round(observation.observedTtlSeconds / 60)
+    : null;
+  return (
+    <div className="mt-2.5 space-y-1 border-t border-border/60 pt-2 leading-tight">
+      <div className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">
+        Prompt cache
+      </div>
+      <div className="whitespace-nowrap text-xs font-medium text-foreground">
+        {formatContextWindowTokens(observation.cacheReadInputTokens)} read
+        <span className="mx-1">⋅</span>
+        {formatContextWindowTokens(observation.cacheWriteInputTokens)} written
+        <span className="mx-1">⋅</span>
+        {formatContextWindowTokens(observation.directInputTokens)} uncached
+      </div>
+      <div className="text-xs text-muted-foreground">
+        Last request {formatRelativeTimeLabel(observation.observedAt)}
+        {lifetimeMinutes !== null ? ` · ${lifetimeMinutes}m write lifetime` : null}
+      </div>
+    </div>
+  );
+}
+
 export function ContextWindowMeter(props: {
   usage: ContextWindowUsage;
   checkedAt?: string | undefined;
   available?: boolean | undefined;
   rateLimits?: ServerProviderRateLimits | undefined;
+  claudeCache?: ClaudeCacheObservation | null | undefined;
 }) {
   const { usage, rateLimits } = props;
   const now = useRelativeTimeTick();
@@ -167,6 +199,7 @@ export function ContextWindowMeter(props: {
             </div>
           ) : null}
         </div>
+        {props.claudeCache ? <PromptCacheSection observation={props.claudeCache} /> : null}
         {showUsageLimits && rateLimits ? (
           <div className="mt-2.5 space-y-1.5 border-t border-border/60 pt-2 leading-tight">
             <div className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">

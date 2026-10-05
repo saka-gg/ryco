@@ -3,6 +3,7 @@ import {
   ORCHESTRATION_WS_METHODS,
   type AgentTokenMode,
   type ChangeRequest,
+  type ClaudeCacheObservation,
   type EnvironmentId,
   type ProviderInteractionMode,
   type ResolvedKeybindingsConfig,
@@ -404,6 +405,7 @@ export const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryA
   contextWindowUsage: ContextWindowUsage;
   contextWindowRateLimits: ServerProvider["rateLimits"] | undefined;
   contextWindowRateLimitsCheckedAt?: string | undefined;
+  claudeCacheObservation?: ClaudeCacheObservation | null | undefined;
   isPreparingWorktree: boolean;
   pendingAction: {
     questionIndex: number;
@@ -432,6 +434,7 @@ export const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryA
         rateLimits={props.contextWindowRateLimits}
         checkedAt={props.contextWindowRateLimitsCheckedAt}
         available={!props.isEnvironmentUnavailable}
+        claudeCache={props.claudeCacheObservation}
       />
       {props.isPreparingWorktree ? (
         <span className="text-muted-foreground/70 text-xs">Preparing worktree...</span>
@@ -526,6 +529,7 @@ export interface ComposerFooterProps {
   contextWindowUsage: ContextWindowUsage;
   contextWindowRateLimits: ServerProvider["rateLimits"] | undefined;
   contextWindowRateLimitsCheckedAt?: string | undefined;
+  claudeCacheObservation?: ClaudeCacheObservation | null | undefined;
   pendingAction: {
     questionIndex: number;
     isLastQuestion: boolean;
@@ -762,6 +766,7 @@ export const ComposerFooter = memo(function ComposerFooter(props: ComposerFooter
           contextWindowUsage={props.contextWindowUsage}
           contextWindowRateLimits={props.contextWindowRateLimits}
           contextWindowRateLimitsCheckedAt={props.contextWindowRateLimitsCheckedAt}
+          claudeCacheObservation={props.claudeCacheObservation}
           pendingAction={props.pendingAction}
           isRunning={props.isRunning}
           showPlanFollowUpPrompt={props.showPlanFollowUpPrompt}
