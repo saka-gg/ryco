@@ -58,6 +58,7 @@ export interface HostedHubAccount {
 export interface HostedHubSession {
   readonly id: string;
   readonly accountId: string;
+  readonly activeSpaceId?: HostedIdentity.HubSpaceId;
   readonly createdAt: number;
   readonly expiresAt: number;
   readonly lastSeenAt: number;

@@ -1,5 +1,10 @@
+import { hostedHubStore } from "@ryco/client-runtime/authorization";
+import { classifyOverviewError } from "~/components/overview/overviewErrors.logic";
 import { EnvironmentId } from "@ryco/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+
+const mode = vi.hoisted(() => ({ hosted: false }));
+vi.mock("~/env", () => ({ isHostedHubMode: () => mode.hosted }));
 
 const {
   listIssues,
@@ -49,6 +54,7 @@ vi.mock("~/environments/runtime", () => ({
 
 import {
   changeRequestListBinding,
+  changeRequestDetailBinding,
   fetchSourceControlChangeRequestDetail,
   fetchSourceControlIssueDetail,
   invalidateSourceControl,
@@ -102,12 +108,16 @@ function changeRequest(number: number) {
 }
 
 beforeEach(() => {
+  mode.hosted = false;
+  hostedHubStore.setState(hostedHubStore.getInitialState(), true);
   vi.clearAllMocks();
   vi.useFakeTimers();
   resetSourceControlAtomsForTests();
 });
 
 afterEach(() => {
+  mode.hosted = false;
+  hostedHubStore.setState(hostedHubStore.getInitialState(), true);
   vi.useRealTimers();
   resetSourceControlAtomsForTests();
 });
@@ -437,5 +447,183 @@ describe("sourceControlAtoms — detail fetches", () => {
     invalidateSourceControl({ environmentId: OTHER_ENVIRONMENT_ID });
     await fetchSourceControlIssueDetail(params);
     expect(getIssue).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("source-control reads in hosted previews", () => {
+  const input = { environmentId: ENVIRONMENT_ID, cwd: CWD, reference: "1" };
+  function live(environmentId = ENVIRONMENT_ID, generation = 1) {
+    hostedHubStore.setState({
+      account: { id: "account-a" } as never,
+      session: { id: "session-a" } as never,
+      nodes: [
+        {
+          id: String(environmentId),
+          environmentId,
+          effectiveRole: "operator",
+          revokedAt: null,
+          presence: { online: true, lastHeartbeatAt: 1 },
+        },
+      ] as never,
+      accountStatus: "authenticated",
+      directoryStatus: "ready",
+      browserStatus: "current",
+      transportStatus: "online",
+      sessionStatus: "ready",
+      selectionStatus: "online",
+      effectiveRole: "operator",
+      generation,
+      selectedNode: {
+        id: String(environmentId),
+        environmentId,
+        presence: { online: true, lastHeartbeatAt: 1 },
+      } as never,
+    });
+  }
+
+  it("does not fetch an offline preview through another live node and resumes when its live read authority is ready", async () => {
+    mode.hosted = true;
+    live(OTHER_ENVIRONMENT_ID);
+    getChangeRequestDetail.mockResolvedValue(changeRequest(1));
+    const release = changeRequestDetailBinding.watch(input, () => 1_000);
+    try {
+      changeRequestDetailBinding.refresh(input);
+      invalidateSourceControl({ environmentId: ENVIRONMENT_ID });
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(getChangeRequestDetail).not.toHaveBeenCalled();
+      expect(changeRequestDetailBinding.snapshotFor(input)).toMatchObject({
+        error: null,
+        isFetching: false,
+      });
+      live(ENVIRONMENT_ID, 2);
+      await flush();
+      expect(getChangeRequestDetail).toHaveBeenCalledOnce();
+      expect(changeRequestDetailBinding.snapshotFor(input).data).toEqual(changeRequest(1));
+    } finally {
+      release();
+    }
+  });
+
+  it("fences a disconnected PR failure and a stale success across reconnect, keeping the overview error path quiet", async () => {
+    mode.hosted = true;
+    live();
+    const old = createDeferred<unknown>();
+    const recovery = createDeferred<unknown>();
+    getChangeRequestDetail.mockReturnValueOnce(old.promise).mockReturnValueOnce(recovery.promise);
+    const release = changeRequestDetailBinding.watch(input, () => 1_000);
+    try {
+      hostedHubStore.setState({ transportStatus: "reconnecting", sessionStatus: "stale" });
+      old.reject(new Error("Connection closed"));
+      await flush();
+      expect(classifyOverviewError(changeRequestDetailBinding.snapshotFor(input).error)).toBeNull();
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(getChangeRequestDetail).toHaveBeenCalledOnce();
+      live(ENVIRONMENT_ID, 2);
+      await flush();
+      expect(getChangeRequestDetail).toHaveBeenCalledTimes(2);
+      hostedHubStore.setState({ transportStatus: "reconnecting", sessionStatus: "stale" });
+      getChangeRequestDetail.mockResolvedValue(changeRequest(3));
+      live(ENVIRONMENT_ID, 3);
+      await flush();
+      recovery.resolve(changeRequest(2));
+      await flush();
+      expect(changeRequestDetailBinding.snapshotFor(input).data).toEqual(changeRequest(3));
+      expect(classifyOverviewError(changeRequestDetailBinding.snapshotFor(input).error)).toBeNull();
+    } finally {
+      release();
+    }
+  });
+
+  it("still publishes genuine PR errors on the current live connection", async () => {
+    mode.hosted = true;
+    live();
+    getChangeRequestDetail.mockRejectedValue(new Error("unexpected provider failure"));
+    const release = changeRequestDetailBinding.watch(input);
+    await flush();
+    expect(
+      classifyOverviewError(changeRequestDetailBinding.snapshotFor(input).error)?.message,
+    ).toBe("Couldn't load pull request details. Try refreshing.");
+    release();
+  });
+
+  it("preserves the existing source-control role policy without issuing denied background reads", async () => {
+    mode.hosted = true;
+    live();
+    hostedHubStore.setState({ effectiveRole: "viewer" });
+    const release = changeRequestDetailBinding.watch(input);
+    await flush();
+    expect(getChangeRequestDetail).not.toHaveBeenCalled();
+    expect(changeRequestDetailBinding.snapshotFor(input).error).toBeNull();
+    release();
+  });
+
+  it.each(["role", "account", "session", "space", "sign-out", "revoked", "authorization-removed"])(
+    "clears retained operator data when %s authority changes while already paused",
+    async (change) => {
+      mode.hosted = true;
+      live();
+      getChangeRequestDetail.mockResolvedValue(changeRequest(1));
+      getIssue.mockResolvedValue({ id: "old" });
+      const issueInput = { environmentId: ENVIRONMENT_ID, cwd: CWD, reference: "1" };
+      const release = changeRequestDetailBinding.watch(input);
+      await flush();
+      await fetchSourceControlIssueDetail(issueInput);
+      hostedHubStore.setState({ transportStatus: "reconnecting", sessionStatus: "stale" });
+      expect(changeRequestDetailBinding.snapshotFor(input).data).toEqual(changeRequest(1));
+      await fetchSourceControlIssueDetail(issueInput);
+      expect(getIssue).toHaveBeenCalledOnce();
+      if (change === "role") hostedHubStore.setState({ effectiveRole: "viewer" });
+      else if (change === "account")
+        hostedHubStore.setState({ account: { id: "account-b" } as never });
+      else if (change === "space")
+        hostedHubStore.setState({
+          session: { id: "session-a", activeSpaceId: "space-b" } as never,
+        });
+      else if (change === "session")
+        hostedHubStore.setState({ session: { id: "session-b" } as never });
+      else if (change === "revoked" || change === "authorization-removed")
+        hostedHubStore.setState({ selectionStatus: change, effectiveRole: null });
+      else hostedHubStore.setState({ accountStatus: "signing-out" });
+      expect(changeRequestDetailBinding.snapshotFor(input)).toMatchObject({
+        data: null,
+        error: null,
+        isFetching: false,
+      });
+      live(ENVIRONMENT_ID, 2);
+      await flush();
+      await fetchSourceControlIssueDetail(issueInput);
+      expect(getIssue).toHaveBeenCalledTimes(2);
+      release();
+    },
+  );
+
+  it("rejects imperative results from a revoked authority even after permission is restored", async () => {
+    mode.hosted = true;
+    live();
+    const old = createDeferred<unknown>();
+    getIssue.mockReturnValueOnce(old.promise).mockResolvedValue({ id: "new" });
+    const issueInput = { environmentId: ENVIRONMENT_ID, cwd: CWD, reference: "1" };
+    const pending = fetchSourceControlIssueDetail(issueInput);
+    const rejected = expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    invalidateSourceControl({ environmentId: ENVIRONMENT_ID });
+    hostedHubStore.setState({ account: { id: "account-b" } as never });
+    live(ENVIRONMENT_ID, 2);
+    old.resolve({ id: "old" });
+    await rejected;
+    expect(await fetchSourceControlIssueDetail(issueInput)).toEqual({ id: "new" });
+  });
+
+  it("allows reads after uncertain delivery was reconciled without allowing mutations", async () => {
+    mode.hosted = true;
+    live();
+    hostedHubStore.setState({
+      sessionStatus: "delivery-unknown",
+      sessionRecoveredAfterUnknown: true,
+    });
+    getChangeRequestDetail.mockResolvedValue(changeRequest(1));
+    const release = changeRequestDetailBinding.watch(input);
+    await flush();
+    expect(getChangeRequestDetail).toHaveBeenCalledOnce();
+    release();
   });
 });

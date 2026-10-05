@@ -512,6 +512,30 @@ describe("HostedHubApi", () => {
     await expect(api.restoreSession()).rejects.toMatchObject({ code: "session_invalid" });
   });
 
+  it("preserves the active space when restoring a session and accepts older responses", async () => {
+    const api = createApi();
+    const activeSpaceId = "space_aaaaaaaaaaaaaaaaaaaaaa";
+    globalThis.fetch = vi.fn(async () =>
+      response({ ...session, session: { ...session.session, activeSpaceId } }),
+    );
+    expect((await api.restoreSession()).session.activeSpaceId).toBe(activeSpaceId);
+
+    globalThis.fetch = vi.fn(async () => response(session));
+    expect((await api.restoreSession()).session.activeSpaceId).toBeUndefined();
+  });
+
+  it.each([null, "", "space_invalid", 1])(
+    "rejects a malformed active space in a restored session: %s",
+    async (activeSpaceId) => {
+      globalThis.fetch = vi.fn(async () =>
+        response({ ...session, session: { ...session.session, activeSpaceId } }),
+      );
+      await expect(createApi().restoreSession()).rejects.toMatchObject({
+        code: "invalid_response",
+      });
+    },
+  );
+
   it("bounds opaque account identifiers by their canonical E2EE UTF-8 limit", async () => {
     const api = createApi();
     for (const accountId of ["", "a".repeat(257), "😀".repeat(65)]) {

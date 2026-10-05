@@ -2770,6 +2770,10 @@ export class HostedHubApi {
     const session = objectValue(value.session);
     const accountId = e2eeAccountIdValue(account.id);
     const sessionAccountId = e2eeAccountIdValue(session.accountId);
+    const activeSpaceId =
+      session.activeSpaceId === undefined
+        ? undefined
+        : decodeContract(HostedIdentity.HubSpaceId, session.activeSpaceId, "invalid_response");
     const recoveryCodes =
       value.recoveryCodes === undefined ? undefined : recoveryCodesValue(value.recoveryCodes);
     if (
@@ -2805,6 +2809,7 @@ export class HostedHubApi {
       session: {
         id: session.id,
         accountId: sessionAccountId,
+        ...(activeSpaceId === undefined ? {} : { activeSpaceId }),
         createdAt: session.createdAt,
         expiresAt: session.expiresAt,
         lastSeenAt: session.lastSeenAt,
