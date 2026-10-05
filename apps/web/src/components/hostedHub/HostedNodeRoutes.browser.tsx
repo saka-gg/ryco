@@ -132,101 +132,131 @@ afterEach(async () => {
 });
 
 describe("hosted node route surfaces", () => {
-  it("opens cloud history in a fresh browser while the target Mac is offline", async () => {
-    const target = node("node_aaaaaaaaaaaaaaaaaaaaaa", false);
-    const threadId = ThreadId.make("cloud-thread");
-    const date = "2026-10-04T12:00:00.000Z";
-    installRoute(`/node/${target.id}/${target.environmentId}/${threadId}`);
-    const snapshot = Schema.decodeUnknownSync(OrchestrationShellSnapshot)({
-      snapshotSequence: 1,
-      updatedAt: date,
-      projects: [
-        {
-          id: "project-a",
-          title: "Project",
-          workspaceRoot: "/repo",
-          defaultModelSelection: null,
-          scripts: [],
-          createdAt: date,
-          updatedAt: date,
-        },
-      ],
-      worktrees: [],
-      threads: [
-        {
-          id: threadId,
-          projectId: "project-a",
-          title: "Cloud thread",
-          modelSelection: { instanceId: "codex", model: "gpt-5" },
-          runtimeMode: "full-access",
-          branch: null,
-          worktreePath: null,
-          latestTurn: null,
-          createdAt: date,
-          updatedAt: date,
-          session: null,
-          latestUserMessageAt: null,
-          hasPendingApprovals: false,
-          hasPendingUserInput: false,
-          hasActionableProposedPlan: false,
-        },
-      ],
-    });
-    vi.mocked(hostedHubApi.readThreadCacheShell).mockResolvedValue({
-      protocolVersion: 1,
-      generation: 1,
-      revision: 1,
-      storedAt: 100,
-      snapshot,
-    });
-    vi.mocked(hostedHubApi.readThreadCacheThread).mockResolvedValue({
-      protocolVersion: 1,
-      generation: 1,
-      revision: 1,
-      storedAt: 100,
-      threadId,
-      snapshot: {
-        messages: [
+  it.each([false, true])(
+    "opens offline cloud history without a reload (previously live: %s)",
+    async (previouslyLive) => {
+      const target = node("node_aaaaaaaaaaaaaaaaaaaaaa", previouslyLive);
+      const threadId = ThreadId.make("cloud-thread");
+      const date = "2026-10-04T12:00:00.000Z";
+      installRoute(`/node/${target.id}/${target.environmentId}/${threadId}`);
+      const snapshot = Schema.decodeUnknownSync(OrchestrationShellSnapshot)({
+        snapshotSequence: 1,
+        updatedAt: date,
+        projects: [
           {
-            id: "message-a" as never,
-            role: "assistant",
-            text: "Cloud history is readable before this Mac reconnects",
+            id: "project-a",
+            title: "Project",
+            workspaceRoot: "/repo",
+            defaultModelSelection: null,
+            scripts: [],
             createdAt: date,
+            updatedAt: date,
           },
         ],
-      },
-    });
-    vi.spyOn(hostedHubController, "selectNode").mockImplementation(async () => {
-      useHostedHubStore.setState({
-        selectedNode: target,
-        selectionStatus: "offline",
-        transportStatus: "reconnecting",
-        sessionStatus: "synchronizing",
-        sessionEstablished: false,
+        worktrees: [],
+        threads: [
+          {
+            id: threadId,
+            projectId: "project-a",
+            title: "Cloud thread",
+            modelSelection: { instanceId: "codex", model: "gpt-5" },
+            runtimeMode: "full-access",
+            branch: null,
+            worktreePath: null,
+            latestTurn: null,
+            createdAt: date,
+            updatedAt: date,
+            session: null,
+            latestUserMessageAt: null,
+            hasPendingApprovals: false,
+            hasPendingUserInput: false,
+            hasActionableProposedPlan: false,
+          },
+        ],
       });
-    });
-    useHostedHubStore.setState({
-      accountStatus: "authenticated",
-      account,
-      session,
-      directoryStatus: "ready",
-      nodes: [target],
-    });
-    expect(useStore.getState().environmentStateById).toEqual({});
-    expect(localStorage.getItem("ryco:remember-hosted-browser:v1")).toBeNull();
+      vi.mocked(hostedHubApi.readThreadCacheShell).mockResolvedValue({
+        protocolVersion: 1,
+        generation: 1,
+        revision: 1,
+        storedAt: 100,
+        snapshot,
+      });
+      vi.mocked(hostedHubApi.readThreadCacheThread).mockResolvedValue({
+        protocolVersion: 1,
+        generation: 1,
+        revision: 1,
+        storedAt: 100,
+        threadId,
+        snapshot: {
+          messages: [
+            {
+              id: "message-a" as never,
+              role: "assistant",
+              text: "Cloud history is readable before this Mac reconnects",
+              createdAt: date,
+            },
+          ],
+        },
+      });
+      vi.spyOn(hostedHubController, "selectNode").mockImplementation(async () => {
+        useHostedHubStore.setState({
+          selectedNode: target,
+          selectionStatus: "offline",
+          transportStatus: "reconnecting",
+          sessionStatus: "synchronizing",
+          sessionEstablished: false,
+        });
+      });
+      useHostedHubStore.setState({
+        accountStatus: "authenticated",
+        account,
+        session,
+        directoryStatus: "ready",
+        nodes: [target],
+      });
+      expect(useStore.getState().environmentStateById).toEqual({});
+      expect(localStorage.getItem("ryco:remember-hosted-browser:v1")).toBeNull();
+      if (previouslyLive) {
+        useStore.getState().syncServerShellSnapshot(snapshot, target.environmentId);
+        useHostedHubStore.setState({
+          selectedNode: target,
+          selectionStatus: "online",
+          transportStatus: "online",
+          sessionStatus: "ready",
+          sessionEstablished: true,
+        });
+      }
 
-    mounted = await render(<HostedHubRoot />);
+      mounted = await render(<HostedHubRoot />);
+      if (previouslyLive) {
+        await expect
+          .poll(() => vi.mocked(hostedHubApi.readThreadCacheThread).mock.calls.length)
+          .toBeGreaterThan(0);
+        expect(
+          useStore.getState().environmentStateById[target.environmentId]?.bootstrapComplete,
+        ).toBe(true);
+        const offline = { ...target, presence: { online: false, lastHeartbeatAt: 1 } };
+        useHostedHubStore.setState({
+          nodes: [offline],
+          selectedNode: offline,
+          selectionStatus: "offline",
+          transportStatus: "reconnecting",
+          sessionStatus: "stale",
+          sessionEstablished: false,
+        });
+      }
 
-    await expect.element(page.getByTestId("root-app-shell")).toHaveTextContent("hosted-cached");
-    await expect
-      .element(page.getByText("Cloud history is readable before this Mac reconnects"))
-      .toBeVisible();
-    expect(useHostedHubStore.getState().sessionEstablished).toBe(false);
-    expect(readHostedNodeMutationLease(target.environmentId)).toBeNull();
-    expect(fakeWindow!.location.pathname).toBe(
-      `/node/${target.id}/${target.environmentId}/${threadId}`,
-    );
-  });
+      await expect.element(page.getByTestId("root-app-shell")).toHaveTextContent("hosted-cached");
+      await expect
+        .element(page.getByText("Cloud history is readable before this Mac reconnects"))
+        .toBeVisible();
+      expect(useHostedHubStore.getState().sessionEstablished).toBe(false);
+      expect(readHostedNodeMutationLease(target.environmentId)).toBeNull();
+      expect(fakeWindow!.location.pathname).toBe(
+        `/node/${target.id}/${target.environmentId}/${threadId}`,
+      );
+    },
+  );
 
   it("keeps the exact cached routed thread mounted while its node reconnects", async () => {
     const target = node("node_aaaaaaaaaaaaaaaaaaaaaa");

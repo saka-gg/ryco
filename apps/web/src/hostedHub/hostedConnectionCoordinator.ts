@@ -35,6 +35,7 @@ import { startBrowserHostedThreadReadCache } from "./threadReadCache";
 import {
   canShowHostedReadPreview,
   readHostedReadCache,
+  purgeHostedReadCacheAuthority,
   subscribeHostedReadCache,
 } from "./readCache";
 import {
@@ -454,6 +455,10 @@ export function startHostedWorkspaceCoordinator(input?: {
   const snapshots = new Map<EnvironmentId, WorkspaceMetadataSnapshot>();
   let accountKey: string | null = null;
   let activeAccountId: string | null = null;
+  let activeAuthority: string | null = null;
+  let authorityResetPending = false;
+  let authorityResetSequence = 0;
+  let authorityCleanup: Promise<void> = Promise.resolve();
   let publishTimer: unknown = null;
   let disposed = false;
   let syncGeneration = 0;
@@ -687,6 +692,7 @@ export function startHostedWorkspaceCoordinator(input?: {
   retryHomeDiscovery = retryDiscovery;
 
   const synchronize = async () => {
+    if (disposed) return;
     const generation = ++syncGeneration;
     const state = hostedHubStore.getState();
     // A failed session check does not prove sign-out. Retain the remembered
@@ -698,16 +704,49 @@ export function startHostedWorkspaceCoordinator(input?: {
     }
     const accountId = state.accountStatus === "authenticated" ? (state.account?.id ?? null) : null;
     const nextAccountKey = accountId ? JSON.stringify([hubOrigin, accountId]) : null;
+    const nextAuthority = accountId
+      ? JSON.stringify([
+          hubOrigin,
+          accountId,
+          state.session?.id ?? null,
+          state.session?.activeSpaceId ?? null,
+        ])
+      : null;
     const previousAccountId = activeAccountId;
+    const previousAuthority = activeAuthority;
     activeAccountId = accountId;
-    if (previousAccountId && accountId !== previousAccountId) {
+    activeAuthority = nextAuthority;
+    if (previousAuthority && nextAuthority !== previousAuthority) {
+      // Fence the visible projection synchronously, before storage or another
+      // session's cache response can complete.
+      accountKey = null;
+      authorityResetPending = true;
+      const resetSequence = ++authorityResetSequence;
       releaseDiscovery();
       failedDiscoveryEnvironments.clear();
-      await cache.purgeAccount({ hubOrigin, accountId: previousAccountId }).catch(() => undefined);
       snapshots.clear();
-      hostedWebConnectionScopes.reset();
+      // Mounted route leases express intent, not authority. Preserve them
+      // across same-account credential/Space changes so fresh admission can
+      // reconnect unchanged routes; an account switch discards that intent.
+      if (accountId !== previousAccountId) hostedWebConnectionScopes.reset();
       clearWebHostedAccountScopedState();
+      publish([]);
+      const cleanup = Promise.all([
+        authorityCleanup,
+        previousAccountId
+          ? cache.purgeAccount({ hubOrigin, accountId: previousAccountId }).catch(() => undefined)
+          : Promise.resolve(),
+        purgeHostedReadCacheAuthority().catch(() => undefined),
+      ]).then(() => undefined);
+      authorityCleanup = cleanup;
+      await cleanup;
+      if (resetSequence === authorityResetSequence) {
+        authorityResetPending = false;
+        if (!disposed) void synchronize();
+      }
+      return;
     }
+    if (authorityResetPending) return;
     if (!accountId) {
       accountKey = null;
       releaseDiscovery();
@@ -729,6 +768,7 @@ export function startHostedWorkspaceCoordinator(input?: {
           .map((node) => node.environmentId),
       );
       for (const record of cached) {
+        if (disposed || generation !== syncGeneration || authorityResetPending) return;
         if (!eligibleEnvironmentIds.has(record.namespace.environmentId)) {
           await cache.purgeEnvironment(record.namespace).catch(() => undefined);
           continue;
@@ -745,6 +785,7 @@ export function startHostedWorkspaceCoordinator(input?: {
       }
     }
 
+    if (disposed || generation !== syncGeneration || authorityResetPending) return;
     const selectedEnvironmentId = state.selectedNode?.environmentId ?? null;
     const activeAttempt =
       selectedEnvironmentId !== null &&
@@ -768,6 +809,7 @@ export function startHostedWorkspaceCoordinator(input?: {
     );
     if (state.directoryStatus === "ready") {
       for (const [environmentId] of Array.from(snapshots)) {
+        if (disposed || generation !== syncGeneration || authorityResetPending) return;
         const machine = machineByEnvironment.get(environmentId);
         if (machine?.cacheDisposition === "available") continue;
         snapshots.delete(environmentId);
@@ -788,7 +830,7 @@ export function startHostedWorkspaceCoordinator(input?: {
     if (publishTimer !== null) return;
     publishTimer = schedule(() => {
       publishTimer = null;
-      if (disposed || !activeAccountId) return;
+      if (disposed || authorityResetPending || !activeAccountId) return;
       const machines = hostedWorkspaceSnapshot.machines;
       for (const machine of machines) {
         if (!machine.canReadMetadata) continue;

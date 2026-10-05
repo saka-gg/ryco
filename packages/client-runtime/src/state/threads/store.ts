@@ -119,6 +119,10 @@ export interface EnvironmentState {
   // rows must be presented as last-known state, never as live.
   // ---------------------------------------------------------------------------
   hydratedFromCacheAt?: number | undefined;
+  /** A disconnected live shell/body remains authoritative over Hub display snapshots. */
+  retainedLiveSnapshot?: boolean | undefined;
+  /** Bodies hydrated from display caches may refresh; live detail snapshots always win. */
+  cachedMessageThreadIds?: Record<ThreadId, true> | undefined;
 }
 
 export interface AppState {
@@ -721,6 +725,12 @@ function removeId<T extends string>(ids: readonly T[], id: T): T[] {
   return ids.filter((value) => value !== id);
 }
 
+function markThreadMessagesLive(state: EnvironmentState, threadId: ThreadId) {
+  if (!state.cachedMessageThreadIds?.[threadId]) return state.cachedMessageThreadIds;
+  const { [threadId]: _cached, ...rest } = state.cachedMessageThreadIds ?? {};
+  return rest;
+}
+
 function buildMessageSlice(thread: Thread): {
   ids: MessageId[];
   byId: Record<MessageId, ChatMessage>;
@@ -917,6 +927,7 @@ function writeThreadState(
     const nextMessageSlice = buildMessageSlice(resolvedThread);
     nextState = {
       ...nextState,
+      cachedMessageThreadIds: markThreadMessagesLive(nextState, resolvedThread.id),
       messageIdsByThreadId: {
         ...nextState.messageIdsByThreadId,
         [resolvedThread.id]: nextMessageSlice.ids,
@@ -1126,6 +1137,7 @@ function removeThreadState(state: EnvironmentState, threadId: ThreadId): Environ
     threadTurnStateById,
     messageIdsByThreadId,
     messageByThreadId,
+    cachedMessageThreadIds: markThreadMessagesLive(state, threadId),
     pendingMessagesByThreadId,
     activityIdsByThreadId,
     activityByThreadId,
@@ -1642,6 +1654,7 @@ function applyThreadMessageSentEvent(
   let nextState: EnvironmentState = {
     ...state,
     pendingMessagesByThreadId: nextPendingMessagesByThreadId,
+    cachedMessageThreadIds: markThreadMessagesLive(state, threadId),
     messageIdsByThreadId:
       nextIds === currentIds
         ? state.messageIdsByThreadId
@@ -1887,6 +1900,10 @@ function syncEnvironmentShellSnapshot(
     threadTurnStateById: Object.create(null) as EnvironmentState["threadTurnStateById"],
     sidebarThreadSummaryById: Object.create(null) as EnvironmentState["sidebarThreadSummaryById"],
     messageIdsByThreadId: retainThreadScopedRecord(state.messageIdsByThreadId, nextThreadIds),
+    cachedMessageThreadIds: retainThreadScopedRecord(
+      state.cachedMessageThreadIds ?? {},
+      nextThreadIds,
+    ),
     messageByThreadId: retainThreadScopedRecord(state.messageByThreadId, nextThreadIds),
     pendingMessagesByThreadId: retainThreadScopedRecord(
       state.pendingMessagesByThreadId,
@@ -1916,6 +1933,7 @@ function syncEnvironmentShellSnapshot(
     // A live snapshot supersedes any cache-hydrated rows; the environment is
     // no longer presenting last-known state.
     hydratedFromCacheAt: undefined,
+    retainedLiveSnapshot: undefined,
   };
 
   // These containers belong exclusively to the new snapshot. Build them once,
@@ -2014,6 +2032,7 @@ function mergeThreadHistoryPageState(
     const retainedIds = new Set(ids);
     nextState = {
       ...nextState,
+      cachedMessageThreadIds: markThreadMessagesLive(state, threadId),
       messageIdsByThreadId: {
         ...nextState.messageIdsByThreadId,
         [threadId]: ids,
@@ -3252,11 +3271,59 @@ export function hydrateEnvironmentStateFromCache(
     previous &&
     (!options?.replaceCached ||
       previous.bootstrapComplete ||
-      previous.hydratedFromCacheAt === undefined ||
-      cached.capturedAt < previous.hydratedFromCacheAt)
+      previous.hydratedFromCacheAt === undefined)
   ) {
     return state;
   }
+
+  if (previous?.retainedLiveSnapshot) {
+    // The Hub upload clock cannot order data against a live projection. Fill
+    // missing or previously cache-filled bodies; even a known-empty live body wins.
+    let next = previous;
+    for (const thread of cached.threads) {
+      const id = thread.shell.id;
+      if (
+        !thread.content ||
+        thread.shell.environmentId !== environmentId ||
+        thread.summary.environmentId !== environmentId ||
+        !previous.threadShellById[id] ||
+        (Object.hasOwn(previous.messageByThreadId, id) && !previous.cachedMessageThreadIds?.[id]) ||
+        (previous.pendingMessagesByThreadId[id]?.length ?? 0) > 0
+      )
+        continue;
+      const ids = previous.messageIdsByThreadId[id];
+      if (
+        ids?.length === thread.content.messages.length &&
+        thread.content.messages.every((message, index) => {
+          const existing = previous.messageByThreadId[id]?.[message.id];
+          return (
+            ids[index] === message.id &&
+            existing?.role === message.role &&
+            existing.text === message.text &&
+            existing.createdAt === message.createdAt &&
+            existing.completedAt === message.completedAt &&
+            existing.turnId === message.turnId
+          );
+        })
+      )
+        continue;
+      if (next === previous) {
+        next = {
+          ...previous,
+          cachedMessageThreadIds: { ...previous.cachedMessageThreadIds },
+          messageIdsByThreadId: { ...previous.messageIdsByThreadId },
+          messageByThreadId: { ...previous.messageByThreadId },
+        };
+      }
+      next.cachedMessageThreadIds![id] = true;
+      next.messageIdsByThreadId[id] = thread.content.messages.map((message) => message.id);
+      next.messageByThreadId[id] = Object.fromEntries(
+        thread.content.messages.map((message) => [message.id, { ...message, streaming: false }]),
+      );
+    }
+    return next === previous ? state : commitEnvironmentState(state, environmentId, next);
+  }
+  if (previous && cached.capturedAt < previous.hydratedFromCacheAt!) return state;
 
   const environmentState: EnvironmentState = {
     ...initialEnvironmentState,
@@ -3267,6 +3334,7 @@ export function hydrateEnvironmentStateFromCache(
       cached.worktrees.filter((worktree) => worktree.environmentId === environmentId),
     ),
     hydratedFromCacheAt: cached.capturedAt,
+    cachedMessageThreadIds: {},
     threadIds: [],
     threadIdsByProjectId: Object.create(null) as EnvironmentState["threadIdsByProjectId"],
     threadShellById: Object.create(null) as EnvironmentState["threadShellById"],
@@ -3299,7 +3367,7 @@ export function hydrateEnvironmentStateFromCache(
     };
     const content =
       thread.content ??
-      (previous
+      (previous && Object.hasOwn(previous.messageByThreadId, id)
         ? {
             messages: (previous.messageIdsByThreadId[id] ?? []).flatMap((messageId) => {
               const message = previous.messageByThreadId[id]?.[messageId];
@@ -3308,6 +3376,7 @@ export function hydrateEnvironmentStateFromCache(
           }
         : undefined);
     if (content) {
+      environmentState.cachedMessageThreadIds![id] = true;
       environmentState.messageIdsByThreadId[id] = content.messages.map((message) => message.id);
       environmentState.messageByThreadId[id] = Object.fromEntries(
         content.messages.map((message) => [message.id, { ...message, streaming: false }]),
@@ -3353,6 +3422,8 @@ export function demoteEnvironmentStateToCachedSnapshot(
     sidebarThreadSummaryById,
     bootstrapComplete: false,
     hydratedFromCacheAt: demotedAt,
+    retainedLiveSnapshot:
+      environmentState.bootstrapComplete || environmentState.retainedLiveSnapshot,
   });
 }
 

@@ -1,4 +1,5 @@
 import { EnvironmentId, ProjectId, ThreadId } from "@ryco/contracts";
+import * as HostedIdentity from "@ryco/contracts/hosted-identity";
 import type {
   WorkspaceMetadataCache,
   WorkspaceMetadataSnapshot,
@@ -172,6 +173,152 @@ async function complete(environmentId: EnvironmentId, empty = false) {
 }
 
 describe("hosted home discovery", () => {
+  it("does not clear the latest session when an earlier namespace purge finishes", async () => {
+    history.push("/account");
+    const session = {
+      id: "session-a",
+      accountId: account.id,
+      createdAt: 1,
+      expiresAt: 9999999999999,
+      lastSeenAt: 1,
+      revokedAt: null,
+      revocationReasonCode: null,
+    };
+    hostedHubStore.setState({ session });
+    let resume: (() => void) | undefined;
+    const purgeAccount = vi.fn<WorkspaceMetadataCache["purgeAccount"]>(async () => undefined);
+    purgeAccount.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          resume = resolve;
+        }),
+    );
+    stop = startHostedWorkspaceCoordinator({
+      hubOrigin: "https://hub.example.test",
+      cache: {
+        list,
+        load: async () => null,
+        replace: async () => undefined,
+        purgeAccount,
+        purgeEnvironment: async () => undefined,
+      },
+    });
+    await settle();
+    hostedHubStore.setState({ session: { ...session, id: "session-b" } });
+    hostedHubStore.setState({ session: { ...session, id: "session-c" } });
+    await settle();
+    const environmentId = nodes[0]!.environmentId;
+    useStore
+      .getState()
+      .hydrateEnvironmentStateFromCache(
+        workspaceMetadataToCachedShellSnapshot(metadata(environmentId)),
+        environmentId,
+      );
+    resume?.();
+    await settle();
+    expect(useStore.getState().environmentStateById[environmentId]).toBeDefined();
+    expect(purgeAccount).toHaveBeenCalledTimes(2);
+  });
+  it("fences a paused cached-directory pass when its session changes", async () => {
+    history.push("/account");
+    const session = {
+      id: "session-a",
+      accountId: account.id,
+      createdAt: 1,
+      expiresAt: 9999999999999,
+      lastSeenAt: 1,
+      revokedAt: null,
+      revocationReasonCode: null,
+    };
+    hostedHubStore.setState({ session });
+    const old = metadata(node(9).environmentId);
+    const eligible = metadata(nodes[0]!.environmentId);
+    list.mockResolvedValueOnce(
+      [old, eligible].map((snapshot) => ({
+        namespace: {
+          hubOrigin: "https://hub.example.test",
+          accountId: account.id,
+          environmentId: snapshot.environmentId,
+        },
+        snapshot,
+        payloadBytes: 1,
+        updatedAt: 1,
+      })),
+    );
+    let resume: (() => void) | undefined;
+    const purgeEnvironment = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resume = resolve;
+        }),
+    );
+    stop = startHostedWorkspaceCoordinator({
+      hubOrigin: "https://hub.example.test",
+      cache: {
+        list,
+        load: async () => null,
+        replace: async () => undefined,
+        purgeAccount: async () => undefined,
+        purgeEnvironment,
+      },
+    });
+    await settle();
+    expect(purgeEnvironment).toHaveBeenCalledOnce();
+    hostedHubStore.setState({ session: { ...session, id: "session-b" } });
+    await settle();
+    resume?.();
+    await settle();
+    expect(useStore.getState().environmentStateById[eligible.environmentId]).toBeUndefined();
+  });
+  it.each(["session", "space"] as const)(
+    "clears retained rows synchronously on a same-account %s change",
+    async (change) => {
+      const session = {
+        id: "session-a",
+        accountId: account.id,
+        createdAt: 1,
+        expiresAt: 9999999999999,
+        lastSeenAt: 1,
+        revokedAt: null,
+        revocationReasonCode: null,
+      };
+      hostedHubStore.setState({ session });
+      history.push("/account");
+      start();
+      await settle();
+      const environmentId = nodes[0]!.environmentId;
+      useStore
+        .getState()
+        .hydrateEnvironmentStateFromCache(
+          workspaceMetadataToCachedShellSnapshot(metadata(environmentId)),
+          environmentId,
+        );
+      expect(useStore.getState().environmentStateById[environmentId]).toBeDefined();
+      const release = hostedWebConnectionScopes.retain(environmentId, {
+        type: "thread-detail",
+        threadId: ThreadId.make("thread"),
+      });
+      hostedHubStore.setState({
+        session:
+          change === "session"
+            ? { ...session, id: "session-b" }
+            : {
+                ...session,
+                activeSpaceId: HostedIdentity.HubSpaceId.make("space_aaaaaaaaaaaaaaaaaaaaaa"),
+              },
+      });
+      expect(useStore.getState().environmentStateById[environmentId]).toBeUndefined();
+      await settle();
+      expect(selectSidebarThreadsAcrossEnvironments(useStore.getState())).toHaveLength(0);
+      expect(hostedWebConnectionScopes.list()).toEqual([
+        expect.objectContaining({
+          environmentId,
+          scope: { type: "thread-detail", threadId: ThreadId.make("thread") },
+        }),
+      ]);
+      release();
+    },
+  );
   it("fills an empty home from two devices in sequence without changing its URL", async () => {
     start();
     await settle();

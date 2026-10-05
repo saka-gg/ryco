@@ -1,5 +1,6 @@
 import { hostedHubController, hostedHubStore } from "@ryco/client-runtime/authorization";
 import type { HostedHubSessionOptions } from "@ryco/client-runtime/relay";
+import * as HostedIdentity from "@ryco/contracts/hosted-identity";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import {
   createWebHubRelaySocket,
@@ -117,6 +118,23 @@ describe("browser Hub connection ownership", () => {
     stop = watchWebHostedHubSession();
     created[0]!.options.onFailure?.({ kind: "authentication", retryable: false });
     expect(expire).toHaveBeenCalledOnce();
+  });
+
+  it("rotates the subscription on a same-session Space change and fences old invalidations", () => {
+    authenticate();
+    stop = watchWebHostedHubSession();
+    const old = created[0]!;
+    hostedHubStore.setState({
+      session: {
+        ...session,
+        activeSpaceId: HostedIdentity.HubSpaceId.make("space_aaaaaaaaaaaaaaaaaaaaaa"),
+      },
+    });
+    expect(old.dispose).toHaveBeenCalledOnce();
+    expect(created).toHaveLength(2);
+    old.options.onInvalidate?.({ directory: true, threadCache: true });
+    expect(hostedHubController.notifyDirectoryInvalidated).not.toHaveBeenCalled();
+    expect(isWebHubSessionOnline()).toBe(true);
   });
 
   it("publishes terminal protocol failure without granting or expiring account authority", () => {

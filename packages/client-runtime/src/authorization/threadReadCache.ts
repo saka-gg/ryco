@@ -25,6 +25,8 @@ export interface HostedThreadReadCachePorts {
   /** Account-scoped Hub subscription. Notifications contain no thread content. */
   readonly subscribeInvalidation?: (listener: () => void) => () => void;
   readonly isSubscriptionOnline?: () => boolean;
+  /** A retained live projection became eligible for display-only cache fill. */
+  readonly subscribeProjection?: (listener: () => void) => () => void;
   readonly subscribeVisibility?: (listener: () => void) => () => void;
   readonly readShell: (
     nodeId: string,
@@ -68,6 +70,7 @@ export function startHostedThreadReadCache(ports: HostedThreadReadCachePorts): (
   let activeShellRequests = 0;
   let invalidationVersion = 0;
   let threadInvalidated = false;
+  let projectionInvalidated = false;
   const shells = new Map<string, ThreadReadCacheShellResponse>();
   const details = new Map<string, Map<ThreadId, ThreadReadCacheThreadResponse>>();
   const requests = new Map<string, AbortController>();
@@ -78,7 +81,16 @@ export function startHostedThreadReadCache(ports: HostedThreadReadCachePorts): (
     return state.accountStatus === "authenticated" &&
       state.directoryStatus === "ready" &&
       (state.browserStatus === "current" || state.browserStatus === "synchronizing")
-      ? state.nodes.filter((node) => !node.revokedAt && !node.capabilities?.nativeClientRequired)
+      ? state.nodes.filter(
+          (node) =>
+            !node.revokedAt &&
+            !node.capabilities?.nativeClientRequired &&
+            !(
+              node.id === state.selectedNode?.id &&
+              (state.selectionStatus === "revoked" ||
+                state.selectionStatus === "authorization-removed")
+            ),
+        )
       : [];
   };
   const current = (node: HostedHubNode, epoch: number, signal: AbortSignal) =>
@@ -199,7 +211,7 @@ export function startHostedThreadReadCache(ports: HostedThreadReadCachePorts): (
     const state = ports.readState();
     const nextAccountKey =
       state.accountStatus === "authenticated" && state.account
-        ? JSON.stringify([state.account.id, state.session?.id])
+        ? JSON.stringify([state.account.id, state.session?.id, state.session?.activeSpaceId])
         : null;
     if (nextAccountKey !== accountKey) {
       abort();
@@ -224,6 +236,11 @@ export function startHostedThreadReadCache(ports: HostedThreadReadCachePorts): (
       routeKey = "";
     }
     if (!ports.isVisible()) return;
+    if (projectionInvalidated) {
+      projectionInvalidated = false;
+      const node = eligible.find((candidate) => candidate.id === ports.readRoute().nodeId);
+      if (node) apply(node);
+    }
     if (
       nextShellRefresh === 0 ||
       (!ports.isSubscriptionOnline?.() && nextShellRefresh <= ports.now())
@@ -237,11 +254,17 @@ export function startHostedThreadReadCache(ports: HostedThreadReadCachePorts): (
         controller.abort();
         requests.delete(key);
       }
+      const routed = eligible.find((node) => node.id === ports.readRoute().nodeId);
+      if (routed) apply(routed);
       refreshThread();
     } else if (threadInvalidated) {
       refreshThread();
     }
   };
+  const unsubscribeProjection = ports.subscribeProjection?.(() => {
+    projectionInvalidated = true;
+    reconcile();
+  });
   const unsubscribeState = ports.subscribeState(reconcile);
   const unsubscribeRoute = ports.subscribeRoute(reconcile);
   const unsubscribeVisibility = ports.subscribeVisibility?.(reconcile);
@@ -264,6 +287,7 @@ export function startHostedThreadReadCache(ports: HostedThreadReadCachePorts): (
     unsubscribeRoute();
     unsubscribeInvalidation?.();
     unsubscribeVisibility?.();
+    unsubscribeProjection?.();
     ports.clearInterval(timer);
   };
 }

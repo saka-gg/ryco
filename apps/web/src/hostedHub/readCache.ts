@@ -87,6 +87,7 @@ let bootstrapPending = true;
 let started = false;
 let invalidatedByAnotherTab = false;
 let lastAuthenticatedSession: string | null = null;
+let authorityPurge: Promise<void> | null = null;
 let pending: Promise<void> = Promise.resolve();
 let timer: ReturnType<typeof setTimeout> | null = null;
 const environments = new Map<EnvironmentId, CachedEnvironment>();
@@ -123,6 +124,19 @@ async function purge(clearUi: boolean) {
     /* Storage can be disabled independently of IndexedDB. */
   }
   if (id) await getHostedReadVault().purge(id);
+}
+
+/** An authenticated namespace change cannot retain the preceding read model. */
+export function purgeHostedReadCacheAuthority(): Promise<void> {
+  const previous = authorityPurge;
+  const operation = Promise.allSettled([previous, purge(true)]).then(() => undefined);
+  authorityPurge = operation;
+  void operation
+    .finally(() => {
+      if (authorityPurge === operation) authorityPurge = null;
+    })
+    .catch(() => undefined);
+  return operation;
 }
 
 function decodeEnvironment(value: unknown, environmentId: EnvironmentId): CachedEnvironment | null {
@@ -273,6 +287,7 @@ async function restore(): Promise<boolean> {
 }
 
 async function reconcile() {
+  if (authorityPurge) await authorityPurge;
   const state = hostedHubStore.getState();
   if (!snapshot.enabled || invalidatedByAnotherTab) return;
   const terminal =
@@ -306,6 +321,19 @@ async function reconcile() {
   }
   const owner = account;
   if (!owner) return;
+  const generation = revision;
+  const isCurrent = () => {
+    const latest = hostedHubStore.getState();
+    return (
+      generation === revision &&
+      owner === account &&
+      latest.accountStatus === "authenticated" &&
+      latest.account?.id === state.account?.id &&
+      latest.session?.id === state.session?.id &&
+      latest.session?.activeSpaceId === state.session?.activeSpaceId &&
+      latest.nodes === state.nodes
+    );
+  };
   const current = hostedHubStore.getState();
   if (
     current.accountStatus !== "authenticated" ||
@@ -327,7 +355,8 @@ async function reconcile() {
       )
       .slice(0, 16)
       .map((node) => ({ nodeId: node.id, environmentId: node.environmentId, label: node.label }));
-    for (const environmentId of environments.keys()) {
+    for (const environmentId of Array.from(environments.keys())) {
+      if (!isCurrent()) return;
       if (nodes.some((node) => node.environmentId === environmentId)) continue;
       environments.delete(environmentId);
       useStore.getState().removeEnvironmentState(environmentId);
@@ -343,8 +372,9 @@ async function reconcile() {
         if (parseScopedThreadKey(key)?.environmentId === environmentId) scrollPositions.delete(key);
       await getHostedReadVault().remove(owner, environmentId);
     }
+    if (!isCurrent()) return;
     publish({ nodes, snapshots: [...environments.values()].map((record) => record.metadata) });
-    if (owner !== account) return;
+    if (!isCurrent()) return;
     await getHostedReadVault().write(owner, "catalog", { nodes });
     scheduleSave();
   }
@@ -452,7 +482,11 @@ export async function bootstrapWithHostedReadCache(bootstrap: () => Promise<void
     hostedHubStore.subscribe(() => {
       const state = hostedHubStore.getState();
       if (state.accountStatus === "authenticated" && state.account) {
-        const session = JSON.stringify([state.account.id, state.session?.id ?? null]);
+        const session = JSON.stringify([
+          state.account.id,
+          state.session?.id ?? null,
+          state.session?.activeSpaceId ?? null,
+        ]);
         if (session !== lastAuthenticatedSession) invalidatedByAnotherTab = false;
         lastAuthenticatedSession = session;
       }
