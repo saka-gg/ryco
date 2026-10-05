@@ -46,6 +46,8 @@ export function deriveOrchestrationBatchEffects(
         break;
       }
 
+      // Trash keeps the unsent draft: restoring the conversation brings it back intact.
+      case "thread.trashed":
       case "thread.archived": {
         threadLifecycleEffects.set(event.payload.threadId, {
           clearPromotedDraft: false,

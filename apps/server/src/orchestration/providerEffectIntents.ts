@@ -223,6 +223,7 @@ export const planProviderEffectIntent = (event: OrchestrationEvent): ProviderEff
       return EMPTY_PROVIDER_EFFECT_INTENT_PLAN;
     }
     case "thread.deleted":
+    case "thread.trashed":
       return settlementPlan(event, [{ _tag: "Thread", threadId: event.payload.threadId }]);
     default:
       return EMPTY_PROVIDER_EFFECT_INTENT_PLAN;

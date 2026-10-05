@@ -1,18 +1,22 @@
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArchiveIcon,
+  ArchiveRestoreIcon,
   ChevronRightIcon,
   CopyIcon,
   Edit3Icon,
   ExternalLinkIcon,
+  FolderMinusIcon,
+  FolderPlusIcon,
   FolderRootIcon,
+  type LucideIcon,
   MoreHorizontalIcon,
   PlusIcon,
   RotateCcwIcon,
-  Trash2Icon,
 } from "lucide-react";
+import { listWorkspaceLifecycleActions } from "@ryco/client-runtime/state/lifecycle";
 import { scopedThreadKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
-import { EnvironmentId, ProjectId } from "@ryco/contracts";
+import { EnvironmentId, ProjectId, type WorkspaceLifecycleAction } from "@ryco/contracts";
 import { cn } from "../../lib/utils";
 import type { GitStatusTarget } from "../../lib/gitStatusState";
 import {
@@ -67,14 +71,12 @@ export interface SidebarWorktreeListProps {
   ) => React.ReactNode;
   treeProject: SidebarTreeProject;
   visibleThreadKeys: ReadonlySet<string> | null;
-  onArchiveWorktree: (worktree: SidebarTreeWorktree) => void;
   onCopyWorktreePath: (worktree: SidebarTreeWorktree) => void;
-  onDeleteWorktree: (worktree: SidebarTreeWorktree) => void;
+  onWorkspaceAction: (worktree: SidebarTreeWorktree, action: WorkspaceLifecycleAction) => void;
   onNewSession: (worktree: SidebarTreeWorktree) => void;
   onOpenInEditor: (worktree: SidebarTreeWorktree) => void;
   onOpenWorktree: (worktree: SidebarTreeWorktree) => void;
   onRenameWorktree: (worktree: SidebarTreeWorktree, title: string) => Promise<void> | void;
-  onRestoreWorktree: (worktree: SidebarTreeWorktree) => void;
 }
 
 export type SidebarThreadGitStatusTarget = GitStatusTarget & {
@@ -164,9 +166,8 @@ export const SidebarWorktreeList = memo(function SidebarWorktreeList(
             resolveThreadGitStatusTarget={props.resolveThreadGitStatusTarget}
             visibleThreadKeys={props.visibleThreadKeys}
             worktree={worktree}
-            onArchiveWorktree={props.onArchiveWorktree}
             onCopyWorktreePath={props.onCopyWorktreePath}
-            onDeleteWorktree={props.onDeleteWorktree}
+            onWorkspaceAction={props.onWorkspaceAction}
             onNewSession={props.onNewSession}
             onOpenInEditor={props.onOpenInEditor}
             onOpenLinkedItem={(item) => handleOpenLinkedItem(worktree, item)}
@@ -194,9 +195,8 @@ export const SidebarWorktreeList = memo(function SidebarWorktreeList(
                     key={worktree.worktree.worktreeId}
                     projectCwd={resolveWorktreeProjectCwd(worktree, props.treeProject)}
                     worktree={worktree}
-                    onDeleteWorktree={props.onDeleteWorktree}
+                    onWorkspaceAction={props.onWorkspaceAction}
                     onOpenLinkedItem={(item) => handleOpenLinkedItem(worktree, item)}
-                    onRestoreWorktree={props.onRestoreWorktree}
                   />
                 ))
               : null}
@@ -243,17 +243,20 @@ function resolveWorktreeProjectCwd(
 function ArchivedWorktreeRow(props: {
   projectCwd: string;
   worktree: SidebarTreeWorktree;
-  onDeleteWorktree: (worktree: SidebarTreeWorktree) => void;
+  onWorkspaceAction: (worktree: SidebarTreeWorktree, action: WorkspaceLifecycleAction) => void;
   onOpenLinkedItem: (item: LinkedWorktreeItem) => void;
-  onRestoreWorktree: (worktree: SidebarTreeWorktree) => void;
 }) {
   const canManage = canManageWorktree(props.worktree.worktree, props.projectCwd);
+  const checkoutRemoved = props.worktree.worktree.checkoutRemovedAt != null;
   return (
     <SidebarMenuSubItem className="w-full" data-thread-selection-safe>
       <div className="ml-3 flex h-7 phone:pointer-coarse:min-h-11 items-center gap-1.5 phone:pointer-coarse:gap-3 rounded-md px-2 text-muted-foreground">
         <ArchiveIcon className="size-3.5 shrink-0" />
         <span className="min-w-0 flex-1 truncate text-xs">
           {getWorktreeDisplayTitle(props.worktree)}
+          {checkoutRemoved ? (
+            <span className="ml-1.5 text-muted-foreground/70">· checkout removed</span>
+          ) : null}
         </span>
         <WorktreeSourceControlBadges
           issueNumber={props.worktree.worktree.issueNumber}
@@ -271,20 +274,34 @@ function ArchivedWorktreeRow(props: {
         <button
           type="button"
           className={`inline-flex size-5 shrink-0 items-center justify-center rounded-md text-muted-foreground/70 hover:bg-secondary hover:text-foreground ${SIDEBAR_ROW_ACTION_COARSE_CLASS_NAME}`}
-          aria-label={`Restore ${props.worktree.worktree.branch}`}
-          onClick={() => props.onRestoreWorktree(props.worktree)}
+          aria-label={`Restore workspace ${props.worktree.worktree.branch}`}
+          title="Restore workspace"
+          onClick={() => props.onWorkspaceAction(props.worktree, "restore")}
         >
           <RotateCcwIcon className="size-3.5" />
         </button>
         {canManage ? (
-          <button
-            type="button"
-            className={`inline-flex size-5 shrink-0 items-center justify-center rounded-md text-muted-foreground/70 hover:bg-secondary hover:text-destructive ${SIDEBAR_ROW_ACTION_COARSE_CLASS_NAME}`}
-            aria-label={`Delete ${props.worktree.worktree.branch}`}
-            onClick={() => props.onDeleteWorktree(props.worktree)}
-          >
-            <Trash2Icon className="size-3.5" />
-          </button>
+          checkoutRemoved ? (
+            <button
+              type="button"
+              className={`inline-flex size-5 shrink-0 items-center justify-center rounded-md text-muted-foreground/70 hover:bg-secondary hover:text-foreground ${SIDEBAR_ROW_ACTION_COARSE_CLASS_NAME}`}
+              aria-label={`Recreate checkout ${props.worktree.worktree.branch}`}
+              title="Recreate checkout"
+              onClick={() => props.onWorkspaceAction(props.worktree, "recreate-checkout")}
+            >
+              <FolderPlusIcon className="size-3.5" />
+            </button>
+          ) : (
+            <button
+              type="button"
+              className={`inline-flex size-5 shrink-0 items-center justify-center rounded-md text-muted-foreground/70 hover:bg-secondary hover:text-destructive ${SIDEBAR_ROW_ACTION_COARSE_CLASS_NAME}`}
+              aria-label={`Remove checkout ${props.worktree.worktree.branch}`}
+              title="Remove checkout (keeps history and branch)"
+              onClick={() => props.onWorkspaceAction(props.worktree, "remove-checkout")}
+            >
+              <FolderMinusIcon className="size-3.5" />
+            </button>
+          )
         ) : null}
       </div>
     </SidebarMenuSubItem>
@@ -303,9 +320,8 @@ const SidebarWorktreeSection = memo(function SidebarWorktreeSection(props: {
   resolveThreadGitStatusTarget: (thread: SidebarTreeThread) => SidebarThreadGitStatusTarget | null;
   visibleThreadKeys: ReadonlySet<string> | null;
   worktree: SidebarTreeWorktree;
-  onArchiveWorktree: (worktree: SidebarTreeWorktree) => void;
   onCopyWorktreePath: (worktree: SidebarTreeWorktree) => void;
-  onDeleteWorktree: (worktree: SidebarTreeWorktree) => void;
+  onWorkspaceAction: (worktree: SidebarTreeWorktree, action: WorkspaceLifecycleAction) => void;
   onNewSession: (worktree: SidebarTreeWorktree) => void;
   onOpenInEditor: (worktree: SidebarTreeWorktree) => void;
   onOpenLinkedItem: (item: LinkedWorktreeItem) => void;
@@ -524,7 +540,7 @@ const SidebarWorktreeSection = memo(function SidebarWorktreeSection(props: {
                 onClick={(event) => {
                   event.preventDefault();
                   event.stopPropagation();
-                  props.onArchiveWorktree(props.worktree);
+                  props.onWorkspaceAction(props.worktree, "archive");
                 }}
               >
                 <ArchiveIcon className="size-3" />
@@ -546,9 +562,8 @@ const SidebarWorktreeSection = memo(function SidebarWorktreeSection(props: {
             <WorktreeMenu
               canManage={canManage}
               worktree={props.worktree}
-              onArchiveWorktree={props.onArchiveWorktree}
               onCopyWorktreePath={props.onCopyWorktreePath}
-              onDeleteWorktree={props.onDeleteWorktree}
+              onWorkspaceAction={props.onWorkspaceAction}
               onNewSession={props.onNewSession}
               onOpenInEditor={props.onOpenInEditor}
               onRenameWorktree={startRename}
@@ -558,9 +573,8 @@ const SidebarWorktreeSection = memo(function SidebarWorktreeSection(props: {
             <WorktreeMenuItems
               canManage={canManage}
               worktree={props.worktree}
-              onArchiveWorktree={props.onArchiveWorktree}
               onCopyWorktreePath={props.onCopyWorktreePath}
-              onDeleteWorktree={props.onDeleteWorktree}
+              onWorkspaceAction={props.onWorkspaceAction}
               onNewSession={props.onNewSession}
               onOpenInEditor={props.onOpenInEditor}
               onRenameWorktree={startRename}
@@ -630,9 +644,8 @@ const SidebarWorktreeThreadRows = memo(function SidebarWorktreeThreadRows(props:
 function WorktreeMenuItems(props: {
   canManage: boolean;
   worktree: SidebarTreeWorktree;
-  onArchiveWorktree: (worktree: SidebarTreeWorktree) => void;
   onCopyWorktreePath: (worktree: SidebarTreeWorktree) => void;
-  onDeleteWorktree: (worktree: SidebarTreeWorktree) => void;
+  onWorkspaceAction: (worktree: SidebarTreeWorktree, action: WorkspaceLifecycleAction) => void;
   onNewSession: (worktree: SidebarTreeWorktree) => void;
   onOpenInEditor: (worktree: SidebarTreeWorktree) => void;
   onRenameWorktree: () => void;
@@ -655,29 +668,43 @@ function WorktreeMenuItems(props: {
         <CopyIcon className="size-4" />
         Copy path
       </MenuItem>
-      <MenuSeparator />
-      <MenuItem disabled={!props.canManage} onClick={() => props.onArchiveWorktree(props.worktree)}>
-        <ArchiveIcon className="size-4" />
-        Archive worktree
-      </MenuItem>
-      <MenuItem
-        disabled={!props.canManage}
-        variant="destructive"
-        onClick={() => props.onDeleteWorktree(props.worktree)}
-      >
-        <Trash2Icon className="size-4" />
-        Delete worktree
-      </MenuItem>
+      {props.canManage ? <MenuSeparator /> : null}
+      {listWorkspaceLifecycleActions(
+        {
+          archivedAt: props.worktree.worktree.archivedAt ?? null,
+          checkoutRemovedAt: props.worktree.worktree.checkoutRemovedAt ?? null,
+        },
+        { protectedWorkspace: !props.canManage },
+      ).map((item) => {
+        const Icon = WORKSPACE_ACTION_ICONS[item.action];
+        return (
+          <MenuItem
+            key={item.action}
+            variant={item.destructive ? "destructive" : "default"}
+            onClick={() => props.onWorkspaceAction(props.worktree, item.action)}
+          >
+            <Icon className="size-4" />
+            {item.label}
+          </MenuItem>
+        );
+      })}
     </>
   );
 }
 
+const WORKSPACE_ACTION_ICONS: Record<WorkspaceLifecycleAction, LucideIcon> = {
+  archive: ArchiveIcon,
+  restore: ArchiveRestoreIcon,
+  "remove-checkout": FolderMinusIcon,
+  "remove-stale-record": FolderMinusIcon,
+  "recreate-checkout": FolderPlusIcon,
+};
+
 function WorktreeMenu(props: {
   canManage: boolean;
   worktree: SidebarTreeWorktree;
-  onArchiveWorktree: (worktree: SidebarTreeWorktree) => void;
   onCopyWorktreePath: (worktree: SidebarTreeWorktree) => void;
-  onDeleteWorktree: (worktree: SidebarTreeWorktree) => void;
+  onWorkspaceAction: (worktree: SidebarTreeWorktree, action: WorkspaceLifecycleAction) => void;
   onNewSession: (worktree: SidebarTreeWorktree) => void;
   onOpenInEditor: (worktree: SidebarTreeWorktree) => void;
   onRenameWorktree: () => void;
@@ -698,9 +725,8 @@ function WorktreeMenu(props: {
         <WorktreeMenuItems
           canManage={props.canManage}
           worktree={props.worktree}
-          onArchiveWorktree={props.onArchiveWorktree}
           onCopyWorktreePath={props.onCopyWorktreePath}
-          onDeleteWorktree={props.onDeleteWorktree}
+          onWorkspaceAction={props.onWorkspaceAction}
           onNewSession={props.onNewSession}
           onOpenInEditor={props.onOpenInEditor}
           onRenameWorktree={props.onRenameWorktree}

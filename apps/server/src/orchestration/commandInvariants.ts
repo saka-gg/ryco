@@ -364,10 +364,10 @@ export function requireThreadAbsent(input: {
   readonly threadId: ThreadId;
 }): Effect.Effect<void, OrchestrationCommandInvariantError> {
   // Deletion is soft and a draft keeps its client-generated id across retries.
-  // Only a live incarnation blocks creation; projections reset incarnation-
-  // scoped state when this id is created again.
+  // Only a live or trashed incarnation blocks creation; projections reset
+  // incarnation-scoped state when a permanently deleted id is created again.
   const existing = findThreadById(input.readModel, input.threadId);
-  if (existing === undefined || existing.deletedAt !== null) {
+  if (existing === undefined || (existing.deletedAt !== null && existing.trashedAt == null)) {
     return Effect.void;
   }
   return Effect.fail(
@@ -405,4 +405,44 @@ export function findThreadWorktree(
     (worktree) =>
       worktree.projectId === thread.projectId && worktree.worktreePath === thread.worktreePath,
   );
+}
+
+export const isThreadTrashed = (thread: Pick<OrchestrationThread, "trashedAt">): boolean =>
+  thread.trashedAt != null;
+
+/** Live = neither in Trash nor permanently deleted. */
+export const isThreadLive = (thread: Pick<OrchestrationThread, "deletedAt">): boolean =>
+  thread.deletedAt === null;
+
+/**
+ * Never-used: no user message and no turn. Only these may be deleted without passing
+ * through Trash (internal rollback of a creation that failed before any work).
+ */
+export const isThreadPristine = (
+  thread: Pick<OrchestrationThread, "messages" | "latestTurn">,
+): boolean => thread.latestTurn === null && !thread.messages.some((m) => m.role === "user");
+
+/**
+ * Why new work cannot start in this thread. A removed checkout is never replaced by
+ * the project root: resuming requires recreating the checkout or another workspace.
+ */
+export function threadLifecycleTurnBlocker(
+  readModel: OrchestrationReadModel,
+  thread: OrchestrationThread,
+): string | null {
+  if (isThreadTrashed(thread))
+    return "This conversation is in Trash. Restore it before continuing.";
+  if (!isThreadLive(thread)) return "This conversation was deleted.";
+  const worktree = findThreadWorktree(readModel, thread);
+  // Only while the thread still targets that checkout: explicitly choosing another
+  // workspace (or the project root) is how a user resumes elsewhere.
+  if (
+    worktree?.checkoutRemovedAt != null &&
+    worktree.worktreePath !== null &&
+    thread.worktreePath !== null &&
+    isSamePathText(thread.worktreePath, worktree.worktreePath)
+  ) {
+    return `The checkout for workspace "${worktree.title ?? worktree.branch}" was removed. Recreate the checkout before continuing; history stays readable.`;
+  }
+  return null;
 }

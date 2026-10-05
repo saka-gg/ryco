@@ -9,6 +9,7 @@ import {
   ListProjectionThreadsByProjectInput,
   ProjectionThread,
   ProjectionThreadRepository,
+  ProjectionTrashedThread,
   AttachProjectionThreadToWorktreeInput,
   SetProjectionThreadManualBucketInput,
   SetProjectionThreadManualPositionInput,
@@ -69,6 +70,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           has_actionable_proposed_plan,
           usage_limit_json,
           deleted_at,
+          trashed_at,
           lineage_parent_thread_id,
           lineage_root_thread_id,
           lineage_relationship
@@ -101,6 +103,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           ${row.hasActionableProposedPlan},
           ${row.usageLimit == null ? null : JSON.stringify(row.usageLimit)},
           ${row.deletedAt},
+          ${row.trashedAt ?? null},
           ${row.lineageParentThreadId},
           ${row.lineageRootThreadId},
           ${row.lineageRelationship}
@@ -133,6 +136,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           has_actionable_proposed_plan = excluded.has_actionable_proposed_plan,
           usage_limit_json = excluded.usage_limit_json,
           deleted_at = excluded.deleted_at,
+          trashed_at = excluded.trashed_at,
           lineage_parent_thread_id = excluded.lineage_parent_thread_id,
           lineage_root_thread_id = excluded.lineage_root_thread_id,
           lineage_relationship = excluded.lineage_relationship
@@ -172,6 +176,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           has_actionable_proposed_plan AS "hasActionableProposedPlan",
           usage_limit_json AS "usageLimit",
           deleted_at AS "deletedAt",
+          trashed_at AS "trashedAt",
           lineage_parent_thread_id AS "lineageParentThreadId",
           lineage_root_thread_id AS "lineageRootThreadId",
           lineage_relationship AS "lineageRelationship"
@@ -213,6 +218,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           has_actionable_proposed_plan AS "hasActionableProposedPlan",
           usage_limit_json AS "usageLimit",
           deleted_at AS "deletedAt",
+          trashed_at AS "trashedAt",
           lineage_parent_thread_id AS "lineageParentThreadId",
           lineage_root_thread_id AS "lineageRootThreadId",
           lineage_relationship AS "lineageRelationship"
@@ -276,6 +282,32 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
       `,
   });
 
+  const listTrashedThreadRows = SqlSchema.findAll({
+    Request: Schema.Struct({ limit: Schema.Number }),
+    Result: ProjectionTrashedThread,
+    execute: ({ limit }) =>
+      sql`
+        SELECT
+          threads.thread_id AS "threadId",
+          threads.project_id AS "projectId",
+          projects.title AS "projectTitle",
+          projects.deleted_at AS "projectDeletedAt",
+          threads.title,
+          threads.branch,
+          threads.worktree_path AS "worktreePath",
+          threads.worktree_id AS "worktreeId",
+          threads.archived_at AS "archivedAt",
+          threads.trashed_at AS "trashedAt",
+          threads.created_at AS "createdAt",
+          threads.updated_at AS "updatedAt"
+        FROM projection_threads threads
+        LEFT JOIN projection_projects projects ON projects.project_id = threads.project_id
+        WHERE threads.trashed_at IS NOT NULL
+        ORDER BY threads.trashed_at DESC, threads.thread_id ASC
+        LIMIT ${limit}
+      `,
+  });
+
   const upsert: ProjectionThreadRepositoryShape["upsert"] = (row) =>
     upsertProjectionThreadRow(row).pipe(
       Effect.mapError(toPersistenceSqlError("ProjectionThreadRepository.upsert:query")),
@@ -320,7 +352,13 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
         ),
       );
 
+  const listTrashed: ProjectionThreadRepositoryShape["listTrashed"] = (input) =>
+    listTrashedThreadRows(input).pipe(
+      Effect.mapError(toPersistenceSqlError("ProjectionThreadRepository.listTrashed:query")),
+    );
+
   return {
+    listTrashed,
     upsert,
     getById,
     listByProjectId,

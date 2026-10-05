@@ -33,6 +33,8 @@ export function createWorkspaceCommitFence(read: () => OrchestrationReadModel) {
             event.type.startsWith("project.") ||
             event.type === "thread.created" ||
             event.type === "thread.deleted" ||
+            event.type === "thread.trashed" ||
+            event.type === "thread.untrashed" ||
             event.type === "thread.meta-updated",
         )
       )

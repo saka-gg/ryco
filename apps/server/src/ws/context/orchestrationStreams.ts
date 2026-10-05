@@ -197,6 +197,7 @@ export const toShellStreamEvent = (
         }),
       );
     case "thread.deleted":
+    case "thread.trashed":
       return Effect.succeed(
         Option.some({
           kind: "thread-removed" as const,
@@ -208,7 +209,9 @@ export const toShellStreamEvent = (
     case "worktree.archived":
     case "worktree.metaUpdated":
     case "worktree.sourceControlStateUpdated":
-    case "worktree.restored": {
+    case "worktree.restored":
+    case "worktree.checkoutRemoved":
+    case "worktree.checkoutRestored": {
       const getWorktreeShellById = projectionSnapshotQuery.getWorktreeShellById;
       if (getWorktreeShellById === undefined) {
         return Effect.succeed(Option.none());

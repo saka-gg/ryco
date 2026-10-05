@@ -38,7 +38,7 @@ export interface PhoneThreadDockProps {
   readonly branch: string | null;
   /**
    * Present on the draft route: the overflow sheet then offers the draft
-   * inventory ("Close session") through the same shared dispatcher instead of
+   * inventory ("Discard draft") through the same shared dispatcher instead of
    * an empty menu, since drafts have no server-side sidebar summary.
    */
   readonly draft?: {
@@ -89,7 +89,7 @@ export function PhoneThreadDock(props: PhoneThreadDockProps) {
     [props.environmentId, props.threadId, summaries],
   );
   // Drafts have no server summary; a minimal synthetic summary carries the
-  // draftId so the shared inventory resolves to "Close session" and the
+  // draftId so the shared inventory resolves to "Discard draft" and the
   // shared dispatcher clears the draft.
   const draftSummary = useMemo<(SidebarThreadSummary & { draftId: DraftId }) | null>(() => {
     if (!props.draft) return null;

@@ -222,12 +222,12 @@ export function ProjectDetailScreen(props: {
   const archiveWorktree = (worktree: SidebarWorktreeSummary) => {
     Alert.alert(
       "Archive worktree?",
-      `${worktree.title?.trim() || worktree.branch} will move to Archived. Its branch is kept.`,
+      `${worktree.title?.trim() || worktree.branch} will move to Archived. Its checkout, branch and conversations are kept.`,
       [
         { text: "Cancel", style: "cancel" },
         {
           text: "Archive",
-          style: "destructive",
+          style: "default",
           onPress: () => {
             setActionError(null);
             void runWorkspaceMutation({

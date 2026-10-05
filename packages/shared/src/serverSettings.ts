@@ -141,6 +141,14 @@ export function applyServerSettingsPatch(
     }
     next = { ...next, projectStorageRetention: Object.fromEntries(policies) };
   }
+  if (patch.projectLifecycleSuggestions !== undefined) {
+    const policies = new Map(Object.entries(current.projectLifecycleSuggestions));
+    for (const [projectId, policy] of Object.entries(patch.projectLifecycleSuggestions)) {
+      if (policy === null) policies.delete(projectId);
+      else policies.set(projectId, policy);
+    }
+    next = { ...next, projectLifecycleSuggestions: Object.fromEntries(policies) };
+  }
   const nextWithReplacements =
     patch.providerInstances !== undefined
       ? {

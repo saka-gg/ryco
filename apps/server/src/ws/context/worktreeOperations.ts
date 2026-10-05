@@ -41,6 +41,7 @@ import { refreshWorktreeSourceControlState } from "../../sourceControl/refreshWo
 import type { TextGenerationShape } from "../../textGeneration/TextGeneration.ts";
 import type { VcsProvisioningServiceShape } from "../../vcs/VcsProvisioningService.ts";
 import type { WorkspaceAccessPolicyShape } from "../../workspace/Services/WorkspaceAccessPolicy.ts";
+import type { WorkspaceLifecycleShape } from "../../workspace/WorkspaceLifecycle.ts";
 import {
   buildIssueBranchNameFallback,
   buildIssueBranchNameMessage,
@@ -86,6 +87,7 @@ export const makeWorktreeOperations = (deps: {
   ) => Effect.Effect<{ readonly sequence: number }, OrchestrationDispatchCommandError>;
   readonly refreshGitStatus: (cwd: string) => Effect.Effect<void>;
   readonly appendSetupScriptActivity: AppendSetupScriptActivity;
+  readonly workspaceLifecycle: Option.Option<WorkspaceLifecycleShape>;
 }) => {
   const {
     projectionSnapshotQuery,
@@ -101,6 +103,7 @@ export const makeWorktreeOperations = (deps: {
     dispatchNormalizedCommand,
     refreshGitStatus,
     appendSetupScriptActivity,
+    workspaceLifecycle,
   } = deps;
 
   const authorizeWorktreePath = (operation: string, candidate: string, existing: boolean) =>
@@ -946,86 +949,52 @@ export const makeWorktreeOperations = (deps: {
     );
   }).pipe(Effect.ignoreCause({ log: true }));
 
+  // Legacy worktree RPCs route through the one workspace lifecycle service, so they
+  // share its preflight, fencing and history-preserving semantics. Archiving only
+  // hides a record; "delete" removes the checkout safely and archives conversations.
+  const runLifecycle = (
+    operation: string,
+    request: Parameters<WorkspaceLifecycleShape["applyCurrent"]>[0],
+  ) =>
+    Option.match(workspaceLifecycle, {
+      onNone: () => failGitWorkflow(operation, "Workspace lifecycle management is unavailable."),
+      onSome: (lifecycle) =>
+        lifecycle.applyCurrent(request).pipe(
+          Effect.mapError((cause) => toGitManagerError(operation, cause.detail, cause)),
+          Effect.flatMap((result) =>
+            result.outcome === "completed"
+              ? Effect.succeed({})
+              : failGitWorkflow(operation, result.message),
+          ),
+        ),
+    });
+
   const archiveWorktree = (input: {
     readonly worktreeId: WorktreeId;
     readonly deleteBranch: boolean;
   }) =>
-    Effect.gen(function* () {
-      const operation = "git.archiveWorktree";
-      const worktree = yield* loadWorktreeForGitWorkflow(operation, input.worktreeId);
-      if (worktree.origin === "main") {
-        return yield* failGitWorkflow(operation, "Cannot archive the main worktree.");
-      }
-      const project = yield* loadProjectForGitWorkflow(operation, worktree.projectId);
-      if (worktree.worktreePath !== null) {
-        yield* ignoreAlreadyMissingGitResource(
-          gitWorkflow.removeWorktree({
-            cwd: project.workspaceRoot,
-            path: worktree.worktreePath,
-            force: true,
-          }),
-          {
-            operation,
-            action: "remove-worktree",
-            target: worktree.worktreePath,
-          },
-        );
-      }
-      if (input.deleteBranch) {
-        yield* ignoreAlreadyMissingGitResource(
-          gitWorkflow.deleteBranch({
-            cwd: project.workspaceRoot,
-            refName: worktree.branch,
-            force: true,
-          }),
-          {
-            operation,
-            action: "delete-branch",
-            target: worktree.branch,
-          },
-        );
-      }
-      yield* dispatchWorktreeCommand(
-        {
-          type: "worktree.archive",
-          commandId: serverCommandId("worktree-archive"),
-          worktreeId: input.worktreeId,
-          archivedAt: new Date().toISOString(),
-          deletedBranch: input.deleteBranch,
-        },
-        operation,
-      );
-      yield* refreshGitStatus(project.workspaceRoot);
-      return {};
-    });
+    input.deleteBranch
+      ? failGitWorkflow(
+          "git.archiveWorktree",
+          "Archiving never deletes a branch. Remove the checkout to delete a merged branch.",
+        )
+      : runLifecycle("git.archiveWorktree", { worktreeId: input.worktreeId, action: "archive" });
 
   const restoreWorktree = (worktreeId: WorktreeId) =>
-    Effect.gen(function* () {
-      const operation = "git.restoreWorktree";
-      const worktree = yield* loadWorktreeForGitWorkflow(operation, worktreeId);
-      const project = yield* loadProjectForGitWorkflow(operation, worktree.projectId);
-      const created =
-        worktree.origin === "main"
-          ? null
-          : yield* gitWorkflow.createWorktree({
-              projectId: worktree.projectId,
-              cwd: project.workspaceRoot,
-              refName: worktree.branch,
-              path: worktree.worktreePath,
-            });
-      const restoredPath = created?.worktree.path ?? worktree.worktreePath;
-      yield* dispatchWorktreeCommand(
-        {
-          type: "worktree.restore",
-          commandId: serverCommandId("worktree-restore"),
-          worktreeId,
-          worktreePath: restoredPath,
-          restoredAt: new Date().toISOString(),
-        },
-        operation,
-      );
-      yield* refreshGitStatus(restoredPath ?? project.workspaceRoot);
-      return {};
+    Option.match(workspaceLifecycle, {
+      onNone: () =>
+        failGitWorkflow("git.restoreWorktree", "Workspace lifecycle management is unavailable."),
+      onSome: (lifecycle) =>
+        lifecycle.preview({ worktreeId, action: "recreate-checkout" }).pipe(
+          Effect.mapError((cause) => toGitManagerError("git.restoreWorktree", cause.detail, cause)),
+          // Records archived by older builds lost their checkout: recreate it when possible.
+          Effect.flatMap((preview) =>
+            runLifecycle("git.restoreWorktree", {
+              worktreeId,
+              action: preview.blockers.length === 0 ? "recreate-checkout" : "restore",
+            }),
+          ),
+        ),
     });
 
   const deleteWorktree = (input: {
@@ -1033,97 +1002,10 @@ export const makeWorktreeOperations = (deps: {
     readonly deleteBranch: boolean;
     readonly force?: boolean | undefined;
   }) =>
-    Effect.gen(function* () {
-      const operation = "git.deleteWorktree";
-      const worktree = yield* loadWorktreeForGitWorkflow(operation, input.worktreeId);
-      if (worktree.origin === "main") {
-        return yield* failGitWorkflow(operation, "Cannot delete the main worktree.");
-      }
-      const project = yield* loadProjectForGitWorkflow(operation, worktree.projectId);
-      if (
-        worktree.worktreePath !== null &&
-        isProjectRootPath(worktree.worktreePath, project.workspaceRoot)
-      ) {
-        return yield* failGitWorkflow(
-          operation,
-          "Cannot delete a worktree that points at the project root.",
-        );
-      }
-      if (input.force) {
-        if (worktree.worktreePath !== null) {
-          if (existsSync(worktree.worktreePath)) {
-            return yield* failGitWorkflow(
-              operation,
-              "Cannot force delete: the worktree path still exists on disk. Use a regular delete instead.",
-            );
-          }
-          const registeredPaths = yield* gitWorkflow
-            .listWorktreePaths(project.workspaceRoot)
-            .pipe(
-              Effect.mapError((cause) =>
-                toGitManagerError(operation, "Failed to inspect git worktrees.", cause),
-              ),
-            );
-          if (registeredPaths.includes(worktree.worktreePath)) {
-            return yield* failGitWorkflow(
-              operation,
-              "Cannot force delete: git still tracks this worktree. Use a regular delete instead.",
-            );
-          }
-        }
-      } else if (worktree.worktreePath !== null) {
-        if (existsSync(worktree.worktreePath)) {
-          yield* ignoreAlreadyMissingGitResource(
-            gitWorkflow.removeWorktree({
-              cwd: project.workspaceRoot,
-              path: worktree.worktreePath,
-              force: true,
-            }),
-            {
-              operation,
-              action: "remove-worktree",
-              target: worktree.worktreePath,
-            },
-          );
-        }
-      }
-      if (input.deleteBranch) {
-        yield* ignoreAlreadyMissingGitResource(
-          gitWorkflow.deleteBranch({
-            cwd: project.workspaceRoot,
-            refName: worktree.branch,
-            force: true,
-          }),
-          {
-            operation,
-            action: "delete-branch",
-            target: worktree.branch,
-          },
-        );
-      }
-      yield* dispatchWorktreeCommand(
-        {
-          type: "worktree.delete",
-          commandId: serverCommandId("worktree-delete"),
-          worktreeId: input.worktreeId,
-          deletedAt: new Date().toISOString(),
-          deletedBranch: input.deleteBranch,
-        },
-        operation,
-      );
-      // Sessions recorded under a different spelling of the removed directory
-      // survive the delete cascade; fold them back into the project root rather
-      // than leaving a worktree node with nothing behind it.
-      yield* reconcileProjectWorktrees(project.id).pipe(
-        Effect.catchCause((cause) =>
-          Effect.logWarning("worktree reconciliation after delete failed", {
-            projectId: project.id,
-            cause,
-          }),
-        ),
-      );
-      yield* refreshGitStatus(project.workspaceRoot);
-      return {};
+    runLifecycle("git.deleteWorktree", {
+      worktreeId: input.worktreeId,
+      action: input.force ? "remove-stale-record" : "remove-checkout",
+      deleteBranch: input.force ? false : input.deleteBranch,
     });
 
   const initializeGitForProject = (projectId: ProjectId) =>

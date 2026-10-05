@@ -19,7 +19,7 @@ import { InboxSidebar, type InboxSidebarProps } from "./InboxSidebar";
 export function ConnectedInboxSidebar(
   props: InboxSidebarProps & { projectGroups: readonly SidebarProjectSnapshot[] } & Pick<
       ReturnType<typeof useThreadActions>,
-      "archiveThread" | "deleteThread"
+      "archiveThread" | "trashThread" | "stopThreadSession" | "interruptThreadTurn"
     >,
 ) {
   const router = useRouter();
@@ -39,7 +39,15 @@ export function ConnectedInboxSidebar(
     },
     [props.projectGroups, projectDialogs],
   );
-  const { deleteThread, archiveThread } = props;
+  const { trashThread, archiveThread, stopThreadSession, interruptThreadTurn } = props;
+  const openWorkspaceManagement = useCallback(
+    (projectRef: ScopedProjectRef) =>
+      void router.navigate({
+        to: "/workspaces",
+        search: { environmentId: projectRef.environmentId, projectId: projectRef.projectId },
+      }),
+    [router],
+  );
   const clipboard = useThreadClipboardActions();
   const appSettingsConfirmThreadDelete = useSettings((s) => s.confirmThreadDelete);
   const appSettingsConfirmThreadArchive = useSettings((s) => s.confirmThreadArchive);
@@ -69,8 +77,12 @@ export function ConnectedInboxSidebar(
   );
   const actions = useThreadMenuActions({
     router,
-    deleteThread,
+    trashThread,
     archiveThread,
+    stopThreadSession,
+    interruptThreadTurn,
+    includeWorkspaceSubmenu: true,
+    openWorkspaceManagement,
     ...clipboard,
     appSettingsConfirmThreadDelete,
     appSettingsConfirmThreadArchive,

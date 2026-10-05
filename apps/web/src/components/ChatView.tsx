@@ -4302,12 +4302,21 @@ export default function ChatView(props: ChatViewProps) {
         });
       })
       .catch(async (err: unknown) => {
+        // Roll back a creation that never ran; one that already holds the request
+        // goes to Trash instead (recoverable), never deleted outright.
         await api.orchestration
           .dispatchCommand({
             type: "thread.delete",
             commandId: newCommandId(),
             threadId: nextThreadId,
           })
+          .catch(() =>
+            api.orchestration.dispatchCommand({
+              type: "thread.trash",
+              commandId: newCommandId(),
+              threadId: nextThreadId,
+            }),
+          )
           .catch(() => undefined);
         toastManager.add(
           stackedThreadToast({

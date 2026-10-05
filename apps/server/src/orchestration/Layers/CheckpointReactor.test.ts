@@ -1888,7 +1888,7 @@ describe("CheckpointReactor", () => {
     // current checkpoint restores files without another provider call.
     await Effect.runPromise(
       harness.engine.dispatch({
-        type: "thread.delete",
+        type: "thread.trash",
         commandId: CommandId.make("cmd-thread-2-delete"),
         threadId: ThreadId.make("thread-2"),
       }),

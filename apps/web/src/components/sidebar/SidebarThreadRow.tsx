@@ -69,7 +69,7 @@ export interface SidebarThreadRowProps {
     threadRef: ScopedThreadRef,
     position: { x: number; y: number },
   ) => Promise<void>;
-  closeThread: (
+  requestTrashThread: (
     thread: SidebarThreadSummary & { draftId?: DraftId | undefined },
     opts?: { deletedThreadKeys?: ReadonlySet<string> },
   ) => Promise<void>;
@@ -162,7 +162,7 @@ export const SidebarThreadRowContent = memo(function SidebarThreadRowContent(
     navigateToDraft,
     handleMultiSelectContextMenu,
     handleThreadContextMenu,
-    closeThread,
+    requestTrashThread,
     clearSelection,
     commitRename,
     cancelRename,
@@ -423,9 +423,9 @@ export const SidebarThreadRowContent = memo(function SidebarThreadRowContent(
     (event: React.MouseEvent<HTMLButtonElement>) => {
       event.preventDefault();
       event.stopPropagation();
-      void closeThread(thread);
+      void requestTrashThread(thread);
     },
-    [closeThread, thread],
+    [requestTrashThread, thread],
   );
   const rowButtonRender = useMemo(() => <div role="button" tabIndex={0} />, []);
 
@@ -568,7 +568,11 @@ export const SidebarThreadRowContent = memo(function SidebarThreadRowContent(
                           type="button"
                           data-thread-selection-safe
                           data-testid={`thread-close-${thread.id}`}
-                          aria-label={`Close ${thread.title}`}
+                          aria-label={
+                            draftId
+                              ? `Discard draft ${thread.title}`
+                              : `Move ${thread.title} to Trash`
+                          }
                           className={`inline-flex size-5 cursor-pointer items-center justify-center text-muted-foreground/60 transition-colors hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring ${SIDEBAR_ROW_ACTION_COARSE_CLASS_NAME}`}
                           onPointerDown={stopPropagationOnPointerDown}
                           onClick={handleCloseClick}
@@ -577,7 +581,9 @@ export const SidebarThreadRowContent = memo(function SidebarThreadRowContent(
                         </button>
                       }
                     />
-                    <TooltipPopup side="top">Close</TooltipPopup>
+                    <TooltipPopup side="top">
+                      {draftId ? "Discard draft" : "Move to Trash"}
+                    </TooltipPopup>
                   </Tooltip>
                 ) : null}
                 {canArchiveThread && !isThreadRunning && appSettingsConfirmThreadArchive ? (

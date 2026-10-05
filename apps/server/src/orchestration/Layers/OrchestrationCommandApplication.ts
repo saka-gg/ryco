@@ -37,8 +37,8 @@ const toDispatchError = (cause: unknown) =>
 export const applyOrchestrationNormalizedCommand = <R = never>(deps: {
   readonly command: OrchestrationCommand;
   readonly dispatch: OrchestrationNormalizedCommandDispatcher;
-  readonly projections: ProjectionSnapshotQueryShape;
-  readonly terminals: TerminalManagerShape;
+  readonly projections: Pick<ProjectionSnapshotQueryShape, "getThreadShellById">;
+  readonly terminals: Pick<TerminalManagerShape, "close">;
   readonly normalizeFollowup?: (
     command: Parameters<OrchestrationCommandApplicationShape["apply"]>[0],
   ) => Effect.Effect<OrchestrationCommand, OrchestrationDispatchCommandError, R>;

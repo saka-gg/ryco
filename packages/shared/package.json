@@ -353,7 +353,8 @@
     "./turnSteer": {
       "types": "./src/turnSteer.ts",
       "import": "./src/turnSteer.ts"
-    }
+    },
+    "./workspaceLifecycle": "./src/workspaceLifecycle.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",

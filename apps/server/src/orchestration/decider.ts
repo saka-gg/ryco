@@ -35,6 +35,9 @@ import { Effect } from "effect";
 
 import { OrchestrationCommandInvariantError } from "./Errors.ts";
 import {
+  isThreadLive,
+  isThreadPristine,
+  isThreadTrashed,
   listThreadsByProjectId,
   listThreadsByWorktree,
   requireProject,
@@ -46,6 +49,7 @@ import {
   requireThreadNotArchived,
   requireThreadIdleForContextHandoff,
   requireWorktree,
+  threadLifecycleTurnBlocker,
 } from "./commandInvariants.ts";
 import {
   makeCheckpointRevertActivity,
@@ -385,7 +389,8 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
   if (
     (command.type === "worktree.archive" ||
       command.type === "worktree.restore" ||
-      command.type === "worktree.delete") &&
+      command.type === "worktree.delete" ||
+      command.type === "worktree.checkout.remove") &&
     command.lifecycleGuard
   ) {
     const expected = command.lifecycleGuard;
@@ -563,13 +568,15 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           detail: `Project '${command.projectId}' is not empty and cannot be deleted without force=true.`,
         });
       }
+      // Removing a project never deletes its conversations: they move to Trash, where
+      // they stay recoverable (as history) and permanent deletion remains explicit.
       if (activeThreads.length > 0) {
         return yield* decideCommandSequence({
           readModel,
           commands: [
             ...activeThreads.map(
-              (thread): Extract<OrchestrationCommand, { type: "thread.delete" }> => ({
-                type: "thread.delete",
+              (thread): Extract<OrchestrationCommand, { type: "thread.trash" }> => ({
+                type: "thread.trash",
                 commandId: command.commandId,
                 threadId: thread.id,
               }),
@@ -707,11 +714,25 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "thread.delete": {
-      yield* requireThread({
+      const thread = yield* requireThread({
         readModel,
         command,
         threadId: command.threadId,
       });
+      if (!isThreadLive(thread) && !isThreadTrashed(thread)) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Thread '${command.threadId}' was already deleted permanently.`,
+        });
+      }
+      // Permanent deletion is a separate, explicit step after Trash. Only a never-used
+      // thread (a failed creation being rolled back) may skip Trash.
+      if (!isThreadTrashed(thread) && !isThreadPristine(thread)) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Thread '${command.threadId}' must be moved to Trash before it can be deleted permanently.`,
+        });
+      }
       const occurredAt = nowIso();
       return {
         ...withEventBase({
@@ -728,17 +749,83 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       };
     }
 
+    case "thread.trash": {
+      const thread = yield* requireThread({ readModel, command, threadId: command.threadId });
+      if (!isThreadLive(thread)) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: isThreadTrashed(thread)
+            ? `Thread '${command.threadId}' is already in Trash.`
+            : `Thread '${command.threadId}' was deleted permanently.`,
+        });
+      }
+      const occurredAt = nowIso();
+      const trashedEvent: PlannedOrchestrationEvent = {
+        ...withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt,
+          commandId: command.commandId,
+        }),
+        type: "thread.trashed",
+        payload: { threadId: command.threadId, trashedAt: occurredAt, updatedAt: occurredAt },
+      };
+      // Never "continue" a conversation out of Trash on a usage-limit reset.
+      const limitCleared = usageLimitClearedEvent({
+        command,
+        thread,
+        reason: "archived",
+        occurredAt,
+      });
+      return limitCleared === null ? trashedEvent : [trashedEvent, limitCleared];
+    }
+
+    case "thread.untrash": {
+      const thread = yield* requireThread({ readModel, command, threadId: command.threadId });
+      if (!isThreadTrashed(thread)) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Thread '${command.threadId}' is not in Trash.`,
+        });
+      }
+      const project = yield* requireProject({ readModel, command, projectId: thread.projectId });
+      if (project.deletedAt !== null) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail:
+            "Its project was removed. Add the project again before restoring this conversation.",
+        });
+      }
+      const occurredAt = nowIso();
+      return {
+        ...withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt,
+          commandId: command.commandId,
+        }),
+        type: "thread.untrashed",
+        payload: { threadId: command.threadId, updatedAt: occurredAt },
+      };
+    }
+
     case "thread.sidebar.undo":
       return yield* new OrchestrationCommandInvariantError({
         commandType: command.type,
         detail: "Undo requires a current server-owned sidebar receipt.",
       });
     case "thread.archive": {
-      yield* requireThreadNotArchived({
+      const target = yield* requireThreadNotArchived({
         readModel,
         command,
         threadId: command.threadId,
       });
+      if (!isThreadLive(target)) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Thread '${command.threadId}' is in Trash or deleted; restore it first.`,
+        });
+      }
       yield* requireThreadHasUserMessage({
         readModel,
         command,
@@ -772,11 +859,17 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "thread.unarchive": {
-      yield* requireThreadArchived({
+      const target = yield* requireThreadArchived({
         readModel,
         command,
         threadId: command.threadId,
       });
+      if (!isThreadLive(target)) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Thread '${command.threadId}' is in Trash or deleted; restore it first.`,
+        });
+      }
       const occurredAt = nowIso();
       return {
         ...withEventBase({
@@ -1264,6 +1357,13 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
+      const lifecycleBlocker = threadLifecycleTurnBlocker(readModel, targetThread);
+      if (lifecycleBlocker !== null) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: lifecycleBlocker,
+        });
+      }
       yield* requireNoPendingCheckpointRevert({
         thread: targetThread,
         command,
@@ -1895,6 +1995,18 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "worktree.archive": {
+      // Archiving hides a record; it never touches the checkout or the branch.
+      const worktree = yield* requireWorktree({
+        readModel,
+        command,
+        worktreeId: command.worktreeId,
+      });
+      if (worktree.origin === "main") {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "The main workspace cannot be archived.",
+        });
+      }
       return {
         ...withEventBase({
           aggregateKind: "worktree",
@@ -1974,53 +2086,29 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         worktreeId: command.worktreeId,
       });
-      const activeThreads = listThreadsByWorktree(readModel, worktree).filter(
-        (thread) => thread.deletedAt === null,
-      );
-      if (activeThreads.length > 0 && command.sessions === "preserve") {
-        const main = (readModel.worktrees ?? []).find(
-          (w) => w.projectId === worktree.projectId && w.origin === "main" && w.archivedAt === null,
-        );
-        if (!main)
-          return yield* new OrchestrationCommandInvariantError({
-            commandType: command.type,
-            detail: "A registered main workspace is required to preserve sessions.",
-          });
-        return yield* decideCommandSequence({
-          readModel,
-          commands: [
-            ...activeThreads.flatMap((thread): OrchestrationCommand[] => [
-              {
-                type: "thread.attach-to-worktree",
-                commandId: command.commandId,
-                threadId: thread.id,
-                worktreeId: main.worktreeId,
-                attachedAt: command.deletedAt,
-              },
-              {
-                type: "thread.meta.update",
-                commandId: command.commandId,
-                threadId: thread.id,
-                worktreePath: null,
-              },
-            ]),
-            { ...command, lifecycleGuard: undefined },
-          ],
+      if (worktree.origin === "main") {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "The main workspace record is protected.",
         });
       }
-      if (activeThreads.length > 0) {
-        return yield* decideCommandSequence({
-          readModel,
-          commands: [
-            ...activeThreads.map(
-              (thread): Extract<OrchestrationCommand, { type: "thread.delete" }> => ({
-                type: "thread.delete",
-                commandId: command.commandId,
-                threadId: thread.id,
-              }),
-            ),
-            { ...command, lifecycleGuard: undefined },
-          ],
+      // A workspace record is provenance for its conversations. It is never deleted
+      // around them, and conversations are never deleted or moved to another
+      // workspace (silently resuming in main) to make room for it.
+      if (command.sessions === "delete") {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail:
+            "Workspace actions never delete conversations. Move conversations to Trash individually.",
+        });
+      }
+      const referencing = listThreadsByWorktree(readModel, worktree).filter(
+        (thread) => isThreadLive(thread) || isThreadTrashed(thread),
+      );
+      if (referencing.length > 0) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Workspace '${command.worktreeId}' still records ${referencing.length} conversation(s); remove its checkout instead to keep their provenance.`,
         });
       }
       return {
@@ -2035,6 +2123,91 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           worktreeId: command.worktreeId,
           deletedAt: command.deletedAt,
           deletedBranch: command.deletedBranch,
+        },
+      };
+    }
+
+    case "worktree.checkout.remove": {
+      const worktree = yield* requireWorktree({
+        readModel,
+        command,
+        worktreeId: command.worktreeId,
+      });
+      const project = yield* requireProject({ readModel, command, projectId: worktree.projectId });
+      if (
+        worktree.origin === "main" ||
+        worktree.worktreePath === null ||
+        worktree.worktreePath === project.workspaceRoot
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "The project root/main checkout is never a removable workspace.",
+        });
+      }
+      if (worktree.checkoutRemovedAt != null) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Workspace '${command.worktreeId}' already records its checkout as removed.`,
+        });
+      }
+      const removed: PlannedOrchestrationEvent = {
+        ...withEventBase({
+          aggregateKind: "worktree",
+          aggregateId: command.worktreeId,
+          occurredAt: command.removedAt,
+          commandId: command.commandId,
+        }),
+        type: "worktree.checkoutRemoved",
+        payload: {
+          worktreeId: command.worktreeId,
+          reason: command.reason,
+          removedAt: command.removedAt,
+        },
+      };
+      if (worktree.archivedAt !== null) return removed;
+      return [
+        removed,
+        {
+          ...withEventBase({
+            aggregateKind: "worktree",
+            aggregateId: command.worktreeId,
+            occurredAt: command.removedAt,
+            commandId: command.commandId,
+          }),
+          type: "worktree.archived",
+          payload: {
+            worktreeId: command.worktreeId,
+            archivedAt: command.removedAt,
+            deletedBranch: false,
+          },
+        },
+      ];
+    }
+
+    case "worktree.checkout.restore": {
+      const worktree = yield* requireWorktree({
+        readModel,
+        command,
+        worktreeId: command.worktreeId,
+      });
+      if (worktree.checkoutRemovedAt == null) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Workspace '${command.worktreeId}' does not record a removed checkout.`,
+        });
+      }
+      return {
+        ...withEventBase({
+          aggregateKind: "worktree",
+          aggregateId: command.worktreeId,
+          occurredAt: command.restoredAt,
+          commandId: command.commandId,
+        }),
+        type: "worktree.checkoutRestored",
+        payload: {
+          worktreeId: command.worktreeId,
+          worktreePath: command.worktreePath,
+          restoredAt: command.restoredAt,
         },
       };
     }

@@ -1,3 +1,7 @@
+import {
+  WorkspaceLifecycle,
+  type WorkspaceLifecycleShape,
+} from "./workspace/WorkspaceLifecycle.ts";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeSocket from "@effect/platform-node/NodeSocket";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -531,6 +535,7 @@ const buildAppUnderTest = (options?: {
     diagnostics?: Partial<DiagnosticsShape>;
     hubConnector?: Partial<HubConnectorServiceShape>;
     chatAttachmentUploads?: ChatAttachmentUploadsShape;
+    workspaceLifecycle?: Partial<WorkspaceLifecycleShape>;
   };
 }) =>
   Effect.gen(function* () {
@@ -1013,6 +1018,9 @@ const buildAppUnderTest = (options?: {
       options?.layers?.chatAttachmentUploads
         ? Layer.provide(Layer.succeed(ChatAttachmentUploads, options.layers.chatAttachmentUploads))
         : Layer.provideMerge(ChatAttachmentUploadsLive),
+      Layer.provideMerge(
+        Layer.mock(WorkspaceLifecycle)({ ...options?.layers?.workspaceLifecycle }),
+      ),
       Layer.provideMerge(makeAuthTestLayer()),
       Layer.provideMerge(LocalDiagnosticsMetricsLive),
       Layer.provideMerge(AdvertisedEndpointRegistryLive),
@@ -4919,32 +4927,15 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
-  it.effect("deletes stale worktree records when the on-disk worktree is already gone", () =>
+  it.effect("routes legacy worktree deletion through the lifecycle service", () =>
     Effect.gen(function* () {
-      const projectId = ProjectId.make("project-stale-worktree");
       const worktreeId = WorktreeId.make("worktree-stale-delete");
-      const missingWorktreePath = "/tmp/ryco-missing-worktree-delete";
       const dispatchedCommands: Array<OrchestrationCommand> = [];
+      const requests: Array<Parameters<WorkspaceLifecycleShape["applyCurrent"]>[0]> = [];
       let removeWorktreeCalls = 0;
 
       yield* buildAppUnderTest({
         layers: {
-          vcsStatusBroadcaster: {
-            refreshStatus: () =>
-              Effect.succeed({
-                isRepo: true,
-                hasPrimaryRemote: true,
-                isDefaultRef: false,
-                refName: "feature/stale-delete",
-                hasWorkingTreeChanges: false,
-                workingTree: { files: [], insertions: 0, deletions: 0 },
-                hasUpstream: false,
-                aheadCount: 0,
-                behindCount: 0,
-                aheadOfDefaultCount: 0,
-                pr: null,
-              }),
-          },
           gitVcsDriver: {
             removeWorktree: () =>
               Effect.sync(() => {
@@ -4958,43 +4949,12 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
                 return { sequence: dispatchedCommands.length };
               }),
           },
-          projectionSnapshotQuery: {
-            getProjectShellById: () =>
-              Effect.succeed(
-                Option.some({
-                  id: projectId,
-                  title: "Stale Worktree Project",
-                  workspaceRoot: "/tmp/ryco-stale-worktree-project",
-                  defaultModelSelection: defaultModelSelection,
-                  scripts: [],
-                  createdAt: "2026-05-10T00:00:00.000Z",
-                  updatedAt: "2026-05-10T00:00:00.000Z",
-                }),
-              ),
-          },
-          projectionWorktreeRepository: {
-            getById: () =>
-              Effect.succeed(
-                Option.some({
-                  worktreeId,
-                  projectId,
-                  title: null,
-                  branch: "feature/stale-delete",
-                  worktreePath: missingWorktreePath,
-                  origin: "pr",
-                  prNumber: 12,
-                  issueNumber: null,
-                  prTitle: null,
-                  issueTitle: null,
-                  prState: null,
-                  prIsDraft: null,
-                  issueState: null,
-                  createdAt: "2026-05-10T00:00:00.000Z",
-                  updatedAt: "2026-05-10T00:00:00.000Z",
-                  archivedAt: null,
-                  manualPosition: 0,
-                }),
-              ),
+          workspaceLifecycle: {
+            applyCurrent: (request) =>
+              Effect.sync(() => {
+                requests.push(request);
+                return { outcome: "completed" as const, message: "done", steps: [] };
+              }),
           },
         },
       });
@@ -5002,116 +4962,78 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       const wsUrl = yield* getWsServerUrl("/ws");
       yield* Effect.scoped(
         withWsRpcClient(wsUrl, (client) =>
-          client[WS_METHODS.gitDeleteWorktree]({
-            worktreeId,
-            deleteBranch: false,
-          }),
+          client[WS_METHODS.gitDeleteWorktree]({ worktreeId, deleteBranch: false }),
+        ),
+      );
+      yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[WS_METHODS.gitDeleteWorktree]({ worktreeId, deleteBranch: false, force: true }),
         ),
       );
 
+      // The old path force-removed files and cascaded thread deletion; now the shared
+      // service decides, and conversations are never deleted.
+      assert.deepEqual(
+        requests.map((request) => request.action),
+        ["remove-checkout", "remove-stale-record"],
+      );
       assert.equal(removeWorktreeCalls, 0);
-      assert.equal(dispatchedCommands.at(-1)?.type, "worktree.delete");
+      assert.isFalse(
+        dispatchedCommands.some(
+          (command) => command.type === "worktree.delete" || command.type === "thread.delete",
+        ),
+      );
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
-  it.effect("archives stale worktree records when the requested branch is already gone", () =>
+  it.effect("archives a worktree without touching its checkout or branch", () =>
     Effect.gen(function* () {
-      const projectId = ProjectId.make("project-stale-branch");
       const worktreeId = WorktreeId.make("worktree-stale-archive");
-      const dispatchedCommands: Array<OrchestrationCommand> = [];
+      const requests: Array<Parameters<WorkspaceLifecycleShape["applyCurrent"]>[0]> = [];
       let deleteBranchCalls = 0;
-
-      const missingBranchError = new GitCommandError({
-        operation: "GitVcsDriver.deleteBranch",
-        command: "git branch -D feature/stale-archive",
-        cwd: "/tmp/ryco-stale-branch-project",
-        detail: "error: branch 'feature/stale-archive' not found.",
-      });
+      let removeWorktreeCalls = 0;
 
       yield* buildAppUnderTest({
         layers: {
-          vcsStatusBroadcaster: {
-            refreshStatus: () =>
-              Effect.succeed({
-                isRepo: true,
-                hasPrimaryRemote: true,
-                isDefaultRef: false,
-                refName: "feature/stale-archive",
-                hasWorkingTreeChanges: false,
-                workingTree: { files: [], insertions: 0, deletions: 0 },
-                hasUpstream: false,
-                aheadCount: 0,
-                behindCount: 0,
-                aheadOfDefaultCount: 0,
-                pr: null,
-              }),
-          },
           gitVcsDriver: {
             deleteBranch: () =>
               Effect.sync(() => {
                 deleteBranchCalls += 1;
-              }).pipe(Effect.andThen(Effect.fail(missingBranchError))),
-          },
-          orchestrationEngine: {
-            dispatch: (command) =>
+              }),
+            removeWorktree: () =>
               Effect.sync(() => {
-                dispatchedCommands.push(command);
-                return { sequence: dispatchedCommands.length };
+                removeWorktreeCalls += 1;
               }),
           },
-          projectionSnapshotQuery: {
-            getProjectShellById: () =>
-              Effect.succeed(
-                Option.some({
-                  id: projectId,
-                  title: "Stale Branch Project",
-                  workspaceRoot: "/tmp/ryco-stale-branch-project",
-                  defaultModelSelection: defaultModelSelection,
-                  scripts: [],
-                  createdAt: "2026-05-10T00:00:00.000Z",
-                  updatedAt: "2026-05-10T00:00:00.000Z",
-                }),
-              ),
-          },
-          projectionWorktreeRepository: {
-            getById: () =>
-              Effect.succeed(
-                Option.some({
-                  worktreeId,
-                  projectId,
-                  title: null,
-                  branch: "feature/stale-archive",
-                  worktreePath: null,
-                  origin: "issue",
-                  prNumber: null,
-                  issueNumber: 34,
-                  prTitle: null,
-                  issueTitle: null,
-                  prState: null,
-                  prIsDraft: null,
-                  issueState: null,
-                  createdAt: "2026-05-10T00:00:00.000Z",
-                  updatedAt: "2026-05-10T00:00:00.000Z",
-                  archivedAt: null,
-                  manualPosition: 0,
-                }),
-              ),
+          workspaceLifecycle: {
+            applyCurrent: (request) =>
+              Effect.sync(() => {
+                requests.push(request);
+                return { outcome: "completed" as const, message: "done", steps: [] };
+              }),
           },
         },
       });
 
       const wsUrl = yield* getWsServerUrl("/ws");
+      const refused = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[WS_METHODS.gitArchiveWorktree]({ worktreeId, deleteBranch: true }),
+        ),
+      ).pipe(Effect.result);
+      assert.equal(refused._tag, "Failure");
       yield* Effect.scoped(
         withWsRpcClient(wsUrl, (client) =>
-          client[WS_METHODS.gitArchiveWorktree]({
-            worktreeId,
-            deleteBranch: true,
-          }),
+          client[WS_METHODS.gitArchiveWorktree]({ worktreeId, deleteBranch: false }),
         ),
       );
 
-      assert.equal(deleteBranchCalls, 1);
-      assert.equal(dispatchedCommands.at(-1)?.type, "worktree.archive");
+      assert.deepEqual(
+        requests.map((request) => request.action),
+        ["archive"],
+      );
+      assert.equal(deleteBranchCalls, 0);
+      assert.equal(removeWorktreeCalls, 0);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 

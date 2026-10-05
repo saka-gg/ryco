@@ -1,6 +1,7 @@
 import { LocalTaskService } from "../tasks/LocalTaskService.ts";
 import { DailyRecapQuery } from "../statistics/DailyRecapQuery.ts";
 import { StorageService } from "../storage/StorageService.ts";
+import { WorkspaceLifecycle } from "../workspace/WorkspaceLifecycle.ts";
 import { SessionImport } from "../imports/SessionImport.ts";
 import { AutomationCentre } from "../agentControl/Services/AutomationCentre.ts";
 import { Cause, Effect, FileSystem, Metric, Option, Schema, Stream } from "effect";
@@ -180,6 +181,8 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
     const lifecycleEvents = yield* ServerLifecycleEvents;
     const serverSettings = yield* ServerSettingsService;
     const storageService = yield* Effect.serviceOption(StorageService);
+    // Optional for the route-test reason above; production provides it with the runtime.
+    const workspaceLifecycle = yield* Effect.serviceOption(WorkspaceLifecycle);
     const localTaskService = yield* Effect.serviceOption(LocalTaskService);
     const dailyRecapQuery = yield* Effect.serviceOption(DailyRecapQuery);
     const codexMcp = yield* makeCodexMcpService;
@@ -821,6 +824,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       dispatchNormalizedCommand,
       refreshGitStatus,
       appendSetupScriptActivity,
+      workspaceLifecycle,
     });
 
     const workflowProviderUnavailableDetail = {
@@ -863,6 +867,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
 
     return {
       storageService,
+      workspaceLifecycle,
       storagePrincipalKey: `${principal.transport}:${principal.scopeId}:${crypto.randomUUID()}`,
       currentSessionId,
       projectionSnapshotQuery,

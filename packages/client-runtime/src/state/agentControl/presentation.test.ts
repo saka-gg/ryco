@@ -378,11 +378,13 @@ it("shows the exact workspace path, branch and session consequences before appro
   expect(preserved.detailSections[0]?.lines).toContain("Path: /workspace/missing");
   expect(preserved.detailSections[0]?.lines).toContain("Branch: topic (retain)");
   expect(preserved.detailSections[0]?.lines).toContain(
-    "Sessions: preserve history and move to main workspace",
+    "Conversations: archived; history, attachments and terminal history kept",
   );
   expect(preserved.detailSections[0]?.lines).toContain("history (archived)");
   const deleted = buildAgentControlProposalCardModel(
     makeProposal({ plan: { ...plan, sessions: "delete" } }),
   );
-  expect(deleted.detailSections[0]?.lines).toContain("Sessions: permanently delete history");
+  expect(deleted.detailSections[0]?.lines).toContain(
+    "Conversations: deletion requested (always refused; conversations are never deleted by workspace actions)",
+  );
 });

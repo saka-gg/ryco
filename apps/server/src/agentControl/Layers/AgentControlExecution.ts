@@ -1,7 +1,8 @@
 import { resolveProjectPreferences } from "../../project/projectPreferences.ts";
 import { ProjectSetupScriptRunner } from "../../project/Services/ProjectSetupScriptRunner.ts";
 import { CompletionReturnRepository } from "../../persistence/Layers/AgentControlCompletionReturns.ts";
-import { GitVcsDriver } from "../../vcs/GitVcsDriver.ts";
+import { WorkspaceLifecycle } from "../../workspace/WorkspaceLifecycle.ts";
+import { workspacePlanLifecycleAction } from "../workspaceLifecycle.ts";
 import { DEFAULT_SERVER_SETTINGS } from "@ryco/contracts";
 import { buildGeneratedWorktreeBranchName } from "@ryco/shared/git";
 import { setupProjectScript } from "@ryco/shared/projectScripts";
@@ -250,7 +251,7 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
     const engine = yield* OrchestrationEngineService;
     const projections = yield* ProjectionSnapshotQuery;
     const git = yield* GitWorkflowService;
-    const gitDriver = yield* Effect.serviceOption(GitVcsDriver);
+    const workspaceLifecycleOption = yield* Effect.serviceOption(WorkspaceLifecycle);
     const workspaceAccess = yield* WorkspaceAccessPolicy;
     const deviceService = yield* Effect.serviceOption(DeviceService);
     const config = yield* ServerConfig;
@@ -351,6 +352,9 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
         }
 
         let cleanupCompleted = true;
+        // A created thread that never ran is rolled back. One that holds any work is moved
+        // to Trash instead (recoverable), and its checkout is then never force-removed.
+        let preservedConversations = false;
         const state = current.state;
         for (const threadId of state.resources.ownedThreadIds.toReversed()) {
           const existing = yield* projections
@@ -364,10 +368,21 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
               threadId,
             }),
           );
-          if (cleaned._tag === "Failure") cleanupCompleted = false;
+          if (cleaned._tag === "Success") continue;
+          preservedConversations = true;
+          cleanupCompleted = false;
+          yield* Effect.exit(
+            commandApplication.apply({
+              type: "thread.trash",
+              commandId: commandIdFor(current.operationId, `compensate-trash-${threadId}`),
+              threadId,
+            }),
+          );
         }
 
-        for (const owned of state.resources.ownedWorktrees.toReversed()) {
+        for (const owned of preservedConversations
+          ? []
+          : state.resources.ownedWorktrees.toReversed()) {
           const getWorktree = projections.getWorktreeShellById;
           if (getWorktree === undefined) {
             cleanupCompleted = false;
@@ -680,86 +695,37 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
               threadIds: expected.sessions.map((s) => s.threadId),
             },
           });
-          if (plan.deleteBranch && Option.isNone(gitDriver))
-            return yield* Effect.fail(new Error("Branch deletion unavailable."));
           yield* validator.revalidateExecution(proposal);
           // These checkpoints are intent/completion evidence, never permission to replay
           // a filesystem effect after an uncertain crash boundary.
           yield* checkpoint(appendStep(operation.state, "workspace-preflight-verified"));
-          if (plan.checkoutMode !== "record-only") {
-            yield* checkpoint(appendStep(operation.state, "workspace-checkout-started"));
-            if (plan.checkoutMode === "remove-checkout") {
-              yield* git.removeWorktree({
-                cwd: expected.projectRoot,
-                path: expected.path,
-                force: false,
-              });
-            } else {
-              yield* git.createWorktree({
-                projectId: plan.projectId,
-                cwd: expected.projectRoot,
-                path: expected.path,
-                refName: expected.branch,
-              });
-            }
-            yield* checkpoint(appendStep(operation.state, "workspace-checkout-completed"));
-          }
-          if (plan.deleteBranch) {
-            if (Option.isNone(gitDriver) || expected.branchHead === null)
-              return yield* Effect.fail(new Error("Branch deletion unavailable."));
-            yield* checkpoint(appendStep(operation.state, "workspace-branch-started"));
-            // Immutable expected OID prevents deleting a branch moved since preflight.
-            yield* gitDriver.value.execute({
-              operation: "Agent Control workspace branch deletion",
-              cwd: expected.projectRoot,
-              args: ["update-ref", "-d", `refs/heads/${expected.branch}`, expected.branchHead],
-              timeoutMs: 10_000,
-              maxOutputBytes: 8192,
-            });
-            yield* checkpoint(appendStep(operation.state, "workspace-branch-completed"));
-          }
-          const lifecycleGuard = {
-            mainWorkspaceId: expected.mainWorkspaceId,
-            projectId: plan.projectId,
-            projectUpdatedAt: expected.projectUpdatedAt,
-            workspaceRoot: expected.projectRoot,
-            updatedAt: expected.updatedAt,
-            worktreePath: expected.path,
-            branch: expected.branch,
-            sessions: expected.sessions.map(({ threadId, updatedAt }) => ({ threadId, updatedAt })),
-          };
-          const now = new Date().toISOString();
+          // The shared lifecycle service performs the change with the same preflight,
+          // session shutdown, fencing and history-preserving rules as the UI.
+          yield* checkpoint(appendStep(operation.state, "workspace-checkout-started"));
+          if (Option.isNone(workspaceLifecycleOption))
+            return yield* Effect.fail(new Error("Workspace lifecycle management is unavailable."));
+          const lifecycleResult = yield* workspaceLifecycleOption.value.applyCurrent({
+            worktreeId: expected.worktreeId,
+            action: workspacePlanLifecycleAction(plan),
+            deleteBranch: plan.deleteBranch,
+            operationKey: operation.operationId,
+          });
+          if (lifecycleResult.outcome !== "completed")
+            return yield* Effect.fail(new Error(lifecycleResult.message));
+          yield* checkpoint(appendStep(operation.state, "workspace-checkout-completed"));
           yield* checkpoint(appendStep(operation.state, "workspace-record-started"));
-          yield* dispatch(
-            "workspace-record-completed",
-            plan.action === "delete"
-              ? {
-                  type: "worktree.delete",
-                  commandId: commandIdFor(operation.operationId, "workspace-record"),
-                  worktreeId: expected.worktreeId,
-                  lifecycleGuard,
-                  sessions: plan.sessions,
-                  deletedAt: now,
-                  deletedBranch: plan.deleteBranch,
-                }
-              : plan.action === "archive"
-                ? {
-                    type: "worktree.archive",
-                    commandId: commandIdFor(operation.operationId, "workspace-record"),
-                    worktreeId: expected.worktreeId,
-                    lifecycleGuard,
-                    archivedAt: now,
-                    deletedBranch: plan.deleteBranch,
-                  }
-                : {
-                    type: "worktree.restore",
-                    commandId: commandIdFor(operation.operationId, "workspace-record"),
-                    worktreeId: expected.worktreeId,
-                    lifecycleGuard,
-                    worktreePath: expected.path,
-                    restoredAt: now,
-                  },
-          );
+          if (plan.action === "delete") {
+            // Only reachable with no referencing conversations (see workspacePlanBlockers).
+            yield* dispatch("workspace-record-completed", {
+              type: "worktree.delete",
+              commandId: commandIdFor(operation.operationId, "workspace-record"),
+              worktreeId: expected.worktreeId,
+              deletedAt: new Date().toISOString(),
+              deletedBranch: plan.deleteBranch,
+            });
+          } else {
+            yield* checkpoint(appendStep(operation.state, "workspace-record-completed"));
+          }
           yield* git.invalidateStatus(expected.projectRoot);
           return operation;
         }

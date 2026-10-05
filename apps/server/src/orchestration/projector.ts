@@ -33,6 +33,8 @@ import {
   ThreadArchivedPayload,
   ThreadCreatedPayload,
   ThreadDeletedPayload,
+  ThreadTrashedPayload,
+  ThreadUntrashedPayload,
   ThreadInteractionModeSetPayload,
   ThreadMetaUpdatedPayload,
   ThreadProposedPlanUpsertedPayload,
@@ -54,6 +56,8 @@ import {
   ThreadAttachedToWorktreePayload,
   ThreadStatusBucketOverriddenPayload,
   WorktreeArchivedPayload,
+  WorktreeCheckoutRemovedPayload,
+  WorktreeCheckoutRestoredPayload,
   WorktreeCreatedPayload,
   WorktreeDeletedPayload,
   WorktreeManualPositionSetPayload,
@@ -523,6 +527,41 @@ export function projectEvent(
         })),
       );
 
+    case "worktree.checkoutRemoved":
+      return decodeForEvent(
+        WorktreeCheckoutRemovedPayload,
+        event.payload,
+        event.type,
+        "payload",
+      ).pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          worktrees: updateWorktree(nextBase.worktrees, payload.worktreeId, {
+            checkoutRemovedAt: payload.removedAt,
+            checkoutRemovalReason: payload.reason,
+            updatedAt: payload.removedAt,
+          }),
+        })),
+      );
+
+    case "worktree.checkoutRestored":
+      return decodeForEvent(
+        WorktreeCheckoutRestoredPayload,
+        event.payload,
+        event.type,
+        "payload",
+      ).pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          worktrees: updateWorktree(nextBase.worktrees, payload.worktreeId, {
+            worktreePath: payload.worktreePath,
+            checkoutRemovedAt: null,
+            checkoutRemovalReason: null,
+            updatedAt: payload.restoredAt,
+          }),
+        })),
+      );
+
     case "worktree.deleted":
       return decodeForEvent(WorktreeDeletedPayload, event.payload, event.type, "payload").pipe(
         Effect.map((payload) => ({
@@ -534,12 +573,40 @@ export function projectEvent(
       );
 
     case "thread.deleted":
+      // Permanent: a trashed thread loses its recoverable marker.
       return decodeForEvent(ThreadDeletedPayload, event.payload, event.type, "payload").pipe(
         Effect.map((payload) => ({
           ...nextBase,
           threads: updateThread(nextBase.threads, payload.threadId, {
             deletedAt: payload.deletedAt,
+            trashedAt: null,
             updatedAt: payload.deletedAt,
+          }),
+        })),
+      );
+
+    case "thread.trashed":
+      // Hidden like a deletion; `trashedAt` keeps it recoverable. Archive state is untouched
+      // so restoring returns the thread to exactly where it was.
+      return decodeForEvent(ThreadTrashedPayload, event.payload, event.type, "payload").pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          threads: updateThread(nextBase.threads, payload.threadId, {
+            deletedAt: payload.trashedAt,
+            trashedAt: payload.trashedAt,
+            updatedAt: payload.updatedAt,
+          }),
+        })),
+      );
+
+    case "thread.untrashed":
+      return decodeForEvent(ThreadUntrashedPayload, event.payload, event.type, "payload").pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          threads: updateThread(nextBase.threads, payload.threadId, {
+            deletedAt: null,
+            trashedAt: null,
+            updatedAt: payload.updatedAt,
           }),
         })),
       );

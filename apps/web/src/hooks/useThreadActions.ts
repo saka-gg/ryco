@@ -16,15 +16,17 @@ import { buildThreadRouteParams, resolveThreadRouteRef } from "../threadRoutes";
 import { useSettings } from "./useSettings";
 import { stackedThreadToast, toastManager } from "../components/ui/toast";
 
-type DeleteThreadOptions = {
+type TrashThreadOptions = {
   deletedThreadKeys?: ReadonlySet<string>;
   optimistic?: boolean;
 };
 
+const errorDescription = (error: unknown) =>
+  error instanceof Error ? error.message : "An error occurred.";
+
 export function useThreadActions() {
   const sidebarThreadSortOrder = useSettings((settings) => settings.sidebarThreadSortOrder);
   const confirmThreadDelete = useSettings((settings) => settings.confirmThreadDelete);
-  const clearComposerDraftForThread = useComposerDraftStore((store) => store.clearDraftThread);
   const clearProjectDraftThreadById = useComposerDraftStore(
     (store) => store.clearProjectDraftThreadById,
   );
@@ -98,8 +100,77 @@ export function useThreadActions() {
     });
   }, []);
 
-  const deleteThread = useCallback(
-    async (target: ScopedThreadRef, opts: DeleteThreadOptions = {}) => {
+  const untrashThread = useCallback(async (target: ScopedThreadRef) => {
+    const api = readEnvironmentApi(target.environmentId);
+    if (!api) throw new Error("This environment is not connected.");
+    await api.orchestration.dispatchCommand({
+      type: "thread.untrash",
+      commandId: newCommandId(),
+      threadId: target.threadId,
+    });
+  }, []);
+
+  /** Separately confirmed by the caller; only a thread in Trash can be deleted permanently. */
+  const deleteThreadPermanently = useCallback(async (target: ScopedThreadRef) => {
+    const api = readEnvironmentApi(target.environmentId);
+    if (!api) throw new Error("This environment is not connected.");
+    await api.orchestration.dispatchCommand({
+      type: "thread.delete",
+      commandId: newCommandId(),
+      threadId: target.threadId,
+    });
+  }, []);
+
+  /** Stops the provider runtime; the conversation and its terminal history stay. */
+  const stopThreadSession = useCallback(async (target: ScopedThreadRef) => {
+    const api = readEnvironmentApi(target.environmentId);
+    if (!api) return;
+    try {
+      await api.orchestration.dispatchCommand({
+        type: "thread.session.stop",
+        commandId: newCommandId(),
+        threadId: target.threadId,
+        createdAt: new Date().toISOString(),
+      });
+    } catch (error) {
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title: "Failed to stop session",
+          description: errorDescription(error),
+        }),
+      );
+    }
+  }, []);
+
+  /** Stops the current generation only; nothing else changes. */
+  const interruptThreadTurn = useCallback(async (target: ScopedThreadRef) => {
+    const api = readEnvironmentApi(target.environmentId);
+    if (!api) return;
+    try {
+      await api.orchestration.dispatchCommand({
+        type: "thread.turn.interrupt",
+        commandId: newCommandId(),
+        threadId: target.threadId,
+        createdAt: new Date().toISOString(),
+      });
+    } catch (error) {
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title: "Failed to interrupt turn",
+          description: errorDescription(error),
+        }),
+      );
+    }
+  }, []);
+
+  /**
+   * Moves a thread to Trash: hidden everywhere, its session stopped, and its history,
+   * attachments, terminal history and unsent draft kept for a later restore.
+   */
+  const trashThread = useCallback(
+    async (target: ScopedThreadRef, opts: TrashThreadOptions = {}) => {
       const api = readEnvironmentApi(target.environmentId);
       if (!api) return;
       const resolved = resolveThreadTarget(target);
@@ -126,22 +197,44 @@ export function useThreadActions() {
         deletedThreadIds: deletedIds ?? new Set<ThreadId>(),
         sortOrder: sidebarThreadSortOrder,
       });
-      const dispatchDelete = api.orchestration.dispatchCommand({
-        type: "thread.delete",
-        commandId: newCommandId(),
-        threadId: threadRef.threadId,
-      });
+      const dispatchDelete = api.orchestration
+        .dispatchCommand({
+          type: "thread.trash",
+          commandId: newCommandId(),
+          threadId: threadRef.threadId,
+        })
+        .then((result) => {
+          toastManager.add({
+            type: "success",
+            title: `Moved "${thread.title}" to Trash`,
+            description: "Restore it from Settings › Archive › Trash.",
+            actionProps: {
+              children: "Undo",
+              onClick: () =>
+                void untrashThread(threadRef).catch((error: unknown) =>
+                  toastManager.add(
+                    stackedThreadToast({
+                      type: "error",
+                      title: "Failed to restore thread",
+                      description: errorDescription(error),
+                    }),
+                  ),
+                ),
+            },
+          });
+          return result;
+        });
 
       if (opts.optimistic) {
-        // Fire WS delete first so the network round-trip parallelizes
+        // Fire the WS command first so the network round-trip parallelizes
         // with the route switch / local cleanup. Errors surface via toast;
-        // the local state stays cleared (matches existing behavior).
+        // the shell stream restores the row if the server refused.
         void dispatchDelete.catch((error: unknown) => {
           toastManager.add(
             stackedThreadToast({
               type: "error",
-              title: "Failed to delete thread",
-              description: error instanceof Error ? error.message : "An error occurred.",
+              title: "Failed to move thread to Trash",
+              description: errorDescription(error),
             }),
           );
         });
@@ -169,7 +262,6 @@ export function useThreadActions() {
 
         const cleanupDeletedThread = () => {
           useStore.getState().removeThread(threadRef);
-          clearComposerDraftForThread(threadRef);
           clearProjectDraftThreadById(
             scopeProjectRef(threadRef.environmentId, thread.projectId),
             threadRef,
@@ -202,7 +294,6 @@ export function useThreadActions() {
       }
 
       await dispatchDelete;
-      clearComposerDraftForThread(threadRef);
       clearProjectDraftThreadById(
         scopeProjectRef(threadRef.environmentId, thread.projectId),
         threadRef,
@@ -230,17 +321,17 @@ export function useThreadActions() {
       }
     },
     [
-      clearComposerDraftForThread,
       clearProjectDraftThreadById,
       clearTerminalState,
       getCurrentRouteThreadRef,
       router,
       resolveThreadTarget,
       sidebarThreadSortOrder,
+      untrashThread,
     ],
   );
 
-  const confirmAndDeleteThread = useCallback(
+  const confirmAndTrashThread = useCallback(
     async (target: ScopedThreadRef) => {
       const api = readEnvironmentApi(target.environmentId);
       if (!api) return;
@@ -250,26 +341,34 @@ export function useThreadActions() {
       const { thread } = resolved;
 
       if (confirmThreadDelete && localApi) {
-        const confirmed = await localApi.dialogs.confirm(
-          [
-            `Delete thread "${thread.title}"?`,
-            "This permanently clears conversation history for this thread.",
-          ].join("\n"),
-        );
+        const confirmed = await localApi.dialogs.confirm(trashConfirmationMessage([thread.title]));
         if (!confirmed) {
           return;
         }
       }
 
-      await deleteThread(target);
+      await trashThread(target);
     },
-    [confirmThreadDelete, deleteThread, resolveThreadTarget],
+    [confirmThreadDelete, trashThread, resolveThreadTarget],
   );
 
   return {
     archiveThread,
     unarchiveThread,
-    deleteThread,
-    confirmAndDeleteThread,
+    trashThread,
+    confirmAndTrashThread,
+    untrashThread,
+    deleteThreadPermanently,
+    stopThreadSession,
+    interruptThreadTurn,
   };
+}
+
+/** Shared by every "Move to Trash" confirmation (single row, menu, multi-select). */
+export function trashConfirmationMessage(titles: ReadonlyArray<string>): string {
+  const subject = titles.length === 1 ? `"${titles[0]}"` : `${titles.length} threads`;
+  return [
+    `Move ${subject} to Trash?`,
+    "History, attachments and terminal history are kept. Restore from Settings › Archive › Trash; Ryco never empties Trash automatically.",
+  ].join("\n");
 }

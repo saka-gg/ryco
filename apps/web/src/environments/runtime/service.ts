@@ -731,7 +731,11 @@ function applyRecoveredEventBatch(
   }
 
   const needsThreadUiSync = events.some(
-    (event) => event.type === "thread.created" || event.type === "thread.deleted",
+    (event) =>
+      event.type === "thread.created" ||
+      event.type === "thread.deleted" ||
+      event.type === "thread.trashed" ||
+      event.type === "thread.untrashed",
   );
   if (needsThreadUiSync) {
     environmentStateSink.syncThreads(environmentId);

@@ -6,15 +6,27 @@ import {
   scopeProjectRef,
   scopeThreadRef,
 } from "@ryco/client-runtime/scoped";
-import { type ScopedProjectRef, type ScopedThreadRef, type ThreadId } from "@ryco/contracts";
+import {
+  type ScopedProjectRef,
+  type ScopedThreadRef,
+  type ThreadId,
+  WorktreeId,
+} from "@ryco/contracts";
 import { newCommandId } from "../../../lib/utils";
 import { readEnvironmentApi } from "../../../environmentApi";
 import { readLocalApi } from "../../../localApi";
 import { useComposerDraftStore, type DraftId } from "../../../composerDraftStore";
 import { resolveThreadRouteTarget } from "../../../threadRoutes";
 import { useUiStateStore } from "../../../uiStateStore";
+import { selectSidebarWorktreesForProjectRef, useStore } from "../../../store";
+import { runWorkspaceLifecycleAction } from "../../../workspaceLifecycle";
+import {
+  buildThreadMenuInventory,
+  type ThreadMenuActionId,
+  type ThreadMenuActionItem,
+} from "../threadMenuInventory";
 import type { useRouter } from "@tanstack/react-router";
-import type { useThreadActions } from "../../../hooks/useThreadActions";
+import { trashConfirmationMessage, type useThreadActions } from "../../../hooks/useThreadActions";
 import {
   canArchiveSidebarThread,
   shouldConfirmSidebarThreadArchive,
@@ -25,33 +37,17 @@ import type { SidebarThreadSummary } from "../../../types";
 import type { SidebarProjectGroupMember } from "../../../sidebarProjectGrouping";
 import { requestThreadPinChange } from "../../../threadPinning";
 
-export type ThreadMenuActionId =
-  | "open-in-split"
-  | "pin"
-  | "unpin"
-  | "rename"
-  | "mark-unread"
-  | "project-settings"
-  | "copy-project-path"
-  | "copy-worktree-path"
-  | "copy-path"
-  | "copy-thread-id"
-  | "archive"
-  | "close";
-
-export interface ThreadMenuActionItem {
-  readonly id: ThreadMenuActionId;
-  readonly label: string;
-  readonly destructive?: boolean;
-}
+export type { ThreadMenuActionId, ThreadMenuActionItem };
 
 export function useThreadMenuActions(params: {
   router: ReturnType<typeof useRouter>;
   appSettingsConfirmThreadDelete: boolean;
   appSettingsConfirmThreadArchive: boolean;
   appSettingsConfirmThreadUnpin: boolean;
-  deleteThread: ReturnType<typeof useThreadActions>["deleteThread"];
+  trashThread: ReturnType<typeof useThreadActions>["trashThread"];
   archiveThread: ReturnType<typeof useThreadActions>["archiveThread"];
+  stopThreadSession: ReturnType<typeof useThreadActions>["stopThreadSession"];
+  interruptThreadTurn: ReturnType<typeof useThreadActions>["interruptThreadTurn"];
   markThreadUnread: (threadId: string, latestTurnCompletedAt: string | null | undefined) => void;
   copyPathToClipboard: (value: string, ctx: { path: string }) => void;
   copyThreadIdToClipboard: (value: string, ctx: { threadId: ThreadId }) => void;
@@ -59,14 +55,19 @@ export function useThreadMenuActions(params: {
   memberProjectByScopedKey: ReadonlyMap<string, Pick<SidebarProjectGroupMember, "cwd">>;
   projectCwd: string | null | undefined;
   openProjectSettings?: (projectRef: ScopedProjectRef) => void;
+  /** Inbox rows add a Workspace submenu; project-sidebar rows sit under their workspace node. */
+  includeWorkspaceSubmenu?: boolean;
+  openWorkspaceManagement?: (projectRef: ScopedProjectRef) => void;
 }) {
   const {
     router,
     appSettingsConfirmThreadDelete,
     appSettingsConfirmThreadArchive,
     appSettingsConfirmThreadUnpin,
-    deleteThread,
+    trashThread,
     archiveThread,
+    stopThreadSession,
+    interruptThreadTurn,
     markThreadUnread,
     copyPathToClipboard,
     copyThreadIdToClipboard,
@@ -74,13 +75,16 @@ export function useThreadMenuActions(params: {
     memberProjectByScopedKey,
     projectCwd,
     openProjectSettings,
+    includeWorkspaceSubmenu = false,
+    openWorkspaceManagement,
   } = params;
   const [renamingThreadKey, setRenamingThreadKey] = useState<string | null>(null);
   const [renamingTitle, setRenamingTitle] = useState("");
   const renamingCommittedRef = useRef(false);
   const renamingInputRef = useRef<HTMLInputElement | null>(null);
 
-  const closeThread = useCallback(
+  // Drafts are discarded locally; server threads move to Trash (never deleted here).
+  const requestTrashThread = useCallback(
     async (
       thread: SidebarThreadSummary & { draftId?: DraftId | undefined },
       opts: { deletedThreadKeys?: ReadonlySet<string> } = {},
@@ -97,15 +101,13 @@ export function useThreadMenuActions(params: {
         return;
       }
       const threadRef = scopeThreadRef(thread.environmentId, thread.id);
-      const shouldConfirmClose = shouldConfirmSidebarThreadDelete({
-        confirmThreadDelete: appSettingsConfirmThreadDelete,
-        thread,
-      });
-      if (shouldConfirmClose) {
-        const message = [
-          `Close session "${thread.title}"?`,
-          "This permanently clears conversation history for this thread.",
-        ].join("\n");
+      if (
+        shouldConfirmSidebarThreadDelete({
+          confirmThreadDelete: appSettingsConfirmThreadDelete,
+          thread,
+        })
+      ) {
+        const message = trashConfirmationMessage([thread.title]);
         const localApi = readLocalApi();
         const confirmed = localApi
           ? await localApi.dialogs.confirm(message)
@@ -114,17 +116,36 @@ export function useThreadMenuActions(params: {
           return;
         }
       }
-      await deleteThread(threadRef, {
+      await trashThread(threadRef, {
         ...opts,
         // Always optimistic after the (synchronous) confirmation. The
         // non-optimistic branch awaits the WS round-trip before touching
         // the UI — perceived as a multi-second freeze. The optimistic
-        // branch already toasts errors if the server delete fails.
+        // branch already toasts errors if the server refuses.
         optimistic: true,
       });
     },
-    [appSettingsConfirmThreadDelete, deleteThread, router],
+    [appSettingsConfirmThreadDelete, trashThread, router],
   );
+
+  /** The registered workspace record a thread belongs to, if any. */
+  const resolveThreadWorkspace = useCallback((thread: SidebarThreadSummary) => {
+    const worktrees = selectSidebarWorktreesForProjectRef(
+      useStore.getState(),
+      scopeProjectRef(thread.environmentId, thread.projectId),
+    );
+    const record =
+      worktrees.find((worktree) =>
+        thread.worktreeId != null
+          ? worktree.id === thread.worktreeId
+          : thread.worktreePath !== null && worktree.worktreePath === thread.worktreePath,
+      ) ?? null;
+    return {
+      record,
+      protectedWorkspace:
+        record === null || record.origin === "main" || record.worktreePath === null,
+    };
+  }, []);
 
   const attemptArchiveThread = useCallback(
     async (threadRef: ScopedThreadRef) => {
@@ -212,62 +233,44 @@ export function useThreadMenuActions(params: {
     [],
   );
 
-  // The single thread action inventory, as data. Both presenters — the DOM
-  // context menu (desktop right-click) and the phone bottom-sheet kebab —
-  // render this inventory and dispatch through `performThreadMenuAction`, so
+  // The single thread action inventory, as data. Every presenter — the DOM
+  // context menu, the Inbox menu, the native menu and the phone bottom sheet —
+  // renders this inventory and dispatches through `performThreadMenuAction`, so
   // the handlers are never forked.
   const listThreadMenuActions = useCallback(
     (threadKey: string): ThreadMenuActionItem[] => {
       const thread = sidebarThreadByKeyRef.current.get(threadKey) ?? null;
       if (!thread) return [];
       const draftId = (thread as SidebarThreadSummary & { draftId?: DraftId | undefined }).draftId;
-      if (draftId) {
-        return [{ id: "close", label: "Close session" }];
-      }
-      const archiveAvailable = canArchiveSidebarThread(thread);
-      const isPinned = useUiStateStore.getState().pinnedThreadKeys[threadKey] === true;
       const panes = useChatPanesStore.getState();
-      const splitAvailable = availablePaneSplit(
-        panes.root,
-        panes.activeRef,
-        scopeThreadRef(thread.environmentId, thread.id),
-      );
-      return [
-        ...(splitAvailable
-          ? [{ id: "open-in-split", label: "Open in split view" } satisfies ThreadMenuActionItem]
-          : []),
-        { id: isPinned ? "unpin" : "pin", label: isPinned ? "Unpin thread" : "Pin thread" },
-        { id: "rename", label: "Rename thread" },
-        { id: "mark-unread", label: "Mark unread" },
-        ...(openProjectSettings
-          ? [
-              ...(memberProjectByScopedKey.has(
+      return buildThreadMenuInventory({
+        thread,
+        isDraft: Boolean(draftId),
+        isPinned: useUiStateStore.getState().pinnedThreadKeys[threadKey] === true,
+        splitAvailable: Boolean(
+          availablePaneSplit(
+            panes.root,
+            panes.activeRef,
+            scopeThreadRef(thread.environmentId, thread.id),
+          ),
+        ),
+        projectActions: openProjectSettings
+          ? {
+              memberProject: memberProjectByScopedKey.has(
                 scopedProjectKey(scopeProjectRef(thread.environmentId, thread.projectId)),
-              )
-                ? ([
-                    { id: "project-settings", label: "Project settings" },
-                    { id: "copy-project-path", label: "Copy Project Path" },
-                  ] satisfies ThreadMenuActionItem[])
-                : []),
-              ...(thread.worktreePath
-                ? ([
-                    { id: "copy-worktree-path", label: "Copy Worktree Path" },
-                  ] satisfies ThreadMenuActionItem[])
-                : []),
-            ]
-          : ([{ id: "copy-path", label: "Copy Path" }] satisfies ThreadMenuActionItem[])),
-        { id: "copy-thread-id", label: "Copy Thread ID" },
-        ...(archiveAvailable
-          ? [{ id: "archive", label: "Archive session" } satisfies ThreadMenuActionItem]
-          : []),
-        {
-          id: "close",
-          label: thread.worktreeId || thread.worktreePath ? "Close session" : "Delete thread",
-          destructive: true,
-        },
-      ];
+              ),
+            }
+          : null,
+        workspace: includeWorkspaceSubmenu ? resolveThreadWorkspace(thread) : null,
+      });
     },
-    [sidebarThreadByKeyRef, memberProjectByScopedKey, openProjectSettings],
+    [
+      includeWorkspaceSubmenu,
+      memberProjectByScopedKey,
+      openProjectSettings,
+      resolveThreadWorkspace,
+      sidebarThreadByKeyRef,
+    ],
   );
 
   const performThreadMenuAction = useCallback(
@@ -335,6 +338,51 @@ export function useThreadMenuActions(params: {
         copyThreadIdToClipboard(thread.id, { threadId: thread.id });
         return;
       }
+      if (actionId === "unarchive") {
+        const api = readEnvironmentApi(threadRef.environmentId);
+        if (!api) return;
+        try {
+          await api.orchestration.dispatchCommand({
+            type: "thread.unarchive",
+            commandId: newCommandId(),
+            threadId: threadRef.threadId,
+          });
+        } catch (error) {
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: "Failed to unarchive thread",
+              description: error instanceof Error ? error.message : "An error occurred.",
+            }),
+          );
+        }
+        return;
+      }
+      if (actionId === "interrupt-turn") {
+        await interruptThreadTurn(threadRef);
+        return;
+      }
+      if (actionId === "stop-session") {
+        await stopThreadSession(threadRef);
+        return;
+      }
+      if (actionId === "workspace:manage") {
+        openWorkspaceManagement?.(scopeProjectRef(thread.environmentId, thread.projectId));
+        return;
+      }
+      if (actionId.startsWith("workspace:")) {
+        const { record } = resolveThreadWorkspace(thread);
+        if (!record) return;
+        await runWorkspaceLifecycleAction({
+          environmentId: thread.environmentId,
+          worktreeId: WorktreeId.make(record.id),
+          action: actionId.slice("workspace:".length) as Parameters<
+            typeof runWorkspaceLifecycleAction
+          >[0]["action"],
+          title: record.title ?? record.branch,
+        });
+        return;
+      }
       if (actionId === "archive") {
         if (
           shouldConfirmSidebarThreadArchive({
@@ -343,8 +391,8 @@ export function useThreadMenuActions(params: {
           })
         ) {
           const message = [
-            `Archive session "${thread.title}"?`,
-            "You can restore archived sessions from Settings > Archive.",
+            `Archive thread "${thread.title}"?`,
+            "Its session stops and its history is kept indefinitely. Unarchive it from Settings › Archive.",
           ].join("\n");
           const localApi = readLocalApi();
           const confirmed = localApi
@@ -355,14 +403,18 @@ export function useThreadMenuActions(params: {
         await attemptArchiveThread(threadRef);
         return;
       }
-      if (actionId !== "close") return;
-      await closeThread(thread);
+      if (actionId !== "trash" && actionId !== "discard-draft") return;
+      await requestTrashThread(thread);
     },
     [
       attemptArchiveThread,
       appSettingsConfirmThreadArchive,
       appSettingsConfirmThreadUnpin,
-      closeThread,
+      requestTrashThread,
+      interruptThreadTurn,
+      openWorkspaceManagement,
+      resolveThreadWorkspace,
+      stopThreadSession,
       copyPathToClipboard,
       copyThreadIdToClipboard,
       markThreadUnread,
@@ -380,7 +432,7 @@ export function useThreadMenuActions(params: {
     setRenamingTitle,
     renamingCommittedRef,
     renamingInputRef,
-    closeThread,
+    requestTrashThread,
     attemptArchiveThread,
     startThreadRename,
     cancelRename,

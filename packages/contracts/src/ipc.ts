@@ -1,5 +1,15 @@
 import type { EffectiveProjectPreferences } from "./settings.ts";
 import type {
+  LifecycleSuggestions,
+  TrashListResult,
+  WorkspaceLifecycleApplyInput,
+  WorkspaceLifecycleListInputType,
+  WorkspaceLifecyclePreview,
+  WorkspaceLifecycleRequest,
+  WorkspaceLifecycleResult,
+  WorkspaceLifecycleSummary,
+} from "./workspaceLifecycle.ts";
+import type {
   CodexResetCreditAccount,
   CodexResetCreditInput,
   CodexResetCreditOutcome,
@@ -1193,6 +1203,16 @@ export interface EnvironmentApi {
     archiveWorktree?: (input: GitArchiveWorktreeInput) => Promise<EmptyRpcResult>;
     restoreWorktree?: (input: GitRestoreWorktreeInput) => Promise<EmptyRpcResult>;
     deleteWorktree?: (input: GitDeleteWorktreeInput) => Promise<EmptyRpcResult>;
+  };
+  /** One server-side lifecycle authority; absent on servers that predate it. */
+  lifecycle?: {
+    listWorkspaces: (
+      input: WorkspaceLifecycleListInputType,
+    ) => Promise<ReadonlyArray<WorkspaceLifecycleSummary>>;
+    previewWorkspace: (input: WorkspaceLifecycleRequest) => Promise<WorkspaceLifecyclePreview>;
+    applyWorkspace: (input: WorkspaceLifecycleApplyInput) => Promise<WorkspaceLifecycleResult>;
+    suggestions: (input: Record<string, never>) => Promise<LifecycleSuggestions>;
+    listTrash: (input: Record<string, never>) => Promise<TrashListResult>;
   };
   worktrees?: {
     setManualPosition: (input: WorktreesSetManualPositionInput) => Promise<EmptyRpcResult>;

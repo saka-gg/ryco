@@ -92,7 +92,7 @@ export function NewThreadWorkLocation({
   const worktrees = useMemo<ReadonlyArray<WorktreeChoice>>(
     () =>
       worktreeSummaries.flatMap((worktree) =>
-        worktree.worktreePath && worktree.archivedAt === null
+        worktree.worktreePath && worktree.archivedAt === null && worktree.checkoutRemovedAt == null
           ? [
               {
                 worktreeId: worktree.id,

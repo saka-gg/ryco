@@ -36,6 +36,7 @@ import {
   PullRequestState,
   StatusBucket,
   Worktree,
+  WorktreeCheckoutRemovalReason,
   WorktreeId,
   WorktreeOrigin,
 } from "./worktree.ts";
@@ -1000,7 +1001,12 @@ export const OrchestrationThread = Schema.Struct({
   snoozedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   /** Optional so mixed-version snapshots decode; older clients strip it. */
   usageLimit: Schema.optional(Schema.NullOr(ThreadUsageLimit)),
+  /**
+   * Hidden from every live view. A trashed thread also carries `trashedAt` and keeps
+   * its history and assets; without `trashedAt` the deletion is permanent.
+   */
   deletedAt: Schema.NullOr(IsoDateTime),
+  trashedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   messages: Schema.Array(OrchestrationMessage),
   proposedPlans: Schema.Array(OrchestrationProposedPlan).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
@@ -1403,8 +1409,22 @@ const ThreadDelegatedCreateCommand = Schema.Struct({
 });
 export type ThreadDelegatedCreateCommand = typeof ThreadDelegatedCreateCommand.Type;
 
+/** Permanent deletion. Only a trashed (or never-used) thread can be deleted. */
 const ThreadDeleteCommand = Schema.Struct({
   type: Schema.Literal("thread.delete"),
+  commandId: CommandId,
+  threadId: ThreadId,
+});
+
+/** Recoverable removal: hidden everywhere, history and assets preserved. */
+const ThreadTrashCommand = Schema.Struct({
+  type: Schema.Literal("thread.trash"),
+  commandId: CommandId,
+  threadId: ThreadId,
+});
+
+const ThreadUntrashCommand = Schema.Struct({
+  type: Schema.Literal("thread.untrash"),
   commandId: CommandId,
   threadId: ThreadId,
 });
@@ -1787,6 +1807,11 @@ const WorktreeRestoreCommand = Schema.Struct({
   restoredAt: IsoDateTime,
 });
 
+/**
+ * Drops a workspace record. Never touches conversations: the decider refuses while
+ * any conversation (active, archived or trashed) still references the record.
+ * `sessions` is decoded for stored commands only; "delete" is always refused.
+ */
 const WorktreeDeleteCommand = Schema.Struct({
   sessions: Schema.optional(Schema.Literals(["preserve", "delete"])),
   type: Schema.Literal("worktree.delete"),
@@ -1795,6 +1820,28 @@ const WorktreeDeleteCommand = Schema.Struct({
   lifecycleGuard: Schema.optional(WorktreeLifecycleGuard),
   deletedAt: IsoDateTime,
   deletedBranch: Schema.Boolean,
+});
+
+/**
+ * Server-only (workspace lifecycle service): records that the physical checkout is
+ * gone. Archives the record when it is still active; the path and branch stay.
+ */
+const WorktreeCheckoutRemoveCommand = Schema.Struct({
+  type: Schema.Literal("worktree.checkout.remove"),
+  commandId: CommandId,
+  worktreeId: WorktreeId,
+  reason: WorktreeCheckoutRemovalReason,
+  lifecycleGuard: Schema.optional(WorktreeLifecycleGuard),
+  removedAt: IsoDateTime,
+});
+
+/** Server-only: the checkout was recreated at its recorded path. */
+const WorktreeCheckoutRestoreCommand = Schema.Struct({
+  type: Schema.Literal("worktree.checkout.restore"),
+  commandId: CommandId,
+  worktreeId: WorktreeId,
+  worktreePath: TrimmedNonEmptyString,
+  restoredAt: IsoDateTime,
 });
 
 const ThreadAttachToWorktreeCommand = Schema.Struct({
@@ -1836,6 +1883,8 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ProjectDeleteCommand,
   ThreadCreateCommand,
   ThreadDeleteCommand,
+  ThreadTrashCommand,
+  ThreadUntrashCommand,
   ThreadArchiveCommand,
   ThreadSidebarUndoCommand,
   ThreadUnarchiveCommand,
@@ -1878,6 +1927,8 @@ export const ClientOrchestrationCommand = Schema.Union([
   ProjectDeleteCommand,
   ThreadCreateCommand,
   ThreadDeleteCommand,
+  ThreadTrashCommand,
+  ThreadUntrashCommand,
   ThreadArchiveCommand,
   ThreadSidebarUndoCommand,
   ThreadUnarchiveCommand,
@@ -2092,6 +2143,8 @@ const InternalOrchestrationCommand = Schema.Union([
   ThreadGoalSyncCommand,
   ThreadGoalProviderClearCommand,
   ThreadUsageLimitRecordCommand,
+  WorktreeCheckoutRemoveCommand,
+  WorktreeCheckoutRestoreCommand,
 ]);
 export type InternalOrchestrationCommand = typeof InternalOrchestrationCommand.Type;
 
@@ -2108,6 +2161,8 @@ export const OrchestrationEventType = Schema.Literals([
   "project.deleted",
   "thread.created",
   "thread.deleted",
+  "thread.trashed",
+  "thread.untrashed",
   "thread.archived",
   "thread.unarchived",
   "thread.snoozed",
@@ -2144,6 +2199,8 @@ export const OrchestrationEventType = Schema.Literals([
   "worktree.sourceControlStateUpdated",
   "worktree.restored",
   "worktree.deleted",
+  "worktree.checkoutRemoved",
+  "worktree.checkoutRestored",
   "thread.attachedToWorktree",
   "thread.statusBucketOverridden",
   "thread.manualPositionSet",
@@ -2214,6 +2271,17 @@ export const ThreadCreatedPayload = Schema.Struct({
 export const ThreadDeletedPayload = Schema.Struct({
   threadId: ThreadId,
   deletedAt: IsoDateTime,
+});
+
+export const ThreadTrashedPayload = Schema.Struct({
+  threadId: ThreadId,
+  trashedAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+});
+
+export const ThreadUntrashedPayload = Schema.Struct({
+  threadId: ThreadId,
+  updatedAt: IsoDateTime,
 });
 
 export const ThreadArchivedPayload = Schema.Struct({
@@ -2524,6 +2592,18 @@ export const WorktreeDeletedPayload = Schema.Struct({
   deletedBranch: Schema.Boolean,
 });
 
+export const WorktreeCheckoutRemovedPayload = Schema.Struct({
+  worktreeId: WorktreeId,
+  reason: WorktreeCheckoutRemovalReason,
+  removedAt: IsoDateTime,
+});
+
+export const WorktreeCheckoutRestoredPayload = Schema.Struct({
+  worktreeId: WorktreeId,
+  worktreePath: TrimmedNonEmptyString,
+  restoredAt: IsoDateTime,
+});
+
 export const ThreadAttachedToWorktreePayload = Schema.Struct({
   threadId: ThreadId,
   worktreeId: WorktreeId,
@@ -2599,6 +2679,16 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("thread.deleted"),
     payload: ThreadDeletedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.trashed"),
+    payload: ThreadTrashedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.untrashed"),
+    payload: ThreadUntrashedPayload,
   }),
   Schema.Struct({
     ...EventBaseFields,
@@ -2779,6 +2869,16 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("worktree.deleted"),
     payload: WorktreeDeletedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("worktree.checkoutRemoved"),
+    payload: WorktreeCheckoutRemovedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("worktree.checkoutRestored"),
+    payload: WorktreeCheckoutRestoredPayload,
   }),
   Schema.Struct({
     ...EventBaseFields,

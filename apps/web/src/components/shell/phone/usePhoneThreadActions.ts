@@ -39,7 +39,7 @@ export function usePhoneThreadActions(params: {
   const defaultThreadEnvMode = useSettings<ThreadEnvMode>(
     (settings) => settings.defaultThreadEnvMode,
   );
-  const { archiveThread, deleteThread } = useThreadActions();
+  const { archiveThread, trashThread, stopThreadSession, interruptThreadTurn } = useThreadActions();
   const { handleNewThread } = useNewThreadHandler();
   const markThreadUnread = useUiStateStore((state) => state.markThreadUnread);
   const toggleThreadSelection = useThreadSelectionStore((state) => state.toggleThread);
@@ -64,8 +64,10 @@ export function usePhoneThreadActions(params: {
     appSettingsConfirmThreadArchive,
     appSettingsConfirmThreadUnpin,
     defaultThreadEnvMode,
-    deleteThread,
+    trashThread,
     archiveThread,
+    stopThreadSession,
+    interruptThreadTurn,
     handleNewThread,
     markThreadUnread,
     copyPathToClipboard,

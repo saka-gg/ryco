@@ -1,6 +1,11 @@
 import React, { useCallback } from "react";
 import { scopedThreadKey, scopeProjectRef, scopeThreadRef } from "@ryco/client-runtime/scoped";
-import { type ScopedThreadRef, type ThreadEnvMode, type ThreadId } from "@ryco/contracts";
+import {
+  type ContextMenuItem,
+  type ScopedThreadRef,
+  type ThreadEnvMode,
+  type ThreadId,
+} from "@ryco/contracts";
 import { isMacPlatform } from "../../../lib/utils";
 import { readLocalApi } from "../../../localApi";
 import { useComposerDraftStore, type DraftId } from "../../../composerDraftStore";
@@ -9,7 +14,7 @@ import { buildThreadRouteParams, resolveThreadRouteTarget } from "../../../threa
 import { useThreadSelectionStore } from "../../../threadSelectionStore";
 import type { useRouter } from "@tanstack/react-router";
 import type { useNewThreadHandler } from "../../../hooks/useHandleNewThread";
-import type { useThreadActions } from "../../../hooks/useThreadActions";
+import { trashConfirmationMessage, type useThreadActions } from "../../../hooks/useThreadActions";
 import {
   isTrailingDoubleClick,
   resolveSidebarNewThreadSeedContext,
@@ -20,7 +25,11 @@ import type { SidebarThreadSummary } from "../../../types";
 import type { SidebarProjectGroupMember } from "../../../sidebarProjectGrouping";
 
 export type { ThreadMenuActionId, ThreadMenuActionItem } from "./useThreadMenuActions";
-import { useThreadMenuActions, type ThreadMenuActionId } from "./useThreadMenuActions";
+import {
+  useThreadMenuActions,
+  type ThreadMenuActionId,
+  type ThreadMenuActionItem,
+} from "./useThreadMenuActions";
 
 export function useSidebarThreadActions(params: {
   router: ReturnType<typeof useRouter>;
@@ -36,8 +45,10 @@ export function useSidebarThreadActions(params: {
   appSettingsConfirmThreadArchive: boolean;
   appSettingsConfirmThreadUnpin: boolean;
   defaultThreadEnvMode: ThreadEnvMode;
-  deleteThread: ReturnType<typeof useThreadActions>["deleteThread"];
+  trashThread: ReturnType<typeof useThreadActions>["trashThread"];
   archiveThread: ReturnType<typeof useThreadActions>["archiveThread"];
+  stopThreadSession: ReturnType<typeof useThreadActions>["stopThreadSession"];
+  interruptThreadTurn: ReturnType<typeof useThreadActions>["interruptThreadTurn"];
   handleNewThread: ReturnType<typeof useNewThreadHandler>["handleNewThread"];
   markThreadUnread: (threadId: string, latestTurnCompletedAt: string | null | undefined) => void;
   copyPathToClipboard: (value: string, ctx: { path: string }) => void;
@@ -58,7 +69,7 @@ export function useSidebarThreadActions(params: {
     selectedThreadCount,
     appSettingsConfirmThreadDelete,
     defaultThreadEnvMode,
-    deleteThread,
+    trashThread,
     handleNewThread,
     markThreadUnread,
     sidebarThreadByKeyRef,
@@ -70,7 +81,7 @@ export function useSidebarThreadActions(params: {
     setRenamingTitle,
     renamingCommittedRef,
     renamingInputRef,
-    closeThread,
+    requestTrashThread,
     attemptArchiveThread,
     startThreadRename,
     cancelRename,
@@ -178,7 +189,7 @@ export function useSidebarThreadActions(params: {
       const clicked = await api.contextMenu.show(
         [
           { id: "mark-unread", label: `Mark unread (${count})` },
-          { id: "delete", label: `Delete (${count})`, destructive: true },
+          { id: "trash", label: `Move to Trash (${count})`, destructive: true },
         ],
         position,
       );
@@ -192,19 +203,20 @@ export function useSidebarThreadActions(params: {
         return;
       }
 
-      if (clicked !== "delete") return;
+      if (clicked !== "trash") return;
 
-      const shouldConfirmDelete = shouldConfirmSidebarThreadSelectionDelete({
+      const shouldConfirmTrash = shouldConfirmSidebarThreadSelectionDelete({
         confirmThreadDelete: appSettingsConfirmThreadDelete,
         threads: threadKeys.map((threadKey) => sidebarThreadByKeyRef.current.get(threadKey)),
       });
 
-      if (shouldConfirmDelete) {
+      if (shouldConfirmTrash) {
         const confirmed = await api.dialogs.confirm(
-          [
-            `Delete ${count} thread${count === 1 ? "" : "s"}?`,
-            "This permanently clears conversation history for these threads.",
-          ].join("\n"),
+          trashConfirmationMessage(
+            threadKeys.map(
+              (threadKey) => sidebarThreadByKeyRef.current.get(threadKey)?.title ?? "",
+            ),
+          ),
         );
         if (!confirmed) return;
       }
@@ -213,7 +225,7 @@ export function useSidebarThreadActions(params: {
       for (const threadKey of threadKeys) {
         const thread = sidebarThreadByKeyRef.current.get(threadKey);
         if (!thread) continue;
-        await deleteThread(scopeThreadRef(thread.environmentId, thread.id), {
+        await trashThread(scopeThreadRef(thread.environmentId, thread.id), {
           deletedThreadKeys,
         });
       }
@@ -222,7 +234,7 @@ export function useSidebarThreadActions(params: {
     [
       appSettingsConfirmThreadDelete,
       clearSelection,
-      deleteThread,
+      trashThread,
       markThreadUnread,
       removeFromSelection,
       sidebarThreadByKeyRef,
@@ -309,14 +321,13 @@ export function useSidebarThreadActions(params: {
       }
       const items = listThreadMenuActions(threadKey);
       if (items.length === 0) return;
-      const clicked = await api.contextMenu.show(
-        items.map((item) =>
-          item.destructive
-            ? { id: item.id, label: item.label, destructive: true }
-            : { id: item.id, label: item.label },
-        ),
-        position,
-      );
+      const toNativeItem = (item: ThreadMenuActionItem): ContextMenuItem<ThreadMenuActionId> => ({
+        id: item.id,
+        label: item.label,
+        ...(item.destructive ? { destructive: true } : {}),
+        ...(item.children ? { children: item.children.map(toNativeItem) } : {}),
+      });
+      const clicked = await api.contextMenu.show(items.map(toNativeItem), position);
       if (!clicked) return;
       await performThreadMenuAction(threadRef, clicked as ThreadMenuActionId);
     },
@@ -337,7 +348,7 @@ export function useSidebarThreadActions(params: {
     renamingInputRef,
     navigateToThread,
     navigateToDraft,
-    closeThread,
+    requestTrashThread,
     handleThreadClick,
     handleMultiSelectContextMenu,
     createThreadForProjectMember,

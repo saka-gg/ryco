@@ -541,8 +541,9 @@ describe("usage-limit recovery against the engine", () => {
         commandId: CommandId.make("archive"),
         threadId: archived,
       });
+      // Trash hides a thread like deletion did; it must never resume either.
       await system.dispatch({
-        type: "thread.delete",
+        type: "thread.trash",
         commandId: CommandId.make("delete"),
         threadId: deleted,
       });

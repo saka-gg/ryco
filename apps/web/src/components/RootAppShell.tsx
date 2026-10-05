@@ -12,6 +12,7 @@ import {
 } from "./RootAppShell.logic";
 import { ContextMenuActionSheetHost } from "./shell/phone/ContextMenuActionSheetHost";
 import { SshPasswordPromptDialog } from "./desktop/SshPasswordPromptDialog";
+import { WorkspaceLifecycleDialogHost } from "./workspaceLifecycle/WorkspaceLifecycleDialog";
 import { ProviderUpdateLaunchNotification } from "./ProviderUpdateLaunchNotification";
 import {
   SlowRpcAckToastCoordinator,
@@ -82,6 +83,7 @@ export function RootAppShell({ authGateState }: RootAppShellProps) {
         {chatAvailable ? <MessageQueueDrainBridge /> : null}
         <ContextMenuActionSheetHost />
         <SshPasswordPromptDialog />
+        <WorkspaceLifecycleDialogHost />
         {authGateState.status === "hosted-static" ? <HostedStaticEnvironmentBootstrap /> : null}
         {primaryEnvironmentAuthenticated ? (
           <EventRouter hosted={authGateState.status === "hosted-hub"} />

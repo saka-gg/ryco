@@ -156,7 +156,7 @@ function fixture() {
     kind: "workspaceLifecycle",
     projectId,
     expected: await read(),
-    action: "delete",
+    action: "archive",
     checkoutMode: "remove-checkout",
     sessions: "preserve",
     deleteBranch: false,
@@ -214,7 +214,7 @@ describe("governed workspace preflight", () => {
     });
     expect(workspacePlanBlockers(plan)).toEqual([]);
     expect(workspacePlanBlockers({ ...plan, deleteBranch: true }).join(" ")).toContain(
-      "branches are retained",
+      "retain the branch",
     );
     expect(f.git(f.repo, "branch", "--list", "topic")).toContain("topic");
   });
@@ -239,7 +239,17 @@ describe("governed workspace preflight", () => {
     expect(status).toMatchObject({ truncateOutputAtMaxBytes: true });
     expect(status?.args).toContain("--untracked-files=normal");
     expect(status?.args).not.toContain("--untracked-files=all");
-    expect(f.git(f.checkout, ...status!.args)).toBe("!! dependencies/\n");
+    expect(f.git(f.checkout, ...status!.args)).toBe("!! dependencies/\0");
+  });
+  it("lets known regenerable caches go but protects unknown ignored content", async () => {
+    const f = fixture();
+    writeFileSync(path.join(f.repo, ".git", "info", "exclude"), "node_modules/\n.env\n");
+    mkdirSync(path.join(f.checkout, "node_modules", "pkg"), { recursive: true });
+    writeFileSync(path.join(f.checkout, "node_modules", "pkg", "index.js"), "cache");
+    expect((await f.read()).dirty).toBe(false);
+    expect(workspacePlanBlockers(await f.plan())).toEqual([]);
+    writeFileSync(path.join(f.checkout, ".env"), "SECRET=1");
+    expect((await f.read()).dirty).toBe(true);
   });
   it("treats truncated change output as dirty while retaining checkout identity", async () => {
     const f = fixture();
@@ -342,7 +352,9 @@ describe("governed workspace preflight", () => {
     const plan = await f.plan();
     expect(
       workspacePlanBlockers({ ...plan, action: "archive", sessions: "delete" }).join(" "),
-    ).toContain("Only delete");
+    ).toContain("never delete conversations");
+    // A record conversations reference is never dropped, not even with "preserve".
+    expect(workspacePlanBlockers({ ...plan, action: "delete" }).join(" ")).toContain("provenance");
     expect(
       workspacePlanBlockers({ ...plan, action: "restore", checkoutMode: "restore-checkout" })
         .length,

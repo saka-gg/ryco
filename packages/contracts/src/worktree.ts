@@ -21,6 +21,10 @@ export type StatusBucket = typeof StatusBucket.Type;
 export const WorktreeCheckoutLocation = Schema.Literals(["appManaged", "projectMetadata"]);
 export type WorktreeCheckoutLocation = typeof WorktreeCheckoutLocation.Type;
 
+/** Why a workspace record no longer has a checkout: removed by Ryco, or found missing. */
+export const WorktreeCheckoutRemovalReason = Schema.Literals(["removed", "missing"]);
+export type WorktreeCheckoutRemovalReason = typeof WorktreeCheckoutRemovalReason.Type;
+
 export const Worktree = Schema.Struct({
   worktreeId: WorktreeId,
   projectId: ProjectId,
@@ -68,6 +72,12 @@ export const Worktree = Schema.Struct({
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
   archivedAt: Schema.NullOr(IsoDateTime),
+  /**
+   * Set once the physical checkout is gone (removed or found missing). The record,
+   * `worktreePath` and `branch` stay as provenance. Optional so older peers decode.
+   */
+  checkoutRemovedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
+  checkoutRemovalReason: Schema.optional(Schema.NullOr(WorktreeCheckoutRemovalReason)),
   manualPosition: Schema.Number,
 });
 export type Worktree = typeof Worktree.Type;

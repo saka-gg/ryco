@@ -326,6 +326,8 @@ function mapWorktree(
     createdAt: worktree.createdAt,
     updatedAt: worktree.updatedAt,
     archivedAt: worktree.archivedAt,
+    checkoutRemovedAt: worktree.checkoutRemovedAt ?? null,
+    checkoutRemovalReason: worktree.checkoutRemovalReason ?? null,
     manualPosition: worktree.manualPosition,
   };
 }
@@ -701,6 +703,8 @@ function sidebarWorktreesEqual(
     left.createdAt === right.createdAt &&
     left.updatedAt === right.updatedAt &&
     left.archivedAt === right.archivedAt &&
+    (left.checkoutRemovedAt ?? null) === (right.checkoutRemovedAt ?? null) &&
+    (left.checkoutRemovalReason ?? null) === (right.checkoutRemovalReason ?? null) &&
     left.manualPosition === right.manualPosition
   );
 }
@@ -2322,7 +2326,12 @@ function applyEnvironmentOrchestrationEvent(
     }
 
     case "thread.deleted":
+    case "thread.trashed":
       return removeThreadState(state, event.payload.threadId);
+
+    // The shell stream re-upserts a restored thread with its full shell.
+    case "thread.untrashed":
+      return state;
 
     case "thread.archived":
       return updateThreadState(state, event.payload.threadId, (thread) => ({
@@ -2743,6 +2752,31 @@ function applyEnvironmentOrchestrationEvent(
 
     case "worktree.deleted":
       return removeWorktreeState(state, event.payload.worktreeId);
+
+    case "worktree.checkoutRemoved": {
+      const existing = state.worktreeById?.[event.payload.worktreeId];
+      return existing
+        ? upsertWorktreeState(state, {
+            ...existing,
+            checkoutRemovedAt: event.payload.removedAt,
+            checkoutRemovalReason: event.payload.reason,
+            updatedAt: event.payload.removedAt,
+          })
+        : state;
+    }
+
+    case "worktree.checkoutRestored": {
+      const existing = state.worktreeById?.[event.payload.worktreeId];
+      return existing
+        ? upsertWorktreeState(state, {
+            ...existing,
+            worktreePath: event.payload.worktreePath,
+            checkoutRemovedAt: null,
+            checkoutRemovalReason: null,
+            updatedAt: event.payload.restoredAt,
+          })
+        : state;
+    }
 
     case "thread.attachedToWorktree":
       return updateThreadState(state, event.payload.threadId, (thread) => ({

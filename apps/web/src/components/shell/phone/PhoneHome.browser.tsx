@@ -606,8 +606,8 @@ describe("PhoneHome", () => {
         "Mark unread",
         "Copy Path",
         "Copy Thread ID",
-        "Archive session",
-        "Delete thread",
+        "Archive thread",
+        "Move to Trash",
       ]) {
         await expect.element(page.getByRole("button", { name: label })).toBeVisible();
       }
@@ -639,7 +639,7 @@ describe("PhoneHome", () => {
 
       // Archive round-trip through the same shared handler.
       await page.getByRole("button", { name: "Thread actions for Alpha thread" }).click();
-      await page.getByRole("button", { name: "Archive session" }).click();
+      await page.getByRole("button", { name: "Archive thread" }).click();
       await vi.waitFor(() => {
         expect(dispatchCommand).toHaveBeenCalledWith(
           expect.objectContaining({ type: "thread.archive", threadId: THREAD_A }),
@@ -670,7 +670,7 @@ describe("PhoneHome", () => {
       </SidebarProvider>,
     );
     await page.getByRole("button", { name: "Thread actions for Alpha thread" }).click();
-    await page.getByRole("button", { name: "Archive session" }).click();
+    await page.getByRole("button", { name: "Archive thread" }).click();
     await vi.waitFor(() => {
       expect(addedToasts).toHaveBeenCalledWith(
         expect.objectContaining({

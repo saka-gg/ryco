@@ -551,7 +551,7 @@ describe("Inbox sidebar rendering and settlement", () => {
             listThreadMenuActions: () => [
               { id: "pin", label: "Pin thread" },
               { id: "rename", label: "Rename thread" },
-              { id: "close", label: "Delete thread", destructive: true },
+              { id: "trash", label: "Move to Trash", destructive: true },
             ],
             performThreadMenuAction,
           }}
