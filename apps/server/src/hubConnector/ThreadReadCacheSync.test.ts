@@ -79,6 +79,8 @@ function harness() {
   stops.push(stop);
   return {
     stop,
+    notifyChanged: stop.notifyChanged,
+    shell,
     identity,
     proof,
     owner,
@@ -105,6 +107,68 @@ afterEach(async () => {
 });
 
 describe("cloud thread history sync adapter", () => {
+  it("coalesces domain changes and limits sustained streams to one read per second", async () => {
+    const h = harness();
+    for (let index = 0; index < 100; index++) h.notifyChanged();
+    await vi.advanceTimersByTimeAsync(249);
+    expect(h.http).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(h.getSequence).toHaveBeenCalledOnce();
+    expect(h.http).toHaveBeenCalledTimes(2);
+    h.getSequence.mockReturnValue(Effect.succeed({ snapshotSequence: 2 }));
+    h.getShell.mockReturnValue(Effect.succeed({ ...h.shell, snapshotSequence: 2 }));
+    for (let index = 0; index < 9; index++) {
+      h.notifyChanged();
+      await vi.advanceTimersByTimeAsync(100);
+    }
+    expect(h.getSequence).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(h.getSequence).toHaveBeenCalledTimes(2);
+    expect(h.http).toHaveBeenCalledTimes(3);
+    await h.stop();
+    h.notifyChanged();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("remembers changes during an upload without overlapping it", async () => {
+    const h = harness();
+    let complete!: (value: Response) => void;
+    h.http.mockImplementationOnce(async () => json({ protocolVersion: 1, generation: 1 }));
+    h.http.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          complete = resolve;
+        }),
+    );
+    h.notifyChanged();
+    await vi.advanceTimersByTimeAsync(250);
+    expect(h.http).toHaveBeenCalledTimes(2);
+    h.getSequence.mockReturnValue(Effect.succeed({ snapshotSequence: 2 }));
+    h.getShell.mockReturnValue(Effect.succeed({ ...h.shell, snapshotSequence: 2 }));
+    for (let index = 0; index < 100; index++) h.notifyChanged();
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(h.getSequence).toHaveBeenCalledOnce();
+    complete(json({ ok: true }));
+    await vi.advanceTimersByTimeAsync(250);
+    expect(h.getSequence).toHaveBeenCalledTimes(2);
+    expect(h.http).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not let domain changes bypass upload failure backoff", async () => {
+    const h = harness();
+    h.http.mockResolvedValue(json({ error: "not_found" }, 404));
+    h.notifyChanged();
+    await vi.advanceTimersByTimeAsync(250);
+    expect(h.http).toHaveBeenCalledOnce();
+    for (let index = 0; index < 59; index++) {
+      h.notifyChanged();
+      await vi.advanceTimersByTimeAsync(1_000);
+    }
+    expect(h.http).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(h.http).toHaveBeenCalledTimes(2);
+  });
+
   it("does no identity, query, or HTTP work while the relay owner is offline", async () => {
     const h = harness();
     h.setOnline(false);

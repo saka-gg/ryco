@@ -1,6 +1,7 @@
-import { RELAY_INITIAL_LIMITS, type RelayChannelId } from "@ryco/contracts";
+import { RELAY_INITIAL_LIMITS, type RelayChannelId, type RelayFrame } from "@ryco/contracts";
 import {
   encodeBase64Url,
+  HostedHubSession,
   RELAY_E2EE_NEGOTIATION_BUFFER_FULL_MESSAGE,
   RELAY_E2EE_SEND_UNAVAILABLE_MESSAGE,
   RELAY_MESSAGE_TOO_LARGE_MESSAGE,
@@ -9,6 +10,7 @@ import {
   type RelayE2eeChannel,
   type RelayE2eeHost,
 } from "@ryco/client-runtime/relay";
+import { decodeHubSessionFrame, encodeHubSessionFrame } from "@ryco/shared/hubSessionCodec";
 import { decodeRelayFrame, encodeRelayFrame } from "@ryco/shared/relayCodec";
 import { stripRelayChunkCapabilityPrelude } from "@ryco/shared/relayMessageChunks";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
@@ -21,7 +23,13 @@ import {
   RELAY_CHANNEL_ID,
   RELAY_VERSION,
 } from "../../test/maliciousRelay";
-import { BrowserHostedRelaySocket, hostedRelayWebSocketUrl, sendException } from "./relaySocket";
+import {
+  BrowserHostedRelaySocket,
+  createBrowserRelaySocket,
+  hostedHubSessionWebSocketUrl,
+  hostedRelayWebSocketUrl,
+  sendException,
+} from "./relaySocket";
 
 /**
  * Facade-level tests for the browser relay adapter (the DOM boundary the
@@ -459,5 +467,101 @@ describe("BrowserHostedRelaySocket wire compatibility", () => {
     facade.close();
     expect(facade.readyState).toBe(WebSocket.CLOSED);
     expect(handlers.onTransportStatus).not.toHaveBeenCalled();
+  });
+});
+
+describe("BrowserHostedRelaySocket multiplexed carrier", () => {
+  it("validates ticket authority before allocating a logical channel", () => {
+    const createRelaySocket = vi.fn();
+    expect(
+      () =>
+        new BrowserHostedRelaySocket({
+          url: hostedRelayWebSocketUrl(),
+          ticket: "expired",
+          ticketExpiresAt: 0,
+          callbacks: callbacks(),
+          createRelaySocket,
+        }),
+    ).toThrow("no longer valid");
+    expect(createRelaySocket).not.toHaveBeenCalled();
+  });
+  it("switches authenticated logical channels without closing or reopening the browser socket", async () => {
+    const physical = new MockWebSocket();
+    const createSocket = vi.fn(() => physical as unknown as WebSocket);
+    const manager = new HostedHubSession({
+      createSocket: () => createBrowserRelaySocket(hostedHubSessionWebSocketUrl(), createSocket),
+      timers: {
+        now: () => Date.now(),
+        setTimeout: (f, ms) => setTimeout(f, ms),
+        clearTimeout: (id) => clearTimeout(id as ReturnType<typeof setTimeout>),
+        queueMicrotask,
+      },
+    });
+    manager.start();
+    physical.open();
+    const ready = encodeHubSessionFrame({ type: "ready", protocolVersion: 1, maxChannels: 8 });
+    if (!ready.ok) throw new Error("invalid test ready");
+    physical.deliver(ready.value.buffer);
+    class Peer extends MockWebSocket {
+      constructor(readonly streamId: number) {
+        super();
+      }
+      override frame(frame: RelayFrame) {
+        const inner = encodeRelayFrame(frame);
+        if (!inner.ok) throw new Error("invalid test relay");
+        const outer = encodeHubSessionFrame({
+          type: "data",
+          streamId: this.streamId,
+          payload: inner.value,
+        });
+        if (!outer.ok) throw new Error("invalid test outer");
+        physical.deliver(Uint8Array.from(outer.value).buffer);
+      }
+    }
+    const createFacade = () =>
+      new BrowserHostedRelaySocket({
+        url: hostedRelayWebSocketUrl(),
+        ticket: encodeBase64Url(new Uint8Array(32).fill(7)),
+        ticketExpiresAt: Date.now() + 60_000,
+        callbacks: callbacks(),
+        createRelaySocket: () => manager.createSocket(),
+      });
+    try {
+      const first = createFacade();
+      await Promise.resolve();
+      authenticateRelay(new Peer(1));
+      expect(first.readyState).toBe(WebSocket.OPEN);
+      first.close();
+      expect(physical.closeCalls).toBe(0);
+      const second = createFacade();
+      await Promise.resolve();
+      authenticateRelay(new Peer(2));
+      expect(second.readyState).toBe(WebSocket.OPEN);
+      expect(createSocket).toHaveBeenCalledExactlyOnceWith(
+        "wss://hub.example.test/v1/relay/session",
+      );
+      const opens = physical.sent.flatMap((bytes) => {
+        const frame = decodeHubSessionFrame(new Uint8Array(bytes));
+        return frame.ok && frame.value.type === "open" ? [frame.value.streamId] : [];
+      });
+      expect(opens).toEqual([1, 2]);
+      second.close();
+      expect(physical.closeCalls).toBe(0);
+    } finally {
+      manager.dispose();
+    }
+    expect(physical.closeCalls).toBe(1);
+  });
+
+  it("preserves terminal Hub close codes across the browser adapter", () => {
+    const physical = new MockWebSocket();
+    const adapter = createBrowserRelaySocket(
+      hostedHubSessionWebSocketUrl(),
+      () => physical as unknown as WebSocket,
+    );
+    const close = vi.fn();
+    adapter.onClose(close);
+    physical.dispatchEvent(Object.assign(new Event("close"), { code: 4401, reason: "expired" }));
+    expect(close).toHaveBeenCalledExactlyOnceWith("expired", 4401);
   });
 });

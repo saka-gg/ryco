@@ -1,6 +1,6 @@
 import { dirname, join } from "node:path";
 
-import { Config, Context, Effect, Exit, Layer, Option, Scope } from "effect";
+import { Config, Context, Effect, Exit, Layer, Option, Scope, Stream } from "effect";
 import { WsHostedRpcGroup } from "@ryco/contracts";
 import type { NodeE2eeAdmissionPolicy } from "@ryco/contracts/native-e2ee";
 
@@ -64,6 +64,7 @@ import type {
 } from "./e2eeOperatorContract.ts";
 import type { RelayChannelSessionFactory } from "./RelayChannelRegistry.ts";
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
 import { startThreadReadCacheSync } from "./ThreadReadCacheSync.ts";
 
 /**
@@ -769,7 +770,7 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
     if (cloudHistoryEnabled && connectorConfig.enabled && connectorConfig.origin) {
       const query = yield* Effect.serviceOption(ProjectionSnapshotQuery);
       if (Option.isSome(query)) {
-        yield* Effect.acquireRelease(
+        const sync = yield* Effect.acquireRelease(
           Effect.sync(() =>
             startThreadReadCacheSync({
               hubOrigin: connectorConfig.origin!,
@@ -785,6 +786,14 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
           ),
           (stop) => Effect.promise(stop),
         );
+        const engine = yield* Effect.serviceOption(OrchestrationEngineService);
+        if (Option.isSome(engine)) {
+          const changes = yield* engine.value.subscribeDomainEvents;
+          yield* Stream.fromSubscription(changes).pipe(
+            Stream.runForEach(() => Effect.sync(sync.notifyChanged)),
+            Effect.forkScoped,
+          );
+        }
       }
     }
     return {

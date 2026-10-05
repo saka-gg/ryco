@@ -3,10 +3,11 @@ import { useEffect } from "react";
 
 import { hostedHubController, useHostedHubStore } from "./state";
 import { setHostedWorkspaceBackgrounded } from "./hostedConnectionCoordinator";
+import { bindHostedBrowserLifecycle } from "./browserLifecycle";
 
 /**
- * The single hosted browser lifecycle wiring: visibilitychange / offline /
- * online / pageshow drive `suspendBrowser` / `recoverAfterConnectivity` while
+ * The single hosted browser lifecycle wiring: offline / freeze / pagehide
+ * suspend authority, and foreground / online / pageshow recover it while
  * the hosted account is authenticated, or while its access check could not
  * reach the Hub. Mounted exactly once at the hosted root, above the
  * presentation-tier seam, so it stays active for every authenticated hosted
@@ -20,35 +21,14 @@ export function useHostedBrowserLifecycle(): void {
 
   useEffect(() => {
     if (!hostedAccountRecoversOnConnectivity(accountStatus)) return;
-    const resumeIfVisible = () => {
-      if (document.visibilityState === "visible" && navigator.onLine) {
-        void hostedHubController
-          .recoverAfterConnectivity()
-          .then(() => setHostedWorkspaceBackgrounded(false));
-      }
-    };
-    const onVisibility = () => {
-      if (document.visibilityState === "hidden") {
-        void setHostedWorkspaceBackgrounded(true);
-        hostedHubController.suspendBrowser("hidden");
-      } else resumeIfVisible();
-    };
-    const onOffline = () => {
-      void setHostedWorkspaceBackgrounded(true);
-      hostedHubController.suspendBrowser("offline");
-    };
-    const onOnline = () => resumeIfVisible();
-    const onPageShow = () => resumeIfVisible();
-    document.addEventListener("visibilitychange", onVisibility);
-    window.addEventListener("offline", onOffline);
-    window.addEventListener("online", onOnline);
-    window.addEventListener("pageshow", onPageShow);
-    if (!navigator.onLine) onOffline();
-    return () => {
-      document.removeEventListener("visibilitychange", onVisibility);
-      window.removeEventListener("offline", onOffline);
-      window.removeEventListener("online", onOnline);
-      window.removeEventListener("pageshow", onPageShow);
-    };
+    return bindHostedBrowserLifecycle({
+      document,
+      window,
+      isVisible: () => document.visibilityState === "visible",
+      isOnline: () => navigator.onLine,
+      suspend: (reason) => hostedHubController.suspendBrowser(reason),
+      recover: () => hostedHubController.recoverAfterConnectivity(),
+      setBackgrounded: setHostedWorkspaceBackgrounded,
+    });
   }, [accountStatus]);
 }

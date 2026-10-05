@@ -18,6 +18,9 @@ class ThreadReadCacheHttpError extends Error {
   }
 }
 
+export const THREAD_READ_CACHE_CHANGE_COALESCE_MS = 250;
+export const THREAD_READ_CACHE_MIN_PUBLISH_INTERVAL_MS = 1_000;
+
 /** Opt-in content synchronization, independent of relay channel and heartbeat work. */
 export function startThreadReadCacheSync(deps: {
   readonly hubOrigin: string;
@@ -31,6 +34,9 @@ export function startThreadReadCacheSync(deps: {
   let timer: ReturnType<typeof setTimeout> | undefined;
   let inFlight: Promise<void> | null = null;
   let failures = 0;
+  let changed = false;
+  let scheduledAt = Infinity;
+  let lastStartedAt = -Infinity;
   const abort = new AbortController();
   // Identity/key-store operations do not expose cancellation. Detach their
   // result on shutdown so they cannot hold the server's scope open; the post
@@ -170,19 +176,46 @@ export function startThreadReadCacheSync(deps: {
           /* Diagnostics cannot interrupt synchronization. */
         }
       }
-    } finally {
-      if (!stopped) timer = setTimeout(run, delay);
     }
+    return delay;
   };
+  const schedule = (delay: number) => {
+    if (stopped) return;
+    const due = Date.now() + delay;
+    if (timer !== undefined && scheduledAt <= due) return;
+    if (timer !== undefined) clearTimeout(timer);
+    scheduledAt = due;
+    timer = setTimeout(run, delay);
+  };
+  const changeDelay = () =>
+    Math.max(
+      THREAD_READ_CACHE_CHANGE_COALESCE_MS,
+      lastStartedAt + THREAD_READ_CACHE_MIN_PUBLISH_INTERVAL_MS - Date.now(),
+    );
   const run = () => {
-    inFlight = tick();
+    timer = undefined;
+    scheduledAt = Infinity;
+    if (stopped || inFlight !== null) return;
+    changed = false;
+    lastStartedAt = Date.now();
+    inFlight = tick().then((delay) => {
+      inFlight = null;
+      schedule(changed && failures === 0 ? changeDelay() : delay);
+    });
   };
-  timer = setTimeout(run, THREAD_READ_CACHE_PUBLISH_INTERVAL_MS);
-  return async () => {
+  const notifyChanged = () => {
+    if (stopped) return;
+    changed = true;
+    // A domain-event storm must never bypass the failed upload's retry budget.
+    if (inFlight === null && failures === 0) schedule(changeDelay());
+  };
+  schedule(THREAD_READ_CACHE_PUBLISH_INTERVAL_MS);
+  const stop = async () => {
     stopped = true;
     publisher.stop();
     abort.abort();
     if (timer !== undefined) clearTimeout(timer);
     await inFlight;
   };
+  return Object.assign(stop, { notifyChanged });
 }

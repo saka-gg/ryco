@@ -15,6 +15,13 @@ import { clearWebHostedNodeScopedState } from "./environment";
 import { hasHostedRelayPendingRequests, resetHostedRelayAttemptFactory } from "./transport";
 import { BrowserHostedRelaySocket, hostedRelayWebSocketUrl } from "./relaySocket";
 
+import {
+  createWebHubRelaySocket,
+  isWebHubSessionOnline,
+  watchWebHostedHubSession,
+} from "./hubSession";
+import { subscribeWebForeground } from "./foreground";
+
 let configured = false;
 
 export function configureWebHostedRuntime(api: HostedHubApi): void {
@@ -47,14 +54,9 @@ export function configureWebHostedRuntime(api: HostedHubApi): void {
         queueMicrotask: (callback) => globalThis.queueMicrotask(callback),
       },
       isForeground: () => globalThis.document?.visibilityState !== "hidden",
-      subscribeForeground: (listener) => {
-        const onVisibility = () => {
-          if (globalThis.document?.visibilityState === "visible") listener();
-        };
-        globalThis.document?.addEventListener("visibilitychange", onVisibility, { once: true });
-        return () => globalThis.document?.removeEventListener("visibilitychange", onVisibility);
-      },
+      subscribeForeground: subscribeWebForeground,
       hasPendingRelayRequests: hasHostedRelayPendingRequests,
+      hasLiveHubSubscription: isWebHubSessionOnline,
       resetRelayAttemptFactory: resetHostedRelayAttemptFactory,
       relayUrl: hostedRelayWebSocketUrl,
       // docs/relay-e2ee-protocol.md §4: THIS IS WHERE THE WEB TIER'S NX CHANNEL
@@ -74,8 +76,13 @@ export function configureWebHostedRuntime(api: HostedHubApi): void {
       // wrong-node routing and some non-Hub network interposition, and against
       // nothing else.
       createRelaySocket: (input) =>
-        new BrowserHostedRelaySocket({ ...input, e2ee: resolveWebRelayE2eeProvider() }),
+        new BrowserHostedRelaySocket({
+          ...input,
+          e2ee: resolveWebRelayE2eeProvider(),
+          createRelaySocket: createWebHubRelaySocket,
+        }),
     },
     api,
   );
+  watchWebHostedHubSession();
 }

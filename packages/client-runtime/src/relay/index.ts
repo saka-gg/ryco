@@ -8,3 +8,5 @@ export * from "./relayE2eeInitiator.ts";
 export * from "./transport.ts";
 export * from "./relayEngine.ts";
 export * from "./webauthn.ts";
+
+export * from "./hostedHubSession.ts";
