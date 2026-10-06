@@ -1,0 +1,694 @@
+/* ============================================================
+   A · Flow — a node canvas, left to right:
+   project → devices → workspaces → threads.
+   ============================================================ */
+.fa-node {
+  width: var(--w);
+  border-radius: 12px;
+  background: var(--popover);
+  border: 1px solid var(--border);
+  box-shadow:
+    0 1px 0 rgba(0, 0, 0, 0.02),
+    0 8px 24px -14px rgba(0, 0, 0, 0.25);
+  transition:
+    opacity 0.3s,
+    border-color 0.25s,
+    box-shadow 0.3s var(--ease),
+    filter 0.3s;
+  cursor: pointer;
+}
+.dark .fa-node {
+  background: #121214;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.035),
+    0 10px 30px -16px rgba(0, 0, 0, 0.9);
+}
+.fa-node:hover {
+  border-color: color-mix(in srgb, var(--fg) 22%, transparent);
+}
+.node.is-selected .fa-node {
+  border-color: color-mix(in srgb, var(--fg) 55%, transparent);
+  box-shadow:
+    0 0 0 3px color-mix(in srgb, var(--fg) 9%, transparent),
+    0 14px 34px -14px rgba(0, 0, 0, 0.35);
+}
+.map[data-focus] .node:not(.lit) .fa-node {
+  opacity: 0.32;
+  filter: saturate(0.4);
+}
+.node.is-dragging .fa-node {
+  box-shadow: 0 24px 48px -18px rgba(0, 0, 0, 0.45);
+  cursor: grabbing;
+}
+
+/* Header row shared by all node kinds */
+.fa-h {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 11px 12px 0;
+  min-width: 0;
+}
+.fa-h .ic {
+  width: 15px;
+  height: 15px;
+  color: var(--muted-fg);
+}
+.fa-title {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fa-title.mono {
+  font-weight: 500;
+  font-size: 12.5px;
+}
+.fa-sp {
+  flex: 1;
+}
+.fa-meta {
+  padding: 4px 12px 11px;
+  font-size: 11.5px;
+  color: var(--faint-fg);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 0;
+  min-width: 0;
+  transition: opacity 0.25s;
+}
+.fa-meta .mono {
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+.fa-kind {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--faint-fg);
+}
+
+/* Ports: the small sockets wires plug into */
+.fa-port {
+  position: absolute;
+  top: 50%;
+  width: 9px;
+  height: 9px;
+  margin-top: -4.5px;
+  border-radius: 50%;
+  background: var(--popover);
+  border: 1.5px solid var(--border);
+  transition:
+    border-color 0.25s,
+    background 0.25s;
+}
+.dark .fa-port {
+  background: #121214;
+  border-color: rgba(255, 255, 255, 0.2);
+}
+.fa-port.p-left {
+  left: -5px;
+}
+.fa-port.p-right {
+  right: -5px;
+}
+.fa-port.p-top,
+.fa-port.p-bottom,
+.fa-port.p-trunk {
+  top: auto;
+  margin-top: 0;
+}
+.fa-port.p-top {
+  top: -5px;
+  left: calc(50% - 4.5px);
+}
+.fa-port.p-bottom {
+  bottom: -5px;
+  left: calc(50% - 4.5px);
+}
+.fa-port.p-trunk {
+  bottom: -5px;
+  left: 13.5px;
+}
+.node.lit .fa-port {
+  border-color: var(--fg);
+}
+
+/* Project node */
+.fa-project .fa-h {
+  padding-top: 14px;
+}
+.fa-project .fa-title {
+  font-size: 15px;
+}
+.fa-project .fa-stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  border-top: 1px solid var(--hair);
+  margin-top: 10px;
+}
+.fa-stats div {
+  padding: 8px 12px 10px;
+  display: flex;
+  flex-direction: column;
+}
+.fa-stats div + div {
+  border-left: 1px solid var(--hair);
+}
+.fa-stats b {
+  font-size: 15px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.fa-stats span {
+  font-size: 10.5px;
+  color: var(--faint-fg);
+}
+
+/* Device node */
+.fa-conn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--muted-fg);
+}
+.fa-conn i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ok-fill);
+}
+.fa-conn.c-connecting i {
+  background: var(--warn-fill);
+  animation: fa-blink 1.1s ease-in-out infinite;
+}
+.fa-conn.c-offline i {
+  background: var(--ghost-fg);
+}
+@keyframes fa-blink {
+  50% {
+    opacity: 0.25;
+  }
+}
+.fa-self {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--muted-fg);
+}
+
+/* Workspace node */
+.fa-ws .fa-title {
+  font-family: var(--font-mono);
+  font-weight: 500;
+  font-size: 12.5px;
+}
+.fa-ws.main .fa-title {
+  font-family: var(--font-sans);
+  font-weight: 600;
+  font-size: 13px;
+}
+.fa-ws.archived {
+  border-style: dashed;
+  background: transparent;
+  box-shadow: none;
+}
+.fa-ws.archived .fa-title {
+  color: var(--muted-fg);
+}
+.fa-ws.fresh {
+  border-color: color-mix(in srgb, var(--info) 55%, transparent);
+}
+.fa-tally {
+  display: inline-flex;
+  gap: 3px;
+  align-items: center;
+  height: 20px;
+  margin: -2px -4px -2px 6px;
+  padding: 0 4px 0 6px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  cursor: pointer;
+  transition: background 0.18s;
+}
+.fa-tally:hover {
+  background: var(--accent);
+}
+.fa-tally .fa-count {
+  margin-left: 3px;
+}
+.fa-chev {
+  width: 12px !important;
+  height: 12px !important;
+  color: var(--faint-fg);
+  transition: rotate 0.32s var(--ease);
+}
+.fa-tally[aria-expanded="true"] .fa-chev {
+  rotate: 90deg;
+}
+.fa-section {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--faint-fg);
+  transition: opacity 0.3s;
+}
+.fa-section .ic {
+  width: 12px;
+  height: 12px;
+}
+.node.dim .fa-section {
+  opacity: 0.35;
+}
+.edge.fa-auto-wire {
+  stroke-dasharray: 2 4;
+}
+.fa-tally .sdot {
+  width: 6px;
+  height: 6px;
+}
+.fa-count {
+  font-size: 11px;
+  color: var(--muted-fg);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Thread node: a slim pill */
+.fa-thread {
+  border-radius: 9px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 34px;
+  padding: 0 11px;
+}
+.fa-thread .fa-title {
+  font-weight: 500;
+  font-size: 12.5px;
+  flex: 1;
+}
+.fa-thread .ago {
+  font-size: 11px;
+  color: var(--faint-fg);
+  font-variant-numeric: tabular-nums;
+}
+.fa-thread.s-archived {
+  border-style: dashed;
+  background: transparent;
+  box-shadow: none;
+}
+.fa-thread.s-archived .fa-title {
+  color: var(--faint-fg);
+}
+.fa-thread.s-input {
+  border-color: color-mix(in srgb, var(--warn-fill) 50%, transparent);
+}
+.fa-thread.s-error {
+  border-color: color-mix(in srgb, var(--err-fill) 45%, transparent);
+}
+.fa-thread .sdot {
+  transition: background 0.4s;
+}
+
+/* "Same branch on another device" link label */
+.fa-labels .node {
+  pointer-events: none;
+}
+.fa-labels .fa-link {
+  pointer-events: auto;
+}
+.fa-link {
+  font-size: 10.5px;
+  color: var(--violet);
+  background: var(--bg);
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px dashed color-mix(in srgb, var(--violet) 45%, transparent);
+  white-space: nowrap;
+  cursor: default;
+  translate: -50% -50%;
+}
+.edge.fa-same {
+  stroke: var(--violet);
+  stroke-dasharray: 3 5;
+  opacity: 0.6;
+}
+
+/* Toolbar (top left) */
+.fa-tools {
+  top: 12px;
+  left: 14px;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.fa-chip {
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--popover);
+  color: var(--muted-fg);
+  font-size: 12px;
+  cursor: pointer;
+  transition:
+    color 0.2s,
+    background 0.2s,
+    border-color 0.2s;
+}
+.fa-chip .ic {
+  width: 13px;
+  height: 13px;
+}
+.fa-chip:hover {
+  color: var(--fg);
+}
+.fa-chip[aria-pressed="false"] {
+  background: transparent;
+  color: var(--faint-fg);
+  border-style: dashed;
+}
+.fa-sep {
+  width: 1px;
+  height: 18px;
+  background: var(--hair);
+  margin: 0 2px;
+}
+
+/* Far zoom: names only, the map reads as structure */
+.map[data-zoom="far"] .fa-meta .fact,
+.map[data-zoom="far"] .fa-meta .mono,
+.map[data-zoom="far"] .fa-thread .ago {
+  opacity: 0;
+}
+
+/* Inspector content */
+.fi-kind {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--faint-fg);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.fi-kind .ic {
+  width: 13px;
+  height: 13px;
+}
+.fi-title {
+  margin: 6px 26px 2px 0;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  word-break: break-word;
+}
+.fi-title.mono {
+  font-size: 14.5px;
+  font-weight: 500;
+}
+.fi-sub {
+  font-size: 12px;
+  color: var(--muted-fg);
+}
+.fi-rows {
+  margin: 14px 0 0;
+  display: grid;
+  grid-template-columns: 84px 1fr;
+  gap: 7px 10px;
+  font-size: 12.5px;
+}
+.fi-rows dt {
+  color: var(--faint-fg);
+}
+.fi-rows dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.fi-rows .mono {
+  font-size: 11.5px;
+}
+.fi-sec {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--hair);
+}
+.fi-sec h4 {
+  margin: 0 0 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--faint-fg);
+}
+.fi-thread {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  margin: 0 -8px;
+  border-radius: 8px;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.fi-thread:hover {
+  background: var(--accent);
+}
+.fi-thread .trunc {
+  flex: 1;
+}
+.fi-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 16px;
+}
+.fi-btn {
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+.fi-btn:hover {
+  background: var(--accent);
+}
+.fi-btn .ic {
+  width: 13px;
+  height: 13px;
+}
+.fi-btn.primary {
+  background: var(--fg);
+  color: var(--bg);
+  border-color: transparent;
+}
+.fi-btn.danger {
+  color: var(--err);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fa-conn.c-connecting i {
+    animation: none;
+  }
+}
+[data-motion="off"] .fa-conn.c-connecting i {
+  animation: none;
+}
+
+/* Automation node */
+.fa-auto .fa-title {
+  font-weight: 600;
+}
+.fa-auto.paused {
+  border-style: dashed;
+  background: transparent;
+  box-shadow: none;
+}
+.fa-auto.paused .fa-title {
+  color: var(--muted-fg);
+}
+.fa-auto.due {
+  border-color: color-mix(in srgb, var(--warn-fill) 60%, transparent);
+  box-shadow:
+    0 0 0 3px color-mix(in srgb, var(--warn-fill) 14%, transparent),
+    0 10px 30px -16px rgba(0, 0, 0, 0.6);
+}
+.fa-ring {
+  width: 18px;
+  height: 18px;
+  flex: none;
+  rotate: -90deg;
+}
+.fa-ring circle {
+  fill: none;
+  stroke-width: 2.4;
+}
+.fa-ring .track {
+  stroke: var(--hair);
+}
+.dark .fa-ring .track {
+  stroke: rgba(255, 255, 255, 0.1);
+}
+.fa-ring .prog {
+  stroke: var(--teal);
+  stroke-linecap: round;
+  transition: stroke-dashoffset 0.9s linear;
+}
+.fa-ring .hand {
+  fill: none;
+  stroke: var(--muted-fg);
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  rotate: 90deg;
+  transform-origin: 12px 12px;
+}
+.fa-auto.paused .fa-ring .prog {
+  stroke: transparent;
+}
+.fa-next {
+  font-size: 11.5px;
+  color: var(--muted-fg);
+}
+.fa-running {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+  color: var(--info);
+}
+.fa-approve {
+  height: 22px;
+  padding: 0 9px;
+  border-radius: 7px;
+  border: 0;
+  font-size: 11.5px;
+  font-weight: 500;
+  color: #1b1200;
+  background: var(--warn-fill);
+  cursor: pointer;
+  animation: fa-due 2.2s var(--ease) infinite;
+}
+@keyframes fa-due {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--warn-fill) 50%, transparent);
+  }
+  60% {
+    box-shadow: 0 0 0 6px transparent;
+  }
+}
+.edge.fa-run {
+  stroke: var(--teal);
+  stroke-dasharray: 1 5;
+  stroke-linecap: round;
+  stroke-width: 2;
+  opacity: 0.7;
+}
+.edge.fa-run.flow {
+  stroke: var(--teal);
+  stroke-dasharray: 1 5;
+  animation: wire-flow-run 1.2s linear infinite;
+}
+@keyframes wire-flow-run {
+  to {
+    stroke-dashoffset: -12;
+  }
+}
+
+/* Inspector: due run + run history */
+.fi-due {
+  margin-top: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--warn-fill) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warn-fill) 35%, transparent);
+  font-size: 12.5px;
+}
+.fi-due > span {
+  flex: 1 1 140px;
+}
+.fi-due .ic {
+  width: 14px;
+  height: 14px;
+  color: var(--warn);
+}
+.fi-run {
+  width: 7px;
+  height: 7px;
+  border-radius: 2px;
+  flex: none;
+  background: var(--ghost-fg);
+}
+.fi-run.r-completed {
+  background: var(--ok-fill);
+}
+.fi-run.r-failed {
+  background: var(--err-fill);
+}
+.fi-run.r-executing,
+.fi-run.r-approved {
+  background: var(--info);
+}
+.fi-run.r-pending-approval {
+  background: var(--warn-fill);
+}
+.fi-link {
+  color: var(--fg);
+  text-decoration: underline;
+  text-decoration-color: var(--ghost-fg);
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+[data-motion="off"] .fa-approve,
+[data-motion="off"] .edge.fa-run.flow {
+  animation: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .fa-approve,
+  .edge.fa-run.flow {
+    animation: none;
+  }
+}
+
+.fa-ws .fa-meta {
+  flex-wrap: nowrap;
+  align-items: flex-start;
+}
+.fa-facts {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  row-gap: 2px;
+}
+.fa-ws .fa-tally {
+  flex: none;
+}

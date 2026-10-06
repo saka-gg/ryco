@@ -1,0 +1,1150 @@
+/* ============================================================
+   Pickers — date/time (calendar · type · segments), interval,
+   until and run preview. Tokens from base.css only; every class
+   is .pk-*. Flat surfaces: one hairline, one soft shadow.
+   ============================================================ */
+.pk,
+.pk-pop {
+  --pk-ease: cubic-bezier(0.16, 1, 0.3, 1);
+  --pk-ring: color-mix(in srgb, var(--fg) 46%, transparent);
+  --pk-range: color-mix(in srgb, var(--fg) 13%, transparent);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--fg);
+}
+.pk .tnum,
+.pk-pop .tnum,
+.pk-tnum {
+  font-variant-numeric: tabular-nums;
+}
+.pk-ic {
+  width: 14px;
+  height: 14px;
+  flex: none;
+}
+.pk :focus-visible,
+.pk-pop :focus-visible {
+  outline: 2px solid var(--pk-ring);
+  outline-offset: 1px;
+}
+/* Parts that draw their own focus (plate ring, inverted segment, field ring). */
+.pk-pop .pk-day:focus-visible,
+.pk-pop .pk-slot:focus-visible,
+.pk-pop .pk-time-input:focus-visible,
+.pk .pk-seg:focus-visible,
+.pk .pk-input:focus-visible,
+.pk .pk-step-input:focus-visible {
+  outline: none;
+}
+.pk button,
+.pk-pop button {
+  font: inherit;
+  color: inherit;
+}
+.pk kbd,
+.pk-pop kbd {
+  height: 15px;
+  min-width: 15px;
+  font-size: 9.5px;
+}
+
+/* Icon button (calendar, month nav, stepper) */
+.pk-icon-btn {
+  width: 26px;
+  height: 26px;
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted-fg);
+  cursor: pointer;
+  transition:
+    background-color 120ms,
+    color 120ms;
+}
+.pk-icon-btn:hover,
+.pk-icon-btn[aria-expanded="true"] {
+  background: var(--accent);
+  color: var(--fg);
+}
+.pk-icon-btn[aria-disabled="true"] {
+  color: var(--ghost-fg);
+  background: transparent;
+  cursor: default;
+}
+
+/* Inline hint under a field: collapses to nothing, never a red wall. */
+.pk-hint {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transition:
+    grid-template-rows 220ms var(--pk-ease),
+    opacity 160ms;
+}
+.pk-hint[data-on] {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+.pk-hint-in {
+  overflow: hidden;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--warn);
+}
+.pk-hint[data-on] .pk-hint-in {
+  padding-top: 6px;
+}
+.pk-hint[data-tone="muted"] .pk-hint-in {
+  color: var(--muted-fg);
+}
+/* Screen-reader-only status line (one settled read-back per part). */
+.pk-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+.pk-hint .pk-ic {
+  width: 13px;
+  height: 13px;
+}
+.pk-fix {
+  height: 20px;
+  padding: 0 7px;
+  margin-left: 2px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--accent-strong);
+  color: var(--fg) !important;
+  font-size: 11.5px !important;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.pk-fix:hover {
+  background: color-mix(in srgb, var(--fg) 14%, transparent);
+}
+
+/* ============================================================
+   Popover surface (top layer)
+   ============================================================ */
+.pk-pop {
+  position: fixed;
+  inset: auto;
+  left: 0;
+  top: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  overflow: visible;
+  z-index: 1000;
+  width: max-content;
+  height: max-content;
+}
+.pk-surface {
+  position: relative;
+  z-index: 1;
+  background: var(--popover);
+  border-radius: 12px;
+  box-shadow:
+    0 0 0 1px var(--border),
+    var(--pop-shadow);
+  outline: none;
+}
+.pk-ghost {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 0;
+  background: var(--popover);
+  border-radius: 12px;
+  box-shadow:
+    0 0 0 1px var(--border),
+    var(--pop-shadow);
+  pointer-events: none;
+}
+/* While the ghost carries the surface, the surface paints content only. */
+.pk-pop[data-morphing] > .pk-surface {
+  background: transparent;
+  box-shadow: none;
+}
+
+/* ============================================================
+   Calendar panel: grid | time column, quick picks, meta line
+   ============================================================ */
+.pk-panel-main {
+  display: flex;
+  align-items: stretch;
+}
+.pk-vr {
+  width: 1px;
+  background: var(--hair);
+}
+.pk-cal {
+  padding: 10px 12px 8px;
+}
+.pk-cal-head {
+  display: flex;
+  align-items: center;
+  height: 28px;
+  margin-bottom: 4px;
+  padding-left: 6px;
+  gap: 2px;
+}
+.pk-cal-title {
+  position: relative;
+  flex: 1;
+  height: 20px;
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+}
+.pk-cal-title > span {
+  position: absolute;
+  inset: 0;
+  white-space: nowrap;
+}
+.pk-grid {
+  position: relative;
+}
+.pk-wk,
+.pk-row {
+  display: grid;
+  grid-template-columns: repeat(7, 36px);
+}
+.pk-wk {
+  height: 24px;
+  align-items: center;
+  text-align: center;
+  font-size: 11px;
+  color: var(--muted-fg);
+}
+.pk-wk abbr {
+  text-decoration: none;
+}
+.pk-weeks {
+  position: relative;
+}
+.pk-weeks-ghost {
+  position: absolute;
+  left: 0;
+  right: 0;
+  pointer-events: none;
+}
+.pk-day {
+  position: relative;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  outline: none;
+  isolation: isolate;
+  user-select: none;
+}
+/* Only a real range (start → end in the end grid) gets a band; the allowed window
+   reads from the ghosted days outside it, plus an end cap on the horizon's last day. */
+.pk-day::before {
+  content: "";
+  position: absolute;
+  inset: 4px 0;
+  z-index: -2;
+}
+.pk-day[data-range]::before {
+  background: var(--pk-range);
+}
+.pk-row > .pk-day[data-range]:first-child::before {
+  left: 3px;
+  border-top-left-radius: 9px;
+  border-bottom-left-radius: 9px;
+}
+.pk-row > .pk-day[data-range]:last-child::before {
+  right: 3px;
+  border-top-right-radius: 9px;
+  border-bottom-right-radius: 9px;
+}
+.pk-day[data-win-end]:not([data-range])::before {
+  left: auto;
+  right: 1px;
+  top: 50%;
+  bottom: auto;
+  width: 2px;
+  height: 14px;
+  margin-top: -7px;
+  border-radius: 1px;
+  background: color-mix(in srgb, var(--fg) 26%, transparent);
+}
+.pk-day[data-range-start]::before {
+  left: 3px;
+  border-top-left-radius: 9px;
+  border-bottom-left-radius: 9px;
+}
+.pk-day[data-range-end]::before {
+  right: 3px;
+  border-top-right-radius: 9px;
+  border-bottom-right-radius: 9px;
+  box-shadow: none;
+}
+/* The plate under the number. */
+.pk-day::after {
+  content: "";
+  position: absolute;
+  inset: 3px 4px;
+  z-index: -1;
+  border-radius: 8px;
+  transition:
+    background-color 120ms,
+    box-shadow 120ms;
+}
+.pk-day[aria-disabled="false"]:hover::after {
+  background: var(--accent-strong);
+}
+.pk-day[aria-selected="true"]::after,
+.pk-day[aria-selected="true"]:hover::after {
+  background: var(--fg);
+}
+.pk-day[aria-selected="true"] {
+  color: var(--bg);
+  font-weight: 600;
+}
+.pk-day:focus-visible::after {
+  box-shadow:
+    0 0 0 1.5px var(--popover),
+    0 0 0 3px var(--pk-ring);
+}
+.pk-day[data-out] {
+  color: var(--faint-fg);
+}
+.pk-day[aria-disabled="true"] {
+  color: var(--ghost-fg);
+  cursor: default;
+}
+.pk-day[aria-current="date"] .pk-n::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: 6px;
+  width: 3px;
+  height: 3px;
+  margin-left: -1.5px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+/* Compact grid (segments, until) */
+.pk-cal.is-compact {
+  padding: 8px 8px 4px;
+}
+.pk-cal.is-compact .pk-wk,
+.pk-cal.is-compact .pk-row {
+  grid-template-columns: repeat(7, 32px);
+}
+.pk-cal.is-compact .pk-day {
+  height: 30px;
+}
+.pk-cal.is-compact .pk-day::before {
+  inset: 3px 0;
+}
+.pk-cal.is-compact .pk-day::after {
+  inset: 2px 3px;
+}
+.pk-cal.is-compact .pk-day[aria-current="date"] .pk-n::after {
+  bottom: 4px;
+}
+
+/* Time column: the typed field heads it (hairline below), then exactly eight
+   whole 28px rows that snap — no half-cut rows, no fade. */
+.pk-time {
+  position: relative;
+  flex: 1 0 96px;
+  min-width: 96px;
+  display: flex;
+  flex-direction: column;
+  padding: 10px 8px 8px;
+}
+.pk-time-input {
+  height: 28px;
+  width: 100%;
+  flex: none;
+  border: 0;
+  border-radius: 7px;
+  box-shadow: inset 0 0 0 1px var(--border);
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  outline: none;
+  transition: box-shadow 120ms;
+}
+.pk-time-input:focus {
+  box-shadow:
+    inset 0 0 0 1px var(--pk-ring),
+    0 0 0 3px color-mix(in srgb, var(--fg) 7%, transparent);
+}
+.pk-time-input::placeholder {
+  color: var(--faint-fg);
+}
+/* The list fills the column without adding height: the grid sets the panel height. */
+.pk-slots {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 45px;
+  height: calc(8 * 28px);
+  /* rows stay pill-sized when the column is stretched by a wider panel */
+  padding: 0 max(6px, calc((100% - 100px) / 2));
+  border-top: 1px solid var(--hair);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scroll-snap-type: y mandatory;
+  scrollbar-width: none;
+}
+.pk-slots::-webkit-scrollbar {
+  display: none;
+}
+.pk-slot {
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 7px;
+  scroll-snap-align: start;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted-fg);
+  cursor: pointer;
+  outline: none;
+  transition:
+    background-color 100ms,
+    color 100ms;
+}
+.pk-slot[data-hour] {
+  color: var(--fg);
+}
+.pk-slot:hover {
+  background: var(--accent);
+  color: var(--fg);
+}
+.pk-slot[data-preview] {
+  box-shadow: inset 0 0 0 1px var(--pk-ring);
+}
+.pk-slot[aria-selected="true"] {
+  background: var(--fg);
+  color: var(--bg);
+  font-weight: 600;
+}
+.pk-slot[aria-disabled="true"] {
+  color: var(--ghost-fg);
+  background: transparent;
+  cursor: default;
+}
+/* Focus shows on selected and unselected rows alike (the row is flush with the
+   scroll edge, so the ring is drawn inside it, with a gap like the day cells). */
+.pk-slot:focus-visible {
+  box-shadow:
+    inset 0 0 0 1.5px var(--pk-ring),
+    inset 0 0 0 3px var(--popover);
+}
+.pk-slot.is-custom {
+  font-style: normal;
+}
+
+/* Quick picks: quiet text buttons; the one matching the value carries a check
+   (the day and the time already carry the strong fill). */
+.pk-quick {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  padding: 6px 8px;
+  border-top: 1px solid var(--hair);
+}
+.pk-qp {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 26px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted-fg) !important;
+  font-size: 12px !important;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background-color 120ms,
+    color 120ms;
+}
+.pk-qp .pk-ic {
+  display: none;
+  width: 12px;
+  height: 12px;
+}
+.pk-qp:hover {
+  background: var(--accent);
+  color: var(--fg) !important;
+}
+.pk-qp[aria-pressed="true"] {
+  color: var(--fg) !important;
+  font-weight: 500;
+}
+.pk-qp[aria-pressed="true"] .pk-ic {
+  display: block;
+}
+.pk-qp[aria-disabled="true"] {
+  background: transparent;
+  color: var(--ghost-fg) !important;
+  cursor: default;
+}
+/* Footer: one line, full width — the limit, or one message and its fix. */
+.pk-panel-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 32px;
+  padding: 0 8px 0 12px;
+  border-top: 1px solid var(--hair);
+  font-size: 11.5px;
+  color: var(--muted-fg);
+  white-space: nowrap;
+}
+.pk-panel-meta > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pk-panel-meta > .pk-meta-l {
+  flex: 1;
+  display: block;
+}
+.pk-panel-meta > .pk-meta-r {
+  flex: none;
+}
+.pk-panel-meta[data-tone="warn"] > .pk-meta-l {
+  color: var(--warn);
+}
+.pk-panel-meta[data-tone="info"] > .pk-meta-l {
+  color: var(--fg);
+}
+.pk-panel-meta .pk-fix {
+  margin: 0;
+}
+.pk-panel.is-compact .pk-panel-meta {
+  min-height: 30px;
+  padding: 0 6px 0 10px;
+}
+
+/* ============================================================
+   Calendar variant: the trigger
+   ============================================================ */
+.pk-dt {
+  min-width: 0;
+}
+.pk-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 34px;
+  max-width: 100%;
+  padding: 0 11px 0 10px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--border);
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    background-color 140ms,
+    box-shadow 140ms;
+}
+.pk-trigger:hover {
+  background: var(--accent);
+}
+.pk-trigger[aria-expanded="true"] {
+  background: var(--accent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--fg) 22%, transparent);
+}
+.pk-trigger > .pk-ic {
+  color: var(--muted-fg);
+}
+.pk-trig-val {
+  font-weight: 500;
+}
+.pk-trig-rel {
+  color: var(--muted-fg);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.pk-trigger[data-invalid] {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--warn) 55%, transparent);
+}
+
+/* ============================================================
+   Type variant: field + chip + suggestions
+   ============================================================ */
+.pk-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 34px;
+  padding: 0 4px 0 11px;
+  border-radius: 9px;
+  box-shadow: inset 0 0 0 1px var(--border);
+  transition: box-shadow 140ms;
+}
+.pk-field:focus-within {
+  box-shadow:
+    inset 0 0 0 1px var(--pk-ring),
+    0 0 0 3px color-mix(in srgb, var(--fg) 7%, transparent);
+}
+.pk-input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  border: 0;
+  outline: none !important;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  font-size: 13px;
+}
+.pk-input::placeholder {
+  color: var(--faint-fg);
+}
+.pk-chipline {
+  min-height: 30px;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+.pk-chip {
+  display: inline-grid;
+  min-width: 0;
+  max-width: 100%;
+}
+.pk-xf {
+  grid-area: 1 / 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.pk-chip .pk-xf {
+  min-height: 24px;
+  padding: 0 2px;
+  font-size: 12px;
+  color: var(--muted-fg);
+}
+.pk-chip .pk-xf[data-leaving] {
+  pointer-events: none;
+}
+.pk-chip .pk-xf[data-tone="ok"] {
+  padding: 0 4px 0 8px;
+  border-radius: 7px;
+  background: var(--accent);
+  color: var(--muted-fg);
+}
+.pk-chip .pk-xf[data-tone="ok"] b {
+  color: var(--fg);
+  font-weight: 500;
+}
+.pk-chip .pk-xf[data-tone="ok"] .pk-ic {
+  color: var(--muted-fg);
+  width: 12px;
+  height: 12px;
+}
+.pk-chip .pk-xf[data-tone="set"] .pk-ic {
+  color: var(--ok);
+  width: 13px;
+  height: 13px;
+}
+/* A warning wraps (up to two lines) rather than cutting its reason off. */
+.pk-chip .pk-xf[data-tone="warn"] {
+  color: var(--warn);
+  flex-wrap: wrap;
+  row-gap: 2px;
+  padding: 3px 2px;
+  white-space: normal;
+}
+.pk-chip .pk-xf[data-tone="warn"] > .pk-ic {
+  align-self: flex-start;
+  margin-top: 2px;
+}
+.pk-chip .pk-xf[data-tone="warn"] > .pk-chip-why {
+  flex: 1 1 12ch;
+  min-width: 0;
+  overflow: visible;
+  line-height: 1.4;
+}
+.pk-chip .pk-xf[data-tone="warn"] > .pk-fix {
+  margin-left: 0;
+}
+.pk-chip .pk-xf[data-tone="warn"] b {
+  color: var(--fg);
+  font-weight: 500;
+}
+.pk-chip .pk-xf > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pk-chip .pk-rel {
+  font-variant-numeric: tabular-nums;
+}
+.pk-sep {
+  color: var(--faint-fg);
+  opacity: 0.7;
+}
+.pk-chip kbd {
+  margin-left: 2px;
+}
+
+.pk-pop-sugg .pk-surface {
+  padding: 4px;
+  border-radius: 10px;
+}
+.pk-opt {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  height: 30px;
+  padding: 0 9px;
+  border-radius: 7px;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.pk-opt:hover {
+  background: var(--accent);
+}
+.pk-opt[aria-selected="true"] {
+  background: var(--accent-strong);
+}
+.pk-opt-typed {
+  color: var(--faint-fg);
+}
+.pk-opt-near {
+  color: var(--fg);
+  font-weight: 500;
+}
+.pk-opt-when {
+  margin-left: auto;
+  color: var(--muted-fg);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.pk-opt-foot {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 4px;
+  padding: 6px 8px 4px;
+  border-top: 1px solid var(--hair);
+  font-size: 11px;
+  color: var(--muted-fg);
+}
+/* Embedded (inside a popover/dialog): suggestions and the calendar live in the
+   host surface, under one hairline, full width — no second card or shadow. */
+.pk-dt.is-embedded .pk-inl-list {
+  margin: 2px -4px 0;
+  padding: 4px 0 0;
+  border-top: 1px solid var(--hair);
+}
+.pk-dt.is-embedded .pk-inl-list[hidden],
+.pk-dt.is-embedded .pk-inl-cal[hidden] {
+  display: none;
+}
+.pk-dt.is-embedded .pk-opt {
+  padding: 0 8px;
+}
+.pk-dt.is-embedded .pk-inl-cal {
+  margin: 2px -12px -12px;
+  border-top: 1px solid var(--hair);
+}
+.pk-dt.is-embedded .pk-inl-cal .pk-panel {
+  border-radius: 0 0 12px 12px;
+}
+.pk-opt-foot kbd + kbd {
+  margin-left: -1px;
+}
+.pk-opt-foot kbd:not(:first-child):not(kbd + kbd) {
+  margin-left: 8px;
+}
+
+/* ============================================================
+   Segments variant
+   ============================================================ */
+.pk-segfield {
+  display: inline-flex;
+  align-items: center;
+  height: 34px;
+  max-width: 100%;
+  padding: 0 4px 0 9px;
+  border-radius: 9px;
+  box-shadow: inset 0 0 0 1px var(--border);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  cursor: text;
+  transition: box-shadow 140ms;
+}
+.pk-segfield:focus-within {
+  box-shadow:
+    inset 0 0 0 1px var(--pk-ring),
+    0 0 0 3px color-mix(in srgb, var(--fg) 7%, transparent);
+}
+.pk-segfield[data-invalid] {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--warn) 55%, transparent);
+}
+.pk-seg-ro {
+  min-width: 3.3ch;
+  margin-right: 5px;
+  color: var(--muted-fg);
+}
+.pk-seg {
+  display: inline-block;
+  padding: 2px 3px;
+  margin: 0 0.5px;
+  border-radius: 5px;
+  text-align: center;
+  outline: none !important;
+  caret-color: transparent;
+  cursor: default;
+  transition:
+    background-color 90ms,
+    color 90ms;
+}
+.pk-seg[data-seg="day"],
+.pk-seg[data-seg="hour"],
+.pk-seg[data-seg="minute"] {
+  min-width: 2.4ch;
+}
+.pk-seg[data-seg="month"] {
+  min-width: 3.5ch;
+}
+.pk-seg[data-seg="year"] {
+  min-width: 4.4ch;
+}
+.pk-seg[data-quiet]:not(:focus) {
+  color: var(--muted-fg);
+}
+.pk-seg:hover {
+  background: var(--accent);
+}
+.pk-seg[data-empty] {
+  color: var(--faint-fg);
+}
+.pk-seg:focus {
+  background: var(--fg);
+  color: var(--bg);
+}
+.pk-seg[data-typing]:focus {
+  background: color-mix(in srgb, var(--fg) 78%, transparent);
+}
+.pk-seg-lit {
+  color: var(--ghost-fg);
+  padding: 0 1px;
+}
+.pk-seg-dot {
+  padding: 0 6px;
+}
+.pk-segfield .pk-cal-btn {
+  margin-left: 8px;
+}
+
+/* ============================================================
+   Segmented row with a sliding plate (interval, until, segmented)
+   ============================================================ */
+.pk-segrow {
+  position: relative;
+  display: inline-flex;
+  flex-wrap: wrap;
+  max-width: 100%;
+  padding: 2px;
+  gap: 2px;
+  border-radius: 9px;
+  box-shadow: inset 0 0 0 1px var(--border);
+  isolation: isolate;
+}
+.pk-plate {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: -1;
+  border-radius: 7px;
+  background: var(--accent-strong);
+  box-shadow: inset 0 0 0 1px var(--hair);
+  transition:
+    transform 300ms var(--pk-ease),
+    width 300ms var(--pk-ease),
+    height 300ms var(--pk-ease),
+    opacity 140ms;
+}
+.pk-segrow > [role="radio"] {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted-fg);
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color 140ms;
+}
+.pk-segrow > [role="radio"]:hover {
+  color: var(--fg);
+}
+.pk-segrow > [role="radio"][aria-checked="true"] {
+  color: var(--fg);
+  font-weight: 500;
+}
+.pk-segrow > [role="radio"][aria-disabled="true"] {
+  color: var(--ghost-fg);
+  cursor: default;
+}
+.pk-segrow > [role="radio"] .pk-ic {
+  width: 13px;
+  height: 13px;
+}
+
+/* Interval */
+.pk-iv {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  min-width: 0;
+}
+.pk-reveal {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transition:
+    grid-template-rows 260ms var(--pk-ease),
+    opacity 180ms;
+}
+.pk-reveal[data-open] {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+.pk-reveal-in {
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.pk-reveal[data-open] .pk-reveal-in {
+  padding-top: 8px;
+}
+.pk-stepper {
+  display: inline-flex;
+  align-items: center;
+  height: 30px;
+  padding: 0 2px;
+  border-radius: 9px;
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+.pk-step-input {
+  width: 46px;
+  height: 100%;
+  border: 0;
+  outline: none !important;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+.pk-stepper:focus-within {
+  box-shadow:
+    inset 0 0 0 1px var(--pk-ring),
+    0 0 0 3px color-mix(in srgb, var(--fg) 7%, transparent);
+}
+.pk-iv > .pk-hint {
+  align-self: stretch;
+}
+
+/* Until: one chip row + at most one read-back line. */
+.pk-until {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.pk-until > .pk-segrow {
+  align-self: flex-start;
+}
+.pk-until-sum {
+  margin-top: 8px;
+  font-size: 12.5px;
+  color: var(--muted-fg);
+}
+.pk-until-sum[hidden],
+.pk-until-sum:empty {
+  display: none;
+}
+.pk-until-sum b {
+  color: var(--fg);
+  font-weight: 500;
+}
+
+/* ============================================================
+   Preview: next runs, total, strip of ticks
+   ============================================================ */
+.pk-pv {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.pk-pv-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 4px;
+}
+.pk-pv-title {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--muted-fg);
+}
+.pk-pv-total {
+  display: inline-grid;
+  justify-items: end;
+}
+.pk-pv-total .pk-xf {
+  display: inline-block;
+  font-size: 12px;
+  color: var(--muted-fg);
+}
+.pk-pv-total b {
+  color: var(--fg);
+  font-weight: 500;
+}
+.pk-pv-list {
+  position: relative;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  height: calc(5 * 29px);
+}
+.pk-pv-list[data-empty]::before {
+  content: attr(data-empty);
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-size: 12.5px;
+  color: var(--muted-fg);
+}
+.pk-pv-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto 84px;
+  align-items: center;
+  gap: 12px;
+  height: 29px;
+  border-top: 1px solid var(--hair);
+  font-size: 13px;
+}
+.pk-pv-row.is-leaving {
+  position: absolute;
+  left: 0;
+  right: 0;
+  pointer-events: none;
+}
+.pk-pv-day {
+  color: var(--muted-fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pk-pv-time {
+  font-weight: 500;
+}
+.pk-pv-rel {
+  text-align: right;
+  font-size: 12px;
+  color: var(--muted-fg);
+}
+.pk-pv-strip {
+  position: relative;
+  height: 20px;
+  margin-top: 12px;
+}
+.pk-pv-strip[hidden] {
+  display: none;
+}
+.pk-pv-ticks {
+  position: absolute;
+  left: 0;
+  right: -1px;
+  top: 6px;
+  height: 8px;
+  background-image: linear-gradient(
+    to right,
+    color-mix(in srgb, var(--fg) 34%, transparent) 1px,
+    transparent 1px
+  );
+  background-repeat: repeat-x;
+  transition:
+    background-size 360ms var(--pk-ease),
+    opacity 200ms;
+}
+.pk-pv-mark {
+  position: absolute;
+  top: 3px;
+  width: 2px;
+  height: 14px;
+  margin-left: -0.5px;
+  border-radius: 1px;
+  background: var(--fg);
+  opacity: 0.55;
+  transition: left 360ms var(--pk-ease);
+}
+.pk-pv-mark.is-next {
+  opacity: 1;
+}
+.pk-pv-note {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--muted-fg);
+}
+.pk-pv-note:empty {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pk *,
+  .pk-pop * {
+    transition-property: background-color, color, opacity, box-shadow !important;
+  }
+}

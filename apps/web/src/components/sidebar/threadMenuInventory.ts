@@ -2,9 +2,9 @@ import {
   listThreadLifecycleActions,
   listWorkspaceLifecycleActions,
   type ThreadLifecycleSubject,
+  type WorkspaceActionId,
   type WorkspaceLifecycleSubject,
 } from "@ryco/client-runtime/state/lifecycle";
-import type { WorkspaceLifecycleAction } from "@ryco/contracts";
 
 export type ThreadMenuActionId =
   | "open-in-split"
@@ -24,7 +24,7 @@ export type ThreadMenuActionId =
   | "trash"
   | "discard-draft"
   | "workspace"
-  | `workspace:${WorkspaceLifecycleAction}`
+  | `workspace:${WorkspaceActionId}`
   | "workspace:manage";
 
 export interface ThreadMenuActionItem {

@@ -1,9 +1,10 @@
 import { useLayoutEffect, useState, type RefObject } from "react";
 
-/** An element's content width, tracked with a ResizeObserver; `initialWidth` until measured. */
+/** Track the element width, using a page-sized default until first measured. */
 export function useElementWidth(
   ref: RefObject<HTMLElement | null>,
-  initialWidth: number | (() => number),
+  initialWidth: number | (() => number) = () =>
+    typeof window === "undefined" ? 1200 : Math.max(0, window.innerWidth - 260),
 ): number {
   const [width, setWidth] = useState(initialWidth);
   useLayoutEffect(() => {

@@ -1,0 +1,233 @@
+/* ============================================================
+   D · Pickers — gallery page. Scoped under [data-dir="D"].
+   One 52px bar, then hairline-separated bands; no cards.
+   ============================================================ */
+.pkd[data-dir="D"] {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--fg);
+  font-size: 13px;
+}
+[data-dir="D"] .pkd-bar {
+  height: 52px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 24px;
+  border-bottom: 1px solid var(--hair);
+}
+[data-dir="D"] .pkd-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+[data-dir="D"] .pkd-sub {
+  color: var(--muted-fg);
+  font-size: 13px;
+}
+[data-dir="D"] .pkd-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+[data-dir="D"] h3 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+}
+
+/* --- three columns, aligned row by row (subgrid) */
+[data-dir="D"] .pkd-trio {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-rows: auto auto auto auto auto;
+  border-bottom: 1px solid var(--hair);
+}
+[data-dir="D"] .pkd-col {
+  grid-row: span 5;
+  display: grid;
+  grid-template-rows: subgrid;
+  row-gap: 10px;
+  padding: 22px 24px 20px;
+  min-width: 0;
+}
+[data-dir="D"] .pkd-col + .pkd-col {
+  border-left: 1px solid var(--hair);
+}
+[data-dir="D"] .pkd-col-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+[data-dir="D"] .pkd-num {
+  font-size: 12px;
+  color: var(--muted-fg);
+  font-variant-numeric: tabular-nums;
+}
+[data-dir="D"] .pkd-idea {
+  margin: 0;
+  max-width: 44ch;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--muted-fg);
+}
+[data-dir="D"] .pkd-slot {
+  align-self: start;
+  margin: 2px -6px 0;
+  padding: 6px;
+  border-radius: 12px;
+  min-width: 0;
+}
+[data-dir="D"] .pkd-slot.is-synced {
+  animation: pkd-sync 900ms ease-out;
+}
+@keyframes pkd-sync {
+  0%,
+  25% {
+    background: color-mix(in srgb, var(--fg) 6%, transparent);
+  }
+  100% {
+    background: transparent;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-dir="D"] .pkd-slot.is-synced {
+    animation-duration: 600ms;
+  }
+}
+/* "Try" phrases under the Type picker: quiet text buttons. */
+[data-dir="D"] .pkd-extra {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 0;
+  min-height: 0;
+  font-size: 12px;
+  color: var(--muted-fg);
+}
+[data-dir="D"] .pkd-extra:empty {
+  display: none;
+}
+[data-dir="D"] .pkd-try-l {
+  margin-right: 6px;
+}
+[data-dir="D"] .pkd-try {
+  padding: 1px 3px;
+  margin: 0 -1px;
+  border: 0;
+  border-radius: 5px;
+  background: none;
+  font: inherit;
+  font-size: 12px;
+  color: var(--fg);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color 120ms;
+}
+[data-dir="D"] .pkd-try:hover {
+  background: var(--accent);
+}
+[data-dir="D"] .pkd-try:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--fg) 46%, transparent);
+  outline-offset: 1px;
+}
+[data-dir="D"] .pkd-dot {
+  margin: 0 5px;
+  color: var(--faint-fg);
+}
+/* Key legend: four essentials, each "keys + label" pair kept on one line. */
+[data-dir="D"] .pkd-keys {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  row-gap: 4px;
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--muted-fg);
+}
+[data-dir="D"] .pkd-k {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  white-space: nowrap;
+}
+[data-dir="D"] .pkd-keys kbd {
+  margin: 0;
+}
+
+/* --- draft: controls | preview */
+[data-dir="D"] .pkd-draft {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
+  border-bottom: 1px solid var(--hair);
+}
+[data-dir="D"] .pkd-ctl {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 20px 24px 22px;
+  min-width: 0;
+}
+[data-dir="D"] .pkd-ctl-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: -4px;
+}
+/* Once collapses Repeat + Ends (height reveal), it doesn't dim them. */
+[data-dir="D"] .pkd-rep {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  margin-bottom: -18px;
+  transition:
+    grid-template-rows 280ms var(--ease),
+    opacity 180ms,
+    margin-bottom 280ms var(--ease);
+}
+[data-dir="D"] .pkd-rep[data-open] {
+  grid-template-rows: 1fr;
+  opacity: 1;
+  margin-bottom: 0;
+}
+[data-dir="D"] .pkd-rep-in {
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-dir="D"] .pkd-rep {
+    transition: opacity 100ms;
+  }
+}
+[data-dir="D"] .pkd-field {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  align-items: start;
+  gap: 12px;
+}
+[data-dir="D"] .pkd-label {
+  padding-top: 6px;
+  font-size: 12.5px;
+  color: var(--muted-fg);
+}
+[data-dir="D"] .pkd-once {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--muted-fg);
+}
+[data-dir="D"] .pkd-pv {
+  padding: 20px 24px 22px;
+  border-left: 1px solid var(--hair);
+  min-width: 0;
+}

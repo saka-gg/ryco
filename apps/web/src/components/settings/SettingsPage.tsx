@@ -1,4 +1,4 @@
-import { EnvironmentId, WS_METHODS } from "@ryco/contracts";
+import { EnvironmentId } from "@ryco/contracts";
 import { useParams, useRouter } from "@tanstack/react-router";
 import {
   ActivityIcon,
@@ -43,26 +43,20 @@ import {
 import { useAppPreferencesLabel, useDeviceName } from "../../deviceName";
 import { isElectron, isHostedHubMode } from "../../env";
 import { usePrimaryEnvironmentDescriptor } from "../../environments/primary";
-import {
-  useSavedEnvironmentRegistryStore,
-  useSavedEnvironmentRuntimeStore,
-} from "../../environments/runtime";
+import { useSavedEnvironmentRegistryStore } from "../../environments/runtime";
 import { useAppSidebarCollapsed } from "../../hooks/useAppSidebarCollapsed";
-import { useHostedRpcCapability } from "../../hostedHub/capabilities";
+import { useEnvironmentSettingsTarget } from "../../hooks/useEnvironmentSettingsTarget";
 import { navigateHub } from "../../hostedHub/hubRoutes";
-import { useHostedHubStore } from "../../hostedHub/state";
 import { cn } from "../../lib/utils";
 import {
   retainDesktopWorkspaceInteractiveScope,
   useDesktopWorkspaceState,
 } from "../../platform/desktopWorkspace";
-import { useServerConfig } from "../../rpc/serverState";
 import { type SettingsSectionId, useSettingsDialogStore } from "../../settingsDialogStore";
 import {
   resolveSettingsTargetEnvironmentId,
   SettingsEditingScopeProvider,
   SettingsTargetProvider,
-  type SettingsTarget,
 } from "../../settingsTarget";
 import { useStore } from "../../store";
 import { resolveThreadRouteRef } from "../../threadRoutes";
@@ -78,14 +72,10 @@ import { Skeleton } from "../ui/skeleton";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { ArchivedThreadsPanel, GeneralSettingsPanel, useSettingsRestore } from "./SettingsPanels";
 import { SETTINGS_SEARCH_INDEX, type SettingsSearchEntry } from "./settingsSearchIndex";
-import {
-  hostedSettingsRoleFresh,
-  hostedSettingsRoleSnapshot,
-  settingsSectionInDestination,
-  settingsSectionReachable,
-} from "./settingsSections.logic";
+import { settingsSectionInDestination, settingsSectionReachable } from "./settingsSections.logic";
 import { SettingsCard, SettingsEmpty } from "./settingsLayout";
 import { useSettingsSubsections } from "./useSettingsSubsections";
+import { useActiveIndicator } from "../ui/useActiveIndicator";
 
 type SettingsDestination = "client" | "node";
 
@@ -406,57 +396,6 @@ function isEditableTarget(target: EventTarget | null): boolean {
   );
 }
 
-/**
- * The nav's active marker: one element that travels between items instead of
- * each item toggling its own background, so moving between sections reads as
- * motion rather than a cut.
- */
-function useActiveIndicator(activeKey: string | null) {
-  const listRef = useRef<HTMLDivElement | null>(null);
-  const [rect, setRect] = useState<{ top: number; height: number } | null>(null);
-  const [animate, setAnimate] = useState(false);
-  const measure = useCallback(() => {
-    const list = listRef.current;
-    if (!list || !activeKey) {
-      setRect(null);
-      return;
-    }
-    const element = list.querySelector<HTMLElement>(`[data-nav-key="${CSS.escape(activeKey)}"]`);
-    if (!element) {
-      setRect(null);
-      return;
-    }
-    setRect((previous) =>
-      previous?.top === element.offsetTop && previous.height === element.offsetHeight
-        ? previous
-        : { top: element.offsetTop, height: element.offsetHeight },
-    );
-  }, [activeKey]);
-  useLayoutEffect(() => {
-    measure();
-  }, [measure]);
-  useEffect(() => {
-    const list = listRef.current;
-    if (!list) return;
-    // Measured on the next frame so a resize never feeds back into the
-    // observer within the same frame.
-    let pending = 0;
-    const observer = new ResizeObserver(() => {
-      cancelAnimationFrame(pending);
-      pending = requestAnimationFrame(measure);
-    });
-    observer.observe(list);
-    // The first placement lands without sliding in from the top.
-    const frame = requestAnimationFrame(() => setAnimate(true));
-    return () => {
-      observer.disconnect();
-      cancelAnimationFrame(pending);
-      cancelAnimationFrame(frame);
-    };
-  }, [measure]);
-  return { listRef, rect, animate };
-}
-
 interface NavGroup {
   readonly destination: SettingsDestination;
   readonly items: ReadonlyArray<NavItem>;
@@ -708,7 +647,6 @@ export function SettingsPage() {
   const router = useRouter();
   const appSidebarCollapsed = useAppSidebarCollapsed();
   const primaryEnvironment = usePrimaryEnvironmentDescriptor();
-  const primaryServerConfig = useServerConfig();
   const activeEnvironmentId = useStore((state) => state.activeEnvironmentId);
   const desktopWorkspace = useDesktopWorkspaceState();
   const section = useSettingsDialogStore((s) => s.section);
@@ -718,7 +656,6 @@ export function SettingsPage() {
   const closeSettings = useSettingsDialogStore((s) => s.closeSettings);
   const requestedEnvironmentId = useSettingsDialogStore((s) => s.targetEnvironmentId);
   const allSavedEnvironments = useSavedEnvironmentRegistryStore((state) => state.byId);
-  const nodeWriteCapability = useHostedRpcCapability(WS_METHODS.serverUpdateSettings);
   const hosted = isHostedHubMode();
   const targetEnvironmentId = hosted
     ? (primaryEnvironment?.environmentId ?? null)
@@ -729,80 +666,21 @@ export function SettingsPage() {
         primaryEnvironmentId: primaryEnvironment?.environmentId ?? null,
         desktopLocalEnvironmentId: isElectron ? desktopWorkspace.localEnvironmentId : null,
       });
-  const savedEnvironment = useSavedEnvironmentRegistryStore((state) =>
-    targetEnvironmentId ? (state.byId[targetEnvironmentId] ?? null) : null,
-  );
-  const savedEnvironmentRuntime = useSavedEnvironmentRuntimeStore((state) =>
-    targetEnvironmentId ? (state.byId[targetEnvironmentId] ?? null) : null,
-  );
-  const targetIsPrimary =
-    targetEnvironmentId !== null && targetEnvironmentId === primaryEnvironment?.environmentId;
-  const desktopWorkspaceMachine = targetEnvironmentId
-    ? (desktopWorkspace.machines.find((machine) => machine.environmentId === targetEnvironmentId) ??
-      null)
-    : null;
-  const targetServerConfig = targetIsPrimary
-    ? primaryServerConfig
-    : (savedEnvironmentRuntime?.serverConfig ?? null);
+  const {
+    target: authorizedTarget,
+    isPrimary: targetIsPrimary,
+    nodeRole,
+    roleFresh,
+    desktopWorkspaceMachine,
+  } = useEnvironmentSettingsTarget(targetEnvironmentId);
+  const settingsTarget = authorizedTarget;
   const primaryDeviceName = useDeviceName();
   const appPreferencesLabel = useAppPreferencesLabel();
-  const targetNodeLabel = useDeviceName(
-    targetEnvironmentId,
-    targetIsPrimary
-      ? (primaryEnvironment?.label ?? targetServerConfig?.environment.label)
-      : (savedEnvironmentRuntime?.descriptor?.label ??
-          targetServerConfig?.environment.label ??
-          savedEnvironment?.label),
-  );
-  const remoteRole = desktopWorkspaceMachine
-    ? desktopWorkspaceMachine.canConnect
-      ? desktopWorkspaceMachine.effectiveRole
-      : null
-    : savedEnvironmentRuntime?.role === "owner"
-      ? "owner"
-      : savedEnvironmentRuntime?.role
-        ? "viewer"
-        : null;
-  const settingsTarget: SettingsTarget | null = targetEnvironmentId
-    ? {
-        environmentId: targetEnvironmentId,
-        nodeLabel: targetNodeLabel,
-        serverConfig: targetServerConfig,
-        primary: targetIsPrimary,
-        canManage: targetIsPrimary ? !hosted : remoteRole === "owner",
-        canMutate:
-          targetIsPrimary ||
-          (desktopWorkspaceMachine
-            ? desktopWorkspaceMachine.canMutate
-            : savedEnvironmentRuntime?.role === "owner" ||
-              savedEnvironmentRuntime?.role === "client"),
-        connected:
-          targetServerConfig !== null &&
-          (targetIsPrimary ||
-            savedEnvironmentRuntime?.connectionState === "connected" ||
-            desktopWorkspaceMachine?.connectionState === "connected"),
-      }
-    : null;
+  const targetNodeLabel = authorizedTarget?.nodeLabel ?? primaryDeviceName;
   useEffect(() => {
     if (editingScope !== "node" || !isElectron || !targetEnvironmentId || targetIsPrimary) return;
     return retainDesktopWorkspaceInteractiveScope(targetEnvironmentId);
   }, [editingScope, targetEnvironmentId, targetIsPrimary]);
-  const hostedRole = useHostedHubStore((state) => state.effectiveRole);
-  const hostedDirectoryStatus = useHostedHubStore((state) => state.directoryStatus);
-  const hostedTransportStatus = useHostedHubStore((state) => state.transportStatus);
-  const roleFresh = hostedSettingsRoleFresh(hostedDirectoryStatus, hostedTransportStatus);
-  const role = hostedSettingsRoleSnapshot(hostedRole, hostedDirectoryStatus, hostedTransportStatus);
-  const nodeRole = hosted ? role : targetIsPrimary ? "owner" : remoteRole;
-  const authorizedTarget = settingsTarget
-    ? {
-        ...settingsTarget,
-        canManage:
-          settingsTarget.connected &&
-          (hosted
-            ? role === "owner" && roleFresh && nodeWriteCapability.allowed
-            : settingsTarget.canManage === true),
-      }
-    : null;
 
   const nodeChoices = new Map<EnvironmentId, string>();
   if (primaryEnvironment) nodeChoices.set(primaryEnvironment.environmentId, primaryDeviceName);

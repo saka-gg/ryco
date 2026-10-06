@@ -1,19 +1,11 @@
 import { LIFECYCLE_RETENTION_COPY } from "@ryco/client-runtime/state/lifecycle";
 import { scopeThreadRef } from "@ryco/client-runtime/scoped";
-import {
-  type EnvironmentId,
-  type LifecycleSuggestionPolicy,
-  type ServerSettingsPatch,
-  type TrashedThreadSummary,
-} from "@ryco/contracts";
-import { resolveLifecycleSuggestionPolicy } from "@ryco/shared/workspaceLifecycle";
+import { type EnvironmentId, type TrashedThreadSummary } from "@ryco/contracts";
 import { ArchiveRestoreIcon, Trash2Icon } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
 import { readLifecycleApi } from "../../workspaceLifecycle";
-import { updateEnvironmentServerSettings } from "../../environments/runtime";
 import { useThreadActions } from "../../hooks/useThreadActions";
-import { useServerConfig } from "../../rpc/serverState";
 import { formatRelativeTimeLabel } from "../../timestampFormat";
 import {
   AlertDialog,
@@ -27,12 +19,13 @@ import {
 import { Button } from "../ui/button";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import {
-  SettingResetButton,
-  SettingsEmpty,
-  SettingsNotice,
-  SettingsRow,
-  SettingsSection,
-} from "./settingsLayout";
+  LIFECYCLE_SUGGESTION_COPY,
+  parseSuggestionDays,
+  suggestionDayOptions,
+  suggestionDaysValue,
+  useLifecycleSuggestionPolicyEditor,
+} from "./lifecycleSuggestionPolicy";
+import { SettingsEmpty, SettingsNotice, SettingsRow, SettingsSection } from "./settingsLayout";
 import { SettingsSelect } from "./SettingsSelect";
 
 type TrashState =
@@ -219,143 +212,47 @@ export function TrashSection(props: {
   );
 }
 
-const DAY_OPTIONS = [7, 14, 30, 60, 90];
-
 /**
- * Approval-only suggestions. A per-project override follows the same pattern as
- * storage retention; "Off" disables a suggestion. Nothing is archived or removed
- * without a confirmed action.
+ * The device default for approval-only cleanup suggestions; "Off" disables one.
+ * Each project can override it on its page, under Workspaces. Nothing is
+ * archived or removed without a confirmed action.
  */
 export function LifecycleSuggestionSettings(props: {
   readonly environmentId: EnvironmentId | null;
-  readonly projects: ReadonlyArray<{ readonly id: string; readonly name: string }>;
   readonly disabled: boolean;
 }) {
-  const config = useServerConfig();
-  const settings = config?.settings;
-  const [projectId, setProjectId] = useState("");
-  const [saving, setSaving] = useState(false);
-  const policy = settings ? resolveLifecycleSuggestionPolicy(settings, projectId || null) : null;
-  const overridden = Boolean(projectId && settings?.projectLifecycleSuggestions[projectId]);
-
-  const save = async (next: LifecycleSuggestionPolicy | null) => {
-    if (!props.environmentId || (!projectId && !next)) return;
-    setSaving(true);
-    const patch: ServerSettingsPatch = projectId
-      ? { projectLifecycleSuggestions: { [projectId]: next } }
-      : { lifecycleSuggestions: next! };
-    try {
-      await updateEnvironmentServerSettings(props.environmentId, patch);
-    } catch (error) {
-      toastManager.add(
-        stackedThreadToast({
-          type: "error",
-          title: "Could not save suggestion settings",
-          description: error instanceof Error ? error.message : "An error occurred.",
-        }),
-      );
-    } finally {
-      setSaving(false);
-    }
-  };
-  const options = (current: number | null) => {
-    const days =
-      current !== null && !DAY_OPTIONS.includes(current) ? [...DAY_OPTIONS, current] : DAY_OPTIONS;
-    return [
-      { value: "off", label: "Off" },
-      ...days
-        .toSorted((a, b) => a - b)
-        .map((value) => ({ value: String(value), label: `${value} days` })),
-    ];
-  };
-  const busy = props.disabled || saving || policy === null;
-
+  const editor = useLifecycleSuggestionPolicyEditor({
+    environmentId: props.environmentId,
+    projectId: null,
+  });
+  const busy = props.disabled || editor.saving || editor.policy === null;
   return (
     <SettingsSection
       title="Cleanup suggestions"
       owner="node"
-      description="Suggestions appear on the Workspaces page and always need your approval. Running work, background tasks, open terminals, pinned threads and unfinished goals are never suggested, and nothing is removed because a pull request merged."
+      description="Suggestions appear on each project's page under Workspaces, where a project can also change these. They always need your approval: running work, background tasks, open terminals, pinned threads and unfinished goals are never suggested, and nothing is removed because a pull request merged."
     >
-      <SettingsRow
-        title="Scope"
-        status={
-          projectId
-            ? overridden
-              ? "Project setting"
-              : "Inherits the device setting"
-            : "Device setting"
-        }
-        resetAction={
-          overridden ? (
-            <SettingResetButton
-              label="project suggestion settings"
-              tooltip="Use device setting"
-              disabled={busy}
-              onClick={() => void save(null)}
-            />
-          ) : null
-        }
-        control={
-          <SettingsSelect
-            ariaLabel="Suggestion settings scope"
-            value={projectId || "device"}
-            disabled={props.disabled}
-            onValueChange={(value) => setProjectId(value === "device" ? "" : value)}
-            options={[
-              { value: "device", label: "All projects" },
-              ...props.projects.map((project) => ({ value: project.id, label: project.name })),
-            ]}
+      {(["archiveInactiveThreadsDays", "removeArchivedCheckoutsDays"] as const).map((field) => {
+        const copy = LIFECYCLE_SUGGESTION_COPY[field];
+        const days = editor.policy?.[field] ?? null;
+        return (
+          <SettingsRow
+            key={field}
+            title={copy.title}
+            description={copy.description}
+            control={
+              <SettingsSelect
+                ariaLabel={copy.ariaLabel}
+                width="sm"
+                disabled={busy}
+                value={suggestionDaysValue(days)}
+                onValueChange={(value) => void editor.setField(field, parseSuggestionDays(value))}
+                options={suggestionDayOptions(days)}
+              />
+            }
           />
-        }
-      />
-      <SettingsRow
-        title="Suggest archiving inactive conversations"
-        description="After this many days without activity."
-        control={
-          <SettingsSelect
-            ariaLabel="Inactive conversation suggestion"
-            width="sm"
-            disabled={busy}
-            value={
-              policy?.archiveInactiveThreadsDays == null
-                ? "off"
-                : String(policy.archiveInactiveThreadsDays)
-            }
-            onValueChange={(value) =>
-              policy &&
-              void save({
-                ...policy,
-                archiveInactiveThreadsDays: value === "off" ? null : Number(value),
-              })
-            }
-            options={options(policy?.archiveInactiveThreadsDays ?? null)}
-          />
-        }
-      />
-      <SettingsRow
-        title="Suggest removing finished checkouts"
-        description="Once every conversation of a workspace has been archived this long. History and the branch are always kept."
-        control={
-          <SettingsSelect
-            ariaLabel="Finished checkout suggestion"
-            width="sm"
-            disabled={busy}
-            value={
-              policy?.removeArchivedCheckoutsDays == null
-                ? "off"
-                : String(policy.removeArchivedCheckoutsDays)
-            }
-            onValueChange={(value) =>
-              policy &&
-              void save({
-                ...policy,
-                removeArchivedCheckoutsDays: value === "off" ? null : Number(value),
-              })
-            }
-            options={options(policy?.removeArchivedCheckoutsDays ?? null)}
-          />
-        }
-      />
+        );
+      })}
     </SettingsSection>
   );
 }

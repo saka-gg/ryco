@@ -1165,9 +1165,6 @@ export function ArchivedThreadsPanel() {
       <LifecycleSuggestionSettings
         environmentId={lifecycleEnvironmentId}
         disabled={!mutationAllowed}
-        projects={projects
-          .filter((project) => project.environmentId === lifecycleEnvironmentId)
-          .map((project) => ({ id: project.id, name: project.name }))}
       />
     </SettingsPageContainer>
   );

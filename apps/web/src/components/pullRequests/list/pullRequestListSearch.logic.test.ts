@@ -1,14 +1,14 @@
 import { EnvironmentId, ProjectId } from "@ryco/contracts";
 import { describe, expect, it } from "vitest";
 
-import type { PullRequestRepositoryOption } from "../pullRequestRepositories.logic";
+import type { ProjectCheckoutOption } from "../../../projectCheckouts.logic";
 import { parsePullRequestLinkTarget, resolvePullRequestLink } from "./pullRequestListSearch.logic";
 
 function option(
   key: string,
   repositoryKey: string,
   isRepresentative = true,
-): PullRequestRepositoryOption {
+): ProjectCheckoutOption {
   return {
     key,
     environmentId: EnvironmentId.make(`env-${key}`),

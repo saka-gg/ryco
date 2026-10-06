@@ -1,3 +1,4 @@
+import { useNavigate } from "@tanstack/react-router";
 import { createContext, useCallback, useContext, useMemo, useState } from "react";
 import type { SidebarProjectGroupingMode, ScopedThreadRef } from "@ryco/contracts";
 import { scopeThreadRef } from "@ryco/client-runtime/scoped";
@@ -7,27 +8,31 @@ import type {
   SidebarProjectSnapshot,
 } from "../../sidebarProjectGrouping";
 import type { useUpdateSettings } from "~/hooks/useSettings";
-import {
-  ProjectExplorerDialog,
-  type ProjectExplorerTabId,
-} from "../projectExplorer/ProjectExplorerDialog";
+import { buildProjectsPageLocation } from "../../projectsRoute";
 import { NewWorktreeDialog, type NewWorktreeDialogTab } from "../worktrees/NewWorktreeDialog";
-import { ProjectSettingsDialog } from "./ProjectSettingsDialog";
 import { SidebarProjectGroupingDialog } from "./SidebarProjectGroupingDialog";
 import { SidebarProjectRenameDialog } from "./SidebarProjectRenameDialog";
 import { useSidebarProjectGroupingDialog } from "./hooks/useSidebarProjectGroupingDialog";
 import { useSidebarProjectRenameDialog } from "./hooks/useSidebarProjectRenameDialog";
-import { useSidebarProjectSettingsDialog } from "./hooks/useSidebarProjectSettingsDialog";
 
+/**
+ * Project actions the desktop sidebar offers. Overview and settings live on
+ * the projects page (the frozen phone tier keeps its own dialogs); the rest
+ * are small dialogs owned here.
+ */
 interface SidebarProjectDialogActions {
-  readonly openExplorer: (
-    project: SidebarProjectSnapshot,
-    initialTab: ProjectExplorerTabId,
+  /**
+   * The project's page through one checkout: a sidebar project row passes its
+   * representative checkout, a thread its own.
+   */
+  readonly openOverview: (
+    checkout: Pick<SidebarProjectGroupMember, "environmentId" | "id">,
   ) => void;
   readonly openNewWorktree: (
     project: SidebarProjectSnapshot,
     initialTab: NewWorktreeDialogTab,
   ) => void;
+  /** The page for one checkout (the project on one device). */
   readonly openSettings: (member: SidebarProjectGroupMember) => void;
   readonly openRename: (member: SidebarProjectGroupMember) => void;
   readonly openGrouping: (member: SidebarProjectGroupMember) => void;
@@ -57,23 +62,28 @@ export function SidebarProjectDialogProvider(props: {
     readonly initialTab: NewWorktreeDialogTab;
   } | null>(null);
   const [newWorktreeOpen, setNewWorktreeOpen] = useState(false);
-  const [explorerTarget, setExplorerTarget] = useState<{
-    readonly project: SidebarProjectSnapshot;
-    readonly initialTab: ProjectExplorerTabId;
-  } | null>(null);
-  const [explorerOpen, setExplorerOpen] = useState(false);
-  const settingsDialog = useSidebarProjectSettingsDialog();
+  const navigate = useNavigate();
   const renameDialog = useSidebarProjectRenameDialog();
   const groupingDialog = useSidebarProjectGroupingDialog({
     projectGroupingSettings: props.projectGroupingSettings,
     updateSettings: props.updateSettings,
   });
-  const openExplorer = useCallback(
-    (project: SidebarProjectSnapshot, initialTab: ProjectExplorerTabId) => {
-      setExplorerTarget({ project, initialTab });
-      setExplorerOpen(true);
+  // Overview and settings are one page: the overview opens its map, settings
+  // its editor; a checkout picks the device.
+  const openProjectPage = useCallback(
+    (
+      checkout: Pick<SidebarProjectGroupMember, "environmentId" | "id">,
+      view: "map" | "settings",
+    ) => {
+      void navigate(
+        buildProjectsPageLocation({
+          environmentId: checkout.environmentId,
+          projectId: checkout.id,
+          view,
+        }),
+      );
     },
-    [],
+    [navigate],
   );
   const openNewWorktree = useCallback(
     (project: SidebarProjectSnapshot, initialTab: NewWorktreeDialogTab) => {
@@ -84,18 +94,17 @@ export function SidebarProjectDialogProvider(props: {
   );
   const actions = useMemo<SidebarProjectDialogActions>(
     () => ({
-      openExplorer,
+      openOverview: (checkout) => openProjectPage(checkout, "map"),
       openNewWorktree,
-      openSettings: settingsDialog.openProjectSettingsDialog,
+      openSettings: (checkout) => openProjectPage(checkout, "settings"),
       openRename: renameDialog.openProjectRenameDialog,
       openGrouping: groupingDialog.openProjectGroupingDialog,
     }),
     [
       groupingDialog.openProjectGroupingDialog,
-      openExplorer,
       openNewWorktree,
+      openProjectPage,
       renameDialog.openProjectRenameDialog,
-      settingsDialog.openProjectSettingsDialog,
     ],
   );
 
@@ -120,40 +129,6 @@ export function SidebarProjectDialogProvider(props: {
           }}
         />
       ) : null}
-
-      {explorerTarget ? (
-        <ProjectExplorerDialog
-          open={explorerOpen}
-          projectName={explorerTarget.project.displayName}
-          memberProjects={explorerTarget.project.memberProjects}
-          initialTab={explorerTarget.initialTab}
-          onOpenChange={(open) => {
-            setExplorerOpen(open);
-          }}
-        />
-      ) : null}
-
-      <ProjectSettingsDialog
-        open={settingsDialog.projectSettingsOpen}
-        target={settingsDialog.projectSettingsTarget}
-        title={settingsDialog.projectSettingsTitle}
-        customAvatarContentHash={settingsDialog.projectSettingsCustomAvatarContentHash}
-        projectAvatarUploadUnavailableReason={settingsDialog.projectAvatarUploadUnavailableReason}
-        preferredRemoteName={settingsDialog.projectSettingsPreferredRemoteName}
-        workspaceRoot={settingsDialog.projectSettingsWorkspaceRoot}
-        customSystemPrompt={settingsDialog.projectSettingsCustomSystemPrompt}
-        saving={settingsDialog.projectSettingsSaving}
-        onClose={settingsDialog.closeProjectSettingsDialog}
-        onSave={() => void settingsDialog.submitProjectSettings()}
-        onTitleChange={settingsDialog.setProjectSettingsTitle}
-        onWorkspaceRootChange={settingsDialog.setProjectSettingsWorkspaceRoot}
-        onCustomSystemPromptChange={settingsDialog.setProjectSettingsCustomSystemPrompt}
-        onPreferredRemoteChange={settingsDialog.setProjectSettingsPreferredRemoteName}
-        onPickWorkspaceRoot={() => void settingsDialog.pickProjectSettingsWorkspaceRoot()}
-        onOpenRemote={settingsDialog.openProjectRemoteByName}
-        onUploadAvatar={settingsDialog.uploadProjectAvatar}
-        onRemoveAvatar={settingsDialog.removeProjectAvatar}
-      />
 
       <SidebarProjectRenameDialog
         target={renameDialog.projectRenameTarget}

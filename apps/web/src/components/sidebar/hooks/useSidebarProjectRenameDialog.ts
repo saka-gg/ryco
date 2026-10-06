@@ -1,6 +1,5 @@
 import { useCallback, useState } from "react";
-import { newCommandId } from "../../../lib/utils";
-import { readEnvironmentApi } from "../../../environmentApi";
+import { updateProjectMeta } from "../../../projectMutations";
 import type { SidebarProjectGroupMember } from "../../../sidebarProjectGrouping";
 import { stackedThreadToast, toastManager } from "../../ui/toast";
 
@@ -39,25 +38,8 @@ export function useSidebarProjectRenameDialog() {
       return;
     }
 
-    const api = readEnvironmentApi(projectRenameTarget.environmentId);
-    if (!api) {
-      toastManager.add(
-        stackedThreadToast({
-          type: "error",
-          title: "Failed to rename project",
-          description: "Project API unavailable.",
-        }),
-      );
-      return;
-    }
-
     try {
-      await api.orchestration.dispatchCommand({
-        type: "project.meta.update",
-        commandId: newCommandId(),
-        projectId: projectRenameTarget.id,
-        title: trimmed,
-      });
+      await updateProjectMeta(projectRenameTarget, { title: trimmed });
       closeProjectRenameDialog();
     } catch (error) {
       toastManager.add(

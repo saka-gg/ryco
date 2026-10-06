@@ -17,12 +17,12 @@ describe("workspace route search", () => {
       workspacePr: 42,
     });
     expect(buildOpenPullRequestSearch({}, -1).workspacePr).toBeUndefined();
-    expect(buildOpenReviewSearch(pinned)).toMatchObject({
+    expect(buildOpenReviewSearch({ ...pinned })).toMatchObject({
       workspaceTab: "review",
       diff: "1",
       workspacePr: undefined,
     });
-    expect(buildCloseWorkspacePanelSearch(pinned)).toMatchObject({
+    expect(buildCloseWorkspacePanelSearch({ ...pinned })).toMatchObject({
       other: "kept",
       workspaceOpen: undefined,
       workspaceTab: undefined,

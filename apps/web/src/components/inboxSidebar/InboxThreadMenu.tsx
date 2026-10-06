@@ -73,6 +73,7 @@ const ACTION_PRESENTATION: Record<
   "workspace:archive": { icon: ArchiveIcon, group: "workspace" },
   "workspace:restore": { icon: ArchiveRestoreIcon, group: "workspace" },
   "workspace:remove-checkout": { icon: FolderMinusIcon, group: "workspace" },
+  "workspace:delete-workspace": { icon: Trash2Icon, group: "workspace" },
   "workspace:remove-stale-record": { icon: FolderMinusIcon, group: "workspace" },
   "workspace:recreate-checkout": { icon: FolderPlusIcon, group: "workspace" },
   "workspace:manage": { icon: Settings2Icon, group: "workspace" },

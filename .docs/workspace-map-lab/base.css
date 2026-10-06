@@ -1,0 +1,313 @@
+/* ============================================================
+   Tokens — mirrored from apps/web/src/index.css (Graphite dark,
+   neutral light). Status colors are the app's semantic tones.
+   ============================================================ */
+:root {
+  color-scheme: light;
+  --font-sans: "DM Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  --font-mono: "SF Mono", "SFMono-Regular", ui-monospace, Menlo, Consolas, monospace;
+  --ease: cubic-bezier(0.16, 1, 0.3, 1);
+  --gentle: cubic-bezier(0.22, 1, 0.36, 1);
+  --snappy: cubic-bezier(0.3, 1.36, 0.44, 1);
+
+  --page: #e9e9ec;
+  --bg: #ffffff;
+  --fg: #262626;
+  --sidebar: #f7f7f7;
+  --sb-border: rgba(0, 0, 0, 0.07);
+  --accent: rgba(0, 0, 0, 0.05);
+  --accent-strong: rgba(0, 0, 0, 0.075);
+  --hover-solid: #efefef;
+  --muted-fg: #66666c;
+  --faint-fg: #9a9aa1;
+  --ghost-fg: #c6c6cb;
+  --border: rgba(0, 0, 0, 0.1);
+  --hair: rgba(0, 0, 0, 0.07);
+  --popover: #ffffff;
+  --code-bg: rgba(0, 0, 0, 0.04);
+  --pop-shadow: 0 18px 50px rgba(15, 23, 42, 0.14), 0 2px 8px rgba(15, 23, 42, 0.06);
+  --tip-bg: #1c1c1f;
+  --tip-fg: #f4f4f5;
+
+  --ok: #047857;
+  --ok-fill: #10b981;
+  --warn: #b45309;
+  --warn-fill: #f59e0b;
+  --err: #dc2626;
+  --err-fill: #ef4444;
+  --info: #1d4ed8;
+  --violet: #6d28d9;
+  --rose: #e11d48;
+  --zinc: #52525b;
+  --add: #15803d;
+  --del: #c2410c;
+  --oc-in: #cfcecd;
+  --oc-out: #211e1e;
+  --check-ink: #ffffff;
+}
+.dark {
+  color-scheme: dark;
+  --page: #050506;
+  --bg: #0b0b0c;
+  --fg: #ececed;
+  --sidebar: #070708;
+  --sb-border: rgba(255, 255, 255, 0.07);
+  --accent: rgba(255, 255, 255, 0.07);
+  --accent-strong: rgba(255, 255, 255, 0.1);
+  --hover-solid: #141416;
+  --muted-fg: #a9a9ae;
+  --faint-fg: #6c6c73;
+  --ghost-fg: #3d3d43;
+  --border: rgba(255, 255, 255, 0.09);
+  --hair: rgba(255, 255, 255, 0.065);
+  --popover: #18181a;
+  --code-bg: rgba(255, 255, 255, 0.05);
+  --pop-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.05), 0 22px 64px rgba(0, 0, 0, 0.62),
+    0 2px 12px rgba(0, 0, 0, 0.35);
+  --tip-bg: #2a2a2e;
+  --tip-fg: #f4f4f5;
+
+  --ok: #34d399;
+  --ok-fill: #10b981;
+  --warn: #fbbf24;
+  --warn-fill: #f59e0b;
+  --err: #f87171;
+  --err-fill: #ef4444;
+  --info: #60a5fa;
+  --violet: #a78bfa;
+  --rose: #fb7185;
+  --zinc: #a1a1aa;
+  --add: #5fd38d;
+  --del: #f0846c;
+  --oc-in: #4b4646;
+  --oc-out: #f1ecec;
+  --check-ink: #04140d;
+}
+[data-motion="off"] *,
+[data-motion="off"] *::before,
+[data-motion="off"] *::after {
+  animation: none !important;
+  transition: none !important;
+}
+
+/* ============================================================
+   Base + lab chrome
+   ============================================================ */
+* {
+  box-sizing: border-box;
+}
+[hidden] {
+  display: none !important;
+}
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+body {
+  font-family: var(--font-sans);
+  background: var(--page);
+  color: var(--fg);
+  -webkit-font-smoothing: antialiased;
+  font-size: 14px;
+  line-height: 1.45;
+  min-height: 100vh;
+}
+button {
+  font: inherit;
+  color: inherit;
+}
+.ic {
+  width: 16px;
+  height: 16px;
+  flex: none;
+}
+.mono {
+  font-family: var(--font-mono);
+}
+.dim {
+  color: var(--faint-fg);
+}
+.strong {
+  color: var(--fg);
+  font-weight: 500;
+}
+.sep {
+  color: var(--ghost-fg);
+}
+.trunc {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 4px;
+  font-family: var(--font-sans);
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--muted-fg);
+  background: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+
+.lab {
+  max-width: 1240px;
+  margin: 0 auto;
+  padding: 28px 28px 64px;
+}
+.lab-bar {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 24px;
+  flex-wrap: wrap;
+}
+.lab-title {
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  margin: 0;
+}
+.lab-sub {
+  margin: 4px 0 0;
+  color: var(--muted-fg);
+  font-size: 13.5px;
+  max-width: 620px;
+}
+.lab-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.lab-btn {
+  height: 30px;
+  padding: 0 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 8px;
+  border: 0;
+  background: transparent;
+  color: var(--muted-fg);
+  box-shadow: inset 0 0 0 1px var(--border);
+  cursor: pointer;
+  font-size: 12.5px;
+  white-space: nowrap;
+  transition:
+    background-color 120ms,
+    color 120ms;
+}
+.lab-btn.icon {
+  width: 30px;
+  padding: 0;
+  justify-content: center;
+}
+.lab-btn:hover {
+  color: var(--fg);
+  background: var(--accent);
+}
+.lab-btn .ic {
+  width: 14px;
+  height: 14px;
+}
+.lab-btn[aria-pressed="true"] .rec {
+  background: var(--ok-fill);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok-fill) 22%, transparent);
+}
+.rec {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--faint-fg);
+}
+.seg {
+  display: inline-flex;
+  padding: 2px;
+  gap: 2px;
+  border-radius: 9px;
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+.seg-opt {
+  height: 26px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted-fg);
+  font-size: 12px;
+  cursor: pointer;
+  transition:
+    background-color 140ms,
+    color 140ms;
+}
+.seg-opt:hover {
+  color: var(--fg);
+}
+.seg-opt[aria-checked="true"],
+.seg-opt[aria-selected="true"] {
+  background: var(--accent-strong);
+  color: var(--fg);
+}
+.lab-tabs {
+  margin: 18px 0 16px;
+}
+.lab-tabs .seg-opt {
+  padding: 0 12px;
+  font-size: 12.5px;
+}
+.lab-tabs .seg-opt b {
+  font-weight: 600;
+  margin-right: 6px;
+  color: var(--faint-fg);
+}
+
+/* Stage ---------------------------------------------------- */
+
+/* Notes (shared with earlier labs) */
+.notes {
+  font-size: 13px;
+  color: var(--muted-fg);
+  line-height: 1.55;
+}
+.notes h2 {
+  margin: 2px 0 4px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--fg);
+  letter-spacing: -0.01em;
+}
+.notes .thesis {
+  margin: 0 0 14px;
+  color: var(--fg);
+  opacity: 0.85;
+}
+.notes h3 {
+  margin: 16px 0 5px;
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--faint-fg);
+}
+.notes ul {
+  margin: 0;
+  padding-left: 16px;
+}
+.notes li {
+  margin: 3px 0;
+}
+.notes li::marker {
+  color: var(--ghost-fg);
+}
+.notes b {
+  color: var(--fg);
+  font-weight: 500;
+}

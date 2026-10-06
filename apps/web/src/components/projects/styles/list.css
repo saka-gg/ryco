@@ -1,0 +1,33 @@
+/* Projects page — list: the selection plate. */
+
+/*
+ * One plate behind the rows glides to the selected row (translateY + height).
+ * It appears in place when it was hidden, and rides along with its row when
+ * the list reorders (the rows' FLIP runs 1.6× the stack duration).
+ */
+.projects-list-plate {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  z-index: 0;
+  height: 0;
+  border-radius: min(var(--radius-lg), 0.625rem);
+  background: var(--accent);
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    transform var(--app-motion-duration-stack, 260ms) var(--app-motion-spring-gentle),
+    height var(--app-motion-duration-stack, 260ms) var(--app-motion-spring-gentle),
+    opacity var(--app-motion-duration-chip, 120ms) var(--app-motion-ease);
+}
+
+.projects-list-plate[data-visible="true"] {
+  opacity: 1;
+}
+
+.projects-list-plate[data-motion="reorder"] {
+  transition-duration:
+    calc(var(--app-motion-duration-stack, 260ms) * 1.6),
+    calc(var(--app-motion-duration-stack, 260ms) * 1.6), var(--app-motion-duration-chip, 120ms);
+}

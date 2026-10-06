@@ -1,10 +1,11 @@
 import { useCallback } from "react";
 import { scopeThreadRef } from "@ryco/client-runtime/scoped";
+import type { WorkspaceActionId } from "@ryco/client-runtime/state/lifecycle";
 import {
   EnvironmentId,
+  ProjectId,
   type ScopedThreadRef,
   type ThreadEnvMode,
-  type WorkspaceLifecycleAction,
   WorktreeId,
 } from "@ryco/contracts";
 import { newCommandId } from "../../../lib/utils";
@@ -12,13 +13,45 @@ import { readEnvironmentApi } from "../../../environmentApi";
 import { readLocalApi } from "../../../localApi";
 import { useStore } from "../../../store";
 import { openInPreferredEditor } from "../../../editorPreferences";
-import { runWorkspaceLifecycleAction } from "../../../workspaceLifecycle";
+import {
+  openWorkspaceReviewDialog,
+  runWorkspaceLifecycleAction,
+  type WorkspaceLifecycleTarget,
+} from "../../../workspaceLifecycle";
 import { stackedThreadToast, toastManager } from "../../ui/toast";
 import type {
   SidebarProjectGroupMember,
   SidebarProjectSnapshot,
 } from "../../../sidebarProjectGrouping";
-import { isSyntheticWorktreeId, type SidebarTreeWorktree } from "./useSidebarTree";
+import {
+  isSyntheticWorktreeId,
+  type SidebarTreeThread,
+  type SidebarTreeWorktree,
+} from "./useSidebarTree";
+
+const newestFirst = (left: SidebarTreeThread, right: SidebarTreeThread) =>
+  Date.parse(right.updatedAt ?? right.createdAt) - Date.parse(left.updatedAt ?? left.createdAt);
+
+/**
+ * Where opening a workspace goes: its latest active thread, else a new thread
+ * there, but only while the workspace is live. An archived workspace or a
+ * removed checkout never gets a new thread: it reopens its latest archived
+ * conversation, or nothing.
+ */
+export function resolveWorktreeOpenTarget(
+  worktreeNode: Pick<SidebarTreeWorktree, "sessions" | "archivedSessions" | "worktree">,
+):
+  | { readonly kind: "thread"; readonly thread: SidebarTreeThread }
+  | { readonly kind: "new-thread" }
+  | { readonly kind: "none" } {
+  const active = worktreeNode.sessions.toSorted(newestFirst)[0];
+  if (active) return { kind: "thread", thread: active };
+  const live =
+    worktreeNode.worktree.archivedAt == null && worktreeNode.worktree.checkoutRemovedAt == null;
+  if (live) return { kind: "new-thread" };
+  const archived = worktreeNode.archivedSessions.toSorted(newestFirst)[0];
+  return archived ? { kind: "thread", thread: archived } : { kind: "none" };
+}
 
 export function useSidebarWorktreeActions(params: {
   project: SidebarProjectSnapshot;
@@ -32,8 +65,19 @@ export function useSidebarWorktreeActions(params: {
     },
   ) => void;
   copyPathToClipboard: (value: string, ctx: { path: string }) => void;
+  /**
+   * Checkout changes are reviewed first; this opens that review. Defaults to
+   * the app-wide review dialog; the project map reviews in its inspector.
+   */
+  openWorkspaceReview?: (target: WorkspaceLifecycleTarget) => void;
 }) {
-  const { project, navigateToThread, createThreadForProjectMember, copyPathToClipboard } = params;
+  const {
+    project,
+    navigateToThread,
+    createThreadForProjectMember,
+    copyPathToClipboard,
+    openWorkspaceReview = openWorkspaceReviewDialog,
+  } = params;
 
   const createThreadInWorktree = useCallback(
     (worktreeNode: SidebarTreeWorktree) => {
@@ -57,17 +101,22 @@ export function useSidebarWorktreeActions(params: {
 
   const openWorktree = useCallback(
     (worktreeNode: SidebarTreeWorktree) => {
-      const activeThreads = worktreeNode.sessions.toSorted(
-        (left, right) =>
-          Date.parse(right.updatedAt ?? right.createdAt) -
-          Date.parse(left.updatedAt ?? left.createdAt),
-      );
-      const targetThread = activeThreads[0];
-      if (targetThread) {
-        navigateToThread(scopeThreadRef(targetThread.environmentId, targetThread.id));
+      const target = resolveWorktreeOpenTarget(worktreeNode);
+      if (target.kind === "thread") {
+        navigateToThread(scopeThreadRef(target.thread.environmentId, target.thread.id));
         return;
       }
-      createThreadInWorktree(worktreeNode);
+      if (target.kind === "new-thread") {
+        createThreadInWorktree(worktreeNode);
+        return;
+      }
+      toastManager.add({
+        type: "info",
+        title:
+          worktreeNode.worktree.checkoutRemovedAt != null
+            ? "Recreate the checkout to start a thread here"
+            : "Restore the workspace to start a thread here",
+      });
     },
     [createThreadInWorktree, navigateToThread],
   );
@@ -137,7 +186,7 @@ export function useSidebarWorktreeActions(params: {
    * review that shows the exact effects.
    */
   const runWorkspaceAction = useCallback(
-    (worktreeNode: SidebarTreeWorktree, action: WorkspaceLifecycleAction) => {
+    (worktreeNode: SidebarTreeWorktree, action: WorkspaceActionId) => {
       if (isSyntheticWorktreeId(worktreeNode.worktree.worktreeId)) {
         toastManager.add(
           stackedThreadToast({
@@ -149,14 +198,20 @@ export function useSidebarWorktreeActions(params: {
         );
         return;
       }
-      void runWorkspaceLifecycleAction({
-        environmentId: resolveWorktreeEnvironmentId(worktreeNode),
-        worktreeId: WorktreeId.make(worktreeNode.worktree.worktreeId),
-        action,
-        title: worktreeNode.worktree.title ?? worktreeNode.worktree.branch,
-      });
+      void runWorkspaceLifecycleAction(
+        {
+          environmentId: resolveWorktreeEnvironmentId(worktreeNode),
+          projectId: ProjectId.make(
+            worktreeNode.worktree.sourceProjectId ?? worktreeNode.worktree.projectId,
+          ),
+          worktreeId: WorktreeId.make(worktreeNode.worktree.worktreeId),
+          action,
+          title: worktreeNode.worktree.title ?? worktreeNode.worktree.branch,
+        },
+        openWorkspaceReview,
+      );
     },
-    [resolveWorktreeEnvironmentId],
+    [openWorkspaceReview, resolveWorktreeEnvironmentId],
   );
 
   const renameWorktree = useCallback(

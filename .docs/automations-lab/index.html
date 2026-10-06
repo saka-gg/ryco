@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Ryco · Automations Lab</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600;9..40,700&display=swap"
+      rel="stylesheet"
+    />
+    <!-- Tabular digits only (DM Sans has no tnum): see --font-tnum in base.css. -->
+    <link
+      href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700&text=0123456789&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="base.css" />
+    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="pickers.css" />
+    <link rel="stylesheet" href="dir-a.css" />
+    <link rel="stylesheet" href="dir-b.css" />
+    <link rel="stylesheet" href="dir-c.css" />
+    <link rel="stylesheet" href="dir-d.css" />
+  </head>
+  <body>
+    <div class="lab">
+      <header class="lab-bar">
+        <div class="lab-id">
+          <h1 class="lab-title">Automations</h1>
+          <p class="lab-sub">
+            Three surfaces for scheduled runs and three date pickers, on one live simulation of
+            approvals, runs and schedule changes.
+          </p>
+        </div>
+        <p class="lab-hint" id="tz-hint"></p>
+      </header>
+      <div class="lab-row">
+        <nav class="seg lab-tabs" id="tabs" role="tablist" aria-label="Direction">
+          <button class="seg-opt" type="button" role="tab" data-tab="A"><b>A</b>Schedules</button>
+          <button class="seg-opt" type="button" role="tab" data-tab="B"><b>B</b>Agenda</button>
+          <button class="seg-opt" type="button" role="tab" data-tab="C"><b>C</b>Dialog</button>
+          <button class="seg-opt" type="button" role="tab" data-tab="D"><b>D</b>Pickers</button>
+        </nav>
+        <div class="lab-controls">
+          <button class="lab-btn" id="live-btn" type="button" aria-pressed="true"></button>
+          <div class="seg lab-speed" id="speed" role="radiogroup" aria-label="Simulation speed">
+            <button class="seg-opt" type="button" role="radio" data-speed="1" data-tip="Real time">
+              ×1
+            </button>
+            <button
+              class="seg-opt"
+              type="button"
+              role="radio"
+              data-speed="60"
+              data-tip="One minute per second"
+            >
+              ×60
+            </button>
+          </div>
+          <button
+            class="lab-btn icon"
+            id="reset-btn"
+            type="button"
+            data-tip="Reset simulation"
+            aria-label="Reset simulation"
+          ></button>
+          <button
+            class="lab-btn icon"
+            id="theme-btn"
+            type="button"
+            data-tip="Toggle theme"
+            aria-label="Toggle theme"
+          ></button>
+          <button class="lab-btn" id="motion-btn" type="button" aria-pressed="true">
+            Motion on
+          </button>
+        </div>
+      </div>
+      <main class="stage">
+        <div id="app-window">
+          <nav class="rail" aria-hidden="true">
+            <span class="logo"></span>
+            <span class="rail-item" data-tip="Threads" data-rail="msg"></span>
+            <span class="rail-item" data-tip="Projects" data-rail="folder"></span>
+            <span class="rail-item" data-tip="Pull requests" data-rail="pr"></span>
+            <span
+              class="rail-item on"
+              data-tip="Automations"
+              data-rail="calendarClock"
+              id="rail-auto"
+              ><span class="rail-dot"></span
+            ></span>
+            <span class="rail-sp"></span>
+            <span class="rail-item" data-tip="Settings" data-rail="gear"></span>
+          </nav>
+          <section class="host" id="host" role="tabpanel" aria-labelledby="tabs"></section>
+        </div>
+        <section class="notes" id="notes" aria-live="polite"></section>
+      </main>
+    </div>
+    <script src="icons.js"></script>
+    <script src="data.js"></script>
+    <script src="core.js"></script>
+    <script src="pickers.js"></script>
+    <script src="dir-a.js"></script>
+    <script src="dir-b.js"></script>
+    <script src="dir-c.js"></script>
+    <script src="dir-d.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>

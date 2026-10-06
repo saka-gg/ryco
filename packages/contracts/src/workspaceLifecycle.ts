@@ -12,7 +12,8 @@ import { WorktreeId, WorktreeOrigin } from "./worktree.ts";
 /**
  * Workspace lifecycle is separate from conversation lifecycle. No action here ever
  * deletes a conversation; checkout removal archives the workspace's conversations
- * by default and always keeps their history and the branch.
+ * by default and keeps their history and the branch. Only an explicit discard
+ * ("Delete workspace") throws work away, and it moves conversations to Trash.
  */
 export const WorkspaceLifecycleAction = Schema.Literals([
   "archive",
@@ -83,6 +84,11 @@ export const WorkspaceLifecycleSummary = Schema.Struct({
   conversations: WorkspaceConversationCounts,
   activeWork: Schema.Array(Schema.String),
   actions: Schema.Array(WorkspaceActionAvailability),
+  /**
+   * Why "Delete workspace" (`remove-checkout` with `discard`) cannot run; empty
+   * when it can. Absent from nodes that predate it.
+   */
+  discardBlockers: Schema.optional(Schema.Array(Schema.String)),
   inspectedAt: IsoDateTime,
 });
 export type WorkspaceLifecycleSummary = typeof WorkspaceLifecycleSummary.Type;
@@ -95,8 +101,19 @@ export const WorkspaceLifecycleRequest = Schema.Struct({
   action: WorkspaceLifecycleAction,
   /** Default true for checkout removal and stale-record cleanup; ignored otherwise. */
   archiveConversations: Schema.optional(Schema.Boolean),
-  /** Off by default. Only a verified merged branch may be deleted, and only on removal. */
+  /**
+   * Off by default. Only on removal; a verified merged branch, or any branch when
+   * discarding.
+   */
   deleteBranch: Schema.optional(Schema.Boolean),
+  /**
+   * Off by default; `remove-checkout` only. "Delete workspace": the checkout is
+   * removed even with uncommitted, untracked or ignored files (they are lost),
+   * an unmerged branch may be deleted, and the workspace's conversations move to
+   * Trash instead of the archive. Also finishes a workspace whose checkout is
+   * already removed. Active work still blocks it.
+   */
+  discard: Schema.optional(Schema.Boolean),
 });
 export type WorkspaceLifecycleRequest = typeof WorkspaceLifecycleRequest.Type;
 
@@ -113,6 +130,12 @@ export const WorkspaceLifecycleEffects = Schema.Struct({
   discardedRegenerableIgnored: NonNegativeInt,
   deleteBranch: Schema.Boolean,
   branch: TrimmedNonEmptyString,
+  /** The request discards ("Delete workspace"). Absent from nodes that predate it. */
+  discard: Schema.optional(Schema.Boolean),
+  /** Conversations moved to Trash, where they stay restorable. */
+  trashConversationIds: Schema.optional(Schema.Array(ThreadId)),
+  /** Work that exists nowhere else is lost: changed or untracked files, unmerged commits. */
+  discardsWork: Schema.optional(Schema.Boolean),
 });
 export type WorkspaceLifecycleEffects = typeof WorkspaceLifecycleEffects.Type;
 

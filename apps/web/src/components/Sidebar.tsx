@@ -1362,7 +1362,6 @@ export default function Sidebar() {
             primaryEnvironmentId={primaryEnvironmentId}
             onOpenThread={navigateToThread}
             projects={projects}
-            projectGroups={sidebarProjects}
             threads={sidebarThreads}
             worktrees={sidebarWorktrees}
           />
