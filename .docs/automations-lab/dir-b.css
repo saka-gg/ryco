@@ -1,0 +1,1720 @@
+/* ============================================================
+   B · Agenda. Everything under [data-dir="B"]; popovers are
+   mounted inside the host so they inherit the scope.
+   Geometry: left = (t - t0) / span, all in hours, from the
+   registered --ag-t0 / --ag-span on .ag.
+   ============================================================ */
+/* On the direction root, so popovers mounted beside .ag inherit them. */
+[data-dir="B"] {
+  /* Future ticks are the only mark of a scheduled run: ≥ 3:1 on the page
+     (WCAG 1.4.11), kept quieter than the next tick by size, not contrast. */
+  --ag-tick: #85858d;
+  /* Waiting is neutral; amber is for the last two minutes and validation. */
+  --ag-wait: var(--fg);
+}
+.dark [data-dir="B"] {
+  --ag-tick: var(--faint-fg);
+}
+[data-dir="B"] .ag {
+  --lw: 300px;
+  --sheet: 468px;
+  position: absolute;
+  inset: 0;
+  display: grid;
+  grid-template-rows: 52px minmax(0, 1fr);
+  background: var(--bg);
+  color: var(--fg);
+  font-size: 13px;
+}
+[data-dir="B"] .ag-sp {
+  flex: 1;
+}
+
+/* ------------------------------------------------------------ bar */
+[data-dir="B"] .ag-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 14px 0 20px;
+  border-bottom: 1px solid var(--hair);
+  min-width: 0;
+}
+[data-dir="B"] .ag-h {
+  margin: 0 8px 0 0;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+[data-dir="B"] .ag-zoom .seg-opt {
+  min-width: 50px;
+}
+[data-dir="B"] .ag-pager {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+}
+[data-dir="B"] .ag-range {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--fg);
+  white-space: nowrap;
+  margin-left: 2px;
+}
+[data-dir="B"] .ag-filter {
+  max-width: 200px;
+}
+[data-dir="B"] .ag-cap {
+  font-size: 12px;
+  color: var(--muted-fg);
+  white-space: nowrap;
+}
+[data-dir="B"] .ag-filter span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+[data-dir="B"] .ag-sel-chev {
+  width: 13px !important;
+  height: 13px !important;
+  color: var(--faint-fg);
+  opacity: 1;
+}
+
+/* ------------------------------------------------------------ body + sheet column
+   The column is committed at once (one layout); the panel slides over it
+   and the timeline's marks FLIP to their new x — transform only. */
+[data-dir="B"] .ag-body {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 0px;
+  min-height: 0;
+}
+[data-dir="B"] .ag[data-sheet="open"] .ag-body {
+  grid-template-columns: minmax(0, 1fr) var(--sheet);
+}
+[data-dir="B"] .ag-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* ------------------------------------------------------------ approvals strip
+   Always mounted, one line: the timeline below never moves on a tick. */
+[data-dir="B"] .ag-due {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 40px;
+  flex: none;
+  padding: 0 14px 0 14px;
+  border-bottom: 1px solid var(--hair);
+  min-width: 0;
+}
+[data-dir="B"] .ag-due-sum {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  flex: 0 1 auto;
+  min-width: 0;
+  height: 30px;
+  padding: 0 10px 0 7px;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  font-size: 12.5px;
+  color: var(--muted-fg);
+  cursor: pointer;
+  white-space: nowrap;
+}
+[data-dir="B"] .ag-due-sum:hover:not([aria-disabled="true"]) {
+  background: var(--accent);
+  color: var(--fg);
+}
+[data-dir="B"] .ag-due-sum[aria-disabled="true"] {
+  cursor: default;
+}
+[data-dir="B"] .ag-due-sum:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 0;
+}
+[data-dir="B"] .ag-due-t {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+[data-dir="B"] .ag-due-t > * {
+  flex: none;
+}
+[data-dir="B"] .ag-due-t > .trunc {
+  flex: 0 1 auto;
+  min-width: 2em;
+  color: var(--fg);
+}
+[data-dir="B"] .ag-due-t b {
+  font-weight: 500;
+  color: var(--fg);
+}
+[data-dir="B"] .ag-due-t .sep {
+  color: var(--ghost-fg);
+}
+/* Countdown digits change width ("13m" → "9m" → "1:00"): a fixed box. */
+[data-dir="B"] .ag-due-left {
+  display: inline-block;
+  min-width: 4ch;
+  color: var(--fg);
+}
+[data-dir="B"] .ag-due[data-state="idle"] .ag-ring {
+  opacity: 0.6;
+}
+[data-dir="B"] .ag-due-sum[data-urgent] .ag-due-left {
+  color: var(--warn);
+}
+[data-dir="B"] .ag-due-chg {
+  flex: none;
+  height: 28px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 7px;
+  background: none;
+  font-size: 12px;
+  color: var(--muted-fg);
+  cursor: pointer;
+  white-space: nowrap;
+}
+[data-dir="B"] .ag-due-chg:hover {
+  background: var(--accent);
+  color: var(--fg);
+}
+[data-dir="B"] .ag-due-chg:focus-visible {
+  outline: 2px solid var(--ring);
+}
+
+/* ------------------------------------------------------------ expiry ring */
+[data-dir="B"] .ag-ring {
+  width: 18px;
+  height: 18px;
+  flex: none;
+  rotate: -90deg;
+  overflow: visible;
+}
+[data-dir="B"] .ag-ring.sm {
+  width: 14px;
+  height: 14px;
+}
+[data-dir="B"] .ag-ring circle {
+  fill: none;
+  stroke-width: 2.4;
+}
+[data-dir="B"] .ag-ring-track {
+  stroke: color-mix(in srgb, var(--fg) 14%, transparent);
+}
+[data-dir="B"] .ag-ring-arc {
+  stroke: var(--ag-wait);
+  stroke-linecap: round;
+  stroke-dasharray: 100px 100px;
+  stroke-dashoffset: calc((1 - var(--f, 1)) * 100px);
+}
+[data-dir="B"] [data-urgent] > .ag-ring .ag-ring-arc,
+[data-dir="B"] [data-urgent] .ag-ring-arc {
+  stroke: var(--warn-fill);
+}
+[data-dir="B"] [data-urgent] > .ag-ring .ag-ring-track {
+  stroke: color-mix(in srgb, var(--warn-fill) 24%, transparent);
+}
+
+/* ------------------------------------------------------------ scroll + axis */
+[data-dir="B"] .ag-scroll {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  display: flex;
+  flex-direction: column;
+}
+[data-dir="B"] .ag-axis {
+  position: sticky;
+  top: 0;
+  z-index: 6;
+  flex: none;
+  display: grid;
+  grid-template-columns: var(--lw) minmax(0, 1fr);
+  height: 46px;
+  background: var(--bg);
+  box-shadow: inset 0 -1px 0 var(--hair);
+}
+[data-dir="B"] .ag-corner {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 10px 5px 20px;
+  min-width: 0;
+}
+[data-dir="B"] .ag-tz {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding-bottom: 3px;
+  font-size: 11px;
+  color: var(--muted-fg);
+  white-space: nowrap;
+}
+[data-dir="B"] .ag-key {
+  --h: 22px;
+  padding: 0 6px;
+  font-size: 11px;
+  color: var(--muted-fg);
+}
+[data-dir="B"] .ag-tz .ic {
+  width: 12px;
+  height: 12px;
+}
+[data-dir="B"] .ag-axplot {
+  position: relative;
+  overflow: hidden;
+  min-width: 0;
+}
+[data-dir="B"] .ag-day {
+  position: absolute;
+  top: 7px;
+  height: 18px;
+  left: calc((var(--a) - var(--ag-t0)) / var(--ag-span) * 100%);
+  width: calc((var(--b) - var(--a)) / var(--ag-span) * 100%);
+}
+[data-dir="B"] .ag-day-w {
+  position: absolute;
+  top: 0;
+  white-space: nowrap;
+  transition: opacity 140ms;
+}
+[data-dir="B"] .ag-day-w {
+  left: 0;
+  right: 0;
+  text-align: center;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--muted-fg);
+}
+[data-dir="B"] .ag-day[data-today="true"] .ag-day-w {
+  color: var(--fg);
+  font-weight: 600;
+}
+/* Day zoom: the bar already names the day; the axis is hours only. */
+[data-dir="B"] .ag[data-zoom="day"] .ag-day-w {
+  opacity: 0;
+}
+[data-dir="B"] .ag-hr {
+  position: absolute;
+  bottom: 7px;
+  left: calc((var(--t) - var(--ag-t0)) / var(--ag-span) * 100%);
+  translate: 4px 0;
+  font-size: 10.5px;
+  line-height: 1;
+  color: var(--faint-fg);
+  font-variant-numeric: tabular-nums;
+  opacity: 0;
+  transition: opacity 140ms;
+}
+[data-dir="B"] .ag[data-hstep="1"] .ag-hr,
+[data-dir="B"] .ag[data-hstep="2"] .ag-hr.d2,
+[data-dir="B"] .ag[data-hstep="3"] .ag-hr.d3,
+[data-dir="B"] .ag[data-hstep="6"] .ag-hr.d6,
+[data-dir="B"] .ag[data-hstep="12"] .ag-hr.d12 {
+  opacity: 1;
+}
+[data-dir="B"] .ag[data-zoom="week"] .ag-hr.is-day,
+[data-dir="B"] .ag .ag-hr.is-near {
+  opacity: 0;
+}
+[data-dir="B"] .ag[data-zoom="week"] .ag-hr {
+  color: var(--ghost-fg);
+}
+/* Day zoom is one row: hours and the now flag sit on the axis's centre
+   line (the bar names the day), so no empty day row floats above them. */
+[data-dir="B"] .ag-hr,
+[data-dir="B"] .ag-nowflag {
+  transition:
+    opacity 140ms,
+    translate 220ms var(--ease);
+}
+[data-dir="B"] .ag[data-zoom="day"] .ag-hr {
+  translate: 4px -10px;
+  font-size: 11px;
+  color: var(--muted-fg);
+}
+[data-dir="B"] .ag[data-zoom="day"] .ag-nowflag {
+  translate: -50% -10px;
+}
+[data-dir="B"] .ag-dstm {
+  position: absolute;
+  bottom: 21px;
+  left: calc((var(--t) - var(--ag-t0)) / var(--ag-span) * 100%);
+  padding-left: 5px;
+  font-size: 10px;
+  line-height: 1;
+  color: var(--muted-fg);
+  white-space: nowrap;
+  border-left: 1px dashed var(--border);
+  height: 10px;
+}
+[data-dir="B"] .ag-nowflag {
+  position: absolute;
+  bottom: 4px;
+  left: calc((var(--t) - var(--ag-t0)) / var(--ag-span) * 100%);
+  --t: var(--ag-now);
+  translate: -50% 0;
+  z-index: 2;
+  height: 17px;
+  padding: 0 5px;
+  border-radius: 5px;
+  background: var(--fg);
+  color: var(--bg);
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 17px;
+  white-space: nowrap;
+}
+
+/* ------------------------------------------------------------ canvas */
+[data-dir="B"] .ag-canvas {
+  position: relative;
+  flex: 1 0 auto;
+  display: flex;
+  flex-direction: column;
+}
+[data-dir="B"] .ag-under {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: var(--lw);
+  right: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+[data-dir="B"] .ag-grid {
+  position: absolute;
+  inset: 0;
+}
+[data-dir="B"] .ag-gl {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: calc((var(--t) - var(--ag-t0)) / var(--ag-span) * 100%);
+  width: 1px;
+  background: var(--hair);
+  transition: opacity 160ms;
+}
+[data-dir="B"] .ag-gl.is-day {
+  background: var(--border);
+}
+[data-dir="B"] .ag-gl.is-h {
+  opacity: 0.55;
+}
+[data-dir="B"] .ag[data-zoom="week"] .ag-gl.is-h {
+  opacity: 0;
+}
+[data-dir="B"] .ag[data-zoom="week"] .ag-gl.is-6 {
+  opacity: 0.6;
+}
+[data-dir="B"] .ag-past {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: calc((var(--ag-now) - var(--ag-t0)) / var(--ag-span) * 100%);
+  background: color-mix(in srgb, var(--fg) 2.4%, transparent);
+}
+[data-dir="B"] .ag-nowline {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  --t: var(--ag-now);
+  left: calc((var(--t) - var(--ag-t0)) / var(--ag-span) * 100%);
+  width: 1px;
+  background: color-mix(in srgb, var(--fg) 68%, transparent);
+}
+[data-dir="B"] .ag-rows {
+  position: relative;
+  z-index: 1;
+}
+
+/* ------------------------------------------------------------ groups + lanes */
+[data-dir="B"] .ag-group {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  height: 34px;
+  padding: 6px 20px 0;
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--muted-fg);
+}
+[data-dir="B"] .ag-group:not(:first-child) {
+  margin-top: 6px;
+}
+[data-dir="B"] .ag-group .ic {
+  width: 13px;
+  height: 13px;
+  color: var(--muted-fg);
+}
+[data-dir="B"] .ag-g-ic {
+  display: inline-grid;
+}
+[data-dir="B"] .ag-g-n {
+  color: var(--muted-fg);
+  font-weight: 400;
+}
+[data-dir="B"] .ag-lane {
+  position: relative;
+  display: grid;
+  grid-template-columns: var(--lw) minmax(0, 1fr);
+  height: 44px;
+}
+[data-dir="B"] .ag-lane[data-kind="lane"],
+[data-dir="B"] .ag-lane[data-kind="draft"] {
+  box-shadow: inset 0 1px 0 var(--hair);
+}
+[data-dir="B"] .ag-group + .ag-lane {
+  box-shadow: none;
+}
+[data-dir="B"] .ag-lane:hover:not([data-kind="draft"]):not([data-kind="draftsub"]) {
+  background: var(--hl-row);
+}
+/* Line 1: title + (Paused / project); line 2: rule · until. */
+[data-dir="B"] .ag-lab {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-content: center;
+  align-items: baseline;
+  column-gap: 8px;
+  row-gap: 2px;
+  min-width: 0;
+  padding: 0 14px 0 20px;
+}
+[data-dir="B"] .ag-title {
+  display: flex;
+  min-width: 0;
+  margin: 0 -3px;
+  padding: 0 3px;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: var(--fg);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.35;
+  text-align: left;
+  cursor: pointer;
+}
+[data-dir="B"] .ag-title:hover .trunc {
+  text-decoration: underline;
+  text-decoration-color: var(--ghost-fg);
+  text-underline-offset: 3px;
+}
+[data-dir="B"] .ag-title:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 0;
+}
+[data-dir="B"] .ag-title[data-empty] {
+  color: var(--muted-fg);
+}
+[data-dir="B"] .ag-side {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  max-width: 120px;
+}
+[data-dir="B"] .ag-side:empty {
+  display: none;
+}
+[data-dir="B"] .ag-proj {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11.5px;
+  color: var(--muted-fg);
+}
+[data-dir="B"] .ag-meta {
+  grid-column: 1 / -1;
+  display: flex;
+  min-width: 0;
+  font-size: 11.5px;
+  line-height: 1.35;
+  color: var(--muted-fg);
+  white-space: nowrap;
+}
+[data-dir="B"] .ag-meta .sep {
+  flex: none;
+  white-space: pre;
+  color: var(--ghost-fg);
+}
+/* The rule gives way before its end: "until Dec 28" is the fact to keep. */
+[data-dir="B"] .ag-mr {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+[data-dir="B"] .ag-mu {
+  flex: none;
+}
+[data-dir="B"] .ag-chip {
+  flex: none;
+  display: inline-block;
+  height: 16px;
+  padding: 0 5px;
+  border-radius: 4px;
+  font-size: 10.5px;
+  font-weight: 500;
+  line-height: 16px;
+  color: var(--muted-fg);
+  background: var(--accent-strong);
+}
+[data-dir="B"] .ag-lane[data-state="paused"] .ag-title,
+[data-dir="B"] .ag-lane[data-pending] .ag-title {
+  color: var(--muted-fg);
+}
+[data-dir="B"] .ag-lane[data-state="paused"] .ag-plot > :not(.ag-hatch) {
+  opacity: 0.5;
+}
+
+/* Sub-lanes: a proposal (or the draft of an edit) tucked under its lane.
+   One 28px row; the change and its action sit together in the label
+   column; the plot only draws the proposed ticks at their real times. */
+[data-dir="B"] .ag-lane[data-kind="sub"],
+[data-dir="B"] .ag-lane[data-kind="draftsub"] {
+  height: 28px;
+}
+[data-dir="B"] .ag-lane[data-kind="sub"] .ag-lab,
+[data-dir="B"] .ag-lane[data-kind="draftsub"] .ag-lab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px 0 33px;
+}
+[data-dir="B"] .ag-lane[data-kind="sub"] .ag-lab::before,
+[data-dir="B"] .ag-lane[data-kind="draftsub"] .ag-lab::before {
+  content: "";
+  position: absolute;
+  left: 22px;
+  top: -8px;
+  width: 7px;
+  height: 22px;
+  border-left: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  border-bottom-left-radius: 5px;
+}
+[data-dir="B"] .ag-sub-k {
+  flex: none;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--fg);
+  white-space: nowrap;
+}
+[data-dir="B"] .ag-sub-d {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11.5px;
+  color: var(--muted-fg);
+}
+[data-dir="B"] .ag-sub-left {
+  flex: none;
+  min-width: 3.5ch;
+  margin-left: auto;
+  font-size: 11.5px;
+  text-align: right;
+  color: var(--muted-fg);
+}
+[data-dir="B"] .ag-sub-left:empty {
+  display: none;
+}
+[data-dir="B"] .ag-sub-left[data-urgent] {
+  color: var(--warn);
+}
+[data-dir="B"] .ag-sub-act {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+[data-dir="B"] .ag-sub-act:empty {
+  display: none;
+}
+[data-dir="B"] .ag-sub-act .btn.icon {
+  width: 22px;
+}
+[data-dir="B"] .ag-lane[data-kind="draftsub"] .ag-sub-d {
+  margin-right: auto;
+}
+[data-dir="B"] .ag-plot {
+  position: relative;
+  overflow: hidden;
+  min-width: 0;
+}
+
+/* Draft lanes: a faint wash and solid ghost ticks; no box, no loud chip. */
+[data-dir="B"] .ag-lane[data-kind="draft"],
+[data-dir="B"] .ag-lane[data-kind="draftsub"] {
+  background: color-mix(in srgb, var(--fg) 2.6%, transparent);
+}
+
+/* The draft's first run is beyond the window: say where it went. */
+[data-dir="B"] .ag-edge {
+  position: absolute;
+  top: 50%;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 22px;
+  margin-top: -11px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  font-size: 11.5px;
+  color: var(--muted-fg);
+  white-space: nowrap;
+  cursor: pointer;
+}
+[data-dir="B"] .ag-edge[data-side="r"] {
+  right: 6px;
+}
+[data-dir="B"] .ag-edge[data-side="l"] {
+  left: 6px;
+}
+[data-dir="B"] .ag-edge .ic {
+  width: 13px;
+  height: 13px;
+}
+[data-dir="B"] .ag-edge:hover {
+  background: var(--accent);
+  color: var(--fg);
+}
+[data-dir="B"] .ag-edge:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 0;
+}
+
+/* ------------------------------------------------------------ marks
+   Shape carries the meaning (never colour alone); colour only for what
+   actually happened badly. Filled = happened (Dispatched), × = couldn't
+   start, hollow ring = expired / rejected, dash = cancelled, outline =
+   proposed, faint thin = scheduled, ring on the now-line = waiting. */
+[data-dir="B"] .ag-m {
+  position: absolute;
+  top: 50%;
+  left: calc((var(--t) - var(--ag-t0)) / var(--ag-span) * 100%);
+  z-index: 1;
+  width: 12px;
+  height: 24px;
+  margin: -12px 0 0 -6px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: none;
+  color: var(--ag-tick);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
+[data-dir="B"] .ag-m::before {
+  content: "";
+  display: block;
+  width: 1.5px;
+  height: 10px;
+  border-radius: 1px;
+  background: currentColor;
+}
+/* Real runs sit above future ticks, so the one you see is the one you hit. */
+[data-dir="B"] .ag-m[data-type="run"] {
+  z-index: 2;
+}
+[data-dir="B"] .ag-m:hover,
+[data-dir="B"] .ag-m[aria-expanded="true"] {
+  background: var(--accent-strong);
+}
+[data-dir="B"] .ag-m[data-type="f"]:hover {
+  color: var(--fg);
+}
+[data-dir="B"] .ag-m:focus-visible,
+[data-dir="B"] .ag-band:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 0;
+}
+[data-dir="B"] .ag-m[data-s="next"] {
+  color: var(--fg);
+}
+[data-dir="B"] .ag-m[data-s="next"]::before {
+  width: 2px;
+  height: 14px;
+}
+/* Proposed: an outlined tick — the shape exists, it hasn't happened. */
+[data-dir="B"] .ag-m[data-type="p"] {
+  color: var(--muted-fg);
+}
+[data-dir="B"] .ag-m[data-type="p"]::before {
+  width: 4px;
+  height: 14px;
+  border-radius: 1.5px;
+  background: transparent;
+  box-shadow: inset 0 0 0 1px currentColor;
+}
+[data-dir="B"] .ag-m[data-type="d"] {
+  color: var(--fg);
+  pointer-events: none;
+}
+[data-dir="B"] .ag-m[data-type="d"]::before {
+  width: 2px;
+  height: 14px;
+}
+/* Dispatched: filled and quiet — the thread started; the outcome lives there. */
+[data-dir="B"] .ag-m[data-s="completed"] {
+  color: var(--muted-fg);
+}
+[data-dir="B"] .ag-m[data-s="completed"]::before {
+  width: 2px;
+  height: 12px;
+}
+[data-dir="B"] .ag-m[data-s="failed"] {
+  color: var(--err);
+}
+[data-dir="B"] .ag-m[data-s="failed"]::before,
+[data-dir="B"] .ag-m[data-s="failed"]::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 1.75px;
+  height: 10px;
+  margin: -5px 0 0 -0.875px;
+  border-radius: 1px;
+  background: currentColor;
+  rotate: 45deg;
+}
+[data-dir="B"] .ag-m[data-s="failed"]::after {
+  rotate: -45deg;
+}
+[data-dir="B"] .ag-m[data-s="expired"],
+[data-dir="B"] .ag-m[data-s="rejected"],
+[data-dir="B"] .ag-m[data-s="cancelled"] {
+  color: var(--muted-fg);
+}
+[data-dir="B"] .ag-m[data-s="expired"]::before,
+[data-dir="B"] .ag-m[data-s="rejected"]::before {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--bg);
+  box-shadow: inset 0 0 0 1.5px currentColor;
+}
+[data-dir="B"] .ag-m[data-s="cancelled"]::before {
+  width: 8px;
+  height: 1.5px;
+}
+/* Starting: a full-strength tick and a word — a text change, no spinner. */
+[data-dir="B"] .ag-m[data-s="approved"],
+[data-dir="B"] .ag-m[data-s="executing"],
+[data-dir="B"] .ag-m[data-s="materializing"] {
+  z-index: 3;
+  color: var(--fg);
+}
+[data-dir="B"] .ag-m[data-s="approved"]::before,
+[data-dir="B"] .ag-m[data-s="executing"]::before,
+[data-dir="B"] .ag-m[data-s="materializing"]::before {
+  width: 2px;
+  height: 14px;
+}
+[data-dir="B"] .ag-m-lab {
+  position: absolute;
+  left: 9px;
+  top: -9px;
+  padding: 0 3px;
+  border-radius: 3px;
+  background: var(--bg);
+  font-size: 10.5px;
+  font-weight: 500;
+  line-height: 12px;
+  color: var(--fg);
+  white-space: nowrap;
+  pointer-events: none;
+}
+[data-dir="B"] .ag-m[data-unread]:not([data-s="failed"])::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 1px;
+  width: 4px;
+  height: 4px;
+  margin-left: -2px;
+  border-radius: 50%;
+  background: var(--fg);
+}
+[data-dir="B"] .ag-plot.is-sliding > .ag-m {
+  transition: left 220ms var(--ease);
+}
+
+/* The due approval: a neutral ring on the now-line that drains with the
+   15 minutes; it turns amber only in the last two (the m:ss phase). */
+[data-dir="B"] .ag-m.ag-dm {
+  z-index: 4;
+  width: 22px;
+  height: 22px;
+  margin: -11px 0 0 -11px;
+  border-radius: 50%;
+  background: var(--bg);
+  animation: ag-halo 2s var(--ease) infinite;
+}
+[data-dir="B"] .ag-m.ag-dm::before {
+  content: none;
+}
+[data-dir="B"] .ag-m.ag-dm::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 6px;
+  height: 6px;
+  margin: -3px 0 0 -3px;
+  border-radius: 50%;
+  background: var(--ag-wait);
+}
+[data-dir="B"] .ag-m.ag-dm[data-urgent]::after {
+  background: var(--warn-fill);
+}
+[data-dir="B"] .ag-m.ag-dm .ag-ring {
+  position: absolute;
+  inset: 2px;
+}
+[data-dir="B"] .ag-m.ag-dm:hover,
+[data-dir="B"] .ag-m.ag-dm[aria-expanded="true"] {
+  background: var(--bg);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--fg) 12%, transparent);
+}
+@keyframes ag-halo {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--fg) 22%, transparent);
+  }
+  70%,
+  100% {
+    box-shadow: 0 0 0 8px transparent;
+  }
+}
+/* The countdown rides above the tick row so the next tick stays visible. */
+[data-dir="B"] .ag-dm-t {
+  position: absolute;
+  left: 19px;
+  top: -9px;
+  min-width: 3.5ch;
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 12px;
+  color: var(--fg);
+  white-space: nowrap;
+  pointer-events: none;
+}
+[data-dir="B"] .ag-dm[data-urgent] .ag-dm-t {
+  color: var(--warn);
+}
+[data-dir="B"] .ag-win {
+  position: absolute;
+  top: 50%;
+  left: calc((var(--a) - var(--ag-t0)) / var(--ag-span) * 100%);
+  width: calc((var(--b) - var(--a)) / var(--ag-span) * 100%);
+  height: 14px;
+  margin-top: -7px;
+  border-radius: 4px;
+  background: linear-gradient(
+    90deg,
+    transparent calc(var(--p, 0) * 100%),
+    color-mix(in srgb, var(--fg) 8%, transparent) calc(var(--p, 0) * 100%)
+  );
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--fg) 18%, transparent);
+  pointer-events: none;
+}
+
+/* Coalesced: a dashed thread from the first missed occurrence to the
+   one approval it folded into, labelled at the approval's end. */
+[data-dir="B"] .ag-br {
+  position: absolute;
+  top: 50%;
+  left: calc((var(--a) - var(--ag-t0)) / var(--ag-span) * 100%);
+  width: calc((var(--b) - var(--a)) / var(--ag-span) * 100%);
+  height: 1px;
+  background: repeating-linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--fg) 30%, transparent) 0 3px,
+    transparent 3px 6px
+  );
+  container-type: inline-size;
+  pointer-events: none;
+}
+[data-dir="B"] .ag-br::before {
+  content: "";
+  position: absolute;
+  left: -3px;
+  top: -3px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 1.25px color-mix(in srgb, var(--fg) 40%, transparent);
+  background: var(--bg);
+}
+[data-dir="B"] .ag-br[data-live] {
+  background: repeating-linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--fg) 45%, transparent) 0 3px,
+    transparent 3px 6px
+  );
+}
+[data-dir="B"] .ag-br-l {
+  position: absolute;
+  right: 14px;
+  bottom: 6px;
+  font-size: 10.5px;
+  line-height: 1;
+  color: var(--muted-fg);
+  white-space: nowrap;
+}
+[data-dir="B"] .ag-br[data-live] .ag-br-l {
+  color: var(--fg);
+}
+@container (max-width: 70px) {
+  [data-dir="B"] .ag-br-l {
+    display: none;
+  }
+}
+
+[data-dir="B"] .ag-end {
+  position: absolute;
+  top: 50%;
+  left: calc((var(--t) - var(--ag-t0)) / var(--ag-span) * 100%);
+  width: 1px;
+  height: 18px;
+  margin-top: -9px;
+  background: color-mix(in srgb, var(--fg) 40%, transparent);
+  pointer-events: none;
+}
+[data-dir="B"] .ag-end span {
+  position: absolute;
+  left: 5px;
+  top: 50%;
+  translate: 0 -50%;
+  font-size: 10.5px;
+  color: var(--muted-fg);
+  white-space: nowrap;
+}
+[data-dir="B"] .ag-hatch {
+  position: absolute;
+  top: 50%;
+  left: calc((var(--a) - var(--ag-t0)) / var(--ag-span) * 100%);
+  width: calc((var(--b) - var(--a)) / var(--ag-span) * 100%);
+  height: 12px;
+  margin-top: -6px;
+  border-radius: 3px;
+  background: repeating-linear-gradient(-45deg, var(--border) 0 1px, transparent 1px 5px);
+  pointer-events: none;
+}
+
+/* Dense intervals: one dotted band with a count */
+[data-dir="B"] .ag-band {
+  position: absolute;
+  top: 50%;
+  left: calc((var(--a) - var(--ag-t0)) / var(--ag-span) * 100%);
+  width: calc((var(--b) - var(--a)) / var(--ag-span) * 100%);
+  min-width: 4px;
+  height: 10px;
+  margin-top: -5px;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  color: var(--ag-tick);
+  background: repeating-linear-gradient(90deg, currentColor 0 1px, transparent 1px 3px);
+  cursor: pointer;
+  container-type: inline-size;
+}
+[data-dir="B"] .ag-band:hover,
+[data-dir="B"] .ag-band[aria-expanded="true"] {
+  color: var(--muted-fg);
+}
+[data-dir="B"] .ag-band[data-sub="p"] {
+  color: var(--muted-fg);
+  opacity: 0.7;
+}
+[data-dir="B"] .ag-band[data-sub="d"] {
+  color: var(--fg);
+  opacity: 0.6;
+  pointer-events: none;
+}
+[data-dir="B"] .ag-band-n {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  translate: -50% -50%;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: var(--bg);
+  box-shadow: 0 0 0 1px var(--hair);
+  font-size: 10.5px;
+  font-weight: 500;
+  line-height: 15px;
+  color: var(--muted-fg);
+  white-space: nowrap;
+}
+@container (max-width: 64px) {
+  [data-dir="B"] .ag-band-n {
+    display: none;
+  }
+}
+
+/* ------------------------------------------------------------ empty + glyphs */
+[data-dir="B"] .ag-empty {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  padding: 96px 24px 40px var(--lw);
+  place-items: start center;
+}
+[data-dir="B"] .ag-empty-in {
+  max-width: 420px;
+  padding: 44px 60px 48px;
+  background: radial-gradient(closest-side, var(--bg) 72%, transparent);
+  text-align: center;
+}
+[data-dir="B"] .ag-empty-t {
+  margin: 0 0 6px;
+  font-size: 14px;
+  font-weight: 600;
+}
+[data-dir="B"] .ag-empty-s {
+  margin: 0 0 14px;
+  font-size: 12.5px;
+  color: var(--muted-fg);
+  line-height: 1.5;
+}
+
+/* Mark glyphs: the timeline's shapes at swatch size (Key + popover heads). */
+[data-dir="B"] .lg {
+  position: relative;
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 12px;
+  height: 14px;
+  color: var(--ag-tick);
+}
+[data-dir="B"] .lg::before {
+  content: "";
+  width: 1.5px;
+  height: 10px;
+  border-radius: 1px;
+  background: currentColor;
+}
+[data-dir="B"] .lg[data-s="completed"] {
+  color: var(--muted-fg);
+}
+[data-dir="B"] .lg[data-s="completed"]::before {
+  width: 2px;
+  height: 11px;
+}
+[data-dir="B"] .lg[data-s="next"],
+[data-dir="B"] .lg[data-s="approved"],
+[data-dir="B"] .lg[data-s="executing"],
+[data-dir="B"] .lg[data-s="materializing"] {
+  color: var(--fg);
+}
+[data-dir="B"] .lg[data-s="next"]::before,
+[data-dir="B"] .lg[data-s="approved"]::before,
+[data-dir="B"] .lg[data-s="executing"]::before,
+[data-dir="B"] .lg[data-s="materializing"]::before {
+  width: 2px;
+  height: 13px;
+}
+[data-dir="B"] .lg[data-s="failed"] {
+  color: var(--err);
+}
+[data-dir="B"] .lg[data-s="failed"]::before,
+[data-dir="B"] .lg[data-s="failed"]::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 1.5px;
+  height: 9px;
+  margin: -4.5px 0 0 -0.75px;
+  border-radius: 1px;
+  background: currentColor;
+  rotate: 45deg;
+}
+[data-dir="B"] .lg[data-s="failed"]::after {
+  rotate: -45deg;
+}
+[data-dir="B"] .lg[data-s="expired"],
+[data-dir="B"] .lg[data-s="rejected"],
+[data-dir="B"] .lg[data-s="cancelled"] {
+  color: var(--muted-fg);
+}
+[data-dir="B"] .lg[data-s="expired"]::before,
+[data-dir="B"] .lg[data-s="rejected"]::before {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: none;
+  box-shadow: inset 0 0 0 1.5px currentColor;
+}
+[data-dir="B"] .lg[data-s="cancelled"]::before {
+  width: 8px;
+  height: 1.5px;
+}
+[data-dir="B"] .lg[data-s="prop"] {
+  color: var(--muted-fg);
+}
+[data-dir="B"] .lg[data-s="prop"]::before {
+  width: 4px;
+  height: 12px;
+  border-radius: 1.5px;
+  background: transparent;
+  box-shadow: inset 0 0 0 1px currentColor;
+}
+[data-dir="B"] .lg[data-s="band"]::before {
+  width: 12px;
+  height: 8px;
+  border-radius: 2px;
+  background: repeating-linear-gradient(90deg, currentColor 0 1px, transparent 1px 3px);
+}
+[data-dir="B"] .lg.lg-due::before {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: radial-gradient(circle, var(--ag-wait) 0 2px, transparent 2.5px);
+  box-shadow: inset 0 0 0 1.75px var(--ag-wait);
+}
+
+/* The Key: what the marks mean, one popover instead of a footer band. */
+[data-dir="B"] .ag-keypop {
+  padding: 12px 14px 12px;
+}
+[data-dir="B"] .ag-key-h {
+  margin: 0 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg);
+}
+[data-dir="B"] .ag-keypop ul {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+[data-dir="B"] .ag-keypop li {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--muted-fg);
+}
+[data-dir="B"] .ag-keypop li .lg {
+  margin-top: 1px;
+  width: 14px;
+}
+[data-dir="B"] .ag-keypop b {
+  font-weight: 500;
+  color: var(--fg);
+}
+[data-dir="B"] .ag-keypop .faint {
+  color: var(--muted-fg);
+}
+
+/* ------------------------------------------------------------ popover */
+[data-dir="B"] .ag-popwrap {
+  border-radius: 12px;
+}
+[data-dir="B"] .ag-pop {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 14px 12px;
+}
+[data-dir="B"] .ag-pop p {
+  margin: 0;
+}
+[data-dir="B"] .ag-pop-h {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+}
+[data-dir="B"] .ag-pop-h b {
+  font-weight: 600;
+  color: var(--fg);
+}
+[data-dir="B"] .ag-pop-h .faint {
+  margin-left: auto;
+  white-space: nowrap;
+  color: var(--muted-fg);
+}
+[data-dir="B"] .ag-pop-n {
+  margin-left: 4px;
+  padding-left: 8px;
+  border-left: 1px solid var(--hair);
+  font-size: 11.5px;
+  color: var(--muted-fg);
+  white-space: nowrap;
+}
+[data-dir="B"] .ag-pop-next {
+  margin: -4px -6px -4px -2px;
+}
+[data-dir="B"] .ag-pop-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--fg);
+  line-height: 1.35;
+}
+[data-dir="B"] .ag-pop-p {
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--muted-fg);
+}
+[data-dir="B"] .ag-pop-p b {
+  color: var(--fg);
+  font-weight: 500;
+}
+[data-dir="B"] .ag-pop-c,
+[data-dir="B"] .ag-pop-s {
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--muted-fg);
+}
+[data-dir="B"] .ag-pop-exp {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12.5px;
+  color: var(--fg);
+}
+[data-dir="B"] .ag-pop-left {
+  margin-left: -4px;
+  color: var(--muted-fg);
+}
+[data-dir="B"] .ag-pop-exp[data-urgent] .ag-pop-left {
+  color: var(--warn);
+}
+[data-dir="B"] .ag-pop-fail {
+  display: flex;
+  gap: 7px;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--err);
+}
+[data-dir="B"] .ag-pop-fail .ic {
+  width: 14px;
+  height: 14px;
+  margin-top: 2px;
+}
+[data-dir="B"] .ag-pop-thread {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  font-size: 12.5px;
+  color: var(--fg);
+}
+[data-dir="B"] .ag-pop-thread .ic {
+  width: 14px;
+  height: 14px;
+  color: var(--faint-fg);
+}
+[data-dir="B"] .ag-pop-a {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+}
+[data-dir="B"] .ag-pop-a .btn.ghost {
+  margin-right: -6px;
+}
+
+/* ------------------------------------------------------------ menus + select buttons */
+[data-dir="B"] .ag-menu {
+  min-width: 0;
+  max-height: 340px;
+  overflow: auto;
+}
+[data-dir="B"] .ag-mi {
+  height: auto;
+  min-height: 30px;
+  padding: 5px 9px;
+  white-space: normal;
+}
+[data-dir="B"] .ag-mi-t {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  flex: 1;
+  min-width: 0;
+}
+[data-dir="B"] .ag-mi-l {
+  font-size: 13px;
+  line-height: 1.3;
+}
+[data-dir="B"] .ag-mi-h {
+  font-size: 11.5px;
+  line-height: 1.35;
+  color: var(--muted-fg);
+}
+[data-dir="B"] .ag-mi-m {
+  font-size: 11.5px;
+  color: var(--muted-fg);
+  white-space: nowrap;
+}
+[data-dir="B"] .ag-mi-c {
+  display: inline-grid;
+  width: 14px;
+  flex: none;
+}
+[data-dir="B"] .ag-mi-c .ic {
+  width: 14px;
+  height: 14px;
+  color: var(--fg);
+}
+[data-dir="B"] .ag-mi .prov,
+[data-dir="B"] .ag-sel .prov {
+  width: 14px;
+  height: 14px;
+}
+[data-dir="B"] .ag-sel {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  text-align: left;
+  cursor: pointer;
+  min-width: 0;
+}
+[data-dir="B"] .ag-sel .trunc {
+  flex: 1;
+}
+[data-dir="B"] .ag-sel > .ic:not(.ag-sel-chev) {
+  width: 14px;
+  height: 14px;
+  color: var(--muted-fg);
+}
+[data-dir="B"] .ag-sel.is-ref {
+  width: auto;
+  max-width: 210px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+/* ------------------------------------------------------------ sheet */
+[data-dir="B"] .ag-sheet {
+  position: relative;
+  z-index: 8;
+  min-width: 0;
+  overflow: hidden;
+}
+/* Closing: the column is already gone; the panel slides out over the
+   timeline from where it was. */
+[data-dir="B"] .ag-sheet[data-exiting] {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: var(--sheet);
+  pointer-events: none;
+}
+[data-dir="B"] .ag-sheet-in {
+  border-left: 1px solid var(--hair);
+  background: var(--bg);
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: var(--sheet);
+  display: flex;
+  flex-direction: column;
+}
+[data-dir="B"] .ag-sh-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+  height: 52px;
+  padding: 0 12px 0 22px;
+  border-bottom: 1px solid var(--hair);
+}
+[data-dir="B"] .ag-sh-tt {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+[data-dir="B"] .ag-sh-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+}
+[data-dir="B"] .ag-sh-sub {
+  font-size: 12px;
+  color: var(--muted-fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+[data-dir="B"] .ag-sh-acts {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+[data-dir="B"] .ag-sh-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 18px 22px 26px;
+}
+[data-dir="B"] .ag-sh-body > * {
+  flex: none;
+}
+[data-dir="B"] .ag-f {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+[data-dir="B"] .ag-f .label {
+  margin-bottom: 6px;
+}
+[data-dir="B"] .ag-two {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+[data-dir="B"] .ag-two > div {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+[data-dir="B"] .ag-sec {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding-top: 16px;
+  border-top: 1px solid var(--hair);
+}
+[data-dir="B"] .ag-sec-h {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 30px;
+  margin-bottom: -2px;
+}
+[data-dir="B"] .ag-sec-h h4 {
+  margin: 0;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--fg);
+}
+[data-dir="B"] .ag-collapse {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  margin: -14px -4px 0;
+  transition:
+    grid-template-rows 320ms var(--ease),
+    opacity 200ms,
+    margin 320ms var(--ease);
+}
+[data-dir="B"] .ag-collapse[data-open] {
+  grid-template-rows: 1fr;
+  opacity: 1;
+  margin: 0 -4px;
+}
+[data-dir="B"] .ag-collapse-in {
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 3px 4px;
+}
+[data-dir="B"] .ag-err {
+  display: none;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 7px 0 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--warn);
+}
+[data-dir="B"] .ag-err[data-on] {
+  display: flex;
+}
+[data-dir="B"] .ag-err .ic {
+  width: 13px;
+  height: 13px;
+  margin-top: 1.5px;
+}
+[data-dir="B"] .ag-f[data-invalid] > .field {
+  border-color: color-mix(in srgb, var(--warn-fill) 55%, transparent);
+}
+[data-dir="B"] .ag-f[data-invalid] > .field:focus {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn-fill) 16%, transparent);
+}
+[data-dir="B"] .ag-hint {
+  margin: 6px 0 0;
+  font-size: 11.5px;
+  color: var(--faint-fg);
+}
+/* The project limit: the sheet's first line, plain text, no box. */
+[data-dir="B"] .ag-limit {
+  margin: 0;
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 1.5;
+  color: var(--fg);
+  outline: none;
+}
+[data-dir="B"] .ag-limit:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 4px;
+  border-radius: 4px;
+}
+[data-dir="B"] .ag-sh-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  transition: opacity 160ms;
+}
+[data-dir="B"] .ag-sh-fields[data-inert] {
+  opacity: 0.42;
+}
+/* Derived from the last valid start while the typed one is invalid. */
+[data-dir="B"] [data-slot="until"][data-stale] {
+  opacity: 0.45;
+  transition: opacity 160ms;
+}
+[data-dir="B"] .ag-sh-from,
+[data-dir="B"] .ag-dst {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--muted-fg);
+}
+[data-dir="B"] .ag-sh-from .ic,
+[data-dir="B"] .ag-dst .ic {
+  width: 13px;
+  height: 13px;
+  margin-top: 2px;
+  color: var(--faint-fg);
+}
+[data-dir="B"] .ag-sh-once {
+  margin: -4px 0 0;
+  font-size: 12px;
+  color: var(--muted-fg);
+}
+[data-dir="B"] .ag-lrow {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+[data-dir="B"] .ag-count {
+  font-size: 11px;
+  color: var(--faint-fg);
+}
+[data-dir="B"] .ag-count[data-over] {
+  color: var(--warn);
+}
+[data-dir="B"] .ag-sheet textarea.field {
+  min-height: 96px;
+}
+[data-dir="B"] .ag-modelrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+[data-dir="B"] .ag-modelrow > :first-child {
+  flex: 1;
+  min-width: 0;
+}
+[data-dir="B"] .ag-whererow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+[data-dir="B"] .ag-off {
+  font-size: 12.5px;
+  color: var(--faint-fg);
+}
+[data-dir="B"] .ag-sh-foot {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px 14px 22px;
+  border-top: 1px solid var(--hair);
+}
+[data-dir="B"] .ag-sh-hint {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--faint-fg);
+}
+[data-dir="B"] .ag-sh-hint .ic {
+  width: 13px;
+  height: 13px;
+}
+[data-dir="B"] .ag-sh-btns {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+[data-dir="B"] .ag-sh-btns .btn.destructive.ghost {
+  margin-left: -8px;
+  color: var(--err);
+}
+/* Pickers inside the sheet: a touch tighter so a row fits 424px. */
+[data-dir="B"] .ag-sheet .pk-segrow > [role="radio"] {
+  padding: 0 7.5px;
+}
+
+/* ------------------------------------------------------------ reduced motion */
+[data-motion="off"] [data-dir="B"] .ag-m.ag-dm,
+[data-motion="off"] [data-dir="B"] .ag-m::before {
+  animation: none !important;
+}
+[data-motion="off"] [data-dir="B"] .ag-m.ag-dm {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--fg) 12%, transparent);
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-dir="B"] .ag-m.ag-dm,
+  [data-dir="B"] .ag-m::before {
+    animation: none;
+  }
+}
+
+/* Disabled sheet actions still explain themselves on hover (the tip says
+   why); the click is a no-op in JS. */
+[data-dir="B"] .ag-sheet .btn[aria-disabled="true"] {
+  pointer-events: auto;
+}

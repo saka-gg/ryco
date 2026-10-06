@@ -354,7 +354,15 @@
       "types": "./src/turnSteer.ts",
       "import": "./src/turnSteer.ts"
     },
-    "./workspaceLifecycle": "./src/workspaceLifecycle.ts"
+    "./workspaceLifecycle": "./src/workspaceLifecycle.ts",
+    "./automationSchedule": {
+      "types": "./src/automationSchedule.ts",
+      "import": "./src/automationSchedule.ts"
+    },
+    "./automationWhenParser": {
+      "types": "./src/automationWhenParser.ts",
+      "import": "./src/automationWhenParser.ts"
+    }
   },
   "scripts": {
     "typecheck": "tsc --noEmit",

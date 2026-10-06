@@ -52,6 +52,7 @@ describe("thread menu inventory", () => {
     expect(workspace?.children?.map((item) => item.id)).toEqual([
       "workspace:archive",
       "workspace:remove-checkout",
+      "workspace:delete-workspace",
       "workspace:manage",
     ]);
     expect(

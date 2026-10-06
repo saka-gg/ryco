@@ -1,11 +1,22 @@
-import { WS_METHODS } from "@ryco/contracts";
+import { AGENT_CONTROL_WS_METHODS, WS_METHODS } from "@ryco/contracts";
 import { Link, useLocation } from "@tanstack/react-router";
-import { GitPullRequestIcon, SearchIcon, SquarePenIcon } from "lucide-react";
+import {
+  CalendarClockIcon,
+  FoldersIcon,
+  GitPullRequestIcon,
+  SearchIcon,
+  SquarePenIcon,
+} from "lucide-react";
 import { memo } from "react";
 
+import { usePresentationTier } from "../../hooks/usePresentationTier";
 import { useHostedRpcCapability } from "../../hostedHub/capabilities";
 import { cn } from "../../lib/utils";
+import { PROJECTS_ROUTE_PATH } from "../../projectsRoute";
+import { PULL_REQUESTS_ROUTE_PATH } from "../../pullRequestsRoute";
 
+import { openAutomationsDialog } from "../automations/automationsDialogStore";
+import { useWaitingAutomationRuns } from "../automations/useWaitingAutomationRuns";
 import { CommandDialogTrigger } from "../ui/command";
 import { Kbd } from "../ui/kbd";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -28,7 +39,11 @@ export interface SidebarPrimaryActionsProps {
  * "Work in …" row retarget from there. "Search" opens the command palette, the
  * one place for everything else — adding a project, jumping to a thread,
  * starting a thread elsewhere — so neither mode can strand you without it.
- * "Pull requests" opens the review page for every connected repository.
+ * "Automations" opens the schedules dialog on the project last shown there,
+ * with a badge for runs waiting for approval on any connected device. "Pull
+ * requests" opens the review page for every connected repository, and
+ * "Projects" the page where each project is managed: where it is checked
+ * out, its settings, worktrees and actions.
  */
 export const SidebarPrimaryActions = memo(function SidebarPrimaryActions({
   newThreadShortcutLabel,
@@ -38,7 +53,9 @@ export const SidebarPrimaryActions = memo(function SidebarPrimaryActions({
 }: SidebarPrimaryActionsProps) {
   const pathname = useLocation({ select: (location) => location.pathname });
   const pullRequestsCapability = useHostedRpcCapability(WS_METHODS.sourceControlListChangeRequests);
-  const pullRequestsActive = pathname === "/pull-requests";
+  const pullRequestsActive = pathname === PULL_REQUESTS_ROUTE_PATH;
+  const projectsCapability = useHostedRpcCapability(WS_METHODS.projectsList);
+  const projectsActive = pathname === PROJECTS_ROUTE_PATH;
   return (
     <div className="space-y-px px-2 pb-1">
       <Tooltip>
@@ -77,9 +94,10 @@ export const SidebarPrimaryActions = memo(function SidebarPrimaryActions({
           </Kbd>
         ) : null}
       </CommandDialogTrigger>
+      <AutomationsEntry />
       {pullRequestsCapability.allowed ? (
         <Link
-          to="/pull-requests"
+          to={PULL_REQUESTS_ROUTE_PATH}
           aria-current={pullRequestsActive ? "page" : undefined}
           data-testid="sidebar-pull-requests-link"
           className={cn(
@@ -93,6 +111,54 @@ export const SidebarPrimaryActions = memo(function SidebarPrimaryActions({
           <span className="min-w-0 flex-1 truncate">Pull requests</span>
         </Link>
       ) : null}
+      {projectsCapability.allowed ? (
+        <Link
+          to={PROJECTS_ROUTE_PATH}
+          aria-current={projectsActive ? "page" : undefined}
+          data-testid="sidebar-projects-link"
+          className={cn(
+            SIDEBAR_PRIMARY_ACTION_CLASS_NAME,
+            projectsActive
+              ? "bg-sidebar-accent text-sidebar-accent-foreground"
+              : "text-muted-foreground/70 hover:text-foreground",
+          )}
+        >
+          <FoldersIcon className="size-3.5 shrink-0" />
+          <span className="min-w-0 flex-1 truncate">Projects</span>
+        </Link>
+      ) : null}
     </div>
   );
 });
+
+/** The Automations dialog's sidebar entry (desktop tiers), with the waiting-run badge. */
+function AutomationsEntry() {
+  const capability = useHostedRpcCapability(AGENT_CONTROL_WS_METHODS.automationCentre);
+  const phone = usePresentationTier() === "phone";
+  if (!capability.allowed || phone) return null;
+  return <AutomationsEntryButton />;
+}
+
+function AutomationsEntryButton() {
+  const waiting = useWaitingAutomationRuns();
+  return (
+    <button
+      type="button"
+      data-testid="sidebar-automations-button"
+      aria-label={`Automations${waiting ? `, ${waiting} ${waiting === 1 ? "run" : "runs"} waiting for approval` : ""}`}
+      onClick={(event) => openAutomationsDialog({ origin: event.currentTarget })}
+      className={cn(
+        SIDEBAR_PRIMARY_ACTION_CLASS_NAME,
+        "text-muted-foreground/70 hover:text-foreground",
+      )}
+    >
+      <CalendarClockIcon className="size-3.5 shrink-0" />
+      <span className="min-w-0 flex-1 truncate">Automations</span>
+      {waiting ? (
+        <span className="shrink-0 rounded-full bg-foreground/8 px-1.5 text-[10px] font-medium text-foreground tabular-nums">
+          {waiting}
+        </span>
+      ) : null}
+    </button>
+  );
+}

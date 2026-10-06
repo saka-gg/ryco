@@ -1,0 +1,380 @@
+/*
+ * The schedule editor (the lab's direction C, `.docs/automations-lab/dir-c.css`
+ * "editor" and "popovers") in the app's tokens. Prefixed `ae-`. Inside the
+ * dialog it reads the dialog's `--ad-*` tokens; its popovers are portaled, so
+ * they use the app's tokens directly.
+ */
+
+/* ------------------------------------------------------------ header */
+/* The title field sits exactly where the detail's heading was. */
+.ae-title-in {
+  all: unset;
+  box-sizing: border-box;
+  width: 100%;
+  height: 28px;
+  margin-left: -6px;
+  padding: 0 6px;
+  border-radius: 7px;
+  font: 600 17px/28px var(--font-sans);
+  letter-spacing: -0.015em;
+  color: var(--ad-fg);
+  transition:
+    background-color 140ms,
+    box-shadow 140ms;
+}
+.ae-title-in:hover {
+  background: var(--ad-accent);
+}
+.ae-title-in:focus {
+  background: transparent;
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--ring) 55%, transparent),
+    0 0 0 3px var(--ad-ring-soft);
+}
+.ae-title-in::placeholder {
+  color: var(--ad-faint);
+  font-weight: 500;
+}
+.ae-title-in[data-invalid] {
+  box-shadow: inset 0 -1.5px 0 color-mix(in srgb, var(--ad-warn) 70%, transparent);
+}
+.ae-title-in[data-invalid]:focus {
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--ad-warn) 70%, transparent),
+    0 0 0 3px var(--ad-ring-soft);
+}
+/* Repeats | Once is the lab's segmented control (`.seg` + `plate`), not a
+   picker's chip row: a filled track, and a raised plate in the surface's
+   colour behind the choice. */
+.ae-kind.pk-segrow {
+  background: color-mix(in srgb, var(--foreground) 4.5%, transparent);
+  box-shadow: none;
+}
+.ae-kind > .pk-plate {
+  background: var(--popover);
+  box-shadow:
+    0 1px 2px rgb(0 0 0 / 8%),
+    0 0 0 1px rgb(0 0 0 / 5.5%);
+}
+.dark .ae-kind > .pk-plate {
+  background: color-mix(in srgb, var(--foreground) 10%, transparent);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 5%),
+    0 1px 2px rgb(0 0 0 / 30%);
+}
+.ae-kind > [role="radio"] {
+  height: 24px;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 0 9px;
+}
+.ae-kind > [role="radio"] .pk-ic {
+  width: 12px;
+  height: 12px;
+}
+
+/* ------------------------------------------------------------ the sentence */
+/* when + where. Each connective is glued to its token, so a line never ends
+   on "on" / "for" / "from". */
+.ae-sentence {
+  margin: 10px 0 0;
+  padding: 0;
+  border: 0;
+  min-inline-size: 0;
+  max-width: 64ch;
+  font-size: 15px;
+  line-height: 40px;
+  letter-spacing: -0.005em;
+  color: var(--ad-muted);
+}
+.ae-pair {
+  white-space: nowrap;
+}
+.ae-pair[hidden] {
+  display: none;
+}
+.ae-tok {
+  position: relative;
+  display: inline-block;
+  height: 30px;
+  margin: 0 1px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--ad-accent);
+  color: var(--ad-fg);
+  font: 500 15px/30px var(--font-sans);
+  letter-spacing: -0.005em;
+  white-space: nowrap;
+  vertical-align: baseline;
+  cursor: pointer;
+  outline: none;
+  transition:
+    background-color 140ms,
+    box-shadow 140ms;
+}
+button.ae-tok:hover,
+button.ae-tok[data-popup-open],
+button.ae-tok[aria-expanded="true"] {
+  background: var(--ad-accent-strong);
+}
+.ae-tok:focus-visible {
+  box-shadow:
+    0 0 0 2px var(--popover),
+    0 0 0 4px var(--ring);
+}
+.ae-tok.is-static {
+  background: transparent;
+  padding: 0 2px;
+  cursor: default;
+}
+.ae-tok-ref {
+  font-family: var(--font-mono);
+  font-size: 13.5px;
+  font-weight: 400;
+}
+.ae-tok[data-invalid] {
+  background: color-mix(in srgb, var(--warning) 13%, transparent);
+  text-decoration: underline dotted color-mix(in srgb, var(--ad-warn) 75%, transparent);
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 5px;
+}
+
+/* ------------------------------------------------------------ messages */
+.ae-msgs:empty {
+  display: none;
+}
+.ae-msgs {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 6px;
+}
+.ae-msg {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--ad-warn);
+}
+.ae-msg > span {
+  min-width: 0;
+}
+.ae-msg > svg {
+  width: 14px;
+  height: 14px;
+  flex: none;
+}
+.ae-fix {
+  flex: none;
+  height: 24px;
+  margin-left: 2px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--ad-accent);
+  color: var(--ad-fg);
+  font: 500 12px/24px var(--font-sans);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ae-fix:hover {
+  background: var(--ad-accent-strong);
+}
+.ae-fix:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+
+/* ------------------------------------------------------------ next runs */
+.ae-pv {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--ad-hair);
+}
+
+/* ------------------------------------------------------------ who runs it */
+.ae-agent {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--ad-hair);
+}
+.ae-pick {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  max-width: 100%;
+  height: 30px;
+  padding: 0 9px 0 10px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--ad-accent);
+  color: var(--ad-fg);
+  font: 500 12.5px/1 var(--font-sans);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 140ms;
+}
+.ae-pick:hover,
+.ae-pick[data-popup-open],
+.ae-pick[aria-expanded="true"] {
+  background: var(--ad-accent-strong);
+}
+.ae-pick:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+.ae-pick-l {
+  font-weight: 400;
+  color: var(--ad-muted);
+  margin-right: 1px;
+}
+.ae-prov {
+  width: 13px;
+  height: 13px;
+  flex: none;
+}
+.ae-pick-ic {
+  width: 12px;
+  height: 12px;
+  flex: none;
+  color: var(--ad-muted);
+  margin-left: -1px;
+}
+.ae-pick[data-invalid] {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ad-warn) 55%, transparent);
+}
+
+/* ------------------------------------------------------------ prompt */
+.ae-fld {
+  margin-top: 16px;
+}
+.ae-fld-h {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+.ae-label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ad-muted);
+}
+.ae-count {
+  font-size: 11.5px;
+  color: var(--ad-faint);
+}
+.ae-count[data-over] {
+  color: var(--ad-err);
+}
+.ae-prompt textarea {
+  min-height: 96px;
+  font-size: 13px;
+}
+.ae-ferr {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--ad-warn);
+}
+
+/* ------------------------------------------------------------ footer */
+.ad-ed-hint[data-limit] {
+  flex-wrap: nowrap;
+  color: var(--ad-warn);
+}
+/* A refused save says why, in the device's words. */
+.ad-ed-hint[data-failed] {
+  flex-wrap: nowrap;
+  color: var(--ad-err);
+}
+.ad-ed-hint > span {
+  min-width: 0;
+}
+.ad-ed-hint > svg {
+  width: 14px;
+  height: 14px;
+  flex: none;
+}
+.ad-dialog .ae-discard-confirm {
+  color: var(--ad-err);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ad-err) 40%, transparent);
+}
+.ae-kbd-in {
+  margin-left: 4px;
+  font-size: 11px;
+  opacity: 0.6;
+  letter-spacing: 0.04em;
+}
+
+/* ------------------------------------------------------------ popovers */
+/* A picker under a small heading; it grows to its content. */
+.ae-pop {
+  max-width: min(calc(100vw - 48px), 720px);
+}
+/* …and keeps following it (the lab's `pin`): the positioner sizes to the
+   picker instead of keeping the size it opened at, so a calendar opening
+   widens the popover, and the positioner's resize re-places it inside the
+   dialog (Floating UI observes it; `tokenAnchor` re-reads the popup's size). */
+[data-slot="popover-positioner"]:has(> .ae-pop) {
+  width: max-content;
+  height: max-content;
+}
+/* Content-sized: a row of chips never wraps for a sub-pixel of measuring. */
+.ae-pp {
+  box-sizing: border-box;
+  width: max-content;
+  max-width: min(calc(100vw - 48px), 720px);
+  padding: 10px 12px 12px;
+  --pk-host-pad: 12px;
+}
+.ae-pp-h {
+  margin: 0 0 8px 2px;
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--muted-foreground);
+}
+.ae-menu {
+  min-width: 200px;
+}
+/* The branch list's items read like the other token menus (`.ad-mi`): the
+   branch icon, the name at 13px, the check on the right. */
+.ae-ref-item {
+  min-height: 30px;
+  padding: 0 9px;
+  border-radius: 7px;
+  font-size: 13px;
+}
+.ae-ref-item-c {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.ae-ref-item-ic {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  color: var(--muted-foreground);
+}
+.ae-ref-item-l {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ae-ref-item-ck {
+  display: inline-flex;
+  margin-left: auto;
+  padding-left: 12px;
+}
+.ae-ref-item-ck svg {
+  width: 14px;
+  height: 14px;
+}

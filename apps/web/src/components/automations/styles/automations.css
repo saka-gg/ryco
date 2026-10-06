@@ -1,0 +1,8 @@
+/*
+ * Automations styles, one stylesheet per area so areas never share a file.
+ * Motion reads the --app-motion-* tokens, so reduced motion (which zeroes
+ * them) stops anything that moves.
+ */
+@import "./pickers.css";
+@import "./dialog.css";
+@import "../dialog/editor/editor.css";

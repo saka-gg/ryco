@@ -12,6 +12,8 @@ import {
 } from "@ryco/contracts";
 import { applyServerSettingsPatch } from "@ryco/shared/serverSettings";
 import { ProjectDefaultsSection } from "./ProjectDefaultsSection";
+import { ProjectPreferenceSettings } from "./ProjectPreferenceSettings";
+import { SettingsCard } from "./settingsLayout";
 
 const harness = vi.hoisted(() => ({
   config: null as ServerConfig | null,
@@ -22,6 +24,11 @@ const harness = vi.hoisted(() => ({
   read: vi.fn(),
   update: vi.fn(),
   local: vi.fn(),
+  navigate: vi.fn(),
+}));
+vi.mock("@tanstack/react-router", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@tanstack/react-router")>()),
+  useNavigate: () => harness.navigate,
 }));
 vi.mock("../../composerDraftStore", () => ({ DraftId: { make: (value: string) => value } }));
 vi.mock("../chat/ProviderModelPicker", () => ({
@@ -58,6 +65,8 @@ vi.mock("../../environments/runtime", () => ({
 }));
 vi.mock("../../localApi", () => ({ ensureLocalApi: harness.local }));
 
+const FIXTURE_PROJECT_CHOICES = [{ id: "p", title: "Fixture project" }];
+
 beforeEach(() => {
   harness.connected = true;
   harness.canManage = true;
@@ -74,6 +83,7 @@ beforeEach(() => {
   harness.read.mockReset();
   harness.update.mockReset();
   harness.local.mockReset();
+  harness.navigate.mockReset();
   harness.read.mockImplementation(async ({ projectId }: { projectId?: ProjectId }) => {
     const overrides = projectId
       ? (harness.config!.settings.projectPreferences[projectId] ?? {})
@@ -103,9 +113,12 @@ beforeEach(() => {
 
 describe("project inheritance controls", () => {
   it("shows effective inheritance, writes only one project field, and resets to node defaults", async () => {
-    await render(<ProjectDefaultsSection />);
-    await page.getByRole("combobox", { name: "Project default scope" }).click();
-    await page.getByRole("option", { name: "Fixture project" }).click();
+    // Per-project overrides render on the projects page, scoped to one project.
+    await render(
+      <SettingsCard>
+        <ProjectPreferenceSettings projectId="p" projects={FIXTURE_PROJECT_CHOICES} />
+      </SettingsCard>,
+    );
     await expect
       .element(page.getByText("Inherited from device defaults", { exact: true }).first())
       .toBeVisible();
@@ -143,9 +156,6 @@ describe("project inheritance controls", () => {
     harness.canMutate = false;
     await render(<ProjectDefaultsSection />);
     await expect
-      .element(page.getByRole("combobox", { name: "Project default scope" }))
-      .toBeDisabled();
-    await expect
       .element(page.getByRole("combobox", { name: "Default thread mode" }))
       .toBeDisabled();
     expect(harness.read).not.toHaveBeenCalled();
@@ -165,17 +175,27 @@ describe("project inheritance controls", () => {
     expect(harness.local).not.toHaveBeenCalled();
   });
   it("does not fall back to node defaults when a selected project is removed", async () => {
-    const mounted = await render(<ProjectDefaultsSection />);
-    await page.getByRole("combobox", { name: "Project default scope" }).click();
-    await page.getByRole("option", { name: "Fixture project" }).click();
+    const mounted = await render(
+      <ProjectPreferenceSettings projectId="p" projects={FIXTURE_PROJECT_CHOICES} />,
+    );
     await expect.element(page.getByRole("combobox", { name: "Worktree setup" })).toBeEnabled();
     await expect
       .element(page.getByText("Inherited from device defaults", { exact: true }).first())
       .toBeVisible();
-    harness.projects = [];
-    await mounted.rerender(<ProjectDefaultsSection />);
+    await mounted.rerender(<ProjectPreferenceSettings projectId="p" projects={[]} />);
     await expect.element(page.getByRole("alert")).toHaveTextContent("Project no longer exists");
     await expect.element(page.getByRole("combobox", { name: "Worktree setup" })).toBeDisabled();
     expect(harness.update).not.toHaveBeenCalled();
+  });
+  it("keeps device defaults here and links to per-project overrides on the projects page", async () => {
+    await render(<ProjectDefaultsSection />);
+    await expect
+      .element(page.getByRole("combobox", { name: "Project default scope" }))
+      .not.toBeInTheDocument();
+    await page.getByRole("button", { name: /Per-project overrides/ }).click();
+    expect(harness.navigate).toHaveBeenCalledWith({
+      to: "/projects",
+      search: { env: "fixture-node", project: "p", section: "defaults" },
+    });
   });
 });

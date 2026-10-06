@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { newCommandId } from "../../../lib/utils";
-import { isHostedHubMode } from "../../../env";
-import { readEnvironmentApi } from "../../../environmentApi";
 import { readLocalApi } from "../../../localApi";
-import { resolveEnvironmentHttpUrl } from "../../../environments/runtime";
+import {
+  openProjectRemote,
+  projectAvatarUploadUnavailableReason,
+  removeProjectAvatar as removeSharedProjectAvatar,
+  updateProjectMeta,
+  uploadProjectAvatar as uploadSharedProjectAvatar,
+} from "../../../projectMutations";
 import type { SidebarProjectGroupMember } from "../../../sidebarProjectGrouping";
 import { stackedThreadToast, toastManager } from "../../ui/toast";
-import { resolveRemoteUrlToBrowserUrl } from "../sidebarProjectRemoteLink";
 
 export function useSidebarProjectSettingsDialog() {
   const [projectSettingsTarget, setProjectSettingsTarget] =
@@ -137,24 +139,9 @@ export function useSidebarProjectSettingsDialog() {
       return;
     }
 
-    const api = readEnvironmentApi(projectSettingsTarget.environmentId);
-    if (!api) {
-      toastManager.add(
-        stackedThreadToast({
-          type: "error",
-          title: "Failed to update project",
-          description: "Project API unavailable.",
-        }),
-      );
-      return;
-    }
-
     setProjectSettingsSaving(true);
     try {
-      await api.orchestration.dispatchCommand({
-        type: "project.meta.update",
-        commandId: newCommandId(),
-        projectId: projectSettingsTarget.id,
+      await updateProjectMeta(projectSettingsTarget, {
         ...(titleChanged ? { title } : {}),
         ...(workspaceRootChanged ? { workspaceRoot } : {}),
         ...(customSystemPromptChanged
@@ -189,39 +176,13 @@ export function useSidebarProjectSettingsDialog() {
     async (file: File) => {
       const initiating = projectSettingsTarget;
       if (!initiating) return;
-      if (isHostedHubMode()) {
-        toastManager.add({
-          type: "warning",
-          title: "Project image upload is unavailable in hosted mode.",
-        });
+      const unavailable = projectAvatarUploadUnavailableReason();
+      if (unavailable) {
+        toastManager.add({ type: "warning", title: unavailable });
         return;
       }
-      const api = readEnvironmentApi(initiating.environmentId);
-      if (!api) return;
-      const httpUrl = resolveEnvironmentHttpUrl({
-        environmentId: initiating.environmentId,
-        pathname: "/api/project-avatar/upload",
-        searchParams: { projectId: initiating.id },
-      });
-      const formData = new FormData();
-      formData.append("avatar", file);
       try {
-        const response = await fetch(httpUrl, {
-          method: "POST",
-          body: formData,
-          credentials: "include",
-        });
-        if (!response.ok) {
-          const text = await response.text().catch(() => "");
-          throw new Error(text || `Upload failed: ${response.status}`);
-        }
-        const { contentHash } = (await response.json()) as { contentHash: string };
-        await api.orchestration.dispatchCommand({
-          type: "project.avatar.set",
-          commandId: newCommandId(),
-          projectId: initiating.id,
-          contentHash,
-        });
+        const contentHash = await uploadSharedProjectAvatar(initiating, file);
         if (projectSettingsTargetRef.current?.id === initiating.id) {
           setProjectSettingsCustomAvatarContentHash(contentHash);
         }
@@ -242,15 +203,8 @@ export function useSidebarProjectSettingsDialog() {
   const removeProjectAvatar = useCallback(async () => {
     const initiating = projectSettingsTarget;
     if (!initiating) return;
-    const api = readEnvironmentApi(initiating.environmentId);
-    if (!api) return;
     try {
-      await api.orchestration.dispatchCommand({
-        type: "project.avatar.set",
-        commandId: newCommandId(),
-        projectId: initiating.id,
-        contentHash: null,
-      });
+      await removeSharedProjectAvatar(initiating);
       if (projectSettingsTargetRef.current?.id === initiating.id) {
         setProjectSettingsCustomAvatarContentHash(null);
       }
@@ -267,23 +221,8 @@ export function useSidebarProjectSettingsDialog() {
   }, [projectSettingsTarget]);
 
   const openProjectRemoteByName = useCallback(
-    (member: SidebarProjectGroupMember, remoteName: string) => {
-      const remote = (member.repositoryIdentity?.remotes ?? []).find((r) => r.name === remoteName);
-      if (!remote) return;
-      const url = resolveRemoteUrlToBrowserUrl(remote.url);
-      if (!url) return;
-      const api = readLocalApi();
-      if (!api) return;
-      void api.shell.openExternal(url).catch((error) => {
-        toastManager.add(
-          stackedThreadToast({
-            type: "error",
-            title: "Unable to open remote repository",
-            description: error instanceof Error ? error.message : "An error occurred.",
-          }),
-        );
-      });
-    },
+    (member: SidebarProjectGroupMember, remoteName: string) =>
+      openProjectRemote(member, remoteName),
     [],
   );
 
@@ -296,9 +235,7 @@ export function useSidebarProjectSettingsDialog() {
     projectSettingsSaving,
     projectSettingsCustomAvatarContentHash,
     projectSettingsPreferredRemoteName,
-    projectAvatarUploadUnavailableReason: isHostedHubMode()
-      ? "Project image upload is unavailable in hosted mode because node HTTP routes are not relayed."
-      : null,
+    projectAvatarUploadUnavailableReason: projectAvatarUploadUnavailableReason(),
     setProjectSettingsTitle,
     setProjectSettingsWorkspaceRoot,
     setProjectSettingsCustomSystemPrompt,

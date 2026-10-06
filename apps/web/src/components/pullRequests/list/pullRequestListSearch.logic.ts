@@ -1,7 +1,7 @@
 import { normalizeGitRemoteUrl } from "@ryco/shared/git";
 
 import { parsePullRequestReference } from "../../../pullRequestReference";
-import type { PullRequestRepositoryOption } from "../pullRequestRepositories.logic";
+import type { ProjectCheckoutOption } from "../../../projectCheckouts.logic";
 
 /**
  * What the list's search field does with a pasted link or `#123`: open that
@@ -19,7 +19,7 @@ export type PullRequestLinkTarget =
       readonly kind: "url";
       readonly number: number;
       readonly url: string;
-      /** `host/owner/repo`, comparable with `PullRequestRepositoryOption.repositoryKey`. */
+      /** `host/owner/repo`, comparable with `ProjectCheckoutOption.repositoryKey`. */
       readonly repositoryKey: string;
     };
 
@@ -58,12 +58,12 @@ export type PullRequestLinkResolution =
   | {
       readonly kind: "switch";
       readonly number: number;
-      readonly repository: PullRequestRepositoryOption;
+      readonly repository: ProjectCheckoutOption;
     }
   /** A repository Ryco does not know: offer to open the link on the host. */
   | { readonly kind: "external"; readonly number: number; readonly url: string };
 
-function repositoryKeyMatches(option: PullRequestRepositoryOption, key: string): boolean {
+function repositoryKeyMatches(option: ProjectCheckoutOption, key: string): boolean {
   const optionKey = option.repositoryKey.toLowerCase();
   return optionKey === key || optionKey.startsWith(`${key}::`);
 }
@@ -75,8 +75,8 @@ function repositoryKeyMatches(option: PullRequestRepositoryOption, key: string):
  */
 export function resolvePullRequestLink(input: {
   readonly target: PullRequestLinkTarget;
-  readonly current: PullRequestRepositoryOption | null;
-  readonly repositories: ReadonlyArray<PullRequestRepositoryOption>;
+  readonly current: ProjectCheckoutOption | null;
+  readonly repositories: ReadonlyArray<ProjectCheckoutOption>;
   /** URLs of loaded rows in the current repository. */
   readonly knownUrls: Iterable<string>;
 }): PullRequestLinkResolution {

@@ -43,7 +43,7 @@ import {
   serializeShortcut,
 } from "../../lib/shortcutCapture";
 import { Schema } from "effect";
-import { KeybindingsConfig } from "@ryco/contracts";
+import { KeybindingsConfig, STATIC_KEYBINDING_COMMANDS } from "@ryco/contracts";
 import { scopedScriptCommand } from "@ryco/client-runtime/state/settings";
 import {
   useAllAppKeybindings,
@@ -93,9 +93,14 @@ const DEFAULT_RULE_KEY_BY_COMMAND = (() => {
   return map;
 })();
 
-const DEFAULT_COMMANDS = new Set<KeybindingCommand>(
-  DEFAULT_KEYBINDINGS.map((r: KeybindingRule) => r.command),
-);
+/**
+ * Every built-in command, bound by default or not: page commands such as
+ * `pullRequests.open` ship without a key and would otherwise be unbindable here.
+ */
+const DEFAULT_COMMANDS = new Set<KeybindingCommand>([
+  ...DEFAULT_KEYBINDINGS.map((r: KeybindingRule) => r.command),
+  ...STATIC_KEYBINDING_COMMANDS,
+]);
 
 function ruleKeyId(rule: KeybindingRule, index: number): string {
   return `${rule.command}|${rule.key}|${rule.when ?? ""}|${index}`;
@@ -132,7 +137,8 @@ function commandStatus(
 ): CommandRowData["status"] {
   if (!DEFAULT_COMMANDS.has(command)) return "custom";
   const defaultKeys = DEFAULT_RULE_KEY_BY_COMMAND.get(command);
-  if (!defaultKeys) return "custom";
+  // A built-in that ships unbound (a page command) is at its default while unbound.
+  if (!defaultKeys) return draftRules.length === 0 ? "default" : "custom";
   if (draftRules.length !== defaultKeys.size) return "modified";
   for (const rule of draftRules) {
     const key = `${rule.key}|${rule.when ?? ""}`;

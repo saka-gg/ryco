@@ -1,29 +1,41 @@
 import type {
+  AgentControlAutomationRunStatus,
+  AgentControlProposal,
   AutomationCentreApi,
   AutomationCentreSnapshot,
   ProjectId,
-  AgentControlAutomationRunStatus,
 } from "@ryco/contracts";
+import { Record as Records } from "effect";
 
-export const automationRunStatusLabel: Record<AgentControlAutomationRunStatus, string> = {
-  materializing: "Preparing approval",
-  "pending-approval": "Awaiting approval",
-  approved: "Approved",
-  executing: "Dispatching",
-  completed: "Dispatched",
-  failed: "Dispatch failed",
-  rejected: "Rejected",
-  expired: "Approval expired",
-  cancelled: "Cancelled",
-};
-export type AutomationRunFilter = "all" | "unread" | "failed";
-export function filterAutomationRuns(
-  snapshot: AutomationCentreSnapshot,
-  filter: AutomationRunFilter,
-) {
-  return snapshot.runs.filter((entry) =>
-    filter === "unread" ? entry.unread : filter === "failed" ? entry.run.status === "failed" : true,
-  );
+import { AUTOMATION_RUN_STATUS } from "./automationSchedules.ts";
+
+/** One run vocabulary app-wide: the labels of `AUTOMATION_RUN_STATUS`. */
+export const automationRunStatusLabel: Readonly<Record<AgentControlAutomationRunStatus, string>> =
+  Records.map(AUTOMATION_RUN_STATUS, (status) => status.label);
+
+/**
+ * A run waiting for the user, as a device's Agent Control queue holds it: an
+ * automation run whose approval is still pending. It is the same run a
+ * checkout's snapshot says is "pending-approval" (`dueScheduleRuns`); the
+ * queue is what every project on the device shares, so counts across
+ * projects (the sidebar's badge) read it from here.
+ */
+export function isWaitingAutomationRun(proposal: AgentControlProposal): boolean {
+  return proposal.status === "pending-user-approval" && proposal.plan.kind === "automationRun";
+}
+
+/** Runs waiting for approval in the given environments' queues. */
+export function waitingAutomationRunCount(
+  queues: Readonly<
+    Record<string, { readonly proposalsById: Readonly<Record<string, AgentControlProposal>> }>
+  >,
+  environmentIds: readonly string[],
+): number {
+  let count = 0;
+  for (const environmentId of environmentIds)
+    for (const proposal of Object.values(queues[environmentId]?.proposalsById ?? {}))
+      if (isWaitingAutomationRun(proposal)) count += 1;
+  return count;
 }
 
 /** Single-flight refresh with a trailing read, and no publications after disposal/rebind. */

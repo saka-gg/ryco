@@ -4,3 +4,4 @@ export * from "./store.ts";
 export * from "./sync.ts";
 
 export * from "./automationCentre.ts";
+export * from "./automationSchedules.ts";

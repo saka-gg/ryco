@@ -13,10 +13,14 @@ import {
   MoreHorizontalIcon,
   PlusIcon,
   RotateCcwIcon,
+  Trash2Icon,
 } from "lucide-react";
-import { listWorkspaceLifecycleActions } from "@ryco/client-runtime/state/lifecycle";
+import {
+  listWorkspaceLifecycleActions,
+  type WorkspaceActionId,
+} from "@ryco/client-runtime/state/lifecycle";
 import { scopedThreadKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
-import { EnvironmentId, ProjectId, type WorkspaceLifecycleAction } from "@ryco/contracts";
+import { EnvironmentId, ProjectId } from "@ryco/contracts";
 import { cn } from "../../lib/utils";
 import type { GitStatusTarget } from "../../lib/gitStatusState";
 import {
@@ -72,7 +76,7 @@ export interface SidebarWorktreeListProps {
   treeProject: SidebarTreeProject;
   visibleThreadKeys: ReadonlySet<string> | null;
   onCopyWorktreePath: (worktree: SidebarTreeWorktree) => void;
-  onWorkspaceAction: (worktree: SidebarTreeWorktree, action: WorkspaceLifecycleAction) => void;
+  onWorkspaceAction: (worktree: SidebarTreeWorktree, action: WorkspaceActionId) => void;
   onNewSession: (worktree: SidebarTreeWorktree) => void;
   onOpenInEditor: (worktree: SidebarTreeWorktree) => void;
   onOpenWorktree: (worktree: SidebarTreeWorktree) => void;
@@ -243,7 +247,7 @@ function resolveWorktreeProjectCwd(
 function ArchivedWorktreeRow(props: {
   projectCwd: string;
   worktree: SidebarTreeWorktree;
-  onWorkspaceAction: (worktree: SidebarTreeWorktree, action: WorkspaceLifecycleAction) => void;
+  onWorkspaceAction: (worktree: SidebarTreeWorktree, action: WorkspaceActionId) => void;
   onOpenLinkedItem: (item: LinkedWorktreeItem) => void;
 }) {
   const canManage = canManageWorktree(props.worktree.worktree, props.projectCwd);
@@ -321,7 +325,7 @@ const SidebarWorktreeSection = memo(function SidebarWorktreeSection(props: {
   visibleThreadKeys: ReadonlySet<string> | null;
   worktree: SidebarTreeWorktree;
   onCopyWorktreePath: (worktree: SidebarTreeWorktree) => void;
-  onWorkspaceAction: (worktree: SidebarTreeWorktree, action: WorkspaceLifecycleAction) => void;
+  onWorkspaceAction: (worktree: SidebarTreeWorktree, action: WorkspaceActionId) => void;
   onNewSession: (worktree: SidebarTreeWorktree) => void;
   onOpenInEditor: (worktree: SidebarTreeWorktree) => void;
   onOpenLinkedItem: (item: LinkedWorktreeItem) => void;
@@ -645,7 +649,7 @@ function WorktreeMenuItems(props: {
   canManage: boolean;
   worktree: SidebarTreeWorktree;
   onCopyWorktreePath: (worktree: SidebarTreeWorktree) => void;
-  onWorkspaceAction: (worktree: SidebarTreeWorktree, action: WorkspaceLifecycleAction) => void;
+  onWorkspaceAction: (worktree: SidebarTreeWorktree, action: WorkspaceActionId) => void;
   onNewSession: (worktree: SidebarTreeWorktree) => void;
   onOpenInEditor: (worktree: SidebarTreeWorktree) => void;
   onRenameWorktree: () => void;
@@ -692,19 +696,20 @@ function WorktreeMenuItems(props: {
   );
 }
 
-const WORKSPACE_ACTION_ICONS: Record<WorkspaceLifecycleAction, LucideIcon> = {
+const WORKSPACE_ACTION_ICONS: Record<WorkspaceActionId, LucideIcon> = {
   archive: ArchiveIcon,
   restore: ArchiveRestoreIcon,
   "remove-checkout": FolderMinusIcon,
   "remove-stale-record": FolderMinusIcon,
   "recreate-checkout": FolderPlusIcon,
+  "delete-workspace": Trash2Icon,
 };
 
 function WorktreeMenu(props: {
   canManage: boolean;
   worktree: SidebarTreeWorktree;
   onCopyWorktreePath: (worktree: SidebarTreeWorktree) => void;
-  onWorkspaceAction: (worktree: SidebarTreeWorktree, action: WorkspaceLifecycleAction) => void;
+  onWorkspaceAction: (worktree: SidebarTreeWorktree, action: WorkspaceActionId) => void;
   onNewSession: (worktree: SidebarTreeWorktree) => void;
   onOpenInEditor: (worktree: SidebarTreeWorktree) => void;
   onRenameWorktree: () => void;
