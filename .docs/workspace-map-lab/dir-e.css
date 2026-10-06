@@ -1,0 +1,1223 @@
+/* ============================================================
+   E · Schedule — time runs left to right, rows are automations
+   grouped by the device that runs them. Marks are positioned in
+   minutes; two variables (--v0 view start, --ppm px per minute)
+   move all of them, so panning and zooming never re-render.
+   ============================================================ */
+@property --ee-now {
+  syntax: "<number>";
+  inherits: true;
+  initial-value: 0;
+}
+/* A finished run's nudge away from the run to its right (see dodge()). */
+@property --dx {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+
+/* Tokens live on the host so the floating legend shares them. */
+[data-dir="E"] {
+  --ee-line: color-mix(in srgb, var(--fg) 7%, transparent);
+  --ee-line-minor: color-mix(in srgb, var(--fg) 3.5%, transparent);
+  --ee-past: color-mix(in srgb, var(--fg) 2.2%, transparent);
+  --ee-rail: color-mix(in srgb, var(--fg) 17%, transparent);
+  --ee-comb: color-mix(in srgb, var(--fg) 30%, transparent);
+  --ee-band: color-mix(in srgb, var(--fg) 7%, transparent);
+  --ee-tick: color-mix(in srgb, var(--fg) 38%, transparent);
+  --ee-row-hover: color-mix(in srgb, var(--fg) 3%, transparent);
+  --ee-row-sel: color-mix(in srgb, var(--fg) 6%, transparent);
+}
+.dark [data-dir="E"] {
+  --ee-line: rgba(255, 255, 255, 0.055);
+  --ee-line-minor: rgba(255, 255, 255, 0.028);
+  --ee-past: rgba(255, 255, 255, 0.018);
+  --ee-rail: rgba(255, 255, 255, 0.13);
+  --ee-comb: rgba(255, 255, 255, 0.26);
+  --ee-band: rgba(255, 255, 255, 0.05);
+  --ee-tick: rgba(255, 255, 255, 0.34);
+  --ee-row-hover: rgba(255, 255, 255, 0.025);
+  --ee-row-sel: rgba(255, 255, 255, 0.05);
+}
+.ee {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  --g: 264px;
+  --ax: 46px;
+  --r: 0px;
+  --v0: 0;
+  --v1: 1;
+  --ppm: 0.05;
+  transition: --ee-now 1s linear;
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+}
+.ee.is-panning {
+  cursor: grabbing;
+}
+
+/* ------------------------------------------------------------ frame */
+.ee-grid,
+.ee-axis {
+  position: absolute;
+  left: var(--g);
+  right: var(--r);
+  overflow: hidden;
+  pointer-events: none;
+  transition: right 0.5s var(--ease);
+}
+.ee-grid {
+  top: 0;
+  bottom: 0;
+}
+.ee-axis {
+  top: 0;
+  height: var(--ax);
+}
+.ee-axisline {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(var(--ax) - 1px);
+  height: 1px;
+  background: var(--hair);
+  pointer-events: none;
+}
+.ee-gutline {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: calc(var(--g) - 1px);
+  width: 1px;
+  background: var(--hair);
+  pointer-events: none;
+}
+.ee-corner {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: var(--g);
+  height: var(--ax);
+  display: flex;
+  align-items: center;
+  padding: 0 14px 0 14px;
+  z-index: 2;
+}
+.ee-scope {
+  height: 28px;
+}
+.ee-scope .seg-opt {
+  height: 24px;
+  padding: 0 10px;
+}
+
+/* Grid: day lines, the past, the Now line */
+.ee-gl {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 1px;
+  background: var(--ee-line);
+}
+.ee-gl:not(.major) {
+  background: var(--ee-line-minor);
+}
+.ee-past {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: max(0px, calc((var(--ee-now) - var(--v0)) * var(--ppm) * 1px));
+  background: var(--ee-past);
+}
+.ee-nowline {
+  position: absolute;
+  top: calc(var(--ax) - 6px);
+  bottom: 0;
+  left: 0;
+  width: 1px;
+  translate: calc((var(--ee-now) - var(--v0)) * var(--ppm) * 1px) 0;
+  background: color-mix(in srgb, var(--fg) 46%, transparent);
+}
+
+/* Axis labels: tier 1 = days (or weeks), tier 2 = hours */
+.ee-al {
+  position: absolute;
+  left: 0;
+  white-space: nowrap;
+  transition: opacity 0.2s;
+}
+.ee-al.t1 {
+  top: 7px;
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--muted-fg);
+}
+.ee-al.t1.today {
+  color: var(--fg);
+}
+.ee-al.t2 {
+  top: 25px;
+  font-size: 10.5px;
+  color: var(--faint-fg);
+  font-variant-numeric: tabular-nums;
+  margin-left: -15px;
+}
+.ee-al.hide {
+  opacity: 0;
+}
+.ee-nowpill {
+  position: absolute;
+  top: 24px;
+  left: 0;
+  height: 17px;
+  line-height: 17px;
+  padding: 0 6px;
+  border-radius: 5px;
+  translate: calc((var(--ee-now) - var(--v0)) * var(--ppm) * 1px - 50%) 0;
+  background: var(--fg);
+  color: var(--bg);
+  font-size: 10.5px;
+  font-weight: 600;
+  z-index: 2;
+}
+
+/* ------------------------------------------------------------ rows */
+/* Rows sit above the grid so pills and marks cover the Now line. */
+.ee-body {
+  position: absolute;
+  z-index: 1;
+  top: var(--ax);
+  left: 0;
+  right: 0;
+  bottom: 0;
+  overflow: hidden;
+}
+.ee-rows {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 6px;
+}
+.ee-rows > .node {
+  width: 100%;
+  cursor: pointer;
+}
+.ee-rows > .node.stuck {
+  z-index: 3;
+}
+.ee-row {
+  position: relative;
+  height: var(--h);
+  transition: background-color 0.2s;
+}
+.ee-cell {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: var(--g);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 14px 0 16px;
+  min-width: 0;
+}
+.ee-lane {
+  position: absolute;
+  left: var(--g);
+  right: var(--r);
+  top: 0;
+  bottom: 0;
+  overflow: hidden;
+  transition: right 0.5s var(--ease);
+}
+.ee-lane-in {
+  position: absolute;
+  inset: 0;
+}
+
+/* Device header */
+.ee-dev {
+  border-top: 1px solid var(--hair);
+}
+.ee-rows > .node:first-child .ee-dev {
+  border-top-color: transparent;
+}
+.node.stuck .ee-dev {
+  background: var(--bg);
+  border-top-color: transparent;
+  box-shadow: 0 1px 0 var(--hair);
+}
+.ee-dev .ee-cell {
+  gap: 7px;
+  padding-top: 4px;
+}
+/* The load figure pins right without a spacer's extra gap, and the name
+   gives way first, so "Connecting" never pushes past the gutter. */
+.ee-dev .ee-sp {
+  display: none;
+}
+.ee-dev .ee-load {
+  margin-left: auto;
+  flex: none;
+}
+.ee-dev .ee-conn {
+  flex: none;
+}
+.ee-dev .ee-dname {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ee-dic {
+  display: grid;
+  color: var(--muted-fg);
+}
+.ee-dic .ic {
+  width: 15px;
+  height: 15px;
+}
+.ee-dname {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+  white-space: nowrap;
+}
+.ee-sp {
+  flex: 1;
+}
+.ee-conn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--faint-fg);
+  white-space: nowrap;
+}
+.ee-conn i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ok-fill);
+  transition: background-color 0.4s;
+}
+.ee-conn.c-online {
+  font-size: 0;
+  gap: 0;
+}
+.ee-conn.c-connecting {
+  color: var(--warn);
+}
+.ee-conn.c-connecting i {
+  background: var(--warn-fill);
+  animation: ee-blink 1.1s ease-in-out infinite;
+}
+.ee-conn.c-offline i {
+  background: var(--ghost-fg);
+}
+@keyframes ee-blink {
+  50% {
+    opacity: 0.25;
+  }
+}
+.ee-load {
+  font-size: 11px;
+  color: var(--faint-fg);
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.ee-due-n {
+  color: var(--warn);
+  font-weight: 500;
+}
+.node.is-sel .ee-dev .ee-dname,
+.node:hover .ee-dev .ee-dname {
+  text-decoration: underline;
+  text-decoration-color: var(--ghost-fg);
+  text-underline-offset: 3px;
+}
+
+/* Project sub-header (All projects) */
+.ee-proj .ee-cell {
+  gap: 8px;
+  padding-left: 39px;
+}
+.ee-proj .pav {
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  font-size: 9px;
+}
+.ee-pname {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--muted-fg);
+}
+.ee-ppath {
+  font-size: 10.5px;
+  color: var(--faint-fg);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Automation row */
+.k-auto:hover .ee-row {
+  background: var(--ee-row-hover);
+}
+.k-auto.is-sel .ee-row,
+.k-dev.is-sel .ee-row,
+.k-proj.is-sel .ee-row {
+  background: var(--ee-row-sel);
+}
+.k-auto.is-sel .ee-row::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 8px;
+  bottom: 8px;
+  width: 2px;
+  border-radius: 0 2px 2px 0;
+  background: var(--fg);
+}
+.ee-auto .ee-cell {
+  padding-left: 16px;
+  gap: 11px;
+}
+.ee-txt {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.ee-l1 {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  min-width: 0;
+}
+.ee-auto .ee-sub {
+  padding-left: 29px;
+}
+.ee-title {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: color 0.3s;
+}
+.ee-sub {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 11.5px;
+  min-width: 0;
+}
+.ee-cad {
+  flex: 1;
+  min-width: 0;
+  color: var(--faint-fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ee-cad i {
+  font-style: normal;
+  margin: 0 5px;
+  color: var(--ghost-fg);
+}
+.ee-next {
+  flex: none;
+  color: var(--muted-fg);
+  font-variant-numeric: tabular-nums;
+}
+.k-auto.paused .ee-title {
+  color: var(--muted-fg);
+}
+.k-auto.paused .ee-next {
+  color: var(--faint-fg);
+}
+.k-auto.paused .ee-lane-in {
+  opacity: 0.55;
+}
+
+/* Countdown ring (copied from Flow, prefixed) */
+.ee-ring {
+  width: 18px;
+  height: 18px;
+  flex: none;
+  rotate: -90deg;
+}
+.ee-ring circle {
+  fill: none;
+  stroke-width: 2.4;
+}
+.ee-ring .track {
+  stroke: var(--hair);
+}
+.dark .ee-ring .track {
+  stroke: rgba(255, 255, 255, 0.1);
+}
+.ee-ring .prog {
+  stroke: var(--teal);
+  stroke-linecap: round;
+  transition: stroke-dashoffset 0.9s linear;
+}
+.ee-ring .hand {
+  fill: none;
+  stroke: var(--muted-fg);
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  rotate: 90deg;
+  transform-origin: 12px 12px;
+}
+.k-auto.due .ee-ring .prog {
+  stroke: var(--warn-fill);
+}
+.k-auto.paused .ee-ring .prog {
+  stroke: transparent;
+}
+
+/* Empty device row */
+.ee-none-tx {
+  padding-left: 23px;
+  font-size: 12px;
+  color: var(--faint-fg);
+}
+.ee-none-cta {
+  position: absolute;
+  left: 14px;
+  top: 50%;
+  translate: 0 -50%;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+  color: var(--faint-fg);
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+.ee-none-cta .ic {
+  width: 12px;
+  height: 12px;
+}
+.k-empty:hover .ee-none-cta {
+  opacity: 1;
+}
+
+/* ------------------------------------------------------------ marks
+   Everything in a lane sits at a minute (--tt) and is translated by
+   the view; scale stays free for entrance and morph animations. */
+.ee-rail,
+.ee-band,
+.ee-cap,
+.ee-mk {
+  position: absolute;
+  left: 0;
+  top: 50%;
+}
+.ee-rail {
+  --a: max(var(--ee-now), calc(var(--v0) - 48 / var(--ppm)));
+  --b: min(var(--r1), calc(var(--v1) + 48 / var(--ppm)));
+  height: 1px;
+  margin-top: -0.5px;
+  translate: calc((var(--a) - var(--v0)) * var(--ppm) * 1px) 0;
+  width: max(0px, calc((var(--b) - var(--a)) * var(--ppm) * 1px));
+  background: var(--ee-rail);
+  transform-origin: left center;
+}
+.ee-rail.paused {
+  background: repeating-linear-gradient(90deg, var(--ee-rail) 0 4px, transparent 4px 8px);
+}
+.ee-band {
+  --a: max(var(--b0), calc(var(--v0) - 48 / var(--ppm)));
+  --b: min(var(--r1), calc(var(--v1) + 48 / var(--ppm)));
+  --tile: calc(var(--ev) * var(--ppm) * 1px);
+  height: 8px;
+  margin-top: -4px;
+  border-radius: 4px;
+  translate: calc((var(--a) - var(--v0)) * var(--ppm) * 1px - 3px) 0;
+  width: max(0px, calc((var(--b) - var(--a)) * var(--ppm) * 1px + 6px));
+  background-color: var(--ee-band);
+  background-image: linear-gradient(90deg, var(--ee-comb) 0 1.2px, transparent 1.2px);
+  background-size: var(--tile) 100%;
+  background-repeat: repeat-x;
+  background-position-x: calc((var(--b0) - var(--a)) * var(--ppm) * 1px + 2.4px);
+  -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 36px), transparent);
+  mask-image: linear-gradient(90deg, #000 calc(100% - 36px), transparent);
+  transform-origin: left center;
+}
+.ee-band.solid {
+  background-image: none;
+  background-color: color-mix(in srgb, var(--ee-comb) 55%, transparent);
+}
+.ee-cap {
+  width: 1.5px;
+  height: 14px;
+  margin-top: -7px;
+  border-radius: 1px;
+  translate: calc((var(--tt) - var(--v0)) * var(--ppm) * 1px) 0;
+  background: var(--muted-fg);
+}
+.ee-cap span {
+  position: absolute;
+  left: 7px;
+  top: 0;
+  font-size: 10.5px;
+  line-height: 14px;
+  color: var(--faint-fg);
+  white-space: nowrap;
+}
+.ee-cap.flip span {
+  left: auto;
+  right: -1px;
+  top: -16px;
+}
+.ee-cap.paused {
+  background: var(--faint-fg);
+}
+
+/* A run (past, now or upcoming). 22 px hit area centred on its minute;
+   in pill states the element itself becomes the pill. */
+.ee-mk {
+  height: 22px;
+  margin-top: -11px;
+  border-radius: 11px;
+  display: flex;
+  align-items: center;
+  translate: calc((var(--tt) - var(--v0)) * var(--ppm) * 1px - 11px + var(--dx)) 0;
+  color: var(--fg);
+  cursor: pointer;
+  z-index: 1;
+  white-space: nowrap;
+  transition:
+    background-color 0.4s,
+    color 0.4s,
+    box-shadow 0.4s,
+    --dx 0.5s var(--ease);
+}
+.ee-dot {
+  width: 22px;
+  height: 22px;
+  flex: none;
+  display: grid;
+  place-items: center;
+}
+.ee-dot > i {
+  display: block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  box-sizing: border-box;
+  background: var(--faint-fg);
+  transition:
+    background-color 0.4s,
+    border-color 0.4s,
+    width 0.35s var(--snappy),
+    height 0.35s var(--snappy),
+    border-radius 0.35s,
+    scale 0.2s var(--ease);
+}
+.ee-mk:hover .ee-dot > i {
+  scale: 1.35;
+}
+.ee-mk[data-st="tick"] .ee-dot > i {
+  width: 7px;
+  height: 7px;
+  background: var(--bg);
+  border: 1.5px solid var(--ee-tick);
+}
+.ee-mk[data-st="next"] {
+  z-index: 2;
+}
+.ee-mk[data-st="next"] .ee-dot > i,
+.ee-mk[data-st="once"] .ee-dot > i {
+  width: 9px;
+  height: 9px;
+  background: var(--bg);
+  border: 1.75px solid color-mix(in srgb, var(--fg) 80%, transparent);
+}
+.ee-mk[data-st="once"] {
+  z-index: 2;
+}
+.ee-mk[data-st="once"] .ee-dot > i {
+  border-radius: 2px;
+  rotate: 45deg;
+}
+.ee-mk[data-st="done"] .ee-dot > i {
+  background: var(--ok-fill);
+}
+.ee-mk[data-st="failed"] .ee-dot > i {
+  background: var(--err-fill);
+}
+.ee-mk[data-st="rejected"] .ee-dot > i {
+  background: var(--bg);
+  border: 1.5px solid var(--faint-fg);
+  background-image: linear-gradient(
+    135deg,
+    transparent 42%,
+    var(--faint-fg) 42% 58%,
+    transparent 58%
+  );
+}
+.ee-mk[data-st="done"],
+.ee-mk[data-st="failed"],
+.ee-mk[data-st="rejected"] {
+  z-index: 2;
+}
+.ee-mk.is-sel .ee-dot > i {
+  box-shadow:
+    0 0 0 3px var(--bg),
+    0 0 0 4.5px var(--fg);
+}
+/* A selected pill is outlined as a whole; a ring on its dot would cut
+   into the label. */
+.ee-mk.is-sel[data-st="pending"] .ee-dot > i,
+.ee-mk.is-sel[data-st="running"] .ee-dot > i {
+  box-shadow: none;
+}
+.ee-mk.is-sel[data-st="running"] {
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--info) 55%, transparent),
+    0 0 0 2px var(--bg),
+    0 0 0 3.5px var(--fg);
+}
+/* Dense cadence (e.g. every 30 min at Day): smaller ticks read as rhythm,
+   not as a chain of rings. */
+.ee-lane-in.dense .ee-mk[data-st="tick"] .ee-dot > i {
+  width: 5px;
+  height: 5px;
+  border-width: 1.25px;
+}
+
+/* The pill: label folds out of the dot */
+.ee-pill {
+  max-width: 0;
+  opacity: 0;
+  overflow: hidden;
+  margin-left: -4px;
+  font-size: 11.5px;
+  font-weight: 600;
+  transition:
+    max-width 0.5s var(--ease),
+    opacity 0.3s,
+    padding 0.5s var(--ease);
+}
+.ee-pill b {
+  font-weight: inherit;
+}
+.ee-tx {
+  position: absolute;
+  left: calc(100% + 8px);
+  top: 50%;
+  translate: 0 -50%;
+  font-size: 11.5px;
+  color: var(--muted-fg);
+  opacity: 0;
+  transition: opacity 0.3s;
+  pointer-events: none;
+  text-shadow:
+    0 0 3px var(--bg),
+    0 0 6px var(--bg),
+    0 0 1px var(--bg);
+}
+.ee-mk[data-st="pending"],
+.ee-mk[data-st="running"] {
+  z-index: 4;
+}
+.ee-mk[data-st="pending"] .ee-pill,
+.ee-mk[data-st="running"] .ee-pill {
+  max-width: 220px;
+  opacity: 1;
+  padding-right: 10px;
+}
+.ee-mk[data-st="pending"] {
+  background: var(--warn-fill);
+  color: #1b1200;
+  animation: ee-due 2.2s var(--ease) infinite;
+}
+.ee-mk[data-st="pending"] .ee-dot > i {
+  width: 7px;
+  height: 7px;
+  background: #1b1200;
+  opacity: 0.75;
+}
+@keyframes ee-due {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--warn-fill) 45%, transparent);
+  }
+  60% {
+    box-shadow: 0 0 0 6px transparent;
+  }
+}
+.ee-mk[data-st="running"] {
+  min-width: calc((var(--ee-now) - var(--tt)) * var(--ppm) * 1px + 22px);
+  background: color-mix(in srgb, var(--info) 16%, var(--bg));
+  color: var(--info);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--info) 30%, transparent);
+}
+/* The amber fill the approve morph wipes away (hidden otherwise). */
+.ee-mk[data-st="running"]::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: 11px;
+  background: var(--warn-fill);
+  clip-path: inset(0 0 0 100%);
+  pointer-events: none;
+}
+.ee-mk[data-st="running"] .ee-dot > i {
+  background: var(--info);
+  animation: ee-pulse 1.8s var(--ease) infinite;
+}
+.ee-mk[data-st="once"] .ee-tx {
+  opacity: 1;
+}
+.ee-mk[data-st="once"] .ee-tx {
+  left: calc(100% + 2px);
+  font-size: 11px;
+  color: var(--faint-fg);
+}
+@keyframes ee-pulse {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--info) 45%, transparent);
+  }
+  70%,
+  100% {
+    box-shadow: 0 0 0 6px transparent;
+  }
+}
+
+/* Where the schedule continues past the right edge */
+.ee-edge {
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  translate: 0 -50%;
+  font-size: 11px;
+  color: var(--faint-fg);
+  white-space: nowrap;
+  opacity: 0;
+  transition: opacity 0.3s;
+  pointer-events: none;
+}
+.ee-lane.has-edge .ee-edge {
+  opacity: 1;
+}
+.ee-lane.has-edge .ee-lane-in {
+  -webkit-mask-image: linear-gradient(
+    90deg,
+    #000 calc(100% - 132px),
+    transparent calc(100% - 96px)
+  );
+  mask-image: linear-gradient(90deg, #000 calc(100% - 132px), transparent calc(100% - 96px));
+}
+
+/* ------------------------------------------------------------ empty project */
+.ee-empty {
+  position: absolute;
+  left: var(--g);
+  right: var(--r);
+  display: none;
+  justify-content: center;
+  padding: 0 24px;
+  transition: right 0.5s var(--ease);
+}
+.ee-empty.on {
+  display: flex;
+}
+.ee-empty-in {
+  max-width: 400px;
+  padding: 18px 22px 20px;
+  text-align: center;
+  cursor: auto;
+  /* Lifts the copy off the day lines without drawing a card. */
+  background: var(--bg);
+  border-radius: 12px;
+  animation: ee-rise 0.6s var(--ease) both;
+}
+.ee-empty-h {
+  font-size: 14px;
+  font-weight: 600;
+}
+.ee-empty-in p {
+  margin: 6px 0 14px;
+  font-size: 12.5px;
+  color: var(--muted-fg);
+  line-height: 1.5;
+}
+.ee-empty-a {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+}
+@keyframes ee-rise {
+  from {
+    opacity: 0;
+    translate: 0 8px;
+  }
+}
+
+/* ------------------------------------------------------------ controls */
+.ee-zoom {
+  gap: 2px;
+}
+.ee-presets {
+  display: flex;
+  gap: 2px;
+  padding: 0 2px;
+}
+.ee-zoom .ee-preset {
+  width: auto;
+  padding: 0 9px;
+  font-size: 12px;
+  color: var(--muted-fg);
+}
+.ee-zoom .ee-preset[aria-pressed="true"] {
+  background: var(--accent-strong);
+  color: var(--fg);
+}
+.ee-legend {
+  left: 14px;
+  bottom: 14px;
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: var(--popover);
+  border: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--muted-fg);
+  transition:
+    opacity 0.3s,
+    translate 0.4s var(--ease);
+}
+.ee-legend.off {
+  opacity: 0;
+  translate: 0 6px;
+  pointer-events: none;
+}
+.ee-legend span {
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.ee-legend .ee-lg-sep {
+  width: 1px;
+  height: 12px;
+  background: var(--hair);
+}
+.ee-lg {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  box-sizing: border-box;
+  display: inline-block;
+}
+.ee-lg.done {
+  background: var(--ok-fill);
+}
+.ee-lg.failed {
+  background: var(--err-fill);
+}
+.ee-lg.rejected {
+  border: 1.5px solid var(--faint-fg);
+  background: linear-gradient(135deg, transparent 42%, var(--faint-fg) 42% 58%, transparent 58%);
+}
+.ee-lg.next {
+  border: 1.6px solid color-mix(in srgb, var(--fg) 75%, transparent);
+}
+.ee-lg.once {
+  border: 1.6px solid color-mix(in srgb, var(--fg) 75%, transparent);
+  border-radius: 1.5px;
+  rotate: 45deg;
+  width: 7px;
+  height: 7px;
+}
+.ee-lg.band {
+  width: 22px;
+  height: 7px;
+  border-radius: 3.5px;
+  background-color: var(--ee-band);
+  background-image: linear-gradient(90deg, var(--ee-comb) 0 1.2px, transparent 1.2px);
+  background-size: 4px 100%;
+}
+
+/* ------------------------------------------------------------ inspector content */
+.ei-kind {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--faint-fg);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.ei-kind .ic {
+  width: 13px;
+  height: 13px;
+}
+.ei-title {
+  margin: 6px 26px 2px 0;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  word-break: break-word;
+}
+.ei-title.mono {
+  font-size: 14.5px;
+  font-weight: 500;
+}
+.ei-sub {
+  font-size: 12px;
+  color: var(--muted-fg);
+}
+.ei-rows {
+  margin: 14px 0 0;
+  display: grid;
+  grid-template-columns: 78px 1fr;
+  gap: 7px 10px;
+  font-size: 12.5px;
+}
+.ei-rows dt {
+  color: var(--faint-fg);
+}
+.ei-rows dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.ei-rows .mono {
+  font-size: 11.5px;
+}
+.ei-path {
+  margin-top: 1px;
+  overflow-wrap: normal;
+  word-break: keep-all;
+}
+.ei-sec {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--hair);
+}
+.ei-sec h4 {
+  margin: 0 0 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--faint-fg);
+}
+.ei-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  margin: 0 -8px;
+  border-radius: 8px;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.ei-item.static {
+  cursor: default;
+}
+.ei-item:not(.static):hover {
+  background: var(--accent);
+}
+.ei-item .trunc {
+  flex: 1;
+}
+.ei-item .ic {
+  width: 13px;
+  height: 13px;
+  color: var(--faint-fg);
+}
+.ei-empty {
+  font-size: 12px;
+  line-height: 1.5;
+}
+.ei-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 16px;
+}
+.ei-btn {
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ei-btn:hover {
+  background: var(--accent);
+}
+.ei-btn .ic {
+  width: 13px;
+  height: 13px;
+}
+.ei-btn.primary {
+  background: var(--fg);
+  color: var(--bg);
+  border-color: transparent;
+}
+.ei-btn.primary:hover {
+  opacity: 0.88;
+}
+.ei-btn.danger {
+  color: var(--err);
+}
+.ei-item > .dim:last-child {
+  flex: none;
+}
+.ei-item .origin {
+  flex: none;
+}
+/* The next run leads the list. */
+.ei-item.first .trunc {
+  color: var(--fg);
+  font-weight: 500;
+}
+.ei-item.first .ei-tick {
+  border-color: var(--fg);
+}
+.ei-item.static:not(.first) .trunc {
+  color: var(--muted-fg);
+}
+.ei-due,
+.ei-live {
+  margin-top: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  font-size: 12.5px;
+}
+.ei-due {
+  background: color-mix(in srgb, var(--warn-fill) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warn-fill) 35%, transparent);
+}
+.ei-live {
+  background: color-mix(in srgb, var(--info) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--info) 26%, transparent);
+}
+.ei-due {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+}
+.ei-due-h {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  line-height: 1.45;
+}
+.ei-due-h .ic {
+  width: 14px;
+  height: 14px;
+  margin-top: 2px;
+  color: var(--warn);
+}
+.ei-due-a {
+  display: flex;
+  gap: 6px;
+  padding-left: 22px;
+}
+.ei-live > span:not(.sdot):not(.ei-link) {
+  flex: 1 1 140px;
+}
+.ei-run {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--faint-fg);
+}
+.ei-run.r-completed {
+  background: var(--ok-fill);
+}
+.ei-run.r-failed {
+  background: var(--err-fill);
+}
+.ei-run.r-executing,
+.ei-run.r-approved {
+  background: var(--info);
+}
+.ei-run.r-pending-approval {
+  background: var(--warn-fill);
+}
+.ei-run.r-rejected,
+.ei-run.r-expired {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--faint-fg);
+}
+.ei-tick {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+  box-sizing: border-box;
+  border: 1.5px solid var(--muted-fg);
+}
+.ei-tick.once {
+  border-radius: 1.5px;
+  rotate: 45deg;
+  width: 7px;
+  height: 7px;
+}
+.ei-link {
+  color: var(--fg);
+  text-decoration: underline;
+  text-decoration-color: var(--ghost-fg);
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+/* ------------------------------------------------------------ reduced motion */
+[data-motion="off"] .ee,
+[data-motion="off"] .ee-mk {
+  animation: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .ee {
+    transition: none;
+  }
+  .ee-mk[data-st="pending"],
+  .ee-mk[data-st="running"] .ee-dot > i,
+  .ee-conn.c-connecting i,
+  .ee-empty-in {
+    animation: none;
+  }
+  .ee-grid,
+  .ee-axis,
+  .ee-lane,
+  .ee-empty,
+  .ee-pill,
+  .ee-mk,
+  .ee-legend,
+  .ee-dot > i,
+  .ee-ring .prog {
+    transition: none;
+  }
+}

@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Ryco · Workspace Map Lab</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600;9..40,700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="base.css" />
+    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="dir-a.css" />
+    <link rel="stylesheet" href="dir-b.css" />
+    <link rel="stylesheet" href="dir-c.css" />
+    <link rel="stylesheet" href="dir-d.css" />
+    <link rel="stylesheet" href="dir-e.css" />
+  </head>
+  <body>
+    <div class="lab">
+      <header class="lab-bar">
+        <div>
+          <h1 class="lab-title">Workspace map</h1>
+          <p class="lab-sub">
+            Five ways to see what lives where: project → devices → workspaces → threads, and which
+            automations run on which device. Same data, live simulation running. Drag to pan,
+            ⌘-scroll or pinch to zoom, double-click to fit, click anything to inspect.
+          </p>
+        </div>
+        <div class="lab-controls">
+          <button class="lab-btn" id="live-btn" type="button" aria-pressed="true"></button>
+          <button
+            class="lab-btn icon"
+            id="reset-btn"
+            type="button"
+            data-tip="Reset simulation"
+          ></button>
+          <button
+            class="lab-btn icon"
+            id="theme-btn"
+            type="button"
+            data-tip="Toggle theme"
+          ></button>
+          <button class="lab-btn" id="motion-btn" type="button" aria-pressed="true">
+            Motion on
+          </button>
+        </div>
+      </header>
+      <nav class="seg lab-tabs" id="tabs" role="tablist" aria-label="Direction">
+        <button class="seg-opt" role="tab" data-tab="A"><b>A</b>Flow</button>
+        <button class="seg-opt" role="tab" data-tab="B"><b>B</b>Lanes</button>
+        <button class="seg-opt" role="tab" data-tab="C"><b>C</b>Branches</button>
+        <button class="seg-opt" role="tab" data-tab="D"><b>D</b>Zoom</button>
+        <button class="seg-opt" role="tab" data-tab="E"><b>E</b>Schedule</button>
+      </nav>
+      <main class="stage" id="stage"></main>
+    </div>
+    <script src="icons.js"></script>
+    <script src="data.js"></script>
+    <script src="core.js"></script>
+    <script src="dir-a.js"></script>
+    <script src="dir-b.js"></script>
+    <script src="dir-c.js"></script>
+    <script src="dir-d.js"></script>
+    <script src="dir-e.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>
