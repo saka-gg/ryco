@@ -1,0 +1,523 @@
+/* Projects page — the project map (Map view): canvas, nodes, wires, inspector. */
+
+/* Map ⇄ Settings: the switch's plate travels; the new view settles in. */
+.projects-view-plate {
+  transition: translate var(--app-motion-duration-stack) var(--app-motion-ease);
+}
+.projects-view-enter {
+  animation: projects-view-enter var(--app-motion-duration-pane) var(--app-motion-ease);
+}
+@keyframes projects-view-enter {
+  from {
+    opacity: 0;
+    translate: 0 6px;
+  }
+}
+
+.map-canvas {
+  --map-grid-size: 22px;
+  --map-grid-x: 0px;
+  --map-grid-y: 0px;
+  --map-wire: color-mix(in srgb, var(--foreground) 16%, transparent);
+  --map-wire-hot: color-mix(in srgb, var(--foreground) 55%, transparent);
+  /* Literal hues: Tailwind only emits palette variables it sees in classes. */
+  --map-run: #0d9488;
+  --map-same: #7c3aed;
+  cursor: grab;
+  touch-action: none;
+}
+.dark .map-canvas {
+  --map-run: #2dd4bf;
+  --map-same: #a78bfa;
+}
+.map-canvas[data-panning] {
+  cursor: grabbing;
+}
+.map-grid {
+  background-image: radial-gradient(
+    circle at 1px 1px,
+    color-mix(in srgb, var(--foreground) 9%, transparent) 1px,
+    transparent 1.2px
+  );
+  background-size: var(--map-grid-size) var(--map-grid-size);
+  background-position: var(--map-grid-x) var(--map-grid-y);
+}
+.map-world {
+  will-change: transform;
+}
+
+/* Nodes: positioned by transform, so a move is a glide. */
+.map-node {
+  transition: transform var(--app-motion-duration-pane) var(--app-motion-ease);
+  cursor: pointer;
+  animation: map-node-in calc(var(--app-motion-duration-pane) * 1.3) var(--app-motion-ease)
+    calc(var(--map-i, 0) * 18ms) backwards;
+}
+.map-node[data-dragging] {
+  transition: none;
+  cursor: grabbing;
+  z-index: 2;
+}
+.map-canvas[data-dragging] .map-wire {
+  transition: none;
+}
+.map-node[data-state="exiting"] {
+  pointer-events: none;
+  animation: map-node-out var(--app-motion-duration-pop) ease-in forwards;
+}
+@keyframes map-node-in {
+  from {
+    opacity: 0;
+    translate: 0 -8px;
+  }
+}
+@keyframes map-node-out {
+  to {
+    opacity: 0;
+    translate: 0 -6px;
+  }
+}
+
+.map-card {
+  border-radius: min(var(--radius-lg), 0.75rem);
+  border: 1px solid var(--border);
+  background: var(--popover);
+  box-shadow:
+    0 1px 0 color-mix(in srgb, var(--foreground) 3%, transparent),
+    0 8px 24px -16px rgb(0 0 0 / 0.35);
+  transition:
+    opacity var(--app-motion-duration-stack) ease,
+    filter var(--app-motion-duration-stack) ease,
+    border-color var(--app-motion-duration-chip) ease,
+    box-shadow var(--app-motion-duration-stack) var(--app-motion-ease);
+}
+.map-node:hover .map-card {
+  border-color: color-mix(in srgb, var(--foreground) 22%, transparent);
+}
+.map-node[data-selected] .map-card {
+  border-color: color-mix(in srgb, var(--foreground) 55%, transparent);
+  box-shadow:
+    0 0 0 3px color-mix(in srgb, var(--foreground) 8%, transparent),
+    0 14px 34px -16px rgb(0 0 0 / 0.4);
+}
+.map-node[data-dragging] .map-card {
+  box-shadow: 0 24px 48px -18px rgb(0 0 0 / 0.5);
+}
+.map-node[data-muted] .map-card {
+  border-style: dashed;
+  background: transparent;
+  box-shadow: none;
+}
+.map-node[data-map-node="thread"] .map-card {
+  border-radius: min(var(--radius-md), 0.5625rem);
+}
+.map-node[data-due] .map-card {
+  border-color: color-mix(in srgb, var(--warning) 60%, transparent);
+  box-shadow:
+    0 0 0 3px color-mix(in srgb, var(--warning) 14%, transparent),
+    0 8px 24px -16px rgb(0 0 0 / 0.35);
+}
+
+/* Lineage: hovering (or selecting) lights a node's parents and children. */
+.map-node[data-lit="off"] .map-card {
+  opacity: 0.34;
+  filter: saturate(0.4);
+}
+.map-label {
+  transition:
+    transform var(--app-motion-duration-pane) var(--app-motion-ease),
+    opacity var(--app-motion-duration-stack) ease;
+  animation: map-node-in calc(var(--app-motion-duration-pane) * 1.3) var(--app-motion-ease)
+    backwards;
+}
+.map-label[data-dim] {
+  opacity: 0.4;
+}
+.map-canvas[data-dragging] .map-label {
+  transition: none;
+}
+/* Facts stay on one line; the last one gives way (the full list is in the title). */
+.map-facts > :last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* The inspector takes the bottom-left too on narrow canvases: the legend steps aside. */
+.map-canvas:has(.map-inspector[data-open]) .map-legend {
+  opacity: 0;
+  pointer-events: none;
+}
+.map-legend {
+  transition: opacity var(--app-motion-duration-stack) ease;
+}
+
+/* Ports: where wires plug in. */
+.map-port {
+  position: absolute;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--popover);
+  border: 1.5px solid color-mix(in srgb, var(--foreground) 20%, transparent);
+  transition: border-color var(--app-motion-duration-chip) ease;
+}
+.map-port[data-port="left"] {
+  left: -5px;
+  top: calc(50% - 4.5px);
+}
+.map-port[data-port="right"] {
+  right: -5px;
+  top: calc(50% - 4.5px);
+}
+.map-port[data-port="top"] {
+  top: -5px;
+  left: calc(50% - 4.5px);
+}
+.map-port[data-port="bottom"] {
+  bottom: -5px;
+  left: calc(50% - 4.5px);
+}
+.map-port[data-port="trunk"] {
+  bottom: -5px;
+  left: 13.5px;
+}
+.map-node[data-lit="on"] .map-port {
+  border-color: var(--foreground);
+}
+
+/* Wires. The path's `d` transitions, so wires follow gliding nodes. */
+.map-wire {
+  fill: none;
+  stroke: var(--map-wire);
+  stroke-width: 1.5;
+  transition:
+    d var(--app-motion-duration-pane) var(--app-motion-ease),
+    stroke var(--app-motion-duration-stack) ease,
+    opacity var(--app-motion-duration-stack) ease;
+  animation: map-wire-in calc(var(--app-motion-duration-pane) * 1.4) ease-out
+    var(--app-motion-duration-stack) backwards;
+}
+@keyframes map-wire-in {
+  from {
+    opacity: 0;
+  }
+}
+.map-wire[data-muted] {
+  stroke-dasharray: 4 5;
+}
+.map-wire[data-kind="same-branch"] {
+  stroke: var(--map-same);
+  stroke-dasharray: 3 5;
+  opacity: 0.65;
+}
+.map-wire[data-kind="run"] {
+  stroke: var(--map-run);
+  stroke-width: 2;
+  stroke-dasharray: 1 5;
+  stroke-linecap: round;
+  opacity: 0.75;
+}
+/* Work flowing through a wire: a slow, quiet dash. */
+.map-wire[data-flow] {
+  stroke: var(--info);
+  stroke-dasharray: 2 9;
+  stroke-linecap: round;
+  opacity: 0.8;
+  animation:
+    map-wire-in calc(var(--app-motion-duration-pane) * 1.4) ease-out backwards,
+    map-wire-flow 1.6s linear infinite;
+}
+.map-wire[data-kind="run"][data-flow] {
+  stroke: var(--map-run);
+  stroke-dasharray: 1 5;
+  animation:
+    map-wire-in calc(var(--app-motion-duration-pane) * 1.4) ease-out backwards,
+    map-wire-flow-run 1.2s linear infinite;
+}
+@keyframes map-wire-flow {
+  to {
+    stroke-dashoffset: -22;
+  }
+}
+@keyframes map-wire-flow-run {
+  to {
+    stroke-dashoffset: -12;
+  }
+}
+.map-wire[data-lit="on"] {
+  stroke: var(--map-wire-hot);
+}
+.map-wire[data-lit="on"][data-flow] {
+  stroke: var(--info);
+}
+.map-wire[data-lit="on"][data-kind="run"] {
+  stroke: var(--map-run);
+}
+.map-wire[data-lit="on"][data-kind="same-branch"] {
+  stroke: var(--map-same);
+}
+/* A wire that left fades with its node. */
+.map-wire[data-state="exiting"] {
+  animation: map-wire-out var(--app-motion-duration-pop) ease-in forwards;
+}
+@keyframes map-wire-out {
+  to {
+    opacity: 0;
+  }
+}
+.map-wire[data-lit="off"] {
+  opacity: 0.22;
+}
+
+/* Labels on the canvas */
+.map-same-chip {
+  display: inline-block;
+  translate: -50% -50%;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px dashed color-mix(in srgb, var(--map-same) 50%, transparent);
+  background: var(--background);
+  color: var(--map-same);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+
+/* Far zoom: names only, the structure still reads. */
+.map-canvas[data-zoom="far"] .map-detail {
+  opacity: 0;
+}
+.map-detail {
+  transition: opacity var(--app-motion-duration-stack) ease;
+}
+
+/* Facts: quiet unless they need care. */
+.map-fact + .map-fact::before {
+  content: "·";
+  margin-right: 0.375rem;
+  color: var(--muted-foreground);
+  opacity: 0.6;
+}
+.map-fact[data-tone="warning"] {
+  color: var(--warning-foreground);
+}
+
+/* Thread tally: the inbox's colours, as dots. */
+.map-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--foreground) 22%, transparent);
+}
+.map-dot[data-glyph="working"],
+.map-dot[data-glyph="connecting"] {
+  background: var(--info);
+}
+.map-dot[data-glyph="needs-input"],
+.map-dot[data-glyph="limited"] {
+  background: var(--warning);
+}
+.map-dot[data-glyph="completed"] {
+  background: var(--success);
+}
+.map-dot[data-glyph="error"] {
+  background: var(--destructive);
+}
+.map-dot[data-glyph="archived"] {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.2px color-mix(in srgb, var(--foreground) 30%, transparent);
+}
+.map-chevron {
+  transition: rotate var(--app-motion-duration-stack) var(--app-motion-ease);
+}
+.map-tally[aria-expanded="true"] .map-chevron {
+  rotate: 90deg;
+}
+
+/* Device presence */
+.map-presence i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--success);
+}
+.map-presence[data-status="connecting"] i {
+  background: var(--warning);
+  animation: map-blink 1.1s ease-in-out infinite;
+}
+.map-presence[data-status="offline"] i,
+.map-presence[data-status="unknown"] i {
+  background: color-mix(in srgb, var(--foreground) 25%, transparent);
+}
+@keyframes map-blink {
+  50% {
+    opacity: 0.25;
+  }
+}
+
+/* Countdown ring */
+.map-ring circle {
+  fill: none;
+  stroke-width: 2.4;
+}
+.map-ring-track {
+  stroke: color-mix(in srgb, var(--foreground) 10%, transparent);
+}
+.map-ring-progress {
+  stroke: var(--map-run);
+  stroke-linecap: round;
+  transition: stroke-dashoffset 0.9s linear;
+}
+.map-node[data-muted] .map-ring-progress {
+  stroke: transparent;
+}
+.map-ring-hand {
+  fill: none;
+  stroke: var(--muted-foreground);
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  transform-origin: 12px 12px;
+  rotate: 90deg;
+}
+
+/* A due run asks for approval right on the node. */
+.map-approve {
+  color: oklch(0.25 0.06 70);
+  background: var(--warning);
+  animation: map-due 2.2s var(--app-motion-ease) infinite;
+}
+@keyframes map-due {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--warning) 50%, transparent);
+  }
+  60% {
+    box-shadow: 0 0 0 6px transparent;
+  }
+}
+.map-due {
+  background: color-mix(in srgb, var(--warning) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warning) 35%, transparent);
+}
+.map-run {
+  width: 7px;
+  height: 7px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--foreground) 25%, transparent);
+}
+.map-run[data-status="completed"] {
+  background: var(--success);
+}
+.map-run[data-status="failed"] {
+  background: var(--destructive);
+}
+.map-run[data-status="executing"],
+.map-run[data-status="approved"],
+.map-run[data-status="materializing"] {
+  background: var(--info);
+}
+.map-run[data-status="pending-approval"] {
+  background: var(--warning);
+}
+
+/* Toolbar chips, zoom controls, legend */
+.map-chip {
+  border-color: var(--border);
+  background: var(--popover);
+  color: var(--muted-foreground);
+}
+.map-chip:hover {
+  color: var(--foreground);
+}
+.map-chip[aria-pressed="false"] {
+  border-style: dashed;
+  background: transparent;
+}
+.map-zoom-button {
+  display: inline-flex;
+  width: 26px;
+  height: 26px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 7px;
+  color: var(--muted-foreground);
+  outline: none;
+  transition:
+    background-color var(--app-motion-duration-chip) ease,
+    color var(--app-motion-duration-chip) ease;
+}
+.map-zoom-button:hover {
+  background: var(--accent);
+  color: var(--foreground);
+}
+.map-zoom-button:focus-visible {
+  box-shadow: 0 0 0 2px var(--ring);
+}
+.map-legend path {
+  fill: none;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+}
+.map-legend-run path {
+  stroke: var(--info);
+  stroke-dasharray: 2 5;
+}
+.map-legend-same path {
+  stroke: var(--map-same);
+  stroke-dasharray: 3 4;
+}
+.map-legend-auto path {
+  stroke: var(--map-run);
+  stroke-dasharray: 1 4;
+  stroke-width: 2;
+}
+
+/* Inspector: slides in from the canvas edge; new subjects settle in. */
+.map-inspector {
+  cursor: auto;
+  translate: calc(100% + 24px) 0;
+  opacity: 0;
+  transition:
+    translate var(--app-motion-duration-pane) var(--app-motion-ease),
+    width var(--app-motion-duration-pane) var(--app-motion-ease),
+    opacity var(--app-motion-duration-stack) ease;
+}
+.map-inspector[data-open] {
+  translate: 0 0;
+  opacity: 1;
+}
+.map-inspector-body {
+  animation: map-inspector-settle var(--app-motion-duration-pane) var(--app-motion-ease);
+}
+@keyframes map-inspector-settle {
+  from {
+    opacity: 0;
+    translate: 0 8px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .map-node,
+  .map-node[data-state="exiting"],
+  .map-wire,
+  .map-wire[data-flow],
+  .map-wire[data-kind="run"][data-flow],
+  .map-wire[data-state="exiting"],
+  .map-label,
+  .map-presence[data-status="connecting"] i,
+  .map-approve,
+  .map-inspector-body,
+  .projects-view-enter {
+    animation: none;
+  }
+  .map-node,
+  .map-wire,
+  .map-label,
+  .map-legend,
+  .map-inspector,
+  .map-ring-progress,
+  .map-chevron,
+  .projects-view-plate {
+    transition: none;
+  }
+}

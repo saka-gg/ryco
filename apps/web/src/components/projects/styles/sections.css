@@ -1,0 +1,89 @@
+/* Projects page — sections: landing ring, saved tick, name field. */
+
+/*
+ * A section reached from the navigation, a deep link or a menu: its card
+ * rings once so the eye finds where the page landed.
+ */
+@keyframes projects-section-landed {
+  0%,
+  35% {
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--ring) 55%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 2px transparent;
+  }
+}
+
+.projects-section-landed [data-slot="settings-card"] {
+  animation: projects-section-landed calc(var(--app-motion-duration-stack, 260ms) * 4)
+    var(--app-motion-ease) both;
+}
+
+/* A workspace reached from a menu: its row tints once, the same rhythm as a section. */
+@keyframes projects-row-landed {
+  0%,
+  35% {
+    background-color: color-mix(in srgb, var(--accent) 80%, transparent);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+
+.projects-row-landed {
+  animation: projects-row-landed calc(var(--app-motion-duration-stack, 260ms) * 4)
+    var(--app-motion-ease) both;
+}
+
+/*
+ * "Saved": rises in beside what changed, holds, then fades. Re-keyed on
+ * every save so a second save replays it; never needs a timer.
+ */
+@keyframes projects-saved-tick {
+  0% {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  12%,
+  70% {
+    opacity: 1;
+    transform: none;
+  }
+  100% {
+    opacity: 0;
+    transform: none;
+  }
+}
+
+@keyframes projects-saved-fade {
+  0% {
+    opacity: 0;
+  }
+  12%,
+  70% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+.projects-saved-tick {
+  animation: projects-saved-tick 1800ms var(--app-motion-ease) forwards;
+}
+
+/* The project name edits in place: it sizes to its text like the heading it is. */
+.projects-name-field {
+  field-sizing: content;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .projects-section-landed [data-slot="settings-card"],
+  .projects-row-landed {
+    animation: none;
+  }
+  /* No travel, but the tick must still leave once it has been read. */
+  .projects-saved-tick {
+    animation-name: projects-saved-fade;
+  }
+}

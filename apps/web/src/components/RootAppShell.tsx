@@ -1,7 +1,7 @@
 import { type ServerLifecycleWelcomePayload, WS_METHODS } from "@ryco/contracts";
 import { scopedProjectKey, scopeProjectRef } from "@ryco/client-runtime/scoped";
 import { Outlet, useLocation, useNavigate } from "@tanstack/react-router";
-import { useEffect, useEffectEvent, useRef } from "react";
+import { lazy, Suspense, useEffect, useEffectEvent, useRef, useState } from "react";
 
 import { OnboardingCoordinator } from "./onboarding/OnboardingCoordinator";
 import { AppSidebarLayout } from "./AppSidebarLayout";
@@ -12,7 +12,8 @@ import {
 } from "./RootAppShell.logic";
 import { ContextMenuActionSheetHost } from "./shell/phone/ContextMenuActionSheetHost";
 import { SshPasswordPromptDialog } from "./desktop/SshPasswordPromptDialog";
-import { WorkspaceLifecycleDialogHost } from "./workspaceLifecycle/WorkspaceLifecycleDialog";
+import { WorkspaceReviewDialog } from "./worktrees/WorkspaceReviewDialog";
+import { useAutomationsDialogStore } from "./automations/automationsDialogStore";
 import { ProviderUpdateLaunchNotification } from "./ProviderUpdateLaunchNotification";
 import {
   SlowRpcAckToastCoordinator,
@@ -83,7 +84,8 @@ export function RootAppShell({ authGateState }: RootAppShellProps) {
         {chatAvailable ? <MessageQueueDrainBridge /> : null}
         <ContextMenuActionSheetHost />
         <SshPasswordPromptDialog />
-        <WorkspaceLifecycleDialogHost />
+        <WorkspaceReviewDialog />
+        {chatAvailable ? <AutomationsDialogMount /> : null}
         {authGateState.status === "hosted-static" ? <HostedStaticEnvironmentBootstrap /> : null}
         {primaryEnvironmentAuthenticated ? (
           <EventRouter hosted={authGateState.status === "hosted-hub"} />
@@ -102,6 +104,25 @@ export function RootAppShell({ authGateState }: RootAppShellProps) {
         )}
       </AnchoredToastProvider>
     </ToastProvider>
+  );
+}
+
+const LazyAutomationsDialog = lazy(() =>
+  import("./automations/dialog/AutomationsDialog").then((module) => ({
+    default: module.AutomationsDialog,
+  })),
+);
+
+/** The Automations dialog loads the first time something opens it, then stays mounted. */
+function AutomationsDialogMount() {
+  const open = useAutomationsDialogStore((state) => state.open);
+  const [hasOpened, setHasOpened] = useState(open);
+  if (open && !hasOpened) setHasOpened(true);
+  if (!hasOpened) return null;
+  return (
+    <Suspense fallback={null}>
+      <LazyAutomationsDialog />
+    </Suspense>
   );
 }
 

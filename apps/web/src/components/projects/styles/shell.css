@@ -1,0 +1,61 @@
+/* Projects page — shell: detail settle, scope settle, bar title. */
+
+/*
+ * Project change (list click, j/k). The new detail enters from the direction
+ * of travel and never starts fully transparent, so no frame is blank; bar and
+ * body move as one unit.
+ */
+@keyframes projects-detail-settle {
+  from {
+    transform: translateY(calc(var(--projects-motion-dir, 0) * 8px));
+    opacity: 0.4;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+
+.projects-detail-settle {
+  animation: projects-detail-settle var(--app-motion-duration-pop, 200ms) var(--app-motion-ease)
+    both;
+}
+
+/* Checkout (device) change inside one project: a quick tone settle, no travel. */
+@keyframes projects-scope-settle {
+  from {
+    opacity: 0.6;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.projects-scope-settle {
+  animation: projects-scope-settle var(--app-motion-duration-chip, 120ms) var(--app-motion-ease)
+    both;
+}
+
+/* Bar title: hidden while the hero is on screen, rises in once it leaves. */
+.projects-bar-title {
+  opacity: 0;
+  transform: translateY(6px);
+  transition:
+    opacity var(--app-motion-duration-pop, 200ms) var(--app-motion-ease),
+    transform var(--app-motion-duration-pop, 200ms) var(--app-motion-ease);
+}
+
+.projects-bar-title[data-visible="true"] {
+  opacity: 1;
+  transform: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .projects-detail-settle,
+  .projects-scope-settle {
+    animation: none;
+  }
+  .projects-bar-title {
+    transition: none;
+  }
+}

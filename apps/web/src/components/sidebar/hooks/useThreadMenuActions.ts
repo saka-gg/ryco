@@ -12,6 +12,7 @@ import {
   type ThreadId,
   WorktreeId,
 } from "@ryco/contracts";
+import type { WorkspaceActionId } from "@ryco/client-runtime/state/lifecycle";
 import { newCommandId } from "../../../lib/utils";
 import { readEnvironmentApi } from "../../../environmentApi";
 import { readLocalApi } from "../../../localApi";
@@ -19,7 +20,8 @@ import { useComposerDraftStore, type DraftId } from "../../../composerDraftStore
 import { resolveThreadRouteTarget } from "../../../threadRoutes";
 import { useUiStateStore } from "../../../uiStateStore";
 import { selectSidebarWorktreesForProjectRef, useStore } from "../../../store";
-import { runWorkspaceLifecycleAction } from "../../../workspaceLifecycle";
+import { renameThread } from "../../../threadMutations";
+import { buildWorkspaceLocation, runWorkspaceLifecycleAction } from "../../../workspaceLifecycle";
 import {
   buildThreadMenuInventory,
   type ThreadMenuActionId,
@@ -55,9 +57,11 @@ export function useThreadMenuActions(params: {
   memberProjectByScopedKey: ReadonlyMap<string, Pick<SidebarProjectGroupMember, "cwd">>;
   projectCwd: string | null | undefined;
   openProjectSettings?: (projectRef: ScopedProjectRef) => void;
-  /** Inbox rows add a Workspace submenu; project-sidebar rows sit under their workspace node. */
+  /**
+   * Inbox rows add a Workspace submenu; project-sidebar rows sit under their workspace node.
+   * Checkout changes and "Manage workspaces…" open the thread's project page.
+   */
   includeWorkspaceSubmenu?: boolean;
-  openWorkspaceManagement?: (projectRef: ScopedProjectRef) => void;
 }) {
   const {
     router,
@@ -76,7 +80,6 @@ export function useThreadMenuActions(params: {
     projectCwd,
     openProjectSettings,
     includeWorkspaceSubmenu = false,
-    openWorkspaceManagement,
   } = params;
   const [renamingThreadKey, setRenamingThreadKey] = useState<string | null>(null);
   const [renamingTitle, setRenamingTitle] = useState("");
@@ -213,12 +216,7 @@ export function useThreadMenuActions(params: {
         return;
       }
       try {
-        await api.orchestration.dispatchCommand({
-          type: "thread.meta.update",
-          commandId: newCommandId(),
-          threadId: threadRef.threadId,
-          title: trimmed,
-        });
+        await renameThread(threadRef, trimmed);
       } catch (error) {
         toastManager.add(
           stackedThreadToast({
@@ -367,7 +365,14 @@ export function useThreadMenuActions(params: {
         return;
       }
       if (actionId === "workspace:manage") {
-        openWorkspaceManagement?.(scopeProjectRef(thread.environmentId, thread.projectId));
+        const { record } = resolveThreadWorkspace(thread);
+        await router.navigate(
+          buildWorkspaceLocation({
+            environmentId: thread.environmentId,
+            projectId: thread.projectId,
+            worktreeId: record ? WorktreeId.make(record.id) : null,
+          }),
+        );
         return;
       }
       if (actionId.startsWith("workspace:")) {
@@ -375,10 +380,9 @@ export function useThreadMenuActions(params: {
         if (!record) return;
         await runWorkspaceLifecycleAction({
           environmentId: thread.environmentId,
+          projectId: thread.projectId,
           worktreeId: WorktreeId.make(record.id),
-          action: actionId.slice("workspace:".length) as Parameters<
-            typeof runWorkspaceLifecycleAction
-          >[0]["action"],
+          action: actionId.slice("workspace:".length) as WorkspaceActionId,
           title: record.title ?? record.branch,
         });
         return;
@@ -412,8 +416,8 @@ export function useThreadMenuActions(params: {
       appSettingsConfirmThreadUnpin,
       requestTrashThread,
       interruptThreadTurn,
-      openWorkspaceManagement,
       resolveThreadWorkspace,
+      router,
       stopThreadSession,
       copyPathToClipboard,
       copyThreadIdToClipboard,

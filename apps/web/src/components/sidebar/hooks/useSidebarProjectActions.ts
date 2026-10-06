@@ -1,13 +1,14 @@
 import { useCallback } from "react";
 import { scopedProjectKey, scopeProjectRef } from "@ryco/client-runtime/scoped";
-import { newCommandId } from "../../../lib/utils";
-import { readEnvironmentApi } from "../../../environmentApi";
 import { readLocalApi } from "../../../localApi";
-import { useComposerDraftStore } from "../../../composerDraftStore";
+import {
+  describeProjectRemoval,
+  openProjectRemote,
+  removeProjectCheckout,
+} from "../../../projectMutations";
 import { selectSidebarThreadsForProjectRefs, useStore } from "../../../store";
 import type { SidebarProjectGroupMember } from "../../../sidebarProjectGrouping";
 import { stackedThreadToast, toastManager } from "../../ui/toast";
-import { resolveProjectRemoteLink } from "../sidebarProjectRemoteLink";
 
 export function useSidebarProjectActions(params: {
   memberThreadCountByPhysicalKey: ReadonlyMap<string, number>;
@@ -15,38 +16,10 @@ export function useSidebarProjectActions(params: {
 }) {
   const { memberThreadCountByPhysicalKey, jiraProjectOpenUrlByProjectKey } = params;
 
-  const openProjectRemoteLink = useCallback((member: SidebarProjectGroupMember) => {
-    const remoteLink = resolveProjectRemoteLink(
-      member.repositoryIdentity,
-      member.preferredRemoteName,
-    );
-    if (!remoteLink) {
-      toastManager.add({
-        type: "warning",
-        title: "No remote link available",
-      });
-      return;
-    }
-
-    const api = readLocalApi();
-    if (!api) {
-      toastManager.add({
-        type: "error",
-        title: "Link opening is unavailable.",
-      });
-      return;
-    }
-
-    void api.shell.openExternal(remoteLink.url).catch((error) => {
-      toastManager.add(
-        stackedThreadToast({
-          type: "error",
-          title: "Unable to open remote repository",
-          description: error instanceof Error ? error.message : "An error occurred.",
-        }),
-      );
-    });
-  }, []);
+  const openProjectRemoteLink = useCallback(
+    (member: SidebarProjectGroupMember) => openProjectRemote(member),
+    [],
+  );
 
   const openProjectJiraLink = useCallback(
     (member: SidebarProjectGroupMember) => {
@@ -85,27 +58,8 @@ export function useSidebarProjectActions(params: {
   );
 
   const removeProject = useCallback(
-    async (member: SidebarProjectGroupMember, options: { force?: boolean } = {}): Promise<void> => {
-      const memberProjectRef = scopeProjectRef(member.environmentId, member.id);
-      const draftStore = useComposerDraftStore.getState();
-      const projectDraftThread = draftStore.getDraftThreadByProjectRef(memberProjectRef);
-      if (projectDraftThread) {
-        draftStore.clearDraftThread(projectDraftThread.draftId);
-      }
-      draftStore.clearProjectDraftThreadId(memberProjectRef);
-
-      const projectApi = readEnvironmentApi(member.environmentId);
-      if (!projectApi) {
-        throw new Error("Project API unavailable.");
-      }
-
-      await projectApi.orchestration.dispatchCommand({
-        type: "project.delete",
-        commandId: newCommandId(),
-        projectId: member.id,
-        ...(options.force === true ? { force: true } : {}),
-      });
-    },
+    (member: SidebarProjectGroupMember, options: { force?: boolean } = {}): Promise<void> =>
+      removeProjectCheckout(member, options),
     [],
   );
 
@@ -138,28 +92,12 @@ export function useSidebarProjectActions(params: {
                     useStore.getState(),
                     [memberProjectRef],
                   );
+                  const removal = describeProjectRemoval({
+                    ...member,
+                    threadCount: latestProjectThreads.length,
+                  });
                   const confirmed = await api.dialogs.confirm(
-                    latestProjectThreads.length > 0
-                      ? [
-                          `Remove project "${member.name}" and delete its ${latestProjectThreads.length} thread${
-                            latestProjectThreads.length === 1 ? "" : "s"
-                          }?`,
-                          `Path: ${member.cwd}`,
-                          ...(member.environmentLabel
-                            ? [`Environment: ${member.environmentLabel}`]
-                            : []),
-                          "This permanently clears conversation history for those threads.",
-                          "This removes only this project entry.",
-                          "This action cannot be undone.",
-                        ].join("\n")
-                      : [
-                          `Remove project "${member.name}"?`,
-                          `Path: ${member.cwd}`,
-                          ...(member.environmentLabel
-                            ? [`Environment: ${member.environmentLabel}`]
-                            : []),
-                          "This removes only this project entry.",
-                        ].join("\n"),
+                    [removal.title, ...removal.lines].join("\n"),
                   );
                   if (!confirmed) {
                     return;
@@ -189,13 +127,8 @@ export function useSidebarProjectActions(params: {
         return;
       }
 
-      const message = [
-        `Remove project "${member.name}"?`,
-        `Path: ${member.cwd}`,
-        ...(member.environmentLabel ? [`Environment: ${member.environmentLabel}`] : []),
-        "This removes only this project entry.",
-      ].join("\n");
-      const confirmed = await api.dialogs.confirm(message);
+      const removal = describeProjectRemoval({ ...member, threadCount: 0 });
+      const confirmed = await api.dialogs.confirm([removal.title, ...removal.lines].join("\n"));
       if (!confirmed) {
         return;
       }

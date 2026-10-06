@@ -15,6 +15,7 @@ import { useHostedHubStore } from "../hostedHub/state";
 
 import { scopedThreadKey, scopeProjectRef, scopeThreadRef } from "@ryco/client-runtime/scoped";
 import {
+  AGENT_CONTROL_WS_METHODS,
   ORCHESTRATION_WS_METHODS,
   WS_METHODS,
   type EnvironmentApi,
@@ -36,6 +37,7 @@ import {
   ArrowLeftIcon,
   ArrowUpIcon,
   BarChart3Icon,
+  CalendarClockIcon,
   GitPullRequestCreateIcon,
   GitPullRequestIcon,
   CircleAlertIcon,
@@ -43,6 +45,7 @@ import {
   CornerLeftUpIcon,
   FolderIcon,
   FolderTreeIcon,
+  FoldersIcon,
   FolderPlusIcon,
   FolderSymlinkIcon,
   LinkIcon,
@@ -50,6 +53,7 @@ import {
   MessageSquareIcon,
   PinIcon,
   PinOffIcon,
+  Settings2Icon,
   SettingsIcon,
   SquarePenIcon,
 } from "lucide-react";
@@ -137,10 +141,10 @@ import { AzureDevOpsIcon, BitbucketIcon, ForgejoIcon, GitHubIcon, GitLabIcon } f
 import { ProjectFavicon } from "./ProjectFavicon";
 import { useCreatePullRequestDialogStore } from "./pullRequests/create/createPullRequestDialogStore";
 import {
-  buildPullRequestRepositoryOptions,
-  pullRequestRepositoryQualifier,
-  type PullRequestRepositoryOption,
-} from "./pullRequests/pullRequestRepositories.logic";
+  buildProjectCheckoutOptions,
+  projectCheckoutQualifier,
+  type ProjectCheckoutOption,
+} from "../projectCheckouts.logic";
 import { ThreadRowLeadingStatus, ThreadRowTrailingStatus } from "./ThreadStatusIndicators";
 import {
   Command,
@@ -155,7 +159,9 @@ import { stackedThreadToast, toastManager } from "./ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 import { useComposerHandleContext } from "../composerHandleContext";
 import { useHostedRpcCapability } from "../hostedHub/capabilities";
+import { openAutomationsDialog } from "./automations/automationsDialogStore";
 import { getPresentationTier } from "../lib/presentationTier";
+import { buildProjectsPageLocation } from "../projectsRoute";
 import { buildPullRequestsPageLocation } from "../pullRequestsRoute";
 import { useSettingsDialogStore } from "../settingsDialogStore";
 import { useThreadSelectionStore } from "../threadSelectionStore";
@@ -437,6 +443,8 @@ function OpenCommandPaletteDialog() {
   const addProjectCapability = useHostedRpcCapability(WS_METHODS.projectsAdd);
   const statisticsCapability = useHostedRpcCapability(WS_METHODS.serverGetStatistics);
   const pullRequestsCapability = useHostedRpcCapability(WS_METHODS.sourceControlListChangeRequests);
+  const projectsCapability = useHostedRpcCapability(WS_METHODS.projectsList);
+  const automationsCapability = useHostedRpcCapability(AGENT_CONTROL_WS_METHODS.automationCentre);
   const createPullRequestCapability = useHostedRpcCapability(
     WS_METHODS.sourceControlCreateChangeRequest,
   );
@@ -828,25 +836,25 @@ function OpenCommandPaletteDialog() {
     [openProjectFromSearch, projects],
   );
 
-  // One entry per checkout the pull requests page can read, labelled like
-  // the page's repository switcher (environment only when checkouts share a name).
+  // One entry per checkout (a project on one environment), labelled like the
+  // pages' checkout switchers (environment only when checkouts share a name).
   const { snapshots: logicalProjects } = useLogicalProjectSnapshots();
-  const pullRequestRepositoryOptions = useMemo(
-    () => buildPullRequestRepositoryOptions(logicalProjects),
+  const checkoutOptions = useMemo(
+    () => buildProjectCheckoutOptions(logicalProjects),
     [logicalProjects],
   );
-  /** One palette row per checkout, as the page's repository switcher labels it. */
-  const buildPullRequestRepositoryItems = useCallback(
+  /** One palette row per checkout, as the pages' checkout switchers label it. */
+  const buildCheckoutItems = useCallback(
     (
       valuePrefix: string,
-      run: (option: PullRequestRepositoryOption) => Promise<void>,
+      run: (option: ProjectCheckoutOption) => Promise<void>,
     ): CommandPaletteActionItem[] => {
-      const options = pullRequestRepositoryOptions;
+      const options = checkoutOptions;
       const projectByKey = new Map(
         projects.map((project) => [`${project.environmentId}\0${project.id}`, project] as const),
       );
       return options.map((option) => {
-        const environment = pullRequestRepositoryQualifier(option, options);
+        const environment = projectCheckoutQualifier(option, options);
         const project = projectByKey.get(`${option.environmentId}\0${option.projectId}`);
         return {
           kind: "action",
@@ -867,11 +875,11 @@ function OpenCommandPaletteDialog() {
         };
       });
     },
-    [projects, pullRequestRepositoryOptions],
+    [checkoutOptions, projects],
   );
   const pullRequestRepositoryItems = useMemo(
     () =>
-      buildPullRequestRepositoryItems("pull-requests-in", async (option) => {
+      buildCheckoutItems("pull-requests-in", async (option) => {
         await navigate(
           buildPullRequestsPageLocation({
             environmentId: option.environmentId,
@@ -879,12 +887,24 @@ function OpenCommandPaletteDialog() {
           }),
         );
       }),
-    [buildPullRequestRepositoryItems, navigate],
+    [buildCheckoutItems, navigate],
+  );
+  const projectCheckoutItems = useMemo(
+    () =>
+      buildCheckoutItems("project-in", async (option) => {
+        await navigate(
+          buildProjectsPageLocation({
+            environmentId: option.environmentId,
+            projectId: option.projectId,
+          }),
+        );
+      }),
+    [buildCheckoutItems, navigate],
   );
   // The create dialog opens over whatever is on screen; the new request then
   // opens on the pull requests page.
   const startCreatePullRequest = useCallback(
-    (option: PullRequestRepositoryOption) => {
+    (option: ProjectCheckoutOption) => {
       setOpen(false);
       openCreatePullRequest({
         environmentId: option.environmentId,
@@ -897,10 +917,10 @@ function OpenCommandPaletteDialog() {
   );
   const newPullRequestRepositoryItems = useMemo(
     () =>
-      buildPullRequestRepositoryItems("new-pull-request-in", async (option) => {
+      buildCheckoutItems("new-pull-request-in", async (option) => {
         startCreatePullRequest(option);
       }),
-    [buildPullRequestRepositoryItems, startCreatePullRequest],
+    [buildCheckoutItems, startCreatePullRequest],
   );
 
   const projectThreadItems = useMemo(
@@ -1490,8 +1510,7 @@ function OpenCommandPaletteDialog() {
       });
     }
     // One checkout: straight to the dialog. Several: pick the checkout first.
-    const onlyPullRequestRepository =
-      pullRequestRepositoryOptions.length === 1 ? pullRequestRepositoryOptions[0] : undefined;
+    const onlyPullRequestRepository = checkoutOptions.length === 1 ? checkoutOptions[0] : undefined;
     const newPullRequestCommon = {
       searchTerms: [
         "new pull request",
@@ -1525,6 +1544,104 @@ function OpenCommandPaletteDialog() {
         groups: [
           { value: "repositories", label: "Repositories", items: newPullRequestRepositoryItems },
         ],
+      });
+    }
+
+    // Viewers may look; the page itself makes its controls read-only.
+    const projectsDisabled = {
+      ...(projectsCapability.reason ? { description: projectsCapability.reason } : {}),
+      disabled: !projectsCapability.allowed,
+    };
+    actionItems.push({
+      kind: "action",
+      value: "action:projects",
+      searchTerms: [
+        "projects",
+        "manage projects",
+        "project settings",
+        "scripts",
+        "actions",
+        "worktrees",
+        "remotes",
+        "devices",
+      ],
+      // "Show Projects sidebar" is the sidebar mode; this is the page.
+      title: "Open projects page",
+      icon: <FoldersIcon className={ITEM_ICON_CLASS} />,
+      shortcutCommand: "projects.open",
+      ...projectsDisabled,
+      run: async () => {
+        setOpen(false);
+        await navigate(buildProjectsPageLocation());
+      },
+    });
+    const currentProjectTitle = currentProjectId
+      ? (projectTitleById.get(currentProjectId) ?? null)
+      : null;
+    if (currentProjectEnvironmentId && currentProjectId && currentProjectTitle) {
+      actionItems.push({
+        kind: "action",
+        value: "action:current-project-settings",
+        searchTerms: ["project settings", "configure project", "project", currentProjectTitle],
+        title: (
+          <>
+            Project settings for <span className="font-semibold">{currentProjectTitle}</span>
+          </>
+        ),
+        icon: <Settings2Icon className={ITEM_ICON_CLASS} />,
+        ...projectsDisabled,
+        run: async () => {
+          setOpen(false);
+          await navigate(
+            buildProjectsPageLocation({
+              environmentId: currentProjectEnvironmentId,
+              projectId: currentProjectId,
+              view: "settings",
+            }),
+          );
+        },
+      });
+    }
+    // The current project's schedules; elsewhere, the project last shown there.
+    // A desktop dialog: the frozen web phone tier doesn't get it (nor the
+    // sidebar's entry).
+    if (presentationTier !== "phone") {
+      actionItems.push({
+        kind: "action",
+        value: "action:automations",
+        searchTerms: [
+          "automations",
+          "schedules",
+          "scheduled runs",
+          "recurring",
+          "cron",
+          "approve run",
+          ...(currentProjectTitle ? [currentProjectTitle] : []),
+        ],
+        title: "Automations…",
+        ...(automationsCapability.reason ? { description: automationsCapability.reason } : {}),
+        disabled: !automationsCapability.allowed,
+        icon: <CalendarClockIcon className={ITEM_ICON_CLASS} />,
+        run: async () => {
+          setOpen(false);
+          openAutomationsDialog(
+            currentProjectEnvironmentId && currentProjectId
+              ? { environmentId: currentProjectEnvironmentId, projectId: currentProjectId }
+              : {},
+          );
+        },
+      });
+    }
+    if (projectCheckoutItems.length > 1) {
+      actionItems.push({
+        kind: "submenu",
+        value: "action:project-in",
+        searchTerms: ["open project", "project overview", "project settings", "projects"],
+        title: "Open project…",
+        icon: <FoldersIcon className={ITEM_ICON_CLASS} />,
+        addonIcon: <FoldersIcon className={ADDON_ICON_CLASS} />,
+        groups: [{ value: "projects", label: "Projects", items: projectCheckoutItems }],
+        ...projectsDisabled,
       });
     }
   }

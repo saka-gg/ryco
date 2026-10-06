@@ -145,6 +145,26 @@ const makeAgentControlAutomationRepository = Effect.gen(function* () {
     `,
   });
 
+  const listCentreAutomationRows = SqlSchema.findAll({
+    Request: Schema.Struct({
+      projectId: AgentControlAutomation.fields.projectId,
+      limit: Schema.Int,
+    }),
+    Result: Schema.Unknown,
+    execute: ({ projectId, limit }) => sql`
+      SELECT automation_id AS "automationId", principal_json AS "principal",
+        project_id AS "projectId", provider_instance_id AS "providerInstanceId",
+        definition_json AS "definition", revision, enabled, cancelled,
+        cancelled_at AS "cancelledAt", next_run_at AS "nextRunAt",
+        created_at AS "createdAt", updated_at AS "updatedAt"
+      FROM agent_control_automations
+      WHERE project_id = ${projectId} AND cancelled = 0
+        AND NOT EXISTS (SELECT 1 FROM agent_control_automation_quarantine q WHERE q.kind = 'automation' AND q.id = agent_control_automations.automation_id)
+      ORDER BY (enabled = 1 AND next_run_at IS NOT NULL) DESC, updated_at DESC, automation_id ASC
+      LIMIT ${limit}
+    `,
+  });
+
   const dueAutomationRows = SqlSchema.findAll({
     Request: Schema.Struct({ now: AgentControlAutomation.fields.updatedAt, limit: Schema.Int }),
     Result: Schema.Unknown,
@@ -294,6 +314,23 @@ const makeAgentControlAutomationRepository = Effect.gen(function* () {
         toError(
           "AgentControlAutomationRepository.listAutomations:query",
           "AgentControlAutomationRepository.listAutomations:decode",
+        ),
+      ),
+    );
+
+  const listCentreAutomations: AgentControlAutomationRepositoryShape["listCentreAutomations"] = (
+    input,
+  ) =>
+    listCentreAutomationRows({
+      projectId: input.projectId,
+      limit: Math.max(1, Math.floor(input.limit)),
+    }).pipe(
+      Effect.flatMap(decodeAutomations),
+      Effect.map((rows) => rows.map(toAutomation)),
+      Effect.mapError(
+        toError(
+          "AgentControlAutomationRepository.listCentreAutomations:query",
+          "AgentControlAutomationRepository.listCentreAutomations:decode",
         ),
       ),
     );
@@ -589,6 +626,7 @@ const makeAgentControlAutomationRepository = Effect.gen(function* () {
     insertAutomation,
     getAutomation,
     listAutomations,
+    listCentreAutomations,
     countActiveAutomations,
     replaceAutomation,
     claimDue,

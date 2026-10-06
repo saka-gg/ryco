@@ -1,4 +1,4 @@
-import { AutomationCentre } from "../automations/AutomationCentre";
+import { AutomationsSummary } from "../automations/AutomationsSummary";
 import { usePresentationTier } from "../../hooks/usePresentationTier";
 import {
   ExternalLinkIcon,
@@ -7,25 +7,10 @@ import {
   SlidersHorizontalIcon,
   SparklesIcon,
 } from "lucide-react";
-import React, { useEffect, useMemo, useRef, useState } from "react";
-import { useMutation, useQueryClient } from "~/rpc/queryClient";
-import {
-  invalidateAtlassian,
-  useAtlassianConnections,
-  useAtlassianProjectLink,
-} from "~/rpc/useAtlassian";
-import { invalidateWorkItems } from "~/rpc/useWorkItems";
-import {
-  PROJECT_CUSTOM_SYSTEM_PROMPT_MAX_CHARS,
-  type AtlassianConnectionId,
-  type AtlassianConnectionSummary,
-  type RepositoryIdentity,
-} from "@ryco/contracts";
+import React, { useEffect, useRef, useState } from "react";
+import { PROJECT_CUSTOM_SYSTEM_PROMPT_MAX_CHARS } from "@ryco/contracts";
 import type { SidebarProjectGroupMember } from "../../sidebarProjectGrouping";
-import { buildJiraProjectUnlinkInput } from "../../lib/atlassianProjectLinks";
-import { readEnvironmentConnection } from "../../environments/runtime";
 import { cn } from "../../lib/utils";
-import { stackedThreadToast, toastManager } from "../ui/toast";
 import { Button } from "../ui/button";
 import { Dialog, DialogPopup, DialogTitle } from "../ui/dialog";
 import { Input } from "../ui/input";
@@ -34,37 +19,12 @@ import { Textarea } from "../ui/textarea";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Switch } from "../ui/switch";
 import { ProjectFavicon } from "../ProjectFavicon";
-import {
-  AzureDevOpsIcon,
-  BitbucketIcon,
-  ForgejoIcon,
-  GitHubIcon,
-  GitIcon,
-  GitLabIcon,
-  type Icon,
-} from "../Icons";
+import { resolveRepositoryProviderIcon } from "./sidebarProjectRemoteLink";
 import { JiraProjectPicker } from "../atlassian/JiraProjectPicker";
-
-// ---------------------------------------------------------------------------
-// Shared helpers
-// ---------------------------------------------------------------------------
-
-function resolveRepositoryProviderIcon(provider: string | undefined): Icon {
-  switch (provider) {
-    case "github":
-      return GitHubIcon;
-    case "gitlab":
-      return GitLabIcon;
-    case "forgejo":
-      return ForgejoIcon;
-    case "azure-devops":
-      return AzureDevOpsIcon;
-    case "bitbucket":
-      return BitbucketIcon;
-    default:
-      return GitIcon;
-  }
-}
+import {
+  ATLASSIAN_NONE_VALUE,
+  useProjectAtlassianLinkForm,
+} from "../atlassian/useProjectAtlassianLinkForm";
 
 // ---------------------------------------------------------------------------
 // Navigation items
@@ -437,227 +397,17 @@ function ProjectSettingsAiSection(props: {
 }
 
 // ---------------------------------------------------------------------------
-// Atlassian helpers
-// ---------------------------------------------------------------------------
-
-const ATLASSIAN_NONE_VALUE = "Not configured";
-
-function atlassianConnectionValue(value: AtlassianConnectionId | null | undefined): string {
-  return value ?? ATLASSIAN_NONE_VALUE;
-}
-
-function nullableAtlassianConnectionId(value: string): AtlassianConnectionId | null {
-  return value === ATLASSIAN_NONE_VALUE || value.trim().length === 0
-    ? null
-    : (value as AtlassianConnectionId);
-}
-
-function splitAtlassianProjectKeys(value: string): string[] {
-  return value
-    .split(/[,\s]+/u)
-    .map((part) => part.trim().toUpperCase())
-    .filter(Boolean);
-}
-
-function bitbucketRemoteSuggestion(repositoryIdentity: RepositoryIdentity | null | undefined): {
-  workspace: string;
-  repoSlug: string;
-} {
-  if (repositoryIdentity?.provider?.toLowerCase() !== "bitbucket") {
-    return { workspace: "", repoSlug: "" };
-  }
-  return {
-    workspace: repositoryIdentity.owner ?? "",
-    repoSlug: repositoryIdentity.name ?? "",
-  };
-}
-
-function connectionProductFilter(product: "jira" | "bitbucket") {
-  return (connection: AtlassianConnectionSummary) =>
-    connection.status === "connected" && connection.products.includes(product);
-}
-
-// ---------------------------------------------------------------------------
 // Atlassian section
 // ---------------------------------------------------------------------------
 
 function ProjectAtlassianSettingsSection(props: { target: SidebarProjectGroupMember | null }) {
   const target = props.target;
-  const queryClient = useQueryClient();
-  const connection = target ? readEnvironmentConnection(target.environmentId) : null;
-  const client = connection?.client ?? null;
-  const [jiraConnectionValue, setJiraConnectionValue] = useState(ATLASSIAN_NONE_VALUE);
-  const [bitbucketConnectionValue, setBitbucketConnectionValue] = useState(ATLASSIAN_NONE_VALUE);
-  const [jiraProjectKeys, setJiraProjectKeys] = useState("");
-  const [bitbucketWorkspace, setBitbucketWorkspace] = useState("");
-  const [bitbucketRepoSlug, setBitbucketRepoSlug] = useState("");
-  const [defaultIssueTypeName, setDefaultIssueTypeName] = useState("");
-  const [branchNameTemplate, setBranchNameTemplate] = useState("{issueKey}-{titleSlug}");
-  const [commitMessageTemplate, setCommitMessageTemplate] = useState("{issueKey}: {summary}");
-  const [pullRequestTitleTemplate, setPullRequestTitleTemplate] = useState("{issueKey}: {summary}");
-  const [smartLinkingEnabled, setSmartLinkingEnabled] = useState(true);
-  const [autoAttachWorkItems, setAutoAttachWorkItems] = useState(true);
-  const dirtyRef = useRef(false);
-  const initializedTargetRef = useRef<string | null>(null);
-
-  const projectLinkQuery = useAtlassianProjectLink({
+  const form = useProjectAtlassianLinkForm({
     environmentId: target?.environmentId ?? null,
     projectId: target?.id ?? null,
-    enabled: client !== null && target !== null,
+    repositoryIdentity: target?.repositoryIdentity,
   });
-
-  const connectionsQuery = useAtlassianConnections({
-    environmentId: target?.environmentId ?? null,
-    enabled: client !== null,
-  });
-
-  const jiraConnections = useMemo(
-    () => (connectionsQuery.data ?? []).filter(connectionProductFilter("jira")),
-    [connectionsQuery.data],
-  );
-  const bitbucketConnections = useMemo(
-    () => (connectionsQuery.data ?? []).filter(connectionProductFilter("bitbucket")),
-    [connectionsQuery.data],
-  );
-
-  useEffect(() => {
-    if (!target) return;
-    const targetKey = `${target.environmentId}:${target.id}`;
-    if (initializedTargetRef.current !== targetKey) {
-      initializedTargetRef.current = targetKey;
-      dirtyRef.current = false;
-    }
-    if (dirtyRef.current) return;
-    const link = projectLinkQuery.data;
-    const remote = bitbucketRemoteSuggestion(target.repositoryIdentity);
-    setJiraConnectionValue(
-      atlassianConnectionValue(link?.jiraConnectionId ?? jiraConnections[0]?.connectionId),
-    );
-    setBitbucketConnectionValue(
-      atlassianConnectionValue(
-        link?.bitbucketConnectionId ?? bitbucketConnections[0]?.connectionId,
-      ),
-    );
-    setJiraProjectKeys(link?.jiraProjectKeys.join(", ") ?? "");
-    setBitbucketWorkspace(link?.bitbucketWorkspace ?? remote.workspace);
-    setBitbucketRepoSlug(link?.bitbucketRepoSlug ?? remote.repoSlug);
-    setDefaultIssueTypeName(link?.defaultIssueTypeName ?? "");
-    setBranchNameTemplate(link?.branchNameTemplate ?? "{issueKey}-{titleSlug}");
-    setCommitMessageTemplate(link?.commitMessageTemplate ?? "{issueKey}: {summary}");
-    setPullRequestTitleTemplate(link?.pullRequestTitleTemplate ?? "{issueKey}: {summary}");
-    setSmartLinkingEnabled(link?.smartLinkingEnabled ?? true);
-    setAutoAttachWorkItems(link?.autoAttachWorkItems ?? true);
-  }, [bitbucketConnections, jiraConnections, projectLinkQuery.data, target]);
-
-  const markDirty = () => {
-    dirtyRef.current = true;
-  };
-
-  const invalidateAtlassianProjectSettings = () => {
-    invalidateAtlassian({ environmentId: target?.environmentId ?? null });
-    invalidateWorkItems({
-      environmentId: target?.environmentId ?? null,
-      projectId: target?.id ?? null,
-    });
-    void queryClient.invalidateQueries({ queryKey: ["atlassian"] });
-    void queryClient.invalidateQueries({ queryKey: ["workItems"] });
-  };
-
-  const saveMutation = useMutation({
-    mutationFn: async () => {
-      if (!client || !target) throw new Error("Project connection is unavailable.");
-      const branchTemplate = branchNameTemplate.trim();
-      const commitTemplate = commitMessageTemplate.trim();
-      const prTemplate = pullRequestTitleTemplate.trim();
-      if (!branchTemplate || !commitTemplate || !prTemplate) {
-        throw new Error("Branch, commit, and pull request templates cannot be empty.");
-      }
-      return client.atlassian.saveProjectLink({
-        projectId: target.id,
-        jiraConnectionId: nullableAtlassianConnectionId(jiraConnectionValue),
-        bitbucketConnectionId: nullableAtlassianConnectionId(bitbucketConnectionValue),
-        jiraCloudId: projectLinkQuery.data?.jiraCloudId ?? null,
-        jiraSiteUrl: null,
-        jiraProjectKeys: splitAtlassianProjectKeys(jiraProjectKeys),
-        bitbucketWorkspace: bitbucketWorkspace.trim() || null,
-        bitbucketRepoSlug: bitbucketRepoSlug.trim() || null,
-        defaultIssueTypeName: defaultIssueTypeName.trim() || null,
-        branchNameTemplate: branchTemplate,
-        commitMessageTemplate: commitTemplate,
-        pullRequestTitleTemplate: prTemplate,
-        smartLinkingEnabled,
-        autoAttachWorkItems,
-      });
-    },
-    onSuccess: () => {
-      dirtyRef.current = false;
-      invalidateAtlassianProjectSettings();
-      toastManager.add(
-        stackedThreadToast({
-          type: "success",
-          title: "Atlassian project settings saved",
-          description: "Jira and Bitbucket defaults were updated for this project.",
-        }),
-      );
-    },
-    onError: (error) => {
-      toastManager.add(
-        stackedThreadToast({
-          type: "error",
-          title: "Could not save Atlassian project settings",
-          description: error instanceof Error ? error.message : "The project link was not saved.",
-        }),
-      );
-    },
-  });
-
-  const unlinkJiraMutation = useMutation({
-    mutationFn: async () => {
-      if (!client || !target) throw new Error("Project connection is unavailable.");
-      return client.atlassian.saveProjectLink(
-        buildJiraProjectUnlinkInput({
-          projectId: target.id,
-          existing: projectLinkQuery.data ?? null,
-        }),
-      );
-    },
-    onSuccess: () => {
-      dirtyRef.current = false;
-      setJiraConnectionValue(ATLASSIAN_NONE_VALUE);
-      setJiraProjectKeys("");
-      invalidateAtlassianProjectSettings();
-      toastManager.add(
-        stackedThreadToast({
-          type: "success",
-          title: "Jira project unlinked",
-          description: "Bitbucket mapping and project templates were left unchanged.",
-        }),
-      );
-    },
-    onError: (error) => {
-      toastManager.add(
-        stackedThreadToast({
-          type: "error",
-          title: "Could not unlink Jira project",
-          description: error instanceof Error ? error.message : "The project link was not saved.",
-        }),
-      );
-    },
-  });
-
-  const isLoading = projectLinkQuery.isLoading || connectionsQuery.isLoading;
-  const disabled =
-    client === null || target === null || saveMutation.isPending || unlinkJiraMutation.isPending;
-  const jiraLinked =
-    projectLinkQuery.data?.jiraConnectionId !== null &&
-    projectLinkQuery.data?.jiraConnectionId !== undefined &&
-    projectLinkQuery.data.jiraProjectKeys.length > 0;
-  const selectedJiraConnectionId = nullableAtlassianConnectionId(jiraConnectionValue);
-  const selectedJiraConnection = jiraConnections.find(
-    (connection) => connection.connectionId === selectedJiraConnectionId,
-  );
-  const selectedJiraSiteUrl =
-    selectedJiraConnection?.baseUrl ?? projectLinkQuery.data?.jiraSiteUrl ?? "";
+  const { fields, setters, disabled, isLoading, jiraConnections, bitbucketConnections } = form;
 
   return (
     <div className="space-y-5">
@@ -686,12 +436,9 @@ function ProjectAtlassianSettingsSection(props: { target: SidebarProjectGroupMem
           <div className="space-y-1.5">
             <label className="text-xs font-medium text-foreground">Jira connection</label>
             <Select
-              value={jiraConnectionValue}
+              value={fields.jiraConnectionValue}
               onValueChange={(value) => {
-                if (typeof value === "string") {
-                  markDirty();
-                  setJiraConnectionValue(value);
-                }
+                if (typeof value === "string") setters.setJiraConnectionValue(value);
               }}
             >
               <SelectTrigger size="sm" disabled={disabled}>
@@ -710,12 +457,9 @@ function ProjectAtlassianSettingsSection(props: { target: SidebarProjectGroupMem
           <div className="space-y-1.5">
             <label className="text-xs font-medium text-foreground">Bitbucket connection</label>
             <Select
-              value={bitbucketConnectionValue}
+              value={fields.bitbucketConnectionValue}
               onValueChange={(value) => {
-                if (typeof value === "string") {
-                  markDirty();
-                  setBitbucketConnectionValue(value);
-                }
+                if (typeof value === "string") setters.setBitbucketConnectionValue(value);
               }}
             >
               <SelectTrigger size="sm" disabled={disabled}>
@@ -740,48 +484,36 @@ function ProjectAtlassianSettingsSection(props: { target: SidebarProjectGroupMem
           <ProjectSettingsField label="Jira project keys">
             <JiraProjectPicker
               environmentId={target?.environmentId ?? null}
-              connectionId={selectedJiraConnectionId}
-              siteUrl={selectedJiraSiteUrl}
-              projectKeys={jiraProjectKeys}
+              connectionId={form.selectedJiraConnectionId}
+              siteUrl={form.selectedJiraSiteUrl}
+              projectKeys={fields.jiraProjectKeys}
               disabled={disabled}
-              onProjectKeysChange={(value) => {
-                markDirty();
-                setJiraProjectKeys(value);
-              }}
+              onProjectKeysChange={setters.setJiraProjectKeys}
             />
             <Input
               size="sm"
-              value={jiraProjectKeys}
+              value={fields.jiraProjectKeys}
               disabled={disabled}
               placeholder="WEB, API"
-              onChange={(event) => {
-                markDirty();
-                setJiraProjectKeys(event.currentTarget.value);
-              }}
+              onChange={(event) => setters.setJiraProjectKeys(event.currentTarget.value)}
             />
           </ProjectSettingsField>
           <ProjectSettingsField label="Bitbucket workspace">
             <Input
               size="sm"
-              value={bitbucketWorkspace}
+              value={fields.bitbucketWorkspace}
               disabled={disabled}
               placeholder="workspace"
-              onChange={(event) => {
-                markDirty();
-                setBitbucketWorkspace(event.currentTarget.value);
-              }}
+              onChange={(event) => setters.setBitbucketWorkspace(event.currentTarget.value)}
             />
           </ProjectSettingsField>
           <ProjectSettingsField label="Bitbucket repo slug">
             <Input
               size="sm"
-              value={bitbucketRepoSlug}
+              value={fields.bitbucketRepoSlug}
               disabled={disabled}
               placeholder="repo-slug"
-              onChange={(event) => {
-                markDirty();
-                setBitbucketRepoSlug(event.currentTarget.value);
-              }}
+              onChange={(event) => setters.setBitbucketRepoSlug(event.currentTarget.value)}
             />
           </ProjectSettingsField>
         </div>
@@ -793,46 +525,34 @@ function ProjectAtlassianSettingsSection(props: { target: SidebarProjectGroupMem
           <ProjectSettingsField label="Default issue type">
             <Input
               size="sm"
-              value={defaultIssueTypeName}
+              value={fields.defaultIssueTypeName}
               disabled={disabled}
               placeholder="Task"
-              onChange={(event) => {
-                markDirty();
-                setDefaultIssueTypeName(event.currentTarget.value);
-              }}
+              onChange={(event) => setters.setDefaultIssueTypeName(event.currentTarget.value)}
             />
           </ProjectSettingsField>
           <ProjectSettingsField label="Branch template">
             <Input
               size="sm"
-              value={branchNameTemplate}
+              value={fields.branchNameTemplate}
               disabled={disabled}
-              onChange={(event) => {
-                markDirty();
-                setBranchNameTemplate(event.currentTarget.value);
-              }}
+              onChange={(event) => setters.setBranchNameTemplate(event.currentTarget.value)}
             />
           </ProjectSettingsField>
           <ProjectSettingsField label="Commit template">
             <Input
               size="sm"
-              value={commitMessageTemplate}
+              value={fields.commitMessageTemplate}
               disabled={disabled}
-              onChange={(event) => {
-                markDirty();
-                setCommitMessageTemplate(event.currentTarget.value);
-              }}
+              onChange={(event) => setters.setCommitMessageTemplate(event.currentTarget.value)}
             />
           </ProjectSettingsField>
           <ProjectSettingsField label="PR title template">
             <Input
               size="sm"
-              value={pullRequestTitleTemplate}
+              value={fields.pullRequestTitleTemplate}
               disabled={disabled}
-              onChange={(event) => {
-                markDirty();
-                setPullRequestTitleTemplate(event.currentTarget.value);
-              }}
+              onChange={(event) => setters.setPullRequestTitleTemplate(event.currentTarget.value)}
             />
           </ProjectSettingsField>
         </div>
@@ -844,23 +564,17 @@ function ProjectAtlassianSettingsSection(props: { target: SidebarProjectGroupMem
           <label className="flex items-center justify-between gap-3 rounded-md border border-border/70 bg-background/60 px-3 py-2 text-xs">
             <span>Smart-link Jira keys in branches, commits, and PRs</span>
             <Switch
-              checked={smartLinkingEnabled}
+              checked={fields.smartLinkingEnabled}
               disabled={disabled}
-              onCheckedChange={(checked) => {
-                markDirty();
-                setSmartLinkingEnabled(Boolean(checked));
-              }}
+              onCheckedChange={(checked) => setters.setSmartLinkingEnabled(Boolean(checked))}
             />
           </label>
           <label className="flex items-center justify-between gap-3 rounded-md border border-border/70 bg-background/60 px-3 py-2 text-xs">
             <span>Attach linked work items to project explorer workflows</span>
             <Switch
-              checked={autoAttachWorkItems}
+              checked={fields.autoAttachWorkItems}
               disabled={disabled}
-              onCheckedChange={(checked) => {
-                markDirty();
-                setAutoAttachWorkItems(Boolean(checked));
-              }}
+              onCheckedChange={(checked) => setters.setAutoAttachWorkItems(Boolean(checked))}
             />
           </label>
         </div>
@@ -876,19 +590,13 @@ function ProjectAtlassianSettingsSection(props: { target: SidebarProjectGroupMem
             size="sm"
             variant="destructive-outline"
             className="h-8"
-            disabled={disabled || !jiraLinked}
-            onClick={() => unlinkJiraMutation.mutate()}
+            disabled={disabled || !form.jiraLinked}
+            onClick={form.unlinkJira}
           >
-            {unlinkJiraMutation.isPending ? "Unlinking..." : "Unlink Jira"}
+            {form.unlinking ? "Unlinking..." : "Unlink Jira"}
           </Button>
-          <Button
-            type="button"
-            size="sm"
-            className="h-8"
-            disabled={disabled}
-            onClick={() => saveMutation.mutate()}
-          >
-            {saveMutation.isPending ? "Saving..." : "Save Atlassian"}
+          <Button type="button" size="sm" className="h-8" disabled={disabled} onClick={form.save}>
+            {form.saving ? "Saving..." : "Save Atlassian"}
           </Button>
         </div>
       </div>
@@ -1009,7 +717,11 @@ export function ProjectSettingsDialog(props: ProjectSettingsDialogProps) {
                   onSave={props.onSave}
                 />
               ) : section === "automations" ? (
-                <AutomationCentre environmentId={target.environmentId} projectId={target.id} />
+                <AutomationsSummary
+                  environmentId={target.environmentId}
+                  projectId={target.id}
+                  onOpen={props.onClose}
+                />
               ) : section === "atlassian" ? (
                 <ProjectAtlassianSettingsSection target={target} />
               ) : (

@@ -1,8 +1,8 @@
 import type { EnvironmentId, VcsRef } from "@ryco/contracts";
 import { ChevronDownIcon } from "lucide-react";
-import { useDeferredValue, useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 
-import { useGitBranches } from "../../../rpc/useGit";
+import { branchSearchEmptyText, useGitBranchSearch } from "../../../rpc/useGitBranchSearch";
 import { Button } from "../../ui/button";
 import {
   Combobox,
@@ -50,26 +50,14 @@ export function BranchPicker(props: {
   const { environmentId, cwd } = props;
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
-  const deferredQuery = useDeferredValue(query.trim());
   const triggerRef = useRef<HTMLButtonElement | null>(null);
 
   // The unfiltered first page is the dialog's own read (shared cache); a
   // query reads the server's matches once typing settles.
-  const all = useGitBranches({ environmentId, cwd: open ? cwd : null, query: "" });
-  const searched = useGitBranches({
-    environmentId,
-    cwd: open && deferredQuery.length > 0 ? cwd : null,
-    query: deferredQuery,
-  });
-  const source = deferredQuery.length > 0 && !searched.isPending ? searched : all;
-  const byRefName = useMemo(() => pickableRefs(source.refs), [source.refs]);
+  const search = useGitBranchSearch({ environmentId, cwd, open, query });
+  const byRefName = useMemo(() => pickableRefs(search.refs), [search.refs]);
   const items = useMemo(() => [...byRefName.keys()], [byRefName]);
-  const needle = query.trim().toLowerCase();
-  const filtered = useMemo(
-    () =>
-      needle.length === 0 ? items : items.filter((name) => name.toLowerCase().includes(needle)),
-    [items, needle],
-  );
+  const filtered = useMemo(() => items.filter(search.matches), [items, search.matches]);
 
   const choose = (refName: string) => {
     const entry = byRefName.get(refName);
@@ -77,12 +65,6 @@ export function BranchPicker(props: {
     setQuery("");
     if (entry) props.onChange(entry.branch);
   };
-
-  const statusText = source.isPending
-    ? null
-    : source.hasNextPage
-      ? `Showing ${source.refs.length} of ${source.totalCount} · type to narrow`
-      : null;
 
   return (
     <Combobox
@@ -121,7 +103,7 @@ export function BranchPicker(props: {
           />
         </div>
         <ComboboxEmpty>
-          {source.isPending && items.length === 0 ? "Loading branches…" : "No branches match."}
+          {branchSearchEmptyText(search.isPending && items.length === 0)}
         </ComboboxEmpty>
         <ComboboxList aria-label={props.label} className="max-h-64">
           {filtered.map((refName, index) => {
@@ -145,7 +127,7 @@ export function BranchPicker(props: {
             );
           })}
         </ComboboxList>
-        {statusText ? <ComboboxStatus>{statusText}</ComboboxStatus> : null}
+        {search.status ? <ComboboxStatus>{search.status}</ComboboxStatus> : null}
       </ComboboxPopup>
     </Combobox>
   );

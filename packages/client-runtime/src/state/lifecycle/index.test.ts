@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  isWorkspaceReviewAction,
   listThreadLifecycleActions,
   listWorkspaceLifecycleActions,
+  WORKSPACE_REVIEW_ACTIONS,
+  workspaceActionRequest,
   type ThreadLifecycleSubject,
 } from "./index.ts";
 
@@ -54,14 +57,17 @@ describe("workspace lifecycle actions", () => {
     expect(actions(null)).toEqual([
       ["archive", false],
       ["remove-checkout", true],
+      ["delete-workspace", true],
     ]);
     expect(actions("2026-10-01T00:00:00.000Z")).toEqual([
       ["restore", false],
       ["remove-checkout", true],
+      ["delete-workspace", true],
     ]);
     expect(actions("2026-10-01T00:00:00.000Z", "2026-10-01T00:00:00.000Z")).toEqual([
       ["restore", false],
       ["recreate-checkout", true],
+      ["delete-workspace", true],
     ]);
   });
 
@@ -69,5 +75,39 @@ describe("workspace lifecycle actions", () => {
     expect(
       listWorkspaceLifecycleActions({ archivedAt: null }, { protectedWorkspace: true }),
     ).toEqual([]);
+  });
+});
+
+describe("workspace review classification", () => {
+  it("reviews every action that changes a checkout, and nothing else", () => {
+    expect(
+      (
+        [
+          "archive",
+          "restore",
+          "remove-checkout",
+          "remove-stale-record",
+          "recreate-checkout",
+          "delete-workspace",
+        ] as const
+      ).filter(isWorkspaceReviewAction),
+    ).toEqual(["remove-checkout", "remove-stale-record", "recreate-checkout", "delete-workspace"]);
+    expect(WORKSPACE_REVIEW_ACTIONS).toEqual([
+      "remove-checkout",
+      "remove-stale-record",
+      "recreate-checkout",
+      "delete-workspace",
+    ]);
+  });
+
+  it("deletes a workspace with a discarding checkout removal", () => {
+    expect(workspaceActionRequest("delete-workspace")).toEqual({
+      action: "remove-checkout",
+      discard: true,
+    });
+    expect(workspaceActionRequest("remove-checkout")).toEqual({
+      action: "remove-checkout",
+      discard: false,
+    });
   });
 });

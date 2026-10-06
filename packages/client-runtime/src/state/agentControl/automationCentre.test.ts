@@ -1,6 +1,15 @@
 import { describe, expect, it, vi } from "vite-plus/test";
-import { ProjectId, type AutomationCentreSnapshot } from "@ryco/contracts";
-import { createAutomationCentreReader, automationRunStatusLabel } from "./automationCentre.ts";
+import {
+  ProjectId,
+  type AgentControlProposal,
+  type AutomationCentreSnapshot,
+} from "@ryco/contracts";
+import {
+  automationRunStatusLabel,
+  createAutomationCentreReader,
+  isWaitingAutomationRun,
+  waitingAutomationRunCount,
+} from "./automationCentre.ts";
 const snapshot: AutomationCentreSnapshot = {
   automations: [],
   runs: [],
@@ -82,5 +91,31 @@ describe("automation centre refresh", () => {
   });
   it("never labels dispatch completion as task success", () => {
     expect(automationRunStatusLabel.completed).toBe("Dispatched");
+  });
+});
+
+const queued = (id: string, kind: string, status = "pending-user-approval") =>
+  ({ proposalId: id, status, plan: { kind } }) as unknown as AgentControlProposal;
+
+describe("runs waiting for approval", () => {
+  it("counts automation runs still pending, on the given devices only", () => {
+    const queues = {
+      "env-local": {
+        proposalsById: {
+          a: queued("a", "automationRun"),
+          b: queued("b", "automationRun", "expired"),
+          c: queued("c", "createAutomation"),
+        },
+      },
+      "env-studio": { proposalsById: { d: queued("d", "automationRun") } },
+      "env-gone": { proposalsById: { e: queued("e", "automationRun") } },
+    };
+    expect(waitingAutomationRunCount(queues, ["env-local", "env-studio"])).toBe(2);
+    expect(waitingAutomationRunCount(queues, [])).toBe(0);
+  });
+
+  it("leaves schedule changes to the dialog: they are proposed, not runs", () => {
+    expect(isWaitingAutomationRun(queued("x", "updateAutomation"))).toBe(false);
+    expect(isWaitingAutomationRun(queued("y", "automationRun", "approved"))).toBe(false);
   });
 });

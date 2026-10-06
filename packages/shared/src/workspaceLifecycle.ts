@@ -311,6 +311,21 @@ export function summarizeWorkspaceLifecycleEffects(
   const branch = effects.deleteBranch
     ? `keep history, delete merged branch ${effects.branch}`
     : "keep history and branch";
+  if (action === "remove-checkout" && effects.discard) {
+    const trashed = effects.trashConversationIds?.length ?? 0;
+    const parts = [
+      effects.removeCheckout
+        ? "remove its checkout"
+        : effects.recordCheckoutRemoval
+          ? "record its missing checkout as removed"
+          : null,
+      trashed > 0 ? `move ${plural(trashed, "conversation")} to Trash` : null,
+      effects.deleteBranch ? `delete branch ${effects.branch}` : `keep branch ${effects.branch}`,
+    ].filter((part) => part !== null);
+    return `Delete 1 workspace: ${parts.join(", ")}.${
+      effects.discardsWork ? " Work that exists only here is lost." : ""
+    }`;
+  }
   switch (action) {
     case "archive":
       return "Archive 1 workspace. Its checkout, branch and conversations stay as they are.";

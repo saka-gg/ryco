@@ -1,0 +1,802 @@
+/*
+ * Automations pickers: the When field (type a time, or pick one in the
+ * calendar), the interval and end pickers and the next-runs preview. Ported
+ * from the automations lab's pickers.css: states, pseudo-elements and motion
+ * live here, static layout is Tailwind in the components. Anything that moves
+ * runs on the house motion tokens, so reduced motion stops it; short opacity
+ * fades stay, so every state change remains visible.
+ */
+.pk,
+.pk-panel {
+  --pk-ease: var(--app-motion-ease);
+  --pk-ring: color-mix(in srgb, var(--foreground) 46%, transparent);
+  --pk-range: color-mix(in srgb, var(--foreground) 13%, transparent);
+  --pk-faint: color-mix(in srgb, var(--foreground) 46%, transparent);
+  --pk-ghost: color-mix(in srgb, var(--foreground) 24%, transparent);
+  --pk-strong: color-mix(in srgb, var(--foreground) 9.5%, transparent);
+  --pk-hair: color-mix(in srgb, var(--foreground) 8%, transparent);
+  --pk-warn: var(--warning-foreground);
+  --pk-ok: var(--success-foreground);
+  /* The host surface's inner padding: embedded parts bleed to its edges. */
+  --pk-host-pad: 12px;
+  /* Lab durations, scaled off the house tokens (zero under reduced motion). */
+  --pk-dur-plate: calc(var(--app-motion-duration-pane) * 300 / 360);
+  --pk-dur-reveal: var(--app-motion-duration-stack);
+  --pk-dur-hint: calc(var(--app-motion-duration-pop) * 220 / 200);
+  --pk-dur-ticks: var(--app-motion-duration-pane);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--foreground);
+}
+.pk .tnum,
+.pk-panel .tnum {
+  font-variant-numeric: tabular-nums;
+}
+.pk-ic {
+  width: 14px;
+  height: 14px;
+  flex: none;
+}
+.pk :focus-visible,
+.pk-panel :focus-visible {
+  outline: 2px solid var(--pk-ring);
+  outline-offset: 1px;
+}
+/* Parts that draw their own focus (plate ring, field ring). */
+.pk-panel .pk-day:focus-visible,
+.pk-panel .pk-slot:focus-visible,
+.pk-panel .pk-time-input:focus-visible,
+.pk .pk-input:focus-visible,
+.pk .pk-step-input:focus-visible {
+  outline: none;
+}
+.pk button,
+.pk-panel button {
+  font: inherit;
+  color: inherit;
+}
+.pk kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 15px;
+  min-width: 15px;
+  padding: 0 4px;
+  border-radius: 4px;
+  font-family: var(--font-sans);
+  font-size: 9.5px;
+  font-weight: 500;
+  color: var(--muted-foreground);
+  background: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+
+/* Icon button (calendar, month nav, stepper) */
+.pk-icon-btn {
+  width: 26px;
+  height: 26px;
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  transition:
+    background-color 120ms,
+    color 120ms;
+}
+.pk-icon-btn:hover,
+.pk-icon-btn[aria-expanded="true"] {
+  background: var(--accent);
+  color: var(--foreground);
+}
+.pk-icon-btn[aria-disabled="true"] {
+  color: var(--pk-ghost);
+  background: transparent;
+  cursor: default;
+}
+
+/* Inline hint under a part: collapses to nothing, never a red wall. */
+.pk-hint {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transition:
+    grid-template-rows var(--pk-dur-hint) var(--pk-ease),
+    opacity 160ms;
+}
+.pk-hint[data-on] {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+.pk-hint-in {
+  overflow: hidden;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--pk-warn);
+}
+.pk-hint[data-on] .pk-hint-in {
+  padding-top: 6px;
+}
+.pk-hint[data-tone="muted"] .pk-hint-in {
+  color: var(--muted-foreground);
+}
+.pk-hint .pk-ic {
+  width: 13px;
+  height: 13px;
+}
+.pk-fix {
+  height: 20px;
+  padding: 0 7px;
+  margin-left: 2px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--pk-strong);
+  color: var(--foreground) !important;
+  font-size: 11.5px !important;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.pk-fix:hover {
+  background: color-mix(in srgb, var(--foreground) 14%, transparent);
+}
+
+/* ============================================================
+   Calendar panel: grid | time column, quick picks, footer
+   ============================================================ */
+.pk-vr {
+  width: 1px;
+  background: var(--pk-hair);
+}
+.pk-cal-title > span {
+  position: absolute;
+  inset: 0;
+  white-space: nowrap;
+}
+.pk-weeks-ghost {
+  position: absolute;
+  left: 0;
+  right: 0;
+  pointer-events: none;
+}
+.pk-day {
+  position: relative;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  outline: none;
+  isolation: isolate;
+  user-select: none;
+}
+/* Only a real range (start → end in the end grid) gets a band; the allowed window
+   reads from the ghosted days outside it, plus an end cap on the horizon's last day. */
+.pk-day::before {
+  content: "";
+  position: absolute;
+  inset: 4px 0;
+  z-index: -2;
+}
+.pk-day[data-range]::before {
+  background: var(--pk-range);
+}
+.pk-row > .pk-day[data-range]:first-child::before {
+  left: 3px;
+  border-top-left-radius: 9px;
+  border-bottom-left-radius: 9px;
+}
+.pk-row > .pk-day[data-range]:last-child::before {
+  right: 3px;
+  border-top-right-radius: 9px;
+  border-bottom-right-radius: 9px;
+}
+.pk-day[data-win-end]:not([data-range])::before {
+  left: auto;
+  right: 1px;
+  top: 50%;
+  bottom: auto;
+  width: 2px;
+  height: 14px;
+  margin-top: -7px;
+  border-radius: 1px;
+  background: color-mix(in srgb, var(--foreground) 26%, transparent);
+}
+.pk-day[data-range-start]::before {
+  left: 3px;
+  border-top-left-radius: 9px;
+  border-bottom-left-radius: 9px;
+}
+.pk-day[data-range-end]::before {
+  right: 3px;
+  border-top-right-radius: 9px;
+  border-bottom-right-radius: 9px;
+}
+/* The plate under the number. */
+.pk-day::after {
+  content: "";
+  position: absolute;
+  inset: 3px 4px;
+  z-index: -1;
+  border-radius: 8px;
+  transition:
+    background-color 120ms,
+    box-shadow 120ms;
+}
+.pk-day[aria-disabled="false"]:hover::after {
+  background: var(--pk-strong);
+}
+.pk-day[aria-selected="true"]::after,
+.pk-day[aria-selected="true"]:hover::after {
+  background: var(--foreground);
+}
+.pk-day[aria-selected="true"] {
+  color: var(--background);
+  font-weight: 600;
+}
+.pk-day:focus-visible::after {
+  box-shadow:
+    0 0 0 1.5px var(--popover),
+    0 0 0 3px var(--pk-ring);
+}
+.pk-day[data-out] {
+  color: var(--pk-faint);
+}
+.pk-day[aria-disabled="true"] {
+  color: var(--pk-ghost);
+  cursor: default;
+}
+.pk-day[aria-current="date"] .pk-n::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: 6px;
+  width: 3px;
+  height: 3px;
+  margin-left: -1.5px;
+  border-radius: 50%;
+  background: currentColor;
+}
+/* Compact grid (the end picker's date) */
+.pk-cal[data-compact] .pk-day {
+  height: 30px;
+}
+.pk-cal[data-compact] .pk-day::before {
+  inset: 3px 0;
+}
+.pk-cal[data-compact] .pk-day::after {
+  inset: 2px 3px;
+}
+.pk-cal[data-compact] .pk-day[aria-current="date"] .pk-n::after {
+  bottom: 4px;
+}
+
+/* Time column: the typed field heads it (hairline below), then exactly eight
+   whole 28px rows that snap — no half-cut rows, no fade. */
+.pk-time-input {
+  height: 28px;
+  width: 100%;
+  flex: none;
+  border: 0;
+  border-radius: 7px;
+  box-shadow: inset 0 0 0 1px var(--border);
+  background: transparent;
+  color: var(--foreground);
+  font: inherit;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  outline: none;
+  transition: box-shadow 120ms;
+}
+.pk-time-input:focus {
+  box-shadow:
+    inset 0 0 0 1px var(--pk-ring),
+    0 0 0 3px color-mix(in srgb, var(--foreground) 7%, transparent);
+}
+.pk-time-input::placeholder {
+  color: var(--pk-faint);
+}
+/* The list fills the column without adding height: the grid sets the panel height. */
+.pk-slots {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 45px;
+  height: calc(8 * 28px);
+  /* rows stay pill-sized when the column is stretched by a wider panel */
+  padding: 0 max(6px, calc((100% - 100px) / 2));
+  border-top: 1px solid var(--pk-hair);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scroll-snap-type: y mandatory;
+  scrollbar-width: none;
+}
+.pk-slots::-webkit-scrollbar {
+  display: none;
+}
+.pk-slot {
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 7px;
+  scroll-snap-align: start;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  outline: none;
+  transition:
+    background-color 100ms,
+    color 100ms;
+}
+.pk-slot[data-hour] {
+  color: var(--foreground);
+}
+.pk-slot:hover {
+  background: var(--accent);
+  color: var(--foreground);
+}
+.pk-slot[data-preview] {
+  box-shadow: inset 0 0 0 1px var(--pk-ring);
+}
+.pk-slot[aria-selected="true"] {
+  background: var(--foreground);
+  color: var(--background);
+  font-weight: 600;
+}
+.pk-slot[aria-disabled="true"] {
+  color: var(--pk-ghost);
+  background: transparent;
+  cursor: default;
+}
+/* Focus shows on selected and unselected rows alike (the row is flush with the
+   scroll edge, so the ring is drawn inside it, with a gap like the day cells). */
+.pk-slot:focus-visible {
+  box-shadow:
+    inset 0 0 0 1.5px var(--pk-ring),
+    inset 0 0 0 3px var(--popover);
+}
+
+/* Quick picks: quiet text buttons; the one matching the value carries a check
+   (the day and the time already carry the strong fill). */
+.pk-qp {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 26px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted-foreground) !important;
+  font-size: 12px !important;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background-color 120ms,
+    color 120ms;
+}
+.pk-qp .pk-ic {
+  display: none;
+  width: 12px;
+  height: 12px;
+}
+.pk-qp:hover {
+  background: var(--accent);
+  color: var(--foreground) !important;
+}
+.pk-qp[aria-pressed="true"] {
+  color: var(--foreground) !important;
+  font-weight: 500;
+}
+.pk-qp[aria-pressed="true"] .pk-ic {
+  display: block;
+}
+.pk-qp[aria-disabled="true"] {
+  background: transparent;
+  color: var(--pk-ghost) !important;
+  cursor: default;
+}
+/* Footer: one line, full width — the limit, or one message and its fix. */
+.pk-panel-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 32px;
+  padding: 0 8px 0 12px;
+  border-top: 1px solid var(--pk-hair);
+  font-size: 11.5px;
+  color: var(--muted-foreground);
+  white-space: nowrap;
+}
+.pk-panel-meta > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pk-panel-meta > .pk-meta-l {
+  flex: 1;
+  display: block;
+}
+.pk-panel-meta > .pk-meta-r {
+  flex: none;
+}
+.pk-panel-meta[data-tone="warn"] > .pk-meta-l {
+  color: var(--pk-warn);
+}
+.pk-panel-meta[data-tone="info"] > .pk-meta-l {
+  color: var(--foreground);
+}
+.pk-panel-meta .pk-fix {
+  margin: 0;
+}
+.pk-panel[data-compact] .pk-panel-meta {
+  min-height: 30px;
+  padding: 0 6px 0 10px;
+}
+
+/* ============================================================
+   When field: input + parse chip + suggestions, all inside the
+   host surface (one surface, one hairline, no second card)
+   ============================================================ */
+.pk-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 34px;
+  padding: 0 4px 0 11px;
+  border-radius: 9px;
+  box-shadow: inset 0 0 0 1px var(--border);
+  transition: box-shadow 140ms;
+}
+.pk-field:focus-within {
+  box-shadow:
+    inset 0 0 0 1px var(--pk-ring),
+    0 0 0 3px color-mix(in srgb, var(--foreground) 7%, transparent);
+}
+.pk-input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  border: 0;
+  outline: none !important;
+  background: transparent;
+  color: var(--foreground);
+  font: inherit;
+  font-size: 13px;
+}
+.pk-input::placeholder {
+  color: var(--pk-faint);
+}
+.pk-chip {
+  display: inline-grid;
+  min-width: 0;
+  max-width: 100%;
+}
+.pk-xf {
+  grid-area: 1 / 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.pk-xf[data-leaving] {
+  pointer-events: none;
+}
+.pk-chip .pk-xf {
+  min-height: 24px;
+  padding: 0 2px;
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+.pk-chip .pk-xf[data-tone="ok"] {
+  padding: 0 4px 0 8px;
+  border-radius: 7px;
+  background: var(--accent);
+  color: var(--muted-foreground);
+}
+.pk-chip .pk-xf[data-tone="ok"] b {
+  color: var(--foreground);
+  font-weight: 500;
+}
+.pk-chip .pk-xf[data-tone="ok"] .pk-ic {
+  color: var(--muted-foreground);
+  width: 12px;
+  height: 12px;
+}
+.pk-chip .pk-xf[data-tone="set"] .pk-ic {
+  color: var(--pk-ok);
+  width: 13px;
+  height: 13px;
+}
+/* A warning wraps (up to two lines) rather than cutting its reason off. */
+.pk-chip .pk-xf[data-tone="warn"] {
+  color: var(--pk-warn);
+  flex-wrap: wrap;
+  row-gap: 2px;
+  padding: 3px 2px;
+  white-space: normal;
+}
+.pk-chip .pk-xf[data-tone="warn"] > .pk-ic {
+  align-self: flex-start;
+  margin-top: 2px;
+}
+.pk-chip .pk-xf[data-tone="warn"] > .pk-chip-why {
+  flex: 1 1 12ch;
+  min-width: 0;
+  overflow: visible;
+  line-height: 1.4;
+}
+.pk-chip .pk-xf[data-tone="warn"] > .pk-fix {
+  margin-left: 0;
+}
+.pk-chip .pk-xf[data-tone="warn"] b {
+  color: var(--foreground);
+  font-weight: 500;
+}
+.pk-chip .pk-xf > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pk-chip .pk-rel {
+  font-variant-numeric: tabular-nums;
+}
+.pk-sep {
+  color: var(--pk-faint);
+  opacity: 0.7;
+}
+.pk-chip kbd {
+  margin-left: 2px;
+}
+.pk-inl-list {
+  margin: 2px -4px 0;
+  padding: 4px 0 0;
+  border-top: 1px solid var(--pk-hair);
+}
+.pk-opt {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  height: 30px;
+  padding: 0 8px;
+  border-radius: 7px;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.pk-opt:hover {
+  background: var(--accent);
+}
+.pk-opt[aria-selected="true"] {
+  background: var(--pk-strong);
+}
+.pk-opt-typed {
+  color: var(--pk-faint);
+}
+.pk-opt-near {
+  color: var(--foreground);
+  font-weight: 500;
+}
+.pk-opt-when {
+  margin-left: auto;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+/* The calendar opens in the host surface, edge to edge, under one hairline. */
+.pk-inl-cal {
+  margin: 2px calc(-1 * var(--pk-host-pad)) calc(-1 * var(--pk-host-pad));
+  border-top: 1px solid var(--pk-hair);
+}
+.pk-inl-cal > .pk-panel {
+  border-radius: 0 0 12px 12px;
+}
+
+/* ============================================================
+   Radio rows with a sliding plate (interval, units, until)
+   ============================================================ */
+.pk-segrow {
+  position: relative;
+  display: inline-flex;
+  flex-wrap: wrap;
+  max-width: 100%;
+  padding: 2px;
+  gap: 2px;
+  border-radius: 9px;
+  box-shadow: inset 0 0 0 1px var(--border);
+  isolation: isolate;
+}
+.pk-plate {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: -1;
+  border-radius: 7px;
+  background: var(--pk-strong);
+  box-shadow: inset 0 0 0 1px var(--pk-hair);
+  opacity: 0;
+  transition:
+    transform var(--pk-dur-plate) var(--pk-ease),
+    width var(--pk-dur-plate) var(--pk-ease),
+    height var(--pk-dur-plate) var(--pk-ease),
+    opacity 140ms;
+}
+.pk-plate[data-instant] {
+  transition: none;
+}
+.pk-segrow > [role="radio"] {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color 140ms;
+}
+.pk-segrow > [role="radio"]:hover {
+  color: var(--foreground);
+}
+.pk-segrow > [role="radio"][aria-checked="true"] {
+  color: var(--foreground);
+  font-weight: 500;
+}
+.pk-segrow > [role="radio"][aria-disabled="true"] {
+  color: var(--pk-ghost);
+  cursor: default;
+}
+.pk-segrow > [role="radio"] .pk-ic {
+  width: 13px;
+  height: 13px;
+}
+
+/* Interval: the custom amount reveals under the chips. */
+.pk-reveal {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transition:
+    grid-template-rows var(--pk-dur-reveal) var(--pk-ease),
+    opacity 180ms;
+}
+.pk-reveal[data-open] {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+.pk-reveal-in {
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.pk-reveal[data-open] .pk-reveal-in {
+  padding-top: 8px;
+}
+.pk-stepper {
+  display: inline-flex;
+  align-items: center;
+  height: 30px;
+  padding: 0 2px;
+  border-radius: 9px;
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+.pk-stepper:focus-within {
+  box-shadow:
+    inset 0 0 0 1px var(--pk-ring),
+    0 0 0 3px color-mix(in srgb, var(--foreground) 7%, transparent);
+}
+.pk-step-input {
+  width: 46px;
+  height: 100%;
+  border: 0;
+  outline: none !important;
+  background: transparent;
+  color: var(--foreground);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+/* Until: one chip row + at most one read-back line. */
+.pk-until-sum b {
+  color: var(--foreground);
+  font-weight: 500;
+}
+
+/* ============================================================
+   Preview: next runs, total, strip of ticks
+   ============================================================ */
+.pk-pv-total .pk-xf {
+  display: inline-block;
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+.pk-pv-total b {
+  color: var(--foreground);
+  font-weight: 500;
+}
+.pk-pv-list[data-empty]::before {
+  content: attr(data-empty);
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-size: 12.5px;
+  color: var(--muted-foreground);
+}
+.pk-pv-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto 84px;
+  align-items: center;
+  gap: 12px;
+  height: 29px;
+  border-top: 1px solid var(--pk-hair);
+  font-size: 13px;
+}
+.pk-pv-row.is-leaving {
+  position: absolute;
+  left: 0;
+  right: 0;
+  pointer-events: none;
+}
+.pk-pv-ticks {
+  position: absolute;
+  left: 0;
+  right: -1px;
+  top: 6px;
+  height: 8px;
+  background-image: linear-gradient(
+    to right,
+    color-mix(in srgb, var(--foreground) 34%, transparent) 1px,
+    transparent 1px
+  );
+  background-repeat: repeat-x;
+  transition:
+    background-size var(--pk-dur-ticks) var(--pk-ease),
+    opacity 200ms;
+}
+.pk-pv-mark {
+  position: absolute;
+  top: 3px;
+  width: 2px;
+  height: 14px;
+  margin-left: -0.5px;
+  border-radius: 1px;
+  background: var(--foreground);
+  opacity: 0.55;
+  transition: left var(--pk-dur-ticks) var(--pk-ease);
+}
+.pk-pv-mark[data-next] {
+  opacity: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pk *,
+  .pk-panel * {
+    transition-property: background-color, color, opacity, box-shadow !important;
+  }
+}

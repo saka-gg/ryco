@@ -58,10 +58,7 @@ import {
 } from "@ryco/contracts";
 import { DateTime, Option } from "effect";
 
-import {
-  pullRequestRepositoryKey,
-  type PullRequestRepositoryOption,
-} from "../pullRequestRepositories.logic";
+import { projectCheckoutKey, type ProjectCheckoutOption } from "../../../projectCheckouts.logic";
 import { FIXTURE_PATCHES, type FixturePatchFile } from "./pullRequestFixturePatches";
 
 // ── Clock ─────────────────────────────────────────────────────────────
@@ -119,8 +116,8 @@ export const fixtureProvider: SourceControlProviderInfo = {
   baseUrl: "https://github.com",
 };
 
-export const fixtureRepositoryOption: PullRequestRepositoryOption = {
-  key: pullRequestRepositoryKey(FIXTURE_ENVIRONMENT_ID, FIXTURE_PROJECT_ID),
+export const fixtureRepositoryOption: ProjectCheckoutOption = {
+  key: projectCheckoutKey(FIXTURE_ENVIRONMENT_ID, FIXTURE_PROJECT_ID),
   environmentId: FIXTURE_ENVIRONMENT_ID,
   projectId: FIXTURE_PROJECT_ID,
   cwd: FIXTURE_CWD,
