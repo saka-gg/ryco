@@ -1,0 +1,867 @@
+/* ============================================================
+   Automations lab — shell + shared primitives.
+   Tokens: base.css. Directions scope their CSS under [data-dir="X"].
+
+   Primitives (use these instead of re-styling basics):
+     .btn                 outline button, 30px, 13px/500. Variants:
+       .btn.primary       filled (app "default")
+       .btn.ghost         no chrome until hover
+       .btn.destructive   red text, outline ("Cancel schedule"); add .solid for a filled red
+       sizes .sm (28px)  .xs (24px)   .icon (square)
+     .chip                20px label; data-tone="ok|warn|err|info|zinc"; .outline
+     .seg > .seg-opt      segmented control; selected via aria-checked/aria-selected="true".
+                          plate(segEl) adds a sliding .seg-plate behind the selection.
+     .field               input / textarea / select look (filled, hairline, 13px).
+                          Also a wrapper: <label class="field">icon <input></label>.
+                          .field.sm  [aria-invalid="true"]
+     .label .hint .field-error   form text (12px label, 11.5px hint, inline error)
+     .kbd                 key cap
+     .hair / .hair-v      1px hairline divider (horizontal / vertical)
+     .dot                 7px status dot: data-status="<run status>" or data-tone
+                          (pending-approval + executing pulse). Lab.statusDot(status) renders one.
+     .surface             popover/dialog material: solid, one hairline, soft shadow, 14px radius
+     .pop                 what popover() wraps content in (.surface.pop)
+     .menu > .menu-item   popover menu rows (30px), .menu-sep, .menu-label
+     .scrim               dim layer: position absolute, inset 0 (of the nearest positioned box)
+     .tnum .mono .muted .faint .trunc .sr-only   text helpers
+                          (.tnum = tabular digits; DM Sans has none, so it swaps
+                          in Figtree digits — use var(--font-tnum) elsewhere)
+     .dot tones           wait (hollow fg ring) · fg (filled neutral) · err · zinc ·
+                          faint (hollow); data-status picks the run glyph itself
+   [data-morphing] hands a surface's paint to the morph ghost; leave it alone.
+   ============================================================ */
+
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+/* Fixed-width digits (see --font-tnum in base.css). :where keeps the
+   specificity at one class so direction rules still win. */
+.tnum:where(:not(.mono)) {
+  font-family: var(--font-tnum);
+}
+.muted {
+  color: var(--muted-fg);
+}
+.faint {
+  color: var(--faint-fg);
+}
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+/* ------------------------------------------------------------ lab chrome */
+.lab {
+  max-width: 1400px;
+  padding: 26px 28px 72px;
+}
+.lab-bar {
+  align-items: center;
+}
+.lab-id {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+.lab-sub {
+  margin: 0;
+  max-width: none;
+}
+.lab-controls {
+  gap: 6px;
+}
+.lab-btn:focus-visible,
+.lab-tabs .seg-opt:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+.lab-clock {
+  font-family: var(--font-tnum);
+  font-variant-numeric: tabular-nums;
+  color: var(--fg);
+  min-width: 128px;
+  text-align: left;
+}
+.lab-btn .rec {
+  transition: background-color 0.2s;
+}
+.lab-btn[aria-pressed="true"] .rec {
+  animation: rec-breathe 2.4s var(--ease) infinite;
+}
+@keyframes rec-breathe {
+  50% {
+    box-shadow: 0 0 0 5px color-mix(in srgb, var(--ok-fill) 8%, transparent);
+  }
+}
+.lab-speed .seg-opt {
+  min-width: 38px;
+  font-family: var(--font-tnum);
+  font-variant-numeric: tabular-nums;
+}
+.lab-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 18px 0 14px;
+}
+.lab-tabs {
+  margin: 0;
+}
+.lab-tabs .seg-opt {
+  height: 28px;
+  padding: 0 13px;
+}
+.lab-hint {
+  font-size: 12px;
+  color: var(--faint-fg);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* ------------------------------------------------------------ app window */
+.stage {
+  display: flex;
+  flex-direction: column;
+  gap: 26px;
+}
+#app-window {
+  position: relative;
+  isolation: isolate;
+  height: 822px;
+  min-width: 1080px;
+  display: grid;
+  grid-template-columns: 52px minmax(0, 1fr);
+  border-radius: 14px;
+  overflow: hidden;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  box-shadow: var(--pop-shadow);
+  font-size: 13px;
+  line-height: 1.45;
+}
+.rail {
+  background: var(--sidebar);
+  border-right: 1px solid var(--sb-border);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 15px 0 12px;
+}
+.rail .logo {
+  width: 20px;
+  height: 20px;
+  color: var(--fg);
+  margin-bottom: 14px;
+}
+.rail .logo svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+.rail-item {
+  position: relative;
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+  display: grid;
+  place-items: center;
+  color: var(--faint-fg);
+}
+.rail-item .ic {
+  width: 17px;
+  height: 17px;
+}
+.rail-item.on {
+  background: var(--accent-strong);
+  color: var(--fg);
+}
+.rail-item .rail-dot {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--fg);
+  box-shadow: 0 0 0 2px var(--sidebar);
+  opacity: 0;
+  scale: 0.4;
+  transition:
+    opacity 0.2s,
+    scale 0.32s var(--ease);
+}
+.rail-item[data-due="true"] .rail-dot {
+  opacity: 1;
+  scale: 1;
+}
+.rail-sp {
+  flex: 1;
+}
+.host {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--bg);
+}
+.host-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  text-align: center;
+  color: var(--faint-fg);
+  font-size: 13px;
+}
+.host-empty b {
+  display: block;
+  color: var(--muted-fg);
+  font-weight: 500;
+  margin-bottom: 3px;
+}
+
+/* Notes under the stage */
+.notes-grid {
+  display: grid;
+  grid-template-columns: minmax(280px, 1.25fr) repeat(auto-fit, minmax(220px, 1fr));
+  gap: 6px 36px;
+  padding: 2px 4px 0;
+}
+.notes .thesis {
+  max-width: 46ch;
+}
+.notes code {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--code-bg);
+}
+
+/* ------------------------------------------------------------ buttons */
+.btn {
+  --h: 30px;
+  position: relative;
+  height: var(--h);
+  padding: 0 11px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border-radius: 9px;
+  border: 1px solid var(--input-border);
+  background: var(--field-bg);
+  color: var(--fg);
+  font: 500 13px/1 var(--font-sans);
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+  transition:
+    background-color 140ms,
+    border-color 140ms,
+    color 140ms,
+    box-shadow 140ms,
+    opacity 140ms;
+}
+.btn .ic {
+  width: 15px;
+  height: 15px;
+  margin: 0 -1px;
+  opacity: 0.85;
+}
+.btn:hover {
+  background: var(--field-bg-hover);
+  border-color: color-mix(in srgb, var(--input-border) 100%, var(--fg) 6%);
+}
+.btn:focus-visible {
+  outline: none;
+  box-shadow:
+    0 0 0 2px var(--bg),
+    0 0 0 4px var(--ring);
+}
+.btn:disabled,
+.btn[aria-disabled="true"] {
+  opacity: 0.5;
+  cursor: default;
+  pointer-events: none;
+}
+.btn.primary {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: var(--primary-fg);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.14),
+    0 1px 2px rgba(0, 0, 0, 0.14);
+}
+.btn.primary:hover {
+  background: var(--primary-hover);
+  border-color: var(--primary-hover);
+}
+.btn.ghost {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+  color: var(--muted-fg);
+}
+.btn.ghost:hover,
+.btn.ghost[aria-expanded="true"] {
+  background: var(--accent);
+  color: var(--fg);
+}
+.btn.ghost:focus-visible {
+  box-shadow: 0 0 0 2px var(--ring);
+}
+.btn.destructive {
+  color: var(--err);
+}
+.btn.destructive:hover {
+  background: color-mix(in srgb, var(--err-fill) 6%, var(--field-bg));
+  border-color: color-mix(in srgb, var(--err-fill) 32%, transparent);
+}
+.btn.destructive.solid {
+  background: var(--err-fill);
+  border-color: var(--err-fill);
+  color: #fff;
+}
+.btn.destructive.solid:hover {
+  background: color-mix(in srgb, var(--err-fill) 90%, #000);
+}
+.btn.sm {
+  --h: 28px;
+  padding: 0 9px;
+  gap: 5px;
+  font-size: 12.5px;
+  border-radius: 8px;
+}
+.btn.xs {
+  --h: 24px;
+  padding: 0 7px;
+  gap: 4px;
+  font-size: 12px;
+  border-radius: 7px;
+}
+.btn.xs .ic {
+  width: 13px;
+  height: 13px;
+}
+.btn.icon {
+  width: var(--h);
+  padding: 0;
+}
+
+/* ------------------------------------------------------------ chips */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 20px;
+  padding: 0 7px;
+  border-radius: 6px;
+  font-size: 11.5px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  color: var(--muted-fg);
+  background: var(--accent);
+}
+.chip .ic {
+  width: 12px;
+  height: 12px;
+}
+.chip.outline {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+.chip[data-tone="ok"] {
+  color: var(--ok);
+  background: color-mix(in srgb, var(--ok-fill) 11%, transparent);
+}
+.chip[data-tone="warn"] {
+  color: var(--warn);
+  background: color-mix(in srgb, var(--warn-fill) 13%, transparent);
+}
+.chip[data-tone="err"] {
+  color: var(--err);
+  background: color-mix(in srgb, var(--err-fill) 10%, transparent);
+}
+.chip[data-tone="info"] {
+  color: var(--info);
+  background: color-mix(in srgb, var(--info) 10%, transparent);
+}
+
+/* ------------------------------------------------------------ segmented */
+.seg {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+  gap: 2px;
+  border-radius: 9px;
+  background: var(--track);
+  box-shadow: none;
+}
+.seg-opt {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted-fg);
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 160ms;
+}
+.seg-opt .ic {
+  width: 14px;
+  height: 14px;
+}
+.seg-opt:hover {
+  color: var(--fg);
+}
+.seg-opt:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+.seg-opt[aria-checked="true"],
+.seg-opt[aria-selected="true"] {
+  color: var(--fg);
+  background: var(--plate);
+  box-shadow: var(--plate-shadow);
+}
+.seg.has-plate .seg-opt[aria-checked="true"],
+.seg.has-plate .seg-opt[aria-selected="true"] {
+  background: transparent;
+  box-shadow: none;
+}
+.seg-plate {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 0;
+  border-radius: 7px;
+  background: var(--plate);
+  box-shadow: var(--plate-shadow);
+  pointer-events: none;
+  opacity: 0;
+}
+
+/* ------------------------------------------------------------ fields */
+.field {
+  width: 100%;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: 9px;
+  border: 1px solid var(--input-border);
+  background: var(--field-bg);
+  color: var(--fg);
+  font: 400 13px/1.4 var(--font-sans);
+  outline: none;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+  transition:
+    border-color 140ms,
+    box-shadow 160ms,
+    background-color 140ms;
+}
+.field::placeholder,
+.field > input::placeholder,
+.field > textarea::placeholder {
+  color: var(--faint-fg);
+}
+.field:hover {
+  border-color: color-mix(in srgb, var(--input-border) 100%, var(--fg) 7%);
+}
+.field:focus,
+.field:focus-within {
+  border-color: var(--ring);
+  box-shadow: 0 0 0 3px var(--ring-soft);
+}
+textarea.field {
+  height: auto;
+  min-height: 88px;
+  padding: 8px 10px;
+  resize: vertical;
+  line-height: 1.5;
+}
+select.field {
+  appearance: none;
+  padding-right: 28px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%239a9aa1' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m7 15 5 5 5-5'/%3E%3Cpath d='m7 9 5-5 5 5'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 9px center;
+}
+div.field,
+label.field,
+span.field {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  cursor: text;
+}
+.field > .ic {
+  width: 14px;
+  height: 14px;
+  color: var(--faint-fg);
+}
+.field > input,
+.field > textarea {
+  all: unset;
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  color: inherit;
+  line-height: 1.4;
+}
+.field.sm {
+  height: 28px;
+  font-size: 12.5px;
+  border-radius: 8px;
+  padding: 0 9px;
+}
+.field[aria-invalid="true"],
+.field:has(> [aria-invalid="true"]) {
+  border-color: color-mix(in srgb, var(--err-fill) 45%, transparent);
+}
+.field[aria-invalid="true"]:focus,
+.field:has(> [aria-invalid="true"]):focus-within {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--err-fill) 14%, transparent);
+}
+.label {
+  display: block;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--muted-fg);
+  margin-bottom: 6px;
+}
+.hint {
+  font-size: 11.5px;
+  color: var(--faint-fg);
+}
+.field-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 5px;
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--err);
+}
+.field-error .ic {
+  width: 13px;
+  height: 13px;
+  margin-top: 1px;
+}
+
+/* ------------------------------------------------------------ atoms */
+.kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 17px;
+  height: 17px;
+  padding: 0 4px;
+  border-radius: 4px;
+  font: 500 10.5px/1 var(--font-sans);
+  color: var(--muted-fg);
+  background: var(--accent);
+  box-shadow: inset 0 -1px 0 var(--border);
+}
+.hair {
+  height: 1px;
+  border: 0;
+  margin: 0;
+  background: var(--hair);
+}
+.hair-v {
+  width: 1px;
+  align-self: stretch;
+  background: var(--hair);
+}
+.dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--ghost-fg);
+}
+.dot[data-tone="ok"] {
+  background: var(--ok-fill);
+}
+.dot[data-tone="warn"] {
+  background: var(--warn-fill);
+}
+.dot[data-tone="err"] {
+  background: var(--err-fill);
+}
+.dot[data-tone="info"] {
+  background: var(--info);
+}
+.dot[data-tone="zinc"] {
+  background: var(--faint-fg);
+}
+.dot[data-tone="faint"] {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.25px var(--ghost-fg);
+}
+/* Run lifecycle marks — one hue (red) and only for failure. Shape carries
+   the meaning too: hollow fg ring = waiting on you, filled fg = started /
+   dispatched (never a success colour — the outcome lives in the thread),
+   hollow faint = expired / rejected, dash = cancelled. */
+.dot[data-tone="fg"],
+.dot[data-status="completed"] {
+  background: color-mix(in srgb, var(--fg) 58%, transparent);
+  box-shadow: none;
+}
+.dot[data-tone="wait"],
+.dot[data-status="pending-approval"] {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--fg);
+}
+.dot[data-status="approved"],
+.dot[data-status="executing"] {
+  background: var(--fg);
+}
+.dot[data-status="failed"] {
+  background: var(--err-fill);
+}
+.dot[data-status="expired"],
+.dot[data-status="rejected"] {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.25px var(--ghost-fg);
+}
+.dot[data-status="materializing"] {
+  background: var(--faint-fg);
+}
+.dot[data-status="cancelled"] {
+  box-shadow: none;
+  background: linear-gradient(var(--faint-fg), var(--faint-fg)) center / 7px 1.5px no-repeat;
+}
+.dot[data-status="pending-approval"] {
+  animation: dot-pulse-wait 1.8s var(--ease) infinite;
+}
+.dot[data-status="approved"],
+.dot[data-status="executing"] {
+  animation: dot-pulse-fg 1.6s var(--ease) infinite;
+}
+@keyframes dot-pulse-wait {
+  0% {
+    box-shadow:
+      inset 0 0 0 1.5px var(--fg),
+      0 0 0 0 color-mix(in srgb, var(--fg) 30%, transparent);
+  }
+  70%,
+  100% {
+    box-shadow:
+      inset 0 0 0 1.5px var(--fg),
+      0 0 0 5px transparent;
+  }
+}
+@keyframes dot-pulse-fg {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--fg) 28%, transparent);
+  }
+  70%,
+  100% {
+    box-shadow: 0 0 0 5px transparent;
+  }
+}
+/* Kept for directions that still reference them. */
+@keyframes dot-pulse-warn {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--warn-fill) 50%, transparent);
+  }
+  70%,
+  100% {
+    box-shadow: 0 0 0 6px transparent;
+  }
+}
+@keyframes dot-pulse-info {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--info) 45%, transparent);
+  }
+  70%,
+  100% {
+    box-shadow: 0 0 0 6px transparent;
+  }
+}
+.prov {
+  display: inline-grid;
+  width: 13px;
+  height: 13px;
+  flex: none;
+  color: var(--muted-fg);
+}
+.prov svg {
+  width: 100%;
+  height: 100%;
+}
+
+/* ------------------------------------------------------------ surfaces */
+.surface {
+  background: var(--popover);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: var(--pop-shadow);
+}
+[data-morphing] {
+  background: transparent !important;
+  border-color: transparent !important;
+  box-shadow: none !important;
+}
+.pop {
+  min-width: 180px;
+  max-width: calc(100vw - 16px);
+  max-height: calc(100vh - 16px);
+  overflow: auto;
+  border-radius: 12px;
+  outline: none;
+  font-size: 13px;
+}
+.scrim {
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+  background: var(--scrim);
+}
+.menu {
+  display: flex;
+  flex-direction: column;
+  padding: 4px;
+  min-width: 200px;
+}
+.menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 7px;
+  background: none;
+  color: var(--fg);
+  font: 400 13px/1 var(--font-sans);
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.menu-item .ic {
+  width: 15px;
+  height: 15px;
+  color: var(--muted-fg);
+}
+.menu-item:hover,
+.menu-item:focus-visible {
+  background: var(--accent);
+  outline: none;
+}
+.menu-item[aria-disabled="true"] {
+  color: var(--faint-fg);
+  pointer-events: none;
+}
+.menu-item.destructive,
+.menu-item.destructive .ic {
+  color: var(--err);
+}
+.menu-item .kbd {
+  margin-left: auto;
+}
+.menu-sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--hair);
+}
+.menu-label {
+  padding: 6px 9px 4px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--faint-fg);
+}
+
+/* Toasts: bottom-centre of the host area */
+.toasts {
+  position: absolute;
+  left: 52px;
+  right: 0;
+  bottom: 18px;
+  z-index: 2000;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  pointer-events: none;
+}
+.toast {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 38px;
+  max-width: 520px;
+  padding: 7px 8px 7px 14px;
+  border-radius: 11px;
+  font-size: 13px;
+}
+.toast:not(:has(.btn)) {
+  padding-right: 14px;
+}
+.toast-text {
+  min-width: 0;
+}
+
+/* Tooltip */
+.tip {
+  position: fixed;
+  z-index: 3000;
+  pointer-events: none;
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 11.5px;
+  line-height: 1.4;
+  background: var(--tip-bg);
+  color: var(--tip-fg);
+  max-width: 320px;
+  opacity: 0;
+  translate: 0 3px;
+  transition:
+    opacity 0.15s,
+    translate 0.2s var(--ease),
+    left 0.22s var(--ease),
+    top 0.22s var(--ease);
+}
+.tip.on {
+  opacity: 1;
+  translate: 0 0;
+}
+
+[data-motion="off"] .dot,
+[data-motion="off"] .lab-btn .rec {
+  animation: none !important;
+}
+@media (prefers-reduced-motion: reduce) {
+  .dot,
+  .lab-btn .rec {
+    animation: none !important;
+  }
+  .tip,
+  .rail-dot {
+    transition: none;
+  }
+}
