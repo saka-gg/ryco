@@ -61,11 +61,14 @@ import { stackedThreadToast, toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import {
   SettingResetButton,
+  SettingsNotice,
   SettingsPageContainer,
   SettingsRow,
   SettingsSection,
   SettingsCard,
 } from "./settingsLayout";
+import { LifecycleSuggestionSettings, TrashSection } from "./LifecycleSettings";
+import { LIFECYCLE_RETENTION_COPY } from "@ryco/client-runtime/state/lifecycle";
 import { ProjectFavicon } from "../ProjectFavicon";
 import { RycoLetterMark } from "../RycoLetterMark";
 import { useServerAvailableEditors, useServerObservability } from "../../rpc/serverState";
@@ -904,14 +907,14 @@ export function GeneralSettingsPanel({
         />
 
         <SettingsRow
-          title="Delete confirmation"
-          description="Ask before deleting a thread and its chat history."
+          title="Move to Trash confirmation"
+          description="Ask before moving a thread to Trash. Deleting from Trash always asks."
           owner="client"
           scope={localScopeLabel}
           resetAction={
             settings.confirmThreadDelete !== DEFAULT_UNIFIED_SETTINGS.confirmThreadDelete ? (
               <SettingResetButton
-                label="delete confirmation"
+                label="Move to Trash confirmation"
                 onClick={() =>
                   updateSettings({
                     confirmThreadDelete: DEFAULT_UNIFIED_SETTINGS.confirmThreadDelete,
@@ -926,7 +929,7 @@ export function GeneralSettingsPanel({
               onCheckedChange={(checked) =>
                 updateSettings({ confirmThreadDelete: Boolean(checked) })
               }
-              aria-label="Confirm thread deletion"
+              aria-label="Confirm moving threads to Trash"
             />
           }
         />
@@ -1058,7 +1061,9 @@ export function ArchivedThreadsPanel() {
     mutationCapability.allowed && (!target || (target.connected && target.canMutate !== false));
   const projects = useStore(useShallow(selectProjectsAcrossEnvironments));
   const threads = useStore(useShallow(selectThreadShellsAcrossEnvironments));
-  const { unarchiveThread, confirmAndDeleteThread } = useThreadActions();
+  const { unarchiveThread, confirmAndTrashThread } = useThreadActions();
+  const config = useServerConfig();
+  const lifecycleEnvironmentId = target?.environmentId ?? config?.environment.environmentId ?? null;
   const archivedGroups = useMemo(
     () => selectArchivedSettingsGroups(projects, threads, target?.environmentId),
     [projects, threads, target?.environmentId],
@@ -1081,7 +1086,7 @@ export function ArchivedThreadsPanel() {
       const clicked = await api.contextMenu.show(
         [
           { id: "unarchive", label: "Unarchive" },
-          { id: "delete", label: "Delete", destructive: true },
+          { id: "trash", label: "Move to Trash", destructive: true },
         ],
         position,
       );
@@ -1101,15 +1106,18 @@ export function ArchivedThreadsPanel() {
         return;
       }
 
-      if (clicked === "delete") {
-        await confirmAndDeleteThread(threadRef);
+      if (clicked === "trash") {
+        await confirmAndTrashThread(threadRef);
       }
     },
-    [confirmAndDeleteThread, mutationAllowed, mutationCapability.reason, unarchiveThread],
+    [confirmAndTrashThread, mutationAllowed, mutationCapability.reason, unarchiveThread],
   );
 
   return (
     <SettingsPageContainer>
+      <SettingsNotice tone="info" title="Retention">
+        {LIFECYCLE_RETENTION_COPY.archive} {LIFECYCLE_RETENTION_COPY.trash}
+      </SettingsNotice>
       {archivedGroups.length === 0 ? (
         <SettingsSection title="Archived threads">
           <Empty className="min-h-88">
@@ -1149,6 +1157,18 @@ export function ArchivedThreadsPanel() {
           </SettingsSection>
         ))
       )}
+      <TrashSection
+        environmentId={lifecycleEnvironmentId}
+        mutationAllowed={mutationAllowed}
+        mutationReason={mutationCapability.reason ?? null}
+      />
+      <LifecycleSuggestionSettings
+        environmentId={lifecycleEnvironmentId}
+        disabled={!mutationAllowed}
+        projects={projects
+          .filter((project) => project.environmentId === lifecycleEnvironmentId)
+          .map((project) => ({ id: project.id, name: project.name }))}
+      />
     </SettingsPageContainer>
   );
 }

@@ -1,6 +1,7 @@
 import { ProjectId, ProviderInstanceId, ThreadId, TurnId } from "@ryco/contracts";
 import { assert, it } from "@effect/vitest";
 import { Effect, Layer, Option } from "effect";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { runMigrations } from "../Migrations.ts";
 import {
@@ -42,6 +43,7 @@ const BASE_ROW = {
   pendingUserInputCount: 0,
   hasActionableProposedPlan: 0,
   deletedAt: null,
+  trashedAt: null,
   lineageParentThreadId: null,
   lineageRootThreadId: null,
   lineageRelationship: null,
@@ -166,6 +168,63 @@ layer("ProjectionThreadRepository lineage", (it) => {
         assert.isNull(reset.value.lineageRootThreadId);
         assert.isNull(reset.value.lineageRelationship);
       }
+    }),
+  );
+});
+
+layer("ProjectionThreadRepository trash", (it) => {
+  it.effect("keeps trash state across upserts and lists only recoverable threads", () =>
+    Effect.gen(function* () {
+      const repository = yield* ProjectionThreadRepository;
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`
+        INSERT INTO projection_projects (project_id, title, workspace_root, scripts_json,
+          created_at, updated_at, deleted_at)
+        VALUES (${BASE_ROW.projectId}, 'Project', '/tmp/project', '[]',
+          '2026-07-31T00:00:00.000Z', '2026-07-31T00:00:00.000Z', NULL)
+      `;
+      const trashedAt = "2026-08-02T00:00:00.000Z";
+      yield* repository.upsert({
+        ...BASE_ROW,
+        threadId: ThreadId.make("thread-trashed"),
+        archivedAt: "2026-08-01T00:00:00.000Z",
+        deletedAt: trashedAt,
+        trashedAt,
+      });
+      // Permanently deleted (including legacy deletions): never listed as recoverable.
+      yield* repository.upsert({
+        ...BASE_ROW,
+        threadId: ThreadId.make("thread-deleted"),
+        deletedAt: trashedAt,
+        trashedAt: null,
+      });
+      yield* repository.upsert({ ...BASE_ROW, threadId: ThreadId.make("thread-live") });
+
+      const trashed = yield* repository.getById({ threadId: ThreadId.make("thread-trashed") });
+      assert.isTrue(Option.isSome(trashed));
+      if (Option.isSome(trashed)) {
+        // A later `...existingRow` upsert must not turn Trash into a permanent deletion.
+        yield* repository.upsert({ ...trashed.value, title: "Renamed while in Trash" });
+      }
+      const listed = yield* repository.listTrashed({ limit: 10 });
+      assert.deepEqual(
+        listed.map((row) => ({
+          threadId: row.threadId,
+          title: row.title,
+          projectTitle: row.projectTitle,
+          archivedAt: row.archivedAt,
+          trashedAt: row.trashedAt,
+        })),
+        [
+          {
+            threadId: ThreadId.make("thread-trashed"),
+            title: "Renamed while in Trash",
+            projectTitle: "Project",
+            archivedAt: "2026-08-01T00:00:00.000Z",
+            trashedAt,
+          },
+        ],
+      );
     }),
   );
 });

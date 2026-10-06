@@ -7,6 +7,7 @@ import path from "node:path";
 import { Context, Effect, Layer, Option, Schema, Semaphore } from "effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import {
+  CommandId,
   ProjectId,
   StorageCleanupPreview,
   StorageCleanupResult,
@@ -23,6 +24,7 @@ import {
   ProjectionSnapshotQuery,
   type ProjectionSnapshotQueryShape,
 } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
 import {
   ProviderSessionDirectory,
   type ProviderSessionDirectoryShape,
@@ -89,6 +91,8 @@ export function makeStorageService(deps: {
   providerProtection: ProviderProtectedPathsShape;
   policy: WorkspaceAccessPolicyShape;
   git: Pick<GitWorkflowServiceShape, "removeWorktree" | "listWorktreePaths">;
+  /** Records a removed checkout on its workspace record (shared lifecycle state). */
+  recordCheckoutRemoval?: (checkoutPath: string) => Effect.Effect<void>;
 }) {
   const { sql, config, settings, snapshots, providers, terminals, policy, git } = deps;
   const resolveProtectedSources = (
@@ -889,6 +893,9 @@ export function makeStorageService(deps: {
         return { id: entry.id, status: "failed" as const, detail: removed };
       }
       yield* sql`UPDATE storage_owned_entries SET state = 'removed' WHERE id = ${entry.id}`;
+      // Keep the workspace record truthful: it stays (with branch and path) as provenance.
+      if (row.category === "worktree" && deps.recordCheckoutRemoval)
+        yield* deps.recordCheckoutRemoval(row.path);
       return {
         id: entry.id,
         status: "removed" as const,
@@ -1096,7 +1103,35 @@ export const StorageServiceLive = Layer.effect(
   StorageService,
   Effect.gen(function* () {
     const protection = yield* Effect.serviceOption(ProviderProtectedPaths);
+    const engine = yield* Effect.serviceOption(OrchestrationEngineService);
+    const snapshots = yield* ProjectionSnapshotQuery;
+    const recordCheckoutRemoval = (checkoutPath: string) =>
+      Option.match(engine, {
+        onNone: () => Effect.void,
+        onSome: (orchestration) =>
+          Effect.gen(function* () {
+            const snapshot = yield* snapshots.getShellSnapshot();
+            const canonicalRemoved = yield* attempt(() => canonical(checkoutPath));
+            for (const worktree of snapshot.worktrees ?? []) {
+              if (worktree.worktreePath === null || worktree.checkoutRemovedAt != null) continue;
+              const candidate = yield* attempt(() => canonical(worktree.worktreePath!)).pipe(
+                Effect.orElseSucceed(() => worktree.worktreePath!),
+              );
+              if (candidate !== canonicalRemoved) continue;
+              yield* orchestration.dispatch({
+                type: "worktree.checkout.remove",
+                commandId: CommandId.make(
+                  `storage-cleanup:${worktree.worktreeId}:${crypto.randomUUID()}`,
+                ),
+                worktreeId: worktree.worktreeId,
+                reason: "removed",
+                removedAt: new Date().toISOString(),
+              });
+            }
+          }).pipe(Effect.ignore({ log: true })),
+      });
     const service = makeStorageService({
+      recordCheckoutRemoval,
       providerProtection: Option.getOrElse(protection, () => ({ resolve: () => null })),
       sql: yield* SqlClient.SqlClient,
       config: yield* ServerConfig,

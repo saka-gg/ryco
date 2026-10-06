@@ -114,14 +114,14 @@ describe("planWorktreeReconciliation", () => {
     expect(result.adopt[0]?.branch).toBe("feat/x");
   });
 
-  it("detaches sessions whose worktree is gone from disk", () => {
+  it("keeps sessions whose worktree is gone from disk on their recorded checkout", () => {
+    // Detaching would silently resume them in the main checkout.
     const result = plan({
       gitWorktreePaths: ["/repo"],
       threads: [makeThread({ id: "thread-1", worktreePath: "/worktrees/deleted" })],
     });
 
-    expect(result.detach).toEqual([ThreadId.make("thread-1")]);
-    expect(result.adopt).toEqual([]);
+    expect(result).toEqual({ adopt: [], attach: [], detach: [] });
   });
 
   it("detaches sessions that point at the project root under another spelling", () => {
@@ -217,9 +217,11 @@ describe("planWorktreeReconciliation", () => {
     expect(plan({ ...input, caseSensitiveFileSystem: false }).attach).toEqual([
       { threadId: ThreadId.make("thread-1"), worktreeId: WorktreeId.make("worktree-1") },
     ]);
-    expect(plan({ ...input, caseSensitiveFileSystem: true }).detach).toEqual([
-      ThreadId.make("thread-1"),
-    ]);
+    expect(plan({ ...input, caseSensitiveFileSystem: true })).toEqual({
+      adopt: [],
+      attach: [],
+      detach: [],
+    });
   });
 
   it("ignores threads and worktrees belonging to other projects", () => {

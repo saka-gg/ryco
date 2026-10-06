@@ -2141,7 +2141,7 @@ describe("server-owned sidebar undo", () => {
         if (change === "delete")
           await system.run(
             system.engine.dispatch({
-              type: "thread.delete",
+              type: "thread.trash",
               commandId: CommandId.make("remote-delete"),
               threadId: system.threadId,
             }),

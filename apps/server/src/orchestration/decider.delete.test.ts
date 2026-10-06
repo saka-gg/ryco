@@ -173,7 +173,7 @@ describe("decider deletion flows", () => {
     ).rejects.toThrow("cannot be deleted without force=true");
   });
 
-  it("reuses thread.delete semantics when force-deleting a non-empty project", async () => {
+  it("moves a force-removed project's conversations to Trash instead of deleting them", async () => {
     const readModel = await seedReadModel();
     const projectUpdatedAt = readModel.projects.find(
       (project) => project.id === asProjectId("project-delete"),
@@ -211,72 +211,50 @@ describe("decider deletion flows", () => {
       ),
     ).rejects.toThrow("thread set changed after the command was authorized");
 
-    const projectDeleteCommand: Extract<OrchestrationCommand, { type: "project.delete" }> = {
-      type: "project.delete",
-      commandId: asCommandId("cmd-project-delete-force"),
-      projectId: asProjectId("project-delete"),
-      force: true,
-      expectedUpdatedAt: projectUpdatedAt,
-      expectedThreadIds: [asThreadId("thread-delete-1"), asThreadId("thread-delete-2")],
-    };
-
     const forcedResult = await Effect.runPromise(
       decideOrchestrationCommand({
-        command: projectDeleteCommand,
+        command: {
+          type: "project.delete",
+          commandId: asCommandId("cmd-project-delete-force"),
+          projectId: asProjectId("project-delete"),
+          force: true,
+          expectedUpdatedAt: projectUpdatedAt,
+          expectedThreadIds: [asThreadId("thread-delete-1"), asThreadId("thread-delete-2")],
+        },
         readModel,
       }),
     );
     const forcedEvents = Array.isArray(forcedResult) ? forcedResult : [forcedResult];
-
     expect(forcedEvents.map((event) => event.type)).toEqual([
-      "thread.deleted",
-      "thread.deleted",
+      "thread.trashed",
+      "thread.trashed",
       "project.deleted",
     ]);
 
-    let sequentialReadModel = readModel;
-    let nextSequence = readModel.snapshotSequence;
-    const sequentialEvents: PlannedEvent[] = [];
-    for (const nextCommand of [
-      {
-        type: "thread.delete",
-        commandId: projectDeleteCommand.commandId,
-        threadId: asThreadId("thread-delete-1"),
-      },
-      {
-        type: "thread.delete",
-        commandId: projectDeleteCommand.commandId,
-        threadId: asThreadId("thread-delete-2"),
-      },
-      {
-        type: "project.delete",
-        commandId: projectDeleteCommand.commandId,
-        projectId: asProjectId("project-delete"),
-      },
-    ] satisfies ReadonlyArray<OrchestrationCommand>) {
-      const decided = await Effect.runPromise(
-        decideOrchestrationCommand({
-          command: nextCommand,
-          readModel: sequentialReadModel,
-        }),
+    let projected = readModel;
+    for (const event of forcedEvents)
+      projected = await Effect.runPromise(
+        projectEvent(projected, { ...event, sequence: projected.snapshotSequence + 1 }),
       );
-      const nextEvents = Array.isArray(decided) ? decided : [decided];
-      sequentialEvents.push(...nextEvents);
-      for (const nextEvent of nextEvents) {
-        nextSequence += 1;
-        sequentialReadModel = await Effect.runPromise(
-          projectEvent(sequentialReadModel, {
-            ...nextEvent,
-            sequence: nextSequence,
-          }),
-        );
-      }
-    }
-
-    expect(normalizeDeleteEvent(forcedResult)).toEqual(normalizeDeleteEvent(sequentialEvents));
+    // Hidden like a deletion, but recoverable: nothing was deleted permanently.
+    expect(projected.threads.every((thread) => thread.deletedAt !== null)).toBe(true);
+    expect(projected.threads.every((thread) => thread.trashedAt != null)).toBe(true);
+    // Restoring needs the project back; the conversation stays in Trash meanwhile.
+    await expect(
+      Effect.runPromise(
+        decideOrchestrationCommand({
+          command: {
+            type: "thread.untrash",
+            commandId: asCommandId("cmd-untrash-orphan"),
+            threadId: asThreadId("thread-delete-1"),
+          },
+          readModel: projected,
+        }),
+      ),
+    ).rejects.toThrow("project was removed");
   });
 
-  it("deletes worktree sessions before deleting a worktree", async () => {
+  it("never deletes conversations or drops a workspace record they reference", async () => {
     const now = new Date().toISOString();
     const worktreeId = asWorktreeId("worktree-delete-1");
     let readModel = await seedReadModel();
@@ -307,207 +285,174 @@ describe("decider deletion flows", () => {
           updatedAt: now,
         },
       },
-      {
-        sequence: 5,
-        eventId: asEventId("evt-thread-attach-1"),
-        aggregateKind: "thread",
-        aggregateId: asThreadId("thread-delete-1"),
-        type: "thread.attachedToWorktree",
-        occurredAt: now,
-        commandId: asCommandId("cmd-thread-attach-1"),
-        causationEventId: null,
-        correlationId: asCommandId("cmd-thread-attach-1"),
-        metadata: {},
-        payload: {
-          threadId: asThreadId("thread-delete-1"),
-          worktreeId,
-          attachedAt: now,
-        },
-      },
-      {
-        sequence: 6,
-        eventId: asEventId("evt-thread-attach-2"),
-        aggregateKind: "thread",
-        aggregateId: asThreadId("thread-delete-2"),
-        type: "thread.attachedToWorktree",
-        occurredAt: now,
-        commandId: asCommandId("cmd-thread-attach-2"),
-        causationEventId: null,
-        correlationId: asCommandId("cmd-thread-attach-2"),
-        metadata: {},
-        payload: {
-          threadId: asThreadId("thread-delete-2"),
-          worktreeId,
-          attachedAt: now,
-        },
-      },
+      ...(["thread-delete-1", "thread-delete-2"] as const).map(
+        (threadId, index) =>
+          ({
+            sequence: 5 + index,
+            eventId: asEventId(`evt-thread-attach-${index}`),
+            aggregateKind: "thread",
+            aggregateId: asThreadId(threadId),
+            type: "thread.attachedToWorktree",
+            occurredAt: now,
+            commandId: asCommandId(`cmd-thread-attach-${index}`),
+            causationEventId: null,
+            correlationId: asCommandId(`cmd-thread-attach-${index}`),
+            metadata: {},
+            payload: { threadId: asThreadId(threadId), worktreeId, attachedAt: now },
+          }) satisfies OrchestrationEvent,
+      ),
     ] satisfies OrchestrationEvent[]) {
       readModel = await Effect.runPromise(projectEvent(readModel, nextEvent));
     }
 
-    const result = await Effect.runPromise(
-      decideOrchestrationCommand({
-        command: {
-          type: "worktree.delete",
-          commandId: asCommandId("cmd-worktree-delete"),
-          worktreeId,
-          deletedAt: now,
-          deletedBranch: false,
-        },
-        readModel,
-      }),
-    );
-    const events = Array.isArray(result) ? result : [result];
+    const deleteCommand = (sessions?: "preserve" | "delete") =>
+      ({
+        type: "worktree.delete",
+        commandId: asCommandId(`cmd-worktree-delete-${sessions ?? "default"}`),
+        worktreeId,
+        ...(sessions ? { sessions } : {}),
+        deletedAt: now,
+        deletedBranch: false,
+      }) satisfies OrchestrationCommand;
 
-    expect(events.map((event) => event.type)).toEqual([
-      "thread.deleted",
-      "thread.deleted",
-      "worktree.deleted",
-    ]);
+    for (const sessions of [undefined, "preserve"] as const)
+      await expect(
+        Effect.runPromise(
+          decideOrchestrationCommand({ command: deleteCommand(sessions), readModel }),
+        ),
+      ).rejects.toThrow("still records 2 conversation(s)");
+    await expect(
+      Effect.runPromise(
+        decideOrchestrationCommand({ command: deleteCommand("delete"), readModel }),
+      ),
+    ).rejects.toThrow("never delete conversations");
+
+    // Trashed conversations still reference it; only permanently deleted ones do not.
+    let emptied = readModel;
+    for (const threadId of ["thread-delete-1", "thread-delete-2"])
+      for (const type of ["thread.trash", "thread.delete"] as const) {
+        const decided = await Effect.runPromise(
+          decideOrchestrationCommand({
+            command: {
+              type,
+              commandId: asCommandId(`${type}-${threadId}`),
+              threadId: asThreadId(threadId),
+            },
+            readModel: emptied,
+          }),
+        );
+        for (const event of Array.isArray(decided) ? decided : [decided])
+          emptied = await Effect.runPromise(
+            projectEvent(emptied, { ...event, sequence: emptied.snapshotSequence + 1 }),
+          );
+        if (type === "thread.trash")
+          await expect(
+            Effect.runPromise(
+              decideOrchestrationCommand({ command: deleteCommand(), readModel: emptied }),
+            ),
+          ).rejects.toThrow("conversation(s)");
+      }
+    const result = await Effect.runPromise(
+      decideOrchestrationCommand({ command: deleteCommand(), readModel: emptied }),
+    );
     expect(normalizeDeleteEvent(result)).toEqual([
-      {
-        type: "thread.deleted",
-        aggregateKind: "thread",
-        aggregateId: asThreadId("thread-delete-1"),
-        commandId: asCommandId("cmd-worktree-delete"),
-        correlationId: asCommandId("cmd-worktree-delete"),
-        payload: {
-          threadId: asThreadId("thread-delete-1"),
-        },
-      },
-      {
-        type: "thread.deleted",
-        aggregateKind: "thread",
-        aggregateId: asThreadId("thread-delete-2"),
-        commandId: asCommandId("cmd-worktree-delete"),
-        correlationId: asCommandId("cmd-worktree-delete"),
-        payload: {
-          threadId: asThreadId("thread-delete-2"),
-        },
-      },
       {
         type: "worktree.deleted",
         aggregateKind: "worktree",
         aggregateId: worktreeId,
-        commandId: asCommandId("cmd-worktree-delete"),
-        correlationId: asCommandId("cmd-worktree-delete"),
-        payload: {
-          worktreeId,
-        },
+        commandId: asCommandId("cmd-worktree-delete-default"),
+        correlationId: asCommandId("cmd-worktree-delete-default"),
+        payload: { worktreeId },
       },
     ]);
   });
 });
 
-for (const sessions of ["preserve", "delete"] as const) {
-  it(`governed workspace deletion atomically enforces ${sessions} sessions`, async () => {
-    const model = await seedReadModel();
-    const project = model.projects[0]!;
-    const targetId = asWorktreeId("governed-target");
-    const mainId = asWorktreeId("governed-main");
-    const base = {
+it("governed checkout removal keeps conversations attached with their provenance", async () => {
+  const model = await seedReadModel();
+  const project = model.projects[0]!;
+  const targetId = asWorktreeId("governed-target");
+  const base = {
+    projectId: project.id,
+    branch: "topic",
+    worktreePath: "/tmp/governed-target",
+    origin: "manual" as const,
+    prNumber: null,
+    issueNumber: null,
+    prTitle: null,
+    issueTitle: null,
+    createdAt: project.createdAt,
+    updatedAt: project.updatedAt,
+    archivedAt: null,
+    manualPosition: 0,
+  };
+  const readModel: OrchestrationReadModel = {
+    ...model,
+    worktrees: [{ ...base, worktreeId: targetId }],
+    threads: model.threads.map((t) =>
+      Object.assign({}, t, { worktreeId: targetId, worktreePath: base.worktreePath }),
+    ),
+  };
+  const command = {
+    type: "worktree.checkout.remove" as const,
+    commandId: asCommandId("governed-remove"),
+    worktreeId: targetId,
+    reason: "removed" as const,
+    removedAt: project.updatedAt,
+    lifecycleGuard: {
+      mainWorkspaceId: null,
       projectId: project.id,
-      branch: "topic",
-      worktreePath: "/tmp/governed-target",
-      origin: "manual" as const,
-      prNumber: null,
-      issueNumber: null,
-      prTitle: null,
-      issueTitle: null,
-      createdAt: project.createdAt,
-      updatedAt: project.updatedAt,
-      archivedAt: null,
-      manualPosition: 0,
-    };
-    const readModel: OrchestrationReadModel = {
-      ...model,
-      worktrees: [
-        { ...base, worktreeId: targetId },
-        { ...base, worktreeId: mainId, worktreePath: null, origin: "main" },
-      ],
-      threads: model.threads.map((t) =>
-        Object.assign({}, t, {
-          worktreeId: targetId,
-          worktreePath: base.worktreePath,
-        }),
-      ),
-    };
-    const command = {
-      type: "worktree.delete" as const,
-      commandId: asCommandId("governed-delete"),
-      worktreeId: targetId,
-      sessions,
-      deletedAt: project.updatedAt,
-      deletedBranch: false,
-      lifecycleGuard: {
-        mainWorkspaceId: mainId,
-        projectId: project.id,
-        projectUpdatedAt: project.updatedAt,
-        workspaceRoot: project.workspaceRoot,
-        updatedAt: base.updatedAt,
-        worktreePath: base.worktreePath,
-        branch: base.branch,
-        sessions: readModel.threads
-          .map((t) => ({ threadId: t.id, updatedAt: t.updatedAt }))
-          .toSorted((a, b) => a.threadId.localeCompare(b.threadId)),
-      },
-    };
-    if (sessions === "preserve") {
-      await expect(
-        Effect.runPromise(
-          decideOrchestrationCommand({
-            readModel,
-            command: {
-              ...command,
-              lifecycleGuard: {
-                ...command.lifecycleGuard,
-                mainWorkspaceId: asWorktreeId("changed-main"),
-              },
-            },
-          }),
-        ),
-      ).rejects.toThrow("changed after approval");
-    }
-    const result = await Effect.runPromise(decideOrchestrationCommand({ readModel, command }));
-    const events = Array.isArray(result) ? result : [result];
-    expect(events.map((e) => e.type).filter((type) => type === "thread.deleted")).toHaveLength(
-      sessions === "delete" ? 2 : 0,
+      projectUpdatedAt: project.updatedAt,
+      workspaceRoot: project.workspaceRoot,
+      updatedAt: base.updatedAt,
+      worktreePath: base.worktreePath,
+      branch: base.branch,
+      sessions: readModel.threads
+        .map((t) => ({ threadId: t.id, updatedAt: t.updatedAt }))
+        .toSorted((a, b) => a.threadId.localeCompare(b.threadId)),
+    },
+  };
+  const result = await Effect.runPromise(decideOrchestrationCommand({ readModel, command }));
+  const events = Array.isArray(result) ? result : [result];
+  expect(events.map((e) => e.type)).toEqual(["worktree.checkoutRemoved", "worktree.archived"]);
+  let projected = readModel;
+  for (const event of events)
+    projected = await Effect.runPromise(
+      projectEvent(projected, { ...event, sequence: projected.snapshotSequence + 1 }),
     );
-    expect(events.at(-1)?.type).toBe("worktree.deleted");
-    let projected = readModel;
-    for (const event of events)
-      projected = await Effect.runPromise(
-        projectEvent(projected, { ...event, sequence: projected.snapshotSequence + 1 }),
-      );
-    if (sessions === "preserve") {
-      expect(
-        projected.threads.every(
-          (t) => t.deletedAt === null && t.worktreePath === null && t.worktreeId === mainId,
-        ),
-      ).toBe(true);
-    }
-    await expect(
-      Effect.runPromise(
-        decideOrchestrationCommand({
-          readModel: { ...readModel, threads: readModel.threads.slice(1) },
-          command,
-        }),
-      ),
-    ).rejects.toThrow("changed after approval");
-    await expect(
-      Effect.runPromise(
-        decideOrchestrationCommand({
-          readModel: {
-            ...readModel,
-            worktrees: readModel.worktrees?.map((w) =>
-              w.worktreeId === targetId
-                ? Object.assign({}, w, { worktreePath: "/tmp/changed" })
-                : w,
-            ),
-          },
-          command,
-        }),
-      ),
-    ).rejects.toThrow("changed after approval");
+  // Never reattached to main, never cleared to the project root, never deleted.
+  expect(
+    projected.threads.every(
+      (t) =>
+        t.deletedAt === null && t.worktreeId === targetId && t.worktreePath === base.worktreePath,
+    ),
+  ).toBe(true);
+  const worktree = projected.worktrees?.find((w) => w.worktreeId === targetId);
+  expect(worktree).toMatchObject({
+    branch: "topic",
+    worktreePath: base.worktreePath,
+    checkoutRemovalReason: "removed",
   });
-}
+  expect(worktree?.archivedAt).not.toBeNull();
+  await expect(
+    Effect.runPromise(
+      decideOrchestrationCommand({
+        readModel: { ...readModel, threads: readModel.threads.slice(1) },
+        command,
+      }),
+    ),
+  ).rejects.toThrow("changed after approval");
+  await expect(
+    Effect.runPromise(
+      decideOrchestrationCommand({
+        readModel: {
+          ...readModel,
+          worktrees: readModel.worktrees?.map((w) =>
+            Object.assign({}, w, { worktreePath: "/tmp/changed" }),
+          ),
+        },
+        command,
+      }),
+    ),
+  ).rejects.toThrow("changed after approval");
+});

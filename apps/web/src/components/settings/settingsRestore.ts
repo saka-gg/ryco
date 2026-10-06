@@ -18,7 +18,7 @@ const RESTORABLE_SETTINGS = {
   defaultThreadEnvMode: "New thread mode",
   addProjectBaseDirectory: "Add project base directory",
   confirmThreadArchive: "Archive confirmation",
-  confirmThreadDelete: "Delete confirmation",
+  confirmThreadDelete: "Move to Trash confirmation",
   confirmThreadUnpin: "Unpin confirmation",
   textGenerationModelSelection: "Git writing model",
 } as const satisfies Partial<Record<keyof UnifiedSettings, string>>;

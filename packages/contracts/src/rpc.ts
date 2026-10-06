@@ -359,6 +359,17 @@ import {
   WorktreeCheckoutLocation,
   WorktreeId,
 } from "./worktree.ts";
+import {
+  LifecycleSuggestions,
+  TrashListResult,
+  WorkspaceLifecycleApplyInput,
+  WorkspaceLifecycleError,
+  WorkspaceLifecycleListInput,
+  WorkspaceLifecyclePreview,
+  WorkspaceLifecycleRequest,
+  WorkspaceLifecycleResult,
+  WorkspaceLifecycleSummary,
+} from "./workspaceLifecycle.ts";
 
 export const WS_METHODS = {
   storageScan: "storage.scan",
@@ -414,6 +425,13 @@ export const WS_METHODS = {
   gitArchiveWorktree: "git.archiveWorktree",
   gitRestoreWorktree: "git.restoreWorktree",
   gitDeleteWorktree: "git.deleteWorktree",
+
+  // Thread/workspace lifecycle (one server-side lifecycle service)
+  lifecycleListWorkspaces: "lifecycle.listWorkspaces",
+  lifecyclePreviewWorkspace: "lifecycle.previewWorkspace",
+  lifecycleApplyWorkspace: "lifecycle.applyWorkspace",
+  lifecycleSuggestions: "lifecycle.suggestions",
+  lifecycleListTrash: "lifecycle.listTrash",
 
   // Sidebar hierarchy methods
   threadsSetManualBucket: "threads.setManualBucket",
@@ -1669,6 +1687,36 @@ export const WsGitDeleteWorktreeRpc = Rpc.make(WS_METHODS.gitDeleteWorktree, {
   error: Schema.Union([GitManagerServiceError, AuthRpcError]),
 });
 
+export const WsLifecycleListWorkspacesRpc = Rpc.make(WS_METHODS.lifecycleListWorkspaces, {
+  payload: WorkspaceLifecycleListInput,
+  success: Schema.Array(WorkspaceLifecycleSummary),
+  error: Schema.Union([WorkspaceLifecycleError, AuthRpcError]),
+});
+
+export const WsLifecyclePreviewWorkspaceRpc = Rpc.make(WS_METHODS.lifecyclePreviewWorkspace, {
+  payload: WorkspaceLifecycleRequest,
+  success: WorkspaceLifecyclePreview,
+  error: Schema.Union([WorkspaceLifecycleError, AuthRpcError]),
+});
+
+export const WsLifecycleApplyWorkspaceRpc = Rpc.make(WS_METHODS.lifecycleApplyWorkspace, {
+  payload: WorkspaceLifecycleApplyInput,
+  success: WorkspaceLifecycleResult,
+  error: Schema.Union([WorkspaceLifecycleError, AuthRpcError]),
+});
+
+export const WsLifecycleSuggestionsRpc = Rpc.make(WS_METHODS.lifecycleSuggestions, {
+  payload: Schema.Struct({}),
+  success: LifecycleSuggestions,
+  error: Schema.Union([WorkspaceLifecycleError, AuthRpcError]),
+});
+
+export const WsLifecycleListTrashRpc = Rpc.make(WS_METHODS.lifecycleListTrash, {
+  payload: Schema.Struct({}),
+  success: TrashListResult,
+  error: Schema.Union([WorkspaceLifecycleError, AuthRpcError]),
+});
+
 export const WsThreadsSetManualBucketRpc = Rpc.make(WS_METHODS.threadsSetManualBucket, {
   payload: ThreadsSetManualBucketInput,
   success: EmptyRpcResult,
@@ -2250,6 +2298,11 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsGitArchiveWorktreeRpc
   | typeof WsGitRestoreWorktreeRpc
   | typeof WsGitDeleteWorktreeRpc
+  | typeof WsLifecycleListWorkspacesRpc
+  | typeof WsLifecyclePreviewWorkspaceRpc
+  | typeof WsLifecycleApplyWorkspaceRpc
+  | typeof WsLifecycleSuggestionsRpc
+  | typeof WsLifecycleListTrashRpc
   | typeof WsThreadsSetManualBucketRpc
   | typeof WsThreadsSetManualPositionRpc
   | typeof WsSearchThreadMessagesRpc
@@ -2437,6 +2490,11 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsGitArchiveWorktreeRpc,
   WsGitRestoreWorktreeRpc,
   WsGitDeleteWorktreeRpc,
+  WsLifecycleListWorkspacesRpc,
+  WsLifecyclePreviewWorkspaceRpc,
+  WsLifecycleApplyWorkspaceRpc,
+  WsLifecycleSuggestionsRpc,
+  WsLifecycleListTrashRpc,
   WsThreadsSetManualBucketRpc,
   WsThreadsSetManualPositionRpc,
   WsSearchThreadMessagesRpc,

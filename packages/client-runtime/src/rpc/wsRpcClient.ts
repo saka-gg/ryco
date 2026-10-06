@@ -259,6 +259,13 @@ export interface WsRpcClient {
     readonly restoreWorktree: RpcUnaryMethod<typeof WS_METHODS.gitRestoreWorktree>;
     readonly deleteWorktree: RpcUnaryMethod<typeof WS_METHODS.gitDeleteWorktree>;
   };
+  readonly lifecycle: {
+    readonly listWorkspaces: RpcUnaryMethod<typeof WS_METHODS.lifecycleListWorkspaces>;
+    readonly previewWorkspace: RpcUnaryMethod<typeof WS_METHODS.lifecyclePreviewWorkspace>;
+    readonly applyWorkspace: RpcUnaryMethod<typeof WS_METHODS.lifecycleApplyWorkspace>;
+    readonly suggestions: RpcUnaryMethod<typeof WS_METHODS.lifecycleSuggestions>;
+    readonly listTrash: RpcUnaryMethod<typeof WS_METHODS.lifecycleListTrash>;
+  };
   readonly storage: {
     readonly scan: RpcUnaryMethod<typeof WS_METHODS.storageScan>;
     readonly preview: RpcUnaryMethod<typeof WS_METHODS.storagePreview>;
@@ -711,6 +718,18 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
         transport.request((client) => client[WS_METHODS.gitRestoreWorktree](input)),
       deleteWorktree: (input) =>
         transport.request((client) => client[WS_METHODS.gitDeleteWorktree](input)),
+    },
+    lifecycle: {
+      listWorkspaces: (input) =>
+        transport.request((client) => client[WS_METHODS.lifecycleListWorkspaces](input)),
+      previewWorkspace: (input) =>
+        transport.request((client) => client[WS_METHODS.lifecyclePreviewWorkspace](input)),
+      applyWorkspace: (input) =>
+        transport.request((client) => client[WS_METHODS.lifecycleApplyWorkspace](input)),
+      suggestions: (input) =>
+        transport.request((client) => client[WS_METHODS.lifecycleSuggestions](input)),
+      listTrash: (input) =>
+        transport.request((client) => client[WS_METHODS.lifecycleListTrash](input)),
     },
     storage: {
       scan: (input) => transport.request((client) => client[WS_METHODS.storageScan](input)),

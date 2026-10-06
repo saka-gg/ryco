@@ -19,6 +19,8 @@ import {
   ThreadGoalUpdatedPayload as ContractsThreadGoalUpdatedPayloadSchema,
   ThreadGoalClearedPayload as ContractsThreadGoalClearedPayloadSchema,
   ThreadDeletedPayload as ContractsThreadDeletedPayloadSchema,
+  ThreadTrashedPayload as ContractsThreadTrashedPayloadSchema,
+  ThreadUntrashedPayload as ContractsThreadUntrashedPayloadSchema,
   ThreadUnarchivedPayload as ContractsThreadUnarchivedPayloadSchema,
   ThreadUnsettledPayload as ContractsThreadUnsettledPayloadSchema,
   ThreadMessageSentPayload as ContractsThreadMessageSentPayloadSchema,
@@ -37,6 +39,8 @@ import {
   WorktreeArchivedPayload as ContractsWorktreeArchivedPayloadSchema,
   WorktreeCreatedPayload as ContractsWorktreeCreatedPayloadSchema,
   WorktreeDeletedPayload as ContractsWorktreeDeletedPayloadSchema,
+  WorktreeCheckoutRemovedPayload as ContractsWorktreeCheckoutRemovedPayloadSchema,
+  WorktreeCheckoutRestoredPayload as ContractsWorktreeCheckoutRestoredPayloadSchema,
   WorktreeManualPositionSetPayload as ContractsWorktreeManualPositionSetPayloadSchema,
   WorktreeMetaUpdatedPayload as ContractsWorktreeMetaUpdatedPayloadSchema,
   WorktreeRestoredPayload as ContractsWorktreeRestoredPayloadSchema,
@@ -59,6 +63,8 @@ export const ThreadTokenModeSetPayload = ContractsThreadTokenModeSetPayloadSchem
 export const ThreadGoalUpdatedPayload = ContractsThreadGoalUpdatedPayloadSchema;
 export const ThreadGoalClearedPayload = ContractsThreadGoalClearedPayloadSchema;
 export const ThreadDeletedPayload = ContractsThreadDeletedPayloadSchema;
+export const ThreadTrashedPayload = ContractsThreadTrashedPayloadSchema;
+export const ThreadUntrashedPayload = ContractsThreadUntrashedPayloadSchema;
 export const ThreadUnarchivedPayload = ContractsThreadUnarchivedPayloadSchema;
 export const ThreadUnsettledPayload = ContractsThreadUnsettledPayloadSchema;
 
@@ -87,4 +93,6 @@ export const WorktreeSourceControlStateUpdatedPayload =
   ContractsWorktreeSourceControlStateUpdatedPayloadSchema;
 export const WorktreeRestoredPayload = ContractsWorktreeRestoredPayloadSchema;
 export const WorktreeDeletedPayload = ContractsWorktreeDeletedPayloadSchema;
+export const WorktreeCheckoutRemovedPayload = ContractsWorktreeCheckoutRemovedPayloadSchema;
+export const WorktreeCheckoutRestoredPayload = ContractsWorktreeCheckoutRestoredPayloadSchema;
 export const WorktreeManualPositionSetPayload = ContractsWorktreeManualPositionSetPayloadSchema;

@@ -2,7 +2,6 @@ import { workspaceSessionActive } from "../workspace/lifecycleSafety.ts";
 export { workspaceSessionActive } from "../workspace/lifecycleSafety.ts";
 import { isDeepStrictEqual } from "node:util";
 import { createHash } from "node:crypto";
-import { lstatSync } from "node:fs";
 import path from "node:path";
 import { Cause, Context, Effect, Layer, Schema } from "effect";
 import {
@@ -11,11 +10,17 @@ import {
   type ProjectId,
   type ThreadId,
   type OrchestrationShellSnapshot,
+  type WorkspaceLifecycleAction,
 } from "@ryco/contracts";
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { WorkspaceAccessPolicy } from "../workspace/Services/WorkspaceAccessPolicy.ts";
 import { GitVcsDriver } from "../vcs/GitVcsDriver.ts";
 import { AgentControlPlanValidationError } from "./Errors.ts";
+import {
+  CheckoutInspectionError,
+  checkoutHasBlockingChanges,
+  inspectCheckout,
+} from "../workspace/checkoutInspection.ts";
 
 const fail = (detail: string) =>
   Effect.fail(new AgentControlPlanValidationError({ reason: "worktree-preflight", detail }));
@@ -26,13 +31,15 @@ const normalized = (value: string) => {
     : result;
 };
 const same = (a: string, b: string) => normalized(a) === normalized(b);
-const contains = (a: string, b: string) =>
-  same(a, b) || normalized(b).startsWith(normalized(a) + path.sep);
 const syntheticId = (projectId: string, directory: string) =>
   `synthetic-${createHash("sha256")
     .update(`${projectId}:${normalized(directory)}`)
     .digest("hex")}`;
 
+/**
+ * Same lifecycle rules as human workspace management: conversations are never deleted,
+ * a record conversations reference is never dropped, and the main checkout is protected.
+ */
 export const workspacePlanBlockers = (
   plan: AgentControlWorkspaceLifecyclePlan,
 ): readonly string[] => {
@@ -40,36 +47,38 @@ export const workspacePlanBlockers = (
   const blockers = [...s.blockers];
   if (s.registration !== "registered")
     blockers.push("Synthetic groups have no workspace record to mutate.");
-  if (
-    plan.action === "delete" &&
-    plan.sessions === "preserve" &&
-    s.sessions.length &&
-    s.mainWorkspaceId === null
-  )
-    blockers.push("A registered main workspace is required to preserve sessions.");
   if (s.main) blockers.push("The main workspace is protected.");
   if (s.current) blockers.push("The caller's current workspace is protected.");
   if (s.sessions.some((thread) => thread.active))
     blockers.push("Associated sessions have active work.");
-  if (plan.action !== "delete" && plan.sessions !== "preserve")
-    blockers.push("Only delete supports session deletion.");
+  if (plan.sessions === "delete")
+    blockers.push(
+      "Workspace actions never delete conversations; move conversations to Trash individually.",
+    );
+  if (plan.action === "delete" && s.sessions.length > 0)
+    blockers.push(
+      "Conversations reference this workspace record; archive it with remove-checkout to keep their provenance.",
+    );
   if (plan.action === "restore") {
-    if (
-      plan.checkoutMode !== "restore-checkout" ||
-      plan.deleteBranch ||
-      s.archivedAt === null ||
-      s.checkout !== "missing" ||
-      s.gitRegistered !== false ||
-      s.branchHead === null
-    )
-      blockers.push(
-        "Restore requires an archived record, absent checkout/registration and retained branch.",
-      );
+    if (s.archivedAt === null) blockers.push("Restore requires an archived workspace record.");
+    if (plan.checkoutMode === "restore-checkout") {
+      if (
+        plan.deleteBranch ||
+        s.checkout !== "missing" ||
+        s.gitRegistered !== false ||
+        s.branchHead === null
+      )
+        blockers.push(
+          "Recreating a checkout requires an absent checkout and registration and a retained branch.",
+        );
+    } else if (plan.checkoutMode !== "record-only")
+      blockers.push("Invalid checkout mode for restore.");
   } else if (plan.checkoutMode === "record-only") {
-    if (s.checkout !== "missing" || s.gitRegistered !== false || plan.deleteBranch)
-      blockers.push(
-        "Record-only cleanup requires a verified absent path and Git registration; branches are retained.",
-      );
+    if (plan.deleteBranch) blockers.push("Record-only actions retain the branch.");
+    if (s.checkout === "missing" && s.gitRegistered !== false)
+      blockers.push("The checkout is missing but Git still registers it; prune it first.");
+    if (plan.action === "delete" && s.checkout !== "missing")
+      blockers.push("Record-only deletion requires a verified absent checkout.");
   } else if (plan.checkoutMode === "remove-checkout") {
     if (
       s.checkout !== "present" ||
@@ -81,10 +90,27 @@ export const workspacePlanBlockers = (
         "Checkout removal requires a registered, clean checkout merged into the project HEAD.",
       );
   } else blockers.push("Invalid checkout mode for archive/delete.");
-  if (plan.deleteBranch && (s.branchHead === null || s.unmerged !== false))
-    blockers.push("Branch deletion requires a verified merged branch.");
+  if (
+    plan.deleteBranch &&
+    (plan.checkoutMode !== "remove-checkout" || s.branchHead === null || s.unmerged !== false)
+  )
+    blockers.push("Branch deletion requires removing a checkout whose branch is verified merged.");
   return [...new Set(blockers)];
 };
+
+/** The shared lifecycle action an approved Agent Control plan performs. */
+export const workspacePlanLifecycleAction = (
+  plan: AgentControlWorkspaceLifecyclePlan,
+): WorkspaceLifecycleAction =>
+  plan.action === "restore"
+    ? plan.checkoutMode === "restore-checkout"
+      ? "recreate-checkout"
+      : "restore"
+    : plan.checkoutMode === "remove-checkout"
+      ? "remove-checkout"
+      : plan.expected.checkout === "missing"
+        ? "remove-stale-record"
+        : "archive";
 
 export class AgentControlWorkspaces extends Context.Service<
   AgentControlWorkspaces,
@@ -226,223 +252,32 @@ export const AgentControlWorkspacesLive = Layer.effect(
           blockers: [],
         };
         const inspection = yield* Effect.exit(
-          Effect.gen(function* () {
-            const root = yield* policy.assertExistingPath({
-              path: project.workspaceRoot,
+          inspectCheckout(
+            { policy, git },
+            {
+              snapshot,
+              project,
+              directory,
+              rowWorktreeId: row?.worktreeId ?? null,
+              branch: row?.branch ?? null,
               operation: "Agent Control workspace inspection",
-            });
-            const authorized = yield* policy.assertPath({
-              path: directory,
-              operation: "Agent Control workspace inspection",
-            });
-            if (!same(root, project.workspaceRoot) || !same(authorized, directory))
-              return yield* fail("Workspace path spelling or symlink changed.");
-            for (const other of snapshot.projects)
-              if (
-                other.id !== project.id &&
-                (contains(directory, other.workspaceRoot) ||
-                  contains(other.workspaceRoot, directory))
-              )
-                return yield* fail("Workspace overlaps another project.");
-            for (const other of snapshot.threads)
-              if (
-                other.projectId !== project.id &&
-                other.worktreePath !== null &&
-                (contains(directory, other.worktreePath) || contains(other.worktreePath, directory))
-              )
-                return yield* fail("Workspace overlaps sessions in another project.");
-            for (const other of snapshot.worktrees ?? [])
-              if (
-                other.worktreeId !== row?.worktreeId &&
-                other.worktreePath !== null &&
-                (contains(directory, other.worktreePath) || contains(other.worktreePath, directory))
-              )
-                return yield* fail("Workspace overlaps another registered workspace.");
-            const stat = yield* Effect.try({
-              try: () => {
-                try {
-                  return lstatSync(directory);
-                } catch (e) {
-                  if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
-                  throw e;
-                }
-              },
-              catch: () =>
-                new AgentControlPlanValidationError({
-                  reason: "worktree-preflight",
-                  detail: "Path inspection failed.",
-                }),
-            });
-            if (stat?.isSymbolicLink() || (stat && !stat.isDirectory()))
-              return yield* fail("Checkout is not a plain directory.");
-            const run = (cwd: string, args: readonly string[], maxOutputBytes = 8192) =>
-              git
-                .execute({
-                  operation: "Agent Control workspace inspection",
-                  cwd,
-                  args: ["-c", "core.fsmonitor=false", ...args],
-                  timeoutMs: 10_000,
-                  maxOutputBytes,
-                  env: { GIT_OPTIONAL_LOCKS: "0" },
-                })
-                .pipe(
-                  Effect.flatMap((r) =>
-                    r.stdoutTruncated || r.stderrTruncated
-                      ? fail("Git inspection exceeded its bounded output limit.")
-                      : Effect.succeed(r.stdout.replace(/\r?\n$/, "")),
-                  ),
-                );
-            const rootStat = yield* Effect.try({
-              try: () => lstatSync(root),
-              catch: () =>
-                new AgentControlPlanValidationError({
-                  reason: "worktree-preflight",
-                  detail: "Project path inspection failed.",
-                }),
-            });
-            const repository = yield* run(root, [
-              "rev-parse",
-              "--path-format=absolute",
-              "--git-common-dir",
-            ]);
-            yield* policy.assertExistingPath({
-              path: repository,
-              operation: "Agent Control Git metadata inspection",
-            });
-            const repositoryStat = yield* Effect.try({
-              try: () => lstatSync(repository),
-              catch: () =>
-                new AgentControlPlanValidationError({
-                  reason: "worktree-preflight",
-                  detail: "Git metadata inspection failed.",
-                }),
-            });
-            if (repositoryStat.isSymbolicLink() || !repositoryStat.isDirectory())
-              return yield* fail("Git metadata must be a plain directory.");
-            const baseHead = yield* run(root, ["rev-parse", "--verify", "HEAD"]);
-            const listing = yield* run(root, ["worktree", "list", "--porcelain", "-z"], 256 * 1024);
-            const entries = listing.split("\0\0").map((entry) => entry.split("\0"));
-            if (
-              entries.some((entry) =>
-                entry.some(
-                  (f) =>
-                    f.startsWith("worktree ") &&
-                    !same(f.slice(9), directory) &&
-                    contains(directory, f.slice(9)),
-                ),
-              )
-            )
-              return yield* fail("Workspace contains another Git checkout.");
-            const registered = entries.some((entry) =>
-              entry.some(
-                (field) => field.startsWith("worktree ") && same(field.slice(9), directory),
-              ),
-            );
-            if (
-              entries.some(
-                (entry) =>
-                  entry.some((f) => f.startsWith("worktree ") && same(f.slice(9), directory)) &&
-                  entry.some((f) => f.startsWith("locked")),
-              )
-            )
-              return yield* fail("Locked worktree.");
-            const branchHead = row
-              ? yield* run(root, [
-                  "rev-parse",
-                  "--verify",
-                  "--end-of-options",
-                  `refs/heads/${row.branch}`,
-                ]).pipe(Effect.catch(() => Effect.succeed(null)))
-              : null;
-            const head =
-              stat && registered ? yield* run(directory, ["rev-parse", "--verify", "HEAD"]) : null;
-            const dirty =
-              stat && registered
-                ? yield* git
-                    .execute({
-                      operation: "Agent Control workspace changes inspection",
-                      cwd: directory,
-                      // Directory summaries are sufficient for a boolean safety check.
-                      // Keep ignored content protected without enumerating dependencies.
-                      args: [
-                        "-c",
-                        "core.fsmonitor=false",
-                        "status",
-                        "--porcelain=v1",
-                        "--untracked-files=normal",
-                        "--ignored",
-                      ],
-                      timeoutMs: 10_000,
-                      maxOutputBytes: 256 * 1024,
-                      truncateOutputAtMaxBytes: true,
-                      env: { GIT_OPTIONAL_LOCKS: "0" },
-                    })
-                    .pipe(
-                      Effect.map(
-                        (result) =>
-                          result.stdoutTruncated ||
-                          result.stderrTruncated ||
-                          result.stdout.length > 0,
-                      ),
-                    )
-                : null;
-            const unmerged = branchHead
-              ? (yield* run(root, ["rev-list", "--count", `${baseHead}..${branchHead}`])) !== "0"
-              : null;
-            if (stat && registered) {
-              const checkoutEntry = entries.find((entry) =>
-                entry.some(
-                  (field) => field.startsWith("worktree ") && same(field.slice(9), directory),
-                ),
-              );
-              if (row && !checkoutEntry?.includes(`branch refs/heads/${row.branch}`))
-                return yield* fail("Registered branch differs from the checkout branch.");
-              if (
-                row &&
-                (yield* run(directory, ["symbolic-ref", "--quiet", "HEAD"])) !==
-                  `refs/heads/${row.branch}`
-              )
-                return yield* fail("Checkout branch changed.");
-              const actualRepo = yield* run(directory, [
-                "rev-parse",
-                "--path-format=absolute",
-                "--git-common-dir",
-              ]);
-              if (!same(actualRepo, repository) || head !== branchHead)
-                return yield* fail(
-                  "Checkout repository or branch does not match its registration.",
-                );
-            }
-            if (
-              row &&
-              entries.some(
-                (entry) =>
-                  entry.includes(`branch refs/heads/${row.branch}`) &&
-                  !entry.some((f) => f.startsWith("worktree ") && same(f.slice(9), directory)),
-              )
-            )
-              return yield* fail("Branch is checked out in another workspace.");
-            return {
-              rootIdentity: `${rootStat.dev}:${rootStat.ino}`,
-              checkoutIdentity: stat ? `${stat.dev}:${stat.ino}` : null,
-              checkout: stat ? ("present" as const) : ("missing" as const),
-              gitRegistered: registered,
-              repository,
-              repositoryIdentity: `${repositoryStat.dev}:${repositoryStat.ino}`,
-              baseHead,
-              branchHead,
-              head,
-              dirty,
-              unmerged,
-            };
-          }),
+            },
+          ).pipe(
+            Effect.map(({ status, ...facts }) => ({
+              ...facts,
+              // Same rule as human checkout removal: modified, untracked or protected
+              // ignored content is dirty; known regenerable caches are not.
+              dirty: status === null ? null : checkoutHasBlockingChanges(status),
+            })),
+          ),
         );
         if (inspection._tag === "Success") return { ...state, ...inspection.value };
         const failure = Cause.squash(inspection.cause);
         return {
           ...state,
           blockers: [
-            Schema.is(AgentControlPlanValidationError)(failure)
+            Schema.is(AgentControlPlanValidationError)(failure) ||
+            failure instanceof CheckoutInspectionError
               ? failure.detail
               : "Filesystem/Git inspection could not safely verify this workspace.",
           ],

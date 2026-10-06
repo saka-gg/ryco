@@ -54,7 +54,9 @@ interface SidebarProjectItemProps {
   activeRouteThreadKey: string | null;
   handleNewThread: ReturnType<typeof useNewThreadHandler>["handleNewThread"];
   archiveThread: ReturnType<typeof useThreadActions>["archiveThread"];
-  deleteThread: ReturnType<typeof useThreadActions>["deleteThread"];
+  trashThread: ReturnType<typeof useThreadActions>["trashThread"];
+  stopThreadSession: ReturnType<typeof useThreadActions>["stopThreadSession"];
+  interruptThreadTurn: ReturnType<typeof useThreadActions>["interruptThreadTurn"];
   threadJumpLabelByKey: ReadonlyMap<string, string>;
   attachThreadListAutoAnimateRef: (node: HTMLElement | null) => void;
   expandThreadListForProject: (projectKey: string) => void;
@@ -74,7 +76,9 @@ export const SidebarProjectItem = memo(function SidebarProjectItem(props: Sideba
     activeRouteThreadKey,
     handleNewThread,
     archiveThread,
-    deleteThread,
+    trashThread,
+    stopThreadSession,
+    interruptThreadTurn,
     threadJumpLabelByKey,
     attachThreadListAutoAnimateRef,
     expandThreadListForProject,
@@ -288,8 +292,10 @@ export const SidebarProjectItem = memo(function SidebarProjectItem(props: Sideba
     appSettingsConfirmThreadArchive,
     appSettingsConfirmThreadUnpin,
     defaultThreadEnvMode,
-    deleteThread,
+    trashThread,
     archiveThread,
+    stopThreadSession,
+    interruptThreadTurn,
     handleNewThread,
     markThreadUnread,
     copyPathToClipboard,
@@ -307,7 +313,7 @@ export const SidebarProjectItem = memo(function SidebarProjectItem(props: Sideba
     renamingInputRef,
     navigateToThread,
     navigateToDraft,
-    closeThread,
+    requestTrashThread,
     handleThreadClick,
     handleMultiSelectContextMenu,
     createThreadForProjectMember,
@@ -322,13 +328,10 @@ export const SidebarProjectItem = memo(function SidebarProjectItem(props: Sideba
     openWorktree,
     copyWorktreePath,
     openWorktreeInEditor,
-    archiveWorktree,
-    deleteWorktree,
-    restoreWorktree,
+    runWorkspaceAction,
     renameWorktree,
   } = useSidebarWorktreeActions({
     project,
-    deleteThread,
     navigateToThread,
     createThreadForProjectMember,
     copyPathToClipboard,
@@ -501,14 +504,12 @@ export const SidebarProjectItem = memo(function SidebarProjectItem(props: Sideba
           visibleThreadKeys={visibleTreeThreadKeys}
           attachThreadListAutoAnimateRef={attachThreadListAutoAnimateRef}
           resolveThreadGitStatusTarget={resolveThreadGitStatusTarget}
-          onArchiveWorktree={archiveWorktree}
           onCopyWorktreePath={copyWorktreePath}
-          onDeleteWorktree={deleteWorktree}
+          onWorkspaceAction={runWorkspaceAction}
           onNewSession={createThreadInWorktree}
           onOpenInEditor={openWorktreeInEditor}
           onOpenWorktree={openWorktree}
           onRenameWorktree={renameWorktree}
-          onRestoreWorktree={restoreWorktree}
           renderThread={(thread: SidebarTreeThread, treeThreadKeys, gitStatusTarget) => {
             const threadKey = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
             return (
@@ -535,7 +536,7 @@ export const SidebarProjectItem = memo(function SidebarProjectItem(props: Sideba
                 navigateToDraft={navigateToDraft}
                 handleMultiSelectContextMenu={handleMultiSelectContextMenu}
                 handleThreadContextMenu={handleThreadContextMenu}
-                closeThread={closeThread}
+                requestTrashThread={requestTrashThread}
                 clearSelection={clearSelection}
                 commitRename={commitRename}
                 cancelRename={cancelRename}
@@ -576,7 +577,7 @@ export const SidebarProjectItem = memo(function SidebarProjectItem(props: Sideba
           navigateToDraft={navigateToDraft}
           handleMultiSelectContextMenu={handleMultiSelectContextMenu}
           handleThreadContextMenu={handleThreadContextMenu}
-          closeThread={closeThread}
+          requestTrashThread={requestTrashThread}
           clearSelection={clearSelection}
           commitRename={commitRename}
           cancelRename={cancelRename}

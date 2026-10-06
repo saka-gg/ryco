@@ -494,7 +494,7 @@ const TOOL_DESCRIPTORS: ReadonlyArray<AgentControlMcpToolDescriptor> = [
       ],
       [
         AGENT_CONTROL_MCP_TOOLS.proposeWorkspace,
-        "Request user approval for an exact workspace lifecycle plan. Record-only cleanup never removes files or branches. Session deletion must be explicit. Reuse requestId for retries; inspect receipt after partial failure.",
+        "Request user approval for an exact workspace lifecycle plan. Conversations are never deleted: checkout removal archives them and keeps history and branch; record-only never removes files or branches. Reuse requestId for retries; inspect receipt after partial failure.",
         AgentControlProposeWorkspaceInput,
       ],
     ] as const

@@ -4,6 +4,7 @@ import {
   EnvironmentId,
   type ScopedThreadRef,
   type ThreadEnvMode,
+  type WorkspaceLifecycleAction,
   WorktreeId,
 } from "@ryco/contracts";
 import { newCommandId } from "../../../lib/utils";
@@ -11,7 +12,7 @@ import { readEnvironmentApi } from "../../../environmentApi";
 import { readLocalApi } from "../../../localApi";
 import { useStore } from "../../../store";
 import { openInPreferredEditor } from "../../../editorPreferences";
-import type { useThreadActions } from "../../../hooks/useThreadActions";
+import { runWorkspaceLifecycleAction } from "../../../workspaceLifecycle";
 import { stackedThreadToast, toastManager } from "../../ui/toast";
 import type {
   SidebarProjectGroupMember,
@@ -21,7 +22,6 @@ import { isSyntheticWorktreeId, type SidebarTreeWorktree } from "./useSidebarTre
 
 export function useSidebarWorktreeActions(params: {
   project: SidebarProjectSnapshot;
-  deleteThread: ReturnType<typeof useThreadActions>["deleteThread"];
   navigateToThread: (threadRef: ScopedThreadRef) => void;
   createThreadForProjectMember: (
     member: SidebarProjectGroupMember,
@@ -33,13 +33,7 @@ export function useSidebarWorktreeActions(params: {
   ) => void;
   copyPathToClipboard: (value: string, ctx: { path: string }) => void;
 }) {
-  const {
-    project,
-    deleteThread,
-    navigateToThread,
-    createThreadForProjectMember,
-    copyPathToClipboard,
-  } = params;
+  const { project, navigateToThread, createThreadForProjectMember, copyPathToClipboard } = params;
 
   const createThreadInWorktree = useCallback(
     (worktreeNode: SidebarTreeWorktree) => {
@@ -137,181 +131,29 @@ export function useSidebarWorktreeActions(params: {
     [resolveWorktreeFilesystemPath],
   );
 
-  const archiveWorktree = useCallback(
-    (worktreeNode: SidebarTreeWorktree) => {
+  /**
+   * Workspace actions never touch conversations directly: the server lifecycle
+   * service archives (never deletes) them as part of checkout removal, after a
+   * review that shows the exact effects.
+   */
+  const runWorkspaceAction = useCallback(
+    (worktreeNode: SidebarTreeWorktree, action: WorkspaceLifecycleAction) => {
       if (isSyntheticWorktreeId(worktreeNode.worktree.worktreeId)) {
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: "Nothing to archive",
-            description: "This group is derived from its sessions, not a registered worktree.",
+            title: "Not a registered workspace",
+            description:
+              "This group is derived from its sessions. Manage its conversations individually.",
           }),
         );
         return;
       }
-      const api = readEnvironmentApi(resolveWorktreeEnvironmentId(worktreeNode));
-      const archive = api?.git.archiveWorktree;
-      if (!archive) {
-        toastManager.add(
-          stackedThreadToast({
-            type: "error",
-            title: "Archive unavailable",
-            description: "This environment does not support worktree archiving.",
-          }),
-        );
-        return;
-      }
-      void archive({
+      void runWorkspaceLifecycleAction({
+        environmentId: resolveWorktreeEnvironmentId(worktreeNode),
         worktreeId: WorktreeId.make(worktreeNode.worktree.worktreeId),
-        deleteBranch: false,
-      }).catch((error: unknown) => {
-        toastManager.add(
-          stackedThreadToast({
-            type: "error",
-            title: "Failed to archive worktree",
-            description: error instanceof Error ? error.message : "An error occurred.",
-          }),
-        );
-      });
-    },
-    [resolveWorktreeEnvironmentId],
-  );
-
-  const deleteWorktree = useCallback(
-    (worktreeNode: SidebarTreeWorktree) => {
-      void (async () => {
-        // A synthetic node is a grouping the sidebar derived from its sessions,
-        // not a worktree the server knows about. There is nothing to delete —
-        // and deleting the sessions to "empty" it would destroy the only copy
-        // of that history.
-        if (isSyntheticWorktreeId(worktreeNode.worktree.worktreeId)) {
-          toastManager.add(
-            stackedThreadToast({
-              type: "error",
-              title: "Nothing to delete",
-              description:
-                "This group is derived from its sessions, not a registered worktree. Delete the sessions individually, or remove the directory with git.",
-            }),
-          );
-          return;
-        }
-        const localApi = readLocalApi();
-        if (localApi) {
-          const confirmed = await localApi.dialogs.confirm(
-            [
-              `Delete worktree "${worktreeNode.worktree.branch}"?`,
-              "This permanently removes the worktree and its sessions.",
-            ].join("\n"),
-          );
-          if (!confirmed) {
-            return;
-          }
-        }
-        const api = readEnvironmentApi(resolveWorktreeEnvironmentId(worktreeNode));
-        if (!api) {
-          toastManager.add(
-            stackedThreadToast({
-              type: "error",
-              title: "Delete unavailable",
-              description: "This environment is not connected.",
-            }),
-          );
-          return;
-        }
-        const worktreeIdRaw = worktreeNode.worktree.worktreeId;
-
-        for (const thread of [...worktreeNode.sessions, ...worktreeNode.archivedSessions]) {
-          await deleteThread(scopeThreadRef(thread.environmentId, thread.id), {
-            optimistic: true,
-          });
-        }
-
-        const deleteRpc = api.git.deleteWorktree;
-        if (!deleteRpc) {
-          toastManager.add(
-            stackedThreadToast({
-              type: "error",
-              title: "Delete unavailable",
-              description: "This environment does not support worktree deletion.",
-            }),
-          );
-          return;
-        }
-        try {
-          await deleteRpc({
-            worktreeId: WorktreeId.make(worktreeIdRaw),
-            deleteBranch: false,
-          });
-        } catch (error: unknown) {
-          const message = error instanceof Error ? error.message : "An error occurred.";
-          const fallbackToastId = toastManager.add(
-            stackedThreadToast({
-              type: "error",
-              title: "Failed to delete worktree",
-              description: `${message}\n\nIf the worktree no longer exists on disk and isn't tracked by git, force-remove it from the list.`,
-              actionVariant: "destructive",
-              actionProps: {
-                children: "Force delete from list",
-                onClick: () => {
-                  toastManager.close(fallbackToastId);
-                  void (async () => {
-                    await deleteRpc({
-                      worktreeId: WorktreeId.make(worktreeIdRaw),
-                      deleteBranch: false,
-                      force: true,
-                    });
-                  })().catch((forceError: unknown) => {
-                    toastManager.add(
-                      stackedThreadToast({
-                        type: "error",
-                        title: "Failed to force delete worktree",
-                        description:
-                          forceError instanceof Error ? forceError.message : "An error occurred.",
-                      }),
-                    );
-                  });
-                },
-              },
-            }),
-          );
-        }
-      })().catch((error: unknown) => {
-        toastManager.add(
-          stackedThreadToast({
-            type: "error",
-            title: "Failed to delete worktree",
-            description: error instanceof Error ? error.message : "An error occurred.",
-          }),
-        );
-      });
-    },
-    [deleteThread, resolveWorktreeEnvironmentId],
-  );
-
-  const restoreWorktree = useCallback(
-    (worktreeNode: SidebarTreeWorktree) => {
-      const api = readEnvironmentApi(resolveWorktreeEnvironmentId(worktreeNode));
-      const restore = api?.git.restoreWorktree;
-      if (!restore) {
-        toastManager.add(
-          stackedThreadToast({
-            type: "error",
-            title: "Restore unavailable",
-            description: "This environment does not support worktree restore.",
-          }),
-        );
-        return;
-      }
-      void restore({
-        worktreeId: WorktreeId.make(worktreeNode.worktree.worktreeId),
-      }).catch((error: unknown) => {
-        toastManager.add(
-          stackedThreadToast({
-            type: "error",
-            title: "Failed to restore worktree",
-            description: error instanceof Error ? error.message : "An error occurred.",
-          }),
-        );
+        action,
+        title: worktreeNode.worktree.title ?? worktreeNode.worktree.branch,
       });
     },
     [resolveWorktreeEnvironmentId],
@@ -371,9 +213,7 @@ export function useSidebarWorktreeActions(params: {
     resolveWorktreeFilesystemPath,
     copyWorktreePath,
     openWorktreeInEditor,
-    archiveWorktree,
-    deleteWorktree,
-    restoreWorktree,
+    runWorkspaceAction,
     renameWorktree,
   };
 }

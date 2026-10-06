@@ -1,4 +1,8 @@
 import { StorageRetentionPolicy } from "./storage.ts";
+import {
+  DEFAULT_LIFECYCLE_SUGGESTION_POLICY,
+  LifecycleSuggestionPolicy,
+} from "./workspaceLifecycle.ts";
 import { Effect } from "effect";
 import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
@@ -616,6 +620,15 @@ export const ServerSettings = Schema.Struct({
   projectStorageRetention: Schema.Record(Schema.String, Schema.NullOr(StorageRetentionPolicy)).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
+  // Approval-only lifecycle suggestions (archive inactive conversations, remove checkouts
+  // whose conversations were all archived). Nothing is ever archived or removed on its own.
+  lifecycleSuggestions: LifecycleSuggestionPolicy.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_LIFECYCLE_SUGGESTION_POLICY)),
+  ),
+  projectLifecycleSuggestions: Schema.Record(
+    Schema.String,
+    Schema.NullOr(LifecycleSuggestionPolicy),
+  ).pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   worktreeRoot: WorktreeRoot.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
   worktreeSubmodules: WorktreeSubmodules.pipe(
     Schema.withDecodingDefault(Effect.succeed("recursive" as const)),
@@ -782,6 +795,10 @@ export const ServerSettingsPatch = Schema.Struct({
   storageRetention: Schema.optionalKey(StorageRetentionPolicy),
   projectStorageRetention: Schema.optionalKey(
     Schema.Record(Schema.String, Schema.NullOr(StorageRetentionPolicy)),
+  ),
+  lifecycleSuggestions: Schema.optionalKey(LifecycleSuggestionPolicy),
+  projectLifecycleSuggestions: Schema.optionalKey(
+    Schema.Record(Schema.String, Schema.NullOr(LifecycleSuggestionPolicy)),
   ),
   worktreeRoot: Schema.optionalKey(WorktreeRoot),
   worktreeSubmodules: Schema.optionalKey(WorktreeSubmodules),

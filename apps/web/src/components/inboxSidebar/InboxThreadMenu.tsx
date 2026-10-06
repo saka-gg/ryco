@@ -2,20 +2,26 @@ import { scopeThreadRef } from "@ryco/client-runtime/scoped";
 import {
   AlarmClockOffIcon,
   ArchiveIcon,
+  ArchiveRestoreIcon,
   CheckIcon,
   CircleDotIcon,
+  CircleStopIcon,
   ClockIcon,
   Columns2Icon,
   CopyIcon,
   ExternalLinkIcon,
   GitPullRequestIcon,
+  FolderGit2Icon,
   FolderIcon,
+  FolderMinusIcon,
+  FolderPlusIcon,
   GitForkIcon,
   HashIcon,
   type LucideIcon,
   PencilIcon,
   PinIcon,
   PinOffIcon,
+  PowerOffIcon,
   Settings2Icon,
   Trash2Icon,
   Undo2Icon,
@@ -23,7 +29,10 @@ import {
 } from "lucide-react";
 import type { ReactNode } from "react";
 
-import type { ThreadMenuActionId } from "../sidebar/hooks/useThreadMenuActions";
+import type {
+  ThreadMenuActionId,
+  ThreadMenuActionItem,
+} from "../sidebar/hooks/useThreadMenuActions";
 import {
   MenuItem,
   MenuSeparator,
@@ -42,25 +51,52 @@ import type { InboxThreadActions } from "./InboxThreadRow";
  * per action. The inventory itself (labels, availability, handlers) stays in
  * useThreadMenuActions, shared with the phone sheet and the project sidebar.
  */
+type ActionGroup = "organize" | "session" | "copy" | "workspace" | "remove";
+
 const ACTION_PRESENTATION: Record<
   ThreadMenuActionId,
-  { readonly icon: LucideIcon; readonly group: "organize" | "copy" | "remove" }
+  { readonly icon: LucideIcon; readonly group: ActionGroup }
 > = {
   "open-in-split": { icon: Columns2Icon, group: "organize" },
   pin: { icon: PinIcon, group: "organize" },
   unpin: { icon: PinOffIcon, group: "organize" },
   rename: { icon: PencilIcon, group: "organize" },
   "mark-unread": { icon: CircleDotIcon, group: "organize" },
+  "interrupt-turn": { icon: CircleStopIcon, group: "session" },
+  "stop-session": { icon: PowerOffIcon, group: "session" },
   "project-settings": { icon: Settings2Icon, group: "copy" },
   "copy-project-path": { icon: FolderIcon, group: "copy" },
   "copy-worktree-path": { icon: GitForkIcon, group: "copy" },
   "copy-path": { icon: CopyIcon, group: "copy" },
   "copy-thread-id": { icon: HashIcon, group: "copy" },
+  workspace: { icon: FolderGit2Icon, group: "workspace" },
+  "workspace:archive": { icon: ArchiveIcon, group: "workspace" },
+  "workspace:restore": { icon: ArchiveRestoreIcon, group: "workspace" },
+  "workspace:remove-checkout": { icon: FolderMinusIcon, group: "workspace" },
+  "workspace:remove-stale-record": { icon: FolderMinusIcon, group: "workspace" },
+  "workspace:recreate-checkout": { icon: FolderPlusIcon, group: "workspace" },
+  "workspace:manage": { icon: Settings2Icon, group: "workspace" },
   archive: { icon: ArchiveIcon, group: "remove" },
-  close: { icon: Trash2Icon, group: "remove" },
+  unarchive: { icon: ArchiveRestoreIcon, group: "remove" },
+  trash: { icon: Trash2Icon, group: "remove" },
+  "discard-draft": { icon: XIcon, group: "remove" },
 };
 
-const MUTATING_ACTIONS: ReadonlySet<ThreadMenuActionId> = new Set(["rename", "archive", "close"]);
+/** Actions that change server state; disabled when this connection cannot mutate. */
+const READ_ONLY_ACTIONS: ReadonlySet<ThreadMenuActionId> = new Set([
+  "open-in-split",
+  "pin",
+  "unpin",
+  "mark-unread",
+  "project-settings",
+  "copy-project-path",
+  "copy-worktree-path",
+  "copy-path",
+  "copy-thread-id",
+  "workspace",
+  "workspace:manage",
+  "discard-draft",
+]);
 
 export interface InboxSnoozePreset {
   readonly id: string;
@@ -86,15 +122,24 @@ export function InboxThreadMenuItems(props: {
 }) {
   const { row } = props;
   const actions = props.threadActions?.listThreadMenuActions(row.key) ?? [];
-  const actionItem = (item: (typeof actions)[number]) => {
-    const presentation = ACTION_PRESENTATION[item.id];
-    // "close" ends a session ("Close session") or deletes a plain thread.
-    const Icon = item.id === "close" && item.label.startsWith("Close") ? XIcon : presentation.icon;
+  const actionItem = (item: ThreadMenuActionItem): ReactNode => {
+    const Icon = ACTION_PRESENTATION[item.id].icon;
+    if (item.children) {
+      return (
+        <MenuSub key={item.id}>
+          <MenuSubTrigger className="[&>svg:first-child]:-mx-0.5 [&>svg]:opacity-80">
+            <Icon aria-hidden />
+            {item.label}
+          </MenuSubTrigger>
+          <MenuSubPopup className="min-w-52">{item.children.map(actionItem)}</MenuSubPopup>
+        </MenuSub>
+      );
+    }
     return (
       <MenuItem
         key={item.id}
         variant={item.destructive ? "destructive" : "default"}
-        disabled={!row.mutationEnabled && MUTATING_ACTIONS.has(item.id)}
+        disabled={!row.mutationEnabled && !READ_ONLY_ACTIONS.has(item.id)}
         onClick={() =>
           void props.threadActions?.performThreadMenuAction(
             scopeThreadRef(row.environmentId, row.threadId),
@@ -107,7 +152,7 @@ export function InboxThreadMenuItems(props: {
       </MenuItem>
     );
   };
-  const inGroup = (group: "organize" | "copy" | "remove") =>
+  const inGroup = (group: ActionGroup) =>
     actions.filter((item) => ACTION_PRESENTATION[item.id].group === group).map(actionItem);
   const pullRequestUrl = props.pullRequest?.url;
 
@@ -174,7 +219,9 @@ export function InboxThreadMenuItems(props: {
         </MenuItem>,
       ],
     ],
+    ["session", inGroup("session")],
     ["copy", inGroup("copy")],
+    ["workspace", inGroup("workspace")],
     ["remove", inGroup("remove")],
   ];
   const rendered: ReactNode[] = [];

@@ -114,6 +114,8 @@ export const ORCHESTRATION_EVENT_PROJECTORS = {
     ORCHESTRATION_PROJECTOR_NAMES.threads,
   ],
   "thread.deleted": [ORCHESTRATION_PROJECTOR_NAMES.threads],
+  "thread.trashed": [ORCHESTRATION_PROJECTOR_NAMES.threads],
+  "thread.untrashed": [ORCHESTRATION_PROJECTOR_NAMES.threads],
   "thread.archived": [ORCHESTRATION_PROJECTOR_NAMES.threads],
   "thread.unarchived": [ORCHESTRATION_PROJECTOR_NAMES.threads],
   "thread.meta-updated": [ORCHESTRATION_PROJECTOR_NAMES.threads],
@@ -184,6 +186,8 @@ export const ORCHESTRATION_EVENT_PROJECTORS = {
   "worktree.sourceControlStateUpdated": [ORCHESTRATION_PROJECTOR_NAMES.worktrees],
   "worktree.restored": [ORCHESTRATION_PROJECTOR_NAMES.worktrees],
   "worktree.deleted": [ORCHESTRATION_PROJECTOR_NAMES.worktrees],
+  "worktree.checkoutRemoved": [ORCHESTRATION_PROJECTOR_NAMES.worktrees],
+  "worktree.checkoutRestored": [ORCHESTRATION_PROJECTOR_NAMES.worktrees],
   "thread.attachedToWorktree": [ORCHESTRATION_PROJECTOR_NAMES.worktrees],
   "thread.statusBucketOverridden": [ORCHESTRATION_PROJECTOR_NAMES.worktrees],
   "thread.manualPositionSet": [ORCHESTRATION_PROJECTOR_NAMES.worktrees],
@@ -787,6 +791,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             hasActionableProposedPlan: 0,
             usageLimit: null,
             deletedAt: null,
+            trashedAt: null,
             // Always written so re-creating a soft-deleted id resets lineage.
             ...projectionLineageColumns(event.payload.lineage),
           });
@@ -1047,7 +1052,43 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           yield* projectionThreadRepository.upsert({
             ...existingRow.value,
             deletedAt: event.payload.deletedAt,
+            trashedAt: null,
             updatedAt: event.payload.deletedAt,
+          });
+          return;
+        }
+
+        // Trash hides the thread exactly like a deletion (`deleted_at`), so every live
+        // view, recovery sweep and statistic keeps excluding it, but nothing is removed:
+        // attachments, terminal history and messages stay until permanent deletion.
+        case "thread.trashed": {
+          const existingRow = yield* projectionThreadRepository.getById({
+            threadId: event.payload.threadId,
+          });
+          if (Option.isNone(existingRow)) {
+            return;
+          }
+          yield* projectionThreadRepository.upsert({
+            ...existingRow.value,
+            deletedAt: event.payload.trashedAt,
+            trashedAt: event.payload.trashedAt,
+            updatedAt: event.payload.updatedAt,
+          });
+          return;
+        }
+
+        case "thread.untrashed": {
+          const existingRow = yield* projectionThreadRepository.getById({
+            threadId: event.payload.threadId,
+          });
+          if (Option.isNone(existingRow)) {
+            return;
+          }
+          yield* projectionThreadRepository.upsert({
+            ...existingRow.value,
+            deletedAt: null,
+            trashedAt: null,
+            updatedAt: event.payload.updatedAt,
           });
           return;
         }
@@ -1338,6 +1379,37 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             }
           }
           return;
+
+        case "worktree.checkoutRemoved": {
+          const existing = yield* projectionWorktreeRepository.getById({
+            worktreeId: event.payload.worktreeId,
+          });
+          if (Option.isSome(existing)) {
+            yield* projectionWorktreeRepository.upsert({
+              ...existing.value,
+              checkoutRemovedAt: event.payload.removedAt,
+              checkoutRemovalReason: event.payload.reason,
+              updatedAt: event.payload.removedAt,
+            });
+          }
+          return;
+        }
+
+        case "worktree.checkoutRestored": {
+          const existing = yield* projectionWorktreeRepository.getById({
+            worktreeId: event.payload.worktreeId,
+          });
+          if (Option.isSome(existing)) {
+            yield* projectionWorktreeRepository.upsert({
+              ...existing.value,
+              worktreePath: event.payload.worktreePath,
+              checkoutRemovedAt: null,
+              checkoutRemovalReason: null,
+              updatedAt: event.payload.restoredAt,
+            });
+          }
+          return;
+        }
 
         case "worktree.deleted":
           yield* projectionWorktreeRepository.deleteById({

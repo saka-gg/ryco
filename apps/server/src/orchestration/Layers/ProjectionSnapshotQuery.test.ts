@@ -661,6 +661,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           snoozedAt: null,
           usageLimit: null,
           deletedAt: null,
+          trashedAt: null,
           messages: [
             {
               id: asMessageId("message-1"),

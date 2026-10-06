@@ -1,6 +1,7 @@
 import { LocalTaskServiceLive } from "./tasks/LocalTaskService.ts";
 import { DailyRecapQueryLive } from "./statistics/DailyRecapQuery.ts";
 import { StorageServiceLive } from "./storage/StorageService.ts";
+import { WorkspaceLifecycleLive } from "./workspace/WorkspaceLifecycle.ts";
 import { ProviderProtectedPathsLive } from "./storage/providerProtection.ts";
 import { SessionImportLive } from "./imports/SessionImport.ts";
 import { CompletionReturnRepositoryLive } from "./persistence/Layers/AgentControlCompletionReturns.ts";
@@ -529,6 +530,8 @@ const RuntimeServicesLive = Layer.mergeAll(
     Layer.provideMerge(OrchestrationCommandApplicationLive),
   ),
 ).pipe(
+  // One lifecycle authority for sidebar, Inbox, workspace management and Agent Control.
+  Layer.provideMerge(WorkspaceLifecycleLive),
   Layer.provideMerge(RuntimeDependenciesLive),
   // One process-scoped manager is shared by control RPC, frame streaming,
   // provider tools, idle cleanup, and crash-recovery ownership.

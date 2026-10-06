@@ -110,6 +110,7 @@ projectionRepositoriesLayer("Projection repositories", (it) => {
         pendingUserInputCount: 0,
         hasActionableProposedPlan: 0,
         deletedAt: null,
+        trashedAt: null,
         lineageParentThreadId: null,
         lineageRootThreadId: null,
         lineageRelationship: null,

@@ -95,7 +95,13 @@ it("routes each event only to its explicit projection owners", () => {
     ORCHESTRATION_PROJECTOR_NAMES.threadTurns,
     ORCHESTRATION_PROJECTOR_NAMES.threads,
   ]);
-  assert.equal(Object.keys(ORCHESTRATION_EVENT_PROJECTORS).length, 46);
+  // Trash and checkout removal are thread/worktree record state only.
+  assert.deepEqual(ORCHESTRATION_EVENT_PROJECTORS["thread.trashed"], ["projection.threads"]);
+  assert.deepEqual(ORCHESTRATION_EVENT_PROJECTORS["thread.untrashed"], ["projection.threads"]);
+  assert.deepEqual(ORCHESTRATION_EVENT_PROJECTORS["worktree.checkoutRemoved"], [
+    ORCHESTRATION_PROJECTOR_NAMES.worktrees,
+  ]);
+  assert.equal(Object.keys(ORCHESTRATION_EVENT_PROJECTORS).length, 50);
 });
 
 it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
@@ -1229,129 +1235,176 @@ it.layer(
 it.layer(
   Layer.fresh(makeProjectionPipelinePrefixedTestLayer("ryco-projection-attachments-revert-")),
 )("OrchestrationProjectionPipeline", (it) => {
-  it.effect("removes thread attachment directory when thread is deleted", () =>
-    Effect.gen(function* () {
-      const fileSystem = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const projectionPipeline = yield* OrchestrationProjectionPipeline;
-      const eventStore = yield* OrchestrationEventStore;
-      const { attachmentsDir } = yield* ServerConfig;
-      const now = new Date().toISOString();
-      const threadId = ThreadId.make("Thread Delete.Files");
-      const attachmentId = "thread-delete-files-00000000-0000-4000-8000-000000000001";
-      const otherThreadAttachmentId =
-        "thread-delete-files-extra-00000000-0000-4000-8000-000000000002";
+  it.effect(
+    "keeps attachments through trash/restore and removes them only on permanent delete",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const projectionPipeline = yield* OrchestrationProjectionPipeline;
+        const eventStore = yield* OrchestrationEventStore;
+        const { attachmentsDir } = yield* ServerConfig;
+        const now = new Date().toISOString();
+        const threadId = ThreadId.make("Thread Delete.Files");
+        const attachmentId = "thread-delete-files-00000000-0000-4000-8000-000000000001";
+        const otherThreadAttachmentId =
+          "thread-delete-files-extra-00000000-0000-4000-8000-000000000002";
 
-      const appendAndProject = (event: Parameters<typeof eventStore.append>[0]) =>
-        eventStore
-          .append(event)
-          .pipe(Effect.flatMap((savedEvent) => projectionPipeline.projectEvent(savedEvent)));
+        const appendAndProject = (event: Parameters<typeof eventStore.append>[0]) =>
+          eventStore
+            .append(event)
+            .pipe(Effect.flatMap((savedEvent) => projectionPipeline.projectEvent(savedEvent)));
 
-      yield* appendAndProject({
-        type: "project.created",
-        eventId: EventId.make("evt-delete-files-1"),
-        aggregateKind: "project",
-        aggregateId: ProjectId.make("project-delete-files"),
-        occurredAt: now,
-        commandId: CommandId.make("cmd-delete-files-1"),
-        causationEventId: null,
-        correlationId: CorrelationId.make("cmd-delete-files-1"),
-        metadata: {},
-        payload: {
-          projectId: ProjectId.make("project-delete-files"),
-          title: "Project Delete Files",
-          workspaceRoot: "/tmp/project-delete-files",
-          defaultModelSelection: null,
-          scripts: [],
-          createdAt: now,
-          updatedAt: now,
-        },
-      });
-
-      yield* appendAndProject({
-        type: "thread.created",
-        eventId: EventId.make("evt-delete-files-2"),
-        aggregateKind: "thread",
-        aggregateId: threadId,
-        occurredAt: now,
-        commandId: CommandId.make("cmd-delete-files-2"),
-        causationEventId: null,
-        correlationId: CorrelationId.make("cmd-delete-files-2"),
-        metadata: {},
-        payload: {
-          threadId,
-          projectId: ProjectId.make("project-delete-files"),
-          title: "Thread Delete Files",
-          modelSelection: {
-            instanceId: ProviderInstanceId.make("codex"),
-            model: "gpt-5-codex",
+        yield* appendAndProject({
+          type: "project.created",
+          eventId: EventId.make("evt-delete-files-1"),
+          aggregateKind: "project",
+          aggregateId: ProjectId.make("project-delete-files"),
+          occurredAt: now,
+          commandId: CommandId.make("cmd-delete-files-1"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-delete-files-1"),
+          metadata: {},
+          payload: {
+            projectId: ProjectId.make("project-delete-files"),
+            title: "Project Delete Files",
+            workspaceRoot: "/tmp/project-delete-files",
+            defaultModelSelection: null,
+            scripts: [],
+            createdAt: now,
+            updatedAt: now,
           },
-          runtimeMode: "full-access",
-          branch: null,
-          worktreePath: null,
-          createdAt: now,
-          updatedAt: now,
-        },
-      });
+        });
 
-      yield* appendAndProject({
-        type: "thread.message-sent",
-        eventId: EventId.make("evt-delete-files-3"),
-        aggregateKind: "thread",
-        aggregateId: threadId,
-        occurredAt: now,
-        commandId: CommandId.make("cmd-delete-files-3"),
-        causationEventId: null,
-        correlationId: CorrelationId.make("cmd-delete-files-3"),
-        metadata: {},
-        payload: {
-          threadId,
-          messageId: MessageId.make("message-delete-files"),
-          role: "user",
-          text: "Delete",
-          attachments: [
-            {
-              type: "image",
-              id: attachmentId,
-              name: "delete.png",
-              mimeType: "image/png",
-              sizeBytes: 5,
+        yield* appendAndProject({
+          type: "thread.created",
+          eventId: EventId.make("evt-delete-files-2"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: now,
+          commandId: CommandId.make("cmd-delete-files-2"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-delete-files-2"),
+          metadata: {},
+          payload: {
+            threadId,
+            projectId: ProjectId.make("project-delete-files"),
+            title: "Thread Delete Files",
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("codex"),
+              model: "gpt-5-codex",
             },
-          ],
-          turnId: null,
-          streaming: false,
-          createdAt: now,
-          updatedAt: now,
-        },
-      });
+            runtimeMode: "full-access",
+            branch: null,
+            worktreePath: null,
+            createdAt: now,
+            updatedAt: now,
+          },
+        });
 
-      const threadAttachmentPath = path.join(attachmentsDir, `${attachmentId}.png`);
-      const otherThreadAttachmentPath = path.join(attachmentsDir, `${otherThreadAttachmentId}.png`);
-      yield* fileSystem.makeDirectory(attachmentsDir, { recursive: true });
-      yield* fileSystem.writeFileString(threadAttachmentPath, "delete");
-      yield* fileSystem.writeFileString(otherThreadAttachmentPath, "other-thread");
-      assert.isTrue(yield* exists(threadAttachmentPath));
-      assert.isTrue(yield* exists(otherThreadAttachmentPath));
+        yield* appendAndProject({
+          type: "thread.message-sent",
+          eventId: EventId.make("evt-delete-files-3"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: now,
+          commandId: CommandId.make("cmd-delete-files-3"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-delete-files-3"),
+          metadata: {},
+          payload: {
+            threadId,
+            messageId: MessageId.make("message-delete-files"),
+            role: "user",
+            text: "Delete",
+            attachments: [
+              {
+                type: "image",
+                id: attachmentId,
+                name: "delete.png",
+                mimeType: "image/png",
+                sizeBytes: 5,
+              },
+            ],
+            turnId: null,
+            streaming: false,
+            createdAt: now,
+            updatedAt: now,
+          },
+        });
 
-      yield* appendAndProject({
-        type: "thread.deleted",
-        eventId: EventId.make("evt-delete-files-4"),
-        aggregateKind: "thread",
-        aggregateId: threadId,
-        occurredAt: now,
-        commandId: CommandId.make("cmd-delete-files-4"),
-        causationEventId: null,
-        correlationId: CorrelationId.make("cmd-delete-files-4"),
-        metadata: {},
-        payload: {
-          threadId,
-          deletedAt: now,
-        },
-      });
+        const threadAttachmentPath = path.join(attachmentsDir, `${attachmentId}.png`);
+        const otherThreadAttachmentPath = path.join(
+          attachmentsDir,
+          `${otherThreadAttachmentId}.png`,
+        );
+        yield* fileSystem.makeDirectory(attachmentsDir, { recursive: true });
+        yield* fileSystem.writeFileString(threadAttachmentPath, "delete");
+        yield* fileSystem.writeFileString(otherThreadAttachmentPath, "other-thread");
+        assert.isTrue(yield* exists(threadAttachmentPath));
+        assert.isTrue(yield* exists(otherThreadAttachmentPath));
 
-      assert.isFalse(yield* exists(threadAttachmentPath));
-      assert.isTrue(yield* exists(otherThreadAttachmentPath));
-    }),
+        // Trash and restore are recoverable transitions: attachments are untouched.
+        const sql = yield* SqlClient.SqlClient;
+        const readState = () =>
+          sql<{ readonly deletedAt: string | null; readonly trashedAt: string | null }>`
+          SELECT deleted_at AS "deletedAt", trashed_at AS "trashedAt"
+          FROM projection_threads WHERE thread_id = ${threadId}
+        `.pipe(Effect.map((rows) => rows[0]));
+        const trashEvent = (suffix: string) =>
+          appendAndProject({
+            type: "thread.trashed",
+            eventId: EventId.make(`evt-delete-files-trash-${suffix}`),
+            aggregateKind: "thread",
+            aggregateId: threadId,
+            occurredAt: now,
+            commandId: CommandId.make(`cmd-delete-files-trash-${suffix}`),
+            causationEventId: null,
+            correlationId: CorrelationId.make(`cmd-delete-files-trash-${suffix}`),
+            metadata: {},
+            payload: { threadId, trashedAt: now, updatedAt: now },
+          });
+        yield* trashEvent("1");
+        assert.deepEqual(yield* readState(), { deletedAt: now, trashedAt: now });
+        assert.isTrue(yield* exists(threadAttachmentPath));
+        yield* appendAndProject({
+          type: "thread.untrashed",
+          eventId: EventId.make("evt-delete-files-untrash"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: now,
+          commandId: CommandId.make("cmd-delete-files-untrash"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-delete-files-untrash"),
+          metadata: {},
+          payload: { threadId, updatedAt: now },
+        });
+        assert.deepEqual(yield* readState(), { deletedAt: null, trashedAt: null });
+        assert.isTrue(yield* exists(threadAttachmentPath));
+        yield* trashEvent("2");
+        assert.isTrue(yield* exists(threadAttachmentPath));
+
+        // Only permanent deletion removes them.
+        yield* appendAndProject({
+          type: "thread.deleted",
+          eventId: EventId.make("evt-delete-files-4"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: now,
+          commandId: CommandId.make("cmd-delete-files-4"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-delete-files-4"),
+          metadata: {},
+          payload: {
+            threadId,
+            deletedAt: now,
+          },
+        });
+
+        assert.isFalse(yield* exists(threadAttachmentPath));
+        assert.isTrue(yield* exists(otherThreadAttachmentPath));
+        assert.deepEqual(yield* readState(), { deletedAt: now, trashedAt: null });
+      }),
   );
 });
 
@@ -3249,6 +3302,12 @@ engineLayer("OrchestrationProjectionPipeline via engine dispatch", (it) => {
         assert.isAbove(yield* countRowsForThread(table), 0, `${table} should be populated`);
       }
 
+      // Permanent deletion passes through Trash.
+      yield* engine.dispatch({
+        type: "thread.trash",
+        commandId: CommandId.make("cmd-incarnation-trash"),
+        threadId,
+      });
       yield* engine.dispatch({
         type: "thread.delete",
         commandId: CommandId.make("cmd-incarnation-delete"),

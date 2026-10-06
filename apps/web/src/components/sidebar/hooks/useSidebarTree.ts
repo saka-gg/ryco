@@ -36,6 +36,8 @@ export interface SidebarWorktree {
   workItemStateName?: string | null | undefined;
   workItemUrl?: string | null | undefined;
   archivedAt?: string | null | undefined;
+  /** The physical checkout is gone; the record keeps its branch and path as provenance. */
+  checkoutRemovedAt?: string | null | undefined;
   manualPosition?: number | null | undefined;
   updatedAt?: string | undefined;
 }
@@ -368,6 +370,7 @@ function mergeWorktree(left: SidebarWorktree, right: SidebarWorktree): SidebarWo
   return {
     ...left,
     archivedAt: mergeArchivedAt(left.archivedAt, right.archivedAt),
+    checkoutRemovedAt: left.checkoutRemovedAt ?? right.checkoutRemovedAt ?? null,
     branch: fresher.branch,
     environmentId: fresher.environmentId ?? left.environmentId ?? right.environmentId,
     manualPosition: minNumber(left.manualPosition, right.manualPosition),

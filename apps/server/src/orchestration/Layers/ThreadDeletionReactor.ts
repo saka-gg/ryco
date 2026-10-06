@@ -12,6 +12,10 @@ import {
 } from "../Services/ThreadDeletionReactor.ts";
 
 type ThreadDeletedEvent = Extract<OrchestrationEvent, { type: "thread.deleted" }>;
+type ThreadRemovalEvent = Extract<
+  OrchestrationEvent,
+  { type: "thread.deleted" | "thread.trashed" }
+>;
 
 export const logCleanupCauseUnlessInterrupted = <R, E>({
   effect,
@@ -42,26 +46,31 @@ const make = Effect.gen(function* () {
   const stopProviderSession = (threadId: ThreadDeletedEvent["payload"]["threadId"]) =>
     logCleanupCauseUnlessInterrupted({
       effect: providerService.stopSession({ threadId }),
-      message: "thread deletion cleanup skipped provider session stop",
+      message: "thread removal cleanup skipped provider session stop",
       threadId,
     });
 
-  const closeThreadTerminals = (threadId: ThreadDeletedEvent["payload"]["threadId"]) =>
+  // Trash only closes terminals: their history is recoverable conversation state.
+  // Permanent deletion is the one transition that removes it.
+  const closeThreadTerminals = (
+    threadId: ThreadDeletedEvent["payload"]["threadId"],
+    deleteHistory: boolean,
+  ) =>
     logCleanupCauseUnlessInterrupted({
-      effect: terminalManager.close({ threadId, deleteHistory: true }),
-      message: "thread deletion cleanup skipped terminal close",
+      effect: terminalManager.close({ threadId, deleteHistory }),
+      message: "thread removal cleanup skipped terminal close",
       threadId,
     });
 
   const processThreadDeleted = Effect.fn("processThreadDeleted")(function* (
-    event: ThreadDeletedEvent,
+    event: ThreadRemovalEvent,
   ) {
     const { threadId } = event.payload;
     yield* stopProviderSession(threadId);
-    yield* closeThreadTerminals(threadId);
+    yield* closeThreadTerminals(threadId, event.type === "thread.deleted");
   });
 
-  const processThreadDeletedSafely = (event: ThreadDeletedEvent) =>
+  const processThreadDeletedSafely = (event: ThreadRemovalEvent) =>
     processThreadDeleted(event).pipe(
       Effect.catchCause((cause) => {
         if (Cause.hasInterruptsOnly(cause)) {
@@ -96,9 +105,10 @@ const make = Effect.gen(function* () {
     const subscription = yield* orchestrationEngine.subscribeDomainEvents;
     yield* Effect.forkScoped(
       Stream.runForEach(Stream.fromSubscription(subscription), (event) =>
-        (event.type === "thread.deleted" ? worker.enqueue(event) : Effect.void).pipe(
-          Effect.andThen(noteSeen(event.sequence)),
-        ),
+        (event.type === "thread.deleted" || event.type === "thread.trashed"
+          ? worker.enqueue(event)
+          : Effect.void
+        ).pipe(Effect.andThen(noteSeen(event.sequence))),
       ),
     );
   });

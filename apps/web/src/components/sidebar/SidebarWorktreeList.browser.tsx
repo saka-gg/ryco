@@ -27,14 +27,12 @@ describe("SidebarWorktreeList", () => {
         renderThread={(thread) => <div>{thread.title}</div>}
         treeProject={makeTreeProject()}
         visibleThreadKeys={null}
-        onArchiveWorktree={vi.fn()}
         onCopyWorktreePath={vi.fn()}
-        onDeleteWorktree={vi.fn()}
+        onWorkspaceAction={vi.fn()}
         onNewSession={vi.fn()}
         onOpenInEditor={vi.fn()}
         onOpenWorktree={vi.fn()}
         onRenameWorktree={vi.fn()}
-        onRestoreWorktree={vi.fn()}
       />,
     );
 
@@ -67,14 +65,12 @@ describe("SidebarWorktreeList", () => {
         }}
         treeProject={{ ...makeTreeProject(), draftSessions: [draft] }}
         visibleThreadKeys={null}
-        onArchiveWorktree={vi.fn()}
         onCopyWorktreePath={vi.fn()}
-        onDeleteWorktree={vi.fn()}
+        onWorkspaceAction={vi.fn()}
         onNewSession={vi.fn()}
         onOpenInEditor={vi.fn()}
         onOpenWorktree={vi.fn()}
         onRenameWorktree={vi.fn()}
-        onRestoreWorktree={vi.fn()}
       />,
     );
 
@@ -106,14 +102,12 @@ describe("SidebarWorktreeList", () => {
         }}
         treeProject={makeTreeProject()}
         visibleThreadKeys={null}
-        onArchiveWorktree={vi.fn()}
         onCopyWorktreePath={vi.fn()}
-        onDeleteWorktree={vi.fn()}
+        onWorkspaceAction={vi.fn()}
         onNewSession={vi.fn()}
         onOpenInEditor={vi.fn()}
         onOpenWorktree={vi.fn()}
         onRenameWorktree={vi.fn()}
-        onRestoreWorktree={vi.fn()}
       />,
     );
 
@@ -136,14 +130,12 @@ describe("SidebarWorktreeList", () => {
         renderThread={(thread) => <div>{thread.title}</div>}
         treeProject={makeTreeProject()}
         visibleThreadKeys={null}
-        onArchiveWorktree={vi.fn()}
         onCopyWorktreePath={vi.fn()}
-        onDeleteWorktree={vi.fn()}
+        onWorkspaceAction={vi.fn()}
         onNewSession={vi.fn()}
         onOpenInEditor={vi.fn()}
         onOpenWorktree={onOpenWorktree}
         onRenameWorktree={vi.fn()}
-        onRestoreWorktree={vi.fn()}
       />,
     );
 
@@ -164,14 +156,12 @@ describe("SidebarWorktreeList", () => {
         renderThread={(thread) => <div>{thread.title}</div>}
         treeProject={makeManySessionsTreeProject(7)}
         visibleThreadKeys={null}
-        onArchiveWorktree={vi.fn()}
         onCopyWorktreePath={vi.fn()}
-        onDeleteWorktree={vi.fn()}
+        onWorkspaceAction={vi.fn()}
         onNewSession={vi.fn()}
         onOpenInEditor={vi.fn()}
         onOpenWorktree={vi.fn()}
         onRenameWorktree={vi.fn()}
-        onRestoreWorktree={vi.fn()}
       />,
     );
 
@@ -202,14 +192,12 @@ describe("SidebarWorktreeList", () => {
         renderThread={(thread) => <div>{thread.title}</div>}
         treeProject={makeManySessionsTreeProject(7)}
         visibleThreadKeys={new Set(["environment-local:thread-1", "environment-local:thread-6"])}
-        onArchiveWorktree={vi.fn()}
         onCopyWorktreePath={vi.fn()}
-        onDeleteWorktree={vi.fn()}
+        onWorkspaceAction={vi.fn()}
         onNewSession={vi.fn()}
         onOpenInEditor={vi.fn()}
         onOpenWorktree={vi.fn()}
         onRenameWorktree={vi.fn()}
-        onRestoreWorktree={vi.fn()}
       />,
     );
 
@@ -231,14 +219,12 @@ describe("SidebarWorktreeList", () => {
         renderThread={(thread) => <div>{thread.title}</div>}
         treeProject={treeProject}
         visibleThreadKeys={null}
-        onArchiveWorktree={vi.fn()}
         onCopyWorktreePath={vi.fn()}
-        onDeleteWorktree={vi.fn()}
+        onWorkspaceAction={vi.fn()}
         onNewSession={vi.fn()}
         onOpenInEditor={vi.fn()}
         onOpenWorktree={vi.fn()}
         onRenameWorktree={vi.fn()}
-        onRestoreWorktree={vi.fn()}
       />,
     );
 
@@ -260,14 +246,12 @@ describe("SidebarWorktreeList", () => {
         renderThread={(thread) => <div>{thread.title}</div>}
         treeProject={makeLinkedIssueAndPrTreeProject()}
         visibleThreadKeys={null}
-        onArchiveWorktree={vi.fn()}
         onCopyWorktreePath={vi.fn()}
-        onDeleteWorktree={vi.fn()}
+        onWorkspaceAction={vi.fn()}
         onNewSession={vi.fn()}
         onOpenInEditor={vi.fn()}
         onOpenWorktree={vi.fn()}
         onRenameWorktree={vi.fn()}
-        onRestoreWorktree={vi.fn()}
       />,
     );
 
@@ -290,14 +274,12 @@ describe("SidebarWorktreeList", () => {
         renderThread={(thread) => <div>{thread.title}</div>}
         treeProject={treeProject}
         visibleThreadKeys={null}
-        onArchiveWorktree={vi.fn()}
         onCopyWorktreePath={vi.fn()}
-        onDeleteWorktree={vi.fn()}
+        onWorkspaceAction={vi.fn()}
         onNewSession={vi.fn()}
         onOpenInEditor={vi.fn()}
         onOpenWorktree={vi.fn()}
         onRenameWorktree={vi.fn()}
-        onRestoreWorktree={vi.fn()}
       />,
     );
 

@@ -139,12 +139,12 @@ describe("PhoneThreadDock", () => {
     expect(onToggleWorkspacePanel).toHaveBeenCalledTimes(1);
   });
 
-  it("exposes Close session for drafts in the overflow sheet and clears the draft through the shared dispatcher", async () => {
+  it("exposes Discard draft for drafts in the overflow sheet and clears the draft through the shared dispatcher", async () => {
     mounted = await renderDock();
 
     await page.getByRole("button", { name: "Thread actions" }).click();
     const closeRow = await vi.waitFor(() => {
-      const row = sheetRow("Close session");
+      const row = sheetRow("Discard draft");
       expect(row).not.toBeNull();
       return row!;
     });
@@ -152,7 +152,7 @@ describe("PhoneThreadDock", () => {
     // The draft inventory is exactly the shared draft inventory: no
     // rename/pin/archive entries for a session that only exists locally.
     expect(sheetRow("Rename thread")).toBeNull();
-    expect(sheetRow("Archive session")).toBeNull();
+    expect(sheetRow("Archive thread")).toBeNull();
 
     closeRow.click();
     await vi.waitFor(() => {

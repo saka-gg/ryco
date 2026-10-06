@@ -99,6 +99,17 @@ export function createEnvironmentApi(rpcClient: WsRpcClient): EnvironmentApi {
       restoreWorktree: rpcClient.git.restoreWorktree,
       deleteWorktree: rpcClient.git.deleteWorktree,
     },
+    ...(rpcClient.lifecycle
+      ? {
+          lifecycle: {
+            listWorkspaces: rpcClient.lifecycle.listWorkspaces,
+            previewWorkspace: rpcClient.lifecycle.previewWorkspace,
+            applyWorkspace: rpcClient.lifecycle.applyWorkspace,
+            suggestions: rpcClient.lifecycle.suggestions,
+            listTrash: rpcClient.lifecycle.listTrash,
+          },
+        }
+      : {}),
     ...(rpcClient.worktrees
       ? {
           worktrees: {

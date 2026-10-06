@@ -49,6 +49,8 @@ function toProjectionWorktree(
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     archivedAt: row.archivedAt,
+    checkoutRemovedAt: row.checkoutRemovedAt ?? null,
+    checkoutRemovalReason: row.checkoutRemovalReason ?? null,
     manualPosition: row.manualPosition,
   };
 }
@@ -84,6 +86,8 @@ const makeProjectionWorktreeRepository = Effect.gen(function* () {
           created_at,
           updated_at,
           archived_at,
+          checkout_removed_at,
+          checkout_removal_reason,
           manual_position
         )
         VALUES (
@@ -110,6 +114,8 @@ const makeProjectionWorktreeRepository = Effect.gen(function* () {
           ${row.createdAt},
           ${row.updatedAt},
           ${row.archivedAt},
+          ${row.checkoutRemovedAt ?? null},
+          ${row.checkoutRemovalReason ?? null},
           ${row.manualPosition}
         )
         ON CONFLICT (worktree_id)
@@ -135,6 +141,8 @@ const makeProjectionWorktreeRepository = Effect.gen(function* () {
           work_item_url = excluded.work_item_url,
           updated_at = excluded.updated_at,
           archived_at = excluded.archived_at,
+          checkout_removed_at = excluded.checkout_removed_at,
+          checkout_removal_reason = excluded.checkout_removal_reason,
           manual_position = excluded.manual_position
       `,
   });
@@ -168,6 +176,8 @@ const makeProjectionWorktreeRepository = Effect.gen(function* () {
           created_at AS "createdAt",
           updated_at AS "updatedAt",
           archived_at AS "archivedAt",
+          checkout_removed_at AS "checkoutRemovedAt",
+          checkout_removal_reason AS "checkoutRemovalReason",
           manual_position AS "manualPosition"
         FROM projection_worktrees
         WHERE worktree_id = ${worktreeId}
@@ -203,6 +213,8 @@ const makeProjectionWorktreeRepository = Effect.gen(function* () {
           created_at AS "createdAt",
           updated_at AS "updatedAt",
           archived_at AS "archivedAt",
+          checkout_removed_at AS "checkoutRemovedAt",
+          checkout_removal_reason AS "checkoutRemovalReason",
           manual_position AS "manualPosition"
         FROM projection_worktrees
         WHERE project_id = ${projectId}

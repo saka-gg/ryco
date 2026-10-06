@@ -241,7 +241,7 @@ export default function Sidebar() {
   }));
   const { updateSettings } = useUpdateSettings();
   const { handleNewThread } = useNewThreadHandler();
-  const { archiveThread, deleteThread } = useThreadActions();
+  const { archiveThread, trashThread, stopThreadSession, interruptThreadTurn } = useThreadActions();
   const { isMobile, open, openMobile, setOpen, setOpenMobile } = useSidebar();
   const pinnedThreadKeys = useMemo(
     () =>
@@ -1325,7 +1325,9 @@ export default function Sidebar() {
                 }
                 handleNewThread={handleNewThread}
                 archiveThread={archiveThread}
-                deleteThread={deleteThread}
+                trashThread={trashThread}
+                stopThreadSession={stopThreadSession}
+                interruptThreadTurn={interruptThreadTurn}
                 threadJumpLabelByKey={visibleThreadJumpLabelByKey}
                 attachThreadListAutoAnimateRef={attachThreadListAutoAnimateRef}
                 expandThreadListForProject={expandThreadListForProject}
@@ -1347,7 +1349,9 @@ export default function Sidebar() {
         >
           <ConnectedInboxSidebar
             archiveThread={archiveThread}
-            deleteThread={deleteThread}
+            trashThread={trashThread}
+            stopThreadSession={stopThreadSession}
+            interruptThreadTurn={interruptThreadTurn}
             activeThreadKey={activeRouteThreadKey}
             aiFocusEnabled={aiFocusEnabled}
             autoSettleAfterDays={sidebarAutoSettleAfterDays}

@@ -384,6 +384,60 @@ describe("worktree sidebar state", () => {
       branch: "feature/renamed",
       title: "Renamed Worktree",
     });
+
+    // Checkout removal keeps the record, its branch and path; recreation clears it.
+    const removed = applyOrchestrationEvent(
+      branchUpdated,
+      makeEvent(
+        "worktree.checkoutRemoved",
+        { worktreeId, reason: "removed", removedAt: "2026-02-13T00:03:00.000Z" },
+        { aggregateKind: "worktree", aggregateId: worktreeId },
+      ),
+      localEnvironmentId,
+    );
+    expect(localEnvironmentStateOf(removed).worktreeById?.[worktreeId]).toMatchObject({
+      branch: "feature/renamed",
+      checkoutRemovedAt: "2026-02-13T00:03:00.000Z",
+      checkoutRemovalReason: "removed",
+    });
+    const recreated = applyOrchestrationEvent(
+      removed,
+      makeEvent(
+        "worktree.checkoutRestored",
+        { worktreeId, worktreePath: "/tmp/project-wt", restoredAt: "2026-02-13T00:04:00.000Z" },
+        { aggregateKind: "worktree", aggregateId: worktreeId },
+      ),
+      localEnvironmentId,
+    );
+    expect(localEnvironmentStateOf(recreated).worktreeById?.[worktreeId]).toMatchObject({
+      worktreePath: "/tmp/project-wt",
+      checkoutRemovedAt: null,
+    });
+  });
+
+  it("hides a trashed thread like a deleted one; the shell stream restores it", () => {
+    const thread = makeThread();
+    const state = makeState(thread);
+    const trashed = applyOrchestrationEvent(
+      state,
+      makeEvent("thread.trashed", {
+        threadId: thread.id,
+        trashedAt: "2026-02-27T00:00:00.000Z",
+        updatedAt: "2026-02-27T00:00:00.000Z",
+      }),
+      localEnvironmentId,
+    );
+    expect(threadsOf(trashed)).toEqual([]);
+    const untrashed = applyOrchestrationEvent(
+      trashed,
+      makeEvent("thread.untrashed", {
+        threadId: thread.id,
+        updatedAt: "2026-02-27T00:00:01.000Z",
+      }),
+      localEnvironmentId,
+    );
+    // The domain event carries no shell; the shell stream re-upserts the thread.
+    expect(untrashed).toBe(trashed);
   });
 
   describe("PR terminal time", () => {

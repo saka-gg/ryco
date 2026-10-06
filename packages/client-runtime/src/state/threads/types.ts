@@ -299,6 +299,9 @@ export interface SidebarWorktreeSummary {
   createdAt: string;
   updatedAt: string;
   archivedAt: string | null;
+  /** Set once the physical checkout is gone; the record keeps path and branch as provenance. */
+  checkoutRemovedAt?: string | null | undefined;
+  checkoutRemovalReason?: "removed" | "missing" | null | undefined;
   manualPosition: number;
 }
 

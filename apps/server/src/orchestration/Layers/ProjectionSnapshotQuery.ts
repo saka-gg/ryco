@@ -643,6 +643,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           has_actionable_proposed_plan AS "hasActionableProposedPlan",
           usage_limit_json AS "usageLimit",
           deleted_at AS "deletedAt",
+          trashed_at AS "trashedAt",
           lineage_parent_thread_id AS "lineageParentThreadId",
           lineage_root_thread_id AS "lineageRootThreadId",
           lineage_relationship AS "lineageRelationship"
@@ -680,6 +681,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           created_at AS "createdAt",
           updated_at AS "updatedAt",
           archived_at AS "archivedAt",
+          checkout_removed_at AS "checkoutRemovedAt",
+          checkout_removal_reason AS "checkoutRemovalReason",
           manual_position AS "manualPosition"
         FROM projection_worktrees
         ORDER BY project_id ASC, manual_position ASC, created_at ASC, worktree_id ASC
@@ -715,6 +718,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           created_at AS "createdAt",
           updated_at AS "updatedAt",
           archived_at AS "archivedAt",
+          checkout_removed_at AS "checkoutRemovedAt",
+          checkout_removal_reason AS "checkoutRemovalReason",
           manual_position AS "manualPosition"
         FROM projection_worktrees
         WHERE worktree_id = ${worktreeId}
@@ -1151,6 +1156,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           has_actionable_proposed_plan AS "hasActionableProposedPlan",
           usage_limit_json AS "usageLimit",
           deleted_at AS "deletedAt",
+          trashed_at AS "trashedAt",
           lineage_parent_thread_id AS "lineageParentThreadId",
           lineage_root_thread_id AS "lineageRootThreadId",
           lineage_relationship AS "lineageRelationship"
@@ -1894,6 +1900,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           snoozedAt: input.threadRow.snoozedAt ?? null,
           usageLimit: input.threadRow.usageLimit ?? null,
           deletedAt: null,
+          trashedAt: null,
           messages: input.messageRows.map(mapMessageRow),
           proposedPlans: input.proposedPlanRows.map(mapProposedPlanRow),
           activities:
@@ -2195,6 +2202,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                     snoozedAt: row.snoozedAt ?? null,
                     usageLimit: row.usageLimit ?? null,
                     deletedAt: row.deletedAt,
+                    trashedAt: row.trashedAt,
                     messages: messagesByThread.get(row.threadId) ?? [],
                     proposedPlans: proposedPlansByThread.get(row.threadId) ?? [],
                     activities: pruneStaleContextWindowActivities(
@@ -2490,6 +2498,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                       snoozedAt: row.snoozedAt ?? null,
                       usageLimit: row.usageLimit ?? null,
                       deletedAt: row.deletedAt,
+                      trashedAt: row.trashedAt,
                       messages: userMessageAnchorsByThread.get(row.threadId) ?? [],
                       proposedPlans: proposedPlansByThread.get(row.threadId) ?? [],
                       activities: actionableActivitiesByThread.get(row.threadId) ?? [],

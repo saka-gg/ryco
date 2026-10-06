@@ -283,7 +283,14 @@ function planPresentation(proposal: AgentControlProposal): {
               `Expected branch commit: ${plan.expected.branchHead ?? "missing"}`,
               `Merged into project HEAD: ${plan.expected.unmerged === false ? "yes" : "unverified"}`,
               `Expected revision: ${plan.expected.updatedAt}`,
-              `Sessions: ${plan.sessions === "delete" ? "permanently delete history" : plan.action === "delete" ? "preserve history and move to main workspace" : "preserve"}`,
+              `Conversations: ${
+                plan.sessions === "delete"
+                  ? "deletion requested (always refused; conversations are never deleted by workspace actions)"
+                  : plan.checkoutMode === "remove-checkout" ||
+                      (plan.action !== "restore" && plan.expected.checkout === "missing")
+                    ? "archived; history, attachments and terminal history kept"
+                    : "unchanged; history kept"
+              }`,
               ...plan.expected.sessions.map(
                 (session) => `${session.threadId}${session.archived ? " (archived)" : ""}`,
               ),

@@ -84,9 +84,10 @@ export interface WorktreeReconciliationPlan {
   /** Threads whose directory has a worktree row they are not linked to. */
   readonly attach: ReadonlyArray<WorktreeAttachment>;
   /**
-   * Threads pointing at a directory that is no longer a worktree of this
-   * project (removed, or the project root under another spelling). Clearing
-   * `worktreePath` returns them to the project root node.
+   * Threads recorded under another spelling of the project root. Clearing
+   * `worktreePath` returns them to the project root node. A thread whose
+   * checkout disappeared is never detached: that would silently resume it in
+   * the main checkout. It keeps its path until the checkout is recreated.
    */
   readonly detach: ReadonlyArray<ThreadId>;
 }
@@ -206,7 +207,6 @@ export function planWorktreeReconciliation(
     }
 
     if (!livePathByKey.has(key)) {
-      detach.push(thread.id);
       continue;
     }
 

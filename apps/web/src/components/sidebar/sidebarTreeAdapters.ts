@@ -355,6 +355,7 @@ function readExplicitWorktrees(
     return [
       {
         archivedAt: readNullableString(record.archivedAt),
+        checkoutRemovedAt: readNullableString(record.checkoutRemovedAt),
         branch,
         environmentId,
         issueNumber: readNumber(record.issueNumber),

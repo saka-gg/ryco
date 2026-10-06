@@ -56,6 +56,12 @@ export const ProjectionThread = Schema.Struct({
   usageLimit: Schema.optional(Schema.NullOr(ThreadUsageLimit)),
   deletedAt: Schema.NullOr(IsoDateTime),
   /**
+   * Set while the thread is in Trash (`deletedAt` is set too, hiding it everywhere).
+   * Required for the same reason as lineage: a SELECT that skipped it would let the
+   * next `...existingRow` upsert turn a recoverable thread into a deleted one.
+   */
+  trashedAt: Schema.NullOr(IsoDateTime),
+  /**
    * Delegation lineage columns. Required on purpose: every SELECT must read them,
    * otherwise the next `...existingRow` upsert would silently wipe the lineage.
    */
@@ -99,6 +105,22 @@ export const SetProjectionThreadManualPositionInput = Schema.Struct({
 });
 export type SetProjectionThreadManualPositionInput =
   typeof SetProjectionThreadManualPositionInput.Type;
+
+export const ProjectionTrashedThread = Schema.Struct({
+  threadId: ThreadId,
+  projectId: ProjectId,
+  projectTitle: Schema.NullOr(Schema.String),
+  projectDeletedAt: Schema.NullOr(IsoDateTime),
+  title: Schema.String,
+  branch: Schema.NullOr(Schema.String),
+  worktreePath: Schema.NullOr(Schema.String),
+  worktreeId: Schema.NullOr(WorktreeId),
+  archivedAt: Schema.NullOr(IsoDateTime),
+  trashedAt: IsoDateTime,
+  createdAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+});
+export type ProjectionTrashedThread = typeof ProjectionTrashedThread.Type;
 
 /**
  * ProjectionThreadRepositoryShape - Service API for projected thread records.
@@ -154,6 +176,11 @@ export interface ProjectionThreadRepositoryShape {
     ReadonlyArray<ThreadId>,
     ProjectionRepositoryError
   >;
+
+  /** Threads in Trash, most recently trashed first. Bounded by `limit`. */
+  readonly listTrashed: (input: {
+    readonly limit: number;
+  }) => Effect.Effect<ReadonlyArray<ProjectionTrashedThread>, ProjectionRepositoryError>;
 }
 
 /**

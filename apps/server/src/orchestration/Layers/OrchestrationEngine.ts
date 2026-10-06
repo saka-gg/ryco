@@ -95,6 +95,8 @@ function commandToAggregateRef(command: OrchestrationCommand): {
     case "worktree.source-control-state.update":
     case "worktree.restore":
     case "worktree.delete":
+    case "worktree.checkout.remove":
+    case "worktree.checkout.restore":
     case "worktree.manual-position.set":
       return {
         aggregateKind: "worktree",
@@ -103,6 +105,8 @@ function commandToAggregateRef(command: OrchestrationCommand): {
     case "thread.create":
     case "thread.delegated.create":
     case "thread.delete":
+    case "thread.trash":
+    case "thread.untrash":
     case "thread.sidebar.undo":
     case "thread.archive":
     case "thread.unarchive":

@@ -155,3 +155,79 @@ describe("ThreadDeletionReactor recreation fence", () => {
     );
   });
 });
+
+describe("ThreadDeletionReactor trash versus permanent deletion", () => {
+  it("stops the session on Trash but keeps terminal history; only deletion removes it", async () => {
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const now = "2026-01-01T00:00:00.000Z";
+          const threadId = ThreadId.make("thread-trash-history");
+          const events = yield* PubSub.unbounded<OrchestrationEvent>();
+          const stops: ThreadId[] = [];
+          const closes: Array<{ threadId: string; deleteHistory?: boolean | undefined }> = [];
+          const base = {
+            aggregateKind: "thread",
+            aggregateId: threadId,
+            occurredAt: now,
+            causationEventId: null,
+            metadata: {},
+          } as const;
+          const trashed = {
+            ...base,
+            sequence: 1,
+            eventId: EventId.make("event-trash"),
+            type: "thread.trashed",
+            commandId: CommandId.make("command-trash"),
+            correlationId: CorrelationId.make("command-trash"),
+            payload: { threadId, trashedAt: now, updatedAt: now },
+          } satisfies OrchestrationEvent;
+          const deleted = {
+            ...base,
+            sequence: 2,
+            eventId: EventId.make("event-delete"),
+            type: "thread.deleted",
+            commandId: CommandId.make("command-delete"),
+            correlationId: CorrelationId.make("command-delete"),
+            payload: { threadId, deletedAt: now },
+          } satisfies OrchestrationEvent;
+
+          const layer = ThreadDeletionReactorLive.pipe(
+            Layer.provide(
+              Layer.succeed(ProviderService, {
+                stopSession: ({
+                  threadId: stopped,
+                }: Parameters<ProviderServiceShape["stopSession"]>[0]) =>
+                  Effect.sync(() => void stops.push(stopped)),
+              } as unknown as ProviderServiceShape),
+            ),
+            Layer.provide(
+              Layer.succeed(TerminalManager, {
+                close: (input: { threadId: string; deleteHistory?: boolean }) =>
+                  Effect.sync(() => void closes.push(input)),
+              } as unknown as TerminalManagerShape),
+            ),
+            Layer.provide(
+              Layer.succeed(OrchestrationEngineService, {
+                streamDomainEvents: Stream.fromPubSub(events),
+                subscribeDomainEvents: PubSub.subscribe(events),
+              } as unknown as OrchestrationEngineShape),
+            ),
+          );
+
+          yield* Effect.gen(function* () {
+            const reactor = yield* ThreadDeletionReactor;
+            yield* reactor.start();
+            yield* PubSub.publish(events, trashed);
+            yield* reactor.drainThrough(trashed.sequence).pipe(Effect.timeout("1 second"));
+            expect(stops).toEqual([threadId]);
+            expect(closes).toEqual([{ threadId, deleteHistory: false }]);
+            yield* PubSub.publish(events, deleted);
+            yield* reactor.drainThrough(deleted.sequence).pipe(Effect.timeout("1 second"));
+            expect(closes.at(-1)).toEqual({ threadId, deleteHistory: true });
+          }).pipe(Effect.provide(layer));
+        }),
+      ),
+    );
+  });
+});
