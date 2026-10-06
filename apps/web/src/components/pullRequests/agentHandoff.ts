@@ -32,7 +32,7 @@ import { buildThreadRouteParams } from "../../threadRoutes";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { notifyWorktreeSubmoduleSetup } from "../worktrees/worktreeCreationNotifications";
 import { usePullRequestsPage } from "./PullRequestsPageContext";
-import type { PullRequestRepositoryOption } from "./pullRequestRepositories.logic";
+import type { ProjectCheckoutOption } from "../../projectCheckouts.logic";
 import { capHandoffContextDetail } from "./rail/agentHandoffContext";
 import {
   composeHandoffPrompt,
@@ -104,7 +104,7 @@ export interface PullRequestWorktreeTarget {
 const CONTEXT_STALE_AFTER_MS = 5 * 60 * 1000;
 
 interface HandoffTarget {
-  readonly repository: PullRequestRepositoryOption;
+  readonly repository: ProjectCheckoutOption;
   readonly projectRef: ScopedProjectRef;
   readonly link: PullRequestThreadLink;
   /** The page's (uncapped) detail, used when the capped context read fails. */

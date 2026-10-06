@@ -1,7 +1,7 @@
 import { useId } from "react";
 
 import { usePullRequestsPage, type PullRequestsRepositoryStatus } from "../PullRequestsPageContext";
-import { pullRequestRepositoryQualifier } from "../pullRequestRepositories.logic";
+import { projectCheckoutQualifier } from "../../../projectCheckouts.logic";
 
 /** The sentence for a repository the URL names but the page cannot read (yet). */
 export function describeRepositoryStatus(
@@ -71,7 +71,7 @@ export function RepositoryStatusMessage(props: {
           </p>
           <ul className="max-h-64 overflow-y-auto">
             {options.map((option) => {
-              const environment = pullRequestRepositoryQualifier(option, repositories);
+              const environment = projectCheckoutQualifier(option, repositories);
               return (
                 <li key={option.key}>
                   <button

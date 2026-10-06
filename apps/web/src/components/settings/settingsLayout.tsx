@@ -148,12 +148,13 @@ export function SettingsRow({
       data-setting-scope={scope}
       data-slot="settings-row"
       className={cn(
-        "min-w-0 border-t border-border/60 py-3.5 first:border-t-0",
+        // Lays out by its own width, so a row reads the same in a narrow panel.
+        "@container/settings-row min-w-0 border-t border-border/60 py-3.5 first:border-t-0",
         SETTINGS_INSET_CLASS,
         className,
       )}
     >
-      <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-center sm:gap-6">
+      <div className="flex min-w-0 flex-col gap-3 @[34rem]/settings-row:flex-row @[34rem]/settings-row:items-center @[34rem]/settings-row:gap-6">
         <div className="min-w-0 flex-1">
           <div className="flex min-h-5 min-w-0 items-center gap-1">
             <h3 className="min-w-0 text-[13px] font-medium leading-5 text-foreground">{title}</h3>
@@ -172,7 +173,7 @@ export function SettingsRow({
         </div>
         {control ? (
           // Capped so a wide control can never squeeze the label column away.
-          <div className="flex min-w-0 shrink-0 flex-wrap items-center gap-2 sm:max-w-[55%] sm:justify-end">
+          <div className="flex min-w-0 shrink-0 flex-wrap items-center gap-2 @[34rem]/settings-row:max-w-[55%] @[34rem]/settings-row:justify-end">
             {control}
           </div>
         ) : null}

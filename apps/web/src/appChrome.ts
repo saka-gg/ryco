@@ -28,3 +28,25 @@ export const COLLAPSED_APP_SIDEBAR_CHROME_INSET_CLASS = isElectron
  */
 export const APP_SIDEBAR_CHROME_INSET_TRANSITION_CLASS =
   "transition-[padding-left] duration-200 ease-linear motion-reduce:transition-none";
+
+/**
+ * The 52px bar of a top-level page (pull requests, projects): a bottom
+ * hairline, and in the desktop shell a drag region matching the native
+ * titlebar height. Clickable non-button wrappers inside it need
+ * `[-webkit-app-region:no-drag]`.
+ */
+export const PAGE_BAR_CLASS = isElectron
+  ? "flex shrink-0 items-center gap-2 border-b border-border/70 drag-region h-[52px] wco:h-[env(titlebar-area-height)]"
+  : "flex shrink-0 items-center gap-2 border-b border-border/70 h-[52px]";
+
+/**
+ * Right inset for the bar that owns the window's top-right corner, clearing
+ * the Windows Controls Overlay buttons.
+ */
+export const PAGE_BAR_TRAILING_WCO_INSET_CLASS =
+  "wco:pr-[calc(100vw-env(titlebar-area-width)-env(titlebar-area-x)+0.75rem)]";
+
+/** A left drawer overlays the window's corner: clear the macOS traffic lights (or the WCO origin). */
+export const PAGE_DRAWER_LEADING_INSET_CLASS = isElectron
+  ? "pl-[84px] wco:pl-[calc(env(titlebar-area-x)+0.75rem)]"
+  : "pl-2.5";

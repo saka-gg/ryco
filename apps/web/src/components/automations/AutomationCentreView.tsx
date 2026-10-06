@@ -32,6 +32,14 @@ export interface AutomationCentreViewProps {
   onDecision: (proposalId: AgentControlProposalId, decision: "accept" | "reject") => Promise<void>;
   onRefresh: () => void;
   onCommand: (input: AutomationCommandDraft) => Promise<boolean>;
+  /**
+   * The host already titles and describes the centre (a settings section):
+   * skip the heading, keep Refresh beside the view switch, and leave the
+   * page's primary action to the host.
+   */
+  embedded?: boolean;
+  /** The host already says why changes are unavailable; do not repeat it. */
+  disabledReasonShownByHost?: boolean;
 }
 export function AutomationCentreView(props: AutomationCentreViewProps) {
   const [tab, setTab] = useState<"schedules" | "runs">("schedules");
@@ -43,19 +51,21 @@ export function AutomationCentreView(props: AutomationCentreViewProps) {
   const disabled = props.busy || props.disabledReason !== null || props.snapshot === null;
   return (
     <section className="space-y-5" aria-label="Automation centre">
-      <header className="space-y-2">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <h2 className="text-base font-semibold">Automations</h2>
-          <Button size="xs" variant="outline" onClick={props.onRefresh}>
-            Refresh
-          </Button>
-        </div>
-        <p className="text-xs leading-relaxed text-muted-foreground">
-          Schedule a task, approve each occurrence, then follow its thread. The server must be
-          running when work is due.
-        </p>
-      </header>
-      {props.disabledReason && (
+      {props.embedded ? null : (
+        <header className="space-y-2">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h2 className="text-base font-semibold">Automations</h2>
+            <Button size="xs" variant="outline" onClick={props.onRefresh}>
+              Refresh
+            </Button>
+          </div>
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            Schedule a task, approve each occurrence, then follow its thread. The server must be
+            running when work is due.
+          </p>
+        </header>
+      )}
+      {props.disabledReason && !props.disabledReasonShownByHost && (
         <p role="status" className="text-xs text-muted-foreground">
           {props.disabledReason}
         </p>
@@ -92,6 +102,11 @@ export function AutomationCentreView(props: AutomationCentreViewProps) {
           Runs
           {props.snapshot ? ` · ${props.snapshot.runs.filter((r) => r.unread).length} unread` : ""}
         </Button>
+        {props.embedded ? (
+          <Button size="sm" variant="ghost" className="ml-auto" onClick={props.onRefresh}>
+            Refresh
+          </Button>
+        ) : null}
       </div>
       {tab === "schedules" ? (
         <>
@@ -120,6 +135,7 @@ export function AutomationCentreView(props: AutomationCentreViewProps) {
           ) : (
             <Button
               size="sm"
+              variant={props.embedded ? "outline" : "default"}
               disabled={disabled}
               onClick={() =>
                 setEditor({

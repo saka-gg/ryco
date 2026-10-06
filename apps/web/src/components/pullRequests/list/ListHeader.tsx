@@ -45,9 +45,9 @@ import { PULL_REQUESTS_BAR_CLASS, usePullRequestsLeadingInsetClass } from "../Pu
 import { KeyHint } from "../primitives";
 import { usePullRequestsPage } from "../PullRequestsPageContext";
 import {
-  pullRequestRepositoryQualifier,
-  type PullRequestRepositoryOption,
-} from "../pullRequestRepositories.logic";
+  projectCheckoutQualifier,
+  type ProjectCheckoutOption,
+} from "../../../projectCheckouts.logic";
 import {
   resolvePullRequestsSort,
   resolvePullRequestsStateFilter,
@@ -341,7 +341,7 @@ function RepositorySwitcher() {
           {filtered.map((key, index) => {
             const option = byKey.get(key);
             if (!option) return null;
-            const environment = pullRequestRepositoryQualifier(option, repositories);
+            const environment = projectCheckoutQualifier(option, repositories);
             return (
               <ComboboxItem key={key} index={index} value={key} onClick={() => choose(key)}>
                 <span className="flex min-w-0 items-center gap-2.5">
@@ -369,7 +369,7 @@ function RepositorySwitcher() {
 
 /** The checkout's project artwork, or its colored initials when it has none. */
 function RepositoryLogo(props: {
-  readonly option: PullRequestRepositoryOption;
+  readonly option: ProjectCheckoutOption;
   readonly className: string;
 }) {
   return (

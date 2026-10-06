@@ -20,16 +20,12 @@ import {
 import { canSubmitChangeRequestReview } from "@ryco/shared/sourceControl";
 import { useLayoutEffect, useMemo, useState } from "react";
 
-import { isElectron } from "../../env";
-import { useAppSidebarCollapsed } from "../../hooks/useAppSidebarCollapsed";
+import { usePageLeadingInsetClass } from "../../hooks/usePageLeadingInsetClass";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { openExternalLink } from "../../lib/openExternalLink";
 import { cn } from "../../lib/utils";
 import { useUpdateChangeRequestMutation } from "../../rpc/useSourceControl";
-import {
-  APP_SIDEBAR_CHROME_INSET_TRANSITION_CLASS,
-  COLLAPSED_APP_SIDEBAR_CHROME_INSET_CLASS,
-} from "../../appChrome";
+import { PAGE_BAR_CLASS } from "../../appChrome";
 import {
   AlertDialog,
   AlertDialogClose,
@@ -61,23 +57,14 @@ import { usePullRequestsShortcut } from "./pullRequestsShortcuts";
 import { NextActionButton } from "./rail/NextActionButton";
 import { StackChip } from "./rail/StackChip";
 
-export const PULL_REQUESTS_BAR_CLASS = cn(
-  "flex shrink-0 items-center gap-2 border-b border-border/70",
-  isElectron ? "drag-region h-[52px] wco:h-[env(titlebar-area-height)]" : "h-[52px]",
-);
+export const PULL_REQUESTS_BAR_CLASS = PAGE_BAR_CLASS;
 
 /** Inside a workspace panel the bar sits under the panel's tabs: no window chrome. */
 const WORKSPACE_PULL_REQUEST_BAR_CLASS =
   "flex h-11 shrink-0 items-center gap-1.5 border-b border-border/70 pl-1.5";
 
 /** Leading inset for whichever bar owns the window's top-left corner. */
-export function usePullRequestsLeadingInsetClass(owns: boolean, fallback: string): string {
-  const collapsed = useAppSidebarCollapsed();
-  return cn(
-    APP_SIDEBAR_CHROME_INSET_TRANSITION_CLASS,
-    owns && collapsed ? COLLAPSED_APP_SIDEBAR_CHROME_INSET_CLASS : fallback,
-  );
-}
+export const usePullRequestsLeadingInsetClass = usePageLeadingInsetClass;
 
 /**
  * Below this reader width the secondary actions (✧ agent menu, external link)

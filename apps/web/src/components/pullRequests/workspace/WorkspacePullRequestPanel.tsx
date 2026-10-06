@@ -19,10 +19,10 @@ import {
   usePullRequestsPage,
 } from "../PullRequestsPageContext";
 import {
-  buildPullRequestRepositoryOptions,
-  pullRequestRepositoryKey,
-  type PullRequestRepositoryOption,
-} from "../pullRequestRepositories.logic";
+  buildProjectCheckoutOptions,
+  projectCheckoutKey,
+  type ProjectCheckoutOption,
+} from "../../../projectCheckouts.logic";
 import { pullRequestReaderKey } from "../pullRequestsLayoutStore";
 import { createPullRequestsNavigation } from "../pullRequestsNavigation";
 import { resolvePullRequestsTab, type PullRequestsSearch } from "../pullRequestsSearch";
@@ -78,11 +78,11 @@ export default function WorkspacePullRequestPanel(props: WorkspacePullRequestPan
   // hand-off drafts, reader state) is shared with it. Snapshots can trail the
   // thread's project for a moment; a provisional option keeps the reader up.
   const { snapshots } = useLogicalProjectSnapshots();
-  const repository = useMemo<PullRequestRepositoryOption | null>(() => {
+  const repository = useMemo<ProjectCheckoutOption | null>(() => {
     if (!environmentId || !project) return null;
-    const key = pullRequestRepositoryKey(environmentId, project.id);
+    const key = projectCheckoutKey(environmentId, project.id);
     return (
-      buildPullRequestRepositoryOptions(snapshots).find((option) => option.key === key) ?? {
+      buildProjectCheckoutOptions(snapshots).find((option) => option.key === key) ?? {
         key,
         environmentId,
         projectId: project.id,
@@ -110,7 +110,7 @@ export default function WorkspacePullRequestPanel(props: WorkspacePullRequestPan
 }
 
 function WorkspacePullRequestReader(props: {
-  readonly repository: PullRequestRepositoryOption;
+  readonly repository: ProjectCheckoutOption;
   readonly number: number;
   readonly onSelectNumber: (number: number) => void;
 }) {

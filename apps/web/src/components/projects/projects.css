@@ -1,0 +1,10 @@
+/*
+ * Projects page styles: keyframes and selectors only; layout lives in
+ * Tailwind classes. One stylesheet per area so areas never share a file.
+ * Every keyframe is driven by the --app-motion-* tokens and listed in its
+ * file's reduced-motion block.
+ */
+@import "./styles/shell.css";
+@import "./styles/list.css";
+@import "./styles/sections.css";
+@import "./styles/map.css";

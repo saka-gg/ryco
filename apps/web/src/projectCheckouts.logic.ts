@@ -1,10 +1,14 @@
 import type { EnvironmentId, ProjectId } from "@ryco/contracts";
 import type { SavedEnvironmentConnectionState } from "@ryco/client-runtime/connection";
 
-import type { SidebarProjectSnapshot } from "../../sidebarProjectGrouping";
+import type { SidebarProjectSnapshot } from "./sidebarProjectGrouping";
 
-/** One checkout the pull requests page can read change requests through. */
-export interface PullRequestRepositoryOption {
+/**
+ * One checkout of a logical project: the project as it exists on one
+ * environment. Pages that act on a single checkout (pull requests, projects)
+ * pick from these.
+ */
+export interface ProjectCheckoutOption {
   /** Stable `${environmentId}\0${projectId}` key. */
   readonly key: string;
   readonly environmentId: EnvironmentId;
@@ -21,7 +25,7 @@ export interface PullRequestRepositoryOption {
   readonly isRepresentative: boolean;
 }
 
-export function pullRequestRepositoryKey(environmentId: string, projectId: string): string {
+export function projectCheckoutKey(environmentId: string, projectId: string): string {
   return `${environmentId}\0${projectId}`;
 }
 
@@ -30,10 +34,10 @@ export function pullRequestRepositoryKey(environmentId: string, projectId: strin
  * representative checkout (primary environment first) leads its group so the
  * default choice reads through the local machine whenever it can.
  */
-export function buildPullRequestRepositoryOptions(
+export function buildProjectCheckoutOptions(
   snapshots: readonly SidebarProjectSnapshot[],
-): PullRequestRepositoryOption[] {
-  const options: PullRequestRepositoryOption[] = [];
+): ProjectCheckoutOption[] {
+  const options: ProjectCheckoutOption[] = [];
   for (const snapshot of snapshots) {
     const members = snapshot.memberProjects.toSorted((left, right) => {
       const leftRepresentative =
@@ -44,7 +48,7 @@ export function buildPullRequestRepositoryOptions(
     });
     for (const member of members) {
       options.push({
-        key: pullRequestRepositoryKey(member.environmentId, member.id),
+        key: projectCheckoutKey(member.environmentId, member.id),
         environmentId: member.environmentId,
         projectId: member.id,
         cwd: member.cwd,
@@ -66,9 +70,9 @@ export function buildPullRequestRepositoryOptions(
  * or not yet started), "offline" (its connection dropped or failed), or
  * "unknown" (no such environment on this device).
  */
-export type PullRequestEnvironmentSync = "synced" | "syncing" | "offline" | "unknown";
+export type CheckoutEnvironmentSync = "synced" | "syncing" | "offline" | "unknown";
 
-export function classifyPullRequestEnvironmentSync(input: {
+export function classifyCheckoutEnvironmentSync(input: {
   /** The environment's live shell snapshot has arrived. */
   readonly bootstrapComplete: boolean;
   readonly isPrimary: boolean;
@@ -82,7 +86,7 @@ export function classifyPullRequestEnvironmentSync(input: {
   readonly savedKnown: boolean;
   /** The saved-environment registry has loaded, so an absent id is truly unknown. */
   readonly registryHydrated: boolean;
-}): PullRequestEnvironmentSync {
+}): CheckoutEnvironmentSync {
   if (input.bootstrapComplete) return "synced";
   if (input.isPrimary) return "syncing";
   const saved = input.saved;
@@ -95,28 +99,28 @@ export function classifyPullRequestEnvironmentSync(input: {
   return input.registryHydrated ? "unknown" : "syncing";
 }
 
-export interface PullRequestRepositoryRequest {
+export interface ProjectCheckoutRequest {
   readonly env?: string | undefined;
   readonly project?: string | undefined;
 }
 
 /**
- * Which checkout the page reads. A repository named in the URL is honoured or
+ * Which checkout a page reads. A checkout named in the URL is honoured or
  * nothing is: while its environment syncs the page waits, and if it never
- * appears the page says so — it never quietly shows another repository (whose
- * `#N` would be a different pull request).
+ * appears the page says so — it never quietly shows another checkout (whose
+ * pull request `#N` or settings would belong to a different project).
  */
-export type PullRequestRepositoryResolution =
+export type ProjectCheckoutResolution =
   | {
       readonly kind: "resolved";
-      readonly option: PullRequestRepositoryOption;
+      readonly option: ProjectCheckoutOption;
       /** "url": named by the link; the rest are defaults when the URL names none. */
       readonly source: "url" | "last" | "recent" | "first";
     }
-  | { readonly kind: "waiting"; readonly requested: PullRequestRepositoryRequest }
+  | { readonly kind: "waiting"; readonly requested: ProjectCheckoutRequest }
   | {
       readonly kind: "unavailable";
-      readonly requested: PullRequestRepositoryRequest;
+      readonly requested: ProjectCheckoutRequest;
       readonly reason: "offline" | "missing";
     }
   /** No repositories at all (nothing added yet). */
@@ -129,15 +133,15 @@ export type PullRequestRepositoryResolution =
  * most recently active thread (old worktree projects linger in the sidebar, so
  * recency beats sidebar order), else the first representative checkout.
  */
-export function resolvePullRequestRepository(input: {
-  readonly options: readonly PullRequestRepositoryOption[];
-  readonly requested?: PullRequestRepositoryRequest | undefined;
+export function resolveProjectCheckout(input: {
+  readonly options: readonly ProjectCheckoutOption[];
+  readonly requested?: ProjectCheckoutRequest | undefined;
   /** Sync state of the requested environment (the primary one when the URL names none). */
-  readonly requestedEnvironmentSync?: PullRequestEnvironmentSync | undefined;
+  readonly requestedEnvironmentSync?: CheckoutEnvironmentSync | undefined;
   readonly lastKey?: string | null | undefined;
   /** Option keys ordered by the latest thread activity in them, most recent first. */
   readonly recentKeys?: readonly string[] | undefined;
-}): PullRequestRepositoryResolution {
+}): ProjectCheckoutResolution {
   const { options, requested, lastKey, recentKeys } = input;
   if (requested?.project !== undefined) {
     const exact = options.find(
@@ -169,9 +173,9 @@ export function resolvePullRequestRepository(input: {
 }
 
 /** The resolved checkout, or null while waiting / unavailable / empty. */
-export function resolvedPullRequestRepository(
-  resolution: PullRequestRepositoryResolution,
-): PullRequestRepositoryOption | null {
+export function resolvedProjectCheckout(
+  resolution: ProjectCheckoutResolution,
+): ProjectCheckoutOption | null {
   return resolution.kind === "resolved" ? resolution.option : null;
 }
 
@@ -179,16 +183,16 @@ export function resolvedPullRequestRepository(
  * The environment to name beside a checkout's repository, only when several
  * checkouts of that repository are on offer (otherwise the name says it all).
  */
-export function pullRequestRepositoryQualifier(
-  option: PullRequestRepositoryOption,
-  options: readonly PullRequestRepositoryOption[],
+export function projectCheckoutQualifier(
+  option: ProjectCheckoutOption,
+  options: readonly ProjectCheckoutOption[],
 ): string | null {
   const shared = options.filter((candidate) => candidate.repositoryKey === option.repositoryKey);
   return shared.length > 1 && option.environmentLabel ? option.environmentLabel : null;
 }
 
 /** Option keys ordered by their threads' latest activity (most recent first). */
-export function rankRepositoryKeysByThreadActivity(
+export function rankCheckoutKeysByThreadActivity(
   threads: ReadonlyArray<{
     readonly environmentId: string;
     readonly projectId: string;
@@ -203,7 +207,7 @@ export function rankRepositoryKeysByThreadActivity(
       Date.parse(thread.updatedAt ?? "") || 0,
     );
     if (at === 0) continue;
-    const key = pullRequestRepositoryKey(thread.environmentId, thread.projectId);
+    const key = projectCheckoutKey(thread.environmentId, thread.projectId);
     if (at > (latest.get(key) ?? 0)) latest.set(key, at);
   }
   return [...latest.entries()].toSorted((left, right) => right[1] - left[1]).map(([key]) => key);

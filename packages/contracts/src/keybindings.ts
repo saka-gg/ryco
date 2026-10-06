@@ -49,7 +49,12 @@ export const MODEL_PICKER_KEYBINDING_COMMANDS = [
 ] as const;
 export type ModelPickerKeybindingCommand = (typeof MODEL_PICKER_KEYBINDING_COMMANDS)[number];
 
-const STATIC_KEYBINDING_COMMANDS = [
+/**
+ * Every built-in command a key can be bound to. Some ship without a default
+ * key, so this — not the default keymap — is the list a keybindings editor
+ * offers.
+ */
+export const STATIC_KEYBINDING_COMMANDS = [
   "terminal.toggle",
   "terminal.split",
   "terminal.new",
@@ -70,8 +75,9 @@ const STATIC_KEYBINDING_COMMANDS = [
   "pane.close",
   "pane.focusNext",
   "pane.focusPrevious",
-  // Opens the pull requests page; no default key (users bind it themselves).
+  // Open the pull requests and projects pages; no default keys (users bind them).
   "pullRequests.open",
+  "projects.open",
   ...MODEL_PICKER_KEYBINDING_COMMANDS,
   ...THREAD_KEYBINDING_COMMANDS,
 ] as const;

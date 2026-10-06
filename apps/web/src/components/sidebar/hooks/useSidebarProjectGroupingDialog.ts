@@ -1,7 +1,7 @@
 import { useCallback, useState } from "react";
 import { type SidebarProjectGroupingMode } from "@ryco/contracts";
 import type { SidebarProjectGroupMember } from "../../../sidebarProjectGrouping";
-import { deriveProjectGroupingOverrideKey } from "../../../logicalProject";
+import { readProjectGroupingChoice, withProjectGroupingChoice } from "../../../projectMutations";
 import { useUpdateSettings } from "~/hooks/useSettings";
 
 interface ProjectGroupingSettings {
@@ -22,10 +22,9 @@ export function useSidebarProjectGroupingDialog(params: {
 
   const openProjectGroupingDialog = useCallback(
     (member: SidebarProjectGroupMember) => {
-      const overrideKey = deriveProjectGroupingOverrideKey(member);
       setProjectGroupingTarget(member);
       setProjectGroupingSelection(
-        projectGroupingSettings.sidebarProjectGroupingOverrides?.[overrideKey] ?? "inherit",
+        readProjectGroupingChoice(projectGroupingSettings.sidebarProjectGroupingOverrides, member),
       );
     },
     [projectGroupingSettings.sidebarProjectGroupingOverrides],
@@ -41,17 +40,12 @@ export function useSidebarProjectGroupingDialog(params: {
       return;
     }
 
-    const overrideKey = deriveProjectGroupingOverrideKey(projectGroupingTarget);
-    const nextOverrides = {
-      ...projectGroupingSettings.sidebarProjectGroupingOverrides,
-    };
-    if (projectGroupingSelection === "inherit") {
-      delete nextOverrides[overrideKey];
-    } else {
-      nextOverrides[overrideKey] = projectGroupingSelection;
-    }
     updateSettings({
-      sidebarProjectGroupingOverrides: nextOverrides,
+      sidebarProjectGroupingOverrides: withProjectGroupingChoice(
+        projectGroupingSettings.sidebarProjectGroupingOverrides,
+        projectGroupingTarget,
+        projectGroupingSelection,
+      ),
     });
     closeProjectGroupingDialog();
   }, [

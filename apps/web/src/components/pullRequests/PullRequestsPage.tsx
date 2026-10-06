@@ -1,24 +1,15 @@
-import type { EnvironmentId } from "@ryco/contracts";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
-  usePrimaryEnvironmentDescriptor,
-  usePrimaryEnvironmentId,
-} from "../../environments/primary";
-import {
-  hasSavedEnvironmentRegistryHydrated,
-  useSavedEnvironmentRegistryStore,
-  useSavedEnvironmentRuntimeStore,
-} from "../../environments/runtime";
+  CHECKOUT_WAIT_GRACE_MS,
+  createRecentCheckoutKeysSelector,
+  useHeldFor,
+  useRequestedEnvironment,
+} from "../../hooks/useCheckoutResolution";
 import { useElementWidth } from "../../hooks/useElementWidth";
 import { useEvent } from "../../hooks/useEvent";
 import { useLogicalProjectSnapshots } from "../../hooks/useLogicalProjectSnapshots";
-import {
-  selectBootstrapCompleteForEnvironment,
-  selectSidebarThreadsAcrossEnvironments,
-  useStore,
-  type AppState,
-} from "../../store";
+import { useStore } from "../../store";
 import { readMotionDurationMs } from "../../lib/perf/motion";
 import { SidebarInset } from "../ui/sidebar";
 import {
@@ -30,13 +21,7 @@ import {
   type PullRequestsRepositoryStatus,
 } from "./PullRequestsPageContext";
 import { PullRequestsPageBody } from "./PullRequestsPageBody";
-import {
-  buildPullRequestRepositoryOptions,
-  classifyPullRequestEnvironmentSync,
-  rankRepositoryKeysByThreadActivity,
-  resolvePullRequestRepository,
-  type PullRequestEnvironmentSync,
-} from "./pullRequestRepositories.logic";
+import { buildProjectCheckoutOptions, resolveProjectCheckout } from "../../projectCheckouts.logic";
 import { pullRequestReaderKey, usePullRequestsLayoutStore } from "./pullRequestsLayoutStore";
 import {
   createPullRequestsNavigation,
@@ -60,12 +45,6 @@ export interface PullRequestsPageProps {
   ) => void;
 }
 
-/**
- * How long a repository named in the URL may stay "waiting" before the page
- * offers other repositories (its environment may never finish connecting).
- */
-const REPOSITORY_WAIT_GRACE_MS = 8_000;
-
 function supportsViewTransitions(): boolean {
   return typeof document !== "undefined" && "startViewTransition" in document;
 }
@@ -76,95 +55,18 @@ function withoutUndefined(search: PullRequestsSearch): PullRequestsSearch {
   ) as PullRequestsSearch;
 }
 
-/**
- * Repository keys by latest thread activity. Ranked only when a thread
- * summary actually changed, and the same array is returned while the ranking
- * holds, so thread traffic elsewhere does not re-render the page.
- */
-function createRecentRepositoryKeysSelector(): (state: AppState) => readonly string[] {
-  let lastThreads: ReturnType<typeof selectSidebarThreadsAcrossEnvironments> = [];
-  let lastKeys: readonly string[] = [];
-  return (state) => {
-    const threads = selectSidebarThreadsAcrossEnvironments(state);
-    if (
-      threads.length === lastThreads.length &&
-      threads.every((thread, index) => thread === lastThreads[index])
-    ) {
-      return lastKeys;
-    }
-    lastThreads = threads;
-    const keys = rankRepositoryKeysByThreadActivity(threads);
-    if (keys.length !== lastKeys.length || keys.some((key, index) => key !== lastKeys[index])) {
-      lastKeys = keys;
-    }
-    return lastKeys;
-  };
-}
-
-/** Whether the environment a URL names can still deliver its projects, and its label. */
-function useRequestedEnvironment(env: string | undefined): {
-  readonly sync: PullRequestEnvironmentSync;
-  readonly label: string | null;
-} {
-  const primaryEnvironmentId = usePrimaryEnvironmentId();
-  const primaryDescriptor = usePrimaryEnvironmentDescriptor();
-  const environmentId = (env ?? primaryEnvironmentId ?? null) as EnvironmentId | null;
-  const bootstrapComplete = useStore((state) =>
-    environmentId === null ? false : selectBootstrapCompleteForEnvironment(state, environmentId),
-  );
-  const savedRecord = useSavedEnvironmentRegistryStore((state) =>
-    environmentId === null ? null : (state.byId?.[environmentId] ?? null),
-  );
-  const savedRuntime = useSavedEnvironmentRuntimeStore((state) =>
-    environmentId === null ? null : (state.byId?.[environmentId] ?? null),
-  );
-  const isPrimary = environmentId !== null && environmentId === primaryEnvironmentId;
-  const sync = classifyPullRequestEnvironmentSync({
-    bootstrapComplete,
-    isPrimary,
-    saved: savedRuntime
-      ? {
-          connectionState: savedRuntime.connectionState,
-          disconnectedAt: savedRuntime.disconnectedAt,
-        }
-      : null,
-    savedKnown: savedRecord !== null,
-    registryHydrated: hasSavedEnvironmentRegistryHydrated(),
-  });
-  const label =
-    savedRuntime?.descriptor?.label ??
-    savedRecord?.label ??
-    (isPrimary ? (primaryDescriptor?.label ?? null) : null);
-  return { sync, label };
-}
-
-/** True once `active` has held for `delayMs` (reset whenever it turns false). */
-function useHeldFor(active: boolean, delayMs: number): boolean {
-  const [elapsed, setElapsed] = useState(false);
-  useEffect(() => {
-    if (!active) return;
-    const timer = window.setTimeout(() => setElapsed(true), delayMs);
-    // Turning inactive starts the next hold over.
-    return () => {
-      window.clearTimeout(timer);
-      setElapsed(false);
-    };
-  }, [active, delayMs]);
-  return active && elapsed;
-}
-
 export function PullRequestsPage({ search, onSearchChange }: PullRequestsPageProps) {
   // ── Repository ────────────────────────────────────────────────────
   const { snapshots } = useLogicalProjectSnapshots();
-  const repositories = useMemo(() => buildPullRequestRepositoryOptions(snapshots), [snapshots]);
+  const repositories = useMemo(() => buildProjectCheckoutOptions(snapshots), [snapshots]);
   const lastRepositoryKey = usePullRequestsLayoutStore((state) => state.lastRepositoryKey);
   const setLastRepositoryKey = usePullRequestsLayoutStore((state) => state.setLastRepositoryKey);
-  const selectRecentRepositoryKeys = useMemo(() => createRecentRepositoryKeysSelector(), []);
+  const selectRecentRepositoryKeys = useMemo(() => createRecentCheckoutKeysSelector(), []);
   const recentRepositoryKeys = useStore(selectRecentRepositoryKeys);
   const requestedEnvironment = useRequestedEnvironment(search.env);
   const resolution = useMemo(
     () =>
-      resolvePullRequestRepository({
+      resolveProjectCheckout({
         options: repositories,
         requested: { env: search.env, project: search.project },
         requestedEnvironmentSync: requestedEnvironment.sync,
@@ -188,7 +90,7 @@ export function PullRequestsPage({ search, onSearchChange }: PullRequestsPagePro
   useEffect(() => {
     if (chosenRepositoryKey !== null) setLastRepositoryKey(chosenRepositoryKey);
   }, [chosenRepositoryKey, setLastRepositoryKey]);
-  const waitStalled = useHeldFor(resolution.kind === "waiting", REPOSITORY_WAIT_GRACE_MS);
+  const waitStalled = useHeldFor(resolution.kind === "waiting", CHECKOUT_WAIT_GRACE_MS);
   const environmentLabel = requestedEnvironment.label;
   const repositoryStatus = useMemo<PullRequestsRepositoryStatus>(() => {
     switch (resolution.kind) {
