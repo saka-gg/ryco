@@ -7,7 +7,8 @@ import { usePullRequestsShortcut } from "../pullRequestsShortcuts";
 import { MergeThroughPopover } from "./MergeThroughPopover";
 import { usePullRequestRailStore } from "./railStore";
 import { StackLayerList } from "./StackLayerList";
-import { StackPopover, StackSummary } from "./StackPopover";
+import { StackPopover } from "./StackPopover";
+import { StackSummary } from "./StackSummary";
 import { useStackFacts } from "./useStackFacts";
 
 const SHELL =

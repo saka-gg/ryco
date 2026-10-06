@@ -428,4 +428,70 @@ layer("ProjectionWorktreeRepository", (it) => {
       );
     }),
   );
+
+  it.effect("findByOrigin only matches pull requests that are the checkout itself", () =>
+    Effect.gen(function* () {
+      yield* runMigrations();
+      const repo = yield* ProjectionWorktreeRepository;
+      const link = (
+        number: number,
+        source: "origin" | "manual" | "discovered",
+        headRefName: string,
+      ) => ({
+        number,
+        title: `PR ${number}`,
+        url: null,
+        state: "open" as const,
+        isDraft: false,
+        terminalAt: null,
+        headRefName,
+        baseRefName: "main",
+        source,
+        linkedAt: "2026-10-06T08:00:00.000Z",
+        dismissedAt: null,
+      });
+      yield* repo.upsert({
+        worktreeId: WorktreeId.make("wt-pr-10"),
+        projectId: ProjectId.make("project-links"),
+        title: null,
+        branch: "feat-a",
+        worktreePath: "/tmp/wt-a",
+        origin: "pr",
+        // The current link is the related #12, linked by hand.
+        prNumber: 12,
+        issueNumber: null,
+        prTitle: "PR 12",
+        issueTitle: null,
+        prState: "open",
+        prIsDraft: false,
+        issueState: null,
+        pullRequests: [
+          link(10, "origin", "feat-a"),
+          link(12, "manual", "feat-b"),
+          link(14, "manual", "feat-a"),
+        ],
+        createdAt: "2026-10-06T07:00:00.000Z",
+        updatedAt: "2026-10-06T08:00:00.000Z",
+        archivedAt: null,
+        manualPosition: 0,
+      });
+      const find = (number: number) =>
+        repo.findByOrigin({ projectId: ProjectId.make("project-links"), kind: "pr", number });
+
+      assert.equal(yield* find(10), "wt-pr-10");
+      // Checking out #12 must not land in #10's checkout.
+      assert.equal(yield* find(12), null);
+      // A manual link on the workspace's own branch is its checkout.
+      assert.equal(yield* find(14), "wt-pr-10");
+      // Refreshes still reach every workspace that carries #12.
+      assert.deepEqual(
+        yield* repo.findActiveByLinkedNumber({
+          projectId: ProjectId.make("project-links"),
+          kind: "pr",
+          number: 12,
+        }),
+        [WorktreeId.make("wt-pr-10")],
+      );
+    }),
+  );
 });

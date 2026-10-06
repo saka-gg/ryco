@@ -1,4 +1,8 @@
 import type { ChangeRequest } from "@ryco/contracts";
+import {
+  visiblePullRequestLinks,
+  type WorktreePullRequestLink,
+} from "@ryco/shared/worktreePullRequests";
 import type { OverviewPanelItem } from "../PlanSidebar";
 import { OVERVIEW_CHECK_DETAIL_RUN_LIMIT } from "../overviewPullRequestChecks.logic";
 import { buildOverviewChangesItem, partitionOverviewChangedFiles } from "../overviewChanges.logic";
@@ -44,19 +48,48 @@ export function findChangeRequestForBranch(
   return changeRequests?.find((request) => candidates.has(request.headRefName)) ?? null;
 }
 
-export function resolveOverviewPullRequestNumber(input: {
-  activeWorktreePrNumber: number | null;
-  gitStatusPrNumber: number | null;
-  overviewBranchPullRequestNumber: number | null;
-  postPushWatchPullRequestNumber: number | null;
-}): number | null {
-  return (
-    input.activeWorktreePrNumber ??
-    input.gitStatusPrNumber ??
-    input.overviewBranchPullRequestNumber ??
-    input.postPushWatchPullRequestNumber ??
-    null
-  );
+/** The pull request git status reports for the checkout's branch. */
+export type LiveBranchPullRequest = NonNullable<NonNullable<GitStatusData["pr"]>>;
+
+/**
+ * A thread's pull requests: the workspace's links plus the pull request git
+ * status reports for the checkout's branch (it sees a follow-up before the
+ * server links it), current first. Where the server discovers the workspace's
+ * pull requests, a finished one it never linked is stale (a reused branch
+ * name's old pull request) and stays out; elsewhere (no workspace record, the
+ * main checkout, an older server) git status is all there is. The current one
+ * is the newest open pull request, else the most recently finished — never a
+ * stale merged link hiding a newer open one.
+ */
+export function resolveThreadPullRequests(input: {
+  readonly links: ReadonlyArray<WorktreePullRequestLink>;
+  readonly live: LiveBranchPullRequest | null;
+  /** `workspaceDiscoversPullRequests(worktree)`. */
+  readonly discoversPullRequests: boolean;
+}): WorktreePullRequestLink[] {
+  const live = input.live;
+  // A dismissed number stays dismissed even while git status reports it.
+  const known = live !== null && input.links.some((link) => link.number === live.number);
+  const candidates =
+    live === null || known || (input.discoversPullRequests && live.state !== "open")
+      ? input.links
+      : [
+          ...input.links,
+          {
+            number: live.number,
+            title: live.title,
+            url: live.url,
+            state: live.state,
+            isDraft: null,
+            terminalAt: null,
+            headRefName: live.headRef,
+            baseRefName: live.baseRef,
+            source: "discovered" as const,
+            linkedAt: null,
+            dismissedAt: null,
+          },
+        ];
+  return visiblePullRequestLinks(candidates);
 }
 
 export function resolveWorkflowDetailRunIds(input: {

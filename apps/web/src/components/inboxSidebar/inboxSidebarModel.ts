@@ -17,9 +17,15 @@ import type {
 import {
   buildThreadInbox,
   planDelegatedNesting,
+  resolveThreadWorkspacePullRequestLink,
   type DelegatedNestingItem,
   type ThreadInboxEntry,
 } from "@ryco/client-runtime/state/threads";
+import {
+  visiblePullRequestLinks,
+  workspaceDiscoversPullRequests,
+  type WorktreePullRequestLink,
+} from "@ryco/shared/worktreePullRequests";
 import {
   describeThreadPriorityFocus,
   type ThreadPriorityFocusMetadata,
@@ -82,6 +88,67 @@ export interface InboxSidebarEnvironment {
   readonly shellCurrent: boolean;
 }
 
+export interface InboxSidebarPullRequest {
+  readonly number: number;
+  readonly state: "open" | "closed" | "merged" | null;
+  readonly isDraft: boolean;
+  readonly title?: string | undefined;
+  readonly url?: string | undefined;
+}
+
+function inboxPullRequestFromLink(link: WorktreePullRequestLink): InboxSidebarPullRequest {
+  return {
+    number: link.number,
+    state: link.state,
+    isDraft: link.isDraft === true,
+    ...(link.title ? { title: link.title } : {}),
+    ...(link.url ? { url: link.url } : {}),
+  };
+}
+
+/** A row's pull requests: the thread's own, and the rest of its workspace's. */
+function resolveRowPullRequests(
+  thread: SidebarThreadSummary,
+  worktree: SidebarWorktreeSummary | null | undefined,
+): Pick<
+  InboxSidebarRow,
+  | "pullRequest"
+  | "pullRequestLinked"
+  | "otherPullRequests"
+  | "dismissedPullRequestNumbers"
+  | "pullRequestsDiscovered"
+> {
+  const link = resolveThreadWorkspacePullRequestLink(thread, worktree ?? null);
+  if (link === undefined) {
+    // A server that predates links: the workspace's one pull request.
+    return {
+      pullRequest:
+        worktree?.prNumber != null
+          ? {
+              number: worktree.prNumber,
+              state: worktree.prState,
+              isDraft: worktree.prIsDraft === true,
+            }
+          : null,
+      pullRequestLinked: false,
+      otherPullRequests: [],
+      dismissedPullRequestNumbers: [],
+      pullRequestsDiscovered: false,
+    };
+  }
+  return {
+    pullRequest: link ? inboxPullRequestFromLink(link) : null,
+    pullRequestLinked: link !== null,
+    otherPullRequests: visiblePullRequestLinks(worktree?.pullRequests ?? [])
+      .filter((other) => other.number !== link?.number)
+      .map(inboxPullRequestFromLink),
+    dismissedPullRequestNumbers: (worktree?.pullRequests ?? [])
+      .filter((other) => other.dismissedAt)
+      .map((other) => other.number),
+    pullRequestsDiscovered: workspaceDiscoversPullRequests(worktree),
+  };
+}
+
 export interface InboxSidebarRow {
   readonly key: string;
   readonly environmentId: EnvironmentId;
@@ -91,11 +158,22 @@ export interface InboxSidebarRow {
   readonly gitCwd: string | null;
   readonly sourceControlEnabled: boolean;
   readonly mutationEnabled: boolean;
-  readonly pullRequest: {
-    readonly number: number;
-    readonly state: "open" | "closed" | "merged" | null;
-    readonly isDraft: boolean;
-  } | null;
+  /** The pull request the thread answers to (the one that settles it). */
+  readonly pullRequest: InboxSidebarPullRequest | null;
+  /**
+   * `pullRequest` is one of the workspace's stored links, so live git status
+   * may only enrich it; otherwise (older servers) the branch's live one wins.
+   */
+  readonly pullRequestLinked: boolean;
+  /** The workspace's other visible pull requests, for the hover card. */
+  readonly otherPullRequests: ReadonlyArray<InboxSidebarPullRequest>;
+  /** Pull requests the user unlinked: live git status must not bring them back. */
+  readonly dismissedPullRequestNumbers: ReadonlyArray<number>;
+  /**
+   * The server discovers the workspace's pull requests, so a finished one git
+   * status reports but the workspace does not carry is stale.
+   */
+  readonly pullRequestsDiscovered: boolean;
   readonly machineLabel: string;
   readonly projectLabel: string;
   readonly project: Project | null;
@@ -590,6 +668,7 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
             : sectionKey(state);
     if (input.filters.status !== "all" && input.filters.status !== rowSection) continue;
     const providerDriver = resolveProviderDriver(thread);
+    const rowPullRequests = resolveRowPullRequests(thread, worktree);
     rows.push({
       key: scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
       environmentId: thread.environmentId,
@@ -607,14 +686,7 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
         environment.shellCurrent &&
         environment.connectionState === "connected",
       ),
-      pullRequest:
-        worktree?.prNumber != null
-          ? {
-              number: worktree.prNumber,
-              state: worktree.prState,
-              isDraft: worktree.prIsDraft === true,
-            }
-          : null,
+      ...rowPullRequests,
       machineLabel,
       projectLabel,
       project: project ?? null,
@@ -643,13 +715,13 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
       modelSelection: thread.modelSelection ?? null,
       branchLabel: thread.branch ?? worktree?.branch ?? null,
       changeRequestLabel:
-        worktree?.prNumber != null
-          ? `#${worktree.prNumber}`
+        rowPullRequests.pullRequest !== null
+          ? `#${rowPullRequests.pullRequest.number}`
           : worktree?.issueNumber != null
             ? `#${worktree.issueNumber}`
             : (worktree?.workItemKey ?? null),
       changeRequestStateLabel:
-        worktree?.prState ??
+        (rowPullRequests.pullRequest !== null ? rowPullRequests.pullRequest.state : null) ??
         worktree?.issueState ??
         worktree?.workItemStateName ??
         worktree?.workItemState ??

@@ -1,8 +1,10 @@
-import { memo } from "react";
+import { memo, type Ref } from "react";
 import { ChatHeaderBreadcrumb } from "./ChatHeaderBreadcrumb";
 import type { WorktreeOriginLike } from "./ChatHeaderBreadcrumb.logic";
 import type { LinkedWorktreeItem } from "../worktrees/LinkedWorktreeItemDialog";
+import type { WorktreePullRequestLink } from "@ryco/shared/worktreePullRequests";
 import { WorktreeSourceControlBadges } from "../worktrees/WorktreeSourceControlBadges";
+import type { WorktreePullRequestsToggle } from "../worktrees/WorktreeSourceControlBadges";
 
 export interface ChatHeaderBarProps {
   projectName: string | null | undefined;
@@ -15,6 +17,11 @@ export interface ChatHeaderBarProps {
   worktreeIssueState?: "open" | "closed" | null | undefined;
   worktreePrState?: "open" | "closed" | "merged" | null | undefined;
   worktreePrIsDraft?: boolean | null | undefined;
+  /** Every pull request the workspace carries; with the popover, the badge opens them. */
+  worktreePullRequests?: ReadonlyArray<WorktreePullRequestLink> | undefined;
+  worktreePrUrl?: string | null | undefined;
+  worktreePullRequestsToggle?: WorktreePullRequestsToggle | undefined;
+  worktreePullRequestBadgeRef?: Ref<HTMLButtonElement> | undefined;
   worktreeWorkItemProvider?: "jira" | null | undefined;
   worktreeWorkItemKey?: string | null | undefined;
   worktreeWorkItemState?: "open" | "in_progress" | "done" | "closed" | "unknown" | null | undefined;
@@ -26,7 +33,10 @@ export interface ChatHeaderBarProps {
   inlineActions?: React.ReactNode;
 }
 
-export const ChatHeaderBar = memo(function ChatHeaderBar(props: ChatHeaderBarProps) {
+export const ChatHeaderBar = memo(function ChatHeaderBar({
+  worktreePullRequestBadgeRef,
+  ...props
+}: ChatHeaderBarProps) {
   return (
     <div className="@container/header-actions flex min-w-0 flex-1 items-center gap-3">
       <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
@@ -52,6 +62,10 @@ export const ChatHeaderBar = memo(function ChatHeaderBar(props: ChatHeaderBarPro
           density="header"
           labelStyle="kind"
           onOpenLinkedItem={props.onOpenLinkedWorktreeItem}
+          prUrl={props.worktreePrUrl}
+          pullRequests={props.worktreePullRequests}
+          pullRequestsToggle={props.worktreePullRequestsToggle}
+          pullRequestBadgeRef={worktreePullRequestBadgeRef}
         />
         {props.projectName && !props.isGitRepo ? (
           <span className="shrink-0 rounded-full border border-border/60 bg-muted/40 px-1.5 py-0.5 text-[10px] text-amber-600 dark:text-amber-400">

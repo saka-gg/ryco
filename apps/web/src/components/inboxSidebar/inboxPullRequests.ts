@@ -1,20 +1,45 @@
 import type { SourceControlChangeRequestDetail, VcsStatusResult } from "@ryco/contracts";
 import { type CheckRollupSummary, summarizeCheckRollup } from "../projectExplorer/prCheckStatus";
 import { resolveThreadPr } from "../ThreadStatusIndicators";
-import type { InboxSidebarRow } from "./inboxSidebarModel";
+import { resolveDisplayStack } from "../worktrees/workspacePullRequests.logic";
+import type { InboxSidebarPullRequest, InboxSidebarRow } from "./inboxSidebarModel";
 
-/** Title and link arrive with live source control; projected rows carry only number and state. */
-export type InboxPullRequest = NonNullable<InboxSidebarRow["pullRequest"]> & {
-  readonly title?: string | undefined;
-  readonly url?: string | undefined;
-};
+/** Title and link arrive with live source control or the stored link. */
+export type InboxPullRequest = InboxSidebarPullRequest;
 
+/**
+ * The row's pull request with what the checkout's branch reports live. A
+ * stored link (the one the thread answers to) only takes the live state,
+ * title and link of that same number: an old thread that shipped #675 keeps
+ * naming #675 while its branch reports #677. Without a link the branch's one
+ * wins, unless the user unlinked it or (in a discovered workspace) it is a
+ * finished one the server did not link.
+ */
 export function resolveInboxPullRequest(
-  row: Pick<InboxSidebarRow, "branchLabel" | "pullRequest">,
+  row: Pick<InboxSidebarRow, "branchLabel" | "pullRequest"> &
+    Partial<
+      Pick<
+        InboxSidebarRow,
+        "pullRequestLinked" | "dismissedPullRequestNumbers" | "pullRequestsDiscovered"
+      >
+    >,
   status: VcsStatusResult | null,
 ): InboxPullRequest | null {
   const live = resolveThreadPr(row.branchLabel, status);
-  if (!live) return row.pullRequest;
+  if (!live || row.dismissedPullRequestNumbers?.includes(live.number)) return row.pullRequest;
+  // Where the server discovers the workspace's pull requests, a finished one
+  // the row does not already name is stale (a reused branch name's old pull
+  // request), as in the header and overview.
+  if (
+    row.pullRequestsDiscovered &&
+    live.state !== "open" &&
+    row.pullRequest?.number !== live.number
+  ) {
+    return row.pullRequest;
+  }
+  if (row.pullRequestLinked && row.pullRequest && row.pullRequest.number !== live.number) {
+    return row.pullRequest;
+  }
   return {
     number: live.number,
     state: live.state,
@@ -39,7 +64,7 @@ export function resolveInboxPullRequests(
     title: detail.title,
     url: detail.url,
   };
-  const stack = detail.provider === "github" ? (detail.stack ?? null) : null;
+  const stack = resolveDisplayStack(detail);
   if (!stack) return { requests: [selected], stack: null };
   const requests: InboxPullRequest[] = stack.entries.map((entry) =>
     entry.number === current.number ? selected : entry,

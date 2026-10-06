@@ -4,7 +4,7 @@ import {
   buildOverviewItems,
   compactQueryErrorMessage,
   findChangeRequestForBranch,
-  resolveOverviewPullRequestNumber,
+  resolveThreadPullRequests,
   resolveWorkflowDetailRunIds,
 } from "./ChatOverviewPanel.logic";
 
@@ -88,38 +88,80 @@ describe("findChangeRequestForBranch", () => {
   });
 });
 
-describe("resolveOverviewPullRequestNumber", () => {
-  it("prioritizes activeWorktreePrNumber", () => {
-    expect(
-      resolveOverviewPullRequestNumber({
-        activeWorktreePrNumber: 10,
-        gitStatusPrNumber: 20,
-        overviewBranchPullRequestNumber: 30,
-        postPushWatchPullRequestNumber: 40,
-      }),
-    ).toBe(10);
+describe("resolveThreadPullRequests", () => {
+  const link = (number: number, state: "open" | "merged", dismissedAt: string | null = null) => ({
+    number,
+    title: `PR ${number}`,
+    url: null,
+    state,
+    isDraft: false,
+    terminalAt: state === "merged" ? "2026-10-06T06:51:51.000Z" : null,
+    headRefName: "feature",
+    baseRefName: "main",
+    source: "created" as const,
+    linkedAt: "2026-10-05T09:00:00.000Z",
+    dismissedAt,
+  });
+  const live = (number: number, state: "open" | "merged" = "open") => ({
+    number,
+    title: `Live ${number}`,
+    url: `https://example.test/pull/${number}`,
+    baseRef: "main",
+    headRef: "feature",
+    state,
   });
 
-  it("falls through to gitStatusPrNumber", () => {
-    expect(
-      resolveOverviewPullRequestNumber({
-        activeWorktreePrNumber: null,
-        gitStatusPrNumber: 20,
-        overviewBranchPullRequestNumber: 30,
-        postPushWatchPullRequestNumber: 40,
-      }),
-    ).toBe(20);
+  it("lets the branch's open follow-up outrank a merged link", () => {
+    const resolved = resolveThreadPullRequests({
+      links: [link(675, "merged")],
+      live: live(677),
+      discoversPullRequests: true,
+    });
+    expect(resolved.map((entry) => [entry.number, entry.state])).toEqual([
+      [677, "open"],
+      [675, "merged"],
+    ]);
   });
 
-  it("returns null when all are null", () => {
+  it("keeps a linked pull request's own data and never revives a dismissed one", () => {
     expect(
-      resolveOverviewPullRequestNumber({
-        activeWorktreePrNumber: null,
-        gitStatusPrNumber: null,
-        overviewBranchPullRequestNumber: null,
-        postPushWatchPullRequestNumber: null,
+      resolveThreadPullRequests({
+        links: [link(677, "open")],
+        live: live(677),
+        discoversPullRequests: true,
+      })[0]?.title,
+    ).toBe("PR 677");
+    expect(
+      resolveThreadPullRequests({
+        links: [link(675, "merged"), link(677, "open", "2026-10-06T07:00:00.000Z")],
+        live: live(677),
+        discoversPullRequests: true,
+      }).map((entry) => entry.number),
+    ).toEqual([675]);
+  });
+
+  it("is empty with no links and nothing live", () => {
+    expect(
+      resolveThreadPullRequests({ links: [], live: null, discoversPullRequests: true }),
+    ).toEqual([]);
+  });
+
+  it("leaves out a finished pull request the server never linked", () => {
+    expect(
+      resolveThreadPullRequests({
+        links: [],
+        live: live(600, "merged"),
+        discoversPullRequests: true,
       }),
-    ).toBeNull();
+    ).toEqual([]);
+    // Without discovery (no workspace record, the main checkout) git status is all there is.
+    expect(
+      resolveThreadPullRequests({
+        links: [],
+        live: live(600, "merged"),
+        discoversPullRequests: false,
+      }).map((entry) => entry.number),
+    ).toEqual([600]);
   });
 });
 

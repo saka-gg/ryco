@@ -177,6 +177,12 @@ export interface WsRpcClient {
     readonly createChangeRequest: RpcUnaryMethod<
       typeof WS_METHODS.sourceControlCreateChangeRequest
     >;
+    readonly linkWorktreePullRequest: RpcUnaryMethod<
+      typeof WS_METHODS.sourceControlLinkWorktreePullRequest
+    >;
+    readonly dismissWorktreePullRequest: RpcUnaryMethod<
+      typeof WS_METHODS.sourceControlDismissWorktreePullRequest
+    >;
   };
   readonly textGeneration: {
     readonly askSideQuestion: RpcUnaryMethod<typeof WS_METHODS.textGenerationAskSideQuestion>;
@@ -596,6 +602,14 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
         transport.request((client) => client[WS_METHODS.sourceControlUpdateChangeRequest](input)),
       createChangeRequest: (input) =>
         transport.request((client) => client[WS_METHODS.sourceControlCreateChangeRequest](input)),
+      linkWorktreePullRequest: (input) =>
+        transport.request((client) =>
+          client[WS_METHODS.sourceControlLinkWorktreePullRequest](input),
+        ),
+      dismissWorktreePullRequest: (input) =>
+        transport.request((client) =>
+          client[WS_METHODS.sourceControlDismissWorktreePullRequest](input),
+        ),
     },
     textGeneration: {
       askSideQuestion: (input) =>

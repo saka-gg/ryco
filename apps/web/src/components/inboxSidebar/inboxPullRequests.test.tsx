@@ -72,6 +72,64 @@ describe("inbox pull requests", () => {
       });
     }
   });
+  it("keeps the thread's own linked PR when the branch reports a newer one", () => {
+    const shipped = { number: 12, state: "merged" as const, isDraft: false, title: "Ship it" };
+    expect(
+      resolveInboxPullRequest(
+        { branchLabel: "feature", pullRequest: shipped, pullRequestLinked: true },
+        status,
+      ),
+    ).toBe(shipped);
+    // The same number takes the live state, title and link.
+    expect(
+      resolveInboxPullRequest(
+        {
+          branchLabel: "feature",
+          pullRequest: { number: 42, state: null, isDraft: true },
+          pullRequestLinked: true,
+        },
+        status,
+      ),
+    ).toEqual({
+      number: 42,
+      state: "open",
+      isDraft: true,
+      title: status.pr!.title,
+      url: status.pr!.url,
+    });
+  });
+  it("leaves out a finished branch pull request the row does not name", () => {
+    const merged = { ...status, pr: { ...status.pr!, state: "merged" as const } };
+    expect(
+      resolveInboxPullRequest(
+        { branchLabel: "feature", pullRequest: null, pullRequestsDiscovered: true },
+        merged,
+      ),
+    ).toBeNull();
+    // Without discovery (no workspace record) git status is all there is.
+    expect(
+      resolveInboxPullRequest({ branchLabel: "feature", pullRequest: null }, merged)?.number,
+    ).toBe(42);
+    // The row's own pull request still takes its live state.
+    expect(
+      resolveInboxPullRequest(
+        {
+          branchLabel: "feature",
+          pullRequest: { number: 42, state: "open", isDraft: false },
+          pullRequestsDiscovered: true,
+        },
+        merged,
+      )?.state,
+    ).toBe("merged");
+  });
+  it("never brings back a pull request the user unlinked", () => {
+    expect(
+      resolveInboxPullRequest(
+        { branchLabel: "feature", pullRequest: null, dismissedPullRequestNumbers: [42] },
+        status,
+      ),
+    ).toBeNull();
+  });
   it("does not borrow the checked-out branch's PR for another thread", () => {
     expect(resolveInboxPullRequest({ branchLabel: "other", pullRequest: null }, status)).toBeNull();
     expect(resolveInboxPullRequest({ branchLabel: null, pullRequest: null }, status)).toBeNull();

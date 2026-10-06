@@ -17,12 +17,17 @@ import {
   getEffectiveSettlementTimestamp,
   getNextThreadSettlementEvaluationAtMs,
   getThreadAutoSettlementBlocker,
+  threadUserAnchorTimestamp,
   type CanSettleThreadResult,
   type ThreadAutoSettlementBlocker,
   type ThreadSettlementBlocker,
   type ThreadSettlementClassification,
   type ThreadSettlementInput,
 } from "@ryco/shared/threadSettlement";
+import {
+  resolveThreadPullRequestLink,
+  type WorktreePullRequestLink,
+} from "@ryco/shared/worktreePullRequests";
 import {
   partitionThreadPriorities,
   type ThreadPriorityFocusMetadata,
@@ -187,6 +192,54 @@ function mutationBlocker(
   return null;
 }
 
+/**
+ * The pull request a thread is judged by. A workspace that carried several
+ * (a shipped one, then its follow-up) settles each thread on the one its own
+ * activity belongs to, so shipping #675 still settles its thread while the
+ * follow-up #677 stays open.
+ */
+function threadPullRequestSettlementFields(
+  thread: SidebarThreadSummary,
+  worktree: SidebarWorktreeSummary | null,
+): Pick<ThreadSettlementInput, "prNumber" | "prState" | "prTerminalAt"> {
+  if (worktree === null) return { prNumber: null, prState: null, prTerminalAt: null };
+  if (worktree.pullRequests === undefined) {
+    return {
+      prNumber: worktree.prNumber,
+      prState: worktree.prState,
+      // Absent (undefined) means the server predates the field: legacy merged rule.
+      prTerminalAt: worktree.prTerminalAt,
+    };
+  }
+  const link = resolveThreadWorkspacePullRequestLink(thread, worktree);
+  return {
+    prNumber: link?.number ?? null,
+    prState: link?.state ?? null,
+    prTerminalAt: link?.terminalAt ?? null,
+  };
+}
+
+/**
+ * The one of its workspace's pull requests a thread answers to — what settles
+ * it, and what its inbox row names. Undefined when the workspace comes from a
+ * server that predates links (callers fall back to its one flat pull request).
+ */
+export function resolveThreadWorkspacePullRequestLink(
+  thread: Pick<SidebarThreadSummary, "createdAt" | "latestUserMessageAt" | "latestTurn">,
+  worktree: Pick<SidebarWorktreeSummary, "pullRequests"> | null,
+): WorktreePullRequestLink | null | undefined {
+  if (worktree === null) return null;
+  if (worktree.pullRequests === undefined) return undefined;
+  return resolveThreadPullRequestLink(
+    worktree.pullRequests,
+    threadUserAnchorTimestamp({
+      createdAt: thread.createdAt,
+      latestUserMessageAt: thread.latestUserMessageAt,
+      latestTurnRequestedAt: thread.latestTurn?.requestedAt ?? null,
+    }),
+  );
+}
+
 function settlementInput(input: {
   readonly thread: SidebarThreadSummary;
   readonly worktree: SidebarWorktreeSummary | null;
@@ -217,10 +270,7 @@ function settlementInput(input: {
     deliveryUnknown: input.deliveryUnknown,
     pinned: input.pinned,
     backgroundLiveness: input.thread.backgroundLiveness ?? null,
-    prNumber: input.worktree?.prNumber ?? null,
-    prState: input.worktree?.prState ?? null,
-    // Absent (undefined) means the server predates the field: legacy merged rule.
-    prTerminalAt: input.worktree === null ? null : input.worktree.prTerminalAt,
+    ...threadPullRequestSettlementFields(input.thread, input.worktree),
     worktreeUpdatedAt: input.worktree?.updatedAt ?? null,
     updatedAt: input.thread.updatedAt ?? null,
     createdAt: input.thread.createdAt,
@@ -297,6 +347,8 @@ function filterEntry(entry: ThreadInboxEntry, filters: ThreadInboxFilters | unde
     entry.worktree?.issueTitle,
     entry.worktree?.workItemKey,
     entry.worktree?.workItemTitle,
+    // Every pull request the workspace carried, so "#675" finds its thread.
+    ...(entry.worktree?.pullRequests ?? []).flatMap((link) => [link.title, `#${link.number}`]),
   ].some((value) => value?.toLocaleLowerCase().includes(text) === true);
 }
 

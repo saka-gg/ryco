@@ -32,6 +32,10 @@ import { Schema } from "effect";
 import { resolveModelSlugForProvider } from "@ryco/shared/model";
 import { capThreadActivitiesPreservingMilestones } from "@ryco/shared/threadActivity";
 import { checkpointStatusToTurnState, mergeReleasedTurn } from "@ryco/shared/turnFinalization";
+import {
+  applySourceControlStateToPullRequestLinks,
+  pullRequestLinksEqual,
+} from "@ryco/shared/worktreePullRequests";
 import { create } from "zustand";
 import {
   type ChatMessage,
@@ -333,6 +337,8 @@ function mapWorktree(
     checkoutRemovedAt: worktree.checkoutRemovedAt ?? null,
     checkoutRemovalReason: worktree.checkoutRemovalReason ?? null,
     manualPosition: worktree.manualPosition,
+    // Absent stays absent: readers derive one link from the `pr*` fields.
+    ...(worktree.pullRequests !== undefined ? { pullRequests: worktree.pullRequests } : {}),
   };
 }
 
@@ -709,7 +715,8 @@ function sidebarWorktreesEqual(
     left.archivedAt === right.archivedAt &&
     (left.checkoutRemovedAt ?? null) === (right.checkoutRemovedAt ?? null) &&
     (left.checkoutRemovalReason ?? null) === (right.checkoutRemovalReason ?? null) &&
-    left.manualPosition === right.manualPosition
+    left.manualPosition === right.manualPosition &&
+    pullRequestLinksEqual(left.pullRequests, right.pullRequests)
   );
 }
 
@@ -2707,6 +2714,9 @@ function applyEnvironmentOrchestrationEvent(
             workItemState: event.payload.workItemState ?? null,
             workItemStateName: event.payload.workItemStateName ?? null,
             workItemUrl: event.payload.workItemUrl ?? null,
+            ...(event.payload.pullRequests !== undefined
+              ? { pullRequests: event.payload.pullRequests }
+              : {}),
             createdAt: event.payload.createdAt,
             updatedAt: event.payload.updatedAt,
             archivedAt: null,
@@ -2753,6 +2763,19 @@ function applyEnvironmentOrchestrationEvent(
               ? { prTerminalAt: event.payload.prTerminalAt }
               : {}),
             issueState: event.payload.issueState,
+            // Current servers send the whole list; an older event on a list we
+            // already hold is folded in the way the server folds it.
+            ...(event.payload.pullRequests !== undefined
+              ? { pullRequests: event.payload.pullRequests }
+              : existing.pullRequests !== undefined
+                ? {
+                    pullRequests: applySourceControlStateToPullRequestLinks(
+                      existing.pullRequests,
+                      event.payload,
+                      existing.prNumber,
+                    ),
+                  }
+                : {}),
             updatedAt: event.payload.updatedAt,
           })
         : state;

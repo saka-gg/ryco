@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { parsePullRequestReference } from "./pullRequestReference";
+import { parsePullRequestReference, parsePullRequestReferenceNumber } from "./pullRequestReference";
 
 describe("parsePullRequestReference", () => {
   it("accepts GitHub pull request URLs", () => {
@@ -75,5 +75,25 @@ describe("parsePullRequestReference", () => {
 
   it("rejects non-pull-request input", () => {
     expect(parsePullRequestReference("feature/my-branch")).toBeNull();
+  });
+});
+
+describe("parsePullRequestReferenceNumber", () => {
+  it("reads the number from numbers, URLs and checkout commands", () => {
+    expect(parsePullRequestReferenceNumber("#677")).toBe(677);
+    expect(parsePullRequestReferenceNumber("677")).toBe(677);
+    expect(parsePullRequestReferenceNumber("https://github.com/sak0a/ryco/pull/677/files")).toBe(
+      677,
+    );
+    expect(
+      parsePullRequestReferenceNumber("https://gitlab.com/group/project/-/merge_requests/42"),
+    ).toBe(42);
+    expect(parsePullRequestReferenceNumber("gh pr checkout 12")).toBe(12);
+  });
+
+  it("names nothing for titles, branches and zero", () => {
+    expect(parsePullRequestReferenceNumber("projects map")).toBeNull();
+    expect(parsePullRequestReferenceNumber("feature/my-branch")).toBeNull();
+    expect(parsePullRequestReferenceNumber("#0")).toBeNull();
   });
 });

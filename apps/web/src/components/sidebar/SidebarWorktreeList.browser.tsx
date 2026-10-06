@@ -1,5 +1,5 @@
 import { EnvironmentId, ProjectId, ProviderInstanceId, ThreadId } from "@ryco/contracts";
-import { page } from "vite-plus/test/browser";
+import { page, userEvent } from "vite-plus/test/browser";
 import { render } from "vitest-browser-react";
 import { describe, expect, it, vi } from "vite-plus/test";
 
@@ -264,6 +264,117 @@ describe("SidebarWorktreeList", () => {
     expect(document.body.textContent).not.toContain("#101");
   });
 
+  it("keeps a badge's Enter and Space from toggling its workspace row", async () => {
+    await render(
+      <SidebarWorktreeList
+        attachThreadListAutoAnimateRef={() => undefined}
+        projectExpanded
+        resolveThreadGitStatusTarget={() => null}
+        renderThread={(thread) => <div>{thread.title}</div>}
+        treeProject={makeLinkedIssueAndPrTreeProject()}
+        visibleThreadKeys={null}
+        onCopyWorktreePath={vi.fn()}
+        onWorkspaceAction={vi.fn()}
+        onNewSession={vi.fn()}
+        onOpenInEditor={vi.fn()}
+        onOpenWorktree={vi.fn()}
+        onRenameWorktree={vi.fn()}
+      />,
+    );
+
+    const badge = page.getByLabelText("Pull request #202 — Open").element() as HTMLElement;
+    const row = badge.closest<HTMLElement>('[role="button"][aria-expanded]');
+    expect(row?.getAttribute("aria-expanded")).toBe("false");
+    // One key at a time, letting React commit, so a toggle cannot hide behind another.
+    for (const key of ["Enter", " "]) {
+      badge.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(row?.getAttribute("aria-expanded")).toBe("false");
+    }
+  });
+
+  it("opens a workspace's pull requests from its badge only when it has several", async () => {
+    // The frozen phone tier keeps the badge's dialog.
+    await page.viewport(1_280, 800);
+    await render(
+      <SidebarWorktreeList
+        attachThreadListAutoAnimateRef={() => undefined}
+        projectExpanded
+        resolveThreadGitStatusTarget={() => null}
+        renderThread={(thread) => <div>{thread.title}</div>}
+        treeProject={makeFollowUpTreeProject()}
+        visibleThreadKeys={null}
+        onCopyWorktreePath={vi.fn()}
+        onWorkspaceAction={vi.fn()}
+        onNewSession={vi.fn()}
+        onOpenInEditor={vi.fn()}
+        onOpenWorktree={vi.fn()}
+        onRenameWorktree={vi.fn()}
+      />,
+    );
+
+    // The row reads as before: one chip, the current pull request.
+    const badge = page.getByLabelText("Pull request #677 — Open · 1 earlier");
+    await expect.element(badge).toHaveAttribute("aria-haspopup", "dialog");
+    expect(document.body.textContent).not.toContain("#675");
+
+    await badge.click();
+
+    await expect.element(page.getByText("Earlier")).toBeInTheDocument();
+    await expect
+      .element(page.getByRole("button", { name: "#675 Ship the lifecycle, Merged" }))
+      .toBeInTheDocument();
+    await expect
+      .element(page.getByRole("button", { name: "#677 Projects map follow-up, Open" }))
+      .toBeInTheDocument();
+    // Not connected in this harness: no linking, no unlinking.
+    expect(document.body.textContent).not.toContain("Link pull request…");
+    expect(document.querySelector('[aria-label^="Unlink"]')).toBeNull();
+
+    // Keys inside the (portaled) popover never reach the workspace row.
+    const row = badge.element().closest<HTMLElement>('[role="button"][aria-expanded]');
+    expect(row?.getAttribute("aria-expanded")).toBe("false");
+    await userEvent.keyboard("{ArrowRight}");
+    await userEvent.keyboard("{ArrowDown}");
+    await expect
+      .element(page.getByRole("button", { name: "#675 Ship the lifecycle, Merged" }))
+      .toHaveFocus();
+    expect(row?.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("shows an archived workspace's pull requests read-only", async () => {
+    await page.viewport(1_280, 800);
+    const live = makeFollowUpTreeProject();
+    const archived = {
+      ...live.worktrees[0]!,
+      worktree: { ...live.worktrees[0]!.worktree, archivedAt: "2026-10-06T09:00:00.000Z" },
+    };
+    await render(
+      <SidebarWorktreeList
+        attachThreadListAutoAnimateRef={() => undefined}
+        projectExpanded
+        resolveThreadGitStatusTarget={() => null}
+        renderThread={(thread) => <div>{thread.title}</div>}
+        treeProject={{ ...live, worktrees: [], archivedWorktrees: [archived] }}
+        visibleThreadKeys={null}
+        onCopyWorktreePath={vi.fn()}
+        onWorkspaceAction={vi.fn()}
+        onNewSession={vi.fn()}
+        onOpenInEditor={vi.fn()}
+        onOpenWorktree={vi.fn()}
+        onRenameWorktree={vi.fn()}
+      />,
+    );
+
+    await page.getByRole("button", { name: "Archived (1)" }).click();
+    await page.getByLabelText("Pull request #677 — Open · 1 earlier").click();
+    await expect
+      .element(page.getByRole("button", { name: "#675 Ship the lifecycle, Merged" }))
+      .toBeInTheDocument();
+    expect(document.querySelector('[aria-label^="Unlink"]')).toBeNull();
+    expect(document.body.textContent).not.toContain("Link pull request…");
+  });
+
   it("colors active worktree names instead of reserving a chat-activity dot slot", async () => {
     const treeProject = makeStatusDotTreeProject();
     await render(
@@ -510,6 +621,51 @@ function makeLinkedIssueAndPrTreeProject(): SidebarTreeProject {
           archivedAt: null,
           manualPosition: 1,
           updatedAt: "2026-05-17T00:00:00.000Z",
+        },
+      }),
+    ],
+  };
+}
+
+function makeFollowUpTreeProject(): SidebarTreeProject {
+  const link = (
+    number: number,
+    title: string,
+    state: "open" | "merged",
+    linkedAt: string,
+  ): NonNullable<SidebarWorktree["pullRequests"]>[number] => ({
+    number,
+    title,
+    url: `https://github.com/acme/ryco/pull/${number}`,
+    state,
+    isDraft: false,
+    terminalAt: state === "merged" ? "2026-10-05T08:00:00.000Z" : null,
+    headRefName: `feature/${number}`,
+    baseRefName: "main",
+    source: "created",
+    linkedAt,
+    dismissedAt: null,
+  });
+  return {
+    archivedSessions: [],
+    archivedWorktrees: [],
+    draftSessions: [],
+    flatSessions: [],
+    isGitRepo: true,
+    project: makeProject(),
+    worktrees: [
+      makeWorktreeNode({
+        aggregateStatus: "idle",
+        manualPosition: 1,
+        worktree: {
+          ...makeWorktreeSummary({ worktreeId: "wt-follow-up", branch: "feature/lifecycle" }),
+          prNumber: 677,
+          prState: "open",
+          prIsDraft: false,
+          pullRequests: [
+            link(675, "Ship the lifecycle", "merged", "2026-10-04T08:00:00.000Z"),
+            link(677, "Projects map follow-up", "open", "2026-10-06T08:00:00.000Z"),
+          ],
         },
       }),
     ],

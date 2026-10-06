@@ -7,8 +7,13 @@ import { scopedThreadKey, scopeProjectRef, scopeThreadRef } from "@ryco/client-r
 import { type ScopedThreadRef, type ThreadId } from "@ryco/contracts";
 import { projectScriptCwd, projectScriptRuntimeEnv } from "@ryco/shared/projectScripts";
 import {
+  readWorktreePullRequestLinks,
+  workspaceDiscoversPullRequests,
+} from "@ryco/shared/worktreePullRequests";
+import {
   ArrowLeftIcon,
   BotIcon,
+  ChevronDownIcon,
   FileTextIcon,
   FolderIcon,
   GlobeIcon,
@@ -30,6 +35,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type KeyboardEvent,
 } from "react";
@@ -62,6 +68,12 @@ import {
 } from "../threadWorkspaceViewModel";
 import { AgentsPanel } from "./AgentsPanel";
 import { useThreadChangeRequest } from "./chat/useThreadChangeRequest";
+import { KeyHint } from "./pullRequests/primitives";
+import { useWorkspacePullRequestEditing } from "./worktrees/useWorkspacePullRequestEditing";
+import {
+  WorkspacePullRequestsPopover,
+  type WorkspacePullRequestsView,
+} from "./worktrees/WorkspacePullRequestsPopover";
 import { formatLiveAgentCount, LiveAgentCountBadge } from "./LiveAgentCountBadge";
 import { buildTabs, type WorkspaceTab } from "../threadWorkspaceTabs";
 import { readEnvironmentApi } from "../environmentApi";
@@ -370,18 +382,32 @@ function useWorkspaceThreadChangeRequest(enabled: boolean) {
         worktreePath: thread?.worktreePath ?? null,
       })
     : null;
+  const worktreePullRequests = useMemo(
+    () => (worktree ? readWorktreePullRequestLinks(worktree) : []),
+    [worktree],
+  );
   const changeRequest = useThreadChangeRequest({
     environmentId: threadRef?.environmentId ?? null,
     gitCwd,
     worktreeBranch: worktree?.branch ?? null,
     threadBranch: thread?.branch ?? null,
-    worktreePrNumber: worktree?.prNumber ?? null,
+    worktreePullRequests,
+    discoversPullRequests: workspaceDiscoversPullRequests(worktree),
     enabled,
   });
+  const storedNumbers = useMemo(
+    () => new Set(worktreePullRequests.map((link) => link.number)),
+    [worktreePullRequests],
+  );
   return {
     environmentId: threadRef?.environmentId ?? null,
     project: project ?? null,
+    worktree,
+    cwd: gitCwd,
+    branch: worktree?.branch ?? thread?.branch ?? null,
     number: changeRequest.number,
+    links: changeRequest.links,
+    storedNumbers,
     resolving: changeRequest.resolving,
   };
 }
@@ -935,6 +961,27 @@ export default function ThreadWorkspacePanel(props: {
   // The frozen phone tier has no pull request tab: resolve nothing there.
   const threadChangeRequest = useWorkspaceThreadChangeRequest(!isPhoneSurface);
   const pullRequestNumber = search.workspacePr ?? threadChangeRequest.number;
+  // The PR tab's switcher: every pull request of the thread's workspace, off
+  // the tab pill (or the empty state's "Link pull request…").
+  const pullRequestEditing = useWorkspacePullRequestEditing({
+    environmentId: threadChangeRequest.environmentId,
+    worktree: threadChangeRequest.worktree
+      ? { ...threadChangeRequest.worktree, worktreeId: threadChangeRequest.worktree.id }
+      : null,
+  });
+  const [pullRequestsOpen, setPullRequestsOpen] = useState(false);
+  const [pullRequestsView, setPullRequestsView] = useState<WorkspacePullRequestsView>("list");
+  // Where the switcher hangs (the tab pill, or the empty state's button) and
+  // the control whose own click toggles it (the chevron, or that button).
+  const pullRequestsAnchorRef = useRef<Element | null>(null);
+  const pullRequestsToggleRef = useRef<Element | null>(null);
+  const pullRequestPillRef = useRef<HTMLDivElement | null>(null);
+  const pullRequestChevronRef = useRef<HTMLButtonElement | null>(null);
+  const pullRequestSwitcherEnabled =
+    !isPhoneSurface &&
+    threadChangeRequest.worktree !== null &&
+    threadChangeRequest.links.length > 0 &&
+    (threadChangeRequest.links.length >= 2 || pullRequestEditing.ready);
   const tabs = useMemo(() => {
     const built = buildTabs({
       subagents,
@@ -995,6 +1042,30 @@ export default function ThreadWorkspacePanel(props: {
       });
     },
     [navigate, params.draftId, routeThreadRef],
+  );
+
+  const togglePullRequestSwitcher = useCallback(() => {
+    pullRequestsAnchorRef.current = pullRequestPillRef.current;
+    pullRequestsToggleRef.current = pullRequestChevronRef.current;
+    setPullRequestsView("list");
+    setPullRequestsOpen((open) => !open);
+  }, []);
+  const openPullRequestLinkPicker = useCallback((anchor: HTMLElement) => {
+    pullRequestsAnchorRef.current = anchor;
+    pullRequestsToggleRef.current = anchor;
+    setPullRequestsView("link");
+    setPullRequestsOpen(true);
+  }, []);
+  // The thread's own pull request opens unpinned, so the tab keeps following it.
+  const openWorkspacePullRequest = useCallback(
+    (number: number) =>
+      navigateSearch((previous) =>
+        buildOpenPullRequestSearch(
+          previous,
+          number === threadChangeRequest.number ? undefined : number,
+        ),
+      ),
+    [navigateSearch, threadChangeRequest.number],
   );
 
   useEffect(() => {
@@ -1123,6 +1194,7 @@ export default function ThreadWorkspacePanel(props: {
             return (
               <div
                 key={tab.key}
+                ref={tab.mode === "pullRequest" ? pullRequestPillRef : undefined}
                 className={cn(
                   "flex min-w-0 shrink-0 items-center rounded-md text-sm transition-colors",
                   isPhoneSurface ? "h-11" : "h-8",
@@ -1161,6 +1233,31 @@ export default function ThreadWorkspacePanel(props: {
                     {tab.label}
                   </span>
                 </button>
+                {tab.mode === "pullRequest" && pullRequestSwitcherEnabled ? (
+                  <Tooltip>
+                    <TooltipTrigger
+                      render={
+                        <button
+                          ref={pullRequestChevronRef}
+                          type="button"
+                          aria-label="Switch pull request"
+                          aria-haspopup="dialog"
+                          aria-expanded={pullRequestsOpen}
+                          data-popup-open={pullRequestsOpen ? "" : undefined}
+                          className="flex size-5 shrink-0 items-center justify-center rounded-md text-muted-foreground/60 transition-colors hover:bg-background/60 hover:text-foreground data-popup-open:bg-background/60 data-popup-open:text-foreground"
+                          onClick={togglePullRequestSwitcher}
+                        />
+                      }
+                    >
+                      <ChevronDownIcon className="size-3" />
+                    </TooltipTrigger>
+                    <TooltipPopup side="bottom" sideOffset={6}>
+                      <span className="inline-flex items-center gap-1.5">
+                        Pull requests <KeyHint>\</KeyHint>
+                      </span>
+                    </TooltipPopup>
+                  </Tooltip>
+                ) : null}
                 <button
                   type="button"
                   className={cn(
@@ -1184,6 +1281,48 @@ export default function ThreadWorkspacePanel(props: {
               </div>
             );
           })}
+          {/* Portaled: renders nothing in the tab list itself. */}
+          {!isPhoneSurface && threadChangeRequest.worktree !== null ? (
+            <WorkspacePullRequestsPopover
+              environmentId={threadChangeRequest.environmentId}
+              worktreeId={pullRequestEditing.supported ? threadChangeRequest.worktree.id : null}
+              cwd={threadChangeRequest.cwd}
+              workspaceTitle={
+                threadChangeRequest.worktree.title ?? threadChangeRequest.worktree.branch
+              }
+              workspaceBranch={threadChangeRequest.branch}
+              links={threadChangeRequest.links}
+              storedNumbers={threadChangeRequest.storedNumbers}
+              shownNumber={pullRequestNumber}
+              // The reader below already shows the stack.
+              showStack={false}
+              canEdit={pullRequestEditing.ready}
+              open={pullRequestsOpen}
+              onOpenChange={setPullRequestsOpen}
+              view={pullRequestsView}
+              onViewChange={setPullRequestsView}
+              anchor={pullRequestsAnchorRef}
+              toggle={() => pullRequestsToggleRef.current}
+              side="bottom"
+              align="start"
+              onOpenPullRequest={openWorkspacePullRequest}
+              // The first link becomes the thread's own (the tab keeps
+              // following it); one linked beside others is pinned to read it.
+              onLinked={(number) =>
+                navigateSearch((previous) =>
+                  buildOpenPullRequestSearch(
+                    previous,
+                    threadChangeRequest.links.length === 0 ? undefined : number,
+                  ),
+                )
+              }
+              onUnlinked={(number) => {
+                if (search.workspacePr === number) {
+                  navigateSearch((previous) => buildOpenPullRequestSearch(previous));
+                }
+              }}
+            />
+          ) : null}
           <Tooltip>
             <TooltipTrigger
               render={
@@ -1275,6 +1414,14 @@ export default function ThreadWorkspacePanel(props: {
               resolving={threadChangeRequest.resolving}
               onSelectNumber={(number) =>
                 navigateSearch((previous) => buildOpenPullRequestSearch(previous, number))
+              }
+              onTogglePullRequests={
+                pullRequestSwitcherEnabled ? togglePullRequestSwitcher : undefined
+              }
+              onLinkPullRequest={
+                pullRequestEditing.ready && threadChangeRequest.links.length === 0
+                  ? openPullRequestLinkPicker
+                  : undefined
               }
             />
           ) : activeMode === "simulator" && !isPhoneSurface ? (

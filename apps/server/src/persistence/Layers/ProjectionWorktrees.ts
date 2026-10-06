@@ -4,6 +4,7 @@ import { Effect, Layer, Option, Schema, Struct } from "effect";
 
 import { toPersistenceSqlError } from "../Errors.ts";
 import {
+  FindProjectionWorktreeByPathInput,
   GetProjectionWorktreeInput,
   ListProjectionWorktreesByProjectInput,
   MarkProjectionWorktreeArchivedInput,
@@ -14,17 +15,21 @@ import {
   SetProjectionWorktreeManualPositionInput,
   UpdateProjectionWorktreeMetaInput,
 } from "../Services/ProjectionWorktrees.ts";
-import { WorktreeId } from "@ryco/contracts";
+import { WorktreeId, WorktreePullRequestLink } from "@ryco/contracts";
+import { readWorktreePullRequestLinks } from "@ryco/shared/worktreePullRequests";
 
 const ProjectionWorktreeDbRowSchema = ProjectionWorktree.mapFields(
   Struct.assign({
     prIsDraft: Schema.NullOr(Schema.Number),
+    // NULL on rows written before links: derived from the flat `pr_*` columns.
+    pullRequests: Schema.NullOr(Schema.fromJsonString(Schema.Array(WorktreePullRequestLink))),
   }),
 );
 
 function toProjectionWorktree(
   row: Schema.Schema.Type<typeof ProjectionWorktreeDbRowSchema>,
 ): ProjectionWorktree {
+  const prIsDraft = row.prIsDraft === null ? null : row.prIsDraft === 1;
   return {
     worktreeId: row.worktreeId,
     projectId: row.projectId,
@@ -37,8 +42,15 @@ function toProjectionWorktree(
     prTitle: row.prTitle,
     issueTitle: row.issueTitle,
     prState: row.prState,
-    prIsDraft: row.prIsDraft === null ? null : row.prIsDraft === 1,
+    prIsDraft,
     prTerminalAt: row.prTerminalAt ?? null,
+    pullRequests:
+      row.pullRequests ??
+      readWorktreePullRequestLinks({
+        ...row,
+        prIsDraft,
+        pullRequests: undefined,
+      }),
     issueState: row.issueState,
     workItemProvider: row.workItemProvider,
     workItemKey: row.workItemKey,
@@ -57,6 +69,36 @@ function toProjectionWorktree(
 
 const makeProjectionWorktreeRepository = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
+
+  /** The workspace carries pull request `number`: current, earlier, or not yet migrated. */
+  const linkedPullRequestMatch = (number: number) => sql`
+    pr_number = ${number}
+    OR EXISTS (
+      SELECT 1 FROM json_each(COALESCE(pull_requests_json, '[]')) AS link
+      WHERE json_extract(link.value, '$.number') = ${number}
+        AND json_extract(link.value, '$.dismissedAt') IS NULL
+    )
+  `;
+
+  /**
+   * The workspace's checkout is pull request `number`: a link that describes
+   * the checkout itself (its origin, one created or discovered on its branch,
+   * or a manual link whose head is the workspace branch), not a related pull
+   * request linked by hand. The flat `pr_number` only speaks for rows that
+   * predate links; it now mirrors the current link, which may be a manual one.
+   */
+  const checkoutPullRequestMatch = (number: number) => sql`
+    (pull_requests_json IS NULL AND pr_number = ${number})
+    OR EXISTS (
+      SELECT 1 FROM json_each(pull_requests_json) AS link
+      WHERE json_extract(link.value, '$.number') = ${number}
+        AND json_extract(link.value, '$.dismissedAt') IS NULL
+        AND (
+          json_extract(link.value, '$.source') <> 'manual'
+          OR json_extract(link.value, '$.headRefName') = branch
+        )
+    )
+  `;
 
   const upsertProjectionWorktreeRow = SqlSchema.void({
     Request: ProjectionWorktree,
@@ -88,7 +130,8 @@ const makeProjectionWorktreeRepository = Effect.gen(function* () {
           archived_at,
           checkout_removed_at,
           checkout_removal_reason,
-          manual_position
+          manual_position,
+          pull_requests_json
         )
         VALUES (
           ${row.worktreeId},
@@ -116,7 +159,8 @@ const makeProjectionWorktreeRepository = Effect.gen(function* () {
           ${row.archivedAt},
           ${row.checkoutRemovedAt ?? null},
           ${row.checkoutRemovalReason ?? null},
-          ${row.manualPosition}
+          ${row.manualPosition},
+          ${JSON.stringify(row.pullRequests ?? readWorktreePullRequestLinks(row))}
         )
         ON CONFLICT (worktree_id)
         DO UPDATE SET
@@ -143,7 +187,8 @@ const makeProjectionWorktreeRepository = Effect.gen(function* () {
           archived_at = excluded.archived_at,
           checkout_removed_at = excluded.checkout_removed_at,
           checkout_removal_reason = excluded.checkout_removal_reason,
-          manual_position = excluded.manual_position
+          manual_position = excluded.manual_position,
+          pull_requests_json = excluded.pull_requests_json
       `,
   });
 
@@ -178,9 +223,52 @@ const makeProjectionWorktreeRepository = Effect.gen(function* () {
           archived_at AS "archivedAt",
           checkout_removed_at AS "checkoutRemovedAt",
           checkout_removal_reason AS "checkoutRemovalReason",
-          manual_position AS "manualPosition"
+          manual_position AS "manualPosition",
+          pull_requests_json AS "pullRequests"
         FROM projection_worktrees
         WHERE worktree_id = ${worktreeId}
+      `,
+  });
+
+  const findActiveProjectionWorktreeRowByPath = SqlSchema.findOneOption({
+    Request: FindProjectionWorktreeByPathInput,
+    Result: ProjectionWorktreeDbRowSchema,
+    execute: ({ worktreePath }) =>
+      sql`
+        SELECT
+          worktree_id AS "worktreeId",
+          project_id AS "projectId",
+          title,
+          branch,
+          worktree_path AS "worktreePath",
+          origin,
+          pr_number AS "prNumber",
+          issue_number AS "issueNumber",
+          pr_title AS "prTitle",
+          issue_title AS "issueTitle",
+          pr_state AS "prState",
+          pr_is_draft AS "prIsDraft",
+          pr_terminal_at AS "prTerminalAt",
+          issue_state AS "issueState",
+          work_item_provider AS "workItemProvider",
+          work_item_key AS "workItemKey",
+          work_item_title AS "workItemTitle",
+          work_item_state AS "workItemState",
+          work_item_state_name AS "workItemStateName",
+          work_item_url AS "workItemUrl",
+          created_at AS "createdAt",
+          updated_at AS "updatedAt",
+          archived_at AS "archivedAt",
+          checkout_removed_at AS "checkoutRemovedAt",
+          checkout_removal_reason AS "checkoutRemovalReason",
+          manual_position AS "manualPosition",
+          pull_requests_json AS "pullRequests"
+        FROM projection_worktrees
+        WHERE worktree_path = ${worktreePath}
+          AND archived_at IS NULL
+          AND checkout_removed_at IS NULL
+        ORDER BY updated_at DESC
+        LIMIT 1
       `,
   });
 
@@ -215,7 +303,8 @@ const makeProjectionWorktreeRepository = Effect.gen(function* () {
           archived_at AS "archivedAt",
           checkout_removed_at AS "checkoutRemovedAt",
           checkout_removal_reason AS "checkoutRemovalReason",
-          manual_position AS "manualPosition"
+          manual_position AS "manualPosition",
+          pull_requests_json AS "pullRequests"
         FROM projection_worktrees
         WHERE project_id = ${projectId}
         ORDER BY
@@ -284,7 +373,7 @@ const makeProjectionWorktreeRepository = Effect.gen(function* () {
               FROM projection_worktrees
               WHERE project_id = ${input.projectId}
                 AND origin = 'pr'
-                AND pr_number = ${input.number}
+                AND (${checkoutPullRequestMatch(input.number)})
                 AND archived_at IS NULL
               ORDER BY manual_position ASC, created_at ASC
               LIMIT 1
@@ -314,7 +403,7 @@ const makeProjectionWorktreeRepository = Effect.gen(function* () {
               SELECT worktree_id AS "worktreeId"
               FROM projection_worktrees
               WHERE project_id = ${input.projectId}
-                AND pr_number = ${input.number}
+                AND (${linkedPullRequestMatch(input.number)})
                 AND archived_at IS NULL
             `
           : yield* sql<{ readonly worktreeId: string }>`
@@ -346,6 +435,16 @@ const makeProjectionWorktreeRepository = Effect.gen(function* () {
       return rows[0]?.worktreeId !== undefined ? WorktreeId.make(rows[0].worktreeId) : null;
     }).pipe(
       Effect.mapError(toPersistenceSqlError("ProjectionWorktreeRepository.findByWorkItem:query")),
+    );
+
+  const findActiveByWorktreePath: ProjectionWorktreeRepositoryShape["findActiveByWorktreePath"] = (
+    input,
+  ) =>
+    findActiveProjectionWorktreeRowByPath(input).pipe(
+      Effect.mapError(
+        toPersistenceSqlError("ProjectionWorktreeRepository.findActiveByWorktreePath:query"),
+      ),
+      Effect.map(Option.map(toProjectionWorktree)),
     );
 
   const upsert: ProjectionWorktreeRepositoryShape["upsert"] = (row) =>
@@ -399,6 +498,7 @@ const makeProjectionWorktreeRepository = Effect.gen(function* () {
     findByOrigin,
     findActiveByLinkedNumber,
     findByWorkItem,
+    findActiveByWorktreePath,
     markArchived,
     markRestored,
     updateMeta,

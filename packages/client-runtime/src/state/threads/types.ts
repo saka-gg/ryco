@@ -22,6 +22,7 @@ import type {
   ThreadSettlementOverride,
   WorktreeId,
   WorktreeOrigin,
+  WorktreePullRequestLink,
   ThreadGoal,
   ThreadLineage,
   ThreadUsageLimit,
@@ -303,6 +304,12 @@ export interface SidebarWorktreeSummary {
   checkoutRemovedAt?: string | null | undefined;
   checkoutRemovalReason?: "removed" | "missing" | null | undefined;
   manualPosition: number;
+  /**
+   * Every pull request the workspace has carried, current one included (the
+   * `pr*` fields mirror the current one). Absent when the server predates
+   * links; read through `readWorktreePullRequestLinks` either way.
+   */
+  pullRequests?: ReadonlyArray<WorktreePullRequestLink> | undefined;
 }
 
 export interface ThreadSession {

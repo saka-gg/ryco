@@ -1,6 +1,5 @@
 import type {
   ChangeRequest,
-  ChangeRequestState,
   EnvironmentId,
   ScopedThreadRef,
   SourceControlWorkflowRunListResult,
@@ -61,6 +60,9 @@ import {
   summarizeActiveWorkflowJob,
 } from "./ChatOverviewPanel.logic";
 import { useThreadChangeRequest } from "./useThreadChangeRequest";
+import type { WorktreePullRequestLink } from "@ryco/shared/worktreePullRequests";
+import { usePresentationTier } from "~/hooks/usePresentationTier";
+import { resolveDisplayStack } from "../worktrees/workspacePullRequests.logic";
 
 export const OVERVIEW_FLOATING_EXIT_DURATION_MS = 260;
 export const OVERVIEW_SIDEBAR_EXIT_DURATION_MS = 320;
@@ -165,9 +167,10 @@ export interface ChatOverviewPanelProps {
   gitCwd: string | null;
   activeWorktreeBranch: string | null;
   activeThreadBranch: string | null;
-  activeWorktreePrNumber: number | null;
-  activeWorktreePrState: ChangeRequestState | null | undefined;
-  activeWorktreePrIsDraft: boolean | null | undefined;
+  /** The workspace's pull request links (`readWorktreePullRequestLinks`). */
+  activeWorktreePullRequests: ReadonlyArray<WorktreePullRequestLink>;
+  /** `workspaceDiscoversPullRequests(worktree)` for the thread's workspace. */
+  activeWorktreeDiscoversPullRequests: boolean;
   activeWorktreeTitle: string | null | undefined;
   activeThreadKey: string | null;
   activePlan: ActivePlanState | null;
@@ -331,9 +334,8 @@ export function ChatOverviewPanel(
     gitCwd,
     activeWorktreeBranch,
     activeThreadBranch,
-    activeWorktreePrNumber,
-    activeWorktreePrState,
-    activeWorktreePrIsDraft,
+    activeWorktreePullRequests,
+    activeWorktreeDiscoversPullRequests,
     activeWorktreeTitle,
     postPushWorkflowWatch,
     activeThreadKey,
@@ -363,9 +365,14 @@ export function ChatOverviewPanel(
     nowMs: Date.now(),
   });
 
+  // The frozen phone tier keeps its overview as it was (no stack marker, no
+  // other pull requests).
+  const presentationTier = usePresentationTier();
   const {
     gitStatusQuery,
     branchChangeRequest: overviewBranchPullRequest,
+    links: overviewPullRequestLinks,
+    current: overviewCurrentLink,
     number: overviewPullRequestNumber,
     fromPush: overviewPullRequestFromPush,
   } = useThreadChangeRequest({
@@ -373,7 +380,8 @@ export function ChatOverviewPanel(
     gitCwd,
     worktreeBranch: activeWorktreeBranch,
     threadBranch: activeThreadBranch,
-    worktreePrNumber: activeWorktreePrNumber,
+    worktreePullRequests: activeWorktreePullRequests,
+    discoversPullRequests: activeWorktreeDiscoversPullRequests,
     pushedPullRequestNumber: postPushWorkflowWatchForContext?.pullRequestNumber ?? null,
   });
 
@@ -524,9 +532,18 @@ export function ChatOverviewPanel(
     }
     // PR metadata only applies to a real pull request; the default-branch path
     // carries CI checks alone (no title / reviews / merge state).
-    const gitPr = isRealPullRequest ? (gitStatusQuery.data?.pr ?? null) : null;
-    const branchPr = isRealPullRequest ? overviewBranchPullRequest : null;
+    // Each fallback speaks for one pull request: use it only for the one shown
+    // (git status can report #675 while the workspace's current link is #677).
+    const forShown = <T extends { readonly number: number }>(value: T | null | undefined) =>
+      isRealPullRequest && value?.number === overviewPullRequestNumber ? value : null;
+    const gitPr = forShown(gitStatusQuery.data?.pr);
+    const branchPr = forShown(overviewBranchPullRequest);
+    const currentLink = forShown(overviewCurrentLink);
     const detail = isRealPullRequest ? (overviewPullRequestDetail.data ?? null) : null;
+    const displayStack = presentationTier === "phone" ? null : resolveDisplayStack(detail);
+    const overviewStack = displayStack
+      ? { number: displayStack.number, position: displayStack.position, size: displayStack.size }
+      : null;
     const workflowData = overviewWorkflowRunsSupported ? (overviewWorkflowRuns.data ?? null) : null;
     const checksQueryError = selectOverviewChecksError({
       workflowRunsSupported: overviewWorkflowRunsSupported,
@@ -617,10 +634,10 @@ export function ChatOverviewPanel(
       };
     }
 
-    const pullRequestUrl = detail?.url ?? gitPr?.url ?? branchPr?.url ?? null;
+    const pullRequestUrl = detail?.url ?? currentLink?.url ?? gitPr?.url ?? branchPr?.url ?? null;
     const pullRequestState =
-      detail?.state ?? activeWorktreePrState ?? gitPr?.state ?? branchPr?.state ?? null;
-    const pullRequestIsDraft = detail?.isDraft ?? activeWorktreePrIsDraft ?? branchPr?.isDraft;
+      detail?.state ?? currentLink?.state ?? gitPr?.state ?? branchPr?.state ?? null;
+    const pullRequestIsDraft = detail?.isDraft ?? currentLink?.isDraft ?? branchPr?.isDraft;
     const reviewsApproved = detail?.participants
       ? detail.participants.filter((participant) => participant.approved === true).length
       : undefined;
@@ -630,6 +647,7 @@ export function ChatOverviewPanel(
       number: overviewPullRequestNumber,
       title:
         detail?.title ??
+        currentLink?.title ??
         gitPr?.title ??
         branchPr?.title ??
         activeWorktreeTitle ??
@@ -650,14 +668,15 @@ export function ChatOverviewPanel(
       checksLoading,
       ...(checksError ? { checksError } : {}),
       ...(detail?.mergeability ? { mergeability: detail.mergeability } : {}),
+      ...(overviewStack ? { stack: overviewStack } : {}),
       hasMergeConflicts: detail?.mergeability === "conflicting",
       activeCheckCount,
       runs,
       latestRuns,
     };
   }, [
-    activeWorktreePrState,
-    activeWorktreePrIsDraft,
+    overviewCurrentLink,
+    presentationTier,
     activeWorktreeTitle,
     checksErrorInfo,
     gitStatusQuery.data?.pr,
@@ -767,6 +786,15 @@ export function ChatOverviewPanel(
     (overviewWorkflowRunsSupported && overviewWorkflowRuns.isFetching);
 
   const detectedChangeRequest = overviewPullRequestDetail.data ?? overviewBranchPullRequest ?? null;
+  // The lane lists the workspace's other pull requests; the frozen phone tier
+  // keeps the one it shows.
+  const overviewOtherPullRequests = useMemo(
+    () =>
+      presentationTier === "phone"
+        ? undefined
+        : overviewPullRequestLinks.filter((link) => link.number !== overviewPullRequestNumber),
+    [overviewPullRequestLinks, overviewPullRequestNumber, presentationTier],
+  );
 
   return (
     <PlanSidebar
@@ -776,6 +804,7 @@ export function ChatOverviewPanel(
       changes={overviewChanges}
       overviewItems={overviewItems}
       pullRequest={overviewPullRequest}
+      otherPullRequests={overviewOtherPullRequests}
       onRefreshPullRequest={handleRefreshPullRequest}
       isRefreshingPullRequest={isRefreshingPullRequest}
       subagents={threadSubagents}
@@ -791,11 +820,16 @@ export function ChatOverviewPanel(
       onOpenSubagent={onOpenSubagent}
       onOpenPullRequestInApp={
         props.onOpenPullRequestInApp && overviewPullRequest?.number != null
-          ? () =>
-              // The panel resolves the thread's change request itself; only a
-              // number the push watch alone knows has to travel in the URL.
+          ? (number?: number) =>
+              // The panel resolves the thread's change request itself; only
+              // another of the workspace's pull requests, or a number the push
+              // watch alone knows, has to travel in the URL.
               props.onOpenPullRequestInApp?.(
-                overviewPullRequestFromPush ? (overviewPullRequest.number as number) : undefined,
+                number !== undefined && number !== overviewPullRequest.number
+                  ? number
+                  : overviewPullRequestFromPush
+                    ? (overviewPullRequest.number as number)
+                    : undefined,
               )
           : undefined
       }

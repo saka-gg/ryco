@@ -1,5 +1,5 @@
 import type { SourceControlChangeRequestStackSummary } from "@ryco/contracts";
-import { ArrowUpRightIcon, GitForkIcon } from "lucide-react";
+import { ArrowUpRightIcon, LayersIcon } from "lucide-react";
 import type { MouseEvent } from "react";
 
 import { openExternalLink } from "../../lib/openExternalLink";
@@ -165,7 +165,7 @@ export function InboxPullRequestBadges(props: {
             label={`Stack #${stack.number} · ${props.shortName} ${stack.position} of ${stack.size}`}
             className="inline-flex items-center gap-0.5 text-[10.5px] tabular-nums text-muted-foreground"
           >
-            <GitForkIcon aria-hidden className="size-3" />
+            <LayersIcon aria-hidden className="size-3" />
             {`${stack.position}/${stack.size}`}
           </InboxHint>
         ) : (
@@ -174,7 +174,7 @@ export function InboxPullRequestBadges(props: {
             aria-label={stackLabel}
             className="inline-flex items-center gap-0.5 text-[10px] tabular-nums text-muted-foreground"
           >
-            <GitForkIcon aria-hidden className="size-3" />
+            <LayersIcon aria-hidden className="size-3" />
             {`Stack ${stack.position}/${stack.size}`}
           </span>
         )

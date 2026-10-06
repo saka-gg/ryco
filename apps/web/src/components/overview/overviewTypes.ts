@@ -1,4 +1,8 @@
-import type { EnvironmentId, SourceControlChangeRequestMergeability } from "@ryco/contracts";
+import type {
+  EnvironmentId,
+  SourceControlChangeRequestMergeability,
+  WorktreePullRequestLink,
+} from "@ryco/contracts";
 import type { ReactNode } from "react";
 
 import type { ActivePlanState, LatestProposedPlanState } from "../../session-logic";
@@ -49,6 +53,8 @@ export interface OverviewPullRequestState {
   /** Classified source-control fetch error (transient vs terminal), if any. */
   checksError?: OverviewErrorInfo;
   mergeability?: SourceControlChangeRequestMergeability;
+  /** The host stack the pull request sits in (GitHub stacks of two or more layers). */
+  stack?: { readonly number: number; readonly position: number; readonly size: number } | null;
   hasMergeConflicts: boolean;
   activeCheckCount: number;
   runs: ReadonlyArray<OverviewPullRequestCheckRun>;
@@ -104,9 +110,14 @@ export interface OverviewLayoutProps {
   changes?: OverviewChanges | undefined;
   overviewItems?: ReadonlyArray<OverviewPanelItem> | undefined;
   pullRequest?: OverviewPullRequestState | null | undefined;
+  /** The workspace's other pull requests (not the one shown), current first. */
+  otherPullRequests?: ReadonlyArray<WorktreePullRequestLink> | undefined;
   onRefreshPullRequest?: (() => void) | undefined;
-  /** Opens the pull request in the workspace panel; ⌘/Ctrl-click keeps the host link. */
-  onOpenPullRequestInApp?: (() => void) | undefined;
+  /**
+   * Opens a pull request in the workspace panel: the shown one without a
+   * number, another one pinned. ⌘/Ctrl-click keeps the host link.
+   */
+  onOpenPullRequestInApp?: ((number?: number) => void) | undefined;
   isRefreshingPullRequest?: boolean | undefined;
   subagents?: ReadonlyArray<ThreadSubagentView> | undefined;
   sourceControlActions?: ReactNode | undefined;

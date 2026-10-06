@@ -24,13 +24,14 @@ const WORKSPACE_PANEL_TABS: ReadonlySet<string> = new Set<WorkspacePanelTab>([
   "agents",
 ]);
 
-export interface WorkspaceRouteSearch {
+// A type alias (not an interface) so a built search can feed the next builder.
+export type WorkspaceRouteSearch = {
   workspaceOpen?: "1" | undefined;
   workspaceTab?: WorkspacePanelTab | undefined;
   workspaceAgentKey?: string | undefined;
   /** Pull request tab: a specific change request; absent = the thread's own. */
   workspacePr?: number | undefined;
-}
+};
 
 /** Every search key the workspace panel owns, legacy diff/preview included. */
 export type WorkspacePanelSearchKey =

@@ -226,10 +226,18 @@ export function getThreadAutoSettlementBlocker(
 }
 
 /** The user's last deliberate interaction: thread creation, a message, or a requested turn. */
+export function threadUserAnchorTimestamp(
+  input: Pick<ThreadSettlementInput, "createdAt" | "latestUserMessageAt" | "latestTurnRequestedAt">,
+): string | null {
+  return newestValidTimestamp([
+    input.createdAt,
+    input.latestUserMessageAt,
+    input.latestTurnRequestedAt,
+  ]);
+}
+
 function pullRequestUserAnchorMs(input: ThreadSettlementInput): number | null {
-  return timestampMs(
-    newestValidTimestamp([input.createdAt, input.latestUserMessageAt, input.latestTurnRequestedAt]),
-  );
+  return timestampMs(threadUserAnchorTimestamp(input));
 }
 
 /** Settlement timestamp contributed by a merged/closed PR, or null when it is not a signal. */

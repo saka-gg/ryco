@@ -12,7 +12,7 @@ import { Toggle } from "../ui/toggle";
 import { OpenInPicker } from "./OpenInPicker";
 import { usePrimaryEnvironmentId } from "../../environments/primary";
 import { HostedNodeMenu } from "../hostedHub/HostedConnectionControls";
-import { ChatHeaderBar } from "./ChatHeaderBar";
+import { ChatHeaderBar, type ChatHeaderBarProps } from "./ChatHeaderBar";
 import type { WorktreeOriginLike } from "./ChatHeaderBreadcrumb.logic";
 import { HEADER_CHROME_ICON_BUTTON_CLASS_NAME } from "./headerChrome";
 import type { LinkedWorktreeItem } from "../worktrees/LinkedWorktreeItemDialog";
@@ -40,6 +40,10 @@ interface ChatHeaderProps {
   worktreeIssueState?: "open" | "closed" | null;
   worktreePrState?: "open" | "closed" | "merged" | null;
   worktreePrIsDraft?: boolean | null;
+  worktreePullRequests?: ChatHeaderBarProps["worktreePullRequests"];
+  worktreePrUrl?: string | null;
+  worktreePullRequestsToggle?: ChatHeaderBarProps["worktreePullRequestsToggle"];
+  worktreePullRequestBadgeRef?: ChatHeaderBarProps["worktreePullRequestBadgeRef"];
   worktreeWorkItemProvider?: "jira" | null;
   worktreeWorkItemKey?: string | null;
   worktreeWorkItemState?: "open" | "in_progress" | "done" | "closed" | "unknown" | null;
@@ -71,7 +75,10 @@ export function shouldShowOpenInPicker(input: {
   );
 }
 
-export const ChatHeader = memo(function ChatHeader(props: ChatHeaderProps) {
+export const ChatHeader = memo(function ChatHeader({
+  worktreePullRequestBadgeRef,
+  ...props
+}: ChatHeaderProps) {
   usePerfMark("ChatHeader");
   useDevPropDiff(props as unknown as Record<string, unknown>, "ChatHeader");
   const primaryEnvironmentId = usePrimaryEnvironmentId();
@@ -167,6 +174,10 @@ export const ChatHeader = memo(function ChatHeader(props: ChatHeaderProps) {
         worktreePrNumber={props.worktreePrNumber}
         worktreePrState={props.worktreePrState}
         worktreePrIsDraft={props.worktreePrIsDraft}
+        worktreePrUrl={props.worktreePrUrl}
+        worktreePullRequests={props.worktreePullRequests}
+        worktreePullRequestsToggle={props.worktreePullRequestsToggle}
+        worktreePullRequestBadgeRef={worktreePullRequestBadgeRef}
         worktreeWorkItemProvider={props.worktreeWorkItemProvider}
         worktreeWorkItemKey={props.worktreeWorkItemKey}
         worktreeWorkItemState={props.worktreeWorkItemState}

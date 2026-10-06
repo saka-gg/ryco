@@ -68,6 +68,17 @@ import {
   type QueuedMessageSteerAttempts,
 } from "@ryco/client-runtime/state/message-queue";
 import { projectScriptCwd } from "@ryco/shared/projectScripts";
+import {
+  readWorktreePullRequestLinks,
+  workspaceDiscoversPullRequests,
+} from "@ryco/shared/worktreePullRequests";
+import { resolveThreadPullRequests } from "./chat/ChatOverviewPanel.logic";
+import {
+  WorkspacePullRequestsPopover,
+  type WorkspacePullRequestsView,
+} from "./worktrees/WorkspacePullRequestsPopover";
+import { useWorkspacePullRequestEditing } from "./worktrees/useWorkspacePullRequestEditing";
+import { hasSeveralPullRequests } from "./worktrees/workspacePullRequests.logic";
 import { truncate } from "@ryco/shared/String";
 import { Debouncer, useDebouncedValue } from "@tanstack/react-pacer";
 import { useQueryClient } from "~/rpc/queryClient";
@@ -979,6 +990,11 @@ export default function ChatView(props: ChatViewProps) {
       [activeThread?.environmentId, activeThread?.worktreeId],
     ),
   );
+  const activeWorktreePullRequests = useMemo(
+    () => (activeWorktreeSummary ? readWorktreePullRequestLinks(activeWorktreeSummary) : []),
+    [activeWorktreeSummary],
+  );
+  const activeWorktreeDiscoversPullRequests = workspaceDiscoversPullRequests(activeWorktreeSummary);
   const [headerLinkedItem, setHeaderLinkedItem] = useState<LinkedWorktreeItem | null>(null);
   const handleOpenHeaderLinkedItem = useCallback((item: LinkedWorktreeItem) => {
     setHeaderLinkedItem(item);
@@ -2237,6 +2253,101 @@ export default function ChatView(props: ChatViewProps) {
   // panel; the full page stays one click away from the panel's own bar.
   const openPullRequestInApp =
     activeProject && presentationTier !== "phone" ? onOpenPullRequestPanel : undefined;
+  // The header names the same pull request the overview does: the workspace's
+  // links plus whatever the checkout's branch has right now, current first.
+  const headerPullRequests = useMemo(
+    () =>
+      resolveThreadPullRequests({
+        links: activeWorktreePullRequests,
+        live: gitStatusQuery.data?.pr ?? null,
+        discoversPullRequests: activeWorktreeDiscoversPullRequests,
+      }),
+    [activeWorktreeDiscoversPullRequests, activeWorktreePullRequests, gitStatusQuery.data?.pr],
+  );
+  const headerPullRequest = headerPullRequests[0] ?? null;
+  const [headerPullRequestsOpen, setHeaderPullRequestsOpen] = useState(false);
+  const [headerPullRequestsView, setHeaderPullRequestsView] =
+    useState<WorkspacePullRequestsView>("list");
+  const headerPullRequestsEditing = useWorkspacePullRequestEditing({
+    environmentId,
+    worktree: activeWorktreeSummary
+      ? { ...activeWorktreeSummary, worktreeId: activeWorktreeSummary.id }
+      : null,
+  });
+  const headerStoredPullRequestNumbers = useMemo(
+    () => new Set(activeWorktreePullRequests.map((link) => link.number)),
+    [activeWorktreePullRequests],
+  );
+  // One popover for the header, mounted while the header names a pull request
+  // (it never remounts between one and two). With several, the chip toggles it.
+  // The chip element itself (it is replaced when it switches between its
+  // one-click and toggle forms), so the popover follows it.
+  const [headerPullRequestBadge, setHeaderPullRequestBadge] = useState<HTMLButtonElement | null>(
+    null,
+  );
+  const headerHasSeveralPullRequests = hasSeveralPullRequests(headerPullRequests);
+  const headerPullRequestNumber = headerPullRequest?.number ?? null;
+  const headerShowsPullRequests = Boolean(openPullRequestInApp) && headerPullRequestNumber !== null;
+  // Nothing left to hang from: close now rather than pop up (and take focus)
+  // when a pull request comes back.
+  if (headerPullRequestsOpen && !headerShowsPullRequests) {
+    setHeaderPullRequestsOpen(false);
+    setHeaderPullRequestsView("list");
+  }
+  const toggleHeaderPullRequests = useCallback(() => {
+    setHeaderPullRequestsView("list");
+    setHeaderPullRequestsOpen((open) => !open);
+  }, []);
+  const headerPullRequestsToggle = useMemo(
+    () =>
+      headerShowsPullRequests
+        ? { open: headerPullRequestsOpen, onToggle: toggleHeaderPullRequests }
+        : undefined,
+    [headerPullRequestsOpen, headerShowsPullRequests, toggleHeaderPullRequests],
+  );
+  const headerPullRequestsPopover =
+    openPullRequestInApp && headerPullRequestNumber !== null ? (
+      <WorkspacePullRequestsPopover
+        environmentId={environmentId}
+        worktreeId={
+          headerPullRequestsEditing.supported ? (activeWorktreeSummary?.id ?? null) : null
+        }
+        cwd={gitCwd}
+        workspaceTitle={
+          activeWorktreeSummary?.title ?? activeWorktreeSummary?.branch ?? activeThread?.title ?? ""
+        }
+        workspaceBranch={activeWorktreeSummary?.branch ?? activeThread?.branch ?? null}
+        links={headerPullRequests}
+        storedNumbers={headerStoredPullRequestNumbers}
+        shownNumber={headerPullRequestNumber}
+        showStack
+        canEdit={headerPullRequestsEditing.ready}
+        open={headerPullRequestsOpen}
+        onOpenChange={setHeaderPullRequestsOpen}
+        view={headerPullRequestsView}
+        onViewChange={setHeaderPullRequestsView}
+        anchor={headerPullRequestBadge}
+        toggle={headerHasSeveralPullRequests ? () => headerPullRequestBadge : undefined}
+        side="bottom"
+        align="start"
+        // The current one opens unpinned, so the tab keeps following the thread.
+        onOpenPullRequest={(number) =>
+          openPullRequestInApp(number === headerPullRequestNumber ? undefined : number)
+        }
+      />
+    ) : null;
+  // On desktop the header's pull request opens in the workspace panel's PR tab;
+  // elsewhere (and for issues and work items) it opens the linked-item dialog.
+  const openHeaderLinkedItem = useCallback(
+    (item: LinkedWorktreeItem) => {
+      if (item.kind === "pr" && openPullRequestInApp) {
+        openPullRequestInApp(item.number === headerPullRequest?.number ? undefined : item.number);
+        return;
+      }
+      handleOpenHeaderLinkedItem(item);
+    },
+    [handleOpenHeaderLinkedItem, headerPullRequest?.number, openPullRequestInApp],
+  );
   const envLocked = Boolean(
     activeThread &&
     (activeThread.messages.length > 0 ||
@@ -4773,14 +4884,18 @@ export default function ChatView(props: ChatViewProps) {
             worktreeOrigin={activeWorktreeSummary?.origin ?? null}
             worktreeIssueNumber={activeWorktreeSummary?.issueNumber ?? null}
             worktreeIssueState={activeWorktreeSummary?.issueState ?? null}
-            worktreePrNumber={activeWorktreeSummary?.prNumber ?? null}
-            worktreePrState={activeWorktreeSummary?.prState ?? null}
-            worktreePrIsDraft={activeWorktreeSummary?.prIsDraft ?? null}
+            worktreePrNumber={headerPullRequest?.number ?? null}
+            worktreePrState={headerPullRequest?.state ?? null}
+            worktreePrIsDraft={headerPullRequest?.isDraft ?? null}
+            worktreePrUrl={headerPullRequest?.url ?? null}
+            worktreePullRequests={headerPullRequests}
+            worktreePullRequestsToggle={headerPullRequestsToggle}
+            worktreePullRequestBadgeRef={setHeaderPullRequestBadge}
             worktreeWorkItemProvider={activeWorktreeSummary?.workItemProvider ?? null}
             worktreeWorkItemKey={activeWorktreeSummary?.workItemKey ?? null}
             worktreeWorkItemState={activeWorktreeSummary?.workItemState ?? null}
             worktreeWorkItemStateName={activeWorktreeSummary?.workItemStateName ?? null}
-            onOpenLinkedWorktreeItem={handleOpenHeaderLinkedItem}
+            onOpenLinkedWorktreeItem={openHeaderLinkedItem}
             workspacePanelOpen={workspacePanelOpen}
             liveAgentCount={resolveHeaderLiveAgentCount({
               liveCount: agentPanelModel.liveCount,
@@ -4797,6 +4912,7 @@ export default function ChatView(props: ChatViewProps) {
           />
         )}
       </header>
+      {headerPullRequestsPopover}
       <LinkedWorktreeItemDialog
         open={paneFocused && headerLinkedItem !== null}
         item={headerLinkedItem}
@@ -4907,9 +5023,8 @@ export default function ChatView(props: ChatViewProps) {
                   gitCwd={gitCwd}
                   activeWorktreeBranch={activeWorktreeSummary?.branch ?? null}
                   activeThreadBranch={activeThread?.branch ?? null}
-                  activeWorktreePrNumber={activeWorktreeSummary?.prNumber ?? null}
-                  activeWorktreePrState={activeWorktreeSummary?.prState}
-                  activeWorktreePrIsDraft={activeWorktreeSummary?.prIsDraft}
+                  activeWorktreePullRequests={activeWorktreePullRequests}
+                  activeWorktreeDiscoversPullRequests={activeWorktreeDiscoversPullRequests}
                   activeWorktreeTitle={activeWorktreeSummary?.title}
                   postPushWorkflowWatch={postPushWorkflowWatch}
                   activeThreadKey={activeThreadKey}
@@ -5319,9 +5434,8 @@ export default function ChatView(props: ChatViewProps) {
               gitCwd={gitCwd}
               activeWorktreeBranch={activeWorktreeSummary?.branch ?? null}
               activeThreadBranch={activeThread?.branch ?? null}
-              activeWorktreePrNumber={activeWorktreeSummary?.prNumber ?? null}
-              activeWorktreePrState={activeWorktreeSummary?.prState}
-              activeWorktreePrIsDraft={activeWorktreeSummary?.prIsDraft}
+              activeWorktreePullRequests={activeWorktreePullRequests}
+              activeWorktreeDiscoversPullRequests={activeWorktreeDiscoversPullRequests}
               activeWorktreeTitle={activeWorktreeSummary?.title}
               postPushWorkflowWatch={postPushWorkflowWatch}
               activeThreadKey={activeThreadKey}
@@ -5407,9 +5521,8 @@ export default function ChatView(props: ChatViewProps) {
               gitCwd={gitCwd}
               activeWorktreeBranch={activeWorktreeSummary?.branch ?? null}
               activeThreadBranch={activeThread?.branch ?? null}
-              activeWorktreePrNumber={activeWorktreeSummary?.prNumber ?? null}
-              activeWorktreePrState={activeWorktreeSummary?.prState}
-              activeWorktreePrIsDraft={activeWorktreeSummary?.prIsDraft}
+              activeWorktreePullRequests={activeWorktreePullRequests}
+              activeWorktreeDiscoversPullRequests={activeWorktreeDiscoversPullRequests}
               activeWorktreeTitle={activeWorktreeSummary?.title}
               postPushWorkflowWatch={postPushWorkflowWatch}
               activeThreadKey={activeThreadKey}
@@ -5437,9 +5550,8 @@ export default function ChatView(props: ChatViewProps) {
             gitCwd={gitCwd}
             activeWorktreeBranch={activeWorktreeSummary?.branch ?? null}
             activeThreadBranch={activeThread?.branch ?? null}
-            activeWorktreePrNumber={activeWorktreeSummary?.prNumber ?? null}
-            activeWorktreePrState={activeWorktreeSummary?.prState}
-            activeWorktreePrIsDraft={activeWorktreeSummary?.prIsDraft}
+            activeWorktreePullRequests={activeWorktreePullRequests}
+            activeWorktreeDiscoversPullRequests={activeWorktreeDiscoversPullRequests}
             activeWorktreeTitle={activeWorktreeSummary?.title}
             postPushWorkflowWatch={postPushWorkflowWatch}
             activeThreadKey={activeThreadKey}

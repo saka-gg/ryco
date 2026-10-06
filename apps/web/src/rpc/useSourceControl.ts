@@ -5,7 +5,9 @@ import type {
   ChangeRequestActivity,
   ChangeRequestCreateInput,
   ChangeRequestUpdateAction,
+  DismissWorktreePullRequestInput,
   EnvironmentId,
+  LinkWorktreePullRequestInput,
   SourceControlAssigneeCandidate,
   SourceControlChangeRequestDetail,
   SourceControlChangeRequestMergeMethod,
@@ -479,6 +481,39 @@ export function useCreateIssueMutation(input: { environmentId: EnvironmentId }) 
       },
     },
   );
+}
+
+/**
+ * Links a pull request to a workspace by number or URL. The workspace's links
+ * arrive back through orchestration events, so nothing is written here.
+ */
+export function useLinkWorktreePullRequestMutation(input: {
+  readonly environmentId: EnvironmentId | null;
+}) {
+  const { environmentId } = input;
+  return useSourceControlMutation((payload: LinkWorktreePullRequestInput) => {
+    if (environmentId === null) {
+      return Promise.reject(new Error("This workspace's environment is not connected."));
+    }
+    return requireEnvironmentConnection(environmentId).client.sourceControl.linkWorktreePullRequest(
+      payload,
+    );
+  });
+}
+
+/** Hides a linked pull request from a workspace (discovery never brings it back). */
+export function useDismissWorktreePullRequestMutation(input: {
+  readonly environmentId: EnvironmentId | null;
+}) {
+  const { environmentId } = input;
+  return useSourceControlMutation((payload: DismissWorktreePullRequestInput) => {
+    if (environmentId === null) {
+      return Promise.reject(new Error("This workspace's environment is not connected."));
+    }
+    return requireEnvironmentConnection(
+      environmentId,
+    ).client.sourceControl.dismissWorktreePullRequest(payload);
+  });
 }
 
 interface CommentMutationInput {

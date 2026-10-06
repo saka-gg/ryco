@@ -74,7 +74,12 @@ import { ServerAuth } from "../auth/Services/ServerAuth.ts";
 import { OrchestrationCommandReceiptRepository } from "../persistence/Services/OrchestrationCommandReceipts.ts";
 import { ProjectionProjectRepository } from "../persistence/Services/ProjectionProjects.ts";
 import { ProjectionWorktreeRepository } from "../persistence/Services/ProjectionWorktrees.ts";
-import { refreshWorktreeSourceControlState } from "../sourceControl/refreshWorktreeSourceControlState.ts";
+import {
+  refreshWorktreeSourceControlState,
+  WORKTREE_PULL_REQUEST_DISCOVERY_INTERVAL_MS,
+  WORKTREE_PULL_REQUEST_SWEEP_DISCOVERY_INTERVAL_MS,
+} from "../sourceControl/refreshWorktreeSourceControlState.ts";
+import { readWorktreePullRequestLinks } from "@ryco/shared/worktreePullRequests";
 import * as SourceControlDiscoveryLayer from "../sourceControl/SourceControlDiscovery.ts";
 import { SourceControlRepositoryService } from "../sourceControl/SourceControlRepositoryService.ts";
 import {
@@ -239,19 +244,46 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
     const ownerEffect = <A, E, R>(method: string, effect: Effect.Effect<A, E, R>) =>
       withAccess(guardedMethodAccess(method), method, effect);
 
+    /** Finds the pull request a checkout's branch has now, from the (cached) git status. */
+    const discoverPullRequest = (cwd: string) =>
+      gitWorkflow.remoteStatus({ cwd }).pipe(Effect.map((remote) => remote?.pr ?? null));
+
+    /**
+     * Which workspaces a source-control call's `cwd` speaks for: every one of a
+     * project when it is the project root, or exactly the one checked out there.
+     */
+    const resolveSourceControlRefreshScope = (cwd: string) =>
+      Effect.gen(function* () {
+        const projectOpt = yield* projectionSnapshotQuery
+          .getActiveProjectByWorkspaceRoot(cwd)
+          .pipe(Effect.catch(() => Effect.succeed(Option.none())));
+        if (Option.isSome(projectOpt)) {
+          return { projectId: projectOpt.value.id, checkout: null } as const;
+        }
+        const checkoutOpt = yield* projectionWorktrees
+          .findActiveByWorktreePath({ worktreePath: cwd })
+          .pipe(Effect.catch(() => Effect.succeed(Option.none())));
+        return Option.isSome(checkoutOpt)
+          ? ({ projectId: checkoutOpt.value.projectId, checkout: checkoutOpt.value } as const)
+          : null;
+      });
+
     const refreshLinkedWorktreeSourceControlStates = (input: {
       readonly cwd: string;
       readonly reason: string;
       readonly force?: boolean;
+      /**
+       * After a merge, close or reopen from Ryco: discover now (not on the
+       * interval), trust that pull request, and, for a single checkout, wait
+       * for the refresh so the link lands before git status reports the change.
+       */
+      readonly lifecycle?: { readonly pullRequestNumber: number | null } | undefined;
     }) =>
       Effect.gen(function* () {
-        const projectOpt = yield* projectionSnapshotQuery
-          .getActiveProjectByWorkspaceRoot(input.cwd)
-          .pipe(Effect.catch(() => Effect.succeed(Option.none())));
-        if (Option.isNone(projectOpt)) return;
+        const scope = yield* resolveSourceControlRefreshScope(input.cwd);
+        if (scope === null) return;
 
-        const project = projectOpt.value;
-        const key = `${project.id}:${input.cwd}`;
+        const key = `${scope.projectId}:${input.cwd}`;
         const now = Date.now();
         const lastRefreshAt = linkedSourceControlRefreshAtByProject.get(key) ?? 0;
         if (!input.force && now - lastRefreshAt < SOURCE_CONTROL_LINKED_REFRESH_DEBOUNCE_MS) {
@@ -259,15 +291,42 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
         }
         linkedSourceControlRefreshAtByProject.set(key, now);
 
-        const worktrees = yield* projectionWorktrees
-          .listByProjectId({ projectId: project.id })
-          .pipe(Effect.catch(() => Effect.succeed([])));
+        const worktrees = scope.checkout
+          ? [scope.checkout]
+          : yield* projectionWorktrees
+              .listByProjectId({ projectId: scope.projectId })
+              .pipe(Effect.catch(() => Effect.succeed([])));
+        const refreshIds: WorktreeId[] = [];
         for (const worktree of worktrees) {
-          if (worktree.archivedAt !== null) continue;
-          if (worktree.prNumber === null && worktree.issueNumber === null) continue;
-          yield* refreshWorktreeSourceControlState({
-            worktreeId: worktree.worktreeId,
-          }).pipe(Effect.ignoreCause({ log: true }), Effect.forkDetach);
+          if (worktree.archivedAt !== null || worktree.worktreePath === null) continue;
+          // Nothing linked and nothing to discover (the main checkout shows the
+          // project's default branch, not a workspace's pull request).
+          if (
+            readWorktreePullRequestLinks(worktree).length === 0 &&
+            worktree.issueNumber === null &&
+            worktree.origin === "main"
+          ) {
+            continue;
+          }
+          refreshIds.push(worktree.worktreeId);
+        }
+        const refresh = (worktreeId: WorktreeId) =>
+          refreshWorktreeSourceControlState({
+            worktreeId,
+            discoverPullRequest,
+            // The checkout on screen discovers promptly; a project-wide sweep
+            // over every other workspace less often; a lifecycle action now.
+            discoveryIntervalMs: input.lifecycle
+              ? 0
+              : scope.checkout
+                ? WORKTREE_PULL_REQUEST_DISCOVERY_INTERVAL_MS
+                : WORKTREE_PULL_REQUEST_SWEEP_DISCOVERY_INTERVAL_MS,
+            actedOnPullRequestNumber: input.lifecycle?.pullRequestNumber ?? undefined,
+          }).pipe(Effect.ignoreCause({ log: true }));
+        if (input.lifecycle && scope.checkout) {
+          yield* Effect.forEach(refreshIds, refresh, { concurrency: "unbounded", discard: true });
+        } else {
+          for (const worktreeId of refreshIds) yield* Effect.forkDetach(refresh(worktreeId));
         }
       }).pipe(Effect.ignoreCause({ log: true }), Effect.asVoid);
 
@@ -279,17 +338,15 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       Effect.gen(function* () {
         const parsed = Number.parseInt(input.reference, 10);
         if (!Number.isInteger(parsed) || parsed <= 0) return;
-        const projectOpt = yield* projectionSnapshotQuery
-          .getActiveProjectByWorkspaceRoot(input.cwd)
-          .pipe(Effect.catch(() => Effect.succeed(Option.none())));
-        if (Option.isNone(projectOpt)) return;
+        const scope = yield* resolveSourceControlRefreshScope(input.cwd);
+        if (scope === null) return;
         const linked = yield* projectionWorktrees.findActiveByLinkedNumber({
-          projectId: projectOpt.value.id,
+          projectId: scope.projectId,
           kind: input.kind,
           number: parsed,
         });
         for (const worktreeId of linked) {
-          yield* refreshWorktreeSourceControlState({ worktreeId }).pipe(
+          yield* refreshWorktreeSourceControlState({ worktreeId, discoverPullRequest }).pipe(
             Effect.ignoreCause({ log: true }),
             Effect.forkDetach,
           );
@@ -938,6 +995,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       loadAuthAccessSnapshot,
       refreshLinkedWorktreeSourceControlStates,
       refreshStateForLinkedReference,
+      discoverPullRequest,
       attachLinkedIssuesToPrAction,
       createWorktreeForProject,
       archiveWorktree,

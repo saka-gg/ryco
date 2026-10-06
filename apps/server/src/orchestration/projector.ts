@@ -20,7 +20,10 @@ import { capThreadActivitiesPreservingMilestones } from "@ryco/shared/threadActi
 import { checkpointStatusToTurnState, mergeReleasedTurn } from "@ryco/shared/turnFinalization";
 
 import { toProjectorDecodeError, type OrchestrationProjectorDecodeError } from "./Errors.ts";
-import { resolveEventPullRequestTerminalAt } from "./pullRequestTerminalAt.ts";
+import {
+  projectCreatedWorktreePullRequests,
+  projectWorktreeSourceControlState,
+} from "./worktreePullRequestProjection.ts";
 import { withThreadLineage } from "./threadLineage.ts";
 import { latestUserMessage } from "./userMessageOrder.ts";
 import {
@@ -444,6 +447,7 @@ export function projectEvent(
             prState: null,
             prIsDraft: null,
             prTerminalAt: null,
+            pullRequests: projectCreatedWorktreePullRequests(payload),
             issueState: null,
             createdAt: payload.createdAt,
             updatedAt: payload.updatedAt,
@@ -500,17 +504,14 @@ export function projectEvent(
           const existing = nextBase.worktrees?.find(
             (worktree) => worktree.worktreeId === payload.worktreeId,
           );
+          if (!existing) return nextBase;
           return {
             ...nextBase,
-            worktrees: updateWorktree(nextBase.worktrees, payload.worktreeId, {
-              ...(payload.prNumber !== undefined ? { prNumber: payload.prNumber } : {}),
-              ...(payload.prTitle !== undefined ? { prTitle: payload.prTitle } : {}),
-              prState: payload.prState,
-              prIsDraft: payload.prIsDraft,
-              prTerminalAt: resolveEventPullRequestTerminalAt(payload, existing),
-              issueState: payload.issueState,
-              updatedAt: payload.updatedAt,
-            }),
+            worktrees: updateWorktree(
+              nextBase.worktrees,
+              payload.worktreeId,
+              projectWorktreeSourceControlState(existing, payload),
+            ),
           };
         }),
       );

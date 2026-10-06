@@ -17,7 +17,8 @@ import {
   TriangleAlertIcon,
   XIcon,
 } from "lucide-react";
-import { useCallback, useState, type ReactNode } from "react";
+import type { WorktreePullRequestLink } from "@ryco/contracts";
+import { useCallback, useId, useState, type ReactNode } from "react";
 
 import { readEnvironmentApi } from "~/environmentApi";
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
@@ -34,6 +35,7 @@ import type { ActivePlanState } from "../../session-logic";
 import type { ThreadSubagentView } from "../../threadWorkspaceViewModel";
 import { formatRelativeTimeLabel } from "../../timestampFormat";
 import ChatMarkdown from "../ChatMarkdown";
+import { ChangeRequestStateGlyph, RelativeTime } from "../pullRequests/primitives";
 import { SubagentAvatar } from "../sidebar/SubagentAvatar";
 import { changeRequestStateKind, StateBadge } from "../projectExplorer/StateBadge";
 import { Button } from "../ui/button";
@@ -953,6 +955,129 @@ export function PullRequestContent({
 
       {showChecks ? <ChecksContent pullRequest={pullRequest} /> : null}
       {showReviews ? <ReviewsRow pullRequest={pullRequest} /> : null}
+    </div>
+  );
+}
+
+function isFinishedLink(link: WorktreePullRequestLink): boolean {
+  return link.state === "merged" || link.state === "closed";
+}
+
+function linkStateWord(link: WorktreePullRequestLink): string {
+  if (link.state === "merged") return "Merged";
+  if (link.state === "closed") return "Closed";
+  if (link.isDraft) return "Draft";
+  return link.state === "open" ? "Open" : "State unknown";
+}
+
+const OTHER_PULL_REQUEST_ROW_CLASS =
+  "flex w-full min-w-0 items-center gap-2 px-3 py-1.5 text-left text-[12.5px] transition-colors hover:bg-accent focus-visible:outline-2 focus-visible:outline-ring";
+
+function OtherPullRequestRow({
+  link,
+  onOpenInApp,
+}: {
+  link: WorktreePullRequestLink;
+  onOpenInApp?: ((number: number) => void) | undefined;
+}) {
+  const finished = isFinishedLink(link);
+  const label = `#${link.number} ${link.title ?? link.headRefName ?? ""}`.trim();
+  const content = (
+    <>
+      <ChangeRequestStateGlyph state={link.state ?? "open"} isDraft={link.isDraft ?? false} />
+      <span className="shrink-0 font-mono text-[12px] text-muted-foreground tabular-nums">
+        #{link.number}
+      </span>
+      <span
+        className={cn(
+          "min-w-0 flex-1 truncate",
+          finished ? "text-muted-foreground" : "text-foreground/85",
+        )}
+      >
+        {link.title ?? link.headRefName ?? ""}
+      </span>
+      {finished && link.terminalAt ? (
+        <RelativeTime
+          value={link.terminalAt}
+          className="shrink-0 font-mono text-[11px] text-muted-foreground"
+        />
+      ) : null}
+    </>
+  );
+  const name = `${label}, ${linkStateWord(link)}`;
+  if (link.url) {
+    return (
+      <a
+        href={link.url}
+        target="_blank"
+        rel="noreferrer"
+        aria-label={name}
+        title={link.title ?? undefined}
+        className={OTHER_PULL_REQUEST_ROW_CLASS}
+        onClick={(event) => {
+          if (!onOpenInApp || prefersExternalPullRequestLink(event)) return;
+          event.preventDefault();
+          onOpenInApp(link.number);
+        }}
+      >
+        {content}
+      </a>
+    );
+  }
+  if (onOpenInApp) {
+    return (
+      <button
+        type="button"
+        aria-label={name}
+        title={link.title ?? undefined}
+        className={OTHER_PULL_REQUEST_ROW_CLASS}
+        onClick={() => onOpenInApp(link.number)}
+      >
+        {content}
+      </button>
+    );
+  }
+  return (
+    <div aria-label={name} className="flex min-w-0 items-center gap-2 px-3 py-1.5 text-[12.5px]">
+      {content}
+    </div>
+  );
+}
+
+/**
+ * The workspace's other pull requests under the one the lane shows (a merged
+ * one and its follow-up, several open ones), read-only: each opens in the PR
+ * tab, ⌘/Ctrl-click on the host. Linking and unlinking live on the chips.
+ */
+export function OtherPullRequestRows({
+  links,
+  onOpenInApp,
+}: {
+  links: ReadonlyArray<WorktreePullRequestLink>;
+  onOpenInApp?: ((number: number) => void) | undefined;
+}) {
+  const openLabelId = useId();
+  const earlierLabelId = useId();
+  const open = links.filter((link) => !isFinishedLink(link));
+  const earlier = links.filter(isFinishedLink);
+  const groups = [
+    { key: "open", label: "Also open", labelId: openLabelId, links: open },
+    { key: "earlier", label: "Earlier", labelId: earlierLabelId, links: earlier },
+  ].filter((group) => group.links.length > 0);
+  return (
+    <div aria-label="Other pull requests in this workspace" role="region" className="pb-0.5">
+      {groups.map((group) => (
+        <div key={group.key} role="list" aria-labelledby={group.labelId}>
+          <div id={group.labelId} className="px-3 pt-1.5 pb-0.5 text-[11px] text-muted-foreground">
+            {group.label}
+          </div>
+          {group.links.map((link) => (
+            <div key={link.number} role="listitem">
+              <OtherPullRequestRow link={link} onOpenInApp={onOpenInApp} />
+            </div>
+          ))}
+        </div>
+      ))}
     </div>
   );
 }

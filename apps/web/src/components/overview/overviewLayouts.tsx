@@ -1,3 +1,5 @@
+import { LayersIcon } from "lucide-react";
+
 import { cn } from "~/lib/utils";
 
 import { changeRequestStateKind, StateBadge } from "../projectExplorer/StateBadge";
@@ -9,6 +11,7 @@ import {
   DiffStat,
   getOverviewSummary,
   MiniProgress,
+  OtherPullRequestRows,
   OverviewBadge,
   planPercent,
   PlanExplanation,
@@ -167,6 +170,21 @@ export function StatusBoardLayout(props: OverviewLayoutProps) {
           subtitle={props.pullRequest.title}
           summary={
             <>
+              {props.pullRequest.stack ? (
+                <span
+                  title={`Stack #${props.pullRequest.stack.number}`}
+                  className="inline-flex items-center gap-0.5 font-mono text-[11px] text-muted-foreground tabular-nums"
+                >
+                  <LayersIcon aria-hidden className="size-3" />
+                  <span aria-hidden>
+                    {props.pullRequest.stack.position}/{props.pullRequest.stack.size}
+                  </span>
+                  <span className="sr-only">
+                    Stack #{props.pullRequest.stack.number}, pull request{" "}
+                    {props.pullRequest.stack.position} of {props.pullRequest.stack.size}
+                  </span>
+                </span>
+              ) : null}
               {props.pullRequest.state ? (
                 <StateBadge
                   kind={changeRequestStateKind(props.pullRequest.state, props.pullRequest.isDraft)}
@@ -184,7 +202,9 @@ export function StatusBoardLayout(props: OverviewLayoutProps) {
                   ariaLabel: props.onOpenPullRequestInApp
                     ? `Review pull request #${props.pullRequest.number} (⌘-click opens it in a new tab)`
                     : `Open pull request #${props.pullRequest.number} in a new tab`,
-                  onOpenInApp: props.onOpenPullRequestInApp,
+                  onOpenInApp: props.onOpenPullRequestInApp
+                    ? () => props.onOpenPullRequestInApp?.()
+                    : undefined,
                 }
               : undefined
           }
@@ -195,6 +215,12 @@ export function StatusBoardLayout(props: OverviewLayoutProps) {
             showChecks={false}
             showReviews
           />
+          {props.otherPullRequests && props.otherPullRequests.length > 0 ? (
+            <OtherPullRequestRows
+              links={props.otherPullRequests}
+              onOpenInApp={props.onOpenPullRequestInApp}
+            />
+          ) : null}
         </SectionLane>
       ) : null}
     </div>
