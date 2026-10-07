@@ -5,3 +5,5 @@ export * from "./sync.ts";
 
 export * from "./automationCentre.ts";
 export * from "./automationSchedules.ts";
+
+export * from "./missedAutomationRuns.ts";

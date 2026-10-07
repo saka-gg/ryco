@@ -153,6 +153,17 @@ export function deriveProviderInstanceEntries(
 }
 
 /**
+ * True when an instance is set up: enabled, available and reporting `ready`.
+ * Model pickers offer only these — unconfigured, disabled or failing
+ * instances are left to the provider settings.
+ */
+export function isSetupProviderInstance(
+  entry: Pick<ProviderInstanceEntry, "enabled" | "isAvailable" | "status">,
+): boolean {
+  return entry.enabled && entry.isAvailable && entry.status === "ready";
+}
+
+/**
  * Sort instance entries so the default instance of each driver kind appears
  * before any custom instances of the same kind. Within a kind, custom
  * instances keep their settings-author order (which is how the server
