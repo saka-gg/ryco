@@ -10,6 +10,9 @@ const bridgeArgs = app.isPackaged
   : null;
 
 if (bridgeArgs !== null) {
+  // Existing MCP configurations may launch Electron without RUN_AS_NODE. This
+  // forwarding process must stay headless too, not just its Node-mode child.
+  app.dock?.hide();
   const bridge = spawn(process.execPath, bridgeArgs, {
     env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
     stdio: "inherit",
