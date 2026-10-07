@@ -62,34 +62,19 @@ import {
 } from "./ChatOverviewPanel.logic";
 import { useThreadChangeRequest } from "./useThreadChangeRequest";
 
+// Unmount delays mirror `--app-motion-duration-stack` / `--app-motion-duration-pane`.
 export const OVERVIEW_FLOATING_EXIT_DURATION_MS = 260;
-export const OVERVIEW_SIDEBAR_EXIT_DURATION_MS = 320;
+export const OVERVIEW_SIDEBAR_EXIT_DURATION_MS = 360;
 export const OVERVIEW_SIDEBAR_FRAME_WIDTH = "calc(340px + 0.75rem)";
 
-export function OverviewSidebarMotionFrame(props: {
-  animate: boolean;
-  children: ReactNode;
-  open: boolean;
-}) {
-  const [entered, setEntered] = useState(!props.animate && props.open);
-
-  useEffect(() => {
-    if (!props.animate) {
-      setEntered(props.open);
-      return;
-    }
-
-    if (!props.open) {
-      setEntered(false);
-      return;
-    }
-
-    const frameId = window.requestAnimationFrame(() => setEntered(true));
-    return () => window.cancelAnimationFrame(frameId);
-  }, [props.animate, props.open]);
-
-  const active = props.animate ? props.open && entered : props.open;
-
+/**
+ * The docked overview column. It trades places with the workspace panel, so it
+ * rides the same pane duration and curve: the column collapsing here and the
+ * panel expanding beside it sum to one smooth change of the chat width instead
+ * of a jump and a wobble. Entry starts from `@starting-style` rather than a
+ * deferred frame, so a mount begins in the same frame as the panel's motion.
+ */
+export function OverviewSidebarMotionFrame(props: { children: ReactNode; open: boolean }) {
   return (
     <div
       aria-hidden={props.open ? undefined : true}
@@ -98,8 +83,8 @@ export function OverviewSidebarMotionFrame(props: {
         // Clears the floating chat header (the transcript scrolls beneath it,
         // this docked panel must not — its own header row carries the branch
         // control). Unset on tiers without the overlay, resolving to 0.
-        "h-full min-h-0 shrink-0 overflow-hidden pt-[var(--chat-header-clearance,0px)] transition-[width,opacity] duration-[320ms] ease-[cubic-bezier(0.16,1,0.3,1)] motion-reduce:transition-none",
-        active ? "w-(--overview-sidebar-frame-width) opacity-100" : "w-0 opacity-0",
+        "h-full min-h-0 shrink-0 overflow-hidden pt-[var(--chat-header-clearance,0px)] transition-[width,opacity] duration-(--app-motion-duration-pane) ease-(--app-motion-ease) starting:w-0 starting:opacity-0 motion-reduce:transition-none",
+        props.open ? "w-(--overview-sidebar-frame-width) opacity-100" : "w-0 opacity-0",
       )}
       style={
         {
@@ -109,8 +94,8 @@ export function OverviewSidebarMotionFrame(props: {
     >
       <div
         className={cn(
-          "h-full min-h-0 w-(--overview-sidebar-frame-width) transition-[translate,opacity] duration-[320ms] ease-[cubic-bezier(0.16,1,0.3,1)] will-change-transform motion-reduce:transition-none",
-          active ? "translate-x-0 opacity-100" : "translate-x-5 opacity-0",
+          "h-full min-h-0 w-(--overview-sidebar-frame-width) transition-[translate,opacity] duration-(--app-motion-duration-pane) ease-(--app-motion-ease) will-change-transform starting:translate-x-5 starting:opacity-0 motion-reduce:transition-none",
+          props.open ? "translate-x-0 opacity-100" : "translate-x-5 opacity-0",
         )}
       >
         {props.children}
@@ -119,38 +104,15 @@ export function OverviewSidebarMotionFrame(props: {
   );
 }
 
-export function FloatingOverviewMotionFrame(props: {
-  animate: boolean;
-  children: ReactNode;
-  open: boolean;
-}) {
-  const [entered, setEntered] = useState(!props.animate && props.open);
-
-  useEffect(() => {
-    if (!props.animate) {
-      setEntered(props.open);
-      return;
-    }
-
-    if (!props.open) {
-      setEntered(false);
-      return;
-    }
-
-    const frameId = window.requestAnimationFrame(() => setEntered(true));
-    return () => window.cancelAnimationFrame(frameId);
-  }, [props.animate, props.open]);
-
-  const active = props.animate ? props.open && entered : props.open;
-
+export function FloatingOverviewMotionFrame(props: { children: ReactNode; open: boolean }) {
   return (
     <div className="pointer-events-none absolute top-[calc(var(--chat-header-clearance,0px)+0.75rem)] right-3 z-40">
       <div
         aria-hidden={props.open ? undefined : true}
         inert={props.open ? undefined : true}
         className={cn(
-          "origin-top-right transition-[translate,opacity] duration-[260ms] ease-[cubic-bezier(0.16,1,0.3,1)] will-change-transform motion-reduce:transition-none",
-          active ? "translate-x-0 opacity-100" : "translate-x-3 opacity-0",
+          "origin-top-right transition-[translate,opacity] duration-(--app-motion-duration-stack) ease-(--app-motion-ease) will-change-transform starting:translate-x-3 starting:opacity-0 motion-reduce:transition-none",
+          props.open ? "translate-x-0 opacity-100" : "translate-x-3 opacity-0",
         )}
       >
         {props.children}

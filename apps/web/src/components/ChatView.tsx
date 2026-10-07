@@ -4491,15 +4491,17 @@ export default function ChatView(props: ChatViewProps) {
     overviewSidebarVisible && !shouldUsePlanSidebarSheet && !isPhoneTier;
   const showOverviewSidebarSheet =
     overviewSidebarVisible && (shouldUsePlanSidebarSheet || isPhoneTier);
+  // Both overview presentations play their exit when the workspace panel takes
+  // or gives up the right side, so the swap reads as one motion: the docked
+  // column collapses while the panel expands, and the floating card fades as
+  // the docked column returns.
   const renderFloatingOverviewSidebar = useDelayedUnmount(
     showFloatingOverviewSidebar,
-    prefersReducedMotion || !workspacePanelOpen ? 0 : OVERVIEW_FLOATING_EXIT_DURATION_MS,
+    prefersReducedMotion ? 0 : OVERVIEW_FLOATING_EXIT_DURATION_MS,
   );
   const renderInlineOverviewSidebar = useDelayedUnmount(
     showInlineOverviewSidebar,
-    prefersReducedMotion || shouldUsePlanSidebarSheet || workspacePanelOpen
-      ? 0
-      : OVERVIEW_SIDEBAR_EXIT_DURATION_MS,
+    prefersReducedMotion || shouldUsePlanSidebarSheet ? 0 : OVERVIEW_SIDEBAR_EXIT_DURATION_MS,
   );
 
   // The thread dock renders inside the composer, beneath the approval and
@@ -4898,10 +4900,7 @@ export default function ChatView(props: ChatViewProps) {
             ) : null}
 
             {renderFloatingOverviewSidebar ? (
-              <FloatingOverviewMotionFrame
-                animate={!prefersReducedMotion}
-                open={showFloatingOverviewSidebar}
-              >
+              <FloatingOverviewMotionFrame open={showFloatingOverviewSidebar}>
                 <ChatOverviewPanel
                   environmentId={environmentId}
                   gitCwd={gitCwd}
@@ -5310,10 +5309,7 @@ export default function ChatView(props: ChatViewProps) {
             />
           </aside>
         ) : renderInlineOverviewSidebar ? (
-          <OverviewSidebarMotionFrame
-            animate={!prefersReducedMotion}
-            open={showInlineOverviewSidebar}
-          >
+          <OverviewSidebarMotionFrame open={showInlineOverviewSidebar}>
             <ChatOverviewPanel
               environmentId={environmentId}
               gitCwd={gitCwd}
