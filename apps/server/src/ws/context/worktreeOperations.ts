@@ -35,7 +35,10 @@ import {
   resolveConfiguredWorktreeRoot,
   selectConfiguredWorktreeRoot,
 } from "../../project/worktreeRoot.ts";
-import { resolveWorktreeCheckoutPath } from "../../project/worktreeCheckoutPaths.ts";
+import {
+  resolveManagedProjectDirectory,
+  resolveWorktreeCheckoutPath,
+} from "../../project/worktreeCheckoutPaths.ts";
 import type { ProjectionWorktreeRepositoryShape } from "../../persistence/Services/ProjectionWorktrees.ts";
 import { refreshWorktreeSourceControlState } from "../../sourceControl/refreshWorktreeSourceControlState.ts";
 import type { TextGenerationShape } from "../../textGeneration/TextGeneration.ts";
@@ -455,7 +458,15 @@ export const makeWorktreeOperations = (deps: {
                         projectId: input.projectId,
                         config,
                       }),
-                      input.projectId,
+                      yield* resolveManagedProjectDirectory(
+                        input.projectId,
+                        project.title,
+                        selectConfiguredWorktreeRoot({
+                          settings,
+                          projectId: input.projectId,
+                          config,
+                        }),
+                      ).pipe(Effect.catch((cause) => failGitWorkflow(operation, cause.message))),
                     ),
             },
             { preferencesSnapshot: { settings, project } },
@@ -576,7 +587,7 @@ export const makeWorktreeOperations = (deps: {
         }
         worktreePath = preparedWorktreePath;
       } else {
-        const targetPath = resolveWorktreeCheckoutPath({
+        const targetPath = yield* resolveWorktreeCheckoutPath({
           location: input.worktreeLocation,
           appWorktreesRoot:
             input.worktreeLocation === "projectMetadata"
@@ -585,6 +596,8 @@ export const makeWorktreeOperations = (deps: {
           projectId: input.projectId,
           workspaceRoot: project.workspaceRoot,
           projectMetadataDir: project.projectMetadataDir,
+          projectTitle: project.title,
+          initialName: title,
           branchName: branch,
         });
         if (isProjectRootPath(targetPath, project.workspaceRoot)) {

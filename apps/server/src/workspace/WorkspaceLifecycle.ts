@@ -1,3 +1,5 @@
+import { ServerConfig } from "../config.ts";
+import { makeManagedWorktreeMigration } from "./managedWorktreeMigration.ts";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 
@@ -103,6 +105,12 @@ export interface WorkspaceLifecycleShape {
     request: WorkspaceLifecycleRequest & { readonly operationKey?: string },
   ) => Effect.Effect<WorkspaceLifecycleResult, WorkspaceLifecycleError>;
   readonly suggestions: () => Effect.Effect<LifecycleSuggestions, WorkspaceLifecycleError>;
+  readonly recoverManagedWorktrees?:
+    | (() => Effect.Effect<void, WorkspaceLifecycleError>)
+    | undefined;
+  readonly migrateManagedWorktrees?:
+    | (() => Effect.Effect<void, WorkspaceLifecycleError>)
+    | undefined;
   readonly listTrash: () => Effect.Effect<TrashListResult, WorkspaceLifecycleError>;
 }
 
@@ -127,6 +135,7 @@ export interface WorkspaceLifecycleDeps {
   readonly settings: Pick<ServerSettingsShape, "getSettings">;
   readonly fence: CheckoutFence;
   readonly now?: () => number;
+  readonly migration?: { readonly sql: SqlClient.SqlClient; readonly stateDir: string } | undefined;
 }
 
 interface LoadedContext {
@@ -356,6 +365,19 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
         threadBelongsToWorktree(thread, worktree, samePath),
       ).length;
       const activeWork: string[] = [];
+      if (deps.migration) {
+        const pending = yield* deps.migration.sql<{ state: string; last_error: string | null }>`
+          SELECT state, last_error FROM managed_worktree_relocations WHERE worktree_id = ${worktree.worktreeId}
+            AND state IN ('moving', 'moved', 'attention')`.pipe(
+          Effect.mapError(() => lifecycleError("Checkout relocation state is unavailable.")),
+        );
+        if (pending[0])
+          activeWork.push(
+            pending[0].state === "attention"
+              ? `checkout relocation needs manual recovery: ${pending[0].last_error ?? "inspect both recorded paths"}`
+              : "a checkout relocation is in progress",
+          );
+      }
       for (const thread of conversations) {
         const reasons = threadPendingWork(thread, context.nowMs);
         if (reasons.length > 0) activeWork.push(`"${thread.title}": ${reasons.join(", ")}`);
@@ -1099,7 +1121,13 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
   const preview: WorkspaceLifecycleShape["preview"] = (request) =>
     loadState(request.worktreeId).pipe(Effect.map((state) => buildPreview(state, request)));
 
+  const migration = deps.migration
+    ? makeManagedWorktreeMigration(deps, deps.migration.sql, deps.migration.stateDir, lockFor)
+    : null;
   return {
+    ...(migration
+      ? { migrateManagedWorktrees: migration.migrate, recoverManagedWorktrees: migration.recover }
+      : {}),
     list: (projectId) =>
       Effect.gen(function* () {
         const context = yield* loadContext;
@@ -1226,6 +1254,7 @@ export const WorkspaceLifecycleLive = Layer.effect(
       git: yield* GitWorkflowService,
       settings: yield* ServerSettingsService,
       fence: makeSqlCheckoutFence(yield* SqlClient.SqlClient),
+      migration: { sql: yield* SqlClient.SqlClient, stateDir: (yield* ServerConfig).stateDir },
     });
   }),
 );

@@ -1,3 +1,4 @@
+import { resolveWorktreeCheckoutPath } from "../project/worktreeCheckoutPaths.ts";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { acquireWorktreeCreationLease, recordCreatedWorktree } from "../storage/lifecycle.ts";
 import { removeVerifiedWorktree } from "../storage/filesystem.ts";
@@ -28,6 +29,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 import { DEFAULT_SERVER_SETTINGS, GitCommandError, type VcsRef } from "@ryco/contracts";
 import { dedupeRemoteBranchesWithLocalMatches } from "@ryco/shared/git";
+import { withGitFilesystemGuidance } from "../git/gitFilesystemErrors.ts";
 import { compactTraceAttributes } from "../observability/Attributes.ts";
 import { gitCommandDuration, gitCommandsTotal, withMetrics } from "../observability/Metrics.ts";
 import * as GitVcsDriver from "./GitVcsDriver.ts";
@@ -36,9 +38,13 @@ import {
   parseRemoteNamesInGitOrder,
   parseRemoteRefWithRemoteNames,
 } from "../git/remoteRefs.ts";
-import { ServerConfig, resolveManagedWorktreesRoot } from "../config.ts";
+import { ServerConfig } from "../config.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
-import { canonicalizeWorktreePath, validateWorktreeRoot } from "../project/worktreeRoot.ts";
+import {
+  canonicalizeWorktreePath,
+  selectConfiguredWorktreeRoot,
+  validateWorktreeRoot,
+} from "../project/worktreeRoot.ts";
 import {
   assertWorktreeSetupComplete,
   beginWorktreeSetup,
@@ -344,7 +350,7 @@ function createGitCommandError(
     operation,
     command: commandLabel(args),
     cwd,
-    detail,
+    detail: withGitFilesystemGuidance(detail),
     ...(cause !== undefined ? { cause } : {}),
   });
 }
@@ -2320,16 +2326,23 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       baseRef = `refs/remotes/${baseRef.startsWith("origin/") ? baseRef : `origin/${baseRef}`}`;
     }
     const targetBranch = input.newRefName ?? baseRef;
-    const sanitizedBranch = targetBranch.replace(/\//g, "-");
-    const repoName = path.basename(input.cwd);
     const worktreePath = yield* Effect.gen(function* () {
       const candidate =
         input.path ??
-        path.join(
-          settings?.worktreeRoot || resolveManagedWorktreesRoot(config),
-          repoName,
-          sanitizedBranch,
-        );
+        (yield* resolveWorktreeCheckoutPath({
+          location: undefined,
+          appWorktreesRoot: selectConfiguredWorktreeRoot({
+            settings,
+            projectId: input.projectId,
+            config,
+          }),
+          projectTitle: input.projectTitle,
+          initialName: input.initialName,
+          projectId: input.projectId ?? input.cwd,
+          workspaceRoot: input.cwd,
+          projectMetadataDir: null,
+          branchName: targetBranch,
+        }));
       const canonical = yield* validateWorktreeRoot(candidate, worktreePolicy);
       return canonical;
     }).pipe(

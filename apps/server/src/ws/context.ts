@@ -1,3 +1,4 @@
+import { makeClientWorkspaceUse } from "../workspace/clientWorkspaceUse.ts";
 import { LocalTaskService } from "../tasks/LocalTaskService.ts";
 import { DailyRecapQuery } from "../statistics/DailyRecapQuery.ts";
 import { StorageService } from "../storage/StorageService.ts";
@@ -129,6 +130,7 @@ const guardedMethodAccess = (method: string): WsRpcAccess => {
 
 export const makeWsRpcContext = (principal: RpcPrincipal) =>
   Effect.gen(function* () {
+    const clientWorkspaceUse = yield* makeClientWorkspaceUse;
     const currentSessionId =
       principal.directSessionId ?? AuthSessionId.make(`relay-scope-${principal.scopeId}`);
     const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
@@ -558,7 +560,8 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
           const { settings, project: bootstrapProject, choices } = resolved;
           shouldRunSetupScript = resolved.runSetupScript;
           if (bootstrap?.prepareWorktree && bootstrapProject) targetProjectId = bootstrapProject.id;
-          if (bootstrap?.createThread) {
+          const createBootstrapThread = Effect.gen(function* () {
+            if (!bootstrap?.createThread) return;
             const created = yield* orchestrationEngine.dispatch({
               type: "thread.create",
               commandId: serverCommandId("bootstrap-thread-create"),
@@ -580,7 +583,12 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
             // can acquire resources under the reused id.
             yield* threadDeletionReactor.drainThrough(created.sequence);
             createdThread = true;
-          }
+          });
+
+          // Publishing a draft's thread promotes it on every connected client.
+          // Finish checkout preparation first: a Git failure must leave the draft
+          // intact instead of creating/deleting it and clearing the user's prompt.
+          if (!bootstrap?.prepareWorktree) yield* createBootstrapThread;
 
           if (bootstrap?.prepareWorktree) {
             const worktree = yield* gitWorkflow.createWorktree({
@@ -590,7 +598,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
               refName: bootstrap.prepareWorktree.baseBranch,
               fetchOrigin: bootstrap.prepareWorktree.fetchOrigin,
               newRefName: bootstrap.prepareWorktree.branch,
-              path: resolveWorktreeCheckoutPath({
+              path: yield* resolveWorktreeCheckoutPath({
                 location: undefined,
                 appWorktreesRoot: yield* resolveConfiguredWorktreeRoot({
                   settings,
@@ -606,6 +614,9 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
                   targetProjectId ?? bootstrapProject?.id ?? ProjectId.make("project-unknown"),
                 workspaceRoot: bootstrap.prepareWorktree.projectCwd,
                 projectMetadataDir: bootstrapProject?.projectMetadataDir,
+                projectTitle: bootstrapProject?.title,
+                initialName: bootstrap?.createThread?.title,
+                fallbackName: command.message.text,
                 branchName:
                   bootstrap.prepareWorktree.branch ?? bootstrap.prepareWorktree.baseBranch,
               }),
@@ -622,6 +633,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
               );
             }
             targetWorktreePath = worktree.worktree.path;
+            yield* createBootstrapThread;
             yield* orchestrationEngine.dispatch({
               type: "thread.meta.update",
               commandId: serverCommandId("bootstrap-thread-meta-update"),
@@ -905,6 +917,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       projectAvatarStore,
       workspaceEntries,
       workspaceFileSystem,
+      clientWorkspaceUse,
       fileSystem,
       workspaceAccessPolicy,
       sourceControlDiscovery,

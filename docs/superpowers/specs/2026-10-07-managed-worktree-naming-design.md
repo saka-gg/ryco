@@ -170,3 +170,11 @@ and TS7 checks. Implementing relocation crosses persistence, lifecycle admission
 and shared client state, so run the repository backstop, web build, and browser
 suite required by `AGENTS.md`, plus focused native client tests for retargeting.
 Do not change the frozen web phone tier.
+
+## Editor lifetime limits
+
+A connected client that reads workspace files pins that checkout until its RPC
+connection closes, preserving buffers that may still be unsaved. Detached external
+editors do not report their lifetime, so launching one records a durable pin and
+excludes that checkout from automatic migration. These exclusions prefer retaining
+the existing directory over guessing that an editor has stopped using it.

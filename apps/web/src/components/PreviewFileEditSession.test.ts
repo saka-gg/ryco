@@ -168,6 +168,38 @@ describe("PreviewFileSessionOwner", () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
 
+  it("retargets a disconnected buffer, ignores a late old save reply, and reconciles before retrying", async () => {
+    const f = ownerHarness();
+    let resolveWrite!: (result: { relativePath: string; version: string }) => void;
+    f.write.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveWrite = resolve;
+        }),
+    );
+    f.owner.change("retained local changes");
+    const pending = f.owner.flush();
+    await Promise.resolve();
+    await Promise.resolve();
+    const nextKey = "environment-local\u0000/new-checkout\u0000src/app.ts";
+    f.owner.retarget(nextKey);
+    resolveWrite({ relativePath: "src/app.ts", version: "old-reply" });
+    await pending;
+    expect(f.owner.getSnapshot()).toMatchObject({
+      key: nextKey,
+      contents: "retained local changes",
+      version: "sha256:old",
+      saveStatus: "error",
+    });
+    expect(f.publish).not.toHaveBeenCalled();
+    f.setDisk({ contents: "retained local changes", version: "new-location" });
+    expect(await f.owner.flush(true)).toBe(true);
+    expect(f.read).toHaveBeenCalledTimes(1);
+    expect(f.write).toHaveBeenCalledTimes(1);
+    expect(f.owner.getSnapshot().version).toBe("new-location");
+    f.unsubscribe();
+  });
+
   it("debounces rapid typing and serializes a drain through edits made during the write", async () => {
     const h = ownerHarness();
     const pending = deferred<{ relativePath: string; version: string }>();

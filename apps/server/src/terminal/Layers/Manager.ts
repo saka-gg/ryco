@@ -1,3 +1,4 @@
+import { noteStorageActivity } from "../../storage/lifecycle.ts";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import {
   storageLifecycleLock,
@@ -1843,6 +1844,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
         return [undefined, { ...state, sessions }] as const;
       });
 
+      noteStorageActivity();
       if (deleteHistoryOnClose) {
         yield* deleteHistory(threadId, terminalId);
       }

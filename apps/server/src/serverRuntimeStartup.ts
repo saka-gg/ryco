@@ -1,3 +1,5 @@
+import { WorkspaceLifecycle } from "./workspace/WorkspaceLifecycle.ts";
+import { storageActivityVersion } from "./storage/lifecycle.ts";
 import {
   callbackRepositories,
   pendingCallbackInvalidation,
@@ -816,6 +818,7 @@ export const makeServerRuntimeStartup = Effect.gen(function* () {
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const restartContinuation = yield* RestartContinuation;
   const providerService = yield* ProviderService;
+  const workspaceLifecycle = yield* Effect.serviceOption(WorkspaceLifecycle);
 
   const commandGate = yield* makeCommandGate();
   const httpListening = yield* Deferred.make<void>();
@@ -844,6 +847,14 @@ export const makeServerRuntimeStartup = Effect.gen(function* () {
   );
 
   const startup = Effect.gen(function* () {
+    if (Option.isSome(workspaceLifecycle) && workspaceLifecycle.value.recoverManagedWorktrees) {
+      // Commit verified destinations (or restore untouched source admission) before
+      // provider/continuation recovery can select a working directory.
+      yield* runStartupPhase(
+        "worktree-relocations.recover",
+        workspaceLifecycle.value.recoverManagedWorktrees(),
+      );
+    }
     yield* Effect.logDebug("startup phase: validating restricted workspace state");
     yield* runStartupPhase(
       "workspace.validate",
@@ -999,6 +1010,29 @@ export const makeServerRuntimeStartup = Effect.gen(function* () {
           }),
         ),
       );
+
+      if (Option.isSome(workspaceLifecycle) && workspaceLifecycle.value.migrateManagedWorktrees) {
+        const migrate = workspaceLifecycle.value.migrateManagedWorktrees;
+        let lastPass = 0;
+        let activity = -1;
+        // One pass after recovery, then resource-release wakeups or the five-minute backstop.
+        yield* Effect.forkScoped(
+          Effect.repeat(
+            Effect.gen(function* () {
+              const current = storageActivityVersion();
+              if (current === activity && Date.now() - lastPass < 300_000) return;
+              activity = current;
+              lastPass = Date.now();
+              yield* migrate().pipe(
+                Effect.catch((cause) =>
+                  Effect.logWarning("Managed worktree migration pass failed", { cause }),
+                ),
+              );
+            }),
+            Schedule.spaced("10 seconds"),
+          ),
+        );
+      }
 
       yield* Effect.logDebug("startup phase: recording startup heartbeat");
       yield* launchStartupHeartbeat;

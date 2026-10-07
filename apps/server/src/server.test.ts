@@ -3912,7 +3912,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           assert.match(
             createdWorktreeInput?.path ?? "",
             new RegExp(
-              `^${expectedRoot.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/project-default/ryco-[0-9a-f]{8}__[a-z]{5}$`,
+              `^${expectedRoot.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/[a-f0-9]{8}_default-project/[a-f0-9]{8}_main$`,
             ),
           );
 
@@ -4008,11 +4008,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
       const createdPath = createWorktree.mock.calls[0]?.[0].path;
       assert.isString(createdPath);
-      assert.isTrue(
-        createdPath!.startsWith(
-          `${path.join(resolveManagedWorktreesRoot(config), defaultProjectId)}${path.sep}`,
-        ),
-      );
+      assert.isTrue(createdPath!.startsWith(`${resolveManagedWorktreesRoot(config)}${path.sep}`));
       const worktreeCreate = dispatchedCommands.find(
         (command): command is Extract<OrchestrationCommand, { type: "worktree.create" }> =>
           command.type === "worktree.create",
@@ -4139,8 +4135,16 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         mode: "worktree",
         projectId: defaultProjectId,
         worktreeLocation: undefined,
-        worktreesDir: path.join(root, "project", defaultProjectId),
+        worktreesDir: preparePullRequestThread.mock.calls[0]?.[0].worktreesDir,
       });
+      assert.match(
+        path.basename(preparePullRequestThread.mock.calls[0]![0].worktreesDir!),
+        /^[a-f0-9]{8}_default-project$/,
+      );
+      assert.equal(
+        path.dirname(preparePullRequestThread.mock.calls[0]![0].worktreesDir!),
+        path.join(root, "project"),
+      );
 
       const worktreeCreate = dispatchedCommands.find(
         (command): command is Extract<OrchestrationCommand, { type: "worktree.create" }> =>
@@ -6830,14 +6834,16 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
             pr: null,
           }),
         );
-        const createWorktree = vi.fn(
-          (_: Parameters<GitVcsDriver.GitVcsDriverShape["createWorktree"]>[0]) =>
-            Effect.succeed({
+        const createWorktree = vi.fn<GitVcsDriver.GitVcsDriverShape["createWorktree"]>(() =>
+          Effect.sync(() => {
+            assert.deepEqual(dispatchedCommands, []);
+            return {
               worktree: {
                 refName: "ryco/bootstrap-refName",
                 path: fixture.worktreePath,
               },
-            }),
+            };
+          }),
         );
         const runForThread = vi.fn(
           (_: Parameters<ProjectSetupScriptRunnerShape["runForThread"]>[0]) =>
@@ -6939,7 +6945,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         assert.match(
           createdWorktreeInput?.path ?? "",
           new RegExp(
-            `^${resolveManagedWorktreesRoot(config).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/project-default/ryco-bootstrap-refname__[a-z]{5}$`,
+            `^${resolveManagedWorktreesRoot(config).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/[a-f0-9]{8}_default-project/[a-f0-9]{8}_bootstrap-thread$`,
           ),
         );
         assert.deepEqual(runForThread.mock.calls[0]?.[0], {
@@ -7382,82 +7388,115 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
-  it.effect("cleans up created bootstrap threads when worktree creation defects", () =>
-    Effect.gen(function* () {
-      const fixture = yield* makeAuthorizedBootstrapFixture();
-      const dispatchedCommands: Array<OrchestrationCommand> = [];
-      const createWorktree = vi.fn(
-        (_: Parameters<GitVcsDriver.GitVcsDriverShape["createWorktree"]>[0]) =>
-          Effect.die(new Error("worktree exploded")),
-      );
+  for (const failureKind of ["failure", "defect"] as const) {
+    it.effect(`preserves the draft for retry when worktree creation has a ${failureKind}`, () =>
+      Effect.gen(function* () {
+        const fixture = yield* makeAuthorizedBootstrapFixture();
+        const dispatchedCommands: Array<OrchestrationCommand> = [];
+        const createWorktree = vi.fn<GitVcsDriver.GitVcsDriverShape["createWorktree"]>(() =>
+          failureKind === "defect"
+            ? Effect.die(new Error("worktree exploded"))
+            : Effect.fail(
+                new GitCommandError({
+                  operation: "GitVcsDriver.createWorktree",
+                  command: "git worktree add",
+                  cwd: fixture.projectCwd,
+                  detail: "worktree exploded",
+                }),
+              ),
+        );
 
-      yield* buildAppUnderTest({
-        config: fixture.config,
-        layers: {
-          projectionSnapshotQuery: fixture.projectionSnapshotQuery,
-          gitVcsDriver: {
-            createWorktree,
+        yield* buildAppUnderTest({
+          config: fixture.config,
+          layers: {
+            projectionSnapshotQuery: fixture.projectionSnapshotQuery,
+            gitVcsDriver: {
+              createWorktree,
+            },
+            orchestrationEngine: {
+              dispatch: (command) =>
+                Effect.sync(() => {
+                  dispatchedCommands.push(command);
+                  return { sequence: dispatchedCommands.length };
+                }),
+              readEvents: () => Stream.empty,
+            },
           },
-          orchestrationEngine: {
-            dispatch: (command) =>
-              Effect.sync(() => {
-                dispatchedCommands.push(command);
-                return { sequence: dispatchedCommands.length };
-              }),
-            readEvents: () => Stream.empty,
-          },
-        },
-      });
+        });
 
-      const createdAt = new Date().toISOString();
-      const wsUrl = yield* getWsServerUrl("/ws");
-      const result = yield* Effect.scoped(
-        withWsRpcClient(wsUrl, (client) =>
-          client[ORCHESTRATION_WS_METHODS.dispatchCommand]({
-            type: "thread.turn.start",
-            commandId: CommandId.make("cmd-bootstrap-turn-start-defect"),
-            threadId: ThreadId.make("thread-bootstrap-defect"),
-            message: {
-              messageId: MessageId.make("msg-bootstrap-defect"),
-              role: "user",
-              text: "hello",
-              attachments: [],
+        const createdAt = new Date().toISOString();
+        const wsUrl = yield* getWsServerUrl("/ws");
+        const command = {
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-bootstrap-turn-start-defect"),
+          threadId: ThreadId.make("thread-bootstrap-defect"),
+          message: {
+            messageId: MessageId.make("msg-bootstrap-defect"),
+            role: "user",
+            text: "hello",
+            attachments: [],
+          },
+          modelSelection: defaultModelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          bootstrap: {
+            createThread: {
+              projectId: defaultProjectId,
+              title: "Bootstrap Thread",
+              modelSelection: defaultModelSelection,
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              branch: "main",
+              worktreePath: null,
+              createdAt,
             },
-            modelSelection: defaultModelSelection,
-            runtimeMode: "full-access",
-            interactionMode: "default",
-            bootstrap: {
-              createThread: {
-                projectId: defaultProjectId,
-                title: "Bootstrap Thread",
-                modelSelection: defaultModelSelection,
-                runtimeMode: "full-access",
-                interactionMode: "default",
-                branch: "main",
-                worktreePath: null,
-                createdAt,
-              },
-              prepareWorktree: {
-                projectCwd: fixture.projectCwd,
-                baseBranch: "main",
-                branch: "ryco/bootstrap-refName",
-              },
-              runSetupScript: false,
+            prepareWorktree: {
+              projectCwd: fixture.projectCwd,
+              baseBranch: "main",
+              branch: "ryco/bootstrap-refName",
             },
-            createdAt,
+            runSetupScript: false,
+          },
+          createdAt,
+        } satisfies OrchestrationCommand;
+        const result = yield* Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            client[ORCHESTRATION_WS_METHODS.dispatchCommand](command),
+          ).pipe(Effect.result),
+        );
+
+        assertTrue(result._tag === "Failure");
+        assertTrue(result.failure._tag === "OrchestrationDispatchCommandError");
+        assert.include(result.failure.message, "worktree exploded");
+        assert.deepEqual(dispatchedCommands, []);
+
+        createWorktree.mockImplementation(() =>
+          Effect.succeed({
+            worktree: { refName: "ryco/bootstrap-refName", path: fixture.worktreePath },
           }),
-        ).pipe(Effect.result),
-      );
-
-      assertTrue(result._tag === "Failure");
-      assertTrue(result.failure._tag === "OrchestrationDispatchCommandError");
-      assert.include(result.failure.message, "worktree exploded");
-      assert.deepEqual(
-        dispatchedCommands.map((command) => command.type),
-        ["thread.create", "thread.delete"],
-      );
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
-  );
+        );
+        yield* Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            client[ORCHESTRATION_WS_METHODS.dispatchCommand]({
+              ...command,
+              commandId: CommandId.make(`cmd-bootstrap-retry-${failureKind}`),
+            }),
+          ),
+        );
+        assert.equal(createWorktree.mock.calls.length, 2);
+        assert.deepEqual(
+          dispatchedCommands.map((command) => command.type),
+          [
+            "thread.create",
+            "thread.meta.update",
+            "worktree.create",
+            "thread.attach-to-worktree",
+            "thread.turn.start",
+          ],
+        );
+      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    );
+  }
 
   it.effect("routes websocket rpc terminal methods", () =>
     Effect.gen(function* () {

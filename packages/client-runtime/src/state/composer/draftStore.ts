@@ -193,6 +193,13 @@ export interface ComposerDraftStoreState<TImage extends ComposerDraftImage = Com
   stickyModelSelectionByProvider: Partial<Record<ProviderInstanceId, ModelSelection>>;
   stickyActiveProvider: ProviderInstanceId | null;
   /** Returns the editable composer content for a draft session or server thread. */
+  /** Retarget routing only; keep prompts, attachments, modes, and queued content. */
+  retargetCheckoutPath: (input: {
+    environmentId: EnvironmentId;
+    projectId: ProjectId;
+    sourcePath: string;
+    destinationPath: string;
+  }) => void;
   getComposerDraft: (target: ComposerThreadTarget) => ComposerThreadDraftState<TImage> | null;
   /** Looks up the active draft session for a logical project identity. */
   getDraftThreadByLogicalProjectKey: (logicalProjectKey: string) => ProjectDraftSession | null;
@@ -1395,6 +1402,22 @@ export function createComposerDraftStore<TImage extends ComposerDraftImage>(
               return { draftsByThreadKey: nextDraftsByThreadKey };
             });
           },
+          retargetCheckoutPath: (input) =>
+            set((state) => {
+              let changed = false;
+              const draftThreadsByThreadKey = { ...state.draftThreadsByThreadKey };
+              for (const [key, draft] of Object.entries(draftThreadsByThreadKey)) {
+                if (
+                  draft.environmentId !== input.environmentId ||
+                  draft.projectId !== input.projectId ||
+                  draft.worktreePath !== input.sourcePath
+                )
+                  continue;
+                draftThreadsByThreadKey[key] = { ...draft, worktreePath: input.destinationPath };
+                changed = true;
+              }
+              return changed ? { draftThreadsByThreadKey } : state;
+            }),
           setPrompt: (threadRef, prompt) => {
             const threadKey = resolveComposerDraftKey(get(), threadRef) ?? "";
             if (threadKey.length === 0) {

@@ -28,6 +28,7 @@ import { authorizeRpcPrincipal, type WsRpcAccess } from "../auth/wsAuthorization
 const makeWsRpcHandlers = (principal: RpcPrincipal) =>
   Effect.gen(function* () {
     const ctx = yield* makeWsRpcContext(principal);
+    yield* Effect.addFinalizer(() => ctx.clientWorkspaceUse.release);
     return WsRpcGroup.of({
       ...makeAgentControlHandlers(ctx),
       ...makeAutomationCentreHandlers(ctx),

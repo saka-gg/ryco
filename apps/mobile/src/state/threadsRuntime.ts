@@ -1,3 +1,4 @@
+import { useComposerDraftStore } from "./composerDraftStore";
 import {
   configureThreadsRuntime,
   setThreadsRuntimeConfigurator,
@@ -11,6 +12,7 @@ import { getMobileEndpoint } from "../connection/runtimeConfig";
 // module has no import-time side effects. Hosted mode is inert in B1.
 setThreadsRuntimeConfigurator(() => {
   configureThreadsRuntime({
+    onCheckoutRelocated: (input) => useComposerDraftStore.getState().retargetCheckoutPath(input),
     clock: { now: () => mobileClock.now() },
     frameScheduler: {
       scheduleFrame: (callback) => mobileFrameScheduler.scheduleFrame(callback),

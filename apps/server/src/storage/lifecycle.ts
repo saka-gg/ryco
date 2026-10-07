@@ -16,6 +16,11 @@ export {
   noteStorageSettingsChange,
 } from "./settingsAdmission.ts";
 const creations = new Map<string, number>();
+let activityVersion = 0;
+export const noteStorageActivity = () => {
+  activityVersion++;
+};
+export const storageActivityVersion = () => activityVersion;
 const overlaps = (a: string, b: string, platform: NodeJS.Platform = process.platform) => {
   if (platform === "darwin" || platform === "win32") {
     a = a.toLowerCase();
@@ -70,6 +75,11 @@ export function acquireWorktreeCreationLease(sql: SqlClient.SqlClient, candidate
   return storageLifecycleLock.withPermit(
     Effect.gen(function* () {
       const canonical = yield* Effect.tryPromise(() => canonicalStoragePath(candidate));
+      if (yield* isWorktreeRelocationBlocked(sql, canonical))
+        return yield* new StorageError({
+          detail:
+            "Checkout relocation is pending or this is a retired checkout path. Reload the workspace.",
+        });
       const pending = yield* sql<{
         path: string;
         identity_json: string;
@@ -88,6 +98,7 @@ export function acquireWorktreeCreationLease(sql: SqlClient.SqlClient, candidate
         const remaining = (creations.get(canonical) ?? 1) - 1;
         if (remaining > 0) creations.set(canonical, remaining);
         else creations.delete(canonical);
+        noteStorageActivity();
       });
     }),
   );
@@ -108,6 +119,7 @@ export function acquireStoragePathUseLease(sql: SqlClient.SqlClient, candidate: 
         const remaining = (creations.get(canonical) ?? 1) - 1;
         if (remaining > 0) creations.set(canonical, remaining);
         else creations.delete(canonical);
+        noteStorageActivity();
       });
     }),
   );
@@ -154,6 +166,7 @@ export function isStoragePathBlocked(
   sql: SqlClient.SqlClient,
   candidate: string,
   platform: NodeJS.Platform = process.platform,
+  ignoredRelocationId?: string,
 ) {
   const ancestors: string[] = [];
   let current = path.resolve(candidate);
@@ -168,6 +181,8 @@ export function isStoragePathBlocked(
       ? sql`path COLLATE NOCASE IN ${sql.in(ancestors)}`
       : sql.in("path", ancestors);
   return Effect.gen(function* () {
+    if (yield* isWorktreeRelocationBlocked(sql, candidate, platform, ignoredRelocationId))
+      return true;
     const ancestorsBlocked = yield* sql<{
       path: string;
     }>`SELECT path FROM storage_owned_entries WHERE state IN ('removing', 'removed') AND ${matching} LIMIT 1`;
@@ -183,6 +198,36 @@ export function isStoragePathBlocked(
       pending.some((row) =>
         removingPaths(row).some((root) => overlaps(root, path.resolve(candidate), platform)),
       )
+    );
+  });
+}
+
+/** Active moves fence both paths; completed moves permanently fence the old path. */
+export function isWorktreeRelocationBlocked(
+  sql: SqlClient.SqlClient,
+  candidate: string,
+  platform: NodeJS.Platform = process.platform,
+  ignoredRelocationId?: string,
+) {
+  return Effect.gen(function* () {
+    const table =
+      yield* sql`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'managed_worktree_relocations'`;
+    if (!table.length) return false;
+    const rows = yield* sql<{ source_path: string; destination_path: string; state: string }>`
+      SELECT source_path, destination_path, state FROM managed_worktree_relocations
+      WHERE state IN ('moving', 'moved', 'attention', 'complete')
+        AND worktree_id != ${ignoredRelocationId ?? ""}`;
+    const resolved = path.resolve(candidate);
+    const contains = (root: string) => {
+      const a = platform === "darwin" || platform === "win32" ? root.toLowerCase() : root;
+      const b = platform === "darwin" || platform === "win32" ? resolved.toLowerCase() : resolved;
+      return a === b || b.startsWith(a.endsWith(path.sep) ? a : a + path.sep);
+    };
+    return rows.some((row) =>
+      row.state === "complete"
+        ? contains(row.source_path)
+        : overlaps(row.source_path, resolved, platform) ||
+          overlaps(row.destination_path, resolved, platform),
     );
   });
 }

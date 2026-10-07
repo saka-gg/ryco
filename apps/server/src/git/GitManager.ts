@@ -1,3 +1,4 @@
+import { allocateWorktreeCheckoutPath } from "../project/worktreeCheckoutPaths.ts";
 import { randomUUID } from "node:crypto";
 
 import {
@@ -1727,12 +1728,16 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
       const worktree = yield* gitCore.createWorktree({
         settingsSnapshot: settings,
         projectId: project?.id,
+        projectTitle: project?.title,
+        initialName: pullRequest.title || localPullRequestBranch,
         cwd: input.cwd,
         refName: localPullRequestBranch,
         path: input.worktreesDir
-          ? path.join(
+          ? yield* allocateWorktreeCheckoutPath(
               input.worktreesDir,
-              sanitizeBranchFragment(localPullRequestBranch).replace(/\//g, "-"),
+              pullRequest.title || localPullRequestBranch,
+            ).pipe(
+              Effect.catch((cause) => gitManagerError("preparePullRequestThread", cause.message)),
             )
           : null,
       });

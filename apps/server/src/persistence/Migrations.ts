@@ -1,3 +1,6 @@
+import Migration0078, {
+  ensureManagedWorktreeNaming,
+} from "./Migrations/078_ManagedWorktreeNaming.ts";
 import Migration0071 from "./Migrations/071_StatisticsUsageHistory.ts";
 import Migration0072, {
   ensureProjectionThreadLineageColumns,
@@ -189,6 +192,7 @@ export const migrationEntries = [
   [75, "ProjectionThreadsUsageLimit", Migration0075],
   [76, "AuthSessionRotation", Migration0076],
   [77, "ThreadWorkspaceLifecycle", Migration0077],
+  [78, "ManagedWorktreeNaming", Migration0078],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>
@@ -578,6 +582,9 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
   }
   if (toMigrationInclusive === undefined || toMigrationInclusive >= 77) {
     yield* repairThreadWorkspaceLifecycleColumns();
+  }
+  if (toMigrationInclusive === undefined || toMigrationInclusive >= 78) {
+    yield* ensureManagedWorktreeNaming;
   }
   yield* Effect.log("Migrations ran successfully").pipe(
     Effect.annotateLogs({

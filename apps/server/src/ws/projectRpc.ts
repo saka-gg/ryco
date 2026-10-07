@@ -88,7 +88,7 @@ export const makeProjectHandlers = (ctx: WsRpcContext) => {
         WS_METHODS.projectsReadFile,
         ownerEffect(
           WS_METHODS.projectsReadFile,
-          workspaceFileSystem.readFile(input).pipe(
+          ctx.clientWorkspaceUse.use(input.cwd, workspaceFileSystem.readFile(input)).pipe(
             Effect.mapError((cause) => {
               const message = Schema.is(WorkspacePathOutsideRootError)(cause)
                 ? "Workspace file path must stay within the project root."
@@ -107,7 +107,7 @@ export const makeProjectHandlers = (ctx: WsRpcContext) => {
         WS_METHODS.projectsReadFileBinary,
         ownerEffect(
           WS_METHODS.projectsReadFileBinary,
-          workspaceFileSystem.readFileBinary(input).pipe(
+          ctx.clientWorkspaceUse.use(input.cwd, workspaceFileSystem.readFileBinary(input)).pipe(
             Effect.mapError((cause) => {
               const message = Schema.is(WorkspacePathOutsideRootError)(cause)
                 ? "Workspace file path must stay within the project root."
@@ -178,7 +178,10 @@ export const makeProjectHandlers = (ctx: WsRpcContext) => {
     [WS_METHODS.shellOpenInEditor]: (input) =>
       observeRpcEffect(
         WS_METHODS.shellOpenInEditor,
-        ownerEffect(WS_METHODS.shellOpenInEditor, open.openInEditor(input)),
+        ownerEffect(
+          WS_METHODS.shellOpenInEditor,
+          ctx.clientWorkspaceUse.externalEditor(input.cwd, open.openInEditor(input)),
+        ),
         {
           "rpc.aggregate": "workspace",
         },

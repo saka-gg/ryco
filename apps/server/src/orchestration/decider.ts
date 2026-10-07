@@ -2184,6 +2184,42 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       ];
     }
 
+    case "worktree.relocate": {
+      const worktree = yield* requireWorktree({
+        readModel,
+        command,
+        worktreeId: command.worktreeId,
+      });
+      if (
+        worktree.origin === "main" ||
+        worktree.checkoutRemovedAt != null ||
+        worktree.projectId !== command.projectId ||
+        worktree.worktreePath !== command.sourcePath ||
+        worktree.updatedAt !== command.expectedUpdatedAt
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "Workspace changed before its managed checkout relocation could commit.",
+        });
+      }
+      return {
+        ...withEventBase({
+          aggregateKind: "worktree",
+          aggregateId: command.worktreeId,
+          occurredAt: command.relocatedAt,
+          commandId: command.commandId,
+        }),
+        type: "worktree.relocated",
+        payload: {
+          worktreeId: command.worktreeId,
+          projectId: command.projectId,
+          sourcePath: command.sourcePath,
+          destinationPath: command.destinationPath,
+          relocatedAt: command.relocatedAt,
+        },
+      };
+    }
+
     case "worktree.checkout.restore": {
       const worktree = yield* requireWorktree({
         readModel,

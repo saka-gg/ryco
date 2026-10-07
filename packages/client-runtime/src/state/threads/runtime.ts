@@ -4,9 +4,17 @@ import {
   type FrameSchedulerService,
   type ObservabilityService,
 } from "../../platform/index.ts";
-import type { EnvironmentId } from "@ryco/contracts";
+import type { EnvironmentId, ProjectId } from "@ryco/contracts";
+
+export interface CheckoutRelocation {
+  environmentId: EnvironmentId;
+  projectId: ProjectId;
+  sourcePath: string;
+  destinationPath: string;
+}
 
 export interface ThreadsRuntimeConfiguration {
+  readonly onCheckoutRelocated?: ((input: CheckoutRelocation) => void) | undefined;
   readonly clock: ClockService;
   readonly frameScheduler: FrameSchedulerService;
   readonly observability: ObservabilityService;
