@@ -1,89 +1,154 @@
+import { randomBytes } from "node:crypto";
+import fs from "node:fs/promises";
 import path from "node:path";
 
-import type { ProjectId, WorktreeCheckoutLocation } from "@ryco/contracts";
-import { sanitizeBranchFragment } from "@ryco/shared/git";
+import { GitCommandError, type ProjectId, type WorktreeCheckoutLocation } from "@ryco/contracts";
+import { Effect, Option } from "effect";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { resolveProjectWorktreesDir } from "./projectMetadataPaths.ts";
 
-const RANDOM_WORD_CONSONANTS = "bcdfghjklmnpqrstvwxz";
-const RANDOM_WORD_VOWELS = "aeiou";
-const RANDOM_WORD_PATTERN = [
-  RANDOM_WORD_CONSONANTS,
-  RANDOM_WORD_VOWELS,
-  RANDOM_WORD_CONSONANTS,
-  RANDOM_WORD_VOWELS,
-  RANDOM_WORD_CONSONANTS,
-] as const;
+export const createWorktreeDirectoryId = (): string => randomBytes(4).toString("hex");
 
-function randomCharacter(alphabet: string): string {
-  return alphabet.charAt(Math.floor(Math.random() * alphabet.length));
-}
-
-export function createRandomWorktreeWord(): string {
-  return RANDOM_WORD_PATTERN.map(randomCharacter).join("");
-}
-
-function sanitizePathSegment(value: string): string {
-  return sanitizeBranchFragment(value).replace(/\//g, "-");
+export function worktreeDirectorySlug(value: string, fallback = "new-worktree"): string {
+  return (
+    value
+      .normalize("NFKD")
+      .replace(/\p{M}/gu, "")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 48)
+      .replace(/-+$/g, "") || fallback
+  );
 }
 
 export function buildWorktreeCheckoutDirectoryName(
-  branchName: string,
-  randomWord = createRandomWorktreeWord(),
+  initialName: string,
+  id = createWorktreeDirectoryId(),
 ): string {
-  const branchSegment = sanitizePathSegment(branchName);
-  const wordSegment = sanitizePathSegment(randomWord)
-    .replace(/[^a-z]/g, "")
-    .slice(0, 5);
-  return `${branchSegment}__${wordSegment || createRandomWorktreeWord()}`;
+  return `${id}_${worktreeDirectorySlug(initialName)}`;
 }
 
-/**
- * @deprecated Project-local worktrees put generated checkouts inside the
- * repository. Keep this for explicit compatibility only; prefer
- * resolveAppManagedWorktreeCheckoutPath for new Ryco-created worktrees.
- */
-export function resolveProjectWorktreeCheckoutPath(
-  workspaceRoot: string,
-  projectMetadataDir: string | null | undefined,
-  branchName: string,
+/** Temporary branches are identifiers, not useful checkout names. */
+export function initialWorktreeName(
+  title: string | null | undefined,
+  branch: string,
+  fallbackTitle?: string,
 ): string {
-  return path.join(
-    resolveProjectWorktreesDir(workspaceRoot, projectMetadataDir),
-    buildWorktreeCheckoutDirectoryName(branchName),
-  );
+  // Custom (including empty) namespaces use the same eight-hex temporary token.
+  // This is a naming hint, never evidence that a branch or path is Ryco-owned.
+  const temporaryBranch =
+    /(?:^|\/)[a-f0-9]{8}$/i.test(branch) || /^(?:ryco|codex)\/[a-f0-9-]{8,}$/i.test(branch);
+  if (
+    title?.trim() &&
+    !/^(?:new thread|new conversation|new worktree|untitled)$/i.test(title.trim()) &&
+    !(temporaryBranch && title.trim() === branch) &&
+    !/^(?:ryco|codex)\/[a-f0-9-]{8,}$/i.test(title.trim())
+  )
+    return title;
+  if (fallbackTitle?.trim()) return fallbackTitle;
+  return temporaryBranch || /^(?:HEAD|origin\/HEAD)$/i.test(branch) ? "new-worktree" : branch;
 }
 
-export function resolveAppManagedWorktreeCheckoutPath(
-  worktreesRoot: string,
-  projectId: ProjectId,
-  branchName: string,
-): string {
-  return path.join(
-    worktreesRoot,
-    sanitizePathSegment(projectId),
-    buildWorktreeCheckoutDirectoryName(branchName),
-  );
+async function pathExists(candidate: string): Promise<boolean> {
+  try {
+    await fs.lstat(candidate);
+    return true;
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw cause;
+  }
+}
+
+/** Persisted once per project; project and branch renames never change disk paths. */
+export function resolveManagedProjectDirectory(projectId: string, title: string, root?: string) {
+  return Effect.gen(function* () {
+    const storage = yield* Effect.serviceOption(SqlClient.SqlClient);
+    if (Option.isNone(storage))
+      return buildWorktreeCheckoutDirectoryName(worktreeDirectorySlug(title, "project"));
+    const sql = storage.value;
+    const existing = yield* sql<{
+      directory_name: string;
+    }>`SELECT directory_name FROM managed_worktree_projects WHERE project_id = ${projectId}`;
+    if (existing[0]) return existing[0].directory_name;
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const name = `${createWorktreeDirectoryId()}_${worktreeDirectorySlug(title, "project")}`;
+      if (root && (yield* Effect.tryPromise(() => pathExists(path.join(root, name))))) continue;
+      yield* sql`INSERT OR IGNORE INTO managed_worktree_projects (project_id, directory_name) VALUES (${projectId}, ${name})`;
+      const rows = yield* sql<{
+        directory_name: string;
+      }>`SELECT directory_name FROM managed_worktree_projects WHERE project_id = ${projectId}`;
+      if (rows[0]) return rows[0].directory_name;
+    }
+    return yield* Effect.fail(new Error("Could not allocate a unique project directory."));
+  });
+}
+
+/** Reserve before Git runs, including destinations whose creation is interrupted. */
+export function allocateWorktreeCheckoutPath(
+  directory: string,
+  initialName: string,
+  createId: () => string = createWorktreeDirectoryId,
+) {
+  return Effect.gen(function* () {
+    const storage = yield* Effect.serviceOption(SqlClient.SqlClient);
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const candidate = path.join(
+        directory,
+        buildWorktreeCheckoutDirectoryName(initialName, createId()),
+      );
+      if (yield* Effect.tryPromise(() => pathExists(candidate))) continue;
+      if (Option.isSome(storage)) {
+        const reserved = yield* storage.value<{
+          path: string;
+        }>`INSERT OR IGNORE INTO managed_worktree_paths (path, allocated_at) VALUES (${candidate}, ${new Date().toISOString()}) RETURNING path`;
+        if (!reserved.length) continue;
+      }
+      return candidate;
+    }
+    return yield* Effect.fail(
+      new Error("Could not allocate a unique worktree directory after eight attempts."),
+    );
+  });
 }
 
 export function resolveWorktreeCheckoutPath(input: {
   readonly location: WorktreeCheckoutLocation | undefined;
   readonly appWorktreesRoot: string;
-  readonly projectId: ProjectId;
+  readonly projectId: ProjectId | string;
+  readonly projectTitle?: string | undefined;
+  readonly initialName?: string | null | undefined;
+  readonly fallbackName?: string | undefined;
   readonly workspaceRoot: string;
   readonly projectMetadataDir: string | null | undefined;
   readonly branchName: string;
-}): string {
-  if (input.location === "projectMetadata") {
-    return resolveProjectWorktreeCheckoutPath(
-      input.workspaceRoot,
-      input.projectMetadataDir,
-      input.branchName,
+}) {
+  return Effect.gen(function* () {
+    const directory =
+      input.location === "projectMetadata"
+        ? resolveProjectWorktreesDir(input.workspaceRoot, input.projectMetadataDir)
+        : path.join(
+            input.appWorktreesRoot,
+            yield* resolveManagedProjectDirectory(
+              input.projectId,
+              input.projectTitle ?? path.basename(input.workspaceRoot),
+              input.appWorktreesRoot,
+            ),
+          );
+    return yield* allocateWorktreeCheckoutPath(
+      directory,
+      initialWorktreeName(input.initialName, input.branchName, input.fallbackName),
     );
-  }
-
-  return resolveAppManagedWorktreeCheckoutPath(
-    input.appWorktreesRoot,
-    input.projectId,
-    input.branchName,
+  }).pipe(
+    Effect.mapError(
+      (cause) =>
+        new GitCommandError({
+          operation: "worktree.allocatePath",
+          cwd: input.workspaceRoot,
+          command: "git worktree add",
+          detail: cause.message,
+          cause,
+        }),
+    ),
   );
 }

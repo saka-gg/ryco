@@ -58,6 +58,7 @@ import {
   WorktreeArchivedPayload,
   WorktreeCheckoutRemovedPayload,
   WorktreeCheckoutRestoredPayload,
+  WorktreeRelocatedPayload,
   WorktreeCreatedPayload,
   WorktreeDeletedPayload,
   WorktreeManualPositionSetPayload,
@@ -541,6 +542,23 @@ export function projectEvent(
             checkoutRemovalReason: payload.reason,
             updatedAt: payload.removedAt,
           }),
+        })),
+      );
+
+    case "worktree.relocated":
+      return decodeForEvent(WorktreeRelocatedPayload, event.payload, event.type, "payload").pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          worktrees: updateWorktree(nextBase.worktrees, payload.worktreeId, {
+            worktreePath: payload.destinationPath,
+            updatedAt: payload.relocatedAt,
+          }),
+          threads: nextBase.threads.map((thread) =>
+            thread.projectId === payload.projectId &&
+            (thread.worktreeId === payload.worktreeId || thread.worktreePath === payload.sourcePath)
+              ? { ...thread, worktreePath: payload.destinationPath }
+              : thread,
+          ),
         })),
       );
 

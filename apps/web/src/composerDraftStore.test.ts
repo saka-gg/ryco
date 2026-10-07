@@ -599,6 +599,34 @@ describe("composerDraftStore project draft thread mapping", () => {
     resetComposerDraftStore();
   });
 
+  it("retargets a moved checkout without clearing composer content or another environment's draft", () => {
+    const store = useComposerDraftStore.getState();
+    store.setProjectDraftThreadId(projectRef, draftId, {
+      threadId,
+      branch: "fix/login",
+      worktreePath: "/old-checkout",
+    });
+    store.setProjectDraftThreadId(remoteProjectRef, remoteDraftId, {
+      threadId: otherThreadId,
+      worktreePath: "/old-checkout",
+    });
+    store.setPrompt(draftId, "Keep my unsent prompt");
+    const before = useComposerDraftStore.getState().draftsByThreadKey[draftId];
+    store.retargetCheckoutPath({
+      environmentId: TEST_ENVIRONMENT_ID,
+      projectId,
+      sourcePath: "/old-checkout",
+      destinationPath: "/new-checkout",
+    });
+    expect(useComposerDraftStore.getState().getDraftThread(draftId)?.worktreePath).toBe(
+      "/new-checkout",
+    );
+    expect(useComposerDraftStore.getState().getDraftThread(remoteDraftId)?.worktreePath).toBe(
+      "/old-checkout",
+    );
+    expect(useComposerDraftStore.getState().draftsByThreadKey[draftId]).toBe(before);
+  });
+
   it("stores and reads project draft thread ids via actions", () => {
     const store = useComposerDraftStore.getState();
     expect(store.getDraftThreadByProjectRef(projectRef)).toBeNull();

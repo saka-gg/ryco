@@ -188,6 +188,7 @@ export const ORCHESTRATION_EVENT_PROJECTORS = {
   "worktree.deleted": [ORCHESTRATION_PROJECTOR_NAMES.worktrees],
   "worktree.checkoutRemoved": [ORCHESTRATION_PROJECTOR_NAMES.worktrees],
   "worktree.checkoutRestored": [ORCHESTRATION_PROJECTOR_NAMES.worktrees],
+  "worktree.relocated": [ORCHESTRATION_PROJECTOR_NAMES.worktrees],
   "thread.attachedToWorktree": [ORCHESTRATION_PROJECTOR_NAMES.worktrees],
   "thread.statusBucketOverridden": [ORCHESTRATION_PROJECTOR_NAMES.worktrees],
   "thread.manualPositionSet": [ORCHESTRATION_PROJECTOR_NAMES.worktrees],
@@ -1392,6 +1393,36 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
               updatedAt: event.payload.removedAt,
             });
           }
+          return;
+        }
+
+        case "worktree.relocated": {
+          const payload = event.payload;
+          const existing = yield* projectionWorktreeRepository.getById({
+            worktreeId: payload.worktreeId,
+          });
+          if (Option.isSome(existing))
+            yield* projectionWorktreeRepository.upsert({
+              ...existing.value,
+              worktreePath: payload.destinationPath,
+              updatedAt: payload.relocatedAt,
+            });
+          // All current references, including archived conversations and recoverable Trash.
+          // Historical messages/events/checkpoints deliberately retain their original paths.
+          yield* sql`UPDATE projection_threads SET worktree_path = ${payload.destinationPath}
+            WHERE project_id = ${payload.projectId} AND (worktree_id = ${payload.worktreeId} OR worktree_path = ${payload.sourcePath})`.pipe(
+            Effect.mapError(toPersistenceSqlError("relocateThreadCheckouts")),
+          );
+          yield* sql`UPDATE storage_owned_entries SET path = ${payload.destinationPath},
+            identity_json = COALESCE((SELECT destination_identity_json FROM managed_worktree_relocations WHERE worktree_id = ${payload.worktreeId}), identity_json)
+            WHERE path = ${payload.sourcePath} AND state = 'owned'`.pipe(
+            Effect.mapError(toPersistenceSqlError("relocateCheckoutOwnership")),
+          );
+          yield* sql`UPDATE managed_worktree_relocations SET state = 'complete', last_error = NULL
+            WHERE worktree_id = ${payload.worktreeId} AND source_path = ${payload.sourcePath}
+              AND destination_path = ${payload.destinationPath} AND state = 'moved'`.pipe(
+            Effect.mapError(toPersistenceSqlError("completeCheckoutRelocation")),
+          );
           return;
         }
 

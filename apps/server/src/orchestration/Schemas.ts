@@ -1,3 +1,4 @@
+export { WorktreeRelocatedPayload } from "@ryco/contracts";
 export {
   ThreadSnoozedPayload,
   ThreadUnsnoozedPayload,

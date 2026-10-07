@@ -1017,7 +1017,11 @@ export const OrchestrationThread = Schema.Struct({
 });
 export type OrchestrationThread = typeof OrchestrationThread.Type;
 
-export const OrchestrationWorktreeShell = Worktree;
+export const OrchestrationWorktreeShell = Schema.Struct({
+  ...Worktree.fields,
+  /** Retired managed path, so persisted drafts can retarget after a cold reconnect. */
+  relocatedFromPath: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
+});
 export type OrchestrationWorktreeShell = typeof OrchestrationWorktreeShell.Type;
 
 export const OrchestrationReadModel = Schema.Struct({
@@ -1142,6 +1146,13 @@ export const OrchestrationShellStreamEvent = Schema.Union([
     kind: Schema.Literal("worktree-upserted"),
     sequence: NonNegativeInt,
     worktree: OrchestrationWorktreeShell,
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("worktree-relocated"),
+    sequence: NonNegativeInt,
+    worktree: OrchestrationWorktreeShell,
+    sourcePath: TrimmedNonEmptyString,
+    destinationPath: TrimmedNonEmptyString,
   }),
   Schema.Struct({
     kind: Schema.Literal("thread-removed"),
@@ -1844,6 +1855,18 @@ const WorktreeCheckoutRestoreCommand = Schema.Struct({
   restoredAt: IsoDateTime,
 });
 
+/** Server-only: a verified managed checkout moved under workspace lifecycle admission. */
+const WorktreeRelocateCommand = Schema.Struct({
+  type: Schema.Literal("worktree.relocate"),
+  commandId: CommandId,
+  worktreeId: WorktreeId,
+  projectId: ProjectId,
+  sourcePath: TrimmedNonEmptyString,
+  destinationPath: TrimmedNonEmptyString,
+  expectedUpdatedAt: IsoDateTime,
+  relocatedAt: IsoDateTime,
+});
+
 const ThreadAttachToWorktreeCommand = Schema.Struct({
   type: Schema.Literal("thread.attach-to-worktree"),
   commandId: CommandId,
@@ -2145,6 +2168,7 @@ const InternalOrchestrationCommand = Schema.Union([
   ThreadUsageLimitRecordCommand,
   WorktreeCheckoutRemoveCommand,
   WorktreeCheckoutRestoreCommand,
+  WorktreeRelocateCommand,
 ]);
 export type InternalOrchestrationCommand = typeof InternalOrchestrationCommand.Type;
 
@@ -2201,6 +2225,7 @@ export const OrchestrationEventType = Schema.Literals([
   "worktree.deleted",
   "worktree.checkoutRemoved",
   "worktree.checkoutRestored",
+  "worktree.relocated",
   "thread.attachedToWorktree",
   "thread.statusBucketOverridden",
   "thread.manualPositionSet",
@@ -2604,6 +2629,14 @@ export const WorktreeCheckoutRestoredPayload = Schema.Struct({
   restoredAt: IsoDateTime,
 });
 
+export const WorktreeRelocatedPayload = Schema.Struct({
+  worktreeId: WorktreeId,
+  projectId: ProjectId,
+  sourcePath: TrimmedNonEmptyString,
+  destinationPath: TrimmedNonEmptyString,
+  relocatedAt: IsoDateTime,
+});
+
 export const ThreadAttachedToWorktreePayload = Schema.Struct({
   threadId: ThreadId,
   worktreeId: WorktreeId,
@@ -2879,6 +2912,11 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("worktree.checkoutRestored"),
     payload: WorktreeCheckoutRestoredPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("worktree.relocated"),
+    payload: WorktreeRelocatedPayload,
   }),
   Schema.Struct({
     ...EventBaseFields,

@@ -5,13 +5,11 @@ import { isHostedHubMode } from "~/env";
 import { readHostedNodeMutationLease } from "~/hostedHub/hostedConnectionCoordinator";
 import { setProjectReadFileCacheData } from "~/rpc/projectPreviewAtoms";
 import { PreviewFileSessionOwner, type PreviewFileDocument } from "./PreviewFileEditSession";
-
-export interface PreviewFileScope {
-  readonly environmentId: EnvironmentId;
-  readonly cwd: string;
-}
-
-const sessions = new Map<string, { scope: PreviewFileScope; owner: PreviewFileSessionOwner }>();
+import {
+  previewFileSessionRegistry as sessions,
+  type PreviewFileScope,
+} from "./previewFileSessionRegistry";
+export type { PreviewFileScope } from "./previewFileSessionRegistry";
 
 /** Consult existing lifecycle authorities; this module never initiates reconnects. */
 export function previewFileAuthority(environmentId: EnvironmentId): string | object | null {
@@ -40,22 +38,26 @@ export function readPreviewFileSession(scope: PreviewFileScope, relativePath: st
 export function getPreviewFileSession(scope: PreviewFileScope, document: PreviewFileDocument) {
   let entry = sessions.get(document.key);
   if (!entry) {
+    const route = { scope, key: document.key };
     const owner = new PreviewFileSessionOwner(document, {
       authority: () => previewFileAuthority(scope.environmentId),
       read: () =>
-        ensureEnvironmentApi(scope.environmentId).projects.readFile({
-          cwd: scope.cwd,
+        ensureEnvironmentApi(route.scope.environmentId).projects.readFile({
+          cwd: route.scope.cwd,
           relativePath: document.relativePath,
         }),
       write: (input) =>
-        ensureEnvironmentApi(scope.environmentId).projects.writeFile({ ...input, cwd: scope.cwd }),
+        ensureEnvironmentApi(route.scope.environmentId).projects.writeFile({
+          ...input,
+          cwd: route.scope.cwd,
+        }),
       publish: (data) =>
-        setProjectReadFileCacheData({ ...scope, relativePath: document.relativePath }, data),
+        setProjectReadFileCacheData({ ...route.scope, relativePath: document.relativePath }, data),
       release: () => {
-        if (sessions.get(document.key)?.owner === owner) sessions.delete(document.key);
+        if (sessions.get(route.key)?.owner === owner) sessions.delete(route.key);
       },
     });
-    entry = { scope, owner };
+    entry = { scope, owner, route };
     sessions.set(document.key, entry);
   }
   return entry.owner;

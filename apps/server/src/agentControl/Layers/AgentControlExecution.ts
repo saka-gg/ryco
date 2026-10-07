@@ -929,7 +929,7 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
               index,
               effective.worktreeBranchPrefix.value,
             );
-            const checkoutPath = resolveWorktreeCheckoutPath({
+            const checkoutPath = yield* resolveWorktreeCheckoutPath({
               location: undefined,
               appWorktreesRoot: yield* resolveConfiguredWorktreeRoot({
                 settings: worktreeSettings,
@@ -940,6 +940,8 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
               projectId: project.id,
               workspaceRoot: project.workspaceRoot,
               projectMetadataDir: project.projectMetadataDir,
+              projectTitle: project.title,
+              initialName: entry.title,
               branchName: branch,
             });
             const baseRef = entry.baseRef ?? "HEAD";

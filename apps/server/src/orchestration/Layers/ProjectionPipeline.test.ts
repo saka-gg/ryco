@@ -101,7 +101,10 @@ it("routes each event only to its explicit projection owners", () => {
   assert.deepEqual(ORCHESTRATION_EVENT_PROJECTORS["worktree.checkoutRemoved"], [
     ORCHESTRATION_PROJECTOR_NAMES.worktrees,
   ]);
-  assert.equal(Object.keys(ORCHESTRATION_EVENT_PROJECTORS).length, 50);
+  assert.deepEqual(ORCHESTRATION_EVENT_PROJECTORS["worktree.relocated"], [
+    ORCHESTRATION_PROJECTOR_NAMES.worktrees,
+  ]);
+  assert.equal(Object.keys(ORCHESTRATION_EVENT_PROJECTORS).length, 51);
 });
 
 it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {

@@ -1061,9 +1061,8 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
           };
           const result = yield* preparePullRequestThread(manager, input);
           expect(result.branch).toBe(`${test.prefix ? `${test.prefix}/` : ""}pr-991/main`);
-          expect(result.worktreePath).toBe(
-            fs.realpathSync(path.join(fixture.worktreesDir, result.branch.replace(/\//g, "-"))),
-          );
+          expect(path.dirname(result.worktreePath!)).toBe(fs.realpathSync(fixture.worktreesDir));
+          expect(path.basename(result.worktreePath!)).toMatch(/^[a-f0-9]{8}_preference-pr$/);
           expect(setupCalls).toHaveLength(test.setup ? 1 : 0);
           if (test.setup)
             expect(setupCalls[0]).toEqual({
@@ -3410,9 +3409,10 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
       });
 
       expect(result.worktreePath).not.toBeNull();
-      expect(result.worktreePath).toBe(
-        fs.realpathSync(path.join(repoDir, ".ryco", "worktrees", "feature-pr-worktree-setup")),
+      expect(path.dirname(result.worktreePath!)).toBe(
+        fs.realpathSync(path.join(repoDir, ".ryco", "worktrees")),
       );
+      expect(path.basename(result.worktreePath!)).toMatch(/^[a-f0-9]{8}_worktree-setup-pr$/);
       expect(setupCalls).toHaveLength(1);
       expect(setupCalls[0]).toEqual({
         threadId: "thread-pr-setup",

@@ -50,6 +50,7 @@ import {
   acquireStorageSettingsLease,
   hasStorageSettingsUpdateLease,
   hasWorktreeCreationLease,
+  isWorktreeRelocationBlocked,
   canonicalStoragePath,
 } from "./lifecycle.ts";
 
@@ -723,6 +724,8 @@ export function makeStorageService(deps: {
         Effect.gen(function* () {
           if (hasStorageSettingsUpdateLease())
             return "Settings update is in progress. Review cleanup again after it completes.";
+          if (yield* isWorktreeRelocationBlocked(sql, row.path))
+            return "Checkout relocation is pending or complete; review the current workspace path.";
           if (hasWorktreeCreationLease(row.path))
             return "A worktree creation/hydration operation is still using this path.";
           const current = yield* snapshots.getShellSnapshot();

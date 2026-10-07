@@ -1,6 +1,7 @@
 import {
   storageLifecycleLock,
   isStoragePathBlocked,
+  isWorktreeRelocationBlocked,
   canonicalStoragePath,
 } from "../../storage/lifecycle.ts";
 import { ProjectionThreadUserInputRequestRepository } from "../../persistence/Services/ProjectionThreadUserInputRequests.ts";
@@ -97,6 +98,7 @@ function commandToAggregateRef(command: OrchestrationCommand): {
     case "worktree.delete":
     case "worktree.checkout.remove":
     case "worktree.checkout.restore":
+    case "worktree.relocate":
     case "worktree.manual-position.set":
       return {
         aggregateKind: "worktree",
@@ -246,6 +248,33 @@ const makeOrchestrationEngine = Effect.gen(function* () {
                 detail,
                 cause,
               });
+        if (storageCommand.type === "worktree.relocate") {
+          const journal = yield* sql`SELECT worktree_id FROM managed_worktree_relocations
+            WHERE worktree_id = ${storageCommand.worktreeId} AND project_id = ${storageCommand.projectId}
+            AND source_path = ${storageCommand.sourcePath} AND destination_path = ${storageCommand.destinationPath}
+            AND expected_updated_at = ${storageCommand.expectedUpdatedAt} AND state = 'moved'
+            AND destination_identity_json IS NOT NULL`.pipe(
+            Effect.mapError(toPersistenceSqlError("relocation.admission")),
+          );
+          if (journal.length !== 1)
+            return yield* storageReadinessError(
+              "No verified checkout relocation is ready to commit.",
+            );
+        }
+        if ("worktreeId" in storageCommand && storageCommand.type !== "worktree.relocate") {
+          const worktree = commandReadModel.worktrees?.find(
+            (row) => row.worktreeId === storageCommand.worktreeId,
+          );
+          if (
+            worktree?.worktreePath &&
+            (yield* isWorktreeRelocationBlocked(sql, worktree.worktreePath).pipe(
+              Effect.mapError(toPersistenceSqlError("relocation.metadataAdmission")),
+            ))
+          )
+            return yield* storageReadinessError(
+              "Checkout relocation is pending. Reload the workspace before changing its metadata.",
+            );
+        }
         const storageThread =
           "threadId" in storageCommand
             ? commandReadModel.threads.find((thread) => thread.id === storageCommand.threadId)

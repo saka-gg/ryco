@@ -21,7 +21,11 @@ describe("VCS worktree project policy context", () => {
       const createWorktree = vi.fn((_input: Parameters<GitVcsDriverShape["createWorktree"]>[0]) =>
         Effect.succeed({ worktree: { path: "/authorized/checkouts/created", refName: "feature" } }),
       );
-      const getProject = vi.fn(() => Effect.succeed(Option.some({ id: projectId })));
+      const getProject = vi.fn(() =>
+        Effect.succeed(
+          Option.some({ id: projectId, title: "Project", workspaceRoot: "/authorized/project" }),
+        ),
+      );
       const ctx = {
         ownerEffect: (_method: string, effect: Effect.Effect<unknown>) => effect,
         gitWorkflow: { createWorktree },

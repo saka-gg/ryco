@@ -23,7 +23,6 @@ import {
   OrchestrationShellSnapshot,
   OrchestrationThread,
   OrchestrationThreadHistoryError,
-  Worktree,
   ProjectScript,
   TurnId,
   type OrchestrationCheckpointSummary,
@@ -40,7 +39,7 @@ import {
   type OrchestrationThreadActivity,
   type OrchestrationThreadShell,
   ThreadPriorityProjectedRanking,
-  type OrchestrationWorktreeShell,
+  OrchestrationWorktreeShell,
   ModelSelection,
   ProjectId,
   type RepositoryIdentity,
@@ -126,7 +125,7 @@ const ProjectionThreadActivityDbRowSchema = ProjectionThreadActivity.mapFields(
   }),
 );
 const ProjectionThreadSessionDbRowSchema = ProjectionThreadSession;
-const ProjectionWorktreeDbRowSchema = Worktree.mapFields(
+const ProjectionWorktreeDbRowSchema = OrchestrationWorktreeShell.mapFields(
   Struct.assign({
     prIsDraft: Schema.NullOr(Schema.Number),
   }),
@@ -134,8 +133,10 @@ const ProjectionWorktreeDbRowSchema = Worktree.mapFields(
 function toWorktreeShell(
   row: Schema.Schema.Type<typeof ProjectionWorktreeDbRowSchema>,
 ): OrchestrationWorktreeShell {
+  const { relocatedFromPath, ...worktree } = row;
   return {
-    ...row,
+    ...worktree,
+    ...(relocatedFromPath ? { relocatedFromPath } : {}),
     prIsDraft: row.prIsDraft === null ? null : row.prIsDraft === 1,
     // Always emit the key: its presence tells clients this server tracks close times.
     prTerminalAt: row.prTerminalAt ?? null,
@@ -663,6 +664,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           title,
           branch,
           worktree_path AS "worktreePath",
+          (SELECT source_path FROM managed_worktree_relocations r
+            WHERE r.worktree_id = projection_worktrees.worktree_id AND r.project_id = projection_worktrees.project_id
+              AND r.destination_path = projection_worktrees.worktree_path AND r.state = 'complete') AS "relocatedFromPath",
           origin,
           pr_number AS "prNumber",
           issue_number AS "issueNumber",
@@ -700,6 +704,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           title,
           branch,
           worktree_path AS "worktreePath",
+          (SELECT source_path FROM managed_worktree_relocations r
+            WHERE r.worktree_id = projection_worktrees.worktree_id AND r.project_id = projection_worktrees.project_id
+              AND r.destination_path = projection_worktrees.worktree_path AND r.state = 'complete') AS "relocatedFromPath",
           origin,
           pr_number AS "prNumber",
           issue_number AS "issueNumber",

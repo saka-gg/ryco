@@ -205,6 +205,22 @@ export const toShellStreamEvent = (
           threadId: event.payload.threadId,
         }),
       );
+    case "worktree.relocated": {
+      const query = projectionSnapshotQuery.getWorktreeShellById;
+      if (!query) return Effect.succeed(Option.none());
+      return query(event.payload.worktreeId).pipe(
+        Effect.map((worktree) =>
+          Option.map(worktree, (nextWorktree) => ({
+            kind: "worktree-relocated" as const,
+            sequence: event.sequence,
+            worktree: nextWorktree,
+            sourcePath: event.payload.sourcePath,
+            destinationPath: event.payload.destinationPath,
+          })),
+        ),
+        Effect.catch(() => Effect.succeed(Option.none())),
+      );
+    }
     case "worktree.created":
     case "worktree.archived":
     case "worktree.metaUpdated":
