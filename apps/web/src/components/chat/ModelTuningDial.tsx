@@ -5,7 +5,7 @@ import type {
   ServerProviderModel,
 } from "@ryco/contracts";
 import { buildProviderOptionSelectionsFromDescriptors } from "@ryco/shared/model";
-import { BrainIcon, ChevronRightIcon, RotateCcwIcon, ZapIcon } from "lucide-react";
+import { BrainIcon, ChevronRightIcon, RotateCcwIcon } from "lucide-react";
 import {
   memo,
   useCallback,
@@ -25,14 +25,19 @@ import { isReducedMotionEffective } from "~/themes/appearancePreferences";
 import { useModelPickerTuningBridge } from "./modelPickerTuningBridge";
 import {
   getTuningScale,
+  nextSpeedTier,
   reasoningTone,
   resetTuningDescriptors,
   resolveModelTuning,
+  SPEED_TIER_LABELS,
   stepTuningScale,
+  withSpeedTier,
   type ModelTuning,
+  type SpeedTier,
   type TuningStop,
 } from "./modelTuning.logic";
 import { RollingText, useTravelDirection } from "./RollingText";
+import { SpeedTierIcon, speedToneClassName } from "./SpeedTierIcon";
 import { applyDescriptorSelection, replaceDescriptorCurrentValue } from "./traitsMenuLogic";
 import {
   useProviderOptionsUpdater,
@@ -50,14 +55,15 @@ export interface ModelTuningDialProps {
   disabled?: boolean;
   onSelectEffort: (value: string) => void;
   onSetThinking: (enabled: boolean) => void;
-  onSetFastMode: (enabled: boolean) => void;
+  onSetSpeed: (tier: SpeedTier) => void;
   onSelectContextWindow: (value: string) => void;
   onReset: () => void;
 }
 
 /**
  * The model picker's footer: reasoning effort (or thinking) as a snapping dial,
- * fast mode, context window and a reset, all for the active model.
+ * speed (Fast, and Ultrafast where offered), context window and a reset, all
+ * for the active model.
  */
 export const ModelTuningDial = memo(function ModelTuningDial(props: ModelTuningDialProps) {
   const { tuning } = props;
@@ -69,7 +75,9 @@ export const ModelTuningDial = memo(function ModelTuningDial(props: ModelTuningD
   const stop = scale ? scale.stops[scale.index] : undefined;
   const tone =
     scale?.kind === "thinking" ? (stop?.id === "on" ? "thinking" : "off") : reasoningTone(stop?.id);
-  const isFastOn = tuning.fastMode?.currentValue === true;
+  const speed = tuning.speed;
+  const speedIsOn = speed !== "standard";
+  const nextSpeed = nextSpeedTier(tuning.descriptors);
 
   const { onSelectEffort, onSetThinking } = props;
   const commitStop = useCallback(
@@ -100,13 +108,13 @@ export const ModelTuningDial = memo(function ModelTuningDial(props: ModelTuningD
   const shapeKey = [
     scale?.kind ?? "none",
     scale?.stops.length ?? 0,
-    tuning.fastMode ? "fast" : "",
+    tuning.speedTiers.join(","),
     tuning.contextWindow?.options.map((option) => option.id).join(",") ?? "",
     tuning.thinking ? "thinking" : "",
   ].join("|");
   useAnimatedHeight(rootRef, shapeKey);
 
-  const [fastBurst, setFastBurst] = useState(0);
+  const [speedBurst, setSpeedBurst] = useState(0);
   const [resetSpin, setResetSpin] = useState(0);
   const modelLabel = bridge?.activeModelLabel ?? null;
   const direction = useTravelDirection(scale?.index ?? 0);
@@ -119,35 +127,32 @@ export const ModelTuningDial = memo(function ModelTuningDial(props: ModelTuningD
       data-slot="model-tuning-dial"
     >
       <div className="flex h-7 items-center gap-1">
-        {tuning.fastMode ? (
+        {tuning.speedTiers.length > 1 ? (
           <button
             type="button"
-            aria-label="Fast mode"
-            aria-pressed={isFastOn}
-            title={isFastOn ? "Fast mode on" : "Fast mode off"}
+            aria-label="Speed"
+            aria-pressed={speedIsOn}
+            data-speed-tier={speed}
+            title={`${SPEED_TIER_LABELS[speed]} speed · click for ${SPEED_TIER_LABELS[nextSpeed]}`}
             disabled={disabled}
             className={cn(
               "relative grid size-7 shrink-0 place-items-center rounded-md outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50",
-              isFastOn
-                ? "text-(--fast-mode-tone)"
-                : "text-muted-foreground hover:bg-accent hover:text-foreground",
+              speedToneClassName(speed) ??
+                "text-muted-foreground hover:bg-accent hover:text-foreground",
             )}
             onClick={() => {
-              if (!isFastOn) setFastBurst((count) => count + 1);
-              props.onSetFastMode(!isFastOn);
+              if (nextSpeed !== "standard") setSpeedBurst((count) => count + 1);
+              props.onSetSpeed(nextSpeed);
             }}
           >
-            <ZapIcon
-              aria-hidden="true"
-              key={`bolt-${fastBurst}`}
-              className={cn(
-                "size-4",
-                isFastOn && "fill-current",
-                fastBurst > 0 && "model-dial-pop",
-              )}
+            <SpeedTierIcon
+              key={`bolt-${speedBurst}`}
+              tier={speed}
+              filled={speedIsOn}
+              className={cn("size-4", speedBurst > 0 && "model-dial-pop")}
             />
-            {fastBurst > 0 && isFastOn ? (
-              <span key={`burst-${fastBurst}`} aria-hidden="true" className="model-dial-burst" />
+            {speedBurst > 0 && speedIsOn ? (
+              <span key={`burst-${speedBurst}`} aria-hidden="true" className="model-dial-burst" />
             ) : null}
           </button>
         ) : null}
@@ -608,7 +613,10 @@ export const ComposerModelTuning = memo(function ComposerModelTuning(
         });
       }}
       onSetThinking={(enabled) => setBoolean(tuning.thinking?.id, enabled)}
-      onSetFastMode={(enabled) => setBoolean(tuning.fastMode?.id, enabled)}
+      onSetSpeed={(tier) => {
+        if (disabled) return;
+        onChangeDescriptors(withSpeedTier(tuning.descriptors, tier));
+      }}
       onSelectContextWindow={(value) => {
         if (!tuning.contextWindow || disabled) return;
         onChangeDescriptors(

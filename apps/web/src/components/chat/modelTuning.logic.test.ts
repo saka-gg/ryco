@@ -59,7 +59,8 @@ describe("resolveModelTuning", () => {
     const tuning = resolveModelTuning({ caps: opus, selections: undefined, prompt: "" });
     expect(tuning?.effort?.id).toBe("effort");
     expect(tuning?.effortValue).toBe("high");
-    expect(tuning?.fastMode?.id).toBe("fastMode");
+    expect(tuning?.speedTiers).toEqual(["standard", "fast"]);
+    expect(tuning?.speed).toBe("standard");
     expect(tuning?.contextWindow?.id).toBe("contextWindow");
     expect(tuning?.isDefault).toBe(true);
   });
@@ -189,7 +190,7 @@ describe("summarizeModelTuning", () => {
     });
     expect(summarizeModelTuning(tuning)).toEqual({
       level: { id: "xhigh", label: "XHigh", index: 3 },
-      fastMode: true,
+      speed: "fast",
       contextWindowLabel: "1M",
     });
   });

@@ -72,8 +72,6 @@ export interface MorphProfile {
   readonly revealAt: number;
   /** The ghost hands off to the landing control over the last stretch of the fold. */
   readonly foldFadeFrom: number;
-  /** Hide the origin while open: the control *became* the popup. */
-  readonly hideOrigin: boolean;
   /** A short scale pulse on the landing control as the ghost arrives. */
   readonly pulseLanding: boolean;
 }
@@ -89,14 +87,12 @@ export const DIALOG_MORPH_PROFILE: MorphProfile = {
   staggerMs: 36,
   revealAt: 0.4,
   foldFadeFrom: 0.6,
-  hideOrigin: true,
   pulseLanding: true,
 };
 
 /**
  * Popovers open on every other click, so they move faster and stay modest:
- * the trigger stays visible (it labels what the popover changes) and the
- * landing takes no pulse.
+ * the landing takes no pulse.
  */
 export const POPOVER_MORPH_PROFILE: MorphProfile = {
   grow: springCurve({ stiffness: 460, damping: 40 }),
@@ -108,11 +104,11 @@ export const POPOVER_MORPH_PROFILE: MorphProfile = {
   staggerMs: 24,
   revealAt: 0.32,
   foldFadeFrom: 0.5,
-  hideOrigin: false,
   pulseLanding: false,
 };
 
 const EASE_OUT = "cubic-bezier(0.23, 1, 0.32, 1)";
+const HANDOFF_EDGE_FADE_MS = 160;
 
 /**
  * Set on the surface while a ghost carries it: the surface then paints only
@@ -266,7 +262,6 @@ export function attachSurfaceMorph(
   const surfacePaint = readSurfacePaint(surface);
   const origin = morph.origin();
   const content: Animation[] = [];
-  let originHidden: Animation | null = null;
   let grow: GhostTravel | null = null;
   let growGhost: HTMLElement | null = null;
   let foldTimer: number | null = null;
@@ -306,13 +301,15 @@ export function attachSurfaceMorph(
         surface.removeAttribute(SURFACE_HANDOFF_ATTRIBUTE);
         ghost.remove();
         growGhost = null;
-      });
-      if (profile.hideOrigin) {
-        originHidden = origin.animate([{ opacity: 1 }, { opacity: 0 }], {
-          duration: profile.contentFadeOutMs,
-          fill: "forwards",
+        // The ghost cannot copy a pseudo-element, so the surface's `::before`
+        // edge highlight was hidden for the whole grow; ease it in rather
+        // than let it pop on as the last frame of the morph.
+        surface.animate([{ opacity: 0 }, { opacity: 1 }], {
+          duration: HANDOFF_EDGE_FADE_MS,
+          easing: "linear",
+          pseudoElement: "::before",
         });
-      }
+      });
       const revealAt = profile.grow.durationMs * profile.revealAt;
       content.push(
         popup.animate([{ opacity: 0 }, { opacity: 1 }], {
@@ -353,19 +350,6 @@ export function attachSurfaceMorph(
   if (options.deferToNextFrame) pendingFrame = window.requestAnimationFrame(beginGrow);
   else beginGrow();
 
-  /** Brings a hidden origin back in as the ghost lands, instead of popping it. */
-  const revealOrigin = (delayMs: number) => {
-    if (!originHidden) return;
-    originHidden.cancel();
-    originHidden = null;
-    if (!origin?.isConnected) return;
-    origin.animate([{ opacity: 0 }, { opacity: 1 }], {
-      duration: 160,
-      delay: delayMs,
-      fill: "backwards",
-    });
-  };
-
   /**
    * Stops the grow. The ghost is forgotten before the cancel so the grow's
    * completion handler (which runs on cancel too) cannot hand the surface
@@ -388,10 +372,7 @@ export function attachSurfaceMorph(
     for (const animation of content) animation.cancel();
 
     const from = toSurfaceRect(surface.getBoundingClientRect());
-    if (from.width === 0) {
-      revealOrigin(0);
-      return;
-    }
+    if (from.width === 0) return;
     const total = profile.contentFadeOutMs + profile.fold.durationMs;
     // One animation owns the popup's opacity for the whole fold, which is
     // what keeps base-ui from unmounting it until the ghost has landed.
@@ -414,7 +395,6 @@ export function attachSurfaceMorph(
           ],
           { duration: 180, easing: EASE_OUT, fill: "forwards" },
         );
-        revealOrigin(0);
         return;
       }
       travelGhost(ghost, {
@@ -425,7 +405,6 @@ export function attachSurfaceMorph(
         curve: profile.fold,
         fadeOutFrom: profile.foldFadeFrom,
       }).finished.then(() => ghost.remove());
-      revealOrigin(profile.fold.durationMs * profile.foldFadeFrom);
       if (profile.pulseLanding) {
         landing.animate(
           [{ transform: "scale(1)" }, { transform: "scale(1.06)" }, { transform: "scale(1)" }],
@@ -449,7 +428,6 @@ export function attachSurfaceMorph(
     // attach): undo the entrance so a re-attach starts from a clean popup.
     if (!folding) {
       surface.removeAttribute(SURFACE_HANDOFF_ATTRIBUTE);
-      originHidden?.cancel();
       for (const animation of content) animation.cancel();
     }
   };

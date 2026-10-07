@@ -378,12 +378,11 @@
   --app-glass-panel-filter: none;
   --app-glass-panel-light-alpha: 100%;
   --app-glass-panel-dark-alpha: 100%;
-  /* The composer's tone: one step off the page at rest and one more while it
-     holds focus. Derived from the theme pair so custom themes re-tint it; the
-     dark variant below re-weights the steps. Its translucency and frost come
-     from the shared surface material (`.app-composer-surface`). */
+  /* The composer's tone: one step off the page, focused or not. Derived from
+     the theme pair so custom themes re-tint it; the dark variant below
+     re-weights the step. Its translucency and frost come from the shared
+     surface material (`.app-composer-surface`). */
   --app-composer-surface: color-mix(in srgb, var(--foreground) 4.5%, var(--background));
-  --app-composer-surface-focus: color-mix(in srgb, var(--foreground) 6.5%, var(--background));
   /* Toasts use a translucent plate and frost, with semantic color mixed in
      separately by toast type. */
   --app-toast-alpha: 52%;
@@ -548,7 +547,6 @@
     --warning: var(--color-amber-500);
     --warning-foreground: var(--color-amber-400);
     --app-composer-surface: color-mix(in srgb, var(--foreground) 6.5%, var(--background));
-    --app-composer-surface-focus: color-mix(in srgb, var(--foreground) 9%, var(--background));
     --scrollbar-thumb: rgba(255, 255, 255, 0.1);
     --scrollbar-thumb-hover: rgba(255, 255, 255, 0.18);
     --scrollbar-thumb-thin: rgba(255, 255, 255, 0.08);
@@ -686,7 +684,7 @@ code {
   /* The composer plate: `.app-surface`'s material — the same plate alpha and
      frost the dialogs use, both driven by the Transparency setting — over the
      composer's own tone instead of the popover colour. Solid resolves to an
-     opaque tone with no filter. Focus steps the tone, not the material. */
+     opaque tone with no filter. Focus leaves it unchanged. */
   .app-composer-surface {
     --app-composer-tone: var(--app-composer-surface);
     background-color: color-mix(
@@ -704,10 +702,6 @@ code {
       var(--app-composer-tone) var(--app-surface-dark-opacity),
       transparent
     );
-  }
-
-  .app-composer-surface:has(:focus-visible) {
-    --app-composer-tone: var(--app-composer-surface-focus);
   }
 
   /* The floating composer bar's scroll-edge scrim, in two layers. The strip
@@ -2446,6 +2440,7 @@ label:has(> select#reasoning-effort) select {
   --ultracode-sheen-2: #9d90ff;
   --ultracode-sheen-3: #ece8ff;
   --fast-mode-tone: var(--color-amber-600);
+  --ultrafast-mode-tone: var(--color-orange-600);
   --model-dial-track: color-mix(in srgb, var(--color-black) 6%, transparent);
   --model-dial-notch: color-mix(in srgb, var(--color-black) 22%, transparent);
   --model-dial-thumb: var(--color-white);
@@ -2466,6 +2461,7 @@ label:has(> select#reasoning-effort) select {
   --ultracode-sheen-2: #b0a5ff;
   --ultracode-sheen-3: #f3f0ff;
   --fast-mode-tone: var(--color-yellow-400);
+  --ultrafast-mode-tone: var(--color-orange-400);
   --model-dial-track: color-mix(in srgb, var(--color-white) 6.5%, transparent);
   --model-dial-notch: color-mix(in srgb, var(--color-white) 30%, transparent);
   --model-dial-thumb: #f4f4f5;
@@ -2731,7 +2727,8 @@ label:has(> select#reasoning-effort) select {
   position: absolute;
   inset: 3px;
   border-radius: 9999px;
-  box-shadow: 0 0 0 1.5px var(--fast-mode-tone);
+  /* The speed button's colour: the tone of the tier just switched on. */
+  box-shadow: 0 0 0 1.5px currentColor;
   pointer-events: none;
   animation: model-dial-ring-out calc(var(--app-motion-duration-pop, 200ms) * 3)
     var(--app-motion-ease) forwards;

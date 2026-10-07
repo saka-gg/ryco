@@ -207,6 +207,9 @@ export function ProviderModelsSection({
           if (descriptors.some((descriptor) => descriptor.id === "fastMode")) {
             capLabels.push("Fast mode");
           }
+          if (descriptors.some((descriptor) => descriptor.id === "ultrafastMode")) {
+            capLabels.push("Ultrafast");
+          }
           if (descriptors.some((descriptor) => descriptor.id === "thinking")) {
             capLabels.push("Thinking");
           }

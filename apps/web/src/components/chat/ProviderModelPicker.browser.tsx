@@ -1740,7 +1740,7 @@ describe("ProviderModelPicker", () => {
           tuning={tuning}
           onSelectEffort={onSelectEffort}
           onSetThinking={() => {}}
-          onSetFastMode={() => {}}
+          onSetSpeed={() => {}}
           onSelectContextWindow={() => {}}
           onReset={() => {}}
         />
@@ -1776,7 +1776,7 @@ describe("ProviderModelPicker", () => {
       lockedProvider: null,
       triggerTraits: {
         level: { id: "high", label: "High", index: 2 },
-        fastMode: true,
+        speed: "fast",
         contextWindowLabel: "1M",
       },
     });

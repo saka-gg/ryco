@@ -59,10 +59,7 @@ import { ChildProcessSpawner } from "effect/unstable/process";
 import * as CodexErrors from "effect-codex-app-server/errors";
 import * as EffectCodexSchema from "effect-codex-app-server/schema";
 
-import {
-  getModelSelectionBooleanOptionValue,
-  getModelSelectionStringOptionValue,
-} from "@ryco/shared/model";
+import { getModelSelectionStringOptionValue } from "@ryco/shared/model";
 import {
   appendAttachmentPathLines,
   formatAttachmentPathLines,
@@ -80,6 +77,7 @@ import {
   type ProviderAdapterError,
 } from "../Errors.ts";
 import { type CodexAdapterShape } from "../Services/CodexAdapter.ts";
+import { codexServiceTierForSelection } from "../CodexServiceTier.ts";
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import { makeServerQueueMetrics } from "../../observability/QueueMetrics.ts";
@@ -1965,6 +1963,10 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             }
           : undefined;
 
+        const startServiceTier =
+          input.modelSelection?.instanceId === boundInstanceId
+            ? codexServiceTierForSelection(input.modelSelection)
+            : undefined;
         const runtimeInput: CodexSessionRuntimeOptions = {
           threadId: input.threadId,
           providerInstanceId: boundInstanceId,
@@ -1984,10 +1986,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           ...(input.modelSelection?.instanceId === boundInstanceId
             ? { model: input.modelSelection.model }
             : {}),
-          ...(input.modelSelection?.instanceId === boundInstanceId &&
-          getModelSelectionBooleanOptionValue(input.modelSelection, "fastMode") === true
-            ? { serviceTier: "fast" }
-            : {}),
+          ...(startServiceTier ? { serviceTier: startServiceTier } : {}),
         };
         const agentControl = Option.getOrUndefined(agentControlLease);
         const sessionScope = yield* Scope.make("sequential");
@@ -2322,9 +2321,9 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       input.modelSelection?.instanceId === boundInstanceId
         ? getModelSelectionStringOptionValue(input.modelSelection, "reasoningEffort")
         : undefined;
-    const fastMode =
+    const serviceTier =
       input.modelSelection?.instanceId === boundInstanceId
-        ? getModelSelectionBooleanOptionValue(input.modelSelection, "fastMode")
+        ? codexServiceTierForSelection(input.modelSelection)
         : undefined;
     const formatted = formatSourceControlContextsForAgent(input.sourceControlContexts ?? []);
     const codexInput = appendAttachmentPathLines(
@@ -2342,7 +2341,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
               effort: reasoningEffort as EffectCodexSchema.V2TurnStartParams__ReasoningEffort,
             }
           : {}),
-        ...(fastMode === true ? { serviceTier: "fast" } : {}),
+        ...(serviceTier ? { serviceTier } : {}),
         ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
         ...(input.customSystemPrompt !== undefined
           ? { customSystemPrompt: input.customSystemPrompt }

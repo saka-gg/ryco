@@ -2546,9 +2546,8 @@ export const ChatComposer = memo(
               // frost, set by the Transparency preference (opaque at Solid). No
               // border, no rim, no shadow. The fill never changes on hover —
               // the pointer crosses this surface constantly and a hover tint
-              // read as flicker — but focus steps it one tone up, and a
-              // drag-over still tints, because that one has to read as a drop
-              // target.
+              // read as flicker — nor on focus; only a drag-over tints it,
+              // because that one has to read as a drop target.
               "app-composer-surface rounded-[max(0px,calc(var(--radius-3xl)-2px))] border-0 outline-none transition-[background-color,box-shadow] duration-(--app-motion-duration-pop) ease-(--app-motion-ease)",
               isDragOverComposer
                 ? "bg-[color-mix(in_srgb,var(--accent)_38%,var(--app-composer-surface))] ring-1 ring-inset ring-primary/45"
