@@ -321,7 +321,7 @@ describe("provider traits render guards", () => {
       }),
     ).toEqual({
       level: { id: "high", label: "High", index: 0 },
-      fastMode: false,
+      speed: "standard",
       contextWindowLabel: "1M",
     });
   });

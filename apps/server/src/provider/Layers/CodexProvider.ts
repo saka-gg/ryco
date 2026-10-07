@@ -22,6 +22,7 @@ import { createModelCapabilities } from "@ryco/shared/model";
 import { buildServerProvider, type ServerProviderDraft } from "../providerSnapshot.ts";
 import { expandHomePath } from "../../pathExpansion.ts";
 import { scopedSafeTeardown } from "./scopedSafeTeardown.ts";
+import { codexSpeedOptionDescriptors } from "../CodexServiceTier.ts";
 import packageJson from "../../../package.json" with { type: "json" };
 
 const PROVIDER_PROBE_TIMEOUT_MS = 8_000;
@@ -119,7 +120,6 @@ function mapCodexModelCapabilities(
         },
   );
   const defaultReasoning = reasoningOptions.find((option) => option.isDefault)?.id;
-  const supportsFastMode = (model.additionalSpeedTiers ?? []).includes("fast");
   return createModelCapabilities({
     optionDescriptors: [
       ...(reasoningOptions.length > 0
@@ -133,15 +133,7 @@ function mapCodexModelCapabilities(
             },
           ]
         : []),
-      ...(supportsFastMode
-        ? [
-            {
-              id: "fastMode",
-              label: "Fast Mode",
-              type: "boolean" as const,
-            },
-          ]
-        : []),
+      ...codexSpeedOptionDescriptors(model),
     ],
   });
 }

@@ -24,6 +24,7 @@ const EFFORT = {
   ],
 };
 const FAST = { id: "fastMode", label: "Fast Mode", type: "boolean" as const };
+const ULTRAFAST = { id: "ultrafastMode", label: "Ultrafast", type: "boolean" as const };
 const CONTEXT = {
   id: "contextWindow",
   label: "Context Window",
@@ -117,7 +118,7 @@ describe("ComposerModelTuning", () => {
 
   it("toggles fast mode and switches the context window", async () => {
     mounted = await mountDial({ descriptors: [EFFORT, FAST, CONTEXT] });
-    await page.getByRole("button", { name: "Fast mode" }).click();
+    await page.getByRole("button", { name: "Speed" }).click();
     expect(mounted.onModelOptionsChange).toHaveBeenLastCalledWith([
       { id: "effort", value: "high" },
       { id: "fastMode", value: true },
@@ -127,6 +128,44 @@ describe("ComposerModelTuning", () => {
     expect(mounted.onModelOptionsChange).toHaveBeenLastCalledWith([
       { id: "effort", value: "high" },
       { id: "contextWindow", value: "200k" },
+    ]);
+  });
+
+  it("cycles the speed button through Fast and Ultrafast, then back off", async () => {
+    const speedButton = () => page.getByRole("button", { name: "Speed" });
+    mounted = await mountDial({ descriptors: [EFFORT, FAST, ULTRAFAST] });
+    await speedButton().click();
+    expect(mounted.onModelOptionsChange).toHaveBeenLastCalledWith([
+      { id: "effort", value: "high" },
+      { id: "fastMode", value: true },
+      { id: "ultrafastMode", value: false },
+    ]);
+    await mounted.screen.unmount();
+
+    mounted = await mountDial({
+      descriptors: [EFFORT, FAST, ULTRAFAST],
+      modelOptions: [{ id: "fastMode", value: true }],
+    });
+    await expect.element(speedButton()).toHaveAttribute("data-speed-tier", "fast");
+    await speedButton().click();
+    expect(mounted.onModelOptionsChange).toHaveBeenLastCalledWith([
+      { id: "effort", value: "high" },
+      { id: "fastMode", value: false },
+      { id: "ultrafastMode", value: true },
+    ]);
+    await mounted.screen.unmount();
+
+    mounted = await mountDial({
+      descriptors: [EFFORT, FAST, ULTRAFAST],
+      modelOptions: [{ id: "ultrafastMode", value: true }],
+    });
+    await expect.element(speedButton()).toHaveAttribute("data-speed-tier", "ultrafast");
+    expect(document.querySelector('[data-speed-glyph="ultrafast"]')).not.toBeNull();
+    await speedButton().click();
+    expect(mounted.onModelOptionsChange).toHaveBeenLastCalledWith([
+      { id: "effort", value: "high" },
+      { id: "fastMode", value: false },
+      { id: "ultrafastMode", value: false },
     ]);
   });
 
@@ -203,7 +242,7 @@ describe("ComposerModelTuning", () => {
 
   it("blocks every change while disabled", async () => {
     mounted = await mountDial({ descriptors: [EFFORT, FAST], disabled: true });
-    await expect.element(page.getByRole("button", { name: "Fast mode" })).toBeDisabled();
+    await expect.element(page.getByRole("button", { name: "Speed" })).toBeDisabled();
     const slider = document.querySelector<HTMLElement>('[role="slider"]');
     slider?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
     expect(mounted.onModelOptionsChange).not.toHaveBeenCalled();

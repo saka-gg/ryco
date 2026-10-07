@@ -833,7 +833,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
       {hasTuning ? (
         <div
           data-morph-surface=""
-          className="selection-glass-surface relative flex w-screen max-w-100 flex-col overflow-hidden rounded-lg border text-popover-foreground"
+          className="selection-glass-surface relative flex w-screen max-w-100 flex-col max-h-(--available-height) overflow-hidden rounded-lg border text-popover-foreground"
         >
           {pickerBody}
           <div className="border-t" data-slot="model-picker-tuning">
@@ -845,7 +845,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
       ) : (
         <div
           data-morph-surface=""
-          className="selection-glass-surface relative flex overflow-hidden rounded-lg border text-popover-foreground"
+          className="selection-glass-surface relative flex max-h-(--available-height) overflow-hidden rounded-lg border text-popover-foreground"
         >
           {pickerBody}
         </div>

@@ -116,6 +116,10 @@ function PopoverPopup({
               tooltipStyle
                 ? "py-1 [--viewport-inline-padding:--spacing(2)]"
                 : "not-data-transitioning:overflow-y-auto",
+              // A marked surface paints its own plate and shadow (and scrolls
+              // itself); clipping it here would cut off the shadow its morph
+              // ghost carried, so the shadow would vanish at the hand-off.
+              "has-data-morph-surface:overflow-visible!",
               viewportClassName,
             )}
             data-slot="popover-viewport"
