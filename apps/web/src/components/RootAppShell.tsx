@@ -15,6 +15,7 @@ import { SshPasswordPromptDialog } from "./desktop/SshPasswordPromptDialog";
 import { WorkspaceReviewDialog } from "./worktrees/WorkspaceReviewDialog";
 import { useAutomationsDialogStore } from "./automations/automationsDialogStore";
 import { ProviderUpdateLaunchNotification } from "./ProviderUpdateLaunchNotification";
+import { MissedAutomationRunsNotice } from "./automations/MissedAutomationRunsNotice";
 import {
   SlowRpcAckToastCoordinator,
   WebSocketConnectionCoordinator,
@@ -86,6 +87,7 @@ export function RootAppShell({ authGateState }: RootAppShellProps) {
         <SshPasswordPromptDialog />
         <WorkspaceReviewDialog />
         {chatAvailable ? <AutomationsDialogMount /> : null}
+        {chatAvailable ? <MissedAutomationRunsNotice /> : null}
         {authGateState.status === "hosted-static" ? <HostedStaticEnvironmentBootstrap /> : null}
         {primaryEnvironmentAuthenticated ? (
           <EventRouter hosted={authGateState.status === "hosted-hub"} />
