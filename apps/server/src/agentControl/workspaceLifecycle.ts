@@ -135,7 +135,7 @@ export class AgentControlWorkspaces extends Context.Service<
     ) => Effect.Effect<AgentControlWorkspaceState, AgentControlPlanValidationError>;
     readonly revalidate: (
       plan: AgentControlWorkspaceLifecyclePlan,
-      caller: ThreadId,
+      caller: ThreadId | null,
     ) => Effect.Effect<void, AgentControlPlanValidationError>;
   }
 >()("ryco/agentControl/AgentControlWorkspaces") {}

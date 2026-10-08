@@ -150,9 +150,32 @@ Integrations that can request tasks or automations also get `ryco_read_control_r
 `ryco_wait_for_control_request`. They return receipts only for requests that integration created,
 for example an automation proposal awaiting approval.
 
-Standalone integrations cannot send messages, interrupt or update threads, plan or propose
-workspace lifecycle changes, manage projects or settings, or use devices, the computer, or the
-browser.
+### Standalone control requests
+
+Two more opt-in grants let a standalone client request changes. Every such request waits for a
+Ryco user's approval, regardless of runtime mode; standalone requests never execute as routine
+actions. Retrying with the same `requestId` and plan returns the original receipt, even after the
+target changed; reusing a `requestId` with a different plan is refused.
+
+| Grant                        | Tools                                                               |
+| ---------------------------- | ------------------------------------------------------------------- |
+| `external.threads.control`   | `ryco_send_message`, `ryco_interrupt_thread`, `ryco_update_thread`  |
+| `external.workspaces.manage` | `ryco_plan_workspace_lifecycle`, `ryco_propose_workspace_lifecycle` |
+
+A standalone client has no thread of its own, so its authority over a thread is the same ceiling
+that bounds the tasks it can create. Without `external.runtime.full-access` it can only target
+threads in `approval-required` mode and cannot raise a thread's runtime mode. Without
+`external.checkout.shared` it can only target threads in an isolated worktree. A target outside
+the project scope is reported exactly like a missing thread. The request captures the target's
+state, and approval is refused at execution if that state changed (for example, the turn it meant
+to interrupt already finished) or if the integration lost the grant.
+
+Workspace lifecycle requests follow the [governed workspace lifecycle](#governed-workspace-lifecycle)
+rules unchanged. A standalone client has no current workspace, so none is protected as current;
+main, active, and unverifiable workspaces stay blocked.
+
+Standalone integrations cannot create or remove projects, change settings, or use devices, the
+computer, or the browser.
 
 ## Repair and disconnect
 
@@ -233,7 +256,8 @@ or recreates user files; inspect current state and prepare a new approved plan f
 remaining work. A failed receipt is not a claim that nothing changed.
 
 Standalone integrations with `external.workspaces.read` can list and read workspaces in
-allowed projects, but they do not advertise or accept the plan and propose lifecycle tools.
-This does not expand their authority to other Ryco sessions or workspace histories. The private catalog is shared across supported
+allowed projects. Only `external.workspaces.manage` adds the plan and propose lifecycle tools,
+and those requests always need approval (see
+[Standalone control requests](#standalone-control-requests)). The private catalog is shared across supported
 provider injection paths. No hosted, mobile authorization, or service-worker policy changes
 are involved.

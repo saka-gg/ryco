@@ -838,3 +838,250 @@ it.effect(
       assert.strictEqual(unavailable.reason, "project-scope");
     }),
 );
+
+const externalIntegration = (
+  capabilities: AgentControlExternalIntegration["capabilities"],
+): AgentControlExternalIntegration => ({
+  integrationId: AgentControlIntegrationId.make("integration-control"),
+  displayName: "External Codex",
+  clientKind: "codex",
+  projectScope: { kind: "selected", projectIds: [projectId] },
+  capabilities,
+  rateLimitPerMinute: 60,
+  activeTaskLimit: 1,
+  activeTaskCount: 0,
+  expiresAt: null,
+  revokedAt: null,
+  pairingState: "paired",
+  pairingCodeExpiresAt: null,
+  pairedAt: now,
+  createdAt: now,
+  updatedAt: now,
+  lastUsedAt: null,
+});
+
+const approvedProposal = (
+  principal: AgentControlProposal["principal"],
+  plan: AgentControlProposal["plan"],
+): AgentControlProposal => ({
+  proposalId: AgentControlProposalId.make("proposal-external-control"),
+  requestId: AgentControlRequestId.make("request-external-control"),
+  principal,
+  planVersion: 1,
+  plan,
+  planDigest: "d".repeat(64),
+  riskTags: [],
+  promptSummary: "External thread control",
+  status: "approved",
+  createdAt: now,
+  updatedAt: now,
+  expiresAt: "2099-01-01T00:00:00.000Z",
+  decidedAt: now,
+  result: null,
+});
+
+it.effect(
+  "external thread control stays within grants, project scope, and captured target state",
+  () =>
+    Effect.gen(function* () {
+      const C = AGENT_CONTROL_CAPABILITIES;
+      const runningTarget = thread({
+        id: targetThreadId,
+        runtimeMode: "approval-required",
+        envMode: "worktree",
+        running: true,
+      });
+      const hiddenThreadId = ThreadId.make("thread-hidden");
+      const hidden = {
+        ...thread({ id: hiddenThreadId, runtimeMode: "approval-required", envMode: "worktree" }),
+        projectId: ProjectId.make("project-hidden"),
+      };
+      const snapshot = yield* Ref.make<OrchestrationShellSnapshot>({
+        ...makeSnapshot(undefined, runningTarget),
+        threads: [runningTarget, hidden],
+      });
+      const providers = yield* Ref.make<ReadonlyArray<typeof provider>>([provider]);
+      const integrationRef = yield* Ref.make(externalIntegration([C.externalControlThreads]));
+      const validator = makeValidator(snapshot, providers, [], () => Ref.get(integrationRef));
+      const submit = (
+        plan: AgentControlProposal["plan"],
+        integration?: AgentControlExternalIntegration,
+      ) =>
+        Effect.gen(function* () {
+          return yield* validator.validateExternalSubmission({
+            integration: integration ?? (yield* Ref.get(integrationRef)),
+            plan,
+          });
+        });
+      const interrupt = { kind: "interruptThread" as const, threadId: targetThreadId };
+
+      const ungranted = yield* Effect.flip(submit(interrupt, externalIntegration([])));
+      assert.strictEqual(ungranted.reason, "privilege-escalation");
+
+      // An out-of-scope target is indistinguishable from a missing one.
+      const outOfScope = yield* Effect.flip(submit({ ...interrupt, threadId: hiddenThreadId }));
+      const missing = yield* Effect.flip(
+        submit({ ...interrupt, threadId: ThreadId.make("thread-missing") }),
+      );
+      assert.deepStrictEqual(
+        [outOfScope.reason, outOfScope.detail],
+        [missing.reason, missing.detail],
+      );
+
+      const principal = yield* submit(interrupt);
+      assert.strictEqual(principal.runtimeMode, "approval-required");
+      assert.strictEqual(principal.envMode, "worktree");
+      assert.deepStrictEqual(principal.targetSnapshots, [
+        {
+          threadId: targetThreadId,
+          projectId,
+          runtimeMode: "approval-required",
+          envMode: "worktree",
+          archived: false,
+          activeTurnId: TurnId.make("turn-target"),
+        },
+      ]);
+
+      const elevated = yield* Effect.flip(
+        submit({ kind: "updateThread", threadId: targetThreadId, runtimeMode: "full-access" }),
+      );
+      assert.strictEqual(elevated.reason, "privilege-escalation");
+
+      const proposal = approvedProposal(principal, interrupt);
+      yield* validator.revalidateExecution(proposal);
+      yield* Ref.update(snapshot, (current) => ({
+        ...current,
+        threads: current.threads.map((candidate) =>
+          candidate.id === targetThreadId
+            ? {
+                ...candidate,
+                session: { ...candidate.session!, activeTurnId: TurnId.make("next") },
+              }
+            : candidate,
+        ),
+      }));
+      assert.strictEqual(
+        (yield* Effect.flip(validator.revalidateExecution(proposal))).reason,
+        "thread-stale",
+      );
+      yield* Ref.update(integrationRef, (current) => ({ ...current, capabilities: [] }));
+      assert.strictEqual(
+        (yield* Effect.flip(validator.revalidateExecution(proposal))).reason,
+        "caller-stale",
+      );
+    }),
+);
+
+it.effect(
+  "external thread control ceilings follow the full-access and shared-checkout grants",
+  () =>
+    Effect.gen(function* () {
+      const C = AGENT_CONTROL_CAPABILITIES;
+      const providers = yield* Ref.make<ReadonlyArray<typeof provider>>([provider]);
+      const send = {
+        kind: "sendMessage" as const,
+        threadId: targetThreadId,
+        text: "Continue.",
+        delivery: "queue" as const,
+      };
+      const attempt = (
+        target: Parameters<typeof thread>[0],
+        capabilities: AgentControlExternalIntegration["capabilities"],
+      ) =>
+        Effect.gen(function* () {
+          const snapshot = yield* Ref.make(makeSnapshot(undefined, thread(target)));
+          return yield* Effect.exit(
+            makeValidator(snapshot, providers).validateExternalSubmission({
+              integration: externalIntegration(capabilities),
+              plan: send,
+            }),
+          );
+        });
+      const autoTarget = { id: targetThreadId, runtimeMode: "auto", envMode: "worktree" } as const;
+      const localTarget = {
+        id: targetThreadId,
+        runtimeMode: "approval-required",
+        envMode: "local",
+      } as const;
+
+      const auto = yield* attempt(autoTarget, [C.externalControlThreads]);
+      assert.isTrue(auto._tag === "Failure");
+      const autoGranted = yield* attempt(autoTarget, [
+        C.externalControlThreads,
+        C.externalFullAccess,
+      ]);
+      assert.strictEqual(autoGranted._tag, "Success");
+
+      const local = yield* Effect.flip(
+        Effect.gen(function* () {
+          const snapshot = yield* Ref.make(makeSnapshot(undefined, thread(localTarget)));
+          return yield* makeValidator(snapshot, providers).validateExternalSubmission({
+            integration: externalIntegration([C.externalControlThreads]),
+            plan: send,
+          });
+        }),
+      );
+      assert.strictEqual(local.reason, "worktree-escalation");
+      const localGranted = yield* attempt(localTarget, [
+        C.externalControlThreads,
+        C.externalSharedCheckout,
+      ]);
+      assert.strictEqual(localGranted._tag, "Success");
+    }),
+);
+
+it.effect("external workspace lifecycle requires its grant, project scope, and no caller", () =>
+  Effect.gen(function* () {
+    const C = AGENT_CONTROL_CAPABILITIES;
+    const snapshot = yield* Ref.make(makeSnapshot());
+    const providers = yield* Ref.make<ReadonlyArray<typeof provider>>([provider]);
+    const callers: Array<ThreadId | null> = [];
+    const workspaces: typeof AgentControlWorkspaces.Service = {
+      list: () => Effect.die("unused"),
+      read: () => Effect.die("unused"),
+      revalidate: (_plan, caller) => Effect.sync(() => void callers.push(caller)),
+    };
+    const integrationRef = yield* Ref.make(externalIntegration([C.externalManageWorkspaces]));
+    const validator = makeValidator(
+      snapshot,
+      providers,
+      [],
+      () => Ref.get(integrationRef),
+      undefined,
+      undefined,
+      undefined,
+      workspaces,
+    );
+
+    const ungranted = yield* Effect.flip(
+      validator.validateExternalSubmission({
+        integration: externalIntegration([C.externalReadWorkspaces]),
+        plan: workspacePlan,
+      }),
+    );
+    assert.strictEqual(ungranted.reason, "privilege-escalation");
+    const outOfScope = yield* Effect.flip(
+      validator.validateExternalSubmission({
+        integration: yield* Ref.get(integrationRef),
+        plan: { ...workspacePlan, projectId: ProjectId.make("project-hidden") },
+      }),
+    );
+    assert.strictEqual(outOfScope.reason, "project-scope");
+    assert.deepStrictEqual(callers, []);
+
+    const principal = yield* validator.validateExternalSubmission({
+      integration: yield* Ref.get(integrationRef),
+      plan: workspacePlan,
+    });
+    assert.strictEqual(principal.projectId, projectId);
+    const proposal = approvedProposal(principal, workspacePlan);
+    yield* validator.revalidateExecution(proposal);
+    assert.deepStrictEqual(callers, [null, null]);
+
+    yield* Ref.update(integrationRef, (current) => ({ ...current, capabilities: [] }));
+    assert.strictEqual(
+      (yield* Effect.flip(validator.revalidateExecution(proposal))).reason,
+      "caller-stale",
+    );
+  }),
+);
