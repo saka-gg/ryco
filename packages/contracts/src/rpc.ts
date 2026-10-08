@@ -41,6 +41,8 @@ import {
 import {
   GitReadLineBlameInput,
   GitReadLineBlameResult,
+  GitReadImageBlobInput,
+  GitReadImageBlobResult,
   GitLocalChangesInput,
   GitLocalChangesResult,
   GitApplyIndexPatchInput,
@@ -407,6 +409,7 @@ export const WS_METHODS = {
   vcsRefreshStatus: "vcs.refreshStatus",
   vcsListRefs: "vcs.listRefs",
   vcsReadLineBlame: "vcs.readLineBlame",
+  vcsReadImageBlob: "vcs.readImageBlob",
   vcsReadLocalChanges: "vcs.readLocalChanges",
   vcsApplyIndexPatch: "vcs.applyIndexPatch",
   vcsReadComparison: "vcs.readComparison",
@@ -1759,6 +1762,12 @@ export const WsVcsReadLineBlameRpc = Rpc.make(WS_METHODS.vcsReadLineBlame, {
   error: Schema.Union([GitCommandError, AuthRpcError]),
 });
 
+export const WsVcsReadImageBlobRpc = Rpc.make(WS_METHODS.vcsReadImageBlob, {
+  payload: GitReadImageBlobInput,
+  success: GitReadImageBlobResult,
+  error: Schema.Union([GitCommandError, AuthRpcError]),
+});
+
 export const WsVcsReadLocalChangesRpc = Rpc.make(WS_METHODS.vcsReadLocalChanges, {
   payload: GitLocalChangesInput,
   success: GitLocalChangesResult,
@@ -2310,6 +2319,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsWorktreesSetManualPositionRpc
   | typeof WsProjectsInitializeGitRpc
   | typeof WsVcsReadLineBlameRpc
+  | typeof WsVcsReadImageBlobRpc
   | typeof WsVcsReadLocalChangesRpc
   | typeof WsVcsApplyIndexPatchRpc
   | typeof WsVcsReadComparisonRpc
@@ -2502,6 +2512,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsWorktreesSetManualPositionRpc,
   WsProjectsInitializeGitRpc,
   WsVcsReadLineBlameRpc,
+  WsVcsReadImageBlobRpc,
   WsVcsReadLocalChangesRpc,
   WsVcsApplyIndexPatchRpc,
   WsVcsReadComparisonRpc,

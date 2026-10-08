@@ -222,6 +222,7 @@ export interface WsRpcClient {
   };
   readonly vcs: {
     readonly readLineBlame: RpcUnaryMethod<typeof WS_METHODS.vcsReadLineBlame>;
+    readonly readImageBlob: RpcUnaryMethod<typeof WS_METHODS.vcsReadImageBlob>;
     readonly readLocalChanges: RpcUnaryMethod<typeof WS_METHODS.vcsReadLocalChanges>;
     readonly applyIndexPatch: RpcUnaryMethod<typeof WS_METHODS.vcsApplyIndexPatch>;
     readonly readComparison: RpcUnaryMethod<typeof WS_METHODS.vcsReadComparison>;
@@ -669,6 +670,8 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
       },
       readLineBlame: (input) =>
         transport.request((client) => client[WS_METHODS.vcsReadLineBlame](input)),
+      readImageBlob: (input) =>
+        transport.request((client) => client[WS_METHODS.vcsReadImageBlob](input)),
       readLocalChanges: (input) =>
         transport.request((client) => client[WS_METHODS.vcsReadLocalChanges](input)),
       applyIndexPatch: (input) =>

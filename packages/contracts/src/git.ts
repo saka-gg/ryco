@@ -524,6 +524,27 @@ export const GitReadLineBlameResult = Schema.Union([
 ]);
 export type GitReadLineBlameResult = typeof GitReadLineBlameResult.Type;
 
+/**
+ * One stored blob named by a review patch's `index` line. Patches without
+ * `--full-index` carry abbreviated IDs. No path, index or working-tree lookup.
+ */
+export const GitReadImageBlobInput = Schema.Struct({
+  cwd: TrimmedNonEmptyStringSchema,
+  oid: Schema.String.check(Schema.isPattern(/^(?:[0-9a-f]{4,40}|[0-9a-f]{64})$/)),
+});
+export type GitReadImageBlobInput = typeof GitReadImageBlobInput.Type;
+/** The mime type is sniffed from the blob's bytes, never from a path. */
+export const GitReadImageBlobResult = Schema.Union([
+  Schema.Struct({
+    kind: Schema.Literal("image"),
+    dataBase64: Schema.String,
+    mimeType: TrimmedNonEmptyStringSchema,
+    sizeBytes: NonNegativeInt,
+  }),
+  Schema.Struct({ kind: Schema.Literal("unavailable"), reason: Schema.String }),
+]);
+export type GitReadImageBlobResult = typeof GitReadImageBlobResult.Type;
+
 export const GitLocalChangesInput = Schema.Struct({ cwd: TrimmedNonEmptyStringSchema });
 export type GitLocalChangesInput = typeof GitLocalChangesInput.Type;
 export const GitLocalChangesScope = Schema.Literals(["staged", "unstaged"]);

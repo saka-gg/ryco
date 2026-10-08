@@ -306,6 +306,12 @@ export const makeGitHandlers = (ctx: WsRpcContext) => {
         ownerEffect(WS_METHODS.vcsReadLineBlame, gitWorkflow.readLineBlame(input)),
         { "rpc.aggregate": "vcs" },
       ),
+    [WS_METHODS.vcsReadImageBlob]: (input) =>
+      observeRpcEffect(
+        WS_METHODS.vcsReadImageBlob,
+        ownerEffect(WS_METHODS.vcsReadImageBlob, gitWorkflow.readImageBlob(input)),
+        { "rpc.aggregate": "vcs" },
+      ),
     [WS_METHODS.vcsReadLocalChanges]: (input) =>
       observeRpcEffect(
         WS_METHODS.vcsReadLocalChanges,
