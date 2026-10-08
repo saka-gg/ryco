@@ -9,6 +9,10 @@ import {
   type CrownSnapshot,
 } from "./crownAlerts.logic";
 import {
+  auditWorkflowAgents,
+  crownAgentPanelFixture,
+  crownDirectAgents,
+  makeAgentPanelModel,
   makeChanges,
   makeCheckStatus,
   makeLayout,
@@ -19,7 +23,9 @@ import {
   makeRun,
   makeSnapshot,
   makeSubagent,
+  makeWorkflowMember,
 } from "./crownTestFixtures";
+import { makeRuntimeAgent } from "../../agents/agentRosterTestFixtures";
 
 const NOW = 1_000_000;
 const CTX: CrownDiffContext = { nowMs: NOW, suppressGitUntilMs: 0, turnOutcome: null };
@@ -97,7 +103,7 @@ describe("buildCrownSnapshot", () => {
           ["One", "completed"],
           ["Two", "inProgress"],
         ]),
-        subagents: [makeSubagent("agent:a", "running", "Scout")],
+        agentPanelModel: makeAgentPanelModel(crownDirectAgents()),
       }),
       latestTurn: {
         turnId: "turn-1",
@@ -131,7 +137,13 @@ describe("buildCrownSnapshot", () => {
       prSettled: true,
       branch: { refName: "feature/crown", ahead: 2, behind: 1 },
       plan: { turnId: "turn-1", completedSteps: ["One"], total: 2 },
-      subagents: { "agent:a": { status: "running", name: "Scout" } },
+      agents: {
+        direct: {
+          "agent-scout": { status: "running", name: "Scout" },
+          "agent-docs": { status: "completed", name: "Docs writer" },
+        },
+        workflows: {},
+      },
       fileCount: 1,
       notes: null,
     });
@@ -270,11 +282,11 @@ describe("diffCrownSnapshots baseline", () => {
   });
 
   it("is silent on a thread switch", () => {
-    const prev = snap({ checks: checks(), subagents: {} });
+    const prev = snap({ checks: checks() });
     const next = snap({
       scopeKey: "thread-2|/repo",
       checks: checks({ kind: "failed", failed: ["lint"] }),
-      subagents: { a: { status: "running", name: "Scout" } },
+      agents: { direct: { a: { status: "running", name: "Scout" } }, workflows: {} },
       branch: { refName: "feature/crown", ahead: 5, behind: 0 },
     });
     assert.deepEqual(diff(prev, next), []);
@@ -594,70 +606,73 @@ describe("diffCrownSnapshots branch", () => {
   });
 });
 
-describe("diffCrownSnapshots subagents", () => {
-  const agents = (entries: Record<string, CrownSnapshot["subagents"][string]["status"]>) =>
-    Object.fromEntries(
+describe("diffCrownSnapshots direct agents", () => {
+  type Status = CrownSnapshot["agents"]["direct"][string]["status"];
+  const agents = (entries: Record<string, Status>): CrownSnapshot["agents"] => ({
+    direct: Object.fromEntries(
       Object.entries(entries).map(([key, status]) => [key, { status, name: key.toUpperCase() }]),
-    );
-
-  it("announces a subagent starting", () => {
-    const event = only(diff(snap(), snap({ subagents: agents({ a: "running" }) })));
-    assert.deepInclude(event, {
-      kind: "subagent",
-      section: "agents",
-      railKey: "agents",
-      tone: "agent",
-      icon: "bot",
-      title: "A started",
-      loud: true,
-    });
+    ),
+    workflows: {},
   });
 
-  it("announces a subagent finishing", () => {
-    const event = only(
-      diff(
-        snap({ subagents: agents({ a: "running" }) }),
-        snap({ subagents: agents({ a: "finished" }) }),
-      ),
-    );
-    assert.deepInclude(event, { tone: "agent", title: "A finished", loud: true });
+  it("announces an agent starting, queued or running", () => {
+    for (const status of ["running", "pending", "waiting"] as const) {
+      const event = only(diff(snap(), snap({ agents: agents({ a: status }) })));
+      assert.deepInclude(event, {
+        kind: "subagent",
+        section: "agents",
+        railKey: "agents",
+        tone: "agent",
+        icon: "bot",
+        title: "A started",
+        loud: true,
+        dedupeKey: "subagent:a:started",
+      });
+    }
   });
 
-  it("asks for review when a subagent fails", () => {
+  it("announces an agent finishing from any live state", () => {
+    for (const before of ["running", "waiting", "idle"] as const) {
+      const event = only(
+        diff(snap({ agents: agents({ a: before }) }), snap({ agents: agents({ a: "completed" }) })),
+      );
+      assert.deepInclude(event, { tone: "agent", title: "A finished", loud: true });
+    }
+  });
+
+  it("asks for review when an agent fails", () => {
     const event = only(
-      diff(
-        snap({ subagents: agents({ a: "running" }) }),
-        snap({ subagents: agents({ a: "failed" }) }),
-      ),
+      diff(snap({ agents: agents({ a: "running" }) }), snap({ agents: agents({ a: "failed" }) })),
     );
     assert.deepInclude(event, { tone: "danger", title: "A needs review", loud: true });
   });
 
-  it("never alerts for interruptions", () => {
+  it("never alerts for interruptions or cancellations", () => {
+    for (const stopped of ["interrupted", "cancelled"] as const) {
+      assert.deepEqual(
+        diff(snap({ agents: agents({ a: "running" }) }), snap({ agents: agents({ a: stopped }) })),
+        [],
+      );
+    }
     assert.deepEqual(
       diff(
-        snap({ subagents: agents({ a: "running" }) }),
-        snap({ subagents: agents({ a: "interrupted" }) }),
-      ),
-      [],
-    );
-    assert.deepEqual(
-      diff(
-        snap({ subagents: agents({ a: "interrupted" }) }),
-        snap({ subagents: agents({ a: "failed" }) }),
+        snap({ agents: agents({ a: "interrupted" }) }),
+        snap({ agents: agents({ a: "failed" }) }),
       ),
       [],
     );
   });
 
-  it("does not announce a subagent that appears already finished", () => {
-    assert.deepEqual(diff(snap(), snap({ subagents: agents({ a: "finished" }) })), []);
+  it("does not announce an agent that appears already settled or idle", () => {
+    for (const status of ["completed", "idle", "cancelled"] as const) {
+      assert.deepEqual(diff(snap(), snap({ agents: agents({ a: status }) })), []);
+    }
   });
 
   it("keeps two events separate", () => {
     const events = diff(
-      snap({ subagents: agents({ a: "running", b: "running" }) }),
-      snap({ subagents: agents({ a: "finished", b: "finished" }) }),
+      snap({ agents: agents({ a: "running", b: "running" }) }),
+      snap({ agents: agents({ a: "completed", b: "completed" }) }),
     );
     assert.deepEqual(
       events.map((event) => event.title),
@@ -668,8 +683,8 @@ describe("diffCrownSnapshots subagents", () => {
   it("collapses a burst of three or more into one event", () => {
     const event = only(
       diff(
-        snap({ subagents: agents({ a: "running", b: "running", c: "running" }) }),
-        snap({ subagents: agents({ a: "finished", b: "finished", c: "finished" }) }),
+        snap({ agents: agents({ a: "running", b: "running", c: "running" }) }),
+        snap({ agents: agents({ a: "completed", b: "completed", c: "completed" }) }),
       ),
     );
     assert.deepInclude(event, {
@@ -683,11 +698,225 @@ describe("diffCrownSnapshots subagents", () => {
   it("collapses a mixed burst and keeps the danger tone", () => {
     const event = only(
       diff(
-        snap({ subagents: agents({ a: "running", b: "running" }) }),
-        snap({ subagents: agents({ a: "finished", b: "failed", c: "running" }) }),
+        snap({ agents: agents({ a: "running", b: "running" }) }),
+        snap({ agents: agents({ a: "completed", b: "failed", c: "running" }) }),
       ),
     );
     assert.deepInclude(event, { title: "3 subagent updates", tone: "danger" });
+  });
+
+  it("does not re-announce a transcript row that yields to its native row", () => {
+    const agentsSnap = (id: string) =>
+      snap({
+        agents: buildCrownSnapshot({
+          scopeKey: "thread-1|/repo",
+          layout: makeLayout({
+            agentPanelModel: makeAgentPanelModel([makeRuntimeAgent(id, { status: "running" })]),
+          }),
+          latestTurn: null,
+          turnSettled: true,
+          agentRunning: false,
+          readiness: READY,
+        }).agents,
+      });
+    assert.deepEqual(diff(agentsSnap("subagent:shared"), agentsSnap("shared")), []);
+  });
+});
+
+describe("diffCrownSnapshots workflows", () => {
+  type AuditStatuses = Parameters<typeof auditWorkflowAgents>[0];
+  /** A snapshot of the `wf-audit` run (plus anything else) built the way the crown builds it. */
+  const agentsSnap = (agents: ReturnType<typeof auditWorkflowAgents>) =>
+    snap({
+      agents: buildCrownSnapshot({
+        scopeKey: "thread-1|/repo",
+        layout: makeLayout({ agentPanelModel: makeAgentPanelModel(agents) }),
+        latestTurn: null,
+        turnSettled: true,
+        agentRunning: false,
+        readiness: READY,
+      }).agents,
+    });
+  const audit = (statuses: AuditStatuses = {}) => agentsSnap(auditWorkflowAgents(statuses));
+  const healthy = { members: { types: "running" } } as const satisfies AuditStatuses;
+
+  it("snapshots a run by its coordinator, never member by member", () => {
+    assert.deepEqual(audit().agents, {
+      direct: {},
+      workflows: {
+        "wf-audit": {
+          name: "Audit",
+          status: "running",
+          phaseCount: 3,
+          memberCount: 4,
+          failedMemberIds: ["wf-audit:types"],
+          firstFailedName: "work:types",
+        },
+      },
+    });
+  });
+
+  it("announces a run starting with its phase count", () => {
+    const event = only(diff(snap(), audit(healthy)));
+    assert.deepInclude(event, {
+      kind: "subagent",
+      section: "agents",
+      railKey: "agents",
+      icon: "workflow",
+      tone: "agent",
+      title: "Workflow Audit started",
+      sub: "3 phases",
+      loud: true,
+      dedupeKey: "workflow:wf-audit:started",
+    });
+  });
+
+  it("does not announce a run that appears already settled", () => {
+    assert.deepEqual(diff(snap(), audit({ coordinator: "completed" })), []);
+  });
+
+  it("stays quiet while members start and finish", () => {
+    assert.deepEqual(
+      diff(
+        audit({ members: { types: "running", card: "pending", alerts: "pending" } }),
+        audit({ members: { types: "completed", card: "running", alerts: "completed" } }),
+      ),
+      [],
+    );
+  });
+
+  it("announces newly failed members once per set of failures", () => {
+    const event = only(diff(audit(healthy), audit()));
+    assert.deepInclude(event, {
+      icon: "workflow",
+      tone: "danger",
+      title: "Audit: 1 failed",
+      sub: "work:types",
+      loud: true,
+      dedupeKey: "workflow:wf-audit:failed:wf-audit:types",
+    });
+    // A second failure is a new set; an unchanged set never re-alerts.
+    const second = only(diff(audit(), audit({ members: { card: "failed" } })));
+    assert.deepInclude(second, {
+      title: "Audit: 2 failed",
+      dedupeKey: "workflow:wf-audit:failed:wf-audit:card,wf-audit:types",
+    });
+    assert.deepEqual(diff(audit(), audit({ members: { alerts: "running" } })), []);
+  });
+
+  it("announces a run finishing with its agent count", () => {
+    const event = only(
+      diff(
+        audit({ members: { types: "completed" } }),
+        audit({ coordinator: "completed", members: { types: "completed", card: "completed" } }),
+      ),
+    );
+    assert.deepInclude(event, {
+      icon: "workflow",
+      tone: "agent",
+      title: "Audit finished",
+      sub: "4 agents",
+      dedupeKey: "workflow:wf-audit:finished",
+    });
+  });
+
+  it("reports failed members when a run finishes, in the danger tone", () => {
+    const event = only(
+      diff(audit(), audit({ coordinator: "completed", members: { card: "completed" } })),
+    );
+    assert.deepInclude(event, {
+      tone: "danger",
+      title: "Audit finished",
+      sub: "1 of 4 agents failed",
+    });
+  });
+
+  it("announces a coordinator failing on its own", () => {
+    const fine = { members: { types: "completed" } } as const;
+    const event = only(diff(audit(fine), audit({ ...fine, coordinator: "failed" })));
+    assert.deepInclude(event, {
+      tone: "danger",
+      title: "Audit failed",
+      dedupeKey: "workflow:wf-audit:failed",
+    });
+    // With failed members, their alert already said it.
+    assert.deepEqual(diff(audit(), audit({ coordinator: "failed" })), []);
+  });
+
+  it("never alerts for an interrupted or cancelled run", () => {
+    for (const stopped of ["interrupted", "cancelled"] as const) {
+      assert.deepEqual(diff(audit(healthy), audit({ ...healthy, coordinator: stopped })), []);
+    }
+    assert.deepEqual(
+      diff(
+        audit({ ...healthy, coordinator: "interrupted" }),
+        audit({ ...healthy, coordinator: "failed" }),
+      ),
+      [],
+    );
+  });
+
+  it("alerts direct agents beside a run without counting members as direct", () => {
+    const events = diff(
+      agentsSnap(auditWorkflowAgents(healthy)),
+      agentsSnap([
+        ...auditWorkflowAgents({ members: { types: "completed", card: "completed" } }),
+        makeRuntimeAgent("agent-scout", { title: "Scout" }),
+      ]),
+    );
+    assert.deepEqual(
+      events.map((event) => event.title),
+      ["Scout started"],
+    );
+  });
+
+  it("labels members the way their rows do and memoises the snapshot per model", () => {
+    // The retry of `work:types` failed; the first attempt completed.
+    const model = makeAgentPanelModel([
+      ...auditWorkflowAgents({ members: { types: "completed" } }),
+      makeWorkflowMember("wf-audit:retry", "wf-audit", 0, {
+        title: "work:types",
+        agentIndex: 9,
+        status: "failed",
+      }),
+    ]);
+    const build = () =>
+      buildCrownSnapshot({
+        scopeKey: "scope",
+        layout: makeLayout({ agentPanelModel: model }),
+        latestTurn: null,
+        turnSettled: true,
+        agentRunning: false,
+        readiness: READY,
+      }).agents;
+    const first = build();
+    // Colliding labels are numbered apart, as in the Agents tab.
+    assert.deepEqual(first.workflows["wf-audit"]?.failedMemberIds, ["wf-audit:retry"]);
+    assert.equal(first.workflows["wf-audit"]?.firstFailedName, "work:types 2");
+    assert.equal(build(), first);
+    assert.notEqual(
+      buildCrownSnapshot({
+        scopeKey: "scope",
+        layout: makeLayout({ agentPanelModel: crownAgentPanelFixture() }),
+        latestTurn: null,
+        turnSettled: true,
+        agentRunning: false,
+        readiness: READY,
+      }).agents,
+      first,
+    );
+  });
+
+  it("ignores the transcript subagents list", () => {
+    const snapshot = buildCrownSnapshot({
+      scopeKey: "scope",
+      layout: makeLayout({ subagents: [makeSubagent("agent:a", "running", "Scout")] }),
+      latestTurn: null,
+      turnSettled: true,
+      agentRunning: false,
+      readiness: READY,
+    });
+    assert.deepEqual(snapshot.agents, { direct: {}, workflows: {} });
   });
 });
 

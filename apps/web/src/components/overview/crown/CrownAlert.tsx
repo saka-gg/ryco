@@ -7,6 +7,7 @@ import {
   GitPullRequestIcon,
   NotebookPenIcon,
   SparklesIcon,
+  WorkflowIcon,
   type LucideIcon,
 } from "lucide-react";
 import { useLayoutEffect, useRef, type MouseEvent, type Ref } from "react";
@@ -23,6 +24,7 @@ const ALERT_ICON: Record<AlertIconKey, LucideIcon> = {
   upload: CloudUploadIcon,
   commit: GitCommitHorizontalIcon,
   bot: BotIcon,
+  workflow: WorkflowIcon,
   pr: GitPullRequestIcon,
   sparkles: SparklesIcon,
   turn: CircleCheckIcon,

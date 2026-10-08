@@ -1,6 +1,6 @@
 import { ExternalLinkIcon, GitPullRequestIcon } from "lucide-react";
 
-import { prefersExternalPullRequestLink } from "~/pullRequestsRoute";
+import { handleInAppLinkClick } from "~/pullRequestsRoute";
 
 import { changeRequestStateKind, StateBadge } from "../../../projectExplorer/StateBadge";
 import { Button } from "../../../ui/button";
@@ -50,11 +50,7 @@ function OpenPullRequestAction({
             href={url}
             target="_blank"
             rel="noreferrer"
-            onClick={(event) => {
-              if (!onOpenInApp || prefersExternalPullRequestLink(event)) return;
-              event.preventDefault();
-              onOpenInApp();
-            }}
+            onClick={(event) => handleInAppLinkClick(event, onOpenInApp)}
           />
         }
       >

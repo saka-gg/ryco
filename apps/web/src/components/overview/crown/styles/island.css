@@ -43,7 +43,7 @@ html:not(.dark) .crown-mat {
     0 0 32px -8px var(--tone);
 }
 
-/* Face: CI ring, headline glyph, "+N" queued alerts. */
+/* Face: the project logo, a status dot on its edge, "+N" queued alerts. */
 .crown-face {
   position: absolute;
   z-index: 2;
@@ -65,37 +65,76 @@ html:not(.dark) .crown-mat {
   outline-offset: -2px;
 }
 
-.crown-face-ring {
-  width: 40px;
-  height: 40px;
-}
-
-.crown-face-ring .crown-ring-track {
-  stroke: rgba(255, 255, 255, 0.08);
-}
-
-.crown-face-glyph {
+/* The logo disc. A monogram fills it; real artwork sits on a light plate so dark favicons stay visible. */
+.crown-face-logo {
   display: grid;
+  width: 38px;
+  height: 38px;
   place-items: center;
-  color: var(--tone);
+  border-radius: 50%;
+  overflow: clip;
+  background: rgba(255, 255, 255, 0.06);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12);
+  transition: background-color var(--crown-dur-logo);
 }
 
-.crown-face-glyph > svg {
+.crown-face-logo > * {
+  grid-area: 1 / 1;
+  width: 100%;
+  height: 100%;
+}
+
+/* Light plate: scheme-aware SVG favicons pick their light-background variant
+   (the crown itself is dark, which would otherwise select their dark one). */
+.crown-face-logo:has(> img[data-state="loaded"]) {
+  background: #ececed;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.18);
+  color-scheme: light;
+}
+
+/* The artwork fades in over the monogram it replaces. */
+.crown-face-logo > img {
+  object-fit: contain;
+  padding: 5px;
+  animation: crown-face-logo-in var(--crown-dur-logo) var(--crown-ease-out);
+}
+
+.crown-face-logo > .crown-face-folder {
   width: 16px;
   height: 16px;
-  stroke-width: 2.2;
+  color: var(--muted-foreground);
 }
 
-.crown-face-glyph > .crown-spin {
-  width: 15px;
-  height: 15px;
-}
-
-.crown-face-dot {
-  width: 7px;
-  height: 7px;
+/*
+ * Status dot: on the logo's bottom-right edge (45deg), cut out by a ring in the
+ * island's material. Its centre sits 17px out (just inside the 19px logo edge)
+ * so the dot clears the island's round clip (23px inside the border); only the
+ * ring, which matches the island, may be clipped.
+ */
+.crown-face-status {
+  position: absolute;
+  top: calc(50% + 17px * 0.7071 - 5.5px);
+  left: calc(50% + 17px * 0.7071 - 5.5px);
+  width: 11px;
+  height: 11px;
   border-radius: 50%;
-  background: currentColor;
+  background: var(--tone);
+  box-shadow: 0 0 0 2px #0d0d0e;
+  transition:
+    background-color var(--crown-dur-dot-color),
+    transform var(--crown-dur-dot) var(--crown-ease-spring),
+    opacity var(--crown-dur-badge-fade);
+}
+
+.crown-face-status[data-tone="neutral"] {
+  opacity: 0;
+  transform: scale(0);
+}
+
+/* Only the fill breathes: the dot and its cut-out ring never go translucent. */
+.crown-face-status[data-pulse="true"] {
+  animation: crown-face-status-pulse 1.1s ease-in-out infinite;
+  animation-play-state: var(--app-motion-activity-play-state, running);
 }
 
 .crown-queue {

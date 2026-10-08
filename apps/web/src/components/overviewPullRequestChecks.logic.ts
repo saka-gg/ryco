@@ -5,6 +5,7 @@ import type {
   SourceControlWorkflowRun,
   SourceControlWorkflowStep,
 } from "@ryco/contracts";
+import { pullRequestCheckJobParam } from "@ryco/client-runtime/state/pull-request-review";
 
 import {
   getCheckStatusFromRaw,
@@ -42,6 +43,13 @@ export interface OverviewWorkflowCheckRow {
   statusKind: PrCheckStatusView["kind"];
   tone: PrCheckStatusView["tone"];
   url?: string;
+  /**
+   * The PR reader's Checks-tab `job` value that lands on this row's job: the
+   * job id for Actions job rows, the shared rollup value for check runs.
+   * Absent for workflow-run rows and status contexts, which open the Checks
+   * tab only.
+   */
+  jobParam?: string;
 }
 
 type CheckStatusView = Pick<PrCheckStatusView, "kind" | "tone">;
@@ -181,6 +189,7 @@ function workflowJobRow(input: {
     tone: status.tone,
     statusKind: status.kind,
     url: jobUrl ?? input.run.url,
+    jobParam: input.job.jobId,
   };
   if (detailParts.length > 0) {
     row.detail = detailParts.join(" / ");
@@ -216,6 +225,14 @@ function checkRollupRow(
   }
   if (url) {
     row.url = url;
+  }
+  // Status contexts are not jobs; the reader can only list them.
+  if (item.kind !== "status-context") {
+    row.jobParam = pullRequestCheckJobParam({
+      name: item.name,
+      workflowName: item.workflowName ?? null,
+      url: url ?? null,
+    });
   }
   return row;
 }

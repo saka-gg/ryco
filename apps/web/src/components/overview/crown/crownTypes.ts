@@ -1,12 +1,19 @@
 import type { OrchestrationLatestTurnState } from "@ryco/contracts";
 import type { ReactNode } from "react";
 
+import type { Project } from "../../../types";
 import type { WorktreeNotes } from "../notes/useWorktreeNotes";
 import type { OverviewDataReadiness, OverviewLayoutProps } from "../overviewTypes";
 import type { CrownSection } from "./crownSections";
 
 /** The thread's worktree notes as the crown renders them (`useWorktreeNotes`). */
 export type CrownNotesBinding = WorktreeNotes;
+
+/** The project whose logo the crown face shows (`ProjectFavicon` inputs). */
+export type CrownProject = Pick<
+  Project,
+  "id" | "environmentId" | "name" | "cwd" | "customAvatarContentHash"
+>;
 
 /** The slice of the thread's latest turn the crown watches for "turn finished" alerts. */
 export interface CrownTurnInput {
@@ -36,6 +43,8 @@ export interface CrownOverviewProps extends OverviewLayoutProps {
   readonly userGitActionActive: boolean;
   /** Worktree notes; the Notes icon shows only while `notes.available`. */
   readonly notes?: CrownNotesBinding | undefined;
+  /** The thread's project; the face shows its logo (a folder without one). */
+  readonly project?: CrownProject | null | undefined;
 }
 
 /** Props of the shared section detail used by both the hover flyout and the card. */

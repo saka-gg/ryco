@@ -10,8 +10,16 @@ import {
   type WorktreeNote,
 } from "@ryco/contracts";
 
+import { makeRuntimeAgent } from "../../agents/agentRosterTestFixtures";
 import type { PrCheckStatusKind, PrCheckStatusView } from "../../projectExplorer/prCheckStatus";
-import type { ThreadSubagentView } from "../../../threadWorkspaceViewModel";
+import {
+  deriveAgentPanelModel,
+  isTerminalSubagentStatus,
+  type AgentPanelModel,
+  type RuntimeSubagent,
+  type RuntimeSubagentStatus,
+  type ThreadSubagentView,
+} from "../../../threadWorkspaceViewModel";
 import type { NoteView } from "../notes/noteView";
 import type { CrownSnapshot } from "./crownAlerts.logic";
 import type { CrownNotesBinding } from "./crownTypes";
@@ -122,6 +130,117 @@ export function makeSubagent(
   };
 }
 
+/** The runtime agents model the crown's Subagents section, counts and alerts read. */
+export function makeAgentPanelModel(agents: ReadonlyArray<RuntimeSubagent>): AgentPanelModel {
+  return deriveAgentPanelModel({ agents });
+}
+
+const AGENT_STARTED_AT = "2026-10-07T10:00:00.000Z";
+
+/** A member of a workflow run, in phase `phaseIndex`. */
+export function makeWorkflowMember(
+  id: string,
+  workflowId: string,
+  phaseIndex: number,
+  overrides: Partial<RuntimeSubagent> = {},
+): RuntimeSubagent {
+  return makeRuntimeAgent(id, {
+    kind: "workflow_agent",
+    parentAgentId: workflowId,
+    phaseIndex,
+    firstSeenAt: AGENT_STARTED_AT,
+    ...overrides,
+  });
+}
+
+export const AUDIT_WORKFLOW_ID = "wf-audit";
+
+type AuditMember = "map" | "types" | "card" | "alerts";
+
+/**
+ * The `wf-audit` run: Work done (map completed, types failed), Review running
+ * (card running, alerts completed), Verify not started. Pass statuses to move
+ * the coordinator or any member along.
+ */
+export function auditWorkflowAgents(
+  statuses: {
+    readonly coordinator?: RuntimeSubagentStatus;
+    readonly members?: Partial<Record<AuditMember, RuntimeSubagentStatus>>;
+  } = {},
+): RuntimeSubagent[] {
+  const member = (key: AuditMember, phaseIndex: number, agentIndex: number, title: string) => {
+    const defaults: Record<AuditMember, RuntimeSubagentStatus> = {
+      map: "completed",
+      types: "failed",
+      card: "running",
+      alerts: "completed",
+    };
+    const status = statuses.members?.[key] ?? defaults[key];
+    return makeWorkflowMember(`${AUDIT_WORKFLOW_ID}:${key}`, AUDIT_WORKFLOW_ID, phaseIndex, {
+      title,
+      agentIndex,
+      status,
+      usage: { totalTokens: 12_000 + agentIndex * 4_100 },
+      ...(status === "failed" ? { error: "Typecheck failed in AgentsDetail.tsx" } : {}),
+      ...(status === "running" ? { progress: "Reviewing CrownWorkflowCard" } : {}),
+      ...(status === "running" || status === "pending" || status === "waiting"
+        ? {}
+        : { completedAt: "2026-10-07T10:04:12.000Z" }),
+    });
+  };
+  return [
+    makeRuntimeAgent(AUDIT_WORKFLOW_ID, {
+      kind: "workflow",
+      title: "Audit the crown follow-ups",
+      workflowName: "Audit",
+      status: statuses.coordinator ?? "running",
+      ...(statuses.coordinator && isTerminalSubagentStatus(statuses.coordinator)
+        ? { completedAt: "2026-10-07T10:06:40.000Z" }
+        : {}),
+      phases: [
+        { index: 0, title: "Work" },
+        { index: 1, title: "Review" },
+        { index: 2, title: "Verify" },
+      ],
+      firstSeenAt: AGENT_STARTED_AT,
+    }),
+    member("map", 0, 0, "work:map-details"),
+    member("types", 0, 1, "work:types"),
+    member("card", 1, 2, "review:card"),
+    member("alerts", 1, 3, "review:alerts"),
+  ];
+}
+
+/** Two direct spawns: Scout running, Docs writer completed. */
+export function crownDirectAgents(
+  statuses: { readonly scout?: RuntimeSubagentStatus; readonly docs?: RuntimeSubagentStatus } = {},
+): RuntimeSubagent[] {
+  return [
+    makeRuntimeAgent("agent-scout", {
+      title: "Scout",
+      status: statuses.scout ?? "running",
+      ...((statuses.scout ?? "running") === "running"
+        ? { progress: "Reading crownAlerts.logic.ts" }
+        : { result: "Mapped the alert rules", completedAt: "2026-10-07T10:05:10.000Z" }),
+      usage: { totalTokens: 8_200 },
+      firstSeenAt: "2026-10-07T10:01:00.000Z",
+    }),
+    makeRuntimeAgent("agent-docs", {
+      title: "Docs writer",
+      status: statuses.docs ?? "completed",
+      result: "Updated the overview docs",
+      usage: { totalTokens: 3_400 },
+      firstSeenAt: "2026-10-07T10:02:00.000Z",
+      completedAt: "2026-10-07T10:03:30.000Z",
+    }),
+  ];
+}
+
+/** The `wf-audit` run plus the two direct agents. */
+export function crownAgentPanelFixture(): AgentPanelModel {
+  return makeAgentPanelModel([...auditWorkflowAgents(), ...crownDirectAgents()]);
+}
+
 export function makePlan(
   steps: ReadonlyArray<[string, "pending" | "inProgress" | "completed"]>,
   turnId = "turn-1",
@@ -153,7 +272,7 @@ export function makeSnapshot(overrides: Partial<CrownSnapshot> = {}): CrownSnaps
     branch: { refName: "feature/crown", ahead: 0, behind: 0 },
     prSettled: true,
     plan: null,
-    subagents: {},
+    agents: { direct: {}, workflows: {} },
     fileCount: 0,
     notes: null,
     ...overrides,
@@ -253,7 +372,7 @@ export const crownPullRequestFixture: OverviewPullRequestState = makePullRequest
   runs: [],
 });
 
-/** The prototype's sample overview: a plan in progress, four changed files, the PR and three subagents. */
+/** The prototype's sample overview: a plan in progress, four changed files, the PR and the `wf-audit` run with two direct agents. */
 export function crownLayoutFixture(
   overrides: Partial<OverviewLayoutProps> = {},
 ): OverviewLayoutProps {
@@ -317,18 +436,7 @@ export function crownLayoutFixture(
       hasUpstream: true,
     }),
     pullRequest: crownPullRequestFixture,
-    subagents: [
-      makeSubagent("subagent:explorer", "finished", "Explorer", {
-        role: "Mapped PlanSidebar usages",
-        tool: "spawnAgent",
-      }),
-      makeSubagent("subagent:test-writer", "running", "Test writer", {
-        role: "Writing NotesPane tests",
-        model: "gpt-5",
-        tool: "spawnAgent",
-      }),
-      makeSubagent("subagent:linter", "failed", "Linter", { tool: "spawnAgent" }),
-    ],
+    agentPanelModel: crownAgentPanelFixture(),
     ...overrides,
   });
 }

@@ -38,6 +38,8 @@
   --crown-dur-arc: 900ms;
   --crown-dur-plan-bar: 800ms;
   --crown-dur-ping: 950ms;
+  /* Face: project artwork replacing its monogram. */
+  --crown-dur-logo: 300ms;
   /* Card section switch and the "+N" badge. */
   --crown-dur-swapin: 350ms;
   /* Flyout. */
@@ -142,6 +144,22 @@
   }
 }
 
+@keyframes crown-face-status-pulse {
+  0%,
+  100% {
+    background-color: var(--tone);
+  }
+  50% {
+    background-color: color-mix(in srgb, var(--tone) 40%, #0d0d0e);
+  }
+}
+
+@keyframes crown-face-logo-in {
+  from {
+    opacity: 0;
+  }
+}
+
 @keyframes crown-swapin {
   from {
     opacity: 0;
@@ -218,6 +236,7 @@
     .crown-ring-seg,
     .crown-ci-dot,
     .crown-live-dot,
+    .crown-face-status,
     .crown-check-bar,
     .crown-step-active
   ),
@@ -230,6 +249,7 @@
     .crown-ring-seg,
     .crown-ci-dot,
     .crown-live-dot,
+    .crown-face-status,
     .crown-check-bar,
     .crown-step-active
   ) {
@@ -269,6 +289,7 @@
   --crown-dur-arc: 0ms;
   --crown-dur-plan-bar: 0ms;
   --crown-dur-ping: 0ms;
+  --crown-dur-logo: 0ms;
   --crown-dur-swapin: 0ms;
   --crown-dur-fly-move: 0ms;
   --crown-dur-fly-fade: 0ms;
@@ -287,6 +308,8 @@
     .crown-ring-seg,
     .crown-ci-dot,
     .crown-live-dot,
+    .crown-face-status,
+    .crown-face-logo > img,
     .crown-queue,
     .crown-swapin,
     .crown-check-bar,

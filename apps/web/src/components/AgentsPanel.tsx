@@ -12,342 +12,44 @@
  * - Rows lead with the agent's functional label (Claude's `verify:implementor`)
  *   and say what it is doing now; model, usage and timestamps live in the
  *   agent's detail view, not on every row.
+ *
+ * Rows, status dots and roster identity are shared with the crown's Subagents
+ * detail (./agents/agentRoster); this file owns the workflow, phase and
+ * script sections and the agent detail view.
  */
 import type { EnvironmentId, ThreadId } from "@ryco/contracts";
 import { ArrowLeftIcon, BotIcon, BracesIcon, ChevronRightIcon, XIcon } from "lucide-react";
-import { createContext, use, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useEffectEvent, useRef, useState, type ReactNode } from "react";
 
 import { readEnvironmentApi } from "../environmentApi";
+import { landingFlashClass, scrollRowIntoView, useLandingFlash } from "../hooks/useLandingFlash";
 import {
-  assignSubagentIdentities,
+  agentPanelRoster,
+  agentPhaseStatusText,
   canonicalSubagentIdentityKey,
   type ThreadSubagentView,
   formatSubagentModelLabel,
   formatSubagentTokenCount,
-  isTerminalSubagentStatus,
-  resolveSubagentDisplayLabel,
-  resolveSubagentDisplayLabels,
-  splitSubagentLabelScope,
-  subagentRoleDuplicatesLabel,
+  summarizeAgentWorkflow,
   type AgentPanelModel,
   type AgentPanelWorkflowGroup,
   type RuntimeSubagent,
-  type SubagentIdentity,
 } from "../threadWorkspaceViewModel";
 import { cn } from "~/lib/utils";
 import { AgentActivityTimeline } from "./AgentActivityTimeline";
+import {
+  AGENT_STATUS_VISUALS,
+  AgentElapsed,
+  AgentLabel,
+  AgentRosterProvider,
+  AgentRow,
+  AgentRowList,
+  AgentStatusDot,
+  PhaseMemberDots,
+  useAgentRowIdentity,
+} from "./agents/agentRoster";
 import ChatMarkdown from "./ChatMarkdown";
 import { ScrollArea } from "./ui/scroll-area";
-
-/**
- * Provider phases remain distinct, including resumable idle agents. `word` is
- * the status a row spells out next to its time: running and completed read
- * from the dot and the ticking/frozen time alone, every other state is named
- * so it never depends on color (or on a stale activity line).
- */
-const STATUS_VISUALS: Record<
-  RuntimeSubagent["status"],
-  { dotClass: string; label: string; word: { text: string; className: string } | null }
-> = {
-  pending: { dotClass: "bg-info", label: "Queued", word: { text: "Queued", className: "" } },
-  running: { dotClass: "bg-info", label: "Running", word: null },
-  waiting: {
-    dotClass: "bg-info",
-    label: "Waiting",
-    word: { text: "Waiting", className: "text-info-foreground" },
-  },
-  // Idle reads as settled (muted, not sky): a resting Codex child looks done
-  // unless resumed.
-  idle: {
-    dotClass: "bg-muted-foreground/50",
-    label: "Idle · resumable",
-    word: { text: "Idle", className: "" },
-  },
-  completed: { dotClass: "bg-success", label: "Completed", word: null },
-  failed: {
-    dotClass: "bg-destructive",
-    label: "Failed",
-    word: { text: "Failed", className: "text-destructive-foreground" },
-  },
-  cancelled: {
-    dotClass: "bg-muted-foreground/60",
-    label: "Stopped",
-    word: { text: "Stopped", className: "" },
-  },
-  interrupted: {
-    dotClass: "bg-muted-foreground/60",
-    label: "Interrupted",
-    word: { text: "Interrupted", className: "" },
-  },
-};
-
-interface AgentsPanelIdentityContextValue {
-  readonly identities: ReadonlyMap<string, SubagentIdentity>;
-  /** Row labels for the whole roster (functional labels, collisions numbered). */
-  readonly labels: ReadonlyMap<string, string>;
-  readonly onOpenAgent: ((agentId: string) => void) | null;
-}
-
-const AgentsPanelIdentityContext = createContext<AgentsPanelIdentityContextValue>({
-  identities: new Map(),
-  labels: new Map(),
-  onOpenAgent: null,
-});
-
-function StatusDot({ status }: { status: RuntimeSubagent["status"] }) {
-  return (
-    <span
-      aria-hidden
-      className={cn("size-1.5 shrink-0 rounded-full", STATUS_VISUALS[status].dotClass)}
-    />
-  );
-}
-
-function formatElapsedSeconds(totalSeconds: number): string {
-  const seconds = Math.max(0, Math.floor(totalSeconds));
-  const minutes = Math.floor(seconds / 60);
-  if (minutes === 0) {
-    return `${seconds}s`;
-  }
-  const hours = Math.floor(minutes / 60);
-  if (hours === 0) {
-    return `${minutes}m ${String(seconds % 60).padStart(2, "0")}s`;
-  }
-  return `${hours}h ${String(minutes % 60).padStart(2, "0")}m`;
-}
-
-function elapsedBetween(startedAt: string, endIso: string | null): string {
-  const start = Date.parse(startedAt);
-  const end = endIso ? Date.parse(endIso) : Date.now();
-  if (Number.isNaN(start) || Number.isNaN(end)) {
-    return "";
-  }
-  return formatElapsedSeconds((end - start) / 1000);
-}
-
-/**
- * How long a settled agent actually ran. The provider's own duration_ms is
- * authoritative when reported; activity timestamps are the fallback for
- * synthesized rows (workflow members) that carry no usage duration.
- */
-function settledDuration(agent: RuntimeSubagent): string | null {
-  if (agent.usage?.durationMs !== undefined) {
-    return formatElapsedSeconds(agent.usage.durationMs / 1000);
-  }
-  if (agent.startedAt && agent.completedAt) {
-    return elapsedBetween(agent.startedAt, agent.completedAt);
-  }
-  return null;
-}
-
-/**
- * Elapsed time for the current activation. Live agents self-tick via DOM
- * writes (zero React commits per tick); settled agents freeze at the run's
- * actual duration.
- */
-function AgentElapsed({ agent }: { agent: RuntimeSubagent }) {
-  const textRef = useRef<HTMLSpanElement>(null);
-  const live = agent.status === "running" || agent.status === "waiting";
-  const startedAt = agent.startedAt;
-
-  useEffect(() => {
-    if (!live || !startedAt) {
-      return;
-    }
-    const update = () => {
-      if (textRef.current) {
-        textRef.current.textContent = elapsedBetween(startedAt, null);
-      }
-    };
-    update();
-    const id = setInterval(update, 1000);
-    return () => clearInterval(id);
-  }, [live, startedAt]);
-
-  if (!live) {
-    const duration = settledDuration(agent);
-    return duration ? <span className="tabular-nums">{duration}</span> : null;
-  }
-  if (!startedAt) {
-    return null;
-  }
-  return (
-    <span ref={textRef} className="tabular-nums">
-      {elapsedBetween(startedAt, null)}
-    </span>
-  );
-}
-
-/**
- * Human label for an agent's last tool. The Workflow harness makes agents
- * deliver their result through an internal tool literally named
- * "StructuredOutput" — surfacing that verbatim reads like a bug, so it maps
- * to result language instead.
- */
-function agentToolHint(name: string, live: boolean): string {
-  if (/^structured[\s_-]?output$/i.test(name)) {
-    return live ? "Delivering result" : "Delivered result";
-  }
-  return live ? `Using ${name}` : name;
-}
-
-/**
- * Status-dependent activity line. Live rows lead with what is happening now;
- * settled rows lead with the outcome. Errors are the only inline previews on
- * failed rows because they explain a red row at a glance.
- */
-function agentActivityText(agent: RuntimeSubagent): string | null {
-  const live =
-    agent.status === "running" || agent.status === "pending" || agent.status === "waiting";
-  if (live) {
-    return (
-      agent.progress ??
-      (agent.lastToolName ? agentToolHint(agent.lastToolName, true) : null) ??
-      agent.result ??
-      agent.error
-    );
-  }
-  return (
-    agent.error ??
-    agent.result ??
-    agent.progress ??
-    (agent.lastToolName ? agentToolHint(agent.lastToolName, false) : null)
-  );
-}
-
-/** Hairline separation between stacked agent rows. */
-function AgentRowList({ children }: { children: ReactNode }) {
-  return <div className="divide-y divide-border/25">{children}</div>;
-}
-
-/**
- * A workflow label's `scope:` prefix (`verify:`, `review:`) is set back so the
- * agent's own name carries the row.
- */
-function AgentLabel({
-  label,
-  className,
-  wrap = false,
-}: {
-  label: string;
-  className?: string;
-  /** Show the whole label (the detail header) instead of truncating it. */
-  wrap?: boolean;
-}) {
-  const { scope, name } = splitSubagentLabelScope(label);
-  return (
-    <span
-      className={cn(
-        "min-w-0 text-[13px] font-medium",
-        wrap ? "break-words" : "truncate",
-        className,
-      )}
-      title={wrap ? undefined : label}
-    >
-      {scope ? <span className="font-normal text-muted-foreground/70">{scope}:</span> : null}
-      {name}
-    </span>
-  );
-}
-
-/** Shared two-line row geometry; updates never change a row's height. */
-const AGENT_ROW_GRID_CLASS =
-  "grid h-10 w-full grid-cols-[0.375rem_minmax(0,1fr)_auto] grid-rows-[1.125rem_1rem] content-center items-center gap-x-2.5 rounded-md px-2 text-left";
-
-/** Fixed two-line row: what the agent is, then what it is doing now. */
-function AgentRow({ agent }: { agent: RuntimeSubagent }) {
-  const { identities, labels, onOpenAgent } = use(AgentsPanelIdentityContext);
-  const visuals = STATUS_VISUALS[agent.status];
-  const activity = agentActivityText(agent);
-  const identity = identities.get(agent.id);
-  const label =
-    labels.get(agent.id) ??
-    resolveSubagentDisplayLabel({
-      id: agent.id,
-      title: agent.title,
-      codename: identity?.codename ?? agent.id,
-    });
-  // Compared with the title too: a numbered label ("Explore 2") still repeats its role.
-  const role =
-    identity?.role &&
-    !subagentRoleDuplicatesLabel(identity.role, label) &&
-    !subagentRoleDuplicatesLabel(identity.role, agent.title)
-      ? identity.role
-      : null;
-  // A named status already says what a quiet row is doing; do not repeat it.
-  const activityLine = activity ?? (visuals.word ? "" : visuals.label);
-  const aside = [role, agent.activationCount > 1 ? `run ${agent.activationCount}` : null]
-    .filter((value): value is string => value !== null)
-    .join(" · ");
-
-  const content = (
-    <>
-      <span className="col-start-1 row-start-1 flex">
-        <StatusDot status={agent.status} />
-      </span>
-      <AgentLabel label={label} className="col-start-2 row-start-1" />
-      <span className="col-start-3 row-start-1 inline-flex items-center justify-end gap-1.5 text-right font-mono text-[10.5px] text-muted-foreground/70">
-        {visuals.word ? (
-          <span className={cn("font-sans", visuals.word.className)}>{visuals.word.text}</span>
-        ) : null}
-        <AgentElapsed agent={agent} />
-      </span>
-      <span
-        className={cn(
-          "col-start-2 row-start-2 block min-w-0 truncate text-[11.5px]",
-          agent.status === "failed" ? "text-destructive-foreground" : "text-muted-foreground",
-        )}
-        title={activityLine || undefined}
-      >
-        {activityLine}
-      </span>
-      {aside ? (
-        <span className="col-start-3 row-start-2 max-w-32 truncate text-right text-[10.5px] text-muted-foreground/65">
-          {aside}
-        </span>
-      ) : null}
-      {/* Rows without a visible status word still name their status (buttons
-          carry it in their accessible name instead). */}
-      {visuals.word || onOpenAgent ? null : <span className="sr-only">{visuals.label}</span>}
-    </>
-  );
-
-  const className = cn(
-    AGENT_ROW_GRID_CLASS,
-    "outline-none transition-colors",
-    onOpenAgent && "hover:bg-accent/35 focus-visible:ring-2 focus-visible:ring-ring/50",
-  );
-  return onOpenAgent ? (
-    <button
-      type="button"
-      className={className}
-      data-agent-row
-      data-agent-id={agent.id}
-      onClick={() => onOpenAgent(agent.id)}
-      aria-label={`Open ${label}${role ? `, ${role}` : ""} transcript. ${visuals.label}.`}
-    >
-      {content}
-    </button>
-  ) : (
-    <div className={className} data-agent-row data-agent-id={agent.id}>
-      {content}
-    </div>
-  );
-}
-
-function workflowIsLive(group: AgentPanelWorkflowGroup): boolean {
-  const status = group.workflow.status;
-  return (
-    status !== "completed" &&
-    status !== "failed" &&
-    status !== "cancelled" &&
-    status !== "interrupted"
-  );
-}
-
-function workflowMembers(group: AgentPanelWorkflowGroup): ReadonlyArray<RuntimeSubagent> {
-  return [...group.phases.flatMap((phase) => phase.members), ...group.unphasedMembers];
-}
 
 /** Small-caps section label shared by phases and the direct spawns list. */
 const SECTION_LABEL_CLASS =
@@ -498,7 +200,7 @@ function PhaseSection({
           className="ml-[3px] size-1.5 shrink-0 rounded-full border border-dashed border-muted-foreground/60"
         />
         <span>{phase.title}</span>
-        <span className="font-normal normal-case">not started</span>
+        <span className="font-normal normal-case">{agentPhaseStatusText(phase)}</span>
       </div>
     );
   }
@@ -525,17 +227,9 @@ function PhaseSection({
         />
         <span>{phase.title}</span>
         <span className="font-normal normal-case text-muted-foreground/70">
-          {phase.state === "done"
-            ? `${phase.settledCount} done`
-            : `${phase.activeCount} active · ${phase.settledCount} done`}
+          {agentPhaseStatusText(phase)}
         </span>
-        {!open ? (
-          <span className="ml-auto flex items-center gap-0.5">
-            {phase.members.map((member) => (
-              <StatusDot key={member.id} status={member.status} />
-            ))}
-          </span>
-        ) : null}
+        {!open ? <PhaseMemberDots members={phase.members} className="ml-auto" /> : null}
       </button>
       {open ? (
         <AgentRowList>
@@ -551,57 +245,68 @@ function PhaseSection({
 /**
  * One workflow: a single header row that toggles the phase tree. The open
  * state belongs to the parent so a live workflow never collapses merely
- * because it settled.
+ * because it settled. A focus token (a deep link into this workflow) opens
+ * it, scrolls it to the top of the pane and flashes its header once.
  */
 function WorkflowSection({
   group,
   environmentId,
   threadId,
+  focusToken,
+  headerClassName,
+  onFocusLanded,
 }: {
   group: AgentPanelWorkflowGroup;
   environmentId: EnvironmentId | null;
   threadId: ThreadId | null;
+  /** Non-null while a focus request for this workflow waits to land. */
+  focusToken: number | null;
+  headerClassName: string | undefined;
+  onFocusLanded: (workflowId: string, token: number) => void;
 }) {
-  const [open, setOpen] = useState(() => workflowIsLive(group));
+  const summary = summarizeAgentWorkflow(group);
+  const [open, setOpen] = useState(() => summary.live);
   const [scriptOpen, setScriptOpen] = useState(false);
-  const members = workflowMembers(group);
-  const failed = members.filter((member) => member.status === "failed").length;
-  const settled = members.filter((member) => isTerminalSubagentStatus(member.status)).length;
-  // Coordinator usage may already aggregate members (panel-footer rule):
-  // count it only when there are no member rows to sum.
-  const totalTokens = members.reduce(
-    (sum, member) => sum + (member.usage?.totalTokens ?? 0),
-    members.length === 0 ? (group.workflow.usage?.totalTokens ?? 0) : 0,
-  );
-  const name = group.workflow.workflowName ?? group.workflow.title;
+  const sectionRef = useRef<HTMLElement>(null);
+  const workflowId = group.workflow.id;
   const scriptPath = group.workflow.runHandles?.scriptPath;
   const canShowScript = scriptPath !== undefined && environmentId !== null && threadId !== null;
 
+  useEffect(() => {
+    if (focusToken === null) return;
+    setOpen(true);
+    const frame = window.requestAnimationFrame(() => {
+      if (sectionRef.current) scrollRowIntoView(sectionRef.current);
+      onFocusLanded(workflowId, focusToken);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [focusToken, onFocusLanded, workflowId]);
+
   return (
-    <section data-workflow-section>
-      <div className="flex h-8 items-center gap-1 pr-1">
+    <section ref={sectionRef} data-workflow-section>
+      <div className={cn("flex h-8 items-center gap-1 rounded-md pr-1", headerClassName)}>
         <button
           type="button"
           onClick={() => setOpen((value) => !value)}
           aria-expanded={open}
           className="flex h-full min-w-0 flex-1 items-center gap-2 rounded-md px-2 text-left outline-none hover:bg-accent/30 focus-visible:ring-2 focus-visible:ring-ring/50"
         >
-          <StatusDot status={failed > 0 ? "failed" : group.workflow.status} />
+          <AgentStatusDot status={summary.displayStatus} />
           <span className="min-w-0 flex-1 truncate text-[13px] font-semibold tracking-[-0.01em]">
-            {name}
+            {summary.name}
           </span>
           <span className="flex shrink-0 items-center gap-1.5 font-mono text-[10.5px] text-muted-foreground/80 tabular-nums">
-            {failed > 0 ? (
-              <span className="text-destructive-foreground">{failed} failed</span>
+            {summary.failedCount > 0 ? (
+              <span className="text-destructive-foreground">{summary.failedCount} failed</span>
             ) : null}
             {open ? (
               <span>
-                {settled}/{members.length}
+                {summary.settledCount}/{summary.memberCount}
               </span>
             ) : (
               <>
-                <span>{members.length} agents</span>
-                <span>· {formatSubagentTokenCount(totalTokens)} tok</span>
+                <span>{summary.memberCount} agents</span>
+                <span>· {formatSubagentTokenCount(summary.totalTokens)} tok</span>
                 <AgentElapsed agent={group.workflow} />
               </>
             )}
@@ -657,6 +362,94 @@ function WorkflowSection({
   );
 }
 
+/** One agent's header and activity feed, inside the Agents surface. */
+function AgentDetailView({
+  selected,
+  transcript,
+  onBack,
+}: {
+  selected: RuntimeSubagent;
+  transcript: ThreadSubagentView | undefined;
+  onBack: () => void;
+}) {
+  const { label, role } = useAgentRowIdentity(selected);
+  return (
+    <div className="flex h-full min-h-0 flex-col" data-agent-detail>
+      <header className="space-y-1.5 border-b border-border/60 px-3 py-2.5">
+        <button
+          type="button"
+          onClick={onBack}
+          className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+        >
+          <ArrowLeftIcon aria-hidden className="size-3.5" />
+          All agents
+        </button>
+        <div className="flex items-center gap-2">
+          <AgentStatusDot status={selected.status} />
+          <h3 className="flex min-w-0 flex-1">
+            <AgentLabel label={label} wrap className="text-sm font-semibold" />
+          </h3>
+          <span className="shrink-0 text-xs text-muted-foreground">
+            {AGENT_STATUS_VISUALS[selected.status].label}
+          </span>
+        </div>
+        {label !== selected.title.trim() ? (
+          <p className="break-words text-xs leading-relaxed text-muted-foreground">
+            {selected.title}
+          </p>
+        ) : null}
+        <div className="flex flex-wrap gap-x-3 gap-y-1 font-mono text-[10.5px] text-muted-foreground tabular-nums">
+          {role ? <span className="font-sans">{role}</span> : null}
+          {selected.model ? (
+            <span>{formatSubagentModelLabel(selected.model, selected.effort)}</span>
+          ) : null}
+          <AgentElapsed agent={selected} />
+          {selected.usage?.totalTokens !== undefined ? (
+            <span>{formatSubagentTokenCount(selected.usage.totalTokens)} tok</span>
+          ) : null}
+          {selected.usage?.toolUses !== undefined ? (
+            <span>{selected.usage.toolUses} tools</span>
+          ) : null}
+          <span>
+            updated{" "}
+            <time dateTime={selected.updatedAt}>
+              {new Date(selected.updatedAt).toLocaleTimeString()}
+            </time>
+          </span>
+        </div>
+      </header>
+      <ScrollArea className="min-h-0 flex-1">
+        {selected.error ? (
+          <p role="status" className="m-3 whitespace-pre-wrap break-words text-xs text-destructive">
+            {selected.error}
+          </p>
+        ) : null}
+        <AgentActivityTimeline
+          subagent={transcript ?? { messages: [], entries: [] }}
+          running={selected.status === "running" || selected.status === "waiting"}
+        />
+        {!transcript && selected.progress ? (
+          <p className="px-3 pb-3 text-xs text-muted-foreground">{selected.progress}</p>
+        ) : null}
+        {selected.result &&
+        !transcript?.messages.some((message) => message.text === selected.result) ? (
+          <div className="border-t border-border/40 p-3 text-sm">
+            <p className="mb-2 text-xs font-medium text-muted-foreground">Result summary</p>
+            <ChatMarkdown text={selected.result} cwd={undefined} isStreaming={false} />
+          </div>
+        ) : null}
+      </ScrollArea>
+    </div>
+  );
+}
+
+interface AgentsPanelFocus {
+  readonly workflowId: string;
+  /** Bumped per request, so focusing the same workflow again re-lands. */
+  readonly token: number;
+  readonly landed: boolean;
+}
+
 export function AgentsPanel({
   model,
   environmentId = null,
@@ -665,6 +458,8 @@ export function AgentsPanel({
   subagents = [],
   selectedAgentId = null,
   onBack,
+  focusWorkflowId = null,
+  onFocusWorkflowHandled,
 }: {
   subagents?: ReadonlyArray<ThreadSubagentView>;
   selectedAgentId?: string | null;
@@ -673,144 +468,65 @@ export function AgentsPanel({
   environmentId?: EnvironmentId | null;
   threadId?: ThreadId | null;
   onOpenAgent?: ((agentId: string) => void) | null;
+  /**
+   * One-shot deep link: expand this workflow, scroll it into view and flash
+   * its header. Handled once per value (onFocusWorkflowHandled fires right
+   * away so the owner can clear it); a new value lands again.
+   */
+  focusWorkflowId?: string | null;
+  onFocusWorkflowHandled?: () => void;
 }) {
   const [localSelection, setLocalSelection] = useState<string | null>(null);
   useEffect(() => setLocalSelection(null), [threadId]);
-  const identityContext = useMemo<AgentsPanelIdentityContextValue>(() => {
-    const agentsById = new Map<string, RuntimeSubagent>();
-    for (const group of model.workflows) {
-      agentsById.set(group.workflow.id, group.workflow);
-      for (const member of workflowMembers(group)) agentsById.set(member.id, member);
-    }
-    for (const agent of model.directAgents) agentsById.set(agent.id, agent);
-    const agents = [...agentsById.values()];
-    const identities = assignSubagentIdentities(
-      agents.map((agent) => ({
-        key: agent.id,
-        role: agent.role,
-        taskLabel: agent.title,
-      })),
-    );
-    return {
-      identities,
-      labels: resolveSubagentDisplayLabels(
-        agents.map((agent) => ({
-          id: agent.id,
-          title: agent.title,
-          codename: identities.get(agent.id)?.codename ?? agent.id,
-        })),
-      ),
-      onOpenAgent: onOpenAgent ?? setLocalSelection,
-    };
-  }, [model, onOpenAgent]);
+
+  const [focus, setFocus] = useState<AgentsPanelFocus | null>(null);
+  const { flash, trigger: triggerFlash } = useLandingFlash();
+  const reportFocusHandled = useEffectEvent(() => onFocusWorkflowHandled?.());
+  useEffect(() => {
+    if (!focusWorkflowId) return;
+    setFocus((current) => ({
+      workflowId: focusWorkflowId,
+      token: (current?.token ?? 0) + 1,
+      landed: false,
+    }));
+    setLocalSelection(null);
+    reportFocusHandled();
+  }, [focusWorkflowId]);
+  const onFocusLanded = useCallback(
+    (workflowId: string, token: number) => {
+      triggerFlash(workflowId);
+      setFocus((current) =>
+        current !== null && current.token === token ? { ...current, landed: true } : current,
+      );
+    },
+    [triggerFlash],
+  );
 
   const selection = selectedAgentId ?? localSelection;
   const selected = selection
-    ? [
-        ...model.directAgents,
-        ...model.workflows.flatMap((group) => [group.workflow, ...workflowMembers(group)]),
-      ].find(
+    ? agentPanelRoster(model).find(
         (agent) =>
           canonicalSubagentIdentityKey(agent.id) === canonicalSubagentIdentityKey(selection),
       )
     : undefined;
-  if (selected) {
-    const transcript = subagents.find(
-      (agent) =>
-        canonicalSubagentIdentityKey(agent.key) === canonicalSubagentIdentityKey(selected.id),
-    );
-    const identity = identityContext.identities.get(selected.id);
-    const label =
-      identityContext.labels.get(selected.id) ??
-      resolveSubagentDisplayLabel({
-        id: selected.id,
-        title: selected.title,
-        codename: identity?.codename ?? selected.id,
-      });
-    const role =
-      identity?.role &&
-      !subagentRoleDuplicatesLabel(identity.role, label) &&
-      !subagentRoleDuplicatesLabel(identity.role, selected.title)
-        ? identity.role
-        : null;
-    return (
-      <div className="flex h-full min-h-0 flex-col" data-agent-detail>
-        <header className="space-y-1.5 border-b border-border/60 px-3 py-2.5">
-          <button
-            type="button"
-            onClick={() => {
-              setLocalSelection(null);
-              onBack?.();
-            }}
-            className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
-          >
-            <ArrowLeftIcon aria-hidden className="size-3.5" />
-            All agents
-          </button>
-          <div className="flex items-center gap-2">
-            <StatusDot status={selected.status} />
-            <h3 className="flex min-w-0 flex-1">
-              <AgentLabel label={label} wrap className="text-sm font-semibold" />
-            </h3>
-            <span className="shrink-0 text-xs text-muted-foreground">
-              {STATUS_VISUALS[selected.status].label}
-            </span>
-          </div>
-          {label !== selected.title.trim() ? (
-            <p className="break-words text-xs leading-relaxed text-muted-foreground">
-              {selected.title}
-            </p>
-          ) : null}
-          <div className="flex flex-wrap gap-x-3 gap-y-1 font-mono text-[10.5px] text-muted-foreground tabular-nums">
-            {role ? <span className="font-sans">{role}</span> : null}
-            {selected.model ? (
-              <span>{formatSubagentModelLabel(selected.model, selected.effort)}</span>
-            ) : null}
-            <AgentElapsed agent={selected} />
-            {selected.usage?.totalTokens !== undefined ? (
-              <span>{formatSubagentTokenCount(selected.usage.totalTokens)} tok</span>
-            ) : null}
-            {selected.usage?.toolUses !== undefined ? (
-              <span>{selected.usage.toolUses} tools</span>
-            ) : null}
-            <span>
-              updated{" "}
-              <time dateTime={selected.updatedAt}>
-                {new Date(selected.updatedAt).toLocaleTimeString()}
-              </time>
-            </span>
-          </div>
-        </header>
-        <ScrollArea className="min-h-0 flex-1">
-          {selected.error ? (
-            <p
-              role="status"
-              className="m-3 whitespace-pre-wrap break-words text-xs text-destructive"
-            >
-              {selected.error}
-            </p>
-          ) : null}
-          <AgentActivityTimeline
-            subagent={transcript ?? { messages: [], entries: [] }}
-            running={selected.status === "running" || selected.status === "waiting"}
-          />
-          {!transcript && selected.progress ? (
-            <p className="px-3 pb-3 text-xs text-muted-foreground">{selected.progress}</p>
-          ) : null}
-          {selected.result &&
-          !transcript?.messages.some((message) => message.text === selected.result) ? (
-            <div className="border-t border-border/40 p-3 text-sm">
-              <p className="mb-2 text-xs font-medium text-muted-foreground">Result summary</p>
-              <ChatMarkdown text={selected.result} cwd={undefined} isStreaming={false} />
-            </div>
-          ) : null}
-        </ScrollArea>
-      </div>
-    );
-  }
 
-  if (!model.hasAgents) {
-    return (
+  let content: ReactNode;
+  if (selected) {
+    content = (
+      <AgentDetailView
+        selected={selected}
+        transcript={subagents.find(
+          (agent) =>
+            canonicalSubagentIdentityKey(agent.key) === canonicalSubagentIdentityKey(selected.id),
+        )}
+        onBack={() => {
+          setLocalSelection(null);
+          onBack?.();
+        }}
+      />
+    );
+  } else if (!model.hasAgents) {
+    content = (
       <div className="flex h-full flex-col items-center justify-center gap-2 p-6 text-center">
         <BotIcon aria-hidden className="size-6 text-muted-foreground/60" />
         <p className="text-sm font-medium">No agents yet</p>
@@ -820,16 +536,25 @@ export function AgentsPanel({
         </p>
       </div>
     );
-  }
-
-  return (
-    <AgentsPanelIdentityContext.Provider value={identityContext}>
+  } else {
+    content = (
       <div className="flex h-full min-h-0 flex-col">
         <ScrollArea className="min-h-0 flex-1">
           <div className="flex flex-col divide-y divide-border/40 px-1.5">
             {model.workflows.map((group) => (
               <div key={group.workflow.id} className="py-1.5">
-                <WorkflowSection group={group} environmentId={environmentId} threadId={threadId} />
+                <WorkflowSection
+                  group={group}
+                  environmentId={environmentId}
+                  threadId={threadId}
+                  focusToken={
+                    focus !== null && !focus.landed && focus.workflowId === group.workflow.id
+                      ? focus.token
+                      : null
+                  }
+                  headerClassName={landingFlashClass(flash, group.workflow.id)}
+                  onFocusLanded={onFocusLanded}
+                />
               </div>
             ))}
             {model.directAgents.length > 0 ? (
@@ -860,6 +585,12 @@ export function AgentsPanel({
           <span className="tabular-nums">Σ {formatSubagentTokenCount(model.totalTokens)} tok</span>
         </footer>
       </div>
-    </AgentsPanelIdentityContext.Provider>
+    );
+  }
+
+  return (
+    <AgentRosterProvider model={model} onOpenAgent={onOpenAgent ?? setLocalSelection}>
+      {content}
+    </AgentRosterProvider>
   );
 }

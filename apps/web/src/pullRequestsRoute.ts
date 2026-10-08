@@ -48,3 +48,22 @@ export function prefersExternalPullRequestLink(event: {
 }): boolean {
   return event.metaKey || event.ctrlKey || event.button === 1;
 }
+
+/**
+ * Click handler for a host link that also opens in the app: a plain click
+ * stays in Ryco through `openInApp`, while ⌘/Ctrl- or middle-click (and any
+ * click without an in-app opener) keeps the link's default navigation.
+ */
+export function handleInAppLinkClick(
+  event: {
+    readonly metaKey: boolean;
+    readonly ctrlKey: boolean;
+    readonly button?: number;
+    preventDefault(): void;
+  },
+  openInApp?: (() => void) | undefined,
+): void {
+  if (!openInApp || prefersExternalPullRequestLink(event)) return;
+  event.preventDefault();
+  openInApp();
+}

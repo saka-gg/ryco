@@ -52,7 +52,10 @@ import {
   buildOpenRenderSearch,
   buildOpenWorkspaceSearch,
   buildCloseWorkspacePanelSearch,
+  parseWorkspacePullRequestReveal,
   parseWorkspaceRenderKey,
+  stripWorkspaceRevealSearch,
+  workspaceAgentKeyForRuntimeAgent,
 } from "../workspaceRouteSearch";
 import { buildOpenRightPanelTabSearch, isRightPanelTabMode } from "../rightPanelTabs.logic";
 import {
@@ -943,6 +946,17 @@ export default function ThreadWorkspacePanel(props: {
   // The frozen phone tier has no pull request tab: resolve nothing there.
   const threadChangeRequest = useWorkspaceThreadChangeRequest(!isPhoneSurface);
   const pullRequestNumber = search.workspacePr ?? threadChangeRequest.number;
+  // One-shot deep links: each tab acts on its key once, then `clearReveal`
+  // strips it, so a repeat link fires again and history never replays it.
+  const pullRequestReveal = useMemo(
+    () =>
+      search.workspaceTab === "pullRequest" && search.workspacePrReveal
+        ? parseWorkspacePullRequestReveal(search.workspacePrReveal)
+        : null,
+    [search.workspacePrReveal, search.workspaceTab],
+  );
+  const agentsFocusWorkflowId =
+    search.workspaceTab === "agents" ? (search.workspaceAgentsWorkflow ?? null) : null;
   // One page tab: the render the route shows, else the one it showed last.
   const renderKey =
     search.workspaceTab === "render" && search.workspaceRender
@@ -1059,11 +1073,13 @@ export default function ThreadWorkspacePanel(props: {
   const openLauncher = useCallback(() => {
     navigateSearch((previous) => buildOpenWorkspaceSearch(previous));
   }, [navigateSearch]);
+  const clearReveal = useCallback(
+    () => navigateSearch((previous) => stripWorkspaceRevealSearch(previous)),
+    [navigateSearch],
+  );
   const openRuntimeAgent = useCallback(
     (runtimeAgentId: string) => {
-      const agentKey = runtimeAgentId.startsWith("subagent:")
-        ? runtimeAgentId
-        : `subagent:${runtimeAgentId}`;
+      const agentKey = workspaceAgentKeyForRuntimeAgent(runtimeAgentId);
       navigateSearch((previous) =>
         isPhoneSurface
           ? buildOpenAgentSearch(previous, agentKey)
@@ -1314,6 +1330,8 @@ export default function ThreadWorkspacePanel(props: {
               onSelectNumber={(number) =>
                 navigateSearch((previous) => buildOpenPullRequestSearch(previous, number))
               }
+              reveal={pullRequestReveal}
+              onRevealHandled={clearReveal}
             />
           ) : activeMode === "simulator" && !isPhoneSurface ? (
             <SimulatorPanel
@@ -1330,6 +1348,8 @@ export default function ThreadWorkspacePanel(props: {
               onOpenAgent={openRuntimeAgent}
               subagents={subagents}
               selectedAgentId={agentKey}
+              focusWorkflowId={agentsFocusWorkflowId}
+              onFocusWorkflowHandled={clearReveal}
               onBack={() => navigateSearch((previous) => buildOpenAgentsSearch(previous))}
             />
           ) : activeMode === "render" && renderKey && !isPhoneSurface ? (

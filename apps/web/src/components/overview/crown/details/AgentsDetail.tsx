@@ -1,90 +1,82 @@
-import { cn } from "~/lib/utils";
+import type { CSSProperties } from "react";
 
-import type { ThreadSubagentView } from "~/threadWorkspaceViewModel";
-import { SubagentAvatar } from "../../../sidebar/SubagentAvatar";
-import { subagentStatusLabel } from "../../overviewSections";
-import { getOverviewSummary } from "../../overviewSummary.logic";
+import {
+  emptyAgentPanelModel,
+  formatSubagentTokenCount,
+} from "../../../../threadWorkspaceViewModel";
+import { AgentRosterProvider, AgentRow, AgentRowList } from "../../../agents/agentRoster";
+import { CROWN_WORKFLOW_MEMBER_LIMIT } from "../crownLayout";
 import {
   CrownDetailEmpty,
+  CrownDetailFootnote,
   CrownDetailHeading,
+  CrownGroupHeader,
   type CrownDetailViewProps,
 } from "./crownDetailPrimitives";
+import { CrownWorkflowCard } from "./CrownWorkflowCard";
 
-const STATUS_PILL_TONE: Record<ThreadSubagentView["status"], string> = {
-  running: "text-[color:var(--crown-agent,#38bdf8)]",
-  finished: "text-muted-foreground/60",
-  failed: "text-destructive-foreground",
-  interrupted: "text-muted-foreground/60",
-  idle: "text-muted-foreground/60",
-};
+/**
+ * Live agents in the crown read in its agent sky (the rail icon, the running
+ * phase fill), so the shared rows' `info` dots take that hue here.
+ */
+const CROWN_AGENT_HUE_STYLE = { "--color-info": "var(--crown-agent, #38bdf8)" } as CSSProperties;
 
-/** The status pill (`.as`); running agents get a pulsing dot in the agent colour. */
-function SubagentStatusPill({ status }: { status: ThreadSubagentView["status"] }) {
-  return (
-    <span
-      className={cn(
-        "inline-flex shrink-0 items-center gap-[5px] text-[10.5px] font-semibold",
-        STATUS_PILL_TONE[status],
-      )}
-    >
-      {status === "running" ? (
-        <span
-          aria-hidden="true"
-          className="crown-agent-pulse size-1.5 rounded-full bg-[color:var(--crown-agent,#38bdf8)]"
-        />
-      ) : null}
-      {subagentStatusLabel(status)}
-    </span>
-  );
-}
-
-function SubagentRow({
-  subagent,
-  onOpen,
-}: {
-  subagent: ThreadSubagentView;
-  onOpen: ((subagent: ThreadSubagentView) => void) | undefined;
-}) {
-  const meta = [subagent.role, subagent.model ?? subagent.tool].filter(Boolean).join(" · ");
-  return (
-    <li>
-      <button
-        type="button"
-        className="flex w-full min-w-0 items-center gap-2 rounded-md px-1 py-[5px] text-left transition-colors hover:bg-muted focus-visible:outline-2 focus-visible:outline-ring"
-        onClick={() => onOpen?.(subagent)}
-        aria-label={`${subagent.name} — ${subagentStatusLabel(subagent.status)}`}
-        title={subagent.detail ?? undefined}
-        data-slot="crown-subagent-row"
-      >
-        <span className="grid size-[22px] shrink-0 place-items-center rounded-full bg-muted">
-          <SubagentAvatar name={subagent.avatarKey ?? subagent.key} className="size-3.5" />
-        </span>
-        <span className="flex min-w-0 flex-1 flex-col leading-tight">
-          <span className="truncate text-[12px] font-semibold">{subagent.name}</span>
-          {meta ? <span className="truncate text-[11px] text-muted-foreground">{meta}</span> : null}
-        </span>
-        <SubagentStatusPill status={subagent.status} />
-      </button>
-    </li>
-  );
-}
-
+/**
+ * The Subagents section: workflow runs as cards, then direct spawns as
+ * compact rows, the way the Agents tab groups them. A member row opens that
+ * agent in the Agents tab; a card header (or "+N more") opens the tab focused
+ * on its run.
+ */
 export function AgentsDetail({ layout, variant }: CrownDetailViewProps) {
-  const subagents = layout.subagents ?? [];
-  const { agentsRunning } = getOverviewSummary(layout);
+  const model = layout.agentPanelModel ?? emptyAgentPanelModel();
+  const limit = CROWN_WORKFLOW_MEMBER_LIMIT[variant];
+  // The flyout's column is too narrow for a row's activity line.
+  const rowDensity = variant === "flyout" ? "mini" : "compact";
+  const { workflows, directAgents } = model;
   return (
     <>
       <CrownDetailHeading
         section="agents"
         variant={variant}
-        meta={subagents.length > 0 ? `${agentsRunning} live` : undefined}
+        meta={model.hasAgents ? `${model.liveCount} live` : undefined}
       />
-      {subagents.length > 0 ? (
-        <ul className="flex flex-col gap-px">
-          {subagents.map((subagent) => (
-            <SubagentRow key={subagent.key} subagent={subagent} onOpen={layout.onOpenSubagent} />
-          ))}
-        </ul>
+      {model.hasAgents ? (
+        <AgentRosterProvider model={model} onOpenAgent={layout.onOpenAgent ?? null}>
+          <div className="contents" style={CROWN_AGENT_HUE_STYLE}>
+            {workflows.length > 0 ? (
+              <div className="flex flex-col gap-1.5" data-slot="crown-workflows">
+                {workflows.map((group) => (
+                  <CrownWorkflowCard
+                    key={group.workflow.id}
+                    group={group}
+                    limit={limit}
+                    rowDensity={rowDensity}
+                    showTokens={variant === "card"}
+                    onOpenWorkflow={layout.onOpenAgentsWorkflow}
+                  />
+                ))}
+              </div>
+            ) : null}
+            {directAgents.length > 0 ? (
+              <div data-slot="crown-direct-agents">
+                {/* Without workflows every agent is direct; the group needs no name. */}
+                {workflows.length > 0 ? (
+                  <CrownGroupHeader label="Direct" count={directAgents.length} />
+                ) : null}
+                <AgentRowList>
+                  {directAgents.map((agent) => (
+                    <AgentRow key={agent.id} agent={agent} density={rowDensity} />
+                  ))}
+                </AgentRowList>
+              </div>
+            ) : null}
+            {variant === "card" ? (
+              <CrownDetailFootnote>
+                {`${formatSubagentTokenCount(model.totalTokens)} tok · ${model.liveCount} active · ${model.settledCount} settled`}
+              </CrownDetailFootnote>
+            ) : null}
+          </div>
+        </AgentRosterProvider>
       ) : (
         <CrownDetailEmpty>No subagents in this thread</CrownDetailEmpty>
       )}
