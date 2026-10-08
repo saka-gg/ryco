@@ -273,6 +273,22 @@
   --text-3xl--line-height: 36px;
 }
 
+/* `font-mono` would otherwise be Tailwind's CSS font stack, which neither
+   platform reads as one family name, so code fell back to the proportional
+   system font. iOS maps `ui-monospace` to SF Mono, the font of the native diff
+   and markdown code; Android's generic `monospace` is its system mono font. */
+@layer theme {
+  :root {
+    @variant ios {
+      --font-mono: "ui-monospace";
+    }
+
+    @variant android {
+      --font-mono: "monospace";
+    }
+  }
+}
+
 /* ─── Custom utilities ──────────────────────────────────────────────── */
 @utility font-ryco-medium {
   font-family: var(--font-medium);

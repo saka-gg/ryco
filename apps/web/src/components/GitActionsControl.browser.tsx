@@ -72,10 +72,16 @@ vi.mock("~/editorPreferences", () => ({
 }));
 
 vi.mock("~/rpc/useGit", () => ({
+  GIT_USER_ACTION_KIND: {
+    runStackedAction: "run-stacked-action",
+    pull: "pull",
+    publishRepository: "publish-repository",
+  },
   gitMutationTrackingKey: (kind: string, environmentId: string | null, cwd: string | null) =>
     `git-mutation:${kind}:${environmentId ?? ""}:${cwd ?? ""}`,
   gitScopeKey: (cwd: string | null) => `git:${cwd ?? ""}`,
   invalidateScopes: vi.fn(),
+  useGitActionActivity: vi.fn(() => false),
   useIsGitMutating: vi.fn(() => false),
   useGitMutation: vi.fn((options: { trackingKey?: string | null }) => {
     const trackingKey = options.trackingKey ?? "";
@@ -262,7 +268,7 @@ function setEnvironmentConfig(environmentId: EnvironmentId, prefix: string | nul
   }
 }
 
-import GitActionsControl from "./GitActionsControl";
+import GitActionsControl, { GitThreadSync } from "./GitActionsControl";
 
 function findButtonByText(text: string): HTMLButtonElement | null {
   return (Array.from(document.querySelectorAll("button")).find((button) =>
@@ -288,7 +294,7 @@ function Harness() {
   );
 }
 
-describe("GitActionsControl thread-scoped progress toast", () => {
+describe("GitActionsControl thread-scoped progress toast and GitThreadSync", () => {
   beforeEach(() => {
     writePrimaryEnvironmentDescriptor({
       environmentId: ENVIRONMENT_A,
@@ -394,7 +400,7 @@ describe("GitActionsControl thread-scoped progress toast", () => {
     const host = document.createElement("div");
     document.body.append(host);
     const screen = await render(
-      <GitActionsControl
+      <GitThreadSync
         gitCwd={GIT_CWD}
         activeThreadRef={scopeThreadRef(ENVIRONMENT_A, SHARED_THREAD_ID)}
       />,
@@ -441,7 +447,7 @@ describe("GitActionsControl thread-scoped progress toast", () => {
     const host = document.createElement("div");
     document.body.append(host);
     const screen = await render(
-      <GitActionsControl
+      <GitThreadSync
         gitCwd={GIT_CWD}
         activeThreadRef={scopeThreadRef(ENVIRONMENT_A, SHARED_THREAD_ID)}
       />,
@@ -483,16 +489,14 @@ describe("GitActionsControl thread-scoped progress toast", () => {
         };
         setEnvironmentConfig(environmentId, null);
         const threadRef = scopeThreadRef(environmentId, SHARED_THREAD_ID);
-        const screen = await render(
-          <GitActionsControl gitCwd={GIT_CWD} activeThreadRef={threadRef} />,
-        );
+        const screen = await render(<GitThreadSync gitCwd={GIT_CWD} activeThreadRef={threadRef} />);
 
         try {
           expect(setDraftThreadContextSpy).not.toHaveBeenCalled();
           expect(setThreadBranchSpy).not.toHaveBeenCalled();
 
           setEnvironmentConfig(environmentId, worktreeBranchPrefix);
-          await screen.rerender(<GitActionsControl gitCwd={GIT_CWD} activeThreadRef={threadRef} />);
+          await screen.rerender(<GitThreadSync gitCwd={GIT_CWD} activeThreadRef={threadRef} />);
 
           expect(setDraftThreadContextSpy).toHaveBeenCalledExactlyOnceWith(threadRef, {
             branch: BRANCH_NAME,
@@ -517,16 +521,14 @@ describe("GitActionsControl thread-scoped progress toast", () => {
       liveBranchRef.current =
         environmentId === ENVIRONMENT_A ? "team/primary/deadbeef" : "team/saved/deadbeef";
       const threadRef = scopeThreadRef(environmentId, SHARED_THREAD_ID);
-      const screen = await render(
-        <GitActionsControl gitCwd={GIT_CWD} activeThreadRef={threadRef} />,
-      );
+      const screen = await render(<GitThreadSync gitCwd={GIT_CWD} activeThreadRef={threadRef} />);
 
       try {
         expect(setDraftThreadContextSpy).not.toHaveBeenCalled();
 
         liveBranchRef.current =
           environmentId === ENVIRONMENT_A ? "team/saved/deadbeef" : "team/primary/deadbeef";
-        await screen.rerender(<GitActionsControl gitCwd={GIT_CWD} activeThreadRef={threadRef} />);
+        await screen.rerender(<GitThreadSync gitCwd={GIT_CWD} activeThreadRef={threadRef} />);
 
         expect(setDraftThreadContextSpy).toHaveBeenCalledExactlyOnceWith(threadRef, {
           branch: liveBranchRef.current,
@@ -552,7 +554,7 @@ describe("GitActionsControl thread-scoped progress toast", () => {
     const host = document.createElement("div");
     document.body.append(host);
     const screen = await render(
-      <GitActionsControl
+      <GitThreadSync
         gitCwd={GIT_CWD}
         activeThreadRef={scopeThreadRef(ENVIRONMENT_A, SHARED_THREAD_ID)}
       />,

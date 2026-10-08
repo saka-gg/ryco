@@ -6,6 +6,8 @@ import path from "node:path";
 import Mime from "@effect/platform-node/Mime";
 import {
   ChatAttachment,
+  ChatFileAttachment,
+  type ChatHtmlRenderMetadata,
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
   PROVIDER_SEND_TURN_MAX_ATTACHMENT_TOTAL_BYTES,
   PROVIDER_SEND_TURN_MAX_FILE_BYTES,
@@ -108,6 +110,60 @@ const isInside = (root: string, candidate: string) => {
   );
 };
 
+const hashToUuid = (hash: string) =>
+  `${hash.slice(0, 8)}-${hash.slice(8, 12)}-${hash.slice(12, 16)}-${hash.slice(16, 20)}-${hash.slice(20, 32)}`;
+
+/** A fresh `.part` file in the attachments root. The caller removes it once published. */
+async function openStagingFile(attachmentsDir: string) {
+  await fs.mkdir(attachmentsDir, { recursive: true });
+  const temporary = path.join(attachmentsDir, `.${randomUUID()}.part`);
+  return { temporary, output: await fs.open(temporary, "wx", 0o600) };
+}
+
+export interface PublishedAssistantAttachment<A extends ChatAttachment = ChatAttachment> {
+  readonly attachment: A;
+  /** False when a previous delivery already stored this exact snapshot under the same id. */
+  readonly created: boolean;
+}
+
+/**
+ * Publishes a fully written staging file under an id derived from its content
+ * hash, so a retried delivery resolves to the same attachment. The file lands
+ * at the attachments root under exactly the attachment's relative path.
+ */
+async function publishStagedAttachment(input: {
+  readonly attachmentsDir: string;
+  readonly temporary: string;
+  readonly thread: string;
+  readonly contentHash: string;
+  /** Omitted for inline images, whose stored name carries the image extension instead. */
+  readonly extensionSegment: string | undefined;
+  readonly fields: {
+    readonly type: "image" | "file";
+    readonly name: string;
+    readonly mimeType: string;
+    readonly sizeBytes: number;
+    readonly htmlRender?: ChatHtmlRenderMetadata;
+  };
+}): Promise<PublishedAssistantAttachment> {
+  const suffix = input.extensionSegment === undefined ? "" : `-${input.extensionSegment}`;
+  const attachment = Schema.decodeUnknownSync(ChatAttachment)({
+    ...input.fields,
+    id: `${input.thread}-${hashToUuid(input.contentHash)}${suffix}`,
+  });
+  const destination = resolveAttachmentPath({ attachmentsDir: input.attachmentsDir, attachment });
+  if (!destination) throw new Error("Invalid attachment destination.");
+  // Atomic publication. Never overwrite a previous delivery's snapshot.
+  try {
+    await fs.link(input.temporary, destination);
+    return { attachment, created: true };
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "EEXIST")
+      return { attachment, created: false };
+    throw error;
+  }
+}
+
 /** Copy in bounded chunks; opaque deterministic ids make delivery retries idempotent. */
 export async function persistAssistantAttachment(input: {
   attachmentsDir: string;
@@ -176,9 +232,9 @@ export async function persistAssistantAttachment(input: {
     const contentHash = createHash("sha256").update(
       JSON.stringify([input.threadId, input.deliveryId, relative, name]),
     );
-    await fs.mkdir(input.attachmentsDir, { recursive: true });
-    temporary = path.join(input.attachmentsDir, `.${randomUUID()}.part`);
-    const output = await fs.open(temporary, "wx", 0o600);
+    const staging = await openStagingFile(input.attachmentsDir);
+    temporary = staging.temporary;
+    const output = staging.output;
     try {
       const chunk = Buffer.alloc(Math.min(info.size, 64 * 1024));
       for (let offset = 0; offset < info.size;) {
@@ -214,26 +270,90 @@ export async function persistAssistantAttachment(input: {
       await output.close();
     }
     input.signal?.throwIfAborted();
-    const hash = contentHash.digest("hex");
-    const uuid = `${hash.slice(0, 8)}-${hash.slice(8, 12)}-${hash.slice(12, 16)}-${hash.slice(16, 20)}-${hash.slice(20, 32)}`;
-    const attachment = Schema.decodeUnknownSync(ChatAttachment)({
-      type: inlineImage ? "image" : "file",
-      id: `${thread}-${uuid}${inlineImage ? "" : `-${toSafeFileAttachmentExtensionSegment(path.basename(source))}`}`,
-      name,
-      mimeType,
-      sizeBytes: info.size,
+    const published = await publishStagedAttachment({
+      attachmentsDir: input.attachmentsDir,
+      temporary,
+      thread,
+      contentHash: contentHash.digest("hex"),
+      extensionSegment: inlineImage
+        ? undefined
+        : toSafeFileAttachmentExtensionSegment(path.basename(source)),
+      fields: { type: inlineImage ? "image" : "file", name, mimeType, sizeBytes: info.size },
     });
-    const destination = resolveAttachmentPath({ attachmentsDir: input.attachmentsDir, attachment });
-    if (!destination) throw new Error("Invalid attachment destination.");
-    // Atomic publication. Never overwrite a previous delivery's snapshot.
-    try {
-      await fs.link(temporary, destination);
-    } catch (error) {
-      if (!(error instanceof Error && "code" in error && error.code === "EEXIST")) throw error;
-    }
-    return attachment;
+    return published.attachment;
   } finally {
     await handle.close();
     if (temporary) await fs.rm(temporary, { force: true });
+  }
+}
+
+const GENERATED_WRITE_CHUNK_BYTES = 1024 * 1024;
+
+/**
+ * Stores server-generated bytes (an HTML render) as a file attachment with
+ * the same content-derived id, staging and never-overwrite publication as a
+ * delivered workspace file. `sizeBytes` is exactly the stored byte count.
+ */
+export async function persistGeneratedAssistantAttachment(input: {
+  attachmentsDir: string;
+  threadId: string;
+  deliveryId: string;
+  name: string;
+  mimeType: string;
+  /** Id suffix naming the format, e.g. `html`; sanitized like an uploaded file's extension. */
+  extensionSegment: string;
+  bytes: Uint8Array;
+  htmlRender?: ChatHtmlRenderMetadata;
+  remainingBytes?: number;
+  signal?: AbortSignal;
+}): Promise<PublishedAssistantAttachment<ChatFileAttachment>> {
+  const sizeBytes = input.bytes.byteLength;
+  const limit = Math.min(
+    PROVIDER_SEND_TURN_MAX_FILE_BYTES,
+    input.remainingBytes ?? PROVIDER_SEND_TURN_MAX_ATTACHMENT_TOTAL_BYTES,
+  );
+  if (sizeBytes <= 0 || sizeBytes > limit)
+    throw new Error("Attachment is empty or exceeds the 50 MiB attachment budget.");
+  const thread = toSafeThreadAttachmentSegment(input.threadId);
+  if (!thread) throw new Error("Invalid attachment thread.");
+  const contentHash = createHash("sha256")
+    .update(JSON.stringify([input.threadId, input.deliveryId, input.name, input.mimeType]))
+    .update(input.bytes);
+  input.signal?.throwIfAborted();
+  const { temporary, output } = await openStagingFile(input.attachmentsDir);
+  try {
+    try {
+      for (let offset = 0; offset < sizeBytes;) {
+        input.signal?.throwIfAborted();
+        const length = Math.min(GENERATED_WRITE_CHUNK_BYTES, sizeBytes - offset);
+        const { bytesWritten } = await output.write(input.bytes, offset, length, offset);
+        if (bytesWritten === 0) throw new Error("Attachment could not be stored.");
+        offset += bytesWritten;
+      }
+      await output.sync();
+    } finally {
+      await output.close();
+    }
+    input.signal?.throwIfAborted();
+    const published = await publishStagedAttachment({
+      attachmentsDir: input.attachmentsDir,
+      temporary,
+      thread,
+      contentHash: contentHash.digest("hex"),
+      extensionSegment: toSafeFileAttachmentExtensionSegment(`.${input.extensionSegment}`),
+      fields: {
+        type: "file",
+        name: input.name,
+        mimeType: input.mimeType,
+        sizeBytes,
+        ...(input.htmlRender === undefined ? {} : { htmlRender: input.htmlRender }),
+      },
+    });
+    const { attachment } = published;
+    if (!Schema.is(ChatFileAttachment)(attachment))
+      throw new Error("Attachment could not be stored.");
+    return { attachment, created: published.created };
+  } finally {
+    await fs.rm(temporary, { force: true });
   }
 }

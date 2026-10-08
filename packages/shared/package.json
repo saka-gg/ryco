@@ -23,6 +23,18 @@
       "types": "./src/restartContinuation.ts",
       "import": "./src/restartContinuation.ts"
     },
+    "./htmlRender": {
+      "types": "./src/htmlRender.ts",
+      "import": "./src/htmlRender.ts"
+    },
+    "./htmlRenderToolPresentation": {
+      "types": "./src/htmlRenderToolPresentation.ts",
+      "import": "./src/htmlRenderToolPresentation.ts"
+    },
+    "./themePalettes": {
+      "types": "./src/themePalettes.ts",
+      "import": "./src/themePalettes.ts"
+    },
     "./lruCache": {
       "types": "./src/lruCache.ts",
       "import": "./src/lruCache.ts"

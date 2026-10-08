@@ -1,0 +1,314 @@
+/* Crown — motion: timing tokens, the root's enter / exit, keyframes, reduced motion. */
+
+.crown-root {
+  --crown-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --crown-ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --crown-ease-morph: cubic-bezier(0.32, 0.72, 0, 1);
+
+  /* Whole rail in / out (ChatView delays unmount by CROWN_RAIL_EXIT_MS). */
+  --crown-dur-enter-fade: 300ms;
+  --crown-dur-enter-move: 500ms;
+  /* Island morph and alert glow. */
+  --crown-dur-morph: 620ms;
+  --crown-dur-glow: 400ms;
+  /* Layer cross-fade: arriving layers wait for the island to start growing. */
+  --crown-dur-layer-in-fade: 350ms;
+  --crown-dur-layer-in-fade-delay: 120ms;
+  --crown-dur-layer-in-blur: 400ms;
+  --crown-dur-layer-in-blur-delay: 100ms;
+  --crown-dur-layer-in-morph: 600ms;
+  --crown-dur-layer-out-fade: 220ms;
+  --crown-dur-layer-out-blur: 300ms;
+  --crown-dur-layer-out-morph: 550ms;
+  /* Rail under the card. */
+  --crown-dur-rail-fade: 300ms;
+  --crown-dur-rail-morph: 550ms;
+  /* Rail icons. */
+  --crown-dur-color: 200ms;
+  --crown-dur-hover: 150ms;
+  --crown-dur-highlight: 420ms;
+  --crown-dur-highlight-fade: 200ms;
+  --crown-dur-badge: 350ms;
+  --crown-dur-badge-fade: 200ms;
+  --crown-dur-roll: 420ms;
+  --crown-dur-dot: 400ms;
+  --crown-dur-dot-color: 300ms;
+  --crown-dur-ring: 600ms;
+  --crown-dur-ring-tone: 350ms;
+  --crown-dur-arc: 900ms;
+  --crown-dur-plan-bar: 800ms;
+  --crown-dur-ping: 950ms;
+  /* Card section switch and the "+N" badge. */
+  --crown-dur-swapin: 350ms;
+  /* Flyout. */
+  --crown-dur-fly-move: 450ms;
+  --crown-dur-fly-fade: 250ms;
+  --crown-dur-fly-morph: 550ms;
+  --crown-dur-fly-blur: 400ms;
+  --crown-dur-fly-layer-fade: 200ms;
+  --crown-dur-fly-layer-move: 300ms;
+
+  top: var(--crown-top, calc(var(--chat-header-clearance, 0px) + 0.25rem));
+  line-height: 1.45;
+  transition:
+    opacity var(--crown-dur-enter-fade) var(--crown-ease-out),
+    transform var(--crown-dur-enter-move) var(--crown-ease-out);
+}
+
+.crown-root[data-state="closed"] {
+  opacity: 0;
+  transform: translateX(20px);
+  pointer-events: none;
+}
+
+@starting-style {
+  .crown-root[data-state="open"] {
+    opacity: 0;
+    transform: translateX(20px);
+  }
+}
+
+/* Crown-owned controls only; ui/Button and detail rows keep their own focus styles. */
+.crown-root
+  :is(
+    .crown-face,
+    .crown-rail-btn,
+    .crown-icon-btn,
+    .crown-alert-view,
+    .notes-check,
+    .notes-save,
+    .notes-thread-chip
+  ):focus-visible,
+.crown-root .notes-seg [role="tab"]:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--info) 70%, transparent);
+  outline-offset: 2px;
+}
+
+/* The Notes scope tabs take the crown ring instead of SlidingTabs' own. */
+.crown-root .notes-seg [role="tab"]:focus-visible {
+  box-shadow: none;
+}
+
+@keyframes crown-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Agent dot: a halo that leaves the dot while the agent works. */
+@keyframes crown-live {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--success) 60%, transparent);
+  }
+  70%,
+  100% {
+    box-shadow: 0 0 0 6px transparent;
+  }
+}
+
+@keyframes crown-ping {
+  0% {
+    opacity: 0.9;
+    transform: scale(0.82);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.75);
+  }
+}
+
+/* Badge numbers (prototype `roll-in-*` / `roll-out-*`); direction comes from RollingText. */
+@keyframes crown-roll-in {
+  from {
+    transform: translateY(var(--rolling-text-from));
+    opacity: 0;
+  }
+}
+
+@keyframes crown-roll-out {
+  to {
+    transform: translateY(var(--rolling-text-to));
+    opacity: 0;
+  }
+}
+
+@keyframes crown-segpulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.32;
+  }
+}
+
+@keyframes crown-swapin {
+  from {
+    opacity: 0;
+    transform: scale(0.9);
+    filter: blur(3px);
+  }
+}
+
+/* Running check rows: an indeterminate bar (no progress percentage exists). */
+@keyframes crown-check-bar {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(250%);
+  }
+}
+
+/* Active plan step: the marker's ring breathes (its static ring is frame 0). */
+@keyframes crown-step-active {
+  0%,
+  100% {
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--crown-plan) 28%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 5px color-mix(in srgb, var(--crown-plan) 8%, transparent);
+  }
+}
+
+.crown-check-bar {
+  animation: crown-check-bar 1.3s ease-in-out infinite;
+  animation-play-state: var(--app-motion-activity-play-state, running);
+}
+
+.crown-step-active {
+  animation: crown-step-active 1.8s infinite;
+  animation-play-state: var(--app-motion-activity-play-state, running);
+}
+
+/* A running subagent's dot (prototype `.as.running::before`). */
+.crown-agent-pulse {
+  animation: crown-segpulse 1s infinite;
+  animation-play-state: var(--app-motion-activity-play-state, running);
+}
+
+.crown-spin {
+  display: inline-block;
+  flex: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 1.6px solid color-mix(in srgb, var(--warning) 28%, transparent);
+  border-top-color: var(--warning);
+  animation: crown-spin 0.8s linear infinite;
+  animation-play-state: var(--app-motion-activity-play-state, running);
+}
+
+.crown-swapin {
+  animation: crown-swapin var(--crown-dur-swapin) var(--crown-ease-out);
+}
+
+/*
+ * Infinite animations stop with the app's activity motion (hidden tab, etc.),
+ * and inside layers nobody can see: a folded card, its spine, the rail under
+ * the card.
+ */
+:root[data-ryco-motion-paused]
+  .crown-root
+  :is(
+    .crown-spin,
+    .crown-refresh-spin,
+    .crown-agent-dot,
+    .crown-agent-pulse,
+    .crown-ring-seg,
+    .crown-ci-dot,
+    .crown-live-dot,
+    .crown-check-bar,
+    .crown-step-active
+  ),
+:is(.crown-layer:not([data-visible="true"]), .crown-rail-nav[inert])
+  :is(
+    .crown-spin,
+    .crown-refresh-spin,
+    .crown-agent-dot,
+    .crown-agent-pulse,
+    .crown-ring-seg,
+    .crown-ci-dot,
+    .crown-live-dot,
+    .crown-check-bar,
+    .crown-step-active
+  ) {
+  animation-play-state: paused;
+}
+
+/*
+ * Reduced motion. `data-motion` comes from useReducedMotionEffective, which
+ * already folds in the OS setting, so this is the only reduced-motion block.
+ */
+.crown-root[data-motion="reduced"] {
+  --crown-dur-enter-fade: 0ms;
+  --crown-dur-enter-move: 0ms;
+  --crown-dur-morph: 0ms;
+  --crown-dur-glow: 0ms;
+  --crown-dur-layer-in-fade: 0ms;
+  --crown-dur-layer-in-fade-delay: 0ms;
+  --crown-dur-layer-in-blur: 0ms;
+  --crown-dur-layer-in-blur-delay: 0ms;
+  --crown-dur-layer-in-morph: 0ms;
+  --crown-dur-layer-out-fade: 0ms;
+  --crown-dur-layer-out-blur: 0ms;
+  --crown-dur-layer-out-morph: 0ms;
+  --crown-dur-rail-fade: 0ms;
+  --crown-dur-rail-morph: 0ms;
+  --crown-dur-color: 0ms;
+  --crown-dur-hover: 0ms;
+  --crown-dur-highlight: 0ms;
+  --crown-dur-highlight-fade: 0ms;
+  --crown-dur-badge: 0ms;
+  --crown-dur-badge-fade: 0ms;
+  --crown-dur-roll: 0ms;
+  --crown-dur-dot: 0ms;
+  --crown-dur-dot-color: 0ms;
+  --crown-dur-ring: 0ms;
+  --crown-dur-ring-tone: 0ms;
+  --crown-dur-arc: 0ms;
+  --crown-dur-plan-bar: 0ms;
+  --crown-dur-ping: 0ms;
+  --crown-dur-swapin: 0ms;
+  --crown-dur-fly-move: 0ms;
+  --crown-dur-fly-fade: 0ms;
+  --crown-dur-fly-morph: 0ms;
+  --crown-dur-fly-blur: 0ms;
+  --crown-dur-fly-layer-fade: 0ms;
+  --crown-dur-fly-layer-move: 0ms;
+}
+
+.crown-root[data-motion="reduced"]
+  :is(
+    .crown-spin,
+    .crown-refresh-spin,
+    .crown-agent-dot,
+    .crown-agent-pulse,
+    .crown-ring-seg,
+    .crown-ci-dot,
+    .crown-live-dot,
+    .crown-queue,
+    .crown-swapin,
+    .crown-check-bar,
+    .crown-step-active,
+    [data-slot="crown-section-detail"] [class*="animate-"]
+  ) {
+  animation: none;
+}
+
+.crown-root[data-motion="reduced"] .crown-ping {
+  display: none;
+}
+
+.crown-root[data-motion="reduced"] :is(.crown-layer, .crown-flyout) {
+  filter: none;
+}
+
+/* The details' own Tailwind transitions and press scale. */
+.crown-root[data-motion="reduced"] [data-slot="crown-section-detail"] * {
+  transition-duration: 0ms;
+}
+
+.crown-root[data-motion="reduced"] [data-slot="crown-section-detail"] *:active {
+  scale: none;
+}

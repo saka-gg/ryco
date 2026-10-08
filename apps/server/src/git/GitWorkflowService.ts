@@ -2,10 +2,13 @@ import { readGitLocalChanges, applyGitIndexPatch } from "../vcs/GitIndexReview.t
 import { authorizeGitReadCwd } from "../vcs/GitReadWorkspace.ts";
 import type { WorkspaceAccessPolicy } from "../workspace/Services/WorkspaceAccessPolicy.ts";
 import { readGitLineBlame } from "../vcs/GitLineBlame.ts";
+import { readGitImageBlob } from "../vcs/GitImageBlob.ts";
 import { readGitComparison } from "../vcs/GitComparison.ts";
 import type {
   GitReadLineBlameInput,
   GitReadLineBlameResult,
+  GitReadImageBlobInput,
+  GitReadImageBlobResult,
   GitLocalChangesInput,
   GitLocalChangesResult,
   GitApplyIndexPatchInput,
@@ -56,6 +59,9 @@ export interface GitWorkflowServiceShape {
   readonly readLineBlame: (
     input: GitReadLineBlameInput,
   ) => Effect.Effect<GitReadLineBlameResult, GitCommandError, WorkspaceAccessPolicy>;
+  readonly readImageBlob: (
+    input: GitReadImageBlobInput,
+  ) => Effect.Effect<GitReadImageBlobResult, GitCommandError, WorkspaceAccessPolicy>;
   readonly readLocalChanges: (
     input: GitLocalChangesInput,
   ) => Effect.Effect<GitLocalChangesResult, GitCommandError, WorkspaceAccessPolicy>;
@@ -349,6 +355,14 @@ export const make = Effect.fn("makeGitWorkflowService")(function* () {
         Effect.flatMap((cwd) =>
           ensureGitCommand("GitWorkflowService.readLineBlame", cwd).pipe(
             Effect.andThen(readGitLineBlame(git.execute, { ...input, cwd })),
+          ),
+        ),
+      ),
+    readImageBlob: (input) =>
+      authorizeGitReadCwd(input.cwd, "readImageBlob").pipe(
+        Effect.flatMap((cwd) =>
+          ensureGitCommand("GitWorkflowService.readImageBlob", cwd).pipe(
+            Effect.andThen(readGitImageBlob(git.execute, { ...input, cwd })),
           ),
         ),
       ),

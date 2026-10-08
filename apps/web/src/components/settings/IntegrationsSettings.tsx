@@ -92,6 +92,40 @@ const CAPABILITY_OPTIONS: ReadonlyArray<{
     description: "Read redacted count-only health summaries for allowed projects.",
   },
   {
+    capability: AGENT_CONTROL_CAPABILITIES.externalReadThreads,
+    label: "Read threads",
+    description:
+      "List, search, read, wait on, and inspect threads in allowed projects. Terminal output stays private.",
+  },
+  {
+    capability: AGENT_CONTROL_CAPABILITIES.externalReadReviews,
+    label: "Read reviews",
+    description: "Read checkpoint diffs and review history for threads in allowed projects.",
+  },
+  {
+    capability: AGENT_CONTROL_CAPABILITIES.externalReadFiles,
+    label: "Read workspace files",
+    description:
+      "Read any text file in a thread's workspace or worktree, including local configuration.",
+  },
+  {
+    capability: AGENT_CONTROL_CAPABILITIES.externalReadWorkspaces,
+    label: "Read projects and workspaces",
+    description: "Read project preferences, workspace paths, and Git status without changing them.",
+  },
+  {
+    capability: AGENT_CONTROL_CAPABILITIES.externalControlThreads,
+    label: "Request thread control",
+    description:
+      "Propose messages, interrupts, and thread updates in allowed projects; each request needs approval.",
+  },
+  {
+    capability: AGENT_CONTROL_CAPABILITIES.externalManageWorkspaces,
+    label: "Request workspace changes",
+    description:
+      "Propose archiving, restoring, or deleting workspaces in allowed projects; each request needs approval.",
+  },
+  {
     capability: AGENT_CONTROL_CAPABILITIES.externalSharedCheckout,
     label: "Request shared checkout",
     description: "May request the local checkout; each request still needs approval.",

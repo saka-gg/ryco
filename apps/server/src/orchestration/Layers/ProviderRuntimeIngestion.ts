@@ -57,7 +57,10 @@ import {
 } from "../Services/ProviderRuntimeIngestion.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { increment, providerRuntimeStaleEventsTotal } from "../../observability/Metrics.ts";
-import { projectActivityPayload } from "../ActivityPayloadProjection.ts";
+import {
+  projectActivityPayload,
+  withoutHtmlRenderToolMarkup,
+} from "../ActivityPayloadProjection.ts";
 import { capActivityData } from "../activityDataCap.ts";
 import {
   REASONING_LIVE_FLUSH_INTERVAL_MS,
@@ -1087,7 +1090,12 @@ export function runtimeEventToActivities(
             ...(event.providerRefs ? { providerRefs: event.providerRefs } : {}),
             ...(event.payload.detail ? { detail: truncateDetail(event.payload.detail) } : {}),
             ...(event.payload.data !== undefined
-              ? { data: capActivityData(event.payload.itemType, event.payload.data) }
+              ? {
+                  data: capActivityData(
+                    event.payload.itemType,
+                    withoutHtmlRenderToolMarkup(event.payload.data),
+                  ),
+                }
               : {}),
             ...(event.payload.agentId ? { agentId: event.payload.agentId } : {}),
             ...(event.payload.parentToolUseId
@@ -1118,7 +1126,12 @@ export function runtimeEventToActivities(
             ...(event.providerRefs ? { providerRefs: event.providerRefs } : {}),
             ...(event.payload.detail ? { detail: truncateDetail(event.payload.detail) } : {}),
             ...(event.payload.data !== undefined
-              ? { data: capActivityData(event.payload.itemType, event.payload.data) }
+              ? {
+                  data: capActivityData(
+                    event.payload.itemType,
+                    withoutHtmlRenderToolMarkup(event.payload.data),
+                  ),
+                }
               : {}),
             ...(event.payload.agentId ? { agentId: event.payload.agentId } : {}),
             ...(event.payload.parentToolUseId
@@ -1149,7 +1162,12 @@ export function runtimeEventToActivities(
             ...(event.providerRefs ? { providerRefs: event.providerRefs } : {}),
             ...(event.payload.detail ? { detail: truncateDetail(event.payload.detail) } : {}),
             ...(event.payload.data !== undefined
-              ? { data: capActivityData(event.payload.itemType, event.payload.data) }
+              ? {
+                  data: capActivityData(
+                    event.payload.itemType,
+                    withoutHtmlRenderToolMarkup(event.payload.data),
+                  ),
+                }
               : {}),
             ...(event.payload.agentId ? { agentId: event.payload.agentId } : {}),
             ...(event.payload.parentToolUseId

@@ -45,10 +45,12 @@ If that second send also fails, Ryco shows its error and puts the message back i
 
 A chat runs locally in a plain folder. Ryco's apps never treat that folder as a Git repository:
 they do not poll the folder's Git status, pull requests or CI runs, and offer no branch, worktree
-or diff controls for it. The overview panel has no **Changes** section for a chat. The node
-refuses a worktree for the first send that creates a chat. Where a project shows its Git state, a
-chat's header and overview panel offer **Turn into project…** instead. The header also has a
-button that shows the folder when it is on this machine.
+or diff controls for it. The overview rail shows no **Branch**, **Changes**, **Checks**, **Pull
+request** or **Push** for a chat, and no **Notes**: notes belong to a project checkout, and a chat
+folder is none. They become available once the chat is a project. The node refuses a worktree for
+the first send that creates a chat. Where a project shows its Git state, a chat's header offers
+**Turn into project…** instead, and the overview rail has a **Turn into project** icon. The header
+also has a button that shows the folder when it is on this machine.
 
 ## Where chats live
 
@@ -140,7 +142,8 @@ older chats' folders by hand.
 Open **Turn into project…** from any of these places:
 
 - the chat's header,
-- the overview panel,
+- the overview rail on desktop: its **Turn into project** icon previews what happens on hover and
+  opens a card with the **Turn into project…** button,
 - the chat's row menu in the sidebar,
 - the command palette (**Turn chat into project…**).
 

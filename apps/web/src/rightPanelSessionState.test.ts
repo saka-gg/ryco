@@ -55,6 +55,29 @@ describe("right panel session state", () => {
     });
   });
 
+  it("restores a thread's page tab with the page it showed", () => {
+    rememberRightPanelSessionSearch("thread-a", {
+      workspaceOpen: "1",
+      workspaceTab: "render",
+      workspaceRender: "message-1:thread-a-chart-html",
+      messageId: MessageId.make("message-9"),
+    });
+    const remembered = readRightPanelSessionSearch("thread-a")!;
+    expect(remembered).toEqual({
+      workspaceOpen: "1",
+      workspaceTab: "render",
+      workspaceRender: "message-1:thread-a-chart-html",
+    });
+    // Restoring replaces another tab's page key, never mixes them.
+    expect(
+      applyRightPanelSessionSearch(
+        { workspaceOpen: "1", workspaceTab: "render", workspaceRender: "other:page" },
+        { workspaceOpen: "1", workspaceTab: "terminal" },
+      ),
+    ).toEqual({ workspaceOpen: "1", workspaceTab: "terminal" });
+    expect(applyRightPanelSessionSearch({}, remembered)).toEqual(remembered);
+  });
+
   it("carries a draft workspace into its promoted server thread", () => {
     rememberRightPanelSessionSearch("draft:draft-a", {
       workspaceOpen: "1",

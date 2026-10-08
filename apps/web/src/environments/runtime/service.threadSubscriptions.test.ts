@@ -6,7 +6,7 @@ import {
   TurnId,
   type OrchestrationShellSnapshot,
 } from "@ryco/contracts";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 const mockSubscribeThread = vi.fn();
 const mockThreadUnsubscribe = vi.fn();
@@ -151,7 +151,17 @@ function makeThreadShellSnapshot(params: {
   };
 }
 
+// The service's module graph is large: its first, cold import takes about a
+// second alone and far longer under a full suite's load, which would land in
+// whichever test happens to run first. Import it once up front; each test's
+// own import after `vi.resetModules()` then reuses the transformed modules.
+const COLD_SERVICE_IMPORT_TIMEOUT_MS = 60_000;
+
 describe("retainThreadDetailSubscription", () => {
+  beforeAll(async () => {
+    await import("./service");
+  }, COLD_SERVICE_IMPORT_TIMEOUT_MS);
+
   beforeEach(() => {
     vi.useFakeTimers();
     vi.resetModules();

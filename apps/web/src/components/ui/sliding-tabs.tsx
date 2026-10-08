@@ -20,6 +20,8 @@ export interface SlidingTab {
    * tab can point at it with `aria-controls`. Defaults to true when `idPrefix` is set.
    */
   readonly hasPanel?: boolean | undefined;
+  /** Not selectable (click or arrow keys); `title` should say why. */
+  readonly disabled?: boolean | undefined;
 }
 
 /** The `id` SlidingTabs gives a tab when it has an `idPrefix`. */
@@ -116,10 +118,12 @@ export const SlidingTabs = memo(function SlidingTabs(props: {
 
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (event.altKey || event.ctrlKey || event.metaKey) return;
-    const index = props.tabs.findIndex((tab) => tab.id === props.activeId);
-    const target = rovingTargetIndex(event.key, Math.max(0, index), props.tabs.length);
+    // Disabled tabs are skipped, as if they were not in the strip.
+    const enabled = props.tabs.filter((tab) => !tab.disabled);
+    const index = enabled.findIndex((tab) => tab.id === props.activeId);
+    const target = rovingTargetIndex(event.key, Math.max(0, index), enabled.length);
     if (target === null) return;
-    const next = props.tabs[target];
+    const next = enabled[target];
     if (!next) return;
     event.preventDefault();
     if (next.id !== props.activeId) props.onSelect(next.id);
@@ -175,12 +179,13 @@ export const SlidingTabs = memo(function SlidingTabs(props: {
             role="tab"
             id={props.idPrefix !== undefined ? slidingTabId(props.idPrefix, tab.id) : undefined}
             aria-selected={selected}
+            aria-disabled={tab.disabled || undefined}
             aria-controls={controls}
             aria-label={tab.ariaLabel}
             tabIndex={tabStop ? 0 : -1}
             title={tab.title}
             data-sliding-tab-id={tab.id}
-            onClick={() => props.onSelect(tab.id)}
+            onClick={tab.disabled ? undefined : () => props.onSelect(tab.id)}
             onPointerEnter={props.onTabIntent ? () => props.onTabIntent?.(tab.id) : undefined}
             onFocus={props.onTabIntent ? () => props.onTabIntent?.(tab.id) : undefined}
             className={cn(
@@ -190,7 +195,9 @@ export const SlidingTabs = memo(function SlidingTabs(props: {
                 ? variant === "pill"
                   ? "text-accent-foreground"
                   : "text-foreground"
-                : "text-muted-foreground hover:text-foreground",
+                : tab.disabled
+                  ? "cursor-default text-muted-foreground opacity-50"
+                  : "text-muted-foreground hover:text-foreground",
               props.tabClassName,
             )}
           >

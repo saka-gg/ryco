@@ -74,7 +74,8 @@ Add `kind: "project" | "chat"` to projects.
 - `apps/server/src/orchestration/decider.ts:468-509`: allow only `chat → project` (one way). Reject
   `project → chat`.
 - `apps/server/src/orchestration/projector.ts:272-364` and `ProjectionPipeline.ts:611-704`: carry `kind`.
-- Migration `079_ProjectKindAndRelocations.ts`:
+- Migration `080_ProjectKindAndRelocations.ts` (written as 079; renumbered when main's
+  `079_WorktreeNotes` landed first):
   - `projection_projects.kind TEXT NOT NULL DEFAULT 'project'`.
   - A new `project_relocations` journal table (see Promotion). Use the idempotent
     `PRAGMA table_info` style and register it in `Migrations.ts`.
@@ -261,7 +262,7 @@ The same setting will drive Phase 3's "new project from a name".
 ## Phases
 
 1. **Chats.** Contracts (`kind`, bootstrap field, `chats` server config, keybinding), migration
-   079, `chatFolders.ts`, the bootstrap path, client-runtime draft support, web entry points,
+   080, `chatFolders.ts`, the bootstrap path, client-runtime draft support, web entry points,
    sidebar section, settings row, delete semantics.
 2. **Promotion.** `projects.promoteChat`, relocation journal and startup recovery, the
    `initializeGitForProject` refactor, the `resumeSurvivesCwdChange` capability plus a fresh
@@ -281,7 +282,7 @@ Proportional, focused (AGENTS.md):
   - Folder-name allocator: slugging, traversal stripping, collisions.
   - Chats availability guard: root inside a repo, symlinked root.
   - Decider `kind` rules.
-  - Migration 079 run twice (idempotent).
+  - Migration 080 run twice (idempotent), and every ledger it can meet (see below).
   - `chatPromotion`: rename, `EXDEV` copy fallback (injected fs), busy rejection, a stale
     `expectedUpdatedAt`, an existing destination, rollback, and each crash-recovery state.
   - The reactor's fresh-session-on-cwd-change branch.
@@ -320,9 +321,13 @@ notable differences from the design above.
 - The `thread.turn.start` bootstrap schema rejects `createChatProject` together with
   `prepareWorktree` or `requireWorktree: true`. It also requires `createThread` for the same
   project ID. The server also refuses a chat whose `createThread` has a `worktreePath`.
-- Migration 079 also runs again after the migration ledger, as `repairProjectKindAndRelocations()`.
-  The reason is that another in-progress branch uses migration number 079; whichever branch merges
-  second renumbers its migration.
+- Migration 080 also runs again after the migration ledger, as `repairProjectKindAndRelocations()`.
+  The migrator keys progress by id alone. This branch first shipped the migration as 079, and
+  main's `079_WorktreeNotes` merged first, so the branch's migration became 080. A development
+  database that recorded the old `79_ProjectKindAndRelocations` skips main's 079; main's
+  `ensureWorktreeNotesTable` repair creates `worktree_notes` there, and 080 then runs as a no-op.
+  `080_ProjectKindAndRelocations.test.ts` covers a fresh database, a main-only database at 79 and
+  a database with the old 79 ledger entry.
 - The journal has states `pending`, `moved`, `done` and `failed`, plus `strategy` (`rename` or
   `copy`) and `destinationCreated`. The new `moved` state marks a verified destination, so that
   recovery finishes the promotion instead of undoing it.
@@ -408,7 +413,12 @@ notable differences from the design above.
   mobile divider renders relocations with it instead of a model transition.
 - Chat row menus have these folder actions: show in the file manager and open in the editor (both
   only on the primary environment), and copy the path. "Turn into project…" plugs into the
-  extension point in `chatRowMenu.ts`. The overview panel's Git slot shows the promote action.
+  extension point in `chatRowMenu.ts`. On the desktop overview (the Crown rail), a chat has a
+  **Turn into project** section (rail icon, hover preview and card) in place of the Git sections.
+  ChatView passes `sourceControlCwd` (null for a chat) to the overview and its Git controls, so no
+  Git status, pull request or CI query, and no VCS status scope, runs for a chat folder. Worktree
+  Notes are hidden for chats (`notesTarget` is null): a chat folder has no worktree record, and the
+  project keeps its id on promotion, so notes start then.
 
 **Deleting**
 

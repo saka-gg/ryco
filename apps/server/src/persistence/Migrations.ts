@@ -1,9 +1,10 @@
+import Migration0079, { ensureWorktreeNotesTable } from "./Migrations/079_WorktreeNotes.ts";
 import Migration0078, {
   ensureManagedWorktreeNaming,
 } from "./Migrations/078_ManagedWorktreeNaming.ts";
-import Migration0079, {
+import Migration0080, {
   ensureProjectKindAndRelocations,
-} from "./Migrations/079_ProjectKindAndRelocations.ts";
+} from "./Migrations/080_ProjectKindAndRelocations.ts";
 import Migration0071 from "./Migrations/071_StatisticsUsageHistory.ts";
 import Migration0072, {
   ensureProjectionThreadLineageColumns,
@@ -196,7 +197,8 @@ export const migrationEntries = [
   [76, "AuthSessionRotation", Migration0076],
   [77, "ThreadWorkspaceLifecycle", Migration0077],
   [78, "ManagedWorktreeNaming", Migration0078],
-  [79, "ProjectKindAndRelocations", Migration0079],
+  [79, "WorktreeNotes", Migration0079],
+  [80, "ProjectKindAndRelocations", Migration0080],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>
@@ -430,8 +432,8 @@ export const repairAuthSessionRotationColumns = Effect.fn("repairAuthSessionRota
   },
 );
 
-// Project kinds and the chat relocation journal: run 079 again as a repair when another
-// branch's 079 (or a later id) was recorded first.
+// Project kinds and the chat relocation journal: run 080 again as a repair when another
+// branch's 080 (or a later id) was recorded first.
 export const repairProjectKindAndRelocations = Effect.fn("repairProjectKindAndRelocations")(
   function* () {
     if (yield* ensureProjectKindAndRelocations) {
@@ -600,7 +602,12 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
   if (toMigrationInclusive === undefined || toMigrationInclusive >= 78) {
     yield* ensureManagedWorktreeNaming;
   }
+  // Repair: 079 is skipped by the migrator when a later number was recorded first, including
+  // development databases that recorded projectless chats' schema as 079 before it moved to 080.
   if (toMigrationInclusive === undefined || toMigrationInclusive >= 79) {
+    yield* ensureWorktreeNotesTable;
+  }
+  if (toMigrationInclusive === undefined || toMigrationInclusive >= 80) {
     yield* repairProjectKindAndRelocations();
   }
   yield* Effect.log("Migrations ran successfully").pipe(

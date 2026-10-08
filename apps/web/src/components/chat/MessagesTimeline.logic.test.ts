@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vite-plus/test";
+import { htmlRenderOfAttachment } from "@ryco/shared/htmlRender";
+import { describe, expect, it, vi } from "vite-plus/test";
 import {
   ContextHandoffId,
   EnvironmentId,
@@ -7,9 +8,13 @@ import {
   ProviderInstanceId,
   TurnId,
 } from "@ryco/contracts";
-import { type ContextHandoffTimelineEntry, type WorkLogEntry } from "../../session-logic";
+import {
+  type ContextHandoffTimelineEntry,
+  type TimelineEntry,
+  type WorkLogEntry,
+} from "../../session-logic";
 import { emptyAgentPanelModel } from "../../threadWorkspaceViewModel";
-import { type TurnDiffSummary } from "../../types";
+import { type ChatAttachment, type TurnDiffSummary } from "../../types";
 import {
   buildTimelineStableState,
   buildTimelineStreamingState,
@@ -32,6 +37,12 @@ import {
   type TimelineStableState,
   type TimelineStreamingState,
 } from "./MessagesTimeline.logic";
+
+// Spied on to count how often the timeline re-validates a page's metadata.
+vi.mock("@ryco/shared/htmlRender", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@ryco/shared/htmlRender")>();
+  return { ...actual, htmlRenderOfAttachment: vi.fn(actual.htmlRenderOfAttachment) };
+});
 
 function makeWorkEntry(overrides: Partial<WorkLogEntry> = {}): WorkLogEntry {
   return {
@@ -1822,5 +1833,436 @@ describe("timeline context split", () => {
     expect(streaming.isWorking).toBe(true);
     expect(stable.routeThreadKey).toBe("environment-local:thread-1");
     expect(stable.onCloseDiff).toBe(input.onCloseDiff);
+  });
+});
+
+describe("HTML renders in the timeline", () => {
+  const turnId = TurnId.make("turn-render");
+  const at = (second: number) => `2026-09-04T12:00:${String(second).padStart(2, "0")}.000Z`;
+  const renderAttachment = (id: string, heights?: Array<[number, number]>) => ({
+    type: "file" as const,
+    id,
+    name: "Chart.html",
+    mimeType: "text/html",
+    sizeBytes: 2048,
+    htmlRender: { title: "Chart", height: 420, ...(heights ? { heights } : {}) },
+  });
+  const userEntry = {
+    id: "user-entry",
+    kind: "message" as const,
+    createdAt: at(0),
+    message: {
+      id: MessageId.make("user-1"),
+      role: "user" as const,
+      text: "Chart it",
+      turnId: null,
+      createdAt: at(0),
+      streaming: false,
+    },
+  };
+  const assistantEntry = (
+    id: string,
+    second: number,
+    text: string,
+    extra: Partial<{ attachments: ChatAttachment[]; streaming: boolean }> = {},
+  ) => ({
+    id: `${id}-entry`,
+    kind: "message" as const,
+    createdAt: at(second),
+    message: {
+      id: MessageId.make(id),
+      role: "assistant" as const,
+      text,
+      turnId,
+      createdAt: at(second),
+      completedAt: at(second),
+      streaming: false,
+      ...extra,
+    },
+  });
+  const renderEntry = (second = 3, attachments: ChatAttachment[] = [renderAttachment("chart")]) =>
+    assistantEntry("render", second, " ", { attachments });
+  const workEntry = (id: string, second: number) => ({
+    id: `${id}-entry`,
+    kind: "work" as const,
+    createdAt: at(second),
+    entry: makeWorkEntry({ id, createdAt: at(second), turnId }),
+  });
+  const turnEntries = () => [
+    userEntry,
+    assistantEntry("commentary", 1, "Checking."),
+    workEntry("work-before", 2),
+    renderEntry(),
+    workEntry("work-after", 4),
+    assistantEntry("final", 5, "Here it is."),
+  ];
+  const settled = { turnId, state: "completed" as const, startedAt: at(0), completedAt: at(6) };
+  const rowsFor = (
+    timelineEntries: TimelineEntry[],
+    options: { expanded?: boolean; running?: boolean } = {},
+  ) =>
+    deriveMessagesTimelineRows({
+      timelineEntries,
+      latestTurn: options.running
+        ? { turnId, state: "running", startedAt: at(0), completedAt: null }
+        : settled,
+      runningTurnId: options.running ? turnId : null,
+      turnFoldExpandedById: options.expanded ? { "turn-fold:settled:turn-render": true } : {},
+      isWorking: options.running === true,
+      activeTurnStartedAt: options.running ? at(0) : null,
+      turnDiffSummaryByAssistantMessageId: new Map(),
+      revertTurnCountByUserMessageId: new Map(),
+    });
+
+  it("shows a render above the reply when its settled turn folds", () => {
+    const rows = rowsFor(turnEntries());
+    expect(rows.map((row) => row.kind)).toEqual(["message", "turn-fold", "html-render", "message"]);
+    expect(rows[2]).toEqual(
+      expect.objectContaining({
+        kind: "html-render",
+        id: "html-render:render:chart",
+        messageId: "render",
+        htmlRender: { title: "Chart", height: 420 },
+      }),
+    );
+    // The render never takes the reply's place or its copy button.
+    const reply = rows[3];
+    expect(reply?.kind === "message" ? reply.message.id : null).toBe("final");
+    expect(reply?.kind === "message" ? reply.showAssistantCopyButton : null).toBe(true);
+    expect(rows[1]).toEqual(expect.objectContaining({ label: "Worked for 6.0s" }));
+  });
+
+  it("keeps the render above a reply the provider opened before publishing it", () => {
+    // Codex keeps its reply's placeholder from the turn's start.
+    const rows = rowsFor([
+      userEntry,
+      assistantEntry("commentary", 1, "Rendering it."),
+      assistantEntry("final", 1, "Here it is."),
+      workEntry("work-before", 2),
+      renderEntry(),
+    ]);
+    expect(rows.map((row) => row.kind)).toEqual(["message", "turn-fold", "html-render", "message"]);
+    const reply = rows[3];
+    expect(reply?.kind === "message" ? reply.message.id : null).toBe("final");
+  });
+
+  it("moves a changed-files card keyed on the render onto the reply below it", () => {
+    const summary = { turnId, files: [] } as unknown as TurnDiffSummary;
+    const rows = deriveMessagesTimelineRows({
+      timelineEntries: [
+        userEntry,
+        workEntry("work-before", 1),
+        assistantEntry("final", 2, "Here it is."),
+        renderEntry(3),
+      ],
+      latestTurn: settled,
+      runningTurnId: null,
+      isWorking: false,
+      activeTurnStartedAt: null,
+      turnDiffSummaryByAssistantMessageId: new Map([[MessageId.make("render"), summary]]),
+      revertTurnCountByUserMessageId: new Map(),
+    });
+    expect(rows.map((row) => row.kind)).toEqual(["message", "turn-fold", "html-render", "message"]);
+    const render = rows[2];
+    const reply = rows[3];
+    expect(render?.kind === "html-render" ? render.assistantTurnDiffSummary : null).toBe(undefined);
+    expect(reply?.kind === "message" ? reply.assistantTurnDiffSummary : null).toBe(summary);
+  });
+
+  it("drops a blank reply after a render instead of showing an empty response", () => {
+    const summary = { turnId, files: [] } as unknown as TurnDiffSummary;
+    const entries = [
+      userEntry,
+      assistantEntry("commentary", 1, "Rendering it."),
+      assistantEntry("final", 1, ""),
+      workEntry("work-before", 2),
+      renderEntry(),
+    ];
+    const rows = deriveMessagesTimelineRows({
+      timelineEntries: entries,
+      latestTurn: settled,
+      runningTurnId: null,
+      isWorking: false,
+      activeTurnStartedAt: null,
+      turnDiffSummaryByAssistantMessageId: new Map([[MessageId.make("final"), summary]]),
+      revertTurnCountByUserMessageId: new Map(),
+    });
+    expect(rows.map((row) => row.kind)).toEqual(["message", "turn-fold", "html-render"]);
+    // The changed-files card keyed on the blank reply moves onto the page.
+    const render = rows[2];
+    expect(render?.kind === "html-render" ? render.assistantTurnDiffSummary : null).toBe(summary);
+
+    // Without a render, a blank reply still says so.
+    const plain = rowsFor([userEntry, assistantEntry("final", 1, "")]);
+    expect(plain.map((row) => row.kind)).toEqual(["message", "message"]);
+  });
+
+  it("splits an expanded turn's chapters around the render", () => {
+    const rows = rowsFor(turnEntries(), { expanded: true });
+    expect(rows.map((row) => row.kind)).toEqual([
+      "message",
+      "turn-fold",
+      "chapter",
+      "html-render",
+      "chapter",
+      "message",
+    ]);
+    expect(rows.map((row) => row.id)).toContain("chapter:commentary");
+    expect(rows.map((row) => row.id)).toContain("chapter:work-after");
+  });
+
+  it("shows the render between a running turn's chapters", () => {
+    const rows = rowsFor(turnEntries().slice(0, 5), { running: true });
+    expect(rows.map((row) => row.kind)).toEqual([
+      "message",
+      "turn-fold",
+      "chapter",
+      "html-render",
+      "chapter",
+    ]);
+    expect(rows.at(-1)).toEqual(expect.objectContaining({ kind: "chapter", status: "active" }));
+  });
+
+  it("never folds the reply away for a render published after it, and keeps the page above it", () => {
+    const rows = rowsFor([
+      userEntry,
+      workEntry("work-before", 1),
+      assistantEntry("final", 2, "Here it is."),
+      renderEntry(3),
+    ]);
+    expect(rows.map((row) => row.id)).toEqual([
+      "user-entry",
+      "turn-fold:settled:turn-render",
+      "html-render:render:chart",
+      "final-entry",
+    ]);
+    const reply = rows[3];
+    expect(reply?.kind === "message" ? reply.showAssistantCopyButton : null).toBe(true);
+  });
+
+  it("shows a render-only turn with one row per page and no empty reply", () => {
+    const rows = rowsFor([
+      userEntry,
+      workEntry("work-before", 1),
+      renderEntry(2, [renderAttachment("first"), renderAttachment("second")]),
+    ]);
+    expect(rows.map((row) => row.id)).toEqual([
+      "user-entry",
+      "turn-fold:settled:turn-render",
+      "html-render:render:first",
+      "html-render:render:second",
+    ]);
+    expect(rows.some((row) => row.kind === "message" && row.message.role === "assistant")).toBe(
+      false,
+    );
+  });
+
+  it("keeps the reply's elapsed time counting from the prompt, not the render", () => {
+    const rows = rowsFor([userEntry, renderEntry(3), assistantEntry("final", 5, "Done.")]);
+    const reply = rows.find((row) => row.kind === "message" && row.message.id === "final");
+    expect(reply?.kind === "message" ? reply.durationStart : null).toBe(at(0));
+  });
+
+  it("carries a changed-files card keyed on the render message onto its last page", () => {
+    const summary = {
+      turnId,
+      completedAt: at(6),
+      assistantMessageId: MessageId.make("render"),
+      checkpointTurnCount: 3,
+      checkpointRef: "refs/ryco/checkpoint-3",
+      files: [{ path: "chart.html", additions: 40, deletions: 0 }],
+    } as unknown as TurnDiffSummary;
+    const rows = deriveMessagesTimelineRows({
+      timelineEntries: [
+        userEntry,
+        renderEntry(2, [renderAttachment("first"), renderAttachment("second")]),
+      ],
+      latestTurn: settled,
+      isWorking: false,
+      activeTurnStartedAt: null,
+      turnDiffSummaryByAssistantMessageId: new Map([[MessageId.make("render"), summary]]),
+      revertTurnCountByUserMessageId: new Map(),
+      undoTurnCountByTurnId: new Map([[turnId, 2]]),
+    });
+    const renders = rows.filter((row) => row.kind === "html-render");
+    expect(renders.map((row) => row.assistantTurnDiffSummary)).toEqual([undefined, summary]);
+    expect(renders.map((row) => row.assistantUndoTurnCount)).toEqual([undefined, 2]);
+  });
+
+  it("leaves a message with text, or a non-render file, as a message row", () => {
+    const rows = rowsFor([
+      userEntry,
+      assistantEntry("mixed", 2, "See the chart.", { attachments: [renderAttachment("chart")] }),
+      assistantEntry("plain", 3, " ", {
+        attachments: [{ ...renderAttachment("plain"), mimeType: "text/plain" }],
+      }),
+      assistantEntry("streaming", 4, "", {
+        attachments: [renderAttachment("live")],
+        streaming: true,
+      }),
+    ]);
+    expect(rows.some((row) => row.kind === "html-render")).toBe(false);
+  });
+
+  it("lists the turn's pages on its reply, never on a page-only turn or an earlier message", () => {
+    const rows = rowsFor(
+      [
+        userEntry,
+        assistantEntry("commentary", 1, "Checking."),
+        renderEntry(2, [renderAttachment("first"), renderAttachment("second")]),
+        assistantEntry("final", 5, "Here it is."),
+      ],
+      { expanded: true },
+    );
+    const reply = rows.find((row) => row.kind === "message" && row.message.id === "final");
+    expect(reply?.kind === "message" ? reply.turnHtmlRenders : null).toEqual([
+      {
+        messageId: "render",
+        attachment: renderAttachment("first"),
+        htmlRender: { title: "Chart", height: 420 },
+      },
+      {
+        messageId: "render",
+        attachment: renderAttachment("second"),
+        htmlRender: { title: "Chart", height: 420 },
+      },
+    ]);
+    expect(
+      rows.filter((row) => row.kind === "message" && row.turnHtmlRenders !== undefined),
+    ).toEqual([reply]);
+
+    // Only the reply lists them, even where an earlier message of the turn
+    // shows as its own row (a turn left with a streaming message never folds).
+    const unfolded = rowsFor([
+      userEntry,
+      assistantEntry("commentary", 1, "Checking.", { streaming: true }),
+      renderEntry(2),
+      assistantEntry("final", 5, "Here it is."),
+    ]);
+    expect(unfolded.map((row) => row.id)).toEqual([
+      "user-entry",
+      "commentary-entry",
+      "html-render:render:chart",
+      "final-entry",
+    ]);
+    expect(
+      unfolded.flatMap((row) =>
+        row.kind === "message" && row.turnHtmlRenders !== undefined ? [row.id] : [],
+      ),
+    ).toEqual(["final-entry"]);
+
+    // A page-only turn ends with its page; there is no reply to list it.
+    const pageOnly = rowsFor([userEntry, workEntry("work-before", 1), renderEntry(2)]);
+    expect(pageOnly.some((row) => row.kind === "message" && row.turnHtmlRenders)).toBe(false);
+    // Nor does a blank reply that the page stands in for.
+    const blankReply = rowsFor([userEntry, renderEntry(2), assistantEntry("final", 3, "")]);
+    expect(blankReply.map((row) => row.kind)).toEqual(["message", "html-render"]);
+    // A turn without pages lists none.
+    const plain = rowsFor([userEntry, assistantEntry("final", 1, "Done.")]);
+    expect(plain.some((row) => row.kind === "message" && row.turnHtmlRenders)).toBe(false);
+  });
+
+  it("validates a page's metadata once, not on every derive", () => {
+    const validate = vi.mocked(htmlRenderOfAttachment);
+    const page = renderEntry(3, [
+      {
+        ...renderAttachment("chart"),
+        htmlRender: {
+          title: "Chart",
+          height: 420,
+          thumbnails: { dark: `data:image/webp;base64,${"A".repeat(40_000)}` },
+        },
+      },
+    ]);
+    const entries = turnEntries().map((entry) => (entry.id === "render-entry" ? page : entry));
+    const readsOfPage = () =>
+      validate.mock.calls.filter(([attachment]) => attachment === page.message.attachments?.[0])
+        .length;
+
+    rowsFor(entries);
+    const firstDerive = readsOfPage();
+    expect(firstDerive).toBe(1);
+    // The reply streams on: every delta derives again, with the page unchanged.
+    for (const text of ["Here it is,", "Here it is, with more."]) {
+      rowsFor(
+        entries.map((entry) =>
+          entry.id === "final-entry" ? assistantEntry("final", 5, text) : entry,
+        ),
+      );
+    }
+    expect(readsOfPage()).toBe(firstDerive);
+  });
+
+  it("keeps the reply row, and its page cards, across rebuilds with equal pages", () => {
+    const entries = turnEntries();
+    const initial = computeStableMessagesTimelineRows(rowsFor(entries), {
+      byId: new Map(),
+      result: [],
+    });
+    const reply = initial.result.find((row) => row.id === "final-entry");
+    expect(reply?.kind === "message" ? reply.turnHtmlRenders?.length : null).toBe(1);
+    // Every rebuild re-derives the list; an equal one keeps the row.
+    const rebuilt = computeStableMessagesTimelineRows(
+      rowsFor(entries.map((entry) => (entry.id === "render-entry" ? renderEntry() : entry))),
+      initial,
+    );
+    expect(rebuilt.result.find((row) => row.id === "final-entry")).toBe(reply);
+
+    const retitled = computeStableMessagesTimelineRows(
+      rowsFor(
+        entries.map((entry) =>
+          entry.id === "render-entry"
+            ? renderEntry(3, [
+                {
+                  ...renderAttachment("chart"),
+                  htmlRender: {
+                    title: "Chart",
+                    height: 420,
+                    thumbnails: { dark: "data:image/webp;base64,AAAA" },
+                  },
+                },
+              ])
+            : entry,
+        ),
+      ),
+      initial,
+    );
+    const updated = retitled.result.find((row) => row.id === "final-entry");
+    expect(updated).not.toBe(reply);
+    expect(
+      updated?.kind === "message" ? updated.turnHtmlRenders?.[0]?.htmlRender.thumbnails : null,
+    ).toEqual({ dark: "data:image/webp;base64,AAAA" });
+  });
+
+  it("keeps an equal render row, and its mounted frame, across rebuilds", () => {
+    const entries = turnEntries();
+    const initial = computeStableMessagesTimelineRows(rowsFor(entries), {
+      byId: new Map(),
+      result: [],
+    });
+    const rebuilt = computeStableMessagesTimelineRows(
+      rowsFor(
+        entries.map((entry) =>
+          entry.id === "render-entry" ? renderEntry(3, [renderAttachment("chart")]) : entry,
+        ),
+      ),
+      initial,
+    );
+    expect(rebuilt).toBe(initial);
+
+    const remeasured = computeStableMessagesTimelineRows(
+      rowsFor(
+        entries.map((entry) =>
+          entry.id === "render-entry"
+            ? renderEntry(3, [renderAttachment("chart", [[760, 300]])])
+            : entry,
+        ),
+      ),
+      initial,
+    );
+    const before = initial.result.find((row) => row.kind === "html-render");
+    const after = remeasured.result.find((row) => row.kind === "html-render");
+    expect(after).not.toBe(before);
+    expect(after?.kind === "html-render" ? after.htmlRender.heights : null).toEqual([[760, 300]]);
   });
 });

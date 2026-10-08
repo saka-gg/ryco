@@ -1,4 +1,4 @@
-import { Cause, Effect, Exit, Queue, Scope } from "effect";
+import { Effect, Exit, Queue, Scope } from "effect";
 import {
   AGENT_CONTROL_WS_METHODS,
   ORCHESTRATION_WS_METHODS,
@@ -60,28 +60,20 @@ function normalizeRequest(tag: string, payload: unknown): NormalizedWsRpcRequest
   return { _tag: tag, payload };
 }
 
-const RPC_FAILURE = Symbol("wsRpcHarness.failure");
-
-/** A unary answer that fails the RPC with one of its typed errors; see `rpcFailure`. */
-export interface WsRpcFailure {
-  readonly [RPC_FAILURE]: Cause.YieldableError;
-}
-
 /**
- * Answers a unary RPC with one of its typed errors (an `OrchestrationDispatchCommandError`
- * refusal, say) instead of a success. Return it from a resolver.
+ * A unary resolver result the harness answers as the method's typed failure
+ * (one of its declared error schemas), as a server handler failing would.
  */
-export function rpcFailure(error: Cause.YieldableError): WsRpcFailure {
-  return { [RPC_FAILURE]: error };
+export class WsRpcFailure {
+  constructor(readonly error: WsRpcTaggedError) {}
 }
 
-function isRpcFailure(result: unknown): result is WsRpcFailure {
-  return typeof result === "object" && result !== null && RPC_FAILURE in result;
-}
+/** A schema-declared RPC error: a tagged error from `@ryco/contracts`. */
+type WsRpcTaggedError = { readonly _tag: string };
 
-function asEffect(result: UnaryResolverResult): Effect.Effect<unknown, Cause.YieldableError> {
-  if (isRpcFailure(result)) {
-    return Effect.fail(result[RPC_FAILURE]);
+function asEffect(result: UnaryResolverResult): Effect.Effect<unknown, WsRpcTaggedError> {
+  if (result instanceof WsRpcFailure) {
+    return Effect.fail(result.error);
   }
   if (result instanceof Promise) {
     return Effect.promise(() => result);

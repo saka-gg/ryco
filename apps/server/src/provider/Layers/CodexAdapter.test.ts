@@ -1177,6 +1177,78 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
     }),
   );
 
+  it.effect("shows Ryco HTML tool items by page title, without the page markup", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const eventsFiber = yield* Stream.take(adapter.streamEvents, 2).pipe(
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      const item = (status: "inProgress" | "completed") => ({
+        type: "mcpToolCall",
+        id: "mcp_1",
+        server: "ryco_agent_control",
+        tool: "ryco_html_render",
+        status,
+        arguments: {
+          html: "<!doctype html><script>drawSecretChart()</script>",
+          title: "Quarterly revenue",
+          height: 420,
+        },
+      });
+      const base = {
+        kind: "notification" as const,
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: new Date().toISOString(),
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-1"),
+        itemId: asItemId("mcp_1"),
+      };
+      yield* runtime.emit({
+        ...base,
+        id: asEventId("evt-html-start"),
+        method: "item/started",
+        payload: {
+          startedAtMs: 1_778_000_000_000,
+          threadId: "thread-1",
+          turnId: "turn-1",
+          item: item("inProgress"),
+        },
+      });
+      yield* runtime.emit({
+        ...base,
+        id: asEventId("evt-html-complete"),
+        method: "item/completed",
+        payload: {
+          completedAtMs: 1_778_000_000_100,
+          threadId: "thread-1",
+          turnId: "turn-1",
+          item: item("completed"),
+        },
+      });
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      assert.deepEqual(
+        events.map((event) =>
+          event.type === "item.started" || event.type === "item.completed"
+            ? [event.type, event.payload.itemType, event.payload.title, event.payload.detail]
+            : [event.type],
+        ),
+        [
+          ["item.started", "mcp_tool_call", "Rendered HTML", "Quarterly revenue"],
+          ["item.completed", "mcp_tool_call", "Rendered HTML", "Quarterly revenue"],
+        ],
+      );
+      const completed = events[1];
+      if (completed?.type !== "item.completed") return assert.fail("Expected a completion");
+      assert.deepEqual(
+        (completed.payload.data as { item: { arguments: unknown } }).item.arguments,
+        { title: "Quarterly revenue", height: 420, htmlChars: 49 },
+      );
+      for (const event of events)
+        assert.equal(JSON.stringify(event.payload).includes("drawSecretChart"), false);
+    }),
+  );
+
   it.effect("maps completed plan items to canonical proposed-plan completion events", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();

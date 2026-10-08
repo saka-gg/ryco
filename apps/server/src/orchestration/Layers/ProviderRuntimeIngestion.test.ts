@@ -550,6 +550,97 @@ describe("ProviderRuntimeIngestion", () => {
     ).toEqual({ text: "part ".repeat(10), streaming: 0 });
   });
 
+  it("returns a delegated child's narration, not a blank, when its turn ends on an HTML page", async () => {
+    const harness = await createHarness({
+      callbackRuntime: true,
+      onCompletionObservation: () => {},
+    });
+    if (Option.isNone(harness.completionRepository)) throw new Error("missing return repository");
+    const repo = harness.completionRepository.value;
+    const record = completionFixture({ childThreadId: asThreadId("thread-1") });
+    await Effect.runPromise(repo.insert(record));
+    const at = (second: number) => `2026-10-07T10:00:${String(second).padStart(2, "0")}.000Z`;
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("delegate-render-initial"),
+        threadId: record.childThreadId,
+        message: {
+          messageId: record.initialMessageId,
+          role: "user",
+          text: "Chart the revenue",
+          attachments: [],
+        },
+        runtimeMode: "approval-required",
+        interactionMode: "default",
+        createdAt: at(0),
+      }),
+    );
+    const event = (type: string, id: string, second: number, rest: object) =>
+      harness.emit({
+        type,
+        eventId: asEventId(id),
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: at(second),
+        threadId: record.childThreadId,
+        turnId: "initial-turn",
+        ...rest,
+      } as ProviderRuntimeEvent);
+    event("turn.started", "render-start", 1, {});
+    await waitForThread(
+      harness.readModel,
+      (thread) => thread.session?.activeTurnId === "initial-turn",
+    );
+    // The agent narrates, then publishes the page and ends without more text.
+    event("content.delta", "render-narration", 2, {
+      itemId: "narration",
+      payload: { streamKind: "assistant_text", delta: "Revenue grew 40%; Q3 led." },
+    });
+    event("item.completed", "render-narration-done", 3, {
+      itemId: "narration",
+      payload: { itemType: "assistant_message", status: "completed" },
+    });
+    await waitForThread(harness.readModel, (thread) =>
+      thread.messages.some((message) => message.text.startsWith("Revenue") && !message.streaming),
+    );
+    await harness.drain();
+    // What turnAttachmentDelivery publishes for ryco_html_render.
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.message.assistant.complete",
+        commandId: CommandId.make("render-html-page"),
+        threadId: record.childThreadId,
+        messageId: MessageId.make("html-render-page"),
+        turnId: asTurnId("initial-turn"),
+        text: " ",
+        attachments: [
+          {
+            type: "file",
+            id: "thread-1-page",
+            name: "Revenue.html",
+            mimeType: "text/html",
+            sizeBytes: 100,
+            htmlRender: { title: "Revenue", height: 400 },
+          },
+        ],
+        createdAt: at(4),
+      }),
+    );
+    await harness.drain();
+    event("turn.completed", "render-done", 5, { payload: { state: "completed" } });
+    await waitForThread(harness.readModel, (thread) => thread.session?.status === "ready");
+    await harness.drain();
+
+    const thread = (await harness.readModel()).threads.find(
+      (entry) => entry.id === record.childThreadId,
+    );
+    const narration = thread?.messages.find((message) => message.text.startsWith("Revenue"));
+    expect(thread?.latestTurn?.assistantMessageId).toBe(narration?.id);
+    expect(
+      await Effect.runPromise(repo.output(record.childThreadId, asTurnId("initial-turn"))),
+    ).toEqual({ text: "Revenue grew 40%; Q3 led.", streaming: 0 });
+  });
+
   it("does not resurrect a cleared native goal from a delayed update", async () => {
     let reads = 0;
     const harness = await createHarness({

@@ -1,0 +1,284 @@
+/* Crown — rail: the icon column (also the card's spine), its glyphs, badges and pings. */
+
+.crown-rail-nav {
+  position: relative;
+  width: var(--crown-rail-width);
+  border-radius: 24px;
+}
+
+/* The docked rail sits below the crown face. */
+.crown-rail {
+  margin-top: var(--crown-head-offset);
+  transition:
+    opacity var(--crown-dur-rail-fade) ease,
+    transform var(--crown-dur-rail-morph) var(--crown-ease-morph);
+}
+
+/* The card swallows the rail; it fades under the spine. */
+.crown-root[data-mode="card"] .crown-rail {
+  opacity: 0;
+  transform: scale(0.94);
+  pointer-events: none;
+}
+
+.crown-rail-hl {
+  position: absolute;
+  z-index: 0;
+  top: 0;
+  left: 5px;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.11);
+  pointer-events: none;
+}
+
+.crown-rail-hl[data-animate="true"] {
+  transition:
+    transform var(--crown-dur-highlight) var(--crown-ease-spring),
+    opacity var(--crown-dur-highlight-fade);
+}
+
+.crown-rail-sep {
+  flex: none;
+  width: 20px;
+  height: 1px;
+  margin: 2px 0;
+  background: rgba(255, 255, 255, 0.09);
+}
+
+.crown-rail-btn {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  flex: none;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  border-radius: 50%;
+  color: var(--muted-foreground);
+  transition: color var(--crown-dur-color);
+}
+
+.crown-rail-btn > * {
+  grid-area: 1 / 1;
+}
+
+.crown-rail-btn:hover,
+.crown-rail-btn[data-active="true"] {
+  color: var(--foreground);
+}
+
+.crown-rail-glyph {
+  width: 16px;
+  height: 16px;
+}
+
+.crown-rail-btn[data-nav-key="pr"][data-state="open"] {
+  color: var(--success-foreground);
+}
+
+.crown-rail-btn[data-nav-key="pr"][data-state="merged"] {
+  color: var(--crown-merged);
+}
+
+.crown-rail-btn[data-nav-key="pr"][data-state="conflict"] {
+  color: var(--destructive);
+}
+
+.crown-rail-btn[data-nav-key="ship"][data-ready="true"] {
+  color: var(--info-foreground);
+}
+
+/* Rings: the CI ring (per-run arcs) and the plan arc share the track. */
+.crown-ring {
+  overflow: visible;
+  transform: rotate(-90deg);
+}
+
+.crown-rail-btn .crown-ring {
+  width: 30px;
+  height: 30px;
+}
+
+.crown-ring-track {
+  fill: none;
+  stroke: var(--muted);
+  stroke-width: 2.5;
+}
+
+.crown-ring-seg {
+  fill: none;
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  transition:
+    stroke var(--crown-dur-ring-tone),
+    stroke-dasharray var(--crown-dur-ring) var(--crown-ease-out),
+    stroke-dashoffset var(--crown-dur-ring) var(--crown-ease-out);
+}
+
+/* New arcs grow in from nothing; the dash is a presentation attribute, so this wins at first paint only. */
+@starting-style {
+  .crown-ring-seg {
+    stroke-dasharray: 0 100;
+  }
+}
+
+.crown-ring-seg[data-s="pass"] {
+  stroke: var(--success);
+}
+
+.crown-ring-seg[data-s="fail"] {
+  stroke: var(--destructive);
+}
+
+.crown-ring-seg[data-s="running"] {
+  stroke: var(--warning);
+  animation: crown-segpulse 1.1s ease-in-out infinite;
+  animation-play-state: var(--app-motion-activity-play-state, running);
+}
+
+.crown-ring-seg[data-s="queued"] {
+  stroke: rgba(255, 255, 255, 0.17);
+}
+
+.crown-arc {
+  fill: none;
+  stroke: var(--crown-plan);
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  transition: stroke-dasharray var(--crown-dur-arc) var(--crown-ease-out);
+}
+
+@starting-style {
+  .crown-arc {
+    stroke-dasharray: 0 100;
+  }
+}
+
+.crown-plan-glyph {
+  width: 11px;
+  height: 11px;
+  color: var(--crown-plan);
+}
+
+/* Checks: the CI dot in the ring's centre. */
+.crown-ci-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--muted-foreground) 60%, transparent);
+  transition:
+    background-color var(--crown-dur-dot-color),
+    transform var(--crown-dur-dot) var(--crown-ease-spring);
+}
+
+[data-ci="pass"] > .crown-ci-dot {
+  background: var(--success);
+}
+
+[data-ci="fail"] > .crown-ci-dot {
+  background: var(--destructive);
+  transform: scale(1.25);
+}
+
+[data-ci="running"] > .crown-ci-dot {
+  background: var(--warning);
+  animation: crown-segpulse 1.1s infinite;
+  animation-play-state: var(--app-motion-activity-play-state, running);
+}
+
+/* Subagents: a live dot in the top-right corner while any run. */
+.crown-live-dot {
+  justify-self: end;
+  align-self: start;
+  width: 6px;
+  height: 6px;
+  margin: 4px 4px 0 0;
+  border-radius: 50%;
+  background: var(--crown-agent);
+  opacity: 0;
+  transform: scale(0);
+  transition:
+    opacity var(--crown-dur-badge-fade),
+    transform var(--crown-dur-badge) var(--crown-ease-spring);
+}
+
+[data-live="true"] > .crown-live-dot {
+  opacity: 1;
+  transform: none;
+  animation: crown-segpulse 1.1s infinite;
+  animation-play-state: var(--app-motion-activity-play-state, running);
+}
+
+/* Corner count. Kept rendered while empty so it can pop out with its last value. */
+.crown-badge {
+  justify-self: end;
+  align-self: end;
+  min-width: 15px;
+  height: 15px;
+  margin: 0 -3px -2px 0;
+  padding: 0 3px;
+  border-radius: 8px;
+  background: #222226;
+  box-shadow: 0 0 0 2px #0d0d0e;
+  color: var(--foreground);
+  font: 600 9px/15px var(--font-family-mono);
+  text-align: center;
+  transition:
+    opacity var(--crown-dur-badge-fade),
+    transform var(--crown-dur-badge) var(--crown-ease-spring);
+}
+
+.crown-badge[data-empty="true"] {
+  opacity: 0;
+  transform: scale(0.3);
+}
+
+.crown-badge[data-variant="info"] {
+  background: var(--info);
+  color: #fff;
+}
+
+.crown-badge[data-variant="note"] {
+  background: var(--crown-note);
+  color: var(--crown-note-ink);
+}
+
+.crown-badge > .rolling-text {
+  vertical-align: top;
+}
+
+/* Numbers roll like the prototype's `.roll`: one .42s ease-out, 75% travel, no blur. */
+.crown-badge > .rolling-text > :is([data-roll-phase="enter"], [data-roll-phase="leave"]) {
+  animation-duration: var(--crown-dur-roll);
+  animation-timing-function: var(--crown-ease-out);
+  animation-fill-mode: both;
+}
+
+.crown-badge > .rolling-text > [data-roll-phase="enter"] {
+  animation-name: crown-roll-in;
+}
+
+.crown-badge > .rolling-text > [data-roll-phase="leave"] {
+  animation-name: crown-roll-out;
+}
+
+.crown-badge > .rolling-text > [data-roll-direction="up"] {
+  --rolling-text-from: 75%;
+  --rolling-text-to: -75%;
+}
+
+.crown-badge > .rolling-text > [data-roll-direction="down"] {
+  --rolling-text-from: -75%;
+  --rolling-text-to: 75%;
+}
+
+.crown-ping {
+  position: absolute;
+  inset: 0;
+  border: 1.5px solid var(--tone);
+  border-radius: inherit;
+  pointer-events: none;
+  animation: crown-ping var(--crown-dur-ping) var(--crown-ease-out) forwards;
+}

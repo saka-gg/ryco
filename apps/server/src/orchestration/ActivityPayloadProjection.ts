@@ -1,3 +1,7 @@
+import {
+  resolveHtmlRenderToolKind,
+  withoutHtmlRenderMarkup,
+} from "@ryco/shared/htmlRenderToolPresentation";
 import { extractToolContentText, extractToolResultText } from "@ryco/shared/toolOutput";
 import type { OrchestrationThreadActivity } from "@ryco/contracts";
 
@@ -180,15 +184,95 @@ function summarizeMcpResult(result: unknown): Record<string, unknown> | undefine
   return summary ? { content: summary } : undefined;
 }
 
+// Ryco's HTML tools carry a whole page in their input; activities keep only its length.
+function isHtmlRenderToolCall(
+  data: Record<string, unknown>,
+  item: Record<string, unknown> | null,
+): boolean {
+  const server = asTrimmedString(item?.server);
+  return (
+    resolveHtmlRenderToolKind(asTrimmedString(item?.tool), server) !== undefined ||
+    resolveHtmlRenderToolKind(asTrimmedString(data.toolName)) !== undefined
+  );
+}
+
+// Pages are whole documents; smaller html arguments are left to their tools.
+const UNNAMED_HTML_TOOL_MIN_CHARS = 1024;
+const RENDER_ARGUMENT_KEYS = new Set(["html", "title", "height"]);
+const PREVIEW_ARGUMENT_KEYS = new Set(["html", "width", "appearance"]);
+
+/**
+ * Whether tool arguments are exactly those of `ryco_html_render` or
+ * `ryco_html_preview` carrying a page: a call that arrives already completed
+ * with no tool name (as an ACP update can) is recognized by them alone.
+ */
+function isUnnamedHtmlRenderToolInput(value: unknown): boolean {
+  const args = asRecord(value);
+  if (
+    !args ||
+    typeof args.html !== "string" ||
+    args.html.length < UNNAMED_HTML_TOOL_MIN_CHARS ||
+    !/<[a-z!]/i.test(args.html)
+  ) {
+    return false;
+  }
+  const keys = Object.keys(args);
+  const render =
+    keys.every((key) => RENDER_ARGUMENT_KEYS.has(key)) &&
+    typeof args.title === "string" &&
+    typeof args.height === "number";
+  const preview =
+    keys.every((key) => PREVIEW_ARGUMENT_KEYS.has(key)) &&
+    (args.width === undefined || typeof args.width === "number") &&
+    (args.appearance === undefined || args.appearance === "dark" || args.appearance === "light");
+  return render || preview;
+}
+
+/** Whether tool data names its tool, so its arguments are judged by that name alone. */
+const namesTool = (data: Record<string, unknown>, item: Record<string, unknown> | null) =>
+  asTrimmedString(data.toolName) !== null || asTrimmedString(item?.tool) !== null;
+
+/**
+ * Tool data with the page of a Ryco HTML tool call replaced by its length.
+ * Ingestion applies it to every lifecycle event, so a started or completed
+ * activity can never store the markup even if an adapter forwarded it.
+ */
+export function withoutHtmlRenderToolMarkup(data: unknown): unknown {
+  const record = asRecord(data);
+  if (!record) return data;
+  const item = asRecord(record.item);
+  if (isHtmlRenderToolCall(record, item)) {
+    return {
+      ...record,
+      ...("input" in record ? { input: withoutHtmlRenderMarkup(record.input) } : {}),
+      ...("rawInput" in record ? { rawInput: withoutHtmlRenderMarkup(record.rawInput) } : {}),
+      ...(item && "arguments" in item
+        ? { item: { ...item, arguments: withoutHtmlRenderMarkup(item.arguments) } }
+        : {}),
+    };
+  }
+  if (namesTool(record, item)) return data;
+  const input = isUnnamedHtmlRenderToolInput(record.input);
+  const rawInput = isUnnamedHtmlRenderToolInput(record.rawInput);
+  if (!input && !rawInput) return data;
+  return {
+    ...record,
+    ...(input ? { input: withoutHtmlRenderMarkup(record.input) } : {}),
+    ...(rawInput ? { rawInput: withoutHtmlRenderMarkup(record.rawInput) } : {}),
+  };
+}
+
 function projectMcpToolCallData(data: Record<string, unknown>): Record<string, unknown> {
   const projectedData: Record<string, unknown> = {};
 
   const item = asRecord(data.item);
+  const htmlRenderTool = isHtmlRenderToolCall(data, item);
   if (item) {
     const projectedItem: Record<string, unknown> = {};
     for (const key of MCP_ITEM_KEPT_FIELDS) {
       if (key in item) {
-        projectedItem[key] = item[key];
+        projectedItem[key] =
+          key === "arguments" && htmlRenderTool ? withoutHtmlRenderMarkup(item[key]) : item[key];
       }
     }
     const result = summarizeMcpResult(item.result);
@@ -202,7 +286,7 @@ function projectMcpToolCallData(data: Record<string, unknown>): Record<string, u
     projectedData.toolName = data.toolName;
   }
   if ("input" in data) {
-    projectedData.input = data.input;
+    projectedData.input = htmlRenderTool ? withoutHtmlRenderMarkup(data.input) : data.input;
   }
   if (!item) {
     const result = summarizeMcpResult(data.result);

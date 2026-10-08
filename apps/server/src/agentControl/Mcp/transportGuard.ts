@@ -14,6 +14,14 @@ export const AGENT_CONTROL_MCP_PATH = "/mcp";
 export const AGENT_CONTROL_BOOTSTRAP_PATH = "/_agent-control/bootstrap";
 /** Bound on a single request body; a bearer plus one tool call is tiny. */
 export const AGENT_CONTROL_MCP_MAX_BODY_BYTES = 128 * 1024;
+/**
+ * Bound on an authenticated request body on the private provider-session
+ * listener only. An HTML render carries up to `HTML_RENDER_MAX_HTML_CHARS`
+ * (512,000) UTF-16 units, which JSON can escape to six bytes each; 3 MiB
+ * holds the worst case plus the envelope. External integrations and the
+ * unauthenticated bootstrap exchange keep the small bound.
+ */
+export const AGENT_CONTROL_PRIVATE_MCP_MAX_BODY_BYTES = 3 * 1024 * 1024;
 /** Bound on one request's total processing time. */
 export const AGENT_CONTROL_MCP_REQUEST_TIMEOUT_MS = 60_000;
 /** Bound on one serialized JSON-RPC response. */

@@ -204,6 +204,57 @@ it.effect("decodes future attachment kinds and rejects malformed known kinds", (
   }),
 );
 
+it.effect("decodes HTML render metadata on file attachments and tolerates its absence", () =>
+  Effect.gen(function* () {
+    const render = yield* decodeChatAttachment({
+      type: "file",
+      id: "thread-1-0f0e0d0c-0b0a-4908-8706-050403020100-html",
+      name: "Chart.html",
+      mimeType: "text/html",
+      sizeBytes: 120,
+      htmlRender: {
+        title: "Chart",
+        height: 420,
+        heights: [
+          [375, 520],
+          [760, 410],
+        ],
+        futureField: "tolerated",
+      },
+    });
+    assert.strictEqual(render.type, "file");
+    assert.deepStrictEqual((render as { htmlRender?: unknown }).htmlRender, {
+      title: "Chart",
+      height: 420,
+      heights: [
+        [375, 520],
+        [760, 410],
+      ],
+    });
+
+    const plain = yield* decodeChatFileAttachment({
+      type: "file",
+      id: "doc-1",
+      name: "notes.html",
+      mimeType: "text/html",
+      sizeBytes: 3,
+    });
+    assert.strictEqual(plain.htmlRender, undefined);
+
+    const malformed = yield* Effect.exit(
+      decodeChatFileAttachment({
+        type: "file",
+        id: "doc-2",
+        name: "page.html",
+        mimeType: "text/html",
+        sizeBytes: 3,
+        htmlRender: { title: "Page", height: "tall" },
+      }),
+    );
+    assert.strictEqual(malformed._tag, "Failure");
+  }),
+);
+
 it.effect("decodes optional attachment media dimensions and rejects negative ones", () =>
   Effect.gen(function* () {
     const image = yield* decodeChatImageAttachment({

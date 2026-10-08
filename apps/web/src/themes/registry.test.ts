@@ -23,6 +23,7 @@ import {
   parseLength,
   resolveTokens,
   setActiveThemeId,
+  themeTokensToStyle,
   tokensToCss,
   updateCustomTheme,
 } from "./registry";
@@ -168,6 +169,43 @@ describe("tokensToCss", () => {
       "font-size-base": "20px",
     });
     expect(css).toBe("--primary: #fff;");
+  });
+});
+
+describe("themeTokensToStyle", () => {
+  it("emits each token as a custom property", () => {
+    expect(themeTokensToStyle({ primary: "#fff", "scrollbar-thumb": "rgba(0,0,0,0.1)" })).toEqual({
+      "--primary": "#fff",
+      "--scrollbar-thumb": "rgba(0,0,0,0.1)",
+    });
+  });
+
+  it("applies the same guards as tokensToCss", () => {
+    const tokens = {
+      primary: "#fff",
+      background: "",
+      foreground: undefined,
+      "evil-key; }:root{--primary": "red",
+      secondary: "red; --accent: blue",
+      accent: "#000 } evil { color: red",
+      border: "javascript:alert(1)",
+      radius: "2rem",
+      "font-family-sans": '"Geist", sans-serif',
+    } as unknown as Parameters<typeof themeTokensToStyle>[0];
+    expect(themeTokensToStyle(tokens)).toEqual({ "--primary": "#fff" });
+    expect(tokensToCss(tokens)).toBe("--primary: #fff;");
+  });
+
+  it("matches tokensToCss for every built-in theme variant", () => {
+    for (const theme of BUILT_IN_THEMES) {
+      for (const variant of ["light", "dark"] as const) {
+        const tokens = materializeTokens(resolveTokens(theme, variant));
+        const css = Object.entries(themeTokensToStyle(tokens))
+          .map(([name, value]) => `${name}: ${value};`)
+          .join(" ");
+        expect(css).toBe(tokensToCss(tokens));
+      }
+    }
   });
 });
 

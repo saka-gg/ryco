@@ -2,6 +2,7 @@
 @import "./components/pullRequests/pullRequests.css";
 @import "./components/projects/projects.css";
 @import "./components/automations/styles/automations.css";
+@import "./components/overview/overview.css";
 
 @custom-variant dark (&:is(.dark, .dark *));
 /* Window Controls Overlay: active when Electron exposes native titlebar control geometry. */

@@ -7,8 +7,9 @@ import {
   parseAssistantAttachments,
   parseAssistantDelivery,
   persistAssistantAttachment,
+  persistGeneratedAssistantAttachment,
 } from "./assistantAttachments.ts";
-import { resolveAttachmentPath } from "./attachmentStore.ts";
+import { attachmentRelativePath, resolveAttachmentPath } from "./attachmentStore.ts";
 
 describe("assistant file delivery format", () => {
   it("extracts only explicit top-level manifests and preserves surrounding prose", () => {
@@ -156,5 +157,79 @@ describe("assistant attachment snapshots", () => {
       }),
     ).rejects.toThrow();
     expect(await fs.readdir(input.attachmentsDir)).toEqual([]);
+  });
+});
+
+describe("generated assistant attachments", () => {
+  const roots: string[] = [];
+  afterEach(async () => {
+    for (const root of roots.splice(0)) await fs.rm(root, { recursive: true, force: true });
+  });
+  async function setup() {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "ryco-generated-"));
+    roots.push(root);
+    const html = "<!doctype html><p>Umsatz – 2026 ✓</p>";
+    return {
+      root,
+      attachmentsDir: path.join(root, "attachments"),
+      threadId: "thread-1",
+      deliveryId: "html-render-1",
+      name: "Revenue.html",
+      mimeType: "text/html",
+      extensionSegment: "html",
+      bytes: Buffer.from(html, "utf8"),
+      htmlRender: { title: "Revenue", height: 420, heights: [[320, 610] as const] },
+    };
+  }
+
+  it("stores the exact bytes at the attachments root under the attachment id", async () => {
+    const input = await setup();
+    const { attachment, created } = await persistGeneratedAssistantAttachment(input);
+    expect(created).toBe(true);
+    expect(attachment).toMatchObject({
+      type: "file",
+      name: "Revenue.html",
+      mimeType: "text/html",
+      sizeBytes: input.bytes.byteLength,
+      htmlRender: { title: "Revenue", height: 420, heights: [[320, 610]] },
+    });
+    expect(attachment.sizeBytes).toBeGreaterThan(input.bytes.toString("utf8").length);
+    expect(attachment.id).toMatch(/^thread-1-[0-9a-f-]{36}-html$/);
+    expect(attachmentRelativePath(attachment)).toBe(attachment.id);
+    expect(await fs.readdir(input.attachmentsDir)).toEqual([attachment.id]);
+    expect(
+      await fs.readFile(
+        resolveAttachmentPath({ attachmentsDir: input.attachmentsDir, attachment })!,
+      ),
+    ).toEqual(input.bytes);
+  });
+
+  it("resolves a retry to the stored snapshot without overwriting it", async () => {
+    const input = await setup();
+    const first = await persistGeneratedAssistantAttachment(input);
+    const second = await persistGeneratedAssistantAttachment(input);
+    expect(second).toEqual({ attachment: first.attachment, created: false });
+    const other = await persistGeneratedAssistantAttachment({ ...input, deliveryId: "other" });
+    expect(other.attachment.id).not.toBe(first.attachment.id);
+    expect((await fs.readdir(input.attachmentsDir)).toSorted()).toEqual(
+      [first.attachment.id, other.attachment.id].toSorted(),
+    );
+  });
+
+  it("rejects empty, over-budget and cancelled writes without leaving staging files", async () => {
+    const input = await setup();
+    await expect(
+      persistGeneratedAssistantAttachment({ ...input, bytes: new Uint8Array() }),
+    ).rejects.toThrow();
+    await expect(
+      persistGeneratedAssistantAttachment({ ...input, remainingBytes: input.bytes.byteLength - 1 }),
+    ).rejects.toThrow();
+    await expect(
+      persistGeneratedAssistantAttachment({ ...input, signal: AbortSignal.abort() }),
+    ).rejects.toThrow();
+    await expect(
+      persistGeneratedAssistantAttachment({ ...input, name: "../escape.html" }),
+    ).rejects.toThrow();
+    expect(await fs.readdir(input.attachmentsDir).catch(() => [])).toEqual([]);
   });
 });

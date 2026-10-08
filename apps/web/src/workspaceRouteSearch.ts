@@ -1,4 +1,4 @@
-import { type TurnId } from "@ryco/contracts";
+import { type EnvironmentId, MessageId, type ThreadId, type TurnId } from "@ryco/contracts";
 
 import { stripDiffSearchParams } from "./diffRouteSearch";
 import { stripPreviewSearchParams } from "./previewRouteSearch";
@@ -11,7 +11,8 @@ export type WorkspacePanelTab =
   | "browser"
   | "pullRequest"
   | "agent"
-  | "agents";
+  | "agents"
+  | "render";
 
 const WORKSPACE_PANEL_TABS: ReadonlySet<string> = new Set<WorkspacePanelTab>([
   "review",
@@ -22,6 +23,7 @@ const WORKSPACE_PANEL_TABS: ReadonlySet<string> = new Set<WorkspacePanelTab>([
   "pullRequest",
   "agent",
   "agents",
+  "render",
 ]);
 
 // A type alias, not an interface: the builders' results feed back into
@@ -32,6 +34,8 @@ export type WorkspaceRouteSearch = {
   workspaceAgentKey?: string | undefined;
   /** Pull request tab: a specific change request; absent = the thread's own. */
   workspacePr?: number | undefined;
+  /** Page tab: the HTML render it shows, as `formatWorkspaceRenderKey` writes it. */
+  workspaceRender?: string | undefined;
 };
 
 /** Every search key the workspace panel owns, legacy diff/preview included. */
@@ -43,9 +47,15 @@ export type WorkspacePanelSearchKey =
   | "workspaceOpen"
   | "workspaceTab"
   | "workspaceAgentKey"
-  | "workspacePr";
+  | "workspacePr"
+  | "workspaceRender";
 
-type WorkspaceSearchKey = "workspaceOpen" | "workspaceTab" | "workspaceAgentKey" | "workspacePr";
+type WorkspaceSearchKey =
+  | "workspaceOpen"
+  | "workspaceTab"
+  | "workspaceAgentKey"
+  | "workspacePr"
+  | "workspaceRender";
 
 /**
  * A route search with the workspace panel's keys replaced. Every key the panel
@@ -77,6 +87,34 @@ function normalizePositiveInt(value: unknown): number | undefined {
   return Number.isSafeInteger(raw) && raw > 0 ? raw : undefined;
 }
 
+/** An HTML render a page tab shows: the attachment, and the message that carries it. */
+export interface WorkspaceRenderTarget {
+  readonly messageId: MessageId;
+  readonly attachmentId: string;
+}
+
+// Attachment ids never contain a colon (`[a-z0-9_-]`); message ids may.
+const RENDER_ATTACHMENT_ID = /^[a-z0-9_-]{1,128}$/i;
+
+export function formatWorkspaceRenderKey(target: WorkspaceRenderTarget): string {
+  return `${target.messageId}:${target.attachmentId}`;
+}
+
+/** The render a `workspaceRender` key names, or null when it names none. */
+export function parseWorkspaceRenderKey(key: string): WorkspaceRenderTarget | null {
+  const separator = key.lastIndexOf(":");
+  if (separator <= 0) return null;
+  const messageId = key.slice(0, separator).trim();
+  const attachmentId = key.slice(separator + 1);
+  if (messageId.length === 0 || !RENDER_ATTACHMENT_ID.test(attachmentId)) return null;
+  return { messageId: MessageId.make(messageId), attachmentId };
+}
+
+function normalizeRenderKey(value: unknown): string | undefined {
+  const key = normalizeSearchString(value);
+  return key !== undefined && parseWorkspaceRenderKey(key) !== null ? key : undefined;
+}
+
 export function stripWorkspaceSearchParams<T extends Record<string, unknown>>(
   params: T,
 ): Omit<T, WorkspaceSearchKey> {
@@ -85,6 +123,7 @@ export function stripWorkspaceSearchParams<T extends Record<string, unknown>>(
     workspaceTab: _workspaceTab,
     workspaceAgentKey: _workspaceAgentKey,
     workspacePr: _workspacePr,
+    workspaceRender: _workspaceRender,
     ...rest
   } = params;
   return rest as Omit<T, WorkspaceSearchKey>;
@@ -99,15 +138,39 @@ export function stripWorkspacePanelSearchParams<T extends Record<string, unknown
 }
 
 /**
- * A pinned change request (`workspacePr`) names a change request in the thread
- * that pinned it. Navigation that carries the panel's search over to another
- * thread drops the pin, so that thread's tab shows its own change request.
+ * A pinned change request (`workspacePr`) and a page tab (`workspaceRender`)
+ * name things in the thread that opened them. Navigation that carries the
+ * panel's search over to another thread drops both: that thread's pull
+ * request tab shows its own change request, and a page tab gives way to the
+ * launcher.
  */
-export function stripWorkspacePullRequestPin<T extends Record<string, unknown>>(
+export function stripThreadScopedWorkspaceSearch<T extends Record<string, unknown>>(
   params: T,
-): Omit<T, "workspacePr"> {
-  const { workspacePr: _workspacePr, ...rest } = params;
-  return rest;
+): Omit<T, "workspacePr" | "workspaceRender"> {
+  const { workspacePr: _workspacePr, workspaceRender: _workspaceRender, ...rest } = params;
+  return (rest.workspaceTab === "render" ? { ...rest, workspaceTab: undefined } : rest) as Omit<
+    T,
+    "workspacePr" | "workspaceRender"
+  >;
+}
+
+/**
+ * The panel's search on a navigation to `to` (a message hit, say): kept as it
+ * is within the thread it was opened in, without the thread-scoped keys in
+ * any other.
+ */
+export function carryWorkspaceSearchToThread<T extends Record<string, unknown>>(
+  params: T,
+  input: {
+    readonly from: { readonly environmentId: EnvironmentId; readonly threadId: ThreadId } | null;
+    readonly to: { readonly environmentId: EnvironmentId; readonly threadId: ThreadId };
+  },
+): T | Omit<T, "workspacePr" | "workspaceRender"> {
+  const sameThread =
+    input.from !== null &&
+    input.from.environmentId === input.to.environmentId &&
+    input.from.threadId === input.to.threadId;
+  return sameThread ? params : stripThreadScopedWorkspaceSearch(params);
 }
 
 /** One builder for every tab: clears all panel keys, then applies `fields`. */
@@ -126,6 +189,7 @@ function withWorkspacePanelSearch<T extends Record<string, unknown>, Legacy>(
     workspaceTab: undefined,
     workspaceAgentKey: undefined,
     workspacePr: undefined,
+    workspaceRender: undefined,
     diff: undefined,
     diffTurnId: undefined,
     diffFilePath: undefined,
@@ -229,6 +293,18 @@ export function buildOpenAgentSearch<T extends Record<string, unknown>>(
   });
 }
 
+/** Page tab: one HTML render of the thread, at full size. */
+export function buildOpenRenderSearch<T extends Record<string, unknown>>(
+  params: T,
+  renderKey: string,
+): WorkspacePanelSearch<T, ClosedLegacySearch> {
+  return withWorkspacePanelSearch(params, {
+    workspaceOpen: "1",
+    workspaceTab: "render",
+    workspaceRender: renderKey,
+  });
+}
+
 export function parseWorkspaceRouteSearch(search: Record<string, unknown>): WorkspaceRouteSearch {
   const workspaceOpen = search.workspaceOpen === "1" ? "1" : undefined;
   const workspaceTab = normalizeWorkspaceTab(search.workspaceTab);
@@ -243,6 +319,11 @@ export function parseWorkspaceRouteSearch(search: Record<string, unknown>): Work
   if (workspaceTab === "agent" && !workspaceAgentKey) {
     return {};
   }
+  const workspaceRender =
+    workspaceTab === "render" ? normalizeRenderKey(search.workspaceRender) : undefined;
+  if (workspaceTab === "render" && !workspaceRender) {
+    return {};
+  }
   const workspacePr =
     workspaceTab === "pullRequest" ? normalizePositiveInt(search.workspacePr) : undefined;
 
@@ -251,5 +332,6 @@ export function parseWorkspaceRouteSearch(search: Record<string, unknown>): Work
     workspaceTab,
     ...(workspaceAgentKey ? { workspaceAgentKey } : {}),
     ...(workspacePr !== undefined ? { workspacePr } : {}),
+    ...(workspaceRender ? { workspaceRender } : {}),
   };
 }

@@ -16,6 +16,7 @@ const IDLE_GIT_STATUS: GitStatusState = { data: null, error: null, cause: null, 
 
 let localRefName: string | null | undefined;
 let folderStatus: GitStatusState = IDLE_GIT_STATUS;
+const watchedCwds = new Set<string>();
 
 /** What a one-off `readLocalGitRefName` read returns until the next reset (default: unknown). */
 export function setLocalGitRefNameForTests(refName: string | null | undefined): void {
@@ -30,7 +31,16 @@ export function setGitStatusForTests(status: VcsStatusResult | null): void {
   folderStatus = status ? { ...IDLE_GIT_STATUS, data: status } : IDLE_GIT_STATUS;
 }
 
-export function useGitStatus(target?: GitStatusTarget): GitStatusState {
+/** Every folder an enabled `useGitStatus` watched since the last reset. */
+export function watchedGitStatusCwdsForTests(): ReadonlySet<string> {
+  return watchedCwds;
+}
+
+export function useGitStatus(
+  target?: GitStatusTarget,
+  options?: { readonly enabled?: boolean | undefined },
+): GitStatusState {
+  if (target?.cwd && options?.enabled !== false) watchedCwds.add(target.cwd);
   return target?.cwd ? folderStatus : IDLE_GIT_STATUS;
 }
 
@@ -45,4 +55,5 @@ export function readLocalGitRefName(): Promise<string | null | undefined> {
 export function resetGitStatusStateForTests(): void {
   localRefName = undefined;
   folderStatus = IDLE_GIT_STATUS;
+  watchedCwds.clear();
 }

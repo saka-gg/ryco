@@ -8,6 +8,8 @@ import {
 } from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
+import { makeAcpToolCallEvent } from "../../provider/acp/AcpCoreRuntimeEvents.ts";
+import { parseSessionUpdateEvent } from "../../provider/acp/AcpRuntimeModel.ts";
 import { runtimeEventToActivities } from "./ProviderRuntimeIngestion.ts";
 
 const base = {
@@ -230,5 +232,44 @@ describe("background work projection", () => {
         payload: { state: "ready" },
       }),
     ).toEqual([]);
+  });
+});
+
+describe("runtimeEventToActivities for Ryco HTML tool calls", () => {
+  it("never stores the page of an ACP call first seen completed without a name", () => {
+    const page = `<!doctype html><html><body>${"<p>drawSecretChart()</p>".repeat(60)}</body></html>`;
+    const [update] = parseSessionUpdateEvent({
+      sessionId: "session-1",
+      update: {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "tool-html",
+        status: "completed",
+        rawInput: { html: page, title: "Quarterly revenue", height: 420 },
+        rawOutput: { content: [{ type: "text", text: "Shown to the reader above your reply." }] },
+      },
+    }).events;
+    if (update?._tag !== "ToolCallUpdated") throw new Error("expected a tool call update");
+    const event = makeAcpToolCallEvent({
+      stamp: { eventId: EventId.make("evt-html"), createdAt: base.createdAt },
+      provider: ProviderDriverKind.make("cursor"),
+      threadId: base.threadId,
+      turnId: undefined,
+      toolCall: update.toolCall,
+      rawPayload: {},
+    });
+    // The page did reach the runtime event: nothing named the tool.
+    expect(JSON.stringify(event.payload)).toContain("drawSecretChart");
+
+    const activities = runtimeEventToActivities(event);
+
+    expect(JSON.stringify(activities)).not.toContain("drawSecretChart");
+    expect(activities).toMatchObject([
+      {
+        kind: "tool.completed",
+        payload: {
+          data: { rawInput: { title: "Quarterly revenue", height: 420, htmlChars: page.length } },
+        },
+      },
+    ]);
   });
 });

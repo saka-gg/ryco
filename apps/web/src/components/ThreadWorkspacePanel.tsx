@@ -7,6 +7,7 @@ import { scopedThreadKey, scopeProjectRef, scopeThreadRef } from "@ryco/client-r
 import { type ScopedThreadRef, type ThreadId } from "@ryco/contracts";
 import { projectScriptCwd, projectScriptRuntimeEnv } from "@ryco/shared/projectScripts";
 import {
+  AppWindowIcon,
   ArrowLeftIcon,
   BotIcon,
   FileTextIcon,
@@ -48,8 +49,10 @@ import {
   buildOpenAgentSearch,
   buildOpenAgentsSearch,
   buildOpenPullRequestSearch,
+  buildOpenRenderSearch,
   buildOpenWorkspaceSearch,
   buildCloseWorkspacePanelSearch,
+  parseWorkspaceRenderKey,
 } from "../workspaceRouteSearch";
 import { buildOpenRightPanelTabSearch, isRightPanelTabMode } from "../rightPanelTabs.logic";
 import {
@@ -61,6 +64,8 @@ import {
   type ThreadSubagentView,
 } from "../threadWorkspaceViewModel";
 import { AgentsPanel } from "./AgentsPanel";
+import { HtmlRenderPanel } from "./chat/HtmlRenderPanel";
+import { useWorkspaceHtmlRender } from "./chat/useWorkspaceHtmlRender";
 import { useThreadChangeRequest } from "./chat/useThreadChangeRequest";
 import { formatLiveAgentCount, LiveAgentCountBadge } from "./LiveAgentCountBadge";
 import { buildTabs, type WorkspaceTab } from "../threadWorkspaceTabs";
@@ -151,6 +156,7 @@ function TabIcon(props: { tab: WorkspaceTab; active: boolean }) {
   if (props.tab.key === "agents") {
     return <BotIcon className={className} />;
   }
+  if (props.tab.mode === "render") return <AppWindowIcon className={className} />;
   return <FileTextIcon className={className} />;
 }
 
@@ -848,6 +854,8 @@ export default function ThreadWorkspacePanel(props: {
   panelMode: RightPanelMode | null;
   openedPanelModes: ReadonlyArray<RightPanelMode>;
   openedAgentKeys: ReadonlyArray<string>;
+  /** The page tab's render while the page tab is open but not shown. */
+  openedRenderKey?: string | null;
   onClosePanelTab: (input: { mode: RightPanelMode; agentKey?: string }) => void;
   /** Inline presentation only: the panel has taken over the whole workspace. */
   maximized?: boolean;
@@ -935,6 +943,25 @@ export default function ThreadWorkspacePanel(props: {
   // The frozen phone tier has no pull request tab: resolve nothing there.
   const threadChangeRequest = useWorkspaceThreadChangeRequest(!isPhoneSurface);
   const pullRequestNumber = search.workspacePr ?? threadChangeRequest.number;
+  // One page tab: the render the route shows, else the one it showed last.
+  const renderKey =
+    search.workspaceTab === "render" && search.workspaceRender
+      ? search.workspaceRender
+      : (props.openedRenderKey ?? null);
+  // Looked up further back only while the page tab is the one shown.
+  const workspaceRender = useWorkspaceHtmlRender({
+    environmentId: workspaceThreadRef?.environmentId ?? null,
+    threadId: workspaceThreadRef ? (workspaceThreadRef.threadId as ThreadId) : null,
+    thread: activeThread,
+    renderKey,
+    lookUp: activeMode === "render" && !isPhoneSurface,
+  });
+  const renderTitle =
+    renderKey && parseWorkspaceRenderKey(renderKey)
+      ? workspaceRender.status === "found"
+        ? workspaceRender.render.htmlRender.title
+        : "Page"
+      : null;
   const tabs = useMemo(() => {
     const built = buildTabs({
       subagents,
@@ -943,6 +970,7 @@ export default function ThreadWorkspacePanel(props: {
       openedPanelModes,
       groupAgents: !isPhoneSurface,
       pullRequestNumber,
+      render: renderKey && renderTitle ? { renderKey, title: renderTitle } : null,
     });
     // The web phone tier is frozen; native mobile owns future phone surfaces.
     return isPhoneSurface
@@ -951,7 +979,8 @@ export default function ThreadWorkspacePanel(props: {
             tab.mode !== "agents" &&
             tab.mode !== "simulator" &&
             tab.mode !== "browser" &&
-            tab.mode !== "pullRequest",
+            tab.mode !== "pullRequest" &&
+            tab.mode !== "render",
         )
       : built;
   }, [
@@ -960,6 +989,8 @@ export default function ThreadWorkspacePanel(props: {
     openedPanelModes,
     props.openedAgentKeys,
     pullRequestNumber,
+    renderKey,
+    renderTitle,
     subagents,
   ]);
   // A phone agents deep link falls back to the launcher with the agents tab
@@ -969,7 +1000,10 @@ export default function ThreadWorkspacePanel(props: {
     activeMode === "agent"
       ? agentKey
       : isPhoneSurface &&
-          (activeMode === "agents" || activeMode === "browser" || activeMode === "pullRequest")
+          (activeMode === "agents" ||
+            activeMode === "browser" ||
+            activeMode === "pullRequest" ||
+            activeMode === "render")
         ? null
         : activeMode;
 
@@ -1012,6 +1046,10 @@ export default function ThreadWorkspacePanel(props: {
       }
       if (tab.mode === "agent") {
         navigateSearch((previous) => buildOpenAgentSearch(previous, tab.agentKey));
+        return;
+      }
+      if (tab.mode === "render") {
+        navigateSearch((previous) => buildOpenRenderSearch(previous, tab.renderKey));
         return;
       }
       navigateSearch((previous) => buildOpenRightPanelTabSearch(previous, tab.mode));
@@ -1293,6 +1331,14 @@ export default function ThreadWorkspacePanel(props: {
               subagents={subagents}
               selectedAgentId={agentKey}
               onBack={() => navigateSearch((previous) => buildOpenAgentsSearch(previous))}
+            />
+          ) : activeMode === "render" && renderKey && !isPhoneSurface ? (
+            // The phone tier keeps its dialog; a page link there lands on the launcher.
+            <HtmlRenderPanel
+              environmentId={workspaceThreadRef?.environmentId ?? null}
+              threadId={workspaceThreadRef ? (workspaceThreadRef.threadId as ThreadId) : null}
+              renderKey={renderKey}
+              resolution={workspaceRender}
             />
           ) : activeMode === "agent" ? (
             <AgentThreadPanel subagent={activeAgent} agentKey={agentKey} />

@@ -45,6 +45,7 @@ import {
 export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
   const {
     ownerEffect,
+    withAccess,
     projectionSnapshotQuery,
     commandReceipts,
     dispatchNormalizedCommand,
@@ -710,7 +711,12 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
     [WS_METHODS.chatAttachmentsReadChunk]: (input) =>
       observeRpcEffect(
         WS_METHODS.chatAttachmentsReadChunk,
-        ownerEffect(
+        // Anyone who can read the thread can read its attachments: the read is
+        // bound to an attachment of a message in that thread, the same data a
+        // viewer already gets from thread windows, diffs and raw payloads. A
+        // phone paired as a client relies on it to show images and agent pages.
+        withAccess(
+          "viewer",
           WS_METHODS.chatAttachmentsReadChunk,
           readAttachmentChunk(input, {
             attachmentsDir: ctx.config.attachmentsDir,

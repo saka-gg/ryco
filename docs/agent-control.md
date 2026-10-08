@@ -5,6 +5,10 @@ routine actions through the durable operation queue. Archiving, runtime permissi
 project linking/unlinking or workspace changes, executable project scripts, system prompts, and
 device lifecycle changes still require user approval. Standalone integrations remain approval-only.
 
+Agent Control also gives agents visual replies: with it on, they can answer with inline HTML pages
+such as charts, tables, diagrams and mockups, shown in the thread above their written reply (see
+[HTML renders](./user/html-renders.md)).
+
 Private tools are advertised when the provider initializes, including before its first turn. Discovery
 is scoped to the session's capabilities; mutations still require exact active-turn authority when
 called. This matters for clients such as Codex that cache the initial MCP catalog.
@@ -32,6 +36,11 @@ called. This matters for clients such as Codex that cache the initial MCP catalo
   and the corresponding user permissions are available. Browser `open` accepts `visible: true`.
 - `ryco_task_status`, `ryco_task_cancel`: status, results and cancel for tasks this chat delegated
   with `returnToOrigin` (see [Delegated tasks](#delegated-tasks)).
+- `ryco_html_preview`, `ryco_html_render`: check a self-contained HTML page in Ryco's headless
+  browser, then show it inline above the reply as a sandboxed page that follows the user's theme,
+  with a card at the end of the reply (see [HTML renders](./user/html-renders.md)). Both need the
+  `html.render` grant and exact active-turn authority; a render counts toward the turn's attachment
+  budget.
 
 Mutation calls return a durable receipt. Reuse `requestId` when retrying the same action, then use
 `ryco_wait_for_control_request` with `waitFor: "terminal"` to get dispatch results and created thread
@@ -115,6 +124,59 @@ The default connection can list allowed projects, request one task at a time, an
 tasks created by that integration. It covers current and future projects, allows 60 control calls
 per minute, and has no expiry. Every requested Ryco mutation still needs approval.
 
+### Standalone read grants
+
+Read access beyond the integration's own tasks is opt-in. Each grant is off by default, is set per
+integration on the Integrations page, and only reaches projects inside the integration's project
+scope. A thread, project, or workspace outside that scope reads exactly like one that does not
+exist.
+
+| Grant                      | Tools                                                                                                      |
+| -------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `external.threads.read`    | `ryco_list_threads`, `ryco_read_thread`, `ryco_search_threads`, `ryco_wait_threads`, `ryco_inspect_thread` |
+| `external.reviews.read`    | `ryco_read_thread_diff` and the `review` section of `ryco_inspect_thread`                                  |
+| `external.files.read`      | `ryco_read_thread_file`                                                                                    |
+| `external.workspaces.read` | `ryco_read_project`, `ryco_list_workspaces`, `ryco_read_workspace`                                         |
+
+These tools return the same bounded, redacted results as the private-session tools, with two
+differences. Standalone inspection never returns terminal output, because that is where secrets
+most often appear. Workspace reads have no calling thread, so no workspace is reported as
+`current`. `ryco_wait_threads` re-checks the integration on every poll, so revoking a grant, narrowing
+the scope, or disabling Agent Control ends a wait in progress. Workspace files can include local
+configuration such as `.env`, so grant `external.files.read` only to clients you would also let
+read the checkout directly.
+
+Integrations that can request tasks or automations also get `ryco_read_control_request` and
+`ryco_wait_for_control_request`. They return receipts only for requests that integration created,
+for example an automation proposal awaiting approval.
+
+### Standalone control requests
+
+Two more opt-in grants let a standalone client request changes. Every such request waits for a
+Ryco user's approval, regardless of runtime mode; standalone requests never execute as routine
+actions. Retrying with the same `requestId` and plan returns the original receipt, even after the
+target changed; reusing a `requestId` with a different plan is refused.
+
+| Grant                        | Tools                                                               |
+| ---------------------------- | ------------------------------------------------------------------- |
+| `external.threads.control`   | `ryco_send_message`, `ryco_interrupt_thread`, `ryco_update_thread`  |
+| `external.workspaces.manage` | `ryco_plan_workspace_lifecycle`, `ryco_propose_workspace_lifecycle` |
+
+A standalone client has no thread of its own, so its authority over a thread is the same ceiling
+that bounds the tasks it can create. Without `external.runtime.full-access` it can only target
+threads in `approval-required` mode and cannot raise a thread's runtime mode. Without
+`external.checkout.shared` it can only target threads in an isolated worktree. A target outside
+the project scope is reported exactly like a missing thread. The request captures the target's
+state, and approval is refused at execution if that state changed (for example, the turn it meant
+to interrupt already finished) or if the integration lost the grant.
+
+Workspace lifecycle requests follow the [governed workspace lifecycle](#governed-workspace-lifecycle)
+rules unchanged. A standalone client has no current workspace, so none is protected as current;
+main, active, and unverifiable workspaces stay blocked.
+
+Standalone integrations cannot create or remove projects, change settings, or use devices, the
+computer, or the browser.
+
 ## Repair and disconnect
 
 Use **Repair** after an interrupted install, a missing credential file, or a failed protocol check.
@@ -193,8 +255,9 @@ leave the checkout removed while its Ryco record remains. Recovery never repeats
 or recreates user files; inspect current state and prepare a new approved plan for any
 remaining work. A failed receipt is not a claim that nothing changed.
 
-Standalone integrations retain their existing task-oriented grants and catalog; they do
-not advertise or accept workspace lifecycle tools. This does not expand their authority to
-other Ryco sessions or workspace histories. The private catalog is shared across supported
+Standalone integrations with `external.workspaces.read` can list and read workspaces in
+allowed projects. Only `external.workspaces.manage` adds the plan and propose lifecycle tools,
+and those requests always need approval (see
+[Standalone control requests](#standalone-control-requests)). The private catalog is shared across supported
 provider injection paths. No hosted, mobile authorization, or service-worker policy changes
 are involved.

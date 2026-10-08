@@ -596,6 +596,26 @@ export const UploadChatImageAttachment = Schema.Struct({
 });
 export type UploadChatImageAttachment = typeof UploadChatImageAttachment.Type;
 
+/**
+ * Marks a `text/html` file attachment as an agent HTML render: a page the agent
+ * published with `ryco_html_render` for clients to show inline in the thread.
+ * Deliberately loose (any finite numbers, no length caps) so a newer server's
+ * metadata can never fail an older client's decode; `@ryco/shared/htmlRender`
+ * `readHtmlRenderMetadata` clamps it before use.
+ */
+export const ChatHtmlRenderMetadata = Schema.Struct({
+  title: Schema.String,
+  /** The agent's frame height in CSS pixels, and the cap on any measured height. */
+  height: Schema.Finite,
+  /** `[width, contentHeight]` pairs measured at publish; absent when not measured. */
+  heights: Schema.optional(Schema.Array(Schema.Tuple([Schema.Finite, Schema.Finite]))),
+  /** Small `data:image/...` screenshots of the page's top per appearance; absent when not captured. */
+  thumbnails: Schema.optional(
+    Schema.Struct({ dark: Schema.optional(Schema.String), light: Schema.optional(Schema.String) }),
+  ),
+});
+export type ChatHtmlRenderMetadata = typeof ChatHtmlRenderMetadata.Type;
+
 export const ChatFileAttachment = Schema.Struct({
   type: Schema.Literal("file"),
   id: ChatAttachmentId,
@@ -604,6 +624,7 @@ export const ChatFileAttachment = Schema.Struct({
   sizeBytes: NonNegativeInt.check(Schema.isLessThanOrEqualTo(PROVIDER_SEND_TURN_MAX_FILE_BYTES)),
   width: Schema.optional(NonNegativeInt),
   height: Schema.optional(NonNegativeInt),
+  htmlRender: Schema.optional(ChatHtmlRenderMetadata),
 });
 export type ChatFileAttachment = typeof ChatFileAttachment.Type;
 

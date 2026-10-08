@@ -1,6 +1,7 @@
 import {
   ORCHESTRATION_WS_METHODS,
   OrchestrationDispatchCommandError,
+  WS_METHODS,
   ProjectId,
   type MessageId,
   type OrchestrationReadModel,
@@ -32,8 +33,8 @@ import {
   waitForServerConfigToApply,
   wsRequests,
 } from "./ChatView.browser.helpers";
-import { rpcFailure } from "../../test/wsRpcHarness";
-import { setGitStatusForTests } from "../../test/gitStatusStateMock";
+import { WsRpcFailure } from "../../test/wsRpcHarness";
+import { setGitStatusForTests, watchedGitStatusCwdsForTests } from "../../test/gitStatusStateMock";
 
 // Hoisted per suite: a mock registered from the shared helpers runs after this file's static imports.
 vi.mock("../lib/gitStatusState", () => import("../../test/gitStatusStateMock"));
@@ -216,7 +217,7 @@ describe("ChatView chats without a project (full app)", () => {
         // Startup cleanup removed this unused chat: the node refuses its id once.
         if ((body as { type?: string }).type === "thread.turn.start" && !refused) {
           refused = true;
-          return rpcFailure(
+          return new WsRpcFailure(
             new OrchestrationDispatchCommandError({
               message:
                 "This chat was cleaned up before its first message was sent. Start a new chat to send this message.",
@@ -294,7 +295,7 @@ describe("ChatView chats without a project (full app)", () => {
               updatedAt: NOW_ISO,
             },
           });
-          return rpcFailure(
+          return new WsRpcFailure(
             new OrchestrationDispatchCommandError({ message: "The provider could not start." }),
           );
         }
@@ -379,7 +380,7 @@ describe("ChatView chats without a project (full app)", () => {
     }
   });
 
-  it("shows no Git changes in a chat's overview, only the way to a project", async () => {
+  it("shows no Git sections or Notes on a chat's overview rail, only the way to a project", async () => {
     // The node answers Git status for any folder, a chat's included.
     setGitStatusForTests({
       isRepo: false,
@@ -393,12 +394,26 @@ describe("ChatView chats without a project (full app)", () => {
       behindCount: 0,
       pr: null,
     });
+    const snapshot = createSnapshotWithChat();
+    const chatFolder = snapshot.projects.find(
+      (project) => project.id === CHAT_PROJECT_ID,
+    )!.workspaceRoot;
     const mounted = await mountChatView({
       viewport: DEFAULT_VIEWPORT,
-      snapshot: createSnapshotWithChat(),
+      snapshot,
       initialPath: `/${LOCAL_ENVIRONMENT_ID}/${CHAT_THREAD_ID}`,
       configureFixture: (nextFixture) => {
-        nextFixture.serverConfig = { ...nextFixture.serverConfig, chats: CHATS_AVAILABLE };
+        nextFixture.serverConfig = {
+          ...nextFixture.serverConfig,
+          chats: CHATS_AVAILABLE,
+          environment: {
+            ...nextFixture.serverConfig.environment,
+            capabilities: {
+              ...nextFixture.serverConfig.environment.capabilities,
+              worktreeNotes: true,
+            },
+          },
+        };
       },
     });
 
@@ -410,15 +425,36 @@ describe("ChatView chats without a project (full app)", () => {
         "Unable to find the overview toggle.",
       );
       if (toggle.getAttribute("aria-pressed") !== "true") toggle.click();
-      const promote = page.getByTestId("chat-promote-block");
+      const rail = await waitForElement(
+        () =>
+          document.querySelector<HTMLElement>(
+            '[data-slot="crown-overview"][data-state="open"] [data-slot="crown-rail"]',
+          ),
+        "Unable to find the overview rail.",
+      );
+      // A chat folder is no checkout: no Branch, Changes, Checks, Pull request or
+      // Push, and no worktree Notes. Promotion is where all of them start.
+      const railKeys = () =>
+        Array.from(rail.querySelectorAll<HTMLElement>("[data-nav-key]"), (button) => {
+          return button.dataset.navKey;
+        });
+      await vi.waitFor(() => expect(railKeys()).toEqual(["plan", "agents", "project"]));
+
+      rail.querySelector<HTMLElement>('[data-nav-key="project"]')!.click();
+      const promote = page.getByTestId("crown-promote-chat");
       await expect.element(promote).toBeVisible();
-      const overview = promote.element().closest('[data-slot="overview-panel"]');
-      expect(overview).not.toBeNull();
-      // A chat records no checkpoints: a "Changes · No changes" row would be wrong
-      // after the agent wrote files. Promotion is where changes start to count.
-      await waitForLayout();
-      expect(overview!.textContent).not.toContain("Changes");
-      expect(overview!.textContent).not.toContain("No changes");
+      const card = promote.element().closest<HTMLElement>('[data-slot="crown-card"]')!;
+      expect(card.textContent).toContain("Turn into project");
+      expect(card.querySelector('button[aria-label^="Refresh pull request"]')).toBeNull();
+
+      // Nothing asked about the chat folder's Git status or its notes.
+      expect(watchedGitStatusCwdsForTests().has(chatFolder)).toBe(false);
+      expect(
+        wsRequests.some(
+          (request) =>
+            request._tag === WS_METHODS.notesList || request._tag === WS_METHODS.notesCommand,
+        ),
+      ).toBe(false);
     } finally {
       await mounted.cleanup();
     }

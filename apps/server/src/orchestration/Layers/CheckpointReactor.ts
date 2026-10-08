@@ -46,6 +46,7 @@ import {
 } from "../checkpointRevertPolicy.ts";
 import { latestTurnFromCheckpoint } from "../projector.ts";
 import { threadShellSettlementInput } from "../threadSettlementInput.ts";
+import { selectTurnReplyMessage, type TurnReplyCandidate } from "../turnReplyMessage.ts";
 import { userFacingFailureDetail } from "../userFacingErrors.ts";
 import { CheckpointStore } from "../../checkpointing/Services/CheckpointStore.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
@@ -367,11 +368,13 @@ const make = Effect.gen(function* () {
     readonly threadId: ThreadId;
     readonly turnId: TurnId;
     readonly thread: {
-      readonly messages: ReadonlyArray<{
-        readonly id: MessageId;
-        readonly role: string;
-        readonly turnId: TurnId | null;
-      }>;
+      readonly messages: ReadonlyArray<
+        TurnReplyCandidate & {
+          readonly id: MessageId;
+          readonly role: string;
+          readonly turnId: TurnId | null;
+        }
+      >;
     };
     readonly cwd: string;
     readonly turnCount: number;
@@ -441,11 +444,10 @@ const make = Effect.gen(function* () {
         ),
       );
 
+    // Keyed on the turn's reply, not on a page or file it published after the reply.
     const assistantMessageId =
       input.assistantMessageId ??
-      input.thread.messages
-        .toReversed()
-        .find((entry) => entry.role === "assistant" && entry.turnId === input.turnId)?.id ??
+      selectTurnReplyMessage(input.thread.messages, input.turnId)?.id ??
       MessageId.make(`assistant:${input.turnId}`);
 
     yield* orchestrationEngine.dispatch({

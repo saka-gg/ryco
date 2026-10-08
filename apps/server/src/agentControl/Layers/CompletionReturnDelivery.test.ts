@@ -1800,6 +1800,51 @@ it.effect(
     }).pipe(Effect.provide(layer)),
 );
 
+it.effect(
+  "returns the child's reply, not blank, when its turn is keyed on a page it published",
+  () =>
+    Effect.gen(function* () {
+      const h = yield* setup();
+      const child = ThreadId.make("child");
+      const turn = TurnId.make("child-turn");
+      // The turn's message is the page ryco_html_render published: blank text carrying it.
+      const page = JSON.stringify([
+        {
+          type: "file",
+          id: "child-page",
+          name: "Chart.html",
+          mimeType: "text/html",
+          sizeBytes: 100,
+          htmlRender: { title: "Revenue chart", height: 400 },
+        },
+      ]);
+      yield* h.sql`UPDATE projection_thread_messages SET text = ' ', attachments_json = ${page}, created_at = ${at(2)}
+        WHERE message_id = 'child-answer'`;
+      yield* h.sql`INSERT INTO projection_thread_messages (message_id, thread_id, turn_id, role, text, is_streaming, created_at, updated_at)
+        VALUES ('child-narration', 'child', 'child-turn', 'assistant', 'Revenue grew 40%.', 0, ${at(1)}, ${at(1)})`;
+      assert.deepEqual(yield* h.repo.output(child, turn), {
+        text: "Revenue grew 40%.",
+        streaming: 0,
+      });
+      yield* h.ack();
+      yield* h.tick(0);
+      assert.equal((yield* h.read()).status, "delivered");
+      assert.include(h.sent[0]!.message.text, '"summary":"Revenue grew 40%."');
+
+      // A turn that only published pages and files names them instead.
+      yield* h.sql`DELETE FROM projection_thread_messages WHERE message_id = 'child-narration'`;
+      const file = JSON.stringify([
+        { type: "file", id: "child-file", name: "data.csv", mimeType: "text/csv", sizeBytes: 9 },
+      ]);
+      yield* h.sql`INSERT INTO projection_thread_messages (message_id, thread_id, turn_id, role, text, attachments_json, is_streaming, created_at, updated_at)
+        VALUES ('child-file', 'child', 'child-turn', 'assistant', ' ', ${file}, 0, ${at(3)}, ${at(3)})`;
+      assert.deepEqual(yield* h.repo.output(child, turn), {
+        text: "[Published HTML page: Revenue chart]\n[Attached file: data.csv]",
+        streaming: 0,
+      });
+    }).pipe(Effect.provide(layer)),
+);
+
 it.effect("requires completed original dispatch and its exact recorded return authority", () =>
   Effect.gen(function* () {
     const h = yield* setup();

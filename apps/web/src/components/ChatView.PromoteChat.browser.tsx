@@ -20,6 +20,7 @@ import {
   mountChatView,
   openCommandPaletteFromTrigger,
   rpcHarness,
+  waitForElement,
   waitForServerConfigToApply,
 } from "./ChatView.browser.helpers";
 import { usePromoteChatDialogStore } from "./chat/promoteChatDialogStore";
@@ -205,6 +206,58 @@ describe("Turn into project… (full app)", () => {
       expect(sidebarProjectRow()?.textContent).toContain(CHAT_TITLE);
       expect(document.querySelector('[data-testid="sidebar-chats-section"]')).toBeNull();
       expect(document.querySelector('[data-testid="chat-header-promote"]')).toBeNull();
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("promotes a chat from the overview rail, whose card waits behind the dialog", async () => {
+    const { mounted, promoteRequests } = await mountChat();
+    try {
+      const toggle = await waitForElement(
+        () =>
+          document.querySelector<HTMLButtonElement>('button[aria-label="Toggle overview panel"]'),
+        "Unable to find the overview toggle.",
+      );
+      if (toggle.getAttribute("aria-pressed") !== "true") toggle.click();
+      const projectIcon = await waitForElement(
+        () =>
+          document.querySelector<HTMLElement>(
+            '[data-slot="crown-overview"][data-state="open"] [data-slot="crown-rail"] [data-nav-key="project"]',
+          ),
+        "Unable to find the rail's Turn into project icon.",
+      );
+      projectIcon.click();
+      const promote = page.getByTestId("crown-promote-chat");
+      await expect.element(promote).toBeVisible();
+      const card = promote.element().closest<HTMLElement>('[data-slot="crown-card"]')!;
+      await promote.click();
+
+      await expectDialogPrefilled();
+      // The dialog grew out of the card's button; pressing inside it keeps the card open.
+      expect(usePromoteChatDialogStore.getState().origin).toBe(promote.element());
+      await page.getByTestId("promote-chat-name").click();
+      expect(card.dataset.visible).toBe("true");
+      await page.getByTestId("promote-chat-submit").click();
+
+      await vi.waitFor(() => expect(promoteRequests).toHaveLength(1));
+      // Once a project, the rail trades "Turn into project" for the Git sections,
+      // and the open card falls back from the section that went away.
+      await vi.waitFor(() =>
+        expect(
+          document.querySelector(
+            '[data-slot="crown-overview"] [data-slot="crown-rail"] [data-nav-key="project"]',
+          ),
+        ).toBeNull(),
+      );
+      expect(
+        document.querySelector(
+          '[data-slot="crown-overview"] [data-slot="crown-rail"] [data-nav-key="branch"]',
+        ),
+      ).not.toBeNull();
+      expect(
+        card.querySelector('[data-slot="crown-card-detail"] [data-section="project"]'),
+      ).toBeNull();
     } finally {
       await mounted.cleanup();
     }

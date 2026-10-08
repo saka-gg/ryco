@@ -31,6 +31,9 @@ import { Effect, Exit, Layer, Option, Scope, Stream } from "effect";
 import { ServerConfig } from "../../config.ts";
 import { withComputerUseTools } from "../Mcp/computerTools.ts";
 import { withAssistantAttachmentTools } from "../Mcp/attachmentTools.ts";
+import { withHtmlRenderTools } from "../Mcp/htmlRenderTools.ts";
+import { makeTurnAttachmentDelivery } from "../Mcp/turnAttachmentDelivery.ts";
+import { HtmlRender } from "../../htmlRender/HtmlRender.ts";
 import { OrchestrationEngineService } from "../../orchestration/Services/OrchestrationEngine.ts";
 import * as Semaphore from "effect/Semaphore";
 
@@ -70,6 +73,7 @@ const makeAgentControlMcpServer = Effect.gen(function* () {
   const workspaceAccess = yield* Effect.serviceOption(WorkspaceAccessPolicy);
   const config = yield* Effect.serviceOption(ServerConfig);
   const engine = yield* Effect.serviceOption(OrchestrationEngineService);
+  const htmlRender = yield* Effect.serviceOption(HtmlRender);
 
   const files = yield* Effect.serviceOption(WorkspaceFileSystem);
   const diffs = yield* Effect.serviceOption(CheckpointDiffQuery);
@@ -114,18 +118,33 @@ const makeAgentControlMcpServer = Effect.gen(function* () {
           }),
         })
       : inspectionTools;
-  const fileTools =
+  // Tools that show an attachment in the caller's turn share one delivery, so
+  // file attachments and HTML renders draw on one serialized per-turn budget.
+  const deliveryDeps =
     Option.isSome(config) && Option.isSome(workspaceAccess) && Option.isSome(engine)
-      ? yield* withAssistantAttachmentTools(baseTools, {
+      ? {
           attachmentsDir: config.value.attachmentsDir,
           registry,
           policy,
           projections,
           workspaceAccess: workspaceAccess.value,
           engine: engine.value,
-        })
+        }
+      : undefined;
+  const delivery = deliveryDeps ? yield* makeTurnAttachmentDelivery(deliveryDeps) : undefined;
+  const fileTools =
+    deliveryDeps && delivery
+      ? yield* withAssistantAttachmentTools(baseTools, { ...deliveryDeps, delivery })
       : baseTools;
-  const legacyComputerTools = withComputerUseTools(fileTools, {
+  const htmlTools =
+    deliveryDeps && delivery && Option.isSome(htmlRender)
+      ? yield* withHtmlRenderTools(fileTools, {
+          ...deliveryDeps,
+          delivery,
+          htmlRender: htmlRender.value,
+        })
+      : fileTools;
+  const legacyComputerTools = withComputerUseTools(htmlTools, {
     ...(Option.isSome(config) && config.value.computerUseBridge
       ? { config: config.value.computerUseBridge }
       : {}),

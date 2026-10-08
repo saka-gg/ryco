@@ -1,4 +1,5 @@
 import { LocalTaskServiceLive } from "./tasks/LocalTaskService.ts";
+import { WorktreeNotesServiceLive } from "./notes/WorktreeNotesService.ts";
 import { DailyRecapQueryLive } from "./statistics/DailyRecapQuery.ts";
 import { StorageServiceLive } from "./storage/StorageService.ts";
 import { WorkspaceLifecycleLive } from "./workspace/WorkspaceLifecycle.ts";
@@ -129,6 +130,7 @@ import { AgentControlExternalRepositoryLive } from "./persistence/Layers/AgentCo
 import { AgentControlAutomationRepositoryLive } from "./persistence/Layers/AgentControlAutomations.ts";
 import { AgentControlMcpInstallationRepositoryLive } from "./persistence/Layers/AgentControlMcpInstallation.ts";
 import { AgentControlMcpServerLive } from "./agentControl/Layers/AgentControlMcpServer.ts";
+import { HtmlRenderLive } from "./htmlRender/HtmlRenderLive.ts";
 import { AgentControlOperationStoreLive } from "./agentControl/Layers/AgentControlOperationStore.ts";
 import { AgentControlPolicyLive } from "./agentControl/Layers/AgentControlPolicy.ts";
 import { AgentControlProposalEventsLive } from "./agentControl/Layers/AgentControlProposalEvents.ts";
@@ -492,6 +494,7 @@ const RuntimeDependenciesLive = RestartContinuationLive.pipe(
 const RuntimeServicesLive = Layer.mergeAll(
   DailyRecapQueryLive,
   LocalTaskServiceLive,
+  WorktreeNotesServiceLive,
   StorageServiceLive.pipe(Layer.provide(ProviderProtectedPathsLive)),
   SessionImportLive,
   AutomationCentreLive.pipe(
@@ -501,6 +504,9 @@ const RuntimeServicesLive = Layer.mergeAll(
   ),
   ServerRuntimeStartupLive,
   AgentControlMcpServerLive.pipe(
+    // HTML render tools exist only on the private listener; the external
+    // endpoint below never sees this service.
+    Layer.provide(HtmlRenderLive),
     Layer.provideMerge(AgentControlDiagnosticsServiceLive),
     Layer.provideMerge(AgentControlActionValidatorLive),
     Layer.provideMerge(AgentControlProjectPlansLive),

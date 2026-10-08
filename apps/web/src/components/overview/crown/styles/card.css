@@ -1,0 +1,129 @@
+/* Crown — card: the expanded island with its header, detail and spine. */
+
+/* The island writes the content width when the chat row narrows it. */
+.crown-card-layer {
+  right: 0;
+  display: flex;
+  width: var(--crown-card-content-w, calc(var(--crown-card-width) - 2px));
+  align-items: flex-start;
+}
+
+.crown-card-main {
+  flex: 1;
+  min-width: 0;
+  padding: 12px 4px 12px 14px;
+}
+
+.crown-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  padding-left: 2px;
+}
+
+.crown-card-title {
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.crown-agent-dot {
+  display: inline-block;
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--muted-foreground) 60%, transparent);
+  transition: background-color var(--crown-dur-dot-color);
+}
+
+.crown-agent-dot[data-running="true"] {
+  background: var(--success);
+  animation: crown-live 1.7s infinite;
+  animation-play-state: var(--app-motion-activity-play-state, running);
+}
+
+.crown-chip {
+  display: inline-flex;
+  flex: 0 1 auto;
+  min-width: 0;
+  height: 18px;
+  align-items: center;
+  gap: 4px;
+  padding: 0 6px;
+  overflow: hidden;
+  border-radius: 5px;
+  background: var(--muted);
+  color: var(--muted-foreground);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+
+.crown-chip > svg {
+  flex: none;
+  width: 11px;
+  height: 11px;
+}
+
+.crown-icon-btn {
+  position: relative;
+  display: inline-grid;
+  flex: none;
+  width: 22px;
+  height: 22px;
+  place-items: center;
+  border-radius: 6px;
+  color: var(--muted-foreground);
+  transition:
+    background-color var(--crown-dur-hover),
+    color var(--crown-dur-hover);
+}
+
+.crown-icon-btn:hover:not(:disabled) {
+  background: var(--muted);
+  color: var(--foreground);
+}
+
+.crown-icon-btn:disabled {
+  cursor: default;
+}
+
+.crown-icon-btn > svg {
+  width: 13px;
+  height: 13px;
+}
+
+.crown-refresh-spin {
+  animation: crown-spin 0.8s linear infinite;
+  animation-play-state: var(--app-motion-activity-play-state, running);
+}
+
+.crown-refresh-warning {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--warning);
+  box-shadow: 0 0 0 1.5px #0d0d0e;
+}
+
+.crown-card-detail {
+  max-height: var(--crown-detail-max, 420px);
+  overflow-x: hidden;
+  overflow-y: auto;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+/* The rail's icons as the card's right edge, aligned with the docked rail below. */
+.crown-spine {
+  flex: none;
+  /* One pixel less: the card's border already sits above it. */
+  margin-top: calc(var(--crown-head-offset) - 1px);
+  border: 1px solid transparent;
+  background: transparent;
+  box-shadow: none;
+}

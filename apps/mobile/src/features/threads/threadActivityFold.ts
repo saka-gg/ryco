@@ -1,5 +1,15 @@
-import { formatDuration } from "@ryco/client-runtime/state/session";
-import type { TimelineEntry, WorkLogEntry } from "@ryco/client-runtime/state/session";
+import {
+  collectTurnHtmlRenders,
+  deriveTerminalAssistantMessageIds,
+  formatDuration,
+  isBlankSettledReply,
+  placeRepliesAfterHtmlRenders,
+  type HtmlRenderAttachment,
+  type TimelineEntry,
+  type WorkLogEntry,
+} from "@ryco/client-runtime/state/session";
+import type { ChatMessage } from "@ryco/client-runtime/state/threads";
+import type { MessageId } from "@ryco/contracts";
 
 // Collapses consecutive activity into one foldable row.
 //
@@ -44,9 +54,24 @@ export interface ActivityFold {
   readonly expanded: boolean;
 }
 
-export type ThreadTimelineRow =
-  | { readonly kind: "entry"; readonly id: string; readonly entry: TimelineEntry }
-  | ActivityFold;
+/** One of a turn's HTML renders, as the turn's reply lists it. */
+export interface TurnHtmlRender extends HtmlRenderAttachment {
+  /** The message that carries the page. */
+  readonly messageId: MessageId;
+}
+
+export interface TimelineEntryRow {
+  readonly kind: "entry";
+  readonly id: string;
+  readonly entry: TimelineEntry;
+  /**
+   * On a turn's settled reply: the pages the turn published above it, which
+   * the reply lists at its foot.
+   */
+  readonly turnHtmlRenders?: ReadonlyArray<TurnHtmlRender>;
+}
+
+export type ThreadTimelineRow = TimelineEntryRow | ActivityFold;
 
 function firstLine(value: string | undefined): string | null {
   if (!value) return null;
@@ -78,6 +103,32 @@ function elapsedMs(startIso: string, endIso: string): number | null {
 }
 
 /**
+ * A turn's HTML renders and its reply, by the timeline rules every client
+ * shares (`@ryco/client-runtime/state/session`): the pages read first and the
+ * reply after them.
+ */
+function placeHtmlRenders(entries: ReadonlyArray<TimelineEntry>, runningTurnId: string | null) {
+  const replyIds = deriveTerminalAssistantMessageIds(entries);
+  const placed = placeRepliesAfterHtmlRenders(entries, replyIds, { runningTurnId });
+  const rendersByTurn = collectTurnHtmlRenders(placed);
+  return {
+    entries: placed,
+    /** The entry as a turn's reply with the pages the turn published above it. */
+    replyUnderPages: (
+      entry: TimelineEntry,
+    ):
+      | { readonly message: ChatMessage; readonly pages: ReadonlyArray<TurnHtmlRender> }
+      | undefined => {
+      if (entry.kind !== "message") return undefined;
+      const { message } = entry;
+      if (!message.turnId || !replyIds.has(message.id)) return undefined;
+      const pages = rendersByTurn.get(message.turnId);
+      return pages === undefined ? undefined : { message, pages };
+    },
+  };
+}
+
+/**
  * Groups CONSECUTIVE work entries. Consecutive matters: a turn whose activity
  * is interrupted by an assistant message produces two folds, which is what the
  * user saw happen.
@@ -93,6 +144,7 @@ export function buildThreadTimelineRows(input: {
   readonly now: string;
 }): ReadonlyArray<ThreadTimelineRow> {
   const rows: ThreadTimelineRow[] = [];
+  const placement = placeHtmlRenders(input.entries, input.runningTurnId);
   let pending: WorkLogEntry[] = [];
 
   const flush = () => {
@@ -137,13 +189,25 @@ export function buildThreadTimelineRows(input: {
     });
   };
 
-  for (const entry of input.entries) {
+  for (const entry of placement.entries) {
     if (entry.kind === "work") {
       pending.push(entry.entry);
       continue;
     }
+    const reply = placement.replyUnderPages(entry);
+    // The page answered: a blank reply under it would be an empty bubble, and
+    // an unseen reply does not split the activity around it.
+    if (reply !== undefined && isBlankSettledReply(reply.message)) continue;
     flush();
-    rows.push({ kind: "entry", id: entry.id, entry });
+    // A settled reply lists the pages at its foot. Until then it waits: a
+    // streaming reply would carry the list down the screen as its text
+    // arrives, and while the turn runs, its latest finished message only
+    // stands in for the reply until the next one starts.
+    rows.push(
+      reply === undefined || reply.message.streaming || reply.message.turnId === input.runningTurnId
+        ? { kind: "entry", id: entry.id, entry }
+        : { kind: "entry", id: entry.id, entry, turnHtmlRenders: reply.pages },
+    );
   }
   flush();
 

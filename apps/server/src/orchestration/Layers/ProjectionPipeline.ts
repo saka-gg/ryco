@@ -6,6 +6,7 @@ import {
   type ChatAttachment,
   DEFAULT_AGENT_TOKEN_MODE,
   DEFAULT_PROJECT_METADATA_DIR,
+  type MessageId,
   type OrchestrationEvent,
   type OrchestrationEventType,
   ThreadId,
@@ -78,6 +79,7 @@ import {
 import { resolveEventPullRequestTerminalAt } from "../pullRequestTerminalAt.ts";
 import { projectionLineageColumns } from "../threadLineage.ts";
 import { turnStartEndedMessageId } from "../providerEffectIntents.ts";
+import { isAttachmentOnlyMessage } from "../turnReplyMessage.ts";
 
 export const ORCHESTRATION_PROJECTOR_NAMES = {
   projects: "projection.projects",
@@ -1839,6 +1841,35 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
       });
     });
 
+    /**
+     * The message a turn is keyed on once `message` is sent in it: the newest
+     * message, except that an attachment-only carrier never displaces a reply
+     * the turn already has (see `turnReplyMessage`).
+     */
+    const turnAssistantMessageAfter = (
+      turn: ProjectionTurn,
+      message: {
+        readonly messageId: MessageId;
+        readonly text: string;
+        readonly attachments?: ReadonlyArray<ChatAttachment> | undefined;
+        readonly streaming: boolean;
+      },
+    ) =>
+      Effect.gen(function* () {
+        const current = turn.assistantMessageId;
+        if (current === null || current === message.messageId || !isAttachmentOnlyMessage(message))
+          return message.messageId;
+        const reply = yield* projectionThreadMessageRepository.getByMessageId({
+          messageId: current,
+        });
+        return Option.isSome(reply) &&
+          reply.value.threadId === turn.threadId &&
+          reply.value.turnId === turn.turnId &&
+          !isAttachmentOnlyMessage({ ...reply.value, streaming: reply.value.isStreaming })
+          ? current
+          : message.messageId;
+      });
+
     const applyThreadTurnsProjection: ProjectorDefinition["apply"] = Effect.fn(
       "applyThreadTurnsProjection",
     )(function* (event, _attachmentSideEffects) {
@@ -1981,7 +2012,10 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           if (Option.isSome(existingTurn)) {
             yield* projectionTurnRepository.upsertByTurnId({
               ...existingTurn.value,
-              assistantMessageId: event.payload.messageId,
+              assistantMessageId: yield* turnAssistantMessageAfter(
+                existingTurn.value,
+                event.payload,
+              ),
               state: event.payload.streaming
                 ? existingTurn.value.state
                 : existingTurn.value.state === "interrupted"

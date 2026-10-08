@@ -123,6 +123,17 @@ export type AgentControlRequestId = typeof AgentControlRequestId.Type;
  * per-provider-runtime, in-memory, thread-bound, and revoked on runtime
  * teardown — none of that credential material appears in this contract.
  */
+/** Audit-safe target thread state captured at submission and used to reject stale approved plans. */
+export const AgentControlTargetThreadSnapshot = Schema.Struct({
+  threadId: ThreadId,
+  projectId: ProjectId,
+  runtimeMode: RuntimeMode,
+  envMode: ThreadEnvMode,
+  archived: Schema.Boolean,
+  activeTurnId: Schema.NullOr(TurnId),
+});
+export type AgentControlTargetThreadSnapshot = typeof AgentControlTargetThreadSnapshot.Type;
+
 export const AgentControlProviderSessionPrincipal = Schema.Struct({
   kind: Schema.Literal("provider-session"),
   threadId: ThreadId,
@@ -136,34 +147,28 @@ export const AgentControlProviderSessionPrincipal = Schema.Struct({
   originRuntimeMode: Schema.optional(RuntimeMode),
   originEnvMode: Schema.optional(ThreadEnvMode),
   /** Audit-safe target state used to reject stale approved plans. */
-  targetSnapshots: Schema.optional(
-    Schema.Array(
-      Schema.Struct({
-        threadId: ThreadId,
-        projectId: ProjectId,
-        runtimeMode: RuntimeMode,
-        envMode: ThreadEnvMode,
-        archived: Schema.Boolean,
-        activeTurnId: Schema.NullOr(TurnId),
-      }),
-    ),
-  ),
+  targetSnapshots: Schema.optional(Schema.Array(AgentControlTargetThreadSnapshot)),
 });
 export type AgentControlProviderSessionPrincipal = typeof AgentControlProviderSessionPrincipal.Type;
 
 /**
- * A separately paired local MCP client. Pairing, credential issuance, and
- * scope grants are owned by later PRs; the principal identity is defined
- * here so proposals persist a stable, audit-safe origin from day one.
+ * A separately paired local MCP client. It has no caller thread, so its
+ * privilege evidence is the integration's grant ceiling at submission.
  */
 export const AgentControlExternalIntegrationPrincipal = Schema.Struct({
   kind: Schema.Literal("external-integration"),
   integrationId: AgentControlIntegrationId,
   label: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(120))),
-  /** Immutable execution-policy evidence captured when the proposal is created. */
+  /**
+   * Immutable execution-policy evidence captured when the proposal is created:
+   * the task's own policy for created threads, or the integration's runtime
+   * and checkout ceiling for thread control.
+   */
   projectId: Schema.optional(ProjectId),
   runtimeMode: Schema.optional(RuntimeMode),
   envMode: Schema.optional(ThreadEnvMode),
+  /** Audit-safe target state for thread control, used to reject stale approved plans. */
+  targetSnapshots: Schema.optional(Schema.Array(AgentControlTargetThreadSnapshot)),
 });
 export type AgentControlExternalIntegrationPrincipal =
   typeof AgentControlExternalIntegrationPrincipal.Type;
@@ -202,6 +207,8 @@ export type AgentControlCapability = typeof AgentControlCapability.Type;
 export const AGENT_CONTROL_CAPABILITIES = {
   read: AgentControlCapability.make("read"),
   attachFile: AgentControlCapability.make("files.attach"),
+  /** Preview HTML pages in Ryco's headless browser and show them inline in the caller's thread. */
+  renderHtml: AgentControlCapability.make("html.render"),
   createThreads: AgentControlCapability.make("threads.create"),
   sendMessage: AgentControlCapability.make("threads.send-message"),
   interruptThread: AgentControlCapability.make("threads.interrupt"),
@@ -230,6 +237,12 @@ export const AGENT_CONTROL_CAPABILITIES = {
   externalManageAutomations: AgentControlCapability.make("external.automations.manage"),
   externalReadActivity: AgentControlCapability.make("external.activity.read"),
   externalReadDiagnostics: AgentControlCapability.make("external.diagnostics.read"),
+  externalReadThreads: AgentControlCapability.make("external.threads.read"),
+  externalReadReviews: AgentControlCapability.make("external.reviews.read"),
+  externalReadFiles: AgentControlCapability.make("external.files.read"),
+  externalReadWorkspaces: AgentControlCapability.make("external.workspaces.read"),
+  externalControlThreads: AgentControlCapability.make("external.threads.control"),
+  externalManageWorkspaces: AgentControlCapability.make("external.workspaces.manage"),
 } as const;
 
 // ── Action plans ──────────────────────────────────────────────────────
@@ -2393,6 +2406,23 @@ export const AGENT_CONTROL_EXTERNAL_MCP_TOOLS = {
   orchestrationEvents: "ryco_orchestration_events",
   providerRuntimeEvents: "ryco_provider_runtime_events",
   diagnosticsSummary: "ryco_diagnostics_summary",
+  readControlRequest: "ryco_read_control_request",
+  waitForControlRequest: "ryco_wait_for_control_request",
+  listThreads: "ryco_list_threads",
+  readThread: "ryco_read_thread",
+  searchThreads: "ryco_search_threads",
+  waitThreads: "ryco_wait_threads",
+  inspectThread: "ryco_inspect_thread",
+  readThreadDiff: "ryco_read_thread_diff",
+  readThreadFile: "ryco_read_thread_file",
+  readProject: "ryco_read_project",
+  listWorkspaces: "ryco_list_workspaces",
+  readWorkspace: "ryco_read_workspace",
+  sendMessage: "ryco_send_message",
+  interruptThread: "ryco_interrupt_thread",
+  updateThread: "ryco_update_thread",
+  planWorkspace: "ryco_plan_workspace_lifecycle",
+  proposeWorkspace: "ryco_propose_workspace_lifecycle",
 } as const;
 export type AgentControlExternalMcpToolName =
   (typeof AGENT_CONTROL_EXTERNAL_MCP_TOOLS)[keyof typeof AGENT_CONTROL_EXTERNAL_MCP_TOOLS];

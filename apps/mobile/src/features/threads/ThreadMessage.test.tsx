@@ -7,9 +7,14 @@ import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 // row that hands the preview URL to the platform share sheet, video file
 // attachments render an inline native video row that keeps a share affordance,
 // image attachments reserve an aspect-ratio slot only when the server probed
-// dimensions, while unknown attachments stay inert.
+// dimensions, while unknown attachments stay inert. An assistant's HTML render
+// shows as the page itself (ThreadHtmlRender) instead of a share row, and a
+// turn's settled reply lists the turn's pages at its foot (HtmlRenderCards).
+// A message validates its render metadata once, not on every re-render.
 
 const hoisted = vi.hoisted(() => ({
+  /** The one `useMemo` slot ThreadMessage has, kept across renders like React keeps it. */
+  memo: null as null | { deps: ReadonlyArray<unknown>; value: unknown },
   share: vi.fn(async (_input: unknown) => undefined),
   player: {
     replace: vi.fn(),
@@ -21,6 +26,29 @@ const hoisted = vi.hoisted(() => ({
   },
 }));
 
+vi.mock("react", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("react")>();
+  return {
+    ...actual,
+    useMemo: <T,>(factory: () => T, deps: ReadonlyArray<unknown>): T => {
+      const kept = hoisted.memo;
+      if (
+        kept !== null &&
+        kept.deps.length === deps.length &&
+        kept.deps.every((dep, index) => Object.is(dep, deps[index]))
+      ) {
+        return kept.value as T;
+      }
+      const value = factory();
+      hoisted.memo = { deps, value };
+      return value;
+    },
+  };
+});
+vi.mock("@ryco/shared/htmlRender", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@ryco/shared/htmlRender")>();
+  return { ...actual, htmlRenderOfAttachment: vi.fn(actual.htmlRenderOfAttachment) };
+});
 vi.mock("react-native", () => ({
   Image: "Image",
   Pressable: "Pressable",
@@ -52,9 +80,17 @@ vi.mock("../../native/SelectableMarkdownText", () => ({
   hasNativeSelectableMarkdownText: () => false,
   SelectableMarkdownText: "SelectableMarkdownText",
 }));
+vi.mock("./ThreadHtmlRender", () => ({ ThreadHtmlRender: "ThreadHtmlRender" }));
+vi.mock("./HtmlRenderCards", () => ({ HtmlRenderCards: "HtmlRenderCards" }));
 
 import { ThreadMessage } from "./ThreadMessage";
 import type { ChatAttachment, ChatMessage } from "@ryco/client-runtime/state/threads";
+import { EnvironmentId, MessageId, ThreadId } from "@ryco/contracts";
+import { htmlRenderOfAttachment } from "@ryco/shared/htmlRender";
+import type { TurnHtmlRender } from "./threadActivityFold";
+
+const environmentId = EnvironmentId.make("env-1");
+const threadId = ThreadId.make("thread-1");
 
 function isElement(value: unknown): value is ReactElement {
   return (
@@ -103,23 +139,36 @@ function pressableLabel(pressable: ReactElement): string | undefined {
   return (pressable.props as { accessibilityLabel?: string }).accessibilityLabel;
 }
 
-function renderMessage(attachments: ChatAttachment[]): ReactElement {
+function renderMessage(
+  attachments: ChatAttachment[],
+  overrides: Partial<Pick<ChatMessage, "role" | "text">> = {},
+): ReactElement {
   return ThreadMessage({
+    environmentId,
+    threadId,
     message: {
       id: "m-1",
       role: "user",
       text: "here",
       attachments,
       streaming: false,
+      ...overrides,
     } as unknown as ChatMessage,
   });
 }
+
+beforeEach(() => {
+  hoisted.memo = null;
+  vi.mocked(htmlRenderOfAttachment).mockClear();
+});
 
 describe("ThreadMessage attachment rows", () => {
   it("shows the sent timestamp and copies the original user text", () => {
     const text = "  Keep this text\nexactly as sent.  ";
     const createdAt = "2026-09-12T15:00:00.000Z";
     const tree = ThreadMessage({
+      environmentId,
+      threadId,
       message: {
         role: "user",
         text,
@@ -146,6 +195,8 @@ describe("ThreadMessage attachment rows", () => {
 
   it("does not add user-message controls to assistant messages", () => {
     const tree = ThreadMessage({
+      environmentId,
+      threadId,
       message: {
         role: "assistant",
         text: "Reply",
@@ -375,5 +426,191 @@ describe("ThreadMessage attachment rows", () => {
     ]);
     expect(collectElements(tree, (element) => element.type === "VideoView")).toHaveLength(0);
     expect(findPressables(tree).find((p) => pressableLabel(p) === "Open report.pdf")).toBeDefined();
+  });
+});
+
+describe("ThreadMessage HTML renders", () => {
+  const render: ChatAttachment = {
+    type: "file",
+    id: "thread-1-abc-html",
+    name: "Bundle size.html",
+    mimeType: "text/html",
+    sizeBytes: 4096,
+    previewUrl: "http://node.local/attachments/thread-1-abc-html",
+    htmlRender: { title: "Bundle size", height: 420 },
+  };
+
+  beforeEach(() => {
+    hoisted.share.mockClear();
+  });
+
+  it("shows an assistant's render as the page, not a share row", () => {
+    const tree = renderMessage([render], { role: "assistant", text: " " });
+    const renders = collectElements(tree, (element) => element.type === "ThreadHtmlRender");
+    expect(renders).toHaveLength(1);
+    expect(renders[0]?.props).toMatchObject({
+      environmentId,
+      threadId,
+      messageId: "m-1",
+      attachment: render,
+      htmlRender: { title: "Bundle size", height: 420 },
+    });
+    expect(findPressables(tree)).toHaveLength(0);
+    expect(collectElements(tree, (element) => element.type === "ScrollView")).toHaveLength(0);
+    expect(hoisted.share).not.toHaveBeenCalled();
+  });
+
+  it("drops the placeholder body of an attachment delivery", () => {
+    const tree = renderMessage([render], { role: "assistant", text: " " });
+    expect(collectElements(tree, (element) => element.type === "AppText")).toHaveLength(0);
+  });
+
+  it("keeps a real reply next to the render", () => {
+    const tree = renderMessage([render], { role: "assistant", text: "Here it is" });
+    const texts = collectElements(tree, (element) => element.type === "AppText");
+    expect(
+      texts.some((text) => (text.props as { children?: unknown }).children === "Here it is"),
+    ).toBe(true);
+    expect(collectElements(tree, (element) => element.type === "ThreadHtmlRender")).toHaveLength(1);
+  });
+
+  it("keeps the other attachments of the message in their own rows", () => {
+    const tree = renderMessage(
+      [
+        render,
+        {
+          type: "file",
+          id: "att-1",
+          name: "report.pdf",
+          mimeType: "application/pdf",
+          sizeBytes: 2048,
+          previewUrl: "http://node.local/attachments/att-1",
+        },
+      ],
+      { role: "assistant", text: " " },
+    );
+    expect(collectElements(tree, (element) => element.type === "ThreadHtmlRender")).toHaveLength(1);
+    expect(findPressables(tree).map(pressableLabel)).toEqual(["Open report.pdf"]);
+  });
+
+  it("leaves an HTML file without render metadata as a file row", () => {
+    const tree = renderMessage(
+      [
+        {
+          type: "file",
+          id: "att-4",
+          name: "page.html",
+          mimeType: "text/html",
+          sizeBytes: 4096,
+          previewUrl: "http://node.local/attachments/att-4",
+        },
+      ],
+      { role: "assistant", text: " " },
+    );
+    expect(collectElements(tree, (element) => element.type === "ThreadHtmlRender")).toHaveLength(0);
+    expect(findPressables(tree).map(pressableLabel)).toEqual(["Open page.html"]);
+  });
+
+  it("validates a render's metadata once, and not again while the message is unchanged", () => {
+    // Fresh objects: reads are remembered per attachment object across tests.
+    const page = { ...render } as ChatAttachment;
+    const pdf: ChatAttachment = {
+      type: "file",
+      id: "att-1",
+      name: "report.pdf",
+      mimeType: "application/pdf",
+      sizeBytes: 2048,
+      previewUrl: "http://node.local/attachments/att-1",
+    };
+    const message = {
+      id: "m-1",
+      role: "assistant",
+      text: " ",
+      attachments: [page, pdf],
+      streaming: false,
+    } as unknown as ChatMessage;
+    const validationsOf = (attachment: ChatAttachment) =>
+      vi.mocked(htmlRenderOfAttachment).mock.calls.filter(([input]) => input === attachment).length;
+
+    ThreadMessage({ environmentId, threadId, message });
+    expect(validationsOf(page)).toBe(1);
+    expect(validationsOf(pdf)).toBe(1);
+
+    // The feed re-renders the row as another message streams.
+    const tree = ThreadMessage({ environmentId, threadId, message });
+    expect(validationsOf(page)).toBe(1);
+    expect(validationsOf(pdf)).toBe(1);
+    expect(collectElements(tree, (element) => element.type === "ThreadHtmlRender")).toHaveLength(1);
+    expect(findPressables(tree).map(pressableLabel)).toEqual(["Open report.pdf"]);
+  });
+
+  it("never runs a page attached to a user message", () => {
+    const tree = renderMessage([render], { role: "user", text: "look" });
+    expect(collectElements(tree, (element) => element.type === "ThreadHtmlRender")).toHaveLength(0);
+    expect(findPressables(tree).map(pressableLabel)).toEqual(["Open Bundle size.html"]);
+  });
+});
+
+describe("ThreadMessage page cards", () => {
+  const turnHtmlRenders: ReadonlyArray<TurnHtmlRender> = [
+    {
+      messageId: MessageId.make("render-1"),
+      attachment: {
+        type: "file",
+        id: "thread-1-abc-html",
+        name: "Bundle size.html",
+        mimeType: "text/html",
+        sizeBytes: 4096,
+        htmlRender: { title: "Bundle size", height: 420 },
+      },
+      htmlRender: { title: "Bundle size", height: 420 },
+    },
+  ];
+
+  function renderReply(role: "assistant" | "user", renders = turnHtmlRenders) {
+    return ThreadMessage({
+      environmentId,
+      threadId,
+      message: { id: "m-1", role, text: "Here is the breakdown.", streaming: false } as never,
+      turnHtmlRenders: renders,
+    });
+  }
+
+  it("lists the turn's pages under the reply's text", () => {
+    const tree = renderReply("assistant");
+    const cards = collectElements(tree, (element) => element.type === "HtmlRenderCards");
+    expect(cards).toHaveLength(1);
+    expect(cards[0]?.props).toEqual({ environmentId, threadId, renders: turnHtmlRenders });
+    // The cards close the reply: they come after its text.
+    const order: string[] = [];
+    walkTree(tree, (element) => {
+      if (element.type === "HtmlRenderCards") order.push("cards");
+      if ((element.props as { children?: unknown }).children === "Here is the breakdown.") {
+        order.push("text");
+      }
+    });
+    expect(order).toEqual(["text", "cards"]);
+  });
+
+  it("lists nothing without pages, and never under a user's message", () => {
+    expect(
+      collectElements(
+        renderReply("assistant", []),
+        (element) => element.type === "HtmlRenderCards",
+      ),
+    ).toHaveLength(0);
+    expect(
+      collectElements(
+        ThreadMessage({
+          environmentId,
+          threadId,
+          message: { id: "m-1", role: "assistant", text: "Hi", streaming: false } as never,
+        }),
+        (element) => element.type === "HtmlRenderCards",
+      ),
+    ).toHaveLength(0);
+    expect(
+      collectElements(renderReply("user"), (element) => element.type === "HtmlRenderCards"),
+    ).toHaveLength(0);
   });
 });

@@ -62,11 +62,18 @@ function shouldSetSecureSessionCookie(
  * its own origin while proxying the request with the backend's host. A missing
  * `Origin` means a non-browser caller — the `ryco hub` CLI authenticates with a
  * bearer token and sends none — so absence is allowed rather than treated as
- * suspect.
+ * suspect. `Origin: null` passes here for bearer callers; a cookie-authenticated
+ * mutation from an opaque origin is refused by `ServerAuth` itself.
  */
 export const rejectCrossOriginMutation = Effect.gen(function* () {
   const request = yield* HttpServerRequest.HttpServerRequest;
   const config = yield* ServerConfig;
+  // Fetch Metadata is authoritative where a browser sends it. A sandboxed
+  // (opaque-origin) document is always cross-site, even when its beacon
+  // carries the embedding page's Origin.
+  if (request.headers["sec-fetch-site"]?.trim().toLowerCase() === "cross-site") {
+    return yield* new AuthError({ message: "Invalid request origin.", status: 403 });
+  }
   const origin = request.headers.origin;
   if (origin === undefined || origin === "" || origin === "null") return;
   const host = request.headers.host;

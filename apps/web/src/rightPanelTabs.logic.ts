@@ -5,6 +5,7 @@ import {
   buildOpenBrowserSearch,
   buildOpenFilesSearch,
   buildOpenPullRequestSearch,
+  buildOpenRenderSearch,
   buildOpenReviewSearch,
   buildOpenSimulatorSearch,
   buildOpenTerminalSearch,
@@ -19,8 +20,11 @@ import {
  * panel, so a new tab kind is one entry in the fallback order.
  */
 
-/** Panel modes that own exactly one tab (agent transcripts are keyed separately). */
-export type RightPanelTabMode = Exclude<RightPanelMode, "agent">;
+/**
+ * Panel modes that own exactly one tab. Agent transcripts are keyed
+ * separately, and so is the page tab: it shows one HTML render at a time.
+ */
+export type RightPanelTabMode = Exclude<RightPanelMode, "agent" | "render">;
 
 /** Fallback order when the active tab closes or the panel reopens without a remembered tab. */
 export const RIGHT_PANEL_TAB_FALLBACK_ORDER: ReadonlyArray<RightPanelTabMode> = [
@@ -45,6 +49,8 @@ export interface RightPanelOpenedTabs {
   readonly scopeKey: string | null;
   readonly modes: ReadonlyArray<RightPanelTabMode>;
   readonly agentKeys: ReadonlyArray<string>;
+  /** The page tab's render key, while the page tab is open. */
+  readonly renderKey?: string | null | undefined;
 }
 
 /** What the route currently shows, for the scope it belongs to. */
@@ -52,16 +58,19 @@ export interface RightPanelRouteTabs {
   readonly scopeKey: string | null;
   readonly mode: RightPanelMode | null;
   readonly activeAgentKey: string | null;
+  /** The render the route's page tab shows. */
+  readonly activeRenderKey?: string | null | undefined;
 }
 
-/** Where opening or falling back lands: a tab, an agent transcript, or the launcher. */
+/** Where opening or falling back lands: a tab, a transcript, a page, or the launcher. */
 export type RightPanelTarget =
   | { readonly kind: "tab"; readonly mode: RightPanelTabMode }
   | { readonly kind: "agent"; readonly agentKey: string }
+  | { readonly kind: "render"; readonly renderKey: string }
   | { readonly kind: "launcher" };
 
 export function isRightPanelTabMode(mode: RightPanelMode | null): mode is RightPanelTabMode {
-  return mode !== null && mode !== "agent";
+  return mode !== null && mode !== "agent" && mode !== "render";
 }
 
 function orderTabModes(modes: Iterable<RightPanelTabMode>): RightPanelTabMode[] {
@@ -74,8 +83,14 @@ function sameOpenedTabs(left: RightPanelOpenedTabs, right: RightPanelOpenedTabs)
     left.scopeKey === right.scopeKey &&
     left.modes.length === right.modes.length &&
     left.modes.every((mode, index) => mode === right.modes[index]) &&
-    left.agentKeys === right.agentKeys
+    left.agentKeys === right.agentKeys &&
+    (left.renderKey ?? null) === (right.renderKey ?? null)
   );
+}
+
+/** The render the route's page tab shows, if it shows one. */
+function routeRenderKey(route: RightPanelRouteTabs): string | null {
+  return route.mode === "render" ? (route.activeRenderKey ?? null) : null;
 }
 
 /** Tabs implied by the URL alone: whatever it currently shows. */
@@ -84,6 +99,7 @@ export function openedTabsFromRoute(route: RightPanelRouteTabs): RightPanelOpene
     scopeKey: route.scopeKey,
     modes: isRightPanelTabMode(route.mode) ? [route.mode] : [],
     agentKeys: route.activeAgentKey ? [route.activeAgentKey] : [],
+    renderKey: routeRenderKey(route),
   };
 }
 
@@ -99,7 +115,11 @@ export function resolveOpenedTabs(
 export function visibleRightPanelTabs(
   opened: RightPanelOpenedTabs,
   route: RightPanelRouteTabs,
-): { readonly modes: RightPanelTabMode[]; readonly agentKeys: ReadonlyArray<string> } {
+): {
+  readonly modes: RightPanelTabMode[];
+  readonly agentKeys: ReadonlyArray<string>;
+  readonly renderKey: string | null;
+} {
   const modes = orderTabModes([
     ...opened.modes,
     ...(isRightPanelTabMode(route.mode) ? [route.mode] : []),
@@ -108,7 +128,7 @@ export function visibleRightPanelTabs(
     route.activeAgentKey && !opened.agentKeys.includes(route.activeAgentKey)
       ? [...opened.agentKeys, route.activeAgentKey]
       : opened.agentKeys;
-  return { modes, agentKeys };
+  return { modes, agentKeys, renderKey: routeRenderKey(route) ?? opened.renderKey ?? null };
 }
 
 /** Remember a tab once it has been shown (the route made it active). */
@@ -122,6 +142,7 @@ export function markRightPanelTabOpened(
     scopeKey: route.scopeKey,
     modes: isRightPanelTabMode(mode) ? orderTabModes([...base.modes, mode]) : base.modes,
     agentKeys: base.agentKeys,
+    renderKey: base.renderKey ?? null,
   };
   return sameOpenedTabs(state, next) ? state : next;
 }
@@ -135,6 +156,17 @@ export function rememberActiveAgentTab(
   const base = resolveOpenedTabs(state, route);
   if (base.agentKeys.includes(route.activeAgentKey)) return base;
   return { ...base, agentKeys: [...base.agentKeys, route.activeAgentKey] };
+}
+
+/** Remember the page the route's page tab shows; it replaces any earlier page. */
+export function rememberActiveRenderTab(
+  state: RightPanelOpenedTabs,
+  route: RightPanelRouteTabs,
+): RightPanelOpenedTabs {
+  const renderKey = routeRenderKey(route);
+  if (!route.scopeKey || !renderKey) return state;
+  const base = resolveOpenedTabs(state, route);
+  return (base.renderKey ?? null) === renderKey ? base : { ...base, renderKey };
 }
 
 function firstOpenedTab(modes: ReadonlyArray<RightPanelTabMode>): RightPanelTarget | null {
@@ -151,9 +183,27 @@ export function closeRightPanelTab(
   const base = resolveOpenedTabs(state, route);
   const visible = visibleRightPanelTabs(base, route);
 
+  if (input.mode === "render") {
+    const next = {
+      scopeKey: route.scopeKey,
+      modes: base.modes,
+      agentKeys: base.agentKeys,
+      renderKey: null,
+    };
+    return {
+      next,
+      target: route.mode === "render" ? (firstOpenedTab(base.modes) ?? { kind: "launcher" }) : null,
+    };
+  }
+
   if (input.mode === "agent") {
     const agentKeys = visible.agentKeys.filter((key) => key !== input.agentKey);
-    const next = { scopeKey: route.scopeKey, modes: base.modes, agentKeys };
+    const next = {
+      scopeKey: route.scopeKey,
+      modes: base.modes,
+      agentKeys,
+      renderKey: visible.renderKey,
+    };
     if (route.mode !== "agent" || route.activeAgentKey !== input.agentKey) {
       return { next, target: null };
     }
@@ -167,7 +217,12 @@ export function closeRightPanelTab(
   }
 
   const modes = visible.modes.filter((mode) => mode !== input.mode);
-  const next = { scopeKey: route.scopeKey, modes, agentKeys: base.agentKeys };
+  const next = {
+    scopeKey: route.scopeKey,
+    modes,
+    agentKeys: base.agentKeys,
+    renderKey: visible.renderKey,
+  };
   return {
     next: sameOpenedTabs(state, next) ? state : next,
     target: route.mode === input.mode ? (firstOpenedTab(modes) ?? { kind: "launcher" }) : null,
@@ -181,15 +236,21 @@ export function resolveRightPanelReopenTarget(
   lastOpenedMode: RightPanelMode,
 ): RightPanelTarget {
   const base = resolveOpenedTabs(state, route);
-  const lastAgentKey = visibleRightPanelTabs(base, route).agentKeys.at(-1);
+  const visible = visibleRightPanelTabs(base, route);
+  const lastAgentKey = visible.agentKeys.at(-1);
+  const page: RightPanelTarget | null = visible.renderKey
+    ? { kind: "render", renderKey: visible.renderKey }
+    : null;
   if (lastOpenedMode === "agent" && lastAgentKey) {
     return { kind: "agent", agentKey: lastAgentKey };
   }
+  if (lastOpenedMode === "render" && page) return page;
   if (isRightPanelTabMode(lastOpenedMode) && base.modes.includes(lastOpenedMode)) {
     return { kind: "tab", mode: lastOpenedMode };
   }
   return (
     firstOpenedTab(base.modes) ??
+    page ??
     (lastAgentKey ? { kind: "agent", agentKey: lastAgentKey } : { kind: "launcher" })
   );
 }
@@ -203,7 +264,13 @@ export function shouldMountRightPanelContent(input: {
   readonly phone: boolean;
 }): boolean {
   if (input.open || input.agentKeys.length > 0) return true;
-  if (!input.phone) return input.route.mode !== null || input.opened.modes.length > 0;
+  if (!input.phone) {
+    return (
+      input.route.mode !== null ||
+      input.opened.modes.length > 0 ||
+      (input.opened.renderKey ?? null) !== null
+    );
+  }
   return (
     (input.route.mode !== null && PHONE_RIGHT_PANEL_TAB_MODES.has(input.route.mode)) ||
     input.route.mode === "agent" ||
@@ -242,6 +309,8 @@ export function buildRightPanelTargetSearch<T extends Record<string, unknown>>(
       return buildOpenRightPanelTabSearch(previous, target.mode);
     case "agent":
       return buildOpenAgentSearch(previous, target.agentKey);
+    case "render":
+      return buildOpenRenderSearch(previous, target.renderKey);
     case "launcher":
       return buildOpenWorkspaceSearch(previous);
   }

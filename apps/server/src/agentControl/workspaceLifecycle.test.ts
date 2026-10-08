@@ -347,6 +347,17 @@ describe("governed workspace preflight", () => {
     expect(page.workspaces).toHaveLength(1);
     expect(page.nextCursor).not.toBeNull();
   });
+  it("reads without a caller thread for standalone integrations, marking nothing current", async () => {
+    const f = fixture();
+    const main = await f.run((s) => s.read(projectId, "main", null));
+    expect(main.current).toBe(false);
+    expect(main.main).toBe(true);
+    const listed = await f.run((s) => s.list(projectId, null));
+    expect(listed.workspaces.every((w) => !w.current)).toBe(true);
+    await expect(f.run((s) => s.read(ProjectId.make("other"), "topic", null))).rejects.toThrow(
+      "scope",
+    );
+  });
   it("requires explicit cascade and retained branches for restore; never authorizes itself", async () => {
     const f = fixture();
     const plan = await f.plan();

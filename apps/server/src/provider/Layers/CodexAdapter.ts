@@ -66,6 +66,10 @@ import {
   type AttachmentPathLineEntry,
 } from "@ryco/shared/attachmentPrompt";
 import { formatSourceControlContextsForAgent } from "@ryco/shared/sourceControlContextFormatter";
+import {
+  resolveHtmlRenderToolPresentation,
+  withoutHtmlRenderMarkup,
+} from "@ryco/shared/htmlRenderToolPresentation";
 
 import {
   ProviderAdapterRequestError,
@@ -96,6 +100,7 @@ import {
   type CodexSessionRuntimeShape,
 } from "./CodexSessionRuntime.ts";
 import {
+  agentControlHostContext,
   installAgentControlNativeHttp,
   type AgentControlProviderBridge,
   type AgentControlRuntimeLease,
@@ -122,16 +127,12 @@ export type CodexAgentControlBridge = AgentControlProviderBridge;
  * The revocation sentence keeps the note truthful for the runtime's whole
  * lifetime: instructions are fixed at session start, but the lease can be
  * revoked mid-session (feature disabled, listener stopped), after which
- * every request is rejected as unauthorized.
+ * every request is rejected as unauthorized. Built on the shared host
+ * context so Codex hears the same guidance as every other provider.
  */
 export const CODEX_AGENT_CONTROL_INSTRUCTIONS =
-  "Ryco Agent Control tools (ryco_*) are available through the " +
-  `'${CODEX_AGENT_CONTROL_SERVER_NAME}' MCP server on a private local connection. They can ` +
-  "inspect Ryco projects, threads, transcripts, and request status. During an active turn, " +
-  "the four thread-action tools create immutable requests that require user approval in Ryco; " +
-  "they never mutate immediately. If the server is " +
-  "unreachable or rejects requests as unauthorized, Ryco has revoked this session's " +
-  "access — treat the tools as unavailable instead of retrying.";
+  `${agentControlHostContext(true)} The server is '${CODEX_AGENT_CONTROL_SERVER_NAME}' on a ` +
+  "private local connection; if it becomes unreachable, Ryco has revoked this session's access.";
 
 export interface CodexAdapterLiveOptions {
   readonly instanceId?: ProviderInstanceId;
@@ -618,6 +619,27 @@ function runtimeEventBase(
   };
 }
 
+/**
+ * A call to one of Ryco's HTML tools: shown by page title or viewport, and
+ * carried without the page markup its arguments hold.
+ */
+function htmlRenderToolItem(
+  payload: { readonly item: CodexLifecycleItem } & object,
+): { readonly title: string; readonly detail?: string; readonly payload: unknown } | undefined {
+  const { item } = payload;
+  if (item.type !== "mcpToolCall") return undefined;
+  const presentation = resolveHtmlRenderToolPresentation({
+    toolName: item.tool,
+    serverName: item.server,
+    input: item.arguments,
+  });
+  if (!presentation) return undefined;
+  return {
+    ...presentation,
+    payload: { ...payload, item: { ...item, arguments: withoutHtmlRenderMarkup(item.arguments) } },
+  };
+}
+
 function mapItemLifecycle(
   event: ProviderEvent,
   canonicalThreadId: ThreadId,
@@ -635,7 +657,9 @@ function mapItemLifecycle(
     return undefined;
   }
 
-  const detail = itemDetail(item);
+  const htmlRender = htmlRenderToolItem(payload);
+  const title = htmlRender?.title ?? itemTitle(itemType);
+  const detail = htmlRender ? htmlRender.detail : itemDetail(item);
   const status =
     lifecycle === "item.started"
       ? "inProgress"
@@ -649,9 +673,13 @@ function mapItemLifecycle(
     payload: {
       itemType,
       ...(status ? { status } : {}),
-      ...(itemTitle(itemType) ? { title: itemTitle(itemType) } : {}),
+      ...(title ? { title } : {}),
       ...(detail ? { detail } : {}),
-      ...(event.payload !== undefined ? { data: event.payload } : {}),
+      ...(htmlRender
+        ? { data: htmlRender.payload }
+        : event.payload !== undefined
+          ? { data: event.payload }
+          : {}),
     },
   };
 }
