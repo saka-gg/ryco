@@ -2,7 +2,7 @@ import type { FileDiffMetadata } from "@pierre/diffs/react";
 import type { EnvironmentId } from "@ryco/contracts";
 import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
-import { readEnvironmentApi } from "../environmentApi";
+import { ensureEnvironmentApi } from "../environmentApi";
 import { errorMessage } from "../lib/errorMessage";
 import { LRUCache } from "../lib/lruCache";
 import { cn } from "~/lib/utils";
@@ -39,16 +39,16 @@ function readDiffImage(
   if (settled) return Promise.resolve(settled);
   const pending = pendingImages.get(key);
   if (pending) return pending;
-  const api = readEnvironmentApi(environmentId);
-  if (!api) return Promise.resolve({ status: "unavailable", reason: "Environment is offline." });
-
-  const request = (
-    source.kind === "blob"
-      ? api.vcs.readImageBlob({ cwd, oid: source.oid })
-      : api.projects
-          .readFileBinary({ cwd, relativePath: source.relativePath })
-          .then((result) => ({ kind: "image" as const, ...result }))
-  )
+  // The review panel reaches its environment through one accessor (as blame and staging do).
+  const request = Promise.resolve()
+    .then(() => {
+      const api = ensureEnvironmentApi(environmentId);
+      return source.kind === "blob"
+        ? api.vcs.readImageBlob({ cwd, oid: source.oid })
+        : api.projects
+            .readFileBinary({ cwd, relativePath: source.relativePath })
+            .then((result) => ({ kind: "image" as const, ...result }));
+    })
     .then((result): SettledDiffImage => {
       const image: SettledDiffImage =
         result.kind === "image"
