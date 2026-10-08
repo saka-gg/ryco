@@ -62,13 +62,17 @@ interface ChatHeaderProps {
   onDeleteProjectScript: (scriptId: string) => Promise<void>;
 }
 
+/**
+ * "Open in" needs a folder on this machine. The project's name is no proxy: an
+ * unsent chat draft is already labelled "No project" but has no folder yet.
+ */
 export function shouldShowOpenInPicker(input: {
-  readonly activeProjectName: string | undefined;
+  readonly openInCwd: string | null;
   readonly activeThreadEnvironmentId: EnvironmentId;
   readonly primaryEnvironmentId: EnvironmentId | null;
 }): boolean {
   return (
-    Boolean(input.activeProjectName) &&
+    input.openInCwd !== null &&
     input.primaryEnvironmentId !== null &&
     input.activeThreadEnvironmentId === input.primaryEnvironmentId
   );
@@ -79,7 +83,7 @@ export const ChatHeader = memo(function ChatHeader(props: ChatHeaderProps) {
   useDevPropDiff(props as unknown as Record<string, unknown>, "ChatHeader");
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const showOpenInPicker = shouldShowOpenInPicker({
-    activeProjectName: props.activeProjectName,
+    openInCwd: props.openInCwd,
     activeThreadEnvironmentId: props.activeThreadEnvironmentId,
     primaryEnvironmentId,
   });

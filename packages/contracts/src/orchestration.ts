@@ -1296,6 +1296,12 @@ export const OrchestrationThreadWindowSnapshot = Schema.Struct({
   snapshotSequence: NonNegativeInt,
   thread: OrchestrationThread,
   history: OrchestrationThreadHistoryState,
+  /**
+   * The directory the thread's next turn runs in (its worktree, else its project root), as the
+   * server resolves it when starting a provider session. Absent from older servers and when the
+   * thread has no resolvable project.
+   */
+  workspaceCwd: Schema.optional(TrimmedNonEmptyString),
 });
 export type OrchestrationThreadWindowSnapshot = typeof OrchestrationThreadWindowSnapshot.Type;
 
@@ -1652,7 +1658,12 @@ export const DelegationReturnGuard = Schema.Struct({
 });
 export const ClaudeResumeGuard = Schema.Struct({
   requireReady: Schema.Boolean,
-  runtimeSessionId: RuntimeSessionId,
+  /**
+   * The runtime the review saw. Null when the session had none (it was stopped): the send is
+   * then accepted only while still no runtime is bound, so the review stays current until the
+   * next turn starts one.
+   */
+  runtimeSessionId: Schema.NullOr(RuntimeSessionId),
   latestTurnId: Schema.NullOr(TurnId),
   modelSelection: ModelSelection,
 });
@@ -2048,11 +2059,25 @@ export const ClientOrchestrationCommand = Schema.Union([
 ]);
 export type ClientOrchestrationCommand = typeof ClientOrchestrationCommand.Type;
 
+/**
+ * The runtime a provider-originated session update comes from. The update applies only while
+ * the thread's session is still bound to exactly this provider instance and runtime (null: none),
+ * so a late lifecycle event of a replaced runtime can never overwrite its successor, whatever
+ * order the two writes reach the engine in.
+ */
+export const ThreadSessionSetExpectedRuntime = Schema.Struct({
+  providerInstanceId: Schema.NullOr(ProviderInstanceId),
+  runtimeSessionId: Schema.NullOr(RuntimeSessionId),
+});
+export type ThreadSessionSetExpectedRuntime = typeof ThreadSessionSetExpectedRuntime.Type;
+
 const ThreadSessionSetCommand = Schema.Struct({
   type: Schema.Literal("thread.session.set"),
   commandId: CommandId,
   threadId: ThreadId,
   session: OrchestrationSession,
+  /** Server-internal precondition; absent for server-decided transitions (bind, stop, restart). */
+  expectedRuntime: Schema.optional(ThreadSessionSetExpectedRuntime),
   /** Internal hint: how the turn this session-set releases ended, when the caller knows. */
   turnOutcome: Schema.optional(OrchestrationTurnOutcome),
   createdAt: IsoDateTime,

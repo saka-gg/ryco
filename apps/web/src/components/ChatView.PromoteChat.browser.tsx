@@ -85,6 +85,27 @@ function preview(destination: string | undefined): ProjectsPromoteChatPreviewRes
   };
 }
 
+type ChatProject = OrchestrationReadModel["projects"][number];
+
+/** The node re-points the chat's project at its new folder, as a regular project. */
+function emitChatTurnedIntoProject(chatProject: ChatProject): void {
+  rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeShell, {
+    kind: "project-upserted",
+    sequence: fixture.snapshot.snapshotSequence + 1,
+    project: {
+      id: CHAT_PROJECT_ID,
+      title: CHAT_TITLE,
+      kind: "project",
+      workspaceRoot: DESTINATION,
+      repositoryIdentity: null,
+      defaultModelSelection: chatProject.defaultModelSelection,
+      scripts: [],
+      createdAt: chatProject.createdAt,
+      updatedAt: "2026-03-04T12:30:00.000Z",
+    },
+  });
+}
+
 /** Mounts the app on the chat thread, with a node that hosts chats and promotes them. */
 async function mountChat(input: { readonly initialPath?: string } = {}) {
   const promoteRequests: Array<Record<string, unknown>> = [];
@@ -104,21 +125,7 @@ async function mountChat(input: { readonly initialPath?: string } = {}) {
       if (body._tag === WS_METHODS.projectsPromoteChat) {
         promoteRequests.push(body as Record<string, unknown>);
         // The server re-points the project before it answers.
-        rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeShell, {
-          kind: "project-upserted",
-          sequence: fixture.snapshot.snapshotSequence + 1,
-          project: {
-            id: CHAT_PROJECT_ID,
-            title: CHAT_TITLE,
-            kind: "project",
-            workspaceRoot: DESTINATION,
-            repositoryIdentity: null,
-            defaultModelSelection: chatProject.defaultModelSelection,
-            scripts: [],
-            createdAt: chatProject.createdAt,
-            updatedAt: "2026-03-04T12:30:00.000Z",
-          },
-        });
+        emitChatTurnedIntoProject(chatProject);
         return {
           projectId: CHAT_PROJECT_ID,
           workspaceRoot: DESTINATION,
@@ -130,7 +137,23 @@ async function mountChat(input: { readonly initialPath?: string } = {}) {
     },
   });
   await waitForServerConfigToApply();
-  return { mounted, promoteRequests };
+  return { mounted, promoteRequests, chatProject };
+}
+
+/** The chat's row in the sidebar's Chats section. */
+function sidebarChatRow(): Element | null {
+  return document.querySelector(
+    `[data-testid="sidebar-chats-section"] [data-testid="thread-row-${CHAT_THREAD_ID}"]`,
+  );
+}
+
+/** The project tree's row (the auto-animated list item) for the chat's project. */
+function sidebarProjectRow(): HTMLElement | null {
+  return (
+    document
+      .querySelector(`[data-sidebar-project-members~="${LOCAL_ENVIRONMENT_ID}:${CHAT_PROJECT_ID}"]`)
+      ?.closest<HTMLElement>("li") ?? null
+  );
 }
 
 async function expectDialogPrefilled(): Promise<void> {
@@ -179,12 +202,43 @@ describe("Turn into project… (full app)", () => {
         () => expect(document.querySelector('[data-testid="promote-chat-dialog"]')).toBeNull(),
         { timeout: 6_000 },
       );
-      const projectRow = document.querySelector(
-        `[data-sidebar-project-members~="${LOCAL_ENVIRONMENT_ID}:${CHAT_PROJECT_ID}"]`,
-      );
-      expect(projectRow?.textContent).toContain(CHAT_TITLE);
+      expect(sidebarProjectRow()?.textContent).toContain(CHAT_TITLE);
       expect(document.querySelector('[data-testid="sidebar-chats-section"]')).toBeNull();
       expect(document.querySelector('[data-testid="chat-header-promote"]')).toBeNull();
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("moves the chat from Chats into the project tree without an empty frame", async () => {
+    const { mounted, chatProject } = await mountChat();
+    try {
+      await vi.waitFor(() => expect(sidebarChatRow()).not.toBeNull());
+      expect(sidebarProjectRow()).toBeNull();
+
+      // Sample every painted frame while the node turns the chat into a project.
+      const frames: Array<{ chatListed: boolean; projectOpacity: number | null }> = [];
+      let sampling = true;
+      const sample = () => {
+        if (!sampling) return;
+        const projectRow = sidebarProjectRow();
+        frames.push({
+          chatListed: sidebarChatRow() !== null,
+          projectOpacity: projectRow ? Number(getComputedStyle(projectRow).opacity) : null,
+        });
+        requestAnimationFrame(sample);
+      };
+      requestAnimationFrame(sample);
+      emitChatTurnedIntoProject(chatProject);
+      await vi.waitFor(() => expect(sidebarProjectRow()).not.toBeNull());
+      // Longer than the list's entrance animation (1.5 × 180 ms).
+      await new Promise((resolve) => window.setTimeout(resolve, 600));
+      sampling = false;
+
+      // In every frame the chat is somewhere you can see it: still under Chats,
+      // or already a fully visible project row (never an invisible one).
+      expect(frames.filter((frame) => !frame.chatListed && frame.projectOpacity !== 1)).toEqual([]);
+      expect(frames.at(-1)).toEqual({ chatListed: false, projectOpacity: 1 });
     } finally {
       await mounted.cleanup();
     }

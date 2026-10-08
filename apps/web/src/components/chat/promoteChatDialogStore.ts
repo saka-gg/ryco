@@ -28,6 +28,11 @@ import { getServerConfig } from "../../rpc/serverState";
  */
 export const SIDEBAR_PROJECT_MEMBERS_ATTRIBUTE = "data-sidebar-project-members";
 
+/** Selects the sidebar project row that holds the project with this scoped key. */
+export function sidebarProjectRowSelector(projectKey: string): string {
+  return `[${SIDEBAR_PROJECT_MEMBERS_ATTRIBUTE}~="${CSS.escape(projectKey)}"]`;
+}
+
 export interface PromoteChatDialogRequest {
   readonly projectRef: ScopedProjectRef;
   /** The chat's thread, kept selected once it is a project; null when unknown. */

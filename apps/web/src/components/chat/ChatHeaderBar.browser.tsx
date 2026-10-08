@@ -23,6 +23,56 @@ describe("ChatHeaderBar", () => {
     document.body.innerHTML = "";
   });
 
+  it("draws breadcrumb chevrons only between segments, never ahead of the first", async () => {
+    const breadcrumb = () => document.querySelector<HTMLElement>('nav[aria-label="Breadcrumb"]')!;
+    const chevrons = () => breadcrumb().querySelectorAll("svg").length;
+
+    // No project (e.g. a thread whose project is not loaded): just the title.
+    mounted = await render(
+      <ChatHeaderBar
+        projectName={undefined}
+        isGitRepo
+        worktreeBranch={null}
+        worktreeTitle={null}
+        worktreeOrigin={null}
+        sessionTitle="New thread"
+      />,
+    );
+    await expect.element(page.getByText("New thread")).toBeInTheDocument();
+    expect(chevrons()).toBe(0);
+    expect(breadcrumb().firstElementChild?.textContent).toBe("New thread");
+
+    // A worktree without a project leads with the worktree.
+    await mounted.rerender(
+      <ChatHeaderBar
+        projectName=""
+        isGitRepo
+        worktreeBranch="feature/x"
+        worktreeTitle={null}
+        worktreeOrigin="branch"
+        sessionTitle="Implementation"
+      />,
+    );
+    await expect.element(page.getByText("Implementation")).toBeInTheDocument();
+    expect(chevrons()).toBe(1);
+    expect(breadcrumb().firstElementChild?.textContent).toBe("feature/x");
+
+    // All three segments: two separators.
+    await mounted.rerender(
+      <ChatHeaderBar
+        projectName="Ryco"
+        isGitRepo
+        worktreeBranch="feature/x"
+        worktreeTitle={null}
+        worktreeOrigin="branch"
+        sessionTitle="Implementation"
+      />,
+    );
+    await expect.element(page.getByText("Ryco")).toBeInTheDocument();
+    expect(chevrons()).toBe(2);
+    expect(breadcrumb().textContent).toBe("Rycofeature/xImplementation");
+  });
+
   it("shows the active worktree issue number and opens the linked item dialog action", async () => {
     const onOpen = vi.fn();
 

@@ -11,6 +11,8 @@ import {
   type ProjectChatDestinationStatus,
   type ProjectsPromoteChatPreviewResult,
   type ProjectsPromoteChatResult,
+  ProviderDriverKind,
+  type ServerProvider,
   type ThreadId,
 } from "@ryco/contracts";
 import {
@@ -222,6 +224,88 @@ export function describeMovePlan(
   return { title: `Move ${contents}`, detail: null };
 }
 
+export type PlanDestinationPresentation =
+  /** The typed location: judged usable, or still being checked (`pending`). */
+  | { readonly kind: "path"; readonly pending: boolean }
+  /** Nothing usable to point at: the location's status line says why. */
+  | { readonly kind: "unusable"; readonly text: string };
+
+/**
+ * The plan's "to" line. Only a location the node judged available is shown as
+ * where the files go; one being checked shows as pending, and a refused (or
+ * missing) one is never presented as a destination.
+ */
+export function describePlanDestination(state: DestinationCheckState): PlanDestinationPresentation {
+  switch (state) {
+    case "available":
+      return { kind: "path", pending: false };
+    case "checking":
+      return { kind: "path", pending: true };
+    case "empty":
+      return { kind: "unusable", text: "Choose a location above" };
+    default:
+      return { kind: "unusable", text: "Choose another location above" };
+  }
+}
+
+/**
+ * How the conversation goes on once the chat's folder moved: the provider
+ * resumes it natively there, or a fresh session receives a summary of it.
+ * "unknown" when this client cannot tell (or the chat's threads differ).
+ */
+export type ConversationContinuity = "resume" | "handoff" | "unknown";
+
+/**
+ * Drivers whose native conversation survives a working-directory move. Mirrors
+ * the server adapters' `resumeSurvivesCwdChange` (see docs/chats.md, "Provider
+ * continuity after the move"): only Codex resumes by thread id in a new folder.
+ */
+const RESUMES_IN_MOVED_FOLDER: ReadonlySet<ProviderDriverKind> = new Set([
+  ProviderDriverKind.make("codex"),
+]);
+
+/**
+ * The driver a thread's next turn runs on: the driver of the provider instance
+ * it has selected (from its node's providers), else its session's driver when
+ * that session runs the same instance. Null when this client cannot tell.
+ */
+export function resolveNextTurnProviderDriver(
+  thread: Pick<SidebarThreadSummary, "modelSelection" | "session">,
+  providers: ReadonlyArray<Pick<ServerProvider, "instanceId" | "driver">>,
+): ProviderDriverKind | null {
+  const instanceId =
+    thread.modelSelection?.instanceId ?? thread.session?.providerInstanceId ?? null;
+  if (instanceId === null) return null;
+  const configured = providers.find((provider) => provider.instanceId === instanceId);
+  if (configured) return configured.driver;
+  return thread.session?.providerInstanceId === instanceId ? thread.session.provider : null;
+}
+
+/** One answer for the whole chat, from the driver each of its threads continues on. */
+export function chatConversationContinuity(
+  drivers: ReadonlyArray<ProviderDriverKind | null>,
+): ConversationContinuity {
+  if (drivers.length === 0) return "unknown";
+  let resumes = 0;
+  for (const driver of drivers) {
+    if (driver === null) return "unknown";
+    if (RESUMES_IN_MOVED_FOLDER.has(driver)) resumes += 1;
+  }
+  if (resumes === drivers.length) return "resume";
+  return resumes === 0 ? "handoff" : "unknown";
+}
+
+export function describeConversationContinuity(continuity: ConversationContinuity): string {
+  switch (continuity) {
+    case "resume":
+      return "The agent resumes this conversation in the new folder.";
+    case "handoff":
+      return "The agent continues in a fresh session in the new folder, with a summary of this conversation.";
+    case "unknown":
+      return "Your next message continues this conversation in the new folder.";
+  }
+}
+
 export function describeGitPlan(
   options: PromotionGitOptions,
   gitAvailable: boolean,
@@ -344,6 +428,28 @@ export function resolvePromotionSteps(
           ? { id, label, status: "warning", detail: result.commitError }
           : { id, label, status: "skipped", detail: "Nothing to commit yet" };
     }
+  });
+}
+
+/**
+ * The running steps once the chat's project already points at its new folder
+ * (the node re-points it before it sets up Git, and the shell stream can say
+ * so before the request answers): the move is done and the next planned step
+ * runs. Returns `steps` itself when the move is not running.
+ */
+export function advancePromotionStepsAfterMove(
+  steps: ReadonlyArray<PromotionStep>,
+  workspaceRoot: string,
+): ReadonlyArray<PromotionStep> {
+  if (!steps.some((step) => step.id === "move" && step.status === "running")) return steps;
+  let next: PromotionStepId | null = null;
+  return steps.map((step): PromotionStep => {
+    if (step.id === "move") return { ...step, status: "done", detail: workspaceRoot };
+    if (next === null && step.status === "pending") {
+      next = step.id;
+      return { ...step, status: "running" };
+    }
+    return step;
   });
 }
 

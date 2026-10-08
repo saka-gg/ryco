@@ -60,7 +60,7 @@ function trashed(
   };
 }
 
-function seedProjects(): void {
+function seedProjects(chatFolder: string = CHAT_FOLDER): void {
   const project = {
     defaultModelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" },
     scripts: [],
@@ -75,7 +75,7 @@ function seedProjects(): void {
         ...project,
         id: CHAT_PROJECT_ID,
         title: "Plan a trip",
-        workspaceRoot: CHAT_FOLDER,
+        workspaceRoot: chatFolder,
         kind: "chat",
       },
     ],
@@ -122,6 +122,44 @@ describe("TrashSection permanent delete", () => {
     await page.getByTestId("trash-delete-permanently").click();
     await expect.poll(() => harness.deleteThreadPermanently.mock.calls.length).toBe(1);
     expect(harness.deleteChatFolder).not.toHaveBeenCalled();
+  });
+
+  it("wraps a long chat folder path between folders, never inside a name", async () => {
+    // Every folder name fits on a line; the whole path does not.
+    const chatFolder =
+      "/Users/someone-with-a-long-account-name/Library/Application-Support/ryco-development-instance/chats/2026-10-08-create-notes-md-0fa11298";
+    seedProjects(chatFolder);
+    harness.trash = [trashed(CHAT_PROJECT_ID, "Plan a trip")];
+    await openDeleteDialog();
+    const folderOption = page.getByTestId("trash-delete-chat-folder");
+    await expect.element(folderOption).toHaveTextContent(chatFolder);
+
+    // The innermost element holding the whole path, split into rendered lines.
+    const pathElement = Array.from(folderOption.element().querySelectorAll("*")).findLast(
+      (element) => element.textContent === chatFolder,
+    )!;
+    const lines: string[] = [];
+    let lineTop: number | null = null;
+    const walker = document.createTreeWalker(pathElement, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      const text = node.textContent ?? "";
+      for (let index = 0; index < text.length; index += 1) {
+        const range = document.createRange();
+        range.setStart(node, index);
+        range.setEnd(node, index + 1);
+        const box = range.getBoundingClientRect();
+        if (lineTop === null || box.top > lineTop + box.height / 2) {
+          lines.push(text.charAt(index));
+          lineTop = box.top;
+        } else {
+          lines.push(`${lines.pop() ?? ""}${text.charAt(index)}`);
+        }
+      }
+    }
+    expect(lines.join("")).toBe(chatFolder);
+    expect(lines.length).toBeGreaterThan(1);
+    // Each line ends at a separator, so no folder name is cut in two.
+    for (const line of lines.slice(0, -1)) expect(line).toMatch(/\/$/);
   });
 
   it("deletes the chat folder after the conversation when asked", async () => {

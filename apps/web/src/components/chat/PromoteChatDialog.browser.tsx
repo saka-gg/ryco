@@ -13,8 +13,10 @@ import {
   type ProjectsPromoteChatPreviewInput,
   type ProjectsPromoteChatPreviewResult,
   type ProjectsPromoteChatResult,
+  ProviderDriverKind,
   ProviderInstanceId,
   type ServerConfig,
+  type ServerProvider,
   ThreadId,
   TurnId,
 } from "@ryco/contracts";
@@ -36,6 +38,7 @@ vi.mock("../../hooks/useThreadActions", () => ({
   useThreadActions: () => ({ interruptThreadTurn: harness.interruptThreadTurn }),
 }));
 
+import { isShownWhole, locateText, rangeRect, textNodesIn } from "../../../test/textLayout";
 import {
   __resetEnvironmentApiOverridesForTests,
   __setEnvironmentApiOverrideForTests,
@@ -78,6 +81,10 @@ const CHAT_TARGET: ChatProjectTarget = {
 };
 
 interface PreviewOptions {
+  /** The chat folder the preview reports. */
+  readonly source?: string;
+  /** Destinations whose check never answers (they stay "checking"). */
+  readonly pending?: ReadonlySet<string>;
   readonly busyThreadIds?: ReadonlyArray<ThreadId>;
   readonly gitIdentityConfigured?: boolean;
   readonly taken?: ReadonlySet<string>;
@@ -89,9 +96,10 @@ let previewOptions: PreviewOptions = {};
 const previewChat = vi.fn(
   async (input: ProjectsPromoteChatPreviewInput): Promise<ProjectsPromoteChatPreviewResult> => {
     const destination = input.destination ?? DEFAULT_DESTINATION;
+    if (previewOptions.pending?.has(destination)) return new Promise(() => undefined);
     return {
       projectId: input.projectId,
-      source: CHAT_FOLDER,
+      source: previewOptions.source ?? CHAT_FOLDER,
       defaultDestination: DEFAULT_DESTINATION,
       destination,
       destinationStatus:
@@ -109,6 +117,24 @@ const previewChat = vi.fn(
 );
 const promoteChat =
   vi.fn<(input: ProjectsPromoteChatInput) => Promise<ProjectsPromoteChatResult>>();
+
+const CLAUDE_INSTANCE_ID = ProviderInstanceId.make("claude_work");
+
+function provider(instanceId: string, driver: string): ServerProvider {
+  return {
+    instanceId: ProviderInstanceId.make(instanceId),
+    driver: ProviderDriverKind.make(driver),
+    enabled: true,
+    installed: true,
+    version: "1.0.0",
+    status: "ready",
+    auth: { status: "authenticated" },
+    checkedAt: NOW,
+    models: [],
+    slashCommands: [],
+    skills: [],
+  };
+}
 
 function serverConfig(): ServerConfig {
   return {
@@ -133,7 +159,7 @@ function serverConfig(): ServerConfig {
     keybindingsConfigPath: "/repo/keybindings.json",
     keybindings: [],
     issues: [],
-    providers: [],
+    providers: [provider("codex", "codex"), provider(CLAUDE_INSTANCE_ID, "claudeAgent")],
     availableEditors: [],
     observability: {
       logsDirectoryPath: "/repo/logs",
@@ -151,8 +177,13 @@ function seedChatProject(input: {
   workspaceRoot: string;
   /** Seeds the chat's thread; "running" gives it a working agent. */
   thread?: "idle" | "running";
+  /** The provider instance the chat's thread has selected (Codex by default). */
+  threadInstanceId?: ProviderInstanceId;
 }): void {
   const modelSelection = { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" };
+  const threadModelSelection = input.threadInstanceId
+    ? { instanceId: input.threadInstanceId, model: "claude-sonnet" }
+    : modelSelection;
   useStore.getState().syncServerShellSnapshot(
     {
       snapshotSequence: input.kind === "chat" ? 1 : 2,
@@ -174,7 +205,7 @@ function seedChatProject(input: {
               id: THREAD_ID,
               projectId: CHAT_PROJECT_ID,
               title: CHAT_TITLE,
-              modelSelection,
+              modelSelection: threadModelSelection,
               runtimeMode: "full-access",
               interactionMode: "default",
               branch: null,
@@ -314,7 +345,9 @@ describe("PromoteChatDialog", () => {
     await expect.element(page.getByTestId("promote-chat-initial-commit")).toBeChecked();
     await expect.element(page.getByTestId("promote-chat-gitignore")).toBeChecked();
     await expect.element(submitButton()).not.toHaveAttribute("aria-disabled");
-    await expect.element(submitButton()).toHaveFocus();
+    // The irreversible action never starts focused: Enter-Enter must not move the folder.
+    await expect.element(page.getByTestId("promote-chat-name")).toHaveFocus();
+    await expect.element(submitButton()).not.toHaveFocus();
   });
 
   it("offers no promotion on a node that does not host chats", async () => {
@@ -375,6 +408,11 @@ describe("PromoteChatDialog", () => {
 
     await expect.element(page.getByText("A folder already exists here")).toBeVisible();
     await expect.element(submitButton()).toHaveAttribute("aria-disabled", "true");
+    // The plan does not present the refused folder as where the files go.
+    const planDestination = page.getByTestId("promote-chat-plan-destination");
+    await expect.element(planDestination).toHaveAttribute("data-state", "exists");
+    await expect.element(planDestination).toHaveTextContent("Choose another location above");
+    expect(planDestination.element().textContent).not.toContain("trip");
     const suggestion = page.getByTestId("promote-chat-use-suggestion");
     await expect.element(suggestion).toHaveTextContent("Use trip-2");
     await suggestion.click();
@@ -382,6 +420,8 @@ describe("PromoteChatDialog", () => {
       .element(page.getByTestId("promote-chat-location"))
       .toHaveValue("/home/me/Code/trip-2");
     await expect.element(page.getByText("Folder is available")).toBeVisible();
+    await expect.element(planDestination).toHaveAttribute("data-state", "available");
+    await expect.element(planDestination).toHaveTextContent("/home/me/Code/trip-2");
   });
 
   it("keeps a busy chat in place until the agent stops", async () => {
@@ -515,7 +555,22 @@ describe("PromoteChatDialog", () => {
       .element(page.getByTestId("promote-step-git-init"))
       .toHaveAttribute("data-status", "pending");
 
+    // The node re-points the project before it answers: the move shows as done
+    // (as the header and overview switch), and Git setup runs.
     seedChatProject({ kind: "project", workspaceRoot: DEFAULT_DESTINATION });
+    await expect
+      .element(page.getByTestId("promote-step-move"))
+      .toHaveAttribute("data-status", "done");
+    await expect
+      .element(page.getByTestId("promote-step-move"))
+      .toHaveTextContent(DEFAULT_DESTINATION);
+    await expect
+      .element(page.getByTestId("promote-step-git-init"))
+      .toHaveAttribute("data-status", "running");
+    await expect
+      .element(page.getByTestId("promote-step-initial-commit"))
+      .toHaveAttribute("data-status", "pending");
+    await expect.element(page.getByTestId("promote-chat-submit")).toBeVisible();
     const projectKey = deriveLogicalProjectKeyFromSettings(
       selectProjectByRef(useStore.getState(), CHAT_TARGET.projectRef)!,
       {
@@ -672,6 +727,172 @@ describe("PromoteChatDialog", () => {
     await expect.element(page.getByTestId("promote-chat-cancel")).toHaveTextContent("Close");
     await page.getByTestId("promote-chat-cancel").click();
     await vi.waitFor(() => expect(usePromoteChatDialogStore.getState().open).toBe(false));
+  });
+
+  it("explains how the conversation continues on the chat's provider", async () => {
+    // Codex resumes its own conversation in the new folder.
+    seedChatProject({ kind: "chat", workspaceRoot: CHAT_FOLDER, thread: "idle" });
+    await openFromHeader();
+    const continuity = page.getByTestId("promote-chat-continuity");
+    await expect.element(continuity).toHaveAttribute("data-continuity", "resume");
+    await expect
+      .element(continuity)
+      .toHaveTextContent("The agent resumes this conversation in the new folder.");
+    expect(continuity.element().textContent).not.toContain("summary");
+    await userEvent.keyboard("{Escape}");
+    await vi.waitFor(() => expect(usePromoteChatDialogStore.getState().open).toBe(false));
+
+    // Other providers start a fresh session that gets a summary.
+    seedChatProject({
+      kind: "chat",
+      workspaceRoot: CHAT_FOLDER,
+      thread: "idle",
+      threadInstanceId: CLAUDE_INSTANCE_ID,
+    });
+    await openFromHeader();
+    await expect.element(continuity).toHaveAttribute("data-continuity", "handoff");
+    await expect.element(continuity).toHaveTextContent("fresh session");
+    await expect.element(continuity).toHaveTextContent("summary of this conversation");
+    await userEvent.keyboard("{Escape}");
+    await vi.waitFor(() => expect(usePromoteChatDialogStore.getState().open).toBe(false));
+
+    // An instance this node does not list: neutral copy, no promise either way.
+    seedChatProject({
+      kind: "chat",
+      workspaceRoot: CHAT_FOLDER,
+      thread: "idle",
+      threadInstanceId: ProviderInstanceId.make("removed_instance"),
+    });
+    await openFromHeader();
+    await expect.element(continuity).toHaveAttribute("data-continuity", "unknown");
+    expect(continuity.element().textContent).not.toMatch(/summary|resumes/);
+  });
+
+  it("keeps long chat folder names readable and inside the plan", async () => {
+    // A chat folder name as long as the node makes them (the E2E's overflowed the plan).
+    const leaf = "2026-10-08-create-a-file-named-notes-md-in-the-current-dire-0fa11298";
+    const source = `/private/tmp/ryco-chats-e2e/home/chats/${leaf}`;
+    const destination = "/private/tmp/ryco-chats-e2e/projects/create-notes-md-with-secret-word";
+    previewOptions = { source };
+    await openFromHeader();
+    await page.getByTestId("promote-chat-location").fill(destination);
+    await expect.element(page.getByText("Folder is available")).toBeVisible();
+
+    const plan = page.getByTestId("promote-chat-plan").element();
+    const planBox = plan.getBoundingClientRect();
+    const dialogBox = page.getByTestId("promote-chat-dialog").element().getBoundingClientRect();
+    // Nothing spills out of the plan's box, and the plan stays inside the dialog.
+    expect(planBox.right).toBeLessThanOrEqual(dialogBox.right);
+    expect(plan.scrollWidth).toBeLessThanOrEqual(plan.clientWidth);
+    for (const element of Array.from(plan.querySelectorAll("*"))) {
+      const box = element.getBoundingClientRect();
+      if (box.width > 0) expect(box.right).toBeLessThanOrEqual(planBox.right + 0.5);
+    }
+    const paths = Array.from(plan.querySelectorAll<HTMLElement>('[data-slot="truncated-path"]'));
+    // The full paths are one hover away.
+    expect(paths.map((path) => path.title)).toEqual([source, destination]);
+    for (const path of paths) {
+      const box = path.getBoundingClientRect();
+      const leafBox = path
+        .querySelector<HTMLElement>('[data-slot="truncated-path-leaf"]')!
+        .getBoundingClientRect();
+      expect(leafBox.right).toBeLessThanOrEqual(box.right + 0.5);
+      // The parents shorten first but never vanish: "…/" stays in front of the name.
+      const parent = path.querySelector<HTMLElement>('[data-slot="truncated-path-parent"]')!;
+      expect(parent.getBoundingClientRect().width).toBeGreaterThan(0);
+    }
+    // The chat folder's name keeps most of its width; its parents gave theirs up first.
+    const [sourcePath] = paths;
+    const sourceLeaf = sourcePath!.querySelector<HTMLElement>('[data-slot="truncated-path-leaf"]')!;
+    expect(sourceLeaf.getBoundingClientRect().width).toBeGreaterThan(
+      sourcePath!.getBoundingClientRect().width * 0.8,
+    );
+
+    // The name itself is too long for the plan even with its parents at "…/"...
+    const sourceParent = sourcePath!.querySelector('[data-slot="truncated-path-parent"]')!;
+    const charWidth = locateText(sourceLeaf, "0fa11298").rect.width / 8;
+    expect(sourceParent.getBoundingClientRect().width).toBeLessThanOrEqual(charWidth * 2 + 0.5);
+    const laidOut = textNodesIn(sourceLeaf).reduce(
+      (width, node) => width + rangeRect(node).width,
+      0,
+    );
+    expect(laidOut).toBeGreaterThan(sourceLeaf.getBoundingClientRect().width);
+    // ...so it gives way in its middle: its start and its id (what tells chat
+    // folders apart) both stay in view, and the whole name is still the text.
+    expect(sourceLeaf.textContent).toBe(leaf);
+    expect(isShownWhole(sourcePath!, "2026-10-08-create")).toBe(true);
+    expect(isShownWhole(sourcePath!, "-0fa11298")).toBe(true);
+    // The cut start spans whole characters, so its "…" meets the id without a gap.
+    const cutStart = sourceLeaf.querySelector('[data-slot="truncated-path-leaf-start"]')!;
+    const cutWidth = cutStart.getBoundingClientRect().width;
+    expect(cutWidth - Math.floor(cutWidth / charWidth + 0.01) * charWidth).toBeLessThan(0.5);
+  });
+
+  it("keeps a name that fits whole while its parent folders shorten", async () => {
+    // A deep chats root: its folders must give up far more than the name could spare.
+    const leaf = "2026-10-08-create-a-file-named-notes-md-in-the-cur-01bf51d6";
+    const source = `/private/tmp/ryco-chats-e2e/some/deeply/nested/home/directory/with/many/levels/of/folders/chats/${leaf}`;
+    previewOptions = { source };
+    await openFromHeader();
+
+    const plan = page.getByTestId("promote-chat-plan").element();
+    const sourcePath = plan.querySelector<HTMLElement>('[data-slot="truncated-path"]')!;
+    expect(sourcePath.title).toBe(source);
+    const parent = sourcePath.querySelector('[data-slot="truncated-path-parent"]')!;
+    expect(isShownWhole(sourcePath, parent.textContent!)).toBe(false);
+    // Not a fraction of a pixel comes out of the name, so no "…" lands in it.
+    const sourceLeaf = sourcePath.querySelector('[data-slot="truncated-path-leaf"]')!;
+    expect(sourceLeaf.textContent).toBe(leaf);
+    for (const node of textNodesIn(sourceLeaf)) {
+      expect(isShownWhole(sourcePath, node.data)).toBe(true);
+    }
+  });
+
+  it("leaves paths that fit untouched: every character drawn, read as one run", async () => {
+    await openFromHeader();
+    await expect.element(page.getByText("Folder is available")).toBeVisible();
+
+    const plan = page.getByTestId("promote-chat-plan").element();
+    const paths = Array.from(plan.querySelectorAll<HTMLElement>('[data-slot="truncated-path"]'));
+    expect(paths.map((path) => path.textContent)).toEqual([CHAT_FOLDER, DEFAULT_DESTINATION]);
+    for (const path of paths) {
+      const nodes = textNodesIn(path);
+      // Every character is drawn, nothing ellipsized, in either the parents or the name.
+      for (const node of nodes) expect(isShownWhole(path, node.data)).toBe(true);
+      // The pieces sit flush on one line, so the path reads as one run of text.
+      for (let index = 1; index < nodes.length; index += 1) {
+        const previous = rangeRect(nodes[index - 1]!);
+        const next = rangeRect(nodes[index]!);
+        expect(Math.abs(next.left - previous.right)).toBeLessThan(0.5);
+        expect(Math.abs(next.bottom - previous.bottom)).toBeLessThan(0.5);
+      }
+    }
+  });
+
+  it("lines the label up with a path that has no parent folder", async () => {
+    previewOptions = { pending: new Set(["foo"]) };
+    await openFromHeader();
+    await page.getByTestId("promote-chat-location").fill("foo");
+    const plan = page.getByTestId("promote-chat-plan");
+
+    const textBottom = (text: string) => {
+      const node = textNodesIn(plan.element()).find((candidate) => candidate.data === text);
+      if (!node) throw new Error(`No text node "${text}"`);
+      return rangeRect(node).bottom;
+    };
+    await vi.waitFor(() => textBottom("foo"));
+    // Same font on both sides, so equal text bottoms mean shared baselines.
+    expect(Math.abs(textBottom("to") - textBottom("foo"))).toBeLessThan(0.5);
+    // A chat folder's name renders in two pieces; both sit on the label's baseline.
+    const sourceLeaf = plan.element().querySelector('[data-slot="truncated-path-leaf"]')!;
+    expect(sourceLeaf.textContent).toBe("2026-10-08-plan-a-trip-1a2b3c4d");
+    for (const node of textNodesIn(sourceLeaf)) {
+      expect(Math.abs(textBottom("from") - rangeRect(node).bottom)).toBeLessThan(0.5);
+    }
+    // Still being judged: shown as where the files would go, not yet as settled.
+    await expect
+      .element(page.getByTestId("promote-chat-plan-destination"))
+      .toHaveAttribute("data-state", "checking");
   });
 
   it("works with reduced motion: no morph ghost and instant step reveals", async () => {

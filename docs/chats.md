@@ -25,9 +25,11 @@ offers a chat as the place for a new thread. Starting a chat returns to the node
 draft when there is one. The node itself does not enforce this rule; see
 [Limitations](#limitations).
 
-Nothing is created on disk until the first message is sent. That send creates the folder and the
-chat in one server request. If the send fails, Ryco removes the still-empty folder and keeps the
-chat, so sending the same draft again reuses the chat and recreates its folder.
+Nothing is created on disk until the first message is sent. Until then the draft is called
+**New chat**, in the **Chats** section and in its header, where its project reads **No project**.
+The first send creates the folder and the chat in one server request. If the send fails, Ryco
+removes the still-empty folder and keeps the chat, so sending the same draft again reuses the chat
+and recreates its folder.
 
 A chat whose first send never succeeded has no conversation; only its unsent draft shows in the
 sidebar. When the node starts, it removes every chat that has no conversation at all (none in the
@@ -42,10 +44,11 @@ with the same prompt and attachments. The draft keeps the new chat, so a later s
 If that second send also fails, Ryco shows its error and puts the message back in the draft.
 
 A chat runs locally in a plain folder. Ryco's apps never treat that folder as a Git repository:
-they do not poll the folder's Git status and offer no branch, worktree or diff controls for it. The
-node refuses a worktree for the first send that creates a chat. Where a project shows its Git
-state, a chat's header offers **Turn into project…** instead, plus a button that shows the folder
-when it is on this machine.
+they do not poll the folder's Git status, pull requests or CI runs, and offer no branch, worktree
+or diff controls for it. The overview panel has no **Changes** section for a chat. The node
+refuses a worktree for the first send that creates a chat. Where a project shows its Git state, a
+chat's header and overview panel offer **Turn into project…** instead. The header also has a
+button that shows the folder when it is on this machine.
 
 ## Where chats live
 
@@ -146,7 +149,7 @@ history stay attached.
 
 The dialog shows a live preview:
 
-- **Name.** The chat's title is filled in.
+- **Name.** The chat's title is filled in, and the dialog opens with the cursor in this field.
 - **Location.** The default is `<parent>/<folder name>`. The parent is the authorized workspace
   under `--restrict-to-cwd`. Otherwise it is **Add project starts in** (`addProjectBaseDirectory`,
   under **Settings → General → Projects & threads**), then `~/Code` when it exists, then the home
@@ -159,8 +162,20 @@ The dialog shows a live preview:
   not be at or inside a workspace checkout that Ryco removed or moved away, or is removing or
   moving, because Ryco keeps new work out of those folders. A location that another chat is being
   moved into counts as taken. Ryco never moves a chat into an existing folder.
-- **Plan.** The preview shows how many files and bytes will move (counting stops at 20,000
-  entries) and whether the new location is on another disk.
+- **What will happen.** The plan shows how many files and bytes will move (counting stops at
+  20,000 entries), from where to where, and whether the new location is on another disk, in which
+  case the files are copied and checked first. Only a location the node accepted is shown as
+  where the files go: one still being checked is dimmed, and one the node refused is replaced by a
+  prompt to choose another location. A long path shortens its parent folders first; a chat
+  folder's name that is still too long is cut in the middle, so its suffix stays visible. Hover a
+  path to see all of it. The plan then says how the conversation continues: **Codex** resumes it
+  in the new folder, and other providers continue in a fresh session with a summary of it (see
+  [Provider continuity after the move](#provider-continuity-after-the-move)). When the chat's
+  conversations would not all continue the same way, or one uses a provider the node does not
+  list, it only says that your next message continues the conversation. Last, it shows the Git
+  setup you chose.
+
+Enter in a field confirms when nothing blocks the move. Escape cancels.
 
 When you confirm, the node runs these steps:
 
@@ -282,6 +297,18 @@ If a resume after the move finds no conversation, also for Codex, Ryco uses the 
 handoff instead of failing the turn. The same rules apply whenever a thread's working directory
 moves for another reason. See
 [Context handoffs → Working-directory moves](context-handoffs.md#working-directory-moves).
+
+For Claude, the first message after the move shows no resume review for a large conversation:
+nothing is resumed, because the conversation continues by handoff. Later messages are reviewed as
+usual.
+
+A promotion stops the chat's agent sessions (step 2 of the move). If the move then does not
+happen, because it is refused, cancelled or undone, the chat stays in its folder with its sessions
+stopped, and your next message starts a new session that resumes the conversation there. For a
+large Claude conversation the resume review may come first: **Continue with full context** works,
+but **Compact then send** is not offered while the session is stopped, because compacting needs a
+running session. See
+[Observed Claude cache usage and resume review](providers/claude-cache.md).
 
 ## Limitations
 

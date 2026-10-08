@@ -56,7 +56,11 @@ import {
   ProviderValidationError,
   type ProviderAdapterError,
 } from "../Errors.ts";
-import type { ProviderAdapterShape, ProviderRollbackInput } from "../Services/ProviderAdapter.ts";
+import type {
+  ProviderAdapterShape,
+  ProviderRollbackInput,
+  ProviderThreadHistory,
+} from "../Services/ProviderAdapter.ts";
 import {
   ProviderAdapterRegistry,
   type ProviderAdapterRegistryShape,
@@ -116,10 +120,13 @@ function makeFakeCodexAdapter(
     /** Defaults to native for Codex only. */
     readonly turnSteering?: "native" | "unsupported";
     readonly turnSubmission?: "acceptance" | "completion";
+    /** Defaults to true for Codex only, as the real adapters declare. */
+    readonly resumeSurvivesCwdChange?: boolean;
   } = {},
 ) {
   const turnSteering =
     options.turnSteering ?? (provider === CODEX_DRIVER ? "native" : "unsupported");
+  const resumeSurvivesCwdChange = options.resumeSurvivesCwdChange ?? provider === CODEX_DRIVER;
   const sessions = new Map<ThreadId, ProviderSession>();
   const runtimeEventPubSub = Effect.runSync(PubSub.unbounded<ProviderRuntimeEvent>());
 
@@ -248,6 +255,15 @@ function makeFakeCodexAdapter(
       Effect.succeed({ threadId, turns: [] }),
   );
 
+  const readThreadHistory = vi.fn(
+    (_input: {
+      readonly threadId: ThreadId;
+      readonly resumeCursor: unknown;
+      readonly cwd?: string;
+    }): Effect.Effect<ProviderThreadHistory, ProviderAdapterError> =>
+      Effect.succeed({ messages: [], items: [], completedTurnIds: [], failedTurnIds: [] }),
+  );
+
   const stopAll = vi.fn((): Effect.Effect<void, ProviderAdapterError> =>
     Effect.sync(() => {
       sessions.clear();
@@ -263,6 +279,7 @@ function makeFakeCodexAdapter(
         ? {}
         : { conversationRollback: "native" as const }),
       ...(options.turnSubmission ? { turnSubmission: options.turnSubmission } : {}),
+      resumeSurvivesCwdChange,
     },
     startSession,
     sendTurn,
@@ -274,6 +291,7 @@ function makeFakeCodexAdapter(
     listSessions,
     hasSession,
     readThread,
+    readThreadHistory,
     rollbackThread,
     stopAll,
     get streamEvents() {
@@ -321,6 +339,7 @@ function makeFakeCodexAdapter(
     listSessions,
     hasSession,
     readThread,
+    readThreadHistory,
     rollbackThread,
     stopAll,
   };
@@ -1320,6 +1339,58 @@ routing.layer("ProviderServiceLive routing", (it) => {
         }),
       );
       assert.equal(routing.codex.startSession.mock.calls.length, 0);
+    }),
+  );
+
+  // "Turn into project…" moves the chat folder away; until the next start the stopped binding
+  // still records it, and a stored read spawned there failed on every reconcile.
+  it.effect("reads a moved thread's stored history where it runs now, keeping its record", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const chatFolder = "/tmp/chats/2026-10-08-plan-history";
+      const projectFolder = "/tmp/code/plan-history";
+      const startStopped = (
+        threadId: ThreadId,
+        driver: ProviderDriverKind,
+        providerInstanceId: ProviderInstanceId,
+      ) =>
+        provider
+          .startSession(threadId, {
+            provider: driver,
+            providerInstanceId,
+            threadId,
+            cwd: chatFolder,
+            runtimeMode: "full-access",
+          })
+          .pipe(Effect.andThen(provider.stopSession({ threadId })));
+
+      // Codex resumes after a move, so its history is read where the next start resumes it.
+      const codexThread = asThreadId("thread-history-moved-codex");
+      yield* startStopped(codexThread, CODEX_DRIVER, codexInstanceId);
+      routing.codex.readThreadHistory.mockClear();
+      assert.equal(
+        Option.isSome(yield* provider.readThreadHistory!(codexThread, { cwd: projectFolder })),
+        true,
+      );
+      assert.equal(routing.codex.readThreadHistory.mock.calls[0]?.[0].cwd, projectFolder);
+      yield* provider.readThreadHistory!(codexThread);
+      assert.equal(routing.codex.readThreadHistory.mock.calls[1]?.[0].cwd, chatFolder);
+      // The record is untouched, so the next turn still detects the move.
+      assert.deepEqual(Option.getOrUndefined(yield* provider.readResumeTarget!(codexThread)), {
+        providerInstanceId: codexInstanceId,
+        cwd: chatFolder,
+        hasResumeCursor: true,
+      });
+
+      // A conversation that does not survive a move still lives in the recorded folder.
+      const claudeThread = asThreadId("thread-history-moved-claude");
+      yield* startStopped(claudeThread, CLAUDE_AGENT_DRIVER, claudeAgentInstanceId);
+      // Later routing tests count the shared Claude adapter's starts from zero.
+      routing.claude.startSession.mockClear();
+      routing.claude.stopSession.mockClear();
+      routing.claude.readThreadHistory.mockClear();
+      yield* provider.readThreadHistory!(claudeThread, { cwd: projectFolder });
+      assert.equal(routing.claude.readThreadHistory.mock.calls[0]?.[0].cwd, chatFolder);
     }),
   );
 

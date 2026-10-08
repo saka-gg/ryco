@@ -46,6 +46,33 @@ function draftChatRow(draftId: DraftId, draft: DraftThreadState): SidebarChatRow
   };
 }
 
+const chatProjectKey = (project: ChatProjectLike) =>
+  scopedProjectKey({ environmentId: project.environmentId, projectId: project.id });
+
+/** Scoped keys of the chat projects among `projects`. */
+export function collectChatProjectKeys(
+  projects: ReadonlyArray<ChatProjectLike>,
+): ReadonlySet<string> {
+  return new Set(projects.filter(isChatProject).map(chatProjectKey));
+}
+
+/**
+ * Keys of the chats (as of `previousChatKeys`) that are projects now: "Turn
+ * into project…" re-points the same project, so its row leaves the Chats
+ * section and enters the project tree in one update. A chat that went away is
+ * not one of them.
+ */
+export function chatsTurnedIntoProjects(
+  previousChatKeys: ReadonlySet<string>,
+  projects: ReadonlyArray<ChatProjectLike>,
+): string[] {
+  if (previousChatKeys.size === 0) return [];
+  return projects
+    .filter((project) => !isChatProject(project))
+    .map(chatProjectKey)
+    .filter((key) => previousChatKeys.has(key));
+}
+
 /**
  * Rows of the Chats section: unsent chat drafts first (newest first), then the
  * unarchived threads of every chat project in the user's thread order (pinned
@@ -59,13 +86,7 @@ export function buildSidebarChatRows(input: {
   readonly sortOrder: SidebarThreadSortOrder;
   readonly pinnedThreadKeys: ReadonlySet<string>;
 }): SidebarChatRow[] {
-  const chatProjectKeys = new Set(
-    input.projects
-      .filter(isChatProject)
-      .map((project) =>
-        scopedProjectKey({ environmentId: project.environmentId, projectId: project.id }),
-      ),
-  );
+  const chatProjectKeys = collectChatProjectKeys(input.projects);
   const threadKey = (thread: Pick<SidebarThreadSummary, "environmentId" | "id">) =>
     scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
   const chatThreads = input.threads.filter(

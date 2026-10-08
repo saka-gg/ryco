@@ -33,6 +33,7 @@ import {
   wsRequests,
 } from "./ChatView.browser.helpers";
 import { rpcFailure } from "../../test/wsRpcHarness";
+import { setGitStatusForTests } from "../../test/gitStatusStateMock";
 
 // Hoisted per suite: a mock registered from the shared helpers runs after this file's static imports.
 vi.mock("../lib/gitStatusState", () => import("../../test/gitStatusStateMock"));
@@ -340,6 +341,84 @@ describe("ChatView chats without a project (full app)", () => {
         branch: null,
       });
       expect(retry?.bootstrap?.prepareWorktree).toBeUndefined();
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("names an unsent chat No project in the header, with no empty segment", async () => {
+    seedChatDraft();
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createDraftOnlySnapshot(),
+      initialPath: `/draft/${DRAFT_ID}`,
+      configureFixture: (nextFixture) => {
+        nextFixture.serverConfig = { ...nextFixture.serverConfig, chats: CHATS_AVAILABLE };
+      },
+    });
+
+    try {
+      await waitForServerConfigToApply();
+      const breadcrumb = await waitForElement(
+        () => document.querySelector<HTMLElement>('header nav[aria-label="Breadcrumb"]'),
+        "The header breadcrumb did not render.",
+      );
+      await vi.waitFor(() => {
+        expect(breadcrumb.textContent).toBe("No projectNew chat");
+      });
+      // One separator, between the two segments: nothing ahead of "No project".
+      const separators = breadcrumb.querySelectorAll('[data-slot="breadcrumb-separator"]');
+      expect(separators).toHaveLength(1);
+      expect(breadcrumb.firstElementChild?.textContent).toBe("No project");
+      // The chat's folder does not exist before the first send: nothing to open.
+      expect(
+        document.querySelector('header [role="group"][aria-label="Subscription actions"]'),
+      ).toBeNull();
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("shows no Git changes in a chat's overview, only the way to a project", async () => {
+    // The node answers Git status for any folder, a chat's included.
+    setGitStatusForTests({
+      isRepo: false,
+      hasPrimaryRemote: false,
+      isDefaultRef: false,
+      refName: null,
+      hasWorkingTreeChanges: false,
+      workingTree: { files: [], insertions: 0, deletions: 0 },
+      hasUpstream: false,
+      aheadCount: 0,
+      behindCount: 0,
+      pr: null,
+    });
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createSnapshotWithChat(),
+      initialPath: `/${LOCAL_ENVIRONMENT_ID}/${CHAT_THREAD_ID}`,
+      configureFixture: (nextFixture) => {
+        nextFixture.serverConfig = { ...nextFixture.serverConfig, chats: CHATS_AVAILABLE };
+      },
+    });
+
+    try {
+      await waitForServerConfigToApply();
+      const toggle = await waitForElement(
+        () =>
+          document.querySelector<HTMLButtonElement>('button[aria-label="Toggle overview panel"]'),
+        "Unable to find the overview toggle.",
+      );
+      if (toggle.getAttribute("aria-pressed") !== "true") toggle.click();
+      const promote = page.getByTestId("chat-promote-block");
+      await expect.element(promote).toBeVisible();
+      const overview = promote.element().closest('[data-slot="overview-panel"]');
+      expect(overview).not.toBeNull();
+      // A chat records no checkpoints: a "Changes · No changes" row would be wrong
+      // after the agent wrote files. Promotion is where changes start to count.
+      await waitForLayout();
+      expect(overview!.textContent).not.toContain("Changes");
+      expect(overview!.textContent).not.toContain("No changes");
     } finally {
       await mounted.cleanup();
     }

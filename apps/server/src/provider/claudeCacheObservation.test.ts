@@ -29,6 +29,10 @@ describe("Claude cache evidence", () => {
       cacheWriteInputTokens: 3_000,
     });
   });
+  it("records the runtime's working directory, where Claude keeps the conversation", () => {
+    expect(observeClaudeCache({ ...input, cwd: "/chats/pelican" })?.cwd).toBe("/chats/pelican");
+    expect(observeClaudeCache(input)).not.toHaveProperty("cwd");
+  });
   it("does not refresh duplicate requests or invent TTL for cache reads", () => {
     const previous = observeClaudeCache(input)!;
     expect(observeClaudeCache({ ...input, observedAt: "2026-09-27T11:00:00.000Z", previous })).toBe(

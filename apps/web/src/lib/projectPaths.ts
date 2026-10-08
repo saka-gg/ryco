@@ -272,6 +272,53 @@ export function canNavigateUp(currentPath: string): boolean {
   return hasTrailingPathSeparator(currentPath) && getBrowseParentPath(currentPath) !== null;
 }
 
+/** A path cut for display around its last segment (see `splitPathForDisplay`). */
+export interface PathDisplayParts {
+  /** Everything before the separator in front of the leaf; "" for a bare name or a root entry. */
+  readonly head: string;
+  /** The separator in front of the leaf; "" for a bare name. */
+  readonly separator: string;
+  /** The last segment, with any trailing separator the path was written with. */
+  readonly leaf: string;
+}
+
+/**
+ * Splits a path into its parent folders, the separator before the last segment
+ * and that segment, so a one-line rendering can shorten the parents and keep
+ * the name readable. Concatenated, the parts are the path unchanged.
+ */
+export function splitPathForDisplay(path: string): PathDisplayParts {
+  const trimmed = trimTrailingPathSeparators(path);
+  const trailing = path.slice(trimmed.length);
+  const separatorIndex = getLastPathSeparatorIndex(trimmed);
+  if (separatorIndex < 0) return { head: "", separator: "", leaf: path };
+  return {
+    head: trimmed.slice(0, separatorIndex),
+    separator: trimmed.charAt(separatorIndex),
+    leaf: `${trimmed.slice(separatorIndex + 1)}${trailing}`,
+  };
+}
+
+/**
+ * The path cut after every separator ("/home/", "me/", "notes"), so a wrapped
+ * rendering can break lines between folders instead of inside their names.
+ * Concatenated, the chunks are the path unchanged.
+ */
+export function splitPathAtSeparators(path: string): string[] {
+  const unix = getAbsolutePathKind(path) === "unix";
+  const chunks: string[] = [];
+  let start = 0;
+  for (let index = 0; index < path.length; index += 1) {
+    const char = path[index];
+    if (char === "/" || (!unix && char === "\\")) {
+      chunks.push(path.slice(start, index + 1));
+      start = index + 1;
+    }
+  }
+  if (start < path.length) chunks.push(path.slice(start));
+  return chunks;
+}
+
 export function isSameFilesystemPath(left: string, right: string): boolean {
   const normalizedLeft = trimTrailingPathSeparators(left.trim());
   const normalizedRight = trimTrailingPathSeparators(right.trim());

@@ -5077,6 +5077,7 @@ describe("ProviderCommandReactor", () => {
           status: "ready",
           providerName: "codex",
           providerInstanceId: ProviderInstanceId.make("codex_work"),
+          runtimeSessionId: RuntimeSessionId.make("runtime-before-stop"),
           runtimeMode: "approval-required",
           activeTurnId: null,
           lastError: null,
@@ -5103,6 +5104,9 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.session?.threadId).toBe("thread-1");
     expect(thread?.session?.providerInstanceId).toBe(ProviderInstanceId.make("codex_work"));
     expect(thread?.session?.activeTurnId).toBeNull();
+    // Deliberate: the stop is final for that runtime, so its late events stay fenced out
+    // (and a Claude resume review of this state guards on "no runtime").
+    expect(thread?.session?.runtimeSessionId).toBeUndefined();
   });
 
   describe("turn finalization", () => {

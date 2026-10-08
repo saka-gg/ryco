@@ -2380,14 +2380,20 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   );
 
   return {
-    readThreadHistory: (threadId) =>
+    readThreadHistory: (threadId, input) =>
       Effect.gen(function* () {
         const binding = yield* directory.getBinding(threadId);
         if (Option.isNone(binding) || binding.value.resumeCursor == null) return Option.none();
         const instanceId = yield* requireBindingInstanceId("readThreadHistory", binding.value);
         const adapter = yield* registry.getByInstance(instanceId);
         if (!adapter.readThreadHistory) return Option.none();
-        const cwd = readPersistedCwd(binding.value.runtimePayload);
+        // Read where the conversation is reachable now, without rewriting the binding: its
+        // recorded directory, possibly gone after a move, is what relocation detection needs.
+        const recordedCwd = readPersistedCwd(binding.value.runtimePayload);
+        const cwd =
+          adapter.capabilities.resumeSurvivesCwdChange === true
+            ? (input?.cwd ?? recordedCwd)
+            : (recordedCwd ?? input?.cwd);
         const history = yield* adapter.readThreadHistory({
           threadId,
           resumeCursor: binding.value.resumeCursor,

@@ -46,6 +46,7 @@ import { useShallow } from "zustand/react/shallow";
 
 import { usePrimaryEnvironmentId } from "../../environments/primary";
 import { readEnvironmentApi } from "../../environmentApi";
+import { useEnvironmentServerConfig } from "../../hooks/useChatsAvailability";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { useEvent } from "../../hooks/useEvent";
 import { useSettings } from "../../hooks/useSettings";
@@ -89,6 +90,7 @@ import {
 } from "../ui/dialog";
 import { DisclosureRegion } from "../ui/DisclosureRegion";
 import { Input } from "../ui/input";
+import { TruncatedPath, WrappingPath } from "../ui/path-text";
 import { Skeleton } from "../ui/skeleton";
 import { Spinner } from "../ui/spinner";
 import type { SurfaceMorph } from "../ui/surfaceMorph";
@@ -98,18 +100,23 @@ import { RollingText } from "./RollingText";
 import {
   closePromoteChatDialog,
   type PromoteChatDialogRequest,
-  SIDEBAR_PROJECT_MEMBERS_ATTRIBUTE,
+  sidebarProjectRowSelector,
   usePromoteChatDialogStore,
 } from "./promoteChatDialogStore";
 import {
+  advancePromotionStepsAfterMove,
   chatActivitySignature,
   type ChatBusyPresentation,
+  chatConversationContinuity,
   chatThreadLiveWork,
+  type ConversationContinuity,
   type DestinationCheckState,
   describeChatBusy,
+  describeConversationContinuity,
   describeDestinationStatus,
   describeGitPlan,
   describeMovePlan,
+  describePlanDestination,
   describePromotionError,
   describePromotionUnavailable,
   DESTINATION_PREVIEW_DEBOUNCE_MS,
@@ -130,6 +137,7 @@ import {
   promotionErrorStillApplies,
   promotionHasWarnings,
   replaceDestinationLeaf,
+  resolveNextTurnProviderDriver,
   resolvePromotionSteps,
   resolvePromotionSubmitBlocker,
   retargetDestinationForName,
@@ -137,6 +145,7 @@ import {
 } from "./PromoteChatDialog.logic";
 
 const PROMOTE_FORM_ID = "promote-chat-form";
+const PROMOTE_NAME_INPUT_ID = "promote-chat-name";
 const MAX_FOLDER_SUGGESTIONS = 8;
 /** Results reveal one after another, a third of the house "stack" step apart. */
 const STEP_STAGGER_FACTOR = 0.35;
@@ -212,8 +221,11 @@ export function PromoteChatDialog() {
         data-testid="promote-chat-dialog"
         bottomStickOnMobile={false}
         morph={morph}
+        // The Name field, never the irreversible primary action: Enter submits
+        // from a field only once the form is valid, but Enter on a focused
+        // "Turn into project" would move the folder without a look at the plan.
         initialFocus={() =>
-          popupRef.current?.querySelector<HTMLElement>("[data-promote-primary]") ?? true
+          popupRef.current?.querySelector<HTMLElement>(`#${PROMOTE_NAME_INPUT_ID}`) ?? true
         }
       >
         {request ? (
@@ -234,9 +246,8 @@ export function PromoteChatDialog() {
  * thread row (an Inbox sidebar has no project rows), else nowhere (dissolve).
  */
 function findPromotedProjectRow(outcome: PromotionOutcome): HTMLElement | null {
-  const projectKey = CSS.escape(scopedProjectKey(outcome.projectRef));
   const projectRow = document.querySelector<HTMLElement>(
-    `[${SIDEBAR_PROJECT_MEMBERS_ATTRIBUTE}~="${projectKey}"]`,
+    sidebarProjectRowSelector(scopedProjectKey(outcome.projectRef)),
   );
   if (projectRow) return projectRow;
   if (!outcome.threadRef) return null;
@@ -378,6 +389,32 @@ function PromoteChatDialogBody(props: {
     [chatThreads, environmentId, terminalStateByThreadKey],
   );
   const activitySignature = chatActivitySignature(liveWork);
+
+  // How the conversation goes on in the new folder depends on the provider
+  // each of the chat's threads continues on (Codex resumes natively).
+  const providers = useEnvironmentServerConfig(environmentId)?.providers;
+  const continuity = useMemo<ConversationContinuity>(
+    () =>
+      chatConversationContinuity(
+        chatThreads.map((thread) => resolveNextTurnProviderDriver(thread, providers ?? [])),
+      ),
+    [chatThreads, providers],
+  );
+
+  // The node re-points the project at its new folder before it sets up Git,
+  // and the shell stream may say so before the request answers: the header and
+  // overview switch then, so the move shows as done at the same moment.
+  const promotedWorkspaceRoot = useStore((state) => {
+    const project = selectProjectByRef(state, projectRef);
+    return project && !isChatProject(project) ? project.cwd : null;
+  });
+  const shownSteps = useMemo(
+    () =>
+      phase === "submitting" && promotedWorkspaceRoot !== null
+        ? advancePromotionStepsAfterMove(steps, promotedWorkspaceRoot)
+        : steps,
+    [phase, promotedWorkspaceRoot, steps],
+  );
 
   const runPreview = useEvent(async (destination: string | null): Promise<PreviewState | null> => {
     const previewChat = readEnvironmentApi(environmentId)?.projects.promoteChatPreview;
@@ -752,13 +789,13 @@ function PromoteChatDialogBody(props: {
                 <>
                   <div className="flex flex-col gap-2">
                     <label
-                      htmlFor="promote-chat-name"
+                      htmlFor={PROMOTE_NAME_INPUT_ID}
                       className="font-medium text-foreground text-sm"
                     >
                       Name
                     </label>
                     <Input
-                      id="promote-chat-name"
+                      id={PROMOTE_NAME_INPUT_ID}
                       ref={nameInputRef}
                       value={name}
                       maxLength={CHAT_PROJECT_TITLE_MAX_CHARS}
@@ -804,6 +841,8 @@ function PromoteChatDialogBody(props: {
                   <WhatWillHappen
                     preview={latestResult}
                     destination={trimmedLocation}
+                    destinationState={destinationState}
+                    continuity={continuity}
                     gitOptions={gitOptions}
                     gitAvailable={gitAvailable}
                   />
@@ -813,12 +852,12 @@ function PromoteChatDialogBody(props: {
           ) : (
             <PromotionProgress
               phase={phase}
-              steps={steps}
+              steps={shownSteps}
               showIdentityHelp={
                 phase === "done" &&
                 latestResult !== null &&
                 !latestResult.gitIdentityConfigured &&
-                steps.some((step) => step.id === "initial-commit" && step.status === "warning")
+                shownSteps.some((step) => step.id === "initial-commit" && step.status === "warning")
               }
             />
           )}
@@ -1192,6 +1231,9 @@ function CopyableCommand(props: { readonly command: string }) {
 function WhatWillHappen(props: {
   readonly preview: ProjectsPromoteChatPreviewResult | null;
   readonly destination: string;
+  /** The verdict on `destination`: only an available one is shown as where the files go. */
+  readonly destinationState: DestinationCheckState;
+  readonly continuity: ConversationContinuity;
   readonly gitOptions: ReturnType<typeof effectiveGitOptions>;
   readonly gitAvailable: boolean;
 }) {
@@ -1217,7 +1259,11 @@ function WhatWillHappen(props: {
               <span className="font-medium text-sm" data-testid="promote-chat-move-plan">
                 {move.title}
               </span>
-              <PathMove from={preview.source} to={props.destination || preview.destination} />
+              <PathMove
+                from={preview.source}
+                to={props.destination || preview.destination}
+                toState={props.destinationState}
+              />
               {move.detail ? (
                 <span className="text-muted-foreground text-xs">{move.detail}</span>
               ) : null}
@@ -1231,8 +1277,12 @@ function WhatWillHappen(props: {
         </PlanItem>
         <PlanItem icon={<MessageSquareIcon className="size-3.5" />}>
           <span className="font-medium text-sm">Your conversation stays attached</span>
-          <span className="text-muted-foreground text-xs">
-            The agent restarts in the new folder and continues from a summary of this chat.
+          <span
+            className="text-muted-foreground text-xs"
+            data-testid="promote-chat-continuity"
+            data-continuity={props.continuity}
+          >
+            {describeConversationContinuity(props.continuity)}
           </span>
         </PlanItem>
         <PlanItem icon={<GitBranchIcon className="size-3.5" />}>
@@ -1258,26 +1308,50 @@ function PlanItem(props: { readonly icon: ReactNode; readonly children: ReactNod
   );
 }
 
-/** "source → destination", each keeping its last segment visible when space runs out. */
-function PathMove(props: { readonly from: string; readonly to: string }) {
+/**
+ * "from source / to destination". Each path keeps its last segment readable
+ * and shortens its parent folders first; a name still too long gives way in
+ * its middle, so a chat folder's id stays in view (the full path is the
+ * tooltip). A destination the node has not judged available is never shown as
+ * the target.
+ */
+function PathMove(props: {
+  readonly from: string;
+  readonly to: string;
+  readonly toState: DestinationCheckState;
+}) {
+  const destination = describePlanDestination(props.toState);
   return (
     <span className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-baseline gap-x-2 gap-y-0.5 font-mono text-[11px]">
       <span className="text-muted-foreground">from</span>
-      <PathLabel path={props.from} />
+      <TruncatedPath
+        path={props.from}
+        monospace
+        parentClassName="text-muted-foreground"
+        leafClassName="text-foreground/80"
+      />
       <span className="text-muted-foreground">to</span>
-      <PathLabel path={props.to} emphasize />
-    </span>
-  );
-}
-
-function PathLabel(props: { readonly path: string; readonly emphasize?: boolean }) {
-  const leaf = getBrowseLeafPathSegment(props.path);
-  const parent = props.path.slice(0, props.path.length - leaf.length);
-  return (
-    <span className="flex min-w-0" title={props.path}>
-      <span className="truncate text-muted-foreground">{parent}</span>
-      <span className={cn("shrink-0", props.emphasize ? "text-foreground" : "text-foreground/80")}>
-        {leaf}
+      <span
+        className="flex min-w-0"
+        data-testid="promote-chat-plan-destination"
+        data-state={props.toState}
+      >
+        {destination.kind === "path" ? (
+          <TruncatedPath
+            path={props.to}
+            monospace
+            parentClassName="text-muted-foreground"
+            // Settles from muted to full once the node judged the location.
+            leafClassName={cn(
+              "transition-colors duration-(--app-motion-duration-chip)",
+              destination.pending ? "text-muted-foreground" : "text-foreground",
+            )}
+          />
+        ) : (
+          <span className="min-w-0 truncate font-sans text-muted-foreground text-xs">
+            {destination.text}
+          </span>
+        )}
       </span>
     </span>
   );
@@ -1439,10 +1513,14 @@ function PromotionStepRow(props: {
             className={cn(
               "break-words text-xs",
               step.status === "warning" ? "text-foreground/85" : "text-muted-foreground",
-              step.id === "move" && step.status === "done" && "font-mono text-[11px]",
             )}
           >
-            {step.detail}
+            {step.id === "move" && step.status === "done" ? (
+              // The project's new folder: wraps between folders, never inside a name.
+              <WrappingPath path={step.detail} className="font-mono text-[11px]" />
+            ) : (
+              step.detail
+            )}
           </span>
         ) : null}
       </span>

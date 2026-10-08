@@ -3491,6 +3491,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       messageId: message.message.id,
       model: message.message.model,
       ...(context.cacheModelSelection ? { modelSelection: context.cacheModelSelection } : {}),
+      ...(context.session.cwd ? { cwd: context.session.cwd } : {}),
       runtimeSessionId: context.session.runtimeSessionId!,
       providerInstanceId: context.session.providerInstanceId!,
       observedAt: cacheStamp.createdAt,

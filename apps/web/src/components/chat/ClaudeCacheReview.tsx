@@ -83,14 +83,16 @@ export const claudeCacheReviewPresentation: ClaudeCacheReviewPresentation = {
                 </DialogDescription>
                 <ClaudeCacheEvidence observation={review.observation} />
                 <p className="text-sm text-muted-foreground">
-                  Compaction summarizes older context and can itself consume tokens. Your message
-                  and attachments will wait until native compaction is confirmed.
+                  {review.compactUnavailableReason ??
+                    "Compaction summarizes older context and can itself consume tokens. Your message and attachments will wait until native compaction is confirmed."}
                 </p>
                 <div className="flex flex-wrap gap-2">
                   <Button onClick={() => choose("continue")}>Continue with full context</Button>
-                  <Button variant="outline" onClick={() => choose("compact")}>
-                    Compact then send
-                  </Button>
+                  {review.compactUnavailableReason === null && (
+                    <Button variant="outline" onClick={() => choose("compact")}>
+                      Compact then send
+                    </Button>
+                  )}
                   <Button variant="ghost" onClick={() => choose("cancel")}>
                     Cancel
                   </Button>

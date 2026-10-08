@@ -17,6 +17,8 @@ import {
   isUnsupportedWindowsProjectPath,
   resolveProjectPathForDispatch,
   resolveInitialProjectBrowsePath,
+  splitPathAtSeparators,
+  splitPathForDisplay,
 } from "./projectPaths";
 
 describe("projectPaths", () => {
@@ -134,5 +136,46 @@ describe("projectPaths", () => {
       "~/projects/",
     );
     expect(resolveInitialProjectBrowsePath({})).toBe("~/");
+  });
+
+  it("splits a path around its last segment for display", () => {
+    expect(splitPathForDisplay("/home/me/.ryco/chats/2026-10-08-plan-a-trip-1a2b3c4d")).toEqual({
+      head: "/home/me/.ryco/chats",
+      separator: "/",
+      leaf: "2026-10-08-plan-a-trip-1a2b3c4d",
+    });
+    expect(splitPathForDisplay("/scratch")).toEqual({ head: "", separator: "/", leaf: "scratch" });
+    expect(splitPathForDisplay("foo")).toEqual({ head: "", separator: "", leaf: "foo" });
+    expect(splitPathForDisplay("/home/me/Code/")).toEqual({
+      head: "/home/me",
+      separator: "/",
+      leaf: "Code/",
+    });
+    expect(splitPathForDisplay("C:\\Users\\me\\trip")).toEqual({
+      head: "C:\\Users\\me",
+      separator: "\\",
+      leaf: "trip",
+    });
+    expect(splitPathForDisplay("/")).toEqual({ head: "", separator: "/", leaf: "" });
+    for (const path of ["/a/b/c", "foo", "/home/me/Code/", "C:\\x\\y", "/"]) {
+      const { head, separator, leaf } = splitPathForDisplay(path);
+      expect(`${head}${separator}${leaf}`).toBe(path);
+    }
+  });
+
+  it("cuts a path after each separator so it wraps between folders", () => {
+    expect(splitPathAtSeparators("/home/me/.ryco/chats/2026-10-08-plan")).toEqual([
+      "/",
+      "home/",
+      "me/",
+      ".ryco/",
+      "chats/",
+      "2026-10-08-plan",
+    ]);
+    expect(splitPathAtSeparators("C:\\Users\\me")).toEqual(["C:\\", "Users\\", "me"]);
+    // A backslash is part of a name on Unix.
+    expect(splitPathAtSeparators("/tmp/a\\b")).toEqual(["/", "tmp/", "a\\b"]);
+    expect(splitPathAtSeparators("notes")).toEqual(["notes"]);
+    expect(splitPathAtSeparators("")).toEqual([]);
   });
 });

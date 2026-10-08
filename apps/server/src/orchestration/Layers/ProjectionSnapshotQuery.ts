@@ -69,6 +69,7 @@ import { ProjectionThreadProposedPlan } from "../../persistence/Services/Project
 import { ProjectionThreadSession } from "../../persistence/Services/ProjectionThreadSessions.ts";
 import { ProjectionThread } from "../../persistence/Services/ProjectionThreads.ts";
 import { RepositoryIdentityResolver } from "../../project/Services/RepositoryIdentityResolver.ts";
+import { resolveThreadWorkspaceCwd } from "../../checkpointing/Utils.ts";
 import { ORCHESTRATION_PROJECTOR_NAMES } from "./ProjectionPipeline.ts";
 import { ThreadBackgroundLivenessService } from "../ThreadBackgroundLiveness.ts";
 import { pruneStaleContextWindowActivities } from "../contextWindowActivities.ts";
@@ -3291,9 +3292,28 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           a.id.localeCompare(b.id),
       );
       const checkpoint = backgroundWorkCheckpoint(orderedEvidence);
+      // Read after the window: a cwd that moved since is the one the next turn runs in.
+      const project =
+        thread.worktreePath === null
+          ? Option.getOrUndefined(
+              yield* getActiveProjectRowById({ projectId: thread.projectId }).pipe(
+                Effect.mapError(
+                  toPersistenceSqlOrDecodeError(
+                    "ProjectionSnapshotQuery.getThreadWindow:getProject:query",
+                    "ProjectionSnapshotQuery.getThreadWindow:getProject:decodeRow",
+                  ),
+                ),
+              ),
+            )
+          : undefined;
+      const workspaceCwd = resolveThreadWorkspaceCwd({
+        thread,
+        projects: project ? [{ id: project.projectId, workspaceRoot: project.workspaceRoot }] : [],
+      });
       return {
         snapshotSequence: computeSnapshotSequence(stateRows),
         thread: checkpoint ? { ...thread, activities: [...thread.activities, checkpoint] } : thread,
+        ...(workspaceCwd ? { workspaceCwd } : {}),
         history: {
           messages: createdAtHistoryPageInfo({
             threadId: input.threadId,

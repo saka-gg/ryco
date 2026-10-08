@@ -70,6 +70,12 @@ export interface ProviderResumeTarget {
   readonly hasResumeCursor: boolean;
 }
 
+/** Where the thread runs now, for {@link ProviderServiceShape.readThreadHistory}. */
+export interface ProviderThreadHistoryReadInput {
+  /** The thread's current working directory: its worktree, else its project's root. */
+  readonly cwd?: string;
+}
+
 /** The last time a live runtime showed any activity, by `Clock` milliseconds. */
 export interface ProviderRuntimeActivity {
   readonly threadId: ThreadId;
@@ -81,8 +87,19 @@ export interface ProviderRuntimeActivity {
  * ProviderServiceShape - Service API for provider session and turn orchestration.
  */
 export interface ProviderServiceShape {
-  /** Read-only history recovery, stamped with the binding that authorized the read. */
-  readonly readThreadHistory?: (threadId: ThreadId) => Effect.Effect<
+  /**
+   * Read-only history recovery, stamped with the binding that authorized the read.
+   *
+   * A move (a chat turned into a project, a relocated worktree) leaves the binding's recorded
+   * directory behind until the next start, and that folder may be gone. A conversation that
+   * survives the move (`resumeSurvivesCwdChange`) is read in `input.cwd`, where the next start
+   * resumes it; any other still lives in the recorded directory. The binding is never rewritten:
+   * cwd-relocation detection (`readResumeTarget`) compares the recorded directory to the new one.
+   */
+  readonly readThreadHistory?: (
+    threadId: ThreadId,
+    input?: ProviderThreadHistoryReadInput,
+  ) => Effect.Effect<
     Option.Option<{
       readonly binding: ProviderRuntimeBinding;
       readonly history: ProviderThreadHistory;

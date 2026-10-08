@@ -12,7 +12,12 @@ import {
   DEFAULT_AGENT_TOKEN_MODE,
   type Thread,
 } from "../types";
-import { type ComposerImageAttachment, type DraftThreadState } from "../composerDraftStore";
+import {
+  type ComposerImageAttachment,
+  type DraftThreadState,
+  isPendingChatDraft,
+} from "../composerDraftStore";
+import { NEW_CHAT_DRAFT_TITLE } from "./sidebar/sidebarChats.logic";
 import { DateTime, Schema } from "effect";
 import { selectThreadByRef, useStore } from "../store";
 import {
@@ -53,7 +58,8 @@ export function buildLocalDraftThread(
     environmentId: draftThread.environmentId,
     codexThreadId: null,
     projectId: draftThread.projectId,
-    title: "New thread",
+    // An unsent chat reads as it does in the sidebar's Chats section.
+    title: isPendingChatDraft(draftThread) ? NEW_CHAT_DRAFT_TITLE : "New thread",
     modelSelection: fallbackModelSelection,
     runtimeMode: draftThread.runtimeMode,
     interactionMode: draftThread.interactionMode,

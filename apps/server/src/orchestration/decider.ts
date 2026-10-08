@@ -61,6 +61,10 @@ import {
 } from "./checkpointRevertPolicy.ts";
 import { projectEvent } from "./projector.ts";
 import { restartContinuationTargetBlocker } from "./restartContinuationPolicy.ts";
+import {
+  SUPERSEDED_RUNTIME_SESSION_SET_DETAIL,
+  runtimeSessionMismatch,
+} from "./runtimeSessionFence.ts";
 import { resolveDelegatedChildLineage } from "./threadLineage.ts";
 import { TURN_FINALIZATION_REASON, resolveReleasedTurn } from "./turnFinalization.ts";
 import { latestUserMessage } from "./userMessageOrder.ts";
@@ -1384,13 +1388,14 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         nowMs: Date.now(),
       });
+      // A null runtime is a review of a stopped session: it holds while no runtime is bound.
       const resumeGuard = command.claudeResumeGuard;
       if (
         resumeGuard &&
         (targetThread.session?.providerName !== "claudeAgent" ||
           (resumeGuard.requireReady && targetThread.session.status !== "ready") ||
           targetThread.session.activeTurnId !== null ||
-          targetThread.session.runtimeSessionId !== resumeGuard.runtimeSessionId ||
+          (targetThread.session.runtimeSessionId ?? null) !== resumeGuard.runtimeSessionId ||
           (targetThread.latestTurn?.turnId ?? null) !== resumeGuard.latestTurnId ||
           JSON.stringify(targetThread.modelSelection) !==
             JSON.stringify(resumeGuard.modelSelection))
@@ -2353,6 +2358,17 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
+      // Atomic against server-decided transitions: an update from a runtime that has since
+      // been replaced or stopped must not overwrite the session bound now.
+      if (
+        command.expectedRuntime !== undefined &&
+        runtimeSessionMismatch(thread.session, command.expectedRuntime) !== null
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: SUPERSEDED_RUNTIME_SESSION_SET_DETAIL,
+        });
+      }
       // The decider is the one place that decides which turn a release ends and how,
       // using the authoritative in-memory model; every reducer applies `releasedTurn`.
       const releasedTurn = resolveReleasedTurn({

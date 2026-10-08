@@ -1,10 +1,15 @@
-import { scopedThreadKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
+import { scopedProjectKey, scopedThreadKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
 import { EnvironmentId, ProjectId, ThreadId } from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import type { DraftThreadState } from "../../composerDraftStore";
 import type { SidebarThreadSummary } from "../../types";
-import { buildSidebarChatRows, NEW_CHAT_DRAFT_TITLE } from "./sidebarChats.logic";
+import {
+  buildSidebarChatRows,
+  chatsTurnedIntoProjects,
+  collectChatProjectKeys,
+  NEW_CHAT_DRAFT_TITLE,
+} from "./sidebarChats.logic";
 
 const ENV = EnvironmentId.make("environment-local");
 const PROJECT = ProjectId.make("project-1");
@@ -120,5 +125,28 @@ describe("buildSidebarChatRows", () => {
       pinnedThreadKeys: new Set(),
     });
     expect(rows.map((row) => row.title)).toEqual(["sent"]);
+  });
+});
+
+describe("chats turned into projects", () => {
+  const key = (projectId: ProjectId) => scopedProjectKey({ environmentId: ENV, projectId });
+
+  it("collects the chat projects' keys", () => {
+    expect([...collectChatProjectKeys(projects)]).toEqual([key(CHAT_A), key(CHAT_B)]);
+  });
+
+  it("names a chat whose project now is a project, and nothing else", () => {
+    const before = collectChatProjectKeys(projects);
+    const after = [
+      { id: PROJECT, environmentId: ENV, kind: "project" as const },
+      // Turned into a project: the same project id, now of kind "project".
+      { id: CHAT_A, environmentId: ENV, kind: "project" as const },
+      { id: CHAT_B, environmentId: ENV, kind: "chat" as const },
+    ];
+    expect(chatsTurnedIntoProjects(before, after)).toEqual([key(CHAT_A)]);
+    // A deleted chat did not become anything; an unchanged list names nothing.
+    expect(chatsTurnedIntoProjects(before, [projects[0]!])).toEqual([]);
+    expect(chatsTurnedIntoProjects(before, projects)).toEqual([]);
+    expect(chatsTurnedIntoProjects(new Set(), after)).toEqual([]);
   });
 });

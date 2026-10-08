@@ -2086,8 +2086,11 @@ export default function ChatView(props: ChatViewProps) {
         worktreePath: activeThread?.worktreePath ?? null,
       })
     : null;
-  // A chat folder is never treated as a repository, so it is not polled.
-  const gitStatusQuery = useGitStatus({ environmentId, cwd: isChatContext ? null : gitCwd });
+  // A chat folder is never treated as a repository: no Git status, pull request
+  // or CI queries run against it (the overview's Changes would only ever say
+  // "No changes" there, since a chat records no checkpoints).
+  const sourceControlCwd = isChatContext ? null : gitCwd;
+  const gitStatusQuery = useGitStatus({ environmentId, cwd: sourceControlCwd });
   const queryClient = useQueryClient();
   const {
     postPushWorkflowWatch,
@@ -4849,9 +4852,8 @@ export default function ChatView(props: ChatViewProps) {
           <ChatHeader
             activeThreadEnvironmentId={activeThread.environmentId}
             activeThreadTitle={activeThread.title}
-            activeProjectName={
-              activeProject && isChatContext ? CHAT_PROJECT_LABEL : activeProject?.name
-            }
+            // An unsent chat draft has no project yet but is already a chat.
+            activeProjectName={isChatContext ? CHAT_PROJECT_LABEL : activeProject?.name}
             // A chat has no Git to miss: no "No Git" badge (promotion offers Git instead).
             isGitRepo={isGitRepo || isChatContext}
             chatProject={chatProjectHeaderTarget}
@@ -4995,7 +4997,7 @@ export default function ChatView(props: ChatViewProps) {
               <FloatingOverviewMotionFrame open={showFloatingOverviewSidebar}>
                 <ChatOverviewPanel
                   environmentId={environmentId}
-                  gitCwd={gitCwd}
+                  gitCwd={sourceControlCwd}
                   activeWorktreeBranch={activeWorktreeSummary?.branch ?? null}
                   activeThreadBranch={activeThread?.branch ?? null}
                   activeWorktreePrNumber={activeWorktreeSummary?.prNumber ?? null}
@@ -5412,7 +5414,7 @@ export default function ChatView(props: ChatViewProps) {
           <OverviewSidebarMotionFrame open={showInlineOverviewSidebar}>
             <ChatOverviewPanel
               environmentId={environmentId}
-              gitCwd={gitCwd}
+              gitCwd={sourceControlCwd}
               activeWorktreeBranch={activeWorktreeSummary?.branch ?? null}
               activeThreadBranch={activeThread?.branch ?? null}
               activeWorktreePrNumber={activeWorktreeSummary?.prNumber ?? null}
@@ -5501,7 +5503,7 @@ export default function ChatView(props: ChatViewProps) {
           >
             <ChatOverviewPanel
               environmentId={environmentId}
-              gitCwd={gitCwd}
+              gitCwd={sourceControlCwd}
               activeWorktreeBranch={activeWorktreeSummary?.branch ?? null}
               activeThreadBranch={activeThread?.branch ?? null}
               activeWorktreePrNumber={activeWorktreeSummary?.prNumber ?? null}
@@ -5531,7 +5533,7 @@ export default function ChatView(props: ChatViewProps) {
         <RightPanelSheet open={paneFocused && showOverviewSidebarSheet} onClose={closePlanSidebar}>
           <ChatOverviewPanel
             environmentId={environmentId}
-            gitCwd={gitCwd}
+            gitCwd={sourceControlCwd}
             activeWorktreeBranch={activeWorktreeSummary?.branch ?? null}
             activeThreadBranch={activeThread?.branch ?? null}
             activeWorktreePrNumber={activeWorktreeSummary?.prNumber ?? null}

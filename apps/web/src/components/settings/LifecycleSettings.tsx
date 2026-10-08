@@ -9,6 +9,7 @@ import { useThreadActions } from "../../hooks/useThreadActions";
 import { deleteChatFolderWithFeedback } from "../../lib/chatFolderActions";
 import { selectEnvironmentState, useStore } from "../../store";
 import { Checkbox } from "../ui/checkbox";
+import { WrappingPath } from "../ui/path-text";
 import { formatRelativeTimeLabel } from "../../timestampFormat";
 import {
   AlertDialog,
@@ -222,9 +223,10 @@ export function TrashSection(props: {
               />
               <span className="flex min-w-0 flex-col gap-0.5">
                 <span className="text-foreground">Also delete the chat's folder</span>
-                <span className="break-all text-muted-foreground text-xs">
-                  {pendingDeleteChatFolder}
-                </span>
+                <WrappingPath
+                  path={pendingDeleteChatFolder}
+                  className="text-muted-foreground text-xs"
+                />
                 <span className="text-muted-foreground text-xs">
                   Off by default: the files the agent wrote stay on disk unless you choose this.
                 </span>

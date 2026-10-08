@@ -1,15 +1,25 @@
-import { ProjectChatError, ProjectId, ThreadId } from "@ryco/contracts";
+import {
+  ProjectChatError,
+  ProjectId,
+  ProviderDriverKind,
+  ProviderInstanceId,
+  ThreadId,
+} from "@ryco/contracts";
 import { describe, expect, it } from "vitest";
 
 import {
+  advancePromotionStepsAfterMove,
   BUSY_CHAT_REASON,
   chatActivitySignature,
+  chatConversationContinuity,
   chatThreadLiveWork,
   describeChatBusy,
+  describeConversationContinuity,
   describeDestinationStatus,
   describeFolderContents,
   describeGitPlan,
   describeMovePlan,
+  describePlanDestination,
   describePromotionError,
   destinationLeaf,
   effectiveGitOptions,
@@ -25,6 +35,7 @@ import {
   readProjectChatErrorReason,
   replaceDestinationLeaf,
   resolvePromotionSteps,
+  resolveNextTurnProviderDriver,
   resolvePromotionSubmitBlocker,
   retargetDestinationForName,
   shouldShowGitIdentityNotice,
@@ -198,6 +209,86 @@ describe("what will happen", () => {
   });
 });
 
+describe("the plan's destination line", () => {
+  it("shows only a location the node judged available as where the files go", () => {
+    expect(describePlanDestination("available")).toEqual({ kind: "path", pending: false });
+    expect(describePlanDestination("checking")).toEqual({ kind: "path", pending: true });
+    expect(describePlanDestination("empty")).toEqual({
+      kind: "unusable",
+      text: "Choose a location above",
+    });
+    for (const refused of [
+      "exists",
+      "invalid",
+      "access-denied",
+      "inside-chats",
+      "inside-source",
+      "retired-checkout",
+    ] as const) {
+      expect(describePlanDestination(refused)).toEqual({
+        kind: "unusable",
+        text: "Choose another location above",
+      });
+    }
+  });
+});
+
+describe("conversation continuity", () => {
+  const codex = ProviderDriverKind.make("codex");
+  const claude = ProviderDriverKind.make("claudeAgent");
+  const providers = [
+    { instanceId: ProviderInstanceId.make("codex"), driver: codex },
+    { instanceId: ProviderInstanceId.make("codex_work"), driver: codex },
+    { instanceId: ProviderInstanceId.make("claude_openrouter"), driver: claude },
+  ];
+  const selecting = (instanceId: string) => ({
+    modelSelection: { instanceId: ProviderInstanceId.make(instanceId), model: "model" },
+    session: null,
+  });
+
+  it("reads the driver of the instance the next turn runs on", () => {
+    expect(resolveNextTurnProviderDriver(selecting("codex_work"), providers)).toBe(codex);
+    expect(resolveNextTurnProviderDriver(selecting("claude_openrouter"), providers)).toBe(claude);
+    // An instance the node does not list: only a session on that same instance tells.
+    expect(resolveNextTurnProviderDriver(selecting("gone"), providers)).toBeNull();
+    expect(
+      resolveNextTurnProviderDriver(
+        {
+          ...selecting("gone"),
+          session: {
+            provider: claude,
+            providerInstanceId: ProviderInstanceId.make("gone"),
+            status: "ready",
+            orchestrationStatus: "ready",
+            createdAt: "2026-10-08T10:00:00.000Z",
+            updatedAt: "2026-10-08T10:00:00.000Z",
+          },
+        },
+        [],
+      ),
+    ).toBe(claude);
+    expect(resolveNextTurnProviderDriver({ session: null }, providers)).toBeNull();
+  });
+
+  it("resumes natively only on Codex and stays neutral when unsure", () => {
+    expect(chatConversationContinuity([codex])).toBe("resume");
+    expect(chatConversationContinuity([codex, codex])).toBe("resume");
+    expect(chatConversationContinuity([claude])).toBe("handoff");
+    expect(chatConversationContinuity([ProviderDriverKind.make("cursor")])).toBe("handoff");
+    expect(chatConversationContinuity([codex, claude])).toBe("unknown");
+    expect(chatConversationContinuity([codex, null])).toBe("unknown");
+    expect(chatConversationContinuity([])).toBe("unknown");
+  });
+
+  it("describes each continuity without promising a summary to Codex", () => {
+    expect(describeConversationContinuity("resume")).toBe(
+      "The agent resumes this conversation in the new folder.",
+    );
+    expect(describeConversationContinuity("handoff")).toMatch(/fresh session .* summary/);
+    expect(describeConversationContinuity("unknown")).not.toMatch(/summary|resumes/);
+  });
+});
+
 describe("promotion steps", () => {
   const result = {
     projectId: PROJECT_ID,
@@ -244,6 +335,23 @@ describe("promotion steps", () => {
       commitError: "Git could not be initialized.",
     });
     expect(steps.map((step) => step.status)).toEqual(["done", "warning", "skipped"]);
+  });
+
+  it("finishes the move once the project points at its new folder", () => {
+    const running = planPromotionSteps(ALL_GIT, { crossDevice: false });
+    const advanced = advancePromotionStepsAfterMove(running, "/Code/plan-a-trip");
+    expect(advanced.map((step) => [step.id, step.status, step.detail])).toEqual([
+      ["move", "done", "/Code/plan-a-trip"],
+      ["git-init", "running", null],
+      ["initial-commit", "pending", null],
+    ]);
+    // Once the move settled, nothing changes (the same steps come back).
+    expect(advancePromotionStepsAfterMove(advanced, "/elsewhere")).toBe(advanced);
+    const settled = resolvePromotionSteps(ALL_GIT, result);
+    expect(advancePromotionStepsAfterMove(settled, "/elsewhere")).toBe(settled);
+    expect(
+      advancePromotionStepsAfterMove(planPromotionSteps(NO_GIT, { crossDevice: false }), "/x"),
+    ).toEqual([{ id: "move", label: "Move files", status: "done", detail: "/x" }]);
   });
 
   it("calls an empty first commit skipped, not failed", () => {

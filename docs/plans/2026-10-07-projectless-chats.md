@@ -512,6 +512,40 @@ notable differences from the design above.
   check now uses too. On a provider that cannot follow the move, a restart without a message is
   deferred to the next turn. `ProviderService.readResumeTarget` was added for persisted bindings.
 
+**Fixes after the end-to-end test**
+
+- Claude resume review after a stop or a move. `ClaudeCacheObservation.cwd` records the
+  directory of the runtime that made the request, and `OrchestrationThreadWindowSnapshot`
+  carries `workspaceCwd`, the directory the next turn runs in. `assessClaudeCacheResume` shows no
+  review when both are known and differ, because that turn continues by handoff. A stopped session
+  (no runtime) is reviewed with its own reason, and `compactUnavailableReason`
+  (`claudeCompactUnavailableReason`) makes surfaces offer only continuing: compaction needs a
+  ready, idle session with a runtime on the selected model. `ClaudeResumeGuard.runtimeSessionId`
+  is nullable; the decider accepts a null guard only while no runtime is bound.
+- Runtime-session fence. `thread.session.set` gained an optional server-internal
+  `expectedRuntime`. Runtime ingestion sets it to the provider instance and runtime of the event
+  it derives the update from, and the decider rejects the update when the thread's session is no
+  longer bound to them (`runtimeSessionFence.ts`). Ingestion counts that rejection as a stale
+  event (`runtime-session-superseded`) and applies nothing more of the event. A late lifecycle
+  event of a replaced or stopped runtime can therefore no longer overwrite its successor.
+- History-recovery attachment fence. Provider transcripts keep the raw `ryco-attachments`
+  manifest that live completion strips. `historyMessagesToRestore` normalizes recovered assistant
+  text the same way (`parseAssistantDelivery` and `formatAssistantDeliveryText`, shared with
+  ingestion) and re-delivers no files. A message that already shows the delivered reply, with its
+  per-file notices, is left alone; one that still shows a raw manifest is repaired.
+- Quiet paths for an unknown hosting provider. A promoted chat's new repository has no remote, so
+  it resolves to the `unknown` source control provider. The remote Git status looks up no pull
+  request for it, and the list and search RPCs (issues, change requests, labels, assignees,
+  workflow runs) answer empty instead of failing. Single-item reads and mutations still fail,
+  with a message that the repository has no recognized host. Recognized hosts keep their errors.
+- Binding cwd after promotion. A move leaves the provider binding's recorded directory behind
+  until the next start. `ProviderService.readThreadHistory` takes the thread's current directory:
+  a provider whose resume survives a directory change (Codex) is read there, any other in the
+  recorded directory. The binding is not rewritten, because `readResumeTarget` compares the
+  recorded directory with the new one to detect the move.
+- The plan's paths in the promotion dialog shorten their parent folders first and cut a name that
+  is still too long in its middle (`TruncatedPath`), so a chat folder's suffix stays visible.
+
 **Not done**
 
 - Phase 3.

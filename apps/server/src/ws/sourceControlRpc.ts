@@ -88,6 +88,34 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
       .resolve({ cwd })
       .pipe(Effect.tap((provider) => requireChangeRequestCapability(provider.kind, request)));
 
+  /**
+   * Run a list or search read for `cwd`. A checkout without a recognized
+   * hosting provider (no remote yet, or an unrecognized host) resolves to the
+   * `unknown` provider, which hosts nothing: its lists are empty, just as git
+   * status reports no change request for it. Panels list on open, so this
+   * answers `empty` instead of failing every read; reads of one item and every
+   * mutation still fail clearly. Recognized hosts keep the capability check
+   * (when `request` is given) and their own errors.
+   */
+  const listFromHostingProvider = <A>(input: {
+    readonly cwd: string;
+    readonly empty: NoInfer<A>;
+    readonly request?: ChangeRequestHostRequest;
+    readonly list: (
+      provider: SourceControlProviderShape,
+    ) => Effect.Effect<A, SourceControlProviderError>;
+  }) =>
+    sourceControlRegistry.resolve({ cwd: input.cwd }).pipe(
+      Effect.flatMap((provider) => {
+        if (provider.kind === "unknown") return Effect.succeed(input.empty);
+        const capable =
+          input.request === undefined
+            ? Effect.void
+            : requireChangeRequestCapability(provider.kind, input.request);
+        return capable.pipe(Effect.andThen(() => input.list(provider)));
+      }),
+    );
+
   /** Resolve a capable provider for `cwd` and call an optional change request method, failing clearly when absent. */
   const callOptionalChangeRequestMethod = <I, A>(
     cwd: string,
@@ -171,14 +199,16 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
         WS_METHODS.sourceControlListIssues,
         ownerEffect(
           WS_METHODS.sourceControlListIssues,
-          sourceControlRegistry.resolve({ cwd }).pipe(
-            Effect.flatMap((provider) =>
+          listFromHostingProvider({
+            cwd,
+            empty: [],
+            list: (provider) =>
               provider.listIssues({
                 cwd,
                 state,
                 ...(limit !== undefined ? { limit } : {}),
               }),
-            ),
+          }).pipe(
             Effect.tap(() =>
               refreshLinkedWorktreeSourceControlStates({
                 cwd,
@@ -260,14 +290,16 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
         WS_METHODS.sourceControlSearchIssues,
         ownerEffect(
           WS_METHODS.sourceControlSearchIssues,
-          sourceControlRegistry.resolve({ cwd }).pipe(
-            Effect.flatMap((provider) =>
+          listFromHostingProvider({
+            cwd,
+            empty: [],
+            list: (provider) =>
               provider.searchIssues({
                 cwd,
                 query,
                 ...(limit !== undefined ? { limit } : {}),
               }),
-            ),
+          }).pipe(
             Effect.tap(() =>
               refreshLinkedWorktreeSourceControlStates({
                 cwd,
@@ -293,8 +325,11 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
         WS_METHODS.sourceControlListChangeRequests,
         ownerEffect(
           WS_METHODS.sourceControlListChangeRequests,
-          resolveCapableProvider(cwd, request).pipe(
-            Effect.flatMap((provider) => {
+          listFromHostingProvider({
+            cwd,
+            empty: [],
+            request,
+            list: (provider) => {
               if (involvement !== undefined) {
                 // Involvement is a server-side search: state and query combine with it.
                 return provider.listChangeRequests({
@@ -319,7 +354,8 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
                 state,
                 ...(limit !== undefined ? { limit } : {}),
               });
-            }),
+            },
+          }).pipe(
             Effect.tap(() =>
               refreshLinkedWorktreeSourceControlStates({
                 cwd,
@@ -338,14 +374,17 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
         WS_METHODS.sourceControlSearchChangeRequests,
         ownerEffect(
           WS_METHODS.sourceControlSearchChangeRequests,
-          resolveCapableProvider(cwd, { operation: "searchChangeRequests" }).pipe(
-            Effect.flatMap((provider) =>
+          listFromHostingProvider({
+            cwd,
+            empty: [],
+            request: { operation: "searchChangeRequests" },
+            list: (provider) =>
               provider.searchChangeRequests({
                 cwd,
                 query,
                 ...(limit !== undefined ? { limit } : {}),
               }),
-            ),
+          }).pipe(
             Effect.tap(() =>
               refreshLinkedWorktreeSourceControlStates({
                 cwd,
@@ -779,9 +818,11 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
         WS_METHODS.sourceControlListIssueLabels,
         ownerEffect(
           WS_METHODS.sourceControlListIssueLabels,
-          sourceControlRegistry
-            .resolve({ cwd })
-            .pipe(Effect.flatMap((provider) => provider.listLabels({ cwd }))),
+          listFromHostingProvider({
+            cwd,
+            empty: [],
+            list: (provider) => provider.listLabels({ cwd }),
+          }),
         ),
         {
           "rpc.aggregate": "source-control",
@@ -792,9 +833,11 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
         WS_METHODS.sourceControlListIssueAssignees,
         ownerEffect(
           WS_METHODS.sourceControlListIssueAssignees,
-          sourceControlRegistry
-            .resolve({ cwd })
-            .pipe(Effect.flatMap((provider) => provider.listAssignees({ cwd }))),
+          listFromHostingProvider({
+            cwd,
+            empty: [],
+            list: (provider) => provider.listAssignees({ cwd }),
+          }),
         ),
         {
           "rpc.aggregate": "source-control",
@@ -811,19 +854,31 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
         WS_METHODS.sourceControlListWorkflowRuns,
         ownerEffect(
           WS_METHODS.sourceControlListWorkflowRuns,
-          callSourceControlWorkflowMethod({
+          listFromHostingProvider({
             cwd,
-            operation: "listWorkflowRuns",
-            invoke: (provider) => {
-              const method = provider.listWorkflowRuns;
-              return method?.({
-                cwd,
-                ...(pullRequestNumber !== undefined ? { pullRequestNumber } : {}),
-                ...(commitSha !== undefined ? { commitSha } : {}),
-                ...(branch !== undefined ? { branch } : {}),
-                ...(limit !== undefined ? { limit } : {}),
-              });
+            empty: {
+              provider: "unknown",
+              repository: Option.none(),
+              pullRequestNumber: Option.fromUndefinedOr(pullRequestNumber),
+              headSha: Option.none(),
+              runs: [],
             },
+            // Re-resolves the (cached) provider to apply the workflow capability gate.
+            list: () =>
+              callSourceControlWorkflowMethod({
+                cwd,
+                operation: "listWorkflowRuns",
+                invoke: (provider) => {
+                  const method = provider.listWorkflowRuns;
+                  return method?.({
+                    cwd,
+                    ...(pullRequestNumber !== undefined ? { pullRequestNumber } : {}),
+                    ...(commitSha !== undefined ? { commitSha } : {}),
+                    ...(branch !== undefined ? { branch } : {}),
+                    ...(limit !== undefined ? { limit } : {}),
+                  });
+                },
+              }),
           }),
         ),
         {

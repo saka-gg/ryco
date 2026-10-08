@@ -850,9 +850,11 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
     }
 
     const shouldQueryPullRequests =
-      details.branch === null
-        ? false
-        : ((yield* probeBranchPublished(cwd, details.branch, details.upstreamRef)) ?? true);
+      details.branch !== null &&
+      ((yield* probeBranchPublished(cwd, details.branch, details.upstreamRef)) ?? true) &&
+      // Change requests live on a recognized hosting provider. A repository without one (no
+      // remote yet, or an unrecognized host) has none to report; that is not a status failure.
+      (yield* sourceControlProvider(cwd)).kind !== "unknown";
     const pr =
       details.branch !== null && shouldQueryPullRequests
         ? yield* findLatestPr(cwd, {

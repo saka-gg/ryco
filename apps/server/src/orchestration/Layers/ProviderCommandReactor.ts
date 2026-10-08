@@ -2594,6 +2594,10 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     }
 
     // Always settled: the user asked for the stop, so the thread never stays busy.
+    // Deliberately without the stopped runtime's id, unlike the runtime's own `session.exited`:
+    // the stop is final for that runtime, so every event it still emits (a late `ready`,
+    // `turn.completed`) fails ingestion's runtime match and the decider's runtime fence instead
+    // of reviving the session. A Claude resume review of this state guards on "no runtime".
     yield* setThreadSession({
       threadId: thread.id,
       session: {

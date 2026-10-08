@@ -11,7 +11,7 @@ import {
   type OrchestrationThread,
 } from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
-import { Effect } from "effect";
+import { Effect, Schema } from "effect";
 
 import { decideOrchestrationCommand } from "./decider.ts";
 
@@ -145,5 +145,59 @@ describe("Claude resume review guards", () => {
         ),
       ).rejects.toThrow("resume review is stale");
     }
+  });
+
+  it("accepts a review of a stopped session only while no runtime is bound", async () => {
+    const live = makeThread();
+    const stopped = makeThread({
+      session: { ...live.session!, status: "stopped", runtimeSessionId: undefined },
+    });
+    const command = makeCommand({
+      modelSelection: stopped.modelSelection,
+      claudeResumeGuard: {
+        runtimeSessionId: null,
+        latestTurnId: null,
+        modelSelection: stopped.modelSelection,
+        requireReady: false,
+      },
+    });
+    await expect(
+      Effect.runPromise(decideOrchestrationCommand({ command, readModel: makeReadModel(stopped) })),
+    ).resolves.toBeDefined();
+    // A runtime started since the review (even a ready one) makes it stale.
+    await expect(
+      Effect.runPromise(decideOrchestrationCommand({ command, readModel: makeReadModel(live) })),
+    ).rejects.toThrow("resume review is stale");
+    // A runtime-naming review never matches a stopped session that has none.
+    await expect(
+      Effect.runPromise(
+        decideOrchestrationCommand({
+          command: makeCommand({
+            modelSelection: stopped.modelSelection,
+            claudeResumeGuard: {
+              runtimeSessionId: RuntimeSessionId.make("runtime-a1"),
+              latestTurnId: null,
+              modelSelection: stopped.modelSelection,
+              requireReady: false,
+            },
+          }),
+          readModel: makeReadModel(stopped),
+        }),
+      ),
+    ).rejects.toThrow("resume review is stale");
+  });
+
+  it("keeps decoding runtime-naming guards from older clients", () => {
+    const thread = makeThread();
+    const decoded = Schema.decodeUnknownSync(ThreadTurnStartCommand)({
+      ...makeCommand({ modelSelection: thread.modelSelection }),
+      claudeResumeGuard: {
+        runtimeSessionId: "runtime-a1",
+        latestTurnId: null,
+        modelSelection: thread.modelSelection,
+        requireReady: false,
+      },
+    });
+    expect(decoded.claudeResumeGuard?.runtimeSessionId).toBe("runtime-a1");
   });
 });
