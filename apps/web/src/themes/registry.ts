@@ -1,3 +1,5 @@
+import type { CSSProperties } from "react";
+
 import { BUILT_IN_THEMES, DEFAULT_THEME, DEFAULT_THEME_ID } from "./builtin";
 import {
   THEME_TOKEN_NAMES,
@@ -230,19 +232,41 @@ export function resolveTokens(theme: ThemeDefinition, variant: ThemeVariant): Th
   return { ...base, ...overlay };
 }
 
+/**
+ * The theme tokens that may be emitted as custom properties: known, theme-owned
+ * names with values that cannot break out of a declaration. Both emitters read
+ * this, so a stylesheet and an inline style apply the exact same guards.
+ */
+function emittableTokenEntries(tokens: ThemeTokens): Array<[name: string, value: string]> {
+  return Object.entries(tokens).filter((entry): entry is [string, string] => {
+    const [name, value] = entry;
+    if (GLOBAL_APPEARANCE_TOKEN_NAMES.has(name)) return false;
+    if (!KNOWN_TOKEN_NAMES.has(name)) return false;
+    if (typeof value !== "string" || value.length === 0) return false;
+    if (value.includes(";") || value.includes("}")) return false;
+    const kind = getTokenKind(name);
+    if (!kind) return false;
+    return isValidTokenValue(kind, value);
+  });
+}
+
 export function tokensToCss(tokens: ThemeTokens): string {
-  return Object.entries(tokens)
-    .filter(([name, value]) => {
-      if (GLOBAL_APPEARANCE_TOKEN_NAMES.has(name)) return false;
-      if (!KNOWN_TOKEN_NAMES.has(name)) return false;
-      if (typeof value !== "string" || value.length === 0) return false;
-      if (value.includes(";") || value.includes("}")) return false;
-      const kind = getTokenKind(name);
-      if (!kind) return false;
-      return isValidTokenValue(kind, value);
-    })
+  return emittableTokenEntries(tokens)
     .map(([name, value]) => `--${name}: ${value};`)
     .join(" ");
+}
+
+/**
+ * The same tokens as {@link tokensToCss}, as an inline `style` object of custom
+ * properties. Lets a subtree pin one variant's tokens (the theme's dark
+ * variables only exist on `:root.dark`, so a nested `.dark` class gets none).
+ */
+export function themeTokensToStyle(tokens: ThemeTokens): CSSProperties {
+  const style: Record<`--${string}`, string> = {};
+  for (const [name, value] of emittableTokenEntries(tokens)) {
+    style[`--${name}`] = value;
+  }
+  return style as CSSProperties;
 }
 
 export function applyThemeToDocument(theme: ThemeDefinition): void {

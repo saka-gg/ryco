@@ -24,10 +24,10 @@ import {
   when,
 } from "@ryco/shared/automationSchedule";
 
+import { formatCount } from "~/lib/formatCount";
+
 /** "1 run" · "3 runs" · "2 missed" */
-export function plural(n: number, word: string, words = `${word}s`): string {
-  return `${n.toLocaleString("en-US")} ${n === 1 ? word : words}`;
-}
+export const plural = formatCount;
 
 export function runStatusLabel(status: AutomationCentreRun["run"]["status"]): string {
   return AUTOMATION_RUN_STATUS[status].label;

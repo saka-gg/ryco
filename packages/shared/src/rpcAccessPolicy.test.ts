@@ -64,6 +64,15 @@ describe("shared RPC access policy", () => {
     }
   });
 
+  it("lets viewers read worktree notes and operators change them", () => {
+    expect(hostedRoleAllows("viewer", WS_METHODS.notesList)).toBe(true);
+    expect(hostedRoleAllows("viewer", WS_METHODS.notesCommand)).toBe(false);
+    expect(hostedRoleAllows("operator", WS_METHODS.notesCommand)).toBe(true);
+    expect(hostedRoleAllows("operator", WS_METHODS.notesCommand, false)).toBe(false);
+    expect(rpcDeliveryEffectFor(WS_METHODS.notesList)).toBe("read");
+    expect(rpcDeliveryEffectFor(WS_METHODS.notesCommand)).toBe("mutation");
+  });
+
   it("fails closed for missing or stale hosted roles", () => {
     for (const method of [
       WS_METHODS.serverSignalDiagnosticProcess,

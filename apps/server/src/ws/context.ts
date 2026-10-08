@@ -1,5 +1,6 @@
 import { makeClientWorkspaceUse } from "../workspace/clientWorkspaceUse.ts";
 import { LocalTaskService } from "../tasks/LocalTaskService.ts";
+import { WorktreeNotesService } from "../notes/WorktreeNotesService.ts";
 import { DailyRecapQuery } from "../statistics/DailyRecapQuery.ts";
 import { StorageService } from "../storage/StorageService.ts";
 import { WorkspaceLifecycle } from "../workspace/WorkspaceLifecycle.ts";
@@ -186,6 +187,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
     // Optional for the route-test reason above; production provides it with the runtime.
     const workspaceLifecycle = yield* Effect.serviceOption(WorkspaceLifecycle);
     const localTaskService = yield* Effect.serviceOption(LocalTaskService);
+    const worktreeNotesService = yield* Effect.serviceOption(WorktreeNotesService);
     const dailyRecapQuery = yield* Effect.serviceOption(DailyRecapQuery);
     const codexMcp = yield* makeCodexMcpService;
     const claudeMcp = yield* makeClaudeMcpAdapter();
@@ -908,6 +910,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       providerMaintenanceRunner,
       dailyRecapQuery,
       localTaskService,
+      worktreeNotesService,
       config,
       lifecycleEvents,
       serverSettings,

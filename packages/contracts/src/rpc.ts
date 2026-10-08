@@ -9,6 +9,7 @@ import {
   LocalTaskListResult,
   LocalTaskDelegateInput,
 } from "./localTasks.ts";
+import { NotesCommand, NotesError, NotesListInput, NotesSnapshot } from "./notes.ts";
 import { DailyRecapRequest, DailyRecapSnapshot, DailyRecapReadError } from "./dailyRecap.ts";
 import { EffectiveProjectPreferences } from "./settings.ts";
 import {
@@ -468,6 +469,11 @@ export const WS_METHODS = {
   serverDeleteLocalTask: "server.deleteLocalTask",
   serverDelegateLocalTask: "server.delegateLocalTask",
   serverGetDailyRecap: "server.getDailyRecap",
+
+  // Worktree notes
+  notesList: "notes.list",
+  notesCommand: "notes.command",
+
   serverRefreshProviders: "server.refreshProviders",
   serverUpdateProvider: "server.updateProvider",
   serverUpsertKeybinding: "server.upsertKeybinding",
@@ -862,6 +868,18 @@ export const WsServerDelegateLocalTaskRpc = Rpc.make(WS_METHODS.serverDelegateLo
   payload: LocalTaskDelegateInput,
   success: LocalTask,
   error: Schema.Union([LocalTaskError, AuthRpcError, OrchestrationDispatchCommandError]),
+});
+
+export const WsNotesListRpc = Rpc.make(WS_METHODS.notesList, {
+  payload: NotesListInput,
+  success: NotesSnapshot,
+  error: Schema.Union([NotesError, AuthRpcError]),
+});
+
+export const WsNotesCommandRpc = Rpc.make(WS_METHODS.notesCommand, {
+  payload: NotesCommand,
+  success: NotesSnapshot,
+  error: Schema.Union([NotesError, AuthRpcError]),
 });
 
 export const WsServerGetDailyRecapRpc = Rpc.make(WS_METHODS.serverGetDailyRecap, {
@@ -2195,6 +2213,8 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsServerUpdateLocalTaskRpc
   | typeof WsServerDeleteLocalTaskRpc
   | typeof WsServerDelegateLocalTaskRpc
+  | typeof WsNotesListRpc
+  | typeof WsNotesCommandRpc
   | typeof WsServerGetDailyRecapRpc
   | typeof WsServerRefreshProvidersRpc
   | typeof WsServerUpdateProviderRpc
@@ -2387,6 +2407,8 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsServerUpdateLocalTaskRpc,
   WsServerDeleteLocalTaskRpc,
   WsServerDelegateLocalTaskRpc,
+  WsNotesListRpc,
+  WsNotesCommandRpc,
   WsServerGetDailyRecapRpc,
   WsServerRefreshProvidersRpc,
   WsServerUpdateProviderRpc,

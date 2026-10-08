@@ -1,10 +1,12 @@
 import { useCallback, useSyncExternalStore } from "react";
 
+import { PREFERS_REDUCED_MOTION_QUERY } from "../lib/perf/motion";
 import {
   APPEARANCE_PREFERENCES_CHANGE_EVENT,
   APPEARANCE_PREFERENCES_STORAGE_KEY,
   getAppearancePreferences,
   getEffectiveAppearancePreferences,
+  isReducedMotionEffective,
   isSurfaceTransparencyReducedBySystem,
   type AppearancePreferenceKey,
 } from "../themes/appearancePreferences";
@@ -56,5 +58,37 @@ export function useSurfaceTransparencyReducedBySystem(): boolean {
     subscribe,
     isSurfaceTransparencyReducedBySystem,
     isSurfaceTransparencyReducedBySystem,
+  );
+}
+
+/**
+ * Subscribes to both inputs of {@link isReducedMotionEffective}: the in-app
+ * Motion preference and the OS `prefers-reduced-motion` query. The query is
+ * watched directly rather than through the environment sync's republished
+ * change event, so a consumer stays correct wherever that sync is not wired.
+ */
+export function subscribeToReducedMotionEffective(onChange: () => void): () => void {
+  const unsubscribePreferences = subscribe(onChange);
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+    return unsubscribePreferences;
+  }
+  const mediaQueryList = window.matchMedia(PREFERS_REDUCED_MOTION_QUERY);
+  mediaQueryList.addEventListener("change", onChange);
+  return () => {
+    unsubscribePreferences();
+    mediaQueryList.removeEventListener("change", onChange);
+  };
+}
+
+/**
+ * Reactive {@link isReducedMotionEffective}: whether motion is reduced by the
+ * in-app Motion preference or by the OS setting. For components whose motion
+ * runs outside CSS (Web Animations, JS timers) or that mark a subtree reduced.
+ */
+export function useReducedMotionEffective(): boolean {
+  return useSyncExternalStore(
+    subscribeToReducedMotionEffective,
+    isReducedMotionEffective,
+    isReducedMotionEffective,
   );
 }

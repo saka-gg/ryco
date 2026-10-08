@@ -1,4 +1,5 @@
 import { LocalTaskServiceLive } from "./tasks/LocalTaskService.ts";
+import { WorktreeNotesServiceLive } from "./notes/WorktreeNotesService.ts";
 import { DailyRecapQueryLive } from "./statistics/DailyRecapQuery.ts";
 import { StorageServiceLive } from "./storage/StorageService.ts";
 import { WorkspaceLifecycleLive } from "./workspace/WorkspaceLifecycle.ts";
@@ -488,6 +489,7 @@ const RuntimeDependenciesLive = RestartContinuationLive.pipe(
 const RuntimeServicesLive = Layer.mergeAll(
   DailyRecapQueryLive,
   LocalTaskServiceLive,
+  WorktreeNotesServiceLive,
   StorageServiceLive.pipe(Layer.provide(ProviderProtectedPathsLive)),
   SessionImportLive,
   AutomationCentreLive.pipe(

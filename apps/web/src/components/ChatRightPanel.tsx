@@ -46,9 +46,8 @@ const RightPanelLoadingFallback = (props: { mode: DiffPanelMode; label: string }
   );
 };
 
-// The column, its slide and this content fade all run on the pane duration and
-// curve shared with the overview column (`OverviewSidebarMotionFrame`), so the
-// two right-side surfaces trade places as one motion.
+// The column, its slide and this content fade all run on the shared pane
+// duration and curve, so the panel opens and closes as one motion.
 const RIGHT_PANEL_MOTION_CLASS_NAME =
   "duration-(--app-motion-duration-pane) ease-(--app-motion-ease) motion-reduce:transition-none";
 

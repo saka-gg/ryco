@@ -14,7 +14,7 @@ import {
   readEnvironmentConnection,
   subscribeEnvironmentConnections,
 } from "../environments/runtime";
-import type { WsRpcClient } from "@ryco/client-runtime/rpc";
+import type { VcsStatusStreamMeta, WsRpcClient } from "@ryco/client-runtime/rpc";
 import { useSettings } from "~/hooks/useSettings";
 
 export interface GitStatusState {
@@ -22,6 +22,12 @@ export interface GitStatusState {
   readonly error: GitManagerServiceError | null;
   readonly cause: Cause.Cause<GitManagerServiceError> | null;
   readonly isPending: boolean;
+  /**
+   * Set while `data` carries local status only: its remote half (upstream,
+   * ahead / behind, change request) is a placeholder the stream has not
+   * filled in yet. Absent once the remote half is known.
+   */
+  readonly remotePending?: true;
 }
 
 type GitStatusClient = Pick<WsRpcClient["vcs"], "onStatus" | "refreshStatus">;
@@ -366,12 +372,14 @@ function subscribeToGitStatus(
       cwd,
       ...(automaticRemoteRefreshIntervalMs > 0 ? { automaticRemoteRefreshIntervalMs } : {}),
     },
-    (status: VcsStatusResult) => {
+    // Without the meta (status-only doubles) the remote half counts as known.
+    (status: VcsStatusResult, meta?: VcsStatusStreamMeta) => {
       appAtomRegistry.set(gitStatusStateAtom(targetKey), {
         data: status,
         error: null,
         cause: null,
         isPending: false,
+        ...(meta?.remoteKnown === false ? { remotePending: true } : {}),
       });
     },
     {

@@ -235,6 +235,37 @@ describe("gitStatusState", () => {
     expect(gitStatusListeners.size).toBe(0);
   });
 
+  it("marks data whose remote half the stream has not delivered yet", () => {
+    let emit: (status: VcsStatusResult, meta: { remoteKnown: boolean }) => void = () => {};
+    const client = {
+      refreshStatus: gitClient.refreshStatus,
+      onStatus: vi.fn(
+        (
+          _input: { cwd: string },
+          listener: (status: VcsStatusResult, meta: { remoteKnown: boolean }) => void,
+        ) => {
+          emit = listener;
+          return () => undefined;
+        },
+      ),
+    };
+    const release = watchGitStatus(TARGET, client);
+
+    emit({ ...BASE_STATUS, hasUpstream: false }, { remoteKnown: false });
+    expect(getGitStatusSnapshot(TARGET).remotePending).toBe(true);
+
+    emit(BASE_STATUS, { remoteKnown: true });
+    expect(getGitStatusSnapshot(TARGET)).toEqual({
+      data: BASE_STATUS,
+      error: null,
+      cause: null,
+      isPending: false,
+    });
+    expect("remotePending" in getGitStatusSnapshot(TARGET)).toBe(false);
+
+    release();
+  });
+
   it("relies on the status stream instead of requesting a full refresh when first watched", () => {
     const release = watchGitStatus(TARGET, gitClient);
 

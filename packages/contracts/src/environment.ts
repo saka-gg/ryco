@@ -59,6 +59,8 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   worktreeSubmoduleSettings: Schema.optionalKey(Schema.Boolean),
   /** Usage-limit settings and the resume/snooze worker; absent on older servers. */
   usageLimitRecovery: Schema.optionalKey(Schema.Boolean),
+  /** Server-owned worktree notes (`notes.list` / `notes.command`); absent on older servers. */
+  worktreeNotes: Schema.optionalKey(Schema.Boolean),
   fileAttachments: Schema.optional(Schema.Struct({ maxUploadBytes: NonNegativeInt })),
 });
 export type ExecutionEnvironmentCapabilities = typeof ExecutionEnvironmentCapabilities.Type;

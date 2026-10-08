@@ -143,6 +143,8 @@ export const RPC_ACCESS_POLICY = {
   [WS_METHODS.serverDeleteLocalTask]: "owner",
   [WS_METHODS.serverDelegateLocalTask]: "owner",
   [WS_METHODS.serverGetDailyRecap]: "owner",
+  [WS_METHODS.notesList]: "viewer",
+  [WS_METHODS.notesCommand]: "operator",
   [WS_METHODS.serverRefreshProviders]: "owner",
   [WS_METHODS.serverUpdateProvider]: "owner",
   [WS_METHODS.serverUpdateSettings]: "owner",
@@ -373,6 +375,9 @@ export const RPC_DELIVERY_EFFECT_POLICY = {
   [WS_METHODS.serverDeleteLocalTask]: "mutation",
   [WS_METHODS.serverDelegateLocalTask]: "mutation",
   [WS_METHODS.serverGetDailyRecap]: "read",
+  [WS_METHODS.notesList]: "read",
+  // Creates are idempotent by note id, but the node keeps no receipt for edits.
+  [WS_METHODS.notesCommand]: "mutation",
   // Re-probes provider status; the result is derived state, not a setting.
   [WS_METHODS.serverRefreshProviders]: "read",
   [WS_METHODS.serverUpdateProvider]: "mutation",
