@@ -54,8 +54,8 @@ export function resolveDiffImageTargets(input: {
 }): DiffImageTarget[] {
   const { fileDiff } = input;
   const beforePath = fileDiff.prevName ?? fileDiff.name;
-  if (fileDiff.hunks.length > 0) return [];
   if (!isRasterImagePath(fileDiff.name) && !isRasterImagePath(beforePath)) return [];
+  if (fileDiff.hunks.length > 0) return [];
 
   const beforeOid = fileDiff.type === "new" ? null : storedObjectId(fileDiff.prevObjectId);
   const afterOid = fileDiff.type === "deleted" ? null : storedObjectId(fileDiff.newObjectId);

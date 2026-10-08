@@ -1,7 +1,7 @@
 import "../index.css";
 
 import { parsePatchFiles } from "@pierre/diffs";
-import { EnvironmentId } from "@ryco/contracts";
+import { EnvironmentId, type EnvironmentApi } from "@ryco/contracts";
 import { page } from "vite-plus/test/browser";
 import { afterEach, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
@@ -9,7 +9,6 @@ import { render } from "vitest-browser-react";
 import {
   __resetEnvironmentApiOverridesForTests,
   __setEnvironmentApiOverrideForTests,
-  type EnvironmentApi,
 } from "../environmentApi";
 import { DiffImagePreview } from "./DiffImagePreview";
 
