@@ -1,3 +1,7 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import {
   AGENT_CONTROL_CAPABILITIES,
   AGENT_CONTROL_DELEGATION_MCP_TOOLS,
@@ -8,7 +12,9 @@ import {
   RuntimeSessionId,
   ServerSettings,
   ThreadId,
+  TurnId,
   type AgentControlCapability,
+  type OrchestrationCommand,
   type AgentControlProposal,
   type AgentControlProposalStreamProposalEvent,
 } from "@ryco/contracts";
@@ -35,7 +41,22 @@ import { CompletionReturnRepositoryLive } from "../../persistence/Layers/AgentCo
 import { AgentControlProposalRepositoryLive } from "../../persistence/Layers/AgentControlProposals.ts";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
 import { ServerSettingsService, type ServerSettingsShape } from "../../serverSettings.ts";
-import { AGENT_CONTROL_MCP_MAX_BODY_BYTES, AGENT_CONTROL_MCP_PATH } from "../Mcp/transportGuard.ts";
+import { ServerConfig, type ServerConfigShape } from "../../config.ts";
+import { HtmlRender } from "../../htmlRender/HtmlRender.ts";
+import {
+  OrchestrationEngineService,
+  type OrchestrationEngineShape,
+} from "../../orchestration/Services/OrchestrationEngine.ts";
+import {
+  WorkspaceAccessPolicy,
+  type WorkspaceAccessPolicyShape,
+} from "../../workspace/Services/WorkspaceAccessPolicy.ts";
+import {
+  AGENT_CONTROL_MCP_MAX_BODY_BYTES,
+  AGENT_CONTROL_MCP_PATH,
+  AGENT_CONTROL_PRIVATE_MCP_MAX_BODY_BYTES,
+} from "../Mcp/transportGuard.ts";
+import { withHtmlRenderTools } from "../Mcp/htmlRenderTools.ts";
 import { makeAgentControlMcpListener } from "../Mcp/listener.ts";
 import { makeAgentControlMcpTools, type AgentControlMcpToolDeps } from "../Mcp/tools.ts";
 import {
@@ -391,16 +412,28 @@ it.live("bounds request bodies, refuses batches, and answers protocol errors", (
       assert.strictEqual(invalidJson.status, 400);
       assert.strictEqual((parseBody(invalidJson).error as { code: number }).code, -32700);
 
+      // Authenticated sessions may send a whole HTML page; only past the private cap is a 413.
+      const pageSized = yield* rpc(url, bearer, "ping", {
+        padding: "y".repeat(AGENT_CONTROL_MCP_MAX_BODY_BYTES * 8),
+      });
+      assert.strictEqual(pageSized.status, 200);
+      assert.deepStrictEqual(parseBody(pageSized).result, {});
       const oversized = yield* post(url, {
         bearer,
         body: JSON.stringify({
           jsonrpc: "2.0",
           id: 1,
           method: "ping",
-          params: { padding: "y".repeat(AGENT_CONTROL_MCP_MAX_BODY_BYTES + 1) },
+          params: { padding: "y".repeat(AGENT_CONTROL_PRIVATE_MCP_MAX_BODY_BYTES + 1) },
         }),
       });
       assert.strictEqual(oversized.status, 413);
+
+      // The unauthenticated bootstrap exchange keeps the small bound.
+      const bootstrap = yield* post(url.replace(/\/mcp$/, "/_agent-control/bootstrap"), {
+        body: JSON.stringify({ token: "x".repeat(AGENT_CONTROL_MCP_MAX_BODY_BYTES + 1) }),
+      });
+      assert.strictEqual(bootstrap.status, 413);
 
       const unknownMethod = yield* rpc(url, bearer, "resources/list");
       assert.strictEqual((parseBody(unknownMethod).error as { code: number }).code, -32601);
@@ -415,6 +448,86 @@ it.live("bounds request bodies, refuses batches, and answers protocol errors", (
       };
       assert.isTrue(denied.isError);
       assert.include(denied.content[0]?.text ?? "", "Exact active-turn");
+    }),
+  ),
+);
+
+it.live("carries a page-sized ryco_html_render call through the private listener", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const registryContext = yield* Layer.build(
+        AgentControlSessionRegistryLive.pipe(
+          Layer.provideMerge(AgentControlPolicyLive),
+          Layer.provideMerge(ServerSettingsService.layerTest({ agentControl: { enabled: true } })),
+        ),
+      );
+      const registry = Context.get(registryContext, AgentControlSessionRegistry);
+      const policy = Context.get(registryContext, AgentControlPolicy);
+      const waitPubsub = yield* PubSub.unbounded<AgentControlProposalStreamProposalEvent>();
+      const attachmentsDir = yield* Effect.promise(() =>
+        mkdtemp(join(tmpdir(), "ryco-mcp-html-listener-")),
+      );
+      yield* Effect.addFinalizer(() =>
+        Effect.promise(() => rm(attachmentsDir, { recursive: true, force: true })),
+      );
+      const dispatched: Array<OrchestrationCommand> = [];
+      const tools = yield* withHtmlRenderTools(
+        makeAgentControlMcpTools(makeToolDeps(policy, PubSub.subscribe(waitPubsub))),
+        {
+          attachmentsDir,
+          registry,
+          policy,
+          projections: {
+            listThreadMessagesByTurn: () => Effect.succeed([]),
+            getThreadCheckpointContext: () => Effect.succeed(Option.none()),
+          },
+          workspaceAccess: { assertExistingPath: die("assertExistingPath") },
+          engine: {
+            dispatch: (command) =>
+              Effect.sync(() => {
+                dispatched.push(command);
+                return { sequence: dispatched.length };
+              }),
+          },
+          htmlRender: {
+            prepare: (input) => Effect.succeed(input.html),
+            measure: () => Effect.succeed(undefined),
+            preview: die("preview"),
+          },
+          tempDirectories: [],
+        },
+      );
+      const handle = yield* makeAgentControlMcpListener({ registry, tools });
+      yield* registry.publishEndpoint({ url: handle.url });
+      const lease = yield* registry.issueLease({
+        threadId: callerThreadId,
+        providerInstanceId: codexInstance,
+        runtimeSessionId: runtime1,
+        capabilities: [AGENT_CONTROL_CAPABILITIES.renderHtml],
+        injectionMode: "codex-http",
+      });
+      const issued = (lease as Option.Some<AgentControlIssuedLease>).value;
+      yield* registry.bindTurnAuthority({
+        sessionId: issued.sessionId,
+        turnId: TurnId.make("turn-html"),
+      });
+      // Near the 512,000-character limit: about 550 KiB on the wire, far over the 128 KiB bound.
+      const html = `<p>${"Umsatz ü ".repeat(56_000)}</p>`;
+      const response = yield* rpc(handle.url, Redacted.value(issued.credential), "tools/call", {
+        name: "ryco_html_render",
+        arguments: { html, title: "Large page", height: 600 },
+      });
+      assert.strictEqual(response.status, 200);
+      const result = parseBody(response).result as {
+        readonly isError?: boolean;
+        readonly content: ReadonlyArray<{ readonly text: string }>;
+      };
+      assert.isUndefined(result.isError, result.content[0]?.text);
+      assert.strictEqual(dispatched.length, 1);
+      const [command] = dispatched;
+      assert.strictEqual(command?.type, "thread.message.assistant.complete");
+      if (command?.type !== "thread.message.assistant.complete") return;
+      assert.strictEqual(command.attachments?.[0]?.sizeBytes, Buffer.byteLength(html, "utf8"));
     }),
   ),
 );
@@ -568,6 +681,99 @@ it.live("installs the delegated-task tools when the completion-return ledger is 
       const readOnly = yield* listFor([AGENT_CONTROL_CAPABILITIES.read]);
       assert.include(readOnly, AGENT_CONTROL_DELEGATION_MCP_TOOLS.taskStatus);
       assert.notInclude(readOnly, AGENT_CONTROL_DELEGATION_MCP_TOOLS.taskCancel);
+    }),
+  ),
+);
+
+const htmlRenderStub = Layer.succeed(HtmlRender, {
+  prepare: (input) => Effect.succeed(input.html),
+  measure: () => Effect.succeed(undefined),
+  preview: die("preview"),
+});
+
+const makeDeliveryLayer = (settingsLayer: Layer.Layer<ServerSettingsService>) =>
+  makeMcpServerLayer(settingsLayer).pipe(
+    Layer.provideMerge(
+      Layer.succeed(ServerConfig, {
+        attachmentsDir: "/nonexistent/attachments",
+      } as unknown as ServerConfigShape),
+    ),
+    Layer.provideMerge(
+      Layer.succeed(WorkspaceAccessPolicy, {
+        assertExistingPath: die("assertExistingPath"),
+      } as unknown as WorkspaceAccessPolicyShape),
+    ),
+    Layer.provideMerge(
+      Layer.succeed(OrchestrationEngineService, {
+        dispatch: die("dispatch"),
+      } as unknown as OrchestrationEngineShape),
+    ),
+  );
+
+it.live("installs the HTML render tools on the private listener when the service exists", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const listFor = (
+        context: Context.Context<AgentControlSessionRegistry>,
+        capabilities: ReadonlyArray<AgentControlCapability>,
+        runtime: string,
+      ) =>
+        Effect.gen(function* () {
+          const registry = Context.get(context, AgentControlSessionRegistry);
+          const endpoint = yield* registry.currentEndpoint;
+          const url = (endpoint as Option.Some<{ url: string }>).value.url;
+          const lease = yield* registry.issueLease({
+            threadId: callerThreadId,
+            providerInstanceId: codexInstance,
+            runtimeSessionId: RuntimeSessionId.make(runtime),
+            capabilities,
+            injectionMode: "codex-http",
+          });
+          const bearer = Redacted.value(
+            (lease as Option.Some<AgentControlIssuedLease>).value.credential,
+          );
+          const response = yield* rpc(url, bearer, "tools/list");
+          const listed = (
+            parseBody(response).result as { tools: ReadonlyArray<{ name: string }> }
+          ).tools.map((tool) => tool.name);
+          const catalog = yield* rpc(url, bearer, "tools/call", {
+            name: AGENT_CONTROL_MCP_TOOLS.capabilities,
+            arguments: {},
+          });
+          const advertised = (
+            parseBody(catalog).result as { structuredContent?: { tools?: ReadonlyArray<string> } }
+          ).structuredContent?.tools;
+          return { listed, advertised };
+        });
+      const settings = ServerSettingsService.layerTest({ agentControl: { enabled: true } });
+      const withRender = yield* Layer.build(
+        makeDeliveryLayer(settings).pipe(Layer.provideMerge(htmlRenderStub)),
+      );
+      const granted = yield* listFor(
+        withRender,
+        [AGENT_CONTROL_CAPABILITIES.read, AGENT_CONTROL_CAPABILITIES.renderHtml],
+        "runtime-html-granted",
+      );
+      for (const name of ["ryco_html_preview", "ryco_html_render"]) {
+        assert.include(granted.listed, name);
+        assert.include(granted.advertised ?? [], name);
+      }
+      const ungranted = yield* listFor(
+        withRender,
+        [AGENT_CONTROL_CAPABILITIES.read, AGENT_CONTROL_CAPABILITIES.attachFile],
+        "runtime-html-ungranted",
+      );
+      assert.include(ungranted.listed, "ryco_attach_file");
+      assert.notInclude(ungranted.listed, "ryco_html_render");
+
+      const withoutRender = yield* Layer.build(makeDeliveryLayer(settings));
+      const missing = yield* listFor(
+        withoutRender,
+        [AGENT_CONTROL_CAPABILITIES.read, AGENT_CONTROL_CAPABILITIES.renderHtml],
+        "runtime-html-missing",
+      );
+      assert.include(missing.listed, AGENT_CONTROL_MCP_TOOLS.context);
+      assert.notInclude(missing.listed, "ryco_html_render");
     }),
   ),
 );

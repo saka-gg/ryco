@@ -147,3 +147,22 @@ it("preserves an agent selection within Agents and reports the shared panel mode
   });
   expect(getRightPanelMode(search)).toBe("agents");
 });
+
+it("opens a page tab only for a render it can name, keeping a message jump", () => {
+  const search = parseRightPanelRouteSearch({
+    workspaceTab: "render",
+    workspaceRender: "message-7:thread-chart-html",
+    messageId: "message-7",
+    diff: "1",
+  });
+  expect(search).toEqual({
+    messageId: MessageId.make("message-7"),
+    workspaceOpen: "1",
+    workspaceTab: "render",
+    workspaceRender: "message-7:thread-chart-html",
+  });
+  expect(getRightPanelMode(search)).toBe("render");
+  expect(isRightPanelOpen(search)).toBe(true);
+  expect(parseRightPanelRouteSearch({ workspaceTab: "render" })).toEqual({});
+  expect(getRightPanelMode({ workspaceOpen: "1", workspaceTab: "render" })).toBeNull();
+});

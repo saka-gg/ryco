@@ -1170,6 +1170,16 @@ function collapseDerivedWorkLogEntries(
   // own turn would splinter one batch into a stream of "Kicked off N
   // subagents" rows.
   const groupKeyByTaskId = new Map<string, string>();
+  // A tool call's open row by its call id. Calls a provider runs in parallel
+  // interleave their lifecycle events, so a call's next event is not always
+  // next to its row; without this each would leave a stuck "running" copy.
+  const openToolRowIndex = new Map<string, number>();
+  const trackToolRow = (index: number) => {
+    const row = collapsed[index]!;
+    if (!row.collapseKey?.startsWith("tool:")) return;
+    if (row.activityKind === "tool.updated") openToolRowIndex.set(row.collapseKey, index);
+    else openToolRowIndex.delete(row.collapseKey);
+  };
   for (const entry of entries) {
     const isTaskRow =
       entry.taskId !== undefined &&
@@ -1215,21 +1225,31 @@ function collapseDerivedWorkLogEntries(
       });
       continue;
     }
-    const previous = collapsed.at(-1);
-    if (previous && shouldCollapseToolLifecycleEntries(previous, entry)) {
+    const openIndex =
+      entry.collapseKey !== undefined ? openToolRowIndex.get(entry.collapseKey) : undefined;
+    const targetIndex =
+      openIndex !== undefined && shouldCollapseToolLifecycleEntries(collapsed[openIndex]!, entry)
+        ? openIndex
+        : collapsed.length > 0 && shouldCollapseToolLifecycleEntries(collapsed.at(-1)!, entry)
+          ? collapsed.length - 1
+          : undefined;
+    if (targetIndex !== undefined) {
+      const target = collapsed[targetIndex]!;
       // One tool call is one row from its first lifecycle event on: it keeps
       // that event's id and position while updates stream in and when it
       // settles. Adopting each update's id re-keyed the row on every event
       // (a remount, lost expansion state, a ghost row in the live chapter)
       // and its completion time could move it past steps started meanwhile.
-      collapsed[collapsed.length - 1] = {
-        ...mergeDerivedWorkLogEntries(previous, entry),
-        id: previous.id,
-        createdAt: previous.createdAt,
+      collapsed[targetIndex] = {
+        ...mergeDerivedWorkLogEntries(target, entry),
+        id: target.id,
+        createdAt: target.createdAt,
       };
+      trackToolRow(targetIndex);
       continue;
     }
     collapsed.push(entry);
+    trackToolRow(collapsed.length - 1);
   }
   return collapsed;
 }

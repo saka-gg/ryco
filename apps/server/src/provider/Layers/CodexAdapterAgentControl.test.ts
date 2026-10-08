@@ -271,6 +271,7 @@ it.effect("injects the MCP connection into runtime options, never the environmen
         capabilities: [
           AGENT_CONTROL_CAPABILITIES.read,
           AGENT_CONTROL_CAPABILITIES.attachFile,
+          AGENT_CONTROL_CAPABILITIES.renderHtml,
           AGENT_CONTROL_CAPABILITIES.createThreads,
           AGENT_CONTROL_CAPABILITIES.sendMessage,
           AGENT_CONTROL_CAPABILITIES.interruptThread,
@@ -301,6 +302,10 @@ it.effect("injects the MCP connection into runtime options, never the environmen
       assert.strictEqual(options.agentControl.endpointUrl, ENDPOINT_URL);
       assert.strictEqual(Redacted.value(options.agentControl.authorization), RAW_TOKEN);
       assert.strictEqual(options.agentControl.instructions, CODEX_AGENT_CONTROL_INSTRUCTIONS);
+      // Codex hears the shared host context, including when to show an HTML render.
+      assert.include(CODEX_AGENT_CONTROL_INSTRUCTIONS, "ryco_html_preview");
+      assert.include(CODEX_AGENT_CONTROL_INSTRUCTIONS, "returnToOrigin: true");
+      assert.include(CODEX_AGENT_CONTROL_INSTRUCTIONS, `'${CODEX_AGENT_CONTROL_SERVER_NAME}'`);
 
       // The credential must be unavailable to the codex process environment
       // (and therefore to every shell subprocess codex spawns).

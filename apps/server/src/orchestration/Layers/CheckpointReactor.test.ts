@@ -603,6 +603,65 @@ describe("CheckpointReactor", () => {
     ).toBe("v2\n");
   });
 
+  it("keys the turn's checkpoint on its reply, not on a page published after it", async () => {
+    const harness = await createHarness({ seedFilesystemCheckpoints: false });
+    const threadId = ThreadId.make("thread-1");
+    const turnId = asTurnId("turn-reply-then-page");
+    harness.provider.emit({
+      type: "turn.started",
+      eventId: EventId.make("evt-turn-started-reply-then-page"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-03-02T00:00:01.000Z",
+      threadId,
+      turnId,
+    });
+    await waitForGitRefExists(harness.cwd, checkpointRefForThreadTurn(threadId, 0));
+    const complete = (messageId: string, at: string, page: boolean) =>
+      Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.message.assistant.complete",
+          commandId: CommandId.make(`cmd-${messageId}`),
+          threadId,
+          messageId: MessageId.make(messageId),
+          turnId,
+          // What ryco_html_render publishes: blank text carrying the page.
+          text: page ? " " : "Revenue grew 40%; the chart breaks it down.",
+          ...(page
+            ? {
+                attachments: [
+                  {
+                    type: "file" as const,
+                    id: "thread-1-page",
+                    name: "Chart.html",
+                    mimeType: "text/html",
+                    sizeBytes: 100,
+                    htmlRender: { title: "Chart", height: 400 },
+                  },
+                ],
+              }
+            : {}),
+          createdAt: at,
+        }),
+      );
+    await complete("assistant-reply", "2026-03-02T00:00:02.000Z", false);
+    await complete("assistant-page", "2026-03-02T00:00:03.000Z", true);
+
+    harness.provider.emit({
+      type: "turn.completed",
+      eventId: EventId.make("evt-turn-completed-reply-then-page"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-03-02T00:00:04.000Z",
+      threadId,
+      turnId,
+      payload: { state: "completed" },
+    });
+
+    await waitForThread(harness.readModel, (entry) => entry.checkpoints.length === 1);
+    const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+    expect(thread?.checkpoints[0]).toMatchObject({ turnId, assistantMessageId: "assistant-reply" });
+    expect(thread?.latestTurn?.assistantMessageId).toBe("assistant-reply");
+  });
+
   /** Simulates ProviderRuntimeIngestion projecting turn.started and turn.completed. */
   const projectIngestedTurn = async (
     harness: Awaited<ReturnType<typeof createHarness>>,

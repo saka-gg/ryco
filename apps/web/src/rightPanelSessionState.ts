@@ -31,6 +31,7 @@ export function applyRightPanelSessionSearch(
     workspaceTab: _workspaceTab,
     workspaceAgentKey: _workspaceAgentKey,
     workspacePr: _workspacePr,
+    workspaceRender: _workspaceRender,
     ...rest
   } = search;
   return {
@@ -51,6 +52,7 @@ export function pickRightPanelSessionSearch(
     workspaceTab: search.workspaceTab,
     workspaceAgentKey: search.workspaceAgentKey,
     workspacePr: search.workspacePr,
+    workspaceRender: search.workspaceRender,
   });
 }
 

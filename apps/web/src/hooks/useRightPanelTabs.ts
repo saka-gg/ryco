@@ -7,6 +7,7 @@ import {
   markRightPanelTabOpened,
   openedTabsFromRoute,
   rememberActiveAgentTab,
+  rememberActiveRenderTab,
   resolveOpenedTabs,
   resolveRightPanelReopenTarget,
   shouldMountRightPanelContent,
@@ -27,14 +28,17 @@ export function useRightPanelTabs(input: {
   readonly rightPanelMode: RightPanelMode | null;
   readonly rightPanelOpen: boolean;
   readonly activeAgentKey: string | null;
+  /** The render the route's page tab shows; routes without pages leave it out. */
+  readonly activeRenderKey?: string | null;
   /** Where the panel reopens before any tab was shown on this route. */
   readonly defaultLastMode: RightPanelMode;
   readonly navigateSearch: (update: RightPanelSearchUpdate) => void;
 }) {
   const { scopeKey, rightPanelMode, rightPanelOpen, activeAgentKey, navigateSearch } = input;
+  const activeRenderKey = input.activeRenderKey ?? null;
   const route = useMemo<RightPanelRouteTabs>(
-    () => ({ scopeKey, mode: rightPanelMode, activeAgentKey }),
-    [activeAgentKey, rightPanelMode, scopeKey],
+    () => ({ scopeKey, mode: rightPanelMode, activeAgentKey, activeRenderKey }),
+    [activeAgentKey, activeRenderKey, rightPanelMode, scopeKey],
   );
   const [state, setState] = useState(() => openedTabsFromRoute(route));
   const [lastOpenedRightPanelMode, setLastOpenedRightPanelMode] = useState<RightPanelMode>(
@@ -86,12 +90,13 @@ export function useRightPanelTabs(input: {
   }, [markRightPanelOpened, rightPanelMode]);
 
   useEffect(() => {
-    setState((previous) => rememberActiveAgentTab(previous, route));
+    setState((previous) => rememberActiveRenderTab(rememberActiveAgentTab(previous, route), route));
   }, [route]);
 
   return {
     openedPanelModes: visible.modes,
     openedAgentKeys: visible.agentKeys,
+    openedRenderKey: visible.renderKey,
     lastOpenedRightPanelMode,
     markRightPanelOpened,
     openRightPanel,

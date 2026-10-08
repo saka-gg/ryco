@@ -1242,6 +1242,42 @@ describe("deriveWorkLogEntries", () => {
     });
   });
 
+  it("settles tool calls a provider ran in parallel into one row each", () => {
+    const call = (id: string, kind: string, toolCallId: string, title: string) =>
+      makeActivity({
+        id,
+        createdAt: `2026-02-23T00:00:0${id.slice(-1)}.000Z`,
+        kind,
+        summary: title,
+        payload: {
+          itemType: "mcp_tool_call",
+          title,
+          ...(kind === "tool.completed" ? { status: "completed" } : {}),
+          data: { toolCallId },
+        },
+      });
+    const activities: OrchestrationThreadActivity[] = [
+      call("e1", "tool.updated", "call-render", "Rendered HTML"),
+      call("e2", "tool.updated", "call-preview", "Previewed HTML"),
+      call("e3", "tool.updated", "call-render", "Rendered HTML"),
+      call("e4", "tool.completed", "call-preview", "Previewed HTML"),
+      call("e5", "tool.completed", "call-render", "Rendered HTML"),
+    ];
+
+    const entries = deriveWorkLogEntries(activities, undefined);
+    expect(entries.map((entry) => [entry.id, entry.toolTitle])).toEqual([
+      ["e1", "Rendered HTML"],
+      ["e2", "Previewed HTML"],
+    ]);
+    // Once settled, a later event with the same call id starts no new row.
+    expect(
+      deriveWorkLogEntries(
+        [...activities, call("e6", "tool.updated", "call-render", "x")],
+        undefined,
+      ),
+    ).toHaveLength(3);
+  });
+
   it("uses completed read-file output previews and still collapses the same tool call", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({

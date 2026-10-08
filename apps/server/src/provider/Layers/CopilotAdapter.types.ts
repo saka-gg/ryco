@@ -15,6 +15,7 @@ import {
   type ProviderSendTurnInput,
   type ThreadTokenUsageSnapshot,
 } from "@ryco/contracts";
+import type { HtmlRenderToolPresentation } from "@ryco/shared/htmlRenderToolPresentation";
 import { resolveCommandPath } from "@ryco/shared/shell";
 import type {
   CopilotClient,
@@ -82,6 +83,11 @@ export interface ActiveCopilotSession {
   readonly pendingApprovals: Map<string, PendingApprovalRequest>;
   readonly pendingUserInputs: Map<string, PendingUserInputRequest>;
   readonly pendingTurnStarts: Set<PendingTurnStartRequest>;
+  /**
+   * How each Ryco HTML tool call in flight shows in the work log, by tool
+   * call id. Copilot's completion event names neither the tool nor its input.
+   */
+  readonly htmlRenderToolCalls: Map<string, HtmlRenderToolPresentation>;
   readonly deviceToolBinding: DeviceToolBinding | null;
   readonly turns: Array<MutableTurnSnapshot>;
   readonly renewSession: () => Promise<CopilotSession>;

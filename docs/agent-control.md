@@ -5,6 +5,10 @@ routine actions through the durable operation queue. Archiving, runtime permissi
 project linking/unlinking or workspace changes, executable project scripts, system prompts, and
 device lifecycle changes still require user approval. Standalone integrations remain approval-only.
 
+Agent Control also gives agents visual replies: with it on, they can answer with inline HTML pages
+such as charts, tables, diagrams and mockups, shown in the thread above their written reply (see
+[HTML renders](./user/html-renders.md)).
+
 Private tools are advertised when the provider initializes, including before its first turn. Discovery
 is scoped to the session's capabilities; mutations still require exact active-turn authority when
 called. This matters for clients such as Codex that cache the initial MCP catalog.
@@ -32,6 +36,11 @@ called. This matters for clients such as Codex that cache the initial MCP catalo
   and the corresponding user permissions are available. Browser `open` accepts `visible: true`.
 - `ryco_task_status`, `ryco_task_cancel`: status, results and cancel for tasks this chat delegated
   with `returnToOrigin` (see [Delegated tasks](#delegated-tasks)).
+- `ryco_html_preview`, `ryco_html_render`: check a self-contained HTML page in Ryco's headless
+  browser, then show it inline above the reply as a sandboxed page that follows the user's theme,
+  with a card at the end of the reply (see [HTML renders](./user/html-renders.md)). Both need the
+  `html.render` grant and exact active-turn authority; a render counts toward the turn's attachment
+  budget.
 
 Mutation calls return a durable receipt. Reuse `requestId` when retrying the same action, then use
 `ryco_wait_for_control_request` with `waitFor: "terminal"` to get dispatch results and created thread

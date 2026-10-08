@@ -323,6 +323,12 @@ describe("forward compatibility (additive extension)", () => {
     expect(decodeRiskTag("touches-settings")).toBe("touches-settings");
   });
 
+  it("defines the HTML render grant as a valid, distinct capability slug", () => {
+    expect(decodeCapability(AGENT_CONTROL_CAPABILITIES.renderHtml)).toBe("html.render");
+    const slugs = Object.values(AGENT_CONTROL_CAPABILITIES);
+    expect(new Set(slugs).size).toBe(slugs.length);
+  });
+
   it("rejects malformed slugs", () => {
     expect(() => decodeCapability("Threads.Create")).toThrow();
     expect(() => decodeCapability("1bad")).toThrow();

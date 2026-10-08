@@ -97,6 +97,8 @@ export const LazyRightPanel = (props: {
   panelMode: RightPanelMode | null;
   openedPanelModes: ReadonlyArray<RightPanelMode>;
   openedAgentKeys: ReadonlyArray<string>;
+  /** The page tab's render while it is open; it shows one HTML render at a time. */
+  openedRenderKey?: string | null;
   onClosePanelTab: (input: { mode: RightPanelMode; agentKey?: string }) => void;
   maximized?: boolean;
   onToggleMaximized?: (() => void) | undefined;
@@ -123,7 +125,9 @@ export const LazyRightPanel = (props: {
                           ? "Loading agents..."
                           : props.panelMode === "agent"
                             ? "Loading subagent thread..."
-                            : "Loading workspace..."
+                            : props.panelMode === "render"
+                              ? "Loading page..."
+                              : "Loading workspace..."
             }
           />
         }
@@ -133,6 +137,7 @@ export const LazyRightPanel = (props: {
           panelMode={props.panelMode}
           openedPanelModes={props.openedPanelModes}
           openedAgentKeys={props.openedAgentKeys}
+          openedRenderKey={props.openedRenderKey ?? null}
           onClosePanelTab={props.onClosePanelTab}
           maximized={props.maximized ?? false}
           onToggleMaximized={props.onToggleMaximized}
@@ -148,6 +153,7 @@ export const RightPanelInlineSidebar = (props: {
   panelMode: RightPanelMode | null;
   openedPanelModes: ReadonlyArray<RightPanelMode>;
   openedAgentKeys: ReadonlyArray<string>;
+  openedRenderKey?: string | null;
   onClosePanelTab: (input: { mode: RightPanelMode; agentKey?: string }) => void;
   onClose: () => void;
   onOpen: () => void;
@@ -270,6 +276,7 @@ export const RightPanelInlineSidebar = (props: {
                 panelMode={panelMode}
                 openedPanelModes={props.openedPanelModes}
                 openedAgentKeys={props.openedAgentKeys}
+                openedRenderKey={props.openedRenderKey ?? null}
                 onClosePanelTab={props.onClosePanelTab}
                 maximized={maximized}
                 onToggleMaximized={props.onToggleMaximized}
