@@ -1,3 +1,4 @@
+import Migration0079, { ensureWorktreeNotesTable } from "./Migrations/079_WorktreeNotes.ts";
 import Migration0078, {
   ensureManagedWorktreeNaming,
 } from "./Migrations/078_ManagedWorktreeNaming.ts";
@@ -193,6 +194,7 @@ export const migrationEntries = [
   [76, "AuthSessionRotation", Migration0076],
   [77, "ThreadWorkspaceLifecycle", Migration0077],
   [78, "ManagedWorktreeNaming", Migration0078],
+  [79, "WorktreeNotes", Migration0079],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>
@@ -585,6 +587,10 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
   }
   if (toMigrationInclusive === undefined || toMigrationInclusive >= 78) {
     yield* ensureManagedWorktreeNaming;
+  }
+  // Repair: 079 is skipped by the migrator when a later number was recorded first.
+  if (toMigrationInclusive === undefined || toMigrationInclusive >= 79) {
+    yield* ensureWorktreeNotesTable;
   }
   yield* Effect.log("Migrations ran successfully").pipe(
     Effect.annotateLogs({

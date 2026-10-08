@@ -136,7 +136,7 @@ import {
 } from "../types";
 import { useTheme } from "../hooks/useTheme";
 import { useTurnDiffSummaries } from "../hooks/useTurnDiffSummaries";
-import { PREFERS_REDUCED_MOTION_QUERY } from "../lib/perf/motion";
+import { useReducedMotionEffective } from "../hooks/useAppearancePreference";
 import { useDelayedUnmount } from "../hooks/useDelayedUnmount";
 import { useMediaQuery } from "../hooks/useMediaQuery";
 import { useAppSidebarCollapsed } from "../hooks/useAppSidebarCollapsed";
@@ -243,13 +243,15 @@ import {
 } from "@ryco/client-runtime/state/threads";
 import {
   ChatOverviewPanel,
-  FloatingOverviewMotionFrame,
-  OverviewSidebarMotionFrame,
-  OVERVIEW_FLOATING_EXIT_DURATION_MS,
-  OVERVIEW_SIDEBAR_EXIT_DURATION_MS,
   usePostPushWorkflowWatch,
   useOverviewPanelControls,
 } from "./chat/ChatOverviewPanel";
+import {
+  CROWN_EASE_OUT,
+  CROWN_RAIL_EXIT_MS,
+  CROWN_RAIL_SLOT_WIDTH_PX,
+} from "./overview/crown/crownLayout";
+import type { WorktreeNotesTarget } from "./overview/notes/useWorktreeNotes";
 import { useChatGlobalShortcuts } from "./chat/useChatGlobalShortcuts";
 import { useChatPendingUserInput } from "./chat/useChatPendingUserInput";
 import { useChatWorkspacePanels } from "./chat/useChatWorkspacePanels";
@@ -304,6 +306,7 @@ import { useLocalStorage } from "~/hooks/useLocalStorage";
 import { useComposerHandleContext } from "../composerHandleContext";
 import { useServerAvailableEditors, useServerConfig } from "~/rpc/serverState";
 import { isTerminalFocused } from "../lib/terminalFocus";
+import { createTurnCompletionTracker } from "../lib/turnCompletion.logic";
 import { sanitizeThreadErrorMessage } from "@ryco/client-runtime/errors";
 import { useHostedDeliveryNotice, useHostedRpcCapability } from "../hostedHub/capabilities";
 import {
@@ -633,10 +636,13 @@ export default function ChatView(props: ChatViewProps) {
   // Set once the user opens the overview from the new-thread surface, so the
   // empty-thread suppression below yields to an explicit request.
   const [overviewOpenedOnEmptyThread, setOverviewOpenedOnEmptyThread] = useState(false);
-  const [overviewFloatingOpen, setOverviewFloatingOpen] = useState(false);
-  const viewportNeedsPlanSidebarSheet = useMediaQuery(RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY);
-  const shouldUsePlanSidebarSheet = viewportNeedsPlanSidebarSheet || paneThreadRef !== null;
-  const prefersReducedMotion = useMediaQuery(PREFERS_REDUCED_MOTION_QUERY);
+  // Narrow viewports and split panes present right-hand panels (the context
+  // handoff inspector) as a sheet rather than an inline aside, and start every
+  // thread with the overview rail closed.
+  const viewportNeedsRightPanelSheet = useMediaQuery(RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY);
+  const shouldUseRightPanelSheet = viewportNeedsRightPanelSheet || paneThreadRef !== null;
+  // Covers both the OS setting and the in-app Motion preference.
+  const reducedMotion = useReducedMotionEffective();
   const presentationTier = usePresentationTier();
   // With the thread sidebar collapsed this header owns the workspace's
   // top-left corner, so it reserves the room the shell's floating
@@ -646,12 +652,12 @@ export default function ChatView(props: ChatViewProps) {
   // tier flips (rotation preserves route, draft, and panel state).
   const presentationTierRef = useRef(presentationTier);
   presentationTierRef.current = presentationTier;
-  // Entering a split must not open one full-window overview for every chat.
+  // Entering a split must not dock one overview rail in every chat pane.
   useEffect(() => {
     if (paneThreadRef) setPlanSidebarOpen(false);
   }, [paneThreadRef]);
-  const shouldUsePlanSidebarSheetRef = useRef(shouldUsePlanSidebarSheet);
-  shouldUsePlanSidebarSheetRef.current = shouldUsePlanSidebarSheet;
+  const shouldUseRightPanelSheetRef = useRef(shouldUseRightPanelSheet);
+  shouldUseRightPanelSheetRef.current = shouldUseRightPanelSheet;
   const [inspectedContextHandoff, setInspectedContextHandoff] = useState<{
     readonly marker: ContextHandoffTimelineEntry;
     readonly trigger: HTMLButtonElement;
@@ -1351,6 +1357,51 @@ export default function ChatView(props: ChatViewProps) {
       ? primaryServerConfig
       : (activeEnvRuntimeState?.serverConfig ?? primaryServerConfig);
   const versionMismatch = resolveServerConfigVersionMismatch(serverConfig);
+  const worktreeNotesAvailable = serverConfig?.environment.capabilities.worktreeNotes === true;
+  // Notes key on the checkout: a server thread without a worktree runs in the
+  // main checkout; a draft without one has no checkout yet.
+  const notesEnvironmentId = activeThread?.environmentId ?? null;
+  const notesProjectId = activeThread?.projectId ?? null;
+  const notesThreadId = isServerThread ? (activeThread?.id ?? null) : null;
+  const notesWorktreeId = activeThread?.worktreeId ?? null;
+  const notesWorktreeOrigin = activeWorktreeSummary?.origin ?? null;
+  const worktreeNotesTarget = useMemo<WorktreeNotesTarget | null>(
+    () =>
+      notesEnvironmentId && notesProjectId
+        ? {
+            environmentId: notesEnvironmentId,
+            projectId: notesProjectId,
+            checkout:
+              notesWorktreeId !== null
+                ? { worktreeId: notesWorktreeId, origin: notesWorktreeOrigin }
+                : isServerThread
+                  ? { worktreeId: null, origin: "main" }
+                  : null,
+            threadId: notesThreadId,
+            available: worktreeNotesAvailable,
+          }
+        : null,
+    [
+      notesEnvironmentId,
+      notesProjectId,
+      notesThreadId,
+      notesWorktreeId,
+      notesWorktreeOrigin,
+      isServerThread,
+      worktreeNotesAvailable,
+    ],
+  );
+  // A note's backlink opens its thread on the notes' environment.
+  const openNoteThread = useCallback(
+    (threadId: ThreadId) => {
+      if (!notesEnvironmentId) return;
+      void navigate({
+        to: "/$environmentId/$threadId",
+        params: buildThreadRouteParams(scopeThreadRef(notesEnvironmentId, threadId)),
+      });
+    },
+    [navigate, notesEnvironmentId],
+  );
   const versionMismatchDismissKey =
     versionMismatch && activeThread
       ? buildVersionMismatchDismissalKey(activeThread.environmentId, versionMismatch)
@@ -1515,21 +1566,25 @@ export default function ChatView(props: ChatViewProps) {
   // main process authoritatively re-checks focus; the `document.hasFocus()`
   // pre-check just avoids a wasted IPC round-trip when we're clearly focused.
   const notifyOnTurnComplete = settings.notifyOnTurnCompleteWhenUnfocused;
-  const seenRunningTurnIdsRef = useRef<Set<string>>(new Set());
-  const notifiedTurnIdsRef = useRef<Set<string>>(new Set());
+  const turnCompletionTrackerRef = useRef(createTurnCompletionTracker());
   useEffect(() => {
-    const turnId = activeLatestTurn?.turnId;
-    if (!turnId) return;
-    if (phase === "running") {
-      seenRunningTurnIdsRef.current.add(turnId);
+    const tracker = turnCompletionTrackerRef.current;
+    const observation = {
+      turnId: activeLatestTurn?.turnId ?? null,
+      running: phase === "running",
+      settled: latestTurnSettled,
+      completedAt: activeLatestTurn?.completedAt ?? null,
+      state: activeLatestTurn?.state ?? null,
+    };
+    // A running turn is recorded whatever the pane's focus; only its
+    // completion waits for the focused pane of a server thread.
+    if (observation.running) {
+      tracker.observe(observation);
       return;
     }
     if (!paneFocused || !serverThread?.id) return;
-    if (!latestTurnSettled) return;
-    if (!activeLatestTurn?.completedAt) return;
-    if (!seenRunningTurnIdsRef.current.has(turnId)) return;
-    if (notifiedTurnIdsRef.current.has(turnId)) return;
-    notifiedTurnIdsRef.current.add(turnId);
+    // Every ending notifies, however the turn ended.
+    if (tracker.observe(observation) === null) return;
 
     if (!notifyOnTurnComplete) return;
     if (typeof document !== "undefined" && document.hasFocus()) return;
@@ -1549,6 +1604,7 @@ export default function ChatView(props: ChatViewProps) {
     latestTurnSettled,
     activeLatestTurn?.turnId,
     activeLatestTurn?.completedAt,
+    activeLatestTurn?.state,
     notifyOnTurnComplete,
     serverThread?.id,
     serverThread?.environmentId,
@@ -2510,6 +2566,12 @@ export default function ChatView(props: ChatViewProps) {
     providerStatuses,
     selectedProvider,
   ]);
+  // The new-thread surface reads as its own page. The overview describes a
+  // thread's history — checks, changes, plan — and an empty thread has none,
+  // so suppress it until the user asks for it. This is a display-time override
+  // rather than a `planSidebarOpen` reset so the rail reappears on its own the
+  // moment the first turn lands, with no second state machine to keep in sync.
+  const overviewSuppressedForEmptyThread = showNewThreadSurface && !overviewOpenedOnEmptyThread;
   const setOverviewSidebarOpen = useCallback(
     (open: boolean) => {
       setPlanSidebarOpen(open);
@@ -2520,40 +2582,23 @@ export default function ChatView(props: ChatViewProps) {
     [activePlan?.turnId, sidebarProposedPlan?.turnId],
   );
   const closePlanSidebar = useCallback(() => {
-    setOverviewFloatingOpen(false);
     setOverviewSidebarOpen(false);
   }, [setOverviewSidebarOpen]);
   const toggleOverviewSidebar = useCallback(
     (nextOpen?: boolean) => {
-      if (workspacePanelOpen) {
-        const wantsOpen = typeof nextOpen === "boolean" ? nextOpen : !overviewFloatingOpen;
-        setOverviewFloatingOpen(wantsOpen);
-        setOverviewSidebarOpen(wantsOpen);
-        if (wantsOpen) setOverviewOpenedOnEmptyThread(true);
-        return;
-      }
-
-      // While the thread is empty the panel reads as closed regardless of
+      // While the thread is empty the overview reads as closed regardless of
       // `planSidebarOpen`, so the toggle has to invert the *visible* state or
       // the first click would be a no-op.
       const wantsOpen =
         typeof nextOpen === "boolean"
           ? nextOpen
-          : showNewThreadSurface && !overviewOpenedOnEmptyThread
+          : overviewSuppressedForEmptyThread
             ? true
             : !planSidebarOpen;
-      setOverviewFloatingOpen(false);
       setOverviewSidebarOpen(wantsOpen);
       setOverviewOpenedOnEmptyThread(wantsOpen);
     },
-    [
-      showNewThreadSurface,
-      overviewFloatingOpen,
-      overviewOpenedOnEmptyThread,
-      planSidebarOpen,
-      setOverviewSidebarOpen,
-      workspacePanelOpen,
-    ],
+    [overviewSuppressedForEmptyThread, planSidebarOpen, setOverviewSidebarOpen],
   );
 
   const persistThreadSettingsForNextTurn = useCallback(
@@ -2709,8 +2754,8 @@ export default function ChatView(props: ChatViewProps) {
     setShowScrollToBottom(false);
     // Honor an explicit "open the overview on the next thread" signal, set when
     // implementing a plan in a freshly created thread (`onImplementPlanInNewThread`).
-    // In wide layouts the overview opens by default anyway, but in sheet/narrow
-    // layouts it starts closed on every thread switch — without consuming this
+    // In wide layouts the overview opens by default anyway, but in narrow and
+    // split layouts it starts closed on every thread switch — without consuming this
     // signal the request to surface the new thread's plan would be silently lost.
     const openOverviewForNextThread = planSidebarOpenOnNextThreadRef.current;
     planSidebarOpenOnNextThreadRef.current = false;
@@ -2720,7 +2765,7 @@ export default function ChatView(props: ChatViewProps) {
     // would drop preserved panel state on rotation).
     setPlanSidebarOpen(
       openOverviewForNextThread ||
-        (!shouldUsePlanSidebarSheetRef.current && presentationTierRef.current !== "phone"),
+        (!shouldUseRightPanelSheetRef.current && presentationTierRef.current !== "phone"),
     );
     planSidebarDismissedForTurnRef.current = null;
   }, [activeThread?.id]);
@@ -2842,6 +2887,7 @@ export default function ChatView(props: ChatViewProps) {
   const {
     sourceControlActions: overviewSourceControlActions,
     branchControl: overviewBranchControl,
+    sourceControlSync: overviewSourceControlSync,
   } = useOverviewPanelControls({
     gitCwd,
     activeThreadRef,
@@ -4464,43 +4510,21 @@ export default function ChatView(props: ChatViewProps) {
   }, []);
 
   useEffect(() => {
-    if (!workspacePanelOpen) {
-      setOverviewFloatingOpen(false);
-    }
-  }, [workspacePanelOpen]);
-
-  useEffect(() => {
-    setOverviewFloatingOpen(false);
     setOverviewOpenedOnEmptyThread(false);
   }, [activeThread?.id]);
 
-  // The new-thread surface reads as its own page. The overview panel describes
-  // a thread's history — checks, changes, plan — and an empty thread has none,
-  // so suppress it until the user asks for it. This is a display-time override
-  // rather than a `planSidebarOpen` reset so the panel reappears on its own the
-  // moment the first turn lands, with no second state machine to keep in sync.
-  const overviewSuppressedForEmptyThread = showNewThreadSurface && !overviewOpenedOnEmptyThread;
-  const overviewSidebarVisible =
-    planSidebarOpen && !workspacePanelOpen && !overviewSuppressedForEmptyThread;
-  const showFloatingOverviewSidebar = overviewFloatingOpen && workspacePanelOpen;
-  const overviewControlOpen = overviewSidebarVisible || showFloatingOverviewSidebar;
-  // The phone tier always promotes the overview to a full-screen surface;
-  // the width-based inline/sheet fork only applies to the desktop tier.
+  // One open state for every presentation. Desktop docks the Crown rail beside
+  // the chat column, also while the workspace panel is open, at every width;
+  // the phone tier promotes the overview to a full-screen surface, which (as
+  // before the rail, the web phone tier is frozen) waits for the full-screen
+  // workspace sheet to close.
+  const overviewVisible = planSidebarOpen && !overviewSuppressedForEmptyThread;
   const isPhoneTier = presentationTier === "phone";
-  const showInlineOverviewSidebar =
-    overviewSidebarVisible && !shouldUsePlanSidebarSheet && !isPhoneTier;
-  const showOverviewSidebarSheet =
-    overviewSidebarVisible && (shouldUsePlanSidebarSheet || isPhoneTier);
-  const renderFloatingOverviewSidebar = useDelayedUnmount(
-    showFloatingOverviewSidebar,
-    prefersReducedMotion || !workspacePanelOpen ? 0 : OVERVIEW_FLOATING_EXIT_DURATION_MS,
-  );
-  const renderInlineOverviewSidebar = useDelayedUnmount(
-    showInlineOverviewSidebar,
-    prefersReducedMotion || shouldUsePlanSidebarSheet || workspacePanelOpen
-      ? 0
-      : OVERVIEW_SIDEBAR_EXIT_DURATION_MS,
-  );
+  const showCrownRail = overviewVisible && !isPhoneTier;
+  const showPhoneOverviewSheet = overviewVisible && !workspacePanelOpen && isPhoneTier;
+  const overviewControlOpen = isPhoneTier ? showPhoneOverviewSheet : overviewVisible;
+  // Keeps the rail mounted through its exit transition.
+  const renderCrownRail = useDelayedUnmount(showCrownRail, reducedMotion ? 0 : CROWN_RAIL_EXIT_MS);
 
   // The thread dock renders inside the composer, beneath the approval and
   // pending-input panels (see `ChatComposer`), so an open panel cannot carry it
@@ -4579,7 +4603,7 @@ export default function ChatView(props: ChatViewProps) {
   }, [composerOverlayActive, activeThreadId]);
   // Same mechanism for the top bar: the header overlays the transcript and
   // publishes its height so the timeline's list header, the search bar, the
-  // floating overview, and the (rare) banner stack clear it.
+  // Crown rail, and the (rare) banner stack clear it.
   useEffect(() => {
     const shell = chatShellRef.current;
     if (!shell) return;
@@ -4819,8 +4843,8 @@ export default function ChatView(props: ChatViewProps) {
         {/* Chat column */}
         <div ref={chatColumnRef} className="relative flex min-h-0 min-w-0 flex-1 flex-col">
           {/* Messages Wrapper. Stays `flex-1` even while empty so the absolutely
-              positioned children below (search bar, floating overview, scroll
-              pill) keep a full-height containing block. */}
+              positioned children below (search bar, scroll pill) keep a
+              full-height containing block. */}
           <div className="relative flex min-h-0 flex-1 flex-col">
             {/* Messages — LegendList handles virtualization and scrolling internally.
                 Gated on useDeferredValue: the urgent render after a tab switch
@@ -4897,42 +4921,6 @@ export default function ChatView(props: ChatViewProps) {
               />
             ) : null}
 
-            {renderFloatingOverviewSidebar ? (
-              <FloatingOverviewMotionFrame
-                animate={!prefersReducedMotion}
-                open={showFloatingOverviewSidebar}
-              >
-                <ChatOverviewPanel
-                  environmentId={environmentId}
-                  gitCwd={gitCwd}
-                  activeWorktreeBranch={activeWorktreeSummary?.branch ?? null}
-                  activeThreadBranch={activeThread?.branch ?? null}
-                  activeWorktreePrNumber={activeWorktreeSummary?.prNumber ?? null}
-                  activeWorktreePrState={activeWorktreeSummary?.prState}
-                  activeWorktreePrIsDraft={activeWorktreeSummary?.prIsDraft}
-                  activeWorktreeTitle={activeWorktreeSummary?.title}
-                  postPushWorkflowWatch={postPushWorkflowWatch}
-                  activeThreadKey={activeThreadKey}
-                  activePlan={activePlan}
-                  sidebarProposedPlan={sidebarProposedPlan}
-                  threadSubagents={threadSubagents}
-                  changedFileSummaries={activeThread?.turnDiffSummaries}
-                  sourceControlActions={overviewSourceControlActions}
-                  branchControl={overviewBranchControl}
-                  markdownCwd={gitCwd ?? undefined}
-                  workspaceRoot={activeWorkspaceRoot}
-                  mode="floating"
-                  preview={workspacePreview}
-                  onClose={closePlanSidebar}
-                  onOpenFiles={onOpenFilesPanel}
-                  onOpenReview={onOpenReviewPanel}
-                  onOpenSubagent={onOpenSubagentPanel}
-                  onOpenPullRequestInApp={openPullRequestInApp}
-                  onPostPushDiscoveryComplete={clearPostPushWatch}
-                />
-              </FloatingOverviewMotionFrame>
-            ) : null}
-
             {/* scroll to bottom pill — shown when user has scrolled away from the bottom */}
             {showScrollToBottom && (
               <div className="pointer-events-none absolute bottom-[calc(var(--chat-composer-clearance,0px)+0.25rem)] left-1/2 z-30 flex -translate-x-1/2 justify-center py-1.5">
@@ -4957,7 +4945,7 @@ export default function ChatView(props: ChatViewProps) {
             <div
               className={cn(
                 "shrink-0",
-                !prefersReducedMotion && "animate-in fade-in slide-in-from-bottom-1",
+                !reducedMotion && "animate-in fade-in slide-in-from-bottom-1",
               )}
             >
               <NewThreadHero
@@ -5300,7 +5288,7 @@ export default function ChatView(props: ChatViewProps) {
           ) : null}
         </div>
         {/* end chat column */}
-        {inspectedContextHandoff && !shouldUsePlanSidebarSheet && !isPhoneTier ? (
+        {isPhoneTier ? null : inspectedContextHandoff && !shouldUseRightPanelSheet ? (
           <aside className="flex min-h-0 w-[25rem] shrink-0 border-l border-border pt-[var(--chat-header-clearance,0px)]">
             <ContextHandoffInspectionPanel
               environmentId={activeThread.environmentId}
@@ -5309,40 +5297,62 @@ export default function ChatView(props: ChatViewProps) {
               onClose={closeContextHandoffInspection}
             />
           </aside>
-        ) : renderInlineOverviewSidebar ? (
-          <OverviewSidebarMotionFrame
-            animate={!prefersReducedMotion}
-            open={showInlineOverviewSidebar}
+        ) : (
+          // Reserves the docked rail's column; the Crown positions itself
+          // inside. No z-index and no overflow clip: the header controls stay
+          // clickable and the expanded card / flyouts extend over the transcript.
+          <div
+            data-slot="crown-rail-slot"
+            className={cn(
+              "pointer-events-none relative shrink-0 transition-[width] motion-reduce:transition-none",
+              reducedMotion && "transition-none",
+            )}
+            style={{
+              width: showCrownRail ? CROWN_RAIL_SLOT_WIDTH_PX : 0,
+              transitionDuration: `${CROWN_RAIL_EXIT_MS}ms`,
+              transitionTimingFunction: CROWN_EASE_OUT,
+            }}
           >
-            <ChatOverviewPanel
-              environmentId={environmentId}
-              gitCwd={gitCwd}
-              activeWorktreeBranch={activeWorktreeSummary?.branch ?? null}
-              activeThreadBranch={activeThread?.branch ?? null}
-              activeWorktreePrNumber={activeWorktreeSummary?.prNumber ?? null}
-              activeWorktreePrState={activeWorktreeSummary?.prState}
-              activeWorktreePrIsDraft={activeWorktreeSummary?.prIsDraft}
-              activeWorktreeTitle={activeWorktreeSummary?.title}
-              postPushWorkflowWatch={postPushWorkflowWatch}
-              activeThreadKey={activeThreadKey}
-              activePlan={activePlan}
-              sidebarProposedPlan={sidebarProposedPlan}
-              threadSubagents={threadSubagents}
-              changedFileSummaries={activeThread?.turnDiffSummaries}
-              sourceControlActions={overviewSourceControlActions}
-              branchControl={overviewBranchControl}
-              markdownCwd={gitCwd ?? undefined}
-              workspaceRoot={activeWorkspaceRoot}
-              mode="sidebar"
-              preview={workspacePreview}
-              onOpenFiles={onOpenFilesPanel}
-              onOpenReview={onOpenReviewPanel}
-              onOpenSubagent={onOpenSubagentPanel}
-              onOpenPullRequestInApp={openPullRequestInApp}
-              onPostPushDiscoveryComplete={clearPostPushWatch}
-            />
-          </OverviewSidebarMotionFrame>
-        ) : null}
+            {renderCrownRail ? (
+              <ChatOverviewPanel
+                environmentId={environmentId}
+                gitCwd={gitCwd}
+                activeWorktreeBranch={activeWorktreeSummary?.branch ?? null}
+                activeThreadBranch={activeThread?.branch ?? null}
+                activeWorktreePrNumber={activeWorktreeSummary?.prNumber ?? null}
+                activeWorktreePrState={activeWorktreeSummary?.prState}
+                activeWorktreePrIsDraft={activeWorktreeSummary?.prIsDraft}
+                activeWorktreeTitle={activeWorktreeSummary?.title}
+                postPushWorkflowWatch={postPushWorkflowWatch}
+                activeThreadKey={activeThreadKey}
+                activePlan={activePlan}
+                sidebarProposedPlan={sidebarProposedPlan}
+                threadSubagents={threadSubagents}
+                changedFileSummaries={activeThread?.turnDiffSummaries}
+                sourceControlActions={overviewSourceControlActions}
+                branchControl={overviewBranchControl}
+                sourceControlSync={overviewSourceControlSync}
+                markdownCwd={gitCwd ?? undefined}
+                workspaceRoot={activeWorkspaceRoot}
+                presentation="crown"
+                open={showCrownRail}
+                notesTarget={worktreeNotesTarget}
+                onOpenNoteThread={openNoteThread}
+                threadTitle={activeThread.title}
+                isGitRepo={isGitRepo}
+                latestTurn={activeLatestTurn}
+                turnSettled={latestTurnSettled}
+                agentRunning={phase === "running"}
+                preview={workspacePreview}
+                onOpenFiles={onOpenFilesPanel}
+                onOpenReview={onOpenReviewPanel}
+                onOpenSubagent={onOpenSubagentPanel}
+                onOpenPullRequestInApp={openPullRequestInApp}
+                onPostPushDiscoveryComplete={clearPostPushWatch}
+              />
+            ) : null}
+          </div>
+        )}
       </div>
       {/* end horizontal flex container */}
 
@@ -5378,7 +5388,7 @@ export default function ChatView(props: ChatViewProps) {
           onAddTerminalContext={addTerminalContextToDraft}
         />
       ))}
-      {paneFocused && !isPhoneTier && shouldUsePlanSidebarSheet && inspectedContextHandoff ? (
+      {paneFocused && !isPhoneTier && shouldUseRightPanelSheet && inspectedContextHandoff ? (
         <RightPanelSheet open onClose={closeContextHandoffInspection}>
           <ContextHandoffInspectionPanel
             environmentId={activeThread.environmentId}
@@ -5394,7 +5404,7 @@ export default function ChatView(props: ChatViewProps) {
         // (the audited right overlay had no close affordance at all).
         <PhoneWorkSurfaceSheet
           label={planSidebarLabel}
-          open={paneFocused && showOverviewSidebarSheet}
+          open={paneFocused && showPhoneOverviewSheet}
           onClose={closePlanSidebar}
         >
           <PhoneSurfaceScaffold
@@ -5419,9 +5429,10 @@ export default function ChatView(props: ChatViewProps) {
               changedFileSummaries={activeThread?.turnDiffSummaries}
               sourceControlActions={overviewSourceControlActions}
               branchControl={overviewBranchControl}
+              sourceControlSync={overviewSourceControlSync}
               markdownCwd={gitCwd ?? undefined}
               workspaceRoot={activeWorkspaceRoot}
-              mode="sheet"
+              presentation="sheet"
               onOpenFiles={onOpenFilesPanel}
               onOpenReview={onOpenReviewPanel}
               onOpenSubagent={onOpenSubagentPanel}
@@ -5430,36 +5441,6 @@ export default function ChatView(props: ChatViewProps) {
             />
           </PhoneSurfaceScaffold>
         </PhoneWorkSurfaceSheet>
-      ) : shouldUsePlanSidebarSheet ? (
-        <RightPanelSheet open={paneFocused && showOverviewSidebarSheet} onClose={closePlanSidebar}>
-          <ChatOverviewPanel
-            environmentId={environmentId}
-            gitCwd={gitCwd}
-            activeWorktreeBranch={activeWorktreeSummary?.branch ?? null}
-            activeThreadBranch={activeThread?.branch ?? null}
-            activeWorktreePrNumber={activeWorktreeSummary?.prNumber ?? null}
-            activeWorktreePrState={activeWorktreeSummary?.prState}
-            activeWorktreePrIsDraft={activeWorktreeSummary?.prIsDraft}
-            activeWorktreeTitle={activeWorktreeSummary?.title}
-            postPushWorkflowWatch={postPushWorkflowWatch}
-            activeThreadKey={activeThreadKey}
-            activePlan={activePlan}
-            sidebarProposedPlan={sidebarProposedPlan}
-            threadSubagents={threadSubagents}
-            changedFileSummaries={activeThread?.turnDiffSummaries}
-            sourceControlActions={overviewSourceControlActions}
-            branchControl={overviewBranchControl}
-            markdownCwd={gitCwd ?? undefined}
-            workspaceRoot={activeWorkspaceRoot}
-            mode="sheet"
-            preview={workspacePreview}
-            onOpenFiles={onOpenFilesPanel}
-            onOpenReview={onOpenReviewPanel}
-            onOpenSubagent={onOpenSubagentPanel}
-            onOpenPullRequestInApp={openPullRequestInApp}
-            onPostPushDiscoveryComplete={clearPostPushWatch}
-          />
-        </RightPanelSheet>
       ) : null}
 
       {isPhoneTier && expandedImage && (

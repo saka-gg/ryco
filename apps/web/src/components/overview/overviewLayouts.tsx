@@ -1,3 +1,4 @@
+import { formatCount } from "~/lib/formatCount";
 import { cn } from "~/lib/utils";
 
 import { changeRequestStateKind, StateBadge } from "../projectExplorer/StateBadge";
@@ -30,11 +31,6 @@ function isPlanActive(props: OverviewLayoutProps): boolean {
   );
 }
 
-/** Format a count and word pair with proper pluralization. */
-function plural(count: number, word: string): string {
-  return `${count} ${word}${count === 1 ? "" : "s"}`;
-}
-
 export function StatusBoardLayout(props: OverviewLayoutProps) {
   const summary = getOverviewSummary(props);
   const changesItem = pickChangesItem(props.overviewItems);
@@ -48,7 +44,7 @@ export function StatusBoardLayout(props: OverviewLayoutProps) {
     .map((subagent) => subagent.name)
     .join(", ");
   const changesFileLabel =
-    summary.fileCount > 0 ? plural(summary.fileCount, "file") : changesItem?.value;
+    summary.fileCount > 0 ? formatCount(summary.fileCount, "file") : changesItem?.value;
 
   return (
     <div>

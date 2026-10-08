@@ -77,7 +77,7 @@ export interface OverviewChangedFile {
   /**
    * Single-letter change type shown as the colored M/A/D tag. Optional because
    * the current `VcsStatusResult.workingTree.files` contract does not yet carry
-   * it (see TODO in ChatOverviewPanel).
+   * it (see the note in chat/useChatOverviewModel).
    */
   status?: OverviewFileStatus | undefined;
   /** Whether the file is staged for commit. Undefined when unknown. */
@@ -93,6 +93,22 @@ export interface OverviewChanges {
   refName: string | null;
   aheadCount: number;
   behindCount: number;
+  /** Whether the branch tracks an upstream; false for a never-pushed branch. */
+  hasUpstream?: boolean | undefined;
+  /** Commits ahead of the default branch — what a first push would publish. */
+  aheadOfDefaultCount?: number | undefined;
+}
+
+/**
+ * Which parts of the overview's live data have answered for this checkout.
+ * Until they have, their fields hold placeholders (no upstream, 0 ahead, no
+ * pull request) that must not be read as real values.
+ */
+export interface OverviewDataReadiness {
+  /** Git status carries its remote half: upstream, ahead / behind and the change request. */
+  readonly remoteStatus: boolean;
+  /** The change-request lookup has answered, so a missing pull request means "none". */
+  readonly pullRequestLookup: boolean;
 }
 
 export type OverviewPanelMode = "floating" | "sheet" | "sidebar";

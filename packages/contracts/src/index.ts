@@ -69,4 +69,5 @@ export * from "./storage.ts";
 export * from "./dailyRecap.ts";
 
 export * from "./localTasks.ts";
+export * from "./notes.ts";
 export * from "./workspaceLifecycle.ts";

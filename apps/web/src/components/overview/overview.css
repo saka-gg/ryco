@@ -1,0 +1,13 @@
+/*
+ * Overview styles: keyframes and selectors only; layout lives in Tailwind
+ * classes where it reads naturally. The Crown rail's values mirror the
+ * approved prototype (output/overview-concepts/rail-island.html, "Crown").
+ * Durations are custom properties on `.crown-root`; motion.css zeroes them
+ * under reduced motion and lists every keyframe in its reduced-motion block.
+ */
+@import "./crown/styles/motion.css";
+@import "./crown/styles/island.css";
+@import "./crown/styles/card.css";
+@import "./crown/styles/rail.css";
+@import "./crown/styles/flyout.css";
+@import "./notes/notes.css";

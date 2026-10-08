@@ -83,10 +83,11 @@ import { stackedThreadToast, toastManager, type ThreadToastData } from "~/compon
 import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
 import { openInPreferredEditor } from "~/editorPreferences";
 import {
+  GIT_USER_ACTION_KIND,
   gitMutationTrackingKey,
   gitScopeKey,
+  useGitActionActivity,
   useGitMutation,
-  useIsGitMutating,
 } from "~/rpc/useGit";
 import { refreshGitStatus, useGitStatus } from "~/lib/gitStatusState";
 import { useSourceControlDiscovery } from "~/lib/sourceControlDiscoveryState";
@@ -452,7 +453,11 @@ function PublishRepositoryDialog(props: PublishRepositoryDialogProps) {
       });
     },
     invalidates: props.gitCwd ? [gitScopeKey(props.gitCwd)] : [],
-    trackingKey: gitMutationTrackingKey("publish-repository", props.environmentId, props.gitCwd),
+    trackingKey: gitMutationTrackingKey(
+      GIT_USER_ACTION_KIND.publishRepository,
+      props.environmentId,
+      props.gitCwd,
+    ),
   });
   const publishAccountByProvider = useMemo(() => {
     const accounts: Record<PublishProviderKind, string | null> = {
@@ -1032,28 +1037,23 @@ function PublishRepositoryDialog(props: PublishRepositoryDialogProps) {
   );
 }
 
-export default function GitActionsControl({
-  gitCwd,
-  activeThreadRef,
-  draftId,
-  showLabels = false,
-  block = false,
-  detectedChangeRequest = null,
-  onPostPush,
-}: GitActionsControlProps) {
-  const activeEnvironmentId = activeThreadRef?.environmentId ?? null;
+/** The branch prefix of the environment's temporary worktree branches, once its config is known. */
+function useWorktreeBranchPrefix(environmentId: ScopedThreadRef["environmentId"] | null) {
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const primaryServerConfig = useServerConfig();
   const environmentServerConfig = useSavedEnvironmentRuntimeStore((state) =>
-    activeEnvironmentId ? state.byId[activeEnvironmentId]?.serverConfig : null,
+    environmentId ? state.byId[environmentId]?.serverConfig : null,
   );
   const serverConfig =
-    activeEnvironmentId === primaryEnvironmentId ? primaryServerConfig : environmentServerConfig;
-  const worktreeBranchPrefix = serverConfig?.settings.worktreeBranchPrefix;
-  const threadToastData = useMemo(
-    () => (activeThreadRef ? { threadRef: activeThreadRef } : undefined),
-    [activeThreadRef],
-  );
+    environmentId === primaryEnvironmentId ? primaryServerConfig : environmentServerConfig;
+  return serverConfig?.settings.worktreeBranchPrefix;
+}
+
+/** The thread the git controls act for, and how to record the branch its checkout is on. */
+function useThreadBranchPersistence(
+  activeThreadRef: ScopedThreadRef | null,
+  draftId: DraftId | undefined,
+) {
   const activeServerThreadSelector = useMemo(
     () => createThreadSelectorByRef(activeThreadRef),
     [activeThreadRef],
@@ -1068,43 +1068,6 @@ export default function GitActionsControl({
   );
   const setDraftThreadContext = useComposerDraftStore((store) => store.setDraftThreadContext);
   const setThreadBranch = useStore((store) => store.setThreadBranch);
-  const [isCommitDialogOpen, setIsCommitDialogOpen] = useState(false);
-  const [dialogCommitMessage, setDialogCommitMessage] = useState("");
-  const [excludedFiles, setExcludedFiles] = useState<ReadonlySet<string>>(new Set());
-  const [isEditingFiles, setIsEditingFiles] = useState(false);
-  const [isPublishDialogOpen, setIsPublishDialogOpen] = useState(false);
-  const [pendingDefaultBranchAction, setPendingDefaultBranchAction] =
-    useState<PendingDefaultBranchAction | null>(null);
-  const activeGitActionProgressRef = useRef<ActiveGitActionProgress | null>(null);
-  const [activeGitActionProgressVersion, setActiveGitActionProgressVersion] = useState(0);
-  let runGitActionWithToast: (input: RunGitActionWithToastInput) => Promise<void>;
-
-  const setActiveGitActionProgress = useCallback((progress: ActiveGitActionProgress) => {
-    activeGitActionProgressRef.current = progress;
-    setActiveGitActionProgressVersion((version) => version + 1);
-  }, []);
-
-  const clearActiveGitActionProgress = useCallback(() => {
-    if (!activeGitActionProgressRef.current) {
-      return;
-    }
-    activeGitActionProgressRef.current = null;
-    setActiveGitActionProgressVersion((version) => version + 1);
-  }, []);
-
-  const updateActiveProgressToast = useCallback(() => {
-    const progress = activeGitActionProgressRef.current;
-    if (!progress) {
-      return;
-    }
-    toastManager.update(progress.toastId, {
-      type: "loading",
-      title: progress.title,
-      description: resolveProgressDescription(progress),
-      timeout: 0,
-      data: progress.toastData,
-    });
-  }, []);
 
   const persistThreadBranchSync = useCallback(
     (branch: string | null) => {
@@ -1154,6 +1117,156 @@ export default function GitActionsControl({
     ],
   );
 
+  return { activeServerThread, activeDraftThread, persistThreadBranchSync };
+}
+
+/**
+ * The git controls' background work, independent of where (or whether) the
+ * controls are shown: follows the checkout's live branch into the thread, and
+ * refreshes git status when the window regains focus. The overview mounts it
+ * once while it is open, so the hover flyout and the card can mount and
+ * unmount the visual controls freely.
+ */
+export function GitThreadSync({
+  gitCwd,
+  activeThreadRef,
+  draftId,
+}: Pick<GitActionsControlProps, "gitCwd" | "activeThreadRef" | "draftId">): null {
+  const activeEnvironmentId = activeThreadRef?.environmentId ?? null;
+  const worktreeBranchPrefix = useWorktreeBranchPrefix(activeEnvironmentId);
+  const { activeServerThread, activeDraftThread, persistThreadBranchSync } =
+    useThreadBranchPersistence(activeThreadRef, draftId);
+  const { data: gitStatus = null } = useGitStatus({
+    environmentId: activeEnvironmentId,
+    cwd: gitCwd,
+  });
+  const isGitActionRunning = useGitActionActivity(activeEnvironmentId, gitCwd);
+
+  const isSelectingWorktreeBase =
+    !activeServerThread &&
+    activeDraftThread?.envMode === "worktree" &&
+    activeDraftThread.worktreePath === null;
+
+  useEffect(() => {
+    if (isGitActionRunning || isSelectingWorktreeBase || worktreeBranchPrefix === undefined) {
+      return;
+    }
+
+    const branchUpdate = resolveLiveThreadBranchUpdate({
+      worktreeBranchPrefix,
+      threadBranch: activeServerThread?.branch ?? activeDraftThread?.branch ?? null,
+      gitStatus,
+    });
+    if (!branchUpdate) {
+      return;
+    }
+
+    persistThreadBranchSync(branchUpdate.branch);
+  }, [
+    activeServerThread?.branch,
+    activeDraftThread?.branch,
+    gitStatus,
+    isGitActionRunning,
+    isSelectingWorktreeBase,
+    worktreeBranchPrefix,
+    persistThreadBranchSync,
+  ]);
+
+  useEffect(() => {
+    if (gitCwd === null) {
+      return;
+    }
+
+    let refreshTimeout: number | null = null;
+    const scheduleRefreshCurrentGitStatus = () => {
+      if (refreshTimeout !== null) {
+        window.clearTimeout(refreshTimeout);
+      }
+      refreshTimeout = window.setTimeout(() => {
+        refreshTimeout = null;
+        void refreshGitStatus({ environmentId: activeEnvironmentId, cwd: gitCwd }).catch(
+          () => undefined,
+        );
+      }, GIT_STATUS_WINDOW_REFRESH_DEBOUNCE_MS);
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        scheduleRefreshCurrentGitStatus();
+      }
+    };
+
+    window.addEventListener("focus", scheduleRefreshCurrentGitStatus);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      if (refreshTimeout !== null) {
+        window.clearTimeout(refreshTimeout);
+      }
+      window.removeEventListener("focus", scheduleRefreshCurrentGitStatus);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [activeEnvironmentId, gitCwd]);
+
+  return null;
+}
+
+export default function GitActionsControl({
+  gitCwd,
+  activeThreadRef,
+  draftId,
+  showLabels = false,
+  block = false,
+  detectedChangeRequest = null,
+  onPostPush,
+}: GitActionsControlProps) {
+  const activeEnvironmentId = activeThreadRef?.environmentId ?? null;
+  const threadToastData = useMemo(
+    () => (activeThreadRef ? { threadRef: activeThreadRef } : undefined),
+    [activeThreadRef],
+  );
+  const [isCommitDialogOpen, setIsCommitDialogOpen] = useState(false);
+  const [dialogCommitMessage, setDialogCommitMessage] = useState("");
+  const [excludedFiles, setExcludedFiles] = useState<ReadonlySet<string>>(new Set());
+  const [isEditingFiles, setIsEditingFiles] = useState(false);
+  const [isPublishDialogOpen, setIsPublishDialogOpen] = useState(false);
+  const [pendingDefaultBranchAction, setPendingDefaultBranchAction] =
+    useState<PendingDefaultBranchAction | null>(null);
+  const activeGitActionProgressRef = useRef<ActiveGitActionProgress | null>(null);
+  const [activeGitActionProgressVersion, setActiveGitActionProgressVersion] = useState(0);
+  let runGitActionWithToast: (input: RunGitActionWithToastInput) => Promise<void>;
+
+  const setActiveGitActionProgress = useCallback((progress: ActiveGitActionProgress) => {
+    activeGitActionProgressRef.current = progress;
+    setActiveGitActionProgressVersion((version) => version + 1);
+  }, []);
+
+  const clearActiveGitActionProgress = useCallback(() => {
+    if (!activeGitActionProgressRef.current) {
+      return;
+    }
+    activeGitActionProgressRef.current = null;
+    setActiveGitActionProgressVersion((version) => version + 1);
+  }, []);
+
+  const updateActiveProgressToast = useCallback(() => {
+    const progress = activeGitActionProgressRef.current;
+    if (!progress) {
+      return;
+    }
+    toastManager.update(progress.toastId, {
+      type: "loading",
+      title: progress.title,
+      description: resolveProgressDescription(progress),
+      timeout: 0,
+      data: progress.toastData,
+    });
+  }, []);
+
+  const { activeServerThread, persistThreadBranchSync } = useThreadBranchPersistence(
+    activeThreadRef,
+    draftId,
+  );
+
   const syncThreadBranchAfterGitAction = useCallback(
     (result: GitRunStackedActionResult) => {
       const branchUpdate = resolveThreadBranchUpdate(result);
@@ -1191,13 +1304,12 @@ export default function GitActionsControl({
 
   const gitScopes = useMemo(() => (gitCwd ? [gitScopeKey(gitCwd)] : []), [gitCwd]);
   const runStackedActionTrackingKey = gitMutationTrackingKey(
-    "run-stacked-action",
+    GIT_USER_ACTION_KIND.runStackedAction,
     activeEnvironmentId,
     gitCwd,
   );
-  const pullTrackingKey = gitMutationTrackingKey("pull", activeEnvironmentId, gitCwd);
-  const publishTrackingKey = gitMutationTrackingKey(
-    "publish-repository",
+  const pullTrackingKey = gitMutationTrackingKey(
+    GIT_USER_ACTION_KIND.pull,
     activeEnvironmentId,
     gitCwd,
   );
@@ -1256,39 +1368,7 @@ export default function GitActionsControl({
     trackingKey: pullTrackingKey,
   });
 
-  const isRunStackedActionRunning = useIsGitMutating(runStackedActionTrackingKey);
-  const isPullRunning = useIsGitMutating(pullTrackingKey);
-  const isPublishRunning = useIsGitMutating(publishTrackingKey);
-  const isGitActionRunning = isRunStackedActionRunning || isPullRunning || isPublishRunning;
-  const isSelectingWorktreeBase =
-    !activeServerThread &&
-    activeDraftThread?.envMode === "worktree" &&
-    activeDraftThread.worktreePath === null;
-
-  useEffect(() => {
-    if (isGitActionRunning || isSelectingWorktreeBase || worktreeBranchPrefix === undefined) {
-      return;
-    }
-
-    const branchUpdate = resolveLiveThreadBranchUpdate({
-      worktreeBranchPrefix,
-      threadBranch: activeServerThread?.branch ?? activeDraftThread?.branch ?? null,
-      gitStatus: gitStatusForActions,
-    });
-    if (!branchUpdate) {
-      return;
-    }
-
-    persistThreadBranchSync(branchUpdate.branch);
-  }, [
-    activeServerThread?.branch,
-    activeDraftThread?.branch,
-    gitStatusForActions,
-    isGitActionRunning,
-    isSelectingWorktreeBase,
-    worktreeBranchPrefix,
-    persistThreadBranchSync,
-  ]);
+  const isGitActionRunning = useGitActionActivity(activeEnvironmentId, gitCwd);
 
   const isDefaultRef = useMemo(() => {
     return gitStatusForActions?.isDefaultRef ?? false;
@@ -1332,41 +1412,6 @@ export default function GitActionsControl({
 
     return poller.stop;
   }, [activeGitActionProgressVersion, updateActiveProgressToast]);
-
-  useEffect(() => {
-    if (gitCwd === null) {
-      return;
-    }
-
-    let refreshTimeout: number | null = null;
-    const scheduleRefreshCurrentGitStatus = () => {
-      if (refreshTimeout !== null) {
-        window.clearTimeout(refreshTimeout);
-      }
-      refreshTimeout = window.setTimeout(() => {
-        refreshTimeout = null;
-        void refreshGitStatus({ environmentId: activeEnvironmentId, cwd: gitCwd }).catch(
-          () => undefined,
-        );
-      }, GIT_STATUS_WINDOW_REFRESH_DEBOUNCE_MS);
-    };
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === "visible") {
-        scheduleRefreshCurrentGitStatus();
-      }
-    };
-
-    window.addEventListener("focus", scheduleRefreshCurrentGitStatus);
-    document.addEventListener("visibilitychange", handleVisibilityChange);
-
-    return () => {
-      if (refreshTimeout !== null) {
-        window.clearTimeout(refreshTimeout);
-      }
-      window.removeEventListener("focus", scheduleRefreshCurrentGitStatus);
-      document.removeEventListener("visibilitychange", handleVisibilityChange);
-    };
-  }, [activeEnvironmentId, gitCwd]);
 
   const openExistingPr = useCallback(async () => {
     const api = readLocalApi();

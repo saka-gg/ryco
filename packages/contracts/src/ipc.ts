@@ -34,6 +34,7 @@ import type {
   GitReadComparisonResult,
 } from "./git.ts";
 import type { AutomationCentreApi } from "./automationCentre.ts";
+import type { NotesApi } from "./notes.ts";
 import type {
   AcpRegistrySearchInput,
   AcpRegistrySearchResult,
@@ -1306,6 +1307,8 @@ export interface EnvironmentApi {
    * feature-detect against environments predating Agent Control.
    */
   automationCentre?: AutomationCentreApi;
+  /** Server-owned worktree notes. Optional so clients can feature-detect older environments. */
+  notes?: NotesApi;
   agentControl?: {
     listProposals: (input: AgentControlListProposalsInput) => Promise<AgentControlProposalQueue>;
     getProposal: (input: AgentControlGetProposalInput) => Promise<AgentControlGetProposalResult>;

@@ -76,6 +76,16 @@ describe("ExecutionEnvironmentCapabilities.worktreeSubmoduleSettings", () => {
   });
 });
 
+describe("ExecutionEnvironmentCapabilities.worktreeNotes", () => {
+  it("stays absent for older nodes and decodes when advertised", () => {
+    expect(decodeDescriptor(descriptor({})).capabilities.worktreeNotes).toBeUndefined();
+    expect(decodeDescriptor(descriptor({ worktreeNotes: true })).capabilities.worktreeNotes).toBe(
+      true,
+    );
+    expect(() => decodeDescriptor(descriptor({ worktreeNotes: "true" }))).toThrow();
+  });
+});
+
 it("requires explicit required-worktree bootstrap support from the node", () => {
   expect(decodeDescriptor(descriptor({})).capabilities.requiredWorktreeBootstrap).toBeUndefined();
   expect(

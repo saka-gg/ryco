@@ -95,6 +95,34 @@ describe("wsRpcClient", () => {
     });
   });
 
+  it("calls the worktree notes wire methods", async () => {
+    const snapshot = { projectId: "project", notes: [], limit: 500, truncated: false };
+    const listWireMethod = vi.fn(() => Effect.succeed(snapshot));
+    const commandWireMethod = vi.fn(() => Effect.succeed(snapshot));
+    const transport = {
+      request: vi.fn((invoke: (client: unknown) => Effect.Effect<unknown>) =>
+        Effect.runPromise(
+          invoke({
+            [WS_METHODS.notesList]: listWireMethod,
+            [WS_METHODS.notesCommand]: commandWireMethod,
+          }),
+        ),
+      ),
+    };
+    const client = createWsRpcClient(transport as unknown as WsTransport);
+    await expect(client.notes.list({ projectId: "project" as never })).resolves.toEqual(snapshot);
+    expect(listWireMethod).toHaveBeenCalledWith({ projectId: "project" });
+    const command = {
+      kind: "delete",
+      noteId: "note",
+      projectId: "project",
+      expectedRevision: 3,
+    } as const;
+    await expect(client.notes.command(command as never)).resolves.toEqual(snapshot);
+    expect(commandWireMethod).toHaveBeenCalledWith(command);
+    expect(transport.request).toHaveBeenCalledTimes(2);
+  });
+
   it("reduces vcs status stream events into flat status snapshots", () => {
     const subscribe = vi.fn(<TValue>(_connect: unknown, listener: (value: TValue) => void) => {
       for (const event of [
@@ -147,12 +175,14 @@ describe("wsRpcClient", () => {
           aheadOfDefaultCount: 0,
           pr: null,
         },
+        { remoteKnown: false },
       ],
       [
         {
           ...baseLocalStatus,
           ...baseRemoteStatus,
         },
+        { remoteKnown: true },
       ],
       [
         {
@@ -160,6 +190,7 @@ describe("wsRpcClient", () => {
           ...baseRemoteStatus,
           hasWorkingTreeChanges: true,
         },
+        { remoteKnown: true },
       ],
     ]);
     expect(client.isHeartbeatFresh()).toBe(true);

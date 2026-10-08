@@ -1,0 +1,80 @@
+/* Crown — flyout: the hover preview that grows out of a rail icon, and the preview dock. */
+
+.crown-flyout {
+  position: absolute;
+  z-index: 40;
+  top: 0;
+  right: calc(var(--crown-rail-width) + var(--crown-flyout-gap));
+  height: 0;
+  overflow: hidden;
+  border-radius: 22px;
+  opacity: 0;
+  filter: blur(8px);
+  transform: translateX(4px) scale(0.5);
+  /* --oy: the hovered icon's centre, so the panel scales out of it. */
+  transform-origin: calc(100% + 34px) var(--oy, 24px);
+  pointer-events: none;
+  transition:
+    top var(--crown-dur-fly-move) var(--crown-ease-morph),
+    height var(--crown-dur-fly-move) var(--crown-ease-morph),
+    opacity var(--crown-dur-fly-fade) ease,
+    transform var(--crown-dur-fly-morph) var(--crown-ease-morph),
+    filter var(--crown-dur-fly-blur) ease;
+}
+
+.crown-flyout[data-open="true"] {
+  opacity: 1;
+  filter: none;
+  transform: none;
+  pointer-events: auto;
+}
+
+/* First open: jump to the icon before animating out of it. */
+.crown-flyout[data-snap="true"] {
+  transition: none;
+}
+
+.crown-flyout-layer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  max-height: var(--fly-max, 480px);
+  overflow: auto;
+  padding: 14px 14px 12px;
+  transition:
+    opacity var(--crown-dur-fly-layer-fade) ease,
+    transform var(--crown-dur-fly-layer-move) var(--crown-ease-out);
+}
+
+.crown-flyout-layer[data-phase="enter"] {
+  opacity: 0;
+  transform: translateY(8px);
+}
+
+.crown-flyout-layer[data-phase="leave"] {
+  opacity: 0;
+  transform: translateY(-6px);
+  pointer-events: none;
+}
+
+/* Previews (computer beta, background browser) docked under the rail. */
+.crown-preview-dock {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  width: 280px;
+  margin-top: 10px;
+  padding: 8px;
+  overflow: hidden;
+  border-radius: 18px;
+}
+
+/* Idle previews render nothing; the dock then has no material at all. */
+.crown-preview-dock:empty {
+  padding: 0;
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+  pointer-events: none;
+}

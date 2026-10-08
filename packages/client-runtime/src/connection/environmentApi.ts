@@ -168,6 +168,7 @@ export function createEnvironmentApi(rpcClient: WsRpcClient): EnvironmentApi {
     // Conditional like worktrees/threads: older environments (and partial
     // test doubles) predate the Agent Control surface.
     ...(rpcClient.automationCentre ? { automationCentre: rpcClient.automationCentre } : {}),
+    ...(rpcClient.notes ? { notes: rpcClient.notes } : {}),
     ...(rpcClient.agentControl
       ? {
           agentControl: {

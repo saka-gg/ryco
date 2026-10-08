@@ -41,6 +41,64 @@ import {
 // Hoisted per suite: a mock registered from the shared helpers runs after this file's static imports.
 vi.mock("../lib/gitStatusState", () => import("../../test/gitStatusStateMock"));
 
+/** The docked Crown rail, once it is open and visible. */
+function queryVisibleCrownRail(): HTMLElement | null {
+  const crown = document.querySelector<HTMLElement>('[data-slot="crown-overview"]');
+  if (crown?.dataset.state !== "open") return null;
+  const rail = crown.querySelector<HTMLElement>('nav[aria-label="Overview"]');
+  return rail && isElementVisible(rail) ? rail : null;
+}
+
+/** Streams a thread snapshot whose latest turn carries a live plan (and a new title to wait on). */
+function emitPlanSnapshot(input: { turnId: string; title: string; offset: number }) {
+  const base = fixture.snapshot;
+  const nextThreads = base.threads.map((thread) =>
+    thread.id === THREAD_ID
+      ? Object.assign({}, thread, {
+          title: input.title,
+          activities: [
+            ...thread.activities,
+            {
+              id: EventId.make(`activity-plan-${input.turnId}`),
+              tone: "info" as const,
+              kind: "turn.plan.updated",
+              summary: "Plan updated",
+              payload: {
+                plan: [
+                  { step: "Draft the change", status: "inProgress" },
+                  { step: "Verify the change", status: "pending" },
+                ],
+              },
+              turnId: input.turnId as TurnId,
+              sequence: input.offset,
+              createdAt: isoAt(1_000 + input.offset),
+            },
+          ],
+          updatedAt: isoAt(1_000 + input.offset),
+        })
+      : thread,
+  );
+  const next = {
+    ...base,
+    snapshotSequence: base.snapshotSequence + 1,
+    threads: nextThreads,
+  };
+  fixture.snapshot = next;
+  rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeThreadWindow, {
+    kind: "snapshot",
+    snapshot: toThreadWindowSnapshot(
+      next.snapshotSequence,
+      nextThreads.find((thread) => thread.id === THREAD_ID)!,
+    ),
+  });
+}
+
+function threadTitleShown(title: string): boolean {
+  return [...document.querySelectorAll<HTMLElement>("header p")].some(
+    (element) => element.textContent === title,
+  );
+}
+
 describe("ChatView PhoneSurfaces (full app)", () => {
   setupChatViewBrowserSuite();
 
@@ -507,12 +565,12 @@ describe("ChatView PhoneSurfaces (full app)", () => {
     }
   });
 
-  it("gives the floating desktop overview overlay a working close affordance", async () => {
+  it("keeps the Crown rail docked beside the workspace panel", async () => {
     const mounted = await mountChatView({
       viewport: WIDE_FOOTER_VIEWPORT,
       snapshot: createSnapshotForTargetUser({
-        targetMessageId: "msg-user-overview-overlay-close" as MessageId,
-        targetText: "overview overlay close thread",
+        targetMessageId: "msg-user-crown-rail-docked" as MessageId,
+        targetText: "crown rail docked thread",
       }),
     });
 
@@ -520,44 +578,49 @@ describe("ChatView PhoneSurfaces (full app)", () => {
       await vi.waitFor(() => {
         expect(document.documentElement.getAttribute("data-tier")).toBe("desktop");
       });
-      // Open the inline workspace panel, then the overview: this is the
-      // audited floating overlay that previously had no close affordance.
       const workspaceToggle = await waitForElement(
         () => document.querySelector<HTMLElement>('button[aria-label="Toggle workspace panel"]'),
         "Unable to find the workspace toggle.",
       );
       workspaceToggle.click();
-      // Wait for the inline panel to actually open (URL-driven) before
-      // toggling the overview, so the toggle takes the floating-overlay path.
       await waitForElement(
         () => document.querySelector<HTMLElement>('button[aria-label="Close workspace panel"]'),
         "Unable to find the opened inline workspace panel.",
       );
-      const overviewToggle = await waitForElement(
-        () => document.querySelector<HTMLElement>('button[aria-label="Toggle overview panel"]'),
-        "Unable to find the overview toggle.",
-      );
-      overviewToggle.click();
 
-      const closeOverview = await waitForElement(
-        () => document.querySelector<HTMLElement>('button[aria-label="Close overview"]'),
-        "Unable to find the overview close affordance.",
+      // Wide layouts open the overview by default; the rail keeps its docked
+      // column while the workspace panel is open.
+      const rail = await waitForElement(queryVisibleCrownRail, "Unable to find the Crown rail.");
+      const slot = await waitForElement(
+        () => document.querySelector<HTMLElement>('[data-slot="crown-rail-slot"]'),
+        "Unable to find the Crown rail slot.",
       );
-      const branchHeader = await waitForElement(
-        () => document.querySelector<HTMLElement>('[data-slot="overview-branch-header"]'),
-        "Unable to find the overview branch header.",
+      await vi.waitFor(() => {
+        expect(Math.round(slot.getBoundingClientRect().width)).toBe(72);
+      });
+      const crownRoot = rail.closest<HTMLElement>('[data-slot="crown-overview"]')!;
+
+      // An icon click expands the island into the card on that section.
+      rail.querySelector<HTMLElement>('[data-nav-key="branch"]')!.click();
+      await vi.waitFor(() => {
+        expect(crownRoot.dataset.mode).toBe("card");
+      });
+      const branchSection = await waitForElement(
+        () =>
+          crownRoot.querySelector<HTMLElement>(
+            '[data-slot="crown-card-detail"] [data-section="branch"]',
+          ),
+        "Unable to find the card's branch section.",
       );
       const branchSelector = await waitForElement(
-        () => branchHeader.querySelector<HTMLElement>('[data-appearance="panelRow"]'),
+        () => branchSection.querySelector<HTMLElement>('[data-appearance="panelRow"]'),
         "Unable to find the full-width overview branch selector.",
       );
       await waitForLayout();
-      const branchSelectorHeight = Math.round(branchSelector.getBoundingClientRect().height);
-      expect(branchSelectorHeight).toBe(36);
-      expect(Math.round(branchHeader.getBoundingClientRect().height)).toBe(
-        branchSelectorHeight + 1,
-      );
-      expect(branchSelector.getBoundingClientRect().width).toBeGreaterThan(200);
+      await vi.waitFor(() => {
+        expect(Math.round(branchSelector.getBoundingClientRect().height)).toBe(36);
+        expect(branchSelector.getBoundingClientRect().width).toBeGreaterThan(200);
+      });
 
       const branchTrigger = branchSelector.querySelector<HTMLButtonElement>(
         '[data-slot="combobox-trigger"]',
@@ -571,12 +634,35 @@ describe("ChatView PhoneSurfaces (full app)", () => {
         () => document.querySelector<HTMLInputElement>('input[placeholder="Search refs..."]'),
         "Unable to open the overview branch picker.",
       );
+      // Escape closes only the picker; the card stays expanded.
       await userEvent.keyboard("{Escape}");
-
-      closeOverview.click();
       await vi.waitFor(() => {
-        expect(document.querySelector('button[aria-label="Close overview"]')).toBeNull();
+        expect(document.querySelector('input[placeholder="Search refs..."]')).toBeNull();
       });
+      expect(crownRoot.dataset.mode).toBe("card");
+
+      const collapse = await waitForElement(
+        () => crownRoot.querySelector<HTMLElement>('button[aria-label="Collapse overview"]'),
+        "Unable to find the card's collapse affordance.",
+      );
+      collapse.click();
+      await vi.waitFor(() => {
+        expect(crownRoot.dataset.mode).toBe("dot");
+      });
+
+      // The header toggle hides the whole rail.
+      const overviewToggle = await waitForElement(
+        () => document.querySelector<HTMLElement>('button[aria-label="Toggle overview panel"]'),
+        "Unable to find the overview toggle.",
+      );
+      overviewToggle.click();
+      await vi.waitFor(
+        () => {
+          expect(document.querySelector('[data-slot="crown-overview"]')).toBeNull();
+          expect(Math.round(slot.getBoundingClientRect().width)).toBe(0);
+        },
+        { timeout: 4_000, interval: 16 },
+      );
     } finally {
       await mounted.cleanup();
     }
@@ -604,20 +690,17 @@ describe("ChatView PhoneSurfaces (full app)", () => {
         "Unable to find the overview toggle.",
       );
       overviewToggle.click();
-      // Desktop <=980 regression guard: the overview renders as the right
-      // sheet, narrower than the viewport, without the phone surface bar.
-      const desktopSheet = await waitForElement(
-        () =>
-          [...document.querySelectorAll<HTMLElement>('[data-slot="sheet-popup"]')].find(
-            isElementVisible,
-          ) ?? null,
-        "Unable to find the desktop overview sheet.",
-      );
+      // Desktop <=980 regression guard: the overview docks the 48px Crown
+      // rail rather than opening a sheet, and there is no phone surface bar.
+      const rail = await waitForElement(queryVisibleCrownRail, "Unable to find the Crown rail.");
       await vi.waitFor(() => {
-        const width = desktopSheet.getBoundingClientRect().width;
-        expect(width).toBeGreaterThan(200);
-        expect(width).toBeLessThan(ROTATED_MID_VIEWPORT.width * 0.7);
+        expect(Math.round(rail.getBoundingClientRect().width)).toBe(48);
       });
+      expect(
+        [...document.querySelectorAll<HTMLElement>('[data-slot="sheet-popup"]')].some(
+          isElementVisible,
+        ),
+      ).toBe(false);
       expect(document.querySelector('button[aria-label="Back to thread"]')).toBeNull();
 
       // Rotate across the tier boundary: the open overview re-presents as a
@@ -859,53 +942,6 @@ describe("ChatView PhoneSurfaces (full app)", () => {
       }),
     });
 
-    const emitPlanSnapshot = (input: { turnId: string; title: string; offset: number }) => {
-      const base = fixture.snapshot;
-      const nextThreads = base.threads.map((thread) =>
-        thread.id === THREAD_ID
-          ? Object.assign({}, thread, {
-              title: input.title,
-              activities: [
-                ...thread.activities,
-                {
-                  id: EventId.make(`activity-plan-${input.turnId}`),
-                  tone: "info" as const,
-                  kind: "turn.plan.updated",
-                  summary: "Plan updated",
-                  payload: {
-                    plan: [
-                      { step: "Draft the change", status: "inProgress" },
-                      { step: "Verify the change", status: "pending" },
-                    ],
-                  },
-                  turnId: input.turnId as TurnId,
-                  sequence: input.offset,
-                  createdAt: isoAt(1_000 + input.offset),
-                },
-              ],
-              updatedAt: isoAt(1_000 + input.offset),
-            })
-          : thread,
-      );
-      const next = {
-        ...base,
-        snapshotSequence: base.snapshotSequence + 1,
-        threads: nextThreads,
-      };
-      fixture.snapshot = next;
-      rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeThreadWindow, {
-        kind: "snapshot",
-        snapshot: toThreadWindowSnapshot(
-          next.snapshotSequence,
-          nextThreads.find((thread) => thread.id === THREAD_ID)!,
-        ),
-      });
-    };
-    const threadTitleShown = (title: string) =>
-      [...document.querySelectorAll<HTMLElement>("header p")].some(
-        (element) => element.textContent === title,
-      );
-
     try {
       await page.getByTestId("composer-editor").click();
       await vi.waitFor(() => {
@@ -946,6 +982,62 @@ describe("ChatView PhoneSurfaces (full app)", () => {
       });
       await vi.waitFor(() => {
         expect(threadTitleShown("Planned thread again")).toBe(true);
+      });
+      await vi.waitFor(() => {
+        const popup = queryPhoneSurfacePopup("Overview");
+        expect(popup).not.toBeNull();
+        expect(isElementVisible(popup!)).toBe(true);
+      });
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("keeps the overview sheet closed while the workspace sheet is open", async () => {
+    localStorage.setItem(
+      "ryco:client-settings:v1",
+      JSON.stringify({
+        ...DEFAULT_CLIENT_SETTINGS,
+        autoOpenPlanSidebar: true,
+      }),
+    );
+    const mounted = await mountChatView({
+      viewport: PHONE_VIEWPORT,
+      snapshot: createSnapshotWithWorkSurfaceCheckpoint({
+        targetMessageId: "msg-user-plan-under-workspace" as MessageId,
+        targetText: "plan under workspace thread",
+      }),
+      resolveRpc: resolveWorkSurfaceRpc,
+    });
+
+    try {
+      const workspaceToggle = await waitForElement(
+        () => document.querySelector<HTMLElement>('button[aria-label="Toggle workspace panel"]'),
+        "Unable to find the workspace toggle.",
+      );
+      workspaceToggle.click();
+      const workspace = await waitForElement(
+        () => queryPhoneSurfacePopup("Workspace"),
+        "Unable to find the phone work surface.",
+      );
+
+      // A plan arriving under the full-screen workspace must not stack a
+      // second full-screen sheet on top of it.
+      emitPlanSnapshot({ turnId: "turn-plan-under-workspace", title: "Planned", offset: 1 });
+      await vi.waitFor(() => {
+        expect(threadTitleShown("Planned")).toBe(true);
+      });
+      await waitForLayout();
+      await waitForLayout();
+      const overviewWhileWorkspace = queryPhoneSurfacePopup("Overview");
+      expect(overviewWhileWorkspace === null || !isElementVisible(overviewWhileWorkspace)).toBe(
+        true,
+      );
+
+      // Once the workspace sheet closes, the opened overview shows.
+      mounted.router.history.back();
+      await vi.waitFor(() => {
+        expect(isElementVisible(workspace)).toBe(false);
       });
       await vi.waitFor(() => {
         const popup = queryPhoneSurfacePopup("Overview");
