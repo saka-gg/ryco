@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { scrollRowIntoView, useLandingFlash } from "../../../hooks/useLandingFlash";
 import { useSettings } from "../../../hooks/useSettings";
 import { resolveSourceControlRefreshDelay } from "../../../rpc/sourceControlRefreshPolicy";
 import {
@@ -28,7 +29,7 @@ import {
   type ChecksWorkflowEntry,
 } from "./checksModel";
 import { checksRerunStartedTitle, describeChecksRerunFailure } from "./checksRerun";
-import { scrollRowIntoView, useLandingFlash, useTabScrollMemory } from "./checksUi";
+import { useTabScrollMemory } from "./checksUi";
 import { createJobLogPathResolver } from "./jobLog";
 import { StatusContextList } from "./StatusContextList";
 import { CHECKS_JOB_ROW_ATTRIBUTE, JobRowsSkeleton, WorkflowSection } from "./WorkflowRunList";
@@ -49,7 +50,7 @@ function isFailedJob(job: ChecksJobEntry): boolean {
 }
 
 export function ChecksTab() {
-  const { model, nav, readerKey } = usePullRequestsPage();
+  const { model, nav, readerKey, jobRevealToken } = usePullRequestsPage();
   const selection = usePullRequestSelection();
   const { environmentId, cwd } = model;
   const { capabilities } = model;
@@ -238,21 +239,23 @@ export function ChecksTab() {
   const { ref: scrollRef, onScroll } = useTabScrollMemory("checks", hasRows);
 
   // ── `job` deep link: open the job, bring it into view, flash it once ──
+  // A repeat reveal of the same job bumps `jobRevealToken`, so it lands again.
   const jobParam = nav.search.job ?? null;
   const target = useMemo(() => resolveChecksJobParam(checks, jobParam), [checks, jobParam]);
   const targetKey = target ? `${target.workflowKey}/${target.jobKey}` : null;
-  const handledParamRef = useRef<string | null>(null);
+  const revealKey = jobParam === null ? null : `${jobParam}#${jobRevealToken ?? 0}`;
+  const handledRevealRef = useRef<string | null>(null);
   useEffect(() => {
-    if (jobParam === null) {
-      handledParamRef.current = null;
+    if (revealKey === null) {
+      handledRevealRef.current = null;
       return;
     }
-    if (target === null || targetKey === null || handledParamRef.current === jobParam) return;
+    if (target === null || targetKey === null || handledRevealRef.current === revealKey) return;
     const workflow = checks.workflows.find((candidate) => candidate.key === target.workflowKey);
     const job = workflow?.jobs.find((candidate) => candidate.key === target.jobKey);
     if (workflow && job && !isExpanded(workflow, job)) setExpanded(workflow, job, true);
     const frame = window.requestAnimationFrame(() => {
-      handledParamRef.current = jobParam;
+      handledRevealRef.current = revealKey;
       const row = scrollRef.current?.querySelector<HTMLElement>(
         `[${CHECKS_JOB_ROW_ATTRIBUTE}="${CSS.escape(targetKey)}"]`,
       );
@@ -261,9 +264,9 @@ export function ChecksTab() {
       triggerFlash(targetKey);
     });
     return () => window.cancelAnimationFrame(frame);
-    // Runs once per link; later model updates must not re-scroll.
+    // Runs once per reveal; later model updates must not re-scroll.
     // oxlint-disable-next-line react-hooks/exhaustive-deps
-  }, [jobParam, targetKey]);
+  }, [revealKey, targetKey]);
 
   // ── Motion: rows glide when the order changes, glyphs pop when state does ──
   const orderSignature = checks.sections

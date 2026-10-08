@@ -83,6 +83,9 @@ export function parseRightPanelRouteSearch(search: Record<string, unknown>): Rig
       ...(workspaceSearch.workspacePr !== undefined
         ? { workspacePr: workspaceSearch.workspacePr }
         : {}),
+      ...(workspaceSearch.workspacePrReveal
+        ? { workspacePrReveal: workspaceSearch.workspacePrReveal }
+        : {}),
     };
   }
   if (workspaceSearch.workspaceTab === "simulator") {
@@ -99,6 +102,9 @@ export function parseRightPanelRouteSearch(search: Record<string, unknown>): Rig
       workspaceTab: "agents",
       ...(workspaceSearch.workspaceAgentKey
         ? { workspaceAgentKey: workspaceSearch.workspaceAgentKey }
+        : {}),
+      ...(workspaceSearch.workspaceAgentsWorkflow
+        ? { workspaceAgentsWorkflow: workspaceSearch.workspaceAgentsWorkflow }
         : {}),
     };
   }

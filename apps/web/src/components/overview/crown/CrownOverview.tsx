@@ -10,12 +10,8 @@ import { CrownFace } from "./CrownFace";
 import { CrownFlyout } from "./CrownFlyout";
 import type { CrownMode } from "./crownGeometry.logic";
 import { CrownIsland } from "./CrownIsland";
-import { CROWN_FACE_RING_GAP_PCT, CROWN_GEOMETRY_STYLE } from "./crownLayout";
-import {
-  buildCheckRingSegments,
-  buildCrownRailSummary,
-  resolveCrownHeadline,
-} from "./crownModel.logic";
+import { CROWN_GEOMETRY_STYLE } from "./crownLayout";
+import { buildCrownRailSummary, resolveCrownHeadline } from "./crownModel.logic";
 import { CrownPreviewDock } from "./CrownPreviewDock";
 import { CrownRailNav } from "./CrownRailNav";
 import {
@@ -81,11 +77,6 @@ export function CrownOverview(props: CrownOverviewProps & { readonly open?: bool
   });
   const headline = resolveCrownHeadline(summary, props);
   const items = visibleCrownRailItems({ isGitRepo, notesAvailable: notes !== undefined });
-  const faceSegments = isGitRepo
-    ? buildCheckRingSegments(props.pullRequest?.latestRuns ?? [], {
-        gapPct: CROWN_FACE_RING_GAP_PCT,
-      })
-    : [];
   const refName = props.changes?.refName ?? null;
 
   const [alertFocused, setAlertFocused] = useState(false);
@@ -318,8 +309,8 @@ export function CrownOverview(props: CrownOverviewProps & { readonly open?: bool
       <CrownIsland ref={islandRef} mode={mode} tone={shownAlert?.tone ?? null}>
         <CrownFace
           ref={faceRef}
+          project={props.project ?? null}
           headline={headline}
-          segments={faceSegments}
           queuedCount={alerts.queuedCount}
           expanded={cardOpen}
           reducedMotion={reducedMotion}

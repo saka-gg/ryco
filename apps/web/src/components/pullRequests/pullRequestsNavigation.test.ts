@@ -37,12 +37,16 @@ function modelWith(selected: number | null) {
   } as unknown as ReturnType<PullRequestsNavigationDeps["getModel"]>;
 }
 
-function harness(initial: PullRequestsSearch) {
+function harness(
+  initial: PullRequestsSearch,
+  extra: Pick<PullRequestsNavigationDeps, "onRevealJob"> = {},
+) {
   let search = initial;
   const commits: Array<{ next: PullRequestsSearch; push: boolean; types?: unknown }> = [];
   const motions: PullRequestSelectionMotion[] = [];
   let drawerClosed = 0;
   const nav = createPullRequestsNavigation({
+    ...extra,
     getSearch: () => search,
     getModel: () => modelWith(search.pr ?? null),
     getRepositoryParams: () => ({ env: "env", project: "project" }),
@@ -71,6 +75,27 @@ function harness(initial: PullRequestsSearch) {
 }
 
 describe("createPullRequestsNavigation", () => {
+  it("counts every job reveal before replacing, even a repeat of the job in the URL", () => {
+    const order: string[] = [];
+    const page = harness(
+      { pr: 703, tab: "files", file: "a.ts" },
+      { onRevealJob: () => order.push(`reveal:${page.commits.length}`) },
+    );
+    page.nav.revealJob("52004433871");
+    expect(page.search).toEqual({ pr: 703, tab: "checks", file: "a.ts", job: "52004433871" });
+    page.nav.revealJob("52004433871");
+    // The URL does not change on the repeat; the count is what lands it again.
+    expect(page.search).toEqual({ pr: 703, tab: "checks", file: "a.ts", job: "52004433871" });
+    expect(order).toEqual(["reveal:0", "reveal:1"]);
+    expect(page.commits.map((commit) => commit.push)).toEqual([false, false]);
+  });
+
+  it("reveals a job without a reveal counter", () => {
+    const page = harness({ pr: 703 });
+    page.nav.revealJob("CI/lint");
+    expect(page.search).toEqual({ pr: 703, tab: "checks", job: "CI/lint" });
+  });
+
   it("reveals a file in the whole change request, clearing a commit scope", () => {
     const page = harness({ pr: 703, tab: "files", commit: "abc1234", thread: "t1" });
     page.nav.revealFile("apps/web/src/a.ts", 12, "right");

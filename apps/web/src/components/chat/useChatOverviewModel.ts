@@ -15,7 +15,7 @@ import {
   useOverviewWorkflowRuns,
 } from "~/rpc/useOverview";
 import type { ActivePlanState, LatestProposedPlanState } from "../../session-logic";
-import type { ThreadSubagentView } from "../../threadWorkspaceViewModel";
+import type { AgentPanelModel, ThreadSubagentView } from "../../threadWorkspaceViewModel";
 import type { TurnDiffSummary } from "../../types";
 import { buildOverviewChangedFiles } from "../overviewChanges.logic";
 import { classifyOverviewError } from "../overview/overviewErrors.logic";
@@ -32,6 +32,7 @@ import {
   areOverviewWorkflowRunsSupported,
   buildOverviewCheckRollupRows,
   buildOverviewItems,
+  buildOverviewPullRequestOpeners,
   buildOverviewWorkflowCheckRows,
   getPrCheckStatusForQuery,
   getPrCheckStatusFromChangeRequest,
@@ -46,6 +47,7 @@ import {
   shouldRefreshPrCheckStatus,
   sourceControlOptionValue,
   summarizeActiveWorkflowJob,
+  type OpenPullRequestInApp,
 } from "./ChatOverviewPanel.logic";
 import { useThreadChangeRequest } from "./useThreadChangeRequest";
 
@@ -73,9 +75,16 @@ export interface ChatOverviewModelInput {
   onOpenSubagent: (subagent: ThreadSubagentView) => void;
   /**
    * Opens the thread's change request in the workspace panel's pull request
-   * tab (desktop). A number pins one the panel cannot resolve on its own yet.
+   * tab (desktop). A number pins one the panel cannot resolve on its own yet;
+   * a reveal lands once on its Checks tab or one job there.
    */
-  onOpenPullRequestInApp?: ((pinnedNumber?: number) => void) | undefined;
+  onOpenPullRequestInApp?: OpenPullRequestInApp | undefined;
+  /** The thread's runtime agents by workflow (desktop crown); see {@link OverviewLayoutProps}. */
+  agentPanelModel?: AgentPanelModel | undefined;
+  /** Opens one runtime agent's transcript in the workspace panel (desktop). */
+  onOpenAgent?: ((agentId: string) => void) | undefined;
+  /** Opens the workspace panel's Agents tab focused on one workflow (desktop). */
+  onOpenAgentsWorkflow?: ((workflowId: string) => void) | undefined;
   postPushWorkflowWatch: PostPushWorkflowDiscoveryWatch | null;
   onPostPushDiscoveryComplete: () => void;
 }
@@ -126,6 +135,9 @@ export function useChatOverviewModel(input: ChatOverviewModelInput): ChatOvervie
     onOpenReview,
     onOpenSubagent,
     onOpenPullRequestInApp,
+    agentPanelModel,
+    onOpenAgent,
+    onOpenAgentsWorkflow,
     onPostPushDiscoveryComplete,
   } = input;
 
@@ -558,6 +570,17 @@ export function useChatOverviewModel(input: ChatOverviewModelInput): ChatOvervie
     [overviewPullRequestResolving, remoteStatusKnown],
   );
 
+  // Desktop opens the pull request (or one check) in the workspace panel.
+  const pullRequestOpeners = useMemo(
+    () =>
+      buildOverviewPullRequestOpeners({
+        open: onOpenPullRequestInApp,
+        pullRequestNumber: overviewPullRequestNumber,
+        pinFromPush: overviewPullRequestFromPush,
+      }),
+    [onOpenPullRequestInApp, overviewPullRequestNumber, overviewPullRequestFromPush],
+  );
+
   return {
     layoutProps: {
       activePlan,
@@ -576,15 +599,11 @@ export function useChatOverviewModel(input: ChatOverviewModelInput): ChatOvervie
       onOpenFiles,
       onOpenReview,
       onOpenSubagent,
-      onOpenPullRequestInApp:
-        onOpenPullRequestInApp && overviewPullRequest?.number != null
-          ? () =>
-              // The panel resolves the thread's change request itself; only a
-              // number the push watch alone knows has to travel in the URL.
-              onOpenPullRequestInApp(
-                overviewPullRequestFromPush ? (overviewPullRequest.number as number) : undefined,
-              )
-          : undefined,
+      ...pullRequestOpeners,
+      // Desktop crown only; the phone sheet's layout stays without them.
+      ...(agentPanelModel ? { agentPanelModel } : {}),
+      ...(onOpenAgent ? { onOpenAgent } : {}),
+      ...(onOpenAgentsWorkflow ? { onOpenAgentsWorkflow } : {}),
     },
     detectedChangeRequest,
     gitStatus: gitStatusQuery.data ?? null,

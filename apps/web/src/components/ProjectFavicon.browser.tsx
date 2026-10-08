@@ -184,6 +184,26 @@ describe("hosted project icons", () => {
     await expect.poll(() => view.container.querySelector("img")?.naturalWidth).toBe(16);
     expect(view.container.querySelector("svg text")).toBeNull();
   });
+  it("marks the image's load state for containers that style loaded artwork", async () => {
+    let complete!: (value: typeof icon) => void;
+    connect(
+      vi.fn(
+        () =>
+          new Promise((resolve) => {
+            complete = resolve;
+          }),
+      ),
+    );
+    const view = await render(
+      <TestFavicon environmentId={env} cwd="/project" projectId={projectId} fallbackName="ryco" />,
+    );
+    expect(view.container.querySelector("img")).toBeNull();
+    complete(icon);
+    await expect
+      .poll(() => view.container.querySelector<HTMLImageElement>("img")?.dataset.state)
+      .toBe("loaded");
+    expect(view.container.querySelector('img[data-state="loaded"]')).not.toBeNull();
+  });
 });
 
 function TestFavicon(props: ComponentProps<typeof ProjectFavicon>) {

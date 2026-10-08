@@ -54,7 +54,10 @@ export interface CrownRailSummary {
     readonly active: boolean;
     readonly stepLabel: string | null;
   };
-  /** `count` is every subagent, `live` the running ones. */
+  /**
+   * `count` is every agent the Agents tab lists (workflow coordinators never
+   * count), `live` the running, queued and waiting ones.
+   */
   readonly agents: { readonly count: number; readonly live: number };
   readonly pr: { readonly state: CrownPrState | null; readonly conflict: boolean };
   readonly notes: { readonly count: number };
@@ -62,12 +65,11 @@ export interface CrownRailSummary {
   readonly ship: { readonly count: number; readonly ready: boolean };
 }
 
-export type CrownHeadlineGlyph = "x" | "spinner" | "upload" | "sparkles" | "check" | "dot";
-
 export interface CrownHeadline {
   readonly section: CrownSection;
   readonly tone: CrownTone;
-  readonly glyph: CrownHeadlineGlyph;
+  /** The face's status dot pulses: only while checks are running. */
+  readonly pulse: boolean;
   readonly title: string;
   readonly sub: string;
 }
@@ -303,7 +305,7 @@ export function crownRailItemDescription(
       const { count, live } = summary.agents;
       if (count === 0) return "No subagents";
       return live > 0
-        ? `${formatCount(count, "subagent")}, ${live} running`
+        ? `${formatCount(count, "subagent")}, ${live} active`
         : formatCount(count, "subagent");
     }
     case "pr": {
@@ -331,7 +333,7 @@ export function resolveCrownHeadline(
     return {
       section: "checks",
       tone: "danger",
-      glyph: "x",
+      pulse: false,
       title: `${formatCount(checks.failed, "check")} failing`,
       sub: checks.failedNames[0] ?? "",
     };
@@ -340,7 +342,7 @@ export function resolveCrownHeadline(
     return {
       section: "checks",
       tone: "warning",
-      glyph: "spinner",
+      pulse: true,
       title: checks.total > 0 ? `Checks ${checks.passed}/${checks.total}` : "Checks running",
       sub: checks.inProgress > 0 ? `${checks.inProgress} in progress` : "In progress",
     };
@@ -349,7 +351,7 @@ export function resolveCrownHeadline(
     return {
       section: "branch",
       tone: "info",
-      glyph: "upload",
+      pulse: false,
       title: `${summary.ship.count} to push`,
       sub: refName,
     };
@@ -358,7 +360,7 @@ export function resolveCrownHeadline(
     return {
       section: "plan",
       tone: "plan",
-      glyph: "sparkles",
+      pulse: false,
       title: `Plan ${summary.plan.done}/${summary.plan.total}`,
       sub: summary.plan.stepLabel ?? "",
     };
@@ -368,7 +370,7 @@ export function resolveCrownHeadline(
     return {
       section: "checks",
       tone: "success",
-      glyph: "check",
+      pulse: false,
       title: "All checks passed",
       sub: typeof prNumber === "number" ? `PR #${prNumber}` : refName,
     };
@@ -376,7 +378,7 @@ export function resolveCrownHeadline(
   return {
     section: summary.isGitRepo ? "branch" : "plan",
     tone: "neutral",
-    glyph: "dot",
+    pulse: false,
     title: "Overview",
     sub: refName,
   };

@@ -2271,6 +2271,8 @@ export default function ChatView(props: ChatViewProps) {
     onOpenTurnDiff,
     onCloseDiff,
     onOpenAgentsPanel,
+    onOpenRuntimeAgentPanel,
+    onOpenAgentsWorkflowPanel,
     onOpenSubagentPanel,
     onOpenHtmlRender,
   } = useChatWorkspacePanels({
@@ -5344,6 +5346,7 @@ export default function ChatView(props: ChatViewProps) {
                 notesTarget={worktreeNotesTarget}
                 onOpenNoteThread={openNoteThread}
                 threadTitle={activeThread.title}
+                project={activeProject ?? null}
                 isGitRepo={isGitRepo}
                 latestTurn={activeLatestTurn}
                 turnSettled={latestTurnSettled}
@@ -5353,6 +5356,9 @@ export default function ChatView(props: ChatViewProps) {
                 onOpenReview={onOpenReviewPanel}
                 onOpenSubagent={onOpenSubagentPanel}
                 onOpenPullRequestInApp={openPullRequestInApp}
+                agentPanelModel={agentPanelModel}
+                onOpenAgent={onOpenRuntimeAgentPanel}
+                onOpenAgentsWorkflow={onOpenAgentsWorkflowPanel}
                 onPostPushDiscoveryComplete={clearPostPushWatch}
               />
             ) : null}

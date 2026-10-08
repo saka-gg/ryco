@@ -29,8 +29,11 @@ import {
   type ContextHandoffTimelineEntry,
 } from "../../session-logic";
 import {
+  agentWorkflowStatusText,
   emptyAgentPanelModel,
   formatSubagentTokenCount,
+  isActiveSubagentStatus,
+  summarizeAgentWorkflow,
   type AgentPanelModel,
 } from "../../threadWorkspaceViewModel";
 import { glassSurfaceClassName } from "../mobile/GlassSurface";
@@ -1674,57 +1677,44 @@ const AgentSpawnCtaRow = memo(function AgentSpawnCtaRow(props: { workEntry: Time
   const workflowGroup = spawn.workflowId
     ? agentPanelModel.workflows.find((group) => group.workflow.id === spawn.workflowId)
     : undefined;
-  const agents = workflowGroup
-    ? [...workflowGroup.phases.flatMap((phase) => phase.members), ...workflowGroup.unphasedMembers]
-    : agentPanelModel.directAgents.filter((agent) => memberIds.has(agent.id));
-  const agentCount = Math.max(
-    agents.length,
-    Math.max(memberIds.size - (spawn.workflowId ? 1 : 0), 0),
-  );
-
-  const running = agents.filter(
-    (agent) => agent.status === "running" || agent.status === "pending",
-  ).length;
-  const waiting = agents.filter((agent) => agent.status === "waiting").length;
-  const failed = agents.filter((agent) => agent.status === "failed").length;
   // The coordinator's own status is authoritative for workflows: dynamic
   // spawns mean the member list can be momentarily all-settled while the
-  // run is still mid-flight. A workflow is live until the coordinator
-  // itself reaches a terminal state.
-  const coordinatorStatus = workflowGroup?.workflow.status;
-  const coordinatorSettled =
-    coordinatorStatus === "completed" ||
-    coordinatorStatus === "failed" ||
-    coordinatorStatus === "cancelled" ||
-    coordinatorStatus === "interrupted";
-  const live = workflowGroup !== undefined ? !coordinatorSettled : running + waiting > 0;
-  // Same rule as the panel footer: providers may aggregate member usage into
-  // the coordinator, so count the coordinator only when no members exist.
-  const totalTokens = agents.reduce(
-    (sum, agent) => sum + (agent.usage?.totalTokens ?? 0),
-    spawn.workflowId && agents.length === 0 ? (workflowGroup?.workflow.usage?.totalTokens ?? 0) : 0,
+  // run is still mid-flight (summarizeAgentWorkflow owns that rule).
+  const workflow = workflowGroup ? summarizeAgentWorkflow(workflowGroup) : null;
+  const batch = workflow
+    ? null
+    : agentPanelModel.directAgents.filter((agent) => memberIds.has(agent.id));
+  const agentCount = Math.max(
+    workflow?.memberCount ?? batch?.length ?? 0,
+    Math.max(memberIds.size - (spawn.workflowId ? 1 : 0), 0),
   );
-
-  const livePhase = workflowGroup?.phases.find((phase) => phase.state === "running");
-  const workflowName =
-    workflowGroup?.workflow.workflowName ?? workflowGroup?.workflow.title ?? null;
-
   // One steady in-flight presentation: waiting and stalled agents read as
   // working; only settled states differentiate.
-  const working = running + waiting;
+  const working =
+    workflow?.workingCount ??
+    batch?.filter((agent) => isActiveSubagentStatus(agent.status)).length ??
+    0;
+  const failed =
+    workflow?.failedCount ?? batch?.filter((agent) => agent.status === "failed").length ?? 0;
+  const live = workflow?.live ?? working > 0;
+  // Same rule as the panel footer: providers may aggregate member usage into
+  // the coordinator, so count the coordinator only when no members exist.
+  const totalTokens =
+    workflow?.totalTokens ??
+    batch?.reduce((sum, agent) => sum + (agent.usage?.totalTokens ?? 0), 0) ??
+    0;
+  const workflowName = workflow?.name ?? null;
+
   const dotClass = live ? "bg-info" : failed > 0 ? "bg-destructive" : "bg-success";
   const lead = live
     ? `Kicked off ${agentCount} subagent${agentCount === 1 ? "" : "s"}`
     : `Ran ${agentCount} subagent${agentCount === 1 ? "" : "s"}`;
-  const status = live
-    ? livePhase
-      ? `${livePhase.title} · ${livePhase.activeCount} working`
-      : working > 0
-        ? `${working} working`
-        : "Working"
-    : failed > 0
-      ? `${failed} failed`
-      : "Completed";
+  const status = agentWorkflowStatusText({
+    live,
+    livePhase: workflow?.livePhase ?? null,
+    workingCount: working,
+    failedCount: failed,
+  });
 
   return (
     <button

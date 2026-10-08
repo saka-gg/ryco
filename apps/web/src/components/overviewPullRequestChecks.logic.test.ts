@@ -222,4 +222,54 @@ describe("overview pull request checks", () => {
     ]);
     expect(rows[2]?.url).toBe("https://github.com/acme/repo/actions/runs/1/job/3");
   });
+
+  describe("jobParam", () => {
+    it("lands job rows on their job id", () => {
+      const rows = buildOverviewWorkflowCheckRows({
+        runs: [workflowRun({ runId: "run-1" })],
+        jobsByRunId: new Map([["run-1", [workflowJob({ jobId: "4242", name: "Test" })]]]),
+      });
+
+      expect(rows[0]?.jobParam).toBe("4242");
+    });
+
+    it("leaves workflow run rows without one (they open the Checks tab)", () => {
+      const rows = buildOverviewWorkflowCheckRows({
+        runs: [workflowRun({ runId: "run-1" })],
+        jobsByRunId: new Map(),
+      });
+
+      expect(rows[0]).not.toHaveProperty("jobParam");
+    });
+
+    it("gives rollup check runs the reader's job value", () => {
+      const rows = buildOverviewCheckRollupRows({
+        rollup: [
+          checkRollup({
+            name: "CodeRabbit",
+            url: Option.some("https://github.com/acme/repo/actions/runs/1/job/3"),
+          }),
+          checkRollup({ name: "Test · web", workflowName: "CI" }),
+          checkRollup({ name: "Lint" }),
+          checkRollup({ kind: "unknown", name: "Mystery" }),
+        ],
+      });
+
+      expect(rows.map((row) => row.jobParam)).toEqual(["3", "CI/Test · web", "Lint", "Mystery"]);
+    });
+
+    it("leaves status contexts without one", () => {
+      const rows = buildOverviewCheckRollupRows({
+        rollup: [
+          checkRollup({
+            kind: "status-context",
+            name: "netlify/deploy-preview",
+            url: Option.some("https://app.netlify.com/sites/acme/deploys/1"),
+          }),
+        ],
+      });
+
+      expect(rows[0]).not.toHaveProperty("jobParam");
+    });
+  });
 });

@@ -32,6 +32,9 @@ export function applyRightPanelSessionSearch(
     workspaceAgentKey: _workspaceAgentKey,
     workspacePr: _workspacePr,
     workspaceRender: _workspaceRender,
+    // Transient deep links: dropped here and never remembered (see below).
+    workspacePrReveal: _workspacePrReveal,
+    workspaceAgentsWorkflow: _workspaceAgentsWorkflow,
     ...rest
   } = search;
   return {
@@ -40,6 +43,11 @@ export function applyRightPanelSessionSearch(
   };
 }
 
+/**
+ * The panel state worth restoring for a thread. The one-shot reveal keys
+ * (`workspacePrReveal`, `workspaceAgentsWorkflow`) are transient and never
+ * remembered: returning to a thread must not replay a deep link.
+ */
 export function pickRightPanelSessionSearch(
   search: RightPanelRouteSearch,
 ): RightPanelSessionSearch {

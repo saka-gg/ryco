@@ -10,15 +10,14 @@ import {
 } from "react";
 
 import { cn } from "../../../lib/utils";
-import { readMotionDurationMs } from "../../../lib/perf/motion";
 import { usePullRequestsPage } from "../PullRequestsPageContext";
 import { usePullRequestReaderStore } from "../pullRequestsLayoutStore";
 import type { PullRequestsTab } from "../pullRequestsSearch";
 
 /**
  * Small pieces the Checks and Commits tabs share: the disclosure shell, the
- * hover-revealed row actions, a count that rolls when it changes, the
- * landing flash, and per-tab scroll memory.
+ * hover-revealed row actions, a count that rolls when it changes, and per-tab
+ * scroll memory. The landing flash lives in `hooks/useLandingFlash`.
  */
 
 /** Icon-sized row action (⋯, copy) that matches the bar's icon buttons. */
@@ -96,47 +95,6 @@ export function RollingCount(props: { readonly value: number }) {
       {props.value}
     </span>
   );
-}
-
-export type LandingFlashMode = "motion" | "static";
-
-export interface LandingFlash {
-  readonly key: string;
-  readonly mode: LandingFlashMode;
-  readonly token: number;
-}
-
-const LANDING_FLASH_MS = 1600;
-
-/** Class for a row that is the target of a deep link. */
-export function landingFlashClass(flash: LandingFlash | null, key: string): string | undefined {
-  if (flash?.key !== key) return undefined;
-  return flash.mode === "motion" ? "pr-checks-flash" : "pr-checks-flash-static";
-}
-
-/**
- * The deep-link landing highlight: one `overview-jump-flash` pass, or a
- * static ring for the same time when motion is reduced.
- */
-export function useLandingFlash() {
-  const [flash, setFlash] = useState<LandingFlash | null>(null);
-  useEffect(() => {
-    if (flash === null) return;
-    const timer = window.setTimeout(() => setFlash(null), LANDING_FLASH_MS);
-    return () => window.clearTimeout(timer);
-  }, [flash]);
-  const trigger = useCallback((key: string) => {
-    const mode: LandingFlashMode =
-      readMotionDurationMs("--app-motion-duration-pop", 200) === 0 ? "static" : "motion";
-    setFlash((current) => ({ key, mode, token: (current?.token ?? 0) + 1 }));
-  }, []);
-  return { flash, trigger };
-}
-
-/** Scrolls an element to the top of its pane, smoothly unless motion is reduced. */
-export function scrollRowIntoView(element: HTMLElement) {
-  const smooth = readMotionDurationMs("--app-motion-duration-pane", 360) > 0;
-  element.scrollIntoView({ block: "start", behavior: smooth ? "smooth" : "auto" });
 }
 
 const SCROLL_SAVE_DELAY_MS = 120;

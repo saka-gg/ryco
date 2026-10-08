@@ -5,53 +5,10 @@ import { page } from "vite-plus/test/browser";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
 
-import {
-  deriveAgentPanelModel,
-  deriveThreadSubagents,
-  type RuntimeSubagent,
-  type RuntimeSubagentStatus,
-} from "../threadWorkspaceViewModel";
+import { deriveAgentPanelModel, deriveThreadSubagents } from "../threadWorkspaceViewModel";
+import { makeRuntimeAgent } from "./agents/agentRosterTestFixtures";
 import { BackgroundLivenessChip } from "./chat/BackgroundLivenessChip";
 import { AgentsPanel } from "./AgentsPanel";
-
-function agent(
-  id: string,
-  overrides: Partial<RuntimeSubagent> & {
-    readonly status?: RuntimeSubagentStatus;
-  } = {},
-): RuntimeSubagent {
-  const firstSeenAt = overrides.firstSeenAt ?? "2026-08-10T10:00:00.000Z";
-  return {
-    id,
-    kind: "subagent",
-    title: `Task for ${id}`,
-    role: null,
-    model: "gpt-5.6-sol",
-    effort: "high",
-    status: "running",
-    activationCount: 1,
-    usage: null,
-    progress: null,
-    lastToolName: null,
-    result: null,
-    error: null,
-    outputFile: null,
-    parentAgentId: null,
-    agentIndex: null,
-    phaseIndex: null,
-    phaseTitle: null,
-    attempt: null,
-    workflowName: null,
-    phases: [],
-    runHandles: null,
-    recentActivity: [],
-    firstSeenAt,
-    startedAt: firstSeenAt,
-    completedAt: null,
-    updatedAt: firstSeenAt,
-    ...overrides,
-  };
-}
 
 function rowIds(): string[] {
   return [...document.querySelectorAll<HTMLElement>("[data-agent-row]")].map(
@@ -137,7 +94,9 @@ describe("AgentsPanel", () => {
     mounted = await render(
       <div className="h-[420px] w-[440px]">
         <AgentsPanel
-          model={deriveAgentPanelModel({ agents: [agent("child", { status: "waiting" })] })}
+          model={deriveAgentPanelModel({
+            agents: [makeRuntimeAgent("child", { status: "waiting" })],
+          })}
           subagents={deriveThreadSubagents(activities)}
         />
       </div>,
@@ -153,13 +112,13 @@ describe("AgentsPanel", () => {
 
   it("keeps fixed role-aware rows in spawn order while live state changes", async () => {
     const onOpenAgent = vi.fn();
-    const reviewer = agent("reviewer-1", {
+    const reviewer = makeRuntimeAgent("reviewer-1", {
       title: "Review reconnect handling",
       role: "code-reviewer",
       progress: "Inspecting the resume handshake",
       firstSeenAt: "2026-08-10T10:00:00.000Z",
     });
-    const verifier = agent("verifier-1", {
+    const verifier = makeRuntimeAgent("verifier-1", {
       title: "Verify queued interruption",
       role: "release-verifier",
       progress: "Running the provider fixture",
@@ -214,13 +173,13 @@ describe("AgentsPanel", () => {
   });
 
   it("leads workflow rows with their functional label instead of a codename", async () => {
-    const workflow = agent("workflow-labels", {
+    const workflow = makeRuntimeAgent("workflow-labels", {
       kind: "workflow",
       title: "Ship it",
       workflowName: "Ship it",
       phases: [{ index: 0, title: "Verify" }],
     });
-    const verifier = agent("workflow-labels:wf:0", {
+    const verifier = makeRuntimeAgent("workflow-labels:wf:0", {
       kind: "workflow_agent",
       title: "verify:implementor",
       progress: "Running the focused suite",
@@ -248,12 +207,12 @@ describe("AgentsPanel", () => {
   });
 
   it("names quiet statuses in the row and tells same-labelled agents apart", async () => {
-    const first = agent("explore-1", {
+    const first = makeRuntimeAgent("explore-1", {
       title: "Explore",
       status: "interrupted",
       progress: "Reading",
     });
-    const second = agent("explore-2", {
+    const second = makeRuntimeAgent("explore-2", {
       title: "Explore",
       status: "failed",
       error: "Boom",
@@ -272,13 +231,13 @@ describe("AgentsPanel", () => {
   });
 
   it("preserves workflow expansion across member updates and settlement", async () => {
-    const workflow = agent("workflow-1", {
+    const workflow = makeRuntimeAgent("workflow-1", {
       kind: "workflow",
       title: "Release readiness",
       workflowName: "Release readiness",
       phases: [{ index: 0, title: "Review" }],
     });
-    const reviewer = agent("workflow-1:wf:0", {
+    const reviewer = makeRuntimeAgent("workflow-1:wf:0", {
       kind: "workflow_agent",
       role: "reviewer",
       title: "Review lifecycle fixes",
@@ -337,7 +296,7 @@ describe("AgentsPanel", () => {
   });
 
   it("shows every future workflow phase as pending until its agent slot arrives", async () => {
-    const workflow = agent("workflow-sequential", {
+    const workflow = makeRuntimeAgent("workflow-sequential", {
       kind: "workflow",
       title: "Work, review, verify",
       workflowName: "Work, review, verify",
@@ -347,7 +306,7 @@ describe("AgentsPanel", () => {
         { index: 3, title: "Verify" },
       ],
     });
-    const worker = agent("workflow-sequential:wf:1", {
+    const worker = makeRuntimeAgent("workflow-sequential:wf:1", {
       kind: "workflow_agent",
       title: "Implement the change",
       parentAgentId: workflow.id,
@@ -370,7 +329,7 @@ describe("AgentsPanel", () => {
       ),
     ).toEqual(["Review", "Verify"]);
 
-    const reviewer = agent("workflow-sequential:wf:2", {
+    const reviewer = makeRuntimeAgent("workflow-sequential:wf:2", {
       kind: "workflow_agent",
       title: "Review the change",
       status: "pending",
@@ -389,5 +348,82 @@ describe("AgentsPanel", () => {
     await expect.element(page.getByLabelText("Review pending")).not.toBeInTheDocument();
     await expect.element(page.getByLabelText("Verify pending")).toBeVisible();
     expect(rowIds()).toEqual([worker.id, reviewer.id]);
+  });
+
+  it("lands a workflow focus once per request: expands, scrolls, flashes, re-triggers", async () => {
+    const scrollIntoView = vi.spyOn(Element.prototype, "scrollIntoView");
+    const live = makeRuntimeAgent("workflow-live", {
+      kind: "workflow",
+      title: "Live sweep",
+      workflowName: "Live sweep",
+    });
+    const settled = makeRuntimeAgent("workflow-settled", {
+      kind: "workflow",
+      title: "Settled audit",
+      workflowName: "Settled audit",
+      status: "completed",
+      completedAt: "2026-08-10T10:05:00.000Z",
+      firstSeenAt: "2026-08-10T10:00:01.000Z",
+    });
+    const member = makeRuntimeAgent("workflow-settled:wf:0", {
+      kind: "workflow_agent",
+      title: "audit:files",
+      status: "completed",
+      parentAgentId: settled.id,
+      agentIndex: 0,
+      completedAt: "2026-08-10T10:04:00.000Z",
+    });
+    const model = deriveAgentPanelModel({ agents: [live, settled, member] });
+    const onFocusWorkflowHandled = vi.fn();
+    const panel = (focusWorkflowId: string | null) => (
+      <div className="h-[420px] w-[440px]">
+        <AgentsPanel
+          model={model}
+          focusWorkflowId={focusWorkflowId}
+          onFocusWorkflowHandled={onFocusWorkflowHandled}
+        />
+      </div>
+    );
+    const section = () =>
+      [...document.querySelectorAll<HTMLElement>("[data-workflow-section]")].find((element) =>
+        element.textContent?.includes("Settled audit"),
+      )!;
+    const header = page.getByRole("button", { name: /Settled audit/ });
+
+    try {
+      mounted = await render(panel(null));
+      // A settled workflow starts collapsed.
+      await expect.element(header).toHaveAttribute("aria-expanded", "false");
+      expect(onFocusWorkflowHandled).not.toHaveBeenCalled();
+
+      await mounted.rerender(panel(settled.id));
+      await expect.element(header).toHaveAttribute("aria-expanded", "true");
+      await vi.waitFor(() => {
+        expect(scrollIntoView.mock.contexts).toContain(section());
+      });
+      await vi.waitFor(() => {
+        expect(section().firstElementChild?.className).toMatch(/\blanding-flash/);
+      });
+      expect(onFocusWorkflowHandled).toHaveBeenCalledOnce();
+      // The live workflow is neither scrolled to nor flashed.
+      expect(document.querySelectorAll(".landing-flash, .landing-flash-static")).toHaveLength(1);
+
+      // The same value does not land again; the owner clears it, then a repeat
+      // request re-expands and re-scrolls.
+      await mounted.rerender(panel(settled.id));
+      expect(onFocusWorkflowHandled).toHaveBeenCalledOnce();
+      await header.click();
+      await expect.element(header).toHaveAttribute("aria-expanded", "false");
+      await mounted.rerender(panel(null));
+      const scrollsBefore = scrollIntoView.mock.calls.length;
+      await mounted.rerender(panel(settled.id));
+      await expect.element(header).toHaveAttribute("aria-expanded", "true");
+      await vi.waitFor(() => {
+        expect(scrollIntoView.mock.calls.length).toBeGreaterThan(scrollsBefore);
+      });
+      expect(onFocusWorkflowHandled).toHaveBeenCalledTimes(2);
+    } finally {
+      scrollIntoView.mockRestore();
+    }
   });
 });

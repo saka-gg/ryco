@@ -239,6 +239,34 @@
   }
 }
 
+/*
+ * Landing on a deep link's target (a Checks job, a commit, an Agents
+ * workflow): one pass of the jump flash. `-replay` swaps in identical
+ * keyframes so landing again mid-pass restarts it. With motion reduced the
+ * target holds a static ring for the same time instead (`useLandingFlash`
+ * removes the class after 1.6s).
+ */
+.landing-flash {
+  animation: overview-jump-flash 1.6s var(--app-motion-ease);
+}
+.landing-flash-replay {
+  animation-name: landing-flash-replay;
+}
+/* Must stay identical to `overview-jump-flash`: it exists only so the
+   animation name changes and the pass restarts. */
+@keyframes landing-flash-replay {
+  0%,
+  100% {
+    background-color: transparent;
+  }
+  30% {
+    background-color: color-mix(in srgb, var(--primary) 8%, transparent);
+  }
+}
+.landing-flash-static {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ring) 70%, transparent);
+}
+
 /* Active status motion stays continuous so working state never looks frozen.
    Dedicated status dots keep a stable core and animate only a transform/opacity
    halo; generic active icons use the quieter breathe animation. */
