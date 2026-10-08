@@ -86,6 +86,76 @@ it("loads a hosted attachment on demand over RPC and releases the blob on unmoun
   expect(revoke).toHaveBeenCalledWith(source);
 });
 
+it("never hands agent HTML or SVG a blob URL the browser would run in the app's origin", async () => {
+  const html = "<script>window.__attachmentExecuted = true</script><h1>Report</h1>";
+  const svg =
+    '<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"><script>window.__attachmentExecuted = true</script><rect width="40" height="20" fill="teal"/></svg>';
+  readChunk.mockImplementation(async ({ attachmentId }: { attachmentId: string }) => {
+    const source = attachmentId === "page" ? html : svg;
+    return { offset: 0, totalBytes: source.length, dataBase64: btoa(source) };
+  });
+  const create = vi.spyOn(URL, "createObjectURL");
+  const screen = await render(
+    <MessageAttachments
+      environmentId={EnvironmentId.make("env")}
+      threadId={ThreadId.make("thread")}
+      messageId={MessageId.make("message")}
+      onImageExpand={() => undefined}
+      attachments={[
+        {
+          type: "file",
+          id: "page",
+          name: "report.html",
+          mimeType: "text/html",
+          sizeBytes: html.length,
+        },
+        {
+          type: "file",
+          id: "vector",
+          name: "logo.svg",
+          mimeType: "image/svg+xml",
+          sizeBytes: svg.length,
+        },
+        {
+          type: "image",
+          id: "picture",
+          name: "chart.svg",
+          mimeType: "image/svg+xml",
+          sizeBytes: svg.length,
+        },
+      ]}
+    />,
+  );
+  await page.getByRole("button", { name: /report.html/ }).click();
+  await expect.element(page.getByRole("dialog")).toBeVisible();
+  await page.getByRole("button", { name: "Close", exact: true }).click();
+  await page.getByRole("button", { name: /logo.svg/ }).click();
+  await page.getByRole("button", { name: /chart.svg/ }).click();
+
+  // The page and the vector file are opaque downloads...
+  await expect.element(page.getByRole("link", { name: "Download logo.svg" })).toBeVisible();
+  const blobs = create.mock.calls.map(([blob]) => blob as Blob);
+  expect(blobs.map((blob) => blob.type)).toEqual([
+    "application/octet-stream",
+    "application/octet-stream",
+  ]);
+  for (const name of ["report.html", "logo.svg"]) {
+    const links = document.querySelectorAll<HTMLAnchorElement>(`a[download="${name}"]`);
+    expect(links.length).toBeGreaterThan(0);
+    for (const link of links) expect(link.href).toMatch(/^blob:/);
+  }
+  // ...and the SVG image displays from a data URL, whose origin is opaque.
+  await expect.element(page.getByRole("img", { name: "chart.svg" })).toBeInTheDocument();
+  const image = page.getByRole("img", { name: "chart.svg" }).element() as HTMLImageElement;
+  expect(image.src).toMatch(/^data:image\/svg\+xml;base64,/);
+  await vi.waitFor(() => expect(image.naturalWidth).toBe(40));
+  expect(document.querySelector<HTMLAnchorElement>('a[download="chart.svg"]')!.href).toMatch(
+    /^data:image\/svg\+xml;base64,/,
+  );
+  expect((window as { __attachmentExecuted?: boolean }).__attachmentExecuted).toBeUndefined();
+  await screen.unmount();
+});
+
 it("offers retry when an attachment read fails", async () => {
   readChunk
     .mockRejectedValueOnce(new Error("Disconnected"))

@@ -1,7 +1,10 @@
+import { HTML_RENDER_MAX_HTML_CHARS, HTML_RENDER_MAX_TITLE_LENGTH } from "@ryco/shared/htmlRender";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  AGENT_CONTROL_MCP_MAX_BODY_BYTES,
   AGENT_CONTROL_MCP_PATH,
+  AGENT_CONTROL_PRIVATE_MCP_MAX_BODY_BYTES,
   isLoopbackRemoteAddress,
   rejectAgentControlMcpTransport,
   type AgentControlMcpTransportInput,
@@ -72,5 +75,28 @@ describe("isLoopbackRemoteAddress", () => {
     expect(isLoopbackRemoteAddress("127.0.0.2")).toBe(false);
     expect(isLoopbackRemoteAddress("192.168.0.10")).toBe(false);
     expect(isLoopbackRemoteAddress(undefined)).toBe(false);
+  });
+});
+
+describe("request body bounds", () => {
+  it("lets the private listener carry a maximal HTML render in the widest JSON escaping", () => {
+    // Control characters escape to six bytes each, the most any UTF-16 unit costs in JSON.
+    const worstCase = JSON.stringify({
+      jsonrpc: "2.0",
+      id: Number.MAX_SAFE_INTEGER,
+      method: "tools/call",
+      params: {
+        name: "ryco_html_render",
+        arguments: {
+          html: "\u0001".repeat(HTML_RENDER_MAX_HTML_CHARS),
+          title: "\u0001".repeat(HTML_RENDER_MAX_TITLE_LENGTH),
+          height: 2000,
+        },
+      },
+    });
+    expect(Buffer.byteLength(worstCase, "utf8")).toBeLessThanOrEqual(
+      AGENT_CONTROL_PRIVATE_MCP_MAX_BODY_BYTES,
+    );
+    expect(AGENT_CONTROL_MCP_MAX_BODY_BYTES).toBe(128 * 1024);
   });
 });

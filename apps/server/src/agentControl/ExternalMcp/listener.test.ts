@@ -8,6 +8,7 @@ import { Effect, Redacted, Ref } from "effect";
 
 import { AgentControlExternalIntegrationError } from "../Errors.ts";
 import type { AgentControlExternalIntegrationServiceShape } from "../Services/AgentControlExternalIntegration.ts";
+import { AGENT_CONTROL_MCP_MAX_BODY_BYTES } from "../Mcp/transportGuard.ts";
 import { AGENT_CONTROL_EXTERNAL_PAIR_PATH, makeAgentControlExternalListener } from "./listener.ts";
 import type { ExternalMcpTools } from "./tools.ts";
 
@@ -133,6 +134,18 @@ it.live("serves pairing and MCP only on its private loopback listener", () =>
         { authorization: `Bearer ${credential}` },
       );
       assert.strictEqual(ping.status, 200);
+      // External integrations keep the small body bound; only the private listener takes pages.
+      const oversized = yield* post(
+        listener.url,
+        {
+          jsonrpc: "2.0",
+          id: 4,
+          method: "ping",
+          params: { padding: "y".repeat(AGENT_CONTROL_MCP_MAX_BODY_BYTES) },
+        },
+        { authorization: `Bearer ${credential}` },
+      );
+      assert.strictEqual(oversized.status, 413);
 
       const publicPath = yield* post(
         listener.url.replace(/\/mcp$/, "/mcp/external"),

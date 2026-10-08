@@ -134,7 +134,13 @@ import {
   setThreadRuntimeMode,
 } from "./sessionActions";
 import { useThreadChecks } from "./useThreadChecks";
-import { buildThreadTimelineRows, toggleFold, type ThreadTimelineRow } from "./threadActivityFold";
+import {
+  buildThreadTimelineRows,
+  toggleFold,
+  type ThreadTimelineRow,
+  type TurnHtmlRender,
+} from "./threadActivityFold";
+import { HtmlRenderFullScreenProvider } from "./HtmlRenderFullScreen";
 import { ThreadActivityFoldRow } from "./ThreadActivityFoldRow";
 import {
   composerFileUploadEngine,
@@ -164,10 +170,22 @@ import { proposedPlanPresentation } from "./threadPresentation";
 import { ContextHandoffMarkerRow } from "./ContextHandoffMarkerRow";
 import { derivePendingContextHandoff } from "./contextHandoffModel";
 
-function TimelineRow(props: { readonly entry: TimelineEntry }) {
+function TimelineRow(props: {
+  readonly environmentId: EnvironmentId;
+  readonly threadId: ThreadId;
+  readonly entry: TimelineEntry;
+  readonly turnHtmlRenders?: ReadonlyArray<TurnHtmlRender> | undefined;
+}) {
   const { entry } = props;
   if (entry.kind === "message") {
-    return <ThreadMessage message={entry.message} />;
+    return (
+      <ThreadMessage
+        environmentId={props.environmentId}
+        threadId={props.threadId}
+        message={entry.message}
+        turnHtmlRenders={props.turnHtmlRenders}
+      />
+    );
   }
   if (entry.kind === "proposed-plan") {
     const presentation = proposedPlanPresentation();
@@ -1210,7 +1228,12 @@ export function ThreadDetailScreen(props: {
         onToggle={() => setExpandedFoldIds((current) => toggleFold(current, item))}
       />
     ) : (
-      <TimelineRow entry={item.entry} />
+      <TimelineRow
+        environmentId={environmentId}
+        threadId={threadId}
+        entry={item.entry}
+        turnHtmlRenders={item.turnHtmlRenders}
+      />
     );
   const visibleError = sendError ?? thread?.error ?? null;
   const hasPrompts =
@@ -1250,56 +1273,59 @@ export function ThreadDetailScreen(props: {
       ) : null}
       {visibleError ? <ErrorBanner message={visibleError} /> : null}
 
-      <LegendList
-        data={timelineRows}
-        renderItem={renderItem}
-        keyExtractor={(row) => row.id}
-        alignItemsAtEnd
-        initialScrollAtEnd
-        maintainScrollAtEnd={{
-          animated: true,
-          on: { dataChange: true, itemLayout: true },
-        }}
-        maintainVisibleContentPosition
-        keyboardDismissMode="interactive"
-        keyboardShouldPersistTaps="handled"
-        contentInsetAdjustmentBehavior="never"
-        contentContainerStyle={{ paddingVertical: 10 }}
-        onStartReached={loadOlderMessages}
-        onStartReachedThreshold={0.35}
-        ListHeaderComponent={
-          messageHistory?.hasMoreBefore || messageHistoryLoad?.status === "loading" ? (
-            <Pressable
-              accessibilityRole="button"
-              disabled={messageHistoryLoad?.status === "loading"}
-              onPress={loadOlderMessages}
-              className="items-center px-4 py-3"
-            >
-              <Text className="text-xs text-muted-foreground">
-                {messageHistoryLoad?.status === "loading"
-                  ? "Loading earlier history…"
-                  : messageHistoryLoad?.status === "error"
-                    ? "Retry earlier history"
-                    : "Load earlier history"}
-              </Text>
-            </Pressable>
-          ) : null
-        }
-        ListEmptyComponent={
-          <View className="px-4 py-16">
-            <EmptyState
-              variant="plain"
-              title={built ? (thread?.title ?? "Task") : "Loading task"}
-              detail={
-                cachedView.emptyStateDetail ??
-                (built
-                  ? "No messages yet. Send one to get started."
-                  : "Syncing the conversation from the node.")
-              }
-            />
-          </View>
-        }
-      />
+      {/* One full-screen view for every page in the feed: it outlives the row that opened it. */}
+      <HtmlRenderFullScreenProvider>
+        <LegendList
+          data={timelineRows}
+          renderItem={renderItem}
+          keyExtractor={(row) => row.id}
+          alignItemsAtEnd
+          initialScrollAtEnd
+          maintainScrollAtEnd={{
+            animated: true,
+            on: { dataChange: true, itemLayout: true },
+          }}
+          maintainVisibleContentPosition
+          keyboardDismissMode="interactive"
+          keyboardShouldPersistTaps="handled"
+          contentInsetAdjustmentBehavior="never"
+          contentContainerStyle={{ paddingVertical: 10 }}
+          onStartReached={loadOlderMessages}
+          onStartReachedThreshold={0.35}
+          ListHeaderComponent={
+            messageHistory?.hasMoreBefore || messageHistoryLoad?.status === "loading" ? (
+              <Pressable
+                accessibilityRole="button"
+                disabled={messageHistoryLoad?.status === "loading"}
+                onPress={loadOlderMessages}
+                className="items-center px-4 py-3"
+              >
+                <Text className="text-xs text-muted-foreground">
+                  {messageHistoryLoad?.status === "loading"
+                    ? "Loading earlier history…"
+                    : messageHistoryLoad?.status === "error"
+                      ? "Retry earlier history"
+                      : "Load earlier history"}
+                </Text>
+              </Pressable>
+            ) : null
+          }
+          ListEmptyComponent={
+            <View className="px-4 py-16">
+              <EmptyState
+                variant="plain"
+                title={built ? (thread?.title ?? "Task") : "Loading task"}
+                detail={
+                  cachedView.emptyStateDetail ??
+                  (built
+                    ? "No messages yet. Send one to get started."
+                    : "Syncing the conversation from the node.")
+                }
+              />
+            </View>
+          }
+        />
+      </HtmlRenderFullScreenProvider>
 
       {hasPrompts ? (
         <ScrollView

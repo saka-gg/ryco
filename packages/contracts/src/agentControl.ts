@@ -201,6 +201,8 @@ export type AgentControlCapability = typeof AgentControlCapability.Type;
 export const AGENT_CONTROL_CAPABILITIES = {
   read: AgentControlCapability.make("read"),
   attachFile: AgentControlCapability.make("files.attach"),
+  /** Preview HTML pages in Ryco's headless browser and show them inline in the caller's thread. */
+  renderHtml: AgentControlCapability.make("html.render"),
   createThreads: AgentControlCapability.make("threads.create"),
   sendMessage: AgentControlCapability.make("threads.send-message"),
   interruptThread: AgentControlCapability.make("threads.interrupt"),

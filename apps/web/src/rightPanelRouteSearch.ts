@@ -11,7 +11,8 @@ export type RightPanelMode =
   | "browser"
   | "pullRequest"
   | "agent"
-  | "agents";
+  | "agents"
+  | "render";
 
 export interface MessageRouteSearch {
   messageId?: MessageId;
@@ -37,6 +38,14 @@ export function parseRightPanelRouteSearch(search: Record<string, unknown>): Rig
     return {
       ...workspaceSearch,
       ...messageSearch,
+    };
+  }
+  if (workspaceSearch.workspaceTab === "render" && workspaceSearch.workspaceRender) {
+    return {
+      ...messageSearch,
+      workspaceOpen: "1",
+      workspaceTab: "render",
+      workspaceRender: workspaceSearch.workspaceRender,
     };
   }
   if (workspaceSearch.workspaceTab === "review") {
@@ -122,6 +131,7 @@ export function parseRightPanelRouteSearch(search: Record<string, unknown>): Rig
 export function getRightPanelMode(search: RightPanelRouteSearch): RightPanelMode | null {
   if (search.workspaceTab === "agents") return "agents";
   if (search.workspaceTab === "agent" && search.workspaceAgentKey) return "agent";
+  if (search.workspaceTab === "render" && search.workspaceRender) return "render";
   if (search.workspaceTab === "review" || search.diff === "1") return "review";
   if (search.workspaceTab === "files" || search.preview === "1") return "files";
   if (search.workspaceTab === "terminal") return "terminal";

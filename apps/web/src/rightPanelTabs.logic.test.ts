@@ -6,6 +6,8 @@ import {
   markRightPanelTabOpened,
   openedTabsFromRoute,
   rememberActiveAgentTab,
+  rememberActiveRenderTab,
+  resolveOpenedTabs,
   resolveRightPanelReopenTarget,
   shouldMountRightPanelContent,
   visibleRightPanelTabs,
@@ -40,13 +42,14 @@ describe("right panel tabs", () => {
     const otherThread = route("terminal", null, "env:thread-2");
     expect(
       visibleRightPanelTabs(markRightPanelTabOpened(state, otherThread, "terminal"), otherThread),
-    ).toEqual({ modes: ["terminal"], agentKeys: [] });
+    ).toEqual({ modes: ["terminal"], agentKeys: [], renderKey: null });
   });
 
   it("shows the route's tab even before it is remembered", () => {
     expect(visibleRightPanelTabs(opened(["files"]), route("pullRequest", null))).toEqual({
       modes: ["files", "pullRequest"],
       agentKeys: [],
+      renderKey: null,
     });
   });
 
@@ -163,5 +166,94 @@ describe("right panel tabs", () => {
       workspaceTab: undefined,
       workspacePr: undefined,
     });
+    expect(
+      buildRightPanelTargetSearch({ workspacePr: 7 }, { kind: "render", renderKey: "m:page" }),
+    ).toMatchObject({ workspaceTab: "render", workspaceRender: "m:page", workspacePr: undefined });
+  });
+});
+
+describe("the page tab", () => {
+  const pageRoute = (renderKey: string, scopeKey = "env:thread-1"): RightPanelRouteTabs => ({
+    scopeKey,
+    mode: "render",
+    activeAgentKey: null,
+    activeRenderKey: renderKey,
+  });
+
+  it("remembers the page the route shows, one at a time, and keeps identity", () => {
+    let state = rememberActiveRenderTab(opened(["files"]), pageRoute("m:first"));
+    expect(state.renderKey).toBe("m:first");
+    expect(rememberActiveRenderTab(state, pageRoute("m:first"))).toBe(state);
+    state = rememberActiveRenderTab(state, pageRoute("m:second"));
+    expect(state).toMatchObject({ modes: ["files"], renderKey: "m:second" });
+    // Another tab keeps the page tab in the strip.
+    expect(visibleRightPanelTabs(state, route("files"))).toEqual({
+      modes: ["files"],
+      agentKeys: [],
+      renderKey: "m:second",
+    });
+    // A key left over from another tab's search is not a page.
+    expect(
+      rememberActiveRenderTab(opened([]), { ...route("files"), activeRenderKey: "m:x" }).renderKey,
+    ).toBeUndefined();
+  });
+
+  it("starts another thread with its own route, not this thread's page", () => {
+    const state = rememberActiveRenderTab(opened([]), pageRoute("m:first"));
+    const otherThread = route("files", null, "env:thread-2");
+    expect(
+      visibleRightPanelTabs(resolveOpenedTabs(state, otherThread), otherThread).renderKey,
+    ).toBeNull();
+  });
+
+  it("closes the shown page to the first open tab, else the launcher", () => {
+    const state = rememberActiveRenderTab(opened(["review"]), pageRoute("m:page"));
+    const closed = closeRightPanelTab(state, pageRoute("m:page"), { mode: "render" });
+    expect(closed.next.renderKey).toBeNull();
+    expect(closed.target).toEqual({ kind: "tab", mode: "review" });
+    expect(closeRightPanelTab(opened([]), pageRoute("m:page"), { mode: "render" }).target).toEqual({
+      kind: "launcher",
+    });
+    // Closing it from behind another tab stays on that tab.
+    expect(closeRightPanelTab(state, route("review"), { mode: "render" })).toEqual({
+      next: expect.objectContaining({ renderKey: null, modes: ["review"] }),
+      target: null,
+    });
+  });
+
+  it("keeps the page tab open when another tab closes", () => {
+    const state = rememberActiveRenderTab(opened(["files", "terminal"]), pageRoute("m:page"));
+    expect(closeRightPanelTab(state, route("terminal"), { mode: "files" }).next.renderKey).toBe(
+      "m:page",
+    );
+  });
+
+  it("reopens on the page when it was shown last, or when nothing else is open", () => {
+    const state = rememberActiveRenderTab(opened(["files"]), pageRoute("m:page"));
+    expect(resolveRightPanelReopenTarget(state, route(null), "render")).toEqual({
+      kind: "render",
+      renderKey: "m:page",
+    });
+    expect(resolveRightPanelReopenTarget(state, route(null), "terminal")).toEqual({
+      kind: "tab",
+      mode: "files",
+    });
+    expect(
+      resolveRightPanelReopenTarget(
+        rememberActiveRenderTab(opened([], ["subagent:a"]), pageRoute("m:page")),
+        route(null),
+        "review",
+      ),
+    ).toEqual({ kind: "render", renderKey: "m:page" });
+  });
+
+  it("keeps an open page mounted on desktop and never on the frozen phone tier", () => {
+    const state = rememberActiveRenderTab(opened([]), pageRoute("m:page"));
+    const base = { open: false, agentKeys: [] as string[], route: route(null), opened: state };
+    expect(shouldMountRightPanelContent({ ...base, phone: false })).toBe(true);
+    expect(shouldMountRightPanelContent({ ...base, phone: true })).toBe(false);
+    expect(shouldMountRightPanelContent({ ...base, route: pageRoute("m:page"), phone: true })).toBe(
+      false,
+    );
   });
 });

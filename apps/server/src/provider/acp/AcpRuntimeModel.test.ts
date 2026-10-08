@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import type * as EffectAcpSchema from "effect-acp/schema";
+import { EventId, ProviderDriverKind, ThreadId } from "@ryco/contracts";
 
+import { makeAcpToolCallEvent } from "./AcpCoreRuntimeEvents.ts";
 import {
   extractModelConfigId,
   mergeToolCallState,
@@ -72,6 +74,120 @@ describe("AcpRuntimeModel", () => {
     } satisfies EffectAcpSchema.NewSessionResponse);
 
     expect(modelConfigId).toBe("model");
+  });
+
+  it("shows a Ryco HTML tool call by page title, without the page markup", () => {
+    const html = "<!doctype html><script>drawSecretChart()</script>";
+    const created = parseSessionUpdateEvent({
+      sessionId: "session-1",
+      update: {
+        sessionUpdate: "tool_call",
+        toolCallId: "tool-html",
+        title: "mcp__ryco__ryco_html_render",
+        kind: "other",
+        status: "pending",
+        rawInput: { html, title: "Quarterly revenue", height: 420 },
+      },
+    } satisfies EffectAcpSchema.SessionNotification);
+    expect(created.events).toMatchObject([
+      {
+        _tag: "ToolCallUpdated",
+        toolCall: {
+          title: "Rendered HTML",
+          detail: "Quarterly revenue",
+          data: { rawInput: { title: "Quarterly revenue", height: 420, htmlChars: html.length } },
+        },
+      },
+    ]);
+    const [event] = created.events;
+    expect(event?._tag === "ToolCallUpdated" && JSON.stringify(event.toolCall)).not.toContain(
+      "drawSecretChart",
+    );
+  });
+
+  describe("Ryco HTML tool calls across updates", () => {
+    const html = "<!doctype html><script>drawSecretChart()</script>";
+    const toolCallOf = (update: EffectAcpSchema.SessionNotification["update"]) => {
+      const [event] = parseSessionUpdateEvent({ sessionId: "session-1", update }).events;
+      if (event?._tag !== "ToolCallUpdated") throw new Error("expected a tool call update");
+      return event.toolCall;
+    };
+    const completedEventOf = (toolCall: ReturnType<typeof toolCallOf>) =>
+      makeAcpToolCallEvent({
+        stamp: { eventId: EventId.make("event-html"), createdAt: "2026-10-07T00:00:00.000Z" },
+        provider: ProviderDriverKind.make("cursor"),
+        threadId: ThreadId.make("thread-html"),
+        turnId: undefined,
+        toolCall,
+        rawPayload: {},
+      });
+
+    it("keeps the page out of the merged state when an update omits the title", () => {
+      const created = toolCallOf({
+        sessionUpdate: "tool_call",
+        toolCallId: "tool-html",
+        title: "mcp__ryco__ryco_html_render",
+        kind: "other",
+        status: "pending",
+      });
+      const withInput = mergeToolCallState(
+        created,
+        toolCallOf({
+          sessionUpdate: "tool_call_update",
+          toolCallId: "tool-html",
+          kind: "other",
+          status: "in_progress",
+          rawInput: { html, title: "Quarterly revenue", height: 420 },
+        }),
+      );
+      expect(withInput).toMatchObject({
+        title: "Rendered HTML",
+        detail: "Quarterly revenue",
+        data: { rawInput: { title: "Quarterly revenue", height: 420, htmlChars: html.length } },
+      });
+
+      const completed = mergeToolCallState(
+        withInput,
+        toolCallOf({
+          sessionUpdate: "tool_call_update",
+          toolCallId: "tool-html",
+          status: "completed",
+          rawOutput: { content: [{ type: "text", text: "Shown to the reader." }] },
+        }),
+      );
+      const event = completedEventOf(completed);
+      expect(event).toMatchObject({
+        type: "item.completed",
+        payload: { title: "Rendered HTML", detail: "Quarterly revenue" },
+      });
+      expect(JSON.stringify(event)).not.toContain("drawSecretChart");
+    });
+
+    it("strips a page that arrived before the update naming the tool", () => {
+      const untitled = toolCallOf({
+        sessionUpdate: "tool_call",
+        toolCallId: "tool-html",
+        title: "Tool call",
+        kind: "other",
+        status: "pending",
+        rawInput: { html, width: 390, appearance: "light" },
+      });
+      const completed = mergeToolCallState(
+        untitled,
+        toolCallOf({
+          sessionUpdate: "tool_call_update",
+          toolCallId: "tool-html",
+          title: "mcp__ryco__ryco_html_preview",
+          status: "completed",
+        }),
+      );
+      expect(completed).toMatchObject({
+        title: "Previewed HTML",
+        detail: "390px light",
+        data: { rawInput: { width: 390, appearance: "light", htmlChars: html.length } },
+      });
+      expect(JSON.stringify(completedEventOf(completed))).not.toContain("drawSecretChart");
+    });
   });
 
   it("projects typed ACP tool call updates into runtime events", () => {

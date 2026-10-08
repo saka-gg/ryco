@@ -60,6 +60,9 @@ import {
 import { Button } from "../ui/button";
 import { MessageAttachments } from "./MessageAttachments";
 import { type ExpandedImagePreview } from "./ExpandedImagePreview";
+import { HtmlRenderCards } from "./HtmlRenderCards";
+import { HtmlRenderOpenerProvider } from "./HtmlRenderDialog";
+import { HtmlRenderFrame } from "./HtmlRenderFrame";
 import { ProposedPlanCard } from "./ProposedPlanCard";
 import { DiffStatLabel, hasNonZeroStat } from "./DiffStatLabel";
 import { VscodeEntryIcon } from "./VscodeEntryIcon";
@@ -225,6 +228,12 @@ interface MessagesTimelineProps {
   onUndoTurn: (turnCount: number) => void;
   isRevertingCheckpoint: boolean;
   onImageExpand: (preview: ExpandedImagePreview) => void;
+  /**
+   * Opens an agent's HTML render in the workspace panel's page tab. Absent
+   * where the view has no panel (the phone tier); renders then open in a
+   * dialog.
+   */
+  onOpenHtmlRender?: ((messageId: MessageId, attachmentId: string) => void) | undefined;
   activeThreadEnvironmentId: EnvironmentId;
   markdownCwd: string | undefined;
   resolvedTheme: "light" | "dark";
@@ -279,6 +288,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   onUndoTurn,
   isRevertingCheckpoint,
   onImageExpand,
+  onOpenHtmlRender,
   activeThreadEnvironmentId,
   markdownCwd,
   resolvedTheme,
@@ -650,7 +660,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     const targetRowIndex = rows.findIndex(
       (row) =>
         (row.kind === "message" && row.message.id === targetMessageId) ||
-        (row.kind === "chapter" && row.message?.id === targetMessageId),
+        (row.kind === "chapter" && row.message?.id === targetMessageId) ||
+        (row.kind === "html-render" && row.messageId === targetMessageId),
     );
     if (targetRowIndex < 0) {
       setHighlightedMessageId(null);
@@ -796,56 +807,58 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   return (
     <TimelineStableProvider value={stableState}>
       <TimelineStreamingCtx.Provider value={streamingState}>
-        <div ref={setTimelineViewportElement} className="relative h-full min-h-0">
-          <LegendList<MessagesTimelineRow>
-            ref={listRef}
-            data={rows}
-            keyExtractor={keyExtractor}
-            renderItem={renderItem}
-            estimatedItemSize={56}
-            recycleItems={false}
-            initialScrollAtEnd={initialScrollOffset === undefined}
-            {...(initialScrollOffset === undefined ? {} : { initialScrollOffset })}
-            maintainScrollAtEnd={liveFollowEnabled}
-            maintainScrollAtEndThreshold={0.1}
-            maintainVisibleContentPosition
-            onScroll={handleScroll}
-            // The transcript scrolls without a visible scrollbar. Hiding it
-            // also removes the gutter entirely, so the content column no longer
-            // shifts when overflow appears — which is what `scrollbar-gutter:
-            // stable` used to reserve space for.
-            className="h-full overflow-x-hidden overscroll-y-contain px-3 [scrollbar-width:none] sm:px-5 [&::-webkit-scrollbar]:hidden"
-            ListHeaderComponent={listHeader}
-            ListFooterComponent={TIMELINE_LIST_FOOTER}
-          />
-          <TimelineMinimap
-            hasPersistentGutter={minimapHasPersistentGutter}
-            hitStripWidth={minimapHitStripWidth}
-            items={minimapItems}
-            stripMap={minimapStripMap}
-            onSelect={(item) => {
-              markManualScrollIntent();
-              onManualNavigation?.();
-              void listRef.current?.scrollToIndex({
-                index: item.rowIndex,
-                animated: true,
-                viewOffset: 24,
-              });
+        <HtmlRenderOpenerProvider onOpenInPanel={onOpenHtmlRender}>
+          <div ref={setTimelineViewportElement} className="relative h-full min-h-0">
+            <LegendList<MessagesTimelineRow>
+              ref={listRef}
+              data={rows}
+              keyExtractor={keyExtractor}
+              renderItem={renderItem}
+              estimatedItemSize={56}
+              recycleItems={false}
+              initialScrollAtEnd={initialScrollOffset === undefined}
+              {...(initialScrollOffset === undefined ? {} : { initialScrollOffset })}
+              maintainScrollAtEnd={liveFollowEnabled}
+              maintainScrollAtEndThreshold={0.1}
+              maintainVisibleContentPosition
+              onScroll={handleScroll}
+              // The transcript scrolls without a visible scrollbar. Hiding it
+              // also removes the gutter entirely, so the content column no longer
+              // shifts when overflow appears — which is what `scrollbar-gutter:
+              // stable` used to reserve space for.
+              className="h-full overflow-x-hidden overscroll-y-contain px-3 [scrollbar-width:none] sm:px-5 [&::-webkit-scrollbar]:hidden"
+              ListHeaderComponent={listHeader}
+              ListFooterComponent={TIMELINE_LIST_FOOTER}
+            />
+            <TimelineMinimap
+              hasPersistentGutter={minimapHasPersistentGutter}
+              hitStripWidth={minimapHitStripWidth}
+              items={minimapItems}
+              stripMap={minimapStripMap}
+              onSelect={(item) => {
+                markManualScrollIntent();
+                onManualNavigation?.();
+                void listRef.current?.scrollToIndex({
+                  index: item.rowIndex,
+                  animated: true,
+                  viewOffset: 24,
+                });
+              }}
+            />
+          </div>
+          <MessageActionsSheet
+            target={messageActionsRequest}
+            onOpenChange={(open) => {
+              if (!open) setMessageActionsRequest(null);
+            }}
+            revertDisabled={isRevertingCheckpoint || isWorking}
+            onRevert={() => {
+              if (messageActionsRequest) {
+                onRevertUserMessage(messageActionsRequest.messageId);
+              }
             }}
           />
-        </div>
-        <MessageActionsSheet
-          target={messageActionsRequest}
-          onOpenChange={(open) => {
-            if (!open) setMessageActionsRequest(null);
-          }}
-          revertDisabled={isRevertingCheckpoint || isWorking}
-          onRevert={() => {
-            if (messageActionsRequest) {
-              onRevertUserMessage(messageActionsRequest.messageId);
-            }
-          }}
-        />
+        </HtmlRenderOpenerProvider>
       </TimelineStreamingCtx.Provider>
     </TimelineStableProvider>
   );
@@ -1172,6 +1185,7 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
             ? null
             : "pb-0.5"
           : row.kind === "work-toggle" ||
+              row.kind === "html-render" ||
               (row.kind === "message" &&
                 row.message.role === "assistant" &&
                 !row.showAssistantCopyButton)
@@ -1319,6 +1333,14 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
                   threadId={parseScopedThreadKey(ctx.routeThreadKey)?.threadId}
                   messageId={row.message.id}
                 />
+                {!assistantResponseStillInProgress && row.turnHtmlRenders && (
+                  <HtmlRenderCards
+                    environmentId={ctx.activeThreadEnvironmentId}
+                    threadId={parseScopedThreadKey(ctx.routeThreadKey)?.threadId}
+                    renders={row.turnHtmlRenders}
+                    appearance={ctx.resolvedTheme}
+                  />
+                )}
                 {!assistantResponseStillInProgress && (
                   <AssistantChangedFilesSection
                     turnSummary={row.assistantTurnDiffSummary}
@@ -1371,6 +1393,36 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
             cwd={ctx.markdownCwd}
             workspaceRoot={ctx.workspaceRoot}
           />
+        </div>
+      )}
+
+      {row.kind === "html-render" && (
+        // The reply column, so the page's left edge lines up with reply text.
+        <div className="min-w-0 px-1">
+          <HtmlRenderFrame
+            // A row reused for another page must not keep the first page's frame.
+            key={row.attachment.id}
+            environmentId={ctx.activeThreadEnvironmentId}
+            threadId={parseScopedThreadKey(ctx.routeThreadKey)?.threadId}
+            messageId={row.messageId}
+            attachment={row.attachment}
+            htmlRender={row.htmlRender}
+          />
+          {!(
+            ctx.activeTurnInProgress &&
+            ctx.activeTurnId !== null &&
+            row.assistantTurnDiffSummary?.turnId === ctx.activeTurnId
+          ) && (
+            <AssistantChangedFilesSection
+              turnSummary={row.assistantTurnDiffSummary}
+              undoTurnCount={row.assistantUndoTurnCount}
+              routeThreadKey={ctx.routeThreadKey}
+              resolvedTheme={ctx.resolvedTheme}
+              openDiffTurnId={ctx.openDiffTurnId}
+              onOpenTurnDiff={ctx.onOpenTurnDiff}
+              onCloseDiff={ctx.onCloseDiff}
+            />
+          )}
         </div>
       )}
 

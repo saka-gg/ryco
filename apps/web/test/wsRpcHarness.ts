@@ -60,7 +60,21 @@ function normalizeRequest(tag: string, payload: unknown): NormalizedWsRpcRequest
   return { _tag: tag, payload };
 }
 
-function asEffect(result: UnaryResolverResult): Effect.Effect<unknown> {
+/**
+ * A unary resolver result the harness answers as the method's typed failure
+ * (one of its declared error schemas), as a server handler failing would.
+ */
+export class WsRpcFailure {
+  constructor(readonly error: WsRpcTaggedError) {}
+}
+
+/** A schema-declared RPC error: a tagged error from `@ryco/contracts`. */
+type WsRpcTaggedError = { readonly _tag: string };
+
+function asEffect(result: UnaryResolverResult): Effect.Effect<unknown, WsRpcTaggedError> {
+  if (result instanceof WsRpcFailure) {
+    return Effect.fail(result.error);
+  }
   if (result instanceof Promise) {
     return Effect.promise(() => result);
   }

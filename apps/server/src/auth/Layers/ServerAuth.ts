@@ -94,6 +94,29 @@ function portFromHostHeader(value: string | undefined): string | null {
   }
 }
 
+const SAFE_HTTP_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+
+/**
+ * Whether a state-changing request that rides the session cookie came from a
+ * document other than the app's own. Browsers can attach the cookie to
+ * requests the app never made: WebKit sends it from sandboxed, opaque-origin
+ * frames such as agent HTML renders (`Origin: null`, and a beacon that reuses
+ * the parent's Origin but says `Sec-Fetch-Site: cross-site`), and SameSite
+ * ignores ports. Bearer callers carry their own credential and are not checked.
+ */
+function isForeignCookieMutation(
+  request: HttpServerRequest.HttpServerRequest,
+  config: ServerConfigShape,
+): boolean {
+  if (SAFE_HTTP_METHODS.has((request.method ?? "GET").toUpperCase())) return false;
+  if (request.headers["sec-fetch-site"]?.trim().toLowerCase() === "cross-site") return true;
+  return !isAcceptedWebSocketOrigin({
+    origin: request.headers.origin,
+    host: request.headers.host,
+    config,
+  });
+}
+
 function isAcceptedWebSocketOrigin(input: {
   readonly origin: string | undefined;
   readonly host: string | undefined;
@@ -232,6 +255,17 @@ export const makeServerAuth = Effect.gen(function* () {
           message: "Authentication required.",
           status: 401,
         }),
+      );
+    }
+    if (cookieToken !== undefined && isForeignCookieMutation(request, config)) {
+      return Effect.logWarning("Rejected a cross-site request carrying the session cookie.", {
+        method: request.method,
+        origin: request.headers.origin ?? null,
+        fetchSite: request.headers["sec-fetch-site"] ?? null,
+      }).pipe(
+        Effect.andThen(
+          Effect.fail(new AuthError({ message: "Invalid request origin.", status: 403 })),
+        ),
       );
     }
     return authenticateToken(credential);

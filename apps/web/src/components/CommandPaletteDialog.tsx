@@ -165,7 +165,7 @@ import { buildProjectsPageLocation } from "../projectsRoute";
 import { buildPullRequestsPageLocation } from "../pullRequestsRoute";
 import { useSettingsDialogStore } from "../settingsDialogStore";
 import { useThreadSelectionStore } from "../threadSelectionStore";
-import { stripWorkspacePullRequestPin } from "../workspaceRouteSearch";
+import { carryWorkspaceSearchToThread } from "../workspaceRouteSearch";
 import { resolveThreadPinCommandPresentation, toggleThreadPin } from "../threadPinning";
 
 const EMPTY_BROWSE_ENTRIES: FilesystemBrowseResult["entries"] = [];
@@ -690,20 +690,29 @@ function OpenCommandPaletteDialog() {
       ),
     [projectTitleById, threads],
   );
+  const routeThreadEnvironmentId = activeThread?.environmentId ?? null;
+  const routeThreadId = activeThread?.id ?? null;
   const openMessageSearchResult = useCallback(
     async (result: CommandPaletteMessageSearchResult) => {
+      const resultThreadRef = scopeThreadRef(result.environmentId, result.threadId);
       await navigate({
         to: "/$environmentId/$threadId",
-        params: buildThreadRouteParams(scopeThreadRef(result.environmentId, result.threadId)),
-        // The open panel follows to the result's thread, minus a pin that
-        // only means something in the thread it came from.
+        params: buildThreadRouteParams(resultThreadRef),
+        // The open panel stays as it is within this thread, and follows to
+        // another minus a pin or a page that only mean something here.
         search: (previous: Record<string, unknown>) => ({
-          ...stripWorkspacePullRequestPin(previous),
+          ...carryWorkspaceSearchToThread(previous, {
+            from:
+              routeThreadEnvironmentId && routeThreadId
+                ? scopeThreadRef(routeThreadEnvironmentId, routeThreadId)
+                : null,
+            to: resultThreadRef,
+          }),
           messageId: result.messageId,
         }),
       });
     },
-    [navigate],
+    [navigate, routeThreadEnvironmentId, routeThreadId],
   );
   const messageSearchItems = useMemo(
     () =>

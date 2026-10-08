@@ -10,6 +10,8 @@ import {
 import { AttachmentPreviewButton } from "./AttachmentDocumentPreview";
 import { attachmentPreviewKind, formatAttachmentBytes } from "./attachmentPreview";
 import { buildExpandedImagePreview, type ExpandedImagePreview } from "./ExpandedImagePreview";
+import { HtmlRenderFrame } from "./HtmlRenderFrame";
+import { readHtmlRenderAttachment } from "./htmlRender.logic";
 
 const USER_IMAGE_MAX_WIDTH_PX = 360;
 const USER_IMAGE_MAX_HEIGHT_PX = 260;
@@ -66,6 +68,7 @@ const LoadableAttachment = memo(function LoadableAttachment(
     attachmentId: attachment.id,
     sizeBytes: attachment.sizeBytes,
     mimeType: attachment.mimeType,
+    image: isChatImageAttachment(attachment),
   });
   if (
     attachment.previewUrl ||
@@ -107,7 +110,51 @@ export const MessageAttachments = memo(function MessageAttachments(
     variant?: "user" | "assistant";
   },
 ) {
+  // An HTML render shows as its page wherever it turns up (beside text, in an
+  // older projection), never as an openable .html file. It needs its message
+  // to be read; without one it stays a plain download row.
+  const canShowRenders = Boolean(props.environmentId && props.threadId && props.messageId);
+  const renders = canShowRenders
+    ? props.attachments.flatMap((attachment) => {
+        const render = readHtmlRenderAttachment(attachment);
+        return render === undefined ? [] : [render];
+      })
+    : [];
+  const files =
+    renders.length === 0
+      ? props.attachments
+      : props.attachments.filter(
+          (attachment) => readHtmlRenderAttachment(attachment) === undefined,
+        );
   if (props.attachments.length === 0) return null;
+  return (
+    <>
+      {renders.length > 0 && (
+        <div className="my-2 flex w-full flex-col gap-2">
+          {renders.map(({ attachment, htmlRender }) => (
+            <HtmlRenderFrame
+              key={`${props.environmentId}:${props.threadId}:${props.messageId}:${attachment.id}`}
+              environmentId={props.environmentId}
+              threadId={props.threadId}
+              messageId={props.messageId}
+              attachment={attachment}
+              htmlRender={htmlRender}
+            />
+          ))}
+        </div>
+      )}
+      {files.length > 0 && <AttachmentCards {...props} attachments={files} />}
+    </>
+  );
+});
+
+function AttachmentCards(
+  props: AttachmentContext & {
+    attachments: ReadonlyArray<ChatAttachment>;
+    onImageExpand: (preview: ExpandedImagePreview) => void;
+    variant?: "user" | "assistant";
+  },
+) {
   return (
     <div
       className={
@@ -195,4 +242,4 @@ export const MessageAttachments = memo(function MessageAttachments(
       ))}
     </div>
   );
-});
+}

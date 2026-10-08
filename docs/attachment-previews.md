@@ -5,7 +5,9 @@ inside a dialog, with previous/next page, zoom, fit-to-width, and download actio
 Locally attached PDFs can also be inspected in the composer before sending.
 
 Text, Markdown, JSON, CSV, and common source files have a UTF-8 source preview,
-limited to 512 KB. HTML is shown as escaped source, not executed. Unknown binary
+limited to 512 KB. HTML is shown as escaped source, not executed, except agent HTML renders
+published with `ryco_html_render`, which run in a sandboxed opaque-origin frame (see
+[HTML renders](user/html-renders.md)). Unknown binary
 formats and Office documents remain downloadable. A missing/generic MIME type
 falls back to the filename for PDF and text preview classification; an explicit
 conflicting MIME type takes precedence.

@@ -1,4 +1,5 @@
 import type {
+  ChatHtmlRenderMetadata,
   EnvironmentId,
   ModelSelection,
   OrchestrationLatestTurn,
@@ -67,6 +68,8 @@ export interface ChatFileAttachment {
   /** Advisory media dimensions probed server-side (video/AV media); absent = unknown. */
   width?: number;
   height?: number;
+  /** Present when this `text/html` file is an agent HTML render shown inline in the thread. */
+  htmlRender?: ChatHtmlRenderMetadata;
 }
 
 export interface ChatUnknownAttachment {

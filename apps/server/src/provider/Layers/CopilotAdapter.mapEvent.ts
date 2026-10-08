@@ -7,6 +7,11 @@ import {
   type UserInputQuestion,
 } from "@ryco/contracts";
 import type { SessionEvent } from "@github/copilot-sdk";
+import {
+  type HtmlRenderToolPresentation,
+  resolveHtmlRenderToolPresentation,
+  withoutHtmlRenderMarkup,
+} from "@ryco/shared/htmlRenderToolPresentation";
 import { Effect } from "effect";
 
 import {
@@ -15,6 +20,47 @@ import {
   eventBase,
   normalizeUsage,
 } from "./CopilotAdapter.types.ts";
+
+/** Ryco's HTML tools, named by Copilot's MCP server/tool pair or its joined tool name. */
+function htmlRenderToolPresentation(data: object, input: unknown) {
+  const field = (key: string) => {
+    const value = (data as Record<string, unknown>)[key];
+    return typeof value === "string" ? value : undefined;
+  };
+  const mcpToolName = field("mcpToolName");
+  return mcpToolName !== undefined
+    ? resolveHtmlRenderToolPresentation({
+        toolName: mcpToolName,
+        serverName: field("mcpServerName"),
+        input,
+      })
+    : resolveHtmlRenderToolPresentation({ toolName: field("toolName"), input });
+}
+
+// Calls that never complete (an interrupted turn) are forgotten oldest first.
+const MAX_REMEMBERED_HTML_RENDER_CALLS = 64;
+
+/** Remembers how a started HTML tool call shows, for its completion to show the same. */
+function rememberHtmlRenderToolCall(
+  session: ActiveCopilotSession,
+  toolCallId: string,
+  presentation: HtmlRenderToolPresentation,
+) {
+  const calls = session.htmlRenderToolCalls;
+  calls.delete(toolCallId);
+  calls.set(toolCallId, presentation);
+  for (const oldest of calls.keys()) {
+    if (calls.size <= MAX_REMEMBERED_HTML_RENDER_CALLS) break;
+    calls.delete(oldest);
+  }
+}
+
+/** How a completed call showed when it started, forgotten once it is done. */
+function takeHtmlRenderToolCall(session: ActiveCopilotSession, toolCallId: string) {
+  const presentation = session.htmlRenderToolCalls.get(toolCallId);
+  session.htmlRenderToolCalls.delete(toolCallId);
+  return presentation;
+}
 
 function nonNegativeCount(value: number | undefined): number | undefined {
   return value !== undefined && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
@@ -344,6 +390,9 @@ export const mapEvent = (
       case "tool.execution_start": {
         const toolName = event.data.toolName ?? "";
         const isMcpTool = event.data.mcpToolName !== undefined;
+        // A Ryco HTML tool shows a short label and is never carried with its page.
+        const htmlRender = htmlRenderToolPresentation(event.data, event.data.arguments);
+        if (htmlRender) rememberHtmlRenderToolCall(session, event.data.toolCallId, htmlRender);
         return [
           {
             ...eventBase({
@@ -359,14 +408,33 @@ export const mapEvent = (
             payload: {
               itemType: isMcpTool ? "mcp_tool_call" : "dynamic_tool_call",
               status: "inProgress",
-              title: toolName,
-              ...(event.data.arguments ? { data: event.data.arguments } : {}),
+              title: htmlRender?.title ?? toolName,
+              ...(htmlRender?.detail ? { detail: htmlRender.detail } : {}),
+              ...(event.data.arguments
+                ? {
+                    data: htmlRender
+                      ? withoutHtmlRenderMarkup(event.data.arguments)
+                      : event.data.arguments,
+                  }
+                : {}),
             },
           },
         ];
       }
       case "tool.execution_complete": {
         const isMcpTool = "mcpToolName" in event.data && event.data.mcpToolName !== undefined;
+        // Copilot names neither the tool nor its input here, so an HTML tool
+        // shows as it started. A success keeps its page title as the detail
+        // rather than the agent-facing result; a failure shows why.
+        const htmlRender =
+          takeHtmlRenderToolCall(session, event.data.toolCallId) ??
+          htmlRenderToolPresentation(event.data, undefined);
+        const resultDetail =
+          htmlRender && event.data.success
+            ? htmlRender.detail
+            : (event.data.result?.detailedContent ??
+              event.data.result?.content ??
+              event.data.error?.message);
         return [
           {
             ...eventBase({
@@ -382,17 +450,8 @@ export const mapEvent = (
             payload: {
               itemType: isMcpTool ? "mcp_tool_call" : "dynamic_tool_call",
               status: event.data.success ? "completed" : "failed",
-              title: "Tool call",
-              ...((event.data.result?.detailedContent ??
-              event.data.result?.content ??
-              event.data.error?.message)
-                ? {
-                    detail:
-                      event.data.result?.detailedContent ??
-                      event.data.result?.content ??
-                      event.data.error?.message,
-                  }
-                : {}),
+              title: htmlRender?.title ?? "Tool call",
+              ...(resultDetail ? { detail: resultDetail } : {}),
               data: event.data,
             },
           },
