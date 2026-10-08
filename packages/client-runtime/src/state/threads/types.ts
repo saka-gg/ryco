@@ -6,6 +6,7 @@ import type {
   RepositoryIdentity,
   OrchestrationSessionStatus,
   OrchestrationThreadActivity,
+  ProjectKind,
   ProjectScript as ContractProjectScript,
   ThreadId,
   ProjectId,
@@ -133,6 +134,8 @@ export interface TurnDiffSummary {
 export interface Project {
   id: ProjectId;
   environmentId: EnvironmentId;
+  /** Absent means a regular project; read it with `@ryco/shared/projectKind`. */
+  kind?: ProjectKind | undefined;
   name: string;
   cwd: string;
   projectMetadataDir?: string | undefined;

@@ -101,6 +101,9 @@ import { adaptProjectForSidebarTree } from "./sidebar/sidebarTreeAdapters";
 import { composeSidebarTree } from "./sidebar/hooks/useSidebarTree";
 import { SidebarProjectsContent, PROJECT_ROOT_DROP_ID } from "./sidebar/SidebarProjectList";
 import { SidebarProjectItem } from "./sidebar/SidebarProjectItem";
+import { SidebarChatList } from "./sidebar/SidebarChatList";
+import { buildSidebarChatRows } from "./sidebar/sidebarChats.logic";
+import { useChatsAvailability } from "../hooks/useChatsAvailability";
 import { SidebarProjectDialogProvider } from "./sidebar/SidebarProjectDialogOwner";
 import { SidebarChromeHeader, SidebarChromeFooter } from "./sidebar/SidebarChrome";
 import { SidebarPrimaryActions } from "./sidebar/SidebarPrimaryActions";
@@ -240,7 +243,7 @@ export default function Sidebar() {
     sidebarProjectGroupingOverrides: settings.sidebarProjectGroupingOverrides,
   }));
   const { updateSettings } = useUpdateSettings();
-  const { handleNewThread } = useNewThreadHandler();
+  const { handleNewThread, handleNewChat } = useNewThreadHandler();
   const { archiveThread, trashThread, stopThreadSession, interruptThreadTurn } = useThreadActions();
   const { isMobile, open, openMobile, setOpen, setOpenMobile } = useSidebar();
   const pinnedThreadKeys = useMemo(
@@ -517,6 +520,34 @@ export default function Sidebar() {
       scopeProjectRef(newThreadTargetProject.environmentId, newThreadTargetProject.id),
     );
   }, [handleNewThread, isMobile, newThreadTargetProject, setOpenMobile]);
+
+  // "No project" chats: excluded from the project tree (useLogicalProjectSnapshots)
+  // and listed in their own section.
+  const draftThreadsByThreadKey = useComposerDraftStore((store) => store.draftThreadsByThreadKey);
+  const sidebarChatRows = useMemo(
+    () =>
+      buildSidebarChatRows({
+        projects,
+        threads: sidebarThreads,
+        draftThreadsByThreadKey,
+        sortOrder: sidebarThreadSortOrder,
+        pinnedThreadKeys,
+      }),
+    [draftThreadsByThreadKey, pinnedThreadKeys, projects, sidebarThreadSortOrder, sidebarThreads],
+  );
+  const chatEnvironmentId =
+    selectedHostedEnvironmentId ?? newThreadTargetProject?.environmentId ?? primaryEnvironmentId;
+  const chatsAvailability = useChatsAvailability(chatEnvironmentId);
+  const startNewChatFromSidebar = useMemo(
+    () =>
+      chatEnvironmentId && chatsAvailability.available
+        ? () => {
+            if (isMobile) setOpenMobile(false);
+            void handleNewChat(chatEnvironmentId);
+          }
+        : null,
+    [chatEnvironmentId, chatsAvailability.available, handleNewChat, isMobile, setOpenMobile],
+  );
 
   // Build a mapping from physical project key → logical project key for
   // cross-environment grouping.  Projects that share a repositoryIdentity
@@ -1281,8 +1312,13 @@ export default function Sidebar() {
 
       <SidebarPrimaryActions
         newThreadShortcutLabel={newThreadShortcutLabel}
-        newThreadDisabled={newThreadTargetProject === null}
-        onNewThread={startNewThreadFromSidebar}
+        // Without any project the button starts a "No project" chat where chats are available.
+        newThreadDisabled={newThreadTargetProject === null && startNewChatFromSidebar === null}
+        onNewThread={
+          newThreadTargetProject === null && startNewChatFromSidebar
+            ? startNewChatFromSidebar
+            : startNewThreadFromSidebar
+        }
         searchShortcutLabel={commandPaletteShortcutLabel}
       />
 
@@ -1315,7 +1351,20 @@ export default function Sidebar() {
             handleProjectDragCancel={handleProjectDragCancel}
             projectTreeRows={projectTreeRows}
             attachProjectListAutoAnimateRef={attachProjectListAutoAnimateRef}
-            projectsLength={projects.length}
+            projectsLength={orderedProjects.length}
+            chatsSection={
+              <SidebarChatList
+                chats={sidebarChatRows}
+                activeRouteThreadKey={activeRouteThreadKey}
+                handleNewThread={handleNewThread}
+                archiveThread={archiveThread}
+                trashThread={trashThread}
+                stopThreadSession={stopThreadSession}
+                interruptThreadTurn={interruptThreadTurn}
+                attachThreadListAutoAnimateRef={attachThreadListAutoAnimateRef}
+                onNewChat={startNewChatFromSidebar}
+              />
+            }
             renderProjectRow={(project, dragHandleProps, onNewFolderWithProject) => (
               <SidebarProjectItem
                 project={project}

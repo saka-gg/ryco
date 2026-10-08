@@ -316,6 +316,55 @@ describe("MessagesTimeline", () => {
     expect(markup).toContain("Delivery uncertain: Acceptance could not be proven");
     expect(markup).toContain("lucide-circle-alert");
     expect(markup).toContain("lucide-circle-question-mark");
+    // Without a recorded reason a handoff is a model change, rendered as before.
+    expect(markup).toContain('data-context-handoff-reason="model-change"');
+    expect(markup).not.toContain("data-context-handoff-retry-hint");
+  });
+
+  it("renders a folder relocation as a fresh session, not as a model transition", async () => {
+    const { MessagesTimeline } = await import("./MessagesTimeline");
+    const sameModel = makeContextHandoffMarker().target;
+    const consumed = makeContextHandoffMarker({
+      id: "context-handoff:relocated",
+      handoffId: ContextHandoffId.make("handoff-relocated"),
+      reason: "cwd-relocation",
+      sources: [sameModel],
+      target: sameModel,
+    });
+    const failed = makeContextHandoffMarker({
+      id: "context-handoff:relocation-failed",
+      handoffId: ContextHandoffId.make("handoff-relocation-failed"),
+      reason: "cwd-relocation",
+      status: "failed",
+      error: "The fresh session could not start.",
+      sources: [sameModel],
+      target: sameModel,
+    });
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[consumed, failed].map((marker) => ({
+          id: marker.id,
+          kind: "context-handoff" as const,
+          createdAt: marker.createdAt,
+          marker,
+        }))}
+      />,
+    );
+
+    expect(markup.match(/data-context-handoff-reason="cwd-relocation"/g)).toHaveLength(2);
+    expect(markup).toContain("Continued in a fresh session in the new folder");
+    expect(markup).toContain(
+      "Fresh session in the new folder. Failed: The fresh session could not start. Send your message again to retry",
+    );
+    expect(markup).toContain("data-context-handoff-retry-hint");
+    expect(markup).toContain("Send your message again to retry.");
+    expect(markup).toContain("lucide-folder-input");
+    // No `<model> → <model>` transition and no "Context handoff from" label.
+    expect(markup).not.toContain("lucide-arrow-right");
+    expect(markup).not.toContain("lucide-arrow-left-right");
+    expect(markup).not.toContain("Context handoff from");
+    expect(markup).not.toContain("Fable 5");
   });
 
   it("formats changed file paths from the workspace root", async () => {

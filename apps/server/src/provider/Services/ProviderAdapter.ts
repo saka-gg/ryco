@@ -59,6 +59,14 @@ export interface ProviderAdapterCapabilities {
    *   turn-acceptance deadline then covers only the time until that event.
    */
   readonly turnSubmission?: ProviderTurnSubmissionMode;
+  /**
+   * Whether a native conversation can be resumed after the thread's working
+   * directory moved (a chat turned into a project, a changed workspace root,
+   * a relocated worktree). Missing is treated as `false`: Ryco then starts a
+   * fresh native session in the new directory and carries the conversation
+   * over with a context handoff instead of resuming the old one there.
+   */
+  readonly resumeSurvivesCwdChange?: boolean;
 }
 
 export type ProviderTurnSubmissionMode = "acceptance" | "completion";

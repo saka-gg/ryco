@@ -3,6 +3,7 @@ import {
   REMOVED_PROJECT_MEMORY_MESSAGE,
 } from "@ryco/shared/retiredFeatures";
 import { canSnoozeThread } from "@ryco/shared/threadSnooze";
+import { projectKindOf } from "@ryco/shared/projectKind";
 import { applicableUsageLimit } from "@ryco/shared/usageLimit";
 import type {
   AgentTokenMode,
@@ -21,6 +22,7 @@ import {
   CONTEXT_HANDOFF_ACTIVITY_KIND,
   ContextHandoffId,
   DEFAULT_AGENT_TOKEN_MODE,
+  DEFAULT_PROJECT_KIND,
   EventId,
   NonNegativeInt,
 } from "@ryco/contracts";
@@ -40,6 +42,7 @@ import {
   isThreadTrashed,
   listThreadsByProjectId,
   listThreadsByWorktree,
+  requireActiveProject,
   requireProject,
   requireProjectAbsent,
   requireThread,
@@ -117,7 +120,7 @@ const decideThreadCreated = Effect.fn("decideThreadCreated")(function* ({
   readonly fields: ThreadCreateFields;
   readonly lineage: ThreadLineage | null;
 }) {
-  yield* requireProject({
+  yield* requireActiveProject({
     readModel,
     command,
     projectId: fields.projectId,
@@ -453,6 +456,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         type: "project.created",
         payload: {
           projectId: command.projectId,
+          kind: command.kind ?? DEFAULT_PROJECT_KIND,
           title: command.title,
           workspaceRoot: command.workspaceRoot,
           projectMetadataDir: command.projectMetadataDir,
@@ -466,7 +470,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "project.meta.update": {
-      const project = yield* requireProject({
+      const project = yield* requireActiveProject({
         readModel,
         command,
         projectId: command.projectId,
@@ -480,6 +484,16 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           detail: `Project '${command.projectId}' changed after the command was authorized.`,
         });
       }
+      // Promotion is one way: a chat may become a project, a project never becomes a chat.
+      const currentKind = projectKindOf(project);
+      const kindChange =
+        command.kind === undefined || command.kind === currentKind ? undefined : command.kind;
+      if (kindChange !== undefined && !(currentKind === "chat" && kindChange === "project")) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Project '${command.projectId}' cannot change kind from '${currentKind}' to '${kindChange}'.`,
+        });
+      }
       const occurredAt = nowIso();
       return {
         ...withEventBase({
@@ -491,6 +505,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         type: "project.meta-updated",
         payload: {
           projectId: command.projectId,
+          ...(kindChange !== undefined ? { kind: kindChange } : {}),
           ...(command.title !== undefined ? { title: command.title } : {}),
           ...(command.workspaceRoot !== undefined ? { workspaceRoot: command.workspaceRoot } : {}),
           ...(command.projectMetadataDir !== undefined
@@ -509,7 +524,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "project.avatar.set": {
-      yield* requireProject({
+      yield* requireActiveProject({
         readModel,
         command,
         projectId: command.projectId,
@@ -1567,6 +1582,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
                   schemaVersion: 1,
                   handoffId,
                   mode: "full-context-fresh-session",
+                  reason: "model-change",
                   status: "requested",
                   targetMessageId: command.message.messageId,
                   sourceSelection: targetThread.modelSelection,

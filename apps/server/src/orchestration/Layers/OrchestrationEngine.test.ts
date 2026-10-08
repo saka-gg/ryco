@@ -204,6 +204,81 @@ describe("OrchestrationEngine", () => {
     }
   });
 
+  it("refuses a turn in a chat whose folder is moving, retryably, until the move settles", async () => {
+    const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "ryco-chat-move-")));
+    const chat = path.join(root, "chats", "2026-10-08-plan-0a1b2c3d");
+    await fs.mkdir(chat, { recursive: true });
+    const system = await createOrchestrationSystem();
+    const projectId = ProjectId.make("chat-move-project");
+    const threadId = ThreadId.make("chat-move-thread");
+    const createdAt = now();
+    const modelSelection = { instanceId: ProviderInstanceId.make("codex"), model: "fixture" };
+    const turnStart: OrchestrationCommand = {
+      type: "thread.turn.start",
+      commandId: CommandId.make("chat-move-turn"),
+      threadId,
+      message: {
+        messageId: MessageId.make("chat-move-message"),
+        role: "user",
+        text: "fixture",
+        attachments: [],
+      },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      createdAt,
+    };
+    try {
+      await system.run(
+        system.engine.dispatch({
+          type: "project.create",
+          commandId: CommandId.make("chat-move-project-create"),
+          projectId,
+          kind: "chat",
+          title: "Plan",
+          workspaceRoot: chat,
+          defaultModelSelection: modelSelection,
+          createdAt,
+        }),
+      );
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("chat-move-thread-create"),
+          threadId,
+          projectId,
+          title: "Plan",
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdAt,
+        }),
+      );
+      await system.run(
+        system.sql`INSERT INTO project_relocations (relocation_id, project_id, source_path, destination_path, strategy, state, destination_created, error, created_at, updated_at)
+          VALUES ('relocation-fixture', ${projectId}, ${chat}, ${path.join(root, "plan")}, 'rename', 'pending', 0, NULL, ${createdAt}, ${createdAt})`,
+      );
+
+      const refused = await system.run(Effect.flip(system.engine.dispatch(turnStart)));
+      expect(refused).toBeInstanceOf(OrchestrationCommandAdmissionError);
+      expect(refused.message).toBe(
+        "This chat is being moved into a project. Try again in a moment.",
+      );
+      expect((await system.readShell()).threads[0]?.latestTurn).toBeNull();
+
+      // No receipt was rejected: the same command goes through once the move settles.
+      await system.run(
+        system.sql`UPDATE project_relocations SET state = 'failed' WHERE relocation_id = 'relocation-fixture'`,
+      );
+      await system.run(system.engine.dispatch(turnStart));
+      expect((await system.readShell()).threads[0]?.latestUserMessageAt).not.toBeNull();
+    } finally {
+      await system.dispose();
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("protects an accepted archived turn before a paused reactor makes it visible in the shell", async () => {
     const root = await fs.realpath(
       await fs.mkdtemp(path.join(os.tmpdir(), "ryco-storage-pending-")),

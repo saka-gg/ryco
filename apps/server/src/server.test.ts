@@ -21,6 +21,8 @@ import {
   TextGenerationError,
   type OrchestrationCommand,
   type OrchestrationEvent,
+  type OrchestrationProjectShell,
+  type ServerChatsCapability,
   ORCHESTRATION_WS_METHODS,
   ProjectId,
   ProviderDriverKind,
@@ -94,7 +96,16 @@ import {
   ThreadDeletionReactor,
   type ThreadDeletionReactorShape,
 } from "./orchestration/Services/ThreadDeletionReactor.ts";
-import { OrchestrationListenerCallbackError } from "./orchestration/Errors.ts";
+import {
+  OrchestrationCommandInvariantError,
+  OrchestrationListenerCallbackError,
+} from "./orchestration/Errors.ts";
+import { ChatFolders, type ChatFoldersShape } from "./project/chatFolders.ts";
+import {
+  type ProjectionProject,
+  ProjectionProjectRepository,
+  type ProjectionProjectRepositoryShape,
+} from "./persistence/Services/ProjectionProjects.ts";
 import {
   ProjectionSnapshotQuery,
   type ProjectionSnapshotQueryShape,
@@ -536,6 +547,10 @@ const buildAppUnderTest = (options?: {
     hubConnector?: Partial<HubConnectorServiceShape>;
     chatAttachmentUploads?: ChatAttachmentUploadsShape;
     workspaceLifecycle?: Partial<WorkspaceLifecycleShape>;
+    /** Absent by default: the node then offers no chats without a project. */
+    chatFolders?: ChatFoldersShape;
+    /** Absent by default, as in other route tests. */
+    projectionProjectRepository?: ProjectionProjectRepositoryShape;
   };
 }) =>
   Effect.gen(function* () {
@@ -1018,6 +1033,14 @@ const buildAppUnderTest = (options?: {
       options?.layers?.chatAttachmentUploads
         ? Layer.provide(Layer.succeed(ChatAttachmentUploads, options.layers.chatAttachmentUploads))
         : Layer.provideMerge(ChatAttachmentUploadsLive),
+      options?.layers?.chatFolders
+        ? Layer.provide(Layer.succeed(ChatFolders, options.layers.chatFolders))
+        : Layer.provide(Layer.empty),
+      options?.layers?.projectionProjectRepository
+        ? Layer.provide(
+            Layer.succeed(ProjectionProjectRepository, options.layers.projectionProjectRepository),
+          )
+        : Layer.provide(Layer.empty),
       Layer.provideMerge(
         Layer.mock(WorkspaceLifecycle)({ ...options?.layers?.workspaceLifecycle }),
       ),
@@ -3210,6 +3233,52 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         type: "providerStatuses",
         payload: { providers: nextProviders },
       });
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("routes websocket rpc subscribeServerConfig re-snapshots chats changes", () =>
+    Effect.gen(function* () {
+      const available = { available: true, root: "/chats" } as const;
+      const insideRepository = {
+        available: false,
+        root: "/repo/chats",
+        unavailableReason: "inside-git-repository",
+      } as const;
+      const current = yield* Ref.make<ServerChatsCapability>(available);
+      yield* buildAppUnderTest({
+        layers: {
+          keybindings: {
+            loadConfigState: Effect.succeed({ keybindings: [], issues: [] }),
+            streamChanges: Stream.empty,
+          },
+          providerRegistry: { getProviders: Effect.succeed([]), streamChanges: Stream.empty },
+          chatFolders: {
+            capability: Ref.get(current),
+            // Starts with the capability the snapshot already carried; only the change is sent.
+            changes: Stream.make(available, insideRepository).pipe(
+              Stream.tap((capability) => Ref.set(current, capability)),
+            ),
+            allocateChatFolder: () => Effect.die("unused"),
+            ensureChatFolder: () => Effect.die("unused"),
+            removeEmptyChatFolder: () => Effect.succeed(false),
+            isInsideChatsRoot: () => Effect.succeed(false),
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const events = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[WS_METHODS.subscribeServerConfig]({}).pipe(Stream.take(2), Stream.runCollect),
+        ),
+      );
+      const [first, second] = Array.from(events);
+      assert.equal(first?.type, "snapshot");
+      assert.equal(second?.type, "snapshot");
+      if (first?.type === "snapshot" && second?.type === "snapshot") {
+        assert.deepEqual(first.config.chats, available);
+        assert.deepEqual(second.config.chats, insideRepository);
+      }
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
@@ -6805,6 +6874,171 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           if (scenario === "shared-result") assert.equal(runForThread.mock.calls.length, 0);
           if (scenario === "replacement-task")
             assert.isFalse(commands.some((command) => command.type === "thread.delete"));
+        }
+      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    );
+  }
+
+  for (const scenario of ["success", "turn-start-fails", "retired"] as const) {
+    it.effect(`chat without a project first send: ${scenario}`, () =>
+      Effect.gen(function* () {
+        const commands: Array<OrchestrationCommand> = [];
+        const removedFolders: Array<string> = [];
+        const createdAt = "2026-10-08T12:00:00.000Z";
+        const chatProjectId = ProjectId.make("project-chat-first-send");
+        const threadId = ThreadId.make("thread-chat-first-send");
+        const folder = "/chats/2026-10-08-sketch-a-logo-0123abcd";
+        let chatProject: OrchestrationProjectShell | null = null;
+        const chatFolders: ChatFoldersShape = {
+          capability: Effect.succeed({ available: true, root: "/chats" }),
+          changes: Stream.empty,
+          allocateChatFolder: () => Effect.succeed(folder),
+          ensureChatFolder: () => Effect.succeed({ created: false }),
+          removeEmptyChatFolder: (path) =>
+            Effect.sync(() => {
+              removedFolders.push(path);
+              return true;
+            }),
+          isInsideChatsRoot: () => Effect.succeed(true),
+        };
+        // A stale draft's chat that startup cleanup already deleted.
+        const retiredRecord = {
+          projectId: chatProjectId,
+          kind: "chat",
+          title: "Sketch a logo",
+          workspaceRoot: folder,
+          projectMetadataDir: ".ryco",
+          defaultModelSelection: null,
+          customAvatarContentHash: null,
+          preferredRemoteName: null,
+          scripts: [],
+          createdAt,
+          updatedAt: createdAt,
+          deletedAt: "2026-10-08T13:00:00.000Z",
+        } satisfies ProjectionProject;
+        yield* buildAppUnderTest({
+          layers: {
+            chatFolders,
+            projectionProjectRepository: {
+              upsert: () => Effect.void,
+              getById: () =>
+                Effect.succeed(scenario === "retired" ? Option.some(retiredRecord) : Option.none()),
+              listAll: () => Effect.succeed([]),
+              deleteById: () => Effect.void,
+            },
+            orchestrationEngine: {
+              dispatch: (command) => {
+                if (command.type === "thread.turn.start" && scenario === "turn-start-fails") {
+                  return Effect.fail(
+                    new OrchestrationCommandInvariantError({
+                      commandType: command.type,
+                      detail: "Provider instance is disabled.",
+                    }),
+                  );
+                }
+                return Effect.sync(() => {
+                  commands.push(command);
+                  if (command.type === "project.create") {
+                    chatProject = {
+                      ...makeDefaultOrchestrationReadModel().projects[0]!,
+                      id: command.projectId,
+                      kind: command.kind,
+                      title: command.title,
+                      workspaceRoot: command.workspaceRoot,
+                    };
+                  }
+                  return { sequence: commands.length };
+                });
+              },
+            },
+            projectionSnapshotQuery: {
+              getProjectShellById: (id) =>
+                Effect.succeed(
+                  chatProject && id === chatProject.id ? Option.some(chatProject) : Option.none(),
+                ),
+              getActiveProjectByWorkspaceRoot: (root) =>
+                Effect.succeed(
+                  chatProject && root === chatProject.workspaceRoot
+                    ? Option.some({
+                        ...makeDefaultOrchestrationReadModel().projects[0]!,
+                        ...chatProject,
+                      })
+                    : Option.none(),
+                ),
+              getFirstActiveThreadIdByProjectId: () => Effect.succeed(Option.none()),
+            },
+          },
+        });
+        const wsUrl = yield* getWsServerUrl("/ws");
+        const config = yield* Effect.scoped(
+          withWsRpcClient(wsUrl, (client) => client[WS_METHODS.serverGetConfig]({})),
+        );
+        assert.deepEqual(config.chats, { available: true, root: "/chats" });
+
+        const dispatch = Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            client[ORCHESTRATION_WS_METHODS.dispatchCommand]({
+              type: "thread.turn.start",
+              commandId: CommandId.make(`chat-first-send-${scenario}`),
+              threadId,
+              message: {
+                messageId: MessageId.make("chat-first-send-message"),
+                role: "user",
+                text: "Sketch a logo",
+                attachments: [],
+              },
+              modelSelection: defaultModelSelection,
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              createdAt,
+              bootstrap: {
+                createChatProject: { projectId: chatProjectId, titleSeed: "Sketch a logo" },
+                createThread: {
+                  projectId: chatProjectId,
+                  title: "Sketch a logo",
+                  modelSelection: defaultModelSelection,
+                  runtimeMode: "full-access",
+                  interactionMode: "default",
+                  branch: null,
+                  worktreePath: null,
+                  createdAt,
+                },
+              },
+            }),
+          ),
+        );
+
+        if (scenario === "success") {
+          yield* dispatch;
+          assert.deepEqual(
+            commands.map((command) => command.type),
+            ["project.create", "thread.create", "thread.turn.start"],
+          );
+          assert.deepInclude(commands[0], {
+            projectId: chatProjectId,
+            kind: "chat",
+            title: "Sketch a logo",
+            workspaceRoot: folder,
+          });
+          assert.deepInclude(commands[1], { projectId: chatProjectId, worktreePath: null });
+          assert.deepEqual(removedFolders, []);
+        } else if (scenario === "retired") {
+          // Recognizable over the wire, and nothing was created: the client starts over.
+          const error = yield* Effect.flip(dispatch);
+          assert.deepInclude(error, {
+            _tag: "OrchestrationDispatchCommandError",
+            reason: "chat-project-retired",
+          });
+          assert.deepEqual(commands, []);
+          assert.deepEqual(removedFolders, []);
+        } else {
+          yield* Effect.flip(dispatch);
+          // The thread is rolled back and the empty folder removed; the chat stays for a retry.
+          assert.deepEqual(
+            commands.map((command) => command.type),
+            ["project.create", "thread.create", "thread.delete"],
+          );
+          assert.deepEqual(removedFolders, [folder]);
         }
       }).pipe(Effect.provide(NodeHttpServer.layerTest)),
     );

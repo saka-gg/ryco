@@ -1295,6 +1295,34 @@ routing.layer("ProviderServiceLive routing", (it) => {
     }),
   );
 
+  it.effect("reads a stopped thread's resume target without starting a runtime", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const threadId = asThreadId("thread-resume-target");
+      assert.deepEqual(yield* provider.readResumeTarget!(threadId), Option.none());
+
+      yield* provider.startSession(threadId, {
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: codexInstanceId,
+        threadId,
+        cwd: "/tmp/project-resume-target",
+        runtimeMode: "full-access",
+      });
+      yield* provider.stopSession({ threadId });
+      routing.codex.startSession.mockClear();
+
+      assert.deepEqual(
+        yield* provider.readResumeTarget!(threadId),
+        Option.some({
+          providerInstanceId: codexInstanceId,
+          cwd: "/tmp/project-resume-target",
+          hasResumeCursor: true,
+        }),
+      );
+      assert.equal(routing.codex.startSession.mock.calls.length, 0);
+    }),
+  );
+
   // A rewind marker the adapter cleared on a completed turn must not survive in
   // the binding: recovery would truncate the conversation at the old rewind point.
   const rewoundCursor = { resume: "session-rewound", rewind: { at: "assistant-1" }, turnCount: 1 };
@@ -2302,23 +2330,27 @@ fanout.layer("ProviderServiceLive fanout", (it) => {
     }),
   );
 
-  it.effect("retires only the exact failed target without leaking its resume state", () =>
+  it.effect("retires a failed same-instance target and puts back the binding it replaced", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService;
       const directory = yield* ProviderSessionDirectory;
       const threadId = asThreadId("thread-retire-failed-target");
       const sourceResumeCursor = { opaque: "source-resume" };
+      const chatFolder = "/tmp/chats/2026-10-08-plan-0a1b2c3d";
       const source = yield* provider.startSession(threadId, {
         provider: CODEX_DRIVER,
         providerInstanceId: codexInstanceId,
         threadId,
+        cwd: chatFolder,
         runtimeMode: "full-access",
         resumeCursor: sourceResumeCursor,
       });
+      // A relocation handoff: a fresh session on the same instance in the moved folder.
       const target = yield* provider.startFreshSession(threadId, {
         provider: CODEX_DRIVER,
         providerInstanceId: codexInstanceId,
         threadId,
+        cwd: "/tmp/code/plan",
         runtimeMode: "full-access",
         runtimeSessionId: RuntimeSessionId.make("runtime-failed-same-instance-target"),
       });
@@ -2335,14 +2367,22 @@ fanout.layer("ProviderServiceLive fanout", (it) => {
       };
 
       assert.equal(yield* provider.stopSessionBinding(targetBinding), "stopped");
+      // The fresh start stopped the source runtime, so it cannot be restored as a live one.
       assert.equal(yield* provider.restoreSessionBinding(target.previousBinding), false);
       assert.equal(yield* provider.retireSessionBinding(targetBinding), true);
 
-      const retired = Option.getOrUndefined(yield* directory.getBinding(threadId));
-      assert.equal(retired?.runtimeSessionId, target.session.runtimeSessionId);
-      assert.equal(retired?.status, "stopped");
-      assert.equal(retired?.resumeCursor, null);
-      assert.equal(retired?.runtimePayload, null);
+      // The source conversation is resumable again, from the folder it ran in, so a retry
+      // detects the move again; its runtime is not revived.
+      const restored = Option.getOrUndefined(yield* directory.getBinding(threadId));
+      assert.equal(restored?.runtimeSessionId, source.runtimeSessionId);
+      assert.equal(restored?.status, "stopped");
+      assert.deepEqual(restored?.resumeCursor, sourceResumeCursor);
+      assert.equal(Option.isNone(yield* provider.getSession(threadId)), true);
+      assert.deepEqual(Option.getOrUndefined(yield* provider.readResumeTarget!(threadId)), {
+        providerInstanceId: codexInstanceId,
+        cwd: chatFolder,
+        hasResumeCursor: true,
+      });
 
       fanout.codex.startSession.mockClear();
       const restartedSource = yield* provider.startSession(threadId, {
@@ -2351,13 +2391,52 @@ fanout.layer("ProviderServiceLive fanout", (it) => {
         threadId,
         runtimeMode: "full-access",
       });
-      assert.equal(fanout.codex.startSession.mock.calls[0]?.[0].resumeCursor, undefined);
+      // The target's resume state never leaks; the source's resumes.
+      assert.deepEqual(
+        fanout.codex.startSession.mock.calls[0]?.[0].resumeCursor,
+        sourceResumeCursor,
+      );
       assert.notEqual(restartedSource.runtimeSessionId, target.session.runtimeSessionId);
 
       assert.equal(yield* provider.retireSessionBinding(targetBinding), false);
       const current = Option.getOrUndefined(yield* directory.getBinding(threadId));
       assert.equal(current?.runtimeSessionId, restartedSource.runtimeSessionId);
-      assert.notDeepEqual(current?.resumeCursor, sourceResumeCursor);
+    }),
+  );
+
+  it.effect("retires a failed target on another instance without leaking its resume state", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const directory = yield* ProviderSessionDirectory;
+      const threadId = asThreadId("thread-retire-failed-cross-instance-target");
+      yield* provider.startSession(threadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const target = yield* provider.startFreshSession(threadId, {
+        provider: CLAUDE_AGENT_DRIVER,
+        providerInstanceId: claudeAgentInstanceId,
+        threadId,
+        runtimeMode: "full-access",
+        runtimeSessionId: RuntimeSessionId.make("runtime-failed-cross-instance-target"),
+      });
+      const targetBinding = {
+        threadId,
+        provider: CLAUDE_AGENT_DRIVER,
+        providerInstanceId: claudeAgentInstanceId,
+        runtimeSessionId: target.session.runtimeSessionId!,
+        runtimeMode: "full-access" as const,
+      };
+      assert.equal(yield* provider.stopSessionBinding(targetBinding), "stopped");
+      assert.equal(yield* provider.retireSessionBinding(targetBinding), true);
+
+      const retired = Option.getOrUndefined(yield* directory.getBinding(threadId));
+      assert.equal(retired?.runtimeSessionId, target.session.runtimeSessionId);
+      assert.equal(retired?.status, "stopped");
+      assert.equal(retired?.resumeCursor, null);
+      assert.equal(retired?.runtimePayload, null);
     }),
   );
 });
@@ -2398,6 +2477,65 @@ it.live("ProviderServiceLive fails a same-instance fresh replacement when stop t
       if (Option.isSome(current)) {
         assert.equal(current.value.runtimeSessionId, source.runtimeSessionId);
       }
+    }).pipe(Effect.provide(providerLayer));
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.live("ProviderServiceLive puts back what an abandoned same-instance fresh start replaced", () =>
+  Effect.gen(function* () {
+    const gate = yield* Deferred.make<void>();
+    const codex = makeFakeCodexAdapter(CODEX_DRIVER, {
+      startSessionEffect: (input, makeSession) =>
+        input.resumePolicy === "fresh"
+          ? Deferred.await(gate).pipe(Effect.as(makeSession(input)))
+          : Effect.sync(() => makeSession(input)),
+    });
+    const providerLayer = makeStandaloneProviderServiceLayer([codex]);
+
+    yield* Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const directory = yield* ProviderSessionDirectory;
+      const threadId = asThreadId("thread-abandoned-fresh-start");
+      const sourceResumeCursor = { opaque: "source-resume" };
+      const source = yield* provider.startSession(threadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId,
+        cwd: "/tmp/chats/2026-10-08-plan-0a1b2c3d",
+        runtimeMode: "full-access",
+        resumeCursor: sourceResumeCursor,
+      });
+      // The user stops the thread while the fresh session is still starting.
+      const starting = yield* Effect.forkChild(
+        provider.startFreshSession(threadId, {
+          provider: CODEX_DRIVER,
+          providerInstanceId: codexInstanceId,
+          threadId,
+          cwd: "/tmp/code/plan",
+          runtimeMode: "full-access",
+          runtimeSessionId: RuntimeSessionId.make("runtime-abandoned-fresh-target"),
+        }),
+      );
+      yield* sleep(20);
+      yield* Fiber.interrupt(starting);
+      const stopsBefore = codex.stopSession.mock.calls.length;
+      yield* Deferred.succeed(gate, undefined);
+
+      // The start completes after nobody waits for it, and is undone: its runtime is stopped.
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        if (codex.stopSession.mock.calls.length > stopsBefore) break;
+        yield* sleep(10);
+      }
+      assert.isAbove(codex.stopSession.mock.calls.length, stopsBefore);
+      let restored = Option.getOrUndefined(yield* directory.getBinding(threadId));
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        if (restored?.runtimeSessionId === source.runtimeSessionId) break;
+        yield* sleep(10);
+        restored = Option.getOrUndefined(yield* directory.getBinding(threadId));
+      }
+      assert.equal(restored?.runtimeSessionId, source.runtimeSessionId);
+      assert.equal(restored?.status, "stopped");
+      assert.deepEqual(restored?.resumeCursor, sourceResumeCursor);
     }).pipe(Effect.provide(providerLayer));
   }).pipe(Effect.provide(NodeServices.layer)),
 );

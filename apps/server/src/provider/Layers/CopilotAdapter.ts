@@ -490,6 +490,8 @@ export const makeCopilotAdapter = Effect.fn("makeCopilotAdapter")(function* (
     provider: COPILOT_DRIVER_KIND,
     capabilities: {
       sessionModelSwitch: "in-session",
+      // Unverified for a moved working directory; carry context over instead.
+      resumeSurvivesCwdChange: false,
     },
     startSession: makeStartSession(sessionDeps),
     sendTurn: makeSendTurn(sessionDeps),

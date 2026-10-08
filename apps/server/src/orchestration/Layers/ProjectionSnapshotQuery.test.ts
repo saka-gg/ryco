@@ -598,6 +598,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
       assert.deepEqual(snapshot.projects, [
         {
           id: asProjectId("project-1"),
+          kind: "project",
           title: "Project 1",
           workspaceRoot: "/tmp/project-1",
           projectMetadataDir: ".ryco",
@@ -731,6 +732,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
       assert.deepEqual(shellSnapshot.projects, [
         {
           id: asProjectId("project-1"),
+          kind: "project",
           title: "Project 1",
           workspaceRoot: "/tmp/project-1",
           projectMetadataDir: ".ryco",

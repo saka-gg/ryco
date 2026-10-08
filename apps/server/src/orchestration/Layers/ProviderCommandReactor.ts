@@ -47,6 +47,9 @@ import {
   type ChatAttachment,
   type ThreadGoal,
   CommandId,
+  CONTEXT_HANDOFF_ACTIVITY_KIND,
+  ContextHandoffActivityPayload,
+  type ContextHandoffReference,
   DEFAULT_AGENT_TOKEN_MODE,
   EventId,
   MessageId,
@@ -56,6 +59,7 @@ import {
   ProviderDriverKind,
   type OrchestrationThreadShell,
   type ProjectId,
+  type ProviderInstanceId,
   type OrchestrationSession,
   type OrchestrationTurnOutcome,
   ThreadId,
@@ -75,6 +79,7 @@ import {
   Cache,
   Cause,
   Clock,
+  Data,
   Deferred,
   Duration,
   Effect,
@@ -96,6 +101,7 @@ import { increment, orchestrationEventsProcessedTotal } from "../../observabilit
 import { ProviderAdapterRequestError } from "../../provider/Errors.ts";
 import type { ProviderServiceError } from "../../provider/Errors.ts";
 import { resolveProviderOperationTimeouts } from "../../provider/providerOperationPolicy.ts";
+import { isMissingConversationError } from "../../provider/resumeFailure.ts";
 import { TextGeneration } from "../../textGeneration/TextGeneration.ts";
 import {
   ProviderService,
@@ -104,6 +110,10 @@ import {
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import { ContextHandoffCoordinator } from "../Services/ContextHandoffCoordinator.ts";
+import {
+  cwdRelocationHandoffReference,
+  makeCwdRelocationRequestedActivity,
+} from "../contextHandoff/ContextHandoffRelocation.ts";
 import { TURN_FINALIZATION_REASON } from "../turnFinalization.ts";
 import {
   ProviderCommandReactor,
@@ -222,6 +232,52 @@ function worktreeIdentity(path: string): string {
     return nodePath.resolve(path);
   }
 }
+
+/** Whether a native conversation that last ran in `previous` would now run elsewhere. */
+function isMovedWorkingDirectory(previous: string, next: string): boolean {
+  return previous !== next && worktreeIdentity(previous) !== worktreeIdentity(next);
+}
+
+const CWD_RELOCATION_RESTART_DETAIL =
+  "This thread's folder moved. Send a message to continue the conversation in a fresh session there.";
+
+/**
+ * The thread's working directory moved since its native conversation last
+ * ran (a chat turned into a project, a new workspace root, a relocated
+ * worktree), and that conversation cannot continue there: the provider keeps
+ * conversations per directory, or the resume found nothing. A turn start
+ * carries the conversation over with a context handoff into a fresh session
+ * on the same provider instance instead.
+ */
+class CwdRelocationResumeUnavailableError extends Data.TaggedError(
+  "CwdRelocationResumeUnavailableError",
+)<{
+  readonly previousCwd: string;
+  readonly cwd: string;
+  readonly reason: "provider-unsupported" | "resume-failed";
+  /** User-facing; shown only when a restart, which has no message to carry it, meets the move. */
+  readonly detail: string;
+}> {}
+
+/** A moved native conversation; `resumeSurvives` when the provider resumes it in any directory. */
+interface CwdRelocation {
+  readonly previousCwd: string;
+  readonly cwd: string;
+  readonly resumeSurvives: boolean;
+}
+
+const cwdRelocationError = (
+  relocation: CwdRelocation,
+  reason: CwdRelocationResumeUnavailableError["reason"],
+) =>
+  new CwdRelocationResumeUnavailableError({
+    previousCwd: relocation.previousCwd,
+    cwd: relocation.cwd,
+    reason,
+    detail: CWD_RELOCATION_RESTART_DETAIL,
+  });
+
+const decodeContextHandoffActivity = Schema.decodeUnknownOption(ContextHandoffActivityPayload);
 
 function toNonEmptyProviderInput(value: string | undefined): string | undefined {
   const normalized = value?.trim();
@@ -639,6 +695,62 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     yield* vcsStatusBroadcaster.refreshStatus(worktreePath).pipe(Effect.ignoreCause({ log: true }));
   }, Effect.scoped);
 
+  /**
+   * The native conversation a start would resume, when it last ran outside the
+   * thread's effective cwd. A restart resumes the live session's cursor; a
+   * start without one gets the persisted binding's cursor and cwd merged by
+   * ProviderService.startSession, for the same instance only. Undefined when
+   * nothing would be resumed or the directory did not move.
+   */
+  const resolveCwdRelocation = Effect.fnUntraced(function* (input: {
+    readonly threadId: ThreadId;
+    readonly liveSession: ProviderSession | undefined;
+    readonly instanceId: ProviderInstanceId;
+    readonly cwd: string | undefined;
+  }) {
+    if (input.cwd === undefined) return undefined;
+    let previousCwd: string | undefined;
+    if (input.liveSession !== undefined) {
+      previousCwd = input.liveSession.resumeCursor != null ? input.liveSession.cwd : undefined;
+    } else if (providerService.readResumeTarget !== undefined) {
+      const target = Option.getOrUndefined(yield* providerService.readResumeTarget(input.threadId));
+      previousCwd =
+        target?.hasResumeCursor === true && target.providerInstanceId === input.instanceId
+          ? target.cwd
+          : undefined;
+    }
+    if (previousCwd === undefined || !isMovedWorkingDirectory(previousCwd, input.cwd)) {
+      return undefined;
+    }
+    const capabilities = yield* providerService.getCapabilities(input.instanceId);
+    return {
+      previousCwd,
+      cwd: input.cwd,
+      resumeSurvives: capabilities.resumeSurvivesCwdChange === true,
+    } satisfies CwdRelocation;
+  });
+
+  /**
+   * A turn's resume after a cwd move that finds no conversation (Codex lost
+   * its rollout, a provider that resumed anyway) fails as a relocation, so the
+   * turn continues with a context handoff instead of failing. Restarts keep
+   * their own failure: they have no message to carry the conversation.
+   */
+  const failMissingMovedConversation =
+    (relocation: CwdRelocation | undefined, kind: StartKind) =>
+    <A, E, R>(
+      start: Effect.Effect<A, E, R>,
+    ): Effect.Effect<A, E | CwdRelocationResumeUnavailableError, R> =>
+      relocation === undefined || kind !== "turn"
+        ? start
+        : start.pipe(
+            Effect.mapError((error): E | CwdRelocationResumeUnavailableError =>
+              isMissingConversationError(error)
+                ? cwdRelocationError(relocation, "resume-failed")
+                : error,
+            ),
+          );
+
   const ensureSessionForThread = Effect.fn("ensureSessionForThread")(function* (
     threadId: ThreadId,
     createdAt: string,
@@ -816,6 +928,14 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
 
     const existingSessionThreadId =
       thread.session && thread.session.status !== "stopped" && activeSession ? thread.id : null;
+    const relocation = yield* resolveCwdRelocation({
+      threadId,
+      liveSession: existingSessionThreadId ? activeSession : undefined,
+      instanceId: desiredInstanceId,
+      cwd: effectiveCwd,
+    });
+    const unresumableRelocation =
+      relocation !== undefined && !relocation.resumeSurvives ? relocation : undefined;
     if (existingSessionThreadId) {
       const runtimeModeChanged = thread.runtimeMode !== thread.session?.runtimeMode;
       const currentThreadSessionTokenMode = thread.session?.tokenMode ?? DEFAULT_TOKEN_MODE;
@@ -864,6 +984,63 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
         return existingSessionThreadId;
       }
 
+      if (unresumableRelocation !== undefined) {
+        if (options.kind === "turn") {
+          return yield* cwdRelocationError(unresumableRelocation, "provider-unsupported");
+        }
+        const turnRunning =
+          thread.session?.activeTurnId != null ||
+          thread.session?.status === "running" ||
+          activeSession?.status === "running";
+        if (runtimeModeChanged && turnRunning && thread.session !== null) {
+          // The replacement this restart cannot make would have ended the running turn. A turn
+          // never keeps working under a runtime mode the thread no longer has (it may have been
+          // tightened), so the session stops; the next turn moves the conversation with the
+          // new mode.
+          yield* Effect.logInfo(
+            "provider command reactor stopped a running turn whose mode changed after a working-directory move",
+            {
+              threadId,
+              previousCwd: unresumableRelocation.previousCwd,
+              desiredCwd: unresumableRelocation.cwd,
+              previousRuntimeMode: thread.session.runtimeMode,
+              desiredRuntimeMode,
+            },
+          );
+          yield* providerService.stopSession({ threadId });
+          yield* setThreadSession({
+            threadId,
+            session: {
+              ...thread.session,
+              status: "stopped",
+              activeTurnId: null,
+              updatedAt: createdAt,
+            },
+            turnOutcome: {
+              state: "interrupted",
+              reason: TURN_FINALIZATION_REASON.sessionReplaced,
+              completedAt: createdAt,
+            },
+            createdAt,
+          });
+          return existingSessionThreadId;
+        }
+        // Resuming here would continue nothing. The live session keeps running in
+        // its old directory; the next turn moves the conversation and applies
+        // the current runtime and token modes to the fresh session.
+        yield* Effect.logInfo(
+          "provider command reactor deferred a restart to the next turn after a working-directory move",
+          {
+            threadId,
+            previousCwd: unresumableRelocation.previousCwd,
+            desiredCwd: unresumableRelocation.cwd,
+            runtimeModeChanged,
+            tokenModeChanged,
+          },
+        );
+        return existingSessionThreadId;
+      }
+
       // Every restart resumes the active native session explicitly.
       const resumeCursor = activeSession?.resumeCursor ?? undefined;
       yield* Effect.logInfo("provider command reactor restarting provider session", {
@@ -887,10 +1064,11 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
         instanceChanged,
         shouldRestartForModelSelectionChange,
         hasResumeCursor: resumeCursor !== undefined,
+        movedConversation: relocation !== undefined,
       });
       const restartedSession = yield* startProviderSession(
         resumeCursor !== undefined ? { resumeCursor } : undefined,
-      );
+      ).pipe(failMissingMovedConversation(relocation, options.kind));
       yield* Effect.logInfo("provider command reactor restarted provider session", {
         threadId,
         previousSessionId: existingSessionThreadId,
@@ -904,7 +1082,13 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
       return restartedSession.threadId;
     }
 
-    const startedSession = yield* startProviderSession(undefined);
+    if (unresumableRelocation !== undefined) {
+      // ProviderService would merge the persisted cursor with the new cwd.
+      return yield* cwdRelocationError(unresumableRelocation, "provider-unsupported");
+    }
+    const startedSession = yield* startProviderSession(undefined).pipe(
+      failMissingMovedConversation(relocation, options.kind),
+    );
     yield* bindSessionToThread(startedSession);
     return startedSession.threadId;
   }, Effect.scoped);
@@ -1461,6 +1645,127 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     );
   };
 
+  /** Hands a turn start that carries a context-handoff reference to the coordinator. */
+  const runContextHandoffTurnStart = Effect.fnUntraced(function* (input: {
+    readonly event: TurnStartRequestedEvent;
+    readonly fenceSequence: number;
+    readonly thread: OrchestrationThreadShell;
+    readonly messageText: string;
+  }) {
+    const { event, fenceSequence, thread } = input;
+    const threadId = event.payload.threadId;
+    const turnFence = { threadId, fenceSequence, kind: "turn" as const };
+    // Handoff owns a separate session-start path. Its current human request
+    // must replace (or clear) the previous turn's Computer catalog too.
+    stageComputerTurn(threadId, undefined);
+    if (event.payload.computerUse)
+      stageComputerTurn(threadId, {
+        intent: event.payload.computerUse,
+        text: input.messageText,
+        runtimeMode: thread.runtimeMode,
+        label: thread.title,
+        createdAt: event.payload.createdAt,
+      });
+    const project = yield* resolveProject(thread.projectId);
+    yield* ensureRecordedWorktreeAvailable(thread, project);
+    // The lane item stays busy for the whole handoff, which keeps the thread's
+    // later items in order. Stop and interrupt reach the provider out of band
+    // while it owns the running turn, and settle in order afterwards.
+    yield* Effect.scoped(
+      leaseThreadPath(thread, project).pipe(
+        Effect.andThen(
+          contextHandoffCoordinator.processTurnStart(event, {
+            guardStart: (effect) => laneControl.guardStart(turnFence, effect),
+            onDispatchStarted: laneControl.beginTurnOwnership(threadId, fenceSequence),
+            stopRequested: laneControl.stopRequestedSince(threadId, fenceSequence),
+          }),
+        ),
+      ),
+    ).pipe(Effect.ensuring(laneControl.endTurnOwnership(threadId)));
+  });
+
+  /**
+   * A relocation handoff's terminal divider is its turn start's outcome, but
+   * the intent row was recorded before the handoff existed and so carries no
+   * handoff id to settle by. Settles it once that outcome is visible; otherwise
+   * the next boot resolves it through the coordinator.
+   */
+  const settleCwdRelocationTurnStart = Effect.fnUntraced(function* (
+    event: TurnStartRequestedEvent,
+    reference: ContextHandoffReference,
+  ) {
+    const detail = Option.getOrUndefined(
+      yield* projectionSnapshotQuery.getThreadDetailById(event.payload.threadId),
+    );
+    const activity = detail?.activities.find(
+      (entry) => entry.id === reference.activityId && entry.kind === CONTEXT_HANDOFF_ACTIVITY_KIND,
+    );
+    const status = activity
+      ? Option.getOrUndefined(decodeContextHandoffActivity(activity.payload))?.status
+      : undefined;
+    if (status === "consumed" || status === "failed" || status === "delivery-uncertain") {
+      yield* providerEffectIntents.settle({ sequence: event.sequence });
+    }
+  });
+
+  /**
+   * Continues a turn whose native conversation cannot follow the thread's
+   * moved working directory. A server-initiated context handoff on the same
+   * provider instance starts a fresh session in the new directory and sends
+   * the deterministic context document ahead of the exact message, like any
+   * handoff; the visible message is never rewritten.
+   */
+  const continueAfterCwdRelocation = Effect.fn("continueAfterCwdRelocation")(function* (input: {
+    readonly event: TurnStartRequestedEvent;
+    readonly fenceSequence: number;
+    readonly thread: OrchestrationThreadShell;
+    readonly messageText: string;
+    readonly relocation: CwdRelocationResumeUnavailableError;
+  }) {
+    const { event, thread, relocation } = input;
+    const reference = cwdRelocationHandoffReference(event);
+    yield* Effect.logInfo("provider command reactor continues a moved conversation by handoff", {
+      threadId: thread.id,
+      handoffId: reference.handoffId,
+      previousCwd: relocation.previousCwd,
+      cwd: relocation.cwd,
+      reason: relocation.reason,
+    });
+    // Deterministic command id: a replay of this turn start reuses the receipt.
+    yield* orchestrationEngine.dispatch({
+      type: "thread.activity.append",
+      commandId: CommandId.make(`server:cwd-relocation-handoff:${event.eventId}`),
+      threadId: thread.id,
+      activity: makeCwdRelocationRequestedActivity({
+        reference,
+        sourceSelection: thread.modelSelection,
+        targetSelection: event.payload.modelSelection ?? thread.modelSelection,
+        sourceRuntimeSessionId: thread.session?.runtimeSessionId,
+        createdAt: event.payload.createdAt,
+      }),
+      createdAt: new Date().toISOString(),
+    });
+    yield* runContextHandoffTurnStart({
+      event: { ...event, payload: { ...event.payload, contextHandoff: reference } },
+      fenceSequence: input.fenceSequence,
+      thread,
+      messageText: input.messageText,
+    });
+    // Best-effort: the outcome is already visible, and the next boot settles a
+    // row this misses.
+    yield* settleCwdRelocationTurnStart(event, reference).pipe(
+      Effect.catchCause((cause) =>
+        Cause.hasInterruptsOnly(cause)
+          ? Effect.failCause(cause)
+          : Effect.logWarning("provider command reactor could not settle a relocation turn start", {
+              threadId: thread.id,
+              handoffId: reference.handoffId,
+              cause: Cause.pretty(cause),
+            }),
+      ),
+    );
+  });
+
   const prepareAndSubmitTurnStart = Effect.fn("prepareAndSubmitTurnStart")(function* (
     event: TurnStartRequestedEvent,
     fenceSequence: number,
@@ -1536,37 +1841,15 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     }
 
     if (event.payload.contextHandoff !== undefined) {
-      // Handoff owns a separate session-start path. Its current human request
-      // must replace (or clear) the previous turn's Computer catalog too.
-      stageComputerTurn(event.payload.threadId, undefined);
-      if (event.payload.computerUse)
-        stageComputerTurn(event.payload.threadId, {
-          intent: event.payload.computerUse,
-          text: message.text,
-          runtimeMode: thread.runtimeMode,
-          label: thread.title,
-          createdAt: event.payload.createdAt,
-        });
-      const project = yield* resolveProject(thread.projectId);
-      yield* ensureRecordedWorktreeAvailable(thread, project);
-      // The lane item stays busy for the whole handoff, which keeps the thread's
-      // later items in order. Stop and interrupt reach the provider out of band
-      // while it owns the running turn, and settle in order afterwards.
-      yield* Effect.scoped(
-        leaseThreadPath(thread, project).pipe(
-          Effect.andThen(
-            contextHandoffCoordinator.processTurnStart(event, {
-              guardStart: (effect) => laneControl.guardStart(turnFence, effect),
-              onDispatchStarted: laneControl.beginTurnOwnership(threadId, fenceSequence),
-              stopRequested: laneControl.stopRequestedSince(threadId, fenceSequence),
-            }),
-          ),
-        ),
-      ).pipe(Effect.ensuring(laneControl.endTurnOwnership(threadId)));
-      return;
+      return yield* runContextHandoffTurnStart({
+        event,
+        fenceSequence,
+        thread,
+        messageText: message.text,
+      });
     }
 
-    const sendTurnRequest = yield* buildSendTurnRequestForThread({
+    const prepared = yield* buildSendTurnRequestForThread({
       threadId: event.payload.threadId,
       fenceSequence,
       messageText: message.text,
@@ -1578,7 +1861,20 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
       interactionMode: event.payload.interactionMode,
       tokenMode: event.payload.tokenMode,
       createdAt: event.payload.createdAt,
-    });
+    }).pipe(
+      Effect.map(Option.some),
+      Effect.catchTag("CwdRelocationResumeUnavailableError", (relocation) =>
+        continueAfterCwdRelocation({
+          event,
+          fenceSequence,
+          thread,
+          messageText: message.text,
+          relocation,
+        }).pipe(Effect.as(Option.none())),
+      ),
+    );
+    if (Option.isNone(prepared)) return;
+    const sendTurnRequest = prepared.value;
 
     if (isFirstUserMessageTurn) {
       // Title and branch generation are best-effort and must never fail a turn
@@ -3074,15 +3370,37 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
             const turnStart = event?.type === "thread.turn-start-requested" ? event : undefined;
             const messageId = turnStart?.payload.messageId ?? row.messageId;
             if (messageId === null) return yield* settleWithoutOutcome(row, "event-unreadable");
-            if (turnStart?.payload.contextHandoff !== undefined) {
+            // A plain start may have become a working-directory relocation handoff,
+            // whose deterministic reference finds the operation if it exists.
+            const relocated =
+              turnStart !== undefined && turnStart.payload.contextHandoff === undefined;
+            const handoffStart =
+              turnStart === undefined
+                ? undefined
+                : relocated
+                  ? {
+                      ...turnStart,
+                      payload: {
+                        ...turnStart.payload,
+                        contextHandoff: cwdRelocationHandoffReference(turnStart),
+                      },
+                    }
+                  : turnStart;
+            if (handoffStart !== undefined) {
               const result = yield* contextHandoffCoordinator.abandonUnstartedTurnStart(
-                turnStart,
-                recoveryCopy({ kind: "turn-start", deliveryState, delegatedReturn: false }).detail,
+                handoffStart,
+                recoveryCopy({
+                  kind: "turn-start",
+                  deliveryState,
+                  delegatedReturn: handoffStart.payload.delegationReturnGuard !== undefined,
+                }).detail,
               );
               if (result === "owned") return yield* settleWithoutOutcome(row, "handoff-owned");
               if (result === "abandoned") {
                 counts.handoffsAbandoned += 1;
                 cancelledTurnStarts.push({ threadId: row.threadId, messageId, deliveryState });
+                // Its failed divider names a handoff id this row never recorded.
+                if (relocated) yield* providerEffectIntents.settle({ sequence: row.sequence });
                 return;
               }
             }

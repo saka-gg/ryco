@@ -1,8 +1,14 @@
-import type { OrchestrationEvent } from "@ryco/contracts";
+import { CommandId, type OrchestrationEvent } from "@ryco/contracts";
 import { makeDrainableWorker } from "@ryco/shared/DrainableWorker";
+import { isChatProject } from "@ryco/shared/projectKind";
 import { losslessBackpressureQueuePolicy } from "@ryco/shared/QueuePolicy";
-import { Cause, Effect, Layer, Stream, SubscriptionRef } from "effect";
+import { Cause, Effect, Layer, Option, Stream, SubscriptionRef } from "effect";
 
+import { ProjectionProjectRepository } from "../../persistence/Services/ProjectionProjects.ts";
+import {
+  isNeverUsedThread,
+  ProjectionThreadRepository,
+} from "../../persistence/Services/ProjectionThreads.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { TerminalManager } from "../../terminal/Services/Manager.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
@@ -42,6 +48,8 @@ const make = Effect.gen(function* () {
   const orchestrationEngine = yield* OrchestrationEngineService;
   const providerService = yield* ProviderService;
   const terminalManager = yield* TerminalManager;
+  const projectionThreads = yield* ProjectionThreadRepository;
+  const projectionProjects = yield* ProjectionProjectRepository;
 
   const stopProviderSession = (threadId: ThreadDeletedEvent["payload"]["threadId"]) =>
     logCleanupCauseUnlessInterrupted({
@@ -62,12 +70,48 @@ const make = Effect.gen(function* () {
       threadId,
     });
 
+  /**
+   * A chat project exists for its conversation, so it goes once its last thread is deleted
+   * permanently. Trashed threads still count: restoring one needs its project. The folder stays
+   * on disk; removing files is the explicit `projects.deleteChatFolder` step. A never-used thread
+   * is deleted directly only when its creation is rolled back, and that creator owns the cleanup:
+   * a failed first send keeps its chat so the retry reuses the same folder.
+   */
+  const retireEmptyChatProject = Effect.fn("retireEmptyChatProject")(function* (
+    event: ThreadDeletedEvent,
+  ) {
+    const thread = yield* projectionThreads.getById({ threadId: event.payload.threadId });
+    if (Option.isNone(thread) || isNeverUsedThread(thread.value)) return;
+    const project = yield* projectionProjects.getById({ projectId: thread.value.projectId });
+    if (Option.isNone(project) || project.value.deletedAt !== null) return;
+    if (!isChatProject(project.value)) return;
+    const threads = yield* projectionThreads.listByProjectId({
+      projectId: project.value.projectId,
+    });
+    if (threads.some((other) => other.deletedAt === null || other.trashedAt !== null)) return;
+    // Both guards fail closed if a thread arrives or the chat is promoted meanwhile.
+    yield* orchestrationEngine.dispatch({
+      type: "project.delete",
+      commandId: CommandId.make(`server:chat-project-retire:${event.eventId}`),
+      projectId: project.value.projectId,
+      expectedUpdatedAt: project.value.updatedAt,
+      expectedThreadIds: [],
+    });
+  });
+
   const processThreadDeleted = Effect.fn("processThreadDeleted")(function* (
     event: ThreadRemovalEvent,
   ) {
     const { threadId } = event.payload;
     yield* stopProviderSession(threadId);
     yield* closeThreadTerminals(threadId, event.type === "thread.deleted");
+    if (event.type === "thread.deleted") {
+      yield* logCleanupCauseUnlessInterrupted({
+        effect: retireEmptyChatProject(event),
+        message: "thread removal cleanup skipped chat project removal",
+        threadId,
+      });
+    }
   });
 
   const processThreadDeletedSafely = (event: ThreadRemovalEvent) =>

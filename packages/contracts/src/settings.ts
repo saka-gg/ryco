@@ -630,6 +630,8 @@ export const ServerSettings = Schema.Struct({
     Schema.NullOr(LifecycleSuggestionPolicy),
   ).pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   worktreeRoot: WorktreeRoot.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  // Node-only root (no per-project overrides). Empty selects the Ryco-managed chats directory.
+  chatsRoot: WorktreeRoot.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
   worktreeSubmodules: WorktreeSubmodules.pipe(
     Schema.withDecodingDefault(Effect.succeed("recursive" as const)),
   ),
@@ -801,6 +803,7 @@ export const ServerSettingsPatch = Schema.Struct({
     Schema.Record(Schema.String, Schema.NullOr(LifecycleSuggestionPolicy)),
   ),
   worktreeRoot: Schema.optionalKey(WorktreeRoot),
+  chatsRoot: Schema.optionalKey(WorktreeRoot),
   worktreeSubmodules: Schema.optionalKey(WorktreeSubmodules),
   projectWorktreeSubmodules: Schema.optionalKey(
     Schema.Record(Schema.String, Schema.NullOr(WorktreeSubmodules)),

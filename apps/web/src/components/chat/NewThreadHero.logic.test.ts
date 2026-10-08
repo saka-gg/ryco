@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  canStartNewThreadWithoutProject,
   canSwitchNewThreadProject,
   NEW_THREAD_HERO_PROJECT_NAME_LIMIT,
   resolveNewThreadHeadline,
@@ -71,5 +72,44 @@ describe("canSwitchNewThreadProject", () => {
         canSwitchNewThreadProject({ routeKind: "draft", envLocked: false, projectCount }),
       ).toBe(false);
     }
+  });
+
+  it("counts No project as a destination when chats are available", () => {
+    expect(
+      canSwitchNewThreadProject({
+        routeKind: "draft",
+        envLocked: false,
+        projectCount: 1,
+        chatsAvailable: true,
+      }),
+    ).toBe(true);
+    expect(
+      canSwitchNewThreadProject({
+        routeKind: "draft",
+        envLocked: false,
+        projectCount: 0,
+        chatsAvailable: true,
+      }),
+    ).toBe(false);
+  });
+});
+
+describe("canStartNewThreadWithoutProject", () => {
+  const base = {
+    routeKind: "draft",
+    envLocked: false,
+    chatsAvailable: true,
+    pendingChat: false,
+  } as const;
+
+  it("offers a chat on an unsent project draft when the node supports chats", () => {
+    expect(canStartNewThreadWithoutProject(base)).toBe(true);
+  });
+
+  it("hides the offer when chats are unavailable, already chosen, sent, or on a server thread", () => {
+    expect(canStartNewThreadWithoutProject({ ...base, chatsAvailable: false })).toBe(false);
+    expect(canStartNewThreadWithoutProject({ ...base, pendingChat: true })).toBe(false);
+    expect(canStartNewThreadWithoutProject({ ...base, envLocked: true })).toBe(false);
+    expect(canStartNewThreadWithoutProject({ ...base, routeKind: "server" })).toBe(false);
   });
 });

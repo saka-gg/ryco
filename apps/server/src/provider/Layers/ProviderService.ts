@@ -26,10 +26,11 @@ import {
   ProviderSteerTurnInput,
   ProviderStopBackgroundTaskInput,
   ProviderStopSessionInput,
+  RuntimeMode,
   RuntimeSessionId,
   TurnId,
   type ProviderInstanceId,
-  type ProviderDriverKind,
+  ProviderDriverKind,
   type ProviderRuntimeEvent,
   type ProviderSession,
   type ProviderTurnStartResult,
@@ -216,12 +217,60 @@ function toRuntimeStatus(session: ProviderSession): "starting" | "running" | "st
   }
 }
 
+/**
+ * The persisted binding a fresh start on the same instance replaced, kept in the new binding's
+ * runtime payload. Until the new runtime is accepted, the replaced one is its only rollback
+ * target: a same-instance start stops it first, so it cannot be restored as a live runtime, and
+ * without its resume cursor and working directory the conversation (and a moved directory, which
+ * is detected from them) would be lost.
+ */
+const REPLACED_BINDING_KEY = "replacedBinding";
+
+const ReplacedBindingSnapshot = Schema.Struct({
+  provider: ProviderDriverKind,
+  runtimeSessionId: RuntimeSessionId,
+  runtimeMode: Schema.optional(RuntimeMode),
+  resumeCursor: Schema.Unknown,
+  runtimePayload: Schema.Unknown,
+});
+type ReplacedBindingSnapshot = typeof ReplacedBindingSnapshot.Type;
+const decodeReplacedBinding = Schema.decodeUnknownOption(ReplacedBindingSnapshot);
+
+const isPayloadRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+function snapshotReplacedBinding(
+  binding: ProviderRuntimeBinding,
+): ReplacedBindingSnapshot | undefined {
+  if (binding.runtimeSessionId === undefined) return undefined;
+  const payload = binding.runtimePayload;
+  return {
+    provider: binding.provider,
+    runtimeSessionId: binding.runtimeSessionId,
+    ...(binding.runtimeMode !== undefined ? { runtimeMode: binding.runtimeMode } : {}),
+    resumeCursor: binding.resumeCursor ?? null,
+    // One level only: what this binding itself replaced is no longer anyone's rollback target.
+    runtimePayload: isPayloadRecord(payload)
+      ? Object.fromEntries(Object.entries(payload).filter(([key]) => key !== REPLACED_BINDING_KEY))
+      : (payload ?? null),
+  };
+}
+
+function readReplacedBinding(
+  runtimePayload: ProviderRuntimeBinding["runtimePayload"],
+): ReplacedBindingSnapshot | undefined {
+  return isPayloadRecord(runtimePayload)
+    ? Option.getOrUndefined(decodeReplacedBinding(runtimePayload[REPLACED_BINDING_KEY]))
+    : undefined;
+}
+
 function toRuntimePayloadFromSession(
   session: ProviderSession,
   extra?: {
     readonly modelSelection?: unknown;
     readonly lastRuntimeEvent?: string;
     readonly lastRuntimeEventAt?: string;
+    readonly replacedBinding?: ReplacedBindingSnapshot;
   },
 ): Record<string, unknown> {
   return {
@@ -229,6 +278,9 @@ function toRuntimePayloadFromSession(
     model: session.model ?? null,
     activeTurnId: session.activeTurnId ?? null,
     lastError: session.lastError ?? null,
+    ...(extra?.replacedBinding !== undefined
+      ? { [REPLACED_BINDING_KEY]: extra.replacedBinding }
+      : {}),
     ...(extra?.modelSelection !== undefined ? { modelSelection: extra.modelSelection } : {}),
     ...(extra?.lastRuntimeEvent !== undefined ? { lastRuntimeEvent: extra.lastRuntimeEvent } : {}),
     ...(extra?.lastRuntimeEventAt !== undefined
@@ -750,6 +802,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       readonly modelSelection?: unknown;
       readonly lastRuntimeEvent?: string;
       readonly lastRuntimeEventAt?: string;
+      readonly replacedBinding?: ReplacedBindingSnapshot;
     },
   ) =>
     Effect.gen(function* () {
@@ -1162,6 +1215,30 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     ),
   );
 
+  /**
+   * Put back, stopped, the binding a fresh same-instance start replaced (see
+   * {@link REPLACED_BINDING_KEY}), with its resume cursor and working directory. Its runtime is
+   * not revived; the next start resumes from the cursor. False when `current` replaced nothing.
+   */
+  const restoreReplacedBinding = (current: ProviderRuntimeBinding) =>
+    Effect.gen(function* () {
+      const replaced = readReplacedBinding(current.runtimePayload);
+      if (replaced === undefined || current.providerInstanceId === undefined) return false;
+      yield* directory.upsert({
+        threadId: current.threadId,
+        provider: replaced.provider,
+        providerInstanceId: current.providerInstanceId,
+        runtimeSessionId: replaced.runtimeSessionId,
+        ...(replaced.runtimeMode !== undefined ? { runtimeMode: replaced.runtimeMode } : {}),
+        status: "stopped",
+        resumeCursor: replaced.resumeCursor ?? null,
+        runtimePayload: isPayloadRecord(replaced.runtimePayload)
+          ? { ...replaced.runtimePayload, activeTurnId: null }
+          : { activeTurnId: null },
+      });
+      return true;
+    });
+
   const retireSessionBinding: ProviderServiceShape["retireSessionBinding"] = Effect.fn(
     "retireSessionBinding",
   )(function* (binding) {
@@ -1175,12 +1252,14 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         if (!current || !bindingIdentityMatches(current, binding)) {
           return false;
         }
-        yield* directory.upsert({
-          ...current,
-          status: "stopped",
-          resumeCursor: null,
-          runtimePayload: null,
-        });
+        if (!(yield* restoreReplacedBinding(current))) {
+          yield* directory.upsert({
+            ...current,
+            status: "stopped",
+            resumeCursor: null,
+            runtimePayload: null,
+          });
+        }
         return true;
       }),
     );
@@ -1195,7 +1274,12 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     Effect.gen(function* () {
       yield* stopExactBinding(binding, true);
       const current = Option.getOrUndefined(yield* directory.getBinding(binding.threadId));
-      if (current && bindingIdentityMatches(current, binding)) {
+      // An abandoned fresh start puts back what it replaced; any other keeps its own cursor.
+      if (
+        current &&
+        bindingIdentityMatches(current, binding) &&
+        !(yield* restoreReplacedBinding(current))
+      ) {
         yield* directory.upsert({
           threadId: binding.threadId,
           provider: binding.provider,
@@ -1271,11 +1355,11 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           );
         }
         const persistedBinding = Option.getOrUndefined(yield* directory.getBinding(threadId));
-        if (
+        const replacesPersistedRuntime =
           persistedBinding?.providerInstanceId === resolvedInstanceId &&
           persistedBinding.runtimeSessionId !== undefined &&
-          persistedBinding.runtimeSessionId !== input.runtimeSessionId
-        ) {
+          persistedBinding.runtimeSessionId !== input.runtimeSessionId;
+        if (persistedBinding !== undefined && replacesPersistedRuntime) {
           const stopped = yield* stopExactBinding(persistedBinding, false);
           if (stopped === "timed-out") {
             return yield* toValidationError(
@@ -1295,6 +1379,12 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           });
         }
         const freshStart = input.resumePolicy === "fresh";
+        // A fresh start on the same instance gives up the conversation's resume state, so the new
+        // binding keeps it until acceptance: a rollback puts it back (`restoreReplacedBinding`).
+        const replacedBinding =
+          freshStart && replacesPersistedRuntime && persistedBinding !== undefined
+            ? snapshotReplacedBinding(persistedBinding)
+            : undefined;
         const effectiveResumeCursor = freshStart
           ? undefined
           : (input.resumeCursor ??
@@ -1380,6 +1470,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
 
           yield* upsertSessionBinding(started, threadId, {
             modelSelection: input.modelSelection,
+            ...(replacedBinding !== undefined ? { replacedBinding } : {}),
           });
           yield* recordRuntimeActivity(threadId, runtimeSessionId);
           if (
@@ -2304,6 +2395,20 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         });
         return Option.some({ binding: binding.value, history });
       }),
+    readResumeTarget: (threadId) =>
+      directory.getBinding(threadId).pipe(
+        Effect.map(
+          Option.flatMap((binding) => {
+            if (binding.providerInstanceId === undefined) return Option.none();
+            const cwd = readPersistedCwd(binding.runtimePayload);
+            return Option.some({
+              providerInstanceId: binding.providerInstanceId,
+              ...(cwd ? { cwd } : {}),
+              hasResumeCursor: binding.resumeCursor !== null && binding.resumeCursor !== undefined,
+            });
+          }),
+        ),
+      ),
     startSession,
     startFreshSession,
     getSession,

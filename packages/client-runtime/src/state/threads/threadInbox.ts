@@ -1,3 +1,4 @@
+import { isChatProject } from "@ryco/shared/projectKind";
 import { canSnoozeThread, isThreadSnoozed } from "@ryco/shared/threadSnooze";
 import { deriveThreadActivityStatus } from "./threadActivityStatus.ts";
 import type {
@@ -29,6 +30,7 @@ import {
 } from "@ryco/shared/threadPriority";
 
 import { scopeThreadRef, scopedProjectKey, scopedThreadKey } from "../../scoped.ts";
+import { CHAT_PROJECT_LABEL } from "../composer/chatDrafts.ts";
 import type { Project, SidebarThreadSummary, SidebarWorktreeSummary } from "./types.ts";
 
 export interface ThreadInboxEnvironment {
@@ -290,6 +292,8 @@ function filterEntry(entry: ThreadInboxEntry, filters: ThreadInboxFilters | unde
     entry.title,
     entry.environment.label,
     entry.project?.name,
+    // A chat reads "No project" everywhere it is listed, so that is what finds it.
+    isChatProject(entry.project) ? CHAT_PROJECT_LABEL : null,
     entry.project?.cwd,
     entry.worktree?.title,
     entry.worktree?.branch,

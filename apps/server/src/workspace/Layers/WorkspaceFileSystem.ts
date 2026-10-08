@@ -1,7 +1,7 @@
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import {
   storageLifecycleLock,
-  isStoragePathBlocked,
+  storagePathBlocker,
   canonicalStoragePath,
 } from "../../storage/lifecycle.ts";
 import { createHash, randomUUID } from "node:crypto";
@@ -10,7 +10,11 @@ import * as NodeFs from "node:fs/promises";
 import * as NodePath from "node:path";
 
 import { Data, Effect, FileSystem, Layer, Path, Schema, Option } from "effect";
-import { PROJECT_READ_FILE_BINARY_MAX_BYTES, PROJECT_STAGE_FILE_MAX_BYTES } from "@ryco/contracts";
+import {
+  PROJECT_READ_FILE_BINARY_MAX_BYTES,
+  PROJECT_RELOCATION_PENDING_MESSAGE,
+  PROJECT_STAGE_FILE_MAX_BYTES,
+} from "@ryco/contracts";
 
 import {
   WorkspaceFileConflictError,
@@ -377,23 +381,25 @@ export const makeWorkspaceFileSystem = Effect.gen(function* () {
             }),
         ),
       );
-      if (
-        yield* isStoragePathBlocked(storageSql.value, canonical).pipe(
-          Effect.mapError(
-            (cause) =>
-              new WorkspaceFileSystemError({
-                cwd,
-                operation: "write",
-                detail: "Cannot establish checkout readiness.",
-                cause,
-              }),
-          ),
-        )
-      ) {
+      const blocker = yield* storagePathBlocker(storageSql.value, canonical).pipe(
+        Effect.mapError(
+          (cause) =>
+            new WorkspaceFileSystemError({
+              cwd,
+              operation: "write",
+              detail: "Cannot establish checkout readiness.",
+              cause,
+            }),
+        ),
+      );
+      if (blocker !== null) {
         return yield* new WorkspaceFileSystemError({
           cwd,
           operation: "write",
-          detail: "Checkout cleanup is pending or complete. Restore it before editing.",
+          detail:
+            blocker === "project-relocation"
+              ? PROJECT_RELOCATION_PENDING_MESSAGE
+              : "Checkout cleanup is pending or complete. Restore it before editing.",
         });
       }
     });

@@ -160,6 +160,12 @@ import type {
   ProjectSearchEntriesResult,
   ProjectWriteFileInput,
   ProjectWriteFileResult,
+  ProjectsDeleteChatFolderInput,
+  ProjectsDeleteChatFolderResult,
+  ProjectsPromoteChatInput,
+  ProjectsPromoteChatPreviewInput,
+  ProjectsPromoteChatPreviewResult,
+  ProjectsPromoteChatResult,
 } from "./project.ts";
 import type { ProviderInstanceId } from "./providerInstance.ts";
 import type {
@@ -1144,6 +1150,13 @@ export interface EnvironmentApi {
       input: ProjectStageFileReferenceInput,
     ) => Promise<ProjectStageFileReferenceResult>;
     initializeGit?: (input: ProjectsInitializeGitInput) => Promise<EmptyRpcResult>;
+    promoteChatPreview?: (
+      input: ProjectsPromoteChatPreviewInput,
+    ) => Promise<ProjectsPromoteChatPreviewResult>;
+    promoteChat?: (input: ProjectsPromoteChatInput) => Promise<ProjectsPromoteChatResult>;
+    deleteChatFolder?: (
+      input: ProjectsDeleteChatFolderInput,
+    ) => Promise<ProjectsDeleteChatFolderResult>;
   };
   filesystem: {
     browse: (input: FilesystemBrowseInput) => Promise<FilesystemBrowseResult>;

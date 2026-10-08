@@ -53,6 +53,22 @@ describe("shared RPC access policy", () => {
     expect(rpcAccessFor(WS_METHODS.threadPriorityEnsureCurrent)).toBe("operator");
   });
 
+  it("keeps chat-folder methods at the project-mutation tier", () => {
+    for (const method of [
+      WS_METHODS.projectsPromoteChatPreview,
+      WS_METHODS.projectsPromoteChat,
+      WS_METHODS.projectsDeleteChatFolder,
+    ]) {
+      expect(rpcAccessFor(method)).toBe(rpcAccessFor(WS_METHODS.projectsInitializeGit));
+      expect(hostedRoleAllows("viewer", method)).toBe(false);
+      expect(hostedRoleAllows("operator", method, false)).toBe(false);
+      expect(hostedRoleAllows("operator", method)).toBe(true);
+    }
+    expect(rpcDeliveryEffectFor(WS_METHODS.projectsPromoteChatPreview)).toBe("read");
+    expect(rpcDeliveryEffectFor(WS_METHODS.projectsPromoteChat)).toBe("mutation");
+    expect(rpcDeliveryEffectFor(WS_METHODS.projectsDeleteChatFolder)).toBe("mutation");
+  });
+
   it("requires current operator authority for side questions and cancellation", () => {
     for (const method of [
       WS_METHODS.textGenerationAskSideQuestion,

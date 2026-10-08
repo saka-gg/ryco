@@ -10,7 +10,11 @@ import { scopedProjectKey } from "@ryco/client-runtime/scoped";
 import {
   DEFAULT_AGENT_TOKEN_MODE,
   DEFAULT_RUNTIME_MODE,
+  type EffectiveProjectPreferences,
+  type EnvironmentId,
+  type ProjectId,
   type ScopedProjectRef,
+  type ServerConfig,
   type ModelSelection,
   type RuntimeMode,
   type AgentTokenMode,
@@ -19,13 +23,18 @@ import {
 import { useParams, useRouter } from "@tanstack/react-router";
 import { useCallback, useMemo, useRef } from "react";
 import { useShallow } from "zustand/react/shallow";
+import { excludeChatProjects, isChatProject } from "@ryco/shared/projectKind";
 import {
+  buildChatDraftTarget,
+  isPendingChatDraft,
+  resolveChatsAvailability,
   type DraftThreadEnvMode,
   type DraftThreadState,
   type DraftId,
   useComposerDraftStore,
 } from "../composerDraftStore";
-import { newDraftId, newThreadId } from "../lib/utils";
+import { newDraftId, newProjectId, newThreadId } from "../lib/utils";
+import { useChatsAvailability } from "./useChatsAvailability";
 import { orderItemsByPreferredIds } from "../components/Sidebar.logic";
 import { deriveLogicalProjectKeyFromSettings, getProjectOrderKey } from "../logicalProject";
 import { selectProjectsAcrossEnvironments, useStore } from "../store";
@@ -90,6 +99,95 @@ function useNewThreadState() {
     return resolveThreadRouteTarget(currentRouteParams);
   }, [router]);
 
+  /**
+   * Hosted nodes accept drafts only under a current mutation lease. Returns
+   * null when no wait is needed, else whether a lease arrived.
+   */
+  const pendingHostedLease = useCallback(
+    (environmentId: EnvironmentId): Promise<boolean> | null => {
+      if (nodeIdForHostedEnvironment(environmentId) === null) return null;
+      adoptHostedTarget(environmentId);
+      if (readHostedNodeMutationLease(environmentId) !== null) return null;
+      return waitForHostedNodeMutationLease(environmentId).then((lease) => lease !== null);
+    },
+    [adoptHostedTarget],
+  );
+
+  /**
+   * The shared tail of every fresh draft: read the owning node's defaults,
+   * register the draft session, seed sticky and initial model state, and open
+   * it. `register` decides what kind of draft it is (project or chat).
+   */
+  const createAndOpenDraft = useCallback(
+    (input: {
+      readonly environmentId: EnvironmentId;
+      readonly draftId: DraftId;
+      /** Project whose effective preferences apply; undefined reads the node defaults. */
+      readonly preferencesProjectId: ProjectId | undefined;
+      readonly explicitModelSelection: ModelSelection | undefined;
+      /** Another creation won while the defaults RPC was in flight. */
+      readonly superseded: () => boolean;
+      readonly resume: () => Promise<void>;
+      readonly register: (
+        config: ServerConfig,
+        effective: EffectiveProjectPreferences | null,
+      ) => void;
+      readonly failureTitle: string;
+    }): Promise<void> =>
+      (async () => {
+        const hosted = nodeIdForHostedEnvironment(input.environmentId) !== null;
+        const leaseBefore = hosted ? readHostedNodeMutationLease(input.environmentId) : null;
+        const api = ensureEnvironmentApi(input.environmentId);
+        if (!api.server?.getConfig)
+          throw new Error("Node settings are still loading. Try creating the draft again.");
+        // Read from the scoped connection: a hosted node's local descriptor may
+        // differ from its canonical identity, and the primary cache can still
+        // contain the previous node's settings while switching targets.
+        const config = await api.server.getConfig();
+        const effective = await readEffectiveProjectPreferences({
+          api,
+          config,
+          ...(input.preferencesProjectId ? { projectId: input.preferencesProjectId } : {}),
+        });
+        const leaseAfter = hosted ? readHostedNodeMutationLease(input.environmentId) : null;
+        if (
+          hosted &&
+          (!leaseBefore ||
+            !leaseAfter ||
+            !nodeMutationLeaseIsCurrent(leaseBefore, input.environmentId, leaseAfter))
+        )
+          throw new Error("The workspace connection changed. Try creating the draft again.");
+        if (input.superseded()) return input.resume();
+        input.register(config, effective);
+        const store = useComposerDraftStore.getState();
+        store.applyStickyState(input.draftId);
+        const initialModel = input.explicitModelSelection ?? effective?.initialModelSelection.value;
+        if (initialModel)
+          store.setModelSelection(
+            input.draftId,
+            initialDraftModelSelection({
+              effective,
+              fallback: initialModel,
+              explicit: input.explicitModelSelection,
+            }),
+          );
+
+        adoptHostedTarget(input.environmentId);
+        await router.navigate({
+          to: "/draft/$draftId",
+          params: { draftId: input.draftId },
+        });
+      })().catch((cause) => {
+        toastManager.add({
+          type: "error",
+          title: input.failureTitle,
+          description:
+            cause instanceof Error ? cause.message : "Reconnect to this node and try again.",
+        });
+      }),
+    [adoptHostedTarget, router],
+  );
+
   const handleNewThread: (
     projectRef: ScopedProjectRef,
     options?: NewThreadOptions,
@@ -98,25 +196,21 @@ function useNewThreadState() {
       projectRef: ScopedProjectRef,
       options?: NewThreadOptions,
     ): Promise<void> {
-      const hostedNodeId = nodeIdForHostedEnvironment(projectRef.environmentId);
-      if (hostedNodeId !== null) {
-        adoptHostedTarget(projectRef.environmentId);
-        if (readHostedNodeMutationLease(projectRef.environmentId) === null) {
-          return waitForHostedNodeMutationLease(projectRef.environmentId).then((lease) => {
-            if (lease === null) {
-              if (options?.freshDraft)
-                throw new Error("The workspace is unavailable. Your selection draft is preserved.");
-              return;
-            }
-            return handleNewThread(projectRef, options);
-          });
-        }
+      const leaseWait = pendingHostedLease(projectRef.environmentId);
+      if (leaseWait) {
+        return leaseWait.then((ready) => {
+          if (!ready) {
+            if (options?.freshDraft)
+              throw new Error("The workspace is unavailable. Your selection draft is preserved.");
+            return;
+          }
+          return handleNewThread(projectRef, options);
+        });
       }
       const {
         getDraftSessionByLogicalProjectKey,
         getDraftSession,
         getDraftThread,
-        applyStickyState,
         setDraftThreadContext,
         setLogicalProjectDraftThreadId,
       } = useComposerDraftStore.getState();
@@ -257,81 +351,102 @@ function useNewThreadState() {
       const draftId = newDraftId();
       const threadId = newThreadId();
       const createdAt = new Date().toISOString();
-      return (async () => {
-        const leaseBefore =
-          hostedNodeId !== null ? readHostedNodeMutationLease(projectRef.environmentId) : null;
-        const api = ensureEnvironmentApi(projectRef.environmentId);
-        if (!api.server?.getConfig)
-          throw new Error("Node settings are still loading. Try creating the draft again.");
-        // Read from the scoped connection: a hosted node's local descriptor may
-        // differ from its canonical identity, and the primary cache can still
-        // contain the previous node's settings while switching targets.
-        const config = await api.server.getConfig();
-        const effective = await readEffectiveProjectPreferences({
-          api,
-          config,
-          projectId: projectRef.projectId,
-        });
-        const leaseAfter =
-          hostedNodeId !== null ? readHostedNodeMutationLease(projectRef.environmentId) : null;
-        if (
-          hostedNodeId !== null &&
-          (!leaseBefore ||
-            !leaseAfter ||
-            !nodeMutationLeaseIsCurrent(leaseBefore, projectRef.environmentId, leaseAfter))
-        )
-          throw new Error("The workspace connection changed. Try creating the draft again.");
-        // Another creation may have won while the defaults RPC was in flight.
-        if (getDraftSessionByLogicalProjectKey(logicalProjectKey))
-          return handleNewThread(projectRef, options);
-        setLogicalProjectDraftThreadId(logicalProjectKey, projectRef, draftId, {
-          threadId,
-          createdAt,
-          branch: options?.branch ?? null,
-          worktreePath: options?.worktreePath ?? null,
-          envMode:
-            options?.envMode ??
-            effective?.defaultThreadEnvMode.value ??
-            config.settings.defaultThreadEnvMode,
-          runtimeMode: DEFAULT_RUNTIME_MODE,
-          tokenMode: config.settings.defaultAgentTokenMode,
-        });
-        applyStickyState(draftId);
-        const initialModel = options?.modelSelection ?? effective?.initialModelSelection.value;
-        if (initialModel)
-          useComposerDraftStore.getState().setModelSelection(
-            draftId,
-            initialDraftModelSelection({
-              effective,
-              fallback: initialModel,
-              explicit: options?.modelSelection,
-            }),
-          );
-
-        adoptHostedTarget(projectRef.environmentId);
-        await router.navigate({
-          to: "/draft/$draftId",
-          params: { draftId },
-        });
-      })().catch((cause) => {
-        toastManager.add({
-          type: "error",
-          title: "Could not create a draft",
-          description:
-            cause instanceof Error ? cause.message : "Reconnect to this node and try again.",
-        });
+      return createAndOpenDraft({
+        environmentId: projectRef.environmentId,
+        draftId,
+        preferencesProjectId: projectRef.projectId,
+        explicitModelSelection: options?.modelSelection,
+        superseded: () => getDraftSessionByLogicalProjectKey(logicalProjectKey) !== null,
+        resume: () => handleNewThread(projectRef, options),
+        register: (config, effective) =>
+          setLogicalProjectDraftThreadId(logicalProjectKey, projectRef, draftId, {
+            threadId,
+            createdAt,
+            branch: options?.branch ?? null,
+            worktreePath: options?.worktreePath ?? null,
+            envMode:
+              options?.envMode ??
+              effective?.defaultThreadEnvMode.value ??
+              config.settings.defaultThreadEnvMode,
+            runtimeMode: DEFAULT_RUNTIME_MODE,
+            tokenMode: config.settings.defaultAgentTokenMode,
+          }),
+        failureTitle: "Could not create a draft",
       });
     },
-    [adoptHostedTarget, getCurrentRouteTarget, projectGroupingSettings, router, projects],
+    [
+      adoptHostedTarget,
+      createAndOpenDraft,
+      getCurrentRouteTarget,
+      pendingHostedLease,
+      projectGroupingSettings,
+      router,
+      projects,
+    ],
   );
-  return handleNewThread;
+
+  /**
+   * Opens a "No project" chat draft on an environment: the environment's
+   * unsent chat draft when there is one, else a fresh one with a
+   * client-generated project id that the first send asks the server to create.
+   */
+  const handleNewChat = useCallback(
+    function handleNewChat(environmentId: EnvironmentId): Promise<void> {
+      const leaseWait = pendingHostedLease(environmentId);
+      if (leaseWait) {
+        return leaseWait.then((ready) => (ready ? handleNewChat(environmentId) : undefined));
+      }
+      const existing = useComposerDraftStore.getState().getPendingChatDraftSession(environmentId);
+      if (existing) {
+        const currentRouteTarget = getCurrentRouteTarget();
+        if (currentRouteTarget?.kind === "draft" && currentRouteTarget.draftId === existing.draftId)
+          return Promise.resolve();
+        adoptHostedTarget(environmentId);
+        return router
+          .navigate({ to: "/draft/$draftId", params: { draftId: existing.draftId } })
+          .then(() => undefined);
+      }
+      const draftId = newDraftId();
+      const threadId = newThreadId();
+      const target = buildChatDraftTarget(environmentId, newProjectId());
+      const createdAt = new Date().toISOString();
+      return createAndOpenDraft({
+        environmentId,
+        draftId,
+        // The chat project does not exist yet; the node's defaults apply.
+        preferencesProjectId: undefined,
+        explicitModelSelection: undefined,
+        superseded: () =>
+          useComposerDraftStore.getState().getPendingChatDraftSession(environmentId) !== null,
+        resume: () => handleNewChat(environmentId),
+        register: (config) => {
+          const availability = resolveChatsAvailability(config);
+          if (!availability.available) throw new Error(availability.message);
+          useComposerDraftStore
+            .getState()
+            .setLogicalProjectDraftThreadId(target.logicalProjectKey, target.projectRef, draftId, {
+              threadId,
+              createdAt,
+              envMode: "local",
+              runtimeMode: DEFAULT_RUNTIME_MODE,
+              tokenMode: config.settings.defaultAgentTokenMode,
+              pendingChat: true,
+            });
+        },
+        failureTitle: "Could not start a chat",
+      });
+    },
+    [adoptHostedTarget, createAndOpenDraft, getCurrentRouteTarget, pendingHostedLease, router],
+  );
+  return { handleNewThread, handleNewChat };
 }
 
 export function useNewThreadHandler() {
-  const handleNewThread = useNewThreadState();
+  const { handleNewThread, handleNewChat } = useNewThreadState();
 
   return {
     handleNewThread,
+    handleNewChat,
   };
 }
 
@@ -360,12 +475,13 @@ export function useHandleNewThread() {
   const projects = useStore(useShallow((store) => selectProjectsAcrossEnvironments(store)));
   const orderedProjects = useMemo(() => {
     return orderItemsByPreferredIds({
-      items: projects,
+      // A chat is never the default target of "new thread".
+      items: excludeChatProjects(projects),
       preferredIds: projectOrder,
       getId: getProjectOrderKey,
     });
   }, [projectOrder, projects]);
-  const handleNewThread = useNewThreadState();
+  const { handleNewThread, handleNewChat } = useNewThreadState();
   const primaryDeviceName = useDeviceName();
   const desktopWorkspace = useDesktopWorkspaceState();
   const hostedWorkspace = useHostedWorkspaceState();
@@ -427,12 +543,43 @@ export function useHandleNewThread() {
     activeDraftThread?.environmentId !== selectedHostedEnvironmentId
       ? null
       : activeDraftThread;
+  // "No project" context: an unsent chat draft or a thread inside a chat project.
+  const activeContextProjectRef = actionActiveThread ?? actionActiveDraftThread ?? null;
+  const activeContextIsChat =
+    isPendingChatDraft(actionActiveDraftThread) ||
+    (activeContextProjectRef !== null &&
+      isChatProject(
+        projects.find(
+          (project) =>
+            project.id === activeContextProjectRef.projectId &&
+            project.environmentId === activeContextProjectRef.environmentId,
+        ),
+      ));
+  // Chats start where the user already is, else on the default project's node.
+  const chatEnvironmentId =
+    activeContextProjectRef?.environmentId ??
+    defaultProjectRef?.environmentId ??
+    selectedHostedEnvironmentId ??
+    primaryEnvironmentId;
+  const chatsAvailability = useChatsAvailability(chatEnvironmentId);
+  const chatTarget = useMemo(
+    () =>
+      chatEnvironmentId && chatsAvailability.available
+        ? { environmentId: chatEnvironmentId }
+        : null,
+    [chatEnvironmentId, chatsAvailability.available],
+  );
 
   return {
     activeDraftThread: actionActiveDraftThread,
     activeThread: actionActiveThread,
+    activeContextIsChat,
     defaultProjectRef,
     handleNewThread,
+    handleNewChat,
+    /** Where "No project" chats start right now; null hides every chat entry point. */
+    chatTarget,
+    chatsAvailability,
     routeThreadRef,
   };
 }

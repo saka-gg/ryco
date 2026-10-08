@@ -22,7 +22,11 @@ import {
 import type { GitVcsDriverShape } from "../vcs/GitVcsDriver.ts";
 import { makeWorkspaceAccessPolicy } from "./Layers/WorkspaceAccessPolicy.ts";
 import type { CheckoutFence, CheckoutFenceClaim } from "./checkoutFence.ts";
-import { makeWorkspaceLifecycle, type WorkspaceLifecycleDeps } from "./WorkspaceLifecycle.ts";
+import {
+  makeWorkspaceLifecycle,
+  toTrashedThreadSummary,
+  type WorkspaceLifecycleDeps,
+} from "./WorkspaceLifecycle.ts";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -251,6 +255,7 @@ function fixture() {
             ...row,
             projectId,
             projectTitle: "Project",
+            projectKind: "project" as const,
             projectDeletedAt: null,
             title: "Trashed",
             branch: "topic",
@@ -790,5 +795,40 @@ describe("workspace lifecycle service", () => {
     // Suggestions never act on their own.
     expect(f.state.commands).toEqual([]);
     expect(existsSync(f.checkout)).toBe(true);
+  });
+});
+
+describe("toTrashedThreadSummary", () => {
+  const row = {
+    threadId: ThreadId.make("trashed-chat"),
+    projectId: ProjectId.make("chat-project"),
+    projectTitle: "Plan the offsite",
+    projectKind: "chat" as const,
+    projectDeletedAt: null,
+    title: "Plan the offsite",
+    branch: null,
+    worktreePath: null,
+    worktreeId: null,
+    archivedAt: null,
+    trashedAt: iso(1),
+    createdAt: iso(3),
+    updatedAt: iso(1),
+  };
+
+  it("carries the project's kind, also for a deleted project record", () => {
+    expect(toTrashedThreadSummary(row)).toMatchObject({
+      projectKind: "chat",
+      projectAvailable: true,
+    });
+    expect(toTrashedThreadSummary({ ...row, projectDeletedAt: iso(0) })).toMatchObject({
+      projectKind: "chat",
+      projectAvailable: false,
+    });
+  });
+
+  it("omits the kind when the project record is gone", () => {
+    const summary = toTrashedThreadSummary({ ...row, projectTitle: null, projectKind: null });
+    expect(summary).not.toHaveProperty("projectKind");
+    expect(summary.projectAvailable).toBe(false);
   });
 });

@@ -107,6 +107,11 @@ export const RPC_ACCESS_POLICY = {
   [CONTEXT_HANDOFF_WS_METHODS.readExportChunk]: "viewer",
   [WS_METHODS.projectsAdd]: "operator",
   [WS_METHODS.projectsInitializeGit]: "operator",
+  // Chat folders: the same project-mutation tier as initializeGit. The preview reports node
+  // paths and folder contents, so it is not viewer-readable either.
+  [WS_METHODS.projectsPromoteChatPreview]: "operator",
+  [WS_METHODS.projectsPromoteChat]: "operator",
+  [WS_METHODS.projectsDeleteChatFolder]: "operator",
   [WS_METHODS.projectsList]: "viewer",
   [WS_METHODS.projectsListEntries]: "operator",
   [WS_METHODS.projectsReadFile]: "operator",
@@ -337,6 +342,9 @@ export const RPC_DELIVERY_EFFECT_POLICY = {
   [CONTEXT_HANDOFF_WS_METHODS.readExportChunk]: "read",
   [WS_METHODS.projectsAdd]: "mutation",
   [WS_METHODS.projectsInitializeGit]: "mutation",
+  [WS_METHODS.projectsPromoteChatPreview]: "read",
+  [WS_METHODS.projectsPromoteChat]: "mutation",
+  [WS_METHODS.projectsDeleteChatFolder]: "mutation",
   [WS_METHODS.projectsList]: "read",
   [WS_METHODS.projectsListEntries]: "read",
   [WS_METHODS.projectsReadFile]: "read",

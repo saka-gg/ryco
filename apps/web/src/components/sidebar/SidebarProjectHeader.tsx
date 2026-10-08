@@ -5,6 +5,7 @@ import {
   PlusIcon,
   SquarePenIcon,
 } from "lucide-react";
+import { scopedProjectKey } from "@ryco/client-runtime/scoped";
 import React from "react";
 import { ProjectFavicon } from "../ProjectFavicon";
 import { Menu, MenuPopup, MenuTrigger } from "../ui/menu";
@@ -21,6 +22,7 @@ import type {
 } from "../../sidebarProjectGrouping";
 import { type SortableProjectHandleProps } from "./SidebarProjectList";
 import { ProjectSettingsMenu } from "./ProjectSettingsMenu";
+import { SIDEBAR_PROJECT_MEMBERS_ATTRIBUTE } from "../chat/promoteChatDialogStore";
 
 export function SidebarProjectHeader(props: {
   project: SidebarProjectSnapshot;
@@ -64,6 +66,11 @@ export function SidebarProjectHeader(props: {
     onOpenNewThreadClick,
   } = props;
 
+  const memberProjectKeys = React.useMemo(
+    () => project.memberProjectRefs.map(scopedProjectKey).join(" "),
+    [project.memberProjectRefs],
+  );
+
   return (
     <div ref={setProjectHeaderVisibilityNode} className="group/project-header relative">
       <SidebarMenuButton
@@ -78,6 +85,7 @@ export function SidebarProjectHeader(props: {
         onClick={onClick}
         onKeyDown={onKeyDown}
         onContextMenu={onContextMenu}
+        {...{ [SIDEBAR_PROJECT_MEMBERS_ATTRIBUTE]: memberProjectKeys }}
       >
         {!projectExpanded && projectStatus ? (
           <span

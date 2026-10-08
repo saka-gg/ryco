@@ -124,6 +124,7 @@ const makeDiagnosticsConfig = (tempDir: string): ServerConfigShape => {
     settingsPath: path.join(tempDir, "settings.json"),
     providerStatusCacheDir: path.join(tempDir, "caches"),
     worktreesDir: path.join(tempDir, "worktrees"),
+    chatsDir: path.join(tempDir, "chats"),
     attachmentsDir: path.join(tempDir, "attachments"),
     logsDir,
     serverLogPath: path.join(logsDir, "server.log"),

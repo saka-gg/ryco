@@ -32,19 +32,31 @@ export interface ChatThreadActionContext {
   readonly defaultProjectRef: ScopedProjectRef | null;
   readonly defaultThreadEnvMode: DraftThreadEnvMode;
   readonly handleNewThread: NewThreadHandler;
+  /**
+   * The active thread or draft is a "No project" chat. A chat holds one thread,
+   * so "new thread" from it starts another chat rather than a second thread in
+   * the same chat folder.
+   */
+  readonly activeContextIsChat?: boolean;
+  /** Where a new "No project" chat starts; null/absent when chats are unavailable. */
+  readonly chatTarget?: { readonly environmentId: EnvironmentId } | null;
+  readonly handleNewChat?: (environmentId: EnvironmentId) => Promise<void>;
 }
 
 export function resolveThreadActionProjectRef(
   context: ChatThreadActionContext,
 ): ScopedProjectRef | null {
-  if (context.activeThread) {
-    return scopeProjectRef(context.activeThread.environmentId, context.activeThread.projectId);
-  }
-  if (context.activeDraftThread) {
-    return scopeProjectRef(
-      context.activeDraftThread.environmentId,
-      context.activeDraftThread.projectId,
-    );
+  // A chat's project is never a "new thread" target; fall back to the default.
+  if (!context.activeContextIsChat) {
+    if (context.activeThread) {
+      return scopeProjectRef(context.activeThread.environmentId, context.activeThread.projectId);
+    }
+    if (context.activeDraftThread) {
+      return scopeProjectRef(
+        context.activeDraftThread.environmentId,
+        context.activeDraftThread.projectId,
+      );
+    }
   }
   return context.defaultProjectRef;
 }
@@ -71,18 +83,31 @@ export async function startNewThreadInProjectFromContext(
 ): Promise<void> {
   await context.handleNewThread(
     projectRef,
-    context.activeThread || context.activeDraftThread
+    !context.activeContextIsChat && (context.activeThread || context.activeDraftThread)
       ? buildContextualThreadOptions(context)
       : buildDefaultThreadOptions(),
   );
 }
 
+/** Opens a "No project" chat draft; false when chats are unavailable. */
+export async function startNewChatFromContext(context: ChatThreadActionContext): Promise<boolean> {
+  if (!context.chatTarget || !context.handleNewChat) {
+    return false;
+  }
+  await context.handleNewChat(context.chatTarget.environmentId);
+  return true;
+}
+
 export async function startNewThreadFromContext(
   context: ChatThreadActionContext,
 ): Promise<boolean> {
+  if (context.activeContextIsChat && (await startNewChatFromContext(context))) {
+    return true;
+  }
   const projectRef = resolveThreadActionProjectRef(context);
   if (!projectRef) {
-    return false;
+    // Without any project the only place to start is a chat.
+    return startNewChatFromContext(context);
   }
 
   await startNewThreadInProjectFromContext(context, projectRef);
@@ -92,9 +117,12 @@ export async function startNewThreadFromContext(
 export async function startNewLocalThreadFromContext(
   context: ChatThreadActionContext,
 ): Promise<boolean> {
+  if (context.activeContextIsChat && (await startNewChatFromContext(context))) {
+    return true;
+  }
   const projectRef = resolveThreadActionProjectRef(context);
   if (!projectRef) {
-    return false;
+    return startNewChatFromContext(context);
   }
 
   await context.handleNewThread(projectRef, buildDefaultThreadOptions());

@@ -43,6 +43,7 @@ import {
   CircleAlertIcon,
   Columns2Icon,
   CornerLeftUpIcon,
+  FolderGit2Icon,
   FolderIcon,
   FolderTreeIcon,
   FoldersIcon,
@@ -50,6 +51,7 @@ import {
   FolderSymlinkIcon,
   LinkIcon,
   InboxIcon,
+  MessageCircleDashedIcon,
   MessageSquareIcon,
   PinIcon,
   PinOffIcon,
@@ -87,9 +89,12 @@ import {
   refreshSourceControlDiscovery,
 } from "../lib/sourceControlDiscoveryState";
 import {
+  startNewChatFromContext,
   startNewThreadInProjectFromContext,
   startNewThreadFromContext,
 } from "../lib/chatThreadActions";
+import { CHAT_PROJECT_LABEL, projectPlaceLabel } from "../composerDraftStore";
+import { excludeChatProjects, isChatProject } from "@ryco/shared/projectKind";
 import {
   appendBrowsePathSegment,
   canNavigateUp,
@@ -160,6 +165,7 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 import { useComposerHandleContext } from "../composerHandleContext";
 import { useHostedRpcCapability } from "../hostedHub/capabilities";
 import { openAutomationsDialog } from "./automations/automationsDialogStore";
+import { openPromoteChatDialog, useCanPromoteChat } from "./chat/promoteChatDialogStore";
 import { getPresentationTier } from "../lib/presentationTier";
 import { buildProjectsPageLocation } from "../projectsRoute";
 import { buildPullRequestsPageLocation } from "../pullRequestsRoute";
@@ -461,9 +467,18 @@ function OpenCommandPaletteDialog() {
   const settings = useSettings();
   const pinnedThreadKeys = useUiStateStore((state) => state.pinnedThreadKeys);
   const primaryServerConfig = useServerConfig();
-  const { activeDraftThread, activeThread, defaultProjectRef, handleNewThread } =
-    useHandleNewThread();
+  const {
+    activeContextIsChat,
+    activeDraftThread,
+    activeThread,
+    chatTarget,
+    defaultProjectRef,
+    handleNewChat,
+    handleNewThread,
+  } = useHandleNewThread();
   const projects = useStore(useShallow(selectProjectsAcrossEnvironments));
+  // Project lists never offer chats; "No project" entries stand in for them.
+  const pickerProjects = useMemo(() => excludeChatProjects(projects), [projects]);
   const threads = useStore(useShallow(selectSidebarThreadsAcrossEnvironments));
   const keybindings = useAppKeybindings();
   const [viewStack, setViewStack] = useState<CommandPaletteView[]>([]);
@@ -676,7 +691,10 @@ function OpenCommandPaletteDialog() {
     [projects],
   );
   const projectTitleById = useMemo(
-    () => new Map<ProjectId, string>(projects.map((project) => [project.id, project.name])),
+    () =>
+      new Map<ProjectId, string>(
+        projects.map((project) => [project.id, projectPlaceLabel(project, project.name)]),
+      ),
     [projects],
   );
   const threadTitleById = useMemo(
@@ -820,7 +838,7 @@ function OpenCommandPaletteDialog() {
   const projectSearchItems = useMemo(
     () =>
       buildProjectActionItems({
-        projects,
+        projects: pickerProjects,
         valuePrefix: "project",
         icon: (project) => (
           <ProjectFavicon
@@ -833,7 +851,7 @@ function OpenCommandPaletteDialog() {
         ),
         runProject: openProjectFromSearch,
       }),
-    [openProjectFromSearch, projects],
+    [openProjectFromSearch, pickerProjects],
   );
 
   // One entry per checkout (a project on one environment), labelled like the
@@ -923,10 +941,69 @@ function OpenCommandPaletteDialog() {
     [buildCheckoutItems, startCreatePullRequest],
   );
 
-  const projectThreadItems = useMemo(
+  const threadActionContext = useMemo(
+    () => ({
+      activeContextIsChat,
+      activeDraftThread,
+      activeThread,
+      chatTarget,
+      defaultProjectRef,
+      defaultThreadEnvMode: settings.defaultThreadEnvMode,
+      handleNewChat,
+      handleNewThread,
+    }),
+    [
+      activeContextIsChat,
+      activeDraftThread,
+      activeThread,
+      chatTarget,
+      defaultProjectRef,
+      handleNewChat,
+      handleNewThread,
+      settings.defaultThreadEnvMode,
+    ],
+  );
+  // The active thread's chat, when it is one: "Turn chat into project…" acts on it.
+  const activeChatPromotion = useMemo(() => {
+    if (!activeThread) return null;
+    const project = projects.find(
+      (candidate) =>
+        candidate.environmentId === activeThread.environmentId &&
+        candidate.id === activeThread.projectId,
+    );
+    return project && isChatProject(project)
+      ? {
+          projectRef: scopeProjectRef(project.environmentId, project.id),
+          threadRef: scopeThreadRef(activeThread.environmentId, activeThread.id),
+          title: activeThread.title,
+        }
+      : null;
+  }, [activeThread, projects]);
+  const canPromoteActiveChat = useCanPromoteChat(
+    activeChatPromotion?.projectRef.environmentId ?? null,
+  );
+  const newChatItem = useMemo<CommandPaletteActionItem | null>(
     () =>
-      buildProjectActionItems({
-        projects,
+      chatTarget
+        ? {
+            kind: "action",
+            value: "new-thread-in:no-project",
+            searchTerms: [CHAT_PROJECT_LABEL, "chat", "without project", "no project", "scratch"],
+            title: CHAT_PROJECT_LABEL,
+            description: "A chat in its own folder · turn it into a project later",
+            icon: <MessageCircleDashedIcon className={ITEM_ICON_CLASS} />,
+            run: async () => {
+              await startNewChatFromContext(threadActionContext);
+            },
+          }
+        : null,
+    [chatTarget, threadActionContext],
+  );
+  const projectThreadItems = useMemo(
+    () => [
+      ...(newChatItem ? [newChatItem] : []),
+      ...buildProjectActionItems({
+        projects: pickerProjects,
         valuePrefix: "new-thread-in",
         icon: (project) => (
           <ProjectFavicon
@@ -939,25 +1016,13 @@ function OpenCommandPaletteDialog() {
         ),
         runProject: async (project) => {
           await startNewThreadInProjectFromContext(
-            {
-              activeDraftThread,
-              activeThread,
-              defaultProjectRef,
-              defaultThreadEnvMode: settings.defaultThreadEnvMode,
-              handleNewThread,
-            },
+            threadActionContext,
             scopeProjectRef(project.environmentId, project.id),
           );
         },
       }),
-    [
-      activeDraftThread,
-      activeThread,
-      defaultProjectRef,
-      handleNewThread,
-      projects,
-      settings.defaultThreadEnvMode,
     ],
+    [newChatItem, pickerProjects, threadActionContext],
   );
 
   const allThreadItems = useMemo(
@@ -1389,10 +1454,51 @@ function OpenCommandPaletteDialog() {
     },
   });
 
-  if (projects.length > 0) {
-    const activeProjectTitle = currentProjectId
-      ? (projectTitleById.get(currentProjectId) ?? null)
-      : null;
+  if (chatTarget) {
+    actionItems.push({
+      kind: "action",
+      value: "action:new-chat-without-project",
+      searchTerms: ["new chat", "no project", "without project", "chat", "scratch", "folder"],
+      title: "New chat without a project",
+      icon: <MessageCircleDashedIcon className={ITEM_ICON_CLASS} />,
+      shortcutCommand: "chat.newWithoutProject",
+      ...(dispatchCapability.reason ? { description: dispatchCapability.reason } : {}),
+      disabled: !dispatchCapability.allowed,
+      run: async () => {
+        await startNewChatFromContext(threadActionContext);
+      },
+    });
+  }
+
+  if (activeChatPromotion && canPromoteActiveChat) {
+    actionItems.push({
+      kind: "action",
+      value: "action:turn-chat-into-project",
+      searchTerms: [
+        "turn into project",
+        "promote",
+        "convert",
+        "project",
+        "git",
+        "move chat",
+        "chat folder",
+      ],
+      title: "Turn chat into project…",
+      description: "Move its folder somewhere permanent and add Git",
+      icon: <FolderGit2Icon className={ITEM_ICON_CLASS} />,
+      run: async () => {
+        setOpen(false);
+        openPromoteChatDialog(activeChatPromotion);
+      },
+    });
+  }
+
+  if (pickerProjects.length > 0 || chatTarget) {
+    // A chat holds one thread, so "New thread in <chat>" is never offered.
+    const activeProjectTitle =
+      currentProjectId && !activeContextIsChat
+        ? (projectTitleById.get(currentProjectId) ?? null)
+        : null;
 
     if (activeProjectTitle) {
       actionItems.push({
@@ -1409,13 +1515,7 @@ function OpenCommandPaletteDialog() {
         ...(dispatchCapability.reason ? { description: dispatchCapability.reason } : {}),
         disabled: !dispatchCapability.allowed,
         run: async () => {
-          await startNewThreadFromContext({
-            activeDraftThread,
-            activeThread,
-            defaultProjectRef,
-            defaultThreadEnvMode: settings.defaultThreadEnvMode,
-            handleNewThread,
-          });
+          await startNewThreadFromContext(threadActionContext);
         },
       });
     }
@@ -1575,9 +1675,11 @@ function OpenCommandPaletteDialog() {
         await navigate(buildProjectsPageLocation());
       },
     });
-    const currentProjectTitle = currentProjectId
-      ? (projectTitleById.get(currentProjectId) ?? null)
-      : null;
+    // A chat has no project page or schedules of its own until it becomes a project.
+    const currentProjectTitle =
+      currentProjectId && !activeContextIsChat
+        ? (projectTitleById.get(currentProjectId) ?? null)
+        : null;
     if (currentProjectEnvironmentId && currentProjectId && currentProjectTitle) {
       actionItems.push({
         kind: "action",
@@ -1625,7 +1727,7 @@ function OpenCommandPaletteDialog() {
         run: async () => {
           setOpen(false);
           openAutomationsDialog(
-            currentProjectEnvironmentId && currentProjectId
+            currentProjectEnvironmentId && currentProjectId && !activeContextIsChat
               ? { environmentId: currentProjectEnvironmentId, projectId: currentProjectId }
               : {},
           );

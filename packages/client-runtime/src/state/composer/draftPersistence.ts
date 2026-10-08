@@ -32,6 +32,7 @@ import {
   DEFAULT_RUNTIME_MODE,
 } from "../threads/types.ts";
 import { ensureInlineTerminalContextPlaceholders } from "./terminalContext.ts";
+import { chatDraftLogicalProjectKey, isChatDraftLogicalProjectKey } from "./chatDrafts.ts";
 import type {
   ComposerDraftImage,
   ComposerDraftStoreState,
@@ -202,6 +203,8 @@ export const PersistedDraftThreadState = Schema.Struct({
       }),
     ),
   ),
+  // Optional so drafts persisted before "No project" chats still decode as project drafts.
+  pendingChat: Schema.optionalKey(Schema.Boolean),
 });
 type PersistedDraftThreadState = typeof PersistedDraftThreadState.Type;
 
@@ -729,6 +732,38 @@ function normalizePersistedDraftThreads(
         continue;
       }
       const normalizedEnvironmentId = environmentId as EnvironmentId;
+      if (candidateDraftThread.pendingChat === true) {
+        draftThreadsByThreadKey[threadKey] = {
+          threadId,
+          environmentId: normalizedEnvironmentId,
+          projectId: projectId as ProjectId,
+          logicalProjectKey:
+            typeof candidateDraftThread.logicalProjectKey === "string" &&
+            isChatDraftLogicalProjectKey(candidateDraftThread.logicalProjectKey)
+              ? candidateDraftThread.logicalProjectKey
+              : chatDraftLogicalProjectKey(projectId as ProjectId),
+          createdAt:
+            typeof createdAt === "string" && createdAt.length > 0
+              ? createdAt
+              : new Date().toISOString(),
+          runtimeMode: isRuntimeMode(candidateDraftThread.runtimeMode)
+            ? candidateDraftThread.runtimeMode
+            : DEFAULT_RUNTIME_MODE,
+          interactionMode: isProviderInteractionMode(candidateDraftThread.interactionMode)
+            ? candidateDraftThread.interactionMode
+            : DEFAULT_INTERACTION_MODE,
+          tokenMode: isAgentTokenMode(candidateDraftThread.tokenMode)
+            ? candidateDraftThread.tokenMode
+            : DEFAULT_AGENT_TOKEN_MODE,
+          // A chat folder is never a branch or worktree, whatever was stored.
+          branch: null,
+          worktreePath: null,
+          envMode: "local",
+          promotedTo,
+          pendingChat: true,
+        };
+        continue;
+      }
       draftThreadsByThreadKey[threadKey] = {
         threadId,
         environmentId: normalizedEnvironmentId,
@@ -780,7 +815,11 @@ function normalizePersistedDraftThreads(
       if (typeof threadKeyOrId !== "string" || threadKeyOrId.length === 0) {
         continue;
       }
-      const projectRef = parseScopedProjectKey(logicalProjectKey);
+      // `chat:<projectId>` would parse as a scoped project key in environment
+      // "chat"; it is a logical key only and must never retarget its draft.
+      const projectRef = isChatDraftLogicalProjectKey(logicalProjectKey)
+        ? null
+        : parseScopedProjectKey(logicalProjectKey);
       const parsedThreadRef = parseScopedThreadKey(threadKeyOrId);
       const threadKey = normalizeLegacyComposerStorageKey(threadKeyOrId);
       logicalProjectDraftThreadKeyByLogicalProjectKey[logicalProjectKey] = threadKey;
@@ -1230,5 +1269,6 @@ export function toHydratedDraftThreadState(
           persistedDraftThread.promotedTo.threadId as ThreadId,
         )
       : null,
+    ...(persistedDraftThread.pendingChat === true ? { pendingChat: true } : {}),
   };
 }

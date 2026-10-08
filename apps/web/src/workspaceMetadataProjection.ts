@@ -6,6 +6,7 @@ import {
   defaultInstanceIdForDriver,
   type EnvironmentId,
 } from "@ryco/contracts";
+import { projectKindOf } from "@ryco/shared/projectKind";
 import {
   isWorkspaceMetadataSnapshot,
   type WorkspaceMetadataSnapshot,
@@ -36,6 +37,7 @@ export function readWorkspaceMetadataSnapshot(
             {
               environmentId,
               id: project.id,
+              kind: projectKindOf(project),
               name: project.name,
               cwd: project.cwd,
               repositoryIdentity: project.repositoryIdentity ?? null,
@@ -128,6 +130,7 @@ export function workspaceMetadataToCachedShellSnapshot(
     projects: snapshot.projects.map((project) => ({
       id: project.id,
       environmentId: project.environmentId,
+      kind: projectKindOf(project),
       name: project.name,
       cwd: project.cwd,
       repositoryIdentity: project.repositoryIdentity,

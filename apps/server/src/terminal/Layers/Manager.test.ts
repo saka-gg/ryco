@@ -7,6 +7,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
   DEFAULT_TERMINAL_ID,
+  PROJECT_RELOCATION_PENDING_MESSAGE,
   type TerminalEvent,
   type TerminalOpenInput,
   type TerminalRestartInput,
@@ -316,6 +317,37 @@ it.layer(NodeServices.layer, { excludeTestServices: true })("TerminalManager", (
         .pipe(Effect.result);
       assert.strictEqual(parentResult._tag, "Failure");
       assert.strictEqual(f.ptyAdapter.spawnInputs.length, 0);
+    }).pipe(Effect.provide(SqlitePersistenceMemory)),
+  );
+  it.effect("refuses a terminal in a chat that is moving into a project, retryably", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const f = yield* createManager();
+      const fileSystem = yield* FileSystem.FileSystem;
+      const chat = path.join(f.baseDir, "chats", "2026-10-08-plan-0a1b2c3d");
+      yield* fileSystem.makeDirectory(chat, { recursive: true });
+      const canonical = yield* Effect.promise(() =>
+        import("node:fs/promises").then((fs) => fs.realpath(chat)),
+      );
+      yield* sql`INSERT INTO project_relocations (
+          relocation_id, project_id, source_path, destination_path, strategy, state,
+          destination_created, error, created_at, updated_at
+        ) VALUES (
+          'relocation-terminal', 'project-chat', ${canonical}, ${path.join(f.baseDir, "plan")},
+          'rename', 'pending', 0, NULL, ${new Date().toISOString()}, ${new Date().toISOString()}
+        )`;
+      const error = yield* f.manager
+        .open({ threadId: "chat-thread", cwd: chat, cols: 80, rows: 24 })
+        .pipe(Effect.flip);
+      // A reason every client decodes; the message says to retry.
+      expect(error).toMatchObject({ _tag: "TerminalCwdError", reason: "statFailed" });
+      expect(error.message).toContain(PROJECT_RELOCATION_PENDING_MESSAGE);
+      assert.strictEqual(f.ptyAdapter.spawnInputs.length, 0);
+
+      // The move settled: the fence lifts.
+      yield* sql`UPDATE project_relocations SET state = 'done'`;
+      yield* f.manager.open({ threadId: "chat-thread", cwd: chat, cols: 80, rows: 24 });
+      assert.strictEqual(f.ptyAdapter.spawnInputs.length, 1);
     }).pipe(Effect.provide(SqlitePersistenceMemory)),
   );
   it.effect(

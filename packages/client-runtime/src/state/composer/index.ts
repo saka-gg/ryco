@@ -1,6 +1,7 @@
 /** Neutral attachment contract; preview URLs and platform File values stay app-side. */
 export type { ComposerAttachment } from "../../platform/index.ts";
 export * from "./attachmentUpload.ts";
+export * from "./chatDrafts.ts";
 export * from "./draftPersistence.ts";
 export * from "./draftStore.ts";
 export * from "./editorMentions.ts";

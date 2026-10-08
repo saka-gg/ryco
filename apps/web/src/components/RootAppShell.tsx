@@ -14,6 +14,7 @@ import { ContextMenuActionSheetHost } from "./shell/phone/ContextMenuActionSheet
 import { SshPasswordPromptDialog } from "./desktop/SshPasswordPromptDialog";
 import { WorkspaceReviewDialog } from "./worktrees/WorkspaceReviewDialog";
 import { useAutomationsDialogStore } from "./automations/automationsDialogStore";
+import { usePromoteChatDialogStore } from "./chat/promoteChatDialogStore";
 import { ProviderUpdateLaunchNotification } from "./ProviderUpdateLaunchNotification";
 import { MissedAutomationRunsNotice } from "./automations/MissedAutomationRunsNotice";
 import {
@@ -87,6 +88,7 @@ export function RootAppShell({ authGateState }: RootAppShellProps) {
         <SshPasswordPromptDialog />
         <WorkspaceReviewDialog />
         {chatAvailable ? <AutomationsDialogMount /> : null}
+        {chatAvailable ? <PromoteChatDialogMount /> : null}
         {chatAvailable ? <MissedAutomationRunsNotice /> : null}
         {authGateState.status === "hosted-static" ? <HostedStaticEnvironmentBootstrap /> : null}
         {primaryEnvironmentAuthenticated ? (
@@ -124,6 +126,25 @@ function AutomationsDialogMount() {
   return (
     <Suspense fallback={null}>
       <LazyAutomationsDialog />
+    </Suspense>
+  );
+}
+
+const LazyPromoteChatDialog = lazy(() =>
+  import("./chat/PromoteChatDialog").then((module) => ({
+    default: module.PromoteChatDialog,
+  })),
+);
+
+/** "Turn into project…" loads the first time a chat asks for it, then stays mounted. */
+function PromoteChatDialogMount() {
+  const open = usePromoteChatDialogStore((state) => state.open);
+  const [hasOpened, setHasOpened] = useState(open);
+  if (open && !hasOpened) setHasOpened(true);
+  if (!hasOpened) return null;
+  return (
+    <Suspense fallback={null}>
+      <LazyPromoteChatDialog />
     </Suspense>
   );
 }

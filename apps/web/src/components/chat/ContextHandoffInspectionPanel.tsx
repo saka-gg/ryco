@@ -13,6 +13,7 @@ import {
   ChevronDownIcon,
   FileJsonIcon,
   FileTextIcon,
+  FolderInputIcon,
   LoaderCircleIcon,
   RefreshCwIcon,
   ShieldAlertIcon,
@@ -21,7 +22,11 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { ensureEnvironmentApi } from "../../environmentApi";
-import type { ContextHandoffTimelineEntry } from "../../session-logic";
+import {
+  CWD_RELOCATION_HANDOFF_COPY,
+  isCwdRelocationHandoff,
+  type ContextHandoffTimelineEntry,
+} from "../../session-logic";
 import {
   readVerifiedContextHandoffExport,
   readVerifiedContextHandoffText,
@@ -283,6 +288,7 @@ export function ContextHandoffInspectionPanel(props: {
   const activeScope = summary?.[scope] ?? null;
   const sourceEndpoints = summary?.sources ?? props.marker.sources;
   const targetEndpoint = summary?.target ?? props.marker.target;
+  const relocation = isCwdRelocationHandoff(props.marker);
 
   return (
     <section
@@ -298,17 +304,36 @@ export function ContextHandoffInspectionPanel(props: {
             <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
               Context handoff
             </p>
-            <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5 text-sm font-medium">
-              {sourceEndpoints.map((endpoint) => (
-                <ContextHandoffEndpointLabel
-                  key={`${endpoint.providerInstanceId}:${endpoint.modelSlug}`}
-                  endpoint={endpoint}
-                  className="max-w-44"
-                />
-              ))}
-              <ArrowRightIcon className="size-3.5 text-muted-foreground" />
-              <ContextHandoffEndpointLabel endpoint={targetEndpoint} className="max-w-44" />
-            </div>
+            {relocation ? (
+              <div
+                className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5 text-sm font-medium"
+                data-context-handoff-reason="cwd-relocation"
+              >
+                <FolderInputIcon className="size-3.5 shrink-0 text-muted-foreground" />
+                <span>{CWD_RELOCATION_HANDOFF_COPY.attempted}</span>
+                <span className="text-muted-foreground/45" aria-hidden>
+                  ·
+                </span>
+                <ContextHandoffEndpointLabel endpoint={targetEndpoint} className="max-w-44" />
+              </div>
+            ) : (
+              <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5 text-sm font-medium">
+                {sourceEndpoints.map((endpoint) => (
+                  <ContextHandoffEndpointLabel
+                    key={`${endpoint.providerInstanceId}:${endpoint.modelSlug}`}
+                    endpoint={endpoint}
+                    className="max-w-44"
+                  />
+                ))}
+                <ArrowRightIcon className="size-3.5 text-muted-foreground" />
+                <ContextHandoffEndpointLabel endpoint={targetEndpoint} className="max-w-44" />
+              </div>
+            )}
+            {relocation ? (
+              <p className="mt-1.5 text-xs leading-4 text-muted-foreground">
+                {CWD_RELOCATION_HANDOFF_COPY.explanation}
+              </p>
+            ) : null}
           </div>
           <Button
             ref={closeButtonRef}

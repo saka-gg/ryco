@@ -13,6 +13,7 @@ import { OpenInPicker } from "./OpenInPicker";
 import { usePrimaryEnvironmentId } from "../../environments/primary";
 import { HostedNodeMenu } from "../hostedHub/HostedConnectionControls";
 import { ChatHeaderBar } from "./ChatHeaderBar";
+import type { ChatProjectTarget } from "./ChatProjectActions";
 import type { WorktreeOriginLike } from "./ChatHeaderBreadcrumb.logic";
 import { HEADER_CHROME_ICON_BUTTON_CLASS_NAME } from "./headerChrome";
 import type { LinkedWorktreeItem } from "../worktrees/LinkedWorktreeItemDialog";
@@ -24,6 +25,8 @@ interface ChatHeaderProps {
   activeThreadTitle: string;
   activeProjectName: string | undefined;
   isGitRepo: boolean;
+  /** The "No project" chat this thread lives in, if any (chat actions replace Git chrome). */
+  chatProject?: ChatProjectTarget | null;
   openInCwd: string | null;
   activeProjectScripts: ProjectScript[] | undefined;
   preferredScriptId: string | null;
@@ -159,6 +162,7 @@ export const ChatHeader = memo(function ChatHeader(props: ChatHeaderProps) {
       <ChatHeaderBar
         projectName={props.activeProjectName}
         isGitRepo={props.isGitRepo}
+        chatProject={props.chatProject ?? null}
         worktreeBranch={props.worktreeBranch}
         worktreeTitle={props.worktreeTitle}
         worktreeOrigin={props.worktreeOrigin}

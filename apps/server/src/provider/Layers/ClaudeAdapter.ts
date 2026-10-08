@@ -6507,6 +6507,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       sessionModelSwitch: "in-session",
       conversationRollback: "native",
       turnSteering: "native",
+      // Transcripts live under a per-cwd project key, so a moved resume finds nothing.
+      resumeSurvivesCwdChange: false,
     },
     startSession,
     sendTurn,

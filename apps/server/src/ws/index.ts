@@ -17,6 +17,7 @@ import { makeOrchestrationHandlers } from "./orchestrationRpc.ts";
 import { makeGitHandlers } from "./gitRpc.ts";
 import { makeTerminalHandlers } from "./terminalRpc.ts";
 import { makeProjectHandlers } from "./projectRpc.ts";
+import { makeChatProjectHandlers } from "./chatProjectRpc.ts";
 import { makeSourceControlHandlers } from "./sourceControlRpc.ts";
 import { makeProviderHandlers } from "./providerRpc.ts";
 import { makeStatisticsHandlers } from "./statisticsRpc.ts";
@@ -39,6 +40,7 @@ const makeWsRpcHandlers = (principal: RpcPrincipal) =>
       ...makeStatisticsHandlers(ctx),
       ...makeSourceControlHandlers(ctx),
       ...makeProjectHandlers(ctx),
+      ...makeChatProjectHandlers(ctx),
       ...makeSessionImportHandlers(ctx),
       ...makeStorageHandlers(ctx),
       ...makeLifecycleHandlers(ctx),

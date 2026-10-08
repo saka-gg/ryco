@@ -158,9 +158,23 @@ export interface DraftSessionState {
   fetchOrigin?: boolean;
   worktreeBranchName?: string | null;
   promotedTo?: ScopedThreadRef | null;
+  /**
+   * A "No project" chat whose project does not exist yet: `projectId` is
+   * client-generated and the first send asks the server to create the chat
+   * project (see `chatDrafts.ts`). Chat drafts always run locally, without a
+   * branch or worktree. Cleared when the draft moves to a real project.
+   */
+  pendingChat?: boolean;
 }
 
 export type DraftThreadState = DraftSessionState;
+
+/** Whether a draft is a "No project" chat that has not been sent yet. */
+export function isPendingChatDraft(
+  draftThread: Pick<DraftSessionState, "pendingChat"> | null | undefined,
+): boolean {
+  return draftThread?.pendingChat === true;
+}
 
 /**
  * Draft session metadata paired with its stable draft-session identity.
@@ -206,6 +220,11 @@ export interface ComposerDraftStoreState<TImage extends ComposerDraftImage = Com
   getDraftSessionByLogicalProjectKey: (logicalProjectKey: string) => ProjectDraftSession | null;
   getDraftThreadByProjectRef: (projectRef: ScopedProjectRef) => ProjectDraftSession | null;
   getDraftSessionByProjectRef: (projectRef: ScopedProjectRef) => ProjectDraftSession | null;
+  /**
+   * The most recent unsent "No project" chat draft in an environment, so new
+   * chat entry points resume it instead of piling up empty chat drafts.
+   */
+  getPendingChatDraftSession: (environmentId: EnvironmentId) => ProjectDraftSession | null;
   /** Reads mutable draft-session metadata by `DraftId`. */
   getDraftSession: (draftId: DraftId) => DraftSessionState | null;
   /** Resolves a server-thread ref back to a matching draft session when one exists. */
@@ -237,6 +256,8 @@ export interface ComposerDraftStoreState<TImage extends ComposerDraftImage = Com
       runtimeMode?: RuntimeMode;
       interactionMode?: ProviderInteractionMode;
       tokenMode?: AgentTokenMode;
+      /** Creates a "No project" chat draft; see `DraftSessionState.pendingChat`. */
+      pendingChat?: boolean;
     },
   ) => void;
   /** Creates or updates the draft session tracked for a concrete project ref. */
@@ -280,10 +301,13 @@ export interface ComposerDraftStoreState<TImage extends ComposerDraftImage = Com
    * draft. Branch and worktree path are dropped because they belong to the old
    * repository. The logical-project mapping moves with the draft, so the old
    * project no longer resolves to it.
+   *
+   * `pendingChat: true` (see `buildChatDraftTarget`) turns the draft into a
+   * "No project" chat; any other target is a real project and clears it.
    */
   moveDraftThreadToProject: (
     threadRef: ComposerThreadTarget,
-    input: { projectRef: ScopedProjectRef; logicalProjectKey: string },
+    input: { projectRef: ScopedProjectRef; logicalProjectKey: string; pendingChat?: boolean },
   ) => void;
   clearProjectDraftThreadId: (projectRef: ScopedProjectRef) => void;
   clearProjectDraftThreadById: (
@@ -680,6 +704,18 @@ function toProjectDraftSession(
   };
 }
 
+/** A chat folder is a plain directory: no branch, worktree or worktree source, always local. */
+const CHAT_DRAFT_LOCATION = {
+  branch: null,
+  worktreePath: null,
+  worktreeSource: null,
+  worktreeBranchName: null,
+  envMode: "local",
+} as const satisfies Pick<
+  DraftThreadState,
+  "branch" | "worktreePath" | "worktreeSource" | "worktreeBranchName" | "envMode"
+>;
+
 function createDraftThreadState(
   projectRef: ScopedProjectRef,
   threadId: ThreadId,
@@ -697,12 +733,33 @@ function createDraftThreadState(
     runtimeMode?: RuntimeMode;
     interactionMode?: ProviderInteractionMode;
     tokenMode?: AgentTokenMode;
+    pendingChat?: boolean;
   },
 ): DraftThreadState {
   const projectChanged =
     existingThread !== undefined &&
     (existingThread.environmentId !== projectRef.environmentId ||
       existingThread.projectId !== projectRef.projectId);
+  // A chat stays a chat only while it keeps its own (not yet created) project.
+  const pendingChat =
+    options?.pendingChat ?? (projectChanged ? false : existingThread?.pendingChat === true);
+  if (pendingChat) {
+    return {
+      threadId,
+      environmentId: projectRef.environmentId,
+      projectId: projectRef.projectId,
+      logicalProjectKey,
+      createdAt: options?.createdAt ?? existingThread?.createdAt ?? new Date().toISOString(),
+      runtimeMode: options?.runtimeMode ?? existingThread?.runtimeMode ?? DEFAULT_RUNTIME_MODE,
+      interactionMode:
+        options?.interactionMode ?? existingThread?.interactionMode ?? DEFAULT_INTERACTION_MODE,
+      tokenMode: options?.tokenMode ?? existingThread?.tokenMode ?? DEFAULT_AGENT_TOKEN_MODE,
+      fetchOrigin: existingThread?.fetchOrigin ?? true,
+      ...CHAT_DRAFT_LOCATION,
+      promotedTo: null,
+      pendingChat: true,
+    };
+  }
   const nextWorktreePath =
     options?.worktreePath === undefined
       ? projectChanged
@@ -780,6 +837,7 @@ function draftThreadsEqual(left: DraftThreadState | undefined, right: DraftThrea
     left.branch === right.branch &&
     left.worktreePath === right.worktreePath &&
     left.envMode === right.envMode &&
+    isPendingChatDraft(left) === isPendingChatDraft(right) &&
     scopedThreadRefsEqual(left.promotedTo, right.promotedTo)
   );
 }
@@ -951,6 +1009,22 @@ export function createComposerDraftStore<TImage extends ComposerDraftImage>(
             }
             return null;
           },
+          getPendingChatDraftSession: (environmentId) => {
+            let latest: ProjectDraftSession | null = null;
+            for (const [draftId, draftThread] of Object.entries(get().draftThreadsByThreadKey)) {
+              if (
+                draftThread.environmentId !== environmentId ||
+                !isPendingChatDraft(draftThread) ||
+                isDraftThreadPromoting(draftThread)
+              ) {
+                continue;
+              }
+              if (latest === null || draftThread.createdAt > latest.createdAt) {
+                latest = toProjectDraftSession(DraftId.make(draftId), draftThread);
+              }
+            }
+            return latest;
+          },
           getDraftSession: (draftId) => get().draftThreadsByThreadKey[draftId] ?? null,
           getDraftSessionByRef: (threadRef) => {
             for (const draftSession of Object.values(get().draftThreadsByThreadKey)) {
@@ -1102,6 +1176,9 @@ export function createComposerDraftStore<TImage extends ComposerDraftImage>(
                     ? null
                     : (existing.worktreeSource ?? null)
                   : options.worktreeSource;
+              // A chat keeps its plain local folder; retargeting it at another
+              // project makes it an ordinary project draft.
+              const staysChat = isPendingChatDraft(existing) && !projectChanged;
               const nextDraftThread: DraftThreadState = {
                 threadId: existing.threadId,
                 environmentId: nextProjectRef.environmentId,
@@ -1131,6 +1208,7 @@ export function createComposerDraftStore<TImage extends ComposerDraftImage>(
                       ? "local"
                       : (existing.envMode ?? "local")),
                 promotedTo: existing.promotedTo ?? null,
+                ...(staysChat ? { ...CHAT_DRAFT_LOCATION, pendingChat: true } : {}),
               };
               const isUnchanged =
                 nextDraftThread.environmentId === existing.environmentId &&
@@ -1146,6 +1224,7 @@ export function createComposerDraftStore<TImage extends ComposerDraftImage>(
                 nextDraftThread.worktreePath === existing.worktreePath &&
                 Equal.equals(nextDraftThread.worktreeSource, existing.worktreeSource ?? null) &&
                 nextDraftThread.envMode === existing.envMode &&
+                isPendingChatDraft(nextDraftThread) === isPendingChatDraft(existing) &&
                 scopedThreadRefsEqual(nextDraftThread.promotedTo, existing.promotedTo);
               if (isUnchanged) {
                 return state;
@@ -1180,6 +1259,7 @@ export function createComposerDraftStore<TImage extends ComposerDraftImage>(
                 existingThread.threadId,
                 normalizedLogicalProjectKey,
                 existingThread,
+                { pendingChat: input.pendingChat === true },
               );
               if (
                 draftThreadsEqual(existingThread, nextDraftThread) &&

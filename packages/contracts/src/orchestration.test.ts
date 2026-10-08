@@ -1468,6 +1468,42 @@ it.effect("rejects malformed context handoff activity metadata", () =>
   }),
 );
 
+it.effect("decodes the context handoff reason, absent on historical records", () =>
+  Effect.gen(function* () {
+    const requested = {
+      schemaVersion: 1,
+      handoffId: "handoff-1",
+      mode: "full-context-fresh-session",
+      status: "requested",
+      targetMessageId: "msg-2",
+      sourceSelection: { instanceId: "claude_work", model: "claude-fable-5" },
+      targetSelection: { instanceId: "claude_work", model: "claude-fable-5" },
+    } as const;
+
+    const historical = yield* decodeContextHandoffActivity(requested);
+    assert.strictEqual(historical.reason, undefined);
+    for (const reason of ["model-change", "cwd-relocation"] as const) {
+      const decoded = yield* decodeContextHandoffActivity({ ...requested, reason });
+      assert.strictEqual(decoded.reason, reason);
+    }
+    const consumed = yield* decodeContextHandoffActivity({
+      ...requested,
+      reason: "cwd-relocation",
+      status: "consumed",
+      sources: [{ providerInstanceId: "claude_work", driverKind: "claudeAgent", modelSlug: "x" }],
+      target: { providerInstanceId: "claude_work", driverKind: "claudeAgent", modelSlug: "x" },
+      contextVersion: 1,
+      contextDigest: "a".repeat(64),
+    });
+    assert.strictEqual(consumed.reason, "cwd-relocation");
+
+    const unknownReason = yield* Effect.exit(
+      decodeContextHandoffActivity({ ...requested, reason: "project-promotion" }),
+    );
+    assert.strictEqual(unknownReason._tag, "Failure");
+  }),
+);
+
 it.effect("bounds context handoff inspection pages and export filenames", () =>
   Effect.gen(function* () {
     const oversizedPage = yield* Effect.exit(

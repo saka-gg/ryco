@@ -1,4 +1,11 @@
-import { FolderIcon, GitBranchIcon, GitForkIcon, InfoIcon, ShieldAlertIcon } from "lucide-react";
+import {
+  FolderIcon,
+  GitBranchIcon,
+  GitForkIcon,
+  InfoIcon,
+  MessageCircleIcon,
+  ShieldAlertIcon,
+} from "lucide-react";
 
 import { formatElapsedClockLabel, formatRelativeTimeLabel } from "../../timestampFormat";
 import { PROVIDER_ICON_BY_PROVIDER } from "../chat/providerIconUtils";
@@ -45,6 +52,14 @@ export function InboxProjectIcon(props: {
   readonly className?: string;
 }) {
   const project = props.row.project;
+  if (props.row.isChat) {
+    return (
+      <MessageCircleIcon
+        aria-hidden
+        className={`${props.className ?? "size-3.5"} shrink-0 opacity-60`}
+      />
+    );
+  }
   if (!project) {
     return (
       <FolderIcon aria-hidden className={`${props.className ?? "size-3.5"} shrink-0 opacity-60`} />

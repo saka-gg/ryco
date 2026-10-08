@@ -45,6 +45,7 @@ import {
   ProjectCustomSystemPrompt,
   ProjectScript,
   OrchestrationSessionStatus,
+  OptionalProjectKind,
   ProjectMetadataDir,
   RuntimeMode,
 } from "./orchestration.ts";
@@ -1886,6 +1887,7 @@ export type AgentControlMcpReadDeviceStateResult = typeof AgentControlMcpReadDev
 
 export const AgentControlMcpProjectSummary = Schema.Struct({
   projectId: ProjectId,
+  kind: OptionalProjectKind,
   title: TrimmedNonEmptyString,
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,

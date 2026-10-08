@@ -44,6 +44,7 @@ const STATIC_COMMAND_META: Record<string, Omit<KeybindingCommandMeta, "category"
   "sidebar.showProjects": { title: "Show Projects sidebar", sortWeight: 2 },
   "chat.new": { title: "New chat", sortWeight: 1 },
   "chat.newLocal": { title: "New chat (local environment)", sortWeight: 2 },
+  "chat.newWithoutProject": { title: "New chat without a project", sortWeight: 3 },
   "composer.stash": { title: "Stash prompt or open stash", sortWeight: 1 },
   "editor.openFavorite": { title: "Open in preferred editor", sortWeight: 1 },
   "modelPicker.toggle": { title: "Toggle model picker", sortWeight: 1 },

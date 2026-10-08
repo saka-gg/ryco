@@ -1,12 +1,12 @@
 import {
   storageLifecycleLock,
-  isStoragePathBlocked,
+  storagePathBlocker,
   isWorktreeRelocationBlocked,
   canonicalStoragePath,
 } from "../../storage/lifecycle.ts";
 import { ProjectionThreadUserInputRequestRepository } from "../../persistence/Services/ProjectionThreadUserInputRequests.ts";
 import { ProjectionThreadUserInputRequestRepositoryLive } from "../../persistence/Layers/ProjectionThreadUserInputRequests.ts";
-import { ApprovalRequestId } from "@ryco/contracts";
+import { ApprovalRequestId, PROJECT_RELOCATION_PENDING_MESSAGE } from "@ryco/contracts";
 import {
   requireApprovalClaim,
   requireApprovalSource,
@@ -323,11 +323,17 @@ const makeOrchestrationEngine = Effect.gen(function* () {
           );
           if (canonicalPaths.has(canonicalPath)) continue;
           canonicalPaths.add(canonicalPath);
-          if (
-            yield* isStoragePathBlocked(sql, canonicalPath).pipe(
-              Effect.mapError(toPersistenceSqlError("storage.readiness")),
-            )
-          ) {
+          const blocker = yield* storagePathBlocker(sql, canonicalPath).pipe(
+            Effect.mapError(toPersistenceSqlError("storage.readiness")),
+          );
+          // A chat moving into a project settles in moments: refuse without a rejected
+          // receipt, so the same command can be retried once the move is done.
+          if (blocker === "project-relocation") {
+            return yield* new OrchestrationCommandAdmissionError({
+              detail: PROJECT_RELOCATION_PENDING_MESSAGE,
+            });
+          }
+          if (blocker !== null) {
             return yield* storageReadinessError(
               "Checkout cleanup is pending or complete. Restore/recreate the checkout before starting work.",
             );

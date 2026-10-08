@@ -1,11 +1,15 @@
 # Worktree roots
 
-In node settings, open **General → Projects and threads → Worktree root**.
-The environment default controls where that node creates new worktrees. Choose a
-project in the scope selector to give it a different root. **Use environment
-default** removes the project override; **Reset worktree root** restores the
-node's existing Ryco-managed placement. Resetting the environment does not erase
-project overrides.
+In node settings, open **General → Project defaults → Worktree root**. This
+device default controls where that node creates new worktrees. To give a project
+a different root, open the project's page (**Per-project overrides** in the
+Project defaults heading leads there) and set **Worktree root** under
+**Location**; this row needs owner access to the node. Until you set one, the
+row shows the inherited root. **Use device default** removes the project
+override; **Reset to default** on the device row restores the node's existing
+Ryco-managed placement. Resetting the device default does not erase project
+overrides. The **Chats folder** row next to **Worktree root** is described in
+[Chats without a project](chats.md#where-chats-live).
 
 Use an absolute path on the node, or `~/` for the node user's home directory.
 Paths refer to the server filesystem, including when editing a remote node from

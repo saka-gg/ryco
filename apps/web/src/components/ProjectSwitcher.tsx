@@ -1,10 +1,20 @@
 import { scopeProjectRef } from "@ryco/client-runtime/scoped";
 import type { EnvironmentId, ProjectId } from "@ryco/contracts";
-import { useCallback, useMemo, useRef, useState } from "react";
+import { MessageCircleDashedIcon } from "lucide-react";
+import { Fragment, useCallback, useMemo, useRef, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 
-import { useComposerDraftStore, type DraftId } from "../composerDraftStore";
+import {
+  buildChatDraftTarget,
+  CHAT_PROJECT_LABEL,
+  isPendingChatDraft,
+  useComposerDraftStore,
+  type DraftId,
+} from "../composerDraftStore";
+import { useChatsAvailability } from "../hooks/useChatsAvailability";
 import { useSettings } from "../hooks/useSettings";
+import { excludeChatProjects } from "@ryco/shared/projectKind";
+import { newProjectId } from "../lib/utils";
 import { deriveLogicalProjectKeyFromSettings } from "../logicalProject";
 import { selectProjectsAcrossEnvironments, useStore } from "../store";
 import { useHostedWorkspaceState } from "../hostedHub/hostedConnectionCoordinator";
@@ -17,6 +27,7 @@ import {
   ComboboxItem,
   ComboboxList,
   ComboboxPopup,
+  ComboboxSeparator,
   ComboboxTrigger,
 } from "./ui/combobox";
 
@@ -41,6 +52,10 @@ function projectItemKey(environmentId: EnvironmentId, projectId: ProjectId): str
   return `${environmentId}\u0000${projectId}`;
 }
 
+/** Combobox value of the "No project" entry; never collides with a project key. */
+const NO_PROJECT_ITEM = "\u0000no-project";
+const NO_PROJECT_SEARCH_TERMS = `${CHAT_PROJECT_LABEL} chat without folder`.toLowerCase();
+
 /**
  * Retargets the thread being composed at a different project.
  *
@@ -50,6 +65,10 @@ function projectItemKey(environmentId: EnvironmentId, projectId: ProjectId): str
  * effort exactly as the user left them — none of it has to be copied, because
  * the composer draft is keyed by draft id and never moves. Only the branch and
  * worktree path are dropped, since they belong to the old repository.
+ *
+ * Where the draft's node supports chats, "No project" leads the list: it turns
+ * the draft into a chat that gets its own folder on first send (and picking a
+ * project turns it back).
  */
 export function ProjectSwitcher({
   activeProjectId,
@@ -60,6 +79,12 @@ export function ProjectSwitcher({
   className,
 }: ProjectSwitcherProps) {
   const moveDraftThreadToProject = useComposerDraftStore((store) => store.moveDraftThreadToProject);
+  const isChatDraft = useComposerDraftStore((store) =>
+    isPendingChatDraft(store.draftThreadsByThreadKey[draftId]),
+  );
+  const chatsAvailability = useChatsAvailability(activeProjectEnvironmentId);
+  // A chat draft keeps its own entry even if the node stopped offering chats.
+  const showNoProject = chatsAvailability.available || isChatDraft;
   const projectGroupingSettings = useSettings((settings) => ({
     sidebarProjectGroupingMode: settings.sidebarProjectGroupingMode,
     sidebarProjectGroupingOverrides: settings.sidebarProjectGroupingOverrides,
@@ -68,9 +93,11 @@ export function ProjectSwitcher({
   const allProjects = useStore(useShallow((store) => selectProjectsAcrossEnvironments(store)));
   const projects = useMemo(
     () =>
-      hosted.status === "signed-out"
-        ? allProjects
-        : allProjects.filter((project) => project.environmentId === activeProjectEnvironmentId),
+      excludeChatProjects(
+        hosted.status === "signed-out"
+          ? allProjects
+          : allProjects.filter((project) => project.environmentId === activeProjectEnvironmentId),
+      ),
     [activeProjectEnvironmentId, allProjects, hosted.status],
   );
   const [open, setOpen] = useState(false);
@@ -78,8 +105,11 @@ export function ProjectSwitcher({
   const triggerRef = useRef<HTMLButtonElement | null>(null);
 
   const items = useMemo(
-    () => projects.map((project) => projectItemKey(project.environmentId, project.id)),
-    [projects],
+    () => [
+      ...(showNoProject ? [NO_PROJECT_ITEM] : []),
+      ...projects.map((project) => projectItemKey(project.environmentId, project.id)),
+    ],
+    [projects, showNoProject],
   );
   const projectByItem = useMemo(
     () =>
@@ -96,6 +126,7 @@ export function ProjectSwitcher({
       return items;
     }
     return items.filter((item) => {
+      if (item === NO_PROJECT_ITEM) return NO_PROJECT_SEARCH_TERMS.includes(normalizedQuery);
       const project = projectByItem.get(item);
       if (!project) return false;
       return (
@@ -114,12 +145,23 @@ export function ProjectSwitcher({
 
   const selectProject = useCallback(
     (item: string) => {
-      const project = projectByItem.get(item);
       setOpen(false);
       setQuery("");
+      if (item === NO_PROJECT_ITEM) {
+        if (!isChatDraft) {
+          moveDraftThreadToProject(
+            draftId,
+            buildChatDraftTarget(activeProjectEnvironmentId, newProjectId()),
+          );
+        }
+        return;
+      }
+      const project = projectByItem.get(item);
       if (
         !project ||
-        (project.id === activeProjectId && project.environmentId === activeProjectEnvironmentId)
+        (!isChatDraft &&
+          project.id === activeProjectId &&
+          project.environmentId === activeProjectEnvironmentId)
       ) {
         return;
       }
@@ -132,13 +174,16 @@ export function ProjectSwitcher({
       activeProjectEnvironmentId,
       activeProjectId,
       draftId,
+      isChatDraft,
       moveDraftThreadToProject,
       projectByItem,
       projectGroupingSettings,
     ],
   );
 
-  const activeItem = projectItemKey(activeProjectEnvironmentId, activeProjectId);
+  const activeItem = isChatDraft
+    ? NO_PROJECT_ITEM
+    : projectItemKey(activeProjectEnvironmentId, activeProjectId);
   const activeProject = projectByItem.get(activeItem) ?? null;
 
   return (
@@ -168,7 +213,9 @@ export function ProjectSwitcher({
         )}
         render={<button type="button" />}
       >
-        {appearance !== "headline" && activeProject ? (
+        {appearance !== "headline" && isChatDraft ? (
+          <MessageCircleDashedIcon aria-hidden className="size-3.5 shrink-0 opacity-80" />
+        ) : appearance !== "headline" && activeProject ? (
           <ProjectFavicon
             environmentId={activeProject.environmentId}
             cwd={activeProject.cwd}
@@ -199,6 +246,40 @@ export function ProjectSwitcher({
         <ComboboxEmpty>No projects found.</ComboboxEmpty>
         <ComboboxList className="max-h-64">
           {filteredItems.map((item, index) => {
+            if (item === NO_PROJECT_ITEM) {
+              return (
+                <Fragment key={item}>
+                  <ComboboxItem
+                    hideIndicator
+                    index={index}
+                    value={item}
+                    data-testid="project-switcher-no-project"
+                    onClick={() => selectProject(item)}
+                  >
+                    <div className="flex w-full min-w-0 items-center gap-2 py-0.5 text-left">
+                      <MessageCircleDashedIcon
+                        aria-hidden
+                        className="size-4 shrink-0 text-muted-foreground"
+                      />
+                      <span className="flex min-w-0 flex-1 flex-col">
+                        <span
+                          className={cn(
+                            "truncate text-sm",
+                            item === activeItem && "font-medium text-foreground",
+                          )}
+                        >
+                          {CHAT_PROJECT_LABEL}
+                        </span>
+                        <span className="truncate text-muted-foreground text-xs">
+                          A chat in its own folder · turn it into a project later
+                        </span>
+                      </span>
+                    </div>
+                  </ComboboxItem>
+                  {index < filteredItems.length - 1 ? <ComboboxSeparator /> : null}
+                </Fragment>
+              );
+            }
             const project = projectByItem.get(item);
             if (!project) return null;
             return (

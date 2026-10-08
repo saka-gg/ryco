@@ -8,6 +8,7 @@ import { useHostedRpcCapability } from "../../hostedHub/capabilities";
 import type { useThreadActions } from "../../hooks/useThreadActions";
 import { useSettings } from "../../hooks/useSettings";
 import { useUiStateStore } from "../../uiStateStore";
+import { useChatRowMenuContext } from "../sidebar/hooks/useChatRowMenuContext";
 import { useThreadMenuActions } from "../sidebar/hooks/useThreadMenuActions";
 import { useThreadClipboardActions } from "../sidebar/hooks/useThreadClipboardActions";
 import { Dialog, DialogPopup, DialogTitle } from "../ui/dialog";
@@ -65,6 +66,7 @@ export function ConnectedInboxSidebar(
       ),
     [props.projects],
   );
+  const chat = useChatRowMenuContext();
   const actions = useThreadMenuActions({
     router,
     trashThread,
@@ -72,6 +74,7 @@ export function ConnectedInboxSidebar(
     stopThreadSession,
     interruptThreadTurn,
     includeWorkspaceSubmenu: true,
+    chat,
     ...clipboard,
     appSettingsConfirmThreadDelete,
     appSettingsConfirmThreadArchive,

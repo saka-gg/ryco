@@ -143,6 +143,23 @@ it.layer(NodeServices.layer)("server settings", (it) => {
     }).pipe(Effect.provide(makeServerSettingsLayer())),
   );
 
+  it.effect("validates the chats folder like a worktree root and keeps empty as the default", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "settings-chats-root-" });
+      const canonical = yield* fs.realPath(root);
+      const settings = yield* ServerSettingsService;
+      const saved = yield* settings.updateSettings({ chatsRoot: `${root}/chats` });
+      assert.equal(saved.chatsRoot, `${canonical}/chats`);
+      const rejected = yield* settings
+        .updateSettings({ chatsRoot: "relative/chats" })
+        .pipe(Effect.flip);
+      assert.include(rejected.detail, "Chats folder must be an absolute directory");
+      assert.equal((yield* settings.getSettings).chatsRoot, `${canonical}/chats`);
+      assert.equal((yield* settings.updateSettings({ chatsRoot: "" })).chatsRoot, "");
+    }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
   it.effect("refuses provider and retention publication during a cleanup settings lease", () =>
     Effect.gen(function* () {
       const settings = yield* ServerSettingsService;

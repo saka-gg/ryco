@@ -11,7 +11,11 @@ import type { WorkspaceAccessPolicyShape } from "../workspace/Services/Workspace
 
 export class WorktreeRootError extends Schema.TaggedError<WorktreeRootError>()(
   "WorktreeRootError",
-  { detail: Schema.String },
+  {
+    detail: Schema.String,
+    /** `restricted`: the workspace access policy rejected it; `unusable`: the path itself is. */
+    reason: Schema.optional(Schema.Literals(["unusable", "restricted"])),
+  },
 ) {
   override get message(): string {
     return this.detail;
@@ -48,6 +52,10 @@ async function resolveWorktreePath(candidate: string) {
   }
 }
 
+/** The canonical nearest existing ancestor; probes that need a real cwd run there. */
+export const resolveExistingAncestor = async (candidate: string): Promise<string> =>
+  (await resolveWorktreePath(candidate)).existingAncestor;
+
 /** One identity for existing and missing worktree paths; no writable-access requirement.
  * Shared by destination locks, journal lookup and Git-registration comparisons.
  */
@@ -62,7 +70,15 @@ export async function canonicalizeWorktreeDirectory(candidate: string): Promise<
   return resolved.canonicalPath;
 }
 
-export const validateWorktreeRoot = (value: string, policy: WorkspaceAccessPolicyShape) =>
+/**
+ * Validate a node-local root setting (worktree root, chats folder). `label` names the setting in
+ * user-facing errors.
+ */
+export const validateWorktreeRoot = (
+  value: string,
+  policy: WorkspaceAccessPolicyShape,
+  label = "Worktree root",
+) =>
   Effect.gen(function* () {
     const trimmed = value.trim();
     const expanded = expandHomePath(trimmed);
@@ -77,24 +93,27 @@ export const validateWorktreeRoot = (value: string, policy: WorkspaceAccessPolic
       (process.platform === "win32" && !/^(?:[A-Za-z]:[\\/]|\\\\[^\\]+\\[^\\]+)/.test(expanded))
     ) {
       return yield* new WorktreeRootError({
-        detail: "Worktree root must be an absolute directory on this node or start with ~/.",
+        detail: `${label} must be an absolute directory on this node or start with ~/.`,
+        reason: "unusable",
       });
     }
-    const operation = "worktree root";
+    const operation = label.toLowerCase();
+    const restricted = (cause: { readonly message: string }) =>
+      new WorktreeRootError({ detail: cause.message, reason: "restricted" });
     const authorized = yield* policy
       .assertPath({ path: path.normalize(expanded), operation })
-      .pipe(Effect.mapError((cause) => new WorktreeRootError({ detail: cause.message })));
+      .pipe(Effect.mapError(restricted));
     const canonical = yield* Effect.tryPromise({
       try: () => canonicalizeWorktreeDirectory(authorized),
       catch: () =>
         new WorktreeRootError({
-          detail:
-            "Worktree root must resolve to a writable directory (or have a writable existing parent), without broken symlinks.",
+          detail: `${label} must resolve to a writable directory (or have a writable existing parent), without broken symlinks.`,
+          reason: "unusable",
         }),
     });
     return yield* policy
       .assertPath({ path: canonical, operation })
-      .pipe(Effect.mapError((cause) => new WorktreeRootError({ detail: cause.message })));
+      .pipe(Effect.mapError(restricted));
   });
 
 /** Storage selection only: this never grants access to the selected directory's contents. */

@@ -2,6 +2,7 @@ import {
   DEFAULT_MODEL,
   EnvironmentId,
   MessageId,
+  OrchestrationDispatchCommandError,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -667,6 +668,91 @@ function makeSendInput() {
   };
   return { input, dispatchCommand };
 }
+
+describe("chat first send with a retired project id", () => {
+  const RETIRED_ID = ProjectId.make("chat-retired");
+  const FRESH_ID = ProjectId.make("chat-fresh");
+  const retired = () =>
+    new OrchestrationDispatchCommandError({
+      message: "This chat was cleaned up before its first message was sent.",
+      reason: "chat-project-retired",
+    });
+
+  function makeChatSendInput() {
+    const sent = makeSendInput();
+    const renewChatProjectId = vi.fn(() => FRESH_ID);
+    sent.input.claudeCacheReview = null;
+    sent.input.thread = {
+      ...sent.input.thread,
+      threadId: ThreadId.make("thread-chat"),
+      isFirstMessage: true,
+      isServerThread: false,
+      isLocalDraftThread: true,
+      projectId: RETIRED_ID,
+      createChatProjectId: RETIRED_ID,
+      renewChatProjectId,
+    };
+    sent.input.project = { projectId: RETIRED_ID, projectCwd: "" };
+    const turnStarts = () =>
+      sent.dispatchCommand.mock.calls
+        .map(([command]) => command as { type: string; commandId: string; bootstrap?: unknown })
+        .filter((command) => command.type === "thread.turn.start");
+    return { ...sent, renewChatProjectId, turnStarts };
+  }
+
+  it("moves the draft to a fresh project id and sends the same message once more", async () => {
+    const { input, dispatchCommand, renewChatProjectId, turnStarts } = makeChatSendInput();
+    dispatchCommand.mockRejectedValueOnce(retired());
+
+    expect(await executeChatSendTurn(input)).toBe(true);
+    expect(renewChatProjectId).toHaveBeenCalledOnce();
+    const [first, second] = turnStarts();
+    expect(turnStarts()).toHaveLength(2);
+    expect(first?.bootstrap).toMatchObject({
+      createChatProject: { projectId: RETIRED_ID },
+      createThread: { projectId: RETIRED_ID },
+    });
+    expect(second?.bootstrap).toMatchObject({
+      createChatProject: { projectId: FRESH_ID, titleSeed: "Continue with Claude" },
+      createThread: { projectId: FRESH_ID },
+    });
+    expect(second?.commandId).not.toBe(first?.commandId);
+    // The optimistic message stays put and no error reaches the thread.
+    expect(input.dispatch.setOptimisticUserMessages).toHaveBeenCalledOnce();
+    expect(input.dispatch.setThreadError).toHaveBeenLastCalledWith(input.thread.threadId, null);
+    expect(input.dispatch.resetLocalDispatch).not.toHaveBeenCalled();
+  });
+
+  it("keeps the message to send again when the resend fails too", async () => {
+    const { input, dispatchCommand, turnStarts } = makeChatSendInput();
+    dispatchCommand
+      .mockRejectedValueOnce(retired())
+      .mockRejectedValueOnce(new Error("Provider unavailable"));
+
+    expect(await executeChatSendTurn(input)).toBe(false);
+    expect(turnStarts()).toHaveLength(2);
+    expect(input.dispatch.setThreadError).toHaveBeenLastCalledWith(
+      input.thread.threadId,
+      "Provider unavailable",
+    );
+    // The composed text returns to the composer of the (renewed) draft.
+    expect(input.draft.setComposerDraftPrompt).toHaveBeenLastCalledWith(
+      input.draft.composerDraftTarget,
+      "Continue with Claude",
+    );
+  });
+
+  it("never renews a send that does not create a chat", async () => {
+    const { input, dispatchCommand, renewChatProjectId, turnStarts } = makeChatSendInput();
+    const { createChatProjectId: _omitted, ...projectThread } = input.thread;
+    input.thread = projectThread;
+    dispatchCommand.mockRejectedValueOnce(retired());
+
+    expect(await executeChatSendTurn(input)).toBe(false);
+    expect(renewChatProjectId).not.toHaveBeenCalled();
+    expect(turnStarts()).toHaveLength(1);
+  });
+});
 
 describe("queued send draft ownership", () => {
   it.each([false, true])(

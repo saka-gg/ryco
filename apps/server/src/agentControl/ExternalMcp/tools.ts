@@ -44,6 +44,7 @@ import {
   type ProjectId,
   type ServerProvider,
 } from "@ryco/contracts";
+import { projectKindOf } from "@ryco/shared/projectKind";
 import { Effect, Schema } from "effect";
 
 import type { ProjectionSnapshotQueryShape } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
@@ -456,6 +457,7 @@ export const makeExternalMcpTools = (deps: {
           return Schema.encodeSync(AgentControlMcpListProjectsResult)({
             projects: allowed.slice(0, limit).map((project) => ({
               projectId: project.id,
+              kind: projectKindOf(project),
               title: project.title,
               createdAt: project.createdAt,
               updatedAt: project.updatedAt,

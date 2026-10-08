@@ -222,6 +222,56 @@ function build(input: {
 }
 
 describe("buildInboxSidebarSections", () => {
+  it("labels chat threads No project, never with the chat folder's title", () => {
+    const chatProjectId = ProjectId.make("chat-project");
+    const rows = buildInboxSidebarSections({
+      projects: [
+        project(ENV_A),
+        {
+          ...project(ENV_A),
+          id: chatProjectId,
+          name: "Plan a trip",
+          cwd: "/home/me/.ryco/chats/2026-10-08-plan-a-trip-1a2b3c4d",
+          kind: "chat",
+        },
+      ],
+      worktrees: [],
+      threads: [
+        thread("chat", { projectId: chatProjectId, branch: null }),
+        thread("project-thread"),
+      ],
+      environments: [environment(ENV_A)],
+      filters: ALL_FILTERS,
+    }).flatMap((section) => section.rows);
+    expect(rows.find((row) => row.title === "chat")).toMatchObject({
+      projectLabel: "No project",
+      isChat: true,
+      workspaceLabel: "Chat folder",
+    });
+    expect(rows.find((row) => row.title === "project-thread")).toMatchObject({
+      projectLabel: "Ryco",
+      isChat: false,
+    });
+  });
+
+  it("finds chat threads when searching for No project", () => {
+    const chatProjectId = ProjectId.make("chat-project");
+    const titles = buildInboxSidebarSections({
+      projects: [
+        project(ENV_A),
+        { ...project(ENV_A), id: chatProjectId, name: "Plan a trip", kind: "chat" },
+      ],
+      worktrees: [],
+      threads: [
+        thread("chat", { projectId: chatProjectId, branch: null }),
+        thread("project-thread"),
+      ],
+      environments: [environment(ENV_A)],
+      filters: { ...ALL_FILTERS, query: "no project" },
+    }).flatMap((section) => section.rows.map((row) => row.title));
+    expect(titles).toEqual(["chat"]);
+  });
+
   it("resolves model aliases from the owning environment and retains project identity", () => {
     const provider = Schema.decodeUnknownSync(ServerProvider)({
       instanceId: "claudeAgent",

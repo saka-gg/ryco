@@ -227,4 +227,39 @@ layer("ProjectionThreadRepository trash", (it) => {
       );
     }),
   );
+
+  it.effect("reports the owning project's kind so a trashed chat reads as No project", () =>
+    Effect.gen(function* () {
+      const repository = yield* ProjectionThreadRepository;
+      const sql = yield* SqlClient.SqlClient;
+      const chatProjectId = ProjectId.make("project-chat-trash");
+      yield* sql`
+        INSERT INTO projection_projects (project_id, kind, title, workspace_root, scripts_json,
+          created_at, updated_at, deleted_at)
+        VALUES (${chatProjectId}, 'chat', 'Plan the offsite', '/chats/plan', '[]',
+          '2026-07-31T00:00:00.000Z', '2026-07-31T00:00:00.000Z', NULL)
+      `;
+      const trashedAt = "2026-08-03T00:00:00.000Z";
+      yield* repository.upsert({
+        ...BASE_ROW,
+        threadId: ThreadId.make("thread-chat-trashed"),
+        projectId: chatProjectId,
+        deletedAt: trashedAt,
+        trashedAt,
+      });
+      yield* repository.upsert({
+        ...BASE_ROW,
+        threadId: ThreadId.make("thread-orphan-trashed"),
+        projectId: ProjectId.make("project-record-gone"),
+        deletedAt: trashedAt,
+        trashedAt,
+      });
+
+      const listed = yield* repository.listTrashed({ limit: 10 });
+      const kindOf = (threadId: string) =>
+        listed.find((row) => row.threadId === threadId)?.projectKind;
+      assert.strictEqual(kindOf("thread-chat-trashed"), "chat");
+      assert.isNull(kindOf("thread-orphan-trashed"));
+    }),
+  );
 });

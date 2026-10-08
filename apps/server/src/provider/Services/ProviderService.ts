@@ -62,6 +62,14 @@ export interface ProviderRuntimeEventSummary {
   readonly occurredAt: string;
 }
 
+/** What a compatible (non-fresh) start of a thread would resume, from its persisted binding. */
+export interface ProviderResumeTarget {
+  readonly providerInstanceId: ProviderInstanceId;
+  /** The directory the native conversation last ran in, when recorded. */
+  readonly cwd?: string;
+  readonly hasResumeCursor: boolean;
+}
+
 /** The last time a live runtime showed any activity, by `Clock` milliseconds. */
 export interface ProviderRuntimeActivity {
   readonly threadId: ThreadId;
@@ -95,6 +103,14 @@ export interface ProviderServiceShape {
     input: ProviderFreshSessionStartInput,
   ) => Effect.Effect<ProviderFreshSessionStartResult, ProviderServiceError>;
 
+  /**
+   * The persisted binding's resume target, read without starting, recovering or
+   * routing a runtime. None when the thread has no binding with an instance id.
+   */
+  readonly readResumeTarget?: (
+    threadId: ThreadId,
+  ) => Effect.Effect<Option.Option<ProviderResumeTarget>, ProviderServiceError>;
+
   /** Resolve only the adapter session matching the authoritative persisted binding. */
   readonly getSession: (
     threadId: ThreadId,
@@ -106,8 +122,11 @@ export interface ProviderServiceShape {
   ) => Effect.Effect<boolean, ProviderServiceError>;
 
   /**
-   * Retire an exact failed target epoch if it is still authoritative.
-   * Clears provider-native resume state without reviving an exited source.
+   * Retire an exact failed target epoch if it is still authoritative, clearing its
+   * provider-native resume state. When it replaced a binding on its own instance (a
+   * fresh start stops that runtime first), that binding is put back, stopped, with its
+   * resume cursor and working directory: the conversation stays resumable without
+   * reviving its runtime.
    */
   readonly retireSessionBinding: (
     binding: ProviderRuntimeBinding,

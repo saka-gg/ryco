@@ -1,3 +1,9 @@
+import {
+  contextHandoffStatusSuffix,
+  cwdRelocationHandoffAccessibleLabel,
+  isCwdRelocationHandoff,
+  type ContextHandoffMarkerSubject,
+} from "@ryco/client-runtime/state/session";
 import type { ContextHandoffEndpointSnapshot, ModelSelection, ServerConfig } from "@ryco/contracts";
 import { modelSelectionRequiresContextHandoff } from "@ryco/shared/model";
 
@@ -73,20 +79,21 @@ export function derivePendingContextHandoff(input: {
   };
 }
 
-export function contextHandoffMarkerAccessibilityLabel(input: {
-  readonly sources: ReadonlyArray<ContextHandoffEndpointSnapshot>;
-  readonly target: ContextHandoffEndpointSnapshot;
-  readonly status: "consumed" | "failed" | "delivery-uncertain";
-  readonly error?: string | undefined;
-}): string {
+/**
+ * A model change reads as `<source> to <target>`. A working-folder relocation (a chat turned
+ * into a project) keeps its model, so it reads as a fresh session in the new folder instead,
+ * with the shared relocation wording. Handoffs recorded before they carried a reason are model
+ * changes.
+ */
+export function contextHandoffMarkerAccessibilityLabel(
+  input: ContextHandoffMarkerSubject & {
+    readonly sources: ReadonlyArray<ContextHandoffEndpointSnapshot>;
+    readonly target: ContextHandoffEndpointSnapshot;
+  },
+): string {
+  if (isCwdRelocationHandoff(input)) return cwdRelocationHandoffAccessibleLabel(input);
   const transition = `Context handoff from ${input.sources
     .map(contextHandoffEndpointAccessibleLabel)
     .join(", ")} to ${contextHandoffEndpointAccessibleLabel(input.target)}`;
-  if (input.status === "failed") {
-    return `${transition}. Failed${input.error ? `: ${input.error}` : ""}`;
-  }
-  if (input.status === "delivery-uncertain") {
-    return `${transition}. Delivery uncertain${input.error ? `: ${input.error}` : ""}`;
-  }
-  return `${transition}. Completed`;
+  return `${transition}. ${contextHandoffStatusSuffix(input) ?? "Completed"}`;
 }

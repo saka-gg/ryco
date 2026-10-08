@@ -244,6 +244,13 @@ import {
   ProjectWriteFileError,
   ProjectWriteFileInput,
   ProjectWriteFileResult,
+  ProjectChatError,
+  ProjectsDeleteChatFolderInput,
+  ProjectsDeleteChatFolderResult,
+  ProjectsPromoteChatInput,
+  ProjectsPromoteChatPreviewInput,
+  ProjectsPromoteChatPreviewResult,
+  ProjectsPromoteChatResult,
 } from "./project.ts";
 import {
   TerminalClearInput,
@@ -438,6 +445,9 @@ export const WS_METHODS = {
   threadsSetManualPosition: "threads.setManualPosition",
   worktreesSetManualPosition: "worktrees.setManualPosition",
   projectsInitializeGit: "projects.initializeGit",
+  projectsPromoteChatPreview: "projects.promoteChatPreview",
+  projectsPromoteChat: "projects.promoteChat",
+  projectsDeleteChatFolder: "projects.deleteChatFolder",
 
   // Thread search methods
   searchThreadMessages: "threads.searchMessages",
@@ -1753,6 +1763,24 @@ export const WsProjectsInitializeGitRpc = Rpc.make(WS_METHODS.projectsInitialize
   error: Schema.Union([GitManagerServiceError, AuthRpcError]),
 });
 
+export const WsProjectsPromoteChatPreviewRpc = Rpc.make(WS_METHODS.projectsPromoteChatPreview, {
+  payload: ProjectsPromoteChatPreviewInput,
+  success: ProjectsPromoteChatPreviewResult,
+  error: Schema.Union([ProjectChatError, AuthRpcError]),
+});
+
+export const WsProjectsPromoteChatRpc = Rpc.make(WS_METHODS.projectsPromoteChat, {
+  payload: ProjectsPromoteChatInput,
+  success: ProjectsPromoteChatResult,
+  error: Schema.Union([ProjectChatError, AuthRpcError]),
+});
+
+export const WsProjectsDeleteChatFolderRpc = Rpc.make(WS_METHODS.projectsDeleteChatFolder, {
+  payload: ProjectsDeleteChatFolderInput,
+  success: ProjectsDeleteChatFolderResult,
+  error: Schema.Union([ProjectChatError, AuthRpcError]),
+});
+
 export const WsVcsReadLineBlameRpc = Rpc.make(WS_METHODS.vcsReadLineBlame, {
   payload: GitReadLineBlameInput,
   success: GitReadLineBlameResult,
@@ -2309,6 +2337,9 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsThreadPriorityEnsureCurrentRpc
   | typeof WsWorktreesSetManualPositionRpc
   | typeof WsProjectsInitializeGitRpc
+  | typeof WsProjectsPromoteChatPreviewRpc
+  | typeof WsProjectsPromoteChatRpc
+  | typeof WsProjectsDeleteChatFolderRpc
   | typeof WsVcsReadLineBlameRpc
   | typeof WsVcsReadLocalChangesRpc
   | typeof WsVcsApplyIndexPatchRpc
@@ -2501,6 +2532,9 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsThreadPriorityEnsureCurrentRpc,
   WsWorktreesSetManualPositionRpc,
   WsProjectsInitializeGitRpc,
+  WsProjectsPromoteChatPreviewRpc,
+  WsProjectsPromoteChatRpc,
+  WsProjectsDeleteChatFolderRpc,
   WsVcsReadLineBlameRpc,
   WsVcsReadLocalChangesRpc,
   WsVcsApplyIndexPatchRpc,

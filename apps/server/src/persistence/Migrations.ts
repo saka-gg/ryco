@@ -1,6 +1,9 @@
 import Migration0078, {
   ensureManagedWorktreeNaming,
 } from "./Migrations/078_ManagedWorktreeNaming.ts";
+import Migration0079, {
+  ensureProjectKindAndRelocations,
+} from "./Migrations/079_ProjectKindAndRelocations.ts";
 import Migration0071 from "./Migrations/071_StatisticsUsageHistory.ts";
 import Migration0072, {
   ensureProjectionThreadLineageColumns,
@@ -193,6 +196,7 @@ export const migrationEntries = [
   [76, "AuthSessionRotation", Migration0076],
   [77, "ThreadWorkspaceLifecycle", Migration0077],
   [78, "ManagedWorktreeNaming", Migration0078],
+  [79, "ProjectKindAndRelocations", Migration0079],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>
@@ -426,6 +430,16 @@ export const repairAuthSessionRotationColumns = Effect.fn("repairAuthSessionRota
   },
 );
 
+// Project kinds and the chat relocation journal: run 079 again as a repair when another
+// branch's 079 (or a later id) was recorded first.
+export const repairProjectKindAndRelocations = Effect.fn("repairProjectKindAndRelocations")(
+  function* () {
+    if (yield* ensureProjectKindAndRelocations) {
+      yield* Effect.log("Repaired project kind column and relocation journal");
+    }
+  },
+);
+
 // Trash and retained workspace records: run 077 again as a repair when a later id was
 // recorded first (parallel branches claim the same next id).
 export const repairThreadWorkspaceLifecycleColumns = Effect.fn(
@@ -585,6 +599,9 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
   }
   if (toMigrationInclusive === undefined || toMigrationInclusive >= 78) {
     yield* ensureManagedWorktreeNaming;
+  }
+  if (toMigrationInclusive === undefined || toMigrationInclusive >= 79) {
+    yield* repairProjectKindAndRelocations();
   }
   yield* Effect.log("Migrations ran successfully").pipe(
     Effect.annotateLogs({

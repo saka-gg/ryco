@@ -582,14 +582,17 @@ export const makeServerSettings = Effect.gen(function* () {
         Effect.gen(function* () {
           const current = yield* getSettingsFromCache;
           const normalizedPatch = { ...patch };
-          const validateRoot = (root: string) =>
-            validateWorktreeRoot(root, worktreeAccessPolicy).pipe(
+          const validateRoot = (root: string, label?: string) =>
+            validateWorktreeRoot(root, worktreeAccessPolicy, label).pipe(
               Effect.mapError(
                 (cause) => new ServerSettingsError({ settingsPath, detail: cause.message, cause }),
               ),
             );
+          // Empty roots select the managed default and need no validation.
           if (patch.worktreeRoot)
             normalizedPatch.worktreeRoot = yield* validateRoot(patch.worktreeRoot);
+          if (patch.chatsRoot)
+            normalizedPatch.chatsRoot = yield* validateRoot(patch.chatsRoot, "Chats folder");
           if (patch.projectWorktreeRoots !== undefined) {
             const roots: Array<[string, string | null]> = [];
             for (const [id, root] of Object.entries(patch.projectWorktreeRoots)) {

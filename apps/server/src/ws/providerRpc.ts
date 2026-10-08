@@ -58,6 +58,7 @@ export const makeProviderHandlers = (ctx: WsRpcContext) => {
     workItems,
     lifecycleEvents,
     loadServerConfig,
+    streamChatsConfigSnapshots,
     loadDiagnosticsMetrics,
     loadDiagnosticsSnapshot,
     loadAuthAccessSnapshot,
@@ -697,17 +698,17 @@ export const makeProviderHandlers = (ctx: WsRpcContext) => {
             Effect.forkScoped,
           );
 
+          const config = yield* loadServerConfig;
           const liveUpdates = Stream.merge(
             keybindingsUpdates,
-            Stream.merge(providerStatuses, settingsUpdates),
+            Stream.merge(
+              Stream.merge(providerStatuses, settingsUpdates),
+              streamChatsConfigSnapshots(config.chats),
+            ),
           );
 
           return Stream.concat(
-            Stream.make({
-              version: 1 as const,
-              type: "snapshot" as const,
-              config: yield* loadServerConfig,
-            }),
+            Stream.make({ version: 1 as const, type: "snapshot" as const, config }),
             liveUpdates,
           );
         }),

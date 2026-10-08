@@ -6,6 +6,7 @@ import { useEffect, useLayoutEffect, useMemo, useReducer, useState } from "react
 import { AppState, Pressable, View } from "react-native";
 
 import type { EnvironmentId, ThreadId } from "@ryco/contracts";
+import { excludeChatProjects } from "@ryco/shared/projectKind";
 
 import { HomeModeControl } from "../../components/HomeModeControl";
 import { HomeBottomToolbar } from "../../components/HomeBottomToolbar";
@@ -162,9 +163,10 @@ export function HomeScreen() {
     dispatch({ type: "set-node-scope", mode: home.mode, environmentId: null });
   };
 
+  // "No project" chats are not somewhere to start a task, so they do not count as projects here.
   const inboxEmptyState = resolveInboxEmptyState({
     environmentCount: environments.length,
-    projectCount: projects.length,
+    projectCount: excludeChatProjects(projects).length,
     threadCount: threads.filter((thread) => thread.archivedAt === null).length,
     hasFilter: home.queryByMode.inbox.length > 0 || home.nodeScopeByMode.inbox !== null,
   });

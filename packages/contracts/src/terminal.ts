@@ -196,6 +196,10 @@ export class TerminalCwdError extends Schema.TaggedError<TerminalCwdError>()("Te
     "notDirectory",
     "outsideWorkspace",
     "statFailed",
+    /**
+     * Closed set on the wire: older clients cannot decode a new reason. A refusal without its
+     * own reason (a chat folder moving into a project) is `statFailed` with a `cause` message.
+     */
     "cleanupPending",
   ]),
   cause: Schema.optional(Schema.Defect()),

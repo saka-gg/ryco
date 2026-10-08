@@ -199,6 +199,14 @@
       "types": "./src/projectScripts.ts",
       "import": "./src/projectScripts.ts"
     },
+    "./projectKind": {
+      "types": "./src/projectKind.ts",
+      "import": "./src/projectKind.ts"
+    },
+    "./directorySlug": {
+      "types": "./src/directorySlug.ts",
+      "import": "./src/directorySlug.ts"
+    },
     "./runtimeEnv": {
       "types": "./src/runtimeEnv.ts",
       "import": "./src/runtimeEnv.ts"

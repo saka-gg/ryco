@@ -3,6 +3,7 @@ import { EnvironmentId, ProjectId } from "@ryco/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
 import {
   resolveThreadActionProjectRef,
+  startNewChatFromContext,
   startNewLocalThreadFromContext,
   startNewThreadFromContext,
   type ChatThreadActionContext,
@@ -112,5 +113,56 @@ describe("chatThreadActions", () => {
 
     expect(didStart).toBe(false);
     expect(handleNewThread).not.toHaveBeenCalled();
+  });
+
+  it("falls back to a chat draft when there is no project at all", async () => {
+    const handleNewThread = vi.fn<ChatThreadActionContext["handleNewThread"]>(async () => {});
+    const handleNewChat = vi.fn(async (_environmentId: EnvironmentId) => {});
+
+    const didStart = await startNewThreadFromContext(
+      createContext({
+        defaultProjectRef: null,
+        handleNewThread,
+        handleNewChat,
+        chatTarget: { environmentId: ENVIRONMENT_ID },
+      }),
+    );
+
+    expect(didStart).toBe(true);
+    expect(handleNewChat).toHaveBeenCalledWith(ENVIRONMENT_ID);
+    expect(handleNewThread).not.toHaveBeenCalled();
+  });
+
+  it("starts another chat instead of a second thread in the active chat", async () => {
+    const handleNewThread = vi.fn<ChatThreadActionContext["handleNewThread"]>(async () => {});
+    const handleNewChat = vi.fn(async (_environmentId: EnvironmentId) => {});
+    const context = createContext({
+      activeThread: {
+        environmentId: ENVIRONMENT_ID,
+        projectId: ProjectId.make("chat-project"),
+        branch: null,
+        worktreePath: null,
+      },
+      activeContextIsChat: true,
+      handleNewThread,
+      handleNewChat,
+      chatTarget: { environmentId: ENVIRONMENT_ID },
+    });
+
+    expect(await startNewLocalThreadFromContext(context)).toBe(true);
+    expect(handleNewChat).toHaveBeenCalledTimes(1);
+    expect(handleNewThread).not.toHaveBeenCalled();
+    // Without chats the default project takes over, never the chat's own project.
+    expect(resolveThreadActionProjectRef(context)).toEqual(
+      scopeProjectRef(ENVIRONMENT_ID, FALLBACK_PROJECT_ID),
+    );
+  });
+
+  it("starts a chat only when chats are available", async () => {
+    const handleNewChat = vi.fn(async (_environmentId: EnvironmentId) => {});
+    expect(await startNewChatFromContext(createContext({ handleNewChat, chatTarget: null }))).toBe(
+      false,
+    );
+    expect(handleNewChat).not.toHaveBeenCalled();
   });
 });

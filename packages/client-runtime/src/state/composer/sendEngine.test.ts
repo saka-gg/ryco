@@ -2,6 +2,7 @@ import {
   CommandId,
   DEFAULT_MODEL,
   MessageId,
+  OrchestrationDispatchCommandError,
   ProjectId,
   ProviderInstanceId,
   ThreadId,
@@ -15,10 +16,13 @@ import {
 import { createModelSelection } from "@ryco/shared/model";
 import { describe, expect, it } from "vite-plus/test";
 
+import { isChatProjectRetiredError } from "./chatDrafts.ts";
 import {
   buildSendTurnBootstrap,
   commitSendTurnDispatch,
   resolveThreadCreateModelSelection,
+  retargetChatProjectBootstrap,
+  type SendTurnBootstrap,
 } from "./sendEngine.ts";
 
 describe("send engine — bootstrap", () => {
@@ -293,5 +297,147 @@ describe("send engine — usage-limit resume", () => {
     const turnStart = harness.commands.find((command) => command.type === "thread.turn.start");
     expect(turnStart?.commandId).toBe("composer-send:thread-1:message-1");
     expect(turnStart).not.toHaveProperty("usageLimitResumeGuard");
+  });
+});
+
+describe("send engine — retired chat project", () => {
+  const RETIRED_ID = ProjectId.make("chat-retired");
+  const FRESH_ID = ProjectId.make("chat-fresh");
+  const retired = () =>
+    new OrchestrationDispatchCommandError({
+      message: "This chat was cleaned up before its first message was sent.",
+      reason: "chat-project-retired",
+    });
+  const chatBootstrap = (): SendTurnBootstrap =>
+    buildSendTurnBootstrap({
+      isLocalDraftThread: true,
+      baseBranchForWorktree: null,
+      shouldMaterializeLegacyBranchWorktree: false,
+      projectId: RETIRED_ID,
+      projectCwd: "",
+      title: "Plan a trip",
+      threadCreateModelSelection: createModelSelection(ProviderInstanceId.make("codex"), "gpt-5"),
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      tokenMode: "balanced",
+      activeThreadBranch: null,
+      worktreePath: null,
+      threadCreatedAt: "2026-10-08T00:00:00.000Z",
+      createChatProject: { projectId: RETIRED_ID, titleSeed: "Plan a trip" },
+    });
+
+  /** A chat first send whose turn starts fail with `failures`, in order, then succeed. */
+  function chatHarness(failures: unknown[], renew = true) {
+    const renewals: ProjectId[] = [];
+    const harness = makeDispatchHarness({
+      isServerThread: false,
+      bootstrap: chatBootstrap(),
+      ...(renew
+        ? {
+            renewChatProjectId: () => {
+              renewals.push(FRESH_ID);
+              return FRESH_ID;
+            },
+          }
+        : {}),
+    });
+    const dispatch = harness.input.api.orchestration.dispatchCommand;
+    const api = {
+      orchestration: {
+        dispatchCommand: async (command: Parameters<typeof dispatch>[0]) => {
+          await dispatch(command);
+          const failure = failures.shift();
+          if (failure !== undefined) throw failure;
+          return { sequence: 1 };
+        },
+      },
+    } as unknown as EnvironmentApi;
+    const turnStarts = () =>
+      harness.commands.filter((command) => command.type === "thread.turn.start") as Array<{
+        commandId: string;
+        threadId: string;
+        message: { messageId: string; text: string };
+        bootstrap: NonNullable<SendTurnBootstrap>;
+      }>;
+    return { input: { ...harness.input, api }, renewals, turnStarts };
+  }
+
+  it("sends once more under a fresh project id and command id", async () => {
+    const { input, renewals, turnStarts } = chatHarness([retired()]);
+    await commitSendTurnDispatch(input);
+
+    expect(renewals).toEqual([FRESH_ID]);
+    const [first, second] = turnStarts();
+    expect(turnStarts()).toHaveLength(2);
+    expect(first?.bootstrap.createChatProject?.projectId).toBe(RETIRED_ID);
+    expect(second?.bootstrap.createChatProject).toEqual({
+      projectId: FRESH_ID,
+      titleSeed: "Plan a trip",
+    });
+    expect(second?.bootstrap.createThread?.projectId).toBe(FRESH_ID);
+    // Same thread and message; only the command is new.
+    expect(second?.threadId).toBe(first?.threadId);
+    expect(second?.message).toEqual(first?.message);
+    expect(first?.commandId).toBe("composer-send:thread-1:message-1");
+    expect(second?.commandId).not.toBe(first?.commandId);
+  });
+
+  it("retries only once and surfaces the second failure", async () => {
+    const second = new OrchestrationDispatchCommandError({ message: "Provider unavailable" });
+    const { input, renewals, turnStarts } = chatHarness([retired(), second]);
+    await expect(commitSendTurnDispatch(input)).rejects.toBe(second);
+    expect(renewals).toHaveLength(1);
+    expect(turnStarts()).toHaveLength(2);
+
+    const twice = chatHarness([retired(), retired()]);
+    await expect(commitSendTurnDispatch(twice.input)).rejects.toMatchObject({
+      reason: "chat-project-retired",
+    });
+    expect(twice.turnStarts()).toHaveLength(2);
+  });
+
+  it("leaves every other failure, and callers without a renewal, alone", async () => {
+    const other = new OrchestrationDispatchCommandError({ message: "Project already exists" });
+    const plain = chatHarness([other]);
+    await expect(commitSendTurnDispatch(plain.input)).rejects.toBe(other);
+    expect(plain.renewals).toEqual([]);
+    expect(plain.turnStarts()).toHaveLength(1);
+
+    const unrenewable = chatHarness([retired()], false);
+    await expect(commitSendTurnDispatch(unrenewable.input)).rejects.toMatchObject({
+      reason: "chat-project-retired",
+    });
+    expect(unrenewable.turnStarts()).toHaveLength(1);
+  });
+
+  it("recognises the retired reason by tag and reason, never by message", () => {
+    expect(isChatProjectRetiredError(retired())).toBe(true);
+    // Decoded off the wire without the class (relay transports): still the same answer.
+    expect(
+      isChatProjectRetiredError({
+        _tag: "OrchestrationDispatchCommandError",
+        reason: "chat-project-retired",
+        message: "x",
+      }),
+    ).toBe(true);
+    expect(
+      isChatProjectRetiredError(
+        new OrchestrationDispatchCommandError({
+          message: "Project 'chat-retired' already exists and cannot be created twice.",
+        }),
+      ),
+    ).toBe(false);
+    expect(isChatProjectRetiredError({ reason: "chat-project-retired" })).toBe(false);
+    expect(isChatProjectRetiredError(new Error("chat-project-retired"))).toBe(false);
+    expect(isChatProjectRetiredError(null)).toBe(false);
+  });
+
+  it("moves a chat bootstrap's project and thread together, and nothing else", () => {
+    const moved = retargetChatProjectBootstrap(chatBootstrap(), FRESH_ID);
+    expect(moved?.createChatProject?.projectId).toBe(FRESH_ID);
+    expect(moved?.createThread?.projectId).toBe(FRESH_ID);
+    const plain: SendTurnBootstrap = { runSetupScript: true };
+    expect(retargetChatProjectBootstrap(plain, FRESH_ID)).toBe(plain);
+    expect(retargetChatProjectBootstrap(undefined, FRESH_ID)).toBeUndefined();
   });
 });

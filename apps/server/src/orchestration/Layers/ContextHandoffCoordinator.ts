@@ -78,6 +78,8 @@ interface HandoffPresentation {
 }
 
 interface TerminalProjectionInput extends HandoffPresentation {
+  /** Holds the handoff's requested activity, whose reason the terminal one keeps. */
+  readonly thread: OrchestrationThread;
   readonly record: ContextHandoffRecord;
   readonly activityId: EventId;
   readonly sources: ReadonlyArray<ContextHandoffEndpointSnapshot>;
@@ -363,10 +365,13 @@ export const makeContextHandoffCoordinator = Effect.gen(function* () {
         refreshEndpointPresentation(providers, endpoint),
       );
       const target = refreshEndpointPresentation(providers, input.target);
+      // The record does not persist the reason: the activity being replaced carries it.
+      const reason = decodeRequestedActivity(input.thread, input.activityId)?.reason;
       const common = {
         schemaVersion: CONTEXT_HANDOFF_SCHEMA_VERSION as 1,
         handoffId: input.record.handoffId,
         mode: "full-context-fresh-session" as const,
+        ...(reason ? { reason } : {}),
         targetMessageId: input.record.firstMessageId,
         ...(input.targetTurnId ? { targetTurnId: input.targetTurnId } : {}),
         sourceSelection: input.record.sourceSelection,
@@ -519,6 +524,7 @@ export const makeContextHandoffCoordinator = Effect.gen(function* () {
   /** Replaces the handoff activity with its terminal `failed` projection. */
   const appendFailedActivity = Effect.fn("ContextHandoffCoordinator.appendFailedActivity")(
     function* (input: {
+      readonly thread: OrchestrationThread;
       readonly record: ContextHandoffRecord;
       readonly activityId: EventId;
       readonly presentation: HandoffPresentation;
@@ -534,6 +540,7 @@ export const makeContextHandoffCoordinator = Effect.gen(function* () {
         );
       const deliveryArtifact = deliveryArtifactFromRecord(input.record);
       yield* appendTerminalActivity({
+        thread: input.thread,
         record: input.record,
         activityId: input.activityId,
         source: input.presentation.source,
@@ -609,6 +616,7 @@ export const makeContextHandoffCoordinator = Effect.gen(function* () {
       updatedAt: nowIso(),
     });
     yield* appendFailedActivity({
+      thread: input.thread,
       record: current,
       activityId: input.activityId,
       presentation: input.presentation,
@@ -644,6 +652,7 @@ export const makeContextHandoffCoordinator = Effect.gen(function* () {
         return yield* Effect.die("Consumed context handoff is missing its target runtime epoch.");
       }
       yield* appendTerminalActivity({
+        thread: input.thread,
         record: input.record,
         activityId: input.activityId,
         source: input.artifact.document.provenance.sources.at(-1)!,
@@ -947,6 +956,7 @@ export const makeContextHandoffCoordinator = Effect.gen(function* () {
       });
       const deliveryArtifact = deliveryArtifactFromRecord(input.record);
       yield* appendTerminalActivity({
+        thread: input.thread,
         record: input.record,
         activityId: input.activityId,
         source: input.presentation.source,
@@ -1094,7 +1104,7 @@ export const makeContextHandoffCoordinator = Effect.gen(function* () {
         ),
       );
     }
-    yield* appendFailedActivity({ record, activityId, presentation, error }).pipe(
+    yield* appendFailedActivity({ thread, record, activityId, presentation, error }).pipe(
       Effect.catchCause(
         logStep("context handoff failure report could not finalize the handoff activity"),
       ),
@@ -1361,6 +1371,7 @@ export const makeContextHandoffCoordinator = Effect.gen(function* () {
         // stop or retire. The activity goes first (as in finalizeFailure), so a
         // failed append leaves the record `requested` for the next boot.
         yield* appendTerminalActivity({
+          thread,
           record,
           activityId: reference.activityId,
           source: presentation.source,

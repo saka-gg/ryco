@@ -160,9 +160,11 @@ import { ChevronDownIcon, CircleAlertIcon, TriangleAlertIcon, WifiOffIcon } from
 import { BackgroundLivenessChip } from "./chat/BackgroundLivenessChip";
 import { cn, randomUUID } from "~/lib/utils";
 import { stackedThreadToast, toastManager } from "./ui/toast";
-import { newCommandId, newDraftId, newMessageId, newThreadId } from "~/lib/utils";
+import { newCommandId, newDraftId, newMessageId, newProjectId, newThreadId } from "~/lib/utils";
+import { isChatProject } from "@ryco/shared/projectKind";
 import { getProviderSupportsAskMode, resolveSelectableProvider } from "../providerModels";
 import { useSettings } from "../hooks/useSettings";
+import { useChatsAvailability } from "../hooks/useChatsAvailability";
 import { resolveAppModelSelectionForInstance } from "../modelSelection";
 import { deriveLogicalProjectKeyFromSettings } from "../logicalProject";
 import {
@@ -172,8 +174,11 @@ import {
 } from "../environments/runtime";
 import { buildDraftThreadRouteParams, buildThreadRouteParams } from "../threadRoutes";
 import {
+  buildChatDraftTarget,
+  CHAT_PROJECT_LABEL,
   type ComposerImageAttachment,
   type DraftThreadEnvMode,
+  isPendingChatDraft,
   useComposerDraftStore,
   type DraftId,
 } from "../composerDraftStore";
@@ -213,6 +218,7 @@ import {
 } from "./chat/ThreadMessageSearch.logic";
 import type { ThreadMessageSearchOccurrence } from "./chat/ThreadMessageSearch.logic";
 import { ChatHeader } from "./chat/ChatHeader";
+import type { ChatProjectTarget } from "./chat/ChatProjectActions";
 import { PhoneThreadAppBar } from "./shell/phone/PhoneThreadAppBar";
 import type { PhoneThreadDockProps } from "./shell/phone/PhoneThreadDock";
 import { PhoneSurfaceScaffold, PhoneWorkSurfaceSheet } from "./shell/phone/PhoneWorkSurface";
@@ -972,6 +978,30 @@ export default function ChatView(props: ChatViewProps) {
     : null;
   const activeProject = useStore(
     useMemo(() => createProjectSelectorByRef(activeProjectRef), [activeProjectRef]),
+  );
+  // "No project" chat context: an unsent chat draft (its project does not exist
+  // until the first send creates it) or a thread inside a chat project. A chat
+  // runs locally in a plain folder, so branch/worktree/env-mode controls and
+  // Git status queries stay off.
+  const isPendingChat = !isServerThread && isPendingChatDraft(draftThread);
+  const isChatContext = isPendingChat || isChatProject(activeProject);
+  const chatsAvailability = useChatsAvailability(activeThread?.environmentId ?? environmentId);
+  // A sent chat (its project exists) offers "Turn into project…" in the header.
+  const chatThreadId = isServerThread ? (activeThread?.id ?? null) : null;
+  const chatThreadTitle = activeThread?.title ?? null;
+  const chatProjectHeaderTarget = useMemo<ChatProjectTarget | null>(
+    () =>
+      activeProject && isChatProject(activeProject)
+        ? {
+            projectRef: scopeProjectRef(activeProject.environmentId, activeProject.id),
+            threadRef: chatThreadId
+              ? scopeThreadRef(activeProject.environmentId, chatThreadId)
+              : null,
+            title: chatThreadTitle ?? activeProject.name,
+            folderPath: activeProject.cwd,
+          }
+        : null,
+    [activeProject, chatThreadId, chatThreadTitle],
   );
   const activeWorktreeSummary = useStore(
     useMemo(
@@ -2056,7 +2086,8 @@ export default function ChatView(props: ChatViewProps) {
         worktreePath: activeThread?.worktreePath ?? null,
       })
     : null;
-  const gitStatusQuery = useGitStatus({ environmentId, cwd: gitCwd });
+  // A chat folder is never treated as a repository, so it is not polled.
+  const gitStatusQuery = useGitStatus({ environmentId, cwd: isChatContext ? null : gitCwd });
   const queryClient = useQueryClient();
   const {
     postPushWorkflowWatch,
@@ -2176,8 +2207,9 @@ export default function ChatView(props: ChatViewProps) {
     terminalLaunchContext?.threadId === activeThreadId
       ? terminalLaunchContext
       : (storeServerTerminalLaunchContext ?? null);
-  // Default true while loading to avoid toolbar flicker.
-  const isGitRepo = gitStatusQuery.data?.isRepo ?? true;
+  // Default true while loading to avoid toolbar flicker. A chat folder is never
+  // a repository here (promotion with Git turns it into a project first).
+  const isGitRepo = isChatContext ? false : (gitStatusQuery.data?.isRepo ?? true);
   const terminalShortcutLabelOptions = useMemo(
     () => ({
       context: {
@@ -2334,6 +2366,24 @@ export default function ChatView(props: ChatViewProps) {
       focusComposer();
     });
   }, [focusComposer]);
+  const moveDraftThreadToProject = useComposerDraftStore((store) => store.moveDraftThreadToProject);
+  // Points a draft at a new "No project" chat in place, keeping its prompt,
+  // attachments and model; returns the chat's (not yet created) project id.
+  const moveDraftToNewChat = useCallback(
+    (targetDraftId: DraftId, targetEnvironmentId: EnvironmentId): ProjectId => {
+      const projectId = newProjectId();
+      moveDraftThreadToProject(targetDraftId, buildChatDraftTarget(targetEnvironmentId, projectId));
+      return projectId;
+    },
+    [moveDraftThreadToProject],
+  );
+  // "or start without a project": the composed draft becomes a chat.
+  const draftEnvironmentId = activeThread?.environmentId ?? null;
+  const startDraftWithoutProject = useCallback(() => {
+    if (!draftId || !draftEnvironmentId) return;
+    moveDraftToNewChat(draftId, draftEnvironmentId);
+    scheduleComposerFocus();
+  }, [draftEnvironmentId, draftId, moveDraftToNewChat, scheduleComposerFocus]);
   const openThreadMessageSearch = useCallback(() => {
     if (!activeThreadId) return;
     setThreadMessageSearchOpen(true);
@@ -3166,7 +3216,17 @@ export default function ChatView(props: ChatViewProps) {
     };
   }, [activeThread?.id, dispatchCapability.allowed, environmentId, gitCwd]);
   const drainEditorsBeforeSend = useCallback(async () => {
-    if (!activeProject || !activeThread) return false;
+    if (!activeThread) return false;
+    if (!activeProject) {
+      // An unsent chat has no folder yet, so no editor can hold unsaved files for it.
+      if (!isPendingChat) return false;
+      const current = editorSendTargetRef.current;
+      return (
+        current.allowed &&
+        current.environmentId === environmentId &&
+        current.threadId === activeThread.id
+      );
+    }
     const scope = { environmentId, cwd: activeThread.worktreePath ?? activeProject.cwd };
     if (hasUnsavedPreviewFiles(scope) && !(await flushPreviewFiles(scope))) {
       toastManager.add({
@@ -3184,7 +3244,7 @@ export default function ChatView(props: ChatViewProps) {
       current.threadId === activeThread.id &&
       current.cwd === scope.cwd
     );
-  }, [activeProject, activeThread, environmentId]);
+  }, [activeProject, activeThread, environmentId, isPendingChat]);
 
   const prepareEditorSend = useCallback(async () => {
     if (editorSendPreparationRef.current) return false;
@@ -3379,7 +3439,14 @@ export default function ChatView(props: ChatViewProps) {
   ): Promise<boolean> => {
     if (!dispatchCapability.allowed || hostedDraftTarget.pending !== null) return false;
     const api = readEnvironmentApi(environmentId);
-    if (!api || !activeThread || !activeProject || editorSendPreparationRef.current) return false;
+    // A pending chat's project is created by this send, so it is not in the store yet.
+    if (
+      !api ||
+      !activeThread ||
+      (!activeProject && !isPendingChat) ||
+      editorSendPreparationRef.current
+    )
+      return false;
     editorSendPreparationRef.current = true;
     const composerChangedDuringPreparation = captureComposerContentGuard();
     try {
@@ -3483,7 +3550,25 @@ export default function ChatView(props: ChatViewProps) {
           activeThreadBranch,
           worktreePath: activeThread.worktreePath,
           createdAt: activeThread.createdAt,
-          projectId: activeProject.id,
+          projectId: activeThread.projectId,
+          // Every send of an unsent chat draft: the server allocates its folder
+          // and creates the chat project with this id. The project can already
+          // be here when an earlier first send failed after creating it; only
+          // this bootstrap makes the server reuse it and recreate its (removed)
+          // folder. Once the node has retired that id (an unused chat cleaned up
+          // meanwhile), the draft moves to a fresh one and the message goes out
+          // again.
+          ...(isPendingChat && isLocalDraftThread
+            ? {
+                createChatProjectId: activeThread.projectId,
+                ...(draftId
+                  ? {
+                      renewChatProjectId: () =>
+                        moveDraftToNewChat(draftId, activeThread.environmentId),
+                    }
+                  : {}),
+              }
+            : {}),
         },
         worktree: pendingWorktreeSource
           ? {
@@ -3509,8 +3594,9 @@ export default function ChatView(props: ChatViewProps) {
             },
         settings: effectiveSettingsSnapshot,
         project: {
-          projectId: activeProject.id,
-          projectCwd: activeProject.cwd,
+          projectId: activeThread.projectId,
+          // Only worktree preparation reads it, and a chat never prepares one.
+          projectCwd: activeProject?.cwd ?? "",
         },
         ...(pendingWorktreeSource ? { prepareForDispatch: prepareWorktreeSourceForDispatch } : {}),
         scroll: {
@@ -4634,7 +4720,9 @@ export default function ChatView(props: ChatViewProps) {
             dispatchCapability.allowed &&
             !isConnecting &&
             !activeEnvironmentUnavailable &&
-            !!activeProject
+            !!activeProject &&
+            // A chat holds one thread: no second thread in the same chat folder.
+            !isChatContext
           }
           canUseWorktree={isGitRepo && !!activeThreadBranch}
           onCurrent={(quote) => {
@@ -4761,8 +4849,12 @@ export default function ChatView(props: ChatViewProps) {
           <ChatHeader
             activeThreadEnvironmentId={activeThread.environmentId}
             activeThreadTitle={activeThread.title}
-            activeProjectName={activeProject?.name}
-            isGitRepo={isGitRepo}
+            activeProjectName={
+              activeProject && isChatContext ? CHAT_PROJECT_LABEL : activeProject?.name
+            }
+            // A chat has no Git to miss: no "No Git" badge (promotion offers Git instead).
+            isGitRepo={isGitRepo || isChatContext}
+            chatProject={chatProjectHeaderTarget}
             openInCwd={gitCwd}
             activeProjectScripts={activeProject?.scripts}
             preferredScriptId={
@@ -4961,11 +5053,19 @@ export default function ChatView(props: ChatViewProps) {
             >
               <NewThreadHero
                 projectName={activeProject?.name ?? null}
-                activeProjectId={activeProject?.id ?? null}
-                activeProjectEnvironmentId={activeProject?.environmentId ?? null}
+                activeProjectId={
+                  activeProject?.id ?? (isPendingChat ? activeThread.projectId : null)
+                }
+                activeProjectEnvironmentId={
+                  activeProject?.environmentId ??
+                  (isPendingChat ? activeThread.environmentId : null)
+                }
                 routeKind={routeKind}
                 envLocked={envLocked}
                 draftId={draftId ?? undefined}
+                pendingChat={isPendingChat}
+                chatsAvailable={chatsAvailability.available}
+                onStartWithoutProject={startDraftWithoutProject}
                 workLocation={
                   isGitRepo ? (
                     <NewThreadWorkLocation
@@ -5349,6 +5449,7 @@ export default function ChatView(props: ChatViewProps) {
           onCancel={hostedDraftTarget.cancel}
           onRetry={hostedDraftTarget.retry}
           onSelect={hostedDraftTarget.selectProject}
+          onSelectNoProject={hostedDraftTarget.selectNoProject}
         />
       ) : null}
 

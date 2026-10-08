@@ -1,5 +1,6 @@
 import { type ChangeRequest, type ScopedThreadRef, WorktreeId } from "@ryco/contracts";
-import { scopedThreadKey } from "@ryco/client-runtime/scoped";
+import { scopedThreadKey, scopeProjectRef } from "@ryco/client-runtime/scoped";
+import { isChatProject } from "@ryco/shared/projectKind";
 import type {
   GitActionProgressEvent,
   GitRunStackedActionResult,
@@ -54,6 +55,7 @@ import {
   resolveThreadBranchUpdate,
 } from "./GitActionsControl.logic";
 import { AnimatedHeight } from "./AnimatedHeight";
+import { ChatProjectPromoteBlock, type ChatProjectTarget } from "./chat/ChatProjectActions";
 import { Button } from "~/components/ui/button";
 import { Checkbox } from "~/components/ui/checkbox";
 import {
@@ -106,7 +108,7 @@ import { useServerConfig } from "~/rpc/serverState";
 import { readLocalApi } from "~/localApi";
 import { getSourceControlPresentation } from "~/sourceControlPresentation";
 import { useStore } from "~/store";
-import { createThreadSelectorByRef } from "~/storeSelectors";
+import { createProjectSelectorByRef, createThreadSelectorByRef } from "~/storeSelectors";
 import { useSettingsDialogStore } from "../settingsDialogStore";
 
 interface GitActionsControlProps {
@@ -1068,6 +1070,34 @@ export default function GitActionsControl({
   );
   const setDraftThreadContext = useComposerDraftStore((store) => store.setDraftThreadContext);
   const setThreadBranch = useStore((store) => store.setThreadBranch);
+  // A "No project" chat has no Git to act on: "Turn into project…" stands in
+  // for the Git actions (and for "Initialize Git") until it is promoted.
+  const threadProjectId = activeServerThread?.projectId ?? activeDraftThread?.projectId ?? null;
+  const threadProject = useStore(
+    useMemo(
+      () =>
+        createProjectSelectorByRef(
+          activeEnvironmentId && threadProjectId
+            ? scopeProjectRef(activeEnvironmentId, threadProjectId)
+            : null,
+        ),
+      [activeEnvironmentId, threadProjectId],
+    ),
+  );
+  const activeServerThreadId = activeServerThread?.id ?? null;
+  const activeServerThreadTitle = activeServerThread?.title ?? null;
+  const chatProject = useMemo<ChatProjectTarget | null>(
+    () =>
+      threadProject && isChatProject(threadProject)
+        ? {
+            projectRef: scopeProjectRef(threadProject.environmentId, threadProject.id),
+            threadRef: activeServerThreadId && activeThreadRef ? activeThreadRef : null,
+            title: activeServerThreadTitle ?? threadProject.name,
+            folderPath: threadProject.cwd,
+          }
+        : null,
+    [activeServerThreadId, activeServerThreadTitle, activeThreadRef, threadProject],
+  );
   const [isCommitDialogOpen, setIsCommitDialogOpen] = useState(false);
   const [dialogCommitMessage, setDialogCommitMessage] = useState("");
   const [excludedFiles, setExcludedFiles] = useState<ReadonlySet<string>>(new Set());
@@ -1168,7 +1198,7 @@ export default function GitActionsControl({
 
   const { data: gitStatus = null, error: gitStatusError } = useGitStatus({
     environmentId: activeEnvironmentId,
-    cwd: gitCwd,
+    cwd: chatProject ? null : gitCwd,
   });
   const sourceControlPresentation = useMemo(
     () => getSourceControlPresentation(gitStatus?.sourceControlProvider),
@@ -1831,6 +1861,7 @@ export default function GitActionsControl({
   const blockHasBranch = gitStatusForActions?.refName != null;
   const blockCanPush = blockHasBranch && (blockHasUpstream || hasPrimaryRemote);
 
+  if (chatProject) return <ChatProjectPromoteBlock chat={chatProject} block={block} />;
   if (!gitCwd) return null;
 
   return (

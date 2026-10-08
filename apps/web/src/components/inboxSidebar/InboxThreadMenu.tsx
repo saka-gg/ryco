@@ -13,7 +13,9 @@ import {
   GitPullRequestIcon,
   FolderGit2Icon,
   FolderIcon,
+  FolderInputIcon,
   FolderMinusIcon,
+  FolderOpenIcon,
   FolderPlusIcon,
   GitForkIcon,
   HashIcon,
@@ -23,6 +25,7 @@ import {
   PinOffIcon,
   PowerOffIcon,
   Settings2Icon,
+  SquareArrowOutUpRightIcon,
   Trash2Icon,
   Undo2Icon,
   XIcon,
@@ -53,9 +56,11 @@ import type { InboxThreadActions } from "./InboxThreadRow";
  */
 type ActionGroup = "organize" | "session" | "copy" | "workspace" | "remove";
 
+type ActionPresentation = { readonly icon: LucideIcon; readonly group: ActionGroup };
+
 const ACTION_PRESENTATION: Record<
-  ThreadMenuActionId,
-  { readonly icon: LucideIcon; readonly group: ActionGroup }
+  Exclude<ThreadMenuActionId, `chat-extension:${string}`>,
+  ActionPresentation
 > = {
   "open-in-split": { icon: Columns2Icon, group: "organize" },
   pin: { icon: PinIcon, group: "organize" },
@@ -81,7 +86,19 @@ const ACTION_PRESENTATION: Record<
   unarchive: { icon: ArchiveRestoreIcon, group: "remove" },
   trash: { icon: Trash2Icon, group: "remove" },
   "discard-draft": { icon: XIcon, group: "remove" },
+  "chat-reveal-folder": { icon: FolderOpenIcon, group: "copy" },
+  "chat-open-folder-in-editor": { icon: SquareArrowOutUpRightIcon, group: "copy" },
+  "chat-copy-folder-path": { icon: FolderIcon, group: "copy" },
 };
+
+/** Chat menu extensions ("Turn into project…") sit with the folder actions. */
+const CHAT_EXTENSION_PRESENTATION: ActionPresentation = { icon: FolderInputIcon, group: "copy" };
+
+function actionPresentation(id: ThreadMenuActionId): ActionPresentation {
+  return id.startsWith("chat-extension:")
+    ? CHAT_EXTENSION_PRESENTATION
+    : ACTION_PRESENTATION[id as keyof typeof ACTION_PRESENTATION];
+}
 
 /** Actions that change server state; disabled when this connection cannot mutate. */
 const READ_ONLY_ACTIONS: ReadonlySet<ThreadMenuActionId> = new Set([
@@ -97,6 +114,9 @@ const READ_ONLY_ACTIONS: ReadonlySet<ThreadMenuActionId> = new Set([
   "workspace",
   "workspace:manage",
   "discard-draft",
+  "chat-reveal-folder",
+  "chat-open-folder-in-editor",
+  "chat-copy-folder-path",
 ]);
 
 export interface InboxSnoozePreset {
@@ -124,7 +144,7 @@ export function InboxThreadMenuItems(props: {
   const { row } = props;
   const actions = props.threadActions?.listThreadMenuActions(row.key) ?? [];
   const actionItem = (item: ThreadMenuActionItem): ReactNode => {
-    const Icon = ACTION_PRESENTATION[item.id].icon;
+    const Icon = actionPresentation(item.id).icon;
     if (item.children) {
       return (
         <MenuSub key={item.id}>
@@ -154,7 +174,7 @@ export function InboxThreadMenuItems(props: {
     );
   };
   const inGroup = (group: ActionGroup) =>
-    actions.filter((item) => ACTION_PRESENTATION[item.id].group === group).map(actionItem);
+    actions.filter((item) => actionPresentation(item.id).group === group).map(actionItem);
   const pullRequestUrl = props.pullRequest?.url;
 
   const groups: ReadonlyArray<readonly [key: string, items: ReactNode[]]> = [
