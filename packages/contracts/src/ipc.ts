@@ -27,6 +27,8 @@ import type {
 import type {
   GitReadLineBlameInput,
   GitReadLineBlameResult,
+  GitReadImageBlobInput,
+  GitReadImageBlobResult,
   GitLocalChangesInput,
   GitLocalChangesResult,
   GitApplyIndexPatchInput,
@@ -1165,6 +1167,7 @@ export interface EnvironmentApi {
   };
   vcs: {
     readLineBlame: (input: GitReadLineBlameInput) => Promise<GitReadLineBlameResult>;
+    readImageBlob: (input: GitReadImageBlobInput) => Promise<GitReadImageBlobResult>;
     readLocalChanges: (input: GitLocalChangesInput) => Promise<GitLocalChangesResult>;
     applyIndexPatch: (input: GitApplyIndexPatchInput) => Promise<void>;
     readComparison: (input: GitReadComparisonInput) => Promise<GitReadComparisonResult>;

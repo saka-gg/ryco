@@ -647,6 +647,32 @@ const collectOutput = Effect.fn("collectOutput")(function* <E>(
   };
 });
 
+/** Undecoded stdout for object contents; a partial object is never returned. */
+const collectOutputBytes = Effect.fn("collectOutputBytes")(function* <E>(
+  input: Pick<GitVcsDriver.ExecuteGitInput, "operation" | "cwd" | "args">,
+  stream: Stream.Stream<Uint8Array, E>,
+  maxOutputBytes: number,
+): Effect.fn.Return<Uint8Array, GitCommandError> {
+  const chunks: Uint8Array[] = [];
+  let bytes = 0;
+  yield* Stream.runForEach(stream, (chunk) => {
+    bytes += chunk.byteLength;
+    if (bytes > maxOutputBytes) {
+      return Effect.fail(
+        new GitCommandError({
+          operation: input.operation,
+          command: quoteGitCommand(input.args),
+          cwd: input.cwd,
+          detail: `${quoteGitCommand(input.args)} output exceeded ${maxOutputBytes} bytes.`,
+        }),
+      );
+    }
+    chunks.push(chunk);
+    return Effect.void;
+  }).pipe(Effect.mapError(toGitCommandError(input, "output stream failed.")));
+  return Buffer.concat(chunks, bytes);
+});
+
 const copyWorktreeDependencyInstallDirs = Effect.fn("copyWorktreeDependencyInstallDirs")(
   function* (input: {
     readonly cwd: string;
@@ -810,13 +836,17 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
 
         const [stdout, stderr, exitCode] = yield* Effect.all(
           [
-            collectOutput(
-              commandInput,
-              child.stdout,
-              maxOutputBytes,
-              truncateOutputAtMaxBytes,
-              input.progress?.onStdoutLine,
-            ),
+            input.stdoutBytes === true
+              ? collectOutputBytes(commandInput, child.stdout, maxOutputBytes).pipe(
+                  Effect.map((bytes) => ({ text: "", truncated: false, bytes })),
+                )
+              : collectOutput(
+                  commandInput,
+                  child.stdout,
+                  maxOutputBytes,
+                  truncateOutputAtMaxBytes,
+                  input.progress?.onStdoutLine,
+                ).pipe(Effect.map((output) => ({ ...output, bytes: undefined }))),
             collectOutput(
               commandInput,
               child.stderr,
@@ -856,6 +886,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
           stderr: stderr.text,
           stdoutTruncated: stdout.truncated,
           stderrTruncated: stderr.truncated,
+          ...(stdout.bytes !== undefined ? { stdoutBytes: stdout.bytes } : {}),
         } satisfies GitVcsDriver.ExecuteGitResult;
       });
 
