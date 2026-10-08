@@ -30,18 +30,13 @@ import {
   AGENT_CONTROL_MCP_LIST_LIMIT_DEFAULT,
   AGENT_CONTROL_MCP_LIST_LIMIT_MAX,
   AGENT_CONTROL_MCP_AUTOMATION_LIST_PROMPT_MAX_CHARS,
-  AGENT_CONTROL_MCP_MESSAGE_LIMIT_DEFAULT,
   AGENT_CONTROL_MCP_MESSAGE_LIMIT_MAX,
-  AGENT_CONTROL_MCP_MESSAGE_TEXT_MAX_CHARS,
   AGENT_CONTROL_MCP_MODELS_PER_INSTANCE_MAX,
-  AGENT_CONTROL_MCP_READ_THREAD_TEXT_BUDGET_CHARS,
   AGENT_CONTROL_MCP_TOOLS,
   AGENT_CONTROL_MCP_TOOL_NAMES,
-  AGENT_CONTROL_MCP_WAIT_TIMEOUT_MS_DEFAULT,
   AGENT_CONTROL_MCP_WAIT_TIMEOUT_MS_MAX,
   AGENT_CONTROL_CAPABILITIES,
   AGENT_CONTROL_RISK_TAGS,
-  AGENT_CONTROL_TERMINAL_PROPOSAL_STATUSES,
   AgentControlMcpCapabilitiesResult,
   AgentControlAutomationId,
   AgentControlMcpDiagnosticsSummaryInput,
@@ -75,11 +70,9 @@ import {
   AgentControlMcpRecentActivityResult,
   AgentControlMcpCreateThreadsInput,
   AgentControlMcpContextResult,
-  AgentControlMcpControlRequestResult,
   AgentControlMcpListProjectsInput,
   AgentControlMcpListProjectsResult,
   AgentControlMcpListThreadsInput,
-  AgentControlMcpListThreadsResult,
   AgentControlMcpInterruptThreadInput,
   AgentControlMcpMutationResult,
   AgentControlMcpProposeProjectCreateInput,
@@ -88,30 +81,22 @@ import {
   AgentControlMcpProposeSettingsChangeInput,
   AgentControlMcpReadControlRequestInput,
   AgentControlMcpReadThreadInput,
-  AgentControlMcpReadThreadResult,
   AgentControlMcpSendMessageInput,
   AgentControlMcpSettingsSummaryResult,
   AgentControlMcpUpdateThreadInput,
   AgentControlMcpWaitForControlRequestInput,
-  OrchestrationThreadHistoryCursor,
-  type AgentControlMcpMessage,
   type AgentControlAutomation,
   type AgentControlMcpProviderInstanceSummary,
-  type AgentControlMcpThreadSummary,
   type AgentControlProposal,
-  type AgentControlProposalStatus,
   type AgentControlActionPlan,
   type AgentControlDeviceActionPlan,
   type AgentControlCapability,
-  type OrchestrationMessage,
   type OrchestrationProjectShell,
-  type OrchestrationThreadHistoryPageInfo,
-  type OrchestrationThreadShell,
   type ServerProvider,
   type ServerSettings,
   type ServerSettingsError,
 } from "@ryco/contracts";
-import { Duration, Effect, Option, Schema, Stream } from "effect";
+import { Effect, Option, Schema } from "effect";
 
 import type { ProjectionSnapshotQueryShape } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import type { DeviceServiceShape } from "../../device/Services/DeviceService.ts";
@@ -134,6 +119,15 @@ import {
   assertSafeAgentControlDeviceUrl,
   resolveAgentControlDeviceArtifact,
 } from "../deviceControl.ts";
+import {
+  ToolFailure,
+  clampLimit,
+  failTool,
+  listThreadsPage,
+  paginate,
+  readThreadPage,
+} from "./threadReads.ts";
+import { readControlRequestReceipt, waitForControlRequestReceipt } from "./proposalReads.ts";
 
 export interface AgentControlMcpToolDescriptor {
   readonly name: string;
@@ -190,15 +184,6 @@ export interface AgentControlMcpTools {
   ) => Effect.Effect<AgentControlMcpToolResult>;
 }
 
-/** Bounded, presentation-safe tool failure. Never carries internals. */
-class ToolFailure {
-  readonly _tag = "ToolFailure";
-  readonly reason: string;
-  constructor(reason: string) {
-    this.reason = reason;
-  }
-}
-
 interface PrivateDeviceContentResult {
   readonly _tag: "PrivateDeviceContentResult";
   readonly content: AgentControlMcpToolResult["content"];
@@ -209,8 +194,6 @@ const isPrivateDeviceContentResult = (value: unknown): value is PrivateDeviceCon
   value !== null &&
   "_tag" in value &&
   value._tag === "PrivateDeviceContentResult";
-
-const failTool = (reason: string) => Effect.fail(new ToolFailure(reason));
 
 const modelSelectionSchema = {
   type: "object",
@@ -301,7 +284,7 @@ const deviceMutationTargetRequired = [
   "expectedRecording",
 ] as const;
 
-const TOOL_DESCRIPTORS: ReadonlyArray<AgentControlMcpToolDescriptor> = [
+export const AGENT_CONTROL_MCP_TOOL_DESCRIPTORS: ReadonlyArray<AgentControlMcpToolDescriptor> = [
   {
     name: AGENT_CONTROL_MCP_TOOLS.context,
     description:
@@ -1025,103 +1008,7 @@ const readCapabilityForTool = (name: string): AgentControlCapability => {
   return AGENT_CONTROL_CAPABILITIES.read;
 };
 
-const clampLimit = (value: number | undefined, fallback: number, max: number): number =>
-  Math.min(value ?? fallback, max);
-
-// ── List cursors ──────────────────────────────────────────────────────
-//
-// Opaque `acp1.<base64url json>` cursors over the stable
-// `(createdAt, id)` ascending ordering of the shell snapshot.
-
-interface ListCursorOrder {
-  readonly createdAt: string;
-  readonly id: string;
-}
-
-const LIST_CURSOR_PREFIX = "acp1.";
-
-const encodeListCursor = (kind: "projects" | "threads", after: ListCursorOrder): string =>
-  `${LIST_CURSOR_PREFIX}${Buffer.from(JSON.stringify({ v: 1, kind, after }), "utf8").toString("base64url")}`;
-
-const decodeListCursor = (kind: "projects" | "threads", cursor: string): ListCursorOrder | null => {
-  if (!cursor.startsWith(LIST_CURSOR_PREFIX)) return null;
-  try {
-    const decoded: unknown = JSON.parse(
-      Buffer.from(cursor.slice(LIST_CURSOR_PREFIX.length), "base64url").toString("utf8"),
-    );
-    if (typeof decoded !== "object" || decoded === null) return null;
-    const record = decoded as Record<string, unknown>;
-    const after = record.after as Record<string, unknown> | undefined;
-    if (
-      record.v !== 1 ||
-      record.kind !== kind ||
-      typeof after?.createdAt !== "string" ||
-      typeof after?.id !== "string"
-    ) {
-      return null;
-    }
-    return { createdAt: after.createdAt, id: after.id };
-  } catch {
-    return null;
-  }
-};
-
-const compareOrder = (a: ListCursorOrder, b: ListCursorOrder): number =>
-  a.createdAt < b.createdAt
-    ? -1
-    : a.createdAt > b.createdAt
-      ? 1
-      : a.id < b.id
-        ? -1
-        : a.id > b.id
-          ? 1
-          : 0;
-
-interface ListPage<T> {
-  readonly items: ReadonlyArray<T>;
-  readonly nextCursor: string | null;
-}
-
-const paginate = <T>(input: {
-  readonly kind: "projects" | "threads";
-  readonly rows: ReadonlyArray<T>;
-  readonly order: (row: T) => ListCursorOrder;
-  readonly limit: number;
-  readonly cursor: string | undefined;
-}): ListPage<T> | null => {
-  let after: ListCursorOrder | null = null;
-  if (input.cursor !== undefined) {
-    after = decodeListCursor(input.kind, input.cursor);
-    if (after === null) return null;
-  }
-  const sorted = input.rows.toSorted((a, b) => compareOrder(input.order(a), input.order(b)));
-  const startFrom = after;
-  const filtered =
-    startFrom === null
-      ? sorted
-      : sorted.filter((row) => compareOrder(input.order(row), startFrom) > 0);
-  const items = filtered.slice(0, input.limit);
-  const last = items.at(-1);
-  const nextCursor =
-    filtered.length > input.limit && last !== undefined
-      ? encodeListCursor(input.kind, input.order(last))
-      : null;
-  return { items, nextCursor };
-};
-
 // ── Result mapping ────────────────────────────────────────────────────
-
-const toThreadSummary = (shell: OrchestrationThreadShell): AgentControlMcpThreadSummary => ({
-  threadId: shell.id,
-  projectId: shell.projectId,
-  title: shell.title,
-  status: shell.session?.status ?? "idle",
-  activeTurnId: shell.session?.activeTurnId ?? null,
-  providerInstanceId: shell.session?.providerInstanceId ?? null,
-  archived: shell.archivedAt !== null,
-  createdAt: shell.createdAt,
-  updatedAt: shell.updatedAt,
-});
 
 const toAutomationSummary = (automation: AgentControlAutomation, fullPrompt = false) => {
   const prompt = automation.definition.execution.prompt;
@@ -1146,45 +1033,6 @@ const toAutomationSummary = (automation: AgentControlAutomation, fullPrompt = fa
     createdAt: automation.createdAt,
     updatedAt: automation.updatedAt,
   };
-};
-
-const toMcpMessage = (message: OrchestrationMessage): AgentControlMcpMessage => {
-  const truncated = message.text.length > AGENT_CONTROL_MCP_MESSAGE_TEXT_MAX_CHARS;
-  return {
-    messageId: message.id,
-    role: message.role,
-    text: truncated
-      ? message.text.slice(0, AGENT_CONTROL_MCP_MESSAGE_TEXT_MAX_CHARS)
-      : message.text,
-    truncated,
-    turnId: message.turnId,
-    attachmentCount: message.attachments?.length ?? 0,
-    createdAt: message.createdAt,
-  };
-};
-
-/**
- * Enforce the aggregate transcript budget over an ascending-order page.
- * Newest messages keep their text; once the budget is exhausted walking
- * backwards, older messages are truncated (possibly to empty) and
- * flagged. The message set itself is untouched, so history cursors stay
- * exact, and the bounded page can never blow the listener's response cap.
- */
-const applyTranscriptTextBudget = (
-  messages: ReadonlyArray<AgentControlMcpMessage>,
-): ReadonlyArray<AgentControlMcpMessage> => {
-  let remaining = AGENT_CONTROL_MCP_READ_THREAD_TEXT_BUDGET_CHARS;
-  const bounded = [...messages];
-  for (let index = bounded.length - 1; index >= 0; index -= 1) {
-    const message = bounded[index]!;
-    if (message.text.length <= remaining) {
-      remaining -= message.text.length;
-      continue;
-    }
-    bounded[index] = { ...message, text: message.text.slice(0, remaining), truncated: true };
-    remaining = 0;
-  }
-  return bounded;
 };
 
 const toInstanceSummary = (provider: ServerProvider): AgentControlMcpProviderInstanceSummary => {
@@ -1226,14 +1074,6 @@ const proposalVisibleToSession = (
   proposal.principal.kind === "provider-session" &&
   proposal.principal.threadId === session.threadId;
 
-const waitConditionMet = (
-  status: AgentControlProposalStatus,
-  waitFor: "decided" | "terminal",
-): boolean =>
-  waitFor === "terminal"
-    ? AGENT_CONTROL_TERMINAL_PROPOSAL_STATUSES.includes(status)
-    : status !== "pending-user-approval";
-
 // ── Factory ───────────────────────────────────────────────────────────
 
 export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentControlMcpTools => {
@@ -1257,7 +1097,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
   const descriptorsFor = (session: AgentControlSessionRecord) =>
     deps.policy.isEnabled.pipe(
       Effect.map((enabled) =>
-        TOOL_DESCRIPTORS.filter((descriptor) => {
+        AGENT_CONTROL_MCP_TOOL_DESCRIPTORS.filter((descriptor) => {
           // Providers discover and cache tools before the first turn starts.
           // Discovery is session-scoped; callTool enforces exact-turn authority.
           if (!enabled) return false;
@@ -1301,23 +1141,6 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
             : new ToolFailure("Capability denied."),
         ),
       );
-
-  const readProposalForSession = (
-    session: AgentControlSessionRecord,
-    proposalId: AgentControlProposal["proposalId"],
-  ) =>
-    deps.proposals.getProposal(proposalId).pipe(
-      Effect.mapError((error) =>
-        error._tag === "AgentControlDisabledError"
-          ? new ToolFailure("Agent Control is disabled.")
-          : new ToolFailure("Control request read failed."),
-      ),
-      Effect.flatMap((proposal) =>
-        Option.isSome(proposal) && proposalVisibleToSession(proposal.value, session)
-          ? Effect.succeed(proposal.value)
-          : failTool("Control request not found."),
-      ),
-    );
 
   const context = (session: AgentControlSessionRecord) =>
     Effect.gen(function* () {
@@ -2409,155 +2232,37 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
     });
 
   const listThreads = (_session: AgentControlSessionRecord, args: unknown) =>
-    Effect.gen(function* () {
-      const input = yield* decodeArgs(AgentControlMcpListThreadsInput, args);
-      const limit = clampLimit(
-        input.limit,
-        AGENT_CONTROL_MCP_LIST_LIMIT_DEFAULT,
-        AGENT_CONTROL_MCP_LIST_LIMIT_MAX,
-      );
-      const snapshot = yield* deps.projections
-        .getShellSnapshot()
-        .pipe(Effect.mapError(() => new ToolFailure("Thread list read failed.")));
-      const rows = snapshot.threads.filter(
-        (thread) =>
-          (input.projectId === undefined || thread.projectId === input.projectId) &&
-          (input.includeArchived === true || thread.archivedAt === null),
-      );
-      const page = paginate({
-        kind: "threads",
-        rows,
-        order: (thread) => ({ createdAt: thread.createdAt, id: thread.id }),
-        limit,
-        cursor: input.cursor,
-      });
-      if (page === null) return yield* failTool("Invalid cursor.");
-      return Schema.encodeSync(AgentControlMcpListThreadsResult)({
-        threads: page.items.map(toThreadSummary),
-        nextCursor: page.nextCursor,
-      });
-    });
+    decodeArgs(AgentControlMcpListThreadsInput, args).pipe(
+      Effect.flatMap((input) => listThreadsPage(deps.projections, input)),
+    );
 
   const readThread = (_session: AgentControlSessionRecord, args: unknown) =>
-    Effect.gen(function* () {
-      const input = yield* decodeArgs(AgentControlMcpReadThreadInput, args);
-      const limit = clampLimit(
-        input.messageLimit,
-        AGENT_CONTROL_MCP_MESSAGE_LIMIT_DEFAULT,
-        AGENT_CONTROL_MCP_MESSAGE_LIMIT_MAX,
-      );
-      const shell = yield* deps.projections
-        .getThreadShellById(input.threadId)
-        .pipe(Effect.mapError(() => new ToolFailure("Thread read failed.")));
-      if (Option.isNone(shell)) return yield* failTool("Thread not found.");
-
-      const getThreadWindow = deps.projections.getThreadWindow;
-      const getThreadHistoryPage = deps.projections.getThreadHistoryPage;
-      if (getThreadWindow === undefined || getThreadHistoryPage === undefined) {
-        return yield* failTool("Thread history is unavailable.");
-      }
-
-      const mapHistoryError = (error: { readonly _tag: string; readonly reason?: string }) =>
-        error._tag === "OrchestrationThreadHistoryError"
-          ? error.reason === "thread-not-found"
-            ? new ToolFailure("Thread not found.")
-            : new ToolFailure("Invalid or stale cursor.")
-          : new ToolFailure("Thread read failed.");
-
-      let messages: ReadonlyArray<OrchestrationMessage>;
-      let pageInfo: OrchestrationThreadHistoryPageInfo;
-      if (input.cursor === undefined) {
-        const window = yield* getThreadWindow({
-          threadId: input.threadId,
-          limits: { messages: limit, proposedPlans: 1, activities: 1, checkpoints: 1 },
-        }).pipe(Effect.mapError(mapHistoryError));
-        messages = window.thread.messages;
-        pageInfo = window.history.messages;
-      } else {
-        const cursor = Schema.decodeUnknownOption(OrchestrationThreadHistoryCursor)(input.cursor);
-        if (Option.isNone(cursor)) return yield* failTool("Invalid or stale cursor.");
-        const historyPage = yield* getThreadHistoryPage({
-          threadId: input.threadId,
-          collection: "messages",
-          mode: { kind: "before", cursor: cursor.value },
-          limit,
-        }).pipe(Effect.mapError(mapHistoryError));
-        if (historyPage.collection !== "messages") {
-          return yield* failTool("Thread read failed.");
-        }
-        messages = historyPage.items;
-        pageInfo = historyPage.page;
-      }
-
-      return Schema.encodeSync(AgentControlMcpReadThreadResult)({
-        thread: toThreadSummary(shell.value),
-        messages: applyTranscriptTextBudget(messages.map(toMcpMessage)),
-        hasMoreBefore: pageInfo.hasMoreBefore,
-        nextCursor: pageInfo.hasMoreBefore ? pageInfo.oldestCursor : null,
-      });
-    });
+    decodeArgs(AgentControlMcpReadThreadInput, args).pipe(
+      Effect.flatMap((input) => readThreadPage(deps.projections, input)),
+    );
 
   const readControlRequest = (session: AgentControlSessionRecord, args: unknown) =>
-    Effect.gen(function* () {
-      const input = yield* decodeArgs(AgentControlMcpReadControlRequestInput, args);
-      const proposal = yield* readProposalForSession(session, input.proposalId);
-      return Schema.encodeSync(AgentControlMcpControlRequestResult)({
-        receipt: toAgentControlProposalReceipt(proposal),
-      });
-    });
+    decodeArgs(AgentControlMcpReadControlRequestInput, args).pipe(
+      Effect.flatMap((input) =>
+        readControlRequestReceipt(deps.proposals, input.proposalId, (proposal) =>
+          proposalVisibleToSession(proposal, session),
+        ),
+      ),
+    );
 
   const waitForControlRequest = (session: AgentControlSessionRecord, args: unknown) =>
-    Effect.gen(function* () {
-      const input = yield* decodeArgs(AgentControlMcpWaitForControlRequestInput, args);
-      const waitFor = input.waitFor ?? "decided";
-      const timeoutMs = clampLimit(
-        input.timeoutMs,
-        AGENT_CONTROL_MCP_WAIT_TIMEOUT_MS_DEFAULT,
-        AGENT_CONTROL_MCP_WAIT_TIMEOUT_MS_MAX,
-      );
-
-      return yield* Effect.scoped(
-        Effect.gen(function* () {
-          // Subscribe before the initial read so no transition between the
-          // read and the stream start can be missed.
-          const subscription = yield* deps.proposalEvents.subscribe;
-          const current = yield* readProposalForSession(session, input.proposalId);
-          if (waitConditionMet(current.status, waitFor)) {
-            return Schema.encodeSync(AgentControlMcpControlRequestResult)({
-              receipt: toAgentControlProposalReceipt(current),
-              timedOut: false,
-            });
-          }
-
-          const matched = yield* Stream.fromSubscription(subscription).pipe(
-            Stream.filter(
-              (event) =>
-                event.proposal.proposalId === input.proposalId &&
-                proposalVisibleToSession(event.proposal, session) &&
-                waitConditionMet(event.proposal.status, waitFor),
-            ),
-            Stream.runHead,
-            Effect.timeoutOption(Duration.millis(timeoutMs)),
-            Effect.map(Option.flatten),
-          );
-
-          if (Option.isSome(matched)) {
-            return Schema.encodeSync(AgentControlMcpControlRequestResult)({
-              receipt: toAgentControlProposalReceipt(matched.value.proposal),
-              timedOut: false,
-            });
-          }
-
-          // Timed out (or the feed shut down): return the freshest state —
-          // the read sweeps expiry first, so an overdue proposal converges.
-          const latest = yield* readProposalForSession(session, input.proposalId);
-          return Schema.encodeSync(AgentControlMcpControlRequestResult)({
-            receipt: toAgentControlProposalReceipt(latest),
-            timedOut: !waitConditionMet(latest.status, waitFor),
-          });
+    decodeArgs(AgentControlMcpWaitForControlRequestInput, args).pipe(
+      Effect.flatMap((input) =>
+        waitForControlRequestReceipt({
+          proposals: deps.proposals,
+          proposalEvents: deps.proposalEvents,
+          proposalId: input.proposalId,
+          waitFor: input.waitFor,
+          timeoutMs: input.timeoutMs,
+          visible: (proposal) => proposalVisibleToSession(proposal, session),
         }),
-      );
-    });
+      ),
+    );
 
   const callTool: AgentControlMcpTools["callTool"] = (session, name, args) => {
     const handler = (
@@ -2728,7 +2433,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
   };
 
   return {
-    descriptors: TOOL_DESCRIPTORS,
+    descriptors: AGENT_CONTROL_MCP_TOOL_DESCRIPTORS,
     descriptorsFor,
     hasTool: (name) => toolNames.has(name),
     isWriteTool: (name) => WRITE_TOOL_NAMES.has(name),

@@ -115,6 +115,36 @@ The default connection can list allowed projects, request one task at a time, an
 tasks created by that integration. It covers current and future projects, allows 60 control calls
 per minute, and has no expiry. Every requested Ryco mutation still needs approval.
 
+### Standalone read grants
+
+Read access beyond the integration's own tasks is opt-in. Each grant is off by default, is set per
+integration on the Integrations page, and only reaches projects inside the integration's project
+scope. A thread, project, or workspace outside that scope reads exactly like one that does not
+exist.
+
+| Grant                      | Tools                                                                                                      |
+| -------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `external.threads.read`    | `ryco_list_threads`, `ryco_read_thread`, `ryco_search_threads`, `ryco_wait_threads`, `ryco_inspect_thread` |
+| `external.reviews.read`    | `ryco_read_thread_diff` and the `review` section of `ryco_inspect_thread`                                  |
+| `external.files.read`      | `ryco_read_thread_file`                                                                                    |
+| `external.workspaces.read` | `ryco_read_project`, `ryco_list_workspaces`, `ryco_read_workspace`                                         |
+
+These tools return the same bounded, redacted results as the private-session tools, with two
+differences. Standalone inspection never returns terminal output, because that is where secrets
+most often appear. Workspace reads have no calling thread, so no workspace is reported as
+`current`. `ryco_wait_threads` re-checks the integration on every poll, so revoking a grant, narrowing
+the scope, or disabling Agent Control ends a wait in progress. Workspace files can include local
+configuration such as `.env`, so grant `external.files.read` only to clients you would also let
+read the checkout directly.
+
+Integrations that can request tasks or automations also get `ryco_read_control_request` and
+`ryco_wait_for_control_request`. They return receipts only for requests that integration created,
+for example an automation proposal awaiting approval.
+
+Standalone integrations cannot send messages, interrupt or update threads, plan or propose
+workspace lifecycle changes, manage projects or settings, or use devices, the computer, or the
+browser.
+
 ## Repair and disconnect
 
 Use **Repair** after an interrupted install, a missing credential file, or a failed protocol check.
@@ -193,8 +223,8 @@ leave the checkout removed while its Ryco record remains. Recovery never repeats
 or recreates user files; inspect current state and prepare a new approved plan for any
 remaining work. A failed receipt is not a claim that nothing changed.
 
-Standalone integrations retain their existing task-oriented grants and catalog; they do
-not advertise or accept workspace lifecycle tools. This does not expand their authority to
-other Ryco sessions or workspace histories. The private catalog is shared across supported
+Standalone integrations with `external.workspaces.read` can list and read workspaces in
+allowed projects, but they do not advertise or accept the plan and propose lifecycle tools.
+This does not expand their authority to other Ryco sessions or workspace histories. The private catalog is shared across supported
 provider injection paths. No hosted, mobile authorization, or service-worker policy changes
 are involved.

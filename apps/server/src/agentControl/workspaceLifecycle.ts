@@ -115,9 +115,13 @@ export const workspacePlanLifecycleAction = (
 export class AgentControlWorkspaces extends Context.Service<
   AgentControlWorkspaces,
   {
+    /**
+     * `caller` is the requesting thread, whose workspace is protected as current.
+     * `null` is a standalone reader without a Ryco thread: no workspace is current.
+     */
     readonly list: (
       projectId: ProjectId,
-      caller: ThreadId,
+      caller: ThreadId | null,
       after?: string,
       limit?: number,
     ) => Effect.Effect<
@@ -127,7 +131,7 @@ export class AgentControlWorkspaces extends Context.Service<
     readonly read: (
       projectId: ProjectId,
       workspaceId: string,
-      caller: ThreadId,
+      caller: ThreadId | null,
     ) => Effect.Effect<AgentControlWorkspaceState, AgentControlPlanValidationError>;
     readonly revalidate: (
       plan: AgentControlWorkspaceLifecyclePlan,
@@ -142,12 +146,12 @@ export const AgentControlWorkspacesLive = Layer.effect(
     const projections = yield* ProjectionSnapshotQuery;
     const policy = yield* WorkspaceAccessPolicy;
     const git = yield* GitVcsDriver;
-    const load = (projectId: ProjectId, callerId: ThreadId) =>
+    const load = (projectId: ProjectId, callerId: ThreadId | null) =>
       Effect.gen(function* () {
         const snapshot = yield* projections.getShellSnapshot();
-        const caller = snapshot.threads.find((t) => t.id === callerId);
+        const caller = callerId === null ? null : snapshot.threads.find((t) => t.id === callerId);
         const project = snapshot.projects.find((p) => p.id === projectId);
-        if (!project || caller?.projectId !== projectId)
+        if (!project || caller === undefined || (caller !== null && caller.projectId !== projectId))
           return yield* fail("Project scope denied.");
         const rows = (snapshot.worktrees ?? []).filter((w) => w.projectId === projectId);
         const groups = new Map<
@@ -230,8 +234,9 @@ export const AgentControlWorkspacesLive = Layer.effect(
           archivedAt: row?.archivedAt ?? null,
           main: row?.origin === "main" || same(directory, project.workspaceRoot),
           current:
-            same(directory, caller.worktreePath ?? project.workspaceRoot) ||
-            sessions.some((t) => t.id === caller.id),
+            caller !== null &&
+            (same(directory, caller.worktreePath ?? project.workspaceRoot) ||
+              sessions.some((t) => t.id === caller.id)),
           checkout: "unavailable",
           gitRegistered: null,
           repository: null,
@@ -283,7 +288,7 @@ export const AgentControlWorkspacesLive = Layer.effect(
           ],
         };
       });
-    const read = (projectId: ProjectId, workspaceId: string, caller: ThreadId) =>
+    const read = (projectId: ProjectId, workspaceId: string, caller: ThreadId | null) =>
       Effect.gen(function* () {
         const context = yield* load(projectId, caller);
         const group = context.groups.get(workspaceId);

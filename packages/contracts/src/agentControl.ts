@@ -229,6 +229,10 @@ export const AGENT_CONTROL_CAPABILITIES = {
   externalManageAutomations: AgentControlCapability.make("external.automations.manage"),
   externalReadActivity: AgentControlCapability.make("external.activity.read"),
   externalReadDiagnostics: AgentControlCapability.make("external.diagnostics.read"),
+  externalReadThreads: AgentControlCapability.make("external.threads.read"),
+  externalReadReviews: AgentControlCapability.make("external.reviews.read"),
+  externalReadFiles: AgentControlCapability.make("external.files.read"),
+  externalReadWorkspaces: AgentControlCapability.make("external.workspaces.read"),
 } as const;
 
 // ── Action plans ──────────────────────────────────────────────────────
@@ -2391,6 +2395,18 @@ export const AGENT_CONTROL_EXTERNAL_MCP_TOOLS = {
   orchestrationEvents: "ryco_orchestration_events",
   providerRuntimeEvents: "ryco_provider_runtime_events",
   diagnosticsSummary: "ryco_diagnostics_summary",
+  readControlRequest: "ryco_read_control_request",
+  waitForControlRequest: "ryco_wait_for_control_request",
+  listThreads: "ryco_list_threads",
+  readThread: "ryco_read_thread",
+  searchThreads: "ryco_search_threads",
+  waitThreads: "ryco_wait_threads",
+  inspectThread: "ryco_inspect_thread",
+  readThreadDiff: "ryco_read_thread_diff",
+  readThreadFile: "ryco_read_thread_file",
+  readProject: "ryco_read_project",
+  listWorkspaces: "ryco_list_workspaces",
+  readWorkspace: "ryco_read_workspace",
 } as const;
 export type AgentControlExternalMcpToolName =
   (typeof AGENT_CONTROL_EXTERNAL_MCP_TOOLS)[keyof typeof AGENT_CONTROL_EXTERNAL_MCP_TOOLS];
