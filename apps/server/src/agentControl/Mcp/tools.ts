@@ -1,11 +1,10 @@
-import { AgentControlWorkspaces, workspacePlanBlockers } from "../workspaceLifecycle.ts";
+import { AgentControlWorkspaces } from "../workspaceLifecycle.ts";
 import { computeAgentControlPlanDigest } from "../planDigest.ts";
 import {
   AgentControlListWorkspacesInput,
   AgentControlReadWorkspaceInput,
   AgentControlPlanWorkspaceInput,
   AgentControlProposeWorkspaceInput,
-  type AgentControlWorkspaceLifecyclePlan,
 } from "@ryco/contracts";
 /**
  * Read and proposal-backed mutation catalog for the internal Agent Control MCP endpoint.
@@ -36,7 +35,6 @@ import {
   AGENT_CONTROL_MCP_TOOL_NAMES,
   AGENT_CONTROL_MCP_WAIT_TIMEOUT_MS_MAX,
   AGENT_CONTROL_CAPABILITIES,
-  AGENT_CONTROL_RISK_TAGS,
   AgentControlMcpCapabilitiesResult,
   AgentControlAutomationId,
   AgentControlMcpDiagnosticsSummaryInput,
@@ -128,6 +126,16 @@ import {
   readThreadPage,
 } from "./threadReads.ts";
 import { readControlRequestReceipt, waitForControlRequestReceipt } from "./proposalReads.ts";
+import {
+  interruptThreadPlan,
+  planWorkspaceLifecycle,
+  sendMessagePlan,
+  updateThreadPlan,
+} from "./controlPlans.ts";
+import {
+  agentControlPromptSummaryForPlan,
+  agentControlRiskTagsForPlan,
+} from "../proposalPresentation.ts";
 
 export interface AgentControlMcpToolDescriptor {
   readonly name: string;
@@ -1193,114 +1201,6 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
       });
     });
 
-  const riskTagsForPlan = (plan: AgentControlActionPlan) => {
-    switch (plan.kind) {
-      case "createThreads": {
-        const tags = [
-          AGENT_CONTROL_RISK_TAGS.createsThreads,
-          AGENT_CONTROL_RISK_TAGS.startsProviderTurn,
-        ];
-        if (plan.entries.some((entry) => entry.envMode === "local")) {
-          tags.push(AGENT_CONTROL_RISK_TAGS.sharedLocalCheckout);
-        }
-        if (plan.entries.some((entry) => entry.runtimeMode === "full-access")) {
-          tags.push(AGENT_CONTROL_RISK_TAGS.elevatedRuntimeMode);
-        }
-        return tags;
-      }
-      case "sendMessage":
-        return [AGENT_CONTROL_RISK_TAGS.startsProviderTurn];
-      case "interruptThread":
-        return [AGENT_CONTROL_RISK_TAGS.interruptsThread];
-      case "updateThread":
-        return [AGENT_CONTROL_RISK_TAGS.modifiesThreadMetadata];
-      case "workspaceLifecycle":
-        return [AGENT_CONTROL_RISK_TAGS.workspaceLifecycle];
-      case "createProject":
-        return [AGENT_CONTROL_RISK_TAGS.createsProject];
-      case "updateProject":
-        return [AGENT_CONTROL_RISK_TAGS.modifiesProjectMetadata];
-      case "removeProject":
-        return [
-          AGENT_CONTROL_RISK_TAGS.removesProject,
-          ...(plan.expectedThreadIds.length > 0 ? [AGENT_CONTROL_RISK_TAGS.removesThreads] : []),
-        ];
-      case "changeSettings":
-        return [AGENT_CONTROL_RISK_TAGS.changesSettings];
-      case "createAutomation":
-        return [AGENT_CONTROL_RISK_TAGS.createsAutomation];
-      case "updateAutomation":
-        return [AGENT_CONTROL_RISK_TAGS.modifiesAutomation];
-      case "cancelAutomation":
-        return [AGENT_CONTROL_RISK_TAGS.cancelsAutomation];
-      case "automationRun":
-        return [
-          AGENT_CONTROL_RISK_TAGS.scheduledRun,
-          AGENT_CONTROL_RISK_TAGS.createsThreads,
-          AGENT_CONTROL_RISK_TAGS.startsProviderTurn,
-        ];
-      case "deviceOpenUrl":
-        return [AGENT_CONTROL_RISK_TAGS.deviceMutation, AGENT_CONTROL_RISK_TAGS.deviceOpenWorld];
-      case "deviceBoot":
-      case "deviceAttach":
-      case "deviceDetach":
-      case "deviceStartRecording":
-      case "deviceStopRecording":
-      case "deviceShutdown":
-        return [AGENT_CONTROL_RISK_TAGS.deviceMutation, AGENT_CONTROL_RISK_TAGS.deviceLifecycle];
-      case "deviceInstall":
-      case "deviceLaunch":
-      case "deviceTap":
-      case "deviceSwipe":
-      case "devicePressButton":
-        return [AGENT_CONTROL_RISK_TAGS.deviceMutation];
-    }
-  };
-
-  const promptSummaryForPlan = (plan: AgentControlActionPlan) => {
-    switch (plan.kind) {
-      case "createThreads":
-        return `Create ${plan.entries.length} thread${plan.entries.length === 1 ? "" : "s"}`;
-      case "sendMessage":
-        return `Send a message to thread ${plan.threadId}`;
-      case "interruptThread":
-        return `Interrupt thread ${plan.threadId}`;
-      case "updateThread":
-        return `Update thread ${plan.threadId}`;
-      case "workspaceLifecycle":
-        return `${plan.action} workspace ${plan.expected.workspaceId}; ${plan.checkoutMode}; ${plan.sessions} sessions; ${plan.deleteBranch ? "delete" : "retain"} branch`;
-      case "createProject":
-        return `Create project ${plan.title}`;
-      case "updateProject":
-        return `Update project ${plan.projectId}`;
-      case "removeProject":
-        return `Unlink project ${plan.expected.title}; workspace files will be retained`;
-      case "changeSettings":
-        return `Change ${plan.change.kind}`;
-      case "createAutomation":
-        return `Create automation ${plan.automationId}; each run requires separate approval`;
-      case "updateAutomation":
-        return `Update automation ${plan.automationId} from revision ${plan.before.revision}`;
-      case "cancelAutomation":
-        return `Cancel future runs for automation ${plan.automationId}`;
-      case "automationRun":
-        return `Approve scheduled run ${plan.runId}`;
-      case "deviceBoot":
-      case "deviceAttach":
-      case "deviceDetach":
-      case "deviceInstall":
-      case "deviceLaunch":
-      case "deviceOpenUrl":
-      case "deviceTap":
-      case "deviceSwipe":
-      case "devicePressButton":
-      case "deviceStartRecording":
-      case "deviceStopRecording":
-      case "deviceShutdown":
-        return plan.executionSummary;
-    }
-  };
-
   const submitMutation = (input: {
     readonly session: AgentControlSessionRecord;
     readonly authority: AgentControlTurnAuthority;
@@ -1322,8 +1222,8 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
         principal,
         requestId: input.requestId,
         plan: input.plan,
-        riskTags: riskTagsForPlan(input.plan),
-        promptSummary: promptSummaryForPlan(input.plan),
+        riskTags: agentControlRiskTagsForPlan(input.plan),
+        promptSummary: agentControlPromptSummaryForPlan(input.plan),
         now: now.toISOString(),
         expiresAt: new Date(now.getTime() + 15 * 60_000).toISOString(),
       });
@@ -1372,12 +1272,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
         session,
         authority,
         requestId: input.requestId,
-        plan: {
-          kind: "sendMessage",
-          threadId: input.threadId,
-          text: input.text,
-          delivery: input.delivery,
-        },
+        plan: sendMessagePlan(input),
       });
     });
 
@@ -1392,11 +1287,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
         session,
         authority,
         requestId: input.requestId,
-        plan: {
-          kind: "interruptThread",
-          threadId: input.threadId,
-          ...(input.turnId === undefined ? {} : { turnId: input.turnId }),
-        },
+        plan: interruptThreadPlan(input),
       });
     });
 
@@ -1411,19 +1302,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
         session,
         authority,
         requestId: input.requestId,
-        plan: {
-          kind: "updateThread",
-          threadId: input.threadId,
-          ...(input.title === undefined ? {} : { title: input.title }),
-          ...(input.archived === undefined ? {} : { archived: input.archived }),
-          ...(input.persistentGoal === undefined ? {} : { persistentGoal: input.persistentGoal }),
-          ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
-          ...(input.runtimeMode === undefined ? {} : { runtimeMode: input.runtimeMode }),
-          ...(input.interactionMode === undefined
-            ? {}
-            : { interactionMode: input.interactionMode }),
-          ...(input.tokenMode === undefined ? {} : { tokenMode: input.tokenMode }),
-        },
+        plan: updateThreadPlan(input),
       });
     });
 
@@ -1446,25 +1325,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
       }
       if (name === AGENT_CONTROL_MCP_TOOLS.planWorkspace) {
         const input = yield* decodeArgs(AgentControlPlanWorkspaceInput, args);
-        const expected = yield* workspaces.read(
-          input.projectId,
-          input.workspaceId,
-          session.threadId,
-        );
-        const plan: AgentControlWorkspaceLifecyclePlan = {
-          kind: "workspaceLifecycle",
-          projectId: input.projectId,
-          expected,
-          action: input.action,
-          checkoutMode: input.checkoutMode,
-          sessions: input.sessions,
-          deleteBranch: input.deleteBranch,
-        };
-        return {
-          plan,
-          planDigest: computeAgentControlPlanDigest(plan),
-          blockers: workspacePlanBlockers(plan),
-        };
+        return yield* planWorkspaceLifecycle(workspaces, input, session.threadId);
       }
       if (!authority) return yield* failTool("Exact active-turn authority required.");
       const input = yield* decodeArgs(AgentControlProposeWorkspaceInput, args);

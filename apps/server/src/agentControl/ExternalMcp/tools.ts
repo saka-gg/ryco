@@ -48,7 +48,11 @@ import {
   AgentControlReadWorkspaceInput,
   AgentControlSearchThreadsInput,
   AgentControlWaitThreadsInput,
-  AGENT_CONTROL_RISK_TAGS,
+  AgentControlMcpSendMessageInput,
+  AgentControlMcpInterruptThreadInput,
+  AgentControlMcpUpdateThreadInput,
+  AgentControlPlanWorkspaceInput,
+  AgentControlProposeWorkspaceInput,
   type AgentControlActionPlan,
   type AgentControlAutomation,
   type AgentControlExternalIntegration,
@@ -64,7 +68,18 @@ import type { CheckpointDiffQueryShape } from "../../checkpointing/Services/Chec
 import type { ProjectionSnapshotQueryShape } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import type { WorkspaceAccessPolicyShape } from "../../workspace/Services/WorkspaceAccessPolicy.ts";
 import type { WorkspaceFileSystemShape } from "../../workspace/Services/WorkspaceFileSystem.ts";
+import {
+  interruptThreadPlan,
+  planWorkspaceLifecycle,
+  sendMessagePlan,
+  updateThreadPlan,
+} from "../Mcp/controlPlans.ts";
 import { INSPECTION_TOOL_DESCRIPTORS } from "../Mcp/inspectionTools.ts";
+import { computeAgentControlPlanDigest } from "../planDigest.ts";
+import {
+  agentControlPromptSummaryForPlan,
+  agentControlRiskTagsForPlan,
+} from "../proposalPresentation.ts";
 import { readControlRequestReceipt, waitForControlRequestReceipt } from "../Mcp/proposalReads.ts";
 import {
   ToolFailure,
@@ -374,6 +389,32 @@ const readDescriptors: ReadonlyArray<ExternalMcpToolDescriptor> = (
   };
 });
 
+/** Thread and workspace control; every request still waits for Ryco user approval. */
+const controlDescriptors: ReadonlyArray<ExternalMcpToolDescriptor> = (
+  [
+    [
+      AGENT_CONTROL_EXTERNAL_MCP_TOOLS.sendMessage,
+      "Request approval to queue or steer a message into a thread in an allowed project. Targets above this integration's runtime or checkout grants are refused.",
+    ],
+    [
+      AGENT_CONTROL_EXTERNAL_MCP_TOOLS.interruptThread,
+      "Request approval to interrupt the running turn of a thread in an allowed project.",
+    ],
+    [
+      AGENT_CONTROL_EXTERNAL_MCP_TOOLS.updateThread,
+      "Request approval to rename, archive or restore, or change the model, goal, or modes of a thread in an allowed project. Runtime modes cannot exceed this integration's grants.",
+    ],
+    [
+      AGENT_CONTROL_EXTERNAL_MCP_TOOLS.planWorkspace,
+      "Read-only lifecycle preflight for a workspace in an allowed project. Returns the exact plan, digest, and blockers. Nothing changes.",
+    ],
+    [
+      AGENT_CONTROL_EXTERNAL_MCP_TOOLS.proposeWorkspace,
+      "Request approval for the exact plan returned by ryco_plan_workspace_lifecycle. Conversations are never deleted without an explicit sessions: delete plan. Reuse requestId for retries.",
+    ],
+  ] as const
+).map(([name, description]) => ({ name, description, inputSchema: internalInputSchema(name) }));
+
 const toolCapability = (name: string): AgentControlCapability | null => {
   switch (name) {
     case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.listAllowedProjects:
@@ -411,6 +452,13 @@ const toolCapability = (name: string): AgentControlCapability | null => {
     case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.listWorkspaces:
     case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.readWorkspace:
       return AGENT_CONTROL_CAPABILITIES.externalReadWorkspaces;
+    case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.sendMessage:
+    case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.interruptThread:
+    case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.updateThread:
+      return AGENT_CONTROL_CAPABILITIES.externalControlThreads;
+    case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.planWorkspace:
+    case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.proposeWorkspace:
+      return AGENT_CONTROL_CAPABILITIES.externalManageWorkspaces;
     default:
       return null;
   }
@@ -420,10 +468,17 @@ const isControlRequestTool = (name: string) =>
   name === AGENT_CONTROL_EXTERNAL_MCP_TOOLS.readControlRequest ||
   name === AGENT_CONTROL_EXTERNAL_MCP_TOOLS.waitForControlRequest;
 
+const isControlTool = (name: string) =>
+  controlDescriptors.some((descriptor) => descriptor.name === name);
+
 /** Control requests are only reachable by integrations that can create them. */
 const canCreateRequests = (integration: AgentControlExternalIntegration) =>
-  integration.capabilities.includes(AGENT_CONTROL_CAPABILITIES.externalCreateTask) ||
-  integration.capabilities.includes(AGENT_CONTROL_CAPABILITIES.externalManageAutomations);
+  [
+    AGENT_CONTROL_CAPABILITIES.externalCreateTask,
+    AGENT_CONTROL_CAPABILITIES.externalManageAutomations,
+    AGENT_CONTROL_CAPABILITIES.externalControlThreads,
+    AGENT_CONTROL_CAPABILITIES.externalManageWorkspaces,
+  ].some((capability) => integration.capabilities.includes(capability));
 
 const providerSummary = (provider: ServerProvider): AgentControlMcpProviderInstanceSummary => {
   const support = agentControlSupportForDriver(provider.driver);
@@ -452,7 +507,7 @@ export const makeExternalMcpTools = (deps: {
   readonly getProviders: Effect.Effect<ReadonlyArray<ServerProvider>>;
   readonly validator?: AgentControlActionValidatorShape;
   readonly proposals?: Pick<AgentControlProposalServiceShape, "submit"> &
-    Partial<Pick<AgentControlProposalServiceShape, "getProposal">>;
+    Partial<Pick<AgentControlProposalServiceShape, "getProposal" | "findByRequest">>;
   readonly proposalEvents?: Pick<AgentControlProposalEventsShape, "subscribe">;
   readonly automations?: AgentControlAutomationShape;
   readonly diagnostics?: AgentControlDiagnosticsShape;
@@ -463,7 +518,7 @@ export const makeExternalMcpTools = (deps: {
 }): ExternalMcpTools => {
   const names = new Set<string>(AGENT_CONTROL_EXTERNAL_MCP_TOOL_NAMES);
   const descriptorsFor = (integration: AgentControlExternalIntegration) =>
-    [...descriptors, ...readDescriptors].filter((descriptor) => {
+    [...descriptors, ...readDescriptors, ...controlDescriptors].filter((descriptor) => {
       if (isControlRequestTool(descriptor.name)) return canCreateRequests(integration);
       const capability = toolCapability(descriptor.name);
       return capability === null || integration.capabilities.includes(capability);
@@ -711,30 +766,36 @@ export const makeExternalMcpTools = (deps: {
       return yield* Effect.fail(new Error("Unavailable"));
     });
 
-  const riskTags = (plan: AgentControlActionPlan) => {
-    switch (plan.kind) {
-      case "createAutomation":
-        return [AGENT_CONTROL_RISK_TAGS.createsAutomation];
-      case "updateAutomation":
-        return [AGENT_CONTROL_RISK_TAGS.modifiesAutomation];
-      case "cancelAutomation":
-        return [AGENT_CONTROL_RISK_TAGS.cancelsAutomation];
-      default:
-        return [];
-    }
-  };
-
-  const submitAutomation = (
+  /**
+   * Submit an immutable proposal. External principals never qualify for
+   * routine authorization, so every plan waits for a Ryco user's approval.
+   * Validation details are presentation-safe and surface to the caller.
+   */
+  const submitExternal = (
     integration: AgentControlExternalIntegration,
     requestId: Parameters<AgentControlProposalServiceShape["submit"]>[0]["requestId"],
-    plan: Extract<
-      AgentControlActionPlan,
-      { kind: "createAutomation" | "updateAutomation" | "cancelAutomation" }
-    >,
+    plan: AgentControlActionPlan,
   ) =>
     Effect.gen(function* () {
       if (deps.validator === undefined || deps.proposals === undefined) {
-        return yield* Effect.fail(new Error("Unavailable"));
+        return yield* failTool("Control request creation is unavailable.");
+      }
+      // A retry after the target changed (for example once executed) must
+      // recover the original receipt instead of failing revalidation.
+      if (deps.proposals.findByRequest !== undefined) {
+        const existing = yield* deps.proposals.findByRequest(
+          { kind: "external-integration", integrationId: integration.integrationId },
+          requestId,
+        );
+        if (Option.isSome(existing)) {
+          if (existing.value.planDigest !== computeAgentControlPlanDigest(plan)) {
+            return yield* failTool("Request ID was already used with a different plan.");
+          }
+          return Schema.encodeSync(AgentControlMcpMutationResult)({
+            receipt: toAgentControlProposalReceipt(existing.value),
+            replayed: true,
+          });
+        }
       }
       const principal = yield* deps.validator.validateExternalSubmission({ integration, plan });
       const now = new Date();
@@ -742,8 +803,8 @@ export const makeExternalMcpTools = (deps: {
         principal,
         requestId,
         plan,
-        riskTags: riskTags(plan),
-        promptSummary: `${plan.kind} requires Ryco user approval`,
+        riskTags: agentControlRiskTagsForPlan(plan),
+        promptSummary: agentControlPromptSummaryForPlan(plan),
         now: now.toISOString(),
         expiresAt: new Date(now.getTime() + AGENT_CONTROL_EXTERNAL_PROPOSAL_TTL_MS).toISOString(),
       });
@@ -751,6 +812,58 @@ export const makeExternalMcpTools = (deps: {
         receipt: toAgentControlProposalReceipt(submitted.proposal),
         replayed: submitted.replayed,
       });
+    }).pipe(
+      Effect.mapError((error) => {
+        switch (error._tag) {
+          case "AgentControlPlanValidationError":
+            return new ToolFailure(error.detail.slice(0, 500));
+          case "AgentControlDuplicateRequestError":
+            return new ToolFailure("Request ID was already used with a different plan.");
+          default:
+            return error;
+        }
+      }),
+    );
+
+  const controlTool = (integrationId: AgentControlIntegrationId, name: string, args: unknown) =>
+    Effect.gen(function* () {
+      const capability = toolCapability(name);
+      if (capability === null) return yield* Effect.fail(new Error("Unknown external MCP tool"));
+      const integration = yield* deps.integrations.authorizeTool({
+        integrationId,
+        tool: name,
+        requiredCapability: capability,
+      });
+      switch (name) {
+        case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.sendMessage: {
+          const input = yield* decode(AgentControlMcpSendMessageInput, args);
+          return yield* submitExternal(integration, input.requestId, sendMessagePlan(input));
+        }
+        case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.interruptThread: {
+          const input = yield* decode(AgentControlMcpInterruptThreadInput, args);
+          return yield* submitExternal(integration, input.requestId, interruptThreadPlan(input));
+        }
+        case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.updateThread: {
+          const input = yield* decode(AgentControlMcpUpdateThreadInput, args);
+          return yield* submitExternal(integration, input.requestId, updateThreadPlan(input));
+        }
+        case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.planWorkspace: {
+          if (deps.workspaces === undefined)
+            return yield* failTool("Workspace service unavailable.");
+          const input = yield* decode(AgentControlPlanWorkspaceInput, args);
+          yield* requireAllowedProject(integration, input.projectId);
+          return yield* planWorkspaceLifecycle(deps.workspaces, input, null).pipe(
+            Effect.mapError((error) => new ToolFailure(error.detail.slice(0, 500))),
+          );
+        }
+        case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.proposeWorkspace: {
+          const input = yield* decode(AgentControlProposeWorkspaceInput, args);
+          yield* requireAllowedProject(integration, input.plan.projectId);
+          return yield* submitExternal(integration, input.requestId, input.plan);
+        }
+        default:
+          return yield* Effect.fail(new Error("Unknown external MCP tool"));
+      }
     });
 
   const execute = (integrationId: AgentControlIntegrationId, name: string, args: unknown) =>
@@ -763,7 +876,7 @@ export const makeExternalMcpTools = (deps: {
             displayName: integration.displayName,
             clientKind: integration.clientKind,
             notice:
-              "Every external task waits for explicit approval by a Ryco user before a thread is created.",
+              "Every request from this integration, including tasks, thread control, and workspace changes, waits for explicit approval by a Ryco user before anything changes.",
           });
         }
         case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.capabilities: {
@@ -877,7 +990,7 @@ export const makeExternalMcpTools = (deps: {
               .digest("hex")
               .slice(0, 32)}`,
           );
-          return yield* submitAutomation(integration, input.requestId, {
+          return yield* submitExternal(integration, input.requestId, {
             kind: "createAutomation",
             automationId,
             definition: {
@@ -918,7 +1031,7 @@ export const makeExternalMcpTools = (deps: {
           const nextOptions = input.options ?? execution.modelSelection.options;
           const nextBaseRef =
             input.baseRef === null ? undefined : (input.baseRef ?? execution.baseRef);
-          return yield* submitAutomation(integration, input.requestId, {
+          return yield* submitExternal(integration, input.requestId, {
             kind: "updateAutomation",
             automationId: current.automationId,
             before: {
@@ -962,7 +1075,7 @@ export const makeExternalMcpTools = (deps: {
           if (current.revision !== input.expectedRevision) {
             return yield* Effect.fail(new Error("Revision changed"));
           }
-          return yield* submitAutomation(integration, input.requestId, {
+          return yield* submitExternal(integration, input.requestId, {
             kind: "cancelAutomation",
             automationId: current.automationId,
             expected: {
@@ -1043,7 +1156,9 @@ export const makeExternalMcpTools = (deps: {
         case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.waitForControlRequest:
           return yield* controlRequestTool(integrationId, name, args);
         default:
-          return yield* readTool(integrationId, name, args);
+          return isControlTool(name)
+            ? yield* controlTool(integrationId, name, args)
+            : yield* readTool(integrationId, name, args);
       }
     });
 

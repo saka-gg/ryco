@@ -680,7 +680,7 @@ describe("AgentControl external MCP", () => {
     expect(value).not.toHaveProperty("credential");
   });
 
-  it("publishes the scoped task, automation, activity, diagnostics, and read tools", async () => {
+  it("publishes the scoped task, automation, activity, diagnostics, read, and control tools", async () => {
     const { AGENT_CONTROL_EXTERNAL_MCP_TOOL_NAMES } = await import("./agentControl.ts");
     expect([...AGENT_CONTROL_EXTERNAL_MCP_TOOL_NAMES]).toEqual([
       "ryco_overview",
@@ -711,6 +711,11 @@ describe("AgentControl external MCP", () => {
       "ryco_read_project",
       "ryco_list_workspaces",
       "ryco_read_workspace",
+      "ryco_send_message",
+      "ryco_interrupt_thread",
+      "ryco_update_thread",
+      "ryco_plan_workspace_lifecycle",
+      "ryco_propose_workspace_lifecycle",
     ]);
   });
 

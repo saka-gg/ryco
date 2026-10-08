@@ -11,6 +11,9 @@ import {
 import { Effect, Option, Schema } from "effect";
 import { describe, expect, it, vi } from "vitest";
 
+import { AgentControlPlanValidationError } from "../Errors.ts";
+import { computeAgentControlPlanDigest } from "../planDigest.ts";
+import { workspacePlan } from "../workspaceLifecycle.testSupport.ts";
 import { makeExternalMcpTools } from "./tools.ts";
 
 const now = "2026-10-08T00:00:00.000Z";
@@ -161,6 +164,20 @@ const fixture = (capabilities: ReadonlyArray<AgentControlCapability>) => {
       Option.some(proposalId === "proposal-other" ? proposal("other") : proposal(integrationId)),
     ),
   );
+  const validateExternalSubmission = vi.fn(
+    (_input: { readonly plan: unknown }): Effect.Effect<unknown, AgentControlPlanValidationError> =>
+      Effect.succeed({
+        kind: "external-integration",
+        integrationId,
+        projectId: "allowed",
+        runtimeMode: "approval-required",
+        envMode: "worktree",
+      }),
+  );
+  const submit = vi.fn((_input: Record<string, unknown>) =>
+    Effect.succeed({ proposal: proposal(integrationId), replayed: false }),
+  );
+  const findByRequest = vi.fn(() => Effect.succeed(Option.none<AgentControlProposal>()));
   const readFile = vi.fn(() => Effect.succeed({ contents: "file" }));
   const getFullThreadDiff = vi.fn(() => Effect.succeed({ diff: "patch" }));
   const assertExistingPath = vi.fn(({ path }: { readonly path: string }) => Effect.succeed(path));
@@ -174,7 +191,8 @@ const fixture = (capabilities: ReadonlyArray<AgentControlCapability>) => {
     tasks: {} as never,
     projections: projections as never,
     getProviders: Effect.succeed([]),
-    proposals: { submit: vi.fn(), getProposal } as never,
+    validator: { validateExternalSubmission } as never,
+    proposals: { submit, getProposal, findByRequest } as never,
     proposalEvents: { subscribe: Effect.never } as never,
     workspaces: workspaces as never,
     files: { readFile } as never,
@@ -189,6 +207,10 @@ const fixture = (capabilities: ReadonlyArray<AgentControlCapability>) => {
     projections,
     integrations,
     getProposal,
+    validateExternalSubmission,
+    submit,
+    findByRequest,
+    proposal,
     readFile,
     getFullThreadDiff,
     workspaces,
@@ -356,5 +378,153 @@ describe("external Agent Control read catalog", () => {
       timedOut: false,
       threads: [{ threadId: hiddenThread.id, error: [{ text: "Thread not found." }] }],
     });
+  });
+
+  it("advertises thread and workspace control only for their grants", () => {
+    const threads = fixture([C.externalControlThreads]);
+    const names = threads.tools.descriptorsFor(threads.integration()).map((tool) => tool.name);
+    expect(names).toEqual(
+      expect.arrayContaining([
+        T.sendMessage,
+        T.interruptThread,
+        T.updateThread,
+        T.readControlRequest,
+      ]),
+    );
+    expect(names).not.toContain(T.proposeWorkspace);
+    const workspaces = fixture([C.externalManageWorkspaces]);
+    const workspaceNames = workspaces.tools
+      .descriptorsFor(workspaces.integration())
+      .map((tool) => tool.name);
+    expect(workspaceNames).toEqual(expect.arrayContaining([T.planWorkspace, T.proposeWorkspace]));
+    expect(workspaceNames).not.toContain(T.sendMessage);
+  });
+
+  it("submits thread control as an approval proposal with shared presentation", async () => {
+    const { call, validateExternalSubmission, submit } = fixture([C.externalControlThreads]);
+    const result = await call(T.sendMessage, {
+      requestId: "send-1",
+      threadId: allowedThread.id,
+      text: "Continue.",
+      delivery: "queue",
+    });
+    expect(result.structuredContent).toMatchObject({
+      receipt: { proposalId: `proposal-${integrationId}` },
+      replayed: false,
+    });
+    expect(validateExternalSubmission.mock.calls[0]![0].plan).toEqual({
+      kind: "sendMessage",
+      threadId: allowedThread.id,
+      text: "Continue.",
+      delivery: "queue",
+    });
+    expect(submit.mock.calls[0]![0]).toMatchObject({
+      riskTags: ["starts-provider-turn"],
+      promptSummary: `Send a message to thread ${allowedThread.id}`,
+    });
+    expect(submit.mock.calls[0]![0]).not.toHaveProperty("authorizeRoutine");
+  });
+
+  it("replays a thread control request by id without revalidating a changed target", async () => {
+    const { call, findByRequest, validateExternalSubmission, proposal } = fixture([
+      C.externalControlThreads,
+    ]);
+    const plan = { kind: "interruptThread" as const, threadId: allowedThread.id };
+    findByRequest.mockReturnValue(
+      Effect.succeed(
+        Option.some({
+          ...proposal(integrationId),
+          planDigest: computeAgentControlPlanDigest(plan),
+        }),
+      ),
+    );
+    const replayed = await call(T.interruptThread, {
+      requestId: "interrupt-1",
+      threadId: allowedThread.id,
+    });
+    expect(replayed.structuredContent).toMatchObject({ replayed: true });
+    expect(validateExternalSubmission).not.toHaveBeenCalled();
+  });
+
+  it("surfaces validation details and refuses ungranted control before validation", async () => {
+    const refused = fixture([C.externalReadThreads]);
+    const denied = await refused.call(T.interruptThread, {
+      requestId: "interrupt-1",
+      threadId: allowedThread.id,
+    });
+    expect(text(denied)).toBe("External Agent Control request was refused.");
+    expect(refused.validateExternalSubmission).not.toHaveBeenCalled();
+
+    const granted = fixture([C.externalControlThreads]);
+    granted.validateExternalSubmission.mockReturnValueOnce(
+      Effect.fail(
+        new AgentControlPlanValidationError({
+          reason: "thread-unavailable",
+          detail: "Target thread is unavailable.",
+        }),
+      ),
+    );
+    const invalid = await granted.call(T.interruptThread, {
+      requestId: "interrupt-2",
+      threadId: hiddenThread.id,
+    });
+    expect(text(invalid)).toBe("Target thread is unavailable.");
+    expect(granted.submit).not.toHaveBeenCalled();
+  });
+
+  it("plans workspace lifecycle without a caller thread and only in allowed projects", async () => {
+    const { call, workspaces } = fixture([C.externalManageWorkspaces]);
+    workspaces.read.mockReturnValue(
+      Effect.succeed({ ...workspacePlan.expected, projectId: "allowed" }),
+    );
+    const args = {
+      workspaceId: "workspace",
+      action: "archive",
+      checkoutMode: "record-only",
+      sessions: "preserve",
+      deleteBranch: false,
+    };
+    expect(text(await call(T.planWorkspace, { ...args, projectId: "hidden" }))).toBe(
+      "Project not found.",
+    );
+    const planned = await call(T.planWorkspace, { ...args, projectId: "allowed" });
+    expect(planned.structuredContent).toMatchObject({
+      plan: { kind: "workspaceLifecycle", projectId: "allowed", action: "archive" },
+      planDigest: expect.any(String),
+    });
+    expect(workspaces.read).toHaveBeenCalledWith("allowed", "workspace", null);
+  });
+
+  it("replays a workspace proposal by request id and rejects a changed plan", async () => {
+    const plan = { ...workspacePlan, projectId: projects[0]!.id };
+    const { call, findByRequest, submit, proposal } = fixture([C.externalManageWorkspaces]);
+    findByRequest.mockReturnValue(
+      Effect.succeed(
+        Option.some({
+          ...proposal(integrationId),
+          planDigest: computeAgentControlPlanDigest(plan),
+        }),
+      ),
+    );
+    const replayed = await call(T.proposeWorkspace, { requestId: "workspace-1", plan });
+    expect(replayed.structuredContent).toMatchObject({ replayed: true });
+    expect(findByRequest).toHaveBeenCalledWith(
+      { kind: "external-integration", integrationId },
+      "workspace-1",
+    );
+    const changed = await call(T.proposeWorkspace, {
+      requestId: "workspace-1",
+      plan: { ...plan, deleteBranch: true },
+    });
+    expect(text(changed)).toBe("Request ID was already used with a different plan.");
+    expect(submit).not.toHaveBeenCalled();
+    expect(
+      text(
+        await call(T.proposeWorkspace, {
+          requestId: "workspace-2",
+          plan: { ...plan, projectId: "hidden" },
+        }),
+      ),
+    ).toBe("Project not found.");
   });
 });

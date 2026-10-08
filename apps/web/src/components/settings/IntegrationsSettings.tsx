@@ -114,6 +114,18 @@ const CAPABILITY_OPTIONS: ReadonlyArray<{
     description: "Read project preferences, workspace paths, and Git status without changing them.",
   },
   {
+    capability: AGENT_CONTROL_CAPABILITIES.externalControlThreads,
+    label: "Request thread control",
+    description:
+      "Propose messages, interrupts, and thread updates in allowed projects; each request needs approval.",
+  },
+  {
+    capability: AGENT_CONTROL_CAPABILITIES.externalManageWorkspaces,
+    label: "Request workspace changes",
+    description:
+      "Propose archiving, restoring, or deleting workspaces in allowed projects; each request needs approval.",
+  },
+  {
     capability: AGENT_CONTROL_CAPABILITIES.externalSharedCheckout,
     label: "Request shared checkout",
     description: "May request the local checkout; each request still needs approval.",
