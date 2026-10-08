@@ -1,5 +1,7 @@
 import { createInterface } from "node:readline";
 
+import { JSON_RPC_ERROR_CODES, jsonRpcError, type JsonRpcId } from "./Mcp/jsonRpc.ts";
+import { AGENT_CONTROL_PRIVATE_MCP_MAX_BODY_BYTES } from "./Mcp/transportGuard.ts";
 import {
   AGENT_CONTROL_BOOTSTRAP_ENV,
   AGENT_CONTROL_BOOTSTRAP_URL_ENV,
@@ -64,9 +66,40 @@ export const runAgentControlStdioProxy = async (
       body: line,
     });
     if (response.status === 202) continue;
-    if (!response.ok) throw new Error("Agent Control MCP request failed");
-    deps.output.write(`${await response.text()}\n`);
+    // One oversized or malformed call must not cut the session's whole Ryco
+    // connection: answer it like the listener answers a bad message.
+    const answer = response.ok
+      ? await response.text()
+      : response.status === 413
+        ? oversizedRequestAnswer(line)
+        : response.status === 400 && isJsonResponse(response)
+          ? await response.text()
+          : undefined;
+    if (answer === undefined) throw new Error("Agent Control MCP request failed");
+    if (answer !== null) deps.output.write(`${answer}\n`);
   }
+};
+
+const isJsonResponse = (response: Response) =>
+  response.headers.get("content-type")?.startsWith("application/json") === true;
+
+/** The JSON-RPC error for a request over the body bound; `null` for a notification. */
+const oversizedRequestAnswer = (line: string): string | null => {
+  let id: JsonRpcId = null;
+  try {
+    const message = JSON.parse(line) as { id?: unknown };
+    if (typeof message !== "object" || message === null || !("id" in message)) return null;
+    if (typeof message.id === "string" || typeof message.id === "number") id = message.id;
+  } catch {
+    // Unparseable: answered with a null id, as for a parse error.
+  }
+  return JSON.stringify(
+    jsonRpcError(
+      id,
+      JSON_RPC_ERROR_CODES.invalidRequest,
+      `Request too large: Ryco accepts at most ${AGENT_CONTROL_PRIVATE_MCP_MAX_BODY_BYTES / (1024 * 1024)} MiB per call.`,
+    ),
+  );
 };
 
 export const runAgentControlStdioProxyFromProcess = (): void => {

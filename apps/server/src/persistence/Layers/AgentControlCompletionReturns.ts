@@ -107,6 +107,10 @@ const decode = Schema.decodeUnknownSync(Schema.fromJsonString(CompletionReturnRe
  * lists in `listDue`, `listProposalIds` and `hasOutstandingDelegations` must match.
  */
 export const PENDING_COMPLETION_RETURN_STATUSES = ["waiting", "ready", "dispatching"] as const;
+// A turn shows at most 8 attachments; the bound only keeps the read small.
+const MAX_OUTPUT_ATTACHMENT_NOTES = 20;
+// The whitespace SQLite's trim() strips when deciding whether a reply is blank.
+const BLANK_CHARACTERS = " \t\n\r\f\v";
 const PENDING_COMPLETION_RETURN_STATUS_SET: ReadonlySet<string> = new Set(
   PENDING_COMPLETION_RETURN_STATUSES,
 );
@@ -252,16 +256,64 @@ export const makeCompletionReturnRepository = Effect.gen(function* () {
         Effect.map((rows) => (rows[0] ? MessageId.make(rows[0].messageId) : null)),
       ),
     );
+  // A completed message's whole text, wherever the projection keeps it.
+  const messageText = sql.literal(
+    "CASE WHEN m.text_json IS NULL THEN m.text ELSE json_extract(m.text_json, '$') END",
+  );
+  /**
+   * What the turn shows the reader besides text: its HTML pages and files. A
+   * turn that ends on a render or a delivered file says so instead of blank.
+   */
+  const attachmentNotes = (threadId: ThreadId, turnId: TurnId) =>
+    sql<{ name: string | null; title: string | null }>`
+    SELECT json_extract(a.value, '$.name') AS name, json_extract(a.value, '$.htmlRender.title') AS title
+    FROM projection_thread_messages m,
+      json_each(CASE WHEN json_valid(m.attachments_json) THEN m.attachments_json ELSE '[]' END) a
+    WHERE m.thread_id = ${threadId} AND m.turn_id = ${turnId} AND m.role = 'assistant'
+    ORDER BY m.created_at, m.message_id, a.key LIMIT ${MAX_OUTPUT_ATTACHMENT_NOTES}
+  `.pipe(
+      Effect.map((rows) =>
+        rows.flatMap((row) =>
+          typeof row.title === "string"
+            ? [`[Published HTML page: ${row.title}]`]
+            : typeof row.name === "string"
+              ? [`[Attached file: ${row.name}]`]
+              : [],
+        ),
+      ),
+    );
+  /**
+   * The turn's reply: the message the turn is keyed on, else its latest
+   * non-blank assistant message, else a note of the pages and files it showed.
+   */
   const output = (threadId: ThreadId, turnId: TurnId) =>
     safe(
-      sql<{ text: string; streaming: number }>`
-    SELECT substr(CASE WHEN m.text_json IS NULL THEN m.text ELSE json_extract(m.text_json, '$') END, 1, 8001) AS text,
+      Effect.gen(function* () {
+        const [row] = yield* sql<{
+          chosen: string | null;
+          latest: string | null;
+          streaming: number;
+        }>`
+    SELECT
+      (SELECT substr(${messageText}, 1, 8001)
+        FROM projection_turns t JOIN projection_thread_messages m ON m.message_id = t.assistant_message_id
+          AND m.thread_id = t.thread_id AND m.turn_id = t.turn_id AND m.role = 'assistant'
+        WHERE t.thread_id = ${threadId} AND t.turn_id = ${turnId} LIMIT 1) AS chosen,
+      (SELECT substr(${messageText}, 1, 8001) FROM projection_thread_messages m
+        WHERE m.thread_id = ${threadId} AND m.turn_id = ${turnId} AND m.role = 'assistant'
+          AND trim(${messageText}, ${BLANK_CHARACTERS}) <> ''
+        ORDER BY m.created_at DESC, m.message_id DESC LIMIT 1) AS latest,
       (SELECT count(*) FROM projection_thread_messages live WHERE live.thread_id = ${threadId}
         AND live.turn_id = ${turnId} AND live.is_streaming <> 0) AS streaming
-    FROM projection_turns t JOIN projection_thread_messages m ON m.message_id = t.assistant_message_id
-      AND m.thread_id = t.thread_id AND m.turn_id = t.turn_id AND m.role = 'assistant'
-    WHERE t.thread_id = ${threadId} AND t.turn_id = ${turnId} LIMIT 1
-  `.pipe(Effect.map((rows) => rows[0] ?? { text: "", streaming: 0 })),
+  `;
+        const streaming = row?.streaming ?? 0;
+        const reply = [row?.chosen, row?.latest].find(
+          (text): text is string => typeof text === "string" && text.trim().length > 0,
+        );
+        if (reply !== undefined) return { text: reply, streaming };
+        const notes = yield* attachmentNotes(threadId, turnId);
+        return { text: notes.join("\n"), streaming };
+      }),
     );
   const observe = (input: {
     childThreadId: ThreadId;

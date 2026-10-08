@@ -119,6 +119,8 @@ export function ChatThreadRouteView({
     threadSearch.workspaceTab === "agent" && threadSearch.workspaceAgentKey
       ? threadSearch.workspaceAgentKey
       : null;
+  const activeRenderKey =
+    threadSearch.workspaceTab === "render" ? (threadSearch.workspaceRender ?? null) : null;
   const shouldUseDiffSheet = useMediaQuery(RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY);
   const pendingDeviceOpenRequest = useDeviceStateStore((state) =>
     currentThreadKey ? state.pendingOpenByThreadKey[currentThreadKey] : undefined,
@@ -165,6 +167,7 @@ export function ChatThreadRouteView({
   const {
     openedPanelModes,
     openedAgentKeys,
+    openedRenderKey,
     lastOpenedRightPanelMode,
     markRightPanelOpened,
     openRightPanel,
@@ -178,6 +181,7 @@ export function ChatThreadRouteView({
     rightPanelMode,
     rightPanelOpen,
     activeAgentKey,
+    activeRenderKey,
     defaultLastMode: "review",
     navigateSearch: navigateThreadSearch,
   });
@@ -255,6 +259,7 @@ export function ChatThreadRouteView({
               panelMode={mountedRightPanelMode}
               openedPanelModes={openedPanelModes}
               openedAgentKeys={openedAgentKeys}
+              openedRenderKey={openedRenderKey}
               onClosePanelTab={closePanelTab}
             />
           ) : null}
@@ -302,6 +307,7 @@ export function ChatThreadRouteView({
           panelMode={mountedRightPanelMode}
           openedPanelModes={openedPanelModes}
           openedAgentKeys={openedAgentKeys}
+          openedRenderKey={openedRenderKey}
           onClosePanelTab={closePanelTab}
           onClose={closeRightPanel}
           onOpen={openRightPanel}
@@ -345,6 +351,7 @@ export function ChatThreadRouteView({
             panelMode={mountedRightPanelMode}
             openedPanelModes={openedPanelModes}
             openedAgentKeys={openedAgentKeys}
+            openedRenderKey={openedRenderKey}
             onClosePanelTab={closePanelTab}
           />
         ) : null}

@@ -172,6 +172,52 @@ it.layer(NodeServices.layer)("ServerAuthLive", (it) => {
     }).pipe(Effect.provide(makeServerAuthLayer())),
   );
 
+  it.effect("refuses cookie-authenticated mutations from documents the app does not own", () =>
+    Effect.gen(function* () {
+      const serverAuth = yield* ServerAuth;
+      const pairingCredential = yield* serverAuth.issuePairingCredential();
+      const { sessionToken } = yield* serverAuth.exchangeBootstrapCredential(
+        pairingCredential.credential,
+        requestMetadata,
+      );
+      const request = (method: string, headers: Record<string, string>, bearer = false) =>
+        ({
+          method,
+          cookies: bearer ? {} : { ryco_session: sessionToken },
+          headers: {
+            host: "127.0.0.1:3773",
+            ...(bearer ? { authorization: `Bearer ${sessionToken}` } : {}),
+            ...headers,
+          },
+        }) as unknown as Parameters<ServerAuthShape["authenticateHttpRequest"]>[0];
+
+      // A sandboxed agent page in WebKit: opaque origin, and a beacon that
+      // reuses the embedding page's Origin but is still cross-site.
+      for (const headers of [
+        { origin: "null" },
+        { origin: "null", "sec-fetch-site": "cross-site" },
+        { origin: "http://127.0.0.1:3773", "sec-fetch-site": "cross-site" },
+        { origin: "http://127.0.0.1:4000" },
+      ]) {
+        const refused = yield* Effect.flip(
+          serverAuth.authenticateHttpRequest(request("POST", headers)),
+        );
+        expect(refused.status).toBe(403);
+      }
+
+      // The app's own requests, safe reads, and bearer callers still pass.
+      for (const allowed of [
+        request("POST", { origin: "http://127.0.0.1:3773", "sec-fetch-site": "same-origin" }),
+        request("POST", {}),
+        request("GET", { origin: "null", "sec-fetch-site": "cross-site" }),
+        request("POST", { origin: "null" }, true),
+      ]) {
+        const session = yield* serverAuth.authenticateHttpRequest(allowed);
+        expect(session.sessionId.length).toBeGreaterThan(0);
+      }
+    }).pipe(Effect.provide(makeServerAuthLayer())),
+  );
+
   it.effect("issues startup pairing URLs that bootstrap owner sessions", () =>
     Effect.gen(function* () {
       const serverAuth = yield* ServerAuth;

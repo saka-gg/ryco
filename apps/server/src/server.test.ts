@@ -2745,8 +2745,10 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       );
 
       yield* buildAppUnderTest({
+        // The browser posts from the dev renderer's origin through its proxy.
         config: {
           otlpTracesUrl: collector.url,
+          devUrl: new URL("http://localhost:5733"),
         },
         layers: {
           browserTraceCollector: {

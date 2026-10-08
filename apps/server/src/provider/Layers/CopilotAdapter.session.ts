@@ -306,6 +306,7 @@ export const makeStartSession =
         pendingApprovals,
         pendingUserInputs,
         pendingTurnStarts: new Set(),
+        htmlRenderToolCalls: new Map(),
         deviceToolBinding,
         turns: [],
         renewSession: () => client.createSession(sessionConfig),

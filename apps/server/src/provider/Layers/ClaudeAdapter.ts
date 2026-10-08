@@ -105,6 +105,11 @@ import {
 import { formatSourceControlContextsForAgent } from "@ryco/shared/sourceControlContextFormatter";
 import { classifyTaskAgentKind } from "@ryco/shared/taskClassification";
 import {
+  resolveHtmlRenderToolKind,
+  resolveHtmlRenderToolPresentation,
+  withoutHtmlRenderMarkup,
+} from "@ryco/shared/htmlRenderToolPresentation";
+import {
   Cause,
   Clock,
   DateTime,
@@ -347,6 +352,7 @@ interface ToolInFlight {
   readonly detail?: string;
   readonly input: Record<string, unknown>;
   readonly partialInputJson: string;
+  readonly partialInputScan: StreamedJsonScan;
   readonly lastEmittedInputFingerprint?: string;
   /** Owning agent when this tool ran inside a subagent (see attribution note). */
   readonly agentId?: string;
@@ -1273,6 +1279,10 @@ function extractPlanStepsFromTodoInput(input: Record<string, unknown>): PlanStep
 }
 
 function summarizeToolRequest(toolName: string, input: Record<string, unknown>): string {
+  // Ryco's HTML tools carry a whole page; name the page instead of dumping it.
+  const htmlRender = resolveHtmlRenderToolPresentation({ toolName, input });
+  if (htmlRender) return htmlRender.detail ? `${toolName}: ${htmlRender.detail}` : toolName;
+
   const commandValue = input.command ?? input.cmd;
   const command = typeof commandValue === "string" ? commandValue : undefined;
   if (command && command.trim().length > 0) {
@@ -1300,6 +1310,24 @@ function summarizeToolRequest(toolName: string, input: Record<string, unknown>):
     return `${toolName}: ${serialized}`;
   }
   return `${toolName}: ${serialized.slice(0, 397)}...`;
+}
+
+/** Work-log detail of a tool item: an HTML tool shows its page title or viewport alone. */
+function toolItemDetail(toolName: string, input: Record<string, unknown>): string | undefined {
+  const htmlRender = resolveHtmlRenderToolPresentation({ toolName, input });
+  return htmlRender ? htmlRender.detail : summarizeToolRequest(toolName, input);
+}
+
+function toolItemTitle(toolName: string, itemType: CanonicalItemType): string {
+  return (
+    resolveHtmlRenderToolPresentation({ toolName, input: undefined })?.title ??
+    titleForTool(itemType)
+  );
+}
+
+/** Tool input as carried on runtime events: an HTML tool's page is reduced to its length. */
+function toolEventInput(toolName: string, input: Record<string, unknown>): unknown {
+  return resolveHtmlRenderToolKind(toolName) === undefined ? input : withoutHtmlRenderMarkup(input);
 }
 
 function titleForTool(itemType: CanonicalItemType): string {
@@ -1632,6 +1660,52 @@ function exitPlanCaptureKey(input: {
     ? `tool:${input.toolUseId}`
     : `plan:${input.planMarkdown}`;
 }
+
+/**
+ * How far a streamed tool input's JSON has got, advanced one delta at a time.
+ * The accumulated text can only parse once its top-level value closes, so it
+ * is parsed then rather than after every delta: re-parsing the whole prefix
+ * each time is quadratic, and an HTML tool call streams a page of up to 512k
+ * characters.
+ */
+interface StreamedJsonScan {
+  /** Open objects and arrays; negative once the text can no longer be JSON. */
+  readonly depth: number;
+  readonly inString: boolean;
+  readonly escaped: boolean;
+  readonly opened: boolean;
+}
+
+const EMPTY_STREAMED_JSON_SCAN: StreamedJsonScan = {
+  depth: 0,
+  inString: false,
+  escaped: false,
+  opened: false,
+};
+
+function scanStreamedJson(scan: StreamedJsonScan, chunk: string): StreamedJsonScan {
+  let { depth, inString, escaped, opened } = scan;
+  for (let index = 0; index < chunk.length; index += 1) {
+    const code = chunk.charCodeAt(index);
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (code === 0x5c) escaped = true; // backslash
+      else if (code === 0x22) inString = false; // quote
+    } else if (code === 0x22) {
+      inString = true;
+    } else if (code === 0x7b || code === 0x5b) {
+      depth += 1;
+      opened = true;
+    } else if (code === 0x7d || code === 0x5d) {
+      depth -= 1;
+    }
+  }
+  return { depth, inString, escaped, opened };
+}
+
+/** Every complete JSON object passes this, so skipping the parse otherwise changes nothing. */
+const mayBeCompleteJson = (scan: StreamedJsonScan): boolean =>
+  scan.opened && scan.depth === 0 && !scan.inString;
 
 function tryParseJsonRecord(value: string): Record<string, unknown> | undefined {
   try {
@@ -2594,7 +2668,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           ...(tool.detail ? { detail: tool.detail } : {}),
           data: {
             toolName: tool.toolName,
-            input: tool.input,
+            input: toolEventInput(tool.toolName, tool.input),
           },
         },
         providerRefs: nativeProviderRefs(context, {
@@ -2945,11 +3019,15 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         }
 
         const partialInputJson = tool.partialInputJson + event.delta.partial_json;
-        const parsedInput = tryParseJsonRecord(partialInputJson);
-        const detail = parsedInput ? summarizeToolRequest(tool.toolName, parsedInput) : tool.detail;
+        const partialInputScan = scanStreamedJson(tool.partialInputScan, event.delta.partial_json);
+        const parsedInput = mayBeCompleteJson(partialInputScan)
+          ? tryParseJsonRecord(partialInputJson)
+          : undefined;
+        const detail = parsedInput ? toolItemDetail(tool.toolName, parsedInput) : tool.detail;
         let nextTool: ToolInFlight = {
           ...tool,
           partialInputJson,
+          partialInputScan,
           ...(parsedInput ? { input: parsedInput } : {}),
           ...(detail ? { detail } : {}),
         };
@@ -3003,7 +3081,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             ...(nextTool.parentToolUseId ? { parentToolUseId: nextTool.parentToolUseId } : {}),
             data: {
               toolName: nextTool.toolName,
-              input: nextTool.input,
+              input: toolEventInput(nextTool.toolName, nextTool.input),
             },
           },
           providerRefs: nativeProviderRefs(context, {
@@ -3090,7 +3168,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           ? (block.input as Record<string, unknown>)
           : {};
       const itemId = block.id;
-      const detail = summarizeToolRequest(toolName, toolInput);
+      const detail = toolItemDetail(toolName, toolInput);
       const inputFingerprint =
         Object.keys(toolInput).length > 0 ? toolInputFingerprint(toolInput) : undefined;
 
@@ -3106,10 +3184,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         itemId,
         itemType,
         toolName,
-        title: titleForTool(itemType),
-        detail,
+        title: toolItemTitle(toolName, itemType),
+        ...(detail ? { detail } : {}),
         input: toolInput,
         partialInputJson: "",
+        partialInputScan: EMPTY_STREAMED_JSON_SCAN,
         ...(inputFingerprint ? { lastEmittedInputFingerprint: inputFingerprint } : {}),
         ...(owningAgentId ? { agentId: owningAgentId } : {}),
         ...(parentToolUseId ? { parentToolUseId } : {}),
@@ -3141,7 +3220,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           ...(tool.parentToolUseId ? { parentToolUseId: tool.parentToolUseId } : {}),
           data: {
             toolName: tool.toolName,
-            input: toolInput,
+            input: toolEventInput(tool.toolName, toolInput),
           },
         },
         providerRefs: nativeProviderRefs(context, {
@@ -3220,7 +3299,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       const itemStatus = toolResult.isError ? "failed" : "completed";
       const toolData = {
         toolName: tool.toolName,
-        input: tool.input,
+        input: toolEventInput(tool.toolName, tool.input),
         result: toolResult.block,
       };
 

@@ -8,7 +8,7 @@ import { Effect } from "effect";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
 
 import { ServerAuth } from "../auth/Services/ServerAuth.ts";
-import { rejectCrossOriginMutation } from "../auth/http.ts";
+import { rejectCrossOriginMutation, respondToAuthError } from "../auth/http.ts";
 import { normalizeDispatchCommand, withChatAttachmentAdoption } from "./Normalizer.ts";
 import { OrchestrationEngineService } from "./Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "./Services/ProjectionSnapshotQuery.ts";
@@ -106,5 +106,8 @@ export const orchestrationDispatchRouteLayer = HttpRouter.add(
       ),
     );
     return HttpServerResponse.jsonUnsafe(result, { status: 200 });
-  }).pipe(Effect.catchTag("OrchestrationDispatchCommandError", respondToOrchestrationHttpError)),
+  }).pipe(
+    Effect.catchTag("OrchestrationDispatchCommandError", respondToOrchestrationHttpError),
+    Effect.catchTag("AuthError", respondToAuthError),
+  ),
 );

@@ -9,7 +9,14 @@ export type WorkspaceTab =
   | {
       key: "files" | "review" | "terminal" | "simulator" | "browser" | "pullRequest" | "agents";
       label: string;
-      mode: Exclude<RightPanelMode, "agent">;
+      mode: Exclude<RightPanelMode, "agent" | "render">;
+    }
+  | {
+      /** One page tab: it shows one HTML render of the thread at a time. */
+      key: "render";
+      label: string;
+      mode: "render";
+      renderKey: string;
     }
   | {
       key: string;
@@ -28,6 +35,8 @@ export function buildTabs(input: {
   groupAgents?: boolean;
   /** Names the pull request tab after the change request it shows. */
   pullRequestNumber?: number | null;
+  /** The page tab, named after the page it shows. */
+  render?: { readonly renderKey: string; readonly title: string } | null;
 }): WorkspaceTab[] {
   const tabs: WorkspaceTab[] = [];
   const openedModes = new Set(input.openedPanelModes);
@@ -53,6 +62,14 @@ export function buildTabs(input: {
   }
   if (openedModes.has("agents") || (input.groupAgents && input.activeAgentKey)) {
     tabs.push({ key: "agents", label: "Agents", mode: "agents" });
+  }
+  if (input.render) {
+    tabs.push({
+      key: "render",
+      label: input.render.title,
+      mode: "render",
+      renderKey: input.render.renderKey,
+    });
   }
 
   if (input.groupAgents) return tabs;

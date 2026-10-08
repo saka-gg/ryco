@@ -188,6 +188,8 @@ interface TestFixture {
   snapshot: OrchestrationReadModel;
   serverConfig: ServerConfig;
   welcome: ServerLifecycleWelcomePayload;
+  /** Threads whose window reports older messages than it holds. */
+  threadsWithOlderMessages?: ReadonlySet<ThreadId>;
 }
 
 let fixture: TestFixture;
@@ -702,6 +704,7 @@ function toShellSnapshot(snapshot: OrchestrationReadModel) {
 function toThreadWindowSnapshot(
   snapshotSequence: number,
   thread: OrchestrationReadModel["threads"][number],
+  options: { readonly hasOlderMessages?: boolean } = {},
 ) {
   const emptyPage = {
     oldestCursor: null,
@@ -712,7 +715,7 @@ function toThreadWindowSnapshot(
     snapshotSequence,
     thread,
     history: {
-      messages: emptyPage,
+      messages: options.hasOlderMessages ? { ...emptyPage, hasMoreBefore: true } : emptyPage,
       proposedPlans: emptyPage,
       activities: emptyPage,
       checkpoints: emptyPage,
@@ -2613,7 +2616,9 @@ export function setupChatViewBrowserSuite() {
               kind: "snapshot",
               snapshot:
                 request._tag === ORCHESTRATION_WS_METHODS.subscribeThreadWindow
-                  ? toThreadWindowSnapshot(fixture.snapshot.snapshotSequence, thread)
+                  ? toThreadWindowSnapshot(fixture.snapshot.snapshotSequence, thread, {
+                      hasOlderMessages: fixture.threadsWithOlderMessages?.has(thread.id) === true,
+                    })
                   : {
                       snapshotSequence: fixture.snapshot.snapshotSequence,
                       thread,

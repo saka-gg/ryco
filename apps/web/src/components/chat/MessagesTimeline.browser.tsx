@@ -120,6 +120,7 @@ vi.mock("@legendapp/list/react", async () => {
 });
 
 import { MessagesTimeline } from "./MessagesTimeline";
+import { __rememberHtmlRenderSourceForTests } from "./useHtmlRenderSource";
 import { useUiStateStore } from "~/uiStateStore";
 
 const THINKING_ENTRIES = [
@@ -1368,5 +1369,232 @@ describe("MessagesTimeline", () => {
     } finally {
       await screen.unmount();
     }
+  });
+
+  describe("HTML renders", () => {
+    const turnId = TurnId.make("turn-render");
+    const renderMessageId = MessageId.make("render-message");
+    const pageHtml = "<!doctype html><p>Quarterly chart</p>";
+    // One thumbnail per appearance, told apart by their bytes.
+    const darkThumbnail = "data:image/png;base64,ZGFyaw==";
+    const lightThumbnail = "data:image/png;base64,bGlnaHQ=";
+    const seedPage = () =>
+      __rememberHtmlRenderSourceForTests(
+        {
+          environmentId: EnvironmentId.make("environment-local"),
+          threadId: "thread-1" as never,
+          messageId: renderMessageId,
+          attachmentId: "thread-1-chart-html",
+        },
+        pageHtml,
+      );
+    const entries = [
+      {
+        id: "user-entry",
+        kind: "message" as const,
+        createdAt: "2026-09-04T12:00:00.000Z",
+        message: {
+          id: MessageId.make("user-1"),
+          role: "user" as const,
+          text: "Chart it",
+          turnId: null,
+          createdAt: "2026-09-04T12:00:00.000Z",
+          streaming: false,
+        },
+      },
+      {
+        id: "render-entry",
+        kind: "message" as const,
+        createdAt: "2026-09-04T12:00:03.000Z",
+        message: {
+          id: renderMessageId,
+          role: "assistant" as const,
+          text: " ",
+          turnId,
+          createdAt: "2026-09-04T12:00:03.000Z",
+          completedAt: "2026-09-04T12:00:03.000Z",
+          streaming: false,
+          attachments: [
+            {
+              type: "file" as const,
+              id: "thread-1-chart-html",
+              name: "Quarterly chart.html",
+              mimeType: "text/html",
+              sizeBytes: 38,
+              htmlRender: {
+                title: "Quarterly chart",
+                height: 240,
+                thumbnails: { dark: darkThumbnail, light: lightThumbnail },
+              },
+            },
+          ],
+        },
+      },
+      {
+        id: "reply-entry",
+        kind: "message" as const,
+        createdAt: "2026-09-04T12:00:05.000Z",
+        message: {
+          id: MessageId.make("reply"),
+          role: "assistant" as const,
+          text: "Revenue doubled.",
+          turnId,
+          createdAt: "2026-09-04T12:00:05.000Z",
+          completedAt: "2026-09-04T12:00:05.000Z",
+          streaming: false,
+        },
+      },
+    ];
+    const latestTurn = {
+      turnId,
+      state: "completed" as const,
+      startedAt: "2026-09-04T12:00:00.000Z",
+      completedAt: "2026-09-04T12:00:06.000Z",
+    };
+
+    async function withTier<T>(tier: "desktop" | "phone", run: () => Promise<T>): Promise<T> {
+      if (tier === "phone") await page.viewport(390, 844);
+      useTierOverrideStore.setState({ override: tier });
+      const stopTier = syncDocumentPresentationTier();
+      try {
+        return await run();
+      } finally {
+        useTierOverrideStore.setState({ override: null });
+        stopTier();
+        if (tier === "phone") await page.viewport(1280, 900);
+      }
+    }
+
+    it("shows a published page above the reply and keeps its full-size view open past its row", async () => {
+      seedPage();
+      await withTier("desktop", async () => {
+        const screen = await render(
+          <MessagesTimeline {...buildProps()} latestTurn={latestTurn} timelineEntries={entries} />,
+        );
+        try {
+          const rowKinds = () =>
+            [...document.querySelectorAll<HTMLElement>("[data-timeline-row-kind]")].map(
+              (row) => row.dataset.timelineRowKind,
+            );
+          expect(rowKinds()).toEqual(["message", "html-render", "message"]);
+          const frame = document.querySelector<HTMLIFrameElement>(
+            '[data-timeline-row-kind="html-render"] iframe',
+          )!;
+          expect(frame.getAttribute("sandbox")).toBe("allow-scripts allow-forms");
+          expect(frame.title).toBe("Quarterly chart");
+
+          await page.getByRole("button", { name: "Open full size" }).click();
+          await expect.element(page.getByRole("dialog")).toBeVisible();
+          // The thread moves on and the row unmounts (as a virtualized row does).
+          await screen.rerender(
+            <MessagesTimeline
+              {...buildProps()}
+              latestTurn={latestTurn}
+              timelineEntries={entries.filter((entry) => entry.id !== "render-entry")}
+            />,
+          );
+          expect(document.querySelector('[data-timeline-row-kind="html-render"]')).toBeNull();
+          await expect.element(page.getByRole("dialog")).toBeVisible();
+          expect(page.getByRole("dialog").element().querySelector("iframe")?.srcdoc).toBe(pageHtml);
+          await page.getByRole("button", { name: "Close", exact: true }).click();
+          await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
+        } finally {
+          await screen.unmount();
+        }
+      });
+    });
+
+    it("opens the page in the workspace panel from its expand button and its reply card", async () => {
+      seedPage();
+      const onOpenHtmlRender = vi.fn();
+      await withTier("desktop", async () => {
+        const screen = await render(
+          <MessagesTimeline
+            {...buildProps()}
+            latestTurn={latestTurn}
+            timelineEntries={entries}
+            onOpenHtmlRender={onOpenHtmlRender}
+          />,
+        );
+        try {
+          // The reply ends with a card for the page, its thumbnail in the
+          // reader's (dark) appearance.
+          const reply = document.querySelector<HTMLElement>('[data-message-id="reply"]')!;
+          const card = reply.querySelector<HTMLButtonElement>("[data-html-render-card]")!;
+          expect(card.getAttribute("aria-label")).toBe("Open Quarterly chart");
+          const image = card.querySelector("img")!;
+          expect(image.getAttribute("src")).toBe(darkThumbnail);
+          expect(image.alt).toBe("");
+          const box = image.getBoundingClientRect();
+          expect([box.width, box.height]).toEqual([72, 45]);
+          // Cropped from the page's top left, where a page starts.
+          expect(getComputedStyle(image).objectFit).toBe("cover");
+          expect(getComputedStyle(image).objectPosition).toBe("0% 0%");
+
+          // The reader switches to light: the card follows.
+          await screen.rerender(
+            <MessagesTimeline
+              {...buildProps()}
+              resolvedTheme="light"
+              latestTurn={latestTurn}
+              timelineEntries={entries}
+              onOpenHtmlRender={onOpenHtmlRender}
+            />,
+          );
+          await vi.waitFor(() =>
+            expect(document.querySelector("[data-html-render-card] img")?.getAttribute("src")).toBe(
+              lightThumbnail,
+            ),
+          );
+          // And back.
+          await screen.rerender(
+            <MessagesTimeline
+              {...buildProps()}
+              latestTurn={latestTurn}
+              timelineEntries={entries}
+              onOpenHtmlRender={onOpenHtmlRender}
+            />,
+          );
+          await vi.waitFor(() =>
+            expect(document.querySelector("[data-html-render-card] img")?.getAttribute("src")).toBe(
+              darkThumbnail,
+            ),
+          );
+
+          await page.getByRole("button", { name: "Open full size" }).click();
+          expect(onOpenHtmlRender).toHaveBeenLastCalledWith(renderMessageId, "thread-1-chart-html");
+          await page.getByRole("button", { name: "Open Quarterly chart" }).click();
+          expect(onOpenHtmlRender).toHaveBeenCalledTimes(2);
+          expect(onOpenHtmlRender).toHaveBeenLastCalledWith(renderMessageId, "thread-1-chart-html");
+          // The panel stands in for the dialog.
+          expect(document.querySelector('[role="dialog"]')).toBeNull();
+        } finally {
+          await screen.unmount();
+        }
+      });
+    });
+
+    it("opens the page in a dialog from its reply card on the phone tier", async () => {
+      seedPage();
+      await withTier("phone", async () => {
+        const screen = await render(
+          <MessagesTimeline {...buildProps()} latestTurn={latestTurn} timelineEntries={entries} />,
+        );
+        try {
+          // The frozen tier has no expand button; the card is its way in.
+          expect(document.querySelector('[aria-label="Open full size"]')).toBeNull();
+          await page.getByRole("button", { name: "Open Quarterly chart" }).click();
+          const dialog = page.getByRole("dialog");
+          await expect.element(dialog).toBeVisible();
+          const frame = dialog.element().querySelector("iframe")!;
+          expect(frame.getAttribute("sandbox")).toBe("allow-scripts allow-forms");
+          expect(frame.srcdoc).toBe(pageHtml);
+          await page.getByRole("button", { name: "Close", exact: true }).click();
+          await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
+        } finally {
+          await screen.unmount();
+        }
+      });
+    });
   });
 });

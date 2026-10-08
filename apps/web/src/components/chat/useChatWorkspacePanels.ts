@@ -1,6 +1,6 @@
 import { useCallback } from "react";
 import { useNavigate } from "@tanstack/react-router";
-import type { EnvironmentId, ThreadId, TurnId } from "@ryco/contracts";
+import type { EnvironmentId, MessageId, ThreadId, TurnId } from "@ryco/contracts";
 import { useEvent } from "../../hooks/useEvent";
 import { usePresentationTier } from "../../hooks/usePresentationTier";
 import type { DraftId } from "../../composerDraftStore";
@@ -11,11 +11,13 @@ import {
   buildOpenBrowserSearch,
   buildOpenFilesSearch,
   buildOpenPullRequestSearch,
+  buildOpenRenderSearch,
   buildOpenReviewSearch,
   buildOpenSimulatorSearch,
   buildOpenTerminalSearch,
   buildOpenWorkspaceSearch,
   buildCloseWorkspacePanelSearch,
+  formatWorkspaceRenderKey,
 } from "../../workspaceRouteSearch";
 
 export interface UseChatWorkspacePanelsInput {
@@ -50,6 +52,8 @@ export interface UseChatWorkspacePanelsResult {
   onCloseDiff: () => void;
   onOpenAgentsPanel: () => void;
   onOpenSubagentPanel: (subagent: ThreadSubagentView) => void;
+  /** Desktop: an agent's HTML render full size, in the workspace panel's page tab. */
+  onOpenHtmlRender: (messageId: MessageId, attachmentId: string) => void;
 }
 
 /**
@@ -339,6 +343,17 @@ export function useChatWorkspacePanels(
     [draftId, environmentId, isServerThread, navigate, onAgentPanelOpen, routeKind, threadId],
   );
 
+  const onOpenHtmlRender = useEvent((messageId: MessageId, attachmentId: string) => {
+    // Pages live in server threads; the frozen phone tier keeps its dialog.
+    if (!isServerThread || isPhoneTier) return;
+    void navigate({
+      to: "/$environmentId/$threadId",
+      params: { environmentId, threadId },
+      search: (previous) =>
+        buildOpenRenderSearch(previous, formatWorkspaceRenderKey({ messageId, attachmentId })),
+    });
+  });
+
   return {
     onOpenReviewPanel,
     onToggleDiff,
@@ -352,5 +367,6 @@ export function useChatWorkspacePanels(
     onCloseDiff,
     onOpenAgentsPanel,
     onOpenSubagentPanel,
+    onOpenHtmlRender,
   };
 }

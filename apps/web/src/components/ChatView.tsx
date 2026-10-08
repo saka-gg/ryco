@@ -2216,6 +2216,7 @@ export default function ChatView(props: ChatViewProps) {
     onCloseDiff,
     onOpenAgentsPanel,
     onOpenSubagentPanel,
+    onOpenHtmlRender,
   } = useChatWorkspacePanels({
     navigate,
     environmentId,
@@ -4864,6 +4865,10 @@ export default function ChatView(props: ChatViewProps) {
                 onRevertUserMessage={onRevertUserMessage}
                 isRevertingCheckpoint={isRevertingCheckpoint}
                 onImageExpand={onExpandTimelineImage}
+                // The frozen phone tier has no page tab; its renders open in a dialog.
+                onOpenHtmlRender={
+                  presentationTier !== "phone" && isServerThread ? onOpenHtmlRender : undefined
+                }
                 markdownCwd={gitCwd ?? undefined}
                 resolvedTheme={resolvedTheme}
                 timestampFormat={timestampFormat}

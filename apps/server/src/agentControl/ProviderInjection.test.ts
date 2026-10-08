@@ -1,4 +1,5 @@
 import {
+  AGENT_CONTROL_CAPABILITIES,
   ProviderInstanceId,
   RuntimeSessionId,
   ThreadId,
@@ -9,8 +10,13 @@ import { assert, it } from "@effect/vitest";
 import { Effect, Option, Redacted } from "effect";
 
 import type { AgentControlProviderBridge } from "./ProviderInjection.ts";
+import { RYCO_AGENT_CONTROL_MCP_SERVER_NAMES } from "@ryco/shared/htmlRenderToolPresentation";
+
+import { CODEX_AGENT_CONTROL_SERVER_NAME } from "../provider/Layers/CodexSessionRuntime.ts";
+import { AGENT_CONTROL_HTML_RENDER_INSTRUCTIONS } from "./htmlRenderInstructions.ts";
 import { AGENT_CONTROL_MCP_INITIALIZE_INSTRUCTIONS } from "./Mcp/listener.ts";
 import {
+  AGENT_CONTROL_INTERNAL_SERVER_NAME,
   AGENT_CONTROL_PROVIDER_SUPPORT,
   agentControlHostContext,
   installAgentControlAcp,
@@ -26,6 +32,7 @@ const runtimeSessionId = RuntimeSessionId.make("runtime-provider-injection");
 
 const makeBridge = () => {
   const issuedModes: Array<AgentControlInjectionMode> = [];
+  const issuedCapabilities: Array<ReadonlyArray<string>> = [];
   const revoked: Array<string> = [];
   const bound: Array<string> = [];
   const retired: Array<string | undefined> = [];
@@ -33,6 +40,7 @@ const makeBridge = () => {
     issueLease: (input) =>
       Effect.sync(() => {
         issuedModes.push(input.injectionMode);
+        issuedCapabilities.push(input.capabilities);
         return Option.some({
           sessionId: `lease-${input.runtimeSessionId}`,
           endpointUrl: "http://127.0.0.1:45000/mcp",
@@ -63,7 +71,7 @@ const makeBridge = () => {
         retired.push(turnId);
       }),
   };
-  return { bridge, issuedModes, revoked, bound, retired };
+  return { bridge, issuedModes, issuedCapabilities, revoked, bound, retired };
 };
 
 it("records truthful runtime-scope decisions for every rollout provider", () => {
@@ -195,4 +203,43 @@ it("tells agents to delegate, confirm, end their turn and let Ryco wake them", (
     AGENT_CONTROL_MCP_INITIALIZE_INSTRUCTIONS,
     "ryco_wait_threads for task completion",
   );
+});
+
+it("tells sessions with Agent Control when to show an HTML render, and no one else", () => {
+  for (const text of [agentControlHostContext(true), AGENT_CONTROL_MCP_INITIALIZE_INSTRUCTIONS]) {
+    assert.include(text, AGENT_CONTROL_HTML_RENDER_INSTRUCTIONS);
+    assert.include(text, "ryco_html_preview");
+    assert.include(text, "ryco_html_render");
+  }
+  assert.include(AGENT_CONTROL_HTML_RENDER_INSTRUCTIONS, "when ryco_html_render is available");
+  assert.notInclude(agentControlHostContext(false), "ryco_html");
+});
+
+it.effect("grants HTML renders to full provider leases but not to computer-only leases", () =>
+  Effect.gen(function* () {
+    const state = makeBridge();
+    yield* installAgentControlNativeHttp(state.bridge, {
+      threadId,
+      providerInstanceId,
+      runtimeSessionId,
+      injectionMode: "claude-http",
+    });
+    yield* installAgentControlNativeHttp(state.bridge, {
+      threadId,
+      providerInstanceId,
+      runtimeSessionId,
+      injectionMode: "opencode-http",
+      computerOnly: true,
+    });
+    const [full = [], computerOnly] = state.issuedCapabilities;
+    assert.include(full, AGENT_CONTROL_CAPABILITIES.renderHtml);
+    assert.include(full, AGENT_CONTROL_CAPABILITIES.attachFile);
+    assert.deepStrictEqual(computerOnly, [AGENT_CONTROL_CAPABILITIES.controlComputer]);
+  }),
+);
+
+it("registers the private server under names the HTML tool presentation recognizes", () => {
+  // Work-log labels resolve provider-prefixed tool names against these server names.
+  assert.isTrue(RYCO_AGENT_CONTROL_MCP_SERVER_NAMES.has(AGENT_CONTROL_INTERNAL_SERVER_NAME));
+  assert.isTrue(RYCO_AGENT_CONTROL_MCP_SERVER_NAMES.has(CODEX_AGENT_CONTROL_SERVER_NAME));
 });

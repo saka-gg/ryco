@@ -8,8 +8,10 @@ import {
 import type { AgentPanelModel } from "../../threadWorkspaceViewModel";
 import { deriveDisplayedUserMessageState } from "../../lib/terminalContext";
 import {
+  isChatFileAttachment,
   isChatImageAttachment,
   type ChatAttachment,
+  type ChatFileAttachment,
   type ChatMessage,
   type ProposedPlan,
   type TurnDiffSummary,
@@ -23,7 +25,15 @@ import {
   type TurnId,
 } from "@ryco/contracts";
 import { type TimestampFormat } from "@ryco/contracts/settings";
+import { htmlRenderMetadataEqual, type HtmlRenderMetadata } from "@ryco/shared/htmlRender";
 import { type ExpandedImagePreview } from "./ExpandedImagePreview";
+import {
+  collectTurnHtmlRenders,
+  deriveTerminalAssistantMessageIds,
+  isBlankSettledReply,
+  placeRepliesAfterHtmlRenders,
+} from "@ryco/client-runtime/state/session";
+import { isHtmlRenderOnlyMessage, readHtmlRenderAttachment } from "./htmlRender.logic";
 import type { ThreadMessageSearchOccurrence } from "./ThreadMessageSearch.logic";
 import { summarizeToolCallGroup, type ToolCallGroupSummary } from "./toolCallGroup.logic";
 import { classifyChapterStep } from "./workChapters.logic";
@@ -278,6 +288,13 @@ export interface TimelineDurationMessage {
   completedAt?: string | undefined;
 }
 
+/** A page a turn published, listed again under the turn's reply. */
+export interface TimelineTurnHtmlRender {
+  readonly messageId: MessageId;
+  readonly attachment: ChatFileAttachment;
+  readonly htmlRender: HtmlRenderMetadata;
+}
+
 export type MessagesTimelineRow =
   | {
       kind: "work";
@@ -296,6 +313,11 @@ export type MessagesTimelineRow =
       revertTurnCount?: number | undefined;
       /** Turn count to roll back to when undoing this assistant turn's edits. */
       assistantUndoTurnCount?: number | undefined;
+      /**
+       * The pages the turn published, on its reply: the reply ends with a
+       * card for each, and a page-only turn (no reply) has none.
+       */
+      turnHtmlRenders?: ReadonlyArray<TimelineTurnHtmlRender> | undefined;
     }
   | {
       kind: "turn-fold";
@@ -360,6 +382,21 @@ export type MessagesTimelineRow =
       startedAt: string;
       /** Null while the chapter is live. */
       endedAt: string | null;
+    }
+  | {
+      /**
+       * One HTML render an agent published, shown in place of its carrier
+       * message: never folded into the turn, never the turn's reply.
+       */
+      kind: "html-render";
+      id: string;
+      createdAt: string;
+      messageId: MessageId;
+      attachment: ChatFileAttachment;
+      htmlRender: HtmlRenderMetadata;
+      /** The turn's changed-files card, when the turn keyed it on this render's message. */
+      assistantTurnDiffSummary?: TurnDiffSummary | undefined;
+      assistantUndoTurnCount?: number | undefined;
     }
   | { kind: "working"; id: string; createdAt: string | null };
 
@@ -478,32 +515,6 @@ export function resolveAssistantMessageCopyState({
     text: hasText ? text : null,
     visible: showCopyButton && hasText && !streaming,
   };
-}
-
-function deriveTerminalAssistantMessageIds(timelineEntries: ReadonlyArray<TimelineEntry>) {
-  const lastAssistantMessageIdByResponseKey = new Map<string, string>();
-  let nullTurnResponseIndex = 0;
-
-  for (const timelineEntry of timelineEntries) {
-    if (timelineEntry.kind !== "message") {
-      continue;
-    }
-    const { message } = timelineEntry;
-    if (message.role === "user") {
-      nullTurnResponseIndex += 1;
-      continue;
-    }
-    if (message.role !== "assistant") {
-      continue;
-    }
-
-    const responseKey = message.turnId
-      ? `turn:${message.turnId}`
-      : `unkeyed:${nullTurnResponseIndex}`;
-    lastAssistantMessageIdByResponseKey.set(responseKey, message.id);
-  }
-
-  return new Set(lastAssistantMessageIdByResponseKey.values());
 }
 
 export type TimelineLatestTurn = Pick<
@@ -629,6 +640,11 @@ function deriveTurnFolds(input: {
       // turn (dynamic spawns, background execution), and folding the CTA
       // when the turn settles makes a still-running fleet invisible.
       if (entry.kind === "work" && entry.entry.agentSpawn !== undefined) {
+        continue;
+      }
+      // A published page is part of the answer: a settled turn reads
+      // [fold, page, reply], and a live one shows it between its chapters.
+      if (entry.kind === "message" && isHtmlRenderOnlyMessage(entry.message)) {
         continue;
       }
       if (isRunning || entry.id !== group.terminalEntry?.id) {
@@ -928,16 +944,29 @@ export function deriveMessagesTimelineRows(input: {
   revealedMessageIds?: ReadonlySet<string> | undefined;
 }): MessagesTimelineRow[] {
   const nextRows: MessagesTimelineRow[] = [];
-  const durationStartByMessageId = computeMessageDurationStart(
-    input.timelineEntries.flatMap((entry) => (entry.kind === "message" ? [entry.message] : [])),
-  );
   const terminalAssistantMessageIds = deriveTerminalAssistantMessageIds(input.timelineEntries);
   const unsettledTurnId = deriveUnsettledTurnId(
     input.latestTurn ?? null,
     input.runningTurnId ?? null,
   );
+  const timelineEntries = placeRepliesAfterHtmlRenders(
+    input.timelineEntries,
+    terminalAssistantMessageIds,
+    { runningTurnId: unsettledTurnId },
+  );
+  // A render's completion is not a response boundary: the reply after it still
+  // counts from the turn's start.
+  const durationStartByMessageId = computeMessageDurationStart(
+    timelineEntries.flatMap((entry) =>
+      entry.kind === "message" && !isHtmlRenderOnlyMessage(entry.message) ? [entry.message] : [],
+    ),
+  );
+  // The last render row of each turn, which takes over a blank reply's place.
+  const lastRenderRowIndexByTurn = new Map<TurnId, number>();
+  // Each turn's pages, which its reply lists again as cards.
+  const htmlRendersByTurn = collectTurnHtmlRenders(timelineEntries);
   const foldsByAnchorEntryId = deriveTurnFolds({
-    timelineEntries: input.timelineEntries,
+    timelineEntries,
     terminalAssistantMessageIds,
     latestTurn: input.latestTurn ?? null,
     unsettledTurnId,
@@ -964,8 +993,8 @@ export function deriveMessagesTimelineRows(input: {
     rows: nextRows,
   });
 
-  for (let index = 0; index < input.timelineEntries.length; index += 1) {
-    const timelineEntry = input.timelineEntries[index];
+  for (let index = 0; index < timelineEntries.length; index += 1) {
+    const timelineEntry = timelineEntries[index];
     if (!timelineEntry) {
       continue;
     }
@@ -1011,8 +1040,8 @@ export function deriveMessagesTimelineRows(input: {
     if (timelineEntry.kind === "work") {
       const groupedEntries = [timelineEntry.entry];
       let cursor = index + 1;
-      while (cursor < input.timelineEntries.length) {
-        const nextEntry = input.timelineEntries[cursor];
+      while (cursor < timelineEntries.length) {
+        const nextEntry = timelineEntries[cursor];
         if (
           !nextEntry ||
           nextEntry.kind !== "work" ||
@@ -1116,7 +1145,82 @@ export function deriveMessagesTimelineRows(input: {
       timelineEntry.message.role === "assistant"
         ? input.turnDiffSummaryByAssistantMessageId.get(timelineEntry.message.id)
         : undefined;
+    const assistantUndoTurnCount = assistantTurnDiffSummary
+      ? input.undoTurnCountByTurnId?.get(assistantTurnDiffSummary.turnId)
+      : undefined;
 
+    if (isHtmlRenderOnlyMessage(timelineEntry.message)) {
+      const { message } = timelineEntry;
+      const renders = (message.attachments ?? []).flatMap((attachment) => {
+        const render = readHtmlRenderAttachment(attachment);
+        return render === undefined ? [] : [render];
+      });
+      renders.forEach(({ attachment, htmlRender }, renderIndex) => {
+        const last = renderIndex === renders.length - 1;
+        if (last && message.turnId) lastRenderRowIndexByTurn.set(message.turnId, nextRows.length);
+        nextRows.push({
+          kind: "html-render",
+          id: `html-render:${message.id}:${attachment.id}`,
+          createdAt: timelineEntry.createdAt,
+          messageId: message.id,
+          attachment,
+          htmlRender,
+          // A turn whose last message is a render keys its changed files on it.
+          assistantTurnDiffSummary: last ? assistantTurnDiffSummary : undefined,
+          assistantUndoTurnCount: last ? assistantUndoTurnCount : undefined,
+        });
+      });
+      continue;
+    }
+
+    const renderRowIndex = timelineEntry.message.turnId
+      ? lastRenderRowIndexByTurn.get(timelineEntry.message.turnId)
+      : undefined;
+    if (
+      renderRowIndex !== undefined &&
+      terminalAssistantMessageIds.has(timelineEntry.message.id) &&
+      isBlankSettledReply(timelineEntry.message)
+    ) {
+      // The turn answered with its page alone: no "(empty response)" under it.
+      const renderRow = nextRows[renderRowIndex];
+      if (renderRow?.kind === "html-render" && renderRow.assistantTurnDiffSummary === undefined) {
+        nextRows[renderRowIndex] = {
+          ...renderRow,
+          assistantTurnDiffSummary,
+          assistantUndoTurnCount,
+        };
+      }
+      continue;
+    }
+
+    // The changed-files card closes the turn: a reply below the turn's render
+    // takes it over when the server keyed it on the render's message.
+    let replyTurnDiffSummary = assistantTurnDiffSummary;
+    let replyUndoTurnCount = assistantUndoTurnCount;
+    const renderRow = renderRowIndex === undefined ? undefined : nextRows[renderRowIndex];
+    if (
+      renderRowIndex !== undefined &&
+      renderRow?.kind === "html-render" &&
+      renderRow.assistantTurnDiffSummary !== undefined &&
+      replyTurnDiffSummary === undefined &&
+      terminalAssistantMessageIds.has(timelineEntry.message.id)
+    ) {
+      replyTurnDiffSummary = renderRow.assistantTurnDiffSummary;
+      replyUndoTurnCount = renderRow.assistantUndoTurnCount;
+      nextRows[renderRowIndex] = {
+        ...renderRow,
+        assistantTurnDiffSummary: undefined,
+        assistantUndoTurnCount: undefined,
+      };
+    }
+
+    const isReply =
+      timelineEntry.message.role === "assistant" &&
+      terminalAssistantMessageIds.has(timelineEntry.message.id);
+    const turnHtmlRenders =
+      isReply && timelineEntry.message.turnId
+        ? htmlRendersByTurn.get(timelineEntry.message.turnId)
+        : undefined;
     nextRows.push({
       kind: "message",
       id: timelineEntry.id,
@@ -1124,17 +1228,19 @@ export function deriveMessagesTimelineRows(input: {
       message: timelineEntry.message,
       durationStart:
         durationStartByMessageId.get(timelineEntry.message.id) ?? timelineEntry.message.createdAt,
-      showAssistantCopyButton:
-        timelineEntry.message.role === "assistant" &&
-        terminalAssistantMessageIds.has(timelineEntry.message.id),
-      assistantTurnDiffSummary,
+      showAssistantCopyButton: isReply,
+      assistantTurnDiffSummary: replyTurnDiffSummary,
       revertTurnCount:
         timelineEntry.message.role === "user"
           ? input.revertTurnCountByUserMessageId.get(timelineEntry.message.id)
           : undefined,
-      assistantUndoTurnCount: assistantTurnDiffSummary
-        ? input.undoTurnCountByTurnId?.get(assistantTurnDiffSummary.turnId)
-        : undefined,
+      assistantUndoTurnCount: replyUndoTurnCount,
+      turnHtmlRenders: turnHtmlRenders?.map((render) => ({
+        // The carrier's own id, widened by the shared helper.
+        messageId: render.messageId as MessageId,
+        attachment: render.attachment,
+        htmlRender: render.htmlRender,
+      })),
     });
   }
 
@@ -1244,6 +1350,20 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
     case "context-handoff":
       return a.marker === (b as typeof a).marker;
 
+    case "html-render": {
+      // Rows rebuild on every thread update; an equal page must keep its
+      // mounted frame, or the page would reload.
+      const bh = b as typeof a;
+      return (
+        a.createdAt === bh.createdAt &&
+        a.messageId === bh.messageId &&
+        areChatAttachmentUnchanged(a.attachment, bh.attachment) &&
+        htmlRenderMetadataEqual(a.htmlRender, bh.htmlRender) &&
+        a.assistantTurnDiffSummary === bh.assistantTurnDiffSummary &&
+        a.assistantUndoTurnCount === bh.assistantUndoTurnCount
+      );
+    }
+
     case "message": {
       const bm = b as typeof a;
       return (
@@ -1252,10 +1372,29 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
         a.showAssistantCopyButton === bm.showAssistantCopyButton &&
         a.assistantTurnDiffSummary === bm.assistantTurnDiffSummary &&
         a.revertTurnCount === bm.revertTurnCount &&
-        a.assistantUndoTurnCount === bm.assistantUndoTurnCount
+        a.assistantUndoTurnCount === bm.assistantUndoTurnCount &&
+        areTurnHtmlRendersUnchanged(a.turnHtmlRenders, bm.turnHtmlRenders)
       );
     }
   }
+}
+
+function areTurnHtmlRendersUnchanged(
+  previous: ReadonlyArray<TimelineTurnHtmlRender> | undefined,
+  next: ReadonlyArray<TimelineTurnHtmlRender> | undefined,
+): boolean {
+  if (previous === next) return true;
+  if (previous === undefined || next === undefined || previous.length !== next.length) {
+    return false;
+  }
+  return previous.every((render, index) => {
+    const other = next[index]!;
+    return (
+      render.messageId === other.messageId &&
+      areChatAttachmentUnchanged(render.attachment, other.attachment) &&
+      htmlRenderMetadataEqual(render.htmlRender, other.htmlRender)
+    );
+  });
 }
 
 function areWorkRowsUnchanged(
@@ -1404,6 +1543,14 @@ function areChatAttachmentUnchanged(previous: ChatAttachment, next: ChatAttachme
     previous.sizeBytes !== next.sizeBytes
   ) {
     return false;
+  }
+  if (isChatFileAttachment(previous) && isChatFileAttachment(next)) {
+    // Whether (and at what size) a file shows as an inline render.
+    const previousRender = readHtmlRenderAttachment(previous)?.htmlRender;
+    const nextRender = readHtmlRenderAttachment(next)?.htmlRender;
+    return previousRender === undefined || nextRender === undefined
+      ? previousRender === nextRender
+      : htmlRenderMetadataEqual(previousRender, nextRender);
   }
   if (!isChatImageAttachment(previous) || !isChatImageAttachment(next)) {
     return true;
