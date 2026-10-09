@@ -67,6 +67,10 @@ export interface ChatOverviewModelInput {
   threadSubagents: ReadonlyArray<ThreadSubagentView>;
   changedFileSummaries?: ReadonlyArray<TurnDiffSummary> | undefined;
   sourceControlActions: (detectedChangeRequest: ChangeRequest | null) => ReactNode;
+  /** The crown's explicit git action buttons; the phone sheet does not pass them. */
+  sourceControlQuickActions?:
+    | ((detectedChangeRequest: ChangeRequest | null) => ReactNode)
+    | undefined;
   branchControl: ReactNode;
   markdownCwd: string | undefined;
   workspaceRoot: string | undefined;
@@ -128,6 +132,7 @@ export function useChatOverviewModel(input: ChatOverviewModelInput): ChatOvervie
     threadSubagents,
     changedFileSummaries,
     sourceControlActions,
+    sourceControlQuickActions,
     branchControl,
     markdownCwd,
     workspaceRoot,
@@ -605,6 +610,9 @@ export function useChatOverviewModel(input: ChatOverviewModelInput): ChatOvervie
       ...(agentPanelModel ? { agentPanelModel } : {}),
       ...(onOpenAgent ? { onOpenAgent } : {}),
       ...(onOpenAgentsWorkflow ? { onOpenAgentsWorkflow } : {}),
+      ...(sourceControlQuickActions
+        ? { sourceControlQuickActions: sourceControlQuickActions(detectedChangeRequest) }
+        : {}),
     },
     detectedChangeRequest,
     gitStatus: gitStatusQuery.data ?? null,

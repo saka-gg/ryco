@@ -65,8 +65,13 @@ html:not(.dark) .crown-mat {
   outline-offset: -2px;
 }
 
-/* The logo disc. A monogram fills it; real artwork sits on a light plate so dark favicons stay visible. */
+/*
+ * The logo disc. A monogram fills it; loaded artwork is framed by CrownFace
+ * (data-fit): a tile covers the disc edge to edge, a bare mark is inset on a
+ * plate (data-plate) that contrasts with it.
+ */
 .crown-face-logo {
+  position: relative;
   display: grid;
   width: 38px;
   height: 38px;
@@ -84,19 +89,55 @@ html:not(.dark) .crown-mat {
   height: 100%;
 }
 
-/* Light plate: scheme-aware SVG favicons pick their light-background variant
-   (the crown itself is dark, which would otherwise select their dark one). */
-.crown-face-logo:has(> img[data-state="loaded"]) {
+/* The artwork fades in over the monogram it replaces; until it is framed it covers the disc. */
+.crown-face-logo > img {
+  object-fit: cover;
+  animation: crown-face-logo-in var(--crown-dur-logo) var(--crown-ease-out);
+}
+
+/* Framed: the image's box is placed (and may overflow the disc) by CrownFace. */
+.crown-face-logo[data-fit] > img {
+  position: absolute;
+  top: var(--logo-y);
+  left: var(--logo-x);
+  width: var(--logo-w);
+  max-width: none;
+  height: var(--logo-h);
+  padding: 0;
+  object-fit: fill;
+}
+
+/* Plates and the ring dress only the artwork they were measured from: while a
+   replacement loads, or after it fails, the disc shows its monogram undressed. */
+
+/* A tile brings its own background: no plate and no ring, so the art reaches the edge. */
+.crown-face-logo[data-plate="none"]:has(> img[data-state="loaded"]) {
+  background: transparent;
+  box-shadow: none;
+}
+
+/* A dark tile would melt into the island: a hairline ring above the art keeps the disc's edge. */
+.crown-face-logo[data-ring]:has(> img[data-state="loaded"])::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12);
+  pointer-events: none;
+}
+
+/* Light plate for a dark mark: scheme-aware SVG favicons pick their light-background
+   variant (the crown itself is dark, which would otherwise select their dark one). */
+.crown-face-logo[data-plate="light"]:has(> img[data-state="loaded"]) {
   background: #ececed;
   box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.18);
   color-scheme: light;
 }
 
-/* The artwork fades in over the monogram it replaces. */
-.crown-face-logo > img {
-  object-fit: contain;
-  padding: 5px;
-  animation: crown-face-logo-in var(--crown-dur-logo) var(--crown-ease-out);
+/* Dark plate for a light mark: a step up from the island so a white glyph stays visible. */
+.crown-face-logo[data-plate="dark"]:has(> img[data-state="loaded"]) {
+  background: #232326;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14);
 }
 
 /* No artwork to show: a chat's glyph, or a folder while the project is unknown. */

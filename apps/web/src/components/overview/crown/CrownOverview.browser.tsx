@@ -6,7 +6,14 @@ import {
   ThreadId,
   WorktreeId,
   type EnvironmentApi,
+  type ServerConfig,
 } from "@ryco/contracts";
+import {
+  appAtomRegistry,
+  recordWsConnectionOpened,
+  resetWsConnectionStateForTests,
+  serverConfigAtom,
+} from "@ryco/client-runtime/rpc";
 import { useNotesStore } from "@ryco/client-runtime/state/notes";
 import { createPortal } from "react-dom";
 import { page, userEvent } from "vite-plus/test/browser";
@@ -14,6 +21,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 import { render } from "vitest-browser-react";
 
 import { PaneFocusContext } from "../../chat/PaneFocus";
+import {
+  resetPrimaryEnvironmentDescriptorForTests,
+  writePrimaryEnvironmentDescriptor,
+} from "../../../environments/primary";
+import { AppAtomRegistryProvider } from "../../../rpc/atomRegistry";
+import { artworkIcon, type ArtworkSample } from "../../projectArtworkTestFixtures";
 import {
   __resetEnvironmentApiOverridesForTests,
   __setEnvironmentApiOverrideForTests,
@@ -154,13 +167,15 @@ async function mountCrown(
   const paneFocused = options.paneFocused ?? true;
   const notesTarget = options.notesTarget;
   const view = (next: CrownOverviewProps) => (
-    <PaneFocusContext value={paneFocused}>
-      {notesTarget ? (
-        <CrownWithNotes {...next} target={notesTarget} />
-      ) : (
-        <CrownOverview {...next} />
-      )}
-    </PaneFocusContext>
+    <AppAtomRegistryProvider>
+      <PaneFocusContext value={paneFocused}>
+        {notesTarget ? (
+          <CrownWithNotes {...next} target={notesTarget} />
+        ) : (
+          <CrownOverview {...next} />
+        )}
+      </PaneFocusContext>
+    </AppAtomRegistryProvider>
   );
   const screen = await render(view(props), { container: host });
   mounts.push({ unmount: () => screen.unmount(), host });
@@ -189,6 +204,44 @@ const CROWN_PROJECT: CrownProject = {
   cwd: "/repo/ryco-hub",
   customAvatarContentHash: null,
 };
+
+/**
+ * Serves `sample` as CROWN_PROJECT's icon over a connected node's
+ * `projects.readIcon`, the path ProjectFavicon takes with projectIcons support.
+ * Returns a setter for what later reads serve ("broken": bytes that fail to decode).
+ */
+function serveProjectIcon(sample: ArtworkSample) {
+  let served: ArtworkSample | "broken" = sample;
+  const environmentId = CROWN_PROJECT.environmentId;
+  const environment = {
+    environmentId,
+    label: "Laptop",
+    platform: { os: "darwin" as const, arch: "arm64" as const },
+    serverVersion: "1",
+    capabilities: {
+      repositoryIdentity: true,
+      threadSettlement: true,
+      threadPriorityRanking: false,
+      projectIcons: true,
+    },
+  };
+  writePrimaryEnvironmentDescriptor(environment);
+  appAtomRegistry.set(serverConfigAtom, { environment } as ServerConfig);
+  __setEnvironmentApiOverrideForTests(environmentId, {
+    projects: {
+      readIcon: async ({ projectId }: { projectId: ProjectId }) => {
+        if (projectId !== CROWN_PROJECT.id) return null;
+        return served === "broken"
+          ? { mimeType: "image/png", dataBase64: "AAAA" }
+          : artworkIcon(served);
+      },
+    },
+  } as unknown as EnvironmentApi);
+  recordWsConnectionOpened({ environmentId });
+  return (next: ArtworkSample | "broken") => {
+    served = next;
+  };
+}
 
 const faceStatus = (host: HTMLElement) =>
   host.querySelector<HTMLElement>('[data-slot="crown-face-status"]')!;
@@ -656,17 +709,90 @@ describe("CrownOverview", () => {
       expect(logo.querySelector("svg text")).toBeNull();
     });
 
-    it("puts loaded artwork on a light plate in the light colour scheme", async () => {
-      const crown = await mountCrown(crownProps({ project: null }));
-      const logo = crown.host.querySelector<HTMLElement>('[data-slot="crown-face-logo"]')!;
-      expect(getComputedStyle(logo).colorScheme).toBe("dark");
-      // Scheme-aware SVG favicons must pick their light-background variant.
-      const artwork = document.createElement("img");
-      artwork.dataset.state = "loaded";
-      logo.append(artwork);
-      expect(getComputedStyle(logo).colorScheme).toBe("light");
-      await expect.poll(() => getComputedStyle(logo).backgroundColor).toBe("rgb(236, 236, 237)");
-      artwork.remove();
+    describe("artwork", () => {
+      afterEach(() => {
+        appAtomRegistry.set(serverConfigAtom, null);
+        resetWsConnectionStateForTests();
+        resetPrimaryEnvironmentDescriptorForTests();
+      });
+
+      async function mountWithArtwork(sample: ArtworkSample) {
+        const serve = serveProjectIcon(sample);
+        const crown = await mountCrown(crownProps({ project: CROWN_PROJECT }));
+        const logo = crown.host.querySelector<HTMLElement>('[data-slot="crown-face-logo"]')!;
+        await expect.poll(() => logo.dataset.fit).toBeDefined();
+        const image = logo.querySelector<HTMLImageElement>('img[data-state="loaded"]')!;
+        return { crown, logo, image, serve };
+      }
+
+      it("zooms an icon with its own background past its margin to fill the disc", async () => {
+        const { crown, logo, image } = await mountWithArtwork("tile");
+        expect(logo.dataset.fit).toBe("tile");
+        expect(logo.dataset.plate).toBe("none");
+        // No plate or ring: the art itself reaches the disc's edge.
+        await expect.poll(() => getComputedStyle(logo).backgroundColor).toBe("rgba(0, 0, 0, 0)");
+        expect(getComputedStyle(logo).boxShadow).toBe("none");
+        const disc = logo.getBoundingClientRect();
+        const art = image.getBoundingClientRect();
+        // The 48px tile inside a 64px icon is scaled to the 38px disc; the margin falls outside.
+        expect(art.width).toBeCloseTo((64 * 38) / 48, 0);
+        expect(art.left).toBeLessThan(disc.left - 4);
+        expect(art.top).toBeLessThan(disc.top - 4);
+        expect(getComputedStyle(image).objectFit).toBe("fill");
+        expect(getComputedStyle(logo).overflow).toBe("clip");
+        expect(logo.dataset.ring).toBeUndefined();
+        expect(getComputedStyle(logo, "::after").content).toBe("none");
+
+        // Another project starts unframed until its own artwork loads.
+        await crown.update({
+          project: { ...CROWN_PROJECT, id: ProjectId.make("project-other"), name: "Other" },
+        });
+        await expect.poll(() => logo.querySelector("svg text")?.textContent).toBe("O");
+        expect(logo.dataset.fit).toBeUndefined();
+        expect(logo.dataset.plate).toBeUndefined();
+      });
+
+      it("rings a dark tile above its art so the disc keeps its edge on the island", async () => {
+        const { logo } = await mountWithArtwork("inkDisc");
+        expect(logo.dataset.fit).toBe("tile");
+        expect(logo.dataset.ring).toBe("true");
+        const ring = getComputedStyle(logo, "::after");
+        expect(ring.position).toBe("absolute");
+        expect(ring.boxShadow).toBe("rgba(255, 255, 255, 0.12) 0px 0px 0px 1px inset");
+      });
+
+      it("insets a dark glyph on a light plate in the light colour scheme", async () => {
+        const { logo } = await mountWithArtwork("darkGlyph");
+        expect(logo.dataset.fit).toBe("mark");
+        expect(logo.dataset.plate).toBe("light");
+        // Scheme-aware SVG favicons must pick their light-background variant.
+        expect(getComputedStyle(logo).colorScheme).toBe("light");
+        await expect.poll(() => getComputedStyle(logo).backgroundColor).toBe("rgb(236, 236, 237)");
+      });
+
+      it("insets a white glyph on a dark plate so it stays visible", async () => {
+        const { logo } = await mountWithArtwork("whiteGlyph");
+        expect(logo.dataset.fit).toBe("mark");
+        expect(logo.dataset.plate).toBe("dark");
+        expect(getComputedStyle(logo).colorScheme).toBe("dark");
+        await expect.poll(() => getComputedStyle(logo).backgroundColor).toBe("rgb(35, 35, 38)");
+      });
+
+      it("drops the plate measured for replaced artwork while the new one fails", async () => {
+        const { crown, logo, serve } = await mountWithArtwork("darkGlyph");
+        await expect.poll(() => getComputedStyle(logo).backgroundColor).toBe("rgb(236, 236, 237)");
+
+        // A new avatar for the same project that never decodes: its monogram
+        // shows on the plain disc, not on the old artwork's light plate.
+        serve("broken");
+        await crown.update({ project: { ...CROWN_PROJECT, customAvatarContentHash: "v2" } });
+        await expect.poll(() => logo.querySelector("svg text")?.textContent).toBe("RH");
+        await expect.poll(() => logo.querySelector("img")).toBeNull();
+        await expect
+          .poll(() => getComputedStyle(logo).backgroundColor)
+          .toBe("rgba(255, 255, 255, 0.06)");
+        expect(getComputedStyle(logo).colorScheme).toBe("dark");
+      });
     });
 
     it("tints the status dot in the headline's tone and pulses it while checks run", async () => {

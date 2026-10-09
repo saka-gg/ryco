@@ -1,6 +1,16 @@
+import type { ProjectId } from "@ryco/contracts";
 import { FolderIcon, MessageCircleDashedIcon } from "lucide-react";
-import { useLayoutEffect, useRef, type CSSProperties, type MouseEvent, type Ref } from "react";
+import {
+  useLayoutEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type MouseEvent,
+  type Ref,
+} from "react";
 
+import { fitArtwork, type ArtworkFit } from "../../../lib/artworkFit.logic";
+import { readArtworkAnalysis } from "../../../lib/readArtwork";
 import { ProjectFavicon } from "../../ProjectFavicon";
 import type { CrownFaceLogo, CrownHeadline } from "./crownModel.logic";
 import { CROWN_TONE_VAR } from "./crownSections";
@@ -15,6 +25,10 @@ const STATUS_POP_TIMING: KeyframeAnimationOptions = {
   duration: 420,
   easing: "cubic-bezier(.34,1.56,.64,1)",
 };
+
+/** The logo disc's diameter (island.css) and a bare mark's inset from its edge, in px. */
+const LOGO_SIZE = 38;
+const LOGO_MARK_INSET = 6;
 
 /**
  * The crown's resting face: the project's logo (a chat's glyph for a chat), a
@@ -57,14 +71,7 @@ export function CrownFace({
       aria-expanded={props.expanded}
       onClick={props.onClick}
     >
-      <span
-        aria-hidden="true"
-        className="crown-face-logo"
-        data-slot="crown-face-logo"
-        data-logo={logo.kind}
-      >
-        <FaceLogo logo={logo} />
-      </span>
+      <FaceLogo logo={logo} />
       <span
         ref={statusRef}
         aria-hidden="true"
@@ -83,7 +90,65 @@ export function CrownFace({
   );
 }
 
+/**
+ * The logo disc. Loaded artwork is framed by its pixels: an icon with its own
+ * background is zoomed past any transparent margin, drop shadow or matte to
+ * fill the disc edge to edge (ringed when its edge is too dark to show); a
+ * bare glyph is inset on a plate that contrasts with it.
+ */
 function FaceLogo({ logo }: { readonly logo: CrownFaceLogo }) {
+  const [framing, setFraming] = useState<{
+    readonly projectId: ProjectId;
+    readonly fit: ArtworkFit;
+  } | null>(null);
+  const fit =
+    logo.kind === "project" && framing?.projectId === logo.project.id ? framing.fit : null;
+  return (
+    <span
+      aria-hidden="true"
+      className="crown-face-logo"
+      data-slot="crown-face-logo"
+      data-logo={logo.kind}
+      data-fit={fit?.mode}
+      data-plate={fit?.plate}
+      data-ring={fit?.ring || undefined}
+      style={fit ? logoFitStyle(fit) : undefined}
+    >
+      <FaceLogoContent
+        logo={logo}
+        onArtworkLoad={(projectId, image) =>
+          setFraming({
+            projectId,
+            fit: fitArtwork({
+              analysis: readArtworkAnalysis(image),
+              naturalWidth: image.naturalWidth,
+              naturalHeight: image.naturalHeight,
+              size: LOGO_SIZE,
+              markInset: LOGO_MARK_INSET,
+            }),
+          })
+        }
+      />
+    </span>
+  );
+}
+
+function logoFitStyle(fit: ArtworkFit): CSSProperties {
+  return {
+    "--logo-w": `${fit.width}px`,
+    "--logo-h": `${fit.height}px`,
+    "--logo-x": `${fit.left}px`,
+    "--logo-y": `${fit.top}px`,
+  } as CSSProperties;
+}
+
+function FaceLogoContent({
+  logo,
+  onArtworkLoad,
+}: {
+  readonly logo: CrownFaceLogo;
+  readonly onArtworkLoad: (projectId: ProjectId, image: HTMLImageElement) => void;
+}) {
   switch (logo.kind) {
     case "project": {
       const { project } = logo;
@@ -96,6 +161,7 @@ function FaceLogo({ logo }: { readonly logo: CrownFaceLogo }) {
           customAvatarContentHash={project.customAvatarContentHash ?? null}
           fallbackName={project.name}
           fillContainer
+          onImageLoad={(image) => onArtworkLoad(project.id, image)}
         />
       );
     }

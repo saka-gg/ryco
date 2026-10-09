@@ -140,6 +140,11 @@ export interface OverviewLayoutProps {
   /** Opens the Agents tab focused on one workflow. */
   onOpenAgentsWorkflow?: ((workflowId: string) => void) | undefined;
   sourceControlActions?: ReactNode | undefined;
+  /**
+   * The same git controls as explicit Commit / Push / PR / Pull buttons, for
+   * the crown's branch preview. The phone sheet ignores it.
+   */
+  sourceControlQuickActions?: ReactNode | undefined;
   branchControl?: ReactNode | undefined;
   environmentId: EnvironmentId;
   markdownCwd: string | undefined;

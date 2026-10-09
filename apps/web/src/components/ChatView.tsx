@@ -2944,6 +2944,7 @@ export default function ChatView(props: ChatViewProps) {
       : (activeThread?.branch ?? null);
   const {
     sourceControlActions: overviewSourceControlActions,
+    sourceControlQuickActions: overviewSourceControlQuickActions,
     branchControl: overviewBranchControl,
     sourceControlSync: overviewSourceControlSync,
   } = useOverviewPanelControls({
@@ -5442,6 +5443,7 @@ export default function ChatView(props: ChatViewProps) {
                 threadSubagents={threadSubagents}
                 changedFileSummaries={activeThread?.turnDiffSummaries}
                 sourceControlActions={overviewSourceControlActions}
+                sourceControlQuickActions={overviewSourceControlQuickActions}
                 branchControl={overviewBranchControl}
                 sourceControlSync={overviewSourceControlSync}
                 markdownCwd={gitCwd ?? undefined}
