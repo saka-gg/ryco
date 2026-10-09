@@ -2,7 +2,7 @@ import type { EnvironmentId, SourceControlChangeRequestMergeability } from "@ryc
 import type { ReactNode } from "react";
 
 import type { ActivePlanState, LatestProposedPlanState } from "../../session-logic";
-import type { ThreadSubagentView } from "../../threadWorkspaceViewModel";
+import type { AgentPanelModel, ThreadSubagentView } from "../../threadWorkspaceViewModel";
 import type { OverviewWorkflowCheckRow } from "../overviewPullRequestChecks.logic";
 import type { OverviewErrorInfo } from "./overviewErrors.logic";
 import type { PrCheckStatusView } from "../projectExplorer/prCheckStatus";
@@ -123,8 +123,22 @@ export interface OverviewLayoutProps {
   onRefreshPullRequest?: (() => void) | undefined;
   /** Opens the pull request in the workspace panel; ⌘/Ctrl-click keeps the host link. */
   onOpenPullRequestInApp?: (() => void) | undefined;
+  /**
+   * Opens one check run in the workspace panel's pull request reader, landing
+   * on its job (or the Checks tab); ⌘/Ctrl-click keeps the host link.
+   */
+  onOpenPullRequestCheck?: ((check: OverviewPullRequestCheckRun) => void) | undefined;
   isRefreshingPullRequest?: boolean | undefined;
   subagents?: ReadonlyArray<ThreadSubagentView> | undefined;
+  /**
+   * The thread's runtime agents grouped into workflows and direct agents. When
+   * set, the crown's agents section renders it instead of {@link subagents}.
+   */
+  agentPanelModel?: AgentPanelModel | undefined;
+  /** Opens one runtime agent's transcript in the workspace panel's Agents tab. */
+  onOpenAgent?: ((agentId: string) => void) | undefined;
+  /** Opens the Agents tab focused on one workflow. */
+  onOpenAgentsWorkflow?: ((workflowId: string) => void) | undefined;
   sourceControlActions?: ReactNode | undefined;
   branchControl?: ReactNode | undefined;
   environmentId: EnvironmentId;

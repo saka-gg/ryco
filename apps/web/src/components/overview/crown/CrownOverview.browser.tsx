@@ -27,13 +27,17 @@ import {
 import type { OverviewPullRequestCheckRun, OverviewPullRequestState } from "../overviewTypes";
 import { CROWN_FLYOUT_CLOSE_DELAY_MS } from "./crownLayout";
 import {
+  auditWorkflowAgents,
   createFakeNotesNode,
+  crownDirectAgents,
   crownLayoutFixture,
   crownPullRequestFixture,
+  makeChanges,
+  makeAgentPanelModel,
   makeCheckStatus,
-  makeSubagent,
 } from "./crownTestFixtures";
-import type { CrownChatBinding, CrownOverviewProps } from "./crownTypes";
+import { makeRuntimeAgent } from "../../agents/agentRosterTestFixtures";
+import type { CrownChatBinding, CrownOverviewProps, CrownProject } from "./crownTypes";
 import { CrownOverview } from "./CrownOverview";
 
 const RUNNING_RUNS: ReadonlyArray<OverviewPullRequestCheckRun> = [
@@ -178,6 +182,25 @@ async function mountCrown(
   };
 }
 
+const CROWN_PROJECT: CrownProject = {
+  id: ProjectId.make("project-ryco-hub"),
+  environmentId: EnvironmentId.make("env-crown-face"),
+  name: "Ryco Hub",
+  cwd: "/repo/ryco-hub",
+  customAvatarContentHash: null,
+};
+
+const faceStatus = (host: HTMLElement) =>
+  host.querySelector<HTMLElement>('[data-slot="crown-face-status"]')!;
+
+/** Script-driven animations only: CSS transitions and keyframe animations are excluded. */
+const scriptAnimations = (element: Element) =>
+  element
+    .getAnimations()
+    .filter(
+      (animation) => !(animation instanceof CSSTransition || animation instanceof CSSAnimation),
+    );
+
 const railKeys = (rail: HTMLElement) =>
   [...rail.querySelectorAll<HTMLElement>("[data-nav-key]")].map((button) => button.dataset.navKey);
 
@@ -319,6 +342,11 @@ describe("CrownOverview", () => {
     );
     expect(crown.railButton("changes").getAttribute("aria-description")).toBe("4 files changed");
     expect(crown.railButton("ship").getAttribute("aria-description")).toBe("2 commits to push");
+    // Four workflow members and two direct agents; the coordinator is not one of them.
+    expect(crown.railButton("agents").getAttribute("aria-description")).toBe(
+      "6 subagents, 2 active",
+    );
+    expect(crown.railButton("agents").querySelector(".crown-badge")?.textContent).toBe("6");
   });
 
   it("opens the card from a rail icon and switches sections on the spine", async () => {
@@ -393,12 +421,14 @@ describe("CrownOverview", () => {
     await expect.element(page.getByRole("status")).toHaveTextContent("1 check failing");
     expect(crown.island().style.width).not.toBe("48px");
 
+    // Two direct agents start: two more alerts queue behind the shown one.
     await crown.update({
-      subagents: [
-        ...crownLayoutFixture().subagents!,
-        makeSubagent("subagent:a", "running", "Fixer"),
-        makeSubagent("subagent:b", "running", "Reviewer"),
-      ],
+      agentPanelModel: makeAgentPanelModel([
+        ...auditWorkflowAgents(),
+        ...crownDirectAgents(),
+        makeRuntimeAgent("agent-fixer", { title: "Fixer" }),
+        makeRuntimeAgent("agent-reviewer", { title: "Reviewer" }),
+      ]),
     });
     await expect
       .poll(() => crown.host.querySelector('[data-slot="crown-queue"]')?.textContent)
@@ -485,10 +515,10 @@ describe("CrownOverview", () => {
     const crown = await mountCrown();
     expect(crown.root().dataset.motion).toBe("reduced");
 
-    const glyph = crown.host.querySelector<HTMLElement>(".crown-face-glyph")!;
-    expect(glyph.dataset.glyph).toBe("spinner");
+    const status = faceStatus(crown.host);
+    expect(status.dataset.tone).toBe("warning");
     await crown.update({ pullRequest: failingPullRequest() });
-    await expect.poll(() => glyph.dataset.glyph).toBe("x");
+    await expect.poll(() => status.dataset.tone).toBe("danger");
     await expect.poll(() => crown.island().dataset.mode).toBe("alert");
 
     const running = crown
@@ -573,6 +603,115 @@ describe("CrownOverview", () => {
       await expect.poll(() => crown.island().dataset.mode).toBe("card");
       await expect.element(page.getByRole("region", { name: "Plan" })).toBeVisible();
       expect(crown.host.textContent).not.toContain("Not a git repository");
+    });
+  });
+
+  describe("face", () => {
+    it("shows the project's monogram when it has no artwork", async () => {
+      const crown = await mountCrown(crownProps({ project: CROWN_PROJECT }));
+      const logo = crown.host.querySelector<HTMLElement>('[data-slot="crown-face-logo"]')!;
+      await expect.poll(() => logo.querySelector("svg text")?.textContent).toBe("RH");
+      expect(logo.getBoundingClientRect().width).toBe(38);
+      expect(logo.getAttribute("aria-hidden")).toBe("true");
+      expect(logo.querySelector(".crown-face-folder")).toBeNull();
+    });
+
+    it("shows a chat's glyph, not its folder's favicon or its title's monogram", async () => {
+      // A chat's project is a Ryco-managed folder named after the chat.
+      const chatProject: CrownProject = {
+        ...CROWN_PROJECT,
+        id: ProjectId.make("project-chat"),
+        kind: "chat",
+        name: "Recipe ideas",
+        cwd: "/chats/recipe-ideas",
+      };
+      const crown = await mountCrown(
+        crownProps({ isGitRepo: false, project: chatProject, isChat: true }),
+      );
+      const logo = crown.host.querySelector<HTMLElement>('[data-slot="crown-face-logo"]')!;
+      expect(logo.dataset.logo).toBe("chat");
+      const glyph = logo.querySelector<SVGElement>(".crown-face-chat")!;
+      expect(glyph).not.toBeNull();
+      expect(glyph.getBoundingClientRect().width).toBe(16);
+      expect(logo.querySelector("img")).toBeNull();
+      expect(logo.querySelector("svg text")).toBeNull();
+
+      // An unsent chat has no project yet: still the chat, not the unknown-project folder.
+      await crown.update({ project: null });
+      expect(logo.dataset.logo).toBe("chat");
+      expect(logo.querySelector(".crown-face-chat")).not.toBeNull();
+      expect(logo.querySelector(".crown-face-folder")).toBeNull();
+
+      // Turned into a project, the face shows the project's logo.
+      await crown.update({ project: CROWN_PROJECT, isChat: false, isGitRepo: true });
+      await expect.poll(() => logo.querySelector("svg text")?.textContent).toBe("RH");
+      expect(logo.dataset.logo).toBe("project");
+      expect(logo.querySelector(".crown-face-chat")).toBeNull();
+    });
+
+    it("falls back to a folder without a project", async () => {
+      const crown = await mountCrown(crownProps({ project: null }));
+      const logo = crown.host.querySelector<HTMLElement>('[data-slot="crown-face-logo"]')!;
+      expect(logo.querySelector(".crown-face-folder")).not.toBeNull();
+      expect(logo.querySelector("svg text")).toBeNull();
+    });
+
+    it("puts loaded artwork on a light plate in the light colour scheme", async () => {
+      const crown = await mountCrown(crownProps({ project: null }));
+      const logo = crown.host.querySelector<HTMLElement>('[data-slot="crown-face-logo"]')!;
+      expect(getComputedStyle(logo).colorScheme).toBe("dark");
+      // Scheme-aware SVG favicons must pick their light-background variant.
+      const artwork = document.createElement("img");
+      artwork.dataset.state = "loaded";
+      logo.append(artwork);
+      expect(getComputedStyle(logo).colorScheme).toBe("light");
+      await expect.poll(() => getComputedStyle(logo).backgroundColor).toBe("rgb(236, 236, 237)");
+      artwork.remove();
+    });
+
+    it("tints the status dot in the headline's tone and pulses it while checks run", async () => {
+      const crown = await mountCrown(crownProps({ project: CROWN_PROJECT }));
+      const status = faceStatus(crown.host);
+      expect(status.dataset.tone).toBe("warning");
+      expect(status.dataset.pulse).toBe("true");
+      const pulse = status.getAnimations().find((a) => a instanceof CSSAnimation);
+      expect(pulse).toBeDefined();
+      // The fill breathes; the dot and its cut-out ring never go translucent.
+      const pulseFrames = (pulse!.effect as KeyframeEffect).getKeyframes();
+      expect(pulseFrames.some((frame) => "opacity" in frame)).toBe(false);
+      expect(getComputedStyle(status).opacity).toBe("1");
+      await expect
+        .element(page.getByRole("button", { name: "Overview: Checks 1/3" }))
+        .toBeInTheDocument();
+
+      await crown.update({ pullRequest: failingPullRequest() });
+      await expect.poll(() => status.dataset.tone).toBe("danger");
+      expect(status.dataset.pulse).toBeUndefined();
+
+      // Nothing urgent: the dot hides.
+      await crown.update({ pullRequest: null, activePlan: null, changes: makeChanges() });
+      await expect.poll(() => status.dataset.tone).toBe("neutral");
+      await expect.poll(() => getComputedStyle(status).opacity).toBe("0");
+    });
+
+    it("pops the status dot when the tone changes, but not into neutral", async () => {
+      const crown = await mountCrown(crownProps({ project: CROWN_PROJECT }));
+      const status = faceStatus(crown.host);
+      expect(scriptAnimations(status)).toEqual([]);
+
+      await crown.update({ pullRequest: failingPullRequest() });
+      await expect.poll(() => scriptAnimations(status).length).toBe(1);
+      const [pop] = scriptAnimations(status);
+      expect((pop!.effect as KeyframeEffect).getKeyframes().map((k) => k.transform)).toEqual([
+        "scale(0.4)",
+        "scale(1.25)",
+        "none",
+      ]);
+      await pop!.finished;
+
+      await crown.update({ pullRequest: null, activePlan: null, changes: makeChanges() });
+      await expect.poll(() => status.dataset.tone).toBe("neutral");
+      expect(scriptAnimations(status)).toEqual([]);
     });
   });
 
@@ -684,6 +823,20 @@ describe("CrownOverview", () => {
 
       await page.getByRole("button", { name: "Notes", exact: true }).hover();
       await expect.poll(() => crown.flyout().dataset.open).toBe("true");
+      // The first open refits beside the icon once the notes lay out; clicking the
+      // composer mid-glide can land outside the settled panel and let it close.
+      const notesIcon = crown.railButton("notes").getBoundingClientRect();
+      const notesIconCentre = notesIcon.top + notesIcon.height / 2;
+      await expect
+        .poll(() => {
+          const panel = crown.flyout().getBoundingClientRect();
+          return (
+            panel.top <= notesIconCentre &&
+            panel.bottom >= notesIconCentre &&
+            crown.flyout().getAnimations().length === 0
+          );
+        })
+        .toBe(true);
       const composer = crown.flyout().querySelector<HTMLTextAreaElement>("textarea")!;
       // The preview keeps the pane's own header.
       expect(crown.flyout().querySelector(".notes-compact")).toBeNull();

@@ -1,3 +1,4 @@
+import { agentPanelAgentCount } from "../../threadWorkspaceViewModel";
 import type { OverviewLayoutProps, OverviewPanelItem } from "./overviewTypes";
 
 /**
@@ -16,7 +17,9 @@ export interface OverviewSummary {
   checksRunning: number;
   planTotal: number;
   planDone: number;
+  /** Agents doing (or having done) work; workflow coordinators never count. */
   agentsTotal: number;
+  /** Live agents: running, queued and, with the runtime model, waiting ones. */
   agentsRunning: number;
   refName: string | null;
   aheadCount: number;
@@ -56,7 +59,7 @@ export function getOverviewSummary(props: OverviewLayoutProps): OverviewSummary 
     else if (run.tone === "running") checksRunning += 1;
   }
   const steps = props.activePlan?.steps ?? [];
-  const agents = props.subagents ?? [];
+  const agents = overviewAgentCounts(props);
   // Progress numerator counts steps that have been *reached* — completed plus the
   // currently in-progress step — to mirror the lab's "N of M" / percentage (e.g.
   // 2 done + 1 active of 5 = 3/5 = 60%). The per-step markers still key off the
@@ -75,11 +78,26 @@ export function getOverviewSummary(props: OverviewLayoutProps): OverviewSummary 
     checksRunning,
     planTotal: steps.length,
     planDone: planReached,
-    agentsTotal: agents.length,
-    agentsRunning: agents.filter((agent) => agent.status === "running").length,
+    agentsTotal: agents.total,
+    agentsRunning: agents.running,
     refName: props.changes?.refName ?? null,
     aheadCount: props.changes?.aheadCount ?? 0,
     behindCount: props.changes?.behindCount ?? 0,
+  };
+}
+
+/**
+ * Agent counts. The runtime model (the crown's) counts the agents the Agents
+ * tab lists, never the coordinators standing in for their workflow members;
+ * without it (the phone sheet) the transcript subagents are counted as before.
+ */
+function overviewAgentCounts(props: OverviewLayoutProps): { total: number; running: number } {
+  const model = props.agentPanelModel;
+  if (model) return { total: agentPanelAgentCount(model), running: model.liveCount };
+  const agents = props.subagents ?? [];
+  return {
+    total: agents.length,
+    running: agents.filter((agent) => agent.status === "running").length,
   };
 }
 

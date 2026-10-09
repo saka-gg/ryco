@@ -60,7 +60,7 @@ import {
   resolveChangeRequestPresentationForKind,
   type ChangeRequestHostCapabilities,
 } from "@ryco/shared/sourceControl";
-import { useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { useMemo, useReducer, useRef, useState, type CSSProperties, type ReactNode } from "react";
 
 import { usePullRequestReviewDraftStore } from "../../../pullRequestReviewDraftStore";
 import type { SourceControlQueryState } from "../../../rpc/sourceControlAtoms";
@@ -456,6 +456,7 @@ export function PullRequestsTestProvider(props: PullRequestsTestProviderProps) {
   const [selectionMotion, setSelectionMotion] = useState<PullRequestSelectionMotion>(
     props.selectionMotion ?? { kind: "none", token: 0 },
   );
+  const [jobRevealToken, bumpJobRevealToken] = useReducer((count: number) => count + 1, 0);
   const searchRef = useRef(search);
   searchRef.current = search;
   const modelRef = useRef(model);
@@ -481,6 +482,7 @@ export function PullRequestsTestProvider(props: PullRequestsTestProviderProps) {
       closeDrawer: () => usePullRequestsLayoutStore.getState().setDrawerOpen(false),
       // No view transitions in tests: the push still sets its motion.
       canRunPushTransition: () => false,
+      onRevealJob: bumpJobRevealToken,
     });
     // One fixture repository: record the call, keep the selection.
     base.selectRepository = () => undefined;
@@ -517,8 +519,18 @@ export function PullRequestsTestProvider(props: PullRequestsTestProviderProps) {
       layout,
       selectionMotion,
       readerKey,
+      jobRevealToken,
     }),
-    [layout, model, nav, readerKey, repositoryReady, repositoryStatus, selectionMotion],
+    [
+      jobRevealToken,
+      layout,
+      model,
+      nav,
+      readerKey,
+      repositoryReady,
+      repositoryStatus,
+      selectionMotion,
+    ],
   );
 
   const frameStyle: CSSProperties = { width: pageWidth, height: props.height ?? 800 };

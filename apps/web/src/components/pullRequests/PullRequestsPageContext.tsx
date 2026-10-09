@@ -147,6 +147,11 @@ export interface PullRequestsPageContextValue {
   readonly selectionMotion: PullRequestSelectionMotion;
   /** `pullRequestReaderKey(repository.key, pr)` for the selected PR, else null. */
   readonly readerKey: string | null;
+  /**
+   * Bumps on every `nav.revealJob`, so revealing the job already in the URL
+   * scrolls to and flashes it again. Absent where nothing counts reveals.
+   */
+  readonly jobRevealToken?: number | undefined;
 }
 
 export const PullRequestsPageContext = createContext<PullRequestsPageContextValue | null>(null);

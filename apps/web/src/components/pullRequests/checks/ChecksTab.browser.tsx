@@ -20,6 +20,7 @@ vi.mock("~/components/pullRequests/agentHandoff", () => ({
   }),
 }));
 
+import { usePullRequestsPage } from "../PullRequestsPageContext";
 import { usePullRequestReaderStore } from "../pullRequestsLayoutStore";
 import {
   FIXTURE_688_FAILING_JOB,
@@ -51,6 +52,16 @@ afterEach(() => {
   resetPullRequestsTestState();
 });
 
+/** Reveals a job through nav, as the rail's "View failing check" link does. */
+function RevealJobButton(props: { readonly job: string }) {
+  const { nav } = usePullRequestsPage();
+  return (
+    <button type="button" onClick={() => nav.revealJob(props.job)}>
+      Reveal job
+    </button>
+  );
+}
+
 async function renderChecks(pr: number, job?: string) {
   await page.viewport(900, 860);
   return render(
@@ -60,6 +71,7 @@ async function renderChecks(pr: number, job?: string) {
       width={900}
       height={860}
     >
+      {job ? <RevealJobButton job={job} /> : null}
       <ChecksTab />
     </PullRequestsTestProvider>,
   );
@@ -205,7 +217,24 @@ describe("ChecksTab", () => {
     await expect.element(jobToggle(screen, "Typecheck")).toHaveAttribute("aria-expanded", "true");
     await expect
       .poll(() => document.querySelector('[data-checks-job="CI#0/Typecheck"] > div')?.className)
-      .toMatch(/pr-checks-flash/u);
+      .toMatch(/\blanding-flash\b/u);
+  });
+
+  it("lands again when the job already in the URL is revealed again", async () => {
+    const screen = await renderChecks(703, "CI/Typecheck");
+    const rowClass = () =>
+      document.querySelector('[data-checks-job="CI#0/Typecheck"] > div')?.className ?? "";
+    await expect.poll(rowClass).toMatch(/\blanding-flash\b/u);
+    expect(rowClass()).not.toMatch(/landing-flash-replay/u);
+
+    // Mid-flash: the URL is unchanged, the reveal count restarts the pass.
+    await screen.getByRole("button", { name: "Reveal job" }).click();
+    await expect.poll(rowClass).toMatch(/landing-flash-replay/u);
+
+    // After the flash ends, a repeat flashes again from the start.
+    await expect.poll(rowClass, { timeout: 4000 }).not.toMatch(/landing-flash/u);
+    await screen.getByRole("button", { name: "Reveal job" }).click();
+    await expect.poll(rowClass).toMatch(/\blanding-flash\b/u);
   });
 
   it("lists a GitLab merged-results pipeline's jobs once and counts them once", async () => {

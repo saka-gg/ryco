@@ -33,6 +33,7 @@ vi.mock("@tanstack/react-router", async (importOriginal) => ({
 import { AppAtomRegistryProvider } from "../../../rpc/atomRegistry";
 import { DiffWorkerPoolProvider } from "../../DiffWorkerPoolProvider";
 import { SidebarProvider } from "../../ui/sidebar";
+import type { WorkspacePullRequestReveal } from "../../../workspaceRouteSearch";
 import { fixtureRepositoryOption } from "../testing/pullRequestFixtures";
 import { resetPullRequestsTestState } from "../testing/PullRequestsTestProvider";
 import WorkspacePullRequestPanel from "./WorkspacePullRequestPanel";
@@ -48,6 +49,8 @@ function Harness(props: {
   readonly number: number | null;
   readonly resolving?: boolean;
   readonly onSelectNumber?: (number: number) => void;
+  readonly reveal?: WorkspacePullRequestReveal | null;
+  readonly onRevealHandled?: () => void;
 }) {
   return (
     <AppAtomRegistryProvider>
@@ -62,6 +65,8 @@ function Harness(props: {
                 number={props.number}
                 resolving={props.resolving ?? false}
                 onSelectNumber={props.onSelectNumber ?? (() => undefined)}
+                reveal={props.reveal ?? null}
+                {...(props.onRevealHandled ? { onRevealHandled: props.onRevealHandled } : {})}
               />
             </div>
           </div>
@@ -69,6 +74,16 @@ function Harness(props: {
       </SidebarProvider>
     </AppAtomRegistryProvider>
   );
+}
+
+function typecheckRow(): HTMLElement | null {
+  return document.querySelector<HTMLElement>('[data-checks-job="CI#0/Typecheck"] > div');
+}
+
+function flashedRows(): number {
+  return document.querySelectorAll(
+    '[data-slot="workspace-pull-request"] .landing-flash, [data-slot="workspace-pull-request"] .landing-flash-static',
+  ).length;
 }
 
 function activeReaderTab(): string | null {
@@ -152,5 +167,92 @@ describe("WorkspacePullRequestPanel", () => {
     await expect.element(page.getByText("Looking for this thread's pull request…")).toBeVisible();
     await mounted.rerender(<Harness number={null} />);
     await expect.element(page.getByText("No pull request yet")).toBeVisible();
+  });
+
+  it("reveals a job once per link: expands it, flashes it, and hands the link back", async () => {
+    const onRevealHandled = vi.fn();
+    const reveal: WorkspacePullRequestReveal = { kind: "job", job: "CI/Typecheck" };
+    mounted = await render(
+      <Harness number={703} reveal={reveal} onRevealHandled={onRevealHandled} />,
+    );
+
+    await expect.poll(activeReaderTab).toBe("checks");
+    await expect
+      .element(page.getByRole("button", { name: /^\S+ Typecheck$/u }))
+      .toHaveAttribute("aria-expanded", "true");
+    await expect.poll(() => typecheckRow()?.className ?? "").toMatch(/\blanding-flash\b/u);
+    expect(onRevealHandled).toHaveBeenCalledTimes(1);
+
+    // Re-renders with the reveal still pending never act on it twice.
+    await mounted.rerender(
+      <Harness number={703} reveal={{ ...reveal }} onRevealHandled={onRevealHandled} />,
+    );
+    expect(onRevealHandled).toHaveBeenCalledTimes(1);
+
+    // The route strips the handled key; the same link again lands again.
+    await mounted.rerender(
+      <Harness number={703} reveal={null} onRevealHandled={onRevealHandled} />,
+    );
+    await expect
+      .poll(() => typecheckRow()?.className ?? "", { timeout: 4000 })
+      .not.toMatch(/landing-flash/u);
+    await mounted.rerender(
+      <Harness number={703} reveal={reveal} onRevealHandled={onRevealHandled} />,
+    );
+    await expect.poll(() => typecheckRow()?.className ?? "").toMatch(/\blanding-flash\b/u);
+    expect(onRevealHandled).toHaveBeenCalledTimes(2);
+  });
+
+  it("re-flashes a job revealed again while it is still flashing", async () => {
+    const onRevealHandled = vi.fn();
+    const reveal: WorkspacePullRequestReveal = { kind: "job", job: "CI/Typecheck" };
+    mounted = await render(
+      <Harness number={703} reveal={reveal} onRevealHandled={onRevealHandled} />,
+    );
+    await expect.poll(() => typecheckRow()?.className ?? "").toMatch(/\blanding-flash\b/u);
+    await mounted.rerender(
+      <Harness number={703} reveal={null} onRevealHandled={onRevealHandled} />,
+    );
+    await mounted.rerender(
+      <Harness number={703} reveal={reveal} onRevealHandled={onRevealHandled} />,
+    );
+    await expect.poll(() => typecheckRow()?.className ?? "").toMatch(/landing-flash-replay/u);
+    expect(onRevealHandled).toHaveBeenCalledTimes(2);
+  });
+
+  it("never replays a handled job landing when the workspace tab remounts", async () => {
+    const reveal: WorkspacePullRequestReveal = { kind: "job", job: "CI/Typecheck" };
+    mounted = await render(
+      <Harness number={703} reveal={reveal} onRevealHandled={() => undefined} />,
+    );
+    await expect.poll(() => typecheckRow()?.className ?? "").toMatch(/\blanding-flash\b/u);
+
+    // Switching the workspace tab away and back remounts the reader.
+    await mounted.unmount();
+    mounted = await render(<Harness number={703} />);
+    await expect.poll(activeReaderTab).toBe("checks");
+    await expect
+      .element(page.getByRole("button", { name: /^\S+ Typecheck$/u }))
+      .toHaveAttribute("aria-expanded", "true");
+    await new Promise((resolve) => window.setTimeout(resolve, 250));
+    expect(flashedRows()).toBe(0);
+  });
+
+  it("lands on the Checks tab without flashing anything for a checks reveal", async () => {
+    const onRevealHandled = vi.fn();
+    mounted = await render(<Harness number={703} onRevealHandled={onRevealHandled} />);
+    await page.getByRole("tab", { name: "Conversation" }).click();
+    await expect.poll(activeReaderTab).toBe("conversation");
+    // The reader resumes where an earlier test left it; let any landing settle.
+    await expect.poll(flashedRows, { timeout: 4000 }).toBe(0);
+
+    await mounted.rerender(
+      <Harness number={703} reveal={{ kind: "checks" }} onRevealHandled={onRevealHandled} />,
+    );
+    await expect.poll(activeReaderTab).toBe("checks");
+    await expect.element(page.getByRole("button", { name: /^\S+ Typecheck$/u })).toBeVisible();
+    expect(onRevealHandled).toHaveBeenCalledTimes(1);
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    expect(flashedRows()).toBe(0);
   });
 });

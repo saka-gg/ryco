@@ -25,6 +25,26 @@ const failing = (names: string[], headSha = "sha-1"): CrownSnapshot["checks"] =>
   total: 3,
   refName: "feature/crown",
 });
+const scoutRunning: CrownSnapshot["agents"] = {
+  direct: { a: { status: "running", name: "Scout" } },
+  workflows: {},
+};
+const auditRun = (
+  workflow: Partial<CrownSnapshot["agents"]["workflows"][string]> = {},
+): CrownSnapshot["agents"] => ({
+  direct: {},
+  workflows: {
+    "wf-audit": {
+      name: "Audit",
+      status: "running",
+      phaseCount: 3,
+      memberCount: 4,
+      failedMemberIds: [],
+      firstFailedName: null,
+      ...workflow,
+    },
+  },
+});
 const RUNNING: CrownSnapshot["checks"] = {
   headSha: "sha-1",
   kind: "running",
@@ -90,12 +110,12 @@ describe("useCrownAlerts", () => {
 
   it("queues alerts and keeps the dwell fixed when the alert appeared", async () => {
     const { hook, update } = await setup({
-      snapshot: makeSnapshot({ checks: RUNNING, subagents: {} }),
+      snapshot: makeSnapshot({ checks: RUNNING }),
     });
     await update({
       snapshot: makeSnapshot({
         checks: failing(["lint"]),
-        subagents: { a: { status: "running", name: "Scout" } },
+        agents: scoutRunning,
       }),
     });
     expect(hook.result.current.current?.title).toBe("1 check failing");
@@ -110,12 +130,30 @@ describe("useCrownAlerts", () => {
     expect(hook.result.current.current).toBeNull();
   });
 
+  it("alerts a workflow run once per transition and pings the agents icon", async () => {
+    const { hook, update } = await setup({ snapshot: makeSnapshot({ checks: RUNNING }) });
+    await update({ snapshot: makeSnapshot({ checks: RUNNING, agents: auditRun() }) });
+    expect(hook.result.current.current).toMatchObject({
+      title: "Workflow Audit started",
+      sub: "3 phases",
+      icon: "workflow",
+    });
+    expect(hook.result.current.pings.agents).toEqual({ n: 1, tone: "agent" });
+
+    // Member churn inside the run is not an alert; a new failure is, once.
+    const failed = auditRun({ failedMemberIds: ["wf-audit:types"], firstFailedName: "work:types" });
+    await update({ snapshot: makeSnapshot({ checks: RUNNING, agents: failed }) });
+    await update({ snapshot: makeSnapshot({ checks: RUNNING, agents: structuredClone(failed) }) });
+    expect(hook.result.current.pings.agents).toEqual({ n: 2, tone: "danger" });
+    expect(hook.result.current.queuedCount).toBe(1);
+  });
+
   it("clears on demand", async () => {
     const { hook, update } = await setup();
     await update({
       snapshot: makeSnapshot({
         checks: failing(["lint"]),
-        subagents: { a: { status: "running", name: "Scout" } },
+        agents: scoutRunning,
       }),
     });
     await hook.act(() => hook.result.current.clear());

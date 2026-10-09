@@ -22,7 +22,7 @@ import { type ChatOverviewModelInput, useChatOverviewModel } from "./useChatOver
 /** Crown-only inputs; the classic phone sheet does not render them. */
 export type ChatOverviewCrownInput = Pick<
   CrownOverviewProps,
-  "threadTitle" | "isGitRepo" | "latestTurn" | "turnSettled" | "agentRunning"
+  "threadTitle" | "isGitRepo" | "latestTurn" | "turnSettled" | "agentRunning" | "project" | "isChat"
 > & {
   /** Drives the rail's enter / exit transition while ChatView delays unmount. */
   open: boolean;
@@ -231,6 +231,8 @@ export function ChatOverviewPanel(
         {...layoutProps}
         preview={props.preview}
         threadTitle={props.threadTitle}
+        project={props.project ?? null}
+        isChat={props.isChat}
         readiness={readiness}
         isGitRepo={props.isGitRepo}
         latestTurn={props.latestTurn}

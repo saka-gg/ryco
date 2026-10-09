@@ -144,6 +144,7 @@ function ProjectFaviconImage(input: {
         src={src}
         alt=""
         className={imgClass}
+        data-state={status}
         onLoad={() => {
           setStatus("loaded");
         }}

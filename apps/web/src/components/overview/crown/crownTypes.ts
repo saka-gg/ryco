@@ -1,6 +1,7 @@
 import type { OrchestrationLatestTurnState } from "@ryco/contracts";
 import type { ReactNode } from "react";
 
+import type { Project } from "../../../types";
 import type { WorktreeNotes } from "../notes/useWorktreeNotes";
 import type { OverviewDataReadiness, OverviewLayoutProps } from "../overviewTypes";
 import type { CrownSection } from "./crownSections";
@@ -18,6 +19,15 @@ export interface CrownChatBinding {
   /** Starts loading the dialog ahead of a likely open. */
   readonly preload: () => void;
 }
+
+/**
+ * The project whose logo the crown face shows (`ProjectFavicon` inputs); its
+ * `kind` tells a chat's folder project apart (`@ryco/shared/projectKind`).
+ */
+export type CrownProject = Pick<
+  Project,
+  "id" | "environmentId" | "name" | "cwd" | "customAvatarContentHash" | "kind"
+>;
 
 /** The slice of the thread's latest turn the crown watches for "turn finished" alerts. */
 export interface CrownTurnInput {
@@ -49,6 +59,13 @@ export interface CrownOverviewProps extends OverviewLayoutProps {
   readonly notes?: CrownNotesBinding | undefined;
   /** Set for a chat this client can promote: the rail shows "Turn into project". */
   readonly chat?: CrownChatBinding | undefined;
+  /** The thread's project; the face shows its logo (a folder without one). */
+  readonly project?: CrownProject | null | undefined;
+  /**
+   * The thread is a "No project" chat, sent or not yet (an unsent chat has no
+   * project): the face shows the chat glyph instead of a project logo.
+   */
+  readonly isChat?: boolean | undefined;
 }
 
 /** Props of the shared section detail used by both the hover flyout and the card. */

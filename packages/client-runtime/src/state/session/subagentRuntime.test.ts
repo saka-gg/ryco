@@ -2,6 +2,12 @@ import { describe, expect, it } from "vite-plus/test";
 import { type OrchestrationThreadActivity } from "@ryco/contracts";
 import { classifyTaskAgentKind } from "@ryco/shared/taskClassification";
 import {
+  agentPanelAgentCount,
+  agentPanelRoster,
+  agentPhaseStatusText,
+  agentWorkflowMembers,
+  agentWorkflowStatusText,
+  buildAgentRosterIdentity,
   deriveAgentPanelModel,
   deriveThreadAgentPanelModel,
   foldSubagentActivities,
@@ -10,6 +16,10 @@ import {
   isAgentAttributedToolActivity,
   isSubagentActivityKind,
   isTimelineBypassActivity,
+  resolveAgentRowIdentity,
+  summarizeAgentWorkflow,
+  type AgentPanelWorkflowGroup,
+  type RuntimeSubagent,
   workflowCardMembers,
 } from "./subagentRuntime.ts";
 import { deriveThreadSubagents } from "./threadWorkspaceViewModel.ts";
@@ -347,8 +357,12 @@ describe("foldSubagentActivities", () => {
   });
 });
 
-describe("deriveAgentPanelModel", () => {
-  const roster = fold([
+/**
+ * Panel roster fixture: a two-phase workflow (Audit done, Verify running) and
+ * one idle direct spawn. A builder, so each describe folds its own rows.
+ */
+function panelRoster() {
+  return fold([
     activity("task.started", { taskId: "wf-1", taskType: "local_workflow", title: "audit" }),
     activity("task.progress", {
       taskId: "wf-1",
@@ -378,6 +392,10 @@ describe("deriveAgentPanelModel", () => {
     activity("task.started", { taskId: "direct-1", title: "Marlow", role: "explorer" }),
     activity("task.updated", { taskId: "direct-1", status: "idle" }),
   ]);
+}
+
+describe("deriveAgentPanelModel", () => {
+  const roster = panelRoster();
 
   it("groups workflow members by phase and separates direct spawns", () => {
     const model = deriveAgentPanelModel({ agents: roster });
@@ -591,8 +609,257 @@ describe("workflowCardMembers", () => {
     const { visible, overflow } = workflowCardMembers(model.workflows[0]!, 8);
     expect(visible).toHaveLength(8);
     expect(overflow).toBe(2);
-    expect(visible[0]!.status).toBe("failed");
+    expect(visible.some((agent) => agent.status === "failed")).toBe(true);
     expect(visible.filter((agent) => agent.status === "completed").length).toBeLessThanOrEqual(2);
+    // Chosen by urgency, rendered in roster (spawn) order.
+    expect(visible.map((agent) => agent.agentIndex)).toEqual([0, 3, 4, 5, 6, 7, 8, 9]);
+  });
+
+  it("keeps rows in place when a member's progress bumps its updatedAt", () => {
+    const rows = [
+      activity("task.started", { taskId: "wf-1", taskType: "local_workflow" }),
+      ...[..."abc"].map((letter, index) =>
+        activity("task.progress", {
+          taskId: `wf-1:wf:${index}`,
+          title: `agent-${letter}`,
+          status: "running",
+          parentAgentId: "wf-1",
+          agentIndex: index,
+          phaseIndex: 0,
+          phaseTitle: "Work",
+        }),
+      ),
+    ];
+    const ids = (activities: ReadonlyArray<OrchestrationThreadActivity>) =>
+      workflowCardMembers(
+        deriveAgentPanelModel({ agents: fold(activities) }).workflows[0]!,
+        3,
+      ).visible.map((agent) => agent.id);
+    const before = ids(rows);
+    const after = ids([
+      ...rows,
+      activity("task.progress", {
+        taskId: "wf-1:wf:0",
+        title: "agent-a",
+        status: "running",
+        parentAgentId: "wf-1",
+        agentIndex: 0,
+        phaseIndex: 0,
+        phaseTitle: "Work",
+        summary: "Still going",
+      }),
+    ]);
+    expect(after).toEqual(before);
+    expect(before).toEqual(["wf-1:wf:0", "wf-1:wf:1", "wf-1:wf:2"]);
+  });
+});
+
+function workflowGroup(rows: ReadonlyArray<OrchestrationThreadActivity>): AgentPanelWorkflowGroup {
+  return deriveAgentPanelModel({ agents: fold(rows) }).workflows[0]!;
+}
+
+function workflowMember(
+  workflowId: string,
+  index: number,
+  status: string,
+  extra: Record<string, unknown> = {},
+): OrchestrationThreadActivity {
+  return activity("task.progress", {
+    taskId: `${workflowId}:wf:${index}`,
+    title: `member-${index}`,
+    status,
+    parentAgentId: workflowId,
+    agentIndex: index,
+    ...extra,
+  });
+}
+
+describe("summarizeAgentWorkflow", () => {
+  it("summarizes a live run by its coordinator, members and live phase", () => {
+    const model = deriveAgentPanelModel({ agents: panelRoster() });
+    const summary = summarizeAgentWorkflow(model.workflows[0]!);
+    expect(summary).toEqual({
+      id: "wf-1",
+      name: "audit",
+      live: true,
+      displayStatus: "running",
+      memberCount: 2,
+      settledCount: 1,
+      workingCount: 1,
+      failedCount: 0,
+      totalTokens: 4000,
+      phaseCount: 2,
+      livePhase: model.workflows[0]!.phases[1],
+    });
+    expect(agentWorkflowStatusText(summary)).toBe("Verify · 1 working");
+  });
+
+  it("prefers the workflow name and reads failed once any member failed", () => {
+    const group = workflowGroup([
+      activity("task.started", {
+        taskId: "wf-f",
+        taskType: "local_workflow",
+        title: "coordinator title",
+        workflowName: "Release audit",
+      }),
+      workflowMember("wf-f", 0, "failed", { error: "boom" }),
+      workflowMember("wf-f", 1, "completed"),
+      activity("task.completed", { taskId: "wf-f", status: "completed" }),
+    ]);
+    const summary = summarizeAgentWorkflow(group);
+    expect(summary.name).toBe("Release audit");
+    expect(summary.live).toBe(false);
+    expect(summary.displayStatus).toBe("failed");
+    expect(summary.failedCount).toBe(1);
+    expect(summary.settledCount).toBe(2);
+    expect(agentWorkflowStatusText(summary)).toBe("1 failed");
+  });
+
+  it("words a settled clean run as completed", () => {
+    const group = workflowGroup([
+      activity("task.started", { taskId: "wf-c", taskType: "local_workflow", title: "sweep" }),
+      workflowMember("wf-c", 0, "completed"),
+      activity("task.completed", { taskId: "wf-c", status: "completed" }),
+    ]);
+    const summary = summarizeAgentWorkflow(group);
+    expect(summary.displayStatus).toBe("completed");
+    expect(agentWorkflowStatusText(summary)).toBe("Completed");
+  });
+
+  it("counts working members without a live phase, and says Working with none", () => {
+    const working = summarizeAgentWorkflow(
+      workflowGroup([
+        activity("task.started", { taskId: "wf-u", taskType: "local_workflow", title: "unphased" }),
+        workflowMember("wf-u", 0, "running"),
+        workflowMember("wf-u", 1, "waiting"),
+        workflowMember("wf-u", 2, "completed"),
+      ]),
+    );
+    expect(working.livePhase).toBeNull();
+    expect(working.workingCount).toBe(2);
+    expect(agentWorkflowStatusText(working)).toBe("2 working");
+
+    // Dynamic spawns: every member settled while the coordinator still runs.
+    const between = summarizeAgentWorkflow(
+      workflowGroup([
+        activity("task.started", { taskId: "wf-b", taskType: "local_workflow", title: "between" }),
+        workflowMember("wf-b", 0, "completed"),
+      ]),
+    );
+    expect(between.live).toBe(true);
+    expect(agentWorkflowStatusText(between)).toBe("Working");
+  });
+
+  it("counts coordinator tokens only when the run has no members", () => {
+    const memberless = summarizeAgentWorkflow(
+      workflowGroup([
+        activity("task.started", { taskId: "wf-t", taskType: "local_workflow", title: "solo" }),
+        activity("task.progress", { taskId: "wf-t", typedUsage: { totalTokens: 900 } }),
+      ]),
+    );
+    expect(memberless.memberCount).toBe(0);
+    expect(memberless.totalTokens).toBe(900);
+
+    const withMembers = summarizeAgentWorkflow(
+      workflowGroup([
+        activity("task.started", { taskId: "wf-m", taskType: "local_workflow", title: "pair" }),
+        activity("task.progress", { taskId: "wf-m", typedUsage: { totalTokens: 900 } }),
+        workflowMember("wf-m", 0, "running", { typedUsage: { totalTokens: 300 } }),
+      ]),
+    );
+    expect(withMembers.totalTokens).toBe(300);
+  });
+
+  it("words a direct-spawn batch through the same status fields", () => {
+    expect(
+      agentWorkflowStatusText({ live: true, livePhase: null, workingCount: 3, failedCount: 0 }),
+    ).toBe("3 working");
+    expect(
+      agentWorkflowStatusText({ live: false, livePhase: null, workingCount: 0, failedCount: 2 }),
+    ).toBe("2 failed");
+  });
+});
+
+describe("agentPhaseStatusText", () => {
+  it("words done, active and unstarted phases", () => {
+    const [audit, verify] = deriveAgentPanelModel({ agents: panelRoster() }).workflows[0]!.phases;
+    expect(agentPhaseStatusText(audit!)).toBe("1 done");
+    expect(agentPhaseStatusText(verify!)).toBe("1 active · 0 done");
+
+    const sequential = workflowGroup([
+      activity("task.started", { taskId: "wf-s", taskType: "local_workflow" }),
+      activity("task.progress", {
+        taskId: "wf-s",
+        phases: [
+          { index: 0, title: "Work" },
+          { index: 1, title: "Review" },
+        ],
+      }),
+      workflowMember("wf-s", 0, "running", { phaseIndex: 0 }),
+      workflowMember("wf-s", 1, "completed", { phaseIndex: 0 }),
+    ]);
+    expect(sequential.phases.map(agentPhaseStatusText)).toEqual([
+      "1 active · 1 done",
+      "not started",
+    ]);
+  });
+});
+
+describe("agent roster helpers", () => {
+  it("lists workflow members in phase order, then unphased members", () => {
+    const group = workflowGroup([
+      activity("task.started", { taskId: "wf-o", taskType: "local_workflow" }),
+      activity("task.progress", { taskId: "wf-o", phases: [{ index: 0, title: "Work" }] }),
+      workflowMember("wf-o", 0, "running"),
+      workflowMember("wf-o", 1, "running", { phaseIndex: 0 }),
+    ]);
+    expect(agentWorkflowMembers(group).map((agent) => agent.id)).toEqual([
+      "wf-o:wf:1",
+      "wf-o:wf:0",
+    ]);
+  });
+
+  it("counts every agent once and never a coordinator standing in for members", () => {
+    const model = deriveAgentPanelModel({ agents: panelRoster() });
+    expect(agentPanelAgentCount(model)).toBe(3);
+    expect(agentPanelRoster(model).map((agent) => agent.id)).toEqual([
+      "wf-1",
+      "wf-1:wf:0",
+      "wf-1:wf:1",
+      "direct-1",
+    ]);
+  });
+
+  it("labels the roster with functional labels, numbered on collision", () => {
+    const model = deriveAgentPanelModel({
+      agents: fold([
+        activity("task.started", { taskId: "explore-1", title: "Explore" }),
+        activity("task.started", { taskId: "explore-2", title: "Explore" }),
+        activity("task.started", { taskId: "direct-1", title: "Marlow", role: "explorer" }),
+        activity("task.started", { taskId: "reviewer-1", title: "Reviewer", role: "reviewer" }),
+      ]),
+    });
+    const roster = buildAgentRosterIdentity(model);
+    const byId = (id: string): RuntimeSubagent =>
+      agentPanelRoster(model).find((agent) => agent.id === id)!;
+    expect(resolveAgentRowIdentity(byId("explore-1"), roster).label).toBe("Explore");
+    expect(resolveAgentRowIdentity(byId("explore-2"), roster).label).toBe("Explore 2");
+    expect(resolveAgentRowIdentity(byId("direct-1"), roster)).toEqual({
+      label: "Marlow",
+      role: "Explorer",
+    });
+    // A role that only repeats the label is not set beside it.
+    expect(resolveAgentRowIdentity(byId("reviewer-1"), roster)).toEqual({
+      label: "Reviewer",
+      role: null,
+    });
+  });
+
+  it("falls back to the agent's own label outside a roster", () => {
+    const [agent] = fold([activity("task.started", { taskId: "solo-1", title: "Lint the tree" })]);
+    const empty = buildAgentRosterIdentity(deriveAgentPanelModel({ agents: [] }));
+    expect(empty.labels.size).toBe(0);
+    expect(resolveAgentRowIdentity(agent!, empty)).toEqual({ label: "Lint the tree", role: null });
   });
 });
 

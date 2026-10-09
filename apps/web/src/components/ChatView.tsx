@@ -2308,6 +2308,8 @@ export default function ChatView(props: ChatViewProps) {
     onOpenTurnDiff,
     onCloseDiff,
     onOpenAgentsPanel,
+    onOpenRuntimeAgentPanel,
+    onOpenAgentsWorkflowPanel,
     onOpenSubagentPanel,
     onOpenHtmlRender,
   } = useChatWorkspacePanels({
@@ -5450,6 +5452,9 @@ export default function ChatView(props: ChatViewProps) {
                 onOpenNoteThread={openNoteThread}
                 chatProject={chatProjectHeaderTarget}
                 threadTitle={activeThread.title}
+                project={activeProject ?? null}
+                // A chat's face wears its "No project" glyph, also before its first send.
+                isChat={isChatContext}
                 isGitRepo={isGitRepo}
                 latestTurn={activeLatestTurn}
                 turnSettled={latestTurnSettled}
@@ -5459,6 +5464,9 @@ export default function ChatView(props: ChatViewProps) {
                 onOpenReview={onOpenReviewPanel}
                 onOpenSubagent={onOpenSubagentPanel}
                 onOpenPullRequestInApp={openPullRequestInApp}
+                agentPanelModel={agentPanelModel}
+                onOpenAgent={onOpenRuntimeAgentPanel}
+                onOpenAgentsWorkflow={onOpenAgentsWorkflowPanel}
                 onPostPushDiscoveryComplete={clearPostPushWatch}
               />
             ) : null}

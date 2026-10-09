@@ -40,8 +40,6 @@ export const CROWN_GIT_ACTION_SUPPRESS_MS = 4000;
 
 /** Gap (in `pathLength=100` units) between check-ring segments on a rail icon (r=12.5). */
 export const CROWN_RAIL_RING_GAP_PCT = 9;
-/** Gap between check-ring segments on the crown face (r=19). */
-export const CROWN_FACE_RING_GAP_PCT = 7;
 /** Above this many runs the ring collapses to one arc per state. */
 export const CROWN_RING_MAX_SEGMENTS = 24;
 /** Shortest drawn ring segment, so a crowded ring still shows a tick per run. */
@@ -53,6 +51,8 @@ export const CROWN_BOUNDS_PADDING_PX = 12;
 export const CROWN_CARD_CHROME_PX = 64;
 /** Dedupe window: alert keys remembered to drop repeats of the same transition. */
 export const CROWN_ALERT_RECENT_MAX = 50;
+/** Workflow members listed per workflow card before "+N more", by detail variant. */
+export const CROWN_WORKFLOW_MEMBER_LIMIT = { flyout: 3, card: 5 } as const;
 
 /** Geometry custom properties on `.crown-root`; the stylesheet sizes the rail, spine, card and flyout from them. */
 export const CROWN_GEOMETRY_STYLE = {

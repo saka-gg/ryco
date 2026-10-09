@@ -78,6 +78,41 @@ describe("right panel session state", () => {
     expect(applyRightPanelSessionSearch({}, remembered)).toEqual(remembered);
   });
 
+  it("never remembers or restores a one-shot reveal", () => {
+    rememberRightPanelSessionSearch("thread-a", {
+      workspaceOpen: "1",
+      workspaceTab: "pullRequest",
+      workspacePr: 42,
+      workspacePrReveal: "job:7",
+    });
+    expect(readRightPanelSessionSearch("thread-a")).toEqual({
+      workspaceOpen: "1",
+      workspaceTab: "pullRequest",
+      workspacePr: 42,
+    });
+    rememberRightPanelSessionSearch("thread-b", {
+      workspaceOpen: "1",
+      workspaceTab: "agents",
+      workspaceAgentsWorkflow: "wf-audit",
+    });
+    expect(readRightPanelSessionSearch("thread-b")).toEqual({
+      workspaceOpen: "1",
+      workspaceTab: "agents",
+    });
+    // Restoring another thread's panel drops a reveal still in the route.
+    expect(
+      applyRightPanelSessionSearch(
+        {
+          workspaceOpen: "1",
+          workspaceTab: "agents",
+          workspaceAgentsWorkflow: "wf-audit",
+          workspacePrReveal: "checks",
+        },
+        { workspaceOpen: "1", workspaceTab: "agents" },
+      ),
+    ).toEqual({ workspaceOpen: "1", workspaceTab: "agents" });
+  });
+
   it("carries a draft workspace into its promoted server thread", () => {
     rememberRightPanelSessionSearch("draft:draft-a", {
       workspaceOpen: "1",

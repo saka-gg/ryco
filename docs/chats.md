@@ -49,8 +49,9 @@ or diff controls for it. The overview rail shows no **Branch**, **Changes**, **C
 request** or **Push** for a chat, and no **Notes**: notes belong to a project checkout, and a chat
 folder is none. They become available once the chat is a project. The node refuses a worktree for
 the first send that creates a chat. Where a project shows its Git state, a chat's header offers
-**Turn into project…** instead, and the overview rail has a **Turn into project** icon. The header
-also has a button that shows the folder when it is on this machine.
+**Turn into project…** instead, and the overview rail has a **Turn into project** icon. Where the
+rail's round face shows a project's logo, a chat's face shows the same chat icon as **No project**.
+The header also has a button that shows the folder when it is on this machine.
 
 ## Where chats live
 

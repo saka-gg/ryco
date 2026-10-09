@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useReducer, useRef, useState } from "react";
 
 import {
   CHECKOUT_WAIT_GRACE_MS,
@@ -139,6 +139,8 @@ export function PullRequestsPage({ search, onSearchChange }: PullRequestsPagePro
     kind: "none",
     token: 0,
   });
+  // Counts job reveals, so revealing the job already in the URL lands on it again.
+  const [jobRevealToken, bumpJobRevealToken] = useReducer((count: number) => count + 1, 0);
   // Stable readers of the latest render, so the actions keep one identity.
   const getSearch = useEvent(() => search);
   const getModel = useEvent(() => model);
@@ -165,6 +167,7 @@ export function PullRequestsPage({ search, onSearchChange }: PullRequestsPagePro
         closeDrawer: () => usePullRequestsLayoutStore.getState().setDrawerOpen(false),
         canRunPushTransition: () =>
           supportsViewTransitions() && readMotionDurationMs("--app-motion-duration-pane", 360) > 0,
+        onRevealJob: bumpJobRevealToken,
       }),
     [commit, getModel, getRepositoryParams, getSearch],
   );
@@ -189,8 +192,19 @@ export function PullRequestsPage({ search, onSearchChange }: PullRequestsPagePro
       layout,
       selectionMotion,
       readerKey,
+      jobRevealToken,
     }),
-    [layout, model, nav, readerKey, repositories, repository, repositoryStatus, selectionMotion],
+    [
+      jobRevealToken,
+      layout,
+      model,
+      nav,
+      readerKey,
+      repositories,
+      repository,
+      repositoryStatus,
+      selectionMotion,
+    ],
   );
 
   return (

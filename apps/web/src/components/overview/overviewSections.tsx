@@ -1,4 +1,4 @@
-import { prefersExternalPullRequestLink } from "../../pullRequestsRoute";
+import { handleInAppLinkClick } from "../../pullRequestsRoute";
 import {
   ArrowDownIcon,
   ArrowUpIcon,
@@ -351,12 +351,7 @@ export function SectionLane({
             rel="noreferrer"
             aria-label={externalLink.ariaLabel}
             title={externalLink.ariaLabel}
-            onClick={(event) => {
-              const openInApp = externalLink.onOpenInApp;
-              if (!openInApp || prefersExternalPullRequestLink(event)) return;
-              event.preventDefault();
-              openInApp();
-            }}
+            onClick={(event) => handleInAppLinkClick(event, externalLink.onOpenInApp)}
             className="absolute top-1/2 right-7 z-10 grid size-7 -translate-y-1/2 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring"
           >
             <ExternalLinkIcon className="size-3" />

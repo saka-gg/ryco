@@ -4,7 +4,14 @@ import { describe, expect, it } from "vite-plus/test";
 import type { OverviewLayoutProps } from "../../overviewTypes";
 import type { CrownSectionDetailProps } from "../crownTypes";
 import { CrownSectionDetail } from "./CrownSectionDetail";
-import { crownLayoutFixture, crownPullRequestFixture, makeLayout } from "../crownTestFixtures";
+import {
+  auditWorkflowAgents,
+  crownDirectAgents,
+  crownLayoutFixture,
+  crownPullRequestFixture,
+  makeAgentPanelModel,
+  makeLayout,
+} from "../crownTestFixtures";
 
 type Section = CrownSectionDetailProps["section"];
 
@@ -56,7 +63,7 @@ describe("CrownSectionDetail", () => {
     expect(headingOf(renderDetail("changes"))).toBe("Changes +337 −35");
     expect(headingOf(renderDetail("checks"))).toBe("Checks 1/4");
     expect(headingOf(renderDetail("plan"))).toBe("Plan 2/5");
-    expect(headingOf(renderDetail("agents"))).toBe("Subagents 1 live");
+    expect(headingOf(renderDetail("agents"))).toBe("Subagents 2 live");
     expect(headingOf(renderDetail("pr"))).toBe("PR #683 Open");
   });
 
@@ -145,20 +152,58 @@ describe("CrownSectionDetail", () => {
     expect(card).toContain("Open review");
   });
 
-  it("renders one row per check with a View link only on failed runs that have a URL", () => {
+  it("renders one row per check, each a single host link when it has a URL", () => {
     const markup = renderDetail("checks", { variant: "card" });
     expect(markup.match(/data-slot="crown-check-row"/g)).toHaveLength(4);
+    // Without an in-app opener, URL rows are plain host links with a ↗ affordance.
     expect(markup).toContain(
-      '<a href="https://github.com/ryco/ryco/actions/runs/2" target="_blank" rel="noreferrer" aria-label="View Typecheck"',
+      '<a href="https://github.com/ryco/ryco/actions/runs/2" target="_blank" rel="noreferrer" aria-label="Typecheck, Failed"',
     );
-    expect(markup).not.toContain('aria-label="View Format"');
-    expect(markup.match(/>View</g)).toHaveLength(1);
+    expect(markup).toContain('aria-label="Format, Succeeded, 14s"');
+    expect(markup.match(/data-opens="host"/g)).toHaveLength(2);
+    expect(markup.match(/lucide-arrow-up-right/g)).toHaveLength(2);
+    // The failed row's old "View" link is folded into the row: no nested links.
+    expect(markup).not.toContain(">View<");
+    expect(markup.match(/<a /g)).toHaveLength(2);
+    // URL-less rows stay static.
+    expect(markup).not.toContain("<button");
     // Running rows show their active step and an indeterminate bar.
     expect(markup).toContain("Test / Run vitest");
     expect(markup.match(/crown-check-bar/g)).toHaveLength(1);
     expect(markup).toContain("crown-spin");
     expect(markup).toContain("Pending");
     expect(markup).toContain("CI on PR #683 · feature/crown");
+  });
+
+  it("opens every check in Ryco when the pull request has an in-app opener", () => {
+    const markup = renderDetail("checks", {
+      variant: "flyout",
+      layout: crownLayoutFixture({ onOpenPullRequestCheck: () => undefined }),
+    });
+    // URL rows stay host links (⌘/Ctrl-click) but lead into the reader.
+    expect(markup.match(/data-opens="app"/g)).toHaveLength(4);
+    expect(markup.match(/<a /g)).toHaveLength(2);
+    expect(markup.match(/title="⌘\/Ctrl-click opens the host page"/g)).toHaveLength(2);
+    // URL-less rows become buttons.
+    expect(markup).toContain(
+      '<button type="button" aria-label="Unit tests, Running, Test / Run vitest"',
+    );
+    expect(markup).toContain('<button type="button" aria-label="Browser suite, Pending"');
+    expect(markup.match(/lucide-chevron-right/g)).toHaveLength(4);
+    expect(markup).not.toContain("lucide-arrow-up-right");
+  });
+
+  it("keeps host links for default-branch CI without a pull request", () => {
+    const { number: _number, ...branchChecks } = crownPullRequestFixture;
+    const markup = renderDetail("checks", {
+      layout: crownLayoutFixture({
+        pullRequest: branchChecks,
+        onOpenPullRequestCheck: () => undefined,
+      }),
+    });
+    expect(markup).not.toContain('data-opens="app"');
+    expect(markup.match(/data-opens="host"/g)).toHaveLength(2);
+    expect(markup).not.toContain("<button");
   });
 
   it("shows the checks error line and a branch-only footnote", () => {
@@ -206,13 +251,128 @@ describe("CrownSectionDetail", () => {
     expect(markup).toContain('aria-label="Overview plan actions"');
   });
 
-  it("lists subagents with role, model and a status pill", () => {
+  it("shows a workflow run as a card: header, phase strip, status line and member rows", () => {
     const markup = renderDetail("agents", { variant: "card" });
-    expect(markup.match(/data-slot="crown-subagent-row"/g)).toHaveLength(3);
-    expect(markup).toContain('aria-label="Test writer — Working"');
-    expect(markup).toContain("Writing NotesPane tests · gpt-5");
-    expect(markup).toContain("crown-agent-pulse");
-    expect(markup).toContain('aria-label="Linter — Needs review"');
+    expect(markup.match(/data-slot="crown-workflow-card"/g)).toHaveLength(1);
+    // Without an opener the header is static.
+    expect(markup).toMatch(/<div[^>]*data-slot="crown-workflow-header"/);
+    expect(markup).toContain(">Audit<");
+    expect(markup).toContain("3/4");
+    // The run's tokens sit on its status line, never in the header.
+    expect(markup).toMatch(/data-slot="crown-workflow-tokens">72.6k tok</);
+    expect(markup).toContain('title="Audit"');
+
+    const phases = [
+      ...markup.matchAll(/data-slot="crown-workflow-phase" data-state="(\w+)" data-tone="(\w+)"/g),
+    ];
+    expect(phases.map((match) => [match[1], match[2]])).toEqual([
+      ["done", "failed"],
+      ["running", "running"],
+      ["pending", "pending"],
+    ]);
+    expect(markup).toContain('<ol aria-label="Phases"');
+    expect(markup).toContain('<span class="sr-only">Work, 2 done · 1 failed</span>');
+    expect(markup).toContain('<span class="sr-only">Review, 1 active · 1 done</span>');
+    expect(markup).toContain('<span class="sr-only">Verify, not started</span>');
+    const fills = [
+      ...markup.matchAll(
+        /class="([^"]*)" data-slot="crown-workflow-phase-fill" style="width:(\d+)%"/g,
+      ),
+    ];
+    expect(fills.map((match) => match[2])).toEqual(["100", "50", "0"]);
+    // A done phase with a failed member never reads as success.
+    expect(fills[0]![1]).toContain("bg-destructive");
+    expect(fills[0]![1]).not.toContain("bg-success");
+    expect(fills[1]![1]).toContain("crown-agent-pulse");
+
+    expect(markup).toMatch(/data-slot="crown-workflow-status">Review · 1 working</);
+    // The card lists every member (limit 5) in roster order, as compact rows.
+    const rows = [
+      ...markup.matchAll(/data-agent-row="true" data-agent-id="([^"]+)" data-density="compact"/g),
+    ];
+    expect(rows.map((match) => match[1])).toEqual([
+      "wf-audit:map",
+      "wf-audit:types",
+      "wf-audit:card",
+      "wf-audit:alerts",
+      "agent-scout",
+      "agent-docs",
+    ]);
+    expect(markup).not.toContain('data-slot="crown-workflow-more"');
+  });
+
+  it("puts direct agents under a Direct group and totals the roster in the card footnote", () => {
+    const card = renderDetail("agents", { variant: "card" });
+    expect(card).toMatch(/<span>Direct<\/span><span class="tabular-nums">2<\/span>/);
+    expect(card.indexOf('data-slot="crown-workflows"')).toBeLessThan(
+      card.indexOf('data-slot="crown-direct-agents"'),
+    );
+    expect(card).toContain("Reading crownAlerts.logic.ts");
+    expect(card).toContain("84.2k tok · 2 active · 4 settled");
+
+    const flyout = renderDetail("agents", { variant: "flyout" });
+    expect(flyout).not.toContain("84.2k tok");
+    expect(flyout).not.toContain('data-slot="crown-workflow-tokens"');
+    // The flyout lists three members, the rest fold into "+N more", as mini
+    // rows: its column is too narrow for an activity line.
+    expect(flyout.match(/data-agent-row="true"/g)).toHaveLength(5);
+    expect(flyout.match(/data-density="mini"/g)).toHaveLength(5);
+    expect(flyout).not.toContain("Reading crownAlerts.logic.ts");
+    expect(flyout).toMatch(/<p[^>]*data-slot="crown-workflow-more">\+1 more<\/p>/);
+
+    // With only direct agents the group needs no header.
+    const directOnly = renderDetail("agents", {
+      layout: makeLayout({ agentPanelModel: makeAgentPanelModel(crownDirectAgents()) }),
+    });
+    expect(directOnly).not.toContain(">Direct<");
+    expect(directOnly).not.toContain('data-slot="crown-workflow-card"');
+    expect(directOnly.match(/data-agent-row="true"/g)).toHaveLength(2);
+  });
+
+  it("makes the header, +N more and member rows buttons when they can open the Agents tab", () => {
+    const markup = renderDetail("agents", {
+      variant: "flyout",
+      layout: crownLayoutFixture({ onOpenAgent: () => {}, onOpenAgentsWorkflow: () => {} }),
+    });
+    expect(markup).toMatch(
+      /<button type="button"[^>]*data-slot="crown-workflow-header" aria-label="Open Audit in Agents, Review · 1 working"/,
+    );
+    expect(markup).toMatch(
+      /<button type="button"[^>]*data-slot="crown-workflow-more" aria-label="Show all 4 agents of Audit in Agents">\+1 more/,
+    );
+    expect(markup).toContain('aria-label="Open work:types transcript. Failed."');
+    expect(markup).toContain('aria-label="Open Scout transcript. Running."');
+  });
+
+  it("words a settled run's outcome and stands a memberless run in for itself", () => {
+    const finished = renderDetail("agents", {
+      layout: makeLayout({
+        agentPanelModel: makeAgentPanelModel(
+          auditWorkflowAgents({ coordinator: "completed", members: { card: "completed" } }),
+        ),
+      }),
+    });
+    expect(finished).toMatch(
+      /text-destructive-foreground"[^>]*data-slot="crown-workflow-status">1 failed</,
+    );
+    expect(finished.match(/data-state="done"/g)).toHaveLength(3);
+    // Verify never ran: no fill, and it says so instead of "0 done".
+    expect(finished).toMatch(
+      /data-state="done" data-tone="skipped" title="Verify · not run"><span class="sr-only">Verify, not run<\/span>/,
+    );
+    const finishedFills = [
+      ...finished.matchAll(/data-slot="crown-workflow-phase-fill" style="width:(\d+)%"/g),
+    ];
+    expect(finishedFills.map((match) => match[1])).toEqual(["100", "100", "0"]);
+
+    const bare = renderDetail("agents", {
+      layout: makeLayout({
+        agentPanelModel: makeAgentPanelModel(auditWorkflowAgents().slice(0, 1)),
+      }),
+    });
+    expect(bare).toMatch(/data-slot="crown-workflow-status">Working</);
+    expect(bare).toContain('data-agent-id="wf-audit"');
+    expect(bare.match(/data-state="pending"/g)).toHaveLength(3);
   });
 
   it("shows the pull request title, reviews, comments, merge state and the open action", () => {

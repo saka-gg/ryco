@@ -33,6 +33,12 @@ export interface PullRequestsNavigationDeps {
   readonly closeDrawer: () => void;
   /** The View Transitions API exists and pane motion is not reduced. */
   readonly canRunPushTransition: () => boolean;
+  /**
+   * Called on every `revealJob`, before the URL changes: a repeat reveal of
+   * the same job leaves the URL as it was, so the surface counts reveals
+   * (`jobRevealToken`) for the Checks tab to land again.
+   */
+  readonly onRevealJob?: () => void;
   readonly now?: () => number;
 }
 
@@ -183,7 +189,10 @@ export function createPullRequestsNavigation(
         thread: undefined,
         commit: undefined,
       }),
-    revealJob: (jobId) => replace({ ...deps.getSearch(), tab: "checks", job: jobId }),
+    revealJob: (jobId) => {
+      deps.onRevealJob?.();
+      replace({ ...deps.getSearch(), tab: "checks", job: jobId });
+    },
     scopeToCommit: (sha) =>
       replace({
         ...deps.getSearch(),

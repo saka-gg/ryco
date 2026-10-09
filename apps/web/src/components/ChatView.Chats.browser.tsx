@@ -439,6 +439,13 @@ describe("ChatView chats without a project (full app)", () => {
           return button.dataset.navKey;
         });
       await vi.waitFor(() => expect(railKeys()).toEqual(["plan", "agents", "project"]));
+      // The face wears the chat glyph "No project" wears elsewhere, not the chat
+      // folder's favicon or a monogram of the chat's title.
+      const faceLogo = rail
+        .closest('[data-slot="crown-overview"]')!
+        .querySelector<HTMLElement>('[data-slot="crown-face-logo"]')!;
+      expect(faceLogo.dataset.logo).toBe("chat");
+      expect(faceLogo.querySelector("img, svg text")).toBeNull();
 
       rail.querySelector<HTMLElement>('[data-nav-key="project"]')!.click();
       const promote = page.getByTestId("crown-promote-chat");
@@ -447,14 +454,17 @@ describe("ChatView chats without a project (full app)", () => {
       expect(card.textContent).toContain("Turn into project");
       expect(card.querySelector('button[aria-label^="Refresh pull request"]')).toBeNull();
 
-      // Nothing asked about the chat folder's Git status or its notes.
+      // Nothing asked about the chat folder's Git status, pull request, CI or notes.
       expect(watchedGitStatusCwdsForTests().has(chatFolder)).toBe(false);
-      expect(
-        wsRequests.some(
-          (request) =>
-            request._tag === WS_METHODS.notesList || request._tag === WS_METHODS.notesCommand,
-        ),
-      ).toBe(false);
+      const noChatFolderLookups: ReadonlySet<string> = new Set([
+        WS_METHODS.notesList,
+        WS_METHODS.notesCommand,
+        WS_METHODS.sourceControlListChangeRequests,
+        WS_METHODS.sourceControlGetChangeRequestDetail,
+        WS_METHODS.sourceControlListWorkflowRuns,
+        WS_METHODS.sourceControlGetWorkflowRunJobs,
+      ]);
+      expect(wsRequests.filter((request) => noChatFolderLookups.has(request._tag))).toEqual([]);
     } finally {
       await mounted.cleanup();
     }

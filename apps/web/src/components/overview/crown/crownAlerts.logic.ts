@@ -4,7 +4,19 @@ import { formatCount } from "~/lib/formatCount";
 import type { TurnCompletionOutcome } from "~/lib/turnCompletion.logic";
 
 import type { PrCheckStatusKind } from "../../projectExplorer/prCheckStatus";
-import type { ThreadSubagentStatus } from "../../../threadWorkspaceViewModel";
+import {
+  agentWorkflowMembers,
+  buildAgentRosterIdentity,
+  canonicalSubagentIdentityKey,
+  emptyAgentPanelModel,
+  isActiveSubagentStatus,
+  isTerminalSubagentStatus,
+  resolveAgentRowIdentity,
+  summarizeAgentWorkflow,
+  type AgentPanelModel,
+  type RuntimeSubagent,
+  type RuntimeSubagentStatus,
+} from "../../../threadWorkspaceViewModel";
 import { formatElapsedDurationLabel } from "../../../timestampFormat";
 import { getOverviewSummary } from "../overviewSummary.logic";
 import type { OverviewDataReadiness, OverviewLayoutProps } from "../overviewTypes";
@@ -75,9 +87,7 @@ export interface CrownSnapshot {
     readonly completedSteps: ReadonlyArray<string>;
     readonly total: number;
   } | null;
-  readonly subagents: Readonly<
-    Record<string, { readonly status: ThreadSubagentStatus; readonly name: string }>
-  >;
+  readonly agents: CrownAgentsSnapshot;
   readonly fileCount: number;
   /**
    * The worktree view's notes by id, in list order; null until the node's
@@ -86,6 +96,27 @@ export interface CrownSnapshot {
   readonly notes: Readonly<
     Record<string, { readonly summary: string; readonly own: boolean }>
   > | null;
+}
+
+/** One workflow run as its alerts read it; members only surface as failures. */
+export interface CrownWorkflowSnapshot {
+  readonly name: string;
+  /** The coordinator's status. */
+  readonly status: RuntimeSubagentStatus;
+  readonly phaseCount: number;
+  readonly memberCount: number;
+  /** Failed member ids, in roster order. */
+  readonly failedMemberIds: ReadonlyArray<string>;
+  /** The first failed member's row label. */
+  readonly firstFailedName: string | null;
+}
+
+/** Runtime agents by id: direct spawns alert one by one, workflows once per run. */
+export interface CrownAgentsSnapshot {
+  readonly direct: Readonly<
+    Record<string, { readonly status: RuntimeSubagentStatus; readonly name: string }>
+  >;
+  readonly workflows: Readonly<Record<string, CrownWorkflowSnapshot>>;
 }
 
 export type CrownEventKind =
@@ -103,6 +134,7 @@ export type CrownEventIcon =
   | "upload"
   | "commit"
   | "bot"
+  | "workflow"
   | "pr"
   | "sparkles"
   | "turn"
@@ -174,11 +206,6 @@ export function buildCrownSnapshot(input: {
     };
   }
 
-  const subagents: Record<string, { status: ThreadSubagentStatus; name: string }> = {};
-  for (const agent of layout.subagents ?? []) {
-    subagents[agent.key] = { status: agent.status, name: agent.name };
-  }
-
   const activePlan = layout.activePlan;
   return {
     scopeKey: input.scopeKey,
@@ -217,10 +244,51 @@ export function buildCrownSnapshot(input: {
           total: activePlan.steps.length,
         }
       : null,
-    subagents,
+    agents: snapshotAgents(layout.agentPanelModel ?? emptyAgentPanelModel()),
     fileCount: summary.fileCount,
     notes: snapshotNotes(input.notes),
   };
+}
+
+/**
+ * Agent snapshots by model. The snapshot is rebuilt and serialised on every
+ * render, while the model only changes with agent activity, and its roster
+ * labels are the costly part.
+ */
+const agentSnapshots = new WeakMap<AgentPanelModel, CrownAgentsSnapshot>();
+function snapshotAgents(model: AgentPanelModel): CrownAgentsSnapshot {
+  let snapshot = agentSnapshots.get(model);
+  if (snapshot === undefined) {
+    snapshot = buildAgentsSnapshot(model);
+    agentSnapshots.set(model, snapshot);
+  }
+  return snapshot;
+}
+
+function buildAgentsSnapshot(model: AgentPanelModel): CrownAgentsSnapshot {
+  if (!model.hasAgents) return { direct: {}, workflows: {} };
+  const roster = buildAgentRosterIdentity(model);
+  const label = (agent: RuntimeSubagent) => resolveAgentRowIdentity(agent, roster).label;
+  const direct: Record<string, { status: RuntimeSubagentStatus; name: string }> = {};
+  // Keyed canonically: a transcript row (`subagent:x`) yields to its native
+  // row (`x`) once native activity lands, and that must not read as new.
+  for (const agent of model.directAgents) {
+    direct[canonicalSubagentIdentityKey(agent.id)] = { status: agent.status, name: label(agent) };
+  }
+  const workflows: Record<string, CrownWorkflowSnapshot> = {};
+  for (const group of model.workflows) {
+    const summary = summarizeAgentWorkflow(group);
+    const failed = agentWorkflowMembers(group).filter((member) => member.status === "failed");
+    workflows[summary.id] = {
+      name: summary.name,
+      status: group.workflow.status,
+      phaseCount: summary.phaseCount,
+      memberCount: summary.memberCount,
+      failedMemberIds: failed.map((member) => member.id),
+      firstFailedName: failed[0] ? label(failed[0]) : null,
+    };
+  }
+  return { direct, workflows };
 }
 
 /** Summaries by note entry: the binding keeps entries stable while their note is unchanged. */
@@ -296,7 +364,8 @@ export function diffCrownSnapshots(
     ...diffChecks(prev, next),
     ...diffPullRequest(prev, next, gitSuppressed),
     ...(gitSuppressed ? [] : diffBranch(prev, next)),
-    ...diffSubagents(prev, next),
+    ...diffDirectAgents(prev, next),
+    ...diffWorkflows(prev, next),
     ...diffPlan(prev, next),
     ...turnEvents(next, ctx.turnOutcome),
     ...diffFiles(prev, next),
@@ -489,14 +558,23 @@ function diffBranch(prev: CrownSnapshot, next: CrownSnapshot): EventDraft[] {
 
 type SubagentTransition = "started" | "finished" | "failed";
 
-function diffSubagents(prev: CrownSnapshot, next: CrownSnapshot): EventDraft[] {
+/**
+ * Direct agents: one that appears active started, one that completes from a
+ * live state finished, one that fails needs review. Interrupted and cancelled
+ * agents were stopped on purpose and never alert.
+ */
+function diffDirectAgents(prev: CrownSnapshot, next: CrownSnapshot): EventDraft[] {
   const transitions: Array<{ key: string; name: string; transition: SubagentTransition }> = [];
-  for (const [key, agent] of Object.entries(next.subagents)) {
-    const before = prev.subagents[key]?.status;
+  for (const [key, agent] of Object.entries(next.agents.direct)) {
+    const before = prev.agents.direct[key]?.status;
     if (before === agent.status) continue;
-    if (agent.status === "running" && before === undefined) {
+    if (before === undefined && isActiveSubagentStatus(agent.status)) {
       transitions.push({ key, name: agent.name, transition: "started" });
-    } else if (agent.status === "finished" && (before === "running" || before === "idle")) {
+    } else if (
+      agent.status === "completed" &&
+      before !== undefined &&
+      !isTerminalSubagentStatus(before)
+    ) {
       transitions.push({ key, name: agent.name, transition: "finished" });
     } else if (agent.status === "failed" && before !== "interrupted") {
       transitions.push({ key, name: agent.name, transition: "failed" });
@@ -545,6 +623,79 @@ function diffSubagents(prev: CrownSnapshot, next: CrownSnapshot): EventDraft[] {
       loud: true,
       dedupeKey: `subagent:${key}:${transition}`,
     });
+  }
+  return events;
+}
+
+/**
+ * Workflows alert per run, never per member: it started, it finished (with
+ * how many members failed), members newly failed, or the coordinator failed on
+ * its own. An interrupted or cancelled run was stopped on purpose.
+ */
+function diffWorkflows(prev: CrownSnapshot, next: CrownSnapshot): EventDraft[] {
+  const base = {
+    section: "agents",
+    railKey: "agents",
+    kind: "subagent",
+    icon: "workflow",
+  } as const;
+  const events: EventDraft[] = [];
+  for (const [id, after] of Object.entries(next.agents.workflows)) {
+    const before = prev.agents.workflows[id];
+    if (!before) {
+      if (isActiveSubagentStatus(after.status)) {
+        events.push({
+          ...base,
+          tone: "agent",
+          title: `Workflow ${after.name} started`,
+          ...(after.phaseCount > 0 ? { sub: formatCount(after.phaseCount, "phase") } : {}),
+          loud: true,
+          dedupeKey: `workflow:${id}:started`,
+        });
+      }
+      continue;
+    }
+    if (after.status === "completed" && !isTerminalSubagentStatus(before.status)) {
+      const failed = after.failedMemberIds.length;
+      events.push({
+        ...base,
+        tone: failed > 0 ? "danger" : "agent",
+        title: `${after.name} finished`,
+        sub:
+          failed > 0
+            ? `${failed} of ${formatCount(after.memberCount, "agent")} failed`
+            : formatCount(after.memberCount, "agent"),
+        loud: true,
+        dedupeKey: `workflow:${id}:finished`,
+      });
+      continue;
+    }
+    const newlyFailed = after.failedMemberIds.filter(
+      (memberId) => !before.failedMemberIds.includes(memberId),
+    );
+    if (newlyFailed.length > 0) {
+      events.push({
+        ...base,
+        tone: "danger",
+        title: `${after.name}: ${after.failedMemberIds.length} failed`,
+        ...(after.firstFailedName ? { sub: after.firstFailedName } : {}),
+        loud: true,
+        dedupeKey: `workflow:${id}:failed:${after.failedMemberIds.toSorted().join(",")}`,
+      });
+    } else if (
+      after.status === "failed" &&
+      after.failedMemberIds.length === 0 &&
+      before.status !== "failed" &&
+      before.status !== "interrupted"
+    ) {
+      events.push({
+        ...base,
+        tone: "danger",
+        title: `${after.name} failed`,
+        loud: true,
+        dedupeKey: `workflow:${id}:failed`,
+      });
+    }
   }
   return events;
 }

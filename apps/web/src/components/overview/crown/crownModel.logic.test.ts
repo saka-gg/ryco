@@ -1,3 +1,4 @@
+import { EnvironmentId, ProjectId } from "@ryco/contracts";
 import { assert, describe, it } from "vite-plus/test";
 
 import {
@@ -5,10 +6,15 @@ import {
   buildCrownRailSummary,
   countCrownChecks,
   crownRailItemDescription,
+  resolveCrownFaceLogo,
   resolveCrownHeadline,
 } from "./crownModel.logic";
 import { CROWN_RAIL_ITEMS, visibleCrownRailItems } from "./crownSections";
+import { makeRuntimeAgent } from "../../agents/agentRosterTestFixtures";
 import {
+  auditWorkflowAgents,
+  crownAgentPanelFixture,
+  makeAgentPanelModel,
   makeChanges,
   makeCheckStatus,
   makeLayout,
@@ -17,6 +23,7 @@ import {
   makeRun,
   makeSubagent,
 } from "./crownTestFixtures";
+import type { CrownProject } from "./crownTypes";
 
 const GIT = { isGitRepo: true };
 
@@ -212,6 +219,39 @@ describe("buildCrownRailSummary", () => {
     );
   });
 
+  it("counts runtime agents the way the Agents tab does, never their workflow coordinator", () => {
+    // wf-audit (coordinator + 4 members: 1 running) and 2 direct agents (1 running).
+    const summary = buildCrownRailSummary(
+      makeLayout({
+        agentPanelModel: crownAgentPanelFixture(),
+        // The model wins over the transcript list.
+        subagents: [makeSubagent("x", "running")],
+      }),
+      GIT,
+    );
+    assert.deepEqual(summary.agents, { count: 6, live: 2 });
+
+    // Waiting agents are live; idle ones are counted but not live.
+    const waiting = buildCrownRailSummary(
+      makeLayout({
+        agentPanelModel: makeAgentPanelModel([
+          makeRuntimeAgent("a", { status: "waiting" }),
+          makeRuntimeAgent("b", { status: "idle" }),
+          makeRuntimeAgent("c", { status: "pending" }),
+        ]),
+      }),
+      GIT,
+    );
+    assert.deepEqual(waiting.agents, { count: 3, live: 2 });
+
+    // A coordinator with no members yet stands for its own work.
+    const bare = buildCrownRailSummary(
+      makeLayout({ agentPanelModel: makeAgentPanelModel(auditWorkflowAgents().slice(0, 1)) }),
+      GIT,
+    );
+    assert.deepEqual(bare.agents, { count: 1, live: 1 });
+  });
+
   it("ignores source control outside a git repository", () => {
     const summary = buildCrownRailSummary(
       makeLayout({
@@ -257,12 +297,27 @@ describe("crownRailItemDescription", () => {
       changes: "1 file changed",
       checks: "2 checks failing",
       plan: "1 of 2 steps done",
-      agents: "2 subagents, 1 running",
+      agents: "2 subagents, 1 active",
       pr: "open, has conflicts",
       notes: "1 note",
       project: null,
       ship: "3 commits to push",
     });
+  });
+
+  it("describes runtime agents as subagents with their active count", () => {
+    const agents = CROWN_RAIL_ITEMS.find((item) => item.key === "agents")!;
+    const describeModel = (model: ReturnType<typeof makeAgentPanelModel>) =>
+      crownRailItemDescription(
+        agents,
+        buildCrownRailSummary(makeLayout({ agentPanelModel: model }), GIT),
+      );
+    assert.equal(describeModel(crownAgentPanelFixture()), "6 subagents, 2 active");
+    assert.equal(
+      describeModel(makeAgentPanelModel([makeRuntimeAgent("a", { status: "completed" })])),
+      "1 subagent",
+    );
+    assert.equal(describeModel(makeAgentPanelModel([])), "No subagents");
   });
 
   it("describes an empty thread and running checks", () => {
@@ -318,7 +373,7 @@ describe("resolveCrownHeadline", () => {
     assert.deepEqual(result, {
       section: "checks",
       tone: "danger",
-      glyph: "x",
+      pulse: false,
       title: "2 checks failing",
       sub: "lint",
     });
@@ -340,7 +395,7 @@ describe("resolveCrownHeadline", () => {
     assert.deepEqual(result, {
       section: "checks",
       tone: "warning",
-      glyph: "spinner",
+      pulse: true,
       title: "Checks 1/3",
       sub: "2 in progress",
     });
@@ -351,7 +406,7 @@ describe("resolveCrownHeadline", () => {
     assert.deepEqual(result, {
       section: "branch",
       tone: "info",
-      glyph: "upload",
+      pulse: false,
       title: "2 to push",
       sub: "feature/crown",
     });
@@ -362,7 +417,7 @@ describe("resolveCrownHeadline", () => {
     assert.deepEqual(result, {
       section: "plan",
       tone: "plan",
-      glyph: "sparkles",
+      pulse: false,
       title: "Plan 1/2",
       sub: "Two",
     });
@@ -375,7 +430,7 @@ describe("resolveCrownHeadline", () => {
     assert.deepEqual(result, {
       section: "checks",
       tone: "success",
-      glyph: "check",
+      pulse: false,
       title: "All checks passed",
       sub: "PR #42",
     });
@@ -393,7 +448,7 @@ describe("resolveCrownHeadline", () => {
     assert.deepEqual(headline(makeLayout({ changes: makeChanges() })), {
       section: "branch",
       tone: "neutral",
-      glyph: "dot",
+      pulse: false,
       title: "Overview",
       sub: "feature/crown",
     });
@@ -429,5 +484,53 @@ describe("visibleCrownRailItems", () => {
       "agents",
       "project",
     ]);
+  });
+});
+
+describe("resolveCrownFaceLogo", () => {
+  const project: CrownProject = {
+    id: ProjectId.make("project-ryco"),
+    environmentId: EnvironmentId.make("env-face"),
+    name: "Ryco",
+    cwd: "/repo/ryco",
+    customAvatarContentHash: null,
+  };
+  // A chat's project: a Ryco-managed folder named after the chat.
+  const chatProject: CrownProject = {
+    ...project,
+    id: ProjectId.make("project-chat"),
+    kind: "chat",
+    name: "Recipe ideas",
+    cwd: "/chats/recipe-ideas",
+  };
+
+  it("shows a project's logo, and a folder while the project is unknown", () => {
+    assert.deepEqual(resolveCrownFaceLogo({ project, isChat: false }), {
+      kind: "project",
+      project,
+    });
+    assert.deepEqual(
+      resolveCrownFaceLogo({ project: { ...project, kind: "project" }, isChat: false }),
+      {
+        kind: "project",
+        project: { ...project, kind: "project" },
+      },
+    );
+    assert.deepEqual(resolveCrownFaceLogo({ project: null, isChat: false }), { kind: "folder" });
+    assert.deepEqual(resolveCrownFaceLogo({ project: undefined, isChat: false }), {
+      kind: "folder",
+    });
+  });
+
+  it("shows the chat glyph for a chat, never its folder's favicon or title monogram", () => {
+    assert.deepEqual(resolveCrownFaceLogo({ project: chatProject, isChat: true }), {
+      kind: "chat",
+    });
+    // An unsent chat has no project until its first send creates it.
+    assert.deepEqual(resolveCrownFaceLogo({ project: null, isChat: true }), { kind: "chat" });
+    // The project's own kind is enough on its own.
+    assert.deepEqual(resolveCrownFaceLogo({ project: chatProject, isChat: false }), {
+      kind: "chat",
+    });
   });
 });
