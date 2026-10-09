@@ -138,7 +138,7 @@ describe("hosted status settlement classification", () => {
       ...RETARGET_WALK,
       "Checking access",
       "Synchronizing",
-      "Reconnecting",
+      "Unavailable",
       "draining",
     ] as const) {
       expect(classifyHostedStatus(statusText)).toBe("transient");
@@ -291,7 +291,7 @@ describe("settled hosted status on a same-node blip", () => {
   it("shows no transient at all for a sub-threshold blip on the current selection", async () => {
     const recorder = createRecorder(makeTracker());
     recorder.observe("Online", "node-a env-a");
-    recorder.observe("Reconnecting", "node-a env-a");
+    recorder.observe("Unavailable", "node-a env-a");
     await vi.advanceTimersByTimeAsync(THRESHOLD - 100);
     recorder.observe("Online", "node-a env-a");
     await vi.advanceTimersByTimeAsync(THRESHOLD * 2);
@@ -306,10 +306,10 @@ describe("settled hosted status on a same-node blip", () => {
   it("gives up the held status once the blip outlasts the grace window", async () => {
     const recorder = createRecorder(makeTracker());
     recorder.observe("Online", "node-a env-a");
-    recorder.observe("Reconnecting", "node-a env-a");
+    recorder.observe("Unavailable", "node-a env-a");
     await vi.advanceTimersByTimeAsync(THRESHOLD);
 
-    expect(recorder.frames).toEqual(["idle", "Online", "Reconnecting"]);
+    expect(recorder.frames).toEqual(["idle", "Online", "Unavailable"]);
   });
 
   /**

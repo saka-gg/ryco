@@ -109,6 +109,42 @@ afterEach(() => {
 });
 
 describe("mobile hosted connection coordinator", () => {
+  it("coalesces simultaneous demand for the same node", async () => {
+    const h = fixture();
+    await Promise.all(Array.from({ length: 20 }, () => h.coordinator.acquireNode(h.nodes[0]!.id)));
+    expect(h.selections).toHaveLength(1);
+    expect(h.active.size).toBe(1);
+    h.coordinator.dispose();
+  });
+
+  it("cancels queued acquisitions on sign-out", async () => {
+    const h = fixture();
+    const pending = h.coordinator.acquireNode(h.nodes[0]!.id);
+    await h.coordinator.releaseAll();
+    await pending;
+    expect(h.selections).toHaveLength(0);
+    expect(h.active.size).toBe(0);
+    h.coordinator.dispose();
+  });
+
+  it("cancels staggered wake when the user selects another node or backgrounds the app", async () => {
+    vi.useFakeTimers();
+    const h = fixture();
+    await h.coordinator.acquireNode(h.nodes[0]!.id);
+    h.scopes.retain(h.nodes[0]!.environmentId, { type: "node-pairing", nodeId: h.nodes[0]!.id });
+    await h.coordinator.acquireNode(h.nodes[1]!.id);
+    h.coordinator.reconnectRetainedAfterForeground();
+    await h.coordinator.acquireNode(h.nodes[2]!.id);
+    const count = h.selections.length;
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(h.selections).toHaveLength(count);
+    h.coordinator.reconnectRetainedAfterForeground();
+    await h.coordinator.releaseNonRetainedForBackground();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(h.selections).toHaveLength(count);
+    h.coordinator.dispose();
+  });
+
   it("allows the explicitly selected connection to recover without a thread scope", async () => {
     const { active, coordinator, nodes } = fixture();
     await coordinator.acquireNode(nodes[0]!.id);

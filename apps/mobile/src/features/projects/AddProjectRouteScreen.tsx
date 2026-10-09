@@ -34,7 +34,7 @@ function readinessFor(
 function statusLabel(state: "connected" | "reconnecting" | "offline" | "read-only"): string {
   if (state === "connected") return "Ready";
   if (state === "read-only") return "Read-only";
-  if (state === "reconnecting") return "Reconnecting";
+  if (state === "reconnecting") return "Unavailable";
   return "Offline";
 }
 

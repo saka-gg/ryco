@@ -185,7 +185,7 @@ function statusLabel(state: InboxThreadState): string {
     case "error":
       return "Error";
     case "reconnecting":
-      return "Reconnecting";
+      return "Unavailable";
     case "offline":
       return "Offline";
     case "idle":

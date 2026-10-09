@@ -131,7 +131,7 @@ export const HOSTED_STATUS_SETTLEMENT = {
   Securing: "transient",
   "Securing this device": "transient",
   "Device encryption unavailable": "settled",
-  Reconnecting: "transient",
+  Unavailable: "transient",
   idle: "transient",
   "requesting ticket": "transient",
   connecting: "transient",

@@ -9,6 +9,7 @@ import type {
 } from "@ryco/contracts";
 import {
   RELAY_ACCOUNT_GRANT_MINOR,
+  RELAY_MAX_RETRY_AFTER_MS,
   type RelayConnectorGeneration,
   type RelayE2eeDigest,
   type RelayE2eeEnrollmentRevokedFrame,
@@ -190,6 +191,7 @@ export class HubConnector {
    * retry must keep its own schedule.
    */
   #retryNudge: (() => void) | undefined;
+  #retryNotBefore = 0;
   #started = false;
   #stopping = false;
   #connecting = false;
@@ -304,6 +306,7 @@ export class HubConnector {
       status.state === "degraded" &&
       status.degradedMode === "backing_off" &&
       this.#retryTimer !== undefined &&
+      this.#scheduler.now() >= this.#retryNotBefore &&
       retry !== undefined
     ) {
       this.#clearTimer("retry");
@@ -818,11 +821,13 @@ export class HubConnector {
     this.#clearAllTimers();
     const registry = this.#registry;
     this.#registry = undefined;
-    await registry?.closeAll();
-    this.#sendQueue?.close();
+    const sendQueue = this.#sendQueue;
     this.#sendQueue = undefined;
-    this.#session?.close();
+    const session = this.#session;
     this.#session = undefined;
+    sendQueue?.close();
+    session?.close();
+    await registry?.closeAll();
     await this.#frameChain.catch(() => undefined);
   }
 
@@ -901,6 +906,9 @@ export class HubConnector {
     if (origin === undefined) return;
     this.#connecting = true;
     const generation = this.#state.beginGeneration();
+    // A retired channel's cleanup must not block the replacement socket's frames.
+    let frameChain = Promise.resolve();
+    this.#frameChain = frameChain;
     const current = this.#state.snapshot().state;
     if (current !== "connecting") this.#state.transition("connecting");
     const session = new RelayConnectionSession({
@@ -910,6 +918,7 @@ export class HubConnector {
       scheduler: this.#scheduler,
       now: this.#scheduler.now,
       onFrame: (frame) => {
+        if (!this.#state.isCurrent(generation) || this.#stopping) return;
         const handleFailure = (error: unknown) =>
           this.#handleFailure(
             generation,
@@ -923,9 +932,10 @@ export class HubConnector {
           void this.#handleFrame(generation, frame).catch(handleFailure);
           return;
         }
-        this.#frameChain = this.#frameChain
+        frameChain = frameChain
           .then(() => this.#handleFrame(generation, frame))
           .catch(handleFailure);
+        this.#frameChain = frameChain;
       },
       onTerminal: (error) => {
         void this.#handleFailure(generation, error.kind, error.retryAfterMs);
@@ -975,7 +985,7 @@ export class HubConnector {
       this.#sendQueue = sendQueue;
       this.#registry = registry;
       session.activateFrameDelivery();
-      await this.#frameChain;
+      await frameChain;
       if (!this.#state.isCurrent(generation) || this.#stopping) {
         session.close();
         return;
@@ -1274,11 +1284,13 @@ export class HubConnector {
     this.#clearTimer("e2eeStatement");
     const registry = this.#registry;
     this.#registry = undefined;
-    await registry?.closeAll();
-    this.#sendQueue?.close();
+    const sendQueue = this.#sendQueue;
     this.#sendQueue = undefined;
-    this.#session?.close();
+    const session = this.#session;
     this.#session = undefined;
+    sendQueue?.close();
+    session?.close();
+    const cleanup = registry?.closeAll();
     const disposition = classifyConnectorFailure(
       kind,
       this.#protocolViolations,
@@ -1288,6 +1300,7 @@ export class HubConnector {
     if (kind === "authentication_stale") this.#staleProofRetries += 1;
     if (disposition.action === "slow_retry") {
       this.#scheduleSlowRetry(disposition.failure, disposition.policy, disposition.nudgeable);
+      await cleanup;
       return;
     }
     if (disposition.action === "operator") {
@@ -1299,6 +1312,7 @@ export class HubConnector {
           failure: disposition.failure,
         });
       }
+      await cleanup;
       return;
     }
     const decision = reconnectDelay(
@@ -1312,6 +1326,11 @@ export class HubConnector {
       retryAfterMs,
     );
     this.#attempt += 1;
+    this.#retryNotBefore =
+      this.#scheduler.now() +
+      (retryAfterMs === undefined || !Number.isFinite(retryAfterMs)
+        ? 0
+        : Math.max(0, Math.min(RELAY_MAX_RETRY_AFTER_MS, Math.round(retryAfterMs))));
     const retryGeneration = this.#state.generation;
     this.#state.transition("degraded", {
       degradedMode: "backing_off",
@@ -1325,6 +1344,7 @@ export class HubConnector {
       if (!this.#state.isCurrent(retryGeneration) || this.#stopping) return;
       void this.#connect();
     }, decision.delayMs);
+    await cleanup;
   }
 
   /**
@@ -1441,8 +1461,10 @@ export class HubConnector {
                 ? this.#drainTimer
                 : this.#e2eeStatementTimer;
     if (current !== undefined) this.#scheduler.clearTimeout(current);
-    if (kind === "retry") this.#retryTimer = undefined;
-    else if (kind === "enrollment") this.#enrollmentTimer = undefined;
+    if (kind === "retry") {
+      this.#retryTimer = undefined;
+      this.#retryNotBefore = 0;
+    } else if (kind === "enrollment") this.#enrollmentTimer = undefined;
     else if (kind === "stable") this.#stableTimer = undefined;
     else if (kind === "heartbeat") this.#heartbeatTimer = undefined;
     else if (kind === "drain") this.#drainTimer = undefined;

@@ -24,6 +24,23 @@ machine and task surfaces. Command delivery must remain truthful.
    connections instead of restarting them merely because another consumer requests them. Reacquire
    leases that expired during renderer sleep, and report readiness only for a current shell snapshot.
 
+## Shared, mobile, and node recovery
+
+The shared hosted attempt factory uses persistent bounded retries and scopes connection status
+to its environment. Reset, disposal, overlapping preparation, and selection changes fence ticket
+issuance and socket callbacks. A stale unauthorized response cannot expire a replacement account
+session. Terminal failures stop transport retries until a new session is explicitly started.
+
+Mobile lifecycle signals suspend readiness synchronously and serialize recovery behind background
+cleanup. Foreground and online signals coalesce. Backgrounding, loss of connectivity, sign-out,
+and a new user selection cancel pending retained-node wake work. Concurrent demand for one node
+shares its acquisition. Late release cannot erase a replacement connection's record.
+
+Node connectors detach failed resources before asynchronous channel cleanup. Each connection owns
+its ordered frame queue, so slow retired work cannot block a replacement. Automatic wake nudges
+respect the Hub's retry-after floor. Mobile workspace recovery preserves the saved view without
+retry alerts or a persistent recovery spinner; machine availability remains explicit.
+
 ## Subsequent transport work
 
 Shared per-environment supervision is the migration direction for all platforms. Hosted stream

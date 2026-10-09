@@ -103,7 +103,7 @@ describe("the Not-connected regression", () => {
     role: "owner" as const,
   };
 
-  it("still reports Not connected when the hosted node is dropped", () => {
+  it("reports a saved view when the hosted node is dropped", () => {
     const state = projectWorkspaceState({
       isReady: true,
       networkStatus: "online",
@@ -115,7 +115,7 @@ describe("the Not-connected regression", () => {
         latestSnapshotUpdatedAt: null,
       },
     });
-    expect(workspaceConnectionStatusLabel(state)).toBe("Not connected");
+    expect(workspaceConnectionStatusLabel(state)).toBe("Saved view · Machines unavailable");
     expect(shouldShowWorkspaceConnectionStatus(state)).toBe(true);
   });
 
@@ -157,7 +157,7 @@ describe("the Not-connected regression", () => {
     });
     expect(state.hasReadyEnvironment).toBe(false);
     expect(shouldShowWorkspaceConnectionStatus(state)).toBe(true);
-    expect(workspaceConnectionStatusLabel(state)).toContain("Reconnecting");
+    expect(workspaceConnectionStatusLabel(state)).toBe("Saved view · Machines unavailable");
   });
 
   it("still reports offline when the device has no network, relay or not", () => {

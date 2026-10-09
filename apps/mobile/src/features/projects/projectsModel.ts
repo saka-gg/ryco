@@ -388,7 +388,7 @@ export function projectMachineStatusLabel(machine: ProjectRowMachine): string {
       : machine.connectionState === "read-only"
         ? "Read-only"
         : machine.connectionState === "reconnecting"
-          ? "Reconnecting"
+          ? "Unavailable"
           : "Offline")
   );
 }

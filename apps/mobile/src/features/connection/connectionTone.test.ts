@@ -10,7 +10,7 @@ describe("connectionTone", () => {
   });
 
   it("overlays the single-socket reconnecting state on a connected env", () => {
-    expect(connectionToneForEnvironment("connected", "reconnecting").label).toBe("Reconnecting");
+    expect(connectionToneForEnvironment("connected", "reconnecting").label).toBe("Offline");
     // offline socket wins regardless of the per-env state
     expect(connectionToneForEnvironment("connected", "offline").label).toBe("Offline");
     // otherwise the per-env state stands

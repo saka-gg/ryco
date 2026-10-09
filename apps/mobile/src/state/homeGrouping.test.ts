@@ -97,7 +97,7 @@ describe("buildHomeThreadGroups", () => {
 });
 
 describe("workspace connection status", () => {
-  it("shows a reconnecting row labelled with the environment", () => {
+  it("shows a quiet saved-view label while the machine is unavailable", () => {
     const state = projectWorkspaceState({
       isReady: true,
       networkStatus: "online",
@@ -118,7 +118,7 @@ describe("workspace connection status", () => {
     });
 
     expect(shouldShowWorkspaceConnectionStatus(state)).toBe(true);
-    expect(workspaceConnectionStatusLabel(state)).toBe("Reconnecting to Prod node");
+    expect(workspaceConnectionStatusLabel(state)).toBe("Saved view · Machines unavailable");
     expect(state.connectionState).toBe("reconnecting");
   });
 
