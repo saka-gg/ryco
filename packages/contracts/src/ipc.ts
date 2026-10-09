@@ -571,6 +571,9 @@ export type DesktopWorkspaceTransportEvent =
       readonly transportId: string;
       readonly code: number;
       readonly reason: string;
+      /** Secret-free recovery policy supplied by the authenticated relay. */
+      readonly retryable?: boolean;
+      readonly retryAfterMs?: number;
     };
 
 export type DesktopNativeE2eePreparation =

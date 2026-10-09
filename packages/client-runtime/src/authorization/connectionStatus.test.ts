@@ -59,7 +59,7 @@ describe("deriveHostedConnectionStatusText", () => {
       deriveHostedConnectionStatusText(
         input({ sessionStatus: "stale", transportStatus: "reconnecting" }),
       ),
-    ).toBe("Reconnecting");
+    ).toBe("Unavailable");
     expect(
       deriveHostedConnectionStatusText(
         input({ sessionStatus: "stale", transportStatus: "idle", selectionStatus: "offline" }),

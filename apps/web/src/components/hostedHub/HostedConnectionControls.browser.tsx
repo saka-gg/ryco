@@ -297,7 +297,7 @@ describe("hosted connection controls", () => {
       .mockResolvedValue();
     mounted = await render(<HostedNodeMenu />);
 
-    await page.getByText("Reconnecting", { exact: true }).click();
+    await page.getByText("Unavailable", { exact: true }).click();
     await page.getByRole("button", { name: "All nodes" }).click();
     // No hosted history is installed in this suite, so the control falls back
     // to the router navigation plus the controller primitive.
@@ -316,7 +316,7 @@ describe("hosted connection controls", () => {
     useHostedHubStore.setState({ transportStatus: "reconnecting", sessionStatus: "stale" });
     mounted = await render(<HostedNodeMenu />);
 
-    await page.getByText("Reconnecting", { exact: true }).click();
+    await page.getByText("Unavailable", { exact: true }).click();
     const disclosure = document.querySelector<HTMLDetailsElement>("details");
     expect(disclosure, "no desktop menu rendered").not.toBeNull();
     expect(disclosure!.open, "the menu did not open, so this proves nothing").toBe(true);
@@ -449,7 +449,7 @@ describe("hosted connection controls", () => {
     // what triggers a live-region announcement.
     useHostedHubStore.setState({ transportStatus: "reconnecting" });
     await vi.waitFor(() => {
-      expect(announcer()!.textContent).toContain("Reconnecting");
+      expect(announcer()!.textContent).toContain("Unavailable");
     });
     useHostedHubStore.setState({ browserStatus: "synchronizing" });
     await vi.waitFor(() => {

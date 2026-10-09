@@ -1,4 +1,5 @@
 import { hostedAccountRecoversOnConnectivity } from "@ryco/client-runtime/authorization";
+import { bindConnectivityRecovery } from "@ryco/client-runtime/connection";
 import { useEffect } from "react";
 
 import { mobileAppLifecycle } from "../platform/appLifecycle";
@@ -29,33 +30,17 @@ export function useHostedAppLifecycle(): void {
       subscribe: (listener) => hostedHubStore.subscribe(listener),
       wake: () => getMobileHostedConnectionCoordinator().reconnectRetainedAfterForeground(),
     });
-    const unsubscribe = mobileAppLifecycle.subscribe((event) => {
-      switch (event) {
-        case "background":
-          retainedWake.cancel();
-          void (async () => {
-            await getMobileHostedConnectionCoordinator().releaseNonRetainedForBackground();
-            hostedHubController.suspendBrowser("hidden");
-          })();
-          return;
-        case "offline":
-          retainedWake.cancel();
-          hostedHubController.suspendBrowser("offline");
-          return;
-        case "foreground":
-        case "online": {
-          const settled = retainedWake.begin();
-          void hostedHubController.recoverAfterConnectivity().then(settled);
-          return;
-        }
-        default:
-          // "resume" is emitted alongside "foreground"; the resume above covers it.
-          return;
-      }
+    return bindConnectivityRecovery({
+      lifecycle: mobileAppLifecycle,
+      suspend: (reason) => hostedHubController.suspendBrowser(reason),
+      releaseBackground: () =>
+        getMobileHostedConnectionCoordinator().releaseNonRetainedForBackground(),
+      recover: () => hostedHubController.recoverAfterConnectivity(),
+      beginWake: () => retainedWake.begin(),
+      cancelWake: () => {
+        retainedWake.cancel();
+        getMobileHostedConnectionCoordinator().cancelPendingRecovery();
+      },
     });
-    return () => {
-      unsubscribe();
-      retainedWake.cancel();
-    };
   }, [recoverable]);
 }

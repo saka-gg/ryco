@@ -130,6 +130,7 @@ export interface MobileHostedConnectionCoordinator {
   readonly markSessionReplaying: (environmentId: EnvironmentId, generation: number) => void;
   readonly reportShellSnapshotFailure: (environmentId: EnvironmentId, generation: number) => void;
   readonly releaseNonRetainedForBackground: () => Promise<void>;
+  readonly cancelPendingRecovery: () => void;
   readonly reconnectRetainedAfterForeground: () => void;
   readonly releaseAll: () => Promise<void>;
   readonly dispose: () => void;
@@ -174,6 +175,21 @@ export function createMobileHostedConnectionCoordinator(
   let acquisition: Promise<void> = Promise.resolve();
   let acquiringEnvironmentId: EnvironmentId | null = null;
   let disposed = false;
+  let lifecycleRevision = 0;
+  let wakeRevision = 0;
+  const pendingAcquisitions = new Map<string, { promise: Promise<void>; current: () => boolean }>();
+  const pendingReleases = new Map<EnvironmentId, Promise<boolean>>();
+  const cancelWake = () => {
+    wakeRevision += 1;
+    for (const timer of wakeTimers) deps.clearTimeout(timer);
+    wakeTimers.clear();
+  };
+  const cancelAcquisitions = () => {
+    lifecycleRevision += 1;
+    pendingAcquisitions.clear();
+    cancelWake();
+    for (const environmentId of attemptWaiters.keys()) resolveAttemptWaiters(environmentId);
+  };
 
   const publish = () =>
     mobileHostedConnectionsStore.publish(
@@ -213,24 +229,39 @@ export function createMobileHostedConnectionCoordinator(
     publish();
   };
 
-  const release = async (environmentId: EnvironmentId): Promise<boolean> => {
+  const releaseOnce = async (environmentId: EnvironmentId): Promise<boolean> => {
     const current = records.get(environmentId);
     const pending = pendingRequestReaders.get(environmentId);
     if (current && pending?.generation === current.generation && pending.read()) {
       deliveryUnknownEnvironmentIds.add(environmentId);
     }
     const removed = await deps.removeConnection(environmentId).catch(() => false);
-    if (!removed && deps.readConnection(environmentId) !== null) return false;
+    if (deps.readConnection(environmentId) !== null) return false;
+    if (records.get(environmentId)?.generation !== current?.generation) return removed;
     forget(environmentId);
     deps.demoteEnvironment(environmentId);
     return true;
   };
 
+  const release = (environmentId: EnvironmentId): Promise<boolean> => {
+    const pending = pendingReleases.get(environmentId);
+    if (pending) return pending;
+    const next = releaseOnce(environmentId).finally(() => {
+      if (pendingReleases.get(environmentId) === next) pendingReleases.delete(environmentId);
+    });
+    pendingReleases.set(environmentId, next);
+    return next;
+  };
+
   const hostedConnections = () =>
     deps.listConnections().filter((connection) => connection.kind === "primary");
 
-  const evictFor = async (environmentId: EnvironmentId): Promise<boolean> => {
+  const evictFor = async (
+    environmentId: EnvironmentId,
+    isCurrent: () => boolean,
+  ): Promise<boolean> => {
     while (
+      isCurrent() &&
       hostedConnections().filter((connection) => connection.environmentId !== environmentId)
         .length >= MAX_MOBILE_HOSTED_CONNECTIONS
     ) {
@@ -244,7 +275,7 @@ export function createMobileHostedConnectionCoordinator(
       const victim = candidates[0];
       if (!victim || !(await release(victim.environmentId))) return false;
     }
-    return true;
+    return isCurrent();
   };
 
   const waitForAttempt = (environmentId: EnvironmentId) => {
@@ -269,24 +300,38 @@ export function createMobileHostedConnectionCoordinator(
     });
   };
 
-  const enqueueAcquire = (nodeId: string) => {
-    const next = acquisition.catch(() => undefined).then(() => acquire(nodeId));
+  const enqueueAcquire = (nodeId: string, allowed: () => boolean = () => true) => {
+    const pending = pendingAcquisitions.get(nodeId);
+    if (pending?.current()) return pending.promise;
+    const revision = lifecycleRevision;
+    const current = () => !disposed && revision === lifecycleRevision && allowed();
+    const next = acquisition
+      .catch(() => undefined)
+      .then(() => acquire(nodeId, current))
+      .finally(() => {
+        if (pendingAcquisitions.get(nodeId)?.promise === next) pendingAcquisitions.delete(nodeId);
+      });
+    pendingAcquisitions.set(nodeId, { promise: next, current });
     acquisition = next.catch(() => undefined);
     return next;
   };
 
-  const acquire = async (nodeId: string) => {
-    if (disposed) return;
+  const acquire = async (nodeId: string, isCurrent: () => boolean) => {
+    if (!isCurrent()) return;
     const node = deps.nodeForId(nodeId);
     if (!node) return;
+    const releasing = pendingReleases.get(node.environmentId);
+    if (releasing) await releasing;
+    if (!isCurrent()) return;
     const current = records.get(node.environmentId);
     const deliveryUnknown = deliveryUnknownEnvironmentIds.has(node.environmentId);
     if (current) {
       records.set(node.environmentId, { ...current, lastAccessedAt: deps.now() });
       publish();
     } else {
-      if (!(await evictFor(node.environmentId))) return;
+      if (!(await evictFor(node.environmentId, isCurrent))) return;
     }
+    if (!isCurrent()) return;
     acquiringEnvironmentId = node.environmentId;
     try {
       if (
@@ -299,6 +344,7 @@ export function createMobileHostedConnectionCoordinator(
         return;
       }
       await deps.selectNode(nodeId);
+      if (!isCurrent()) return;
       if (deliveryUnknown) deps.markSelectedDeliveryUnknown();
       await waitForAttempt(node.environmentId);
     } finally {
@@ -334,6 +380,7 @@ export function createMobileHostedConnectionCoordinator(
 
   return {
     acquireNode(nodeId) {
+      cancelWake();
       return enqueueAcquire(nodeId);
     },
     retainPairingScope(nodeId, environmentId) {
@@ -342,9 +389,12 @@ export function createMobileHostedConnectionCoordinator(
       return deps.scopes.retain(environmentId, { type: "node-pairing", nodeId });
     },
     async reconnectNode(nodeId, environmentId) {
+      cancelWake();
+      const revision = lifecycleRevision;
       const node = deps.nodeForId(nodeId);
       if (!node || node.environmentId !== environmentId) return false;
       if (!(await release(environmentId))) return false;
+      if (disposed || revision !== lifecycleRevision) return false;
       await enqueueAcquire(nodeId);
       return records.has(environmentId);
     },
@@ -498,7 +548,10 @@ export function createMobileHostedConnectionCoordinator(
       );
       resolveAttemptWaiters(environmentId);
     },
+    cancelPendingRecovery: cancelAcquisitions,
     async releaseNonRetainedForBackground() {
+      cancelAcquisitions();
+      const revision = lifecycleRevision;
       const selectedEnvironmentId = deps.selectedEnvironmentId();
       const selectedRecord = selectedEnvironmentId ? records.get(selectedEnvironmentId) : null;
       const releasedEnvironmentIds = Array.from(records.values())
@@ -511,6 +564,8 @@ export function createMobileHostedConnectionCoordinator(
         })),
       );
       if (
+        !disposed &&
+        revision === lifecycleRevision &&
         selectedRecord &&
         deps.selectedEnvironmentId() === selectedEnvironmentId &&
         released.some((result) => result.removed && result.environmentId === selectedEnvironmentId)
@@ -526,8 +581,9 @@ export function createMobileHostedConnectionCoordinator(
       }
     },
     reconnectRetainedAfterForeground() {
-      for (const timer of wakeTimers) deps.clearTimeout(timer);
-      wakeTimers.clear();
+      cancelWake();
+      const revision = wakeRevision;
+      const current = () => !disposed && revision === wakeRevision;
       const originalEnvironmentId = deps.selectedEnvironmentId();
       const retained = Array.from(records.values())
         .filter(
@@ -541,14 +597,19 @@ export function createMobileHostedConnectionCoordinator(
         const timer = deps.setTimeout(
           () => {
             wakeTimers.delete(timer);
-            void enqueueAcquire(record.nodeId).finally(() => {
-              if (index !== retained.length - 1 || !originalEnvironmentId) return;
-              const original = records.get(originalEnvironmentId);
-              if (!original) return;
-              void enqueueAcquire(original.nodeId).finally(() =>
-                deps.restoreActiveEnvironment(originalEnvironmentId),
-              );
-            });
+            if (!current()) return;
+            void enqueueAcquire(record.nodeId, current)
+              .catch(() => undefined)
+              .then(() => {
+                if (!current() || index !== retained.length - 1 || !originalEnvironmentId) return;
+                const original = records.get(originalEnvironmentId);
+                if (!original) return;
+                void enqueueAcquire(original.nodeId, current)
+                  .then(() => {
+                    if (current()) deps.restoreActiveEnvironment(originalEnvironmentId);
+                  })
+                  .catch(() => undefined);
+              });
           },
           (index + 1) * MOBILE_HOSTED_WAKE_STAGGER_MS,
         );
@@ -556,6 +617,7 @@ export function createMobileHostedConnectionCoordinator(
       });
     },
     async releaseAll() {
+      cancelAcquisitions();
       // Sign-out: no command may replay into the next account session.
       for (const environmentId of records.keys()) getHostedDispatchReplay().end(environmentId);
       await Promise.all(Array.from(records.keys(), (environmentId) => release(environmentId)));
@@ -564,6 +626,7 @@ export function createMobileHostedConnectionCoordinator(
     },
     dispose() {
       disposed = true;
+      cancelAcquisitions();
       unsubscribeScopes();
       for (const timer of wakeTimers) deps.clearTimeout(timer);
       wakeTimers.clear();

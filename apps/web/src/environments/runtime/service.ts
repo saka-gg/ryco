@@ -1215,7 +1215,6 @@ export async function connectDesktopWorkspaceEnvironment(input: {
   }
   const existing = getEnvironmentSupervisor().read(input.environmentId);
   if (existing) {
-    await existing.reconnect();
     await existing.ensureBootstrapped();
     return existing;
   }
@@ -1224,7 +1223,7 @@ export async function connectDesktopWorkspaceEnvironment(input: {
     preserveSocketPath: true,
     webSocketConstructor: (url) => socketFactory.createSocket(url) as unknown as WebSocket,
     retryTransientErrors: false,
-    reconnectMaxRetries: 1_000_000,
+    ...socketFactory.lifecycleHandlers,
     getConnectionLabel: () => input.label,
     getEnvironmentId: () => input.environmentId,
   });
@@ -1263,7 +1262,9 @@ export async function connectDesktopWorkspaceEnvironment(input: {
     await connection.ensureBootstrapped();
     return connection;
   } catch (error) {
-    await removeConnection(input.environmentId).catch(() => undefined);
+    if (getEnvironmentSupervisor().read(input.environmentId) === connection) {
+      await removeConnection(input.environmentId).catch(() => undefined);
+    }
     throw error;
   }
 }

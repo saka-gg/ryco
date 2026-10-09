@@ -7,7 +7,7 @@ import type { ProjectEnvironment } from "../projects/projectsModel";
 const connectionLabels = {
   connected: "Ready for changes",
   "read-only": "Read-only",
-  reconnecting: "Reconnecting",
+  reconnecting: "Unavailable",
   offline: "Offline",
 } as const;
 

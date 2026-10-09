@@ -173,7 +173,7 @@ export type HostedConnectionStatusText =
   | "Securing this device"
   | "Device encryption unavailable"
   | "Device removed"
-  | "Reconnecting"
+  | "Unavailable"
   | "idle"
   | "requesting ticket"
   | "connecting"
@@ -188,7 +188,7 @@ export type HostedConnectionStatusText =
  * `replaceAll("-", " ")` so the derivation's return type is the named union.
  * Every entry is the string that expression produced, with one exception:
  * `reconnecting` is unreachable here because the dedicated branch above the
- * fall-through already claims it, and mirroring that branch's `Reconnecting`
+ * fall-through already claims it, and mirroring that branch's `Unavailable`
  * keeps a lowercase twin out of the vocabulary.
  */
 const HOSTED_TRANSPORT_STATUS_TEXTS: Record<
@@ -201,7 +201,7 @@ const HOSTED_TRANSPORT_STATUS_TEXTS: Record<
   authenticating: "authenticating",
   "opening-channel": "opening channel",
   online: "online",
-  reconnecting: "Reconnecting",
+  reconnecting: "Unavailable",
   draining: "draining",
   "terminal-failure": "terminal failure",
 };
@@ -265,7 +265,7 @@ export function deriveHostedConnectionStatusText(
                         : transportStatus === "online" && sessionStatus === "ready"
                           ? HOSTED_E2EE_READY_TEXTS[e2eeStatus]
                           : transportStatus === "reconnecting"
-                            ? "Reconnecting"
+                            ? "Unavailable"
                             : selectionStatus === "offline"
                               ? "Offline"
                               : HOSTED_TRANSPORT_STATUS_TEXTS[transportStatus];
@@ -391,7 +391,7 @@ export const HOSTED_CONNECTION_STATUS_INDICATORS = {
   // The Hub revoked THIS device's account enrollment. Not the selected node's
   // `Revoked`: every node is closed to the device until it signs in again.
   "Device removed": { shortLabel: "Removed", connected: false, guarantee: "none" },
-  Reconnecting: { shortLabel: "Reconnecting", connected: false, guarantee: "none" },
+  Unavailable: { shortLabel: "Unavailable", connected: false, guarantee: "none" },
   idle: { shortLabel: "Idle", connected: false, guarantee: "none" },
   "requesting ticket": { shortLabel: "Preparing", connected: false, guarantee: "none" },
   connecting: { shortLabel: "Connecting", connected: false, guarantee: "none" },

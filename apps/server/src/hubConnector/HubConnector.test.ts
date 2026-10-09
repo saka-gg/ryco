@@ -272,6 +272,144 @@ const settle = async (turns = 10) => {
 };
 
 describe("HubConnector", () => {
+  it("respects the Hub retry-after floor when wake and network nudges arrive", async () => {
+    const clock = scheduler();
+    const sockets: FakeSocket[] = [];
+    const connector = new HubConnector({
+      config: enabledConfig,
+      identity: identity(),
+      transport: {
+        open: () => {
+          const socket = new FakeSocket();
+          sockets.push(socket);
+          return socket;
+        },
+      },
+      channels: {
+        open: async () => {
+          throw new Error("unused");
+        },
+      },
+      enrollmentMetadata,
+      livenessWatch: false,
+      scheduler: clock.value,
+    });
+    const starting = connector.start();
+    await settle();
+    sockets[0]!.emit("open", {} as Event);
+    sockets[0]!.emit("message", {
+      data: encoded({
+        type: "error",
+        protocolMajor: 1,
+        protocolMinor: 2,
+        code: "rate_limited",
+        fatal: true,
+        retryAfterMs: 30_000,
+      }),
+    } as MessageEvent);
+    await starting;
+    connector.nudge();
+    await settle();
+    expect(sockets).toHaveLength(1);
+    await clock.advance(29_999);
+    connector.nudge();
+    await settle();
+    expect(sockets).toHaveLength(1);
+    await clock.advance(1);
+    await settle();
+    expect(sockets).toHaveLength(2);
+    await connector.stop();
+    expect(clock.timers.size).toBe(0);
+  });
+
+  it.each(["close", "error", "opening"] as const)(
+    "cannot disrupt a replacement connection when old %s cleanup finishes late",
+    async (failure) => {
+      const clock = scheduler();
+      const sockets: FakeSocket[] = [];
+      const cleanup = Promise.withResolvers<void>();
+      const close = vi.fn(() => cleanup.promise);
+      const connector = new HubConnector({
+        config: enabledConfig,
+        identity: identity(),
+        transport: {
+          open: () => {
+            const socket = new FakeSocket();
+            sockets.push(socket);
+            return socket;
+          },
+        },
+        channels: {
+          open: async () => {
+            if (failure === "opening") await cleanup.promise;
+            return {
+              receive: async () => true,
+              queuedBytes: async () => 0,
+              supportsChunkedMessages: () => false,
+              close,
+            };
+          },
+        },
+        enrollmentMetadata,
+        livenessWatch: false,
+        scheduler: clock.value,
+      });
+      const ready = (socket: FakeSocket) => {
+        socket.emit("open", {} as Event);
+        socket.emit("message", {
+          data: encoded({
+            type: "ready",
+            protocolMajor: 1,
+            protocolMinor: 2,
+            limits: RELAY_INITIAL_LIMITS,
+          }),
+        } as MessageEvent);
+      };
+      const starting = connector.start();
+      await settle();
+      ready(sockets[0]!);
+      if (failure !== "opening") await starting;
+      sockets[0]!.emit("message", {
+        data: encoded({
+          type: "channel.open",
+          protocolMajor: 1,
+          protocolMinor: 2,
+          channelId: `ch_${"W".repeat(22)}` as RelayChannelId,
+          capability: "ryco.rpc",
+          effectiveRole: "operator",
+        }),
+      } as MessageEvent);
+      await settle();
+      if (failure !== "error") {
+        sockets[0]!.emit("close", { code: 1006, reason: "network" } as CloseEvent);
+      } else {
+        sockets[0]!.emit("message", {
+          data: encoded({
+            type: "error",
+            protocolMajor: 1,
+            protocolMinor: 2,
+            code: "server_draining",
+            fatal: true,
+          }),
+        } as MessageEvent);
+      }
+      await settle();
+      if (failure !== "opening") expect(close).toHaveBeenCalledOnce();
+      const resuming = connector.resume();
+      await settle();
+      expect(sockets).toHaveLength(2);
+      ready(sockets[1]!);
+      await resuming;
+      cleanup.resolve();
+      await starting;
+      await settle();
+      expect(sockets[1]!.closeCalls).toBe(0);
+      expect(connector.status().state).toBe("online");
+      await connector.stop();
+      expect(clock.timers.size).toBe(0);
+    },
+  );
+
   it("does no network work while disabled", async () => {
     let opens = 0;
     const connector = new HubConnector({

@@ -114,6 +114,8 @@ export class DesktopWorkspaceClient {
   readonly #snapshots = new Map<EnvironmentId, WorkspaceMetadataSnapshot>();
   #identityStatus: DesktopWorkspaceIdentityStatus = { status: "signed-out" };
   #catalog: ReadonlyArray<WorkspaceMachineCatalogEntry> = [];
+  #demandOperation: Promise<WorkspaceConnectionDemandPlan> | null = null;
+  #demandRevision = 0;
   #demand = createWorkspaceConnectionDemandState(UNIFIED_WORKSPACE_MAX_CONNECTIONS);
   #queued: ReadonlyArray<EnvironmentId> = [];
   #leaseSequence = 0;
@@ -328,6 +330,9 @@ export class DesktopWorkspaceClient {
   }
 
   async renewScope(leaseId: string): Promise<DesktopWorkspaceClientSnapshot> {
+    if (!this.#demand.leases.some((lease) => lease.leaseId === leaseId)) {
+      throw new Error("Desktop workspace scope lease expired.");
+    }
     this.#demand = renewWorkspaceConnectionScope(this.#demand, leaseId, this.#now());
     await this.#applyDemand();
     return this.snapshot();
@@ -466,7 +471,27 @@ export class DesktopWorkspaceClient {
     }
   }
 
-  async #applyDemand(wakeStaggerMs = 0): Promise<WorkspaceConnectionDemandPlan> {
+  #applyDemand(wakeStaggerMs = 0): Promise<WorkspaceConnectionDemandPlan> {
+    this.#demandRevision += 1;
+    if (this.#demandOperation) return this.#demandOperation;
+    this.#demandOperation = Promise.resolve()
+      .then(async () => {
+        let plan: WorkspaceConnectionDemandPlan;
+        let revision: number;
+        do {
+          revision = this.#demandRevision;
+          plan = await this.#reconcileDemand(wakeStaggerMs);
+        } while (revision !== this.#demandRevision);
+        return plan;
+      })
+      .finally(() => {
+        this.#demandOperation = null;
+      });
+    return this.#demandOperation;
+  }
+
+  async #reconcileDemand(wakeStaggerMs: number): Promise<WorkspaceConnectionDemandPlan> {
+    const identity = this.#identityStatus;
     const plan = planWorkspaceConnectionDemand(this.#demand, {
       now: this.#now(),
       wakeStaggerMs,
@@ -474,6 +499,7 @@ export class DesktopWorkspaceClient {
     this.#demand = plan.state;
     for (const environmentId of plan.release) {
       await this.#connection.release(environmentId).catch(() => undefined);
+      if (this.#identityStatus !== identity) break;
       this.#demand = setWorkspaceEnvironmentConnected(
         this.#demand,
         environmentId,
@@ -482,8 +508,19 @@ export class DesktopWorkspaceClient {
       );
     }
     for (const request of plan.connect) {
+      if (this.#identityStatus !== identity || identity.status !== "ready") break;
+      if (
+        !this.#catalog.some(
+          (machine) => machine.environmentId === request.environmentId && machine.canConnect,
+        )
+      )
+        continue;
       try {
         await this.#connection.connect(request);
+        if (this.#identityStatus !== identity) {
+          await this.#connection.release(request.environmentId).catch(() => undefined);
+          break;
+        }
         this.#demand = setWorkspaceEnvironmentConnected(
           this.#demand,
           request.environmentId,
@@ -491,6 +528,7 @@ export class DesktopWorkspaceClient {
           this.#now(),
         );
       } catch {
+        if (this.#identityStatus !== identity) break;
         this.#demand = setWorkspaceEnvironmentConnected(
           this.#demand,
           request.environmentId,
@@ -499,6 +537,7 @@ export class DesktopWorkspaceClient {
         );
       }
     }
+    if (this.#identityStatus !== identity) return plan;
     this.#queued = plan.queued;
     this.#syncCatalogConnectionStates();
     this.#publish();

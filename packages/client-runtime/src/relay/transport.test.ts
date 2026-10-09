@@ -171,6 +171,81 @@ afterEach(() => {
 });
 
 describe("HostedRelayAttemptFactory", () => {
+  it("releases native preparation that finishes after disposal without issuing a ticket", async () => {
+    const prepared = Promise.withResolvers<unknown>();
+    const dispose = vi.fn();
+    configureHostedRuntime(
+      {
+        ...fakeRuntime(),
+        prepareRelaySocketContext: () => prepared.promise,
+        disposeRelaySocketContext: dispose,
+      },
+      hostedHubApi,
+    );
+    const issue = vi.spyOn(hostedHubApi, "issueRelayTicket");
+    const factory = new HostedRelayAttemptFactory();
+    const pending = factory.nextUrl();
+    factory.lifecycleHandlers().onDispose?.();
+    const context = { transient: true };
+    prepared.resolve(context);
+    await expect(pending).rejects.toThrow("Hosted node selection changed");
+    expect(dispose).toHaveBeenCalledExactlyOnceWith(context);
+    expect(issue).not.toHaveBeenCalled();
+  });
+
+  it.each(["reset", "dispose"] as const)("discards tickets finishing after %s", async (action) => {
+    const ticket = Promise.withResolvers<Awaited<ReturnType<HostedHubApi["issueRelayTicket"]>>>();
+    vi.spyOn(hostedHubApi, "issueRelayTicket").mockReturnValue(ticket.promise);
+    const factory = new HostedRelayAttemptFactory();
+    const pending = factory.nextUrl();
+    await Promise.resolve();
+    if (action === "reset") factory.reset();
+    else factory.lifecycleHandlers().onDispose?.();
+    ticket.resolve({
+      ticket: encodeBase64Url(new Uint8Array(32).fill(6)),
+      expiresAt: Date.now() + 60_000,
+      protocolMajor: 1,
+      protocolMinor: 2,
+    });
+    await expect(pending).rejects.toThrow("Hosted node selection changed");
+    expect(() => factory.createSocket(RELAY_URL)).toThrow("fresh relay ticket");
+    expect(sockets).toHaveLength(0);
+  });
+
+  it("does not expire a replacement account session for a stale unauthorized ticket response", async () => {
+    const ticket = Promise.withResolvers<Awaited<ReturnType<HostedHubApi["issueRelayTicket"]>>>();
+    vi.spyOn(hostedHubApi, "issueRelayTicket").mockReturnValue(ticket.promise);
+    const expire = vi.spyOn(hostedHubController, "expireSession");
+    const factory = new HostedRelayAttemptFactory();
+    const pending = factory.nextUrl();
+    await Promise.resolve();
+    factory.reset();
+    ticket.reject(new HostedHubApiError("unauthorized", 401));
+    await expect(pending).rejects.toBeInstanceOf(HostedHubApiError);
+    expect(expire).not.toHaveBeenCalled();
+  });
+
+  it("ignores an old socket even after reset creates another socket with the same selection", async () => {
+    vi.spyOn(hostedHubApi, "issueRelayTicket").mockResolvedValue({
+      ticket: encodeBase64Url(new Uint8Array(32).fill(6)),
+      expiresAt: Date.now() + 60_000,
+      protocolMajor: 1,
+      protocolMinor: 2,
+    });
+    const factory = new HostedRelayAttemptFactory();
+    const old = factory.createSocket(await factory.nextUrl()) as MockRelaySocket;
+    factory.reset();
+    const fresh = factory.createSocket(await factory.nextUrl()) as MockRelaySocket;
+    fresh.callbacks.onTransportStatus("online");
+    old.callbacks.onTransportStatus("reconnecting");
+    old.callbacks.onRole(null);
+    expect(hostedHubStore.getState()).toMatchObject({
+      transportStatus: "online",
+      effectiveRole: "operator",
+    });
+    expect(factory.lifecycleHandlers().recordGlobalConnectionState).toBe(false);
+  });
+
   it("exposes authoritative admission changes and releases their listener", () => {
     const factory = new HostedRelayAttemptFactory();
     const changed = vi.fn();
