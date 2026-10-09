@@ -322,7 +322,7 @@ describe("HubConnector", () => {
     expect(clock.timers.size).toBe(0);
   });
 
-  it.each(["close", "error"] as const)(
+  it.each(["close", "error", "opening"] as const)(
     "cannot disrupt a replacement connection when old %s cleanup finishes late",
     async (failure) => {
       const clock = scheduler();
@@ -340,12 +340,15 @@ describe("HubConnector", () => {
           },
         },
         channels: {
-          open: async () => ({
-            receive: async () => true,
-            queuedBytes: async () => 0,
-            supportsChunkedMessages: () => false,
-            close,
-          }),
+          open: async () => {
+            if (failure === "opening") await cleanup.promise;
+            return {
+              receive: async () => true,
+              queuedBytes: async () => 0,
+              supportsChunkedMessages: () => false,
+              close,
+            };
+          },
         },
         enrollmentMetadata,
         livenessWatch: false,
@@ -365,7 +368,7 @@ describe("HubConnector", () => {
       const starting = connector.start();
       await settle();
       ready(sockets[0]!);
-      await starting;
+      if (failure !== "opening") await starting;
       sockets[0]!.emit("message", {
         data: encoded({
           type: "channel.open",
@@ -377,7 +380,7 @@ describe("HubConnector", () => {
         }),
       } as MessageEvent);
       await settle();
-      if (failure === "close") {
+      if (failure !== "error") {
         sockets[0]!.emit("close", { code: 1006, reason: "network" } as CloseEvent);
       } else {
         sockets[0]!.emit("message", {
@@ -391,13 +394,14 @@ describe("HubConnector", () => {
         } as MessageEvent);
       }
       await settle();
-      expect(close).toHaveBeenCalledOnce();
+      if (failure !== "opening") expect(close).toHaveBeenCalledOnce();
       const resuming = connector.resume();
       await settle();
       expect(sockets).toHaveLength(2);
       ready(sockets[1]!);
       await resuming;
       cleanup.resolve();
+      await starting;
       await settle();
       expect(sockets[1]!.closeCalls).toBe(0);
       expect(connector.status().state).toBe("online");

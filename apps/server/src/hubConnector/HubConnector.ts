@@ -194,7 +194,7 @@ export class HubConnector {
   #retryNotBefore = 0;
   #started = false;
   #stopping = false;
-  #connecting = false;
+  #connecting: number | null = null;
   /**
    * The Hub-issued id of the identity this connector authenticates with.
    *
@@ -474,7 +474,11 @@ export class HubConnector {
   async resume(): Promise<void> {
     if (!this.#started || this.#stopping || !this.#config.enabled) return;
     if (this.#state.snapshot().state === "revoked") return;
-    if (this.#session !== undefined || this.#connecting) return;
+    if (
+      this.#session !== undefined ||
+      (this.#connecting !== null && this.#state.isCurrent(this.#connecting))
+    )
+      return;
     this.#clearTimer("retry");
     this.#slowAttempts.clear();
     this.#slowRetryLog.clear();
@@ -901,11 +905,16 @@ export class HubConnector {
   }
 
   async #connect(): Promise<void> {
-    if (this.#stopping || this.#connecting || this.#session !== undefined) return;
+    if (
+      this.#stopping ||
+      this.#session !== undefined ||
+      (this.#connecting !== null && this.#state.isCurrent(this.#connecting))
+    )
+      return;
     const origin = this.#config.origin;
     if (origin === undefined) return;
-    this.#connecting = true;
     const generation = this.#state.beginGeneration();
+    this.#connecting = generation;
     // A retired channel's cleanup must not block the replacement socket's frames.
     let frameChain = Promise.resolve();
     this.#frameChain = frameChain;
@@ -1029,7 +1038,7 @@ export class HubConnector {
         error instanceof RelayConnectionError ? error : new RelayConnectionError("internal_error");
       await this.#handleFailure(generation, failure.kind, failure.retryAfterMs);
     } finally {
-      this.#connecting = false;
+      if (this.#connecting === generation) this.#connecting = null;
     }
   }
 
