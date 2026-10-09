@@ -75,7 +75,7 @@ function GlyphMark({ kind }: { readonly kind: InboxGlyphKind }) {
       );
     case "working":
       return (
-        <span className="inbox-glyph-spin size-[11px] rounded-full border-[1.5px] border-foreground/15 border-t-foreground/85" />
+        <span className="inbox-glyph-spin size-[11px] rounded-full border-[1.5px] border-sky-500/20 border-t-sky-500 dark:border-sky-400/25 dark:border-t-sky-400" />
       );
     case "connecting":
       return (

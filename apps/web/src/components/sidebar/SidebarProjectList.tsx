@@ -51,6 +51,7 @@ import {
   DialogTitle,
 } from "../ui/dialog";
 import { Input } from "../ui/input";
+import { handleSidebarListScroll } from "./sidebarFold";
 import {
   Menu,
   MenuGroup,
@@ -471,7 +472,7 @@ export const SidebarProjectsContent = memo(function SidebarProjectsContent(
 
   return (
     <>
-      <SidebarContent className="gap-0">
+      <SidebarContent className="gap-0" onViewportScroll={handleSidebarListScroll}>
         {showArm64IntelBuildWarning && arm64IntelBuildWarningDescription ? (
           <SidebarGroup className="px-2 pt-2 pb-0">
             <Alert variant="warning" className="rounded-2xl border-warning/40 bg-warning/8">

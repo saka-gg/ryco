@@ -1356,6 +1356,9 @@ export default function Sidebar() {
       />
 
       <SidebarPrimaryActions
+        mode={sidebarMode}
+        environments={inboxEnvironments}
+        primaryEnvironmentId={primaryEnvironmentId}
         newThreadShortcutLabel={newThreadShortcutLabel}
         // Without any project the button starts a "No project" chat where chats are available.
         newThreadDisabled={newThreadTargetProject === null && startNewChatFromSidebar === null}

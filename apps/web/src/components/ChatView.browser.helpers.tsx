@@ -4,6 +4,8 @@ import { serializeWhenAst } from "../lib/keybindingWhenPresets";
 import { useChatPanesStore } from "../chatPanesStore";
 
 import { resetPreviewFileSessionsForTests } from "./previewFileSessions";
+import { useInboxFilterStore } from "./inboxSidebar/inboxFilterStore";
+import { useSidebarFoldStore } from "./sidebar/sidebarFold";
 
 // Production CSS is part of the behavior under test because row height depends on it.
 import "../index.css";
@@ -2665,6 +2667,8 @@ export function setupChatViewBrowserSuite() {
       open: false,
       openIntent: null,
     });
+    useInboxFilterStore.setState({ draft: "", environmentId: null, status: "all" });
+    useSidebarFoldStore.getState().reset();
     useStore.setState({
       activeEnvironmentId: null,
       environmentStateById: {},

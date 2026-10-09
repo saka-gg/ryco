@@ -8,7 +8,7 @@ import {
   WS_METHODS,
 } from "@ryco/contracts";
 import { scopedThreadKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
-import { page } from "vite-plus/test/browser";
+import { page, userEvent } from "vite-plus/test/browser";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { useCommandPaletteStore } from "../commandPaletteStore";
 import { useComposerDraftStore, DraftId } from "../composerDraftStore";
@@ -20,6 +20,7 @@ import {
 import { isMacPlatform } from "../lib/utils";
 import { useStore } from "../store";
 import { useUiStateStore } from "../uiStateStore";
+import { useInboxFilterStore } from "./inboxSidebar/inboxFilterStore";
 import {
   setupChatViewBrowserSuite,
   ADD_PROJECT_SUBMENU_PLACEHOLDER,
@@ -321,7 +322,7 @@ describe("ChatView Navigation (full app)", () => {
           .querySelector<HTMLElement>('[data-testid="command-palette-trigger"]')
           ?.checkVisibility(),
       ).toBe(true);
-      await page.getByRole("searchbox", { name: "Filter inbox" }).fill("preserved search");
+      await page.getByRole("combobox", { name: "Filter inbox" }).fill("preserved search");
       expect(useUiStateStore.getState().sidebarMode).toBe("inbox");
 
       const showProjectsButton = page.getByRole("button", { name: "Show Projects sidebar" });
@@ -339,7 +340,7 @@ describe("ChatView Navigation (full app)", () => {
       await waitForWsRequestsToSettle();
       await showInboxButton.click();
       await expect
-        .element(page.getByRole("searchbox", { name: "Filter inbox" }))
+        .element(page.getByRole("combobox", { name: "Filter inbox" }))
         .toHaveValue("preserved search");
       expect(countStableRequests()).toEqual(stableRequestCountsBeforeSwitch);
     } finally {
@@ -669,6 +670,76 @@ describe("ChatView Navigation (full app)", () => {
 
       expect(mounted.router.state.location.pathname).toBe(serverThreadPath(THREAD_ID));
       expect(Object.keys(useComposerDraftStore.getState().draftThreadsByThreadKey)).toHaveLength(0);
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("turns is: picks in the sidebar field into status tokens that Backspace removes", async () => {
+    useUiStateStore.setState({ sidebarMode: "inbox" });
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createSnapshotForTargetUser({
+        targetMessageId: "msg-user-omnifield-tokens" as MessageId,
+        targetText: "omnifield tokens",
+      }),
+    });
+
+    try {
+      const field = page.getByRole("combobox", { name: "Filter inbox" });
+      await field.click();
+      await field.fill("is:act");
+      await page.getByRole("option", { name: /Active now/ }).click();
+      const token = page.getByRole("button", { name: "Remove status filter Active now" });
+      await expect.element(token).toBeInTheDocument();
+      await expect.element(field).toHaveValue("");
+      await expect
+        .element(page.getByRole("button", { name: "Filter by machine and status" }))
+        .toHaveAttribute("data-on", "true");
+
+      // The first Backspace arms the token, the second removes it.
+      await userEvent.keyboard("{Backspace}");
+      await expect.element(token).toHaveAttribute("data-armed", "true");
+      await userEvent.keyboard("{Backspace}");
+      await vi.waitFor(() => expect(useInboxFilterStore.getState().status).toBe("all"));
+
+      // Tabbing away closes the menu.
+      const menu = document.querySelector<HTMLElement>(
+        '[role="listbox"][aria-label="Filters and search"]',
+      );
+      expect(menu?.dataset.open).toBe("true");
+      await userEvent.keyboard("{Tab}");
+      await vi.waitFor(() => expect(menu?.dataset.open).toBe("false"));
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("hands the sidebar field's text to the command palette as Search everywhere", async () => {
+    useUiStateStore.setState({ sidebarMode: "inbox" });
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createSnapshotForTargetUser({
+        targetMessageId: "msg-user-omnifield-search" as MessageId,
+        targetText: "omnifield search",
+      }),
+    });
+
+    try {
+      const field = page.getByRole("combobox", { name: "Filter inbox" });
+      await field.click();
+      await field.fill("relay ticket");
+      await expect.element(field).toHaveValue("relay ticket");
+      const everywhere = page.getByRole("option", {
+        name: /Search everywhere for “relay ticket”/,
+      });
+      await expect.element(everywhere).toBeVisible();
+      await everywhere.click();
+      const paletteInput = await waitForElement(
+        () => document.querySelector<HTMLInputElement>('[data-testid="command-palette"] input'),
+        "Command palette should have opened with the field's text.",
+      );
+      await vi.waitFor(() => expect(paletteInput.value).toBe("relay ticket"));
     } finally {
       await mounted.cleanup();
     }
