@@ -1039,7 +1039,7 @@ describe("HostedHubRoot accessibility and responsive flows", () => {
     await expect.element(page.getByText("Revoked", { exact: true })).toBeVisible();
   });
 
-  it("announces reconnect, switches nodes, and preserves delivery uncertainty", async () => {
+  it("shows availability, switches nodes, and preserves delivery uncertainty", async () => {
     const current = node("node_aaaaaaaaaaaaaaaaaaaaaa", true, "operator");
     const replacement = {
       ...node("node_bbbbbbbbbbbbbbbbbbbbbb", true, "owner"),
@@ -1058,8 +1058,8 @@ describe("HostedHubRoot accessibility and responsive flows", () => {
     });
     const selectNode = vi.spyOn(hostedHubController, "selectNode").mockResolvedValue();
     mounted = await render(<HostedNodeMenu />);
-    await expect.element(page.getByText("Reconnecting", { exact: true })).toBeVisible();
-    await page.getByText("Reconnecting", { exact: true }).click();
+    await expect.element(page.getByText("Unavailable", { exact: true })).toBeVisible();
+    await page.getByText("Unavailable", { exact: true }).click();
     await page.getByRole("button", { name: new RegExp(replacement.label) }).click();
     expect(selectNode).toHaveBeenCalledWith(replacement.id);
 
