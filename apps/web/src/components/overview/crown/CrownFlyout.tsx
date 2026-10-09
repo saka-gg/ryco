@@ -1,7 +1,11 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 
 import type { OverviewLayoutProps } from "../overviewTypes";
-import { CrownNotesDetail, CrownSectionDetail } from "./details/CrownSectionDetail";
+import {
+  CrownChatDetail,
+  CrownNotesDetail,
+  CrownSectionDetail,
+} from "./details/CrownSectionDetail";
 import { computeFlyoutPlacement } from "./crownGeometry.logic";
 import { CROWN_FLYOUT_GAP_PX, CROWN_FLYOUT_WIDTH_PX } from "./crownLayout";
 import {
@@ -10,7 +14,7 @@ import {
   type CrownRailKey,
   type CrownSection,
 } from "./crownSections";
-import type { CrownNotesBinding } from "./crownTypes";
+import type { CrownChatBinding, CrownNotesBinding } from "./crownTypes";
 
 type FlyoutSection = CrownSection;
 
@@ -25,10 +29,15 @@ const LEAVING_LAYER_MS = 230;
 /** Prototype `Flyout.close()`: content stays through the fade-out, then goes. */
 const CLOSED_CONTENT_MS = 280;
 
-function flyoutSection(key: CrownRailKey | null, hasNotes: boolean): FlyoutSection | null {
+function flyoutSection(
+  key: CrownRailKey | null,
+  bindings: { readonly notes: boolean; readonly chat: boolean },
+): FlyoutSection | null {
   if (key === null) return null;
   const section = crownSectionForRailKey(key);
-  return section === "notes" && !hasNotes ? null : section;
+  if (section === "notes" && !bindings.notes) return null;
+  if (section === "project" && !bindings.chat) return null;
+  return section;
 }
 
 function isEditable(element: Element | null): boolean {
@@ -75,13 +84,17 @@ export function CrownFlyout(props: {
   readonly isGitRepo: boolean;
   readonly reducedMotion: boolean;
   readonly notes?: CrownNotesBinding | undefined;
+  readonly chat?: CrownChatBinding | undefined;
   readonly onPointerEnter: () => void;
   readonly onPointerLeave: () => void;
   /** Focus inside started or stopped holding the preview (the Notes composer, keyboard focus). */
   readonly onEditingChange?: (editing: boolean) => void;
 }) {
-  const { anchorEl, rootRef, railRef, reducedMotion, notes, onEditingChange } = props;
-  const section = flyoutSection(props.openKey, notes !== undefined);
+  const { anchorEl, rootRef, railRef, reducedMotion, notes, chat, onEditingChange } = props;
+  const section = flyoutSection(props.openKey, {
+    notes: notes !== undefined,
+    chat: chat !== undefined,
+  });
   const open = section !== null && anchorEl !== null;
   const flyRef = useRef<HTMLDivElement>(null);
   const anchorRef = useRef(anchorEl);
@@ -253,6 +266,10 @@ export function CrownFlyout(props: {
           {entry.section === "notes" ? (
             notes ? (
               <CrownNotesDetail notes={notes} variant="flyout" />
+            ) : null
+          ) : entry.section === "project" ? (
+            chat ? (
+              <CrownChatDetail chat={chat} variant="flyout" />
             ) : null
           ) : (
             <CrownSectionDetail

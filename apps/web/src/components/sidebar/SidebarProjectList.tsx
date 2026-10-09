@@ -352,6 +352,8 @@ export interface SidebarProjectsContentProps {
     dragHandleProps: SortableProjectHandleProps | null,
     onNewFolderWithProject: (project: SidebarProjectSnapshot) => void,
   ) => React.ReactNode;
+  /** The "Chats" section ("No project" chats), rendered after the project tree. */
+  chatsSection?: React.ReactNode;
 }
 
 export const SidebarProjectsContent = memo(function SidebarProjectsContent(
@@ -378,6 +380,7 @@ export const SidebarProjectsContent = memo(function SidebarProjectsContent(
     attachProjectListAutoAnimateRef,
     projectsLength,
     renderProjectRow,
+    chatsSection,
   } = props;
   const createProjectFolder = useUiStateStore((state) => state.createProjectFolder);
   const renameProjectFolder = useUiStateStore((state) => state.renameProjectFolder);
@@ -637,6 +640,7 @@ export const SidebarProjectsContent = memo(function SidebarProjectsContent(
             </div>
           )}
         </SidebarGroup>
+        {chatsSection}
       </SidebarContent>
       <Dialog
         open={folderDialog !== null}

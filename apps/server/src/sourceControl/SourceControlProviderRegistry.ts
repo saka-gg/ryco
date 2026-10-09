@@ -69,7 +69,11 @@ function unsupportedProviderOperation(kind: SourceControlProviderKind, operation
     new SourceControlProviderError({
       provider: kind,
       operation,
-      detail: `No ${kind} source control provider is registered.`,
+      // `unknown` is what a checkout without a recognized host resolves to, not a missing driver.
+      detail:
+        kind === "unknown"
+          ? "This repository has no recognized source control host: it has no remote yet, or its remote is on an unsupported host."
+          : `No ${kind} source control provider is registered.`,
     }),
   );
 }

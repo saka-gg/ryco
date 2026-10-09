@@ -25,9 +25,11 @@ import {
   buildSendTurnBootstrap,
   buildSendTurnDispatchAttachment,
   buildSendTurnUploadTokenDispatchAttachment,
+  CHAT_PROJECT_LABEL,
   commitSendTurnDispatch,
   captureReviewedSendReadiness,
   isFileUploadTokenUsable,
+  resolveChatProjectTitleSeed,
   resolveThreadCreateModelSelection,
 } from "@ryco/client-runtime/state/composer";
 import { truncate } from "@ryco/shared/String";
@@ -84,6 +86,17 @@ export interface SendTurnThreadContext {
   worktreePath: string | null;
   createdAt: string;
   projectId: ProjectId;
+  /**
+   * Set on the first send of a "No project" chat draft: the bootstrap asks the
+   * server to create this chat project (titled from the message) first.
+   */
+  createChatProjectId?: ProjectId;
+  /**
+   * With `createChatProjectId`: gives the chat draft a fresh project id, kept
+   * on the draft, when the node has retired the current one (an unused chat
+   * removed by cleanup). The message is then sent once more under it.
+   */
+  renewChatProjectId?: () => ProjectId;
 }
 
 export interface SendTurnWorktreePlan {
@@ -462,16 +475,15 @@ export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Prom
         firstComposerImageName = firstComposerImage.name;
       }
     }
-    const title = truncate(
-      buildChatSendTitleSeed({
-        trimmedPrompt: composer.trimmedPrompt,
-        firstImageName: firstComposerImageName,
-        firstTerminalContextLabel:
-          terminalContextsSnapshot.length > 0
-            ? formatTerminalContextLabel(terminalContextsSnapshot[0]!)
-            : null,
-      }),
-    );
+    const titleSeedText = buildChatSendTitleSeed({
+      trimmedPrompt: composer.trimmedPrompt,
+      firstImageName: firstComposerImageName,
+      firstTerminalContextLabel:
+        terminalContextsSnapshot.length > 0
+          ? formatTerminalContextLabel(terminalContextsSnapshot[0]!)
+          : null,
+    });
+    const title = truncate(titleSeedText);
 
     const threadCreateModelSelection = resolveThreadCreateModelSelection({
       selectedModelSelection: composer.selectedModelSelection,
@@ -518,6 +530,16 @@ export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Prom
       activeThreadBranch: thread.activeThreadBranch,
       worktreePath: thread.worktreePath,
       threadCreatedAt: thread.createdAt,
+      ...(thread.createChatProjectId
+        ? {
+            createChatProject: {
+              projectId: thread.createChatProjectId,
+              // The untruncated first message (bounded by the contract); attachment
+              // names stand in for missing text, so it is never empty.
+              titleSeed: resolveChatProjectTitleSeed(titleSeedText) ?? CHAT_PROJECT_LABEL,
+            },
+          }
+        : {}),
     });
 
     // Creating a worktree from a PR / issue / work item also creates its thread,
@@ -556,6 +578,9 @@ export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Prom
       // for the bootstrap to create.
       ...(composer.goal ? { goal: composer.goal } : {}),
       bootstrap: prepared ? undefined : bootstrap,
+      ...(!prepared && thread.createChatProjectId && thread.renewChatProjectId
+        ? { renewChatProjectId: thread.renewChatProjectId }
+        : {}),
       sourceControlContexts: freshSourceControlContexts,
       createdAt: messageCreatedAt,
       newCommandId,

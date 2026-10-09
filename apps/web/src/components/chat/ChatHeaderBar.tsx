@@ -1,12 +1,18 @@
 import { memo } from "react";
 import { ChatHeaderBreadcrumb } from "./ChatHeaderBreadcrumb";
 import type { WorktreeOriginLike } from "./ChatHeaderBreadcrumb.logic";
+import { ChatProjectHeaderActions, type ChatProjectTarget } from "./ChatProjectActions";
 import type { LinkedWorktreeItem } from "../worktrees/LinkedWorktreeItemDialog";
 import { WorktreeSourceControlBadges } from "../worktrees/WorktreeSourceControlBadges";
 
 export interface ChatHeaderBarProps {
   projectName: string | null | undefined;
   isGitRepo: boolean;
+  /**
+   * Set when the thread's project is a "No project" chat: its Git chrome (the
+   * "No Git" badge) gives way to "Turn into project…" and "Reveal folder".
+   */
+  chatProject?: ChatProjectTarget | null | undefined;
   worktreeBranch: string | null | undefined;
   worktreeTitle: string | null | undefined;
   worktreeOrigin: WorktreeOriginLike;
@@ -53,7 +59,9 @@ export const ChatHeaderBar = memo(function ChatHeaderBar(props: ChatHeaderBarPro
           labelStyle="kind"
           onOpenLinkedItem={props.onOpenLinkedWorktreeItem}
         />
-        {props.projectName && !props.isGitRepo ? (
+        {props.chatProject ? (
+          <ChatProjectHeaderActions chat={props.chatProject} />
+        ) : props.projectName && !props.isGitRepo ? (
           <span className="shrink-0 rounded-full border border-border/60 bg-muted/40 px-1.5 py-0.5 text-[10px] text-amber-600 dark:text-amber-400">
             No Git
           </span>

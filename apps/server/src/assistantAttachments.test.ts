@@ -3,7 +3,9 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vite-plus/test";
 import {
+  formatAssistantDeliveryText,
   parseAssistantAttachments,
+  parseAssistantDelivery,
   persistAssistantAttachment,
   persistGeneratedAssistantAttachment,
 } from "./assistantAttachments.ts";
@@ -34,6 +36,19 @@ describe("assistant file delivery format", () => {
       expect(parseAssistantAttachments(text).errors).toHaveLength(1);
       expect(parseAssistantAttachments(text).files).toEqual([]);
     }
+  });
+  it("only treats actionable manifests as a delivery and formats its visible text", () => {
+    expect(parseAssistantDelivery("  plain reply  ")).toBeUndefined();
+    expect(parseAssistantDelivery("```markdown\n```ryco-attachments\n```\n```")).toBeUndefined();
+    const delivery = parseAssistantDelivery(
+      'OK\n\n```ryco-attachments\n{"files":[{"path":"a.txt"}]}\n```',
+    );
+    expect(delivery?.files).toEqual([{ path: "a.txt" }]);
+    expect(formatAssistantDeliveryText(delivery!.text, delivery!.errors)).toBe("OK");
+    expect(formatAssistantDeliveryText("OK", ["Attachment 1 failed."])).toBe(
+      "OK\n\nAttachment 1 failed.",
+    );
+    expect(formatAssistantDeliveryText("", [])).toBe(" ");
   });
 });
 

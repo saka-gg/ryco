@@ -38,6 +38,8 @@ import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as GitHubSourceControlProvider from "../sourceControl/GitHubSourceControlProvider.ts";
 import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
+import { githubDiscovery } from "../sourceControl/SourceControlProviderDiscoveryCatalog.ts";
+import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import { makeGitManager } from "./GitManager.ts";
 import { ServerConfig } from "../config.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
@@ -759,6 +761,8 @@ function makeManager(input?: {
   setupScriptRunner?: ProjectSetupScriptRunnerShape;
   settingsPatch?: ServerSettingsPatch;
   project?: OrchestrationProjectShell;
+  /** Route through the production registry, which detects the provider from git remotes. */
+  detectSourceControlFromRemotes?: boolean;
 }) {
   const {
     service: gitHubCli,
@@ -815,21 +819,28 @@ function makeManager(input?: {
     Layer.provideMerge(NodeServices.layer),
     Layer.provideMerge(ServerConfigLayer),
   );
+  // The detecting registry shares the memoized `vcsDriverLayer`; only the driver registry is extra.
   const sourceControlRegistryLayer = Layer.effect(
     SourceControlProviderRegistry.SourceControlProviderRegistry,
     GitHubSourceControlProvider.make().pipe(
-      Effect.map((provider) =>
-        SourceControlProviderRegistry.SourceControlProviderRegistry.of({
-          get: () => Effect.succeed(provider),
-          detectProviderFromRemoteUrl: () => null,
-          resolveHandle: () => Effect.succeed({ provider, context: null }),
-          resolve: () => Effect.succeed(provider),
-          discover: Effect.succeed([]),
-        }),
+      Effect.flatMap((provider) =>
+        input?.detectSourceControlFromRemotes
+          ? SourceControlProviderRegistry.makeWithProviders([
+              { kind: "github", provider, discovery: githubDiscovery },
+            ])
+          : Effect.succeed(
+              SourceControlProviderRegistry.SourceControlProviderRegistry.of({
+                get: () => Effect.succeed(provider),
+                detectProviderFromRemoteUrl: () => null,
+                resolveHandle: () => Effect.succeed({ provider, context: null }),
+                resolve: () => Effect.succeed(provider),
+                discover: Effect.succeed([]),
+              }),
+            ),
       ),
       Effect.provide(Layer.succeed(GitHubCli, gitHubCli)),
     ),
-  );
+  ).pipe(Layer.provide(VcsDriverRegistry.layer.pipe(Layer.provideMerge(vcsDriverLayer))));
 
   const managerLayer = Layer.mergeAll(
     Layer.succeed(TextGeneration, textGeneration),
@@ -1489,6 +1500,42 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
       yield* runGit(repoDir, ["push", "-u", "origin", "feature/provider-failure"]);
 
       const { manager } = yield* makeManager({
+        ghScenario: {
+          failWith: new GitHubCliError({ operation: "execute", detail: "provider unavailable" }),
+        },
+      });
+
+      const error = yield* manager.remoteStatus({ cwd: repoDir }).pipe(Effect.flip);
+      expect(String(error)).toContain("provider unavailable");
+    }),
+  );
+
+  it.effect("reports no pull request for a repository without a hosting provider", () =>
+    Effect.gen(function* () {
+      // A freshly initialized repository (e.g. a promoted chat) has no remote yet.
+      const repoDir = yield* makeTempDir("ryco-git-manager-");
+      yield* initRepo(repoDir);
+
+      const { manager, ghCalls } = yield* makeManager({ detectSourceControlFromRemotes: true });
+      const remote = yield* manager.remoteStatus({ cwd: repoDir });
+
+      expect(remote).toMatchObject({ hasUpstream: false, pr: null });
+      expect(ghCalls.filter((call) => call.startsWith("pr list "))).toHaveLength(0);
+    }),
+  );
+
+  it.effect("still propagates provider failures for a repository on a recognized host", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("ryco-git-manager-");
+      yield* initRepo(repoDir);
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+      yield* runGit(repoDir, ["checkout", "-b", "feature/hosted-failure"]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "feature/hosted-failure"]);
+      yield* runGit(repoDir, ["remote", "set-url", "origin", "https://github.com/acme/app.git"]);
+
+      const { manager } = yield* makeManager({
+        detectSourceControlFromRemotes: true,
         ghScenario: {
           failWith: new GitHubCliError({ operation: "execute", detail: "provider unavailable" }),
         },

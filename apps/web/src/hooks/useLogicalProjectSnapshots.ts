@@ -8,6 +8,7 @@ import {
   useSavedEnvironmentRegistryStore,
   useSavedEnvironmentRuntimeStore,
 } from "../environments/runtime";
+import { excludeChatProjects } from "@ryco/shared/projectKind";
 import { getProjectOrderKey } from "../logicalProject";
 import {
   buildSidebarProjectSnapshots,
@@ -24,7 +25,11 @@ const selectProjectGroupingOverrides = (settings: UnifiedSettings) =>
   settings.sidebarProjectGroupingOverrides;
 
 export interface LogicalProjectSnapshots {
-  /** Every project across environments, in the user's sidebar order. */
+  /**
+   * Every project across environments, in the user's sidebar order. "No
+   * project" chats are not projects here: they live in the sidebar's Chats
+   * section and never appear in project trees or pickers.
+   */
   readonly orderedProjects: readonly Project[];
   /** Projects grouped into logical repositories (one per repository identity). */
   readonly snapshots: readonly SidebarProjectSnapshot[];
@@ -54,7 +59,7 @@ export function useLogicalProjectSnapshots(): LogicalProjectSnapshots {
   const orderedProjects = useMemo(
     () =>
       orderItemsByPreferredIds({
-        items: projects,
+        items: excludeChatProjects(projects),
         preferredIds: projectOrder,
         getId: getProjectOrderKey,
       }),

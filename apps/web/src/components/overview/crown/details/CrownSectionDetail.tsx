@@ -1,12 +1,19 @@
+import { FolderGit2Icon } from "lucide-react";
+
+import { PROMOTE_CHAT_SUMMARY } from "../../../chat/ChatProjectActions";
+import { Button } from "../../../ui/button";
 import { NotesPane } from "../../notes/NotesPane";
-import type { CrownNotesBinding, CrownSectionDetailProps } from "../crownTypes";
+import type { CrownChatBinding, CrownNotesBinding, CrownSectionDetailProps } from "../crownTypes";
 import { AgentsDetail } from "./AgentsDetail";
 import { BranchDetail } from "./BranchDetail";
 import { ChangesDetail } from "./ChangesDetail";
 import { ChecksDetail } from "./ChecksDetail";
 import {
+  CROWN_PILL_BUTTON_CLASS,
   crownRailItemForSection,
+  CrownDetailActions,
   CrownDetailEmpty,
+  CrownDetailFootnote,
   CrownDetailHeading,
   type CrownDetailViewProps,
 } from "./crownDetailPrimitives";
@@ -99,6 +106,47 @@ export function CrownNotesDetail(props: {
         compact={variant === "card"}
         autoFocusComposer={props.autoFocusComposer === true}
       />
+    </div>
+  );
+}
+
+/**
+ * A chat's "Turn into project" section, in place of the source-control ones.
+ * The flyout previews what promotion does; the card holds the button, and the
+ * dialog grows out of it.
+ */
+export function CrownChatDetail(props: {
+  readonly chat: CrownChatBinding;
+  readonly variant: "flyout" | "card";
+}) {
+  const { chat, variant } = props;
+  return (
+    <div
+      className="min-w-0 text-[12px] leading-[1.45]"
+      data-slot="crown-section-detail"
+      data-section="project"
+      data-variant={variant}
+    >
+      <CrownDetailHeading section="project" variant={variant} />
+      <p className="mx-1 text-muted-foreground">{PROMOTE_CHAT_SUMMARY}</p>
+      {variant === "flyout" ? (
+        <CrownDetailFootnote>Click to choose where it goes</CrownDetailFootnote>
+      ) : (
+        <CrownDetailActions>
+          <Button
+            variant="ghost"
+            size="sm"
+            className={CROWN_PILL_BUTTON_CLASS}
+            data-testid="crown-promote-chat"
+            onPointerEnter={chat.preload}
+            onFocus={chat.preload}
+            onClick={(event) => chat.turnIntoProject(event.currentTarget)}
+          >
+            <FolderGit2Icon aria-hidden="true" className="size-3.5" />
+            Turn into project…
+          </Button>
+        </CrownDetailActions>
+      )}
     </div>
   );
 }

@@ -8,6 +8,7 @@ import { readEnvironmentConnection } from "../../environments/runtime";
 import { selectProjectsAcrossEnvironments, useStore } from "../../store";
 import { SettingsSection } from "./settingsLayout";
 import { SessionImportPanel } from "./SessionImportPanel";
+import { excludeChatProjects } from "@ryco/shared/projectKind";
 export function SessionImportSettings() {
   const target = useSettingsTarget();
   const scope = useSettingsEditingScope();
@@ -35,7 +36,10 @@ export function SessionImportSettings() {
         key={target.environmentId}
         nodeLabel={target.nodeLabel}
         allowed={allowed}
-        projects={projects.filter((project) => project.environmentId === target.environmentId)}
+        // Imports land in a real project; chats are not import targets.
+        projects={excludeChatProjects(projects).filter(
+          (project) => project.environmentId === target.environmentId,
+        )}
         providerOptions={target.serverConfig?.providers ?? []}
         client={() => {
           const connection = readEnvironmentConnection(target.environmentId);

@@ -2,9 +2,13 @@ import { GitBranchIcon, RefreshCwIcon, XIcon } from "lucide-react";
 import { useId, type ReactNode, type Ref } from "react";
 
 import type { OverviewLayoutProps } from "../overviewTypes";
-import { CrownNotesDetail, CrownSectionDetail } from "./details/CrownSectionDetail";
+import {
+  CrownChatDetail,
+  CrownNotesDetail,
+  CrownSectionDetail,
+} from "./details/CrownSectionDetail";
 import { CROWN_SECTION_LABEL, type CrownSection } from "./crownSections";
-import type { CrownNotesBinding } from "./crownTypes";
+import type { CrownChatBinding, CrownNotesBinding } from "./crownTypes";
 
 /**
  * The expanded crown (prototype `.cr-card`): a header row and the selected
@@ -28,6 +32,8 @@ export function CrownCard({
   readonly notes?: CrownNotesBinding | undefined;
   /** The note a "Note saved" alert opened the card on. */
   readonly highlightNoteId?: string | null;
+  /** Renders a chat's "Turn into project" section; without it the section is never selected. */
+  readonly chat?: CrownChatBinding | undefined;
   readonly onCollapse: () => void;
   readonly spine: ReactNode;
   readonly mainRef?: Ref<HTMLDivElement>;
@@ -109,6 +115,10 @@ export function CrownCard({
                     // The prototype focuses the composer whenever the section opens.
                     autoFocusComposer={visible}
                   />
+                ) : null
+              ) : section === "project" ? (
+                props.chat ? (
+                  <CrownChatDetail chat={props.chat} variant="card" />
                 ) : null
               ) : (
                 <CrownSectionDetail

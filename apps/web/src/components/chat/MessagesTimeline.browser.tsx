@@ -360,6 +360,69 @@ describe("MessagesTimeline", () => {
     }
   });
 
+  it("shows a folder relocation as a fresh session with a retry hint, still inspectable", async () => {
+    const sameModel = makeContextHandoffMarker().target;
+    const continued = makeContextHandoffMarker({
+      id: "context-handoff:relocated",
+      handoffId: ContextHandoffId.make("handoff-relocated"),
+      reason: "cwd-relocation",
+      status: "consumed",
+      sources: [sameModel],
+      target: sameModel,
+    });
+    const failed = makeContextHandoffMarker({
+      id: "context-handoff:relocation-failed",
+      handoffId: ContextHandoffId.make("handoff-relocation-failed"),
+      createdAt: "2026-04-13T12:05:00.000Z",
+      reason: "cwd-relocation",
+      status: "failed",
+      error: "The fresh session could not start",
+      sources: [sameModel],
+      target: sameModel,
+    });
+    const onInspectContextHandoff = vi.fn();
+    const screen = await render(
+      <div style={{ width: 320 }}>
+        <MessagesTimeline
+          {...buildProps()}
+          onInspectContextHandoff={onInspectContextHandoff}
+          timelineEntries={[continued, failed].map((marker) => ({
+            id: marker.id,
+            kind: "context-handoff" as const,
+            createdAt: marker.createdAt,
+            marker,
+          }))}
+        />
+      </div>,
+    );
+
+    try {
+      const continuedDivider = page.getByRole("button", {
+        name: "Continued in a fresh session in the new folder",
+        exact: true,
+      });
+      await expect.element(continuedDivider).toBeVisible();
+      expect(continuedDivider.element().textContent).not.toContain("Fable 5");
+      expect(continuedDivider.element().querySelector(".lucide-arrow-right")).toBeNull();
+
+      const failedDivider = page.getByRole("button", {
+        name: "Fresh session in the new folder. Failed: The fresh session could not start. Send your message again to retry",
+      });
+      await expect.element(failedDivider).toBeVisible();
+      await expect
+        .element(page.getByText("Send your message again to retry.", { exact: true }))
+        .toBeVisible();
+      const failedElement = failedDivider.element();
+      expect(failedElement.dataset.contextHandoffReason).toBe("cwd-relocation");
+      expect(failedElement.scrollWidth).toBeLessThanOrEqual(failedElement.clientWidth);
+
+      await userEvent.click(failedDivider);
+      expect(onInspectContextHandoff).toHaveBeenCalledWith(failed, expect.any(HTMLButtonElement));
+    } finally {
+      await screen.unmount();
+    }
+  });
+
   it("renders activity rows instead of the empty placeholder when a thread has non-message timeline data", async () => {
     const screen = await render(
       <MessagesTimeline

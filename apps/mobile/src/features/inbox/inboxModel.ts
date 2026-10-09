@@ -9,8 +9,10 @@ import type {
   ThreadInboxMutationBlocker,
 } from "@ryco/client-runtime/state/threads";
 import { buildThreadInbox } from "@ryco/client-runtime/state/threads";
+import { CHAT_WORKSPACE_LABEL, projectDisplayLabel } from "@ryco/client-runtime/state/composer";
 import type { EnvironmentId, ThreadId } from "@ryco/contracts";
 import type { SidebarAutoSettleAfterDays } from "@ryco/contracts/settings";
+import { isChatProject } from "@ryco/shared/projectKind";
 import type { ThreadSettlementBlocker } from "@ryco/shared/threadSettlement";
 import {
   describeThreadPriorityFocus,
@@ -77,6 +79,8 @@ export interface InboxThreadRow {
   readonly nodeLabel: string;
   readonly projectLabel: string;
   readonly project: Project | null;
+  /** The thread is a "No project" chat: its project is a chat folder, labelled "No project". */
+  readonly isChat: boolean;
   readonly isWorktree: boolean;
   readonly worktreeLabel: string;
   readonly contextLabel: string;
@@ -235,9 +239,11 @@ export function buildInboxSections(input: BuildInboxInput): ReadonlyArray<InboxS
     const thread = entry.thread!;
     const environment = environmentById.get(thread.environmentId);
     const nodeLabel = environment?.label || "Unknown machine";
-    const projectLabel = entry.project?.name || "Unknown project";
-    const worktreeLabel =
-      entry.worktree?.title || entry.worktree?.branch || thread.branch || "Local workspace";
+    const isChat = isChatProject(entry.project);
+    const projectLabel = projectDisplayLabel(entry.project, "Unknown project");
+    const worktreeLabel = isChat
+      ? CHAT_WORKSPACE_LABEL
+      : entry.worktree?.title || entry.worktree?.branch || thread.branch || "Local workspace";
     const contextLabel = `${nodeLabel} · ${projectLabel} · ${worktreeLabel}`;
     const state =
       environment?.stale ||
@@ -259,6 +265,7 @@ export function buildInboxSections(input: BuildInboxInput): ReadonlyArray<InboxS
       nodeLabel,
       projectLabel,
       project: entry.project,
+      isChat,
       isWorktree: Boolean(entry.worktree?.worktreePath ?? thread.worktreePath),
       worktreeLabel,
       contextLabel,
@@ -316,8 +323,10 @@ export function resolveInboxEmptyState(input: {
   readonly hasFilter: boolean;
 }): InboxEmptyState {
   if (input.environmentCount === 0) return "connect-node";
+  // "No project" chats are threads without a project to start new work in (projectCount
+  // excludes them), so hidden threads point at the filter before any missing project.
+  if (input.threadCount > 0 && input.hasFilter) return "clear-filter";
   if (input.projectCount === 0) return "add-project";
   if (input.threadCount === 0) return "new-task";
-  if (input.hasFilter) return "clear-filter";
   return null;
 }

@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 
 import { GitCommandError, type ProjectId, type WorktreeCheckoutLocation } from "@ryco/contracts";
+import { directorySlug } from "@ryco/shared/directorySlug";
 import { Effect, Option } from "effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { resolveProjectWorktreesDir } from "./projectMetadataPaths.ts";
@@ -10,16 +11,7 @@ import { resolveProjectWorktreesDir } from "./projectMetadataPaths.ts";
 export const createWorktreeDirectoryId = (): string => randomBytes(4).toString("hex");
 
 export function worktreeDirectorySlug(value: string, fallback = "new-worktree"): string {
-  return (
-    value
-      .normalize("NFKD")
-      .replace(/\p{M}/gu, "")
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "")
-      .slice(0, 48)
-      .replace(/-+$/g, "") || fallback
-  );
+  return directorySlug(value, fallback);
 }
 
 export function buildWorktreeCheckoutDirectoryName(

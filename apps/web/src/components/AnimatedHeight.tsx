@@ -72,7 +72,9 @@ export function AnimatedHeight({ children }: { readonly children: ReactNode }) {
   return (
     <div
       data-slot="animated-height"
-      className="transition-[height] duration-200 ease-out motion-reduce:transition-none"
+      // The house "pop" step (200ms) is zeroed by the app's reduced-motion
+      // preference as well as the OS setting.
+      className="transition-[height] duration-(--app-motion-duration-pop) ease-out motion-reduce:transition-none"
       style={
         heightState.height === null
           ? undefined

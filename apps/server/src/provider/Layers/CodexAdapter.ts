@@ -2792,6 +2792,8 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       sessionModelSwitch: "in-session",
       turnSteering: "native",
       conversationRollback: "native",
+      // thread/resume addresses the rollout by thread id and takes the new cwd.
+      resumeSurvivesCwdChange: true,
     },
     startSession,
     sendTurn,

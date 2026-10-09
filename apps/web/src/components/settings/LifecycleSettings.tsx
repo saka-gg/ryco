@@ -6,6 +6,10 @@ import { useCallback, useEffect, useState } from "react";
 
 import { readLifecycleApi } from "../../workspaceLifecycle";
 import { useThreadActions } from "../../hooks/useThreadActions";
+import { deleteChatFolderWithFeedback } from "../../lib/chatFolderActions";
+import { selectEnvironmentState, useStore } from "../../store";
+import { Checkbox } from "../ui/checkbox";
+import { WrappingPath } from "../ui/path-text";
 import { formatRelativeTimeLabel } from "../../timestampFormat";
 import {
   AlertDialog,
@@ -27,6 +31,7 @@ import {
 } from "./lifecycleSuggestionPolicy";
 import { SettingsEmpty, SettingsNotice, SettingsRow, SettingsSection } from "./settingsLayout";
 import { SettingsSelect } from "./SettingsSelect";
+import { describeTrashedThreadPlace } from "./archivedSettings";
 
 type TrashState =
   | { readonly status: "loading" }
@@ -52,6 +57,18 @@ export function TrashSection(props: {
   const [state, setState] = useState<TrashState>({ status: "loading" });
   const [pendingDelete, setPendingDelete] = useState<TrashedThreadSummary | null>(null);
   const [busyThreadId, setBusyThreadId] = useState<string | null>(null);
+  // "Also delete the chat's folder": off by default, and re-armed per dialog.
+  const [deleteChatFolder, setDeleteChatFolder] = useState(false);
+  // Chats are listed as "No project", never under their folder's title, and only chats offer
+  // their folder for deletion. The node says which rows are chats; the store knows the folder.
+  const projectById = useStore((store) => selectEnvironmentState(store, environmentId).projectById);
+  const placeOf = (thread: TrashedThreadSummary) =>
+    describeTrashedThreadPlace(thread, environmentId ? projectById[thread.projectId] : null);
+  const pendingDeleteChatFolder = pendingDelete ? placeOf(pendingDelete).chatFolder : null;
+  const requestPermanentDelete = (thread: TrashedThreadSummary) => {
+    setDeleteChatFolder(false);
+    setPendingDelete(thread);
+  };
 
   const available = readLifecycleApi(environmentId) !== undefined;
   const load = useCallback(async () => {
@@ -136,8 +153,11 @@ export function TrashSection(props: {
             >
               <div className="min-w-0 flex-1">
                 <h3 className="truncate text-[13px] font-medium text-foreground">{thread.title}</h3>
-                <p className="mt-0.5 text-xs text-muted-foreground">
-                  {thread.projectTitle ?? "Removed project"}
+                <p
+                  className="mt-0.5 text-xs text-muted-foreground"
+                  data-testid={`trash-row-place-${thread.threadId}`}
+                >
+                  {placeOf(thread).label}
                   {" · Moved to Trash "}
                   {formatRelativeTimeLabel(thread.trashedAt)}
                   {thread.archivedAt ? " · Restores to Archive" : ""}
@@ -167,7 +187,7 @@ export function TrashSection(props: {
                 size="xs"
                 className="shrink-0"
                 disabled={!props.mutationAllowed || busyThreadId !== null}
-                onClick={() => setPendingDelete(thread)}
+                onClick={() => requestPermanentDelete(thread)}
               >
                 <span>Delete permanently</span>
               </Button>
@@ -191,6 +211,28 @@ export function TrashSection(props: {
               {LIFECYCLE_RETENTION_COPY.permanentDelete}
             </AlertDialogDescription>
           </AlertDialogHeader>
+          {pendingDeleteChatFolder ? (
+            <label
+              data-testid="trash-delete-chat-folder"
+              className="mx-6 mb-2 flex cursor-pointer items-start gap-2.5 rounded-lg border border-border/70 bg-muted/30 px-3 py-2.5 text-sm"
+            >
+              <Checkbox
+                className="mt-0.5"
+                checked={deleteChatFolder}
+                onCheckedChange={(checked) => setDeleteChatFolder(checked === true)}
+              />
+              <span className="flex min-w-0 flex-col gap-0.5">
+                <span className="text-foreground">Also delete the chat's folder</span>
+                <WrappingPath
+                  path={pendingDeleteChatFolder}
+                  className="text-muted-foreground text-xs"
+                />
+                <span className="text-muted-foreground text-xs">
+                  Off by default: the files the agent wrote stay on disk unless you choose this.
+                </span>
+              </span>
+            </label>
+          ) : null}
           <AlertDialogFooter>
             <AlertDialogClose render={<Button variant="outline" />}>Keep in Trash</AlertDialogClose>
             <Button
@@ -198,9 +240,24 @@ export function TrashSection(props: {
               data-testid="trash-delete-permanently"
               onClick={() => {
                 const thread = pendingDelete;
+                const chatFolder = deleteChatFolder ? pendingDeleteChatFolder : null;
                 setPendingDelete(null);
-                if (thread)
-                  void run(thread, deleteThreadPermanently, "Failed to delete conversation");
+                if (!thread) return;
+                void run(
+                  thread,
+                  async (ref) => {
+                    await deleteThreadPermanently(ref);
+                    // Only after the conversation is gone; a folder failure is reported
+                    // on its own and never undoes or retries the delete.
+                    if (chatFolder && environmentId)
+                      void deleteChatFolderWithFeedback({
+                        environmentId,
+                        projectId: thread.projectId,
+                        folderPath: chatFolder,
+                      });
+                  },
+                  "Failed to delete conversation",
+                );
               }}
             >
               Delete permanently

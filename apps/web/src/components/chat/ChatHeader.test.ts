@@ -9,7 +9,7 @@ describe("shouldShowOpenInPicker", () => {
   it("shows the picker for projects in the primary environment", () => {
     expect(
       shouldShowOpenInPicker({
-        activeProjectName: "codething-mvp",
+        openInCwd: "/repo/codething-mvp",
         activeThreadEnvironmentId: primaryEnvironmentId,
         primaryEnvironmentId,
       }),
@@ -19,7 +19,7 @@ describe("shouldShowOpenInPicker", () => {
   it("hides the picker when hosted static mode has no primary environment", () => {
     expect(
       shouldShowOpenInPicker({
-        activeProjectName: "codething-mvp",
+        openInCwd: "/repo/codething-mvp",
         activeThreadEnvironmentId: EnvironmentId.make("environment-remote"),
         primaryEnvironmentId: null,
       }),
@@ -29,17 +29,17 @@ describe("shouldShowOpenInPicker", () => {
   it("hides the picker for remote environments", () => {
     expect(
       shouldShowOpenInPicker({
-        activeProjectName: "codething-mvp",
+        openInCwd: "/repo/codething-mvp",
         activeThreadEnvironmentId: EnvironmentId.make("environment-remote"),
         primaryEnvironmentId,
       }),
     ).toBe(false);
   });
 
-  it("hides the picker when there is no active project", () => {
+  it("hides the picker when there is no folder to open (no project, or an unsent chat)", () => {
     expect(
       shouldShowOpenInPicker({
-        activeProjectName: undefined,
+        openInCwd: null,
         activeThreadEnvironmentId: primaryEnvironmentId,
         primaryEnvironmentId,
       }),

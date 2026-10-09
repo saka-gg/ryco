@@ -17,6 +17,7 @@ import {
   type OrchestrationWorktreeShell,
   type ProjectId,
   ThreadId,
+  type TrashedThreadSummary,
   type TrashListResult,
   type WorkspaceActionAvailability,
   type WorkspaceCheckoutState,
@@ -52,6 +53,7 @@ import {
 import {
   ProjectionThreadRepository,
   type ProjectionThreadRepositoryShape,
+  type ProjectionTrashedThread,
 } from "../persistence/Services/ProjectionThreads.ts";
 import {
   ProviderService,
@@ -63,6 +65,7 @@ import {
 } from "../provider/Services/ProviderSessionDirectory.ts";
 import { ServerSettingsService, type ServerSettingsShape } from "../serverSettings.ts";
 import { TerminalManager, type TerminalManagerShape } from "../terminal/Services/Manager.ts";
+import { isTerminalAlive, isTerminalWorking } from "../terminal/terminalActivity.ts";
 import { GitVcsDriver, type GitVcsDriverShape } from "../vcs/GitVcsDriver.ts";
 import { type CheckoutFence, makeSqlCheckoutFence } from "./checkoutFence.ts";
 import {
@@ -178,8 +181,27 @@ const statusKey = (status: CheckoutFacts["status"] | undefined) =>
     },
   );
 const plural = (count: number, noun: string) => `${count} ${noun}${count === 1 ? "" : "s"}`;
-const terminalAlive = (terminal: DiagnosticsTerminalProcess) =>
-  terminal.pid !== null || terminal.status === "running" || terminal.status === "starting";
+
+/**
+ * A Trash row for clients. `projectKind` comes from the project record, also a deleted one, so a
+ * chat reads as "No project" without the client's project store; it is omitted only when the
+ * record is gone.
+ */
+export const toTrashedThreadSummary = (row: ProjectionTrashedThread): TrashedThreadSummary => ({
+  threadId: row.threadId,
+  projectId: row.projectId,
+  projectTitle: row.projectTitle,
+  ...(row.projectKind === null ? {} : { projectKind: row.projectKind }),
+  projectAvailable: row.projectTitle !== null && row.projectDeletedAt === null,
+  title: row.title,
+  branch: row.branch,
+  worktreePath: row.worktreePath,
+  worktreeId: row.worktreeId,
+  archivedAt: row.archivedAt,
+  trashedAt: row.trashedAt,
+  createdAt: row.createdAt,
+  updatedAt: row.updatedAt,
+});
 
 const normalizeRequest = (request: WorkspaceLifecycleRequest): WorkspaceLifecycleRequest => {
   const removal = request.action === "remove-checkout" || request.action === "remove-stale-record";
@@ -384,7 +406,7 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
       }
       const idleTerminalThreadIds = new Set<ThreadId>();
       for (const terminal of context.terminals) {
-        if (!terminalAlive(terminal)) continue;
+        if (!isTerminalAlive(terminal)) continue;
         const inCheckout =
           worktree.worktreePath !== null &&
           (containsPath(worktree.worktreePath, terminal.cwd) ||
@@ -392,7 +414,7 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
               containsPath(worktree.worktreePath, terminal.worktreePath)));
         const owned = conversationIds.has(terminal.threadId);
         if (!owned && !inCheckout) continue;
-        if (terminal.hasRunningSubprocess || terminal.status === "starting")
+        if (isTerminalWorking(terminal))
           activeWork.push("a terminal is running a command in this checkout");
         else if (!owned) activeWork.push("a terminal of another conversation uses this checkout");
         else idleTerminalThreadIds.add(ThreadId.make(terminal.threadId));
@@ -1154,7 +1176,7 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
         );
         const context = yield* loadContext;
         const excluded = new Set(
-          context.terminals.filter(terminalAlive).map((terminal) => terminal.threadId),
+          context.terminals.filter(isTerminalAlive).map((terminal) => terminal.threadId),
         );
         const plan = planLifecycleSuggestions({
           threads: context.snapshot.threads,
@@ -1217,20 +1239,7 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
       deps.threads.listTrashed({ limit: 501 }).pipe(
         Effect.map((rows) => ({
           truncated: rows.length > 500,
-          threads: rows.slice(0, 500).map((row) => ({
-            threadId: row.threadId,
-            projectId: row.projectId,
-            projectTitle: row.projectTitle,
-            projectAvailable: row.projectTitle !== null && row.projectDeletedAt === null,
-            title: row.title,
-            branch: row.branch,
-            worktreePath: row.worktreePath,
-            worktreeId: row.worktreeId,
-            archivedAt: row.archivedAt,
-            trashedAt: row.trashedAt,
-            createdAt: row.createdAt,
-            updatedAt: row.updatedAt,
-          })),
+          threads: rows.slice(0, 500).map(toTrashedThreadSummary),
         })),
         Effect.mapError(() => lifecycleError("Trash is unavailable.")),
       ),

@@ -17,6 +17,13 @@ export const ClaudeCacheObservation = Schema.Struct({
   providerInstanceId: ProviderInstanceId,
   model: TrimmedNonEmptyString,
   modelSelection: Schema.optional(ModelSelection),
+  /**
+   * The working directory of the runtime that made this request. Claude keeps native
+   * conversations per directory, so once the thread's working directory differs, the next
+   * turn continues in a fresh session instead of resuming this conversation. Absent from
+   * older servers.
+   */
+  cwd: Schema.optional(TrimmedNonEmptyString),
   messageId: TrimmedNonEmptyString,
   directInputTokens: NonNegativeInt,
   cacheReadInputTokens: NonNegativeInt,

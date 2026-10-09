@@ -3,6 +3,7 @@ import {
   readEffectiveProjectPreferences,
 } from "@ryco/client-runtime/state/settings";
 import { buildTemporaryWorktreeBranchName } from "@ryco/shared/git";
+import { excludeChatProjects } from "@ryco/shared/projectKind";
 import { KeyboardAvoidingView, useKeyboardState } from "react-native-keyboard-controller";
 import { StackActions, type StaticScreenProps, useNavigation } from "@react-navigation/native";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -93,7 +94,11 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
     () => new Set(environments.map((environment) => environment.environmentId)),
     [environments],
   );
-  const { projects, worktrees, threads } = useHomeWorkspaceData(eligibleEnvironmentIds);
+  const workspace = useHomeWorkspaceData(eligibleEnvironmentIds);
+  const { worktrees, threads } = workspace;
+  // "No project" chats are never a place to start a task: every default, choice and
+  // execution-target variant below reads this chat-free list.
+  const projects = excludeChatProjects(workspace.projects);
   const launch = useMemo(() => {
     const environmentId = firstParam(props.route.params?.environmentId);
     const projectId = firstParam(props.route.params?.projectId);

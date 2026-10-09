@@ -58,7 +58,8 @@ function fixture(): OrchestrationThread {
 }
 function setup(choice: "continue" | "compact" | "cancel" = "compact") {
   let thread = fixture();
-  const read = vi.fn(async () => ({ thread }));
+  let workspaceCwd: string | undefined;
+  const read = vi.fn(async () => ({ thread, ...(workspaceCwd ? { workspaceCwd } : {}) }));
   const dispatch = vi.fn<EnvironmentApi["orchestration"]["dispatchCommand"]>(async () => ({
     sequence: 1,
   }));
@@ -144,6 +145,9 @@ function setup(choice: "continue" | "compact" | "cancel" = "compact") {
     settle,
     setThread: (value: OrchestrationThread) => {
       thread = value;
+    },
+    setWorkspaceCwd: (value: string) => {
+      workspaceCwd = value;
     },
   };
 }
@@ -461,6 +465,105 @@ it("retains a queued draft when a permission-blocked runtime cannot compact", as
   expect(f.input.beginLocalDispatch).not.toHaveBeenCalled();
   expect(f.input.turnAttachments[0]?.uploadToken).toBe("fixture-token");
   expect(f.input.outgoingMessageText).toBe("Original prompt");
+});
+
+describe("a stopped Claude session (no runtime)", () => {
+  function stopped(f: ReturnType<typeof setup>) {
+    const thread = fixture();
+    f.setThread({
+      ...thread,
+      session: { ...thread.session!, status: "stopped", runtimeSessionId: undefined },
+    });
+  }
+
+  it("continues with full context under a guard that names no runtime", async () => {
+    const f = setup("continue");
+    stopped(f);
+    await commitSendTurnDispatch(f.input);
+    expect(f.review).toHaveBeenCalledWith(
+      expect.objectContaining({
+        compactUnavailableReason: expect.stringContaining("stopped"),
+      }),
+    );
+    expect(f.dispatch).toHaveBeenCalledTimes(1);
+    expect(f.dispatch.mock.calls[0]?.[0]).toMatchObject({
+      message: { messageId: "original-1", text: "Original prompt" },
+      claudeResumeGuard: { runtimeSessionId: null, requireReady: false },
+    });
+  });
+
+  it("refuses compaction with accurate copy and keeps the draft", async () => {
+    const f = setup("compact");
+    stopped(f);
+    await expect(commitSendTurnDispatch(f.input)).rejects.toThrow(
+      "stopped, so it cannot compact first",
+    );
+    expect(f.dispatch).not.toHaveBeenCalled();
+    expect(f.input.turnAttachments[0]?.uploadToken).toBe("fixture-token");
+  });
+
+  it("asks for a fresh review when a runtime started after the review", async () => {
+    const f = setup("continue");
+    stopped(f);
+    await expect(
+      commitSendTurnDispatch({
+        ...f.input,
+        persistThreadSettingsForNextTurn: async () => {
+          f.setThread(fixture());
+        },
+      }),
+    ).rejects.toThrow("changed before sending");
+    expect(f.dispatch).not.toHaveBeenCalled();
+  });
+});
+
+describe("a conversation whose folder moved", () => {
+  // "Turn into project…" stops the chat's session; attaching a worktree can move a live one.
+  it.each([
+    ["stopped", { status: "stopped", runtimeSessionId: undefined }],
+    ["live", { status: "ready", runtimeSessionId: observation.runtimeSessionId }],
+  ] as const)(
+    "is not reviewed for a %s session: the next turn starts fresh there",
+    async (_, session) => {
+      const f = setup("continue");
+      const thread = fixture();
+      f.setThread({
+        ...thread,
+        session: { ...thread.session!, ...session },
+        activities: [
+          {
+            ...thread.activities[0]!,
+            payload: { claudeCache: { ...observation, cwd: "/chats/pelican" } },
+          },
+        ],
+      });
+      f.setWorkspaceCwd("/projects/pelican");
+      await commitSendTurnDispatch(f.input);
+      expect(f.review).not.toHaveBeenCalled();
+      expect(f.dispatch).toHaveBeenCalledTimes(1);
+      expect(f.dispatch.mock.calls[0]?.[0]).not.toHaveProperty("claudeResumeGuard");
+    },
+  );
+
+  it("is still reviewed while the next turn runs in the observed folder", async () => {
+    const f = setup("continue");
+    const thread = fixture();
+    f.setThread({
+      ...thread,
+      activities: [
+        {
+          ...thread.activities[0]!,
+          payload: { claudeCache: { ...observation, cwd: "/projects/pelican" } },
+        },
+      ],
+    });
+    f.setWorkspaceCwd("/projects/pelican");
+    await commitSendTurnDispatch(f.input);
+    expect(f.review).toHaveBeenCalledTimes(1);
+    expect(f.dispatch.mock.calls[0]?.[0]).toMatchObject({
+      claudeResumeGuard: { runtimeSessionId: observation.runtimeSessionId },
+    });
+  });
 });
 
 it("does not preflight Claude cache for a known non-Claude source handoff", async () => {

@@ -64,6 +64,9 @@ export function createEnvironmentApi(rpcClient: WsRpcClient): EnvironmentApi {
       writeFile: rpcClient.projects.writeFile,
       stageFileReference: rpcClient.projects.stageFileReference,
       initializeGit: rpcClient.projects.initializeGit,
+      promoteChatPreview: rpcClient.projects.promoteChatPreview,
+      promoteChat: rpcClient.projects.promoteChat,
+      deleteChatFolder: rpcClient.projects.deleteChatFolder,
     },
     filesystem: { browse: rpcClient.filesystem.browse },
     sourceControl: {

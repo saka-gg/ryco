@@ -10,19 +10,38 @@
  */
 import type { VcsStatusResult } from "@ryco/contracts";
 
-import type { GitStatusState } from "../src/lib/gitStatusState";
+import type { GitStatusState, GitStatusTarget } from "../src/lib/gitStatusState";
 
 const IDLE_GIT_STATUS: GitStatusState = { data: null, error: null, cause: null, isPending: false };
 
 let localRefName: string | null | undefined;
+let folderStatus: GitStatusState = IDLE_GIT_STATUS;
+const watchedCwds = new Set<string>();
 
 /** What a one-off `readLocalGitRefName` read returns until the next reset (default: unknown). */
 export function setLocalGitRefNameForTests(refName: string | null | undefined): void {
   localRefName = refName;
 }
 
-export function useGitStatus(): GitStatusState {
-  return IDLE_GIT_STATUS;
+/**
+ * What `useGitStatus` reports for every folder it is asked about until the next
+ * reset (default: nothing loaded). A watch without a folder stays idle.
+ */
+export function setGitStatusForTests(status: VcsStatusResult | null): void {
+  folderStatus = status ? { ...IDLE_GIT_STATUS, data: status } : IDLE_GIT_STATUS;
+}
+
+/** Every folder an enabled `useGitStatus` watched since the last reset. */
+export function watchedGitStatusCwdsForTests(): ReadonlySet<string> {
+  return watchedCwds;
+}
+
+export function useGitStatus(
+  target?: GitStatusTarget,
+  options?: { readonly enabled?: boolean | undefined },
+): GitStatusState {
+  if (target?.cwd && options?.enabled !== false) watchedCwds.add(target.cwd);
+  return target?.cwd ? folderStatus : IDLE_GIT_STATUS;
 }
 
 export function refreshGitStatus(): Promise<VcsStatusResult | null> {
@@ -35,4 +54,6 @@ export function readLocalGitRefName(): Promise<string | null | undefined> {
 
 export function resetGitStatusStateForTests(): void {
   localRefName = undefined;
+  folderStatus = IDLE_GIT_STATUS;
+  watchedCwds.clear();
 }

@@ -81,4 +81,31 @@ describe("mobile context handoff presentation", () => {
       "Context handoff from Codex gpt-5.6 to Claude claude-opus-5. Delivery uncertain: Connection closed",
     );
   });
+
+  it("reads a working-folder relocation as a fresh session, not a model transition", () => {
+    // A chat turned into a project keeps its model; only its folder moved.
+    const endpoint = {
+      providerInstanceId: ProviderInstanceId.make("claude-work"),
+      driverKind: ProviderDriverKind.make("claudeAgent"),
+      modelSlug: "claude-opus-5",
+    };
+    const relocation = {
+      sources: [endpoint],
+      target: endpoint,
+      reason: "cwd-relocation" as const,
+    };
+
+    expect(contextHandoffMarkerAccessibilityLabel({ ...relocation, status: "consumed" })).toBe(
+      "Continued in a fresh session in the new folder",
+    );
+    expect(
+      contextHandoffMarkerAccessibilityLabel({
+        ...relocation,
+        status: "failed",
+        error: "Provider exited",
+      }),
+    ).toBe(
+      "Fresh session in the new folder. Failed: Provider exited. Send your message again to retry",
+    );
+  });
 });

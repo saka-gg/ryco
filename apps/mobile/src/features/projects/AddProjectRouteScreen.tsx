@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Pressable, ScrollView, TextInput, View } from "react-native";
 
 import type { EnvironmentId } from "@ryco/contracts";
+import { isChatProject } from "@ryco/shared/projectKind";
 
 import { AppText as Text } from "../../components/AppText";
 import { EmptyState } from "../../components/EmptyState";
@@ -109,6 +110,13 @@ export function AddProjectRouteScreen() {
         (project) =>
           project.environmentId === environment.environmentId && project.cwd === normalizedPath,
       );
+      if (existing && isChatProject(existing)) {
+        // A chat's folder becomes a project only by promotion, which also moves it.
+        setError(
+          "This folder belongs to a chat without a project. Turn that chat into a project in Ryco's desktop or web app.",
+        );
+        return;
+      }
       if (existing) {
         useStore.getState().setActiveEnvironmentId(existing.environmentId);
         navigation.dispatch(

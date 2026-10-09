@@ -94,6 +94,7 @@ import {
   type ServerSettings,
   type ServerSettingsError,
 } from "@ryco/contracts";
+import { projectKindOf } from "@ryco/shared/projectKind";
 import { Effect, Option, Schema } from "effect";
 
 import type { ProjectionSnapshotQueryShape } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
@@ -2084,6 +2085,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
       return Schema.encodeSync(AgentControlMcpListProjectsResult)({
         projects: page.items.map((project) => ({
           projectId: project.id,
+          kind: projectKindOf(project),
           title: project.title,
           createdAt: project.createdAt,
           updatedAt: project.updatedAt,

@@ -15,6 +15,7 @@ import { type ChatMessage, type Thread } from "../types";
 import {
   MAX_HIDDEN_MOUNTED_TERMINAL_THREADS,
   buildExpiredTerminalContextToastCopy,
+  buildLocalDraftThread,
   createLocalDispatchSnapshot,
   deriveComposerSendState,
   deriveProviderSelectionPolicy,
@@ -74,6 +75,29 @@ describe("resolveHeaderLiveAgentCount", () => {
         workspaceTab: "agents",
       }),
     ).toBe(4);
+  });
+});
+
+describe("buildLocalDraftThread", () => {
+  const draft = {
+    threadId: ThreadId.make("thread-draft"),
+    environmentId: localEnvironmentId,
+    projectId: ProjectId.make("project-draft"),
+    logicalProjectKey: "environment-local:project-draft",
+    createdAt: "2026-10-08T10:00:00.000Z",
+    runtimeMode: "full-access" as const,
+    interactionMode: "default" as const,
+    branch: null,
+    worktreePath: null,
+    envMode: "local" as const,
+  };
+  const modelSelection = { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" };
+
+  it("titles an unsent chat as the sidebar's Chats section does", () => {
+    const thread = (pendingChat: boolean) =>
+      buildLocalDraftThread(draft.threadId, { ...draft, pendingChat }, modelSelection, null);
+    expect(thread(true).title).toBe("New chat");
+    expect(thread(false).title).toBe("New thread");
   });
 });
 

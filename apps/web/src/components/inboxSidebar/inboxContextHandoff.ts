@@ -8,6 +8,7 @@ import {
   type ProviderDriverKind,
   type ThreadId,
 } from "@ryco/contracts";
+import { isCwdRelocationHandoff } from "@ryco/client-runtime/state/session";
 import { Schema } from "effect";
 
 export function inboxModelName(name: string, driver: ProviderDriverKind): string {
@@ -21,6 +22,11 @@ export interface InboxContextHandoff {
 
 const decodeHandoff = Schema.decodeUnknownOption(ContextHandoffActivityPayload);
 
+/**
+ * The latest completed model transfer. A working-directory relocation keeps
+ * its model, so it never answers "how did this thread get to this model": the
+ * transfer before it still does.
+ */
 export function latestInboxContextHandoff(activities: ReadonlyArray<OrchestrationThreadActivity>) {
   const ordered = activities.toSorted(
     (a, b) =>
@@ -31,7 +37,13 @@ export function latestInboxContextHandoff(activities: ReadonlyArray<Orchestratio
   for (const activity of ordered) {
     if (activity.kind !== CONTEXT_HANDOFF_ACTIVITY_KIND) continue;
     const decoded = decodeHandoff(activity.payload);
-    if (decoded._tag === "Some" && decoded.value.status === "consumed") return decoded.value;
+    if (
+      decoded._tag === "Some" &&
+      decoded.value.status === "consumed" &&
+      !isCwdRelocationHandoff(decoded.value)
+    ) {
+      return decoded.value;
+    }
   }
   return null;
 }

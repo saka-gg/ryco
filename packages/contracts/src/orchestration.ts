@@ -158,6 +158,15 @@ export const CONTEXT_HANDOFF_INSPECTION_CHUNK_MAX_BYTES = 96 * 1_024;
 export const ContextHandoffMode = Schema.Literal("full-context-fresh-session");
 export type ContextHandoffMode = typeof ContextHandoffMode.Type;
 
+/**
+ * Why a thread handed its context to a fresh session:
+ * - `model-change`: the user switched to another provider instance.
+ * - `cwd-relocation`: the thread's working directory moved (for example, a chat became a project)
+ *   and the provider cannot resume its conversation there.
+ */
+export const ContextHandoffReason = Schema.Literals(["model-change", "cwd-relocation"]);
+export type ContextHandoffReason = typeof ContextHandoffReason.Type;
+
 export const ContextHandoffEndpointSnapshot = Schema.Struct({
   providerInstanceId: ProviderInstanceId,
   driverKind: ProviderDriverKind,
@@ -195,6 +204,8 @@ const ContextHandoffActivityBaseFields = {
   schemaVersion: Schema.Literal(CONTEXT_HANDOFF_SCHEMA_VERSION),
   handoffId: ContextHandoffId,
   mode: ContextHandoffMode,
+  /** Absent on records written before reasons existed: those are model changes. */
+  reason: Schema.optional(ContextHandoffReason),
   targetMessageId: MessageId,
   targetTurnId: Schema.optional(TurnId),
   sourceSelection: ModelSelection,
@@ -745,8 +756,22 @@ export const ProjectMetadataDir = TrimmedNonEmptyString.check(
 );
 export type ProjectMetadataDir = typeof ProjectMetadataDir.Type;
 
+/**
+ * `chat` backs a "No project" chat: one project record per chat, rooted in a Ryco-managed
+ * plain folder under the chats root. Promotion turns it into a regular `project`, never back.
+ * Read it through `@ryco/shared/projectKind`, which treats an absent kind as `project`.
+ */
+export const ProjectKind = Schema.Literals(["project", "chat"]);
+export type ProjectKind = typeof ProjectKind.Type;
+export const DEFAULT_PROJECT_KIND: ProjectKind = "project";
+/** Absent on snapshots, events and nodes that predate chats; those only had regular projects. */
+export const OptionalProjectKind = Schema.optional(ProjectKind).pipe(
+  Schema.withDecodingDefault(Effect.succeed(DEFAULT_PROJECT_KIND)),
+);
+
 export const OrchestrationProject = Schema.Struct({
   id: ProjectId,
+  kind: OptionalProjectKind,
   title: TrimmedNonEmptyString,
   workspaceRoot: TrimmedNonEmptyString,
   projectMetadataDir: Schema.optional(ProjectMetadataDir).pipe(
@@ -1056,6 +1081,7 @@ export type OrchestrationReadModel = typeof OrchestrationReadModel.Type;
 
 export const OrchestrationProjectShell = Schema.Struct({
   id: ProjectId,
+  kind: OptionalProjectKind,
   title: TrimmedNonEmptyString,
   workspaceRoot: TrimmedNonEmptyString,
   projectMetadataDir: Schema.optional(ProjectMetadataDir).pipe(
@@ -1291,6 +1317,12 @@ export const OrchestrationThreadWindowSnapshot = Schema.Struct({
   snapshotSequence: NonNegativeInt,
   thread: OrchestrationThread,
   history: OrchestrationThreadHistoryState,
+  /**
+   * The directory the thread's next turn runs in (its worktree, else its project root), as the
+   * server resolves it when starting a provider session. Absent from older servers and when the
+   * thread has no resolvable project.
+   */
+  workspaceCwd: Schema.optional(TrimmedNonEmptyString),
 });
 export type OrchestrationThreadWindowSnapshot = typeof OrchestrationThreadWindowSnapshot.Type;
 
@@ -1371,6 +1403,8 @@ export const ProjectCreateCommand = Schema.Struct({
   type: Schema.Literal("project.create"),
   commandId: CommandId,
   projectId: ProjectId,
+  /** Absent creates a regular project. */
+  kind: Schema.optional(ProjectKind),
   title: TrimmedNonEmptyString,
   workspaceRoot: TrimmedNonEmptyString,
   projectMetadataDir: Schema.optional(ProjectMetadataDir).pipe(
@@ -1389,6 +1423,8 @@ const ProjectMetaUpdateCommand = Schema.Struct({
   projectId: ProjectId,
   /** Optional compare-and-set guard used by governed mutation flows. */
   expectedUpdatedAt: Schema.optional(IsoDateTime),
+  /** Only `chat` -> `project` (promotion) is accepted; the same kind is a no-op. */
+  kind: Schema.optional(ProjectKind),
   title: Schema.optional(TrimmedNonEmptyString),
   workspaceRoot: Schema.optional(TrimmedNonEmptyString),
   projectMetadataDir: Schema.optional(ProjectMetadataDir),
@@ -1585,13 +1621,45 @@ const ThreadTurnStartBootstrapPrepareWorktree = Schema.Struct({
   branch: Schema.optional(TrimmedNonEmptyString),
 });
 
+/** Bounds a chat's title seed and the title it is given on promotion. */
+export const CHAT_PROJECT_TITLE_MAX_CHARS = 200;
+
+/**
+ * Shown when work (a turn, provider session, terminal or file write) is refused because the chat's
+ * folder is moving into a project. The move settles in moments, so retrying shortly succeeds.
+ */
+export const PROJECT_RELOCATION_PENDING_MESSAGE =
+  "This chat is being moved into a project. Try again in a moment.";
+
+/**
+ * First send of a "No project" chat. The server, not the client, allocates the chat folder
+ * under its chats root, creates a `chat` project with `projectId` there, and then continues
+ * with `createThread` for that project. Mutually exclusive with `prepareWorktree` and
+ * `requireWorktree`: a chat folder is a plain directory, never a Git worktree.
+ */
+const ThreadTurnStartBootstrapCreateChatProject = Schema.Struct({
+  projectId: ProjectId,
+  /** Seeds the chat title and its folder name; the folder name never changes afterwards. */
+  titleSeed: TrimmedNonEmptyString.check(Schema.isMaxLength(CHAT_PROJECT_TITLE_MAX_CHARS)),
+});
+
 const ThreadTurnStartBootstrap = Schema.Struct({
   /** Reject a turn unless this bootstrap creates a fresh isolated Git worktree. */
   requireWorktree: Schema.optional(Schema.Boolean),
+  createChatProject: Schema.optional(ThreadTurnStartBootstrapCreateChatProject),
   createThread: Schema.optional(ThreadTurnStartBootstrapCreateThread),
   prepareWorktree: Schema.optional(ThreadTurnStartBootstrapPrepareWorktree),
   runSetupScript: Schema.optional(Schema.Boolean),
-});
+}).check(
+  Schema.makeFilter((bootstrap) => {
+    if (bootstrap.createChatProject === undefined) return undefined;
+    if (bootstrap.prepareWorktree !== undefined || bootstrap.requireWorktree === true)
+      return "A chat without a project cannot also prepare a Git worktree";
+    if (bootstrap.createThread?.projectId !== bootstrap.createChatProject.projectId)
+      return "A chat without a project must create its first thread in that chat";
+    return undefined;
+  }),
+);
 
 export type ThreadTurnStartBootstrap = typeof ThreadTurnStartBootstrap.Type;
 
@@ -1611,7 +1679,12 @@ export const DelegationReturnGuard = Schema.Struct({
 });
 export const ClaudeResumeGuard = Schema.Struct({
   requireReady: Schema.Boolean,
-  runtimeSessionId: RuntimeSessionId,
+  /**
+   * The runtime the review saw. Null when the session had none (it was stopped): the send is
+   * then accepted only while still no runtime is bound, so the review stays current until the
+   * next turn starts one.
+   */
+  runtimeSessionId: Schema.NullOr(RuntimeSessionId),
   latestTurnId: Schema.NullOr(TurnId),
   modelSelection: ModelSelection,
 });
@@ -2007,11 +2080,25 @@ export const ClientOrchestrationCommand = Schema.Union([
 ]);
 export type ClientOrchestrationCommand = typeof ClientOrchestrationCommand.Type;
 
+/**
+ * The runtime a provider-originated session update comes from. The update applies only while
+ * the thread's session is still bound to exactly this provider instance and runtime (null: none),
+ * so a late lifecycle event of a replaced runtime can never overwrite its successor, whatever
+ * order the two writes reach the engine in.
+ */
+export const ThreadSessionSetExpectedRuntime = Schema.Struct({
+  providerInstanceId: Schema.NullOr(ProviderInstanceId),
+  runtimeSessionId: Schema.NullOr(RuntimeSessionId),
+});
+export type ThreadSessionSetExpectedRuntime = typeof ThreadSessionSetExpectedRuntime.Type;
+
 const ThreadSessionSetCommand = Schema.Struct({
   type: Schema.Literal("thread.session.set"),
   commandId: CommandId,
   threadId: ThreadId,
   session: OrchestrationSession,
+  /** Server-internal precondition; absent for server-decided transitions (bind, stop, restart). */
+  expectedRuntime: Schema.optional(ThreadSessionSetExpectedRuntime),
   /** Internal hint: how the turn this session-set releases ended, when the caller knows. */
   turnOutcome: Schema.optional(OrchestrationTurnOutcome),
   createdAt: IsoDateTime,
@@ -2260,6 +2347,7 @@ export const OrchestrationActorKind = Schema.Literals(["client", "server", "prov
 
 export const ProjectCreatedPayload = Schema.Struct({
   projectId: ProjectId,
+  kind: OptionalProjectKind,
   title: TrimmedNonEmptyString,
   workspaceRoot: TrimmedNonEmptyString,
   projectMetadataDir: Schema.optional(ProjectMetadataDir).pipe(
@@ -2275,6 +2363,8 @@ export const ProjectCreatedPayload = Schema.Struct({
 
 export const ProjectMetaUpdatedPayload = Schema.Struct({
   projectId: ProjectId,
+  /** Present only when the kind changed, which is always `chat` -> `project`. */
+  kind: Schema.optional(ProjectKind),
   title: Schema.optional(TrimmedNonEmptyString),
   workspaceRoot: Schema.optional(TrimmedNonEmptyString),
   projectMetadataDir: Schema.optional(ProjectMetadataDir),
@@ -3347,10 +3437,25 @@ export class OrchestrationGetSnapshotError extends Schema.TaggedError<Orchestrat
   },
 ) {}
 
+/**
+ * Machine-readable dispatch failures a client acts on. Absent for every other failure, which a
+ * client only shows by `message`.
+ *
+ * - `chat-project-retired`: a `thread.turn.start` whose `bootstrap.createChatProject` names a
+ *   project id this node has already deleted, such as an unused chat removed by startup cleanup.
+ *   Nothing was created and the id can never be used again. The client gives the draft a fresh
+ *   project id and sends again once.
+ */
+export const OrchestrationDispatchCommandErrorReason = Schema.Literals(["chat-project-retired"]);
+export type OrchestrationDispatchCommandErrorReason =
+  typeof OrchestrationDispatchCommandErrorReason.Type;
+
 export class OrchestrationDispatchCommandError extends Schema.TaggedError<OrchestrationDispatchCommandError>()(
   "OrchestrationDispatchCommandError",
   {
     message: TrimmedNonEmptyString,
+    /** Additive: older clients ignore it and show `message`. */
+    reason: Schema.optionalKey(OrchestrationDispatchCommandErrorReason),
     cause: Schema.optional(Schema.Defect()),
   },
 ) {}

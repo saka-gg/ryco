@@ -1,5 +1,13 @@
 import { Schema } from "effect";
-import { NonNegativeInt, PositiveInt, ProjectId, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import {
+  IsoDateTime,
+  NonNegativeInt,
+  PositiveInt,
+  ProjectId,
+  ThreadId,
+  TrimmedNonEmptyString,
+} from "./baseSchemas.ts";
+import { CHAT_PROJECT_TITLE_MAX_CHARS } from "./orchestration.ts";
 
 const PROJECT_SEARCH_ENTRIES_MAX_LIMIT = 200;
 const PROJECT_WRITE_FILE_PATH_MAX_LENGTH = 512;
@@ -195,3 +203,123 @@ export class ProjectReadIconError extends Schema.TaggedError<ProjectReadIconErro
   "ProjectReadIconError",
   { message: TrimmedNonEmptyString },
 ) {}
+
+/** Server-local absolute directory; access and filesystem validation belong to the server. */
+const ProjectChatDestination = TrimmedNonEmptyString.check(Schema.isMaxLength(4096));
+
+/**
+ * Where a promoted chat folder would go. Only `available` can be promoted:
+ * - `exists`: something is already at the destination, or another chat is moving there.
+ * - `invalid`: not an absolute path, or its parent is missing or not a writable directory.
+ * - `access-denied`: the workspace access policy rejects it.
+ * - `inside-chats`: it lies inside the chats root.
+ * - `inside-source`: it lies inside the chat folder being moved.
+ * - `retired-checkout`: it is at or inside a workspace checkout Ryco removed (or is removing or
+ *   moving). The server keeps new work out of such paths, so a project there could never run.
+ */
+export const ProjectChatDestinationStatus = Schema.Literals([
+  "available",
+  "exists",
+  "invalid",
+  "access-denied",
+  "inside-chats",
+  "inside-source",
+  "retired-checkout",
+]);
+export type ProjectChatDestinationStatus = typeof ProjectChatDestinationStatus.Type;
+
+export const ProjectsPromoteChatPreviewInput = Schema.Struct({
+  projectId: ProjectId,
+  /** Absent previews the default destination. Any text is accepted and judged in the result. */
+  destination: Schema.optional(Schema.String.check(Schema.isMaxLength(4096))),
+});
+export type ProjectsPromoteChatPreviewInput = typeof ProjectsPromoteChatPreviewInput.Type;
+
+/** Read-only: previewing never creates, moves or locks anything. */
+export const ProjectsPromoteChatPreviewResult = Schema.Struct({
+  projectId: ProjectId,
+  /** The chat folder that would move. */
+  source: TrimmedNonEmptyString,
+  /**
+   * A free folder under `addProjectBaseDirectory` (or its default): `<slug>` when nothing is there,
+   * otherwise the first free `<slug>-2`, `<slug>-3`, …
+   */
+  defaultDestination: TrimmedNonEmptyString,
+  /** The destination that was judged: the input's (normalized) or the default. */
+  destination: Schema.String,
+  destinationStatus: ProjectChatDestinationStatus,
+  fileCount: NonNegativeInt,
+  totalBytes: NonNegativeInt,
+  /** The scan stopped at its bound; the counts are lower limits. */
+  countTruncated: Schema.Boolean,
+  /** Threads with live work (running turn, pending approval or input, queued dispatch). */
+  busyThreadIds: Schema.Array(ThreadId),
+  gitAvailable: Schema.Boolean,
+  /** Whether `user.name` and `user.email` resolve, so an initial commit can succeed. */
+  gitIdentityConfigured: Schema.Boolean,
+  /** Source and destination are on different devices: the move is a copy, then a delete. */
+  crossDevice: Schema.Boolean,
+});
+export type ProjectsPromoteChatPreviewResult = typeof ProjectsPromoteChatPreviewResult.Type;
+
+export const ProjectsPromoteChatInput = Schema.Struct({
+  projectId: ProjectId,
+  /** Compare-and-set guard against the project as previewed. */
+  expectedUpdatedAt: Schema.optional(IsoDateTime),
+  title: TrimmedNonEmptyString.check(Schema.isMaxLength(CHAT_PROJECT_TITLE_MAX_CHARS)),
+  destination: ProjectChatDestination,
+  initializeGit: Schema.Boolean,
+  /** Ignored unless `initializeGit`. */
+  initialCommit: Schema.Boolean,
+  /** Ignored unless `initializeGit`; never overwrites an existing `.gitignore`. */
+  writeGitignore: Schema.Boolean,
+});
+export type ProjectsPromoteChatInput = typeof ProjectsPromoteChatInput.Type;
+
+export const ProjectsPromoteChatResult = Schema.Struct({
+  projectId: ProjectId,
+  workspaceRoot: TrimmedNonEmptyString,
+  gitInitialized: Schema.Boolean,
+  initialCommitCreated: Schema.Boolean,
+  /** The project was promoted, but its first commit failed (for example, no Git identity). */
+  commitError: Schema.optional(Schema.String),
+});
+export type ProjectsPromoteChatResult = typeof ProjectsPromoteChatResult.Type;
+
+/**
+ * The explicit "Also delete files" step for a chat. Refused while the chat still has threads, and
+ * never removes anything outside the chats root.
+ */
+export const ProjectsDeleteChatFolderInput = Schema.Struct({ projectId: ProjectId });
+export type ProjectsDeleteChatFolderInput = typeof ProjectsDeleteChatFolderInput.Type;
+
+export const ProjectsDeleteChatFolderResult = Schema.Struct({
+  /** False when the folder was already gone. */
+  deleted: Schema.Boolean,
+});
+export type ProjectsDeleteChatFolderResult = typeof ProjectsDeleteChatFolderResult.Type;
+
+export const ProjectChatErrorReason = Schema.Literals([
+  "not-found",
+  "not-chat",
+  "busy",
+  "stale",
+  "destination-exists",
+  "destination-invalid",
+  "destination-inside-chats",
+  "destination-inside-source",
+  "destination-retired-checkout",
+  "access-denied",
+  "move-failed",
+  "git-failed",
+  "chats-unavailable",
+  "has-threads",
+  "outside-chats-root",
+]);
+export type ProjectChatErrorReason = typeof ProjectChatErrorReason.Type;
+
+/** One error for every chat-folder RPC; `reason` is the stable, machine-readable part. */
+export class ProjectChatError extends Schema.TaggedError<ProjectChatError>()("ProjectChatError", {
+  reason: ProjectChatErrorReason,
+  message: TrimmedNonEmptyString,
+}) {}

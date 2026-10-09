@@ -12,6 +12,7 @@ import {
   type UploadChatFileAttachment,
   type UploadChatImageAttachment,
 } from "@ryco/contracts";
+import { isChatProject } from "@ryco/shared/projectKind";
 
 import { createAttachmentId, resolveAttachmentPath } from "../attachmentStore.ts";
 import { probeAttachmentMediaDimensions } from "../attachmentMedia.ts";
@@ -20,6 +21,7 @@ import { ServerConfig } from "../config.ts";
 import { parseBase64DataUrl } from "../imageMime.ts";
 import { WorkspaceAccessPolicy } from "../workspace/Services/WorkspaceAccessPolicy.ts";
 import { WorkspacePaths } from "../workspace/Services/WorkspacePaths.ts";
+import { ProjectionSnapshotQuery } from "./Services/ProjectionSnapshotQuery.ts";
 
 // A replay must not release a reservation acquired by an earlier accepted or
 // still-running attempt with the same command ID.
@@ -104,7 +106,16 @@ export const normalizeDispatchCommand = (command: ClientOrchestrationCommand) =>
           }),
       });
 
+    // Project kind is server-owned: chats are created by the first-send bootstrap inside the
+    // chats root and become projects only through promotion, which also moves their folder.
+    // Both dispatch server-internally and never pass through this client normalization.
     if (command.type === "project.create") {
+      if (command.kind === "chat") {
+        return yield* new OrchestrationDispatchCommandError({
+          message:
+            "A chat without a project is created by sending its first message, not as a project.",
+        });
+      }
       return {
         ...command,
         workspaceRoot: yield* normalizeProjectWorkspaceRootForCreate(
@@ -117,11 +128,41 @@ export const normalizeDispatchCommand = (command: ClientOrchestrationCommand) =>
     }
 
     if (command.type === "project.meta.update") {
+      if (command.kind !== undefined) {
+        return yield* new OrchestrationDispatchCommandError({
+          message:
+            "A project's kind cannot be changed directly. Turn the chat into a project instead.",
+        });
+      }
+      const workspaceRoot =
+        command.workspaceRoot === undefined
+          ? undefined
+          : yield* normalizeProjectWorkspaceRoot(command.workspaceRoot);
+      if (workspaceRoot !== undefined) {
+        const project = yield* (yield* ProjectionSnapshotQuery)
+          .getProjectShellById(command.projectId)
+          .pipe(
+            Effect.mapError(
+              (cause) =>
+                new OrchestrationDispatchCommandError({
+                  message: "Failed to read the project before changing its folder.",
+                  cause,
+                }),
+            ),
+          );
+        if (
+          Option.isSome(project) &&
+          isChatProject(project.value) &&
+          project.value.workspaceRoot !== workspaceRoot
+        ) {
+          return yield* new OrchestrationDispatchCommandError({
+            message: "A chat's folder moves only when the chat is turned into a project.",
+          });
+        }
+      }
       return {
         ...command,
-        ...(command.workspaceRoot !== undefined
-          ? { workspaceRoot: yield* normalizeProjectWorkspaceRoot(command.workspaceRoot) }
-          : {}),
+        ...(workspaceRoot !== undefined ? { workspaceRoot } : {}),
         ...(command.projectMetadataDir !== undefined
           ? { projectMetadataDir: yield* normalizeProjectMetadataDir(command.projectMetadataDir) }
           : {}),

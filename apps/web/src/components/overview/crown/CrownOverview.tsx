@@ -11,7 +11,11 @@ import { CrownFlyout } from "./CrownFlyout";
 import type { CrownMode } from "./crownGeometry.logic";
 import { CrownIsland } from "./CrownIsland";
 import { CROWN_GEOMETRY_STYLE } from "./crownLayout";
-import { buildCrownRailSummary, resolveCrownHeadline } from "./crownModel.logic";
+import {
+  buildCrownRailSummary,
+  resolveCrownFaceLogo,
+  resolveCrownHeadline,
+} from "./crownModel.logic";
 import { CrownPreviewDock } from "./CrownPreviewDock";
 import { CrownRailNav } from "./CrownRailNav";
 import {
@@ -60,7 +64,7 @@ function isFocusDropped(): boolean {
  * `open` drives the enter / exit transition while the parent delays unmount.
  */
 export function CrownOverview(props: CrownOverviewProps & { readonly open?: boolean }) {
-  const { open = true, isGitRepo } = props;
+  const { open = true, isGitRepo, chat } = props;
   const notes = props.notes?.available ? props.notes : undefined;
   const reducedMotion = useReducedMotionEffective();
   const paneFocused = usePaneFocus();
@@ -76,7 +80,14 @@ export function CrownOverview(props: CrownOverviewProps & { readonly open?: bool
     notesCount: notes?.counts.worktree ?? 0,
   });
   const headline = resolveCrownHeadline(summary, props);
-  const items = visibleCrownRailItems({ isGitRepo, notesAvailable: notes !== undefined });
+  const items = visibleCrownRailItems({
+    isGitRepo,
+    notesAvailable: notes !== undefined,
+    chatAvailable: chat !== undefined,
+  });
+  /** The card only opens on sections the rail shows. */
+  const isShown = (section: CrownSection) => items.some((item) => item.section === section);
+  const faceLogo = resolveCrownFaceLogo({ project: props.project, isChat: props.isChat === true });
   const refName = props.changes?.refName ?? null;
 
   const [alertFocused, setAlertFocused] = useState(false);
@@ -100,7 +111,8 @@ export function CrownOverview(props: CrownOverviewProps & { readonly open?: bool
 
   const mode: CrownMode = cardOpen ? "card" : alerts.current ? "alert" : "dot";
   const headlineSection = headline.section;
-  const selectedSection = selected === "notes" && !notes ? null : selected;
+  // A section that went away (Notes turning off, a chat becoming a project) falls back.
+  const selectedSection = selected !== null && isShown(selected) ? selected : null;
   const cardSection: CrownSection = selectedSection ?? headlineSection;
   const flyout = useCrownFlyout({ enabled: mode !== "card" });
 
@@ -171,12 +183,14 @@ export function CrownOverview(props: CrownOverviewProps & { readonly open?: bool
   const restoreFocusRef = useRef(false);
 
   const openCard = (
-    section: CrownSection,
+    requested: CrownSection,
     trigger: HTMLElement | null,
     viaKeyboard: boolean,
     noteId: string | null = null,
   ) => {
-    if (section === "notes" && !notes) return;
+    // An alert about a section the rail hides opens the headline's section:
+    // "Turn finished" points at Changes, which a chat or a folder without Git has none of.
+    const section = isShown(requested) ? requested : headlineSection;
     flyout.close();
     triggerRef.current = trigger;
     // The Notes pane focuses its own composer when the card opens on it.
@@ -252,6 +266,9 @@ export function CrownOverview(props: CrownOverviewProps & { readonly open?: bool
     const onPointerDown = (event: PointerEvent) => {
       if (insidePressRef.current === event) return;
       if (event.target instanceof Node && rootRef.current?.contains(event.target)) return;
+      // A dialog the card opened without portaling from it ("Turn into project…")
+      // keeps the card behind it, so closing the dialog returns to its button.
+      if (event.target instanceof Element && event.target.closest(POPUP_SELECTOR)) return;
       collapse(false);
     };
     document.addEventListener("pointerdown", onPointerDown);
@@ -287,7 +304,7 @@ export function CrownOverview(props: CrownOverviewProps & { readonly open?: bool
 
   const onSpineClick = (key: CrownRailKey) => {
     const section = crownSectionForRailKey(key);
-    if (section === "notes" && !notes) return;
+    if (!isShown(section)) return;
     setHighlightNoteId(null);
     setSelected(section);
   };
@@ -309,7 +326,7 @@ export function CrownOverview(props: CrownOverviewProps & { readonly open?: bool
       <CrownIsland ref={islandRef} mode={mode} tone={shownAlert?.tone ?? null}>
         <CrownFace
           ref={faceRef}
-          project={props.project ?? null}
+          logo={faceLogo}
           headline={headline}
           queuedCount={alerts.queuedCount}
           expanded={cardOpen}
@@ -336,6 +353,7 @@ export function CrownOverview(props: CrownOverviewProps & { readonly open?: bool
           agentRunning={props.agentRunning}
           branchName={refName}
           notes={notes}
+          chat={chat}
           highlightNoteId={highlightNoteId}
           onCollapse={() => collapse(true)}
           spine={
@@ -371,6 +389,7 @@ export function CrownOverview(props: CrownOverviewProps & { readonly open?: bool
         isGitRepo={isGitRepo}
         reducedMotion={reducedMotion}
         notes={notes}
+        chat={chat}
         onPointerEnter={onFlyoutPointerEnter}
         onPointerLeave={onFlyoutPointerLeave}
         onEditingChange={onFlyoutEditingChange}

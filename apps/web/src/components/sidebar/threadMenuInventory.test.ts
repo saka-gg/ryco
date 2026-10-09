@@ -84,4 +84,46 @@ describe("thread menu inventory", () => {
       { id: "discard-draft", label: "Discard draft", destructive: true },
     ]);
   });
+
+  it("gives chat rows folder actions and extensions instead of project and workspace items", () => {
+    const items = buildThreadMenuInventory({
+      ...base,
+      workspace: { record: null, protectedWorkspace: true },
+      chat: {
+        localFolder: true,
+        fileManagerLabel: "Finder",
+        extensions: [{ id: "promote", label: "Turn into project…" }],
+      },
+    });
+    const ids = items.map((item) => item.id);
+    expect(ids).toEqual([
+      "pin",
+      "rename",
+      "mark-unread",
+      "chat-reveal-folder",
+      "chat-open-folder-in-editor",
+      "chat-copy-folder-path",
+      "chat-extension:promote",
+      "copy-thread-id",
+      "stop-session",
+      "archive",
+      "trash",
+    ]);
+    expect(items.find((item) => item.id === "rename")?.label).toBe("Rename chat");
+    expect(items.find((item) => item.id === "chat-reveal-folder")?.label).toBe(
+      "Show folder in Finder",
+    );
+  });
+
+  it("only copies the folder path of a chat on another machine", () => {
+    const ids = threadMenuActionIds(
+      buildThreadMenuInventory({
+        ...base,
+        chat: { localFolder: false, fileManagerLabel: "Files", extensions: [] },
+      }),
+    );
+    expect(ids).toContain("chat-copy-folder-path");
+    expect(ids).not.toContain("chat-reveal-folder");
+    expect(ids).not.toContain("chat-open-folder-in-editor");
+  });
 });

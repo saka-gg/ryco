@@ -25,7 +25,11 @@ export type ThreadMenuActionId =
   | "discard-draft"
   | "workspace"
   | `workspace:${WorkspaceActionId}`
-  | "workspace:manage";
+  | "workspace:manage"
+  | "chat-reveal-folder"
+  | "chat-open-folder-in-editor"
+  | "chat-copy-folder-path"
+  | `chat-extension:${string}`;
 
 export interface ThreadMenuActionItem {
   readonly id: ThreadMenuActionId;
@@ -50,6 +54,17 @@ export interface ThreadMenuInventoryInput {
     readonly record: WorkspaceLifecycleSubject | null;
     readonly protectedWorkspace: boolean;
   } | null;
+  /**
+   * A "No project" chat row: folder actions replace the project/worktree
+   * section (a chat has no project settings or worktrees of its own).
+   */
+  readonly chat?: {
+    /** The chat folder is on this machine, so it can be revealed or opened. */
+    readonly localFolder: boolean;
+    /** Label of the platform file manager ("Finder", "Explorer", "Files"). */
+    readonly fileManagerLabel: string;
+    readonly extensions: ReadonlyArray<{ readonly id: string; readonly label: string }>;
+  } | null;
 }
 
 /**
@@ -61,12 +76,24 @@ export function buildThreadMenuInventory(input: ThreadMenuInventoryInput): Threa
   if (input.isDraft) return [{ id: "discard-draft", label: "Discard draft", destructive: true }];
   const items: ThreadMenuActionItem[] = [];
   if (input.splitAvailable) items.push({ id: "open-in-split", label: "Open in split view" });
+  const chat = input.chat ?? null;
   items.push(
     input.isPinned ? { id: "unpin", label: "Unpin thread" } : { id: "pin", label: "Pin thread" },
-    { id: "rename", label: "Rename thread" },
+    { id: "rename", label: chat ? "Rename chat" : "Rename thread" },
     { id: "mark-unread", label: "Mark unread" },
   );
-  if (input.projectActions) {
+  if (chat) {
+    if (chat.localFolder) {
+      items.push(
+        { id: "chat-reveal-folder", label: `Show folder in ${chat.fileManagerLabel}` },
+        { id: "chat-open-folder-in-editor", label: "Open folder in editor" },
+      );
+    }
+    items.push({ id: "chat-copy-folder-path", label: "Copy folder path" });
+    for (const extension of chat.extensions) {
+      items.push({ id: `chat-extension:${extension.id}`, label: extension.label });
+    }
+  } else if (input.projectActions) {
     if (input.projectActions.memberProject)
       items.push(
         { id: "project-settings", label: "Project settings" },
@@ -78,7 +105,8 @@ export function buildThreadMenuInventory(input: ThreadMenuInventoryInput): Threa
     items.push({ id: "copy-path", label: "Copy Path" });
   }
   items.push({ id: "copy-thread-id", label: "Copy Thread ID" });
-  if (input.workspace) {
+  // A chat folder is not a Git workspace.
+  if (input.workspace && !chat) {
     const workspaceItems: ThreadMenuActionItem[] = input.workspace.record
       ? listWorkspaceLifecycleActions(input.workspace.record, {
           protectedWorkspace: input.workspace.protectedWorkspace,

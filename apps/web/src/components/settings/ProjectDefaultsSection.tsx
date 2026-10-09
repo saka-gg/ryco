@@ -14,6 +14,8 @@ import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../
 import { ProjectPreferenceSettings } from "./ProjectPreferenceSettings";
 import { SettingsSection } from "./settingsLayout";
 import { WorktreeRootSettings } from "./WorktreeRootSettings";
+import { ChatsFolderSettings } from "./ChatsFolderSettings";
+import { excludeChatProjects } from "@ryco/shared/projectKind";
 import { WorktreeSubmoduleSettings } from "./WorktreeSubmoduleSettings";
 
 export interface ProjectScopeChoice {
@@ -113,7 +115,8 @@ export function ProjectDefaultsSection() {
   const closeSettings = useSettingsDialogStore((state) => state.closeSettings);
   const allProjects = useStore(useShallow(selectProjectsAcrossEnvironments));
   const environmentId = target?.environmentId ?? config?.environment.environmentId;
-  const projects = allProjects
+  // Chats carry no project defaults of their own.
+  const projects = excludeChatProjects(allProjects)
     .filter((project) => project.environmentId === environmentId)
     .map((project) => ({ id: project.id, title: project.name }));
   return (
@@ -144,6 +147,7 @@ export function ProjectDefaultsSection() {
         <ProjectPreferenceSettings projectId="" projects={projects} />
       ) : null}
       <WorktreeRootSettings projectId="" projects={projects} />
+      <ChatsFolderSettings />
       <WorktreeSubmoduleSettings projectId="" projects={projects} />
     </SettingsSection>
   );

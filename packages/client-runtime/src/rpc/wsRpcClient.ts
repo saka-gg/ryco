@@ -109,6 +109,9 @@ export interface WsRpcClient {
     readonly writeFile: RpcUnaryMethod<typeof WS_METHODS.projectsWriteFile>;
     readonly stageFileReference: RpcUnaryMethod<typeof WS_METHODS.projectsStageFileReference>;
     readonly initializeGit: RpcUnaryMethod<typeof WS_METHODS.projectsInitializeGit>;
+    readonly promoteChatPreview: RpcUnaryMethod<typeof WS_METHODS.projectsPromoteChatPreview>;
+    readonly promoteChat: RpcUnaryMethod<typeof WS_METHODS.projectsPromoteChat>;
+    readonly deleteChatFolder: RpcUnaryMethod<typeof WS_METHODS.projectsDeleteChatFolder>;
   };
   readonly sessionImport: {
     readonly sources: RpcUnaryMethod<typeof WS_METHODS.sessionImportSources>;
@@ -508,6 +511,12 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
         transport.request((client) => client[WS_METHODS.projectsStageFileReference](input)),
       initializeGit: (input) =>
         transport.request((client) => client[WS_METHODS.projectsInitializeGit](input)),
+      promoteChatPreview: (input) =>
+        transport.request((client) => client[WS_METHODS.projectsPromoteChatPreview](input)),
+      promoteChat: (input) =>
+        transport.request((client) => client[WS_METHODS.projectsPromoteChat](input)),
+      deleteChatFolder: (input) =>
+        transport.request((client) => client[WS_METHODS.projectsDeleteChatFolder](input)),
     },
     sessionImport: {
       sources: (input) =>

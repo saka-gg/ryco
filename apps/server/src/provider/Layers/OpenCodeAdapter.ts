@@ -2927,6 +2927,8 @@ export function makeOpenCodeAdapter(
       capabilities: {
         sessionModelSwitch: "in-session",
         conversationRollback: "native",
+        // Unverified: OpenCode scopes sessions to a project directory.
+        resumeSurvivesCwdChange: false,
       },
       startSession,
       sendTurn,

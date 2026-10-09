@@ -10,6 +10,7 @@ import {
   ThreadId,
   TurnId,
   type ContextHandoffEndpointSnapshot,
+  type ContextHandoffReason,
   type OrchestrationCommand,
   type OrchestrationEvent,
   type OrchestrationThread,
@@ -1183,6 +1184,109 @@ describe("ContextHandoffCoordinator lane control", () => {
       error: "Stopped before the handoff turn was accepted.",
     });
     expect(sessionSets(harness.commands).at(-1)?.status).toBe("stopped");
+  });
+});
+
+describe("ContextHandoffCoordinator handoff reason", () => {
+  function threadWithReason(reason: ContextHandoffReason): OrchestrationThread {
+    const [requested] = makeThread().activities;
+    return makeThread({
+      activities: [{ ...requested!, payload: { ...(requested!.payload as object), reason } }],
+    });
+  }
+  const terminalPayload = (commands: ReadonlyArray<OrchestrationCommand>, status: string) => {
+    const command = commands.find(
+      (candidate) =>
+        candidate.type === "thread.activity.append" &&
+        candidate.activity.id === activityId &&
+        (candidate.activity.payload as { status?: string }).status === status,
+    );
+    return command?.type === "thread.activity.append" ? command.activity.payload : undefined;
+  };
+  const dispatchingRecord = (): ContextHandoffRecord => ({
+    ...requestedRecord(),
+    status: "dispatching",
+    targetRuntimeSessionId,
+    structuredContext: artifact.document,
+    contextDigest: artifact.digest,
+    updatedAt: "2026-08-04T00:00:01.000Z",
+  });
+
+  it("keeps the requested reason on a completed divider", async () => {
+    const harness = makeHarness({ thread: threadWithReason("cwd-relocation") });
+    await harness.run(
+      Effect.gen(function* () {
+        const coordinator = yield* ContextHandoffCoordinator;
+        yield* coordinator.processTurnStart(turnStartEvent());
+      }),
+    );
+    expect(terminalPayload(harness.commands, "consumed")).toMatchObject({
+      reason: "cwd-relocation",
+    });
+  });
+
+  it("keeps the requested reason on a failed divider", async () => {
+    const harness = makeHarness({
+      thread: threadWithReason("cwd-relocation"),
+      sendFailure: new ProviderAdapterRequestError({
+        provider: "claudeAgent",
+        method: "sendTurn",
+        detail: "target rejected the turn",
+      }),
+    });
+    await harness.run(
+      Effect.gen(function* () {
+        const coordinator = yield* ContextHandoffCoordinator;
+        yield* coordinator.processTurnStart(turnStartEvent());
+      }),
+    );
+    expect(terminalPayload(harness.commands, "failed")).toMatchObject({
+      reason: "cwd-relocation",
+    });
+  });
+
+  it("keeps the requested reason when recovery cannot prove delivery", async () => {
+    const harness = makeHarness({
+      thread: threadWithReason("model-change"),
+      initialRecord: dispatchingRecord(),
+    });
+    await harness.run(
+      Effect.gen(function* () {
+        const coordinator = yield* ContextHandoffCoordinator;
+        yield* coordinator.recover();
+      }),
+    );
+    expect(terminalPayload(harness.commands, "delivery-uncertain")).toMatchObject({
+      reason: "model-change",
+    });
+  });
+
+  it("keeps the requested reason when an unstarted turn start is abandoned", async () => {
+    const harness = makeHarness({ thread: threadWithReason("cwd-relocation") });
+    await harness.run(
+      Effect.gen(function* () {
+        const coordinator = yield* ContextHandoffCoordinator;
+        yield* coordinator
+          .abandonUnstartedTurnStart(turnStartEvent(), "Nothing was sent.")
+          .pipe(Effect.orDie);
+      }),
+    );
+    expect(terminalPayload(harness.commands, "failed")).toMatchObject({
+      reason: "cwd-relocation",
+    });
+  });
+
+  it("leaves the reason absent for a historical request without one", async () => {
+    const harness = makeHarness();
+    await harness.run(
+      Effect.gen(function* () {
+        const coordinator = yield* ContextHandoffCoordinator;
+        yield* coordinator.processTurnStart(turnStartEvent());
+      }),
+    );
+    const payload = terminalPayload(harness.commands, "consumed");
+    expect(payload).toBeDefined();
+    expect(payload).not.toHaveProperty("reason");
   });
 });
 

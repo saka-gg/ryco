@@ -328,12 +328,36 @@ export const ServerObservability = Schema.Struct({
 });
 export type ServerObservability = typeof ServerObservability.Type;
 
+/**
+ * Why "No project" chats are off on this node:
+ * - `inside-git-repository`: the chats root lies in a Git working tree, so every chat would show
+ *   the parent repository's branch and diff.
+ * - `root-unavailable`: the chats root cannot be resolved or created.
+ * - `restricted`: the workspace access policy does not allow the chats root.
+ */
+export const ServerChatsUnavailableReason = Schema.Literals([
+  "inside-git-repository",
+  "root-unavailable",
+  "restricted",
+]);
+export type ServerChatsUnavailableReason = typeof ServerChatsUnavailableReason.Type;
+
+/** Absent from nodes without chat support; clients then hide every "No project" entry point. */
+export const ServerChatsCapability = Schema.Struct({
+  available: Schema.Boolean,
+  /** Resolved chats root (symlinks resolved), present when it could be determined. */
+  root: Schema.optionalKey(TrimmedNonEmptyString),
+  unavailableReason: Schema.optionalKey(ServerChatsUnavailableReason),
+});
+export type ServerChatsCapability = typeof ServerChatsCapability.Type;
+
 export const ServerConfig = Schema.Struct({
   usageContractVersion: Schema.optional(NonNegativeInt),
   environment: ExecutionEnvironmentDescriptor,
   auth: ServerAuthDescriptor,
   cwd: TrimmedNonEmptyString,
   workspaceAccessRoot: Schema.optional(TrimmedNonEmptyString),
+  chats: Schema.optionalKey(ServerChatsCapability),
   keybindingsConfigPath: TrimmedNonEmptyString,
   keybindings: ResolvedKeybindingsConfig,
   issues: ServerConfigIssues,

@@ -1,3 +1,5 @@
+import { isChatProject } from "@ryco/shared/projectKind";
+
 import { formatCount } from "~/lib/formatCount";
 
 import { getOverviewSummary } from "../overviewSummary.logic";
@@ -12,6 +14,7 @@ import {
   CROWN_RING_MIN_SEGMENT_PCT,
 } from "./crownLayout";
 import type { CrownRailItem, CrownSection, CrownTone } from "./crownSections";
+import type { CrownProject } from "./crownTypes";
 
 /**
  * Pure view model for the Crown rail: per-icon badges, the check ring and the
@@ -319,6 +322,8 @@ export function crownRailItemDescription(
       return summary.ship.count > 0
         ? `${formatCount(summary.ship.count, "commit")} to push`
         : "Nothing to push";
+    case "project":
+      return null;
   }
 }
 
@@ -382,4 +387,27 @@ export function resolveCrownHeadline(
     title: "Overview",
     sub: refName,
   };
+}
+
+/** What the crown face's logo disc shows. */
+export type CrownFaceLogo =
+  | { readonly kind: "project"; readonly project: CrownProject }
+  /** A "No project" chat: the chat glyph its "No project" label wears elsewhere. */
+  | { readonly kind: "chat" }
+  /** A thread whose project is not (yet) known. */
+  | { readonly kind: "folder" };
+
+/**
+ * The face's logo: the project's favicon, avatar or monogram, except for a
+ * chat. A chat's project is a Ryco-managed folder named after the chat, so its
+ * favicon lookup finds nothing and its monogram would spell the chat's title
+ * as if it were a project; it shows the chat glyph instead, also before its
+ * first send creates the project (`isChat` without a project).
+ */
+export function resolveCrownFaceLogo(input: {
+  readonly project: CrownProject | null | undefined;
+  readonly isChat: boolean;
+}): CrownFaceLogo {
+  if (input.isChat || isChatProject(input.project)) return { kind: "chat" };
+  return input.project ? { kind: "project", project: input.project } : { kind: "folder" };
 }

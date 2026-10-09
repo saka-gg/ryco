@@ -10,6 +10,7 @@ import os from "node:os";
 import path from "node:path";
 
 import {
+  type OrchestrationCommand,
   OrchestrationReadModel,
   ProviderDriverKind,
   ProviderRuntimeEvent,
@@ -46,7 +47,10 @@ import { OrchestrationProjectionPipelineLive } from "./ProjectionPipeline.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
 import * as ThreadBackgroundLiveness from "../ThreadBackgroundLiveness.ts";
 import { ProviderRuntimeIngestionLive } from "./ProviderRuntimeIngestion.ts";
-import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
+import {
+  OrchestrationEngineService,
+  type OrchestrationEngineShape,
+} from "../Services/OrchestrationEngine.ts";
 import { ProviderRuntimeIngestionService } from "../Services/ProviderRuntimeIngestion.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import { ServerConfig } from "../../config.ts";
@@ -249,11 +253,16 @@ describe("ProviderRuntimeIngestion", () => {
     getThreadGoal?: NonNullable<ProviderServiceShape["getThreadGoal"]>;
     serverSettings?: Partial<ServerSettings>;
     readThreadHistory?: NonNullable<ProviderServiceShape["readThreadHistory"]>;
+    /** Wraps every engine dispatch, so a test can interleave a competing command. */
+    interceptDispatch?: (
+      command: OrchestrationCommand,
+      dispatch: OrchestrationEngineShape["dispatch"],
+    ) => ReturnType<OrchestrationEngineShape["dispatch"]>;
   }) {
     const workspaceRoot = makeTempDir("ryco-provider-project-");
     fs.mkdirSync(path.join(workspaceRoot, ".git"));
     const provider = createProviderServiceHarness();
-    const orchestrationLayer = OrchestrationEngineLive.pipe(
+    const engineLayer = OrchestrationEngineLive.pipe(
       Layer.provide(OrchestrationProjectionSnapshotQueryLive),
       Layer.provide(OrchestrationProjectionPipelineLive),
       Layer.provide(
@@ -268,6 +277,17 @@ describe("ProviderRuntimeIngestion", () => {
       Layer.provide(RepositoryIdentityResolverLive),
       Layer.provide(SqlitePersistenceMemory),
     );
+    const interceptDispatch = options?.interceptDispatch;
+    const orchestrationLayer = interceptDispatch
+      ? Layer.effect(
+          OrchestrationEngineService,
+          Effect.map(Effect.service(OrchestrationEngineService), (engine) => ({
+            ...engine,
+            dispatch: (command: OrchestrationCommand) =>
+              interceptDispatch(command, engine.dispatch),
+          })),
+        ).pipe(Layer.provide(engineLayer))
+      : engineLayer;
     const projectionSnapshotLayer = OrchestrationProjectionSnapshotQueryLive.pipe(
       Layer.provide(RepositoryIdentityResolverLive),
       Layer.provide(SqlitePersistenceMemory),
@@ -826,6 +846,29 @@ describe("ProviderRuntimeIngestion", () => {
     ).rejects.toThrow("Thread changed");
   });
 
+  // After "Turn into project…" the stopped binding still records the moved-away chat folder.
+  it("reads provider history where the thread runs now", async () => {
+    const reads: Array<string | undefined> = [];
+    const harness = await createHarness({
+      readThreadHistory: (_threadId, input) =>
+        Effect.sync(() => {
+          reads.push(input?.cwd);
+          return Option.none();
+        }),
+    });
+    const movedRoot = makeTempDir("ryco-provider-promoted-");
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "project.meta.update",
+        commandId: CommandId.make("cmd-project-moved"),
+        projectId: asProjectId("project-1"),
+        workspaceRoot: movedRoot,
+      }),
+    );
+    await harness.reconcileThread(asThreadId("thread-1"));
+    expect(reads).toEqual([movedRoot]);
+  });
+
   it("expires previous-turn requests on turn start while retaining current requests", async () => {
     const harness = await createHarness({ callbackRuntime: true });
     const threadId = asThreadId("thread-1");
@@ -1116,6 +1159,102 @@ describe("ProviderRuntimeIngestion", () => {
 
     await waitForThread(harness.readModel, (thread) => thread.session?.status === "ready");
   });
+
+  it.each([
+    ["session.exited", { reason: "restarted for a model switch" }],
+    ["runtime.error", { message: "old runtime failed while shutting down" }],
+  ] as const)(
+    "fences a replaced runtime's %s that reaches the engine after the restart bound its successor",
+    async (staleType, stalePayload) => {
+      // Thread c8d50937: an in-session Claude model switch restarts the session. The old
+      // runtime's `session.exited` passes ingestion's pre-check while the thread still names
+      // it, but the restart's bind of the new runtime commits before that session-set does.
+      const threadId = asThreadId("thread-1");
+      const instance = ProviderInstanceId.make("claudeAgent");
+      const oldRuntime = RuntimeSessionId.make("runtime-a0e7016f");
+      const newRuntime = RuntimeSessionId.make("runtime-3f8cad48");
+      const session = (runtimeSessionId: RuntimeSessionId, updatedAt: string) => ({
+        threadId,
+        status: "ready" as const,
+        providerName: "claudeAgent",
+        providerInstanceId: instance,
+        runtimeSessionId,
+        runtimeMode: "full-access" as const,
+        activeTurnId: null,
+        lastError: null,
+        updatedAt,
+      });
+      let bindInterleaved = false;
+      const harness = await createHarness({
+        interceptDispatch: (command, dispatch) =>
+          Effect.gen(function* () {
+            if (
+              !bindInterleaved &&
+              command.type === "thread.session.set" &&
+              command.commandId.startsWith("provider:evt-old-runtime:")
+            ) {
+              bindInterleaved = true;
+              const boundAt = new Date().toISOString();
+              yield* dispatch({
+                type: "thread.session.set",
+                commandId: CommandId.make("server:provider-session-set:restart"),
+                threadId,
+                session: session(newRuntime, boundAt),
+                createdAt: boundAt,
+              });
+            }
+            return yield* dispatch(command);
+          }),
+      });
+      const seededAt = new Date().toISOString();
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("cmd-session-old-runtime"),
+          threadId,
+          session: session(oldRuntime, seededAt),
+          createdAt: seededAt,
+        }),
+      );
+
+      harness.emit({
+        type: staleType,
+        eventId: asEventId("evt-old-runtime"),
+        provider: ProviderDriverKind.make("claudeAgent"),
+        providerInstanceId: instance,
+        runtimeSessionId: oldRuntime,
+        threadId,
+        createdAt: new Date().toISOString(),
+        payload: stalePayload,
+      });
+      await harness.drain();
+      expect(bindInterleaved).toBe(true);
+      let thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+      expect(thread?.session).toMatchObject({ status: "ready", runtimeSessionId: newRuntime });
+      // Nothing else of the stale event applied either.
+      expect(thread?.activities.some((entry) => entry.id === "evt-old-runtime")).toBe(false);
+
+      // The new runtime's turn is ingested instead of being dropped as a runtime mismatch.
+      harness.emit({
+        type: "turn.started",
+        eventId: asEventId("evt-new-turn-started"),
+        provider: ProviderDriverKind.make("claudeAgent"),
+        providerInstanceId: instance,
+        runtimeSessionId: newRuntime,
+        threadId,
+        turnId: asTurnId("turn-notes"),
+        createdAt: new Date().toISOString(),
+        payload: {},
+      });
+      await harness.drain();
+      thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+      expect(thread?.session).toMatchObject({
+        status: "running",
+        runtimeSessionId: newRuntime,
+        activeTurnId: "turn-notes",
+      });
+    },
+  );
 
   it("fences late A1 lifecycle events after A1 -> B -> A2", async () => {
     const harness = await createHarness({ callbackRuntime: true });

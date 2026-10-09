@@ -62,6 +62,7 @@ import {
   type ProjectId,
   type ServerProvider,
 } from "@ryco/contracts";
+import { projectKindOf } from "@ryco/shared/projectKind";
 import { Effect, Option, Schema } from "effect";
 
 import type { CheckpointDiffQueryShape } from "../../checkpointing/Services/CheckpointDiffQuery.ts";
@@ -909,6 +910,7 @@ export const makeExternalMcpTools = (deps: {
           return Schema.encodeSync(AgentControlMcpListProjectsResult)({
             projects: allowed.slice(0, limit).map((project) => ({
               projectId: project.id,
+              kind: projectKindOf(project),
               title: project.title,
               createdAt: project.createdAt,
               updatedAt: project.updatedAt,

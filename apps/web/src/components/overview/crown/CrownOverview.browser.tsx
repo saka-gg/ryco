@@ -37,7 +37,7 @@ import {
   makeCheckStatus,
 } from "./crownTestFixtures";
 import { makeRuntimeAgent } from "../../agents/agentRosterTestFixtures";
-import type { CrownOverviewProps, CrownProject } from "./crownTypes";
+import type { CrownChatBinding, CrownOverviewProps, CrownProject } from "./crownTypes";
 import { CrownOverview } from "./CrownOverview";
 
 const RUNNING_RUNS: ReadonlyArray<OverviewPullRequestCheckRun> = [
@@ -528,6 +528,84 @@ describe("CrownOverview", () => {
     expect(running).toEqual([]);
   });
 
+  describe("chat", () => {
+    /** A "No project" chat: no checkout, so no git data; the client can promote it. */
+    const chatProps = (chat: CrownChatBinding, overrides: Partial<CrownOverviewProps> = {}) =>
+      crownProps({
+        ...crownLayoutFixture({ changes: undefined, pullRequest: null }),
+        isGitRepo: false,
+        chat,
+        ...overrides,
+      });
+
+    it("offers Turn into project in place of the git sections and opens it from the card", async () => {
+      const chat = { turnIntoProject: vi.fn(), preload: vi.fn() };
+      const crown = await mountCrown(chatProps(chat));
+      expect(railKeys(crown.rail())).toEqual(["plan", "agents", "project"]);
+      expect(crown.rail().querySelectorAll(".crown-rail-sep")).toHaveLength(1);
+
+      const icon = page.getByRole("button", { name: "Turn into project", exact: true });
+      await icon.hover();
+      await expect
+        .poll(() => currentFlyoutLayer(crown.flyout())?.querySelector('[data-section="project"]'))
+        .not.toBeNull();
+      // The preview only explains; the button lives in the card.
+      expect(currentFlyoutLayer(crown.flyout())?.querySelector("button")).toBeNull();
+
+      await icon.click();
+      await expect.poll(() => crown.island().dataset.mode).toBe("card");
+      await expect.element(page.getByRole("region", { name: "Turn into project" })).toBeVisible();
+      const action = page.getByRole("button", { name: "Turn into project…" });
+      await action.click();
+      expect(chat.preload).toHaveBeenCalled();
+      expect(chat.turnIntoProject).toHaveBeenCalledWith(action.element());
+
+      // The dialog it opens is not portaled from the card: pressing in it keeps the card.
+      const dialog = document.createElement("div");
+      dialog.setAttribute("role", "dialog");
+      const field = document.createElement("button");
+      field.type = "button";
+      field.textContent = "Dialog field";
+      dialog.append(field);
+      document.body.append(dialog);
+      mounts.push({ unmount: () => {}, host: dialog });
+      await page.getByRole("button", { name: "Dialog field" }).click();
+      expect(crown.island().dataset.mode).toBe("card");
+
+      // Once the chat is a project, the open card falls back to the headline's section.
+      await crown.update({ chat: undefined, isGitRepo: true, ...crownLayoutFixture() });
+      expect(railKeys(crown.rail())).not.toContain("project");
+      expect(crown.island().dataset.mode).toBe("card");
+      await expect
+        .poll(() =>
+          crown.host
+            .querySelector('[data-slot="crown-card-detail"] [data-section]')
+            ?.getAttribute("data-section"),
+        )
+        .toBe("checks");
+    });
+
+    it("opens a Turn finished alert on the headline section when Changes is hidden", async () => {
+      const chat = { turnIntoProject: vi.fn(), preload: vi.fn() };
+      const turn = (running: boolean) => ({
+        turnId: "turn-chat",
+        state: running ? ("running" as const) : ("completed" as const),
+        startedAt: "2026-10-07T10:00:00.000Z",
+        completedAt: running ? null : "2026-10-07T10:02:00.000Z",
+      });
+      const crown = await mountCrown(
+        chatProps(chat, { latestTurn: turn(true), turnSettled: false, agentRunning: true }),
+      );
+      await crown.update({ latestTurn: turn(false), turnSettled: true, agentRunning: false });
+
+      await expect.poll(() => crown.island().dataset.mode).toBe("alert");
+      await page.getByRole("button", { name: "View Turn finished" }).click();
+      await expect.poll(() => crown.island().dataset.mode).toBe("card");
+      await expect.element(page.getByRole("region", { name: "Plan" })).toBeVisible();
+      expect(crown.host.textContent).not.toContain("Not a git repository");
+    });
+  });
+
   describe("face", () => {
     it("shows the project's monogram when it has no artwork", async () => {
       const crown = await mountCrown(crownProps({ project: CROWN_PROJECT }));
@@ -536,6 +614,39 @@ describe("CrownOverview", () => {
       expect(logo.getBoundingClientRect().width).toBe(38);
       expect(logo.getAttribute("aria-hidden")).toBe("true");
       expect(logo.querySelector(".crown-face-folder")).toBeNull();
+    });
+
+    it("shows a chat's glyph, not its folder's favicon or its title's monogram", async () => {
+      // A chat's project is a Ryco-managed folder named after the chat.
+      const chatProject: CrownProject = {
+        ...CROWN_PROJECT,
+        id: ProjectId.make("project-chat"),
+        kind: "chat",
+        name: "Recipe ideas",
+        cwd: "/chats/recipe-ideas",
+      };
+      const crown = await mountCrown(
+        crownProps({ isGitRepo: false, project: chatProject, isChat: true }),
+      );
+      const logo = crown.host.querySelector<HTMLElement>('[data-slot="crown-face-logo"]')!;
+      expect(logo.dataset.logo).toBe("chat");
+      const glyph = logo.querySelector<SVGElement>(".crown-face-chat")!;
+      expect(glyph).not.toBeNull();
+      expect(glyph.getBoundingClientRect().width).toBe(16);
+      expect(logo.querySelector("img")).toBeNull();
+      expect(logo.querySelector("svg text")).toBeNull();
+
+      // An unsent chat has no project yet: still the chat, not the unknown-project folder.
+      await crown.update({ project: null });
+      expect(logo.dataset.logo).toBe("chat");
+      expect(logo.querySelector(".crown-face-chat")).not.toBeNull();
+      expect(logo.querySelector(".crown-face-folder")).toBeNull();
+
+      // Turned into a project, the face shows the project's logo.
+      await crown.update({ project: CROWN_PROJECT, isChat: false, isGitRepo: true });
+      await expect.poll(() => logo.querySelector("svg text")?.textContent).toBe("RH");
+      expect(logo.dataset.logo).toBe("project");
+      expect(logo.querySelector(".crown-face-chat")).toBeNull();
     });
 
     it("falls back to a folder without a project", async () => {

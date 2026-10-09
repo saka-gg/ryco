@@ -10,6 +10,7 @@ import {
   IsoDateTime,
   ModelSelection,
   ProjectId,
+  ProjectKind,
   ProjectMetadataDir,
   ProjectScript,
 } from "@ryco/contracts";
@@ -20,6 +21,7 @@ import type { ProjectionRepositoryError } from "../Errors.ts";
 
 export const ProjectionProject = Schema.Struct({
   projectId: ProjectId,
+  kind: ProjectKind,
   title: Schema.String,
   workspaceRoot: Schema.String,
   projectMetadataDir: ProjectMetadataDir,

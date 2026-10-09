@@ -1,3 +1,4 @@
+import { EnvironmentId, ProjectId } from "@ryco/contracts";
 import { assert, describe, it } from "vite-plus/test";
 
 import {
@@ -5,6 +6,7 @@ import {
   buildCrownRailSummary,
   countCrownChecks,
   crownRailItemDescription,
+  resolveCrownFaceLogo,
   resolveCrownHeadline,
 } from "./crownModel.logic";
 import { CROWN_RAIL_ITEMS, visibleCrownRailItems } from "./crownSections";
@@ -21,6 +23,7 @@ import {
   makeRun,
   makeSubagent,
 } from "./crownTestFixtures";
+import type { CrownProject } from "./crownTypes";
 
 const GIT = { isGitRepo: true };
 
@@ -297,6 +300,7 @@ describe("crownRailItemDescription", () => {
       agents: "2 subagents, 1 active",
       pr: "open, has conflicts",
       notes: "1 note",
+      project: null,
       ship: "3 commits to push",
     });
   });
@@ -325,6 +329,7 @@ describe("crownRailItemDescription", () => {
       agents: "No subagents",
       pr: "No pull request",
       notes: null,
+      project: null,
       ship: "Nothing to push",
     });
     const running = buildCrownRailSummary(
@@ -468,5 +473,64 @@ describe("visibleCrownRailItems", () => {
     ]);
     assert.notInclude(keys({ isGitRepo: true, notesAvailable: false }), "notes");
     assert.deepEqual(keys({ isGitRepo: false, notesAvailable: true }), ["plan", "agents", "notes"]);
+  });
+
+  it("offers Turn into project only for a chat the client can promote", () => {
+    const keys = (input: Parameters<typeof visibleCrownRailItems>[0]) =>
+      visibleCrownRailItems(input).map((item) => item.key);
+    assert.notInclude(keys({ isGitRepo: true, notesAvailable: true }), "project");
+    assert.deepEqual(keys({ isGitRepo: false, notesAvailable: false, chatAvailable: true }), [
+      "plan",
+      "agents",
+      "project",
+    ]);
+  });
+});
+
+describe("resolveCrownFaceLogo", () => {
+  const project: CrownProject = {
+    id: ProjectId.make("project-ryco"),
+    environmentId: EnvironmentId.make("env-face"),
+    name: "Ryco",
+    cwd: "/repo/ryco",
+    customAvatarContentHash: null,
+  };
+  // A chat's project: a Ryco-managed folder named after the chat.
+  const chatProject: CrownProject = {
+    ...project,
+    id: ProjectId.make("project-chat"),
+    kind: "chat",
+    name: "Recipe ideas",
+    cwd: "/chats/recipe-ideas",
+  };
+
+  it("shows a project's logo, and a folder while the project is unknown", () => {
+    assert.deepEqual(resolveCrownFaceLogo({ project, isChat: false }), {
+      kind: "project",
+      project,
+    });
+    assert.deepEqual(
+      resolveCrownFaceLogo({ project: { ...project, kind: "project" }, isChat: false }),
+      {
+        kind: "project",
+        project: { ...project, kind: "project" },
+      },
+    );
+    assert.deepEqual(resolveCrownFaceLogo({ project: null, isChat: false }), { kind: "folder" });
+    assert.deepEqual(resolveCrownFaceLogo({ project: undefined, isChat: false }), {
+      kind: "folder",
+    });
+  });
+
+  it("shows the chat glyph for a chat, never its folder's favicon or title monogram", () => {
+    assert.deepEqual(resolveCrownFaceLogo({ project: chatProject, isChat: true }), {
+      kind: "chat",
+    });
+    // An unsent chat has no project until its first send creates it.
+    assert.deepEqual(resolveCrownFaceLogo({ project: null, isChat: true }), { kind: "chat" });
+    // The project's own kind is enough on its own.
+    assert.deepEqual(resolveCrownFaceLogo({ project: chatProject, isChat: false }), {
+      kind: "chat",
+    });
   });
 });

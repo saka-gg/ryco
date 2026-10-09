@@ -126,7 +126,7 @@ export function ThreadActionsSheet(props: {
           </View>
           <View className="border-t border-border px-4 py-4">
             <Text className="text-xs font-ryco-bold uppercase tracking-wide text-foreground-muted">
-              Project · Worktree
+              {props.model.contextHeading}
             </Text>
             <Text className="mt-1 text-base font-ryco-medium text-foreground">
               {props.model.projectLabel} · {props.model.worktreeLabel}

@@ -7,6 +7,7 @@ import {
   ThreadId,
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
+import { ProjectKind } from "./orchestration.ts";
 import { WorktreeId, WorktreeOrigin } from "./worktree.ts";
 
 /**
@@ -252,6 +253,12 @@ export const TrashedThreadSummary = Schema.Struct({
   threadId: ThreadId,
   projectId: ProjectId,
   projectTitle: Schema.NullOr(Schema.String),
+  /**
+   * The owning project's kind, so a chat is listed as "No project" without the client's project
+   * store. Absent when the project record is gone, or from a node that predates chats; both read
+   * as a regular project.
+   */
+  projectKind: Schema.optionalKey(ProjectKind),
   /** False when the owning project was removed; restore is unavailable. */
   projectAvailable: Schema.Boolean,
   title: Schema.String,

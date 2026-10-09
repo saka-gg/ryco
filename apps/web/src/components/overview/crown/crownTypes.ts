@@ -9,10 +9,24 @@ import type { CrownSection } from "./crownSections";
 /** The thread's worktree notes as the crown renders them (`useWorktreeNotes`). */
 export type CrownNotesBinding = WorktreeNotes;
 
-/** The project whose logo the crown face shows (`ProjectFavicon` inputs). */
+/**
+ * A "No project" chat the crown offers to turn into a project, in place of
+ * its source-control sections (`usePromoteChatBinding`).
+ */
+export interface CrownChatBinding {
+  /** Opens the "Turn into project…" dialog, growing out of `origin`. */
+  readonly turnIntoProject: (origin: HTMLElement) => void;
+  /** Starts loading the dialog ahead of a likely open. */
+  readonly preload: () => void;
+}
+
+/**
+ * The project whose logo the crown face shows (`ProjectFavicon` inputs); its
+ * `kind` tells a chat's folder project apart (`@ryco/shared/projectKind`).
+ */
 export type CrownProject = Pick<
   Project,
-  "id" | "environmentId" | "name" | "cwd" | "customAvatarContentHash"
+  "id" | "environmentId" | "name" | "cwd" | "customAvatarContentHash" | "kind"
 >;
 
 /** The slice of the thread's latest turn the crown watches for "turn finished" alerts. */
@@ -43,13 +57,21 @@ export interface CrownOverviewProps extends OverviewLayoutProps {
   readonly userGitActionActive: boolean;
   /** Worktree notes; the Notes icon shows only while `notes.available`. */
   readonly notes?: CrownNotesBinding | undefined;
+  /** Set for a chat this client can promote: the rail shows "Turn into project". */
+  readonly chat?: CrownChatBinding | undefined;
   /** The thread's project; the face shows its logo (a folder without one). */
   readonly project?: CrownProject | null | undefined;
+  /**
+   * The thread is a "No project" chat, sent or not yet (an unsent chat has no
+   * project): the face shows the chat glyph instead of a project logo.
+   */
+  readonly isChat?: boolean | undefined;
 }
 
 /** Props of the shared section detail used by both the hover flyout and the card. */
 export interface CrownSectionDetailProps {
-  readonly section: Exclude<CrownSection, "notes">;
+  /** Notes and a chat's "Turn into project" render from their own bindings. */
+  readonly section: Exclude<CrownSection, "notes" | "project">;
   /**
    * Flyouts are read-only previews with a heading row; the card titles the
    * section itself and hosts the interactive controls.

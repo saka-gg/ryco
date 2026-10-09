@@ -3570,6 +3570,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       messageId: message.message.id,
       model: message.message.model,
       ...(context.cacheModelSelection ? { modelSelection: context.cacheModelSelection } : {}),
+      ...(context.session.cwd ? { cwd: context.session.cwd } : {}),
       runtimeSessionId: context.session.runtimeSessionId!,
       providerInstanceId: context.session.providerInstanceId!,
       observedAt: cacheStamp.createdAt,
@@ -6586,6 +6587,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       sessionModelSwitch: "in-session",
       conversationRollback: "native",
       turnSteering: "native",
+      // Transcripts live under a per-cwd project key, so a moved resume finds nothing.
+      resumeSurvivesCwdChange: false,
     },
     startSession,
     sendTurn,

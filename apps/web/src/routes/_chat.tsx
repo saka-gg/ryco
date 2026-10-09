@@ -7,6 +7,7 @@ import { useChatPanesStore } from "../chatPanesStore";
 import { useCommandPaletteStore } from "../commandPaletteStore";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
 import {
+  startNewChatFromContext,
   startNewLocalThreadFromContext,
   startNewThreadFromContext,
 } from "../lib/chatThreadActions";
@@ -28,8 +29,16 @@ import { toggleThreadPin } from "../threadPinning";
 function ChatRouteGlobalShortcuts() {
   const clearSelection = useThreadSelectionStore((state) => state.clearSelection);
   const selectedThreadKeysSize = useThreadSelectionStore((state) => state.selectedThreadKeys.size);
-  const { activeDraftThread, activeThread, defaultProjectRef, handleNewThread, routeThreadRef } =
-    useHandleNewThread();
+  const {
+    activeContextIsChat,
+    activeDraftThread,
+    activeThread,
+    chatTarget,
+    defaultProjectRef,
+    handleNewChat,
+    handleNewThread,
+    routeThreadRef,
+  } = useHandleNewThread();
   const keybindings = useAppKeybindings();
   const terminalOpen = useTerminalStateStore((state) =>
     routeThreadRef
@@ -102,33 +111,39 @@ function ChatRouteGlobalShortcuts() {
         return;
       }
 
+      const threadActionContext = {
+        activeContextIsChat,
+        activeDraftThread,
+        activeThread,
+        chatTarget,
+        defaultProjectRef,
+        defaultThreadEnvMode: resolveSidebarNewThreadEnvMode({
+          defaultEnvMode: appSettings.defaultThreadEnvMode,
+        }),
+        handleNewChat,
+        handleNewThread,
+      };
+
+      if (command === "chat.newWithoutProject") {
+        // Unavailable chats leave the key to the focused control.
+        if (!chatTarget) return;
+        event.preventDefault();
+        event.stopPropagation();
+        void startNewChatFromContext(threadActionContext);
+        return;
+      }
+
       if (command === "chat.newLocal") {
         event.preventDefault();
         event.stopPropagation();
-        void startNewLocalThreadFromContext({
-          activeDraftThread,
-          activeThread,
-          defaultProjectRef,
-          defaultThreadEnvMode: resolveSidebarNewThreadEnvMode({
-            defaultEnvMode: appSettings.defaultThreadEnvMode,
-          }),
-          handleNewThread,
-        });
+        void startNewLocalThreadFromContext(threadActionContext);
         return;
       }
 
       if (command === "chat.new") {
         event.preventDefault();
         event.stopPropagation();
-        void startNewThreadFromContext({
-          activeDraftThread,
-          activeThread,
-          defaultProjectRef,
-          defaultThreadEnvMode: resolveSidebarNewThreadEnvMode({
-            defaultEnvMode: appSettings.defaultThreadEnvMode,
-          }),
-          handleNewThread,
-        });
+        void startNewThreadFromContext(threadActionContext);
       }
     };
 
@@ -137,9 +152,12 @@ function ChatRouteGlobalShortcuts() {
       window.removeEventListener("keydown", onWindowKeyDown);
     };
   }, [
+    activeContextIsChat,
     activeDraftThread,
     activeThread,
+    chatTarget,
     clearSelection,
+    handleNewChat,
     handleNewThread,
     keybindings,
     defaultProjectRef,

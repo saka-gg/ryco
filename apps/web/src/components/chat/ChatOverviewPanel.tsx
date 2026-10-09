@@ -12,6 +12,7 @@ import GitActionsControl, {
 import { CrownOverview } from "../overview/crown/CrownOverview";
 import type { CrownOverviewProps } from "../overview/crown/crownTypes";
 import { useWorktreeNotes, type WorktreeNotesTarget } from "../overview/notes/useWorktreeNotes";
+import { type ChatProjectTarget, usePromoteChatBinding } from "./ChatProjectActions";
 import {
   createPostPushWorkflowDiscoveryWatch,
   type PostPushWorkflowDiscoveryWatch,
@@ -21,7 +22,7 @@ import { type ChatOverviewModelInput, useChatOverviewModel } from "./useChatOver
 /** Crown-only inputs; the classic phone sheet does not render them. */
 export type ChatOverviewCrownInput = Pick<
   CrownOverviewProps,
-  "threadTitle" | "isGitRepo" | "latestTurn" | "turnSettled" | "agentRunning" | "project"
+  "threadTitle" | "isGitRepo" | "latestTurn" | "turnSettled" | "agentRunning" | "project" | "isChat"
 > & {
   /** Drives the rail's enter / exit transition while ChatView delays unmount. */
   open: boolean;
@@ -29,6 +30,11 @@ export type ChatOverviewCrownInput = Pick<
   notesTarget: WorktreeNotesTarget | null;
   /** Opens a note's backlinked thread in the notes' environment. */
   onOpenNoteThread?: ((threadId: ThreadId) => void) | undefined;
+  /**
+   * The thread's "No project" chat, which the rail offers to turn into a
+   * project in place of its source-control sections; null for projects.
+   */
+  chatProject: ChatProjectTarget | null;
 };
 
 export type ChatOverviewPanelProps = Omit<
@@ -221,10 +227,12 @@ export function ChatOverviewPanel(
       <CrownWithNotes
         notesTarget={props.notesTarget}
         onOpenNoteThread={props.onOpenNoteThread}
+        chatProject={props.chatProject}
         {...layoutProps}
         preview={props.preview}
         threadTitle={props.threadTitle}
         project={props.project ?? null}
+        isChat={props.isChat}
         readiness={readiness}
         isGitRepo={props.isGitRepo}
         latestTurn={props.latestTurn}
@@ -238,18 +246,21 @@ export function ChatOverviewPanel(
   );
 }
 
-/** The crown bound to the thread's notes; the phone sheet never reads them. */
+/** The crown bound to the thread's notes and chat; the phone sheet never reads them. */
 function CrownWithNotes({
   notesTarget,
   onOpenNoteThread,
+  chatProject,
   ...props
-}: Omit<CrownOverviewProps, "notes"> & {
+}: Omit<CrownOverviewProps, "notes" | "chat"> & {
   readonly open: boolean;
   readonly notesTarget: WorktreeNotesTarget | null;
   readonly onOpenNoteThread?: ((threadId: ThreadId) => void) | undefined;
+  readonly chatProject: ChatProjectTarget | null;
 }) {
   const notes = useWorktreeNotes(notesTarget, { onOpenThread: onOpenNoteThread });
-  return <CrownOverview {...props} notes={notes} />;
+  const chat = usePromoteChatBinding(chatProject);
+  return <CrownOverview {...props} notes={notes} chat={chat} />;
 }
 
 export default ChatOverviewPanel;

@@ -2,7 +2,8 @@ import { scopeProjectRef } from "@ryco/client-runtime/scoped";
 import type { Project } from "@ryco/client-runtime/state/threads";
 import type { EnvironmentId } from "@ryco/contracts";
 import { useSyncExternalStore } from "react";
-import { useComposerDraftStore, type DraftId } from "../composerDraftStore";
+import { buildChatDraftTarget, useComposerDraftStore, type DraftId } from "../composerDraftStore";
+import { newProjectId } from "../lib/utils";
 import { createHostedDraftTargetController } from "../hostedHub/draftExecutionTarget";
 import {
   nodeIdForHostedEnvironment,
@@ -64,6 +65,10 @@ export const hostedDraftTargetController = createHostedDraftTargetController({
       projectRef: scopeProjectRef(project.environmentId, project.id),
       logicalProjectKey,
     }),
+  moveToChat: (draftId, environmentId) =>
+    useComposerDraftStore
+      .getState()
+      .moveDraftThreadToProject(draftId, buildChatDraftTarget(environmentId, newProjectId())),
   retry: (environmentId) => {
     if (useHostedHubStore.getState().selectedNode?.environmentId === environmentId)
       void hostedHubController.retrySelectedNode();
@@ -106,5 +111,6 @@ export function useHostedDraftExecutionTarget(input: {
     cancel: () => hostedDraftTargetController.cancel(),
     retry: hostedDraftTargetController.retry,
     selectProject: hostedDraftTargetController.selectProject,
+    selectNoProject: hostedDraftTargetController.selectNoProject,
   };
 }

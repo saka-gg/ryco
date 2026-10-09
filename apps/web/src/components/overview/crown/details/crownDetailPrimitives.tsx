@@ -2,7 +2,12 @@ import type { ReactNode } from "react";
 
 import { cn } from "~/lib/utils";
 
-import { CROWN_RAIL_ITEMS, CROWN_SECTION_LABEL, type CrownRailItem } from "../crownSections";
+import {
+  CROWN_RAIL_ITEMS,
+  CROWN_SECTION_LABEL,
+  type CrownRailItem,
+  type CrownSection,
+} from "../crownSections";
 import type { CrownSectionDetailProps } from "../crownTypes";
 
 /**
@@ -15,10 +20,8 @@ import type { CrownSectionDetailProps } from "../crownTypes";
 /** Props every section detail receives (the section is implied by the component). */
 export type CrownDetailViewProps = Omit<CrownSectionDetailProps, "section">;
 
-export type CrownDetailSection = CrownSectionDetailProps["section"];
-
 /** The rail item that owns a section (its icon and git requirement). */
-export function crownRailItemForSection(section: CrownDetailSection): CrownRailItem | undefined {
+export function crownRailItemForSection(section: CrownSection): CrownRailItem | undefined {
   return CROWN_RAIL_ITEMS.find((item) => item.key === section);
 }
 
@@ -29,7 +32,7 @@ export function CrownDetailHeading({
   title,
   meta,
 }: {
-  section: CrownDetailSection;
+  section: CrownSection;
   variant: CrownDetailViewProps["variant"];
   /** Overrides the section label (e.g. "PR #683"). */
   title?: ReactNode;

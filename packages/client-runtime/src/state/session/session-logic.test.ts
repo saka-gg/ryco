@@ -8,6 +8,14 @@ import {
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  contextHandoffStatusSuffix,
+  CWD_RELOCATION_HANDOFF_COPY,
+  cwdRelocationHandoffAccessibleLabel,
+  cwdRelocationHandoffHeadline,
+  cwdRelocationHandoffRetryHint,
+  isCwdRelocationHandoff,
+} from "./contextHandoff";
+import {
   deriveCompletionDividerBeforeEntryId,
   deriveActiveWorkStartedAt,
   deriveActivePlanState,
@@ -2177,6 +2185,84 @@ describe("deriveWorkLogEntries context window handling", () => {
       status: "delivery-uncertain",
       error: "Target delivery failed",
     });
+  });
+
+  it("carries the handoff reason, absent on historical records", () => {
+    const entries = deriveContextHandoffTimelineEntries([
+      makeActivity({
+        id: "handoff-historical",
+        createdAt: "2026-02-23T00:00:01.000Z",
+        kind: "context-handoff",
+        summary: "Context handoff",
+        tone: "info",
+        payload: contextHandoffPayload("consumed"),
+      }),
+      makeActivity({
+        id: "handoff-relocated",
+        createdAt: "2026-02-23T00:00:02.000Z",
+        kind: "context-handoff",
+        summary: "Context handoff",
+        tone: "info",
+        payload: contextHandoffPayload("consumed", {
+          handoffId: "handoff-relocated",
+          reason: "cwd-relocation",
+        }),
+      }),
+    ]);
+
+    expect(entries).toHaveLength(2);
+    expect(entries[0]).not.toHaveProperty("reason");
+    expect(entries[1]?.reason).toBe("cwd-relocation");
+    expect(entries.map(isCwdRelocationHandoff)).toEqual([false, true]);
+    expect(isCwdRelocationHandoff({ reason: "model-change" })).toBe(false);
+  });
+
+  it("names a relocation by its outcome, not by a model transition", () => {
+    expect(cwdRelocationHandoffHeadline("consumed")).toBe(
+      "Continued in a fresh session in the new folder",
+    );
+    expect(cwdRelocationHandoffHeadline("failed")).toBe(CWD_RELOCATION_HANDOFF_COPY.attempted);
+    expect(cwdRelocationHandoffHeadline("delivery-uncertain")).toBe(
+      CWD_RELOCATION_HANDOFF_COPY.attempted,
+    );
+  });
+
+  it("describes a relocation divider for screen readers, with a retry hint only on failure", () => {
+    const relocation = { reason: "cwd-relocation" as const };
+    expect(cwdRelocationHandoffAccessibleLabel({ ...relocation, status: "consumed" })).toBe(
+      "Continued in a fresh session in the new folder",
+    );
+    expect(
+      cwdRelocationHandoffAccessibleLabel({
+        ...relocation,
+        status: "failed",
+        error: "Provider exited",
+      }),
+    ).toBe(
+      "Fresh session in the new folder. Failed: Provider exited. Send your message again to retry",
+    );
+    expect(
+      cwdRelocationHandoffAccessibleLabel({ ...relocation, status: "delivery-uncertain" }),
+    ).toBe("Fresh session in the new folder. Delivery uncertain");
+
+    expect(cwdRelocationHandoffRetryHint({ ...relocation, status: "failed" })).toBe(
+      CWD_RELOCATION_HANDOFF_COPY.retryHint,
+    );
+    expect(cwdRelocationHandoffRetryHint({ ...relocation, status: "consumed" })).toBeNull();
+    // A model change, even one recorded before handoffs carried a reason, offers no retry.
+    expect(cwdRelocationHandoffRetryHint({ status: "failed" })).toBeNull();
+    expect(cwdRelocationHandoffRetryHint({ status: "failed", reason: "model-change" })).toBeNull();
+  });
+
+  it("names how an unfinished handoff ended", () => {
+    expect(contextHandoffStatusSuffix({ status: "consumed" })).toBeNull();
+    expect(contextHandoffStatusSuffix({ status: "failed" })).toBe("Failed");
+    expect(contextHandoffStatusSuffix({ status: "failed", error: "Timed out" })).toBe(
+      "Failed: Timed out",
+    );
+    expect(contextHandoffStatusSuffix({ status: "delivery-uncertain", error: "Closed" })).toBe(
+      "Delivery uncertain: Closed",
+    );
   });
 
   it("keeps all handoff states out of the work log", () => {

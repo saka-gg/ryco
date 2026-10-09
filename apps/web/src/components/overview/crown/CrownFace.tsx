@@ -1,10 +1,9 @@
-import { FolderIcon } from "lucide-react";
+import { FolderIcon, MessageCircleDashedIcon } from "lucide-react";
 import { useLayoutEffect, useRef, type CSSProperties, type MouseEvent, type Ref } from "react";
 
 import { ProjectFavicon } from "../../ProjectFavicon";
-import type { CrownHeadline } from "./crownModel.logic";
+import type { CrownFaceLogo, CrownHeadline } from "./crownModel.logic";
 import { CROWN_TONE_VAR } from "./crownSections";
-import type { CrownProject } from "./crownTypes";
 
 /** The status dot pops when the headline changes tone: a spring overshoot. */
 const STATUS_POP_KEYFRAMES: Keyframe[] = [
@@ -18,16 +17,16 @@ const STATUS_POP_TIMING: KeyframeAnimationOptions = {
 };
 
 /**
- * The crown's resting face: the project's logo, a status dot on its edge in
- * the headline's tone, and the "+N" count of queued alerts. A button: it
- * opens the card on the headline's (or the shown alert's) section, or
- * collapses an open card.
+ * The crown's resting face: the project's logo (a chat's glyph for a chat), a
+ * status dot on its edge in the headline's tone, and the "+N" count of queued
+ * alerts. A button: it opens the card on the headline's (or the shown alert's)
+ * section, or collapses an open card.
  */
 export function CrownFace({
   ref,
   ...props
 }: {
-  readonly project: CrownProject | null;
+  readonly logo: CrownFaceLogo;
   readonly headline: CrownHeadline;
   readonly queuedCount: number;
   readonly expanded: boolean;
@@ -35,7 +34,7 @@ export function CrownFace({
   readonly onClick: (event: MouseEvent<HTMLButtonElement>) => void;
   readonly ref?: Ref<HTMLButtonElement>;
 }) {
-  const { project, headline, reducedMotion } = props;
+  const { logo, headline, reducedMotion } = props;
   const { tone } = headline;
   const statusRef = useRef<HTMLSpanElement>(null);
   const lastToneRef = useRef(tone);
@@ -58,20 +57,13 @@ export function CrownFace({
       aria-expanded={props.expanded}
       onClick={props.onClick}
     >
-      <span aria-hidden="true" className="crown-face-logo" data-slot="crown-face-logo">
-        {project ? (
-          <ProjectFavicon
-            key={project.id}
-            environmentId={project.environmentId}
-            cwd={project.cwd}
-            projectId={project.id}
-            customAvatarContentHash={project.customAvatarContentHash ?? null}
-            fallbackName={project.name}
-            fillContainer
-          />
-        ) : (
-          <FolderIcon className="crown-face-folder" />
-        )}
+      <span
+        aria-hidden="true"
+        className="crown-face-logo"
+        data-slot="crown-face-logo"
+        data-logo={logo.kind}
+      >
+        <FaceLogo logo={logo} />
       </span>
       <span
         ref={statusRef}
@@ -89,4 +81,27 @@ export function CrownFace({
       ) : null}
     </button>
   );
+}
+
+function FaceLogo({ logo }: { readonly logo: CrownFaceLogo }) {
+  switch (logo.kind) {
+    case "project": {
+      const { project } = logo;
+      return (
+        <ProjectFavicon
+          key={project.id}
+          environmentId={project.environmentId}
+          cwd={project.cwd}
+          projectId={project.id}
+          customAvatarContentHash={project.customAvatarContentHash ?? null}
+          fallbackName={project.name}
+          fillContainer
+        />
+      );
+    }
+    case "chat":
+      return <MessageCircleDashedIcon className="crown-face-glyph crown-face-chat" />;
+    case "folder":
+      return <FolderIcon className="crown-face-glyph crown-face-folder" />;
+  }
 }

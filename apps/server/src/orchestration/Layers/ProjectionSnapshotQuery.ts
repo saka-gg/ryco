@@ -69,6 +69,7 @@ import { ProjectionThreadProposedPlan } from "../../persistence/Services/Project
 import { ProjectionThreadSession } from "../../persistence/Services/ProjectionThreadSessions.ts";
 import { ProjectionThread } from "../../persistence/Services/ProjectionThreads.ts";
 import { RepositoryIdentityResolver } from "../../project/Services/RepositoryIdentityResolver.ts";
+import { resolveThreadWorkspaceCwd } from "../../checkpointing/Utils.ts";
 import { ORCHESTRATION_PROJECTOR_NAMES } from "./ProjectionPipeline.ts";
 import { ThreadBackgroundLivenessService } from "../ThreadBackgroundLiveness.ts";
 import { pruneStaleContextWindowActivities } from "../contextWindowActivities.ts";
@@ -351,6 +352,7 @@ function mapProjectShellRow(
 ): OrchestrationProjectShell {
   return {
     id: row.projectId,
+    kind: row.kind,
     title: row.title,
     workspaceRoot: row.workspaceRoot,
     projectMetadataDir: row.projectMetadataDir,
@@ -594,6 +596,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       sql`
         SELECT
           project_id AS "projectId",
+          kind,
           title,
           workspace_root AS "workspaceRoot",
           project_metadata_dir AS "projectMetadataDir",
@@ -1051,6 +1054,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       sql`
         SELECT
           project_id AS "projectId",
+          kind,
           title,
           workspace_root AS "workspaceRoot",
           project_metadata_dir AS "projectMetadataDir",
@@ -1077,6 +1081,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       sql`
         SELECT
           project_id AS "projectId",
+          kind,
           title,
           workspace_root AS "workspaceRoot",
           project_metadata_dir AS "projectMetadataDir",
@@ -2173,6 +2178,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
 
               const projects: ReadonlyArray<OrchestrationProject> = projectRows.map((row) => ({
                 id: row.projectId,
+                kind: row.kind,
                 title: row.title,
                 workspaceRoot: row.workspaceRoot,
                 repositoryIdentity: repositoryIdentities.get(row.projectId) ?? null,
@@ -2355,6 +2361,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 updatedAt = maxIso(updatedAt, row.updatedAt);
                 projects.push({
                   id: row.projectId,
+                  kind: row.kind,
                   title: row.title,
                   workspaceRoot: row.workspaceRoot,
                   projectMetadataDir: row.projectMetadataDir,
@@ -2789,6 +2796,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 Effect.map((repositoryIdentity) =>
                   Option.some({
                     id: option.value.projectId,
+                    kind: option.value.kind,
                     title: option.value.title,
                     workspaceRoot: option.value.workspaceRoot,
                     projectMetadataDir: option.value.projectMetadataDir,
@@ -3284,9 +3292,28 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           a.id.localeCompare(b.id),
       );
       const checkpoint = backgroundWorkCheckpoint(orderedEvidence);
+      // Read after the window: a cwd that moved since is the one the next turn runs in.
+      const project =
+        thread.worktreePath === null
+          ? Option.getOrUndefined(
+              yield* getActiveProjectRowById({ projectId: thread.projectId }).pipe(
+                Effect.mapError(
+                  toPersistenceSqlOrDecodeError(
+                    "ProjectionSnapshotQuery.getThreadWindow:getProject:query",
+                    "ProjectionSnapshotQuery.getThreadWindow:getProject:decodeRow",
+                  ),
+                ),
+              ),
+            )
+          : undefined;
+      const workspaceCwd = resolveThreadWorkspaceCwd({
+        thread,
+        projects: project ? [{ id: project.projectId, workspaceRoot: project.workspaceRoot }] : [],
+      });
       return {
         snapshotSequence: computeSnapshotSequence(stateRows),
         thread: checkpoint ? { ...thread, activities: [...thread.activities, checkpoint] } : thread,
+        ...(workspaceCwd ? { workspaceCwd } : {}),
         history: {
           messages: createdAtHistoryPageInfo({
             threadId: input.threadId,

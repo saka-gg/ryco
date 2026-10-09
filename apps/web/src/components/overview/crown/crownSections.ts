@@ -3,6 +3,7 @@ import {
   CircleCheckIcon,
   CloudUploadIcon,
   FileDiffIcon,
+  FolderGit2Icon,
   GitBranchIcon,
   GitPullRequestIcon,
   NotebookPenIcon,
@@ -17,7 +18,15 @@ import {
  */
 
 /** A detail view the card / flyout can show. */
-export type CrownSection = "branch" | "changes" | "checks" | "plan" | "agents" | "pr" | "notes";
+export type CrownSection =
+  | "branch"
+  | "changes"
+  | "checks"
+  | "plan"
+  | "agents"
+  | "pr"
+  | "notes"
+  | "project";
 
 /** A rail button. `ship` (push) opens the branch section. */
 export type CrownRailKey = CrownSection | "ship";
@@ -48,6 +57,8 @@ export interface CrownRailItem {
   readonly requiresGit: boolean;
   /** Notes ride on the server's `worktreeNotes` capability (Stage 2). */
   readonly requiresNotes: boolean;
+  /** Only a "No project" chat this client can turn into a project offers it. */
+  readonly requiresChat?: boolean;
 }
 
 export const CROWN_RAIL_ITEMS: ReadonlyArray<CrownRailItem> = [
@@ -122,6 +133,17 @@ export const CROWN_RAIL_ITEMS: ReadonlyArray<CrownRailItem> = [
     requiresNotes: true,
   },
   {
+    key: "project",
+    section: "project",
+    label: "Turn into project",
+    icon: FolderGit2Icon,
+    glyph: "icon",
+    group: "tools",
+    requiresGit: false,
+    requiresNotes: false,
+    requiresChat: true,
+  },
+  {
     key: "ship",
     section: "branch",
     label: "Push",
@@ -161,9 +183,13 @@ export function crownSectionForRailKey(key: CrownRailKey): CrownSection {
 export function visibleCrownRailItems(input: {
   readonly isGitRepo: boolean;
   readonly notesAvailable: boolean;
+  /** The thread is a "No project" chat this client can turn into a project. */
+  readonly chatAvailable?: boolean;
 }): ReadonlyArray<CrownRailItem> {
   return CROWN_RAIL_ITEMS.filter(
     (item) =>
-      (!item.requiresGit || input.isGitRepo) && (!item.requiresNotes || input.notesAvailable),
+      (!item.requiresGit || input.isGitRepo) &&
+      (!item.requiresNotes || input.notesAvailable) &&
+      (!item.requiresChat || input.chatAvailable === true),
   );
 }

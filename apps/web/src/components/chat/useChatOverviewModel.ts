@@ -588,7 +588,8 @@ export function useChatOverviewModel(input: ChatOverviewModelInput): ChatOvervie
       changes: overviewChanges,
       overviewItems,
       pullRequest: overviewPullRequest,
-      onRefreshPullRequest: handleRefreshPullRequest,
+      // Without a checkout (a chat folder) there is no source control to refresh.
+      onRefreshPullRequest: gitCwd !== null ? handleRefreshPullRequest : undefined,
       isRefreshingPullRequest,
       subagents: threadSubagents,
       sourceControlActions: sourceControlActions(detectedChangeRequest),

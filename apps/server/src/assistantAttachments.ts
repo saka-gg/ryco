@@ -84,6 +84,22 @@ export function parseAssistantAttachments(text: string): {
   return { text: output.join("\n").trim(), files, errors };
 }
 
+/** A reply's delivery request, or `undefined` when it has no actionable top-level fence. */
+export function parseAssistantDelivery(
+  text: string,
+): ReturnType<typeof parseAssistantAttachments> | undefined {
+  if (!text.includes("ryco-attachments")) return undefined;
+  const parsed = parseAssistantAttachments(text);
+  return parsed.files.length > 0 || parsed.errors.length > 0 ? parsed : undefined;
+}
+
+/**
+ * The visible text of a delivered reply: its prose, then one paragraph per delivery notice. A
+ * reply that was only a manifest keeps a single space so the message is never empty.
+ */
+export const formatAssistantDeliveryText = (text: string, notices: ReadonlyArray<string>): string =>
+  [text, ...notices].filter(Boolean).join("\n\n") || " ";
+
 const isInside = (root: string, candidate: string) => {
   const relative = path.relative(root, candidate);
   return (

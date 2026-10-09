@@ -1,4 +1,4 @@
-import { IconGitBranch, IconGitFork } from "@tabler/icons-react-native";
+import { IconFolder, IconGitBranch, IconGitFork, IconMessage } from "@tabler/icons-react-native";
 import { ProjectFavicon } from "../../components/ProjectFavicon";
 import { useThemeColor } from "../../lib/useThemeColor";
 import { DeviceIcon } from "../../components/DeviceIcon";
@@ -57,12 +57,13 @@ export function InboxThreadRow(props: {
 }) {
   const row = props.row;
   const iconColor = useThemeColor("--color-icon-subtle");
-  const WorkspaceIcon = row.isWorktree ? IconGitFork : IconGitBranch;
+  // A chat works in one plain folder: no branch or worktree glyph to imply Git.
+  const WorkspaceIcon = row.isChat ? IconFolder : row.isWorktree ? IconGitFork : IconGitBranch;
   const showStatus = row.state !== "idle" && row.state !== "settled";
   const accessibilityLabel = [
     row.title,
     row.contextLabel,
-    row.isWorktree ? "Worktree" : "Original directory",
+    row.isChat ? null : row.isWorktree ? "Worktree" : "Original directory",
     row.statusLabel,
     row.roleLabel,
     row.changeRequest?.accessibilityLabel,
@@ -97,13 +98,19 @@ export function InboxThreadRow(props: {
         </Text>
       </View>
       <View className="flex-row items-center gap-1.5">
-        <ProjectFavicon
-          environmentId={row.environmentId}
-          projectId={row.project?.id}
-          projectTitle={row.projectLabel}
-          customAvatarContentHash={row.project?.customAvatarContentHash}
-          size={16}
-        />
+        {row.isChat ? (
+          <View className="h-4 w-4 items-center justify-center">
+            <IconMessage size={13} strokeWidth={1.75} color={iconColor as string} />
+          </View>
+        ) : (
+          <ProjectFavicon
+            environmentId={row.environmentId}
+            projectId={row.project?.id}
+            projectTitle={row.projectLabel}
+            customAvatarContentHash={row.project?.customAvatarContentHash}
+            size={16}
+          />
+        )}
         <Text
           className="min-w-0 flex-1 font-ryco-medium text-xs text-foreground-muted"
           numberOfLines={1}

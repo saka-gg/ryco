@@ -689,6 +689,7 @@ function toShellSnapshot(snapshot: OrchestrationReadModel) {
     projects: snapshot.projects.map((project) => ({
       id: project.id,
       title: project.title,
+      ...(project.kind ? { kind: project.kind } : {}),
       workspaceRoot: project.workspaceRoot,
       repositoryIdentity: project.repositoryIdentity ?? null,
       defaultModelSelection: project.defaultModelSelection,

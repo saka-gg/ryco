@@ -99,7 +99,8 @@ html:not(.dark) .crown-mat {
   animation: crown-face-logo-in var(--crown-dur-logo) var(--crown-ease-out);
 }
 
-.crown-face-logo > .crown-face-folder {
+/* No artwork to show: a chat's glyph, or a folder while the project is unknown. */
+.crown-face-logo > .crown-face-glyph {
   width: 16px;
   height: 16px;
   color: var(--muted-foreground);

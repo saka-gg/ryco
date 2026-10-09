@@ -291,6 +291,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           threads.thread_id AS "threadId",
           threads.project_id AS "projectId",
           projects.title AS "projectTitle",
+          projects.kind AS "projectKind",
           projects.deleted_at AS "projectDeletedAt",
           threads.title,
           threads.branch,

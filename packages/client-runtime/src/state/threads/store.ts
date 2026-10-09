@@ -30,6 +30,7 @@ import { isProviderDriverKind, ProviderDriverKind } from "@ryco/contracts";
 import type { ThreadId, TurnId } from "@ryco/contracts";
 import { Schema } from "effect";
 import { resolveModelSlugForProvider } from "@ryco/shared/model";
+import { projectKindOf } from "@ryco/shared/projectKind";
 import { capThreadActivitiesPreservingMilestones } from "@ryco/shared/threadActivity";
 import { checkpointStatusToTurnState, mergeReleasedTurn } from "@ryco/shared/turnFinalization";
 import { create } from "zustand";
@@ -285,6 +286,7 @@ function mapProject(
   return {
     id: project.id,
     environmentId,
+    kind: projectKindOf(project),
     name: project.title,
     cwd: project.workspaceRoot,
     projectMetadataDir: project.projectMetadataDir,
@@ -2250,6 +2252,7 @@ function applyEnvironmentOrchestrationEvent(
       const nextProject = mapProject(
         {
           id: event.payload.projectId,
+          kind: event.payload.kind,
           title: event.payload.title,
           workspaceRoot: event.payload.workspaceRoot,
           projectMetadataDir: event.payload.projectMetadataDir,
@@ -2305,6 +2308,7 @@ function applyEnvironmentOrchestrationEvent(
       }
       const nextProject: Project = {
         ...project,
+        ...(event.payload.kind !== undefined ? { kind: event.payload.kind } : {}),
         ...(event.payload.title !== undefined ? { name: event.payload.title } : {}),
         ...(event.payload.workspaceRoot !== undefined ? { cwd: event.payload.workspaceRoot } : {}),
         ...(event.payload.projectMetadataDir !== undefined

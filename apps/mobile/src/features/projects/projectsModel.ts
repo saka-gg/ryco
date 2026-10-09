@@ -4,6 +4,7 @@ import type {
   SidebarWorktreeSummary,
 } from "@ryco/client-runtime/state/threads";
 import type { EnvironmentId, ProjectId } from "@ryco/contracts";
+import { excludeChatProjects } from "@ryco/shared/projectKind";
 
 import {
   deriveLogicalProjectKey,
@@ -218,6 +219,9 @@ function claimKey(used: Set<string>, preferred: string, fallback: string): strin
  * Ambiguity is judged on the UNFILTERED catalog: a query that happens to hide
  * one of two same-machine checkouts must not manufacture a merge the full view
  * refuses — the pairing is no less ambiguous for being filtered out of sight.
+ *
+ * "No project" chats are never rows: a chat's project is its Ryco-managed folder,
+ * not a project to open, and its thread already lives in the inbox.
  */
 export function buildProjectRows(input: {
   readonly projects: ReadonlyArray<Project>;
@@ -229,6 +233,7 @@ export function buildProjectRows(input: {
   readonly groupingMode: ProjectGroupingMode;
 }): ReadonlyArray<ProjectListRow> {
   const query = input.query?.trim().toLocaleLowerCase() ?? "";
+  const projects = excludeChatProjects(input.projects);
   const environmentsById = new Map<EnvironmentId, ProjectEnvironment>();
   for (const environment of input.environments) {
     environmentsById.set(environment.environmentId, environment);
@@ -250,7 +255,7 @@ export function buildProjectRows(input: {
   }
 
   const unfilteredCountByKeyAndEnvironment = new Map<string, Map<EnvironmentId, number>>();
-  for (const project of input.projects) {
+  for (const project of projects) {
     const logicalKey = deriveLogicalProjectKey(project, { groupingMode: input.groupingMode });
     const byEnvironment =
       unfilteredCountByKeyAndEnvironment.get(logicalKey) ?? new Map<EnvironmentId, number>();
@@ -263,7 +268,7 @@ export function buildProjectRows(input: {
   }
 
   const membersByLogicalKey = new Map<string, ProjectMember[]>();
-  for (const project of input.projects) {
+  for (const project of projects) {
     if (input.nodeScope && project.environmentId !== input.nodeScope) continue;
     // A merged row renders the repository identity as its title, so the title
     // must be searchable — not only the members' own names and paths.

@@ -311,6 +311,31 @@ it.effect("falls back to a non-origin remote when origin is not configured", () 
   }),
 );
 
+it.effect("explains a checkout without a recognized host when an operation needs one", () =>
+  Effect.gen(function* () {
+    // A promoted chat's folder: a git repository that has no remote yet.
+    const registry = yield* makeRegistry({ remotes: [] });
+
+    const provider = yield* registry.resolve({ cwd: "/repo" });
+    assert.strictEqual(provider.kind, "unknown");
+
+    const detailOf = (error: SourceControlProviderError) => error.detail;
+    const expected =
+      "This repository has no recognized source control host: it has no remote yet, or its remote is on an unsupported host.";
+    const createIssue = yield* provider
+      .createIssue({ cwd: "/repo", title: "Bug", body: "Details" })
+      .pipe(Effect.flip);
+    assert.strictEqual(detailOf(createIssue), expected);
+    // The registry stays strict for every operation: the ws list reads answer empty for
+    // `unknown` themselves, so server flows that list before mutating (create a PR) still
+    // stop here instead of continuing as if the host had no change requests.
+    const listChangeRequests = yield* provider
+      .listChangeRequests({ cwd: "/repo", headSelector: "feature/x", state: "open" })
+      .pipe(Effect.flip);
+    assert.strictEqual(detailOf(listChangeRequests), expected);
+  }),
+);
+
 it.effect("dispatches listIssues to the GitHub provider for GitHub remotes", () =>
   Effect.gen(function* () {
     const called = yield* Ref.make(false);

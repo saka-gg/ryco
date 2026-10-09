@@ -50,6 +50,7 @@ import {
   CODEX_PLAN_MODE_DEVELOPER_INSTRUCTIONS,
 } from "../CodexDeveloperInstructions.ts";
 import { appendProjectCustomSystemPrompt } from "../ProjectCustomSystemPrompt.ts";
+import { isMissingConversationError } from "../resumeFailure.ts";
 import {
   createProcessDeviceToolBinding,
   type DeviceToolBinding,
@@ -65,14 +66,6 @@ const BENIGN_ERROR_LOG_SNIPPETS = [
   "state db missing rollout path for thread",
   "state db record_discrepancy: find_thread_path_by_id_str_in_subdir, falling_back",
 ];
-const RECOVERABLE_THREAD_RESUME_ERROR_SNIPPETS = [
-  "not found",
-  "missing thread",
-  "no such thread",
-  "unknown thread",
-  "does not exist",
-];
-
 export const CodexResumeCursorSchema = Schema.Struct({
   threadId: Schema.String,
 });
@@ -584,12 +577,12 @@ function classifyCodexStderrLine(rawLine: string): { readonly message: string } 
   return { message: line };
 }
 
+/** A Codex thread's history is its rollout: "no rollout found for thread id …". */
+const CODEX_CONVERSATION_NOUNS = ["thread", "rollout"] as const;
+
+/** A `thread/resume` failure that means the Codex thread itself is gone. */
 export function isRecoverableThreadResumeError(error: unknown): boolean {
-  const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
-  if (!message.includes("thread")) {
-    return false;
-  }
-  return RECOVERABLE_THREAD_RESUME_ERROR_SNIPPETS.some((snippet) => message.includes(snippet));
+  return isMissingConversationError(error, CODEX_CONVERSATION_NOUNS);
 }
 
 type CodexThreadOpenResponse =

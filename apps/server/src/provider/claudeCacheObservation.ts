@@ -31,6 +31,8 @@ export function observeClaudeCache(input: {
   messageId: string;
   model: string;
   modelSelection?: ModelSelection;
+  /** The runtime's working directory, where Claude keeps this native conversation. */
+  cwd?: string;
   runtimeSessionId: RuntimeSessionId;
   providerInstanceId: ProviderInstanceId;
   observedAt: string;
@@ -60,6 +62,7 @@ export function observeClaudeCache(input: {
     providerInstanceId: input.providerInstanceId,
     model: input.model,
     ...(input.modelSelection ? { modelSelection: input.modelSelection } : {}),
+    ...(input.cwd ? { cwd: input.cwd } : {}),
     messageId: input.messageId,
     directInputTokens: counts.directInputTokens,
     cacheReadInputTokens: counts.cacheReadInputTokens,

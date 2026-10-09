@@ -57,6 +57,7 @@ vi.mock("../GitActionsControl", () => ({ default: () => null, GitThreadSync: () 
 vi.mock("../BranchToolbarBranchSelector", () => ({ BranchToolbarBranchSelector: () => null }));
 vi.mock("../overview/crown/CrownOverview", () => ({ CrownOverview: () => null }));
 vi.mock("../overview/notes/useWorktreeNotes", () => ({ useWorktreeNotes: () => undefined }));
+vi.mock("./ChatProjectActions", () => ({ usePromoteChatBinding: () => undefined }));
 vi.mock("../PlanSidebar", () => ({
   default: ({ pullRequest }: { pullRequest: { title: string } | null }) => (
     <div>{pullRequest?.title}</div>

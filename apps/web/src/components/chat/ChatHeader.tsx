@@ -13,6 +13,7 @@ import { OpenInPicker } from "./OpenInPicker";
 import { usePrimaryEnvironmentId } from "../../environments/primary";
 import { HostedNodeMenu } from "../hostedHub/HostedConnectionControls";
 import { ChatHeaderBar } from "./ChatHeaderBar";
+import type { ChatProjectTarget } from "./ChatProjectActions";
 import type { WorktreeOriginLike } from "./ChatHeaderBreadcrumb.logic";
 import { HEADER_CHROME_ICON_BUTTON_CLASS_NAME } from "./headerChrome";
 import type { LinkedWorktreeItem } from "../worktrees/LinkedWorktreeItemDialog";
@@ -24,6 +25,8 @@ interface ChatHeaderProps {
   activeThreadTitle: string;
   activeProjectName: string | undefined;
   isGitRepo: boolean;
+  /** The "No project" chat this thread lives in, if any (chat actions replace Git chrome). */
+  chatProject?: ChatProjectTarget | null;
   openInCwd: string | null;
   activeProjectScripts: ProjectScript[] | undefined;
   preferredScriptId: string | null;
@@ -59,13 +62,17 @@ interface ChatHeaderProps {
   onDeleteProjectScript: (scriptId: string) => Promise<void>;
 }
 
+/**
+ * "Open in" needs a folder on this machine. The project's name is no proxy: an
+ * unsent chat draft is already labelled "No project" but has no folder yet.
+ */
 export function shouldShowOpenInPicker(input: {
-  readonly activeProjectName: string | undefined;
+  readonly openInCwd: string | null;
   readonly activeThreadEnvironmentId: EnvironmentId;
   readonly primaryEnvironmentId: EnvironmentId | null;
 }): boolean {
   return (
-    Boolean(input.activeProjectName) &&
+    input.openInCwd !== null &&
     input.primaryEnvironmentId !== null &&
     input.activeThreadEnvironmentId === input.primaryEnvironmentId
   );
@@ -76,7 +83,7 @@ export const ChatHeader = memo(function ChatHeader(props: ChatHeaderProps) {
   useDevPropDiff(props as unknown as Record<string, unknown>, "ChatHeader");
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const showOpenInPicker = shouldShowOpenInPicker({
-    activeProjectName: props.activeProjectName,
+    openInCwd: props.openInCwd,
     activeThreadEnvironmentId: props.activeThreadEnvironmentId,
     primaryEnvironmentId,
   });
@@ -159,6 +166,7 @@ export const ChatHeader = memo(function ChatHeader(props: ChatHeaderProps) {
       <ChatHeaderBar
         projectName={props.activeProjectName}
         isGitRepo={props.isGitRepo}
+        chatProject={props.chatProject ?? null}
         worktreeBranch={props.worktreeBranch}
         worktreeTitle={props.worktreeTitle}
         worktreeOrigin={props.worktreeOrigin}

@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useRef, useState, type ReactNode } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { ProjectId } from "@ryco/contracts";
+import { excludeChatProjects } from "@ryco/shared/projectKind";
 import {
   parseScopedThreadKey,
   scopedProjectKey,
@@ -132,7 +133,9 @@ export function PhoneHome() {
   const orderedProjects = useMemo(
     () =>
       orderItemsByPreferredIds({
-        items: projects,
+        // Chats are not projects: never a row here or a "New thread" target, as
+        // in every other project list.
+        items: excludeChatProjects(projects),
         preferredIds: projectOrder,
         getId: getProjectOrderKey,
       }),

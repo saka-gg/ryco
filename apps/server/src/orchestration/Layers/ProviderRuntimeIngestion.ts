@@ -5,7 +5,8 @@ import { ServerConfig } from "../../config.ts";
 import { WorkspaceAccessPolicy } from "../../workspace/Services/WorkspaceAccessPolicy.ts";
 import {
   AssistantAttachmentError,
-  parseAssistantAttachments,
+  formatAssistantDeliveryText,
+  parseAssistantDelivery,
   persistAssistantAttachment,
 } from "../../assistantAttachments.ts";
 import {
@@ -46,6 +47,7 @@ import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
 import { ProjectionTurnRepositoryLive } from "../../persistence/Layers/ProjectionTurns.ts";
 import { isGitRepository } from "../../git/Utils.ts";
+import { resolveThreadWorkspaceCwd } from "../../checkpointing/Utils.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ThreadBackgroundLivenessService } from "../ThreadBackgroundLiveness.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
@@ -68,6 +70,12 @@ import {
   type ReasoningSegment,
 } from "../reasoningActivity.ts";
 import { TURN_FINALIZATION_REASON, runtimeTerminalTurnState } from "../turnFinalization.ts";
+import {
+  expectedRuntimeOf,
+  isSupersededRuntimeSessionSet,
+  runtimeSessionMismatch,
+  type RuntimeSessionMismatch,
+} from "../runtimeSessionFence.ts";
 import {
   usageLimitIdForTurn,
   usageLimitRecordCommandId,
@@ -1831,9 +1839,9 @@ const make = Effect.gen(function* () {
               : (yield* resolveThreadDetail(input.threadId))?.messages.find(
                   (message) => message.id === input.messageId,
                 );
-            if (!message?.streaming || !message.text.includes("ryco-attachments")) return undefined;
-            const parsed = parseAssistantAttachments(message.text);
-            if (parsed.files.length === 0 && parsed.errors.length === 0) return undefined;
+            if (!message?.streaming) return undefined;
+            const parsed = parseAssistantDelivery(message.text);
+            if (!parsed) return undefined;
             const context = Option.getOrUndefined(
               yield* projectionSnapshotQuery.getThreadCheckpointContext(input.threadId),
             );
@@ -1870,10 +1878,7 @@ const make = Effect.gen(function* () {
                 );
               }
             }
-            return {
-              text: [parsed.text, ...parsed.errors].filter(Boolean).join("\n\n") || " ",
-              attachments,
-            };
+            return { text: formatAssistantDeliveryText(parsed.text, parsed.errors), attachments };
           }).pipe(Effect.catch(() => Effect.succeed(undefined)));
         }
         yield* orchestrationEngine.dispatch({
@@ -2279,6 +2284,50 @@ const make = Effect.gen(function* () {
       ),
     );
 
+  const reportStaleRuntimeEvent = (
+    event: ProviderRuntimeEvent,
+    reason: RuntimeSessionMismatch | "runtime-session-superseded",
+  ) =>
+    Effect.gen(function* () {
+      yield* increment(providerRuntimeStaleEventsTotal, {
+        provider: event.provider,
+        eventType: event.type,
+        reason,
+      });
+      yield* Effect.logDebug("provider.runtime-event.stale-dropped", {
+        provider: event.provider,
+        eventType: event.type,
+        reason,
+      });
+    });
+
+  /**
+   * A session update derived from `event`, fenced to the runtime that emitted it. False when
+   * that runtime was replaced or stopped after the stale-event pre-check: the event is then as
+   * stale as one the pre-check drops, and nothing more of it may apply.
+   */
+  const dispatchRuntimeSessionSet = (
+    event: ProviderRuntimeEvent,
+    command: Omit<
+      Extract<OrchestrationCommand, { type: "thread.session.set" }>,
+      "type" | "expectedRuntime"
+    >,
+  ) =>
+    orchestrationEngine
+      .dispatch({
+        type: "thread.session.set",
+        ...command,
+        expectedRuntime: expectedRuntimeOf(event),
+      })
+      .pipe(
+        Effect.as(true),
+        Effect.catchCause((cause) =>
+          isSupersededRuntimeSessionSet(cause)
+            ? reportStaleRuntimeEvent(event, "runtime-session-superseded").pipe(Effect.as(false))
+            : Effect.failCause(cause),
+        ),
+      );
+
   const processRuntimeEvent = (event: ProviderRuntimeEvent) =>
     Effect.gen(function* () {
       if (
@@ -2303,32 +2352,11 @@ const make = Effect.gen(function* () {
       const thread = yield* resolveThreadShell(event.threadId);
       if (!thread) return;
 
+      // A fast pre-check only: lifecycle updates are fenced again atomically by the decider.
       const activeSession = thread.session;
-      const instanceMatches =
-        activeSession?.providerInstanceId === undefined
-          ? event.providerInstanceId === undefined
-          : event.providerInstanceId === activeSession.providerInstanceId;
-      const runtimeMatches =
-        activeSession?.runtimeSessionId === undefined
-          ? event.runtimeSessionId === undefined
-          : event.runtimeSessionId === activeSession.runtimeSessionId;
-      if (!activeSession || !instanceMatches || !runtimeMatches) {
-        const reason = !activeSession
-          ? "missing-active-session"
-          : !instanceMatches
-            ? "provider-instance-mismatch"
-            : "runtime-session-mismatch";
-        yield* increment(providerRuntimeStaleEventsTotal, {
-          provider: event.provider,
-          eventType: event.type,
-          reason,
-        });
-        yield* Effect.logDebug("provider.runtime-event.stale-dropped", {
-          provider: event.provider,
-          eventType: event.type,
-          reason,
-        });
-        return;
+      const mismatch = runtimeSessionMismatch(activeSession, expectedRuntimeOf(event));
+      if (mismatch !== null || activeSession === null) {
+        return yield* reportStaleRuntimeEvent(event, mismatch ?? "missing-active-session");
       }
 
       let loadedThreadDetail: OrchestrationThread | null | undefined;
@@ -2575,8 +2603,7 @@ const make = Effect.gen(function* () {
             );
           }
 
-          yield* orchestrationEngine.dispatch({
-            type: "thread.session.set",
+          const applied = yield* dispatchRuntimeSessionSet(event, {
             commandId: providerCommandId(event, "thread-session-set"),
             threadId: thread.id,
             session: {
@@ -2600,6 +2627,7 @@ const make = Effect.gen(function* () {
             ...(turnOutcome ? { turnOutcome } : {}),
             createdAt: now,
           });
+          if (!applied) return;
         }
       }
 
@@ -2981,8 +3009,7 @@ const make = Effect.gen(function* () {
         // the turn is finalized even when no terminal turn event follows.
         const usageLimitTurnId = event.payload.class === "usage_limit" ? eventTurnId : undefined;
         if (shouldApplyRuntimeError) {
-          yield* orchestrationEngine.dispatch({
-            type: "thread.session.set",
+          const applied = yield* dispatchRuntimeSessionSet(event, {
             commandId: providerCommandId(event, "runtime-error-session-set"),
             threadId: thread.id,
             session: {
@@ -3017,6 +3044,7 @@ const make = Effect.gen(function* () {
                   },
             createdAt: now,
           });
+          if (!applied) return;
         }
         yield* clearSubagentMessageBuffersForThread(thread.id);
         // After the session-set and the buffer clear: a failed or duplicate record must
@@ -3405,7 +3433,18 @@ const make = Effect.gen(function* () {
             Effect.gen(function* () {
               const thread = yield* resolveThreadShell(threadId);
               if (!thread?.session) return;
-              const snapshot = yield* providerService.readThreadHistory!(threadId);
+              // Where the thread runs now: after a move the binding still records the old folder.
+              const project =
+                thread.worktreePath === null
+                  ? Option.getOrUndefined(
+                      yield* projectionSnapshotQuery.getProjectShellById(thread.projectId),
+                    )
+                  : undefined;
+              const cwd = resolveThreadWorkspaceCwd({ thread, projects: project ? [project] : [] });
+              const snapshot = yield* providerService.readThreadHistory!(
+                threadId,
+                cwd ? { cwd } : {},
+              );
               if (Option.isNone(snapshot)) return;
               const done = yield* Deferred.make<void>();
               yield* worker.enqueue({

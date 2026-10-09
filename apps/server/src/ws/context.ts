@@ -3,10 +3,12 @@ import { LocalTaskService } from "../tasks/LocalTaskService.ts";
 import { WorktreeNotesService } from "../notes/WorktreeNotesService.ts";
 import { DailyRecapQuery } from "../statistics/DailyRecapQuery.ts";
 import { StorageService } from "../storage/StorageService.ts";
+import { storagePathBlocker } from "../storage/lifecycle.ts";
 import { WorkspaceLifecycle } from "../workspace/WorkspaceLifecycle.ts";
 import { SessionImport } from "../imports/SessionImport.ts";
 import { AutomationCentre } from "../agentControl/Services/AutomationCentre.ts";
-import { Cause, Effect, FileSystem, Metric, Option, Schema, Stream } from "effect";
+import { Cause, Duration, Effect, FileSystem, Metric, Option, Schema, Stream } from "effect";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 import {
   AuthSessionId,
   USAGE_CONTRACT_VERSION,
@@ -17,6 +19,7 @@ import {
   type OrchestrationCommand,
   OrchestrationDispatchCommandError,
   ProjectId,
+  type ServerChatsCapability,
   type ServerProvider,
   type ThreadId,
   SourceControlProviderError,
@@ -69,12 +72,23 @@ import { ProjectAvatarStore } from "../project/Services/ProjectAvatarStore.ts";
 import { ProjectSetupScriptRunner } from "../project/Services/ProjectSetupScriptRunner.ts";
 import { RepositoryIdentityResolver } from "../project/Services/RepositoryIdentityResolver.ts";
 import { resolveConfiguredWorktreeRoot } from "../project/worktreeRoot.ts";
+import { ChatFolders, sameChatsCapability } from "../project/chatFolders.ts";
 import { resolveWorktreeCheckoutPath } from "../project/worktreeCheckoutPaths.ts";
 import { resolveBootstrapPreferences } from "./context/bootstrapPreferences.ts";
+import {
+  type ChatBootstrapDependencies,
+  classifyChatBootstrapFailure,
+  type PreparedChatProject,
+  prepareChatProject,
+  releasePreparedChatFolder,
+} from "./context/chatBootstrap.ts";
 import { ServerEnvironment } from "../environment/Services/ServerEnvironment.ts";
 import { ServerAuth } from "../auth/Services/ServerAuth.ts";
 import { OrchestrationCommandReceiptRepository } from "../persistence/Services/OrchestrationCommandReceipts.ts";
 import { ProjectionProjectRepository } from "../persistence/Services/ProjectionProjects.ts";
+import { ProjectionThreadRepository } from "../persistence/Services/ProjectionThreads.ts";
+import { ProjectRelocationRepository } from "../persistence/Services/ProjectRelocations.ts";
+import { GitVcsDriver } from "../vcs/GitVcsDriver.ts";
 import { ProjectionWorktreeRepository } from "../persistence/Services/ProjectionWorktrees.ts";
 import { refreshWorktreeSourceControlState } from "../sourceControl/refreshWorktreeSourceControlState.ts";
 import * as SourceControlDiscoveryLayer from "../sourceControl/SourceControlDiscovery.ts";
@@ -205,6 +219,19 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
     ]);
     const startup = yield* ServerRuntimeStartup;
     const projectionProjects = yield* Effect.serviceOption(ProjectionProjectRepository);
+    const projectionThreads = yield* Effect.serviceOption(ProjectionThreadRepository);
+    // Optional for the route-test reason above; without it the node offers no chats.
+    const chatFolders = yield* Effect.serviceOption(ChatFolders);
+    // Optional for the same route-test reason: the chat-promotion journal and the Git driver for
+    // a promoted project's first commit.
+    const projectRelocations = yield* Effect.serviceOption(ProjectRelocationRepository);
+    // Storage admission (the fence turn, session and terminal starts pass), for promotion to judge
+    // its destination. Absent only where persistence is, as for the journal above.
+    const storageAdmission = Option.map(
+      yield* Effect.serviceOption(SqlClient.SqlClient),
+      (sql) => (canonicalPath: string) => storagePathBlocker(sql, canonicalPath),
+    );
+    const gitDriver = Option.getOrUndefined(yield* Effect.serviceOption(GitVcsDriver));
     const projectFaviconResolver = yield* Effect.serviceOption(ProjectFaviconResolver);
     const projectAvatarStore = yield* Effect.serviceOption(ProjectAvatarStore);
     const workspaceEntries = yield* WorkspaceEntries;
@@ -229,6 +256,13 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
     const localDiagnosticsMetrics = yield* LocalDiagnosticsMetrics;
     const advertisedEndpointRegistry = yield* AdvertisedEndpointRegistry;
     const serverCommandId = (tag: string) => CommandId.make(`server:${tag}:${crypto.randomUUID()}`);
+    const chatBootstrap: ChatBootstrapDependencies = {
+      chatFolders: Option.getOrUndefined(chatFolders),
+      projects: projectionSnapshotQuery,
+      projectRecords: Option.getOrUndefined(projectionProjects),
+      dispatch: orchestrationEngine.dispatch,
+      serverCommandId,
+    };
     const linkedSourceControlRefreshAtByProject = new Map<string, number>();
 
     const authorize = (access: WsRpcAccess, method: string) =>
@@ -411,6 +445,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
         let targetWorktreePath = bootstrap?.createThread?.worktreePath ?? null;
         let shouldRunSetupScript = bootstrap?.runSetupScript ?? false;
         let targetWorktreeId: WorktreeId | null = null;
+        let preparedChat: PreparedChatProject | undefined;
 
         const cleanupCreatedThread = () =>
           Effect.gen(function* () {
@@ -553,6 +588,13 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
             : Effect.void;
 
         const bootstrapProgram = Effect.gen(function* () {
+          // A chat's project must exist before preferences resolve against it.
+          if (bootstrap?.createChatProject && bootstrap.createThread) {
+            preparedChat = yield* prepareChatProject(chatBootstrap, {
+              chat: bootstrap.createChatProject,
+              createThread: bootstrap.createThread,
+            });
+          }
           const resolved = yield* resolveBootstrapPreferences({
             bootstrap,
             settings: serverSettings,
@@ -718,7 +760,23 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
             if (Cause.hasInterruptsOnly(cause)) {
               return Effect.fail(dispatchError);
             }
-            return cleanupCreatedThread().pipe(Effect.flatMap(() => Effect.fail(dispatchError)));
+            const chatProjectId = bootstrap?.createChatProject?.projectId;
+            return cleanupCreatedThread().pipe(
+              Effect.andThen(
+                Effect.suspend(() =>
+                  preparedChat
+                    ? releasePreparedChatFolder(chatBootstrap, preparedChat)
+                    : Effect.void,
+                ),
+              ),
+              // Once cleanup settled: a chat retired meanwhile needs a fresh id, not a retry.
+              Effect.andThen(
+                chatProjectId === undefined
+                  ? Effect.succeed(dispatchError)
+                  : classifyChatBootstrapFailure(chatBootstrap, chatProjectId, dispatchError),
+              ),
+              Effect.flatMap(Effect.fail),
+            );
           }),
         );
       });
@@ -773,6 +831,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       const environment = yield* serverEnvironment.getDescriptor;
       const auth = yield* serverAuth.getDescriptor();
       const localMetrics = yield* loadDiagnosticsMetrics;
+      const chats = Option.isSome(chatFolders) ? yield* chatFolders.value.capability : undefined;
 
       return {
         environment,
@@ -781,6 +840,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
         ...(config.workspaceAccessRoot !== undefined
           ? { workspaceAccessRoot: config.workspaceAccessRoot }
           : {}),
+        ...(chats !== undefined ? { chats } : {}),
         usageContractVersion: USAGE_CONTRACT_VERSION,
         keybindingsConfigPath: config.keybindingsConfigPath,
         keybindings: keybindingsConfig.keybindings,
@@ -799,6 +859,51 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
         settings,
       };
     });
+
+    /**
+     * Full config snapshots for each chats-capability change after the one a subscriber already
+     * received, e.g. when the Chats folder setting moves the root into a Git repository.
+     */
+    const streamChatsConfigSnapshots = (received: ServerChatsCapability | undefined) =>
+      Option.match(chatFolders, {
+        onNone: () => Stream.empty,
+        onSome: (folders) =>
+          Stream.concat(Stream.make(received), folders.changes).pipe(
+            Stream.changesWith((left, right) => sameChatsCapability(left, right)),
+            Stream.drop(1),
+            // A failed reload skips this update instead of ending the subscriber's config stream.
+            Stream.mapEffect(() =>
+              loadServerConfig.pipe(
+                Effect.map(Option.some),
+                Effect.catch((cause) =>
+                  Effect.logWarning("chats config snapshot skipped", { cause }).pipe(
+                    Effect.as(Option.none()),
+                  ),
+                ),
+              ),
+            ),
+            Stream.filter(Option.isSome),
+            Stream.map(({ value: config }) => ({
+              version: 1 as const,
+              type: "snapshot" as const,
+              config,
+            })),
+          ),
+      });
+
+    /**
+     * Wait, bounded, until cleanup for every thread deletion committed so far has run (provider
+     * sessions stopped, terminals closed). Earlier processes cleaned up their own deletions.
+     */
+    const settleThreadDeletionCleanup = projectionSnapshotQuery.getSnapshotSequence().pipe(
+      Effect.flatMap(({ snapshotSequence }) =>
+        snapshotSequence > orchestrationEngine.bootSequence
+          ? threadDeletionReactor.drainThrough(snapshotSequence)
+          : Effect.void,
+      ),
+      Effect.timeout(Duration.seconds(10)),
+      Effect.ignoreCause({ log: true }),
+    );
 
     const refreshGitStatus = (cwd: string) =>
       vcsStatusBroadcaster
@@ -830,6 +935,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       projectionWorktrees,
       gitWorkflow,
       vcsProvisioning,
+      gitDriver,
       config,
       workspaceAccessPolicy,
       textGeneration,
@@ -916,6 +1022,11 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       serverSettings,
       mcpRegistry,
       projectionProjects,
+      projectionThreads,
+      chatFolders,
+      projectRelocations,
+      storageAdmission,
+      gitDriver,
       projectFaviconResolver,
       projectAvatarStore,
       workspaceEntries,
@@ -938,6 +1049,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       ownerStreamEffect,
       directOwnerStreamEffect,
       serverCommandId,
+      settleThreadDeletionCleanup,
       refreshGitStatus,
       toGitManagerError,
       commandReceipts,
@@ -947,6 +1059,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       makeReplayableShellStream,
       makeReplayableThreadStream,
       loadServerConfig,
+      streamChatsConfigSnapshots,
       loadAdvertisedEndpoints,
       loadDiagnosticsMetrics,
       loadDiagnosticsSnapshot,
