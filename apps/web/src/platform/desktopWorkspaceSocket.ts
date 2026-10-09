@@ -1,5 +1,8 @@
 import type { DesktopBridge, DesktopWorkspaceTransportEvent, EnvironmentId } from "@ryco/contracts";
 
+import { HostedReconnectPolicy } from "@ryco/client-runtime/relay";
+import type { WsProtocolLifecycleHandlers } from "@ryco/client-runtime/rpc";
+
 const CONNECTING = 0;
 const OPEN = 1;
 const CLOSING = 2;
@@ -46,6 +49,9 @@ export class DesktopWorkspaceIpcSocket {
   readonly #bridge: DesktopWorkspaceTransportBridge;
   readonly #transportId: string;
   readonly #listeners = new Map<string, Set<ListenerRegistration>>();
+  readonly #onClose:
+    | ((event: Extract<DesktopWorkspaceTransportEvent, { type: "close" }>) => void)
+    | undefined;
   readonly #unsubscribe: (() => void) | undefined;
   #state = CONNECTING;
 
@@ -53,7 +59,9 @@ export class DesktopWorkspaceIpcSocket {
     readonly url: string;
     readonly transportId: string;
     readonly bridge: DesktopWorkspaceTransportBridge;
+    readonly onClose?: (event: Extract<DesktopWorkspaceTransportEvent, { type: "close" }>) => void;
   }) {
+    this.#onClose = input.onClose;
     this.url = input.url;
     this.#transportId = input.transportId;
     this.#bridge = input.bridge;
@@ -64,6 +72,7 @@ export class DesktopWorkspaceIpcSocket {
     // constructor returns. Activate on the next microtask so a fast main-side
     // refusal cannot settle before those listeners exist.
     void Promise.resolve().then(async () => {
+      if (this.#state !== CONNECTING) return;
       try {
         await input.bridge.activateDesktopWorkspaceTransport?.(input.transportId);
       } catch {
@@ -97,7 +106,13 @@ export class DesktopWorkspaceIpcSocket {
   close(): void {
     if (this.#state === CLOSING || this.#state === CLOSED) return;
     this.#state = CLOSING;
-    this.#bridge.closeDesktopWorkspaceTransport?.(this.#transportId);
+    try {
+      this.#bridge.closeDesktopWorkspaceTransport?.(this.#transportId);
+    } finally {
+      // Prepared handles and failed activations may have no main-side socket
+      // left to acknowledge closure. Always release the renderer listener.
+      this.#accept({ type: "close", transportId: this.#transportId, code: 1000, reason: "" });
+    }
   }
 
   addEventListener(
@@ -134,6 +149,7 @@ export class DesktopWorkspaceIpcSocket {
         this.#emit({ type: "error" });
         return;
       case "close":
+        this.#onClose?.(event);
         this.#state = CLOSED;
         this.#emit({
           type: "close",
@@ -177,6 +193,44 @@ export class DesktopWorkspaceIpcSocketFactory {
   readonly #environmentId: EnvironmentId;
   readonly #bridge: DesktopWorkspaceTransportBridge;
   #pendingTransportId: string | null = null;
+  #generation = 0;
+  #disposed = false;
+  #retryable = true;
+  #retryAfterMs: number | undefined;
+  #currentSocket: DesktopWorkspaceIpcSocket | null = null;
+  readonly #policy = new HostedReconnectPolicy();
+
+  readonly lifecycleHandlers: WsProtocolLifecycleHandlers = {
+    persistentReconnect: true,
+    recordGlobalConnectionState: false,
+    shouldReconnect: () => !this.#disposed && this.#retryable,
+    getReconnectDelayMs: () => this.#policy.nextDelay(this.#retryAfterMs),
+    onOpen: () => {
+      this.#retryAfterMs = undefined;
+      this.#policy.opened();
+    },
+    onClose: () => this.#policy.closed(),
+    isSocketCurrent: (socket) => socket === (this.#currentSocket as unknown),
+    onSessionStart: () => {
+      this.#invalidatePending();
+      this.#retryable = true;
+      this.#retryAfterMs = undefined;
+    },
+    onDispose: () => {
+      this.#disposed = true;
+      this.#invalidatePending();
+    },
+    isTerminalUrlError: () => this.#disposed || !this.#retryable,
+  };
+
+  #invalidatePending(): void {
+    this.#generation += 1;
+    this.#currentSocket = null;
+    if (this.#pendingTransportId) {
+      this.#bridge.closeDesktopWorkspaceTransport?.(this.#pendingTransportId);
+      this.#pendingTransportId = null;
+    }
+  }
 
   constructor(environmentId: EnvironmentId, bridge: DesktopWorkspaceTransportBridge) {
     this.#environmentId = environmentId;
@@ -184,10 +238,19 @@ export class DesktopWorkspaceIpcSocketFactory {
   }
 
   async nextUrl(): Promise<string> {
+    if (this.#disposed || !this.#retryable)
+      throw new Error("Desktop workspace requires attention.");
+    const generation = this.#generation;
     if (!this.#bridge.prepareDesktopWorkspaceTransport) {
       throw new Error("Desktop workspace transport is unavailable.");
     }
     const prepared = await this.#bridge.prepareDesktopWorkspaceTransport(this.#environmentId);
+    if (this.#disposed || generation !== this.#generation) {
+      this.#bridge.closeDesktopWorkspaceTransport?.(prepared.transportId);
+      throw new Error("Desktop workspace transport was cancelled.");
+    }
+    if (this.#pendingTransportId)
+      this.#bridge.closeDesktopWorkspaceTransport?.(this.#pendingTransportId);
     this.#pendingTransportId = prepared.transportId;
     return `ws://desktop-workspace.invalid/${prepared.transportId}`;
   }
@@ -198,6 +261,17 @@ export class DesktopWorkspaceIpcSocketFactory {
     if (!transportId || !url.endsWith(`/${transportId}`)) {
       throw new Error("Desktop workspace transport requires a fresh opaque handle.");
     }
-    return new DesktopWorkspaceIpcSocket({ url, transportId, bridge: this.#bridge });
+    const socket = new DesktopWorkspaceIpcSocket({
+      url,
+      transportId,
+      bridge: this.#bridge,
+      onClose: (event) => {
+        if (this.#currentSocket !== socket) return;
+        this.#retryable = event.retryable ?? true;
+        this.#retryAfterMs = event.retryAfterMs;
+      },
+    });
+    this.#currentSocket = socket;
+    return socket;
   }
 }

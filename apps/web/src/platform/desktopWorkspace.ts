@@ -106,7 +106,13 @@ function retainDesktopWorkspaceScope(
         }
         leaseId = result.leaseId;
         renewal = globalThis.setInterval(() => {
-          void bridge.renewDesktopWorkspaceScope?.(result.leaseId).catch(() => undefined);
+          void bridge.renewDesktopWorkspaceScope?.(result.leaseId).catch(() => {
+            if (released || leaseId !== result.leaseId) return;
+            // Main may have expired this lease while the renderer was asleep.
+            // A mounted consumer still needs demand; acquire a fresh lease.
+            stopLease();
+            reconcile();
+          });
         }, 15_000);
       })
       .catch(() => {
@@ -184,7 +190,10 @@ function adopt(state: DesktopWorkspaceStateProjection): void {
   for (const listener of listeners) listener();
 }
 
-async function applyConnectionCommand(command: DesktopWorkspaceConnectionCommand): Promise<void> {
+async function applyConnectionCommand(
+  command: DesktopWorkspaceConnectionCommand,
+  isCurrent: () => boolean,
+): Promise<void> {
   const primaryEnvironmentId = readPrimaryEnvironmentDescriptor()?.environmentId ?? null;
   const usesDirectLocalConnection =
     primaryEnvironmentId !== null &&
@@ -195,10 +204,12 @@ async function applyConnectionCommand(command: DesktopWorkspaceConnectionCommand
       if (command.delayMs > 0) {
         await new Promise<void>((resolve) => globalThis.setTimeout(resolve, command.delayMs));
       }
+      if (!isCurrent()) return;
       try {
         const connection = connectPrimaryEnvironment();
         if (!connection) throw new Error("Primary environment is unavailable.");
         await connection.ensureBootstrapped();
+        if (!isCurrent()) return;
         await globalThis.window?.desktopBridge
           ?.reportDesktopWorkspaceConnection?.({
             environmentId: command.environmentId,
@@ -206,6 +217,7 @@ async function applyConnectionCommand(command: DesktopWorkspaceConnectionCommand
           })
           .catch(() => undefined);
       } catch (error) {
+        if (!isCurrent()) return;
         await globalThis.window?.desktopBridge
           ?.reportDesktopWorkspaceConnection?.({
             environmentId: command.environmentId,
@@ -225,11 +237,12 @@ async function applyConnectionCommand(command: DesktopWorkspaceConnectionCommand
     return;
   }
 
-  let connection = readEnvironmentConnection(command.environmentId);
   if (command.action === "connect") {
     if (command.delayMs > 0) {
       await new Promise<void>((resolve) => globalThis.setTimeout(resolve, command.delayMs));
     }
+    if (!isCurrent()) return;
+    let connection = readEnvironmentConnection(command.environmentId);
     try {
       if (!connection) {
         const machine = current.machines.find(
@@ -241,16 +254,17 @@ async function applyConnectionCommand(command: DesktopWorkspaceConnectionCommand
           label: machine.label,
         });
       } else {
-        await connection.reconnect();
         await connection.ensureBootstrapped();
       }
+      if (!isCurrent()) return;
       await globalThis.window?.desktopBridge
         ?.reportDesktopWorkspaceConnection?.({
           environmentId: command.environmentId,
-          connected: true,
+          connected: connection.shellSnapshotReadiness.read() !== null,
         })
         .catch(() => undefined);
     } catch (error) {
+      if (!isCurrent()) return;
       await globalThis.window?.desktopBridge
         ?.reportDesktopWorkspaceConnection?.({
           environmentId: command.environmentId,
@@ -261,12 +275,14 @@ async function applyConnectionCommand(command: DesktopWorkspaceConnectionCommand
     }
     return;
   }
+  const connection = readEnvironmentConnection(command.environmentId);
   if (!connection) return;
   if (connection.kind === "primary") {
     await disconnectPrimaryEnvironment();
   } else {
     await disconnectSavedEnvironment(command.environmentId);
   }
+  if (!isCurrent()) return;
   await globalThis.window?.desktopBridge
     ?.reportDesktopWorkspaceConnection?.({
       environmentId: command.environmentId,
@@ -282,10 +298,12 @@ export function startDesktopWorkspaceBridge(): () => void {
   let disposed = false;
   let publishTimer: ReturnType<typeof setTimeout> | null = null;
   let publicationAccountId = current.accountId;
+  const commands = new Map<EnvironmentId, DesktopWorkspaceConnectionCommand>();
   const publications = new Map<EnvironmentId, { fingerprint: string; pending: boolean }>();
   const adoptPublicationScope = (state: DesktopWorkspaceStateProjection) => {
     if (publicationAccountId !== state.accountId) {
       publications.clear();
+      commands.clear();
       publicationAccountId = state.accountId;
     }
     for (const environmentId of publications.keys()) {
@@ -350,7 +368,14 @@ export function startDesktopWorkspaceBridge(): () => void {
     publishLiveMetadata();
   });
   const unsubscribeCommands = bridge.onDesktopWorkspaceConnectionCommand?.((command) => {
-    void applyConnectionCommand(command).catch(() => undefined);
+    if (disposed || commands.get(command.environmentId)?.action === command.action) return;
+    commands.set(command.environmentId, command);
+    const isCurrent = () => !disposed && commands.get(command.environmentId) === command;
+    void applyConnectionCommand(command, isCurrent)
+      .catch(() => undefined)
+      .finally(() => {
+        if (isCurrent()) commands.delete(command.environmentId);
+      });
   });
   const unsubscribeStore = useStore.subscribe(publishLiveMetadata);
   void bridge

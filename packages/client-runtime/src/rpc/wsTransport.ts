@@ -101,7 +101,7 @@ class RpcTransport<Client> {
   private disposed = false;
   private hasReportedTransportDisconnect = false;
   private intentionalCloseDepth = 0;
-  private reconnectChain: Promise<void> = Promise.resolve();
+  private reconnectOperation: Promise<void> | null = null;
   private nextSessionId = 0;
   private activeSessionId = 0;
   private session: TransportSession<Client>;
@@ -310,7 +310,8 @@ class RpcTransport<Client> {
       throw new RpcTransportDisposedError();
     }
 
-    const reconnectOperation = this.reconnectChain.then(async () => {
+    if (this.reconnectOperation) return this.reconnectOperation;
+    const reconnectOperation = Promise.resolve().then(async () => {
       if (this.disposed) {
         throw new RpcTransportDisposedError();
       }
@@ -323,8 +324,12 @@ class RpcTransport<Client> {
       await this.closeSession(previousSession);
     });
 
-    this.reconnectChain = reconnectOperation.catch(() => undefined);
-    await reconnectOperation;
+    this.reconnectOperation = reconnectOperation;
+    try {
+      await reconnectOperation;
+    } finally {
+      this.reconnectOperation = null;
+    }
   }
 
   isHeartbeatFresh(maxAgeMs = 15_000): boolean {
@@ -336,6 +341,7 @@ class RpcTransport<Client> {
       return;
     }
     this.disposed = true;
+    this.lifecycleHandlers?.onDispose?.();
     for (const wake of this.subscriptionRetryWakeups) wake();
     await this.closeSession(this.session);
   }
@@ -349,6 +355,7 @@ class RpcTransport<Client> {
   }
 
   private createSession(): TransportSession<Client> {
+    this.lifecycleHandlers?.onSessionStart?.();
     const sessionId = this.nextSessionId + 1;
     this.nextSessionId = sessionId;
     this.activeSessionId = sessionId;

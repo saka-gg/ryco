@@ -34,6 +34,9 @@ export interface WsProtocolLifecycleHandlers {
   readonly isActive?: () => boolean;
   /** Reject lifecycle events emitted late by a superseded socket in the same transport session. */
   readonly isSocketCurrent?: (socket: globalThis.WebSocket) => boolean;
+  /** Reset attempt-scoped policy when an explicit transport session is created. */
+  readonly onSessionStart?: () => void;
+  readonly onDispose?: () => void;
   readonly onAttempt?: (socketUrl: string) => void;
   readonly onOpen?: () => void;
   readonly onHeartbeatPing?: () => void;
@@ -279,7 +282,7 @@ export function createWsRpcProtocolLayer(
             (persistent
               ? getPersistentWsReconnectDelayMs(retryCount)
               : getWsReconnectDelayMsForRetry(retryCount)) ??
-            0,
+            getPersistentWsReconnectDelayMs(retryCount),
         ),
       ),
   ).pipe(Schedule.while(() => lifecycle.isActive() && (handlers?.shouldReconnect?.() ?? true)));

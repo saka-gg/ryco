@@ -1,6 +1,6 @@
 import * as Crypto from "node:crypto";
 
-import type { EnvironmentId } from "@ryco/contracts";
+import type { DesktopWorkspaceTransportEvent, EnvironmentId } from "@ryco/contracts";
 import type { WorkspaceNativeTrustState } from "@ryco/client-runtime/state/workspace";
 import {
   HostedRelayEngine,
@@ -21,20 +21,7 @@ const MAX_TRANSPORTS = 8;
 const MAX_APPLICATION_FRAME_BYTES = 16 * 1024 * 1024;
 const PREPARED_LIFETIME_MS = 30_000;
 
-export type DesktopWorkspaceTransportEvent =
-  | { readonly type: "open"; readonly transportId: string }
-  | {
-      readonly type: "message";
-      readonly transportId: string;
-      readonly data: Uint8Array;
-    }
-  | { readonly type: "error"; readonly transportId: string }
-  | {
-      readonly type: "close";
-      readonly transportId: string;
-      readonly code: number;
-      readonly reason: string;
-    };
+export type { DesktopWorkspaceTransportEvent } from "@ryco/contracts";
 
 export interface DesktopWorkspaceRelayTarget {
   readonly accountId: string;
@@ -73,6 +60,8 @@ interface PreparedTransport {
   readonly pairingOnly: boolean;
   readonly expiresAt: number;
   active: DesktopWorkspaceRelayConnection | null;
+  activating: boolean;
+  cleanup: () => void;
 }
 
 function opaqueTransportId(): string {
@@ -263,6 +252,8 @@ export class DesktopWorkspaceRelayManager {
       pairingOnly,
       expiresAt: this.#now() + PREPARED_LIFETIME_MS,
       active: null,
+      activating: false,
+      cleanup: () => undefined,
     });
     return transportId;
   }
@@ -270,30 +261,65 @@ export class DesktopWorkspaceRelayManager {
   async activate(transportId: string): Promise<void> {
     this.#prune();
     const prepared = this.#transports.get(transportId);
-    if (!prepared || prepared.active !== null || prepared.expiresAt <= this.#now()) {
+    if (
+      !prepared ||
+      prepared.active !== null ||
+      prepared.activating ||
+      prepared.expiresAt <= this.#now()
+    ) {
       throw new Error("Desktop workspace transport is unavailable.");
     }
+    prepared.activating = true;
+    const isCurrent = () => this.#transports.get(transportId) === prepared;
     let preparation: Extract<DesktopNativeE2eePreparation, { readonly kind: "native" }> | undefined;
     let handshake: DesktopNativeE2eeHandshakeService | undefined;
+    let destroyed = false;
+    const cleanup = () => {
+      if (preparation && handshake && !destroyed) {
+        destroyed = true;
+        handshake.destroy(preparation.attemptHandle);
+      }
+    };
+    prepared.cleanup = cleanup;
     let failureCode = 4401;
+    let retryable = true;
+    let retryAfterMs: number | undefined;
     let failureReason = "Relay unavailable";
     try {
       const target = await this.#authority.resolveTarget(
         prepared.environmentId,
         prepared.pairingOnly,
       );
+      if (!isCurrent()) return;
       if (!target || target.environmentId !== prepared.environmentId) {
         throw new Error("Desktop workspace target is unavailable.");
       }
-      const [resolvedPreparation, ticket, headers, resolvedHandshake] = await Promise.all([
-        this.#authority.prepareE2ee(target, prepared.pairingOnly),
+      // Obtain the cleanup owner before allocating a native handshake. Capture
+      // preparation independently so a sibling request failure cannot leak it.
+      handshake = await this.#authority.handshake();
+      if (!isCurrent()) return;
+      let preparationFailed = false;
+      const [resolvedPreparation, ticket, headers] = await Promise.all([
+        this.#authority.prepareE2ee(target, prepared.pairingOnly).then((value) => {
+          if (value.kind === "native") preparation = value;
+          if (!isCurrent() || preparationFailed) cleanup();
+          return value;
+        }),
         target.nativeTrust === "account-trusted" && !prepared.pairingOnly
           ? Promise.resolve(null)
           : this.#authority.issueTicket(target),
         this.#authority.authorizeUpgrade(target),
-        this.#authority.handshake(),
-      ]);
+      ]).catch((error: unknown) => {
+        preparationFailed = true;
+        cleanup();
+        throw error;
+      });
+      if (!isCurrent()) {
+        cleanup();
+        return;
+      }
       if (resolvedPreparation.kind !== "native") {
+        retryable = false;
         if (resolvedPreparation.kind === "update-required") {
           failureCode = 4406;
           failureReason = "Update required";
@@ -301,7 +327,6 @@ export class DesktopWorkspaceRelayManager {
         throw new Error("Desktop workspace target is not natively verified.");
       }
       preparation = resolvedPreparation;
-      handshake = resolvedHandshake;
       if (preparation.pairingOnly !== prepared.pairingOnly) {
         throw new Error("Desktop workspace target verification state changed.");
       }
@@ -325,8 +350,16 @@ export class DesktopWorkspaceRelayManager {
           onSessionStatus: () => undefined,
           onRole: () => undefined,
           onFailure: (failure) => {
-            if (failure.kind === "revoked" && target.nativeTrust === "account-trusted") {
+            if (!isCurrent()) return;
+            retryable = failure.retryable;
+            retryAfterMs = failure.retryAfterMs;
+            if (
+              failure.enrollmentRevoked !== undefined &&
+              target.nativeTrust === "account-trusted"
+            ) {
               globalThis.queueMicrotask(() => {
+                // The close event normally retires this handle first. Account
+                // revocation is authoritative even after that normal retirement.
                 this.#authority.onAccountAuthorizationRevoked?.();
                 this.dispose();
               });
@@ -334,26 +367,46 @@ export class DesktopWorkspaceRelayManager {
           },
         },
         events: {
-          open: () => this.#emit({ type: "open", transportId }),
-          message: (data) => this.#emit({ type: "message", transportId, data }),
-          error: () => this.#emit({ type: "error", transportId }),
+          open: () => {
+            if (isCurrent()) this.#emit({ type: "open", transportId });
+          },
+          message: (data) => {
+            if (isCurrent()) this.#emit({ type: "message", transportId, data });
+          },
+          // Publish the classified close as the terminal event. An earlier
+          // generic error can make Effect close IPC before its retry policy arrives.
+          error: () => undefined,
           close: (code, reason) => {
-            handshake?.destroy(preparation!.attemptHandle);
+            cleanup();
+            if (!isCurrent()) return;
             this.#transports.delete(transportId);
-            this.#emit({ type: "close", transportId, code, reason });
+            this.#emit({
+              type: "close",
+              transportId,
+              code,
+              reason,
+              retryable,
+              ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
+            });
           },
         },
       });
+      if (!isCurrent()) {
+        active.close();
+        cleanup();
+        return;
+      }
       prepared.active = active;
     } catch {
-      if (preparation && handshake) handshake.destroy(preparation.attemptHandle);
+      cleanup();
+      if (!isCurrent()) return;
       this.#transports.delete(transportId);
-      this.#emit({ type: "error", transportId });
       this.#emit({
         type: "close",
         transportId,
         code: failureCode,
         reason: failureReason,
+        retryable,
       });
       throw new Error("Desktop workspace relay activation failed.");
     }
@@ -367,20 +420,35 @@ export class DesktopWorkspaceRelayManager {
 
   close(transportId: string): void {
     const prepared = this.#transports.get(transportId);
+    if (!prepared) return;
     this.#transports.delete(transportId);
-    prepared?.active?.close();
+    try {
+      prepared.active?.close();
+    } finally {
+      prepared.cleanup();
+      // Main can close independently (sign-out, revocation, expiry). The
+      // renderer must settle even when this handle never owned a socket.
+      this.#emit({
+        type: "close",
+        transportId,
+        code: 1000,
+        reason: "Workspace closed",
+        retryable: false,
+      });
+    }
   }
 
   dispose(): void {
-    for (const transport of this.#transports.values()) transport.active?.close();
-    this.#transports.clear();
+    // Closing publishes an event; snapshot ownership before reentrant listeners run.
+    const transportIds = Array.from(this.#transports.keys());
+    for (const transportId of transportIds) this.close(transportId);
   }
 
   #prune(): void {
     const now = this.#now();
     for (const [transportId, transport] of this.#transports) {
       if (transport.active === null && transport.expiresAt <= now) {
-        this.#transports.delete(transportId);
+        this.close(transportId);
       }
     }
   }

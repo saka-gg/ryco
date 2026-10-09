@@ -17,11 +17,7 @@ import { useAutomationsDialogStore } from "./automations/automationsDialogStore"
 import { usePromoteChatDialogStore } from "./chat/promoteChatDialogStore";
 import { ProviderUpdateLaunchNotification } from "./ProviderUpdateLaunchNotification";
 import { MissedAutomationRunsNotice } from "./automations/MissedAutomationRunsNotice";
-import {
-  SlowRpcAckToastCoordinator,
-  WebSocketConnectionCoordinator,
-  WebSocketConnectionSurface,
-} from "./WebSocketConnectionSurface";
+import { WebSocketConnectionCoordinator } from "./WebSocketConnectionSurface";
 import { AnchoredToastProvider, ToastProvider } from "./ui/toast";
 import { getPresentationTier } from "../lib/presentationTier";
 import { useSettings } from "../hooks/useSettings";
@@ -100,12 +96,7 @@ export function RootAppShell({ authGateState }: RootAppShellProps) {
             recoveryOwner={authGateState.status === "hosted-hub" ? "hosted-lifecycle" : "generic"}
           />
         ) : null}
-        {primaryEnvironmentAuthenticated ? <SlowRpcAckToastCoordinator /> : null}
-        {authGateState.status === "authenticated" ? (
-          <WebSocketConnectionSurface>{appShell}</WebSocketConnectionSurface>
-        ) : (
-          appShell
-        )}
+        {appShell}
       </AnchoredToastProvider>
     </ToastProvider>
   );
