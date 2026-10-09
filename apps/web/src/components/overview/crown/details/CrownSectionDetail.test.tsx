@@ -96,22 +96,40 @@ describe("CrownSectionDetail", () => {
     expect(headingOf(unpushed)).toBe("Branch in sync");
   });
 
-  it("previews the branch read-only in the flyout, without the stateful git controls", () => {
+  it("previews the branch with its git action buttons, without the picker or split button", () => {
     const markup = renderDetail("branch", {
       variant: "flyout",
       layout: crownLayoutFixture({
         branchControl: <div data-testid="branch-control">picker</div>,
         sourceControlActions: <div data-testid="git-actions">Commit</div>,
+        sourceControlQuickActions: <div data-testid="git-quick-actions">Commit Push</div>,
       }),
     });
     expect(markup).not.toContain("branch-control");
     expect(markup).not.toContain("git-actions");
-    expect(markup).not.toContain("<button");
-    const order = ["feature/crown", "Sync", "Tracking origin", "Click to commit or push"].map(
-      (needle) => markup.indexOf(needle),
+    expect(markup).not.toContain("Click to commit or push");
+    const order = ["feature/crown", "Sync", "Tracking origin", "git-quick-actions"].map((needle) =>
+      markup.indexOf(needle),
     );
     expect(order.every((index) => index >= 0)).toBe(true);
     expect(order).toEqual([...order].toSorted((a, b) => a - b));
+
+    // Without the buttons (no checkout) the preview stays read-only and points at the card.
+    const readOnly = renderDetail("branch", { variant: "flyout" });
+    expect(readOnly).not.toContain("<button");
+    expect(readOnly).toContain("Click to commit or push");
+  });
+
+  it("keeps the git action buttons out of the branch card", () => {
+    const markup = renderDetail("branch", {
+      variant: "card",
+      layout: crownLayoutFixture({
+        sourceControlActions: <div data-testid="git-actions">Commit</div>,
+        sourceControlQuickActions: <div data-testid="git-quick-actions">Commit Push</div>,
+      }),
+    });
+    expect(markup).toContain("git-actions");
+    expect(markup).not.toContain("git-quick-actions");
   });
 
   it("groups changed files into Local and Committed with coloured status letters", () => {

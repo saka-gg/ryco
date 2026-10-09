@@ -204,6 +204,22 @@ describe("hosted project icons", () => {
       .toBe("loaded");
     expect(view.container.querySelector('img[data-state="loaded"]')).not.toBeNull();
   });
+  it("hands the loaded artwork to onImageLoad", async () => {
+    connect(vi.fn(async () => icon));
+    const onImageLoad = vi.fn((image: HTMLImageElement) => image.dataset.state);
+    const view = await render(
+      <TestFavicon
+        environmentId={env}
+        cwd="/project"
+        projectId={projectId}
+        onImageLoad={onImageLoad}
+      />,
+    );
+    await expect.poll(() => onImageLoad.mock.calls.length).toBe(1);
+    const [image] = onImageLoad.mock.calls[0]!;
+    expect(image).toBe(view.container.querySelector("img"));
+    expect(image.naturalWidth).toBe(16);
+  });
 });
 
 function TestFavicon(props: ComponentProps<typeof ProjectFavicon>) {

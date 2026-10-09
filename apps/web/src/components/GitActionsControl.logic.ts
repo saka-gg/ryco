@@ -192,6 +192,10 @@ export function buildMenuItems(
   ];
 }
 
+/** Why every git action is unavailable while one runs, or before status loads. */
+export const GIT_ACTION_BUSY_HINT = "Git action in progress.";
+export const GIT_STATUS_UNAVAILABLE_HINT = "Git status is unavailable.";
+
 export function resolveQuickAction(
   gitStatus: VcsStatusResult | null,
   isBusy: boolean,
@@ -199,7 +203,7 @@ export function resolveQuickAction(
   hasPrimaryRemote = true,
 ): GitQuickAction {
   if (isBusy) {
-    return { label: "Commit", disabled: true, kind: "show_hint", hint: "Git action in progress." };
+    return { label: "Commit", disabled: true, kind: "show_hint", hint: GIT_ACTION_BUSY_HINT };
   }
 
   if (!gitStatus) {
@@ -207,7 +211,7 @@ export function resolveQuickAction(
       label: "Commit",
       disabled: true,
       kind: "show_hint",
-      hint: "Git status is unavailable.",
+      hint: GIT_STATUS_UNAVAILABLE_HINT,
     };
   }
 
@@ -335,6 +339,56 @@ export function resolveQuickAction(
     kind: "show_hint",
     hint: "Branch is up to date. No action needed.",
   };
+}
+
+/** The explicit action buttons of the `actions` appearance, in display order. */
+export type GitActionTileId = "commit" | "push" | "pr" | "pull";
+
+/**
+ * Which action button carries the quick action, so the `actions` appearance
+ * can mark the recommended next step. A commit-including action points at
+ * Commit while there is something to commit (its button opens the commit
+ * dialog); `commit_push` on a clean default ref is a plain push.
+ */
+export function resolveRecommendedGitActionTile(
+  quickAction: GitQuickAction,
+  hasWorkingTreeChanges: boolean,
+): GitActionTileId | null {
+  switch (quickAction.kind) {
+    case "open_pr":
+      return "pr";
+    case "open_publish":
+      return "push";
+    case "run_pull":
+      return "pull";
+    case "show_hint":
+      return null;
+    case "run_action":
+      if (quickAction.action === "create_pr") return "pr";
+      if (quickAction.action === "push") return "push";
+      if (quickAction.action === "commit" || hasWorkingTreeChanges) return "commit";
+      return quickAction.action === "commit_push" ? "push" : null;
+  }
+}
+
+/**
+ * Whether Pull can run: it needs an upstream to be behind. `detail` describes
+ * the upstream either way (a menu subtitle); `disabledReason` is null when
+ * Pull is available, a diverged branch included.
+ */
+export function resolvePullAvailability(
+  gitStatus: VcsStatusResult | null,
+  isBusy: boolean,
+): { readonly disabledReason: string | null; readonly detail: string } {
+  const behind = gitStatus?.behindCount ?? 0;
+  const detail = !gitStatus?.hasUpstream
+    ? "No upstream"
+    : behind > 0
+      ? `${behind} behind upstream`
+      : "Up to date";
+  if (isBusy) return { disabledReason: GIT_ACTION_BUSY_HINT, detail };
+  if (!gitStatus) return { disabledReason: GIT_STATUS_UNAVAILABLE_HINT, detail };
+  return { disabledReason: !gitStatus.hasUpstream || behind === 0 ? detail : null, detail };
 }
 
 export function requiresDefaultBranchConfirmation(

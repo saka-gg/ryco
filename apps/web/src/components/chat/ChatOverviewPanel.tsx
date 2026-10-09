@@ -8,6 +8,7 @@ import { BranchToolbarBranchSelector } from "../BranchToolbarBranchSelector";
 import GitActionsControl, {
   GitThreadSync,
   type GitActionPostPushEvent,
+  type GitActionsControlAppearance,
 } from "../GitActionsControl";
 import { CrownOverview } from "../overview/crown/CrownOverview";
 import type { CrownOverviewProps } from "../overview/crown/crownTypes";
@@ -110,6 +111,8 @@ export interface OverviewPanelControlsInput {
 
 export interface OverviewPanelControls {
   sourceControlActions: (detectedChangeRequest: ChangeRequest | null) => ReactNode;
+  /** The same controls as explicit Commit / Push / PR / Pull buttons (the crown's branch preview). */
+  sourceControlQuickActions: (detectedChangeRequest: ChangeRequest | null) => ReactNode;
   branchControl: ReactNode;
   /** Keeps the thread in step with its checkout whether or not the controls are shown. */
   sourceControlSync: ReactNode;
@@ -133,8 +136,8 @@ export function useOverviewPanelControls(input: OverviewPanelControlsInput): Ove
     onCheckoutPullRequestRequest,
   } = input;
 
-  const sourceControlActions = useCallback(
-    (detectedChangeRequest: ChangeRequest | null) =>
+  const renderSourceControl = useCallback(
+    (appearance: GitActionsControlAppearance, detectedChangeRequest: ChangeRequest | null) =>
       gitCwd && activeThreadRef ? (
         <GitActionsControl
           gitCwd={gitCwd}
@@ -143,10 +146,20 @@ export function useOverviewPanelControls(input: OverviewPanelControlsInput): Ove
           {...(routeKind === "draft" && draftId ? { draftId } : {})}
           onPostPush={onPostPush}
           showLabels
-          block
+          appearance={appearance}
         />
       ) : null,
     [gitCwd, activeThreadRef, routeKind, draftId, onPostPush],
+  );
+  const sourceControlActions = useCallback(
+    (detectedChangeRequest: ChangeRequest | null) =>
+      renderSourceControl("block", detectedChangeRequest),
+    [renderSourceControl],
+  );
+  const sourceControlQuickActions = useCallback(
+    (detectedChangeRequest: ChangeRequest | null) =>
+      renderSourceControl("actions", detectedChangeRequest),
+    [renderSourceControl],
   );
 
   const sourceControlSync = useMemo<ReactNode>(
@@ -196,7 +209,7 @@ export function useOverviewPanelControls(input: OverviewPanelControlsInput): Ove
     ],
   );
 
-  return { sourceControlActions, branchControl, sourceControlSync };
+  return { sourceControlActions, sourceControlQuickActions, branchControl, sourceControlSync };
 }
 
 /**

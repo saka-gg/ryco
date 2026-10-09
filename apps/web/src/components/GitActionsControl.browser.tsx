@@ -1,6 +1,9 @@
+import "../index.css";
+
 import { scopeThreadRef } from "@ryco/client-runtime/scoped";
-import { EnvironmentId, ThreadId, type ServerConfig } from "@ryco/contracts";
+import { EnvironmentId, ThreadId, type ServerConfig, type VcsStatusResult } from "@ryco/contracts";
 import { useState } from "react";
+import { page, userEvent } from "vite-plus/test/browser";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
 
@@ -25,7 +28,11 @@ function createDeferredPromise<T>() {
 const {
   activeRunStackedActionDeferredRef,
   activeDraftThreadRef,
+  gitActionActivityRef,
+  gitStatusOverridesRef,
+  localApiRef,
   primaryServerConfigRef,
+  pullMutateAsyncSpy,
   liveBranchRef,
   hasServerThreadRef,
   refreshGitStatusSpy,
@@ -39,7 +46,13 @@ const {
 } = vi.hoisted(() => ({
   activeRunStackedActionDeferredRef: { current: createDeferredPromise<never>() },
   activeDraftThreadRef: { current: null as unknown },
+  gitActionActivityRef: { current: false },
+  gitStatusOverridesRef: { current: {} as Partial<VcsStatusResult> },
+  localApiRef: { current: null as unknown },
   primaryServerConfigRef: { current: null as ServerConfig | null },
+  pullMutateAsyncSpy: vi.fn(() =>
+    Promise.resolve({ status: "pulled", refName: "feature/toast-scope", upstreamRef: null }),
+  ),
   liveBranchRef: { current: "" },
   hasServerThreadRef: { current: true },
   refreshGitStatusSpy: vi.fn(() => Promise.resolve(null)),
@@ -81,7 +94,7 @@ vi.mock("~/rpc/useGit", () => ({
     `git-mutation:${kind}:${environmentId ?? ""}:${cwd ?? ""}`,
   gitScopeKey: (cwd: string | null) => `git:${cwd ?? ""}`,
   invalidateScopes: vi.fn(),
-  useGitActionActivity: vi.fn(() => false),
+  useGitActionActivity: vi.fn(() => gitActionActivityRef.current),
   useIsGitMutating: vi.fn(() => false),
   useGitMutation: vi.fn((options: { trackingKey?: string | null }) => {
     const trackingKey = options.trackingKey ?? "";
@@ -89,6 +102,15 @@ vi.mock("~/rpc/useGit", () => ({
       return {
         mutate: vi.fn(),
         mutateAsync: runStackedActionMutateAsyncSpy,
+        isPending: false,
+        error: null,
+        reset: vi.fn(),
+      };
+    }
+    if (typeof trackingKey === "string" && trackingKey.includes(":pull:")) {
+      return {
+        mutate: vi.fn(),
+        mutateAsync: pullMutateAsyncSpy,
         isPending: false,
         error: null,
         reset: vi.fn(),
@@ -124,6 +146,7 @@ vi.mock("~/lib/gitStatusState", () => ({
       aheadCount: 1,
       behindCount: 0,
       pr: null,
+      ...gitStatusOverridesRef.current,
     },
     error: null,
     isPending: false,
@@ -134,7 +157,7 @@ vi.mock("~/localApi", () => ({
   ensureLocalApi: vi.fn(() => {
     throw new Error("ensureLocalApi not implemented in browser test");
   }),
-  readLocalApi: vi.fn(() => null),
+  readLocalApi: vi.fn(() => localApiRef.current),
 }));
 
 vi.mock("~/composerDraftStore", async () => {
@@ -571,6 +594,273 @@ describe("GitActionsControl thread-scoped progress toast and GitThreadSync", () 
     } finally {
       await screen.unmount();
       host.remove();
+    }
+  });
+});
+
+describe('GitActionsControl appearance="actions"', () => {
+  const changedFiles = ["a.ts", "b.ts", "c.ts"].map((path) => ({
+    path,
+    insertions: 2,
+    deletions: 1,
+  }));
+
+  const mounted: Array<{ unmount: () => Promise<void> | void; host: HTMLElement }> = [];
+
+  beforeEach(() => {
+    liveBranchRef.current = BRANCH_NAME;
+  });
+
+  afterEach(async () => {
+    for (const mount of mounted.splice(0)) {
+      await mount.unmount();
+      mount.host.remove();
+    }
+    vi.clearAllMocks();
+    activeRunStackedActionDeferredRef.current = createDeferredPromise<never>();
+    gitStatusOverridesRef.current = {};
+    gitActionActivityRef.current = false;
+    localApiRef.current = null;
+    liveBranchRef.current = "";
+    document.body.innerHTML = "";
+  });
+
+  async function mountActions(overrides: Partial<VcsStatusResult>) {
+    gitStatusOverridesRef.current = overrides;
+    const host = document.createElement("div");
+    host.style.width = "244px";
+    document.body.append(host);
+    const screen = await render(
+      <GitActionsControl
+        gitCwd={GIT_CWD}
+        activeThreadRef={scopeThreadRef(ENVIRONMENT_A, SHARED_THREAD_ID)}
+        appearance="actions"
+      />,
+      { container: host },
+    );
+    mounted.push({ unmount: () => screen.unmount(), host });
+    const tile = (id: string) => host.querySelector<HTMLButtonElement>(`[data-tile="${id}"]`)!;
+    /** The disabled reason a tile's tooltip shows, linked as its accessible description. */
+    const reason = (id: string) => {
+      const describedBy = tile(id).getAttribute("aria-describedby");
+      return describedBy ? (document.getElementById(describedBy)?.textContent ?? null) : null;
+    };
+    const remove = async () => {
+      mounted.splice(
+        mounted.findIndex((mount) => mount.host === host),
+        1,
+      );
+      await screen.unmount();
+      host.remove();
+    };
+    return { host, tile, reason, remove };
+  }
+
+  it("names, counts and explains each button, and marks the recommended step", async () => {
+    const { host, tile, reason } = await mountActions({
+      hasWorkingTreeChanges: true,
+      workingTree: { files: changedFiles, insertions: 6, deletions: 3 },
+      aheadCount: 2,
+      behindCount: 1,
+    });
+
+    await expect.element(page.getByRole("group", { name: "Git actions" })).toBeVisible();
+    expect(
+      [...host.querySelectorAll("[data-tile]")].map((el) => el.getAttribute("aria-label")),
+    ).toEqual(["Commit 3 files", "Push 2 commits", "Create PR", "Pull 1 commit"]);
+    // A disabled tile drops its count badge: it cannot move what it counts.
+    expect([...host.querySelectorAll("[data-tile]")].map((el) => el.textContent)).toEqual([
+      "3Commit",
+      "Push",
+      "Create PR",
+      "1Pull",
+    ]);
+
+    expect(tile("commit").getAttribute("aria-disabled")).toBeNull();
+    expect(tile("commit").dataset.recommended).toBe("true");
+    expect(tile("push").getAttribute("aria-disabled")).toBe("true");
+    expect(reason("push")).toBe("Commit or stash local changes before pushing.");
+    expect(reason("pr")).toBe("Commit local changes before creating a pull request.");
+    expect(tile("pull").getAttribute("aria-disabled")).toBeNull();
+    expect(tile("pull").hasAttribute("aria-describedby")).toBe(false);
+    for (const id of ["push", "pr", "pull"]) expect(tile(id).dataset.recommended).toBeUndefined();
+
+    // Four equal tiles in one row inside a 244px column.
+    const rects = [...host.querySelectorAll<HTMLElement>("[data-tile]")].map((el) =>
+      el.getBoundingClientRect(),
+    );
+    expect(new Set(rects.map((rect) => Math.round(rect.top))).size).toBe(1);
+    expect(new Set(rects.map((rect) => Math.round(rect.width))).size).toBe(1);
+    for (const el of host.querySelectorAll<HTMLElement>("[data-tile] > span:last-child")) {
+      expect(el.scrollWidth).toBeLessThanOrEqual(el.clientWidth);
+    }
+
+    // A disabled tile stays focusable but does nothing.
+    tile("push").focus();
+    expect(document.activeElement).toBe(tile("push"));
+    await page.getByRole("button", { name: "Push 2 commits" }).click({ force: true });
+    expect(runStackedActionMutateAsyncSpy).not.toHaveBeenCalled();
+  });
+
+  it("shows a disabled tile's reason in a tooltip on hover", async () => {
+    await mountActions({
+      hasWorkingTreeChanges: true,
+      workingTree: { files: changedFiles, insertions: 6, deletions: 3 },
+      aheadCount: 2,
+      behindCount: 1,
+    });
+    await page.getByRole("button", { name: "Push 2 commits" }).hover();
+    await vi.waitFor(() => {
+      const popup = document.querySelector('[data-slot="tooltip-popup"]');
+      expect(popup?.textContent).toBe("Commit or stash local changes before pushing.");
+    });
+  });
+
+  it("tells keyboard focus apart from the recommended step", async () => {
+    const { tile } = await mountActions({
+      hasWorkingTreeChanges: true,
+      workingTree: { files: changedFiles, insertions: 6, deletions: 3 },
+      behindCount: 1,
+    });
+    expect(tile("commit").dataset.recommended).toBe("true");
+    tile("commit").focus();
+    await userEvent.keyboard("{Tab}");
+    expect(document.activeElement).toBe(tile("push"));
+    await userEvent.keyboard("{Tab}{Tab}");
+    expect(document.activeElement).toBe(tile("pull"));
+    const focused = getComputedStyle(tile("pull"));
+    expect(focused.outlineStyle).toBe("solid");
+    expect(focused.outlineColor).not.toBe(getComputedStyle(tile("commit")).borderTopColor);
+    expect(focused.outlineColor).not.toBe(focused.borderTopColor);
+  });
+
+  it("keeps ticking a started action's elapsed time after the control unmounts", async () => {
+    const { tile, remove } = await mountActions({ aheadCount: 2 });
+    vi.useFakeTimers();
+    try {
+      tile("push").click();
+      await remove();
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(toastUpdateSpy).toHaveBeenLastCalledWith(
+        "toast-1",
+        expect.objectContaining({ type: "loading", title: "Pushing..." }),
+      );
+      const ticks = toastUpdateSpy.mock.calls.length;
+      expect(ticks).toBeGreaterThanOrEqual(3);
+
+      // The action settles: the ticker stops with it.
+      activeRunStackedActionDeferredRef.current.reject(new Error("push failed"));
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(toastUpdateSpy).toHaveBeenCalledTimes(ticks + 1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("opens the commit dialog from Commit instead of committing", async () => {
+    await mountActions({
+      hasWorkingTreeChanges: true,
+      workingTree: { files: changedFiles, insertions: 6, deletions: 3 },
+    });
+
+    await page.getByRole("button", { name: "Commit 3 files" }).click();
+    await expect.element(page.getByRole("dialog", { name: "Commit changes" })).toBeVisible();
+    expect(runStackedActionMutateAsyncSpy).not.toHaveBeenCalled();
+  });
+
+  it("pushes and creates the change request through the shared git action", async () => {
+    const { tile } = await mountActions({ aheadCount: 2 });
+    expect(tile("pr").dataset.recommended).toBe("true");
+
+    await page.getByRole("button", { name: "Push 2 commits" }).click();
+    expect(runStackedActionMutateAsyncSpy).toHaveBeenLastCalledWith(
+      expect.objectContaining({ action: "push", worktreeId: null }),
+    );
+    expect(toastAddSpy).toHaveBeenLastCalledWith(
+      expect.objectContaining({ title: "Pushing...", type: "loading" }),
+    );
+
+    await page.getByRole("button", { name: "Create PR" }).click();
+    expect(runStackedActionMutateAsyncSpy).toHaveBeenLastCalledWith(
+      expect.objectContaining({ action: "create_pr" }),
+    );
+  });
+
+  it("asks before pushing to the default ref", async () => {
+    await mountActions({ aheadCount: 1, isDefaultRef: true });
+
+    await page.getByRole("button", { name: "Push 1 commit" }).click();
+    await expect.element(page.getByRole("dialog", { name: "Push to default ref?" })).toBeVisible();
+    expect(runStackedActionMutateAsyncSpy).not.toHaveBeenCalled();
+  });
+
+  it("pulls only with an upstream that is ahead", async () => {
+    const { tile, remove } = await mountActions({ aheadCount: 0, behindCount: 1 });
+    expect(tile("pull").dataset.recommended).toBe("true");
+    await page.getByRole("button", { name: "Pull 1 commit" }).click();
+    expect(pullMutateAsyncSpy).toHaveBeenCalledTimes(1);
+    expect(toastPromiseSpy).toHaveBeenCalledWith(
+      expect.any(Promise),
+      expect.objectContaining({ loading: expect.objectContaining({ title: "Pulling..." }) }),
+    );
+    await remove();
+
+    const upToDate = await mountActions({ aheadCount: 0 });
+    expect(upToDate.reason("pull")).toBe("Up to date");
+    expect(upToDate.tile("pull").getAttribute("aria-label")).toBe("Pull");
+    await upToDate.remove();
+
+    const noUpstream = await mountActions({ hasUpstream: false, behindCount: 1 });
+    expect(noUpstream.reason("pull")).toBe("No upstream");
+    await page.getByRole("button", { name: "Pull 1 commit" }).click({ force: true });
+    expect(pullMutateAsyncSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("views an open change request instead of creating one", async () => {
+    const openExternal = vi.fn(() => Promise.resolve());
+    localApiRef.current = { shell: { openExternal } };
+    const { tile } = await mountActions({
+      aheadCount: 0,
+      pr: {
+        number: 12,
+        title: "Crown",
+        url: "https://github.com/ryco/ryco/pull/12",
+        baseRef: "main",
+        headRef: BRANCH_NAME,
+        state: "open",
+      },
+    });
+    expect(tile("pr").dataset.recommended).toBe("true");
+
+    await page.getByRole("button", { name: "View PR" }).click();
+    expect(openExternal).toHaveBeenCalledWith("https://github.com/ryco/ryco/pull/12");
+  });
+
+  it("offers Publish in place of Push without a primary remote", async () => {
+    const { tile, reason } = await mountActions({ hasPrimaryRemote: false, hasUpstream: false });
+    expect(tile("push").getAttribute("aria-label")).toBe("Publish repository");
+    expect(tile("push").textContent).toBe("Publish");
+    expect(tile("push").dataset.recommended).toBe("true");
+    expect(tile("pr").getAttribute("aria-disabled")).toBe("true");
+    expect(reason("pr")).toBe('Add an "origin" remote before creating a pull request.');
+
+    await page.getByRole("button", { name: "Publish repository" }).click();
+    await expect.element(page.getByRole("dialog")).toBeVisible();
+  });
+
+  it("disables every button while a git action runs", async () => {
+    gitActionActivityRef.current = true;
+    const { host, reason } = await mountActions({
+      hasWorkingTreeChanges: true,
+      workingTree: { files: changedFiles, insertions: 6, deletions: 3 },
+      behindCount: 1,
+    });
+    const tiles = [...host.querySelectorAll<HTMLElement>("[data-tile]")];
+    expect(tiles).toHaveLength(4);
+    for (const el of tiles) {
+      expect(el.getAttribute("aria-disabled")).toBe("true");
+      expect(reason(el.dataset.tile!)).toBe("Git action in progress.");
+      expect(el.dataset.recommended).toBeUndefined();
     }
   });
 });

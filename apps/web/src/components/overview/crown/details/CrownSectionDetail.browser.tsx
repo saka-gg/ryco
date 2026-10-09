@@ -1,12 +1,24 @@
 import "../../../../index.css";
 
-import type { ReactNode } from "react";
-import { page } from "vite-plus/test/browser";
+import { useState, type ReactNode } from "react";
+import { page, userEvent } from "vite-plus/test/browser";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
 
-import { CROWN_FLYOUT_WIDTH_PX } from "../crownLayout";
-import type { CrownSectionDetailProps } from "../crownTypes";
+import { Button } from "~/components/ui/button";
+import {
+  Dialog,
+  DialogFooter,
+  DialogHeader,
+  DialogPanel,
+  DialogPopup,
+  DialogTitle,
+} from "~/components/ui/dialog";
+import { Input } from "~/components/ui/input";
+import { PaneFocusContext } from "../../../chat/PaneFocus";
+import { CROWN_FLYOUT_CLOSE_DELAY_MS, CROWN_FLYOUT_WIDTH_PX } from "../crownLayout";
+import type { CrownOverviewProps, CrownSectionDetailProps } from "../crownTypes";
+import { CrownOverview } from "../CrownOverview";
 import { CrownSectionDetail } from "./CrownSectionDetail";
 import {
   crownLayoutFixture,
@@ -337,5 +349,127 @@ describe("CrownSectionDetail interactions", () => {
     const rect = picker.getBoundingClientRect();
     expect(rect.height).toBe(36);
     expect(rect.width).toBeGreaterThan(200);
+  });
+});
+
+/**
+ * Stands in for the Branch preview's git action buttons: a button opening a
+ * portaled modal dialog with a text field, like the commit dialog.
+ */
+function QuickActionsDialogProbe() {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <button type="button" onClick={() => setOpen(true)}>
+        Commit 3 files
+      </button>
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogPopup>
+          <DialogHeader>
+            <DialogTitle>Commit changes</DialogTitle>
+          </DialogHeader>
+          <DialogPanel>
+            <Input aria-label="Commit message" />
+          </DialogPanel>
+          <DialogFooter>
+            <Button size="sm" onClick={() => setOpen(false)}>
+              Commit
+            </Button>
+          </DialogFooter>
+        </DialogPopup>
+      </Dialog>
+    </>
+  );
+}
+
+describe("Crown branch preview actions", () => {
+  const mounts: Array<{ unmount: () => Promise<void> | void; host: HTMLElement }> = [];
+
+  afterEach(async () => {
+    for (const mount of mounts.splice(0).toReversed()) {
+      await mount.unmount();
+      mount.host.remove();
+    }
+  });
+
+  async function mountCrown() {
+    await page.viewport(1200, 800);
+    const host = document.createElement("div");
+    host.style.position = "relative";
+    host.style.width = "1200px";
+    host.style.height = "800px";
+    const outside = document.createElement("button");
+    outside.type = "button";
+    outside.textContent = "Outside";
+    outside.style.position = "absolute";
+    outside.style.left = "20px";
+    outside.style.top = "400px";
+    document.body.append(host, outside);
+    const props: CrownOverviewProps = {
+      ...crownLayoutFixture({ sourceControlQuickActions: <QuickActionsDialogProbe /> }),
+      threadTitle: "Overview rail",
+      readiness: { remoteStatus: true, pullRequestLookup: true },
+      isGitRepo: true,
+      latestTurn: null,
+      turnSettled: true,
+      agentRunning: false,
+      scopeKey: "thread-1|/repo",
+      userGitActionActive: false,
+    };
+    const screen = await render(
+      <PaneFocusContext value={true}>
+        <CrownOverview {...props} />
+      </PaneFocusContext>,
+      { container: host },
+    );
+    mounts.push({ unmount: () => screen.unmount(), host }, { unmount: () => {}, host: outside });
+    return { flyout: () => host.querySelector<HTMLElement>('[data-slot="crown-flyout"]')! };
+  }
+
+  const pastCloseDelay = () =>
+    new Promise((resolve) => setTimeout(resolve, CROWN_FLYOUT_CLOSE_DELAY_MS + 120));
+
+  it("shows the buttons in the Branch preview and holds it open while their dialog is up", async () => {
+    const crown = await mountCrown();
+    await page.getByRole("button", { name: "Branch", exact: true }).hover();
+    await expect.poll(() => crown.flyout().dataset.open).toBe("true");
+    expect(crown.flyout().textContent).not.toContain("Click to commit or push");
+
+    await page.getByRole("button", { name: "Commit 3 files" }).click();
+    const dialog = page.getByRole("dialog", { name: "Commit changes" });
+    await expect.element(dialog).toBeVisible();
+    // Portaled out of the crown, yet the flyout (and the control owning the dialog) stays.
+    expect(crown.flyout().contains(dialog.element())).toBe(false);
+    await page.getByRole("textbox", { name: "Commit message" }).click();
+    await userEvent.keyboard("wip");
+    await page.getByRole("heading", { name: "Commit changes" }).hover();
+    await pastCloseDelay();
+    expect(crown.flyout().dataset.open).toBe("true");
+
+    // Escape closes only the dialog.
+    await userEvent.keyboard("{Escape}");
+    await expect.element(dialog).not.toBeInTheDocument();
+    expect(crown.flyout().dataset.open).toBe("true");
+
+    // Reopen, close from a button, then leave: the preview closes as usual.
+    await page.getByRole("button", { name: "Commit 3 files" }).click();
+    await expect.element(dialog).toBeVisible();
+    await page.getByRole("button", { name: "Commit", exact: true }).click();
+    await expect.element(dialog).not.toBeInTheDocument();
+    expect(crown.flyout().dataset.open).toBe("true");
+    await page.getByRole("button", { name: "Outside" }).hover();
+    await expect.poll(() => crown.flyout().dataset.open).toBeUndefined();
+  });
+
+  it("closes the preview when the pointer rests outside after a dialog closes", async () => {
+    const crown = await mountCrown();
+    await page.getByRole("button", { name: "Branch", exact: true }).hover();
+    await expect.poll(() => crown.flyout().dataset.open).toBe("true");
+    await page.getByRole("button", { name: "Commit 3 files" }).click();
+    // Close from a button far from the flyout, so the pointer ends up outside it.
+    await page.getByRole("button", { name: "Commit", exact: true }).click();
+    await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
+    await page.getByRole("button", { name: "Outside" }).hover();
+    await expect.poll(() => crown.flyout().dataset.open).toBeUndefined();
   });
 });

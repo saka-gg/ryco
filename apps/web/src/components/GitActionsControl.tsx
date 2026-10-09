@@ -13,7 +13,16 @@ import type {
   VcsStatusResult,
 } from "@ryco/contracts";
 import { Option } from "effect";
-import { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
+import {
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useEffectEvent,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { flushSync } from "react-dom";
 import {
   ArrowDownIcon,
@@ -46,11 +55,16 @@ import {
   type GitActionMenuItem,
   type GitQuickAction,
   type DefaultBranchConfirmableAction,
+  type GitActionTileId,
+  GIT_ACTION_BUSY_HINT,
+  GIT_STATUS_UNAVAILABLE_HINT,
   mergeDetectedChangeRequestIntoGitStatus,
   requiresDefaultBranchConfirmation,
   resolveDefaultBranchActionDialogCopy,
   resolveLiveThreadBranchUpdate,
+  resolvePullAvailability,
   resolveQuickAction,
+  resolveRecommendedGitActionTile,
   resolveThreadBranchUpdate,
 } from "./GitActionsControl.logic";
 import { AnimatedHeight } from "./AnimatedHeight";
@@ -116,13 +130,18 @@ interface GitActionsControlProps {
   draftId?: DraftId;
   showLabels?: boolean;
   /**
-   * Render as a full-width split button (primary quick action + caret menu),
-   * matching the overview panel footer. Defaults to the compact toolbar group.
+   * - `toolbar` (default): the compact quick action + caret menu group.
+   * - `block`: a full-width split button (primary quick action + caret menu),
+   *   matching the overview panel footer.
+   * - `actions`: one row of explicit Commit / Push / PR / Pull buttons, for
+   *   surfaces without room for a menu (the crown's branch preview).
    */
-  block?: boolean;
+  appearance?: GitActionsControlAppearance;
   detectedChangeRequest?: ChangeRequest | null;
   onPostPush?: (event: GitActionPostPushEvent) => void;
 }
+
+export type GitActionsControlAppearance = "toolbar" | "block" | "actions";
 
 export interface GitActionPostPushEvent {
   readonly environmentId: ScopedThreadRef["environmentId"];
@@ -306,8 +325,8 @@ function getMenuActionDisabledReason({
   hasPrimaryRemote: boolean;
 }): string | null {
   if (!item.disabled) return null;
-  if (isBusy) return "Git action in progress.";
-  if (!gitStatus) return "Git status is unavailable.";
+  if (isBusy) return GIT_ACTION_BUSY_HINT;
+  if (!gitStatus) return GIT_STATUS_UNAVAILABLE_HINT;
 
   const hasBranch = gitStatus.refName !== null;
   const hasChanges = gitStatus.hasWorkingTreeChanges;
@@ -418,6 +437,107 @@ function BlockQuickActionIcon({ quickAction }: { quickAction: GitQuickAction }) 
     return <CloudUploadIcon className={iconClassName} />;
   }
   return <GitCommitIcon className={iconClassName} />;
+}
+
+interface GitActionTile {
+  readonly id: GitActionTileId;
+  readonly label: string;
+  /** The label with its count spelled out ("Commit 3 files"). */
+  readonly accessibleLabel: string;
+  readonly icon: ReactNode;
+  /** Badge for what the action moves: changed files, commits ahead or behind. */
+  readonly count: number | null;
+  readonly disabledReason: string | null;
+  readonly recommended: boolean;
+  readonly run: () => void;
+}
+
+function pluralize(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? "" : "s"}`;
+}
+
+/**
+ * The `actions` appearance: four equal tiles in one row (fits a 244px column).
+ * Disabled tiles stay focusable and hoverable (`aria-disabled`) and explain
+ * themselves in a tooltip on hover or focus (also their accessible
+ * description); the recommended next step is emphasised. Semantic tokens
+ * only, so it reads the same inside the forced-dark island.
+ */
+function GitActionTiles({ tiles }: { tiles: ReadonlyArray<GitActionTile> }) {
+  return (
+    <div
+      role="group"
+      aria-label="Git actions"
+      className="grid w-full grid-cols-4 gap-1"
+      data-slot="git-action-tiles"
+    >
+      {tiles.map((tile) => (
+        <GitActionTileButton key={tile.id} tile={tile} />
+      ))}
+    </div>
+  );
+}
+
+function GitActionTileButton({ tile }: { tile: GitActionTile }) {
+  const reasonId = useId();
+  const { disabledReason } = tile;
+  const button = (
+    <button
+      type="button"
+      aria-label={tile.accessibleLabel}
+      aria-disabled={disabledReason !== null || undefined}
+      aria-describedby={disabledReason !== null ? reasonId : undefined}
+      data-tile={tile.id}
+      data-recommended={tile.recommended || undefined}
+      className={cn(
+        "group/tile flex min-w-0 flex-col items-center justify-center gap-1 rounded-lg border border-border/70 bg-muted/40 px-0.5 pt-2 pb-1.5 text-foreground/86",
+        "transition-[background-color,border-color,color,transform] duration-150 active:scale-[.97]",
+        "hover:border-foreground/15 hover:bg-foreground/10 hover:text-foreground",
+        // Focus is blue, apart from the recommended step's primary border.
+        "focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-info/70",
+        "data-recommended:border-primary/55 data-recommended:bg-primary/16 data-recommended:text-foreground data-recommended:hover:bg-primary/24",
+        "aria-disabled:cursor-not-allowed aria-disabled:opacity-45 aria-disabled:hover:border-border/70 aria-disabled:hover:bg-muted/40 aria-disabled:hover:text-foreground/86 aria-disabled:active:scale-100",
+      )}
+      onClick={() => {
+        if (disabledReason === null) tile.run();
+      }}
+    >
+      <span className="flex h-4 items-center gap-1">
+        <span
+          aria-hidden="true"
+          className="flex text-muted-foreground group-data-recommended/tile:text-primary [&_svg]:size-4"
+        >
+          {tile.icon}
+        </span>
+        {/* A disabled tile cannot move what it counts. */}
+        {tile.count !== null && disabledReason === null ? (
+          <span
+            aria-hidden="true"
+            className="min-w-4 rounded-full bg-foreground/10 px-1 text-center text-[10px] leading-4 font-semibold tabular-nums group-data-recommended/tile:bg-primary group-data-recommended/tile:text-primary-foreground"
+          >
+            {tile.count}
+          </span>
+        ) : null}
+      </span>
+      <span className="w-full truncate text-center text-[11px] leading-4 font-medium tracking-tight">
+        {tile.label}
+      </span>
+    </button>
+  );
+  if (disabledReason === null) return button;
+  return (
+    <>
+      <Tooltip>
+        <TooltipTrigger delay={150} render={button} />
+        <TooltipPopup side="top" className="max-w-56">
+          {disabledReason}
+        </TooltipPopup>
+      </Tooltip>
+      <span id={reasonId} hidden>
+        {disabledReason}
+      </span>
+    </>
+  );
 }
 
 interface PublishRepositoryDialogProps {
@@ -1215,10 +1335,11 @@ export default function GitActionsControl({
   activeThreadRef,
   draftId,
   showLabels = false,
-  block = false,
+  appearance = "toolbar",
   detectedChangeRequest = null,
   onPostPush,
 }: GitActionsControlProps) {
+  const block = appearance === "block";
   const activeEnvironmentId = activeThreadRef?.environmentId ?? null;
   const threadToastData = useMemo(
     () => (activeThreadRef ? { threadRef: activeThreadRef } : undefined),
@@ -1232,20 +1353,14 @@ export default function GitActionsControl({
   const [pendingDefaultBranchAction, setPendingDefaultBranchAction] =
     useState<PendingDefaultBranchAction | null>(null);
   const activeGitActionProgressRef = useRef<ActiveGitActionProgress | null>(null);
-  const [activeGitActionProgressVersion, setActiveGitActionProgressVersion] = useState(0);
   let runGitActionWithToast: (input: RunGitActionWithToastInput) => Promise<void>;
 
   const setActiveGitActionProgress = useCallback((progress: ActiveGitActionProgress) => {
     activeGitActionProgressRef.current = progress;
-    setActiveGitActionProgressVersion((version) => version + 1);
   }, []);
 
   const clearActiveGitActionProgress = useCallback(() => {
-    if (!activeGitActionProgressRef.current) {
-      return;
-    }
     activeGitActionProgressRef.current = null;
-    setActiveGitActionProgressVersion((version) => version + 1);
   }, []);
 
   const updateActiveProgressToast = useCallback(() => {
@@ -1394,24 +1509,6 @@ export default function GitActionsControl({
         terminology: changeRequestTerminology,
       })
     : null;
-
-  useEffect(() => {
-    if (!activeGitActionProgressRef.current) {
-      return;
-    }
-
-    const poller = createVisibilityAwarePoller({
-      lifecycle: webAppLifecycle,
-      run: () => {
-        updateActiveProgressToast();
-        return Promise.resolve();
-      },
-      resolveDelayMs: () => 1_000,
-      runImmediately: false,
-    });
-
-    return poller.stop;
-  }, [activeGitActionProgressVersion, updateActiveProgressToast]);
 
   const openExistingPr = useCallback(async () => {
     const api = readLocalApi();
@@ -1600,9 +1697,21 @@ export default function GitActionsControl({
         ...(filePaths ? { filePaths } : {}),
         onProgress: applyProgressEvent,
       });
+      // Ticks the elapsed time for as long as the action runs, not as long as
+      // this control is mounted: a hover preview closes right after the click.
+      const elapsedTicker = createVisibilityAwarePoller({
+        lifecycle: webAppLifecycle,
+        run: () => {
+          updateActiveProgressToast();
+          return Promise.resolve();
+        },
+        resolveDelayMs: () => 1_000,
+        runImmediately: false,
+      });
 
       try {
         const result = await promise;
+        elapsedTicker.stop();
         clearActiveGitActionProgress();
         syncThreadBranchAfterGitAction(result);
         if (result.push.status === "pushed" && activeEnvironmentId && gitCwd) {
@@ -1674,6 +1783,7 @@ export default function GitActionsControl({
           });
         }
       } catch (err) {
+        elapsedTicker.stop();
         clearActiveGitActionProgress();
         toastManager.update(
           resolvedProgressToastId,
@@ -1875,6 +1985,95 @@ export default function GitActionsControl({
   // overview footer can't offer actions the compact menu guards.
   const blockHasBranch = gitStatusForActions?.refName != null;
   const blockCanPush = blockHasBranch && (blockHasUpstream || hasPrimaryRemote);
+  const pullAvailability = resolvePullAvailability(gitStatusForActions, isGitActionRunning);
+
+  // Explicit buttons for the `actions` appearance. Commit / Push / PR are the
+  // menu items (same enable rules, reasons and handlers); Pull shares the
+  // block menu's availability. Without a primary remote the menu only offers Commit,
+  // so Push / PR fall back to a disabled item explaining why, and Push becomes
+  // Publish when the repository can be published.
+  const buildActionTiles = (): GitActionTile[] => {
+    const recommendedTile = resolveRecommendedGitActionTile(quickAction, blockHasChanges);
+    const menuItem = (id: GitActionMenuItem["id"], label: string): GitActionMenuItem =>
+      gitActionMenuItems.find((item) => item.id === id) ?? {
+        id,
+        label,
+        disabled: true,
+        icon: id,
+        kind: "open_dialog",
+      };
+    const disabledReason = (item: GitActionMenuItem) =>
+      getMenuActionDisabledReason({
+        item,
+        gitStatus: gitStatusForActions,
+        isBusy: isGitActionRunning,
+        hasPrimaryRemote,
+      });
+    const itemIcon = (item: GitActionMenuItem) => (
+      <GitActionItemIcon icon={item.icon} SourceControlIcon={SourceControlIcon} />
+    );
+    const tile = (
+      id: GitActionTileId,
+      fields: Omit<GitActionTile, "id" | "recommended">,
+    ): GitActionTile => ({
+      id,
+      ...fields,
+      recommended: recommendedTile === id && fields.disabledReason === null,
+    });
+
+    const commitItem = menuItem("commit", "Commit");
+    const pushItem = menuItem("push", "Push");
+    const prItem = menuItem(
+      "pr",
+      `${blockHasOpenPr ? "View" : "Create"} ${changeRequestTerminology.shortLabel}`,
+    );
+    const ahead = gitStatusForActions?.aheadCount ?? 0;
+
+    return [
+      tile("commit", {
+        label: commitItem.label,
+        accessibleLabel:
+          blockFileCount > 0 ? `Commit ${pluralize(blockFileCount, "file")}` : "Commit",
+        icon: itemIcon(commitItem),
+        count: blockFileCount > 0 ? blockFileCount : null,
+        disabledReason: disabledReason(commitItem),
+        run: () => openDialogForMenuItem(commitItem),
+      }),
+      canPublishRepository
+        ? tile("push", {
+            label: "Publish",
+            accessibleLabel: "Publish repository",
+            icon: <CloudUploadIcon />,
+            count: null,
+            disabledReason: isGitActionRunning ? GIT_ACTION_BUSY_HINT : null,
+            run: () => setIsPublishDialogOpen(true),
+          })
+        : tile("push", {
+            label: pushItem.label,
+            accessibleLabel: ahead > 0 ? `Push ${pluralize(ahead, "commit")}` : "Push",
+            icon: itemIcon(pushItem),
+            count: ahead > 0 ? ahead : null,
+            disabledReason: disabledReason(pushItem),
+            run: () => openDialogForMenuItem(pushItem),
+          }),
+      tile("pr", {
+        label: prItem.label,
+        accessibleLabel: prItem.label,
+        icon: itemIcon(prItem),
+        count: null,
+        disabledReason: disabledReason(prItem),
+        run: () => openDialogForMenuItem(prItem),
+      }),
+      tile("pull", {
+        label: "Pull",
+        accessibleLabel: blockBehind > 0 ? `Pull ${pluralize(blockBehind, "commit")}` : "Pull",
+        icon: <ArrowDownIcon />,
+        count: blockBehind > 0 ? blockBehind : null,
+        disabledReason: pullAvailability.disabledReason,
+        run: runPull,
+      }),
+    ];
+  };
 
   if (!gitCwd) return null;
 
@@ -1889,6 +2088,8 @@ export default function GitActionsControl({
         >
           {initMutation.isPending ? "Initializing..." : "Initialize Git"}
         </Button>
+      ) : appearance === "actions" ? (
+        <GitActionTiles tiles={buildActionTiles()} />
       ) : (
         <Group aria-label="Git actions" className={cn("shrink-0", block && "flex w-full")}>
           {block ? (
@@ -2025,19 +2226,12 @@ export default function GitActionsControl({
                     </MenuItem>
                   </MenuGroup>
                   <MenuSeparator />
-                  <MenuItem
-                    disabled={isGitActionRunning || !blockHasUpstream || blockBehind === 0}
-                    onClick={runPull}
-                  >
+                  <MenuItem disabled={pullAvailability.disabledReason !== null} onClick={runPull}>
                     <ArrowDownIcon className="text-muted-foreground" />
                     <div className="flex min-w-0 flex-col">
                       <span className="font-medium">Pull</span>
                       <span className="truncate text-[11.5px] font-normal text-muted-foreground">
-                        {!blockHasUpstream
-                          ? "No upstream"
-                          : blockBehind > 0
-                            ? `${blockBehind} behind upstream`
-                            : "Up to date"}
+                        {pullAvailability.detail}
                       </span>
                     </div>
                   </MenuItem>

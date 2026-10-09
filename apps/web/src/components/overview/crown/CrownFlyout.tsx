@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 
+import { useEvent } from "../../../hooks/useEvent";
 import type { OverviewLayoutProps } from "../overviewTypes";
 import {
   CrownChatDetail,
@@ -65,13 +66,23 @@ function holdsFlyout(element: Element | null): boolean {
  * inside the crown's dark tokens and motion scope, and positioned by hand so
  * its transform origin can sit on the icon.
  *
- * A hover preview, not an interaction surface: the details render their
- * read-only flyout variant, and the card hosts the stateful controls. The
- * Notes preview is the exception, as in the prototype: its composer works
- * here too, and while it has focus the crown holds the flyout open. It is a
- * labelled non-modal group, inert while closed and in its leaving layer, so
- * hidden content is never focusable. Keyboard users get the same detail in
- * the card.
+ * A hover preview, not a full interaction surface: the details render their
+ * flyout variant, and the card hosts the stateful pickers and menus (a
+ * combobox or menu would close under the pointer here). Two previews act:
+ * the Notes composer, as in the prototype, which holds the flyout open while
+ * it has focus; and the Branch preview's git action buttons. Their dialogs
+ * (commit, default-branch confirm, publish) portal to the body but stay
+ * React children of this panel, so its pointer handlers treat them as
+ * inside and the flyout (and the control owning the dialog) stays mounted
+ * until the dialog closes and the pointer leaves. Escape in a dialog only
+ * closes the dialog. A push or pull still running when the pointer leaves
+ * keeps going after the flyout closes and unmounts its control, and its toast
+ * keeps updating: a push's elapsed-time ticker belongs to the action, not the
+ * control.
+ *
+ * It is a labelled non-modal group, inert while closed and in its leaving
+ * layer, so hidden content is never focusable. Keyboard users get the same
+ * detail in the card.
  */
 export function CrownFlyout(props: {
   readonly openKey: CrownRailKey | null;
@@ -91,6 +102,7 @@ export function CrownFlyout(props: {
   readonly onEditingChange?: (editing: boolean) => void;
 }) {
   const { anchorEl, rootRef, railRef, reducedMotion, notes, chat, onEditingChange } = props;
+  const onPointerLeave = useEvent(props.onPointerLeave);
   const section = flyoutSection(props.openKey, {
     notes: notes !== undefined,
     chat: chat !== undefined,
@@ -235,6 +247,26 @@ export function CrownFlyout(props: {
     return () => observer.disconnect();
   }, [open, currentKey, fit]);
 
+  // React derives a leave from the outgoing event's related target. When the
+  // element under the pointer is removed (a dialog opened from the preview
+  // closing), the next pointerover has no live related target and React
+  // reports no leave, so the preview would stay open. Backstop: a pointerover
+  // this panel did not see ends the hover. React marks its own (portaled
+  // descendants included) before the document listener runs; the rail
+  // answers hovers over itself.
+  const pointerInsideRef = useRef(false);
+  const insideOverRef = useRef<Event | null>(null);
+  useEffect(() => {
+    const onDocumentPointerOver = (event: PointerEvent) => {
+      if (!pointerInsideRef.current || insideOverRef.current === event) return;
+      pointerInsideRef.current = false;
+      if (event.target instanceof Node && railRef.current?.contains(event.target)) return;
+      onPointerLeave();
+    };
+    document.addEventListener("pointerover", onDocumentPointerOver);
+    return () => document.removeEventListener("pointerover", onDocumentPointerOver);
+  }, [railRef, onPointerLeave]);
+
   return (
     <div
       ref={flyRef}
@@ -244,8 +276,18 @@ export function CrownFlyout(props: {
       data-slot="crown-flyout"
       data-section={current?.section}
       style={{ width: CROWN_FLYOUT_WIDTH_PX }}
-      onPointerEnter={props.onPointerEnter}
-      onPointerLeave={props.onPointerLeave}
+      onPointerEnter={() => {
+        pointerInsideRef.current = true;
+        props.onPointerEnter();
+      }}
+      onPointerLeave={() => {
+        pointerInsideRef.current = false;
+        props.onPointerLeave();
+      }}
+      onPointerOver={(event) => {
+        insideOverRef.current = event.nativeEvent;
+        pointerInsideRef.current = true;
+      }}
       onFocus={(event) => onEditingChange?.(holdsFlyout(event.target))}
       onBlur={(event) => {
         const next = event.relatedTarget;
