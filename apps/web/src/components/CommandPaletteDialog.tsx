@@ -1365,6 +1365,15 @@ function OpenCommandPaletteDialog() {
     openAddProjectFlow();
   }, [clearOpenIntent, openAddProjectFlow, openIntent]);
 
+  useLayoutEffect(() => {
+    if (openIntent?.kind !== "search") {
+      return;
+    }
+    clearOpenIntent();
+    setHighlightedItemValue(null);
+    setQuery(openIntent.query);
+  }, [clearOpenIntent, openIntent]);
+
   const splitThreadView: CommandPaletteView = {
     addonIcon: <Columns2Icon className={ADDON_ICON_CLASS} />,
     groups: [{ value: "split-threads", label: "Open in split view", items: splitThreadItems }],

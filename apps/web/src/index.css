@@ -2260,6 +2260,311 @@ label:has(> select#reasoning-effort) select {
   }
 }
 
+/* Sidebar header (SidebarPrimaryActions): the Omnifield, New thread and the
+   destinations fold into one toolbar row while a sidebar list is scrolled
+   (sidebarFold.ts). Every control is absolutely placed, so both layouts morph
+   through the same transitions. Values are the approved prototype's
+   (output/sidebar-top-concepts/omnifield-condensing.html). */
+.sidebar-fold {
+  position: relative;
+  z-index: 3;
+  flex: none;
+  /* Field row (30 + 6), 28px per destination, 6px before the list. */
+  height: calc(42px + var(--sidebar-fold-rows, 0) * 28px);
+  margin: 0 0.5rem 2px;
+  transition: height var(--app-motion-duration-pane) var(--app-motion-spring-gentle);
+}
+
+.sidebar-fold[data-folded="true"] {
+  height: 36px;
+}
+
+.sidebar-fold-item {
+  position: absolute;
+  transition:
+    left var(--app-motion-duration-pane) var(--app-motion-spring-gentle),
+    top var(--app-motion-duration-pane) var(--app-motion-spring-gentle),
+    width var(--app-motion-duration-pane) var(--app-motion-spring-gentle),
+    height var(--app-motion-duration-pane) var(--app-motion-spring-gentle),
+    padding var(--app-motion-duration-pane) var(--app-motion-spring-gentle),
+    background-color var(--app-motion-duration-chip),
+    color var(--app-motion-duration-chip),
+    border-color var(--app-motion-duration-pane),
+    box-shadow var(--app-motion-duration-chip);
+}
+
+.sidebar-fold-field {
+  top: 0;
+  left: 0;
+  width: calc(100% - 36px);
+  height: 30px;
+  padding: 0 5px 0 2px;
+}
+
+.sidebar-fold[data-folded="true"] .sidebar-fold-field {
+  top: 3px;
+  width: 30px;
+  padding: 0 0 0 2px;
+  border-color: transparent;
+  background-color: transparent;
+  box-shadow: none;
+  cursor: pointer;
+}
+
+.sidebar-fold[data-folded="true"] .sidebar-fold-field:hover {
+  background-color: var(--sidebar-accent);
+}
+
+.sidebar-fold-field :is(input, .sidebar-omnifield-kbd, .sidebar-omnifield-tokens) {
+  transition: opacity var(--app-motion-duration-pop);
+}
+
+.sidebar-fold[data-folded="true"]
+  .sidebar-fold-field
+  :is(input, .sidebar-omnifield-kbd, .sidebar-omnifield-tokens) {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* Hidden while typing, not on focus-within: pressing the chip focuses it, and
+   hiding it then would swallow the click. */
+.sidebar-fold-field:has(input:focus) .sidebar-omnifield-kbd,
+.sidebar-fold-field[data-tokens="true"] .sidebar-omnifield-kbd {
+  display: none;
+}
+
+.sidebar-fold-new {
+  top: 0;
+  left: calc(100% - 30px);
+  width: 30px;
+  height: 30px;
+}
+
+.sidebar-fold[data-folded="true"] .sidebar-fold-new {
+  top: 3px;
+}
+
+.sidebar-fold-destination {
+  top: calc(36px + var(--sidebar-fold-index) * 28px);
+  left: 0;
+  width: 100%;
+  height: 28px;
+  gap: 8px;
+  padding: 0 8px;
+  overflow: hidden;
+}
+
+.sidebar-fold[data-folded="true"] .sidebar-fold-destination {
+  top: 4px;
+  left: calc(34px + var(--sidebar-fold-index) * 30px);
+  width: 28px;
+  gap: 0;
+  padding: 0 7px;
+}
+
+.sidebar-fold-label {
+  max-width: 180px;
+  overflow: hidden;
+  white-space: nowrap;
+  transition:
+    opacity var(--app-motion-duration-pop) var(--app-motion-ease),
+    filter var(--app-motion-duration-pop) var(--app-motion-ease),
+    max-width var(--app-motion-duration-pane) var(--app-motion-spring-gentle);
+}
+
+.sidebar-fold[data-folded="true"] .sidebar-fold-label {
+  max-width: 0;
+  opacity: 0;
+  filter: blur(3px);
+}
+
+.sidebar-fold-badge {
+  transition: all var(--app-motion-duration-pane) var(--app-motion-spring-gentle);
+}
+
+.sidebar-fold[data-folded="true"] .sidebar-fold-badge {
+  position: absolute;
+  top: 1px;
+  right: 0;
+  height: 13px;
+  min-width: 13px;
+  padding: 0 3px;
+  background: var(--color-amber-400);
+  color: #1a1406;
+  font-size: 8.5px;
+}
+
+/* Funnel (Inbox) and magnifier (Projects) share the field's leading button. */
+.sidebar-omnifield-icon {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  transition:
+    opacity var(--app-motion-duration-pop) var(--app-motion-ease),
+    transform var(--app-motion-duration-stack) var(--app-motion-spring-snappy);
+}
+
+.sidebar-omnifield-icon[data-shown="false"] {
+  opacity: 0;
+  transform: scale(0.5) rotate(-30deg);
+}
+
+/* The funnel's three lines cross into an X while the filter menu is open. */
+.sidebar-omnifield-funnel path {
+  transform-box: fill-box;
+  transform-origin: center;
+  transition:
+    transform var(--app-motion-duration-stack) var(--app-motion-spring-snappy),
+    opacity var(--app-motion-duration-chip);
+}
+
+.sidebar-omnifield-lead[aria-expanded="true"] .sidebar-omnifield-funnel path:nth-child(1) {
+  transform: translateY(6px) rotate(45deg) scaleX(0.62);
+}
+
+.sidebar-omnifield-lead[aria-expanded="true"] .sidebar-omnifield-funnel path:nth-child(2) {
+  opacity: 0;
+}
+
+.sidebar-omnifield-lead[aria-expanded="true"] .sidebar-omnifield-funnel path:nth-child(3) {
+  transform: translateY(-6px) rotate(-45deg) scaleX(2.6);
+}
+
+.sidebar-omnifield-count {
+  position: absolute;
+  top: -4px;
+  right: -5px;
+  transform: scale(0);
+  transition: transform var(--app-motion-duration-stack) var(--app-motion-spring-snappy);
+}
+
+.sidebar-omnifield-count[data-shown="true"] {
+  transform: scale(1);
+}
+
+.sidebar-omnifield-lead[aria-expanded="true"] .sidebar-omnifield-count {
+  transform: scale(0);
+}
+
+.sidebar-fold[data-folded="true"] .sidebar-omnifield-count {
+  top: -2px;
+  right: -3px;
+}
+
+.sidebar-omnifield-count-roll {
+  animation: sidebar-omnifield-roll var(--app-motion-duration-stack) var(--app-motion-spring-snappy);
+}
+
+@keyframes sidebar-omnifield-roll {
+  from {
+    opacity: 0;
+    transform: translateY(100%);
+  }
+}
+
+.sidebar-omnifield-token {
+  animation: sidebar-omnifield-token-in var(--app-motion-duration-stack)
+    var(--app-motion-spring-snappy);
+  transition: gap var(--app-motion-duration-stack) var(--app-motion-spring-gentle);
+}
+
+.sidebar-omnifield-token[data-leaving] {
+  animation: sidebar-omnifield-token-out var(--app-motion-duration-pop) var(--app-motion-ease)
+    forwards;
+}
+
+.sidebar-omnifield-token[data-armed="true"] {
+  box-shadow: 0 0 0 1.5px currentColor;
+}
+
+/* While typing, the machine token shrinks to its dot so the text has room. */
+.sidebar-omnifield-token-label {
+  display: inline-block;
+  max-width: 96px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition:
+    max-width var(--app-motion-duration-stack) var(--app-motion-spring-gentle),
+    opacity var(--app-motion-duration-pop) var(--app-motion-ease);
+}
+
+.sidebar-fold-field[data-typing="true"] .sidebar-omnifield-token[data-kind="machine"] {
+  gap: 0;
+}
+
+.sidebar-fold-field[data-typing="true"]
+  .sidebar-omnifield-token[data-kind="machine"]
+  .sidebar-omnifield-token-label {
+  max-width: 0;
+  opacity: 0;
+}
+
+@keyframes sidebar-omnifield-token-in {
+  from {
+    opacity: 0;
+    filter: blur(2px);
+    transform: translateX(10px) scale(0.7);
+  }
+}
+
+@keyframes sidebar-omnifield-token-out {
+  to {
+    opacity: 0;
+    filter: blur(2px);
+    transform: scale(0.6);
+  }
+}
+
+.sidebar-omnifield-menu {
+  position: absolute;
+  top: 34px;
+  right: 0;
+  left: 0;
+  z-index: 20;
+  max-height: 360px;
+  overflow-y: auto;
+  scrollbar-width: none;
+  opacity: 0;
+  filter: blur(3px);
+  transform: translateY(-4px) scale(0.96);
+  transform-origin: top left;
+  pointer-events: none;
+  transition:
+    opacity var(--app-motion-duration-pop) var(--app-motion-ease),
+    transform var(--app-motion-duration-pop) var(--app-motion-spring-snappy),
+    filter var(--app-motion-duration-pop) var(--app-motion-ease);
+}
+
+.sidebar-omnifield-menu[data-open="true"] {
+  opacity: 1;
+  filter: none;
+  transform: none;
+  pointer-events: auto;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sidebar-fold,
+  .sidebar-fold-item,
+  .sidebar-fold-label,
+  .sidebar-fold-badge,
+  .sidebar-fold-field :is(input, .sidebar-omnifield-kbd, .sidebar-omnifield-tokens),
+  .sidebar-omnifield-icon,
+  .sidebar-omnifield-funnel path,
+  .sidebar-omnifield-count,
+  .sidebar-omnifield-token,
+  .sidebar-omnifield-token-label,
+  .sidebar-omnifield-menu {
+    transition: none;
+  }
+
+  .sidebar-omnifield-count-roll,
+  .sidebar-omnifield-token,
+  .sidebar-omnifield-token[data-leaving] {
+    animation: none;
+  }
+}
+
 /* Split chat panes (ChatPanes). Geometry eases through CSS transitions on the
    pane token; these keyframes cover what CSS transitions cannot. An opened
    pane is pushed in from the edge it was dropped on by exactly its own size,

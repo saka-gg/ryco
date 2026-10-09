@@ -6,7 +6,7 @@ import type {
 } from "@ryco/client-runtime/state/threads";
 import type { EnvironmentId, ScopedThreadRef } from "@ryco/contracts";
 import type { SidebarAutoSettleAfterDays } from "@ryco/contracts/settings";
-import { ChevronDownIcon, ChevronRightIcon, ListFilterIcon } from "lucide-react";
+import { ChevronDownIcon, ChevronRightIcon } from "lucide-react";
 import { Fragment, type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
 
 import { readEnvironmentApi } from "../../environmentApi";
@@ -16,19 +16,21 @@ import { PREFERS_REDUCED_MOTION_QUERY, shouldEnableAutoAnimate } from "../../lib
 import { newCommandId } from "../../lib/utils";
 import { sidebarUndo } from "../../sidebarUndo";
 import { SIDEBAR_AUTO_ANIMATE_VISIBLE_THREAD_LIMIT } from "../Sidebar.logic";
+import { handleSidebarListScroll } from "../sidebar/sidebarFold";
+import { omnifieldListQuery } from "../sidebar/sidebarOmnifield.logic";
 import { Button } from "../ui/button";
-import { Input } from "../ui/input";
 import { SidebarContent } from "../ui/sidebar";
 import { toastManager } from "../ui/toast";
 import { TooltipCreateHandle } from "../ui/tooltip";
 import { InboxDelegatedGroup } from "./InboxDelegatedGroup";
+import { useInboxFilterStore } from "./inboxFilterStore";
 import { InboxHoverLayer } from "./InboxHoverLayer";
 import type { InboxRowPreviewPayload } from "./InboxRowPreview";
 import {
   buildInboxSidebarModel,
   type InboxSidebarEnvironment,
   type InboxSidebarRow,
-  type InboxSidebarStatusFilter,
+  type InboxSidebarSectionKey,
 } from "./inboxSidebarModel";
 import { InboxThreadRow, type InboxThreadActions } from "./InboxThreadRow";
 import { InboxMotionContext, useInboxListMotion } from "./useInboxListMotion";
@@ -52,24 +54,13 @@ export interface InboxSidebarProps {
   readonly onAddProject?: (() => void) | undefined;
 }
 
-const STATUS_FILTERS: ReadonlyArray<{
-  readonly value: InboxSidebarStatusFilter;
-  readonly label: string;
-}> = [
-  { value: "all", label: "All status" },
-  { value: "pinned", label: "Pinned" },
-  { value: "focus", label: "Focus" },
-  { value: "active", label: "Active now" },
-  { value: "needs-input", label: "Needs input" },
-  { value: "recent", label: "Recent" },
-  { value: "snoozed", label: "Snoozed" },
-  { value: "settled", label: "Settled" },
-];
-
 export function InboxSidebar(props: InboxSidebarProps) {
-  const [query, setQuery] = useState("");
-  const [environmentId, setEnvironmentId] = useState<EnvironmentId | null>(null);
-  const [status, setStatus] = useState<InboxSidebarStatusFilter>("all");
+  // Edited by the sidebar header's Omnifield; a token still being typed narrows nothing.
+  const draft = useInboxFilterStore((store) => store.draft);
+  const environmentId = useInboxFilterStore((store) => store.environmentId);
+  const status = useInboxFilterStore((store) => store.status);
+  const publishCounts = useInboxFilterStore((store) => store.publishCounts);
+  const query = useMemo(() => omnifieldListQuery(draft), [draft]);
   const [snoozedOpen, setSnoozedOpen] = useState(false);
   const [settledOpen, setSettledOpen] = useState(false);
   const [settlementNowMs, setSettlementNowMs] = useState(() => Date.now());
@@ -180,6 +171,15 @@ export function InboxSidebar(props: InboxSidebarProps) {
     };
   }, []);
   const sections = model.sections;
+  useEffect(() => {
+    const counts: Partial<Record<InboxSidebarSectionKey, number>> = {};
+    let total = 0;
+    for (const section of sections) {
+      counts[section.key] = section.rows.length;
+      total += section.rows.length;
+    }
+    publishCounts(total, status === "all" ? counts : null);
+  }, [publishCounts, sections, status]);
   const hasFilters = query.trim().length > 0 || environmentId !== null || status !== "all";
   const hasNoProjects = props.projects.length === 0;
   const isExpanded = (key: string) =>
@@ -231,56 +231,12 @@ export function InboxSidebar(props: InboxSidebarProps) {
 
   return (
     <InboxMotionContext value={gateRef}>
-      <SidebarContent className="gap-0 px-2 pb-2" data-testid="inbox-sidebar">
+      <SidebarContent
+        className="gap-0 px-2 pt-1 pb-2"
+        data-testid="inbox-sidebar"
+        onViewportScroll={handleSidebarListScroll}
+      >
         <InboxHoverLayer hintHandle={hintHandle} previewHandle={previewHandle}>
-          <div className="sticky top-0 z-10 space-y-1.5 bg-sidebar px-0.5 pb-2 pt-1">
-            <label className="relative block">
-              {/* "Filter", not "Search": the command palette above searches
-                  everything, this only narrows the list below. */}
-              <ListFilterIcon className="pointer-events-none absolute left-2.5 top-1/2 z-10 size-3.5 -translate-y-1/2 text-muted-foreground/60" />
-              <Input
-                aria-label="Filter inbox"
-                className="bg-sidebar shadow-none [&_[data-slot=input]]:pl-8"
-                onChange={(event) => setQuery(event.target.value)}
-                placeholder="Filter tasks"
-                size="sm"
-                type="search"
-                value={query}
-              />
-            </label>
-            <div className="grid grid-cols-2 gap-1.5">
-              <select
-                aria-label="Filter Inbox by machine"
-                className="h-7 min-w-0 rounded-md border border-input bg-sidebar px-2 text-[11px] text-muted-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                onChange={(event) =>
-                  setEnvironmentId(
-                    event.target.value ? (event.target.value as EnvironmentId) : null,
-                  )
-                }
-                value={environmentId ?? ""}
-              >
-                <option value="">All machines</option>
-                {props.environments.map((environment) => (
-                  <option key={environment.environmentId} value={environment.environmentId}>
-                    {environment.label}
-                  </option>
-                ))}
-              </select>
-              <select
-                aria-label="Filter Inbox by status"
-                className="h-7 min-w-0 rounded-md border border-input bg-sidebar px-2 text-[11px] text-muted-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                onChange={(event) => setStatus(event.target.value as InboxSidebarStatusFilter)}
-                value={status}
-              >
-                {STATUS_FILTERS.map((filter) => (
-                  <option key={filter.value} value={filter.value}>
-                    {filter.label}
-                  </option>
-                ))}
-              </select>
-            </div>
-          </div>
-
           {sections.length === 0 ? (
             <div className="flex min-h-36 flex-col items-center justify-center gap-2 px-4 text-center">
               <p className="text-xs font-medium text-sidebar-foreground">
