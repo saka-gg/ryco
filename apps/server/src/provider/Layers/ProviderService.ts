@@ -89,7 +89,10 @@ import {
   type ProviderStartPhase,
   type ProviderTimedOperation,
 } from "../providerOperationPolicy.ts";
-import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
+import type {
+  ProviderAdapterCapabilities,
+  ProviderAdapterShape,
+} from "../Services/ProviderAdapter.ts";
 import { ProviderAdapterRegistry } from "../Services/ProviderAdapterRegistry.ts";
 import {
   ProviderService,
@@ -169,7 +172,25 @@ const ProviderRollbackConversationInput = Schema.Struct({
   numTurns: NonNegativeInt,
   targetTurnId: Schema.NullOr(TurnId),
   droppedTurnIds: Schema.Array(TurnId),
+  cwd: Schema.optional(Schema.String),
 });
+
+/**
+ * Where a thread's native conversation is reachable now. A move (a chat turned into a project, a
+ * relocated worktree) leaves the binding's recorded directory behind until the next start, and
+ * that folder may be gone. A conversation that survives the move (`resumeSurvivesCwdChange`) is
+ * reached in the thread's current directory, where the next start resumes it; any other still
+ * lives in the recorded directory.
+ */
+function reachableConversationCwd(input: {
+  readonly capabilities: ProviderAdapterCapabilities;
+  readonly recordedCwd: string | undefined;
+  readonly currentCwd: string | undefined;
+}): string | undefined {
+  return input.capabilities.resumeSurvivesCwdChange === true
+    ? (input.currentCwd ?? input.recordedCwd)
+    : (input.recordedCwd ?? input.currentCwd);
+}
 
 function toValidationError(
   operation: string,
@@ -994,6 +1015,8 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const recoverSessionForThread = Effect.fn("recoverSessionForThread")(function* (input: {
     readonly binding: ProviderRuntimeBinding;
     readonly operation: string;
+    /** The thread's current working directory, when the caller knows it. */
+    readonly cwd?: string | undefined;
   }) {
     const bindingInstanceId = yield* requireBindingInstanceId(input.operation, input.binding);
     yield* Effect.annotateCurrentSpan({
@@ -1037,7 +1060,11 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         );
       }
 
-      const persistedCwd = readPersistedCwd(input.binding.runtimePayload);
+      const resumeCwd = reachableConversationCwd({
+        capabilities: adapter.capabilities,
+        recordedCwd: readPersistedCwd(input.binding.runtimePayload),
+        currentCwd: input.cwd,
+      });
       const persistedModelSelection = readPersistedModelSelection(input.binding.runtimePayload);
       const recoveredBinding: ProviderRuntimeBinding = {
         threadId: input.binding.threadId,
@@ -1059,7 +1086,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
               providerInstanceId: bindingInstanceId,
               runtimeSessionId,
               resumePolicy: "compatible",
-              ...(persistedCwd ? { cwd: persistedCwd } : {}),
+              ...(resumeCwd ? { cwd: resumeCwd } : {}),
               ...(persistedModelSelection ? { modelSelection: persistedModelSelection } : {}),
               ...(hasResumeCursor ? { resumeCursor: input.binding.resumeCursor } : {}),
               runtimeMode: input.binding.runtimeMode ?? "full-access",
@@ -1107,6 +1134,8 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     readonly threadId: ThreadId;
     readonly operation: string;
     readonly allowRecovery: boolean;
+    /** Where a recovered session resumes a conversation that survives a move. */
+    readonly cwd?: string | undefined;
   }) {
     const bindingOption = yield* directory.getBinding(input.threadId);
     const binding = Option.getOrUndefined(bindingOption);
@@ -1146,6 +1175,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     const recovered = yield* recoverSessionForThread({
       binding,
       operation: input.operation,
+      cwd: input.cwd,
     });
     return {
       adapter: recovered.adapter,
@@ -2259,6 +2289,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           threadId: input.threadId,
           operation,
           allowRecovery: true,
+          cwd: input.cwd,
         });
         metricProvider = routed.adapter.provider;
         yield* Effect.annotateCurrentSpan({
@@ -2389,11 +2420,11 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         if (!adapter.readThreadHistory) return Option.none();
         // Read where the conversation is reachable now, without rewriting the binding: its
         // recorded directory, possibly gone after a move, is what relocation detection needs.
-        const recordedCwd = readPersistedCwd(binding.value.runtimePayload);
-        const cwd =
-          adapter.capabilities.resumeSurvivesCwdChange === true
-            ? (input?.cwd ?? recordedCwd)
-            : (recordedCwd ?? input?.cwd);
+        const cwd = reachableConversationCwd({
+          capabilities: adapter.capabilities,
+          recordedCwd: readPersistedCwd(binding.value.runtimePayload),
+          currentCwd: input?.cwd,
+        });
         const history = yield* adapter.readThreadHistory({
           threadId,
           resumeCursor: binding.value.resumeCursor,

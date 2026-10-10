@@ -26,9 +26,15 @@ import { workItemStateLabel } from "~/lib/workItemState";
 import { cn } from "~/lib/utils";
 import { AtlassianJiraIcon } from "../Icons";
 import { Button } from "../ui/button";
+import {
+  formatProjectOverviewCount,
+  formatProjectOverviewHostedCount,
+  isProjectOverviewUnhosted,
+  NO_HOSTING_PROVIDER_LABEL,
+  PROJECT_OVERVIEW_LIST_LIMIT,
+} from "./ProjectOverviewTab.logic";
 import { changeRequestStateKind, StateBadge } from "./StateBadge";
 
-const OVERVIEW_LIST_LIMIT = 20;
 const OVERVIEW_VISIBLE_LIMIT = 5;
 
 type OverviewTabId = "issues" | "prs" | "actions" | "workItems";
@@ -37,6 +43,8 @@ interface ProjectOverviewTabProps {
   readonly environmentId: EnvironmentId | null;
   readonly cwd: string | null;
   readonly projectId: ProjectId | null;
+  /** Without a git remote no hosting provider serves issues, pull requests or runs. */
+  readonly hasGitRemote: boolean;
   readonly onOpenTab: (tab: OverviewTabId) => void;
   readonly onSelectIssue: (issue: SourceControlIssueSummary) => void;
   readonly onSelectChangeRequest: (changeRequest: ChangeRequest) => void;
@@ -46,7 +54,8 @@ interface ProjectOverviewTabProps {
 interface OverviewSectionProps<TItem> {
   readonly title: string;
   readonly description: string;
-  readonly countLabel: string;
+  /** Omitted when the count would not mean anything (no hosting provider). */
+  readonly countLabel: string | null;
   readonly emptyText: string;
   readonly error: unknown;
   readonly isLoading: boolean;
@@ -58,30 +67,23 @@ interface OverviewSectionProps<TItem> {
   readonly renderItem: (item: TItem) => ReactNode;
 }
 
-export function formatProjectOverviewCount(
-  count: number,
-  limit: number = OVERVIEW_LIST_LIMIT,
-): string {
-  return count >= limit ? `${limit}+` : String(count);
-}
-
 export function ProjectOverviewTab(props: ProjectOverviewTabProps) {
   const issueListQuery = useSourceControlIssueList({
     environmentId: props.environmentId,
     cwd: props.cwd,
     state: "open",
-    limit: OVERVIEW_LIST_LIMIT,
+    limit: PROJECT_OVERVIEW_LIST_LIMIT,
   });
   const pullRequestListQuery = useSourceControlChangeRequestList({
     environmentId: props.environmentId,
     cwd: props.cwd,
     state: "open",
-    limit: OVERVIEW_LIST_LIMIT,
+    limit: PROJECT_OVERVIEW_LIST_LIMIT,
   });
   const workflowRunsQuery = useSourceControlWorkflowRuns({
     environmentId: props.environmentId,
     cwd: props.cwd,
-    limit: OVERVIEW_LIST_LIMIT,
+    limit: PROJECT_OVERVIEW_LIST_LIMIT,
   });
   const projectLinkQuery = useAtlassianProjectLink({
     environmentId: props.environmentId,
@@ -97,7 +99,7 @@ export function ProjectOverviewTab(props: ProjectOverviewTabProps) {
     environmentId: props.environmentId,
     projectId: props.projectId,
     state: "open",
-    limit: OVERVIEW_LIST_LIMIT,
+    limit: PROJECT_OVERVIEW_LIST_LIMIT,
     enabled: jiraConfigured,
   });
 
@@ -105,6 +107,12 @@ export function ProjectOverviewTab(props: ProjectOverviewTabProps) {
   const pullRequests = useMemo(() => pullRequestListQuery.data ?? [], [pullRequestListQuery.data]);
   const workflowRuns = useMemo(() => workflowRunsQuery.data?.runs ?? [], [workflowRunsQuery.data]);
   const workItems = useMemo(() => workItemListQuery.data ?? [], [workItemListQuery.data]);
+  const { hasGitRemote } = props;
+  const issuesUnhosted = isProjectOverviewUnhosted({ hasGitRemote, count: issues.length });
+  const pullRequestsUnhosted = isProjectOverviewUnhosted({
+    hasGitRemote,
+    count: pullRequests.length,
+  });
 
   return (
     <div className="h-full min-h-0 overflow-y-auto">
@@ -114,21 +122,21 @@ export function ProjectOverviewTab(props: ProjectOverviewTabProps) {
       <div className="grid gap-3 p-4 sm:grid-cols-2 xl:grid-cols-4">
         <OverviewMetric
           label="Open issues"
-          value={formatProjectOverviewCount(issues.length)}
+          value={formatProjectOverviewHostedCount({ hasGitRemote, count: issues.length })}
           icon={<CircleDotIcon className="size-3.5" />}
           accentClassName="border-emerald-500/18 bg-emerald-500/8 text-emerald-600 dark:text-emerald-300"
           onClick={() => props.onOpenTab("issues")}
         />
         <OverviewMetric
           label="Open pull requests"
-          value={formatProjectOverviewCount(pullRequests.length)}
+          value={formatProjectOverviewHostedCount({ hasGitRemote, count: pullRequests.length })}
           icon={<GitPullRequestIcon className="size-3.5" />}
           accentClassName="border-emerald-500/18 bg-emerald-500/8 text-emerald-600 dark:text-emerald-300"
           onClick={() => props.onOpenTab("prs")}
         />
         <OverviewMetric
           label="Actions"
-          value={formatProjectOverviewCount(workflowRuns.length)}
+          value={formatProjectOverviewHostedCount({ hasGitRemote, count: workflowRuns.length })}
           icon={<ListChecksIcon className="size-3.5" />}
           accentClassName="border-amber-500/18 bg-amber-500/8 text-amber-600 dark:text-amber-300"
           onClick={() => props.onOpenTab("actions")}
@@ -146,8 +154,12 @@ export function ProjectOverviewTab(props: ProjectOverviewTabProps) {
         <OverviewSection
           title="Issues"
           description="Open source-control issues for this repository."
-          countLabel={formatProjectOverviewCount(issues.length)}
-          emptyText="No open issues."
+          countLabel={issuesUnhosted ? null : formatProjectOverviewCount(issues.length)}
+          emptyText={
+            issuesUnhosted
+              ? `${NO_HOSTING_PROVIDER_LABEL}. Add a git remote to see its issues here.`
+              : "No open issues."
+          }
           error={issueListQuery.error}
           isLoading={issueListQuery.isLoading}
           items={issues.slice(0, OVERVIEW_VISIBLE_LIMIT)}
@@ -171,8 +183,12 @@ export function ProjectOverviewTab(props: ProjectOverviewTabProps) {
         <OverviewSection
           title="Pull requests"
           description="Open pull requests and review work for this repository."
-          countLabel={formatProjectOverviewCount(pullRequests.length)}
-          emptyText="No open pull requests."
+          countLabel={pullRequestsUnhosted ? null : formatProjectOverviewCount(pullRequests.length)}
+          emptyText={
+            pullRequestsUnhosted
+              ? `${NO_HOSTING_PROVIDER_LABEL}. Add a git remote to see its pull requests here.`
+              : "No open pull requests."
+          }
           error={pullRequestListQuery.error}
           isLoading={pullRequestListQuery.isLoading}
           items={pullRequests.slice(0, OVERVIEW_VISIBLE_LIMIT)}
@@ -310,7 +326,9 @@ function OverviewSection<TItem>(props: OverviewSectionProps<TItem>) {
           <div className="min-w-0">
             <div className="flex items-baseline gap-2">
               <h3 className="font-medium text-sm">{props.title}</h3>
-              <span className="text-muted-foreground text-xs">{props.countLabel}</span>
+              {props.countLabel !== null ? (
+                <span className="text-muted-foreground text-xs">{props.countLabel}</span>
+              ) : null}
             </div>
             <p className="mt-0.5 text-muted-foreground text-xs">{props.description}</p>
           </div>

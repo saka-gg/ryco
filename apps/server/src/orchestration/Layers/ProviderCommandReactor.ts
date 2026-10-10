@@ -40,7 +40,7 @@ import { matchesApprovalAttempt, questionAsCallback } from "../approvalResponses
 import { ProjectionPendingApprovalRepository } from "../../persistence/Services/ProjectionPendingApprovals.ts";
 import { ProjectionPendingApprovalRepositoryLive } from "../../persistence/Layers/ProjectionPendingApprovals.ts";
 import type { ApprovalResponseState } from "@ryco/contracts";
-import { lstatSync, realpathSync } from "node:fs";
+import { lstatSync } from "node:fs";
 import nodePath from "node:path";
 
 import {
@@ -59,7 +59,6 @@ import {
   ProviderDriverKind,
   type OrchestrationThreadShell,
   type ProjectId,
-  type ProviderInstanceId,
   type OrchestrationSession,
   type OrchestrationTurnOutcome,
   ThreadId,
@@ -115,6 +114,7 @@ import {
   makeCwdRelocationRequestedActivity,
 } from "../contextHandoff/ContextHandoffRelocation.ts";
 import { TURN_FINALIZATION_REASON } from "../turnFinalization.ts";
+import { type CwdRelocation, resolveCwdRelocation, worktreeIdentity } from "../cwdRelocation.ts";
 import {
   ProviderCommandReactor,
   type ProviderCommandReactorShape,
@@ -224,20 +224,6 @@ type TurnStartRequestedEvent = Extract<
   { type: "thread.turn-start-requested" }
 >;
 
-// Git canonicalizes registered paths, while saved paths can contain symlinked parents.
-function worktreeIdentity(path: string): string {
-  try {
-    return realpathSync(path);
-  } catch {
-    return nodePath.resolve(path);
-  }
-}
-
-/** Whether a native conversation that last ran in `previous` would now run elsewhere. */
-function isMovedWorkingDirectory(previous: string, next: string): boolean {
-  return previous !== next && worktreeIdentity(previous) !== worktreeIdentity(next);
-}
-
 const CWD_RELOCATION_RESTART_DETAIL =
   "This thread's folder moved. Send a message to continue the conversation in a fresh session there.";
 
@@ -258,13 +244,6 @@ class CwdRelocationResumeUnavailableError extends Data.TaggedError(
   /** User-facing; shown only when a restart, which has no message to carry it, meets the move. */
   readonly detail: string;
 }> {}
-
-/** A moved native conversation; `resumeSurvives` when the provider resumes it in any directory. */
-interface CwdRelocation {
-  readonly previousCwd: string;
-  readonly cwd: string;
-  readonly resumeSurvives: boolean;
-}
 
 const cwdRelocationError = (
   relocation: CwdRelocation,
@@ -696,41 +675,6 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
   }, Effect.scoped);
 
   /**
-   * The native conversation a start would resume, when it last ran outside the
-   * thread's effective cwd. A restart resumes the live session's cursor; a
-   * start without one gets the persisted binding's cursor and cwd merged by
-   * ProviderService.startSession, for the same instance only. Undefined when
-   * nothing would be resumed or the directory did not move.
-   */
-  const resolveCwdRelocation = Effect.fnUntraced(function* (input: {
-    readonly threadId: ThreadId;
-    readonly liveSession: ProviderSession | undefined;
-    readonly instanceId: ProviderInstanceId;
-    readonly cwd: string | undefined;
-  }) {
-    if (input.cwd === undefined) return undefined;
-    let previousCwd: string | undefined;
-    if (input.liveSession !== undefined) {
-      previousCwd = input.liveSession.resumeCursor != null ? input.liveSession.cwd : undefined;
-    } else if (providerService.readResumeTarget !== undefined) {
-      const target = Option.getOrUndefined(yield* providerService.readResumeTarget(input.threadId));
-      previousCwd =
-        target?.hasResumeCursor === true && target.providerInstanceId === input.instanceId
-          ? target.cwd
-          : undefined;
-    }
-    if (previousCwd === undefined || !isMovedWorkingDirectory(previousCwd, input.cwd)) {
-      return undefined;
-    }
-    const capabilities = yield* providerService.getCapabilities(input.instanceId);
-    return {
-      previousCwd,
-      cwd: input.cwd,
-      resumeSurvives: capabilities.resumeSurvivesCwdChange === true,
-    } satisfies CwdRelocation;
-  });
-
-  /**
    * A turn's resume after a cwd move that finds no conversation (Codex lost
    * its rollout, a provider that resumed anyway) fails as a relocation, so the
    * turn continues with a context handoff instead of failing. Restarts keep
@@ -928,7 +872,7 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
 
     const existingSessionThreadId =
       thread.session && thread.session.status !== "stopped" && activeSession ? thread.id : null;
-    const relocation = yield* resolveCwdRelocation({
+    const relocation = yield* resolveCwdRelocation(providerService, {
       threadId,
       liveSession: existingSessionThreadId ? activeSession : undefined,
       instanceId: desiredInstanceId,

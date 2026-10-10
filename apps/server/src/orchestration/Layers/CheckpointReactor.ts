@@ -44,6 +44,7 @@ import {
   threadBusyMessage,
   threadBusyReason,
 } from "../checkpointRevertPolicy.ts";
+import { resolveCwdRelocation } from "../cwdRelocation.ts";
 import { latestTurnFromCheckpoint } from "../projector.ts";
 import { threadShellSettlementInput } from "../threadSettlementInput.ts";
 import { selectTurnReplyMessage, type TurnReplyCandidate } from "../turnReplyMessage.ts";
@@ -359,6 +360,25 @@ const make = Effect.gen(function* () {
       return undefined;
     }
     return cwd;
+  });
+
+  // Whether the conversation a revert would rewind last ran outside the
+  // thread's folder: the same check a turn start makes before resuming it.
+  const resolveRevertCwdRelocation = Effect.fn("resolveRevertCwdRelocation")(function* (
+    thread: OrchestrationThread,
+    cwd: string | undefined,
+  ) {
+    const sessions = yield* providerService.listSessions();
+    const liveSession =
+      thread.session !== null && thread.session.status !== "stopped"
+        ? sessions.find((session) => session.threadId === thread.id)
+        : undefined;
+    return yield* resolveCwdRelocation(providerService, {
+      threadId: thread.id,
+      liveSession,
+      instanceId: thread.modelSelection.instanceId,
+      cwd,
+    });
   });
 
   // Shared tail for both capture paths: creates the git checkpoint ref, diffs
@@ -1138,6 +1158,31 @@ const make = Effect.gen(function* () {
 
     // 8. Provider first: files and history stay untouched if it refuses.
     const fromTurnCount = outcome.currentTurnCount;
+    // The thread's folder, resolved like a turn start: the binding may still
+    // record the folder the conversation ran in before the thread moved.
+    const workspaceCwd = resolveThreadWorkspaceCwd({ thread, projects });
+    const resolvedRelocation =
+      outcome.dropped.length > 0
+        ? yield* Effect.result(resolveRevertCwdRelocation(thread, workspaceCwd))
+        : undefined;
+    if (resolvedRelocation?._tag === "Failure") {
+      return yield* fail(
+        "provider-failed",
+        `Ryco could not rewind the agent's conversation. ${asSentence(
+          userFacingFailureDetail(Cause.fail(resolvedRelocation.failure)),
+        )}`,
+      );
+    }
+    const relocation = resolvedRelocation?.success;
+    if (relocation !== undefined && !relocation.resumeSurvives) {
+      // The provider cannot resume this conversation in the new folder, so
+      // rewinding it would resume it in the old one. Refuse before anything
+      // changes rather than restore files the conversation would not match.
+      return yield* fail(
+        "provider-unsupported",
+        "This conversation ran in a folder the thread has since moved from, and the agent can't rewind it there. Send a message first to continue it in the new folder.",
+      );
+    }
     if (outcome.dropped.length > 0) {
       // The journal must say "rolling-back" before the provider can forget
       // anything, or a crash would be recovered as "nothing was changed".
@@ -1169,6 +1214,7 @@ const make = Effect.gen(function* () {
           numTurns: outcome.currentTurnCount - turnCount,
           targetTurnId: outcome.targetTurnId,
           droppedTurnIds: outcome.dropped.map((checkpoint) => checkpoint.turnId),
+          ...(workspaceCwd !== undefined ? { cwd: workspaceCwd } : {}),
         }),
       );
       if (rolledBack._tag === "Failure") {

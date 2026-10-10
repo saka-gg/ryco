@@ -585,6 +585,7 @@ export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Prom
       createdAt: messageCreatedAt,
       newCommandId,
       beginLocalDispatch,
+      endLocalDispatch: resetLocalDispatch,
       persistThreadSettingsForNextTurn: persistSettingsDeps.persistThreadSettingsForNextTurn,
     });
     turnStartSucceeded = true;

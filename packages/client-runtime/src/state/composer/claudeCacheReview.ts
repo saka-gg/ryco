@@ -83,6 +83,7 @@ export async function reviewClaudeResumeBeforeSend(
     throw new ClaudeResumeReviewError(
       "This Claude resume needs review. Open the conversation and send again; your message is retained.",
     );
+  input.endLocalDispatch?.();
   const choice = await presentation.review(review);
   if (choice === "cancel")
     throw new ClaudeResumeReviewError("Send cancelled. Your message and attachments are retained.");
