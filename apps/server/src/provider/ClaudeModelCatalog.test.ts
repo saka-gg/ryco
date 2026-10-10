@@ -176,7 +176,7 @@ describe("ClaudeModelCatalog", () => {
       const ids = getClaudeCatalogModelCapabilities(
         catalog,
         "claude-opus-5-5",
-      ).optionDescriptors.map((descriptor) => descriptor.id);
+      ).optionDescriptors?.map((descriptor) => descriptor.id);
       assert.deepEqual(ids, ["effort", "fastMode", "contextWindow"]);
       assert.equal(
         resolveClaudeCatalogApiModelId(
