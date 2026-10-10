@@ -44,10 +44,8 @@ vi.mock("./NeedsVerificationSection", () => ({
   NeedsVerificationSection: "NeedsVerificationSection",
 }));
 vi.mock("./useHomeEnvironments", () => ({ useHomeEnvironments: () => [] }));
-// useNodeTrust reaches the E2EE trust store singleton and the hosted runtime
-// config at module scope; preferencesStore reaches expo-sqlite's KV store.
-// Both must stop at the module boundary in the node test environment.
-vi.mock("./useNodeTrust", () => ({ useNodeTrust: () => null }));
+// preferencesStore reaches expo-sqlite's KV store; it must stop at the module
+// boundary in the node test environment.
 vi.mock("../../state/preferencesStore", () => ({ usePreferences: () => ({}) }));
 vi.mock("../connection/useConnectionController", () => ({
   useSavedEnvironments: () => ({ rows: [], isLoading: false }),
