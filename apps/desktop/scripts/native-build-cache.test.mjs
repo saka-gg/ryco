@@ -1,6 +1,15 @@
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import {
+  copyFileSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rm } from "node:fs/promises";
+import { basename, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import {
   buildCachedNativeBinary,
@@ -14,9 +23,9 @@ beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "ryco-native-cache-test-"));
   vi.stubEnv("RYCO_NATIVE_BUILD_CACHE_DIR", join(root, "cache"));
 });
-afterEach(() => {
+afterEach(async () => {
   vi.unstubAllEnvs();
-  rmSync(root, { recursive: true, force: true });
+  await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 });
 
 function setup() {
@@ -43,14 +52,17 @@ describe("native build cache", () => {
     expect(readFileSync(options.output, "utf8")).toBe("verified binary");
   });
 
-  it.each(["binary", "build.json"])("rebuilds a corrupted cached %s", (file) => {
-    const { options, cache } = setup();
-    buildCachedNativeBinary(options);
-    writeFileSync(join(cache, file), "corrupt");
-    buildCachedNativeBinary(options);
-    expect(options.build).toHaveBeenCalledTimes(2);
-    expect(readFileSync(options.output, "utf8")).toBe("verified binary");
-  });
+  it.each([process.platform === "win32" ? "binary.exe" : "binary", "build.json"])(
+    "rebuilds a corrupted cached %s",
+    (file) => {
+      const { options, cache } = setup();
+      buildCachedNativeBinary(options);
+      writeFileSync(join(cache, file), "corrupt");
+      buildCachedNativeBinary(options);
+      expect(options.build).toHaveBeenCalledTimes(2);
+      expect(readFileSync(options.output, "utf8")).toBe("verified binary");
+    },
+  );
 
   it("rebuilds when executable validation fails despite a matching checksum", () => {
     const { options } = setup();
@@ -69,7 +81,7 @@ describe("native build cache", () => {
     });
     expect(() => buildCachedNativeBinary(options)).toThrow("compiler failed");
     expect(readFileSync(options.output, "utf8")).toBe("verified binary");
-    expect(readdirSync(join(root, "cache/artifacts/fixture"))).toEqual([cache.split("/").at(-1)]);
+    expect(readdirSync(join(root, "cache/artifacts/fixture"))).toEqual([basename(cache)]);
   });
 
   it("accepts another builder's verified publication of the same key", () => {
@@ -85,6 +97,28 @@ describe("native build cache", () => {
     buildCachedNativeBinary(options);
     expect(readFileSync(options.output, "utf8")).toBe("verified binary");
   });
+
+  it.runIf(process.platform === "win32")(
+    "executes the staged and cached Windows binary during validation",
+    () => {
+      const build = vi.fn((binary) => copyFileSync(process.execPath, binary));
+      const validate = (binary) => {
+        const result = spawnSync(binary, ["--version"], { encoding: "utf8" });
+        return result.status === 0 && result.stdout.trim() === process.version;
+      };
+      const options = {
+        name: "executable",
+        key: fingerprint("executable"),
+        output: join(root, "helper.exe"),
+        build,
+        validate,
+      };
+      buildCachedNativeBinary(options);
+      expect(validate(options.output)).toBe(true);
+      buildCachedNativeBinary(options);
+      expect(build).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it("fingerprints relative source contents while excluding compiler outputs", () => {
     const first = join(root, "first");

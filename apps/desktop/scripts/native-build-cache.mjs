@@ -89,6 +89,28 @@ export function swiftModuleCacheDirectory(identity) {
   return directory;
 }
 
+function withWindowsFileRetries(operation) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return operation();
+    } catch (error) {
+      if (
+        process.platform !== "win32" ||
+        !["EACCES", "EBUSY", "EPERM"].includes(error.code) ||
+        attempt === 10
+      ) {
+        throw error;
+      }
+      // Windows can briefly retain executable handles after validation exits.
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100 * (attempt + 1));
+    }
+  }
+}
+
+function removeNativeDirectory(directory) {
+  withWindowsFileRetries(() => rmSync(directory, { recursive: true, force: true }));
+}
+
 export function stageNativeBinary(source, output) {
   mkdirSync(dirname(output), { recursive: true });
   const temporary = mkdtempSync(join(dirname(output), ".native-stage-"));
@@ -96,30 +118,37 @@ export function stageNativeBinary(source, output) {
     const pending = join(temporary, "binary");
     copyFileSync(source, pending);
     chmodSync(pending, 0o755);
-    renameSync(pending, output);
+    withWindowsFileRetries(() => renameSync(pending, output));
   } finally {
-    rmSync(temporary, { recursive: true, force: true });
+    removeNativeDirectory(temporary);
   }
 }
 
 // Callers finish verification before publication; another builder may have
 // already published this immutable key while our compiler was running.
 export function publishNativeCacheDirectory(temporary, cache, usable) {
-  if (!usable(cache)) rmSync(cache, { recursive: true, force: true });
-  try {
-    renameSync(temporary, cache);
-  } catch (error) {
-    if (!["EEXIST", "ENOTEMPTY"].includes(error.code) || !usable(cache)) throw error;
-  }
+  if (!usable(cache)) removeNativeDirectory(cache);
+  withWindowsFileRetries(() => {
+    try {
+      renameSync(temporary, cache);
+    } catch (error) {
+      // Windows reports EPERM when the destination directory already exists.
+      // Accept a competing publication only after revalidating its contents.
+      if (!["EEXIST", "ENOTEMPTY", "EPERM"].includes(error.code) || !usable(cache)) throw error;
+    }
+  });
 }
 
 export function buildCachedNativeBinary({ name, key, output, validate, build }) {
   const parent = join(nativeBuildCacheDirectory(), "artifacts", name);
   const cache = join(parent, key);
+  // CreateProcess requires the executable extension even for temporary and
+  // cached helpers. Validate exactly the executable we will later restore.
+  const binaryName = process.platform === "win32" ? "binary.exe" : "binary";
   function usable(directory) {
     try {
       const metadata = JSON.parse(readFileSync(join(directory, "build.json"), "utf8"));
-      const binary = join(directory, "binary");
+      const binary = join(directory, binaryName);
       return (
         metadata.key === key &&
         metadata.sha256 === fingerprint(readFileSync(binary)) &&
@@ -130,14 +159,14 @@ export function buildCachedNativeBinary({ name, key, output, validate, build }) 
     }
   }
   if (usable(cache)) {
-    stageNativeBinary(join(cache, "binary"), output);
+    stageNativeBinary(join(cache, binaryName), output);
     console.error(`[native] Reusing ${name} (${key.slice(0, 12)})`);
     return output;
   }
   mkdirSync(parent, { recursive: true });
   const temporary = mkdtempSync(join(parent, ".build-"));
   try {
-    const binary = join(temporary, "binary");
+    const binary = join(temporary, binaryName);
     build(binary, temporary);
     chmodSync(binary, 0o755);
     if (!validate(binary)) throw new Error(`Native ${name} artifact verification failed.`);
@@ -152,7 +181,7 @@ export function buildCachedNativeBinary({ name, key, output, validate, build }) 
     console.error(`[native] Built ${name} (${key.slice(0, 12)})`);
     return output;
   } finally {
-    rmSync(temporary, { recursive: true, force: true });
+    removeNativeDirectory(temporary);
   }
 }
 

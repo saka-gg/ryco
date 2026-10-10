@@ -27,6 +27,13 @@ This document covers the unified release workflow for stable and nightly desktop
   - nightly releases publish npm dist-tag `nightly`
 - Signing is optional and auto-detected per platform from secrets.
 
+The Windows x64 job defaults to `windows-2025`. To use a prepared self-hosted
+Windows x64 runner, set the repository Actions variable `WINDOWS_X64_RUNNER` to
+its dedicated runner label. Clear the variable to restore the hosted default.
+The runner needs Git, PowerShell, MSVC Build Tools, the Windows SDK, and Rustup;
+the workflow installs the pinned Node, Bun, and Rust versions. Other matrix jobs
+and npm trusted publishing retain their existing runners.
+
 ## Nightly builds
 
 - Workflow: `.github/workflows/release.yml`

@@ -151,7 +151,7 @@ jobs:
             target: AppImage
             arch: arm64
           - label: Windows x64
-            runner: windows-2025
+            runner: ${{ vars.WINDOWS_X64_RUNNER || 'windows-2025' }}
             platform: win
             target: nsis
             arch: x64
@@ -185,6 +185,16 @@ jobs:
         shell: pwsh
         run: |
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $component = if ('${{ matrix.arch }}' -eq 'arm64') {
+            'Microsoft.VisualStudio.Component.VC.Runtimes.ARM64.Spectre'
+          } else {
+            'Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre'
+          }
+          $ready = & $vswhere -products * -latest -requires $component -property installationPath
+          if (-not [string]::IsNullOrWhiteSpace($ready)) {
+            Write-Host "Spectre libraries already installed: $component"
+            exit 0
+          }
           $installPath = & $vswhere -products * -latest -property installationPath
           $setupExe = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\setup.exe"
           if ([string]::IsNullOrWhiteSpace($installPath)) {
@@ -194,7 +204,7 @@ jobs:
 
           $proc = Start-Process -FilePath $setupExe `
             -ArgumentList "modify", "--installPath", "`"$installPath`"", "--add", `
-            "Microsoft.VisualStudio.Component.VC.Tools.x86.x64.Spectre", "--quiet", "--norestart" `
+            $component, "--quiet", "--norestart" `
             -Wait -PassThru -NoNewWindow
           if ($null -eq $proc -or $proc.ExitCode -ne 0) {
             $code = if ($null -ne $proc) { $proc.ExitCode } else { 1 }
