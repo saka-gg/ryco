@@ -1141,6 +1141,40 @@ routing.layer("ProviderServiceLive routing", (it) => {
     }),
   );
 
+  // "Turn into project…" stops the session and moves the chat folder away; a revert before the
+  // next turn must not resume the conversation in the folder the binding still records.
+  it.effect("recovers a moved thread's rollback session where its conversation runs now", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const chatFolder = "/tmp/chats/2026-10-09-rollback-moved";
+      const projectFolder = "/tmp/code/rollback-moved";
+      const threadId = asThreadId("thread-rollback-moved-codex");
+      yield* provider.startSession(threadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId,
+        cwd: chatFolder,
+        runtimeMode: "full-access",
+      });
+      yield* provider.stopSession({ threadId });
+      routing.codex.startSession.mockClear();
+      routing.codex.rollbackThread.mockClear();
+
+      yield* provider.rollbackConversation({
+        threadId,
+        numTurns: 1,
+        targetTurnId: null,
+        droppedTurnIds: [asTurnId("turn-1")],
+        cwd: projectFolder,
+      });
+
+      // Codex resumes after a move, so recovery resumes it where the next turn would.
+      assert.equal(routing.codex.startSession.mock.calls.length, 1);
+      assert.equal(routing.codex.startSession.mock.calls[0]?.[0].cwd, projectFolder);
+      assert.equal(routing.codex.rollbackThread.mock.calls.length, 1);
+    }),
+  );
+
   it.effect("refuses rollback for providers without native rollback before any recovery", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService;

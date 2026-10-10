@@ -238,6 +238,9 @@ export function createEnvironmentConnectionSupervisor<
   const listeners = new Set<() => void>();
   const threadDetailSubscriptions = new Map<string, ThreadDetailSubscriptionEntry>();
   const projectionTracker = createProjectionTracker();
+  // The threads each environment's applied shell lists. Absent until a snapshot
+  // lands: until then nothing is known missing and subscriptions attach as before.
+  const shellThreadIdsByEnvironment = new Map<EnvironmentId, Set<ThreadId>>();
   let activeService: {
     readonly throttle: EnvironmentSupervisorThrottle;
     refCount: number;
@@ -348,12 +351,20 @@ export function createEnvironmentConnectionSupervisor<
     },
   });
 
+  const isMissingFromShell = (environmentId: EnvironmentId, threadId: ThreadId) => {
+    const threadIds = shellThreadIdsByEnvironment.get(environmentId);
+    return threadIds !== undefined && !threadIds.has(threadId);
+  };
   const attach = (entry: ThreadDetailSubscriptionEntry): boolean => {
     if (entry.unsubscribeConnectionListener !== null) {
       entry.unsubscribeConnectionListener();
       entry.unsubscribeConnectionListener = null;
     }
     if (entry.unsubscribe !== NOOP) return true;
+    // A local draft's thread does not exist on the server until its first send,
+    // and the transport retries a missing thread every 250 ms. Wait for the
+    // shell to list the thread instead; `attachListedThreads` picks it up.
+    if (isMissingFromShell(entry.environmentId, entry.threadId)) return true;
     const connection = read(entry.environmentId);
     if (!connection) return false;
     let active = true;
@@ -448,6 +459,12 @@ export function createEnvironmentConnectionSupervisor<
     });
     attach(entry);
   };
+  const attachListedThreads = (environmentId: EnvironmentId) => {
+    for (const entry of threadDetailSubscriptions.values()) {
+      if (entry.environmentId !== environmentId || entry.unsubscribe !== NOOP) continue;
+      if (!attach(entry)) watch(entry);
+    }
+  };
   const disposeByKey = (key: string): boolean => {
     const entry = threadDetailSubscriptions.get(key);
     if (!entry) return false;
@@ -504,9 +521,16 @@ export function createEnvironmentConnectionSupervisor<
   ) => {
     const activeThreadIds = new Set(threadIds);
     for (const [key, entry] of threadDetailSubscriptions) {
-      if (entry.environmentId === environmentId && !activeThreadIds.has(entry.threadId)) {
+      if (entry.environmentId !== environmentId || activeThreadIds.has(entry.threadId)) continue;
+      if (entry.refCount === 0) {
         disposeByKey(key);
+        continue;
       }
+      // Still retained (a draft before its first send): detach and wait for the
+      // shell to list the thread, so its creation still starts the stream.
+      historyPagination.invalidate({ environmentId, threadId: entry.threadId });
+      entry.unsubscribe();
+      entry.unsubscribe = NOOP;
     }
   };
 
@@ -528,6 +552,7 @@ export function createEnvironmentConnectionSupervisor<
     if (!connection) return false;
     connections.delete(environmentId);
     projectionTracker.clearEnvironment(environmentId);
+    shellThreadIdsByEnvironment.delete(environmentId);
     historyPagination.clearEnvironment(environmentId);
     emit();
     for (const entry of threadDetailSubscriptions.values()) {
@@ -688,6 +713,15 @@ export function createEnvironmentConnectionSupervisor<
     input.stateSink.applyShellEvent(environmentId, event);
     projectionTracker.markEvent(environmentId, event.sequence);
     input.stateSink.afterShellEventApplied(environmentId, event, context);
+    const shellThreadIds = shellThreadIdsByEnvironment.get(environmentId);
+    if (shellThreadIds === undefined) return;
+    if (event.kind === "thread-removed") {
+      shellThreadIds.delete(event.threadId);
+    } else if (event.kind === "thread-upserted" && !shellThreadIds.has(event.thread.id)) {
+      // A draft's first send created the thread: start what was retained for it.
+      shellThreadIds.add(event.thread.id);
+      attachListedThreads(environmentId);
+    }
   };
   const syncShellSnapshot = (
     snapshot: OrchestrationShellSnapshot,
@@ -714,10 +748,10 @@ export function createEnvironmentConnectionSupervisor<
     projectionTracker.markSnapshot(environmentId, snapshot);
     input.onShellSnapshotReady(environmentId);
     callbacks?.onReady();
-    reconcileSubscriptionsForEnvironment(
-      environmentId,
-      snapshot.threads.map((thread) => thread.id),
-    );
+    const shellThreadIds = snapshot.threads.map((thread) => thread.id);
+    shellThreadIdsByEnvironment.set(environmentId, new Set(shellThreadIds));
+    reconcileSubscriptionsForEnvironment(environmentId, shellThreadIds);
+    attachListedThreads(environmentId);
     reconcileForEnvironment(environmentId);
     input.stateSink.reconcileSnapshotDerivedState();
   };
@@ -873,6 +907,7 @@ export function createEnvironmentConnectionSupervisor<
     await Promise.all([...connections.keys()].map((environmentId) => remove(environmentId)));
     pendingSavedEnvironmentConnections.clear();
     projectionTracker.clear();
+    shellThreadIdsByEnvironment.clear();
   };
   return {
     subscribe,

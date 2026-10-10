@@ -248,6 +248,12 @@ export interface ProviderServiceShape {
     readonly numTurns: number;
     readonly targetTurnId: TurnId | null;
     readonly droppedTurnIds: ReadonlyArray<TurnId>;
+    /**
+     * The thread's current working directory: its worktree, else its project's root. A session
+     * recovered for the rollback resumes a conversation that survives a move there, like the next
+     * start would; any other still resumes in the binding's recorded directory.
+     */
+    readonly cwd?: string;
   }) => Effect.Effect<void, ProviderServiceError>;
 
   /**

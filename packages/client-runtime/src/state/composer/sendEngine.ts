@@ -313,6 +313,12 @@ export interface CommitSendTurnDispatchInput {
   readonly newCommandId: () => CommandId;
   readonly beginLocalDispatch: (options: { readonly preparingWorktree: boolean }) => void;
   /**
+   * Closes the local dispatch window while the Claude resume review holds the
+   * send, so the settled previous turn does not read as running behind the
+   * dialog. `beginLocalDispatch` reopens it right before the turn starts.
+   */
+  readonly endLocalDispatch?: () => void;
+  /**
    * Runs immediately before the final `thread.turn.start`: after the Claude
    * resume review (including any `/compact` turn and its wait), the settings
    * writes and the readiness asserts. Not called when those throw, nor for a
@@ -349,9 +355,12 @@ export function commitSendTurnDispatch(input: CommitSendTurnDispatchInput): Prom
   return result;
 }
 
-async function commitSendTurnDispatchOnce(input: CommitSendTurnDispatchInput): Promise<void> {
-  rejectRetiredProjectMemory(input);
-  const reviewed = await reviewClaudeResumeBeforeSend(input);
+async function commitSendTurnDispatchOnce(sendInput: CommitSendTurnDispatchInput): Promise<void> {
+  rejectRetiredProjectMemory(sendInput);
+  const reviewed = await reviewClaudeResumeBeforeSend(sendInput);
+  // The turn's start time is the command's `createdAt`, so a reviewed resume is
+  // restamped: the time spent in the dialog (and any compaction) is not work.
+  const input = reviewed ? { ...sendInput, createdAt: new Date().toISOString() } : sendInput;
   // Server-side writes derived from this message must only run once the send
   // commits; otherwise an undone first send leaves orphan title/settings.
   if (input.isFirstMessage && input.isServerThread) {

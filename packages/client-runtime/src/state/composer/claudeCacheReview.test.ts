@@ -298,6 +298,19 @@ describe("held send through native compaction", () => {
       claudeResumeGuard: { runtimeSessionId: "runtime-1" },
     });
   });
+  it("is not working while the dialog is open and starts the turn at confirmation", async () => {
+    const f = setup("continue");
+    const order: string[] = [];
+    f.review.mockImplementationOnce(async () => {
+      order.push("review");
+      return "continue";
+    });
+    vi.mocked(f.input.beginLocalDispatch).mockImplementation(() => order.push("begin"));
+    await commitSendTurnDispatch({ ...f.input, endLocalDispatch: () => order.push("end") });
+    expect(order).toEqual(["end", "review", "begin"]);
+    expect(f.dispatch.mock.calls[0]?.[0]).toMatchObject({ type: "thread.turn.start" });
+    expect(f.dispatch.mock.calls[0]?.[0]).not.toMatchObject({ createdAt: f.input.createdAt });
+  });
   it("preserves held send on disconnect and never retries an uncertain compaction dispatch", async () => {
     const f = setup();
     f.dispatch.mockRejectedValueOnce(new Error("disconnected"));
@@ -330,10 +343,13 @@ describe("held send through native compaction", () => {
     const f = setup();
     const thread = fixture();
     f.setThread({ ...thread, session: { ...thread.session!, providerName: "codex" } });
-    await commitSendTurnDispatch({ ...f.input, providerDriver: "codex" });
+    const endLocalDispatch = vi.fn();
+    await commitSendTurnDispatch({ ...f.input, providerDriver: "codex", endLocalDispatch });
     expect(f.read).not.toHaveBeenCalled();
     expect(f.review).not.toHaveBeenCalled();
+    expect(endLocalDispatch).not.toHaveBeenCalled();
     expect(f.dispatch).toHaveBeenCalledTimes(1);
+    expect(f.dispatch.mock.calls[0]?.[0]).toMatchObject({ createdAt: f.input.createdAt });
   });
   it("reuses the logical command after successful compact+send loses its acknowledgement, even with a fresh API and no evidence", async () => {
     const f = setup();
