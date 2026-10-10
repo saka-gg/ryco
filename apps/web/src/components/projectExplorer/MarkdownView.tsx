@@ -1,4 +1,4 @@
-import { createContext, memo, useContext, useMemo, type ComponentProps } from "react";
+import { createContext, memo, useContext, useMemo, useRef, type ComponentProps } from "react";
 import ReactMarkdown, {
   defaultUrlTransform,
   type Components,
@@ -14,6 +14,12 @@ import {
   stripHtmlCommentsWithSourceMap,
   type StrippedMarkdown,
 } from "./markdownPreprocess";
+import {
+  MarkdownImage,
+  MarkdownImageGallery,
+  MarkdownLink,
+  MarkdownPicture,
+} from "./MarkdownImages";
 
 interface MarkdownViewProps {
   text: string;
@@ -44,20 +50,9 @@ const sanitizeSchema: SanitizeOptions = {
 };
 
 const markdownComponents: Components = {
-  a({ node: _node, href, ...props }) {
-    return <a {...props} href={href} target="_blank" rel="noopener noreferrer" />;
-  },
-  img({ node: _node, alt, src, ...props }) {
-    return (
-      <img
-        {...props}
-        alt={alt ?? ""}
-        src={src}
-        loading="lazy"
-        className={cn("max-w-full rounded-md border border-border/50", props.className)}
-      />
-    );
-  },
+  a: MarkdownLink,
+  img: MarkdownImage,
+  picture: MarkdownPicture,
   details({ node: _node, className, ...props }) {
     return (
       <details
@@ -239,6 +234,7 @@ export const MarkdownView = memo(function MarkdownView({
     () => (raw || !interactive ? null : stripHtmlCommentsWithSourceMap(text)),
     [text, raw, interactive],
   );
+  const containerRef = useRef<HTMLDivElement>(null);
   const stripped = useMemo(
     () => (raw ? text : (source?.text ?? stripHtmlComments(text))),
     [text, raw, source],
@@ -263,6 +259,7 @@ export const MarkdownView = memo(function MarkdownView({
 
   return (
     <div
+      ref={containerRef}
       className={cn(
         "chat-markdown w-full min-w-0 text-foreground/90 text-sm leading-relaxed",
         className,
@@ -279,16 +276,18 @@ export const MarkdownView = memo(function MarkdownView({
           : undefined
       }
     >
-      <TaskSourceContext value={source}>
-        <ReactMarkdown
-          remarkPlugins={remarkPlugins}
-          rehypePlugins={rehypePlugins}
-          components={interactive ? interactiveTaskComponents : markdownComponents}
-          urlTransform={urlTransform}
-        >
-          {stripped}
-        </ReactMarkdown>
-      </TaskSourceContext>
+      <MarkdownImageGallery container={containerRef}>
+        <TaskSourceContext value={source}>
+          <ReactMarkdown
+            remarkPlugins={remarkPlugins}
+            rehypePlugins={rehypePlugins}
+            components={interactive ? interactiveTaskComponents : markdownComponents}
+            urlTransform={urlTransform}
+          >
+            {stripped}
+          </ReactMarkdown>
+        </TaskSourceContext>
+      </MarkdownImageGallery>
     </div>
   );
 });
