@@ -6,8 +6,10 @@ import { Effect, FileSystem, Layer, Option, Schema } from "effect";
 import {
   AuthSessionId,
   SourceControlProviderError,
+  WorktreeId,
   WS_METHODS,
   type ChangeRequest,
+  type OrchestrationCommand,
 } from "@ryco/contracts";
 
 import type { AuthenticatedSession } from "../auth/Services/ServerAuth.ts";
@@ -339,6 +341,228 @@ describe("pull request page handlers", () => {
         expect(error.provider).toBe("gitlab");
         expect(error.operation).toBe("getChangeRequestActivity");
       }
+    }),
+  );
+});
+
+describe("workspace pull request links", () => {
+  const worktreeId = WorktreeId.make("wt-lifecycle");
+  function makeLinkContext(
+    changeRequests: Record<string, ChangeRequest>,
+    worktree: { readonly checkoutRemovedAt?: string | null } = {},
+    host: { readonly kind?: string; readonly remoteUrl?: string } = {},
+  ) {
+    const dispatched: OrchestrationCommand[] = [];
+    const resolvedCwds: string[] = [];
+    const provider = {
+      kind: host.kind ?? "github",
+      getChangeRequest: (input: { readonly reference: string }) => {
+        const found = changeRequests[input.reference];
+        return found
+          ? Effect.succeed(found)
+          : Effect.fail(
+              new SourceControlProviderError({
+                provider: "github",
+                operation: "getChangeRequest",
+                detail: "not found",
+              }),
+            );
+      },
+      getPullRequestState: () =>
+        Effect.fail(
+          new SourceControlProviderError({
+            provider: "github",
+            operation: "getPullRequestState",
+            detail: "unavailable",
+          }),
+        ),
+    } as unknown as SourceControlProviderShape;
+    const ctx = {
+      ownerEffect,
+      sourceControlRegistry: {
+        resolveHandle: (input: { readonly cwd: string }) =>
+          Effect.sync(() => resolvedCwds.push(input.cwd)).pipe(
+            Effect.as({
+              provider,
+              context: host.remoteUrl ? { remoteName: "origin", remoteUrl: host.remoteUrl } : null,
+            }),
+          ),
+      },
+      projectionSnapshotQuery: {
+        getProjectShellById: () => Effect.succeed(Option.some({ workspaceRoot: "/repo" })),
+      },
+      projectionWorktrees: {
+        getById: () =>
+          Effect.succeed(
+            Option.some({
+              worktreeId,
+              projectId: "project-1",
+              worktreePath: "/repo/lifecycle",
+              archivedAt: null,
+              origin: "branch",
+              prNumber: null,
+              prTitle: null,
+              pullRequests: [],
+              checkoutRemovedAt: worktree.checkoutRemovedAt ?? null,
+            }),
+          ),
+      },
+      dispatchNormalizedCommand: (command: OrchestrationCommand) =>
+        Effect.sync(() => {
+          dispatched.push(command);
+          return { sequence: 1 };
+        }),
+      serverCommandId: (tag: string) => `${tag}-1`,
+    } as unknown as WsRpcContext;
+    return { handlers: makeSourceControlHandlers(ctx), dispatched, resolvedCwds };
+  }
+
+  it.effect("links by hand, bringing a dismissed link back", () =>
+    Effect.gen(function* () {
+      const { handlers, dispatched } = makeLinkContext({
+        "677": changeRequest({ number: 677, url: "https://github.com/acme/repo/pull/677" }),
+      });
+      const linked = yield* handlers[WS_METHODS.sourceControlLinkWorktreePullRequest]({
+        worktreeId,
+        reference: "#677",
+      }).pipe(Effect.provide(handlerLayer));
+
+      expect(linked).toMatchObject({ number: 677, source: "manual", dismissedAt: null });
+      expect(dispatched).toHaveLength(1);
+      expect(dispatched[0]).toMatchObject({
+        type: "worktree.pull-requests.update",
+        worktreeId,
+        upserts: [{ number: 677, source: "manual", restore: true }],
+      });
+    }),
+  );
+
+  it.effect("links a workspace whose checkout was removed through the project root", () =>
+    Effect.gen(function* () {
+      const { handlers, dispatched, resolvedCwds } = makeLinkContext(
+        { "677": changeRequest({ number: 677 }) },
+        { checkoutRemovedAt: "2026-10-06T09:00:00.000Z" },
+      );
+      yield* handlers[WS_METHODS.sourceControlLinkWorktreePullRequest]({
+        worktreeId,
+        reference: "677",
+      }).pipe(Effect.provide(handlerLayer));
+
+      expect(resolvedCwds).toEqual(["/repo"]);
+      expect(dispatched).toHaveLength(1);
+    }),
+  );
+
+  it.effect("refuses a pasted link to another repository's pull request", () =>
+    Effect.gen(function* () {
+      const foreign = "https://github.com/other/repo/pull/5";
+      const { handlers, dispatched } = makeLinkContext({
+        [foreign]: changeRequest({ number: 5, url: foreign }),
+        "5": changeRequest({ number: 5, url: "https://github.com/acme/repo/pull/5" }),
+      });
+      const error = yield* handlers[WS_METHODS.sourceControlLinkWorktreePullRequest]({
+        worktreeId,
+        reference: foreign,
+      }).pipe(Effect.provide(handlerLayer), Effect.flip);
+
+      expect(Schema.is(SourceControlProviderError)(error)).toBe(true);
+      expect((error as SourceControlProviderError).detail).toBe(
+        "#5 belongs to another repository.",
+      );
+      expect(dispatched).toEqual([]);
+    }),
+  );
+
+  it.effect("refuses another repository's URL on hosts that resolve URLs by number", () =>
+    Effect.gen(function* () {
+      // Bitbucket/Forgejo-style: the URL's own repository is ignored, the number
+      // is looked up in the checkout's repository.
+      const own = changeRequest({
+        number: 5,
+        url: "https://bitbucket.org/acme/repo/pull-requests/5",
+      });
+      const pasted = "https://bitbucket.org/other/repo/pull-requests/5";
+      const { handlers, dispatched } = makeLinkContext({ [pasted]: own, "5": own });
+      const error = yield* handlers[WS_METHODS.sourceControlLinkWorktreePullRequest]({
+        worktreeId,
+        reference: pasted,
+      }).pipe(Effect.provide(handlerLayer), Effect.flip);
+
+      expect((error as SourceControlProviderError).detail).toBe(
+        "#5 belongs to another repository.",
+      );
+      expect(dispatched).toEqual([]);
+    }),
+  );
+
+  it.effect("checks Azure DevOps links against the checkout's own repository", () =>
+    Effect.gen(function* () {
+      const azure = { kind: "azure-devops", remoteUrl: "git@ssh.dev.azure.com:v3/acme/Shop/shop" };
+      const own = changeRequest({
+        number: 9,
+        url: "https://dev.azure.com/acme/Shop/_git/shop/pullrequest/9",
+      });
+      // Its own pull request, pasted in another of Azure's URL forms.
+      const pastedOwn =
+        "https://acme.visualstudio.com/DefaultCollection/Shop/_git/shop/pullrequest/9";
+      const first = makeLinkContext({ [pastedOwn]: own, "9": own }, {}, azure);
+      yield* first.handlers[WS_METHODS.sourceControlLinkWorktreePullRequest]({
+        worktreeId,
+        reference: pastedOwn,
+      }).pipe(Effect.provide(handlerLayer));
+      expect(first.dispatched).toHaveLength(1);
+
+      // Ids are organisation-wide: a sibling repository's #12, pasted or typed.
+      const siblingUrl = "https://dev.azure.com/acme/Shop/_git/other/pullrequest/12";
+      const sibling = changeRequest({ number: 12, url: siblingUrl });
+      for (const reference of [siblingUrl, "#12"]) {
+        const attempt = makeLinkContext({ [siblingUrl]: sibling, "12": sibling }, {}, azure);
+        const error = yield* attempt.handlers[WS_METHODS.sourceControlLinkWorktreePullRequest]({
+          worktreeId,
+          reference,
+        }).pipe(Effect.provide(handlerLayer), Effect.flip);
+        expect((error as SourceControlProviderError).detail).toBe(
+          "#12 belongs to another repository.",
+        );
+        expect(attempt.dispatched).toEqual([]);
+      }
+    }),
+  );
+
+  it.effect(
+    "says when it could not confirm a pasted pull request, rather than blaming its repository",
+    () =>
+      Effect.gen(function* () {
+        const own = "https://github.com/acme/repo/pull/5";
+        // The URL resolves; the number lookup in the checkout fails (rate limit, network).
+        const { handlers, dispatched } = makeLinkContext({
+          [own]: changeRequest({ number: 5, url: own }),
+        });
+        const error = yield* handlers[WS_METHODS.sourceControlLinkWorktreePullRequest]({
+          worktreeId,
+          reference: own,
+        }).pipe(Effect.provide(handlerLayer), Effect.flip);
+
+        expect((error as SourceControlProviderError).detail).toBe(
+          "Couldn't confirm #5 is this repository's pull request.",
+        );
+        expect(dispatched).toEqual([]);
+      }),
+  );
+
+  it.effect("accepts a pasted link to the workspace's own repository", () =>
+    Effect.gen(function* () {
+      const own = "https://github.com/acme/repo/pull/5/files";
+      const { handlers, dispatched } = makeLinkContext({
+        [own]: changeRequest({ number: 5, url: "https://github.com/acme/repo/pull/5" }),
+        "5": changeRequest({ number: 5, url: "https://github.com/Acme/repo/pull/5/" }),
+      });
+      yield* handlers[WS_METHODS.sourceControlLinkWorktreePullRequest]({
+        worktreeId,
+        reference: own,
+      }).pipe(Effect.provide(handlerLayer));
+
+      expect(dispatched).toHaveLength(1);
     }),
   );
 });

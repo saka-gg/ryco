@@ -10,6 +10,7 @@ import {
   type SidebarStatusBucket,
   type ThreadStatusPill,
 } from "../../Sidebar.logic";
+import type { WorktreePullRequestLink } from "@ryco/shared/worktreePullRequests";
 
 export type SidebarWorktreeOrigin = "main" | "branch" | "pr" | "issue" | "manual";
 export type SidebarWorkItemState = "open" | "in_progress" | "done" | "closed" | "unknown";
@@ -28,6 +29,8 @@ export interface SidebarWorktree {
   issueNumber?: number | null | undefined;
   prState?: "open" | "closed" | "merged" | null | undefined;
   prIsDraft?: boolean | null | undefined;
+  /** Every pull request the workspace carried; absent from older servers. */
+  pullRequests?: ReadonlyArray<WorktreePullRequestLink> | undefined;
   issueState?: "open" | "closed" | null | undefined;
   workItemProvider?: "jira" | null | undefined;
   workItemKey?: string | null | undefined;
@@ -375,10 +378,12 @@ function mergeWorktree(left: SidebarWorktree, right: SidebarWorktree): SidebarWo
     environmentId: fresher.environmentId ?? left.environmentId ?? right.environmentId,
     manualPosition: minNumber(left.manualPosition, right.manualPosition),
     origin,
-    prNumber: left.prNumber ?? right.prNumber ?? null,
+    // One record speaks for the pull request: never pair one record's number
+    // with the other's state.
+    ...pullRequestFieldsOf(
+      fresher.prNumber != null ? fresher : left.prNumber != null ? left : right,
+    ),
     issueNumber: left.issueNumber ?? right.issueNumber ?? null,
-    prState: fresher.prState ?? null,
-    prIsDraft: fresher.prIsDraft ?? null,
     issueState: fresher.issueState ?? null,
     workItemProvider: left.workItemProvider ?? right.workItemProvider ?? null,
     workItemKey: left.workItemKey ?? right.workItemKey ?? null,
@@ -392,6 +397,17 @@ function mergeWorktree(left: SidebarWorktree, right: SidebarWorktree): SidebarWo
     updatedAt: maxIso(left.updatedAt, right.updatedAt),
     worktreeId: preferWorktreeId(left, right),
     worktreePath: origin === "main" ? null : (left.worktreePath ?? right.worktreePath),
+  };
+}
+
+function pullRequestFieldsOf(
+  worktree: SidebarWorktree,
+): Pick<SidebarWorktree, "prNumber" | "prState" | "prIsDraft" | "pullRequests"> {
+  return {
+    prNumber: worktree.prNumber ?? null,
+    prState: worktree.prState ?? null,
+    prIsDraft: worktree.prIsDraft ?? null,
+    ...(worktree.pullRequests !== undefined ? { pullRequests: worktree.pullRequests } : {}),
   };
 }
 

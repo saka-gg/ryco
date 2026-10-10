@@ -24,6 +24,15 @@ function parseAzureDevOpsCheckoutReference(args: string): string | null {
   return parts.find((part) => !part.startsWith("-")) ?? null;
 }
 
+function matchPullRequestUrl(input: string): RegExpExecArray | null {
+  return (
+    GITHUB_PULL_REQUEST_URL_PATTERN.exec(input) ??
+    GITLAB_MERGE_REQUEST_URL_PATTERN.exec(input) ??
+    FORGEJO_PULL_REQUEST_URL_PATTERN.exec(input) ??
+    AZURE_DEVOPS_PULL_REQUEST_URL_PATTERN.exec(input)
+  );
+}
+
 export function parsePullRequestReference(input: string): string | null {
   const trimmed = input.trim();
   if (trimmed.length === 0) {
@@ -44,11 +53,7 @@ export function parsePullRequestReference(input: string): string | null {
     return null;
   }
 
-  const urlMatch =
-    GITHUB_PULL_REQUEST_URL_PATTERN.exec(normalizedInput) ??
-    GITLAB_MERGE_REQUEST_URL_PATTERN.exec(normalizedInput) ??
-    FORGEJO_PULL_REQUEST_URL_PATTERN.exec(normalizedInput) ??
-    AZURE_DEVOPS_PULL_REQUEST_URL_PATTERN.exec(normalizedInput);
+  const urlMatch = matchPullRequestUrl(normalizedInput);
   if (urlMatch?.[1]) {
     return normalizedInput;
   }
@@ -59,4 +64,14 @@ export function parsePullRequestReference(input: string): string | null {
   }
 
   return null;
+}
+
+/** The number a reference names (`#42`, `42`, a pull/merge request URL, a checkout command). */
+export function parsePullRequestReferenceNumber(input: string): number | null {
+  const reference = parsePullRequestReference(input);
+  if (reference === null) return null;
+  const digits =
+    PULL_REQUEST_NUMBER_PATTERN.exec(reference)?.[1] ?? matchPullRequestUrl(reference)?.[1];
+  const number = digits === undefined ? Number.NaN : Number(digits);
+  return Number.isSafeInteger(number) && number > 0 ? number : null;
 }

@@ -581,7 +581,7 @@ describe("pull request settlement signals in the decider", () => {
     ...(prTerminalAt !== undefined ? { prTerminalAt } : {}),
   });
 
-  it("passes prTerminalAt through and leaves it out when absent", async () => {
+  it("passes prTerminalAt through and resolves it when absent", async () => {
     const readModel = await seedPullRequestThread({ prState: "open" });
     const withTime = asEvents(
       await Effect.runPromise(
@@ -606,6 +606,8 @@ describe("pull request settlement signals in the decider", () => {
       expect(withNull[0].payload.prTerminalAt).toBeNull();
     }
 
+    // Omitted: the decider resolves it (first observation = the update time),
+    // so every event states the current pull request completely.
     const absent = asEvents(
       await Effect.runPromise(
         decideOrchestrationCommand({ command: sourceControlUpdate(), readModel }),
@@ -613,7 +615,10 @@ describe("pull request settlement signals in the decider", () => {
     );
     expect(absent[0]?.type).toBe("worktree.sourceControlStateUpdated");
     if (absent[0]?.type === "worktree.sourceControlStateUpdated") {
-      expect("prTerminalAt" in absent[0].payload).toBe(false);
+      expect(absent[0].payload.prTerminalAt).toBe("2026-07-31T01:00:00.000Z");
+      expect(
+        absent[0].payload.pullRequests?.map((link: { number: number }) => link.number),
+      ).toEqual([absent[0].payload.prNumber]);
     }
   });
 

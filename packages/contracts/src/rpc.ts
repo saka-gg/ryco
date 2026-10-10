@@ -365,9 +365,12 @@ import {
 } from "./workItems.ts";
 import {
   CreateWorktreeIntent,
+  DismissWorktreePullRequestInput,
+  LinkWorktreePullRequestInput,
   StatusBucket,
   WorktreeCheckoutLocation,
   WorktreeId,
+  WorktreePullRequestLink,
 } from "./worktree.ts";
 import {
   LifecycleSuggestions,
@@ -548,6 +551,8 @@ export const WS_METHODS = {
   sourceControlUpdateChangeRequestComment: "sourceControl.updateChangeRequestComment",
   sourceControlUpdateChangeRequest: "sourceControl.updateChangeRequest",
   sourceControlCreateChangeRequest: "sourceControl.createChangeRequest",
+  sourceControlLinkWorktreePullRequest: "sourceControl.linkWorktreePullRequest",
+  sourceControlDismissWorktreePullRequest: "sourceControl.dismissWorktreePullRequest",
 
   // Text generation methods
   textGenerationGenerateIssueContent: "textGeneration.generateIssueContent",
@@ -1354,6 +1359,23 @@ export const WsSourceControlCreateChangeRequestRpc = Rpc.make(
   {
     payload: ChangeRequestCreateInput,
     success: ChangeRequest,
+    error: Schema.Union([SourceControlProviderError, AuthRpcError]),
+  },
+);
+
+export const WsSourceControlLinkWorktreePullRequestRpc = Rpc.make(
+  WS_METHODS.sourceControlLinkWorktreePullRequest,
+  {
+    payload: LinkWorktreePullRequestInput,
+    success: WorktreePullRequestLink,
+    error: Schema.Union([SourceControlProviderError, AuthRpcError]),
+  },
+);
+
+export const WsSourceControlDismissWorktreePullRequestRpc = Rpc.make(
+  WS_METHODS.sourceControlDismissWorktreePullRequest,
+  {
+    payload: DismissWorktreePullRequestInput,
     error: Schema.Union([SourceControlProviderError, AuthRpcError]),
   },
 );
@@ -2308,6 +2330,8 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsSourceControlUpdateChangeRequestCommentRpc
   | typeof WsSourceControlUpdateChangeRequestRpc
   | typeof WsSourceControlCreateChangeRequestRpc
+  | typeof WsSourceControlLinkWorktreePullRequestRpc
+  | typeof WsSourceControlDismissWorktreePullRequestRpc
   | typeof WsTextGenerationAskSideQuestionRpc
   | typeof WsTextGenerationCancelSideQuestionRpc
   | typeof WsTextGenerationGenerateIssueContentRpc
@@ -2506,6 +2530,8 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsSourceControlUpdateChangeRequestCommentRpc,
   WsSourceControlUpdateChangeRequestRpc,
   WsSourceControlCreateChangeRequestRpc,
+  WsSourceControlLinkWorktreePullRequestRpc,
+  WsSourceControlDismissWorktreePullRequestRpc,
   WsTextGenerationAskSideQuestionRpc,
   WsTextGenerationCancelSideQuestionRpc,
   WsTextGenerationGenerateIssueContentRpc,

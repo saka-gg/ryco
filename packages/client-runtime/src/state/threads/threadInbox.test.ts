@@ -219,6 +219,49 @@ describe("thread inbox", () => {
     expect(reopened.settled).toEqual([]);
   });
 
+  it("judges each thread by its own pull request when the workspace carried several", () => {
+    const link = (number: number, state: "open" | "merged", linkedAt: string) => ({
+      number,
+      title: `PR ${number}`,
+      url: null,
+      state,
+      isDraft: false,
+      terminalAt: state === "merged" ? "2026-07-31T06:00:00.000Z" : null,
+      headRefName: "feature",
+      baseRefName: "main",
+      source: "created" as const,
+      linkedAt,
+      dismissedAt: null,
+    });
+    const worktree = makeWorktree(environmentA, {
+      prNumber: 677,
+      prState: "open",
+      prTerminalAt: null,
+      pullRequests: [
+        link(675, "merged", "2026-07-31T02:00:00.000Z"),
+        link(677, "open", "2026-07-31T08:00:00.000Z"),
+      ],
+    });
+    const shipped = makeThread(environmentA, "thread-shipped", {
+      worktreeId,
+      worktreePath: `/tmp/${environmentA}/worktree`,
+      createdAt: "2026-07-31T01:00:00.000Z",
+      latestUserMessageAt: "2026-07-31T01:30:00.000Z",
+    });
+    const followUp = makeThread(environmentA, "thread-follow-up", {
+      worktreeId,
+      worktreePath: `/tmp/${environmentA}/worktree`,
+      createdAt: "2026-07-31T09:00:00.000Z",
+      latestUserMessageAt: "2026-07-31T09:30:00.000Z",
+    });
+    const inbox = buildThreadInbox(
+      baseInput({ threads: [shipped, followUp], worktrees: [worktree] }),
+    );
+    expect(inbox.settled.map((entry) => entry.thread.id)).toEqual([shipped.id]);
+    expect(inbox.active.map((entry) => entry.thread.id)).toEqual([followUp.id]);
+    expect(inbox.active[0]?.lifecycle.settlementBlocker ?? null).toBeNull();
+  });
+
   it("auto-settles from activity time, protects open PRs, and exposes one next boundary", () => {
     const inactive = makeThread(environmentA, "thread-inactive", {
       latestUserMessageAt: "2026-07-23T12:00:00.000Z",

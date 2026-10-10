@@ -55,6 +55,11 @@ export const FindProjectionWorktreeByWorkItemInput = Schema.Struct({
 export type FindProjectionWorktreeByWorkItemInput =
   typeof FindProjectionWorktreeByWorkItemInput.Type;
 
+export const FindProjectionWorktreeByPathInput = Schema.Struct({
+  worktreePath: Schema.String,
+});
+export type FindProjectionWorktreeByPathInput = typeof FindProjectionWorktreeByPathInput.Type;
+
 export const MarkProjectionWorktreeArchivedInput = Schema.Struct({
   worktreeId: WorktreeId,
   archivedAt: IsoDateTime,
@@ -103,6 +108,11 @@ export interface ProjectionWorktreeRepositoryShape {
   readonly findByWorkItem: (
     input: FindProjectionWorktreeByWorkItemInput,
   ) => Effect.Effect<WorktreeId | null, ProjectionRepositoryError>;
+
+  /** The live (not archived, checkout present) workspace checked out at `worktreePath`. */
+  readonly findActiveByWorktreePath: (
+    input: FindProjectionWorktreeByPathInput,
+  ) => Effect.Effect<Option.Option<ProjectionWorktree>, ProjectionRepositoryError>;
 
   readonly markArchived: (
     input: MarkProjectionWorktreeArchivedInput,

@@ -4,7 +4,8 @@ import {
   scopeProjectRef,
   scopeThreadRef,
 } from "@ryco/client-runtime/scoped";
-import type { EnvironmentId, ProjectId } from "@ryco/contracts";
+import { WorktreePullRequestLink, type EnvironmentId, type ProjectId } from "@ryco/contracts";
+import { Option, Schema } from "effect";
 import type { DraftId, DraftThreadState } from "../../composerDraftStore";
 import {
   DEFAULT_AGENT_TOKEN_MODE,
@@ -364,6 +365,7 @@ function readExplicitWorktrees(
         prNumber: readNumber(record.prNumber),
         prState: readPullRequestState(record.prState),
         prIsDraft: readNullableBoolean(record.prIsDraft),
+        ...readPullRequestLinks(record.pullRequests),
         issueState: readIssueState(record.issueState),
         workItemProvider: readWorkItemProvider(record.workItemProvider),
         workItemKey: readNullableString(record.workItemKey),
@@ -381,6 +383,17 @@ function readExplicitWorktrees(
       },
     ];
   });
+}
+
+const decodePullRequestLinks = Schema.decodeUnknownOption(Schema.Array(WorktreePullRequestLink));
+
+/** The record's links when it carries a valid list; absent otherwise (derived from `pr*`). */
+function readPullRequestLinks(value: unknown): {
+  readonly pullRequests?: ReadonlyArray<WorktreePullRequestLink>;
+} {
+  if (value === undefined) return {};
+  const decoded = decodePullRequestLinks(value);
+  return Option.isSome(decoded) ? { pullRequests: decoded.value } : {};
 }
 
 function readPullRequestState(value: unknown): "open" | "closed" | "merged" | null {

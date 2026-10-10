@@ -39,6 +39,8 @@ import {
   WorktreeCheckoutRemovalReason,
   WorktreeId,
   WorktreeOrigin,
+  WorktreePullRequestLink,
+  WorktreePullRequestLinkSource,
 } from "./worktree.ts";
 
 export const ORCHESTRATION_WS_METHODS = {
@@ -1889,6 +1891,34 @@ const WorktreeMetaUpdateCommand = Schema.Struct({
   changedAt: IsoDateTime,
 });
 
+/** Link (or refresh) and dismiss pull requests on a workspace; server-issued only. */
+const WorktreePullRequestLinkUpsert = Schema.Struct({
+  number: Schema.Number,
+  title: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
+  url: Schema.optional(Schema.NullOr(Schema.String)),
+  state: Schema.NullOr(PullRequestState),
+  isDraft: Schema.NullOr(Schema.Boolean),
+  /** Omitted: derived (kept while the state holds, else the event time). */
+  terminalAt: Schema.optional(Schema.NullOr(IsoDateTime)),
+  headRefName: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
+  baseRefName: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
+  source: WorktreePullRequestLinkSource,
+  /** Linked by hand: brings a dismissed link back (nothing else does). */
+  restore: Schema.optional(Schema.Boolean),
+});
+export type WorktreePullRequestLinkUpsert = typeof WorktreePullRequestLinkUpsert.Type;
+
+const WorktreePullRequestsUpdateCommand = Schema.Struct({
+  type: Schema.Literal("worktree.pull-requests.update"),
+  commandId: CommandId,
+  worktreeId: WorktreeId,
+  upserts: Schema.optional(Schema.Array(WorktreePullRequestLinkUpsert)),
+  dismissals: Schema.optional(Schema.Array(Schema.Number)),
+  /** The linked issue's refreshed state; omitted keeps the stored one. */
+  issueState: Schema.optional(Schema.NullOr(IssueState)),
+  updatedAt: IsoDateTime,
+});
+
 const WorktreeSourceControlStateUpdateCommand = Schema.Struct({
   type: Schema.Literal("worktree.source-control-state.update"),
   commandId: CommandId,
@@ -2276,6 +2306,7 @@ const InternalOrchestrationCommand = Schema.Union([
   ThreadUsageLimitRecordCommand,
   WorktreeCheckoutRemoveCommand,
   WorktreeCheckoutRestoreCommand,
+  WorktreePullRequestsUpdateCommand,
   WorktreeRelocateCommand,
 ]);
 export type InternalOrchestrationCommand = typeof InternalOrchestrationCommand.Type;
@@ -2685,6 +2716,8 @@ export const WorktreeCreatedPayload = Schema.Struct({
   workItemState: Schema.optional(Schema.NullOr(WorkItemState)),
   workItemStateName: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   workItemUrl: Schema.optional(Schema.NullOr(Schema.String)),
+  /** The workspace's pull request links; absent from older servers (derive from `prNumber`). */
+  pullRequests: Schema.optional(Schema.Array(WorktreePullRequestLink)),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
 });
@@ -2711,6 +2744,11 @@ export const WorktreeSourceControlStateUpdatedPayload = Schema.Struct({
   /** When the PR reached its current merged/closed state; see `Worktree.prTerminalAt`. */
   prTerminalAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   issueState: Schema.NullOr(IssueState),
+  /**
+   * The workspace's links after this update. When present, the `pr*` fields
+   * above describe the current link. Absent from older servers' events.
+   */
+  pullRequests: Schema.optional(Schema.Array(WorktreePullRequestLink)),
   updatedAt: IsoDateTime,
 });
 export type WorktreeSourceControlStateUpdatedPayload =

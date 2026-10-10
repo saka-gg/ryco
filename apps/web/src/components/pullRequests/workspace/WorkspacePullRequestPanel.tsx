@@ -8,6 +8,7 @@ import { useEvent } from "../../../hooks/useEvent";
 import { useLogicalProjectSnapshots } from "../../../hooks/useLogicalProjectSnapshots";
 import { buildPullRequestLocation } from "../../../pullRequestsRoute";
 import type { Project } from "../../../types";
+import { Button } from "../../ui/button";
 import {
   formatWorkspacePullRequestReveal,
   type WorkspacePullRequestReveal,
@@ -74,6 +75,10 @@ export interface WorkspacePullRequestPanelProps {
   readonly resolving: boolean;
   /** Pin another change request (a stack layer) on the thread route. */
   readonly onSelectNumber: (number: number) => void;
+  /** `\` toggles the workspace's pull request switcher (absent: no switcher). */
+  readonly onTogglePullRequests?: (() => void) | undefined;
+  /** The empty state offers "Link pull request…" (absent: linking is unavailable). */
+  readonly onLinkPullRequest?: ((anchor: HTMLElement) => void) | undefined;
   /**
    * A one-shot deep link from the thread route: land on the Checks tab, or
    * reveal one job there. Acted on once the reader is up, then handed back.
@@ -108,7 +113,12 @@ export default function WorkspacePullRequestPanel(props: WorkspacePullRequestPan
   }, [environmentId, project, snapshots]);
 
   if (!repository || number === null) {
-    return <WorkspacePullRequestEmptyState resolving={props.resolving && repository !== null} />;
+    return (
+      <WorkspacePullRequestEmptyState
+        resolving={props.resolving && repository !== null}
+        onLinkPullRequest={props.onLinkPullRequest}
+      />
+    );
   }
   return (
     <WorkspacePullRequestReader
@@ -116,6 +126,7 @@ export default function WorkspacePullRequestPanel(props: WorkspacePullRequestPan
       repository={repository}
       number={number}
       onSelectNumber={props.onSelectNumber}
+      onTogglePullRequests={props.onTogglePullRequests}
       reveal={props.reveal ?? null}
       onRevealHandled={props.onRevealHandled}
     />
@@ -126,6 +137,7 @@ function WorkspacePullRequestReader(props: {
   readonly repository: ProjectCheckoutOption;
   readonly number: number;
   readonly onSelectNumber: (number: number) => void;
+  readonly onTogglePullRequests?: (() => void) | undefined;
   readonly reveal: WorkspacePullRequestReveal | null;
   readonly onRevealHandled: (() => void) | undefined;
 }) {
@@ -245,7 +257,7 @@ function WorkspacePullRequestReader(props: {
   return (
     <PullRequestsPageContext.Provider value={value}>
       <PullRequestsShortcutsProvider tab={tab} enabled scope={rootRef}>
-        <WorkspacePullRequestShortcuts />
+        <WorkspacePullRequestShortcuts onTogglePullRequests={props.onTogglePullRequests} />
         {/* Focusable so a click on plain reader content keeps its keys in scope. */}
         <div
           ref={rootRef}
@@ -260,15 +272,25 @@ function WorkspacePullRequestReader(props: {
   );
 }
 
-/** The page-wide stack keys that still make sense for one change request. */
-function WorkspacePullRequestShortcuts() {
+/**
+ * The page-wide stack keys that still make sense for one change request, and
+ * `\` for the workspace's pull requests (on the page it toggles the list).
+ */
+function WorkspacePullRequestShortcuts(props: {
+  readonly onTogglePullRequests?: (() => void) | undefined;
+}) {
   const { nav } = usePullRequestsPage();
+  const toggle = props.onTogglePullRequests;
   usePullRequestsShortcut("[", () => nav.stepStackLayer(-1));
   usePullRequestsShortcut("]", () => nav.stepStackLayer(1));
+  usePullRequestsShortcut("\\", () => toggle?.(), { enabled: toggle !== undefined });
   return null;
 }
 
-function WorkspacePullRequestEmptyState(props: { readonly resolving: boolean }) {
+function WorkspacePullRequestEmptyState(props: {
+  readonly resolving: boolean;
+  readonly onLinkPullRequest?: ((anchor: HTMLElement) => void) | undefined;
+}) {
   return (
     <div className="flex min-h-0 flex-1 items-center justify-center p-6 text-center">
       <div className="max-w-64">
@@ -281,6 +303,16 @@ function WorkspacePullRequestEmptyState(props: { readonly resolving: boolean }) 
             Once this thread's branch has an open pull request, it opens here.
           </p>
         )}
+        {!props.resolving && props.onLinkPullRequest ? (
+          <Button
+            variant="outline"
+            size="sm"
+            className="mt-3"
+            onClick={(event) => props.onLinkPullRequest?.(event.currentTarget)}
+          >
+            Link pull request…
+          </Button>
+        ) : null}
       </div>
     </div>
   );

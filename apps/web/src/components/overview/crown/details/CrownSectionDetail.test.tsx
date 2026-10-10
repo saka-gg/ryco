@@ -435,6 +435,42 @@ describe("CrownSectionDetail", () => {
     }
   });
 
+  it("marks the pull request's stack and lists the workspace's other pull requests", () => {
+    const link = (number: number, state: "open" | "merged", title: string) => ({
+      number,
+      title,
+      url: `https://github.com/ryco/ryco/pull/${number}`,
+      state,
+      isDraft: false,
+      terminalAt: state === "merged" ? "2026-10-01T10:00:00.000Z" : null,
+      headRefName: `feature/${number}`,
+      baseRefName: "main",
+      source: "discovered" as const,
+      linkedAt: "2026-10-01T09:00:00.000Z",
+      dismissedAt: null,
+    });
+    const layout = crownLayoutFixture({
+      pullRequest: { ...crownPullRequestFixture, stack: { number: 12, position: 2, size: 3 } },
+      otherPullRequests: [link(690, "open", "Follow-up"), link(675, "merged", "First pass")],
+      onOpenPullRequestInApp: () => {},
+    });
+
+    const flyout = renderDetail("pr", { layout });
+    expect(headingOf(flyout)).toContain("2/3");
+    expect(flyout).toContain("Stack #12, pull request 2 of 3");
+    expect(flyout).toContain("Also open");
+    expect(flyout).toContain("Earlier");
+    expect(flyout).toContain('href="https://github.com/ryco/ryco/pull/690"');
+    expect(flyout).toContain('href="https://github.com/ryco/ryco/pull/675"');
+
+    const card = renderDetail("pr", { variant: "card", layout });
+    expect(card).toContain("Stack #12, pull request 2 of 3");
+
+    const single = renderDetail("pr", { layout: crownLayoutFixture() });
+    expect(single).not.toContain("Stack #");
+    expect(single).not.toContain("Other pull requests in this workspace");
+  });
+
   it("replaces git sections with a not-a-repository notice outside git", () => {
     for (const section of ["branch", "changes", "checks", "pr"] as const) {
       const markup = renderDetail(section, { isGitRepo: false });

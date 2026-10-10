@@ -109,6 +109,9 @@ import Migration0076 from "./Migrations/076_AuthSessionRotation.ts";
 import Migration0077, {
   ensureThreadWorkspaceLifecycleColumns,
 } from "./Migrations/077_ThreadWorkspaceLifecycle.ts";
+import Migration0082, {
+  ensureWorktreePullRequestLinksColumn,
+} from "./Migrations/082_WorktreePullRequestLinks.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -201,6 +204,7 @@ export const migrationEntries = [
   [79, "WorktreeNotes", Migration0079],
   [80, "ProjectKindAndRelocations", Migration0080],
   [81, "NotesDocuments", Migration0081],
+  [82, "WorktreePullRequestLinks", Migration0082],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>
@@ -454,6 +458,16 @@ export const repairThreadWorkspaceLifecycleColumns = Effect.fn(
   }
 });
 
+// Workspace pull request links: run 082 again as a repair when a later id was
+// recorded first (parallel branches claim the same next id).
+export const repairWorktreePullRequestLinksColumn = Effect.fn(
+  "repairWorktreePullRequestLinksColumn",
+)(function* () {
+  if (yield* ensureWorktreePullRequestLinksColumn) {
+    yield* Effect.log("Repaired workspace pull request links column");
+  }
+});
+
 // Unlike schema checks, the summary backfill scans the entire activity history.
 // Track its successful compatibility repair separately from the divergent
 // numerical migration ledger, and commit the marker with the repaired data.
@@ -614,6 +628,9 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
   }
   if (toMigrationInclusive === undefined || toMigrationInclusive >= 81) {
     yield* ensureNotesDocumentsTable;
+  }
+  if (toMigrationInclusive === undefined || toMigrationInclusive >= 82) {
+    yield* repairWorktreePullRequestLinksColumn();
   }
   yield* Effect.log("Migrations ran successfully").pipe(
     Effect.annotateLogs({

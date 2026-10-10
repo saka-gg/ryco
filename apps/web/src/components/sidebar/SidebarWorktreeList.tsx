@@ -9,6 +9,7 @@ import {
   FolderMinusIcon,
   FolderPlusIcon,
   FolderRootIcon,
+  LinkIcon,
   type LucideIcon,
   MoreHorizontalIcon,
   PlusIcon,
@@ -20,7 +21,7 @@ import {
   type WorkspaceActionId,
 } from "@ryco/client-runtime/state/lifecycle";
 import { scopedThreadKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
-import { EnvironmentId, ProjectId } from "@ryco/contracts";
+import { EnvironmentId, ProjectId, WorktreeId } from "@ryco/contracts";
 import { cn } from "../../lib/utils";
 import type { GitStatusTarget } from "../../lib/gitStatusState";
 import {
@@ -52,6 +53,17 @@ import {
   type LinkedWorktreeItem,
 } from "../worktrees/LinkedWorktreeItemDialog";
 import { WorktreeSourceControlBadges } from "../worktrees/WorktreeSourceControlBadges";
+import {
+  WorkspacePullRequestsPopover,
+  type WorkspacePullRequestsView,
+} from "../worktrees/WorkspacePullRequestsPopover";
+import { useWorkspacePullRequestEditing } from "../worktrees/useWorkspacePullRequestEditing";
+import { hasSeveralPullRequests } from "../worktrees/workspacePullRequests.logic";
+import {
+  readWorktreePullRequestLinks,
+  visiblePullRequestLinks,
+} from "@ryco/shared/worktreePullRequests";
+import { usePresentationTier } from "../../hooks/usePresentationTier";
 
 const WORKTREE_STATUS_LABELS: Record<SidebarStatusBucket, string> = {
   done: "Done",
@@ -165,6 +177,7 @@ export const SidebarWorktreeList = memo(function SidebarWorktreeList(
             key={worktree.worktree.worktreeId}
             orderedProjectThreadKeys={orderedProjectThreadKeys}
             projectCwd={resolveWorktreeProjectCwd(worktree, props.treeProject)}
+            environmentId={resolveWorktreeEnvironmentId(worktree, props.treeProject)}
             projectExpanded={props.projectExpanded}
             renderThread={props.renderThread}
             resolveThreadGitStatusTarget={props.resolveThreadGitStatusTarget}
@@ -198,6 +211,7 @@ export const SidebarWorktreeList = memo(function SidebarWorktreeList(
                   <ArchivedWorktreeRow
                     key={worktree.worktree.worktreeId}
                     projectCwd={resolveWorktreeProjectCwd(worktree, props.treeProject)}
+                    environmentId={resolveWorktreeEnvironmentId(worktree, props.treeProject)}
                     worktree={worktree}
                     onWorkspaceAction={props.onWorkspaceAction}
                     onOpenLinkedItem={(item) => handleOpenLinkedItem(worktree, item)}
@@ -246,15 +260,31 @@ function resolveWorktreeProjectCwd(
 
 function ArchivedWorktreeRow(props: {
   projectCwd: string;
+  environmentId: EnvironmentId;
   worktree: SidebarTreeWorktree;
   onWorkspaceAction: (worktree: SidebarTreeWorktree, action: WorkspaceActionId) => void;
   onOpenLinkedItem: (item: LinkedWorktreeItem) => void;
 }) {
   const canManage = canManageWorktree(props.worktree.worktree, props.projectCwd);
   const checkoutRemoved = props.worktree.worktree.checkoutRemovedAt != null;
+  // An archived workspace's pull requests read the same, read-only (it
+  // cannot be linked to or unlinked from).
+  const [rowElement, setRowElement] = useState<HTMLDivElement | null>(null);
+  const [pullRequestBadge, setPullRequestBadge] = useState<HTMLButtonElement | null>(null);
+  const pullRequests = useWorktreePullRequestsControl({
+    rowElement,
+    badgeElement: pullRequestBadge,
+    worktree: props.worktree,
+    environmentId: props.environmentId,
+    projectCwd: props.projectCwd,
+    onOpenPullRequest: (number) => props.onOpenLinkedItem({ kind: "pr", number }),
+  });
   return (
     <SidebarMenuSubItem className="w-full" data-thread-selection-safe>
-      <div className="ml-3 flex h-7 phone:pointer-coarse:min-h-11 items-center gap-1.5 phone:pointer-coarse:gap-3 rounded-md px-2 text-muted-foreground">
+      <div
+        ref={setRowElement}
+        className="ml-3 flex h-7 phone:pointer-coarse:min-h-11 items-center gap-1.5 phone:pointer-coarse:gap-3 rounded-md px-2 text-muted-foreground"
+      >
         <ArchiveIcon className="size-3.5 shrink-0" />
         <span className="min-w-0 flex-1 truncate text-xs">
           {getWorktreeDisplayTitle(props.worktree)}
@@ -274,7 +304,15 @@ function ArchivedWorktreeRow(props: {
           workItemStateName={props.worktree.worktree.workItemStateName}
           displayMode="prefer-pr"
           onOpenLinkedItem={props.onOpenLinkedItem}
+          pullRequests={pullRequests.links}
+          pullRequestsToggle={
+            pullRequests.enabled
+              ? { open: pullRequests.open, onToggle: pullRequests.onToggle }
+              : undefined
+          }
+          pullRequestBadgeRef={setPullRequestBadge}
         />
+        {pullRequests.popover}
         <button
           type="button"
           className={`inline-flex size-5 shrink-0 items-center justify-center rounded-md text-muted-foreground/70 hover:bg-secondary hover:text-foreground ${SIDEBAR_ROW_ACTION_COARSE_CLASS_NAME}`}
@@ -315,6 +353,7 @@ function ArchivedWorktreeRow(props: {
 const SidebarWorktreeSection = memo(function SidebarWorktreeSection(props: {
   orderedProjectThreadKeys: readonly string[];
   projectCwd: string;
+  environmentId: EnvironmentId;
   projectExpanded: boolean;
   renderThread: (
     thread: SidebarTreeThread,
@@ -347,6 +386,18 @@ const SidebarWorktreeSection = memo(function SidebarWorktreeSection(props: {
   const [renameTitle, setRenameTitle] = useState(() => getWorktreeDisplayTitle(props.worktree));
   const pendingTitleClickRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isCollapsed = props.visibleThreadKeys ? false : collapsed;
+  // Elements, not refs: the badge node is replaced when it switches between
+  // its one-click and toggle forms, and the popover must follow it.
+  const [rowElement, setRowElement] = useState<HTMLDivElement | null>(null);
+  const [pullRequestBadge, setPullRequestBadge] = useState<HTMLButtonElement | null>(null);
+  const pullRequests = useWorktreePullRequestsControl({
+    rowElement,
+    badgeElement: pullRequestBadge,
+    worktree: props.worktree,
+    environmentId: props.environmentId,
+    projectCwd: props.projectCwd,
+    onOpenPullRequest: (number) => props.onOpenLinkedItem({ kind: "pr", number }),
+  });
   const showEmptyState = props.projectExpanded && !isCollapsed && visibleThreads.length === 0;
   const showSessions = !isCollapsed;
   // Don't cap while a thread filter is active — every match should stay visible.
@@ -417,12 +468,19 @@ const SidebarWorktreeSection = memo(function SidebarWorktreeSection(props: {
           <ContextMenuTrigger
             render={
               <div
+                ref={setRowElement}
                 role="button"
                 tabIndex={0}
                 aria-expanded={!isCollapsed}
                 className="group/worktree flex h-7 phone:pointer-coarse:min-h-11 w-full items-center gap-1.5 phone:pointer-coarse:gap-3 rounded-md px-2 text-left text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
-                onClick={toggleCollapsed}
+                // The row's pull request popover is portaled, but its React
+                // events still bubble here: only the row's own DOM toggles it.
+                onClick={(event) => {
+                  if (!event.currentTarget.contains(event.target as Node)) return;
+                  toggleCollapsed();
+                }}
                 onKeyDown={(event) => {
+                  if (!event.currentTarget.contains(event.target as Node)) return;
                   if (event.key === "ArrowLeft") {
                     event.preventDefault();
                     setCollapsed(true);
@@ -532,7 +590,20 @@ const SidebarWorktreeSection = memo(function SidebarWorktreeSection(props: {
                   workItemStateName={props.worktree.worktree.workItemStateName}
                   displayMode="prefer-pr"
                   onOpenLinkedItem={props.onOpenLinkedItem}
+                  prUrl={
+                    pullRequests.links.find(
+                      (link) => link.number === props.worktree.worktree.prNumber,
+                    )?.url ?? null
+                  }
+                  pullRequests={pullRequests.links}
+                  pullRequestsToggle={
+                    pullRequests.enabled
+                      ? { open: pullRequests.open, onToggle: pullRequests.onToggle }
+                      : undefined
+                  }
+                  pullRequestBadgeRef={setPullRequestBadge}
                 />
+                {pullRequests.popover}
               </span>
             )}
             <WorktreeOriginLabel worktree={props.worktree} />
@@ -566,6 +637,7 @@ const SidebarWorktreeSection = memo(function SidebarWorktreeSection(props: {
             <WorktreeMenu
               canManage={canManage}
               worktree={props.worktree}
+              onLinkPullRequest={pullRequests.onLinkPullRequest}
               onCopyWorktreePath={props.onCopyWorktreePath}
               onWorkspaceAction={props.onWorkspaceAction}
               onNewSession={props.onNewSession}
@@ -577,6 +649,7 @@ const SidebarWorktreeSection = memo(function SidebarWorktreeSection(props: {
             <WorktreeMenuItems
               canManage={canManage}
               worktree={props.worktree}
+              onLinkPullRequest={pullRequests.onLinkPullRequest}
               onCopyWorktreePath={props.onCopyWorktreePath}
               onWorkspaceAction={props.onWorkspaceAction}
               onNewSession={props.onNewSession}
@@ -648,6 +721,8 @@ const SidebarWorktreeThreadRows = memo(function SidebarWorktreeThreadRows(props:
 function WorktreeMenuItems(props: {
   canManage: boolean;
   worktree: SidebarTreeWorktree;
+  /** Absent where a pull request cannot be linked (project root, synthetic, phone). */
+  onLinkPullRequest?: (() => void) | null | undefined;
   onCopyWorktreePath: (worktree: SidebarTreeWorktree) => void;
   onWorkspaceAction: (worktree: SidebarTreeWorktree, action: WorkspaceActionId) => void;
   onNewSession: (worktree: SidebarTreeWorktree) => void;
@@ -672,6 +747,15 @@ function WorktreeMenuItems(props: {
         <CopyIcon className="size-4" />
         Copy path
       </MenuItem>
+      {props.onLinkPullRequest !== undefined ? (
+        <MenuItem
+          disabled={props.onLinkPullRequest === null}
+          onClick={props.onLinkPullRequest ?? undefined}
+        >
+          <LinkIcon className="size-4" />
+          Link pull request…
+        </MenuItem>
+      ) : null}
       {props.canManage ? <MenuSeparator /> : null}
       {listWorkspaceLifecycleActions(
         {
@@ -708,6 +792,7 @@ const WORKSPACE_ACTION_ICONS: Record<WorkspaceActionId, LucideIcon> = {
 function WorktreeMenu(props: {
   canManage: boolean;
   worktree: SidebarTreeWorktree;
+  onLinkPullRequest?: (() => void) | null | undefined;
   onCopyWorktreePath: (worktree: SidebarTreeWorktree) => void;
   onWorkspaceAction: (worktree: SidebarTreeWorktree, action: WorkspaceActionId) => void;
   onNewSession: (worktree: SidebarTreeWorktree) => void;
@@ -730,6 +815,7 @@ function WorktreeMenu(props: {
         <WorktreeMenuItems
           canManage={props.canManage}
           worktree={props.worktree}
+          onLinkPullRequest={props.onLinkPullRequest}
           onCopyWorktreePath={props.onCopyWorktreePath}
           onWorkspaceAction={props.onWorkspaceAction}
           onNewSession={props.onNewSession}
@@ -739,6 +825,96 @@ function WorktreeMenu(props: {
       </MenuPopup>
     </Menu>
   );
+}
+
+/**
+ * A workspace row's pull requests: its links, and the one popover that shows
+ * them, mounted for the row's lifetime (going from one pull request to two
+ * never remounts it). With several, the badge toggles it; "Link pull
+ * request…" in the row's menu opens it on the link view. It hangs from the
+ * badge, or the row while there is none. The frozen phone tier keeps the
+ * badge's dialog and gets no picker.
+ */
+function useWorktreePullRequestsControl(input: {
+  readonly rowElement: HTMLDivElement | null;
+  readonly badgeElement: HTMLButtonElement | null;
+  readonly worktree: SidebarTreeWorktree;
+  readonly environmentId: EnvironmentId;
+  readonly projectCwd: string;
+  readonly onOpenPullRequest: (number: number) => void;
+}) {
+  const worktree = input.worktree.worktree;
+  const presentationTier = usePresentationTier();
+  const { rowElement, badgeElement } = input;
+  const [open, setOpen] = useState(false);
+  const [view, setView] = useState<WorkspacePullRequestsView>("list");
+  const links = useMemo(
+    () =>
+      visiblePullRequestLinks(
+        readWorktreePullRequestLinks({
+          prNumber: worktree.prNumber ?? null,
+          prTitle: null,
+          prState: worktree.prState,
+          prIsDraft: worktree.prIsDraft,
+          origin: worktree.origin,
+          pullRequests: worktree.pullRequests,
+        }),
+      ),
+    [
+      worktree.origin,
+      worktree.prIsDraft,
+      worktree.prNumber,
+      worktree.prState,
+      worktree.pullRequests,
+    ],
+  );
+  const editing = useWorkspacePullRequestEditing({
+    environmentId: input.environmentId,
+    worktree,
+  });
+  const enabled = presentationTier !== "phone" && !isSyntheticWorktreeId(worktree.worktreeId);
+  const badgeToggles = worktree.prNumber != null && hasSeveralPullRequests(links);
+  // Wait a frame so the closing menu returns focus first, then the picker takes it.
+  const openLinkPicker = () =>
+    requestAnimationFrame(() => {
+      setView("link");
+      setOpen(true);
+    });
+  return {
+    enabled,
+    links,
+    open,
+    onToggle: () => {
+      setView("list");
+      setOpen((current) => !current);
+    },
+    /** Absent: no entry. Null: shown, disabled (the environment is not mutation-ready). */
+    onLinkPullRequest:
+      enabled && editing.supported ? (editing.ready ? openLinkPicker : null) : undefined,
+    popover: enabled ? (
+      <WorkspacePullRequestsPopover
+        environmentId={input.environmentId}
+        worktreeId={editing.supported ? WorktreeId.make(worktree.worktreeId) : null}
+        cwd={worktree.worktreePath ?? input.projectCwd}
+        workspaceTitle={getWorktreeDisplayTitle(input.worktree)}
+        workspaceBranch={worktree.branch}
+        links={links}
+        shownNumber={worktree.prNumber ?? null}
+        showStack
+        canEdit={editing.ready}
+        open={open}
+        onOpenChange={setOpen}
+        view={view}
+        onViewChange={setView}
+        anchor={badgeElement ?? rowElement}
+        toggle={badgeToggles ? () => badgeElement : undefined}
+        side="right"
+        align="start"
+        sideOffset={8}
+        onOpenPullRequest={input.onOpenPullRequest}
+      />
+    ) : null,
+  };
 }
 
 function WorktreeOriginLabel({ worktree }: { worktree: SidebarTreeWorktree }) {

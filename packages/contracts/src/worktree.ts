@@ -25,6 +25,50 @@ export type WorktreeCheckoutLocation = typeof WorktreeCheckoutLocation.Type;
 export const WorktreeCheckoutRemovalReason = Schema.Literals(["removed", "missing"]);
 export type WorktreeCheckoutRemovalReason = typeof WorktreeCheckoutRemovalReason.Type;
 
+/** How a pull request came to be linked to a workspace. */
+export const WorktreePullRequestLinkSource = Schema.Literals([
+  /** The workspace was created to work on this pull request. */
+  "origin",
+  /** Ryco opened (or adopted) it from this workspace's branch. */
+  "created",
+  /** Found for the workspace's checked-out branch. */
+  "discovered",
+  /** Linked by hand. */
+  "manual",
+]);
+export type WorktreePullRequestLinkSource = typeof WorktreePullRequestLinkSource.Type;
+
+/**
+ * One pull request linked to a workspace. A workspace keeps every pull request
+ * it has carried (a merged one and its follow-up, stack layers, manual links);
+ * the flat `pr*` fields on `Worktree` mirror the current one.
+ */
+export const WorktreePullRequestLink = Schema.Struct({
+  number: Schema.Number,
+  title: Schema.NullOr(TrimmedNonEmptyString),
+  url: Schema.optional(Schema.NullOr(Schema.String)).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  state: Schema.NullOr(PullRequestState),
+  isDraft: Schema.NullOr(Schema.Boolean),
+  /** When it was merged or closed (forge time, else first observation); null while open. */
+  terminalAt: Schema.NullOr(IsoDateTime),
+  headRefName: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  baseRefName: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  source: WorktreePullRequestLinkSource,
+  /** When the link was made; null for links carried over from before links had a time. */
+  linkedAt: Schema.NullOr(IsoDateTime),
+  /** Hidden by the user; discovery never re-links a dismissed pull request. */
+  dismissedAt: Schema.optional(Schema.NullOr(IsoDateTime)).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+});
+export type WorktreePullRequestLink = typeof WorktreePullRequestLink.Type;
+
 export const Worktree = Schema.Struct({
   worktreeId: WorktreeId,
   projectId: ProjectId,
@@ -79,8 +123,26 @@ export const Worktree = Schema.Struct({
   checkoutRemovedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   checkoutRemovalReason: Schema.optional(Schema.NullOr(WorktreeCheckoutRemovalReason)),
   manualPosition: Schema.Number,
+  /**
+   * Every pull request this workspace has carried, current one included. Absent
+   * from servers that predate links: derive a single link from the `pr*` fields.
+   */
+  pullRequests: Schema.optional(Schema.Array(WorktreePullRequestLink)),
 });
 export type Worktree = typeof Worktree.Type;
+
+export const LinkWorktreePullRequestInput = Schema.Struct({
+  worktreeId: WorktreeId,
+  /** `#123`, `123`, or the pull request's URL. */
+  reference: TrimmedNonEmptyString,
+});
+export type LinkWorktreePullRequestInput = typeof LinkWorktreePullRequestInput.Type;
+
+export const DismissWorktreePullRequestInput = Schema.Struct({
+  worktreeId: WorktreeId,
+  number: Schema.Number,
+});
+export type DismissWorktreePullRequestInput = typeof DismissWorktreePullRequestInput.Type;
 
 export const CreateWorktreeIntent = Schema.Union([
   Schema.Struct({ kind: Schema.Literal("branch"), branchName: TrimmedNonEmptyString }),

@@ -761,6 +761,54 @@ describe("inbox PR badges", () => {
       expect(rows[0]?.pullRequest).toEqual({ number: 42, state, isDraft: state === "open" });
     },
   );
+  it("names each thread's own pull request and lists the workspace's others", () => {
+    const link = (number: number, state: "open" | "merged", linkedAt: string) => ({
+      number,
+      title: `PR ${number}`,
+      url: `https://github.com/acme/ryco/pull/${number}`,
+      state,
+      isDraft: false,
+      terminalAt: state === "merged" ? "2026-08-24T09:00:00.000Z" : null,
+      headRefName: `branch-${number}`,
+      baseRefName: "main",
+      source: "created" as const,
+      linkedAt,
+      dismissedAt: null,
+    });
+    const rows = build({
+      threads: [
+        // Shipped #675 before the follow-up existed.
+        thread("shipped", {
+          worktreeId: worktree.id,
+          createdAt: "2026-08-23T08:00:00.000Z",
+          updatedAt: "2026-08-23T08:00:00.000Z",
+        }),
+        // Asked for the follow-up after #675 merged.
+        thread("follow-up", {
+          worktreeId: worktree.id,
+          createdAt: "2026-08-24T10:00:00.000Z",
+          updatedAt: "2026-08-24T10:00:00.000Z",
+        }),
+      ],
+      worktrees: [
+        {
+          ...worktree,
+          prNumber: 677,
+          prState: "open",
+          pullRequests: [
+            link(675, "merged", "2026-08-23T09:00:00.000Z"),
+            link(677, "open", "2026-08-24T11:00:00.000Z"),
+          ],
+        },
+      ],
+    }).flatMap((section) => section.rows);
+    const byThread = new Map(rows.map((row) => [row.threadId as string, row]));
+    expect(byThread.get("shipped")?.pullRequest).toMatchObject({ number: 675, state: "merged" });
+    expect(byThread.get("shipped")?.pullRequestLinked).toBe(true);
+    expect(byThread.get("shipped")?.otherPullRequests.map((pr) => pr.number)).toEqual([677]);
+    expect(byThread.get("follow-up")?.pullRequest).toMatchObject({ number: 677, state: "open" });
+    expect(byThread.get("follow-up")?.otherPullRequests.map((pr) => pr.number)).toEqual([675]);
+  });
   it("does not label an issue as a pull request or borrow another machine's PR", () => {
     const rows = build({
       threads: [

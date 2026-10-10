@@ -9,6 +9,7 @@ import {
 
 import { formatElapsedClockLabel, formatRelativeTimeLabel } from "../../timestampFormat";
 import { PROVIDER_ICON_BY_PROVIDER } from "../chat/providerIconUtils";
+import { usePresentationTier } from "../../hooks/usePresentationTier";
 import { DeviceIcon } from "../DeviceIcon";
 import { ProjectFavicon } from "../ProjectFavicon";
 import { InboxContextHandoffPreview } from "./InboxContextHandoffPreview";
@@ -94,6 +95,13 @@ export function InboxRowPreview({ payload }: { readonly payload: InboxRowPreview
     ? (PROVIDER_ICON_BY_PROVIDER[row.providerDriver] ?? null)
     : null;
   const WorkspaceIcon = row.isWorktree ? GitForkIcon : GitBranchIcon;
+  // The workspace's other pull requests, past those the line above already
+  // shows; the frozen phone tier keeps its card as it was.
+  const isPhone = usePresentationTier() === "phone";
+  const shownNumbers = new Set(payload.pullRequests.requests.map((pr) => pr.number));
+  const alsoLinked = isPhone
+    ? []
+    : row.otherPullRequests.filter((pr) => !shownNumbers.has(pr.number));
   const focus = row.focus ? describeInboxFocus(row.focus) : null;
   return (
     <div className="w-[18.875rem] space-y-2 py-1.5 text-left" data-testid="inbox-preview">
@@ -187,6 +195,18 @@ export function InboxRowPreview({ payload }: { readonly payload: InboxRowPreview
               />
             ) : null}
             {payload.changeStats ? <InboxChangeStatsLine stats={payload.changeStats} /> : null}
+          </div>
+        ) : null}
+        {alsoLinked.length > 0 ? (
+          <div className="flex min-w-0 flex-wrap items-center gap-1">
+            <span className="text-muted-foreground/75">Also linked</span>
+            <InboxPullRequestBadges
+              variant="badges"
+              requests={alsoLinked}
+              stack={null}
+              providerName={payload.sourceControlName}
+              shortName={payload.changeRequestShortName}
+            />
           </div>
         ) : null}
         {row.trustLabel || row.roleLabel ? (

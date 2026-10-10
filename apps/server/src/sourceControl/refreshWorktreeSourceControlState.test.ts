@@ -5,7 +5,7 @@ import {
   type OrchestrationCommand,
   type OrchestrationEvent,
 } from "@ryco/contracts";
-import { assert, describe, it } from "@effect/vitest";
+import { assert, beforeEach, describe, it } from "@effect/vitest";
 import { DateTime, Effect, Option, PubSub, Ref, Stream } from "effect";
 
 import type { OrchestrationEngineShape } from "../orchestration/Services/OrchestrationEngine.ts";
@@ -18,7 +18,21 @@ import { ProjectionWorktreeRepository } from "../persistence/Services/Projection
 import type { SourceControlProviderShape } from "./SourceControlProvider.ts";
 import type { SourceControlProviderRegistryShape } from "./SourceControlProviderRegistry.ts";
 import { SourceControlProviderRegistry } from "./SourceControlProviderRegistry.ts";
-import { refreshWorktreeSourceControlState } from "./refreshWorktreeSourceControlState.ts";
+import {
+  refreshWorktreeSourceControlState,
+  resetWorktreePullRequestDiscoveryForTests,
+  type DiscoveredPullRequest,
+} from "./refreshWorktreeSourceControlState.ts";
+
+type LinksCommand = Extract<OrchestrationCommand, { type: "worktree.pull-requests.update" }>;
+
+function linkCommands(commands: ReadonlyArray<OrchestrationCommand>): LinksCommand[] {
+  return commands.filter(
+    (command): command is LinksCommand => command.type === "worktree.pull-requests.update",
+  );
+}
+
+beforeEach(() => resetWorktreePullRequestDiscoveryForTests());
 
 const worktreeId = WorktreeId.make("wt-test-1");
 const projectId = ProjectId.make("proj-test-1");
@@ -51,6 +65,7 @@ function makeWorktreeRepo(row: ProjectionWorktree | null): ProjectionWorktreeRep
     findByOrigin: () => Effect.die("not used"),
     findByWorkItem: () => Effect.die("not used"),
     findActiveByLinkedNumber: () => Effect.die("not used"),
+    findActiveByWorktreePath: () => Effect.die("not used"),
     markArchived: () => Effect.die("not used"),
     markRestored: () => Effect.die("not used"),
     updateMeta: () => Effect.die("not used"),
@@ -135,16 +150,15 @@ it.effect("state changed → command dispatched", () =>
       Effect.provideService(OrchestrationEngineService, makeEngine(dispatchRef)),
     );
 
-    const dispatched = yield* Ref.get(dispatchRef);
+    const dispatched = linkCommands(yield* Ref.get(dispatchRef));
     assert.equal(dispatched.length, 1);
     const cmd = dispatched[0];
-    assert.equal(cmd?.type, "worktree.source-control-state.update");
-    if (cmd?.type === "worktree.source-control-state.update") {
-      assert.equal(cmd.prState, "merged");
-      assert.equal(cmd.prIsDraft, false);
-      assert.equal(cmd.issueState, null);
-      assert.equal(cmd.worktreeId, worktreeId);
-    }
+    assert.equal(cmd?.worktreeId, worktreeId);
+    assert.equal(cmd?.upserts?.[0]?.number, 10);
+    assert.equal(cmd?.upserts?.[0]?.state, "merged");
+    assert.equal(cmd?.upserts?.[0]?.isDraft, false);
+    assert.equal(cmd?.upserts?.[0]?.source, "origin");
+    assert.isUndefined(cmd?.issueState);
   }),
 );
 
@@ -217,7 +231,7 @@ it.effect("missing projection row → no-op", () =>
   }),
 );
 
-it.effect("worktree with no prNumber or issueNumber → no-op", () =>
+it.effect("worktree with nothing linked and no discovery → no-op", () =>
   Effect.gen(function* () {
     const dispatchRef = yield* Ref.make<ReadonlyArray<OrchestrationCommand>>([]);
     const worktreeNoLinks: ProjectionWorktree = {
@@ -286,14 +300,11 @@ describe("prTerminalAt", () => {
         Effect.provideService(SourceControlProviderRegistry, makeRegistry(provider)),
         Effect.provideService(OrchestrationEngineService, makeEngine(dispatchRef)),
       );
-      return (yield* Ref.get(dispatchRef)).filter(
-        (
-          command,
-        ): command is Extract<
-          OrchestrationCommand,
-          { type: "worktree.source-control-state.update" }
-        > => command.type === "worktree.source-control-state.update",
-      );
+      return linkCommands(yield* Ref.get(dispatchRef)).map((command) => ({
+        prState: command.upserts?.[0]?.state,
+        prTerminalAt: command.upserts?.[0]?.terminalAt,
+        updatedAt: command.updatedAt,
+      }));
     });
   const openWorktree: ProjectionWorktree = {
     ...baseWorktree,
@@ -354,6 +365,224 @@ describe("prTerminalAt", () => {
       assert.equal(dispatched.length, 1);
       assert.equal(dispatched[0]?.prState, "open");
       assert.isNull(dispatched[0]?.prTerminalAt);
+    }),
+  );
+});
+
+describe("several pull requests per workspace", () => {
+  const MERGED_AT = "2026-05-18T00:00:00.000Z";
+  const shippedWorktree: ProjectionWorktree = {
+    ...baseWorktree,
+    origin: "branch",
+    prNumber: 677,
+    prTitle: "Follow-up",
+    prState: "open",
+    prIsDraft: false,
+    prTerminalAt: null,
+    pullRequests: [
+      {
+        number: 675,
+        title: "Shipped",
+        url: null,
+        state: "merged",
+        isDraft: false,
+        terminalAt: MERGED_AT,
+        headRefName: "feature/test",
+        baseRefName: "main",
+        source: "created",
+        linkedAt: "2026-05-17T00:00:00.000Z",
+        dismissedAt: null,
+      },
+      {
+        number: 677,
+        title: "Follow-up",
+        url: null,
+        state: "open",
+        isDraft: false,
+        terminalAt: null,
+        headRefName: "feature/test",
+        baseRefName: "main",
+        source: "manual",
+        linkedAt: "2026-05-19T00:00:00.000Z",
+        dismissedAt: null,
+      },
+    ],
+  };
+
+  const run = (
+    stored: ProjectionWorktree,
+    options: {
+      readonly states?: Record<number, { state: "open" | "merged" | "closed"; mergedAt?: string }>;
+      readonly discovered?: DiscoveredPullRequest | null;
+      readonly actedOnPullRequestNumber?: number;
+    },
+  ) =>
+    Effect.gen(function* () {
+      const dispatchRef = yield* Ref.make<ReadonlyArray<OrchestrationCommand>>([]);
+      const read: number[] = [];
+      let discoverCalls = 0;
+      const provider = makeProvider({
+        getPullRequestState: ({ number }) => {
+          read.push(number);
+          const entry = options.states?.[number] ?? { state: "open" as const };
+          return Effect.succeed({
+            state: entry.state,
+            isDraft: false,
+            ...(entry.mergedAt ? { terminalAt: DateTime.makeUnsafe(entry.mergedAt) } : {}),
+          });
+        },
+      });
+      const discoverPullRequest =
+        options.discovered === undefined
+          ? undefined
+          : () => {
+              discoverCalls += 1;
+              return Effect.succeed(options.discovered ?? null);
+            };
+      const refresh = () =>
+        refreshWorktreeSourceControlState({
+          worktreeId,
+          discoverPullRequest,
+          actedOnPullRequestNumber: options.actedOnPullRequestNumber,
+        }).pipe(
+          Effect.provideService(ProjectionWorktreeRepository, makeWorktreeRepo(stored)),
+          Effect.provideService(SourceControlProviderRegistry, makeRegistry(provider)),
+          Effect.provideService(OrchestrationEngineService, makeEngine(dispatchRef)),
+        );
+      yield* refresh();
+      yield* refresh();
+      return {
+        commands: linkCommands(yield* Ref.get(dispatchRef)),
+        read,
+        discoverCalls: () => discoverCalls,
+      };
+    });
+
+  it.effect("re-reads the current pull request but leaves shipped history alone", () =>
+    Effect.gen(function* () {
+      const { commands, read } = yield* run(shippedWorktree, {
+        states: { 677: { state: "merged", mergedAt: "2026-05-20T00:00:00.000Z" } },
+      });
+      assert.deepStrictEqual([...new Set(read)], [677]);
+      assert.equal(commands[0]?.upserts?.[0]?.number, 677);
+      assert.equal(commands[0]?.upserts?.[0]?.terminalAt, "2026-05-20T00:00:00.000Z");
+    }),
+  );
+
+  it.effect("links the open pull request the checkout's branch gained, once a minute", () =>
+    Effect.gen(function* () {
+      const result = yield* run(
+        { ...baseWorktree, origin: "branch", prNumber: null, prTitle: null },
+        {
+          discovered: {
+            number: 680,
+            title: "Second pass",
+            url: "https://example.test/pull/680",
+            state: "open",
+            headRef: "feature/test",
+            baseRef: "main",
+          },
+        },
+      );
+      assert.equal(result.discoverCalls(), 1);
+      const upsert = result.commands[0]?.upserts?.[0];
+      assert.equal(upsert?.number, 680);
+      assert.equal(upsert?.source, "discovered");
+      assert.equal(upsert?.title, "Second pass");
+      assert.equal(upsert?.url, "https://example.test/pull/680");
+      assert.equal(upsert?.headRefName, "feature/test");
+      assert.equal(upsert?.state, "open");
+    }),
+  );
+
+  it.effect("never re-links a known (or dismissed) pull request", () =>
+    Effect.gen(function* () {
+      const dismissed: ProjectionWorktree = {
+        ...shippedWorktree,
+        pullRequests: shippedWorktree.pullRequests?.map((link) =>
+          link.number === 677 ? { ...link, dismissedAt: "2026-05-19T01:00:00.000Z" } : link,
+        ),
+      };
+      const { commands } = yield* run(dismissed, {
+        // With #677 dismissed, shipped #675 is current again and is re-read.
+        states: { 675: { state: "merged", mergedAt: MERGED_AT } },
+        discovered: {
+          number: 677,
+          title: "Follow-up",
+          url: "https://example.test/pull/677",
+          state: "open",
+          headRef: "feature/test",
+          baseRef: "main",
+        },
+      });
+      assert.equal(commands.length, 0);
+    }),
+  );
+
+  it.effect("ignores a reused branch's pull request that finished before the workspace", () =>
+    Effect.gen(function* () {
+      const fresh = { ...baseWorktree, origin: "branch" as const, prNumber: null, prTitle: null };
+      const stale = yield* run(fresh, {
+        states: { 12: { state: "merged", mergedAt: "2026-01-01T00:00:00.000Z" } },
+        discovered: {
+          number: 12,
+          title: "Old",
+          url: "u",
+          state: "merged",
+          headRef: "feature/test",
+          baseRef: "main",
+        },
+      });
+      assert.equal(stale.commands.length, 0);
+      resetWorktreePullRequestDiscoveryForTests();
+      const recent = yield* run(fresh, {
+        states: { 13: { state: "merged", mergedAt: "2026-05-17T05:00:00.000Z" } },
+        discovered: {
+          number: 13,
+          title: "New",
+          url: "u",
+          state: "merged",
+          headRef: "feature/test",
+          baseRef: "main",
+        },
+      });
+      assert.equal(recent.commands[0]?.upserts?.[0]?.number, 13);
+    }),
+  );
+
+  it.effect("leaves a finished pull request with no forge close time to a manual link", () =>
+    Effect.gen(function* () {
+      const fresh = { ...baseWorktree, origin: "branch" as const, prNumber: null, prTitle: null };
+      const discovered: DiscoveredPullRequest = {
+        number: 12,
+        title: "Old",
+        url: "u",
+        state: "merged",
+        headRef: "feature/test",
+        baseRef: "main",
+      };
+      // No close time from the forge (Bitbucket): our own "now" proves nothing.
+      const unknown = yield* run(fresh, { states: { 12: { state: "merged" } }, discovered });
+      assert.equal(unknown.commands.length, 0);
+      resetWorktreePullRequestDiscoveryForTests();
+      // Unless the user just merged it from Ryco.
+      const actedOn = yield* run(fresh, {
+        states: { 12: { state: "merged" } },
+        discovered,
+        actedOnPullRequestNumber: 12,
+      });
+      assert.equal(actedOn.commands[0]?.upserts?.[0]?.number, 12);
+    }),
+  );
+
+  it.effect("does not discover for the project's main checkout", () =>
+    Effect.gen(function* () {
+      const result = yield* run(
+        { ...baseWorktree, origin: "main", prNumber: null, prTitle: null },
+        { discovered: null },
+      );
+      assert.equal(result.discoverCalls(), 0);
+      assert.equal(result.commands.length, 0);
     }),
   );
 });

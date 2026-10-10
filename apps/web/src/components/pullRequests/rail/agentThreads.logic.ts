@@ -4,6 +4,7 @@ import type {
 } from "@ryco/client-runtime/state/threads";
 
 import { threadLinkActivityAt } from "../../threads/threadLinkActivity";
+import { readWorktreePullRequestLinks } from "@ryco/shared/worktreePullRequests";
 
 /**
  * Which agent threads belong to a pull request, and where a new hand-off
@@ -32,8 +33,25 @@ export function localHeadBranch(link: PullRequestThreadLink): string | null {
 
 type WorktreeLike = Pick<
   SidebarWorktreeSummary,
-  "id" | "branch" | "worktreePath" | "prNumber" | "archivedAt" | "updatedAt"
+  | "id"
+  | "branch"
+  | "worktreePath"
+  | "prNumber"
+  | "prTitle"
+  | "prState"
+  | "prIsDraft"
+  | "prTerminalAt"
+  | "pullRequests"
+  | "archivedAt"
+  | "updatedAt"
 >;
+
+/** The workspace has carried this pull request at some point (current or earlier). */
+function carriesPullRequest(worktree: WorktreeLike, number: number): boolean {
+  return readWorktreePullRequestLinks(worktree).some(
+    (link) => link.number === number && !link.dismissedAt,
+  );
+}
 type ThreadLike = Pick<
   SidebarThreadSummary,
   | "id"
@@ -47,8 +65,9 @@ type ThreadLike = Pick<
 >;
 
 /**
- * A live worktree checked out for this pull request: linked by number, else
- * (same-repository heads only) by head branch.
+ * A live worktree checked out for this pull request: one whose current pull
+ * request it is, else (same-repository heads only) one on its head branch. A
+ * workspace that only carried it earlier has moved on to other work.
  */
 export function findPullRequestWorktree<T extends WorktreeLike>(
   worktrees: ReadonlyArray<T>,
@@ -69,9 +88,9 @@ export function findPullRequestWorktree<T extends WorktreeLike>(
 }
 
 /**
- * Agent threads working on this pull request: threads in a worktree linked to
- * it, or (same-repository heads only) on its head branch. Archived threads are
- * left out; newest first.
+ * Agent threads that worked on this pull request: threads in a worktree that
+ * carried it (now or earlier), or (same-repository heads only) on its head
+ * branch. Archived threads are left out; newest first.
  */
 export function linkedAgentThreads<T extends ThreadLike>(input: {
   readonly threads: ReadonlyArray<T>;
@@ -82,7 +101,8 @@ export function linkedAgentThreads<T extends ThreadLike>(input: {
   const branch = localHeadBranch(input.link);
   const linkedWorktrees = input.worktrees.filter(
     (worktree) =>
-      worktree.prNumber === input.link.number || (branch !== null && worktree.branch === branch),
+      carriesPullRequest(worktree, input.link.number) ||
+      (branch !== null && worktree.branch === branch),
   );
   const worktreeIds = new Set(linkedWorktrees.map((worktree) => worktree.id as string));
   const worktreePaths = new Set(

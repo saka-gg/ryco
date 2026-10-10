@@ -28,6 +28,13 @@ import {
 } from "@ryco/contracts";
 import { modelSelectionRequiresContextHandoff } from "@ryco/shared/model";
 import { threadSettlementInput } from "./threadSettlementInput.ts";
+import {
+  applyPullRequestLinkChanges,
+  applySourceControlStateToPullRequestLinks,
+  currentPullRequestFields,
+  initialPullRequestLinks,
+  readWorktreePullRequestLinks,
+} from "@ryco/shared/worktreePullRequests";
 import { canSettleThread, type ThreadSettlementBlocker } from "@ryco/shared/threadSettlement";
 import {
   TURN_STEER_FAILED_ACTIVITY_KIND,
@@ -51,6 +58,7 @@ import {
   requireThreadAbsent,
   requireThreadNotArchived,
   requireThreadIdleForContextHandoff,
+  findWorktreeById,
   requireWorktree,
   threadLifecycleTurnBlocker,
 } from "./commandInvariants.ts";
@@ -2009,6 +2017,12 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           workItemState: command.workItemState ?? null,
           workItemStateName: command.workItemStateName ?? null,
           workItemUrl: command.workItemUrl ?? null,
+          pullRequests: initialPullRequestLinks({
+            origin: command.origin,
+            prNumber: command.prNumber,
+            prTitle: command.prTitle,
+            createdAt: command.createdAt,
+          }),
           createdAt: command.createdAt,
           updatedAt: command.createdAt,
         },
@@ -2063,6 +2077,61 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "worktree.source-control-state.update": {
+      const worktree = findWorktreeById(readModel, command.worktreeId);
+      const base = withEventBase({
+        aggregateKind: "worktree",
+        aggregateId: command.worktreeId,
+        occurredAt: command.updatedAt,
+        commandId: command.commandId,
+      });
+      if (!worktree) {
+        // Unknown to the read model (projection lag): keep the plain update.
+        return {
+          ...base,
+          type: "worktree.sourceControlStateUpdated",
+          payload: {
+            worktreeId: command.worktreeId,
+            ...(command.prNumber !== undefined ? { prNumber: command.prNumber } : {}),
+            ...(command.prTitle !== undefined ? { prTitle: command.prTitle } : {}),
+            prState: command.prState,
+            prIsDraft: command.prIsDraft,
+            ...(command.prTerminalAt !== undefined ? { prTerminalAt: command.prTerminalAt } : {}),
+            issueState: command.issueState,
+            updatedAt: command.updatedAt,
+          },
+        };
+      }
+      // A pull request number links (or refreshes) that pull request; without
+      // one, the update refreshes the current one. The workspace keeps the rest.
+      const pullRequests = applySourceControlStateToPullRequestLinks(
+        readWorktreePullRequestLinks(worktree),
+        command,
+        worktree.prNumber,
+      );
+      return {
+        ...base,
+        type: "worktree.sourceControlStateUpdated",
+        payload: {
+          worktreeId: command.worktreeId,
+          ...currentPullRequestFields(pullRequests),
+          issueState: command.issueState,
+          pullRequests,
+          updatedAt: command.updatedAt,
+        },
+      };
+    }
+
+    case "worktree.pull-requests.update": {
+      const worktree = yield* requireWorktree({
+        readModel,
+        command,
+        worktreeId: command.worktreeId,
+      });
+      const pullRequests = applyPullRequestLinkChanges(
+        readWorktreePullRequestLinks(worktree),
+        { upserts: command.upserts, dismissals: command.dismissals },
+        command.updatedAt,
+      );
       return {
         ...withEventBase({
           aggregateKind: "worktree",
@@ -2073,12 +2142,10 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         type: "worktree.sourceControlStateUpdated",
         payload: {
           worktreeId: command.worktreeId,
-          ...(command.prNumber !== undefined ? { prNumber: command.prNumber } : {}),
-          ...(command.prTitle !== undefined ? { prTitle: command.prTitle } : {}),
-          prState: command.prState,
-          prIsDraft: command.prIsDraft,
-          ...(command.prTerminalAt !== undefined ? { prTerminalAt: command.prTerminalAt } : {}),
-          issueState: command.issueState,
+          ...currentPullRequestFields(pullRequests),
+          issueState:
+            command.issueState !== undefined ? command.issueState : (worktree.issueState ?? null),
+          pullRequests,
           updatedAt: command.updatedAt,
         },
       };

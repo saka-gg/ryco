@@ -76,7 +76,10 @@ import {
   pendingStateDelta,
   userInputActivityPendingState,
 } from "../threadShellSummaryProjection.ts";
-import { resolveEventPullRequestTerminalAt } from "../pullRequestTerminalAt.ts";
+import {
+  projectCreatedWorktreePullRequests,
+  projectWorktreeSourceControlState,
+} from "../worktreePullRequestProjection.ts";
 import { projectionLineageColumns } from "../threadLineage.ts";
 import { turnStartEndedMessageId } from "../providerEffectIntents.ts";
 import { isAttachmentOnlyMessage } from "../turnReplyMessage.ts";
@@ -1311,6 +1314,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             prState: null,
             prIsDraft: null,
             prTerminalAt: null,
+            pullRequests: projectCreatedWorktreePullRequests(event.payload),
             issueState: null,
             workItemProvider: event.payload.workItemProvider ?? null,
             workItemKey: event.payload.workItemKey ?? null,
@@ -1354,13 +1358,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           if (Option.isSome(existing)) {
             yield* projectionWorktreeRepository.upsert({
               ...existing.value,
-              ...(event.payload.prNumber !== undefined ? { prNumber: event.payload.prNumber } : {}),
-              ...(event.payload.prTitle !== undefined ? { prTitle: event.payload.prTitle } : {}),
-              prState: event.payload.prState,
-              prIsDraft: event.payload.prIsDraft,
-              prTerminalAt: resolveEventPullRequestTerminalAt(event.payload, existing.value),
-              issueState: event.payload.issueState,
-              updatedAt: event.payload.updatedAt,
+              ...projectWorktreeSourceControlState(existing.value, event.payload),
             });
           }
           return;

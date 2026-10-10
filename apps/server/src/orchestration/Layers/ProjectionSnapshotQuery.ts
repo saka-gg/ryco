@@ -23,6 +23,7 @@ import {
   OrchestrationShellSnapshot,
   OrchestrationThread,
   OrchestrationThreadHistoryError,
+  WorktreePullRequestLink,
   ProjectScript,
   TurnId,
   type OrchestrationCheckpointSummary,
@@ -49,6 +50,7 @@ import {
   TurnDispatchMode,
   WorktreeId,
 } from "@ryco/contracts";
+import { readWorktreePullRequestLinks } from "@ryco/shared/worktreePullRequests";
 import { Effect, Layer, Option, Schema, Struct } from "effect";
 import { backgroundWorkCheckpoint } from "@ryco/shared/backgroundWork";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
@@ -129,18 +131,25 @@ const ProjectionThreadSessionDbRowSchema = ProjectionThreadSession;
 const ProjectionWorktreeDbRowSchema = OrchestrationWorktreeShell.mapFields(
   Struct.assign({
     prIsDraft: Schema.NullOr(Schema.Number),
+    // NULL on rows written before links: derived from the flat `pr_*` columns.
+    pullRequests: Schema.NullOr(Schema.fromJsonString(Schema.Array(WorktreePullRequestLink))),
   }),
 );
 function toWorktreeShell(
   row: Schema.Schema.Type<typeof ProjectionWorktreeDbRowSchema>,
 ): OrchestrationWorktreeShell {
   const { relocatedFromPath, ...worktree } = row;
+  const prIsDraft = row.prIsDraft === null ? null : row.prIsDraft === 1;
   return {
     ...worktree,
     ...(relocatedFromPath ? { relocatedFromPath } : {}),
-    prIsDraft: row.prIsDraft === null ? null : row.prIsDraft === 1,
+    prIsDraft,
     // Always emit the key: its presence tells clients this server tracks close times.
     prTerminalAt: row.prTerminalAt ?? null,
+    // Always emit links: their presence tells clients this server tracks several.
+    pullRequests:
+      row.pullRequests ??
+      readWorktreePullRequestLinks({ ...row, prIsDraft, pullRequests: undefined }),
   };
 }
 const ProjectionCheckpointDbRowSchema = ProjectionCheckpoint.mapFields(
@@ -690,7 +699,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           archived_at AS "archivedAt",
           checkout_removed_at AS "checkoutRemovedAt",
           checkout_removal_reason AS "checkoutRemovalReason",
-          manual_position AS "manualPosition"
+          manual_position AS "manualPosition",
+          pull_requests_json AS "pullRequests"
         FROM projection_worktrees
         ORDER BY project_id ASC, manual_position ASC, created_at ASC, worktree_id ASC
       `,
@@ -730,7 +740,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           archived_at AS "archivedAt",
           checkout_removed_at AS "checkoutRemovedAt",
           checkout_removal_reason AS "checkoutRemovalReason",
-          manual_position AS "manualPosition"
+          manual_position AS "manualPosition",
+          pull_requests_json AS "pullRequests"
         FROM projection_worktrees
         WHERE worktree_id = ${worktreeId}
         LIMIT 1

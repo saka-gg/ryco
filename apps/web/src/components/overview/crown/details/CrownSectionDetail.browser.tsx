@@ -238,6 +238,64 @@ describe("CrownSectionDetail interactions", () => {
     expect(onOpenPullRequestInApp).toHaveBeenCalledTimes(1);
   });
 
+  it("opens the shown pull request without a number, even from the plain button", async () => {
+    const onOpenPullRequestInApp = vi.fn();
+    const { url: _url, ...pullRequest } = crownPullRequestFixture;
+    await mountDetail({
+      section: "pr",
+      variant: "flyout",
+      isGitRepo: true,
+      layout: crownLayoutFixture({ pullRequest, onOpenPullRequestInApp }),
+    });
+
+    await page.getByRole("button", { name: "Open in Ryco" }).click();
+    // The click event must never travel as a pull request number to pin.
+    expect(onOpenPullRequestInApp).toHaveBeenCalledWith();
+  });
+
+  it("opens another of the workspace's pull requests in Ryco by its number", async () => {
+    const onOpenPullRequestInApp = vi.fn();
+    const guard = guardLinkClicks();
+    try {
+      await mountDetail({
+        section: "pr",
+        variant: "flyout",
+        isGitRepo: true,
+        layout: crownLayoutFixture({
+          onOpenPullRequestInApp,
+          otherPullRequests: [
+            {
+              number: 690,
+              title: "Follow-up",
+              url: "https://github.com/ryco/ryco/pull/690",
+              state: "open",
+              isDraft: false,
+              terminalAt: null,
+              headRefName: "feature/follow-up",
+              baseRefName: "main",
+              source: "manual",
+              linkedAt: "2026-10-01T09:00:00.000Z",
+              dismissedAt: null,
+            },
+          ],
+        }),
+      });
+      const row = page.getByRole("link", { name: /#690/ });
+      await row.click();
+      expect(guard.state.preventedByApp).toBe(true);
+      expect(onOpenPullRequestInApp).toHaveBeenCalledWith(690);
+
+      guard.state.preventedByApp = null;
+      row
+        .element()
+        .dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, metaKey: true }));
+      expect(guard.state.preventedByApp).toBe(false);
+      expect(onOpenPullRequestInApp).toHaveBeenCalledTimes(1);
+    } finally {
+      guard.dispose();
+    }
+  });
+
   it("opens a check in Ryco on a plain click and leaves modified clicks to the host link", async () => {
     const onOpenPullRequestCheck = vi.fn();
     const guard = guardLinkClicks();

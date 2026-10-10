@@ -214,7 +214,7 @@ export function ActivityView({
                 <div className="divide-y divide-border/60">
                   {snapshot.recentPullRequests.slice(0, 6).map((pullRequest) => (
                     <div
-                      key={pullRequest.worktreeId}
+                      key={`${pullRequest.worktreeId}:${pullRequest.prNumber}`}
                       className="flex items-center gap-3 px-4 py-3.5"
                     >
                       <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">

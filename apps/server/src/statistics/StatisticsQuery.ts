@@ -23,7 +23,9 @@ import {
   type StatisticsSnapshot,
   type StatisticsTokenAttribution,
   WorktreeId,
+  WorktreePullRequestLink,
 } from "@ryco/contracts";
+import { readWorktreePullRequestLinks } from "@ryco/shared/worktreePullRequests";
 import { Context, Effect, Layer, Option, Schema, Semaphore } from "effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as SqlSchema from "effect/unstable/sql/SqlSchema";
@@ -106,7 +108,26 @@ const WorktreeRow = Schema.Struct({
   prTitle: Schema.NullOr(Schema.String),
   prState: Schema.NullOr(PullRequestState),
   prIsDraft: Schema.NullOr(Schema.Number),
+  prTerminalAt: Schema.NullOr(Schema.String),
+  origin: Schema.String,
+  // NULL on rows written before links: derived from the flat `pr_*` columns.
+  pullRequests: Schema.NullOr(Schema.fromJsonString(Schema.Array(WorktreePullRequestLink))),
 });
+
+/** Every pull request a worktree row carried (dismissed ones left out). */
+function worktreeRowLinks(row: typeof WorktreeRow.Type) {
+  return (
+    row.pullRequests ??
+    readWorktreePullRequestLinks({
+      prNumber: row.prNumber,
+      prTitle: row.prTitle,
+      prState: row.prState,
+      prIsDraft: row.prIsDraft === null ? null : row.prIsDraft === 1,
+      prTerminalAt: row.prTerminalAt,
+      origin: row.origin,
+    })
+  ).filter((link) => !link.dismissedAt);
+}
 
 interface MutableBucket {
   date: string;
@@ -297,7 +318,10 @@ const makeStatisticsQuery = Effect.gen(function* () {
           pr_number AS "prNumber",
           pr_title AS "prTitle",
           pr_state AS "prState",
-          pr_is_draft AS "prIsDraft"
+          pr_is_draft AS "prIsDraft",
+          pr_terminal_at AS "prTerminalAt",
+          origin,
+          pull_requests_json AS "pullRequests"
         FROM projection_worktrees
       `,
   });
@@ -578,8 +602,11 @@ const makeStatisticsQuery = Effect.gen(function* () {
         wtCreated += 1;
         if (row.archivedAt) {
           wtArchived += 1;
-        } else if (row.prNumber !== null) {
-          wtOpenPrs += 1;
+        } else {
+          // Merged or closed pull requests don't count; one not yet refreshed does.
+          wtOpenPrs += worktreeRowLinks(row).filter(
+            (link) => link.state !== "merged" && link.state !== "closed",
+          ).length;
         }
       }
 
@@ -649,31 +676,36 @@ const makeStatisticsQuery = Effect.gen(function* () {
         (a, b) =>
           (a.provider ?? "").localeCompare(b.provider ?? "") || a.model.localeCompare(b.model),
       );
+      // One row per pull request a workspace carried, so a shipped one and its
+      // follow-up both stay listed.
       const recentPullRequests: Array<StatisticsRecentPullRequest> = worktreeRows
-        .filter((row): row is typeof row & { readonly prNumber: number } => row.prNumber !== null)
-        .map((row) =>
-          Object.assign(
-            {
-              worktreeId: row.worktreeId,
-              branch: row.branch,
-              projectId: row.projectId,
-              projectTitle: projectTitle.get(row.projectId)?.trim() || row.projectId,
-              prNumber: row.prNumber,
-              createdAt: row.createdAt,
-              updatedAt: row.updatedAt,
-              active: row.archivedAt === null,
-            },
-            row.title === null ? {} : { worktreeTitle: row.title },
-            row.prTitle === null ? {} : { prTitle: row.prTitle },
-            row.prState === null ? {} : { prState: row.prState },
-            row.prIsDraft === null ? {} : { prIsDraft: row.prIsDraft === 1 },
-            row.archivedAt === null ? {} : { archivedAt: row.archivedAt },
-          ),
+        .flatMap((row) =>
+          worktreeRowLinks(row).map((link) => {
+            const updatedAt = link.terminalAt ?? link.linkedAt ?? row.updatedAt;
+            return Object.assign(
+              {
+                worktreeId: row.worktreeId,
+                branch: link.headRefName ?? row.branch,
+                projectId: row.projectId,
+                projectTitle: projectTitle.get(row.projectId)?.trim() || row.projectId,
+                prNumber: link.number,
+                createdAt: link.linkedAt ?? row.createdAt,
+                updatedAt,
+                active: row.archivedAt === null,
+              },
+              row.title === null ? {} : { worktreeTitle: row.title },
+              link.title === null ? {} : { prTitle: link.title },
+              link.state === null ? {} : { prState: link.state },
+              link.isDraft === null ? {} : { prIsDraft: link.isDraft },
+              row.archivedAt === null ? {} : { archivedAt: row.archivedAt },
+            );
+          }),
         )
         .toSorted(
           (left, right) =>
             right.updatedAt.localeCompare(left.updatedAt) ||
-            left.worktreeId.localeCompare(right.worktreeId),
+            left.worktreeId.localeCompare(right.worktreeId) ||
+            right.prNumber - left.prNumber,
         )
         .slice(0, 20);
 

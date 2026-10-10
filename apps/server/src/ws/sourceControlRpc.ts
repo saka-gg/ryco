@@ -1,11 +1,17 @@
-import { Effect, Option } from "effect";
+import { DateTime, Effect, Exit, Option } from "effect";
 import {
   SourceControlProviderError,
   WS_METHODS,
   type ChangeRequest,
   type ChangeRequestCreateInput,
   type ChangeRequestUpdateAction,
+  type OrchestrationCommand,
+  type WorktreeId,
 } from "@ryco/contracts";
+import {
+  applyPullRequestLinkChanges,
+  readWorktreePullRequestLinks,
+} from "@ryco/shared/worktreePullRequests";
 
 import { observeRpcEffect } from "../observability/RpcInstrumentation.ts";
 import {
@@ -13,6 +19,10 @@ import {
   type ChangeRequestHostRequest,
 } from "@ryco/shared/sourceControl";
 
+import {
+  azureRemoteRepositoryKey,
+  changeRequestRepositoryKey,
+} from "../sourceControl/changeRequestRepositoryKey.ts";
 import {
   normalizeSourceBranch,
   parseSourceControlOwnerRef,
@@ -76,8 +86,94 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
     createWorktreeForProject,
     callSourceControlWorkflowMethod,
     projectionSnapshotQuery,
+    projectionWorktrees,
+    dispatchNormalizedCommand,
+    serverCommandId,
     toGitManagerError,
   } = ctx;
+
+  const linkFailure = (operation: string, detail: string, cause?: unknown) =>
+    new SourceControlProviderError({
+      provider: "unknown",
+      operation,
+      detail,
+      ...(cause !== undefined ? { cause } : {}),
+    });
+
+  /** A live workspace and the checkout its source-control calls run in. */
+  const requireLinkableWorktree = (worktreeId: WorktreeId, operation: string) =>
+    Effect.gen(function* () {
+      const worktree = yield* projectionWorktrees.getById({ worktreeId }).pipe(
+        Effect.mapError((cause) => linkFailure(operation, "Could not load the workspace.", cause)),
+        Effect.flatMap(
+          Option.match({
+            onNone: () => Effect.fail(linkFailure(operation, "The workspace no longer exists.")),
+            onSome: Effect.succeed,
+          }),
+        ),
+      );
+      if (worktree.archivedAt !== null) {
+        return yield* linkFailure(operation, "The workspace is archived.");
+      }
+      // A removed checkout keeps its path on record; the project root reaches
+      // the same repository.
+      if (worktree.worktreePath !== null && !worktree.checkoutRemovedAt) {
+        return { worktree, cwd: worktree.worktreePath };
+      }
+      const project = yield* projectionSnapshotQuery
+        .getProjectShellById(worktree.projectId)
+        .pipe(
+          Effect.mapError((cause) => linkFailure(operation, "Could not load the project.", cause)),
+        );
+      if (Option.isNone(project)) {
+        return yield* linkFailure(operation, "The workspace's project no longer exists.");
+      }
+      return { worktree, cwd: project.value.workspaceRoot };
+    });
+
+  const dispatchPullRequestLinks = (
+    command: Omit<
+      Extract<OrchestrationCommand, { readonly type: "worktree.pull-requests.update" }>,
+      "type" | "commandId" | "updatedAt"
+    >,
+    operation: string,
+  ) =>
+    dispatchNormalizedCommand({
+      type: "worktree.pull-requests.update",
+      commandId: serverCommandId("worktree-pr-links"),
+      updatedAt: new Date().toISOString(),
+      ...command,
+    }).pipe(
+      Effect.mapError((cause) =>
+        linkFailure(operation, "Could not update the workspace's pull requests.", cause),
+      ),
+      Effect.asVoid,
+    );
+
+  /** Links a change request that was just opened from a workspace checkout to that workspace. */
+  const linkCreatedChangeRequest = (cwd: string, created: ChangeRequest) =>
+    Effect.gen(function* () {
+      const checkout = yield* projectionWorktrees.findActiveByWorktreePath({ worktreePath: cwd });
+      if (Option.isNone(checkout) || checkout.value.origin === "main") return;
+      yield* dispatchPullRequestLinks(
+        {
+          worktreeId: checkout.value.worktreeId,
+          upserts: [
+            {
+              number: created.number,
+              title: created.title,
+              url: created.url,
+              state: created.state,
+              isDraft: created.isDraft ?? null,
+              headRefName: created.headRefName,
+              baseRefName: created.baseRefName,
+              source: "created",
+            },
+          ],
+        },
+        WS_METHODS.sourceControlCreateChangeRequest,
+      );
+    }).pipe(Effect.ignoreCause({ log: true }));
 
   /**
    * Resolve the provider for `cwd`, failing fast (before the provider loads)
@@ -137,15 +233,25 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
   const refreshLinkedChangeRequest = (cwd: string, reference: string) =>
     refreshStateForLinkedReference({ cwd, kind: "pr", reference });
 
-  const refreshChangeRequestLifecycle = (cwd: string, reference: string, reason: string) =>
-    Effect.all(
+  // The workspace's link (discovered now if git status alone knew the pull
+  // request) lands before git status reports the new state, so the surfaces
+  // never drop the pull request in between.
+  const refreshChangeRequestLifecycle = (cwd: string, reference: string, reason: string) => {
+    const parsed = Number.parseInt(reference.replace(/^#/u, ""), 10);
+    const pullRequestNumber = Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+    return Effect.all(
       [
         refreshStateForLinkedReference({ cwd, kind: "pr", reference }),
-        refreshLinkedWorktreeSourceControlStates({ cwd, reason, force: true }),
-        refreshGitStatus(cwd),
+        refreshLinkedWorktreeSourceControlStates({
+          cwd,
+          reason,
+          force: true,
+          lifecycle: { pullRequestNumber },
+        }),
       ],
-      { concurrency: 3 },
-    );
+      { concurrency: 2, discard: true },
+    ).pipe(Effect.andThen(refreshGitStatus(cwd)));
+  };
 
   return defineWsHandlers({
     [WS_METHODS.sourceControlLookupRepository]: (input) =>
@@ -729,6 +835,7 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
                   "The change request was created, but it could not be found yet. Refresh the list to see it.",
               });
             }
+            yield* linkCreatedChangeRequest(input.cwd, created);
             return created;
           }).pipe(
             Effect.tap(() =>
@@ -745,6 +852,117 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
               ),
             ),
           ),
+        ),
+        { "rpc.aggregate": "source-control" },
+      ),
+    [WS_METHODS.sourceControlLinkWorktreePullRequest]: (input) =>
+      observeRpcEffect(
+        WS_METHODS.sourceControlLinkWorktreePullRequest,
+        ownerEffect(
+          WS_METHODS.sourceControlLinkWorktreePullRequest,
+          Effect.gen(function* () {
+            const operation = "linkWorktreePullRequest";
+            const { worktree, cwd } = yield* requireLinkableWorktree(input.worktreeId, operation);
+            const handle = yield* sourceControlRegistry.resolveHandle({ cwd });
+            const provider = handle.provider;
+            const reference = input.reference.replace(/^#/u, "").trim();
+            const changeRequest = yield* provider.getChangeRequest({ cwd, reference });
+            const pastedUrl = /^https?:\/\//iu.test(reference);
+            const resolvedRepository = changeRequestRepositoryKey(changeRequest.url);
+            const foreign = linkFailure(
+              operation,
+              `#${changeRequest.number} belongs to another repository.`,
+            );
+            // A pasted URL must name what it resolved to (some hosts resolve a
+            // URL by its number alone, in the checkout's repository).
+            if (pastedUrl) {
+              const pasted = changeRequestRepositoryKey(reference);
+              if (pasted === null || pasted !== resolvedRepository) return yield* foreign;
+            }
+            if (provider.kind === "azure-devops") {
+              // Azure pull request ids are organisation-wide (a number or a
+              // URL can resolve in a sibling repository): only the checkout's
+              // own remote says which repository the workspace is.
+              const own = azureRemoteRepositoryKey(handle.context?.remoteUrl);
+              if (own === null) {
+                return yield* linkFailure(
+                  operation,
+                  "Couldn't tell which Azure DevOps repository this checkout is.",
+                );
+              }
+              if (own !== resolvedRepository) return yield* foreign;
+            } else if (pastedUrl) {
+              // Elsewhere a number names the checkout repository's pull request:
+              // the pasted one must be that very one.
+              const own = yield* Effect.exit(
+                provider.getChangeRequest({ cwd, reference: String(changeRequest.number) }),
+              );
+              if (Exit.isFailure(own)) {
+                return yield* linkFailure(
+                  operation,
+                  `Couldn't confirm #${changeRequest.number} is this repository's pull request.`,
+                  own.cause,
+                );
+              }
+              if (changeRequestRepositoryKey(own.value.url) !== resolvedRepository) {
+                return yield* foreign;
+              }
+            }
+            const state = yield* provider
+              .getPullRequestState({ number: changeRequest.number, cwd })
+              .pipe(Effect.option);
+            const upsert = {
+              number: changeRequest.number,
+              title: changeRequest.title,
+              url: changeRequest.url,
+              state: Option.match(state, {
+                onNone: () => changeRequest.state,
+                onSome: (value) => value.state,
+              }),
+              isDraft: Option.match(state, {
+                onNone: () => changeRequest.isDraft ?? null,
+                onSome: (value) => value.isDraft,
+              }),
+              ...Option.match(state, {
+                onNone: () => ({}),
+                onSome: (value) =>
+                  value.terminalAt ? { terminalAt: DateTime.formatIso(value.terminalAt) } : {},
+              }),
+              headRefName: changeRequest.headRefName,
+              baseRefName: changeRequest.baseRefName,
+              source: "manual" as const,
+              restore: true,
+            };
+            yield* dispatchPullRequestLinks(
+              { worktreeId: worktree.worktreeId, upserts: [upsert] },
+              operation,
+            );
+            const linked = applyPullRequestLinkChanges(
+              readWorktreePullRequestLinks(worktree),
+              { upserts: [upsert] },
+              new Date().toISOString(),
+            ).find((link) => link.number === changeRequest.number);
+            if (!linked) {
+              return yield* linkFailure(operation, "The pull request could not be linked.");
+            }
+            return linked;
+          }),
+        ),
+        { "rpc.aggregate": "source-control" },
+      ),
+    [WS_METHODS.sourceControlDismissWorktreePullRequest]: (input) =>
+      observeRpcEffect(
+        WS_METHODS.sourceControlDismissWorktreePullRequest,
+        ownerEffect(
+          WS_METHODS.sourceControlDismissWorktreePullRequest,
+          Effect.gen(function* () {
+            const operation = "dismissWorktreePullRequest";
+            const { worktree } = yield* requireLinkableWorktree(input.worktreeId, operation);
+            yield* dispatchPullRequestLinks(
+              { worktreeId: worktree.worktreeId, dismissals: [input.number] },
+              operation,
+            );
+          }),
         ),
         { "rpc.aggregate": "source-control" },
       ),

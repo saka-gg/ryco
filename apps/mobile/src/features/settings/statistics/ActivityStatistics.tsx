@@ -262,7 +262,7 @@ export function ActivityStatistics({
         ) : (
           snapshot.recentPullRequests.slice(0, 6).map((pr) => (
             <View
-              key={pr.worktreeId}
+              key={`${pr.worktreeId}:${pr.prNumber}`}
               style={{
                 flexDirection: "row",
                 alignItems: "center",

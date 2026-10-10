@@ -94,6 +94,7 @@ function commandToAggregateRef(command: OrchestrationCommand): {
     case "worktree.archive":
     case "worktree.meta.update":
     case "worktree.source-control-state.update":
+    case "worktree.pull-requests.update":
     case "worktree.restore":
     case "worktree.delete":
     case "worktree.checkout.remove":

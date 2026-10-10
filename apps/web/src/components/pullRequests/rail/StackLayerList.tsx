@@ -216,6 +216,7 @@ export function StackLayerList(props: {
             <button
               type="button"
               data-layer-main=""
+              data-layer-number={entry.number}
               onClick={() => props.onSelect(entry.number)}
               className="flex h-full min-w-0 flex-1 items-center gap-2 rounded-md pl-1.5 text-left outline-hidden"
               title={entry.title}

@@ -114,9 +114,22 @@ function overview() {
       gitCwd="/workspace"
       activeWorktreeBranch="pr-1"
       activeThreadBranch="pr-1"
-      activeWorktreePrNumber={1}
-      activeWorktreePrState="merged"
-      activeWorktreePrIsDraft={false}
+      activeWorktreeDiscoversPullRequests
+      activeWorktreePullRequests={[
+        {
+          number: 1,
+          title: null,
+          url: null,
+          state: "merged",
+          isDraft: false,
+          terminalAt: "2026-07-31T00:00:00.000Z",
+          headRefName: null,
+          baseRefName: null,
+          source: "origin",
+          linkedAt: null,
+          dismissedAt: null,
+        },
+      ]}
       activeWorktreeTitle="Cached pull request"
       activeThreadKey="thread-1"
       activePlan={null}
