@@ -351,6 +351,8 @@ export interface ChatComposerProps {
   executionTargets: ReadonlyArray<ComposerExecutionTarget>;
   executionTargetLocked: boolean;
   onExecutionTargetChange: (environmentId: EnvironmentId) => void;
+  /** The device is shown above the composer (new-thread surface), not in the footer. */
+  executionTargetHoisted?: boolean;
 
   // Refs the parent needs kept in sync
   promptRef: React.MutableRefObject<string>;
@@ -2797,6 +2799,7 @@ export const ChatComposer = memo(
                 selectedExecutionEnvironmentId={environmentId}
                 executionTargetLocked={props.executionTargetLocked}
                 onExecutionTargetChange={props.onExecutionTargetChange}
+                executionTargetHoisted={props.executionTargetHoisted === true}
                 selectedInstanceId={selectedInstanceId}
                 selectedModel={selectedModelForPickerWithCustomFallback}
                 lockedProvider={lockedProvider}

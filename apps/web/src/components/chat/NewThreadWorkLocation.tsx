@@ -7,10 +7,10 @@ import { useShallow } from "zustand/react/shallow";
 import { useComposerDraftStore, type DraftId } from "../../composerDraftStore";
 import { selectSidebarWorktreesForProjectRef, useStore } from "../../store";
 import { cn } from "~/lib/utils";
-import type { EnvironmentOption } from "../BranchToolbar.logic";
 import { BranchToolbarBranchSelector } from "../BranchToolbarBranchSelector";
-import { BranchToolbarEnvironmentSelector } from "../BranchToolbarEnvironmentSelector";
 import { ProjectSwitcher } from "../ProjectSwitcher";
+import { RollingText, useTravelDirection, type RollDirection } from "./RollingText";
+import { useFlipLayout } from "./useFlipLayout";
 import { NewThreadSourcePicker, type NewThreadSource } from "./NewThreadSourcePicker";
 import type { DraftWorktreeSource } from "@ryco/client-runtime/state/composer";
 import {
@@ -34,7 +34,13 @@ import {
 } from "./NewThreadWorkLocation.logic";
 
 const PROJECT_ROOT_ITEM = "__project_root__";
-const NEW_WORKTREE_ITEM = "__new_worktree__";
+
+/** Orders the targets so the label rolls up toward "more isolated" and back down. */
+const LOCATION_RANK: Record<WorkLocation["kind"], number> = {
+  projectRoot: 0,
+  existingWorktree: 1,
+  newWorktree: 2,
+};
 
 export interface NewThreadWorkLocationProps {
   readonly draftId: DraftId | undefined;
@@ -44,8 +50,6 @@ export interface NewThreadWorkLocationProps {
   readonly projectEnvironmentId: EnvironmentId | null;
   readonly projectName: string | null;
   readonly envLocked: boolean;
-  readonly availableEnvironments: readonly EnvironmentOption[];
-  readonly onEnvironmentChange: ((environmentId: EnvironmentId) => void) | undefined;
   readonly onComposerFocusRequest: (() => void) | undefined;
   readonly onCheckoutPullRequestRequest: ((reference: string) => void) | undefined;
   readonly cwd: string | null;
@@ -58,10 +62,12 @@ export interface NewThreadWorkLocationProps {
  *
  * Every bold token is a control. Slots that don't apply are dropped rather
  * than disabled — an existing worktree already has its branch, so it shows no
- * source; the environment appears only when there is more than one.
+ * source. The one-click switch into a new worktree and the device the thread
+ * runs on live in `NewThreadContextBar` above the composer; this picker only
+ * offers the project root and existing worktrees, and follows that switch.
  *
- * This replaces the chip row for empty threads so the same three settings
- * aren't offered twice on one screen.
+ * This replaces the chip row for empty threads so the same settings aren't
+ * offered twice on one screen.
  */
 export function NewThreadWorkLocation({
   draftId,
@@ -71,8 +77,6 @@ export function NewThreadWorkLocation({
   projectEnvironmentId,
   projectName,
   envLocked,
-  availableEnvironments,
-  onEnvironmentChange,
   onComposerFocusRequest,
   onCheckoutPullRequestRequest,
   cwd,
@@ -123,7 +127,7 @@ export function NewThreadWorkLocation({
     [draftId, onComposerFocusRequest, setDraftThreadContext],
   );
 
-  const showEnvironment = availableEnvironments.length > 1 && onEnvironmentChange !== undefined;
+  const locationDirection = useTravelDirection(LOCATION_RANK[location.kind]);
   const canEdit = draftId !== undefined && !envLocked;
   const worktreeSource = draftThread?.worktreeSource ?? null;
   const fetchOrigin = draftThread?.fetchOrigin ?? true;
@@ -163,100 +167,145 @@ export function NewThreadWorkLocation({
     [draftId, onComposerFocusRequest, setDraftThreadContext],
   );
 
+  // One glide for the whole line when the target changes: tokens snap to
+  // their new text and `useFlipLayout` moves every item from where it was.
+  const sentenceRef = useRef<HTMLParagraphElement | null>(null);
+  useFlipLayout(sentenceRef, location.kind);
+  // The branch slot rolls in only on a change, not when the hero first appears.
+  const [shownKind, setShownKind] = useState(location.kind);
+  const [locationChanged, setLocationChanged] = useState(false);
+  if (shownKind !== location.kind) {
+    setShownKind(location.kind);
+    setLocationChanged(true);
+  }
+
   if (!projectId || !projectEnvironmentId || !projectName) {
     return null;
   }
 
   return (
     <p
+      ref={sentenceRef}
       className="flex max-w-208 flex-wrap items-center justify-center gap-x-0.5 gap-y-1 text-[13px] text-muted-foreground/70"
       data-testid="new-thread-work-location"
     >
-      <span className="px-1">Work in</span>
+      <FlipItem id="lead">
+        <span className="px-1">Work in</span>
+      </FlipItem>
 
-      {canEdit && draftId ? (
-        <ProjectSwitcher
-          activeProjectId={projectId}
-          activeProjectEnvironmentId={projectEnvironmentId}
-          appearance="sentence"
-          draftId={draftId}
-          label={projectName}
-        />
-      ) : (
-        <SentenceValue>{projectName}</SentenceValue>
-      )}
+      <FlipItem id="project">
+        {canEdit && draftId ? (
+          <ProjectSwitcher
+            activeProjectId={projectId}
+            activeProjectEnvironmentId={projectEnvironmentId}
+            appearance="sentence"
+            draftId={draftId}
+            label={projectName}
+          />
+        ) : (
+          <SentenceValue>{projectName}</SentenceValue>
+        )}
+      </FlipItem>
 
-      <span aria-hidden className="px-1 text-muted-foreground/35">
-        ›
-      </span>
+      <FlipItem id="separator">
+        <span aria-hidden className="px-1 text-muted-foreground/35">
+          ›
+        </span>
+      </FlipItem>
 
-      {canEdit ? (
-        <WorkLocationPicker location={location} worktrees={worktrees} onSelect={applyLocation} />
-      ) : (
-        <SentenceValue>{workLocationLabel(location)}</SentenceValue>
-      )}
+      <FlipItem id="location">
+        {canEdit ? (
+          <WorkLocationPicker
+            location={location}
+            direction={locationDirection}
+            worktrees={worktrees}
+            onSelect={applyLocation}
+          />
+        ) : (
+          <SentenceValue>{workLocationLabel(location)}</SentenceValue>
+        )}
+      </FlipItem>
 
       {showsBranchSlot(location) ? (
         <>
-          <span className="px-1">{branchSlotPreposition(location)}</span>
+          <FlipItem id="preposition">
+            <RollingText
+              className="px-1"
+              text={branchSlotPreposition(location)}
+              direction={locationDirection}
+              animateWidth={false}
+              overlayLeaving
+            />
+          </FlipItem>
           {/* A new worktree can branch off far more than a local ref, and none
               of those are things you can `git switch` to — so the richer source
               picker is offered only in that mode, and the project root keeps
-              the plain ref selector that performs a real checkout. */}
-          {location.kind === "newWorktree" && canEdit && projectId ? (
-            <NewThreadSourcePicker
-              label={sourceLabel}
-              sourceKind={sourceKind}
-              environmentId={environmentId}
-              projectId={projectId}
-              cwd={cwd}
-              fetchOrigin={fetchOrigin}
-              onFetchOriginChange={(enabled) => {
-                if (draftId) setDraftThreadContext(draftId, { fetchOrigin: enabled, branch: null });
-              }}
-              branchName={draftThread?.worktreeBranchName ?? null}
-              onBranchNameChange={(name) => {
-                if (draftId)
-                  setDraftThreadContext(draftId, {
-                    worktreeBranchName: name,
-                    worktreeSource: null,
-                  });
-              }}
-              onSelect={handleSelectSource}
-            />
-          ) : (
-            <BranchToolbarBranchSelector
-              className="text-[13px] text-foreground/85 hover:text-foreground"
-              environmentId={environmentId}
-              threadId={threadId}
-              {...(draftId ? { draftId } : {})}
-              envLocked={envLocked}
-              omitBasePrefix
-              {...(onCheckoutPullRequestRequest ? { onCheckoutPullRequestRequest } : {})}
-              {...(onComposerFocusRequest ? { onComposerFocusRequest } : {})}
-            />
-          )}
+              the plain ref selector that performs a real checkout. The two are
+              different controls, so the slot rolls one in like the text around
+              it rather than swapping it in place. */}
+          <FlipItem id="branch">
+            <span
+              key={location.kind}
+              className={cn("inline-flex items-center", locationChanged && "new-thread-roll-in")}
+              data-roll-direction={locationDirection === 1 ? "up" : "down"}
+            >
+              {location.kind === "newWorktree" && canEdit && projectId ? (
+                <NewThreadSourcePicker
+                  label={sourceLabel}
+                  sourceKind={sourceKind}
+                  environmentId={environmentId}
+                  projectId={projectId}
+                  cwd={cwd}
+                  fetchOrigin={fetchOrigin}
+                  onFetchOriginChange={(enabled) => {
+                    if (draftId)
+                      setDraftThreadContext(draftId, { fetchOrigin: enabled, branch: null });
+                  }}
+                  branchName={draftThread?.worktreeBranchName ?? null}
+                  onBranchNameChange={(name) => {
+                    if (draftId)
+                      setDraftThreadContext(draftId, {
+                        worktreeBranchName: name,
+                        worktreeSource: null,
+                      });
+                  }}
+                  onSelect={handleSelectSource}
+                />
+              ) : (
+                <BranchToolbarBranchSelector
+                  className="text-[13px] text-foreground/85 hover:text-foreground"
+                  environmentId={environmentId}
+                  threadId={threadId}
+                  {...(draftId ? { draftId } : {})}
+                  envLocked={envLocked}
+                  omitBasePrefix
+                  {...(onCheckoutPullRequestRequest ? { onCheckoutPullRequestRequest } : {})}
+                  {...(onComposerFocusRequest ? { onComposerFocusRequest } : {})}
+                />
+              )}
+            </span>
+          </FlipItem>
         </>
       ) : null}
 
       {location.kind === "newWorktree" && draftThread?.worktreeBranchName && !worktreeSource ? (
-        <span className="px-1 text-muted-foreground">
-          as <span className="font-mono text-foreground/85">{draftThread.worktreeBranchName}</span>
-        </span>
-      ) : null}
-
-      {showEnvironment && onEnvironmentChange ? (
-        <>
-          <span className="px-1">on</span>
-          <BranchToolbarEnvironmentSelector
-            envLocked={envLocked}
-            environmentId={environmentId}
-            availableEnvironments={availableEnvironments}
-            onEnvironmentChange={onEnvironmentChange}
-          />
-        </>
+        <FlipItem id="branch-name">
+          <span className="px-1 text-muted-foreground">
+            as{" "}
+            <span className="font-mono text-foreground/85">{draftThread.worktreeBranchName}</span>
+          </span>
+        </FlipItem>
       ) : null}
     </p>
+  );
+}
+
+/** A token of the sentence that `useFlipLayout` moves as one unit. */
+function FlipItem({ id, children }: { readonly id: string; readonly children: React.ReactNode }) {
+  return (
+    <span data-flip-id={id} className="inline-flex min-w-0 items-center">
+      {children}
+    </span>
   );
 }
 
@@ -297,22 +346,21 @@ function SentenceValue({ children }: { readonly children: React.ReactNode }) {
 
 function WorkLocationPicker({
   location,
+  direction,
   worktrees,
   onSelect,
 }: {
   readonly location: WorkLocation;
+  readonly direction: RollDirection;
   readonly worktrees: ReadonlyArray<WorktreeChoice>;
   readonly onSelect: (location: WorkLocation) => void;
 }) {
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
 
+  // "A new worktree" is deliberately absent: the context bar's switch owns it.
   const items = useMemo(
-    () => [
-      PROJECT_ROOT_ITEM,
-      ...worktrees.map((worktree) => worktree.worktreeId),
-      NEW_WORKTREE_ITEM,
-    ],
+    () => [PROJECT_ROOT_ITEM, ...worktrees.map((worktree) => worktree.worktreeId)],
     [worktrees],
   );
   const worktreeById = useMemo(
@@ -323,7 +371,7 @@ function WorkLocationPicker({
     location.kind === "projectRoot"
       ? PROJECT_ROOT_ITEM
       : location.kind === "newWorktree"
-        ? NEW_WORKTREE_ITEM
+        ? null
         : (location.worktree?.worktreeId ?? PROJECT_ROOT_ITEM);
 
   const selectItem = useCallback(
@@ -331,10 +379,6 @@ function WorkLocationPicker({
       setOpen(false);
       if (item === PROJECT_ROOT_ITEM) {
         onSelect({ kind: "projectRoot", worktree: null });
-        return;
-      }
-      if (item === NEW_WORKTREE_ITEM) {
-        onSelect({ kind: "newWorktree", worktree: null });
         return;
       }
       const worktree = worktreeById.get(item);
@@ -361,7 +405,13 @@ function WorkLocationPicker({
         render={<button type="button" />}
       >
         <WorkLocationIcon kind={location.kind} />
-        <span className="min-w-0 max-w-[16rem] truncate">{workLocationLabel(location)}</span>
+        <RollingText
+          className="min-w-0 max-w-[16rem]"
+          text={workLocationLabel(location)}
+          direction={direction}
+          animateWidth={false}
+          overlayLeaving
+        />
       </ComboboxTrigger>
       <ComboboxPopup anchor={triggerRef} align="start" side="bottom" className="w-80">
         <ComboboxEmpty>Nowhere to run this thread.</ComboboxEmpty>
@@ -371,17 +421,13 @@ function WorkLocationPicker({
             const label =
               item === PROJECT_ROOT_ITEM
                 ? "The project root"
-                : item === NEW_WORKTREE_ITEM
-                  ? "A new worktree"
-                  : worktree
-                    ? worktreeChoiceLabel(worktree)
-                    : item;
+                : worktree
+                  ? worktreeChoiceLabel(worktree)
+                  : item;
             const description =
               item === PROJECT_ROOT_ITEM
                 ? "Work directly in the checked-out project directory"
-                : item === NEW_WORKTREE_ITEM
-                  ? "Branch off and create the worktree when you send"
-                  : (worktree?.worktreePath ?? "");
+                : (worktree?.worktreePath ?? "");
             return (
               <ComboboxItem
                 hideIndicator
@@ -392,13 +438,7 @@ function WorkLocationPicker({
               >
                 <div className="flex w-full min-w-0 items-center gap-2 py-0.5 text-left">
                   <WorkLocationIcon
-                    kind={
-                      item === PROJECT_ROOT_ITEM
-                        ? "projectRoot"
-                        : item === NEW_WORKTREE_ITEM
-                          ? "newWorktree"
-                          : "existingWorktree"
-                    }
+                    kind={item === PROJECT_ROOT_ITEM ? "projectRoot" : "existingWorktree"}
                   />
                   <span className="flex min-w-0 flex-1 flex-col">
                     <span

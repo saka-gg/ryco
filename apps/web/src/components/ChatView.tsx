@@ -208,6 +208,7 @@ import {
   deriveRevertTurnCountByUserMessageId,
   deriveUndoTurnCountByTurnId,
 } from "./chat/MessagesTimeline.logic";
+import { NewThreadContextBar } from "./chat/NewThreadContextBar";
 import { NewThreadHero } from "./chat/NewThreadHero";
 import { NewThreadWorkLocation } from "./chat/NewThreadWorkLocation";
 import { ThreadMessageSearchBar } from "./chat/ThreadMessageSearchBar";
@@ -2379,6 +2380,13 @@ export default function ChatView(props: ChatViewProps) {
     hostedWorkspace.status === "signed-out"
       ? onEnvironmentChange
       : hostedDraftTarget.selectEnvironment;
+  const executionTargetLocked =
+    envLocked || routeKind === "server" || isSendBusy || hostedDraftTarget.pending !== null;
+  // An empty thread shows its context as pills above the composer: the
+  // new-worktree switch (git projects only) and the device, which then leaves
+  // the composer footer so it is offered once.
+  const showNewThreadContextBar = showNewThreadComposerSpacer && showNewThreadSurface;
+  const executionTargetHoisted = showNewThreadContextBar && executionTargets.length > 0;
   const executionTargetMachine =
     hostedWorkspace.status === "signed-out"
       ? desktopExecutionMachines.find((machine) => machine.environmentId === environmentId)
@@ -5064,12 +5072,6 @@ export default function ChatView(props: ChatViewProps) {
                       projectEnvironmentId={activeProject?.environmentId ?? null}
                       projectName={activeProject?.name ?? null}
                       envLocked={envLocked}
-                      availableEnvironments={logicalProjectEnvironments}
-                      onEnvironmentChange={
-                        hostedWorkspace.status === "signed-out" && hasMultipleEnvironments
-                          ? onEnvironmentChange
-                          : undefined
-                      }
                       onComposerFocusRequest={scheduleComposerFocus}
                       onCheckoutPullRequestRequest={
                         canCheckoutPullRequestIntoThread ? openPullRequestDialog : undefined
@@ -5183,7 +5185,22 @@ export default function ChatView(props: ChatViewProps) {
                   />
                 </>
               ) : null}
-              {showNewThreadComposerSpacer ? <div aria-hidden className="mb-2 h-5" /> : null}
+              {showNewThreadComposerSpacer ? (
+                showNewThreadContextBar ? (
+                  <NewThreadContextBar
+                    draftId={draftId ?? undefined}
+                    worktreeAvailable={isGitRepo && !isPendingChat}
+                    envLocked={envLocked}
+                    executionTargets={executionTargets}
+                    executionEnvironmentId={environmentId}
+                    executionTargetLocked={executionTargetLocked}
+                    onExecutionTargetChange={onExecutionTargetChange}
+                    onComposerFocusRequest={scheduleComposerFocus}
+                  />
+                ) : (
+                  <div aria-hidden className="mb-2 h-5" />
+                )
+              ) : null}
               <ComposerQueuedMessages
                 messages={queuedMessages}
                 hold={queueHold}
@@ -5258,12 +5275,8 @@ export default function ChatView(props: ChatViewProps) {
                   terminalOpen={Boolean(terminalState.terminalOpen)}
                   gitCwd={gitCwd}
                   executionTargets={executionTargets}
-                  executionTargetLocked={
-                    envLocked ||
-                    routeKind === "server" ||
-                    isSendBusy ||
-                    hostedDraftTarget.pending !== null
-                  }
+                  executionTargetLocked={executionTargetLocked}
+                  executionTargetHoisted={executionTargetHoisted}
                   onExecutionTargetChange={onExecutionTargetChange}
                   promptRef={promptRef}
                   composerImagesRef={composerImagesRef}
