@@ -1204,7 +1204,6 @@ const SUPPORTING_SUITES: readonly string[] = [
   "../hostedHub/returnToDirectory.integration.test.ts",
   "../hostedHub/lifecycle.integration.test.ts",
   "../pwa/lifecycle.test.ts",
-  "../pwa/serviceWorkerPolicy.test.ts",
   "../pwa/buildArtifacts.test.ts",
 ];
 
