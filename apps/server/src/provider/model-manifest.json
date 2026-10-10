@@ -141,13 +141,24 @@
                   { "id": "max", "label": "Max" },
                   { "id": "ultracode", "label": "Ultracode" }
                 ]
+              },
+              { "id": "fastMode", "label": "Fast Mode", "type": "boolean" },
+              {
+                "id": "contextWindow",
+                "label": "Context Window",
+                "type": "select",
+                "options": [
+                  { "id": "200k", "label": "200k" },
+                  { "id": "1m", "label": "1M", "isDefault": true }
+                ]
               }
             ]
           },
           "adapter": {
             "claudeCode": {
               "effortMap": { "ultracode": "xhigh", "ultrathink": null },
-              "fixedContextWindowTokens": 1000000
+              "modelSuffixes": { "contextWindow": { "1m": "[1m]" } },
+              "contextWindowTokens": { "200k": 200000, "1m": 1000000 }
             }
           }
         },
@@ -173,8 +184,8 @@
                 "label": "Context Window",
                 "type": "select",
                 "options": [
-                  { "id": "200k", "label": "200k", "isDefault": true },
-                  { "id": "1m", "label": "1M" }
+                  { "id": "200k", "label": "200k" },
+                  { "id": "1m", "label": "1M", "isDefault": true }
                 ]
               }
             ]
@@ -208,8 +219,8 @@
                 "label": "Context Window",
                 "type": "select",
                 "options": [
-                  { "id": "200k", "label": "200k", "isDefault": true },
-                  { "id": "1m", "label": "1M" }
+                  { "id": "200k", "label": "200k" },
+                  { "id": "1m", "label": "1M", "isDefault": true }
                 ]
               }
             ]
@@ -242,8 +253,8 @@
                 "label": "Context Window",
                 "type": "select",
                 "options": [
-                  { "id": "200k", "label": "200k", "isDefault": true },
-                  { "id": "1m", "label": "1M" }
+                  { "id": "200k", "label": "200k" },
+                  { "id": "1m", "label": "1M", "isDefault": true }
                 ]
               }
             ]
@@ -295,8 +306,8 @@
                 "label": "Context Window",
                 "type": "select",
                 "options": [
-                  { "id": "200k", "label": "200k", "isDefault": true },
-                  { "id": "1m", "label": "1M" }
+                  { "id": "200k", "label": "200k" },
+                  { "id": "1m", "label": "1M", "isDefault": true }
                 ]
               }
             ]
@@ -329,8 +340,8 @@
                 "label": "Context Window",
                 "type": "select",
                 "options": [
-                  { "id": "200k", "label": "200k", "isDefault": true },
-                  { "id": "1m", "label": "1M" }
+                  { "id": "200k", "label": "200k" },
+                  { "id": "1m", "label": "1M", "isDefault": true }
                 ]
               }
             ]
@@ -362,8 +373,8 @@
                 "label": "Context Window",
                 "type": "select",
                 "options": [
-                  { "id": "200k", "label": "200k", "isDefault": true },
-                  { "id": "1m", "label": "1M" }
+                  { "id": "200k", "label": "200k" },
+                  { "id": "1m", "label": "1M", "isDefault": true }
                 ]
               }
             ]
