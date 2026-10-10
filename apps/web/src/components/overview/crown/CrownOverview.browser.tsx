@@ -3,7 +3,6 @@ import "../../../index.css";
 import {
   EnvironmentId,
   ProjectId,
-  ThreadId,
   WorktreeId,
   type EnvironmentApi,
   type ServerConfig,
@@ -130,7 +129,6 @@ const NOTES_TARGET: WorktreeNotesTarget = {
   environmentId: NOTES_ENV,
   projectId: NOTES_PROJECT,
   checkout: { worktreeId: NOTES_WORKTREE, origin: "branch" },
-  threadId: ThreadId.make("thread-crown"),
   available: true,
 };
 
@@ -423,6 +421,45 @@ describe("CrownOverview", () => {
     expect(
       crown.host.querySelector('[data-slot="crown-card-detail"] [data-section="plan"]'),
     ).not.toBeNull();
+  });
+
+  it("folds the card into a live git alert and shows the result with its follow-up", async () => {
+    const crown = await mountCrown();
+    await page.getByRole("button", { name: "Changes", exact: true }).click();
+    await expect.poll(() => crown.island().dataset.mode).toBe("card");
+
+    const running = {
+      id: "push-1",
+      kind: "push",
+      status: "running",
+      title: "Pushing...",
+      description: "2s",
+    } as const;
+    await crown.update({ userGitActionActive: true, gitNotice: running });
+    await expect.poll(() => crown.island().dataset.mode).toBe("alert");
+    const alert = () => crown.host.querySelector<HTMLElement>('[data-slot="crown-alert"]')!;
+    expect(alert().textContent).toContain("Pushing...");
+    expect(alert().textContent).toContain("2s");
+    expect(alert().textContent).not.toContain("just now");
+    expect(alert().querySelector(".animate-spin")).not.toBeNull();
+
+    const createPr = vi.fn();
+    await crown.update({
+      userGitActionActive: false,
+      gitNotice: {
+        ...running,
+        status: "success",
+        title: "Pushed abc123",
+        description: "to origin/feature/crown",
+        action: { label: "Create PR", onClick: createPr },
+      },
+    });
+    await expect.poll(() => alert().textContent).toContain("Pushed abc123");
+    expect(alert().querySelector(".animate-spin")).toBeNull();
+    await page.getByRole("button", { name: "Create PR" }).click();
+    expect(createPr).toHaveBeenCalledTimes(1);
+    // The follow-up runs in place of opening the card.
+    await expect.poll(() => crown.island().dataset.mode).toBe("dot");
   });
 
   it("collapses the card on Escape, the close button and an outside press", async () => {
@@ -842,23 +879,20 @@ describe("CrownOverview", () => {
   });
 
   describe("notes", () => {
-    const notesItems = (host: HTMLElement) =>
-      [...host.querySelectorAll<HTMLElement>('[data-slot="crown-card-detail"] [data-note-id]')].map(
-        (item) => item.dataset.noteId,
-      );
+    const editor = (name: string) => page.getByRole("textbox", { name });
 
-    it("shows the Notes icon with a note-coloured count only while notes are available", async () => {
-      notesNode.seed("pinned", { scope: "project" });
-      notesNode.seed("here", { worktreeId: NOTES_WORKTREE });
-      notesNode.seed("elsewhere", { worktreeId: WorktreeId.make("wt-other") });
+    it("shows the Notes icon with a note dot only while notes are available and filled", async () => {
       const crown = await mountCrown(crownProps(), { notesTarget: NOTES_TARGET });
-
       await expect.poll(() => railKeys(crown.rail())).toContain("notes");
       expect(railKeys(crown.rail()).slice(-2)).toEqual(["notes", "ship"]);
       const badge = () => crown.railButton("notes").querySelector<HTMLElement>(".crown-badge")!;
-      await expect.poll(() => badge().textContent).toBe("2");
+      expect(badge().dataset.empty).toBe("true");
+
+      notesNode.seed("project", "Shared notes");
+      window.dispatchEvent(new Event("focus"));
+      await expect.poll(() => badge().dataset.empty).toBeUndefined();
+      expect(badge().textContent).toBe("•");
       expect(badge().dataset.variant).toBe("note");
-      expect(badge().dataset.empty).toBeUndefined();
 
       const unavailable = await mountCrown(crownProps(), {
         notesTarget: { ...NOTES_TARGET, available: false },
@@ -866,8 +900,8 @@ describe("CrownOverview", () => {
       expect(railKeys(unavailable.rail())).not.toContain("notes");
     });
 
-    it("opens the Notes section, re-reads the notes and saves through the composer", async () => {
-      notesNode.seed("here", { worktreeId: NOTES_WORKTREE, body: "Existing note" });
+    it("opens the Notes section, re-reads the notes and saves the editor's text", async () => {
+      notesNode.seed("worktree", "Existing notes", NOTES_WORKTREE);
       const crown = await mountCrown(crownProps(), { notesTarget: NOTES_TARGET });
       await expect.poll(() => railKeys(crown.rail())).toContain("notes");
       const readsBefore = notesNode.node.reads;
@@ -876,47 +910,42 @@ describe("CrownOverview", () => {
       await expect.poll(() => crown.island().dataset.mode).toBe("card");
       await expect.element(page.getByRole("region", { name: "Notes" })).toBeVisible();
       await expect.poll(() => notesNode.node.reads).toBeGreaterThan(readsBefore);
-      const composer = page.getByRole("textbox", { name: "New note" });
-      await expect.element(composer).toHaveFocus();
-      expect(notesItems(crown.host)).toEqual(["here"]);
+      const worktreeEditor = editor("Worktree notes");
+      await expect.element(worktreeEditor).toHaveFocus();
+      await expect.element(worktreeEditor).toHaveValue("Existing notes");
+      expect(crown.host.querySelectorAll('[data-slot="crown-card-detail"] textarea')).toHaveLength(
+        1,
+      );
 
-      await composer.fill("[ ] Wire the crown");
+      await worktreeEditor.fill("Existing notes\nWire the crown");
       await userEvent.keyboard("{ControlOrMeta>}{Enter}{/ControlOrMeta}");
       await expect.poll(() => notesNode.node.commands.length).toBe(1);
-      const created = notesNode.node.commands[0]!;
-      expect(created).toMatchObject({
-        kind: "create",
+      expect(notesNode.node.commands[0]).toMatchObject({
+        kind: "save",
         worktreeId: NOTES_WORKTREE,
         scope: "worktree",
-        body: "[ ] Wire the crown",
+        body: "Existing notes\nWire the crown",
+        expectedRevision: 1,
       });
-      await expect.poll(() => notesItems(crown.host)).toEqual([created.noteId, "here"]);
-      await expect
-        .poll(() => crown.railButton("notes").querySelector(".crown-badge")?.textContent)
-        .toBe("2");
-      // Escape in the composer only blurs; the card stays open.
-      await composer.click();
+      // Escape in the editor only blurs; the card stays open.
+      await worktreeEditor.click();
       await userEvent.keyboard("{Escape}");
       expect(crown.island().dataset.mode).toBe("card");
-      expect(document.activeElement).not.toBe(composer.element());
+      expect(document.activeElement).not.toBe(worktreeEditor.element());
     });
 
-    it("announces a note saved elsewhere and opens it highlighted from View", async () => {
-      notesNode.seed("here", { worktreeId: NOTES_WORKTREE });
+    it("announces notes edited elsewhere and opens that document from View", async () => {
+      notesNode.seed("project", "Before");
       const crown = await mountCrown(crownProps(), { notesTarget: NOTES_TARGET });
       await expect.poll(() => notesNode.node.reads).toBe(1);
       await expect.poll(() => railKeys(crown.rail())).toContain("notes");
 
-      const remote = notesNode.seed("remote", {
-        worktreeId: NOTES_WORKTREE,
-        body: "Hosted service worker must never cache notes",
-      });
+      notesNode.seed("project", "Hosted service worker must never cache notes");
       window.dispatchEvent(new Event("focus"));
 
       await expect.poll(() => crown.island().dataset.mode).toBe("alert");
       const alert = crown.host.querySelector<HTMLElement>('[data-slot="crown-alert"]')!;
-      expect(alert.textContent).toContain("Note saved");
-      expect(alert.textContent).toContain("Hosted service worker must never cache…");
+      expect(alert.textContent).toContain("Project notes edited");
 
       // The island must never scroll while it morphs into the card (only the detail may).
       const islandScrollTops: number[] = [];
@@ -926,16 +955,11 @@ describe("CrownOverview", () => {
         frame = requestAnimationFrame(sample);
       };
       frame = requestAnimationFrame(sample);
-      await page.getByRole("button", { name: "View Note saved" }).click();
+      await page.getByRole("button", { name: "View Project notes edited" }).click();
       await expect.poll(() => crown.island().dataset.mode).toBe("card");
-      await expect.element(page.getByRole("region", { name: "Notes" })).toBeVisible();
       await expect
-        .poll(() =>
-          crown.host
-            .querySelector<HTMLElement>(`[data-note-id="${remote.noteId}"]`)
-            ?.hasAttribute("data-highlight"),
-        )
-        .toBe(true);
+        .element(editor("Project notes"))
+        .toHaveValue("Hosted service worker must never cache notes");
       await new Promise((resolve) => setTimeout(resolve, 900));
       cancelAnimationFrame(frame);
       expect(islandScrollTops.length).toBeGreaterThan(10);
@@ -950,7 +974,7 @@ describe("CrownOverview", () => {
       await page.getByRole("button", { name: "Notes", exact: true }).hover();
       await expect.poll(() => crown.flyout().dataset.open).toBe("true");
       // The first open refits beside the icon once the notes lay out; clicking the
-      // composer mid-glide can land outside the settled panel and let it close.
+      // editor mid-glide can land outside the settled panel and let it close.
       const notesIcon = crown.railButton("notes").getBoundingClientRect();
       const notesIconCentre = notesIcon.top + notesIcon.height / 2;
       await expect
@@ -963,30 +987,23 @@ describe("CrownOverview", () => {
           );
         })
         .toBe(true);
-      const composer = crown.flyout().querySelector<HTMLTextAreaElement>("textarea")!;
+      const textarea = crown.flyout().querySelector<HTMLTextAreaElement>("textarea")!;
       // The preview keeps the pane's own header.
       expect(crown.flyout().querySelector(".notes-compact")).toBeNull();
-      await userEvent.click(composer);
-      await userEvent.type(composer, "Mine");
-      // Leaving the flyout while composing keeps it open.
+      await userEvent.click(textarea);
+      await userEvent.type(textarea, "Mine");
+      // Leaving the flyout while editing keeps it open.
       await page.getByRole("button", { name: "Outside" }).hover();
       await new Promise((resolve) => setTimeout(resolve, CROWN_FLYOUT_CLOSE_DELAY_MS + 120));
       expect(crown.flyout().dataset.open).toBe("true");
-      // Tabbing on to Save (keyboard focus inside) keeps holding it, draft and all.
-      await userEvent.keyboard("{Tab}");
-      expect(document.activeElement?.classList.contains("notes-save")).toBe(true);
-      await new Promise((resolve) => setTimeout(resolve, CROWN_FLYOUT_CLOSE_DELAY_MS + 120));
-      expect(crown.flyout().dataset.open).toBe("true");
-      expect(composer.value).toBe("Mine");
-      await userEvent.keyboard("{Shift>}{Tab}{/Shift}");
-      expect(document.activeElement).toBe(composer);
+      expect(textarea.value).toBe("Mine");
 
       await userEvent.keyboard("{ControlOrMeta>}{Enter}{/ControlOrMeta}");
-      await expect.poll(() => notesNode.node.notes.length).toBe(1);
+      await expect.poll(() => notesNode.node.documents.length).toBe(1);
       await new Promise((resolve) => setTimeout(resolve, 50));
       expect(crown.island().dataset.mode).toBe("dot");
 
-      // Focus leaving the composer lets the preview close.
+      // Focus leaving the editor lets the preview close.
       await page.getByRole("button", { name: "Outside" }).click();
       await expect.poll(() => crown.flyout().dataset.open).toBeUndefined();
     });

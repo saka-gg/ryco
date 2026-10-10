@@ -71,16 +71,7 @@
 }
 
 /* Crown-owned controls only; ui/Button and detail rows keep their own focus styles. */
-.crown-root
-  :is(
-    .crown-face,
-    .crown-rail-btn,
-    .crown-icon-btn,
-    .crown-alert-view,
-    .notes-check,
-    .notes-save,
-    .notes-thread-chip
-  ):focus-visible,
+.crown-root :is(.crown-face, .crown-rail-btn, .crown-icon-btn, .crown-alert-view):focus-visible,
 .crown-root .notes-seg [role="tab"]:focus-visible {
   outline: 2px solid color-mix(in srgb, var(--info) 70%, transparent);
   outline-offset: 2px;

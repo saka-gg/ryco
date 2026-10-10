@@ -2,6 +2,7 @@ import {
   BotIcon,
   CircleCheckIcon,
   CircleXIcon,
+  CloudDownloadIcon,
   CloudUploadIcon,
   GitCommitHorizontalIcon,
   GitPullRequestIcon,
@@ -11,6 +12,8 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { useLayoutEffect, useRef, type MouseEvent, type Ref } from "react";
+
+import { Spinner } from "~/components/ui/spinner";
 
 import type { CrownEvent, CrownEventIcon } from "./crownAlerts.logic";
 
@@ -29,6 +32,7 @@ const ALERT_ICON: Record<AlertIconKey, LucideIcon> = {
   sparkles: SparklesIcon,
   turn: CircleCheckIcon,
   note: NotebookPenIcon,
+  pull: CloudDownloadIcon,
 };
 
 /** Prototype `alertHTML`: the tone decides first (danger ✕, success ✓), then the event kind. */
@@ -52,6 +56,8 @@ const ALERT_SWAP_TIMING: KeyframeAnimationOptions = {
  * It keeps rendering the last alert after the crown folds back, so the
  * cross-fade never shows an empty layer. Clicking anywhere opens the card on
  * the alert's section; View is the keyboard-reachable control for the same.
+ * An alert with an action (a git result's "View PR") offers it in View's place,
+ * and a live one (a git action still running) spins until its result lands.
  * While focus is inside, `onFocusWithinChange` lets the crown hold the alert.
  */
 export function CrownAlert({
@@ -64,6 +70,8 @@ export function CrownAlert({
   readonly visible: boolean;
   readonly reducedMotion: boolean;
   readonly onOpen: (event: MouseEvent<HTMLElement>) => void;
+  /** Runs the alert's own action. */
+  readonly onAction: () => void;
   readonly onFocusWithinChange: (focused: boolean) => void;
   readonly ref?: Ref<HTMLDivElement>;
 }) {
@@ -83,6 +91,8 @@ export function CrownAlert({
 
   const Icon = alert ? ALERT_ICON[alertIconKey(alert)] : null;
   const sub = alert?.sub || props.fallbackSub;
+  const when = alert?.live ? null : "just now";
+  const meta = [sub, when].filter(Boolean).join(" · ");
   return (
     <div
       ref={ref}
@@ -101,15 +111,33 @@ export function CrownAlert({
         {alert && Icon ? (
           <>
             <span className="crown-alert-icon">
-              <Icon aria-hidden="true" />
+              {alert.live ? (
+                <Spinner aria-hidden="true" role={undefined} />
+              ) : (
+                <Icon aria-hidden="true" />
+              )}
             </span>
-            <div className="crown-alert-text">
+            <div className="crown-alert-text" aria-live={alert.live ? "polite" : undefined}>
               <b>{alert.title}</b>
-              <small>{sub ? `${sub} · just now` : "just now"}</small>
+              {meta ? <small>{meta}</small> : null}
             </div>
-            <button type="button" className="crown-alert-view" aria-label={`View ${alert.title}`}>
-              View
-            </button>
+            {alert.action ? (
+              <button
+                type="button"
+                className="crown-alert-view"
+                onClick={(event) => {
+                  // The action replaces opening the card.
+                  event.stopPropagation();
+                  props.onAction();
+                }}
+              >
+                {alert.action.label}
+              </button>
+            ) : (
+              <button type="button" className="crown-alert-view" aria-label={`View ${alert.title}`}>
+                View
+              </button>
+            )}
           </>
         ) : null}
       </div>

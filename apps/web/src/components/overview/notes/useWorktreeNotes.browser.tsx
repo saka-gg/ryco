@@ -3,10 +3,8 @@ import {
   NOTE_BODY_MAX_LENGTH,
   NotesError,
   ProjectId,
-  ThreadId,
   WorktreeId,
   type EnvironmentApi,
-  type WorktreeNote,
 } from "@ryco/contracts";
 import { useNotesStore } from "@ryco/client-runtime/state/notes";
 import { useEffect } from "react";
@@ -18,8 +16,8 @@ vi.mock("../../../hostedHub/capabilities", () => ({
 }));
 
 import {
-  NOTES_CREATE_UNCONFIRMED,
   NOTES_DRAFT_REASON,
+  NOTES_SAVE_DEBOUNCE_MS,
   NOTES_TOO_LONG,
   NOTES_UNCONFIRMED,
   useWorktreeNotes,
@@ -35,24 +33,17 @@ import { createFakeNotesNode } from "../crown/crownTestFixtures";
 const ENV = EnvironmentId.make("env-notes");
 const PROJECT = ProjectId.make("project-notes");
 const FEATURE = WorktreeId.make("wt-feature");
-const THREAD = ThreadId.make("thread-notes");
 
 const target = (overrides: Partial<WorktreeNotesTarget> = {}): WorktreeNotesTarget => ({
   environmentId: ENV,
   projectId: PROJECT,
   checkout: { worktreeId: FEATURE, origin: "branch" },
-  threadId: THREAD,
   available: true,
   ...overrides,
 });
 
 const fake = createFakeNotesNode(PROJECT);
 const node = fake.node;
-/** Lists in seed order: the first seeded note is the newest. */
-function seedAll(...notes: Array<[string, Partial<WorktreeNote>?]>) {
-  for (const [noteId, overrides] of notes.toReversed())
-    fake.seed(noteId, { worktreeId: FEATURE, ...overrides });
-}
 
 let latest: WorktreeNotes | null = null;
 function Probe(props: { readonly target: WorktreeNotesTarget | null }) {
@@ -60,10 +51,10 @@ function Probe(props: { readonly target: WorktreeNotesTarget | null }) {
   useEffect(() => {
     latest = notes;
   });
-  return <p data-testid="notes">{notes.worktreeNotes.map((note) => note.id).join(",")}</p>;
+  return <p data-testid="notes">{notes.bodyFor(notes.view)}</p>;
 }
 const state = () => latest!;
-const ids = (notes: ReadonlyArray<{ id: string }>) => notes.map((note) => note.id);
+const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
 
 beforeEach(() => {
   fake.reset();
@@ -71,224 +62,218 @@ beforeEach(() => {
   __setEnvironmentApiOverrideForTests(ENV, { notes: fake.api } as unknown as EnvironmentApi);
 });
 afterEach(async () => {
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await settle();
   useNotesStore.setState({ byKey: {} });
   __resetEnvironmentApiOverridesForTests();
 });
 
 describe("useWorktreeNotes", () => {
-  it("lists this worktree's notes with pinned ones first and every note in the project view", async () => {
-    seedAll(
-      ["pinned", { worktreeId: null, scope: "project", threadId: ThreadId.make("gone") }],
-      ["here"],
-      ["main", { worktreeId: null }],
-      ["other", { worktreeId: WorktreeId.make("wt-gone") }],
-    );
+  it("shows this checkout's document and the project's, each in its own view", async () => {
+    fake.seed("worktree", "Feature notes", FEATURE);
+    fake.seed("worktree", "Main notes");
+    fake.seed("project", "Project notes");
     const screen = await render(<Probe target={target()} />);
     await expect.poll(() => state().loaded).toBe(true);
 
-    expect(ids(state().worktreeNotes)).toEqual(["pinned", "here"]);
-    expect(ids(state().projectNotes)).toEqual(["pinned", "here", "main", "other"]);
-    expect(state().counts).toEqual({ worktree: 2, project: 4 });
-    const byId = new Map(state().projectNotes.map((note) => [note.id, note]));
-    // A thread that no longer exists keeps its chip with no title.
-    expect(byId.get("pinned")!.thread).toEqual({ id: "gone", title: null });
-    expect(byId.get("main")!.worktreeLabel).toBe("main");
-    expect(byId.get("other")!.worktreeLabel).toBe("Removed worktree");
-    expect(byId.get("here")!.worktreeLabel).toBeNull();
-    expect(state().available).toBe(true);
-    expect(state().composerDisabledReason).toBeNull();
+    expect(state().bodyFor("worktree")).toBe("Feature notes");
+    expect(state().bodyFor("project")).toBe("Project notes");
+    expect(state().saveStateFor("worktree")).toBe("saved");
+    expect(state().filled).toBe(true);
+    expect(state().editDisabledReasonFor("worktree")).toBeNull();
+    expect(state().alertDocuments).toEqual([
+      { key: "worktree:wt-feature", view: "worktree", revision: 1, own: false },
+      { key: "project", view: "project", revision: 1, own: false },
+    ]);
     await screen.unmount();
   });
 
-  it("shows a save at once as pending, then confirms it from the node's reply", async () => {
+  it("shows an edit at once and saves it once typing stops, as this client's own", async () => {
     const screen = await render(<Probe target={target()} />);
     await expect.poll(() => state().loaded).toBe(true);
+    expect(state().filled).toBe(false);
 
-    state().save("  [ ] Ship the crown  ", "worktree");
-    await expect.poll(() => state().worktreeNotes.length).toBe(1);
-    const [command] = node.commands;
-    expect(command).toMatchObject({
-      kind: "create",
+    state().edit("worktree", "Ship");
+    state().edit("worktree", "Ship the crown");
+    await expect.poll(() => state().bodyFor("worktree")).toBe("Ship the crown");
+    expect(state().saveStateFor("worktree")).toBe("unsaved");
+    expect(node.commands).toEqual([]);
+
+    await expect
+      .poll(() => node.commands.length, { timeout: NOTES_SAVE_DEBOUNCE_MS + 2000 })
+      .toBe(1);
+    expect(node.commands[0]).toEqual({
+      kind: "save",
       projectId: PROJECT,
-      worktreeId: FEATURE,
       scope: "worktree",
-      body: "[ ] Ship the crown",
-      threadId: THREAD,
+      worktreeId: FEATURE,
+      body: "Ship the crown",
+      expectedRevision: 0,
     });
-    await expect.poll(() => state().worktreeNotes[0]?.pending).toBeUndefined();
-    expect(state().worktreeNotes[0]!.id).toBe(command!.noteId);
-    expect(state().ownNoteIds.has(command!.noteId)).toBe(true);
+    await expect.poll(() => state().saveStateFor("worktree")).toBe("saved");
+    expect(state().bodyFor("worktree")).toBe("Ship the crown");
+    expect(state().alertDocuments).toEqual([
+      { key: "worktree:wt-feature", view: "worktree", revision: 1, own: true },
+    ]);
     await screen.unmount();
   });
 
-  it("keeps a create whose reply was lost pending and resends it with the same id", async () => {
+  it("saves on flush and sends text typed during a save after it, on the new revision", async () => {
     const screen = await render(<Probe target={target()} />);
     await expect.poll(() => state().loaded).toBe(true);
 
-    node.dropReplies = 1;
-    state().save("Lost reply", "project");
-    await expect.poll(() => node.commands.length).toBe(1);
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(state().worktreeNotes[0]?.pending).toBe(true);
-
-    expect(state().error).toBe(NOTES_CREATE_UNCONFIRMED);
-
-    state().refresh();
-    await expect.poll(() => node.commands.length).toBe(2);
-    expect(node.commands[1]!.noteId).toBe(node.commands[0]!.noteId);
-    await expect.poll(() => state().worktreeNotes[0]?.pending).toBeUndefined();
-    expect(node.notes).toHaveLength(1);
-    expect(state().error).toBeNull();
+    state().edit("project", "First");
+    await settle();
+    state().flush("project");
+    state().edit("project", "First and second");
+    state().flush("project");
+    await expect
+      .poll(() => node.commands.length, { timeout: NOTES_SAVE_DEBOUNCE_MS + 2000 })
+      .toBe(2);
+    expect(node.commands.map((command) => [command.body, command.expectedRevision])).toEqual([
+      ["First", 0],
+      ["First and second", 1],
+    ]);
+    await expect.poll(() => state().saveStateFor("project")).toBe("saved");
+    expect(node.documents[0]).toMatchObject({ body: "First and second", revision: 2 });
     await screen.unmount();
   });
 
-  it("resends a create whose reply was lost on its own, after a short backoff", async () => {
+  it("drops an edit that returns to the saved text", async () => {
+    fake.seed("project", "Same");
     const screen = await render(<Probe target={target()} />);
     await expect.poll(() => state().loaded).toBe(true);
 
-    node.dropReplies = 1;
-    await expect(state().save("Retried", "worktree")).resolves.toBe("unconfirmed");
-    await expect.poll(() => node.commands.length, { timeout: 4000 }).toBe(2);
-    expect(node.commands[1]!.noteId).toBe(node.commands[0]!.noteId);
-    await expect.poll(() => state().worktreeNotes[0]?.pending).toBeUndefined();
-    await screen.unmount();
-  });
-
-  it("drops a retried create quietly when its note was deleted elsewhere meanwhile", async () => {
-    const screen = await render(<Probe target={target()} />);
-    await expect.poll(() => state().loaded).toBe(true);
-
-    node.dropReplies = 1;
-    await state().save("Deleted elsewhere", "worktree");
-    const noteId = node.commands[0]!.noteId;
-    node.notes = [];
-    node.deleted.add(noteId);
-
-    state().refresh();
-    await expect.poll(() => node.commands.length).toBe(2);
-    await expect.poll(() => state().worktreeNotes.length).toBe(0);
-    expect(state().error).toBeNull();
-    await screen.unmount();
-  });
-
-  it("refuses an over-long note before sending, without leaving it pending", async () => {
-    const screen = await render(<Probe target={target()} />);
-    await expect.poll(() => state().loaded).toBe(true);
-
-    await expect(state().save("x".repeat(NOTE_BODY_MAX_LENGTH + 1), "worktree")).resolves.toBe(
-      "refused",
-    );
-    await expect.poll(() => state().error).toBe(NOTES_TOO_LONG);
-    expect(state().worktreeNotes).toEqual([]);
+    state().edit("project", "Same");
+    await settle();
+    expect(state().saveStateFor("project")).toBe("saved");
+    state().flush("project");
+    await settle();
     expect(node.commands).toEqual([]);
     await screen.unmount();
   });
 
-  it("reports a rejected create so the composer can take its text back", async () => {
+  it("keeps the text typed here when the document changed elsewhere meanwhile", async () => {
+    fake.seed("worktree", "Base", FEATURE);
+    const screen = await render(<Probe target={target()} />);
+    await expect.poll(() => state().loaded).toBe(true);
+
+    state().edit("worktree", "Mine");
+    await settle();
+    fake.seed("worktree", "Theirs", FEATURE);
+    const readsBefore = node.reads;
+    state().flush("worktree");
+    await expect.poll(() => node.commands.length).toBe(2);
+    expect(node.reads).toBeGreaterThan(readsBefore);
+    expect(node.commands.map((command) => command.expectedRevision)).toEqual([1, 2]);
+    await expect.poll(() => state().saveStateFor("worktree")).toBe("saved");
+    expect(state().bodyFor("worktree")).toBe("Mine");
+    expect(state().error).toBeNull();
+    await screen.unmount();
+  });
+
+  it("follows the node's text while nothing is typed here", async () => {
+    fake.seed("project", "Before");
+    const screen = await render(<Probe target={target()} />);
+    await expect.poll(() => state().bodyFor("project")).toBe("Before");
+    fake.seed("project", "After");
+    window.dispatchEvent(new Event("focus"));
+    await expect.poll(() => state().bodyFor("project")).toBe("After");
+    await screen.unmount();
+  });
+
+  it("resends a save whose reply was lost and settles once the node shows it", async () => {
+    const screen = await render(<Probe target={target()} />);
+    await expect.poll(() => state().loaded).toBe(true);
+
+    node.dropReplies = 1;
+    state().edit("worktree", "Lost reply");
+    state().flush("worktree");
+    await expect.poll(() => state().error).toBe(NOTES_UNCONFIRMED);
+    expect(state().saveStateFor("worktree")).toBe("unsaved");
+
+    state().refresh();
+    // The resend meets its own landed revision, re-reads and finds the text saved.
+    await expect.poll(() => state().saveStateFor("worktree")).toBe("saved");
+    expect(node.commands).toHaveLength(2);
+    expect(node.documents).toHaveLength(1);
+    expect(state().error).toBeNull();
+    expect(state().alertDocuments[0]?.own).toBe(true);
+    await screen.unmount();
+  });
+
+  it("refuses over-long text before sending", async () => {
+    const screen = await render(<Probe target={target()} />);
+    await expect.poll(() => state().loaded).toBe(true);
+
+    state().edit("worktree", "x".repeat(NOTE_BODY_MAX_LENGTH + 1));
+    state().flush("worktree");
+    await expect.poll(() => state().error).toBe(NOTES_TOO_LONG);
+    expect(node.commands).toEqual([]);
+    await screen.unmount();
+  });
+
+  it("reports a refused save and keeps the text", async () => {
     __setEnvironmentApiOverrideForTests(ENV, {
       notes: {
         ...fake.api,
         command: async () => {
-          throw new NotesError({ reason: "invalid", message: "The note worktree is unavailable." });
+          throw new NotesError({
+            reason: "invalid",
+            message: "The notes worktree is unavailable.",
+          });
         },
       },
     } as unknown as EnvironmentApi);
     const screen = await render(<Probe target={target()} />);
     await expect.poll(() => state().loaded).toBe(true);
 
-    await expect(state().save("Gone worktree", "worktree")).resolves.toBe("rejected");
-    await expect.poll(() => state().error).toBe("The note worktree is unavailable.");
-    expect(state().worktreeNotes).toEqual([]);
+    state().edit("worktree", "Gone worktree");
+    state().flush("worktree");
+    await expect.poll(() => state().error).toBe("The notes worktree is unavailable.");
+    expect(state().bodyFor("worktree")).toBe("Gone worktree");
+    expect(state().saveStateFor("worktree")).toBe("unsaved");
     await screen.unmount();
   });
 
-  it("shows a fixed message for a change that could not be confirmed, until a later read", async () => {
-    seedAll(["todo", { body: "[ ] Fix the ring" }]);
-    const screen = await render(<Probe target={target()} />);
-    await expect.poll(() => state().loaded).toBe(true);
-
-    node.dropReplies = 1;
-    state().toggleTodo("todo");
-    await expect.poll(() => state().error).toBe(NOTES_UNCONFIRMED);
-    // The follow-up read reconciles the list but keeps the message up...
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(state().error).toBe(NOTES_UNCONFIRMED);
-    // ...until a later read lists the notes again.
-    window.dispatchEvent(new Event("focus"));
-    await expect.poll(() => state().error).toBeNull();
-    await screen.unmount();
-  });
-
-  it("edits against the last seen revision and re-reads on a conflict", async () => {
-    seedAll(["todo", { body: "[ ] Fix the ring" }]);
-    const screen = await render(<Probe target={target()} />);
-    await expect.poll(() => state().loaded).toBe(true);
-
-    state().toggleTodo("todo");
-    await expect.poll(() => node.notes[0]!.body).toBe("[x] Fix the ring");
-    expect(node.commands[0]).toMatchObject({ kind: "update", expectedRevision: 0 });
-    await expect.poll(() => state().worktreeNotes[0]!.body).toBe("[x] Fix the ring");
-
-    // Someone else moved the note on; this client still holds revision 1.
-    node.notes[0] = { ...node.notes[0]!, revision: 5 };
-    const readsBefore = node.reads;
-    state().togglePin("todo");
-    await expect.poll(() => node.reads).toBeGreaterThan(readsBefore);
-    await expect.poll(() => state().worktreeNotes[0]!.scope).toBe("worktree");
-    expect(state().error).toBeNull();
-
-    state().remove("todo");
-    await expect.poll(() => node.notes.length).toBe(0);
-    await expect.poll(() => state().worktreeNotes.length).toBe(0);
-    await screen.unmount();
-  });
-
-  it("counts a note pinned here from another worktree as this client's own", async () => {
-    seedAll(["other", { worktreeId: WorktreeId.make("wt-other") }]);
-    const screen = await render(<Probe target={target()} />);
-    await expect.poll(() => state().loaded).toBe(true);
-    expect(ids(state().worktreeNotes)).toEqual([]);
-
-    state().togglePin("other");
-    // It appears in this worktree's list, so it must not alert as saved elsewhere.
-    await expect.poll(() => ids(state().worktreeNotes)).toEqual(["other"]);
-    expect(state().ownNoteIds.has("other")).toBe(true);
-    await expect.poll(() => node.notes[0]!.scope).toBe("project");
-    await screen.unmount();
-  });
-
-  it("re-reads when the window regains focus", async () => {
-    const screen = await render(<Probe target={target()} />);
-    await expect.poll(() => node.reads).toBe(1);
-    seedAll(["elsewhere"]);
-    window.dispatchEvent(new Event("focus"));
-    await expect.poll(() => ids(state().worktreeNotes)).toEqual(["elsewhere"]);
-    await screen.unmount();
-  });
-
-  it("gives a draft without a checkout the Project view with the composer off", async () => {
-    seedAll(["pinned", { scope: "project" }], ["here"]);
-    const screen = await render(<Probe target={target({ checkout: null, threadId: null })} />);
+  it("gives a draft without a checkout only the Project view", async () => {
+    fake.seed("project", "Shared");
+    const screen = await render(<Probe target={target({ checkout: null })} />);
     await expect.poll(() => state().loaded).toBe(true);
 
     expect(state().view).toBe("project");
-    expect(state().composerDisabledReason).toBe(NOTES_DRAFT_REASON);
     expect(state().worktreeViewDisabledReason).toBe(NOTES_DRAFT_REASON);
+    expect(state().editDisabledReasonFor("worktree")).toBe(NOTES_DRAFT_REASON);
+    expect(state().editDisabledReasonFor("project")).toBeNull();
     state().setView("worktree");
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await settle();
     expect(state().view).toBe("project");
-    expect(ids(state().worktreeNotes)).toEqual(["pinned"]);
-    state().save("Nope", "worktree");
-    expect(node.commands).toEqual([]);
+    state().edit("worktree", "Nope");
+    state().flush("worktree");
+    state().edit("project", "Shared, edited");
+    state().flush("project");
+    await expect.poll(() => node.commands.length).toBe(1);
+    expect(node.commands[0]).toMatchObject({ scope: "project", worktreeId: null });
+    await screen.unmount();
+  });
+
+  it("saves unsaved text when the thread moves to another project", async () => {
+    const other = ProjectId.make("project-other");
+    const screen = await render(<Probe target={target()} />);
+    await expect.poll(() => state().loaded).toBe(true);
+
+    state().edit("project", "Before leaving");
+    await screen.rerender(<Probe target={target({ projectId: other })} />);
+    await expect.poll(() => node.commands.length).toBe(1);
+    expect(node.commands[0]).toMatchObject({ projectId: PROJECT, body: "Before leaving" });
+    expect(state().bodyFor("project")).toBe("");
     await screen.unmount();
   });
 
   it("stays unavailable without the node's capability and never reads", async () => {
     const screen = await render(<Probe target={target({ available: false })} />);
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await settle();
     expect(state().available).toBe(false);
-    expect(state().disabledReason).not.toBeNull();
+    expect(state().editDisabledReasonFor("project")).not.toBeNull();
     expect(node.reads).toBe(0);
     await screen.unmount();
   });

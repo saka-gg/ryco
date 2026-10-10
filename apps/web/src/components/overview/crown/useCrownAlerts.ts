@@ -2,9 +2,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { createTurnCompletionTracker } from "~/lib/turnCompletion.logic";
 
+import type { GitActionNotice } from "../../../gitActionNotices";
 import { useEvent } from "../../../hooks/useEvent";
 import {
   diffCrownSnapshots,
+  gitNoticeEvent,
   mergeCrownBaseline,
   type CrownEvent,
   type CrownSnapshot,
@@ -15,6 +17,7 @@ import {
   clearCrownAlerts,
   crownAlertDwellMs,
   enqueueCrownAlerts,
+  showCrownAlertNow,
   type CrownAlertQueueState,
 } from "./crownAlertQueue.logic";
 import { CROWN_GIT_ACTION_SUPPRESS_MS } from "./crownLayout";
@@ -34,7 +37,7 @@ export interface CrownAlerts {
   /** Waiting alerts, shown as "+N" on the face. */
   readonly queuedCount: number;
   readonly pings: CrownPings;
-  /** Drop the shown and waiting alerts. */
+  /** Drop the shown and waiting alerts (a running git action's too, until its result). */
   readonly clear: () => void;
 }
 
@@ -81,7 +84,9 @@ export function startVisibleTimeout(durationMs: number, onExpire: () => void): (
  * Turns overview snapshots into crown alerts and rail pings: diffs each new
  * snapshot against the last baseline, feeds its turn to the shared
  * turn-completion tracker, queues loud events and walks the queue on the
- * prototype's dwell timer.
+ * prototype's dwell timer. A user-started git action shows live while it
+ * runs, holding the queue, and its result shows at once (after the card
+ * closes, when it is open).
  */
 export function useCrownAlerts(input: {
   readonly snapshot: CrownSnapshot;
@@ -89,8 +94,11 @@ export function useCrownAlerts(input: {
   readonly userGitActionActive: boolean;
   /** Holds the shown alert while the user is on it (e.g. its View button has focus). */
   readonly paused: boolean;
+  /** The checkout's latest git action notice, while this crown presents them. */
+  readonly gitNotice?: GitActionNotice | null | undefined;
 }): CrownAlerts {
   const { snapshot, cardOpen, userGitActionActive, paused } = input;
+  const gitNotice = input.gitNotice ?? null;
   const baselineRef = useRef<CrownSnapshot | null>(null);
   const turnTrackerRef = useRef(createTurnCompletionTracker());
   const suppressGitUntilRef = useRef(userGitActionActive ? Infinity : 0);
@@ -107,12 +115,43 @@ export function useCrownAlerts(input: {
     gitActionWasActiveRef.current = userGitActionActive;
   }, [userGitActionActive]);
 
+  /** Git results that landed while the card was open; they show once it closes. */
+  const [deferredGit, setDeferredGit] = useState<ReadonlyArray<CrownEvent>>([]);
+  /** A running git alert the user dismissed; its result still shows. */
+  const [dismissedLiveId, setDismissedLiveId] = useState<string | null>(null);
+
   // Opening the card drops the queue (adjusted during render, React's "previous prop" pattern).
   const [cardWasOpen, setCardWasOpen] = useState(cardOpen);
   if (cardOpen !== cardWasOpen) {
     setCardWasOpen(cardOpen);
     if (cardOpen) setQueueState(clearCrownAlerts);
+    else if (deferredGit.length > 0) {
+      setDeferredGit([]);
+      setQueueState((current) => deferredGit.reduce(showCrownAlertNow, current));
+    }
   }
+
+  // A git result replaces its live alert at once (adjusted during render, as above).
+  const [seenGitNotice, setSeenGitNotice] = useState(gitNotice);
+  if (gitNotice !== seenGitNotice) {
+    setSeenGitNotice(gitNotice);
+    if (gitNotice && gitNotice.status !== "running") {
+      const event = gitNoticeEvent(gitNotice);
+      setPings((current) => ({
+        ...current,
+        [event.railKey]: { n: current[event.railKey].n + 1, tone: event.tone },
+      }));
+      if (cardOpen) setDeferredGit((current) => [...current, event]);
+      else setQueueState((current) => showCrownAlertNow(current, event));
+    }
+  }
+  const live = useMemo(
+    () =>
+      gitNotice?.status === "running" && gitNotice.id !== dismissedLiveId
+        ? gitNoticeEvent(gitNotice)
+        : null,
+    [gitNotice, dismissedLiveId],
+  );
 
   const applySnapshot = useEvent((next: CrownSnapshot) => {
     const prev = baselineRef.current;
@@ -162,17 +201,23 @@ export function useCrownAlerts(input: {
   useEffect(() => {
     dwellRef.current = dwellMs;
   });
-  // A pause holds the alert; the dwell starts over once the user moves on.
+  // A pause, or a live git alert in front, holds the alert; the dwell starts over once the user moves on.
+  const held = paused || live !== null;
   useEffect(() => {
-    if (currentId === null || paused) return;
+    if (currentId === null || held) return;
     return startVisibleTimeout(dwellRef.current, () => setQueueState(advanceCrownAlert));
-  }, [currentId, paused]);
+  }, [currentId, held]);
 
-  const clear = useCallback(() => setQueueState(clearCrownAlerts), []);
+  const liveId = live?.id ?? null;
+  const liveNoticeId = live ? (gitNotice?.id ?? null) : null;
+  const clear = useCallback(() => {
+    setQueueState(clearCrownAlerts);
+    if (liveNoticeId !== null) setDismissedLiveId(liveNoticeId);
+  }, [liveNoticeId]);
 
   return {
-    current: queueState.current,
-    queuedCount: queueState.queue.length,
+    current: live ?? queueState.current,
+    queuedCount: queueState.queue.length + (liveId !== null && queueState.current ? 1 : 0),
     pings,
     clear,
   };

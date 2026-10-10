@@ -17,7 +17,6 @@ import {
   makeCheckStatus,
   makeLayout,
   makeNotesBinding,
-  makeNoteView,
   makePlan,
   makePullRequest,
   makeRun,
@@ -149,7 +148,7 @@ describe("buildCrownSnapshot", () => {
     });
   });
 
-  it("keeps the worktree view's notes once they have answered, marking this client's own", () => {
+  it("keeps the thread's confirmed notes documents once they have answered", () => {
     const base = {
       scopeKey: "scope",
       layout: makeLayout(),
@@ -159,27 +158,17 @@ describe("buildCrownSnapshot", () => {
       readiness: READY,
     };
     const notes = makeNotesBinding({
-      worktreeNotes: [
-        makeNoteView("mine", { body: "[ ] Ship   the\ncrown" }),
-        makeNoteView("theirs", { body: "x".repeat(60) }),
+      alertDocuments: [
+        { key: "worktree:feature", view: "worktree", revision: 3, own: true },
+        { key: "project", view: "project", revision: 7, own: false },
       ],
-      ownNoteIds: new Set(["mine"]),
     });
     assert.deepEqual(buildCrownSnapshot({ ...base, notes }).notes, {
-      mine: { summary: "Ship the crown", own: true },
-      theirs: { summary: `${"x".repeat(39)}…`, own: false },
+      "worktree:feature": { view: "worktree", revision: 3, own: true },
+      project: { view: "project", revision: 7, own: false },
     });
     assert.isNull(buildCrownSnapshot({ ...base, notes: { ...notes, loaded: false } }).notes);
     assert.isNull(buildCrownSnapshot({ ...base, notes: { ...notes, available: false } }).notes);
-    // A pending delete hides a note from the list, not from the alert baseline: rolling
-    // it back must not look like a note appearing.
-    const deleting = makeNotesBinding({
-      worktreeNotes: [],
-      alertNotes: [makeNoteView("theirs", { body: "Kept" })],
-    });
-    assert.deepEqual(buildCrownSnapshot({ ...base, notes: deleting }).notes, {
-      theirs: { summary: "Kept", own: false },
-    });
   });
 
   it("leaves checks unknown while loading, unavailable or erroring", () => {
@@ -999,21 +988,25 @@ describe("diffCrownSnapshots changes", () => {
 });
 
 describe("diffCrownSnapshots notes", () => {
-  const note = (summary: string, own = false) => ({ summary, own });
+  const document = (revision: number, view: "worktree" | "project" = "worktree", own = false) => ({
+    view,
+    revision,
+    own,
+  });
 
   it("is silent when the notes first answer, and keeps them across a reload", () => {
-    const loaded = snap({ notes: { a: note("Alpha") } });
+    const loaded = snap({ notes: { "worktree:": document(1) } });
     assert.deepEqual(diff(snap(), loaded), []);
     const reloading = mergeCrownBaseline(loaded, snap());
     assert.deepEqual(reloading.notes, loaded.notes);
     assert.deepEqual(diff(reloading, loaded), []);
   });
 
-  it("announces a note saved elsewhere, carrying its id for View", () => {
+  it("announces a document edited elsewhere, carrying its view for View", () => {
     const event = only(
       diff(
-        snap({ notes: { a: note("Alpha") } }),
-        snap({ notes: { b: note("Hosted worker must not cache"), a: note("Alpha") } }),
+        snap({ notes: { "worktree:": document(1), project: document(2, "project") } }),
+        snap({ notes: { "worktree:": document(1), project: document(3, "project") } }),
       ),
     );
     assert.deepInclude(event, {
@@ -1022,27 +1015,32 @@ describe("diffCrownSnapshots notes", () => {
       railKey: "notes",
       tone: "note",
       icon: "note",
-      title: "Note saved",
-      sub: "Hosted worker must not cache",
+      title: "Project notes edited",
       loud: true,
-      noteId: "b",
-      dedupeKey: "note:b",
+      notesView: "project",
+      dedupeKey: "notes:project:3",
     });
   });
 
-  it("only pings for this client's own save", () => {
-    const event = only(diff(snap({ notes: {} }), snap({ notes: { mine: note("Mine", true) } })));
-    assert.deepInclude(event, { kind: "note", railKey: "notes", loud: false, noteId: "mine" });
+  it("announces a document first saved elsewhere", () => {
+    const event = only(diff(snap({ notes: {} }), snap({ notes: { "worktree:": document(1) } })));
+    assert.deepInclude(event, { title: "Worktree notes edited", notesView: "worktree" });
   });
 
-  it("collapses a burst of notes into one alert and ignores removals", () => {
-    const event = only(
+  it("stays quiet for this client's own saves and for unchanged revisions", () => {
+    assert.deepEqual(
       diff(
-        snap({ notes: { a: note("A") } }),
-        snap({ notes: { d: note("D"), c: note("C"), b: note("B") } }),
+        snap({ notes: { "worktree:": document(1) } }),
+        snap({ notes: { "worktree:": document(2, "worktree", true) } }),
       ),
+      [],
     );
-    assert.deepInclude(event, { title: "3 notes saved", sub: "D", noteId: "d", loud: true });
-    assert.equal(event.dedupeKey, "notes:b|c|d");
+    assert.deepEqual(
+      diff(
+        snap({ notes: { "worktree:": document(2) } }),
+        snap({ notes: { "worktree:": document(2) } }),
+      ),
+      [],
+    );
   });
 });

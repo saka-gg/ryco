@@ -22,7 +22,8 @@ import { getOverviewSummary } from "../overviewSummary.logic";
 import type { OverviewDataReadiness, OverviewLayoutProps } from "../overviewTypes";
 import { countCrownChecks, crownKnownPrState, type CrownPrState } from "./crownModel.logic";
 import type { CrownRailKey, CrownSection, CrownTone } from "./crownSections";
-import { noteSummaryText } from "../notes/noteText.logic";
+import type { GitActionNotice, GitActionNoticeAction } from "../../../gitActionNotices";
+import type { NotesPaneView } from "../notes/noteView";
 import type { CrownNotesBinding, CrownTurnInput } from "./crownTypes";
 
 /**
@@ -90,11 +91,14 @@ export interface CrownSnapshot {
   readonly agents: CrownAgentsSnapshot;
   readonly fileCount: number;
   /**
-   * The worktree view's notes by id, in list order; null until the node's
-   * notes have answered. `own` marks notes this client created.
+   * The thread's notes documents by key, at their confirmed revision; null
+   * until the node's notes have answered. `own` marks a revision this client saved.
    */
   readonly notes: Readonly<
-    Record<string, { readonly summary: string; readonly own: boolean }>
+    Record<
+      string,
+      { readonly view: NotesPaneView; readonly revision: number; readonly own: boolean }
+    >
   > | null;
 }
 
@@ -127,7 +131,8 @@ export type CrownEventKind =
   | "plan"
   | "turn"
   | "changes"
-  | "note";
+  | "note"
+  | "git";
 export type CrownEventIcon =
   | "x"
   | "check"
@@ -138,7 +143,8 @@ export type CrownEventIcon =
   | "pr"
   | "sparkles"
   | "turn"
-  | "note";
+  | "note"
+  | "pull";
 
 export interface CrownEvent {
   readonly id: string;
@@ -155,8 +161,12 @@ export interface CrownEvent {
   readonly loud: boolean;
   /** Identical for the same transition, so flapping data can't alert twice. */
   readonly dedupeKey: string;
-  /** The note a "Note saved" alert is about; View highlights it. */
-  readonly noteId?: string;
+  /** The notes document an "edited elsewhere" alert is about; View opens it. */
+  readonly notesView?: NotesPaneView;
+  /** A git action still running: the alert holds until its result replaces it. */
+  readonly live?: true;
+  /** Offered in place of View (a git result's "View PR", "Create PR"). */
+  readonly action?: GitActionNoticeAction;
 }
 
 export interface CrownDiffContext {
@@ -174,10 +184,8 @@ const UNSETTLED_CHECK_KINDS: ReadonlySet<PrCheckStatusKind> = new Set([
 ]);
 const IN_FLIGHT_CHECK_KINDS: ReadonlySet<PrCheckStatusKind> = new Set(["pending", "running"]);
 
-/** Subagent (and note) events in one diff at or above this count collapse into one. */
+/** Subagent events in one diff at or above this count collapse into one. */
 export const CROWN_SUBAGENT_BURST_MIN = 3;
-/** The "Note saved" alert's sub line (prototype `trunc(stripTodo(sub), 40)`). */
-export const CROWN_NOTE_SUMMARY_MAX = 40;
 
 export function buildCrownSnapshot(input: {
   readonly scopeKey: string;
@@ -291,23 +299,12 @@ function buildAgentsSnapshot(model: AgentPanelModel): CrownAgentsSnapshot {
   return { direct, workflows };
 }
 
-/** Summaries by note entry: the binding keeps entries stable while their note is unchanged. */
-const noteSummaries = new WeakMap<object, string>();
-function noteSummary(note: CrownNotesBinding["alertNotes"][number]): string {
-  let summary = noteSummaries.get(note);
-  if (summary === undefined) {
-    summary = noteSummaryText(note.body, CROWN_NOTE_SUMMARY_MAX);
-    noteSummaries.set(note, summary);
-  }
-  return summary;
-}
-
-/** The confirmed Worktree view (no pending edits or deletes), so a rollback never "appears". */
+/** The confirmed documents (never unsaved text), so only the node's revisions can alert. */
 function snapshotNotes(binding: CrownNotesBinding | undefined): CrownSnapshot["notes"] {
   if (!binding?.available || !binding.loaded) return null;
-  const notes: Record<string, { summary: string; own: boolean }> = {};
-  for (const note of binding.alertNotes) {
-    notes[note.id] = { summary: noteSummary(note), own: binding.ownNoteIds.has(note.id) };
+  const notes: Record<string, { view: NotesPaneView; revision: number; own: boolean }> = {};
+  for (const document of binding.alertDocuments) {
+    notes[document.key] = { view: document.view, revision: document.revision, own: document.own };
   }
   return notes;
 }
@@ -352,6 +349,36 @@ function mergePullRequest(
 }
 
 type EventDraft = Omit<CrownEvent, "id">;
+
+const GIT_NOTICE_PLACEMENT: Record<
+  GitActionNotice["kind"],
+  Pick<CrownEvent, "section" | "railKey" | "icon">
+> = {
+  pull: { section: "branch", railKey: "branch", icon: "pull" },
+  commit: { section: "branch", railKey: "ship", icon: "commit" },
+  push: { section: "branch", railKey: "ship", icon: "upload" },
+  pr: { section: "pr", railKey: "pr", icon: "pr" },
+};
+
+/**
+ * A user-started git action as a crown alert: live while it runs (one id, so
+ * progress updates never re-announce it), then its result.
+ */
+export function gitNoticeEvent(notice: GitActionNotice): CrownEvent {
+  const key = `git:${notice.id}:${notice.status === "running" ? "running" : "result"}`;
+  return {
+    id: key,
+    ...GIT_NOTICE_PLACEMENT[notice.kind],
+    kind: "git",
+    tone: notice.status === "error" ? "danger" : notice.status === "success" ? "success" : "info",
+    title: notice.title,
+    ...(notice.description ? { sub: notice.description } : {}),
+    loud: true,
+    dedupeKey: key,
+    ...(notice.status === "running" ? { live: true as const } : {}),
+    ...(notice.action ? { action: notice.action } : {}),
+  };
+}
 
 export function diffCrownSnapshots(
   prev: CrownSnapshot | null,
@@ -778,59 +805,28 @@ function diffFiles(prev: CrownSnapshot, next: CrownSnapshot): EventDraft[] {
 }
 
 /**
- * A note that appears is "saved": loud when it came from elsewhere (another
- * device or client), only a ping for this client's own saves, which the pane
- * already shows. A first answer or a reload that hides notes never alerts.
+ * A notes document saved elsewhere (another device or client) alerts loudly;
+ * this client's own saves never do, the editor already shows them. A first
+ * answer or a reload that hides the documents never alerts.
  */
 function diffNotes(prev: CrownSnapshot, next: CrownSnapshot): EventDraft[] {
   const before = prev.notes;
   const after = next.notes;
   if (!before || !after) return [];
-  const base = { section: "notes", railKey: "notes", kind: "note", icon: "note" } as const;
-  const own: string[] = [];
-  const elsewhere: Array<{ id: string; summary: string }> = [];
-  for (const [id, note] of Object.entries(after)) {
-    if (id in before) continue;
-    if (note.own) own.push(id);
-    else elsewhere.push({ id, summary: note.summary });
-  }
   const events: EventDraft[] = [];
-  for (const id of own) {
+  for (const [key, document] of Object.entries(after)) {
+    const previous = before[key];
+    if (document.own || (previous && document.revision <= previous.revision)) continue;
     events.push({
-      ...base,
+      section: "notes",
+      railKey: "notes",
+      kind: "note",
+      icon: "note",
       tone: "note",
-      title: "Note saved",
-      loud: false,
-      dedupeKey: `note:${id}:own`,
-      noteId: id,
-    });
-  }
-  const [first] = elsewhere;
-  if (!first) return events;
-  if (elsewhere.length >= CROWN_SUBAGENT_BURST_MIN) {
-    events.push({
-      ...base,
-      tone: "note",
-      title: `${elsewhere.length} notes saved`,
-      ...(first.summary ? { sub: first.summary } : {}),
+      title: document.view === "project" ? "Project notes edited" : "Worktree notes edited",
       loud: true,
-      dedupeKey: `notes:${elsewhere
-        .map((note) => note.id)
-        .toSorted()
-        .join("|")}`,
-      noteId: first.id,
-    });
-    return events;
-  }
-  for (const note of elsewhere) {
-    events.push({
-      ...base,
-      tone: "note",
-      title: "Note saved",
-      ...(note.summary ? { sub: note.summary } : {}),
-      loud: true,
-      dedupeKey: `note:${note.id}`,
-      noteId: note.id,
+      dedupeKey: `notes:${key}:${document.revision}`,
+      notesView: document.view,
     });
   }
   return events;

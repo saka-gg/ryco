@@ -1,5 +1,6 @@
 import type { ChangeRequest, EnvironmentId, ScopedThreadRef, ThreadId } from "@ryco/contracts";
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useGitActionNotice } from "~/gitActionNotices";
 import { useGitActionActivity } from "~/rpc/useGit";
 import { invalidateSourceControl } from "~/rpc/useSourceControl";
 import PlanSidebar from "../PlanSidebar";
@@ -29,8 +30,6 @@ export type ChatOverviewCrownInput = Pick<
   open: boolean;
   /** What the thread's worktree notes are written against; null hides Notes. */
   notesTarget: WorktreeNotesTarget | null;
-  /** Opens a note's backlinked thread in the notes' environment. */
-  onOpenNoteThread?: ((threadId: ThreadId) => void) | undefined;
   /**
    * The thread's "No project" chat, which the rail offers to turn into a
    * project in place of its source-control sections; null for projects.
@@ -224,6 +223,12 @@ export function ChatOverviewPanel(
 ) {
   const { layoutProps, readiness } = useChatOverviewModel(props);
   const userGitActionActive = useGitActionActivity(props.environmentId, props.gitCwd);
+  // The open crown reports this checkout's git actions in place of toasts.
+  const gitNotice = useGitActionNotice(
+    props.environmentId,
+    props.gitCwd,
+    props.presentation !== "sheet" && props.open,
+  );
 
   if (props.presentation === "sheet") {
     return (
@@ -239,7 +244,6 @@ export function ChatOverviewPanel(
       {props.sourceControlSync}
       <CrownWithNotes
         notesTarget={props.notesTarget}
-        onOpenNoteThread={props.onOpenNoteThread}
         chatProject={props.chatProject}
         {...layoutProps}
         preview={props.preview}
@@ -254,6 +258,7 @@ export function ChatOverviewPanel(
         open={props.open}
         scopeKey={`${props.activeThreadKey ?? "none"}|${props.gitCwd ?? ""}`}
         userGitActionActive={userGitActionActive}
+        gitNotice={gitNotice}
       />
     </>
   );
@@ -262,16 +267,14 @@ export function ChatOverviewPanel(
 /** The crown bound to the thread's notes and chat; the phone sheet never reads them. */
 function CrownWithNotes({
   notesTarget,
-  onOpenNoteThread,
   chatProject,
   ...props
 }: Omit<CrownOverviewProps, "notes" | "chat"> & {
   readonly open: boolean;
   readonly notesTarget: WorktreeNotesTarget | null;
-  readonly onOpenNoteThread?: ((threadId: ThreadId) => void) | undefined;
   readonly chatProject: ChatProjectTarget | null;
 }) {
-  const notes = useWorktreeNotes(notesTarget, { onOpenThread: onOpenNoteThread });
+  const notes = useWorktreeNotes(notesTarget);
   const chat = usePromoteChatBinding(chatProject);
   return <CrownOverview {...props} notes={notes} chat={chat} />;
 }

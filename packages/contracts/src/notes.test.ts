@@ -1,99 +1,64 @@
 import { describe, expect, it } from "vite-plus/test";
 import { Schema } from "effect";
-import { NotesCommand, NotesError, NotesSnapshot, WorktreeNote } from "./notes.ts";
+import {
+  NOTE_BODY_MAX_LENGTH,
+  NotesCommand,
+  NotesDocument,
+  NotesError,
+  NotesSnapshot,
+} from "./notes.ts";
 import { WS_METHODS, WsRpcGroup } from "./rpc.ts";
 
-const note = {
-  noteId: "note_1",
-  revision: 0,
+const document = {
   projectId: "project",
-  worktreeId: null,
   scope: "worktree",
-  body: "[ ] Check the reconnect fence",
-  threadId: "thread",
-  createdAt: "2026-10-07T00:00:00.000Z",
+  worktreeId: null,
+  body: "Check the reconnect fence",
+  revision: 1,
   updatedAt: "2026-10-07T00:00:00.000Z",
 };
-const create = {
-  kind: "create",
-  noteId: "note_1",
+const save = {
+  kind: "save",
   projectId: "project",
+  scope: "worktree",
   worktreeId: "worktree",
-  scope: "project",
-  body: "Pinned",
-  threadId: null,
+  body: "Draft",
+  expectedRevision: 0,
 };
 const decodeCommand = Schema.decodeUnknownSync(NotesCommand);
 
-describe("worktree notes contract", () => {
+describe("notes contract", () => {
   it("round-trips a snapshot", () => {
-    const snapshot = { projectId: "project", notes: [note], limit: 500, truncated: false };
+    const snapshot = { projectId: "project", documents: [document] };
     const decoded = Schema.decodeUnknownSync(NotesSnapshot)(snapshot);
-    expect(decoded.notes[0]?.worktreeId).toBeNull();
+    expect(decoded.documents[0]?.worktreeId).toBeNull();
     expect(Schema.encodeSync(NotesSnapshot)(decoded)).toEqual(snapshot);
   });
 
-  it("bounds note bodies, identifiers and revisions", () => {
-    const decodeNote = Schema.decodeUnknownSync(WorktreeNote);
-    expect(decodeNote({ ...note, body: "x".repeat(10_000) }).body).toHaveLength(10_000);
+  it("bounds bodies and revisions, and allows a cleared document", () => {
+    const decodeDocument = Schema.decodeUnknownSync(NotesDocument);
+    expect(decodeDocument({ ...document, body: "" }).body).toBe("");
+    expect(
+      decodeDocument({ ...document, body: "x".repeat(NOTE_BODY_MAX_LENGTH) }).body,
+    ).toHaveLength(NOTE_BODY_MAX_LENGTH);
     for (const invalid of [
-      { ...note, body: "" },
-      { ...note, body: "x".repeat(10_001) },
-      { ...note, noteId: "has space" },
-      { ...note, noteId: "x".repeat(129) },
-      { ...note, revision: -1 },
-      { ...note, scope: "thread" },
+      { ...document, body: "x".repeat(NOTE_BODY_MAX_LENGTH + 1) },
+      { ...document, revision: -1 },
+      { ...document, scope: "thread" },
     ])
-      expect(() => decodeNote(invalid)).toThrow();
-    expect(() =>
-      Schema.decodeUnknownSync(NotesSnapshot)({
-        projectId: "project",
-        notes: [],
-        limit: 0,
-        truncated: false,
-      }),
-    ).toThrow();
+      expect(() => decodeDocument(invalid)).toThrow();
   });
 
-  it("decodes each command kind", () => {
-    expect(decodeCommand(create).kind).toBe("create");
-    expect(
-      decodeCommand({
-        kind: "update",
-        noteId: "note_1",
-        projectId: "project",
-        expectedRevision: 2,
-        scope: "worktree",
-      }),
-    ).toEqual({
-      kind: "update",
-      noteId: "note_1",
-      projectId: "project",
-      expectedRevision: 2,
-      scope: "worktree",
-    });
-    expect(
-      decodeCommand({ kind: "delete", noteId: "note_1", projectId: "project", expectedRevision: 0 })
-        .kind,
-    ).toBe("delete");
-    expect(() => decodeCommand({ ...create, kind: "restore" })).toThrow();
-    expect(() =>
-      decodeCommand({ kind: "update", noteId: "note_1", projectId: "project" }),
-    ).toThrow();
+  it("decodes a save", () => {
+    expect(decodeCommand(save)).toEqual(save);
+    expect(decodeCommand({ ...save, body: "" }).body).toBe("");
+    expect(() => decodeCommand({ ...save, kind: "create" })).toThrow();
+    expect(() => decodeCommand({ ...save, expectedRevision: undefined })).toThrow();
   });
 
   it("rejects excess properties instead of silently dropping them", () => {
-    expect(() => decodeCommand({ ...create, revision: 4 })).toThrow();
-    expect(() => decodeCommand({ ...create, createdAt: note.createdAt })).toThrow();
-    expect(() =>
-      decodeCommand({
-        kind: "delete",
-        noteId: "note_1",
-        projectId: "project",
-        expectedRevision: 0,
-        body: "smuggled",
-      }),
-    ).toThrow();
+    expect(() => decodeCommand({ ...save, revision: 4 })).toThrow();
+    expect(() => decodeCommand({ ...save, threadId: "thread" })).toThrow();
   });
 
   it("is part of the one wire API", () => {

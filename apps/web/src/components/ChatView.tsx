@@ -1394,7 +1394,6 @@ export default function ChatView(props: ChatViewProps) {
   // turned into a project, which keeps its id.
   const notesEnvironmentId = activeThread?.environmentId ?? null;
   const notesProjectId = isChatContext ? null : (activeThread?.projectId ?? null);
-  const notesThreadId = isServerThread ? (activeThread?.id ?? null) : null;
   const notesWorktreeId = activeThread?.worktreeId ?? null;
   const notesWorktreeOrigin = activeWorktreeSummary?.origin ?? null;
   const worktreeNotesTarget = useMemo<WorktreeNotesTarget | null>(
@@ -1409,30 +1408,17 @@ export default function ChatView(props: ChatViewProps) {
                 : isServerThread
                   ? { worktreeId: null, origin: "main" }
                   : null,
-            threadId: notesThreadId,
             available: worktreeNotesAvailable,
           }
         : null,
     [
       notesEnvironmentId,
       notesProjectId,
-      notesThreadId,
       notesWorktreeId,
       notesWorktreeOrigin,
       isServerThread,
       worktreeNotesAvailable,
     ],
-  );
-  // A note's backlink opens its thread on the notes' environment.
-  const openNoteThread = useCallback(
-    (threadId: ThreadId) => {
-      if (!notesEnvironmentId) return;
-      void navigate({
-        to: "/$environmentId/$threadId",
-        params: buildThreadRouteParams(scopeThreadRef(notesEnvironmentId, threadId)),
-      });
-    },
-    [navigate, notesEnvironmentId],
   );
   const versionMismatchDismissKey =
     versionMismatch && activeThread
@@ -5451,7 +5437,6 @@ export default function ChatView(props: ChatViewProps) {
                 presentation="crown"
                 open={showCrownRail}
                 notesTarget={worktreeNotesTarget}
-                onOpenNoteThread={openNoteThread}
                 chatProject={chatProjectHeaderTarget}
                 threadTitle={activeThread.title}
                 project={activeProject ?? null}

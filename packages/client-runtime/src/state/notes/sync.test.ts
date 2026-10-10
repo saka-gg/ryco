@@ -8,11 +8,18 @@ const ENV = EnvironmentId.make("env-notes");
 const PROJECT = ProjectId.make("project-notes");
 const KEY = projectNotesKey(ENV, PROJECT);
 
-const snapshot = (count: number): NotesSnapshot => ({
+const snapshot = (revision: number): NotesSnapshot => ({
   projectId: PROJECT,
-  notes: [],
-  limit: count,
-  truncated: false,
+  documents: [
+    {
+      projectId: PROJECT,
+      scope: "project",
+      worktreeId: null,
+      body: `Revision ${revision}`,
+      revision,
+      updatedAt: "2026-10-07T00:00:00.000Z",
+    },
+  ],
 });
 
 function deferred<T>() {
@@ -59,14 +66,14 @@ describe("retainProjectNotes", () => {
     expect(useNotesStore.getState().byKey[KEY]).toBeUndefined();
   });
 
-  it("forgets the notes on the last release but remembers this client's own ids", async () => {
+  it("forgets the notes on the last release but remembers this client's own revisions", async () => {
     const sync = retainProjectNotes(makeApi(vi.fn().mockResolvedValue(snapshot(10))), ENV, PROJECT);
     await flushMicrotasks();
-    useNotesStore.getState().markOwn(KEY, "mine");
+    useNotesStore.getState().markOwn(KEY, "project", 3);
     sync.release();
     await flushMicrotasks();
     expect(notesState()).toMatchObject({ snapshot: null, status: "idle" });
-    expect(notesState().ownNoteIds.has("mine")).toBe(true);
+    expect(notesState().ownRevisions.get("project")).toBe(3);
   });
 
   it("hands the sync over when a release and a retain land in the same task", async () => {

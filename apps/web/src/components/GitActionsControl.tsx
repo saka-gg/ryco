@@ -93,9 +93,14 @@ import {
 import { Popover, PopoverPopup, PopoverTrigger } from "~/components/ui/popover";
 import { ScrollArea } from "~/components/ui/scroll-area";
 import { Textarea } from "~/components/ui/textarea";
-import { stackedThreadToast, toastManager, type ThreadToastData } from "~/components/ui/toast";
+import { stackedThreadToast, toastManager } from "~/components/ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
 import { openInPreferredEditor } from "~/editorPreferences";
+import {
+  createGitActionReporter,
+  gitActionNoticeKind,
+  type GitActionReporter,
+} from "~/gitActionNotices";
 import {
   GIT_USER_ACTION_KIND,
   gitMutationTrackingKey,
@@ -166,11 +171,8 @@ type PublishProviderKind = Extract<
   "github" | "gitlab" | "forgejo" | "bitbucket" | "azure-devops"
 >;
 
-type GitActionToastId = ReturnType<typeof toastManager.add>;
-
 interface ActiveGitActionProgress {
-  toastId: GitActionToastId;
-  toastData: ThreadToastData | undefined;
+  reporter: GitActionReporter;
   actionId: string;
   title: string;
   phaseStartedAtMs: number | null;
@@ -197,7 +199,6 @@ interface RunGitActionWithToastInput {
   skipDefaultBranchPrompt?: boolean;
   statusOverride?: VcsStatusResult | null;
   featureBranch?: boolean;
-  progressToastId?: GitActionToastId;
   filePaths?: string[];
 }
 
@@ -1368,13 +1369,7 @@ export default function GitActionsControl({
     if (!progress) {
       return;
     }
-    toastManager.update(progress.toastId, {
-      type: "loading",
-      title: progress.title,
-      description: resolveProgressDescription(progress),
-      timeout: 0,
-      data: progress.toastData,
-    });
+    progress.reporter.running(progress.title, resolveProgressDescription(progress));
   }, []);
 
   const { activeServerThread, persistThreadBranchSync } = useThreadBranchPersistence(
@@ -1549,7 +1544,6 @@ export default function GitActionsControl({
       skipDefaultBranchPrompt = false,
       statusOverride,
       featureBranch = false,
-      progressToastId,
       filePaths,
     }: RunGitActionWithToastInput) => {
       const actionStatus = statusOverride ?? gitStatusForActions;
@@ -1595,22 +1589,20 @@ export default function GitActionsControl({
           action === "create_pr" &&
           (!actionStatus?.hasUpstream || (actionStatus?.aheadCount ?? 0) > 0),
       });
-      const scopedToastData = threadToastData ? { ...threadToastData } : undefined;
       const actionThreadKey = activeThreadRef ? scopedThreadKey(activeThreadRef) : null;
       const actionId = randomUUID();
-      const resolvedProgressToastId =
-        progressToastId ??
-        toastManager.add({
-          type: "loading",
-          title: progressStages[0] ?? "Running git action...",
-          description: "Waiting for Git...",
-          timeout: 0,
-          data: scopedToastData,
-        });
+      // The crown showing this checkout reports the action; otherwise toasts do.
+      const reporter = createGitActionReporter({
+        id: actionId,
+        kind: gitActionNoticeKind(action),
+        environmentId: activeEnvironmentId,
+        cwd: gitCwd,
+        toastData: threadToastData ? { ...threadToastData } : undefined,
+      });
+      reporter.running(progressStages[0] ?? "Running git action...", "Waiting for Git...");
 
       setActiveGitActionProgress({
-        toastId: resolvedProgressToastId,
-        toastData: scopedToastData,
+        reporter,
         actionId,
         title: progressStages[0] ?? "Running git action...",
         phaseStartedAtMs: null,
@@ -1619,16 +1611,6 @@ export default function GitActionsControl({
         lastOutputLine: null,
         currentPhaseLabel: progressStages[0] ?? "Running git action...",
       });
-
-      if (progressToastId) {
-        toastManager.update(progressToastId, {
-          type: "loading",
-          title: progressStages[0] ?? "Running git action...",
-          description: "Waiting for Git...",
-          timeout: 0,
-          data: scopedToastData,
-        });
-      }
 
       const applyProgressEvent = (event: GitActionProgressEvent) => {
         const progress = activeGitActionProgressRef.current;
@@ -1724,76 +1706,31 @@ export default function GitActionsControl({
             pullRequestNumber: result.pr.number ?? null,
           });
         }
-        const closeResultToast = () => {
-          toastManager.close(resolvedProgressToastId);
-        };
-
         const toastCta = result.toast.cta;
-        let toastActionProps: {
-          children: string;
-          onClick: () => void;
-        } | null = null;
-        if (toastCta.kind === "run_action") {
-          toastActionProps = {
-            children: toastCta.label,
-            onClick: () => {
-              closeResultToast();
-              void runGitActionWithToast({
-                action: toastCta.action.kind,
-              });
-            },
-          };
-        } else if (toastCta.kind === "open_pr") {
-          toastActionProps = {
-            children: toastCta.label,
-            onClick: () => {
-              const api = readLocalApi();
-              if (!api) return;
-              closeResultToast();
-              void api.shell.openExternal(toastCta.url);
-            },
-          };
-        }
-
-        const successToastData = {
-          ...scopedToastData,
-          dismissAfterVisibleMs: 10_000,
-        };
-
-        if (toastActionProps) {
-          toastManager.update(
-            resolvedProgressToastId,
-            stackedThreadToast({
-              type: "success",
-              title: result.toast.title,
-              description: result.toast.description,
-              timeout: 0,
-              actionProps: toastActionProps,
-              actionVariant: "outline",
-              data: successToastData,
-            }),
-          );
-        } else {
-          toastManager.update(resolvedProgressToastId, {
-            type: "success",
-            title: result.toast.title,
-            description: result.toast.description,
-            timeout: 0,
-            data: successToastData,
-          });
-        }
+        const followUp =
+          toastCta.kind === "run_action"
+            ? {
+                label: toastCta.label,
+                onClick: () => void runGitActionWithToast({ action: toastCta.action.kind }),
+              }
+            : toastCta.kind === "open_pr"
+              ? {
+                  label: toastCta.label,
+                  onClick: () => void readLocalApi()?.shell.openExternal(toastCta.url),
+                }
+              : undefined;
+        reporter.succeeded({
+          title: result.toast.title,
+          description: result.toast.description,
+          action: followUp,
+        });
       } catch (err) {
         elapsedTicker.stop();
         clearActiveGitActionProgress();
-        toastManager.update(
-          resolvedProgressToastId,
-          stackedThreadToast({
-            type: "error",
-            title: "Action failed",
-            description: err instanceof Error ? err.message : "An error occurred.",
-            ...(scopedToastData !== undefined ? { data: scopedToastData } : {}),
-          }),
-        );
+        reporter.failed({
+          title: "Action failed",
+          description: err instanceof Error ? err.message : "An error occurred.",
+        });
       }
     },
   );
@@ -1844,27 +1781,29 @@ export default function GitActionsControl({
   };
 
   const runPull = () => {
-    const promise = pullMutation.mutateAsync();
-    void toastManager.promise<
-      Awaited<ReturnType<typeof pullMutation.mutateAsync>>,
-      ThreadToastData
-    >(promise, {
-      loading: { title: "Pulling...", data: threadToastData },
-      success: (result) => ({
-        title: result.status === "pulled" ? "Pulled" : "Already up to date",
-        description:
-          result.status === "pulled"
-            ? `Updated ${result.refName} from ${result.upstreamRef ?? "upstream"}`
-            : `${result.refName} is already synchronized.`,
-        data: threadToastData,
-      }),
-      error: (err) => ({
-        title: "Pull failed",
-        description: err instanceof Error ? err.message : "An error occurred.",
-        data: threadToastData,
-      }),
+    const reporter = createGitActionReporter({
+      id: randomUUID(),
+      kind: "pull",
+      environmentId: activeEnvironmentId,
+      cwd: gitCwd,
+      toastData: threadToastData,
     });
-    void promise.catch(() => undefined);
+    reporter.running("Pulling...");
+    pullMutation.mutateAsync().then(
+      (result) =>
+        reporter.succeeded({
+          title: result.status === "pulled" ? "Pulled" : "Already up to date",
+          description:
+            result.status === "pulled"
+              ? `Updated ${result.refName} from ${result.upstreamRef ?? "upstream"}`
+              : `${result.refName} is already synchronized.`,
+        }),
+      (err: unknown) =>
+        reporter.failed({
+          title: "Pull failed",
+          description: err instanceof Error ? err.message : "An error occurred.",
+        }),
+    );
   };
 
   const runQuickAction = () => {

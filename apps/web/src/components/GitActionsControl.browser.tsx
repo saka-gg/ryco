@@ -41,7 +41,6 @@ const {
   setThreadBranchSpy,
   toastAddSpy,
   toastCloseSpy,
-  toastPromiseSpy,
   toastUpdateSpy,
 } = vi.hoisted(() => ({
   activeRunStackedActionDeferredRef: { current: createDeferredPromise<never>() },
@@ -61,7 +60,6 @@ const {
   setThreadBranchSpy: vi.fn(),
   toastAddSpy: vi.fn(() => "toast-1"),
   toastCloseSpy: vi.fn(),
-  toastPromiseSpy: vi.fn(),
   toastUpdateSpy: vi.fn(),
 }));
 
@@ -74,7 +72,6 @@ vi.mock("~/components/ui/toast", () => ({
   toastManager: {
     add: toastAddSpy,
     close: toastCloseSpy,
-    promise: toastPromiseSpy,
     update: toastUpdateSpy,
   },
   stackedThreadToast: vi.fn((options: unknown) => options),
@@ -292,6 +289,7 @@ function setEnvironmentConfig(environmentId: EnvironmentId, prefix: string | nul
 }
 
 import GitActionsControl, { GitThreadSync } from "./GitActionsControl";
+import { presentGitActionNotices, type GitActionNotice } from "~/gitActionNotices";
 
 function findButtonByText(text: string): HTMLButtonElement | null {
   return (Array.from(document.querySelectorAll("button")).find((button) =>
@@ -799,10 +797,12 @@ describe('GitActionsControl appearance="actions"', () => {
     expect(tile("pull").dataset.recommended).toBe("true");
     await page.getByRole("button", { name: "Pull 1 commit" }).click();
     expect(pullMutateAsyncSpy).toHaveBeenCalledTimes(1);
-    expect(toastPromiseSpy).toHaveBeenCalledWith(
-      expect.any(Promise),
-      expect.objectContaining({ loading: expect.objectContaining({ title: "Pulling..." }) }),
+    expect(toastAddSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "loading", title: "Pulling..." }),
     );
+    await expect
+      .poll(() => toastUpdateSpy.mock.calls.at(-1))
+      .toEqual(["toast-1", expect.objectContaining({ type: "success", title: "Pulled" })]);
     await remove();
 
     const upToDate = await mountActions({ aheadCount: 0 });
@@ -814,6 +814,21 @@ describe('GitActionsControl appearance="actions"', () => {
     expect(noUpstream.reason("pull")).toBe("No upstream");
     await page.getByRole("button", { name: "Pull 1 commit" }).click({ force: true });
     expect(pullMutateAsyncSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports a pull to the crown presenting the checkout instead of toasting", async () => {
+    const notices: GitActionNotice[] = [];
+    const release = presentGitActionNotices(ENVIRONMENT_A, GIT_CWD, (notice) =>
+      notices.push(notice),
+    );
+    const { remove } = await mountActions({ aheadCount: 0, behindCount: 1 });
+    toastAddSpy.mockClear();
+    await page.getByRole("button", { name: "Pull 1 commit" }).click();
+    await expect.poll(() => notices.map((notice) => notice.status)).toEqual(["running", "success"]);
+    expect(notices[1]).toMatchObject({ kind: "pull", title: "Pulled" });
+    expect(toastAddSpy).not.toHaveBeenCalled();
+    release();
+    await remove();
   });
 
   it("views an open change request instead of creating one", async () => {

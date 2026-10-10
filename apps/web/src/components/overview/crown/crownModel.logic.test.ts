@@ -161,7 +161,7 @@ describe("buildCrownRailSummary", () => {
         ]),
         subagents: [makeSubagent("x", "running"), makeSubagent("y", "finished")],
       }),
-      { isGitRepo: true, notesCount: 2 },
+      { isGitRepo: true, notesFilled: true },
     );
     assert.equal(summary.branch.badge, "↑3");
     assert.equal(summary.changes.count, 2);
@@ -178,7 +178,7 @@ describe("buildCrownRailSummary", () => {
     });
     assert.deepEqual(summary.agents, { count: 2, live: 1 });
     assert.deepEqual(summary.pr, { state: "draft", conflict: true });
-    assert.deepEqual(summary.notes, { count: 2 });
+    assert.deepEqual(summary.notes, { filled: true });
     assert.deepEqual(summary.ship, { count: 3, ready: true });
   });
 
@@ -290,7 +290,7 @@ describe("crownRailItemDescription", () => {
         ]),
         subagents: [makeSubagent("x", "running"), makeSubagent("y", "finished")],
       }),
-      { isGitRepo: true, notesCount: 1 },
+      { isGitRepo: true, notesFilled: true },
     );
     assert.deepEqual(describeAll(summary), {
       branch: "3 commits ahead",
@@ -299,7 +299,7 @@ describe("crownRailItemDescription", () => {
       plan: "1 of 2 steps done",
       agents: "2 subagents, 1 active",
       pr: "open, has conflicts",
-      notes: "1 note",
+      notes: "Has notes",
       project: null,
       ship: "3 commits to push",
     });

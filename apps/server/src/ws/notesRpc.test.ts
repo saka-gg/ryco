@@ -7,12 +7,14 @@ import { relayRpcPrincipal, type RpcPrincipalRole } from "./RpcPrincipal.ts";
 import type { WsRpcContext } from "./context.ts";
 import { makeNotesHandlers } from "./notesRpc.ts";
 
-const snapshot = { projectId: "project", notes: [], limit: 500, truncated: false };
+const snapshot = { projectId: "project", documents: [] };
 const listInput = { projectId: "project" };
 const commandInput = {
-  kind: "delete",
-  noteId: "note",
+  kind: "save",
   projectId: "project",
+  scope: "project",
+  worktreeId: null,
+  body: "Notes",
   expectedRevision: 0,
 };
 

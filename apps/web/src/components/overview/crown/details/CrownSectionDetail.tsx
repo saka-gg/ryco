@@ -70,13 +70,13 @@ export function CrownSectionDetail(props: CrownSectionDetailProps) {
 /**
  * The Notes section: the shared NotesPane bound to the thread's notes. The
  * card titles the section itself, so its pane is compact; the flyout keeps the
- * pane's own header, as in the prototype. Both share the binding's scope view.
+ * pane's own header, as in the prototype. Both share the binding's scope view
+ * and its unsaved text.
  */
 export function CrownNotesDetail(props: {
   readonly notes: CrownNotesBinding;
   readonly variant: "flyout" | "card";
-  readonly highlightId?: string | null;
-  readonly autoFocusComposer?: boolean;
+  readonly autoFocus?: boolean;
 }) {
   const { notes, variant } = props;
   return (
@@ -89,22 +89,16 @@ export function CrownNotesDetail(props: {
       <NotesPane
         view={notes.view}
         onViewChange={notes.setView}
-        notes={notes.notesFor(notes.view)}
+        body={notes.bodyFor(notes.view)}
+        onChange={notes.edit}
+        onFlush={notes.flush}
+        saveState={notes.saveStateFor(notes.view)}
         breadcrumb={notes.breadcrumb}
-        threadTitle={notes.threadTitle}
-        composerDisabledReason={notes.composerDisabledReason}
-        actionsDisabledReason={notes.disabledReason}
+        disabledReason={notes.editDisabledReasonFor(notes.view)}
         error={notes.error}
-        onSave={notes.save}
-        onToggleTodo={notes.toggleTodo}
-        onTogglePin={notes.togglePin}
-        onDelete={notes.remove}
-        onOpenThread={notes.openThread ?? undefined}
         worktreeViewDisabledReason={notes.worktreeViewDisabledReason}
-        truncatedLimit={notes.truncatedLimit}
-        highlightId={props.highlightId ?? null}
         compact={variant === "card"}
-        autoFocusComposer={props.autoFocusComposer === true}
+        autoFocus={props.autoFocus === true}
       />
     </div>
   );

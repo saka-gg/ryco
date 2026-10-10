@@ -256,8 +256,15 @@ html:not(.dark) .crown-mat {
   display: flex;
   flex: 1;
   min-width: 0;
+  max-width: 280px;
   flex-direction: column;
   line-height: 1.3;
+}
+
+/* Git progress and results carry free text (hook output, branch names). */
+.crown-alert-text > :is(b, small) {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .crown-alert-text > b {
