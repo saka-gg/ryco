@@ -191,10 +191,6 @@
       "types": "./src/composerInlineTokens.ts",
       "import": "./src/composerInlineTokens.ts"
     },
-    "./projectFavicon": {
-      "types": "./src/projectFavicon.ts",
-      "import": "./src/projectFavicon.ts"
-    },
     "./Struct": {
       "types": "./src/Struct.ts",
       "import": "./src/Struct.ts"
