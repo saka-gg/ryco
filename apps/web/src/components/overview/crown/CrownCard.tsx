@@ -30,8 +30,6 @@ export function CrownCard({
   readonly branchName: string | null;
   /** Renders the Notes section; without it the section is never selected. */
   readonly notes?: CrownNotesBinding | undefined;
-  /** The note a "Note saved" alert opened the card on. */
-  readonly highlightNoteId?: string | null;
   /** Renders a chat's "Turn into project" section; without it the section is never selected. */
   readonly chat?: CrownChatBinding | undefined;
   readonly onCollapse: () => void;
@@ -111,9 +109,8 @@ export function CrownCard({
                   <CrownNotesDetail
                     notes={props.notes}
                     variant="card"
-                    highlightId={props.highlightNoteId ?? null}
-                    // The prototype focuses the composer whenever the section opens.
-                    autoFocusComposer={visible}
+                    // The prototype focuses the editor whenever the section opens.
+                    autoFocus={visible}
                   />
                 ) : null
               ) : section === "project" ? (

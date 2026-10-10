@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { renderHook } from "vitest-browser-react";
 
+import type { GitActionNotice } from "../../../gitActionNotices";
 import type { CrownSnapshot } from "./crownAlerts.logic";
 import {
   CROWN_ALERT_DWELL_MS,
@@ -15,7 +16,17 @@ interface Props {
   cardOpen: boolean;
   userGitActionActive: boolean;
   paused: boolean;
+  gitNotice?: GitActionNotice | null;
 }
+
+const pushing = (overrides: Partial<GitActionNotice> = {}): GitActionNotice => ({
+  id: "push-1",
+  kind: "push",
+  status: "running",
+  title: "Pushing...",
+  description: "3s",
+  ...overrides,
+});
 
 const failing = (names: string[], headSha = "sha-1"): CrownSnapshot["checks"] => ({
   headSha,
@@ -266,5 +277,65 @@ describe("useCrownAlerts", () => {
     await hook.act(() => vi.advanceTimersByTime(CROWN_ALERT_DWELL_MS));
     expect(hook.result.current.current).toBeNull();
     hidden.mockRestore();
+  });
+
+  it("shows a running git action live, holding the queue, then its result at once", async () => {
+    const { hook, update } = await setup();
+    await update({ snapshot: makeSnapshot({ checks: failing(["lint"]) }) });
+    await update({ gitNotice: pushing() });
+    expect(hook.result.current.current).toMatchObject({
+      title: "Pushing...",
+      sub: "3s",
+      live: true,
+      icon: "upload",
+      railKey: "ship",
+    });
+    expect(hook.result.current.queuedCount).toBe(1);
+
+    // Progress updates keep the same alert, and it never dwells away.
+    await update({ gitNotice: pushing({ description: "9s" }) });
+    const liveId = hook.result.current.current?.id;
+    await hook.act(() => vi.advanceTimersByTime(CROWN_ALERT_DWELL_MS * 3));
+    expect(hook.result.current.current).toMatchObject({ id: liveId, sub: "9s" });
+
+    const open = vi.fn();
+    await update({
+      gitNotice: pushing({
+        status: "success",
+        title: "Pushed abc123",
+        description: "to origin/feature",
+        action: { label: "Create PR", onClick: open },
+      }),
+    });
+    expect(hook.result.current.current).toMatchObject({
+      title: "Pushed abc123",
+      tone: "success",
+      action: { label: "Create PR" },
+    });
+    expect(hook.result.current.current?.live).toBeUndefined();
+    expect(hook.result.current.pings.ship).toEqual({ n: 1, tone: "success" });
+    // The check alert it pre-empted shows next.
+    await hook.act(() => vi.advanceTimersByTime(CROWN_ALERT_DWELL_QUEUED_MS));
+    expect(hook.result.current.current?.title).toBe("1 check failing");
+  });
+
+  it("keeps a git result that lands while the card is open until it closes", async () => {
+    const { hook, update } = await setup();
+    await update({ gitNotice: pushing(), cardOpen: true });
+    await update({
+      gitNotice: pushing({ status: "error", title: "Action failed", description: "rejected" }),
+    });
+    expect(hook.result.current.current).toBeNull();
+    await update({ cardOpen: false });
+    expect(hook.result.current.current).toMatchObject({ title: "Action failed", tone: "danger" });
+  });
+
+  it("lets a running git alert be dismissed while its result still shows", async () => {
+    const { hook, update } = await setup();
+    await update({ gitNotice: pushing() });
+    await hook.act(() => hook.result.current.clear());
+    expect(hook.result.current.current).toBeNull();
+    await update({ gitNotice: pushing({ status: "success", title: "Pushed" }) });
+    expect(hook.result.current.current?.title).toBe("Pushed");
   });
 });

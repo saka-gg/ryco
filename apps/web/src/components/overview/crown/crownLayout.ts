@@ -35,7 +35,7 @@ export const CROWN_ALERT_DWELL_MS = 2900;
 export const CROWN_ALERT_DWELL_QUEUED_MS = 1800;
 /** Pending alerts kept; older ones are dropped. */
 export const CROWN_ALERT_QUEUE_MAX = 3;
-/** After a user-started git action ends, branch/PR alerts stay quiet this long (the action already toasted). */
+/** After a user-started git action ends, branch/PR alerts stay quiet this long (the action already reported). */
 export const CROWN_GIT_ACTION_SUPPRESS_MS = 4000;
 
 /** Gap (in `pathLength=100` units) between check-ring segments on a rail icon (r=12.5). */

@@ -63,7 +63,8 @@ export interface CrownRailSummary {
    */
   readonly agents: { readonly count: number; readonly live: number };
   readonly pr: { readonly state: CrownPrState | null; readonly conflict: boolean };
-  readonly notes: { readonly count: number };
+  /** The thread's worktree or project notes have text. */
+  readonly notes: { readonly filled: boolean };
   /** Commits a push would publish; `ready` lights the Push icon. */
   readonly ship: { readonly count: number; readonly ready: boolean };
 }
@@ -234,7 +235,7 @@ function collapseRingStates(
 
 export function buildCrownRailSummary(
   layout: OverviewLayoutProps,
-  input: { readonly isGitRepo: boolean; readonly notesCount?: number },
+  input: { readonly isGitRepo: boolean; readonly notesFilled?: boolean },
 ): CrownRailSummary {
   const summary = getOverviewSummary(layout);
   const checks = input.isGitRepo ? countCrownChecks(layout.pullRequest) : NO_CHECKS;
@@ -269,7 +270,7 @@ export function buildCrownRailSummary(
       state: prState,
       conflict: prState !== null && layout.pullRequest?.hasMergeConflicts === true,
     },
-    notes: { count: input.notesCount ?? 0 },
+    notes: { filled: input.notesFilled === true },
     ship: { count: shipCount, ready: shipCount > 0 },
   };
 }
@@ -317,7 +318,7 @@ export function crownRailItemDescription(
       return conflict ? `${state}, has conflicts` : state;
     }
     case "notes":
-      return summary.notes.count > 0 ? formatCount(summary.notes.count, "note") : null;
+      return summary.notes.filled ? "Has notes" : null;
     case "ship":
       return summary.ship.count > 0
         ? `${formatCount(summary.ship.count, "commit")} to push`

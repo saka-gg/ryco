@@ -5,9 +5,9 @@ import {
   TurnId,
   type NotesApi,
   type NotesCommand,
+  type NotesDocument,
   type NotesSnapshot,
   type ProjectId,
-  type WorktreeNote,
 } from "@ryco/contracts";
 
 import { makeRuntimeAgent } from "../../agents/agentRosterTestFixtures";
@@ -20,7 +20,7 @@ import {
   type RuntimeSubagentStatus,
   type ThreadSubagentView,
 } from "../../../threadWorkspaceViewModel";
-import type { NoteView } from "../notes/noteView";
+import type { NotesPaneView } from "../notes/noteView";
 import type { CrownSnapshot } from "./crownAlerts.logic";
 import type { CrownNotesBinding } from "./crownTypes";
 import type {
@@ -279,48 +279,32 @@ export function makeSnapshot(overrides: Partial<CrownSnapshot> = {}): CrownSnaps
   };
 }
 
-export function makeNoteView(id: string, overrides: Partial<NoteView> = {}): NoteView {
-  return {
-    id,
-    body: `Note ${id}`,
-    scope: "worktree",
-    worktreeLabel: null,
-    thread: { id: "thread-1", title: "Overview rail" },
-    createdAt: "2026-10-07T10:00:00.000Z",
-    ...overrides,
-  };
-}
-
-/** A loaded, writable notes binding with no-op actions; pass `worktreeNotes` to fill it. */
-export function makeNotesBinding(overrides: Partial<CrownNotesBinding> = {}): CrownNotesBinding {
-  const worktreeNotes = overrides.worktreeNotes ?? [];
-  const projectNotes = overrides.projectNotes ?? worktreeNotes;
+/** A loaded, writable notes binding with no-op actions; pass `bodies` to fill its documents. */
+export function makeNotesBinding(
+  overrides: Partial<CrownNotesBinding> & {
+    readonly bodies?: Partial<Record<NotesPaneView, string>>;
+  } = {},
+): CrownNotesBinding {
+  const { bodies = {}, ...rest } = overrides;
+  const bodyFor = (view: NotesPaneView) => bodies[view] ?? "";
   return {
     available: true,
     status: "ready",
     loaded: true,
     error: null,
-    worktreeNotes,
-    projectNotes,
-    alertNotes: overrides.alertNotes ?? worktreeNotes,
-    truncatedLimit: null,
-    counts: { worktree: worktreeNotes.length, project: projectNotes.length },
     view: "worktree",
     setView: () => {},
     worktreeViewDisabledReason: null,
-    notesFor: (view) => (view === "project" ? projectNotes : worktreeNotes),
     breadcrumb: { project: "ryco", worktree: "notes-panel" },
-    threadTitle: "Overview rail",
-    disabledReason: null,
-    composerDisabledReason: null,
-    ownNoteIds: new Set(),
-    save: async () => "saved",
-    toggleTodo: () => {},
-    togglePin: () => {},
-    remove: () => {},
+    bodyFor,
+    saveStateFor: () => "saved",
+    editDisabledReasonFor: () => null,
+    filled: bodyFor("worktree").trim() !== "" || bodyFor("project").trim() !== "",
+    alertDocuments: [],
+    edit: () => {},
+    flush: () => {},
     refresh: () => {},
-    openThread: null,
-    ...overrides,
+    ...rest,
   };
 }
 
@@ -442,68 +426,59 @@ export function crownLayoutFixture(
 }
 
 /**
- * An in-memory notes node for hook and component tests: it applies commands
- * like the server (idempotent creates, revision checks, newest first) and
- * records every call. `dropReplies` lands that many commands but loses their
+ * An in-memory notes node for hook and component tests: it applies saves like
+ * the server (revision checks, a save that changes nothing keeps its revision)
+ * and records every call. `dropReplies` lands that many saves but loses their
  * replies, like a dropped connection.
  */
 export function createFakeNotesNode(projectId: ProjectId) {
   const node = {
-    notes: [] as WorktreeNote[],
+    documents: [] as NotesDocument[],
     reads: 0,
     commands: [] as NotesCommand[],
     dropReplies: 0,
     clock: 0,
-    /** Deleted ids: like the node's tombstones, a create reusing one conflicts. */
-    deleted: new Set<string>(),
   };
-  const snapshot = (): NotesSnapshot => ({
-    projectId,
-    notes: node.notes.map((note) => ({ ...note })),
-    limit: 500,
-    truncated: false,
+  /** Each project lists only its own documents. */
+  const snapshot = (forProject: ProjectId = projectId): NotesSnapshot => ({
+    projectId: forProject,
+    documents: structuredClone(
+      node.documents.filter((document) => document.projectId === forProject),
+    ),
   });
+  const find = (
+    scope: NotesDocument["scope"],
+    worktreeId: NotesDocument["worktreeId"],
+    forProject: ProjectId = projectId,
+  ) =>
+    node.documents.findIndex(
+      (document) =>
+        document.projectId === forProject &&
+        document.scope === scope &&
+        document.worktreeId === worktreeId,
+    );
   const apply = (command: NotesCommand) => {
     const at = new Date(Date.UTC(2026, 9, 7, 10, 0, ++node.clock)).toISOString();
-    const index = node.notes.findIndex((note) => note.noteId === command.noteId);
-    if (command.kind === "create") {
-      if (node.deleted.has(command.noteId))
-        throw new NotesError({ reason: "conflict", message: "Note identifier is already in use." });
-      if (index >= 0) return;
-      node.notes.unshift({
-        noteId: command.noteId,
-        revision: 0,
-        projectId: command.projectId,
-        worktreeId: command.worktreeId,
-        scope: command.scope,
-        body: command.body.trim(),
-        threadId: command.threadId,
-        createdAt: at,
-        updatedAt: at,
-      });
-      return;
-    }
-    const current = node.notes[index];
-    if (!current) throw new NotesError({ reason: "not-found", message: "Note not found." });
-    if (current.revision !== command.expectedRevision)
-      throw new NotesError({ reason: "conflict", message: "The note changed." });
-    if (command.kind === "delete") {
-      node.notes.splice(index, 1);
-      node.deleted.add(command.noteId);
-      return;
-    }
-    node.notes[index] = {
-      ...current,
-      revision: current.revision + 1,
+    const index = find(command.scope, command.worktreeId, command.projectId);
+    const current = node.documents[index];
+    if ((current?.revision ?? 0) !== command.expectedRevision)
+      throw new NotesError({ reason: "conflict", message: "Notes changed elsewhere." });
+    if ((current?.body ?? "") === command.body) return;
+    const next: NotesDocument = {
+      projectId: command.projectId,
+      scope: command.scope,
+      worktreeId: command.worktreeId,
+      body: command.body,
+      revision: (current?.revision ?? 0) + 1,
       updatedAt: at,
-      ...(command.body !== undefined ? { body: command.body } : {}),
-      ...(command.scope !== undefined ? { scope: command.scope } : {}),
     };
+    if (current) node.documents[index] = next;
+    else node.documents.push(next);
   };
   const api: NotesApi = {
-    list: async () => {
+    list: async (input) => {
       node.reads += 1;
-      return snapshot();
+      return snapshot(input.projectId);
     },
     command: async (command) => {
       node.commands.push(command);
@@ -512,34 +487,34 @@ export function createFakeNotesNode(projectId: ProjectId) {
         node.dropReplies -= 1;
         throw new Error("socket closed");
       }
-      return snapshot();
+      return snapshot(command.projectId);
     },
   };
-  /** Seeds a note; each seed is newer than the ones before it. */
-  const seed = (noteId: string, overrides: Partial<WorktreeNote> = {}): WorktreeNote => {
-    const at = new Date(Date.UTC(2026, 9, 7, 9, node.notes.length)).toISOString();
-    const note: WorktreeNote = {
-      noteId,
-      revision: 0,
+  /** Writes a document as if saved elsewhere: a new revision of `body`. */
+  const seed = (
+    scope: NotesDocument["scope"],
+    body: string,
+    worktreeId: NotesDocument["worktreeId"] = null,
+  ): NotesDocument => {
+    const index = find(scope, worktreeId);
+    const document: NotesDocument = {
       projectId,
-      worktreeId: null,
-      scope: "worktree",
-      body: noteId,
-      threadId: null,
-      createdAt: at,
-      updatedAt: at,
-      ...overrides,
+      scope,
+      worktreeId,
+      body,
+      revision: (node.documents[index]?.revision ?? 0) + 1,
+      updatedAt: new Date(Date.UTC(2026, 9, 7, 9, node.clock++)).toISOString(),
     };
-    node.notes.unshift(note);
-    return note;
+    if (index >= 0) node.documents[index] = document;
+    else node.documents.push(document);
+    return document;
   };
   const reset = () => {
-    node.notes = [];
+    node.documents = [];
     node.reads = 0;
     node.commands = [];
     node.dropReplies = 0;
     node.clock = 0;
-    node.deleted = new Set();
   };
   return { node, api, seed, reset };
 }

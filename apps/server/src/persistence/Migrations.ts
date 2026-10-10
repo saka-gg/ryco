@@ -5,6 +5,7 @@ import Migration0078, {
 import Migration0080, {
   ensureProjectKindAndRelocations,
 } from "./Migrations/080_ProjectKindAndRelocations.ts";
+import Migration0081, { ensureNotesDocumentsTable } from "./Migrations/081_NotesDocuments.ts";
 import Migration0071 from "./Migrations/071_StatisticsUsageHistory.ts";
 import Migration0072, {
   ensureProjectionThreadLineageColumns,
@@ -199,6 +200,7 @@ export const migrationEntries = [
   [78, "ManagedWorktreeNaming", Migration0078],
   [79, "WorktreeNotes", Migration0079],
   [80, "ProjectKindAndRelocations", Migration0080],
+  [81, "NotesDocuments", Migration0081],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>
@@ -609,6 +611,9 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
   }
   if (toMigrationInclusive === undefined || toMigrationInclusive >= 80) {
     yield* repairProjectKindAndRelocations();
+  }
+  if (toMigrationInclusive === undefined || toMigrationInclusive >= 81) {
+    yield* ensureNotesDocumentsTable;
   }
   yield* Effect.log("Migrations ran successfully").pipe(
     Effect.annotateLogs({

@@ -3,6 +3,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState, type MouseEv
 import { usePaneFocus } from "../../chat/PaneFocus";
 import { useEvent } from "../../../hooks/useEvent";
 import { useReducedMotionEffective } from "../../../hooks/useAppearancePreference";
+import type { NotesPaneView } from "../notes/noteView";
 import { CrownAlert } from "./CrownAlert";
 import { buildCrownSnapshot } from "./crownAlerts.logic";
 import { CrownCard } from "./CrownCard";
@@ -72,12 +73,10 @@ export function CrownOverview(props: CrownOverviewProps & { readonly open?: bool
   const [cardOpen, setCardOpen] = useState(false);
   const [cardContentMounted, setCardContentMounted] = useState(false);
   const [selected, setSelected] = useState<CrownSection | null>(null);
-  /** The note a "Note saved" alert opened the card on; it flashes in the pane. */
-  const [highlightNoteId, setHighlightNoteId] = useState<string | null>(null);
 
   const summary = buildCrownRailSummary(props, {
     isGitRepo,
-    notesCount: notes?.counts.worktree ?? 0,
+    notesFilled: notes?.filled === true,
   });
   const headline = resolveCrownHeadline(summary, props);
   const items = visibleCrownRailItems({
@@ -104,6 +103,7 @@ export function CrownOverview(props: CrownOverviewProps & { readonly open?: bool
     cardOpen,
     userGitActionActive: props.userGitActionActive,
     paused: alertFocused,
+    gitNotice: props.gitNotice,
   });
   // The alert layer keeps its last alert through the fold-back (adjusted during render).
   const [shownAlert, setShownAlert] = useState(alerts.current);
@@ -186,17 +186,19 @@ export function CrownOverview(props: CrownOverviewProps & { readonly open?: bool
     requested: CrownSection,
     trigger: HTMLElement | null,
     viaKeyboard: boolean,
-    noteId: string | null = null,
+    notesView: NotesPaneView | null = null,
   ) => {
     // An alert about a section the rail hides opens the headline's section:
     // "Turn finished" points at Changes, which a chat or a folder without Git has none of.
     const section = isShown(requested) ? requested : headlineSection;
     flyout.close();
     triggerRef.current = trigger;
-    // The Notes pane focuses its own composer when the card opens on it.
+    // The Notes pane focuses its own editor when the card opens on it.
     focusCardOnOpenRef.current =
-      viaKeyboard && !(section === "notes" && notes?.composerDisabledReason === null);
-    setHighlightNoteId(section === "notes" ? noteId : null);
+      viaKeyboard &&
+      !(section === "notes" && notes?.editDisabledReasonFor(notesView ?? notes.view) === null);
+    // An "edited elsewhere" alert opens the document it is about.
+    if (section === "notes" && notesView !== null) notes?.setView(notesView);
     setSelected(section);
     setCardContentMounted(true);
     setCardOpen(true);
@@ -210,7 +212,6 @@ export function CrownOverview(props: CrownOverviewProps & { readonly open?: bool
     restoreFocusRef.current =
       restoreFocus &&
       (rootRef.current?.contains(document.activeElement) === true || isFocusDropped());
-    setHighlightNoteId(null);
     setCardOpen(false);
   });
 
@@ -286,16 +287,29 @@ export function CrownOverview(props: CrownOverviewProps & { readonly open?: bool
         shownAlert.section,
         event.currentTarget,
         event.detail === 0,
-        shownAlert.noteId ?? null,
+        shownAlert.notesView ?? null,
       );
       return;
     }
     openCard(headlineSection, event.currentTarget, event.detail === 0);
   };
 
+  // A git action starting folds an open card, so its live progress shows in the island.
+  const liveGitNoticeId = props.gitNotice?.status === "running" ? props.gitNotice.id : null;
+  useEffect(() => {
+    if (liveGitNoticeId !== null) collapse(true);
+  }, [liveGitNoticeId, collapse]);
+
+  const onAlertAction = () => {
+    const action = shownAlert?.action;
+    if (!action) return;
+    alerts.clear();
+    action.onClick();
+  };
+
   const onAlertOpen = (event: MouseEvent<HTMLElement>) => {
     if (!shownAlert) return;
-    openCard(shownAlert.section, faceRef.current, event.detail === 0, shownAlert.noteId ?? null);
+    openCard(shownAlert.section, faceRef.current, event.detail === 0, shownAlert.notesView ?? null);
   };
 
   const onRailClick = (key: CrownRailKey, button: HTMLElement, event: MouseEvent) => {
@@ -305,7 +319,6 @@ export function CrownOverview(props: CrownOverviewProps & { readonly open?: bool
   const onSpineClick = (key: CrownRailKey) => {
     const section = crownSectionForRailKey(key);
     if (!isShown(section)) return;
-    setHighlightNoteId(null);
     setSelected(section);
   };
 
@@ -340,6 +353,7 @@ export function CrownOverview(props: CrownOverviewProps & { readonly open?: bool
           visible={mode === "alert"}
           reducedMotion={reducedMotion}
           onOpen={onAlertOpen}
+          onAction={onAlertAction}
           onFocusWithinChange={setAlertFocused}
         />
         <CrownCard
@@ -354,7 +368,6 @@ export function CrownOverview(props: CrownOverviewProps & { readonly open?: bool
           branchName={refName}
           notes={notes}
           chat={chat}
-          highlightNoteId={highlightNoteId}
           onCollapse={() => collapse(true)}
           spine={
             <CrownRailNav

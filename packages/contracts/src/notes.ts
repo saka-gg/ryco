@@ -1,78 +1,56 @@
 import { Schema } from "effect";
-import { IsoDateTime, NonNegativeInt, PositiveInt, ProjectId, ThreadId } from "./baseSchemas.ts";
+import { IsoDateTime, NonNegativeInt, ProjectId } from "./baseSchemas.ts";
 import { WorktreeId } from "./worktree.ts";
 
-/** Client-generated, so a retried create is idempotent. */
-export const WorktreeNoteId = Schema.String.check(Schema.isPattern(/^[a-zA-Z0-9_-]{1,128}$/));
-export type WorktreeNoteId = typeof WorktreeNoteId.Type;
-/** `worktree` belongs to one checkout; `project` is pinned across the whole project. */
+/** `worktree` belongs to one checkout; `project` is shared by the whole project. */
 export const NoteScope = Schema.Literals(["worktree", "project"]);
 export type NoteScope = typeof NoteScope.Type;
-/** The longest note body, in UTF-16 code units (what a textarea's `maxLength` counts). */
-export const NOTE_BODY_MAX_LENGTH = 10_000;
-/** The node trims bodies and rejects blank ones. */
-export const NoteBody = Schema.String.check(
-  Schema.isMinLength(1),
-  Schema.isMaxLength(NOTE_BODY_MAX_LENGTH),
-);
+/** The longest notes document, in UTF-16 code units (what a textarea's `maxLength` counts). */
+export const NOTE_BODY_MAX_LENGTH = 100_000;
+/** Free text; empty is a cleared document. */
+export const NoteBody = Schema.String.check(Schema.isMaxLength(NOTE_BODY_MAX_LENGTH));
 export type NoteBody = typeof NoteBody.Type;
 
-export const WorktreeNote = Schema.Struct({
-  noteId: WorktreeNoteId,
-  revision: NonNegativeInt,
+/**
+ * One free-text notes document: a checkout's (`scope: "worktree"`, keyed by
+ * its worktree, `null` for the main checkout) or the project's own
+ * (`scope: "project"`, always `worktreeId: null`).
+ */
+export const NotesDocument = Schema.Struct({
   projectId: ProjectId,
-  /** `null` is the project's main checkout. */
-  worktreeId: Schema.NullOr(WorktreeId),
   scope: NoteScope,
+  worktreeId: Schema.NullOr(WorktreeId),
   body: NoteBody,
-  /** Soft backlink to the thread the note was written from. */
-  threadId: Schema.NullOr(ThreadId),
-  createdAt: IsoDateTime,
+  /** Bumped by every save; a document never saved is revision 0 and is not listed. */
+  revision: NonNegativeInt,
   updatedAt: IsoDateTime,
 });
-export type WorktreeNote = typeof WorktreeNote.Type;
+export type NotesDocument = typeof NotesDocument.Type;
 
 export const NotesListInput = Schema.Struct({ projectId: ProjectId });
 export type NotesListInput = typeof NotesListInput.Type;
 export const NotesSnapshot = Schema.Struct({
   projectId: ProjectId,
-  /** Newest first. */
-  notes: Schema.Array(WorktreeNote),
-  limit: PositiveInt,
-  /** More notes exist than this bounded view returns. */
-  truncated: Schema.Boolean,
+  /** The project's document and every live checkout's, in no particular order. */
+  documents: Schema.Array(NotesDocument),
 });
 export type NotesSnapshot = typeof NotesSnapshot.Type;
 
-export const NotesCommand = Schema.Union([
-  Schema.Struct({
-    kind: Schema.Literal("create"),
-    noteId: WorktreeNoteId,
-    projectId: ProjectId,
-    worktreeId: Schema.NullOr(WorktreeId),
-    scope: NoteScope,
-    body: NoteBody,
-    threadId: Schema.NullOr(ThreadId),
-  }),
-  Schema.Struct({
-    kind: Schema.Literal("update"),
-    noteId: WorktreeNoteId,
-    projectId: ProjectId,
-    expectedRevision: NonNegativeInt,
-    body: Schema.optionalKey(NoteBody),
-    scope: Schema.optionalKey(NoteScope),
-  }),
-  Schema.Struct({
-    kind: Schema.Literal("delete"),
-    noteId: WorktreeNoteId,
-    projectId: ProjectId,
-    expectedRevision: NonNegativeInt,
-  }),
-]).annotate({ parseOptions: { onExcessProperty: "error" } });
+/** Replaces one document's body; judged against the revision the edit started from. */
+export const NotesCommand = Schema.Struct({
+  kind: Schema.Literal("save"),
+  projectId: ProjectId,
+  scope: NoteScope,
+  /** Must be `null` for the project's document. */
+  worktreeId: Schema.NullOr(WorktreeId),
+  body: NoteBody,
+  /** The revision the edit was based on (0 for a document never saved). */
+  expectedRevision: NonNegativeInt,
+}).annotate({ parseOptions: { onExcessProperty: "error" } });
 export type NotesCommand = typeof NotesCommand.Type;
 
 export class NotesError extends Schema.TaggedError<NotesError>()("NotesError", {
-  reason: Schema.Literals(["not-found", "conflict", "invalid", "persistence"]),
+  reason: Schema.Literals(["conflict", "invalid", "persistence"]),
   message: Schema.String,
 }) {}
 

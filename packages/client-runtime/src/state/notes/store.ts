@@ -10,15 +10,18 @@ export interface ProjectNotesState {
   readonly snapshot: NotesSnapshot | null;
   readonly status: ProjectNotesStatus;
   readonly error: string | null;
-  /** Notes this client created or pinned, so its own changes never announce as "saved elsewhere". */
-  readonly ownNoteIds: ReadonlySet<string>;
+  /**
+   * The latest revision this client saved, by document key
+   * (`notesDocumentKey`), so its own saves never announce as "edited elsewhere".
+   */
+  readonly ownRevisions: ReadonlyMap<string, number>;
 }
 
 export const EMPTY_PROJECT_NOTES_STATE: ProjectNotesState = {
   snapshot: null,
   status: "idle",
   error: null,
-  ownNoteIds: new Set(),
+  ownRevisions: new Map(),
 };
 
 export interface NotesStoreState {
@@ -26,7 +29,7 @@ export interface NotesStoreState {
   readonly setLoading: (key: string) => void;
   readonly applySnapshot: (key: string, snapshot: NotesSnapshot) => void;
   readonly setError: (key: string, error: string) => void;
-  readonly markOwn: (key: string, noteId: string) => void;
+  readonly markOwn: (key: string, documentKey: string, revision: number) => void;
   readonly clear: (key: string) => void;
 }
 
@@ -46,7 +49,7 @@ function patch(
 }
 
 /**
- * Worktree notes, keyed by environment + project. Memory only: note bodies
+ * Notes documents, keyed by environment + project. Memory only: note bodies
  * are node-owned content and never reach persistent client storage. The
  * writers are the project's retained sync (`retainProjectNotes`) and the
  * command replies it applies.
@@ -65,12 +68,12 @@ export const useNotesStore = create<NotesStoreState>((set) => ({
     ),
   setError: (key, error) =>
     set((state) => patch(state, key, (current) => ({ ...current, status: "error", error }))),
-  markOwn: (key, noteId) =>
+  markOwn: (key, documentKey, revision) =>
     set((state) =>
       patch(state, key, (current) =>
-        current.ownNoteIds.has(noteId)
+        (current.ownRevisions.get(documentKey) ?? -1) >= revision
           ? current
-          : { ...current, ownNoteIds: new Set([...current.ownNoteIds, noteId]) },
+          : { ...current, ownRevisions: new Map(current.ownRevisions).set(documentKey, revision) },
       ),
     ),
   clear: (key) =>
@@ -78,10 +81,10 @@ export const useNotesStore = create<NotesStoreState>((set) => ({
       const current = state.byKey[key];
       if (!current) return state;
       const byKey = { ...state.byKey };
-      // Note ids are not content: remembering this client's own keeps a
-      // save resent after a reconnect from announcing as saved elsewhere.
-      if (current.ownNoteIds.size > 0)
-        byKey[key] = { ...EMPTY_PROJECT_NOTES_STATE, ownNoteIds: current.ownNoteIds };
+      // Revisions are not content: remembering this client's own keeps a
+      // save confirmed after a reconnect from announcing as edited elsewhere.
+      if (current.ownRevisions.size > 0)
+        byKey[key] = { ...EMPTY_PROJECT_NOTES_STATE, ownRevisions: current.ownRevisions };
       else delete byKey[key];
       return { byKey };
     }),

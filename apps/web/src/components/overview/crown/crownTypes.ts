@@ -1,6 +1,7 @@
 import type { OrchestrationLatestTurnState } from "@ryco/contracts";
 import type { ReactNode } from "react";
 
+import type { GitActionNotice } from "../../../gitActionNotices";
 import type { Project } from "../../../types";
 import type { WorktreeNotes } from "../notes/useWorktreeNotes";
 import type { OverviewDataReadiness, OverviewLayoutProps } from "../overviewTypes";
@@ -53,8 +54,10 @@ export interface CrownOverviewProps extends OverviewLayoutProps {
   readonly agentRunning: boolean;
   /** Stable key for the thread + checkout; a change re-baselines alerts silently. */
   readonly scopeKey: string;
-  /** A user-started git action (commit/push/PR) is in flight; it already toasts. */
+  /** A user-started git action (commit/push/PR) is in flight; it reports itself. */
   readonly userGitActionActive: boolean;
+  /** The checkout's latest git action notice while this crown presents them (in place of toasts). */
+  readonly gitNotice?: GitActionNotice | null | undefined;
   /** Worktree notes; the Notes icon shows only while `notes.available`. */
   readonly notes?: CrownNotesBinding | undefined;
   /** Set for a chat this client can promote: the rail shows "Turn into project". */

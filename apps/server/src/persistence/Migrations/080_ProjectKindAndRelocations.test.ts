@@ -124,7 +124,7 @@ const readLedger = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const rows = yield* sql<{ readonly id: number; readonly name: string }>`
     SELECT migration_id AS id, name FROM effect_sql_migrations
-    WHERE migration_id >= 79 ORDER BY migration_id
+    WHERE migration_id BETWEEN 79 AND 80 ORDER BY migration_id
   `;
   return rows.map((row) => `${row.id}_${row.name}`);
 });

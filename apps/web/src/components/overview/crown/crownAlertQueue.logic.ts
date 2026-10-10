@@ -43,6 +43,25 @@ export function enqueueCrownAlerts(
   return { current, queue, recent };
 }
 
+/**
+ * Shows `event` at once, the shown alert waiting behind it: a git action's
+ * result answers what the user just did, so it never queues.
+ */
+export function showCrownAlertNow(
+  state: CrownAlertQueueState,
+  event: CrownEvent,
+): CrownAlertQueueState {
+  if (state.recent.includes(event.dedupeKey)) return state;
+  return {
+    current: event,
+    queue: (state.current ? [state.current, ...state.queue] : state.queue).slice(
+      0,
+      CROWN_ALERT_QUEUE_MAX,
+    ),
+    recent: [...state.recent, event.dedupeKey].slice(-CROWN_ALERT_RECENT_MAX),
+  };
+}
+
 /** Show the next waiting alert, or none (the crown folds back to its face). */
 export function advanceCrownAlert(state: CrownAlertQueueState): CrownAlertQueueState {
   const [current = null, ...queue] = state.queue;

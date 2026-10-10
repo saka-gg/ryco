@@ -7,6 +7,7 @@ import {
   clearCrownAlerts,
   crownAlertDwellMs,
   enqueueCrownAlerts,
+  showCrownAlertNow,
   type CrownAlertQueueState,
 } from "./crownAlertQueue.logic";
 import {
@@ -121,5 +122,20 @@ describe("crownAlertDwellMs", () => {
     assert.equal(crownAlertDwellMs(one), CROWN_ALERT_DWELL_MS);
     const two = enqueueCrownAlerts(one, [event("b")], OPEN);
     assert.equal(crownAlertDwellMs(two), CROWN_ALERT_DWELL_QUEUED_MS);
+  });
+});
+
+describe("showCrownAlertNow", () => {
+  it("shows the event at once with the shown alert waiting behind it, once per key", () => {
+    const shown = enqueueCrownAlerts(EMPTY_CROWN_ALERT_QUEUE, [event("a"), event("b")], {
+      cardOpen: false,
+    });
+    const result = showCrownAlertNow(shown, event("git"));
+    assert.equal(result.current?.dedupeKey, "git");
+    assert.deepEqual(
+      result.queue.map((queued) => queued.dedupeKey),
+      ["a", "b"],
+    );
+    assert.strictEqual(showCrownAlertNow(result, event("git")), result);
   });
 });
