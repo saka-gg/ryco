@@ -215,7 +215,9 @@ export function ProjectSwitcher({
       >
         {appearance !== "headline" && isChatDraft ? (
           <MessageCircleDashedIcon aria-hidden className="size-3.5 shrink-0 opacity-80" />
-        ) : appearance !== "headline" && activeProject ? (
+        ) : appearance === "chip" && activeProject ? (
+          // The sentence omits the favicon: the new-thread hero already shows
+          // the project's artwork right above it.
           <ProjectFavicon
             environmentId={activeProject.environmentId}
             cwd={activeProject.cwd}

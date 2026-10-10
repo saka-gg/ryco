@@ -42,6 +42,12 @@ export const RollingText = memo(function RollingText(props: {
   align?: "start" | "center";
   /** Ease the width between values (default). Off, the width snaps like a plain inline-grid. */
   animateWidth?: boolean;
+  /**
+   * Lift the leaving value out of flow so the width snaps straight to the new
+   * text. For rows that animate their own layout (see `useFlipLayout`); pair
+   * with `animateWidth={false}`.
+   */
+  overlayLeaving?: boolean;
   className?: string;
   itemClassName?: string;
 }) {
@@ -99,6 +105,7 @@ export const RollingText = memo(function RollingText(props: {
       ref={containerRef}
       className={cn("rolling-text", props.className)}
       data-align={props.align ?? "start"}
+      data-overlay-leaving={props.overlayLeaving ? "true" : undefined}
     >
       {entries.map((entry) => (
         <span

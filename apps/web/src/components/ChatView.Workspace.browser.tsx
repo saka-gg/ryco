@@ -7,7 +7,7 @@ import {
   WS_METHODS,
 } from "@ryco/contracts";
 import { createModelCapabilities, createModelSelection } from "@ryco/shared/model";
-import { page } from "vite-plus/test/browser";
+import { page, userEvent } from "vite-plus/test/browser";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { useComposerDraftStore, DraftId } from "../composerDraftStore";
 import { useTerminalStateStore } from "../terminalStateStore";
@@ -1822,13 +1822,25 @@ describe("ChatView Workspace (full app)", () => {
       );
       expect(locationTrigger.textContent).toContain("existing");
 
+      // The picker no longer offers "A new worktree"; the context bar's switch
+      // above the composer is the one way in.
       locationTrigger.click();
-
       await waitForElement(
         () => document.querySelector<HTMLElement>('[data-slot="combobox-popup"]'),
         "Unable to find the work-location popup.",
       );
-      await page.getByText("A new worktree", { exact: true }).click();
+      expect(page.getByText("A new worktree", { exact: true }).query()).toBeNull();
+      await userEvent.keyboard("{Escape}");
+
+      const worktreeSwitch = await waitForElement(
+        () =>
+          document.querySelector<HTMLButtonElement>(
+            '[data-testid="new-thread-context-bar"] button[role="switch"]',
+          ),
+        "Unable to find the new-worktree switch.",
+      );
+      expect(worktreeSwitch.getAttribute("aria-checked")).toBe("false");
+      worktreeSwitch.click();
 
       await vi.waitFor(
         () => {

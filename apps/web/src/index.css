@@ -2845,6 +2845,17 @@ label:has(> select#reasoning-effort) select {
 .rolling-text[data-align="center"] > * {
   justify-self: center;
 }
+.rolling-text[data-overlay-leaving="true"] {
+  position: relative;
+  /* Clip the roll vertically only, so a longer leaving value can still fade
+     out over its neighbours while they glide into place. */
+  overflow: visible;
+  clip-path: inset(0 -100vw);
+}
+.rolling-text[data-overlay-leaving="true"] > [data-roll-phase="leave"] {
+  position: absolute;
+  inset: 0 auto auto 0;
+}
 .rolling-text > [data-roll-phase="enter"] {
   animation: rolling-text-in var(--app-motion-duration-stack, 260ms)
     var(--app-motion-spring-gentle, ease-out) both;
@@ -2861,6 +2872,18 @@ label:has(> select#reasoning-effort) select {
   --rolling-text-from: -85%;
   --rolling-text-to: 85%;
 }
+/* A whole control rolling in like a `.rolling-text` value (the new-thread
+   sentence's branch slot swaps between two different pickers). */
+.new-thread-roll-in {
+  animation: rolling-text-in var(--app-motion-duration-stack, 260ms)
+    var(--app-motion-spring-gentle, ease-out) both;
+}
+.new-thread-roll-in[data-roll-direction="up"] {
+  --rolling-text-from: 85%;
+}
+.new-thread-roll-in[data-roll-direction="down"] {
+  --rolling-text-from: -85%;
+}
 @keyframes rolling-text-in {
   from {
     transform: translateY(var(--rolling-text-from));
@@ -2876,6 +2899,128 @@ label:has(> select#reasoning-effort) select {
   }
 }
 
+/* New-thread pill row: the "New worktree" switch and the device pill above the
+   composer. Durations scale the stack token, so reduced motion collapses them. */
+.new-thread-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 1.75rem;
+  padding: 0 10px;
+  border-radius: 9999px;
+  border: 1px solid var(--border);
+  background: var(--background);
+  color: color-mix(in oklab, var(--foreground) 85%, transparent);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+  cursor: pointer;
+  transition-property: border-color, background-color, color, box-shadow;
+  transition-duration: calc(var(--app-motion-duration-stack, 260ms) * 1.15);
+}
+.new-thread-pill:hover,
+.new-thread-pill[data-pressed] {
+  background: color-mix(in oklab, var(--foreground) 6%, var(--background));
+  color: var(--foreground);
+}
+.new-thread-pill:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+.new-thread-pill[data-disabled] {
+  cursor: default;
+  background: var(--background);
+}
+.new-thread-worktree-toggle {
+  padding-left: 5px;
+}
+.new-thread-worktree-switch {
+  position: relative;
+  flex: none;
+  width: 22px;
+  height: 13px;
+  border-radius: 9999px;
+  background: color-mix(in oklab, var(--muted-foreground) 30%, transparent);
+  transition: background-color var(--app-motion-duration-stack, 260ms)
+    cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.new-thread-worktree-switch::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 9px;
+  height: 9px;
+  border-radius: 9999px;
+  background: var(--background);
+  transition: transform calc(var(--app-motion-duration-stack, 260ms) * 1.35)
+    cubic-bezier(0.34, 1.45, 0.55, 1);
+}
+[data-on="true"] > .new-thread-worktree-switch {
+  background: var(--primary);
+}
+[data-on="true"] > .new-thread-worktree-switch::after {
+  transform: translateX(9px);
+  background: var(--primary-foreground);
+}
+.new-thread-worktree-fork [data-part="grow"] {
+  stroke-dasharray: 14;
+  stroke-dashoffset: 14;
+  transition: stroke-dashoffset calc(var(--app-motion-duration-stack, 260ms) * 1.73)
+    cubic-bezier(0.2, 0.8, 0.2, 1) calc(var(--app-motion-duration-stack, 260ms) * 0.2);
+}
+.new-thread-worktree-fork [data-part="tip"] {
+  transform-origin: 18px 6px;
+  transform: scale(0);
+  transition: transform calc(var(--app-motion-duration-stack, 260ms) * 1.35)
+    cubic-bezier(0.34, 1.45, 0.55, 1) var(--app-motion-duration-stack, 260ms);
+}
+[data-on="true"] > .new-thread-worktree-fork [data-part="grow"] {
+  stroke-dashoffset: 0;
+}
+[data-on="true"] > .new-thread-worktree-fork [data-part="tip"] {
+  transform: scale(1);
+}
+.new-thread-pill-icon {
+  animation: new-thread-pill-icon-in calc(var(--app-motion-duration-stack, 260ms) * 1.54)
+    cubic-bezier(0.34, 1.45, 0.55, 1) both;
+}
+@keyframes new-thread-pill-icon-in {
+  from {
+    opacity: 0;
+    transform: scale(0.4) rotate(-30deg);
+  }
+}
+.new-thread-connection-dot {
+  position: relative;
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 9999px;
+  background: var(--muted-foreground);
+}
+.new-thread-connection-dot[data-connected="true"] {
+  background: var(--success);
+}
+.new-thread-connection-dot[data-connected="true"]::after {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border-radius: inherit;
+  border: 1.5px solid var(--success);
+  opacity: 0;
+  animation: new-thread-connection-ping calc(var(--app-motion-duration-stack, 260ms) * 3.46)
+    cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+@keyframes new-thread-connection-ping {
+  from {
+    opacity: 0.9;
+    transform: scale(0.6);
+  }
+  to {
+    opacity: 0;
+    transform: scale(1.8);
+  }
+}
 /* Ultracode label: a slow light sweep through the tone. */
 .reasoning-tone-shimmer {
   background-image: linear-gradient(

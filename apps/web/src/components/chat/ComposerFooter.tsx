@@ -13,7 +13,6 @@ import {
 } from "@ryco/contracts";
 import type { ProviderDriverKind, ProviderInstanceId } from "@ryco/contracts";
 import { memo, type ReactNode, useCallback, useEffect, useRef, useState } from "react";
-import { DeviceIcon } from "../DeviceIcon";
 import { ListTodoIcon } from "lucide-react";
 import { ComposerExpandableLabelControl } from "./ComposerExpandableLabelControl";
 import { ComposerPrimaryActions } from "./ComposerPrimaryActions";
@@ -24,6 +23,7 @@ import {
 import { ContextPickerButton } from "./ContextPickerButton";
 import { ContextWindowMeter } from "./ContextWindowMeter";
 import type { ComposerExecutionTarget } from "./ExecutionTarget.logic";
+import { ExecutionTargetSelect } from "./ExecutionTargetSelect";
 import { PhoneSessionPolicyControl } from "./PhoneSessionPolicySheet";
 import { ProviderModelPicker } from "./ProviderModelPicker";
 import type { ModelPickMeta } from "./modelPickerTuningBridge";
@@ -477,6 +477,8 @@ export interface ComposerFooterProps {
   selectedExecutionEnvironmentId?: EnvironmentId;
   executionTargetLocked?: boolean;
   onExecutionTargetChange?: (environmentId: EnvironmentId) => void;
+  /** The new-thread surface shows the device as a pill above the composer instead. */
+  executionTargetHoisted?: boolean;
 
   // Model picker
   selectedInstanceId: ProviderInstanceId;
@@ -611,67 +613,16 @@ export const ComposerFooter = memo(function ComposerFooter(props: ComposerFooter
           onOpenChange={props.onModelPickerOpenChange}
           onInstanceModelChange={props.onProviderModelSelect}
         />
-        {(props.executionTargets?.length ?? 0) > 0 && props.selectedExecutionEnvironmentId ? (
-          <>
-            <Select
-              value={props.selectedExecutionEnvironmentId}
-              disabled={props.executionTargetLocked}
-              onValueChange={(value) => {
-                if (value) props.onExecutionTargetChange?.(value as EnvironmentId);
-              }}
-            >
-              <SelectTrigger
-                variant="ghost"
-                size="xs"
-                className="max-w-40 gap-1 px-1.5 text-muted-foreground/80"
-                aria-label="Execution machine"
-                title={
-                  props.executionTargetLocked
-                    ? "Existing threads stay on their owning machine"
-                    : "Choose a device to run this thread"
-                }
-              >
-                <DeviceIcon
-                  environmentId={props.selectedExecutionEnvironmentId}
-                  className="size-3.5 shrink-0"
-                />
-                <SelectValue>
-                  {props.executionTargets?.find(
-                    (target) => target.environmentId === props.selectedExecutionEnvironmentId,
-                  )?.label ?? "No verified machine"}
-                </SelectValue>
-              </SelectTrigger>
-              <SelectPopup alignItemWithTrigger={false} className="w-56 p-0.5">
-                {props.executionTargets?.map((target) => (
-                  <SelectItem
-                    key={target.environmentId}
-                    value={target.environmentId}
-                    disabled={target.disabled}
-                  >
-                    <span className="inline-flex min-w-0 items-center gap-2">
-                      <DeviceIcon
-                        environmentId={target.environmentId}
-                        label={target.label}
-                        className="size-3.5 shrink-0 text-muted-foreground"
-                      />
-                      <span className="flex min-w-0 flex-col">
-                        <span className="truncate">{target.label}</span>
-                        {target.status ? (
-                          <span className="text-xs text-muted-foreground">{target.status}</span>
-                        ) : null}
-                      </span>
-                    </span>
-                  </SelectItem>
-                ))}
-              </SelectPopup>
-            </Select>
-            {!props.executionTargetLocked &&
-            props.executionTargets?.find(
-              (target) => target.environmentId === props.selectedExecutionEnvironmentId,
-            )?.disabled ? (
-              <span className="shrink-0 text-destructive text-xs">Device unavailable</span>
-            ) : null}
-          </>
+        {!props.executionTargetHoisted &&
+        (props.executionTargets?.length ?? 0) > 0 &&
+        props.executionTargets &&
+        props.selectedExecutionEnvironmentId ? (
+          <ExecutionTargetSelect
+            targets={props.executionTargets}
+            selectedEnvironmentId={props.selectedExecutionEnvironmentId}
+            locked={props.executionTargetLocked === true}
+            onChange={props.onExecutionTargetChange}
+          />
         ) : null}
 
         {isPhoneTier ? (
