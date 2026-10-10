@@ -195,8 +195,8 @@ describe("surface morph", () => {
     expect(ghosts()).toHaveLength(1);
     expect(ghosts()[0]!.parentElement?.dataset.slot).toBe("alert-dialog-viewport");
     await vi.waitFor(() => expect(ghosts()).toHaveLength(0), { timeout: 2_000 });
-    // A dialog's origin became the dialog: hidden while it is open.
-    expect(opacityOf(button)).toBe(0);
+    // The control that opened the dialog stays put (a sidebar row keeps its label).
+    expect(opacityOf(button)).toBe(1);
 
     await userEvent.keyboard("{Escape}");
     await sleep(150);

@@ -184,6 +184,42 @@ describe("hosted project icons", () => {
     await expect.poll(() => view.container.querySelector("img")?.naturalWidth).toBe(16);
     expect(view.container.querySelector("svg text")).toBeNull();
   });
+  it("marks the image's load state for containers that style loaded artwork", async () => {
+    let complete!: (value: typeof icon) => void;
+    connect(
+      vi.fn(
+        () =>
+          new Promise((resolve) => {
+            complete = resolve;
+          }),
+      ),
+    );
+    const view = await render(
+      <TestFavicon environmentId={env} cwd="/project" projectId={projectId} fallbackName="ryco" />,
+    );
+    expect(view.container.querySelector("img")).toBeNull();
+    complete(icon);
+    await expect
+      .poll(() => view.container.querySelector<HTMLImageElement>("img")?.dataset.state)
+      .toBe("loaded");
+    expect(view.container.querySelector('img[data-state="loaded"]')).not.toBeNull();
+  });
+  it("hands the loaded artwork to onImageLoad", async () => {
+    connect(vi.fn(async () => icon));
+    const onImageLoad = vi.fn((image: HTMLImageElement) => image.dataset.state);
+    const view = await render(
+      <TestFavicon
+        environmentId={env}
+        cwd="/project"
+        projectId={projectId}
+        onImageLoad={onImageLoad}
+      />,
+    );
+    await expect.poll(() => onImageLoad.mock.calls.length).toBe(1);
+    const [image] = onImageLoad.mock.calls[0]!;
+    expect(image).toBe(view.container.querySelector("img"));
+    expect(image.naturalWidth).toBe(16);
+  });
 });
 
 function TestFavicon(props: ComponentProps<typeof ProjectFavicon>) {

@@ -49,7 +49,12 @@ export const MODEL_PICKER_KEYBINDING_COMMANDS = [
 ] as const;
 export type ModelPickerKeybindingCommand = (typeof MODEL_PICKER_KEYBINDING_COMMANDS)[number];
 
-const STATIC_KEYBINDING_COMMANDS = [
+/**
+ * Every built-in command a key can be bound to. Some ship without a default
+ * key, so this — not the default keymap — is the list a keybindings editor
+ * offers.
+ */
+export const STATIC_KEYBINDING_COMMANDS = [
   "terminal.toggle",
   "terminal.split",
   "terminal.new",
@@ -64,14 +69,18 @@ const STATIC_KEYBINDING_COMMANDS = [
   "sidebar.showProjects",
   "chat.new",
   "chat.newLocal",
+  // Start a chat in its own Ryco-managed folder instead of a project; no default key (users bind
+  // it), because a default reaches clients that cannot decode a command newer than they are.
+  "chat.newWithoutProject",
   "composer.stash",
   "editor.openFavorite",
   "pane.split",
   "pane.close",
   "pane.focusNext",
   "pane.focusPrevious",
-  // Opens the pull requests page; no default key (users bind it themselves).
+  // Open the pull requests and projects pages; no default keys (users bind them).
   "pullRequests.open",
+  "projects.open",
   ...MODEL_PICKER_KEYBINDING_COMMANDS,
   ...THREAD_KEYBINDING_COMMANDS,
 ] as const;

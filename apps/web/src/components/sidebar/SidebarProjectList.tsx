@@ -51,6 +51,7 @@ import {
   DialogTitle,
 } from "../ui/dialog";
 import { Input } from "../ui/input";
+import { handleSidebarListScroll } from "./sidebarFold";
 import {
   Menu,
   MenuGroup,
@@ -352,6 +353,8 @@ export interface SidebarProjectsContentProps {
     dragHandleProps: SortableProjectHandleProps | null,
     onNewFolderWithProject: (project: SidebarProjectSnapshot) => void,
   ) => React.ReactNode;
+  /** The "Chats" section ("No project" chats), rendered after the project tree. */
+  chatsSection?: React.ReactNode;
 }
 
 export const SidebarProjectsContent = memo(function SidebarProjectsContent(
@@ -378,6 +381,7 @@ export const SidebarProjectsContent = memo(function SidebarProjectsContent(
     attachProjectListAutoAnimateRef,
     projectsLength,
     renderProjectRow,
+    chatsSection,
   } = props;
   const createProjectFolder = useUiStateStore((state) => state.createProjectFolder);
   const renameProjectFolder = useUiStateStore((state) => state.renameProjectFolder);
@@ -468,7 +472,7 @@ export const SidebarProjectsContent = memo(function SidebarProjectsContent(
 
   return (
     <>
-      <SidebarContent className="gap-0">
+      <SidebarContent className="gap-0" onViewportScroll={handleSidebarListScroll}>
         {showArm64IntelBuildWarning && arm64IntelBuildWarningDescription ? (
           <SidebarGroup className="px-2 pt-2 pb-0">
             <Alert variant="warning" className="rounded-2xl border-warning/40 bg-warning/8">
@@ -637,6 +641,7 @@ export const SidebarProjectsContent = memo(function SidebarProjectsContent(
             </div>
           )}
         </SidebarGroup>
+        {chatsSection}
       </SidebarContent>
       <Dialog
         open={folderDialog !== null}

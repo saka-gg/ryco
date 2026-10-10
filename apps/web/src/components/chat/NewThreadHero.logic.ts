@@ -56,12 +56,31 @@ export function resolveNewThreadHeadline(input: {
  * The headline's project name doubles as a project switcher, but only where
  * switching is meaningful and safe: draft threads (a server thread is already
  * bound to its project), before the thread is locked to an environment, and
- * when there is somewhere else to switch to.
+ * when there is somewhere else to switch to. "No project" counts as a
+ * destination wherever chats are available.
  */
 export function canSwitchNewThreadProject(input: {
   readonly routeKind: "draft" | "server";
   readonly envLocked: boolean;
+  /** Real projects only; chats are not projects. */
   readonly projectCount: number;
+  readonly chatsAvailable?: boolean;
 }): boolean {
-  return input.routeKind === "draft" && !input.envLocked && input.projectCount > 1;
+  const destinations = input.projectCount + (input.chatsAvailable ? 1 : 0);
+  return input.routeKind === "draft" && !input.envLocked && destinations > 1;
+}
+
+/**
+ * "or start without a project" under the headline: a project draft that has
+ * not been sent, on a node that can host chats.
+ */
+export function canStartNewThreadWithoutProject(input: {
+  readonly routeKind: "draft" | "server";
+  readonly envLocked: boolean;
+  readonly chatsAvailable: boolean;
+  readonly pendingChat: boolean;
+}): boolean {
+  return (
+    input.routeKind === "draft" && !input.envLocked && input.chatsAvailable && !input.pendingChat
+  );
 }

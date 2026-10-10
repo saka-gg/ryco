@@ -6,8 +6,13 @@ import {
 import type { OverviewPanelItem } from "../PlanSidebar";
 import { OVERVIEW_CHECK_DETAIL_RUN_LIMIT } from "../overviewPullRequestChecks.logic";
 import { buildOverviewChangesItem, partitionOverviewChangedFiles } from "../overviewChanges.logic";
-import type { OverviewChangedFile } from "../overview/overviewTypes";
+import type { OverviewChangedFile, OverviewPullRequestCheckRun } from "../overview/overviewTypes";
 import type { useGitStatus } from "~/lib/gitStatusState";
+import {
+  formatWorkspacePullRequestReveal,
+  parseWorkspacePullRequestReveal,
+  type WorkspacePullRequestReveal,
+} from "~/workspaceRouteSearch";
 
 export type GitStatusData = NonNullable<ReturnType<typeof useGitStatus>["data"]>;
 
@@ -112,6 +117,59 @@ export function resolveWorkflowDetailRunIds(input: {
     return [input.activeWorkflowRunId, ...runIds].slice(0, OVERVIEW_CHECK_DETAIL_RUN_LIMIT);
   }
   return runIds;
+}
+
+/**
+ * Where a check row lands in the pull request reader: its job when the row
+ * names one the route can carry, otherwise the Checks tab.
+ */
+export function overviewCheckReveal(
+  check: Pick<OverviewPullRequestCheckRun, "jobParam">,
+): WorkspacePullRequestReveal {
+  if (check.jobParam === undefined) return { kind: "checks" };
+  // Round-trip through the route parser so a value the URL would drop (empty,
+  // over-long) still lands on the Checks tab.
+  return (
+    parseWorkspacePullRequestReveal(
+      formatWorkspacePullRequestReveal({ kind: "job", job: check.jobParam }),
+    ) ?? { kind: "checks" }
+  );
+}
+
+export type OpenPullRequestInApp = (
+  pinnedNumber?: number,
+  reveal?: WorkspacePullRequestReveal,
+) => void;
+
+export interface OverviewPullRequestOpeners {
+  /** The shown pull request without a number, another of the workspace's pinned. */
+  onOpenPullRequestInApp?: (number?: number) => void;
+  onOpenPullRequestCheck?: (check: OverviewPullRequestCheckRun) => void;
+}
+
+/**
+ * The overview's in-app pull request openers, or none without an opener or a
+ * pull request to open (default-branch CI keeps its host links).
+ */
+export function buildOverviewPullRequestOpeners(input: {
+  readonly open: OpenPullRequestInApp | null | undefined;
+  readonly pullRequestNumber: number | null | undefined;
+  /**
+   * Only the post-push watch knows this number: it has to travel in the URL.
+   * Otherwise the panel resolves the thread's change request itself.
+   */
+  readonly pinFromPush: boolean;
+}): OverviewPullRequestOpeners {
+  const { open, pullRequestNumber } = input;
+  if (!open || pullRequestNumber == null) return {};
+  const pinned = input.pinFromPush ? pullRequestNumber : undefined;
+  return {
+    // Only another of the workspace's pull requests, or a number the push watch
+    // alone knows, has to travel in the URL.
+    onOpenPullRequestInApp: (number) =>
+      open(number !== undefined && number !== pullRequestNumber ? number : pinned),
+    onOpenPullRequestCheck: (check) => open(pinned, overviewCheckReveal(check)),
+  };
 }
 
 export interface BuildOverviewItemsInput {

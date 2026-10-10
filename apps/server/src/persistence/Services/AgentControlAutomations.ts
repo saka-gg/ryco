@@ -69,6 +69,16 @@ export interface AgentControlAutomationRepositoryShape {
     readonly includeDisabled: boolean;
     readonly limit: number;
   }) => Effect.Effect<ReadonlyArray<AgentControlAutomation>, AgentControlAutomationRepositoryError>;
+  /**
+   * The automation centre's schedules: never cancelled ones, and every active
+   * one (enabled with a next run, the ones the per-project limit counts)
+   * before paused and finished ones, so a bounded list never hides an active
+   * schedule or undercounts the limit.
+   */
+  readonly listCentreAutomations: (input: {
+    readonly projectId: ProjectId;
+    readonly limit: number;
+  }) => Effect.Effect<ReadonlyArray<AgentControlAutomation>, AgentControlAutomationRepositoryError>;
   readonly countActiveAutomations: (
     projectId: ProjectId,
   ) => Effect.Effect<number, AgentControlAutomationRepositoryError>;

@@ -1,0 +1,1064 @@
+/*
+ * Automations dialog (the lab's direction C, `.docs/automations-lab/dir-c.css`)
+ * in the app's tokens: one header bar, list | detail with one hairline
+ * between them, flat solid surfaces, no card-in-card. Everything is scoped to
+ * `.ad-dialog` (the popup) and prefixed `ad-`. The editor's pane frame
+ * (`.ad-pane-editor`, `.ad-ed-scroll`, `.ad-ed-foot`) lives here too, so the
+ * editor only styles its own content.
+ */
+
+/* The tokens also reach the dialog's menus, which are portaled outside it. */
+.ad-dialog,
+.ad-menu {
+  --ad-fg: var(--foreground);
+  --ad-muted: var(--muted-foreground);
+  --ad-faint: color-mix(in srgb, var(--muted-foreground) 64%, transparent);
+  --ad-ghost: color-mix(in srgb, var(--foreground) 22%, transparent);
+  --ad-hair: color-mix(in srgb, var(--foreground) 7%, transparent);
+  --ad-hl-row: color-mix(in srgb, var(--foreground) 3.5%, transparent);
+  --ad-accent: var(--accent);
+  --ad-accent-strong: color-mix(in srgb, var(--foreground) 8%, transparent);
+  --ad-ring-soft: color-mix(in srgb, var(--ring) 22%, transparent);
+  --ad-err: var(--destructive-foreground);
+  --ad-warn: var(--warning-foreground);
+  --ad-info: var(--info-foreground);
+}
+.ad-dialog {
+  width: min(1040px, calc(100vw - 64px));
+  max-width: none;
+  height: min(760px, calc(100vh - 64px));
+  max-height: none;
+  overflow: hidden;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--ad-fg);
+}
+.ad-root {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  outline: none;
+}
+.ad-ghost {
+  z-index: 70;
+}
+
+/* text helpers */
+.ad-root .tnum {
+  font-variant-numeric: tabular-nums;
+}
+.ad-trunc {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ad-muted {
+  color: var(--ad-muted);
+}
+.ad-tone-err {
+  color: var(--ad-err);
+}
+.ad-sp {
+  flex: 1;
+}
+
+/* buttons: the lab's 28px / 24px sizes on the app's Button */
+.ad-dialog .ad-btn {
+  height: 28px;
+  gap: 5px;
+  padding: 0 9px;
+  font-size: 12.5px;
+  border-radius: 8px;
+}
+.ad-dialog .ad-btn svg {
+  width: 15px;
+  height: 15px;
+}
+.ad-dialog .ad-btn-xs {
+  height: 24px;
+  gap: 4px;
+  padding: 0 7px;
+  font-size: 12px;
+  border-radius: 7px;
+}
+.ad-dialog .ad-btn-xs svg {
+  width: 13px;
+  height: 13px;
+}
+.ad-dialog .ad-btn-icon {
+  width: 28px;
+  padding: 0;
+}
+.ad-dialog .ad-btn-icon.ad-btn-xs {
+  width: 24px;
+}
+.ad-dialog .ad-btn-quiet {
+  color: var(--ad-muted);
+}
+.ad-dialog .ad-btn-quiet:hover {
+  color: var(--ad-fg);
+}
+.ad-dialog .ad-btn[aria-disabled="true"] {
+  opacity: 0.5;
+  cursor: default;
+}
+.ad-icon-btn {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ad-muted);
+  cursor: pointer;
+  transition: background-color 140ms;
+}
+.ad-icon-btn:hover,
+.ad-icon-btn[data-popup-open] {
+  background: var(--ad-accent);
+  color: var(--ad-fg);
+}
+.ad-icon-btn:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 0;
+}
+.ad-icon-btn svg {
+  width: 15px;
+  height: 15px;
+}
+.ad-icon-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.ad-link {
+  border: 0;
+  background: none;
+  padding: 0;
+  font: 500 12.5px/1.4 var(--font-sans);
+  color: var(--ad-fg);
+  text-decoration: underline;
+  text-decoration-color: var(--ad-ghost);
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+.ad-link:hover {
+  text-decoration-color: currentColor;
+}
+.ad-link:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+/* ------------------------------------------------------------ header: one bar */
+.ad-head {
+  height: 52px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 12px 0 18px;
+  border-bottom: 1px solid var(--ad-hair);
+}
+.ad-dialog .ad-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: -0.01em;
+}
+.ad-slash {
+  color: var(--ad-ghost);
+  font-size: 15px;
+  margin: 0 1px;
+}
+.ad-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  max-width: 260px;
+  height: 28px;
+  padding: 0 7px 0 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ad-fg);
+  font: 500 13px/1 var(--font-sans);
+  cursor: pointer;
+  transition: background-color 140ms;
+}
+.ad-switch:hover,
+.ad-switch[data-popup-open] {
+  background: var(--ad-accent);
+}
+.ad-switch[aria-disabled="true"] {
+  cursor: default;
+  color: var(--ad-muted);
+  background: transparent;
+}
+.ad-switch:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 0;
+}
+.ad-switch-ic {
+  flex: none;
+  width: 13px;
+  height: 13px;
+  color: var(--ad-faint);
+}
+.ad-fav {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 4px;
+}
+/* the limit, said once at the top */
+.ad-cap {
+  margin-left: 6px;
+  font-size: 12px;
+  color: var(--ad-muted);
+  white-space: nowrap;
+}
+.ad-cap[data-full] {
+  color: var(--ad-fg);
+  font-weight: 500;
+}
+/* the one-line queue: runs waiting · changes waiting */
+.ad-queue {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-right: 10px;
+  min-width: 0;
+}
+.ad-q {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 28px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ad-fg);
+  font: 500 12.5px/1 var(--font-sans);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 140ms;
+}
+.ad-q:hover {
+  background: var(--ad-accent);
+}
+.ad-q:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 0;
+}
+.ad-q[aria-disabled="true"] {
+  cursor: default;
+  color: var(--ad-muted);
+  background: transparent;
+}
+.ad-q-sep {
+  color: var(--ad-faint);
+  margin: 0 -2px;
+}
+.ad-q-left {
+  font-weight: 400;
+  color: var(--ad-muted);
+}
+.ad-q-div {
+  width: 1px;
+  height: 14px;
+  background: var(--border);
+}
+.ad-tz {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-right: 8px;
+  font-size: 12px;
+  color: var(--ad-muted);
+  white-space: nowrap;
+}
+.ad-tz svg {
+  width: 13px;
+  height: 13px;
+}
+.ad-root:has(.ad-body[data-empty]) .ad-new {
+  display: none;
+}
+
+/* ------------------------------------------------------------ body: list | detail */
+.ad-body {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 320px minmax(0, 1fr);
+}
+.ad-body[data-empty] {
+  grid-template-columns: minmax(0, 1fr);
+}
+.ad-body[data-empty] .ad-list {
+  display: none;
+}
+.ad-list {
+  min-height: 0;
+  overflow: auto;
+  padding: 8px 8px 14px;
+  border-right: 1px solid var(--ad-hair);
+  transition: opacity 200ms;
+}
+.ad-list-note {
+  margin: 8px 10px 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--ad-muted);
+}
+.ad-group,
+.ad-row {
+  transition:
+    opacity 200ms,
+    background-color 120ms;
+}
+.ad-body[data-editing] :is(.ad-group, .ad-row:not([data-editing])) {
+  opacity: 0.42;
+}
+
+/* rows: two fixed lines, so a tick or a tag never changes a row's height */
+.ad-rows,
+.ad-dev {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  outline: none;
+}
+.ad-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 8px 10px 0;
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--ad-muted);
+}
+.ad-dev:first-child > .ad-group {
+  height: 22px;
+  padding-top: 2px;
+}
+.ad-group-ic,
+.ad-group svg {
+  width: 12px;
+  height: 12px;
+}
+.ad-row {
+  display: grid;
+  grid-template-columns: 12px minmax(0, 1fr) auto;
+  grid-template-rows: 20px 18px;
+  align-items: center;
+  column-gap: 9px;
+  row-gap: 2px;
+  padding: 8px 10px 9px;
+  border-radius: 8px;
+  cursor: pointer;
+  outline: none;
+}
+.ad-row:hover {
+  background: var(--ad-hl-row);
+}
+.ad-row[aria-selected="true"] {
+  background: var(--ad-accent);
+}
+.ad-row:focus-visible {
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--ring) 70%, transparent),
+    0 0 0 3px var(--ad-ring-soft);
+}
+.ad-row[data-editing] {
+  background: var(--ad-accent-strong);
+}
+.ad-row > .ad-glyph {
+  grid-row: 1;
+}
+.ad-row-title {
+  grid-column: 2;
+  grid-row: 1;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ad-fg);
+  letter-spacing: -0.005em;
+}
+.ad-row-tag {
+  grid-column: 3;
+  grid-row: 1;
+  font-size: 11.5px;
+  color: var(--ad-muted);
+  white-space: nowrap;
+}
+.ad-row-tag:empty {
+  display: none;
+}
+.ad-row:has(.ad-row-tag:empty) .ad-row-title {
+  grid-column: 2 / -1;
+}
+.ad-row-tag[data-tone="prop"]::before,
+.ad-row-tag[data-tone="lapsed"]::before {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 5px;
+  border: 1px dashed currentColor;
+  border-radius: 1.5px;
+  vertical-align: 1px;
+}
+.ad-row-tag[data-tone="prop"] {
+  color: var(--ad-fg);
+}
+.ad-row-tag[data-tone="err"] {
+  color: var(--ad-err);
+}
+.ad-row-sum {
+  grid-column: 2;
+  grid-row: 2;
+  font-size: 12px;
+  color: var(--ad-muted);
+}
+.ad-row-meta {
+  grid-column: 3;
+  grid-row: 2;
+  font-size: 12px;
+  color: var(--ad-muted);
+  white-space: nowrap;
+}
+.ad-row-meta[data-tone="fg"] {
+  color: var(--ad-fg);
+}
+
+/* state glyphs: shape carries the meaning, colour only for what happened.
+   No infinite pulses — waiting is a calm, static state. */
+.ad-glyph {
+  position: relative;
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  justify-self: center;
+  box-shadow: inset 0 0 0 1.5px var(--ad-ghost);
+  flex: none;
+}
+.ad-glyph[data-g="scheduled"] {
+  box-shadow: inset 0 0 0 1.5px var(--ad-muted);
+}
+.ad-glyph[data-g="awaiting-approval"] {
+  background: var(--ad-fg);
+  box-shadow: none;
+}
+.ad-glyph[data-g="running"] {
+  background: var(--ad-info);
+  box-shadow: none;
+}
+.ad-glyph[data-g="paused"] {
+  border-radius: 1px;
+  box-shadow: none;
+  background: linear-gradient(
+    90deg,
+    var(--ad-muted) 0 3px,
+    transparent 3px 5px,
+    var(--ad-muted) 5px 8px
+  );
+}
+.ad-glyph[data-g="finished"] {
+  background: var(--ad-ghost);
+  box-shadow: none;
+}
+/* proposals: a hollow dashed square — not a spinner-like ring */
+.ad-glyph[data-g="pending-create"],
+.ad-glyph[data-g="lapsed"] {
+  border-radius: 2px;
+  box-shadow: none;
+  border: 1.25px dashed var(--ad-fg);
+}
+.ad-glyph[data-g="lapsed"] {
+  border-color: var(--ad-faint);
+}
+
+/* run marks: one hue (red) and only for failure */
+.ad-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--ad-ghost);
+}
+.ad-dot[data-tone="fg"] {
+  background: color-mix(in srgb, var(--ad-fg) 58%, transparent);
+}
+.ad-dot[data-tone="wait"] {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--ad-fg);
+}
+.ad-dot[data-tone="err"] {
+  background: var(--destructive);
+}
+.ad-dot[data-tone="zinc"] {
+  background: var(--ad-faint);
+}
+.ad-dot[data-tone="faint"] {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.25px var(--ad-ghost);
+}
+
+/* ------------------------------------------------------------ detail */
+.ad-detail {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+.ad-pane {
+  position: absolute;
+  inset: 0;
+  overflow: auto;
+  padding: 20px 26px 28px;
+  outline: none;
+}
+.ad-pane.is-leaving {
+  pointer-events: none;
+}
+.ad-dh {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+}
+.ad-dh-t {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  min-height: 28px;
+}
+.ad-dtitle {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  line-height: 1.3;
+}
+.ad-dh-x {
+  display: flex;
+  gap: 6px;
+  flex: none;
+}
+.ad-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 20px;
+  padding: 0 7px;
+  border-radius: 6px;
+  font-size: 11.5px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  color: var(--ad-muted);
+  background: var(--ad-accent);
+}
+.ad-chip svg {
+  width: 12px;
+  height: 12px;
+}
+.ad-sentence-ro {
+  margin: 8px 0 0;
+  max-width: 58ch;
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: var(--ad-muted);
+}
+.ad-sentence-ro b {
+  font-weight: 500;
+  color: var(--ad-fg);
+}
+.ad-ref {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+}
+.ad-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--ad-muted);
+}
+.ad-meta .ad-sep {
+  margin: 0 1px;
+}
+.ad-prov {
+  width: 14px;
+  height: 14px;
+}
+.ad-warnline {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 12px 0 0;
+  font-size: 12.5px;
+  color: var(--ad-warn);
+}
+.ad-warnline svg {
+  flex: none;
+  width: 14px;
+  height: 14px;
+}
+
+/* blocks: things waiting on you — one hairline box each, never nested */
+.ad-blks {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 18px;
+}
+.ad-blk {
+  position: relative;
+  padding: 12px 14px 13px;
+  border-radius: 10px;
+  box-shadow: inset 0 0 0 1px var(--border);
+  overflow: hidden;
+}
+.ad-blk-prop,
+.ad-blk-lapsed {
+  box-shadow: none;
+  border: 1px dashed color-mix(in srgb, var(--ad-fg) 22%, transparent);
+}
+.ad-blk-lapsed {
+  border-color: var(--border);
+}
+.ad-blk-h {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 13px;
+}
+.ad-blk-h b,
+.ad-blk-run b {
+  font-weight: 500;
+}
+.ad-blk-aside {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--ad-muted);
+  white-space: nowrap;
+}
+.ad-blk-cd {
+  color: var(--ad-fg);
+  font-weight: 500;
+}
+/* the deadline only turns warm in its last two minutes */
+.ad-dialog [data-left][data-urgent] {
+  color: var(--ad-warn);
+}
+.ad-blk-p {
+  margin: 6px 0 0 17px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--ad-muted);
+}
+.ad-blk-p b {
+  font-weight: 500;
+  color: var(--ad-fg);
+}
+.ad-blk-x {
+  display: flex;
+  gap: 6px;
+  margin: 11px 0 0 17px;
+}
+.ad-drain {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2px;
+  background: color-mix(in srgb, var(--ad-fg) 30%, transparent);
+  transform-origin: left center;
+}
+.ad-blk-run {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 13px;
+}
+.ad-diff {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 5px 14px;
+  margin: 10px 0 0 17px;
+  font-size: 12.5px;
+}
+.ad-diff-row {
+  display: contents;
+}
+.ad-diff dt {
+  color: var(--ad-faint);
+}
+.ad-diff dd {
+  margin: 0;
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 2px 6px;
+  color: var(--ad-fg);
+  min-width: 0;
+}
+.ad-diff s {
+  color: var(--ad-faint);
+  text-decoration-color: color-mix(in srgb, var(--ad-faint) 60%, transparent);
+}
+.ad-diff-arrow {
+  width: 12px;
+  height: 12px;
+  align-self: center;
+  color: var(--ad-faint);
+}
+
+/* sections */
+.ad-sec {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--ad-hair);
+}
+.ad-sec-h {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0 0 7px;
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--ad-muted);
+}
+.ad-sec-h .ad-muted {
+  font-weight: 400;
+}
+.ad-hist-why {
+  margin-left: auto;
+  font-weight: 400;
+  color: var(--ad-muted);
+}
+.ad-when-p {
+  margin: 0;
+  font-size: 13px;
+}
+.ad-when-p b {
+  font-weight: 500;
+}
+.ad-note {
+  display: flex;
+  gap: 7px;
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--ad-muted);
+}
+.ad-note svg {
+  flex: none;
+  width: 13px;
+  height: 13px;
+  margin-top: 2px;
+  color: var(--ad-faint);
+}
+.ad-prompt {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--ad-fg);
+  white-space: pre-wrap;
+  max-width: 64ch;
+}
+.ad-prompt[data-clamped] {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.ad-prompt + .ad-link {
+  margin-top: 5px;
+}
+.ad-runs {
+  list-style: none;
+  margin: 0 0 6px;
+  padding: 0;
+}
+.ad-run {
+  display: grid;
+  grid-template-columns: 7px 92px 124px minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: 10px;
+  min-height: 34px;
+  padding: 3px 0;
+  border-top: 1px solid var(--ad-hair);
+  font-size: 12.5px;
+  outline: none;
+}
+.ad-run:first-child {
+  border-top: 0;
+}
+.ad-run:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--ring);
+  border-radius: 6px;
+}
+.ad-run-l {
+  color: var(--ad-fg);
+  white-space: nowrap;
+}
+.ad-run[data-unread] .ad-run-l {
+  font-weight: 600;
+}
+.ad-run[data-unread] .ad-run-l::after {
+  content: "";
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  margin-left: 5px;
+  border-radius: 50%;
+  background: var(--info);
+  vertical-align: 2px;
+}
+.ad-run-w {
+  color: var(--ad-muted);
+  white-space: nowrap;
+}
+.ad-run-t {
+  min-width: 0;
+  color: var(--ad-muted);
+  line-height: 1.4;
+}
+.ad-run-co {
+  color: var(--ad-fg);
+}
+.ad-run-why {
+  font-size: 11.5px;
+  color: var(--ad-muted);
+  white-space: nowrap;
+}
+.ad-run[data-status="failed"] .ad-run-t {
+  color: var(--ad-err);
+}
+.ad-run-a {
+  justify-self: end;
+}
+.ad-dialog .ad-run-a .ad-btn svg {
+  width: 12px;
+  height: 12px;
+}
+.ad-none {
+  margin: 0;
+  font-size: 12.5px;
+}
+
+/* empty project */
+.ad-empty {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 0 24px 40px;
+}
+.ad-empty-ic {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  color: var(--ad-muted);
+  box-shadow: inset 0 0 0 1px var(--border);
+  margin-bottom: 16px;
+}
+.ad-empty-ic svg {
+  width: 20px;
+  height: 20px;
+}
+.ad-empty h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.ad-empty p {
+  margin: 6px 0 18px;
+  max-width: 46ch;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--ad-muted);
+}
+.ad-path {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ad-fg);
+}
+
+/* after a discard: recovery stays inside the dialog */
+.ad-detail[data-undo] .ad-pane:not(.ad-pane-editor) {
+  padding-bottom: 64px;
+}
+.ad-undo {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 44px;
+  padding: 0 12px 0 26px;
+  border-top: 1px solid var(--ad-hair);
+  background: var(--popover);
+  font-size: 12.5px;
+  color: var(--ad-muted);
+}
+.ad-undo kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 4px;
+  font: 500 11px/1 var(--font-sans);
+  color: var(--ad-muted);
+  background: var(--ad-accent);
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+
+/* ------------------------------------------------------------ the editor's pane frame */
+.ad-pane.ad-pane-editor {
+  padding: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+/* same insets as the detail pane, so the title field sits exactly where the
+   detail's heading was — Edit swaps them in place, nothing travels */
+.ad-ed-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 20px 26px 22px;
+}
+.ad-ed-h {
+  align-items: center;
+}
+.ad-ed-foot {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 54px;
+  padding: 10px 14px 10px 26px;
+  border-top: 1px solid var(--ad-hair);
+  background: var(--popover);
+}
+.ad-ed-hint {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 7px;
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--ad-muted);
+}
+.ad-ed-hint[data-confirm] {
+  color: var(--ad-fg);
+}
+.ad-ed-hint .ad-link {
+  font-size: 12px;
+}
+
+/* ------------------------------------------------------------ menus */
+.ad-menu {
+  min-width: 200px;
+}
+.ad-switch-menu {
+  min-width: 260px;
+}
+.ad-mi {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+  padding: 0 9px;
+  border-radius: 7px;
+  color: var(--ad-fg);
+  font-size: 13px;
+  outline: none;
+  cursor: default;
+  user-select: none;
+}
+.ad-mi[data-highlighted] {
+  background: var(--ad-accent);
+}
+/* A leading icon (where it runs, a device): the lab's 15px, muted. A
+   project's favicon keeps its own size and colours. */
+.ad-mi > svg:first-child:not(.ad-fav) {
+  width: 15px;
+  height: 15px;
+  flex-shrink: 0;
+  color: var(--ad-muted);
+}
+.ad-mi-t {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.ad-mi-h {
+  font-size: 11.5px;
+  line-height: 1.35;
+  color: var(--ad-muted);
+  white-space: normal;
+}
+.ad-mi-a {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding-left: 12px;
+  font-size: 12px;
+  color: var(--ad-muted);
+}
+.ad-mi-a .ad-glyph {
+  width: 6px;
+  height: 6px;
+}
+.ad-mi-ck-slot {
+  display: inline-flex;
+  width: 14px;
+  margin-left: 2px;
+}
+.ad-mi-ck svg {
+  width: 14px;
+  height: 14px;
+}
+.ad-menu .ad-mi2 {
+  align-items: flex-start;
+  padding-top: 7px;
+  padding-bottom: 7px;
+}
+.ad-menu .ad-mi2 > svg {
+  margin-top: 1px;
+}
+.ad-menu .ad-mi2 .ad-mi-h {
+  color: var(--ad-muted);
+}

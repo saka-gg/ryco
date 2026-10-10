@@ -1,12 +1,4 @@
-import {
-  Suspense,
-  lazy,
-  useCallback,
-  useEffect,
-  useState,
-  type CSSProperties,
-  type ReactNode,
-} from "react";
+import { Suspense, lazy, useCallback, type CSSProperties, type ReactNode } from "react";
 
 import {
   PREFERS_REDUCED_MOTION_QUERY,
@@ -54,37 +46,20 @@ const RightPanelLoadingFallback = (props: { mode: DiffPanelMode; label: string }
   );
 };
 
-function RightPanelContentMotionFrame(props: {
-  animate: boolean;
-  children: ReactNode;
-  open: boolean;
-}) {
-  const [entered, setEntered] = useState(!props.animate && props.open);
+// The column, its slide and this content fade all run on the shared pane
+// duration and curve, so the panel opens and closes as one motion.
+const RIGHT_PANEL_MOTION_CLASS_NAME =
+  "duration-(--app-motion-duration-pane) ease-(--app-motion-ease) motion-reduce:transition-none";
 
-  useEffect(() => {
-    if (!props.animate) {
-      setEntered(props.open);
-      return;
-    }
-
-    if (!props.open) {
-      setEntered(false);
-      return;
-    }
-
-    const frameId = window.requestAnimationFrame(() => setEntered(true));
-    return () => window.cancelAnimationFrame(frameId);
-  }, [props.animate, props.open]);
-
-  const active = props.animate ? props.open && entered : props.open;
-
+function RightPanelContentMotionFrame(props: { children: ReactNode; open: boolean }) {
   return (
     <div
       aria-hidden={props.open ? undefined : true}
       inert={props.open ? undefined : true}
       className={cn(
-        "flex min-h-0 w-full flex-1 transition-[translate,opacity] duration-[300ms] ease-[cubic-bezier(0.16,1,0.3,1)] will-change-transform motion-reduce:transition-none",
-        active ? "translate-x-0 opacity-100" : "translate-x-4 opacity-0",
+        "flex min-h-0 w-full flex-1 transition-[translate,opacity] will-change-transform starting:translate-x-4 starting:opacity-0",
+        RIGHT_PANEL_MOTION_CLASS_NAME,
+        props.open ? "translate-x-0 opacity-100" : "translate-x-4 opacity-0",
       )}
     >
       {props.children}
@@ -97,6 +72,8 @@ export const LazyRightPanel = (props: {
   panelMode: RightPanelMode | null;
   openedPanelModes: ReadonlyArray<RightPanelMode>;
   openedAgentKeys: ReadonlyArray<string>;
+  /** The page tab's render while it is open; it shows one HTML render at a time. */
+  openedRenderKey?: string | null;
   onClosePanelTab: (input: { mode: RightPanelMode; agentKey?: string }) => void;
   maximized?: boolean;
   onToggleMaximized?: (() => void) | undefined;
@@ -123,7 +100,9 @@ export const LazyRightPanel = (props: {
                           ? "Loading agents..."
                           : props.panelMode === "agent"
                             ? "Loading subagent thread..."
-                            : "Loading workspace..."
+                            : props.panelMode === "render"
+                              ? "Loading page..."
+                              : "Loading workspace..."
             }
           />
         }
@@ -133,6 +112,7 @@ export const LazyRightPanel = (props: {
           panelMode={props.panelMode}
           openedPanelModes={props.openedPanelModes}
           openedAgentKeys={props.openedAgentKeys}
+          openedRenderKey={props.openedRenderKey ?? null}
           onClosePanelTab={props.onClosePanelTab}
           maximized={props.maximized ?? false}
           onToggleMaximized={props.onToggleMaximized}
@@ -148,6 +128,7 @@ export const RightPanelInlineSidebar = (props: {
   panelMode: RightPanelMode | null;
   openedPanelModes: ReadonlyArray<RightPanelMode>;
   openedAgentKeys: ReadonlyArray<string>;
+  openedRenderKey?: string | null;
   onClosePanelTab: (input: { mode: RightPanelMode; agentKey?: string }) => void;
   onClose: () => void;
   onOpen: () => void;
@@ -236,7 +217,8 @@ export const RightPanelInlineSidebar = (props: {
         maximized
           ? "min-w-0 flex-1"
           : cn(
-              "flex-none transition-[width] duration-[360ms] ease-[cubic-bezier(0.16,1,0.3,1)] motion-reduce:transition-none",
+              "flex-none transition-[width]",
+              RIGHT_PANEL_MOTION_CLASS_NAME,
               open ? "w-(--sidebar-width)" : "w-0",
             ),
       )}
@@ -251,7 +233,8 @@ export const RightPanelInlineSidebar = (props: {
           maximized
             ? "translate-x-0"
             : cn(
-                "transition-[translate,width] duration-[360ms] ease-[cubic-bezier(0.16,1,0.3,1)] motion-reduce:transition-none",
+                "transition-[translate,width]",
+                RIGHT_PANEL_MOTION_CLASS_NAME,
                 open ? "translate-x-0" : "pointer-events-none translate-x-full",
               ),
         )}
@@ -262,7 +245,7 @@ export const RightPanelInlineSidebar = (props: {
           storageKey: RIGHT_PANEL_INLINE_SIDEBAR_WIDTH_STORAGE_KEY,
         }}
       >
-        <RightPanelContentMotionFrame animate={!prefersReducedMotion} open={open}>
+        <RightPanelContentMotionFrame open={open}>
           <div className="flex min-h-0 w-full flex-1" style={panelContentVisibilityStyle}>
             {renderContent && renderPanelSurface ? (
               <LazyRightPanel
@@ -270,6 +253,7 @@ export const RightPanelInlineSidebar = (props: {
                 panelMode={panelMode}
                 openedPanelModes={props.openedPanelModes}
                 openedAgentKeys={props.openedAgentKeys}
+                openedRenderKey={props.openedRenderKey ?? null}
                 onClosePanelTab={props.onClosePanelTab}
                 maximized={maximized}
                 onToggleMaximized={props.onToggleMaximized}

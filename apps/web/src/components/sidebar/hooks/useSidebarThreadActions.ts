@@ -2,6 +2,7 @@ import React, { useCallback } from "react";
 import { scopedThreadKey, scopeProjectRef, scopeThreadRef } from "@ryco/client-runtime/scoped";
 import {
   type ContextMenuItem,
+  type ScopedProjectRef,
   type ScopedThreadRef,
   type ThreadEnvMode,
   type ThreadId,
@@ -56,6 +57,10 @@ export function useSidebarThreadActions(params: {
   sidebarThreadByKeyRef: React.RefObject<ReadonlyMap<string, SidebarThreadSummary>>;
   memberProjectByScopedKey: ReadonlyMap<string, SidebarProjectGroupMember>;
   projectCwd: string | null | undefined;
+  /** See `useThreadMenuActions`; the frozen phone tier leaves it unset. */
+  openProjectSettings?: (projectRef: ScopedProjectRef) => void;
+  /** See `useThreadMenuActions`: chat rows get folder actions and chat menu extensions. */
+  chat?: Parameters<typeof useThreadMenuActions>[0]["chat"];
 }) {
   const {
     router,

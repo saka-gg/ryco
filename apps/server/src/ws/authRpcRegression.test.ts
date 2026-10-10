@@ -1,3 +1,6 @@
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import { Effect, Layer, Option, Schema } from "effect";
@@ -180,6 +183,58 @@ it.effect("routes orchestration message search through the projection query", ()
     });
     expect(result).toEqual([searchResult]);
   }),
+);
+
+it.effect(
+  "lets client sessions read a thread's attachments, but only attachments of its messages",
+  () =>
+    Effect.gen(function* () {
+      const attachmentsDir = mkdtempSync(join(tmpdir(), "ryco-read-chunk-"));
+      const attachmentId = "thread-read-11111111-2222-4333-8444-555555555555-html";
+      writeFileSync(join(attachmentsDir, attachmentId), "<p>chart</p>");
+      const message = {
+        id: MessageId.make("message-page"),
+        role: "assistant",
+        text: " ",
+        attachments: [
+          {
+            type: "file",
+            id: attachmentId,
+            name: "Chart.html",
+            mimeType: "text/html",
+            sizeBytes: 12,
+          },
+        ],
+      };
+      const { ctx } = makeOrchestrationContext("client");
+      const handlers = makeOrchestrationHandlers({
+        ...ctx,
+        config: { attachmentsDir },
+        projectionSnapshotQuery: {
+          ...ctx.projectionSnapshotQuery,
+          getThreadMessageById: (input: { readonly messageId: MessageId }) =>
+            Effect.succeed(input.messageId === message.id ? Option.some(message) : Option.none()),
+        },
+      } as unknown as WsRpcContext);
+      const readChunk = getTestHandler<
+        {
+          readonly threadId: ThreadId;
+          readonly messageId: MessageId;
+          readonly attachmentId: string;
+          readonly offset: number;
+        },
+        { readonly dataBase64: string; readonly totalBytes: number },
+        { readonly _tag: string }
+      >(handlers, WS_METHODS.chatAttachmentsReadChunk);
+      const reference = { threadId: ThreadId.make("thread-read"), attachmentId, offset: 0 };
+
+      const chunk = yield* readChunk({ ...reference, messageId: message.id });
+      expect(Buffer.from(chunk.dataBase64, "base64").toString("utf8")).toBe("<p>chart</p>");
+      const unrelated = yield* Effect.flip(
+        readChunk({ ...reference, messageId: MessageId.make("other-message") }),
+      );
+      expect(unrelated._tag).toBe("ChatAttachmentReadError");
+    }),
 );
 
 it.effect("rejects client sessions from orchestration dispatch", () =>

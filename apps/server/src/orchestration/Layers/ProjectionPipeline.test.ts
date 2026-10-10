@@ -101,7 +101,10 @@ it("routes each event only to its explicit projection owners", () => {
   assert.deepEqual(ORCHESTRATION_EVENT_PROJECTORS["worktree.checkoutRemoved"], [
     ORCHESTRATION_PROJECTOR_NAMES.worktrees,
   ]);
-  assert.equal(Object.keys(ORCHESTRATION_EVENT_PROJECTORS).length, 50);
+  assert.deepEqual(ORCHESTRATION_EVENT_PROJECTORS["worktree.relocated"], [
+    ORCHESTRATION_PROJECTOR_NAMES.worktrees,
+  ]);
+  assert.equal(Object.keys(ORCHESTRATION_EVENT_PROJECTORS).length, 51);
 });
 
 it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
@@ -1836,6 +1839,123 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
         WHERE turn_id = 'turn-turn-end'
       `;
       assert.equal(turns[0]?.completedAt, at(40));
+    }),
+  );
+
+  it.effect("keys a turn on its reply, not on a page or file published after it", () =>
+    Effect.gen(function* () {
+      const projectionPipeline = yield* OrchestrationProjectionPipeline;
+      const eventStore = yield* OrchestrationEventStore;
+      const sql = yield* SqlClient.SqlClient;
+      const at = (second: number) => `2026-01-02T00:00:${String(second).padStart(2, "0")}.000Z`;
+      const threadId = ThreadId.make("thread-turn-reply");
+      let sequence = 0;
+      const base = () => {
+        sequence += 1;
+        return {
+          eventId: EventId.make(`evt-turn-reply-${sequence}`),
+          occurredAt: at(sequence),
+          commandId: CommandId.make(`cmd-turn-reply-${sequence}`),
+          causationEventId: null,
+          correlationId: CorrelationId.make(`cmd-turn-reply-${sequence}`),
+          metadata: {},
+        };
+      };
+      yield* eventStore.append({
+        ...base(),
+        type: "project.created",
+        aggregateKind: "project",
+        aggregateId: ProjectId.make("project-turn-reply"),
+        payload: {
+          projectId: ProjectId.make("project-turn-reply"),
+          title: "Project",
+          workspaceRoot: "/tmp/project-turn-reply",
+          defaultModelSelection: null,
+          scripts: [],
+          createdAt: at(0),
+          updatedAt: at(0),
+        },
+      });
+      yield* eventStore.append({
+        ...base(),
+        type: "thread.created",
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        payload: {
+          threadId,
+          projectId: ProjectId.make("project-turn-reply"),
+          title: "Thread",
+          modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-codex" },
+          runtimeMode: "full-access",
+          branch: null,
+          worktreePath: null,
+          createdAt: at(0),
+          updatedAt: at(0),
+        },
+      });
+      const message = (
+        turn: string,
+        messageId: string,
+        second: number,
+        kind: "reply" | "page" | "streaming",
+      ) => ({
+        ...base(),
+        type: "thread.message-sent" as const,
+        aggregateKind: "thread" as const,
+        aggregateId: threadId,
+        payload: {
+          threadId,
+          messageId: MessageId.make(messageId),
+          role: "assistant" as const,
+          // What ryco_html_render and ryco_attach_file publish: blank text and the attachment.
+          text: kind === "page" ? " " : `${messageId} text`,
+          ...(kind === "page"
+            ? {
+                attachments: [
+                  {
+                    type: "file" as const,
+                    id: `thread-turn-reply-${messageId}`,
+                    name: "Chart.html",
+                    mimeType: "text/html",
+                    sizeBytes: 100,
+                    htmlRender: { title: "Chart", height: 400 },
+                  },
+                ],
+              }
+            : {}),
+          turnId: TurnId.make(turn),
+          streaming: kind === "streaming",
+          createdAt: at(second),
+          updatedAt: at(second),
+        },
+      });
+      // The reply was written before the page was published.
+      yield* eventStore.append(message("turn-a", "a-reply", 5, "reply"));
+      yield* eventStore.append(message("turn-a", "a-page", 10, "page"));
+      // The page came first, then the reply.
+      yield* eventStore.append(message("turn-b", "b-page", 12, "page"));
+      yield* eventStore.append(message("turn-b", "b-reply", 14, "reply"));
+      // Only pages: the turn keys on the latest.
+      yield* eventStore.append(message("turn-c", "c-page-1", 16, "page"));
+      yield* eventStore.append(message("turn-c", "c-page-2", 18, "page"));
+      // A page while the reply is still streaming.
+      yield* eventStore.append(message("turn-d", "d-reply", 20, "streaming"));
+      yield* eventStore.append(message("turn-d", "d-page", 22, "page"));
+
+      yield* projectionPipeline.bootstrap;
+
+      const turns = yield* sql<{ readonly turnId: string; readonly assistantMessageId: string }>`
+        SELECT turn_id AS "turnId", assistant_message_id AS "assistantMessageId"
+        FROM projection_turns
+        WHERE thread_id = ${threadId}
+        ORDER BY turn_id
+      `;
+      assert.deepEqual(turns, [
+        { turnId: "turn-a", assistantMessageId: "a-reply" },
+        { turnId: "turn-b", assistantMessageId: "b-reply" },
+        { turnId: "turn-c", assistantMessageId: "c-page-2" },
+        { turnId: "turn-d", assistantMessageId: "d-reply" },
+      ]);
     }),
   );
 

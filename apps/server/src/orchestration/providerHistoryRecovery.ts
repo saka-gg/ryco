@@ -5,7 +5,42 @@ import {
   type OrchestrationThread,
   type OrchestrationThreadActivity,
 } from "@ryco/contracts";
+import { formatAssistantDeliveryText, parseAssistantDelivery } from "../assistantAttachments.ts";
 import type { ProviderThreadHistory } from "../provider/Services/ProviderAdapter.ts";
+
+interface RecoveredReply {
+  readonly text: string;
+  /** The provider text carried a `ryco-attachments` manifest that live completion consumes. */
+  readonly delivery: boolean;
+}
+
+/**
+ * Provider transcripts keep the raw delivery manifest that live completion strips, so recovered
+ * text is normalized the same way and never shows the fence. Files are not re-delivered here:
+ * restores carry no attachment list, so the projection keeps the message's existing attachments.
+ */
+function recoveredReply(role: "user" | "assistant", text: string): RecoveredReply {
+  const delivery = role === "assistant" ? parseAssistantDelivery(text) : undefined;
+  return delivery
+    ? { text: formatAssistantDeliveryText(delivery.text, delivery.errors), delivery: true }
+    : { text, delivery: false };
+}
+
+/** Whether a local message already shows the recovered reply, so restoring it changes nothing. */
+function showsReply(
+  local: Pick<OrchestrationMessage, "text" | "streaming">,
+  reply: RecoveredReply,
+): boolean {
+  if (local.streaming) return false;
+  if (local.text === reply.text) return true;
+  // Live delivery appends per-file failure notices after the reply, which the transcript cannot
+  // reproduce. Text that still contains a raw manifest (an earlier recovery) is repaired.
+  return (
+    reply.delivery &&
+    (reply.text.trim() === "" || local.text.startsWith(`${reply.text}\n\n`)) &&
+    parseAssistantDelivery(local.text) === undefined
+  );
+}
 
 /** Preserve local IDs/attachments and segmented messages when filling a provider gap. */
 export function historyMessagesToRestore(
@@ -65,10 +100,13 @@ export function historyMessagesToRestore(
       // Do not duplicate earlier text across a pause-for-user segment boundary.
       if (!message.text.startsWith(prefix)) continue;
       for (const [segmentIndex, segment] of segments.entries()) {
-        const text =
-          segmentIndex === segments.length - 1 ? message.text.slice(prefix.length) : segment.text;
-        if (segment.text !== text || segment.streaming)
-          restored.push({ ...segment, text, streaming: false, updatedAt: now });
+        // Live completion finalizes (and strips a manifest from) each segment on its own.
+        const reply =
+          segmentIndex === segments.length - 1
+            ? recoveredReply(message.role, message.text.slice(prefix.length))
+            : { text: segment.text, delivery: false };
+        if (!showsReply(segment, reply))
+          restored.push({ ...segment, text: reply.text, streaming: false, updatedAt: now });
       }
       continue;
     }
@@ -85,9 +123,11 @@ export function historyMessagesToRestore(
         ),
       ).toISOString();
     precedingCreatedAt = Math.max(precedingCreatedAt, Date.parse(createdAt));
-    if (existing && existing.text === message.text && !existing.streaming) continue;
+    const reply = recoveredReply(message.role, message.text);
+    if (existing && showsReply(existing, reply)) continue;
     restored.push({
       ...message,
+      text: reply.text,
       id: existing?.id ?? recoveredId,
       streaming: false,
       createdAt,

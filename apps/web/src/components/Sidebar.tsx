@@ -4,7 +4,7 @@ import { useDeviceName } from "../deviceName";
 import { isLocalHubAlias } from "../deviceName.logic";
 import { useServerConfig } from "~/rpc/serverState";
 import { autoAnimate, type AnimationController } from "@formkit/auto-animate";
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 import {
   type DragCancelEvent,
@@ -101,6 +101,14 @@ import { adaptProjectForSidebarTree } from "./sidebar/sidebarTreeAdapters";
 import { composeSidebarTree } from "./sidebar/hooks/useSidebarTree";
 import { SidebarProjectsContent, PROJECT_ROOT_DROP_ID } from "./sidebar/SidebarProjectList";
 import { SidebarProjectItem } from "./sidebar/SidebarProjectItem";
+import { SidebarChatList } from "./sidebar/SidebarChatList";
+import {
+  buildSidebarChatRows,
+  chatsTurnedIntoProjects,
+  collectChatProjectKeys,
+} from "./sidebar/sidebarChats.logic";
+import { sidebarProjectRowSelector } from "./chat/promoteChatDialogStore";
+import { useChatsAvailability } from "../hooks/useChatsAvailability";
 import { SidebarProjectDialogProvider } from "./sidebar/SidebarProjectDialogOwner";
 import { SidebarChromeHeader, SidebarChromeFooter } from "./sidebar/SidebarChrome";
 import { SidebarPrimaryActions } from "./sidebar/SidebarPrimaryActions";
@@ -182,6 +190,31 @@ function attachSidebarAutoAnimateNode(
   }
 }
 
+/**
+ * Shows rows that moved into an auto-animated list from elsewhere in the
+ * sidebar at once. auto-animate keeps an added row fully transparent for the
+ * first half of its entrance; for a row whose old copy left another list in
+ * the same update (a chat turned into a project leaves the Chats section) that
+ * reads as an empty list. Call it from a layout effect of the commit that
+ * added the rows: that commit's DOM changes queued auto-animate's mutation
+ * observer first, so this microtask runs after the entrances started and
+ * before the next paint. Rows that move by FLIP stay animated.
+ */
+function revealMovedSidebarRows(
+  controllers: SidebarAutoAnimateControllers,
+  rowSelector: string,
+): void {
+  queueMicrotask(() => {
+    for (const list of controllers.keys()) {
+      if (!list.isConnected) continue;
+      for (const row of Array.from(list.children)) {
+        if (!row.matches(rowSelector) && row.querySelector(rowSelector) === null) continue;
+        for (const animation of row.getAnimations()) animation.finish();
+      }
+    }
+  });
+}
+
 function buildThreadJumpLabelMap(input: {
   keybindings: ReturnType<typeof useAppKeybindings>;
   platform: string;
@@ -240,7 +273,7 @@ export default function Sidebar() {
     sidebarProjectGroupingOverrides: settings.sidebarProjectGroupingOverrides,
   }));
   const { updateSettings } = useUpdateSettings();
-  const { handleNewThread } = useNewThreadHandler();
+  const { handleNewThread, handleNewChat } = useNewThreadHandler();
   const { archiveThread, trashThread, stopThreadSession, interruptThreadTurn } = useThreadActions();
   const { isMobile, open, openMobile, setOpen, setOpenMobile } = useSidebar();
   const pinnedThreadKeys = useMemo(
@@ -517,6 +550,34 @@ export default function Sidebar() {
       scopeProjectRef(newThreadTargetProject.environmentId, newThreadTargetProject.id),
     );
   }, [handleNewThread, isMobile, newThreadTargetProject, setOpenMobile]);
+
+  // "No project" chats: excluded from the project tree (useLogicalProjectSnapshots)
+  // and listed in their own section.
+  const draftThreadsByThreadKey = useComposerDraftStore((store) => store.draftThreadsByThreadKey);
+  const sidebarChatRows = useMemo(
+    () =>
+      buildSidebarChatRows({
+        projects,
+        threads: sidebarThreads,
+        draftThreadsByThreadKey,
+        sortOrder: sidebarThreadSortOrder,
+        pinnedThreadKeys,
+      }),
+    [draftThreadsByThreadKey, pinnedThreadKeys, projects, sidebarThreadSortOrder, sidebarThreads],
+  );
+  const chatEnvironmentId =
+    selectedHostedEnvironmentId ?? newThreadTargetProject?.environmentId ?? primaryEnvironmentId;
+  const chatsAvailability = useChatsAvailability(chatEnvironmentId);
+  const startNewChatFromSidebar = useMemo(
+    () =>
+      chatEnvironmentId && chatsAvailability.available
+        ? () => {
+            if (isMobile) setOpenMobile(false);
+            void handleNewChat(chatEnvironmentId);
+          }
+        : null,
+    [chatEnvironmentId, chatsAvailability.available, handleNewChat, isMobile, setOpenMobile],
+  );
 
   // Build a mapping from physical project key → logical project key for
   // cross-environment grouping.  Projects that share a repositoryIdentity
@@ -939,6 +1000,21 @@ export default function Sidebar() {
       shouldAnimateProjectLists,
     );
   }, [shouldAnimateProjectLists]);
+  // A chat turned into a project moves from the Chats section into the project
+  // tree in one update: its project row appears in place instead of fading in
+  // from nothing after its chat row is already gone.
+  const previousChatProjectKeysRef = useRef<ReadonlySet<string> | null>(null);
+  useLayoutEffect(() => {
+    const previousChatProjectKeys = previousChatProjectKeysRef.current;
+    previousChatProjectKeysRef.current = collectChatProjectKeys(projects);
+    if (previousChatProjectKeys === null) return;
+    const promoted = chatsTurnedIntoProjects(previousChatProjectKeys, projects);
+    if (promoted.length === 0) return;
+    revealMovedSidebarRows(
+      projectListAnimationControllersRef.current,
+      promoted.map(sidebarProjectRowSelector).join(", "),
+    );
+  }, [projects]);
 
   const threadListAnimationControllersRef = useRef<SidebarAutoAnimateControllers>(new Map());
   const attachThreadListAutoAnimateRef = useCallback(
@@ -1280,9 +1356,17 @@ export default function Sidebar() {
       />
 
       <SidebarPrimaryActions
+        mode={sidebarMode}
+        environments={inboxEnvironments}
+        primaryEnvironmentId={primaryEnvironmentId}
         newThreadShortcutLabel={newThreadShortcutLabel}
-        newThreadDisabled={newThreadTargetProject === null}
-        onNewThread={startNewThreadFromSidebar}
+        // Without any project the button starts a "No project" chat where chats are available.
+        newThreadDisabled={newThreadTargetProject === null && startNewChatFromSidebar === null}
+        onNewThread={
+          newThreadTargetProject === null && startNewChatFromSidebar
+            ? startNewChatFromSidebar
+            : startNewThreadFromSidebar
+        }
         searchShortcutLabel={commandPaletteShortcutLabel}
       />
 
@@ -1315,7 +1399,20 @@ export default function Sidebar() {
             handleProjectDragCancel={handleProjectDragCancel}
             projectTreeRows={projectTreeRows}
             attachProjectListAutoAnimateRef={attachProjectListAutoAnimateRef}
-            projectsLength={projects.length}
+            projectsLength={orderedProjects.length}
+            chatsSection={
+              <SidebarChatList
+                chats={sidebarChatRows}
+                activeRouteThreadKey={activeRouteThreadKey}
+                handleNewThread={handleNewThread}
+                archiveThread={archiveThread}
+                trashThread={trashThread}
+                stopThreadSession={stopThreadSession}
+                interruptThreadTurn={interruptThreadTurn}
+                attachThreadListAutoAnimateRef={attachThreadListAutoAnimateRef}
+                onNewChat={startNewChatFromSidebar}
+              />
+            }
             renderProjectRow={(project, dragHandleProps, onNewFolderWithProject) => (
               <SidebarProjectItem
                 project={project}
@@ -1362,7 +1459,6 @@ export default function Sidebar() {
             primaryEnvironmentId={primaryEnvironmentId}
             onOpenThread={navigateToThread}
             projects={projects}
-            projectGroups={sidebarProjects}
             threads={sidebarThreads}
             worktrees={sidebarWorktrees}
           />

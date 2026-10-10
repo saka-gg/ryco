@@ -114,6 +114,7 @@ const PlanSidebar = memo(function PlanSidebar({
           "selection-glass-surface pointer-events-auto max-h-[min(72vh,42rem)] w-[min(360px,calc(100vw_-_1.5rem))] rounded-lg border",
       )}
       style={mode === "sidebar" ? { maxHeight: "calc(100% - 1.5rem)" } : undefined}
+      data-slot="overview-panel"
     >
       {!empty && layoutProps.branchControl ? (
         <div

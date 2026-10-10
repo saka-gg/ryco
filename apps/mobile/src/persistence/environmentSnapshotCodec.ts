@@ -1,4 +1,5 @@
 import { WorktreeId, type EnvironmentId } from "@ryco/contracts";
+import { projectKindOf } from "@ryco/shared/projectKind";
 import { isThreadLineage } from "@ryco/client-runtime/state/threads";
 import {
   MAX_WORKSPACE_SNAPSHOT_BYTES_PER_ENVIRONMENT,
@@ -228,6 +229,7 @@ export function toWorkspaceMetadataSnapshot(
     projects: record.projects.map((project) => ({
       environmentId: project.environmentId,
       id: project.id,
+      kind: projectKindOf(project),
       name: project.name,
       cwd: project.cwd,
       repositoryIdentity: project.repositoryIdentity ?? null,

@@ -10,12 +10,15 @@ export const mobileClaudeCacheReview: ClaudeCacheReviewPresentation = {
   review: (review) =>
     new Promise((resolve) => {
       const evidence = review.observation;
+      const compactUnavailable = review.compactUnavailableReason;
       Alert.alert(
         "Review large Claude resume",
-        `${review.reason}\n\n${describeObservedClaudeCache(evidence)} Compaction summarizes context and can consume tokens.`,
+        `${review.reason}\n\n${describeObservedClaudeCache(evidence)} ${compactUnavailable ?? "Compaction summarizes context and can consume tokens."}`,
         [
           { text: "Continue with full context", onPress: () => resolve("continue") },
-          { text: "Compact then send", onPress: () => resolve("compact") },
+          ...(compactUnavailable === null
+            ? [{ text: "Compact then send", onPress: () => resolve("compact") }]
+            : []),
           { text: "Cancel", style: "cancel", onPress: () => resolve("cancel") },
         ],
         { cancelable: true, onDismiss: () => resolve("cancel") },

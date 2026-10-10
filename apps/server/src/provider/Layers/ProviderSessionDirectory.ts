@@ -1,3 +1,4 @@
+import { noteStorageActivity } from "../../storage/lifecycle.ts";
 import { defaultInstanceIdForDriver, ProviderDriverKind, type ThreadId } from "@ryco/contracts";
 import { Effect, Layer, Option, Schema } from "effect";
 
@@ -190,7 +191,12 @@ const makeProviderSessionDirectory = Effect.gen(function* () {
     );
 
   return {
-    upsert,
+    upsert: (binding) =>
+      upsert(binding).pipe(
+        Effect.tap(() =>
+          binding.status === "stopped" ? Effect.sync(noteStorageActivity) : Effect.void,
+        ),
+      ),
     getProvider,
     getBinding,
     listThreadIds,

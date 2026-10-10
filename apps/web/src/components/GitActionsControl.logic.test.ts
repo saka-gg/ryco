@@ -9,7 +9,9 @@ import {
   resolveAutoFeatureBranchName,
   resolveDefaultBranchActionDialogCopy,
   resolveLiveThreadBranchUpdate,
+  resolvePullAvailability,
   resolveQuickAction,
+  resolveRecommendedGitActionTile,
   resolveThreadBranchUpdate,
 } from "./GitActionsControl.logic";
 
@@ -1193,3 +1195,86 @@ describe("resolveAutoFeatureBranchName", () => {
     assert.equal(ref, "feature/update");
   });
 });
+
+describe("resolveRecommendedGitActionTile", () => {
+  const resolve = (overrides: Partial<VcsStatusResult>, isDefaultRef = false, hasRemote = true) => {
+    const gitStatus = status(overrides);
+    return resolveRecommendedGitActionTile(
+      resolveQuickAction(gitStatus, false, isDefaultRef, hasRemote),
+      gitStatus.hasWorkingTreeChanges,
+    );
+  };
+
+  it("points a commit-including quick action at Commit while there are changes", () => {
+    assert.equal(resolve({ hasWorkingTreeChanges: true }), "commit");
+    assert.equal(resolve({ hasWorkingTreeChanges: true }, true), "commit");
+    assert.equal(
+      resolve({ hasWorkingTreeChanges: true, hasUpstream: false }, false, false),
+      "commit",
+    );
+  });
+
+  it("points pushes at Push, including a clean default ref's commit_push", () => {
+    assert.equal(resolve({ aheadCount: 2 }, true), "push");
+    assert.equal(resolve({ aheadCount: 2, pr: { ...openPrStatus(), state: "open" } }), "push");
+  });
+
+  it("points create, view, pull and publish at their buttons", () => {
+    assert.equal(resolve({ aheadCount: 2 }), "pr");
+    assert.equal(resolve({ pr: openPrStatus() }), "pr");
+    assert.equal(resolve({ behindCount: 1 }), "pull");
+    assert.equal(resolve({ hasUpstream: false }, false, false), "push");
+  });
+
+  it("recommends nothing for a hint", () => {
+    assert.equal(resolve({}), null);
+    assert.equal(resolve({ aheadCount: 1, behindCount: 1 }), null);
+    assert.equal(resolveRecommendedGitActionTile(resolveQuickAction(status(), true), false), null);
+  });
+});
+
+describe("resolvePullAvailability", () => {
+  it("blocks Pull while busy or before status loads", () => {
+    assert.deepStrictEqual(resolvePullAvailability(status({ behindCount: 1 }), true), {
+      disabledReason: "Git action in progress.",
+      detail: "1 behind upstream",
+    });
+    assert.deepStrictEqual(resolvePullAvailability(null, false), {
+      disabledReason: "Git status is unavailable.",
+      detail: "No upstream",
+    });
+  });
+
+  it("needs an upstream to be behind", () => {
+    assert.deepStrictEqual(resolvePullAvailability(status({ hasUpstream: false }), false), {
+      disabledReason: "No upstream",
+      detail: "No upstream",
+    });
+    assert.deepStrictEqual(resolvePullAvailability(status({ behindCount: 0 }), false), {
+      disabledReason: "Up to date",
+      detail: "Up to date",
+    });
+    assert.deepStrictEqual(resolvePullAvailability(status({ behindCount: 3 }), false), {
+      disabledReason: null,
+      detail: "3 behind upstream",
+    });
+  });
+
+  it("allows Pull on a diverged branch", () => {
+    assert.equal(
+      resolvePullAvailability(status({ aheadCount: 2, behindCount: 1 }), false).disabledReason,
+      null,
+    );
+  });
+});
+
+function openPrStatus(): NonNullable<VcsStatusResult["pr"]> {
+  return {
+    number: 7,
+    title: "Open PR",
+    url: "https://example.com/pr/7",
+    baseRef: "main",
+    headRef: "feature/test",
+    state: "open",
+  };
+}

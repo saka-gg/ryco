@@ -281,6 +281,57 @@ describe("Inbox model", () => {
     expect(sections[1]?.rows.map((row) => row.threadId)).toEqual(["manual", "merged"]);
   });
 
+  it("labels chat threads No project in a chat folder and keeps them openable", () => {
+    const chat: Project = {
+      ...project(NODE_A, "chat-a", "Fix the login bug"),
+      cwd: "/Users/me/.ryco/chats/2026-10-07-fix-the-login-bug-1a2b3c4d",
+      kind: "chat",
+    };
+    const sections = buildInboxSections({
+      projects: [project(NODE_A, "project-a", "Ryco"), chat],
+      worktrees: [],
+      environments: [{ environmentId: NODE_A, label: "Studio", connectionState: "connected" }],
+      threads: [
+        thread(NODE_A, "chat-thread", "chat-a", { updatedAt: "2026-07-26T09:00:00.000Z" }),
+        thread(NODE_A, "project-thread", "project-a"),
+      ],
+    });
+    const rows = sections.flatMap((section) => section.rows);
+
+    expect(rows.find((row) => row.threadId === "chat-thread")).toMatchObject({
+      environmentId: NODE_A,
+      projectLabel: "No project",
+      isChat: true,
+      isWorktree: false,
+      worktreeLabel: "Chat folder",
+      contextLabel: "Studio · No project · Chat folder",
+      state: "idle",
+      changeRequest: null,
+    });
+    expect(rows.find((row) => row.threadId === "project-thread")).toMatchObject({
+      projectLabel: "Ryco",
+      isChat: false,
+      worktreeLabel: "Local workspace",
+    });
+  });
+
+  it("finds chat threads when searching for No project", () => {
+    const chat: Project = { ...project(NODE_A, "chat-a", "Fix the login bug"), kind: "chat" };
+    const sections = buildInboxSections({
+      projects: [project(NODE_A, "project-a", "Ryco"), chat],
+      worktrees: [],
+      environments: [{ environmentId: NODE_A, label: "Studio", connectionState: "connected" }],
+      threads: [
+        thread(NODE_A, "chat-thread", "chat-a"),
+        thread(NODE_A, "project-thread", "project-a"),
+      ],
+      query: "No project",
+    });
+    expect(sections.flatMap((section) => section.rows.map((row) => row.threadId))).toEqual([
+      "chat-thread",
+    ]);
+  });
+
   it("routes every empty state to its missing prerequisite", () => {
     expect(
       resolveInboxEmptyState({
@@ -314,6 +365,26 @@ describe("Inbox model", () => {
         hasFilter: true,
       }),
     ).toBe("clear-filter");
+  });
+
+  it("points filtered-away chat threads at the filter, not at a missing project", () => {
+    // projectCount excludes "No project" chats, so chat threads can exist with no project.
+    expect(
+      resolveInboxEmptyState({
+        environmentCount: 1,
+        projectCount: 0,
+        threadCount: 2,
+        hasFilter: true,
+      }),
+    ).toBe("clear-filter");
+    expect(
+      resolveInboxEmptyState({
+        environmentCount: 1,
+        projectCount: 0,
+        threadCount: 0,
+        hasFilter: true,
+      }),
+    ).toBe("add-project");
   });
 });
 

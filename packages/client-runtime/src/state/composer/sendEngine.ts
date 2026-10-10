@@ -3,7 +3,7 @@ import {
   revalidateClaudeResumeBeforeCommit,
   type ClaudeCacheReviewPresentation,
 } from "./claudeCacheReview.ts";
-import type { ComputerTurnIntent, UsageLimitResumeGuard } from "@ryco/contracts";
+import type { ClaudeResumeGuard, ComputerTurnIntent, UsageLimitResumeGuard } from "@ryco/contracts";
 import { rejectRetiredProjectMemory } from "@ryco/shared/retiredFeatures";
 import {
   DEFAULT_MODEL,
@@ -23,6 +23,7 @@ import {
 import { buildTemporaryWorktreeBranchName } from "@ryco/shared/git";
 import { createModelSelection } from "@ryco/shared/model";
 import type { ComposerAttachment } from "../../platform/index.ts";
+import { isChatProjectRetiredError } from "./chatDrafts.ts";
 
 export interface SendTurnBootstrapInput {
   readonly requireWorktree?: boolean;
@@ -43,11 +44,22 @@ export interface SendTurnBootstrapInput {
   readonly activeThreadBranch: string | null;
   readonly worktreePath: string | null;
   readonly threadCreatedAt: string;
+  /**
+   * First send of a "No project" chat draft: the server creates the chat
+   * project (`projectId` must be the draft's) before creating the thread.
+   */
+  readonly createChatProject?: SendTurnChatProjectBootstrap | null | undefined;
+}
+
+export interface SendTurnChatProjectBootstrap {
+  readonly projectId: ProjectId;
+  readonly titleSeed: string;
 }
 
 export type SendTurnBootstrap =
   | {
       readonly requireWorktree?: boolean;
+      readonly createChatProject?: SendTurnChatProjectBootstrap;
       readonly createThread?: {
         readonly projectId: ProjectId;
         readonly title: string;
@@ -75,6 +87,30 @@ export type SendTurnBootstrap =
  * web caller around this deterministic send-engine step.
  */
 export function buildSendTurnBootstrap(input: SendTurnBootstrapInput): SendTurnBootstrap {
+  if (input.createChatProject && input.isLocalDraftThread) {
+    // A chat folder is a plain directory: never a worktree, always the
+    // draft's own (not yet created) project.
+    if (input.requireWorktree) {
+      throw new Error("A chat without a project cannot run in an isolated Git worktree.");
+    }
+    return {
+      createChatProject: {
+        projectId: input.createChatProject.projectId,
+        titleSeed: input.createChatProject.titleSeed,
+      },
+      createThread: {
+        projectId: input.createChatProject.projectId,
+        title: input.title,
+        modelSelection: input.threadCreateModelSelection,
+        runtimeMode: input.runtimeMode,
+        interactionMode: input.interactionMode,
+        tokenMode: input.tokenMode,
+        branch: null,
+        worktreePath: null,
+        createdAt: input.threadCreatedAt,
+      },
+    };
+  }
   if (input.requireWorktree && (!input.isLocalDraftThread || !input.baseBranchForWorktree)) {
     throw new Error("This launch requires a new thread and an isolated Git worktree.");
   }
@@ -114,6 +150,23 @@ export function buildSendTurnBootstrap(input: SendTurnBootstrapInput): SendTurnB
           ...(input.runSetupScript === undefined ? {} : { runSetupScript: input.runSetupScript }),
         }
       : {}),
+  };
+}
+
+/**
+ * The same chat first-send bootstrap aimed at another project id: the chat
+ * project and its thread always name the same project, so both move together.
+ * Anything that is not a chat bootstrap is returned unchanged.
+ */
+export function retargetChatProjectBootstrap(
+  bootstrap: SendTurnBootstrap,
+  projectId: ProjectId,
+): SendTurnBootstrap {
+  if (!bootstrap?.createChatProject) return bootstrap;
+  return {
+    ...bootstrap,
+    createChatProject: { ...bootstrap.createChatProject, projectId },
+    ...(bootstrap.createThread ? { createThread: { ...bootstrap.createThread, projectId } } : {}),
   };
 }
 
@@ -248,10 +301,23 @@ export interface CommitSendTurnDispatchInput {
   readonly tokenMode: AgentTokenMode;
   readonly goal?: ThreadGoalUpdate;
   readonly bootstrap: SendTurnBootstrap;
+  /**
+   * A chat first send whose project id the node retired
+   * (`isChatProjectRetiredError`): returns a fresh project id, already
+   * persisted into the chat draft, and the same message is sent once more
+   * under it with a new command id. Absent, that failure surfaces as is.
+   */
+  readonly renewChatProjectId?: () => ProjectId;
   readonly sourceControlContexts: readonly ComposerSourceControlContext[];
   readonly createdAt: string;
   readonly newCommandId: () => CommandId;
   readonly beginLocalDispatch: (options: { readonly preparingWorktree: boolean }) => void;
+  /**
+   * Closes the local dispatch window while the Claude resume review holds the
+   * send, so the settled previous turn does not read as running behind the
+   * dialog. `beginLocalDispatch` reopens it right before the turn starts.
+   */
+  readonly endLocalDispatch?: () => void;
   /**
    * Runs immediately before the final `thread.turn.start`: after the Claude
    * resume review (including any `/compact` turn and its wait), the settings
@@ -289,9 +355,12 @@ export function commitSendTurnDispatch(input: CommitSendTurnDispatchInput): Prom
   return result;
 }
 
-async function commitSendTurnDispatchOnce(input: CommitSendTurnDispatchInput): Promise<void> {
-  rejectRetiredProjectMemory(input);
-  const reviewed = await reviewClaudeResumeBeforeSend(input);
+async function commitSendTurnDispatchOnce(sendInput: CommitSendTurnDispatchInput): Promise<void> {
+  rejectRetiredProjectMemory(sendInput);
+  const reviewed = await reviewClaudeResumeBeforeSend(sendInput);
+  // The turn's start time is the command's `createdAt`, so a reviewed resume is
+  // restamped: the time spent in the dialog (and any compaction) is not work.
+  const input = reviewed ? { ...sendInput, createdAt: new Date().toISOString() } : sendInput;
   // Server-side writes derived from this message must only run once the send
   // commits; otherwise an undone first send leaves orphan title/settings.
   if (input.isFirstMessage && input.isServerThread) {
@@ -319,12 +388,39 @@ async function commitSendTurnDispatchOnce(input: CommitSendTurnDispatchInput): P
   if (reviewed || input.bootstrap?.requireWorktree) input.assertMutationReady?.();
   input.beginLocalDispatch({ preparingWorktree: false });
   input.onBeforeTurnStart?.();
-  await input.api.orchestration.dispatchCommand({
+  const startTurn = (bootstrap: SendTurnBootstrap, commandId: CommandId) =>
+    dispatchTurnStart(input, reviewed?.guard, bootstrap, commandId);
+  try {
+    await startTurn(
+      input.bootstrap,
+      input.commandId ?? CommandId.make(`composer-send:${input.threadId}:${input.messageId}`),
+    );
+  } catch (error) {
+    if (
+      !input.bootstrap?.createChatProject ||
+      !input.renewChatProjectId ||
+      !isChatProjectRetiredError(error)
+    ) {
+      throw error;
+    }
+    // The node refused before creating anything, so the same thread id and
+    // attachments go out again; a second failure is the send's own outcome.
+    const projectId = input.renewChatProjectId();
+    await startTurn(retargetChatProjectBootstrap(input.bootstrap, projectId), input.newCommandId());
+  }
+}
+
+function dispatchTurnStart(
+  input: CommitSendTurnDispatchInput,
+  claudeResumeGuard: ClaudeResumeGuard | undefined,
+  bootstrap: SendTurnBootstrap,
+  commandId: CommandId,
+) {
+  return input.api.orchestration.dispatchCommand({
     type: "thread.turn.start",
     ...(input.computerUse ? { computerUse: input.computerUse } : {}),
-    commandId:
-      input.commandId ?? CommandId.make(`composer-send:${input.threadId}:${input.messageId}`),
-    ...(reviewed ? { claudeResumeGuard: reviewed.guard } : {}),
+    commandId,
+    ...(claudeResumeGuard ? { claudeResumeGuard } : {}),
     ...(input.usageLimitResumeGuard ? { usageLimitResumeGuard: input.usageLimitResumeGuard } : {}),
     threadId: input.threadId,
     message: {
@@ -339,7 +435,7 @@ async function commitSendTurnDispatchOnce(input: CommitSendTurnDispatchInput): P
     interactionMode: input.interactionMode,
     tokenMode: input.tokenMode,
     ...(input.goal ? { goal: input.goal } : {}),
-    ...(input.bootstrap ? { bootstrap: input.bootstrap } : {}),
+    ...(bootstrap ? { bootstrap } : {}),
     ...(input.sourceControlContexts.length > 0
       ? { sourceControlContexts: input.sourceControlContexts }
       : {}),

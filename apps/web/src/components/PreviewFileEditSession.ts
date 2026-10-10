@@ -310,6 +310,30 @@ export class PreviewFileSessionOwner {
     return Promise.resolve(true);
   };
 
+  /** An authoritative checkout move preserves the buffer and fences old RPC replies. */
+  retarget(key: string) {
+    this.clearTimer();
+    this.operationGeneration++;
+    const previous = this.operation;
+    if (previous) {
+      this.discardedOperation = previous;
+      void previous.finally(() => {
+        if (this.discardedOperation === previous) this.discardedOperation = undefined;
+        this.releaseIfUnused();
+      });
+    }
+    this.operation = undefined;
+    this.commit({
+      ...this.session,
+      key,
+      saveStatus: this.unsaved ? "error" : "idle",
+      errorReason: this.unsaved ? "failed" : null,
+      errorMessage: this.unsaved
+        ? "Workspace moved. Retry saving to verify the file at its new location; your draft is preserved."
+        : null,
+    });
+  }
+
   disposeForTests() {
     this.clearTimer();
     this.disposed = true;

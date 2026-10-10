@@ -63,12 +63,18 @@ function makeContext(
   fileSystem?: FileSystem.FileSystem,
 ) {
   const refreshes: Array<string> = [];
+  const resolved = { kind: "github", ...provider } as SourceControlProviderShape;
   const ctx = {
     ownerEffect,
     fileSystem,
     sourceControlRegistry: {
-      resolve: () => Effect.succeed({ kind: "github", ...provider } as SourceControlProviderShape),
+      resolve: () => Effect.succeed(resolved),
     },
+    callSourceControlWorkflowMethod: <A>(input: {
+      readonly invoke: (
+        provider: SourceControlProviderShape,
+      ) => Effect.Effect<A, SourceControlProviderError> | undefined;
+    }) => input.invoke(resolved) ?? Effect.die("provider lacks the workflow method"),
     refreshStateForLinkedReference: () => Effect.sync(() => refreshes.push("linked")),
     refreshLinkedWorktreeSourceControlStates: (input: { readonly reason: string }) =>
       Effect.sync(() => refreshes.push(`worktrees:${input.reason}`)),
@@ -262,17 +268,6 @@ describe("pull request page handlers", () => {
           }).pipe(provide),
         ),
       ).toBe("Bitbucket does not support reopening pull requests.");
-      expect(
-        yield* run(
-          unknown[WS_METHODS.sourceControlListChangeRequests]({
-            cwd: "/repo",
-            state: "open",
-            involvement: "review-requested",
-          }).pipe(provide),
-        ),
-      ).toBe(
-        "This source control provider does not support filtering change requests by involvement.",
-      );
       expect(
         yield* run(
           unknown[WS_METHODS.sourceControlGetChangeRequestDiff]({
@@ -568,6 +563,161 @@ describe("workspace pull request links", () => {
       }).pipe(Effect.provide(handlerLayer));
 
       expect(dispatched).toHaveLength(1);
+    }),
+  );
+});
+
+describe("checkout without a recognized hosting provider", () => {
+  const unreachable = () => Effect.die("must not reach the provider");
+  const detailOf = (error: unknown) =>
+    Schema.is(SourceControlProviderError)(error) ? error.detail : String(error);
+  const failureDetail = <A, E>(effect: Effect.Effect<A, E, Layer.Success<typeof handlerLayer>>) =>
+    effect.pipe(Effect.provide(handlerLayer), Effect.flip, Effect.map(detailOf));
+
+  // A promoted chat's folder is a git repository with no remote: it resolves to `unknown`.
+  it.effect("answers every list and search read empty instead of failing", () =>
+    Effect.gen(function* () {
+      const { handlers, refreshes } = makeContext({
+        kind: "unknown",
+        listIssues: unreachable,
+        searchIssues: unreachable,
+        listChangeRequests: unreachable,
+        searchChangeRequests: unreachable,
+        listLabels: unreachable,
+        listAssignees: unreachable,
+        listWorkflowRuns: unreachable,
+      });
+      const provide = Effect.provide(handlerLayer);
+
+      expect(
+        yield* handlers[WS_METHODS.sourceControlListChangeRequests]({
+          cwd: "/repo",
+          state: "open",
+          limit: 50,
+        }).pipe(provide),
+      ).toEqual([]);
+      // Filters and search narrow nothing, so they cannot widen an empty answer either.
+      expect(
+        yield* handlers[WS_METHODS.sourceControlListChangeRequests]({
+          cwd: "/repo",
+          state: "open",
+          involvement: "review-requested",
+        }).pipe(provide),
+      ).toEqual([]);
+      expect(
+        yield* handlers[WS_METHODS.sourceControlListChangeRequests]({
+          cwd: "/repo",
+          state: "all",
+          query: "flaky",
+        }).pipe(provide),
+      ).toEqual([]);
+      expect(
+        yield* handlers[WS_METHODS.sourceControlSearchChangeRequests]({
+          cwd: "/repo",
+          query: "flaky",
+        }).pipe(provide),
+      ).toEqual([]);
+      expect(
+        yield* handlers[WS_METHODS.sourceControlListIssues]({
+          cwd: "/repo",
+          state: "open",
+          limit: 50,
+        }).pipe(provide),
+      ).toEqual([]);
+      expect(
+        yield* handlers[WS_METHODS.sourceControlSearchIssues]({
+          cwd: "/repo",
+          query: "flaky",
+        }).pipe(provide),
+      ).toEqual([]);
+      expect(
+        yield* handlers[WS_METHODS.sourceControlListIssueLabels]({ cwd: "/repo" }).pipe(provide),
+      ).toEqual([]);
+      expect(
+        yield* handlers[WS_METHODS.sourceControlListIssueAssignees]({ cwd: "/repo" }).pipe(provide),
+      ).toEqual([]);
+      expect(
+        yield* handlers[WS_METHODS.sourceControlListWorkflowRuns]({
+          cwd: "/repo",
+          pullRequestNumber: 7,
+          limit: 20,
+        }).pipe(provide),
+      ).toEqual({
+        provider: "unknown",
+        repository: Option.none(),
+        pullRequestNumber: Option.some(7),
+        headSha: Option.none(),
+        runs: [],
+      });
+      // The lists still refresh linked worktrees as before; that work is a no-op here.
+      expect(refreshes).toContain("worktrees:sourceControl.listChangeRequests");
+    }),
+  );
+
+  it.effect("still fails explicit operations with a clear message", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const { handlers } = makeContext(
+        {
+          kind: "unknown",
+          createChangeRequest: unreachable,
+          listChangeRequests: unreachable,
+          mergeChangeRequest: unreachable,
+        },
+        fileSystem,
+      );
+
+      expect(
+        yield* failureDetail(
+          handlers[WS_METHODS.sourceControlCreateChangeRequest]({
+            cwd: "/repo",
+            baseRefName: "main",
+            headRefName: "feature/x",
+            title: "Add things",
+            body: "Body",
+          }),
+        ),
+      ).toBe("This source control provider does not support opening change requests.");
+      expect(
+        yield* failureDetail(
+          handlers[WS_METHODS.sourceControlMergeChangeRequest]({
+            cwd: "/repo",
+            reference: "7",
+            mergeMethod: "squash",
+          }),
+        ),
+      ).toBe("This source control provider does not support merging change requests.");
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("does not hide a recognized host's list failures", () =>
+    Effect.gen(function* () {
+      const hostError = (operation: string) =>
+        new SourceControlProviderError({
+          provider: "github",
+          operation,
+          detail: "gh: authentication required",
+        });
+      const { handlers } = makeContext({
+        kind: "github",
+        listChangeRequests: () => Effect.fail(hostError("listChangeRequests")),
+        listIssues: () => Effect.fail(hostError("listIssues")),
+        listWorkflowRuns: () => Effect.fail(hostError("listWorkflowRuns")),
+      });
+
+      expect(
+        yield* failureDetail(
+          handlers[WS_METHODS.sourceControlListChangeRequests]({ cwd: "/repo", state: "open" }),
+        ),
+      ).toBe("gh: authentication required");
+      expect(
+        yield* failureDetail(
+          handlers[WS_METHODS.sourceControlListIssues]({ cwd: "/repo", state: "open" }),
+        ),
+      ).toBe("gh: authentication required");
+      expect(
+        yield* failureDetail(handlers[WS_METHODS.sourceControlListWorkflowRuns]({ cwd: "/repo" })),
+      ).toBe("gh: authentication required");
     }),
   );
 });

@@ -22,6 +22,7 @@ import { ActionsTab } from "./ActionsTab";
 import { IssueDetail } from "./IssueDetail";
 import { IssuesTab } from "./IssuesTab";
 import { ProjectOverviewTab } from "./ProjectOverviewTab";
+import { projectHasGitRemote } from "./ProjectOverviewTab.logic";
 import { PullRequestDetail } from "./PullRequestDetail";
 import { PullRequestsTab } from "./PullRequestsTab";
 import { WorkItemDetail } from "./WorkItemDetail";
@@ -313,6 +314,7 @@ export function ProjectExplorerDialog(props: ProjectExplorerDialogProps) {
                   environmentId={environmentId}
                   cwd={cwd}
                   projectId={selectedMember?.id ?? null}
+                  hasGitRemote={projectHasGitRemote(selectedMember)}
                   onOpenTab={setActiveTab}
                   onSelectIssue={handleSelectIssue}
                   onSelectChangeRequest={handleSelectChangeRequest}

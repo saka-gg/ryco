@@ -114,11 +114,6 @@ it.layer(
         assert.isFalse(resolved.runSetupScript);
         assert.deepEqual(resolved.choices.modelSelection, modelSelection);
         const branch = `${resolved.choices.worktreeBranchPrefix}/destination-one`;
-        const destination = path.join(
-          checkoutRoot,
-          path.basename(repo),
-          branch.replaceAll("/", "-"),
-        );
         const operations: string[] = [];
         const driver = yield* makeGitVcsDriverCore({
           executeOverride: (input) =>
@@ -149,7 +144,10 @@ it.layer(
           projectId,
           settingsSnapshot: resolved.settings,
         });
-        assert.equal(created.worktree.path, destination);
+        const destination = created.worktree.path;
+        assert.equal(path.dirname(path.dirname(destination)), checkoutRoot);
+        assert.match(path.basename(path.dirname(destination)), /^[a-f0-9]{8}_repository$/);
+        assert.match(path.basename(destination), /^[a-f0-9]{8}_comparison-tasks-destination-one$/);
         assert.equal(created.submoduleInitialization?.mode, "none");
         assert.equal(created.submoduleInitialization?.source, "project");
         assert.notInclude(operations, "GitVcsDriver.createWorktree.initializeSubmodules");

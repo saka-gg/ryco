@@ -6,11 +6,13 @@ import {
   type ChatAttachment,
   DEFAULT_AGENT_TOKEN_MODE,
   DEFAULT_PROJECT_METADATA_DIR,
+  type MessageId,
   type OrchestrationEvent,
   type OrchestrationEventType,
   ThreadId,
 } from "@ryco/contracts";
 import { derivePendingThreadRequestState } from "@ryco/shared/threadActivity";
+import { projectKindOf } from "@ryco/shared/projectKind";
 import {
   checkpointStatusToTurnState,
   laterIsoTimestamp,
@@ -80,6 +82,7 @@ import {
 } from "../worktreePullRequestProjection.ts";
 import { projectionLineageColumns } from "../threadLineage.ts";
 import { turnStartEndedMessageId } from "../providerEffectIntents.ts";
+import { isAttachmentOnlyMessage } from "../turnReplyMessage.ts";
 
 export const ORCHESTRATION_PROJECTOR_NAMES = {
   projects: "projection.projects",
@@ -191,6 +194,7 @@ export const ORCHESTRATION_EVENT_PROJECTORS = {
   "worktree.deleted": [ORCHESTRATION_PROJECTOR_NAMES.worktrees],
   "worktree.checkoutRemoved": [ORCHESTRATION_PROJECTOR_NAMES.worktrees],
   "worktree.checkoutRestored": [ORCHESTRATION_PROJECTOR_NAMES.worktrees],
+  "worktree.relocated": [ORCHESTRATION_PROJECTOR_NAMES.worktrees],
   "thread.attachedToWorktree": [ORCHESTRATION_PROJECTOR_NAMES.worktrees],
   "thread.statusBucketOverridden": [ORCHESTRATION_PROJECTOR_NAMES.worktrees],
   "thread.manualPositionSet": [ORCHESTRATION_PROJECTOR_NAMES.worktrees],
@@ -617,6 +621,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         case "project.created":
           yield* projectionProjectRepository.upsert({
             projectId: event.payload.projectId,
+            kind: projectKindOf(event.payload),
             title: event.payload.title,
             workspaceRoot: event.payload.workspaceRoot,
             projectMetadataDir: event.payload.projectMetadataDir ?? DEFAULT_PROJECT_METADATA_DIR,
@@ -640,6 +645,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           }
           yield* projectionProjectRepository.upsert({
             ...existingRow.value,
+            ...(event.payload.kind !== undefined ? { kind: event.payload.kind } : {}),
             ...(event.payload.title !== undefined ? { title: event.payload.title } : {}),
             ...(event.payload.workspaceRoot !== undefined
               ? { workspaceRoot: event.payload.workspaceRoot }
@@ -1393,6 +1399,36 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           return;
         }
 
+        case "worktree.relocated": {
+          const payload = event.payload;
+          const existing = yield* projectionWorktreeRepository.getById({
+            worktreeId: payload.worktreeId,
+          });
+          if (Option.isSome(existing))
+            yield* projectionWorktreeRepository.upsert({
+              ...existing.value,
+              worktreePath: payload.destinationPath,
+              updatedAt: payload.relocatedAt,
+            });
+          // All current references, including archived conversations and recoverable Trash.
+          // Historical messages/events/checkpoints deliberately retain their original paths.
+          yield* sql`UPDATE projection_threads SET worktree_path = ${payload.destinationPath}
+            WHERE project_id = ${payload.projectId} AND (worktree_id = ${payload.worktreeId} OR worktree_path = ${payload.sourcePath})`.pipe(
+            Effect.mapError(toPersistenceSqlError("relocateThreadCheckouts")),
+          );
+          yield* sql`UPDATE storage_owned_entries SET path = ${payload.destinationPath},
+            identity_json = COALESCE((SELECT destination_identity_json FROM managed_worktree_relocations WHERE worktree_id = ${payload.worktreeId}), identity_json)
+            WHERE path = ${payload.sourcePath} AND state = 'owned'`.pipe(
+            Effect.mapError(toPersistenceSqlError("relocateCheckoutOwnership")),
+          );
+          yield* sql`UPDATE managed_worktree_relocations SET state = 'complete', last_error = NULL
+            WHERE worktree_id = ${payload.worktreeId} AND source_path = ${payload.sourcePath}
+              AND destination_path = ${payload.destinationPath} AND state = 'moved'`.pipe(
+            Effect.mapError(toPersistenceSqlError("completeCheckoutRelocation")),
+          );
+          return;
+        }
+
         case "worktree.checkoutRestored": {
           const existing = yield* projectionWorktreeRepository.getById({
             worktreeId: event.payload.worktreeId,
@@ -1803,6 +1839,35 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
       });
     });
 
+    /**
+     * The message a turn is keyed on once `message` is sent in it: the newest
+     * message, except that an attachment-only carrier never displaces a reply
+     * the turn already has (see `turnReplyMessage`).
+     */
+    const turnAssistantMessageAfter = (
+      turn: ProjectionTurn,
+      message: {
+        readonly messageId: MessageId;
+        readonly text: string;
+        readonly attachments?: ReadonlyArray<ChatAttachment> | undefined;
+        readonly streaming: boolean;
+      },
+    ) =>
+      Effect.gen(function* () {
+        const current = turn.assistantMessageId;
+        if (current === null || current === message.messageId || !isAttachmentOnlyMessage(message))
+          return message.messageId;
+        const reply = yield* projectionThreadMessageRepository.getByMessageId({
+          messageId: current,
+        });
+        return Option.isSome(reply) &&
+          reply.value.threadId === turn.threadId &&
+          reply.value.turnId === turn.turnId &&
+          !isAttachmentOnlyMessage({ ...reply.value, streaming: reply.value.isStreaming })
+          ? current
+          : message.messageId;
+      });
+
     const applyThreadTurnsProjection: ProjectorDefinition["apply"] = Effect.fn(
       "applyThreadTurnsProjection",
     )(function* (event, _attachmentSideEffects) {
@@ -1945,7 +2010,10 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           if (Option.isSome(existingTurn)) {
             yield* projectionTurnRepository.upsertByTurnId({
               ...existingTurn.value,
-              assistantMessageId: event.payload.messageId,
+              assistantMessageId: yield* turnAssistantMessageAfter(
+                existingTurn.value,
+                event.payload,
+              ),
               state: event.payload.streaming
                 ? existingTurn.value.state
                 : existingTurn.value.state === "interrupted"

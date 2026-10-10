@@ -1,3 +1,4 @@
+import { resolveWorktreeCheckoutPath } from "../project/worktreeCheckoutPaths.ts";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { acquireWorktreeCreationLease, recordCreatedWorktree } from "../storage/lifecycle.ts";
 import { removeVerifiedWorktree } from "../storage/filesystem.ts";
@@ -28,6 +29,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 import { DEFAULT_SERVER_SETTINGS, GitCommandError, type VcsRef } from "@ryco/contracts";
 import { dedupeRemoteBranchesWithLocalMatches } from "@ryco/shared/git";
+import { withGitFilesystemGuidance } from "../git/gitFilesystemErrors.ts";
 import { compactTraceAttributes } from "../observability/Attributes.ts";
 import { gitCommandDuration, gitCommandsTotal, withMetrics } from "../observability/Metrics.ts";
 import * as GitVcsDriver from "./GitVcsDriver.ts";
@@ -36,9 +38,13 @@ import {
   parseRemoteNamesInGitOrder,
   parseRemoteRefWithRemoteNames,
 } from "../git/remoteRefs.ts";
-import { ServerConfig, resolveManagedWorktreesRoot } from "../config.ts";
+import { ServerConfig } from "../config.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
-import { canonicalizeWorktreePath, validateWorktreeRoot } from "../project/worktreeRoot.ts";
+import {
+  canonicalizeWorktreePath,
+  selectConfiguredWorktreeRoot,
+  validateWorktreeRoot,
+} from "../project/worktreeRoot.ts";
 import {
   assertWorktreeSetupComplete,
   beginWorktreeSetup,
@@ -344,7 +350,7 @@ function createGitCommandError(
     operation,
     command: commandLabel(args),
     cwd,
-    detail,
+    detail: withGitFilesystemGuidance(detail),
     ...(cause !== undefined ? { cause } : {}),
   });
 }
@@ -641,6 +647,32 @@ const collectOutput = Effect.fn("collectOutput")(function* <E>(
   };
 });
 
+/** Undecoded stdout for object contents; a partial object is never returned. */
+const collectOutputBytes = Effect.fn("collectOutputBytes")(function* <E>(
+  input: Pick<GitVcsDriver.ExecuteGitInput, "operation" | "cwd" | "args">,
+  stream: Stream.Stream<Uint8Array, E>,
+  maxOutputBytes: number,
+): Effect.fn.Return<Uint8Array, GitCommandError> {
+  const chunks: Uint8Array[] = [];
+  let bytes = 0;
+  yield* Stream.runForEach(stream, (chunk) => {
+    bytes += chunk.byteLength;
+    if (bytes > maxOutputBytes) {
+      return Effect.fail(
+        new GitCommandError({
+          operation: input.operation,
+          command: quoteGitCommand(input.args),
+          cwd: input.cwd,
+          detail: `${quoteGitCommand(input.args)} output exceeded ${maxOutputBytes} bytes.`,
+        }),
+      );
+    }
+    chunks.push(chunk);
+    return Effect.void;
+  }).pipe(Effect.mapError(toGitCommandError(input, "output stream failed.")));
+  return Buffer.concat(chunks, bytes);
+});
+
 const copyWorktreeDependencyInstallDirs = Effect.fn("copyWorktreeDependencyInstallDirs")(
   function* (input: {
     readonly cwd: string;
@@ -804,13 +836,17 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
 
         const [stdout, stderr, exitCode] = yield* Effect.all(
           [
-            collectOutput(
-              commandInput,
-              child.stdout,
-              maxOutputBytes,
-              truncateOutputAtMaxBytes,
-              input.progress?.onStdoutLine,
-            ),
+            input.stdoutBytes === true
+              ? collectOutputBytes(commandInput, child.stdout, maxOutputBytes).pipe(
+                  Effect.map((bytes) => ({ text: "", truncated: false, bytes })),
+                )
+              : collectOutput(
+                  commandInput,
+                  child.stdout,
+                  maxOutputBytes,
+                  truncateOutputAtMaxBytes,
+                  input.progress?.onStdoutLine,
+                ).pipe(Effect.map((output) => ({ ...output, bytes: undefined }))),
             collectOutput(
               commandInput,
               child.stderr,
@@ -850,6 +886,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
           stderr: stderr.text,
           stdoutTruncated: stdout.truncated,
           stderrTruncated: stderr.truncated,
+          ...(stdout.bytes !== undefined ? { stdoutBytes: stdout.bytes } : {}),
         } satisfies GitVcsDriver.ExecuteGitResult;
       });
 
@@ -2320,16 +2357,23 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       baseRef = `refs/remotes/${baseRef.startsWith("origin/") ? baseRef : `origin/${baseRef}`}`;
     }
     const targetBranch = input.newRefName ?? baseRef;
-    const sanitizedBranch = targetBranch.replace(/\//g, "-");
-    const repoName = path.basename(input.cwd);
     const worktreePath = yield* Effect.gen(function* () {
       const candidate =
         input.path ??
-        path.join(
-          settings?.worktreeRoot || resolveManagedWorktreesRoot(config),
-          repoName,
-          sanitizedBranch,
-        );
+        (yield* resolveWorktreeCheckoutPath({
+          location: undefined,
+          appWorktreesRoot: selectConfiguredWorktreeRoot({
+            settings,
+            projectId: input.projectId,
+            config,
+          }),
+          projectTitle: input.projectTitle,
+          initialName: input.initialName,
+          projectId: input.projectId ?? input.cwd,
+          workspaceRoot: input.cwd,
+          projectMetadataDir: null,
+          branchName: targetBranch,
+        }));
       const canonical = yield* validateWorktreeRoot(candidate, worktreePolicy);
       return canonical;
     }).pipe(

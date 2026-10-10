@@ -12,6 +12,7 @@ import { useHostedRpcCapability } from "../hostedHub/capabilities";
 import { resolveShortcutCommand, shouldIgnoreGlobalNavigationShortcut } from "../keybindings";
 import { getPresentationTier } from "../lib/presentationTier";
 import { isTerminalFocused } from "../lib/terminalFocus";
+import { buildProjectsPageLocation } from "../projectsRoute";
 import { buildPullRequestsPageLocation } from "../pullRequestsRoute";
 import { selectThreadTerminalState, useTerminalStateStore } from "../terminalStateStore";
 import { resolveThreadRouteTarget } from "../threadRoutes";
@@ -57,12 +58,14 @@ export function CommandPalette({ children }: { children: ReactNode }) {
   });
   const routeThreadRef = routeTarget?.kind === "server" ? routeTarget.threadRef : null;
   const navigate = useNavigate();
-  // `pullRequests.open` (no default key) opens the page wherever the user is.
+  // `pullRequests.open` and `projects.open` (no default keys) open their pages
+  // wherever the user is.
   const pullRequestsAllowed = useHostedRpcCapability(
     WS_METHODS.sourceControlListChangeRequests,
   ).allowed;
-  const pullRequestsAllowedRef = useRef(pullRequestsAllowed);
-  pullRequestsAllowedRef.current = pullRequestsAllowed;
+  const projectsAllowed = useHostedRpcCapability(WS_METHODS.projectsList).allowed;
+  const pageAllowedRef = useRef({ pullRequests: pullRequestsAllowed, projects: projectsAllowed });
+  pageAllowedRef.current = { pullRequests: pullRequestsAllowed, projects: projectsAllowed };
   const terminalOpen = useTerminalStateStore((state) =>
     routeThreadRef
       ? selectThreadTerminalState(state.terminalStateByThreadKey, routeThreadRef).terminalOpen
@@ -80,12 +83,15 @@ export function CommandPalette({ children }: { children: ReactNode }) {
           terminalOpen,
         },
       });
-      if (command === "pullRequests.open") {
-        if (!pullRequestsAllowedRef.current || getPresentationTier() === "phone") return;
+      if (command === "pullRequests.open" || command === "projects.open") {
+        const page = command === "projects.open" ? "projects" : "pullRequests";
+        if (!pageAllowedRef.current[page] || getPresentationTier() === "phone") return;
         event.preventDefault();
         event.stopPropagation();
         setOpen(false);
-        void navigate(buildPullRequestsPageLocation());
+        void navigate(
+          page === "projects" ? buildProjectsPageLocation() : buildPullRequestsPageLocation(),
+        );
         return;
       }
       if (command !== "commandPalette.toggle") {

@@ -6,15 +6,21 @@ import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import ThreadWorkspacePanel, { AgentThreadPanel } from "./ThreadWorkspacePanel";
 import type { ThreadSubagentView } from "../threadWorkspaceViewModel";
 
+const routerState = vi.hoisted(() => ({
+  navigate: null as null | ((options: unknown) => void),
+  params: {} as Record<string, string>,
+  search: { workspaceOpen: "1" } as Record<string, string>,
+}));
+
 vi.mock("@tanstack/react-router", async () => ({
   ...(await vi.importActual<typeof import("@tanstack/react-router")>("@tanstack/react-router")),
-  useNavigate: () => vi.fn(),
+  useNavigate: () => routerState.navigate ?? vi.fn(),
   useParams: vi.fn((options?: { select?: (params: Record<string, string>) => unknown }) => {
-    const params = {};
+    const params = routerState.params;
     return options?.select ? options.select(params) : params;
   }),
   useSearch: vi.fn((options?: { select?: (search: Record<string, string>) => unknown }) => {
-    const search = { workspaceOpen: "1" };
+    const search = routerState.search;
     return options?.select ? options.select(search) : search;
   }),
   useBlocker: vi.fn(() => ({
@@ -49,7 +55,54 @@ describe("ThreadWorkspacePanel", () => {
       await teardown?.call(mounted).catch(() => {});
     }
     mounted = null;
+    routerState.navigate = null;
+    routerState.params = {};
+    routerState.search = { workspaceOpen: "1" };
     document.body.innerHTML = "";
+  });
+
+  it("acts on a one-shot Agents workflow link once, then strips it from the route", async () => {
+    const navigate = vi.fn();
+    routerState.navigate = navigate;
+    routerState.params = { draftId: "draft-reveal" };
+    routerState.search = {
+      workspaceOpen: "1",
+      workspaceTab: "agents",
+      workspaceAgentsWorkflow: "wf-audit",
+    };
+    const host = document.createElement("div");
+    host.style.width = "720px";
+    host.style.height = "520px";
+    host.style.display = "flex";
+    document.body.append(host);
+
+    mounted = await render(
+      <ThreadWorkspacePanel
+        mode="sidebar"
+        panelMode={null}
+        openedPanelModes={[]}
+        openedAgentKeys={[]}
+        onClosePanelTab={vi.fn()}
+      />,
+      { container: host },
+    );
+
+    await expect.poll(() => navigate.mock.calls.length).toBe(1);
+    const [options] = navigate.mock.calls[0] as [
+      {
+        to: string;
+        replace: boolean;
+        search: (previous: Record<string, unknown>) => Record<string, unknown>;
+      },
+    ];
+    expect(options).toMatchObject({
+      to: "/draft/$draftId",
+      params: { draftId: "draft-reveal" },
+      replace: true,
+    });
+    const next = options.search({ ...routerState.search, other: "kept" });
+    expect(next.workspaceAgentsWorkflow).toBeUndefined();
+    expect(next).toMatchObject({ workspaceOpen: "1", workspaceTab: "agents", other: "kept" });
   });
 
   it("stretches its root to the full right-panel width", async () => {

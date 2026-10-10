@@ -79,8 +79,26 @@ function normalizeEventKey(key: string): string {
   return normalized;
 }
 
+const LETTER_EVENT_CODE = /^Key([A-Z])$/;
+const PLAIN_LETTER_KEY = /^[a-z]$/i;
+
+/**
+ * macOS Option rewrites the produced character: Option+N is the "Dead" tilde
+ * key and Option+P yields "π", so `event.key` never names the letter of an
+ * `alt+<letter>` binding. Fall back to the physical key only while Alt is held
+ * and the layout did not already produce a plain letter, so every layout that
+ * does report letters (Windows/Linux Ctrl+Alt, non-QWERTY) keeps its own key.
+ */
+function resolveAltTransformedLetter(event: ShortcutEventLike): string | null {
+  if (!event.altKey || !event.code || PLAIN_LETTER_KEY.test(event.key)) return null;
+  const match = LETTER_EVENT_CODE.exec(event.code);
+  return match?.[1] ? match[1].toLowerCase() : null;
+}
+
 function resolveEventKeys(event: ShortcutEventLike): Set<string> {
   const keys = new Set([normalizeEventKey(event.key)]);
+  const altLetter = resolveAltTransformedLetter(event);
+  if (altLetter) keys.add(altLetter);
   const aliases = event.code ? EVENT_CODE_KEY_ALIASES[event.code] : undefined;
   if (!aliases) return keys;
 

@@ -1,7 +1,7 @@
 import { ProjectBrowserPreview } from "../../browser/ProjectBrowserPreview";
 import React, { useCallback, memo, useMemo, useRef, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
-import { type ThreadEnvMode } from "@ryco/contracts";
+import { type ScopedProjectRef, type ThreadEnvMode } from "@ryco/contracts";
 import {
   scopedProjectKey,
   scopedThreadKey,
@@ -278,6 +278,14 @@ export const SidebarProjectItem = memo(function SidebarProjectItem(props: Sideba
       jiraProjectOpenUrlByProjectKey,
     });
 
+  // Stable, so the thread rows' menu handlers keep their identity.
+  const openProjectSettings = useCallback(
+    (projectRef: ScopedProjectRef) => {
+      const member = memberProjectByScopedKey.get(scopedProjectKey(projectRef));
+      if (member) projectDialogs.openSettings(member);
+    },
+    [memberProjectByScopedKey, projectDialogs],
+  );
   const threadActions = useSidebarThreadActions({
     router,
     isMobile,
@@ -303,6 +311,7 @@ export const SidebarProjectItem = memo(function SidebarProjectItem(props: Sideba
     sidebarThreadByKeyRef,
     memberProjectByScopedKey,
     projectCwd: project.cwd,
+    openProjectSettings,
   });
   const {
     renamingThreadKey,
@@ -338,7 +347,7 @@ export const SidebarProjectItem = memo(function SidebarProjectItem(props: Sideba
   });
 
   const openProjectOverview = useCallback(() => {
-    projectDialogs.openExplorer(project, "overview");
+    projectDialogs.openOverview(project);
   }, [project, projectDialogs]);
 
   const { handleProjectButtonContextMenu } = useSidebarProjectContextMenu({
@@ -454,7 +463,7 @@ export const SidebarProjectItem = memo(function SidebarProjectItem(props: Sideba
     (event: React.MouseEvent<HTMLButtonElement>) => {
       event.preventDefault();
       event.stopPropagation();
-      projectDialogs.openExplorer(project, "overview");
+      projectDialogs.openOverview(project);
     },
     [project, projectDialogs],
   );

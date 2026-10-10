@@ -69,7 +69,7 @@ function NodeIntegrationsSettingsPanel() {
     <>
       <SettingsSection
         title="Agent Control"
-        description="Private tools for every agent. Ryco sessions receive the tools automatically. Connect supported standalone provider profiles with one click. Routine private-session actions run directly; destructive and security-sensitive changes require approval."
+        description="Private tools for every agent, including visual replies (inline HTML pages). Ryco sessions receive the tools automatically. Connect supported standalone provider profiles with one click. Routine private-session actions run directly; destructive and security-sensitive changes require approval."
       >
         <SettingsRow
           title="Enable Agent Control"

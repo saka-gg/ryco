@@ -42,3 +42,40 @@ export async function readAttachmentBytes(input: {
   }
   return bytes;
 }
+
+export interface AttachmentReadTransport {
+  readonly readChunk: (
+    input: ChatAttachmentReadChunkInput,
+  ) => Promise<ChatAttachmentReadChunkResult>;
+}
+
+/**
+ * Reads an attachment over the transport current when the read starts. A
+ * replacement connection must never contribute chunks to an earlier attempt's
+ * buffer, so a transport change mid-read fails the read instead.
+ */
+export async function readAttachmentBytesFromTransport(input: {
+  reference: Omit<ChatAttachmentReadChunkInput, "offset">;
+  sizeBytes: number;
+  /** The environment's authorized transport right now; undefined while disconnected. */
+  currentTransport: () => AttachmentReadTransport | undefined;
+  signal?: AbortSignal;
+}): Promise<Uint8Array<ArrayBuffer>> {
+  const transport = input.currentTransport();
+  if (!transport) throw new Error("Attachment connection unavailable.");
+  const assertCurrent = () => {
+    if (input.currentTransport()?.readChunk !== transport.readChunk)
+      throw new Error("Attachment connection changed.");
+  };
+  const bytes = await readAttachmentBytes({
+    reference: input.reference,
+    sizeBytes: input.sizeBytes,
+    ...(input.signal ? { signal: input.signal } : {}),
+    readChunk: (chunk) => {
+      assertCurrent();
+      return transport.readChunk(chunk);
+    },
+  });
+  assertCurrent();
+  return bytes;
+}

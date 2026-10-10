@@ -1,13 +1,19 @@
 import {
+  readHtmlRenderAttachment,
+  type HtmlRenderAttachment,
+} from "@ryco/client-runtime/state/session";
+import {
   isChatImageAttachment,
   type ChatFileAttachment,
   type ChatImageAttachment,
   type ChatMessage,
   type ChatUnknownAttachment,
 } from "@ryco/client-runtime/state/threads";
+import type { EnvironmentId, ThreadId } from "@ryco/contracts";
 import { useVideoPlayer, VideoView } from "expo-video";
 import { useEvent } from "expo";
 import * as Linking from "expo-linking";
+import { useMemo } from "react";
 import { Image, Pressable, ScrollView, Share, View } from "react-native";
 
 import { AppText as Text } from "../../components/AppText";
@@ -21,6 +27,9 @@ import {
   type NativeMarkdownTextStyle,
 } from "../../native/SelectableMarkdownText";
 import { useScaledTextRole } from "../settings/appearance/useScaledTextRole";
+import { HtmlRenderCards } from "./HtmlRenderCards";
+import { ThreadHtmlRender } from "./ThreadHtmlRender";
+import type { TurnHtmlRender } from "./threadActivityFold";
 import {
   DEFAULT_MEDIA_ASPECT_RATIO,
   IMAGE_ATTACHMENT_SLOT_WIDTH,
@@ -165,7 +174,13 @@ function AudioAttachmentRow({ attachment }: { readonly attachment: ChatFileAttac
   );
 }
 
-export function ThreadMessage(props: { readonly message: ChatMessage }) {
+export function ThreadMessage(props: {
+  readonly environmentId: EnvironmentId;
+  readonly threadId: ThreadId;
+  readonly message: ChatMessage;
+  /** On a turn's settled reply: the pages the turn published, listed at its foot. */
+  readonly turnHtmlRenders?: ReadonlyArray<TurnHtmlRender> | undefined;
+}) {
   const isUser = props.message.role === "user";
   const sentAt = isUser ? Date.parse(props.message.createdAt) : Number.NaN;
   const sentLabel = Number.isFinite(sentAt) ? sentTimeFormatter.format(sentAt) : null;
@@ -220,9 +235,31 @@ export function ThreadMessage(props: { readonly message: ChatMessage }) {
     attachment.mimeType.toLowerCase().startsWith("audio/") &&
     attachment.previewUrl !== undefined;
   const audioAttachments = attachments.filter(hasAudioPlaybackSource);
-  const stripAttachments = attachments.filter(
-    (attachment) => !hasVideoPlaybackSource(attachment) && !hasAudioPlaybackSource(attachment),
+  // An agent's HTML render shows as the page itself. Only assistant messages
+  // carry them; on any other message the file keeps its ordinary row. The
+  // metadata is validated once per message rather than on each re-render:
+  // its thumbnails can run to tens of kilobytes, and the feed re-renders its
+  // rows as a reply streams.
+  const htmlRenders = useMemo<ReadonlyArray<HtmlRenderAttachment>>(
+    () =>
+      isUser
+        ? []
+        : (props.message.attachments ?? []).flatMap((attachment) => {
+            const render = readHtmlRenderAttachment(attachment);
+            return render === undefined ? [] : [render];
+          }),
+    [isUser, props.message.attachments],
   );
+  const htmlRenderFiles = new Set<unknown>(htmlRenders.map((render) => render.attachment));
+  const stripAttachments = attachments.filter(
+    (attachment) =>
+      !hasVideoPlaybackSource(attachment) &&
+      !hasAudioPlaybackSource(attachment) &&
+      !htmlRenderFiles.has(attachment),
+  );
+  // Attachment deliveries carry a placeholder " " body, which would render as
+  // a blank line above the attachment.
+  const showText = text.trim().length > 0 || attachments.length === 0;
 
   return (
     <View className={`px-4 py-2 ${isUser ? "items-end" : "items-start"}`}>
@@ -238,7 +275,7 @@ export function ThreadMessage(props: { readonly message: ChatMessage }) {
             Steered
           </Text>
         ) : null}
-        {isUser || !hasNativeSelectableMarkdownText() ? (
+        {!showText ? null : isUser || !hasNativeSelectableMarkdownText() ? (
           <Text
             selectable
             className={`font-sans text-base leading-normal ${presentation.textClassName}`}
@@ -257,6 +294,20 @@ export function ThreadMessage(props: { readonly message: ChatMessage }) {
             }}
           />
         )}
+        {htmlRenders.length > 0 ? (
+          <View className={`w-full gap-2 ${showText ? "mt-2" : ""}`}>
+            {htmlRenders.map(({ attachment, htmlRender }) => (
+              <ThreadHtmlRender
+                key={attachment.id}
+                environmentId={props.environmentId}
+                threadId={props.threadId}
+                messageId={props.message.id}
+                attachment={attachment}
+                htmlRender={htmlRender}
+              />
+            ))}
+          </View>
+        ) : null}
         {audioAttachments.length > 0 ? (
           <View className="mt-2 w-full gap-2">
             {audioAttachments.map((attachment) => (
@@ -317,6 +368,13 @@ export function ThreadMessage(props: { readonly message: ChatMessage }) {
               )}
             </View>
           </ScrollView>
+        ) : null}
+        {!isUser && props.turnHtmlRenders !== undefined && props.turnHtmlRenders.length > 0 ? (
+          <HtmlRenderCards
+            environmentId={props.environmentId}
+            threadId={props.threadId}
+            renders={props.turnHtmlRenders}
+          />
         ) : null}
       </View>
       {isUser ? (

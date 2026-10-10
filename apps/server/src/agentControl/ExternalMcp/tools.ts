@@ -36,17 +36,68 @@ import {
   AgentControlMcpReadAutomationInput,
   AgentControlMcpReadAutomationResult,
   AgentControlMcpRecentActivityResult,
-  AGENT_CONTROL_RISK_TAGS,
+  AgentControlMcpListThreadsInput,
+  AgentControlMcpReadThreadInput,
+  AgentControlMcpReadControlRequestInput,
+  AgentControlMcpWaitForControlRequestInput,
+  AgentControlInspectThreadInput,
+  AgentControlListWorkspacesInput,
+  AgentControlReadDiffInput,
+  AgentControlReadProjectInput,
+  AgentControlReadThreadFileInput,
+  AgentControlReadWorkspaceInput,
+  AgentControlSearchThreadsInput,
+  AgentControlWaitThreadsInput,
+  AgentControlMcpSendMessageInput,
+  AgentControlMcpInterruptThreadInput,
+  AgentControlMcpUpdateThreadInput,
+  AgentControlPlanWorkspaceInput,
+  AgentControlProposeWorkspaceInput,
   type AgentControlActionPlan,
   type AgentControlAutomation,
   type AgentControlExternalIntegration,
   type AgentControlMcpProviderInstanceSummary,
+  type AgentControlCapability,
+  type AgentControlProposal,
   type ProjectId,
   type ServerProvider,
 } from "@ryco/contracts";
-import { Effect, Schema } from "effect";
+import { projectKindOf } from "@ryco/shared/projectKind";
+import { Effect, Option, Schema } from "effect";
 
+import type { CheckpointDiffQueryShape } from "../../checkpointing/Services/CheckpointDiffQuery.ts";
 import type { ProjectionSnapshotQueryShape } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import type { WorkspaceAccessPolicyShape } from "../../workspace/Services/WorkspaceAccessPolicy.ts";
+import type { WorkspaceFileSystemShape } from "../../workspace/Services/WorkspaceFileSystem.ts";
+import {
+  interruptThreadPlan,
+  planWorkspaceLifecycle,
+  sendMessagePlan,
+  updateThreadPlan,
+} from "../Mcp/controlPlans.ts";
+import { INSPECTION_TOOL_DESCRIPTORS } from "../Mcp/inspectionTools.ts";
+import { computeAgentControlPlanDigest } from "../planDigest.ts";
+import {
+  agentControlPromptSummaryForPlan,
+  agentControlRiskTagsForPlan,
+} from "../proposalPresentation.ts";
+import { readControlRequestReceipt, waitForControlRequestReceipt } from "../Mcp/proposalReads.ts";
+import {
+  ToolFailure,
+  failTool,
+  inspectThread,
+  listThreadsPage,
+  readThreadDiff,
+  readThreadFile,
+  readThreadPage,
+  sanitizeInspection,
+  toProjectPreferences,
+  waitThreads,
+  type ThreadVisibility,
+} from "../Mcp/threadReads.ts";
+import { AGENT_CONTROL_MCP_TOOL_DESCRIPTORS } from "../Mcp/tools.ts";
+import type { AgentControlProposalEventsShape } from "../Services/AgentControlProposalEvents.ts";
+import type { AgentControlWorkspaces } from "../workspaceLifecycle.ts";
 import { agentControlSupportForDriver } from "../ProviderInjection.ts";
 import type { AgentControlExternalIntegrationServiceShape } from "../Services/AgentControlExternalIntegration.ts";
 import type { AgentControlExternalTaskServiceShape } from "../Services/AgentControlExternalTask.ts";
@@ -258,7 +309,114 @@ const descriptors: ReadonlyArray<ExternalMcpToolDescriptor> = [
   })),
 ];
 
-const toolCapability = (name: string) => {
+const internalInputSchema = (name: string): Readonly<Record<string, unknown>> => {
+  const descriptor = [...AGENT_CONTROL_MCP_TOOL_DESCRIPTORS, ...INSPECTION_TOOL_DESCRIPTORS].find(
+    (candidate) => candidate.name === name,
+  );
+  if (descriptor === undefined) throw new Error(`Missing Agent Control descriptor: ${name}`);
+  return descriptor.inputSchema;
+};
+
+/** Standalone inspection omits terminal output, the likeliest carrier of secrets. */
+const EXTERNAL_INSPECT_SECTIONS = ["info", "agents", "activities", "plans", "review"] as const;
+
+const readDescriptors: ReadonlyArray<ExternalMcpToolDescriptor> = (
+  [
+    [
+      AGENT_CONTROL_EXTERNAL_MCP_TOOLS.readControlRequest,
+      "Read the approval and dispatch receipt of a request this integration created, such as an automation proposal. Requests from other callers read as not found.",
+    ],
+    [
+      AGENT_CONTROL_EXTERNAL_MCP_TOOLS.waitForControlRequest,
+      "Wait boundedly until a request this integration created is decided or reaches a terminal dispatch outcome.",
+    ],
+    [
+      AGENT_CONTROL_EXTERNAL_MCP_TOOLS.listThreads,
+      "List threads in allowed projects with status (bounded page; cursor-based; archived threads excluded unless requested).",
+    ],
+    [
+      AGENT_CONTROL_EXTERNAL_MCP_TOOLS.readThread,
+      "Read one thread's status header and a bounded, newest-first page of its messages. Threads outside allowed projects read as not found.",
+    ],
+    [
+      AGENT_CONTROL_EXTERNAL_MCP_TOOLS.searchThreads,
+      "Search conversation content in allowed projects, optionally scoped to one project or thread. Returns message snippets and thread identifiers.",
+    ],
+    [
+      AGENT_CONTROL_EXTERNAL_MCP_TOOLS.waitThreads,
+      "Wait for any of up to eight threads in allowed projects to finish or require attention. timeoutMs: 0 gives an immediate snapshot.",
+    ],
+    [
+      AGENT_CONTROL_EXTERNAL_MCP_TOOLS.inspectThread,
+      "Inspect a thread in an allowed project: info, agents, activities, plans, or review checkpoints (review requires review access). Terminal output is not available to standalone integrations.",
+    ],
+    [
+      AGENT_CONTROL_EXTERNAL_MCP_TOOLS.readThreadDiff,
+      "Read a thread's checkpoint diff through a turn count from ryco_inspect_thread section review. Large patches are truncated.",
+    ],
+    [
+      AGENT_CONTROL_EXTERNAL_MCP_TOOLS.readThreadFile,
+      "Read a text file relative to a thread's workspace or worktree in an allowed project. Paths escaping the workspace are rejected; large files are truncated.",
+    ],
+    [
+      AGENT_CONTROL_EXTERNAL_MCP_TOOLS.readProject,
+      "Read an allowed project's preferences and revision: system prompt, scripts and preferred remote.",
+    ],
+    [
+      AGENT_CONTROL_EXTERNAL_MCP_TOOLS.listWorkspaces,
+      "List a bounded page of registered workspaces and synthetic session groups in one allowed project, including archived and missing checkouts. Read-only.",
+    ],
+    [
+      AGENT_CONTROL_EXTERNAL_MCP_TOOLS.readWorkspace,
+      "Inspect one workspace in an allowed project: sessions, protection, and Git lifecycle status. Read-only.",
+    ],
+  ] as const
+).map(([name, description]) => {
+  const inputSchema = internalInputSchema(name);
+  if (name !== AGENT_CONTROL_EXTERNAL_MCP_TOOLS.inspectThread) {
+    return { name, description, inputSchema };
+  }
+  const properties = inputSchema.properties as Record<string, unknown>;
+  return {
+    name,
+    description,
+    inputSchema: {
+      ...inputSchema,
+      properties: {
+        ...properties,
+        section: { type: "string", enum: [...EXTERNAL_INSPECT_SECTIONS] },
+      },
+    },
+  };
+});
+
+/** Thread and workspace control; every request still waits for Ryco user approval. */
+const controlDescriptors: ReadonlyArray<ExternalMcpToolDescriptor> = (
+  [
+    [
+      AGENT_CONTROL_EXTERNAL_MCP_TOOLS.sendMessage,
+      "Request approval to queue or steer a message into a thread in an allowed project. Targets above this integration's runtime or checkout grants are refused.",
+    ],
+    [
+      AGENT_CONTROL_EXTERNAL_MCP_TOOLS.interruptThread,
+      "Request approval to interrupt the running turn of a thread in an allowed project.",
+    ],
+    [
+      AGENT_CONTROL_EXTERNAL_MCP_TOOLS.updateThread,
+      "Request approval to rename, archive or restore, or change the model, goal, or modes of a thread in an allowed project. Runtime modes cannot exceed this integration's grants.",
+    ],
+    [
+      AGENT_CONTROL_EXTERNAL_MCP_TOOLS.planWorkspace,
+      "Read-only lifecycle preflight for a workspace in an allowed project. Returns the exact plan, digest, and blockers. Nothing changes.",
+    ],
+    [
+      AGENT_CONTROL_EXTERNAL_MCP_TOOLS.proposeWorkspace,
+      "Request approval for the exact plan returned by ryco_plan_workspace_lifecycle. Conversations are never deleted without an explicit sessions: delete plan. Reuse requestId for retries.",
+    ],
+  ] as const
+).map(([name, description]) => ({ name, description, inputSchema: internalInputSchema(name) }));
+
+const toolCapability = (name: string): AgentControlCapability | null => {
   switch (name) {
     case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.listAllowedProjects:
       return AGENT_CONTROL_CAPABILITIES.externalListProjects;
@@ -281,10 +439,47 @@ const toolCapability = (name: string) => {
       return AGENT_CONTROL_CAPABILITIES.externalReadActivity;
     case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.diagnosticsSummary:
       return AGENT_CONTROL_CAPABILITIES.externalReadDiagnostics;
+    case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.listThreads:
+    case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.readThread:
+    case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.searchThreads:
+    case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.waitThreads:
+    case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.inspectThread:
+      return AGENT_CONTROL_CAPABILITIES.externalReadThreads;
+    case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.readThreadDiff:
+      return AGENT_CONTROL_CAPABILITIES.externalReadReviews;
+    case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.readThreadFile:
+      return AGENT_CONTROL_CAPABILITIES.externalReadFiles;
+    case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.readProject:
+    case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.listWorkspaces:
+    case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.readWorkspace:
+      return AGENT_CONTROL_CAPABILITIES.externalReadWorkspaces;
+    case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.sendMessage:
+    case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.interruptThread:
+    case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.updateThread:
+      return AGENT_CONTROL_CAPABILITIES.externalControlThreads;
+    case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.planWorkspace:
+    case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.proposeWorkspace:
+      return AGENT_CONTROL_CAPABILITIES.externalManageWorkspaces;
     default:
       return null;
   }
 };
+
+const isControlRequestTool = (name: string) =>
+  name === AGENT_CONTROL_EXTERNAL_MCP_TOOLS.readControlRequest ||
+  name === AGENT_CONTROL_EXTERNAL_MCP_TOOLS.waitForControlRequest;
+
+const isControlTool = (name: string) =>
+  controlDescriptors.some((descriptor) => descriptor.name === name);
+
+/** Control requests are only reachable by integrations that can create them. */
+const canCreateRequests = (integration: AgentControlExternalIntegration) =>
+  [
+    AGENT_CONTROL_CAPABILITIES.externalCreateTask,
+    AGENT_CONTROL_CAPABILITIES.externalManageAutomations,
+    AGENT_CONTROL_CAPABILITIES.externalControlThreads,
+    AGENT_CONTROL_CAPABILITIES.externalManageWorkspaces,
+  ].some((capability) => integration.capabilities.includes(capability));
 
 const providerSummary = (provider: ServerProvider): AgentControlMcpProviderInstanceSummary => {
   const support = agentControlSupportForDriver(provider.driver);
@@ -312,13 +507,20 @@ export const makeExternalMcpTools = (deps: {
   readonly projections: ProjectionSnapshotQueryShape;
   readonly getProviders: Effect.Effect<ReadonlyArray<ServerProvider>>;
   readonly validator?: AgentControlActionValidatorShape;
-  readonly proposals?: Pick<AgentControlProposalServiceShape, "submit">;
+  readonly proposals?: Pick<AgentControlProposalServiceShape, "submit"> &
+    Partial<Pick<AgentControlProposalServiceShape, "getProposal" | "findByRequest">>;
+  readonly proposalEvents?: Pick<AgentControlProposalEventsShape, "subscribe">;
   readonly automations?: AgentControlAutomationShape;
   readonly diagnostics?: AgentControlDiagnosticsShape;
+  readonly workspaces?: typeof AgentControlWorkspaces.Service;
+  readonly diffs?: CheckpointDiffQueryShape;
+  readonly files?: WorkspaceFileSystemShape;
+  readonly workspaceAccess?: WorkspaceAccessPolicyShape;
 }): ExternalMcpTools => {
   const names = new Set<string>(AGENT_CONTROL_EXTERNAL_MCP_TOOL_NAMES);
   const descriptorsFor = (integration: AgentControlExternalIntegration) =>
-    descriptors.filter((descriptor) => {
+    [...descriptors, ...readDescriptors, ...controlDescriptors].filter((descriptor) => {
+      if (isControlRequestTool(descriptor.name)) return canCreateRequests(integration);
       const capability = toolCapability(descriptor.name);
       return capability === null || integration.capabilities.includes(capability);
     });
@@ -354,6 +556,200 @@ export const makeExternalMcpTools = (deps: {
     integration.projectScope.kind === "all" ||
     integration.projectScope.projectIds.includes(projectId);
 
+  const threadVisibility =
+    (integration: AgentControlExternalIntegration): ThreadVisibility =>
+    (thread) =>
+      allowedProject(integration, thread.projectId);
+
+  /** Rate admission and capability first; project scope is checked per resolved thread. */
+  const authorizeRead = (
+    integrationId: AgentControlIntegrationId,
+    name: string,
+    requiredCapability: AgentControlCapability,
+  ) => deps.integrations.authorizeTool({ integrationId, tool: name, requiredCapability });
+
+  /** A project outside scope reads exactly like a missing project. */
+  const requireAllowedProject = (
+    integration: AgentControlExternalIntegration,
+    projectId: ProjectId,
+  ) =>
+    Effect.gen(function* () {
+      const project = allowedProject(integration, projectId)
+        ? yield* deps.projections.getProjectShellById(projectId)
+        : Option.none();
+      if (Option.isNone(project)) return yield* failTool("Project not found.");
+      return project.value;
+    });
+
+  const readTool = (integrationId: AgentControlIntegrationId, name: string, args: unknown) =>
+    Effect.gen(function* () {
+      const capability = toolCapability(name);
+      if (capability === null) return yield* Effect.fail(new Error("Unknown external MCP tool"));
+      const integration = yield* authorizeRead(integrationId, name, capability);
+      const visible = threadVisibility(integration);
+      switch (name) {
+        case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.listThreads: {
+          const input = yield* decode(AgentControlMcpListThreadsInput, args);
+          if (input.projectId !== undefined) {
+            yield* requireAllowedProject(integration, input.projectId);
+          }
+          return yield* listThreadsPage(deps.projections, input, visible);
+        }
+        case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.readThread:
+          return yield* readThreadPage(
+            deps.projections,
+            yield* decode(AgentControlMcpReadThreadInput, args),
+            visible,
+          );
+        case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.searchThreads: {
+          const input = yield* decode(AgentControlSearchThreadsInput, args);
+          const limit = input.limit ?? 20;
+          if (input.threadId !== undefined) {
+            const thread = yield* deps.projections.getThreadShellById(input.threadId);
+            if (Option.isNone(thread) || !visible(thread.value)) {
+              return yield* failTool("Thread not found.");
+            }
+          }
+          if (input.projectId !== undefined) {
+            yield* requireAllowedProject(integration, input.projectId);
+          }
+          const scoped =
+            integration.projectScope.kind === "all" ||
+            input.threadId !== undefined ||
+            input.projectId !== undefined;
+          if (scoped) {
+            return sanitizeInspection(
+              yield* deps.projections.searchThreadMessages({ ...input, limit }),
+            );
+          }
+          // Selected scope without a narrower target: search each allowed
+          // project, then merge newest-first like the unscoped query orders.
+          const snapshot = yield* deps.projections.getShellSnapshot();
+          const allowedProjects = snapshot.projects.filter((project) =>
+            allowedProject(integration, project.id),
+          );
+          const pages = yield* Effect.forEach(
+            allowedProjects,
+            (project) =>
+              deps.projections.searchThreadMessages({ ...input, projectId: project.id, limit }),
+            { concurrency: 4 },
+          );
+          return sanitizeInspection(
+            pages
+              .flat()
+              .toSorted((a, b) =>
+                a.timestamp === b.timestamp
+                  ? b.messageId.localeCompare(a.messageId)
+                  : b.timestamp.localeCompare(a.timestamp),
+              )
+              .slice(0, limit),
+          );
+        }
+        case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.waitThreads: {
+          const input = yield* decode(AgentControlWaitThreadsInput, args);
+          // Re-check the integration on every poll: revocation, expiry, a
+          // disabled policy, or a narrowed scope ends visibility immediately.
+          const access = Effect.suspend(() => deps.integrations.revalidate(integrationId)).pipe(
+            Effect.flatMap((current) =>
+              current.capabilities.includes(AGENT_CONTROL_CAPABILITIES.externalReadThreads)
+                ? Effect.succeed(threadVisibility(current))
+                : failTool("Thread access was revoked."),
+            ),
+          );
+          return sanitizeInspection(yield* waitThreads(deps.projections, input, access));
+        }
+        case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.inspectThread: {
+          const input = yield* decode(AgentControlInspectThreadInput, args);
+          if (input.section === "terminals") return yield* failTool("Section unavailable.");
+          if (
+            input.section === "review" &&
+            !integration.capabilities.includes(AGENT_CONTROL_CAPABILITIES.externalReadReviews)
+          ) {
+            return yield* failTool("Review access is not granted.");
+          }
+          return sanitizeInspection(
+            yield* inspectThread({ projections: deps.projections }, input, visible),
+          );
+        }
+        case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.readThreadDiff:
+          return sanitizeInspection(
+            yield* readThreadDiff(
+              { projections: deps.projections, ...(deps.diffs ? { diffs: deps.diffs } : {}) },
+              yield* decode(AgentControlReadDiffInput, args),
+              visible,
+            ),
+          );
+        case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.readThreadFile:
+          return sanitizeInspection(
+            yield* readThreadFile(
+              {
+                projections: deps.projections,
+                ...(deps.files ? { files: deps.files } : {}),
+                ...(deps.workspaceAccess ? { workspaceAccess: deps.workspaceAccess } : {}),
+              },
+              yield* decode(AgentControlReadThreadFileInput, args),
+              visible,
+            ),
+          );
+        case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.readProject: {
+          const input = yield* decode(AgentControlReadProjectInput, args);
+          return sanitizeInspection(
+            toProjectPreferences(yield* requireAllowedProject(integration, input.projectId)),
+          );
+        }
+        case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.listWorkspaces: {
+          if (deps.workspaces === undefined)
+            return yield* failTool("Workspace service unavailable.");
+          const input = yield* decode(AgentControlListWorkspacesInput, args);
+          yield* requireAllowedProject(integration, input.projectId);
+          return yield* deps.workspaces
+            .list(input.projectId, null, input.after, input.limit)
+            .pipe(Effect.mapError((error) => new ToolFailure(error.detail.slice(0, 500))));
+        }
+        case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.readWorkspace: {
+          if (deps.workspaces === undefined)
+            return yield* failTool("Workspace service unavailable.");
+          const input = yield* decode(AgentControlReadWorkspaceInput, args);
+          yield* requireAllowedProject(integration, input.projectId);
+          return yield* deps.workspaces
+            .read(input.projectId, input.workspaceId, null)
+            .pipe(Effect.mapError((error) => new ToolFailure(error.detail.slice(0, 500))));
+        }
+        default:
+          return yield* Effect.fail(new Error("Unknown external MCP tool"));
+      }
+    });
+
+  const controlRequestTool = (
+    integrationId: AgentControlIntegrationId,
+    name: string,
+    args: unknown,
+  ) =>
+    Effect.gen(function* () {
+      const getProposal = deps.proposals?.getProposal;
+      if (getProposal === undefined || deps.proposalEvents === undefined) {
+        return yield* failTool("Control requests are unavailable.");
+      }
+      const integration = yield* deps.integrations.authorizeTool({ integrationId, tool: name });
+      if (!canCreateRequests(integration)) return yield* failTool("Control request not found.");
+      const visible = (proposal: AgentControlProposal) =>
+        proposal.principal.kind === "external-integration" &&
+        proposal.principal.integrationId === integrationId;
+      if (name === AGENT_CONTROL_EXTERNAL_MCP_TOOLS.readControlRequest) {
+        const input = yield* decode(AgentControlMcpReadControlRequestInput, args);
+        return yield* readControlRequestReceipt({ getProposal }, input.proposalId, visible);
+      }
+      const input = yield* decode(AgentControlMcpWaitForControlRequestInput, args);
+      return yield* waitForControlRequestReceipt({
+        proposals: { getProposal },
+        proposalEvents: deps.proposalEvents,
+        proposalId: input.proposalId,
+        waitFor: input.waitFor,
+        timeoutMs: input.timeoutMs,
+        visible,
+      });
+    });
+
   const findAutomation = (
     integration: AgentControlExternalIntegration,
     automationId: AgentControlAutomation["automationId"],
@@ -371,30 +767,36 @@ export const makeExternalMcpTools = (deps: {
       return yield* Effect.fail(new Error("Unavailable"));
     });
 
-  const riskTags = (plan: AgentControlActionPlan) => {
-    switch (plan.kind) {
-      case "createAutomation":
-        return [AGENT_CONTROL_RISK_TAGS.createsAutomation];
-      case "updateAutomation":
-        return [AGENT_CONTROL_RISK_TAGS.modifiesAutomation];
-      case "cancelAutomation":
-        return [AGENT_CONTROL_RISK_TAGS.cancelsAutomation];
-      default:
-        return [];
-    }
-  };
-
-  const submitAutomation = (
+  /**
+   * Submit an immutable proposal. External principals never qualify for
+   * routine authorization, so every plan waits for a Ryco user's approval.
+   * Validation details are presentation-safe and surface to the caller.
+   */
+  const submitExternal = (
     integration: AgentControlExternalIntegration,
     requestId: Parameters<AgentControlProposalServiceShape["submit"]>[0]["requestId"],
-    plan: Extract<
-      AgentControlActionPlan,
-      { kind: "createAutomation" | "updateAutomation" | "cancelAutomation" }
-    >,
+    plan: AgentControlActionPlan,
   ) =>
     Effect.gen(function* () {
       if (deps.validator === undefined || deps.proposals === undefined) {
-        return yield* Effect.fail(new Error("Unavailable"));
+        return yield* failTool("Control request creation is unavailable.");
+      }
+      // A retry after the target changed (for example once executed) must
+      // recover the original receipt instead of failing revalidation.
+      if (deps.proposals.findByRequest !== undefined) {
+        const existing = yield* deps.proposals.findByRequest(
+          { kind: "external-integration", integrationId: integration.integrationId },
+          requestId,
+        );
+        if (Option.isSome(existing)) {
+          if (existing.value.planDigest !== computeAgentControlPlanDigest(plan)) {
+            return yield* failTool("Request ID was already used with a different plan.");
+          }
+          return Schema.encodeSync(AgentControlMcpMutationResult)({
+            receipt: toAgentControlProposalReceipt(existing.value),
+            replayed: true,
+          });
+        }
       }
       const principal = yield* deps.validator.validateExternalSubmission({ integration, plan });
       const now = new Date();
@@ -402,8 +804,8 @@ export const makeExternalMcpTools = (deps: {
         principal,
         requestId,
         plan,
-        riskTags: riskTags(plan),
-        promptSummary: `${plan.kind} requires Ryco user approval`,
+        riskTags: agentControlRiskTagsForPlan(plan),
+        promptSummary: agentControlPromptSummaryForPlan(plan),
         now: now.toISOString(),
         expiresAt: new Date(now.getTime() + AGENT_CONTROL_EXTERNAL_PROPOSAL_TTL_MS).toISOString(),
       });
@@ -411,6 +813,58 @@ export const makeExternalMcpTools = (deps: {
         receipt: toAgentControlProposalReceipt(submitted.proposal),
         replayed: submitted.replayed,
       });
+    }).pipe(
+      Effect.mapError((error) => {
+        switch (error._tag) {
+          case "AgentControlPlanValidationError":
+            return new ToolFailure(error.detail.slice(0, 500));
+          case "AgentControlDuplicateRequestError":
+            return new ToolFailure("Request ID was already used with a different plan.");
+          default:
+            return error;
+        }
+      }),
+    );
+
+  const controlTool = (integrationId: AgentControlIntegrationId, name: string, args: unknown) =>
+    Effect.gen(function* () {
+      const capability = toolCapability(name);
+      if (capability === null) return yield* Effect.fail(new Error("Unknown external MCP tool"));
+      const integration = yield* deps.integrations.authorizeTool({
+        integrationId,
+        tool: name,
+        requiredCapability: capability,
+      });
+      switch (name) {
+        case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.sendMessage: {
+          const input = yield* decode(AgentControlMcpSendMessageInput, args);
+          return yield* submitExternal(integration, input.requestId, sendMessagePlan(input));
+        }
+        case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.interruptThread: {
+          const input = yield* decode(AgentControlMcpInterruptThreadInput, args);
+          return yield* submitExternal(integration, input.requestId, interruptThreadPlan(input));
+        }
+        case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.updateThread: {
+          const input = yield* decode(AgentControlMcpUpdateThreadInput, args);
+          return yield* submitExternal(integration, input.requestId, updateThreadPlan(input));
+        }
+        case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.planWorkspace: {
+          if (deps.workspaces === undefined)
+            return yield* failTool("Workspace service unavailable.");
+          const input = yield* decode(AgentControlPlanWorkspaceInput, args);
+          yield* requireAllowedProject(integration, input.projectId);
+          return yield* planWorkspaceLifecycle(deps.workspaces, input, null).pipe(
+            Effect.mapError((error) => new ToolFailure(error.detail.slice(0, 500))),
+          );
+        }
+        case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.proposeWorkspace: {
+          const input = yield* decode(AgentControlProposeWorkspaceInput, args);
+          yield* requireAllowedProject(integration, input.plan.projectId);
+          return yield* submitExternal(integration, input.requestId, input.plan);
+        }
+        default:
+          return yield* Effect.fail(new Error("Unknown external MCP tool"));
+      }
     });
 
   const execute = (integrationId: AgentControlIntegrationId, name: string, args: unknown) =>
@@ -423,7 +877,7 @@ export const makeExternalMcpTools = (deps: {
             displayName: integration.displayName,
             clientKind: integration.clientKind,
             notice:
-              "Every external task waits for explicit approval by a Ryco user before a thread is created.",
+              "Every request from this integration, including tasks, thread control, and workspace changes, waits for explicit approval by a Ryco user before anything changes.",
           });
         }
         case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.capabilities: {
@@ -456,6 +910,7 @@ export const makeExternalMcpTools = (deps: {
           return Schema.encodeSync(AgentControlMcpListProjectsResult)({
             projects: allowed.slice(0, limit).map((project) => ({
               projectId: project.id,
+              kind: projectKindOf(project),
               title: project.title,
               createdAt: project.createdAt,
               updatedAt: project.updatedAt,
@@ -537,7 +992,7 @@ export const makeExternalMcpTools = (deps: {
               .digest("hex")
               .slice(0, 32)}`,
           );
-          return yield* submitAutomation(integration, input.requestId, {
+          return yield* submitExternal(integration, input.requestId, {
             kind: "createAutomation",
             automationId,
             definition: {
@@ -578,7 +1033,7 @@ export const makeExternalMcpTools = (deps: {
           const nextOptions = input.options ?? execution.modelSelection.options;
           const nextBaseRef =
             input.baseRef === null ? undefined : (input.baseRef ?? execution.baseRef);
-          return yield* submitAutomation(integration, input.requestId, {
+          return yield* submitExternal(integration, input.requestId, {
             kind: "updateAutomation",
             automationId: current.automationId,
             before: {
@@ -622,7 +1077,7 @@ export const makeExternalMcpTools = (deps: {
           if (current.revision !== input.expectedRevision) {
             return yield* Effect.fail(new Error("Revision changed"));
           }
-          return yield* submitAutomation(integration, input.requestId, {
+          return yield* submitExternal(integration, input.requestId, {
             kind: "cancelAutomation",
             automationId: current.automationId,
             expected: {
@@ -699,8 +1154,13 @@ export const makeExternalMcpTools = (deps: {
             integrationId,
             request: yield* decode(AgentControlExternalWaitForTaskInput, args),
           });
+        case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.readControlRequest:
+        case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.waitForControlRequest:
+          return yield* controlRequestTool(integrationId, name, args);
         default:
-          return yield* Effect.fail(new Error("Unknown external MCP tool"));
+          return isControlTool(name)
+            ? yield* controlTool(integrationId, name, args)
+            : yield* readTool(integrationId, name, args);
       }
     });
 
@@ -710,9 +1170,19 @@ export const makeExternalMcpTools = (deps: {
         content: [{ type: "text" as const, text: JSON.stringify(value) }],
         structuredContent: value,
       })),
-      Effect.catch(() =>
+      // Tool failures carry presentation-safe reasons; everything else,
+      // including authorization, collapses to one indistinguishable refusal.
+      Effect.catch((error) =>
         Effect.succeed({
-          content: [{ type: "text" as const, text: "External Agent Control request was refused." }],
+          content: [
+            {
+              type: "text" as const,
+              text:
+                error instanceof ToolFailure
+                  ? error.reason
+                  : "External Agent Control request was refused.",
+            },
+          ],
           isError: true,
         }),
       ),

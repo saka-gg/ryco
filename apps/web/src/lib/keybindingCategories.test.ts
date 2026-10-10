@@ -38,6 +38,13 @@ describe("keybindingCategories", () => {
     });
   });
 
+  it("maps the projects page command to its own category, apart from the sidebar mode", () => {
+    expect(getCommandMeta("projects.open")).toMatchObject({
+      category: KEYBINDING_CATEGORIES.projects,
+      title: "Open projects page",
+    });
+  });
+
   it("maps stash to the Composer category with a friendly title", () => {
     expect(getCommandMeta("composer.stash").category).toBe(KEYBINDING_CATEGORIES.composer);
     expect(getCommandMeta("composer.stash").title).toBe("Stash prompt or open stash");

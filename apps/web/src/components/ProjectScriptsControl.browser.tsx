@@ -100,7 +100,8 @@ describe("ProjectScriptsControl action dialog", () => {
     await vi.waitFor(() => expect(ghosts()).toHaveLength(0), { timeout: 2_000 });
     expect(popup.hasAttribute("data-surface-morphing")).toBe(false);
     expect(scrimAlpha(popup)).toBeGreaterThan(0.5);
-    expect(Number(getComputedStyle(addButton).opacity)).toBe(0);
+    // The button that opened the dialog stays visible while it is open.
+    expect(Number(getComputedStyle(addButton).opacity)).toBe(1);
     await expect.element(page.getByRole("textbox", { name: "Name" })).toHaveFocus();
 
     await userEvent.keyboard("{Escape}");

@@ -42,6 +42,12 @@ const EXTERNAL_CAPABILITIES = new Set<AgentControlCapability>([
   AGENT_CONTROL_CAPABILITIES.externalManageAutomations,
   AGENT_CONTROL_CAPABILITIES.externalReadActivity,
   AGENT_CONTROL_CAPABILITIES.externalReadDiagnostics,
+  AGENT_CONTROL_CAPABILITIES.externalReadThreads,
+  AGENT_CONTROL_CAPABILITIES.externalReadReviews,
+  AGENT_CONTROL_CAPABILITIES.externalReadFiles,
+  AGENT_CONTROL_CAPABILITIES.externalReadWorkspaces,
+  AGENT_CONTROL_CAPABILITIES.externalControlThreads,
+  AGENT_CONTROL_CAPABILITIES.externalManageWorkspaces,
 ]);
 const AUDIT_RETENTION_MS = 30 * 24 * 60 * 60_000;
 const AUDIT_RETENTION_ROWS = 1_000;

@@ -48,7 +48,10 @@ import {
   isAgentControlDevicePlan,
   resolveAgentControlDeviceArtifact,
 } from "../deviceControl.ts";
-import { AgentControlActionValidator } from "../Services/AgentControlActionValidator.ts";
+import {
+  AgentControlActionValidator,
+  agentControlTargetSnapshots,
+} from "../Services/AgentControlActionValidator.ts";
 import { AgentControlAutomationService } from "../Services/AgentControlAutomation.ts";
 import {
   AgentControlExecution,
@@ -929,7 +932,7 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
               index,
               effective.worktreeBranchPrefix.value,
             );
-            const checkoutPath = resolveWorktreeCheckoutPath({
+            const checkoutPath = yield* resolveWorktreeCheckoutPath({
               location: undefined,
               appWorktreesRoot: yield* resolveConfiguredWorktreeRoot({
                 settings: worktreeSettings,
@@ -940,6 +943,8 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
               projectId: project.id,
               workspaceRoot: project.workspaceRoot,
               projectMetadataDir: project.projectMetadataDir,
+              projectTitle: project.title,
+              initialName: entry.title,
               branchName: branch,
             });
             const baseRef = entry.baseRef ?? "HEAD";
@@ -1163,12 +1168,9 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
         if (proposal.plan.kind === "sendMessage") {
           const plan = proposal.plan;
           const target = yield* loadThread(plan.threadId);
-          const expectedTarget =
-            proposal.principal.kind === "provider-session"
-              ? proposal.principal.targetSnapshots?.find(
-                  (snapshot) => snapshot.threadId === plan.threadId,
-                )
-              : undefined;
+          const expectedTarget = agentControlTargetSnapshots(proposal.principal).find(
+            (snapshot) => snapshot.threadId === plan.threadId,
+          );
           const messageId = messageIdFor(operation.operationId, "send-message");
           let delivery: "queued" | "steered" | "queued-after-steer-fallback" = "queued";
           let shouldQueue = plan.delivery === "queue";
@@ -1258,12 +1260,9 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
         if (proposal.plan.kind === "interruptThread") {
           const plan = proposal.plan;
           const target = yield* loadThread(plan.threadId);
-          const expectedTarget =
-            proposal.principal.kind === "provider-session"
-              ? proposal.principal.targetSnapshots?.find(
-                  (snapshot) => snapshot.threadId === plan.threadId,
-                )
-              : undefined;
+          const expectedTarget = agentControlTargetSnapshots(proposal.principal).find(
+            (snapshot) => snapshot.threadId === plan.threadId,
+          );
           const requestedTurnId = plan.turnId ?? expectedTarget?.activeTurnId ?? null;
           if (
             requestedTurnId === null ||

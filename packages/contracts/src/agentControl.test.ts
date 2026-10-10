@@ -323,6 +323,12 @@ describe("forward compatibility (additive extension)", () => {
     expect(decodeRiskTag("touches-settings")).toBe("touches-settings");
   });
 
+  it("defines the HTML render grant as a valid, distinct capability slug", () => {
+    expect(decodeCapability(AGENT_CONTROL_CAPABILITIES.renderHtml)).toBe("html.render");
+    const slugs = Object.values(AGENT_CONTROL_CAPABILITIES);
+    expect(new Set(slugs).size).toBe(slugs.length);
+  });
+
   it("rejects malformed slugs", () => {
     expect(() => decodeCapability("Threads.Create")).toThrow();
     expect(() => decodeCapability("1bad")).toThrow();
@@ -674,7 +680,7 @@ describe("AgentControl external MCP", () => {
     expect(value).not.toHaveProperty("credential");
   });
 
-  it("publishes the scoped task, automation, activity, and diagnostics tools", async () => {
+  it("publishes the scoped task, automation, activity, diagnostics, read, and control tools", async () => {
     const { AGENT_CONTROL_EXTERNAL_MCP_TOOL_NAMES } = await import("./agentControl.ts");
     expect([...AGENT_CONTROL_EXTERNAL_MCP_TOOL_NAMES]).toEqual([
       "ryco_overview",
@@ -693,6 +699,23 @@ describe("AgentControl external MCP", () => {
       "ryco_orchestration_events",
       "ryco_provider_runtime_events",
       "ryco_diagnostics_summary",
+      "ryco_read_control_request",
+      "ryco_wait_for_control_request",
+      "ryco_list_threads",
+      "ryco_read_thread",
+      "ryco_search_threads",
+      "ryco_wait_threads",
+      "ryco_inspect_thread",
+      "ryco_read_thread_diff",
+      "ryco_read_thread_file",
+      "ryco_read_project",
+      "ryco_list_workspaces",
+      "ryco_read_workspace",
+      "ryco_send_message",
+      "ryco_interrupt_thread",
+      "ryco_update_thread",
+      "ryco_plan_workspace_lifecycle",
+      "ryco_propose_workspace_lifecycle",
     ]);
   });
 

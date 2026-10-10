@@ -40,9 +40,18 @@ export const RollingText = memo(function RollingText(props: {
   text: string;
   direction?: RollDirection;
   align?: "start" | "center";
+  /** Ease the width between values (default). Off, the width snaps like a plain inline-grid. */
+  animateWidth?: boolean;
+  /**
+   * Lift the leaving value out of flow so the width snaps straight to the new
+   * text. For rows that animate their own layout (see `useFlipLayout`); pair
+   * with `animateWidth={false}`.
+   */
+  overlayLeaving?: boolean;
   className?: string;
   itemClassName?: string;
 }) {
+  const animateWidth = props.animateWidth ?? true;
   const [shownText, setShownText] = useState(props.text);
   const [entries, setEntries] = useState<ReadonlyArray<RollEntry>>(() => [
     { key: 0, text: props.text, phase: "idle", direction: 1 },
@@ -73,7 +82,7 @@ export const RollingText = memo(function RollingText(props: {
 
   useLayoutEffect(() => {
     const container = containerRef.current;
-    if (!container) return;
+    if (!container || !animateWidth) return;
     const enteringKey = entries.find((entry) => entry.phase === "enter")?.key;
     const entering =
       enteringKey === undefined
@@ -89,13 +98,14 @@ export const RollingText = memo(function RollingText(props: {
       duration: 300,
       easing: "cubic-bezier(0.22, 1, 0.36, 1)",
     });
-  }, [entries]);
+  }, [animateWidth, entries]);
 
   return (
     <span
       ref={containerRef}
       className={cn("rolling-text", props.className)}
       data-align={props.align ?? "start"}
+      data-overlay-leaving={props.overlayLeaving ? "true" : undefined}
     >
       {entries.map((entry) => (
         <span

@@ -2,6 +2,12 @@ import { extractToolResultText, extractToolContentText } from "@ryco/shared/tool
 import type * as EffectAcpSchema from "effect-acp/schema";
 import { deriveToolActivityPresentation } from "@ryco/shared/toolActivity";
 import {
+  type HtmlRenderToolKind,
+  htmlRenderToolPresentation,
+  resolveHtmlRenderToolKind,
+  withoutHtmlRenderMarkup,
+} from "@ryco/shared/htmlRenderToolPresentation";
+import {
   ProviderItemId,
   RuntimeSubagentId,
   type RuntimeSubagentStatus,
@@ -33,6 +39,11 @@ export interface AcpToolCallState {
   readonly command?: string;
   readonly detail?: string;
   readonly subagent?: AcpSubagentSummaryState;
+  /**
+   * Set once any event names one of Ryco's HTML tools. Updates may omit the
+   * title, so merges carry it forward and keep the page out of `data`.
+   */
+  readonly htmlRenderKind?: HtmlRenderToolKind;
   readonly data: Record<string, unknown>;
 }
 
@@ -635,6 +646,11 @@ function makeToolCallState(
     return undefined;
   }
   const title = input.title?.trim() || undefined;
+  // Ryco's HTML tools show a short label and are never carried with their page.
+  const htmlRenderKind = resolveHtmlRenderToolKind(title);
+  const htmlRender = htmlRenderKind
+    ? htmlRenderToolPresentation(htmlRenderKind, input.rawInput)
+    : undefined;
   const command = extractToolCallCommand(input.rawInput, title);
   const textContent = extractTextContentFromToolCallContent(input.content);
   const normalizedTitle =
@@ -650,7 +666,7 @@ function makeToolCallState(
     data.command = command;
   }
   if (input.rawInput !== undefined) {
-    data.rawInput = input.rawInput;
+    data.rawInput = htmlRender ? withoutHtmlRenderMarkup(input.rawInput) : input.rawInput;
   }
   if (input.rawOutput !== undefined) {
     data.rawOutput = input.rawOutput;
@@ -676,21 +692,23 @@ function makeToolCallState(
     command !== undefined ||
     normalizedTitle !== undefined ||
     textContent !== undefined;
-  const presentation = hasPresentationSeed
-    ? deriveToolActivityPresentation({
-        itemType: canonicalItemTypeFromAcpTool({
-          kind,
+  const presentation = htmlRender
+    ? { summary: htmlRender.title, ...(htmlRender.detail ? { detail: htmlRender.detail } : {}) }
+    : hasPresentationSeed
+      ? deriveToolActivityPresentation({
+          itemType: canonicalItemTypeFromAcpTool({
+            kind,
+            title,
+            command,
+            detail: fallbackDetail,
+            data,
+          }),
           title,
-          command,
           detail: fallbackDetail,
           data,
-        }),
-        title,
-        detail: fallbackDetail,
-        data,
-        fallbackSummary: title ?? "Tool",
-      })
-    : undefined;
+          fallbackSummary: title ?? "Tool",
+        })
+      : undefined;
   const status = normalizeToolCallStatus(input.status, options?.fallbackStatus);
   const subagent = makeAcpSubagentSummaryState({
     toolCallId,
@@ -709,6 +727,7 @@ function makeToolCallState(
     ...(command ? { command } : {}),
     ...(presentation?.detail ? { detail: presentation.detail } : {}),
     ...(subagent ? { subagent } : {}),
+    ...(htmlRenderKind ? { htmlRenderKind } : {}),
     data,
   };
 }
@@ -740,14 +759,26 @@ export function mergeToolCallState(
 ): AcpToolCallState {
   const nextKind = typeof next.data.kind === "string" ? next.data.kind : undefined;
   const kind = nextKind ?? previous?.kind;
-  const title = next.title ?? previous?.title;
   const status = next.status ?? previous?.status;
   const command = next.command ?? previous?.command;
-  const detail = next.detail ?? previous?.detail;
-  const data = {
+  const mergedData = {
     ...previous?.data,
     ...next.data,
   };
+  // Decided on the merged state: an update that omits the title (or the call
+  // that preceded the titled one) may still carry the page in `rawInput`.
+  const htmlRenderKind = next.htmlRenderKind ?? previous?.htmlRenderKind;
+  const data =
+    htmlRenderKind && mergedData.rawInput !== undefined
+      ? { ...mergedData, rawInput: withoutHtmlRenderMarkup(mergedData.rawInput) }
+      : mergedData;
+  const htmlRender = htmlRenderKind
+    ? htmlRenderToolPresentation(htmlRenderKind, data.rawInput)
+    : undefined;
+  const title = htmlRender?.title ?? next.title ?? previous?.title;
+  const detail = htmlRender
+    ? (htmlRender.detail ?? (previous?.htmlRenderKind ? previous.detail : undefined))
+    : (next.detail ?? previous?.detail);
   const subagent = makeAcpSubagentSummaryState({
     toolCallId: next.toolCallId,
     ...(kind ? { kind } : {}),
@@ -765,6 +796,7 @@ export function mergeToolCallState(
     ...(command ? { command } : {}),
     ...(detail ? { detail } : {}),
     ...(subagent ? { subagent } : {}),
+    ...(htmlRenderKind ? { htmlRenderKind } : {}),
     data,
   };
 }

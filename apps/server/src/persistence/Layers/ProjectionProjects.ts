@@ -29,6 +29,7 @@ const makeProjectionProjectRepository = Effect.gen(function* () {
       sql`
         INSERT INTO projection_projects (
           project_id,
+          kind,
           title,
           workspace_root,
           project_metadata_dir,
@@ -43,6 +44,7 @@ const makeProjectionProjectRepository = Effect.gen(function* () {
         )
         VALUES (
           ${row.projectId},
+          ${row.kind},
           ${row.title},
           ${row.workspaceRoot},
           ${row.projectMetadataDir},
@@ -57,6 +59,7 @@ const makeProjectionProjectRepository = Effect.gen(function* () {
         )
         ON CONFLICT (project_id)
         DO UPDATE SET
+          kind = excluded.kind,
           title = excluded.title,
           workspace_root = excluded.workspace_root,
           project_metadata_dir = excluded.project_metadata_dir,
@@ -78,6 +81,7 @@ const makeProjectionProjectRepository = Effect.gen(function* () {
       sql`
         SELECT
           project_id AS "projectId",
+          kind,
           title,
           workspace_root AS "workspaceRoot",
           project_metadata_dir AS "projectMetadataDir",
@@ -101,6 +105,7 @@ const makeProjectionProjectRepository = Effect.gen(function* () {
       sql`
         SELECT
           project_id AS "projectId",
+          kind,
           title,
           workspace_root AS "workspaceRoot",
           project_metadata_dir AS "projectMetadataDir",

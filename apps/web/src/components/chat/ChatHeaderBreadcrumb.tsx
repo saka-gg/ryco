@@ -1,5 +1,5 @@
 import { ChevronRightIcon } from "lucide-react";
-import { memo } from "react";
+import { Fragment, memo, type ReactNode } from "react";
 import { cn } from "~/lib/utils";
 import {
   shouldShowWorktreeBreadcrumbSegment,
@@ -24,25 +24,49 @@ export const ChatHeaderBreadcrumb = memo(function ChatHeaderBreadcrumb(
     branch: props.worktreeBranch,
   });
   const worktreeLabel = (props.worktreeTitle?.trim() || props.worktreeBranch?.trim()) ?? null;
+  const projectName = props.projectName?.trim() || null;
+
+  // A chevron only ever separates two segments: never one in front of the
+  // first, so a missing project or worktree leaves no empty step behind.
+  const segments: Array<{ readonly key: string; readonly node: ReactNode }> = [];
+  if (projectName) {
+    segments.push({
+      key: "project",
+      node: <Segment label={projectName} onSelect={props.onSelectProject} prominent />,
+    });
+  }
+  if (showWorktree && worktreeLabel) {
+    segments.push({
+      key: "worktree",
+      node: <Segment label={worktreeLabel} onSelect={props.onSelectWorktree} mono />,
+    });
+  }
+  segments.push({
+    key: "session",
+    node: (
+      <span className="min-w-0 truncate text-foreground/85" title={props.sessionTitle}>
+        {props.sessionTitle}
+      </span>
+    ),
+  });
 
   return (
     <nav
       aria-label="Breadcrumb"
       className="flex min-w-0 flex-1 items-center gap-1.5 text-sm font-medium"
     >
-      {props.projectName ? (
-        <Segment label={props.projectName} onSelect={props.onSelectProject} prominent />
-      ) : null}
-      {showWorktree && worktreeLabel ? (
-        <>
-          <ChevronRightIcon className="size-3 shrink-0 text-muted-foreground/60" aria-hidden />
-          <Segment label={worktreeLabel} onSelect={props.onSelectWorktree} mono />
-        </>
-      ) : null}
-      <ChevronRightIcon className="size-3 shrink-0 text-muted-foreground/60" aria-hidden />
-      <span className="min-w-0 truncate text-foreground/85" title={props.sessionTitle}>
-        {props.sessionTitle}
-      </span>
+      {segments.map((segment, index) => (
+        <Fragment key={segment.key}>
+          {index > 0 ? (
+            <ChevronRightIcon
+              className="size-3 shrink-0 text-muted-foreground/60"
+              aria-hidden
+              data-slot="breadcrumb-separator"
+            />
+          ) : null}
+          {segment.node}
+        </Fragment>
+      ))}
     </nav>
   );
 });

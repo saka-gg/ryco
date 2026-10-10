@@ -1,3 +1,4 @@
+import { allocateWorktreeCheckoutPath } from "../project/worktreeCheckoutPaths.ts";
 import { randomUUID } from "node:crypto";
 
 import {
@@ -849,9 +850,11 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
     }
 
     const shouldQueryPullRequests =
-      details.branch === null
-        ? false
-        : ((yield* probeBranchPublished(cwd, details.branch, details.upstreamRef)) ?? true);
+      details.branch !== null &&
+      ((yield* probeBranchPublished(cwd, details.branch, details.upstreamRef)) ?? true) &&
+      // Change requests live on a recognized hosting provider. A repository without one (no
+      // remote yet, or an unrecognized host) has none to report; that is not a status failure.
+      (yield* sourceControlProvider(cwd)).kind !== "unknown";
     const pr =
       details.branch !== null && shouldQueryPullRequests
         ? yield* findLatestPr(cwd, {
@@ -1727,12 +1730,16 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
       const worktree = yield* gitCore.createWorktree({
         settingsSnapshot: settings,
         projectId: project?.id,
+        projectTitle: project?.title,
+        initialName: pullRequest.title || localPullRequestBranch,
         cwd: input.cwd,
         refName: localPullRequestBranch,
         path: input.worktreesDir
-          ? path.join(
+          ? yield* allocateWorktreeCheckoutPath(
               input.worktreesDir,
-              sanitizeBranchFragment(localPullRequestBranch).replace(/\//g, "-"),
+              pullRequest.title || localPullRequestBranch,
+            ).pipe(
+              Effect.catch((cause) => gitManagerError("preparePullRequestThread", cause.message)),
             )
           : null,
       });

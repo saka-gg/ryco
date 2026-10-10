@@ -1,9 +1,6 @@
 import { createContext, useContext } from "react";
 
-import type {
-  PullRequestRepositoryOption,
-  PullRequestRepositoryRequest,
-} from "./pullRequestRepositories.logic";
+import type { ProjectCheckoutOption, ProjectCheckoutRequest } from "../../projectCheckouts.logic";
 import type {
   PullRequestsDiffSide,
   PullRequestsSearch,
@@ -66,7 +63,7 @@ export interface PullRequestsNavigation {
   revealJob(jobId: string): void;
   /** Scope Files to one commit (`undefined` = whole change request). */
   scopeToCommit(sha: string | undefined): void;
-  selectRepository(option: PullRequestRepositoryOption): void;
+  selectRepository(option: ProjectCheckoutOption): void;
 }
 
 export interface PullRequestsLayout {
@@ -111,14 +108,14 @@ export type PullRequestsRepositoryStatus =
   | { readonly kind: "empty" }
   | {
       readonly kind: "waiting";
-      readonly requested: PullRequestRepositoryRequest;
+      readonly requested: ProjectCheckoutRequest;
       /** Human label for the requested environment, when known. */
       readonly environmentLabel: string | null;
       readonly stalled: boolean;
     }
   | {
       readonly kind: "unavailable";
-      readonly requested: PullRequestRepositoryRequest;
+      readonly requested: ProjectCheckoutRequest;
       readonly environmentLabel: string | null;
       readonly reason: "offline" | "missing";
     };
@@ -140,9 +137,9 @@ export const PULL_REQUESTS_PAGE_SURFACE: PullRequestsSurface = { kind: "page" };
 
 export interface PullRequestsPageContextValue {
   readonly surface: PullRequestsSurface;
-  readonly repository: PullRequestRepositoryOption | null;
+  readonly repository: ProjectCheckoutOption | null;
   readonly repositoryStatus: PullRequestsRepositoryStatus;
-  readonly repositories: ReadonlyArray<PullRequestRepositoryOption>;
+  readonly repositories: ReadonlyArray<ProjectCheckoutOption>;
   readonly model: PullRequestsModel;
   readonly nav: PullRequestsNavigation;
   readonly layout: PullRequestsLayout;
@@ -150,6 +147,11 @@ export interface PullRequestsPageContextValue {
   readonly selectionMotion: PullRequestSelectionMotion;
   /** `pullRequestReaderKey(repository.key, pr)` for the selected PR, else null. */
   readonly readerKey: string | null;
+  /**
+   * Bumps on every `nav.revealJob`, so revealing the job already in the URL
+   * scrolls to and flashes it again. Absent where nothing counts reveals.
+   */
+  readonly jobRevealToken?: number | undefined;
 }
 
 export const PullRequestsPageContext = createContext<PullRequestsPageContextValue | null>(null);

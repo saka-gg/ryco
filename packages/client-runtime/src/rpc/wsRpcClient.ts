@@ -44,6 +44,15 @@ export interface ResumableSubscriptionOptions extends StreamSubscriptionOptions 
 }
 export type ShellSubscriptionOptions = ResumableSubscriptionOptions;
 
+/** What a reduced status snapshot does not say on its own. */
+export interface VcsStatusStreamMeta {
+  /**
+   * The stream has delivered the remote half (upstream, ahead / behind, change
+   * request). Until then those fields hold placeholders, not real values.
+   */
+  readonly remoteKnown: boolean;
+}
+
 const resumeInput = (options: ResumableSubscriptionOptions | undefined) => {
   const resumeFromSequence = options?.resumeFromSequence?.() ?? null;
   return resumeFromSequence !== null && resumeFromSequence > 0 ? { resumeFromSequence } : {};
@@ -100,6 +109,9 @@ export interface WsRpcClient {
     readonly writeFile: RpcUnaryMethod<typeof WS_METHODS.projectsWriteFile>;
     readonly stageFileReference: RpcUnaryMethod<typeof WS_METHODS.projectsStageFileReference>;
     readonly initializeGit: RpcUnaryMethod<typeof WS_METHODS.projectsInitializeGit>;
+    readonly promoteChatPreview: RpcUnaryMethod<typeof WS_METHODS.projectsPromoteChatPreview>;
+    readonly promoteChat: RpcUnaryMethod<typeof WS_METHODS.projectsPromoteChat>;
+    readonly deleteChatFolder: RpcUnaryMethod<typeof WS_METHODS.projectsDeleteChatFolder>;
   };
   readonly sessionImport: {
     readonly sources: RpcUnaryMethod<typeof WS_METHODS.sessionImportSources>;
@@ -228,6 +240,7 @@ export interface WsRpcClient {
   };
   readonly vcs: {
     readonly readLineBlame: RpcUnaryMethod<typeof WS_METHODS.vcsReadLineBlame>;
+    readonly readImageBlob: RpcUnaryMethod<typeof WS_METHODS.vcsReadImageBlob>;
     readonly readLocalChanges: RpcUnaryMethod<typeof WS_METHODS.vcsReadLocalChanges>;
     readonly applyIndexPatch: RpcUnaryMethod<typeof WS_METHODS.vcsApplyIndexPatch>;
     readonly readComparison: RpcUnaryMethod<typeof WS_METHODS.vcsReadComparison>;
@@ -235,7 +248,8 @@ export interface WsRpcClient {
     readonly refreshStatus: RpcUnaryMethod<typeof WS_METHODS.vcsRefreshStatus>;
     readonly onStatus: (
       input: RpcInput<typeof WS_METHODS.subscribeVcsStatus>,
-      listener: (status: VcsStatusResult) => void,
+      // The client always passes `meta`; it is optional so status-only listeners and doubles fit.
+      listener: (status: VcsStatusResult, meta?: VcsStatusStreamMeta) => void,
       options?: StreamSubscriptionOptions,
     ) => () => void;
     readonly listRefs: RpcUnaryMethod<typeof WS_METHODS.vcsListRefs>;
@@ -419,6 +433,10 @@ export interface WsRpcClient {
     readonly snapshot: RpcUnaryMethod<typeof AGENT_CONTROL_WS_METHODS.automationCentre>;
     readonly command: RpcUnaryMethod<typeof AGENT_CONTROL_WS_METHODS.automationCommand>;
   };
+  readonly notes: {
+    readonly list: RpcUnaryMethod<typeof WS_METHODS.notesList>;
+    readonly command: RpcUnaryMethod<typeof WS_METHODS.notesCommand>;
+  };
   readonly agentControl: {
     readonly listProposals: RpcUnaryMethod<typeof AGENT_CONTROL_WS_METHODS.listProposals>;
     readonly getProposal: RpcUnaryMethod<typeof AGENT_CONTROL_WS_METHODS.getProposal>;
@@ -499,6 +517,12 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
         transport.request((client) => client[WS_METHODS.projectsStageFileReference](input)),
       initializeGit: (input) =>
         transport.request((client) => client[WS_METHODS.projectsInitializeGit](input)),
+      promoteChatPreview: (input) =>
+        transport.request((client) => client[WS_METHODS.projectsPromoteChatPreview](input)),
+      promoteChat: (input) =>
+        transport.request((client) => client[WS_METHODS.projectsPromoteChat](input)),
+      deleteChatFolder: (input) =>
+        transport.request((client) => client[WS_METHODS.projectsDeleteChatFolder](input)),
     },
     sessionImport: {
       sources: (input) =>
@@ -672,17 +696,24 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
         transport.request((client) => client[WS_METHODS.vcsRefreshStatus](input)),
       onStatus: (input, listener, options) => {
         let current: VcsStatusResult | null = null;
+        let remoteKnown = false;
         return transport.subscribe(
           (client) => client[WS_METHODS.subscribeVcsStatus](input),
           (event: VcsStatusStreamEvent) => {
             current = applyGitStatusStreamEvent(current, event);
-            listener(current);
+            // A snapshot (also after a resubscribe) may carry local status only;
+            // a local update keeps whatever remote half the stream already had.
+            if (event._tag === "snapshot") remoteKnown = event.remote !== null;
+            else if (event._tag === "remoteUpdated") remoteKnown = true;
+            listener(current, { remoteKnown });
           },
           { ...options, tag: WS_METHODS.subscribeVcsStatus },
         );
       },
       readLineBlame: (input) =>
         transport.request((client) => client[WS_METHODS.vcsReadLineBlame](input)),
+      readImageBlob: (input) =>
+        transport.request((client) => client[WS_METHODS.vcsReadImageBlob](input)),
       readLocalChanges: (input) =>
         transport.request((client) => client[WS_METHODS.vcsReadLocalChanges](input)),
       applyIndexPatch: (input) =>
@@ -947,6 +978,10 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
         transport.request((client) => client[AGENT_CONTROL_WS_METHODS.automationCentre](input)),
       command: (input) =>
         transport.request((client) => client[AGENT_CONTROL_WS_METHODS.automationCommand](input)),
+    },
+    notes: {
+      list: (input) => transport.request((client) => client[WS_METHODS.notesList](input)),
+      command: (input) => transport.request((client) => client[WS_METHODS.notesCommand](input)),
     },
     agentControl: {
       listProposals: (input) =>

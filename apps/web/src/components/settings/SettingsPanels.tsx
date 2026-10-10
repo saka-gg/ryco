@@ -12,7 +12,7 @@ import { SourceControlPreferences } from "./SourceControlPreferences";
 import { ComposerSettings } from "./ComposerSettings";
 import { QuitShortcutSetting } from "./QuitShortcutSetting";
 import { UsageLimitSettings } from "./UsageLimitSettings";
-import { ArchiveIcon, ArchiveX, ChevronRightIcon } from "lucide-react";
+import { ArchiveIcon, ArchiveX, ChevronRightIcon, MessageCircleDashedIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ORCHESTRATION_WS_METHODS,
@@ -22,6 +22,7 @@ import {
   type ScopedThreadRef,
 } from "@ryco/contracts";
 import { scopeThreadRef } from "@ryco/client-runtime/scoped";
+import { CHAT_PROJECT_LABEL } from "@ryco/client-runtime/state/composer";
 import { DEFAULT_UNIFIED_SETTINGS, WorktreeBranchPrefix } from "@ryco/contracts/settings";
 import { APP_BASE_NAME, APP_VERSION } from "../../branding";
 import {
@@ -1131,20 +1132,24 @@ export function ArchivedThreadsPanel() {
           </Empty>
         </SettingsSection>
       ) : (
-        archivedGroups.map(({ project, threads: projectThreads }) => (
+        archivedGroups.map((group) => (
           <SettingsSection
-            key={`${project.environmentId}:${project.id}`}
-            title={project.name}
+            key={group.key}
+            title={group.kind === "project" ? group.project.name : CHAT_PROJECT_LABEL}
             icon={
-              <ProjectFavicon
-                environmentId={project.environmentId}
-                cwd={project.cwd}
-                projectId={project.id}
-                customAvatarContentHash={project.customAvatarContentHash ?? null}
-              />
+              group.kind === "project" ? (
+                <ProjectFavicon
+                  environmentId={group.project.environmentId}
+                  cwd={group.project.cwd}
+                  projectId={group.project.id}
+                  customAvatarContentHash={group.project.customAvatarContentHash ?? null}
+                />
+              ) : (
+                <MessageCircleDashedIcon aria-hidden />
+              )
             }
           >
-            {projectThreads.map((thread) => (
+            {group.threads.map((thread) => (
               <ArchivedThreadRow
                 key={thread.id}
                 thread={thread}
@@ -1165,9 +1170,6 @@ export function ArchivedThreadsPanel() {
       <LifecycleSuggestionSettings
         environmentId={lifecycleEnvironmentId}
         disabled={!mutationAllowed}
-        projects={projects
-          .filter((project) => project.environmentId === lifecycleEnvironmentId)
-          .map((project) => ({ id: project.id, name: project.name }))}
       />
     </SettingsPageContainer>
   );

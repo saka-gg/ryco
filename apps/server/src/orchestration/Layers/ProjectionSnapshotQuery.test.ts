@@ -598,6 +598,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
       assert.deepEqual(snapshot.projects, [
         {
           id: asProjectId("project-1"),
+          kind: "project",
           title: "Project 1",
           workspaceRoot: "/tmp/project-1",
           projectMetadataDir: ".ryco",
@@ -731,6 +732,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
       assert.deepEqual(shellSnapshot.projects, [
         {
           id: asProjectId("project-1"),
+          kind: "project",
           title: "Project 1",
           workspaceRoot: "/tmp/project-1",
           projectMetadataDir: ".ryco",
@@ -2105,6 +2107,57 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
 
       yield* sql`DELETE FROM projection_thread_messages`;
       yield* sql`DELETE FROM projection_threads`;
+    }),
+  );
+
+  it.effect("reports the directory a thread's next turn runs in with its window", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+
+      yield* sql`DELETE FROM projection_projects`;
+      yield* sql`DELETE FROM projection_threads`;
+      yield* sql`DELETE FROM projection_state`;
+      yield* sql`
+        INSERT INTO projection_projects (
+          project_id, title, workspace_root, default_model_selection_json, scripts_json,
+          created_at, updated_at, deleted_at
+        )
+        VALUES (
+          'project-cwd', 'Chat', '/chats/pelican', NULL, '[]',
+          '2026-05-01T00:00:00.000Z', '2026-05-01T00:00:00.000Z', NULL
+        )
+      `;
+      yield* sql`
+        INSERT INTO projection_threads (
+          thread_id, project_id, title, model_selection_json, runtime_mode, interaction_mode,
+          branch, worktree_path, latest_turn_id, created_at, updated_at, deleted_at
+        )
+        VALUES
+          ('thread-root', 'project-cwd', 'Root', '{"provider":"codex","model":"gpt-5-codex"}',
+           'full-access', 'default', NULL, NULL, NULL,
+           '2026-05-01T00:00:01.000Z', '2026-05-01T00:00:01.000Z', NULL),
+          ('thread-worktree', 'project-cwd', 'Worktree', '{"provider":"codex","model":"gpt-5-codex"}',
+           'full-access', 'default', 'feature', '/worktrees/pelican-feature', NULL,
+           '2026-05-01T00:00:01.000Z', '2026-05-01T00:00:01.000Z', NULL)
+      `;
+      const windowOf = (threadId: string) =>
+        snapshotQuery.getThreadWindow!({
+          threadId: ThreadId.make(threadId),
+          limits: { messages: 1, activities: 1, proposedPlans: 1, checkpoints: 1 },
+        });
+
+      assert.equal((yield* windowOf("thread-root")).workspaceCwd, "/chats/pelican");
+      assert.equal((yield* windowOf("thread-worktree")).workspaceCwd, "/worktrees/pelican-feature");
+      // "Turn into project…" moves the chat's folder: the window follows the new root.
+      yield* sql`
+        UPDATE projection_projects SET workspace_root = '/projects/pelican'
+        WHERE project_id = 'project-cwd'
+      `;
+      assert.equal((yield* windowOf("thread-root")).workspaceCwd, "/projects/pelican");
+
+      yield* sql`DELETE FROM projection_threads`;
+      yield* sql`DELETE FROM projection_projects`;
     }),
   );
 

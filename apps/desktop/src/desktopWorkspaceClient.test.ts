@@ -109,6 +109,7 @@ function snapshot(environmentId: EnvironmentId, title = "Thread"): WorkspaceMeta
 function fixture(
   input: {
     readonly nodes?: HostedHubNode[];
+    readonly connect?: () => Promise<void>;
     readonly trustedNodeIds?: ReadonlySet<string>;
     readonly identityStatus?: DesktopWorkspaceIdentityStatus;
     readonly cache?: WorkspaceMetadataCache;
@@ -162,7 +163,10 @@ function fixture(
     },
     cache: input.cache ?? memoryCache(),
     connection: {
-      connect: async (request) => void connectCalls.push(request),
+      connect: async (request) => {
+        connectCalls.push(request);
+        await input.connect?.();
+      },
       release: async (environmentId) => void releaseCalls.push(environmentId),
     },
     ...(input.verification ? { verification: input.verification } : {}),
@@ -488,5 +492,52 @@ describe("DesktopWorkspaceClient", () => {
       }),
     ).resolves.toEqual({ handle: "verification-handle-1" });
     expect(begin).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("desktop workspace demand serialization", () => {
+  it("coalesces concurrent scope retains while a connection is pending", async () => {
+    let complete!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      complete = resolve;
+    });
+    const f = fixture({ connect: () => pending });
+    await f.client.resume();
+    const environmentId = node(2).environmentId;
+    const first = f.client.retainScope({ environmentId, scope: { type: "interactive" } });
+    await vi.waitFor(() => expect(f.connectCalls).toHaveLength(1));
+    const second = f.client.retainScope({ environmentId, scope: { type: "provider-status" } });
+    complete();
+    await Promise.all([first, second]);
+    expect(f.connectCalls).toHaveLength(1);
+    expect(f.client.snapshot().demand.leases).toHaveLength(2);
+  });
+
+  it("releases a late connection after access is invalidated", async () => {
+    let complete!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      complete = resolve;
+    });
+    const f = fixture({ connect: () => pending });
+    await f.client.resume();
+    const environmentId = node(2).environmentId;
+    const retained = f.client.retainScope({ environmentId, scope: { type: "interactive" } });
+    await vi.waitFor(() => expect(f.connectCalls).toHaveLength(1));
+    f.client.invalidateAccess();
+    complete();
+    await retained;
+    expect(f.releaseCalls).toEqual([environmentId]);
+    expect(f.client.snapshot().demand.connections).toEqual([]);
+  });
+
+  it("rejects renewal of a removed lease so the renderer can reacquire demand", async () => {
+    const f = fixture();
+    await f.client.resume();
+    const { leaseId } = await f.client.retainScope({
+      environmentId: node(2).environmentId,
+      scope: { type: "interactive" },
+    });
+    await f.client.releaseScope(leaseId);
+    await expect(f.client.renewScope(leaseId)).rejects.toThrow("lease expired");
   });
 });

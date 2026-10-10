@@ -7,11 +7,20 @@ import {
   scopeThreadRef,
 } from "@ryco/client-runtime/scoped";
 import {
+  type EnvironmentId,
   type ScopedProjectRef,
   type ScopedThreadRef,
   type ThreadId,
   WorktreeId,
 } from "@ryco/contracts";
+import { openFolderWithFeedback } from "../../../lib/chatFolderActions";
+import { getEditorLabel } from "../../settings/SettingsPanels.editor";
+import {
+  CHAT_EXTENSION_ACTION_PREFIX,
+  type ChatRowMenuExtension,
+  type ChatRowMenuSubject,
+} from "../chatRowMenu";
+import type { WorkspaceActionId } from "@ryco/client-runtime/state/lifecycle";
 import { newCommandId } from "../../../lib/utils";
 import { readEnvironmentApi } from "../../../environmentApi";
 import { readLocalApi } from "../../../localApi";
@@ -19,7 +28,8 @@ import { useComposerDraftStore, type DraftId } from "../../../composerDraftStore
 import { resolveThreadRouteTarget } from "../../../threadRoutes";
 import { useUiStateStore } from "../../../uiStateStore";
 import { selectSidebarWorktreesForProjectRef, useStore } from "../../../store";
-import { runWorkspaceLifecycleAction } from "../../../workspaceLifecycle";
+import { renameThread } from "../../../threadMutations";
+import { buildWorkspaceLocation, runWorkspaceLifecycleAction } from "../../../workspaceLifecycle";
 import {
   buildThreadMenuInventory,
   type ThreadMenuActionId,
@@ -55,9 +65,23 @@ export function useThreadMenuActions(params: {
   memberProjectByScopedKey: ReadonlyMap<string, Pick<SidebarProjectGroupMember, "cwd">>;
   projectCwd: string | null | undefined;
   openProjectSettings?: (projectRef: ScopedProjectRef) => void;
-  /** Inbox rows add a Workspace submenu; project-sidebar rows sit under their workspace node. */
+  /**
+   * Inbox rows add a Workspace submenu; project-sidebar rows sit under their workspace node.
+   * Checkout changes and "Manage workspaces…" open the thread's project page.
+   */
   includeWorkspaceSubmenu?: boolean;
-  openWorkspaceManagement?: (projectRef: ScopedProjectRef) => void;
+  /**
+   * "No project" chat rows: folder actions and chat menu extensions replace the
+   * project/workspace items for threads this resolves to a chat.
+   */
+  chat?:
+    | {
+        readonly resolveSubject: (thread: SidebarThreadSummary) => ChatRowMenuSubject | null;
+        readonly extensions: ReadonlyArray<ChatRowMenuExtension>;
+        /** Chat folders on this environment can be revealed and opened locally. */
+        readonly localEnvironmentId: EnvironmentId | null;
+      }
+    | undefined;
 }) {
   const {
     router,
@@ -76,7 +100,7 @@ export function useThreadMenuActions(params: {
     projectCwd,
     openProjectSettings,
     includeWorkspaceSubmenu = false,
-    openWorkspaceManagement,
+    chat,
   } = params;
   const [renamingThreadKey, setRenamingThreadKey] = useState<string | null>(null);
   const [renamingTitle, setRenamingTitle] = useState("");
@@ -213,12 +237,7 @@ export function useThreadMenuActions(params: {
         return;
       }
       try {
-        await api.orchestration.dispatchCommand({
-          type: "thread.meta.update",
-          commandId: newCommandId(),
-          threadId: threadRef.threadId,
-          title: trimmed,
-        });
+        await renameThread(threadRef, trimmed);
       } catch (error) {
         toastManager.add(
           stackedThreadToast({
@@ -243,6 +262,7 @@ export function useThreadMenuActions(params: {
       if (!thread) return [];
       const draftId = (thread as SidebarThreadSummary & { draftId?: DraftId | undefined }).draftId;
       const panes = useChatPanesStore.getState();
+      const chatSubject = chat?.resolveSubject(thread) ?? null;
       return buildThreadMenuInventory({
         thread,
         isDraft: Boolean(draftId),
@@ -262,15 +282,63 @@ export function useThreadMenuActions(params: {
             }
           : null,
         workspace: includeWorkspaceSubmenu ? resolveThreadWorkspace(thread) : null,
+        chat:
+          chat && chatSubject
+            ? {
+                localFolder:
+                  chatSubject.folderPath !== null &&
+                  thread.environmentId === chat.localEnvironmentId,
+                fileManagerLabel: getEditorLabel("file-manager", navigator.platform),
+                extensions: chat.extensions
+                  .filter((extension) => extension.isAvailable?.(chatSubject) ?? true)
+                  .map((extension) => ({ id: extension.id, label: extension.label })),
+              }
+            : null,
       });
     },
     [
+      chat,
       includeWorkspaceSubmenu,
       memberProjectByScopedKey,
       openProjectSettings,
       resolveThreadWorkspace,
       sidebarThreadByKeyRef,
     ],
+  );
+
+  /** Folder actions and menu extensions of a "No project" chat row. */
+  const performChatMenuAction = useCallback(
+    async (thread: SidebarThreadSummary, actionId: ThreadMenuActionId): Promise<boolean> => {
+      if (!actionId.startsWith("chat-")) return false;
+      const subject = chat?.resolveSubject(thread) ?? null;
+      if (!chat || !subject) return true;
+      if (actionId.startsWith(CHAT_EXTENSION_ACTION_PREFIX)) {
+        const extensionId = actionId.slice(CHAT_EXTENSION_ACTION_PREFIX.length);
+        await chat.extensions.find((extension) => extension.id === extensionId)?.run(subject);
+        return true;
+      }
+      const path = subject.folderPath;
+      if (!path) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Chat folder unavailable",
+            description: "This chat's folder is not known yet. Try again once it has synced.",
+          }),
+        );
+        return true;
+      }
+      if (actionId === "chat-copy-folder-path") {
+        copyPathToClipboard(path, { path });
+        return true;
+      }
+      await openFolderWithFeedback(
+        path,
+        actionId === "chat-reveal-folder" ? "file-manager" : "editor",
+      );
+      return true;
+    },
+    [chat, copyPathToClipboard],
   );
 
   const performThreadMenuAction = useCallback(
@@ -285,6 +353,7 @@ export function useThreadMenuActions(params: {
       );
       const threadWorkspacePath = thread.worktreePath ?? threadProject?.cwd ?? projectCwd ?? null;
 
+      if (await performChatMenuAction(thread, actionId)) return;
       if (actionId === "project-settings") {
         if (threadProject)
           openProjectSettings?.(scopeProjectRef(thread.environmentId, thread.projectId));
@@ -367,7 +436,14 @@ export function useThreadMenuActions(params: {
         return;
       }
       if (actionId === "workspace:manage") {
-        openWorkspaceManagement?.(scopeProjectRef(thread.environmentId, thread.projectId));
+        const { record } = resolveThreadWorkspace(thread);
+        await router.navigate(
+          buildWorkspaceLocation({
+            environmentId: thread.environmentId,
+            projectId: thread.projectId,
+            worktreeId: record ? WorktreeId.make(record.id) : null,
+          }),
+        );
         return;
       }
       if (actionId.startsWith("workspace:")) {
@@ -375,10 +451,9 @@ export function useThreadMenuActions(params: {
         if (!record) return;
         await runWorkspaceLifecycleAction({
           environmentId: thread.environmentId,
+          projectId: thread.projectId,
           worktreeId: WorktreeId.make(record.id),
-          action: actionId.slice("workspace:".length) as Parameters<
-            typeof runWorkspaceLifecycleAction
-          >[0]["action"],
+          action: actionId.slice("workspace:".length) as WorkspaceActionId,
           title: record.title ?? record.branch,
         });
         return;
@@ -412,14 +487,15 @@ export function useThreadMenuActions(params: {
       appSettingsConfirmThreadUnpin,
       requestTrashThread,
       interruptThreadTurn,
-      openWorkspaceManagement,
       resolveThreadWorkspace,
+      router,
       stopThreadSession,
       copyPathToClipboard,
       copyThreadIdToClipboard,
       markThreadUnread,
       memberProjectByScopedKey,
       openProjectSettings,
+      performChatMenuAction,
       projectCwd,
       sidebarThreadByKeyRef,
       startThreadRename,

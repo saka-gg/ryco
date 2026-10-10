@@ -225,10 +225,40 @@ export function useIsGitMutating(trackingKey: string): boolean {
 // Tracking key helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Tracking-key kinds of the git actions a user starts from the git controls.
+ * The mutations register under these and {@link useGitActionActivity} reads
+ * them, so the two cannot drift apart.
+ */
+export const GIT_USER_ACTION_KIND = {
+  runStackedAction: "run-stacked-action",
+  pull: "pull",
+  publishRepository: "publish-repository",
+} as const;
+
 export function gitMutationTrackingKey(
   kind: string,
   environmentId: string | null,
   cwd: string | null,
 ): string {
   return `git-mutation:${kind}:${environmentId ?? ""}:${cwd ?? ""}`;
+}
+
+/**
+ * Whether a git action the user started from the git controls is in flight
+ * for this checkout: a stacked commit/push/PR action, a pull, or a repository
+ * publish. Those actions report their own progress and outcome, so other
+ * surfaces read this to stay quiet about the changes they cause.
+ */
+export function useGitActionActivity(environmentId: string | null, cwd: string | null): boolean {
+  const isRunStackedActionRunning = useIsGitMutating(
+    gitMutationTrackingKey(GIT_USER_ACTION_KIND.runStackedAction, environmentId, cwd),
+  );
+  const isPullRunning = useIsGitMutating(
+    gitMutationTrackingKey(GIT_USER_ACTION_KIND.pull, environmentId, cwd),
+  );
+  const isPublishRunning = useIsGitMutating(
+    gitMutationTrackingKey(GIT_USER_ACTION_KIND.publishRepository, environmentId, cwd),
+  );
+  return isRunStackedActionRunning || isPullRunning || isPublishRunning;
 }

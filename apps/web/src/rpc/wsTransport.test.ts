@@ -2,7 +2,12 @@ import {
   isSavedEnvironmentCredentialRejection,
   RemoteEnvironmentAuthHttpError,
 } from "@ryco/client-runtime/connection";
-import { DEFAULT_SERVER_SETTINGS, WS_METHODS } from "@ryco/contracts";
+import {
+  DEFAULT_SERVER_SETTINGS,
+  WS_METHODS,
+  EnvironmentId,
+  type DesktopWorkspaceTransportEvent,
+} from "@ryco/contracts";
 import { E2EE_CAPABILITY_CARRIER_TAG } from "@ryco/shared/relayE2eeConstants";
 import { Stream } from "effect";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
@@ -19,9 +24,11 @@ import {
 import {
   getWsConnectionStatus,
   getWsConnectionUiState,
+  recordWsConnectionOpened,
   resetWsConnectionStateForTests,
 } from "../rpc/wsConnectionState";
 import { WsTransport } from "./wsTransport";
+import { DesktopWorkspaceIpcSocketFactory } from "../platform/desktopWorkspaceSocket";
 
 type WsEventType = "open" | "message" | "close" | "error";
 type WsEvent = { code?: number; data?: unknown; reason?: string; type?: string };
@@ -1713,4 +1720,78 @@ describe("WsTransport", () => {
     await expect(requestPromise).resolves.toEqual(DEFAULT_SERVER_SETTINGS);
     await transport.dispose();
   });
+});
+
+describe("recovery scheduling regressions", () => {
+  it("does not turn a larger retry budget into a zero-delay loop after seven failures", async () => {
+    vi.useFakeTimers();
+    const url = vi.fn(async () => {
+      throw new Error("offline");
+    });
+    createTransport(url, { reconnectMaxRetries: 1_000_000, retryTransientErrors: false });
+    await vi.advanceTimersByTimeAsync(127_100);
+    const attempts = url.mock.calls.length;
+    expect(attempts).toBeGreaterThanOrEqual(8);
+    expect(attempts).toBeLessThanOrEqual(9);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(url).toHaveBeenCalledTimes(attempts);
+  });
+
+  it("coalesces concurrent explicit recovery into a single replacement session", async () => {
+    const onSessionStart = vi.fn();
+    const onDispose = vi.fn();
+    const transport = createTransport("ws://localhost:3020", { onSessionStart, onDispose });
+    await Promise.all([transport.reconnect(), transport.reconnect(), transport.reconnect()]);
+    expect(onSessionStart).toHaveBeenCalledTimes(2);
+    await transport.dispose();
+    expect(onDispose).toHaveBeenCalledOnce();
+  });
+});
+
+it("recovers desktop IPC with bounded retries and stops a terminal relay refusal without disturbing local status", async () => {
+  vi.useFakeTimers();
+  vi.spyOn(Math, "random").mockReturnValue(0.5);
+  recordWsConnectionOpened({ connectionLabel: "Local" });
+  let terminal = false;
+  let sequence = 0;
+  const listeners = new Set<(event: DesktopWorkspaceTransportEvent) => void>();
+  const prepare = vi.fn(async () => ({ transportId: `transport-${++sequence}` }));
+  const factory = new DesktopWorkspaceIpcSocketFactory(EnvironmentId.make("desktop-remote"), {
+    prepareDesktopWorkspaceTransport: prepare,
+    activateDesktopWorkspaceTransport: async (transportId) => {
+      for (const listener of listeners)
+        listener({
+          type: "close",
+          transportId,
+          code: terminal ? 4406 : 1006,
+          reason: terminal ? "Update required" : "Unavailable",
+          retryable: !terminal,
+        });
+    },
+    closeDesktopWorkspaceTransport: () => undefined,
+    onDesktopWorkspaceTransportEvent: (listener) => {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+  });
+  createTransport(() => factory.nextUrl(), {
+    ...factory.lifecycleHandlers,
+    preserveSocketPath: true,
+    retryTransientErrors: false,
+    getEnvironmentId: () => EnvironmentId.make("desktop-remote"),
+    webSocketConstructor: (url) => factory.createSocket(url) as unknown as WebSocket,
+  });
+  await vi.advanceTimersByTimeAsync(300_000);
+  expect(prepare.mock.calls.length).toBeGreaterThan(7);
+  expect(prepare.mock.calls.length).toBeLessThan(15);
+  expect(getWsConnectionStatus()).toMatchObject({ phase: "connected", connectionLabel: "Local" });
+  terminal = true;
+  await vi.advanceTimersByTimeAsync(60_000);
+  const attempts = prepare.mock.calls.length;
+  await vi.advanceTimersByTimeAsync(600_000);
+  expect(prepare).toHaveBeenCalledTimes(attempts);
+  expect(factory.lifecycleHandlers.shouldReconnect!()).toBe(false);
+  expect(listeners.size).toBe(0);
 });

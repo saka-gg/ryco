@@ -1,4 +1,5 @@
 import type {
+  ChatHtmlRenderMetadata,
   EnvironmentId,
   ModelSelection,
   OrchestrationLatestTurn,
@@ -6,6 +7,7 @@ import type {
   RepositoryIdentity,
   OrchestrationSessionStatus,
   OrchestrationThreadActivity,
+  ProjectKind,
   ProjectScript as ContractProjectScript,
   ThreadId,
   ProjectId,
@@ -68,6 +70,8 @@ export interface ChatFileAttachment {
   /** Advisory media dimensions probed server-side (video/AV media); absent = unknown. */
   width?: number;
   height?: number;
+  /** Present when this `text/html` file is an agent HTML render shown inline in the thread. */
+  htmlRender?: ChatHtmlRenderMetadata;
 }
 
 export interface ChatUnknownAttachment {
@@ -134,6 +138,8 @@ export interface TurnDiffSummary {
 export interface Project {
   id: ProjectId;
   environmentId: EnvironmentId;
+  /** Absent means a regular project; read it with `@ryco/shared/projectKind`. */
+  kind?: ProjectKind | undefined;
   name: string;
   cwd: string;
   projectMetadataDir?: string | undefined;

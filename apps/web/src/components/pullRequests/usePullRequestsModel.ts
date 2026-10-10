@@ -10,7 +10,7 @@ import {
   useSourceControlChangeRequestDetail,
   useSourceControlChangeRequestList,
 } from "../../rpc/useSourceControl";
-import type { PullRequestRepositoryOption } from "./pullRequestRepositories.logic";
+import type { ProjectCheckoutOption } from "../../projectCheckouts.logic";
 import { usePullRequestsLayoutStore } from "./pullRequestsLayoutStore";
 import {
   assemblePullRequestSelection,
@@ -62,7 +62,7 @@ function errorMessage(error: unknown): string | null {
  * activity, and the derived checks / next action / thread index.
  */
 export function usePullRequestsModel(input: {
-  readonly repository: PullRequestRepositoryOption | null;
+  readonly repository: ProjectCheckoutOption | null;
   readonly search: PullRequestsSearch;
   /**
    * Read the repository's lists (default). A reader of one change request

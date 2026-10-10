@@ -12,6 +12,8 @@ import os from "node:os";
 import path from "node:path";
 
 import {
+  CONTEXT_HANDOFF_ACTIVITY_KIND,
+  ContextHandoffActivityPayload,
   ModelSelection,
   ProviderRuntimeEvent,
   ProviderSession,
@@ -41,6 +43,7 @@ import {
   ManagedRuntime,
   Option,
   PubSub,
+  Schema,
   Scope,
   Stream,
 } from "effect";
@@ -49,6 +52,7 @@ import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { deriveServerPaths, ServerConfig } from "../../config.ts";
 import { TextGenerationError } from "@ryco/contracts";
 import {
+  ProviderAdapterProcessError,
   ProviderAdapterRequestError,
   ProviderAdapterSessionNotFoundError,
   ProviderOperationTimeoutError,
@@ -72,8 +76,18 @@ import {
 } from "../../persistence/Services/ProviderEffectIntents.ts";
 import {
   ProviderService,
+  type ProviderFreshSessionStartInput,
+  type ProviderResumeTarget,
   type ProviderServiceShape,
 } from "../../provider/Services/ProviderService.ts";
+import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
+import { ContextHandoffRepositoryLive } from "../../persistence/Layers/ContextHandoffs.ts";
+import { ContextHandoffServiceLive } from "../contextHandoff/ContextHandoffService.ts";
+import {
+  CWD_RELOCATION_HANDOFF_ID_PREFIX,
+  cwdRelocationHandoffReference,
+} from "../contextHandoff/ContextHandoffRelocation.ts";
+import { ContextHandoffCoordinatorLive } from "./ContextHandoffCoordinator.ts";
 import { TextGeneration, type TextGenerationShape } from "../../textGeneration/TextGeneration.ts";
 import { ProjectAvatarStore } from "../../project/Services/ProjectAvatarStore.ts";
 import { RepositoryIdentityResolverLive } from "../../project/Layers/RepositoryIdentityResolver.ts";
@@ -211,6 +225,10 @@ describe("ProviderCommandReactor", () => {
     readonly workspaceRoot?: string;
     readonly threadModelSelection?: ModelSelection;
     readonly sessionModelSwitch?: "unsupported" | "in-session";
+    /** Declared by the fake adapter; omitted means a conservative `false`. */
+    readonly resumeSurvivesCwdChange?: boolean;
+    /** Runs the real handoff coordinator, context service and SQL repository. */
+    readonly realContextHandoff?: boolean;
     readonly interruptTurnEffect?: () => Effect.Effect<void, ProviderAdapterRequestError>;
     readonly stopSessionEffect?: () => Effect.Effect<void, ProviderServiceError>;
     /** Simulates adapter model normalization for `session.model` (undefined = unknown). */
@@ -257,6 +275,41 @@ describe("ProviderCommandReactor", () => {
     };
     const normalizeSessionModel = input?.sessionModel ?? ((model: string) => model);
     const startSessionEffect = input?.startSessionEffect;
+    // What ProviderService's directory would persist per thread (resume target only).
+    const persistedBindings = new Map<string, ProviderResumeTarget>();
+    const persistBinding = (session: ProviderSession) => {
+      if (session.providerInstanceId === undefined) return;
+      persistedBindings.set(session.threadId, {
+        providerInstanceId: session.providerInstanceId,
+        ...(session.cwd ? { cwd: session.cwd } : {}),
+        hasResumeCursor: session.resumeCursor != null,
+      });
+    };
+    const startFreshSession = vi.fn(
+      (threadId: ThreadId, freshInput: ProviderFreshSessionStartInput) =>
+        Effect.sync(() => {
+          const sessionIndex = nextSessionIndex++;
+          const session: ProviderSession = {
+            provider:
+              freshInput.provider ?? ProviderDriverKind.make(freshInput.modelSelection!.instanceId),
+            providerInstanceId: freshInput.providerInstanceId!,
+            status: "ready",
+            runtimeSessionId: freshInput.runtimeSessionId,
+            runtimeMode: freshInput.runtimeMode,
+            ...(freshInput.cwd ? { cwd: freshInput.cwd } : {}),
+            ...(freshInput.modelSelection ? { model: freshInput.modelSelection.model } : {}),
+            threadId,
+            resumeCursor: { opaque: `resume-${sessionIndex}` },
+            createdAt: now,
+            updatedAt: now,
+          };
+          const index = runtimeSessions.findIndex((entry) => entry.threadId === threadId);
+          if (index >= 0) runtimeSessions.splice(index, 1);
+          runtimeSessions.push(session);
+          persistBinding(session);
+          return { session };
+        }),
+    );
     const startSession = vi.fn((_: unknown, input: unknown) => {
       const sessionIndex = nextSessionIndex++;
       const resumeCursor =
@@ -317,12 +370,14 @@ describe("ProviderCommandReactor", () => {
           Effect.andThen(
             Effect.sync(() => {
               runtimeSessions.push(session);
+              persistBinding(session);
               return session;
             }),
           ),
         );
       }
       runtimeSessions.push(session);
+      persistBinding(session);
       return Effect.succeed(session);
     });
     const sendTurn = vi.fn((_: unknown, _expectedRuntime?: unknown) =>
@@ -431,7 +486,9 @@ describe("ProviderCommandReactor", () => {
       ...(input?.getThreadGoal ? { getThreadGoal: input.getThreadGoal } : {}),
       ...(input?.clearThreadGoal ? { clearThreadGoal: input.clearThreadGoal } : {}),
       startSession: startSession as ProviderServiceShape["startSession"],
-      startFreshSession: () => unsupported(),
+      startFreshSession: startFreshSession as ProviderServiceShape["startFreshSession"],
+      readResumeTarget: (threadId) =>
+        Effect.succeed(Option.fromNullishOr(persistedBindings.get(threadId))),
       getSession: input?.getSession ?? (() => Effect.succeed(Option.none())),
       restoreSessionBinding: () => Effect.succeed(false),
       retireSessionBinding: () => Effect.succeed(false),
@@ -448,6 +505,9 @@ describe("ProviderCommandReactor", () => {
       getCapabilities: (_provider) =>
         Effect.succeed({
           sessionModelSwitch: input?.sessionModelSwitch ?? "in-session",
+          ...(input?.resumeSurvivesCwdChange !== undefined
+            ? { resumeSurvivesCwdChange: input.resumeSurvivesCwdChange }
+            : {}),
         }),
       getInstanceInfo: (instanceId) => {
         const raw = String(instanceId);
@@ -535,7 +595,26 @@ describe("ProviderCommandReactor", () => {
           ),
         )
       : reactorWithIntents;
+    // First in the chain so the real coordinator gets the shared engine,
+    // projection query, provider service and database provided below.
+    const contextHandoffLayer = input?.realContextHandoff
+      ? ContextHandoffCoordinatorLive.pipe(
+          Layer.provide(ContextHandoffServiceLive),
+          Layer.provideMerge(ContextHandoffRepositoryLive),
+          Layer.provide(
+            Layer.mock(ProviderRegistry)({
+              getProviders: Effect.succeed([]),
+              streamChanges: Stream.empty,
+            }),
+          ),
+        )
+      : Layer.succeed(ContextHandoffCoordinator, {
+          processTurnStart: processContextHandoff,
+          recover: () => Effect.void,
+          abandonUnstartedTurnStart,
+        });
     const layer = reactorLayer.pipe(
+      Layer.provideMerge(contextHandoffLayer),
       Layer.provideMerge(
         ProjectionThreadUserInputRequestRepositoryLive.pipe(Layer.provide(persistence)),
       ),
@@ -544,13 +623,6 @@ describe("ProviderCommandReactor", () => {
       Layer.provideMerge(orchestrationLayer),
       Layer.provideMerge(projectionSnapshotLayer),
       Layer.provideMerge(Layer.succeed(ProviderService, service)),
-      Layer.provideMerge(
-        Layer.succeed(ContextHandoffCoordinator, {
-          processTurnStart: processContextHandoff,
-          recover: () => Effect.void,
-          abandonUnstartedTurnStart,
-        }),
-      ),
       Layer.provideMerge(
         Layer.mock(GitWorkflowService)({
           createWorktree,
@@ -677,6 +749,8 @@ describe("ProviderCommandReactor", () => {
           }),
         ),
       startSession,
+      startFreshSession,
+      persistedBindings,
       sendTurn,
       interruptTurn,
       respondToRequest,
@@ -2219,12 +2293,13 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.modelSelection.instanceId).toBe(ProviderInstanceId.make("codex"));
   });
 
-  it("restarts the provider session when the thread workspace changes", async () => {
+  it("resumes in the moved workspace when the provider's resume survives a cwd change", async () => {
     const harness = await createHarness({
       threadModelSelection: {
         instanceId: ProviderInstanceId.make("claudeAgent"),
         model: "claude-sonnet-4-6",
       },
+      resumeSurvivesCwdChange: true,
     });
     const now = new Date().toISOString();
 
@@ -2290,6 +2365,384 @@ describe("ProviderCommandReactor", () => {
         model: "claude-sonnet-4-6",
       },
       runtimeMode: "approval-required",
+    });
+    expect(harness.processContextHandoff).not.toHaveBeenCalled();
+  });
+
+  describe("session continuity after a working-directory move", () => {
+    const T = ThreadId.make("thread-1");
+    const CLAUDE: ModelSelection = {
+      instanceId: ProviderInstanceId.make("claudeAgent"),
+      model: "claude-sonnet-4-6",
+    };
+    const MOVED_WORKTREE = "/tmp/provider-project-worktree";
+    type Harness = Awaited<ReturnType<typeof createHarness>>;
+
+    const sendMessage = (harness: Harness, messageId: string, text = messageId) =>
+      Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make(`cmd-${messageId}`),
+          threadId: T,
+          message: { messageId: asMessageId(messageId), role: "user", text, attachments: [] },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: new Date().toISOString(),
+        }),
+      );
+    // A relocated worktree.
+    const moveWorktree = (harness: Harness) =>
+      Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.meta.update",
+          commandId: CommandId.make("cmd-move-worktree"),
+          threadId: T,
+          branch: "feature/workspace",
+          worktreePath: MOVED_WORKTREE,
+        }),
+      );
+    // A chat turned into a project at a new location.
+    const moveWorkspaceRoot = (harness: Harness, workspaceRoot: string) =>
+      Effect.runPromise(
+        harness.engine.dispatch({
+          type: "project.meta.update",
+          commandId: CommandId.make("cmd-move-workspace-root"),
+          projectId: asProjectId("project-1"),
+          workspaceRoot,
+        }),
+      );
+    // Promotion stops the sessions; the binding keeps its cursor and cwd.
+    const stopRuntime = async (harness: Harness) => {
+      harness.runtimeSessions.splice(0);
+      const now = new Date().toISOString();
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make(`cmd-session-stopped-${crypto.randomUUID()}`),
+          threadId: T,
+          session: {
+            threadId: T,
+            status: "stopped",
+            providerName: "claudeAgent",
+            providerInstanceId: CLAUDE.instanceId,
+            runtimeSessionId: RuntimeSessionId.make("runtime-1"),
+            runtimeMode: "approval-required",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: now,
+          },
+          createdAt: now,
+        }),
+      );
+    };
+    const threadOf = async (harness: Harness) =>
+      (await harness.readModel()).threads.find((entry) => entry.id === T);
+    const handoffActivities = async (harness: Harness) =>
+      ((await threadOf(harness))?.activities ?? [])
+        .filter((activity) => activity.kind === CONTEXT_HANDOFF_ACTIVITY_KIND)
+        .map((activity) => ({
+          activity,
+          payload: Option.getOrUndefined(
+            Schema.decodeUnknownOption(ContextHandoffActivityPayload)(activity.payload),
+          ),
+        }));
+    const failuresOf = async (harness: Harness) =>
+      ((await threadOf(harness))?.activities ?? []).filter(
+        (activity) => activity.kind === "provider.turn.start.failed",
+      );
+
+    it("continues a moved conversation with a context handoff instead of resuming it", async () => {
+      const harness = await createHarness({ threadModelSelection: CLAUDE });
+      await sendMessage(harness, "before-move");
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+
+      await moveWorktree(harness);
+      await sendMessage(harness, "after-move");
+      await waitFor(() => harness.processContextHandoff.mock.calls.length === 1);
+      await harness.drain();
+
+      // The old native conversation is neither resumed nor sent to.
+      expect(harness.startSession).toHaveBeenCalledTimes(1);
+      expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+      const [event] = harness.processContextHandoff.mock.calls[0]!;
+      const reference = cwdRelocationHandoffReference(event);
+      expect(event.payload.contextHandoff).toEqual(reference);
+      expect(reference.handoffId.startsWith(CWD_RELOCATION_HANDOFF_ID_PREFIX)).toBe(true);
+      expect(reference.targetMessageId).toBe("after-move");
+
+      const handoffs = await handoffActivities(harness);
+      expect(handoffs).toHaveLength(1);
+      expect(handoffs[0]?.activity.id).toBe(reference.activityId);
+      expect(handoffs[0]?.payload).toMatchObject({
+        status: "requested",
+        mode: "full-context-fresh-session",
+        reason: "cwd-relocation",
+        handoffId: reference.handoffId,
+        targetMessageId: "after-move",
+        sourceSelection: CLAUDE,
+        targetSelection: CLAUDE,
+        sourceRuntimeSessionId: "runtime-1",
+      });
+      expect(await failuresOf(harness)).toEqual([]);
+      expect((await threadOf(harness))?.modelSelection).toEqual(CLAUDE);
+    });
+
+    it("detects a move from the persisted binding while the session is stopped", async () => {
+      const harness = await createHarness({ threadModelSelection: CLAUDE });
+      await sendMessage(harness, "in-chat-folder");
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      await stopRuntime(harness);
+      expect(harness.persistedBindings.get(T)).toMatchObject({
+        cwd: "/tmp/provider-project",
+        hasResumeCursor: true,
+      });
+
+      await moveWorkspaceRoot(harness, "/tmp/promoted-project");
+      await sendMessage(harness, "in-project");
+      await waitFor(() => harness.processContextHandoff.mock.calls.length === 1);
+      await harness.drain();
+
+      expect(harness.startSession).toHaveBeenCalledTimes(1);
+      expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+      expect(
+        harness.processContextHandoff.mock.calls[0]?.[0].payload.contextHandoff?.targetMessageId,
+      ).toBe("in-project");
+      expect(await failuresOf(harness)).toEqual([]);
+    });
+
+    for (const state of ["live", "stopped"] as const) {
+      it(`leaves a ${state} session's turn untouched when its directory did not move`, async () => {
+        const harness = await createHarness({ threadModelSelection: CLAUDE });
+        await sendMessage(harness, "first");
+        await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+        if (state === "stopped") await stopRuntime(harness);
+
+        await sendMessage(harness, "second");
+        await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+        await harness.drain();
+
+        expect(harness.processContextHandoff).not.toHaveBeenCalled();
+        expect(harness.startSession).toHaveBeenCalledTimes(state === "live" ? 1 : 2);
+        if (state === "stopped") {
+          // ProviderService merges the persisted cursor for an unmoved start.
+          expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({
+            cwd: "/tmp/provider-project",
+          });
+          expect(harness.startSession.mock.calls[1]?.[1]).not.toHaveProperty("resumeCursor");
+        }
+        expect(await handoffActivities(harness)).toEqual([]);
+      });
+    }
+
+    it.each([
+      ["a missing thread", "thread/resume failed: thread not found"],
+      // Codex app-server's actual reply for a thread without a rollout.
+      ["a missing rollout", "no rollout found for thread id 019a0000-0000-7000-8000-000000000001"],
+    ])("hands off when a moved resume finds no conversation (%s)", async (_case, nativeError) => {
+      const harness = await createHarness({
+        resumeSurvivesCwdChange: true,
+        startSessionEffect: ({ call }) =>
+          call === 2
+            ? Effect.fail(
+                new ProviderAdapterProcessError({
+                  provider: "codex",
+                  threadId: "thread-1",
+                  detail: "Codex App Server failed to resume the thread.",
+                  cause: new Error(nativeError),
+                }),
+              )
+            : undefined,
+      });
+      await sendMessage(harness, "before-move");
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+
+      await moveWorktree(harness);
+      await sendMessage(harness, "after-move");
+      await waitFor(() => harness.processContextHandoff.mock.calls.length === 1);
+      await harness.drain();
+
+      // The provider was asked to resume in the moved directory first.
+      expect(harness.startSession).toHaveBeenCalledTimes(2);
+      expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({
+        cwd: MOVED_WORKTREE,
+        resumeCursor: { opaque: "resume-1" },
+      });
+      expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+      expect(
+        harness.processContextHandoff.mock.calls[0]?.[0].payload.contextHandoff?.handoffId,
+      ).toMatch(CWD_RELOCATION_HANDOFF_ID_PREFIX);
+      expect(await failuresOf(harness)).toEqual([]);
+    });
+
+    it("still fails a moved resume that fails for another reason", async () => {
+      const harness = await createHarness({
+        resumeSurvivesCwdChange: true,
+        startSessionEffect: ({ call }) =>
+          call === 2
+            ? Effect.fail(
+                new ProviderAdapterRequestError({
+                  provider: "codex",
+                  method: "thread/resume",
+                  detail: "Permission denied",
+                }),
+              )
+            : undefined,
+      });
+      await sendMessage(harness, "before-move");
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+
+      await moveWorktree(harness);
+      await sendMessage(harness, "after-move");
+      await waitFor(async () => (await failuresOf(harness)).length === 1);
+      await harness.drain();
+
+      expect(harness.processContextHandoff).not.toHaveBeenCalled();
+      expect((await failuresOf(harness))[0]?.payload).toMatchObject({
+        messageId: "after-move",
+        detail: "Permission denied",
+      });
+    });
+
+    it("defers a mode restart to the next turn instead of resuming a moved conversation", async () => {
+      const harness = await createHarness({ threadModelSelection: CLAUDE });
+      await sendMessage(harness, "before-move");
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+
+      await moveWorktree(harness);
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.runtime-mode.set",
+          commandId: CommandId.make("cmd-runtime-mode-after-move"),
+          threadId: T,
+          runtimeMode: "full-access",
+          createdAt: new Date().toISOString(),
+        }),
+      );
+      await harness.drain();
+      expect(harness.startSession).toHaveBeenCalledTimes(1);
+      expect(
+        ((await threadOf(harness))?.activities ?? []).filter((activity) =>
+          activity.kind.endsWith(".failed"),
+        ),
+      ).toEqual([]);
+
+      await sendMessage(harness, "after-move");
+      await waitFor(() => harness.processContextHandoff.mock.calls.length === 1);
+      expect(harness.startSession).toHaveBeenCalledTimes(1);
+    });
+
+    it("stops a running turn whose mode changes after a move instead of letting it run on", async () => {
+      const harness = await createHarness({ threadModelSelection: CLAUDE });
+      await sendMessage(harness, "before-move");
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      // The provider reports the turn running.
+      const runningAt = new Date().toISOString();
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("cmd-session-running"),
+          threadId: T,
+          session: {
+            threadId: T,
+            status: "running",
+            providerName: "claudeAgent",
+            providerInstanceId: CLAUDE.instanceId,
+            runtimeSessionId: RuntimeSessionId.make("runtime-1"),
+            runtimeMode: "approval-required",
+            activeTurnId: asTurnId("turn-1"),
+            lastError: null,
+            updatedAt: runningAt,
+          },
+          createdAt: runningAt,
+        }),
+      );
+
+      await moveWorktree(harness);
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.runtime-mode.set",
+          commandId: CommandId.make("cmd-runtime-mode-while-running"),
+          threadId: T,
+          runtimeMode: "full-access",
+          createdAt: new Date().toISOString(),
+        }),
+      );
+      await waitFor(() => harness.stopSession.mock.calls.length === 1);
+      await harness.drain();
+
+      // No resume in the moved folder, and the turn does not keep its old mode.
+      expect(harness.startSession).toHaveBeenCalledTimes(1);
+      expect(harness.stopSession).toHaveBeenCalledWith({ threadId: T });
+      expect((await threadOf(harness))?.session).toMatchObject({
+        status: "stopped",
+        activeTurnId: null,
+      });
+
+      await sendMessage(harness, "after-move");
+      await waitFor(() => harness.processContextHandoff.mock.calls.length === 1);
+      expect(harness.startSession).toHaveBeenCalledTimes(1);
+    });
+
+    it("sends the context document ahead of the exact message in a fresh session on the same instance", async () => {
+      const harness = await createHarness({
+        threadModelSelection: CLAUDE,
+        realContextHandoff: true,
+      });
+      await sendMessage(harness, "before-move", "Summarize the notes in this folder.");
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+
+      await moveWorktree(harness);
+      await sendMessage(harness, "after-move", "  Now write them up as a README.  ");
+      await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+      await waitFor(async () =>
+        (await handoffActivities(harness)).some((entry) => entry.payload?.status === "consumed"),
+      );
+      await harness.drain();
+
+      // A fresh native session on the same instance, in the moved directory.
+      expect(harness.startSession).toHaveBeenCalledTimes(1);
+      expect(harness.startFreshSession).toHaveBeenCalledTimes(1);
+      expect(harness.startFreshSession.mock.calls[0]?.[1]).toMatchObject({
+        providerInstanceId: CLAUDE.instanceId,
+        cwd: MOVED_WORKTREE,
+        modelSelection: CLAUDE,
+      });
+      const sent = harness.sendTurn.mock.calls[1]?.[0] as { readonly input?: string } | undefined;
+      const input = sent?.input;
+      expect(
+        input?.startsWith('<context_handoff version="1" mode="full-context-fresh-session">'),
+      ).toBe(true);
+      expect(input).toContain("Summarize the notes in this folder.");
+      expect(
+        input?.endsWith(
+          "<current_user_message>\n  Now write them up as a README.  \n</current_user_message>",
+        ),
+      ).toBe(true);
+
+      const thread = await threadOf(harness);
+      // The visible message is never rewritten.
+      expect(thread?.messages.find((message) => message.id === "after-move")?.text).toBe(
+        "  Now write them up as a README.  ",
+      );
+      expect(thread?.modelSelection).toEqual(CLAUDE);
+      const consumed = (await handoffActivities(harness)).find(
+        (entry) => entry.payload?.status === "consumed",
+      );
+      expect(consumed?.payload?.handoffId.startsWith(CWD_RELOCATION_HANDOFF_ID_PREFIX)).toBe(true);
+      expect(consumed?.payload).toMatchObject({ sourceSelection: CLAUDE, targetSelection: CLAUDE });
+
+      const records = await Effect.runPromise(
+        harness.sql<{ readonly status: string; readonly threadId: string }>`
+          SELECT status, thread_id AS "threadId" FROM provider_context_handoffs
+        `,
+      );
+      expect(records).toEqual([{ status: "consumed", threadId: "thread-1" }]);
+      const openTurnStarts = await Effect.runPromise(
+        harness.sql<{ readonly messageId: string }>`
+          SELECT message_id AS "messageId" FROM provider_effect_intents WHERE kind = 'turn-start'
+        `,
+      );
+      expect(openTurnStarts.map((row) => row.messageId)).not.toContain("after-move");
     });
   });
 
@@ -4624,6 +5077,7 @@ describe("ProviderCommandReactor", () => {
           status: "ready",
           providerName: "codex",
           providerInstanceId: ProviderInstanceId.make("codex_work"),
+          runtimeSessionId: RuntimeSessionId.make("runtime-before-stop"),
           runtimeMode: "approval-required",
           activeTurnId: null,
           lastError: null,
@@ -4650,6 +5104,9 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.session?.threadId).toBe("thread-1");
     expect(thread?.session?.providerInstanceId).toBe(ProviderInstanceId.make("codex_work"));
     expect(thread?.session?.activeTurnId).toBeNull();
+    // Deliberate: the stop is final for that runtime, so its late events stay fenced out
+    // (and a Claude resume review of this state guards on "no runtime").
+    expect(thread?.session?.runtimeSessionId).toBeUndefined();
   });
 
   describe("turn finalization", () => {
@@ -6305,6 +6762,117 @@ describe("ProviderCommandReactor", () => {
         expect(await openIntents(second)).toEqual([]);
       });
     }
+
+    const moveWorktree = (harness: Harness) =>
+      Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.meta.update",
+          commandId: CommandId.make("cmd-move-worktree"),
+          threadId: T,
+          branch: "feature/workspace",
+          worktreePath: "/tmp/provider-project-worktree",
+        }),
+      );
+
+    for (const result of ["owned", "abandoned", "unrecognized"] as const) {
+      it(`resolves an earlier process's relocation handoff start the coordinator reports ${result}`, async () => {
+        const dbPath = makeDbPath();
+        const first = await createHarness({ dbPath });
+        await startOriginatingTurn(first, T, new Date().toISOString());
+        await moveWorktree(first);
+        await startTurn(first, "relocation-lost");
+        await waitFor(() => first.processContextHandoff.mock.calls.length === 1);
+        await first.drain();
+        // The mocked coordinator never finished: no outcome, so the row stays open.
+        expect(await openIntents(first)).toMatchObject([
+          { kind: "turn-start", messageId: "relocation-lost", dispatchedAt: null },
+        ]);
+        await disposeHarness();
+
+        const second = await createHarness({ dbPath });
+        second.abandonUnstartedTurnStart.mockImplementation(() => Effect.succeed(result));
+        const summary = await recover(second);
+        await second.drain();
+        expect(second.abandonUnstartedTurnStart).toHaveBeenCalledTimes(1);
+        const [event] = second.abandonUnstartedTurnStart.mock.calls[0]!;
+        expect(event.payload.contextHandoff).toEqual(cwdRelocationHandoffReference(event));
+        expect(event.payload.contextHandoff?.targetMessageId).toBe("relocation-lost");
+        const failures = await activitiesOf(second, "provider.turn.start.failed");
+        if (result === "unrecognized") {
+          expect(failures).toHaveLength(1);
+          expect(failures[0]?.payload).toMatchObject({
+            messageId: "relocation-lost",
+            deliveryState: "not-sent",
+          });
+        } else {
+          expect(failures).toHaveLength(0);
+          expect(summary.settledWithoutOutcome).toBe(result === "owned" ? 1 : 0);
+          expect(summary.handoffsAbandoned).toBe(result === "abandoned" ? 1 : 0);
+        }
+        expect(second.sendTurn).not.toHaveBeenCalled();
+        expect(await openIntents(second)).toEqual([]);
+      });
+    }
+
+    it("settles a relocation turn start once its handoff divider is terminal", async () => {
+      const harness = await createHarness();
+      await startOriginatingTurn(harness, T, new Date().toISOString());
+      await moveWorktree(harness);
+      harness.processContextHandoff.mockImplementation((event) =>
+        harness.engine
+          .dispatch({
+            type: "thread.activity.append",
+            commandId: CommandId.make("cmd-relocation-handoff-failed"),
+            threadId: T,
+            activity: {
+              id: event.payload.contextHandoff!.activityId,
+              tone: "error",
+              kind: CONTEXT_HANDOFF_ACTIVITY_KIND,
+              summary: "Context handoff failed",
+              payload: {
+                schemaVersion: 1,
+                handoffId: event.payload.contextHandoff!.handoffId,
+                mode: "full-context-fresh-session",
+                status: "failed",
+                targetMessageId: event.payload.messageId,
+                sourceSelection: {
+                  instanceId: ProviderInstanceId.make("codex"),
+                  model: "gpt-5-codex",
+                },
+                targetSelection: {
+                  instanceId: ProviderInstanceId.make("codex"),
+                  model: "gpt-5-codex",
+                },
+                sources: [
+                  {
+                    providerInstanceId: ProviderInstanceId.make("codex"),
+                    driverKind: ProviderDriverKind.make("codex"),
+                    modelSlug: "gpt-5-codex",
+                  },
+                ],
+                target: {
+                  providerInstanceId: ProviderInstanceId.make("codex"),
+                  driverKind: ProviderDriverKind.make("codex"),
+                  modelSlug: "gpt-5-codex",
+                },
+                error: "The target provider did not accept the context handoff.",
+              },
+              turnId: null,
+              createdAt: event.payload.createdAt,
+            },
+            createdAt: new Date().toISOString(),
+          })
+          .pipe(Effect.asVoid, Effect.orDie),
+      );
+      await startTurn(harness, "relocation-failed");
+      await waitFor(() => harness.processContextHandoff.mock.calls.length === 1);
+      await harness.drain();
+      expect(
+        (await activitiesOf(harness, CONTEXT_HANDOFF_ACTIVITY_KIND)).map((entry) => entry.summary),
+      ).toEqual(["Context handoff failed"]);
+      // The divider names a handoff id the row never recorded; the reactor settles it.
+      expect(await openIntents(harness)).toEqual([]);
+    });
 
     it("replays a request committed before the reactor subscribed, exactly once", async () => {
       const harness = await createHarness({ startReactor: false });

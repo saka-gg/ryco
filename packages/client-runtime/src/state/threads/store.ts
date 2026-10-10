@@ -30,6 +30,7 @@ import { isProviderDriverKind, ProviderDriverKind } from "@ryco/contracts";
 import type { ThreadId, TurnId } from "@ryco/contracts";
 import { Schema } from "effect";
 import { resolveModelSlugForProvider } from "@ryco/shared/model";
+import { projectKindOf } from "@ryco/shared/projectKind";
 import { capThreadActivitiesPreservingMilestones } from "@ryco/shared/threadActivity";
 import { checkpointStatusToTurnState, mergeReleasedTurn } from "@ryco/shared/turnFinalization";
 import {
@@ -52,7 +53,7 @@ import {
 } from "./types.ts";
 import { sanitizeThreadErrorMessage } from "../../errors/transportError.ts";
 import { getThreadFromEnvironmentState } from "./threadDerivation.ts";
-import { getThreadsRuntimeConfiguration } from "./runtime.ts";
+import { getThreadsRuntimeConfiguration, type CheckoutRelocation } from "./runtime.ts";
 import { selectDelegatedChildThreads, threadLineagesEqual } from "./threadLineage.ts";
 
 export interface EnvironmentState {
@@ -67,6 +68,7 @@ export interface EnvironmentState {
   // Both streams ensure the thread is registered here; the bookkeeping is
   // additive (append-only IDs) so concurrent writes are safe.
   // ---------------------------------------------------------------------------
+  relocatedCheckoutPaths?: Record<string, Omit<CheckoutRelocation, "environmentId">> | undefined;
   threadIds: ThreadId[];
   threadIdsByProjectId: Record<ProjectId, ThreadId[]>;
 
@@ -288,6 +290,7 @@ function mapProject(
   return {
     id: project.id,
     environmentId,
+    kind: projectKindOf(project),
     name: project.title,
     cwd: project.workspaceRoot,
     projectMetadataDir: project.projectMetadataDir,
@@ -876,11 +879,56 @@ function ensureThreadRegistered(
  * unnecessary re-renders when delivering equivalent data).
  * Does NOT write sidebarThreadSummaryById — that is shell-stream-only.
  */
+function resolveRelocatedThreadPath<
+  T extends { projectId: ProjectId; worktreePath: string | null },
+>(state: EnvironmentState, thread: T): T {
+  const destination =
+    thread.worktreePath &&
+    state.relocatedCheckoutPaths?.[`${thread.projectId}\u0000${thread.worktreePath}`]
+      ?.destinationPath;
+  return destination ? { ...thread, worktreePath: destination } : thread;
+}
+
+function retargetCheckoutState(
+  state: EnvironmentState,
+  input: {
+    projectId: ProjectId;
+    worktreeId: WorktreeId;
+    sourcePath: string;
+    destinationPath: string;
+  },
+): EnvironmentState {
+  let next: EnvironmentState = {
+    ...state,
+    relocatedCheckoutPaths: {
+      ...state.relocatedCheckoutPaths,
+      [`${input.projectId}\u0000${input.sourcePath}`]: {
+        projectId: input.projectId,
+        sourcePath: input.sourcePath,
+        destinationPath: input.destinationPath,
+      },
+    },
+  };
+  for (const id of state.threadIds) {
+    const thread = state.threadShellById[id];
+    if (
+      thread?.projectId === input.projectId &&
+      (thread.worktreeId === input.worktreeId || thread.worktreePath === input.sourcePath)
+    )
+      next = updateThreadState(next, id, (current) => ({
+        ...current,
+        worktreePath: input.destinationPath,
+      }));
+  }
+  return next;
+}
+
 function writeThreadState(
   state: EnvironmentState,
   nextThread: Thread,
   previousThread?: Thread,
 ): EnvironmentState {
+  nextThread = resolveRelocatedThreadPath(state, nextThread);
   const pendingMessages = state.pendingMessagesByThreadId[nextThread.id] ?? [];
   const resolvedThread =
     pendingMessages.length === 0
@@ -1025,6 +1073,13 @@ function writeThreadShellState(
     summary: SidebarThreadSummary;
   },
 ): EnvironmentState {
+  const shell = resolveRelocatedThreadPath(state, nextThread.shell);
+  if (shell !== nextThread.shell)
+    nextThread = {
+      ...nextThread,
+      shell,
+      summary: { ...nextThread.summary, worktreePath: shell.worktreePath },
+    };
   const previousShell = state.threadShellById[nextThread.shell.id];
 
   let nextState = ensureThreadRegistered(
@@ -1972,15 +2027,20 @@ export function syncServerShellSnapshot(
   snapshot: OrchestrationShellSnapshot,
   environmentId: EnvironmentId,
 ): AppState {
-  return commitEnvironmentState(
-    state,
-    environmentId,
-    syncEnvironmentShellSnapshot(
-      getStoredEnvironmentState(state, environmentId),
-      snapshot,
-      environmentId,
-    ),
-  );
+  const previous = getStoredEnvironmentState(state, environmentId);
+  let next = syncEnvironmentShellSnapshot(previous, snapshot, environmentId);
+  for (const worktree of snapshot.worktrees ?? []) {
+    const sourcePath =
+      worktree.relocatedFromPath ?? previous.worktreeById?.[worktree.worktreeId]?.worktreePath;
+    if (sourcePath && worktree.worktreePath && sourcePath !== worktree.worktreePath)
+      next = retargetCheckoutState(next, {
+        projectId: worktree.projectId,
+        worktreeId: worktree.worktreeId,
+        sourcePath,
+        destinationPath: worktree.worktreePath,
+      });
+  }
+  return commitEnvironmentState(state, environmentId, next);
 }
 
 export function syncServerThreadDetail(
@@ -2199,6 +2259,7 @@ function applyEnvironmentOrchestrationEvent(
       const nextProject = mapProject(
         {
           id: event.payload.projectId,
+          kind: event.payload.kind,
           title: event.payload.title,
           workspaceRoot: event.payload.workspaceRoot,
           projectMetadataDir: event.payload.projectMetadataDir,
@@ -2254,6 +2315,7 @@ function applyEnvironmentOrchestrationEvent(
       }
       const nextProject: Project = {
         ...project,
+        ...(event.payload.kind !== undefined ? { kind: event.payload.kind } : {}),
         ...(event.payload.title !== undefined ? { name: event.payload.title } : {}),
         ...(event.payload.workspaceRoot !== undefined ? { cwd: event.payload.workspaceRoot } : {}),
         ...(event.payload.projectMetadataDir !== undefined
@@ -2807,6 +2869,18 @@ function applyEnvironmentOrchestrationEvent(
         : state;
     }
 
+    case "worktree.relocated": {
+      const existing = state.worktreeById?.[event.payload.worktreeId];
+      const next = existing
+        ? upsertWorktreeState(state, {
+            ...existing,
+            worktreePath: event.payload.destinationPath,
+            updatedAt: event.payload.relocatedAt,
+          })
+        : state;
+      return retargetCheckoutState(next, event.payload);
+    }
+
     case "worktree.checkoutRestored": {
       const existing = state.worktreeById?.[event.payload.worktreeId];
       return existing
@@ -2900,11 +2974,22 @@ function applyEnvironmentShellEvent(
       return writeThreadShellState(state, mapThreadShell(event.thread, environmentId));
     case "worktree-upserted":
       return upsertWorktreeState(state, mapWorktree(event.worktree, environmentId));
+    case "worktree-relocated":
+      return retargetCheckoutState(
+        upsertWorktreeState(state, mapWorktree(event.worktree, environmentId)),
+        {
+          projectId: event.worktree.projectId,
+          worktreeId: event.worktree.worktreeId,
+          sourcePath: event.sourcePath,
+          destinationPath: event.destinationPath,
+        },
+      );
     case "thread-removed":
       return removeThreadState(state, event.threadId);
     case "worktree-removed":
       return removeWorktreeState(state, event.worktreeId);
   }
+  return state;
 }
 
 export function applyOrchestrationEvents(
@@ -3681,11 +3766,28 @@ interface AppStore extends AppState {
 }
 
 export const useStore = create<AppStore>((set, get) => {
+  const commitWithRelocations = (next: AppState) => {
+    const previous = get();
+    const retarget = getThreadsRuntimeConfiguration().onCheckoutRelocated;
+    if (retarget)
+      for (const [environmentId, environment] of Object.entries(next.environmentStateById)) {
+        const old = previous.environmentStateById[environmentId];
+        if (old?.relocatedCheckoutPaths === environment.relocatedCheckoutPaths) continue;
+        for (const [key, relocation] of Object.entries(environment.relocatedCheckoutPaths ?? {})) {
+          if (old?.relocatedCheckoutPaths?.[key]?.destinationPath !== relocation.destinationPath)
+            retarget({
+              environmentId: environmentId as EnvironmentId,
+              ...relocation,
+            });
+        }
+      }
+    set(next);
+  };
   // Buffers high-frequency shell-stream events and flushes them once per frame
   // under load.  All non-shell mutators flush it first to preserve ordering.
   const shellCoalescer = createShellEventCoalescer({
     getState: get,
-    commitState: (next) => set(next),
+    commitState: commitWithRelocations,
   });
 
   return {
@@ -3708,7 +3810,7 @@ export const useStore = create<AppStore>((set, get) => {
     },
     syncServerShellSnapshot: (snapshot, environmentId) => {
       shellCoalescer.flush();
-      set((state) => syncServerShellSnapshot(state, snapshot, environmentId));
+      commitWithRelocations(syncServerShellSnapshot(get(), snapshot, environmentId));
     },
     syncServerThreadDetail: (thread, environmentId) => {
       shellCoalescer.flush();
@@ -3728,11 +3830,11 @@ export const useStore = create<AppStore>((set, get) => {
     },
     applyOrchestrationEvent: (event, environmentId) => {
       shellCoalescer.flush();
-      set((state) => applyOrchestrationEvent(state, event, environmentId));
+      commitWithRelocations(applyOrchestrationEvent(get(), event, environmentId));
     },
     applyOrchestrationEvents: (events, environmentId) => {
       shellCoalescer.flush();
-      set((state) => applyOrchestrationEvents(state, events, environmentId));
+      commitWithRelocations(applyOrchestrationEvents(get(), events, environmentId));
     },
     applyShellEvent: (event, environmentId) => shellCoalescer.enqueue(event, environmentId),
     removeThread: (threadRef) => {

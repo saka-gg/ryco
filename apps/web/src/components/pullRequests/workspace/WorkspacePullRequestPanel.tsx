@@ -1,7 +1,7 @@
 import type { EnvironmentId } from "@ryco/contracts";
 import { useNavigate } from "@tanstack/react-router";
 import { GitPullRequestIcon } from "lucide-react";
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useReducer, useRef, useState } from "react";
 
 import { useElementWidth } from "../../../hooks/useElementWidth";
 import { useEvent } from "../../../hooks/useEvent";
@@ -9,6 +9,10 @@ import { useLogicalProjectSnapshots } from "../../../hooks/useLogicalProjectSnap
 import { buildPullRequestLocation } from "../../../pullRequestsRoute";
 import type { Project } from "../../../types";
 import { Button } from "../../ui/button";
+import {
+  formatWorkspacePullRequestReveal,
+  type WorkspacePullRequestReveal,
+} from "../../../workspaceRouteSearch";
 import { PullRequestReader } from "../PullRequestReader";
 import {
   PullRequestsPageContext,
@@ -20,10 +24,10 @@ import {
   usePullRequestsPage,
 } from "../PullRequestsPageContext";
 import {
-  buildPullRequestRepositoryOptions,
-  pullRequestRepositoryKey,
-  type PullRequestRepositoryOption,
-} from "../pullRequestRepositories.logic";
+  buildProjectCheckoutOptions,
+  projectCheckoutKey,
+  type ProjectCheckoutOption,
+} from "../../../projectCheckouts.logic";
 import { pullRequestReaderKey } from "../pullRequestsLayoutStore";
 import { createPullRequestsNavigation } from "../pullRequestsNavigation";
 import { resolvePullRequestsTab, type PullRequestsSearch } from "../pullRequestsSearch";
@@ -75,6 +79,13 @@ export interface WorkspacePullRequestPanelProps {
   readonly onTogglePullRequests?: (() => void) | undefined;
   /** The empty state offers "Link pull request…" (absent: linking is unavailable). */
   readonly onLinkPullRequest?: ((anchor: HTMLElement) => void) | undefined;
+  /**
+   * A one-shot deep link from the thread route: land on the Checks tab, or
+   * reveal one job there. Acted on once the reader is up, then handed back.
+   */
+  readonly reveal?: WorkspacePullRequestReveal | null | undefined;
+  /** The reveal was acted on: the route drops it, so the same link can fire again. */
+  readonly onRevealHandled?: (() => void) | undefined;
 }
 
 export default function WorkspacePullRequestPanel(props: WorkspacePullRequestPanelProps) {
@@ -83,11 +94,11 @@ export default function WorkspacePullRequestPanel(props: WorkspacePullRequestPan
   // hand-off drafts, reader state) is shared with it. Snapshots can trail the
   // thread's project for a moment; a provisional option keeps the reader up.
   const { snapshots } = useLogicalProjectSnapshots();
-  const repository = useMemo<PullRequestRepositoryOption | null>(() => {
+  const repository = useMemo<ProjectCheckoutOption | null>(() => {
     if (!environmentId || !project) return null;
-    const key = pullRequestRepositoryKey(environmentId, project.id);
+    const key = projectCheckoutKey(environmentId, project.id);
     return (
-      buildPullRequestRepositoryOptions(snapshots).find((option) => option.key === key) ?? {
+      buildProjectCheckoutOptions(snapshots).find((option) => option.key === key) ?? {
         key,
         environmentId,
         projectId: project.id,
@@ -116,15 +127,19 @@ export default function WorkspacePullRequestPanel(props: WorkspacePullRequestPan
       number={number}
       onSelectNumber={props.onSelectNumber}
       onTogglePullRequests={props.onTogglePullRequests}
+      reveal={props.reveal ?? null}
+      onRevealHandled={props.onRevealHandled}
     />
   );
 }
 
 function WorkspacePullRequestReader(props: {
-  readonly repository: PullRequestRepositoryOption;
+  readonly repository: ProjectCheckoutOption;
   readonly number: number;
   readonly onSelectNumber: (number: number) => void;
   readonly onTogglePullRequests?: (() => void) | undefined;
+  readonly reveal: WorkspacePullRequestReveal | null;
+  readonly onRevealHandled: (() => void) | undefined;
 }) {
   const { repository, number } = props;
   const readerKey = pullRequestReaderKey(repository.key, number);
@@ -145,6 +160,8 @@ function WorkspacePullRequestReader(props: {
 
   const [selectionMotion, setSelectionMotion] =
     useState<PullRequestSelectionMotion>(NO_SELECTION_MOTION);
+  // Counts job reveals, so revealing the job already open lands on it again.
+  const [jobRevealToken, bumpJobRevealToken] = useReducer((count: number) => count + 1, 0);
   const getSearch = useEvent(() => search);
   const getModel = useEvent(() => model);
   const onSelectNumber = useEvent(props.onSelectNumber);
@@ -156,7 +173,10 @@ function WorkspacePullRequestReader(props: {
       onSelectNumber(next.pr);
       return;
     }
-    readerSearchByKey.set(readerKey, fields);
+    // `job` only drives the landing; persisting it would replay the landing
+    // (expand, scroll, flash) every time this reader remounts.
+    const { job: _job, ...persisted } = fields;
+    readerSearchByKey.set(readerKey, persisted);
     setReader(fields);
   });
   const actions = useMemo(
@@ -170,9 +190,33 @@ function WorkspacePullRequestReader(props: {
         closeDrawer: () => undefined,
         // Layer pushes run router view transitions; this panel has no route of its own.
         canRunPushTransition: () => false,
+        onRevealJob: bumpJobRevealToken,
       }),
     [commit, getModel, getSearch],
   );
+
+  // ── One-shot reveal from the thread route ──
+  // Keyed on the formatted reveal; the route strips it once handled, so a
+  // repeat link goes absent → present and fires again.
+  const revealKey = props.reveal ? formatWorkspacePullRequestReveal(props.reveal) : null;
+  const getReveal = useEvent(() => props.reveal);
+  const onRevealHandled = useEvent(() => props.onRevealHandled?.());
+  const handledRevealRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (revealKey === null) {
+      handledRevealRef.current = null;
+      return;
+    }
+    const reveal = getReveal();
+    if (reveal === null || handledRevealRef.current === revealKey) return;
+    handledRevealRef.current = revealKey;
+    if (reveal.kind === "job") {
+      actions.revealJob(reveal.job);
+    } else {
+      actions.setSearch({ tab: "checks", job: undefined });
+    }
+    onRevealHandled();
+  }, [actions, getReveal, onRevealHandled, revealKey]);
   const nav = useMemo<PullRequestsNavigation>(
     () => ({ search, tab, ...actions }),
     [actions, search, tab],
@@ -205,8 +249,9 @@ function WorkspacePullRequestReader(props: {
       layout,
       selectionMotion,
       readerKey,
+      jobRevealToken,
     }),
-    [layout, model, nav, readerKey, repository, selectionMotion, surface],
+    [jobRevealToken, layout, model, nav, readerKey, repository, selectionMotion, surface],
   );
 
   return (

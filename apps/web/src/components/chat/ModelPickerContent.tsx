@@ -50,7 +50,7 @@ import {
 import { useSettings, updateClientModelFavorites } from "~/hooks/useSettings";
 import { cn } from "~/lib/utils";
 import { TooltipProvider } from "../ui/tooltip";
-import type { ProviderInstanceEntry } from "../../providerInstances";
+import { isSetupProviderInstance, type ProviderInstanceEntry } from "../../providerInstances";
 import { providerModelKey, sortProviderModelItems } from "../../modelOrdering";
 
 type ModelPickerItem = {
@@ -133,7 +133,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
   const listRegionRef = useRef<HTMLDivElement>(null);
   const highlightedModelKeyRef = useRef<string | null>(null);
   const favorites = useSettings((s) => s.favorites ?? []);
-  const [selectedInstanceId, setSelectedInstanceId] = useState<ProviderInstanceId | "favorites">(
+  const [requestedInstanceId, setRequestedInstanceId] = useState<ProviderInstanceId | "favorites">(
     () => {
       if (props.lockedProvider !== null) {
         // When locked, prime the sidebar to the currently-active instance
@@ -154,7 +154,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
 
   const handleSelectInstance = useCallback(
     (instanceId: ProviderInstanceId | "favorites") => {
-      setSelectedInstanceId(instanceId);
+      setRequestedInstanceId(instanceId);
       window.requestAnimationFrame(() => {
         focusSearchInput();
       });
@@ -231,15 +231,16 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     [props.lockedContinuationGroupKey, props.lockedProvider],
   );
 
-  const readyInstanceSet = useMemo(() => {
-    const ready = new Set<ProviderInstanceId>();
-    for (const entry of instanceEntries) {
-      if (entry.status === "ready") {
-        ready.add(entry.instanceId);
-      }
-    }
-    return ready;
-  }, [instanceEntries]);
+  // Only set-up instances (enabled, available, ready) appear in the picker —
+  // neither their rail button nor their models are offered otherwise.
+  const setupInstanceEntries = useMemo(
+    () => instanceEntries.filter(isSetupProviderInstance),
+    [instanceEntries],
+  );
+  const setupInstanceIds = useMemo(
+    () => new Set(setupInstanceEntries.map((entry) => entry.instanceId)),
+    [setupInstanceEntries],
+  );
 
   // Flatten models into a searchable array. One pass over the
   // instance-keyed map; each model carries its instance id + driver kind
@@ -254,7 +255,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
         // its models — stale options shouldn't appear in the picker.
         continue;
       }
-      if (!readyInstanceSet.has(instanceId)) {
+      if (!setupInstanceIds.has(instanceId)) {
         continue;
       }
       for (const model of models) {
@@ -274,7 +275,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
       }
     }
     return out;
-  }, [modelOptionsByInstance, entryByInstanceId, readyInstanceSet]);
+  }, [modelOptionsByInstance, entryByInstanceId, setupInstanceIds]);
 
   // Index row presentation independently of search. Each model and preset is
   // visited once; typing only scores/filter rows and performs map lookups.
@@ -317,14 +318,24 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
   const isSearching = searchQuery.trim().length > 0;
   const lockedInstanceEntries = useMemo(
     () =>
-      props.lockedProvider ? instanceEntries.filter((entry) => matchesLockedProvider(entry)) : [],
-    [instanceEntries, matchesLockedProvider, props.lockedProvider],
+      props.lockedProvider
+        ? setupInstanceEntries.filter((entry) => matchesLockedProvider(entry))
+        : [],
+    [setupInstanceEntries, matchesLockedProvider, props.lockedProvider],
   );
   const showLockedInstanceSidebar = isLocked && lockedInstanceEntries.length > 1;
   const showSidebar = !isSearching && (!isLocked || showLockedInstanceSidebar);
   const sidebarInstanceEntries = showLockedInstanceSidebar
     ? lockedInstanceEntries
-    : instanceEntries;
+    : setupInstanceEntries;
+  // The rail only lists set-up instances, so a selection that points at one
+  // that is not set up (e.g. the composer's active instance just failed) lands
+  // on the first rail entry instead of an empty, unhighlighted list.
+  const selectedInstanceId =
+    requestedInstanceId === "favorites" ||
+    sidebarInstanceEntries.some((entry) => entry.instanceId === requestedInstanceId)
+      ? requestedInstanceId
+      : (sidebarInstanceEntries[0]?.instanceId ?? requestedInstanceId);
   const instanceOrder = useMemo(
     () => instanceEntries.map((entry) => entry.instanceId),
     [instanceEntries],
@@ -661,7 +672,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
   }, [flatModels, props.activeInstanceId, props.model]);
   const revealActiveModel = useCallback(() => {
     setSearchQuery("");
-    if (!isLocked || showLockedInstanceSidebar) setSelectedInstanceId(props.activeInstanceId);
+    if (!isLocked || showLockedInstanceSidebar) setRequestedInstanceId(props.activeInstanceId);
     window.requestAnimationFrame(() => {
       const selected = listRegionRef.current?.querySelector<HTMLElement>("[data-selected]");
       selected?.scrollIntoView({ block: "nearest" });
@@ -704,7 +715,6 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
           onSelectInstance={handleSelectInstance}
           instanceEntries={sidebarInstanceEntries}
           showFavorites={!isLocked}
-          showComingSoon={!isLocked}
         />
       )}
 
@@ -833,7 +843,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
       {hasTuning ? (
         <div
           data-morph-surface=""
-          className="selection-glass-surface relative flex w-screen max-w-100 flex-col overflow-hidden rounded-lg border text-popover-foreground"
+          className="selection-glass-surface relative flex w-screen max-w-100 flex-col max-h-(--available-height) overflow-hidden rounded-lg border text-popover-foreground"
         >
           {pickerBody}
           <div className="border-t" data-slot="model-picker-tuning">
@@ -845,7 +855,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
       ) : (
         <div
           data-morph-surface=""
-          className="selection-glass-surface relative flex overflow-hidden rounded-lg border text-popover-foreground"
+          className="selection-glass-surface relative flex max-h-(--available-height) overflow-hidden rounded-lg border text-popover-foreground"
         >
           {pickerBody}
         </div>

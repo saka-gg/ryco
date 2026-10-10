@@ -645,6 +645,35 @@ describe("thread inbox", () => {
     expect(inbox.settled).toHaveLength(1);
     expect(inbox.settled[0]).toMatchObject({ key, current: true });
   });
+
+  it("finds chat threads by the No project label they are listed under", () => {
+    const chatProjectId = ProjectId.make("chat-project");
+    const chatProject: Project = {
+      ...makeProject(environmentA),
+      id: chatProjectId,
+      kind: "chat",
+      name: "Plan a trip",
+      cwd: "/home/me/.ryco/chats/plan-a-trip",
+    };
+    const chat = makeThread(environmentA, "chat-thread", {
+      projectId: chatProjectId,
+      title: "Plan a trip",
+    });
+    const regular = makeThread(environmentA, "regular-thread", { title: "Fix the build" });
+    const search = (text: string) =>
+      buildThreadInbox(
+        baseInput({
+          projects: [makeProject(environmentA), chatProject],
+          threads: [chat, regular],
+          filters: { text },
+        }),
+      ).active.map((entry) => entry.thread?.id);
+
+    expect(search("no project")).toEqual([chat.id]);
+    expect(search("  No Proj ")).toEqual([chat.id]);
+    // A regular project still matches by its own name, never by the chat label.
+    expect(search("alpha")).toEqual([regular.id]);
+  });
 });
 
 describe("snoozed inbox entries", () => {

@@ -112,6 +112,28 @@ describe("Projects rows", () => {
     expect(rows[0]?.machines.map((machine) => machine.label)).toEqual(["Mac Studio"]);
   });
 
+  it("never lists No project chats, even when a search matches their title", () => {
+    const chat: Project = {
+      ...project({
+        environmentId: NODE_A,
+        id: "chat-a",
+        name: "Ryco release notes",
+        cwd: "/Users/me/.ryco/chats/2026-10-07-ryco-release-notes-1a2b3c4d",
+      }),
+      kind: "chat",
+    };
+    const input = {
+      projects: [PROJECT, chat],
+      worktrees: [],
+      threads: [THREAD, thread(NODE_A, "chat-thread", "chat-a")],
+      environments: [MAC],
+      groupingMode: "repository" as const,
+    };
+
+    expect(buildProjectRows(input).map((row) => row.open.projectId)).toEqual(["project-a"]);
+    expect(buildProjectRows({ ...input, query: "release" })).toEqual([]);
+  });
+
   it("retains custom artwork and counts settled tasks as part of the project total", () => {
     const rows = buildProjectRows({
       projects: [{ ...PROJECT, customAvatarContentHash: "avatar" }],

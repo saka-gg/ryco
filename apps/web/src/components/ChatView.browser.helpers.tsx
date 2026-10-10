@@ -4,6 +4,8 @@ import { serializeWhenAst } from "../lib/keybindingWhenPresets";
 import { useChatPanesStore } from "../chatPanesStore";
 
 import { resetPreviewFileSessionsForTests } from "./previewFileSessions";
+import { useInboxFilterStore } from "./inboxSidebar/inboxFilterStore";
+import { useSidebarFoldStore } from "./sidebar/sidebarFold";
 
 // Production CSS is part of the behavior under test because row height depends on it.
 import "../index.css";
@@ -188,6 +190,8 @@ interface TestFixture {
   snapshot: OrchestrationReadModel;
   serverConfig: ServerConfig;
   welcome: ServerLifecycleWelcomePayload;
+  /** Threads whose window reports older messages than it holds. */
+  threadsWithOlderMessages?: ReadonlySet<ThreadId>;
 }
 
 let fixture: TestFixture;
@@ -687,6 +691,7 @@ function toShellSnapshot(snapshot: OrchestrationReadModel) {
     projects: snapshot.projects.map((project) => ({
       id: project.id,
       title: project.title,
+      ...(project.kind ? { kind: project.kind } : {}),
       workspaceRoot: project.workspaceRoot,
       repositoryIdentity: project.repositoryIdentity ?? null,
       defaultModelSelection: project.defaultModelSelection,
@@ -702,6 +707,7 @@ function toShellSnapshot(snapshot: OrchestrationReadModel) {
 function toThreadWindowSnapshot(
   snapshotSequence: number,
   thread: OrchestrationReadModel["threads"][number],
+  options: { readonly hasOlderMessages?: boolean } = {},
 ) {
   const emptyPage = {
     oldestCursor: null,
@@ -712,7 +718,7 @@ function toThreadWindowSnapshot(
     snapshotSequence,
     thread,
     history: {
-      messages: emptyPage,
+      messages: options.hasOlderMessages ? { ...emptyPage, hasMoreBefore: true } : emptyPage,
       proposedPlans: emptyPage,
       activities: emptyPage,
       checkpoints: emptyPage,
@@ -2613,7 +2619,9 @@ export function setupChatViewBrowserSuite() {
               kind: "snapshot",
               snapshot:
                 request._tag === ORCHESTRATION_WS_METHODS.subscribeThreadWindow
-                  ? toThreadWindowSnapshot(fixture.snapshot.snapshotSequence, thread)
+                  ? toThreadWindowSnapshot(fixture.snapshot.snapshotSequence, thread, {
+                      hasOlderMessages: fixture.threadsWithOlderMessages?.has(thread.id) === true,
+                    })
                   : {
                       snapshotSequence: fixture.snapshot.snapshotSequence,
                       thread,
@@ -2659,6 +2667,8 @@ export function setupChatViewBrowserSuite() {
       open: false,
       openIntent: null,
     });
+    useInboxFilterStore.setState({ draft: "", environmentId: null, status: "all" });
+    useSidebarFoldStore.getState().reset();
     useStore.setState({
       activeEnvironmentId: null,
       environmentStateById: {},

@@ -1,3 +1,5 @@
+import { WorkspaceLifecycle } from "./workspace/WorkspaceLifecycle.ts";
+import { storageActivityVersion } from "./storage/lifecycle.ts";
 import {
   callbackRepositories,
   pendingCallbackInvalidation,
@@ -42,6 +44,12 @@ import {
 } from "effect";
 
 import { ServerConfig } from "./config.ts";
+import { ProjectionProjectRepository } from "./persistence/Services/ProjectionProjects.ts";
+import { ProjectionThreadRepository } from "./persistence/Services/ProjectionThreads.ts";
+import { ProjectRelocationRepository } from "./persistence/Services/ProjectRelocations.ts";
+import { ChatFolders } from "./project/chatFolders.ts";
+import { recoverProjectRelocations } from "./project/chatPromotion.ts";
+import { removeOrphanChatProjects } from "./project/orphanChatProjects.ts";
 import { resolveProjectPreferences } from "./project/projectPreferences.ts";
 import { Keybindings } from "./keybindings.ts";
 import { Open } from "./open.ts";
@@ -78,6 +86,8 @@ export const DEFAULT_STARTUP_COMMAND_GATE_MAX_PENDING = 2_048;
 export const DEFAULT_STARTUP_COMMAND_GATE_READY_TIMEOUT_MS = 30_000;
 /** A hanging shutdown-hint write must never hold up shutdown. */
 export const RESTART_SHUTDOWN_HINT_TIMEOUT = Duration.seconds(2);
+/** Removing a large interrupted copy can be slow; whatever is left is retried on the next start. */
+export const PROJECT_RELOCATION_RECOVERY_TIMEOUT = Duration.seconds(30);
 
 export type ServerRuntimeStartupErrorReason = "startup" | "busy" | "timeout";
 
@@ -816,6 +826,11 @@ export const makeServerRuntimeStartup = Effect.gen(function* () {
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const restartContinuation = yield* RestartContinuation;
   const providerService = yield* ProviderService;
+  const workspaceLifecycle = yield* Effect.serviceOption(WorkspaceLifecycle);
+  const projectRelocations = yield* Effect.serviceOption(ProjectRelocationRepository);
+  const projectionProjects = yield* Effect.serviceOption(ProjectionProjectRepository);
+  const projectionThreads = yield* Effect.serviceOption(ProjectionThreadRepository);
+  const chatFolders = yield* Effect.serviceOption(ChatFolders);
 
   const commandGate = yield* makeCommandGate();
   const httpListening = yield* Deferred.make<void>();
@@ -844,6 +859,48 @@ export const makeServerRuntimeStartup = Effect.gen(function* () {
   );
 
   const startup = Effect.gen(function* () {
+    if (Option.isSome(workspaceLifecycle) && workspaceLifecycle.value.recoverManagedWorktrees) {
+      // Commit verified destinations (or restore untouched source admission) before
+      // provider/continuation recovery can select a working directory.
+      yield* runStartupPhase(
+        "worktree-relocations.recover",
+        workspaceLifecycle.value.recoverManagedWorktrees(),
+      );
+    }
+    if (Option.isSome(projectRelocations) && Option.isSome(projectionProjects)) {
+      // Settle chat promotions an earlier process left mid-move, before anything reads project
+      // roots. Never blocks startup: failures are logged and retried on the next start.
+      const orchestrationEngine = yield* OrchestrationEngineService;
+      yield* runStartupPhase(
+        "project-relocations.recover",
+        recoverProjectRelocations({
+          relocations: projectRelocations.value,
+          projects: projectionProjects.value,
+          dispatch: orchestrationEngine.dispatch,
+        }).pipe(
+          Effect.timeout(PROJECT_RELOCATION_RECOVERY_TIMEOUT),
+          Effect.ignoreCause({ log: true }),
+        ),
+      );
+    }
+    if (
+      Option.isSome(projectionProjects) &&
+      Option.isSome(projectionThreads) &&
+      Option.isSome(chatFolders)
+    ) {
+      // After recovery settled every move. Housekeeping: startup does not wait for it, and a
+      // failure is logged and retried on the next start.
+      const orchestrationEngine = yield* OrchestrationEngineService;
+      yield* runStartupPhase(
+        "chat-projects.remove-orphans",
+        removeOrphanChatProjects({
+          projects: projectionProjects.value,
+          threads: projectionThreads.value,
+          chatFolders: chatFolders.value,
+          dispatch: orchestrationEngine.dispatch,
+        }),
+      ).pipe(Effect.ignoreCause({ log: true }), Effect.forkScoped);
+    }
     yield* Effect.logDebug("startup phase: validating restricted workspace state");
     yield* runStartupPhase(
       "workspace.validate",
@@ -999,6 +1056,29 @@ export const makeServerRuntimeStartup = Effect.gen(function* () {
           }),
         ),
       );
+
+      if (Option.isSome(workspaceLifecycle) && workspaceLifecycle.value.migrateManagedWorktrees) {
+        const migrate = workspaceLifecycle.value.migrateManagedWorktrees;
+        let lastPass = 0;
+        let activity = -1;
+        // One pass after recovery, then resource-release wakeups or the five-minute backstop.
+        yield* Effect.forkScoped(
+          Effect.repeat(
+            Effect.gen(function* () {
+              const current = storageActivityVersion();
+              if (current === activity && Date.now() - lastPass < 300_000) return;
+              activity = current;
+              lastPass = Date.now();
+              yield* migrate().pipe(
+                Effect.catch((cause) =>
+                  Effect.logWarning("Managed worktree migration pass failed", { cause }),
+                ),
+              );
+            }),
+            Schedule.spaced("10 seconds"),
+          ),
+        );
+      }
 
       yield* Effect.logDebug("startup phase: recording startup heartbeat");
       yield* launchStartupHeartbeat;

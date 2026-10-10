@@ -23,6 +23,18 @@
       "types": "./src/restartContinuation.ts",
       "import": "./src/restartContinuation.ts"
     },
+    "./htmlRender": {
+      "types": "./src/htmlRender.ts",
+      "import": "./src/htmlRender.ts"
+    },
+    "./htmlRenderToolPresentation": {
+      "types": "./src/htmlRenderToolPresentation.ts",
+      "import": "./src/htmlRenderToolPresentation.ts"
+    },
+    "./themePalettes": {
+      "types": "./src/themePalettes.ts",
+      "import": "./src/themePalettes.ts"
+    },
     "./lruCache": {
       "types": "./src/lruCache.ts",
       "import": "./src/lruCache.ts"
@@ -199,6 +211,14 @@
       "types": "./src/projectScripts.ts",
       "import": "./src/projectScripts.ts"
     },
+    "./projectKind": {
+      "types": "./src/projectKind.ts",
+      "import": "./src/projectKind.ts"
+    },
+    "./directorySlug": {
+      "types": "./src/directorySlug.ts",
+      "import": "./src/directorySlug.ts"
+    },
     "./runtimeEnv": {
       "types": "./src/runtimeEnv.ts",
       "import": "./src/runtimeEnv.ts"
@@ -358,7 +378,15 @@
       "types": "./src/turnSteer.ts",
       "import": "./src/turnSteer.ts"
     },
-    "./workspaceLifecycle": "./src/workspaceLifecycle.ts"
+    "./workspaceLifecycle": "./src/workspaceLifecycle.ts",
+    "./automationSchedule": {
+      "types": "./src/automationSchedule.ts",
+      "import": "./src/automationSchedule.ts"
+    },
+    "./automationWhenParser": {
+      "types": "./src/automationWhenParser.ts",
+      "import": "./src/automationWhenParser.ts"
+    }
   },
   "scripts": {
     "typecheck": "tsc --noEmit",

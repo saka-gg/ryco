@@ -53,6 +53,10 @@
       "types": "./src/state/agentControl/index.ts",
       "import": "./src/state/agentControl/index.ts"
     },
+    "./state/notes": {
+      "types": "./src/state/notes/index.ts",
+      "import": "./src/state/notes/index.ts"
+    },
     "./state/orchestration": {
       "types": "./src/state/orchestration/index.ts",
       "import": "./src/state/orchestration/index.ts"

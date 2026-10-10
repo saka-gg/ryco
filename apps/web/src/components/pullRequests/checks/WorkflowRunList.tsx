@@ -4,6 +4,7 @@ import { DateTime, Option } from "effect";
 import { ExternalLinkIcon, MoreHorizontalIcon, RotateCwIcon, SparklesIcon } from "lucide-react";
 import { memo, useCallback, useEffect, useId, useMemo, useState } from "react";
 
+import { landingFlashClass } from "../../../hooks/useLandingFlash";
 import { openExternalLink } from "../../../lib/openExternalLink";
 import { cn } from "../../../lib/utils";
 import {
@@ -36,7 +37,6 @@ import {
   ROW_HOVER_REVEAL_CLASS,
   ROW_ICON_BUTTON_CLASS,
   RequiredTag,
-  landingFlashClass,
 } from "./checksUi";
 import { JobLogBlock } from "./JobLogBlock";
 import { jobLogAllLines, jobLogStepLines, jobLogTailText, splitJobLog } from "./jobLog";

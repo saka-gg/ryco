@@ -61,6 +61,7 @@ import {
   WorktreeArchivedPayload,
   WorktreeCheckoutRemovedPayload,
   WorktreeCheckoutRestoredPayload,
+  WorktreeRelocatedPayload,
   WorktreeCreatedPayload,
   WorktreeDeletedPayload,
   WorktreeManualPositionSetPayload,
@@ -277,6 +278,7 @@ export function projectEvent(
           const existing = nextBase.projects.find((entry) => entry.id === payload.projectId);
           const nextProject = {
             id: payload.projectId,
+            kind: payload.kind,
             title: payload.title,
             workspaceRoot: payload.workspaceRoot,
             projectMetadataDir: payload.projectMetadataDir,
@@ -309,6 +311,7 @@ export function projectEvent(
             project.id === payload.projectId
               ? {
                   ...project,
+                  ...(payload.kind !== undefined ? { kind: payload.kind } : {}),
                   ...(payload.title !== undefined ? { title: payload.title } : {}),
                   ...(payload.workspaceRoot !== undefined
                     ? { workspaceRoot: payload.workspaceRoot }
@@ -542,6 +545,23 @@ export function projectEvent(
             checkoutRemovalReason: payload.reason,
             updatedAt: payload.removedAt,
           }),
+        })),
+      );
+
+    case "worktree.relocated":
+      return decodeForEvent(WorktreeRelocatedPayload, event.payload, event.type, "payload").pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          worktrees: updateWorktree(nextBase.worktrees, payload.worktreeId, {
+            worktreePath: payload.destinationPath,
+            updatedAt: payload.relocatedAt,
+          }),
+          threads: nextBase.threads.map((thread) =>
+            thread.projectId === payload.projectId &&
+            (thread.worktreeId === payload.worktreeId || thread.worktreePath === payload.sourcePath)
+              ? { ...thread, worktreePath: payload.destinationPath }
+              : thread,
+          ),
         })),
       );
 

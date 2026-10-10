@@ -34,6 +34,8 @@ export interface ServerDerivedPaths {
   readonly settingsPath: string;
   readonly providerStatusCacheDir: string;
   readonly worktreesDir: string;
+  /** Default root for "No project" chat folders; created lazily on the first chat. */
+  readonly chatsDir: string;
   readonly attachmentsDir: string;
   readonly logsDir: string;
   readonly serverLogPath: string;
@@ -305,6 +307,15 @@ export function resolveManagedWorktreesRoot(
     : path.join(config.workspaceAccessRoot, ".ryco", "worktrees");
 }
 
+/** The chats root used when the `chatsRoot` setting is empty. */
+export function resolveManagedChatsRoot(
+  config: Pick<ServerConfigShape, "workspaceAccessRoot" | "chatsDir">,
+): string {
+  return config.workspaceAccessRoot === undefined
+    ? config.chatsDir
+    : path.join(config.workspaceAccessRoot, ".ryco", "chats");
+}
+
 export const deriveServerPaths = Effect.fn(function* (
   baseDir: ServerConfigShape["baseDir"],
   devUrl: ServerConfigShape["devUrl"],
@@ -323,6 +334,7 @@ export const deriveServerPaths = Effect.fn(function* (
     settingsPath: join(stateDir, "settings.json"),
     providerStatusCacheDir,
     worktreesDir: join(baseDir, "worktrees"),
+    chatsDir: join(baseDir, "chats"),
     attachmentsDir,
     logsDir,
     serverLogPath: join(logsDir, "server.log"),

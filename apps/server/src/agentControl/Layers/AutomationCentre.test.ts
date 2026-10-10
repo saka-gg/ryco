@@ -1,4 +1,5 @@
 import {
+  AGENT_CONTROL_AUTOMATION_MAX_ACTIVE_PER_PROJECT,
   AgentControlAutomationId,
   AgentControlAutomationRunId,
   AgentControlRequestId,
@@ -271,6 +272,61 @@ layer("Automation centre", (it) => {
           unread: false,
         }),
       );
+    }),
+  );
+
+  it.effect("lists every active schedule ahead of paused ones and leaves cancelled ones out", () =>
+    Effect.gen(function* () {
+      const repo = yield* AgentControlAutomationRepository;
+      const centre = yield* AutomationCentre;
+      const busy = ProjectId.make("busy-project");
+      const older = new Date(Date.now() - 3600000).toISOString();
+      const newer = new Date(Date.now() - 60000).toISOString();
+      const inBusy = (
+        id: string,
+        updatedAt: string,
+        patch: Partial<AgentControlAutomation> = {},
+      ): AgentControlAutomation => {
+        const base = automation(id);
+        return {
+          ...base,
+          projectId: busy,
+          principal: {
+            kind: "automation-owner",
+            projectId: busy,
+            runtimeMode: "approval-required",
+            envMode: "worktree",
+          },
+          definition: {
+            ...base.definition,
+            execution: { ...base.definition.execution, projectId: busy },
+          },
+          updatedAt,
+          ...patch,
+        };
+      };
+      for (let index = 0; index < AGENT_CONTROL_AUTOMATION_MAX_ACTIVE_PER_PROJECT; index++)
+        assert.isTrue(yield* repo.insertAutomation(inBusy(`busy-active-${index}`, older)));
+      // Changed more recently than every active one.
+      for (let index = 0; index < 30; index++) {
+        yield* repo.insertAutomation(
+          inBusy(`busy-cancelled-${index}`, newer, {
+            enabled: false,
+            cancelled: true,
+            cancelledAt: newer,
+            nextRunAt: null,
+          }),
+        );
+        yield* repo.insertAutomation(
+          inBusy(`busy-paused-${index}`, newer, { enabled: false, nextRunAt: null }),
+        );
+      }
+      const result = yield* centre.snapshot({ projectId: busy });
+      assert.isFalse(result.automations.some((a) => a.cancelled));
+      const active = result.automations.filter((a) => a.enabled && a.nextRunAt !== null);
+      assert.strictEqual(active.length, yield* repo.countActiveAutomations(busy));
+      assert.strictEqual(active.length, AGENT_CONTROL_AUTOMATION_MAX_ACTIVE_PER_PROJECT);
+      assert.strictEqual(result.automations.length, 50);
     }),
   );
 });

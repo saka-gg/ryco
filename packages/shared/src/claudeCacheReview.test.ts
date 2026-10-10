@@ -8,7 +8,11 @@ import {
   type OrchestrationThread,
 } from "@ryco/contracts";
 
-import { assessClaudeCacheResume, latestClaudeCacheObservation } from "./claudeCacheReview.ts";
+import {
+  assessClaudeCacheResume,
+  claudeCompactUnavailableReason,
+  latestClaudeCacheObservation,
+} from "./claudeCacheReview.ts";
 
 const observation: ClaudeCacheObservation = {
   source: "assistant-usage",
@@ -83,6 +87,65 @@ describe("assessClaudeCacheResume", () => {
     expect(
       assessClaudeCacheResume(codexThread, codexThread.modelSelection, observedAtMs + 3_600_000),
     ).toBeUndefined();
+  });
+
+  it("reviews a stopped session without a runtime and offers only continuing", () => {
+    const subject = thread();
+    const stopped = {
+      ...subject,
+      session: { ...subject.session!, status: "stopped", runtimeSessionId: undefined },
+    } as OrchestrationThread;
+    const review = assessClaudeCacheResume(stopped, stopped.modelSelection, observedAtMs + 1_000);
+    expect(review?.reason).toContain("session stopped");
+    expect(review?.compactUnavailableReason).toContain("stopped, so it cannot compact");
+    // A session that failed before binding a runtime is not "stopped", but has none either.
+    const unbound = {
+      ...subject,
+      session: { ...subject.session!, status: "error", runtimeSessionId: undefined },
+    } as OrchestrationThread;
+    expect(claudeCompactUnavailableReason(unbound, unbound.modelSelection)).toBe(
+      "Claude has no running session to compact first.",
+    );
+  });
+
+  it("offers compaction only for a ready, idle runtime on the selected model", () => {
+    const subject = thread();
+    const ready = {
+      ...subject,
+      session: { ...subject.session!, status: "ready" },
+    } as OrchestrationThread;
+    const at = observedAtMs + 301_000;
+    expect(
+      assessClaudeCacheResume(ready, ready.modelSelection, at)?.compactUnavailableReason,
+    ).toBeNull();
+    expect(claudeCompactUnavailableReason(subject, subject.modelSelection)).toContain(
+      "ready before compacting",
+    );
+    expect(
+      claudeCompactUnavailableReason(ready, { ...ready.modelSelection, model: "opus" }),
+    ).toContain("Apply the model");
+  });
+
+  it("skips the review once the thread's directory moved away from the observed runtime's", () => {
+    const subject = thread({ observation: { ...observation, cwd: "/chats/pelican" } });
+    const at = observedAtMs + 301_000;
+    expect(
+      assessClaudeCacheResume(subject, subject.modelSelection, at, {
+        workspaceCwd: "/projects/pelican",
+      }),
+    ).toBeUndefined();
+    expect(
+      assessClaudeCacheResume(subject, subject.modelSelection, at, {
+        workspaceCwd: "/chats/pelican",
+      }),
+    ).toBeDefined();
+    // Either directory unknown (older server or client): review as before.
+    expect(assessClaudeCacheResume(subject, subject.modelSelection, at)).toBeDefined();
+    expect(
+      assessClaudeCacheResume(thread(), thread().modelSelection, at, {
+        workspaceCwd: "/projects/pelican",
+      }),
+    ).toBeDefined();
   });
 
   it("forgets the observation after a compaction", () => {

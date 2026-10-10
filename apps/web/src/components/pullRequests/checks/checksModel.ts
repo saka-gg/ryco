@@ -491,21 +491,6 @@ export function formatWorkflowDuration(ms: number | null | undefined): string | 
 
 // ── Deep links (`job` URL param) ─────────────────────────────────────
 
-/**
- * The `job` URL value that opens a rollup check on the Checks tab: the
- * host's job id when the check links to one (Actions, GitLab CI), otherwise
- * `workflow/name`. Use with `nav.revealJob` (e.g. the rail's "View failing check").
- */
-export function pullRequestCheckJobParam(check: {
-  readonly name: string;
-  readonly workflowName: string | null;
-  readonly url: string | null;
-}): string {
-  const jobId = workflowJobIdFromUrl(check.url);
-  if (jobId) return jobId;
-  return check.workflowName ? `${check.workflowName}/${check.name}` : check.name;
-}
-
 export interface ChecksJobTarget {
   readonly workflowKey: string;
   readonly jobKey: string;

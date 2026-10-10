@@ -204,6 +204,57 @@ it.effect("decodes future attachment kinds and rejects malformed known kinds", (
   }),
 );
 
+it.effect("decodes HTML render metadata on file attachments and tolerates its absence", () =>
+  Effect.gen(function* () {
+    const render = yield* decodeChatAttachment({
+      type: "file",
+      id: "thread-1-0f0e0d0c-0b0a-4908-8706-050403020100-html",
+      name: "Chart.html",
+      mimeType: "text/html",
+      sizeBytes: 120,
+      htmlRender: {
+        title: "Chart",
+        height: 420,
+        heights: [
+          [375, 520],
+          [760, 410],
+        ],
+        futureField: "tolerated",
+      },
+    });
+    assert.strictEqual(render.type, "file");
+    assert.deepStrictEqual((render as { htmlRender?: unknown }).htmlRender, {
+      title: "Chart",
+      height: 420,
+      heights: [
+        [375, 520],
+        [760, 410],
+      ],
+    });
+
+    const plain = yield* decodeChatFileAttachment({
+      type: "file",
+      id: "doc-1",
+      name: "notes.html",
+      mimeType: "text/html",
+      sizeBytes: 3,
+    });
+    assert.strictEqual(plain.htmlRender, undefined);
+
+    const malformed = yield* Effect.exit(
+      decodeChatFileAttachment({
+        type: "file",
+        id: "doc-2",
+        name: "page.html",
+        mimeType: "text/html",
+        sizeBytes: 3,
+        htmlRender: { title: "Page", height: "tall" },
+      }),
+    );
+    assert.strictEqual(malformed._tag, "Failure");
+  }),
+);
+
 it.effect("decodes optional attachment media dimensions and rejects negative ones", () =>
   Effect.gen(function* () {
     const image = yield* decodeChatImageAttachment({
@@ -1465,6 +1516,42 @@ it.effect("rejects malformed context handoff activity metadata", () =>
       }),
     );
     assert.strictEqual(oversizedError._tag, "Failure");
+  }),
+);
+
+it.effect("decodes the context handoff reason, absent on historical records", () =>
+  Effect.gen(function* () {
+    const requested = {
+      schemaVersion: 1,
+      handoffId: "handoff-1",
+      mode: "full-context-fresh-session",
+      status: "requested",
+      targetMessageId: "msg-2",
+      sourceSelection: { instanceId: "claude_work", model: "claude-fable-5" },
+      targetSelection: { instanceId: "claude_work", model: "claude-fable-5" },
+    } as const;
+
+    const historical = yield* decodeContextHandoffActivity(requested);
+    assert.strictEqual(historical.reason, undefined);
+    for (const reason of ["model-change", "cwd-relocation"] as const) {
+      const decoded = yield* decodeContextHandoffActivity({ ...requested, reason });
+      assert.strictEqual(decoded.reason, reason);
+    }
+    const consumed = yield* decodeContextHandoffActivity({
+      ...requested,
+      reason: "cwd-relocation",
+      status: "consumed",
+      sources: [{ providerInstanceId: "claude_work", driverKind: "claudeAgent", modelSlug: "x" }],
+      target: { providerInstanceId: "claude_work", driverKind: "claudeAgent", modelSlug: "x" },
+      contextVersion: 1,
+      contextDigest: "a".repeat(64),
+    });
+    assert.strictEqual(consumed.reason, "cwd-relocation");
+
+    const unknownReason = yield* Effect.exit(
+      decodeContextHandoffActivity({ ...requested, reason: "project-promotion" }),
+    );
+    assert.strictEqual(unknownReason._tag, "Failure");
   }),
 );
 

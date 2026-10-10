@@ -7,6 +7,7 @@ import { AttachmentFileRow, attachmentDownloadUrl } from "./AttachmentVideo";
 import {
   ATTACHMENT_TEXT_PREVIEW_MAX_BYTES,
   attachmentPreviewKind,
+  attachmentUrlPolicy,
   formatAttachmentBytes,
 } from "./attachmentPreview";
 
@@ -184,7 +185,13 @@ export function AttachmentPreviewButton({
   const changeOpen = (nextOpen: boolean) => {
     if (localResource.current) URL.revokeObjectURL(localResource.current);
     localResource.current =
-      nextOpen && attachment.file ? URL.createObjectURL(attachment.file) : undefined;
+      nextOpen && attachment.file
+        ? URL.createObjectURL(
+            new Blob([attachment.file], {
+              type: attachmentUrlPolicy({ mimeType: attachment.file.type, image: false }).type,
+            }),
+          )
+        : undefined;
     setLocalSource(localResource.current);
     setOpen(nextOpen);
   };

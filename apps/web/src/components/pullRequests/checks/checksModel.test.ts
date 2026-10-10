@@ -1,5 +1,8 @@
 import type { SourceControlCheckRollupItem, SourceControlWorkflowJob } from "@ryco/contracts";
-import { summarizeChangeRequestChecks } from "@ryco/client-runtime/state/pull-request-review";
+import {
+  pullRequestCheckJobParam,
+  summarizeChangeRequestChecks,
+} from "@ryco/client-runtime/state/pull-request-review";
 import { Option } from "effect";
 import { describe, expect, it } from "vitest";
 
@@ -27,7 +30,6 @@ import {
   formatWorkflowDuration,
   isChecksJobExpanded,
   orderByCheckGroup,
-  pullRequestCheckJobParam,
   resolveChecksJobParam,
 } from "./checksModel";
 
@@ -319,19 +321,14 @@ describe("job deep links", () => {
     });
   });
 
-  it("builds the param from a rollup check", () => {
+  it("resolves the param built from a rollup check", () => {
     const failing = summarizeChangeRequestChecks(fixtureDetail(703).checkRollup).failing[0]!;
-    expect(pullRequestCheckJobParam(failing)).toBe(FIXTURE_703_FAILING_JOB.jobId);
-    expect(pullRequestCheckJobParam({ name: "lint", workflowName: "CI", url: null })).toBe(
-      "CI/lint",
-    );
-    expect(
-      pullRequestCheckJobParam({
-        name: "lint",
-        workflowName: "CI",
-        url: "https://github.com/o/r/actions/runs/1/jobs/42",
-      }),
-    ).toBe("42");
+    const param = pullRequestCheckJobParam(failing);
+    expect(param).toBe(FIXTURE_703_FAILING_JOB.jobId);
+    expect(resolveChecksJobParam(model, param)).toEqual({
+      workflowKey: "CI#0",
+      jobKey: "Test · web",
+    });
   });
 });
 

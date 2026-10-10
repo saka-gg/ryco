@@ -22,6 +22,79 @@ export const REASONING_DESCRIPTOR_IDS: ReadonlySet<string> = new Set([
 const ULTRATHINK_PREFIX_PATTERN = /^Ultrathink:\s*/i;
 
 /**
+ * Speed tiers. Fast and Ultrafast are separate boolean options (Ultrafast is
+ * Codex-only), but only one is ever on: they read and write as one tier.
+ */
+export type SpeedTier = "standard" | "fast" | "ultrafast";
+
+const SPEED_DESCRIPTOR_IDS: Readonly<Record<Exclude<SpeedTier, "standard">, string>> = {
+  fast: "fastMode",
+  ultrafast: "ultrafastMode",
+};
+
+export const SPEED_TIER_LABELS: Readonly<Record<SpeedTier, string>> = {
+  standard: "Standard",
+  fast: "Fast",
+  ultrafast: "Ultrafast",
+};
+
+export function isSpeedDescriptor(descriptor: ProviderOptionDescriptor): boolean {
+  return (
+    descriptor.type === "boolean" &&
+    (descriptor.id === SPEED_DESCRIPTOR_IDS.fast ||
+      descriptor.id === SPEED_DESCRIPTOR_IDS.ultrafast)
+  );
+}
+
+/** The tiers a model offers, slowest first; just `["standard"]` means no choice. */
+export function availableSpeedTiers(
+  descriptors: ReadonlyArray<ProviderOptionDescriptor>,
+): ReadonlyArray<SpeedTier> {
+  const offered = (tier: Exclude<SpeedTier, "standard">) =>
+    descriptors.some(
+      (descriptor) => descriptor.type === "boolean" && descriptor.id === SPEED_DESCRIPTOR_IDS[tier],
+    );
+  return [
+    "standard",
+    ...(offered("fast") ? (["fast"] as const) : []),
+    ...(offered("ultrafast") ? (["ultrafast"] as const) : []),
+  ];
+}
+
+export function currentSpeedTier(descriptors: ReadonlyArray<ProviderOptionDescriptor>): SpeedTier {
+  const isOn = (tier: Exclude<SpeedTier, "standard">) =>
+    descriptors.some(
+      (descriptor) =>
+        descriptor.type === "boolean" &&
+        descriptor.id === SPEED_DESCRIPTOR_IDS[tier] &&
+        descriptor.currentValue === true,
+    );
+  return isOn("ultrafast") ? "ultrafast" : isOn("fast") ? "fast" : "standard";
+}
+
+/** Descriptors with exactly `tier` switched on (and every other speed off). */
+export function withSpeedTier(
+  descriptors: ReadonlyArray<ProviderOptionDescriptor>,
+  tier: SpeedTier,
+): ReadonlyArray<ProviderOptionDescriptor> {
+  return descriptors.map((descriptor) =>
+    isSpeedDescriptor(descriptor)
+      ? ({
+          ...descriptor,
+          currentValue: tier !== "standard" && descriptor.id === SPEED_DESCRIPTOR_IDS[tier],
+        } as ProviderOptionDescriptor)
+      : descriptor,
+  );
+}
+
+/** The tier one press of the speed button moves to: up through the offered tiers, then off. */
+export function nextSpeedTier(descriptors: ReadonlyArray<ProviderOptionDescriptor>): SpeedTier {
+  const tiers = availableSpeedTiers(descriptors);
+  const index = tiers.indexOf(currentSpeedTier(descriptors));
+  return tiers[(index + 1) % tiers.length] ?? "standard";
+}
+
+/**
  * Whether the model picker's tuning dial owns this descriptor. Everything the
  * dial does not own (agent, OpenCode variants, future selects) stays a
  * composer chip.
@@ -30,7 +103,7 @@ export function isTuningDescriptor(descriptor: ProviderOptionDescriptor): boolea
   if (descriptor.type === "select") {
     return REASONING_DESCRIPTOR_IDS.has(descriptor.id) || descriptor.id === "contextWindow";
   }
-  return descriptor.id === "fastMode" || descriptor.id === "thinking";
+  return isSpeedDescriptor(descriptor) || descriptor.id === "thinking";
 }
 
 export interface ModelTuning {
@@ -39,7 +112,9 @@ export interface ModelTuning {
   readonly primarySelectDescriptorId: string | undefined;
   readonly effort: SelectDescriptor | null;
   readonly thinking: BooleanDescriptor | null;
-  readonly fastMode: BooleanDescriptor | null;
+  /** Offered speed tiers; more than one means the dial shows the speed button. */
+  readonly speedTiers: ReadonlyArray<SpeedTier>;
+  readonly speed: SpeedTier;
   readonly contextWindow: SelectDescriptor | null;
   /** The effort the turn will actually use, including prompt-controlled ultrathink. */
   readonly effortValue: string | null;
@@ -93,9 +168,9 @@ export function resolveModelTuning(input: {
     REASONING_DESCRIPTOR_IDS.has(descriptor.id),
   );
   const contextWindow = findSelect(descriptors, (descriptor) => descriptor.id === "contextWindow");
-  const fastMode = findBoolean(descriptors, "fastMode");
+  const speedTiers = availableSpeedTiers(descriptors);
   const thinking = findBoolean(descriptors, "thinking");
-  if (!effort && !contextWindow && !fastMode && !thinking) return null;
+  if (!effort && !contextWindow && speedTiers.length < 2 && !thinking) return null;
 
   const primarySelect = findSelect(descriptors, () => true);
   const ultrathinkPromptControlled =
@@ -130,7 +205,8 @@ export function resolveModelTuning(input: {
     primarySelectDescriptorId: primarySelect?.id,
     effort,
     thinking,
-    fastMode,
+    speedTiers,
+    speed: currentSpeedTier(descriptors),
     contextWindow,
     effortValue,
     ultrathinkPromptControlled,
@@ -222,7 +298,7 @@ const SHORT_LEVEL_LABELS: Readonly<Record<string, string>> = {
 export interface ModelTuningSummary {
   /** Effort (or "thinking") shown in the composer pill; `index` orders changes. */
   readonly level: { readonly id: string; readonly label: string; readonly index: number } | null;
-  readonly fastMode: boolean;
+  readonly speed: SpeedTier;
   /** Only present when the model offers a choice of context window. */
   readonly contextWindowLabel: string | null;
 }
@@ -251,7 +327,7 @@ export function summarizeModelTuning(tuning: ModelTuning | null): ModelTuningSum
       : null;
   return {
     level,
-    fastMode: tuning.fastMode?.currentValue === true,
+    speed: tuning.speed,
     contextWindowLabel,
   };
 }

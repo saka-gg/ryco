@@ -21,6 +21,9 @@ import { ProjectionSnapshotQuery } from "../../orchestration/Services/Projection
 import { computeAgentControlPlanDigest } from "../planDigest.ts";
 import { agentControlPrincipalScope } from "../principal.ts";
 
+/** Schedules per snapshot; above the per-project active limit, which they all fit in. */
+const AUTOMATION_CENTRE_SCHEDULE_LIMIT = 50;
+
 const conflict = (message: string) =>
   Effect.fail(new AgentControlRpcError({ code: "conflict", message }));
 const toError = (error: unknown): AgentControlRpcError => {
@@ -72,10 +75,11 @@ export const AutomationCentreLive = Layer.effect(
               error._tag === "PersistenceDecodeError" ? Effect.void : Effect.fail(error),
             ),
           );
-        const definitions = yield* automations.list({
+        // Cancelled schedules stay out, active ones come first: the list never
+        // hides an active schedule, so the reader's limit count is the server's.
+        const definitions = yield* repository.listCentreAutomations({
           projectId,
-          includeDisabled: true,
-          limit: 50,
+          limit: AUTOMATION_CENTRE_SCHEDULE_LIMIT,
         });
         const records = yield* repository.listProjectRuns(projectId);
         const runs: AutomationCentreRun[] = [];

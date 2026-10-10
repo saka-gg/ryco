@@ -1,4 +1,5 @@
 import { makeLocalTaskHandlers } from "./localTaskRpc.ts";
+import { makeNotesHandlers } from "./notesRpc.ts";
 import { makeDailyRecapHandlers } from "./dailyRecapRpc.ts";
 import { makeStorageHandlers } from "./storageRpc.ts";
 import { makeLifecycleHandlers } from "./lifecycleRpc.ts";
@@ -17,6 +18,7 @@ import { makeOrchestrationHandlers } from "./orchestrationRpc.ts";
 import { makeGitHandlers } from "./gitRpc.ts";
 import { makeTerminalHandlers } from "./terminalRpc.ts";
 import { makeProjectHandlers } from "./projectRpc.ts";
+import { makeChatProjectHandlers } from "./chatProjectRpc.ts";
 import { makeSourceControlHandlers } from "./sourceControlRpc.ts";
 import { makeProviderHandlers } from "./providerRpc.ts";
 import { makeStatisticsHandlers } from "./statisticsRpc.ts";
@@ -28,6 +30,7 @@ import { authorizeRpcPrincipal, type WsRpcAccess } from "../auth/wsAuthorization
 const makeWsRpcHandlers = (principal: RpcPrincipal) =>
   Effect.gen(function* () {
     const ctx = yield* makeWsRpcContext(principal);
+    yield* Effect.addFinalizer(() => ctx.clientWorkspaceUse.release);
     return WsRpcGroup.of({
       ...makeAgentControlHandlers(ctx),
       ...makeAutomationCentreHandlers(ctx),
@@ -38,11 +41,13 @@ const makeWsRpcHandlers = (principal: RpcPrincipal) =>
       ...makeStatisticsHandlers(ctx),
       ...makeSourceControlHandlers(ctx),
       ...makeProjectHandlers(ctx),
+      ...makeChatProjectHandlers(ctx),
       ...makeSessionImportHandlers(ctx),
       ...makeStorageHandlers(ctx),
       ...makeLifecycleHandlers(ctx),
       ...makeDailyRecapHandlers(ctx),
       ...makeLocalTaskHandlers(ctx),
+      ...makeNotesHandlers(ctx),
       ...makeGitHandlers(ctx),
       ...makeTerminalHandlers(ctx),
     });

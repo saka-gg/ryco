@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   classifyCheckState,
+  pullRequestCheckJobParam,
   summarizeChangeRequestChecks,
   workflowJobIdFromUrl,
 } from "./checks.ts";
@@ -49,6 +50,49 @@ describe("workflowJobIdFromUrl", () => {
     );
     expect(workflowJobIdFromUrl("https://ci.example.com/job/build/12")).toBe(null);
     expect(workflowJobIdFromUrl(null)).toBe(null);
+  });
+});
+
+describe("pullRequestCheckJobParam", () => {
+  it("prefers the host's job id, then workflow/name, then the bare name", () => {
+    expect(
+      pullRequestCheckJobParam({
+        name: "lint",
+        workflowName: "CI",
+        url: "https://github.com/o/r/actions/runs/1/jobs/42",
+      }),
+    ).toBe("42");
+    expect(
+      pullRequestCheckJobParam({
+        name: "lint",
+        workflowName: "CI",
+        url: "https://gitlab.example.com/group/project/-/jobs/91",
+      }),
+    ).toBe("91");
+    expect(pullRequestCheckJobParam({ name: "lint", workflowName: "CI", url: null })).toBe(
+      "CI/lint",
+    );
+    expect(
+      pullRequestCheckJobParam({
+        name: "lint",
+        workflowName: "CI",
+        url: "https://ci.example.com/job/build/12",
+      }),
+    ).toBe("CI/lint");
+    expect(pullRequestCheckJobParam({ name: "ci/circleci", workflowName: null, url: null })).toBe(
+      "ci/circleci",
+    );
+  });
+
+  it("builds the param from a summarized rollup check", () => {
+    const summary = summarizeChangeRequestChecks([
+      check("test", {
+        workflowName: "CI",
+        conclusion: "FAILURE",
+        url: "https://github.com/o/r/actions/runs/7/job/99",
+      }),
+    ]);
+    expect(pullRequestCheckJobParam(summary.failing[0]!)).toBe("99");
   });
 });
 

@@ -30,6 +30,9 @@ import {
 } from "../Services/AgentControlExternalIntegration.ts";
 import {
   AgentControlActionValidator,
+  agentControlExternalCeiling,
+  agentControlTargetSnapshotOf,
+  agentControlTargetSnapshots,
   agentControlThreadEnvMode,
   isAgentControlProviderReady,
   type AgentControlActionValidatorShape,
@@ -232,6 +235,13 @@ const isProjectPlan = (
   { kind: "createProject" | "updateProject" | "removeProject" }
 > =>
   plan.kind === "createProject" || plan.kind === "updateProject" || plan.kind === "removeProject";
+
+const isThreadControlPlan = (
+  plan: AgentControlActionPlan,
+): plan is Extract<
+  AgentControlActionPlan,
+  { kind: "sendMessage" | "interruptThread" | "updateThread" }
+> => plan.kind === "sendMessage" || plan.kind === "interruptThread" || plan.kind === "updateThread";
 
 const isAutomationLifecyclePlan = (
   plan: AgentControlActionPlan,
@@ -583,15 +593,9 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
         NonNullable<AgentControlProviderSessionPrincipal["targetSnapshots"]>[number]
       > = [];
       for (const threadId of targetThreadIds(input.plan)) {
-        const target = yield* requireThread(snapshot, threadId);
-        targetSnapshots.push({
-          threadId: target.id,
-          projectId: target.projectId,
-          runtimeMode: target.runtimeMode,
-          envMode: agentControlThreadEnvMode(target),
-          archived: target.archivedAt !== null,
-          activeTurnId: target.session?.activeTurnId ?? null,
-        });
+        targetSnapshots.push(
+          agentControlTargetSnapshotOf(yield* requireThread(snapshot, threadId)),
+        );
       }
 
       return {
@@ -677,6 +681,72 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
             projectId: definition.execution.projectId,
             runtimeMode: definition.execution.runtimeMode,
             envMode: definition.execution.envMode,
+          };
+        }
+        const scopeAllows = (projectId: string) =>
+          input.integration.projectScope.kind === "all" ||
+          input.integration.projectScope.projectIds.some((allowed) => allowed === projectId);
+        if (isThreadControlPlan(input.plan)) {
+          const plan = input.plan;
+          if (
+            !input.integration.capabilities.includes(
+              AGENT_CONTROL_CAPABILITIES.externalControlThreads,
+            )
+          ) {
+            return yield* fail(
+              "privilege-escalation",
+              "External thread control authority is absent.",
+            );
+          }
+          const { snapshot, providers } = yield* loadState;
+          const target = snapshot.threads.find((thread) => thread.id === plan.threadId);
+          // An out-of-scope target is reported exactly like a missing one.
+          if (!target || !scopeAllows(target.projectId)) {
+            return yield* fail("thread-unavailable", "Target thread is unavailable.");
+          }
+          const ceiling = agentControlExternalCeiling(input.integration);
+          yield* validatePlanAgainstSnapshot({
+            plan,
+            originProjectId: target.projectId,
+            originRuntimeMode: ceiling.runtimeMode,
+            originEnvMode: ceiling.envMode,
+            snapshot,
+            providers,
+            requireBaseRef,
+          });
+          return {
+            kind: "external-integration",
+            integrationId: input.integration.integrationId,
+            label: input.integration.displayName,
+            projectId: target.projectId,
+            runtimeMode: ceiling.runtimeMode,
+            envMode: ceiling.envMode,
+            targetSnapshots: [agentControlTargetSnapshotOf(target)],
+          };
+        }
+        if (input.plan.kind === "workspaceLifecycle") {
+          if (
+            deps.workspaces === undefined ||
+            !input.integration.capabilities.includes(
+              AGENT_CONTROL_CAPABILITIES.externalManageWorkspaces,
+            )
+          ) {
+            return yield* fail(
+              "privilege-escalation",
+              "External workspace lifecycle authority is absent.",
+            );
+          }
+          if (!scopeAllows(input.plan.projectId)) {
+            return yield* fail("project-scope", "Workspace control unavailable in caller scope.");
+          }
+          yield* deps.workspaces.revalidate(input.plan, null);
+          return {
+            kind: "external-integration",
+            integrationId: input.integration.integrationId,
+            label: input.integration.displayName,
+            projectId: input.plan.projectId,
+            runtimeMode: "approval-required",
+            envMode: "worktree",
           };
         }
         if (input.plan.kind !== "createThreads" || input.plan.entries.length !== 1) {
@@ -780,11 +850,13 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
           integration.projectScope.kind === "all" ||
           integration.projectScope.projectIds.includes(originProjectId);
         const externalCapability =
-          proposal.plan.kind === "automationRun"
+          proposal.plan.kind === "automationRun" || isAutomationLifecyclePlan(proposal.plan)
             ? AGENT_CONTROL_CAPABILITIES.externalManageAutomations
-            : isAutomationLifecyclePlan(proposal.plan)
-              ? AGENT_CONTROL_CAPABILITIES.externalManageAutomations
-              : AGENT_CONTROL_CAPABILITIES.externalCreateTask;
+            : isThreadControlPlan(proposal.plan)
+              ? AGENT_CONTROL_CAPABILITIES.externalControlThreads
+              : proposal.plan.kind === "workspaceLifecycle"
+                ? AGENT_CONTROL_CAPABILITIES.externalManageWorkspaces
+                : AGENT_CONTROL_CAPABILITIES.externalCreateTask;
         const requiresTaskCapability =
           proposal.plan.kind === "automationRun" || isAutomationLifecyclePlan(proposal.plan);
         if (
@@ -888,13 +960,16 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
         return;
       }
       if (proposal.plan.kind === "workspaceLifecycle") {
-        if (
-          principal.kind !== "provider-session" ||
-          !deps.workspaces ||
-          proposal.plan.projectId !== originProjectId
-        )
+        // External integrations have no caller thread, so no workspace is their current one.
+        const caller =
+          principal.kind === "provider-session"
+            ? principal.threadId
+            : principal.kind === "external-integration"
+              ? null
+              : undefined;
+        if (caller === undefined || !deps.workspaces || proposal.plan.projectId !== originProjectId)
           return yield* fail("project-scope", "Workspace control unavailable in caller scope.");
-        yield* deps.workspaces.revalidate(proposal.plan, principal.threadId);
+        yield* deps.workspaces.revalidate(proposal.plan, caller);
         return;
       }
       if (isProjectPlan(proposal.plan)) {
@@ -921,9 +996,7 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
         requireBaseRef,
       });
 
-      for (const expected of principal.kind === "provider-session"
-        ? (principal.targetSnapshots ?? [])
-        : []) {
+      for (const expected of agentControlTargetSnapshots(principal)) {
         const current = snapshot.threads.find((thread) => thread.id === expected.threadId);
         if (!current) {
           return yield* fail("thread-unavailable", "The approved target thread was deleted.");

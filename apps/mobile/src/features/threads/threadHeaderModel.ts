@@ -1,3 +1,4 @@
+import { CHAT_WORKSPACE_LABEL, projectDisplayLabel } from "@ryco/client-runtime/state/composer";
 import { resolveThreadWorkspaceRoot } from "@ryco/client-runtime/state/files";
 import type {
   Project,
@@ -5,6 +6,7 @@ import type {
   Thread,
   ThreadInboxMutationBlocker,
 } from "@ryco/client-runtime/state/threads";
+import { isChatProject } from "@ryco/shared/projectKind";
 import type { ThreadSettlementBlocker } from "@ryco/shared/threadSettlement";
 
 import { buildChangeRequestBadge, type ChangeRequestBadge } from "../../lib/changeRequestBadge";
@@ -30,6 +32,8 @@ export interface ThreadHeaderModel {
   readonly nodeLabel: string;
   readonly projectLabel: string;
   readonly worktreeLabel: string;
+  /** Heading over `projectLabel · worktreeLabel`; a chat works in a folder, not a worktree. */
+  readonly contextHeading: "Project · Worktree" | "Project · Folder";
   readonly statusLabel:
     | "Ready"
     | "Running"
@@ -115,7 +119,7 @@ export function buildThreadHeaderModel(input: {
     | "branch"
     | "worktreePath"
   >;
-  readonly project: Pick<Project, "name" | "cwd"> | null;
+  readonly project: Pick<Project, "name" | "cwd" | "kind"> | null;
   readonly worktree: Pick<
     SidebarWorktreeSummary,
     | "title"
@@ -154,12 +158,15 @@ export function buildThreadHeaderModel(input: {
   const running =
     input.thread.latestTurn?.state === "running" || input.thread.session?.status === "running";
   const nodeLabel = input.nodeLabel?.trim() || "Node";
-  const projectLabel = input.project?.name.trim() || "Project";
-  const worktreeLabel =
-    input.worktree?.title?.trim() ||
-    input.worktree?.branch.trim() ||
-    input.thread.branch?.trim() ||
-    (input.thread.worktreePath ? basename(input.thread.worktreePath) : "Local workspace");
+  // A "No project" chat is an ordinary thread in one plain folder: no project name, no branch.
+  const isChat = isChatProject(input.project);
+  const projectLabel = projectDisplayLabel(input.project, "Project");
+  const worktreeLabel = isChat
+    ? CHAT_WORKSPACE_LABEL
+    : input.worktree?.title?.trim() ||
+      input.worktree?.branch.trim() ||
+      input.thread.branch?.trim() ||
+      (input.thread.worktreePath ? basename(input.thread.worktreePath) : "Local workspace");
   const statusLabel = input.forcedOffline
     ? "Offline"
     : input.thread.archivedAt !== null
@@ -197,8 +204,11 @@ export function buildThreadHeaderModel(input: {
     nodeLabel,
     projectLabel,
     worktreeLabel,
+    contextHeading: isChat ? "Project · Folder" : "Project · Worktree",
     statusLabel,
-    contextAccessibilityLabel: `Working in node ${nodeLabel}, project ${projectLabel}, worktree ${worktreeLabel}. ${statusLabel}.`,
+    contextAccessibilityLabel: isChat
+      ? `Working in node ${nodeLabel}, ${projectLabel}, in a chat folder. ${statusLabel}.`
+      : `Working in node ${nodeLabel}, project ${projectLabel}, worktree ${worktreeLabel}. ${statusLabel}.`,
     reviewVisible: input.thread.turnDiffSummaries.some((summary) => summary.files.length > 0),
     filesVisible:
       resolveThreadWorkspaceRoot({

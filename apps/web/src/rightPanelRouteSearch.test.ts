@@ -147,3 +147,55 @@ it("preserves an agent selection within Agents and reports the shared panel mode
   });
   expect(getRightPanelMode(search)).toBe("agents");
 });
+
+it("opens a page tab only for a render it can name, keeping a message jump", () => {
+  const search = parseRightPanelRouteSearch({
+    workspaceTab: "render",
+    workspaceRender: "message-7:thread-chart-html",
+    messageId: "message-7",
+    diff: "1",
+  });
+  expect(search).toEqual({
+    messageId: MessageId.make("message-7"),
+    workspaceOpen: "1",
+    workspaceTab: "render",
+    workspaceRender: "message-7:thread-chart-html",
+  });
+  expect(getRightPanelMode(search)).toBe("render");
+  expect(isRightPanelOpen(search)).toBe(true);
+  expect(parseRightPanelRouteSearch({ workspaceTab: "render" })).toEqual({});
+  expect(getRightPanelMode({ workspaceOpen: "1", workspaceTab: "render" })).toBeNull();
+});
+
+it("carries the one-shot reveal keys only on the tab they belong to", () => {
+  expect(
+    parseRightPanelRouteSearch({
+      workspaceTab: "pullRequest",
+      workspacePr: "42",
+      workspacePrReveal: "job:52004433871",
+      workspaceAgentsWorkflow: "wf-audit",
+    }),
+  ).toEqual({
+    workspaceOpen: "1",
+    workspaceTab: "pullRequest",
+    workspacePr: 42,
+    workspacePrReveal: "job:52004433871",
+  });
+  expect(
+    parseRightPanelRouteSearch({
+      workspaceTab: "agents",
+      workspaceAgentsWorkflow: "wf-audit",
+      workspacePrReveal: "checks",
+    }),
+  ).toEqual({ workspaceOpen: "1", workspaceTab: "agents", workspaceAgentsWorkflow: "wf-audit" });
+  expect(
+    parseRightPanelRouteSearch({ workspaceTab: "pullRequest", workspacePrReveal: "files" }),
+  ).toEqual({ workspaceOpen: "1", workspaceTab: "pullRequest" });
+  expect(
+    parseRightPanelRouteSearch({
+      workspaceTab: "terminal",
+      workspacePrReveal: "checks",
+      workspaceAgentsWorkflow: "wf-audit",
+    }),
+  ).toEqual({ workspaceOpen: "1", workspaceTab: "terminal" });
+});

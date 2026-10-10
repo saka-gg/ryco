@@ -21,6 +21,8 @@ export function ProjectFavicon(input: {
   fillContainer?: boolean;
   /** Without artwork, show this name's colored initials instead of a folder. */
   fallbackName?: string;
+  /** Called with the artwork once it has loaded, e.g. to measure it for framing. */
+  onImageLoad?: (image: HTMLImageElement) => void;
 }) {
   const primaryId = usePrimaryEnvironmentId();
   const primaryConfig = useAtomValue(serverConfigAtom);
@@ -96,6 +98,7 @@ export function ProjectFavicon(input: {
       className={input.className}
       fillContainer={input.fillContainer}
       fallbackName={input.fallbackName}
+      onImageLoad={input.onImageLoad}
     />
   );
 }
@@ -105,6 +108,7 @@ function ProjectFaviconImage(input: {
   className?: string | undefined;
   fillContainer?: boolean | undefined;
   fallbackName?: string | undefined;
+  onImageLoad?: ((image: HTMLImageElement) => void) | undefined;
 }) {
   const { src } = input;
   const [status, setStatus] = useState<"loading" | "loaded" | "error">("loading");
@@ -144,8 +148,10 @@ function ProjectFaviconImage(input: {
         src={src}
         alt=""
         className={imgClass}
-        onLoad={() => {
+        data-state={status}
+        onLoad={(event) => {
           setStatus("loaded");
+          input.onImageLoad?.(event.currentTarget);
         }}
         onError={() => setStatus("error")}
       />

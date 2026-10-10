@@ -23,12 +23,6 @@ export function resolveConnectionTone(state: ConnectionToneState): StatusTone {
         pillClassName: "bg-success-bg border border-success-border",
         textClassName: "text-success",
       };
-    case "reconnecting":
-      return {
-        label: "Reconnecting",
-        pillClassName: "bg-warning-bg border border-warning-border",
-        textClassName: "text-warning",
-      };
     case "connecting":
       return {
         label: "Connecting",
@@ -41,6 +35,7 @@ export function resolveConnectionTone(state: ConnectionToneState): StatusTone {
         pillClassName: "bg-danger border border-danger-border",
         textClassName: "text-danger-foreground",
       };
+    case "reconnecting":
     case "offline":
       return {
         label: "Offline",

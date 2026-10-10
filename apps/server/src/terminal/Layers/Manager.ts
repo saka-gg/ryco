@@ -1,7 +1,8 @@
+import { noteStorageActivity } from "../../storage/lifecycle.ts";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import {
   storageLifecycleLock,
-  isStoragePathBlocked,
+  storagePathBlocker,
   canonicalStoragePath,
 } from "../../storage/lifecycle.ts";
 import path from "node:path";
@@ -9,6 +10,7 @@ import { randomUUID } from "node:crypto";
 
 import {
   DEFAULT_TERMINAL_ID,
+  PROJECT_RELOCATION_PENDING_MESSAGE,
   TerminalInputRejectedError,
   type DiagnosticsTerminalProcess,
   type TerminalEvent,
@@ -1368,12 +1370,19 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
         const canonical = yield* Effect.tryPromise(() => canonicalStoragePath(authorizedCwd)).pipe(
           Effect.mapError((cause) => new TerminalCwdError({ cwd, reason: "statFailed", cause })),
         );
-        if (
-          yield* isStoragePathBlocked(storageSql.value, canonical).pipe(
-            Effect.mapError((cause) => new TerminalCwdError({ cwd, reason: "statFailed", cause })),
-          )
-        )
-          return yield* new TerminalCwdError({ cwd, reason: "cleanupPending" });
+        const blocker = yield* storagePathBlocker(storageSql.value, canonical).pipe(
+          Effect.mapError((cause) => new TerminalCwdError({ cwd, reason: "statFailed", cause })),
+        );
+        if (blocker !== null)
+          return yield* blocker === "project-relocation"
+            ? // Retryable, unlike a checkout's cleanup. An existing reason, so every client decodes
+              // it, and the message says to try again.
+              new TerminalCwdError({
+                cwd,
+                reason: "statFailed",
+                cause: new Error(PROJECT_RELOCATION_PENDING_MESSAGE),
+              })
+            : new TerminalCwdError({ cwd, reason: "cleanupPending" });
       }
       const stats = yield* fileSystem.stat(authorizedCwd).pipe(
         Effect.mapError(
@@ -1843,6 +1852,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
         return [undefined, { ...state, sessions }] as const;
       });
 
+      noteStorageActivity();
       if (deleteHistoryOnClose) {
         yield* deleteHistory(threadId, terminalId);
       }

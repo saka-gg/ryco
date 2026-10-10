@@ -1,70 +1,54 @@
 import type {
+  AgentControlAutomationRunStatus,
+  AgentControlProposal,
   AutomationCentreApi,
   AutomationCentreSnapshot,
   ProjectId,
-  AgentControlAutomationRunStatus,
 } from "@ryco/contracts";
+import { Record as Records } from "effect";
 
-export const automationRunStatusLabel: Record<AgentControlAutomationRunStatus, string> = {
-  materializing: "Preparing approval",
-  "pending-approval": "Awaiting approval",
-  approved: "Approved",
-  executing: "Dispatching",
-  completed: "Dispatched",
-  failed: "Dispatch failed",
-  rejected: "Rejected",
-  expired: "Approval expired",
-  cancelled: "Cancelled",
-};
-export type AutomationRunFilter = "all" | "unread" | "failed";
-export function filterAutomationRuns(
-  snapshot: AutomationCentreSnapshot,
-  filter: AutomationRunFilter,
-) {
-  return snapshot.runs.filter((entry) =>
-    filter === "unread" ? entry.unread : filter === "failed" ? entry.run.status === "failed" : true,
-  );
+import { createSingleFlightReader, type SingleFlightReader } from "../singleFlightReader.ts";
+import { AUTOMATION_RUN_STATUS } from "./automationSchedules.ts";
+
+/** One run vocabulary app-wide: the labels of `AUTOMATION_RUN_STATUS`. */
+export const automationRunStatusLabel: Readonly<Record<AgentControlAutomationRunStatus, string>> =
+  Records.map(AUTOMATION_RUN_STATUS, (status) => status.label);
+
+/**
+ * A run waiting for the user, as a device's Agent Control queue holds it: an
+ * automation run whose approval is still pending. It is the same run a
+ * checkout's snapshot says is "pending-approval" (`dueScheduleRuns`); the
+ * queue is what every project on the device shares, so counts across
+ * projects (the sidebar's badge) read it from here.
+ */
+export function isWaitingAutomationRun(proposal: AgentControlProposal): boolean {
+  return proposal.status === "pending-user-approval" && proposal.plan.kind === "automationRun";
 }
 
-/** Single-flight refresh with a trailing read, and no publications after disposal/rebind. */
+/** Runs waiting for approval in the given environments' queues. */
+export function waitingAutomationRunCount(
+  queues: Readonly<
+    Record<string, { readonly proposalsById: Readonly<Record<string, AgentControlProposal>> }>
+  >,
+  environmentIds: readonly string[],
+): number {
+  let count = 0;
+  for (const environmentId of environmentIds)
+    for (const proposal of Object.values(queues[environmentId]?.proposalsById ?? {}))
+      if (isWaitingAutomationRun(proposal)) count += 1;
+  return count;
+}
+
+/** The checkout's automation snapshot through the shared single-flight reader. */
 export function createAutomationCentreReader(input: {
   api: AutomationCentreApi;
   projectId: ProjectId;
   onSnapshot: (snapshot: AutomationCentreSnapshot) => void;
   onError: () => void;
-}) {
-  let stopped = false;
-  let generation = 0;
-  let running = false;
-  let pending = false;
-  const refresh = async () => {
-    if (stopped) return;
-    if (running) {
-      pending = true;
-      return;
-    }
-    running = true;
-    do {
-      pending = false;
-      const epoch = generation;
-      try {
-        const snapshot = await input.api.snapshot({ projectId: input.projectId });
-        if (!stopped && epoch === generation) input.onSnapshot(snapshot);
-      } catch {
-        if (!stopped && epoch === generation) input.onError();
-      }
-      if (stopped) break;
-    } while (pending);
-    running = false;
-  };
-  return {
-    refresh,
-    invalidate: () => {
-      generation++;
-      pending = false;
-    },
-    stop: () => {
-      stopped = true;
-    },
-  };
+}): SingleFlightReader {
+  return createSingleFlightReader({
+    read: () => input.api.snapshot({ projectId: input.projectId }),
+    onValue: input.onSnapshot,
+    onError: () => input.onError(),
+  });
 }

@@ -147,7 +147,7 @@ import {
 } from "../types";
 import { useTheme } from "../hooks/useTheme";
 import { useTurnDiffSummaries } from "../hooks/useTurnDiffSummaries";
-import { PREFERS_REDUCED_MOTION_QUERY } from "../lib/perf/motion";
+import { useReducedMotionEffective } from "../hooks/useAppearancePreference";
 import { useDelayedUnmount } from "../hooks/useDelayedUnmount";
 import { useMediaQuery } from "../hooks/useMediaQuery";
 import { useAppSidebarCollapsed } from "../hooks/useAppSidebarCollapsed";
@@ -171,9 +171,11 @@ import { ChevronDownIcon, CircleAlertIcon, TriangleAlertIcon, WifiOffIcon } from
 import { BackgroundLivenessChip } from "./chat/BackgroundLivenessChip";
 import { cn, randomUUID } from "~/lib/utils";
 import { stackedThreadToast, toastManager } from "./ui/toast";
-import { newCommandId, newDraftId, newMessageId, newThreadId } from "~/lib/utils";
+import { newCommandId, newDraftId, newMessageId, newProjectId, newThreadId } from "~/lib/utils";
+import { isChatProject } from "@ryco/shared/projectKind";
 import { getProviderSupportsAskMode, resolveSelectableProvider } from "../providerModels";
 import { useSettings } from "../hooks/useSettings";
+import { useChatsAvailability } from "../hooks/useChatsAvailability";
 import { resolveAppModelSelectionForInstance } from "../modelSelection";
 import { deriveLogicalProjectKeyFromSettings } from "../logicalProject";
 import {
@@ -183,8 +185,11 @@ import {
 } from "../environments/runtime";
 import { buildDraftThreadRouteParams, buildThreadRouteParams } from "../threadRoutes";
 import {
+  buildChatDraftTarget,
+  CHAT_PROJECT_LABEL,
   type ComposerImageAttachment,
   type DraftThreadEnvMode,
+  isPendingChatDraft,
   useComposerDraftStore,
   type DraftId,
 } from "../composerDraftStore";
@@ -214,6 +219,7 @@ import {
   deriveRevertTurnCountByUserMessageId,
   deriveUndoTurnCountByTurnId,
 } from "./chat/MessagesTimeline.logic";
+import { NewThreadContextBar } from "./chat/NewThreadContextBar";
 import { NewThreadHero } from "./chat/NewThreadHero";
 import { NewThreadWorkLocation } from "./chat/NewThreadWorkLocation";
 import { ThreadMessageSearchBar } from "./chat/ThreadMessageSearchBar";
@@ -224,6 +230,7 @@ import {
 } from "./chat/ThreadMessageSearch.logic";
 import type { ThreadMessageSearchOccurrence } from "./chat/ThreadMessageSearch.logic";
 import { ChatHeader } from "./chat/ChatHeader";
+import type { ChatProjectTarget } from "./chat/ChatProjectActions";
 import { PhoneThreadAppBar } from "./shell/phone/PhoneThreadAppBar";
 import type { PhoneThreadDockProps } from "./shell/phone/PhoneThreadDock";
 import { PhoneSurfaceScaffold, PhoneWorkSurfaceSheet } from "./shell/phone/PhoneWorkSurface";
@@ -254,13 +261,15 @@ import {
 } from "@ryco/client-runtime/state/threads";
 import {
   ChatOverviewPanel,
-  FloatingOverviewMotionFrame,
-  OverviewSidebarMotionFrame,
-  OVERVIEW_FLOATING_EXIT_DURATION_MS,
-  OVERVIEW_SIDEBAR_EXIT_DURATION_MS,
   usePostPushWorkflowWatch,
   useOverviewPanelControls,
 } from "./chat/ChatOverviewPanel";
+import {
+  CROWN_EASE_OUT,
+  CROWN_RAIL_EXIT_MS,
+  CROWN_RAIL_SLOT_WIDTH_PX,
+} from "./overview/crown/crownLayout";
+import type { WorktreeNotesTarget } from "./overview/notes/useWorktreeNotes";
 import { useChatGlobalShortcuts } from "./chat/useChatGlobalShortcuts";
 import { useChatPendingUserInput } from "./chat/useChatPendingUserInput";
 import { useChatWorkspacePanels } from "./chat/useChatWorkspacePanels";
@@ -315,6 +324,7 @@ import { useLocalStorage } from "~/hooks/useLocalStorage";
 import { useComposerHandleContext } from "../composerHandleContext";
 import { useServerAvailableEditors, useServerConfig } from "~/rpc/serverState";
 import { isTerminalFocused } from "../lib/terminalFocus";
+import { createTurnCompletionTracker } from "../lib/turnCompletion.logic";
 import { sanitizeThreadErrorMessage } from "@ryco/client-runtime/errors";
 import { useHostedDeliveryNotice, useHostedRpcCapability } from "../hostedHub/capabilities";
 import {
@@ -644,10 +654,13 @@ export default function ChatView(props: ChatViewProps) {
   // Set once the user opens the overview from the new-thread surface, so the
   // empty-thread suppression below yields to an explicit request.
   const [overviewOpenedOnEmptyThread, setOverviewOpenedOnEmptyThread] = useState(false);
-  const [overviewFloatingOpen, setOverviewFloatingOpen] = useState(false);
-  const viewportNeedsPlanSidebarSheet = useMediaQuery(RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY);
-  const shouldUsePlanSidebarSheet = viewportNeedsPlanSidebarSheet || paneThreadRef !== null;
-  const prefersReducedMotion = useMediaQuery(PREFERS_REDUCED_MOTION_QUERY);
+  // Narrow viewports and split panes present right-hand panels (the context
+  // handoff inspector) as a sheet rather than an inline aside, and start every
+  // thread with the overview rail closed.
+  const viewportNeedsRightPanelSheet = useMediaQuery(RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY);
+  const shouldUseRightPanelSheet = viewportNeedsRightPanelSheet || paneThreadRef !== null;
+  // Covers both the OS setting and the in-app Motion preference.
+  const reducedMotion = useReducedMotionEffective();
   const presentationTier = usePresentationTier();
   // With the thread sidebar collapsed this header owns the workspace's
   // top-left corner, so it reserves the room the shell's floating
@@ -657,12 +670,12 @@ export default function ChatView(props: ChatViewProps) {
   // tier flips (rotation preserves route, draft, and panel state).
   const presentationTierRef = useRef(presentationTier);
   presentationTierRef.current = presentationTier;
-  // Entering a split must not open one full-window overview for every chat.
+  // Entering a split must not dock one overview rail in every chat pane.
   useEffect(() => {
     if (paneThreadRef) setPlanSidebarOpen(false);
   }, [paneThreadRef]);
-  const shouldUsePlanSidebarSheetRef = useRef(shouldUsePlanSidebarSheet);
-  shouldUsePlanSidebarSheetRef.current = shouldUsePlanSidebarSheet;
+  const shouldUseRightPanelSheetRef = useRef(shouldUseRightPanelSheet);
+  shouldUseRightPanelSheetRef.current = shouldUseRightPanelSheet;
   const [inspectedContextHandoff, setInspectedContextHandoff] = useState<{
     readonly marker: ContextHandoffTimelineEntry;
     readonly trigger: HTMLButtonElement;
@@ -983,6 +996,30 @@ export default function ChatView(props: ChatViewProps) {
     : null;
   const activeProject = useStore(
     useMemo(() => createProjectSelectorByRef(activeProjectRef), [activeProjectRef]),
+  );
+  // "No project" chat context: an unsent chat draft (its project does not exist
+  // until the first send creates it) or a thread inside a chat project. A chat
+  // runs locally in a plain folder, so branch/worktree/env-mode controls and
+  // Git status queries stay off.
+  const isPendingChat = !isServerThread && isPendingChatDraft(draftThread);
+  const isChatContext = isPendingChat || isChatProject(activeProject);
+  const chatsAvailability = useChatsAvailability(activeThread?.environmentId ?? environmentId);
+  // A sent chat (its project exists) offers "Turn into project…" in the header.
+  const chatThreadId = isServerThread ? (activeThread?.id ?? null) : null;
+  const chatThreadTitle = activeThread?.title ?? null;
+  const chatProjectHeaderTarget = useMemo<ChatProjectTarget | null>(
+    () =>
+      activeProject && isChatProject(activeProject)
+        ? {
+            projectRef: scopeProjectRef(activeProject.environmentId, activeProject.id),
+            threadRef: chatThreadId
+              ? scopeThreadRef(activeProject.environmentId, chatThreadId)
+              : null,
+            title: chatThreadTitle ?? activeProject.name,
+            folderPath: activeProject.cwd,
+          }
+        : null,
+    [activeProject, chatThreadId, chatThreadTitle],
   );
   const activeWorktreeSummary = useStore(
     useMemo(
@@ -1367,6 +1404,39 @@ export default function ChatView(props: ChatViewProps) {
       ? primaryServerConfig
       : (activeEnvRuntimeState?.serverConfig ?? primaryServerConfig);
   const versionMismatch = resolveServerConfigVersionMismatch(serverConfig);
+  const worktreeNotesAvailable = serverConfig?.environment.capabilities.worktreeNotes === true;
+  // Notes key on the checkout: a server thread without a worktree runs in the
+  // main checkout; a draft without one has no checkout yet. A chat folder is no
+  // checkout (no Git, no worktree record), so a chat has no Notes until it is
+  // turned into a project, which keeps its id.
+  const notesEnvironmentId = activeThread?.environmentId ?? null;
+  const notesProjectId = isChatContext ? null : (activeThread?.projectId ?? null);
+  const notesWorktreeId = activeThread?.worktreeId ?? null;
+  const notesWorktreeOrigin = activeWorktreeSummary?.origin ?? null;
+  const worktreeNotesTarget = useMemo<WorktreeNotesTarget | null>(
+    () =>
+      notesEnvironmentId && notesProjectId
+        ? {
+            environmentId: notesEnvironmentId,
+            projectId: notesProjectId,
+            checkout:
+              notesWorktreeId !== null
+                ? { worktreeId: notesWorktreeId, origin: notesWorktreeOrigin }
+                : isServerThread
+                  ? { worktreeId: null, origin: "main" }
+                  : null,
+            available: worktreeNotesAvailable,
+          }
+        : null,
+    [
+      notesEnvironmentId,
+      notesProjectId,
+      notesWorktreeId,
+      notesWorktreeOrigin,
+      isServerThread,
+      worktreeNotesAvailable,
+    ],
+  );
   const versionMismatchDismissKey =
     versionMismatch && activeThread
       ? buildVersionMismatchDismissalKey(activeThread.environmentId, versionMismatch)
@@ -1531,21 +1601,25 @@ export default function ChatView(props: ChatViewProps) {
   // main process authoritatively re-checks focus; the `document.hasFocus()`
   // pre-check just avoids a wasted IPC round-trip when we're clearly focused.
   const notifyOnTurnComplete = settings.notifyOnTurnCompleteWhenUnfocused;
-  const seenRunningTurnIdsRef = useRef<Set<string>>(new Set());
-  const notifiedTurnIdsRef = useRef<Set<string>>(new Set());
+  const turnCompletionTrackerRef = useRef(createTurnCompletionTracker());
   useEffect(() => {
-    const turnId = activeLatestTurn?.turnId;
-    if (!turnId) return;
-    if (phase === "running") {
-      seenRunningTurnIdsRef.current.add(turnId);
+    const tracker = turnCompletionTrackerRef.current;
+    const observation = {
+      turnId: activeLatestTurn?.turnId ?? null,
+      running: phase === "running",
+      settled: latestTurnSettled,
+      completedAt: activeLatestTurn?.completedAt ?? null,
+      state: activeLatestTurn?.state ?? null,
+    };
+    // A running turn is recorded whatever the pane's focus; only its
+    // completion waits for the focused pane of a server thread.
+    if (observation.running) {
+      tracker.observe(observation);
       return;
     }
     if (!paneFocused || !serverThread?.id) return;
-    if (!latestTurnSettled) return;
-    if (!activeLatestTurn?.completedAt) return;
-    if (!seenRunningTurnIdsRef.current.has(turnId)) return;
-    if (notifiedTurnIdsRef.current.has(turnId)) return;
-    notifiedTurnIdsRef.current.add(turnId);
+    // Every ending notifies, however the turn ended.
+    if (tracker.observe(observation) === null) return;
 
     if (!notifyOnTurnComplete) return;
     if (typeof document !== "undefined" && document.hasFocus()) return;
@@ -1565,6 +1639,7 @@ export default function ChatView(props: ChatViewProps) {
     latestTurnSettled,
     activeLatestTurn?.turnId,
     activeLatestTurn?.completedAt,
+    activeLatestTurn?.state,
     notifyOnTurnComplete,
     serverThread?.id,
     serverThread?.environmentId,
@@ -2072,7 +2147,11 @@ export default function ChatView(props: ChatViewProps) {
         worktreePath: activeThread?.worktreePath ?? null,
       })
     : null;
-  const gitStatusQuery = useGitStatus({ environmentId, cwd: gitCwd });
+  // A chat folder is never treated as a repository: no Git status, pull request
+  // or CI queries run against it (the overview's Changes would only ever say
+  // "No changes" there, since a chat records no checkpoints).
+  const sourceControlCwd = isChatContext ? null : gitCwd;
+  const gitStatusQuery = useGitStatus({ environmentId, cwd: sourceControlCwd });
   const queryClient = useQueryClient();
   const {
     postPushWorkflowWatch,
@@ -2161,14 +2240,14 @@ export default function ChatView(props: ChatViewProps) {
   }, [composerBannerItems, usageLimitBannerItem, visibleProviderStatusNotice]);
 
   useEffect(() => {
-    if (routeKind !== "server" || !gitCwd) return;
-    const releaseDesktop = retainDesktopWorkspaceVcsScope(environmentId, gitCwd);
-    const releaseHosted = retainHostedWorkspaceVcsScope(environmentId, gitCwd);
+    if (routeKind !== "server" || !sourceControlCwd) return;
+    const releaseDesktop = retainDesktopWorkspaceVcsScope(environmentId, sourceControlCwd);
+    const releaseHosted = retainHostedWorkspaceVcsScope(environmentId, sourceControlCwd);
     return () => {
       releaseHosted();
       releaseDesktop();
     };
-  }, [environmentId, gitCwd, routeKind]);
+  }, [environmentId, routeKind, sourceControlCwd]);
 
   useEffect(() => {
     if (routeKind !== "server") return;
@@ -2192,8 +2271,9 @@ export default function ChatView(props: ChatViewProps) {
     terminalLaunchContext?.threadId === activeThreadId
       ? terminalLaunchContext
       : (storeServerTerminalLaunchContext ?? null);
-  // Default true while loading to avoid toolbar flicker.
-  const isGitRepo = gitStatusQuery.data?.isRepo ?? true;
+  // Default true while loading to avoid toolbar flicker. A chat folder is never
+  // a repository here (promotion with Git turns it into a project first).
+  const isGitRepo = isChatContext ? false : (gitStatusQuery.data?.isRepo ?? true);
   const terminalShortcutLabelOptions = useMemo(
     () => ({
       context: {
@@ -2231,7 +2311,10 @@ export default function ChatView(props: ChatViewProps) {
     onOpenTurnDiff,
     onCloseDiff,
     onOpenAgentsPanel,
+    onOpenRuntimeAgentPanel,
+    onOpenAgentsWorkflowPanel,
     onOpenSubagentPanel,
+    onOpenHtmlRender,
   } = useChatWorkspacePanels({
     navigate,
     environmentId,
@@ -2312,7 +2395,7 @@ export default function ChatView(props: ChatViewProps) {
         worktreeId={
           headerPullRequestsEditing.supported ? (activeWorktreeSummary?.id ?? null) : null
         }
-        cwd={gitCwd}
+        cwd={sourceControlCwd}
         workspaceTitle={
           activeWorktreeSummary?.title ?? activeWorktreeSummary?.branch ?? activeThread?.title ?? ""
         }
@@ -2408,6 +2491,13 @@ export default function ChatView(props: ChatViewProps) {
     hostedWorkspace.status === "signed-out"
       ? onEnvironmentChange
       : hostedDraftTarget.selectEnvironment;
+  const executionTargetLocked =
+    envLocked || routeKind === "server" || isSendBusy || hostedDraftTarget.pending !== null;
+  // An empty thread shows its context as pills above the composer: the
+  // new-worktree switch (git projects only) and the device, which then leaves
+  // the composer footer so it is offered once.
+  const showNewThreadContextBar = showNewThreadComposerSpacer && showNewThreadSurface;
+  const executionTargetHoisted = showNewThreadContextBar && executionTargets.length > 0;
   const executionTargetMachine =
     hostedWorkspace.status === "signed-out"
       ? desktopExecutionMachines.find((machine) => machine.environmentId === environmentId)
@@ -2445,6 +2535,24 @@ export default function ChatView(props: ChatViewProps) {
       focusComposer();
     });
   }, [focusComposer]);
+  const moveDraftThreadToProject = useComposerDraftStore((store) => store.moveDraftThreadToProject);
+  // Points a draft at a new "No project" chat in place, keeping its prompt,
+  // attachments and model; returns the chat's (not yet created) project id.
+  const moveDraftToNewChat = useCallback(
+    (targetDraftId: DraftId, targetEnvironmentId: EnvironmentId): ProjectId => {
+      const projectId = newProjectId();
+      moveDraftThreadToProject(targetDraftId, buildChatDraftTarget(targetEnvironmentId, projectId));
+      return projectId;
+    },
+    [moveDraftThreadToProject],
+  );
+  // "or start without a project": the composed draft becomes a chat.
+  const draftEnvironmentId = activeThread?.environmentId ?? null;
+  const startDraftWithoutProject = useCallback(() => {
+    if (!draftId || !draftEnvironmentId) return;
+    moveDraftToNewChat(draftId, draftEnvironmentId);
+    scheduleComposerFocus();
+  }, [draftEnvironmentId, draftId, moveDraftToNewChat, scheduleComposerFocus]);
   const openThreadMessageSearch = useCallback(() => {
     if (!activeThreadId) return;
     setThreadMessageSearchOpen(true);
@@ -2621,6 +2729,12 @@ export default function ChatView(props: ChatViewProps) {
     providerStatuses,
     selectedProvider,
   ]);
+  // The new-thread surface reads as its own page. The overview describes a
+  // thread's history — checks, changes, plan — and an empty thread has none,
+  // so suppress it until the user asks for it. This is a display-time override
+  // rather than a `planSidebarOpen` reset so the rail reappears on its own the
+  // moment the first turn lands, with no second state machine to keep in sync.
+  const overviewSuppressedForEmptyThread = showNewThreadSurface && !overviewOpenedOnEmptyThread;
   const setOverviewSidebarOpen = useCallback(
     (open: boolean) => {
       setPlanSidebarOpen(open);
@@ -2631,40 +2745,23 @@ export default function ChatView(props: ChatViewProps) {
     [activePlan?.turnId, sidebarProposedPlan?.turnId],
   );
   const closePlanSidebar = useCallback(() => {
-    setOverviewFloatingOpen(false);
     setOverviewSidebarOpen(false);
   }, [setOverviewSidebarOpen]);
   const toggleOverviewSidebar = useCallback(
     (nextOpen?: boolean) => {
-      if (workspacePanelOpen) {
-        const wantsOpen = typeof nextOpen === "boolean" ? nextOpen : !overviewFloatingOpen;
-        setOverviewFloatingOpen(wantsOpen);
-        setOverviewSidebarOpen(wantsOpen);
-        if (wantsOpen) setOverviewOpenedOnEmptyThread(true);
-        return;
-      }
-
-      // While the thread is empty the panel reads as closed regardless of
+      // While the thread is empty the overview reads as closed regardless of
       // `planSidebarOpen`, so the toggle has to invert the *visible* state or
       // the first click would be a no-op.
       const wantsOpen =
         typeof nextOpen === "boolean"
           ? nextOpen
-          : showNewThreadSurface && !overviewOpenedOnEmptyThread
+          : overviewSuppressedForEmptyThread
             ? true
             : !planSidebarOpen;
-      setOverviewFloatingOpen(false);
       setOverviewSidebarOpen(wantsOpen);
       setOverviewOpenedOnEmptyThread(wantsOpen);
     },
-    [
-      showNewThreadSurface,
-      overviewFloatingOpen,
-      overviewOpenedOnEmptyThread,
-      planSidebarOpen,
-      setOverviewSidebarOpen,
-      workspacePanelOpen,
-    ],
+    [overviewSuppressedForEmptyThread, planSidebarOpen, setOverviewSidebarOpen],
   );
 
   const persistThreadSettingsForNextTurn = useCallback(
@@ -2820,8 +2917,8 @@ export default function ChatView(props: ChatViewProps) {
     setShowScrollToBottom(false);
     // Honor an explicit "open the overview on the next thread" signal, set when
     // implementing a plan in a freshly created thread (`onImplementPlanInNewThread`).
-    // In wide layouts the overview opens by default anyway, but in sheet/narrow
-    // layouts it starts closed on every thread switch — without consuming this
+    // In wide layouts the overview opens by default anyway, but in narrow and
+    // split layouts it starts closed on every thread switch — without consuming this
     // signal the request to surface the new thread's plan would be silently lost.
     const openOverviewForNextThread = planSidebarOpenOnNextThreadRef.current;
     planSidebarOpenOnNextThreadRef.current = false;
@@ -2831,7 +2928,7 @@ export default function ChatView(props: ChatViewProps) {
     // would drop preserved panel state on rotation).
     setPlanSidebarOpen(
       openOverviewForNextThread ||
-        (!shouldUsePlanSidebarSheetRef.current && presentationTierRef.current !== "phone"),
+        (!shouldUseRightPanelSheetRef.current && presentationTierRef.current !== "phone"),
     );
     planSidebarDismissedForTurnRef.current = null;
   }, [activeThread?.id]);
@@ -2952,9 +3049,12 @@ export default function ChatView(props: ChatViewProps) {
       : (activeThread?.branch ?? null);
   const {
     sourceControlActions: overviewSourceControlActions,
+    sourceControlQuickActions: overviewSourceControlQuickActions,
     branchControl: overviewBranchControl,
+    sourceControlSync: overviewSourceControlSync,
   } = useOverviewPanelControls({
-    gitCwd,
+    // No Git controls, and so no Git status polling, for a chat folder.
+    gitCwd: sourceControlCwd,
     activeThreadRef,
     routeKind,
     draftId,
@@ -3277,7 +3377,17 @@ export default function ChatView(props: ChatViewProps) {
     };
   }, [activeThread?.id, dispatchCapability.allowed, environmentId, gitCwd]);
   const drainEditorsBeforeSend = useCallback(async () => {
-    if (!activeProject || !activeThread) return false;
+    if (!activeThread) return false;
+    if (!activeProject) {
+      // An unsent chat has no folder yet, so no editor can hold unsaved files for it.
+      if (!isPendingChat) return false;
+      const current = editorSendTargetRef.current;
+      return (
+        current.allowed &&
+        current.environmentId === environmentId &&
+        current.threadId === activeThread.id
+      );
+    }
     const scope = { environmentId, cwd: activeThread.worktreePath ?? activeProject.cwd };
     if (hasUnsavedPreviewFiles(scope) && !(await flushPreviewFiles(scope))) {
       toastManager.add({
@@ -3295,7 +3405,7 @@ export default function ChatView(props: ChatViewProps) {
       current.threadId === activeThread.id &&
       current.cwd === scope.cwd
     );
-  }, [activeProject, activeThread, environmentId]);
+  }, [activeProject, activeThread, environmentId, isPendingChat]);
 
   const prepareEditorSend = useCallback(async () => {
     if (editorSendPreparationRef.current) return false;
@@ -3490,7 +3600,14 @@ export default function ChatView(props: ChatViewProps) {
   ): Promise<boolean> => {
     if (!dispatchCapability.allowed || hostedDraftTarget.pending !== null) return false;
     const api = readEnvironmentApi(environmentId);
-    if (!api || !activeThread || !activeProject || editorSendPreparationRef.current) return false;
+    // A pending chat's project is created by this send, so it is not in the store yet.
+    if (
+      !api ||
+      !activeThread ||
+      (!activeProject && !isPendingChat) ||
+      editorSendPreparationRef.current
+    )
+      return false;
     editorSendPreparationRef.current = true;
     const composerChangedDuringPreparation = captureComposerContentGuard();
     try {
@@ -3594,7 +3711,25 @@ export default function ChatView(props: ChatViewProps) {
           activeThreadBranch,
           worktreePath: activeThread.worktreePath,
           createdAt: activeThread.createdAt,
-          projectId: activeProject.id,
+          projectId: activeThread.projectId,
+          // Every send of an unsent chat draft: the server allocates its folder
+          // and creates the chat project with this id. The project can already
+          // be here when an earlier first send failed after creating it; only
+          // this bootstrap makes the server reuse it and recreate its (removed)
+          // folder. Once the node has retired that id (an unused chat cleaned up
+          // meanwhile), the draft moves to a fresh one and the message goes out
+          // again.
+          ...(isPendingChat && isLocalDraftThread
+            ? {
+                createChatProjectId: activeThread.projectId,
+                ...(draftId
+                  ? {
+                      renewChatProjectId: () =>
+                        moveDraftToNewChat(draftId, activeThread.environmentId),
+                    }
+                  : {}),
+              }
+            : {}),
         },
         worktree: pendingWorktreeSource
           ? {
@@ -3620,8 +3755,9 @@ export default function ChatView(props: ChatViewProps) {
             },
         settings: effectiveSettingsSnapshot,
         project: {
-          projectId: activeProject.id,
-          projectCwd: activeProject.cwd,
+          projectId: activeThread.projectId,
+          // Only worktree preparation reads it, and a chat never prepares one.
+          projectCwd: activeProject?.cwd ?? "",
         },
         ...(pendingWorktreeSource ? { prepareForDispatch: prepareWorktreeSourceForDispatch } : {}),
         scroll: {
@@ -4575,43 +4711,21 @@ export default function ChatView(props: ChatViewProps) {
   }, []);
 
   useEffect(() => {
-    if (!workspacePanelOpen) {
-      setOverviewFloatingOpen(false);
-    }
-  }, [workspacePanelOpen]);
-
-  useEffect(() => {
-    setOverviewFloatingOpen(false);
     setOverviewOpenedOnEmptyThread(false);
   }, [activeThread?.id]);
 
-  // The new-thread surface reads as its own page. The overview panel describes
-  // a thread's history — checks, changes, plan — and an empty thread has none,
-  // so suppress it until the user asks for it. This is a display-time override
-  // rather than a `planSidebarOpen` reset so the panel reappears on its own the
-  // moment the first turn lands, with no second state machine to keep in sync.
-  const overviewSuppressedForEmptyThread = showNewThreadSurface && !overviewOpenedOnEmptyThread;
-  const overviewSidebarVisible =
-    planSidebarOpen && !workspacePanelOpen && !overviewSuppressedForEmptyThread;
-  const showFloatingOverviewSidebar = overviewFloatingOpen && workspacePanelOpen;
-  const overviewControlOpen = overviewSidebarVisible || showFloatingOverviewSidebar;
-  // The phone tier always promotes the overview to a full-screen surface;
-  // the width-based inline/sheet fork only applies to the desktop tier.
+  // One open state for every presentation. Desktop docks the Crown rail beside
+  // the chat column, also while the workspace panel is open, at every width;
+  // the phone tier promotes the overview to a full-screen surface, which (as
+  // before the rail, the web phone tier is frozen) waits for the full-screen
+  // workspace sheet to close.
+  const overviewVisible = planSidebarOpen && !overviewSuppressedForEmptyThread;
   const isPhoneTier = presentationTier === "phone";
-  const showInlineOverviewSidebar =
-    overviewSidebarVisible && !shouldUsePlanSidebarSheet && !isPhoneTier;
-  const showOverviewSidebarSheet =
-    overviewSidebarVisible && (shouldUsePlanSidebarSheet || isPhoneTier);
-  const renderFloatingOverviewSidebar = useDelayedUnmount(
-    showFloatingOverviewSidebar,
-    prefersReducedMotion || !workspacePanelOpen ? 0 : OVERVIEW_FLOATING_EXIT_DURATION_MS,
-  );
-  const renderInlineOverviewSidebar = useDelayedUnmount(
-    showInlineOverviewSidebar,
-    prefersReducedMotion || shouldUsePlanSidebarSheet || workspacePanelOpen
-      ? 0
-      : OVERVIEW_SIDEBAR_EXIT_DURATION_MS,
-  );
+  const showCrownRail = overviewVisible && !isPhoneTier;
+  const showPhoneOverviewSheet = overviewVisible && !workspacePanelOpen && isPhoneTier;
+  const overviewControlOpen = isPhoneTier ? showPhoneOverviewSheet : overviewVisible;
+  // Keeps the rail mounted through its exit transition.
+  const renderCrownRail = useDelayedUnmount(showCrownRail, reducedMotion ? 0 : CROWN_RAIL_EXIT_MS);
 
   // The thread dock renders inside the composer, beneath the approval and
   // pending-input panels (see `ChatComposer`), so an open panel cannot carry it
@@ -4690,7 +4804,7 @@ export default function ChatView(props: ChatViewProps) {
   }, [composerOverlayActive, activeThreadId]);
   // Same mechanism for the top bar: the header overlays the transcript and
   // publishes its height so the timeline's list header, the search bar, the
-  // floating overview, and the (rare) banner stack clear it.
+  // Crown rail, and the (rare) banner stack clear it.
   useEffect(() => {
     const shell = chatShellRef.current;
     if (!shell) return;
@@ -4743,7 +4857,9 @@ export default function ChatView(props: ChatViewProps) {
             dispatchCapability.allowed &&
             !isConnecting &&
             !activeEnvironmentUnavailable &&
-            !!activeProject
+            !!activeProject &&
+            // A chat holds one thread: no second thread in the same chat folder.
+            !isChatContext
           }
           canUseWorktree={isGitRepo && !!activeThreadBranch}
           onCurrent={(quote) => {
@@ -4870,8 +4986,11 @@ export default function ChatView(props: ChatViewProps) {
           <ChatHeader
             activeThreadEnvironmentId={activeThread.environmentId}
             activeThreadTitle={activeThread.title}
-            activeProjectName={activeProject?.name}
-            isGitRepo={isGitRepo}
+            // An unsent chat draft has no project yet but is already a chat.
+            activeProjectName={isChatContext ? CHAT_PROJECT_LABEL : activeProject?.name}
+            // A chat has no Git to miss: no "No Git" badge (promotion offers Git instead).
+            isGitRepo={isGitRepo || isChatContext}
+            chatProject={chatProjectHeaderTarget}
             openInCwd={gitCwd}
             activeProjectScripts={activeProject?.scripts}
             preferredScriptId={
@@ -4935,8 +5054,8 @@ export default function ChatView(props: ChatViewProps) {
         {/* Chat column */}
         <div ref={chatColumnRef} className="relative flex min-h-0 min-w-0 flex-1 flex-col">
           {/* Messages Wrapper. Stays `flex-1` even while empty so the absolutely
-              positioned children below (search bar, floating overview, scroll
-              pill) keep a full-height containing block. */}
+              positioned children below (search bar, scroll pill) keep a
+              full-height containing block. */}
           <div className="relative flex min-h-0 flex-1 flex-col">
             {/* Messages — LegendList handles virtualization and scrolling internally.
                 Gated on useDeferredValue: the urgent render after a tab switch
@@ -4978,6 +5097,10 @@ export default function ChatView(props: ChatViewProps) {
                 onRevertUserMessage={onRevertUserMessage}
                 isRevertingCheckpoint={isRevertingCheckpoint}
                 onImageExpand={onExpandTimelineImage}
+                // The frozen phone tier has no page tab; its renders open in a dialog.
+                onOpenHtmlRender={
+                  presentationTier !== "phone" && isServerThread ? onOpenHtmlRender : undefined
+                }
                 markdownCwd={gitCwd ?? undefined}
                 resolvedTheme={resolvedTheme}
                 timestampFormat={timestampFormat}
@@ -5013,41 +5136,6 @@ export default function ChatView(props: ChatViewProps) {
               />
             ) : null}
 
-            {renderFloatingOverviewSidebar ? (
-              <FloatingOverviewMotionFrame
-                animate={!prefersReducedMotion}
-                open={showFloatingOverviewSidebar}
-              >
-                <ChatOverviewPanel
-                  environmentId={environmentId}
-                  gitCwd={gitCwd}
-                  activeWorktreeBranch={activeWorktreeSummary?.branch ?? null}
-                  activeThreadBranch={activeThread?.branch ?? null}
-                  activeWorktreePullRequests={activeWorktreePullRequests}
-                  activeWorktreeDiscoversPullRequests={activeWorktreeDiscoversPullRequests}
-                  activeWorktreeTitle={activeWorktreeSummary?.title}
-                  postPushWorkflowWatch={postPushWorkflowWatch}
-                  activeThreadKey={activeThreadKey}
-                  activePlan={activePlan}
-                  sidebarProposedPlan={sidebarProposedPlan}
-                  threadSubagents={threadSubagents}
-                  changedFileSummaries={activeThread?.turnDiffSummaries}
-                  sourceControlActions={overviewSourceControlActions}
-                  branchControl={overviewBranchControl}
-                  markdownCwd={gitCwd ?? undefined}
-                  workspaceRoot={activeWorkspaceRoot}
-                  mode="floating"
-                  preview={workspacePreview}
-                  onClose={closePlanSidebar}
-                  onOpenFiles={onOpenFilesPanel}
-                  onOpenReview={onOpenReviewPanel}
-                  onOpenSubagent={onOpenSubagentPanel}
-                  onOpenPullRequestInApp={openPullRequestInApp}
-                  onPostPushDiscoveryComplete={clearPostPushWatch}
-                />
-              </FloatingOverviewMotionFrame>
-            ) : null}
-
             {/* scroll to bottom pill — shown when user has scrolled away from the bottom */}
             {showScrollToBottom && (
               <div className="pointer-events-none absolute bottom-[calc(var(--chat-composer-clearance,0px)+0.25rem)] left-1/2 z-30 flex -translate-x-1/2 justify-center py-1.5">
@@ -5072,16 +5160,24 @@ export default function ChatView(props: ChatViewProps) {
             <div
               className={cn(
                 "shrink-0",
-                !prefersReducedMotion && "animate-in fade-in slide-in-from-bottom-1",
+                !reducedMotion && "animate-in fade-in slide-in-from-bottom-1",
               )}
             >
               <NewThreadHero
                 projectName={activeProject?.name ?? null}
-                activeProjectId={activeProject?.id ?? null}
-                activeProjectEnvironmentId={activeProject?.environmentId ?? null}
+                activeProjectId={
+                  activeProject?.id ?? (isPendingChat ? activeThread.projectId : null)
+                }
+                activeProjectEnvironmentId={
+                  activeProject?.environmentId ??
+                  (isPendingChat ? activeThread.environmentId : null)
+                }
                 routeKind={routeKind}
                 envLocked={envLocked}
                 draftId={draftId ?? undefined}
+                pendingChat={isPendingChat}
+                chatsAvailable={chatsAvailability.available}
+                onStartWithoutProject={startDraftWithoutProject}
                 workLocation={
                   isGitRepo ? (
                     <NewThreadWorkLocation
@@ -5092,12 +5188,6 @@ export default function ChatView(props: ChatViewProps) {
                       projectEnvironmentId={activeProject?.environmentId ?? null}
                       projectName={activeProject?.name ?? null}
                       envLocked={envLocked}
-                      availableEnvironments={logicalProjectEnvironments}
-                      onEnvironmentChange={
-                        hostedWorkspace.status === "signed-out" && hasMultipleEnvironments
-                          ? onEnvironmentChange
-                          : undefined
-                      }
                       onComposerFocusRequest={scheduleComposerFocus}
                       onCheckoutPullRequestRequest={
                         canCheckoutPullRequestIntoThread ? openPullRequestDialog : undefined
@@ -5211,7 +5301,22 @@ export default function ChatView(props: ChatViewProps) {
                   />
                 </>
               ) : null}
-              {showNewThreadComposerSpacer ? <div aria-hidden className="mb-2 h-5" /> : null}
+              {showNewThreadComposerSpacer ? (
+                showNewThreadContextBar ? (
+                  <NewThreadContextBar
+                    draftId={draftId ?? undefined}
+                    worktreeAvailable={isGitRepo && !isPendingChat}
+                    envLocked={envLocked}
+                    executionTargets={executionTargets}
+                    executionEnvironmentId={environmentId}
+                    executionTargetLocked={executionTargetLocked}
+                    onExecutionTargetChange={onExecutionTargetChange}
+                    onComposerFocusRequest={scheduleComposerFocus}
+                  />
+                ) : (
+                  <div aria-hidden className="mb-2 h-5" />
+                )
+              ) : null}
               <ComposerQueuedMessages
                 messages={queuedMessages}
                 hold={queueHold}
@@ -5286,12 +5391,8 @@ export default function ChatView(props: ChatViewProps) {
                   terminalOpen={Boolean(terminalState.terminalOpen)}
                   gitCwd={gitCwd}
                   executionTargets={executionTargets}
-                  executionTargetLocked={
-                    envLocked ||
-                    routeKind === "server" ||
-                    isSendBusy ||
-                    hostedDraftTarget.pending !== null
-                  }
+                  executionTargetLocked={executionTargetLocked}
+                  executionTargetHoisted={executionTargetHoisted}
                   onExecutionTargetChange={onExecutionTargetChange}
                   promptRef={promptRef}
                   composerImagesRef={composerImagesRef}
@@ -5415,7 +5516,7 @@ export default function ChatView(props: ChatViewProps) {
           ) : null}
         </div>
         {/* end chat column */}
-        {inspectedContextHandoff && !shouldUsePlanSidebarSheet && !isPhoneTier ? (
+        {isPhoneTier ? null : inspectedContextHandoff && !shouldUseRightPanelSheet ? (
           <aside className="flex min-h-0 w-[25rem] shrink-0 border-l border-border pt-[var(--chat-header-clearance,0px)]">
             <ContextHandoffInspectionPanel
               environmentId={activeThread.environmentId}
@@ -5424,39 +5525,68 @@ export default function ChatView(props: ChatViewProps) {
               onClose={closeContextHandoffInspection}
             />
           </aside>
-        ) : renderInlineOverviewSidebar ? (
-          <OverviewSidebarMotionFrame
-            animate={!prefersReducedMotion}
-            open={showInlineOverviewSidebar}
+        ) : (
+          // Reserves the docked rail's column; the Crown positions itself
+          // inside. No z-index and no overflow clip: the header controls stay
+          // clickable and the expanded card / flyouts extend over the transcript.
+          <div
+            data-slot="crown-rail-slot"
+            className={cn(
+              "pointer-events-none relative shrink-0 transition-[width] motion-reduce:transition-none",
+              reducedMotion && "transition-none",
+            )}
+            style={{
+              width: showCrownRail ? CROWN_RAIL_SLOT_WIDTH_PX : 0,
+              transitionDuration: `${CROWN_RAIL_EXIT_MS}ms`,
+              transitionTimingFunction: CROWN_EASE_OUT,
+            }}
           >
-            <ChatOverviewPanel
-              environmentId={environmentId}
-              gitCwd={gitCwd}
-              activeWorktreeBranch={activeWorktreeSummary?.branch ?? null}
-              activeThreadBranch={activeThread?.branch ?? null}
-              activeWorktreePullRequests={activeWorktreePullRequests}
-              activeWorktreeDiscoversPullRequests={activeWorktreeDiscoversPullRequests}
-              activeWorktreeTitle={activeWorktreeSummary?.title}
-              postPushWorkflowWatch={postPushWorkflowWatch}
-              activeThreadKey={activeThreadKey}
-              activePlan={activePlan}
-              sidebarProposedPlan={sidebarProposedPlan}
-              threadSubagents={threadSubagents}
-              changedFileSummaries={activeThread?.turnDiffSummaries}
-              sourceControlActions={overviewSourceControlActions}
-              branchControl={overviewBranchControl}
-              markdownCwd={gitCwd ?? undefined}
-              workspaceRoot={activeWorkspaceRoot}
-              mode="sidebar"
-              preview={workspacePreview}
-              onOpenFiles={onOpenFilesPanel}
-              onOpenReview={onOpenReviewPanel}
-              onOpenSubagent={onOpenSubagentPanel}
-              onOpenPullRequestInApp={openPullRequestInApp}
-              onPostPushDiscoveryComplete={clearPostPushWatch}
-            />
-          </OverviewSidebarMotionFrame>
-        ) : null}
+            {renderCrownRail ? (
+              <ChatOverviewPanel
+                environmentId={environmentId}
+                gitCwd={sourceControlCwd}
+                activeWorktreeBranch={activeWorktreeSummary?.branch ?? null}
+                activeThreadBranch={activeThread?.branch ?? null}
+                activeWorktreePullRequests={activeWorktreePullRequests}
+                activeWorktreeDiscoversPullRequests={activeWorktreeDiscoversPullRequests}
+                activeWorktreeTitle={activeWorktreeSummary?.title}
+                postPushWorkflowWatch={postPushWorkflowWatch}
+                activeThreadKey={activeThreadKey}
+                activePlan={activePlan}
+                sidebarProposedPlan={sidebarProposedPlan}
+                threadSubagents={threadSubagents}
+                changedFileSummaries={activeThread?.turnDiffSummaries}
+                sourceControlActions={overviewSourceControlActions}
+                sourceControlQuickActions={overviewSourceControlQuickActions}
+                branchControl={overviewBranchControl}
+                sourceControlSync={overviewSourceControlSync}
+                markdownCwd={gitCwd ?? undefined}
+                workspaceRoot={activeWorkspaceRoot}
+                presentation="crown"
+                open={showCrownRail}
+                notesTarget={worktreeNotesTarget}
+                chatProject={chatProjectHeaderTarget}
+                threadTitle={activeThread.title}
+                project={activeProject ?? null}
+                // A chat's face wears its "No project" glyph, also before its first send.
+                isChat={isChatContext}
+                isGitRepo={isGitRepo}
+                latestTurn={activeLatestTurn}
+                turnSettled={latestTurnSettled}
+                agentRunning={phase === "running"}
+                preview={workspacePreview}
+                onOpenFiles={onOpenFilesPanel}
+                onOpenReview={onOpenReviewPanel}
+                onOpenSubagent={onOpenSubagentPanel}
+                onOpenPullRequestInApp={openPullRequestInApp}
+                agentPanelModel={agentPanelModel}
+                onOpenAgent={onOpenRuntimeAgentPanel}
+                onOpenAgentsWorkflow={onOpenAgentsWorkflowPanel}
+                onPostPushDiscoveryComplete={clearPostPushWatch}
+              />
+            ) : null}
+          </div>
+        )}
       </div>
       {/* end horizontal flex container */}
 
@@ -5467,6 +5597,7 @@ export default function ChatView(props: ChatViewProps) {
           onCancel={hostedDraftTarget.cancel}
           onRetry={hostedDraftTarget.retry}
           onSelect={hostedDraftTarget.selectProject}
+          onSelectNoProject={hostedDraftTarget.selectNoProject}
         />
       ) : null}
 
@@ -5492,7 +5623,7 @@ export default function ChatView(props: ChatViewProps) {
           onAddTerminalContext={addTerminalContextToDraft}
         />
       ))}
-      {paneFocused && !isPhoneTier && shouldUsePlanSidebarSheet && inspectedContextHandoff ? (
+      {paneFocused && !isPhoneTier && shouldUseRightPanelSheet && inspectedContextHandoff ? (
         <RightPanelSheet open onClose={closeContextHandoffInspection}>
           <ContextHandoffInspectionPanel
             environmentId={activeThread.environmentId}
@@ -5508,7 +5639,7 @@ export default function ChatView(props: ChatViewProps) {
         // (the audited right overlay had no close affordance at all).
         <PhoneWorkSurfaceSheet
           label={planSidebarLabel}
-          open={paneFocused && showOverviewSidebarSheet}
+          open={paneFocused && showPhoneOverviewSheet}
           onClose={closePlanSidebar}
         >
           <PhoneSurfaceScaffold
@@ -5518,7 +5649,7 @@ export default function ChatView(props: ChatViewProps) {
           >
             <ChatOverviewPanel
               environmentId={environmentId}
-              gitCwd={gitCwd}
+              gitCwd={sourceControlCwd}
               activeWorktreeBranch={activeWorktreeSummary?.branch ?? null}
               activeThreadBranch={activeThread?.branch ?? null}
               activeWorktreePullRequests={activeWorktreePullRequests}
@@ -5532,9 +5663,10 @@ export default function ChatView(props: ChatViewProps) {
               changedFileSummaries={activeThread?.turnDiffSummaries}
               sourceControlActions={overviewSourceControlActions}
               branchControl={overviewBranchControl}
+              sourceControlSync={overviewSourceControlSync}
               markdownCwd={gitCwd ?? undefined}
               workspaceRoot={activeWorkspaceRoot}
-              mode="sheet"
+              presentation="sheet"
               onOpenFiles={onOpenFilesPanel}
               onOpenReview={onOpenReviewPanel}
               onOpenSubagent={onOpenSubagentPanel}
@@ -5543,35 +5675,6 @@ export default function ChatView(props: ChatViewProps) {
             />
           </PhoneSurfaceScaffold>
         </PhoneWorkSurfaceSheet>
-      ) : shouldUsePlanSidebarSheet ? (
-        <RightPanelSheet open={paneFocused && showOverviewSidebarSheet} onClose={closePlanSidebar}>
-          <ChatOverviewPanel
-            environmentId={environmentId}
-            gitCwd={gitCwd}
-            activeWorktreeBranch={activeWorktreeSummary?.branch ?? null}
-            activeThreadBranch={activeThread?.branch ?? null}
-            activeWorktreePullRequests={activeWorktreePullRequests}
-            activeWorktreeDiscoversPullRequests={activeWorktreeDiscoversPullRequests}
-            activeWorktreeTitle={activeWorktreeSummary?.title}
-            postPushWorkflowWatch={postPushWorkflowWatch}
-            activeThreadKey={activeThreadKey}
-            activePlan={activePlan}
-            sidebarProposedPlan={sidebarProposedPlan}
-            threadSubagents={threadSubagents}
-            changedFileSummaries={activeThread?.turnDiffSummaries}
-            sourceControlActions={overviewSourceControlActions}
-            branchControl={overviewBranchControl}
-            markdownCwd={gitCwd ?? undefined}
-            workspaceRoot={activeWorkspaceRoot}
-            mode="sheet"
-            preview={workspacePreview}
-            onOpenFiles={onOpenFilesPanel}
-            onOpenReview={onOpenReviewPanel}
-            onOpenSubagent={onOpenSubagentPanel}
-            onOpenPullRequestInApp={openPullRequestInApp}
-            onPostPushDiscoveryComplete={clearPostPushWatch}
-          />
-        </RightPanelSheet>
       ) : null}
 
       {isPhoneTier && expandedImage && (

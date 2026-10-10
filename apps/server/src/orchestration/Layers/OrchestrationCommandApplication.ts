@@ -242,6 +242,7 @@ const makeOrchestrationCommandApplication = Effect.gen(function* () {
       Effect.provideService(ServerConfig, serverConfig),
       Effect.provideService(WorkspaceAccessPolicy, workspaceAccessPolicy),
       Effect.provideService(WorkspacePaths, workspacePaths),
+      Effect.provideService(ProjectionSnapshotQuery, projections),
     );
 
   const applyWithDispatcher: OrchestrationCommandApplicationShape["applyWithDispatcher"] = (

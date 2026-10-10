@@ -25,7 +25,15 @@ import {
   MenuTrigger,
 } from "../ui/menu";
 import { getProviderModelCapabilities } from "../../providerModels";
-import { isTuningDescriptor, reasoningTone } from "./modelTuning.logic";
+import {
+  availableSpeedTiers,
+  currentSpeedTier,
+  isSpeedDescriptor,
+  isTuningDescriptor,
+  reasoningTone,
+  SPEED_TIER_LABELS,
+  withSpeedTier,
+} from "./modelTuning.logic";
 import { applyDescriptorSelection, replaceDescriptorCurrentValue } from "./traitsMenuLogic";
 import {
   useProviderOptionsUpdater,
@@ -250,6 +258,13 @@ export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
     omitTuning,
   });
   const boundedReason = disabled && disabledReason ? boundedDisabledReason(disabledReason) : null;
+  // Fast and Ultrafast are two options but one exclusive choice: offered
+  // together, they read as a single Speed group.
+  const speedTiers = availableSpeedTiers(booleanDescriptors);
+  const groupsSpeed = speedTiers.length > 2;
+  const plainBooleanDescriptors = groupsSpeed
+    ? booleanDescriptors.filter((descriptor) => !isSpeedDescriptor(descriptor))
+    : booleanDescriptors;
   const updateDescriptors = (nextDescriptors: ReadonlyArray<ProviderOptionDescriptor>) => {
     // Fail closed: the items are already disabled, so this only matters if a
     // change ever reaches here another way.
@@ -340,7 +355,7 @@ export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
           </MenuGroup>
         </div>
       ))}
-      {booleanDescriptors.map((descriptor, index) => (
+      {plainBooleanDescriptors.map((descriptor, index) => (
         <div key={descriptor.id}>
           {index > 0 || selectDescriptors.length > 0 ? <MenuDivider /> : null}
           <MenuGroup>
@@ -365,6 +380,29 @@ export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
           </MenuGroup>
         </div>
       ))}
+      {groupsSpeed ? (
+        <div>
+          {selectDescriptors.length > 0 || plainBooleanDescriptors.length > 0 ? (
+            <MenuDivider />
+          ) : null}
+          <MenuGroup>
+            <div className="px-2 py-1.5 font-medium text-muted-foreground text-xs">Speed</div>
+            <MenuRadioGroup
+              value={currentSpeedTier(descriptors)}
+              onValueChange={(value) => {
+                const tier = speedTiers.find((candidate) => candidate === value);
+                if (tier) updateDescriptors(withSpeedTier(descriptors, tier));
+              }}
+            >
+              {speedTiers.map((tier) => (
+                <MenuRadioItem key={tier} value={tier} disabled={disabled}>
+                  {SPEED_TIER_LABELS[tier]}
+                </MenuRadioItem>
+              ))}
+            </MenuRadioGroup>
+          </MenuGroup>
+        </div>
+      ) : null}
     </>
   );
 });
@@ -411,6 +449,11 @@ export const TraitsPicker = memo(function TraitsPicker({
     return null;
   }
 
+  const speedLabel = (() => {
+    const tier = currentSpeedTier(descriptors);
+    return tier === "standard" ? "Normal" : SPEED_TIER_LABELS[tier];
+  })();
+  const firstSpeedDescriptor = descriptors.find(isSpeedDescriptor);
   const triggerLabel =
     descriptors
       .map((descriptor) => {
@@ -418,8 +461,8 @@ export const TraitsPicker = memo(function TraitsPicker({
           return "Ultrathink";
         }
         if (descriptor.type === "boolean") {
-          if (descriptor.id === "fastMode") {
-            return descriptor.currentValue === true ? "Fast" : "Normal";
+          if (isSpeedDescriptor(descriptor)) {
+            return descriptor === firstSpeedDescriptor ? speedLabel : null;
           }
           return `${descriptor.label} ${descriptor.currentValue === true ? "On" : "Off"}`;
         }

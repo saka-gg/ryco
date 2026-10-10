@@ -6,7 +6,7 @@ import type {
 import type { ReactNode } from "react";
 
 import type { ActivePlanState, LatestProposedPlanState } from "../../session-logic";
-import type { ThreadSubagentView } from "../../threadWorkspaceViewModel";
+import type { AgentPanelModel, ThreadSubagentView } from "../../threadWorkspaceViewModel";
 import type { OverviewWorkflowCheckRow } from "../overviewPullRequestChecks.logic";
 import type { OverviewErrorInfo } from "./overviewErrors.logic";
 import type { PrCheckStatusView } from "../projectExplorer/prCheckStatus";
@@ -83,7 +83,7 @@ export interface OverviewChangedFile {
   /**
    * Single-letter change type shown as the colored M/A/D tag. Optional because
    * the current `VcsStatusResult.workingTree.files` contract does not yet carry
-   * it (see TODO in ChatOverviewPanel).
+   * it (see the note in chat/useChatOverviewModel).
    */
   status?: OverviewFileStatus | undefined;
   /** Whether the file is staged for commit. Undefined when unknown. */
@@ -99,6 +99,22 @@ export interface OverviewChanges {
   refName: string | null;
   aheadCount: number;
   behindCount: number;
+  /** Whether the branch tracks an upstream; false for a never-pushed branch. */
+  hasUpstream?: boolean | undefined;
+  /** Commits ahead of the default branch — what a first push would publish. */
+  aheadOfDefaultCount?: number | undefined;
+}
+
+/**
+ * Which parts of the overview's live data have answered for this checkout.
+ * Until they have, their fields hold placeholders (no upstream, 0 ahead, no
+ * pull request) that must not be read as real values.
+ */
+export interface OverviewDataReadiness {
+  /** Git status carries its remote half: upstream, ahead / behind and the change request. */
+  readonly remoteStatus: boolean;
+  /** The change-request lookup has answered, so a missing pull request means "none". */
+  readonly pullRequestLookup: boolean;
 }
 
 export type OverviewPanelMode = "floating" | "sheet" | "sidebar";
@@ -118,9 +134,28 @@ export interface OverviewLayoutProps {
    * number, another one pinned. ⌘/Ctrl-click keeps the host link.
    */
   onOpenPullRequestInApp?: ((number?: number) => void) | undefined;
+  /**
+   * Opens one check run in the workspace panel's pull request reader, landing
+   * on its job (or the Checks tab); ⌘/Ctrl-click keeps the host link.
+   */
+  onOpenPullRequestCheck?: ((check: OverviewPullRequestCheckRun) => void) | undefined;
   isRefreshingPullRequest?: boolean | undefined;
   subagents?: ReadonlyArray<ThreadSubagentView> | undefined;
+  /**
+   * The thread's runtime agents grouped into workflows and direct agents. When
+   * set, the crown's agents section renders it instead of {@link subagents}.
+   */
+  agentPanelModel?: AgentPanelModel | undefined;
+  /** Opens one runtime agent's transcript in the workspace panel's Agents tab. */
+  onOpenAgent?: ((agentId: string) => void) | undefined;
+  /** Opens the Agents tab focused on one workflow. */
+  onOpenAgentsWorkflow?: ((workflowId: string) => void) | undefined;
   sourceControlActions?: ReactNode | undefined;
+  /**
+   * The same git controls as explicit Commit / Push / PR / Pull buttons, for
+   * the crown's branch preview. The phone sheet ignores it.
+   */
+  sourceControlQuickActions?: ReactNode | undefined;
   branchControl?: ReactNode | undefined;
   environmentId: EnvironmentId;
   markdownCwd: string | undefined;

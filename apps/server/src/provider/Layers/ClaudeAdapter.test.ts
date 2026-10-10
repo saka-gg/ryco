@@ -1769,6 +1769,200 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("shows Ryco HTML tool calls as short labels without the page markup", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const runtimeEventsFiber = yield* Stream.take(adapter.streamEvents, 10).pipe(
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      const session = yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("test-claudeadapter-html-render"),
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId: session.threadId, input: "chart it", attachments: [] });
+
+      const input = JSON.stringify({
+        html: "<!doctype html><script>drawSecretChart()</script>",
+        title: "Quarterly revenue",
+        height: 420,
+      });
+      const stream = (uuid: string, event: unknown) =>
+        harness.query.emit({
+          type: "stream_event",
+          session_id: "sdk-session-html",
+          uuid,
+          parent_tool_use_id: null,
+          event,
+        } as unknown as SDKMessage);
+      stream("html-start", {
+        type: "content_block_start",
+        index: 0,
+        content_block: {
+          type: "tool_use",
+          id: "tool-html-1",
+          name: "mcp__ryco__ryco_html_render",
+          input: {},
+        },
+      });
+      stream("html-input-1", {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "input_json_delta", partial_json: input.slice(0, 30) },
+      });
+      stream("html-input-2", {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "input_json_delta", partial_json: input.slice(30) },
+      });
+      stream("html-stop", { type: "content_block_stop", index: 0 });
+      harness.query.emit({
+        type: "user",
+        session_id: "sdk-session-html",
+        uuid: "html-result",
+        parent_tool_use_id: null,
+        message: {
+          role: "user",
+          content: [
+            { type: "tool_result", tool_use_id: "tool-html-1", content: "Shown to the reader." },
+          ],
+        },
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        errors: [],
+        session_id: "sdk-session-html",
+        uuid: "html-turn-result",
+      } as unknown as SDKMessage);
+
+      const toolEvents = Array.from(yield* Fiber.join(runtimeEventsFiber)).filter(
+        (event) =>
+          event.type === "item.started" ||
+          event.type === "item.updated" ||
+          event.type === "item.completed",
+      );
+      assert.deepEqual(
+        toolEvents.map((event) => [event.type, event.payload.title, event.payload.detail]),
+        [
+          ["item.started", "Rendered HTML", undefined],
+          ["item.updated", "Rendered HTML", "Quarterly revenue"],
+          ["item.updated", "Rendered HTML", "Quarterly revenue"],
+          ["item.completed", "Rendered HTML", "Quarterly revenue"],
+        ],
+      );
+      for (const event of toolEvents) {
+        assert.equal(event.payload.itemType, "mcp_tool_call");
+        assert.notInclude(JSON.stringify(event.payload), "drawSecretChart");
+      }
+      assert.deepEqual((toolEvents[1]!.payload.data as { input?: unknown }).input, {
+        title: "Quarterly revenue",
+        height: 420,
+        htmlChars: 49,
+      });
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("parses a streamed tool input once, when its object closes", () => {
+    const harness = makeHarness();
+    // Braces and escaped quotes inside the page must not look like the input closing.
+    const html = `<!doctype html><style>${'.bar{fill:"red"} .x\\{}\n'.repeat(400)}</style>`;
+    const input = JSON.stringify({ html, title: "Braces", height: 300 });
+    const parseSpy = vi.spyOn(JSON, "parse");
+    const inputParses = () =>
+      parseSpy.mock.calls.filter(([text]) => typeof text === "string" && text.startsWith('{"html"'))
+        .length;
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const runtimeEventsFiber = yield* Stream.take(adapter.streamEvents, 10).pipe(
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      const session = yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("test-claudeadapter-streamed-input"),
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId: session.threadId, input: "chart it", attachments: [] });
+
+      const stream = (uuid: string, event: unknown) =>
+        harness.query.emit({
+          type: "stream_event",
+          session_id: "sdk-session-streamed-input",
+          uuid,
+          parent_tool_use_id: null,
+          event,
+        } as unknown as SDKMessage);
+      stream("input-start", {
+        type: "content_block_start",
+        index: 0,
+        content_block: {
+          type: "tool_use",
+          id: "tool-streamed-1",
+          name: "mcp__ryco__ryco_html_render",
+          input: {},
+        },
+      });
+      const deltaCount = Math.ceil(input.length / 7);
+      for (let index = 0; index < deltaCount; index += 1) {
+        stream(`input-delta-${index}`, {
+          type: "content_block_delta",
+          index: 0,
+          delta: { type: "input_json_delta", partial_json: input.slice(index * 7, index * 7 + 7) },
+        });
+      }
+      stream("input-stop", { type: "content_block_stop", index: 0 });
+      harness.query.emit({
+        type: "user",
+        session_id: "sdk-session-streamed-input",
+        uuid: "streamed-result",
+        parent_tool_use_id: null,
+        message: {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "tool-streamed-1",
+              content: "Shown to the reader.",
+            },
+          ],
+        },
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        errors: [],
+        session_id: "sdk-session-streamed-input",
+        uuid: "streamed-turn-result",
+      } as unknown as SDKMessage);
+
+      const updated = Array.from(yield* Fiber.join(runtimeEventsFiber)).find(
+        (event) => event.type === "item.updated",
+      );
+      assert.isAbove(deltaCount, 1_000);
+      assert.equal(inputParses(), 1);
+      assert.deepEqual((updated?.payload.data as { input?: unknown } | undefined)?.input, {
+        title: "Braces",
+        height: 300,
+        htmlChars: html.length,
+      });
+      assert.equal(updated?.type === "item.updated" ? updated.payload.detail : undefined, "Braces");
+    }).pipe(
+      Effect.ensuring(Effect.sync(() => parseSpy.mockRestore())),
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("falls back to a default plan step label for blank TodoWrite content", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
@@ -4668,7 +4862,7 @@ describe("ClaudeAdapterLive", () => {
         attachments: [],
       });
 
-      assert.deepEqual(harness.query.setModelCalls, ["claude-opus-4-6"]);
+      assert.deepEqual(harness.query.setModelCalls, ["claude-opus-4-6[1m]"]);
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
@@ -4769,10 +4963,11 @@ describe("ClaudeAdapterLive", () => {
       yield* adapter.sendTurn({
         threadId: session.threadId,
         input: "hello again",
-        modelSelection: {
-          instanceId: ProviderInstanceId.make("claudeAgent"),
-          model: "claude-opus-4-6",
-        },
+        modelSelection: createModelSelection(
+          ProviderInstanceId.make("claudeAgent"),
+          "claude-opus-4-6",
+          [{ id: "contextWindow", value: "200k" }],
+        ),
         attachments: [],
       });
 
@@ -6355,7 +6550,7 @@ describe("ClaudeAdapterLive", () => {
       if (progress?.type === "task.progress") {
         assert.equal(progress.payload.model, "claude-haiku-4-5-20251001");
       }
-      assert.deepEqual(harness.query.setModelCalls, ["claude-sonnet-4-6"]);
+      assert.deepEqual(harness.query.setModelCalls, ["claude-sonnet-4-6[1m]"]);
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),

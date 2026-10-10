@@ -10,7 +10,7 @@ import {
   WS_METHODS,
 } from "@ryco/contracts";
 
-import { buildWorktreeCheckoutDirectoryName } from "../project/worktreeCheckoutPaths.ts";
+import { resolveWorktreeCheckoutPath } from "../project/worktreeCheckoutPaths.ts";
 import { selectConfiguredWorktreeRoot } from "../project/worktreeRoot.ts";
 import { observeRpcEffect, observeRpcStream } from "../observability/RpcInstrumentation.ts";
 import { resolveProjectWorktreesDir } from "../project/projectMetadataPaths.ts";
@@ -306,6 +306,12 @@ export const makeGitHandlers = (ctx: WsRpcContext) => {
         ownerEffect(WS_METHODS.vcsReadLineBlame, gitWorkflow.readLineBlame(input)),
         { "rpc.aggregate": "vcs" },
       ),
+    [WS_METHODS.vcsReadImageBlob]: (input) =>
+      observeRpcEffect(
+        WS_METHODS.vcsReadImageBlob,
+        ownerEffect(WS_METHODS.vcsReadImageBlob, gitWorkflow.readImageBlob(input)),
+        { "rpc.aggregate": "vcs" },
+      ),
     [WS_METHODS.vcsReadLocalChanges]: (input) =>
       observeRpcEffect(
         WS_METHODS.vcsReadLocalChanges,
@@ -368,11 +374,19 @@ export const makeGitHandlers = (ctx: WsRpcContext) => {
               ...input,
               settingsSnapshot: settings,
               projectId: project.id,
-              path: path.join(
-                selectConfiguredWorktreeRoot({ settings, config, projectId: project.id }),
-                project.id,
-                buildWorktreeCheckoutDirectoryName(input.newRefName ?? input.refName),
-              ),
+              path: yield* resolveWorktreeCheckoutPath({
+                location: undefined,
+                appWorktreesRoot: selectConfiguredWorktreeRoot({
+                  settings,
+                  config,
+                  projectId: project.id,
+                }),
+                projectId: project.id,
+                projectTitle: project.title,
+                workspaceRoot: project.workspaceRoot,
+                projectMetadataDir: project.projectMetadataDir,
+                branchName: input.newRefName ?? input.refName,
+              }),
             });
           }).pipe(
             Effect.mapError((cause) =>

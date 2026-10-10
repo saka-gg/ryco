@@ -147,6 +147,21 @@ export function workflowJobIdFromUrl(url: string | null | undefined): string | n
 }
 
 /**
+ * The Checks tab's `job` URL value that opens a rollup check: the host's job
+ * id when the check links to one (Actions, GitLab CI), otherwise
+ * `workflow/name` (or the bare name without a workflow).
+ */
+export function pullRequestCheckJobParam(check: {
+  readonly name: string;
+  readonly workflowName: string | null;
+  readonly url: string | null;
+}): string {
+  const jobId = workflowJobIdFromUrl(check.url);
+  if (jobId) return jobId;
+  return check.workflowName ? `${check.workflowName}/${check.name}` : check.name;
+}
+
+/**
  * A check run reports `status` plus a `conclusion` once it finished; a status
  * context reports one state. The conclusion wins when present.
  */

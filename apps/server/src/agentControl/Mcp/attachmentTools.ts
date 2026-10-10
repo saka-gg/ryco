@@ -1,12 +1,6 @@
 import { createHash } from "node:crypto";
-import {
-  AGENT_CONTROL_CAPABILITIES,
-  CommandId,
-  MessageId,
-  PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
-  PROVIDER_SEND_TURN_MAX_ATTACHMENT_TOTAL_BYTES,
-} from "@ryco/contracts";
-import { Effect, Option, Schema, Semaphore } from "effect";
+import { AGENT_CONTROL_CAPABILITIES, CommandId, MessageId } from "@ryco/contracts";
+import { Effect, Option, Schema } from "effect";
 import {
   AssistantAttachmentError,
   AssistantAttachmentFile,
@@ -22,6 +16,10 @@ import type {
   AgentControlMcpToolDescriptor,
   AgentControlMcpToolResult,
 } from "./tools.ts";
+import {
+  makeTurnAttachmentDelivery,
+  type TurnAttachmentDelivery,
+} from "./turnAttachmentDelivery.ts";
 
 const descriptor: AgentControlMcpToolDescriptor = {
   name: "ryco_attach_file",
@@ -51,11 +49,12 @@ export const withAssistantAttachmentTools = (
     >;
     workspaceAccess: Pick<WorkspaceAccessPolicyShape, "assertExistingPath">;
     engine: Pick<OrchestrationEngineShape, "dispatch">;
+    /** Shared with the other turn-attachment tools so they draw on one serialized budget. */
+    delivery?: TurnAttachmentDelivery;
   },
 ): Effect.Effect<AgentControlMcpTools> =>
   Effect.gen(function* () {
-    // Serialize budget checks and publication across concurrent MCP requests.
-    const deliveries = yield* Semaphore.make(1);
+    const delivery = deps.delivery ?? (yield* makeTurnAttachmentDelivery(deps));
     const capability = AGENT_CONTROL_CAPABILITIES.attachFile;
     return {
       ...base,
@@ -72,58 +71,26 @@ export const withAssistantAttachmentTools = (
       isWriteTool: (name) => name === descriptor.name || base.isWriteTool(name),
       callTool: (session, name, args) => {
         if (name !== descriptor.name) return base.callTool(session, name, args);
-        return deliveries
-          .withPermits(1)(
+        return delivery
+          .serialized(
             Effect.gen(function* () {
-              const authority = yield* deps.registry.getTurnAuthority(session.sessionId);
-              if (
-                Option.isNone(authority) ||
-                authority.value.threadId !== session.threadId ||
-                authority.value.sessionId !== session.sessionId
-              )
-                return yield* new AssistantAttachmentError();
-              const turnId = authority.value.turnId;
-              yield* deps.policy.authorize({
-                principal: {
-                  kind: "provider-session",
-                  threadId: session.threadId,
-                  runtimeSessionId: session.runtimeSessionId,
-                  providerInstanceId: session.providerInstanceId,
-                  turnId,
-                },
-                requiredCapability: capability,
-                grantedCapabilities: session.grantedCapabilities,
+              const authority = yield* delivery.authorize(session, {
+                capability,
                 operation: "mcp:ryco_attach_file",
               });
+              const turnId = authority.turnId;
               const file = yield* Schema.decodeUnknownEffect(AssistantAttachmentFile)(args);
               const digest = createHash("sha256")
                 .update(JSON.stringify([session.sessionId, turnId, file.path, file.name]))
                 .digest("hex");
               const messageId = MessageId.make(`attachment-${digest}`);
-              // A bounded turn read supplies durable idempotency and a per-turn byte/count budget.
-              if (!deps.projections.listThreadMessagesByTurn)
-                return yield* new AssistantAttachmentError();
-              const messages = yield* deps.projections.listThreadMessagesByTurn({
-                threadId: session.threadId,
-                turnId,
-                limit: 1000,
-              });
-              if (messages.length >= 1000) return yield* new AssistantAttachmentError();
-              const existing = messages.find((message) => message.id === messageId);
-              if (existing?.attachments?.length)
+              const budget = yield* delivery.budget(session, authority, messageId);
+              if (budget.delivered)
                 return {
                   content: [
                     { type: "text", text: "This file is already attached in the timeline." },
                   ],
                 } satisfies AgentControlMcpToolResult;
-              const attached = messages
-                .filter((message) => message.role === "assistant")
-                .flatMap((message) => message.attachments ?? []);
-              if (attached.length >= PROVIDER_SEND_TURN_MAX_ATTACHMENTS)
-                return yield* new AssistantAttachmentError();
-              const remainingBytes =
-                PROVIDER_SEND_TURN_MAX_ATTACHMENT_TOTAL_BYTES -
-                attached.reduce((total, attachment) => total + (attachment.sizeBytes ?? 0), 0);
               const context = Option.getOrUndefined(
                 yield* deps.projections.getThreadCheckpointContext(session.threadId),
               );
@@ -141,27 +108,15 @@ export const withAssistantAttachmentTools = (
                     threadId: session.threadId,
                     deliveryId: messageId,
                     file,
-                    remainingBytes,
+                    remainingBytes: budget.remainingBytes,
                     signal,
                   }),
                 catch: () => new AssistantAttachmentError(),
               });
-              const current = yield* deps.registry.getTurnAuthority(session.sessionId);
-              if (
-                Option.isNone(current) ||
-                current.value.turnId !== turnId ||
-                current.value.boundAt !== authority.value.boundAt
-              )
-                return yield* new AssistantAttachmentError();
-              yield* deps.engine.dispatch({
-                type: "thread.message.assistant.complete",
-                commandId: CommandId.make(`attach-${digest}`),
-                threadId: session.threadId,
+              yield* delivery.publish(session, authority, {
                 messageId,
-                turnId,
-                text: " ",
-                attachments: [attachment],
-                createdAt: new Date().toISOString(),
+                commandId: CommandId.make(`attach-${digest}`),
+                attachment,
               });
               return {
                 content: [

@@ -2,13 +2,13 @@ import { useCallback, useMemo, useRef } from "react";
 import { useRouter } from "@tanstack/react-router";
 import { scopedProjectKey, scopedThreadKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
 import { WS_METHODS, type ScopedProjectRef } from "@ryco/contracts";
-import type { SidebarProjectSnapshot } from "../../sidebarProjectGrouping";
+import { buildProjectsPageLocation } from "../../projectsRoute";
 import { useCommandPaletteStore } from "../../commandPaletteStore";
 import { useHostedRpcCapability } from "../../hostedHub/capabilities";
-import { useSidebarProjectDialogs } from "../sidebar/SidebarProjectDialogOwner";
 import type { useThreadActions } from "../../hooks/useThreadActions";
 import { useSettings } from "../../hooks/useSettings";
 import { useUiStateStore } from "../../uiStateStore";
+import { useChatRowMenuContext } from "../sidebar/hooks/useChatRowMenuContext";
 import { useThreadMenuActions } from "../sidebar/hooks/useThreadMenuActions";
 import { useThreadClipboardActions } from "../sidebar/hooks/useThreadClipboardActions";
 import { Dialog, DialogPopup, DialogTitle } from "../ui/dialog";
@@ -17,37 +17,28 @@ import { Input } from "../ui/input";
 import { InboxSidebar, type InboxSidebarProps } from "./InboxSidebar";
 
 export function ConnectedInboxSidebar(
-  props: InboxSidebarProps & { projectGroups: readonly SidebarProjectSnapshot[] } & Pick<
+  props: InboxSidebarProps &
+    Pick<
       ReturnType<typeof useThreadActions>,
       "archiveThread" | "trashThread" | "stopThreadSession" | "interruptThreadTurn"
     >,
 ) {
   const router = useRouter();
-  const projectDialogs = useSidebarProjectDialogs();
   const openAddProject = useCommandPaletteStore((store) => store.openAddProject);
   const addProjectCapability = useHostedRpcCapability(WS_METHODS.projectsAdd);
   const openProjectSettings = useCallback(
     (projectRef: ScopedProjectRef) => {
-      const member = props.projectGroups
-        .flatMap((group) => group.memberProjects)
-        .find(
-          (project) =>
-            project.environmentId === projectRef.environmentId &&
-            project.id === projectRef.projectId,
-        );
-      if (member) projectDialogs.openSettings(member);
+      void router.navigate(
+        buildProjectsPageLocation({
+          environmentId: projectRef.environmentId,
+          projectId: projectRef.projectId,
+          view: "settings",
+        }),
+      );
     },
-    [props.projectGroups, projectDialogs],
-  );
-  const { trashThread, archiveThread, stopThreadSession, interruptThreadTurn } = props;
-  const openWorkspaceManagement = useCallback(
-    (projectRef: ScopedProjectRef) =>
-      void router.navigate({
-        to: "/workspaces",
-        search: { environmentId: projectRef.environmentId, projectId: projectRef.projectId },
-      }),
     [router],
   );
+  const { trashThread, archiveThread, stopThreadSession, interruptThreadTurn } = props;
   const clipboard = useThreadClipboardActions();
   const appSettingsConfirmThreadDelete = useSettings((s) => s.confirmThreadDelete);
   const appSettingsConfirmThreadArchive = useSettings((s) => s.confirmThreadArchive);
@@ -75,6 +66,7 @@ export function ConnectedInboxSidebar(
       ),
     [props.projects],
   );
+  const chat = useChatRowMenuContext();
   const actions = useThreadMenuActions({
     router,
     trashThread,
@@ -82,7 +74,7 @@ export function ConnectedInboxSidebar(
     stopThreadSession,
     interruptThreadTurn,
     includeWorkspaceSubmenu: true,
-    openWorkspaceManagement,
+    chat,
     ...clipboard,
     appSettingsConfirmThreadDelete,
     appSettingsConfirmThreadArchive,

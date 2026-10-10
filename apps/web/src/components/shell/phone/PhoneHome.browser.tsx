@@ -31,6 +31,7 @@ import { render } from "vitest-browser-react";
 const navigate = vi.fn(async () => undefined);
 const routerStub = { navigate, state: { matches: [], location: { href: "/" } } };
 vi.mock("../../../environments/runtime", { spy: true });
+vi.mock("../../../hooks/useHandleNewThread", { spy: true });
 vi.mock("@tanstack/react-router", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@tanstack/react-router")>()),
   useNavigate: () => navigate,
@@ -65,6 +66,7 @@ import { useStore, type EnvironmentState } from "../../../store";
 import type { SidebarThreadSummary } from "../../../types";
 import { useUiStateStore } from "../../../uiStateStore";
 import { readEnvironmentConnection } from "../../../environments/runtime";
+import { useNewThreadHandler } from "../../../hooks/useHandleNewThread";
 import {
   resetPrimaryEnvironmentDescriptorForTests,
   writePrimaryEnvironmentDescriptor,
@@ -565,6 +567,48 @@ describe("PhoneHome", () => {
       expect(chip().getAttribute("aria-label")).toBe(`Connection: MacBook Pro M5, ${text}`);
       expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(320);
     }
+  });
+
+  it("leaves chats out of the project list and the New thread choice", async () => {
+    const handleNewThread = vi.fn<ReturnType<typeof useNewThreadHandler>["handleNewThread"]>(
+      async () => undefined,
+    );
+    vi.mocked(useNewThreadHandler).mockReturnValue({
+      handleNewThread,
+      handleNewChat: vi.fn(async () => undefined),
+    });
+    const state = environmentState();
+    useStore.setState({
+      activeEnvironmentId: ENV_ID,
+      environmentStateById: {
+        [ENV_ID]: {
+          ...state,
+          projectById: {
+            ...state.projectById,
+            [PROJECT_B]: { ...state.projectById[PROJECT_B]!, name: "Plan a trip", kind: "chat" },
+          },
+        },
+      },
+    });
+    mounted = await render(
+      <SidebarProvider>
+        <PhoneHome />
+      </SidebarProvider>,
+    );
+
+    await expect.element(page.getByText("Alpha thread")).toBeVisible();
+    // A chat is not a project row, and its thread is not listed under one.
+    expect(document.body.textContent).not.toContain("Plan a trip");
+    expect(document.body.textContent).not.toContain("Beta running thread");
+
+    // The only project left takes the new thread; the chat is never a choice.
+    await page.getByRole("button", { name: "New thread", exact: true }).click();
+    await vi.waitFor(() => expect(handleNewThread).toHaveBeenCalledOnce());
+    expect(handleNewThread.mock.calls[0]?.[0]).toEqual({
+      environmentId: ENV_ID,
+      projectId: PROJECT_A,
+    });
+    expect(document.body.textContent).not.toContain("Choose a project for the new thread.");
   });
 
   it("navigates into a thread from a row", async () => {

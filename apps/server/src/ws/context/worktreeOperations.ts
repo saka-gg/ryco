@@ -1,10 +1,12 @@
 import { resolveProjectPreferences } from "../../project/projectPreferences.ts";
 import { existsSync } from "node:fs";
+import { writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { Cause, Effect, Option } from "effect";
 import {
   type CommandId,
+  DEFAULT_PROJECT_METADATA_DIR,
   type GitCreateWorktreeForProjectInput,
   type GitManagerServiceError,
   type OrchestrationCommand,
@@ -35,10 +37,14 @@ import {
   resolveConfiguredWorktreeRoot,
   selectConfiguredWorktreeRoot,
 } from "../../project/worktreeRoot.ts";
-import { resolveWorktreeCheckoutPath } from "../../project/worktreeCheckoutPaths.ts";
+import {
+  resolveManagedProjectDirectory,
+  resolveWorktreeCheckoutPath,
+} from "../../project/worktreeCheckoutPaths.ts";
 import type { ProjectionWorktreeRepositoryShape } from "../../persistence/Services/ProjectionWorktrees.ts";
 import { refreshWorktreeSourceControlState } from "../../sourceControl/refreshWorktreeSourceControlState.ts";
 import type { TextGenerationShape } from "../../textGeneration/TextGeneration.ts";
+import type { GitVcsDriverShape } from "../../vcs/GitVcsDriver.ts";
 import type { VcsProvisioningServiceShape } from "../../vcs/VcsProvisioningService.ts";
 import type { WorkspaceAccessPolicyShape } from "../../workspace/Services/WorkspaceAccessPolicy.ts";
 import type { WorkspaceLifecycleShape } from "../../workspace/WorkspaceLifecycle.ts";
@@ -56,11 +62,97 @@ import {
 } from "./gitErrors.ts";
 
 const RECONCILIATION_THROTTLE_MS = 5 * 60 * 1000;
+/** Staging a large folder or a commit hook can be slow; a signing prompt must not hang forever. */
+const INITIAL_COMMIT_TIMEOUT_MS = 60_000;
+const INITIAL_COMMIT_PROBE_TIMEOUT_MS = 10_000;
+const INITIAL_COMMIT_OUTPUT_BYTES = 64 * 1024;
+const COMMIT_FAILURE_DETAIL_MAX_CHARS = 200;
+
+export const INITIAL_COMMIT_MESSAGE = "Initial commit";
 
 // Process-wide: the WS context is rebuilt per connection, but the on-disk state
 // this sweep inspects is shared by all of them.
 let lastReconciliationAtMs = 0;
 const missingProjectRoots = new Set<ProjectId>();
+
+/** What `initializeGitForProject` does beyond `git init`, the main workspace and thread attachment. */
+export interface InitializeProjectGitOptions {
+  /** Write a minimal `.gitignore` when the project has none. An existing one is never touched. */
+  readonly writeGitignore?: boolean;
+  /**
+   * Stage everything and commit it as "Initial commit", only in a repository without history.
+   * A failed commit is reported in the result; the repository and the project are kept.
+   */
+  readonly initialCommit?: boolean;
+}
+
+/** Empty unless `initialCommit` was requested, so "Initialize Git" still answers `{}`. */
+export interface InitializeProjectGitResult {
+  readonly initialCommitCreated?: boolean;
+  /** Short and actionable, e.g. how to set a missing Git identity. */
+  readonly commitError?: string;
+}
+
+/**
+ * A new repository's `.gitignore`: OS litter, dependencies, secrets and the project's own
+ * Ryco-managed worktrees, which live inside it.
+ */
+export const minimalGitignore = (projectMetadataDir: string | null | undefined): string => {
+  const metadataDir = (projectMetadataDir?.trim() || DEFAULT_PROJECT_METADATA_DIR)
+    .replaceAll("\\", "/")
+    .replace(/^\/+|\/+$/g, "");
+  return [".DS_Store", "node_modules/", ".env", ".env.*", `/${metadataDir}/worktrees/`, ""].join(
+    "\n",
+  );
+};
+
+/** Create `.gitignore` only when nothing exists at that path; true when it was written. */
+export const writeGitignoreIfMissing = (workspaceRoot: string, content: string) =>
+  Effect.tryPromise(() =>
+    writeFile(path.join(workspaceRoot, ".gitignore"), content, { flag: "wx" }).then(
+      () => true,
+      (cause: NodeJS.ErrnoException) => {
+        if (cause.code === "EEXIST") return false;
+        throw cause;
+      },
+    ),
+  );
+
+/**
+ * Turn Git's multi-line commit failure into one sentence that says what to fix. The repository
+ * is kept either way, so every message ends by pointing at a commit the user can make later.
+ */
+export const describeInitialCommitFailure = (detail: string): string => {
+  const text = detail.trim();
+  if (
+    /please tell me who you are|author identity unknown|committer identity unknown|unable to auto-detect email|empty ident name|no email was given/i.test(
+      text,
+    )
+  ) {
+    return "Git has no name or email on this machine. Set user.name and user.email, then commit.";
+  }
+  if (/gpg|signing|sign the data|ssh-keygen|failed to write commit object/i.test(text)) {
+    return "Git could not sign the first commit. Check your commit signing setup, then commit.";
+  }
+  if (/timed out/i.test(text)) {
+    return "Git took too long to make the first commit; it may be waiting for a passphrase. Commit from a terminal.";
+  }
+  if (/hook/i.test(text)) {
+    return "A Git hook rejected the first commit. Fix what it reports, then commit.";
+  }
+  const firstLine =
+    text
+      .split("\n")
+      .map((line) => line.replace(/^(fatal|error):\s*/i, "").trim())
+      .find((line) => line.length > 0) ?? "";
+  const reason =
+    firstLine.length > COMMIT_FAILURE_DETAIL_MAX_CHARS
+      ? `${firstLine.slice(0, COMMIT_FAILURE_DETAIL_MAX_CHARS - 1)}…`
+      : firstLine;
+  return reason
+    ? `The first commit failed: ${reason}. Fix it, then commit.`
+    : "The first commit failed. Commit from a terminal to see why.";
+};
 
 type AppendSetupScriptActivity = (input: {
   readonly threadId: ThreadId;
@@ -76,6 +168,8 @@ export const makeWorktreeOperations = (deps: {
   readonly projectionWorktrees: ProjectionWorktreeRepositoryShape;
   readonly gitWorkflow: GitWorkflowServiceShape;
   readonly vcsProvisioning: VcsProvisioningServiceShape;
+  /** Runs the optional first commit of `initializeGitForProject`; absent nodes report it. */
+  readonly gitDriver?: Pick<GitVcsDriverShape, "execute"> | undefined;
   readonly config: ServerConfigShape;
   readonly serverSettings: ServerSettingsShape;
   readonly workspaceAccessPolicy: WorkspaceAccessPolicyShape;
@@ -94,6 +188,7 @@ export const makeWorktreeOperations = (deps: {
     projectionWorktrees,
     gitWorkflow,
     vcsProvisioning,
+    gitDriver,
     config,
     serverSettings,
     workspaceAccessPolicy,
@@ -455,7 +550,15 @@ export const makeWorktreeOperations = (deps: {
                         projectId: input.projectId,
                         config,
                       }),
-                      input.projectId,
+                      yield* resolveManagedProjectDirectory(
+                        input.projectId,
+                        project.title,
+                        selectConfiguredWorktreeRoot({
+                          settings,
+                          projectId: input.projectId,
+                          config,
+                        }),
+                      ).pipe(Effect.catch((cause) => failGitWorkflow(operation, cause.message))),
                     ),
             },
             { preferencesSnapshot: { settings, project } },
@@ -576,7 +679,7 @@ export const makeWorktreeOperations = (deps: {
         }
         worktreePath = preparedWorktreePath;
       } else {
-        const targetPath = resolveWorktreeCheckoutPath({
+        const targetPath = yield* resolveWorktreeCheckoutPath({
           location: input.worktreeLocation,
           appWorktreesRoot:
             input.worktreeLocation === "projectMetadata"
@@ -585,6 +688,8 @@ export const makeWorktreeOperations = (deps: {
           projectId: input.projectId,
           workspaceRoot: project.workspaceRoot,
           projectMetadataDir: project.projectMetadataDir,
+          projectTitle: project.title,
+          initialName: title,
           branchName: branch,
         });
         if (isProjectRootPath(targetPath, project.workspaceRoot)) {
@@ -1008,7 +1113,76 @@ export const makeWorktreeOperations = (deps: {
       deleteBranch: input.force ? false : input.deleteBranch,
     });
 
-  const initializeGitForProject = (projectId: ProjectId) =>
+  /**
+   * The optional first commit of a new repository. Never fails: the repository is already
+   * usable, so a missing identity, a signing prompt or a hook is reported for the user to fix.
+   */
+  const commitInitialSnapshot = (cwd: string) =>
+    Effect.gen(function* () {
+      if (gitDriver === undefined) {
+        return {
+          initialCommitCreated: false,
+          commitError: "This server cannot make the first commit. Commit from a terminal.",
+        } satisfies InitializeProjectGitResult;
+      }
+      const git = (operation: string, args: ReadonlyArray<string>, timeoutMs: number) =>
+        gitDriver.execute({
+          operation: `projects.initializeGit.${operation}`,
+          cwd,
+          args,
+          // Git localizes its messages; failures are recognized in English.
+          env: { LC_ALL: "C" },
+          allowNonZeroExit: true,
+          timeoutMs,
+          maxOutputBytes: INITIAL_COMMIT_OUTPUT_BYTES,
+          truncateOutputAtMaxBytes: true,
+        });
+      const failed = (result: { readonly stderr: string; readonly stdout: string }) =>
+        ({
+          initialCommitCreated: false,
+          commitError: describeInitialCommitFailure(result.stderr || result.stdout),
+        }) satisfies InitializeProjectGitResult;
+      // A folder that was already a repository keeps its history untouched.
+      const head = yield* git(
+        "head",
+        ["rev-parse", "--verify", "--quiet", "HEAD"],
+        INITIAL_COMMIT_PROBE_TIMEOUT_MS,
+      );
+      if (head.exitCode === 0) return { initialCommitCreated: false };
+      const add = yield* git("add", ["add", "--all"], INITIAL_COMMIT_TIMEOUT_MS);
+      if (add.exitCode !== 0) return failed(add);
+      // An empty folder has nothing to commit; that is not a failure.
+      const staged = yield* git(
+        "staged",
+        ["diff", "--cached", "--quiet"],
+        INITIAL_COMMIT_PROBE_TIMEOUT_MS,
+      );
+      if (staged.exitCode === 0) return { initialCommitCreated: false };
+      const commit = yield* git(
+        "commit",
+        ["commit", "--quiet", "-m", INITIAL_COMMIT_MESSAGE],
+        INITIAL_COMMIT_TIMEOUT_MS,
+      );
+      if (commit.exitCode !== 0) return failed(commit);
+      return { initialCommitCreated: true };
+    }).pipe(
+      Effect.catch((error) =>
+        Effect.succeed({
+          initialCommitCreated: false,
+          commitError: describeInitialCommitFailure(error.detail),
+        } satisfies InitializeProjectGitResult),
+      ),
+    );
+
+  /**
+   * `git init`, the main workspace record and every thread attached to it. Options add a minimal
+   * `.gitignore` and the first commit (promotion uses both); without them only the repository is
+   * created, as for "Initialize Git".
+   */
+  const initializeGitForProject = (
+    projectId: ProjectId,
+    options: InitializeProjectGitOptions = {},
+  ) =>
     Effect.gen(function* () {
       const operation = "projects.initializeGit";
       const project = yield* loadProjectForGitWorkflow(operation, projectId);
@@ -1019,6 +1193,20 @@ export const makeWorktreeOperations = (deps: {
             toGitManagerError(operation, "Failed to initialize git repository.", cause),
           ),
         );
+      if (options.writeGitignore) {
+        // Best effort: a missing `.gitignore` never undoes a created repository.
+        yield* writeGitignoreIfMissing(
+          project.workspaceRoot,
+          minimalGitignore(project.projectMetadataDir),
+        ).pipe(
+          Effect.catch((cause) =>
+            Effect.logWarning("could not write the new repository's .gitignore", {
+              projectId,
+              cause: String(cause),
+            }),
+          ),
+        );
+      }
       const worktreeId = yield* ensureProjectMainWorktree(project, operation);
       if (worktreeId === null)
         return yield* failGitWorkflow(operation, "The initialized repository is unavailable.");
@@ -1043,8 +1231,11 @@ export const makeWorktreeOperations = (deps: {
           operation,
         );
       }
+      const result: InitializeProjectGitResult = options.initialCommit
+        ? yield* commitInitialSnapshot(project.workspaceRoot)
+        : {};
       yield* refreshGitStatus(project.workspaceRoot);
-      return {};
+      return result;
     });
 
   return {

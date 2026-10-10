@@ -64,6 +64,9 @@ export function createEnvironmentApi(rpcClient: WsRpcClient): EnvironmentApi {
       writeFile: rpcClient.projects.writeFile,
       stageFileReference: rpcClient.projects.stageFileReference,
       initializeGit: rpcClient.projects.initializeGit,
+      promoteChatPreview: rpcClient.projects.promoteChatPreview,
+      promoteChat: rpcClient.projects.promoteChat,
+      deleteChatFolder: rpcClient.projects.deleteChatFolder,
     },
     filesystem: { browse: rpcClient.filesystem.browse },
     sourceControl: {
@@ -78,6 +81,7 @@ export function createEnvironmentApi(rpcClient: WsRpcClient): EnvironmentApi {
       onStatus: (input, callback, options) => rpcClient.vcs.onStatus(input, callback, options),
       listRefs: rpcClient.vcs.listRefs,
       readLineBlame: rpcClient.vcs.readLineBlame,
+      readImageBlob: rpcClient.vcs.readImageBlob,
       readLocalChanges: rpcClient.vcs.readLocalChanges,
       applyIndexPatch: async (input) => {
         await rpcClient.vcs.applyIndexPatch(input);
@@ -168,6 +172,7 @@ export function createEnvironmentApi(rpcClient: WsRpcClient): EnvironmentApi {
     // Conditional like worktrees/threads: older environments (and partial
     // test doubles) predate the Agent Control surface.
     ...(rpcClient.automationCentre ? { automationCentre: rpcClient.automationCentre } : {}),
+    ...(rpcClient.notes ? { notes: rpcClient.notes } : {}),
     ...(rpcClient.agentControl
       ? {
           agentControl: {

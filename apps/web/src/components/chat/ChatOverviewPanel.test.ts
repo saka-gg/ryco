@@ -1,7 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import type { OverviewPullRequestCheckRun } from "../overview/overviewTypes";
 import {
   branchNameCandidates,
   buildOverviewItems,
+  buildOverviewPullRequestOpeners,
+  overviewCheckReveal,
   compactQueryErrorMessage,
   findChangeRequestForBranch,
   resolveThreadPullRequests,
@@ -252,5 +255,105 @@ describe("buildOverviewItems", () => {
         action: "review",
       }),
     );
+  });
+});
+
+function checkRun(
+  overrides: Partial<OverviewPullRequestCheckRun> = {},
+): OverviewPullRequestCheckRun {
+  return {
+    id: "run:1:job:42",
+    name: "Test",
+    statusLabel: "Failed",
+    statusKind: "failed",
+    tone: "failure",
+    ...overrides,
+  };
+}
+
+describe("overviewCheckReveal", () => {
+  it("lands on the row's job", () => {
+    expect(overviewCheckReveal(checkRun({ jobParam: "42" }))).toEqual({ kind: "job", job: "42" });
+    expect(overviewCheckReveal(checkRun({ jobParam: "CI/Test · web" }))).toEqual({
+      kind: "job",
+      job: "CI/Test · web",
+    });
+  });
+
+  it("lands on the Checks tab without a job", () => {
+    expect(overviewCheckReveal(checkRun())).toEqual({ kind: "checks" });
+  });
+
+  it("lands on the Checks tab when the route cannot carry the job", () => {
+    expect(overviewCheckReveal(checkRun({ jobParam: "  " }))).toEqual({ kind: "checks" });
+    expect(overviewCheckReveal(checkRun({ jobParam: "x".repeat(129) }))).toEqual({
+      kind: "checks",
+    });
+  });
+});
+
+describe("buildOverviewPullRequestOpeners", () => {
+  it("returns no openers without an opener or a pull request", () => {
+    expect(
+      buildOverviewPullRequestOpeners({
+        open: undefined,
+        pullRequestNumber: 7,
+        pinFromPush: false,
+      }),
+    ).toEqual({});
+    expect(
+      buildOverviewPullRequestOpeners({
+        open: vi.fn(),
+        pullRequestNumber: null,
+        pinFromPush: true,
+      }),
+    ).toEqual({});
+  });
+
+  it("lets the panel resolve the pull request itself", () => {
+    const open = vi.fn();
+    const openers = buildOverviewPullRequestOpeners({
+      open,
+      pullRequestNumber: 7,
+      pinFromPush: false,
+    });
+
+    openers.onOpenPullRequestInApp?.();
+    openers.onOpenPullRequestCheck?.(checkRun({ jobParam: "42" }));
+    openers.onOpenPullRequestCheck?.(checkRun());
+
+    expect(open.mock.calls).toEqual([
+      [undefined],
+      [undefined, { kind: "job", job: "42" }],
+      [undefined, { kind: "checks" }],
+    ]);
+  });
+
+  it("pins a number only the push watch knows", () => {
+    const open = vi.fn();
+    const openers = buildOverviewPullRequestOpeners({
+      open,
+      pullRequestNumber: 7,
+      pinFromPush: true,
+    });
+
+    openers.onOpenPullRequestInApp?.();
+    openers.onOpenPullRequestCheck?.(checkRun({ jobParam: "42" }));
+
+    expect(open.mock.calls).toEqual([[7], [7, { kind: "job", job: "42" }]]);
+  });
+
+  it("pins another of the workspace's pull requests, never the shown one", () => {
+    const open = vi.fn();
+    const openers = buildOverviewPullRequestOpeners({
+      open,
+      pullRequestNumber: 7,
+      pinFromPush: false,
+    });
+
+    openers.onOpenPullRequestInApp?.(9);
+    openers.onOpenPullRequestInApp?.(7);
+
+    expect(open.mock.calls).toEqual([[9], [undefined]]);
   });
 });

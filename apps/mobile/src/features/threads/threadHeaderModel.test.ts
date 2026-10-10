@@ -67,6 +67,34 @@ describe("buildThreadHeaderModel", () => {
     );
   });
 
+  it("labels a chat thread No project in its plain chat folder, never by folder or branch", () => {
+    const model = buildThreadHeaderModel({
+      thread: thread({ branch: null, worktreePath: null }),
+      project: {
+        name: "Fix the login bug",
+        cwd: "/Users/me/.ryco/chats/2026-10-07-fix-the-login-bug-1a2b3c4d",
+        kind: "chat",
+      },
+      worktree: null,
+      nodeLabel: "Mac Studio",
+      hasPendingApproval: false,
+      hasPendingUserInput: false,
+    });
+
+    expect(model).toMatchObject({
+      projectLabel: "No project",
+      worktreeLabel: "Chat folder",
+      contextHeading: "Project · Folder",
+      statusLabel: "Ready",
+      // The chat folder is browsable like any workspace.
+      filesVisible: true,
+      moreActions: ["rename", "archive", "details"],
+    });
+    expect(model.contextAccessibilityLabel).toBe(
+      "Working in node Mac Studio, No project, in a chat folder. Ready.",
+    );
+  });
+
   it("prioritizes attention states and exposes stop/review while a turn is running", () => {
     const model = buildThreadHeaderModel({
       thread: thread({

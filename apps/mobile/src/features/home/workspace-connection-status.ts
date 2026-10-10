@@ -4,21 +4,18 @@ export function shouldShowWorkspaceConnectionStatus(state: WorkspaceState): bool
   return (
     state.networkStatus === "offline" ||
     state.connectionError !== null ||
-    state.hasConnectingEnvironment ||
-    state.hasPendingShellSnapshot ||
+    (!state.hasLoadedShellSnapshot &&
+      (state.hasConnectingEnvironment || state.hasPendingShellSnapshot)) ||
     (state.hasLoadedShellSnapshot && !state.hasReadyEnvironment)
   );
 }
 
 export function workspaceConnectionStatusLabel(state: WorkspaceState): string {
   if (state.networkStatus === "offline") return "You are offline";
-  if (state.connectingEnvironments.length === 1) {
-    return `Reconnecting to ${state.connectingEnvironments[0]!.environmentLabel}`;
-  }
-  if (state.connectingEnvironments.length > 1) {
-    return `Reconnecting ${state.connectingEnvironments.length} environments`;
-  }
   if (state.connectionError !== null) return state.connectionError;
+  if (state.hasLoadedShellSnapshot && !state.hasReadyEnvironment)
+    return "Saved view · Machines unavailable";
+  if (state.hasConnectingEnvironment) return "Loading workspace...";
   if (state.hasPendingShellSnapshot) {
     return state.hasLoadedShellSnapshot ? "Syncing threads..." : "Loading threads...";
   }

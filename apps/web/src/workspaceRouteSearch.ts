@@ -1,4 +1,4 @@
-import { type TurnId } from "@ryco/contracts";
+import { type EnvironmentId, MessageId, type ThreadId, type TurnId } from "@ryco/contracts";
 
 import { stripDiffSearchParams } from "./diffRouteSearch";
 import { stripPreviewSearchParams } from "./previewRouteSearch";
@@ -11,7 +11,8 @@ export type WorkspacePanelTab =
   | "browser"
   | "pullRequest"
   | "agent"
-  | "agents";
+  | "agents"
+  | "render";
 
 const WORKSPACE_PANEL_TABS: ReadonlySet<string> = new Set<WorkspacePanelTab>([
   "review",
@@ -22,15 +23,27 @@ const WORKSPACE_PANEL_TABS: ReadonlySet<string> = new Set<WorkspacePanelTab>([
   "pullRequest",
   "agent",
   "agents",
+  "render",
 ]);
 
-// A type alias (not an interface) so a built search can feed the next builder.
+// A type alias, not an interface: the builders' results feed back into
+// builders that take `Record<string, unknown>`, which interfaces never satisfy.
 export type WorkspaceRouteSearch = {
   workspaceOpen?: "1" | undefined;
   workspaceTab?: WorkspacePanelTab | undefined;
   workspaceAgentKey?: string | undefined;
   /** Pull request tab: a specific change request; absent = the thread's own. */
   workspacePr?: number | undefined;
+  /** Page tab: the HTML render it shows, as `formatWorkspaceRenderKey` writes it. */
+  workspaceRender?: string | undefined;
+  /**
+   * Pull request tab: a one-shot reveal (`formatWorkspacePullRequestReveal`).
+   * The reader acts on it once and the panel strips it, so a repeat click
+   * re-triggers and history, reload and the session never replay it.
+   */
+  workspacePrReveal?: string | undefined;
+  /** Agents tab: a one-shot focus on one workflow, consumed like `workspacePrReveal`. */
+  workspaceAgentsWorkflow?: string | undefined;
 };
 
 /** Every search key the workspace panel owns, legacy diff/preview included. */
@@ -42,9 +55,24 @@ export type WorkspacePanelSearchKey =
   | "workspaceOpen"
   | "workspaceTab"
   | "workspaceAgentKey"
-  | "workspacePr";
+  | "workspacePr"
+  | "workspaceRender"
+  | "workspacePrReveal"
+  | "workspaceAgentsWorkflow";
 
-type WorkspaceSearchKey = "workspaceOpen" | "workspaceTab" | "workspaceAgentKey" | "workspacePr";
+type WorkspaceSearchKey =
+  | "workspaceOpen"
+  | "workspaceTab"
+  | "workspaceAgentKey"
+  | "workspacePr"
+  | "workspaceRender"
+  | WorkspaceRevealSearchKey;
+
+/** The one-shot keys: consumed once, then stripped (`stripWorkspaceRevealSearch`). */
+type WorkspaceRevealSearchKey = "workspacePrReveal" | "workspaceAgentsWorkflow";
+
+/** Keys that name something in the thread that opened them. */
+type ThreadScopedWorkspaceSearchKey = "workspacePr" | "workspaceRender" | WorkspaceRevealSearchKey;
 
 /**
  * A route search with the workspace panel's keys replaced. Every key the panel
@@ -57,12 +85,13 @@ export type WorkspacePanelSearch<T, Legacy> = Omit<T, WorkspacePanelSearchKey> &
 
 type ClosedLegacySearch = { diff?: undefined; preview?: undefined };
 
-function normalizeSearchString(value: unknown): string | undefined {
+function normalizeSearchString(value: unknown, maxLength?: number): string | undefined {
   if (typeof value !== "string") {
     return undefined;
   }
   const normalized = value.trim();
-  return normalized.length > 0 ? normalized : undefined;
+  if (normalized.length === 0) return undefined;
+  return maxLength === undefined || normalized.length <= maxLength ? normalized : undefined;
 }
 
 function normalizeWorkspaceTab(value: unknown): WorkspacePanelTab | undefined {
@@ -76,6 +105,72 @@ function normalizePositiveInt(value: unknown): number | undefined {
   return Number.isSafeInteger(raw) && raw > 0 ? raw : undefined;
 }
 
+/** An HTML render a page tab shows: the attachment, and the message that carries it. */
+export interface WorkspaceRenderTarget {
+  readonly messageId: MessageId;
+  readonly attachmentId: string;
+}
+
+// Attachment ids never contain a colon (`[a-z0-9_-]`); message ids may.
+const RENDER_ATTACHMENT_ID = /^[a-z0-9_-]{1,128}$/i;
+
+export function formatWorkspaceRenderKey(target: WorkspaceRenderTarget): string {
+  return `${target.messageId}:${target.attachmentId}`;
+}
+
+/** The render a `workspaceRender` key names, or null when it names none. */
+export function parseWorkspaceRenderKey(key: string): WorkspaceRenderTarget | null {
+  const separator = key.lastIndexOf(":");
+  if (separator <= 0) return null;
+  const messageId = key.slice(0, separator).trim();
+  const attachmentId = key.slice(separator + 1);
+  if (messageId.length === 0 || !RENDER_ATTACHMENT_ID.test(attachmentId)) return null;
+  return { messageId: MessageId.make(messageId), attachmentId };
+}
+
+function normalizeRenderKey(value: unknown): string | undefined {
+  const key = normalizeSearchString(value);
+  return key !== undefined && parseWorkspaceRenderKey(key) !== null ? key : undefined;
+}
+
+/** Where a pull request tab deep link lands: the Checks tab, or one job on it. */
+export type WorkspacePullRequestReveal =
+  | { readonly kind: "checks" }
+  | { readonly kind: "job"; readonly job: string };
+
+const PULL_REQUEST_REVEAL_JOB_PREFIX = "job:";
+// Same bound as the pull requests page's `job` param.
+const PULL_REQUEST_REVEAL_JOB_MAX_LENGTH = 128;
+const AGENTS_WORKFLOW_MAX_LENGTH = 256;
+
+export function formatWorkspacePullRequestReveal(reveal: WorkspacePullRequestReveal): string {
+  return reveal.kind === "checks" ? "checks" : `${PULL_REQUEST_REVEAL_JOB_PREFIX}${reveal.job}`;
+}
+
+/** The reveal a `workspacePrReveal` key names, or null when it names none. */
+export function parseWorkspacePullRequestReveal(key: string): WorkspacePullRequestReveal | null {
+  if (key === "checks") return { kind: "checks" };
+  if (!key.startsWith(PULL_REQUEST_REVEAL_JOB_PREFIX)) return null;
+  const job = key.slice(PULL_REQUEST_REVEAL_JOB_PREFIX.length).trim();
+  return job.length > 0 && job.length <= PULL_REQUEST_REVEAL_JOB_MAX_LENGTH
+    ? { kind: "job", job }
+    : null;
+}
+
+function normalizePullRequestRevealKey(value: unknown): string | undefined {
+  const key = normalizeSearchString(value);
+  const reveal = key === undefined ? null : parseWorkspacePullRequestReveal(key);
+  return reveal === null ? undefined : formatWorkspacePullRequestReveal(reveal);
+}
+
+/**
+ * The Agents tab row key of one runtime subagent. Idempotent: transcript-backed
+ * runtime agents already carry the `subagent:` prefix.
+ */
+export function workspaceAgentKeyForRuntimeAgent(agentId: string): string {
+  return agentId.startsWith("subagent:") ? agentId : `subagent:${agentId}`;
+}
+
 export function stripWorkspaceSearchParams<T extends Record<string, unknown>>(
   params: T,
 ): Omit<T, WorkspaceSearchKey> {
@@ -84,6 +179,9 @@ export function stripWorkspaceSearchParams<T extends Record<string, unknown>>(
     workspaceTab: _workspaceTab,
     workspaceAgentKey: _workspaceAgentKey,
     workspacePr: _workspacePr,
+    workspaceRender: _workspaceRender,
+    workspacePrReveal: _workspacePrReveal,
+    workspaceAgentsWorkflow: _workspaceAgentsWorkflow,
     ...rest
   } = params;
   return rest as Omit<T, WorkspaceSearchKey>;
@@ -98,15 +196,63 @@ export function stripWorkspacePanelSearchParams<T extends Record<string, unknown
 }
 
 /**
- * A pinned change request (`workspacePr`) names a change request in the thread
- * that pinned it. Navigation that carries the panel's search over to another
- * thread drops the pin, so that thread's tab shows its own change request.
+ * Clears the one-shot deep-link keys once their tab acted on them. Written
+ * explicitly as undefined so a navigation built from the result drops them.
  */
-export function stripWorkspacePullRequestPin<T extends Record<string, unknown>>(
+export function stripWorkspaceRevealSearch<T extends Record<string, unknown>>(
   params: T,
-): Omit<T, "workspacePr"> {
-  const { workspacePr: _workspacePr, ...rest } = params;
-  return rest;
+): Omit<T, WorkspaceRevealSearchKey> & {
+  workspacePrReveal: undefined;
+  workspaceAgentsWorkflow: undefined;
+} {
+  const {
+    workspacePrReveal: _workspacePrReveal,
+    workspaceAgentsWorkflow: _workspaceAgentsWorkflow,
+    ...rest
+  } = params;
+  return { ...rest, workspacePrReveal: undefined, workspaceAgentsWorkflow: undefined };
+}
+
+/**
+ * A pinned change request (`workspacePr`), a page tab (`workspaceRender`) and
+ * the one-shot reveals name things in the thread that opened them.
+ * Navigation that carries the panel's search over to another thread drops
+ * them: that thread's pull request tab shows its own change request, and a
+ * page tab gives way to the launcher.
+ */
+export function stripThreadScopedWorkspaceSearch<T extends Record<string, unknown>>(
+  params: T,
+): Omit<T, ThreadScopedWorkspaceSearchKey> {
+  const {
+    workspacePr: _workspacePr,
+    workspaceRender: _workspaceRender,
+    workspacePrReveal: _workspacePrReveal,
+    workspaceAgentsWorkflow: _workspaceAgentsWorkflow,
+    ...rest
+  } = params;
+  return (rest.workspaceTab === "render" ? { ...rest, workspaceTab: undefined } : rest) as Omit<
+    T,
+    ThreadScopedWorkspaceSearchKey
+  >;
+}
+
+/**
+ * The panel's search on a navigation to `to` (a message hit, say): kept as it
+ * is within the thread it was opened in, without the thread-scoped keys in
+ * any other.
+ */
+export function carryWorkspaceSearchToThread<T extends Record<string, unknown>>(
+  params: T,
+  input: {
+    readonly from: { readonly environmentId: EnvironmentId; readonly threadId: ThreadId } | null;
+    readonly to: { readonly environmentId: EnvironmentId; readonly threadId: ThreadId };
+  },
+): T | Omit<T, ThreadScopedWorkspaceSearchKey> {
+  const sameThread =
+    input.from !== null &&
+    input.from.environmentId === input.to.environmentId &&
+    input.from.threadId === input.to.threadId;
+  return sameThread ? params : stripThreadScopedWorkspaceSearch(params);
 }
 
 /** One builder for every tab: clears all panel keys, then applies `fields`. */
@@ -125,6 +271,9 @@ function withWorkspacePanelSearch<T extends Record<string, unknown>, Legacy>(
     workspaceTab: undefined,
     workspaceAgentKey: undefined,
     workspacePr: undefined,
+    workspaceRender: undefined,
+    workspacePrReveal: undefined,
+    workspaceAgentsWorkflow: undefined,
     diff: undefined,
     diffTurnId: undefined,
     diffFilePath: undefined,
@@ -193,16 +342,22 @@ export function buildOpenBrowserSearch<T extends Record<string, unknown>>(
 
 /**
  * Pull request tab. Without a number the tab follows the thread's own change
- * request; a number pins another one (a stack layer, a linked PR).
+ * request; a number pins another one (a stack layer, a linked PR). A `reveal`
+ * lands on the Checks tab, or one job on it, once.
  */
 export function buildOpenPullRequestSearch<T extends Record<string, unknown>>(
   params: T,
   pullRequestNumber?: number,
+  reveal?: WorkspacePullRequestReveal,
 ): WorkspacePanelSearch<T, ClosedLegacySearch> {
   return withWorkspacePanelSearch(params, {
     workspaceOpen: "1",
     workspaceTab: "pullRequest",
     workspacePr: normalizePositiveInt(pullRequestNumber),
+    workspacePrReveal:
+      reveal === undefined
+        ? undefined
+        : normalizePullRequestRevealKey(formatWorkspacePullRequestReveal(reveal)),
   });
 }
 
@@ -217,6 +372,18 @@ export function buildOpenAgentsSearch<T extends Record<string, unknown>>(
   });
 }
 
+/** Agents tab, focused once on one workflow (expanded, scrolled to and flashed). */
+export function buildOpenAgentsWorkflowSearch<T extends Record<string, unknown>>(
+  params: T,
+  workflowId: string,
+): WorkspacePanelSearch<T, ClosedLegacySearch> {
+  return withWorkspacePanelSearch(params, {
+    workspaceOpen: "1",
+    workspaceTab: "agents",
+    workspaceAgentsWorkflow: normalizeSearchString(workflowId, AGENTS_WORKFLOW_MAX_LENGTH),
+  });
+}
+
 export function buildOpenAgentSearch<T extends Record<string, unknown>>(
   params: T,
   agentKey: string,
@@ -225,6 +392,18 @@ export function buildOpenAgentSearch<T extends Record<string, unknown>>(
     workspaceOpen: "1",
     workspaceTab: "agent",
     workspaceAgentKey: agentKey,
+  });
+}
+
+/** Page tab: one HTML render of the thread, at full size. */
+export function buildOpenRenderSearch<T extends Record<string, unknown>>(
+  params: T,
+  renderKey: string,
+): WorkspacePanelSearch<T, ClosedLegacySearch> {
+  return withWorkspacePanelSearch(params, {
+    workspaceOpen: "1",
+    workspaceTab: "render",
+    workspaceRender: renderKey,
   });
 }
 
@@ -242,13 +421,29 @@ export function parseWorkspaceRouteSearch(search: Record<string, unknown>): Work
   if (workspaceTab === "agent" && !workspaceAgentKey) {
     return {};
   }
+  const workspaceRender =
+    workspaceTab === "render" ? normalizeRenderKey(search.workspaceRender) : undefined;
+  if (workspaceTab === "render" && !workspaceRender) {
+    return {};
+  }
   const workspacePr =
     workspaceTab === "pullRequest" ? normalizePositiveInt(search.workspacePr) : undefined;
+  const workspacePrReveal =
+    workspaceTab === "pullRequest"
+      ? normalizePullRequestRevealKey(search.workspacePrReveal)
+      : undefined;
+  const workspaceAgentsWorkflow =
+    workspaceTab === "agents"
+      ? normalizeSearchString(search.workspaceAgentsWorkflow, AGENTS_WORKFLOW_MAX_LENGTH)
+      : undefined;
 
   return {
     workspaceOpen: "1",
     workspaceTab,
     ...(workspaceAgentKey ? { workspaceAgentKey } : {}),
     ...(workspacePr !== undefined ? { workspacePr } : {}),
+    ...(workspaceRender ? { workspaceRender } : {}),
+    ...(workspacePrReveal ? { workspacePrReveal } : {}),
+    ...(workspaceAgentsWorkflow ? { workspaceAgentsWorkflow } : {}),
   };
 }

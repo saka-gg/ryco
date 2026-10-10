@@ -50,9 +50,27 @@ describe("Claude cache review", () => {
       observation,
       promptTokens: 52_100,
       reason: "Large idle conversation.",
+      compactUnavailableReason: null,
     });
     await page.getByRole("button", { name: label, exact: true }).click();
     expect(await decision).toBe(choice);
+    await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
+  });
+  it("offers only continuing when the session cannot compact, and says why", async () => {
+    const decision = claudeCacheReviewPresentation.review({
+      observation,
+      promptTokens: 52_100,
+      reason: "Claude's session stopped since this observation.",
+      compactUnavailableReason: "Claude's session is stopped, so it cannot compact first.",
+    });
+    await expect
+      .element(page.getByText("Claude's session is stopped, so it cannot compact first."))
+      .toBeVisible();
+    await expect
+      .element(page.getByRole("button", { name: "Compact then send", exact: true }))
+      .not.toBeInTheDocument();
+    await page.getByRole("button", { name: "Continue with full context", exact: true }).click();
+    expect(await decision).toBe("continue");
     await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
   });
   it("offers cancellation while compaction holds the original send", async () => {

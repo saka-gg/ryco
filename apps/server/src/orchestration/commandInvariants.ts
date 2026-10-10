@@ -251,6 +251,31 @@ export function requireProject(input: {
   );
 }
 
+/**
+ * {@link requireProject}, refusing a removed one. The read model keeps removed projects (with
+ * `deletedAt`) so their history resolves, but nothing may change them or add to them: a retired
+ * chat's record must not be pointed at another folder, and a thread created in it would be
+ * invisible and would run without its folder.
+ */
+export function requireActiveProject(input: {
+  readonly readModel: OrchestrationReadModel;
+  readonly command: OrchestrationCommand;
+  readonly projectId: ProjectId;
+}): Effect.Effect<OrchestrationProject, OrchestrationCommandInvariantError> {
+  return requireProject(input).pipe(
+    Effect.flatMap((project) =>
+      project.deletedAt === null
+        ? Effect.succeed(project)
+        : Effect.fail(
+            invariantError(
+              input.command.type,
+              `Project '${input.projectId}' was removed and cannot be used by command '${input.command.type}'.`,
+            ),
+          ),
+    ),
+  );
+}
+
 export function requireWorktree(input: {
   readonly readModel: OrchestrationReadModel;
   readonly command: OrchestrationCommand;

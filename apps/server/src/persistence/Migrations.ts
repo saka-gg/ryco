@@ -1,3 +1,11 @@
+import Migration0079, { ensureWorktreeNotesTable } from "./Migrations/079_WorktreeNotes.ts";
+import Migration0078, {
+  ensureManagedWorktreeNaming,
+} from "./Migrations/078_ManagedWorktreeNaming.ts";
+import Migration0080, {
+  ensureProjectKindAndRelocations,
+} from "./Migrations/080_ProjectKindAndRelocations.ts";
+import Migration0081, { ensureNotesDocumentsTable } from "./Migrations/081_NotesDocuments.ts";
 import Migration0071 from "./Migrations/071_StatisticsUsageHistory.ts";
 import Migration0072, {
   ensureProjectionThreadLineageColumns,
@@ -101,9 +109,9 @@ import Migration0076 from "./Migrations/076_AuthSessionRotation.ts";
 import Migration0077, {
   ensureThreadWorkspaceLifecycleColumns,
 } from "./Migrations/077_ThreadWorkspaceLifecycle.ts";
-import Migration0078, {
+import Migration0082, {
   ensureWorktreePullRequestLinksColumn,
-} from "./Migrations/078_WorktreePullRequestLinks.ts";
+} from "./Migrations/082_WorktreePullRequestLinks.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -192,7 +200,11 @@ export const migrationEntries = [
   [75, "ProjectionThreadsUsageLimit", Migration0075],
   [76, "AuthSessionRotation", Migration0076],
   [77, "ThreadWorkspaceLifecycle", Migration0077],
-  [78, "WorktreePullRequestLinks", Migration0078],
+  [78, "ManagedWorktreeNaming", Migration0078],
+  [79, "WorktreeNotes", Migration0079],
+  [80, "ProjectKindAndRelocations", Migration0080],
+  [81, "NotesDocuments", Migration0081],
+  [82, "WorktreePullRequestLinks", Migration0082],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>
@@ -426,6 +438,16 @@ export const repairAuthSessionRotationColumns = Effect.fn("repairAuthSessionRota
   },
 );
 
+// Project kinds and the chat relocation journal: run 080 again as a repair when another
+// branch's 080 (or a later id) was recorded first.
+export const repairProjectKindAndRelocations = Effect.fn("repairProjectKindAndRelocations")(
+  function* () {
+    if (yield* ensureProjectKindAndRelocations) {
+      yield* Effect.log("Repaired project kind column and relocation journal");
+    }
+  },
+);
+
 // Trash and retained workspace records: run 077 again as a repair when a later id was
 // recorded first (parallel branches claim the same next id).
 export const repairThreadWorkspaceLifecycleColumns = Effect.fn(
@@ -436,7 +458,7 @@ export const repairThreadWorkspaceLifecycleColumns = Effect.fn(
   }
 });
 
-// Workspace pull request links: run 078 again as a repair when a later id was
+// Workspace pull request links: run 082 again as a repair when a later id was
 // recorded first (parallel branches claim the same next id).
 export const repairWorktreePullRequestLinksColumn = Effect.fn(
   "repairWorktreePullRequestLinksColumn",
@@ -594,6 +616,20 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
     yield* repairThreadWorkspaceLifecycleColumns();
   }
   if (toMigrationInclusive === undefined || toMigrationInclusive >= 78) {
+    yield* ensureManagedWorktreeNaming;
+  }
+  // Repair: 079 is skipped by the migrator when a later number was recorded first, including
+  // development databases that recorded projectless chats' schema as 079 before it moved to 080.
+  if (toMigrationInclusive === undefined || toMigrationInclusive >= 79) {
+    yield* ensureWorktreeNotesTable;
+  }
+  if (toMigrationInclusive === undefined || toMigrationInclusive >= 80) {
+    yield* repairProjectKindAndRelocations();
+  }
+  if (toMigrationInclusive === undefined || toMigrationInclusive >= 81) {
+    yield* ensureNotesDocumentsTable;
+  }
+  if (toMigrationInclusive === undefined || toMigrationInclusive >= 82) {
     yield* repairWorktreePullRequestLinksColumn();
   }
   yield* Effect.log("Migrations ran successfully").pipe(

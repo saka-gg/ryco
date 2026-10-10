@@ -1,7 +1,9 @@
 import { LocalTaskServiceLive } from "./tasks/LocalTaskService.ts";
+import { WorktreeNotesServiceLive } from "./notes/WorktreeNotesService.ts";
 import { DailyRecapQueryLive } from "./statistics/DailyRecapQuery.ts";
 import { StorageServiceLive } from "./storage/StorageService.ts";
 import { WorkspaceLifecycleLive } from "./workspace/WorkspaceLifecycle.ts";
+import { ChatFoldersLive } from "./project/chatFolders.ts";
 import { ProviderProtectedPathsLive } from "./storage/providerProtection.ts";
 import { SessionImportLive } from "./imports/SessionImport.ts";
 import { CompletionReturnRepositoryLive } from "./persistence/Layers/AgentControlCompletionReturns.ts";
@@ -119,6 +121,7 @@ import { AtlassianConnectionRepositoryLive } from "./persistence/Layers/Atlassia
 import { AtlassianResourceRepositoryLive } from "./persistence/Layers/AtlassianResources.ts";
 import { ProjectAtlassianLinkRepositoryLive } from "./persistence/Layers/ProjectAtlassianLinks.ts";
 import { ProjectionProjectRepositoryLive } from "./persistence/Layers/ProjectionProjects.ts";
+import { ProjectRelocationRepositoryLive } from "./persistence/Layers/ProjectRelocations.ts";
 import { ProjectionWorktreeRepositoryLive } from "./persistence/Layers/ProjectionWorktrees.ts";
 import { AgentControlAuditRepositoryLive } from "./persistence/Layers/AgentControlAudit.ts";
 import { AgentControlOperationRepositoryLive } from "./persistence/Layers/AgentControlOperations.ts";
@@ -127,6 +130,7 @@ import { AgentControlExternalRepositoryLive } from "./persistence/Layers/AgentCo
 import { AgentControlAutomationRepositoryLive } from "./persistence/Layers/AgentControlAutomations.ts";
 import { AgentControlMcpInstallationRepositoryLive } from "./persistence/Layers/AgentControlMcpInstallation.ts";
 import { AgentControlMcpServerLive } from "./agentControl/Layers/AgentControlMcpServer.ts";
+import { HtmlRenderLive } from "./htmlRender/HtmlRenderLive.ts";
 import { AgentControlOperationStoreLive } from "./agentControl/Layers/AgentControlOperationStore.ts";
 import { AgentControlPolicyLive } from "./agentControl/Layers/AgentControlPolicy.ts";
 import { AgentControlProposalEventsLive } from "./agentControl/Layers/AgentControlProposalEvents.ts";
@@ -415,7 +419,10 @@ const RuntimeCoreBaseDependenciesLive = RuntimeFeatureLayerLive.pipe(
   Layer.provideMerge(AgentControlLayerLive),
   Layer.provideMerge(PersistenceLayerLive),
   Layer.provideMerge(ProjectionWorktreeRepositoryLive),
-  Layer.provideMerge(ProjectionProjectRepositoryLive),
+  // With the chat-promotion journal: written by "Turn into project…", settled at startup.
+  Layer.provideMerge(
+    Layer.mergeAll(ProjectionProjectRepositoryLive, ProjectRelocationRepositoryLive),
+  ),
   Layer.provideMerge(KeybindingsLive),
   Layer.provideMerge(ProviderRegistryLive),
   // The instance registry is the new routing keystone — text generation,
@@ -487,6 +494,7 @@ const RuntimeDependenciesLive = RestartContinuationLive.pipe(
 const RuntimeServicesLive = Layer.mergeAll(
   DailyRecapQueryLive,
   LocalTaskServiceLive,
+  WorktreeNotesServiceLive,
   StorageServiceLive.pipe(Layer.provide(ProviderProtectedPathsLive)),
   SessionImportLive,
   AutomationCentreLive.pipe(
@@ -496,6 +504,9 @@ const RuntimeServicesLive = Layer.mergeAll(
   ),
   ServerRuntimeStartupLive,
   AgentControlMcpServerLive.pipe(
+    // HTML render tools exist only on the private listener; the external
+    // endpoint below never sees this service.
+    Layer.provide(HtmlRenderLive),
     Layer.provideMerge(AgentControlDiagnosticsServiceLive),
     Layer.provideMerge(AgentControlActionValidatorLive),
     Layer.provideMerge(AgentControlProjectPlansLive),
@@ -530,6 +541,9 @@ const RuntimeServicesLive = Layer.mergeAll(
     Layer.provideMerge(OrchestrationCommandApplicationLive),
   ),
 ).pipe(
+  // "No project" chat folders and the chats capability clients read from the server config.
+  // Beneath the services so startup can clean up chats that never got a conversation.
+  Layer.provideMerge(ChatFoldersLive),
   // One lifecycle authority for sidebar, Inbox, workspace management and Agent Control.
   Layer.provideMerge(WorkspaceLifecycleLive),
   Layer.provideMerge(RuntimeDependenciesLive),

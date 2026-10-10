@@ -6,6 +6,8 @@ import {
   type UsageLimitStatus,
 } from "@ryco/client-runtime/state/threads";
 import { scopedThreadKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
+import { CHAT_WORKSPACE_LABEL, projectDisplayLabel } from "@ryco/client-runtime/state/composer";
+import { isChatProject } from "@ryco/shared/projectKind";
 import type { SavedEnvironmentRuntimeState } from "@ryco/client-runtime/connection";
 import type { WsConnectionUiState } from "@ryco/client-runtime/rpc";
 import { PROVIDER_OPTIONS } from "@ryco/client-runtime/state/session";
@@ -177,6 +179,8 @@ export interface InboxSidebarRow {
   readonly machineLabel: string;
   readonly projectLabel: string;
   readonly project: Project | null;
+  /** The thread is a "No project" chat (its project is a chat folder). */
+  readonly isChat: boolean;
   readonly isWorktree: boolean;
   readonly rankingModelLabel: string | null;
   readonly workspaceLabel: string;
@@ -470,6 +474,7 @@ function sectionKey(
 }
 
 const NO_DELEGATED_CHILDREN: ReadonlyArray<InboxSidebarRow> = [];
+const UNKNOWN_PROJECT_LABEL = "Unknown project";
 
 /**
  * Folds quiet delegated children under their topmost visible host (spec D7/D8).
@@ -633,7 +638,10 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
   const threadEnvironmentIds = new Set(input.threads.map((thread) => thread.environmentId));
   const singleEnvironment = threadEnvironmentIds.size <= 1;
   const projectNameByKey = new Map(
-    input.projects.map((project) => [`${project.environmentId}:${project.id}`, project.name]),
+    input.projects.map((project) => [
+      `${project.environmentId}:${project.id}`,
+      projectDisplayLabel(project, UNKNOWN_PROJECT_LABEL),
+    ]),
   );
   const threadProjectNames = new Set(
     input.threads.map(
@@ -649,9 +657,12 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
     const project = entry.project;
     const worktree = entry.worktree;
     const machineLabel = environment?.label ?? "Unknown machine";
-    const projectLabel = project?.name ?? "Unknown project";
-    const workspaceLabel =
-      worktree?.title ?? worktree?.branch ?? thread.branch ?? "Local workspace";
+    const isChat = isChatProject(project);
+    // A chat's project is its folder, not something to name: chats read "No project".
+    const projectLabel = projectDisplayLabel(project, UNKNOWN_PROJECT_LABEL);
+    const workspaceLabel = isChat
+      ? CHAT_WORKSPACE_LABEL
+      : (worktree?.title ?? worktree?.branch ?? thread.branch ?? "Local workspace");
     const contextLabel = `${machineLabel} · ${projectLabel} · ${workspaceLabel}`;
     const state = resolveThreadState(thread, environment, deliveryUnknownThreadKeys, nowMs);
     const usageLimit = state === "limited" ? deriveUsageLimitStatus(thread, nowMs) : null;
@@ -690,6 +701,7 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
       machineLabel,
       projectLabel,
       project: project ?? null,
+      isChat,
       isWorktree: Boolean(worktree?.worktreePath ?? thread.worktreePath),
       rankingModelLabel: modelDisplayName(entry.focus?.ranking?.modelSelection, environment),
       workspaceLabel,

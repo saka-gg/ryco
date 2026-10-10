@@ -291,6 +291,10 @@ export class HostedRelayAttemptFactory {
   #activeAttemptId: number | null = null;
   #activeSocket: unknown = null;
   #requiresClientRecreation = false;
+  #revision = 0;
+  #preparation = 0;
+  #disposed = false;
+  #retryable = true;
 
   constructor(binding: HostedRelayAttemptBinding = defaultBinding()) {
     this.#binding = binding;
@@ -299,16 +303,30 @@ export class HostedRelayAttemptFactory {
   async nextUrl(): Promise<string> {
     const nodeId = this.#binding.nodeId();
     const generation = this.#binding.generation();
-    if (!nodeId || generation === null || !this.#binding.isAuthenticated()) {
+    if (
+      this.#disposed ||
+      !this.#retryable ||
+      !nodeId ||
+      generation === null ||
+      !this.#binding.isAuthenticated()
+    ) {
       throw new Error("No authorized hosted node is selected.");
     }
+    const revision = this.#revision;
+    const preparation = ++this.#preparation;
+    const isCurrent = () =>
+      !this.#disposed &&
+      revision === this.#revision &&
+      preparation === this.#preparation &&
+      this.#binding.isCurrent(generation) &&
+      this.#binding.nodeId() === nodeId;
     this.#activeGeneration = generation;
     this.#binding.transportStatus(generation, "requesting-ticket");
     this.#discardPendingTicket();
     let preparedSocketContext: unknown;
     try {
       preparedSocketContext = await this.#binding.prepareSocketContext?.();
-      if (!this.#binding.isCurrent(generation)) {
+      if (!isCurrent()) {
         throw new Error("Hosted node selection changed.");
       }
       const issued = this.#binding.issueRelayAttempt
@@ -322,7 +340,7 @@ export class HostedRelayAttemptFactory {
             preparedSocketContext,
           };
       preparedSocketContext = undefined;
-      if (!this.#binding.isCurrent(generation)) {
+      if (!isCurrent()) {
         this.#disposeSocketContext(issued.preparedSocketContext);
         throw new Error("Hosted node selection changed.");
       }
@@ -336,13 +354,16 @@ export class HostedRelayAttemptFactory {
       return this.#binding.relayUrl?.() ?? getHostedRuntimeConfiguration().relayUrl();
     } catch (error) {
       this.#disposeSocketContext(preparedSocketContext);
+      if (!isCurrent()) throw error;
       if (error instanceof HostedHubApiError && error.status === 401) {
         void hostedHubController.expireSession();
       } else if (error instanceof HostedRelayPreparationError) {
+        this.#retryable = error.failure.retryable;
         this.#lastRetryAfterMs = error.failure.retryAfterMs;
         this.#binding.failure(generation, error.failure);
       } else if (error instanceof HostedHubApiError) {
         const failure = ticketFailure(error);
+        this.#retryable = failure.retryable;
         this.#lastRetryAfterMs = failure.retryAfterMs;
         this.#binding.failure(generation, failure);
       }
@@ -355,6 +376,8 @@ export class HostedRelayAttemptFactory {
     this.#pendingTicket = null;
     if (
       !pending ||
+      this.#disposed ||
+      !this.#binding.isCurrent(pending.generation) ||
       pending.used ||
       pending.expiresAt <= getHostedRuntimeConfiguration().timers.now()
     ) {
@@ -368,7 +391,12 @@ export class HostedRelayAttemptFactory {
     const attemptId = this.#nextAttemptId + 1;
     this.#nextAttemptId = attemptId;
     this.#activeAttemptId = attemptId;
-    const isCurrentAttempt = () => this.#activeAttemptId === attemptId;
+    const revision = this.#revision;
+    const isCurrentAttempt = () =>
+      !this.#disposed &&
+      revision === this.#revision &&
+      this.#activeAttemptId === attemptId &&
+      this.#binding.isCurrent(generation);
     const callbacks = {
       onTransportStatus: (status: HostedRelayTransportStatus) => {
         if (!isCurrentAttempt()) return;
@@ -386,6 +414,7 @@ export class HostedRelayAttemptFactory {
       },
       onFailure: (failure: HostedRelayFailure) => {
         if (!isCurrentAttempt()) return;
+        this.#retryable = failure.retryable;
         this.#lastRetryAfterMs = failure.retryAfterMs;
         this.#reconnect.closed();
         if (this.#pendingRequests.size > 0) {
@@ -433,9 +462,24 @@ export class HostedRelayAttemptFactory {
       isSocketCurrent: (socket) => socket === this.#activeSocket,
       preserveSocketPath: true,
       retryTransientErrors: false,
-      reconnectMaxRetries: 1_000_000,
+      persistentReconnect: true,
+      recordGlobalConnectionState: false,
+      onSessionStart: () => {
+        this.#disposed = false;
+        this.#retryable = true;
+        this.#invalidateAttempt();
+      },
+      onDispose: () => {
+        this.#disposed = true;
+        this.#invalidateAttempt();
+        this.#pendingRequests.clear();
+      },
+      isTerminalUrlError: () => this.#disposed || !this.#retryable,
       shouldReconnect: () =>
-        this.#activeGeneration !== null && this.#binding.shouldReconnect(this.#activeGeneration),
+        !this.#disposed &&
+        this.#retryable &&
+        this.#activeGeneration !== null &&
+        this.#binding.shouldReconnect(this.#activeGeneration),
       authorizeRequest: (info) => this.#binding.authorizeRequest(info),
       ...(this.#binding.subscribeAdmissionChanges
         ? { subscribeAdmissionChanges: this.#binding.subscribeAdmissionChanges }
@@ -482,15 +526,25 @@ export class HostedRelayAttemptFactory {
     return this.#pendingRequests.size > 0;
   }
 
-  reset(): void {
+  #invalidateAttempt(): void {
+    this.#revision += 1;
     this.#discardPendingTicket();
+    this.#activeGeneration = null;
+    this.#activeAttemptId = null;
+    this.#activeSocket = null;
+    this.#requiresClientRecreation = false;
+  }
+
+  reset(): void {
+    this.#invalidateAttempt();
+    this.#disposed = false;
+    this.#retryable = true;
     this.#pendingRequests.clear();
     this.#lastRetryAfterMs = undefined;
     this.#activeGeneration = null;
     this.#activeAttemptId = null;
     this.#activeSocket = null;
     this.#requiresClientRecreation = false;
-    this.#nextAttemptId = 0;
     this.#reconnect.reset();
   }
 

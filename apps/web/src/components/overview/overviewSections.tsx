@@ -1,4 +1,4 @@
-import { prefersExternalPullRequestLink } from "../../pullRequestsRoute";
+import { handleInAppLinkClick } from "../../pullRequestsRoute";
 import {
   ArrowDownIcon,
   ArrowUpIcon,
@@ -42,129 +42,22 @@ import { Button } from "../ui/button";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 
+import { pickChangesItem } from "./overviewSummary.logic";
 import type {
   OverviewChangedFile,
+  OverviewFileStatus,
   OverviewLayoutProps,
-  OverviewPanelItem,
   OverviewPullRequestCheckRun,
 } from "./overviewTypes";
 
-/* ================================================================== *
- * Helpers + derived summary
- * ================================================================== */
-
-export interface OverviewSummary {
-  additions: number;
-  deletions: number;
-  hasDiff: boolean;
-  fileCount: number;
-  checksTotal: number;
-  checksPassed: number;
-  checksFailed: number;
-  checksRunning: number;
-  planTotal: number;
-  planDone: number;
-  agentsTotal: number;
-  agentsRunning: number;
-  refName: string | null;
-  aheadCount: number;
-  behindCount: number;
-}
-
-/** Compute aggregated metrics (diff, checks, plan progress, agent status) from layout props for rendering badges and summaries. */
-export function getOverviewSummary(props: OverviewLayoutProps): OverviewSummary {
-  let additions = 0;
-  let deletions = 0;
-  let fileCount = 0;
-  let hasDiff = false;
-  if (props.changes) {
-    additions = props.changes.insertions;
-    deletions = props.changes.deletions;
-    fileCount = props.changes.files.length;
-    hasDiff = fileCount > 0 || additions > 0 || deletions > 0;
-  } else {
-    for (const item of props.overviewItems ?? []) {
-      if (typeof item.additions === "number") {
-        additions += item.additions;
-        hasDiff = true;
-      }
-      if (typeof item.deletions === "number") {
-        deletions += item.deletions;
-        hasDiff = true;
-      }
-    }
-  }
-  const runs = props.pullRequest?.latestRuns ?? [];
-  let checksPassed = 0;
-  let checksFailed = 0;
-  let checksRunning = 0;
-  for (const run of runs) {
-    if (run.tone === "success") checksPassed += 1;
-    else if (run.tone === "failure" || run.tone === "error") checksFailed += 1;
-    else if (run.tone === "running") checksRunning += 1;
-  }
-  const steps = props.activePlan?.steps ?? [];
-  const agents = props.subagents ?? [];
-  // Progress numerator counts steps that have been *reached* — completed plus the
-  // currently in-progress step — to mirror the lab's "N of M" / percentage (e.g.
-  // 2 done + 1 active of 5 = 3/5 = 60%). The per-step markers still key off the
-  // raw status, so only completed steps render a check.
-  const planReached = steps.filter(
-    (step) => step.status === "completed" || step.status === "inProgress",
-  ).length;
-  return {
-    additions,
-    deletions,
-    hasDiff,
-    fileCount,
-    checksTotal: runs.length,
-    checksPassed,
-    checksFailed,
-    checksRunning,
-    planTotal: steps.length,
-    planDone: planReached,
-    agentsTotal: agents.length,
-    agentsRunning: agents.filter((agent) => agent.status === "running").length,
-    refName: props.changes?.refName ?? null,
-    aheadCount: props.changes?.aheadCount ?? 0,
-    behindCount: props.changes?.behindCount ?? 0,
-  };
-}
-
-/** Check if the panel has no meaningful content to display. */
-export function isOverviewEmpty(props: OverviewLayoutProps): boolean {
-  return (
-    !props.activePlan &&
-    !props.activeProposedPlan?.planMarkdown &&
-    (props.subagents?.length ?? 0) === 0 &&
-    (props.overviewItems?.length ?? 0) === 0 &&
-    (props.changes?.files.length ?? 0) === 0 &&
-    !props.pullRequest &&
-    !props.sourceControlActions &&
-    !props.branchControl
-  );
-}
-
-/** Extract the changes item from the overview items array. */
-export function pickChangesItem(
-  overviewItems: ReadonlyArray<OverviewPanelItem> | undefined,
-): OverviewPanelItem | undefined {
-  return overviewItems?.find((item) => item.icon === "changes");
-}
-
-/** Calculate plan completion percentage (0–100). */
-export function planPercent(summary: OverviewSummary): number {
-  if (summary.planTotal === 0) return 0;
-  return Math.round((summary.planDone / summary.planTotal) * 100);
-}
-
-/** Check if the pull request has any review data (approved or requested). */
-export function hasReviews(pullRequest: { reviewsApproved?: number; reviewsRequested?: number }) {
-  return (
-    typeof pullRequest.reviewsApproved === "number" ||
-    typeof pullRequest.reviewsRequested === "number"
-  );
-}
+export {
+  getOverviewSummary,
+  hasReviews,
+  isOverviewEmpty,
+  pickChangesItem,
+  planPercent,
+  type OverviewSummary,
+} from "./overviewSummary.logic";
 
 /* ================================================================== *
  * Primitives
@@ -215,6 +108,13 @@ export function DiffStat({
     </span>
   );
 }
+
+/**
+ * `className` for a {@link DiffStat} in dense rows (the lab's `.ds`): 10.5px
+ * medium mono with the lighter `-foreground` tones.
+ */
+export const COMPACT_DIFF_STAT_CLASS =
+  "gap-[5px] text-[10.5px] font-medium [&>:first-child]:text-success-foreground [&>:last-child]:text-destructive-foreground";
 
 /** The `.spark` stacked add/del bar. */
 export function SparkBar({
@@ -453,12 +353,7 @@ export function SectionLane({
             rel="noreferrer"
             aria-label={externalLink.ariaLabel}
             title={externalLink.ariaLabel}
-            onClick={(event) => {
-              const openInApp = externalLink.onOpenInApp;
-              if (!openInApp || prefersExternalPullRequestLink(event)) return;
-              event.preventDefault();
-              openInApp();
-            }}
+            onClick={(event) => handleInAppLinkClick(event, externalLink.onOpenInApp)}
             className="absolute top-1/2 right-7 z-10 grid size-7 -translate-y-1/2 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring"
           >
             <ExternalLinkIcon className="size-3" />
@@ -589,6 +484,74 @@ export function ChangesContent({
   return <p className="px-3 py-1.5 text-[12px] text-muted-foreground">No file changes.</p>;
 }
 
+const FILE_STATUS_TONE: Partial<Record<OverviewFileStatus, string>> = {
+  M: "text-warning-foreground",
+  A: "text-success-foreground",
+  D: "text-destructive-foreground",
+};
+
+function ChangedFileRow({ file }: { file: OverviewChangedFile }) {
+  const slash = file.path.lastIndexOf("/");
+  const name = file.path.slice(slash + 1);
+  const directory = file.path.slice(0, slash + 1);
+  return (
+    <li
+      className="flex h-6 items-center gap-[7px] rounded-[5px] px-1 transition-colors hover:bg-muted"
+      title={file.path}
+    >
+      <span
+        className={cn(
+          "grid w-3 shrink-0 place-items-center font-mono text-[10px] font-bold",
+          file.status ? (FILE_STATUS_TONE[file.status] ?? "text-muted-foreground") : undefined,
+        )}
+      >
+        {file.status ?? (
+          <span aria-hidden="true" className="size-1 rounded-full bg-muted-foreground/60" />
+        )}
+      </span>
+      <span className="flex min-w-0 flex-1 gap-[5px] overflow-hidden whitespace-nowrap">
+        <span className="max-w-full shrink-0 truncate">{name}</span>
+        {directory ? (
+          <span className="min-w-0 truncate text-muted-foreground/60">{directory}</span>
+        ) : null}
+      </span>
+      <DiffStat
+        additions={file.insertions}
+        deletions={file.deletions}
+        className={COMPACT_DIFF_STAT_CLASS}
+      />
+    </li>
+  );
+}
+
+/**
+ * Dense per-file rows (the lab's `.fr`): status letter, file name, dimmed
+ * directory and diff stat. Rows past `maxRows` collapse into a "+N more" line.
+ */
+export function ChangedFileList({
+  files,
+  maxRows,
+}: {
+  files: ReadonlyArray<OverviewChangedFile>;
+  maxRows?: number | undefined;
+}) {
+  const visible = maxRows === undefined ? files : files.slice(0, Math.max(0, maxRows));
+  const hiddenCount = files.length - visible.length;
+  if (files.length === 0) return null;
+  return (
+    <>
+      <ul className="flex flex-col gap-px" data-slot="overview-changed-file-list">
+        {visible.map((file) => (
+          <ChangedFileRow key={file.path} file={file} />
+        ))}
+      </ul>
+      {hiddenCount > 0 ? (
+        <p className="px-1 py-[3px] text-[11px] text-muted-foreground/60">+{hiddenCount} more</p>
+      ) : null}
+    </>
+  );
+}
+
 /* ================================================================== *
  * Plan
  * ================================================================== */
@@ -651,13 +614,17 @@ export function PlanSteps({ activePlan }: { activePlan: ActivePlanState | null }
 type ProposedPlanProps = Pick<
   OverviewLayoutProps,
   "activeProposedPlan" | "environmentId" | "markdownCwd" | "workspaceRoot"
->;
+> & {
+  /** Accessible name of the actions menu trigger; distinct per surface so queries stay unambiguous. */
+  actionsLabel?: string;
+};
 
 export function ProposedPlanDisclosure({
   activeProposedPlan,
   environmentId,
   markdownCwd,
   workspaceRoot,
+  actionsLabel = "Plan actions",
 }: ProposedPlanProps) {
   const [proposedPlanExpanded, setProposedPlanExpanded] = useState(false);
   const [isSavingToWorkspace, setIsSavingToWorkspace] = useState(false);
@@ -737,7 +704,7 @@ export function ProposedPlanDisclosure({
                 size="icon-xs"
                 variant="ghost"
                 className="shrink-0 text-muted-foreground hover:text-foreground/70"
-                aria-label="Plan actions"
+                aria-label={actionsLabel}
               />
             }
           >
@@ -770,7 +737,7 @@ export function ProposedPlanDisclosure({
  * Subagents
  * ================================================================== */
 
-function subagentStatusLabel(status: ThreadSubagentView["status"]): string {
+export function subagentStatusLabel(status: ThreadSubagentView["status"]): string {
   if (status === "running") return "Working";
   if (status === "failed") return "Needs review";
   if (status === "finished") return "Finished";
@@ -904,7 +871,7 @@ export function ChecksContent({
   );
 }
 
-function reviewsLabel(approved?: number, requested?: number): string | null {
+export function reviewsLabel(approved?: number, requested?: number): string | null {
   const parts: string[] = [];
   if (typeof approved === "number") parts.push(`${approved} approved`);
   if (typeof requested === "number") parts.push(`${requested} requested`);
@@ -1014,11 +981,9 @@ function OtherPullRequestRow({
         aria-label={name}
         title={link.title ?? undefined}
         className={OTHER_PULL_REQUEST_ROW_CLASS}
-        onClick={(event) => {
-          if (!onOpenInApp || prefersExternalPullRequestLink(event)) return;
-          event.preventDefault();
-          onOpenInApp(link.number);
-        }}
+        onClick={(event) =>
+          handleInAppLinkClick(event, onOpenInApp ? () => onOpenInApp(link.number) : undefined)
+        }
       >
         {content}
       </a>

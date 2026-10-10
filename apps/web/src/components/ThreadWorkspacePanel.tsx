@@ -11,6 +11,7 @@ import {
   workspaceDiscoversPullRequests,
 } from "@ryco/shared/worktreePullRequests";
 import {
+  AppWindowIcon,
   ArrowLeftIcon,
   BotIcon,
   ChevronDownIcon,
@@ -54,8 +55,13 @@ import {
   buildOpenAgentSearch,
   buildOpenAgentsSearch,
   buildOpenPullRequestSearch,
+  buildOpenRenderSearch,
   buildOpenWorkspaceSearch,
   buildCloseWorkspacePanelSearch,
+  parseWorkspacePullRequestReveal,
+  parseWorkspaceRenderKey,
+  stripWorkspaceRevealSearch,
+  workspaceAgentKeyForRuntimeAgent,
 } from "../workspaceRouteSearch";
 import { buildOpenRightPanelTabSearch, isRightPanelTabMode } from "../rightPanelTabs.logic";
 import {
@@ -67,6 +73,8 @@ import {
   type ThreadSubagentView,
 } from "../threadWorkspaceViewModel";
 import { AgentsPanel } from "./AgentsPanel";
+import { HtmlRenderPanel } from "./chat/HtmlRenderPanel";
+import { useWorkspaceHtmlRender } from "./chat/useWorkspaceHtmlRender";
 import { useThreadChangeRequest } from "./chat/useThreadChangeRequest";
 import { KeyHint } from "./pullRequests/primitives";
 import { useWorkspacePullRequestEditing } from "./worktrees/useWorkspacePullRequestEditing";
@@ -163,6 +171,7 @@ function TabIcon(props: { tab: WorkspaceTab; active: boolean }) {
   if (props.tab.key === "agents") {
     return <BotIcon className={className} />;
   }
+  if (props.tab.mode === "render") return <AppWindowIcon className={className} />;
   return <FileTextIcon className={className} />;
 }
 
@@ -874,6 +883,8 @@ export default function ThreadWorkspacePanel(props: {
   panelMode: RightPanelMode | null;
   openedPanelModes: ReadonlyArray<RightPanelMode>;
   openedAgentKeys: ReadonlyArray<string>;
+  /** The page tab's render while the page tab is open but not shown. */
+  openedRenderKey?: string | null;
   onClosePanelTab: (input: { mode: RightPanelMode; agentKey?: string }) => void;
   /** Inline presentation only: the panel has taken over the whole workspace. */
   maximized?: boolean;
@@ -982,6 +993,36 @@ export default function ThreadWorkspacePanel(props: {
     threadChangeRequest.worktree !== null &&
     threadChangeRequest.links.length > 0 &&
     (threadChangeRequest.links.length >= 2 || pullRequestEditing.ready);
+  // One-shot deep links: each tab acts on its key once, then `clearReveal`
+  // strips it, so a repeat link fires again and history never replays it.
+  const pullRequestReveal = useMemo(
+    () =>
+      search.workspaceTab === "pullRequest" && search.workspacePrReveal
+        ? parseWorkspacePullRequestReveal(search.workspacePrReveal)
+        : null,
+    [search.workspacePrReveal, search.workspaceTab],
+  );
+  const agentsFocusWorkflowId =
+    search.workspaceTab === "agents" ? (search.workspaceAgentsWorkflow ?? null) : null;
+  // One page tab: the render the route shows, else the one it showed last.
+  const renderKey =
+    search.workspaceTab === "render" && search.workspaceRender
+      ? search.workspaceRender
+      : (props.openedRenderKey ?? null);
+  // Looked up further back only while the page tab is the one shown.
+  const workspaceRender = useWorkspaceHtmlRender({
+    environmentId: workspaceThreadRef?.environmentId ?? null,
+    threadId: workspaceThreadRef ? (workspaceThreadRef.threadId as ThreadId) : null,
+    thread: activeThread,
+    renderKey,
+    lookUp: activeMode === "render" && !isPhoneSurface,
+  });
+  const renderTitle =
+    renderKey && parseWorkspaceRenderKey(renderKey)
+      ? workspaceRender.status === "found"
+        ? workspaceRender.render.htmlRender.title
+        : "Page"
+      : null;
   const tabs = useMemo(() => {
     const built = buildTabs({
       subagents,
@@ -990,6 +1031,7 @@ export default function ThreadWorkspacePanel(props: {
       openedPanelModes,
       groupAgents: !isPhoneSurface,
       pullRequestNumber,
+      render: renderKey && renderTitle ? { renderKey, title: renderTitle } : null,
     });
     // The web phone tier is frozen; native mobile owns future phone surfaces.
     return isPhoneSurface
@@ -998,7 +1040,8 @@ export default function ThreadWorkspacePanel(props: {
             tab.mode !== "agents" &&
             tab.mode !== "simulator" &&
             tab.mode !== "browser" &&
-            tab.mode !== "pullRequest",
+            tab.mode !== "pullRequest" &&
+            tab.mode !== "render",
         )
       : built;
   }, [
@@ -1007,6 +1050,8 @@ export default function ThreadWorkspacePanel(props: {
     openedPanelModes,
     props.openedAgentKeys,
     pullRequestNumber,
+    renderKey,
+    renderTitle,
     subagents,
   ]);
   // A phone agents deep link falls back to the launcher with the agents tab
@@ -1016,7 +1061,10 @@ export default function ThreadWorkspacePanel(props: {
     activeMode === "agent"
       ? agentKey
       : isPhoneSurface &&
-          (activeMode === "agents" || activeMode === "browser" || activeMode === "pullRequest")
+          (activeMode === "agents" ||
+            activeMode === "browser" ||
+            activeMode === "pullRequest" ||
+            activeMode === "render")
         ? null
         : activeMode;
 
@@ -1085,6 +1133,10 @@ export default function ThreadWorkspacePanel(props: {
         navigateSearch((previous) => buildOpenAgentSearch(previous, tab.agentKey));
         return;
       }
+      if (tab.mode === "render") {
+        navigateSearch((previous) => buildOpenRenderSearch(previous, tab.renderKey));
+        return;
+      }
       navigateSearch((previous) => buildOpenRightPanelTabSearch(previous, tab.mode));
     },
     [activeMode, navigateSearch],
@@ -1092,11 +1144,13 @@ export default function ThreadWorkspacePanel(props: {
   const openLauncher = useCallback(() => {
     navigateSearch((previous) => buildOpenWorkspaceSearch(previous));
   }, [navigateSearch]);
+  const clearReveal = useCallback(
+    () => navigateSearch((previous) => stripWorkspaceRevealSearch(previous)),
+    [navigateSearch],
+  );
   const openRuntimeAgent = useCallback(
     (runtimeAgentId: string) => {
-      const agentKey = runtimeAgentId.startsWith("subagent:")
-        ? runtimeAgentId
-        : `subagent:${runtimeAgentId}`;
+      const agentKey = workspaceAgentKeyForRuntimeAgent(runtimeAgentId);
       navigateSearch((previous) =>
         isPhoneSurface
           ? buildOpenAgentSearch(previous, agentKey)
@@ -1423,6 +1477,8 @@ export default function ThreadWorkspacePanel(props: {
                   ? openPullRequestLinkPicker
                   : undefined
               }
+              reveal={pullRequestReveal}
+              onRevealHandled={clearReveal}
             />
           ) : activeMode === "simulator" && !isPhoneSurface ? (
             <SimulatorPanel
@@ -1439,7 +1495,17 @@ export default function ThreadWorkspacePanel(props: {
               onOpenAgent={openRuntimeAgent}
               subagents={subagents}
               selectedAgentId={agentKey}
+              focusWorkflowId={agentsFocusWorkflowId}
+              onFocusWorkflowHandled={clearReveal}
               onBack={() => navigateSearch((previous) => buildOpenAgentsSearch(previous))}
+            />
+          ) : activeMode === "render" && renderKey && !isPhoneSurface ? (
+            // The phone tier keeps its dialog; a page link there lands on the launcher.
+            <HtmlRenderPanel
+              environmentId={workspaceThreadRef?.environmentId ?? null}
+              threadId={workspaceThreadRef ? (workspaceThreadRef.threadId as ThreadId) : null}
+              renderKey={renderKey}
+              resolution={workspaceRender}
             />
           ) : activeMode === "agent" ? (
             <AgentThreadPanel subagent={activeAgent} agentKey={agentKey} />

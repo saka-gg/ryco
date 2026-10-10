@@ -7,7 +7,7 @@ import {
   WS_METHODS,
 } from "@ryco/contracts";
 import { createModelCapabilities, createModelSelection } from "@ryco/shared/model";
-import { page } from "vite-plus/test/browser";
+import { page, userEvent } from "vite-plus/test/browser";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { useComposerDraftStore, DraftId } from "../composerDraftStore";
 import { useTerminalStateStore } from "../terminalStateStore";
@@ -56,6 +56,34 @@ import {
 
 // Hoisted per suite: a mock registered from the shared helpers runs after this file's static imports.
 vi.mock("../lib/gitStatusState", () => import("../../test/gitStatusStateMock"));
+
+/**
+ * Opens the overview from the new-thread hero (where it starts suppressed) and
+ * expands the Crown card on its Branch section, which carries the thread's
+ * full branch selector.
+ */
+async function openCrownBranchSection(): Promise<HTMLElement> {
+  const overviewToggle = await waitForElement(
+    () => document.querySelector<HTMLButtonElement>('button[aria-label="Toggle overview panel"]'),
+    "Unable to find the overview toggle.",
+  );
+  overviewToggle.click();
+  const branchIcon = await waitForElement(
+    () =>
+      document.querySelector<HTMLElement>(
+        '[data-slot="crown-overview"][data-state="open"] [data-slot="crown-rail"] [data-nav-key="branch"]',
+      ),
+    "Unable to find the Crown rail's Branch icon.",
+  );
+  branchIcon.click();
+  return waitForElement(
+    () =>
+      document.querySelector<HTMLElement>(
+        '[data-slot="crown-card-detail"] [data-section="branch"]',
+      ),
+    "Unable to find the Crown card's Branch section.",
+  );
+}
 
 describe("ChatView Workspace (full app)", () => {
   setupChatViewBrowserSuite();
@@ -1542,9 +1570,10 @@ describe("ChatView Workspace (full app)", () => {
     });
 
     try {
+      const branchSection = await openCrownBranchSection();
       const branchButton = await waitForElement(
         () =>
-          Array.from(document.querySelectorAll("button")).find(
+          Array.from(branchSection.querySelectorAll("button")).find(
             (button) => button.textContent?.trim() === "From main",
           ) as HTMLButtonElement | null,
         'Unable to find branch selector button with "From main".',
@@ -1654,9 +1683,10 @@ describe("ChatView Workspace (full app)", () => {
     });
 
     try {
+      const branchSection = await openCrownBranchSection();
       const branchButton = await waitForElement(
         () =>
-          Array.from(document.querySelectorAll("button")).find(
+          Array.from(branchSection.querySelectorAll("button")).find(
             (button) => button.textContent?.trim() === "From feature/selected",
           ) as HTMLButtonElement | null,
         'Unable to find branch selector button with "From feature/selected".',
@@ -1792,13 +1822,25 @@ describe("ChatView Workspace (full app)", () => {
       );
       expect(locationTrigger.textContent).toContain("existing");
 
+      // The picker no longer offers "A new worktree"; the context bar's switch
+      // above the composer is the one way in.
       locationTrigger.click();
-
       await waitForElement(
         () => document.querySelector<HTMLElement>('[data-slot="combobox-popup"]'),
         "Unable to find the work-location popup.",
       );
-      await page.getByText("A new worktree", { exact: true }).click();
+      expect(page.getByText("A new worktree", { exact: true }).query()).toBeNull();
+      await userEvent.keyboard("{Escape}");
+
+      const worktreeSwitch = await waitForElement(
+        () =>
+          document.querySelector<HTMLButtonElement>(
+            '[data-testid="new-thread-context-bar"] button[role="switch"]',
+          ),
+        "Unable to find the new-worktree switch.",
+      );
+      expect(worktreeSwitch.getAttribute("aria-checked")).toBe("false");
+      worktreeSwitch.click();
 
       await vi.waitFor(
         () => {
@@ -1814,7 +1856,7 @@ describe("ChatView Workspace (full app)", () => {
     }
   });
 
-  it("hides the overview panel on an empty thread and restores it on request", async () => {
+  it("hides the Crown rail on an empty thread and restores it on request", async () => {
     const draftId = DraftId.make("draft-empty-thread-overview");
     useComposerDraftStore.setState({
       draftThreadsByThreadKey: {
@@ -1850,12 +1892,12 @@ describe("ChatView Workspace (full app)", () => {
 
       // The overview describes a thread's history, so it stays out of the way
       // until there is one — or until the user explicitly asks for it.
-      // Visibility, not DOM presence: the sheet presentation keeps the panel
-      // mounted and only toggles whether it is shown, and the inline one plays
-      // an exit transition before unmounting.
+      // Open state plus visibility, not DOM presence: the rail stays mounted
+      // through its exit transition.
       const overviewShowing = () => {
-        const header = document.querySelector('[data-slot="overview-branch-header"]');
-        return header !== null && header.checkVisibility();
+        const crown = document.querySelector<HTMLElement>('[data-slot="crown-overview"]');
+        const rail = crown?.querySelector('nav[aria-label="Overview"]');
+        return crown?.dataset.state === "open" && rail != null && rail.checkVisibility();
       };
       await vi.waitFor(
         () => {

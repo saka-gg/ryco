@@ -23,7 +23,6 @@ import {
   OrchestrationShellSnapshot,
   OrchestrationThread,
   OrchestrationThreadHistoryError,
-  Worktree,
   WorktreePullRequestLink,
   ProjectScript,
   TurnId,
@@ -41,7 +40,7 @@ import {
   type OrchestrationThreadActivity,
   type OrchestrationThreadShell,
   ThreadPriorityProjectedRanking,
-  type OrchestrationWorktreeShell,
+  OrchestrationWorktreeShell,
   ModelSelection,
   ProjectId,
   type RepositoryIdentity,
@@ -72,6 +71,7 @@ import { ProjectionThreadProposedPlan } from "../../persistence/Services/Project
 import { ProjectionThreadSession } from "../../persistence/Services/ProjectionThreadSessions.ts";
 import { ProjectionThread } from "../../persistence/Services/ProjectionThreads.ts";
 import { RepositoryIdentityResolver } from "../../project/Services/RepositoryIdentityResolver.ts";
+import { resolveThreadWorkspaceCwd } from "../../checkpointing/Utils.ts";
 import { ORCHESTRATION_PROJECTOR_NAMES } from "./ProjectionPipeline.ts";
 import { ThreadBackgroundLivenessService } from "../ThreadBackgroundLiveness.ts";
 import { pruneStaleContextWindowActivities } from "../contextWindowActivities.ts";
@@ -128,7 +128,7 @@ const ProjectionThreadActivityDbRowSchema = ProjectionThreadActivity.mapFields(
   }),
 );
 const ProjectionThreadSessionDbRowSchema = ProjectionThreadSession;
-const ProjectionWorktreeDbRowSchema = Worktree.mapFields(
+const ProjectionWorktreeDbRowSchema = OrchestrationWorktreeShell.mapFields(
   Struct.assign({
     prIsDraft: Schema.NullOr(Schema.Number),
     // NULL on rows written before links: derived from the flat `pr_*` columns.
@@ -138,9 +138,11 @@ const ProjectionWorktreeDbRowSchema = Worktree.mapFields(
 function toWorktreeShell(
   row: Schema.Schema.Type<typeof ProjectionWorktreeDbRowSchema>,
 ): OrchestrationWorktreeShell {
+  const { relocatedFromPath, ...worktree } = row;
   const prIsDraft = row.prIsDraft === null ? null : row.prIsDraft === 1;
   return {
-    ...row,
+    ...worktree,
+    ...(relocatedFromPath ? { relocatedFromPath } : {}),
     prIsDraft,
     // Always emit the key: its presence tells clients this server tracks close times.
     prTerminalAt: row.prTerminalAt ?? null,
@@ -359,6 +361,7 @@ function mapProjectShellRow(
 ): OrchestrationProjectShell {
   return {
     id: row.projectId,
+    kind: row.kind,
     title: row.title,
     workspaceRoot: row.workspaceRoot,
     projectMetadataDir: row.projectMetadataDir,
@@ -602,6 +605,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       sql`
         SELECT
           project_id AS "projectId",
+          kind,
           title,
           workspace_root AS "workspaceRoot",
           project_metadata_dir AS "projectMetadataDir",
@@ -672,6 +676,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           title,
           branch,
           worktree_path AS "worktreePath",
+          (SELECT source_path FROM managed_worktree_relocations r
+            WHERE r.worktree_id = projection_worktrees.worktree_id AND r.project_id = projection_worktrees.project_id
+              AND r.destination_path = projection_worktrees.worktree_path AND r.state = 'complete') AS "relocatedFromPath",
           origin,
           pr_number AS "prNumber",
           issue_number AS "issueNumber",
@@ -710,6 +717,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           title,
           branch,
           worktree_path AS "worktreePath",
+          (SELECT source_path FROM managed_worktree_relocations r
+            WHERE r.worktree_id = projection_worktrees.worktree_id AND r.project_id = projection_worktrees.project_id
+              AND r.destination_path = projection_worktrees.worktree_path AND r.state = 'complete') AS "relocatedFromPath",
           origin,
           pr_number AS "prNumber",
           issue_number AS "issueNumber",
@@ -1055,6 +1065,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       sql`
         SELECT
           project_id AS "projectId",
+          kind,
           title,
           workspace_root AS "workspaceRoot",
           project_metadata_dir AS "projectMetadataDir",
@@ -1081,6 +1092,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       sql`
         SELECT
           project_id AS "projectId",
+          kind,
           title,
           workspace_root AS "workspaceRoot",
           project_metadata_dir AS "projectMetadataDir",
@@ -2177,6 +2189,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
 
               const projects: ReadonlyArray<OrchestrationProject> = projectRows.map((row) => ({
                 id: row.projectId,
+                kind: row.kind,
                 title: row.title,
                 workspaceRoot: row.workspaceRoot,
                 repositoryIdentity: repositoryIdentities.get(row.projectId) ?? null,
@@ -2359,6 +2372,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 updatedAt = maxIso(updatedAt, row.updatedAt);
                 projects.push({
                   id: row.projectId,
+                  kind: row.kind,
                   title: row.title,
                   workspaceRoot: row.workspaceRoot,
                   projectMetadataDir: row.projectMetadataDir,
@@ -2793,6 +2807,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 Effect.map((repositoryIdentity) =>
                   Option.some({
                     id: option.value.projectId,
+                    kind: option.value.kind,
                     title: option.value.title,
                     workspaceRoot: option.value.workspaceRoot,
                     projectMetadataDir: option.value.projectMetadataDir,
@@ -3288,9 +3303,28 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           a.id.localeCompare(b.id),
       );
       const checkpoint = backgroundWorkCheckpoint(orderedEvidence);
+      // Read after the window: a cwd that moved since is the one the next turn runs in.
+      const project =
+        thread.worktreePath === null
+          ? Option.getOrUndefined(
+              yield* getActiveProjectRowById({ projectId: thread.projectId }).pipe(
+                Effect.mapError(
+                  toPersistenceSqlOrDecodeError(
+                    "ProjectionSnapshotQuery.getThreadWindow:getProject:query",
+                    "ProjectionSnapshotQuery.getThreadWindow:getProject:decodeRow",
+                  ),
+                ),
+              ),
+            )
+          : undefined;
+      const workspaceCwd = resolveThreadWorkspaceCwd({
+        thread,
+        projects: project ? [{ id: project.projectId, workspaceRoot: project.workspaceRoot }] : [],
+      });
       return {
         snapshotSequence: computeSnapshotSequence(stateRows),
         thread: checkpoint ? { ...thread, activities: [...thread.activities, checkpoint] } : thread,
+        ...(workspaceCwd ? { workspaceCwd } : {}),
         history: {
           messages: createdAtHistoryPageInfo({
             threadId: input.threadId,

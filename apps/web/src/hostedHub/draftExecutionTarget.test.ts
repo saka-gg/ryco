@@ -45,6 +45,7 @@ function harness() {
     return true;
   });
   const move = vi.fn();
+  const moveToChat = vi.fn();
   const retry = vi.fn();
   const readLease = vi.fn(() => readyLease);
   const controller = createHostedDraftTargetController({
@@ -62,6 +63,7 @@ function harness() {
     readProjects: () => projects,
     canPreviewProjects: () => previewProjects,
     move,
+    moveToChat,
     retry,
   });
   const begin = (environmentId = target) =>
@@ -76,6 +78,7 @@ function harness() {
     controller,
     begin,
     move,
+    moveToChat,
     release,
     adopt,
     retry,
@@ -255,6 +258,22 @@ describe("hosted draft device switching", () => {
     await settle();
     expect(test.controller.getSnapshot()?.phase).toBe("project");
     expect(test.retry).toHaveBeenCalledWith(target);
+  });
+
+  it("turns the draft into a chat on the target only under a current lease", async () => {
+    const test = harness();
+    test.setPreviewProjects(true);
+    test.setLease(null);
+    test.begin();
+    test.controller.selectNoProject();
+    expect(test.moveToChat).not.toHaveBeenCalled();
+    expect(test.controller.getSnapshot()?.phase).toBe("connecting");
+    test.setLease(lease());
+    test.waiters[0]!(lease());
+    await settle();
+    expect(test.moveToChat).toHaveBeenCalledWith(draftId, target);
+    expect(test.move).not.toHaveBeenCalled();
+    expect(test.controller.getSnapshot()).toBeNull();
   });
 
   it("keeps the source draft after failure and allows a successful retry", async () => {

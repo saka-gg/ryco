@@ -57,6 +57,17 @@ function makeSupervisor(
         resume = null;
       };
     },
+    stateSink: {
+      prepareShellEvent: () => undefined,
+      applyShellEvent: () => undefined,
+      afterShellEventApplied: () => undefined,
+      syncServerShellSnapshot: () => undefined,
+      reconcileSnapshotDerivedState: () => undefined,
+    },
+    onShellSnapshotReceived: () => undefined,
+    onShellSnapshotCurrent: () => undefined,
+    onShellSnapshotApplied: () => undefined,
+    onShellSnapshotReady: () => undefined,
   } as unknown as EnvironmentSupervisorInput<Record>;
   const supervisor = createEnvironmentConnectionSupervisor(input);
   return {
@@ -332,5 +343,66 @@ describe("thread subscription resume", () => {
     supervisor.retainThreadDetailSubscription(remote, "thread-1" as ThreadId);
     thread.emit(windowSnapshot(5));
     expect(thread.resumeFrom()).toBeNull();
+  });
+});
+
+describe("thread subscription before the thread exists", () => {
+  function countingConnection() {
+    const subscribed: string[] = [];
+    const connection = {
+      kind: "saved",
+      environmentId: remote,
+      knownEnvironment: { source: "manual" },
+      client: {
+        orchestration: {
+          subscribeThread: () => () => undefined,
+          subscribeThreadWindow: (input: { readonly threadId: string }) => {
+            subscribed.push(input.threadId);
+            return () => undefined;
+          },
+        },
+      },
+    } as unknown as EnvironmentConnection;
+    return { connection, subscribed };
+  }
+
+  const shellSnapshot = (snapshotSequence: number, threadIds: ReadonlyArray<string>) =>
+    ({
+      snapshotSequence,
+      updatedAt: null,
+      projects: [],
+      worktrees: [],
+      threads: threadIds.map((id) => ({ id })),
+    }) as never;
+
+  it("waits for the shell to list a draft's thread instead of requesting it", () => {
+    const { supervisor } = makeSupervisor(async (record) => connectionFor(record));
+    const { connection, subscribed } = countingConnection();
+    supervisor.register(connection);
+    supervisor.syncShellSnapshot(shellSnapshot(1, ["thread-existing"]), remote);
+
+    supervisor.retainThreadDetailSubscription(remote, "thread-draft" as ThreadId);
+    supervisor.retainThreadDetailSubscription(remote, "thread-existing" as ThreadId);
+    expect(subscribed).toEqual(["thread-existing"]);
+
+    // A reconnect's snapshot still lacks the draft: it stays retained and idle.
+    supervisor.syncShellSnapshot(shellSnapshot(2, ["thread-existing"]), remote);
+    expect(subscribed).toEqual(["thread-existing"]);
+
+    // The first send creates the thread.
+    supervisor.applyShellEvent(
+      { kind: "thread-upserted", sequence: 3, thread: { id: "thread-draft" } } as never,
+      remote,
+    );
+    expect(subscribed).toEqual(["thread-existing", "thread-draft"]);
+  });
+
+  it("subscribes right away before any shell snapshot has been applied", () => {
+    const { supervisor } = makeSupervisor(async (record) => connectionFor(record));
+    const { connection, subscribed } = countingConnection();
+    supervisor.register(connection);
+
+    supervisor.retainThreadDetailSubscription(remote, "thread-1" as ThreadId);
+    expect(subscribed).toEqual(["thread-1"]);
   });
 });

@@ -1098,6 +1098,8 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
         },
         // sendTurn awaits the whole ACP prompt after emitting turn.started.
         turnSubmission: "completion",
+        // Agent-specific: ACP does not say whether session/load accepts a new cwd.
+        resumeSurvivesCwdChange: false,
       },
       startSession,
       sendTurn,

@@ -693,9 +693,29 @@ function SidebarSeparator({ className, ...props }: React.ComponentProps<typeof S
   );
 }
 
-function SidebarContent({ className, ...props }: React.ComponentProps<"div">) {
+function SidebarContent({
+  className,
+  onViewportScroll,
+  ...props
+}: React.ComponentProps<"div"> & {
+  /** Scroll of the content's own viewport (scroll events don't bubble to `onScroll`). */
+  onViewportScroll?: ((viewport: HTMLElement) => void) | undefined;
+}) {
   return (
-    <ScrollArea hideScrollbars scrollFade className="h-auto min-h-0 flex-1">
+    <ScrollArea
+      hideScrollbars
+      scrollFade
+      className="h-auto min-h-0 flex-1"
+      onScrollCapture={
+        onViewportScroll
+          ? (event) => {
+              const target = event.target as HTMLElement;
+              // Only this area's viewport, not a nested scroller inside the content.
+              if (target.parentElement === event.currentTarget) onViewportScroll(target);
+            }
+          : undefined
+      }
+    >
       <div
         className={cn(
           "flex w-full min-w-0 flex-col gap-2 group-data-[collapsible=icon]:overflow-hidden",

@@ -35,10 +35,12 @@ import {
   AGENT_CONTROL_MCP_PATH,
   AGENT_CONTROL_MCP_REQUEST_TIMEOUT_MS,
   AGENT_CONTROL_BOOTSTRAP_PATH,
+  AGENT_CONTROL_PRIVATE_MCP_MAX_BODY_BYTES,
   rejectAgentControlBootstrapTransport,
   rejectAgentControlMcpTransport,
 } from "./transportGuard.ts";
 import type { AgentControlMcpTools } from "./tools.ts";
+import { AGENT_CONTROL_HTML_RENDER_INSTRUCTIONS } from "../htmlRenderInstructions.ts";
 
 /** Newest first; an unknown requested version negotiates to the newest. */
 export const AGENT_CONTROL_MCP_PROTOCOL_VERSIONS = [
@@ -65,6 +67,7 @@ export const AGENT_CONTROL_MCP_INITIALIZE_INSTRUCTIONS =
   "When available, ryco_computer and ryco_browser execute under separate opt-in desktop/app permissions; " +
   "these tools act directly and require an exact active turn. " +
   "When available, ryco_attach_file directly delivers a workspace file to this thread's timeline under exact active-turn authority. " +
+  `${AGENT_CONTROL_HTML_RENDER_INSTRUCTIONS} ` +
   "Respect local denials and verify results.";
 
 export class AgentControlMcpListenerError extends Schema.TaggedError<AgentControlMcpListenerError>()(
@@ -116,14 +119,14 @@ const endJson = (response: ServerResponse, status: number, body: JsonRpcResponse
   response.end(serialized);
 };
 
-/** Read the request body, resolving `null` when it exceeds the bound. */
-const readBoundedBody = (request: IncomingMessage): Promise<string | null> =>
+/** Read the request body, resolving `null` when it exceeds `maxBytes`. */
+const readBoundedBody = (request: IncomingMessage, maxBytes: number): Promise<string | null> =>
   new Promise((resolve, reject) => {
     const chunks: Array<Buffer> = [];
     let total = 0;
     request.on("data", (chunk: Buffer) => {
       total += chunk.length;
-      if (total > AGENT_CONTROL_MCP_MAX_BODY_BYTES) {
+      if (total > maxBytes) {
         request.removeAllListeners("data");
         request.removeAllListeners("end");
         resolve(null);
@@ -158,7 +161,8 @@ const makeRequestHandler = (deps: AgentControlMcpListenerDeps) => {
         endEmpty(response, rejection.status);
         return;
       }
-      const body = await readBoundedBody(request);
+      // Unauthenticated exchange: keep the small bound.
+      const body = await readBoundedBody(request, AGENT_CONTROL_MCP_MAX_BODY_BYTES);
       if (body === null) {
         endEmpty(response, 413);
         return;
@@ -216,7 +220,8 @@ const makeRequestHandler = (deps: AgentControlMcpListenerDeps) => {
       return;
     }
 
-    const body = await readBoundedBody(request);
+    // Authenticated provider sessions may send a whole HTML page in one call.
+    const body = await readBoundedBody(request, AGENT_CONTROL_PRIVATE_MCP_MAX_BODY_BYTES);
     if (body === null) {
       endEmpty(response, 413);
       return;

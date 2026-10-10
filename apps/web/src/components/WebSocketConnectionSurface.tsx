@@ -1,21 +1,12 @@
-import { type ReactNode, useEffect, useEffectEvent, useRef } from "react";
-
-import { type SlowRpcAckRequest, useSlowRpcAckRequests } from "../rpc/requestLatencyState";
+import { useEffect, useEffectEvent, useRef } from "react";
 import {
   getWsConnectionStatus,
-  getWsConnectionStatusForEnvironment,
   getWsConnectionUiState,
   setBrowserOnlineStatus,
   type WsConnectionStatus,
   useWsConnectionStatus,
-  useWsConnectionStatusForEnvironment,
-  WS_RECONNECT_MAX_ATTEMPTS,
 } from "../rpc/wsConnectionState";
-import { stackedThreadToast, toastManager } from "./ui/toast";
 import { getPrimaryEnvironmentConnection } from "../environments/runtime";
-
-import { usePrimaryEnvironmentId } from "../environments/primary";
-import { createConnectionNoticeGate } from "./connectionNoticeGate";
 
 const FORCED_WS_RECONNECT_DEBOUNCE_MS = 5_000;
 type WsAutoReconnectTrigger = "focus" | "online";
@@ -23,128 +14,6 @@ export type ConnectionRecoveryOwner = "generic" | "hosted-lifecycle";
 
 export function allowsGenericConnectionRecovery(owner: ConnectionRecoveryOwner): boolean {
   return owner === "generic";
-}
-
-const connectionTimeFormatter = new Intl.DateTimeFormat(undefined, {
-  day: "numeric",
-  hour: "numeric",
-  minute: "2-digit",
-  month: "short",
-  second: "2-digit",
-});
-
-function formatConnectionMoment(isoDate: string | null): string | null {
-  if (!isoDate) {
-    return null;
-  }
-
-  return connectionTimeFormatter.format(new Date(isoDate));
-}
-
-function formatRetryCountdown(nextRetryAt: string, nowMs: number): string {
-  const remainingMs = Math.max(0, new Date(nextRetryAt).getTime() - nowMs);
-  return `${Math.max(1, Math.ceil(remainingMs / 1000))}s`;
-}
-
-function describeOfflineToast(): string {
-  return "WebSocket disconnected. Waiting for network.";
-}
-
-function formatReconnectAttemptLabel(status: WsConnectionStatus): string {
-  const reconnectAttempt = Math.max(
-    1,
-    Math.min(status.reconnectAttemptCount, WS_RECONNECT_MAX_ATTEMPTS),
-  );
-  return `Attempt ${reconnectAttempt}/${status.reconnectMaxAttempts}`;
-}
-
-function describeExhaustedToast(): string {
-  return "Retries exhausted trying to reconnect";
-}
-
-function getConnectionDisplayName(status: WsConnectionStatus): string {
-  return status.connectionLabel?.trim() || "Ryco Server";
-}
-
-function buildReconnectTitle(status: WsConnectionStatus): string {
-  return `Disconnected from ${getConnectionDisplayName(status)}`;
-}
-
-function buildRecoveredTitle(status: WsConnectionStatus): string {
-  return `Reconnected to ${getConnectionDisplayName(status)}`;
-}
-
-function describeRecoveredToast(
-  previousDisconnectedAt: string | null,
-  connectedAt: string | null,
-): string {
-  const reconnectedAtLabel = formatConnectionMoment(connectedAt);
-  const disconnectedAtLabel = formatConnectionMoment(previousDisconnectedAt);
-
-  if (disconnectedAtLabel && reconnectedAtLabel) {
-    return `Disconnected at ${disconnectedAtLabel} and reconnected at ${reconnectedAtLabel}.`;
-  }
-
-  if (reconnectedAtLabel) {
-    return `Connection restored at ${reconnectedAtLabel}.`;
-  }
-
-  return "Connection restored.";
-}
-
-function describeSlowRpcAckToast(requests: ReadonlyArray<SlowRpcAckRequest>): string {
-  const count = requests.length;
-  const thresholdSeconds = Math.round((requests[0]?.thresholdMs ?? 0) / 1000);
-
-  return `${count} request${count === 1 ? "" : "s"} waiting longer than ${thresholdSeconds}s.`;
-}
-
-function buildReconnectingToast(
-  status: WsConnectionStatus,
-  nowMs: number,
-  triggerManualReconnect?: () => void,
-) {
-  return stackedThreadToast({
-    ...(triggerManualReconnect
-      ? {
-          actionProps: {
-            children: "Retry now",
-            onClick: triggerManualReconnect,
-          },
-        }
-      : {}),
-    data: {
-      hideCopyButton: true,
-    },
-    description:
-      status.nextRetryAt === null
-        ? `Reconnecting... ${formatReconnectAttemptLabel(status)}`
-        : `Reconnecting in ${formatRetryCountdown(status.nextRetryAt, nowMs)}... ${formatReconnectAttemptLabel(status)}`,
-    timeout: 0,
-    title: buildReconnectTitle(status),
-    type: "loading",
-  });
-}
-
-function SlowRpcAckRequestDetails({ requests }: { requests: ReadonlyArray<SlowRpcAckRequest> }) {
-  return (
-    <ul className="space-y-2.5 text-xs text-muted-foreground">
-      {requests.map((req) => (
-        <li
-          className="min-w-0 border-border/50 border-b pb-2 last:border-b-0 last:pb-0"
-          key={req.requestId}
-        >
-          <div className="wrap-break-word font-medium text-foreground">{req.tag}</div>
-          <div className="mt-0.5 font-mono text-[10px] leading-snug opacity-90">
-            {req.requestId}
-          </div>
-          <div className="mt-0.5 text-[10px] opacity-75">
-            Started {formatConnectionMoment(req.startedAt) ?? req.startedAt}
-          </div>
-        </li>
-      ))}
-    </ul>
-  );
 }
 
 export function shouldAutoReconnect(
@@ -181,55 +50,26 @@ export function shouldRestartStalledReconnect(
   );
 }
 
+/** Recovery is background work; transport diagnostics never create application toasts. */
 export function WebSocketConnectionCoordinator({
   recoveryOwner = "generic",
 }: {
   readonly recoveryOwner?: ConnectionRecoveryOwner;
 }) {
   const genericRecoveryEnabled = allowsGenericConnectionRecovery(recoveryOwner);
-  const primaryEnvironmentId = usePrimaryEnvironmentId();
-  const status = useWsConnectionStatusForEnvironment(
-    genericRecoveryEnabled ? null : primaryEnvironmentId,
-  );
+  const status = useWsConnectionStatus();
   const lastForcedReconnectAtRef = useRef(0);
-  const toastIdRef = useRef<ReturnType<typeof toastManager.add> | null>(null);
-  const toastResetTimerRef = useRef<number | null>(null);
-  const noticeGateRef = useRef<ReturnType<typeof createConnectionNoticeGate> | null>(null);
-  const previousDisconnectedAtRef = useRef<string | null>(status.disconnectedAt);
-
-  const runReconnect = useEffectEvent((showFailureToast: boolean) => {
+  const runReconnect = useEffectEvent(() => {
     if (!genericRecoveryEnabled) return;
-    if (toastResetTimerRef.current !== null) {
-      window.clearTimeout(toastResetTimerRef.current);
-      toastResetTimerRef.current = null;
-    }
     lastForcedReconnectAtRef.current = Date.now();
     void getPrimaryEnvironmentConnection()
       .reconnect()
       .catch((error) => {
-        if (!showFailureToast) {
-          console.warn("Automatic WebSocket reconnect failed", { error });
-          return;
-        }
-        toastManager.add(
-          stackedThreadToast({
-            type: "error",
-            title: "Reconnect failed",
-            description:
-              error instanceof Error ? error.message : "Unable to restart the WebSocket.",
-            data: {
-              dismissAfterVisibleMs: 8_000,
-              hideCopyButton: true,
-            },
-          }),
-        );
+        console.warn("Automatic WebSocket reconnect failed", { error });
       });
   });
   const syncBrowserOnlineStatus = useEffectEvent(() => {
     setBrowserOnlineStatus(navigator.onLine !== false);
-  });
-  const triggerManualReconnect = useEffectEvent(() => {
-    runReconnect(true);
   });
   const triggerAutoReconnect = useEffectEvent((trigger: WsAutoReconnectTrigger) => {
     const currentStatus =
@@ -243,7 +83,7 @@ export function WebSocketConnectionCoordinator({
       return;
     }
 
-    runReconnect(false);
+    runReconnect();
   });
 
   useEffect(() => {
@@ -266,45 +106,6 @@ export function WebSocketConnectionCoordinator({
   }, []);
 
   useEffect(() => {
-    if (status.reconnectPhase !== "waiting" || status.nextRetryAt === null) {
-      return;
-    }
-
-    const updateReconnectToastCountdown = () => {
-      if (!toastIdRef.current || !noticeGateRef.current?.isOutageVisible()) {
-        return;
-      }
-
-      const currentStatus =
-        !genericRecoveryEnabled && primaryEnvironmentId
-          ? getWsConnectionStatusForEnvironment(primaryEnvironmentId)
-          : getWsConnectionStatus();
-      if (
-        getWsConnectionUiState(currentStatus) !== "reconnecting" ||
-        currentStatus.nextRetryAt === null
-      ) {
-        return;
-      }
-
-      toastManager.update(
-        toastIdRef.current,
-        buildReconnectingToast(
-          currentStatus,
-          Date.now(),
-          genericRecoveryEnabled ? triggerManualReconnect : undefined,
-        ),
-      );
-    };
-
-    updateReconnectToastCountdown();
-    const intervalId = window.setInterval(updateReconnectToastCountdown, 1_000);
-
-    return () => {
-      window.clearInterval(intervalId);
-    };
-  }, [genericRecoveryEnabled, primaryEnvironmentId, status.nextRetryAt, status.reconnectPhase]);
-
-  useEffect(() => {
     if (
       !genericRecoveryEnabled ||
       status.reconnectPhase !== "waiting" ||
@@ -323,7 +124,7 @@ export function WebSocketConnectionCoordinator({
         return;
       }
 
-      runReconnect(false);
+      runReconnect();
     }, timeoutMs);
 
     return () => {
@@ -337,172 +138,5 @@ export function WebSocketConnectionCoordinator({
     status.reconnectPhase,
   ]);
 
-  const publishNotice = useEffectEvent((recovered: boolean) => {
-    const uiState = getWsConnectionUiState(status);
-    const previousDisconnectedAt = previousDisconnectedAtRef.current;
-    const shouldShowReconnectToast = status.hasConnected && uiState === "reconnecting";
-    const shouldShowOfflineToast = uiState === "offline" && status.disconnectedAt !== null;
-    const shouldShowExhaustedToast = status.hasConnected && status.reconnectPhase === "exhausted";
-
-    if (
-      toastResetTimerRef.current !== null &&
-      (shouldShowReconnectToast || shouldShowOfflineToast || shouldShowExhaustedToast)
-    ) {
-      window.clearTimeout(toastResetTimerRef.current);
-      toastResetTimerRef.current = null;
-    }
-
-    if (shouldShowReconnectToast || shouldShowOfflineToast || shouldShowExhaustedToast) {
-      const toastPayload = shouldShowOfflineToast
-        ? stackedThreadToast({
-            data: {
-              hideCopyButton: true,
-            },
-            description: describeOfflineToast(),
-            timeout: 0,
-            title: "Offline",
-            type: "warning",
-          })
-        : shouldShowExhaustedToast
-          ? stackedThreadToast({
-              ...(genericRecoveryEnabled
-                ? {
-                    actionProps: {
-                      children: "Retry",
-                      onClick: triggerManualReconnect,
-                    },
-                  }
-                : {}),
-              data: {
-                hideCopyButton: true,
-              },
-              description: describeExhaustedToast(),
-              timeout: 0,
-              title: buildReconnectTitle(status),
-              type: "error",
-            })
-          : buildReconnectingToast(
-              status,
-              Date.now(),
-              genericRecoveryEnabled ? triggerManualReconnect : undefined,
-            );
-
-      if (toastIdRef.current) {
-        toastManager.update(toastIdRef.current, toastPayload);
-      } else {
-        toastIdRef.current = toastManager.add(toastPayload);
-      }
-    } else if (toastIdRef.current) {
-      toastManager.close(toastIdRef.current);
-      toastIdRef.current = null;
-    }
-
-    if (recovered) {
-      const successToast = {
-        description: describeRecoveredToast(previousDisconnectedAt, status.connectedAt),
-        title: buildRecoveredTitle(status),
-        type: "success" as const,
-        timeout: 0,
-        data: {
-          dismissAfterVisibleMs: 8_000,
-          hideCopyButton: true,
-        },
-      };
-
-      if (toastIdRef.current) {
-        toastManager.update(toastIdRef.current, successToast);
-      } else {
-        toastIdRef.current = toastManager.add(successToast);
-      }
-
-      toastResetTimerRef.current = window.setTimeout(() => {
-        toastIdRef.current = null;
-        toastResetTimerRef.current = null;
-      }, 8_250);
-    }
-
-    previousDisconnectedAtRef.current = status.disconnectedAt;
-  });
-
-  useEffect(() => {
-    const gate = (noticeGateRef.current ??= createConnectionNoticeGate({
-      showOutage: () => publishNotice(false),
-      showRecovery: () => publishNotice(true),
-      close: () => {
-        if (toastIdRef.current !== null) toastManager.close(toastIdRef.current);
-        toastIdRef.current = null;
-        if (toastResetTimerRef.current !== null) window.clearTimeout(toastResetTimerRef.current);
-        toastResetTimerRef.current = null;
-      },
-      setTimeout: (callback, delayMs) => window.setTimeout(callback, delayMs),
-      clearTimeout: (timer) => window.clearTimeout(timer as number),
-    }));
-    const uiState = getWsConnectionUiState(status);
-    const offline = uiState === "offline" && status.disconnectedAt !== null;
-    const exhausted = status.hasConnected && status.reconnectPhase === "exhausted";
-    gate.update({
-      key: `${genericRecoveryEnabled ? "" : (primaryEnvironmentId ?? "")}:${status.socketUrl ?? ""}:${status.connectionLabel ?? ""}`,
-      requireObservedConnection: !genericRecoveryEnabled,
-      outage: offline || exhausted || (status.hasConnected && uiState === "reconnecting"),
-      connected: uiState === "connected",
-      delayMs: genericRecoveryEnabled || offline || exhausted ? 0 : 4_000,
-    });
-  }, [genericRecoveryEnabled, primaryEnvironmentId, status]);
-
-  useEffect(() => {
-    return () => {
-      noticeGateRef.current?.dispose();
-      noticeGateRef.current = null;
-    };
-  }, []);
-
   return null;
-}
-
-export function SlowRpcAckToastCoordinator() {
-  const slowRequests = useSlowRpcAckRequests();
-  const status = useWsConnectionStatus();
-  const toastIdRef = useRef<ReturnType<typeof toastManager.add> | null>(null);
-
-  useEffect(() => {
-    if (getWsConnectionUiState(status) !== "connected") {
-      if (toastIdRef.current) {
-        toastManager.close(toastIdRef.current);
-        toastIdRef.current = null;
-      }
-      return;
-    }
-
-    if (slowRequests.length === 0) {
-      if (toastIdRef.current) {
-        toastManager.close(toastIdRef.current);
-        toastIdRef.current = null;
-      }
-      return;
-    }
-
-    const nextToast = {
-      data: {
-        expandableContent: <SlowRpcAckRequestDetails requests={slowRequests} />,
-        expandableDescriptionTrigger: true,
-        expandableLabels: { collapse: "Hide requests", expand: "Show requests" },
-      },
-      description: describeSlowRpcAckToast(slowRequests),
-      timeout: 0,
-      title: "Some requests are slow",
-      type: "warning" as const,
-    };
-
-    if (toastIdRef.current) {
-      toastManager.update(toastIdRef.current, nextToast);
-    } else {
-      toastIdRef.current = toastManager.add(nextToast);
-    }
-  }, [slowRequests, status]);
-
-  return null;
-}
-
-export function WebSocketConnectionSurface({ children }: { readonly children: ReactNode }) {
-  return children;
 }

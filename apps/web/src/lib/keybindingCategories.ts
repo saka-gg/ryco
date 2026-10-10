@@ -19,6 +19,7 @@ export const KEYBINDING_CATEGORIES: Record<string, KeybindingCategory> = {
   thread: { id: "thread", label: "Threads", sortWeight: 100 },
   pane: { id: "pane", label: "Split view", sortWeight: 105 },
   pullRequests: { id: "pullRequests", label: "Pull requests", sortWeight: 107 },
+  projects: { id: "projects", label: "Projects", sortWeight: 108 },
   script: { id: "script", label: "Project scripts", sortWeight: 110 },
 } as const;
 
@@ -43,6 +44,7 @@ const STATIC_COMMAND_META: Record<string, Omit<KeybindingCommandMeta, "category"
   "sidebar.showProjects": { title: "Show Projects sidebar", sortWeight: 2 },
   "chat.new": { title: "New chat", sortWeight: 1 },
   "chat.newLocal": { title: "New chat (local environment)", sortWeight: 2 },
+  "chat.newWithoutProject": { title: "New chat without a project", sortWeight: 3 },
   "composer.stash": { title: "Stash prompt or open stash", sortWeight: 1 },
   "editor.openFavorite": { title: "Open in preferred editor", sortWeight: 1 },
   "modelPicker.toggle": { title: "Toggle model picker", sortWeight: 1 },
@@ -73,6 +75,8 @@ const STATIC_COMMAND_META: Record<string, Omit<KeybindingCommandMeta, "category"
   "pane.focusNext": { title: "Focus next pane", sortWeight: 3 },
   "pane.focusPrevious": { title: "Focus previous pane", sortWeight: 4 },
   "pullRequests.open": { title: "Open pull requests", sortWeight: 1 },
+  // Not "Show Projects": that is the sidebar mode (`sidebar.showProjects`).
+  "projects.open": { title: "Open projects page", sortWeight: 1 },
 };
 
 function categoryForCommand(command: KeybindingCommand): KeybindingCategory {

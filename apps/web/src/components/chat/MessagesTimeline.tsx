@@ -29,8 +29,11 @@ import {
   type ContextHandoffTimelineEntry,
 } from "../../session-logic";
 import {
+  agentWorkflowStatusText,
   emptyAgentPanelModel,
   formatSubagentTokenCount,
+  isActiveSubagentStatus,
+  summarizeAgentWorkflow,
   type AgentPanelModel,
 } from "../../threadWorkspaceViewModel";
 import { glassSurfaceClassName } from "../mobile/GlassSurface";
@@ -60,6 +63,9 @@ import {
 import { Button } from "../ui/button";
 import { MessageAttachments } from "./MessageAttachments";
 import { type ExpandedImagePreview } from "./ExpandedImagePreview";
+import { HtmlRenderCards } from "./HtmlRenderCards";
+import { HtmlRenderOpenerProvider } from "./HtmlRenderDialog";
+import { HtmlRenderFrame } from "./HtmlRenderFrame";
 import { ProposedPlanCard } from "./ProposedPlanCard";
 import { DiffStatLabel, hasNonZeroStat } from "./DiffStatLabel";
 import { VscodeEntryIcon } from "./VscodeEntryIcon";
@@ -225,6 +231,12 @@ interface MessagesTimelineProps {
   onUndoTurn: (turnCount: number) => void;
   isRevertingCheckpoint: boolean;
   onImageExpand: (preview: ExpandedImagePreview) => void;
+  /**
+   * Opens an agent's HTML render in the workspace panel's page tab. Absent
+   * where the view has no panel (the phone tier); renders then open in a
+   * dialog.
+   */
+  onOpenHtmlRender?: ((messageId: MessageId, attachmentId: string) => void) | undefined;
   activeThreadEnvironmentId: EnvironmentId;
   markdownCwd: string | undefined;
   resolvedTheme: "light" | "dark";
@@ -279,6 +291,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   onUndoTurn,
   isRevertingCheckpoint,
   onImageExpand,
+  onOpenHtmlRender,
   activeThreadEnvironmentId,
   markdownCwd,
   resolvedTheme,
@@ -650,7 +663,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     const targetRowIndex = rows.findIndex(
       (row) =>
         (row.kind === "message" && row.message.id === targetMessageId) ||
-        (row.kind === "chapter" && row.message?.id === targetMessageId),
+        (row.kind === "chapter" && row.message?.id === targetMessageId) ||
+        (row.kind === "html-render" && row.messageId === targetMessageId),
     );
     if (targetRowIndex < 0) {
       setHighlightedMessageId(null);
@@ -796,56 +810,58 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   return (
     <TimelineStableProvider value={stableState}>
       <TimelineStreamingCtx.Provider value={streamingState}>
-        <div ref={setTimelineViewportElement} className="relative h-full min-h-0">
-          <LegendList<MessagesTimelineRow>
-            ref={listRef}
-            data={rows}
-            keyExtractor={keyExtractor}
-            renderItem={renderItem}
-            estimatedItemSize={56}
-            recycleItems={false}
-            initialScrollAtEnd={initialScrollOffset === undefined}
-            {...(initialScrollOffset === undefined ? {} : { initialScrollOffset })}
-            maintainScrollAtEnd={liveFollowEnabled}
-            maintainScrollAtEndThreshold={0.1}
-            maintainVisibleContentPosition
-            onScroll={handleScroll}
-            // The transcript scrolls without a visible scrollbar. Hiding it
-            // also removes the gutter entirely, so the content column no longer
-            // shifts when overflow appears — which is what `scrollbar-gutter:
-            // stable` used to reserve space for.
-            className="h-full overflow-x-hidden overscroll-y-contain px-3 [scrollbar-width:none] sm:px-5 [&::-webkit-scrollbar]:hidden"
-            ListHeaderComponent={listHeader}
-            ListFooterComponent={TIMELINE_LIST_FOOTER}
-          />
-          <TimelineMinimap
-            hasPersistentGutter={minimapHasPersistentGutter}
-            hitStripWidth={minimapHitStripWidth}
-            items={minimapItems}
-            stripMap={minimapStripMap}
-            onSelect={(item) => {
-              markManualScrollIntent();
-              onManualNavigation?.();
-              void listRef.current?.scrollToIndex({
-                index: item.rowIndex,
-                animated: true,
-                viewOffset: 24,
-              });
+        <HtmlRenderOpenerProvider onOpenInPanel={onOpenHtmlRender}>
+          <div ref={setTimelineViewportElement} className="relative h-full min-h-0">
+            <LegendList<MessagesTimelineRow>
+              ref={listRef}
+              data={rows}
+              keyExtractor={keyExtractor}
+              renderItem={renderItem}
+              estimatedItemSize={56}
+              recycleItems={false}
+              initialScrollAtEnd={initialScrollOffset === undefined}
+              {...(initialScrollOffset === undefined ? {} : { initialScrollOffset })}
+              maintainScrollAtEnd={liveFollowEnabled}
+              maintainScrollAtEndThreshold={0.1}
+              maintainVisibleContentPosition
+              onScroll={handleScroll}
+              // The transcript scrolls without a visible scrollbar. Hiding it
+              // also removes the gutter entirely, so the content column no longer
+              // shifts when overflow appears — which is what `scrollbar-gutter:
+              // stable` used to reserve space for.
+              className="h-full overflow-x-hidden overscroll-y-contain px-3 [scrollbar-width:none] sm:px-5 [&::-webkit-scrollbar]:hidden"
+              ListHeaderComponent={listHeader}
+              ListFooterComponent={TIMELINE_LIST_FOOTER}
+            />
+            <TimelineMinimap
+              hasPersistentGutter={minimapHasPersistentGutter}
+              hitStripWidth={minimapHitStripWidth}
+              items={minimapItems}
+              stripMap={minimapStripMap}
+              onSelect={(item) => {
+                markManualScrollIntent();
+                onManualNavigation?.();
+                void listRef.current?.scrollToIndex({
+                  index: item.rowIndex,
+                  animated: true,
+                  viewOffset: 24,
+                });
+              }}
+            />
+          </div>
+          <MessageActionsSheet
+            target={messageActionsRequest}
+            onOpenChange={(open) => {
+              if (!open) setMessageActionsRequest(null);
+            }}
+            revertDisabled={isRevertingCheckpoint || isWorking}
+            onRevert={() => {
+              if (messageActionsRequest) {
+                onRevertUserMessage(messageActionsRequest.messageId);
+              }
             }}
           />
-        </div>
-        <MessageActionsSheet
-          target={messageActionsRequest}
-          onOpenChange={(open) => {
-            if (!open) setMessageActionsRequest(null);
-          }}
-          revertDisabled={isRevertingCheckpoint || isWorking}
-          onRevert={() => {
-            if (messageActionsRequest) {
-              onRevertUserMessage(messageActionsRequest.messageId);
-            }
-          }}
-        />
+        </HtmlRenderOpenerProvider>
       </TimelineStreamingCtx.Provider>
     </TimelineStableProvider>
   );
@@ -1172,6 +1188,7 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
             ? null
             : "pb-0.5"
           : row.kind === "work-toggle" ||
+              row.kind === "html-render" ||
               (row.kind === "message" &&
                 row.message.role === "assistant" &&
                 !row.showAssistantCopyButton)
@@ -1319,6 +1336,14 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
                   threadId={parseScopedThreadKey(ctx.routeThreadKey)?.threadId}
                   messageId={row.message.id}
                 />
+                {!assistantResponseStillInProgress && row.turnHtmlRenders && (
+                  <HtmlRenderCards
+                    environmentId={ctx.activeThreadEnvironmentId}
+                    threadId={parseScopedThreadKey(ctx.routeThreadKey)?.threadId}
+                    renders={row.turnHtmlRenders}
+                    appearance={ctx.resolvedTheme}
+                  />
+                )}
                 {!assistantResponseStillInProgress && (
                   <AssistantChangedFilesSection
                     turnSummary={row.assistantTurnDiffSummary}
@@ -1371,6 +1396,36 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
             cwd={ctx.markdownCwd}
             workspaceRoot={ctx.workspaceRoot}
           />
+        </div>
+      )}
+
+      {row.kind === "html-render" && (
+        // The reply column, so the page's left edge lines up with reply text.
+        <div className="min-w-0 px-1">
+          <HtmlRenderFrame
+            // A row reused for another page must not keep the first page's frame.
+            key={row.attachment.id}
+            environmentId={ctx.activeThreadEnvironmentId}
+            threadId={parseScopedThreadKey(ctx.routeThreadKey)?.threadId}
+            messageId={row.messageId}
+            attachment={row.attachment}
+            htmlRender={row.htmlRender}
+          />
+          {!(
+            ctx.activeTurnInProgress &&
+            ctx.activeTurnId !== null &&
+            row.assistantTurnDiffSummary?.turnId === ctx.activeTurnId
+          ) && (
+            <AssistantChangedFilesSection
+              turnSummary={row.assistantTurnDiffSummary}
+              undoTurnCount={row.assistantUndoTurnCount}
+              routeThreadKey={ctx.routeThreadKey}
+              resolvedTheme={ctx.resolvedTheme}
+              openDiffTurnId={ctx.openDiffTurnId}
+              onOpenTurnDiff={ctx.onOpenTurnDiff}
+              onCloseDiff={ctx.onCloseDiff}
+            />
+          )}
         </div>
       )}
 
@@ -1622,57 +1677,44 @@ const AgentSpawnCtaRow = memo(function AgentSpawnCtaRow(props: { workEntry: Time
   const workflowGroup = spawn.workflowId
     ? agentPanelModel.workflows.find((group) => group.workflow.id === spawn.workflowId)
     : undefined;
-  const agents = workflowGroup
-    ? [...workflowGroup.phases.flatMap((phase) => phase.members), ...workflowGroup.unphasedMembers]
-    : agentPanelModel.directAgents.filter((agent) => memberIds.has(agent.id));
-  const agentCount = Math.max(
-    agents.length,
-    Math.max(memberIds.size - (spawn.workflowId ? 1 : 0), 0),
-  );
-
-  const running = agents.filter(
-    (agent) => agent.status === "running" || agent.status === "pending",
-  ).length;
-  const waiting = agents.filter((agent) => agent.status === "waiting").length;
-  const failed = agents.filter((agent) => agent.status === "failed").length;
   // The coordinator's own status is authoritative for workflows: dynamic
   // spawns mean the member list can be momentarily all-settled while the
-  // run is still mid-flight. A workflow is live until the coordinator
-  // itself reaches a terminal state.
-  const coordinatorStatus = workflowGroup?.workflow.status;
-  const coordinatorSettled =
-    coordinatorStatus === "completed" ||
-    coordinatorStatus === "failed" ||
-    coordinatorStatus === "cancelled" ||
-    coordinatorStatus === "interrupted";
-  const live = workflowGroup !== undefined ? !coordinatorSettled : running + waiting > 0;
-  // Same rule as the panel footer: providers may aggregate member usage into
-  // the coordinator, so count the coordinator only when no members exist.
-  const totalTokens = agents.reduce(
-    (sum, agent) => sum + (agent.usage?.totalTokens ?? 0),
-    spawn.workflowId && agents.length === 0 ? (workflowGroup?.workflow.usage?.totalTokens ?? 0) : 0,
+  // run is still mid-flight (summarizeAgentWorkflow owns that rule).
+  const workflow = workflowGroup ? summarizeAgentWorkflow(workflowGroup) : null;
+  const batch = workflow
+    ? null
+    : agentPanelModel.directAgents.filter((agent) => memberIds.has(agent.id));
+  const agentCount = Math.max(
+    workflow?.memberCount ?? batch?.length ?? 0,
+    Math.max(memberIds.size - (spawn.workflowId ? 1 : 0), 0),
   );
-
-  const livePhase = workflowGroup?.phases.find((phase) => phase.state === "running");
-  const workflowName =
-    workflowGroup?.workflow.workflowName ?? workflowGroup?.workflow.title ?? null;
-
   // One steady in-flight presentation: waiting and stalled agents read as
   // working; only settled states differentiate.
-  const working = running + waiting;
+  const working =
+    workflow?.workingCount ??
+    batch?.filter((agent) => isActiveSubagentStatus(agent.status)).length ??
+    0;
+  const failed =
+    workflow?.failedCount ?? batch?.filter((agent) => agent.status === "failed").length ?? 0;
+  const live = workflow?.live ?? working > 0;
+  // Same rule as the panel footer: providers may aggregate member usage into
+  // the coordinator, so count the coordinator only when no members exist.
+  const totalTokens =
+    workflow?.totalTokens ??
+    batch?.reduce((sum, agent) => sum + (agent.usage?.totalTokens ?? 0), 0) ??
+    0;
+  const workflowName = workflow?.name ?? null;
+
   const dotClass = live ? "bg-info" : failed > 0 ? "bg-destructive" : "bg-success";
   const lead = live
     ? `Kicked off ${agentCount} subagent${agentCount === 1 ? "" : "s"}`
     : `Ran ${agentCount} subagent${agentCount === 1 ? "" : "s"}`;
-  const status = live
-    ? livePhase
-      ? `${livePhase.title} · ${livePhase.activeCount} working`
-      : working > 0
-        ? `${working} working`
-        : "Working"
-    : failed > 0
-      ? `${failed} failed`
-      : "Completed";
+  const status = agentWorkflowStatusText({
+    live,
+    livePhase: workflow?.livePhase ?? null,
+    workingCount: working,
+    failedCount: failed,
+  });
 
   return (
     <button

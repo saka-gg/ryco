@@ -19,7 +19,14 @@
  */
 import type { OrchestrationThreadActivity } from "@ryco/contracts";
 
-import { canonicalSubagentIdentityKey } from "./subagentIdentity.ts";
+import {
+  assignSubagentIdentities,
+  canonicalSubagentIdentityKey,
+  resolveSubagentDisplayLabel,
+  resolveSubagentDisplayLabels,
+  subagentRoleDuplicatesLabel,
+  type SubagentIdentity,
+} from "./subagentIdentity.ts";
 import type { ThreadSubagentView } from "./threadWorkspaceViewModel.ts";
 
 export type RuntimeSubagentStatus =
@@ -1002,27 +1009,192 @@ export function deriveAgentPanelModel({
   };
 }
 
+/** Every member of a workflow run: phase members in phase order, then unphased ones. */
+export function agentWorkflowMembers(
+  group: AgentPanelWorkflowGroup,
+): ReadonlyArray<RuntimeSubagent> {
+  return [...group.phases.flatMap((phase) => phase.members), ...group.unphasedMembers];
+}
+
+export type AgentWorkflowPhase = AgentPanelWorkflowGroup["phases"][number];
+
+/** One workflow run reduced to what its header, status line and alerts read. */
+export interface AgentWorkflowSummary {
+  readonly id: string;
+  /** The provider's workflow name, else the coordinator's title. */
+  readonly name: string;
+  /** The coordinator is authoritative: dynamic spawns can leave every member
+   * momentarily settled while the run is still mid-flight. */
+  readonly live: boolean;
+  /** "failed" as soon as any member failed, else the coordinator's status. */
+  readonly displayStatus: RuntimeSubagentStatus;
+  readonly memberCount: number;
+  readonly settledCount: number;
+  /** Running, queued and waiting members: one steady in-flight presentation. */
+  readonly workingCount: number;
+  readonly failedCount: number;
+  /** Member usage; the coordinator counts only when it has no members, since
+   * providers may already aggregate member usage into it. */
+  readonly totalTokens: number;
+  readonly phaseCount: number;
+  readonly livePhase: AgentWorkflowPhase | null;
+}
+
+export function summarizeAgentWorkflow(group: AgentPanelWorkflowGroup): AgentWorkflowSummary {
+  const coordinator = group.workflow;
+  const members = agentWorkflowMembers(group);
+  let settledCount = 0;
+  let workingCount = 0;
+  let failedCount = 0;
+  let totalTokens = members.length === 0 ? (coordinator.usage?.totalTokens ?? 0) : 0;
+  for (const member of members) {
+    if (isTerminalSubagentStatus(member.status)) settledCount += 1;
+    if (isActiveSubagentStatus(member.status)) workingCount += 1;
+    if (member.status === "failed") failedCount += 1;
+    totalTokens += member.usage?.totalTokens ?? 0;
+  }
+  return {
+    id: coordinator.id,
+    name: coordinator.workflowName ?? coordinator.title,
+    live: !isTerminalSubagentStatus(coordinator.status),
+    displayStatus: failedCount > 0 ? "failed" : coordinator.status,
+    memberCount: members.length,
+    settledCount,
+    workingCount,
+    failedCount,
+    totalTokens,
+    phaseCount: group.phases.length,
+    livePhase: group.phases.find((phase) => phase.state === "running") ?? null,
+  };
+}
+
 /**
- * Members ordered by urgency for the capped inline workflow card: running and
- * failed first, then waiting, then most recently updated.
+ * One-line run status: the live phase and how many of its agents work, else
+ * how many agents work, else the outcome. Takes the summary's status fields
+ * only, so a direct-spawn batch (no phases) words its status the same way.
+ */
+export function agentWorkflowStatusText(
+  summary: Pick<AgentWorkflowSummary, "live" | "livePhase" | "workingCount" | "failedCount">,
+): string {
+  if (summary.live) {
+    if (summary.livePhase) {
+      return `${summary.livePhase.title} · ${summary.livePhase.activeCount} working`;
+    }
+    return summary.workingCount > 0 ? `${summary.workingCount} working` : "Working";
+  }
+  return summary.failedCount > 0 ? `${summary.failedCount} failed` : "Completed";
+}
+
+/** A phase's progress words: "3 done", "1 active · 2 done", or "not started". */
+export function agentPhaseStatusText(phase: AgentWorkflowPhase): string {
+  if (phase.members.length === 0 && phase.state === "pending") {
+    return "not started";
+  }
+  return phase.state === "done"
+    ? `${phase.settledCount} done`
+    : `${phase.activeCount} active · ${phase.settledCount} done`;
+}
+
+/** Agents doing (or having done) work. Coordinators standing in for their
+ * members are already excluded from every bucket, so they never count. */
+export function agentPanelAgentCount(model: AgentPanelModel): number {
+  return model.runningCount + model.waitingCount + model.idleCount + model.settledCount;
+}
+
+/** Every agent in the panel once, in identity order: each workflow's
+ * coordinator then its members, then direct spawns. */
+export function agentPanelRoster(model: AgentPanelModel): ReadonlyArray<RuntimeSubagent> {
+  const agentsById = new Map<string, RuntimeSubagent>();
+  for (const group of model.workflows) {
+    agentsById.set(group.workflow.id, group.workflow);
+    for (const member of agentWorkflowMembers(group)) agentsById.set(member.id, member);
+  }
+  for (const agent of model.directAgents) agentsById.set(agent.id, agent);
+  return [...agentsById.values()];
+}
+
+export interface AgentRosterIdentity {
+  readonly identities: ReadonlyMap<string, SubagentIdentity>;
+  /** Row labels for the whole roster (functional labels, collisions numbered). */
+  readonly labels: ReadonlyMap<string, string>;
+}
+
+const EMPTY_ROSTER_IDENTITY: AgentRosterIdentity = { identities: new Map(), labels: new Map() };
+
+/** Identities and collision-free row labels for a whole panel roster. */
+export function buildAgentRosterIdentity(model: AgentPanelModel): AgentRosterIdentity {
+  const agents = agentPanelRoster(model);
+  if (agents.length === 0) {
+    return EMPTY_ROSTER_IDENTITY;
+  }
+  const identities = assignSubagentIdentities(
+    agents.map((agent) => ({ key: agent.id, role: agent.role, taskLabel: agent.title })),
+  );
+  return {
+    identities,
+    labels: resolveSubagentDisplayLabels(
+      agents.map((agent) => ({
+        id: agent.id,
+        title: agent.title,
+        codename: identities.get(agent.id)?.codename ?? agent.id,
+      })),
+    ),
+  };
+}
+
+/**
+ * The label a row leads with and the role it sets beside it. The role is
+ * dropped when it only repeats the label or the title (a numbered label such
+ * as "Explore 2" still repeats its role).
+ */
+export function resolveAgentRowIdentity(
+  agent: RuntimeSubagent,
+  roster: AgentRosterIdentity,
+): { readonly label: string; readonly role: string | null } {
+  const identity = roster.identities.get(agent.id);
+  const label =
+    roster.labels.get(agent.id) ??
+    resolveSubagentDisplayLabel({
+      id: agent.id,
+      title: agent.title,
+      codename: identity?.codename ?? agent.id,
+    });
+  const role =
+    identity?.role &&
+    !subagentRoleDuplicatesLabel(identity.role, label) &&
+    !subagentRoleDuplicatesLabel(identity.role, agent.title)
+      ? identity.role
+      : null;
+  return { label, role };
+}
+
+/**
+ * The members a capped inline workflow card lists: the most urgent are chosen
+ * (failed, then running, then waiting, then the rest, ties by roster
+ * position), but they render in roster order (phase, then spawn), so rows stay
+ * put and grouped by phase while live state changes.
  */
 export function workflowCardMembers(
   group: AgentPanelWorkflowGroup,
   limit: number,
 ): { readonly visible: ReadonlyArray<RuntimeSubagent>; readonly overflow: number } {
-  const all = [...group.phases.flatMap((phase) => phase.members), ...group.unphasedMembers];
+  const all = agentWorkflowMembers(group);
   const urgency = (agent: RuntimeSubagent): number => {
     if (agent.status === "failed") return 0;
     if (agent.status === "running") return 1;
     if (agent.status === "waiting") return 2;
     return 3;
   };
-  const ordered = all.toSorted(
-    (a, b) => urgency(a) - urgency(b) || b.updatedAt.localeCompare(a.updatedAt),
+  const ranked = all.map((agent, position) => ({ agent, position }));
+  const chosen = new Set(
+    ranked
+      .toSorted((a, b) => urgency(a.agent) - urgency(b.agent) || a.position - b.position)
+      .slice(0, Math.max(0, limit))
+      .map(({ agent }) => agent.id),
   );
   return {
-    visible: ordered.slice(0, limit),
-    overflow: Math.max(0, ordered.length - limit),
+    visible: all.filter((agent) => chosen.has(agent.id)),
+    overflow: Math.max(0, all.length - Math.max(0, limit)),
   };
 }
 

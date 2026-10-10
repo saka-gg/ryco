@@ -6,7 +6,11 @@ import {
   type KeybindingWhenNode,
   type ResolvedKeybindingsConfig,
 } from "@ryco/contracts";
-import { DEFAULT_RESOLVED_KEYBINDINGS } from "@ryco/shared/keybindings";
+import {
+  compileResolvedKeybindingsConfig,
+  DEFAULT_RESOLVED_KEYBINDINGS,
+  mergeWithDefaultKeybindings,
+} from "@ryco/shared/keybindings";
 import {
   formatShortcutLabel,
   hasNoShortcutModifiers,
@@ -791,6 +795,46 @@ describe("resolveShortcutCommand", () => {
       shortcutLabelForCommand(DEFAULT_RESOLVED_KEYBINDINGS, "pane.close", "MacIntel"),
       "⇧⌘\\",
     );
+  });
+
+  it("matches alt+letter bindings through macOS Option dead keys and rewritten characters", () => {
+    // No default: a node sends every default to clients that may predate the command.
+    assert.isFalse(
+      DEFAULT_RESOLVED_KEYBINDINGS.some((rule) => rule.command === "chat.newWithoutProject"),
+    );
+    // `chat.newWithoutProject` has no default key; this is a user's binding.
+    const keybindings = mergeWithDefaultKeybindings(
+      compileResolvedKeybindingsConfig([
+        { key: "mod+alt+n", command: "chat.newWithoutProject", when: "!terminalFocus" },
+      ]),
+    );
+    const resolve = (overrides: Partial<ShortcutEventLike>, platform = "MacIntel") =>
+      resolveShortcutCommand(event(overrides), keybindings, {
+        platform,
+        context: { terminalFocus: false },
+      });
+    // Option+N is the dead tilde key on macOS; the physical key names the binding.
+    assert.strictEqual(
+      resolve({ key: "Dead", code: "KeyN", metaKey: true, altKey: true }),
+      "chat.newWithoutProject",
+    );
+    // Option+P produces "π".
+    assert.strictEqual(
+      resolve({ key: "π", code: "KeyP", metaKey: true, altKey: true }),
+      "thread.pinToggle",
+    );
+    // Layouts that report the letter keep using it (Linux Ctrl+Alt+N).
+    assert.strictEqual(
+      resolve({ key: "n", code: "KeyN", ctrlKey: true, altKey: true }, "Linux"),
+      "chat.newWithoutProject",
+    );
+    // A non-QWERTY layout whose physical KeyN yields "b" does not trigger an N binding.
+    assert.notStrictEqual(
+      resolve({ key: "b", code: "KeyN", metaKey: true, altKey: true }),
+      "chat.newWithoutProject",
+    );
+    // Without Alt the physical key never stands in for the produced character.
+    assert.isNull(resolve({ key: "Dead", code: "KeyN", metaKey: true }));
   });
 });
 

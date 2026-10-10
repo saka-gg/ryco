@@ -1,7 +1,7 @@
 import type { ProviderDriverKind, ProviderInstanceId } from "@ryco/contracts";
 
 import { providerModelKey, sortProviderModelItems } from "../../modelOrdering";
-import type { ProviderInstanceEntry } from "../../providerInstances";
+import { isSetupProviderInstance, type ProviderInstanceEntry } from "../../providerInstances";
 import { buildModelPickerSearchText, scoreModelPickerSearch } from "./modelPickerSearch";
 import { getDisplayModelName, type ModelEsque } from "./providerIconUtils";
 
@@ -95,9 +95,9 @@ export function buildPhoneModelSheetGroups(
   const flat: FlatModel[] = [];
   for (const [instanceId, models] of input.modelOptionsByInstance) {
     const entry = entryByInstanceId.get(instanceId);
-    // Instance disappeared between renders, or is not ready: the desktop picker
-    // drops both, and so does this.
-    if (!entry || entry.status !== "ready") continue;
+    // Instance disappeared between renders, or is not set up: the desktop
+    // picker drops both, and so does this.
+    if (!entry || !isSetupProviderInstance(entry)) continue;
     if (!matchesLockedProvider(entry, input.lockedProvider, input.lockedContinuationGroupKey)) {
       continue;
     }

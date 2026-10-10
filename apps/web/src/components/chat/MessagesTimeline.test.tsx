@@ -316,6 +316,55 @@ describe("MessagesTimeline", () => {
     expect(markup).toContain("Delivery uncertain: Acceptance could not be proven");
     expect(markup).toContain("lucide-circle-alert");
     expect(markup).toContain("lucide-circle-question-mark");
+    // Without a recorded reason a handoff is a model change, rendered as before.
+    expect(markup).toContain('data-context-handoff-reason="model-change"');
+    expect(markup).not.toContain("data-context-handoff-retry-hint");
+  });
+
+  it("renders a folder relocation as a fresh session, not as a model transition", async () => {
+    const { MessagesTimeline } = await import("./MessagesTimeline");
+    const sameModel = makeContextHandoffMarker().target;
+    const consumed = makeContextHandoffMarker({
+      id: "context-handoff:relocated",
+      handoffId: ContextHandoffId.make("handoff-relocated"),
+      reason: "cwd-relocation",
+      sources: [sameModel],
+      target: sameModel,
+    });
+    const failed = makeContextHandoffMarker({
+      id: "context-handoff:relocation-failed",
+      handoffId: ContextHandoffId.make("handoff-relocation-failed"),
+      reason: "cwd-relocation",
+      status: "failed",
+      error: "The fresh session could not start.",
+      sources: [sameModel],
+      target: sameModel,
+    });
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[consumed, failed].map((marker) => ({
+          id: marker.id,
+          kind: "context-handoff" as const,
+          createdAt: marker.createdAt,
+          marker,
+        }))}
+      />,
+    );
+
+    expect(markup.match(/data-context-handoff-reason="cwd-relocation"/g)).toHaveLength(2);
+    expect(markup).toContain("Continued in a fresh session in the new folder");
+    expect(markup).toContain(
+      "Fresh session in the new folder. Failed: The fresh session could not start. Send your message again to retry",
+    );
+    expect(markup).toContain("data-context-handoff-retry-hint");
+    expect(markup).toContain("Send your message again to retry.");
+    expect(markup).toContain("lucide-folder-input");
+    // No `<model> → <model>` transition and no "Context handoff from" label.
+    expect(markup).not.toContain("lucide-arrow-right");
+    expect(markup).not.toContain("lucide-arrow-left-right");
+    expect(markup).not.toContain("Context handoff from");
+    expect(markup).not.toContain("Fable 5");
   });
 
   it("formats changed file paths from the workspace root", async () => {
@@ -385,6 +434,175 @@ describe("MessagesTimeline", () => {
 
     expect(markup).toContain("Close diff");
     expect(markup).not.toContain("View diff");
+  });
+
+  describe("HTML renders", () => {
+    const htmlRenderAttachment = {
+      type: "file" as const,
+      id: "thread-1-abc-html",
+      name: "Chart.html",
+      mimeType: "text/html",
+      sizeBytes: 64,
+      htmlRender: { title: "Chart", height: 420 },
+    };
+    const page = '<p id="chart">Chart</p><a href="https://example.com">Source</a>';
+
+    async function renderTimeline(message: {
+      id: string;
+      text: string;
+      attachments: Array<typeof htmlRenderAttachment>;
+    }) {
+      const { __rememberHtmlRenderSourceForTests } = await import("./useHtmlRenderSource");
+      __rememberHtmlRenderSourceForTests(
+        {
+          environmentId: ACTIVE_THREAD_ENVIRONMENT_ID,
+          threadId: "thread-1" as never,
+          messageId: MessageId.make(message.id),
+          attachmentId: htmlRenderAttachment.id,
+        },
+        page,
+      );
+      const { MessagesTimeline } = await import("./MessagesTimeline");
+      return renderToStaticMarkup(
+        <MessagesTimeline
+          {...buildProps()}
+          timelineEntries={[
+            {
+              id: `${message.id}-entry`,
+              kind: "message",
+              createdAt: "2026-09-04T12:00:03.000Z",
+              message: {
+                id: MessageId.make(message.id),
+                role: "assistant",
+                text: message.text,
+                turnId: TurnId.make("turn-render"),
+                createdAt: "2026-09-04T12:00:03.000Z",
+                completedAt: "2026-09-04T12:00:03.000Z",
+                streaming: false,
+                attachments: message.attachments,
+              },
+            },
+          ]}
+        />,
+      );
+    }
+
+    it("shows a render-only message as its page in a sandboxed srcdoc frame", async () => {
+      const markup = await renderTimeline({
+        id: "render",
+        text: " ",
+        attachments: [htmlRenderAttachment],
+      });
+      expect(markup).toContain('data-timeline-row-kind="html-render"');
+      expect(markup).not.toContain('data-message-role="assistant"');
+      expect(markup.match(/<iframe/g)).toHaveLength(1);
+      expect(markup).toContain('sandbox="allow-scripts allow-forms"');
+      expect(markup).not.toContain("allow-same-origin");
+      expect(markup).not.toContain("allow-popups");
+      expect(markup).toContain('referrerPolicy="no-referrer"');
+      expect(markup).toContain('title="Chart"');
+      // The page travels as escaped srcdoc, never as a URL.
+      expect(markup).toContain('srcDoc="&lt;p id=&quot;chart&quot;&gt;Chart&lt;/p&gt;');
+      expect(markup).not.toMatch(/<iframe[^>]*\ssrc="/);
+      expect(markup).toContain('name="ryco-theme:{');
+      // The box reserves the page's height before it loads.
+      expect(markup).toContain("height:420px");
+      expect(markup).not.toContain("(empty response)");
+      expect(markup).not.toContain('download="Chart.html"');
+    });
+
+    it("ends the turn's reply with a card per page, thumbnail in the reader's appearance", async () => {
+      const { MessagesTimeline } = await import("./MessagesTimeline");
+      const turnId = TurnId.make("turn-render");
+      const light = "data:image/webp;base64,TElHSFQ=";
+      const dark = "data:image/webp;base64,REFSSw==";
+      const markup = renderToStaticMarkup(
+        <MessagesTimeline
+          {...buildProps()}
+          latestTurn={{
+            turnId,
+            state: "completed",
+            startedAt: "2026-09-04T12:00:00.000Z",
+            completedAt: "2026-09-04T12:00:06.000Z",
+          }}
+          timelineEntries={[
+            {
+              id: "render-entry",
+              kind: "message",
+              createdAt: "2026-09-04T12:00:03.000Z",
+              message: {
+                id: MessageId.make("render"),
+                role: "assistant",
+                text: " ",
+                turnId,
+                createdAt: "2026-09-04T12:00:03.000Z",
+                completedAt: "2026-09-04T12:00:03.000Z",
+                streaming: false,
+                attachments: [
+                  {
+                    ...htmlRenderAttachment,
+                    htmlRender: { title: "Chart", height: 420, thumbnails: { light, dark } },
+                  },
+                  {
+                    ...htmlRenderAttachment,
+                    id: "thread-1-def-html",
+                    htmlRender: { title: "Mockup", height: 300 },
+                  },
+                ],
+              },
+            },
+            {
+              id: "reply-entry",
+              kind: "message",
+              createdAt: "2026-09-04T12:00:05.000Z",
+              message: {
+                id: MessageId.make("reply"),
+                role: "assistant",
+                text: "Revenue doubled.",
+                turnId,
+                createdAt: "2026-09-04T12:00:05.000Z",
+                completedAt: "2026-09-04T12:00:05.000Z",
+                streaming: false,
+              },
+            },
+          ]}
+        />,
+      );
+      const reply = markup.slice(markup.indexOf('data-message-id="reply"'));
+      expect(reply).toContain("Revenue doubled.");
+      const cards = reply.match(/<button[^>]*data-html-render-card=""[^>]*>[\s\S]*?<\/button>/g)!;
+      expect(cards).toHaveLength(2);
+      expect(cards[0]).toContain('aria-label="Open Chart"');
+      // Explicit size (no layout shift), decorative, decoded off the main thread.
+      expect(cards[0]).toMatch(
+        new RegExp(
+          `<img src="${light.replace(/[+/]/g, "\\$&")}" alt="" width="72" height="45" loading="lazy" decoding="async"`,
+        ),
+      );
+      expect(cards[0]).not.toContain(dark);
+      // No thumbnail stored: a placeholder icon instead of an image.
+      expect(cards[1]).toContain('aria-label="Open Mockup"');
+      expect(cards[1]).not.toContain("<img");
+      expect(cards[1]).toContain("<svg");
+      // Each page itself still shows above the reply, once.
+      expect(markup.match(/data-html-render-frame=""/g)).toHaveLength(2);
+      expect(markup.indexOf("data-html-render-frame")).toBeLessThan(
+        markup.indexOf('data-message-id="reply"'),
+      );
+    });
+
+    it("shows a render beside text as its page, not as an .html file row", async () => {
+      const markup = await renderTimeline({
+        id: "mixed",
+        text: "Here is the chart.",
+        attachments: [htmlRenderAttachment],
+      });
+      expect(markup).toContain('data-message-role="assistant"');
+      expect(markup).toContain("Here is the chart.");
+      expect(markup).toContain('sandbox="allow-scripts allow-forms"');
+      expect(markup).not.toContain('download="Chart.html"');
+      expect(markup).not.toContain("Text preview");
+    });
   });
 
   it("renders assistant image, video, audio and document deliveries without an empty-response placeholder", async () => {

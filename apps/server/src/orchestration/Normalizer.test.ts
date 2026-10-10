@@ -9,9 +9,10 @@ import {
   ThreadId,
   type ChatImageAttachment,
   type ClientOrchestrationCommand,
+  type OrchestrationProjectShell,
 } from "@ryco/contracts";
 import { it } from "@effect/vitest";
-import { Deferred, Effect, Fiber, FileSystem, Layer } from "effect";
+import { Deferred, Effect, Fiber, FileSystem, Layer, Option } from "effect";
 import { expect, vi } from "vite-plus/test";
 
 import { applyOrchestrationCommand } from "./Layers/OrchestrationCommandApplication.ts";
@@ -25,6 +26,17 @@ import { deriveServerPaths, ServerConfig } from "../config.ts";
 import { WorkspaceAccessPolicyLayer } from "../workspace/Layers/WorkspaceAccessPolicy.ts";
 import { WorkspacePathsLive } from "../workspace/Layers/WorkspacePaths.ts";
 import { normalizeDispatchCommand, withChatAttachmentAdoption } from "./Normalizer.ts";
+import {
+  ProjectionSnapshotQuery,
+  type ProjectionSnapshotQueryShape,
+} from "./Services/ProjectionSnapshotQuery.ts";
+
+/** The project shells the normalizer may read; only folder changes look them up. */
+const projectionsLayer = (projects: ReadonlyArray<OrchestrationProjectShell> = []) =>
+  Layer.succeed(ProjectionSnapshotQuery, {
+    getProjectShellById: (projectId) =>
+      Effect.succeed(Option.fromNullishOr(projects.find((project) => project.id === projectId))),
+  } as Partial<ProjectionSnapshotQueryShape> as ProjectionSnapshotQueryShape);
 
 const projectCreateCommand = (workspaceRoot: string): ClientOrchestrationCommand => ({
   type: "project.create",
@@ -95,6 +107,7 @@ const makeUploadNormalizerContext = (input?: { readonly ttlMs?: number }) =>
       WorkspacePathsLive,
       ServerConfig.layerTest(workspaceAccessRoot, baseDir),
       Layer.succeed(ChatAttachmentUploads, uploads),
+      projectionsLayer(),
     ).pipe(Layer.provideMerge(NodeServices.layer));
     return { uploads, layer, attachmentsDir: derivedPaths.attachmentsDir };
   }).pipe(Effect.provide(NodeServices.layer));
@@ -118,13 +131,17 @@ const completeUploadFixture = Effect.fn("completeUploadFixture")(function* (
   return { created, lease };
 });
 
-const makeNormalizerLayer = (workspaceAccessRoot: string) =>
+const makeNormalizerLayer = (
+  workspaceAccessRoot: string,
+  projects: ReadonlyArray<OrchestrationProjectShell> = [],
+) =>
   Layer.mergeAll(
     WorkspaceAccessPolicyLayer(workspaceAccessRoot),
     WorkspacePathsLive,
     ServerConfig.layerTest(workspaceAccessRoot, {
       prefix: "ryco-normalizer-test-",
     }),
+    projectionsLayer(projects),
   ).pipe(Layer.provideMerge(NodeServices.layer));
 
 it.effect("project creation rejects an outside root before creating it", () =>
@@ -169,6 +186,105 @@ it.effect("project creation accepts and canonicalizes a root inside the workspac
         throw new Error(`Unexpected normalized command: ${normalized.type}`);
       }
       expect(normalized.workspaceRoot).toBe(yield* fileSystem.realPath(requestedRoot));
+    }).pipe(Effect.provide(NodeServices.layer)),
+  ),
+);
+
+const projectShell = (input: {
+  readonly id: string;
+  readonly kind: OrchestrationProjectShell["kind"];
+  readonly workspaceRoot: string;
+}): OrchestrationProjectShell => ({
+  id: ProjectId.make(input.id),
+  kind: input.kind,
+  title: input.id,
+  workspaceRoot: input.workspaceRoot,
+  projectMetadataDir: ".ryco",
+  defaultModelSelection: null,
+  scripts: [],
+  createdAt: "2026-01-01T00:00:00.000Z",
+  updatedAt: "2026-01-01T00:00:00.000Z",
+});
+
+const projectMetaUpdate = (
+  projectId: string,
+  patch: Partial<Extract<ClientOrchestrationCommand, { type: "project.meta.update" }>>,
+): ClientOrchestrationCommand => ({
+  type: "project.meta.update",
+  commandId: CommandId.make(`meta-update-${projectId}`),
+  projectId: ProjectId.make(projectId),
+  ...patch,
+});
+
+it.effect("rejects client-created chat projects before touching the filesystem", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const workspaceAccessRoot = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "ryco-normalizer-chat-",
+      });
+      const requestedRoot = `${workspaceAccessRoot}/client-chat`;
+      const create = projectCreateCommand(requestedRoot) as Extract<
+        ClientOrchestrationCommand,
+        { type: "project.create" }
+      >;
+      const error = yield* normalizeDispatchCommand({ ...create, kind: "chat" }).pipe(
+        Effect.provide(makeNormalizerLayer(workspaceAccessRoot)),
+        Effect.flip,
+      );
+
+      expect(error.message).toContain("first message");
+      expect(yield* fileSystem.exists(requestedRoot)).toBe(false);
+
+      const regular = yield* normalizeDispatchCommand({ ...create, kind: "project" }).pipe(
+        Effect.provide(makeNormalizerLayer(workspaceAccessRoot)),
+      );
+      expect(regular.type).toBe("project.create");
+    }).pipe(Effect.provide(NodeServices.layer)),
+  ),
+);
+
+it.effect("rejects client kind changes and chat folder moves but keeps other edits", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const workspaceAccessRoot = yield* fileSystem.realPath(
+        yield* fileSystem.makeTempDirectoryScoped({ prefix: "ryco-normalizer-meta-" }),
+      );
+      const chatRoot = `${workspaceAccessRoot}/chat`;
+      const projectRoot = `${workspaceAccessRoot}/project`;
+      const elsewhere = `${workspaceAccessRoot}/elsewhere`;
+      for (const directory of [chatRoot, projectRoot, elsewhere]) {
+        yield* fileSystem.makeDirectory(directory);
+      }
+      const layer = makeNormalizerLayer(workspaceAccessRoot, [
+        projectShell({ id: "chat", kind: "chat", workspaceRoot: chatRoot }),
+        projectShell({ id: "project", kind: "project", workspaceRoot: projectRoot }),
+      ]);
+      const normalize = (command: ClientOrchestrationCommand) =>
+        normalizeDispatchCommand(command).pipe(Effect.provide(layer));
+
+      for (const kind of ["project", "chat"] as const) {
+        for (const projectId of ["chat", "project"]) {
+          const error = yield* Effect.flip(normalize(projectMetaUpdate(projectId, { kind })));
+          expect(error.message).toContain("kind cannot be changed");
+        }
+      }
+
+      const moved = yield* Effect.flip(
+        normalize(projectMetaUpdate("chat", { workspaceRoot: elsewhere })),
+      );
+      expect(moved.message).toContain("turned into a project");
+
+      // Renames that resend the unchanged folder, and moves of regular projects, still work.
+      const renamed = yield* normalize(
+        projectMetaUpdate("chat", { title: "Renamed", workspaceRoot: chatRoot }),
+      );
+      expect(renamed).toMatchObject({ title: "Renamed", workspaceRoot: chatRoot });
+      const relocated = yield* normalize(
+        projectMetaUpdate("project", { workspaceRoot: elsewhere }),
+      );
+      expect(relocated).toMatchObject({ workspaceRoot: elsewhere });
     }).pipe(Effect.provide(NodeServices.layer)),
   ),
 );
@@ -459,6 +575,7 @@ it.effect("rejects upload references when the upload service is absent", () =>
         WorkspaceAccessPolicyLayer("/tmp"),
         WorkspacePathsLive,
         ServerConfig.layerTest("/tmp", { prefix: "ryco-normalizer-noupload-" }),
+        projectionsLayer(),
       ).pipe(Layer.provideMerge(NodeServices.layer));
       const uploads = yield* makeChatAttachmentUploads({ attachmentsDir: "/tmp" });
       const created = yield* uploads.create({

@@ -27,6 +27,8 @@ import type {
 import type {
   GitReadLineBlameInput,
   GitReadLineBlameResult,
+  GitReadImageBlobInput,
+  GitReadImageBlobResult,
   GitLocalChangesInput,
   GitLocalChangesResult,
   GitApplyIndexPatchInput,
@@ -34,6 +36,7 @@ import type {
   GitReadComparisonResult,
 } from "./git.ts";
 import type { AutomationCentreApi } from "./automationCentre.ts";
+import type { NotesApi } from "./notes.ts";
 import type {
   AcpRegistrySearchInput,
   AcpRegistrySearchResult,
@@ -160,6 +163,12 @@ import type {
   ProjectSearchEntriesResult,
   ProjectWriteFileInput,
   ProjectWriteFileResult,
+  ProjectsDeleteChatFolderInput,
+  ProjectsDeleteChatFolderResult,
+  ProjectsPromoteChatInput,
+  ProjectsPromoteChatPreviewInput,
+  ProjectsPromoteChatPreviewResult,
+  ProjectsPromoteChatResult,
 } from "./project.ts";
 import type { ProviderInstanceId } from "./providerInstance.ts";
 import type {
@@ -562,6 +571,9 @@ export type DesktopWorkspaceTransportEvent =
       readonly transportId: string;
       readonly code: number;
       readonly reason: string;
+      /** Secret-free recovery policy supplied by the authenticated relay. */
+      readonly retryable?: boolean;
+      readonly retryAfterMs?: number;
     };
 
 export type DesktopNativeE2eePreparation =
@@ -1144,6 +1156,13 @@ export interface EnvironmentApi {
       input: ProjectStageFileReferenceInput,
     ) => Promise<ProjectStageFileReferenceResult>;
     initializeGit?: (input: ProjectsInitializeGitInput) => Promise<EmptyRpcResult>;
+    promoteChatPreview?: (
+      input: ProjectsPromoteChatPreviewInput,
+    ) => Promise<ProjectsPromoteChatPreviewResult>;
+    promoteChat?: (input: ProjectsPromoteChatInput) => Promise<ProjectsPromoteChatResult>;
+    deleteChatFolder?: (
+      input: ProjectsDeleteChatFolderInput,
+    ) => Promise<ProjectsDeleteChatFolderResult>;
   };
   filesystem: {
     browse: (input: FilesystemBrowseInput) => Promise<FilesystemBrowseResult>;
@@ -1164,6 +1183,7 @@ export interface EnvironmentApi {
   };
   vcs: {
     readLineBlame: (input: GitReadLineBlameInput) => Promise<GitReadLineBlameResult>;
+    readImageBlob: (input: GitReadImageBlobInput) => Promise<GitReadImageBlobResult>;
     readLocalChanges: (input: GitLocalChangesInput) => Promise<GitLocalChangesResult>;
     applyIndexPatch: (input: GitApplyIndexPatchInput) => Promise<void>;
     readComparison: (input: GitReadComparisonInput) => Promise<GitReadComparisonResult>;
@@ -1306,6 +1326,8 @@ export interface EnvironmentApi {
    * feature-detect against environments predating Agent Control.
    */
   automationCentre?: AutomationCentreApi;
+  /** Server-owned worktree notes. Optional so clients can feature-detect older environments. */
+  notes?: NotesApi;
   agentControl?: {
     listProposals: (input: AgentControlListProposalsInput) => Promise<AgentControlProposalQueue>;
     getProposal: (input: AgentControlGetProposalInput) => Promise<AgentControlGetProposalResult>;

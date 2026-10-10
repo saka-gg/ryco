@@ -518,6 +518,56 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
   });
 
   describe("worktree operations", () => {
+    for (const reason of ["Operation timed out", "Operation canceled", "Cannot allocate memory"]) {
+      it.effect(`preserves partial checkouts and explains mmap failure: ${reason}`, () =>
+        Effect.gen(function* () {
+          const cwd = yield* makeTmpDir();
+          const { initialBranch } = yield* initRepoWithCommit(cwd);
+          const checkout = (yield* Path.Path).join(yield* makeTmpDir("mmap-worktree-"), "checkout");
+          const fs = yield* FileSystem.FileSystem;
+          const base = yield* GitVcsDriver.GitVcsDriver;
+          let attempts = 0;
+          const driver = yield* makeGitVcsDriverCore({
+            executeOverride: (input) =>
+              Effect.gen(function* () {
+                if (input.operation !== "GitVcsDriver.createWorktree")
+                  return yield* base.execute(input);
+                attempts++;
+                // Git may register the checkout/branch before reading mapped data.
+                const result = yield* base.execute({
+                  ...input,
+                  args: ["worktree", "add", "--no-checkout", ...input.args.slice(2)],
+                });
+                yield* fs
+                  .writeFileString(`${checkout}/retain.txt`, "partial checkout data")
+                  .pipe(Effect.orDie);
+                return {
+                  ...result,
+                  exitCode: 128 as GitVcsDriver.ExecuteGitResult["exitCode"],
+                  stderr: `fatal: mmap failed: ${reason}`,
+                };
+              }),
+          });
+          const error = yield* driver
+            .createWorktree({
+              cwd,
+              path: checkout,
+              refName: initialBranch,
+              newRefName: "feature/mmap",
+            })
+            .pipe(Effect.flip);
+          assert.include(error.detail, `mmap failed: ${reason}`);
+          if (reason.startsWith("Operation")) assert.include(error.detail, "available offline");
+          else assert.notInclude(error.detail, "available offline");
+          assert.equal(attempts, 1);
+          assert.equal(yield* fs.readFileString(`${checkout}/retain.txt`), "partial checkout data");
+          assert.include(yield* base.listWorktreePaths(cwd), yield* fs.realPath(checkout));
+          const incomplete = yield* driver.assertWorktreeSetupComplete(checkout).pipe(Effect.flip);
+          assert.include(incomplete.detail, "incomplete setup");
+        }).pipe(Effect.provide(OverrideTestLayer)),
+      );
+    }
+
     it.effect(
       "uses configured defaults, preserves explicit paths and registrations after reset",
       () =>

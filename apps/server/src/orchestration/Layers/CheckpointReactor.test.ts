@@ -90,6 +90,11 @@ function createProviderServiceHarness(
   hasSession = true,
   sessionCwd = cwd,
   providerName: ProviderSession["provider"] = ProviderDriverKind.make("codex"),
+  binding: {
+    /** The folder the persisted binding last recorded, with a resume cursor. */
+    readonly resumeTargetCwd?: string;
+    readonly resumeSurvivesCwdChange?: boolean;
+  } = {},
 ) {
   const now = new Date().toISOString();
   const runtimeEventPubSub = Effect.runSync(PubSub.unbounded<ProviderRuntimeEvent>());
@@ -129,7 +134,23 @@ function createProviderServiceHarness(
     respondToUserInput: () => unsupported(),
     stopSession: () => unsupported(),
     listSessions,
-    getCapabilities: () => Effect.succeed({ sessionModelSwitch: "in-session" }),
+    getCapabilities: () =>
+      Effect.succeed({
+        sessionModelSwitch: "in-session",
+        ...(binding.resumeSurvivesCwdChange !== undefined
+          ? { resumeSurvivesCwdChange: binding.resumeSurvivesCwdChange }
+          : {}),
+      }),
+    readResumeTarget: () =>
+      Effect.succeed(
+        binding.resumeTargetCwd === undefined
+          ? Option.none()
+          : Option.some({
+              providerInstanceId: ProviderInstanceId.make("codex"),
+              cwd: binding.resumeTargetCwd,
+              hasResumeCursor: true,
+            }),
+      ),
     getInstanceInfo: (instanceId) =>
       Effect.succeed({
         instanceId,
@@ -345,6 +366,8 @@ describe("CheckpointReactor", () => {
     readonly threadWorktreePath?: string | null;
     readonly providerSessionCwd?: string;
     readonly providerName?: ProviderDriverKind;
+    readonly resumeTargetCwd?: string;
+    readonly resumeSurvivesCwdChange?: boolean;
     readonly gitStatusRefreshCalls?: Array<string>;
     /** Fault injection: wrap the services the reactor sees. */
     readonly wrapEngine?: (engine: OrchestrationEngineShape) => OrchestrationEngineShape;
@@ -360,6 +383,14 @@ describe("CheckpointReactor", () => {
       options?.hasSession ?? true,
       options?.providerSessionCwd ?? cwd,
       options?.providerName ?? ProviderDriverKind.make("codex"),
+      {
+        ...(options?.resumeTargetCwd !== undefined
+          ? { resumeTargetCwd: options.resumeTargetCwd }
+          : {}),
+        ...(options?.resumeSurvivesCwdChange !== undefined
+          ? { resumeSurvivesCwdChange: options.resumeSurvivesCwdChange }
+          : {}),
+      },
     );
     const orchestrationLayer = OrchestrationEngineLive.pipe(
       Layer.provide(OrchestrationProjectionSnapshotQueryLive),
@@ -601,6 +632,65 @@ describe("CheckpointReactor", () => {
         "README.md",
       ),
     ).toBe("v2\n");
+  });
+
+  it("keys the turn's checkpoint on its reply, not on a page published after it", async () => {
+    const harness = await createHarness({ seedFilesystemCheckpoints: false });
+    const threadId = ThreadId.make("thread-1");
+    const turnId = asTurnId("turn-reply-then-page");
+    harness.provider.emit({
+      type: "turn.started",
+      eventId: EventId.make("evt-turn-started-reply-then-page"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-03-02T00:00:01.000Z",
+      threadId,
+      turnId,
+    });
+    await waitForGitRefExists(harness.cwd, checkpointRefForThreadTurn(threadId, 0));
+    const complete = (messageId: string, at: string, page: boolean) =>
+      Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.message.assistant.complete",
+          commandId: CommandId.make(`cmd-${messageId}`),
+          threadId,
+          messageId: MessageId.make(messageId),
+          turnId,
+          // What ryco_html_render publishes: blank text carrying the page.
+          text: page ? " " : "Revenue grew 40%; the chart breaks it down.",
+          ...(page
+            ? {
+                attachments: [
+                  {
+                    type: "file" as const,
+                    id: "thread-1-page",
+                    name: "Chart.html",
+                    mimeType: "text/html",
+                    sizeBytes: 100,
+                    htmlRender: { title: "Chart", height: 400 },
+                  },
+                ],
+              }
+            : {}),
+          createdAt: at,
+        }),
+      );
+    await complete("assistant-reply", "2026-03-02T00:00:02.000Z", false);
+    await complete("assistant-page", "2026-03-02T00:00:03.000Z", true);
+
+    harness.provider.emit({
+      type: "turn.completed",
+      eventId: EventId.make("evt-turn-completed-reply-then-page"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-03-02T00:00:04.000Z",
+      threadId,
+      turnId,
+      payload: { state: "completed" },
+    });
+
+    await waitForThread(harness.readModel, (entry) => entry.checkpoints.length === 1);
+    const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+    expect(thread?.checkpoints[0]).toMatchObject({ turnId, assistantMessageId: "assistant-reply" });
+    expect(thread?.latestTurn?.assistantMessageId).toBe("assistant-reply");
   });
 
   /** Simulates ProviderRuntimeIngestion projecting turn.started and turn.completed. */
@@ -1185,6 +1275,7 @@ describe("CheckpointReactor", () => {
       numTurns: 1,
       targetTurnId: asTurnId("turn-1"),
       droppedTurnIds: [asTurnId("turn-2")],
+      cwd: harness.cwd,
     });
     expect(fs.readFileSync(path.join(harness.cwd, "README.md"), "utf8")).toBe("v2\n");
     await waitForRevertStatus(harness.engine, "cmd-revert-request", "completed");
@@ -1267,6 +1358,7 @@ describe("CheckpointReactor", () => {
       numTurns: 1,
       targetTurnId: asTurnId("turn-claude-1"),
       droppedTurnIds: [asTurnId("turn-claude-2")],
+      cwd: harness.cwd,
     });
   });
 
@@ -1350,12 +1442,14 @@ describe("CheckpointReactor", () => {
       numTurns: 1,
       targetTurnId: asTurnId("turn-1"),
       droppedTurnIds: [asTurnId("turn-2")],
+      cwd: harness.cwd,
     });
     expect(harness.provider.rollbackConversation.mock.calls[1]?.[0]).toEqual({
       threadId: ThreadId.make("thread-1"),
       numTurns: 1,
       targetTurnId: null,
       droppedTurnIds: [asTurnId("turn-1")],
+      cwd: harness.cwd,
     });
     expect(fs.readFileSync(path.join(harness.cwd, "README.md"), "utf8")).toBe("v1\n");
   });
@@ -1912,8 +2006,56 @@ describe("CheckpointReactor", () => {
       numTurns: 1,
       targetTurnId: asTurnId("turn-1"),
       droppedTurnIds: [asTurnId("turn-2")],
+      cwd: harness.cwd,
     });
     expect(readme(harness.cwd)).toBe("v2\n");
+  });
+
+  // A move (a chat turned into a project, a relocated worktree) stops the
+  // session and leaves the binding recording the old folder until a turn starts.
+  it("rewinds a moved conversation in the thread's current folder when it resumes there", async () => {
+    const harness = await createHarness({
+      hasSession: false,
+      resumeTargetCwd: "/tmp/ryco-moved-chat-folder",
+      resumeSurvivesCwdChange: true,
+    });
+    await seedCheckpoints(harness);
+
+    await requestRevert(harness, "cmd-revert-moved-resumable", 1);
+    await waitForRevertStatus(harness.engine, "cmd-revert-moved-resumable", "completed");
+
+    expect(harness.provider.rollbackConversation).toHaveBeenCalledWith({
+      threadId: ThreadId.make("thread-1"),
+      numTurns: 1,
+      targetTurnId: asTurnId("turn-1"),
+      droppedTurnIds: [asTurnId("turn-2")],
+      cwd: harness.cwd,
+    });
+    expect(readme(harness.cwd)).toBe("v2\n");
+  });
+
+  it("refuses to revert a moved conversation the provider cannot resume in the new folder", async () => {
+    const harness = await createHarness({
+      hasSession: false,
+      providerName: ProviderDriverKind.make("claudeAgent"),
+      resumeTargetCwd: "/tmp/ryco-moved-chat-folder",
+      resumeSurvivesCwdChange: false,
+    });
+    await seedCheckpoints(harness);
+
+    await requestRevert(harness, "cmd-revert-moved-unresumable", 1);
+    const activity = await waitForRevertStatus(
+      harness.engine,
+      "cmd-revert-moved-unresumable",
+      "failed",
+    );
+
+    // Rewinding would resume the conversation in the old folder.
+    expect(activity.reason).toBe("provider-unsupported");
+    expect(activity.detail).toContain("Nothing was changed.");
+    expect(harness.provider.rollbackConversation).not.toHaveBeenCalled();
+    expect(readme(harness.cwd)).toBe("v3\n");
+    expect(gitRefExists(harness.cwd, ref(2))).toBe(true);
   });
 
   describe("startup recovery", () => {

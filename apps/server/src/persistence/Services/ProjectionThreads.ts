@@ -12,6 +12,7 @@ import {
   ModelSelection,
   NonNegativeInt,
   ProjectId,
+  ProjectKind,
   ProviderInteractionMode,
   RuntimeMode,
   StatusBucket,
@@ -71,6 +72,23 @@ export const ProjectionThread = Schema.Struct({
 });
 export type ProjectionThread = typeof ProjectionThread.Type;
 
+/** Never used: no turn and no user message. */
+export const isNeverUsedThread = (
+  thread: Pick<ProjectionThread, "latestTurnId" | "latestUserMessageAt">,
+): boolean => thread.latestTurnId === null && thread.latestUserMessageAt === null;
+
+/**
+ * A creation that was rolled back: deleted permanently without passing Trash, and never used. Only
+ * such a thread may skip Trash (a failed first send undoing its `thread.create`), so nothing of it
+ * can be restored or shown; the retained row is only a tombstone for its id.
+ */
+export const isRolledBackThreadCreation = (
+  thread: Pick<
+    ProjectionThread,
+    "deletedAt" | "trashedAt" | "latestTurnId" | "latestUserMessageAt"
+  >,
+): boolean => thread.deletedAt !== null && thread.trashedAt === null && isNeverUsedThread(thread);
+
 export const GetProjectionThreadInput = Schema.Struct({
   threadId: ThreadId,
 });
@@ -110,6 +128,8 @@ export const ProjectionTrashedThread = Schema.Struct({
   threadId: ThreadId,
   projectId: ProjectId,
   projectTitle: Schema.NullOr(Schema.String),
+  /** Null when the project record is gone. */
+  projectKind: Schema.NullOr(ProjectKind),
   projectDeletedAt: Schema.NullOr(IsoDateTime),
   title: Schema.String,
   branch: Schema.NullOr(Schema.String),

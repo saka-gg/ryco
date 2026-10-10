@@ -26,10 +26,11 @@ import {
   ProviderSteerTurnInput,
   ProviderStopBackgroundTaskInput,
   ProviderStopSessionInput,
+  RuntimeMode,
   RuntimeSessionId,
   TurnId,
   type ProviderInstanceId,
-  type ProviderDriverKind,
+  ProviderDriverKind,
   type ProviderRuntimeEvent,
   type ProviderSession,
   type ProviderTurnStartResult,
@@ -88,7 +89,10 @@ import {
   type ProviderStartPhase,
   type ProviderTimedOperation,
 } from "../providerOperationPolicy.ts";
-import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
+import type {
+  ProviderAdapterCapabilities,
+  ProviderAdapterShape,
+} from "../Services/ProviderAdapter.ts";
 import { ProviderAdapterRegistry } from "../Services/ProviderAdapterRegistry.ts";
 import {
   ProviderService,
@@ -168,7 +172,25 @@ const ProviderRollbackConversationInput = Schema.Struct({
   numTurns: NonNegativeInt,
   targetTurnId: Schema.NullOr(TurnId),
   droppedTurnIds: Schema.Array(TurnId),
+  cwd: Schema.optional(Schema.String),
 });
+
+/**
+ * Where a thread's native conversation is reachable now. A move (a chat turned into a project, a
+ * relocated worktree) leaves the binding's recorded directory behind until the next start, and
+ * that folder may be gone. A conversation that survives the move (`resumeSurvivesCwdChange`) is
+ * reached in the thread's current directory, where the next start resumes it; any other still
+ * lives in the recorded directory.
+ */
+function reachableConversationCwd(input: {
+  readonly capabilities: ProviderAdapterCapabilities;
+  readonly recordedCwd: string | undefined;
+  readonly currentCwd: string | undefined;
+}): string | undefined {
+  return input.capabilities.resumeSurvivesCwdChange === true
+    ? (input.currentCwd ?? input.recordedCwd)
+    : (input.recordedCwd ?? input.currentCwd);
+}
 
 function toValidationError(
   operation: string,
@@ -216,12 +238,60 @@ function toRuntimeStatus(session: ProviderSession): "starting" | "running" | "st
   }
 }
 
+/**
+ * The persisted binding a fresh start on the same instance replaced, kept in the new binding's
+ * runtime payload. Until the new runtime is accepted, the replaced one is its only rollback
+ * target: a same-instance start stops it first, so it cannot be restored as a live runtime, and
+ * without its resume cursor and working directory the conversation (and a moved directory, which
+ * is detected from them) would be lost.
+ */
+const REPLACED_BINDING_KEY = "replacedBinding";
+
+const ReplacedBindingSnapshot = Schema.Struct({
+  provider: ProviderDriverKind,
+  runtimeSessionId: RuntimeSessionId,
+  runtimeMode: Schema.optional(RuntimeMode),
+  resumeCursor: Schema.Unknown,
+  runtimePayload: Schema.Unknown,
+});
+type ReplacedBindingSnapshot = typeof ReplacedBindingSnapshot.Type;
+const decodeReplacedBinding = Schema.decodeUnknownOption(ReplacedBindingSnapshot);
+
+const isPayloadRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+function snapshotReplacedBinding(
+  binding: ProviderRuntimeBinding,
+): ReplacedBindingSnapshot | undefined {
+  if (binding.runtimeSessionId === undefined) return undefined;
+  const payload = binding.runtimePayload;
+  return {
+    provider: binding.provider,
+    runtimeSessionId: binding.runtimeSessionId,
+    ...(binding.runtimeMode !== undefined ? { runtimeMode: binding.runtimeMode } : {}),
+    resumeCursor: binding.resumeCursor ?? null,
+    // One level only: what this binding itself replaced is no longer anyone's rollback target.
+    runtimePayload: isPayloadRecord(payload)
+      ? Object.fromEntries(Object.entries(payload).filter(([key]) => key !== REPLACED_BINDING_KEY))
+      : (payload ?? null),
+  };
+}
+
+function readReplacedBinding(
+  runtimePayload: ProviderRuntimeBinding["runtimePayload"],
+): ReplacedBindingSnapshot | undefined {
+  return isPayloadRecord(runtimePayload)
+    ? Option.getOrUndefined(decodeReplacedBinding(runtimePayload[REPLACED_BINDING_KEY]))
+    : undefined;
+}
+
 function toRuntimePayloadFromSession(
   session: ProviderSession,
   extra?: {
     readonly modelSelection?: unknown;
     readonly lastRuntimeEvent?: string;
     readonly lastRuntimeEventAt?: string;
+    readonly replacedBinding?: ReplacedBindingSnapshot;
   },
 ): Record<string, unknown> {
   return {
@@ -229,6 +299,9 @@ function toRuntimePayloadFromSession(
     model: session.model ?? null,
     activeTurnId: session.activeTurnId ?? null,
     lastError: session.lastError ?? null,
+    ...(extra?.replacedBinding !== undefined
+      ? { [REPLACED_BINDING_KEY]: extra.replacedBinding }
+      : {}),
     ...(extra?.modelSelection !== undefined ? { modelSelection: extra.modelSelection } : {}),
     ...(extra?.lastRuntimeEvent !== undefined ? { lastRuntimeEvent: extra.lastRuntimeEvent } : {}),
     ...(extra?.lastRuntimeEventAt !== undefined
@@ -750,6 +823,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       readonly modelSelection?: unknown;
       readonly lastRuntimeEvent?: string;
       readonly lastRuntimeEventAt?: string;
+      readonly replacedBinding?: ReplacedBindingSnapshot;
     },
   ) =>
     Effect.gen(function* () {
@@ -941,6 +1015,8 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const recoverSessionForThread = Effect.fn("recoverSessionForThread")(function* (input: {
     readonly binding: ProviderRuntimeBinding;
     readonly operation: string;
+    /** The thread's current working directory, when the caller knows it. */
+    readonly cwd?: string | undefined;
   }) {
     const bindingInstanceId = yield* requireBindingInstanceId(input.operation, input.binding);
     yield* Effect.annotateCurrentSpan({
@@ -984,7 +1060,11 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         );
       }
 
-      const persistedCwd = readPersistedCwd(input.binding.runtimePayload);
+      const resumeCwd = reachableConversationCwd({
+        capabilities: adapter.capabilities,
+        recordedCwd: readPersistedCwd(input.binding.runtimePayload),
+        currentCwd: input.cwd,
+      });
       const persistedModelSelection = readPersistedModelSelection(input.binding.runtimePayload);
       const recoveredBinding: ProviderRuntimeBinding = {
         threadId: input.binding.threadId,
@@ -1006,7 +1086,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
               providerInstanceId: bindingInstanceId,
               runtimeSessionId,
               resumePolicy: "compatible",
-              ...(persistedCwd ? { cwd: persistedCwd } : {}),
+              ...(resumeCwd ? { cwd: resumeCwd } : {}),
               ...(persistedModelSelection ? { modelSelection: persistedModelSelection } : {}),
               ...(hasResumeCursor ? { resumeCursor: input.binding.resumeCursor } : {}),
               runtimeMode: input.binding.runtimeMode ?? "full-access",
@@ -1054,6 +1134,8 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     readonly threadId: ThreadId;
     readonly operation: string;
     readonly allowRecovery: boolean;
+    /** Where a recovered session resumes a conversation that survives a move. */
+    readonly cwd?: string | undefined;
   }) {
     const bindingOption = yield* directory.getBinding(input.threadId);
     const binding = Option.getOrUndefined(bindingOption);
@@ -1093,6 +1175,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     const recovered = yield* recoverSessionForThread({
       binding,
       operation: input.operation,
+      cwd: input.cwd,
     });
     return {
       adapter: recovered.adapter,
@@ -1162,6 +1245,30 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     ),
   );
 
+  /**
+   * Put back, stopped, the binding a fresh same-instance start replaced (see
+   * {@link REPLACED_BINDING_KEY}), with its resume cursor and working directory. Its runtime is
+   * not revived; the next start resumes from the cursor. False when `current` replaced nothing.
+   */
+  const restoreReplacedBinding = (current: ProviderRuntimeBinding) =>
+    Effect.gen(function* () {
+      const replaced = readReplacedBinding(current.runtimePayload);
+      if (replaced === undefined || current.providerInstanceId === undefined) return false;
+      yield* directory.upsert({
+        threadId: current.threadId,
+        provider: replaced.provider,
+        providerInstanceId: current.providerInstanceId,
+        runtimeSessionId: replaced.runtimeSessionId,
+        ...(replaced.runtimeMode !== undefined ? { runtimeMode: replaced.runtimeMode } : {}),
+        status: "stopped",
+        resumeCursor: replaced.resumeCursor ?? null,
+        runtimePayload: isPayloadRecord(replaced.runtimePayload)
+          ? { ...replaced.runtimePayload, activeTurnId: null }
+          : { activeTurnId: null },
+      });
+      return true;
+    });
+
   const retireSessionBinding: ProviderServiceShape["retireSessionBinding"] = Effect.fn(
     "retireSessionBinding",
   )(function* (binding) {
@@ -1175,12 +1282,14 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         if (!current || !bindingIdentityMatches(current, binding)) {
           return false;
         }
-        yield* directory.upsert({
-          ...current,
-          status: "stopped",
-          resumeCursor: null,
-          runtimePayload: null,
-        });
+        if (!(yield* restoreReplacedBinding(current))) {
+          yield* directory.upsert({
+            ...current,
+            status: "stopped",
+            resumeCursor: null,
+            runtimePayload: null,
+          });
+        }
         return true;
       }),
     );
@@ -1195,7 +1304,12 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     Effect.gen(function* () {
       yield* stopExactBinding(binding, true);
       const current = Option.getOrUndefined(yield* directory.getBinding(binding.threadId));
-      if (current && bindingIdentityMatches(current, binding)) {
+      // An abandoned fresh start puts back what it replaced; any other keeps its own cursor.
+      if (
+        current &&
+        bindingIdentityMatches(current, binding) &&
+        !(yield* restoreReplacedBinding(current))
+      ) {
         yield* directory.upsert({
           threadId: binding.threadId,
           provider: binding.provider,
@@ -1271,11 +1385,11 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           );
         }
         const persistedBinding = Option.getOrUndefined(yield* directory.getBinding(threadId));
-        if (
+        const replacesPersistedRuntime =
           persistedBinding?.providerInstanceId === resolvedInstanceId &&
           persistedBinding.runtimeSessionId !== undefined &&
-          persistedBinding.runtimeSessionId !== input.runtimeSessionId
-        ) {
+          persistedBinding.runtimeSessionId !== input.runtimeSessionId;
+        if (persistedBinding !== undefined && replacesPersistedRuntime) {
           const stopped = yield* stopExactBinding(persistedBinding, false);
           if (stopped === "timed-out") {
             return yield* toValidationError(
@@ -1295,6 +1409,12 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           });
         }
         const freshStart = input.resumePolicy === "fresh";
+        // A fresh start on the same instance gives up the conversation's resume state, so the new
+        // binding keeps it until acceptance: a rollback puts it back (`restoreReplacedBinding`).
+        const replacedBinding =
+          freshStart && replacesPersistedRuntime && persistedBinding !== undefined
+            ? snapshotReplacedBinding(persistedBinding)
+            : undefined;
         const effectiveResumeCursor = freshStart
           ? undefined
           : (input.resumeCursor ??
@@ -1380,6 +1500,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
 
           yield* upsertSessionBinding(started, threadId, {
             modelSelection: input.modelSelection,
+            ...(replacedBinding !== undefined ? { replacedBinding } : {}),
           });
           yield* recordRuntimeActivity(threadId, runtimeSessionId);
           if (
@@ -2168,6 +2289,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           threadId: input.threadId,
           operation,
           allowRecovery: true,
+          cwd: input.cwd,
         });
         metricProvider = routed.adapter.provider;
         yield* Effect.annotateCurrentSpan({
@@ -2289,14 +2411,20 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   );
 
   return {
-    readThreadHistory: (threadId) =>
+    readThreadHistory: (threadId, input) =>
       Effect.gen(function* () {
         const binding = yield* directory.getBinding(threadId);
         if (Option.isNone(binding) || binding.value.resumeCursor == null) return Option.none();
         const instanceId = yield* requireBindingInstanceId("readThreadHistory", binding.value);
         const adapter = yield* registry.getByInstance(instanceId);
         if (!adapter.readThreadHistory) return Option.none();
-        const cwd = readPersistedCwd(binding.value.runtimePayload);
+        // Read where the conversation is reachable now, without rewriting the binding: its
+        // recorded directory, possibly gone after a move, is what relocation detection needs.
+        const cwd = reachableConversationCwd({
+          capabilities: adapter.capabilities,
+          recordedCwd: readPersistedCwd(binding.value.runtimePayload),
+          currentCwd: input?.cwd,
+        });
         const history = yield* adapter.readThreadHistory({
           threadId,
           resumeCursor: binding.value.resumeCursor,
@@ -2304,6 +2432,20 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         });
         return Option.some({ binding: binding.value, history });
       }),
+    readResumeTarget: (threadId) =>
+      directory.getBinding(threadId).pipe(
+        Effect.map(
+          Option.flatMap((binding) => {
+            if (binding.providerInstanceId === undefined) return Option.none();
+            const cwd = readPersistedCwd(binding.runtimePayload);
+            return Option.some({
+              providerInstanceId: binding.providerInstanceId,
+              ...(cwd ? { cwd } : {}),
+              hasResumeCursor: binding.resumeCursor !== null && binding.resumeCursor !== undefined,
+            });
+          }),
+        ),
+      ),
     startSession,
     startFreshSession,
     getSession,

@@ -44,8 +44,10 @@ import {
   threadBusyMessage,
   threadBusyReason,
 } from "../checkpointRevertPolicy.ts";
+import { resolveCwdRelocation } from "../cwdRelocation.ts";
 import { latestTurnFromCheckpoint } from "../projector.ts";
 import { threadShellSettlementInput } from "../threadSettlementInput.ts";
+import { selectTurnReplyMessage, type TurnReplyCandidate } from "../turnReplyMessage.ts";
 import { userFacingFailureDetail } from "../userFacingErrors.ts";
 import { CheckpointStore } from "../../checkpointing/Services/CheckpointStore.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
@@ -360,6 +362,25 @@ const make = Effect.gen(function* () {
     return cwd;
   });
 
+  // Whether the conversation a revert would rewind last ran outside the
+  // thread's folder: the same check a turn start makes before resuming it.
+  const resolveRevertCwdRelocation = Effect.fn("resolveRevertCwdRelocation")(function* (
+    thread: OrchestrationThread,
+    cwd: string | undefined,
+  ) {
+    const sessions = yield* providerService.listSessions();
+    const liveSession =
+      thread.session !== null && thread.session.status !== "stopped"
+        ? sessions.find((session) => session.threadId === thread.id)
+        : undefined;
+    return yield* resolveCwdRelocation(providerService, {
+      threadId: thread.id,
+      liveSession,
+      instanceId: thread.modelSelection.instanceId,
+      cwd,
+    });
+  });
+
   // Shared tail for both capture paths: creates the git checkpoint ref, diffs
   // it against the previous turn, then dispatches the domain events to update
   // the orchestration read model.
@@ -367,11 +388,13 @@ const make = Effect.gen(function* () {
     readonly threadId: ThreadId;
     readonly turnId: TurnId;
     readonly thread: {
-      readonly messages: ReadonlyArray<{
-        readonly id: MessageId;
-        readonly role: string;
-        readonly turnId: TurnId | null;
-      }>;
+      readonly messages: ReadonlyArray<
+        TurnReplyCandidate & {
+          readonly id: MessageId;
+          readonly role: string;
+          readonly turnId: TurnId | null;
+        }
+      >;
     };
     readonly cwd: string;
     readonly turnCount: number;
@@ -441,11 +464,10 @@ const make = Effect.gen(function* () {
         ),
       );
 
+    // Keyed on the turn's reply, not on a page or file it published after the reply.
     const assistantMessageId =
       input.assistantMessageId ??
-      input.thread.messages
-        .toReversed()
-        .find((entry) => entry.role === "assistant" && entry.turnId === input.turnId)?.id ??
+      selectTurnReplyMessage(input.thread.messages, input.turnId)?.id ??
       MessageId.make(`assistant:${input.turnId}`);
 
     yield* orchestrationEngine.dispatch({
@@ -1136,6 +1158,31 @@ const make = Effect.gen(function* () {
 
     // 8. Provider first: files and history stay untouched if it refuses.
     const fromTurnCount = outcome.currentTurnCount;
+    // The thread's folder, resolved like a turn start: the binding may still
+    // record the folder the conversation ran in before the thread moved.
+    const workspaceCwd = resolveThreadWorkspaceCwd({ thread, projects });
+    const resolvedRelocation =
+      outcome.dropped.length > 0
+        ? yield* Effect.result(resolveRevertCwdRelocation(thread, workspaceCwd))
+        : undefined;
+    if (resolvedRelocation?._tag === "Failure") {
+      return yield* fail(
+        "provider-failed",
+        `Ryco could not rewind the agent's conversation. ${asSentence(
+          userFacingFailureDetail(Cause.fail(resolvedRelocation.failure)),
+        )}`,
+      );
+    }
+    const relocation = resolvedRelocation?.success;
+    if (relocation !== undefined && !relocation.resumeSurvives) {
+      // The provider cannot resume this conversation in the new folder, so
+      // rewinding it would resume it in the old one. Refuse before anything
+      // changes rather than restore files the conversation would not match.
+      return yield* fail(
+        "provider-unsupported",
+        "This conversation ran in a folder the thread has since moved from, and the agent can't rewind it there. Send a message first to continue it in the new folder.",
+      );
+    }
     if (outcome.dropped.length > 0) {
       // The journal must say "rolling-back" before the provider can forget
       // anything, or a crash would be recovered as "nothing was changed".
@@ -1167,6 +1214,7 @@ const make = Effect.gen(function* () {
           numTurns: outcome.currentTurnCount - turnCount,
           targetTurnId: outcome.targetTurnId,
           droppedTurnIds: outcome.dropped.map((checkpoint) => checkpoint.turnId),
+          ...(workspaceCwd !== undefined ? { cwd: workspaceCwd } : {}),
         }),
       );
       if (rolledBack._tag === "Failure") {

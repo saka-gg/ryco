@@ -27,7 +27,12 @@ const older = {
   modelSlug: "older-model",
   modelDisplayName: "Older model",
 };
-function activity(sequence: number, status = "consumed", source = opus) {
+function activity(
+  sequence: number,
+  status = "consumed",
+  source = opus,
+  extra: Record<string, unknown> = {},
+) {
   return Schema.decodeUnknownSync(OrchestrationThreadActivity)({
     id: `handoff-${sequence}`,
     kind: "context-handoff",
@@ -49,7 +54,15 @@ function activity(sequence: number, status = "consumed", source = opus) {
       contextVersion: 1,
       contextDigest: "a".repeat(64),
       ...(status === "failed" ? { error: "Failed" } : {}),
+      ...extra,
     },
+  });
+}
+/** A fresh session after the thread's folder moved: same model on both sides. */
+function relocation(sequence: number) {
+  return activity(sequence, "consumed", target, {
+    reason: "cwd-relocation",
+    sources: [target],
   });
 }
 const end = { hasMoreBefore: false, oldestCursor: null, newestCursor: null };
@@ -80,6 +93,16 @@ describe("inbox context handoff", () => {
     expect(result?.target.modelDisplayName).toBe("GPT 6 Astra");
     expect(result?.source.providerInstanceId).toBe("claudeAgent");
     expect(api.orchestration.getThreadHistoryPage).not.toHaveBeenCalled();
+  });
+  it("keeps naming the model transfer when a folder move came after it", async () => {
+    const result = await load(
+      apiWith([relocation(3), activity(2, "consumed", opus, { reason: "model-change" })]),
+    );
+    expect(result?.source.modelDisplayName).toBe("Opus 5");
+    expect(result?.target.modelDisplayName).toBe("GPT 6 Astra");
+  });
+  it("never presents a folder move as a model transfer", async () => {
+    expect(await load(apiWith([relocation(1)]))).toBeNull();
   });
   it("does not label an old target as the current model", async () => {
     expect(await load(apiWith([activity(1)]), { ...selection, model: "another-model" })).toBeNull();

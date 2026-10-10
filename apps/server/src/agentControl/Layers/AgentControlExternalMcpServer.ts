@@ -5,6 +5,9 @@ import { ServerConfig } from "../../config.ts";
 import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
+import { CheckpointDiffQuery } from "../../checkpointing/Services/CheckpointDiffQuery.ts";
+import { WorkspaceAccessPolicy } from "../../workspace/Services/WorkspaceAccessPolicy.ts";
+import { WorkspaceFileSystem } from "../../workspace/Services/WorkspaceFileSystem.ts";
 import { makeAgentControlExternalListener } from "../ExternalMcp/listener.ts";
 import {
   clearExternalRuntimeDescriptor,
@@ -17,7 +20,9 @@ import { AgentControlExternalTaskService } from "../Services/AgentControlExterna
 import { AgentControlActionValidator } from "../Services/AgentControlActionValidator.ts";
 import { AgentControlAutomationService } from "../Services/AgentControlAutomation.ts";
 import { AgentControlDiagnosticsService } from "../Services/AgentControlDiagnostics.ts";
+import { AgentControlProposalEvents } from "../Services/AgentControlProposalEvents.ts";
 import { AgentControlProposalService } from "../Services/AgentControlProposalService.ts";
+import { AgentControlWorkspaces } from "../workspaceLifecycle.ts";
 
 const makeAgentControlExternalMcpServer = Effect.gen(function* () {
   const config = yield* ServerConfig;
@@ -30,6 +35,11 @@ const makeAgentControlExternalMcpServer = Effect.gen(function* () {
   const automations = yield* Effect.serviceOption(AgentControlAutomationService);
   const diagnostics = yield* Effect.serviceOption(AgentControlDiagnosticsService);
   const proposals = yield* Effect.serviceOption(AgentControlProposalService);
+  const proposalEvents = yield* Effect.serviceOption(AgentControlProposalEvents);
+  const workspaces = yield* Effect.serviceOption(AgentControlWorkspaces);
+  const diffs = yield* Effect.serviceOption(CheckpointDiffQuery);
+  const files = yield* Effect.serviceOption(WorkspaceFileSystem);
+  const workspaceAccess = yield* Effect.serviceOption(WorkspaceAccessPolicy);
   const topology = yield* AgentControlExternalTopologyService;
   const tools = makeExternalMcpTools({
     integrations,
@@ -40,6 +50,11 @@ const makeAgentControlExternalMcpServer = Effect.gen(function* () {
     ...(Option.isSome(automations) ? { automations: automations.value } : {}),
     ...(Option.isSome(diagnostics) ? { diagnostics: diagnostics.value } : {}),
     ...(Option.isSome(proposals) ? { proposals: proposals.value } : {}),
+    ...(Option.isSome(proposalEvents) ? { proposalEvents: proposalEvents.value } : {}),
+    ...(Option.isSome(workspaces) ? { workspaces: workspaces.value } : {}),
+    ...(Option.isSome(diffs) ? { diffs: diffs.value } : {}),
+    ...(Option.isSome(files) ? { files: files.value } : {}),
+    ...(Option.isSome(workspaceAccess) ? { workspaceAccess: workspaceAccess.value } : {}),
   });
   const transitions = yield* Semaphore.make(1);
   let listenerScope: Scope.Closeable | null = null;

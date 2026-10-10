@@ -1,5 +1,8 @@
 @import "tailwindcss";
 @import "./components/pullRequests/pullRequests.css";
+@import "./components/projects/projects.css";
+@import "./components/automations/styles/automations.css";
+@import "./components/overview/overview.css";
 
 @custom-variant dark (&:is(.dark, .dark *));
 /* Window Controls Overlay: active when Electron exposes native titlebar control geometry. */
@@ -236,6 +239,34 @@
   }
 }
 
+/*
+ * Landing on a deep link's target (a Checks job, a commit, an Agents
+ * workflow): one pass of the jump flash. `-replay` swaps in identical
+ * keyframes so landing again mid-pass restarts it. With motion reduced the
+ * target holds a static ring for the same time instead (`useLandingFlash`
+ * removes the class after 1.6s).
+ */
+.landing-flash {
+  animation: overview-jump-flash 1.6s var(--app-motion-ease);
+}
+.landing-flash-replay {
+  animation-name: landing-flash-replay;
+}
+/* Must stay identical to `overview-jump-flash`: it exists only so the
+   animation name changes and the pass restarts. */
+@keyframes landing-flash-replay {
+  0%,
+  100% {
+    background-color: transparent;
+  }
+  30% {
+    background-color: color-mix(in srgb, var(--primary) 8%, transparent);
+  }
+}
+.landing-flash-static {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ring) 70%, transparent);
+}
+
 /* Active status motion stays continuous so working state never looks frozen.
    Dedicated status dots keep a stable core and animate only a transform/opacity
    halo; generic active icons use the quieter breathe animation. */
@@ -376,12 +407,11 @@
   --app-glass-panel-filter: none;
   --app-glass-panel-light-alpha: 100%;
   --app-glass-panel-dark-alpha: 100%;
-  /* The composer's tone: one step off the page at rest and one more while it
-     holds focus. Derived from the theme pair so custom themes re-tint it; the
-     dark variant below re-weights the steps. Its translucency and frost come
-     from the shared surface material (`.app-composer-surface`). */
+  /* The composer's tone: one step off the page, focused or not. Derived from
+     the theme pair so custom themes re-tint it; the dark variant below
+     re-weights the step. Its translucency and frost come from the shared
+     surface material (`.app-composer-surface`). */
   --app-composer-surface: color-mix(in srgb, var(--foreground) 4.5%, var(--background));
-  --app-composer-surface-focus: color-mix(in srgb, var(--foreground) 6.5%, var(--background));
   /* Toasts use a translucent plate and frost, with semantic color mixed in
      separately by toast type. */
   --app-toast-alpha: 52%;
@@ -546,7 +576,6 @@
     --warning: var(--color-amber-500);
     --warning-foreground: var(--color-amber-400);
     --app-composer-surface: color-mix(in srgb, var(--foreground) 6.5%, var(--background));
-    --app-composer-surface-focus: color-mix(in srgb, var(--foreground) 9%, var(--background));
     --scrollbar-thumb: rgba(255, 255, 255, 0.1);
     --scrollbar-thumb-hover: rgba(255, 255, 255, 0.18);
     --scrollbar-thumb-thin: rgba(255, 255, 255, 0.08);
@@ -684,7 +713,7 @@ code {
   /* The composer plate: `.app-surface`'s material — the same plate alpha and
      frost the dialogs use, both driven by the Transparency setting — over the
      composer's own tone instead of the popover colour. Solid resolves to an
-     opaque tone with no filter. Focus steps the tone, not the material. */
+     opaque tone with no filter. Focus leaves it unchanged. */
   .app-composer-surface {
     --app-composer-tone: var(--app-composer-surface);
     background-color: color-mix(
@@ -702,10 +731,6 @@ code {
       var(--app-composer-tone) var(--app-surface-dark-opacity),
       transparent
     );
-  }
-
-  .app-composer-surface:has(:focus-visible) {
-    --app-composer-tone: var(--app-composer-surface-focus);
   }
 
   /* The floating composer bar's scroll-edge scrim, in two layers. The strip
@@ -2235,6 +2260,311 @@ label:has(> select#reasoning-effort) select {
   }
 }
 
+/* Sidebar header (SidebarPrimaryActions): the Omnifield, New thread and the
+   destinations fold into one toolbar row while a sidebar list is scrolled
+   (sidebarFold.ts). Every control is absolutely placed, so both layouts morph
+   through the same transitions. Values are the approved prototype's
+   (output/sidebar-top-concepts/omnifield-condensing.html). */
+.sidebar-fold {
+  position: relative;
+  z-index: 3;
+  flex: none;
+  /* Field row (30 + 6), 28px per destination, 6px before the list. */
+  height: calc(42px + var(--sidebar-fold-rows, 0) * 28px);
+  margin: 0 0.5rem 2px;
+  transition: height var(--app-motion-duration-pane) var(--app-motion-spring-gentle);
+}
+
+.sidebar-fold[data-folded="true"] {
+  height: 36px;
+}
+
+.sidebar-fold-item {
+  position: absolute;
+  transition:
+    left var(--app-motion-duration-pane) var(--app-motion-spring-gentle),
+    top var(--app-motion-duration-pane) var(--app-motion-spring-gentle),
+    width var(--app-motion-duration-pane) var(--app-motion-spring-gentle),
+    height var(--app-motion-duration-pane) var(--app-motion-spring-gentle),
+    padding var(--app-motion-duration-pane) var(--app-motion-spring-gentle),
+    background-color var(--app-motion-duration-chip),
+    color var(--app-motion-duration-chip),
+    border-color var(--app-motion-duration-pane),
+    box-shadow var(--app-motion-duration-chip);
+}
+
+.sidebar-fold-field {
+  top: 0;
+  left: 0;
+  width: calc(100% - 36px);
+  height: 30px;
+  padding: 0 5px 0 2px;
+}
+
+.sidebar-fold[data-folded="true"] .sidebar-fold-field {
+  top: 3px;
+  width: 30px;
+  padding: 0 0 0 2px;
+  border-color: transparent;
+  background-color: transparent;
+  box-shadow: none;
+  cursor: pointer;
+}
+
+.sidebar-fold[data-folded="true"] .sidebar-fold-field:hover {
+  background-color: var(--sidebar-accent);
+}
+
+.sidebar-fold-field :is(input, .sidebar-omnifield-kbd, .sidebar-omnifield-tokens) {
+  transition: opacity var(--app-motion-duration-pop);
+}
+
+.sidebar-fold[data-folded="true"]
+  .sidebar-fold-field
+  :is(input, .sidebar-omnifield-kbd, .sidebar-omnifield-tokens) {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* Hidden while typing, not on focus-within: pressing the chip focuses it, and
+   hiding it then would swallow the click. */
+.sidebar-fold-field:has(input:focus) .sidebar-omnifield-kbd,
+.sidebar-fold-field[data-tokens="true"] .sidebar-omnifield-kbd {
+  display: none;
+}
+
+.sidebar-fold-new {
+  top: 0;
+  left: calc(100% - 30px);
+  width: 30px;
+  height: 30px;
+}
+
+.sidebar-fold[data-folded="true"] .sidebar-fold-new {
+  top: 3px;
+}
+
+.sidebar-fold-destination {
+  top: calc(36px + var(--sidebar-fold-index) * 28px);
+  left: 0;
+  width: 100%;
+  height: 28px;
+  gap: 8px;
+  padding: 0 8px;
+  overflow: hidden;
+}
+
+.sidebar-fold[data-folded="true"] .sidebar-fold-destination {
+  top: 4px;
+  left: calc(34px + var(--sidebar-fold-index) * 30px);
+  width: 28px;
+  gap: 0;
+  padding: 0 7px;
+}
+
+.sidebar-fold-label {
+  max-width: 180px;
+  overflow: hidden;
+  white-space: nowrap;
+  transition:
+    opacity var(--app-motion-duration-pop) var(--app-motion-ease),
+    filter var(--app-motion-duration-pop) var(--app-motion-ease),
+    max-width var(--app-motion-duration-pane) var(--app-motion-spring-gentle);
+}
+
+.sidebar-fold[data-folded="true"] .sidebar-fold-label {
+  max-width: 0;
+  opacity: 0;
+  filter: blur(3px);
+}
+
+.sidebar-fold-badge {
+  transition: all var(--app-motion-duration-pane) var(--app-motion-spring-gentle);
+}
+
+.sidebar-fold[data-folded="true"] .sidebar-fold-badge {
+  position: absolute;
+  top: 1px;
+  right: 0;
+  height: 13px;
+  min-width: 13px;
+  padding: 0 3px;
+  background: var(--color-amber-400);
+  color: #1a1406;
+  font-size: 8.5px;
+}
+
+/* Funnel (Inbox) and magnifier (Projects) share the field's leading button. */
+.sidebar-omnifield-icon {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  transition:
+    opacity var(--app-motion-duration-pop) var(--app-motion-ease),
+    transform var(--app-motion-duration-stack) var(--app-motion-spring-snappy);
+}
+
+.sidebar-omnifield-icon[data-shown="false"] {
+  opacity: 0;
+  transform: scale(0.5) rotate(-30deg);
+}
+
+/* The funnel's three lines cross into an X while the filter menu is open. */
+.sidebar-omnifield-funnel path {
+  transform-box: fill-box;
+  transform-origin: center;
+  transition:
+    transform var(--app-motion-duration-stack) var(--app-motion-spring-snappy),
+    opacity var(--app-motion-duration-chip);
+}
+
+.sidebar-omnifield-lead[aria-expanded="true"] .sidebar-omnifield-funnel path:nth-child(1) {
+  transform: translateY(6px) rotate(45deg) scaleX(0.62);
+}
+
+.sidebar-omnifield-lead[aria-expanded="true"] .sidebar-omnifield-funnel path:nth-child(2) {
+  opacity: 0;
+}
+
+.sidebar-omnifield-lead[aria-expanded="true"] .sidebar-omnifield-funnel path:nth-child(3) {
+  transform: translateY(-6px) rotate(-45deg) scaleX(2.6);
+}
+
+.sidebar-omnifield-count {
+  position: absolute;
+  top: -4px;
+  right: -5px;
+  transform: scale(0);
+  transition: transform var(--app-motion-duration-stack) var(--app-motion-spring-snappy);
+}
+
+.sidebar-omnifield-count[data-shown="true"] {
+  transform: scale(1);
+}
+
+.sidebar-omnifield-lead[aria-expanded="true"] .sidebar-omnifield-count {
+  transform: scale(0);
+}
+
+.sidebar-fold[data-folded="true"] .sidebar-omnifield-count {
+  top: -2px;
+  right: -3px;
+}
+
+.sidebar-omnifield-count-roll {
+  animation: sidebar-omnifield-roll var(--app-motion-duration-stack) var(--app-motion-spring-snappy);
+}
+
+@keyframes sidebar-omnifield-roll {
+  from {
+    opacity: 0;
+    transform: translateY(100%);
+  }
+}
+
+.sidebar-omnifield-token {
+  animation: sidebar-omnifield-token-in var(--app-motion-duration-stack)
+    var(--app-motion-spring-snappy);
+  transition: gap var(--app-motion-duration-stack) var(--app-motion-spring-gentle);
+}
+
+.sidebar-omnifield-token[data-leaving] {
+  animation: sidebar-omnifield-token-out var(--app-motion-duration-pop) var(--app-motion-ease)
+    forwards;
+}
+
+.sidebar-omnifield-token[data-armed="true"] {
+  box-shadow: 0 0 0 1.5px currentColor;
+}
+
+/* While typing, the machine token shrinks to its dot so the text has room. */
+.sidebar-omnifield-token-label {
+  display: inline-block;
+  max-width: 96px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition:
+    max-width var(--app-motion-duration-stack) var(--app-motion-spring-gentle),
+    opacity var(--app-motion-duration-pop) var(--app-motion-ease);
+}
+
+.sidebar-fold-field[data-typing="true"] .sidebar-omnifield-token[data-kind="machine"] {
+  gap: 0;
+}
+
+.sidebar-fold-field[data-typing="true"]
+  .sidebar-omnifield-token[data-kind="machine"]
+  .sidebar-omnifield-token-label {
+  max-width: 0;
+  opacity: 0;
+}
+
+@keyframes sidebar-omnifield-token-in {
+  from {
+    opacity: 0;
+    filter: blur(2px);
+    transform: translateX(10px) scale(0.7);
+  }
+}
+
+@keyframes sidebar-omnifield-token-out {
+  to {
+    opacity: 0;
+    filter: blur(2px);
+    transform: scale(0.6);
+  }
+}
+
+.sidebar-omnifield-menu {
+  position: absolute;
+  top: 34px;
+  right: 0;
+  left: 0;
+  z-index: 20;
+  max-height: 360px;
+  overflow-y: auto;
+  scrollbar-width: none;
+  opacity: 0;
+  filter: blur(3px);
+  transform: translateY(-4px) scale(0.96);
+  transform-origin: top left;
+  pointer-events: none;
+  transition:
+    opacity var(--app-motion-duration-pop) var(--app-motion-ease),
+    transform var(--app-motion-duration-pop) var(--app-motion-spring-snappy),
+    filter var(--app-motion-duration-pop) var(--app-motion-ease);
+}
+
+.sidebar-omnifield-menu[data-open="true"] {
+  opacity: 1;
+  filter: none;
+  transform: none;
+  pointer-events: auto;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sidebar-fold,
+  .sidebar-fold-item,
+  .sidebar-fold-label,
+  .sidebar-fold-badge,
+  .sidebar-fold-field :is(input, .sidebar-omnifield-kbd, .sidebar-omnifield-tokens),
+  .sidebar-omnifield-icon,
+  .sidebar-omnifield-funnel path,
+  .sidebar-omnifield-count,
+  .sidebar-omnifield-token,
+  .sidebar-omnifield-token-label,
+  .sidebar-omnifield-menu {
+    transition: none;
+  }
+
+  .sidebar-omnifield-count-roll,
+  .sidebar-omnifield-token,
+  .sidebar-omnifield-token[data-leaving] {
+    animation: none;
+  }
+}
+
 /* Split chat panes (ChatPanes). Geometry eases through CSS transitions on the
    pane token; these keyframes cover what CSS transitions cannot. An opened
    pane is pushed in from the edge it was dropped on by exactly its own size,
@@ -2444,6 +2774,7 @@ label:has(> select#reasoning-effort) select {
   --ultracode-sheen-2: #9d90ff;
   --ultracode-sheen-3: #ece8ff;
   --fast-mode-tone: var(--color-amber-600);
+  --ultrafast-mode-tone: var(--color-orange-600);
   --model-dial-track: color-mix(in srgb, var(--color-black) 6%, transparent);
   --model-dial-notch: color-mix(in srgb, var(--color-black) 22%, transparent);
   --model-dial-thumb: var(--color-white);
@@ -2464,6 +2795,7 @@ label:has(> select#reasoning-effort) select {
   --ultracode-sheen-2: #b0a5ff;
   --ultracode-sheen-3: #f3f0ff;
   --fast-mode-tone: var(--color-yellow-400);
+  --ultrafast-mode-tone: var(--color-orange-400);
   --model-dial-track: color-mix(in srgb, var(--color-white) 6.5%, transparent);
   --model-dial-notch: color-mix(in srgb, var(--color-white) 30%, transparent);
   --model-dial-thumb: #f4f4f5;
@@ -2513,6 +2845,17 @@ label:has(> select#reasoning-effort) select {
 .rolling-text[data-align="center"] > * {
   justify-self: center;
 }
+.rolling-text[data-overlay-leaving="true"] {
+  position: relative;
+  /* Clip the roll vertically only, so a longer leaving value can still fade
+     out over its neighbours while they glide into place. */
+  overflow: visible;
+  clip-path: inset(0 -100vw);
+}
+.rolling-text[data-overlay-leaving="true"] > [data-roll-phase="leave"] {
+  position: absolute;
+  inset: 0 auto auto 0;
+}
 .rolling-text > [data-roll-phase="enter"] {
   animation: rolling-text-in var(--app-motion-duration-stack, 260ms)
     var(--app-motion-spring-gentle, ease-out) both;
@@ -2529,6 +2872,18 @@ label:has(> select#reasoning-effort) select {
   --rolling-text-from: -85%;
   --rolling-text-to: 85%;
 }
+/* A whole control rolling in like a `.rolling-text` value (the new-thread
+   sentence's branch slot swaps between two different pickers). */
+.new-thread-roll-in {
+  animation: rolling-text-in var(--app-motion-duration-stack, 260ms)
+    var(--app-motion-spring-gentle, ease-out) both;
+}
+.new-thread-roll-in[data-roll-direction="up"] {
+  --rolling-text-from: 85%;
+}
+.new-thread-roll-in[data-roll-direction="down"] {
+  --rolling-text-from: -85%;
+}
 @keyframes rolling-text-in {
   from {
     transform: translateY(var(--rolling-text-from));
@@ -2544,6 +2899,128 @@ label:has(> select#reasoning-effort) select {
   }
 }
 
+/* New-thread pill row: the "New worktree" switch and the device pill above the
+   composer. Durations scale the stack token, so reduced motion collapses them. */
+.new-thread-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 1.75rem;
+  padding: 0 10px;
+  border-radius: 9999px;
+  border: 1px solid var(--border);
+  background: var(--background);
+  color: color-mix(in oklab, var(--foreground) 85%, transparent);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+  cursor: pointer;
+  transition-property: border-color, background-color, color, box-shadow;
+  transition-duration: calc(var(--app-motion-duration-stack, 260ms) * 1.15);
+}
+.new-thread-pill:hover,
+.new-thread-pill[data-pressed] {
+  background: color-mix(in oklab, var(--foreground) 6%, var(--background));
+  color: var(--foreground);
+}
+.new-thread-pill:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+.new-thread-pill[data-disabled] {
+  cursor: default;
+  background: var(--background);
+}
+.new-thread-worktree-toggle {
+  padding-left: 5px;
+}
+.new-thread-worktree-switch {
+  position: relative;
+  flex: none;
+  width: 22px;
+  height: 13px;
+  border-radius: 9999px;
+  background: color-mix(in oklab, var(--muted-foreground) 30%, transparent);
+  transition: background-color var(--app-motion-duration-stack, 260ms)
+    cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.new-thread-worktree-switch::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 9px;
+  height: 9px;
+  border-radius: 9999px;
+  background: var(--background);
+  transition: transform calc(var(--app-motion-duration-stack, 260ms) * 1.35)
+    cubic-bezier(0.34, 1.45, 0.55, 1);
+}
+[data-on="true"] > .new-thread-worktree-switch {
+  background: var(--primary);
+}
+[data-on="true"] > .new-thread-worktree-switch::after {
+  transform: translateX(9px);
+  background: var(--primary-foreground);
+}
+.new-thread-worktree-fork [data-part="grow"] {
+  stroke-dasharray: 14;
+  stroke-dashoffset: 14;
+  transition: stroke-dashoffset calc(var(--app-motion-duration-stack, 260ms) * 1.73)
+    cubic-bezier(0.2, 0.8, 0.2, 1) calc(var(--app-motion-duration-stack, 260ms) * 0.2);
+}
+.new-thread-worktree-fork [data-part="tip"] {
+  transform-origin: 18px 6px;
+  transform: scale(0);
+  transition: transform calc(var(--app-motion-duration-stack, 260ms) * 1.35)
+    cubic-bezier(0.34, 1.45, 0.55, 1) var(--app-motion-duration-stack, 260ms);
+}
+[data-on="true"] > .new-thread-worktree-fork [data-part="grow"] {
+  stroke-dashoffset: 0;
+}
+[data-on="true"] > .new-thread-worktree-fork [data-part="tip"] {
+  transform: scale(1);
+}
+.new-thread-pill-icon {
+  animation: new-thread-pill-icon-in calc(var(--app-motion-duration-stack, 260ms) * 1.54)
+    cubic-bezier(0.34, 1.45, 0.55, 1) both;
+}
+@keyframes new-thread-pill-icon-in {
+  from {
+    opacity: 0;
+    transform: scale(0.4) rotate(-30deg);
+  }
+}
+.new-thread-connection-dot {
+  position: relative;
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 9999px;
+  background: var(--muted-foreground);
+}
+.new-thread-connection-dot[data-connected="true"] {
+  background: var(--success);
+}
+.new-thread-connection-dot[data-connected="true"]::after {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border-radius: inherit;
+  border: 1.5px solid var(--success);
+  opacity: 0;
+  animation: new-thread-connection-ping calc(var(--app-motion-duration-stack, 260ms) * 3.46)
+    cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+@keyframes new-thread-connection-ping {
+  from {
+    opacity: 0.9;
+    transform: scale(0.6);
+  }
+  to {
+    opacity: 0;
+    transform: scale(1.8);
+  }
+}
 /* Ultracode label: a slow light sweep through the tone. */
 .reasoning-tone-shimmer {
   background-image: linear-gradient(
@@ -2729,7 +3206,8 @@ label:has(> select#reasoning-effort) select {
   position: absolute;
   inset: 3px;
   border-radius: 9999px;
-  box-shadow: 0 0 0 1.5px var(--fast-mode-tone);
+  /* The speed button's colour: the tone of the tier just switched on. */
+  box-shadow: 0 0 0 1.5px currentColor;
   pointer-events: none;
   animation: model-dial-ring-out calc(var(--app-motion-duration-pop, 200ms) * 3)
     var(--app-motion-ease) forwards;

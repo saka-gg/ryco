@@ -6,6 +6,7 @@ import {
   canonicalStoragePath,
   hasWorktreeCreationLease,
   storageLifecycleLock,
+  isWorktreeRelocationBlocked,
 } from "../storage/lifecycle.ts";
 
 /**
@@ -43,6 +44,8 @@ export const makeSqlCheckoutFence = (sql: SqlClient.SqlClient): CheckoutFence =>
             try: () => canonicalStoragePath(input.path),
             catch: () => fenceError("Checkout path could not be resolved."),
           });
+          if (yield* isWorktreeRelocationBlocked(sql, canonical))
+            return yield* fenceError("Checkout relocation requires recovery before removal.");
           if (hasWorktreeCreationLease(canonical))
             return yield* Effect.fail(
               fenceError("A worktree creation is still using this path. Try again shortly."),

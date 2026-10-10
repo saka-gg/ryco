@@ -1630,7 +1630,7 @@ describe("ProviderModelPicker", () => {
     }
   });
 
-  it("shows disabled providers grayed out in sidebar", async () => {
+  it("hides providers that are not set up from the sidebar", async () => {
     const disabledProviders = TEST_PROVIDERS.slice();
     const claudeIndex = disabledProviders.findIndex(
       (provider) => provider.instanceId === ProviderInstanceId.make("claudeAgent"),
@@ -1656,8 +1656,11 @@ describe("ProviderModelPicker", () => {
       await vi.waitFor(() => {
         const text = document.body.textContent ?? "";
         expect(text).toContain("GPT-5 Codex");
-        // Disabled provider should not have its models shown
+        // Neither the disabled provider's rail button nor its models are offered.
         expect(text).not.toContain("Claude Opus 4.6");
+        expect(getSidebarProviderOrder()).toContain("codex");
+        expect(getSidebarProviderOrder()).not.toContain("claudeAgent");
+        expect(getSidebarProviderOrder()).not.toContain("gemini-coming-soon");
       });
     } finally {
       await mounted.cleanup();
@@ -1740,7 +1743,7 @@ describe("ProviderModelPicker", () => {
           tuning={tuning}
           onSelectEffort={onSelectEffort}
           onSetThinking={() => {}}
-          onSetFastMode={() => {}}
+          onSetSpeed={() => {}}
           onSelectContextWindow={() => {}}
           onReset={() => {}}
         />
@@ -1776,7 +1779,7 @@ describe("ProviderModelPicker", () => {
       lockedProvider: null,
       triggerTraits: {
         level: { id: "high", label: "High", index: 2 },
-        fastMode: true,
+        speed: "fast",
         contextWindowLabel: "1M",
       },
     });

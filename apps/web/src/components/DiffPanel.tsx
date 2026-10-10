@@ -3,6 +3,7 @@ import { DiffStagingActions } from "./DiffStagingActions";
 import type { GitLocalChangesScope } from "@ryco/contracts";
 import { DiffLineBlame } from "./DiffLineBlame";
 import { DiffComparisonControls } from "./DiffComparisonControls";
+import { DiffImagePreview } from "./DiffImagePreview";
 import { useComparison } from "../rpc/useComparison";
 import { FileDiff, type FileDiffMetadata, Virtualizer } from "@pierre/diffs/react";
 import { useDebouncedValue } from "@tanstack/react-pacer";
@@ -562,6 +563,8 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
       : comparison.data
         ? JSON.stringify([activeThread?.environmentId, comparison.data.source.revision])
         : null;
+  // Local patches name repository-root paths; checkpoint and comparison images are read by blob ID.
+  const imagePreviewCwd = reviewingLocal ? localChanges.data?.worktreePath : activeCwd;
   const hasResolvedPatch = typeof selectedPatch === "string";
   const hasNoNetChanges = hasResolvedPatch && selectedPatch.trim().length === 0;
   const renderableContent = useMemo<ParsedDiffContent>(() => {
@@ -1548,6 +1551,14 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
                                   }),
                             }}
                           />
+                          {!collapsed && activeThread && imagePreviewCwd ? (
+                            <DiffImagePreview
+                              environmentId={activeThread.environmentId}
+                              cwd={imagePreviewCwd}
+                              fileDiff={fileDiff}
+                              afterIsWorkingTree={reviewingLocal && localScope === "unstaged"}
+                            />
+                          ) : null}
                         </div>
                       );
                     })}

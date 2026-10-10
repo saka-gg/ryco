@@ -1,3 +1,5 @@
+import { retargetPreviewFileSessions } from "./components/previewFileSessionRegistry";
+import { useComposerDraftStore } from "./composerDraftStore";
 import {
   configureThreadsRuntime,
   setThreadsRuntimeConfigurator,
@@ -9,6 +11,10 @@ import { webClock, webFrameScheduler, webObservability } from "./platform";
 
 setThreadsRuntimeConfigurator(() => {
   configureThreadsRuntime({
+    onCheckoutRelocated: (input) => {
+      useComposerDraftStore.getState().retargetCheckoutPath(input);
+      retargetPreviewFileSessions(input);
+    },
     clock: { now: () => webClock.now() },
     frameScheduler: { scheduleFrame: (callback) => webFrameScheduler.scheduleFrame(callback) },
     observability: webObservability,

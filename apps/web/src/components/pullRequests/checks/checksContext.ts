@@ -2,7 +2,7 @@ import type { EnvironmentId } from "@ryco/contracts";
 import { createContext, useContext } from "react";
 
 import type { PullRequestAgentHandoff } from "../agentHandoff";
-import type { LandingFlash } from "./checksUi";
+import type { LandingFlash } from "../../../hooks/useLandingFlash";
 import type { ChecksJobEntry, ChecksWorkflowEntry } from "./checksModel";
 
 /** "Re-run failed jobs" for one run, registered by the run's section. */

@@ -1,16 +1,21 @@
-import { useState } from "react";
-import { WS_METHODS } from "@ryco/contracts";
-import { FolderIcon, ServerIcon } from "lucide-react";
+import type { EnvironmentId, ProjectId } from "@ryco/contracts";
+import { useNavigate } from "@tanstack/react-router";
+import { ArrowUpRightIcon, FolderIcon, ServerIcon } from "lucide-react";
 import { useShallow } from "zustand/react/shallow";
 
-import { useHostedRpcCapability } from "../../hostedHub/capabilities";
+import { buildProjectsPageLocation } from "../../projectsRoute";
 import { useServerConfig } from "../../rpc/serverState";
+import { useSettingsDialogStore } from "../../settingsDialogStore";
 import { useSettingsTarget } from "../../settingsTarget";
 import { selectProjectsAcrossEnvironments, useStore } from "../../store";
+import { useProjectsLayoutStore } from "../projects/projectsLayoutStore";
+import { Button } from "../ui/button";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { ProjectPreferenceSettings } from "./ProjectPreferenceSettings";
 import { SettingsSection } from "./settingsLayout";
 import { WorktreeRootSettings } from "./WorktreeRootSettings";
+import { ChatsFolderSettings } from "./ChatsFolderSettings";
+import { excludeChatProjects } from "@ryco/shared/projectKind";
 import { WorktreeSubmoduleSettings } from "./WorktreeSubmoduleSettings";
 
 export interface ProjectScopeChoice {
@@ -79,52 +84,71 @@ export function ProjectScopeSelect({
   );
 }
 
-/** Node defaults for new threads and worktrees, with per-project overrides. */
+/**
+ * Where a "per-project overrides" link should land: the checkout last opened
+ * on the projects page when it is on this device, else this device's first
+ * project, else the page itself.
+ */
+function projectsPageLocationFor(environmentId: string | undefined, projectIds: readonly string[]) {
+  if (!environmentId || projectIds.length === 0) return buildProjectsPageLocation();
+  const last = useProjectsLayoutStore.getState().lastCheckoutKey;
+  const lastProjectId = last?.startsWith(`${environmentId}\0`)
+    ? last.slice(environmentId.length + 1)
+    : null;
+  const projectId =
+    lastProjectId && projectIds.includes(lastProjectId) ? lastProjectId : projectIds[0]!;
+  return buildProjectsPageLocation({
+    environmentId: environmentId as EnvironmentId,
+    projectId: projectId as ProjectId,
+    section: "defaults",
+  });
+}
+
+/**
+ * This device's defaults for new threads and worktrees. Each project can
+ * override them; those overrides live with the project on the projects page.
+ */
 export function ProjectDefaultsSection() {
   const config = useServerConfig();
   const target = useSettingsTarget();
-  const capability = useHostedRpcCapability(WS_METHODS.serverUpdateSettings);
+  const navigate = useNavigate();
+  const closeSettings = useSettingsDialogStore((state) => state.closeSettings);
   const allProjects = useStore(useShallow(selectProjectsAcrossEnvironments));
   const environmentId = target?.environmentId ?? config?.environment.environmentId;
-  const projects = allProjects
+  // Chats carry no project defaults of their own.
+  const projects = excludeChatProjects(allProjects)
     .filter((project) => project.environmentId === environmentId)
     .map((project) => ({ id: project.id, title: project.name }));
-  const [selection, setSelection] = useState<{ environmentId: string; projectId: string }>({
-    environmentId: environmentId ?? "",
-    projectId: "",
-  });
-  // A different node starts back at its own defaults; drafts never cross nodes.
-  const projectId = selection.environmentId === (environmentId ?? "") ? selection.projectId : "";
-  const disabled =
-    !capability.allowed ||
-    !config ||
-    !target ||
-    !target.connected ||
-    target.canManage === false ||
-    target.canMutate === false;
   return (
     <SettingsSection
       title="Project defaults"
       owner="node"
-      description={
-        projectId
-          ? "Overrides for this project. Fields you don't change keep following the device defaults."
-          : "Used by new threads and worktrees. Pick a project to override fields for it."
-      }
+      description="Used by new threads and worktrees in every project on this device."
       headerAction={
-        <ProjectScopeSelect
-          projects={projects}
-          value={projectId}
-          disabled={disabled}
-          onChange={(next) => setSelection({ environmentId: environmentId ?? "", projectId: next })}
-        />
+        <Button
+          size="xs"
+          variant="ghost"
+          onClick={() => {
+            const location = projectsPageLocationFor(
+              environmentId,
+              projects.map((project) => project.id),
+            );
+            // Close first; the settings route defers its own back-navigation.
+            closeSettings();
+            void navigate(location);
+          }}
+        >
+          Per-project overrides
+          <ArrowUpRightIcon className="size-3" />
+        </Button>
       }
     >
       {config?.environment.capabilities.projectPreferences === true ? (
-        <ProjectPreferenceSettings projectId={projectId} projects={projects} />
+        <ProjectPreferenceSettings projectId="" projects={projects} />
       ) : null}
-      <WorktreeRootSettings projectId={projectId} projects={projects} />
-      <WorktreeSubmoduleSettings projectId={projectId} projects={projects} />
+      <WorktreeRootSettings projectId="" projects={projects} />
+      <ChatsFolderSettings />
+      <WorktreeSubmoduleSettings projectId="" projects={projects} />
     </SettingsSection>
   );
 }

@@ -28,6 +28,8 @@ import * as VcsProcess from "./VcsProcess.ts";
 /** Server-derived context only; deliberately absent from public RPC schemas. */
 export interface GitWorktreeCreationContext {
   readonly projectId?: ProjectId | undefined;
+  readonly projectTitle?: string | undefined;
+  readonly initialName?: string | undefined;
   readonly settingsSnapshot?: ServerSettings | undefined;
 }
 
@@ -42,6 +44,11 @@ export interface ExecuteGitInput {
   readonly maxOutputBytes?: number;
   readonly truncateOutputAtMaxBytes?: boolean;
   readonly progress?: ExecuteGitProgress;
+  /**
+   * Collect stdout undecoded into `stdoutBytes` (object contents such as image
+   * blobs). Output over `maxOutputBytes` fails instead of truncating.
+   */
+  readonly stdoutBytes?: boolean;
 }
 
 export interface ExecuteGitResult {
@@ -50,6 +57,8 @@ export interface ExecuteGitResult {
   readonly stderr: string;
   readonly stdoutTruncated: boolean;
   readonly stderrTruncated: boolean;
+  /** Present only when the input requested `stdoutBytes`; `stdout` is then empty. */
+  readonly stdoutBytes?: Uint8Array;
 }
 
 export interface GitStatusDetails {

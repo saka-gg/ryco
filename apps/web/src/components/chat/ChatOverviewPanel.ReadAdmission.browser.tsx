@@ -52,9 +52,12 @@ vi.mock("~/hooks/useSettings", () => ({
   useSettings: (select: (settings: unknown) => unknown) =>
     select({ sourceControlRefreshMode: "manual" }),
 }));
-vi.mock("~/lib/gitStatusState", () => ({ useGitStatus: () => ({ data: null }) }));
-vi.mock("../GitActionsControl", () => ({ default: () => null }));
+vi.mock("~/lib/gitStatusState", () => import("../../../test/gitStatusStateMock"));
+vi.mock("../GitActionsControl", () => ({ default: () => null, GitThreadSync: () => null }));
 vi.mock("../BranchToolbarBranchSelector", () => ({ BranchToolbarBranchSelector: () => null }));
+vi.mock("../overview/crown/CrownOverview", () => ({ CrownOverview: () => null }));
+vi.mock("../overview/notes/useWorktreeNotes", () => ({ useWorktreeNotes: () => undefined }));
+vi.mock("./ChatProjectActions", () => ({ usePromoteChatBinding: () => undefined }));
 vi.mock("../PlanSidebar", () => ({
   default: ({ pullRequest }: { pullRequest: { title: string } | null }) => (
     <div>{pullRequest?.title}</div>
@@ -136,7 +139,7 @@ function overview() {
       branchControl={null}
       markdownCwd={undefined}
       workspaceRoot={undefined}
-      mode="sidebar"
+      presentation="sheet"
       onOpenFiles={() => {}}
       onOpenReview={() => {}}
       onOpenSubagent={() => {}}

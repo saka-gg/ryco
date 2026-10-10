@@ -135,6 +135,10 @@ describe("context handoff decider", () => {
     if (activity?.type !== "thread.activity-appended") return;
     expect(activity.payload.activity.id).toBe("context-handoff-activity:command-handoff");
     expect(activity.payload.activity.payload).not.toHaveProperty("structuredContext");
+    expect(activity.payload.activity.payload).toMatchObject({
+      status: "requested",
+      reason: "model-change",
+    });
 
     const message = events[2];
     expect(message?.type).toBe("thread.message-sent");

@@ -30,8 +30,15 @@ export interface HostedDraftTargetPorts {
   readonly canPreviewProjects?: (environmentId: EnvironmentId) => boolean;
   readonly subscribeProjects?: (listener: () => void) => () => void;
   readonly move: (draftId: DraftId, project: Project, logicalKey: string) => void;
+  /** Turns the draft into a "No project" chat on the target; absent disables that choice. */
+  readonly moveToChat?: (draftId: DraftId, environmentId: EnvironmentId) => void;
   readonly retry: (environmentId: EnvironmentId) => void;
 }
+
+/** Where the moved draft lands on the target device. */
+type HostedDraftTargetChoice =
+  | { readonly kind: "project"; readonly projectId: ProjectId }
+  | { readonly kind: "chat" };
 
 /** UI intent survives the shell remount; the existing lifecycle still owns every connection. */
 export function createHostedDraftTargetController(ports: HostedDraftTargetPorts) {
@@ -46,7 +53,7 @@ export function createHostedDraftTargetController(ports: HostedDraftTargetPorts)
     unsubscribeRoute: () => void;
     unsubscribeProjects: () => void;
     previewing: boolean;
-    chosenProjectId: ProjectId | null;
+    chosen: HostedDraftTargetChoice | null;
   } | null = null;
   const listeners = new Set<() => void>();
   const publish = (next: HostedDraftTargetSelection | null) => {
@@ -71,22 +78,26 @@ export function createHostedDraftTargetController(ports: HostedDraftTargetPorts)
   const fail = (request: HostedDraftTargetSelection, error: string) => {
     if (current(request)) publish({ ...request, phase: "error", error });
   };
-  const chooseProject = (request: HostedDraftTargetSelection, projectId: ProjectId) => {
+  const chooseTarget = (request: HostedDraftTargetSelection, choice: HostedDraftTargetChoice) => {
     if (!current(request) || !operation) return;
+    if (choice.kind === "chat" && !ports.moveToChat) return;
     if (operation.previewing && !ports.readLease(request.environmentId)) {
       // Choosing a cached row records local intent only. The fresh shell must
       // still confirm this project and the mutation lease before moving it.
-      operation.chosenProjectId = projectId;
+      operation.chosen = choice;
       publish({ ...request, phase: "connecting" });
       return;
     }
     const before = ports.readLease(request.environmentId);
-    const project = ports
-      .readProjects(request.environmentId)
-      .find((candidate) => candidate.id === projectId);
+    const project =
+      choice.kind === "project"
+        ? ports
+            .readProjects(request.environmentId)
+            .find((candidate) => candidate.id === choice.projectId)
+        : null;
     const after = ports.readLease(request.environmentId);
     if (
-      !project ||
+      (choice.kind === "project" && !project) ||
       !ports.targetIsEligible(request.environmentId) ||
       !before ||
       !after ||
@@ -95,7 +106,8 @@ export function createHostedDraftTargetController(ports: HostedDraftTargetPorts)
       fail(request, "The device connection changed. Try again.");
       return;
     }
-    ports.move(request.draftId, project, operation.logicalKey(project));
+    if (project) ports.move(request.draftId, project, operation.logicalKey(project));
+    else ports.moveToChat?.(request.draftId, request.environmentId);
     // The committed draft takes over destination demand when the shell renders.
     cancel(false);
   };
@@ -114,14 +126,15 @@ export function createHostedDraftTargetController(ports: HostedDraftTargetPorts)
       }
       const active = operation;
       active.previewing = false;
-      if (active.chosenProjectId) {
-        chooseProject(request, active.chosenProjectId);
+      if (active.chosen) {
+        chooseTarget(request, active.chosen);
         return;
       }
       const matches = ports
         .readProjects(request.environmentId)
         .filter((project) => active.logicalKey(project) === active.sourceLogicalKey);
-      if (matches.length === 1 && matches[0]) chooseProject(request, matches[0].id);
+      if (matches.length === 1 && matches[0])
+        chooseTarget(request, { kind: "project", projectId: matches[0].id });
       else publish({ ...request, phase: "project" });
     } catch {
       if (attempt === loadSequence)
@@ -167,7 +180,7 @@ export function createHostedDraftTargetController(ports: HostedDraftTargetPorts)
         unsubscribeRoute: () => undefined,
         unsubscribeProjects: () => undefined,
         previewing: false,
-        chosenProjectId: null,
+        chosen: null,
       };
       publish(request);
       if (!ports.adopt(input.environmentId)) {
@@ -181,7 +194,7 @@ export function createHostedDraftTargetController(ports: HostedDraftTargetPorts)
         if (
           !current(request) ||
           !operation ||
-          operation.chosenProjectId ||
+          operation.chosen ||
           selection?.phase !== "connecting" ||
           !ports.canPreviewProjects?.(request.environmentId) ||
           ports.readProjects(request.environmentId).length === 0
@@ -196,7 +209,11 @@ export function createHostedDraftTargetController(ports: HostedDraftTargetPorts)
     },
     cancel,
     selectProject(projectId: ProjectId) {
-      if (selection?.phase === "project") chooseProject(selection, projectId);
+      if (selection?.phase === "project") chooseTarget(selection, { kind: "project", projectId });
+    },
+    /** "No project": the draft becomes a chat on the target device. */
+    selectNoProject() {
+      if (selection?.phase === "project") chooseTarget(selection, { kind: "chat" });
     },
     retry() {
       if (!selection || !current(selection)) return;

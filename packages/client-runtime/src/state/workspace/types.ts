@@ -4,6 +4,7 @@ import type {
   ExecutionEnvironmentPlatform,
   ModelSelection,
   ProjectId,
+  ProjectKind,
   ProviderDriverKind,
   RelayEffectiveRole,
   RepositoryIdentity,
@@ -71,6 +72,8 @@ export interface WorkspaceMachineCatalogEntry {
 export interface WorkspaceProjectMetadata {
   readonly environmentId: EnvironmentId;
   readonly id: ProjectId;
+  /** Absent in caches written before chats existed, which only held regular projects. */
+  readonly kind?: ProjectKind | undefined;
   readonly name: string;
   readonly cwd: string;
   readonly repositoryIdentity: RepositoryIdentity | null;

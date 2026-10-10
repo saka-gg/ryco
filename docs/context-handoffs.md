@@ -53,3 +53,54 @@ Provider-native rollback is limited to the active runtime epoch. Ryco rejects a 
 cross the latest successful handoff boundary before changing either provider conversation state or
 the filesystem. Cross-epoch provider-native resume, delta context transfer, and cross-process
 exactly-once delivery are deliberate version 1 non-goals.
+
+## Working-directory moves
+
+A thread's working directory can move after its native conversation last ran. This happens when a
+chat is turned into a project (see [Chats without a project](chats.md)), when a project's workspace
+root changes, or when a worktree is relocated. On the next turn start, the server compares the
+thread's current working directory with the directory where the conversation last ran. With a
+live session, that is the session's directory, provided the session has a resume cursor. Without
+one, it is the directory of the persisted binding, provided the binding belongs to the same
+provider instance and has a resume cursor. Both paths are compared after symlinks are resolved.
+
+When the directory moved, the outcome depends on the provider instance:
+
+- **Native resume.** Providers whose adapter reports `resumeSurvivesCwdChange` resume normally in
+  the new directory. Today only Codex does.
+- **Relocation handoff.** For all other providers (today Claude, GitHub Copilot, OpenCode and
+  Cursor), the server continues the turn with an ordinary `full-context-fresh-session` handoff on
+  the same provider instance. The target is the turn's own model selection. Nobody stages it in the
+  composer: the server appends the `requested` activity itself. The coordinator, operation record,
+  context document, durability rules and timeline divider are the same as for a model change.
+
+Relocation handoffs use deterministic ids that derive from the `thread.turn-start-requested`
+event:
+
+- handoff id: `context-handoff:cwd-relocation:<event id>`
+- activity id: `context-handoff-activity:cwd-relocation:<event id>`
+- command id of the appended activity: `server:cwd-relocation-handoff:<event id>`
+
+Because of these ids, a replay, retry or restart finds the same operation instead of starting a
+second one. At startup, a relocation turn start that never reached the provider is abandoned
+through the same deterministic reference. It ends as a failed divider, and sending the message
+again retries it.
+
+Handoff activity payloads carry a `reason`. It is `model-change` for a selection staged by the user
+and `cwd-relocation` for a working-directory move. Records written before reasons existed have no
+`reason`; they are model changes. The operation record does not persist the reason, so the
+terminal activity copies it from the `requested` activity it replaces. Clients present a relocation
+divider as a fresh session in the new folder, not as a model switch.
+
+**Fallback.** A resume after a move can fail because the provider cannot find the conversation,
+for example Codex `thread/resume` on a missing rollout, or Claude's "No conversation found". In
+that case the turn continues with the same relocation handoff instead of failing. This applies to
+every provider, including those that report `resumeSurvivesCwdChange`. Errors qualify when they
+name a missing thread, conversation or session.
+
+A session restart without a message, such as a runtime-mode or token-mode change, never resumes a
+conversation that cannot follow the move. The live session keeps running in its old directory,
+and the next turn moves the conversation. Restarts keep their own failure behavior and get no
+handoff fallback, because they have no message to carry the context. Relocation handoffs are
+started by the server. They therefore also run for messages sent from clients that cannot stage a
+handoff themselves.

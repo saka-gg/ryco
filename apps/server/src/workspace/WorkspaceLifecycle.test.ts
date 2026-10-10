@@ -22,7 +22,11 @@ import {
 import type { GitVcsDriverShape } from "../vcs/GitVcsDriver.ts";
 import { makeWorkspaceAccessPolicy } from "./Layers/WorkspaceAccessPolicy.ts";
 import type { CheckoutFence, CheckoutFenceClaim } from "./checkoutFence.ts";
-import { makeWorkspaceLifecycle, type WorkspaceLifecycleDeps } from "./WorkspaceLifecycle.ts";
+import {
+  makeWorkspaceLifecycle,
+  toTrashedThreadSummary,
+  type WorkspaceLifecycleDeps,
+} from "./WorkspaceLifecycle.ts";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -202,6 +206,13 @@ function fixture() {
         case "thread.session.stop":
           updateThread(command.threadId, { session: null });
           break;
+        case "thread.trash":
+          state.snapshot = {
+            ...state.snapshot,
+            threads: state.snapshot.threads.filter((row) => row.id !== command.threadId),
+          };
+          state.trashed.push({ threadId: command.threadId, worktreeId: topicId });
+          break;
       }
       return Effect.succeed({ sequence: state.commands.length });
     });
@@ -244,6 +255,7 @@ function fixture() {
             ...row,
             projectId,
             projectTitle: "Project",
+            projectKind: "project" as const,
             projectDeletedAt: null,
             title: "Trashed",
             branch: "topic",
@@ -639,6 +651,116 @@ describe("workspace lifecycle service", () => {
     expect(f.branchExists("topic")).toBe(false);
   });
 
+  it("deletes a workspace with unsaved and unmerged work only when discarding", async () => {
+    const f = fixture();
+    writeFileSync(path.join(f.checkout, "tracked.txt"), "v1");
+    f.git(f.checkout, "add", "tracked.txt");
+    f.commit(f.checkout, "unmerged work");
+    writeFileSync(path.join(f.checkout, "tracked.txt"), "v2");
+    writeFileSync(path.join(f.checkout, "scratch.txt"), "untracked");
+
+    const kept = await f.run((s) => s.preview({ worktreeId: topicId, action: "remove-checkout" }));
+    expect(kept.blockers.join(" ")).toContain("uncommitted changes");
+    expect(kept.workspace.discardBlockers).toEqual([]);
+
+    const { preview, result } = await f.previewAndApply({
+      worktreeId: topicId,
+      action: "remove-checkout",
+      discard: true,
+      deleteBranch: true,
+      // Ignored: a discard moves conversations to Trash.
+      archiveConversations: true,
+    });
+    expect(preview.blockers).toEqual([]);
+    expect(preview.summary).toBe(
+      "Delete 1 workspace: remove its checkout, move 3 conversations to Trash, delete branch topic. Work that exists only here is lost.",
+    );
+    expect(preview.effects).toMatchObject({
+      discard: true,
+      discardsWork: true,
+      archiveConversationIds: [],
+      unchangedConversations: 0,
+    });
+    expect(preview.effects.trashConversationIds?.toSorted()).toEqual(
+      [activeId, archivedId, pristineId].toSorted(),
+    );
+    const details = preview.details.join(" ");
+    expect(details).toContain("git worktree remove --force");
+    expect(details).toContain("Discards uncommitted changes to 1 tracked file.");
+    expect(details).toContain("Deletes 1 untracked file.");
+    expect(details).toContain("including commits the project HEAD does not contain");
+
+    expect(result.outcome).toBe("completed");
+    expect(existsSync(f.checkout)).toBe(false);
+    expect(f.git(f.repo, "worktree", "list")).not.toContain(f.checkout);
+    expect(f.branchExists("topic")).toBe(false);
+    expect(f.state.stopped).toEqual([activeId]);
+    const types = f.commandTypes();
+    expect(types.filter((type) => type === "thread.trash")).toHaveLength(3);
+    expect(types).not.toContain("thread.archive");
+    expect(types).not.toContain("thread.delete");
+  });
+
+  it("refuses a discard when the checkout changed after review, and while work is active", async () => {
+    const f = fixture();
+    writeFileSync(path.join(f.checkout, "scratch.txt"), "untracked");
+    const request = {
+      worktreeId: topicId,
+      action: "remove-checkout",
+      discard: true,
+    } as const;
+    const preview = await f.run((s) => s.preview(request));
+    expect(preview.blockers).toEqual([]);
+    expect(preview.details.join(" ")).toContain("Keeps the branch topic.");
+    writeFileSync(path.join(f.checkout, "late.txt"), "written after review");
+    const stale = await f.run((s) =>
+      s.apply({ ...preview.request, expectedFingerprint: preview.fingerprint }),
+    );
+    expect(stale.outcome).toBe("blocked");
+    expect(existsSync(path.join(f.checkout, "late.txt"))).toBe(true);
+
+    f.updateThread(activeId, {
+      session: {
+        threadId: activeId,
+        status: "running",
+        providerName: "codex",
+        runtimeMode: "full-access",
+        activeTurnId: "turn-1",
+        lastError: null,
+        updatedAt: iso(0),
+      },
+    });
+    const running = await f.run((s) => s.preview(request));
+    expect(running.blockers.join(" ")).toContain("a turn is running");
+    expect(running.workspace.discardBlockers?.join(" ")).toContain("a turn is running");
+    expect(f.state.removals).toBe(0);
+    expect(f.commandTypes()).toEqual([]);
+  });
+
+  it("finishes deleting a workspace whose checkout was already removed", async () => {
+    const f = fixture();
+    await f.previewAndApply({ worktreeId: topicId, action: "remove-checkout" });
+    const { preview, result } = await f.previewAndApply({
+      worktreeId: topicId,
+      action: "remove-checkout",
+      discard: true,
+      deleteBranch: true,
+    });
+    expect(preview.blockers).toEqual([]);
+    expect(preview.summary).toBe(
+      "Delete 1 workspace: move 3 conversations to Trash, delete branch topic.",
+    );
+    expect(result.outcome).toBe("completed");
+    expect(f.state.removals).toBe(1);
+    expect(f.branchExists("topic")).toBe(false);
+    expect(f.commandTypes().filter((type) => type === "worktree.checkout.remove")).toHaveLength(1);
+
+    const done = await f.run((s) =>
+      s.preview({ worktreeId: topicId, action: "remove-checkout", discard: true }),
+    );
+    expect(done.blockers.join(" ")).toContain("Nothing is left to delete");
+  });
+
   it("suggests only eligible conversations and finished checkouts", async () => {
     const f = fixture();
     // `active` has been idle 40 days; `archived` was archived 20 days ago.
@@ -673,5 +795,40 @@ describe("workspace lifecycle service", () => {
     // Suggestions never act on their own.
     expect(f.state.commands).toEqual([]);
     expect(existsSync(f.checkout)).toBe(true);
+  });
+});
+
+describe("toTrashedThreadSummary", () => {
+  const row = {
+    threadId: ThreadId.make("trashed-chat"),
+    projectId: ProjectId.make("chat-project"),
+    projectTitle: "Plan the offsite",
+    projectKind: "chat" as const,
+    projectDeletedAt: null,
+    title: "Plan the offsite",
+    branch: null,
+    worktreePath: null,
+    worktreeId: null,
+    archivedAt: null,
+    trashedAt: iso(1),
+    createdAt: iso(3),
+    updatedAt: iso(1),
+  };
+
+  it("carries the project's kind, also for a deleted project record", () => {
+    expect(toTrashedThreadSummary(row)).toMatchObject({
+      projectKind: "chat",
+      projectAvailable: true,
+    });
+    expect(toTrashedThreadSummary({ ...row, projectDeletedAt: iso(0) })).toMatchObject({
+      projectKind: "chat",
+      projectAvailable: false,
+    });
+  });
+
+  it("omits the kind when the project record is gone", () => {
+    const summary = toTrashedThreadSummary({ ...row, projectTitle: null, projectKind: null });
+    expect(summary).not.toHaveProperty("projectKind");
+    expect(summary.projectAvailable).toBe(false);
   });
 });

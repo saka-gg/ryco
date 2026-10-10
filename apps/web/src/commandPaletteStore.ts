@@ -1,9 +1,9 @@
 import { create } from "zustand";
 
-interface CommandPaletteOpenIntent {
-  kind: "add-project" | "split-thread";
-  requestId: number;
-}
+type CommandPaletteOpenIntent =
+  | { kind: "add-project" | "split-thread"; requestId: number }
+  /** Opens with `query` already typed, e.g. the sidebar field's "Search everywhere". */
+  | { kind: "search"; query: string; requestId: number };
 
 interface CommandPaletteStore {
   open: boolean;
@@ -13,6 +13,7 @@ interface CommandPaletteStore {
   openAddProject: () => void;
   /** Opens straight into the thread picker for a new split pane. */
   openSplitThread: () => void;
+  openSearch: (query: string) => void;
   clearOpenIntent: () => void;
 }
 
@@ -35,6 +36,15 @@ export const useCommandPaletteStore = create<CommandPaletteStore>((set) => ({
       open: true,
       openIntent: {
         kind: "split-thread",
+        requestId: (state.openIntent?.requestId ?? 0) + 1,
+      },
+    })),
+  openSearch: (query) =>
+    set((state) => ({
+      open: true,
+      openIntent: {
+        kind: "search",
+        query,
         requestId: (state.openIntent?.requestId ?? 0) + 1,
       },
     })),

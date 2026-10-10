@@ -153,21 +153,37 @@ describe("ClaudeModelCatalog", () => {
       assert.equal(resolveClaudeCatalogApiModelId(catalog, selection), "claude-fable-5");
     });
 
-    it("keeps the Opus 5 default 1M suffix and Sonnet 5 default 200k", () => {
-      assert.equal(
-        resolveClaudeCatalogApiModelId(catalog, modelSelection("claude-opus-5")),
-        "claude-opus-5[1m]",
-      );
-      assert.equal(
-        resolveClaudeCatalogApiModelId(catalog, modelSelection("claude-sonnet-5")),
+    it("defaults every context-window model to the 1M suffix", () => {
+      for (const slug of [
+        "claude-opus-5-5",
+        "claude-opus-5",
         "claude-sonnet-5",
-      );
+        "claude-opus-4-6",
+      ]) {
+        assert.equal(resolveClaudeCatalogContextWindow(catalog, modelSelection(slug)), "1m");
+        assert.equal(resolveClaudeCatalogApiModelId(catalog, modelSelection(slug)), `${slug}[1m]`);
+      }
       assert.equal(
         resolveClaudeCatalogApiModelId(
           catalog,
-          modelSelection("claude-sonnet-5", { contextWindow: "1m" }),
+          modelSelection("claude-sonnet-5", { contextWindow: "200k" }),
         ),
-        "claude-sonnet-5[1m]",
+        "claude-sonnet-5",
+      );
+    });
+
+    it("offers fast mode and a selectable context window on Opus 5.5", () => {
+      const ids = getClaudeCatalogModelCapabilities(
+        catalog,
+        "claude-opus-5-5",
+      ).optionDescriptors?.map((descriptor) => descriptor.id);
+      assert.deepEqual(ids, ["effort", "fastMode", "contextWindow"]);
+      assert.equal(
+        resolveClaudeCatalogApiModelId(
+          catalog,
+          modelSelection("claude-opus-5-5", { contextWindow: "200k" }),
+        ),
+        "claude-opus-5-5",
       );
     });
 

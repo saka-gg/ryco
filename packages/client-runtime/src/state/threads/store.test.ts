@@ -17,7 +17,8 @@ import {
   type OrchestrationThreadShell,
   type ThreadLineage,
 } from "@ryco/contracts";
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
+import { configureThreadsRuntime, getThreadsRuntimeConfiguration } from "./runtime.ts";
 
 import {
   applyOrchestrationEvent,
@@ -41,6 +42,7 @@ import {
   SHELL_COALESCE_THRESHOLD_EVENTS_PER_MS,
   type AppState,
   type EnvironmentState,
+  useStore,
 } from "./store";
 import { deriveThreadActivityStatus } from "./threadActivityStatus";
 import { DEFAULT_INTERACTION_MODE, DEFAULT_RUNTIME_MODE, type Thread } from "./types";
@@ -479,6 +481,83 @@ describe("worktree sidebar state", () => {
       sequence: number,
     ) =>
       applyShellEvent(state, { kind: "worktree-upserted", sequence, worktree }, localEnvironmentId);
+
+    it("retargets an entire worktree without losing messages and fences late detail paths", () => {
+      const thread = makeThread({ worktreeId, worktreePath: "/tmp/project/pr" });
+      let state = upsert(makeState(thread), worktreeShell(), 1);
+      const previousMessages = threadsOf(state)[0]!.messages;
+      state = applyShellEvent(
+        state,
+        {
+          kind: "worktree-relocated",
+          sequence: 2,
+          worktree: worktreeShell({ worktreePath: "/tmp/new-checkout" }),
+          sourcePath: "/tmp/project/pr",
+          destinationPath: "/tmp/new-checkout",
+        },
+        localEnvironmentId,
+      );
+      expect(threadsOf(state)[0]?.worktreePath).toBe("/tmp/new-checkout");
+      expect(threadsOf(state)[0]?.messages).toBe(previousMessages);
+      const delayed = applyOrchestrationEvent(
+        state,
+        makeEvent("thread.meta-updated", {
+          threadId: thread.id,
+          worktreePath: "/tmp/project/pr",
+          updatedAt: thread.updatedAt,
+        }),
+        localEnvironmentId,
+      );
+      expect(threadsOf(delayed)[0]?.worktreePath).toBe("/tmp/new-checkout");
+    });
+
+    it("publishes retired paths on a cold snapshot for persisted drafts and fences late detail replies", () => {
+      const configuration = getThreadsRuntimeConfiguration();
+      const previous = useStore.getState();
+      const retarget = vi.fn();
+      try {
+        configureThreadsRuntime({ ...configuration, onCheckoutRelocated: retarget });
+        useStore.setState(makeEmptyState());
+        useStore.getState().syncServerShellSnapshot(
+          {
+            snapshotSequence: 2,
+            projects: [],
+            worktrees: [
+              worktreeShell({
+                worktreePath: "/tmp/new-checkout",
+                relocatedFromPath: "/tmp/project/pr",
+              }),
+            ],
+            threads: [],
+            updatedAt: "2026-02-13T01:00:00.000Z",
+          },
+          localEnvironmentId,
+        );
+        expect(retarget).toHaveBeenCalledOnce();
+        expect(retarget).toHaveBeenCalledWith({
+          environmentId: localEnvironmentId,
+          projectId,
+          sourcePath: "/tmp/project/pr",
+          destinationPath: "/tmp/new-checkout",
+        });
+        const delayed = {
+          ...makeThread({ worktreeId, worktreePath: "/tmp/project/pr" }),
+          updatedAt: "2026-02-13T00:00:00.000Z",
+          deletedAt: null,
+          latestTurn: null,
+          session: null,
+          messages: [],
+          proposedPlans: [],
+          activities: [],
+          checkpoints: [],
+        };
+        useStore.getState().syncServerThreadDetail(delayed, localEnvironmentId);
+        expect(threadsOf(useStore.getState())[0]?.worktreePath).toBe("/tmp/new-checkout");
+      } finally {
+        useStore.setState(previous, true);
+        configureThreadsRuntime(configuration);
+      }
+    });
 
     it("maps prTerminalAt from a streamed worktree upsert and keeps an absent key absent", () => {
       const withTime = upsert(
