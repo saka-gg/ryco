@@ -1,7 +1,13 @@
 import type { Plugin } from "vite";
+import {
+  ACCOUNT_E2EE_DEVICES_PATH,
+  ACCOUNT_E2EE_DEVICE_PATH_PREFIX,
+  NATIVE_ACCOUNT_GRANT_RELAY_TICKET_PATH,
+  NATIVE_E2EE_CURRENT_DEVICE_PATH,
+  NATIVE_E2EE_GRANT_KEYS_PATH,
+} from "@ryco/contracts/native-e2ee";
 
 import { renderHostedPwaOfflineDocument } from "./offlineDocument";
-import { HOSTED_PWA_NETWORK_ONLY_PATH_PREFIXES } from "./serviceWorkerPolicy";
 
 export interface HostedPwaBundleEntry {
   readonly dynamicImports?: ReadonlyArray<string>;
@@ -24,6 +30,21 @@ const CACHE_NAME_PREFIX = "ryco-pwa-shell-";
 const FNV_OFFSET_BASIS = 0xcbf29ce484222325n;
 const FNV_PRIME = 0x100000001b3n;
 const UINT64_MASK = 0xffffffffffffffffn;
+const NETWORK_ONLY_PATH_PREFIXES = ["/.well-known", "/api", "/attachments", "/v1/relay"];
+
+/**
+ * Security-sensitive native E2EE routes called out independently of the `/api`
+ * catch-all. Rendering them into the worker makes a future API namespace move
+ * keep credentials out of the shell cache instead of silently making them
+ * cache-eligible.
+ */
+export const HOSTED_E2EE_NETWORK_ONLY_PATHS = [
+  NATIVE_E2EE_CURRENT_DEVICE_PATH,
+  NATIVE_E2EE_GRANT_KEYS_PATH,
+  NATIVE_ACCOUNT_GRANT_RELAY_TICKET_PATH,
+  ACCOUNT_E2EE_DEVICES_PATH,
+] as const;
+const NETWORK_ONLY_PATH_SUBTREES = [ACCOUNT_E2EE_DEVICE_PATH_PREFIX];
 
 function normalizeBase(base: string): string {
   const withLeadingSlash = base.startsWith("/") ? base : `/${base}`;
@@ -93,13 +114,23 @@ export function renderHostedPwaServiceWorker(input: HostedPwaPrecache): string {
 const CACHE_NAME = ${JSON.stringify(input.cacheName)};
 const CACHE_PREFIX = ${JSON.stringify(CACHE_NAME_PREFIX)};
 const PRECACHE_URLS = ${JSON.stringify(input.urls)};
-const NETWORK_ONLY_PATH_PREFIXES = ${JSON.stringify(HOSTED_PWA_NETWORK_ONLY_PATH_PREFIXES)};
+const NETWORK_ONLY_PATH_PREFIXES = ${JSON.stringify(NETWORK_ONLY_PATH_PREFIXES)};
+const NETWORK_ONLY_PATHS = ${JSON.stringify(HOSTED_E2EE_NETWORK_ONLY_PATHS)};
+const NETWORK_ONLY_PATH_SUBTREES = ${JSON.stringify(NETWORK_ONLY_PATH_SUBTREES)};
 const ACTIVATION_MESSAGE = "ryco:pwa:activate:v1";
 const absolutePrecacheUrls = new Set(PRECACHE_URLS.map((url) => new URL(url, self.registration.scope).href));
 const offlineUrl = new URL(PRECACHE_URLS.find((url) => url.endsWith("/offline.html")), self.registration.scope).href;
 
 function hasPathPrefix(pathname, prefix) {
   return pathname === prefix || pathname.startsWith(prefix + "/");
+}
+
+function isNetworkOnlyPath(pathname) {
+  return (
+    NETWORK_ONLY_PATHS.includes(pathname) ||
+    NETWORK_ONLY_PATH_SUBTREES.some((prefix) => pathname.startsWith(prefix + "/")) ||
+    NETWORK_ONLY_PATH_PREFIXES.some((prefix) => hasPathPrefix(pathname, prefix))
+  );
 }
 
 self.addEventListener("install", (event) => {
@@ -128,7 +159,7 @@ self.addEventListener("fetch", (event) => {
   if ((url.protocol !== "http:" && url.protocol !== "https:") || url.origin !== self.location.origin) return;
   if (request.headers.has("range")) return;
   if (request.headers.get("accept")?.toLowerCase().includes("text/event-stream")) return;
-  if (NETWORK_ONLY_PATH_PREFIXES.some((prefix) => hasPathPrefix(url.pathname, prefix))) return;
+  if (isNetworkOnlyPath(url.pathname)) return;
 
   if (request.mode === "navigate") {
     event.respondWith(caches.open(CACHE_NAME).then(async (cache) => (await cache.match(offlineUrl)) ?? fetch(request)));
