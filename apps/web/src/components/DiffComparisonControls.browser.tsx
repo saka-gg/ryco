@@ -77,7 +77,7 @@ describe("comparison controls", () => {
     await screen.getByRole("button", { name: "Refresh comparison" }).click();
     await expect
       .element(screen.getByRole("alert"))
-      .toHaveTextContent("Reference main is unavailable");
+      .toMatchTextContent("Reference main is unavailable");
     expect(f.controller.getSnapshot().data).toBeNull();
     await screen.getByRole("combobox", { name: "Comparison mode" }).selectOptions("direct");
     await screen.getByRole("textbox", { name: "Branch, tag, or commit" }).fill("abc1234");

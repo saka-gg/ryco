@@ -212,7 +212,7 @@ describe("staged and unstaged review", () => {
     await screen.getByRole("button", { name: "Unstage file a/file.ts" }).click();
     await expect
       .element(screen.getByRole("alert"))
-      .toHaveTextContent(/HEAD, branch, index or patch changed/);
+      .toMatchTextContent(/HEAD, branch, index or patch changed/);
     expect(fixture.apply).toHaveBeenCalledTimes(2);
     fixture.read.mockResolvedValue(snapshot("3".repeat(64), patch, ""));
     await screen.getByRole("button", { name: "Refresh local changes" }).click();

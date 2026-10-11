@@ -508,7 +508,7 @@ describe("CrownOverview", () => {
     expect(alert.textContent).toContain("1 check failing");
     expect(alert.textContent).toContain("Typecheck · just now");
     // Screen readers hear the alert through the live region.
-    await expect.element(page.getByRole("status")).toHaveTextContent("1 check failing");
+    await expect.element(page.getByRole("status")).toMatchTextContent("1 check failing");
     expect(crown.island().style.width).not.toBe("48px");
 
     // Two direct agents start: two more alerts queue behind the shown one.

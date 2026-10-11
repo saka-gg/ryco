@@ -250,7 +250,7 @@ functions.
 ### Tasks
 
 1. Change Security and Verification navigation params to carry the exact `(nodeId,
-environmentId)` pair. Reject a route whose node cannot be matched to the expected environment;
+   environmentId)` pair. Reject a route whose node cannot be matched to the expected environment;
    never fall back to the current/first selected node.
 2. Refactor `useMobileE2eeSession` or add an environment-scoped accessor so trust, fingerprint,
    pending request, and authorization state are resolved for the route's exact environment.

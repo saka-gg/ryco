@@ -2136,6 +2136,10 @@ async function openCommandPaletteFromTrigger(): Promise<void> {
 async function openNewWorkspaceDialog(): Promise<void> {
   const newThreadButton = page.getByTestId("new-thread-button");
   await expect.element(newThreadButton).toBeInTheDocument();
+  // The action only takes pointer events while its project header is hovered,
+  // so reach it the way a pointer user does.
+  const projectHeader = newThreadButton.element().closest<HTMLElement>(".group\\/project-header");
+  await page.elementLocator(projectHeader!).hover();
   await newThreadButton.click();
   await expect.element(page.getByText("New worktree", { exact: true })).toBeInTheDocument();
 }

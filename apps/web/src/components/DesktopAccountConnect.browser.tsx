@@ -44,7 +44,7 @@ describe("desktop account onboarding", () => {
     resolve({ status: "unavailable" });
     await expect
       .element(page.getByRole("status"))
-      .toHaveTextContent("Account setup is temporarily unavailable");
+      .toMatchTextContent("Account setup is temporarily unavailable");
     await expect
       .element(page.getByRole("button", { name: "Connect Ryco account", exact: true }))
       .toBeEnabled();

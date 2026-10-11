@@ -122,8 +122,8 @@ describe("useAutomationCentre", () => {
 
     // The server refused the queue: both say so.
     device.streams[0]!.onError();
-    await expect.element(screen.getByTestId("error-alpha")).toHaveTextContent(/unavailable/);
-    await expect.element(screen.getByTestId("error-beta")).toHaveTextContent(/unavailable/);
+    await expect.element(screen.getByTestId("error-alpha")).toMatchTextContent(/unavailable/);
+    await expect.element(screen.getByTestId("error-beta")).toMatchTextContent(/unavailable/);
 
     screen.unmount();
     await new Promise<void>((resolve) => queueMicrotask(resolve));

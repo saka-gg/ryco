@@ -99,7 +99,7 @@ it("shows fetch errors and lets the user turn fetching off", async () => {
   listRefs.mockRejectedValueOnce(new Error("Origin unavailable"));
   await render(<Picker />);
   await page.getByRole("button", { name: /Change what this worktree/ }).click();
-  await expect.element(page.getByRole("alert")).toHaveTextContent("Origin unavailable");
+  await expect.element(page.getByRole("alert")).toMatchTextContent("Origin unavailable");
   await page.getByRole("switch", { name: "Fetch Origin" }).click();
   await expect
     .element(page.getByRole("button", { name: "main current", exact: true }))

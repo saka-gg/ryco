@@ -287,7 +287,9 @@ jobs:
           name: browser-test-results-${{ strategy.job-index }}
           path: |
             apps/web/test-results/*
-            apps/web/src/**/__screenshots__/**
+            apps/web/.vitest/attachments/**
+          # Vitest 5 writes failure screenshots under the hidden `.vitest/` directory.
+          include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 14
 

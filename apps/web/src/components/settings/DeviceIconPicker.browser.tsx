@@ -106,9 +106,9 @@ describe("device icon selection", () => {
     await page.getByRole("option", { name: "Server", exact: true }).click();
     await expect
       .element(page.getByRole("alert"))
-      .toHaveTextContent("Could not save the icon for Remote laptop");
+      .toMatchTextContent("Could not save the icon for Remote laptop");
     await expect
       .element(page.getByLabelText("Device icon for Remote laptop"))
-      .toHaveTextContent("Automatic · Laptop");
+      .toMatchTextContent("Automatic · Laptop");
   });
 });

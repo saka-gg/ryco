@@ -153,7 +153,7 @@ describe("ACP registry settings boundaries", () => {
     const onChange = vi.fn();
     const mounted = await render(registry(target("node-a"), onChange));
     await mounted.getByRole("button", { name: "Install 1.2.3" }).click();
-    await expect.element(mounted.getByRole("alert")).toHaveTextContent("Checksum mismatch");
+    await expect.element(mounted.getByRole("alert")).toMatchTextContent("Checksum mismatch");
     expect(onChange).not.toHaveBeenCalled();
     await expect.element(mounted.getByRole("button", { name: "Install 1.2.3" })).toBeEnabled();
   });
@@ -237,7 +237,9 @@ describe("ACP registry settings boundaries", () => {
       instanceId,
       methodId: "browser",
     });
-    await expect.element(mounted.getByRole("status")).toHaveTextContent("Authentication completed");
+    await expect
+      .element(mounted.getByRole("status"))
+      .toMatchTextContent("Authentication completed");
     expect(harness.localApi).not.toHaveBeenCalled();
   });
 
@@ -264,7 +266,7 @@ describe("ACP registry settings boundaries", () => {
   it("does not fall back to the primary server when a selected node is unavailable", async () => {
     const onChange = vi.fn();
     const mounted = await render(registry(target("missing-node"), onChange));
-    await expect.element(mounted.getByRole("alert")).toHaveTextContent("Reconnect to this node");
+    await expect.element(mounted.getByRole("alert")).toMatchTextContent("Reconnect to this node");
     expect(harness.localApi).not.toHaveBeenCalled();
     expect(onChange).not.toHaveBeenCalled();
   });

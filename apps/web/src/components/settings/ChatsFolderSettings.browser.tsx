@@ -133,7 +133,9 @@ describe("ChatsFolderSettings", () => {
       <ChatsFolderHarness chats={{ available: true, root: "/home/me/.ryco/chats" }} />,
     );
     await expect.element(page.getByText("Effective: /home/me/.ryco/chats")).toBeVisible();
-    await expect.element(page.getByText("existing chats stay where they are")).toBeVisible();
+    await expect
+      .element(page.getByText("existing chats stay where they are", { exact: false }))
+      .toBeVisible();
     const directory = page.getByRole("textbox", { name: "Chats folder directory" });
     await directory.fill("~/Chats");
     await userEvent.keyboard("{Enter}");
@@ -150,7 +152,7 @@ describe("ChatsFolderSettings", () => {
     mounted = await render(<ChatsFolderHarness chats={{ available: true }} />);
     await page.getByRole("textbox", { name: "Chats folder directory" }).fill("relative/chats");
     await userEvent.keyboard("{Enter}");
-    await expect.element(page.getByRole("alert")).toHaveTextContent("absolute directory");
+    await expect.element(page.getByRole("alert")).toMatchTextContent("absolute directory");
   });
 
   it("explains why chats are unavailable but still lets the user fix the folder", async () => {
@@ -161,7 +163,7 @@ describe("ChatsFolderSettings", () => {
     );
     await expect
       .element(page.getByTestId("chats-folder-unavailable"))
-      .toHaveTextContent("inside a Git repository");
+      .toMatchTextContent("inside a Git repository");
     await expect
       .element(page.getByRole("textbox", { name: "Chats folder directory" }))
       .toBeEnabled();
@@ -171,7 +173,7 @@ describe("ChatsFolderSettings", () => {
     mounted = await render(<ChatsFolderHarness chats={undefined} />);
     await expect
       .element(page.getByTestId("chats-folder-unavailable"))
-      .toHaveTextContent("does not support chats");
+      .toMatchTextContent("does not support chats");
     await expect
       .element(page.getByRole("textbox", { name: "Chats folder directory" }))
       .toBeDisabled();

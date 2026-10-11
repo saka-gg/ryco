@@ -57,10 +57,10 @@ describe("PreviewFileEditor", () => {
     await userEvent.keyboard("const answer = 42;");
     await expect
       .element(page.getByLabelText("Current file contents"))
-      .toHaveTextContent("const answer = 42;");
+      .toMatchTextContent("const answer = 42;");
 
     await page.getByRole("button", { name: "Reset contents" }).click();
-    await expect.element(editor).toHaveTextContent("const answer = 41;");
+    await expect.element(editor).toMatchTextContent("const answer = 41;");
 
     await mounted.unmount();
   });
@@ -83,7 +83,7 @@ describe("PreviewFileEditor", () => {
 
     await userEvent.tripleClick(editor);
     await userEvent.keyboard("XX");
-    await expect.element(editor).toHaveTextContent("XX");
+    await expect.element(editor).toMatchTextContent("XX");
     await vi.waitFor(() => {
       const currentLine = editable.querySelector<HTMLElement>(
         "[data-line][data-editor-active-line]",
@@ -145,7 +145,7 @@ describe("PreviewFileEditor", () => {
       await userEvent.keyboard("X");
       await expect
         .element(page.getByLabelText("Current file contents"))
-        .toHaveTextContent(expectedLine);
+        .toMatchTextContent(expectedLine);
     }
 
     await mounted.unmount();
@@ -199,7 +199,7 @@ describe("PreviewFileEditor", () => {
 
     await expect
       .element(page.getByLabelText("Current file contents"))
-      .toHaveTextContent("const punctuation = value;,.X");
+      .toMatchTextContent("const punctuation = value;,.X");
 
     await mounted.unmount();
   });

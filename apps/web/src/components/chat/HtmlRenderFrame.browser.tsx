@@ -497,11 +497,11 @@ it("expands to a full-size dialog with source and download, then closes", async 
 
   const createObjectURL = vi.spyOn(URL, "createObjectURL");
   const downloads: Array<{ download: string; href: string }> = [];
-  vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(
-    function (this: HTMLAnchorElement) {
-      downloads.push({ download: this.download, href: this.href });
-    },
-  );
+  vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (
+    this: HTMLAnchorElement,
+  ) {
+    downloads.push({ download: this.download, href: this.href });
+  });
   await dialog.getByRole("button", { name: "Download" }).click();
   expect(downloads).toEqual([{ download: "Chart.html", href: expect.stringMatching(/^blob:/) }]);
   const blob = createObjectURL.mock.calls[0]![0] as Blob;

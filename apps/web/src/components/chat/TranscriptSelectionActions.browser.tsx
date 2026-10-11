@@ -125,10 +125,10 @@ describe("TranscriptSelectionActions", () => {
     await page.getByRole("textbox", { name: "Message for new chat" }).fill("Explain recovery");
     await page.getByLabelText("Work location").selectOptions("worktree");
     await page.getByRole("button", { name: "Send", exact: true }).click();
-    await expect.element(page.getByRole("alert")).toHaveTextContent("File save failed");
+    await expect.element(page.getByRole("alert")).toMatchTextContent("File save failed");
     await expect
       .element(page.getByRole("textbox", { name: "Message for new chat" }))
-      .toHaveTextContent("Explain recovery");
+      .toMatchTextContent("Explain recovery");
     await page.getByRole("textbox", { name: "Message for new chat" }).click();
     await userEvent.keyboard("{Escape}");
     await page.getByRole("button", { name: "Resume new chat draft" }).click();

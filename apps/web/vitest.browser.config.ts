@@ -29,6 +29,10 @@ export default mergeConfig(
       // them avoids scheduler-driven timing failures in interaction tests.
       fileParallelism: false,
       maxWorkers: 1,
+      // Vitest 5 serves browser mode from the single top-level API server.
+      api: {
+        strictPort: false,
+      },
       browser: {
         enabled: true,
         provider: playwright({
@@ -48,9 +52,6 @@ export default mergeConfig(
         }),
         instances: [{ browser: "chromium" }],
         headless: true,
-        api: {
-          strictPort: false,
-        },
       },
       testTimeout: 30_000,
       hookTimeout: 30_000,

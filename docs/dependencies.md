@@ -6,9 +6,14 @@ older Bun release. The standalone `marketing` app has its own manifest and lockf
 
 ## Coupled upgrades
 
-- Keep `vite-plus` and the `vite` alias on the same release. Vite Plus 0.3.1 bundles
-  Vitest 4.1.11 and requires the matching browser provider. Vitest 5 is not a compatible
-  independent upgrade. The root Oxfmt and Oxlint versions match Vite Plus's bundled tools.
+- Keep `vite-plus` and the `vite` alias on the same release. Vite Plus 1.1.0 bundles
+  Vitest 5.0.3 and requires the exactly matching `@vitest/browser-playwright`; Vitest is
+  not an independent upgrade. `vp fmt` and `vp lint` run the project's own `oxfmt` and
+  `oxlint` before the bundled copies, so the root versions must match Vite Plus's
+  bundled tools (Oxfmt 0.72.0, Oxlint 1.87.0 for 1.1.0). Older pins fail to load nested
+  `vite.config.ts` files such as `marketing/`.
+- `@effect/vitest` 4.0.0-beta.107 declares a `vitest <5` peer range; Bun only warns.
+  It runs under Vitest 5, and Effect 4 stable's `@effect/vitest` requires Vitest 5.
 - Keep TypeScript and `@effect/tsgo` compatible; tsgo 0.43.0 supports TypeScript 7.0.2.
 - Upgrade Expo using its `bundledNativeModules.json` and `expo install --check`.
   Expo 57.0.21 expects React 19.2.3, React Native 0.86.3, keyboard-controller 1.21.9,

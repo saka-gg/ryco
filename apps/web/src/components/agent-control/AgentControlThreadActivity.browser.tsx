@@ -231,7 +231,7 @@ it("shows the creator and a different current manager on one line", async () => 
   );
   await expect
     .element(screen.getByTestId("agent-control-approvals"))
-    .toHaveTextContent(/Delegated from\s*Coordinator\s*·\s*Managed by\s*Reviewer/);
+    .toMatchTextContent(/Delegated from\s*Coordinator\s*·\s*Managed by\s*Reviewer/);
   await expect
     .element(screen.getByRole("link", { name: "Reviewer" }))
     .toHaveAttribute("href", "/fixture-env/reviewer-uuid");

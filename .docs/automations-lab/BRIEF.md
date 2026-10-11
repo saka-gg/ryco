@@ -126,12 +126,12 @@ never re-`innerHTML` an element that holds focus or a running animation.
 - State `S` (see `data.js`): `S.now` (sim ms), `S.projects`, `S.devices`, `S.automations`,
   `S.runs`, `S.proposals`, `S.providers`, `S.tz`; `emit()` notifies listeners; `listeners`.
 - Actions (mutate `S`, then `emit()`; each returns what it created): `act.save(def, {id?,
-expectedRevision?})` → proposal; `act.approve(proposalId)` / `act.reject(proposalId)`;
+  expectedRevision?})` → proposal; `act.approve(proposalId)` / `act.reject(proposalId)`;
   `act.approveRun(runId)` / `act.rejectRun(runId)`; `act.pause(id)` / `act.resume(id)` →
   proposal; `act.cancel(id)` → proposal; `act.retryRun(runId)`; `act.markRead(runId, read)`.
 - Schedule math: `sched.occurrences(schedule, fromMs, toMs, limit)` → ms[];
   `sched.validate(draft, nowMs)` → `{ ok, errors: {start?, end?, interval?, title?, prompt?,
-model?} }` with the exact rules above; `sched.label(schedule)` → "Every 2 h · until Oct 31";
+  model?} }` with the exact rules above; `sched.label(schedule)` → "Every 2 h · until Oct 31";
   `sched.relative(ms, nowMs)` → "in 7m" / "in 3h 20m" / "tomorrow 09:00" / "Oct 9, 10:00";
   `fmt.time(ms)`, `fmt.day(ms)`, `fmt.date(ms)`, `fmt.duration(ms)`.
 - Motion: `morph.open(popupEl, originEl, {onClosed})` → grows a popup out of an origin
@@ -222,5 +222,5 @@ under 15 minutes — explain inline, never a red wall), and the 25-per-project l
 - Serve: `python3 .docs/automations-lab/serve.py 5803` → http://127.0.0.1:5803/#A
 - Screenshot: `node .docs/automations-lab/shoot.mjs A shots/a.png "paused=1&theme=light"`;
   interaction steps via env `SHOOT_STEPS='[{"click":"[data-new]"},{"wait":600},
-{"type":"tomorrow 9"},{"press":"Enter"}]'`. Read the PNG to check your work. Fix every
+  {"type":"tomorrow 9"},{"press":"Enter"}]'`. Read the PNG to check your work. Fix every
   page error it prints.

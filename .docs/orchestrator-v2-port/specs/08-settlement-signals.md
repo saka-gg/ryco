@@ -151,7 +151,10 @@ manual settle and snooze eligibility, the read model has no liveness, and manual
 - Add the exported type and function:
   ```ts
   export type ThreadAutoSettlementBlocker =
-    "pinned" | "background-work" | "pull-request-open" | "pull-request-unknown";
+    | "pinned"
+    | "background-work"
+    | "pull-request-open"
+    | "pull-request-unknown";
 
   export function getThreadAutoSettlementBlocker(
     input: ThreadSettlementInput,

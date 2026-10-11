@@ -182,7 +182,7 @@ describe("Turn into project… (full app)", () => {
       await expectDialogPrefilled();
       await expect
         .element(page.getByTestId("promote-chat-move-plan"))
-        .toHaveTextContent("Move 3 files (2.0 KB)");
+        .toMatchTextContent("Move 3 files (2.0 KB)");
       await page.getByTestId("promote-chat-submit").click();
 
       await vi.waitFor(() => expect(promoteRequests).toHaveLength(1));

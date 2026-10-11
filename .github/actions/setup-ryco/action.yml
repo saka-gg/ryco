@@ -13,7 +13,7 @@ inputs:
   vite-plus-version:
     description: Vite+ CLI version. Keep aligned with package.json workspaces.catalog.vite-plus.
     required: false
-    default: "0.3.1"
+    default: "1.1.0"
   install-resource-monitor-toolchain:
     description: Install Rust for jobs that build the server resource monitor.
     required: false

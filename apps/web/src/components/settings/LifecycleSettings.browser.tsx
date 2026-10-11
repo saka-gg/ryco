@@ -117,7 +117,7 @@ describe("TrashSection permanent delete", () => {
     harness.trash = [trashed(CHAT_PROJECT_ID, "Plan a trip")];
     await openDeleteDialog();
     const folderOption = page.getByTestId("trash-delete-chat-folder");
-    await expect.element(folderOption).toHaveTextContent(CHAT_FOLDER);
+    await expect.element(folderOption).toMatchTextContent(CHAT_FOLDER);
     await expect.element(page.getByRole("checkbox")).not.toBeChecked();
     await page.getByTestId("trash-delete-permanently").click();
     await expect.poll(() => harness.deleteThreadPermanently.mock.calls.length).toBe(1);
@@ -132,7 +132,7 @@ describe("TrashSection permanent delete", () => {
     harness.trash = [trashed(CHAT_PROJECT_ID, "Plan a trip")];
     await openDeleteDialog();
     const folderOption = page.getByTestId("trash-delete-chat-folder");
-    await expect.element(folderOption).toHaveTextContent(chatFolder);
+    await expect.element(folderOption).toMatchTextContent(chatFolder);
 
     // The innermost element holding the whole path, split into rendered lines.
     const pathElement = Array.from(folderOption.element().querySelectorAll("*")).findLast(
@@ -184,10 +184,10 @@ describe("TrashSection permanent delete", () => {
     );
     await expect
       .element(page.getByTestId(`trash-row-place-thread-${CHAT_PROJECT_ID}`))
-      .toHaveTextContent(/^No project · Moved to Trash/);
+      .toMatchTextContent(/^No project · Moved to Trash/);
     await expect
       .element(page.getByTestId(`trash-row-place-thread-${PROJECT_ID}`))
-      .toHaveTextContent(/^Project · Moved to Trash/);
+      .toMatchTextContent(/^Project · Moved to Trash/);
   });
 
   it("lists a chat as No project from the node's project kind alone", async () => {
@@ -205,7 +205,7 @@ describe("TrashSection permanent delete", () => {
     );
     await expect
       .element(page.getByTestId(`trash-row-place-thread-${goneChatId}`))
-      .toHaveTextContent(/^No project · Moved to Trash/);
+      .toMatchTextContent(/^No project · Moved to Trash/);
   });
 
   it("offers no folder option for a chat whose folder this client does not know", async () => {

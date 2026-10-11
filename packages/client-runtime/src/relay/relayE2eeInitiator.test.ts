@@ -527,14 +527,14 @@ function standalone(
   });
   /** Record `destroy` in the same sequence, so §11.2's order is observable. */
   const watchDestroy = (): void => {
-    vi.spyOn(E2eeClientHandshake.prototype, "destroy").mockImplementation(
-      function (this: E2eeClientHandshake) {
-        events.push("destroy");
-        // The pristine method, captured before any spy: re-reading the prototype
-        // here would find the previous case's spy and call it forever.
-        HANDSHAKE_DESTROY.call(this);
-      },
-    );
+    vi.spyOn(E2eeClientHandshake.prototype, "destroy").mockImplementation(function (
+      this: E2eeClientHandshake,
+    ) {
+      events.push("destroy");
+      // The pristine method, captured before any spy: re-reading the prototype
+      // here would find the previous case's spy and call it forever.
+      HANDSHAKE_DESTROY.call(this);
+    });
   };
   return { machine, emitted, events, watchDestroy };
 }

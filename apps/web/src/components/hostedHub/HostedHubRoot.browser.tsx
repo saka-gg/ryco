@@ -721,7 +721,7 @@ describe("HostedHubRoot accessibility and responsive flows", () => {
       errorMessage: "Directory refresh failed.",
     });
     mounted = await render(<HostedHubRoot />);
-    await expect.element(page.getByRole("status")).toHaveTextContent(/Directory data is stale/);
+    await expect.element(page.getByRole("status")).toMatchTextContent(/Directory data is stale/);
     await expect.element(page.getByRole("button", { name: /^Studio online/ })).toBeDisabled();
     await expect.element(page.getByRole("button", { name: /^Travel offline/ })).toBeDisabled();
     await expect.element(page.getByText("Online", { exact: true })).toBeVisible();
@@ -824,7 +824,7 @@ describe("HostedHubRoot accessibility and responsive flows", () => {
     await expect
       .element(page.getByRole("heading", { name: `Connecting to ${selectedNode.label}` }))
       .toBeVisible();
-    await expect.element(page.getByRole("status")).toHaveTextContent(/synchronizing Ryco state/);
+    await expect.element(page.getByRole("status")).toMatchTextContent(/synchronizing Ryco state/);
   });
 
   it("shows a labelled relay failure without mounting the node session UI", async () => {
@@ -847,7 +847,7 @@ describe("HostedHubRoot accessibility and responsive flows", () => {
       .toBeVisible();
     await expect
       .element(page.getByRole("alert"))
-      .toHaveTextContent(/authentication attempt expired/);
+      .toMatchTextContent(/authentication attempt expired/);
     await expect.element(page.getByRole("button", { name: "Retry" })).not.toBeInTheDocument();
   });
 
@@ -1034,7 +1034,7 @@ describe("HostedHubRoot accessibility and responsive flows", () => {
       selectionStatus: "authorization-removed",
     });
     mounted = await render(<HostedHubRoot />);
-    await expect.element(page.getByRole("alert")).toHaveTextContent(/Authorization.*removed/);
+    await expect.element(page.getByRole("alert")).toMatchTextContent(/Authorization.*removed/);
     await expect.element(page.getByRole("button", { name: /^Studio online/ })).toBeDisabled();
     await expect.element(page.getByText("Revoked", { exact: true })).toBeVisible();
   });

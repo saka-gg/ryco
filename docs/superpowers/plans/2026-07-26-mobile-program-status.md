@@ -180,7 +180,7 @@ deleted possibly-valid enclave keys on every launch.
   revoke, email verification, sign out. All native DPoP calls; **nothing here opens a browser**.
 - `HubNodeSection.tsx` — Hub nodes as a second labelled section inside the existing
   `Connections` sheet, fail-closed disabled unless `directoryStatus === "ready" &&
-browserStatus === "current" && !revokedAt`.
+  browserStatus === "current" && !revokedAt`.
 - `HostedFallbackSession.ts` — `expo-web-browser`'s `openAuthSessionAsync` (ephemeral). Used
   only for the **no-passkey login** path. Ships no in-app WebView at all, deliberately: on
   Android an in-app WebView writes to the app-global cookie jar that OkHttp and the RN

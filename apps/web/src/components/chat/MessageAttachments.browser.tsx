@@ -172,7 +172,7 @@ it("offers retry when an attachment read fails", async () => {
     />,
   );
   await page.getByRole("button", { name: /report.pdf/ }).click();
-  await expect.element(page.getByRole("status")).toHaveTextContent("Could not load file");
+  await expect.element(page.getByRole("status")).toMatchTextContent("Could not load file");
   await page.getByRole("button", { name: /report.pdf/ }).click();
   await expect
     .element(page.getByRole("link", { name: "Download report.pdf" }))
@@ -283,7 +283,7 @@ it("renders an RPC PDF inside the app, paginates, zooms, and reopens without rer
   await page.getByRole("button", { name: "Zoom in" }).click();
   await expect
     .element(page.getByRole("button", { name: "Fit to width" }))
-    .toHaveTextContent("125%");
+    .toMatchTextContent("125%");
   await expect.element(page.getByRole("img", { name: "report.pdf, page 2" })).toBeVisible();
   await page.getByRole("button", { name: "Close", exact: true }).click();
   await page.getByRole("button", { name: "Preview report.pdf" }).click();
@@ -361,7 +361,7 @@ it("rejects corrupt PDFs with a download fallback", async () => {
     />,
   );
   await page.getByRole("button", { name: "Preview broken.pdf" }).click();
-  await expect.element(page.getByRole("status")).toHaveTextContent("Could not preview this PDF");
+  await expect.element(page.getByRole("status")).toMatchTextContent("Could not preview this PDF");
   await expect.element(page.getByRole("link", { name: "Download broken.pdf" })).toBeVisible();
   await screen.unmount();
 });
@@ -377,7 +377,7 @@ it("bounds text previews before fetching and rejects mislabeled binary content",
   await page.getByRole("button", { name: "Preview binary.txt" }).click();
   await expect
     .element(page.getByRole("status"))
-    .toHaveTextContent("cannot be previewed as UTF-8 text");
+    .toMatchTextContent("cannot be previewed as UTF-8 text");
   await screen.unmount();
   const fetchSpy = vi.spyOn(window, "fetch");
   const large = await render(
@@ -393,7 +393,7 @@ it("bounds text previews before fetching and rejects mislabeled binary content",
   await page.getByRole("button", { name: "Preview large.txt" }).click();
   await expect
     .element(page.getByRole("status"))
-    .toHaveTextContent("Text previews are limited to 512 KB");
+    .toMatchTextContent("Text previews are limited to 512 KB");
   expect(fetchSpy).not.toHaveBeenCalled();
   await large.unmount();
 });

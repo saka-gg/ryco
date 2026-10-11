@@ -127,7 +127,7 @@ chip:
   prompt-injection path identically to `TraitsMenuContent`'s
   `handleSelectChange`. To avoid duplicating that logic, extract a small
   helper `applyDescriptorSelection(descriptors, descriptor, value, prompt,
-onPromptChange)` from `TraitsMenuContent` into a shared module
+  onPromptChange)` from `TraitsMenuContent` into a shared module
   (`TraitsMenuLogic.ts`) and call it from both places.
 
 The chip ordering in the bar (left to right): **Reasoning → Fast Mode →
@@ -183,7 +183,7 @@ For `text` style: abbreviated label only (`Low`, `Med`, `High`, `XHi`, `Max`,
   50% opacity, 1px ring at `border` color. Click toggles to on.
 - No menu; click toggles in place.
 - `aria-pressed` reflects current state; `title` is `"Fast mode: on (click
-to disable)"` / `"Fast mode: off (click to enable)"`.
+  to disable)"` / `"Fast mode: off (click to enable)"`.
 
 ### Context Window chip
 

@@ -565,7 +565,10 @@ export interface HintRowFlags {
 }
 
 export type HintRowPillId =
-  "reference-issue" | "reference-pr" | "reference-jira" | "browse-commands";
+  | "reference-issue"
+  | "reference-pr"
+  | "reference-jira"
+  | "browse-commands";
 
 export type HintRowTrigger = "#i " | "#pr " | "#jira " | "/";
 
