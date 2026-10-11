@@ -416,7 +416,7 @@ describe("AccountSettingsPanel", () => {
     await mount();
 
     await expect.element(page.getByText("Encrypted devices")).toBeVisible();
-    await expect.element(page.getByText("Studio Mac")).toBeVisible();
+    await expect.element(page.getByText("Studio Mac", { exact: false })).toBeVisible();
     await expect.element(page.getByText(device.identityFingerprint)).toBeVisible();
     await expect.element(page.getByText(device.agreementFingerprint)).toBeVisible();
     await expect.element(page.getByText(/does not protect against a malicious Hub/)).toBeVisible();
@@ -1499,7 +1499,7 @@ describe("AccountSettingsPanel", () => {
     });
 
     await mount();
-    await expect.element(page.getByText("Old phone")).toBeVisible();
+    await expect.element(page.getByText("Old phone", { exact: false })).toBeVisible();
     await expect.element(page.getByText(/device_lost/)).toBeVisible();
     await expect.element(page.getByText("1 usable passkey")).toBeVisible();
     await expect

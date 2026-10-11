@@ -336,7 +336,7 @@ describe("PromoteChatDialog", () => {
     await expect.element(page.getByText("Folder is available")).toBeVisible();
     await expect
       .element(page.getByTestId("promote-chat-move-plan"))
-      .toHaveTextContent("Move 12 files (3.0 MB)");
+      .toMatchTextContent("Move 12 files (3.0 MB)");
     await expect.element(page.getByText("Your conversation stays attached")).toBeVisible();
     expect(previewChat).toHaveBeenCalledWith({ projectId: CHAT_PROJECT_ID });
 
@@ -411,17 +411,17 @@ describe("PromoteChatDialog", () => {
     // The plan does not present the refused folder as where the files go.
     const planDestination = page.getByTestId("promote-chat-plan-destination");
     await expect.element(planDestination).toHaveAttribute("data-state", "exists");
-    await expect.element(planDestination).toHaveTextContent("Choose another location above");
+    await expect.element(planDestination).toMatchTextContent("Choose another location above");
     expect(planDestination.element().textContent).not.toContain("trip");
     const suggestion = page.getByTestId("promote-chat-use-suggestion");
-    await expect.element(suggestion).toHaveTextContent("Use trip-2");
+    await expect.element(suggestion).toMatchTextContent("Use trip-2");
     await suggestion.click();
     await expect
       .element(page.getByTestId("promote-chat-location"))
       .toHaveValue("/home/me/Code/trip-2");
     await expect.element(page.getByText("Folder is available")).toBeVisible();
     await expect.element(planDestination).toHaveAttribute("data-state", "available");
-    await expect.element(planDestination).toHaveTextContent("/home/me/Code/trip-2");
+    await expect.element(planDestination).toMatchTextContent("/home/me/Code/trip-2");
   });
 
   it("keeps a busy chat in place until the agent stops", async () => {
@@ -466,7 +466,7 @@ describe("PromoteChatDialog", () => {
     await expect.element(notice).toBeVisible();
     await expect
       .element(notice)
-      .toHaveTextContent("A terminal is still running a command in this chat");
+      .toMatchTextContent("A terminal is still running a command in this chat");
     // Interrupting the agent cannot end a terminal command.
     expect(document.querySelector('[data-testid="promote-chat-busy"]')?.textContent).not.toContain(
       "Stop the agent",
@@ -492,7 +492,7 @@ describe("PromoteChatDialog", () => {
 
     await expect
       .element(page.getByTestId("promote-chat-busy"))
-      .toHaveTextContent("This chat is still busy");
+      .toMatchTextContent("This chat is still busy");
     previewOptions = {};
     await page.getByRole("button", { name: "Check again" }).click();
     await vi.waitFor(() =>
@@ -508,10 +508,10 @@ describe("PromoteChatDialog", () => {
 
     const notice = page.getByTestId("promote-chat-identity-notice");
     await expect.element(notice).toBeVisible();
-    await expect.element(notice).toHaveTextContent('git config --global user.name "Your Name"');
+    await expect.element(notice).toMatchTextContent('git config --global user.name "Your Name"');
     await expect
       .element(notice)
-      .toHaveTextContent("git config --global user.email you@example.com");
+      .toMatchTextContent("git config --global user.email you@example.com");
 
     // Without an initial commit there is nothing to warn about.
     await page.getByTestId("promote-chat-initial-commit").click();
@@ -563,7 +563,7 @@ describe("PromoteChatDialog", () => {
       .toHaveAttribute("data-status", "done");
     await expect
       .element(page.getByTestId("promote-step-move"))
-      .toHaveTextContent(DEFAULT_DESTINATION);
+      .toMatchTextContent(DEFAULT_DESTINATION);
     await expect
       .element(page.getByTestId("promote-step-git-init"))
       .toHaveAttribute("data-status", "running");
@@ -593,7 +593,7 @@ describe("PromoteChatDialog", () => {
     }
     await expect
       .element(page.getByTestId("promote-step-move"))
-      .toHaveTextContent(DEFAULT_DESTINATION);
+      .toMatchTextContent(DEFAULT_DESTINATION);
     await expect.element(page.getByTestId("promote-chat-done")).toHaveFocus();
 
     // A clean result folds away by itself and points at the new project.
@@ -629,7 +629,7 @@ describe("PromoteChatDialog", () => {
 
     const commit = page.getByTestId("promote-step-initial-commit");
     await expect.element(commit).toHaveAttribute("data-status", "warning");
-    await expect.element(commit).toHaveTextContent("Author identity unknown");
+    await expect.element(commit).toMatchTextContent("Author identity unknown");
     await expect.element(page.getByTestId("promote-chat-identity-notice")).toBeVisible();
     // Warnings wait for the user.
     await new Promise((resolve) => window.setTimeout(resolve, 2_000));
@@ -651,7 +651,7 @@ describe("PromoteChatDialog", () => {
 
     const error = page.getByTestId("promote-chat-error");
     await expect.element(error).toHaveAttribute("data-reason", "stale");
-    await expect.element(error).toHaveTextContent("This chat changed while the dialog was open");
+    await expect.element(error).toMatchTextContent("This chat changed while the dialog was open");
     expect(usePromoteChatDialogStore.getState().open).toBe(true);
     // The preview is read again so the next attempt uses fresh state.
     await vi.waitFor(() => expect(previewChat.mock.calls.length).toBeGreaterThanOrEqual(2));
@@ -665,7 +665,7 @@ describe("PromoteChatDialog", () => {
     await submitButton().click();
     await expect
       .element(page.getByTestId("promote-chat-error"))
-      .toHaveTextContent("That folder already exists");
+      .toMatchTextContent("That folder already exists");
   });
 
   it("refuses a location inside the chat's own folder and sends the user back to it", async () => {
@@ -678,7 +678,7 @@ describe("PromoteChatDialog", () => {
     await expect.element(status).toHaveAttribute("data-state", "inside-source");
     await expect
       .element(status)
-      .toHaveTextContent("Inside this chat's own folder. Choose a location outside it");
+      .toMatchTextContent("Inside this chat's own folder. Choose a location outside it");
     await expect.element(submitButton()).toHaveAttribute("aria-disabled", "true");
 
     // The server can still refuse a location the preview allowed (a symlink, a
@@ -696,10 +696,10 @@ describe("PromoteChatDialog", () => {
 
     const error = page.getByTestId("promote-chat-error");
     await expect.element(error).toHaveAttribute("data-reason", "destination-inside-source");
-    await expect.element(error).toHaveTextContent("That location is inside this chat's folder");
+    await expect.element(error).toMatchTextContent("That location is inside this chat's folder");
     await expect
       .element(error)
-      .toHaveTextContent("A chat can't move into its own folder. Choose a location outside it.");
+      .toMatchTextContent("A chat can't move into its own folder. Choose a location outside it.");
     await expect.element(page.getByTestId("promote-chat-location")).toHaveFocus();
     await expect.element(status).toHaveAttribute("data-state", "inside-source");
     await expect.element(submitButton()).toHaveAttribute("aria-disabled", "true");
@@ -722,9 +722,9 @@ describe("PromoteChatDialog", () => {
 
     await expect
       .element(page.getByTestId("promote-chat-error"))
-      .toHaveTextContent("This chat no longer exists");
+      .toMatchTextContent("This chat no longer exists");
     expect(document.querySelector('[data-testid="promote-chat-submit"]')).toBeNull();
-    await expect.element(page.getByTestId("promote-chat-cancel")).toHaveTextContent("Close");
+    await expect.element(page.getByTestId("promote-chat-cancel")).toMatchTextContent("Close");
     await page.getByTestId("promote-chat-cancel").click();
     await vi.waitFor(() => expect(usePromoteChatDialogStore.getState().open).toBe(false));
   });
@@ -737,7 +737,7 @@ describe("PromoteChatDialog", () => {
     await expect.element(continuity).toHaveAttribute("data-continuity", "resume");
     await expect
       .element(continuity)
-      .toHaveTextContent("The agent resumes this conversation in the new folder.");
+      .toMatchTextContent("The agent resumes this conversation in the new folder.");
     expect(continuity.element().textContent).not.toContain("summary");
     await userEvent.keyboard("{Escape}");
     await vi.waitFor(() => expect(usePromoteChatDialogStore.getState().open).toBe(false));
@@ -751,8 +751,8 @@ describe("PromoteChatDialog", () => {
     });
     await openFromHeader();
     await expect.element(continuity).toHaveAttribute("data-continuity", "handoff");
-    await expect.element(continuity).toHaveTextContent("fresh session");
-    await expect.element(continuity).toHaveTextContent("summary of this conversation");
+    await expect.element(continuity).toMatchTextContent("fresh session");
+    await expect.element(continuity).toMatchTextContent("summary of this conversation");
     await userEvent.keyboard("{Escape}");
     await vi.waitFor(() => expect(usePromoteChatDialogStore.getState().open).toBe(false));
 

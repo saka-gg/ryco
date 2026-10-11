@@ -65,7 +65,7 @@ describe("pull request file review progress", () => {
     rejectWrite(new Error("GitHub could not save review progress"));
     await expect
       .element(screen.getByRole("alert"))
-      .toHaveTextContent("GitHub could not save review progress");
+      .toMatchTextContent("GitHub could not save review progress");
     await expect
       .element(screen.getByRole("checkbox", { name: "Viewed src/current.ts", exact: true }))
       .not.toBeChecked();

@@ -45,7 +45,7 @@ describe("GenericSelectChip", () => {
     );
     const chip = page.getByRole("button", { name: /variant/i });
     await vi.waitFor(async () => {
-      await expect.element(chip).toHaveTextContent("Large");
+      await expect.element(chip).toMatchTextContent("Large");
     });
     await chip.click();
     await page.getByText("Small").click();

@@ -697,7 +697,7 @@ describe("GeneralSettingsPanel observability", () => {
     }
     await page.getByRole("combobox", { name: "Project default scope" }).click();
     await page.getByRole("option", { name: "Project A", exact: true }).click();
-    await expect.element(mode).toHaveTextContent("Inherit");
+    await expect.element(mode).toMatchTextContent("Inherit");
     await mode.click();
     await page.getByRole("option", { name: "None", exact: true }).click();
     await expect
@@ -708,7 +708,7 @@ describe("GeneralSettingsPanel observability", () => {
     await expect
       .poll(() => mockUpdateEnvironmentServerSettings.mock.calls.at(-1))
       .toEqual(["environment-local", { projectWorktreeSubmodules: { projectA: null } }]);
-    await expect.element(mode).toHaveTextContent("Inherit");
+    await expect.element(mode).toMatchTextContent("Inherit");
   });
 
   it("keeps submodule settings disabled for unavailable mutation authority", async () => {
@@ -746,8 +746,8 @@ describe("GeneralSettingsPanel observability", () => {
     await page.getByRole("option", { name: "None", exact: true }).click();
     await expect
       .element(page.getByRole("alert"))
-      .toHaveTextContent("Reconnect before changing node settings.");
-    await expect.element(mode).toHaveTextContent("Recursive");
+      .toMatchTextContent("Reconnect before changing node settings.");
+    await expect.element(mode).toMatchTextContent("Recursive");
   });
 
   it("saves worktree roots to the selected environment and resets project inheritance", async () => {
@@ -782,7 +782,7 @@ describe("GeneralSettingsPanel observability", () => {
     mounted = await render(<WorktreeSettingsHarness />);
     await page.getByRole("textbox", { name: "Worktree root directory" }).fill("relative/path");
     await userEvent.keyboard("{Enter}");
-    await expect.element(page.getByRole("alert")).toHaveTextContent("absolute directory");
+    await expect.element(page.getByRole("alert")).toMatchTextContent("absolute directory");
     await expect.element(page.getByText("Effective: /volumes/default")).toBeVisible();
   });
 
@@ -1021,12 +1021,14 @@ describe("GeneralSettingsPanel observability", () => {
     );
 
     await expect.element(page.getByText("http://192.168.86.39:3773/")).toBeInTheDocument();
-    await expect.element(page.getByRole("button", { name: "+2" })).toBeInTheDocument();
+    await expect
+      .element(page.getByRole("button", { name: "+2", exact: false }))
+      .toBeInTheDocument();
     await expect
       .element(page.getByRole("heading", { name: "Local network", exact: true }))
       .not.toBeInTheDocument();
 
-    await page.getByRole("button", { name: "+2" }).click();
+    await page.getByRole("button", { name: "+2", exact: false }).click();
 
     await expect
       .element(page.getByRole("heading", { name: "Local network", exact: true }))
@@ -1497,7 +1499,7 @@ describe("GeneralSettingsPanel observability", () => {
       .toBeInTheDocument();
 
     const refreshMode = page.getByLabelText("PR and workflow update mode");
-    await expect.element(refreshMode).toHaveTextContent("Automatic");
+    await expect.element(refreshMode).toMatchTextContent("Automatic");
     await refreshMode.click();
     await page.getByRole("option", { name: "Reduced", exact: true }).click();
 
@@ -1507,7 +1509,7 @@ describe("GeneralSettingsPanel observability", () => {
         sourceControlRefreshMode: "reduced",
       });
     });
-    await expect.element(refreshMode).toHaveTextContent("Reduced");
+    await expect.element(refreshMode).toMatchTextContent("Reduced");
   });
 
   it("creates and shows a pairing link when network access is enabled", async () => {
@@ -1736,7 +1738,9 @@ describe("GeneralSettingsPanel observability", () => {
     await vi.waitFor(() => {
       expect(desktopBridge.setServerExposureMode).toHaveBeenCalledWith("network-accessible");
     });
-    await expect.element(page.getByText("http://192.168.1.44:3773")).toBeInTheDocument();
+    await expect
+      .element(page.getByText("http://192.168.1.44:3773", { exact: false }))
+      .toBeInTheDocument();
   });
 
   it("saves deferred network access before waiting for running turns", async () => {

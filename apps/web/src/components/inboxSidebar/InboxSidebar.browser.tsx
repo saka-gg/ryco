@@ -740,7 +740,7 @@ describe("Inbox sidebar delegated threads", () => {
         name: "Show 1 delegated thread from Coordinator task",
       });
       await expect.element(disclosure).toBeInTheDocument();
-      await expect.element(disclosure).toHaveTextContent("1 delegated");
+      await expect.element(disclosure).toMatchTextContent("1 delegated");
       await expect.element(disclosure).toHaveAttribute("aria-expanded", "false");
       expect(rowTitles()).toEqual(["Coordinator task"]);
 

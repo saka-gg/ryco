@@ -112,7 +112,7 @@ function jobToggle(screen: Awaited<ReturnType<typeof renderChecks>>, name: strin
 describe("ChecksTab", () => {
   it("summarizes what it lists and opens the failing job at its log tail", async () => {
     const screen = await renderChecks(703);
-    await expect.element(screen.getByText("failing")).toBeVisible();
+    await expect.element(screen.getByText("failing", { exact: false })).toBeVisible();
     expect(document.body.textContent).toContain("1 failing·8 passed");
 
     // The failing job and its failing step open on their own; passing jobs stay closed.
@@ -124,7 +124,7 @@ describe("ChecksTab", () => {
       .toHaveAttribute("aria-expanded", "false");
     const log = screen.getByRole("log", { name: "Step log" });
     await expect.element(log).toBeVisible();
-    await expect.element(log).toHaveTextContent(/Process completed with exit code 1/u);
+    await expect.element(log).toMatchTextContent(/Process completed with exit code 1/u);
 
     // A `path:line` in the log opens the changed file at that line.
     await screen
@@ -154,7 +154,7 @@ describe("ChecksTab", () => {
 
   it("leaves the required count and tags out when the host does not mark them", async () => {
     const screen = await renderChecks(703);
-    await expect.element(screen.getByText("failing")).toBeVisible();
+    await expect.element(screen.getByText("failing", { exact: false })).toBeVisible();
     expect(document.body.textContent).not.toMatch(/\d required/u);
     expect(requiredRows()).toEqual([]);
   });

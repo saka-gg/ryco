@@ -7,7 +7,7 @@ import { page } from "vite-plus/test/browser";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
 
-import { syncDocumentPresentationTier } from "../../lib/presentationTier";
+import { getPresentationTier, syncDocumentPresentationTier } from "../../lib/presentationTier";
 import { syncDocumentVisualViewportInsets } from "../../lib/visualViewportInsets";
 import type { PendingApproval } from "../../session-logic";
 import {
@@ -58,6 +58,8 @@ describe("ApprovalCard", () => {
     vi.restoreAllMocks();
     document.body.innerHTML = "";
     await page.viewport(1_280, 720);
+    // The real page resize reaches the tier on a later media-query change.
+    await vi.waitFor(() => expect(getPresentationTier()).toBe("desktop"));
   });
 
   it("forwards the displayed callback identity and disables uncertain outcomes", async () => {
@@ -85,7 +87,9 @@ describe("ApprovalCard", () => {
       />,
     );
     await expect.element(page.getByRole("button", { name: "Approve once" })).toBeDisabled();
-    await expect.element(page.getByRole("status")).toHaveTextContent("Delivery outcome is unknown");
+    await expect
+      .element(page.getByRole("status"))
+      .toMatchTextContent("Delivery outcome is unknown");
     await mounted.rerender(
       <ApprovalCard
         approval={approval({ approvalIdentity: identity, responseState: "retryable" })}

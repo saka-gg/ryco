@@ -72,7 +72,7 @@ describe("comparison lifecycle adapter", () => {
     const screen = await render(<View />);
     await expect
       .element(screen.getByRole("status", { name: "Patch" }))
-      .toHaveTextContent("initial");
+      .toMatchTextContent("initial");
     let resolvePending!: (value: GitReadComparisonResult) => void;
     fixture.read.mockImplementationOnce(
       () =>
@@ -81,14 +81,16 @@ describe("comparison lifecycle adapter", () => {
         }),
     );
     fixture.invalidate!();
-    await expect.element(screen.getByRole("status", { name: "Loading" })).toHaveTextContent("true");
+    await expect
+      .element(screen.getByRole("status", { name: "Loading" }))
+      .toMatchTextContent("true");
     await expect
       .element(screen.getByRole("status", { name: "Patch" }))
-      .toHaveTextContent("initial");
+      .toMatchTextContent("initial");
     const atom = wsConnectionStatusForEnvironmentAtom(environmentId);
     appAtomRegistry.set(atom, { ...appAtomRegistry.get(atom), phase: "disconnected" });
     resolvePending(snapshot("obsolete"));
-    await expect.element(screen.getByRole("status", { name: "Patch" })).toHaveTextContent("empty");
+    await expect.element(screen.getByRole("status", { name: "Patch" })).toMatchTextContent("empty");
     fixture.read.mockResolvedValueOnce(snapshot("reconnected"));
     appAtomRegistry.set(atom, {
       ...appAtomRegistry.get(atom),
@@ -97,7 +99,7 @@ describe("comparison lifecycle adapter", () => {
     });
     await expect
       .element(screen.getByRole("status", { name: "Patch" }))
-      .toHaveTextContent("reconnected");
+      .toMatchTextContent("reconnected");
     await screen.unmount();
   });
 });

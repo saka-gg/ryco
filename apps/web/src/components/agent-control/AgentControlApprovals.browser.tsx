@@ -94,7 +94,9 @@ it("keeps external approvals actionable with no active thread and after switchin
   await expect
     .element(screen.getByRole("region", { name: "External Agent Control approval requests" }))
     .toBeVisible();
-  await expect.element(screen.getByText("External integration Terminal agent")).toBeVisible();
+  await expect
+    .element(screen.getByText("External integration Terminal agent", { exact: false }))
+    .toBeVisible();
   await expect.element(screen.getByText("Unrelated thread request")).not.toBeInTheDocument();
   await expect.element(screen.getByText("Hidden external prompt")).not.toBeInTheDocument();
   await screen.getByRole("button", { name: "Approve", exact: true }).click();

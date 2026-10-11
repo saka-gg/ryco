@@ -246,7 +246,7 @@ describe("hosted node route surfaces", () => {
         });
       }
 
-      await expect.element(page.getByTestId("root-app-shell")).toHaveTextContent("hosted-cached");
+      await expect.element(page.getByTestId("root-app-shell")).toMatchTextContent("hosted-cached");
       await expect
         .element(page.getByText("Cloud history is readable before this Mac reconnects"))
         .toBeVisible();
@@ -291,7 +291,7 @@ describe("hosted node route surfaces", () => {
 
     mounted = await render(<HostedHubRoot />);
 
-    await expect.element(page.getByTestId("root-app-shell")).toHaveTextContent("hosted-cached");
+    await expect.element(page.getByTestId("root-app-shell")).toMatchTextContent("hosted-cached");
     await expect
       .element(page.getByRole("heading", { name: `Connecting to ${target.label}` }))
       .not.toBeInTheDocument();
@@ -322,7 +322,7 @@ describe("hosted node route surfaces", () => {
     mounted = await render(<HostedHubRoot />);
 
     await expect.element(page.getByRole("heading", { name: "Restoring your node" })).toBeVisible();
-    await expect.element(page.getByRole("status")).toHaveTextContent(/Checking your access/);
+    await expect.element(page.getByRole("status")).toMatchTextContent(/Checking your access/);
     expect(document.body.textContent).not.toContain("Your nodes");
     expect(selectNode).not.toHaveBeenCalled();
 
@@ -372,7 +372,7 @@ describe("hosted node route surfaces", () => {
 
     // Cached content survives, but the auth gate remains explicitly read-only
     // until the current shell snapshot establishes mutation readiness.
-    await expect.element(page.getByTestId("root-app-shell")).toHaveTextContent("hosted-cached");
+    await expect.element(page.getByTestId("root-app-shell")).toMatchTextContent("hosted-cached");
     expect(selectNode).toHaveBeenCalledWith(target.id);
     expect(fakeWindow!.location.pathname).toBe(
       `/node/${target.id}/${target.environmentId}/${threadId}`,
@@ -389,7 +389,7 @@ describe("hosted node route surfaces", () => {
       sessionEstablished: true,
     });
 
-    await expect.element(page.getByTestId("root-app-shell")).toHaveTextContent("hosted-hub");
+    await expect.element(page.getByTestId("root-app-shell")).toMatchTextContent("hosted-hub");
     expect(fakeWindow!.location.pathname).toBe(
       `/node/${target.id}/${target.environmentId}/${threadId}`,
     );
@@ -412,7 +412,7 @@ describe("hosted node route surfaces", () => {
     await expect.element(page.getByRole("heading", { name: /^Your nodes?$/ })).toBeVisible();
     await expect
       .element(page.getByRole("alert"))
-      .toHaveTextContent(/not in your authorized node directory/);
+      .toMatchTextContent(/not in your authorized node directory/);
     expect(selectNode).not.toHaveBeenCalled();
     expect(fakeWindow!.location.pathname).toBe("/");
   });
@@ -434,7 +434,7 @@ describe("hosted node route surfaces", () => {
     await expect.element(page.getByRole("heading", { name: /^Your nodes?$/ })).toBeVisible();
     await expect
       .element(page.getByRole("alert"))
-      .toHaveTextContent(/not in your authorized node directory/);
+      .toMatchTextContent(/not in your authorized node directory/);
     expect(selectNode).not.toHaveBeenCalled();
   });
 
@@ -450,7 +450,7 @@ describe("hosted node route surfaces", () => {
     mounted = await render(<HostedHubRoot />);
 
     await expect.element(page.getByRole("heading", { name: /^Your nodes?$/ })).toBeVisible();
-    await expect.element(page.getByRole("alert")).toHaveTextContent(/link is not valid/);
+    await expect.element(page.getByRole("alert")).toMatchTextContent(/link is not valid/);
     expect(fakeWindow!.location.pathname).toBe("/");
   });
 

@@ -60,13 +60,13 @@ it("discloses commands, keeps Agents navigation, and waits for lifecycle settlem
   expect(onStop).toHaveBeenCalledExactlyOnceWith(work.tasks[0]);
   await expect
     .element(page.getByRole("button", { name: "Stop Run tests" }))
-    .toHaveTextContent("Stopping…");
+    .toMatchTextContent("Stopping…");
   await expect.element(page.getByRole("button", { name: "Stop Run tests" })).toBeDisabled();
   await page.getByRole("button", { name: "2 background tasks" }).click();
   await page.getByRole("button", { name: "2 background tasks" }).click();
   await expect
     .element(page.getByRole("button", { name: "Stop Run tests" }))
-    .toHaveTextContent("Stopping…");
+    .toMatchTextContent("Stopping…");
   await mounted.rerender(view({ ...work, tasks: work.tasks.slice(1) }, onStop));
   await expect
     .element(page.getByRole("button", { name: "Stop Run tests" }))
@@ -79,7 +79,7 @@ it("shows stop errors and allows retry without reporting completion", async () =
   mounted = await render(view({ tasks: [task("Run tests")], detailsOmitted: false }, onStop));
   await page.getByRole("button", { name: "1 background task" }).click();
   await page.getByRole("button", { name: "Stop Run tests" }).click();
-  await expect.element(page.getByRole("alert")).toHaveTextContent("Provider stop timed out");
+  await expect.element(page.getByRole("alert")).toMatchTextContent("Provider stop timed out");
   await expect.element(page.getByRole("button", { name: "Stop Run tests" })).toBeEnabled();
 });
 it("keeps uncertain tasks on reconnect and gates stop with shared mutation readiness", async () => {
@@ -94,7 +94,7 @@ it("keeps uncertain tasks on reconnect and gates stop with shared mutation readi
     .toBeVisible();
   await expect.element(page.getByRole("button", { name: "Stop Watch CI" })).toBeDisabled();
   await mounted.rerender(view(work, undefined, { mutationReady: false }));
-  await expect.element(page.getByText("Paused / idle")).toBeVisible();
+  await expect.element(page.getByText("Paused / idle", { exact: false })).toBeVisible();
   await expect.element(page.getByRole("button", { name: "Stop Watch CI" })).toBeDisabled();
   await mounted.rerender(view(work));
   await expect.element(page.getByRole("button", { name: "Stop Watch CI" })).toBeEnabled();
@@ -133,13 +133,13 @@ it("allows retry when acceptance never settles and ignores a late failed request
   await vi.advanceTimersByTimeAsync(20_001);
   vi.useRealTimers();
   await expect.element(page.getByRole("button", { name: "Stop Run tests" })).toBeEnabled();
-  await expect.element(page.getByRole("alert")).toHaveTextContent("Stop has not been confirmed");
+  await expect.element(page.getByRole("alert")).toMatchTextContent("Stop has not been confirmed");
   await page.getByRole("button", { name: "Stop Run tests" }).click();
   rejectFirst?.(new Error("Late failure"));
   await expect.element(page.getByRole("button", { name: "Stop Run tests" })).toBeDisabled();
   await expect
     .element(page.getByRole("button", { name: "Stop Run tests" }))
-    .toHaveTextContent("Stopping…");
+    .toMatchTextContent("Stopping…");
 });
 
 it("sends displayed activation identity and synchronously rejects a same-tick duplicate stop", async () => {

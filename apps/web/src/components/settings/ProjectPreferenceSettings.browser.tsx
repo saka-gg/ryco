@@ -169,7 +169,7 @@ describe("project inheritance controls", () => {
     await expect.element(page.getByRole("combobox", { name: "Worktree setup" })).toBeEnabled();
     await page.getByRole("combobox", { name: "Worktree setup" }).click();
     await page.getByRole("option", { name: "Skip setup" }).click();
-    await expect.element(page.getByRole("alert")).toHaveTextContent("changed elsewhere");
+    await expect.element(page.getByRole("alert")).toMatchTextContent("changed elsewhere");
     await page.getByRole("button", { name: "Reload", exact: true }).click();
     await expect.poll(() => harness.read.mock.calls.length).toBeGreaterThan(1);
     expect(harness.local).not.toHaveBeenCalled();
@@ -183,7 +183,7 @@ describe("project inheritance controls", () => {
       .element(page.getByText("Inherited from device defaults", { exact: true }).first())
       .toBeVisible();
     await mounted.rerender(<ProjectPreferenceSettings projectId="p" projects={[]} />);
-    await expect.element(page.getByRole("alert")).toHaveTextContent("Project no longer exists");
+    await expect.element(page.getByRole("alert")).toMatchTextContent("Project no longer exists");
     await expect.element(page.getByRole("combobox", { name: "Worktree setup" })).toBeDisabled();
     expect(harness.update).not.toHaveBeenCalled();
   });

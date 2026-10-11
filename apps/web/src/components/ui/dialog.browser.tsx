@@ -151,15 +151,15 @@ describe("Dialog", () => {
     expect(closeHitTarget?.closest("button")).toBe(closeButton.element());
 
     await userEvent.type(closeButton, "{Enter}");
-    await expect.element(page.getByTestId("dialog-state")).toHaveTextContent("closed");
+    await expect.element(page.getByTestId("dialog-state")).toMatchTextContent("closed");
 
     await page.getByRole("button", { name: "Reopen" }).click();
     await userEvent.keyboard("{Escape}");
-    await expect.element(page.getByTestId("dialog-state")).toHaveTextContent("closed");
+    await expect.element(page.getByTestId("dialog-state")).toMatchTextContent("closed");
 
     await page.getByRole("button", { name: "Reopen" }).click();
     await page.getByRole("button", { name: "Close" }).click();
-    await expect.element(page.getByTestId("dialog-state")).toHaveTextContent("closed");
+    await expect.element(page.getByTestId("dialog-state")).toMatchTextContent("closed");
   });
 
   it("keeps outside app controls behind the modal hit target", async () => {
@@ -216,8 +216,8 @@ describe("Dialog", () => {
       }),
     );
 
-    await expect.element(page.getByTestId("dialog-state")).toHaveTextContent("open");
-    await expect.element(page.getByTestId("global-navigation-count")).toHaveTextContent("0");
+    await expect.element(page.getByTestId("dialog-state")).toMatchTextContent("open");
+    await expect.element(page.getByTestId("global-navigation-count")).toMatchTextContent("0");
   });
 
   it("treats editable targets as global navigation shortcut boundaries", () => {
@@ -285,7 +285,7 @@ describe("Dialog", () => {
       }),
     );
 
-    await expect.element(page.getByTestId("parent-shortcut-count")).toHaveTextContent("0");
+    await expect.element(page.getByTestId("parent-shortcut-count")).toMatchTextContent("0");
   });
 
   it("keeps the bottom-stuck mobile dialog footer above a stubbed software keyboard", async () => {

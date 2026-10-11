@@ -327,13 +327,13 @@ describe("AutomationsDialog", () => {
     await expect.element(title).toBeVisible();
     await userEvent.fill(title, "Weekly digest");
     await userEvent.keyboard("{Escape}");
-    await expect.element(dialog.getByTestId("editor-confirm")).toHaveTextContent("escape");
+    await expect.element(dialog.getByTestId("editor-confirm")).toMatchTextContent("escape");
     await userEvent.keyboard("{Escape}");
     await expect.element(dialog.getByText("Draft discarded.")).toBeVisible();
     expect(useAutomationsDialogStore.getState().open).toBe(true);
 
     await dialog.getByRole("button", { name: "Restore" }).click();
-    await expect.element(dialog.getByTestId("editor-source")).toHaveTextContent("restore");
+    await expect.element(dialog.getByTestId("editor-source")).toMatchTextContent("restore");
     await expect
       .element(dialog.getByRole("textbox", { name: "Title" }))
       .toHaveValue("Weekly digest");
@@ -341,7 +341,7 @@ describe("AutomationsDialog", () => {
 
     // Closing the dialog with a dirty draft asks too; closing again discards it.
     await dialog.getByRole("button", { name: "Close" }).click();
-    await expect.element(dialog.getByTestId("editor-confirm")).toHaveTextContent("close");
+    await expect.element(dialog.getByTestId("editor-confirm")).toMatchTextContent("close");
     expect(useAutomationsDialogStore.getState().open).toBe(true);
     await dialog.getByRole("button", { name: "Close" }).click();
     await expect.poll(() => useAutomationsDialogStore.getState().open).toBe(false);

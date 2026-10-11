@@ -60,7 +60,7 @@ it("keeps control opt-in, preserves remembered app denial and pairs only enabled
   await view.getByRole("switch", { name: "Enable computer use on this computer" }).click();
   await expect
     .element(view.getByRole("combobox", { name: "Access to Private.app" }))
-    .toHaveTextContent("Block");
+    .toMatchTextContent("Block");
   await expect
     .element(view.getByRole("switch", { name: "Allow foreground takeover requests" }))
     .not.toBeChecked();
