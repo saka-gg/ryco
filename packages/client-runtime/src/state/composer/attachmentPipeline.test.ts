@@ -68,7 +68,7 @@ describe("composer attachment pipeline (compose -> queue -> send)", () => {
       buildSendTurnDispatchAttachment({
         attachment: entry.attachment,
         name: entry.name,
-        type: entry.type,
+        ...(entry.type ? { type: entry.type } : {}),
       }),
     );
 

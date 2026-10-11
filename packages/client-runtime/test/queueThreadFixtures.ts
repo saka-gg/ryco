@@ -56,17 +56,22 @@ export interface ActivityFixture {
 export interface ThreadFixture {
   readonly id: string;
   readonly session?: SessionFixture | null;
-  readonly latestTurn?: {
-    readonly turnId: string;
-    readonly state: OrchestrationLatestTurnState;
-  } | null;
+  readonly latestTurn?:
+    | {
+        readonly turnId: string;
+        readonly state: OrchestrationLatestTurnState;
+      }
+    | null
+    | undefined;
   /** The latest turn's checkpoint summary. */
-  readonly latestCheckpoint?: {
-    readonly status: "ready" | "missing" | "error";
-    readonly checkpointRef: string;
-  };
+  readonly latestCheckpoint?:
+    | {
+        readonly status: "ready" | "missing" | "error";
+        readonly checkpointRef: string;
+      }
+    | undefined;
   /** undefined = no detail applied. */
-  readonly messageIds?: readonly string[];
+  readonly messageIds?: readonly string[] | undefined;
   readonly activities?: readonly ActivityFixture[];
   readonly archivedAt?: string | null;
   readonly worktreeArchivedAt?: string | null;

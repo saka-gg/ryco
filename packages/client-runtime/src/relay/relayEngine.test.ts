@@ -1,7 +1,12 @@
 import {
+  E2eeAuthorizationEpoch,
+  NativeE2eeEnrollmentId,
+  NativeE2eeEnrollmentRevision,
   RELAY_INITIAL_LIMITS,
   RELAY_MAX_RPC_MESSAGE_BYTES,
+  RelayE2eeDigest,
   RelayLimits,
+  RelayTicketId,
   type RelayChannelId,
   type RelayFrame,
 } from "@ryco/contracts";
@@ -19,7 +24,7 @@ import {
 } from "@ryco/shared/relayMessageChunks";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
-import { encodeBase64Url } from "./base64url";
+import { encodeBase64Url } from "./base64url.ts";
 import {
   HostedRelayEngine,
   RELAY_E2EE_NEGOTIATION_BUFFER_FULL_MESSAGE,
@@ -34,7 +39,7 @@ import {
   type RelayTimers,
   relayE2eeFailure,
   relayE2eeUnresolvedAttemptFailure,
-} from "./relayEngine";
+} from "./relayEngine.ts";
 
 const CHANNEL_ID = "ch_cccccccccccccccccccccc" as RelayChannelId;
 const VERSION = { protocolMajor: 1, protocolMinor: 2 } as const;
@@ -383,10 +388,10 @@ describe("HostedRelayEngine", () => {
     socket.frame({
       type: "e2ee.enrollment-revoked",
       ...VERSION_3,
-      enrollmentId: `enr_${"e".repeat(22)}`,
-      enrollmentRevision: 2,
-      accountAuthEpoch: 3,
-      deviceAuthEpoch: 4,
+      enrollmentId: NativeE2eeEnrollmentId.make(`enr_${"e".repeat(22)}`),
+      enrollmentRevision: NativeE2eeEnrollmentRevision.make(2),
+      accountAuthEpoch: E2eeAuthorizationEpoch.make(3),
+      deviceAuthEpoch: E2eeAuthorizationEpoch.make(4),
     });
 
     expect(handlers.onFailure).toHaveBeenCalledWith(
@@ -844,9 +849,9 @@ describe("HostedRelayEngine E2EE seams", () => {
   it("passes the exact minor-3 account-grant context into the E2EE channel", () => {
     const { provider, host } = stubProvider();
     const { socket } = create(callbacks(), realTimers(), provider);
-    const grantDigest = new Uint8Array(32).fill(3);
-    const statementDigest = new Uint8Array(32).fill(4);
-    const relayTicketId = `rtk_${"t".repeat(22)}`;
+    const grantDigest = RelayE2eeDigest.make(new Uint8Array(32).fill(3));
+    const statementDigest = RelayE2eeDigest.make(new Uint8Array(32).fill(4));
+    const relayTicketId = RelayTicketId.make(`rtk_${"t".repeat(22)}`);
     socket.open();
     socket.frame({ type: "ready", ...VERSION_3, limits: RELAY_INITIAL_LIMITS });
     socket.frame({
@@ -1464,7 +1469,7 @@ describe("HostedRelayEngine E2EE seams", () => {
       beginClose: async () => {
         calls.beginCloseCalls += 1;
         if (refuse) return "refused";
-        host.close();
+        host().close();
         return "opened";
       },
     });
@@ -1497,7 +1502,7 @@ describe("HostedRelayEngine E2EE seams", () => {
       beginClose: async () => {
         calls.beginCloseCalls += 1;
         if (refuse) return "refused";
-        host.close();
+        host().close();
         return "opened";
       },
     });

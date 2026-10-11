@@ -86,8 +86,11 @@ describe("logical workspace projects", () => {
       cwd: "/repo/apps/mobile",
       repositoryIdentity: { ...repositoryIdentity, rootPath: "/repo" },
     });
-    expect(deriveLogicalProjectKey(project, { groupingMode: "repository_path" })).toBe(
-      `${repositoryIdentity.canonicalKey}::apps/mobile`,
-    );
+    expect(
+      deriveLogicalProjectKey(
+        { ...project, id: project.projectId },
+        { groupingMode: "repository_path" },
+      ),
+    ).toBe(`${repositoryIdentity.canonicalKey}::apps/mobile`);
   });
 });

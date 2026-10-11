@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { decodeBase64Url, encodeBase64Url } from "./base64url";
-import { createDpopProofSigner, type DpopProofContext, type DpopSigningKey } from "./dpop";
+import { decodeBase64Url, encodeBase64Url } from "./base64url.ts";
+import { createDpopProofSigner, type DpopProofContext, type DpopSigningKey } from "./dpop.ts";
 
 async function sha256(bytes: Uint8Array): Promise<Uint8Array> {
-  return new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+  return new Uint8Array(await crypto.subtle.digest("SHA-256", bytes as BufferSource));
 }
 
 const context: DpopProofContext = {

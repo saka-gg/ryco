@@ -16,11 +16,8 @@ import {
   syncServerShellSnapshot,
   type AppState,
   type CachedEnvironmentShellSnapshot,
-  type Project,
-  type SidebarThreadSummary,
-  type ThreadShell,
-  type ThreadSession,
 } from "./store.ts";
+import type { Project, SidebarThreadSummary, ThreadSession, ThreadShell } from "./types.ts";
 
 const ENV_A = EnvironmentId.make("env-cache-a");
 const ENV_B = EnvironmentId.make("env-cache-b");

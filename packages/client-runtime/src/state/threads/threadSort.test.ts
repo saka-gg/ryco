@@ -6,8 +6,8 @@ import {
   ProviderInstanceId,
   ThreadId,
 } from "@ryco/contracts";
-import type { Thread } from "../types";
-import { getLatestThreadForProject, sortThreads } from "./threadSort";
+import type { Thread } from "./types.ts";
+import { getLatestThreadForProject, sortThreads } from "./threadSort.ts";
 
 const LOCAL_ENVIRONMENT_ID = EnvironmentId.make("environment-local");
 const PROJECT_ID = ProjectId.make("project-1");

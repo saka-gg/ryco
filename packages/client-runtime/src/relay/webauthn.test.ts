@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { encodeBase64Url } from "./base64url";
+import { encodeBase64Url } from "./base64url.ts";
 import {
   AUTHENTICATOR_TRANSPORTS,
   validatePasskeyAuthenticationOptions,
   validatePasskeyRegistrationOptions,
-} from "./webauthn";
+} from "./webauthn.ts";
 
 /**
  * Pure fail-closed option codecs. The navigator ceremony that consumes these

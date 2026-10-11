@@ -10,7 +10,7 @@ import {
 } from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { deriveOrchestrationBatchEffects } from "./orchestrationEventEffects";
+import { deriveOrchestrationBatchEffects } from "./orchestrationEventEffects.ts";
 
 function makeEvent<T extends OrchestrationEvent["type"]>(
   type: T,

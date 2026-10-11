@@ -119,12 +119,12 @@ it("keeps native optional cards outside blocking composer state and retains thei
     ...requested,
     payload: { ...(requested.payload as object), nonBlocking: true },
   };
-  const model = deriveThreadActivityViewModel([optional]);
+  const model = deriveThreadActivityViewModel([optional], undefined);
   expect(model.pendingUserInputs).toEqual([]);
   expect(model.optionalUserInputs).toMatchObject([
     { nonBlocking: true, userInputIdentity: identity },
   ]);
-  expect(deriveThreadActivityViewModel([requested]).pendingUserInputs).toHaveLength(1);
+  expect(deriveThreadActivityViewModel([requested], undefined).pendingUserInputs).toHaveLength(1);
 });
 
 it("renders free-text native questions without inventing a suggested answer", () => {
@@ -133,7 +133,8 @@ it("renders free-text native questions without inventing a suggested answer", ()
     questions: [{ id: "0", header: "Question", question: "Any constraints?", options: [] }],
   });
   expect(
-    deriveThreadActivityViewModel([optional]).optionalUserInputs[0]?.questions[0]?.options,
+    deriveThreadActivityViewModel([optional], undefined).optionalUserInputs[0]?.questions[0]
+      ?.options,
   ).toEqual([]);
 });
 
@@ -147,17 +148,20 @@ it("settles an optional answer without clearing a concurrent blocking permission
     ...(requested.payload as object),
     nonBlocking: true,
   });
-  const before = deriveThreadActivityViewModel([permission, optional]);
+  const before = deriveThreadActivityViewModel([permission, optional], undefined);
   expect(before.pendingApprovals).toHaveLength(1);
   expect(before.optionalUserInputs).toHaveLength(1);
-  const after = deriveThreadActivityViewModel([
-    permission,
-    optional,
-    activity(3, "user-input.resolved", {
-      userInputIdentity: identity,
-      runtimeSessionId: identity.runtimeSessionId,
-    }),
-  ]);
+  const after = deriveThreadActivityViewModel(
+    [
+      permission,
+      optional,
+      activity(3, "user-input.resolved", {
+        userInputIdentity: identity,
+        runtimeSessionId: identity.runtimeSessionId,
+      }),
+    ],
+    undefined,
+  );
   expect(after.optionalUserInputs).toEqual([]);
   expect(after.pendingApprovals).toEqual(before.pendingApprovals);
 });

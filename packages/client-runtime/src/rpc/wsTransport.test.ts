@@ -1,11 +1,11 @@
 import { AGENT_CONTROL_WS_METHODS } from "@ryco/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
-import { fakeSocketPlatform, type FakeWebSocket } from "../../test/fakeWebSocket";
-import type { RpcRequestAdmission, WsProtocolLifecycleHandlers } from "./protocol";
-import { resetRequestLatencyStateForTests } from "./requestLatencyState";
-import { resetWsConnectionStateForTests } from "./wsConnectionState";
-import { WsTransport } from "./wsTransport";
+import { fakeSocketPlatform, type FakeWebSocket } from "../../test/fakeWebSocket.ts";
+import type { RpcRequestAdmission, WsProtocolLifecycleHandlers } from "./protocol.ts";
+import { resetRequestLatencyStateForTests } from "./requestLatencyState.ts";
+import { resetWsConnectionStateForTests } from "./wsConnectionState.ts";
+import { WsTransport } from "./wsTransport.ts";
 
 const sockets: FakeWebSocket[] = [];
 const transports: WsTransport[] = [];

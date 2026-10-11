@@ -68,6 +68,8 @@ const baseEnvironment = {
   serverVersion: "0.0.0-test",
   capabilities: {
     repositoryIdentity: true,
+    threadSettlement: false,
+    threadPriorityRanking: false,
   },
 };
 

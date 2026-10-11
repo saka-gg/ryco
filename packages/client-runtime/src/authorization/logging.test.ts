@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
-import { installHostedConsoleBoundary, resetHostedConsoleBoundaryForTests } from "./logging";
+import { installHostedConsoleBoundary, resetHostedConsoleBoundaryForTests } from "./logging.ts";
 
 const originals = {
   debug: console.debug,

@@ -20,7 +20,7 @@ it("a reconnect and new live shell cannot revive an old reviewed send", () => {
   recordWsConnectionOpened(metadata);
   const guard = captureReviewedSendReadiness(environmentId, () => connection);
   expect(guard).not.toThrow();
-  recordWsConnectionClosed({ code: 1006, reason: "fixture disconnect", wasClean: false }, metadata);
+  recordWsConnectionClosed({ code: 1006, reason: "fixture disconnect" }, metadata);
   generation = null;
   expect(guard).toThrow("connection changed");
   recordWsConnectionAttempt("ws://fixture.invalid", metadata);

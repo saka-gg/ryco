@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { HostedReconnectPolicy } from "./reconnectPolicy";
+import { HostedReconnectPolicy } from "./reconnectPolicy.ts";
 
 describe("HostedReconnectPolicy", () => {
   it("uses bounded deterministic exponential jitter and honors retry-after", () => {

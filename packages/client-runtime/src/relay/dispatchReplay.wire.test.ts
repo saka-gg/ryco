@@ -7,13 +7,13 @@ import {
 } from "@ryco/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
-import type { HostedRuntimeTimers } from "../authorization/runtime";
-import { resetRequestLatencyStateForTests } from "../rpc/requestLatencyState";
-import { resetWsConnectionStateForTests } from "../rpc/wsConnectionState";
-import { createWsRpcClient, type WsRpcClient } from "../rpc/wsRpcClient";
-import { WsTransport } from "../rpc/wsTransport";
-import { fakeSocketPlatform, type FakeWebSocket } from "../../test/fakeWebSocket";
-import { bindHostedDispatchReplay, HostedDispatchReplay } from "./dispatchReplay";
+import type { HostedRuntimeTimers } from "../authorization/runtime.ts";
+import { resetRequestLatencyStateForTests } from "../rpc/requestLatencyState.ts";
+import { resetWsConnectionStateForTests } from "../rpc/wsConnectionState.ts";
+import { createWsRpcClient, type WsRpcClient } from "../rpc/wsRpcClient.ts";
+import { WsTransport } from "../rpc/wsTransport.ts";
+import { fakeSocketPlatform, type FakeWebSocket } from "../../test/fakeWebSocket.ts";
+import { bindHostedDispatchReplay, HostedDispatchReplay } from "./dispatchReplay.ts";
 
 /**
  * Runs the replay against the real RPC client, protocol layer, and Effect

@@ -1,4 +1,6 @@
-import { EnvironmentId } from "@ryco/contracts";
+import { EnvironmentId, NativeE2eeEnrollmentRevision } from "@ryco/contracts";
+import { AccountE2eeDeviceSummary } from "@ryco/contracts/native-e2ee";
+import * as Schema from "effect/Schema";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import type {
@@ -8,7 +10,7 @@ import type {
   SessionCredentialsService,
 } from "@ryco/client-runtime/platform";
 
-import type { HostedHubNode, HostedHubSessionResponse } from "./types";
+import type { HostedHubNode, HostedHubSessionResponse } from "./types.ts";
 
 const originalDocument = globalThis.document;
 
@@ -38,12 +40,12 @@ const { activateHostedNode, deactivateHostedNode, suspendHostedNode, resetRelayA
   });
 vi.mock("./environment", () => ({ activateHostedNode, deactivateHostedNode, suspendHostedNode }));
 
-import { HostedHubApiError, STEP_UP_REQUIRED_CODE, type HostedHubApi } from "./api";
+import { HostedHubApiError, STEP_UP_REQUIRED_CODE, type HostedHubApi } from "./api.ts";
 import {
   configureHostedRuntime,
   type HostedNodeLifecycle,
   type HostedRuntimeConfiguration,
-} from "./runtime";
+} from "./runtime.ts";
 import {
   DIRECTORY_PRESENCE_REFRESH_MS,
   DIRECTORY_PRESENCE_WINDOW_MS,
@@ -59,7 +61,7 @@ import {
   hostedHubStore,
   hostedRecoveryCodeDisplayStore,
   markHostedSessionReady,
-} from "./state";
+} from "./state.ts";
 
 const hasHostedRelayPendingRequests = vi.fn(() => false);
 
@@ -2367,7 +2369,8 @@ describe("hosted account management state", () => {
     revocationReasonCode: null,
   } as const;
 
-  const e2eeDevice = {
+  const decodeDeviceSummary = Schema.decodeUnknownSync(AccountE2eeDeviceSummary);
+  const e2eeDevice = decodeDeviceSummary({
     enrollmentId: `enr_${"e".repeat(22)}`,
     enrollmentRevision: 1,
     accountAuthEpoch: 3,
@@ -2385,7 +2388,7 @@ describe("hosted account management state", () => {
     updatedAt: 1_788_451_200_000,
     lastUsedAt: null,
     revokedAt: null,
-  } as const;
+  });
 
   /** Bring the controller to an authenticated, ready-directory state. */
   async function authenticate(): Promise<void> {
@@ -2498,7 +2501,7 @@ describe("hosted account management state", () => {
 
   it("loads account security once for concurrent callers without inventing an empty posture", async () => {
     await authenticate();
-    let resolveSecurity: ((value: typeof emptySecurity) => void) | null = null;
+    let resolveSecurity = null as ((value: typeof emptySecurity) => void) | null;
     const getAccountSecurity = vi.spyOn(hostedHubApi, "getAccountSecurity").mockImplementation(
       () =>
         new Promise((resolve) => {
@@ -2676,7 +2679,7 @@ describe("hosted account management state", () => {
     // A refresh is already in flight when the enrolment lands. It was issued
     // against the pre-add state and cannot observe the new credential, so
     // joining it would settle the surface on evidence the add had failed.
-    let releaseStaleRead: ((value: ReadonlyArray<typeof passkey>) => void) | null = null;
+    let releaseStaleRead = null as ((value: ReadonlyArray<typeof passkey>) => void) | null;
     const listPasskeys = vi
       .spyOn(hostedHubApi, "listPasskeys")
       .mockImplementationOnce(
@@ -2750,7 +2753,7 @@ describe("hosted account management state", () => {
 
   it("runs one account action at a time and says so when it refuses", async () => {
     await authenticate();
-    let release: ((value: { passkey: null; confirmed: false }) => void) | null = null;
+    let release = null as ((value: { passkey: null; confirmed: false }) => void) | null;
     vi.spyOn(hostedHubApi, "addPasskey").mockImplementation(
       () =>
         new Promise((resolve) => {
@@ -2780,7 +2783,7 @@ describe("hosted account management state", () => {
   it("clears a concurrent refusal once the action it refused has succeeded", async () => {
     await authenticate();
     leaseRecoveryCodeDisplay();
-    let release: ((value: ReadonlyArray<string>) => void) | null = null;
+    let release = null as ((value: ReadonlyArray<string>) => void) | null;
     vi.spyOn(hostedHubApi, "regenerateRecoveryCodes").mockImplementation(
       () =>
         new Promise((resolve) => {
@@ -3065,7 +3068,7 @@ describe("hosted account management state", () => {
     // list that still shows the credential as active — evidence the revoke had
     // failed, for a revoke that succeeded. Asserting only the call count does
     // not catch that: the count is 2 either way.
-    let releaseStaleRead: ((value: ReadonlyArray<typeof passkey>) => void) | null = null;
+    let releaseStaleRead = null as ((value: ReadonlyArray<typeof passkey>) => void) | null;
     const listPasskeys = vi
       .spyOn(hostedHubApi, "listPasskeys")
       .mockImplementationOnce(
@@ -3093,20 +3096,20 @@ describe("hosted account management state", () => {
 
   it("renames and revokes native E2EE devices with forced confirming reads", async () => {
     await authenticate();
-    const renamed = {
+    const renamed = decodeDeviceSummary({
       ...e2eeDevice,
       enrollmentRevision: 2,
       deviceLabel: "Travel phone",
       updatedAt: e2eeDevice.updatedAt + 1,
-    } as const;
-    const revoked = {
+    });
+    const revoked = decodeDeviceSummary({
       ...renamed,
       enrollmentRevision: 3,
       deviceAuthEpoch: 3,
       status: "revoked",
       updatedAt: renamed.updatedAt + 1,
       revokedAt: renamed.updatedAt + 1,
-    } as const;
+    });
     const renameE2eeDevice = vi.spyOn(hostedHubApi, "renameE2eeDevice").mockResolvedValue(renamed);
     const revokeE2eeDevice = vi.spyOn(hostedHubApi, "revokeE2eeDevice").mockResolvedValue(revoked);
     const listE2eeDevices = vi
@@ -3116,13 +3119,13 @@ describe("hosted account management state", () => {
 
     await expect(
       hostedHubController.renameE2eeDevice(e2eeDevice.enrollmentId, {
-        expectedEnrollmentRevision: 1,
+        expectedEnrollmentRevision: NativeE2eeEnrollmentRevision.make(1),
         deviceLabel: "Travel phone",
       }),
     ).resolves.toEqual({ status: "committed" });
     await expect(
       hostedHubController.revokeE2eeDevice(e2eeDevice.enrollmentId, {
-        expectedEnrollmentRevision: 2,
+        expectedEnrollmentRevision: NativeE2eeEnrollmentRevision.make(2),
         reasonCode: "owner_revoked",
       }),
     ).resolves.toEqual({ status: "committed" });
@@ -3226,7 +3229,9 @@ describe("hosted account management state", () => {
     // A user who backs out while the request is in flight must not have the
     // account's shared key pushed back into state when it lands.
     await authenticate();
-    let release: ((value: { secretBase32: string; provisioningUri: string }) => void) | null = null;
+    let release = null as
+      | ((value: { secretBase32: string; provisioningUri: string }) => void)
+      | null;
     vi.spyOn(hostedHubApi, "beginTotpEnrollment").mockImplementation(
       () =>
         new Promise((resolve) => {
@@ -3342,7 +3347,7 @@ describe("hosted account management state", () => {
 
   it("runs one credential change at a time across the whole account surface", async () => {
     await authenticate();
-    let release: (() => void) | null = null;
+    let release = null as (() => void) | null;
     vi.spyOn(hostedHubApi, "setPassword").mockImplementation(
       () =>
         new Promise<void>((resolve) => {
@@ -3477,7 +3482,7 @@ describe("hosted account management state", () => {
     expect(signedOut).toMatchObject({ status: "refused", reason: "signed-out", errorCode: null });
 
     await authenticate();
-    let release: (() => void) | null = null;
+    let release = null as (() => void) | null;
     vi.spyOn(hostedHubApi, "setPassword").mockImplementation(
       () =>
         new Promise<void>((resolve) => {
@@ -3587,7 +3592,7 @@ describe("hosted account management state", () => {
     // that is holding the mutex, or starting that action would have cleared it
     // and the assertion would prove nothing. A concurrent passkey read is
     // exactly that.
-    let release: (() => void) | null = null;
+    let release = null as (() => void) | null;
     vi.spyOn(hostedHubApi, "setPassword").mockImplementation(
       () =>
         new Promise<void>((resolve) => {
@@ -3644,7 +3649,7 @@ describe("hosted account management state", () => {
   it("publishes a rotation whose display went away while it was in flight", async () => {
     await authenticate();
     const release = leaseRecoveryCodeDisplay();
-    let settle: ((value: ReadonlyArray<string>) => void) | null = null;
+    let settle = null as ((value: ReadonlyArray<string>) => void) | null;
     vi.spyOn(hostedHubApi, "regenerateRecoveryCodes").mockImplementation(
       () =>
         new Promise((resolve) => {
@@ -3758,7 +3763,7 @@ describe("hosted account management state", () => {
     await authenticate();
     leaseRecoveryCodeDisplay();
     hostedHubStore.setState({ recoveryCodes: ["stale-set"] });
-    let settle: ((value: ReadonlyArray<string>) => void) | null = null;
+    let settle = null as ((value: ReadonlyArray<string>) => void) | null;
     vi.spyOn(hostedHubApi, "regenerateRecoveryCodes").mockImplementation(
       () =>
         new Promise((resolve) => {
