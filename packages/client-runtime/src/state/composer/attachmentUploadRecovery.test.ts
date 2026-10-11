@@ -41,7 +41,10 @@ function harness() {
     },
     client: {
       orchestration: {
-        subscribeShell: (listener, options) => {
+        subscribeShell: (
+          listener: typeof shell,
+          options?: Parameters<WsRpcClient["orchestration"]["subscribeShell"]>[1],
+        ) => {
           shell = listener;
           resubscribe = options?.onResubscribe;
           return () => {};

@@ -2,7 +2,7 @@ import {
   indexModelFavorites,
   resolveModelFavoriteForRow,
   getModelFavoriteEffortLabel,
-} from "./modelFavorites";
+} from "./modelFavorites.ts";
 import { describe, expect, it } from "vite-plus/test";
 import { ProviderInstanceId, type ModelSelection } from "@ryco/contracts";
 import { createModelCapabilities } from "@ryco/shared/model";
@@ -12,7 +12,7 @@ import {
   modelFavoriteKey,
   toggleModelFavorite,
   updateInstanceModelFavorites,
-} from "./modelFavorites";
+} from "./modelFavorites.ts";
 
 const provider = ProviderInstanceId.make("codex_personal");
 const base = { provider, model: "vendor:model" };

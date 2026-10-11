@@ -1,8 +1,8 @@
 import { ORCHESTRATION_WS_METHODS, WS_METHODS } from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { hostedSessionAdmits, resolveHostedRpcCapability } from "./capabilities";
-import { resolveHostedDeliveryNotice } from "./deliveryNotice";
+import { hostedSessionAdmits, resolveHostedRpcCapability } from "./capabilities.ts";
+import { resolveHostedDeliveryNotice } from "./deliveryNotice.ts";
 
 describe("hosted UI capabilities", () => {
   it("keeps standard direct and desktop behavior unchanged", () => {

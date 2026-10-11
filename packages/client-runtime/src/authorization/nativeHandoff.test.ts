@@ -8,7 +8,10 @@ import {
 } from "@ryco/contracts/native-handoff";
 import { describe, expect, it, vi } from "vitest";
 
-import type { NativeAuthorizationService } from "../platform/index.ts";
+import type {
+  NativeAuthorizationBrowserResult,
+  NativeAuthorizationService,
+} from "../platform/index.ts";
 import {
   NativeHandoffClientError,
   createNativeHandoffAttempt,
@@ -163,7 +166,7 @@ describe("runNativeHandoff", () => {
         redeemResponseSchema: NativeHandoffConnectRedeemResponse,
         buildRedeemRequest: (base) => ({
           ...base,
-          purpose: { kind: "connect_external_identity", provider: "github" },
+          purpose: { kind: "connect_external_identity" as const, provider: "github" as const },
         }),
         start: async (request) => {
           expect(request.purpose).toEqual({
@@ -331,7 +334,7 @@ describe("runNativeHandoff", () => {
         openSystemBrowser: vi.fn(async () => {
           currentTime = testCase.callbackNow;
           return {
-            type: "success",
+            type: "success" as const,
             url: `${CALLBACK}?code=${OPAQUE_B}&state=${OPAQUE_A}&handoff_id=${OPAQUE_A}`,
           };
         }),
@@ -360,13 +363,14 @@ describe("runNativeHandoff", () => {
   });
 
   it("cancels a prior overlapping attempt and fences its late browser result", async () => {
-    let releaseFirst: ((value: { readonly type: "success"; readonly url: string }) => void) | null =
-      null;
+    let releaseFirst = null as
+      | ((value: { readonly type: "success"; readonly url: string }) => void)
+      | null;
     const firstPlatform: NativeAuthorizationService = {
       ...platform(),
       openSystemBrowser: vi.fn(
         () =>
-          new Promise((resolve) => {
+          new Promise<NativeAuthorizationBrowserResult>((resolve) => {
             releaseFirst = resolve;
           }),
       ),

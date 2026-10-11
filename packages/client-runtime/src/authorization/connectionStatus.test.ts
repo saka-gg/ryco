@@ -8,12 +8,12 @@ import {
   HOSTED_E2EE_CHANNEL_STATUSES,
   type HostedConnectionStatusInput,
   type HostedConnectionStatusText,
-} from "./connectionStatus";
+} from "./connectionStatus.ts";
 import {
   everyHostedConnectionStatusInput,
   hostedConnectionConnectedByGateOrder,
   hostedConnectionGuaranteeByGateOrder,
-} from "../../test/hostedConnectionVocabulary";
+} from "../../test/hostedConnectionVocabulary.ts";
 
 function input(overrides: Partial<HostedConnectionStatusInput>): HostedConnectionStatusInput {
   return {

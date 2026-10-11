@@ -2,7 +2,10 @@ import { p256 } from "@noble/curves/nist.js";
 import { x25519 } from "@noble/curves/ed25519.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { describe, expect, it, vi } from "vite-plus/test";
+import * as Schema from "effect/Schema";
 
+import { NativeE2eeEnrollmentId } from "@ryco/contracts";
+import { AccountE2eeDeviceSummary } from "@ryco/contracts/native-e2ee";
 import { e2eeKeyFingerprint, e2eeSha256 } from "@ryco/shared/relayE2eeKeys";
 import {
   encodeClientE2eePrekeyCertificateCarrier,
@@ -20,7 +23,7 @@ const NOW = 1_788_451_200_000;
 const HUB_ORIGIN = "https://hub.example.test";
 const ACCOUNT_ID = `acct_${"a".repeat(22)}`;
 const OTHER_ACCOUNT_ID = `acct_${"b".repeat(22)}`;
-const ENROLLMENT_ID = `enr_${"e".repeat(22)}`;
+const ENROLLMENT_ID = NativeE2eeEnrollmentId.make(`enr_${"e".repeat(22)}`);
 const IDENTITY_SECRET = new Uint8Array(32).fill(3);
 const IDENTITY_PUBLIC = p256.getPublicKey(IDENTITY_SECRET, false);
 const AGREEMENT_PUBLIC = x25519.getPublicKey(new Uint8Array(32).fill(4));
@@ -51,9 +54,11 @@ function prekey(accountId = ACCOUNT_ID) {
   };
 }
 
+const decodeDeviceSummary = Schema.decodeUnknownSync(AccountE2eeDeviceSummary);
+
 function summary(revision = 1, status: "active" | "revoked" = "active") {
   const material = prekey();
-  return {
+  return decodeDeviceSummary({
     enrollmentId: ENROLLMENT_ID,
     enrollmentRevision: revision,
     accountAuthEpoch: 1,
@@ -71,7 +76,7 @@ function summary(revision = 1, status: "active" | "revoked" = "active") {
     updatedAt: NOW + revision,
     lastUsedAt: null,
     revokedAt: status === "active" ? null : NOW + revision,
-  } as const;
+  });
 }
 
 function harness(options: { readonly recovery?: boolean } = {}) {
@@ -84,7 +89,7 @@ function harness(options: { readonly recovery?: boolean } = {}) {
     ensureIdentity: vi.fn(async () => ({
       publicKey: IDENTITY_PUBLIC,
       fingerprint: e2eeKeyFingerprint("client-identity", IDENTITY_PUBLIC),
-      backing: "secure-enclave",
+      backing: "secure-enclave" as const,
     })),
     ensureClientPrekey: vi.fn(async (namespace) => prekey(namespace.accountId)),
     getOrCreateEnrollmentId: vi.fn(async () => ENROLLMENT_ID),
@@ -218,7 +223,7 @@ describe("native E2EE enrollment coordinator", () => {
       clientPrekeyCertificateDigest: request.clientPrekeyCertificateDigest,
       certificateExpiresAt: request.certificateExpiresAt,
     }));
-    let release: (() => void) | null = null;
+    let release = null as (() => void) | null;
     vi.mocked(platform.ensureIdentity).mockImplementationOnce(
       () =>
         new Promise(

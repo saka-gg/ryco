@@ -2,6 +2,7 @@ process.env.TZ = "Europe/Berlin";
 
 import {
   AgentControlAutomationId,
+  AgentControlErrorCode,
   AgentControlAutomationRunId,
   AgentControlProposalId,
   AgentControlRequestId,
@@ -174,7 +175,11 @@ function run(
       coalescedOccurrences: patch.coalesced ?? 0,
       status,
       proposalId:
-        patch.proposalId === undefined ? pid(`p-${id}`) : patch.proposalId && pid(patch.proposalId),
+        patch.proposalId === undefined
+          ? pid(`p-${id}`)
+          : patch.proposalId === null
+            ? null
+            : pid(patch.proposalId),
       safeFailureDetail: status === "failed" ? "Approved run failed safely." : null,
       createdAt: iso(at),
       updatedAt: iso(at + MINUTE_MS),
@@ -224,7 +229,11 @@ function proposal(
       patch.failedWith !== undefined
         ? {
             outcome: "failed",
-            error: { code: "execution-failed", message: patch.failedWith, retryable: true },
+            error: {
+              code: AgentControlErrorCode.make("execution-failed"),
+              message: patch.failedWith,
+              retryable: true,
+            },
             failedAt: iso(failedAt),
           }
         : null,

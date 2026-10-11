@@ -57,12 +57,12 @@ import {
 import { RELAY_CHUNK_CAPABILITY_PRELUDE } from "@ryco/shared/relayMessageChunks";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
-import { encodeBase64Url } from "./base64url";
+import { encodeBase64Url } from "./base64url.ts";
 import {
   makeRelayE2eeInitiator,
   type RelayE2eeInitiator,
   type RelayE2eeInitiatorAttempt,
-} from "./relayE2eeInitiator";
+} from "./relayE2eeInitiator.ts";
 import {
   HostedRelayEngine,
   RELAY_E2EE_NEGOTIATION_BUFFER_FULL_MESSAGE,
@@ -71,7 +71,7 @@ import {
   type HostedRelaySocketCallbacks,
   type RelaySocket,
   type RelayTimers,
-} from "./relayEngine";
+} from "./relayEngine.ts";
 
 // §4.4 rows K1–K24 on the REAL relay path — the client mode machine wired into
 // `HostedRelayEngine`, driven by a synthetic node that puts its §5.3 carrier at
@@ -444,7 +444,9 @@ function harness(
         attempt: attemptOf({
           onDiagnostic: (diagnostic) => diagnostics.push(diagnostic.row),
           onUnexpectedNode: (evidence) => unexpected.push(evidence),
-          onStatement: (verification) => statements.push(verification),
+          onStatement: (verification) => {
+            statements.push(verification);
+          },
           ...overrides,
         }),
       });
@@ -856,7 +858,7 @@ describe("§4.4 client transition table — rows K1–K4 (the capability carrier
       },
     });
     const invalidCarrier = Uint8Array.from(CARRIER);
-    invalidCarrier[invalidCarrier.byteLength - 1] ^= 0x01;
+    invalidCarrier[invalidCarrier.byteLength - 1]! ^= 0x01;
 
     deliver(test.socket, invalidCarrier);
     await flush();
@@ -1308,7 +1310,7 @@ describe("§4.4 client transition table — rows K5–K8 (negotiation records)",
     await flush();
     const accept = respond(Uint8Array.from(outbound(test.socket).at(-1)!));
     const tampered = Uint8Array.from(accept.record);
-    tampered[tampered.byteLength - 1] ^= 0x01;
+    tampered[tampered.byteLength - 1]! ^= 0x01;
 
     deliver(test.socket, tampered, 1);
     await flush();
@@ -1513,7 +1515,7 @@ describe("§4.4 client transition table — rows K16–K18 (the established chan
       accept.sessionBindingHash,
       utf8('{"_tag":"Response"}'),
     );
-    envelope[envelope.byteLength - 1] ^= 0x01;
+    envelope[envelope.byteLength - 1]! ^= 0x01;
 
     deliver(test.socket, envelope, 2);
     await flush();
@@ -1864,7 +1866,7 @@ describe("§4.4 FATAL-PRE — the buffer is zeroized and discarded, and no recor
         await flush();
         const accept = respond(Uint8Array.from(outbound(test.socket).at(-1)!));
         const tampered = Uint8Array.from(accept.record);
-        tampered[tampered.byteLength - 1] ^= 0x01;
+        tampered[tampered.byteLength - 1]! ^= 0x01;
         deliver(test.socket, tampered, 1);
       },
     ],
@@ -2207,7 +2209,7 @@ describe("§13.5 WebSAS — the web tier's advisory code, and only the web tier'
     await flush();
     const accept = respond(Uint8Array.from(outbound(test.socket).at(-1)!));
     const tampered = Uint8Array.from(accept.record);
-    tampered[tampered.length - 1] ^= 0xff;
+    tampered[tampered.length - 1]! ^= 0xff;
     deliver(test.socket, tampered, 1);
     await flush();
     expect(test.machine().mode()).toBe("closed");

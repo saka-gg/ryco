@@ -47,7 +47,6 @@
     "@shikijs/themes": "4.4.3",
     "@tabler/icons-react-native": "^3.46.0",
     "clsx": "^2.1.1",
-    "diff": "9.0.0",
     "effect": "catalog:",
     "expo": "~57.0.21",
     "expo-asset": "~57.0.16",

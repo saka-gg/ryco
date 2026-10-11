@@ -2,8 +2,13 @@ import { describe, expect, it, vi } from "vitest";
 import type { EnvironmentApi, OrchestrationThreadWindowSnapshot, ThreadId } from "@ryco/contracts";
 import { loadThreadForExport } from "./threadExport.ts";
 
-const end = { hasMoreBefore: false, oldestCursor: null, newestCursor: null };
-const more = (cursor: string) => ({ ...end, hasMoreBefore: true, oldestCursor: cursor });
+interface PageInfo {
+  readonly hasMoreBefore: boolean;
+  readonly oldestCursor: string | null;
+  readonly newestCursor: string | null;
+}
+const end: PageInfo = { hasMoreBefore: false, oldestCursor: null, newestCursor: null };
+const more = (cursor: string): PageInfo => ({ ...end, hasMoreBefore: true, oldestCursor: cursor });
 function setup(pages: unknown[] = [], first = more("c1")) {
   const snapshot = {
     snapshotSequence: 4,
@@ -69,7 +74,7 @@ describe("complete retained-history export", () => {
   });
   it.each([
     [page("m2", more("c1"))],
-    [page("m2", { ...end, oldestCursor: "c1" } as typeof end)],
+    [page("m2", { ...end, oldestCursor: "c1" })],
     [page("m2", more("c2")), page("m1", more("c1"))],
     [{ ...page("m2"), items: [] }],
     [page("m3")],

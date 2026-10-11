@@ -13,14 +13,14 @@ import {
   clearHostedNodeScopedState,
   deactivateHostedNode,
   suspendHostedNode,
-} from "./environment";
+} from "./environment.ts";
 import {
   configureHostedRuntime,
   type HostedNodeLifecycle,
   type HostedRuntimeConfiguration,
-} from "./runtime";
-import type { HostedHubApi } from "./api";
-import type { HostedHubNode } from "./types";
+} from "./runtime.ts";
+import type { HostedHubApi } from "./api.ts";
+import type { HostedHubNode } from "./types.ts";
 
 /**
  * The transition queue is the single owner of the node teardown order and of

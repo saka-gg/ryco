@@ -257,8 +257,8 @@ describe("thread inbox", () => {
     const inbox = buildThreadInbox(
       baseInput({ threads: [shipped, followUp], worktrees: [worktree] }),
     );
-    expect(inbox.settled.map((entry) => entry.thread.id)).toEqual([shipped.id]);
-    expect(inbox.active.map((entry) => entry.thread.id)).toEqual([followUp.id]);
+    expect(inbox.settled.map((entry) => entry.thread?.id)).toEqual([shipped.id]);
+    expect(inbox.active.map((entry) => entry.thread?.id)).toEqual([followUp.id]);
     expect(inbox.active[0]?.lifecycle.settlementBlocker ?? null).toBeNull();
   });
 
