@@ -98,23 +98,29 @@
     "@effect/sql-sqlite-bun": "catalog:",
     "@effect/vitest": "catalog:",
     "@hono/node-server": "1.19.17",
+    "@modelcontextprotocol/sdk": "1.32.1",
     "@xmldom/xmldom": "0.8.15",
     "body-parser": "2.3.0",
     "browserslist": "4.28.9",
+    "compression": "1.8.2",
     "effect": "catalog:",
-    "fast-uri": "3.1.7",
+    "fast-uri": "3.1.8",
     "form-data": "4.0.6",
-    "hono": "4.13.2",
-    "ip-address": "10.5.0",
-    "js-yaml": "4.3.1",
+    "hono": "4.13.13",
+    "http-cache-semantics": "4.3.0",
+    "ip-address": "10.7.3",
+    "js-yaml": "4.3.2",
     "nanoid": "3.3.18",
-    "next": "16.3.1",
+    "proxy-addr": "2.0.8",
     "qs": "6.16.0",
     "query-string": {
       "decode-uri-component": "0.5.0"
     },
     "react-native-nitro-markdown": "0.10.0",
+    "shell-quote": "1.12.0",
+    "source-map-js": "1.2.2",
     "tar": "7.5.22",
+    "tinypool": "2.2.0",
     "vite": "catalog:",
     "vitest": "catalog:",
     "xcode": {
@@ -125,7 +131,7 @@
     "bun": "^1.4.0",
     "node": "^24.13.1"
   },
-  "packageManager": "bun@1.4.0",
+  "packageManager": "bun@1.4.3",
   "msw": {
     "workerDirectory": [
       "apps/web/public"
