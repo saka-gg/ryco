@@ -1,8 +1,8 @@
 diff --git a/dist/NodeChildProcessSpawner.js b/dist/NodeChildProcessSpawner.js
-index aa8abbe375f40350f9a5a12f36143d5d85802485..fda344061d8b89ecd91a9c9ebe5429312a0e5483 100644
+index b3e4deaa75124184262437280a97bad2b9e07c9d..29bd166bfc2174fb01f02a9f8fd13767e717236e 100644
 --- a/dist/NodeChildProcessSpawner.js
 +++ b/dist/NodeChildProcessSpawner.js
-@@ -152,6 +152,10 @@ const make = /*#__PURE__*/Effect.gen(function* () {
+@@ -170,6 +170,10 @@ const make = /*#__PURE__*/Effect.gen(function* () {
              // Create a sink to write to for input file descriptors
              let sink = Sink.drain;
              if (nodeStream && "write" in nodeStream) {
@@ -14,10 +14,10 @@ index aa8abbe375f40350f9a5a12f36143d5d85802485..fda344061d8b89ecd91a9c9ebe542931
                  evaluate: () => nodeStream,
                  onError: error => toPlatformError(`fromWritable(fd${fd})`, toError(error), command)
 diff --git a/src/NodeChildProcessSpawner.ts b/src/NodeChildProcessSpawner.ts
-index 38299e217c557dc5e1fe318814769b99507fb0ae..d156bbdbdde4636bc342059f2a2baa93bdae6532 100644
+index f15aa85d65f52c3f79e7a78403897c9c32eaa521..73fac98c549f4761edd9f268c578d27818d9c7d3 100644
 --- a/src/NodeChildProcessSpawner.ts
 +++ b/src/NodeChildProcessSpawner.ts
-@@ -214,6 +214,10 @@ const make = Effect.gen(function*() {
+@@ -244,6 +244,10 @@ const make = Effect.gen(function*() {
            // Create a sink to write to for input file descriptors
            let sink: Sink.Sink<void, Uint8Array, never, PlatformError.PlatformError> = Sink.drain
            if (nodeStream && "write" in nodeStream) {
