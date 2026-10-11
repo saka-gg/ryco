@@ -29,7 +29,7 @@ application. Generated local marker references and animation keyframes are
 permitted; user CSS is not.
 
 Mermaid 11.16.1 is pinned at the fix version for its published August 2026
-configuration/CSS security advisories. DOMPurify 3.4.15 is an explicit dependency
+configuration/CSS security advisories. DOMPurify 3.4.16 is an explicit dependency
 and also satisfies Mermaid's sanitizer dependency. Recheck both projects'
 security advisories before updating either dependency or broadening the subset.
 
