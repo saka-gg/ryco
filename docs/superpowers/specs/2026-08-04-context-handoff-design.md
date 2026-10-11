@@ -37,7 +37,7 @@ so a later version can resume a previously used provider and inject only the off
 - The visible user message remains unchanged in canonical history. The provider receives a rendered
   handoff preamble followed by the exact current user message.
 - Runtime events are accepted only from the currently projected `(providerInstanceId,
-runtimeSessionId)` pair. A provider-instance check alone is insufficient for `A -> B -> A`.
+  runtimeSessionId)` pair. A provider-instance check alone is insufficient for `A -> B -> A`.
 - Old-session cleanup is bounded and best-effort. It may not block target dispatch indefinitely.
 - A successful or failed handoff is auditable in the timeline. Pending internal state is not shown
   as a completed breaker.

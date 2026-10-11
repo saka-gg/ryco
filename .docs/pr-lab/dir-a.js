@@ -376,77 +376,84 @@
     }
 
     /* ------------------------------------------------------ skeleton */
-    root.innerHTML = String(html`<div class="a-shell">
-      <aside class="a-list" aria-label="Pull requests">
-        <div class="a-lhead">
-          <label class="a-search"
-            >${icon("search")}<input
-              type="text"
-              spellcheck="false"
-              autocomplete="off"
-              placeholder="Search or paste a link"
-              aria-label="Search pull requests"
-            /><kbd>/</kbd></label
-          >
-          <button class="ib a-fbtn" type="button" data-act="filter-menu" data-tip="Filter and sort">
-            ${icon("filter")}<i class="a-fdot"></i>
-          </button>
-        </div>
-        <div class="a-chips disc">
-          <div><div class="a-chips-in"></div></div>
-        </div>
-        <div class="a-lscroll scroll" role="listbox" aria-label="Pull requests" tabindex="-1">
-          <div class="a-lin">
-            <i class="a-sel" aria-hidden="true"></i>
-            <div class="a-groups"></div>
-            <div class="a-lfoot"></div>
+    root.innerHTML = String(
+      html`<div class="a-shell">
+        <aside class="a-list" aria-label="Pull requests">
+          <div class="a-lhead">
+            <label class="a-search"
+              >${icon("search")}<input
+                type="text"
+                spellcheck="false"
+                autocomplete="off"
+                placeholder="Search or paste a link"
+                aria-label="Search pull requests"
+              /><kbd>/</kbd></label
+            >
+            <button
+              class="ib a-fbtn"
+              type="button"
+              data-act="filter-menu"
+              data-tip="Filter and sort"
+            >
+              ${icon("filter")}<i class="a-fdot"></i>
+            </button>
           </div>
-        </div>
-      </aside>
-      <div
-        class="a-handle"
-        role="separator"
-        aria-orientation="vertical"
-        aria-label="Resize list"
-        tabindex="0"
-        data-tip="Drag to resize · double-click to reset"
-      ></div>
-      <section class="a-reader" aria-label="Pull request">
-        <header class="a-bar">
-          <button
-            class="ib a-listbtn"
-            type="button"
-            data-act="list-toggle"
-            data-tip="Pull requests"
-            data-kbd="\\"
-          >
-            ${icon("sidebar")}
-          </button>
-          <div class="a-id"></div>
-          <div class="a-acts"></div>
-        </header>
-        <div class="a-tabrow">
-          <div class="tabs a-tabs" role="tablist" aria-label="Pull request sections">
-            ${TABS.map((t) => html`<button class="tab" type="button" role="tab" data-tab="${t.key}" aria-selected="false">${t.label}<span class="cnt tnum"></span></button>`)}<i
-              class="tab-ind"
-            ></i>
+          <div class="a-chips disc">
+            <div><div class="a-chips-in"></div></div>
           </div>
-          <div class="a-tools"></div>
-        </div>
-        <div class="a-panes"></div>
-        <div class="a-empty">
-          <div class="a-empty-in">
-            <p>Select a pull request</p>
-            <ul class="a-keys">
-              <li><kbd>J</kbd><kbd>K</kbd><span>Move through the list</span></li>
-              <li><kbd>/</kbd><span>Search, or paste a pull request link</span></li>
-              <li><kbd>1</kbd><i>–</i><kbd>4</kbd><span>Switch section</span></li>
-            </ul>
+          <div class="a-lscroll scroll" role="listbox" aria-label="Pull requests" tabindex="-1">
+            <div class="a-lin">
+              <i class="a-sel" aria-hidden="true"></i>
+              <div class="a-groups"></div>
+              <div class="a-lfoot"></div>
+            </div>
           </div>
-        </div>
-      </section>
-      <div class="a-scrim" data-act="overlay-close"></div>
-    </div>`);
+        </aside>
+        <div
+          class="a-handle"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize list"
+          tabindex="0"
+          data-tip="Drag to resize · double-click to reset"
+        ></div>
+        <section class="a-reader" aria-label="Pull request">
+          <header class="a-bar">
+            <button
+              class="ib a-listbtn"
+              type="button"
+              data-act="list-toggle"
+              data-tip="Pull requests"
+              data-kbd="\\"
+            >
+              ${icon("sidebar")}
+            </button>
+            <div class="a-id"></div>
+            <div class="a-acts"></div>
+          </header>
+          <div class="a-tabrow">
+            <div class="tabs a-tabs" role="tablist" aria-label="Pull request sections">
+              ${TABS.map((t) => html`<button class="tab" type="button" role="tab" data-tab="${t.key}" aria-selected="false">${t.label}<span class="cnt tnum"></span></button>`)}<i
+                class="tab-ind"
+              ></i>
+            </div>
+            <div class="a-tools"></div>
+          </div>
+          <div class="a-panes"></div>
+          <div class="a-empty">
+            <div class="a-empty-in">
+              <p>Select a pull request</p>
+              <ul class="a-keys">
+                <li><kbd>J</kbd><kbd>K</kbd><span>Move through the list</span></li>
+                <li><kbd>/</kbd><span>Search, or paste a pull request link</span></li>
+                <li><kbd>1</kbd><i>–</i><kbd>4</kbd><span>Switch section</span></li>
+              </ul>
+            </div>
+          </div>
+        </section>
+        <div class="a-scrim" data-act="overlay-close"></div>
+      </div>`,
+    );
     const shell = $(".a-shell", root);
     const search = $(".a-search input", root);
     const lscroll = $(".a-lscroll", root);
@@ -509,19 +516,21 @@
                   ></span
                 >`
               : html`<span class="a-rnext ${T(na.tone)}">${na.label}</span>`;
-      return String(html`<span class="a-rg">${stateGlyph(pr, { size: 15 })}</span>
-        <span class="a-rt">${pr.title}</span>
-        <span class="a-rtime tnum" data-tip="Updated ${agoLong(pr.updatedAt)}"
-          >${ago(pr.updatedAt)}</span
-        >
-        <span class="a-rc ${animateCheck ? "a-glyph-in" : ""}"
-          >${checkGlyph(pr.checks.state, { size: 12, tip: checksTip(pr), animate: animateCheck })}</span
-        >
-        <span class="a-rs"
-          ><span class="a-rnum tnum">#${pr.number}</span
-          >${sub}${sk ? html`<span class="a-rstk tnum" data-tip="Stack #${sk.number} · layer ${sk.position} of ${sk.size} · into ${sk.baseRefName}">${icon("stack")}${sk.position}/${sk.size}</span>` : ""}</span
-        >
-        <span class="a-rm">${isMine(pr) ? "" : avatar(pr.author, { size: 16 })}</span>`);
+      return String(
+        html`<span class="a-rg">${stateGlyph(pr, { size: 15 })}</span>
+          <span class="a-rt">${pr.title}</span>
+          <span class="a-rtime tnum" data-tip="Updated ${agoLong(pr.updatedAt)}"
+            >${ago(pr.updatedAt)}</span
+          >
+          <span class="a-rc ${animateCheck ? "a-glyph-in" : ""}"
+            >${checkGlyph(pr.checks.state, { size: 12, tip: checksTip(pr), animate: animateCheck })}</span
+          >
+          <span class="a-rs"
+            ><span class="a-rnum tnum">#${pr.number}</span
+            >${sub}${sk ? html`<span class="a-rstk tnum" data-tip="Stack #${sk.number} · layer ${sk.position} of ${sk.size} · into ${sk.baseRefName}">${icon("stack")}${sk.position}/${sk.size}</span>` : ""}</span
+          >
+          <span class="a-rm">${isMine(pr) ? "" : avatar(pr.author, { size: 16 })}</span>`,
+      );
     }
     function ensureRow(pr, stk) {
       let row = rowEls.get(pr.number);
@@ -607,10 +616,14 @@
       const q = st.q.trim();
       if (!m.shown) {
         const n = refQuery(q) ? model.parseRef(q) : null;
-        foot.innerHTML = String(html`<div class="a-lempty">
-          <p>${n ? `No pull request #${n} in ${repo.nameWithOwner}` : "No pull requests match"}</p>
-          ${m.elsewhere ? html`<button class="btn sm" type="button" data-act="show-all">Show ${plural(m.elsewhere, "match", "matches")} in other states</button>` : html`<button class="btn sm ghost" type="button" data-act="clear-filters">Clear filters</button>`}
-        </div>`);
+        foot.innerHTML = String(
+          html`<div class="a-lempty">
+            <p>
+              ${n ? `No pull request #${n} in ${repo.nameWithOwner}` : "No pull requests match"}
+            </p>
+            ${m.elsewhere ? html`<button class="btn sm" type="button" data-act="show-all">Show ${plural(m.elsewhere, "match", "matches")} in other states</button>` : html`<button class="btn sm ghost" type="button" data-act="clear-filters">Clear filters</button>`}
+          </div>`,
+        );
       } else if (m.elsewhere) {
         foot.innerHTML = String(
           html`<button class="a-lmore" type="button" data-act="show-all">
@@ -783,21 +796,23 @@
     }
     function paintIdentity(pr) {
       const s = pr.stack;
-      $(".a-id", root).innerHTML = String(html`${stateGlyph(pr, { size: 16 })}
-        <button class="a-num tnum" type="button" data-act="copy-link" data-tip="Copy link">
-          #${pr.number}
-        </button>
-        ${s ? html`<button class="a-stkchip tnum" type="button" data-act="stack" aria-expanded="${S(st.stack)}" data-tip="Stack #${s.number} · layer ${s.position} of ${s.size} · into ${s.baseRefName}" data-kbd="S">${icon("stack")}<span>${s.position}/${s.size}</span></button>` : ""}
-        <button class="a-ctitle" type="button" data-act="to-top" tabindex="-1">
-          <span class="trunc">${pr.title}</span>
-        </button>`);
+      $(".a-id", root).innerHTML = String(
+        html`${stateGlyph(pr, { size: 16 })}
+          <button class="a-num tnum" type="button" data-act="copy-link" data-tip="Copy link">
+            #${pr.number}
+          </button>
+          ${s ? html`<button class="a-stkchip tnum" type="button" data-act="stack" aria-expanded="${S(st.stack)}" data-tip="Stack #${s.number} · layer ${s.position} of ${s.size} · into ${s.baseRefName}" data-kbd="S">${icon("stack")}<span>${s.position}/${s.size}</span></button>` : ""}
+          <button class="a-ctitle" type="button" data-act="to-top" tabindex="-1">
+            <span class="trunc">${pr.title}</span>
+          </button>`,
+      );
     }
     function paintActs(pr) {
       const d = det(pr);
       const pend = d.pendingReview?.comments?.length || 0;
       const prev = $(".a-badge", root)?.textContent;
-      $(".a-acts", root).innerHTML =
-        String(html`${pr.state === "open" ? html`<button class="btn sm a-revbtn" type="button" data-act="review" data-kbd="R" data-tip="${pend ? `Submit your review · ${plural(pend, "pending comment")}` : isMine(pr) ? "Comment on the changes" : "Submit a review"}">Review${pend ? html`<span class="a-badge tnum">${pend}</span>` : ""}</button>` : ""}
+      $(".a-acts", root).innerHTML = String(
+        html`${pr.state === "open" ? html`<button class="btn sm a-revbtn" type="button" data-act="review" data-kbd="R" data-tip="${pend ? `Submit your review · ${plural(pend, "pending comment")}` : isMine(pr) ? "Comment on the changes" : "Submit a review"}">Review${pend ? html`<span class="a-badge tnum">${pend}</span>` : ""}</button>` : ""}
           <button
             class="chip agent a-askchip"
             type="button"
@@ -811,7 +826,8 @@
           </button>
           <button class="ib" type="button" data-act="more" data-tip="More">
             ${icon("more")}
-          </button>`);
+          </button>`,
+      );
       const badge = $(".a-badge", root);
       if (badge && prev !== badge.textContent) badge.classList.add("pop-in");
     }
@@ -841,56 +857,58 @@
         const files = scopedFiles(d);
         const viewed = files.filter((f) => f.viewed).length;
         const treeOn = treeShown();
-        tools.innerHTML = String(html`<span class="a-vprog" data-tip="Files viewed" data-kbd="V"
-            ><span class="a-vbar"
-              ><i style="--p:${files.length ? viewed / files.length : 0}"></i></span
-            ><span class="tnum">${viewed}/${files.length}</span></span
-          >
-          <button
-            class="btn sm ghost a-scope ${st.commit ? "on" : ""}"
-            type="button"
-            data-act="scope"
-            data-tip="${st.commit ? "Viewing one commit · commenting is off" : "Scope to a commit"}"
-            data-kbd="C"
-          >
-            ${icon("commit")}<span class="a-scope-l">${st.commit || "All commits"}</span
-            >${icon("chevron-down", { cls: "a-dd" })}
-          </button>
-          <div class="seg a-vseg" role="radiogroup" aria-label="Diff layout">
-            <i class="seg-ind"></i
-            ><button
-              class="seg-opt"
-              type="button"
-              role="radio"
-              data-act="view"
-              data-v="unified"
-              aria-checked="${S(st.view !== "split")}"
-              data-tip="Unified"
-              data-kbd="U"
+        tools.innerHTML = String(
+          html`<span class="a-vprog" data-tip="Files viewed" data-kbd="V"
+              ><span class="a-vbar"
+                ><i style="--p:${files.length ? viewed / files.length : 0}"></i></span
+              ><span class="tnum">${viewed}/${files.length}</span></span
             >
-              ${icon("unified")}</button
-            ><button
-              class="seg-opt"
+            <button
+              class="btn sm ghost a-scope ${st.commit ? "on" : ""}"
               type="button"
-              role="radio"
-              data-act="view"
-              data-v="split"
-              aria-checked="${S(st.view === "split")}"
-              data-tip="Split"
-              data-kbd="U"
+              data-act="scope"
+              data-tip="${st.commit ? "Viewing one commit · commenting is off" : "Scope to a commit"}"
+              data-kbd="C"
             >
-              ${icon("split")}
+              ${icon("commit")}<span class="a-scope-l">${st.commit || "All commits"}</span
+              >${icon("chevron-down", { cls: "a-dd" })}
             </button>
-          </div>
-          <button
-            class="ib a-treebtn ${treeOn ? "on" : ""}"
-            type="button"
-            data-act="tree"
-            data-tip="${treeOn ? "Hide" : "Show"} file tree"
-            data-kbd="F"
-          >
-            ${icon("sidebar")}
-          </button>`);
+            <div class="seg a-vseg" role="radiogroup" aria-label="Diff layout">
+              <i class="seg-ind"></i
+              ><button
+                class="seg-opt"
+                type="button"
+                role="radio"
+                data-act="view"
+                data-v="unified"
+                aria-checked="${S(st.view !== "split")}"
+                data-tip="Unified"
+                data-kbd="U"
+              >
+                ${icon("unified")}</button
+              ><button
+                class="seg-opt"
+                type="button"
+                role="radio"
+                data-act="view"
+                data-v="split"
+                aria-checked="${S(st.view === "split")}"
+                data-tip="Split"
+                data-kbd="U"
+              >
+                ${icon("split")}
+              </button>
+            </div>
+            <button
+              class="ib a-treebtn ${treeOn ? "on" : ""}"
+              type="button"
+              data-act="tree"
+              data-tip="${treeOn ? "Hide" : "Show"} file tree"
+              data-kbd="F"
+            >
+              ${icon("sidebar")}
+            </button>`,
+        );
         syncIndicator($(".a-vseg", tools), { instant: true });
       } else if (st.tab === "checks") {
         const C = model.checks(d);
@@ -1483,16 +1501,17 @@ ${ui.convDraft}</textarea>
           lines.length
             ? html`<ul class="a-mb-ls">
                 ${lines.map(
-                  (l) => html`<li
-                    class="a-mb-l ${l.go ? "go" : ""}"
-                    data-line="${l.key}"
-                    ${l.go ? raw(`data-act="mb-go" data-go="${l.go}" role="button" tabindex="0"`) : ""}
-                  >
-                    <span class="a-mb-li">${toneGlyph(l.tone, 13)}</span
-                    ><span class="a-mb-lt">${l.text}</span
-                    >${l.sub ? html`<span class="a-mb-ls-sub tnum">${l.sub}</span>` : ""}
-                    ${l.agent ? html`<button class="a-agent" type="button" data-act="agent" data-what="${l.key === "checks" ? "fix-checks" : "resolve-conflicts"}" data-tip="${l.key === "checks" ? "Start an agent thread to fix the failing check" : "Start an agent thread to resolve the conflicts"}">${icon("agent")}<span>${l.agent}</span></button>` : ""}
-                  </li>`,
+                  (l) =>
+                    html`<li
+                      class="a-mb-l ${l.go ? "go" : ""}"
+                      data-line="${l.key}"
+                      ${l.go ? raw(`data-act="mb-go" data-go="${l.go}" role="button" tabindex="0"`) : ""}
+                    >
+                      <span class="a-mb-li">${toneGlyph(l.tone, 13)}</span
+                      ><span class="a-mb-lt">${l.text}</span
+                      >${l.sub ? html`<span class="a-mb-ls-sub tnum">${l.sub}</span>` : ""}
+                      ${l.agent ? html`<button class="a-agent" type="button" data-act="agent" data-what="${l.key === "checks" ? "fix-checks" : "resolve-conflicts"}" data-tip="${l.key === "checks" ? "Start an agent thread to fix the failing check" : "Start an agent thread to resolve the conflicts"}">${icon("agent")}<span>${l.agent}</span></button>` : ""}
+                    </li>`,
                 )}
               </ul>`
             : ""
@@ -1672,21 +1691,22 @@ ${ui.convDraft}</textarea>
         <div class="a-fv">
           <ul class="a-links">
             ${threads.map(
-              (t) => html`<li
-                class="a-lk ${t.fresh ? "rise-in" : ""}"
-                data-act="open-thread"
-                data-id="${t.id}"
-                role="button"
-                tabindex="0"
-              >
-                <span class="a-lkg"
-                  >${t.state === "working" ? raw('<span class="g g-working"></span>') : checkGlyph("pass", { size: 13, tip: false, animate: !!t.justDone })}</span
+              (t) =>
+                html`<li
+                  class="a-lk ${t.fresh ? "rise-in" : ""}"
+                  data-act="open-thread"
+                  data-id="${t.id}"
+                  role="button"
+                  tabindex="0"
                 >
-                <span class="trunc">${t.title}</span
-                ><span class="a-lkm"
-                  >${t.state === "working" ? "Working" : t.result || "Done"}</span
-                >
-              </li>`,
+                  <span class="a-lkg"
+                    >${t.state === "working" ? raw('<span class="g g-working"></span>') : checkGlyph("pass", { size: 13, tip: false, animate: !!t.justDone })}</span
+                  >
+                  <span class="trunc">${t.title}</span
+                  ><span class="a-lkm"
+                    >${t.state === "working" ? "Working" : t.result || "Done"}</span
+                  >
+                </li>`,
             )}
           </ul>
         </div>
@@ -1968,23 +1988,26 @@ ${ui.convDraft}</textarea>
         return String(
           html`<div class="a-th ${t.pending ? "pending" : ""}" data-thread="${t.id}">${body}</div>`,
         );
-      return String(html`<div class="a-th resolved ${open ? "open" : ""}" data-thread="${t.id}">
-        <button
-          class="a-th-sum"
-          type="button"
-          data-act="th-expand"
-          data-thread="${t.id}"
-          aria-expanded="${S(open)}"
-        >
-          ${icon("resolve")}<span class="a-th-sl">Resolved</span
-          ><span class="a-th-who">${uname(first.author).split(" ")[0]}</span
-          ><span class="a-th-snip trunc">${snippet(first.body)}</span
-          ><span class="a-th-n tnum">${t.comments.length}</span>${icon("chevron", { cls: "chev" })}
-        </button>
-        <div class="disc ${open ? "open" : ""}">
-          <div><div class="a-th-body">${body}</div></div>
-        </div>
-      </div>`);
+      return String(
+        html`<div class="a-th resolved ${open ? "open" : ""}" data-thread="${t.id}">
+          <button
+            class="a-th-sum"
+            type="button"
+            data-act="th-expand"
+            data-thread="${t.id}"
+            aria-expanded="${S(open)}"
+          >
+            ${icon("resolve")}<span class="a-th-sl">Resolved</span
+            ><span class="a-th-who">${uname(first.author).split(" ")[0]}</span
+            ><span class="a-th-snip trunc">${snippet(first.body)}</span
+            ><span class="a-th-n tnum">${t.comments.length}</span
+            >${icon("chevron", { cls: "chev" })}
+          </button>
+          <div class="disc ${open ? "open" : ""}">
+            <div><div class="a-th-body">${body}</div></div>
+          </div>
+        </div>`,
+      );
     }
     function commentHtml(pr, t, c) {
       const hasSug = /```suggestion/.test(c.body);
@@ -2069,35 +2092,37 @@ ${draft}</textarea>
       const c = ui.composer;
       const fresh = c.fresh;
       c.fresh = false;
-      return String(html`<div class="a-lc ${fresh ? "a-grow-in" : ""}">
-        <div>
-          <div class="a-lc-in">
-            <textarea
-              class="a-lc-ta"
-              rows="3"
-              data-composer-ta
-              placeholder="Comment on line ${c.side === "LEFT" ? "L" : "R"}${c.line}"
-            >
-${c.text || ""}</textarea>
-            <div class="a-lc-acts">
-              <button
-                class="btn sm ghost"
-                type="button"
-                data-act="lc-suggest"
-                data-tip="Insert a suggestion"
+      return String(
+        html`<div class="a-lc ${fresh ? "a-grow-in" : ""}">
+          <div>
+            <div class="a-lc-in">
+              <textarea
+                class="a-lc-ta"
+                rows="3"
+                data-composer-ta
+                placeholder="Comment on line ${c.side === "LEFT" ? "L" : "R"}${c.line}"
               >
-                ${icon("file-diff")}Suggest
-              </button>
-              <span class="a-sp"></span>
-              <button class="btn sm ghost" type="button" data-act="lc-cancel">Cancel</button>
-              <button class="btn sm" type="button" data-act="lc-single">Comment now</button>
-              <button class="btn sm pri" type="button" data-act="lc-review">
-                ${pend ? "Add to review" : "Start a review"}<kbd>⌘↵</kbd>
-              </button>
+${c.text || ""}</textarea>
+              <div class="a-lc-acts">
+                <button
+                  class="btn sm ghost"
+                  type="button"
+                  data-act="lc-suggest"
+                  data-tip="Insert a suggestion"
+                >
+                  ${icon("file-diff")}Suggest
+                </button>
+                <span class="a-sp"></span>
+                <button class="btn sm ghost" type="button" data-act="lc-cancel">Cancel</button>
+                <button class="btn sm" type="button" data-act="lc-single">Comment now</button>
+                <button class="btn sm pri" type="button" data-act="lc-review">
+                  ${pend ? "Add to review" : "Start a review"}<kbd>⌘↵</kbd>
+                </button>
+              </div>
             </div>
           </div>
-        </div>
-      </div>`);
+        </div>`,
+      );
     }
     function refreshFile(path) {
       const p = ui.panes.get("files");
@@ -2522,22 +2547,24 @@ ${c.text || ""}</textarea>
           );
         else {
           const c = it.c;
-          out.push(html`<li
-            class="a-ci ${st.commit === c.short ? "on" : ""}"
-            data-act="goto-commit"
-            data-sha="${c.short}"
-            role="button"
-            tabindex="0"
-          >
-            <span class="a-cdot"></span>
-            <span class="a-cmsg trunc">${c.message}</span>
-            <span class="a-cmeta"
-              >${checkGlyph(c.checks, { size: 12 })}<code class="a-sha">${c.short}</code
-              >${avatar(c.author, { size: 16 })}<span class="dim tnum a-cago"
-                >${ago(c.committedAt)}</span
-              ><span class="a-cgo">${icon("arrow-right")}</span></span
+          out.push(
+            html`<li
+              class="a-ci ${st.commit === c.short ? "on" : ""}"
+              data-act="goto-commit"
+              data-sha="${c.short}"
+              role="button"
+              tabindex="0"
             >
-          </li>`);
+              <span class="a-cdot"></span>
+              <span class="a-cmsg trunc">${c.message}</span>
+              <span class="a-cmeta"
+                >${checkGlyph(c.checks, { size: 12 })}<code class="a-sha">${c.short}</code
+                >${avatar(c.author, { size: 16 })}<span class="dim tnum a-cago"
+                  >${ago(c.committedAt)}</span
+                ><span class="a-cgo">${icon("arrow-right")}</span></span
+              >
+            </li>`,
+          );
         }
       }
       return html`<div class="a-cm">

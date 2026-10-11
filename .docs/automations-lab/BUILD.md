@@ -18,7 +18,7 @@ have; never drop states C shows.
 - `.docs/automations-lab/BRIEF.md` — product truth (schedules, approvals, proposals).
 - Visual reference: run `python3 .docs/automations-lab/serve.py 5803` (may already be running)
   and open `http://127.0.0.1:5803/#C`, or `node .docs/automations-lab/shoot.mjs C <out.png>
-"paused=1"` (+ `SHOOT_STEPS`). Screenshots: `.docs/automations-lab/shots/final/C-*.png`.
+  "paused=1"` (+ `SHOOT_STEPS`). Screenshots: `.docs/automations-lab/shots/final/C-*.png`.
 
 Repo rules: AGENTS.md (Bun, `bun run test` never `bun test`, React Compiler lint rules,
 Effect contracts schema-only, `@ryco/shared` subpath exports, `client-runtime` has no DOM).
@@ -65,7 +65,7 @@ Phase 1 (parallel)
     units; `occurrences/next/first/last/count/rollForward/dstShift/clockChange`;
     `validateScheduleDefinition(def, nowMs, {activeCount?, editingId?})` mirroring the
     server exactly plus the lab's draft errors (`start | end | interval | title | prompt |
-model | limit`, same wording as the lab); words: `everyWords`, `endWords`, `cadence`,
+    model | limit`, same wording as the lab); words: `everyWords`, `endWords`, `cadence`,
     `phrase`, `when`, `rel`, `countdown`, `time/day/date/dateTime`; `UNTIL_PRESETS`,
     `endFor(start, preset)`; `ceilQuarter`.
   - `packages/shared/src/automationWhenParser.ts` (+ `.test.ts`) — the lab's `parseWhen`
@@ -75,9 +75,9 @@ model | limit`, same wording as the lab); words: `everyWords`, `endWords`, `cade
     `./automationWhenParser`).
   - `packages/client-runtime/src/state/agentControl/automationSchedules.ts` (+ test), exported
     from that domain's `index.ts`: `deriveScheduleRows({ snapshot, queueProposals,
-dismissedLapsed, nowMs })` → rows exactly like `Lab.q.schedules` + dir-c `rowsFor`
+    dismissedLapsed, nowMs })` → rows exactly like `Lab.q.schedules` + dir-c `rowsFor`
     (`state: "awaiting-approval" | "running" | "paused" | "finished" | "pending-create" |
-"lapsed" | "scheduled"`, `proposal {kind, id, before, after, expiresAt}`, `lapsed`,
+    "lapsed" | "scheduled"`, `proposal {kind, id, before, after, expiresAt}`, `lapsed`,
     `dueRun {run, proposalId, expiresAt, coalescedOccurrences}`, `activeRun`, `lastRun`,
     `nextRunAt`, `def`, `title`), sorted like the lab; `pendingScheduleProposals`,
     `lapsedScheduleProposals`, `scheduleRetryState(run, rows)` (ok / short / long reason),
@@ -89,14 +89,14 @@ dismissedLapsed, nowMs })` → rows exactly like `Lab.q.schedules` + dir-c `rows
 - **data** owns `apps/web/src/components/automations/data/*` and
   `apps/web/src/components/automations/automationsDialogStore.ts`:
   - `useProjectAutomations(snapshot)` → per member checkout `{ member, environmentId,
-projectId, deviceLabel, isPrimary, presence, snapshot, providers, error, busy,
-disabledReason, command, decide, refresh }` (source-component pattern; stable identities;
+    projectId, deviceLabel, isPrimary, presence, snapshot, providers, error, busy,
+    disabledReason, command, decide, refresh }` (source-component pattern; stable identities;
     holds the desktop interactive scope for non-primary devices like the map does).
   - `useAutomationProposalSync(environmentIds)` (extracted from `AgentControlApprovals.tsx`,
     which then uses it) and `useLapsedScheduleProposals(...)` (queue store + dismissed set).
   - `automationsDialogStore`: `openAutomationsDialog({ projectKey | {environmentId, projectId},
-automationId?, mode?: "view" | "edit" | "new", environmentId? (device for new), origin?:
-HTMLElement | null })`, `closeAutomationsDialog()`, remembers the last project.
+    automationId?, mode?: "view" | "edit" | "new", environmentId? (device for new), origin?:
+    HTMLElement | null })`, `closeAutomationsDialog()`, remembers the last project.
   - `useAutomationProjectCounts(snapshots)` for the switcher's counts: fetch each project's
     snapshot once when asked (not a live subscription), cache, expose `{schedules, waiting}`.
 

@@ -169,9 +169,9 @@ Concretely:
   `text-muted-foreground/60 text-[10px] uppercase tracking-wide`, then
   the body. When `workEntry.output` (after ANSI stripping) is non-empty,
   the body is a `<pre>` with `font-mono text-[11px] leading-4
-whitespace-pre max-h-[400px] overflow-auto`. When empty/undefined, the
+  whitespace-pre max-h-[400px] overflow-auto`. When empty/undefined, the
   body is a faint `(no output)` placeholder (`text-muted-foreground/40
-italic`).
+  italic`).
 - **Footer.** Flex row, `justify-between items-center mt-1`.
   - Leading: `exit N` chip when `exitCode !== undefined && exitCode !== 0`.
     Uses `bg-rose-500/10 text-rose-300 border-rose-500/30` for error tone.

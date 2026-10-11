@@ -212,7 +212,7 @@ Private Ryco sessions expose these project-scoped tools:
   archive/current/main protection, checkout existence, Git registration, commit IDs,
   dirty/unmerged state, and inspection blockers. No file contents or Git stderr are returned.
 - `ryco_plan_workspace_lifecycle({ projectId, workspaceId, action, checkoutMode,
-sessions, deleteBranch })`: read-only preflight returning `{ plan, planDigest, blockers }`.
+  sessions, deleteBranch })`: read-only preflight returning `{ plan, planDigest, blockers }`.
 - `ryco_propose_workspace_lifecycle({ requestId, plan })`: submit the exact returned plan.
   Requires the `workspaces.manage` grant and exact active-turn authority. Every lifecycle
   action requires human approval, including in Full Access. Do not approve your own request.

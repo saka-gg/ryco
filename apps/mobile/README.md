@@ -593,7 +593,7 @@ the Node suite.
   not honor pnpm's `parent>child` scoped-override syntax, and a name-scoped
   override applies by name to _both_ `@pierre/diffs` copies — it would force
   `apps/web`'s `@pierre/diffs@1.1.20` (which declares `@shikijs/transformers:
-^3.0.0`) to an out-of-range `4.2.0`, violating the "nothing else touching
+  ^3.0.0`) to an out-of-range `4.2.0`, violating the "nothing else touching
   `apps/web`" invariant. `@pierre/diffs@1.3.0-beta.5` declares
   `^3.0.0 || ^4.0.0` and resolves `@shikijs/transformers@3.23.0`; that dependency
   is inert on the mobile code path (the native review canvas is fed the app's own
