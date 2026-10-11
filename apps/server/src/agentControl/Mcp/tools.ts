@@ -493,7 +493,8 @@ export const AGENT_CONTROL_MCP_TOOL_DESCRIPTORS: ReadonlyArray<AgentControlMcpTo
   ).map(([name, description, schema]) => ({
     name,
     description,
-    inputSchema: Schema.toJsonSchemaDocument(schema).schema,
+    // Advertise closed objects so clients see unknown keys as invalid input.
+    inputSchema: Schema.toJsonSchemaDocument(schema, { onExcessProperty: "error" }).schema,
   })),
   {
     name: AGENT_CONTROL_MCP_TOOLS.listProjects,

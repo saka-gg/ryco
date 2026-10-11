@@ -325,31 +325,31 @@ function getPatchedDependencyPackageName(patchKey: string): string {
 }
 
 const AzureTrustedSigningOptionsConfig = Config.all({
-  publisherName: Config.nonEmptyString("AZURE_TRUSTED_SIGNING_PUBLISHER_NAME"),
-  endpoint: Config.nonEmptyString("AZURE_TRUSTED_SIGNING_ENDPOINT"),
-  certificateProfileName: Config.nonEmptyString("AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME"),
-  codeSigningAccountName: Config.nonEmptyString("AZURE_TRUSTED_SIGNING_ACCOUNT_NAME"),
-  fileDigest: Config.string("AZURE_TRUSTED_SIGNING_FILE_DIGEST").pipe(Config.withDefault("SHA256")),
-  timestampDigest: Config.string("AZURE_TRUSTED_SIGNING_TIMESTAMP_DIGEST").pipe(
+  publisherName: Config.NonEmptyString("AZURE_TRUSTED_SIGNING_PUBLISHER_NAME"),
+  endpoint: Config.NonEmptyString("AZURE_TRUSTED_SIGNING_ENDPOINT"),
+  certificateProfileName: Config.NonEmptyString("AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME"),
+  codeSigningAccountName: Config.NonEmptyString("AZURE_TRUSTED_SIGNING_ACCOUNT_NAME"),
+  fileDigest: Config.String("AZURE_TRUSTED_SIGNING_FILE_DIGEST").pipe(Config.withDefault("SHA256")),
+  timestampDigest: Config.String("AZURE_TRUSTED_SIGNING_TIMESTAMP_DIGEST").pipe(
     Config.withDefault("SHA256"),
   ),
-  timestampRfc3161: Config.string("AZURE_TRUSTED_SIGNING_TIMESTAMP_RFC3161").pipe(
+  timestampRfc3161: Config.String("AZURE_TRUSTED_SIGNING_TIMESTAMP_RFC3161").pipe(
     Config.withDefault("http://timestamp.acs.microsoft.com"),
   ),
 });
 
 const BuildEnvConfig = Config.all({
   platform: Config.schema(BuildPlatform, "RYCO_DESKTOP_PLATFORM").pipe(Config.option),
-  target: Config.string("RYCO_DESKTOP_TARGET").pipe(Config.option),
+  target: Config.String("RYCO_DESKTOP_TARGET").pipe(Config.option),
   arch: Config.schema(BuildArch, "RYCO_DESKTOP_ARCH").pipe(Config.option),
-  version: Config.string("RYCO_DESKTOP_VERSION").pipe(Config.option),
-  outputDir: Config.string("RYCO_DESKTOP_OUTPUT_DIR").pipe(Config.option),
-  skipBuild: Config.boolean("RYCO_DESKTOP_SKIP_BUILD").pipe(Config.withDefault(false)),
-  keepStage: Config.boolean("RYCO_DESKTOP_KEEP_STAGE").pipe(Config.withDefault(false)),
-  signed: Config.boolean("RYCO_DESKTOP_SIGNED").pipe(Config.withDefault(false)),
-  verbose: Config.boolean("RYCO_DESKTOP_VERBOSE").pipe(Config.withDefault(false)),
-  mockUpdates: Config.boolean("RYCO_DESKTOP_MOCK_UPDATES").pipe(Config.withDefault(false)),
-  mockUpdateServerPort: Config.string("RYCO_DESKTOP_MOCK_UPDATE_SERVER_PORT").pipe(Config.option),
+  version: Config.String("RYCO_DESKTOP_VERSION").pipe(Config.option),
+  outputDir: Config.String("RYCO_DESKTOP_OUTPUT_DIR").pipe(Config.option),
+  skipBuild: Config.Boolean("RYCO_DESKTOP_SKIP_BUILD").pipe(Config.withDefault(false)),
+  keepStage: Config.Boolean("RYCO_DESKTOP_KEEP_STAGE").pipe(Config.withDefault(false)),
+  signed: Config.Boolean("RYCO_DESKTOP_SIGNED").pipe(Config.withDefault(false)),
+  verbose: Config.Boolean("RYCO_DESKTOP_VERBOSE").pipe(Config.withDefault(false)),
+  mockUpdates: Config.Boolean("RYCO_DESKTOP_MOCK_UPDATES").pipe(Config.withDefault(false)),
+  mockUpdateServerPort: Config.String("RYCO_DESKTOP_MOCK_UPDATE_SERVER_PORT").pipe(Config.option),
 });
 
 const MockUpdateServerPortSchema = Schema.NumberFromString.check(
@@ -1082,7 +1082,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       // consistent, which a post-build signtool step would not.
       // Effect.option (not Config.option) so that both "env unset" and
       // "env set but empty" are treated as absent. Config.option only maps
-      // missing-env failures; SchemaError from Config.nonEmptyString still
+      // missing-env failures; SchemaError from Config.NonEmptyString still
       // propagates and would abort the build.
       const azureSignOptions = yield* Effect.option(AzureTrustedSigningOptionsConfig);
       if (Option.isSome(azureSignOptions)) {
@@ -1480,53 +1480,53 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
 });
 
 const buildDesktopArtifactCli = Command.make("build-desktop-artifact", {
-  platform: Flag.choice("platform", BuildPlatform.literals).pipe(
+  platform: Flag.Literals("platform", BuildPlatform.literals).pipe(
     Flag.withDescription("Build platform (env: RYCO_DESKTOP_PLATFORM)."),
     Flag.optional,
   ),
-  target: Flag.string("target").pipe(
+  target: Flag.String("target").pipe(
     Flag.withDescription(
       "Artifact target, for example dmg/AppImage/nsis (env: RYCO_DESKTOP_TARGET).",
     ),
     Flag.optional,
   ),
-  arch: Flag.choice("arch", BuildArch.literals).pipe(
+  arch: Flag.Literals("arch", BuildArch.literals).pipe(
     Flag.withDescription("Build arch, for example arm64/x64/universal (env: RYCO_DESKTOP_ARCH)."),
     Flag.optional,
   ),
-  buildVersion: Flag.string("build-version").pipe(
+  buildVersion: Flag.String("build-version").pipe(
     Flag.withDescription("Artifact version metadata (env: RYCO_DESKTOP_VERSION)."),
     Flag.optional,
   ),
-  outputDir: Flag.string("output-dir").pipe(
+  outputDir: Flag.String("output-dir").pipe(
     Flag.withDescription("Output directory for artifacts (env: RYCO_DESKTOP_OUTPUT_DIR)."),
     Flag.optional,
   ),
-  skipBuild: Flag.boolean("skip-build").pipe(
+  skipBuild: Flag.Boolean("skip-build").pipe(
     Flag.withDescription(
       "Skip `bun run build:desktop` and use existing dist artifacts (env: RYCO_DESKTOP_SKIP_BUILD).",
     ),
     Flag.optional,
   ),
-  keepStage: Flag.boolean("keep-stage").pipe(
+  keepStage: Flag.Boolean("keep-stage").pipe(
     Flag.withDescription("Keep temporary staging files (env: RYCO_DESKTOP_KEEP_STAGE)."),
     Flag.optional,
   ),
-  signed: Flag.boolean("signed").pipe(
+  signed: Flag.Boolean("signed").pipe(
     Flag.withDescription(
       "Enable signing/notarization discovery; Windows uses Azure Trusted Signing (env: RYCO_DESKTOP_SIGNED).",
     ),
     Flag.optional,
   ),
-  verbose: Flag.boolean("verbose").pipe(
+  verbose: Flag.Boolean("verbose").pipe(
     Flag.withDescription("Stream subprocess stdout (env: RYCO_DESKTOP_VERBOSE)."),
     Flag.optional,
   ),
-  mockUpdates: Flag.boolean("mock-updates").pipe(
+  mockUpdates: Flag.Boolean("mock-updates").pipe(
     Flag.withDescription("Enable mock updates (env: RYCO_DESKTOP_MOCK_UPDATES)."),
     Flag.optional,
   ),
-  mockUpdateServerPort: Flag.integer("mock-update-server-port").pipe(
+  mockUpdateServerPort: Flag.Int("mock-update-server-port").pipe(
     Flag.withSchema(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 65535 }))),
     Flag.withDescription("Mock update server port (env: RYCO_DESKTOP_MOCK_UPDATE_SERVER_PORT)."),
     Flag.optional,

@@ -5,6 +5,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { HttpSpanHeadersLive } from "./HttpHeaderRedaction.ts";
 import { makeLocalFileTracer } from "./LocalFileTracer.ts";
 
 describe("HTTP credential redaction", () => {
@@ -48,6 +49,7 @@ describe("HTTP credential redaction", () => {
           "x-custom-credential",
         ]),
       ),
+      Layer.merge(HttpSpanHeadersLive),
     );
     const { handler, dispose } = HttpEffect.toWebHandlerLayer(
       Effect.gen(function* () {

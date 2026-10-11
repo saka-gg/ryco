@@ -5,6 +5,7 @@ import { ServerConfig } from "../../config.ts";
 import { makeDiagnosticsService } from "../../diagnostics/Layers/Diagnostics.ts";
 import { Diagnostics } from "../../diagnostics/Services/Diagnostics.ts";
 import { ServerLoggerLive } from "../../serverLogger.ts";
+import { HttpSpanHeadersLive } from "../HttpHeaderRedaction.ts";
 import { makeLocalFileTracer } from "../LocalFileTracer.ts";
 import { LocalDiagnosticsMetricsLive } from "../Services/LocalDiagnosticsMetrics.ts";
 import { BrowserTraceCollector } from "../Services/BrowserTraceCollector.ts";
@@ -19,6 +20,7 @@ export const ObservabilityLive = Layer.unwrap(
     const traceReferencesLayer = Layer.mergeAll(
       Layer.succeed(Tracer.MinimumTraceLevel, config.traceMinLevel),
       Layer.succeed(References.TracerTimingEnabled, config.traceTimingEnabled),
+      HttpSpanHeadersLive,
     );
 
     const tracerLayer = Layer.unwrap(

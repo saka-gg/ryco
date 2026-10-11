@@ -8,7 +8,14 @@ import {
   AgentControlProposal,
   AgentControlRequestId,
 } from "./agentControl.ts";
-import { ProjectId, ThreadId, PositiveInt, NonNegativeInt, IsoDateTime } from "./baseSchemas.ts";
+import {
+  ProjectId,
+  ThreadId,
+  PositiveInt,
+  NonNegativeInt,
+  IsoDateTime,
+  rejectExcessProperties,
+} from "./baseSchemas.ts";
 
 export const AutomationCentreInput = Schema.Struct({ projectId: ProjectId });
 export type AutomationCentreInput = typeof AutomationCentreInput.Type;
@@ -56,7 +63,7 @@ export const AutomationCentreCommand = Schema.Union([
     expectedUpdatedAt: IsoDateTime,
     unread: Schema.Boolean,
   }),
-]).annotate({ parseOptions: { onExcessProperty: "error" } });
+]).pipe(rejectExcessProperties);
 export type AutomationCentreCommand = typeof AutomationCentreCommand.Type;
 export interface AutomationCentreApi {
   readonly snapshot: (input: AutomationCentreInput) => Promise<AutomationCentreSnapshot>;

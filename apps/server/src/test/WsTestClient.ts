@@ -61,10 +61,10 @@ export const wsRpcProtocolLayer = (
   const { cookie, origin, url } = parseSessionCookieFromWsUrl(wsUrl);
   const webSocketConstructorLayer = Layer.succeed(
     Socket.WebSocketConstructor,
-    (socketUrl, protocols) =>
+    (socketUrl, options) =>
       new NodeSocket.NodeWS.WebSocket(
         socketUrl,
-        protocols,
+        typeof options === "string" || Array.isArray(options) ? options : undefined,
         cookie || origin
           ? {
               headers: {

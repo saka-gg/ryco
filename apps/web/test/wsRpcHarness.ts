@@ -132,6 +132,8 @@ export class BrowserWsRpcHarness {
       supportsAck: true,
       supportsTransferables: false,
       supportsSpanPropagation: true,
+      supportsNotifications: true,
+      codecFor: RpcSerialization.json.codecFor,
     } satisfies RpcServer.Protocol["Service"];
     const connection: BrowserWsConnection = {
       client,

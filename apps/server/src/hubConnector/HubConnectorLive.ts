@@ -764,7 +764,7 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
           await identity.stopE2eeInstrumentation();
         }),
     );
-    const cloudHistoryEnabled = yield* Config.boolean("RYCO_HUB_THREAD_CACHE_ENABLED").pipe(
+    const cloudHistoryEnabled = yield* Config.Boolean("RYCO_HUB_THREAD_CACHE_ENABLED").pipe(
       Config.withDefault(false),
     );
     if (cloudHistoryEnabled && connectorConfig.enabled && connectorConfig.origin) {

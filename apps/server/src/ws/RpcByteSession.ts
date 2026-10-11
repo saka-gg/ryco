@@ -310,7 +310,7 @@ export function makeRpcByteSession<Rpcs extends Rpc.Any, E, R>(
                   const replacement = encodeResponse(
                     RpcMessage.ResponseExitDieEncoded({
                       requestId,
-                      defect: new Error(
+                      encodedDefect: new Error(
                         "The response exceeded the largest message this connection can carry.",
                       ),
                     }),
@@ -328,6 +328,10 @@ export function makeRpcByteSession<Rpcs extends Rpc.Any, E, R>(
           supportsAck: true,
           supportsTransferables: false,
           supportsSpanPropagation: true,
+          // Each reassembled record is one message, so the server may send
+          // unsolicited frames just as it does over a WebSocket.
+          supportsNotifications: true,
+          codecFor: RpcSerialization.json.codecFor,
         };
       }),
     );

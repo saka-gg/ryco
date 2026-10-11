@@ -13,7 +13,8 @@ import {
 const ScriptTestLayer = Layer.mergeAll(NodeServices.layer, TestConsole.layer);
 const runCli = Command.runWith(updateReleasePackageVersionsCommand, { version: "0.0.0" });
 const PackageJsonSchema = Schema.Record(Schema.String, Schema.Unknown);
-const PrettyJsonString = SchemaGetter.parseJson<string>().compose(
+const PrettyJsonString = SchemaGetter.compose(
+  SchemaGetter.parseJson<string>(),
   SchemaGetter.stringifyJson({ space: 2 }),
 );
 const PackageJsonPrettyJson = Schema.fromJsonString(PackageJsonSchema).pipe(

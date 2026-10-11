@@ -490,6 +490,7 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
     send: (_clientId, request) => offerOutgoing(request).pipe(Effect.mapError(toRpcClientError)),
     supportsAck: true,
     supportsTransferables: false,
+    codecFor: parserFactory.codecFor,
   });
 
   const serverProtocol = RpcServer.Protocol.of({
@@ -506,6 +507,8 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
     supportsAck: true,
     supportsTransferables: false,
     supportsSpanPropagation: true,
+    supportsNotifications: true,
+    codecFor: parserFactory.codecFor,
   });
 
   const sendNotification = Effect.fn("sendNotification")(function* (

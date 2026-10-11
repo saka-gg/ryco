@@ -98,7 +98,7 @@ export const deviceFrameRouteLayer = Layer.effectDiscard(
         const writer = yield* socket.writer;
         let open = true;
         const sink = makeDeviceFrameSink({
-          send: (bytes) => Effect.runPromise(writer(bytes)).catch(() => undefined),
+          send: (bytes) => Effect.runPromise(writer.write(bytes)).catch(() => undefined),
           isOpen: () => open,
         });
         const unsubscribe = deviceService.manager.subscribeFrames(udid, sink);
@@ -111,15 +111,22 @@ export const deviceFrameRouteLayer = Layer.effectDiscard(
 
         // Decoder errors and sequence gaps request fresh codec parameters plus
         // an IDR on this same stream. Unknown messages are deliberately ignored.
-        yield* socket.run((message) => {
-          if (decodeResyncRequest(message) === null) return;
-          Effect.runFork(
-            Effect.promise(() =>
-              deviceService.manager.requestKeyframe(udid).catch(() => undefined),
-            ),
-          );
-        });
-        return HttpServerResponse.empty();
+        const { pull } = yield* socket.reader;
+        return yield* pull.pipe(
+          Effect.flatMap((messages) =>
+            Effect.sync(() => {
+              for (const message of messages) {
+                if (decodeResyncRequest(message) === null) continue;
+                Effect.runFork(
+                  Effect.promise(() =>
+                    deviceService.manager.requestKeyframe(udid).catch(() => undefined),
+                  ),
+                );
+              }
+            }),
+          ),
+          Effect.forever,
+        );
       }).pipe(
         Effect.catchTag("AuthError", respondToAuthError),
         Effect.catchCause((cause) =>

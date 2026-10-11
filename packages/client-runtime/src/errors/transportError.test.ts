@@ -9,6 +9,9 @@ describe("transportError", () => {
       isTransportConnectionErrorMessage("Unable to connect to the Ryco server WebSocket."),
     ).toBe(true);
     expect(isTransportConnectionErrorMessage("SocketOpenError: Timeout")).toBe(true);
+    expect(
+      isTransportConnectionErrorMessage("SocketReadError: An error occurred during Read"),
+    ).toBe(true);
   });
 
   it("preserves non-transport thread errors", () => {

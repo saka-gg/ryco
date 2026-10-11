@@ -82,7 +82,7 @@ export async function discoverDesktopSshHosts(input?: {
 
 export class DesktopSshEnvironmentManager {
   private readonly runtime: ReturnType<typeof createDesktopSshRuntime>;
-  private readonly scope: Scope.Scope;
+  private readonly scope: Scope.Closeable;
 
   constructor(options: DesktopSshEnvironmentManagerOptions = {}) {
     const passwordPrompt: SshPasswordPromptShape = {

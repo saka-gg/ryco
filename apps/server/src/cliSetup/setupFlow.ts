@@ -226,7 +226,7 @@ const askFileKeyStore = (
       ),
     );
     const allow = yield* ask(
-      Prompt.confirm({
+      Prompt.Confirm({
         message:
           "Keep this node's Hub key in an owner-only file in Ryco's state directory instead? Anything running as your user can read it.",
         initial: false,
@@ -282,7 +282,7 @@ const askNodeSettings = (
     const workspaceDefault =
       current?.workspace ?? (process.cwd() === homedir() ? homedir() : process.cwd());
     const workspace = yield* ask(
-      Prompt.text({
+      Prompt.String({
         message: "Where are your projects?",
         default: tildify(workspaceDefault),
       }),
@@ -296,7 +296,7 @@ const askNodeSettings = (
     yield* Console.log(dim("  How should your other devices reach this computer?"));
     if (
       yield* ask(
-        Prompt.confirm({
+        Prompt.Confirm({
           message:
             "From anywhere, through your Ryco account? (Hub relay, end-to-end encrypted, no open ports)",
           initial: current?.hub?.enabled ?? true,
@@ -308,7 +308,7 @@ const askNodeSettings = (
     if (
       tailscale.magicDnsName !== null &&
       (yield* ask(
-        Prompt.confirm({
+        Prompt.Confirm({
           message: `Over Tailscale? (HTTPS at https://${tailscale.magicDnsName})`,
           initial: current?.tailscaleServe ?? true,
         }),
@@ -318,7 +318,7 @@ const askNodeSettings = (
     }
     if (
       yield* ask(
-        Prompt.confirm({
+        Prompt.Confirm({
           message: "On this local network? (plain HTTP — only on networks you trust)",
           initial: current?.host === "0.0.0.0",
         }),
@@ -329,7 +329,7 @@ const askNodeSettings = (
 
     const nodeName = reach.includes("hub")
       ? yield* ask(
-          Prompt.text({
+          Prompt.String({
             message: "Name this computer",
             default: current?.hub?.nodeName ?? machineName,
           }),
@@ -345,14 +345,14 @@ const askNodeSettings = (
       context.platform === null
         ? false
         : yield* ask(
-            Prompt.confirm({
+            Prompt.Confirm({
               message: backgroundServicePrompt(context.platform, lingering),
               initial: true,
             }),
           );
     const preventSleep = background
       ? yield* ask(
-          Prompt.confirm({
+          Prompt.Confirm({
             message: "Keep this computer awake while it is plugged in?",
             initial: current?.preventSleep ?? true,
           }),
@@ -407,7 +407,7 @@ const ensureDurableCli = (context: SetupContext): SetupEffect<string | undefined
     const script = process.argv[1];
     if (script === undefined || !isEphemeralCliInstall(script)) return undefined;
     const install = yield* ask(
-      Prompt.confirm({
+      Prompt.Confirm({
         message: `A background service cannot run from the npx cache. Install ryco-cli ${context.version} globally with npm?`,
         initial: true,
       }),
@@ -483,7 +483,7 @@ const offerNodeServiceLinger = (context: SetupContext): SetupEffect<void> =>
     });
     if (plan.kind === "not-needed") return;
     const approved = yield* ask(
-      Prompt.confirm({
+      Prompt.Confirm({
         message: `Keep Ryco running after you log out and start it at boot? (runs \`${plan.display}\`)`,
         initial: true,
       }),
@@ -563,7 +563,7 @@ const linkAccount = (
   Effect.gen(function* () {
     const hubOrigin = config.hub?.origin ?? DEFAULT_HOSTED_APP_ORIGIN;
     const method = yield* ask(
-      Prompt.select<"password" | "code" | "later">({
+      Prompt.Select<"password" | "code" | "later">({
         message: "Link this computer to your Ryco account",
         choices: [
           {
@@ -607,7 +607,7 @@ const linkAccount = (
         "",
       ].join("\n"),
     );
-    yield* ask(Prompt.confirm({ message: "Approved it in the Ryco app?", initial: true }));
+    yield* ask(Prompt.Confirm({ message: "Approved it in the Ryco app?", initial: true }));
     for (let attempt = 0; attempt < 30; attempt += 1) {
       const hub = yield* operations.hubState;
       if (hub?.enrolled === "active") {
@@ -752,7 +752,7 @@ export const editNodeConfigFile = (context: SetupContext): SetupEffect<boolean> 
         return changed;
       }
       const again = yield* ask(
-        Prompt.confirm({
+        Prompt.Confirm({
           message: "That file has a setting Ryco does not understand. Edit it again?",
           initial: true,
         }),
@@ -801,7 +801,7 @@ export const runFirstTimeSetup = (
         "",
       ].join("\n"),
     );
-    const proceed = yield* ask(Prompt.confirm({ message: "Apply these settings?", initial: true }));
+    const proceed = yield* ask(Prompt.Confirm({ message: "Apply these settings?", initial: true }));
     if (!proceed) {
       yield* Console.log(dim("  Nothing was changed."));
       return;
@@ -814,7 +814,7 @@ export const runFirstTimeSetup = (
     }
     if (origin !== null) {
       const pair = yield* ask(
-        Prompt.confirm({ message: "Pair a phone, browser, or other computer now?", initial: true }),
+        Prompt.Confirm({ message: "Pair a phone, browser, or other computer now?", initial: true }),
       );
       if (pair) yield* showPairing(operations, answers.config, origin);
     }
@@ -832,7 +832,7 @@ export const runFirstTimeSetup = (
     );
     if (!background) {
       const startNow = yield* ask(
-        Prompt.confirm({ message: "Start Ryco in this terminal now?", initial: true }),
+        Prompt.Confirm({ message: "Start Ryco in this terminal now?", initial: true }),
       );
       if (startNow) {
         yield* operations.runInForeground.pipe(Effect.mapError(toSetupError));
@@ -928,7 +928,7 @@ export const runNodeManager = (
           : []),
         { title: "Quit", value: "quit" as const },
       ];
-      const action = yield* ask(Prompt.select({ message: "What would you like to do?", choices }));
+      const action = yield* ask(Prompt.Select({ message: "What would you like to do?", choices }));
       const platform = context.platform;
       switch (action) {
         case "quit":
@@ -979,7 +979,7 @@ export const runNodeManager = (
         case "settings": {
           const answers = yield* askNodeSettings(context, config);
           const proceed = yield* ask(
-            Prompt.confirm({ message: "Apply these settings?", initial: true }),
+            Prompt.Confirm({ message: "Apply these settings?", initial: true }),
           );
           if (proceed) {
             // Re-installing replaces the service in place and restarts it.
@@ -994,7 +994,7 @@ export const runNodeManager = (
           const changed = yield* editNodeConfigFile(context);
           if (changed && installed && platform !== null) {
             const restart = yield* ask(
-              Prompt.confirm({ message: "Restart Ryco to use them?", initial: true }),
+              Prompt.Confirm({ message: "Restart Ryco to use them?", initial: true }),
             );
             if (restart) {
               yield* promise(() => restartNodeService(platform, context.serviceLabel));
@@ -1006,7 +1006,7 @@ export const runNodeManager = (
         case "remove":
           if (platform !== null) {
             const sure = yield* ask(
-              Prompt.confirm({
+              Prompt.Confirm({
                 message:
                   "Remove the background service? Settings, projects, and pairings are kept.",
                 initial: false,

@@ -2,7 +2,6 @@ import {
   Cause,
   Effect,
   Exit,
-  Option,
   Result,
   Schema,
   SchemaGetter,
@@ -50,7 +49,7 @@ export const formatSchemaError = (cause: Cause.Cause<Schema.SchemaError>) => {
  * Mirrors `SchemaGetter.parseJson()` but uses `parseLenientJson` instead
  * of `JSON.parse`.
  */
-const parseLenientJsonGetter = SchemaGetter.onSome((input: string) =>
+const parseLenientJsonGetter = SchemaGetter.transformEffect((input: string) =>
   Effect.try({
     try: () => {
       // Strip single-line comments — alternation preserves quoted strings.
@@ -68,7 +67,7 @@ const parseLenientJsonGetter = SchemaGetter.onSome((input: string) =>
       // Strip trailing commas before `}` or `]`.
       stripped = stripped.replace(/,(\s*[}\]])/g, "$1");
 
-      return Option.some(JSON.parse(stripped));
+      return JSON.parse(stripped);
     },
     catch: (e) => new SchemaIssue.InvalidValue({ message: String(e) }, input),
   }),

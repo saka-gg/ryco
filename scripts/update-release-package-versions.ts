@@ -17,7 +17,8 @@ interface UpdateReleasePackageVersionsOptions {
 }
 
 const PackageJsonSchema = Schema.Record(Schema.String, Schema.Unknown);
-const PrettyJsonString = SchemaGetter.parseJson<string>().compose(
+const PrettyJsonString = SchemaGetter.compose(
+  SchemaGetter.parseJson<string>(),
   SchemaGetter.stringifyJson({ space: 2 }),
 );
 const PackageJsonPrettyJson = Schema.fromJsonString(PackageJsonSchema).pipe(
@@ -54,21 +55,21 @@ export const updateReleasePackageVersions = Effect.fn("updateReleasePackageVersi
 
 const writeGithubOutput = Effect.fn("writeGithubOutput")(function* (changed: boolean) {
   const fs = yield* FileSystem.FileSystem;
-  const githubOutputPath = yield* Config.nonEmptyString("GITHUB_OUTPUT");
+  const githubOutputPath = yield* Config.NonEmptyString("GITHUB_OUTPUT");
   yield* fs.writeFileString(githubOutputPath, `changed=${changed}\n`, { flag: "a" });
 });
 
 export const updateReleasePackageVersionsCommand = Command.make(
   "update-release-package-versions",
   {
-    version: Argument.string("version").pipe(
+    version: Argument.String("version").pipe(
       Argument.withDescription("Release version to write into each releasable package.json."),
     ),
-    root: Flag.string("root").pipe(
+    root: Flag.String("root").pipe(
       Flag.withDescription("Workspace root used to resolve the release package manifests."),
       Flag.optional,
     ),
-    githubOutput: Flag.boolean("github-output").pipe(
+    githubOutput: Flag.Boolean("github-output").pipe(
       Flag.withDescription("Append changed=<boolean> to GITHUB_OUTPUT."),
       Flag.withDefault(false),
     ),

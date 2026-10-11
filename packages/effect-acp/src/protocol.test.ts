@@ -162,7 +162,7 @@ it.layer(NodeServices.layer)("effect-acp protocol", (it) => {
           direction: "outgoing",
           stage: "raw",
           payload:
-            '{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"session-1"},"id":"","headers":[]}\n',
+            '{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"session-1"},"id":""}\n',
         },
       ]);
     }),
@@ -207,7 +207,6 @@ it.layer(NodeServices.layer)("effect-acp protocol", (it) => {
         params: {
           hello: "world",
         },
-        headers: [],
       });
 
       yield* Queue.offer(
@@ -328,7 +327,6 @@ it.layer(NodeServices.layer)("effect-acp protocol", (it) => {
         params: {
           hello: "world",
         },
-        headers: [],
       });
 
       yield* Fiber.interrupt(response);
@@ -388,7 +386,7 @@ it.layer(NodeServices.layer)("effect-acp protocol", (it) => {
     }),
   );
 
-  it.effect("does not emit a second process-exit error after a decode failure", () =>
+  it.effect("skips malformed output and reports the process exit once", () =>
     Effect.gen(function* () {
       const handle = yield* makeHandle({
         ACP_MOCK_MALFORMED_OUTPUT: "1",
@@ -415,7 +413,9 @@ it.layer(NodeServices.layer)("effect-acp protocol", (it) => {
         readonly cause: unknown;
       };
       assert.equal(defect._tag, "RpcClientDefect");
-      assert.instanceOf(defect.cause, AcpError.AcpProtocolParseError);
+      // Effect's NDJSON parser drops lines that are not JSON, so the exit is the failure.
+      assert.instanceOf(defect.cause, AcpError.AcpProcessExitedError);
+      assert.equal((defect.cause as AcpError.AcpProcessExitedError).code, 23);
     }),
   );
 

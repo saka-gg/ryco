@@ -53,6 +53,7 @@ import {
 } from "effect";
 import { ChildProcessSpawner } from "effect/process";
 import { FetchHttpClient, HttpBody, HttpClient, HttpRouter, HttpServer } from "effect/http";
+import type { NetAddress } from "effect/net";
 import { OtlpSerialization, OtlpTracer } from "effect/observability";
 import { RpcClient, RpcSerialization } from "effect/rpc";
 import * as Socket from "effect/socket/Socket";
@@ -1071,10 +1072,10 @@ const wsRpcProtocolLayer = (wsUrl: string) => {
   const { cookie, origin, url } = parseSessionCookieFromWsUrl(wsUrl);
   const webSocketConstructorLayer = Layer.succeed(
     Socket.WebSocketConstructor,
-    (socketUrl, protocols) =>
+    (socketUrl, options) =>
       new NodeSocket.NodeWS.WebSocket(
         socketUrl,
-        protocols,
+        typeof options === "string" || Array.isArray(options) ? options : undefined,
         cookie || origin
           ? {
               headers: {
@@ -1120,7 +1121,7 @@ const appendOriginToWsUrl = (url: string, origin: string) => {
 const getHttpServerUrl = (pathname = "") =>
   Effect.gen(function* () {
     const server = yield* HttpServer.HttpServer;
-    const address = server.address as HttpServer.TcpAddress;
+    const address = server.address as NetAddress.InetAddress;
     return `http://127.0.0.1:${address.port}${pathname}`;
   });
 
@@ -1278,7 +1279,7 @@ const getWsServerUrl = (
 ) =>
   Effect.gen(function* () {
     const server = yield* HttpServer.HttpServer;
-    const address = server.address as HttpServer.TcpAddress;
+    const address = server.address as NetAddress.InetAddress;
     const baseUrl = `ws://127.0.0.1:${address.port}${pathname}`;
     if (options?.authenticated === false) {
       return baseUrl;

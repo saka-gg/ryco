@@ -319,8 +319,9 @@ export function createWsRpcProtocolLayer(
 
   const trackingWebSocketConstructorLayer = Layer.succeed(
     Socket.WebSocketConstructor,
-    (socketUrl, protocols) => {
+    (socketUrl, options) => {
       lifecycle.onAttempt(socketUrl);
+      const protocols = toWebSocketProtocols(options);
       const socket = handlers?.webSocketConstructor
         ? handlers.webSocketConstructor(socketUrl, protocols)
         : // SocketService is intentionally platform-neutral; Effect's browser seam requires this bridge.
@@ -473,4 +474,18 @@ export function createWsRpcProtocolLayer(
     requestHooksLayer,
     connectionHooksLayer,
   );
+}
+
+/**
+ * Effect passes its WebSocket constructor either subprotocols or client
+ * options. The platform seam is browser-shaped and takes only subprotocols, so
+ * client options are rejected the way Effect's global constructor rejects them.
+ */
+function toWebSocketProtocols(
+  options: Socket.WebSocketConstructorOptions | undefined,
+): string | ReadonlyArray<string> | undefined {
+  if (options !== undefined && typeof options !== "string" && !Array.isArray(options)) {
+    throw new TypeError("WebSocket client options are not supported by the platform WebSocket.");
+  }
+  return options;
 }

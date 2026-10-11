@@ -1,5 +1,6 @@
 import { Schema } from "effect";
 
+import { rejectExcessProperties } from "./baseSchemas.ts";
 import { HubAccountId } from "./hostedIdentity.ts";
 import {
   E2eeAuthorizationEpoch,
@@ -44,9 +45,6 @@ export const CLIENT_PREKEY_CERTIFICATE_MAX_BYTES = 1_094;
 export const CLIENT_PREKEY_CERTIFICATE_BASE64URL_MAX_CHARS = 1_459;
 export const NODE_E2EE_CAPABILITY_STATEMENT_MAX_BYTES = RELAY_E2EE_CAPABILITY_STATEMENT_MAX_BYTES;
 export const NODE_E2EE_CAPABILITY_STATEMENT_BASE64URL_MAX_CHARS = 6_920;
-
-const strict = <S extends Schema.Top>(schema: S): S =>
-  schema.annotate({ parseOptions: { onExcessProperty: "error" } }) as S;
 
 const UInt32 = Schema.Int.check(
   Schema.isGreaterThanOrEqualTo(0),
@@ -158,7 +156,7 @@ const ReasonCode = Schema.String.check(
   Schema.isPattern(/^[a-z][a-z0-9_]*$/),
 );
 
-export const HubDeviceGrantClaims = strict(
+export const HubDeviceGrantClaims = rejectExcessProperties(
   Schema.Struct({
     version: Schema.Literal(1),
     suiteId: Schema.Literal(2),
@@ -206,7 +204,7 @@ export const HubDeviceGrantClaims = strict(
 );
 export type HubDeviceGrantClaims = typeof HubDeviceGrantClaims.Type;
 
-export const NativeE2eeEnrollmentUpsertRequest = strict(
+export const NativeE2eeEnrollmentUpsertRequest = rejectExcessProperties(
   Schema.Struct({
     protocolVersion: Schema.Literal(NATIVE_E2EE_PROTOCOL_VERSION),
     hubOrigin: HubOrigin,
@@ -232,7 +230,7 @@ export const NativeE2eeEnrollmentUpsertRequest = strict(
 );
 export type NativeE2eeEnrollmentUpsertRequest = typeof NativeE2eeEnrollmentUpsertRequest.Type;
 
-export const AccountE2eeDeviceSummary = strict(
+export const AccountE2eeDeviceSummary = rejectExcessProperties(
   Schema.Struct({
     enrollmentId: NativeE2eeEnrollmentId,
     enrollmentRevision: NativeE2eeEnrollmentRevision,
@@ -272,7 +270,7 @@ export const AccountE2eeDeviceSummary = strict(
 );
 export type AccountE2eeDeviceSummary = typeof AccountE2eeDeviceSummary.Type;
 
-export const NativeE2eeEnrollmentUpsertResponse = strict(
+export const NativeE2eeEnrollmentUpsertResponse = rejectExcessProperties(
   Schema.Struct({
     protocolVersion: Schema.Literal(NATIVE_E2EE_PROTOCOL_VERSION),
     enrollment: AccountE2eeDeviceSummary,
@@ -280,7 +278,7 @@ export const NativeE2eeEnrollmentUpsertResponse = strict(
 );
 export type NativeE2eeEnrollmentUpsertResponse = typeof NativeE2eeEnrollmentUpsertResponse.Type;
 
-export const AccountE2eeDeviceListResponse = strict(
+export const AccountE2eeDeviceListResponse = rejectExcessProperties(
   Schema.Struct({
     protocolVersion: Schema.Literal(NATIVE_E2EE_PROTOCOL_VERSION),
     devices: Schema.Array(AccountE2eeDeviceSummary).check(
@@ -296,7 +294,7 @@ export const AccountE2eeDeviceListResponse = strict(
 );
 export type AccountE2eeDeviceListResponse = typeof AccountE2eeDeviceListResponse.Type;
 
-export const AccountE2eeDeviceRenameRequest = strict(
+export const AccountE2eeDeviceRenameRequest = rejectExcessProperties(
   Schema.Struct({
     expectedEnrollmentRevision: NativeE2eeEnrollmentRevision,
     deviceLabel: DeviceLabel,
@@ -304,7 +302,7 @@ export const AccountE2eeDeviceRenameRequest = strict(
 );
 export type AccountE2eeDeviceRenameRequest = typeof AccountE2eeDeviceRenameRequest.Type;
 
-export const AccountE2eeDeviceRevokeRequest = strict(
+export const AccountE2eeDeviceRevokeRequest = rejectExcessProperties(
   Schema.Struct({
     expectedEnrollmentRevision: NativeE2eeEnrollmentRevision,
     reasonCode: ReasonCode,
@@ -312,7 +310,7 @@ export const AccountE2eeDeviceRevokeRequest = strict(
 );
 export type AccountE2eeDeviceRevokeRequest = typeof AccountE2eeDeviceRevokeRequest.Type;
 
-export const AccountE2eeDeviceMutationResponse = strict(
+export const AccountE2eeDeviceMutationResponse = rejectExcessProperties(
   Schema.Struct({
     protocolVersion: Schema.Literal(NATIVE_E2EE_PROTOCOL_VERSION),
     enrollment: AccountE2eeDeviceSummary,
@@ -320,7 +318,7 @@ export const AccountE2eeDeviceMutationResponse = strict(
 );
 export type AccountE2eeDeviceMutationResponse = typeof AccountE2eeDeviceMutationResponse.Type;
 
-export const HubGrantVerificationKey = strict(
+export const HubGrantVerificationKey = rejectExcessProperties(
   Schema.Struct({
     keyId: HubGrantVerificationKeyId,
     publicKey: Base64Url32,
@@ -344,7 +342,7 @@ const HubGrantVerificationKeys = Schema.Array(HubGrantVerificationKey).check(
   ),
 );
 
-export const HubGrantVerificationKeysetResponse = strict(
+export const HubGrantVerificationKeysetResponse = rejectExcessProperties(
   Schema.Struct({
     protocolVersion: Schema.Literal(NATIVE_E2EE_PROTOCOL_VERSION),
     generation: E2eeKeysetGeneration,
@@ -353,7 +351,7 @@ export const HubGrantVerificationKeysetResponse = strict(
 );
 export type HubGrantVerificationKeysetResponse = typeof HubGrantVerificationKeysetResponse.Type;
 
-export const NativeAccountGrantRelayTicketRequest = strict(
+export const NativeAccountGrantRelayTicketRequest = rejectExcessProperties(
   Schema.Struct({
     protocolVersion: Schema.Literal(NATIVE_E2EE_PROTOCOL_VERSION),
     nodeId: RelayNodeId,
@@ -368,7 +366,7 @@ export const NativeAccountGrantRelayTicketRequest = strict(
 );
 export type NativeAccountGrantRelayTicketRequest = typeof NativeAccountGrantRelayTicketRequest.Type;
 
-export const NativeAccountGrantRelayTicketResponse = strict(
+export const NativeAccountGrantRelayTicketResponse = rejectExcessProperties(
   Schema.Struct({
     protocolVersion: Schema.Literal(NATIVE_E2EE_PROTOCOL_VERSION),
     ticket: Base64Url(43, 86),
@@ -389,7 +387,7 @@ export const NativeAccountGrantRelayTicketResponse = strict(
 export type NativeAccountGrantRelayTicketResponse =
   typeof NativeAccountGrantRelayTicketResponse.Type;
 
-export const NativeE2eeEnrollmentRevocationEvent = strict(
+export const NativeE2eeEnrollmentRevocationEvent = rejectExcessProperties(
   Schema.Struct({
     protocolVersion: Schema.Literal(NATIVE_E2EE_PROTOCOL_VERSION),
     enrollmentId: NativeE2eeEnrollmentId,

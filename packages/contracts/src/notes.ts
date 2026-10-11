@@ -1,5 +1,5 @@
 import { Schema } from "effect";
-import { IsoDateTime, NonNegativeInt, ProjectId } from "./baseSchemas.ts";
+import { IsoDateTime, NonNegativeInt, ProjectId, rejectExcessProperties } from "./baseSchemas.ts";
 import { WorktreeId } from "./worktree.ts";
 
 /** `worktree` belongs to one checkout; `project` is shared by the whole project. */
@@ -46,7 +46,7 @@ export const NotesCommand = Schema.Struct({
   body: NoteBody,
   /** The revision the edit was based on (0 for a document never saved). */
   expectedRevision: NonNegativeInt,
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type NotesCommand = typeof NotesCommand.Type;
 
 export class NotesError extends Schema.TaggedError<NotesError>()("NotesError", {
