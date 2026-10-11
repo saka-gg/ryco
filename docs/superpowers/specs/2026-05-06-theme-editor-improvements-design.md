@@ -69,8 +69,8 @@ CSS wiring (`index.css`):
 
 ```css
 :root {
-  --font-family-sans: "DM Sans", -apple-system, /* ... */;
-  --font-family-mono: "SF Mono", /* ... */;
+  --font-family-sans: "DM Sans", -apple-system /* ... */;
+  --font-family-mono: "SF Mono" /* ... */;
   --font-size-base: 16px;
 }
 html {

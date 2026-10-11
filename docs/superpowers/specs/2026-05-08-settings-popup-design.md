@@ -27,7 +27,7 @@ components.
 In scope:
 
 - New Zustand store `settingsDialogStore.ts` exposing `{ open, section,
-openSettings(section?), closeSettings(), setSection() }`.
+  openSettings(section?), closeSettings(), setSection() }`.
 - New component `SettingsDialog.tsx` that renders the dialog popup (header
   with title + Restore Defaults + close, two-pane body, no footer). Mounted
   once at the root layout via `AppSidebarLayout`.
@@ -60,7 +60,12 @@ Out of scope:
 import { create } from "zustand";
 
 export type SettingsSectionId =
-  "general" | "providers" | "appearance" | "source-control" | "connections" | "archived";
+  | "general"
+  | "providers"
+  | "appearance"
+  | "source-control"
+  | "connections"
+  | "archived";
 
 interface SettingsDialogStore {
   open: boolean;

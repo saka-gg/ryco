@@ -95,7 +95,7 @@ No store schema change. `useTerminalStateStore` already provides:
   `Close active`), reusing `TerminalActionButton` and the existing
   shortcut-label / disabled logic verbatim.
 - The `hasTerminalSidebar` boolean and its conditional layout (`flex
-gap-1.5`, `min-w-0 flex-1` left + sidebar right) are removed. The
+  gap-1.5`, `min-w-0 flex-1` left + sidebar right) are removed. The
   viewport always takes the full drawer width below the tab strip.
 
 ### Component layout
@@ -144,7 +144,7 @@ from the `.tsx`):
   — `"Terminal N"` for single-terminal groups, `"Split N"` for multi-
   terminal groups. `groupIndex` is 1-based for display.
 - `groupHasRunningTerminal(group: ThreadTerminalGroup, runningTerminalIds:
-readonly string[]): boolean` — true if any terminal in the group appears
+  readonly string[]): boolean` — true if any terminal in the group appears
   in `runningTerminalIds`.
 
 ## Testing

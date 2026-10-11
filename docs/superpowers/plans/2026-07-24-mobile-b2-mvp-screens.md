@@ -179,7 +179,7 @@ surface).
 - Rewrite `src/App.tsx`: `AppProviders` (B1) + `AppearancePreferencesProvider` (copied from
   `features/settings/appearance/`, storage on `mobileKV`) + `BlurTargetView` +
   `Navigation = createStaticNavigation(RootStack)` with `appLinking.prefixes =
-[Linking.createURL("/"), "ryco://", "ryco-dev://", "ryco-preview://"]` (matching the
+  [Linking.createURL("/"), "ryco://", "ryco-dev://", "ryco-preview://"]` (matching the
   per-variant `scheme`; keep the expo-development-client URL filter). Note: the plain
   `ryco*` schemes are B1's shipped per-variant schemes from `app.config.ts` and deliberately
   supersede the spec's "reverse-DNS schemes" wording in §7. Theme DarkTheme/DefaultTheme,
@@ -276,7 +276,7 @@ surface).
   (`diffParser.ts`), with colocated tests.
 - The Thread screen retains the supervisor subscription while mounted (spec Thread-row
   requirement): `useEffect(() => retainThreadDetailSubscription(environmentId, threadId),
-[environmentId, threadId])` per `apps/web/src/components/ChatView.tsx:843–848`, via a thin
+  [environmentId, threadId])` per `apps/web/src/components/ChatView.tsx:843–848`, via a thin
   `src/connection/threadDetail.ts` wrapper over `registry.driver.supervisor`.
 - Timeline: `deriveThreadActivityViewModel` + `deriveTimelineEntries` from
   `@ryco/client-runtime/state/session` (ChatView ~1349–1500 consumption template); this
@@ -369,7 +369,7 @@ surface).
   (`resolveRemotePairingTarget` → `fetchRemoteEnvironmentDescriptor` pre-auth → registry
   snapshot → `bootstrapRemoteBearerSession` → persist record → `writeBearerToken`; on write
   failure roll the registry back and throw `"Unable to persist saved environment
-credentials."` → upsert → `ensureSavedEnvironmentConnection`),
+  credentials."` → upsert → `ensureSavedEnvironmentConnection`),
   `reconnectSavedEnvironment`, `disconnectSavedEnvironment`, `removeSavedEnvironment`
   (disconnect + `disposeThreadDetailSubscriptionsForEnvironment` + registry.remove +
   runtime.clear + `useStore.getState().removeEnvironmentState` + `removeBearerToken`),
@@ -377,8 +377,8 @@ credentials."` → upsert → `ensureSavedEnvironmentConnection`),
   `fetchRemoteSessionState` → `registry.rename(envId, serverConfig.environment.label)` +
   runtime patch), and the web error surfaces verbatim (missing credential →
   `requires-auth` patch + `"Saved environment is missing its saved credential. Pair it
-again."`; 401 on refresh → drop token + `"Saved environment credential expired. Pair it
-again."`). Note: the route table's `createPrimaryAuth` pairing cell is superseded by the
+  again."`; 401 on refresh → drop token + `"Saved environment credential expired. Pair it
+  again."`). Note: the route table's `createPrimaryAuth` pairing cell is superseded by the
   spec's own auth-story section ("direct-node bearer … the MVP's primary connection path")
   and B1's shipped bearer pairing — mobile has no primary-origin environment, so
   `createPrimaryAuth` is deliberately not used.

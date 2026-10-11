@@ -234,7 +234,11 @@ web: inbox folding (planDelegatedNesting) · DelegatedThreadsSection (parent) ·
    - `planDelegatedNesting(items, options?)`, the generic planner (D7–D9):
      ```ts
      export type DelegatedNestingUrgency =
-       "needs-input" | "active" | "recent" | "snoozed" | "settled";
+       | "needs-input"
+       | "active"
+       | "recent"
+       | "snoozed"
+       | "settled";
      export interface DelegatedNestingItem {
        readonly key: string; // scopedThreadKey(scopeThreadRef(environmentId, threadId))
        readonly environmentId: EnvironmentId;

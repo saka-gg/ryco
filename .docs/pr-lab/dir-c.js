@@ -181,54 +181,61 @@
       };
 
       /* ------------------------------------------------------ skeleton */
-      root.innerHTML = String(html`<div class="c-app">
-        <aside class="c-list" aria-label="Pull requests">
-          <div class="c-list-panel">
-            <div class="c-list-top">
-              <button
-                class="ib c-list-tog"
-                type="button"
-                data-act="list-toggle"
-                data-tip="Collapse list"
-                data-kbd="L"
-              >
-                ${icon("sidebar")}
-              </button>
-              <label class="c-search"
-                >${icon("search")}<input
-                  type="text"
-                  spellcheck="false"
-                  autocomplete="off"
-                  placeholder="Search or paste a PR link"
-                  aria-label="Search pull requests"
-                /><kbd>/</kbd></label
-              >
-              <button class="ib c-filter-b" type="button" data-act="list-filter" data-tip="Filter">
-                ${icon("filter")}<i class="c-dot"></i>
-              </button>
-            </div>
-            <div class="c-list-scroll scroll">
-              <div class="c-list-in">
-                <i class="c-list-sel" aria-hidden="true"></i>
-                <div class="c-list-rows"></div>
+      root.innerHTML = String(
+        html`<div class="c-app">
+          <aside class="c-list" aria-label="Pull requests">
+            <div class="c-list-panel">
+              <div class="c-list-top">
+                <button
+                  class="ib c-list-tog"
+                  type="button"
+                  data-act="list-toggle"
+                  data-tip="Collapse list"
+                  data-kbd="L"
+                >
+                  ${icon("sidebar")}
+                </button>
+                <label class="c-search"
+                  >${icon("search")}<input
+                    type="text"
+                    spellcheck="false"
+                    autocomplete="off"
+                    placeholder="Search or paste a PR link"
+                    aria-label="Search pull requests"
+                  /><kbd>/</kbd></label
+                >
+                <button
+                  class="ib c-filter-b"
+                  type="button"
+                  data-act="list-filter"
+                  data-tip="Filter"
+                >
+                  ${icon("filter")}<i class="c-dot"></i>
+                </button>
+              </div>
+              <div class="c-list-scroll scroll">
+                <div class="c-list-in">
+                  <i class="c-list-sel" aria-hidden="true"></i>
+                  <div class="c-list-rows"></div>
+                </div>
               </div>
             </div>
-          </div>
-        </aside>
-        <main class="c-detail">
-          <header class="c-head"><div class="c-head-in"></div></header>
-          <div class="c-body">
-            <div class="c-doc scroll"></div>
-            <section class="c-sheet" aria-label="Changed files" inert></section>
-            <div class="c-rbar"></div>
-            <div class="c-selchip" hidden>
-              <button class="chip agent" type="button" data-act="ask-selection">
-                ${icon("sparkle")}Ask agent
-              </button>
+          </aside>
+          <main class="c-detail">
+            <header class="c-head"><div class="c-head-in"></div></header>
+            <div class="c-body">
+              <div class="c-doc scroll"></div>
+              <section class="c-sheet" aria-label="Changed files" inert></section>
+              <div class="c-rbar"></div>
+              <div class="c-selchip" hidden>
+                <button class="chip agent" type="button" data-act="ask-selection">
+                  ${icon("sparkle")}Ask agent
+                </button>
+              </div>
             </div>
-          </div>
-        </main>
-      </div>`);
+          </main>
+        </div>`,
+      );
       const R = {
         app: $(".c-app", root),
         list: $(".c-list", root),
@@ -714,12 +721,14 @@
         const p = cur();
         const d = curD();
         const grid = h("div", "c-docgrid");
-        grid.innerHTML = String(html`<div class="c-mast"></div>
-          <aside class="c-rail" aria-label="Status">
-            <div class="c-actblk"></div>
-            <div class="c-facts"></div>
-          </aside>
-          <div class="c-docbody"></div>`);
+        grid.innerHTML = String(
+          html`<div class="c-mast"></div>
+            <aside class="c-rail" aria-label="Status">
+              <div class="c-actblk"></div>
+              <div class="c-facts"></div>
+            </aside>
+            <div class="c-docbody"></div>`,
+        );
         R.grid = grid;
         R.mast = $(".c-mast", grid);
         R.rail = $(".c-rail", grid);
@@ -1143,104 +1152,114 @@
         const bad = C.jobs.filter((j) => ["fail", "run", "queued"].includes(L.runKind(j)));
         const badStatuses = C.statuses.filter((s) => L.checkKind(s.state) === "fail");
         const out = [];
-        out.push(html`<section class="c-fact" data-k="checks">
-          <button
-            class="c-fact-h"
-            type="button"
-            data-act="goto-checks"
-            data-tip="Open checks"
-            data-kbd="3"
-          >
-            ${raw(donutHTML(c, animate))}<span class="k">Checks</span
-            ><span class="v tnum"
-              >${c.total ? html`${c.passed}<span class="of">/${c.total}</span>` : html`<span class="of">None</span>`}</span
+        out.push(
+          html`<section class="c-fact" data-k="checks">
+            <button
+              class="c-fact-h"
+              type="button"
+              data-act="goto-checks"
+              data-tip="Open checks"
+              data-kbd="3"
             >
-          </button>
-          ${
-            bad.length || badStatuses.length || (c.failed && !C.jobs.length)
-              ? html`<div class="c-fact-b c-cks">
-                  ${bad.map(
-                    (j) =>
-                      html`<button
-                        class="c-ck k-${L.runKind(j)}"
-                        type="button"
-                        data-act="goto-job"
-                        data-job="${j.id}"
-                      >
-                        ${L.checkGlyph(j, { size: 12, tip: false })}<span class="trunc"
-                          >${j.name}</span
-                        ><span class="c-ck-st">${KIND_WORD[L.runKind(j)]}</span>
-                      </button>`,
-                  )}${badStatuses.map((s) => html`<span class="c-ck k-fail">${L.checkGlyph(s.state, { size: 12, tip: false })}<span class="trunc">${s.name}</span></span>`)}${!C.jobs.length && c.failed ? html`<span class="c-ck k-fail">${L.checkGlyph("fail", { size: 12, tip: false })}<span class="trunc">${plural(c.failed, "check")} failing</span></span>` : ""}
-                </div>`
-              : ""
-          }
-        </section>`);
+              ${raw(donutHTML(c, animate))}<span class="k">Checks</span
+              ><span class="v tnum"
+                >${c.total ? html`${c.passed}<span class="of">/${c.total}</span>` : html`<span class="of">None</span>`}</span
+              >
+            </button>
+            ${
+              bad.length || badStatuses.length || (c.failed && !C.jobs.length)
+                ? html`<div class="c-fact-b c-cks">
+                    ${bad.map(
+                      (j) =>
+                        html`<button
+                          class="c-ck k-${L.runKind(j)}"
+                          type="button"
+                          data-act="goto-job"
+                          data-job="${j.id}"
+                        >
+                          ${L.checkGlyph(j, { size: 12, tip: false })}<span class="trunc"
+                            >${j.name}</span
+                          ><span class="c-ck-st">${KIND_WORD[L.runKind(j)]}</span>
+                        </button>`,
+                    )}${badStatuses.map((s) => html`<span class="c-ck k-fail">${L.checkGlyph(s.state, { size: 12, tip: false })}<span class="trunc">${s.name}</span></span>`)}${!C.jobs.length && c.failed ? html`<span class="c-ck k-fail">${L.checkGlyph("fail", { size: 12, tip: false })}<span class="trunc">${plural(c.failed, "check")} failing</span></span>` : ""}
+                  </div>`
+                : ""
+            }
+          </section>`,
+        );
         const dec = DEC[p.reviewDecision];
         const revs = (d.reviewers && d.reviewers.length ? d.reviewers : p.reviewers) || [];
-        out.push(html`<section class="c-fact" data-k="reviews">
-          <div class="c-fact-h">
-            <span class="k"
-              >Reviews${p.state === "open" ? html`<button class="ib sm c-edit" type="button" data-act="edit-reviewers" data-tip="Request reviewers">${icon("plus")}</button>` : ""}</span
-            ><span class="v ${dec ? "t-" + dec[1] : "dim"}">${dec ? dec[0] : "None yet"}</span>
-          </div>
-          <div class="c-fact-b c-revs">
-            ${revs.map((r) => {
-              const u = M.user(r.login);
-              const name =
-                r.login === VIEWER ? "You" : u.team ? "@" + r.login.split("/").pop() : r.login;
-              const tip =
-                r.state === "pending"
-                  ? "Review requested"
-                  : `${{ approved: "Approved", changes_requested: "Requested changes", commented: "Commented", dismissed: "Dismissed" }[r.state] || ""}${r.submittedAt ? " · " + L.agoLong(r.submittedAt) : ""}`;
-              return html`<div class="c-rev-r">
-                ${L.avatar(r.login, { size: 18 })}<span class="trunc">${name}</span
-                >${L.reviewGlyph(r.state, { size: 13, tip })}
-              </div>`;
-            })}${revs.length ? "" : html`<span class="c-none">No reviewers</span>`}
-          </div>
-        </section>`);
+        out.push(
+          html`<section class="c-fact" data-k="reviews">
+            <div class="c-fact-h">
+              <span class="k"
+                >Reviews${p.state === "open" ? html`<button class="ib sm c-edit" type="button" data-act="edit-reviewers" data-tip="Request reviewers">${icon("plus")}</button>` : ""}</span
+              ><span class="v ${dec ? "t-" + dec[1] : "dim"}">${dec ? dec[0] : "None yet"}</span>
+            </div>
+            <div class="c-fact-b c-revs">
+              ${revs.map((r) => {
+                const u = M.user(r.login);
+                const name =
+                  r.login === VIEWER ? "You" : u.team ? "@" + r.login.split("/").pop() : r.login;
+                const tip =
+                  r.state === "pending"
+                    ? "Review requested"
+                    : `${{ approved: "Approved", changes_requested: "Requested changes", commented: "Commented", dismissed: "Dismissed" }[r.state] || ""}${r.submittedAt ? " · " + L.agoLong(r.submittedAt) : ""}`;
+                return html`<div class="c-rev-r">
+                  ${L.avatar(r.login, { size: 18 })}<span class="trunc">${name}</span
+                  >${L.reviewGlyph(r.state, { size: 13, tip })}
+                </div>`;
+              })}${revs.length ? "" : html`<span class="c-none">No reviewers</span>`}
+            </div>
+          </section>`,
+        );
         const threads = d.threads || [];
         const open = d.synthetic
           ? p.unresolvedThreads || 0
           : threads.filter((t) => !t.isResolved).length;
         if (threads.length || open)
-          out.push(html`<section class="c-fact" data-k="threads">
-            <button
-              class="c-fact-h"
-              type="button"
-              data-act="goto-thread"
-              ${open ? "" : "disabled"}
-              data-tip="${open ? "Jump to the next unresolved conversation" : ""}"
-              data-kbd="${open ? "N" : ""}"
-            >
-              <span class="k">Conversations</span
-              ><span class="v ${open ? "t-warn" : "dim"} tnum"
-                >${open ? `${open} unresolved` : "All resolved"}</span
+          out.push(
+            html`<section class="c-fact" data-k="threads">
+              <button
+                class="c-fact-h"
+                type="button"
+                data-act="goto-thread"
+                ${open ? "" : "disabled"}
+                data-tip="${open ? "Jump to the next unresolved conversation" : ""}"
+                data-kbd="${open ? "N" : ""}"
               >
-            </button>
-          </section>`);
+                <span class="k">Conversations</span
+                ><span class="v ${open ? "t-warn" : "dim"} tnum"
+                  >${open ? `${open} unresolved` : "All resolved"}</span
+                >
+              </button>
+            </section>`,
+          );
         if (p.stack) out.push(stackFactHTML(p));
-        out.push(html`<section class="c-fact" data-k="labels">
-          <div class="c-fact-h">
-            <span class="k"
-              >Labels${p.state !== "merged" ? html`<button class="ib sm c-edit" type="button" data-act="edit-labels" data-tip="Edit labels">${icon("plus")}</button>` : ""}</span
-            >
-          </div>
-          <div class="c-fact-b c-lbls">
-            ${p.labels.length ? p.labels.map((l) => L.labelChip(l)) : html`<span class="c-none">None</span>`}
-          </div>
-        </section>`);
-        out.push(html`<section class="c-fact" data-k="assignees">
-          <div class="c-fact-h">
-            <span class="k"
-              >Assignees${p.state !== "merged" ? html`<button class="ib sm c-edit" type="button" data-act="edit-assignees" data-tip="Edit assignees">${icon("plus")}</button>` : ""}</span
-            >
-          </div>
-          <div class="c-fact-b c-asg">
-            ${(p.assignees || []).length ? p.assignees.map((a) => html`<span class="c-asg-i">${L.avatar(a, { size: 18 })}<span>${a === VIEWER ? "You" : a}</span></span>`) : html`<span class="c-none">Nobody</span>`}
-          </div>
-        </section>`);
+        out.push(
+          html`<section class="c-fact" data-k="labels">
+            <div class="c-fact-h">
+              <span class="k"
+                >Labels${p.state !== "merged" ? html`<button class="ib sm c-edit" type="button" data-act="edit-labels" data-tip="Edit labels">${icon("plus")}</button>` : ""}</span
+              >
+            </div>
+            <div class="c-fact-b c-lbls">
+              ${p.labels.length ? p.labels.map((l) => L.labelChip(l)) : html`<span class="c-none">None</span>`}
+            </div>
+          </section>`,
+        );
+        out.push(
+          html`<section class="c-fact" data-k="assignees">
+            <div class="c-fact-h">
+              <span class="k"
+                >Assignees${p.state !== "merged" ? html`<button class="ib sm c-edit" type="button" data-act="edit-assignees" data-tip="Edit assignees">${icon("plus")}</button>` : ""}</span
+              >
+            </div>
+            <div class="c-fact-b c-asg">
+              ${(p.assignees || []).length ? p.assignees.map((a) => html`<span class="c-asg-i">${L.avatar(a, { size: 18 })}<span>${a === VIEWER ? "You" : a}</span></span>`) : html`<span class="c-none">Nobody</span>`}
+            </div>
+          </section>`,
+        );
         return out;
       }
       function stackFactHTML(p) {
@@ -1919,37 +1938,38 @@
         for (const fp of pushes) delete fp._placed;
         return html`<div class="c-commits">
           ${days.map(
-            (g) => html`<section class="c-day c-rv" data-rv="${"day-" + g.day}">
-              <div class="c-sec-h"><span>${g.day}</span></div>
-              <ol class="c-cl">
-                ${g.items.map((it) =>
-                  it.fp
-                    ? html`<li class="c-cfp">
-                        ${icon("rerun")}<span
-                          >${actorB(it.fp.actor)}
-                          force-pushed${it.fp.note ? " · " + it.fp.note : ""}</span
-                        >${timeT(it.fp.at)}
-                      </li>`
-                    : html`<li>
-                        <button
-                          class="c-commit ${st.commit === it.c.short ? "on" : ""}"
-                          type="button"
-                          data-act="commit-scope"
-                          data-sha="${it.c.short}"
-                          data-tip="Review this commit's files"
-                        >
-                          ${L.checkGlyph(it.c.checks || "none", { size: 14, tip: false })}<span
-                            class="c-commit-m trunc"
-                            >${it.c.message}</span
+            (g) =>
+              html`<section class="c-day c-rv" data-rv="${"day-" + g.day}">
+                <div class="c-sec-h"><span>${g.day}</span></div>
+                <ol class="c-cl">
+                  ${g.items.map((it) =>
+                    it.fp
+                      ? html`<li class="c-cfp">
+                          ${icon("rerun")}<span
+                            >${actorB(it.fp.actor)}
+                            force-pushed${it.fp.note ? " · " + it.fp.note : ""}</span
+                          >${timeT(it.fp.at)}
+                        </li>`
+                      : html`<li>
+                          <button
+                            class="c-commit ${st.commit === it.c.short ? "on" : ""}"
+                            type="button"
+                            data-act="commit-scope"
+                            data-sha="${it.c.short}"
+                            data-tip="Review this commit's files"
                           >
-                          <span class="c-commit-a"
-                            >${L.avatar(it.c.author, { size: 16, tip: false })}</span
-                          ><code class="c-sha">${it.c.short}</code>${timeT(it.c.committedAt)}
-                        </button>
-                      </li>`,
-                )}
-              </ol>
-            </section>`,
+                            ${L.checkGlyph(it.c.checks || "none", { size: 14, tip: false })}<span
+                              class="c-commit-m trunc"
+                              >${it.c.message}</span
+                            >
+                            <span class="c-commit-a"
+                              >${L.avatar(it.c.author, { size: 16, tip: false })}</span
+                            ><code class="c-sha">${it.c.short}</code>${timeT(it.c.committedAt)}
+                          </button>
+                        </li>`,
+                  )}
+                </ol>
+              </section>`,
           )}
         </div>`;
       }
@@ -2648,60 +2668,63 @@
         const a = s.assessment;
         const aTone = { ready: "ok", blocked: "err", pending: "warn", merged: "merged" }[a.state];
         const node = h("div", "c-stk");
-        node.innerHTML = String(html`<div class="c-stk-h">
-            <div class="c-stk-t">
-              ${icon("stack")}<b>Stack #${s.number}</b
-              ><span class="dim">${s.size} layers into <code>${s.baseRefName}</code></span>
+        node.innerHTML = String(
+          html`<div class="c-stk-h">
+              <div class="c-stk-t">
+                ${icon("stack")}<b>Stack #${s.number}</b
+                ><span class="dim">${s.size} layers into <code>${s.baseRefName}</code></span>
+              </div>
+              <div class="c-stk-a t-${aTone}">
+                <i class="c-dotc"></i
+                >${a.state === "ready" ? "Every layer can merge" : a.state === "merged" ? "Stack merged" : a.label}
+              </div>
             </div>
-            <div class="c-stk-a t-${aTone}">
-              <i class="c-dotc"></i
-              >${a.state === "ready" ? "Every layer can merge" : a.state === "merged" ? "Stack merged" : a.label}
-            </div>
-          </div>
-          <ol class="c-stk-l">
-            ${top.map((e) => {
-              const na = M.nextAction(e);
-              const plan = M.mergePlan(e.number);
-              const isCur = e.number === p.number;
-              const canMerge = e.state === "open" && !e.isDraft;
-              return html`<li class="c-stk-i ${isCur ? "cur" : ""}">
-                <button
-                  class="c-stk-row"
-                  type="button"
-                  data-act="stack-go"
-                  data-pr="${e.number}"
-                  ${isCur ? raw('aria-current="page"') : ""}
-                >
-                  <span class="c-stk-g">${L.stateGlyph(e, { size: 14, tip: false })}</span>
-                  <span class="c-stk-tx"
-                    ><span class="c-stk-ti"><span class="tnum">#${e.number}</span> ${e.title}</span
-                    ><span class="c-stk-na t-${na.tone}"
-                      >${isCur ? "This pull request · " : ""}${shortAction(na)}</span
-                    ></span
+            <ol class="c-stk-l">
+              ${top.map((e) => {
+                const na = M.nextAction(e);
+                const plan = M.mergePlan(e.number);
+                const isCur = e.number === p.number;
+                const canMerge = e.state === "open" && !e.isDraft;
+                return html`<li class="c-stk-i ${isCur ? "cur" : ""}">
+                  <button
+                    class="c-stk-row"
+                    type="button"
+                    data-act="stack-go"
+                    data-pr="${e.number}"
+                    ${isCur ? raw('aria-current="page"') : ""}
                   >
-                </button>
-                ${
-                  canMerge
-                    ? html`<button
-                        class="btn sm c-stk-m"
-                        type="button"
-                        data-act="stack-merge"
-                        data-pr="${e.number}"
-                        ${plan.blockedBy ? raw(`aria-disabled="true" data-tip="${esc(`#${plan.blockedBy.pr.number}: ${plan.blockedBy.reason}`)}"`) : raw(`data-tip="${esc(`Merge ${plan.layers.map((l) => "#" + l.number).join(", ")} into ${plan.base}`)}"`)}
-                      >
-                        ${plan.layers.length > 1 ? `Merge ${plan.layers.length}` : "Merge"}
-                      </button>`
-                    : ""
-                }
-              </li>`;
-            })}
-            <li class="c-stk-base">
-              <span class="c-stk-g"><i></i></span><code>${s.baseRefName}</code>
-            </li>
-          </ol>
-          <div class="c-stk-f">
-            <span><kbd>[</kbd><kbd>]</kbd> move between layers</span>
-          </div>`);
+                    <span class="c-stk-g">${L.stateGlyph(e, { size: 14, tip: false })}</span>
+                    <span class="c-stk-tx"
+                      ><span class="c-stk-ti"
+                        ><span class="tnum">#${e.number}</span> ${e.title}</span
+                      ><span class="c-stk-na t-${na.tone}"
+                        >${isCur ? "This pull request · " : ""}${shortAction(na)}</span
+                      ></span
+                    >
+                  </button>
+                  ${
+                    canMerge
+                      ? html`<button
+                          class="btn sm c-stk-m"
+                          type="button"
+                          data-act="stack-merge"
+                          data-pr="${e.number}"
+                          ${plan.blockedBy ? raw(`aria-disabled="true" data-tip="${esc(`#${plan.blockedBy.pr.number}: ${plan.blockedBy.reason}`)}"`) : raw(`data-tip="${esc(`Merge ${plan.layers.map((l) => "#" + l.number).join(", ")} into ${plan.base}`)}"`)}
+                        >
+                          ${plan.layers.length > 1 ? `Merge ${plan.layers.length}` : "Merge"}
+                        </button>`
+                      : ""
+                  }
+                </li>`;
+              })}
+              <li class="c-stk-base">
+                <span class="c-stk-g"><i></i></span><code>${s.baseRefName}</code>
+              </li>
+            </ol>
+            <div class="c-stk-f">
+              <span><kbd>[</kbd><kbd>]</kbd> move between layers</span>
+            </div>`,
+        );
         return node;
       }
       function openStackPop(fromHash) {
@@ -2833,46 +2856,54 @@
         const own = mine(p);
         if (own && ui.reviewEvent !== "comment") ui.reviewEvent = "comment";
         const node = h("div", "c-rvp");
-        node.innerHTML = String(html`<div class="c-rvp-h">
-            <b>Finish your review</b
-            ><span class="dim tnum"
-              >${n ? plural(n, "pending comment") : "No line comments yet"}</span
+        node.innerHTML = String(
+          html`<div class="c-rvp-h">
+              <b>Finish your review</b
+              ><span class="dim tnum"
+                >${n ? plural(n, "pending comment") : "No line comments yet"}</span
+              >
+            </div>
+            <textarea
+              class="input c-rvp-t"
+              rows="3"
+              placeholder="Leave a summary (optional)"
+              aria-label="Review summary"
             >
-          </div>
-          <textarea
-            class="input c-rvp-t"
-            rows="3"
-            placeholder="Leave a summary (optional)"
-            aria-label="Review summary"
-          >
 ${ui.reviewBody}</textarea>
-          <div class="c-rvp-o" role="radiogroup" aria-label="Review verdict">
-            ${[
-              ["comment", "Comment", "General feedback without a verdict"],
-              ["approve", "Approve", "These changes are good to merge"],
-              ["request", "Request changes", "Must be addressed before merging"],
-            ].map(
-              ([v, l, s]) =>
-                html`<button
-                  class="c-rvp-i ${ui.reviewEvent === v ? "on" : ""} v-${v}"
-                  type="button"
-                  role="radio"
-                  data-v="${v}"
-                  aria-checked="${String(ui.reviewEvent === v)}"
-                  ${own && v !== "comment" ? raw(`aria-disabled="true" data-tip="Authors can't ${v === "approve" ? "approve" : "request changes on"} their own pull request"`) : ""}
-                >
-                  <i class="c-radio"></i><span class="c-rvp-tx"><b>${l}</b><span>${s}</span></span>
-                </button>`,
-            )}
-          </div>
-          <div class="c-rvp-f">
-            <button class="btn sm ghost" type="button" data-r="discard" ${n ? "" : raw("disabled")}>
-              Discard</button
-            ><span class="sp"></span
-            ><button class="btn pri" type="button" data-r="submit">
-              Submit review<kbd>⌘↵</kbd>
-            </button>
-          </div>`);
+            <div class="c-rvp-o" role="radiogroup" aria-label="Review verdict">
+              ${[
+                ["comment", "Comment", "General feedback without a verdict"],
+                ["approve", "Approve", "These changes are good to merge"],
+                ["request", "Request changes", "Must be addressed before merging"],
+              ].map(
+                ([v, l, s]) =>
+                  html`<button
+                    class="c-rvp-i ${ui.reviewEvent === v ? "on" : ""} v-${v}"
+                    type="button"
+                    role="radio"
+                    data-v="${v}"
+                    aria-checked="${String(ui.reviewEvent === v)}"
+                    ${own && v !== "comment" ? raw(`aria-disabled="true" data-tip="Authors can't ${v === "approve" ? "approve" : "request changes on"} their own pull request"`) : ""}
+                  >
+                    <i class="c-radio"></i
+                    ><span class="c-rvp-tx"><b>${l}</b><span>${s}</span></span>
+                  </button>`,
+              )}
+            </div>
+            <div class="c-rvp-f">
+              <button
+                class="btn sm ghost"
+                type="button"
+                data-r="discard"
+                ${n ? "" : raw("disabled")}
+              >
+                Discard</button
+              ><span class="sp"></span
+              ><button class="btn pri" type="button" data-r="submit">
+                Submit review<kbd>⌘↵</kbd>
+              </button>
+            </div>`,
+        );
         const ta = $(".c-rvp-t", node);
         ta.addEventListener("input", () => (ui.reviewBody = ta.value));
         node.addEventListener("click", (e) => {
@@ -3101,21 +3132,23 @@ ${ui.reviewBody}</textarea>
         const p = cur();
         const anchor = e?.currentTarget || R.actMain;
         const node = h("div", "c-cfl");
-        node.innerHTML = String(html`<div class="c-cfl-h">
-            ${icon("alert")}<b>Conflicts with <code>${p.baseRefName}</code></b>
-          </div>
-          <p>
-            GitHub can't merge <code>${p.headRefName}</code> automatically. Resolve the conflicting
-            hunks locally or in a worktree, then push.
-          </p>
-          <div class="c-cfl-a">
-            <button class="chip agent" type="button" data-cfl="agent">
-              ${icon("sparkle")}Resolve with agent</button
-            ><span class="sp"></span
-            ><button class="btn sm" type="button" data-cfl="worktree">
-              ${icon("terminal")}Check out in a worktree
-            </button>
-          </div>`);
+        node.innerHTML = String(
+          html`<div class="c-cfl-h">
+              ${icon("alert")}<b>Conflicts with <code>${p.baseRefName}</code></b>
+            </div>
+            <p>
+              GitHub can't merge <code>${p.headRefName}</code> automatically. Resolve the
+              conflicting hunks locally or in a worktree, then push.
+            </p>
+            <div class="c-cfl-a">
+              <button class="chip agent" type="button" data-cfl="agent">
+                ${icon("sparkle")}Resolve with agent</button
+              ><span class="sp"></span
+              ><button class="btn sm" type="button" data-cfl="worktree">
+                ${icon("terminal")}Check out in a worktree
+              </button>
+            </div>`,
+        );
         node.addEventListener("click", (ev) => {
           const b = ev.target.closest("[data-cfl]");
           if (!b) return;
