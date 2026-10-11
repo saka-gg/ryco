@@ -205,7 +205,7 @@ describe("applyAgentControlStreamEvent", () => {
     const recent = selectRecentAgentControlProposals(state);
     expect(recent).toHaveLength(AGENT_CONTROL_CLIENT_HISTORY_LIMIT);
     // Newest history first; the oldest entries were pruned.
-    expect(recent[0]?.updatedAt >= recent[recent.length - 1]!.updatedAt).toBe(true);
+    expect(recent[0]!.updatedAt >= recent[recent.length - 1]!.updatedAt).toBe(true);
   });
 });
 

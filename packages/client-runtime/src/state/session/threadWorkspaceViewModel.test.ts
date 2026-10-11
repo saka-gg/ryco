@@ -1,9 +1,9 @@
 import { EventId, TurnId, type OrchestrationThreadActivity } from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { deriveAgentTimeline } from "./agentActivity";
-import { deriveWorkLogEntries } from "./session-logic";
-import { deriveThreadSubagents, findThreadSubagent } from "./threadWorkspaceViewModel";
+import { deriveAgentTimeline } from "./agentActivity.ts";
+import { deriveWorkLogEntries } from "./session-logic.ts";
+import { deriveThreadSubagents, findThreadSubagent } from "./threadWorkspaceViewModel.ts";
 
 function makeActivity(overrides: {
   id?: string;
@@ -809,9 +809,9 @@ it("keeps child tool details out of the parent and folds tool lifecycle at its o
     output: "Readme contents",
     sequence: 2,
   });
-  expect(deriveWorkLogEntries(activities).some((entry) => entry.command === "cat README.md")).toBe(
-    false,
-  );
+  expect(
+    deriveWorkLogEntries(activities, undefined).some((entry) => entry.command === "cat README.md"),
+  ).toBe(false);
   const timeline = deriveAgentTimeline({
     ...child,
     messages: [
@@ -820,6 +820,7 @@ it("keeps child tool details out of the parent and folds tool lifecycle at its o
         text: "Reading documentation",
         createdAt: activities[0]!.createdAt,
         sequence: 3,
+        providerThreadId: null,
       },
     ],
   });

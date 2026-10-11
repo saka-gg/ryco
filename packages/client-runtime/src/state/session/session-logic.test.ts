@@ -14,7 +14,7 @@ import {
   cwdRelocationHandoffHeadline,
   cwdRelocationHandoffRetryHint,
   isCwdRelocationHandoff,
-} from "./contextHandoff";
+} from "./contextHandoff.ts";
 import {
   deriveCompletionDividerBeforeEntryId,
   deriveActiveWorkStartedAt,
@@ -31,7 +31,7 @@ import {
   hasActionableProposedPlan,
   hasToolActivityForTurn,
   isLatestTurnSettled,
-} from "./session-logic";
+} from "./session-logic.ts";
 
 function makeActivity(overrides: {
   id?: string;

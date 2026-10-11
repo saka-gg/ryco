@@ -113,7 +113,7 @@
     "./state/lifecycle": "./src/state/lifecycle/index.ts"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
     "test": "vp test run"
   },
   "dependencies": {

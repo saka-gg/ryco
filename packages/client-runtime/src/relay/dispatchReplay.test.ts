@@ -11,17 +11,17 @@ import { RpcClientError } from "effect/unstable/rpc/RpcClientError";
 import * as Socket from "effect/unstable/socket/Socket";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
-import type { HostedRuntimeTimers } from "../authorization/runtime";
-import { RpcRequestRefusedError } from "../rpc/protocol";
-import type { WsRpcClient } from "../rpc/wsRpcClient";
-import { RpcTransportDisposedError } from "../rpc/wsTransport";
+import type { HostedRuntimeTimers } from "../authorization/runtime.ts";
+import { RpcRequestRefusedError } from "../rpc/protocol.ts";
+import type { WsRpcClient } from "../rpc/wsRpcClient.ts";
+import { RpcTransportDisposedError } from "../rpc/wsTransport.ts";
 import {
   bindHostedDispatchReplay,
   HOSTED_DISPATCH_REPLAY_HORIZON_MS,
   HostedDispatchReplay,
   HostedDispatchUnconfirmedError,
   hostedDispatchLineage,
-} from "./dispatchReplay";
+} from "./dispatchReplay.ts";
 
 type Dispatch = WsRpcClient["orchestration"]["dispatchCommand"];
 

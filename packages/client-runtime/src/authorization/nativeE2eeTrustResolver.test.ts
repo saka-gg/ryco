@@ -2,7 +2,11 @@ import { ed25519, x25519 } from "@noble/curves/ed25519.js";
 import { p256 } from "@noble/curves/nist.js";
 import { describe, expect, it, vi } from "vite-plus/test";
 
-import type { NativeAccountGrantRelayTicketResponse } from "@ryco/contracts/native-e2ee";
+import { E2eeKeysetGeneration, HubGrantVerificationKeyId } from "@ryco/contracts";
+import type {
+  HubGrantVerificationKeysetResponse,
+  NativeAccountGrantRelayTicketResponse,
+} from "@ryco/contracts/native-e2ee";
 import {
   encodeHubDeviceGrantClaims,
   encodeHubDeviceGrantEnvelope,
@@ -27,7 +31,7 @@ const ENROLLMENT_ID = `enr_${"e".repeat(22)}`;
 const NODE_ID = `node_${"n".repeat(22)}`;
 const TICKET_ID = `rtk_${"t".repeat(22)}`;
 const CONTINUITY_ID = `nct_${"c".repeat(22)}`;
-const KEY_ID = `hgk_${"k".repeat(22)}`;
+const KEY_ID = HubGrantVerificationKeyId.make(`hgk_${"k".repeat(22)}`);
 const HUB_SECRET = new Uint8Array(32).fill(1);
 const DEVICE_PUBLIC = p256.getPublicKey(new Uint8Array(32).fill(2), false);
 const DEVICE_AGREEMENT_PUBLIC = x25519.getPublicKey(new Uint8Array(32).fill(3));
@@ -104,14 +108,16 @@ const enrollment = {
 } as unknown as NativeE2eeReadyEnrollment;
 
 const ROTATED_SIGNER = {
-  keyId: `hgk_${"r".repeat(22)}`,
+  keyId: HubGrantVerificationKeyId.make(`hgk_${"r".repeat(22)}`),
   secretKey: new Uint8Array(32).fill(8),
 };
 
-function keyset(signer = { keyId: KEY_ID, secretKey: HUB_SECRET }) {
+function keyset(
+  signer = { keyId: KEY_ID, secretKey: HUB_SECRET },
+): HubGrantVerificationKeysetResponse {
   return {
-    protocolVersion: 1 as const,
-    generation: 2,
+    protocolVersion: 1,
+    generation: E2eeKeysetGeneration.make(2),
     keys: [
       {
         keyId: signer.keyId,
@@ -419,7 +425,7 @@ describe("native E2EE trust resolver", () => {
     const rotated = keyset(ROTATED_SIGNER);
     vi.mocked(api.getE2eeGrantVerificationKeys).mockResolvedValue({
       ...rotated,
-      generation: 3,
+      generation: E2eeKeysetGeneration.make(3),
       keys: [...keyset().keys, ...rotated.keys],
     });
 
@@ -435,7 +441,10 @@ describe("native E2EE trust resolver", () => {
 
   it("refuses a keyset older than the ticket's generation even after refreshing", async () => {
     const { api, platform, resolve, request } = harness();
-    vi.mocked(api.getE2eeGrantVerificationKeys).mockResolvedValue({ ...keyset(), generation: 1 });
+    vi.mocked(api.getE2eeGrantVerificationKeys).mockResolvedValue({
+      ...keyset(),
+      generation: E2eeKeysetGeneration.make(1),
+    });
 
     await expect(resolve(request)).resolves.toEqual({
       kind: "blocked",

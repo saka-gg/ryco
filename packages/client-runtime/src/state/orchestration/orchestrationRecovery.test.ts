@@ -3,7 +3,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   createOrchestrationRecoveryCoordinator,
   deriveReplayRetryDecision,
-} from "./orchestrationRecovery";
+} from "./orchestrationRecovery.ts";
 
 describe("createOrchestrationRecoveryCoordinator", () => {
   it("defers live events until bootstrap completes and then requests replay", () => {

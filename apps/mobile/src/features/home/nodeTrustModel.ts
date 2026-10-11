@@ -2,7 +2,7 @@
  * Per-row presentation of the async durable trust result.
  *
  * PURE MODULE. It imports no react and no platform adapter so it can be tested;
- * `useNodeTrust.ts` is the only binding that touches the store.
+ * `useHomeEnvironments.ts` is the only binding that touches the store.
  *
  * DISPLAY ONLY. Eligibility is resolved before this module by the durable async
  * classifier. This module merely narrows that authoritative result to the two

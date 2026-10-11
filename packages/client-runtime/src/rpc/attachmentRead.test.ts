@@ -59,7 +59,7 @@ it("reads over the transport current at the start and fails if it is replaced mi
     }),
   ).toEqual(new TextEncoder().encode("abcde"));
 
-  let current: { readChunk: ReturnType<typeof vi.fn> } | undefined = first;
+  let current: typeof first | undefined = first;
   const second = { readChunk: vi.fn(chunk("vwxyz")) };
   first.readChunk.mockImplementationOnce(async (input: { offset: number }) => {
     current = second;

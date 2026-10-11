@@ -13,8 +13,6 @@ Copied and re-namespaced from
 
 - `src/composerInlineTokens.ts` (+ `src/composerInlineTokens.test.ts`) — from
   `packages/shared/src/composerInlineTokens.ts`.
-- `src/projectFavicon.ts` (+ `src/projectFavicon.test.ts`) — from
-  `packages/shared/src/projectFavicon.ts`.
 
 MIT License
 

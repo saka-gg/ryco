@@ -69,7 +69,7 @@ describe("fresh target model presets", () => {
         value: { instanceId: fallback.instanceId, model, ...(options ? { options } : {}) },
         source: "project",
       },
-    }) as EffectiveProjectPreferences;
+    }) as unknown as EffectiveProjectPreferences;
 
   it("replaces sticky high/fast traits when the new project's preset omits options", () => {
     const store = createComposerDraftStore({
@@ -96,12 +96,15 @@ describe("fresh target model presets", () => {
         newDraft,
         initialDraftModelSelection({ effective: preset("new-model"), fallback }),
       );
-    expect(store.getState().getComposerDraft(newDraft)?.modelSelectionByProvider.codex).toEqual({
+    expect(
+      store.getState().getComposerDraft(newDraft)?.modelSelectionByProvider[fallback.instanceId],
+    ).toEqual({
       ...fallback,
       model: "new-model",
     });
     expect(
-      store.getState().getComposerDraft(oldDraft)?.modelSelectionByProvider.codex?.options,
+      store.getState().getComposerDraft(oldDraft)?.modelSelectionByProvider[fallback.instanceId]
+        ?.options,
     ).toEqual(traits);
     const explicit = { ...fallback, model: "caller-model", options: traits };
     expect(

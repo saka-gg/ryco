@@ -22,7 +22,11 @@ export class FakeWebSocket {
   readonly sent: string[] = [];
   readonly #listeners = new Map<string, Set<Listener>>();
 
-  constructor(readonly url: string) {}
+  readonly url: string;
+
+  constructor(url: string) {
+    this.url = url;
+  }
 
   addEventListener(type: string, listener: Listener) {
     const listeners = this.#listeners.get(type) ?? new Set<Listener>();

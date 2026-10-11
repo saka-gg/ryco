@@ -28,7 +28,7 @@ function makeRegistry(input?: {
     initialState,
     gcTime: input?.gcTime ?? 20,
     maxEntries: input?.maxEntries ?? 16,
-    lifecycle: input?.lifecycle,
+    ...(input?.lifecycle ? { lifecycle: input.lifecycle } : {}),
     ...(input?.admission ? { admission: input.admission } : {}),
     buildFetchingState: (current) => ({ ...current, fetching: true, error: null }),
     buildSuccessState: (data) => ({ data: data as string, fetching: false, error: null }),

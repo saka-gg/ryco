@@ -61,12 +61,18 @@ describe("sidebar undo history", () => {
     "offers immediate %s undo bound to its owning command and node",
     async (action) => {
       const s = setup();
-      const original = s.history.dispatch(target, {
-        type: `thread.${action}`,
-        commandId: CommandId.make("original"),
-        threadId: target.threadId,
-        ...(action === "snooze" ? { snoozedUntil: "2026-10-01T12:00:00.000Z" } : {}),
-      });
+      const commandId = CommandId.make("original");
+      const original = s.history.dispatch(
+        target,
+        action === "snooze"
+          ? {
+              type: "thread.snooze",
+              commandId,
+              threadId: target.threadId,
+              snoozedUntil: "2026-10-01T12:00:00.000Z",
+            }
+          : { type: `thread.${action}`, commandId, threadId: target.threadId },
+      );
       expect(s.read()).toMatchObject([{ action, target, pending: false }]);
       await original;
       await s.history.undo(s.read()[0]!.id);

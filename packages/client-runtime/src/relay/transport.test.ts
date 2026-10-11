@@ -16,30 +16,30 @@ import type {
   SessionCredentialsService,
 } from "@ryco/client-runtime/platform";
 
-import { HostedHubApi, HostedHubApiError } from "../authorization/api";
+import { HostedHubApi, HostedHubApiError } from "../authorization/api.ts";
 import {
   configureHostedRuntime,
   type HostedNodeLifecycle,
   type HostedRuntimeConfiguration,
-} from "../authorization/runtime";
-import { hostedHubController, hostedHubStore } from "../authorization/state";
-import type { HostedHubNode, HostedRelayFailure } from "../authorization/types";
-import { RpcRequestRefusedError } from "../rpc/protocol";
-import type { WsRpcClient } from "../rpc/wsRpcClient";
-import { encodeBase64Url } from "./base64url";
+} from "../authorization/runtime.ts";
+import { hostedHubController, hostedHubStore } from "../authorization/state.ts";
+import type { HostedHubNode, HostedRelayFailure } from "../authorization/types.ts";
+import { RpcRequestRefusedError } from "../rpc/protocol.ts";
+import type { WsRpcClient } from "../rpc/wsRpcClient.ts";
+import { encodeBase64Url } from "./base64url.ts";
 import {
   bindHostedDispatchReplay,
   getHostedDispatchReplay,
   hostedDispatchLineage,
   HostedDispatchUnconfirmedError,
-} from "./dispatchReplay";
+} from "./dispatchReplay.ts";
 import {
   admitHostedRequestForState,
   HostedRelayAttemptFactory,
   HostedRelayPreparationError,
   ticketFailure,
   type HostedRelayAttemptBinding,
-} from "./transport";
+} from "./transport.ts";
 
 const RELAY_URL = "wss://hub.example.test/v1/relay/client";
 
@@ -58,7 +58,10 @@ interface RelaySocketCallbacks {
  * attempt factory's state wiring can be exercised without a browser WebSocket.
  */
 class MockRelaySocket {
-  constructor(readonly callbacks: RelaySocketCallbacks) {
+  readonly callbacks: RelaySocketCallbacks;
+
+  constructor(callbacks: RelaySocketCallbacks) {
+    this.callbacks = callbacks;
     callbacks.onTransportStatus("connecting");
   }
   fail(): void {
