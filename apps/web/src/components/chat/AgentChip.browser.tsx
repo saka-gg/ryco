@@ -45,7 +45,7 @@ describe("AgentChip", () => {
     );
     const chip = page.getByRole("button", { name: /agent/i });
     await vi.waitFor(async () => {
-      await expect.element(chip).toHaveTextContent("gpt-5-codex");
+      await expect.element(chip).toMatchTextContent("gpt-5-codex");
     });
     await chip.click();
     await page.getByText("gpt-5", { exact: true }).click();

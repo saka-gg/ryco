@@ -230,7 +230,7 @@ describe("PullRequestsPageBody — bar", () => {
     const header = title.closest("header")!;
     expect(header.scrollWidth).toBeLessThanOrEqual(header.clientWidth + 1);
     // 672 ≥ 640: counts stay.
-    await expect.element(screen.getByRole("tab", { name: /Commits/u })).toHaveTextContent(/\d/u);
+    await expect.element(screen.getByRole("tab", { name: /Commits/u })).toMatchTextContent(/\d/u);
   });
 });
 

@@ -333,8 +333,11 @@ it("cycles and closes panes from the keyboard controller", async () => {
   const controller = () => useChatPanesStore.getState().controller!;
   expect(controller().focusSibling(1)).toBe(true);
   await expect.poll(() => router.state.location.pathname).toBe("/pane-test/b");
+  // The router settles before the panes commit the new thread; cycle from there.
+  await expect.poll(() => useChatPanesStore.getState().activeRef).toEqual(b);
   expect(controller().focusSibling(1)).toBe(true);
   await expect.poll(() => router.state.location.pathname).toBe("/pane-test/a");
+  await expect.poll(() => useChatPanesStore.getState().activeRef).toEqual(a);
   expect(controller().closeFocused()).toBe(true);
   await expect.poll(() => paneLeaves(useChatPanesStore.getState().root!)).toHaveLength(1);
   // A lone pane leaves the shortcuts to the rest of the app.

@@ -41,7 +41,7 @@ describe("goal controls", () => {
         {...actions()}
       />,
     );
-    await expect.element(page.getByText("Updating goal…")).toBeVisible();
+    await expect.element(page.getByText("Updating goal…", { exact: false })).toBeVisible();
     await expect.element(page.getByRole("button", { name: "Clear goal" })).toBeDisabled();
     await expect.element(page.getByRole("button", { name: "Pause goal" })).toBeDisabled();
   });
@@ -63,7 +63,7 @@ describe("goal controls", () => {
         {...handlers}
       />,
     );
-    await expect.element(page.getByRole("alert")).toHaveTextContent("Provider disconnected");
+    await expect.element(page.getByRole("alert")).toMatchTextContent("Provider disconnected");
     await page.getByRole("button", { name: "Retry", exact: true }).click();
     expect(handlers.onRetry).toHaveBeenCalledOnce();
   });

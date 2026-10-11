@@ -233,10 +233,10 @@ describe("ChatView Conversation (full app)", () => {
       await page.getByRole("button", { name: "Open in chat", exact: true }).click();
       await expect
         .element(page.getByRole("dialog", { name: "New chat from selection" }).getByRole("alert"))
-        .toHaveTextContent("Save the pending file changes");
+        .toMatchTextContent("Save the pending file changes");
       await expect
         .element(page.getByRole("textbox", { name: "Message for new chat" }))
-        .toHaveTextContent("Explain the selection");
+        .toMatchTextContent("Explain the selection");
       expect(owner.getSnapshot().contents).toBe("Keep file draft");
       expect(mounted.router.state.location.pathname).toBe(`/${LOCAL_ENVIRONMENT_ID}/${THREAD_ID}`);
       expect(writes).toBe(1);
@@ -283,18 +283,18 @@ describe("ChatView Conversation (full app)", () => {
       await page.getByRole("button", { name: "Open in chat", exact: true }).click();
       await expect
         .element(page.getByRole("dialog", { name: "New chat from selection" }).getByRole("alert"))
-        .toHaveTextContent("Navigation interrupted");
+        .toMatchTextContent("Navigation interrupted");
       await page.getByRole("button", { name: "Open in chat", exact: true }).click();
       await expect
         .element(page.getByRole("dialog", { name: "New chat from selection" }).getByRole("alert"))
-        .toHaveTextContent("destination draft changed elsewhere");
+        .toMatchTextContent("destination draft changed elsewhere");
       const destination = Object.entries(useComposerDraftStore.getState().draftsByThreadKey).find(
         ([key]) => key.startsWith("selection-"),
       );
       expect(destination?.[1].prompt).toBe("Concurrent destination edit");
       await expect
         .element(page.getByRole("textbox", { name: "Message for new chat" }))
-        .toHaveTextContent("Original mini draft");
+        .toMatchTextContent("Original mini draft");
       expect(navigation).toHaveBeenCalledOnce();
     } finally {
       navigation?.mockRestore();

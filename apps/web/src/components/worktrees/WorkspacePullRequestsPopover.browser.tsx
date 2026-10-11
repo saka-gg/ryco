@@ -353,7 +353,7 @@ describe("WorkspacePullRequestsPopover", () => {
 
     await expect
       .element(page.getByRole("alert"))
-      .toHaveTextContent("Couldn't link #999: No pull request #999 in acme/ryco.");
+      .toMatchTextContent("Couldn't link #999: No pull request #999 in acme/ryco.");
     await expect
       .element(page.getByRole("combobox", { name: "Pull request to link" }))
       .toHaveValue("999");

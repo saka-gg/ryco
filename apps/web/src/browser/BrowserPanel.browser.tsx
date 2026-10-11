@@ -111,7 +111,7 @@ it("rejects unsupported URL schemes before desktop IPC", async () => {
   );
   await view.getByRole("textbox", { name: "Browser address" }).fill("file:///etc/passwd");
   await view.getByRole("button", { name: "Go", exact: true }).click();
-  await expect.element(view.getByRole("alert")).toHaveTextContent("HTTP(S)");
+  await expect.element(view.getByRole("alert")).toMatchTextContent("HTTP(S)");
   expect(api.open).not.toHaveBeenCalled();
 });
 it("ignores discovery results from the previous project", async () => {
@@ -225,21 +225,21 @@ it("offers explicit one-use popup consent, blocked recovery and cancellation", a
     });
   };
   update("blocked");
-  await expect.element(view.getByRole("status")).toHaveTextContent("Popup blocked");
+  await expect.element(view.getByRole("status")).toMatchTextContent("Popup blocked");
   await view.getByRole("button", { name: "Allow sign-in popup" }).click();
   expect(api.command).toHaveBeenLastCalledWith({ action: "allow-sign-in", tab: "tab-1" });
   update("armed");
-  await expect.element(view.getByRole("status")).toHaveTextContent("30 seconds");
+  await expect.element(view.getByRole("status")).toMatchTextContent("30 seconds");
   await view.getByRole("button", { name: "Cancel sign-in", exact: true }).click();
   expect(api.command).toHaveBeenLastCalledWith({ action: "cancel-sign-in", tab: "tab-1" });
   update("open");
   await view.getByRole("button", { name: "Close sign-in popup" }).click();
   expect(api.command).toHaveBeenLastCalledWith({ action: "cancel-sign-in", tab: "tab-1" });
   update("failed");
-  await expect.element(view.getByRole("status")).toHaveTextContent("could not load");
+  await expect.element(view.getByRole("status")).toMatchTextContent("could not load");
   api.command.mockRejectedValueOnce(
     new Error("Show and focus this browser tab before allowing sign-in."),
   );
   await view.getByRole("button", { name: "Allow sign-in popup" }).click();
-  await expect.element(view.getByRole("alert")).toHaveTextContent("Show and focus");
+  await expect.element(view.getByRole("alert")).toMatchTextContent("Show and focus");
 });

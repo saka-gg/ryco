@@ -114,7 +114,7 @@ describe("useFilesystemBrowse", () => {
       </AppAtomRegistryProvider>,
     );
 
-    await expect.element(page.getByTestId("hosted-browse-state")).toHaveTextContent("~/");
+    await expect.element(page.getByTestId("hosted-browse-state")).toMatchTextContent("~/");
     expect(browse).toHaveBeenCalledOnce();
     expect(browse).toHaveBeenCalledWith({ partialPath: "~/" });
 
@@ -134,14 +134,14 @@ describe("useFilesystemBrowse", () => {
 
     await expect
       .element(page.getByTestId("browse-state"))
-      .toHaveTextContent("temporarily unavailable");
+      .toMatchTextContent("temporarily unavailable");
 
     publishConnection({
       environmentId: ENVIRONMENT_ID,
       client: { api: { filesystem: { browse } } },
     });
 
-    await expect.element(page.getByTestId("browse-state")).toHaveTextContent("~/");
+    await expect.element(page.getByTestId("browse-state")).toMatchTextContent("~/");
     expect(browse).toHaveBeenCalledOnce();
     expect(browse).toHaveBeenCalledWith({ partialPath: "~/" });
 
@@ -177,7 +177,7 @@ describe("useFilesystemBrowse", () => {
       client: { api: { filesystem: { browse: secondBrowse } } },
     });
 
-    await expect.element(page.getByTestId("browse-state")).toHaveTextContent("~/replacement");
+    await expect.element(page.getByTestId("browse-state")).toMatchTextContent("~/replacement");
     expect(secondBrowse).toHaveBeenCalledOnce();
 
     resolveFirst({
@@ -186,7 +186,7 @@ describe("useFilesystemBrowse", () => {
     });
     await Promise.resolve();
 
-    await expect.element(page.getByTestId("browse-state")).toHaveTextContent("~/replacement");
+    await expect.element(page.getByTestId("browse-state")).toMatchTextContent("~/replacement");
 
     await mounted.unmount();
   });

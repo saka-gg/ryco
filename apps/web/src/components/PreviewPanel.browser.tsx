@@ -547,7 +547,11 @@ describe("PreviewPanel", () => {
     await page.getByRole("button", { name: "Discard file changes" }).click();
     await page.getByRole("button", { name: "Confirm discard" }).click();
     await expect
-      .element(page.getByText("Draft discarded. Reload to read the current disk contents."))
+      .element(
+        page.getByText("Draft discarded. Reload to read the current disk contents.", {
+          exact: false,
+        }),
+      )
       .toBeInTheDocument();
     await expect
       .element(page.getByRole("textbox", { name: "Edit src/app.ts" }))

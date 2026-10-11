@@ -102,7 +102,7 @@ it("shows an uncertain outcome without allowing a replay", async () => {
   );
   await expect
     .element(page.getByRole("status"))
-    .toHaveTextContent("Answer delivery is unconfirmed");
+    .toMatchTextContent("Answer delivery is unconfirmed");
   await expect.element(page.getByRole("button", { name: /Yes/ })).toBeDisabled();
   await expect.element(page.getByRole("button", { name: /No/ })).toBeDisabled();
   expect(respond).not.toHaveBeenCalled();

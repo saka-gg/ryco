@@ -189,7 +189,7 @@ describe("New pull request from the list header", () => {
     await userEvent.type(dialog().getByLabelText("Title"), "Add the create dialog");
     await expect
       .element(dialog().getByRole("status"))
-      .toHaveTextContent(
+      .toMatchTextContent(
         `${FIXTURE_CURRENT_BRANCH} isn't on origin yet. Push it, then open the pull request.`,
       );
     await expect.element(dialog().getByRole("button", { name: /^Create/u })).toBeDisabled();
@@ -204,7 +204,7 @@ describe("New pull request from the list header", () => {
     await userEvent.type(dialog().getByLabelText("Title"), "Add the create dialog");
     await expect
       .element(dialog().getByRole("status"))
-      .toHaveTextContent("2 local commits aren't on origin yet");
+      .toMatchTextContent("2 local commits aren't on origin yet");
     await expect.element(dialog().getByRole("button", { name: /^Create/u })).toBeEnabled();
   });
 
@@ -215,7 +215,7 @@ describe("New pull request from the list header", () => {
     await pickBranch("Head branch", "ryco/local-only");
     await expect
       .element(dialog().getByRole("status"))
-      .toHaveTextContent("ryco/local-only isn't on origin yet.");
+      .toMatchTextContent("ryco/local-only isn't on origin yet.");
     expect(createPullRequestGitMock.listRefsCalls.at(-1)).toMatchObject({
       cwd: FIXTURE_CWD,
       originOnly: true,
@@ -262,7 +262,7 @@ describe("New pull request from the list header", () => {
     await pickBranch("Head branch", "mvogt/pr-diff-virtualization");
     await expect
       .element(dialog().getByRole("status"))
-      .toHaveTextContent("#712 is already open from mvogt/pr-diff-virtualization.");
+      .toMatchTextContent("#712 is already open from mvogt/pr-diff-virtualization.");
     await userEvent.click(dialog().getByRole("button", { name: "Open", exact: true }));
     await expect.element(dialog()).not.toBeInTheDocument();
     expect(pullRequestsTestNavLog.callsTo("selectPullRequest").at(-1)?.args).toEqual([
@@ -281,7 +281,7 @@ describe("New pull request from the list header", () => {
     await userEvent.click(dialog().getByRole("button", { name: /^Create/u }));
     await expect
       .element(dialog().getByRole("alert"))
-      .toHaveTextContent("No commits between main and ryco/create-pr-dialog.");
+      .toMatchTextContent("No commits between main and ryco/create-pr-dialog.");
     await expect.element(dialog().getByLabelText("Title")).toHaveValue("Add the create dialog");
     expect(toasts).toEqual([]);
     expect(pullRequestsTestNavLog.callsTo("selectPullRequest")).toEqual([]);

@@ -242,7 +242,7 @@ describe("useProjectAutomations", () => {
     const rows = screen.getByTestId("checkout").elements();
     expect(rows[0]!.textContent).toContain("This device · primary · 3 schedules");
     expect(rows[1]!.textContent).toContain("Studio · remote · 1 schedules");
-    await expect.element(screen.getByTestId("loading")).toHaveTextContent("ready");
+    await expect.element(screen.getByTestId("loading")).toMatchTextContent("ready");
 
     await screen.getByRole("button", { name: "Cancel on Studio" }).click();
     expect(automationCentreFixture.commands).toEqual([
@@ -303,7 +303,7 @@ describe("useProjectAutomations", () => {
       `${STUDIO_ENV} · waiting · empty · 0 dismissed`,
     ]);
 
-    await expect.element(screen.getByTestId("lapsed")).toHaveTextContent("Weekly digest");
+    await expect.element(screen.getByTestId("lapsed")).toMatchTextContent("Weekly digest");
 
     const before = seenQueues.at(-1)!.get(`${LOCAL_ENV}\0${RYCO_LOCAL}`)!;
     await screen.getByRole("button", { name: "Render again" }).click();
@@ -313,7 +313,7 @@ describe("useProjectAutomations", () => {
 
     dismissLapsedScheduleProposal(LOCAL_ENV, expiredCreate.proposalId);
     await expect.poll(() => text()[0]).toBe(`${LOCAL_ENV} · hydrated · expired · 1 dismissed`);
-    await expect.element(screen.getByTestId("lapsed")).toHaveTextContent("none lapsed");
+    await expect.element(screen.getByTestId("lapsed")).toMatchTextContent("none lapsed");
     expect(
       seenQueues
         .at(-1)!
@@ -322,6 +322,6 @@ describe("useProjectAutomations", () => {
     ).toBe(true);
     restoreLapsedScheduleProposal(LOCAL_ENV, expiredCreate.proposalId);
     await expect.poll(() => text()[0]).toBe(`${LOCAL_ENV} · hydrated · expired · 0 dismissed`);
-    await expect.element(screen.getByTestId("lapsed")).toHaveTextContent("Weekly digest");
+    await expect.element(screen.getByTestId("lapsed")).toMatchTextContent("Weekly digest");
   });
 });

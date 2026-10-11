@@ -192,7 +192,7 @@ describe("SideChatPanel", () => {
     await mounted!.rerender(
       <SideChatPanel threadRef={threadRef} providers={providers} connected={false} />,
     );
-    await expect.element(page.getByRole("alert")).toHaveTextContent("Connection lost");
+    await expect.element(page.getByRole("alert")).toMatchTextContent("Connection lost");
     finish({ requestId: mocks.ask.mock.calls[0]![0].requestId, answer: "Old socket" });
     await mounted!.rerender(
       <SideChatPanel threadRef={threadRef} providers={providers} connected />,
@@ -214,7 +214,7 @@ describe("SideChatPanel", () => {
     );
     mocks.ask.mockRejectedValueOnce(new Error("Provider unavailable"));
     await page.getByRole("button", { name: "Ask", exact: true }).click();
-    await expect.element(page.getByRole("alert")).toHaveTextContent("Provider unavailable");
+    await expect.element(page.getByRole("alert")).toMatchTextContent("Provider unavailable");
     await expect.element(page.getByLabelText("Side question")).toHaveValue("Question");
     await page.getByRole("button", { name: "New chat" }).click();
     await expect.element(page.getByLabelText("Side question")).toHaveValue("");

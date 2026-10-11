@@ -663,7 +663,7 @@ describe("Project page sections", () => {
       await clickNode("project", "ryco");
       const inspector = screen.getByRole("complementary", { name: "Details" });
       const entry = inspector.getByTestId("map-automations-entry");
-      await expect.element(entry).toHaveTextContent(/3 schedules.*1 waiting/);
+      await expect.element(entry).toMatchTextContent(/3 schedules.*1 waiting/);
       await entry.click();
       expect(useAutomationsDialogStore.getState().request).toMatchObject({
         project: { kind: "key" },
