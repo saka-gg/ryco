@@ -1,5 +1,5 @@
 import { Effect } from "effect";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
 /**
  * Project kinds ("No project" chats are projects of kind `chat`) and the crash-safe journal for

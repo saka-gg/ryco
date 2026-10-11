@@ -20,7 +20,7 @@ import {
   type OrchestrationEvent,
 } from "@ryco/contracts";
 import { Effect, Layer, Option } from "effect";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 import { ServerConfig } from "../src/config.ts";
 import { OrchestrationProjectionPipelineLive } from "../src/orchestration/Layers/ProjectionPipeline.ts";
 import { OrchestrationProjectionPipeline } from "../src/orchestration/Services/ProjectionPipeline.ts";

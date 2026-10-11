@@ -3,8 +3,8 @@
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { Array, Config, Effect, FileSystem, Schema, Stream, String } from "effect";
-import { Command, Flag } from "effect/unstable/cli";
-import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
+import { Command, Flag } from "effect/cli";
+import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 const ReleaseChannel = Schema.Literals(["stable", "nightly"]);
 type ReleaseChannel = typeof ReleaseChannel.Type;

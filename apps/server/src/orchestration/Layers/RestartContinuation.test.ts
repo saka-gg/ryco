@@ -17,7 +17,7 @@ import {
 } from "@ryco/contracts";
 import { deriveBackgroundWork } from "@ryco/shared/backgroundWork";
 import { Effect, Layer, ManagedRuntime, Option } from "effect";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 import { afterEach, describe, expect, it } from "vite-plus/test";
 
 import { ServerConfig } from "../../config.ts";

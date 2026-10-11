@@ -8,7 +8,7 @@ import { makeAutomationCentreHandlers } from "./automationCentreRpc.ts";
 import { makeSideQuestionHandlers } from "./sideQuestionRpc.ts";
 import { Effect, Layer, Option } from "effect";
 import { WsDeviceRpcGroup, WsRpcGroup } from "@ryco/contracts";
-import { RpcSerialization } from "effect/unstable/rpc";
+import { RpcSerialization } from "effect/rpc";
 
 import type { AuthenticatedSession } from "../auth/Services/ServerAuth.ts";
 import { makeWsRpcContext } from "./context.ts";

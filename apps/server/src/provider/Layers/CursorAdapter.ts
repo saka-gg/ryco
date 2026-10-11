@@ -39,7 +39,7 @@ import {
   Stream,
   SynchronizedRef,
 } from "effect";
-import { ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcessSpawner } from "effect/process";
 import type * as EffectAcpSchema from "effect-acp/schema";
 
 import {

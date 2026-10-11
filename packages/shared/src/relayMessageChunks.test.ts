@@ -1,5 +1,5 @@
 import { RELAY_CHUNK_HEADER_BYTES, RELAY_MAX_RPC_MESSAGE_BYTES } from "@ryco/contracts/relay";
-import { RpcSerialization } from "effect/unstable/rpc";
+import { RpcSerialization } from "effect/rpc";
 import { describe, expect, it } from "vite-plus/test";
 
 import {

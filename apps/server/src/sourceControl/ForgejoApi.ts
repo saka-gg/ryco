@@ -25,7 +25,7 @@ import {
   type SourceControlRepositoryCloneUrls,
   type SourceControlRepositoryVisibility,
 } from "@ryco/contracts";
-import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http";
+import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 import { sanitizeBranchFragment, WORKTREE_BRANCH_PREFIX } from "@ryco/shared/git";
 import { detectSourceControlProviderFromRemoteUrl } from "@ryco/shared/sourceControl";
 import { decodeJsonResult } from "@ryco/shared/schemaJson";

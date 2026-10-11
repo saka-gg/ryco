@@ -12,8 +12,8 @@ import type {
 import { ProviderDriverKind } from "@ryco/contracts";
 import type * as EffectAcpSchema from "effect-acp/schema";
 import { Cause, Effect, Exit, FileSystem, Layer, Option, Path, Result, Schema } from "effect";
-import { HttpClient } from "effect/unstable/http";
-import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
+import { HttpClient } from "effect/http";
+import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import {
   createModelCapabilities,
   getProviderOptionBooleanSelectionValue,

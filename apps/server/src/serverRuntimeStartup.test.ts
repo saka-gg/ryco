@@ -43,7 +43,7 @@ import { ServerEnvironment } from "./environment/Services/ServerEnvironment.ts";
 import { Keybindings } from "./keybindings.ts";
 import { Open } from "./open.ts";
 import { AdvertisedEndpointRegistry } from "./remote/Services/AdvertisedEndpointRegistry.ts";
-import { HttpServer } from "effect/unstable/http";
+import { HttpServer } from "effect/http";
 import { ServerLifecycleEvents } from "./serverLifecycleEvents.ts";
 import { WorkspaceAccessPolicy } from "./workspace/Services/WorkspaceAccessPolicy.ts";
 import { CompletionReturnRepository } from "./persistence/Layers/AgentControlCompletionReturns.ts";

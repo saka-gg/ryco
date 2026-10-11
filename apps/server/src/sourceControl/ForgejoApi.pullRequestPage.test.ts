@@ -1,7 +1,7 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { Effect, FileSystem } from "effect";
-import type { HttpClientRequest } from "effect/unstable/http";
+import type { HttpClientRequest } from "effect/http";
 
 import * as ForgejoApi from "./ForgejoApi.ts";
 import { appendCommentMutationMarker } from "./gitHubCommentMutationMarker.ts";

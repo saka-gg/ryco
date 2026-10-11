@@ -1,7 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import { Effect, FileSystem, Path } from "effect";
-import { Command, CliError } from "effect/unstable/cli";
+import { Command, CliError } from "effect/cli";
 
 import {
   mergePlatformUpdateManifests,

@@ -1,7 +1,7 @@
 import { Effect, Layer } from "effect";
 import { WsDeviceRpcGroup, WsRpcGroup } from "@ryco/contracts";
-import { HttpRouter, HttpServerRequest } from "effect/unstable/http";
-import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
+import { HttpRouter, HttpServerRequest } from "effect/http";
+import { RpcSerialization, RpcServer } from "effect/rpc";
 
 import * as ProviderMaintenanceRunner from "./provider/providerMaintenanceRunner.ts";
 import { ChatAttachmentUploadsLive } from "./attachmentUpload.ts";

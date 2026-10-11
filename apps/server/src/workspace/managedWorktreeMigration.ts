@@ -8,7 +8,7 @@ import {
   type OrchestrationWorktreeShell,
 } from "@ryco/contracts";
 import { Effect, Option, Semaphore } from "effect";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 import { threadPendingWork } from "@ryco/shared/workspaceLifecycle";
 import { captureWorktreeIdentity, type WorktreeIdentity } from "../storage/filesystem.ts";
 import {

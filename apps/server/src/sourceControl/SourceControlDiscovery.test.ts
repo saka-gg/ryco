@@ -2,7 +2,7 @@ import { assert, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { Duration, Effect, Layer, Option, Ref } from "effect";
 import { TestClock } from "effect/testing";
-import { ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcessSpawner } from "effect/process";
 import { VcsProcessSpawnError } from "@ryco/contracts";
 
 import { ServerConfig } from "../config.ts";

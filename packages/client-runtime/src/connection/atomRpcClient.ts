@@ -1,6 +1,6 @@
 import { WsRpcGroup } from "@ryco/contracts";
 import { Effect } from "effect";
-import { AtomRegistry, AtomRpc } from "effect/unstable/reactivity";
+import { AtomRegistry, AtomRpc } from "effect/reactivity";
 
 import { getKnownEnvironmentWsBaseUrl, type KnownEnvironment } from "../knownEnvironment.ts";
 import { createWsRpcProtocolLayer } from "../rpc/index.ts";

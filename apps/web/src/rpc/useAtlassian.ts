@@ -6,7 +6,7 @@ import type {
   EnvironmentId,
 } from "@ryco/contracts";
 import { useCallback, useEffect, useMemo, useRef, useSyncExternalStore } from "react";
-import { Atom } from "effect/unstable/reactivity";
+import { Atom } from "effect/reactivity";
 
 import { requireEnvironmentConnection } from "~/environments/runtime";
 import { appAtomRegistry } from "@ryco/client-runtime/rpc";

@@ -14,8 +14,8 @@ import {
 import { assert, it } from "@effect/vitest";
 import { Effect, Fiber, Layer, Option } from "effect";
 import { TestClock } from "effect/testing";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
-import * as SqlStatement from "effect/unstable/sql/Statement";
+import * as SqlClient from "effect/sql/SqlClient";
+import * as SqlStatement from "effect/sql/Statement";
 
 import { makeCompletionReturnRepository } from "../../persistence/Layers/AgentControlCompletionReturns.ts";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";

@@ -1,4 +1,4 @@
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 import { acquireStoragePathUseLease } from "../../storage/lifecycle.ts";
 import { isClaudeNativeCompaction } from "../../provider/claudeNativeCompaction.ts";
 import { computerToolInstructions } from "../../computer/tools/computerGuidance.ts";

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 import { Effect, Layer, Tracer } from "effect";
-import { Headers, HttpEffect, HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
+import { Headers, HttpEffect, HttpServerRequest, HttpServerResponse } from "effect/http";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

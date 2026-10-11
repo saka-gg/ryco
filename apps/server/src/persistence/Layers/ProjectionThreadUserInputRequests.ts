@@ -8,8 +8,8 @@ import {
   ThreadId,
 } from "@ryco/contracts";
 import { Effect, Layer, Option, Schema } from "effect";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
-import * as SqlSchema from "effect/unstable/sql/SqlSchema";
+import * as SqlClient from "effect/sql/SqlClient";
+import * as SqlSchema from "effect/sql/SqlSchema";
 
 import { toPersistenceSqlError } from "../Errors.ts";
 import {

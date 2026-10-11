@@ -1,7 +1,7 @@
 import { messageTextForSearch } from "../messageText.ts";
 import { MessageId, ThreadId, TurnId } from "@ryco/contracts";
 import { assert, it } from "@effect/vitest";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 import { Effect, Layer, Logger, Option } from "effect";
 
 import { ProjectionThreadMessageRepository } from "../Services/ProjectionThreadMessages.ts";

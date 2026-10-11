@@ -36,7 +36,7 @@ import {
 } from "effect";
 import { describe, expect, it } from "vite-plus/test";
 
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 import { OrchestrationCommandAdmissionError } from "../Errors.ts";
 import { PersistenceSqlError } from "../../persistence/Errors.ts";
 import { makeCompletionReturnRepository } from "../../persistence/Layers/AgentControlCompletionReturns.ts";

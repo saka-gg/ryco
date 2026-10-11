@@ -5,7 +5,7 @@ import {
   WS_METHODS,
   WsRpcGroup,
 } from "@ryco/contracts";
-import { RpcMessage, RpcSerialization, RpcServer } from "effect/unstable/rpc";
+import { RpcMessage, RpcSerialization, RpcServer } from "effect/rpc";
 
 type BrowserWsClient = {
   send: (data: string) => void;

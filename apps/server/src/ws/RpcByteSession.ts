@@ -1,9 +1,9 @@
 import { Clock, Effect, Queue, Scope, Semaphore } from "effect";
 import type { Layer } from "effect";
-import type { Rpc } from "effect/unstable/rpc";
+import type { Rpc } from "effect/rpc";
 import { RelayMessageAssembler } from "@ryco/shared/relayMessageChunks";
-import { RpcMessage, RpcSerialization, RpcServer } from "effect/unstable/rpc";
-import type { RpcGroup } from "effect/unstable/rpc";
+import { RpcMessage, RpcSerialization, RpcServer } from "effect/rpc";
+import type { RpcGroup } from "effect/rpc";
 
 export interface RpcByteSession {
   readonly receive: (bytes: Uint8Array) => Effect.Effect<boolean>;

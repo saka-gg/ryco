@@ -5,7 +5,7 @@ import { workspaceSessionActive } from "../workspace/lifecycleSafety.ts";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { Context, Effect, Layer, Option, Schema, Semaphore } from "effect";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 import {
   CommandId,
   ProjectId,

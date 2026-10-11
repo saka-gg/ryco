@@ -13,7 +13,7 @@ import {
   type AgentControlCapability,
 } from "@ryco/contracts";
 import { Effect, Layer, Option, Schema } from "effect";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 import {
   CompletionReturnRepository,
   CompletionReturnRepositoryLive,

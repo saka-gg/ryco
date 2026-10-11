@@ -1,5 +1,5 @@
 import { noteStorageActivity } from "../../storage/lifecycle.ts";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 import {
   storageLifecycleLock,
   storagePathBlocker,

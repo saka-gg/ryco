@@ -23,8 +23,8 @@ import { DEFAULT_HOSTED_APP_ORIGIN } from "@ryco/shared/hostedApp";
 import { NetService } from "@ryco/shared/Net";
 import { readCachedTailscaleMagicDnsName } from "@ryco/tailscale/endpoints";
 import { Console, Data, Effect, Option } from "effect";
-import { Prompt } from "effect/unstable/cli";
-import type { ChildProcessSpawner } from "effect/unstable/process";
+import { Prompt } from "effect/cli";
+import type { ChildProcessSpawner } from "effect/process";
 import type * as Terminal from "effect/Terminal";
 
 import { resolveServerAdvertisedEndpointsWithTailscale } from "../remote/AdvertisedEndpointRegistry.ts";

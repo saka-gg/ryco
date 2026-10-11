@@ -21,7 +21,7 @@ import {
   TurnId,
 } from "@ryco/contracts";
 import { Context, Effect, Layer, Option, Schema } from "effect";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import { toPersistenceSqlError } from "../Errors.ts";
 import type {

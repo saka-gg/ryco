@@ -7,8 +7,8 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { NetService } from "@ryco/shared/Net";
 import { deleteEnv, setEnv } from "@ryco/shared/runtimeEnv";
 import { Config, Data, Effect, Hash, Layer, Logger, Option, Path, Schema } from "effect";
-import { Argument, Command, Flag } from "effect/unstable/cli";
-import { ChildProcess } from "effect/unstable/process";
+import { Argument, Command, Flag } from "effect/cli";
+import { ChildProcess } from "effect/process";
 
 const BASE_SERVER_PORT = 13773;
 const BASE_WEB_PORT = 5733;

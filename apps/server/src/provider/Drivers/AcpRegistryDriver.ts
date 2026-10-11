@@ -6,7 +6,7 @@ import {
   type ServerProviderModel,
 } from "@ryco/contracts";
 import { Effect, FileSystem, Path, PubSub, Ref, Schema, Stream } from "effect";
-import { ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcessSpawner } from "effect/process";
 import { ServerConfig } from "../../config.ts";
 import { ProviderDriverError } from "../Errors.ts";
 import { makeAcpAdapter } from "../Layers/AcpAdapter.ts";

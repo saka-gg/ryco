@@ -19,7 +19,7 @@ import {
 } from "@ryco/contracts";
 import { redactDiagnosticText } from "@ryco/shared/diagnosticRedaction";
 import { Effect, Option, Schema } from "effect";
-import type * as SqlClient from "effect/unstable/sql/SqlClient";
+import type * as SqlClient from "effect/sql/SqlClient";
 import {
   DELEGATION_WAKE_MESSAGE_PREFIX,
   type CompletionReturnRecord,

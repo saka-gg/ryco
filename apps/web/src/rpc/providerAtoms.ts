@@ -6,7 +6,7 @@ import {
   type ThreadId,
 } from "@ryco/contracts";
 import { Option, Schema } from "effect";
-import { Atom } from "effect/unstable/reactivity";
+import { Atom } from "effect/reactivity";
 
 import { ensureEnvironmentApi } from "../environmentApi";
 import { appAtomRegistry } from "@ryco/client-runtime/rpc";

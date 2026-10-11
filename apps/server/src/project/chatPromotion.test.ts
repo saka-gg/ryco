@@ -30,7 +30,7 @@ import {
   ThreadId,
 } from "@ryco/contracts";
 import { Effect, Fiber, Option } from "effect";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 import { afterEach, beforeEach, describe, expect, it } from "vite-plus/test";
 
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";

@@ -1,6 +1,6 @@
 import { type CursorSettings, type ProviderOptionSelection } from "@ryco/contracts";
 import { Effect, Layer, Scope } from "effect";
-import { ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcessSpawner } from "effect/process";
 import type * as EffectAcpErrors from "effect-acp/errors";
 
 import {

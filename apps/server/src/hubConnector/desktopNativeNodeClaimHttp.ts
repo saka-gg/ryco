@@ -9,7 +9,7 @@ import {
   DesktopNativeNodeClaimSignRequest,
 } from "@ryco/contracts/desktop-native-node-claim";
 import { Data, Effect, Layer } from "effect";
-import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
+import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 
 import { ServerConfig, type ServerConfigShape } from "../config.ts";
 import { ServerEnvironment } from "../environment/Services/ServerEnvironment.ts";

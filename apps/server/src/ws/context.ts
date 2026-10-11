@@ -8,7 +8,7 @@ import { WorkspaceLifecycle } from "../workspace/WorkspaceLifecycle.ts";
 import { SessionImport } from "../imports/SessionImport.ts";
 import { AutomationCentre } from "../agentControl/Services/AutomationCentre.ts";
 import { Cause, Duration, Effect, FileSystem, Metric, Option, Schema, Stream } from "effect";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 import {
   AuthSessionId,
   USAGE_CONTRACT_VERSION,
@@ -26,7 +26,7 @@ import {
   WsRpcGroup,
   WorktreeId,
 } from "@ryco/contracts";
-import { RpcGroup } from "effect/unstable/rpc";
+import { RpcGroup } from "effect/rpc";
 
 import { AgentControlProposalService } from "../agentControl/Services/AgentControlProposalService.ts";
 import { ChatAttachmentUploads } from "../attachmentUpload.ts";

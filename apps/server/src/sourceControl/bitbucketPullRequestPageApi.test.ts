@@ -1,6 +1,6 @@
 import { assert, describe, it } from "@effect/vitest";
 import { Effect, FileSystem } from "effect";
-import type { HttpClientRequest } from "effect/unstable/http";
+import type { HttpClientRequest } from "effect/http";
 
 import * as BitbucketApi from "./BitbucketApi.ts";
 import { makeLayer } from "./bitbucketApiTestLayer.ts";

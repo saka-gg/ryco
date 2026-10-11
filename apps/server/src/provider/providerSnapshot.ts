@@ -10,7 +10,7 @@ import type {
   ServerProviderState,
 } from "@ryco/contracts";
 import { Effect, Stream } from "effect";
-import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import { normalizeModelSlug } from "@ryco/shared/model";
 import { isWindowsCommandNotFound } from "../processRunner.ts";
 import { collectUint8StreamText } from "../stream/collectUint8StreamText.ts";

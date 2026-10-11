@@ -24,7 +24,7 @@ import {
   WORK_ITEM_DETAIL_MAX_COMMENTS,
 } from "@ryco/contracts";
 import { Context, DateTime, Effect, Layer, Option, Schema } from "effect";
-import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http";
+import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 
 import { ServerSecretStore } from "../auth/Services/ServerSecretStore.ts";
 import { AtlassianConnectionRepository } from "../persistence/Services/AtlassianConnections.ts";

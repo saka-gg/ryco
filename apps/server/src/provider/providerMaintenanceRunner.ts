@@ -9,8 +9,8 @@ import {
 } from "@ryco/contracts";
 import { isBlockingProviderCompatibilityStatus } from "@ryco/shared/providerCapabilities";
 import { Cause, Context, DateTime, Duration, Effect, Layer, Option, Ref, Schema } from "effect";
-import { HttpClient } from "effect/unstable/http";
-import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
+import { HttpClient } from "effect/http";
+import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import { ProviderRegistry } from "./Services/ProviderRegistry.ts";
 import { makeProviderMaintenanceCommandCoordinator } from "./providerMaintenanceCommandCoordinator.ts";

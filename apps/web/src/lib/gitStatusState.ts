@@ -6,7 +6,7 @@ import {
 } from "@ryco/contracts";
 import type { GitStatusPollIntervalMs } from "@ryco/contracts/settings";
 import { Cause } from "effect";
-import { Atom } from "effect/unstable/reactivity";
+import { Atom } from "effect/reactivity";
 import { useEffect } from "react";
 
 import { appAtomRegistry } from "@ryco/client-runtime/rpc";

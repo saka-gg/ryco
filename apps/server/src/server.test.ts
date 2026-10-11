@@ -51,17 +51,11 @@ import {
   Ref,
   Stream,
 } from "effect";
-import { ChildProcessSpawner } from "effect/unstable/process";
-import {
-  FetchHttpClient,
-  HttpBody,
-  HttpClient,
-  HttpRouter,
-  HttpServer,
-} from "effect/unstable/http";
-import { OtlpSerialization, OtlpTracer } from "effect/unstable/observability";
-import { RpcClient, RpcSerialization } from "effect/unstable/rpc";
-import * as Socket from "effect/unstable/socket/Socket";
+import { ChildProcessSpawner } from "effect/process";
+import { FetchHttpClient, HttpBody, HttpClient, HttpRouter, HttpServer } from "effect/http";
+import { OtlpSerialization, OtlpTracer } from "effect/observability";
+import { RpcClient, RpcSerialization } from "effect/rpc";
+import * as Socket from "effect/socket/Socket";
 import { vi } from "vite-plus/test";
 
 const TEST_EPOCH = DateTime.makeUnsafe("1970-01-01T00:00:00.000Z");

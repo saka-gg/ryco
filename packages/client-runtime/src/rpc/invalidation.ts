@@ -1,6 +1,6 @@
 import type { ReadonlyRecord } from "effect/Record";
 import { Context, Effect, Layer, Scope } from "effect";
-import { Atom, Reactivity } from "effect/unstable/reactivity";
+import { Atom, Reactivity } from "effect/reactivity";
 
 import { appAtomRegistry } from "./atomRegistry.ts";
 

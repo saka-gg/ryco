@@ -1,5 +1,5 @@
 import * as Effect from "effect/Effect";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
 /** Durable external-integration identities, task reservations, and redacted audit metadata. */
 export default Effect.gen(function* () {

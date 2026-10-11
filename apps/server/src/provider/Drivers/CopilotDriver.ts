@@ -1,6 +1,6 @@
 import { CopilotSettings, ProviderDriverKind, type ServerProvider } from "@ryco/contracts";
 import { Effect, FileSystem, Option, Path, Schema, Stream } from "effect";
-import { ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcessSpawner } from "effect/process";
 
 import { ServerConfig } from "../../config.ts";
 import { makeCopilotTextGeneration } from "../../textGeneration/CopilotTextGeneration.ts";

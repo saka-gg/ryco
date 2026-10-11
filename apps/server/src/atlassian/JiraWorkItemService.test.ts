@@ -1,7 +1,7 @@
 import { AtlassianConnectionId, ProjectId } from "@ryco/contracts";
 import { assert, it, vi } from "@effect/vitest";
 import { Effect, Layer, Option } from "effect";
-import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http";
+import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 
 import { ServerSecretStore } from "../auth/Services/ServerSecretStore.ts";
 import { AtlassianConnectionRepository } from "../persistence/Services/AtlassianConnections.ts";

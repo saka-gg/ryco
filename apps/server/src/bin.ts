@@ -4,7 +4,7 @@ import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
-import { CliError, Command } from "effect/unstable/cli";
+import { CliError, Command } from "effect/cli";
 
 import { NetService } from "@ryco/shared/Net";
 import { cli } from "./cli.ts";

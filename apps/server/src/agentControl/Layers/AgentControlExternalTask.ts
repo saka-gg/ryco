@@ -11,7 +11,7 @@ import {
   type AgentControlProposalStatus,
 } from "@ryco/contracts";
 import { Duration, Effect, Layer, Option, PubSub } from "effect";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import {
   AgentControlExternalRepository,

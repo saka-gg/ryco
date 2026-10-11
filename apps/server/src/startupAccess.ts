@@ -6,7 +6,7 @@ import { buildDirectPairingUrl, buildHostedPairingUrl } from "@ryco/shared/pairi
 import { QrCode } from "@ryco/shared/qrCode";
 import { isTailscaleIpv4Address } from "@ryco/tailscale";
 import { DateTime, Effect } from "effect";
-import { HttpServer } from "effect/unstable/http";
+import { HttpServer } from "effect/http";
 
 import { ServerConfig } from "./config.ts";
 import { ServerAuth } from "./auth/Services/ServerAuth.ts";

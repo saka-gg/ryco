@@ -5,7 +5,7 @@ import {
   type DesktopHubReachabilityResponse,
 } from "@ryco/contracts/desktop-native-node-claim";
 import { Effect } from "effect";
-import { HttpRouter, HttpServerResponse } from "effect/unstable/http";
+import { HttpRouter, HttpServerResponse } from "effect/http";
 
 import { HubConnectorService } from "./HubConnectorLive.ts";
 import {

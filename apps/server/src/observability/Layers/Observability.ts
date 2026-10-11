@@ -1,10 +1,5 @@
 import { Effect, Layer, References, Tracer } from "effect";
-import {
-  OtlpExporter,
-  OtlpMetrics,
-  OtlpSerialization,
-  OtlpTracer,
-} from "effect/unstable/observability";
+import { OtlpExporter, OtlpMetrics, OtlpSerialization, OtlpTracer } from "effect/observability";
 
 import { ServerConfig } from "../../config.ts";
 import { makeDiagnosticsService } from "../../diagnostics/Layers/Diagnostics.ts";

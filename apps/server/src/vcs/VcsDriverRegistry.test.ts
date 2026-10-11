@@ -1,6 +1,6 @@
 import { assert, it, describe } from "@effect/vitest";
 import { Effect, Layer } from "effect";
-import { ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcessSpawner } from "effect/process";
 
 import * as VcsProcess from "./VcsProcess.ts";
 import * as VcsProjectConfig from "./VcsProjectConfig.ts";

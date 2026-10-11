@@ -14,7 +14,7 @@
  */
 import { Clock, Context, Effect, FileSystem, Layer, Path, Schema } from "effect";
 import * as Semaphore from "effect/Semaphore";
-import { HttpClient, HttpClientResponse } from "effect/unstable/http";
+import { HttpClient, HttpClientResponse } from "effect/http";
 import {
   ModelCapabilities,
   TrimmedNonEmptyString,

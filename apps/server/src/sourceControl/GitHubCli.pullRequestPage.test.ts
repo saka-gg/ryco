@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 
 import { afterEach, describe, expect, it, vi } from "@effect/vitest";
 import { Effect, Layer } from "effect";
-import { ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcessSpawner } from "effect/process";
 import { CHANGE_REQUEST_FILE_CONTENTS_MAX_BYTES, VcsProcessExitError } from "@ryco/contracts";
 
 import * as VcsProcess from "../vcs/VcsProcess.ts";

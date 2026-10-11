@@ -6,8 +6,8 @@ import {
   type Rpc,
   type RpcClientError,
   type RpcGroup,
-} from "effect/unstable/rpc";
-import * as Socket from "effect/unstable/socket/Socket";
+} from "effect/rpc";
+import * as Socket from "effect/socket/Socket";
 
 import {
   WS_METHODS,

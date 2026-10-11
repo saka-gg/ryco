@@ -1,6 +1,6 @@
 import { useAtomValue } from "@effect/atom-react";
 import type { DesktopUpdateState } from "@ryco/contracts";
-import { Atom } from "effect/unstable/reactivity";
+import { Atom } from "effect/reactivity";
 import { useEffect } from "react";
 
 import { appAtomRegistry } from "@ryco/client-runtime/rpc";

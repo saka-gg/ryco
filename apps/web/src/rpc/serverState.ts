@@ -1,5 +1,5 @@
 import { useAtomSubscribe, useAtomValue } from "@effect/atom-react";
-import type { Atom } from "effect/unstable/reactivity";
+import type { Atom } from "effect/reactivity";
 import {
   selectAvailableEditors,
   selectKeybindingsConfigPath,

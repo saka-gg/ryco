@@ -1,6 +1,6 @@
 import type * as Exit from "effect/Exit";
 import { Effect, Option, Tracer } from "effect";
-import { Headers } from "effect/unstable/http";
+import { Headers } from "effect/http";
 
 import { spanToTraceRecord } from "./TraceRecord.ts";
 import type { EffectTraceRecord } from "./TraceRecord.ts";

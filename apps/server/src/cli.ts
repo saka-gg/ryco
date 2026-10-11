@@ -39,14 +39,9 @@ import {
 } from "effect";
 // oxlint-disable-next-line no-unused-vars -- TS needs the symbol in scope to name exported CLI types.
 import type { NodeInspectSymbol } from "effect/Inspectable";
-import { Argument, Command, Flag, GlobalFlag, Prompt } from "effect/unstable/cli";
+import { Argument, Command, Flag, GlobalFlag, Prompt } from "effect/cli";
 import type * as Terminal from "effect/Terminal";
-import {
-  FetchHttpClient,
-  HttpClient,
-  HttpClientRequest,
-  HttpClientResponse,
-} from "effect/unstable/http";
+import { FetchHttpClient, HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 
 import {
   DEFAULT_PORT,

@@ -5,7 +5,7 @@ import { spawnSync } from "node:child_process";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
 import { Effect, FileSystem, Layer, Option, PlatformError, Scope } from "effect";
-import { ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcessSpawner } from "effect/process";
 import { expect } from "vite-plus/test";
 import type {
   GitActionProgressEvent,

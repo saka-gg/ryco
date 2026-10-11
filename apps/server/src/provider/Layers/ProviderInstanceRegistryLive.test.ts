@@ -34,7 +34,7 @@ import {
   ProviderInstanceId,
 } from "@ryco/contracts";
 import { Effect, Layer } from "effect";
-import { HttpClient, HttpClientResponse } from "effect/unstable/http";
+import { HttpClient, HttpClientResponse } from "effect/http";
 
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";

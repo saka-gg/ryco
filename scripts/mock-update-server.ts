@@ -3,7 +3,7 @@ import * as NodeHttp from "node:http";
 import { NodeHttpServer, NodeRuntime } from "@effect/platform-node";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { Config, Effect, FileSystem, Layer, Path } from "effect";
-import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
+import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 
 interface MockUpdateServerConfig {
   readonly port: number;

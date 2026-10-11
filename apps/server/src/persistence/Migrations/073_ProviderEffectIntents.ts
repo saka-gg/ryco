@@ -1,5 +1,5 @@
 import { Effect } from "effect";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
 /**
  * The open-intent ledger for provider-bound side effects (turn start, steer,

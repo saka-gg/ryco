@@ -1,6 +1,6 @@
 import { sideQuestionDirectory, sideQuestionEnvironment } from "./SideQuestionIsolation.ts";
 import { Effect, FileSystem, Option, Path, Schema, Scope, Stream } from "effect";
-import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import { type CodexSettings, type ModelSelection } from "@ryco/contracts";
 import { sanitizeBranchFragment, sanitizeFeatureBranchName } from "@ryco/shared/git";

@@ -8,7 +8,7 @@
  * on the configured API so credentials never leave it.
  */
 import { Duration, Effect, Result, Schema, Stream } from "effect";
-import { HttpClientRequest, type HttpClientResponse } from "effect/unstable/http";
+import { HttpClientRequest, type HttpClientResponse } from "effect/http";
 import {
   CHANGE_REQUEST_FILE_CONTENTS_MAX_BYTES,
   type ChangeRequestActivity,

@@ -4,7 +4,7 @@ import {
   type AtlassianProduct,
   type AtlassianResourceId,
 } from "@ryco/contracts";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 import { Effect, Layer, Schema } from "effect";
 
 import {

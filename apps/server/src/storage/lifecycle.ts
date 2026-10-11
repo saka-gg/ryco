@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { Effect, Semaphore } from "effect";
 import { PROJECT_RELOCATION_PENDING_MESSAGE, StorageError } from "@ryco/contracts";
-import type * as SqlClient from "effect/unstable/sql/SqlClient";
+import type * as SqlClient from "effect/sql/SqlClient";
 import { captureWorktreeIdentity } from "./filesystem.ts";
 
 // One process-wide admission lock: orchestration projection, terminal spawning and cleanup.

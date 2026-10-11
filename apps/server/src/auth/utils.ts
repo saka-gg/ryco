@@ -1,5 +1,5 @@
 import type { AuthClientMetadata, AuthClientMetadataDeviceType } from "@ryco/contracts";
-import type * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
+import type * as HttpServerRequest from "effect/http/HttpServerRequest";
 import * as Crypto from "node:crypto";
 
 const SESSION_COOKIE_NAME = "ryco_session";

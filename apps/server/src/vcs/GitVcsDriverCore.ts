@@ -1,5 +1,5 @@
 import { resolveWorktreeCheckoutPath } from "../project/worktreeCheckoutPaths.ts";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 import { acquireWorktreeCreationLease, recordCreatedWorktree } from "../storage/lifecycle.ts";
 import { removeVerifiedWorktree } from "../storage/filesystem.ts";
 import type { Dirent } from "node:fs";
@@ -25,7 +25,7 @@ import {
   Semaphore,
   Stream,
 } from "effect";
-import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import { DEFAULT_SERVER_SETTINGS, GitCommandError, type VcsRef } from "@ryco/contracts";
 import { dedupeRemoteBranchesWithLocalMatches } from "@ryco/shared/git";

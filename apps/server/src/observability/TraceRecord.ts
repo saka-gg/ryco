@@ -1,7 +1,7 @@
 import { Cause, Exit, Option, Tracer } from "effect";
 
 import { compactTraceAttributes } from "./Attributes.ts";
-import { OtlpResource, OtlpTracer } from "effect/unstable/observability";
+import { OtlpResource, OtlpTracer } from "effect/observability";
 
 interface TraceRecordEvent {
   readonly name: string;

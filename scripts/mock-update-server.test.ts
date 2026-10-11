@@ -2,7 +2,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { NodeHttpServer } from "@effect/platform-node";
 import { assert, it } from "@effect/vitest";
 import { Effect, FileSystem, Layer, Path } from "effect";
-import { HttpClient, HttpRouter } from "effect/unstable/http";
+import { HttpClient, HttpRouter } from "effect/http";
 
 import { makeMockUpdateRouteLayer } from "./mock-update-server.ts";
 

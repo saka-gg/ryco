@@ -13,8 +13,8 @@
  */
 import { CursorSettings, ProviderDriverKind, type ServerProvider } from "@ryco/contracts";
 import { Effect, FileSystem, Option, Path, Schema, Stream } from "effect";
-import { HttpClient } from "effect/unstable/http";
-import { ChildProcessSpawner } from "effect/unstable/process";
+import { HttpClient } from "effect/http";
+import { ChildProcessSpawner } from "effect/process";
 
 import { ServerConfig } from "../../config.ts";
 import { makeCursorTextGeneration } from "../../textGeneration/CursorTextGeneration.ts";

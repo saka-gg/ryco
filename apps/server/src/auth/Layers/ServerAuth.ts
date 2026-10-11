@@ -7,7 +7,7 @@ import {
   type AuthWebSocketTokenResult,
 } from "@ryco/contracts";
 import { DateTime, Effect, Layer, Option } from "effect";
-import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
+import * as HttpServerRequest from "effect/http/HttpServerRequest";
 
 import { ServerConfig, type ServerConfigShape } from "../../config.ts";
 import { isLoopbackHost } from "../../startupAccess.ts";

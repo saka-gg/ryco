@@ -19,7 +19,7 @@ import {
   mergeReleasedTurn,
 } from "@ryco/shared/turnFinalization";
 import { Effect, FileSystem, Layer, Option, Path, Stream, Schema } from "effect";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import { toPersistenceSqlError, type ProjectionRepositoryError } from "../../persistence/Errors.ts";
 import { OrchestrationEventStore } from "../../persistence/Services/OrchestrationEventStore.ts";

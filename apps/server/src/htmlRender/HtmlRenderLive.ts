@@ -30,7 +30,7 @@ import {
   Semaphore,
 } from "effect";
 import type { Duration } from "effect";
-import { ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcessSpawner } from "effect/process";
 
 import {
   HTML_RENDER_WITHOUT_PREVIEW,

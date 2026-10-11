@@ -1,8 +1,8 @@
 import { WsDeviceRpcGroup, WsHostedRpcGroup, WsRpcGroup } from "@ryco/contracts";
 import type { EnvironmentId } from "@ryco/contracts";
 import { Data, Duration, Effect, Layer, Schedule } from "effect";
-import { RpcClient, RpcSerialization } from "effect/unstable/rpc";
-import * as Socket from "effect/unstable/socket/Socket";
+import { RpcClient, RpcSerialization } from "effect/rpc";
+import * as Socket from "effect/socket/Socket";
 
 import type { SocketService } from "../platform/index.ts";
 import {

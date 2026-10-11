@@ -7,8 +7,8 @@ import {
   ThreadId,
   type ClientOrchestrationCommand,
 } from "@ryco/contracts";
-import { RpcClientError } from "effect/unstable/rpc/RpcClientError";
-import * as Socket from "effect/unstable/socket/Socket";
+import { RpcClientError } from "effect/rpc/RpcClientError";
+import * as Socket from "effect/socket/Socket";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import type { HostedRuntimeTimers } from "../authorization/runtime.ts";

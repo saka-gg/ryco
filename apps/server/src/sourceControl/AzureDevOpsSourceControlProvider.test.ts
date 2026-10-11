@@ -1,6 +1,6 @@
 import { assert, describe, it } from "@effect/vitest";
 import { DateTime, Effect, Layer, Option, Result } from "effect";
-import { ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcessSpawner } from "effect/process";
 import { SOURCE_CONTROL_DETAIL_BODY_MAX_BYTES } from "@ryco/contracts";
 
 import * as AzureDevOpsCli from "./AzureDevOpsCli.ts";

@@ -15,7 +15,7 @@ import {
   TurnId,
 } from "@ryco/contracts";
 import { Context, Effect, Layer, Schema } from "effect";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 import { toPersistenceSqlError } from "../Errors.ts";
 import { latestUserMessageIdQuery } from "../userMessageAnchors.ts";
 import { hasTurnStartEnded, hasTurnStartFailure } from "../delegatedRunStatus.ts";

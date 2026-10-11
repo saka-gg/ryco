@@ -4,7 +4,7 @@ import {
   type VcsListRefsResult,
   type VcsRef,
 } from "@ryco/contracts";
-import { Atom } from "effect/unstable/reactivity";
+import { Atom } from "effect/reactivity";
 
 import { readEnvironmentApi } from "../environmentApi";
 import { createVisibilityAwarePoller, type VisibilityAwarePoller } from "../lib/visibilityPolling";

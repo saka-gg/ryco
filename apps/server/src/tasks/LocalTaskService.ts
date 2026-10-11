@@ -13,7 +13,7 @@ import {
   type ProjectId,
 } from "@ryco/contracts";
 import { Context, Effect, Layer, Schema } from "effect";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 import { readDelegatedRunState } from "../persistence/delegatedRunStatus.ts";
 
 type TaskEffect<A> = Effect.Effect<A, LocalTaskError>;

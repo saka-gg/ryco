@@ -6,7 +6,7 @@ import {
 } from "@ryco/contracts";
 import { resolveCommandPath } from "@ryco/shared/shell";
 import { DateTime, Effect, FileSystem, Option, Schema } from "effect";
-import { HttpClient, HttpClientRequest } from "effect/unstable/http";
+import { HttpClient, HttpClientRequest } from "effect/http";
 
 import { ServerSettingsService } from "../serverSettings.ts";
 import { compareCliVersions } from "./cliVersion.ts";

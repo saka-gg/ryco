@@ -14,8 +14,8 @@
  */
 import { ClaudeSettings, ProviderDriverKind, type ServerProvider } from "@ryco/contracts";
 import { Cache, Duration, Effect, FileSystem, Option, Path, Schema, Stream } from "effect";
-import { HttpClient } from "effect/unstable/http";
-import { ChildProcessSpawner } from "effect/unstable/process";
+import { HttpClient } from "effect/http";
+import { ChildProcessSpawner } from "effect/process";
 
 import { makeClaudeTextGeneration } from "../../textGeneration/ClaudeTextGeneration.ts";
 import { ServerConfig } from "../../config.ts";

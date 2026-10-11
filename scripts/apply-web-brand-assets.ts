@@ -3,7 +3,7 @@
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { Effect, FileSystem, Option, Path } from "effect";
-import { Argument, Command } from "effect/unstable/cli";
+import { Argument, Command } from "effect/cli";
 import { resolveWebIconOverrides, type WebAssetBrand } from "./lib/brand-assets.ts";
 
 const WEB_ASSET_BRANDS = [

@@ -1,6 +1,6 @@
 import { parseResetCredits } from "./CodexResetCredits.ts";
 import { DateTime, Duration, Effect, Layer, Option, Result, Schema, Types } from "effect";
-import { ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcessSpawner } from "effect/process";
 import * as CodexClient from "effect-codex-app-server/client";
 import * as CodexSchema from "effect-codex-app-server/schema";
 import * as CodexErrors from "effect-codex-app-server/errors";

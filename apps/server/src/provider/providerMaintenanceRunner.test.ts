@@ -7,8 +7,8 @@ import {
 } from "@ryco/contracts";
 import { ServerProviderUpdateError } from "@ryco/contracts";
 import { Cause, Effect, Exit, Fiber, Layer, Ref, Schema, Sink, Stream } from "effect";
-import { HttpClient, HttpClientResponse } from "effect/unstable/http";
-import { ChildProcessSpawner } from "effect/unstable/process";
+import { HttpClient, HttpClientResponse } from "effect/http";
+import { ChildProcessSpawner } from "effect/process";
 
 import { ProviderRegistry, type ProviderRegistryShape } from "./Services/ProviderRegistry.ts";
 import * as ProviderMaintenanceRunner from "./providerMaintenanceRunner.ts";

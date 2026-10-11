@@ -1,5 +1,5 @@
 import { Context, DateTime, Effect, Layer, Option } from "effect";
-import { ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcessSpawner } from "effect/process";
 
 import {
   GitCommandError,
