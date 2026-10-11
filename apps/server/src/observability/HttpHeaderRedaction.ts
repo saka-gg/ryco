@@ -11,7 +11,13 @@ export const HttpSpanHeadersLive = Layer.succeed(HttpMiddleware.TracerHeaderFilt
 
 /** Capture policy before HTTP tracing defers span completion outside its request context. */
 export function makeHttpHeaderRedactor(names: ReadonlyArray<string | RegExp>) {
-  const redactedNames = [...names, LOCAL_INTRODUCTION_CONTROL_HEADER, "dpop", "dpop-nonce"];
+  const redactedNames = [
+    ...names,
+    LOCAL_INTRODUCTION_CONTROL_HEADER,
+    "dpop",
+    "dpop-nonce",
+    "proxy-authorization",
+  ];
   return (key: string, value: unknown): unknown => {
     const match = /^http\.(?:request|response)\.header\.(.+)$/iu.exec(key);
     if (!match) return value;

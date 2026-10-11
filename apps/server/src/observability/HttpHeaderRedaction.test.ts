@@ -28,6 +28,7 @@ describe("HTTP credential redaction", () => {
       "x-ryco-desktop-control": "test-only-desktop-control",
       dpop: "test-only-proof",
       "dpop-nonce": "test-only-nonce",
+      "proxy-authorization": "Basic test-only-proxy",
       "x-custom-credential": "test-only-custom-credential",
     };
     const layer = Layer.effect(
