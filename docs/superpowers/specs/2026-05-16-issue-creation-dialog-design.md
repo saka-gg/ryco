@@ -372,7 +372,7 @@ insurance against future regressions.
   `TextGenerationError`. Mirrors the existing `generateBranchName`
   pattern.
 - Per-driver tests (`CodexTextGeneration.test.ts`, `ClaudeTextGeneration.
-test.ts`, etc.) — one happy-path case per driver confirming wire-up and
+  test.ts`, etc.) — one happy-path case per driver confirming wire-up and
   JSON parsing.
 - `wsServer` test — RPC routing for the four new methods, input
   validation, error pass-through.

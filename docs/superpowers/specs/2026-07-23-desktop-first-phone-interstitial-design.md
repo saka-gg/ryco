@@ -145,7 +145,7 @@ dependency on app shell, sidebar, or connection state):
 
 - Brand mark + headline ("Ryco is better as an app") + one sentence of copy.
 - Primary action: **Get the app** — a plain `<a href={mobileAppUrl}
-target="_blank" rel="noreferrer">` (no `window.open`, works under popup
+  target="_blank" rel="noreferrer">` (no `window.open`, works under popup
   blockers).
 - Secondary action: **Continue in browser** — records the dismissal and
   removes the overlay, revealing the already-mounted experience.

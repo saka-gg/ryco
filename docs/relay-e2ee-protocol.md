@@ -3766,12 +3766,12 @@ withholds is therefore never an input to these guards.
     subject to the same exclusion: a selection for which the owner has recorded explicit legacy
     consent is claimed by legacy-eligible branch (b) and is never unexpected. The clauses are
     (i) a pin resolves but is not latched; (ii) no pin resolves while the `(hubOrigin,
-accountId)` pair holds at least one verified pin; (iii) no pin resolves under the pair while
+    accountId)` pair holds at least one verified pin; (iii) no pin resolves under the pair while
     `anyNodeVerified(hubOrigin)` is set. Evaluate the three classes in the order stated above —
     latched, then legacy-eligible, then unexpected — which resolves every selection identically
     to the precise rule of §11.2 P22.
 - **Why branch (a) is scoped to the Hub origin and not to the pair.** The `(hubOrigin,
-accountId)` pair is half Hub-chosen (see provenance above), so a pair test alone is a guard the
+  accountId)` pair is half Hub-chosen (see provenance above), so a pair test alone is a guard the
   Hub can retire by re-minting the account identifier: a fully verified, latched device resolves
   its selection under the new pair, finds no pin and no verified pin _in that pair_, and would
   classify as "genuine first contact" — after which withholding the carrier reaches row K13 and a
@@ -3780,7 +3780,7 @@ accountId)` pair is half Hub-chosen (see provenance above), so a pair test alone
   account-scope change lands in **unexpected** (rows K23/K24, §11.2 P22) and raises the §13.2.1
   surface instead of releasing plaintext. Note the asymmetry this restores: on the node side the
   same re-mint already fails **closed**, because §8.6 step 6 looks up `(hubOrigin, accountId,
-clientIdentityFingerprint)` and finds no record (§11.2 P12). Before the marker, the client
+  clientIdentityFingerprint)` and finds no record (§11.2 P12). Before the marker, the client
   failed _open_ on exactly the input the node failed closed on.
 - **The marker never relaxes anything.** It can only move a selection from legacy-eligible to
   unexpected, never the reverse, and it is not evidence about the node on the channel: it says
@@ -4036,7 +4036,7 @@ counted separately rather than being allowed to move the same number.
   observation-window start timestamp; the last-occurrence
   timestamp per class; and a bounded ring of the most recent `E2EE_FALLBACK_RING_SIZE`
   occurrences across both classes. Each ring entry contains exactly three fields: `originHash =
-SHA-256(canonical-CBOR([ "ryco.relay-e2ee.fallback-origin.v1", hubOrigin ]))`, the occurrence
+  SHA-256(canonical-CBOR([ "ryco.relay-e2ee.fallback-origin.v1", hubOrigin ]))`, the occurrence
   timestamp, and the reason label — one of the fixed set `peer-legacy`, `undersized-connection`,
   `statement-unavailable`. The label is a bounded enumerated value carrying no account, channel,
   session, key, or payload data, so it does not widen what this record retains. Counters are
@@ -4795,7 +4795,7 @@ key:
   be built on it as though it were. The client-side counterpart of this concession is §12.1.1's
   provenance rule: `accountId` is Hub-issued at the other end of the same value, so no downgrade
   guard rests on it alone. Note that the Branch A key `(hubOrigin, accountId,
-clientIdentityFingerprint)` fails **closed** under an account re-mint — the lookup at §8.6 step
+  clientIdentityFingerprint)` fails **closed** under an account re-mint — the lookup at §8.6 step
   6 simply finds no record and takes §11.2 P12 — which is the behavior §12.1.1's marker restores
   on the client side.
 - Approved: at most `E2EE_APPROVED_CLIENTS_MAX`; exceeding it fails the approval explicitly —
@@ -6391,7 +6391,7 @@ Relay minor 3 adds the following bounded control-plane structures; it changes no
 - `e2ee.enrollment-revoked` carries enrollment id/revision plus the new account and device epochs.
   A stale epoch is ignored; a newer matching event aborts handshakes and closes leases.
 - An account-grant `channel.open` carries `accountGrantContext =
-[ 0x02, relayTicketId, bstr(deviceGrantDigest), bstr(nodeCapabilityStatementDigest) ]` in addition
+  [ 0x02, relayTicketId, bstr(deviceGrantDigest), bstr(nodeCapabilityStatementDigest) ]` in addition
   to minor-2 capability and role. All four members are required together on minor 3 and forbidden on
   minors 0–2. Local suite-`0x01` and Web channels omit it.
 

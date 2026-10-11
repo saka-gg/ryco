@@ -169,7 +169,7 @@ Wiring:
   `aria-label="Edit shortcut for <command title>"`.
 - **Enter recording** — click, or focus + Enter/Space. Sets state to
   `recording`. Attaches a `keydown` listener on `window` with `capture:
-true` and `preventDefault: true` so global app shortcuts (the existing
+  true` and `preventDefault: true` so global app shortcuts (the existing
   `keybindings.ts` runtime) do not fire while recording.
 - **Capture** — first non-modifier `keydown` becomes the shortcut. Modifiers
   held at that moment populate `metaKey/ctrlKey/altKey/shiftKey`. To keep

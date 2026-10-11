@@ -352,7 +352,7 @@ describe("ChatMarkdown", () => {
       />,
     );
     try {
-      await expect.element(page.getByRole("status")).toHaveTextContent("Preparing files…");
+      await expect.element(page.getByRole("status")).toMatchTextContent("Preparing files…");
       const manifest =
         '```ryco-attachments\n{"files":[{"path":"output/result.png"}]}\n```\n\nReady';
       await screen.rerender(

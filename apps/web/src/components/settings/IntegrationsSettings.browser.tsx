@@ -94,10 +94,12 @@ describe("ExternalIntegrationsSettings", () => {
     await page.getByLabelText("Display name").fill("Browser test Codex");
     await page.getByRole("button", { name: "Create and pair" }).click();
 
-    await expect.element(page.getByTestId("external-pairing-code")).toHaveTextContent("ABCD234567");
+    await expect
+      .element(page.getByTestId("external-pairing-code"))
+      .toMatchTextContent("ABCD234567");
     await expect
       .element(page.getByTestId("external-mcp-configuration"))
-      .toHaveTextContent("/actual/runtime/node");
+      .toMatchTextContent("/actual/runtime/node");
     expect(document.body.textContent).not.toContain("rycoext_");
     expect(harness.createIntegration).toHaveBeenCalledWith(
       expect.objectContaining({

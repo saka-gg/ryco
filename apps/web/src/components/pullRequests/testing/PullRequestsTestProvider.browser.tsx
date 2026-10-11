@@ -221,9 +221,9 @@ describe("PullRequestsTestProvider", () => {
     const conversation = screen.getByRole("tab", { name: /Conversation/u });
     const files = screen.getByRole("tab", { name: /Files/u });
     await expect.element(conversation).toHaveAttribute("aria-selected", "true");
-    await expect.element(files).toHaveTextContent("12");
+    await expect.element(files).toMatchTextContent("12");
     await expect.element(screen.getByRole("tab", { name: /Checks/u })).toBeVisible();
-    await expect.element(screen.getByRole("tab", { name: /Commits/u })).toHaveTextContent("8");
+    await expect.element(screen.getByRole("tab", { name: /Commits/u })).toMatchTextContent("8");
 
     await files.click();
     await expect.element(files).toHaveAttribute("aria-selected", "true");

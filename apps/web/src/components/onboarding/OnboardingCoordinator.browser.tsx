@@ -319,7 +319,7 @@ describe("local first-run onboarding", () => {
     await mount();
     fixture.refresh.mockRejectedValueOnce(new Error("fixture failure"));
     await page.getByRole("button", { name: "Refresh discovery" }).click();
-    await expect.element(page.getByRole("alert")).toHaveTextContent("Provider discovery failed");
+    await expect.element(page.getByRole("alert")).toMatchTextContent("Provider discovery failed");
     let finish!: (value: { providers: readonly ServerProvider[] }) => void;
     fixture.refresh.mockReturnValueOnce(
       new Promise((resolve) => {

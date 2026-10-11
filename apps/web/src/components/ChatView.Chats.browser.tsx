@@ -620,7 +620,9 @@ describe("ChatView chats without a project (full app)", () => {
       expect(useComposerDraftStore.getState().getComposerDraft(DRAFT_ID)?.prompt).toBe(
         "Keep this prompt",
       );
-      await expect.element(page.getByText("What should we do in")).toBeInTheDocument();
+      await expect
+        .element(page.getByText("What should we do in", { exact: false }))
+        .toBeInTheDocument();
       expect(document.querySelector('[data-testid="new-thread-chat-location"]')).toBeNull();
     } finally {
       await mounted.cleanup();

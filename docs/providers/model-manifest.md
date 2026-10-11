@@ -149,7 +149,7 @@ rating), `Layers/ProviderRegistry.ts` (rates snapshots, post-sync refresh),
 
 1. Add a profile (or reuse one) and a `models` entry with the version gate.
 2. Validate locally: `bun run test src/provider/ModelManifest.test.ts
-src/provider/ClaudeModelCatalog.test.ts` in `apps/server` (the first test
+   src/provider/ClaudeModelCatalog.test.ts` in `apps/server` (the first test
    decodes the bundled file).
 3. Merge to `main`. Running installs pick it up on their next provider check
    after the TTL window; releases bundle it.

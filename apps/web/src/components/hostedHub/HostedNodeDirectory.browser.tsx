@@ -519,7 +519,7 @@ describe("hosted node directory", () => {
 
     await expect
       .element(page.getByRole("alert"))
-      .toHaveTextContent("You are not authorized to perform this action.");
+      .toMatchTextContent("You are not authorized to perform this action.");
     await expect.element(page.getByRole("heading", { name: "Rename device" })).toBeVisible();
     await expect.element(input).toBeEnabled();
   });
@@ -832,7 +832,7 @@ describe("hosted node revocation", () => {
     await page.getByRole("button", { name: "Revoke", exact: true }).click();
     await page.getByRole("button", { name: "Revoke this node" }).click();
 
-    await expect.element(page.getByRole("alert")).toHaveTextContent(/Only an owner of this Hub/);
+    await expect.element(page.getByRole("alert")).toMatchTextContent(/Only an owner of this Hub/);
     // Bounded: it says what happened and nothing about the transport.
     const alert = document.querySelector<HTMLElement>('[role="alert"]')?.textContent ?? "";
     expect(alert).toContain("Nothing was changed");
@@ -869,7 +869,7 @@ describe("hosted node revocation", () => {
     await page.getByRole("button", { name: "Revoke", exact: true }).click();
     await page.getByRole("button", { name: "Revoke this node" }).click();
 
-    await expect.element(page.getByRole("alert")).toHaveTextContent(/nothing here left to revoke/);
+    await expect.element(page.getByRole("alert")).toMatchTextContent(/nothing here left to revoke/);
     await expect
       .element(page.getByRole("button", { name: "Revoke this node" }))
       .not.toBeInTheDocument();
@@ -952,7 +952,7 @@ describe("hosted node revocation", () => {
     );
 
     rejectRevoke(new HostedHubApiError("forbidden", 403));
-    await expect.element(page.getByRole("alert")).toHaveTextContent(/Only an owner of this Hub/);
+    await expect.element(page.getByRole("alert")).toMatchTextContent(/Only an owner of this Hub/);
   });
 
   it("sends exactly one request when the owner clicks the confirmation twice", async () => {

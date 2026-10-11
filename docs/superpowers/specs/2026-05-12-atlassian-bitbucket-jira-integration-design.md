@@ -115,7 +115,10 @@ Bitbucket Cloud and Jira Cloud have historically had different auth surfaces. Th
 
 ```ts
 type AtlassianCredentialCapability =
-  "jira:read" | "jira:write" | "bitbucket:read" | "bitbucket:write";
+  | "jira:read"
+  | "jira:write"
+  | "bitbucket:read"
+  | "bitbucket:write";
 ```
 
 Each saved Atlassian connection advertises capabilities based on actual token type and verified probes.

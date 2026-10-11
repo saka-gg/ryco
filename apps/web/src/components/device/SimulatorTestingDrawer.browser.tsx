@@ -16,7 +16,7 @@ describe("Simulator testing drawer", () => {
     await screen.getByRole("button", { name: "Dark + large text", exact: true }).click();
     await expect
       .element(screen.getByRole("status"))
-      .toHaveTextContent("Dark + large text applied.");
+      .toMatchTextContent("Dark + large text applied.");
     expect(testing).toHaveBeenLastCalledWith({
       udid: "TEST-0001",
       action: { type: "preset", value: "dark-large-text" },
@@ -33,7 +33,7 @@ describe("Simulator testing drawer", () => {
     await screen.getByRole("button", { name: "Set location", exact: true }).click();
     await expect
       .element(screen.getByRole("status"))
-      .toHaveTextContent("Simulated location applied.");
+      .toMatchTextContent("Simulated location applied.");
     expect(testing).toHaveBeenLastCalledWith({
       udid: "TEST-0001",
       action: { type: "location", latitude: 0, longitude: -122.5 },
@@ -45,7 +45,7 @@ describe("Simulator testing drawer", () => {
     await screen.getByRole("button", { name: "Reset to prompt", exact: true }).click();
     await expect
       .element(screen.getByRole("status"))
-      .toHaveTextContent("Permission reset completed.");
+      .toMatchTextContent("Permission reset completed.");
     expect(testing).toHaveBeenLastCalledWith({
       udid: "TEST-0001",
       action: {
@@ -58,7 +58,7 @@ describe("Simulator testing drawer", () => {
     await screen.getByRole("button", { name: "Send push", exact: true }).click();
     await expect
       .element(screen.getByRole("status"))
-      .toHaveTextContent("Push delivered to the simulator.");
+      .toMatchTextContent("Push delivered to the simulator.");
     expect(testing).toHaveBeenLastCalledWith({
       udid: "TEST-0001",
       action: {
@@ -94,13 +94,13 @@ describe("Simulator testing drawer", () => {
     reject(new Error("Runtime does not support this action"));
     await expect
       .element(screen.getByRole("alert"))
-      .toHaveTextContent("Runtime does not support this action");
+      .toMatchTextContent("Runtime does not support this action");
     await expect
       .element(screen.getByRole("button", { name: "Dark mode", exact: true }))
       .toBeEnabled();
     testing.mockResolvedValue(undefined);
     await screen.getByRole("button", { name: "Dark mode", exact: true }).click();
-    await expect.element(screen.getByRole("status")).toHaveTextContent("Dark mode applied.");
+    await expect.element(screen.getByRole("status")).toMatchTextContent("Dark mode applied.");
   });
 
   it("keeps the expanded drawer scrollable beside a usable simulator at a narrow panel width", async () => {

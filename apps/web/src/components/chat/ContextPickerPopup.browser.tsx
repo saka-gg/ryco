@@ -160,7 +160,7 @@ describe("ContextPickerPopup", () => {
         expect(document.body.textContent).toContain("PRs");
       });
 
-      await page.getByRole("tab", { name: "PRs" }).click();
+      await page.getByRole("tab", { name: "PRs", exact: false }).click();
 
       await vi.waitFor(() => {
         const text = document.body.textContent ?? "";

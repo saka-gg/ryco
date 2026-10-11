@@ -127,7 +127,7 @@ describe("local history import", () => {
     await chooseOption("Import target project", "Replacement project");
     await expect
       .element(page.getByLabelText("Continuation model"))
-      .toHaveTextContent("Fixture model");
+      .toMatchTextContent("Fixture model");
     await page.getByRole("button", { name: "Import selected" }).click();
     await expect.element(page.getByText("Fixture provider unavailable")).toBeVisible();
     await expect.element(page.getByLabelText("Select First fixture")).toBeDisabled();
@@ -176,22 +176,22 @@ describe("local history import", () => {
     render(<FixturePanel />);
     await expect
       .element(page.getByLabelText("Continuation model"))
-      .toHaveTextContent("Fixture model");
+      .toMatchTextContent("Fixture model");
     await chooseOption("Import provider instance", "Other Codex");
     await expect
       .element(page.getByLabelText("Continuation model"))
-      .toHaveTextContent("Other model");
+      .toMatchTextContent("Other model");
     await chooseOption("Import source", "Claude Code");
     await expect
       .element(page.getByLabelText("Import provider instance"))
-      .toHaveTextContent("Claude fixture");
+      .toMatchTextContent("Claude fixture");
     await expect
       .element(page.getByLabelText("Continuation model"))
-      .toHaveTextContent("Claude fixture model");
+      .toMatchTextContent("Claude fixture model");
     await chooseOption("Import source", "Codex");
     await expect
       .element(page.getByLabelText("Continuation model"))
-      .toHaveTextContent("Fixture model");
+      .toMatchTextContent("Fixture model");
   });
   it("keeps discovery disabled until hosted mutation readiness is current", async () => {
     harness.allowed = false;
@@ -284,12 +284,12 @@ it("filters continuation instances by the explicitly chosen store and clears old
   await page.getByRole("button", { name: "Find conversations" }).click();
   await expect
     .element(page.getByLabelText("Import provider instance"))
-    .toHaveTextContent("Fixture Codex");
+    .toMatchTextContent("Fixture Codex");
   await chooseOption("Import source store", "Custom store");
   await expect.element(page.getByText("Recovery fixture")).not.toBeInTheDocument();
   await expect
     .element(page.getByLabelText("Import provider instance"))
-    .toHaveTextContent("Other Codex");
+    .toMatchTextContent("Other Codex");
   await page.getByRole("button", { name: "Find conversations" }).click();
   expect(harness.discover.mock.calls[1]![0].storeKey).toBe("d".repeat(64));
   await chooseOption("Import source store", "Disabled store (no enabled continuation instance)");

@@ -168,7 +168,7 @@ describe("WhenField", () => {
     expect(onChange).not.toHaveBeenCalled();
 
     // The nearest valid time leads the suggestions.
-    await expect.element(page.getByRole("option").first()).toHaveTextContent("Earliest allowed");
+    await expect.element(page.getByRole("option").first()).toMatchTextContent("Earliest allowed");
 
     await page.getByRole("button", { name: `Use ${why.fixLabel}` }).click();
     expect(onChange).toHaveBeenCalledWith(why.fix, { via: "fix" });
@@ -186,7 +186,7 @@ describe("WhenField", () => {
     if (!why || why.fix == null) throw new Error("expected a late explanation with a fix");
     expect(why.kind).toBe("late");
     await expect.poll(chipText).toContain("Past the 90-day limit");
-    await expect.element(page.getByRole("option").first()).toHaveTextContent("Latest allowed");
+    await expect.element(page.getByRole("option").first()).toMatchTextContent("Latest allowed");
     await page.getByRole("button", { name: `Use ${why.fixLabel}` }).click();
     expect(onChange).toHaveBeenCalledWith(why.fix, { via: "fix" });
   });

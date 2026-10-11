@@ -449,7 +449,7 @@ logic + `composerDraftPersistence` **Schema migrations** (`./state/composer`), `
   `AttachmentCodec` + `KV` + `SecretKV`. Domain helpers `modelSelection`, `providerInstances`,
   `providerModels`, and `composer-logic` move alongside.
   _`executeChatSendTurn` is split, not moved whole._ It imports UI at `hooks/executeChatSendTurn.ts:
-20-40` — `ChatComposerHandle` (`components/chat/ChatComposer`), `toastManager`/`stackedThreadToast`
+  20-40` — `ChatComposerHandle` (`components/chat/ChatComposer`), `toastManager`/`stackedThreadToast`
   (`components/ui/toast`), and `components/ChatView.logic`. The **pure send engine** (model/provider/
   runtime-mode resolution, worktree/branch naming, `EnvironmentApi` dispatch, `newCommandId`/
   `newMessageId`) moves into `./state/composer`; the **UI adapters** (composer focus/handle, toasts,
@@ -492,8 +492,8 @@ Slices 1–5a, with 5b as the composer/terminal follow-up.
   error text; an effect bump silently changes reconnect semantics. Preserve and pin, with tests
   asserting exact strings: the transport patterns `/\bSocketCloseError\b/i`, `/\bSocketOpenError\b/i`,
   `/\bping timeout\b/i` (`transportError.ts:2-5`); the literal `"Unable to connect to the Ryco
-server WebSocket."` (`protocol.ts:217`); `THREAD_NOT_FOUND_ERROR_RE = /^Thread\s.+\swas not
-found$/u` (`wsTransport.ts:39`); and `isSubscriptionStreamDoneError` matching
+  server WebSocket."` (`protocol.ts:217`); `THREAD_NOT_FOUND_ERROR_RE = /^Thread\s.+\swas not
+  found$/u` (`wsTransport.ts:39`); and `isSubscriptionStreamDoneError` matching
   `"SchemaError(Expected array"` (`wsTransport.ts:66-72`). Effect stays pinned at catalog
   `4.0.0-beta.59` + patch; any future mobile app joins the same catalog (a duplicate `effect`
   instance fractures atoms and Schema brands).
@@ -521,7 +521,7 @@ found$/u` (`wsTransport.ts:39`); and `isSubscriptionStreamDoneError` matching
 4. **String-based error classification.** → Preserve verbatim, pin effect, add the pinning tests
    above.
 5. **`import.meta.env` — mostly ambient function reads, two genuine import-time sites.** `env.ts:
-12-14`, `target.ts:40-68`, `catalog.ts:227-234`, and `hostedPairing.ts:11-16` read `VITE_*`
+   12-14`, `target.ts:40-68`, `catalog.ts:227-234`, and `hostedPairing.ts:11-16` read `VITE_*`
    **inside functions**, so they become injected-config lookups without reordering init. The real
    import-time hazards are `perf/perfInstrumentation.ts:10` (module-scope `const`) and
    `composerDraftPersistence.ts:53` (module-scope `const` calling `isHostedHubMode()` plus a

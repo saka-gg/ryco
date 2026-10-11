@@ -52,3 +52,5 @@ scripts/**/*.d.ts
 /output/task12/four-panes.png
 /output/task12/narrow-panes.png
 /output/task12/two-panes.png
+# Vitest 5 artifacts: attachments, failure screenshots, blob/HTML/JSON/JUnit defaults.
+.vitest/
