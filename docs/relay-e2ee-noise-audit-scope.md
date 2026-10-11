@@ -454,7 +454,7 @@ bun run --cwd packages/shared test # the module's own suite
 bun typecheck
 ```
 
-Use the Bun version pinned in `package.json` (`packageManager`, currently `bun@1.4.0`). Never invoke
+Use the Bun version pinned in `package.json` (`packageManager`, currently `bun@1.4.3`). Never invoke
 `bun test`, which runs Bun's own runner instead of the configured Vitest setup and will not execute
 these suites.
 
