@@ -7,7 +7,8 @@
       "claude-opus-5-5",
       "claude-opus-5",
       "claude-sonnet-5-5",
-      "claude-sonnet-5"
+      "claude-sonnet-5",
+      "claude-haiku-5-5"
     ]
   },
   "compatibility": [
@@ -387,6 +388,25 @@
             }
           }
         },
+        "haiku-5-5": {
+          "capabilities": {
+            "optionDescriptors": [
+              {
+                "id": "effort",
+                "label": "Reasoning",
+                "type": "select",
+                "options": [
+                  { "id": "low", "label": "Low" },
+                  { "id": "medium", "label": "Medium", "isDefault": true },
+                  { "id": "high", "label": "High" },
+                  { "id": "xhigh", "label": "Extra High" },
+                  { "id": "max", "label": "Max" }
+                ]
+              }
+            ]
+          },
+          "adapter": { "claudeCode": { "fixedContextWindowTokens": 1000000 } }
+        },
         "haiku-4-5": {
           "capabilities": {
             "optionDescriptors": [{ "id": "thinking", "label": "Thinking", "type": "boolean" }]
@@ -486,6 +506,14 @@
           "aliases": ["sonnet-4.6", "claude-sonnet-4.6", "claude-sonnet-4-6-20251117"],
           "status": "legacy",
           "profile": "sonnet-4-6"
+        },
+        {
+          "slug": "claude-haiku-5-5",
+          "name": "Claude Haiku 5.5",
+          "shortName": "Haiku 5.5",
+          "aliases": ["haiku-5.5", "claude-haiku-5.5"],
+          "status": "current",
+          "profile": "haiku-5-5"
         },
         {
           "slug": "claude-haiku-4-5",

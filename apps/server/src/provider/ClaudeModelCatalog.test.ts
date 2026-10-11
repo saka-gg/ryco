@@ -9,6 +9,7 @@ import {
   normalizeClaudeCatalogEffort,
   resolveClaudeCatalogApiModelId,
   resolveClaudeCatalogContextWindow,
+  resolveClaudeCatalogEffort,
   resolveClaudeCatalogModel,
   resolveClaudeModelsForVersion,
 } from "./ClaudeModelCatalog.ts";
@@ -196,6 +197,29 @@ describe("ClaudeModelCatalog", () => {
   });
 
   describe("capabilities", () => {
+    it("Haiku 5.5 supports all five efforts with medium as the default", () => {
+      const model = "claude-haiku-5-5";
+      const caps = getClaudeCatalogModelCapabilities(catalog, model);
+      assert.deepEqual(
+        caps.optionDescriptors?.map((descriptor) => descriptor.id),
+        ["effort"],
+      );
+      const effort = caps.optionDescriptors?.find((descriptor) => descriptor.id === "effort");
+      assert.equal(effort?.type, "select");
+      if (effort?.type !== "select") return;
+      assert.deepEqual(
+        effort.options.map((option) => option.id),
+        ["low", "medium", "high", "xhigh", "max"],
+      );
+      assert.equal(resolveClaudeCatalogEffort(catalog, model, undefined), "medium");
+      for (const option of effort.options) {
+        assert.equal(resolveClaudeCatalogEffort(catalog, model, option.id), option.id);
+        assert.equal(normalizeClaudeCatalogEffort(catalog, option.id, model), option.id);
+      }
+      assert.equal(resolveClaudeCatalogModel(catalog, "haiku-5.5")?.model.slug, model);
+      assert.equal(resolveClaudeCatalogApiModelId(catalog, modelSelection(model)), model);
+    });
+
     it("Fable 5.1 exposes the ultracode ladder without fast mode", () => {
       const caps = getClaudeCatalogModelCapabilities(catalog, "claude-fable-5-1");
       const ids = caps.optionDescriptors?.map((descriptor) => descriptor.id);
