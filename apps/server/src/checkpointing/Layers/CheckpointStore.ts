@@ -2,7 +2,7 @@
  * CheckpointStoreLive - Filesystem checkpoint store adapter layer.
  *
  * Implements hidden Git-ref checkpoint capture/restore directly with
- * Effect-native child process execution (`effect/unstable/process`).
+ * Effect-native child process execution (`effect/process`).
  *
  * This layer owns filesystem/Git interactions only; it does not persist
  * checkpoint metadata and does not coordinate provider rollback semantics.

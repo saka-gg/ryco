@@ -9,15 +9,15 @@
       "scripts"
     ],
     "catalog": {
-      "effect": "4.0.0-beta.107",
-      "@effect/atom-react": "4.0.0-beta.107",
-      "@effect/openapi-generator": "4.0.0-beta.107",
-      "@effect/platform-bun": "4.0.0-beta.107",
-      "@effect/platform-node": "4.0.0-beta.107",
-      "@effect/platform-node-shared": "4.0.0-beta.107",
-      "@effect/sql-sqlite-bun": "4.0.0-beta.107",
-      "@effect/vitest": "4.0.0-beta.107",
-      "@effect/tsgo": "0.43.0",
+      "effect": "4.0.2",
+      "@effect/atom-react": "4.0.2",
+      "@effect/openapi-generator": "4.0.2",
+      "@effect/platform-bun": "4.0.2",
+      "@effect/platform-node": "4.0.2",
+      "@effect/platform-node-shared": "4.0.2",
+      "@effect/sql-sqlite-bun": "4.0.2",
+      "@effect/vitest": "4.0.2",
+      "@effect/tsgo": "0.51.1",
       "@noble/ciphers": "2.3.0",
       "@noble/curves": "2.3.0",
       "@noble/hashes": "2.3.0",
@@ -139,7 +139,6 @@
   },
   "patchedDependencies": {
     "@react-native-menu/menu@2.0.0": "patches/@react-native-menu__menu@2.0.0.patch",
-    "effect@4.0.0-beta.107": "patches/effect@4.0.0-beta.107.patch",
     "react-native-gesture-handler@2.32.0": "patches/react-native-gesture-handler@2.32.0.patch",
     "react-native-screens@4.26.2": "patches/react-native-screens@4.26.2.patch",
     "@legendapp/list@3.3.10": "patches/@legendapp%2Flist@3.3.10.patch",
@@ -149,7 +148,8 @@
     "query-string@7.1.3": "patches/query-string@7.1.3.patch",
     "react-native-keyboard-controller@1.21.9": "patches/react-native-keyboard-controller@1.21.9.patch",
     "react-native-nitro-modules@0.36.5": "patches/react-native-nitro-modules@0.36.5.patch",
-    "@effect/platform-node-shared@4.0.0-beta.107": "patches/@effect%2Fplatform-node-shared@4.0.0-beta.107.patch"
+    "@effect/platform-node-shared@4.0.2": "patches/@effect%2Fplatform-node-shared@4.0.2.patch",
+    "effect@4.0.2": "patches/effect@4.0.2.patch"
   },
   "trustedDependencies": [
     "node-pty",

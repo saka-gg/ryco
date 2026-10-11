@@ -1,5 +1,5 @@
 import { noteStorageActivity } from "../../storage/lifecycle.ts";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 import {
   storageLifecycleLock,
   storagePathBlocker,
@@ -24,7 +24,6 @@ import { bracketedTerminalSnippet } from "@ryco/shared/terminalPaste";
 import {
   Effect,
   Deferred,
-  Encoding,
   Equal,
   Exit,
   Fiber,
@@ -37,6 +36,7 @@ import {
   Semaphore,
   SynchronizedRef,
 } from "effect";
+import { Base64Url } from "effect/encoding";
 
 import { ServerConfig } from "../../config.ts";
 import {
@@ -843,11 +843,11 @@ function legacySafeThreadId(threadId: string): string {
 }
 
 function toSafeThreadId(threadId: string): string {
-  return `terminal_${Encoding.encodeBase64Url(threadId)}`;
+  return `terminal_${Base64Url.encode(threadId)}`;
 }
 
 function toSafeTerminalId(terminalId: string): string {
-  return Encoding.encodeBase64Url(terminalId);
+  return Base64Url.encode(terminalId);
 }
 
 function toSessionKey(threadId: string, terminalId: string): string {

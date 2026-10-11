@@ -1,5 +1,5 @@
 import { Effect } from "effect";
-import type * as SqlClient from "effect/unstable/sql/SqlClient";
+import type * as SqlClient from "effect/sql/SqlClient";
 import { StorageError } from "@ryco/contracts";
 import type { WorktreeIdentity } from "./filesystem.ts";
 import { assertStorageSettingsLease, type StorageSettingsLease } from "./settingsAdmission.ts";

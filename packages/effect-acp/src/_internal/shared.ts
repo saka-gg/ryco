@@ -1,7 +1,7 @@
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as SchemaIssue from "effect/SchemaIssue";
-import { RpcClientError } from "effect/unstable/rpc";
+import { RpcClientError } from "effect/rpc";
 
 import * as AcpSchema from "../_generated/schema.gen.ts";
 import * as AcpError from "../errors.ts";
@@ -88,7 +88,7 @@ export const jsonRpcRequest = <A, I>(method: string, params: Schema.Codec<A, I>)
     id: JsonRpcId,
     method: Schema.Literal(method),
     params,
-    headers: JsonRpcHeaders,
+    headers: Schema.optional(JsonRpcHeaders),
   });
 
 export const jsonRpcNotification = <A, I>(method: string, params: Schema.Codec<A, I>) =>

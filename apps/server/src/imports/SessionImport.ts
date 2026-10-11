@@ -24,9 +24,9 @@ import {
   type SessionImportAdoptInput,
 } from "@ryco/contracts";
 import { Context, Effect, Layer, Option, Schema, Semaphore, FileSystem, Path } from "effect";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 import * as CodexClient from "effect-codex-app-server/client";
-import { ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcessSpawner } from "effect/process";
 import { ServerSettingsService } from "../serverSettings.ts";
 import { deriveProviderInstanceConfigMap } from "../provider/Layers/ProviderInstanceRegistryHydration.ts";
 import { ProviderSessionDirectory } from "../provider/Services/ProviderSessionDirectory.ts";

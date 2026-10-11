@@ -12,7 +12,7 @@ import {
 import { it, assert } from "@effect/vitest";
 import { assertSome } from "@effect/vitest/utils";
 import { Effect, Layer, Option } from "effect";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import {
   makeSqlitePersistenceLive,

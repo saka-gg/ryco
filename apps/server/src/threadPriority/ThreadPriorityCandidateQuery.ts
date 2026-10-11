@@ -1,7 +1,7 @@
 import { assembledMessageText, decodeMessageText } from "../persistence/messageText.ts";
 import { ThreadId } from "@ryco/contracts";
 import { Context, Effect, Layer } from "effect";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import { toPersistenceSqlError, type PersistenceSqlError } from "../persistence/Errors.ts";
 import type { ThreadPriorityCandidateInput } from "./threadPriorityPolicy.ts";

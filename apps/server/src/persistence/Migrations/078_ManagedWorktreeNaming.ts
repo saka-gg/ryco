@@ -1,5 +1,5 @@
 import { Effect } from "effect";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
 /** Node-owned names and a durable, independently recoverable journal for each move. */
 export const ensureManagedWorktreeNaming = Effect.gen(function* () {

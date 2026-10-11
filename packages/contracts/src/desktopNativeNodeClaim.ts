@@ -1,5 +1,6 @@
 import { Schema } from "effect";
 
+import { rejectExcessProperties } from "./baseSchemas.ts";
 import {
   NativeNodeClaimEnvironmentId,
   NativeNodeClaimFinishResponse,
@@ -23,10 +24,7 @@ export const DESKTOP_NATIVE_NODE_CLAIM_MAX_BODY_BYTES = 16 * 1_024;
  */
 export const DESKTOP_HUB_REACHABILITY_PATH = "/api/desktop/hub/reachability" as const;
 
-const strict = <S extends Schema.Top>(schema: S): S =>
-  schema.annotate({ parseOptions: { onExcessProperty: "error" } }) as S;
-
-export const DesktopNativeNodeClaimDescriptorResponse = strict(
+export const DesktopNativeNodeClaimDescriptorResponse = rejectExcessProperties(
   Schema.Struct({
     protocolVersion: Schema.Literal(DESKTOP_NATIVE_NODE_CLAIM_PROTOCOL_VERSION),
     state: Schema.Literals(["prepared", "active"]),
@@ -44,12 +42,12 @@ export const DesktopNativeNodeClaimDescriptorResponse = strict(
 export type DesktopNativeNodeClaimDescriptorResponse =
   typeof DesktopNativeNodeClaimDescriptorResponse.Type;
 
-export const DesktopNativeNodeClaimSignRequest = strict(
+export const DesktopNativeNodeClaimSignRequest = rejectExcessProperties(
   Schema.Struct({ claim: NativeNodeClaimStartResponse }),
 );
 export type DesktopNativeNodeClaimSignRequest = typeof DesktopNativeNodeClaimSignRequest.Type;
 
-export const DesktopNativeNodeClaimSignResponse = strict(
+export const DesktopNativeNodeClaimSignResponse = rejectExcessProperties(
   Schema.Struct({
     protocolVersion: Schema.Literal(DESKTOP_NATIVE_NODE_CLAIM_PROTOCOL_VERSION),
     signature: Schema.String.check(
@@ -61,7 +59,7 @@ export const DesktopNativeNodeClaimSignResponse = strict(
 );
 export type DesktopNativeNodeClaimSignResponse = typeof DesktopNativeNodeClaimSignResponse.Type;
 
-export const DesktopNativeNodeClaimCommitRequest = strict(
+export const DesktopNativeNodeClaimCommitRequest = rejectExcessProperties(
   Schema.Struct({
     claim: NativeNodeClaimStartResponse,
     result: NativeNodeClaimFinishResponse,
@@ -69,7 +67,7 @@ export const DesktopNativeNodeClaimCommitRequest = strict(
 );
 export type DesktopNativeNodeClaimCommitRequest = typeof DesktopNativeNodeClaimCommitRequest.Type;
 
-export const DesktopNativeNodeClaimCommitResponse = strict(
+export const DesktopNativeNodeClaimCommitResponse = rejectExcessProperties(
   Schema.Struct({
     protocolVersion: Schema.Literal(DESKTOP_NATIVE_NODE_CLAIM_PROTOCOL_VERSION),
     status: Schema.Literal("active"),
@@ -78,7 +76,7 @@ export const DesktopNativeNodeClaimCommitResponse = strict(
 );
 export type DesktopNativeNodeClaimCommitResponse = typeof DesktopNativeNodeClaimCommitResponse.Type;
 
-export const DesktopHubReachabilityResponse = strict(
+export const DesktopHubReachabilityResponse = rejectExcessProperties(
   Schema.Struct({
     protocolVersion: Schema.Literal(DESKTOP_NATIVE_NODE_CLAIM_PROTOCOL_VERSION),
     reachable: Schema.Boolean,
@@ -91,7 +89,7 @@ export const DesktopHubReachabilityResponse = strict(
 );
 export type DesktopHubReachabilityResponse = typeof DesktopHubReachabilityResponse.Type;
 
-export const DesktopNativeNodeClaimErrorResponse = strict(
+export const DesktopNativeNodeClaimErrorResponse = rejectExcessProperties(
   Schema.Struct({
     error: Schema.Literals([
       "native_node_claim_unavailable",

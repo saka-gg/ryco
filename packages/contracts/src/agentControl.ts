@@ -37,6 +37,7 @@ import {
   ThreadId,
   TrimmedNonEmptyString,
   TurnId,
+  rejectExcessProperties,
 } from "./baseSchemas.ts";
 import {
   ModelSelection,
@@ -360,7 +361,7 @@ export const AgentControlCreateThreadEntry = Schema.Struct({
   envMode: ThreadEnvMode,
   /** Base ref for worktree creation; the project default when absent. */
   baseRef: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(256))),
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlCreateThreadEntry = typeof AgentControlCreateThreadEntry.Type;
 
 /** One exact immutable batch — never a generic spawning loop. */
@@ -370,7 +371,7 @@ export const AgentControlCreateThreadsPlan = Schema.Struct({
     Schema.isMinLength(1),
     Schema.isMaxLength(AGENT_CONTROL_CREATE_THREADS_MAX_ENTRIES),
   ),
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlCreateThreadsPlan = typeof AgentControlCreateThreadsPlan.Type;
 
 export const AgentControlSendMessageDelivery = Schema.Literals(["queue", "steer"]);
@@ -381,7 +382,7 @@ export const AgentControlSendMessagePlan = Schema.Struct({
   threadId: ThreadId,
   text: AgentControlPrompt,
   delivery: AgentControlSendMessageDelivery,
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlSendMessagePlan = typeof AgentControlSendMessagePlan.Type;
 
 export const AgentControlInterruptThreadPlan = Schema.Struct({
@@ -389,7 +390,7 @@ export const AgentControlInterruptThreadPlan = Schema.Struct({
   threadId: ThreadId,
   /** When present, only this exact turn may be interrupted. */
   turnId: Schema.optional(TurnId),
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlInterruptThreadPlan = typeof AgentControlInterruptThreadPlan.Type;
 
 export const AgentControlThreadPreferences = Schema.Struct({
@@ -418,7 +419,7 @@ export const AgentControlUpdateThreadPlan = Schema.Struct({
       TrimmedNonEmptyString.check(Schema.isMaxLength(AGENT_CONTROL_PERSISTENT_GOAL_MAX_CHARS)),
     ),
   ),
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlUpdateThreadPlan = typeof AgentControlUpdateThreadPlan.Type;
 
 const AgentControlWorkspaceRoot = TrimmedNonEmptyString.check(Schema.isMaxLength(4_096));
@@ -433,7 +434,7 @@ export const AgentControlProjectState = Schema.Struct({
   workspaceRoot: AgentControlWorkspaceRoot,
   repositoryIdentityKey: AgentControlRepositoryIdentityKey,
   updatedAt: IsoDateTime,
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlProjectState = typeof AgentControlProjectState.Type;
 
 export const AgentControlProjectTarget = Schema.Struct({
@@ -441,7 +442,7 @@ export const AgentControlProjectTarget = Schema.Struct({
   title: AgentControlTitle,
   workspaceRoot: AgentControlWorkspaceRoot,
   repositoryIdentityKey: AgentControlRepositoryIdentityKey,
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlProjectTarget = typeof AgentControlProjectTarget.Type;
 
 /** Creates only Ryco's project record for an already-existing authorized directory. */
@@ -452,7 +453,7 @@ export const AgentControlCreateProjectPlan = Schema.Struct({
   workspaceRoot: AgentControlWorkspaceRoot,
   projectMetadataDir: ProjectMetadataDir,
   repositoryIdentityKey: AgentControlRepositoryIdentityKey,
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlCreateProjectPlan = typeof AgentControlCreateProjectPlan.Type;
 
 /** Exact before/after project metadata and preference update. */
@@ -461,7 +462,7 @@ export const AgentControlUpdateProjectPlan = Schema.Struct({
   projectId: ProjectId,
   before: AgentControlProjectState,
   after: AgentControlProjectTarget,
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlUpdateProjectPlan = typeof AgentControlUpdateProjectPlan.Type;
 
 /**
@@ -474,7 +475,7 @@ export const AgentControlRemoveProjectPlan = Schema.Struct({
   expected: AgentControlProjectState,
   expectedThreadIds: Schema.Array(ThreadId),
   force: Schema.Boolean,
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlRemoveProjectPlan = typeof AgentControlRemoveProjectPlan.Type;
 
 /** Audit-safe workspace inventory and immutable lifecycle evidence. */
@@ -528,7 +529,7 @@ export const AgentControlWorkspaceLifecyclePlan = Schema.Struct({
   ...AgentControlWorkspaceLifecycleOptions.fields,
   projectId: ProjectId,
   expected: AgentControlWorkspaceState,
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlWorkspaceLifecyclePlan = typeof AgentControlWorkspaceLifecyclePlan.Type;
 
 export const AgentControlListWorkspacesInput = Schema.Struct({
@@ -547,13 +548,13 @@ export const AgentControlPlanWorkspaceInput = Schema.Struct({
 export const AgentControlProposeWorkspaceInput = Schema.Struct({
   requestId: AgentControlRequestId,
   plan: AgentControlWorkspaceLifecyclePlan,
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 
 export const AgentControlLegacyTokenStreamingChange = Schema.Struct({
   kind: Schema.Literal("legacyTokenStreaming"),
   before: Schema.Boolean,
   after: Schema.Boolean,
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlLegacyTokenStreamingChange =
   typeof AgentControlLegacyTokenStreamingChange.Type;
 
@@ -561,7 +562,7 @@ export const AgentControlProviderUpdateChecksChange = Schema.Struct({
   kind: Schema.Literal("providerUpdateChecks"),
   before: Schema.Boolean,
   after: Schema.Boolean,
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlProviderUpdateChecksChange =
   typeof AgentControlProviderUpdateChecksChange.Type;
 
@@ -575,7 +576,7 @@ export type AgentControlSettingsChange = typeof AgentControlSettingsChange.Type;
 export const AgentControlChangeSettingsPlan = Schema.Struct({
   kind: Schema.Literal("changeSettings"),
   change: AgentControlSettingsChange,
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlChangeSettingsPlan = typeof AgentControlChangeSettingsPlan.Type;
 
 // ── Governed automation plans ─────────────────────────────────────────
@@ -597,7 +598,7 @@ export const AgentControlAutomationExecutionTemplate = Schema.Struct({
   tokenMode: Schema.optional(AgentTokenMode),
   envMode: ThreadEnvMode,
   baseRef: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(256))),
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlAutomationExecutionTemplate =
   typeof AgentControlAutomationExecutionTemplate.Type;
 
@@ -605,14 +606,14 @@ export const AgentControlAutomationSchedule = Schema.Union([
   Schema.Struct({
     kind: Schema.Literal("once"),
     runAt: IsoDateTime,
-  }).annotate({ parseOptions: { onExcessProperty: "error" } }),
+  }).pipe(rejectExcessProperties),
   Schema.Struct({
     kind: Schema.Literal("fixed-interval"),
     startsAt: IsoDateTime,
     intervalMs: PositiveInt,
     /** Required finite end: recurring schedules are never unbounded. */
     endsAt: IsoDateTime,
-  }).annotate({ parseOptions: { onExcessProperty: "error" } }),
+  }).pipe(rejectExcessProperties),
 ]);
 export type AgentControlAutomationSchedule = typeof AgentControlAutomationSchedule.Type;
 
@@ -620,7 +621,7 @@ export const AgentControlAutomationDefinition = Schema.Struct({
   execution: AgentControlAutomationExecutionTemplate,
   schedule: AgentControlAutomationSchedule,
   enabled: Schema.Boolean,
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlAutomationDefinition = typeof AgentControlAutomationDefinition.Type;
 
 /** Exact persisted definition revision captured in update/cancel plans. */
@@ -629,14 +630,14 @@ export const AgentControlAutomationRevisionState = Schema.Struct({
   definition: AgentControlAutomationDefinition,
   cancelled: Schema.Boolean,
   updatedAt: IsoDateTime,
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlAutomationRevisionState = typeof AgentControlAutomationRevisionState.Type;
 
 export const AgentControlCreateAutomationPlan = Schema.Struct({
   kind: Schema.Literal("createAutomation"),
   automationId: AgentControlAutomationId,
   definition: AgentControlAutomationDefinition,
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlCreateAutomationPlan = typeof AgentControlCreateAutomationPlan.Type;
 
 export const AgentControlUpdateAutomationPlan = Schema.Struct({
@@ -644,14 +645,14 @@ export const AgentControlUpdateAutomationPlan = Schema.Struct({
   automationId: AgentControlAutomationId,
   before: AgentControlAutomationRevisionState,
   after: AgentControlAutomationDefinition,
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlUpdateAutomationPlan = typeof AgentControlUpdateAutomationPlan.Type;
 
 export const AgentControlCancelAutomationPlan = Schema.Struct({
   kind: Schema.Literal("cancelAutomation"),
   automationId: AgentControlAutomationId,
   expected: AgentControlAutomationRevisionState,
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlCancelAutomationPlan = typeof AgentControlCancelAutomationPlan.Type;
 
 /** Server-materialized exact occurrence. No MCP mutation tool accepts this plan. */
@@ -663,7 +664,7 @@ export const AgentControlAutomationRunPlan = Schema.Struct({
   scheduledFor: IsoDateTime,
   coalescedOccurrences: NonNegativeInt,
   execution: AgentControlAutomationExecutionTemplate,
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlAutomationRunPlan = typeof AgentControlAutomationRunPlan.Type;
 
 // ── Governed iOS Simulator plans ────────────────────────────────────
@@ -711,26 +712,26 @@ export type AgentControlDevicePlanTarget = typeof AgentControlDevicePlanTarget.T
 export const AgentControlDeviceBootPlan = Schema.Struct({
   kind: Schema.Literal("deviceBoot"),
   ...AgentControlDevicePlanTarget.fields,
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlDeviceBootPlan = typeof AgentControlDeviceBootPlan.Type;
 
 export const AgentControlDeviceAttachPlan = Schema.Struct({
   kind: Schema.Literal("deviceAttach"),
   ...AgentControlDevicePlanTarget.fields,
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlDeviceAttachPlan = typeof AgentControlDeviceAttachPlan.Type;
 
 export const AgentControlDeviceDetachPlan = Schema.Struct({
   kind: Schema.Literal("deviceDetach"),
   ...AgentControlDevicePlanTarget.fields,
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlDeviceDetachPlan = typeof AgentControlDeviceDetachPlan.Type;
 
 export const AgentControlDeviceInstallPlan = Schema.Struct({
   kind: Schema.Literal("deviceInstall"),
   ...AgentControlDevicePlanTarget.fields,
   artifactPath: AgentControlDeviceArtifactPath,
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlDeviceInstallPlan = typeof AgentControlDeviceInstallPlan.Type;
 
 /** Launch arguments are deliberately absent: they may contain user secrets. */
@@ -738,14 +739,14 @@ export const AgentControlDeviceLaunchPlan = Schema.Struct({
   kind: Schema.Literal("deviceLaunch"),
   ...AgentControlDevicePlanTarget.fields,
   bundleId: DeviceBundleId,
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlDeviceLaunchPlan = typeof AgentControlDeviceLaunchPlan.Type;
 
 export const AgentControlDeviceOpenUrlPlan = Schema.Struct({
   kind: Schema.Literal("deviceOpenUrl"),
   ...AgentControlDevicePlanTarget.fields,
   url: TrimmedNonEmptyString.check(Schema.isMaxLength(AGENT_CONTROL_DEVICE_URL_MAX_CHARS)),
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlDeviceOpenUrlPlan = typeof AgentControlDeviceOpenUrlPlan.Type;
 
 export const AgentControlDeviceTapPlan = Schema.Struct({
@@ -753,7 +754,7 @@ export const AgentControlDeviceTapPlan = Schema.Struct({
   ...AgentControlDevicePlanTarget.fields,
   x: AgentControlDeviceCoordinate,
   y: AgentControlDeviceCoordinate,
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlDeviceTapPlan = typeof AgentControlDeviceTapPlan.Type;
 
 export const AgentControlDeviceSwipePlan = Schema.Struct({
@@ -769,32 +770,32 @@ export const AgentControlDeviceSwipePlan = Schema.Struct({
       maximum: DEVICE_SWIPE_DURATION_MAX_MS,
     }),
   ),
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlDeviceSwipePlan = typeof AgentControlDeviceSwipePlan.Type;
 
 export const AgentControlDevicePressButtonPlan = Schema.Struct({
   kind: Schema.Literal("devicePressButton"),
   ...AgentControlDevicePlanTarget.fields,
   button: DeviceHardwareButton,
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlDevicePressButtonPlan = typeof AgentControlDevicePressButtonPlan.Type;
 
 export const AgentControlDeviceStartRecordingPlan = Schema.Struct({
   kind: Schema.Literal("deviceStartRecording"),
   ...AgentControlDevicePlanTarget.fields,
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlDeviceStartRecordingPlan = typeof AgentControlDeviceStartRecordingPlan.Type;
 
 export const AgentControlDeviceStopRecordingPlan = Schema.Struct({
   kind: Schema.Literal("deviceStopRecording"),
   ...AgentControlDevicePlanTarget.fields,
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlDeviceStopRecordingPlan = typeof AgentControlDeviceStopRecordingPlan.Type;
 
 export const AgentControlDeviceShutdownPlan = Schema.Struct({
   kind: Schema.Literal("deviceShutdown"),
   ...AgentControlDevicePlanTarget.fields,
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlDeviceShutdownPlan = typeof AgentControlDeviceShutdownPlan.Type;
 
 export const AgentControlDeviceActionPlan = Schema.Union([
@@ -1317,7 +1318,7 @@ export const AgentControlAutomation = Schema.Struct({
   nextRunAt: Schema.NullOr(IsoDateTime),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlAutomation = typeof AgentControlAutomation.Type;
 
 export const AgentControlAutomationRunStatus = Schema.Literals([
@@ -1354,7 +1355,7 @@ export const AgentControlAutomationRun = Schema.Struct({
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
   completedAt: Schema.NullOr(IsoDateTime),
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlAutomationRun = typeof AgentControlAutomationRun.Type;
 
 // ── Internal provider-session MCP surface ─────────────────────────────
@@ -1544,7 +1545,7 @@ export type AgentControlMcpWaitForControlRequestInput =
 export const AgentControlMcpCreateThreadsInput = Schema.Struct({
   requestId: AgentControlRequestId,
   entries: AgentControlCreateThreadsPlan.fields.entries,
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlMcpCreateThreadsInput = typeof AgentControlMcpCreateThreadsInput.Type;
 
 export const AgentControlMcpSendMessageInput = Schema.Struct({
@@ -1552,14 +1553,14 @@ export const AgentControlMcpSendMessageInput = Schema.Struct({
   threadId: ThreadId,
   text: AgentControlSendMessagePlan.fields.text,
   delivery: AgentControlSendMessageDelivery,
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlMcpSendMessageInput = typeof AgentControlMcpSendMessageInput.Type;
 
 export const AgentControlMcpInterruptThreadInput = Schema.Struct({
   requestId: AgentControlRequestId,
   threadId: ThreadId,
   turnId: Schema.optional(TurnId),
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlMcpInterruptThreadInput = typeof AgentControlMcpInterruptThreadInput.Type;
 
 export const AgentControlMcpUpdateThreadInput = Schema.Struct({
@@ -1573,7 +1574,7 @@ export const AgentControlMcpUpdateThreadInput = Schema.Struct({
       TrimmedNonEmptyString.check(Schema.isMaxLength(AGENT_CONTROL_PERSISTENT_GOAL_MAX_CHARS)),
     ),
   ),
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlMcpUpdateThreadInput = typeof AgentControlMcpUpdateThreadInput.Type;
 
 export const AgentControlMcpProposeProjectCreateInput = Schema.Struct({
@@ -1581,7 +1582,7 @@ export const AgentControlMcpProposeProjectCreateInput = Schema.Struct({
   projectId: ProjectId,
   title: AgentControlTitle,
   workspaceRoot: AgentControlWorkspaceRoot,
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlMcpProposeProjectCreateInput =
   typeof AgentControlMcpProposeProjectCreateInput.Type;
 
@@ -1592,7 +1593,7 @@ export const AgentControlMcpProposeProjectUpdateInput = Schema.Struct({
   expectedUpdatedAt: IsoDateTime,
   title: Schema.optional(AgentControlTitle),
   workspaceRoot: Schema.optional(AgentControlWorkspaceRoot),
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlMcpProposeProjectUpdateInput =
   typeof AgentControlMcpProposeProjectUpdateInput.Type;
 
@@ -1601,7 +1602,7 @@ export const AgentControlMcpProposeProjectRemoveInput = Schema.Struct({
   projectId: ProjectId,
   expectedUpdatedAt: IsoDateTime,
   force: Schema.optional(Schema.Boolean),
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlMcpProposeProjectRemoveInput =
   typeof AgentControlMcpProposeProjectRemoveInput.Type;
 
@@ -1609,18 +1610,18 @@ export const AgentControlMcpSettingsChangeRequest = Schema.Union([
   Schema.Struct({
     kind: Schema.Literal("legacyTokenStreaming"),
     value: Schema.Boolean,
-  }).annotate({ parseOptions: { onExcessProperty: "error" } }),
+  }).pipe(rejectExcessProperties),
   Schema.Struct({
     kind: Schema.Literal("providerUpdateChecks"),
     value: Schema.Boolean,
-  }).annotate({ parseOptions: { onExcessProperty: "error" } }),
+  }).pipe(rejectExcessProperties),
 ]);
 export type AgentControlMcpSettingsChangeRequest = typeof AgentControlMcpSettingsChangeRequest.Type;
 
 export const AgentControlMcpProposeSettingsChangeInput = Schema.Struct({
   requestId: AgentControlRequestId,
   change: AgentControlMcpSettingsChangeRequest,
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlMcpProposeSettingsChangeInput =
   typeof AgentControlMcpProposeSettingsChangeInput.Type;
 
@@ -1628,18 +1629,18 @@ export const AgentControlMcpListAutomationsInput = Schema.Struct({
   projectId: Schema.optional(ProjectId),
   includeDisabled: Schema.optional(Schema.Boolean),
   limit: Schema.optional(PositiveInt),
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlMcpListAutomationsInput = typeof AgentControlMcpListAutomationsInput.Type;
 
 export const AgentControlMcpReadAutomationInput = Schema.Struct({
   automationId: AgentControlAutomationId,
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlMcpReadAutomationInput = typeof AgentControlMcpReadAutomationInput.Type;
 
 export const AgentControlMcpListAutomationRunsInput = Schema.Struct({
   automationId: AgentControlAutomationId,
   limit: Schema.optional(PositiveInt),
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlMcpListAutomationRunsInput =
   typeof AgentControlMcpListAutomationRunsInput.Type;
 
@@ -1657,7 +1658,7 @@ export const AgentControlMcpProposeAutomationCreateInput = Schema.Struct({
   baseRef: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(256))),
   schedule: AgentControlAutomationSchedule,
   enabled: Schema.optional(Schema.Boolean),
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlMcpProposeAutomationCreateInput =
   typeof AgentControlMcpProposeAutomationCreateInput.Type;
 
@@ -1676,7 +1677,7 @@ export const AgentControlMcpProposeAutomationUpdateInput = Schema.Struct({
   baseRef: Schema.optional(Schema.NullOr(TrimmedNonEmptyString.check(Schema.isMaxLength(256)))),
   schedule: Schema.optional(AgentControlAutomationSchedule),
   enabled: Schema.optional(Schema.Boolean),
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlMcpProposeAutomationUpdateInput =
   typeof AgentControlMcpProposeAutomationUpdateInput.Type;
 
@@ -1684,7 +1685,7 @@ export const AgentControlMcpProposeAutomationCancelInput = Schema.Struct({
   requestId: AgentControlRequestId,
   automationId: AgentControlAutomationId,
   expectedRevision: PositiveInt,
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlMcpProposeAutomationCancelInput =
   typeof AgentControlMcpProposeAutomationCancelInput.Type;
 
@@ -1694,29 +1695,27 @@ export const AgentControlMcpOperationalReadInput = Schema.Struct({
   providerInstanceId: Schema.optional(ProviderInstanceId),
   since: Schema.optional(IsoDateTime),
   limit: Schema.optional(PositiveInt),
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlMcpOperationalReadInput = typeof AgentControlMcpOperationalReadInput.Type;
 
 export const AgentControlMcpDiagnosticsSummaryInput = Schema.Struct({
   projectId: Schema.optional(ProjectId),
   providerInstanceId: Schema.optional(ProviderInstanceId),
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlMcpDiagnosticsSummaryInput =
   typeof AgentControlMcpDiagnosticsSummaryInput.Type;
 
 export const AgentControlMcpListDevicesInput = Schema.Struct({
   includeShutdown: Schema.optional(Schema.Boolean),
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlMcpListDevicesInput = typeof AgentControlMcpListDevicesInput.Type;
 
-export const AgentControlMcpReadDeviceStateInput = Schema.Struct({}).annotate({
-  parseOptions: { onExcessProperty: "error" },
-});
+export const AgentControlMcpReadDeviceStateInput = Schema.Struct({}).pipe(rejectExcessProperties);
 export type AgentControlMcpReadDeviceStateInput = typeof AgentControlMcpReadDeviceStateInput.Type;
 
 export const AgentControlMcpReadDeviceContentInput = Schema.Struct({
   udid: DeviceUdid,
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlMcpReadDeviceContentInput =
   typeof AgentControlMcpReadDeviceContentInput.Type;
 
@@ -1732,40 +1731,40 @@ const AgentControlMcpDeviceMutationTarget = Schema.Struct({
 
 export const AgentControlMcpProposeDeviceBootInput = Schema.Struct({
   ...AgentControlMcpDeviceMutationTarget.fields,
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlMcpProposeDeviceBootInput =
   typeof AgentControlMcpProposeDeviceBootInput.Type;
 
 export const AgentControlMcpProposeDeviceAttachInput = Schema.Struct({
   ...AgentControlMcpDeviceMutationTarget.fields,
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlMcpProposeDeviceAttachInput =
   typeof AgentControlMcpProposeDeviceAttachInput.Type;
 
 export const AgentControlMcpProposeDeviceDetachInput = Schema.Struct({
   ...AgentControlMcpDeviceMutationTarget.fields,
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlMcpProposeDeviceDetachInput =
   typeof AgentControlMcpProposeDeviceDetachInput.Type;
 
 export const AgentControlMcpProposeDeviceInstallInput = Schema.Struct({
   ...AgentControlMcpDeviceMutationTarget.fields,
   artifactPath: AgentControlDeviceArtifactPath,
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlMcpProposeDeviceInstallInput =
   typeof AgentControlMcpProposeDeviceInstallInput.Type;
 
 export const AgentControlMcpProposeDeviceLaunchInput = Schema.Struct({
   ...AgentControlMcpDeviceMutationTarget.fields,
   bundleId: DeviceBundleId,
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlMcpProposeDeviceLaunchInput =
   typeof AgentControlMcpProposeDeviceLaunchInput.Type;
 
 export const AgentControlMcpProposeDeviceOpenUrlInput = Schema.Struct({
   ...AgentControlMcpDeviceMutationTarget.fields,
   url: TrimmedNonEmptyString.check(Schema.isMaxLength(AGENT_CONTROL_DEVICE_URL_MAX_CHARS)),
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlMcpProposeDeviceOpenUrlInput =
   typeof AgentControlMcpProposeDeviceOpenUrlInput.Type;
 
@@ -1774,7 +1773,7 @@ export const AgentControlMcpDeviceInputAction = Schema.Union([
     kind: Schema.Literal("tap"),
     x: AgentControlDeviceCoordinate,
     y: AgentControlDeviceCoordinate,
-  }).annotate({ parseOptions: { onExcessProperty: "error" } }),
+  }).pipe(rejectExcessProperties),
   Schema.Struct({
     kind: Schema.Literal("swipe"),
     fromX: AgentControlDeviceCoordinate,
@@ -1787,31 +1786,31 @@ export const AgentControlMcpDeviceInputAction = Schema.Union([
         maximum: DEVICE_SWIPE_DURATION_MAX_MS,
       }),
     ),
-  }).annotate({ parseOptions: { onExcessProperty: "error" } }),
+  }).pipe(rejectExcessProperties),
   Schema.Struct({
     kind: Schema.Literal("press-button"),
     button: DeviceHardwareButton,
-  }).annotate({ parseOptions: { onExcessProperty: "error" } }),
+  }).pipe(rejectExcessProperties),
 ]);
 export type AgentControlMcpDeviceInputAction = typeof AgentControlMcpDeviceInputAction.Type;
 
 export const AgentControlMcpProposeDeviceInputInput = Schema.Struct({
   ...AgentControlMcpDeviceMutationTarget.fields,
   action: AgentControlMcpDeviceInputAction,
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlMcpProposeDeviceInputInput =
   typeof AgentControlMcpProposeDeviceInputInput.Type;
 
 export const AgentControlMcpProposeDeviceRecordingInput = Schema.Struct({
   ...AgentControlMcpDeviceMutationTarget.fields,
   action: Schema.Literals(["start", "stop"]),
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlMcpProposeDeviceRecordingInput =
   typeof AgentControlMcpProposeDeviceRecordingInput.Type;
 
 export const AgentControlMcpProposeDeviceShutdownInput = Schema.Struct({
   ...AgentControlMcpDeviceMutationTarget.fields,
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlMcpProposeDeviceShutdownInput =
   typeof AgentControlMcpProposeDeviceShutdownInput.Type;
 
@@ -2022,7 +2021,7 @@ export const AgentControlMcpAutomationSummary = Schema.Struct({
   nextRunAt: Schema.NullOr(IsoDateTime),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlMcpAutomationSummary = typeof AgentControlMcpAutomationSummary.Type;
 
 export const AgentControlMcpListAutomationsResult = Schema.Struct({
@@ -2254,7 +2253,7 @@ export const AgentControlExternalIntegrationCreateInput = Schema.Struct({
     Schema.isLessThanOrEqualTo(AGENT_CONTROL_EXTERNAL_ACTIVE_TASK_LIMIT_MAX),
   ),
   expiresAt: Schema.NullOr(IsoDateTime),
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlExternalIntegrationCreateInput =
   typeof AgentControlExternalIntegrationCreateInput.Type;
 
@@ -2271,7 +2270,7 @@ export const AgentControlExternalIntegrationUpdateInput = Schema.Struct({
     PositiveInt.check(Schema.isLessThanOrEqualTo(AGENT_CONTROL_EXTERNAL_ACTIVE_TASK_LIMIT_MAX)),
   ),
   expiresAt: Schema.optional(Schema.NullOr(IsoDateTime)),
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlExternalIntegrationUpdateInput =
   typeof AgentControlExternalIntegrationUpdateInput.Type;
 
@@ -2356,7 +2355,7 @@ export const AgentControlMcpInstallationConnectInput = Schema.Struct({
     PositiveInt.check(Schema.isLessThanOrEqualTo(AGENT_CONTROL_EXTERNAL_ACTIVE_TASK_LIMIT_MAX)),
   ),
   expiresAt: Schema.optional(Schema.NullOr(IsoDateTime)),
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlMcpInstallationConnectInput =
   typeof AgentControlMcpInstallationConnectInput.Type;
 
@@ -2441,7 +2440,7 @@ export const AgentControlExternalCreateTaskInput = Schema.Struct({
   environment: Schema.optional(ThreadEnvMode),
   runtimeMode: Schema.optional(Schema.Literals(["approval-required", "full-access"])),
   tokenMode: Schema.optional(AgentTokenMode),
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlExternalCreateTaskInput = typeof AgentControlExternalCreateTaskInput.Type;
 
 export const AgentControlExternalTaskIdInput = Schema.Struct({

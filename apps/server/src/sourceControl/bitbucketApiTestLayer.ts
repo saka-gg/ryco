@@ -1,7 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { vi } from "@effect/vitest";
 import { ConfigProvider, DateTime, Effect, Layer, Option } from "effect";
-import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http";
+import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 
 import * as BitbucketApi from "./BitbucketApi.ts";
 import { ServerSecretStore } from "../auth/Services/ServerSecretStore.ts";

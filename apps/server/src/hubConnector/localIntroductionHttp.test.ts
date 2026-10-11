@@ -13,8 +13,8 @@ import {
 } from "@ryco/contracts/local-introduction";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as HttpRouter from "effect/unstable/http/HttpRouter";
-import * as HttpServer from "effect/unstable/http/HttpServer";
+import * as HttpRouter from "effect/http/HttpRouter";
+import * as HttpServer from "effect/http/HttpServer";
 
 import { deriveServerPaths, ServerConfig, type ServerConfigShape } from "../config.ts";
 import { NodeLocalIntroductionError } from "../hubIdentity/NodeLocalIntroductionService.ts";

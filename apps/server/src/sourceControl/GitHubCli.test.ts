@@ -1,6 +1,6 @@
 import { assert, it, afterEach, describe, expect, vi } from "@effect/vitest";
 import { Effect, Layer } from "effect";
-import { ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcessSpawner } from "effect/process";
 import { VcsProcessExitError } from "@ryco/contracts";
 
 import * as VcsProcess from "../vcs/VcsProcess.ts";

@@ -1,5 +1,5 @@
 import { Effect } from "effect";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
 // Scan saved bodies once, so ordinary reads need neither a NUL scan nor JSON.
 // SQL encoding retains bytes after NUL that native TEXT reads can truncate.

@@ -18,7 +18,8 @@
         "includeSuggestionsInTsc": false,
         "namespaceImportPackages": ["@effect/platform-node"],
         "diagnosticSeverity": {
-          "importFromBarrel": "error",
+          "unstableApiUsage": "off",
+          "experimentalApiUsage": "off",
           "anyUnknownInErrorContext": "warning",
           "instanceOfSchema": "warning",
           "deterministicKeys": "off"

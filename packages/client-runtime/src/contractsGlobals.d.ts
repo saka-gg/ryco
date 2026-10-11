@@ -64,7 +64,11 @@ interface CloseEvent {
 }
 
 interface WebSocket {
+  readonly readyState: number;
   addEventListener(type: string, listener: (event: CloseEvent) => void, options?: unknown): void;
+  removeEventListener(type: string, listener: (event: CloseEvent) => void): void;
+  close(code?: number, reason?: string): void;
+  send(data: string | Uint8Array<ArrayBuffer>): void;
 }
 
 declare function setTimeout(

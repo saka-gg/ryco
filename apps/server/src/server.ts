@@ -14,7 +14,7 @@ import { CompletionReturnDeliveryLive } from "./agentControl/Layers/CompletionRe
 import { AgentControlWorkspacesLive } from "./agentControl/workspaceLifecycle.ts";
 import { AutomationCentreLive } from "./agentControl/Layers/AutomationCentre.ts";
 import { Effect, Layer } from "effect";
-import { FetchHttpClient, HttpRouter, HttpServer } from "effect/unstable/http";
+import { FetchHttpClient, HttpRouter, HttpServer } from "effect/http";
 
 import { ServerConfig } from "./config.ts";
 import { ChatAttachmentUploadsLive } from "./attachmentUpload.ts";

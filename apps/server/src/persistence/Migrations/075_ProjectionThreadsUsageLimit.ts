@@ -1,5 +1,5 @@
 import { Effect } from "effect";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
 /**
  * Durable per-thread usage limit (`ThreadUsageLimit` JSON). Idempotent: it also runs as

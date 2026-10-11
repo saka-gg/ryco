@@ -39,14 +39,9 @@ import {
 } from "effect";
 // oxlint-disable-next-line no-unused-vars -- TS needs the symbol in scope to name exported CLI types.
 import type { NodeInspectSymbol } from "effect/Inspectable";
-import { Argument, Command, Flag, GlobalFlag, Prompt } from "effect/unstable/cli";
+import { Argument, Command, Flag, GlobalFlag, Prompt } from "effect/cli";
 import type * as Terminal from "effect/Terminal";
-import {
-  FetchHttpClient,
-  HttpClient,
-  HttpClientRequest,
-  HttpClientResponse,
-} from "effect/unstable/http";
+import { FetchHttpClient, HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 
 import {
   DEFAULT_PORT,
@@ -200,201 +195,201 @@ const BootstrapEnvelopeSchema = Schema.Struct({
   otlpMetricsUrl: Schema.optional(Schema.String),
 });
 
-const modeFlag = Flag.choice("mode", RuntimeMode.literals).pipe(
+const modeFlag = Flag.Literals("mode", RuntimeMode.literals).pipe(
   Flag.withDescription("Runtime mode. `desktop` keeps loopback defaults unless overridden."),
   Flag.optional,
 );
-const portFlag = Flag.integer("port").pipe(
+const portFlag = Flag.Int("port").pipe(
   Flag.withSchema(PortSchema),
   Flag.withDescription("Port for the HTTP/WebSocket server."),
   Flag.optional,
 );
-const hostFlag = Flag.string("host").pipe(
+const hostFlag = Flag.String("host").pipe(
   Flag.withDescription("Host/interface to bind (for example 127.0.0.1, 0.0.0.0, or a Tailnet IP)."),
   Flag.optional,
 );
-const baseDirFlag = Flag.string("base-dir").pipe(
+const baseDirFlag = Flag.String("base-dir").pipe(
   Flag.withDescription("Base directory path (equivalent to RYCO_HOME)."),
   Flag.optional,
 );
-const devUrlFlag = Flag.string("dev-url").pipe(
+const devUrlFlag = Flag.String("dev-url").pipe(
   Flag.withSchema(Schema.URLFromString),
   Flag.withDescription("Dev web URL to proxy/redirect to (equivalent to VITE_DEV_SERVER_URL)."),
   Flag.optional,
 );
-const noBrowserFlag = Flag.boolean("no-browser").pipe(
+const noBrowserFlag = Flag.Boolean("no-browser").pipe(
   Flag.withDescription("Disable automatic browser opening."),
   Flag.optional,
 );
-const bootstrapFdFlag = Flag.integer("bootstrap-fd").pipe(
+const bootstrapFdFlag = Flag.Int("bootstrap-fd").pipe(
   Flag.withSchema(Schema.Int),
   Flag.withDescription("Read one-time bootstrap secrets from the given file descriptor."),
   Flag.optional,
 );
-const autoBootstrapProjectFromCwdFlag = Flag.boolean("auto-bootstrap-project-from-cwd").pipe(
+const autoBootstrapProjectFromCwdFlag = Flag.Boolean("auto-bootstrap-project-from-cwd").pipe(
   Flag.withDescription(
     "Create a project for the current working directory on startup when missing.",
   ),
   Flag.optional,
 );
-const restrictToCwdFlag = Flag.boolean("restrict-to-cwd").pipe(
+const restrictToCwdFlag = Flag.Boolean("restrict-to-cwd").pipe(
   Flag.withDescription(
     "Restrict Ryco-managed workspace paths to the startup working directory (not a process sandbox).",
   ),
   Flag.optional,
 );
-const logWebSocketEventsFlag = Flag.boolean("log-websocket-events").pipe(
+const logWebSocketEventsFlag = Flag.Boolean("log-websocket-events").pipe(
   Flag.withDescription(
     "Emit server-side logs for outbound WebSocket push traffic (equivalent to RYCO_LOG_WS_EVENTS).",
   ),
   Flag.withAlias("log-ws-events"),
   Flag.optional,
 );
-const hubConnectorEnabledFlag = Flag.boolean("hub-connector-enabled").pipe(
+const hubConnectorEnabledFlag = Flag.Boolean("hub-connector-enabled").pipe(
   Flag.withDescription(
     "Enable the outbound Hub connector so this node is reachable through the Hub relay (overrides RYCO_HUB_CONNECTOR_ENABLED).",
   ),
   Flag.withAlias("hub"),
   Flag.optional,
 );
-const hubOriginFlag = Flag.string("hub-origin").pipe(
+const hubOriginFlag = Flag.String("hub-origin").pipe(
   Flag.withDescription(
     `Canonical Hub HTTPS origin (overrides RYCO_HUB_ORIGIN; defaults to ${DEFAULT_HOSTED_APP_ORIGIN} when the connector is enabled).`,
   ),
   Flag.optional,
 );
-const hubNodeNameFlag = Flag.string("hub-node-name").pipe(
+const hubNodeNameFlag = Flag.String("hub-node-name").pipe(
   Flag.withDescription("Name proposed when this node enrolls (overrides RYCO_HUB_NODE_NAME)."),
   Flag.optional,
 );
-const hubAllowFileSecretStoreFlag = Flag.boolean("hub-allow-file-secret-store").pipe(
+const hubAllowFileSecretStoreFlag = Flag.Boolean("hub-allow-file-secret-store").pipe(
   Flag.withDescription(
     "Allow the permissioned-file Hub secret-store fallback (overrides RYCO_HUB_ALLOW_FILE_SECRET_STORE).",
   ),
   Flag.optional,
 );
-const hubRequireE2EEFlag = Flag.boolean("hub-require-e2ee").pipe(
+const hubRequireE2EEFlag = Flag.Boolean("hub-require-e2ee").pipe(
   Flag.withDescription(
     "Accept only end-to-end encrypted relay channels; open plaintext channels are closed (overrides RYCO_HUB_REQUIRE_E2EE).",
   ),
   Flag.optional,
 );
-const hubRequireApprovedClientE2EEFlag = Flag.boolean("hub-require-approved-client-e2ee").pipe(
+const hubRequireApprovedClientE2EEFlag = Flag.Boolean("hub-require-approved-client-e2ee").pipe(
   Flag.withDescription(
     "Accept only approved native clients over the relay. Disables web and legacy access entirely, closes the live channels it no longer admits, and can strand remote access if every approved client key is lost (overrides RYCO_HUB_REQUIRE_APPROVED_CLIENT_E2EE).",
   ),
   Flag.optional,
 );
-const hubE2eePolicyFlag = Flag.choice("hub-e2ee-policy", NodeE2eeAdmissionPolicy.literals).pipe(
+const hubE2eePolicyFlag = Flag.Literals("hub-e2ee-policy", NodeE2eeAdmissionPolicy.literals).pipe(
   Flag.withDescription(
     "Relay E2EE admission policy committed to this node (overrides RYCO_HUB_E2EE_POLICY). `require-locally-approved-native-e2ee` disables web and legacy access entirely.",
   ),
   Flag.optional,
 );
-const preventSleepFlag = Flag.boolean("prevent-sleep").pipe(
+const preventSleepFlag = Flag.Boolean("prevent-sleep").pipe(
   Flag.withDescription(
     "Keep the machine from idle-sleeping while this server runs (macOS: only on AC power) so it stays reachable (equivalent to RYCO_PREVENT_SLEEP).",
   ),
   Flag.optional,
 );
-const tailscaleServeFlag = Flag.boolean("tailscale-serve").pipe(
+const tailscaleServeFlag = Flag.Boolean("tailscale-serve").pipe(
   Flag.withDescription(
     "Configure Tailscale Serve to expose this backend over HTTPS on the Tailnet.",
   ),
   Flag.optional,
 );
-const tailscaleServePortFlag = Flag.integer("tailscale-serve-port").pipe(
+const tailscaleServePortFlag = Flag.Int("tailscale-serve-port").pipe(
   Flag.withSchema(PortSchema),
   Flag.withDescription("HTTPS port for Tailscale Serve when --tailscale-serve is enabled."),
   Flag.optional,
 );
 
 const EnvServerConfig = Config.all({
-  logLevel: Config.logLevel("RYCO_LOG_LEVEL").pipe(Config.withDefault("Info")),
-  traceMinLevel: Config.logLevel("RYCO_TRACE_MIN_LEVEL").pipe(Config.withDefault("Info")),
-  traceTimingEnabled: Config.boolean("RYCO_TRACE_TIMING_ENABLED").pipe(Config.withDefault(true)),
-  traceFile: Config.string("RYCO_TRACE_FILE").pipe(
+  logLevel: Config.LogLevel("RYCO_LOG_LEVEL").pipe(Config.withDefault("Info")),
+  traceMinLevel: Config.LogLevel("RYCO_TRACE_MIN_LEVEL").pipe(Config.withDefault("Info")),
+  traceTimingEnabled: Config.Boolean("RYCO_TRACE_TIMING_ENABLED").pipe(Config.withDefault(true)),
+  traceFile: Config.String("RYCO_TRACE_FILE").pipe(
     Config.option,
     Config.map(Option.getOrUndefined),
   ),
-  traceMaxBytes: Config.int("RYCO_TRACE_MAX_BYTES").pipe(Config.withDefault(10 * 1024 * 1024)),
-  traceMaxFiles: Config.int("RYCO_TRACE_MAX_FILES").pipe(Config.withDefault(10)),
-  traceBatchWindowMs: Config.int("RYCO_TRACE_BATCH_WINDOW_MS").pipe(Config.withDefault(200)),
-  otlpTracesUrl: Config.string("RYCO_OTLP_TRACES_URL").pipe(
+  traceMaxBytes: Config.Int("RYCO_TRACE_MAX_BYTES").pipe(Config.withDefault(10 * 1024 * 1024)),
+  traceMaxFiles: Config.Int("RYCO_TRACE_MAX_FILES").pipe(Config.withDefault(10)),
+  traceBatchWindowMs: Config.Int("RYCO_TRACE_BATCH_WINDOW_MS").pipe(Config.withDefault(200)),
+  otlpTracesUrl: Config.String("RYCO_OTLP_TRACES_URL").pipe(
     Config.option,
     Config.map(Option.getOrUndefined),
   ),
-  otlpMetricsUrl: Config.string("RYCO_OTLP_METRICS_URL").pipe(
+  otlpMetricsUrl: Config.String("RYCO_OTLP_METRICS_URL").pipe(
     Config.option,
     Config.map(Option.getOrUndefined),
   ),
-  otlpExportIntervalMs: Config.int("RYCO_OTLP_EXPORT_INTERVAL_MS").pipe(Config.withDefault(10_000)),
-  otlpServiceName: Config.string("RYCO_OTLP_SERVICE_NAME").pipe(Config.withDefault("ryco-server")),
+  otlpExportIntervalMs: Config.Int("RYCO_OTLP_EXPORT_INTERVAL_MS").pipe(Config.withDefault(10_000)),
+  otlpServiceName: Config.String("RYCO_OTLP_SERVICE_NAME").pipe(Config.withDefault("ryco-server")),
   mode: Config.schema(RuntimeMode, "RYCO_MODE").pipe(
     Config.option,
     Config.map(Option.getOrUndefined),
   ),
-  port: Config.port("RYCO_PORT").pipe(Config.option, Config.map(Option.getOrUndefined)),
-  host: Config.string("RYCO_HOST").pipe(Config.option, Config.map(Option.getOrUndefined)),
-  rycoHome: Config.string("RYCO_HOME").pipe(Config.option, Config.map(Option.getOrUndefined)),
-  devUrl: Config.url("VITE_DEV_SERVER_URL").pipe(Config.option, Config.map(Option.getOrUndefined)),
-  noBrowser: Config.boolean("RYCO_NO_BROWSER").pipe(
+  port: Config.Port("RYCO_PORT").pipe(Config.option, Config.map(Option.getOrUndefined)),
+  host: Config.String("RYCO_HOST").pipe(Config.option, Config.map(Option.getOrUndefined)),
+  rycoHome: Config.String("RYCO_HOME").pipe(Config.option, Config.map(Option.getOrUndefined)),
+  devUrl: Config.URL("VITE_DEV_SERVER_URL").pipe(Config.option, Config.map(Option.getOrUndefined)),
+  noBrowser: Config.Boolean("RYCO_NO_BROWSER").pipe(
     Config.option,
     Config.map(Option.getOrUndefined),
   ),
-  bootstrapFd: Config.int("RYCO_BOOTSTRAP_FD").pipe(
+  bootstrapFd: Config.Int("RYCO_BOOTSTRAP_FD").pipe(
     Config.option,
     Config.map(Option.getOrUndefined),
   ),
-  autoBootstrapProjectFromCwd: Config.boolean("RYCO_AUTO_BOOTSTRAP_PROJECT_FROM_CWD").pipe(
+  autoBootstrapProjectFromCwd: Config.Boolean("RYCO_AUTO_BOOTSTRAP_PROJECT_FROM_CWD").pipe(
     Config.option,
     Config.map(Option.getOrUndefined),
   ),
-  logWebSocketEvents: Config.boolean("RYCO_LOG_WS_EVENTS").pipe(
+  logWebSocketEvents: Config.Boolean("RYCO_LOG_WS_EVENTS").pipe(
     Config.option,
     Config.map(Option.getOrUndefined),
   ),
-  preventSleep: Config.boolean("RYCO_PREVENT_SLEEP").pipe(
+  preventSleep: Config.Boolean("RYCO_PREVENT_SLEEP").pipe(
     Config.option,
     Config.map(Option.getOrUndefined),
   ),
-  tailscaleServeEnabled: Config.boolean("RYCO_TAILSCALE_SERVE").pipe(
+  tailscaleServeEnabled: Config.Boolean("RYCO_TAILSCALE_SERVE").pipe(
     Config.option,
     Config.map(Option.getOrUndefined),
   ),
-  tailscaleServePort: Config.port("RYCO_TAILSCALE_SERVE_PORT").pipe(
+  tailscaleServePort: Config.Port("RYCO_TAILSCALE_SERVE_PORT").pipe(
     Config.option,
     Config.map(Option.getOrUndefined),
   ),
-  hubConnectorEnabled: Config.string("RYCO_HUB_CONNECTOR_ENABLED").pipe(
+  hubConnectorEnabled: Config.String("RYCO_HUB_CONNECTOR_ENABLED").pipe(
     Config.option,
     Config.map(Option.getOrUndefined),
   ),
-  hubOrigin: Config.string("RYCO_HUB_ORIGIN").pipe(
+  hubOrigin: Config.String("RYCO_HUB_ORIGIN").pipe(
     Config.option,
     Config.map(Option.getOrUndefined),
   ),
-  hubNodeName: Config.string("RYCO_HUB_NODE_NAME").pipe(
+  hubNodeName: Config.String("RYCO_HUB_NODE_NAME").pipe(
     Config.option,
     Config.map(Option.getOrUndefined),
   ),
-  hubReconnectBaseMs: Config.string("RYCO_HUB_RECONNECT_BASE_MS").pipe(
+  hubReconnectBaseMs: Config.String("RYCO_HUB_RECONNECT_BASE_MS").pipe(
     Config.option,
     Config.map(Option.getOrUndefined),
   ),
-  hubReconnectMaxMs: Config.string("RYCO_HUB_RECONNECT_MAX_MS").pipe(
+  hubReconnectMaxMs: Config.String("RYCO_HUB_RECONNECT_MAX_MS").pipe(
     Config.option,
     Config.map(Option.getOrUndefined),
   ),
-  hubReconnectStableMs: Config.string("RYCO_HUB_RECONNECT_STABLE_MS").pipe(
+  hubReconnectStableMs: Config.String("RYCO_HUB_RECONNECT_STABLE_MS").pipe(
     Config.option,
     Config.map(Option.getOrUndefined),
   ),
-  hubReconnectJitterRatio: Config.string("RYCO_HUB_RECONNECT_JITTER_RATIO").pipe(
+  hubReconnectJitterRatio: Config.String("RYCO_HUB_RECONNECT_JITTER_RATIO").pipe(
     Config.option,
     Config.map(Option.getOrUndefined),
   ),
-  hubAllowFileSecretStore: Config.string("RYCO_HUB_ALLOW_FILE_SECRET_STORE").pipe(
+  hubAllowFileSecretStore: Config.String("RYCO_HUB_ALLOW_FILE_SECRET_STORE").pipe(
     Config.option,
     Config.map(Option.getOrUndefined),
   ),
@@ -402,15 +397,15 @@ const EnvServerConfig = Config.all({
   // `resolveNodeE2eePolicyConfig` and is reported as `configuration_invalid`
   // rather than being coerced by the config layer into a policy the operator did
   // not ask for.
-  hubRequireE2EE: Config.string("RYCO_HUB_REQUIRE_E2EE").pipe(
+  hubRequireE2EE: Config.String("RYCO_HUB_REQUIRE_E2EE").pipe(
     Config.option,
     Config.map(Option.getOrUndefined),
   ),
-  hubRequireApprovedClientE2EE: Config.string("RYCO_HUB_REQUIRE_APPROVED_CLIENT_E2EE").pipe(
+  hubRequireApprovedClientE2EE: Config.String("RYCO_HUB_REQUIRE_APPROVED_CLIENT_E2EE").pipe(
     Config.option,
     Config.map(Option.getOrUndefined),
   ),
-  hubE2eePolicy: Config.string("RYCO_HUB_E2EE_POLICY").pipe(
+  hubE2eePolicy: Config.String("RYCO_HUB_E2EE_POLICY").pipe(
     Config.option,
     Config.map(Option.getOrUndefined),
   ),
@@ -919,7 +914,7 @@ const parseDurationInput = (value: string): Duration.Duration | null => {
 const DurationFromString = Schema.String.pipe(
   Schema.decodeTo(
     Schema.Duration,
-    SchemaTransformation.transformOrFail({
+    SchemaTransformation.transformEffect({
       decode: (value) => {
         const duration = parseDurationInput(value);
         if (duration !== null) {
@@ -1453,7 +1448,7 @@ const sharedServerCommandFlags = {
   port: portFlag,
   host: hostFlag,
   baseDir: baseDirFlag,
-  cwd: Argument.string("cwd").pipe(
+  cwd: Argument.String("cwd").pipe(
     Argument.withDescription(
       "Working directory for provider sessions (defaults to the current directory).",
     ),
@@ -1479,13 +1474,13 @@ const sharedServerCommandFlags = {
 
 const authLocationFlags = sharedServerLocationFlags;
 
-const ttlFlag = Flag.string("ttl").pipe(
+const ttlFlag = Flag.String("ttl").pipe(
   Flag.withSchema(DurationFromString),
   Flag.withDescription("TTL, for example `5m`, `1h`, `30d`, or `15 minutes`."),
   Flag.optional,
 );
 
-const jsonFlag = Flag.boolean("json").pipe(
+const jsonFlag = Flag.Boolean("json").pipe(
   Flag.withDescription("Emit JSON instead of human-readable output."),
   Flag.withDefault(false),
 );
@@ -1520,27 +1515,27 @@ const jsonFlag = Flag.boolean("json").pipe(
  */
 const emitJson = (value: unknown): string => JSON.stringify(value);
 
-const sessionRoleFlag = Flag.choice("role", ["owner", "client"]).pipe(
+const sessionRoleFlag = Flag.Literals("role", ["owner", "client"]).pipe(
   Flag.withDescription("Role for the issued bearer session."),
   Flag.withDefault("owner"),
 );
 
-const labelFlag = Flag.string("label").pipe(
+const labelFlag = Flag.String("label").pipe(
   Flag.withDescription("Optional human-readable label."),
   Flag.optional,
 );
 
-const subjectFlag = Flag.string("subject").pipe(
+const subjectFlag = Flag.String("subject").pipe(
   Flag.withDescription("Optional session subject."),
   Flag.optional,
 );
 
-const baseUrlFlag = Flag.string("base-url").pipe(
+const baseUrlFlag = Flag.String("base-url").pipe(
   Flag.withDescription("Optional public base URL used to print a ready `/pair#token=...` link."),
   Flag.optional,
 );
 
-const tokenOnlyFlag = Flag.boolean("token-only").pipe(
+const tokenOnlyFlag = Flag.Boolean("token-only").pipe(
   Flag.withDescription("Print only the issued bearer token."),
   Flag.withDefault(false),
 );
@@ -1599,7 +1594,7 @@ const pairingListCommand = Command.make("list", {
 
 const pairingRevokeCommand = Command.make("revoke", {
   ...authLocationFlags,
-  id: Argument.string("id").pipe(Argument.withDescription("Pairing credential id to revoke.")),
+  id: Argument.String("id").pipe(Argument.withDescription("Pairing credential id to revoke.")),
 }).pipe(
   Command.withDescription("Revoke an active client pairing token."),
   Command.withHandler((flags) =>
@@ -1678,7 +1673,7 @@ const sessionListCommand = Command.make("list", {
 
 const sessionRevokeCommand = Command.make("revoke", {
   ...authLocationFlags,
-  sessionId: Argument.string("session-id").pipe(
+  sessionId: Argument.String("session-id").pipe(
     Argument.withDescription("Session id to revoke."),
     Argument.withSchema(AuthSessionId),
   ),
@@ -1915,14 +1910,14 @@ const runHubLoginFlow = (
 
     const username = Option.isSome(input.username)
       ? input.username.value
-      : yield* Prompt.run(Prompt.text({ message: "Ryco username" }));
-    const password = yield* Prompt.run(Prompt.password({ message: "Password" }));
+      : yield* Prompt.run(Prompt.String({ message: "Ryco username" }));
+    const password = yield* Prompt.run(Prompt.Password({ message: "Password" }));
     const account = yield* hubLoginStep(() => createCliHubAccount(hubOrigin));
     const signIn = yield* hubLoginStep(() =>
       startPasswordSignIn(account, { username, password: Redacted.value(password) }),
     );
     const code = yield* Prompt.run(
-      Prompt.text({
+      Prompt.String({
         message:
           signIn.factor === "totp"
             ? "Code from your authenticator app"
@@ -1971,11 +1966,11 @@ const parseHubOrigin = (value: Option.Option<string>) =>
 
 const hubLoginCommand = Command.make("login", {
   ...authLocationFlags,
-  hubOrigin: Flag.string("hub-origin").pipe(
+  hubOrigin: Flag.String("hub-origin").pipe(
     Flag.withDescription(`Hub to sign in to (defaults to ${DEFAULT_HOSTED_APP_ORIGIN}).`),
     Flag.optional,
   ),
-  username: Flag.string("username").pipe(
+  username: Flag.String("username").pipe(
     Flag.withDescription(
       "Ryco username; asked for when omitted. Passwords are only ever prompted for.",
     ),
@@ -2023,11 +2018,11 @@ const hubCommand = Command.make("hub").pipe(
 // only the live connector holds those channels. An offline mode would answer
 // exactly the questions whose answers would then be false.
 
-const e2eeHubOriginFlag = Flag.string("hub-origin").pipe(
+const e2eeHubOriginFlag = Flag.String("hub-origin").pipe(
   Flag.withDescription("Hub origin of the client authorization record (§13.6 record key)."),
 );
 
-const e2eeAccountIdFlag = Flag.string("account-id").pipe(
+const e2eeAccountIdFlag = Flag.String("account-id").pipe(
   Flag.withDescription("Account id of the client authorization record (§13.6 record key)."),
 );
 
@@ -2038,20 +2033,20 @@ const e2eeAccountIdFlag = Flag.string("account-id").pipe(
  * is the value the owner reads off the device they are pairing — the same
  * `SHA256:`-prefixed string `ryco hub enroll` already prints for this node.
  */
-const e2eeFingerprintArgument = Argument.string("fingerprint").pipe(
+const e2eeFingerprintArgument = Argument.String("fingerprint").pipe(
   Argument.withDescription("Client key fingerprint in SHA256: display form (§7.1)."),
 );
 
-const e2eeMaxRoleFlag = Flag.choice("max-role", ["viewer", "operator", "owner"]).pipe(
+const e2eeMaxRoleFlag = Flag.Literals("max-role", ["viewer", "operator", "owner"]).pipe(
   Flag.withDescription("Maximum role this client key may exercise (§8.3 role ordering)."),
 );
 
-const e2eeCapabilityFlag = Flag.string("capability").pipe(
+const e2eeCapabilityFlag = Flag.String("capability").pipe(
   Flag.withDescription("Relay capability to grant. Repeat the flag to grant more than one."),
   Flag.atLeast(1),
 );
 
-const e2eeLabelFlag = Flag.string("label").pipe(
+const e2eeLabelFlag = Flag.String("label").pipe(
   Flag.withDescription("Optional owner-assigned label for this record."),
   Flag.optional,
 );
@@ -2061,21 +2056,21 @@ const e2eeClientKeyFlags = {
   accountId: e2eeAccountIdFlag,
 } as const;
 
-const e2eeRequireE2eeFlag = Flag.boolean("require-e2ee").pipe(
+const e2eeRequireE2eeFlag = Flag.Boolean("require-e2ee").pipe(
   Flag.withDescription(
     "Reject plaintext relay payloads (§12.3). Enabling it closes every open legacy channel.",
   ),
   Flag.optional,
 );
 
-const e2eePolicyModeFlag = Flag.choice("mode", NodeE2eeAdmissionPolicy.literals).pipe(
+const e2eePolicyModeFlag = Flag.Literals("mode", NodeE2eeAdmissionPolicy.literals).pipe(
   Flag.withDescription(
     "Admission mode: compatibility, require-e2ee, require-native-e2ee, or require-locally-approved-native-e2ee.",
   ),
   Flag.optional,
 );
 
-const e2eeRequireApprovedClientFlag = Flag.boolean("require-approved-client-e2ee").pipe(
+const e2eeRequireApprovedClientFlag = Flag.Boolean("require-approved-client-e2ee").pipe(
   Flag.withDescription(
     "Admit only approved native client keys (§12.4). Disables web access entirely.",
   ),
@@ -2096,7 +2091,7 @@ const e2eeRequireApprovedClientFlag = Flag.boolean("require-approved-client-e2ee
  * resulting registry, so the owner states what is kept and the node decides
  * whether that is a reduction.
  */
-const e2eeSuiteFlag = Flag.integer("suite").pipe(
+const e2eeSuiteFlag = Flag.Int("suite").pipe(
   Flag.withDescription(
     "Suite id to advertise (§3.4 registry). Repeat the flag for each suite kept; the set replaces the current registry.",
   ),
@@ -2104,12 +2099,12 @@ const e2eeSuiteFlag = Flag.integer("suite").pipe(
   Flag.optional,
 );
 
-const e2eeAdoptFlag = Flag.string("adopt").pipe(
+const e2eeAdoptFlag = Flag.String("adopt").pipe(
   Flag.withDescription("Re-adopt this continuity id, keeping every existing client verification."),
   Flag.optional,
 );
 
-const e2eeBreakFlag = Flag.boolean("break").pipe(
+const e2eeBreakFlag = Flag.Boolean("break").pipe(
   Flag.withDescription(
     "Break continuity and mint a fresh id. Every paired client must verify this node again.",
   ),
@@ -2605,7 +2600,7 @@ const e2eeClientNarrowCommand = Command.make("narrow", {
   ...authLocationFlags,
   ...e2eeClientKeyFlags,
   fingerprint: e2eeFingerprintArgument,
-  maxRole: Flag.choice("max-role", ["viewer", "operator", "owner"]).pipe(
+  maxRole: Flag.Literals("max-role", ["viewer", "operator", "owner"]).pipe(
     Flag.withDescription("Reduced maximum role (§8.3 role ordering). Never widens."),
     Flag.optional,
   ),
@@ -2614,7 +2609,7 @@ const e2eeClientNarrowCommand = Command.make("narrow", {
   // states what is kept and the client checks that it is a reduction. Repeated
   // and optional together, because narrowing the role alone must leave the
   // capability set untouched rather than emptying it.
-  capability: Flag.string("capability").pipe(
+  capability: Flag.String("capability").pipe(
     Flag.withDescription("The reduced capability set. Repeat the flag for each member kept."),
     Flag.atLeast(1),
     Flag.optional,
@@ -3164,10 +3159,10 @@ const e2eeCommand = Command.make("e2ee").pipe(
 
 const projectAddCommand = Command.make("add", {
   ...projectLocationFlags,
-  workspaceRoot: Argument.string("path").pipe(
+  workspaceRoot: Argument.String("path").pipe(
     Argument.withDescription("Workspace root to add as a project."),
   ),
-  title: Flag.string("title").pipe(Flag.withDescription("Optional project title."), Flag.optional),
+  title: Flag.String("title").pipe(Flag.withDescription("Optional project title."), Flag.optional),
 }).pipe(
   Command.withDescription("Add a project."),
   Command.withHandler((flags) =>
@@ -3210,7 +3205,7 @@ const projectAddCommand = Command.make("add", {
 
 const projectRemoveCommand = Command.make("remove", {
   ...projectLocationFlags,
-  project: Argument.string("project").pipe(
+  project: Argument.String("project").pipe(
     Argument.withDescription("Project id or workspace root to remove."),
   ),
 }).pipe(
@@ -3244,10 +3239,10 @@ const projectRemoveCommand = Command.make("remove", {
 
 const projectRenameCommand = Command.make("rename", {
   ...projectLocationFlags,
-  project: Argument.string("project").pipe(
+  project: Argument.String("project").pipe(
     Argument.withDescription("Project id or workspace root to rename."),
   ),
-  title: Argument.string("title").pipe(Argument.withDescription("New project title.")),
+  title: Argument.String("title").pipe(Argument.withDescription("New project title.")),
 }).pipe(
   Command.withDescription("Rename a project."),
   Command.withHandler((flags) =>
@@ -3355,7 +3350,7 @@ const serviceInstallCommand = Command.make("install", {
   tailscaleServePort: tailscaleServePortFlag,
   restrictToCwd: restrictToCwdFlag,
   preventSleep: preventSleepFlag,
-  cwd: Argument.string("cwd").pipe(
+  cwd: Argument.String("cwd").pipe(
     Argument.withDescription(
       "Working directory for provider sessions (defaults to the current directory).",
     ),
@@ -3515,13 +3510,13 @@ const serviceStatusCommand = Command.make("status", {
 
 const serviceLogsCommand = Command.make("logs", {
   ...serviceLocationFlags,
-  lines: Flag.integer("lines").pipe(
+  lines: Flag.Int("lines").pipe(
     Flag.withSchema(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 100_000 }))),
     Flag.withAlias("n"),
     Flag.withDescription("How many trailing lines to print (default 80)."),
     Flag.optional,
   ),
-  follow: Flag.boolean("follow").pipe(
+  follow: Flag.Boolean("follow").pipe(
     Flag.withAlias("f"),
     Flag.withDescription("Keep printing new lines as they are written."),
     Flag.optional,
@@ -3590,16 +3585,16 @@ const remoteStep = <A>(run: () => Promise<A>) =>
           }),
   });
 
-const remoteNameArgument = Argument.string("name").pipe(
+const remoteNameArgument = Argument.String("name").pipe(
   Argument.withDescription("The name you gave the remote with `ryco remote add`."),
 );
 
 const remoteAddCommand = Command.make("add", {
   ...remoteLocationFlags,
-  name: Argument.string("name").pipe(
+  name: Argument.String("name").pipe(
     Argument.withDescription("A short name for the remote, for example `mac-mini`."),
   ),
-  pairingUrl: Argument.string("pairing-url").pipe(
+  pairingUrl: Argument.String("pairing-url").pipe(
     Argument.withDescription(
       "A pairing link from the remote (`ryco auth pairing create --base-url …` there), or `-` to read it from stdin.",
     ),
@@ -3695,7 +3690,7 @@ const loadRemote = (baseDir: Option.Option<string>, name: string) =>
 const remoteThreadsCommand = Command.make("threads", {
   ...remoteLocationFlags,
   name: remoteNameArgument,
-  all: Flag.boolean("all").pipe(Flag.withDescription("Include archived threads."), Flag.optional),
+  all: Flag.Boolean("all").pipe(Flag.withDescription("Include archived threads."), Flag.optional),
   json: jsonFlag,
 }).pipe(
   Command.withDescription("List a remote's threads, most recently updated first."),
@@ -3720,14 +3715,14 @@ const remoteThreadsCommand = Command.make("threads", {
 const remoteSendCommand = Command.make("send", {
   ...remoteLocationFlags,
   name: remoteNameArgument,
-  threadId: Argument.string("thread-id").pipe(
+  threadId: Argument.String("thread-id").pipe(
     Argument.withDescription("The thread to continue (see `ryco remote threads`)."),
   ),
-  message: Argument.string("message").pipe(
+  message: Argument.String("message").pipe(
     Argument.withDescription("The message to send."),
     Argument.variadic({ min: 1 }),
   ),
-  wait: Flag.boolean("wait").pipe(
+  wait: Flag.Boolean("wait").pipe(
     Flag.withDescription(
       "Print the assistant's reply as it streams until the turn ends (default; --no-wait returns at once).",
     ),
@@ -3992,10 +3987,10 @@ const configPathCommand = Command.make("path", { ...configLocationFlags }).pipe(
 
 const configSetCommand = Command.make("set", {
   ...configLocationFlags,
-  key: Argument.string("key").pipe(
+  key: Argument.String("key").pipe(
     Argument.withDescription(`One of: ${Object.keys(NODE_CONFIG_KEYS).join(", ")}.`),
   ),
-  value: Argument.string("value"),
+  value: Argument.String("value"),
 }).pipe(
   Command.withDescription("Change one saved setting, named like its `ryco serve` flag."),
   Command.withHandler((flags) =>
@@ -4017,7 +4012,7 @@ const configSetCommand = Command.make("set", {
 
 const configUnsetCommand = Command.make("unset", {
   ...configLocationFlags,
-  key: Argument.string("key").pipe(
+  key: Argument.String("key").pipe(
     Argument.withDescription(`One of: ${Object.keys(NODE_CONFIG_KEYS).join(", ")}.`),
   ),
 }).pipe(
@@ -4136,7 +4131,7 @@ const runBareCommand = (flags: CliServerFlags) =>
     if (preferences.skipLaunchChooser) return yield* runServerCommand(flags);
 
     const choice = yield* Prompt.run(
-      Prompt.select<"open" | "setup" | "always-open">({
+      Prompt.Select<"open" | "setup" | "always-open">({
         message: "Welcome to Ryco",
         choices: [
           {

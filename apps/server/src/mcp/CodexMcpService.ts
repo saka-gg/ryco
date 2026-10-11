@@ -30,7 +30,7 @@ import { Cause, Duration, Effect, Exit, FileSystem, Layer, Path, Schema } from "
 import * as CodexClient from "effect-codex-app-server/client";
 import type * as CodexErrors from "effect-codex-app-server/errors";
 import type * as CodexSchema from "effect-codex-app-server/schema";
-import { ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcessSpawner } from "effect/process";
 
 import { ServerConfig } from "../config.ts";
 import { runProcess } from "../processRunner.ts";

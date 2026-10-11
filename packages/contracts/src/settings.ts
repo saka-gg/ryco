@@ -6,7 +6,12 @@ import {
 import { Effect } from "effect";
 import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
-import { EnvironmentId, TrimmedNonEmptyString, TrimmedString } from "./baseSchemas.ts";
+import {
+  EnvironmentId,
+  TrimmedNonEmptyString,
+  TrimmedString,
+  rejectExcessProperties,
+} from "./baseSchemas.ts";
 import { EditorId } from "./editor.ts";
 import { EnvironmentMachineKind, EnvironmentMachineHint } from "./environment.ts";
 import {
@@ -164,7 +169,7 @@ const makeBinaryPathSetting = (fallback: string) =>
   TrimmedString.pipe(
     Schema.decodeTo(
       Schema.String,
-      SchemaTransformation.transformOrFail({
+      SchemaTransformation.transformEffect({
         decode: (value) => Effect.succeed(value || fallback),
         encode: (value) => Effect.succeed(value),
       }),
@@ -557,7 +562,7 @@ export const ProjectPreferencesPatch = Schema.Struct({
   defaultThreadEnvMode: Schema.optionalKey(Schema.NullOr(ThreadEnvMode)),
   worktreeBranchPrefix: Schema.optionalKey(Schema.NullOr(WorktreeBranchPrefix)),
   runSetupScript: Schema.optionalKey(Schema.NullOr(Schema.Boolean)),
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type ProjectPreferencesPatch = typeof ProjectPreferencesPatch.Type;
 
 /** Model absence is distinct from a persisted inheritance mask for legacy presets. */

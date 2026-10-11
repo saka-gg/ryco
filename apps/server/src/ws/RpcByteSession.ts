@@ -1,9 +1,9 @@
 import { Clock, Effect, Queue, Scope, Semaphore } from "effect";
 import type { Layer } from "effect";
-import type { Rpc } from "effect/unstable/rpc";
+import type { Rpc } from "effect/rpc";
 import { RelayMessageAssembler } from "@ryco/shared/relayMessageChunks";
-import { RpcMessage, RpcSerialization, RpcServer } from "effect/unstable/rpc";
-import type { RpcGroup } from "effect/unstable/rpc";
+import { RpcMessage, RpcSerialization, RpcServer } from "effect/rpc";
+import type { RpcGroup } from "effect/rpc";
 
 export interface RpcByteSession {
   readonly receive: (bytes: Uint8Array) => Effect.Effect<boolean>;
@@ -310,7 +310,7 @@ export function makeRpcByteSession<Rpcs extends Rpc.Any, E, R>(
                   const replacement = encodeResponse(
                     RpcMessage.ResponseExitDieEncoded({
                       requestId,
-                      defect: new Error(
+                      encodedDefect: new Error(
                         "The response exceeded the largest message this connection can carry.",
                       ),
                     }),
@@ -328,6 +328,10 @@ export function makeRpcByteSession<Rpcs extends Rpc.Any, E, R>(
           supportsAck: true,
           supportsTransferables: false,
           supportsSpanPropagation: true,
+          // Each reassembled record is one message, so the server may send
+          // unsolicited frames just as it does over a WebSocket.
+          supportsNotifications: true,
+          codecFor: RpcSerialization.json.codecFor,
         };
       }),
     );

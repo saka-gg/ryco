@@ -9,7 +9,7 @@ import { sideQuestionDirectory, sideQuestionEnvironment } from "./SideQuestionIs
  * @module ClaudeTextGeneration
  */
 import { Effect, Option, Schema, Stream } from "effect";
-import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import { type ClaudeSettings, type ModelSelection } from "@ryco/contracts";
 import { sanitizeBranchFragment, sanitizeFeatureBranchName } from "@ryco/shared/git";

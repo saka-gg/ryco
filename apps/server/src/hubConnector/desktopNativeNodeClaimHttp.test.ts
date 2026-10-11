@@ -17,8 +17,8 @@ import type {
 } from "@ryco/contracts/hosted-identity";
 import { LOCAL_INTRODUCTION_CONTROL_HEADER } from "@ryco/contracts/local-introduction";
 import { Effect, Layer } from "effect";
-import * as HttpRouter from "effect/unstable/http/HttpRouter";
-import * as HttpServer from "effect/unstable/http/HttpServer";
+import * as HttpRouter from "effect/http/HttpRouter";
+import * as HttpServer from "effect/http/HttpServer";
 
 import { deriveServerPaths, ServerConfig, type ServerConfigShape } from "../config.ts";
 import {

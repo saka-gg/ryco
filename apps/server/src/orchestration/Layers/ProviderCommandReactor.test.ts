@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import * as GitVcsDriver from "../../vcs/GitVcsDriver.ts";
 import { canonicalStoragePath } from "../../storage/lifecycle.ts";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 import { ProjectionThreadUserInputRequestRepository } from "../../persistence/Services/ProjectionThreadUserInputRequests.ts";
 import { ProjectionThreadUserInputRequestRepositoryLive } from "../../persistence/Layers/ProjectionThreadUserInputRequests.ts";
 import { ProjectionPendingApprovalRepository } from "../../persistence/Services/ProjectionPendingApprovals.ts";

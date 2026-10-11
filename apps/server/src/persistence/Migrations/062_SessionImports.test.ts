@@ -1,6 +1,6 @@
 import { it, assert } from "@effect/vitest";
 import { Effect } from "effect";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 import { runMigrations } from "../Migrations.ts";
 import * as NodeSqliteClient from "../NodeSqliteClient.ts";
 it.layer(NodeSqliteClient.layerMemory())("062 session import migration", (it) => {

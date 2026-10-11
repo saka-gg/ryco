@@ -3,7 +3,7 @@ import { constants } from "node:fs";
 import * as fs from "node:fs/promises";
 import path from "node:path";
 
-import Mime from "@effect/platform-node/Mime";
+import Mime from "mime";
 import {
   ChatAttachment,
   ChatFileAttachment,

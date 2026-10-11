@@ -3,7 +3,7 @@
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { Effect, FileSystem, Option, Path } from "effect";
-import { Argument, Command } from "effect/unstable/cli";
+import { Argument, Command } from "effect/cli";
 import { resolveWebIconOverrides, type WebAssetBrand } from "./lib/brand-assets.ts";
 
 const WEB_ASSET_BRANDS = [
@@ -34,10 +34,10 @@ export const applyWebBrandAssets = Effect.fn("applyWebBrandAssets")(function* (
 export const applyWebBrandAssetsCommand = Command.make(
   "apply-web-brand-assets",
   {
-    brand: Argument.choice("brand", WEB_ASSET_BRANDS).pipe(
+    brand: Argument.Literals("brand", WEB_ASSET_BRANDS).pipe(
       Argument.withDescription("Asset brand to copy into the hosted web output directory."),
     ),
-    targetDirectory: Argument.string("target-directory").pipe(
+    targetDirectory: Argument.String("target-directory").pipe(
       Argument.withDescription("Output directory that contains the hosted web build assets."),
       Argument.optional,
     ),

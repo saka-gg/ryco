@@ -2,7 +2,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { realpath } from "node:fs/promises";
 import { assert, it } from "@effect/vitest";
 import { Effect, FileSystem, Layer, Option, Path } from "effect";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 import {
   DEFAULT_SERVER_SETTINGS,
   ProjectId,

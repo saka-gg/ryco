@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { CommandId, MessageId, RuntimeSessionId, ThreadId, TurnId } from "@ryco/contracts";
 import { Effect, Layer } from "effect";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 import { expect, it } from "vite-plus/test";
 import * as NodeSqliteClient from "../NodeSqliteClient.ts";
 import { runMigrations } from "../Migrations.ts";

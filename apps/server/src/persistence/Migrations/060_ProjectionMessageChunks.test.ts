@@ -2,7 +2,7 @@ import { messageTextColumns, decodeMessageText } from "../messageText.ts";
 import { assert, it } from "@effect/vitest";
 import { MessageId, ThreadId } from "@ryco/contracts";
 import { Effect, Layer, Option } from "effect";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 import { runMigrations } from "../Migrations.ts";
 import * as NodeSqliteClient from "../NodeSqliteClient.ts";
 import { ProjectionThreadMessageRepositoryLive } from "../Layers/ProjectionThreadMessages.ts";

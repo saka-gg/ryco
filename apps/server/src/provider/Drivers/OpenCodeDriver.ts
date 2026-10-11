@@ -15,8 +15,8 @@ import { AgentControlSessionRegistry } from "../../agentControl/Services/AgentCo
  */
 import { OpenCodeSettings, ProviderDriverKind, type ServerProvider } from "@ryco/contracts";
 import { Effect, FileSystem, Path, Schema, Stream } from "effect";
-import { HttpClient } from "effect/unstable/http";
-import { ChildProcessSpawner } from "effect/unstable/process";
+import { HttpClient } from "effect/http";
+import { ChildProcessSpawner } from "effect/process";
 
 import { makeOpenCodeTextGeneration } from "../../textGeneration/OpenCodeTextGeneration.ts";
 import { ServerConfig } from "../../config.ts";

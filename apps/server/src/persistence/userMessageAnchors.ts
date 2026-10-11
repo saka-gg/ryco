@@ -1,5 +1,5 @@
-import type * as SqlClient from "effect/unstable/sql/SqlClient";
-import type * as Statement from "effect/unstable/sql/Statement";
+import type * as SqlClient from "effect/sql/SqlClient";
+import type * as Statement from "effect/sql/Statement";
 
 /** A bound thread id, or a code-owned column reference such as sql.literal("threads.thread_id"). */
 type ThreadRef = string | Statement.Fragment;

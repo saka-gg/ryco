@@ -1,11 +1,11 @@
-import { Encoding } from "effect";
+import { Base64Url } from "effect/encoding";
 import { CheckpointRef, ProjectId, type ThreadId } from "@ryco/contracts";
 
 export const CHECKPOINT_REFS_PREFIX = "refs/ryco/checkpoints";
 
 export function checkpointRefForThreadTurn(threadId: ThreadId, turnCount: number): CheckpointRef {
   return CheckpointRef.make(
-    `${CHECKPOINT_REFS_PREFIX}/${Encoding.encodeBase64Url(threadId)}/turn/${turnCount}`,
+    `${CHECKPOINT_REFS_PREFIX}/${Base64Url.encode(threadId)}/turn/${turnCount}`,
   );
 }
 

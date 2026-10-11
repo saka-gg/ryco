@@ -37,6 +37,7 @@
     "@opencode-ai/sdk": "^1.18.29",
     "@pierre/diffs": "catalog:",
     "effect": "catalog:",
+    "mime": "4.1.0",
     "node-pty": "^1.1.0",
     "open": "^11.0.2",
     "sharp": "^0.35.5"

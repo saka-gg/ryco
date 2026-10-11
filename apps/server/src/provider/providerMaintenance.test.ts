@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { ProviderDriverKind, ProviderInstanceId, type ServerProvider } from "@ryco/contracts";
 import { Effect } from "effect";
-import { HttpClient, HttpClientResponse } from "effect/unstable/http";
+import { HttpClient, HttpClientResponse } from "effect/http";
 import {
   clearLatestProviderVersionCacheForTests,
   createProviderVersionAdvisory,

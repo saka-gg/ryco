@@ -1,5 +1,5 @@
 import { Effect } from "effect";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
 /** The longest document body (contracts' `NOTE_BODY_MAX_LENGTH` when this shipped). */
 const BODY_MAX_LENGTH = 100_000;

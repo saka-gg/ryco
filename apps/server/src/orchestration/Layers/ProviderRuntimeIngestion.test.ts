@@ -5,7 +5,7 @@ import {
 import { completionFixture } from "../../agentControl/completionReturnTestSupport.ts";
 import { derivePendingThreadRequestState } from "@ryco/shared/threadActivity";
 import fs from "node:fs";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 import os from "node:os";
 import path from "node:path";
 

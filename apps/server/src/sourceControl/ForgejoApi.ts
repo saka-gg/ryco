@@ -25,7 +25,7 @@ import {
   type SourceControlRepositoryCloneUrls,
   type SourceControlRepositoryVisibility,
 } from "@ryco/contracts";
-import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http";
+import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 import { sanitizeBranchFragment, WORKTREE_BRANCH_PREFIX } from "@ryco/shared/git";
 import { detectSourceControlProviderFromRemoteUrl } from "@ryco/shared/sourceControl";
 import { decodeJsonResult } from "@ryco/shared/schemaJson";
@@ -48,10 +48,10 @@ const DEFAULT_BASE_URL = "https://codeberg.org";
 const DEFAULT_PAGE_LIMIT = 50;
 
 const ForgejoApiEnvConfig = Config.all({
-  baseUrl: Config.string("RYCO_FORGEJO_BASE_URL").pipe(Config.option),
-  token: Config.string("RYCO_FORGEJO_TOKEN").pipe(Config.option),
-  instances: Config.string("RYCO_FORGEJO_INSTANCES").pipe(Config.option),
-  cliKeysFile: Config.string("RYCO_FORGEJO_CLI_KEYS_FILE").pipe(Config.option),
+  baseUrl: Config.String("RYCO_FORGEJO_BASE_URL").pipe(Config.option),
+  token: Config.String("RYCO_FORGEJO_TOKEN").pipe(Config.option),
+  instances: Config.String("RYCO_FORGEJO_INSTANCES").pipe(Config.option),
+  cliKeysFile: Config.String("RYCO_FORGEJO_CLI_KEYS_FILE").pipe(Config.option),
 });
 
 export { ForgejoApiError };

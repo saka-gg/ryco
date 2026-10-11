@@ -36,7 +36,7 @@ import {
   Stream,
 } from "effect";
 import * as SchemaIssue from "effect/SchemaIssue";
-import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import * as CodexClient from "effect-codex-app-server/client";
 import * as CodexErrors from "effect-codex-app-server/errors";
 import * as CodexRpc from "effect-codex-app-server/rpc";
@@ -2166,7 +2166,9 @@ export const makeCodexSessionRuntime = (
         activeTurnId: undefined,
       });
       yield* emitSessionEvent("session/closed", "Session stopped");
-      yield* Scope.close(runtimeScope, Exit.void);
+      // Callers hand this runtime a scope they created for it alone (the
+      // adapter's per-session `Scope.make`), so closing it is the runtime's job.
+      yield* Scope.close(runtimeScope as Scope.Closeable, Exit.void);
       yield* Queue.shutdown(serverNotifications);
       yield* Queue.shutdown(events);
     });

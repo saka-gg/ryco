@@ -1,5 +1,5 @@
 import { vi } from "vite-plus/test";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import { mintStorageCleanupClaim, type StorageCleanupClaim } from "../storage/cleanupClaim.ts";
 import {

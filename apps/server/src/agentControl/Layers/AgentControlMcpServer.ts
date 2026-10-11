@@ -7,7 +7,7 @@ import { withDelegationTools } from "../Mcp/delegationTools.ts";
 import { makeDelegatedTaskControl } from "../delegatedTaskControl.ts";
 import { CompletionReturnRepository } from "../../persistence/Layers/AgentControlCompletionReturns.ts";
 import { AgentControlProposalRepository } from "../../persistence/Services/AgentControlProposals.ts";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 import { TerminalManager } from "../../terminal/Services/Manager.ts";
 /**
  * AgentControlMcpServer - Lifecycle owner of the private Agent Control

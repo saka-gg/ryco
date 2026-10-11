@@ -16,8 +16,8 @@ import { resolveRemotePairingTarget } from "@ryco/client-runtime/connection";
 import { WsRpcGroup } from "@ryco/contracts";
 import { getPairingTokenFromUrl } from "@ryco/shared/pairingUrl";
 import { Data, Effect, Layer, Schema, type Scope } from "effect";
-import { RpcClient, RpcClientError, RpcSerialization } from "effect/unstable/rpc";
-import * as Socket from "effect/unstable/socket/Socket";
+import { RpcClient, RpcClientError, RpcSerialization } from "effect/rpc";
+import * as Socket from "effect/socket/Socket";
 
 export const CliRemote = Schema.Struct({
   name: Schema.String,

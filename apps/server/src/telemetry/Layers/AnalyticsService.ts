@@ -8,7 +8,7 @@
  */
 
 import { Config, DateTime, Effect, Layer, Ref } from "effect";
-import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http";
+import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 
 import { ServerConfig } from "../../config.ts";
 import { AnalyticsService, type AnalyticsServiceShape } from "../Services/AnalyticsService.ts";
@@ -22,16 +22,16 @@ interface BufferedAnalyticsEvent {
 }
 
 const TelemetryEnvConfig = Config.all({
-  posthogKey: Config.string("RYCO_POSTHOG_KEY").pipe(
+  posthogKey: Config.String("RYCO_POSTHOG_KEY").pipe(
     Config.withDefault("phc_XOWci4oZP4VvLiEyrFqkFjP4CZn55mjYYBMREK5Wd6m"),
   ),
-  posthogHost: Config.string("RYCO_POSTHOG_HOST").pipe(
+  posthogHost: Config.String("RYCO_POSTHOG_HOST").pipe(
     Config.withDefault("https://us.i.posthog.com"),
   ),
-  enabled: Config.boolean("RYCO_TELEMETRY_ENABLED").pipe(Config.withDefault(true)),
-  flushBatchSize: Config.number("RYCO_TELEMETRY_FLUSH_BATCH_SIZE").pipe(Config.withDefault(20)),
-  flushIntervalMs: Config.number("RYCO_TELEMETRY_FLUSH_INTERVAL_MS").pipe(Config.withDefault(1000)),
-  maxBufferedEvents: Config.number("RYCO_TELEMETRY_MAX_BUFFERED_EVENTS").pipe(
+  enabled: Config.Boolean("RYCO_TELEMETRY_ENABLED").pipe(Config.withDefault(true)),
+  flushBatchSize: Config.Number("RYCO_TELEMETRY_FLUSH_BATCH_SIZE").pipe(Config.withDefault(20)),
+  flushIntervalMs: Config.Number("RYCO_TELEMETRY_FLUSH_INTERVAL_MS").pipe(Config.withDefault(1000)),
+  maxBufferedEvents: Config.Number("RYCO_TELEMETRY_MAX_BUFFERED_EVENTS").pipe(
     Config.withDefault(1_000),
   ),
 });

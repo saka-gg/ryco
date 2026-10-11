@@ -1,5 +1,5 @@
 import { Effect } from "effect";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
 // Keep migration 058 and all saved rows, including crash-claim evidence, intact.
 // No runtime now reads or mutates these tables. Retire triggers which otherwise

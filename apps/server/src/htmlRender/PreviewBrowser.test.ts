@@ -18,7 +18,7 @@ import {
 } from "effect";
 import type { Duration } from "effect";
 import { TestClock } from "effect/testing";
-import { FetchHttpClient, HttpClient, HttpClientResponse } from "effect/unstable/http";
+import { FetchHttpClient, HttpClient, HttpClientResponse } from "effect/http";
 
 import { makeZip } from "../zipArchive.fixtures.ts";
 import * as PreviewBrowser from "./PreviewBrowser.ts";

@@ -1,6 +1,6 @@
 import path from "node:path";
 import { Effect, Option, Schema, Semaphore } from "effect";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 import { OpenError } from "../open.ts";
 import { acquireStoragePathUseLease, canonicalStoragePath } from "../storage/lifecycle.ts";
 import { WorkspaceFileSystemError } from "./Services/WorkspaceFileSystem.ts";

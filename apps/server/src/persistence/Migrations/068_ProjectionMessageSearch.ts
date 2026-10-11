@@ -1,5 +1,5 @@
 import { Effect } from "effect";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
 // Index only settled, ordinary TEXT bodies. Streaming chunks and lossless JSON
 // fallback bodies retain their existing search path, without reindexing deltas.

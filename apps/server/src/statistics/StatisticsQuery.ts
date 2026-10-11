@@ -27,8 +27,8 @@ import {
 } from "@ryco/contracts";
 import { readWorktreePullRequestLinks } from "@ryco/shared/worktreePullRequests";
 import { Context, Effect, Layer, Option, Schema, Semaphore } from "effect";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
-import * as SqlSchema from "effect/unstable/sql/SqlSchema";
+import * as SqlClient from "effect/sql/SqlClient";
+import * as SqlSchema from "effect/sql/SqlSchema";
 
 import { collectProcessedTokenUsage } from "./processedTokenUsage.ts";
 

@@ -13,6 +13,7 @@ describe("transport error string pins", () => {
     expect(TRANSPORT_ERROR_PATTERNS.map((pattern) => pattern.source)).toEqual([
       "\\bSocketCloseError\\b",
       "\\bSocketOpenError\\b",
+      "\\bSocketReadError\\b",
       "Unable to connect to the Ryco server WebSocket\\.",
       "\\bping timeout\\b",
     ]);

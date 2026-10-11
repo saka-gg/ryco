@@ -34,12 +34,7 @@ import {
   Stream,
 } from "effect";
 import type { Duration } from "effect";
-import {
-  FetchHttpClient,
-  HttpClient,
-  HttpClientRequest,
-  HttpClientResponse,
-} from "effect/unstable/http";
+import { FetchHttpClient, HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 
 import { ServerConfig } from "../config.ts";
 import { extractZipArchive } from "../zipArchive.ts";

@@ -1559,7 +1559,7 @@ unconditionally; the broadcast path C2 names did not exist. That change arrived 
 beta bump. Accordingly:
 
 - Changing the pinned `effect` version — including a patch-level beta bump, and including a
-  change to `patches/effect@<version>.patch` that touches `dist/unstable/rpc/RpcClient.js` — MUST
+  change to `patches/effect@<version>.patch` that touches `dist/rpc/RpcClient.js` — MUST
   re-run the §16 C1–C6 vector family against the new build before the pin lands. A bump that
   cannot satisfy C1–C6 is a protocol-breaking change and MUST NOT be taken as an incidental
   dependency update.

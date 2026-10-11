@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vite-plus/test";
 import { Effect, Layer, Tracer } from "effect";
-import { Headers, HttpEffect, HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
+import { Headers, HttpEffect, HttpServerRequest, HttpServerResponse } from "effect/http";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { HttpSpanHeadersLive } from "./HttpHeaderRedaction.ts";
 import { makeLocalFileTracer } from "./LocalFileTracer.ts";
 
 describe("HTTP credential redaction", () => {
@@ -27,6 +28,7 @@ describe("HTTP credential redaction", () => {
       "x-ryco-desktop-control": "test-only-desktop-control",
       dpop: "test-only-proof",
       "dpop-nonce": "test-only-nonce",
+      "proxy-authorization": "Basic test-only-proxy",
       "x-custom-credential": "test-only-custom-credential",
     };
     const layer = Layer.effect(
@@ -48,6 +50,7 @@ describe("HTTP credential redaction", () => {
           "x-custom-credential",
         ]),
       ),
+      Layer.merge(HttpSpanHeadersLive),
     );
     const { handler, dispose } = HttpEffect.toWebHandlerLayer(
       Effect.gen(function* () {

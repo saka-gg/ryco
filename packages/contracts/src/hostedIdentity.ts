@@ -1,5 +1,6 @@
 import { Schema } from "effect";
 
+import { rejectExcessProperties } from "./baseSchemas.ts";
 import { HubNodePublicKeyFingerprint } from "./hubConnector.ts";
 import { RelayNodeId } from "./relay.ts";
 
@@ -65,9 +66,6 @@ export const HOSTED_IDENTITY_MIN_PASSWORD_CHARS = 12;
 export const HOSTED_IDENTITY_MAX_PASSWORD_CHARS = 256;
 export const HOSTED_IDENTITY_MAX_SPACES = 64;
 
-const strict = <S extends Schema.Top>(schema: S): S =>
-  schema.annotate({ parseOptions: { onExcessProperty: "error" } }) as S;
-
 const EpochMs = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
 const Opaque256 = Schema.String.check(
   Schema.isMinLength(43),
@@ -119,7 +117,7 @@ const JsonObject = Schema.Unknown.check(
 );
 
 const strictTimed = <S extends Schema.Struct.Fields>(fields: S) =>
-  strict(
+  rejectExcessProperties(
     Schema.Struct({
       ...fields,
       issuedAt: EpochMs,
@@ -184,17 +182,17 @@ const PublicSignupTurnstileSiteKey = Schema.String.check(
  * produced by Turnstile.
  */
 export const PublicSignupConfigResponse = Schema.Union([
-  strict(Schema.Struct({ status: Schema.Literal("disabled") })),
-  strict(
+  rejectExcessProperties(Schema.Struct({ status: Schema.Literal("disabled") })),
+  rejectExcessProperties(
     Schema.Struct({
       status: Schema.Literal("enabled"),
-      antiBot: strict(Schema.Struct({ provider: Schema.Literal("bypass") })),
+      antiBot: rejectExcessProperties(Schema.Struct({ provider: Schema.Literal("bypass") })),
     }),
   ),
-  strict(
+  rejectExcessProperties(
     Schema.Struct({
       status: Schema.Literal("enabled"),
-      antiBot: strict(
+      antiBot: rejectExcessProperties(
         Schema.Struct({
           provider: Schema.Literal("turnstile"),
           siteKey: PublicSignupTurnstileSiteKey,
@@ -214,7 +212,7 @@ const ExternalIdentityLogin = Schema.Trim.check(
   Schema.isPattern(/^[A-Za-z0-9-]+$/),
 );
 
-export const ExternalIdentitySummary = strict(
+export const ExternalIdentitySummary = rejectExcessProperties(
   Schema.Struct({
     provider: ExternalIdentityProvider,
     login: ExternalIdentityLogin,
@@ -231,7 +229,7 @@ export const ExternalIdentitySummary = strict(
 );
 export type ExternalIdentitySummary = typeof ExternalIdentitySummary.Type;
 
-export const ExternalIdentityProviderPolicy = strict(
+export const ExternalIdentityProviderPolicy = rejectExcessProperties(
   Schema.Struct({
     provider: ExternalIdentityProvider,
     login: Schema.Literal(true),
@@ -250,7 +248,7 @@ const ExternalIdentityProviders = Schema.Array(ExternalIdentityProviderPolicy).c
   ),
 );
 
-export const ExternalIdentityConfigResponse = strict(
+export const ExternalIdentityConfigResponse = rejectExcessProperties(
   Schema.Struct({
     version: Schema.Literal(EXTERNAL_IDENTITY_PROTOCOL_VERSION),
     providers: ExternalIdentityProviders,
@@ -303,7 +301,7 @@ const GitHubAuthorizationUrl = Schema.String.check(
   }),
 );
 
-export const ExternalIdentityAuthorizationStartRequest = strict(
+export const ExternalIdentityAuthorizationStartRequest = rejectExcessProperties(
   Schema.Struct({
     provider: ExternalIdentityProvider,
     intent: Schema.Literals(["authenticate", "link"]),
@@ -313,7 +311,7 @@ export const ExternalIdentityAuthorizationStartRequest = strict(
 export type ExternalIdentityAuthorizationStartRequest =
   typeof ExternalIdentityAuthorizationStartRequest.Type;
 
-export const ExternalIdentityAuthorizationStartResponse = strict(
+export const ExternalIdentityAuthorizationStartResponse = rejectExcessProperties(
   Schema.Struct({
     authorizationUrl: GitHubAuthorizationUrl,
     expiresAt: EpochMs,
@@ -335,8 +333,8 @@ export const ExternalIdentityPendingErrorCode = Schema.Literals([
 export type ExternalIdentityPendingErrorCode = typeof ExternalIdentityPendingErrorCode.Type;
 
 export const ExternalIdentityPendingResponse = Schema.Union([
-  strict(Schema.Struct({ status: Schema.Literal("none") })),
-  strict(
+  rejectExcessProperties(Schema.Struct({ status: Schema.Literal("none") })),
+  rejectExcessProperties(
     Schema.Struct({
       status: Schema.Literal("signup"),
       provider: ExternalIdentityProvider,
@@ -345,14 +343,14 @@ export const ExternalIdentityPendingResponse = Schema.Union([
       expiresAt: EpochMs,
     }),
   ),
-  strict(
+  rejectExcessProperties(
     Schema.Struct({
       status: Schema.Literal("link"),
       externalIdentity: ExternalIdentitySummary,
       expiresAt: EpochMs,
     }),
   ),
-  strict(
+  rejectExcessProperties(
     Schema.Struct({
       status: Schema.Literal("error"),
       provider: ExternalIdentityProvider,
@@ -362,7 +360,7 @@ export const ExternalIdentityPendingResponse = Schema.Union([
 ]);
 export type ExternalIdentityPendingResponse = typeof ExternalIdentityPendingResponse.Type;
 
-export const ExternalIdentitySignupFinishRequest = strict(
+export const ExternalIdentitySignupFinishRequest = rejectExcessProperties(
   Schema.Struct({
     provider: ExternalIdentityProvider,
     username: HubUsername,
@@ -372,13 +370,13 @@ export const ExternalIdentitySignupFinishRequest = strict(
 );
 export type ExternalIdentitySignupFinishRequest = typeof ExternalIdentitySignupFinishRequest.Type;
 
-export const BrowserExternalIdentityConnectRequest = strict(
+export const BrowserExternalIdentityConnectRequest = rejectExcessProperties(
   Schema.Struct({ totpCode: Schema.optionalKey(TotpCode) }),
 );
 export type BrowserExternalIdentityConnectRequest =
   typeof BrowserExternalIdentityConnectRequest.Type;
 
-export const BrowserExternalIdentityConnectResponse = strict(
+export const BrowserExternalIdentityConnectResponse = rejectExcessProperties(
   Schema.Struct({
     status: Schema.Literal("connected"),
     externalIdentity: ExternalIdentitySummary,
@@ -387,12 +385,12 @@ export const BrowserExternalIdentityConnectResponse = strict(
 export type BrowserExternalIdentityConnectResponse =
   typeof BrowserExternalIdentityConnectResponse.Type;
 
-export const ExternalIdentityDisconnectRequest = strict(
+export const ExternalIdentityDisconnectRequest = rejectExcessProperties(
   Schema.Struct({ totpCode: Schema.optionalKey(TotpCode) }),
 );
 export type ExternalIdentityDisconnectRequest = typeof ExternalIdentityDisconnectRequest.Type;
 
-export const ExternalIdentityDisconnectResponse = strict(
+export const ExternalIdentityDisconnectResponse = rejectExcessProperties(
   Schema.Struct({
     status: Schema.Literal("disconnected"),
     signedOut: Schema.Boolean,
@@ -409,13 +407,13 @@ const ExternalIdentitySummaries = Schema.Array(ExternalIdentitySummary).check(
   ),
 );
 
-export const HostedAccountSecurityResponse = strict(
+export const HostedAccountSecurityResponse = rejectExcessProperties(
   Schema.Struct({
     passwordConfigured: Schema.Boolean,
     totpEnrolled: Schema.Boolean,
     emailDeliveryConfigured: Schema.Boolean,
     email: Schema.NullOr(
-      strict(
+      rejectExcessProperties(
         Schema.Struct({
           address: HubNormalizedEmail,
           verified: Schema.Boolean,
@@ -427,7 +425,7 @@ export const HostedAccountSecurityResponse = strict(
 );
 export type HostedAccountSecurityResponse = typeof HostedAccountSecurityResponse.Type;
 
-export const HubActiveSpaceSummary = strict(
+export const HubActiveSpaceSummary = rejectExcessProperties(
   Schema.Struct({
     id: HubSpaceId,
     kind: HubSpaceKind,
@@ -437,7 +435,7 @@ export const HubActiveSpaceSummary = strict(
 );
 export type HubActiveSpaceSummary = typeof HubActiveSpaceSummary.Type;
 
-export const HubPublicAccount = strict(
+export const HubPublicAccount = rejectExcessProperties(
   Schema.Struct({
     id: HubAccountId,
     username: HubUsername,
@@ -448,7 +446,7 @@ export const HubPublicAccount = strict(
 );
 export type HubPublicAccount = typeof HubPublicAccount.Type;
 
-export const HubPublicBrowserSession = strict(
+export const HubPublicBrowserSession = rejectExcessProperties(
   Schema.Struct({
     id: SessionId,
     accountId: HubAccountId,
@@ -501,7 +499,7 @@ function hubSessionIdentityConsistency(value: {
     : "active space must appear exactly once in spaces";
 }
 
-export const HubBrowserSessionResponse = strict(
+export const HubBrowserSessionResponse = rejectExcessProperties(
   Schema.Struct({
     ...HubSessionIdentityFields,
     csrfToken: Schema.String.check(Schema.isNonEmpty(), Schema.isMaxLength(4_096)),
@@ -509,7 +507,7 @@ export const HubBrowserSessionResponse = strict(
 );
 export type HubBrowserSessionResponse = typeof HubBrowserSessionResponse.Type;
 
-export const HubSessionIdentity = strict(
+export const HubSessionIdentity = rejectExcessProperties(
   Schema.Struct(HubSessionIdentityFields).check(Schema.makeFilter(hubSessionIdentityConsistency)),
 );
 export type HubSessionIdentity = typeof HubSessionIdentity.Type;
@@ -541,7 +539,7 @@ const NativeIdentityTimedAttempt = {
   ),
 } as const;
 
-export const NativeIdentityEmailStartRequest = strict(
+export const NativeIdentityEmailStartRequest = rejectExcessProperties(
   Schema.Struct({
     email: HubNormalizedEmail,
     antiBotAssertion: AntiBotAssertion,
@@ -556,12 +554,12 @@ export const NativeIdentityEmailStartResponse = strictTimed({
 export type NativeIdentityEmailStartResponse = typeof NativeIdentityEmailStartResponse.Type;
 
 export const NativeIdentityMailboxProof = Schema.Union([
-  strict(Schema.Struct({ kind: Schema.Literal("link_token"), token: MailToken })),
-  strict(Schema.Struct({ kind: Schema.Literal("email_code"), code: EmailCode })),
+  rejectExcessProperties(Schema.Struct({ kind: Schema.Literal("link_token"), token: MailToken })),
+  rejectExcessProperties(Schema.Struct({ kind: Schema.Literal("email_code"), code: EmailCode })),
 ]);
 export type NativeIdentityMailboxProof = typeof NativeIdentityMailboxProof.Type;
 
-export const NativeIdentityEmailVerifyRequest = strict(
+export const NativeIdentityEmailVerifyRequest = rejectExcessProperties(
   Schema.Struct({
     attemptId: NativeIdentityAttemptId,
     attemptSecret: NativeIdentityAttemptSecret,
@@ -589,29 +587,29 @@ const NativeIdentityActivation = {
   activationSecret: NativeIdentityActivationSecret,
 } as const;
 
-export const NativeIdentitySignupUsernameRequest = strict(
+export const NativeIdentitySignupUsernameRequest = rejectExcessProperties(
   Schema.Struct({ ...NativeIdentityActivation, username: HubUsername }),
 );
 export type NativeIdentitySignupUsernameRequest = typeof NativeIdentitySignupUsernameRequest.Type;
 
-export const NativeIdentitySignupUsernameResponse = strict(
+export const NativeIdentitySignupUsernameResponse = rejectExcessProperties(
   Schema.Struct({ status: Schema.Literal("claimed") }),
 );
 export type NativeIdentitySignupUsernameResponse = typeof NativeIdentitySignupUsernameResponse.Type;
 
-export const NativeIdentitySignupPasskeyOptionsRequest = strict(
+export const NativeIdentitySignupPasskeyOptionsRequest = rejectExcessProperties(
   Schema.Struct(NativeIdentityActivation),
 );
 export type NativeIdentitySignupPasskeyOptionsRequest =
   typeof NativeIdentitySignupPasskeyOptionsRequest.Type;
 
-export const NativeIdentitySignupPasskeyOptionsResponse = strict(
+export const NativeIdentitySignupPasskeyOptionsResponse = rejectExcessProperties(
   Schema.Struct({ options: JsonObject }),
 );
 export type NativeIdentitySignupPasskeyOptionsResponse =
   typeof NativeIdentitySignupPasskeyOptionsResponse.Type;
 
-export const NativeIdentitySignupPasskeyFinishRequest = strict(
+export const NativeIdentitySignupPasskeyFinishRequest = rejectExcessProperties(
   Schema.Struct({
     ...NativeIdentityActivation,
     response: JsonObject,
@@ -621,7 +619,7 @@ export const NativeIdentitySignupPasskeyFinishRequest = strict(
 export type NativeIdentitySignupPasskeyFinishRequest =
   typeof NativeIdentitySignupPasskeyFinishRequest.Type;
 
-export const NativeIdentitySignupPasswordFinishRequest = strict(
+export const NativeIdentitySignupPasswordFinishRequest = rejectExcessProperties(
   Schema.Struct({
     ...NativeIdentityActivation,
     password: BoundedPassword,
@@ -631,7 +629,7 @@ export const NativeIdentitySignupPasswordFinishRequest = strict(
 export type NativeIdentitySignupPasswordFinishRequest =
   typeof NativeIdentitySignupPasswordFinishRequest.Type;
 
-export const NativeIdentitySessionResponse = strict(
+export const NativeIdentitySessionResponse = rejectExcessProperties(
   Schema.Struct({
     status: Schema.Literal("complete"),
     identity: HubSessionIdentity,
@@ -644,7 +642,7 @@ const NativeIdentityRecoveryCodes = Schema.Array(
   Schema.String.check(Schema.isNonEmpty(), Schema.isMaxLength(512)),
 ).check(Schema.isMinLength(1), Schema.isMaxLength(256));
 
-export const NativeIdentitySignupFinishResponse = strict(
+export const NativeIdentitySignupFinishResponse = rejectExcessProperties(
   Schema.Struct({
     status: Schema.Literal("complete"),
     identity: HubSessionIdentity,
@@ -655,7 +653,7 @@ export const NativeIdentitySignupFinishResponse = strict(
 export type NativeIdentitySignupFinishResponse = typeof NativeIdentitySignupFinishResponse.Type;
 
 export const NativeIdentityPasswordStartRequest = Schema.Union([
-  strict(
+  rejectExcessProperties(
     Schema.Struct({
       kind: Schema.Literal("username"),
       username: HubUsername,
@@ -663,7 +661,7 @@ export const NativeIdentityPasswordStartRequest = Schema.Union([
       antiBotAssertion: Schema.optionalKey(AntiBotAssertion),
     }),
   ),
-  strict(
+  rejectExcessProperties(
     Schema.Struct({
       kind: Schema.Literal("verified_email"),
       ...NativeIdentityActivation,
@@ -682,7 +680,7 @@ export const NativeIdentityPasswordStartResponse = strictTimed({
 export type NativeIdentityPasswordStartResponse = typeof NativeIdentityPasswordStartResponse.Type;
 
 export const NativeIdentityPasswordFinishRequest = Schema.Union([
-  strict(
+  rejectExcessProperties(
     Schema.Struct({
       attemptId: NativeIdentityLoginAttemptId,
       attemptSecret: NativeIdentityAttemptSecret,
@@ -690,7 +688,7 @@ export const NativeIdentityPasswordFinishRequest = Schema.Union([
       code: TotpCode,
     }),
   ),
-  strict(
+  rejectExcessProperties(
     Schema.Struct({
       attemptId: NativeIdentityLoginAttemptId,
       attemptSecret: NativeIdentityAttemptSecret,
@@ -701,7 +699,7 @@ export const NativeIdentityPasswordFinishRequest = Schema.Union([
 ]);
 export type NativeIdentityPasswordFinishRequest = typeof NativeIdentityPasswordFinishRequest.Type;
 
-export const NativeIdentityRecoveryCodeRequest = strict(
+export const NativeIdentityRecoveryCodeRequest = rejectExcessProperties(
   Schema.Struct({
     code: Schema.String.check(Schema.isNonEmpty(), Schema.isMaxLength(512)),
     idempotencyKey: IdempotencyKey,
@@ -712,7 +710,7 @@ export type NativeIdentityRecoveryCodeRequest = typeof NativeIdentityRecoveryCod
 export const NativeIdentityRecoveryResponse = NativeIdentitySignupFinishResponse;
 export type NativeIdentityRecoveryResponse = typeof NativeIdentityRecoveryResponse.Type;
 
-export const NativeIdentityPasswordResetRequest = strict(
+export const NativeIdentityPasswordResetRequest = rejectExcessProperties(
   Schema.Struct({
     identifier: HubLoginIdentifier,
     antiBotAssertion: Schema.optionalKey(AntiBotAssertion),
@@ -731,7 +729,7 @@ export const NativeIdentityPasswordResetResponse = strictTimed({
 });
 export type NativeIdentityPasswordResetResponse = typeof NativeIdentityPasswordResetResponse.Type;
 
-export const NativeIdentityPasswordResetVerifyRequest = strict(
+export const NativeIdentityPasswordResetVerifyRequest = rejectExcessProperties(
   Schema.Struct({
     attemptId: NativeIdentityResetAttemptId,
     attemptSecret: NativeIdentityAttemptSecret,
@@ -750,27 +748,27 @@ export const NativeIdentityPasswordResetVerifyResponse = strictTimed({
 export type NativeIdentityPasswordResetVerifyResponse =
   typeof NativeIdentityPasswordResetVerifyResponse.Type;
 
-export const NativeIdentityPasswordResetFinishRequest = strict(
+export const NativeIdentityPasswordResetFinishRequest = rejectExcessProperties(
   Schema.Struct({
     attemptId: NativeIdentityResetAttemptId,
     resetSecret: NativeIdentityResetSecret,
     password: BoundedPassword,
     factor: Schema.Union([
-      strict(Schema.Struct({ kind: Schema.Literal("none") })),
-      strict(Schema.Struct({ kind: Schema.Literal("totp"), code: TotpCode })),
+      rejectExcessProperties(Schema.Struct({ kind: Schema.Literal("none") })),
+      rejectExcessProperties(Schema.Struct({ kind: Schema.Literal("totp"), code: TotpCode })),
     ]),
   }),
 );
 export type NativeIdentityPasswordResetFinishRequest =
   typeof NativeIdentityPasswordResetFinishRequest.Type;
 
-export const NativeIdentityPasswordResetFinishResponse = strict(
+export const NativeIdentityPasswordResetFinishResponse = rejectExcessProperties(
   Schema.Struct({ status: Schema.Literal("complete") }),
 );
 export type NativeIdentityPasswordResetFinishResponse =
   typeof NativeIdentityPasswordResetFinishResponse.Type;
 
-export const NativeIdentityAttemptCancelRequest = strict(
+export const NativeIdentityAttemptCancelRequest = rejectExcessProperties(
   Schema.Struct({
     attemptId: Schema.Union([
       NativeIdentityAttemptId,
@@ -785,7 +783,7 @@ export const NativeIdentityAttemptCancelRequest = strict(
 );
 export type NativeIdentityAttemptCancelRequest = typeof NativeIdentityAttemptCancelRequest.Type;
 
-export const NativeIdentityAttemptCancelResponse = strict(
+export const NativeIdentityAttemptCancelResponse = rejectExcessProperties(
   Schema.Struct({ status: Schema.Literal("cancelled") }),
 );
 export type NativeIdentityAttemptCancelResponse = typeof NativeIdentityAttemptCancelResponse.Type;
@@ -796,7 +794,7 @@ export const PublicSignupAttemptId = Schema.String.check(
 ).pipe(Schema.brand("PublicSignupAttemptId"));
 export type PublicSignupAttemptId = typeof PublicSignupAttemptId.Type;
 
-export const PublicSignupStartRequest = strict(
+export const PublicSignupStartRequest = rejectExcessProperties(
   Schema.Struct({
     username: HubUsername,
     email: HubNormalizedEmail,
@@ -818,12 +816,12 @@ export const PublicSignupStartResponse = strictTimed({
 export type PublicSignupStartResponse = typeof PublicSignupStartResponse.Type;
 
 export const PublicSignupMailboxProof = Schema.Union([
-  strict(Schema.Struct({ kind: Schema.Literal("link_token"), token: MailToken })),
-  strict(Schema.Struct({ kind: Schema.Literal("email_code"), code: EmailCode })),
+  rejectExcessProperties(Schema.Struct({ kind: Schema.Literal("link_token"), token: MailToken })),
+  rejectExcessProperties(Schema.Struct({ kind: Schema.Literal("email_code"), code: EmailCode })),
 ]);
 export type PublicSignupMailboxProof = typeof PublicSignupMailboxProof.Type;
 
-export const PublicSignupVerifyRequest = strict(
+export const PublicSignupVerifyRequest = rejectExcessProperties(
   Schema.Struct({
     attemptId: PublicSignupAttemptId,
     attemptSecret: SignupAttemptSecret,
@@ -844,13 +842,17 @@ const PublicSignupActivation = {
   activationSecret: SignupActivationSecret,
 } as const;
 
-export const PublicSignupPasskeyOptionsRequest = strict(Schema.Struct(PublicSignupActivation));
+export const PublicSignupPasskeyOptionsRequest = rejectExcessProperties(
+  Schema.Struct(PublicSignupActivation),
+);
 export type PublicSignupPasskeyOptionsRequest = typeof PublicSignupPasskeyOptionsRequest.Type;
 
-export const PublicSignupPasskeyOptionsResponse = strict(Schema.Struct({ options: JsonObject }));
+export const PublicSignupPasskeyOptionsResponse = rejectExcessProperties(
+  Schema.Struct({ options: JsonObject }),
+);
 export type PublicSignupPasskeyOptionsResponse = typeof PublicSignupPasskeyOptionsResponse.Type;
 
-export const PublicSignupPasskeyFinishRequest = strict(
+export const PublicSignupPasskeyFinishRequest = rejectExcessProperties(
   Schema.Struct({
     ...PublicSignupActivation,
     response: JsonObject,
@@ -859,7 +861,7 @@ export const PublicSignupPasskeyFinishRequest = strict(
 );
 export type PublicSignupPasskeyFinishRequest = typeof PublicSignupPasskeyFinishRequest.Type;
 
-export const PublicSignupPasswordFinishRequest = strict(
+export const PublicSignupPasswordFinishRequest = rejectExcessProperties(
   Schema.Struct({
     ...PublicSignupActivation,
     password: BoundedPassword,
@@ -868,7 +870,7 @@ export const PublicSignupPasswordFinishRequest = strict(
 );
 export type PublicSignupPasswordFinishRequest = typeof PublicSignupPasswordFinishRequest.Type;
 
-export const PublicSignupFinishResponse = strict(
+export const PublicSignupFinishResponse = rejectExcessProperties(
   Schema.Struct({
     status: Schema.Literal("complete"),
     identity: HubBrowserSessionResponse,
@@ -893,7 +895,7 @@ export type PasswordLoginAttemptId = typeof PasswordLoginAttemptId.Type;
 export const PasswordLoginFactor = Schema.Literals(["totp", "email_code"]);
 export type PasswordLoginFactor = typeof PasswordLoginFactor.Type;
 
-export const PasswordLoginStartRequest = strict(
+export const PasswordLoginStartRequest = rejectExcessProperties(
   Schema.Struct({
     identifier: HubLoginIdentifier,
     password: BoundedPassword,
@@ -911,7 +913,7 @@ export const PasswordLoginStartResponse = strictTimed({
 export type PasswordLoginStartResponse = typeof PasswordLoginStartResponse.Type;
 
 export const PasswordLoginFinishRequest = Schema.Union([
-  strict(
+  rejectExcessProperties(
     Schema.Struct({
       attemptId: PasswordLoginAttemptId,
       attemptSecret: PasswordLoginAttemptSecret,
@@ -919,7 +921,7 @@ export const PasswordLoginFinishRequest = Schema.Union([
       code: TotpCode,
     }),
   ),
-  strict(
+  rejectExcessProperties(
     Schema.Struct({
       attemptId: PasswordLoginAttemptId,
       attemptSecret: PasswordLoginAttemptSecret,
@@ -930,7 +932,7 @@ export const PasswordLoginFinishRequest = Schema.Union([
 ]);
 export type PasswordLoginFinishRequest = typeof PasswordLoginFinishRequest.Type;
 
-export const PasswordResetRequest = strict(
+export const PasswordResetRequest = rejectExcessProperties(
   Schema.Struct({
     identifier: HubLoginIdentifier,
     antiBotAssertion: Schema.optional(AntiBotAssertion),
@@ -938,7 +940,7 @@ export const PasswordResetRequest = strict(
 );
 export type PasswordResetRequest = typeof PasswordResetRequest.Type;
 
-export const PasswordResetRequestResponse = strict(
+export const PasswordResetRequestResponse = rejectExcessProperties(
   Schema.Struct({ status: Schema.Literal("accepted") }),
 );
 export type PasswordResetRequestResponse = typeof PasswordResetRequestResponse.Type;
@@ -949,7 +951,9 @@ export const PasswordResetAttemptId = Schema.String.check(
 ).pipe(Schema.brand("PasswordResetAttemptId"));
 export type PasswordResetAttemptId = typeof PasswordResetAttemptId.Type;
 
-export const PasswordResetVerifyRequest = strict(Schema.Struct({ token: MailToken }));
+export const PasswordResetVerifyRequest = rejectExcessProperties(
+  Schema.Struct({ token: MailToken }),
+);
 export type PasswordResetVerifyRequest = typeof PasswordResetVerifyRequest.Type;
 
 export const PasswordResetVerifyResponse = strictTimed({
@@ -961,12 +965,12 @@ export const PasswordResetVerifyResponse = strictTimed({
 export type PasswordResetVerifyResponse = typeof PasswordResetVerifyResponse.Type;
 
 export const PasswordResetFactor = Schema.Union([
-  strict(Schema.Struct({ kind: Schema.Literal("none") })),
-  strict(Schema.Struct({ kind: Schema.Literal("totp"), code: TotpCode })),
+  rejectExcessProperties(Schema.Struct({ kind: Schema.Literal("none") })),
+  rejectExcessProperties(Schema.Struct({ kind: Schema.Literal("totp"), code: TotpCode })),
 ]);
 export type PasswordResetFactor = typeof PasswordResetFactor.Type;
 
-export const PasswordResetFinishRequest = strict(
+export const PasswordResetFinishRequest = rejectExcessProperties(
   Schema.Struct({
     attemptId: PasswordResetAttemptId,
     attemptSecret: PasswordResetAttemptSecret,
@@ -976,15 +980,17 @@ export const PasswordResetFinishRequest = strict(
 );
 export type PasswordResetFinishRequest = typeof PasswordResetFinishRequest.Type;
 
-export const PasswordResetFinishResponse = strict(
+export const PasswordResetFinishResponse = rejectExcessProperties(
   Schema.Struct({ status: Schema.Literal("complete") }),
 );
 export type PasswordResetFinishResponse = typeof PasswordResetFinishResponse.Type;
 
-export const ActiveSpaceSwitchRequest = strict(Schema.Struct({ spaceId: HubSpaceId }));
+export const ActiveSpaceSwitchRequest = rejectExcessProperties(
+  Schema.Struct({ spaceId: HubSpaceId }),
+);
 export type ActiveSpaceSwitchRequest = typeof ActiveSpaceSwitchRequest.Type;
 
-export const ActiveSpaceSwitchResponse = strict(
+export const ActiveSpaceSwitchResponse = rejectExcessProperties(
   Schema.Struct({
     activeSpace: HubActiveSpaceSummary,
     spaces: HubSpaces,
@@ -1027,7 +1033,7 @@ export const NativeNodeClaimPublicKey = Schema.String.check(
 ).pipe(Schema.brand("NativeNodeClaimPublicKey"));
 export type NativeNodeClaimPublicKey = typeof NativeNodeClaimPublicKey.Type;
 
-const NativeNodeClaimMetadata = strict(
+const NativeNodeClaimMetadata = rejectExcessProperties(
   Schema.Struct({
     environmentId: NativeNodeClaimEnvironmentId,
     label: Schema.Trim.check(Schema.isNonEmpty(), Schema.isMaxLength(100)),
@@ -1040,7 +1046,7 @@ const NativeNodeClaimMetadata = strict(
   }),
 );
 
-export const NativeNodeClaimStartRequest = strict(
+export const NativeNodeClaimStartRequest = rejectExcessProperties(
   Schema.Struct({
     installationId: DesktopInstallationId,
     node: NativeNodeClaimMetadata,
@@ -1063,7 +1069,7 @@ export const NativeNodeClaimStartResponse = strictTimed({
 });
 export type NativeNodeClaimStartResponse = typeof NativeNodeClaimStartResponse.Type;
 
-export const NativeNodeClaimFinishRequest = strict(
+export const NativeNodeClaimFinishRequest = rejectExcessProperties(
   Schema.Struct({
     claimId: NativeNodeClaimId,
     challenge: Opaque256,
@@ -1077,11 +1083,11 @@ export const NativeNodeClaimFinishRequest = strict(
 );
 export type NativeNodeClaimFinishRequest = typeof NativeNodeClaimFinishRequest.Type;
 
-export const NativeNodeClaimFinishResponse = strict(
+export const NativeNodeClaimFinishResponse = rejectExcessProperties(
   Schema.Struct({
     status: Schema.Literal("claimed"),
     disposition: Schema.Literals(["created", "reconnected"]),
-    node: strict(
+    node: rejectExcessProperties(
       Schema.Struct({
         id: RelayNodeId,
         activeKeyId: Schema.String.check(
@@ -1099,13 +1105,13 @@ export const NativeNodeClaimFinishResponse = strict(
 export type NativeNodeClaimFinishResponse = typeof NativeNodeClaimFinishResponse.Type;
 
 export const NativeNodeClaimError = Schema.Union([
-  strict(
+  rejectExcessProperties(
     Schema.Struct({
       error: Schema.Literal("node_claim_rejected"),
       retryable: Schema.Literal(false),
     }),
   ),
-  strict(
+  rejectExcessProperties(
     Schema.Struct({
       error: Schema.Literal("node_claim_unavailable"),
       retryable: Schema.Literal(true),

@@ -4,8 +4,8 @@ import {
   resolveMessageText,
   MessageTextFromSql,
 } from "../messageText.ts";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
-import * as SqlSchema from "effect/unstable/sql/SqlSchema";
+import * as SqlClient from "effect/sql/SqlClient";
+import * as SqlSchema from "effect/sql/SqlSchema";
 import { Effect, Layer, Option, Schema, Struct } from "effect";
 import { ChatAttachment, TurnDispatchMode } from "@ryco/contracts";
 

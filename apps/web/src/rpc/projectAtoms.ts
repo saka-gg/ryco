@@ -4,7 +4,7 @@ import type {
   FilesystemBrowseResult,
   ProjectSearchEntriesResult,
 } from "@ryco/contracts";
-import { Atom } from "effect/unstable/reactivity";
+import { Atom } from "effect/reactivity";
 
 import { ensureEnvironmentApi, readEnvironmentApi } from "~/environmentApi";
 import { appAtomRegistry } from "@ryco/client-runtime/rpc";

@@ -7,7 +7,7 @@ import {
   type AuthWebSocketTokenResult,
 } from "@ryco/contracts";
 import { DateTime, Effect, Schema } from "effect";
-import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
+import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 
 import { ServerConfig, type ServerConfigShape } from "../config.ts";
 import { AuthError, ServerAuth } from "./Services/ServerAuth.ts";

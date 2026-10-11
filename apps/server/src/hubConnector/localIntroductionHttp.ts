@@ -10,7 +10,7 @@ import {
   type LocalIntroductionErrorResponse,
 } from "@ryco/contracts/local-introduction";
 import { Data, Effect, Layer } from "effect";
-import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
+import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 
 import { ServerConfig } from "../config.ts";
 import {

@@ -1,5 +1,5 @@
 import { ProviderRegistry } from "../provider/Services/ProviderRegistry.ts";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 import { afterEach, expect, it } from "vitest";
 import { Effect, Layer, Option } from "effect";
 import { mkdtemp, mkdir, writeFile, readFile, realpath, rm } from "node:fs/promises";

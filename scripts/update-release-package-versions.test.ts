@@ -1,7 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import { ConfigProvider, Effect, FileSystem, Layer, Path, Schema, SchemaGetter } from "effect";
-import { Command, CliError } from "effect/unstable/cli";
+import { Command, CliError } from "effect/cli";
 import * as TestConsole from "effect/testing/TestConsole";
 
 import {
@@ -13,7 +13,8 @@ import {
 const ScriptTestLayer = Layer.mergeAll(NodeServices.layer, TestConsole.layer);
 const runCli = Command.runWith(updateReleasePackageVersionsCommand, { version: "0.0.0" });
 const PackageJsonSchema = Schema.Record(Schema.String, Schema.Unknown);
-const PrettyJsonString = SchemaGetter.parseJson<string>().compose(
+const PrettyJsonString = SchemaGetter.compose(
+  SchemaGetter.parseJson<string>(),
   SchemaGetter.stringifyJson({ space: 2 }),
 );
 const PackageJsonPrettyJson = Schema.fromJsonString(PackageJsonSchema).pipe(

@@ -1,5 +1,7 @@
 import { Schema } from "effect";
 
+import { rejectExcessProperties } from "./baseSchemas.ts";
+
 export const LOCAL_INTRODUCTION_PROTOCOL_VERSION = 1 as const;
 export const LOCAL_INTRODUCTION_DESCRIPTOR_PATH =
   "/api/desktop/e2ee/local-introduction/descriptor" as const;
@@ -7,9 +9,6 @@ export const LOCAL_INTRODUCTION_COMPLETE_PATH =
   "/api/desktop/e2ee/local-introduction/complete" as const;
 export const LOCAL_INTRODUCTION_CONTROL_HEADER = "x-ryco-desktop-control" as const;
 export const LOCAL_INTRODUCTION_MAX_BODY_BYTES = 8 * 1_024;
-
-const strict = <S extends Schema.Top>(schema: S): S =>
-  schema.annotate({ parseOptions: { onExcessProperty: "error" } }) as S;
 
 const Base64Url256 = Schema.String.check(
   Schema.isMinLength(43),
@@ -39,7 +38,7 @@ const ContinuityId = Schema.String.check(
   Schema.isMaxLength(26),
 );
 
-export const LocalIntroductionDescriptorResponse = strict(
+export const LocalIntroductionDescriptorResponse = rejectExcessProperties(
   Schema.Struct({
     protocolVersion: Schema.Literal(LOCAL_INTRODUCTION_PROTOCOL_VERSION),
     hubOrigin: Schema.String.check(Schema.isNonEmpty(), Schema.isMaxLength(2_048)),
@@ -53,7 +52,7 @@ export const LocalIntroductionDescriptorResponse = strict(
 );
 export type LocalIntroductionDescriptorResponse = typeof LocalIntroductionDescriptorResponse.Type;
 
-export const LocalIntroductionCompleteRequest = strict(
+export const LocalIntroductionCompleteRequest = rejectExcessProperties(
   Schema.Struct({
     requestTbs: Base64UrlTranscript,
     requestSignature: Base64UrlSignature64,
@@ -61,7 +60,7 @@ export const LocalIntroductionCompleteRequest = strict(
 );
 export type LocalIntroductionCompleteRequest = typeof LocalIntroductionCompleteRequest.Type;
 
-export const LocalIntroductionCompleteResponse = strict(
+export const LocalIntroductionCompleteResponse = rejectExcessProperties(
   Schema.Struct({
     protocolVersion: Schema.Literal(LOCAL_INTRODUCTION_PROTOCOL_VERSION),
     disposition: Schema.Literals(["created", "promoted", "reconciled"]),
@@ -71,7 +70,7 @@ export const LocalIntroductionCompleteResponse = strict(
 );
 export type LocalIntroductionCompleteResponse = typeof LocalIntroductionCompleteResponse.Type;
 
-export const LocalIntroductionErrorResponse = strict(
+export const LocalIntroductionErrorResponse = rejectExcessProperties(
   Schema.Struct({
     error: Schema.Literals([
       "local_introduction_unavailable",

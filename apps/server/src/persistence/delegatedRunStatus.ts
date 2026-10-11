@@ -1,6 +1,6 @@
 import { Effect } from "effect";
-import type * as SqlClient from "effect/unstable/sql/SqlClient";
-import type { SqlError } from "effect/unstable/sql/SqlError";
+import type * as SqlClient from "effect/sql/SqlClient";
+import type { SqlError } from "effect/sql/SqlError";
 
 /**
  * State of one delegated run, keyed by the exact delegated user message (never the latest

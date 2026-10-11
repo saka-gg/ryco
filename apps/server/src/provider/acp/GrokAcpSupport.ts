@@ -2,7 +2,7 @@ import { type GrokSettings, ProviderDriverKind } from "@ryco/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Scope from "effect/Scope";
-import { ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcessSpawner } from "effect/process";
 import * as EffectAcpErrors from "effect-acp/errors";
 import { normalizeModelSlug } from "@ryco/shared/model";
 

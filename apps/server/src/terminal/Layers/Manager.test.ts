@@ -1,4 +1,4 @@
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
 import path from "node:path";
 import { writeFileSync } from "node:fs";
@@ -16,7 +16,6 @@ import {
   Duration,
   Effect,
   Deferred,
-  Encoding,
   Exit,
   Fiber,
   FileSystem,
@@ -28,6 +27,7 @@ import {
   Scope,
   Queue,
 } from "effect";
+import { Base64Url } from "effect/encoding";
 import { TestClock } from "effect/testing";
 import { expect } from "vite-plus/test";
 
@@ -183,15 +183,15 @@ function restartInput(overrides: Partial<TerminalRestartInput> = {}): TerminalRe
 }
 
 function historyLogName(threadId: string): string {
-  return `terminal_${Encoding.encodeBase64Url(threadId)}.log`;
+  return `terminal_${Base64Url.encode(threadId)}.log`;
 }
 
 function multiTerminalHistoryLogName(threadId: string, terminalId: string): string {
-  const threadPart = `terminal_${Encoding.encodeBase64Url(threadId)}`;
+  const threadPart = `terminal_${Base64Url.encode(threadId)}`;
   if (terminalId === DEFAULT_TERMINAL_ID) {
     return `${threadPart}.log`;
   }
-  return `${threadPart}_${Encoding.encodeBase64Url(terminalId)}.log`;
+  return `${threadPart}_${Base64Url.encode(terminalId)}.log`;
 }
 
 function historyLogPath(logsDir: string, threadId = "thread-1"): string {

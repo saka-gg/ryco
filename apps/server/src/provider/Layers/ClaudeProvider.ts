@@ -7,7 +7,7 @@ import {
   type ServerProviderSlashCommand,
 } from "@ryco/contracts";
 import { Effect, Option, Path, Result } from "effect";
-import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import {
   createModelCapabilities,
   getProviderOptionCurrentValue,

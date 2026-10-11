@@ -8,10 +8,10 @@ import {
   HttpServerResponse,
   HttpServerRequest,
   Multipart,
-} from "effect/unstable/http";
+} from "effect/http";
 import { open, rename, unlink } from "node:fs/promises";
 import * as Schema from "effect/Schema";
-import { OtlpTracer } from "effect/unstable/observability";
+import { OtlpTracer } from "effect/observability";
 
 import {
   ATTACHMENTS_ROUTE_PREFIX,

@@ -6,7 +6,7 @@ import * as NodeSqliteClient from "../persistence/NodeSqliteClient.ts";
 import { runMigrations } from "../persistence/Migrations.ts";
 import { assert, it } from "@effect/vitest";
 import { Effect, Layer, Schema } from "effect";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 import { StatisticsSnapshot } from "@ryco/contracts";
 
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";

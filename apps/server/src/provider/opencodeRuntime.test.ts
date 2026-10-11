@@ -3,7 +3,7 @@ import { it as effectIt } from "@effect/vitest";
 import { Effect, Fiber, Layer, Sink, Stream } from "effect";
 import * as PlatformError from "effect/PlatformError";
 import { TestClock } from "effect/testing";
-import { ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcessSpawner } from "effect/process";
 import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 
 import { OPENCODE_NON_JSON_HEALTH_MESSAGE } from "./openCodeVersion.ts";

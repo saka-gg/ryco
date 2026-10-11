@@ -1,5 +1,5 @@
 import { Schema, SchemaTransformation } from "effect";
-import type * as SqlClient from "effect/unstable/sql/SqlClient";
+import type * as SqlClient from "effect/sql/SqlClient";
 
 // TEXT crosses UTF-8/native SQLite boundaries. JSON preserves NUL and individual
 // UTF-16 code units (including surrogate pairs split across provider deltas).

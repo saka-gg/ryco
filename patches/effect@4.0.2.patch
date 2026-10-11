@@ -1,16 +1,46 @@
-diff --git a/dist/unstable/rpc/RpcClient.d.ts b/dist/unstable/rpc/RpcClient.d.ts
-index 7feaa44684c9e08e70b8c2bd7cbf365201d39d68..818255c6a412684aa4c0c0a5179d05eb39ef94cf 100644
---- a/dist/unstable/rpc/RpcClient.d.ts
-+++ b/dist/unstable/rpc/RpcClient.d.ts
-@@ -2,6 +2,7 @@ import * as Cause from "../../Cause.ts";
- import * as Context from "../../Context.ts";
- import type * as Duration from "../../Duration.ts";
- import * as Effect from "../../Effect.ts";
-+import * as Exit from "../../Exit.ts";
- import * as Layer from "../../Layer.ts";
- import * as Queue from "../../Queue.ts";
- import * as Schedule from "../../Schedule.ts";
-@@ -275,9 +276,42 @@ export declare const layerProtocolWorker: (options: {
+diff --git a/dist/rpc/RpcClient.d.ts b/dist/rpc/RpcClient.d.ts
+index ebfe86fa46ae56830747d15fdae357871841b435..a65ca2a33395adc66e1b2ff431975eef551c1db9 100644
+--- a/dist/rpc/RpcClient.d.ts
++++ b/dist/rpc/RpcClient.d.ts
+@@ -2,6 +2,7 @@ import * as Cause from "../Cause.ts";
+ import * as Context from "../Context.ts";
+ import * as Duration from "../Duration.ts";
+ import * as Effect from "../Effect.ts";
++import * as Exit from "../Exit.ts";
+ import * as Headers from "../http/Headers.ts";
+ import * as HttpClient from "../http/HttpClient.ts";
+ import * as Layer from "../Layer.ts";
+@@ -230,9 +231,11 @@ export declare const layerProtocolHttp: (options: {
+  *
+  * **Details**
+  *
+- * `pingInterval` defaults to 5 seconds. `pingTimeout` defaults to the interval
+- * and measures time since the last decoded server frame, not the last pong.
+- * The timeout is checked on each ping tick; any decoded frame counts as liveness.
++ * `pingInterval` defaults to 8 seconds. `pingTimeout` defaults to twice the
++ * interval and measures time since the last decoded server frame, not the last
++ * pong. The timeout is checked on each ping tick; any decoded frame counts as
++ * liveness. A timeout equal to the interval leaves no slack for timer drift, so
++ * a healthy connection whose pong beats the drift would look dead.
+  *
+  * @stability unstable
+  * @category protocols
+@@ -257,9 +260,11 @@ export declare const makeProtocolSocket: (options?: {
+  *
+  * **Details**
+  *
+- * `pingInterval` defaults to 5 seconds. `pingTimeout` defaults to the interval
+- * and measures time since the last decoded server frame, not the last pong.
+- * The timeout is checked on each ping tick; any decoded frame counts as liveness.
++ * `pingInterval` defaults to 8 seconds. `pingTimeout` defaults to twice the
++ * interval and measures time since the last decoded server frame, not the last
++ * pong. The timeout is checked on each ping tick; any decoded frame counts as
++ * liveness. A timeout equal to the interval leaves no slack for timer drift, so
++ * a healthy connection whose pong beats the drift would look dead.
+  * `retryPolicy` configures retries after socket errors.
+  *
+  * @stability unstable
+@@ -317,9 +322,43 @@ export declare const layerProtocolWorker: (options: {
      readonly targetUtilization?: number | undefined;
      readonly timeToLive: Duration.Input;
  }) => Layer.Layer<Protocol, WorkerError, Worker.WorkerPlatform | Worker.Spawner>;
@@ -39,6 +69,7 @@ index 7feaa44684c9e08e70b8c2bd7cbf365201d39d68..818255c6a412684aa4c0c0a5179d05eb
 +/**
 + * Represents optional hooks for outgoing RPC request lifecycle events.
 + *
++ * @stability unstable
 + * @category services
 + * @since 4.0.0
 + */
@@ -53,11 +84,11 @@ index 7feaa44684c9e08e70b8c2bd7cbf365201d39d68..818255c6a412684aa4c0c0a5179d05eb
  }>;
  /**
   * Represents optional client protocol hooks that run when a transport connects
-diff --git a/dist/unstable/rpc/RpcClient.js b/dist/unstable/rpc/RpcClient.js
-index 7a7ea894edc03e8cf76c34210f7bd1fc8cfd465b..edb844f8fb03eab2b9d37f793cdb14f56e3497c9 100644
---- a/dist/unstable/rpc/RpcClient.js
-+++ b/dist/unstable/rpc/RpcClient.js
-@@ -49,6 +49,7 @@ export const makeNoSerialization = /*#__PURE__*/Effect.fnUntraced(function* (gro
+diff --git a/dist/rpc/RpcClient.js b/dist/rpc/RpcClient.js
+index f5b14efe8beff4c0fe0127ce6dc0d13d7d289338..4e2edda057bc19354f7c02d2b76d540a30326567 100644
+--- a/dist/rpc/RpcClient.js
++++ b/dist/rpc/RpcClient.js
+@@ -53,6 +53,7 @@ export const makeNoSerialization = /*#__PURE__*/Effect.fnUntraced(function* (gro
    const services = yield* Effect.context();
    const scope = Context.get(services, Scope.Scope);
    const entries = new Map();
@@ -65,7 +96,7 @@ index 7a7ea894edc03e8cf76c34210f7bd1fc8cfd465b..edb844f8fb03eab2b9d37f793cdb14f5
    let isShutdown = false;
    yield* Scope.addFinalizer(scope, Effect.withFiber(parent => {
      isShutdown = true;
-@@ -86,6 +87,11 @@ export const makeNoSerialization = /*#__PURE__*/Effect.fnUntraced(function* (gro
+@@ -91,6 +92,11 @@ export const makeNoSerialization = /*#__PURE__*/Effect.fnUntraced(function* (gro
        return Effect.interrupt;
      }
      const id = generateRequestId();
@@ -77,7 +108,7 @@ index 7a7ea894edc03e8cf76c34210f7bd1fc8cfd465b..edb844f8fb03eab2b9d37f793cdb14f5
      const send = middleware(message => options.onFromClient({
        message,
        context,
-@@ -103,7 +109,7 @@ export const makeNoSerialization = /*#__PURE__*/Effect.fnUntraced(function* (gro
+@@ -108,7 +114,7 @@ export const makeNoSerialization = /*#__PURE__*/Effect.fnUntraced(function* (gro
        headers: Headers.merge(parentFiber.getRef(CurrentHeaders), headers)
      });
      if (discard) {
@@ -86,7 +117,7 @@ index 7a7ea894edc03e8cf76c34210f7bd1fc8cfd465b..edb844f8fb03eab2b9d37f793cdb14f5
      }
      let fiber;
      return Effect.onInterrupt(Effect.callback(resume => {
-@@ -121,7 +127,7 @@ export const makeNoSerialization = /*#__PURE__*/Effect.fnUntraced(function* (gro
+@@ -126,7 +132,7 @@ export const makeNoSerialization = /*#__PURE__*/Effect.fnUntraced(function* (gro
          }
        };
        entries.set(id, entry);
@@ -95,7 +126,7 @@ index 7a7ea894edc03e8cf76c34210f7bd1fc8cfd465b..edb844f8fb03eab2b9d37f793cdb14f5
          captureStackTrace: false
        }) : identity, Effect.runForkWith(parentFiber.context));
        fiber.addObserver(exit => {
-@@ -130,8 +136,9 @@ export const makeNoSerialization = /*#__PURE__*/Effect.fnUntraced(function* (gro
+@@ -135,8 +141,9 @@ export const makeNoSerialization = /*#__PURE__*/Effect.fnUntraced(function* (gro
          }
        });
      }), interruptors => {
@@ -106,7 +137,7 @@ index 7a7ea894edc03e8cf76c34210f7bd1fc8cfd465b..edb844f8fb03eab2b9d37f793cdb14f5
      });
    });
    const onStreamRequest = Effect.fnUntraced(function* (rpc, middleware, payload, headers, streamBufferSize, context) {
-@@ -143,11 +150,17 @@ export const makeNoSerialization = /*#__PURE__*/Effect.fnUntraced(function* (gro
+@@ -149,22 +156,29 @@ export const makeNoSerialization = /*#__PURE__*/Effect.fnUntraced(function* (gro
      });
      const fiber = Fiber.getCurrent();
      const id = generateRequestId();
@@ -116,7 +147,9 @@ index 7a7ea894edc03e8cf76c34210f7bd1fc8cfd465b..edb844f8fb03eab2b9d37f793cdb14f5
 +      stream: true
 +    }) : Effect.void;
      const scope = Context.getUnsafe(fiber.context, Scope.Scope);
+     const queue = yield* Queue.bounded(streamBufferSize);
      yield* Scope.addFinalizerExit(scope, exit => {
+       Queue.shutdownUnsafe(queue);
 -      if (!entries.has(id)) return Effect.void;
 +      const entry = entries.get(id);
 +      if (!entry) return Effect.void;
@@ -124,9 +157,8 @@ index 7a7ea894edc03e8cf76c34210f7bd1fc8cfd465b..edb844f8fb03eab2b9d37f793cdb14f5
 -      return sendInterrupt(id, Exit.isFailure(exit) ? Array.from(Cause.interruptors(exit.cause)) : [], context);
 +      return sendInterrupt(id, Exit.isFailure(exit) ? Array.from(Cause.interruptors(exit.cause)) : [], context, entry.rpc._tag);
      });
-     const queue = yield* Queue.bounded(streamBufferSize);
      entries.set(id, {
-@@ -155,9 +168,10 @@ export const makeNoSerialization = /*#__PURE__*/Effect.fnUntraced(function* (gro
+       _tag: "Queue",
        rpc,
        queue,
        scope,
@@ -139,16 +171,16 @@ index 7a7ea894edc03e8cf76c34210f7bd1fc8cfd465b..edb844f8fb03eab2b9d37f793cdb14f5
        message,
        context,
        discard: false
-@@ -172,7 +186,7 @@ export const makeNoSerialization = /*#__PURE__*/Effect.fnUntraced(function* (gro
+@@ -179,7 +193,7 @@ export const makeNoSerialization = /*#__PURE__*/Effect.fnUntraced(function* (gro
          sampled: span.sampled
        } : {}),
        headers: Headers.merge(fiber.getRef(CurrentHeaders), headers)
 -    }).pipe(span ? Effect.withParentSpan(span, {
 +    }))).pipe(span ? Effect.withParentSpan(span, {
        captureStackTrace: false
-     }) : identity, Effect.catchCause(error => Queue.failCause(queue, error)), Effect.interruptible, Effect.forkIn(scope, {
+     }) : identity, Effect.onError(cause => Queue.failCause(queue, cause)), Effect.interruptible, Effect.forkIn(scope, {
        startImmediately: true
-@@ -202,7 +216,10 @@ export const makeNoSerialization = /*#__PURE__*/Effect.fnUntraced(function* (gro
+@@ -209,7 +223,10 @@ export const makeNoSerialization = /*#__PURE__*/Effect.fnUntraced(function* (gro
        });
      };
    };
@@ -160,7 +192,7 @@ index 7a7ea894edc03e8cf76c34210f7bd1fc8cfd465b..edb844f8fb03eab2b9d37f793cdb14f5
      const parentFiber = Fiber.getCurrent();
      const fiber = options.onFromClient({
        message: {
-@@ -216,7 +233,7 @@ export const makeNoSerialization = /*#__PURE__*/Effect.fnUntraced(function* (gro
+@@ -223,7 +240,7 @@ export const makeNoSerialization = /*#__PURE__*/Effect.fnUntraced(function* (gro
      fiber.addObserver(() => {
        resume(Effect.void);
      });
@@ -169,7 +201,7 @@ index 7a7ea894edc03e8cf76c34210f7bd1fc8cfd465b..edb844f8fb03eab2b9d37f793cdb14f5
    const write = message => {
      switch (message._tag) {
        case "Chunk":
-@@ -224,7 +241,13 @@ export const makeNoSerialization = /*#__PURE__*/Effect.fnUntraced(function* (gro
+@@ -231,7 +248,13 @@ export const makeNoSerialization = /*#__PURE__*/Effect.fnUntraced(function* (gro
            const requestId = message.requestId;
            const entry = entries.get(requestId);
            if (!entry || entry._tag !== "Queue") return Effect.void;
@@ -184,7 +216,7 @@ index 7a7ea894edc03e8cf76c34210f7bd1fc8cfd465b..edb844f8fb03eab2b9d37f793cdb14f5
              message: {
                _tag: "Ack",
                requestId: message.requestId
-@@ -239,11 +262,16 @@ export const makeNoSerialization = /*#__PURE__*/Effect.fnUntraced(function* (gro
+@@ -246,11 +269,16 @@ export const makeNoSerialization = /*#__PURE__*/Effect.fnUntraced(function* (gro
            const entry = entries.get(requestId);
            if (!entry) return Effect.void;
            entries.delete(requestId);
@@ -204,76 +236,107 @@ index 7a7ea894edc03e8cf76c34210f7bd1fc8cfd465b..edb844f8fb03eab2b9d37f793cdb14f5
          }
        case "Defect":
          {
-@@ -592,7 +620,7 @@ export const makeProtocolSocket = options => Protocol.make(Effect.fnUntraced(fun
-   const requestClientMap = new Map();
-   const write = yield* socket.writer;
-   let parser = serialization.makeUnsafe();
--  const pinger = yield* makePinger(write(parser.encode(constPing)));
-+  const pinger = yield* makePinger(write(parser.encode(constPing)), Option.isSome(hooks) ? hooks.value : undefined);
+@@ -606,9 +634,11 @@ export const layerProtocolHttp = options => Layer.effect(Protocol)(Effect.flatMa
+  *
+  * **Details**
+  *
+- * `pingInterval` defaults to 5 seconds. `pingTimeout` defaults to the interval
+- * and measures time since the last decoded server frame, not the last pong.
+- * The timeout is checked on each ping tick; any decoded frame counts as liveness.
++ * `pingInterval` defaults to 8 seconds. `pingTimeout` defaults to twice the
++ * interval and measures time since the last decoded server frame, not the last
++ * pong. The timeout is checked on each ping tick; any decoded frame counts as
++ * liveness. A timeout equal to the interval leaves no slack for timer drift, so
++ * a healthy connection whose pong beats the drift would look dead.
+  *
+  * @stability unstable
+  * @category protocols
+@@ -624,7 +654,7 @@ export const makeProtocolSocket = options => Protocol.make(Effect.fnUntraced(fun
+   // `parser` is replaced on every connect, and a stateful serialization
+   // encodes against the connection it is writing to, so the ping is encoded
+   // when it is sent rather than once up front.
+-  const pinger = yield* makePinger(Effect.suspend(() => writer.write(parser.encode(constPing))), options);
++  const pinger = yield* makePinger(Effect.suspend(() => writer.write(parser.encode(constPing))), options, Option.isSome(hooks) ? hooks.value : undefined);
    let currentError;
-   const onOpen = Effect.suspend(() => {
-     currentError = undefined;
-@@ -618,10 +646,7 @@ export const makeProtocolSocket = options => Protocol.make(Effect.fnUntraced(fun
-           while: () => i < responses.length,
-           body: () => {
-             const response = responses[i++];
--            if (response._tag === "Pong") {
--              pinger.onPong();
--              return Effect.void;
--            }
-+            if (response._tag === "Pong") return pinger.onPong;
-             if (Object.hasOwn(response, "requestId")) {
-               const requestId = response.requestId;
-               const clientId = requestClientMap.get(requestId);
-@@ -649,12 +674,12 @@ export const makeProtocolSocket = options => Protocol.make(Effect.fnUntraced(fun
+   const broadcast = response => Effect.forEach(clientIds, clientId => writeResponse(clientId, response));
+   const broadcastError = error => {
+@@ -644,7 +674,7 @@ export const makeProtocolSocket = options => Protocol.make(Effect.fnUntraced(fun
+         while: () => i < responses.length,
+         body: () => {
+           const response = responses[i++];
+-          if (response._tag === "Pong") return Effect.void;
++          if (response._tag === "Pong") return pinger.onPong;
+           if (Object.hasOwn(response, "requestId")) {
+             const requestId = response.requestId;
+             const clientId = requestClientMap.get(requestId);
+@@ -688,11 +718,11 @@ export const makeProtocolSocket = options => Protocol.make(Effect.fnUntraced(fun
+           yield* processData(frames[i]);
+         }
        }
-     }, {
-       onOpen
--    }).pipe(Effect.raceFirst(Effect.flatMap(pinger.timeout, () => Effect.fail(new Socket.SocketError({
-+    }).pipe(Effect.raceFirst(Effect.flatMap(pinger.timeout, () => (Option.isSome(hooks) && hooks.value.onPingTimeout ? hooks.value.onPingTimeout : Effect.void).pipe(Effect.andThen(Effect.fail(new Socket.SocketError({
-       reason: new Socket.SocketOpenError({
-         kind: "Timeout",
+-    }).pipe(Effect.scoped, Effect.raceFirst(Effect.flatMap(pinger.timeout, () => Effect.fail(new Socket.SocketError({
++    }).pipe(Effect.scoped, Effect.raceFirst(Effect.flatMap(pinger.timeout, () => (Option.isSome(hooks) && hooks.value.onPingTimeout ? hooks.value.onPingTimeout : Effect.void).pipe(Effect.andThen(Effect.fail(new Socket.SocketError({
+       reason: new Socket.SocketReadError({
          cause: new Error("ping timeout")
        })
 -    })))));
 +    })))))));
-   }).pipe(Effect.flatMap(() => Effect.fail(new Socket.SocketError({
-     reason: new Socket.SocketCloseError({
-       code: 1000
-@@ -698,21 +723,21 @@ export const makeProtocolSocket = options => Protocol.make(Effect.fnUntraced(fun
+   }).pipe(Option.isSome(hooks) ? Effect.ensuring(hooks.value.onDisconnect) : identity, Effect.tapCause(cause => {
+     const error = Cause.findError(cause);
+     const hasError = Result.isSuccess(error);
+@@ -733,10 +763,10 @@ export const makeProtocolSocket = options => Protocol.make(Effect.fnUntraced(fun
    };
  }));
  const defaultRetryPolicy = /*#__PURE__*/Schedule.min([/*#__PURE__*/Schedule.exponential(500, 1.5), /*#__PURE__*/Schedule.spaced(5000)]);
--const makePinger = /*#__PURE__*/Effect.fnUntraced(function* (writePing) {
-+const makePinger = /*#__PURE__*/Effect.fnUntraced(function* (writePing, hooks) {
-   let recievedPong = true;
+-const makePinger = /*#__PURE__*/Effect.fnUntraced(function* (writePing, options) {
++const makePinger = /*#__PURE__*/Effect.fnUntraced(function* (writePing, options, hooks) {
+   const clock = yield* Clock.Clock;
+-  const interval = options?.pingInterval ?? "5 seconds";
+-  const timeoutMillis = Duration.toMillis(options?.pingTimeout ?? interval);
++  const interval = options?.pingInterval ?? "8 seconds";
++  const timeoutMillis = options?.pingTimeout === undefined ? Duration.toMillis(interval) * 2 : Duration.toMillis(options.pingTimeout);
+   let lastSeen = clock.currentTimeMillisUnsafe();
    const latch = Latch.makeUnsafe();
-   const reset = () => {
-     recievedPong = true;
-     latch.closeUnsafe();
+   const onFrame = () => {
+@@ -748,12 +778,14 @@ const makePinger = /*#__PURE__*/Effect.fnUntraced(function* (writePing, options)
    };
--  const onPong = () => {
-+  const onPong = Effect.sync(() => {
-     recievedPong = true;
--  };
-+  }).pipe(Effect.andThen(hooks?.onPong ?? Effect.void));
    yield* Effect.suspend(() => {
-     if (!recievedPong) return latch.open;
-     recievedPong = false;
+     if (clock.currentTimeMillisUnsafe() - lastSeen > timeoutMillis) return latch.open;
 -    return writePing;
--  }).pipe(Effect.delay("5 seconds"), Effect.ignore, Effect.forever, Effect.interruptible, Effect.forkScoped);
 +    return (hooks?.onPing ?? Effect.void).pipe(Effect.andThen(writePing));
-+  }).pipe(Effect.delay("8 seconds"), Effect.ignore, Effect.forever, Effect.interruptible, Effect.forkScoped);
+   }).pipe(Effect.delay(interval), Effect.ignore, Effect.forever, Effect.interruptible, Effect.forkScoped);
++  const onPong = hooks?.onPong ?? Effect.void;
    return {
      timeout: latch.await,
      reset,
-@@ -859,6 +884,13 @@ export const makeProtocolWorker = options => Protocol.make(Effect.fnUntraced(fun
+-    onFrame
++    onFrame,
++    onPong
+   };
+ });
+ /**
+@@ -762,9 +794,11 @@ const makePinger = /*#__PURE__*/Effect.fnUntraced(function* (writePing, options)
+  *
+  * **Details**
+  *
+- * `pingInterval` defaults to 5 seconds. `pingTimeout` defaults to the interval
+- * and measures time since the last decoded server frame, not the last pong.
+- * The timeout is checked on each ping tick; any decoded frame counts as liveness.
++ * `pingInterval` defaults to 8 seconds. `pingTimeout` defaults to twice the
++ * interval and measures time since the last decoded server frame, not the last
++ * pong. The timeout is checked on each ping tick; any decoded frame counts as
++ * liveness. A timeout equal to the interval leaves no slack for timer drift, so
++ * a healthy connection whose pong beats the drift would look dead.
+  * `retryPolicy` configures retries after socket errors.
+  *
+  * @stability unstable
+@@ -909,6 +943,14 @@ export const makeProtocolWorker = options => Protocol.make(Effect.fnUntraced(fun
   * @since 4.0.0
   */
  export const layerProtocolWorker = /*#__PURE__*/flow(makeProtocolWorker, /*#__PURE__*/Layer.effect(Protocol));
 +/**
 + * Represents optional hooks for outgoing RPC request lifecycle events.
 + *
++ * @stability unstable
 + * @category services
 + * @since 4.0.0
 + */
@@ -281,11 +344,11 @@ index 7a7ea894edc03e8cf76c34210f7bd1fc8cfd465b..edb844f8fb03eab2b9d37f793cdb14f5
  /**
   * Represents optional client protocol hooks that run when a transport connects
   * and disconnects.
-diff --git a/src/unstable/rpc/RpcClient.ts b/src/unstable/rpc/RpcClient.ts
-index f11d06fc4db53a3a94e542b4a06aae63f55cbad7..38a09a90bde99ca8dea7603074a75d8f60a62f46 100644
---- a/src/unstable/rpc/RpcClient.ts
-+++ b/src/unstable/rpc/RpcClient.ts
-@@ -279,8 +279,10 @@ export const makeNoSerialization: <Rpcs extends Rpc.Any, E, const Flatten extend
+diff --git a/src/rpc/RpcClient.ts b/src/rpc/RpcClient.ts
+index 8ec45e8b23acfe32eb62671b925acf3e712f0aee..cc3d3f64e2fb9c2da5aba4da0132cd2005fead12 100644
+--- a/src/rpc/RpcClient.ts
++++ b/src/rpc/RpcClient.ts
+@@ -288,8 +288,10 @@ export const makeNoSerialization: <Rpcs extends Rpc.Any, E, const Flatten extend
      readonly queue: Queue.Queue<any, any>
      readonly scope: Scope.Scope
      readonly context: Context.Context<never>
@@ -296,7 +359,7 @@ index f11d06fc4db53a3a94e542b4a06aae63f55cbad7..38a09a90bde99ca8dea7603074a75d8f
  
    let isShutdown = false
    yield* Scope.addFinalizer(
-@@ -363,6 +365,9 @@ export const makeNoSerialization: <Rpcs extends Rpc.Any, E, const Flatten extend
+@@ -372,6 +374,9 @@ export const makeNoSerialization: <Rpcs extends Rpc.Any, E, const Flatten extend
          return Effect.interrupt
        }
        const id = generateRequestId()
@@ -306,7 +369,7 @@ index f11d06fc4db53a3a94e542b4a06aae63f55cbad7..38a09a90bde99ca8dea7603074a75d8f
        const send = middleware(
          (message) =>
            options.onFromClient({
-@@ -386,7 +391,7 @@ export const makeNoSerialization: <Rpcs extends Rpc.Any, E, const Flatten extend
+@@ -395,7 +400,7 @@ export const makeNoSerialization: <Rpcs extends Rpc.Any, E, const Flatten extend
          }
        )
        if (discard) {
@@ -315,7 +378,7 @@ index f11d06fc4db53a3a94e542b4a06aae63f55cbad7..38a09a90bde99ca8dea7603074a75d8f
        }
        let fiber: Fiber.Fiber<any, any>
        return Effect.onInterrupt(
-@@ -405,7 +410,8 @@ export const makeNoSerialization: <Rpcs extends Rpc.Any, E, const Flatten extend
+@@ -414,7 +419,8 @@ export const makeNoSerialization: <Rpcs extends Rpc.Any, E, const Flatten extend
              }
            }
            entries.set(id, entry)
@@ -325,7 +388,7 @@ index f11d06fc4db53a3a94e542b4a06aae63f55cbad7..38a09a90bde99ca8dea7603074a75d8f
              span ? Effect.withParentSpan(span, { captureStackTrace: false }) : identity,
              Effect.runForkWith(parentFiber.context)
            )
-@@ -416,10 +422,11 @@ export const makeNoSerialization: <Rpcs extends Rpc.Any, E, const Flatten extend
+@@ -425,10 +431,11 @@ export const makeNoSerialization: <Rpcs extends Rpc.Any, E, const Flatten extend
            })
          }),
          (interruptors) => {
@@ -338,8 +401,8 @@ index f11d06fc4db53a3a94e542b4a06aae63f55cbad7..38a09a90bde99ca8dea7603074a75d8f
            )
          }
        )
-@@ -445,19 +452,24 @@ export const makeNoSerialization: <Rpcs extends Rpc.Any, E, const Flatten extend
-     })
+@@ -455,6 +462,9 @@ export const makeNoSerialization: <Rpcs extends Rpc.Any, E, const Flatten extend
+     )
      const fiber = Fiber.getCurrent()!
      const id = generateRequestId()
 +    const onStart = Option.isSome(requestHooks) && requestHooks.value.onRequestStart
@@ -347,9 +410,11 @@ index f11d06fc4db53a3a94e542b4a06aae63f55cbad7..38a09a90bde99ca8dea7603074a75d8f
 +      : Effect.void
  
      const scope = Context.getUnsafe(fiber.context, Scope.Scope)
-     yield* Scope.addFinalizerExit(
+     const queue = yield* Queue.bounded<any, any>(streamBufferSize)
+@@ -462,14 +472,16 @@ export const makeNoSerialization: <Rpcs extends Rpc.Any, E, const Flatten extend
        scope,
        (exit) => {
+         Queue.shutdownUnsafe(queue)
 -        if (!entries.has(id)) return Effect.void
 +        const entry = entries.get(id)
 +        if (!entry) return Effect.void
@@ -365,7 +430,7 @@ index f11d06fc4db53a3a94e542b4a06aae63f55cbad7..38a09a90bde99ca8dea7603074a75d8f
          )
        }
      )
-@@ -468,31 +480,33 @@ export const makeNoSerialization: <Rpcs extends Rpc.Any, E, const Flatten extend
+@@ -479,31 +491,33 @@ export const makeNoSerialization: <Rpcs extends Rpc.Any, E, const Flatten extend
        rpc,
        queue,
        scope,
@@ -420,9 +485,9 @@ index f11d06fc4db53a3a94e542b4a06aae63f55cbad7..38a09a90bde99ca8dea7603074a75d8f
 +        }
 +      )),
        span ? Effect.withParentSpan(span, { captureStackTrace: false }) : identity,
-       Effect.catchCause((error) => Queue.failCause(queue, error)),
+       Effect.onError((cause) => Queue.failCause(queue, cause)),
        Effect.interruptible,
-@@ -540,9 +554,12 @@ export const makeNoSerialization: <Rpcs extends Rpc.Any, E, const Flatten extend
+@@ -551,9 +565,12 @@ export const makeNoSerialization: <Rpcs extends Rpc.Any, E, const Flatten extend
    const sendInterrupt = (
      requestId: RequestId,
      interruptors: ReadonlyArray<number>,
@@ -437,7 +502,7 @@ index f11d06fc4db53a3a94e542b4a06aae63f55cbad7..38a09a90bde99ca8dea7603074a75d8f
        const parentFiber = Fiber.getCurrent()!
        const fiber = options.onFromClient({
          message: { _tag: "Interrupt", requestId, interruptors },
-@@ -555,7 +572,7 @@ export const makeNoSerialization: <Rpcs extends Rpc.Any, E, const Flatten extend
+@@ -566,7 +583,7 @@ export const makeNoSerialization: <Rpcs extends Rpc.Any, E, const Flatten extend
        fiber.addObserver(() => {
          resume(Effect.void)
        })
@@ -446,7 +511,7 @@ index f11d06fc4db53a3a94e542b4a06aae63f55cbad7..38a09a90bde99ca8dea7603074a75d8f
  
    const write = (message: FromServer<Rpcs>): Effect.Effect<void> => {
      switch (message._tag) {
-@@ -563,7 +580,16 @@ export const makeNoSerialization: <Rpcs extends Rpc.Any, E, const Flatten extend
+@@ -574,7 +591,16 @@ export const makeNoSerialization: <Rpcs extends Rpc.Any, E, const Flatten extend
          const requestId = message.requestId
          const entry = entries.get(requestId)
          if (!entry || entry._tag !== "Queue") return Effect.void
@@ -463,7 +528,7 @@ index f11d06fc4db53a3a94e542b4a06aae63f55cbad7..38a09a90bde99ca8dea7603074a75d8f
            supportsAck
              ? Effect.flatMap(() =>
                options.onFromClient({
-@@ -581,13 +607,20 @@ export const makeNoSerialization: <Rpcs extends Rpc.Any, E, const Flatten extend
+@@ -592,13 +618,20 @@ export const makeNoSerialization: <Rpcs extends Rpc.Any, E, const Flatten extend
          const entry = entries.get(requestId)
          if (!entry) return Effect.void
          entries.delete(requestId)
@@ -488,84 +553,123 @@ index f11d06fc4db53a3a94e542b4a06aae63f55cbad7..38a09a90bde99ca8dea7603074a75d8f
        }
        case "Defect": {
          return clearEntries(Exit.die(message.defect))
-@@ -1047,7 +1080,10 @@ export const makeProtocolSocket = (options?: {
- 
-     let parser = serialization.makeUnsafe()
- 
--    const pinger = yield* makePinger(write(parser.encode(constPing)!))
+@@ -1051,9 +1084,11 @@ export const layerProtocolHttp = (options: {
+  *
+  * **Details**
+  *
+- * `pingInterval` defaults to 5 seconds. `pingTimeout` defaults to the interval
+- * and measures time since the last decoded server frame, not the last pong.
+- * The timeout is checked on each ping tick; any decoded frame counts as liveness.
++ * `pingInterval` defaults to 8 seconds. `pingTimeout` defaults to twice the
++ * interval and measures time since the last decoded server frame, not the last
++ * pong. The timeout is checked on each ping tick; any decoded frame counts as
++ * liveness. A timeout equal to the interval leaves no slack for timer drift, so
++ * a healthy connection whose pong beats the drift would look dead.
+  *
+  * @stability unstable
+  * @category protocols
+@@ -1089,7 +1124,11 @@ export const makeProtocolSocket = (options?: {
+     // `parser` is replaced on every connect, and a stateful serialization
+     // encodes against the connection it is writing to, so the ping is encoded
+     // when it is sent rather than once up front.
+-    const pinger = yield* makePinger(Effect.suspend(() => writer.write(parser.encode(constPing)!)), options)
 +    const pinger = yield* makePinger(
-+      write(parser.encode(constPing)!),
++      Effect.suspend(() => writer.write(parser.encode(constPing)!)),
++      options,
 +      Option.isSome(hooks) ? hooks.value : undefined
 +    )
      let currentError: RpcClientError | undefined
-     const onOpen = Effect.suspend(() => {
-       currentError = undefined
-@@ -1077,8 +1113,7 @@ export const makeProtocolSocket = (options?: {
-             body: () => {
-               const response = responses[i++]
-               if (response._tag === "Pong") {
--                pinger.onPong()
--                return Effect.void
-+                return pinger.onPong
-               }
-               if (Object.hasOwn(response, "requestId")) {
-                 const requestId = (response as FromServerEncoded & { readonly requestId: string | number }).requestId
-@@ -1109,13 +1144,16 @@ export const makeProtocolSocket = (options?: {
+ 
+     const broadcast = (response: FromServerEncoded) =>
+@@ -1112,7 +1151,7 @@ export const makeProtocolSocket = (options?: {
+           while: () => i < responses.length,
+           body: () => {
+             const response = responses[i++]
+-            if (response._tag === "Pong") return Effect.void
++            if (response._tag === "Pong") return pinger.onPong
+             if (Object.hasOwn(response, "requestId")) {
+               const requestId = (response as FromServerEncoded & { readonly requestId: string | number }).requestId
+               const clientId = requestClientMap.get(requestId)
+@@ -1160,13 +1199,15 @@ export const makeProtocolSocket = (options?: {
          Effect.raceFirst(Effect.flatMap(
            pinger.timeout,
            () =>
 -            Effect.fail(
+-              new Socket.SocketError({
+-                reason: new Socket.SocketReadError({
+-                  cause: new Error("ping timeout")
 +            (Option.isSome(hooks) && hooks.value.onPingTimeout
 +              ? hooks.value.onPingTimeout
 +              : Effect.void).pipe(Effect.andThen(Effect.fail(
-               new Socket.SocketError({
-                 reason: new Socket.SocketOpenError({
-                   kind: "Timeout",
-                   cause: new Error("ping timeout")
++                new Socket.SocketError({
++                  reason: new Socket.SocketReadError({
++                    cause: new Error("ping timeout")
++                  })
                  })
-               })
-+            )))
-             )
+-              })
+-            )
++              )))
          ))
        )
-@@ -1179,22 +1217,25 @@ const defaultRetryPolicy = Schedule.min([
-   Schedule.spaced(5000)
- ])
- 
--const makePinger = Effect.fnUntraced(function*<A, E, R>(writePing: Effect.Effect<A, E, R>) {
-+const makePinger = Effect.fnUntraced(function*<A, E, R>(
-+  writePing: Effect.Effect<A, E, R>,
-+  hooks?: Context.Service.Shape<typeof ConnectionHooks>
-+) {
-   let recievedPong = true
+     }).pipe(
+@@ -1230,10 +1271,12 @@ const defaultRetryPolicy = Schedule.min([
+ const makePinger = Effect.fnUntraced(function*<A, E, R>(writePing: Effect.Effect<A, E, R>, options?: {
+   readonly pingInterval?: Duration.Input | undefined
+   readonly pingTimeout?: Duration.Input | undefined
+-}) {
++}, hooks?: Context.Service.Shape<typeof ConnectionHooks>) {
+   const clock = yield* Clock.Clock
+-  const interval = options?.pingInterval ?? "5 seconds"
+-  const timeoutMillis = Duration.toMillis(options?.pingTimeout ?? interval)
++  const interval = options?.pingInterval ?? "8 seconds"
++  const timeoutMillis = options?.pingTimeout === undefined
++    ? Duration.toMillis(interval) * 2
++    : Duration.toMillis(options.pingTimeout)
+   let lastSeen = clock.currentTimeMillisUnsafe()
    const latch = Latch.makeUnsafe()
-   const reset = () => {
-     recievedPong = true
-     latch.closeUnsafe()
+   const onFrame = () => {
+@@ -1245,7 +1288,7 @@ const makePinger = Effect.fnUntraced(function*<A, E, R>(writePing: Effect.Effect
    }
--  const onPong = () => {
-+  const onPong = Effect.sync(() => {
-     recievedPong = true
--  }
-+  }).pipe(Effect.andThen(hooks?.onPong ?? Effect.void))
    yield* Effect.suspend((): Effect.Effect<void, E, R> => {
-     if (!recievedPong) return latch.open
-     recievedPong = false
+     if (clock.currentTimeMillisUnsafe() - lastSeen > timeoutMillis) return latch.open
 -    return writePing
 +    return (hooks?.onPing ?? Effect.void).pipe(Effect.andThen(writePing))
    }).pipe(
--    Effect.delay("5 seconds"),
-+    Effect.delay("8 seconds"),
+     Effect.delay(interval),
      Effect.ignore,
-     Effect.forever,
+@@ -1253,7 +1296,8 @@ const makePinger = Effect.fnUntraced(function*<A, E, R>(writePing: Effect.Effect
      Effect.interruptible,
-@@ -1421,6 +1462,35 @@ export const layerProtocolWorker: (
+     Effect.forkScoped
+   )
+-  return { timeout: latch.await, reset, onFrame } as const
++  const onPong = hooks?.onPong ?? Effect.void
++  return { timeout: latch.await, reset, onFrame, onPong } as const
+ })
+ 
+ /**
+@@ -1262,9 +1306,11 @@ const makePinger = Effect.fnUntraced(function*<A, E, R>(writePing: Effect.Effect
+  *
+  * **Details**
+  *
+- * `pingInterval` defaults to 5 seconds. `pingTimeout` defaults to the interval
+- * and measures time since the last decoded server frame, not the last pong.
+- * The timeout is checked on each ping tick; any decoded frame counts as liveness.
++ * `pingInterval` defaults to 8 seconds. `pingTimeout` defaults to twice the
++ * interval and measures time since the last decoded server frame, not the last
++ * pong. The timeout is checked on each ping tick; any decoded frame counts as
++ * liveness. A timeout equal to the interval leaves no slack for timer drift, so
++ * a healthy connection whose pong beats the drift would look dead.
+  * `retryPolicy` configures retries after socket errors.
+  *
+  * @stability unstable
+@@ -1490,6 +1536,36 @@ export const layerProtocolWorker: (
    Worker.WorkerPlatform | Worker.Spawner
  > = flow(makeProtocolWorker, Layer.effect(Protocol))
  
 +/**
 + * Represents optional hooks for outgoing RPC request lifecycle events.
 + *
++ * @stability unstable
 + * @category services
 + * @since 4.0.0
 + */
@@ -595,7 +699,7 @@ index f11d06fc4db53a3a94e542b4a06aae63f55cbad7..38a09a90bde99ca8dea7603074a75d8f
  /**
   * Represents optional client protocol hooks that run when a transport connects
   * and disconnects.
-@@ -1436,6 +1506,9 @@ export const layerProtocolWorker: (
+@@ -1506,4 +1582,7 @@ export const layerProtocolWorker: (
  export class ConnectionHooks extends Context.Service<ConnectionHooks, {
    readonly onConnect: Effect.Effect<void>
    readonly onDisconnect: Effect.Effect<void>
@@ -603,5 +707,3 @@ index f11d06fc4db53a3a94e542b4a06aae63f55cbad7..38a09a90bde99ca8dea7603074a75d8f
 +  readonly onPong?: Effect.Effect<void> | undefined
 +  readonly onPingTimeout?: Effect.Effect<void> | undefined
  }>()("effect/rpc/RpcClient/ConnectionHooks") {}
- 
- // internal

@@ -7,7 +7,8 @@
         "name": "@effect/language-service",
         "includeSuggestionsInTsc": false,
         "diagnosticSeverity": {
-          "importFromBarrel": "error",
+          "unstableApiUsage": "off",
+          "experimentalApiUsage": "off",
           "anyUnknownInErrorContext": "warning",
           "instanceOfSchema": "warning",
           "deterministicKeys": "off"

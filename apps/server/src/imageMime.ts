@@ -1,4 +1,4 @@
-import Mime from "@effect/platform-node/Mime";
+import Mime from "mime";
 
 export const IMAGE_EXTENSION_BY_MIME_TYPE: Record<string, string> = {
   "image/avif": ".avif",

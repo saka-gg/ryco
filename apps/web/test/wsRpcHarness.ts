@@ -5,7 +5,7 @@ import {
   WS_METHODS,
   WsRpcGroup,
 } from "@ryco/contracts";
-import { RpcMessage, RpcSerialization, RpcServer } from "effect/unstable/rpc";
+import { RpcMessage, RpcSerialization, RpcServer } from "effect/rpc";
 
 type BrowserWsClient = {
   send: (data: string) => void;
@@ -132,6 +132,8 @@ export class BrowserWsRpcHarness {
       supportsAck: true,
       supportsTransferables: false,
       supportsSpanPropagation: true,
+      supportsNotifications: true,
+      codecFor: RpcSerialization.json.codecFor,
     } satisfies RpcServer.Protocol["Service"];
     const connection: BrowserWsConnection = {
       client,

@@ -1,5 +1,5 @@
 import { Effect } from "effect";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
 // Additive migration: retain saved text and projector cursors. A resumed body is
 // moved into a prefix chunk by the repository in the next event transaction.

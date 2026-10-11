@@ -1,5 +1,5 @@
 import { Schema } from "effect";
-import { IsoDateTime, ThreadId } from "./baseSchemas.ts";
+import { IsoDateTime, ThreadId, rejectExcessProperties } from "./baseSchemas.ts";
 import {
   AgentControlCompletionReturn,
   AgentControlProposalId,
@@ -35,13 +35,13 @@ export type AgentControlTaskNoticeOutcome = typeof AgentControlTaskNoticeOutcome
 
 export const AgentControlTaskStatusInput = Schema.Struct({
   taskId: Schema.optional(ThreadId),
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlTaskStatusInput = typeof AgentControlTaskStatusInput.Type;
 
 export const AgentControlTaskCancelInput = Schema.Struct({
   requestId: AgentControlRequestId,
   taskId: ThreadId,
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+}).pipe(rejectExcessProperties);
 export type AgentControlTaskCancelInput = typeof AgentControlTaskCancelInput.Type;
 
 export const AgentControlTaskRunState = Schema.Literals([

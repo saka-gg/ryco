@@ -7,7 +7,7 @@ import {
   type SourceControlRepositoryCloneUrls,
   type SourceControlRepositoryVisibility,
 } from "@ryco/contracts";
-import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http";
+import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 import { sanitizeBranchFragment, WORKTREE_BRANCH_PREFIX } from "@ryco/shared/git";
 import { detectSourceControlProviderFromRemoteUrl } from "@ryco/shared/sourceControl";
 
@@ -27,12 +27,12 @@ const DEFAULT_API_BASE_URL = "https://api.bitbucket.org/2.0";
 const textDecoder = new TextDecoder();
 
 const BitbucketApiEnvConfig = Config.all({
-  baseUrl: Config.string("RYCO_BITBUCKET_API_BASE_URL").pipe(
+  baseUrl: Config.String("RYCO_BITBUCKET_API_BASE_URL").pipe(
     Config.withDefault(DEFAULT_API_BASE_URL),
   ),
-  accessToken: Config.string("RYCO_BITBUCKET_ACCESS_TOKEN").pipe(Config.option),
-  email: Config.string("RYCO_BITBUCKET_EMAIL").pipe(Config.option),
-  apiToken: Config.string("RYCO_BITBUCKET_API_TOKEN").pipe(Config.option),
+  accessToken: Config.String("RYCO_BITBUCKET_ACCESS_TOKEN").pipe(Config.option),
+  email: Config.String("RYCO_BITBUCKET_EMAIL").pipe(Config.option),
+  apiToken: Config.String("RYCO_BITBUCKET_API_TOKEN").pipe(Config.option),
 });
 
 export { BitbucketApiError };

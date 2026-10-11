@@ -5,7 +5,7 @@ import {
   type OrchestrationReadModel,
 } from "@ryco/contracts";
 import { Effect } from "effect";
-import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
+import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 
 import { ServerAuth } from "../auth/Services/ServerAuth.ts";
 import { rejectCrossOriginMutation, respondToAuthError } from "../auth/http.ts";

@@ -1,5 +1,5 @@
 import { readPersistedCwd } from "../runtimeCwd.ts";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 import { acquireStoragePathUseLease } from "../../storage/lifecycle.ts";
 /**
  * ProviderServiceLive - Cross-provider orchestration layer.

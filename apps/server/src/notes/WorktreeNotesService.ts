@@ -7,7 +7,7 @@ import {
   type ProjectId,
 } from "@ryco/contracts";
 import { Clock, Context, Effect, Layer, Schema } from "effect";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
 type NotesEffect<A> = Effect.Effect<A, NotesError>;
 export interface WorktreeNotesServiceShape {

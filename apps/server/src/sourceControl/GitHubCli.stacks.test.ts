@@ -1,7 +1,7 @@
 import { afterEach, assert, describe, expect, it, vi } from "@effect/vitest";
 import { Duration, Effect, Fiber, Layer, Result } from "effect";
 import { TestClock } from "effect/testing";
-import { ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcessSpawner } from "effect/process";
 
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as GitHubCli from "./GitHubCli.ts";

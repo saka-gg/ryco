@@ -11,7 +11,7 @@ import {
   type ThreadId,
 } from "@ryco/contracts";
 import { Option, Schema } from "effect";
-import { Atom } from "effect/unstable/reactivity";
+import { Atom } from "effect/reactivity";
 
 import { cachedPayloadBytes } from "../persistence/cacheSize";
 import { ensureEnvironmentApi } from "../connection/environmentApi";

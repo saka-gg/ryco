@@ -2,7 +2,7 @@ import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { DateTime, Effect, Layer, Option, Ref, Schema } from "effect";
 import { SourceControlProviderError } from "@ryco/contracts";
-import { ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcessSpawner } from "effect/process";
 
 import { ServerConfig } from "../config.ts";
 import type * as VcsDriver from "../vcs/VcsDriver.ts";

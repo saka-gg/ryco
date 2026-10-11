@@ -1,6 +1,8 @@
 export const TRANSPORT_ERROR_PATTERNS = [
   /\bSocketCloseError\b/i,
   /\bSocketOpenError\b/i,
+  // Dropped connections and missed heartbeats fail in-flight calls with this.
+  /\bSocketReadError\b/i,
   /Unable to connect to the Ryco server WebSocket\./i,
   /\bping timeout\b/i,
 ] as const;

@@ -1,7 +1,7 @@
 import { EventId, MessageId, ThreadId } from "@ryco/contracts";
 import { Effect, Layer, Option, Schema } from "effect";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
-import type { SqlError } from "effect/unstable/sql/SqlError";
+import * as SqlClient from "effect/sql/SqlClient";
+import type { SqlError } from "effect/sql/SqlError";
 
 import {
   PROVIDER_EFFECT_INTENT_KINDS,

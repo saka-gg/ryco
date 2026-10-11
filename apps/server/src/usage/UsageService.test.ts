@@ -13,7 +13,7 @@ import {
   type ServerSettings,
 } from "@ryco/contracts";
 import { Effect, Layer, Stream } from "effect";
-import { HttpClient, HttpClientResponse } from "effect/unstable/http";
+import { HttpClient, HttpClientResponse } from "effect/http";
 import { afterEach, expect, it, vi } from "vite-plus/test";
 import { ServerConfig } from "../config.ts";
 import { ServerEnvironment } from "../environment/Services/ServerEnvironment.ts";

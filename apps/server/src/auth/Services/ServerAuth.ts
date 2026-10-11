@@ -14,7 +14,7 @@ import type {
 } from "@ryco/contracts";
 import { Data, DateTime, Context } from "effect";
 import type { Effect } from "effect";
-import type * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
+import type * as HttpServerRequest from "effect/http/HttpServerRequest";
 import type { SessionRole } from "./SessionCredentialService.ts";
 
 export interface AuthenticatedSession {

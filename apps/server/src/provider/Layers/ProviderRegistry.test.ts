@@ -28,8 +28,8 @@ import {
   type ServerSettings as ContractServerSettings,
 } from "@ryco/contracts";
 import * as PlatformError from "effect/PlatformError";
-import { HttpClient, HttpClientResponse } from "effect/unstable/http";
-import { ChildProcessSpawner } from "effect/unstable/process";
+import { HttpClient, HttpClientResponse } from "effect/http";
+import { ChildProcessSpawner } from "effect/process";
 import { deepMerge } from "@ryco/shared/Struct";
 import { createModelCapabilities, createModelSelection } from "@ryco/shared/model";
 

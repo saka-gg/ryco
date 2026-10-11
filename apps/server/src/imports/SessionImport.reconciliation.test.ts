@@ -1,6 +1,6 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { Effect, Fiber, Layer, Option } from "effect";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 import { NodeServices } from "@effect/platform-node";
 import { mkdtemp, mkdir, writeFile, readFile, realpath, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";

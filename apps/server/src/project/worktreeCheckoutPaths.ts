@@ -5,7 +5,7 @@ import path from "node:path";
 import { GitCommandError, type ProjectId, type WorktreeCheckoutLocation } from "@ryco/contracts";
 import { directorySlug } from "@ryco/shared/directorySlug";
 import { Effect, Option } from "effect";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 import { resolveProjectWorktreesDir } from "./projectMetadataPaths.ts";
 
 export const createWorktreeDirectoryId = (): string => randomBytes(4).toString("hex");

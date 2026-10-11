@@ -1,6 +1,6 @@
 import { expect, it } from "@effect/vitest";
 import { Effect } from "effect";
-import { HttpServerRequest } from "effect/unstable/http";
+import { HttpServerRequest } from "effect/http";
 
 import { ServerConfig, type ServerConfigShape } from "../config.ts";
 import { rejectCrossOriginMutation } from "./http.ts";

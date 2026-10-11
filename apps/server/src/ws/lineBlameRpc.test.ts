@@ -1,4 +1,4 @@
-import { ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcessSpawner } from "effect/process";
 import { describe, expect, it } from "@effect/vitest";
 import { Effect } from "effect";
 import { GitCommandError, WS_METHODS } from "@ryco/contracts";

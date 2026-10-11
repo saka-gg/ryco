@@ -6,8 +6,8 @@ import {
   type Rpc,
   type RpcClientError,
   type RpcGroup,
-} from "effect/unstable/rpc";
-import * as Socket from "effect/unstable/socket/Socket";
+} from "effect/rpc";
+import * as Socket from "effect/socket/Socket";
 
 import {
   WS_METHODS,
@@ -61,10 +61,10 @@ export const wsRpcProtocolLayer = (
   const { cookie, origin, url } = parseSessionCookieFromWsUrl(wsUrl);
   const webSocketConstructorLayer = Layer.succeed(
     Socket.WebSocketConstructor,
-    (socketUrl, protocols) =>
+    (socketUrl, options) =>
       new NodeSocket.NodeWS.WebSocket(
         socketUrl,
-        protocols,
+        typeof options === "string" || Array.isArray(options) ? options : undefined,
         cookie || origin
           ? {
               headers: {

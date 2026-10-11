@@ -1,5 +1,6 @@
 import { Schema } from "effect";
 
+import { rejectExcessProperties } from "./baseSchemas.ts";
 import { ExternalIdentityProvider, ExternalIdentitySummary } from "./hostedIdentity.ts";
 
 export const NATIVE_HANDOFF_CAPABILITY_PATH = "/.well-known/ryco-hub" as const;
@@ -27,9 +28,6 @@ export const NATIVE_HANDOFF_MAX_BODY_BYTES = 4 * 1_024;
 export const NATIVE_HANDOFF_MAX_CAPABILITY_BYTES = 16 * 1_024;
 export const NATIVE_HANDOFF_MAX_DEVICE_LABEL_CHARS = 64;
 export const NATIVE_HANDOFF_MAX_URL_CHARS = 2_048;
-
-const strict = <S extends Schema.Top>(schema: S): S =>
-  schema.annotate({ parseOptions: { onExcessProperty: "error" } }) as S;
 
 const Base64Url256 = Schema.String.check(
   Schema.isMinLength(43),
@@ -90,8 +88,8 @@ const uniqueNonEmpty = <S extends Schema.Top>(item: S, maximum: number) =>
   );
 
 const NativeIdentityAntiBot = Schema.Union([
-  strict(Schema.Struct({ provider: Schema.Literal("bypass") })),
-  strict(
+  rejectExcessProperties(Schema.Struct({ provider: Schema.Literal("bypass") })),
+  rejectExcessProperties(
     Schema.Struct({
       provider: Schema.Literal("turnstile"),
       siteKey: NativeIdentityTurnstileSiteKey,
@@ -99,28 +97,28 @@ const NativeIdentityAntiBot = Schema.Union([
   ),
 ]);
 
-export const NativeIdentityCapability = strict(
+export const NativeIdentityCapability = rejectExcessProperties(
   Schema.Struct({
     version: Schema.Literal(NATIVE_IDENTITY_CAPABILITY_VERSION),
-    email: strict(
+    email: rejectExcessProperties(
       Schema.Struct({
         verification: Schema.Literal("required"),
         antiBot: NativeIdentityAntiBot,
       }),
     ),
     signup: Schema.Union([
-      strict(Schema.Struct({ status: Schema.Literal("disabled") })),
-      strict(
+      rejectExcessProperties(Schema.Struct({ status: Schema.Literal("disabled") })),
+      rejectExcessProperties(
         Schema.Struct({
           status: Schema.Literal("enabled"),
           primaryCredentials: uniqueNonEmpty(NativeIdentityPrimaryCredential, 2),
         }),
       ),
     ]),
-    login: strict(
+    login: rejectExcessProperties(
       Schema.Struct({
         methods: uniqueNonEmpty(NativeIdentityLoginMethod, 3),
-        passwordSecondFactor: strict(
+        passwordSecondFactor: rejectExcessProperties(
           Schema.Struct({
             totp: Schema.Literal("when_enrolled"),
             fallback: Schema.Literal("verified_email_code"),
@@ -128,7 +126,7 @@ export const NativeIdentityCapability = strict(
         ),
       }),
     ),
-    recovery: strict(
+    recovery: rejectExcessProperties(
       Schema.Struct({
         recoveryCode: Schema.Boolean,
         passwordReset: Schema.Boolean,
@@ -218,17 +216,17 @@ const CancelledCallbackUrl = Schema.String.check(
   ),
 );
 
-export const NativeHandoffCapability = strict(
+export const NativeHandoffCapability = rejectExcessProperties(
   Schema.Struct({
     service: Schema.Literal("ryco-hub"),
     protocolVersion: Schema.Literal(NATIVE_HANDOFF_PROTOCOL_VERSION),
-    nativeHandoff: strict(
+    nativeHandoff: rejectExcessProperties(
       Schema.Struct({
         mode: Schema.Literal(NATIVE_HANDOFF_MODE),
         version: Schema.Literal(NATIVE_HANDOFF_VERSION),
       }),
     ),
-    relyingParty: strict(
+    relyingParty: rejectExcessProperties(
       Schema.Struct({
         id: RelyingPartyId,
         displayName: DisplayName,
@@ -239,7 +237,7 @@ export const NativeHandoffCapability = strict(
 );
 export type NativeHandoffCapability = typeof NativeHandoffCapability.Type;
 
-export const NativeHandoffSignInPurpose = strict(
+export const NativeHandoffSignInPurpose = rejectExcessProperties(
   Schema.Struct({
     kind: Schema.Literal("sign_in"),
     providerHint: Schema.optionalKey(ExternalIdentityProvider),
@@ -247,7 +245,7 @@ export const NativeHandoffSignInPurpose = strict(
 );
 export type NativeHandoffSignInPurpose = typeof NativeHandoffSignInPurpose.Type;
 
-export const NativeHandoffConnectExternalIdentityPurpose = strict(
+export const NativeHandoffConnectExternalIdentityPurpose = rejectExcessProperties(
   Schema.Struct({
     kind: Schema.Literal("connect_external_identity"),
     provider: ExternalIdentityProvider,
@@ -262,7 +260,7 @@ export const NativeHandoffPurpose = Schema.Union([
 ]);
 export type NativeHandoffPurpose = typeof NativeHandoffPurpose.Type;
 
-export const NativeHandoffStartRequest = strict(
+export const NativeHandoffStartRequest = rejectExcessProperties(
   Schema.Struct({
     redirectUri: NativeHandoffCallbackUri,
     codeChallenge: NativeHandoffCodeChallenge,
@@ -274,7 +272,7 @@ export const NativeHandoffStartRequest = strict(
 );
 export type NativeHandoffStartRequest = typeof NativeHandoffStartRequest.Type;
 
-export const NativeHandoffStartResponse = strict(
+export const NativeHandoffStartResponse = rejectExcessProperties(
   Schema.Struct({
     handoffId: NativeHandoffId,
     authorizationUrl: AuthorizationUrl,
@@ -283,7 +281,7 @@ export const NativeHandoffStartResponse = strict(
 );
 export type NativeHandoffStartResponse = typeof NativeHandoffStartResponse.Type;
 
-export const NativeHandoffPresentation = strict(
+export const NativeHandoffPresentation = rejectExcessProperties(
   Schema.Struct({
     status: Schema.Literal("pending"),
     deviceLabel: BoundedDeviceLabel,
@@ -293,17 +291,17 @@ export const NativeHandoffPresentation = strict(
 );
 export type NativeHandoffPresentation = typeof NativeHandoffPresentation.Type;
 
-export const NativeHandoffApproveResponse = strict(
+export const NativeHandoffApproveResponse = rejectExcessProperties(
   Schema.Struct({ redirectUri: ApprovedCallbackUrl }),
 );
 export type NativeHandoffApproveResponse = typeof NativeHandoffApproveResponse.Type;
 
-export const NativeHandoffCancelResponse = strict(
+export const NativeHandoffCancelResponse = rejectExcessProperties(
   Schema.Struct({ redirectUri: CancelledCallbackUrl }),
 );
 export type NativeHandoffCancelResponse = typeof NativeHandoffCancelResponse.Type;
 
-export const NativeHandoffRedeemRequest = strict(
+export const NativeHandoffRedeemRequest = rejectExcessProperties(
   Schema.Struct({
     handoffId: NativeHandoffId,
     code: NativeHandoffCode,
@@ -312,7 +310,7 @@ export const NativeHandoffRedeemRequest = strict(
 );
 export type NativeHandoffRedeemRequest = typeof NativeHandoffRedeemRequest.Type;
 
-export const NativeHandoffConnectRedeemRequest = strict(
+export const NativeHandoffConnectRedeemRequest = rejectExcessProperties(
   Schema.Struct({
     handoffId: NativeHandoffId,
     code: NativeHandoffCode,
@@ -339,7 +337,7 @@ const NullableSessionLabel = Schema.NullOr(
   Schema.Trim.check(Schema.isNonEmpty(), Schema.isMaxLength(NATIVE_HANDOFF_MAX_DEVICE_LABEL_CHARS)),
 );
 
-const NativeHandoffAccount = strict(
+const NativeHandoffAccount = rejectExcessProperties(
   Schema.Struct({
     id: AccountId,
     displayName: Schema.Trim.check(Schema.isNonEmpty(), Schema.isMaxLength(200)),
@@ -349,7 +347,7 @@ const NativeHandoffAccount = strict(
   }),
 );
 
-const NativeHandoffSession = strict(
+const NativeHandoffSession = rejectExcessProperties(
   Schema.Struct({
     id: SessionId,
     accountId: AccountId,
@@ -373,7 +371,7 @@ const NativeHandoffSession = strict(
   ),
 );
 
-export const NativeHandoffRedeemResponse = strict(
+export const NativeHandoffRedeemResponse = rejectExcessProperties(
   Schema.Struct({
     account: NativeHandoffAccount,
     session: NativeHandoffSession,
@@ -388,7 +386,7 @@ export const NativeHandoffRedeemResponse = strict(
 );
 export type NativeHandoffRedeemResponse = typeof NativeHandoffRedeemResponse.Type;
 
-export const NativeHandoffConnectRedeemResponse = strict(
+export const NativeHandoffConnectRedeemResponse = rejectExcessProperties(
   Schema.Struct({
     status: Schema.Literal("connected"),
     purpose: NativeHandoffConnectExternalIdentityPurpose,
