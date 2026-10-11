@@ -4,7 +4,7 @@ import {
   clearProjectIconCache,
   projectIconCacheBytes,
   readProjectIconSource,
-} from "./projectIconSource";
+} from "./projectIconSource.ts";
 
 const project = ProjectId.make("project");
 const icon = { mimeType: "image/png", dataBase64: "aWNvbg==" };

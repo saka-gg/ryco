@@ -1,0 +1,11 @@
+// Typechecks the test suites. `tsconfig.json` stays the runtime program: it
+// excludes tests and keeps DOM/ambient types out so production source cannot
+// grow platform dependencies (enforced by test/boundary.test.ts). Tests run on
+// Node and stub browser globals, so they get Node and DOM types here instead.
+{
+  "extends": "../../tsconfig.node.json",
+  "compilerOptions": {
+    "lib": ["ESNext", "esnext.disposable", "DOM", "DOM.Iterable"]
+  },
+  "include": ["src", "test"]
+}

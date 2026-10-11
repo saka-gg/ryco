@@ -4,6 +4,7 @@ import {
   EventId,
   MessageId,
   ProviderInstanceId,
+  ProviderDriverKind,
   RuntimeSessionId,
   ThreadId,
   TurnId,
@@ -65,7 +66,7 @@ function setup(choice: "continue" | "compact" | "cancel" = "compact") {
   }));
   const review = vi.fn(async () => choice);
   const input: CommitSendTurnDispatchInput = {
-    providerDriver: "claudeAgent",
+    providerDriver: ProviderDriverKind.make("claudeAgent"),
     assertMutationReady: vi.fn(),
     api: {
       orchestration: { getThreadWindow: read, dispatchCommand: dispatch },
@@ -344,7 +345,11 @@ describe("held send through native compaction", () => {
     const thread = fixture();
     f.setThread({ ...thread, session: { ...thread.session!, providerName: "codex" } });
     const endLocalDispatch = vi.fn();
-    await commitSendTurnDispatch({ ...f.input, providerDriver: "codex", endLocalDispatch });
+    await commitSendTurnDispatch({
+      ...f.input,
+      providerDriver: ProviderDriverKind.make("codex"),
+      endLocalDispatch,
+    });
     expect(f.read).not.toHaveBeenCalled();
     expect(f.review).not.toHaveBeenCalled();
     expect(endLocalDispatch).not.toHaveBeenCalled();
@@ -585,7 +590,10 @@ describe("a conversation whose folder moved", () => {
 it("does not preflight Claude cache for a known non-Claude source handoff", async () => {
   const f = setup();
   f.read.mockRejectedValue(new Error("Source history is unavailable"));
-  await commitSendTurnDispatch({ ...f.input, sourceProviderDriver: "codex" });
+  await commitSendTurnDispatch({
+    ...f.input,
+    sourceProviderDriver: ProviderDriverKind.make("codex"),
+  });
   expect(f.read).not.toHaveBeenCalled();
   expect(f.review).not.toHaveBeenCalled();
   expect(f.dispatch).toHaveBeenCalledTimes(1);
@@ -595,7 +603,7 @@ it("still reviews an existing Claude source when its target model changes", asyn
   const f = setup("continue");
   await commitSendTurnDispatch({
     ...f.input,
-    sourceProviderDriver: "claudeAgent",
+    sourceProviderDriver: ProviderDriverKind.make("claudeAgent"),
     modelSelection: { ...f.input.modelSelection, model: "opus" },
   });
   expect(f.review).toHaveBeenCalledTimes(1);

@@ -1,9 +1,10 @@
 import {
   PROVIDER_SEND_TURN_MAX_FILE_BYTES,
   type EnvironmentId,
+  type ExecutionEnvironmentCapabilities,
   type ThreadId,
 } from "@ryco/contracts";
-import { describe, expect, it, vi } from "vite-plus/test";
+import { describe, expect, it, vi, type Mock } from "vite-plus/test";
 
 import {
   createChatFileUploadEngine,
@@ -21,17 +22,19 @@ const ENV_ID = "env-1" as EnvironmentId;
 const FUTURE = new Date(Date.now() + 10 * 60 * 1000).toISOString();
 const PAST = new Date(Date.now() - 10 * 60 * 1000).toISOString();
 
-function makeTransport(overrides?: Partial<ChatFileUploadTransport>): ChatFileUploadTransport & {
-  createFileUploadUrl: ReturnType<typeof vi.fn>;
-  transferBytes: ReturnType<typeof vi.fn>;
-} {
+interface TransportMocks {
+  readonly createFileUploadUrl: Mock<ChatFileUploadTransport["createFileUploadUrl"]>;
+  readonly transferBytes: Mock<ChatFileUploadTransport["transferBytes"]>;
+}
+
+function makeTransport(overrides?: Partial<TransportMocks>): TransportMocks {
   return {
-    createFileUploadUrl: vi.fn(async () => ({
+    createFileUploadUrl: vi.fn<ChatFileUploadTransport["createFileUploadUrl"]>(async () => ({
       uploadToken: "token-1",
       expiresAt: FUTURE,
       maxUploadBytes: PROVIDER_SEND_TURN_MAX_FILE_BYTES,
     })),
-    transferBytes: vi.fn(async ({ onProgress }) => {
+    transferBytes: vi.fn<ChatFileUploadTransport["transferBytes"]>(async ({ onProgress }) => {
       onProgress?.(0.5);
       return { name: "file.bin", mimeType: "application/octet-stream", sizeBytes: 10 };
     }),
@@ -54,6 +57,17 @@ function makeRequest(
   };
 }
 
+function capabilities(
+  overrides: Partial<ExecutionEnvironmentCapabilities>,
+): ExecutionEnvironmentCapabilities {
+  return {
+    repositoryIdentity: false,
+    threadSettlement: false,
+    threadPriorityRanking: false,
+    ...overrides,
+  };
+}
+
 function flushMicrotasks(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
@@ -69,14 +83,20 @@ describe("upload pure helpers", () => {
 
   it("resolves the streaming limit from the capability", () => {
     expect(
-      resolveFileUploadMaxBytes({ fileAttachments: { maxUploadBytes: 25 * 1024 * 1024 } }),
+      resolveFileUploadMaxBytes(
+        capabilities({ fileAttachments: { maxUploadBytes: 25 * 1024 * 1024 } }),
+      ),
     ).toBe(25 * 1024 * 1024);
     expect(
-      resolveFileUploadMaxBytes({ fileAttachments: { maxUploadBytes: 500 * 1024 * 1024 } }),
+      resolveFileUploadMaxBytes(
+        capabilities({ fileAttachments: { maxUploadBytes: 500 * 1024 * 1024 } }),
+      ),
     ).toBe(PROVIDER_SEND_TURN_MAX_FILE_BYTES);
     expect(resolveFileUploadMaxBytes(undefined)).toBeNull();
-    expect(resolveFileUploadMaxBytes({})).toBeNull();
-    expect(resolveFileUploadMaxBytes({ fileAttachments: { maxUploadBytes: 0 } })).toBeNull();
+    expect(resolveFileUploadMaxBytes(capabilities({}))).toBeNull();
+    expect(
+      resolveFileUploadMaxBytes(capabilities({ fileAttachments: { maxUploadBytes: 0 } })),
+    ).toBeNull();
   });
 
   it("classifies blocking statuses", () => {
@@ -204,7 +224,7 @@ describe("upload engine", () => {
 
   it("marks a transfer failure as retryable", async () => {
     const transport = makeTransport({
-      transferBytes: vi.fn(async ({ onProgress }) => {
+      transferBytes: vi.fn<ChatFileUploadTransport["transferBytes"]>(async ({ onProgress }) => {
         onProgress?.(0.1);
         throw new Error("disk full");
       }),

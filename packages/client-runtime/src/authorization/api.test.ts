@@ -1,3 +1,9 @@
+import { NativeE2eeEnrollmentRevision } from "@ryco/contracts";
+import {
+  NativeAccountGrantRelayTicketRequest,
+  NativeE2eeEnrollmentUpsertRequest,
+} from "@ryco/contracts/native-e2ee";
+import * as Schema from "effect/Schema";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import type {
@@ -10,8 +16,8 @@ import type {
   SessionCredentialsService,
 } from "@ryco/client-runtime/platform";
 
-import { HostedHubApi, HostedHubApiError } from "./api";
-import { encodeBase64Url } from "../relay/base64url";
+import { HostedHubApi, HostedHubApiError } from "./api.ts";
+import { encodeBase64Url } from "../relay/base64url.ts";
 
 const PASSKEY_ID = "pkey_aaaaaaaaaaaaaaaaaaaaaa";
 
@@ -217,7 +223,9 @@ describe("HostedHubApi", () => {
 
   it("uses the existing same-origin first-owner WebAuthn registration endpoints", async () => {
     const requests: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
-    const register = vi.fn(async () => ({ id: "passkey-response-canary" }) as never);
+    const register = vi.fn(
+      async (_options: unknown, _signal?: unknown) => ({ id: "passkey-response-canary" }) as never,
+    );
     globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       requests.push({ input, ...(init ? { init } : {}) });
       return requests.length === 1
@@ -460,13 +468,13 @@ describe("HostedHubApi", () => {
     await expect(api.listE2eeDevices()).resolves.toEqual([nativeE2eeEnrollment]);
     await expect(
       api.renameE2eeDevice(nativeE2eeEnrollmentId, {
-        expectedEnrollmentRevision: 1,
+        expectedEnrollmentRevision: NativeE2eeEnrollmentRevision.make(1),
         deviceLabel: "Phone",
       }),
     ).resolves.toMatchObject({ enrollmentRevision: 2, deviceLabel: "Phone" });
     await expect(
       api.revokeE2eeDevice(nativeE2eeEnrollmentId, {
-        expectedEnrollmentRevision: 2,
+        expectedEnrollmentRevision: NativeE2eeEnrollmentRevision.make(2),
         reasonCode: "owner_requested",
       }),
     ).resolves.toMatchObject({ status: "revoked" });
@@ -593,7 +601,7 @@ describe("HostedHubApi", () => {
     const maxNodeId = `node_${"m".repeat(43)}`;
     globalThis.fetch = vi.fn(async () => response(session));
     await api.restoreSession();
-    const request = vi.fn(async () =>
+    const request = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
       response({ ticket: "ticket", expiresAt: 1, protocolMajor: 1, protocolMinor: 2 }, 201),
     );
     globalThis.fetch = request;
@@ -1941,7 +1949,7 @@ const nativeE2eeEnrollment = {
   revokedAt: null,
 } as const;
 
-const nativeE2eeEnrollmentRequest = {
+const nativeE2eeEnrollmentRequest = Schema.decodeUnknownSync(NativeE2eeEnrollmentUpsertRequest)({
   protocolVersion: 1,
   hubOrigin: "https://hub.example.test",
   accountId: session.account.id,
@@ -1961,9 +1969,9 @@ const nativeE2eeEnrollmentRequest = {
   requestedCapabilities: ["ryco.rpc"],
   enrollmentNonce: nativeE2eeOpaque,
   idempotencyKey: nativeE2eeOpaque,
-} as const;
+});
 
-const nativeE2eeTicketRequest = {
+const nativeE2eeTicketRequest = Schema.decodeUnknownSync(NativeAccountGrantRelayTicketRequest)({
   protocolVersion: 1,
   nodeId: "node_aaaaaaaaaaaaaaaaaaaaaa",
   capability: "ryco.rpc",
@@ -1973,7 +1981,7 @@ const nativeE2eeTicketRequest = {
   enrollmentId: nativeE2eeEnrollmentId,
   enrollmentRevision: 1,
   clientPrekeyCertificateDigest: nativeE2eeOpaque,
-} as const;
+});
 
 const nativeE2eeTicket = {
   protocolVersion: 1,
@@ -2788,7 +2796,7 @@ describe("HostedHubApi native system-browser handoff", () => {
       }),
       sha256: vi.fn(async () => new Uint8Array(32).fill(8)),
       openSystemBrowser: vi.fn(async () => ({
-        type: "success",
+        type: "success" as const,
         url: `ryco-dev://hosted/complete?code=${code}&state=${state}&handoff_id=${handoffId}`,
       })),
     };
@@ -2878,7 +2886,7 @@ describe("HostedHubApi native system-browser handoff", () => {
       }),
       sha256: vi.fn(async () => new Uint8Array(32).fill(8)),
       openSystemBrowser: vi.fn(async () => ({
-        type: "success",
+        type: "success" as const,
         url: `ryco-dev://hosted/complete?code=${code}&state=${state}&handoff_id=${handoffId}`,
       })),
     };
@@ -3746,7 +3754,7 @@ describe("HostedHubApi native identity v2 transport", () => {
       activationSecret: verified.activationSecret,
       password: "password-sensitive-canary",
       idempotencyKey: opaqueC,
-    });
+    } as never);
     const login = await api.startNativeIdentityPasswordLogin({
       kind: "username",
       username: "ada_dev",

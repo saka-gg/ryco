@@ -14,6 +14,7 @@ import {
   WorktreeId,
   type OrchestrationEvent,
   type OrchestrationShellStreamEvent,
+  type OrchestrationThread,
   type OrchestrationThreadShell,
   type ThreadLineage,
 } from "@ryco/contracts";
@@ -43,9 +44,9 @@ import {
   type AppState,
   type EnvironmentState,
   useStore,
-} from "./store";
-import { deriveThreadActivityStatus } from "./threadActivityStatus";
-import { DEFAULT_INTERACTION_MODE, DEFAULT_RUNTIME_MODE, type Thread } from "./types";
+} from "./store.ts";
+import { deriveThreadActivityStatus } from "./threadActivityStatus.ts";
+import { DEFAULT_INTERACTION_MODE, DEFAULT_RUNTIME_MODE, type Thread } from "./types.ts";
 
 const localEnvironmentId = EnvironmentId.make("environment-local");
 const remoteEnvironmentId = EnvironmentId.make("environment-remote");
@@ -504,7 +505,7 @@ describe("worktree sidebar state", () => {
         makeEvent("thread.meta-updated", {
           threadId: thread.id,
           worktreePath: "/tmp/project/pr",
-          updatedAt: thread.updatedAt,
+          updatedAt: thread.updatedAt!,
         }),
         localEnvironmentId,
       );
@@ -540,8 +541,11 @@ describe("worktree sidebar state", () => {
           sourcePath: "/tmp/project/pr",
           destinationPath: "/tmp/new-checkout",
         });
-        const delayed = {
+        const delayed: OrchestrationThread = {
           ...makeThread({ worktreeId, worktreePath: "/tmp/project/pr" }),
+          worktreeId,
+          settledOverride: null,
+          settledAt: null,
           updatedAt: "2026-02-13T00:00:00.000Z",
           deletedAt: null,
           latestTurn: null,
@@ -2171,7 +2175,7 @@ describe("thread settlement state", () => {
         localEnvironmentId,
       );
       expect(
-        localEnvironmentStateOf(state).sidebarThreadSummaryById["thread-settlement"]
+        localEnvironmentStateOf(state).sidebarThreadSummaryById[ThreadId.make("thread-settlement")]
           ?.latestCompletedTurnAt,
       ).toBe(latestCompletedTurnAt);
     }
@@ -2185,7 +2189,7 @@ describe("thread settlement state", () => {
       localEnvironmentId,
     );
     expect(
-      localEnvironmentStateOf(settled).sidebarThreadSummaryById["thread-settlement"],
+      localEnvironmentStateOf(settled).sidebarThreadSummaryById[ThreadId.make("thread-settlement")],
     ).toMatchObject({
       settledOverride: "settled",
       settledAt,
@@ -2197,7 +2201,9 @@ describe("thread settlement state", () => {
       localEnvironmentId,
     );
     expect(
-      localEnvironmentStateOf(replaced).sidebarThreadSummaryById["thread-settlement"],
+      localEnvironmentStateOf(replaced).sidebarThreadSummaryById[
+        ThreadId.make("thread-settlement")
+      ],
     ).toMatchObject({
       settledOverride: null,
       settledAt: null,

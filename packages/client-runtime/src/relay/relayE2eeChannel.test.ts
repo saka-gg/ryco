@@ -46,14 +46,14 @@ import {
   CLIENT_E2EE_RECEIVE_FATAL_ROWS,
   makeRelayE2eeClientChannel,
   type RelayE2eeChannelDiagnostic,
-} from "./relayE2eeChannel";
+} from "./relayE2eeChannel.ts";
+import type { HostedRelayFailure } from "../authorization/types.ts";
 import {
   relayE2eeFailure,
-  type HostedRelayFailure,
   type RelayE2eeFailureKind,
   type RelayE2eeHost,
   type RelayE2eeReservation,
-} from "./relayEngine";
+} from "./relayEngine.ts";
 
 // §16.1-style TEST-ONLY material: fixed counting patterns, reproducible from
 // the document alone. None of it may ever reach a real endpoint.
@@ -133,6 +133,15 @@ function makeHost(limits: RelayLimitsType = RELAY_INITIAL_LIMITS): {
   };
   const host: RelayE2eeHost = {
     limits,
+    channel: {
+      channelId: "channel-test",
+      capability: "ryco.rpc",
+      effectiveRole: "operator",
+      relayProtocolMajor: 1,
+      relayProtocolMinor: 3,
+    },
+    // The engine owns the release valve; the channel under test never calls it.
+    lockMode: () => {},
     admit: (messageBytes): RelayE2eeReservation | undefined => {
       if (
         wire.refuseAdmission ||

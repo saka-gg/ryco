@@ -353,7 +353,9 @@ describe("send engine — retired chat project", () => {
       },
     } as unknown as EnvironmentApi;
     const turnStarts = () =>
-      harness.commands.filter((command) => command.type === "thread.turn.start") as Array<{
+      harness.commands.filter(
+        (command) => command.type === "thread.turn.start",
+      ) as unknown as Array<{
         commandId: string;
         threadId: string;
         message: { messageId: string; text: string };

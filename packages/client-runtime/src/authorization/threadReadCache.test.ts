@@ -3,7 +3,7 @@ import type { ThreadReadCacheThreadResponse } from "@ryco/contracts/thread-read-
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import { hostedHubStore, type HostedHubState } from "./state.ts";
-import type { HostedHubNode } from "./types.ts";
+import type { HostedHubAccount, HostedHubNode } from "./types.ts";
 import { startHostedThreadReadCache } from "./threadReadCache.ts";
 
 const settle = async () => {
@@ -25,7 +25,7 @@ describe("shared hosted thread read cache", () => {
       accountStatus: "authenticated",
       directoryStatus: "ready",
       browserStatus: "current",
-      account: { id: "account-a" },
+      account: { id: "account-a" } as HostedHubAccount,
       nodes: [node],
     } as HostedHubState;
     let invalidate = () => {};
@@ -120,7 +120,7 @@ describe("shared hosted thread read cache", () => {
       accountStatus: "authenticated",
       directoryStatus: "ready",
       browserStatus: "current",
-      account: { id: "account-a" },
+      account: { id: "account-a" } as HostedHubAccount,
       nodes: [node],
     } as HostedHubState;
     let invalidate = () => {};
@@ -218,7 +218,7 @@ describe("shared hosted thread read cache", () => {
       accountStatus: "authenticated",
       directoryStatus: "ready",
       browserStatus: "current",
-      account: { id: "account-a" },
+      account: { id: "account-a" } as HostedHubAccount,
       nodes: [node],
     } as HostedHubState;
     let tick = () => {};

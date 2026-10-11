@@ -51,7 +51,7 @@ function fixture(id = "environment-1") {
     })),
   }));
   const environment: ProviderMaintenanceEnvironment = {
-    client: { server: { updateProvider } } as ProviderMaintenanceEnvironment["client"],
+    client: { server: { updateProvider } } as unknown as ProviderMaintenanceEnvironment["client"],
     providers,
     activeInstanceIds: [],
     readiness: {
