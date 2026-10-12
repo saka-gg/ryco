@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { Config, Context, Effect, Exit, Layer, Option, Scope, Stream } from "effect";
 import { WsHostedRpcGroup } from "@ryco/contracts";
 import type { NodeE2eeAdmissionPolicy } from "@ryco/contracts/native-e2ee";
+import { installE2eeNodeNativePrimitives } from "@ryco/shared/relayE2eeNodeCrypto";
 
 import { AgentControlExternalTopologyService } from "../agentControl/Services/AgentControlExternalTopology.ts";
 import { DEFAULT_HUB_CONNECTOR_CONFIG, ServerConfig } from "../config.ts";
@@ -439,6 +440,12 @@ const machineDependencies: HubConnectorLiveDependencies = {
 
 const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
   Effect.gen(function* () {
+    // Every relay E2EE operation this node performs — record sealing and
+    // opening, the Noise DH, capability and certificate verification — may use
+    // `node:crypto` where it passes its known-answer self-test, with the pinned
+    // primitives deciding every rejection (§14.7). Idempotent and free until a
+    // primitive is first used.
+    installE2eeNodeNativePrimitives();
     const config = yield* ServerConfig;
     const environment = yield* ServerEnvironment;
     const descriptor = yield* environment.getDescriptor;

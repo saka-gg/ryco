@@ -94,6 +94,10 @@
       "types": "./src/relayE2eeClose.ts",
       "import": "./src/relayE2eeClose.ts"
     },
+    "./relayE2eeNodeCrypto": {
+      "types": "./src/relayE2eeNodeCrypto.ts",
+      "import": "./src/relayE2eeNodeCrypto.ts"
+    },
     "./relayE2eeSession": {
       "types": "./src/relayE2eeSession.ts",
       "import": "./src/relayE2eeSession.ts"

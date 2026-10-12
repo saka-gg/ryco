@@ -317,6 +317,248 @@ export function e2eeBytesEqual(left: Uint8Array, right: Uint8Array): boolean {
   return true;
 }
 
+// ─── §14.7 native primitive fast paths ───────────────────────────────────────
+//
+// A runtime that carries a native implementation of a §14.2 primitive — the
+// node and desktop processes, through `node:crypto` — may install it here, and
+// the pinned primitive then remains THE AUTHORITY for every verdict this
+// protocol depends on. The rules, which every dispatch function below follows:
+//
+//   - A native result is used only where §14.7 proves it byte-identical, or
+//     accept-equivalent, to the pinned primitive on every input the protocol
+//     can produce or receive. Anything else — a native throw, a result of the
+//     wrong shape, an all-zero agreement output, a native `false` — is
+//     answered by the pinned primitive, so every rejection, every error object
+//     and every error message is the pinned primitive's own.
+//   - Nothing is installed by default. Browsers and Hermes never install
+//     anything, and this module imports no Node built-in; the provider is
+//     built by a node-only module (`relayE2eeNodeCrypto.ts`) that the server
+//     and desktop compositions select, and it detects each primitive by a
+//     known-answer self-test at first use, never by version.
+//   - Installing a provider changes no wire byte, no accepted signature set,
+//     and no error surface; the corpus runs with and without it.
+
+/**
+ * Native implementations a runtime may install. Every member is optional and
+ * may be a getter that resolves to `undefined` (a primitive whose self-test
+ * failed); the dispatch functions below read each member on every use.
+ */
+export interface E2eeNativePrimitives {
+  /** RFC 7748 X25519(k, 9). Throw or return anything but 32 bytes to decline. */
+  readonly x25519PublicKey?: ((secretKey: Uint8Array) => Uint8Array) | undefined;
+  /** RFC 7748 X25519(k, u). Throw or return anything but 32 bytes to decline. */
+  readonly x25519SharedSecret?:
+    | ((secretKey: Uint8Array, publicKey: Uint8Array) => Uint8Array)
+    | undefined;
+  /** RFC 8032 Ed25519 (PureEdDSA) verification of `signature` over `message`. */
+  readonly ed25519Verify?:
+    | ((signature: Uint8Array, message: Uint8Array, publicKey: Uint8Array) => boolean)
+    | undefined;
+  /**
+   * ECDSA P-256 verification over SHA-256(`message`), signature raw `r ‖ s`,
+   * public key X9.63 uncompressed.
+   */
+  readonly p256Verify?:
+    | ((signature: Uint8Array, message: Uint8Array, publicKey: Uint8Array) => boolean)
+    | undefined;
+  /** RFC 8439 ChaCha20-Poly1305 with a 16-byte tag, used for records of at least `minBytes`. */
+  readonly chacha20Poly1305?: E2eeNativeChaCha20Poly1305 | undefined;
+}
+
+/** RFC 8439 §2.8 AEAD. `open` throws on authentication failure. */
+export interface E2eeNativeChaCha20Poly1305 {
+  /** Plaintext length (seal) or ciphertext-minus-tag length (open) below which noble runs. */
+  readonly minBytes: number;
+  seal(key: Uint8Array, nonce: Uint8Array, plaintext: Uint8Array, aad: Uint8Array): Uint8Array;
+  open(key: Uint8Array, nonce: Uint8Array, ciphertext: Uint8Array, aad: Uint8Array): Uint8Array;
+}
+
+let installedNativePrimitives: E2eeNativePrimitives | undefined;
+
+/**
+ * Install (or, with `undefined`, remove) the process's native primitives. The
+ * server and desktop compositions call this once at startup; nothing else may.
+ */
+export function installE2eeNativePrimitives(primitives: E2eeNativePrimitives | undefined): void {
+  installedNativePrimitives = primitives;
+}
+
+/** The installed native primitives, if any (§14.7). */
+export function e2eeNativePrimitives(): E2eeNativePrimitives | undefined {
+  return installedNativePrimitives;
+}
+
+const X25519_BYTES = 32;
+
+function isExactBytes(value: unknown, length: number): value is Uint8Array {
+  return value instanceof Uint8Array && value.byteLength === length;
+}
+
+function isAllZero(bytes: Uint8Array): boolean {
+  let accumulator = 0;
+  for (let index = 0; index < bytes.byteLength; index += 1) accumulator |= bytes[index]!;
+  return accumulator === 0;
+}
+
+/**
+ * Run a native X25519 operation, returning its output only if it is a 32-byte,
+ * not-all-zero value; `undefined` sends the caller to the pinned primitive.
+ */
+function nativeX25519Output(run: () => Uint8Array): Uint8Array | undefined {
+  let output: unknown;
+  try {
+    output = run();
+  } catch {
+    return undefined;
+  }
+  if (!(output instanceof Uint8Array)) return undefined;
+  if (output.byteLength === X25519_BYTES && !isAllZero(output)) return output;
+  output.fill(0);
+  return undefined;
+}
+
+/**
+ * `x25519.getPublicKey`, with the §14.7 native fast path. The X25519 function
+ * is deterministic (RFC 7748 §5): clamping, the base point, and the canonical
+ * output encoding leave no implementation latitude, so a native result is the
+ * pinned primitive's result. The pinned primitive throws only on an all-zero
+ * output, which no clamped scalar produces against the base point; a native
+ * all-zero or a native failure is answered by the pinned primitive anyway.
+ */
+export function e2eeX25519PublicKey(secretKey: Uint8Array): Uint8Array {
+  const native = installedNativePrimitives?.x25519PublicKey;
+  if (native !== undefined && isExactBytes(secretKey, X25519_BYTES)) {
+    const output = nativeX25519Output(() => native(secretKey));
+    if (output !== undefined) return output;
+  }
+  return x25519.getPublicKey(secretKey);
+}
+
+/**
+ * `x25519.getSharedSecret`, with the §14.7 native fast path.
+ *
+ * §8.1/§14.3: the pinned primitive throws exactly when the shared secret is
+ * all zero — it rejects the five low-order `u` values (after RFC 7748 masking
+ * and reduction) before the ladder, and those are precisely the inputs a
+ * clamped scalar sends to zero. A native output is therefore used only when it
+ * is NOT all zero, where it equals the pinned output byte for byte; an all-zero
+ * native output or any native failure re-runs the pinned primitive, so the
+ * mandated abort is raised by the pinned primitive itself, unchanged.
+ */
+export function e2eeX25519SharedSecret(secretKey: Uint8Array, publicKey: Uint8Array): Uint8Array {
+  const native = installedNativePrimitives?.x25519SharedSecret;
+  if (
+    native !== undefined &&
+    isExactBytes(secretKey, X25519_BYTES) &&
+    isExactBytes(publicKey, X25519_BYTES)
+  ) {
+    const output = nativeX25519Output(() => native(secretKey, publicKey));
+    if (output !== undefined) return output;
+  }
+  return x25519.getSharedSecret(secretKey, publicKey);
+}
+
+/**
+ * `x25519.keygen`, with the public half derived through `e2eeX25519PublicKey`.
+ * The secret is the pinned primitive's CSPRNG output either way (§14.5).
+ */
+export function e2eeX25519KeyPair(): E2eeAgreementKeyPair {
+  if (installedNativePrimitives?.x25519PublicKey === undefined) {
+    const keyPair = x25519.keygen();
+    return { secretKey: keyPair.secretKey, publicKey: keyPair.publicKey };
+  }
+  const secretKey = x25519.utils.randomSecretKey();
+  try {
+    return { secretKey, publicKey: e2eeX25519PublicKey(secretKey) };
+  } catch (error) {
+    secretKey.fill(0);
+    throw error;
+  }
+}
+
+const ED25519_GROUP_ORDER = ed25519.Point.Fn.ORDER;
+
+function bytesToBigIntLe(bytes: Uint8Array): bigint {
+  let value = 0n;
+  for (let index = bytes.byteLength - 1; index >= 0; index -= 1) {
+    value = (value << 8n) | BigInt(bytes[index]!);
+  }
+  return value;
+}
+
+/**
+ * The conditions strict (`zip215: false`) verification by the pinned primitive
+ * imposes before its verification equation: `A` and `R` decode under strict
+ * RFC 8032 rules, `A` is not of small order, and `0 ≤ s < L`. A native `true`
+ * is admitted only when every one holds (§14.7).
+ */
+function ed25519NativeVerdictAdmissible(signature: Uint8Array, publicKey: Uint8Array): boolean {
+  try {
+    if (ed25519.Point.fromBytes(publicKey, false).isSmallOrder()) return false;
+    ed25519.Point.fromBytes(signature.subarray(0, ED25519_SIGNATURE_BYTES / 2), false);
+    return bytesToBigIntLe(signature.subarray(ED25519_SIGNATURE_BYTES / 2)) < ED25519_GROUP_ORDER;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Strict Ed25519 verification (§14.3) with the §14.7 native fast path.
+ *
+ * The pinned primitive accepts iff `A` and `R` decode strictly, `A` is not of
+ * small order, `s < L`, and the COFACTORED equation `[8](R + [k]A − [s]B) = 0`
+ * holds for `k = SHA-512(R ‖ A ‖ M) mod L`. A conforming native verifier
+ * returns `true` only when the cofactored or the cofactorless equation holds
+ * for the same decoded points and the same `k`; the cofactorless equation
+ * implies the cofactored one, so a native `true` under the admissibility
+ * checks above is a pinned `true`. A native `false` proves nothing (a
+ * cofactorless verifier rejects torsion-carrying signatures the pinned
+ * primitive accepts), so it is answered by the pinned primitive. The accepted
+ * set is therefore exactly the pinned primitive's.
+ */
+function verifyEd25519Strict(
+  signature: Uint8Array,
+  message: Uint8Array,
+  publicKey: Uint8Array,
+): boolean {
+  const native = installedNativePrimitives?.ed25519Verify;
+  if (native !== undefined && ed25519NativeVerdictAdmissible(signature, publicKey)) {
+    try {
+      if (native(signature, message, publicKey) === true) return true;
+    } catch {
+      // Answered by the pinned primitive below.
+    }
+  }
+  return ed25519.verify(signature, message, publicKey, { zip215: false });
+}
+
+/**
+ * P-256 verification (§7.1, §14.3) with the §14.7 native fast path, on a key
+ * and signature the caller has already put through the full §7.1 validation.
+ *
+ * ECDSA verification is one predicate (SEC 1 §4.1.4 / FIPS 186-5 §6.4.2): with
+ * `1 ≤ r, s < n` and `Q` a valid non-identity point, accept iff
+ * `x([e·s⁻¹]G + [r·s⁻¹]Q) mod n = r` with the sum not the identity, where `e`
+ * is SHA-256(M) as an integer. Neither implementation enforces low `s`. A
+ * native `true` is therefore a pinned `true`; a native `false` or failure is
+ * answered by the pinned primitive regardless.
+ */
+function verifyP256(signature: Uint8Array, message: Uint8Array, publicKey: Uint8Array): boolean {
+  const native = installedNativePrimitives?.p256Verify;
+  if (native !== undefined) {
+    try {
+      if (native(signature, message, publicKey) === true) return true;
+    } catch {
+      // Answered by the pinned primitive below.
+    }
+  }
+  return p256.verify(signature, sha256(message), publicKey, {
+    prehash: false,
+    lowS: false,
+    format: "compact",
+  });
+}
+
 // ─── §6.2 static agreement key generation ────────────────────────────────────
 
 /**
@@ -361,8 +603,7 @@ export interface E2eeAgreementKeyPair {
  * no `crypto.getRandomValues` rather than falling back to anything.
  */
 export function generateE2eeAgreementKeyPair(): E2eeAgreementKeyPair {
-  const keyPair = x25519.keygen();
-  return { secretKey: keyPair.secretKey, publicKey: keyPair.publicKey };
+  return e2eeX25519KeyPair();
 }
 
 /**
@@ -382,7 +623,7 @@ export function deriveE2eeAgreementPublicKey(secretKey: Uint8Array): Uint8Array 
     invalidRelayE2eeInput();
   }
   try {
-    return validateE2eeAgreementPublicKey(x25519.getPublicKey(secretKey));
+    return validateE2eeAgreementPublicKey(e2eeX25519PublicKey(secretKey));
   } catch (error: unknown) {
     if (error instanceof RelayE2eeValidationError) throw error;
     return invalidRelayE2eeInput();
@@ -422,7 +663,7 @@ export function verifyE2eeSignature(input: E2eeSignatureVerification): boolean {
       const signature = validateE2eeNodeSignature(input.signature);
       const memoKey = verifiedSignatureKey(input.algorithm, publicKey, input.message, signature);
       if (rememberedVerifiedSignature(memoKey)) return true;
-      const verified = ed25519.verify(signature, input.message, publicKey, { zip215: false });
+      const verified = verifyEd25519Strict(signature, input.message, publicKey);
       if (verified) rememberVerifiedSignature(memoKey);
       return verified;
     }
@@ -431,11 +672,7 @@ export function verifyE2eeSignature(input: E2eeSignatureVerification): boolean {
       const signature = validateE2eeClientSignature(input.signature);
       const memoKey = verifiedSignatureKey(input.algorithm, publicKey, input.message, signature);
       if (rememberedVerifiedSignature(memoKey)) return true;
-      const verified = p256.verify(signature, sha256(input.message), publicKey, {
-        prehash: false,
-        lowS: false,
-        format: "compact",
-      });
+      const verified = verifyP256(signature, input.message, publicKey);
       if (verified) rememberVerifiedSignature(memoKey);
       return verified;
     }

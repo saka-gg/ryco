@@ -1,5 +1,4 @@
 import { chacha20poly1305 } from "@noble/ciphers/chacha.js";
-import { x25519 } from "@noble/curves/ed25519.js";
 import { expand, extract } from "@noble/hashes/hkdf.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { clean, concatBytes, utf8ToBytes } from "@noble/hashes/utils.js";
@@ -10,6 +9,7 @@ import {
   E2EE_AGREEMENT_PUBLIC_KEY_BYTES,
   E2EE_SECRET_BYTES,
 } from "./relayE2eeConstants.ts";
+import { e2eeX25519KeyPair, e2eeX25519PublicKey, e2eeX25519SharedSecret } from "./relayE2eeKeys.ts";
 import {
   E2EE_NOISE_PATTERN_IK,
   E2EE_NOISE_PATTERN_NX,
@@ -29,9 +29,12 @@ import {
 // and call only the §14.2 primitive packages". Every AEAD, hash, HMAC/HKDF, and
 // curve operation below is therefore a call into `@noble/ciphers`,
 // `@noble/hashes`, or `@noble/curves`, through their documented public entry
-// points only (§14.6). Nothing here reimplements a primitive, and nothing here
-// may grow a second protocol name, a PSK token, a fallback pattern, or a
-// transport cipher state.
+// points only (§14.6) — the X25519 operations through the `relayE2eeKeys`
+// dispatch functions, which call `@noble/curves` unless a §14.7 native
+// implementation is installed, and then still leave every all-zero abort and
+// every error to `@noble/curves`. Nothing here reimplements a primitive, and
+// nothing here may grow a second protocol name, a PSK token, a fallback
+// pattern, or a transport cipher state.
 //
 // KEEP IT SMALL. §14.1's bound on first-party Noise code is what makes a scoped
 // third-party audit possible at all, and that audit is a precondition for
@@ -634,7 +637,7 @@ export class E2eeNoiseHandshake {
     // disagrees with itself and a handshake its peer rejects — never a leaked
     // copy.
     const staticPublicKey =
-      staticSecretKey === undefined ? undefined : x25519.getPublicKey(staticSecretKey);
+      staticSecretKey === undefined ? undefined : e2eeX25519PublicKey(staticSecretKey);
     if (pattern === E2EE_NOISE_PATTERN_IK) {
       // Noise §5.3: one MixHash per pre-message public key. IK's only
       // pre-message is `<- s`, so both parties hash the responder's static. The
@@ -918,13 +921,13 @@ export class E2eeNoiseHandshake {
       // would put the injected secret beyond the reach of `#eraseSecrets` while
       // a statement that can still fail runs, and the caller of this method
       // assigns the pair to `#e` with nothing fallible in between.
-      const publicKey = x25519.getPublicKey(injected);
+      const publicKey = e2eeX25519PublicKey(injected);
       this.#pendingEphemeralSecretKey = undefined;
       return { secretKey: injected, publicKey };
     }
     // §14.5: the CSPRNG is the primitive's, and it fails closed when the runtime
     // has no `crypto.getRandomValues` rather than falling back to anything.
-    const keyPair = x25519.keygen();
+    const keyPair = e2eeX25519KeyPair();
     return { secretKey: keyPair.secretKey, publicKey: keyPair.publicKey };
   }
 
@@ -965,7 +968,7 @@ export class E2eeNoiseHandshake {
     // preceding tokens have not established; it is a guard against a pattern
     // table edit, not a runtime condition.
     if (local === undefined || remote === undefined) noiseFailure("out_of_sequence");
-    const sharedSecret = x25519.getSharedSecret(local.secretKey, remote);
+    const sharedSecret = e2eeX25519SharedSecret(local.secretKey, remote);
     try {
       this.#symmetric.mixKey(sharedSecret);
     } finally {
