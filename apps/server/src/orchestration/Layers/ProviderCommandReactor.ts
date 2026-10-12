@@ -1,5 +1,5 @@
 import * as SqlClient from "effect/sql/SqlClient";
-import { acquireStoragePathUseLease } from "../../storage/lifecycle.ts";
+import { acquireStoragePathUseLeaseHandle } from "../../storage/lifecycle.ts";
 import { isClaudeNativeCompaction } from "../../provider/claudeNativeCompaction.ts";
 import { computerToolInstructions } from "../../computer/tools/computerGuidance.ts";
 import type { ComputerTurnIntent } from "@ryco/contracts";
@@ -411,8 +411,8 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
   ) =>
     Effect.gen(function* () {
       const candidate = thread.worktreePath ?? project?.workspaceRoot;
-      if (!candidate || Option.isNone(storageSql)) return;
-      const release = yield* acquireStoragePathUseLease(storageSql.value, candidate).pipe(
+      if (!candidate || Option.isNone(storageSql)) return undefined;
+      const held = yield* acquireStoragePathUseLeaseHandle(storageSql.value, candidate).pipe(
         Effect.mapError(
           (cause) =>
             new ProviderAdapterRequestError({
@@ -423,7 +423,8 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
             }),
         ),
       );
-      yield* Effect.addFinalizer(() => release);
+      yield* Effect.addFinalizer(() => held.release);
+      return held;
     });
   const approvals = yield* ProjectionPendingApprovalRepository;
   const questions = yield* ProjectionThreadUserInputRequestRepository;
@@ -770,8 +771,8 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     const project = options.prefetched
       ? options.prefetched.project
       : yield* resolveProject(thread.projectId);
-    // One lease for the whole start, including the worktree check.
-    yield* leaseThreadPath(thread, project);
+    // One lease for the whole start, including the worktree check and the provider start.
+    const heldPathLease = yield* leaseThreadPath(thread, project);
     yield* ensureRecordedWorktreeAvailable(thread, project, { pathLeased: true });
 
     const desiredRuntimeMode = thread.runtimeMode;
@@ -875,17 +876,21 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     }) =>
       laneControl.guardStart(
         startFence,
-        providerService.startSession(threadId, {
+        providerService.startSession(
           threadId,
-          ...(preferredProvider ? { provider: preferredProvider } : {}),
-          providerInstanceId: desiredInstanceId,
-          ...(effectiveCwd ? { cwd: effectiveCwd } : {}),
-          modelSelection: desiredModelSelection,
-          ...(input?.resumeCursor !== undefined ? { resumeCursor: input.resumeCursor } : {}),
-          runtimeMode: desiredRuntimeMode,
-          tokenMode: desiredTokenMode,
-          ...(customSystemPrompt !== undefined ? { customSystemPrompt } : {}),
-        }),
+          {
+            threadId,
+            ...(preferredProvider ? { provider: preferredProvider } : {}),
+            providerInstanceId: desiredInstanceId,
+            ...(effectiveCwd ? { cwd: effectiveCwd } : {}),
+            modelSelection: desiredModelSelection,
+            ...(input?.resumeCursor !== undefined ? { resumeCursor: input.resumeCursor } : {}),
+            runtimeMode: desiredRuntimeMode,
+            tokenMode: desiredTokenMode,
+            ...(customSystemPrompt !== undefined ? { customSystemPrompt } : {}),
+          },
+          heldPathLease !== undefined ? { heldPathLease } : undefined,
+        ),
       );
 
     const bindSessionToThread = (session: ProviderSession) =>

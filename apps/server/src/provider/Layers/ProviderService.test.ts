@@ -43,6 +43,10 @@ import {
   Stream,
 } from "effect";
 import * as SqlClient from "effect/sql/SqlClient";
+import {
+  acquireStoragePathUseLeaseHandle,
+  hasWorktreeCreationLease,
+} from "../../storage/lifecycle.ts";
 import { TestClock } from "effect/testing";
 
 import {
@@ -2600,6 +2604,64 @@ fanout.layer("ProviderServiceLive fanout", (it) => {
     }),
   );
 });
+
+it.live("ProviderServiceLive retains the caller's path lease instead of acquiring its own", () =>
+  Effect.gen(function* () {
+    const codex = makeFakeCodexAdapter();
+    const registry = makeAdapterRegistryMock({ [CODEX_DRIVER]: codex.adapter });
+    const runtimeRepositoryLayer = ProviderSessionRuntimeRepositoryLive.pipe(
+      Layer.provide(SqlitePersistenceMemory),
+    );
+    const directoryLayer = ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer));
+    // The service and the test share one database, so the move below fences the service.
+    const providerLayer = makeProviderServiceLive().pipe(
+      Layer.provide(Layer.succeed(ProviderAdapterRegistry, registry)),
+      Layer.provide(directoryLayer),
+      Layer.provide(defaultServerSettingsLayer),
+      Layer.provide(AnalyticsService.layerTest),
+      Layer.provide(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
+      Layer.provideMerge(SqlitePersistenceMemory),
+    );
+    const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ryco-start-lease-")));
+
+    yield* Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const sql = yield* SqlClient.SqlClient;
+      const held = yield* acquireStoragePathUseLeaseHandle(sql, root);
+      // A move that starts after the caller leased the path refuses new leases there.
+      yield* sql`INSERT INTO project_relocations (
+          relocation_id, project_id, source_path, destination_path, strategy, state,
+          destination_created, error, created_at, updated_at
+        ) VALUES (
+          'relocation-start-lease', 'project-chat', ${root}, ${`${root}-moved`}, 'rename',
+          'pending', 0, NULL, '2026-10-08T10:00:00.000Z', '2026-10-08T10:00:00.000Z'
+        )`;
+      const startInput = (threadId: ThreadId) => ({
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId,
+        cwd: root,
+        runtimeMode: "full-access" as const,
+      });
+
+      const unleased = asThreadId("thread-start-own-lease");
+      const refused = yield* Effect.flip(provider.startSession(unleased, startInput(unleased)));
+      assert.instanceOf(refused, ProviderValidationError);
+      assert.include(refused.issue, "being moved");
+
+      const leased = asThreadId("thread-start-held-lease");
+      const session = yield* provider.startSession(leased, startInput(leased), {
+        heldPathLease: held,
+      });
+      assert.equal(session.cwd, root);
+      assert.isTrue(hasWorktreeCreationLease(root));
+      yield* held.release;
+      // The start's own use ended with the start.
+      assert.isFalse(hasWorktreeCreationLease(root));
+    }).pipe(Effect.provide(providerLayer));
+    fs.rmSync(root, { recursive: true, force: true });
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
 
 it.live("ProviderServiceLive fails a same-instance fresh replacement when stop times out", () =>
   Effect.gen(function* () {

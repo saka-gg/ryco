@@ -1,6 +1,6 @@
 import { readPersistedCwd } from "../runtimeCwd.ts";
 import * as SqlClient from "effect/sql/SqlClient";
-import { acquireStoragePathUseLease } from "../../storage/lifecycle.ts";
+import { acquireStoragePathUseLease, retainStoragePathUseLease } from "../../storage/lifecycle.ts";
 /**
  * ProviderServiceLive - Cross-provider orchestration layer.
  *
@@ -1335,7 +1335,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     );
 
   const startSession: ProviderServiceShape["startSession"] = Effect.fn("startSession")(
-    function* (threadId, rawInput) {
+    function* (threadId, rawInput, options) {
       const parsed = yield* decodeInputOrValidationError({
         operation: "ProviderService.startSession",
         schema: ProviderSessionStartInput,
@@ -1432,7 +1432,12 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             ? readPersistedCwd(persistedBinding.runtimePayload)
             : undefined);
         if (effectiveCwd && Option.isSome(storageSql)) {
-          const release = yield* acquireStoragePathUseLease(storageSql.value, effectiveCwd).pipe(
+          const heldPathLease = options?.heldPathLease;
+          const release = yield* (
+            heldPathLease !== undefined && heldPathLease.path === effectiveCwd
+              ? retainStoragePathUseLease(storageSql.value, heldPathLease)
+              : acquireStoragePathUseLease(storageSql.value, effectiveCwd)
+          ).pipe(
             Effect.mapError((cause) =>
               toValidationError(
                 "ProviderService.startSession",

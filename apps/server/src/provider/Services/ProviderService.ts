@@ -33,6 +33,7 @@ import type {
 import { Context } from "effect";
 import type { Effect, Option, Stream } from "effect";
 
+import type { HeldStoragePathUseLease } from "../../storage/lifecycle.ts";
 import type { ProviderServiceError } from "../Errors.ts";
 import type { ProviderAdapterCapabilities, ProviderThreadHistory } from "./ProviderAdapter.ts";
 import type { ProviderInstanceRoutingInfo } from "./ProviderAdapterRegistry.ts";
@@ -86,6 +87,15 @@ export interface ProviderRuntimeActivity {
 /**
  * ProviderServiceShape - Service API for provider session and turn orchestration.
  */
+/** In-process start options that are not part of the start input schema. */
+export interface ProviderSessionStartOptions {
+  /**
+   * A path use lease the caller holds for the whole start. When it covers the start's cwd the
+   * start retains it instead of acquiring its own (no second realpath and admission query).
+   */
+  readonly heldPathLease?: HeldStoragePathUseLease;
+}
+
 export interface ProviderServiceShape {
   /**
    * Read-only history recovery, stamped with the binding that authorized the read.
@@ -112,6 +122,7 @@ export interface ProviderServiceShape {
   readonly startSession: (
     threadId: ThreadId,
     input: ProviderSessionStartInput,
+    options?: ProviderSessionStartOptions,
   ) => Effect.Effect<ProviderSession, ProviderServiceError>;
 
   /** Start a fresh epoch and return the exact prior binding as a rollback token. */
