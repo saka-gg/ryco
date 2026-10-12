@@ -89,6 +89,22 @@ function shellSnapshot(sequence: number): OrchestrationShellSnapshot {
   };
 }
 
+function serverConfig() {
+  return {
+    environment: {
+      environmentId: EnvironmentId.make("env_bbbbbbbbbbbbbbbbbbbbbb"),
+      label: "Unrelated saved environment",
+      platform: { os: "linux", arch: "x64" },
+      serverVersion: "0.9.0",
+      capabilities: {
+        repositoryIdentity: false,
+        threadSettlement: false,
+        threadPriorityRanking: false,
+      },
+    },
+  };
+}
+
 function makeClient(): CapturedClient & Record<string, unknown> {
   let shellListener:
     | ((item: { kind: "snapshot"; snapshot: OrchestrationShellSnapshot }) => void)
@@ -99,20 +115,12 @@ function makeClient(): CapturedClient & Record<string, unknown> {
     isHeartbeatFresh: vi.fn(() => false),
     server: {
       subscribeLifecycle: vi.fn(() => () => undefined),
-      subscribeConfig: vi.fn(() => () => undefined),
-      getConfig: vi.fn(async () => ({
-        environment: {
-          environmentId: EnvironmentId.make("env_bbbbbbbbbbbbbbbbbbbbbb"),
-          label: "Unrelated saved environment",
-          platform: { os: "linux", arch: "x64" },
-          serverVersion: "0.9.0",
-          capabilities: {
-            repositoryIdentity: false,
-            threadSettlement: false,
-            threadPriorityRanking: false,
-          },
-        },
-      })),
+      // Like a real server, the config stream opens with a full snapshot.
+      subscribeConfig: vi.fn((listener: (event: unknown) => void) => {
+        queueMicrotask(() => listener({ version: 1, type: "snapshot", config: serverConfig() }));
+        return () => undefined;
+      }),
+      getConfig: vi.fn(async () => serverConfig()),
     },
     orchestration: {
       subscribeShell: vi.fn((listener: typeof shellListener) => {

@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { LinkIcon, PlusIcon } from "lucide-react";
-import { lazy, Suspense } from "react";
+import { Suspense } from "react";
 
 import { NoActiveThreadState } from "../components/NoActiveThreadState";
 import { Button } from "../components/ui/button";
@@ -9,12 +9,15 @@ import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "../components/
 import { SidebarInset } from "../components/ui/sidebar";
 import { useSavedEnvironmentRegistryStore } from "../environments/runtime";
 import { usePresentationTier } from "../hooks/usePresentationTier";
+import { getPresentationTier } from "../lib/presentationTier";
+import { preloadableLazy } from "../lib/preloadableLazy";
 import { APP_DISPLAY_NAME } from "~/branding";
 
-const LazyPhoneHome = lazy(() =>
-  import("../components/shell/phone/PhoneHome").then((module) => ({
-    default: module.PhoneHome,
-  })),
+// The frozen phone tier's Home. The route loader preloads it on that tier so
+// it renders on the first pass; the Suspense boundary below only covers a
+// rotation into the phone tier after the route already loaded.
+const PhoneHome = preloadableLazy(() =>
+  import("../components/shell/phone/PhoneHome").then((module) => module.PhoneHome),
 );
 
 function ChatIndexRouteView() {
@@ -33,7 +36,7 @@ function ChatIndexRouteView() {
   if (presentationTier === "phone") {
     return (
       <Suspense fallback={null}>
-        <LazyPhoneHome />
+        <PhoneHome />
       </Suspense>
     );
   }
@@ -42,6 +45,7 @@ function ChatIndexRouteView() {
 }
 
 export const Route = createFileRoute("/_chat/")({
+  loader: () => (getPresentationTier() === "phone" ? PhoneHome.preload() : undefined),
   component: ChatIndexRouteView,
 });
 

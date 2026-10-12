@@ -418,15 +418,20 @@ export function decodeGitHubPullRequestListJson(
   if (Result.isSuccess(result)) {
     const pullRequests: NormalizedGitHubPullRequestRecord[] = [];
     for (const entry of result.success) {
-      const decodedEntry = decodeGitHubPullRequestEntry(entry);
-      if (Exit.isFailure(decodedEntry)) {
-        continue;
-      }
-      pullRequests.push(normalizeGitHubPullRequestRecord(decodedEntry.value));
+      const pullRequest = decodeGitHubPullRequestEntryValue(entry);
+      if (pullRequest) pullRequests.push(pullRequest);
     }
     return Result.succeed(pullRequests);
   }
   return Result.fail(result.failure);
+}
+
+/** One already-parsed list entry in `gh`'s JSON shape; `null` when it does not decode. */
+export function decodeGitHubPullRequestEntryValue(
+  entry: unknown,
+): NormalizedGitHubPullRequestRecord | null {
+  const decodedEntry = decodeGitHubPullRequestEntry(entry);
+  return Exit.isSuccess(decodedEntry) ? normalizeGitHubPullRequestRecord(decodedEntry.value) : null;
 }
 
 export function decodeGitHubPullRequestJson(

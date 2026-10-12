@@ -175,6 +175,35 @@ describe("pull request page handlers", () => {
     }),
   );
 
+  it.effect("serves every list surface the one default list shape", () =>
+    Effect.gen(function* () {
+      const changeRequests: Array<unknown> = [];
+      const issues: Array<unknown> = [];
+      const { handlers, refreshes } = makeContext({
+        listChangeRequests: (input) =>
+          Effect.sync(() => (changeRequests.push(input), [changeRequest({ number: 4 })])),
+        listIssues: (input) => Effect.sync(() => (issues.push(input), [])),
+      });
+      yield* handlers[WS_METHODS.sourceControlListChangeRequests]({
+        cwd: "/repo",
+        state: "open",
+        limit: 100,
+      }).pipe(Effect.provide(handlerLayer));
+      yield* handlers[WS_METHODS.sourceControlListIssues]({
+        cwd: "/repo",
+        state: "open",
+        limit: 100,
+      }).pipe(Effect.provide(handlerLayer));
+      // No per-surface field or stack variants: the provider's default list is
+      // already lean (comment counts, stack summaries in the same request).
+      expect(changeRequests).toEqual([
+        { cwd: "/repo", headSelector: "", state: "open", limit: 100 },
+      ]);
+      expect(issues).toEqual([{ cwd: "/repo", state: "open", limit: 100 }]);
+      expect(refreshes).toContain("worktrees:sourceControl.listChangeRequests");
+    }),
+  );
+
   it.effect("passes commit scope through to the diff", () =>
     Effect.gen(function* () {
       const seen: Array<unknown> = [];

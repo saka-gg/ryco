@@ -57,6 +57,7 @@ import { ServerConfig } from "../../config.ts";
 import { WorkspaceAccessPolicyLayer } from "../../workspace/Layers/WorkspaceAccessPolicy.ts";
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
+import { ProviderAdapterRequestError } from "../../provider/Errors.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 
 function makeTestServerSettingsLayer(overrides: Partial<ServerSettings> = {}) {
@@ -420,8 +421,8 @@ describe("ProviderRuntimeIngestion", () => {
       completionRepository,
       workspaceRoot,
       attachmentsDir: path.join(workspaceRoot, "userdata", "attachments"),
-      reconcileThread: (threadId: ThreadId) =>
-        Effect.runPromise(ingestion.reconcileThread!(threadId)),
+      reconcileThread: (threadId: ThreadId, trigger?: "subscribe" | "session-settled") =>
+        Effect.runPromise(ingestion.reconcileThread!(threadId, trigger)),
       engine,
       readModel: () => Effect.runPromise(snapshotQuery.getSnapshot()),
       readShell: () => Effect.runPromise(snapshotQuery.getShellSnapshot()),
@@ -844,6 +845,43 @@ describe("ProviderRuntimeIngestion", () => {
         }),
       ),
     ).rejects.toThrow("Thread changed");
+  });
+
+  it("spaces a thread's history reads instead of reading on every signal", async () => {
+    let reads = 0;
+    const harness = await createHarness({
+      readThreadHistory: () =>
+        Effect.sync(() => {
+          reads += 1;
+          return Option.none();
+        }),
+    });
+    const threadId = asThreadId("thread-1");
+    await harness.reconcileThread(threadId);
+    await harness.reconcileThread(threadId);
+    await harness.reconcileThread(threadId, "session-settled");
+    expect(reads).toBe(1);
+  });
+
+  it("backs off a thread whose history read fails", async () => {
+    let reads = 0;
+    const harness = await createHarness({
+      readThreadHistory: () =>
+        Effect.suspend(() => {
+          reads += 1;
+          return Effect.fail(
+            new ProviderAdapterRequestError({
+              provider: "codex",
+              method: "thread/read",
+              detail: "codex app-server could not start",
+            }),
+          );
+        }),
+    });
+    const threadId = asThreadId("thread-1");
+    await harness.reconcileThread(threadId);
+    await harness.reconcileThread(threadId, "session-settled");
+    expect(reads).toBe(1);
   });
 
   // After "Turn into project…" the stopped binding still records the moved-away chat folder.

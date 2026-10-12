@@ -1,6 +1,7 @@
 import { ed25519, x25519 } from "@noble/curves/ed25519.js";
 import { p256 } from "@noble/curves/nist.js";
 import { sha256 } from "@noble/hashes/sha2.js";
+import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import { encode, rfc8949EncodeOptions } from "cborg";
 
 import {
@@ -11,6 +12,7 @@ import {
   P256_PUBLIC_KEY_BYTES,
   P256_SIGNATURE_BYTES,
 } from "./relayE2eeConstants.ts";
+import { RelayE2eeValidationError, invalidRelayE2eeInput } from "./relayE2eeIds.ts";
 
 // Key material, fingerprints, and signature verification for the Ryco relay
 // E2EE protocol — docs/relay-e2ee-protocol.md §7.1 (encoding conventions,
@@ -47,25 +49,10 @@ import {
 // it. `verifyE2eeSignature` is the exception — it takes unvalidated peer bytes
 // and returns `false` for every failure, never throwing.
 
-/**
- * The single validation error of the E2EE key and transcript modules. It
- * carries no detail by design: §7 material includes peer-supplied bytes and Hub
- * origins, and an error that reflected its input would put them in logs and
- * crash reports. It mirrors `NodeIdentityValidationError` in shape and in that
- * intent.
- */
-export class RelayE2eeValidationError extends Error {
-  readonly code = "invalid_relay_e2ee_input" as const;
-
-  constructor() {
-    super("Relay E2EE input is invalid.");
-    this.name = "RelayE2eeValidationError";
-  }
-}
-
-export function invalidRelayE2eeInput(): never {
-  throw new RelayE2eeValidationError();
-}
+// The single validation error lives in the dependency-free `relayE2eeIds.ts` so
+// identifier validation never loads the primitives above; it is re-exported here
+// unchanged, so `instanceof` holds across both import paths.
+export { RelayE2eeValidationError, invalidRelayE2eeInput };
 
 /** Cross-runtime SHA-256 used for exact E2EE wire-artifact digests. */
 export function e2eeSha256(bytes: Uint8Array): Uint8Array {
@@ -433,19 +420,122 @@ export function verifyE2eeSignature(input: E2eeSignatureVerification): boolean {
     if (input.algorithm === E2EE_NODE_IDENTITY_ALGORITHM) {
       const publicKey = validateE2eeNodeIdentityPublicKey(input.publicKey);
       const signature = validateE2eeNodeSignature(input.signature);
-      return ed25519.verify(signature, input.message, publicKey, { zip215: false });
+      const memoKey = verifiedSignatureKey(input.algorithm, publicKey, input.message, signature);
+      if (rememberedVerifiedSignature(memoKey)) return true;
+      const verified = ed25519.verify(signature, input.message, publicKey, { zip215: false });
+      if (verified) rememberVerifiedSignature(memoKey);
+      return verified;
     }
     if (input.algorithm === E2EE_CLIENT_IDENTITY_ALGORITHM) {
       const publicKey = validateE2eeClientIdentityPublicKey(input.publicKey);
       const signature = validateE2eeClientSignature(input.signature);
-      return p256.verify(signature, sha256(input.message), publicKey, {
+      const memoKey = verifiedSignatureKey(input.algorithm, publicKey, input.message, signature);
+      if (rememberedVerifiedSignature(memoKey)) return true;
+      const verified = p256.verify(signature, sha256(input.message), publicKey, {
         prehash: false,
         lowS: false,
         format: "compact",
       });
+      if (verified) rememberVerifiedSignature(memoKey);
+      return verified;
     }
     return false;
   } catch {
     return false;
+  }
+}
+
+// ─── verified-signature memo ──────────────────────────────────────────────────
+//
+// A client re-verifies the same node-signed bytes on every reconnect: the §5.2
+// capability statement's identity signature, its prekey cross-signature, and
+// every §7.5 continuity link, all through the function above. A signature
+// verdict under §14.3 is a pure function of (algorithm, key, message,
+// signature), so a triple this process has already verified true verifies true
+// again, and only that verdict is remembered. A failure is never remembered,
+// every §7.1 validation above still runs first, and nothing about the
+// statement's time, origin, pin, policy generation or suite selection is
+// cached — the callers re-run every one of those checks around each lookup.
+//
+// The key is SHA-256 over the length-prefixed algorithm label, key, message and
+// signature, so a hit requires those exact bytes. Bounded and per process (per
+// tab on the web): it holds digests only, never key material or messages.
+
+const VERIFIED_SIGNATURE_MEMO_LIMIT = 128;
+const verifiedSignatures = new Set<string>();
+
+function verifiedSignatureKey(
+  algorithm: E2eeSignatureAlgorithm,
+  publicKey: Uint8Array,
+  message: Uint8Array,
+  signature: Uint8Array,
+): string {
+  const hash = sha256.create();
+  for (const part of [new TextEncoder().encode(algorithm), publicKey, message, signature]) {
+    const length = new Uint8Array(4);
+    new DataView(length.buffer).setUint32(0, part.byteLength);
+    hash.update(length);
+    hash.update(part);
+  }
+  return bytesToHex(hash.digest());
+}
+
+function rememberedVerifiedSignature(key: string): boolean {
+  if (!verifiedSignatures.has(key)) return false;
+  // Most recently used last, so the bound evicts the stalest verdict.
+  verifiedSignatures.delete(key);
+  verifiedSignatures.add(key);
+  return true;
+}
+
+function rememberVerifiedSignature(key: string): void {
+  verifiedSignatures.add(key);
+  if (verifiedSignatures.size > VERIFIED_SIGNATURE_MEMO_LIMIT) {
+    verifiedSignatures.delete(verifiedSignatures.values().next().value!);
+  }
+}
+
+/** Test seam: forget every remembered verdict. */
+export function resetE2eeSignatureMemoForTests(): void {
+  verifiedSignatures.clear();
+}
+
+/** Test seam: how many verdicts are remembered. */
+export function e2eeSignatureMemoSizeForTests(): number {
+  return verifiedSignatures.size;
+}
+
+// RFC 8032 §7.1 TEST 1: a valid Ed25519 signature over the empty message.
+const WARM_ED25519_PUBLIC_KEY = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
+const WARM_ED25519_SIGNATURE =
+  "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b";
+let primitivesWarmed = false;
+
+/**
+ * Run each curve operation a client handshake needs once, off its critical
+ * path, so the first real connect does not pay the curve library's lazy
+ * precomputation and the engine's first-call compilation (about 20 ms on a
+ * desktop, several times that on a phone). A throwaway X25519 key pair and
+ * agreement, and one strict Ed25519 verification of a fixed public test vector
+ * through the verification path above. Nothing it computes is kept or used;
+ * it runs once per process.
+ */
+export function warmE2eePrimitives(): void {
+  if (primitivesWarmed) return;
+  primitivesWarmed = true;
+  try {
+    const local = x25519.keygen();
+    const remote = x25519.keygen();
+    x25519.getSharedSecret(local.secretKey, remote.publicKey).fill(0);
+    local.secretKey.fill(0);
+    remote.secretKey.fill(0);
+    verifyE2eeSignature({
+      algorithm: E2EE_NODE_IDENTITY_ALGORITHM,
+      publicKey: hexToBytes(WARM_ED25519_PUBLIC_KEY),
+      message: new Uint8Array(0),
+      signature: hexToBytes(WARM_ED25519_SIGNATURE),
+    });
+  } catch {
+    // A warm-up is an optimization only; the real handshake reports failures.
   }
 }

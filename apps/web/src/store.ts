@@ -64,7 +64,6 @@ export {
   setSidebarWorktreeTitle,
   setThreadBranch,
   setThreadError,
-  SHELL_COALESCE_THRESHOLD_EVENTS_PER_MS,
   syncServerShellSnapshot,
   syncServerThreadDetail,
   useStore,

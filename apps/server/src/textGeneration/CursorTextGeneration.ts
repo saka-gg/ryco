@@ -23,7 +23,7 @@ import {
   extractJsonObject,
   sanitizeCommitSubject,
   sanitizePrTitle,
-  sanitizeThreadTitle,
+  sanitizeThreadTitleResult,
 } from "./TextGenerationUtils.ts";
 import {
   applyCursorAcpModelSelection,
@@ -263,6 +263,7 @@ export const makeCursorTextGeneration = Effect.fn("makeCursorTextGeneration")(fu
     const { prompt, outputSchema } = buildThreadTitlePrompt({
       message: input.message,
       attachments: input.attachments,
+      includeBranch: input.includeBranch,
     });
 
     const generated = yield* runCursorJson({
@@ -274,7 +275,7 @@ export const makeCursorTextGeneration = Effect.fn("makeCursorTextGeneration")(fu
     });
 
     return {
-      title: sanitizeThreadTitle(generated.title),
+      ...sanitizeThreadTitleResult(generated),
     } satisfies ThreadTitleGenerationResult;
   });
 

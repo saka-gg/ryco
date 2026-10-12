@@ -7,7 +7,10 @@ import {
   type SavedEnvironmentRecord,
   type SavedEnvironmentRuntimeState,
 } from "@ryco/client-runtime/connection";
-import type { WsProtocolLifecycleHandlers } from "@ryco/client-runtime/rpc";
+import {
+  WS_URL_PROVIDER_TIMEOUT_MS,
+  type WsProtocolLifecycleHandlers,
+} from "@ryco/client-runtime/rpc";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 // Native modules are stubbed so the driver/state-sink load under the Node runner.
@@ -39,13 +42,16 @@ vi.mock("expo-constants", () => ({ default: { expoConfig: { extra: {} } } }));
 // The saved-environment socket is replaced by a recorder: tests drive its
 // lifecycle callbacks the way the protocol would.
 const socketHolder = vi.hoisted(() => ({
-  urls: [] as Array<() => Promise<string>>,
+  urls: [] as Array<(signal?: AbortSignal) => Promise<string>>,
   options: [] as Array<WsProtocolLifecycleHandlers>,
   clientDisposals: 0,
 }));
 vi.mock("../rpc/wsTransport", () => ({
   WsTransport: class {
-    constructor(url: () => Promise<string>, options: WsProtocolLifecycleHandlers) {
+    constructor(
+      url: (signal?: AbortSignal) => Promise<string>,
+      options: WsProtocolLifecycleHandlers,
+    ) {
       socketHolder.urls.push(url);
       socketHolder.options.push(options);
     }
@@ -69,6 +75,7 @@ vi.mock("../rpc/wsRpcClient", async (importOriginal) => ({
 import { subscribeAppStateResume } from "./appStateResume";
 import { createMobileEnvironmentDriver, type MobileCatalogLike } from "./environmentDriver";
 import { createMobileEnvironmentStateSink } from "./environmentStateSink";
+import { createSavedSessionHints, type SavedSessionHints } from "./savedSessionHints";
 import { useStore } from "../state/threadsRuntime";
 
 const ENV_ID = "env-1" as EnvironmentId;
@@ -180,6 +187,198 @@ const noopRemoteApi = {
     throw new Error("No renewal is due in this test.");
   },
 };
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** A bearer session the node answered for, with `daysLeft` of its 30 days left. */
+function bearerSession(daysLeft: number, role = "owner"): AuthSessionState {
+  return {
+    authenticated: true,
+    role,
+    sessionMethod: "bearer-session-token",
+    expiresAt: new Date(Date.now() + daysLeft * DAY_MS).toISOString(),
+    auth: {},
+  } as unknown as AuthSessionState;
+}
+
+function memoryHints(initial?: AuthSessionState): SavedSessionHints {
+  const values = new Map<string, string>();
+  if (initial) {
+    values.set(
+      "ryco.savedEnvironments.sessionHints.v1",
+      JSON.stringify({ version: 1, sessions: { [ENV_ID]: initial } }),
+    );
+  }
+  return createSavedSessionHints({
+    getItem: async (key) => values.get(key) ?? null,
+    setItem: async (key, value) => {
+      values.set(key, value);
+    },
+  });
+}
+
+describe("mobile environment driver with session hints", () => {
+  it("connects a session far from renewal without asking first, then checks in the background", async () => {
+    const fake = createFakeCatalog();
+    fake.setBearerToken(ENV_ID, "bearer-token");
+    fake.upsert(record());
+    const registeredWhenAsked: boolean[] = [];
+    const fetchRemoteSessionState = vi.fn(async () => {
+      registeredWhenAsked.push(driver.supervisor.read(ENV_ID) !== null);
+      return bearerSession(29.5, "client");
+    });
+    const sessionHints = memoryHints(bearerSession(29.6));
+    const driver: ReturnType<typeof createMobileEnvironmentDriver> = createMobileEnvironmentDriver({
+      catalog: fake.catalog,
+      remoteApi: { ...noopRemoteApi, fetchRemoteSessionState },
+      subscribeResume: () => () => {},
+      sessionHints,
+    });
+
+    const connection = await driver.connectSavedEnvironment(record());
+    expect(driver.supervisor.read(ENV_ID)).toBe(connection);
+    expect(fake.runtime(ENV_ID)?.role).toBe("owner");
+
+    // The skipped question is asked once the connection exists, and its answer
+    // replaces the hinted role and the remembered session.
+    await vi.waitFor(() => expect(fetchRemoteSessionState).toHaveBeenCalledOnce());
+    expect(registeredWhenAsked).toEqual([true]);
+    await vi.waitFor(() => expect(fake.runtime(ENV_ID)?.role).toBe("client"));
+    expect((await sessionHints.read(ENV_ID))?.role).toBe("client");
+    await driver.supervisor.remove(ENV_ID);
+  });
+
+  it("asks before the socket again once the remembered session is forgotten", async () => {
+    const fake = createFakeCatalog();
+    fake.setBearerToken(ENV_ID, "bearer-token");
+    fake.upsert(record());
+    const registeredWhenAsked: boolean[] = [];
+    const fetchRemoteSessionState = vi.fn(async () => {
+      registeredWhenAsked.push(driver.supervisor.read(ENV_ID) !== null);
+      return bearerSession(29.5);
+    });
+    const sessionHints = memoryHints(bearerSession(29.6));
+    const driver: ReturnType<typeof createMobileEnvironmentDriver> = createMobileEnvironmentDriver({
+      catalog: fake.catalog,
+      remoteApi: { ...noopRemoteApi, fetchRemoteSessionState },
+      subscribeResume: () => () => {},
+      sessionHints,
+    });
+
+    // A re-pairing or removal replaces the credential the hint described.
+    driver.forgetSessionHint(ENV_ID);
+    await expect(sessionHints.read(ENV_ID)).resolves.toBeNull();
+    await driver.connectSavedEnvironment(record());
+    expect(registeredWhenAsked).toEqual([false]);
+    await driver.supervisor.remove(ENV_ID);
+  });
+
+  it("does not remember the answer of an attempt a new pairing cancelled", async () => {
+    const fake = createFakeCatalog();
+    fake.setBearerToken(ENV_ID, "replaced-bearer");
+    fake.upsert(record());
+    let cancelled = false;
+    const fetchRemoteSessionState = vi.fn(async () => {
+      // The pairing replaces the credential while this check is in flight.
+      cancelled = true;
+      return bearerSession(29.5, "client");
+    });
+    const sessionHints = memoryHints();
+    const driver = createMobileEnvironmentDriver({
+      catalog: fake.catalog,
+      remoteApi: { ...noopRemoteApi, fetchRemoteSessionState },
+      subscribeResume: () => () => {},
+      sessionHints,
+    });
+
+    await expect(driver.connectSavedEnvironment(record(), () => cancelled)).rejects.toThrow();
+    expect(fetchRemoteSessionState).toHaveBeenCalledOnce();
+    await expect(sessionHints.read(ENV_ID)).resolves.toBeNull();
+    expect(driver.supervisor.read(ENV_ID)).toBeNull();
+  });
+
+  it("asks before the socket when the remembered session is due for renewal", async () => {
+    const fake = createFakeCatalog();
+    fake.setBearerToken(ENV_ID, "bearer-token");
+    fake.upsert(record());
+    const fetchRemoteSessionState = vi.fn(async () => bearerSession(29.5));
+    const driver = createMobileEnvironmentDriver({
+      catalog: fake.catalog,
+      remoteApi: { ...noopRemoteApi, fetchRemoteSessionState },
+      subscribeResume: () => () => {},
+      // Ten days into its lifetime: renewal is due, so the node is asked first.
+      sessionHints: memoryHints(bearerSession(20)),
+    });
+
+    await driver.connectSavedEnvironment(record()).catch(() => undefined);
+    expect(fetchRemoteSessionState).toHaveBeenCalled();
+    await driver.supervisor.remove(ENV_ID);
+  });
+
+  it("asks first, and remembers the answer, when nothing is remembered", async () => {
+    const fake = createFakeCatalog();
+    fake.setBearerToken(ENV_ID, "bearer-token");
+    fake.upsert(record());
+    const fetchRemoteSessionState = vi.fn(async () => bearerSession(29.5));
+    const sessionHints = memoryHints();
+    const driver = createMobileEnvironmentDriver({
+      catalog: fake.catalog,
+      remoteApi: { ...noopRemoteApi, fetchRemoteSessionState },
+      subscribeResume: () => () => {},
+      sessionHints,
+    });
+
+    await driver.connectSavedEnvironment(record());
+    expect(fetchRemoteSessionState).toHaveBeenCalledOnce();
+    expect((await sessionHints.read(ENV_ID))?.sessionMethod).toBe("bearer-session-token");
+    await driver.supervisor.remove(ENV_ID);
+  });
+
+  it("ends the connection and forgets the hint when the background check finds the session gone", async () => {
+    const fake = createFakeCatalog();
+    fake.setBearerToken(ENV_ID, "bearer-token");
+    fake.upsert(record());
+    const sessionHints = memoryHints(bearerSession(29.6));
+    const driver = createMobileEnvironmentDriver({
+      catalog: fake.catalog,
+      remoteApi: { ...noopRemoteApi, fetchRemoteSessionState: async () => sessionState(false) },
+      subscribeResume: () => () => {},
+      sessionHints,
+    });
+
+    await driver.connectSavedEnvironment(record());
+
+    await vi.waitFor(() => expect(driver.supervisor.read(ENV_ID)).toBeNull());
+    expect(fake.runtime(ENV_ID)).toMatchObject({
+      authState: "requires-auth",
+      lastError: SAVED_ENVIRONMENT_REQUIRES_AUTH_MESSAGE,
+    });
+    expect(await sessionHints.read(ENV_ID)).toBeNull();
+  });
+
+  it("forgets the hint when the ws-token request rejects the bearer", async () => {
+    const fake = createFakeCatalog();
+    fake.setBearerToken(ENV_ID, "bearer-token");
+    fake.upsert(record());
+    const sessionHints = memoryHints(bearerSession(29.6));
+    const driver = createMobileEnvironmentDriver({
+      catalog: fake.catalog,
+      // The background check never answers, so only the socket reports.
+      remoteApi: { ...noopRemoteApi, fetchRemoteSessionState: () => new Promise(() => {}) },
+      subscribeResume: () => () => {},
+      sessionHints,
+    });
+
+    await driver.connectSavedEnvironment(record());
+    socketHolder.options
+      .at(-1)!
+      .onTerminalUrlError?.(new RemoteEnvironmentAuthHttpError("Unauthorized request.", 401));
+
+    expect(fake.runtime(ENV_ID)?.authState).toBe("requires-auth");
+    expect(await sessionHints.read(ENV_ID)).toBeNull();
+    await vi.waitFor(() => expect(driver.supervisor.read(ENV_ID)).toBeNull());
+  });
+});
 
 describe("mobile environment driver", () => {
   it("asks for a new pairing before opening a socket on a bearer the node rejects", async () => {
@@ -367,6 +566,30 @@ describe("mobile environment driver", () => {
     await socketHolder.urls.at(-1)!();
     expect(resolveRemoteWebSocketConnectionUrl).toHaveBeenLastCalledWith(
       expect.objectContaining({ bearerToken: "bearer-2" }),
+    );
+    await driver.supervisor.remove(ENV_ID);
+  });
+
+  it("bounds the direct ws-token request and abandons it with its connect attempt", async () => {
+    const fake = createFakeCatalog();
+    fake.setBearerToken(ENV_ID, "bearer-1");
+    fake.upsert(record());
+    const resolveRemoteWebSocketConnectionUrl = vi.fn(
+      noopRemoteApi.resolveRemoteWebSocketConnectionUrl,
+    );
+    const driver = createMobileEnvironmentDriver({
+      catalog: fake.catalog,
+      remoteApi: { ...noopRemoteApi, resolveRemoteWebSocketConnectionUrl },
+      subscribeResume: () => () => {},
+    });
+
+    await driver.connectSavedEnvironment(record());
+
+    expect(socketHolder.options.at(-1)?.urlProviderTimeoutMs).toBe(WS_URL_PROVIDER_TIMEOUT_MS);
+    const attempt = new AbortController();
+    await socketHolder.urls.at(-1)!(attempt.signal);
+    expect(resolveRemoteWebSocketConnectionUrl).toHaveBeenLastCalledWith(
+      expect.objectContaining({ bearerToken: "bearer-1", signal: attempt.signal }),
     );
     await driver.supervisor.remove(ENV_ID);
   });
@@ -657,22 +880,20 @@ describe("mobile environment driver", () => {
     const snapshotSpy = vi
       .spyOn(useStore.getState(), "syncServerShellSnapshot")
       .mockImplementation(() => undefined);
-    const eventSpy = vi
-      .spyOn(useStore.getState(), "applyShellEvent")
-      .mockImplementation(() => undefined);
+    const eventSpy = vi.spyOn(useStore.getState(), "applyShellEvents").mockImplementation(() => []);
 
     const snapshot = { threads: [] } as unknown as Parameters<
       typeof sink.syncServerShellSnapshot
     >[1];
     const event = { kind: "thread-upserted" } as unknown as Parameters<
-      typeof sink.applyShellEvent
-    >[1];
+      typeof sink.applyShellEvents
+    >[1][number];
 
     sink.syncServerShellSnapshot(ENV_ID, snapshot);
-    sink.applyShellEvent(ENV_ID, event);
+    sink.applyShellEvents(ENV_ID, [event]);
 
     expect(snapshotSpy).toHaveBeenCalledWith(snapshot, ENV_ID);
-    expect(eventSpy).toHaveBeenCalledWith(event, ENV_ID);
+    expect(eventSpy).toHaveBeenCalledWith([event], ENV_ID, expect.any(Function));
 
     snapshotSpy.mockRestore();
     eventSpy.mockRestore();

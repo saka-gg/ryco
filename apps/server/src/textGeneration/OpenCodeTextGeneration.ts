@@ -31,7 +31,7 @@ import {
   extractJsonObject,
   sanitizeCommitSubject,
   sanitizePrTitle,
-  sanitizeThreadTitle,
+  sanitizeThreadTitleResult,
 } from "./TextGenerationUtils.ts";
 import {
   OpenCodeRuntime,
@@ -376,6 +376,7 @@ export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration"
     const { prompt, outputSchema } = buildThreadTitlePrompt({
       message: input.message,
       attachments: input.attachments,
+      includeBranch: input.includeBranch,
     });
     const generated = yield* runOpenCodeJson({
       operation: "generateThreadTitle",
@@ -387,7 +388,7 @@ export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration"
     });
 
     return {
-      title: sanitizeThreadTitle(generated.title),
+      ...sanitizeThreadTitleResult(generated),
     };
   });
 

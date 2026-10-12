@@ -1,14 +1,21 @@
 import type { ThreadGoal } from "@ryco/contracts";
 
+import { isSlashCommandInput } from "./attachmentInstructionDelivery.ts";
+
 function escapeXml(value: string): string {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 }
 
+/**
+ * Leads the turn's input with the thread's active goal, for providers without native goals.
+ * A slash command stays verbatim: provider CLIs only run input that starts with `/` as a
+ * command, so the goal waits for the next ordinary turn.
+ */
 export function withProviderGoalPrompt(input: {
   readonly message: string | undefined;
   readonly goal: ThreadGoal | null | undefined;
 }): string | undefined {
-  if (input.goal?.status !== "active") {
+  if (input.goal?.status !== "active" || isSlashCommandInput(input.message)) {
     return input.message;
   }
 

@@ -462,10 +462,11 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
               });
             },
           }).pipe(
-            Effect.tap(() =>
+            Effect.tap((items) =>
               refreshLinkedWorktreeSourceControlStates({
                 cwd,
                 reason: "sourceControl.listChangeRequests",
+                knownPullRequests: items,
               }),
             ),
           ),
@@ -491,10 +492,11 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
                 ...(limit !== undefined ? { limit } : {}),
               }),
           }).pipe(
-            Effect.tap(() =>
+            Effect.tap((items) =>
               refreshLinkedWorktreeSourceControlStates({
                 cwd,
                 reason: "sourceControl.searchChangeRequests",
+                knownPullRequests: items,
               }),
             ),
           ),

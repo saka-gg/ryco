@@ -34,6 +34,7 @@ import {
   createThreadConnectionRetargetEngine,
   deriveThreadConnectionRetarget,
   resetMobileThreadConnectionRetargetEngineForTests,
+  THREAD_CONNECTION_RETARGET_DEBOUNCE_MS,
   type ThreadConnectionRetargetEngine,
   type ThreadConnectionRetargetEngineDeps,
 } from "./threadConnectionRetarget";
@@ -646,6 +647,21 @@ describe("thread connection retarget engine", () => {
    * navigated away from — a back-swipe inside the debounce window must cost
    * nothing at all.
    */
+  it("starts a single cross-node open within the default window", async () => {
+    // The window is pure latency on every cross-node thread open, so it stays
+    // just long enough to collapse a double tap.
+    expect(THREAD_CONNECTION_RETARGET_DEBOUNCE_MS).toBeLessThanOrEqual(100);
+    const store = createFakeStore(hubState({ nodes: [node("node-a", ENV_A)] }));
+    const selectNode = vi.fn(async () => undefined);
+    const engine = createEngine({ store, selectNode, debounceMs: undefined });
+
+    engine.open(ENV_A);
+    await vi.advanceTimersByTimeAsync(THREAD_CONNECTION_RETARGET_DEBOUNCE_MS - 1);
+    expect(selectNode).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(selectNode).toHaveBeenCalledExactlyOnceWith("node-a");
+  });
+
   it("cancels an intent released before the debounce fires", async () => {
     const store = createFakeStore(hubState({ nodes: [node("node-a", ENV_A)] }));
     const selectNode = vi.fn(async () => undefined);

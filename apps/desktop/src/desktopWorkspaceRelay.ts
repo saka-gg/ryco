@@ -4,12 +4,14 @@ import type { DesktopWorkspaceTransportEvent, EnvironmentId } from "@ryco/contra
 import type { WorkspaceNativeTrustState } from "@ryco/client-runtime/state/workspace";
 import {
   HostedRelayEngine,
-  makeRelayE2eeInitiator,
   type HostedRelaySocketCallbacks,
-  type RelayE2eeInitiatorAttempt,
   type RelayE2eeProvider,
   type RelaySocket,
 } from "@ryco/client-runtime/relay";
+import {
+  makeRelayE2eeInitiator,
+  type RelayE2eeInitiatorAttempt,
+} from "@ryco/client-runtime/relay/e2ee";
 import WebSocket, { type RawData } from "ws";
 
 import type {

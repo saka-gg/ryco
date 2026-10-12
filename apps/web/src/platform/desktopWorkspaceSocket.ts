@@ -1,6 +1,6 @@
 import type { DesktopBridge, DesktopWorkspaceTransportEvent, EnvironmentId } from "@ryco/contracts";
 
-import { HostedReconnectPolicy } from "@ryco/client-runtime/relay";
+import { HostedReconnectPolicy } from "@ryco/client-runtime/relay/reconnectPolicy";
 import type { WsProtocolLifecycleHandlers } from "@ryco/client-runtime/rpc";
 
 const CONNECTING = 0;
@@ -74,7 +74,12 @@ export class DesktopWorkspaceIpcSocket {
     void Promise.resolve().then(async () => {
       if (this.#state !== CONNECTING) return;
       try {
-        await input.bridge.activateDesktopWorkspaceTransport?.(input.transportId);
+        const activation = await input.bridge.activateDesktopWorkspaceTransport?.(
+          input.transportId,
+        );
+        // A refusal arrives as a value (Electron would log a thrown one); the
+        // reconnect policy backs off from the resulting close.
+        if (activation?.ok === false) this.#failClosed();
       } catch {
         this.#failClosed();
       }

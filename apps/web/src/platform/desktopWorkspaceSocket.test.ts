@@ -1,12 +1,16 @@
 import { EnvironmentId, type DesktopWorkspaceTransportEvent } from "@ryco/contracts";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { DesktopWorkspaceIpcSocketFactory } from "./desktopWorkspaceSocket";
 
 describe("DesktopWorkspaceIpcSocketFactory", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it("uses a fresh opaque handle and carries only authorized RPC bytes", async () => {
     let listener: ((event: DesktopWorkspaceTransportEvent) => void) | undefined;
-    const activate = vi.fn(async () => undefined);
+    const activate = vi.fn(async () => ({ ok: true }) as const);
     const send = vi.fn();
     const close = vi.fn();
     const bridge = {
@@ -44,6 +48,40 @@ describe("DesktopWorkspaceIpcSocketFactory", () => {
     expect(JSON.stringify(bridge)).not.toContain("ticket");
   });
 
+  it("fails closed on a refusal reported as a value, backing off across refusals", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    let sequence = 0;
+    const bridge = {
+      prepareDesktopWorkspaceTransport: vi.fn(async () => ({
+        transportId: String(++sequence).padStart(32, "D"),
+      })),
+      activateDesktopWorkspaceTransport: vi.fn(
+        async () => ({ ok: false, reason: "unavailable" }) as const,
+      ),
+      sendDesktopWorkspaceTransport: vi.fn(),
+      closeDesktopWorkspaceTransport: vi.fn(),
+      onDesktopWorkspaceTransportEvent: vi.fn(() => () => undefined),
+    };
+    const factory = new DesktopWorkspaceIpcSocketFactory(EnvironmentId.make("env_remote"), bridge);
+    const delays: number[] = [];
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const socket = factory.createSocket(await factory.nextUrl());
+      const closes = vi.fn();
+      socket.addEventListener("close", closes);
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(closes.mock.calls[0]?.[0]).toMatchObject({ code: 4401, reason: "Relay unavailable" });
+      expect(socket.readyState).toBe(socket.CLOSED);
+      factory.lifecycleHandlers.onClose!(
+        { code: 4401, reason: "Relay unavailable" },
+        { intentional: false },
+      );
+      delays.push(factory.lifecycleHandlers.getReconnectDelayMs!(attempt));
+    }
+    // Exponential: 1 s, 2 s, 4 s, 8 s (no jitter at random = 0.5).
+    expect(delays).toEqual([1_000, 2_000, 4_000, 8_000]);
+  });
+
   it("fails closed when main refuses activation", async () => {
     const bridge = {
       prepareDesktopWorkspaceTransport: vi.fn(async () => ({ transportId: "B".repeat(32) })),
@@ -75,7 +113,7 @@ function socketFixture() {
   });
   const bridge = {
     prepareDesktopWorkspaceTransport: vi.fn(async () => ({ transportId: "C".repeat(32) })),
-    activateDesktopWorkspaceTransport: vi.fn(async () => undefined),
+    activateDesktopWorkspaceTransport: vi.fn(async () => ({ ok: true }) as const),
     closeDesktopWorkspaceTransport: vi.fn(),
     onDesktopWorkspaceTransportEvent: vi.fn((next) => {
       listener = next;

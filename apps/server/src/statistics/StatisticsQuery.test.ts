@@ -11,7 +11,12 @@ import * as SqlStatement from "effect/sql/Statement";
 import { StatisticsSnapshot } from "@ryco/contracts";
 
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
-import { StatisticsQuery, StatisticsQueryLive } from "./StatisticsQuery.ts";
+import {
+  selectStatisticsTokenActivities,
+  selectStatisticsToolUses,
+  StatisticsQuery,
+  StatisticsQueryLive,
+} from "./StatisticsQuery.ts";
 
 const encodeSnapshot = Schema.encodeUnknownSync(StatisticsSnapshot);
 
@@ -28,6 +33,7 @@ const clean = (sql: SqlClient.SqlClient) =>
     yield* sql`DELETE FROM projection_thread_activities`;
     yield* sql`DELETE FROM projection_turns`;
     yield* sql`DELETE FROM projection_worktrees`;
+    yield* sql`DELETE FROM projection_state`;
   });
 
 const insertProject = (sql: SqlClient.SqlClient, id: string, title: string) =>
@@ -838,6 +844,377 @@ statisticsLayer("recorded usage attribution", (it) => {
   );
 });
 
+const insertContextEvent = (
+  sql: SqlClient.SqlClient,
+  eventId: string,
+  threadId: string,
+  turnId: string,
+  createdAt: string,
+  payload: object,
+) =>
+  sql`
+    INSERT INTO orchestration_events (
+      event_id, aggregate_kind, stream_id, stream_version, event_type, occurred_at,
+      actor_kind, payload_json, metadata_json
+    ) VALUES (
+      ${eventId}, 'thread', ${threadId},
+      (SELECT COUNT(*) FROM orchestration_events WHERE stream_id = ${threadId}),
+      'thread.activity-appended', ${createdAt}, 'system',
+      ${JSON.stringify({
+        threadId,
+        activity: {
+          id: eventId,
+          turnId,
+          kind: "context-window.updated",
+          createdAt,
+          payload,
+        },
+      })},
+      '{}'
+    )
+  `;
+
+/** What the projection pipeline records after projecting every stored event. */
+const markProjected = (sql: SqlClient.SqlClient) =>
+  sql`
+    INSERT INTO projection_state (projector, last_applied_sequence, updated_at)
+    SELECT value, (SELECT COALESCE(MAX(sequence), 0) FROM orchestration_events), '2026-06-10T00:00:00.000Z'
+    FROM json_each('["projection.threads","projection.thread-sessions","projection.thread-activities","projection.thread-turns","projection.checkpoints"]')
+    WHERE true
+    ON CONFLICT (projector) DO UPDATE SET last_applied_sequence = excluded.last_applied_sequence
+  `;
+
+/** A full recompute: inside a caller transaction the cache is bypassed. */
+const recompute = (sql: SqlClient.SqlClient, statistics: StatisticsQuery["Service"]) =>
+  sql.withTransaction(statistics.getStatistics());
+
+const withoutGeneratedAt = (snapshot: StatisticsSnapshot) => ({
+  ...snapshot,
+  generatedAt: "",
+});
+
+statisticsLayer("incremental statistics", (it) => {
+  it.effect("plans the projection-only fallback lookup on every index column", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const plan = yield* sql<{
+        detail: string;
+      }>`EXPLAIN QUERY PLAN ${selectStatisticsTokenActivities(sql, null)}`;
+      assert.ok(
+        plan.some(
+          (row) =>
+            row.detail.includes("idx_orch_events_statistics_usage") &&
+            row.detail.includes("(stream_id=? AND <expr>=? AND <expr>=?)"),
+        ),
+        JSON.stringify(plan),
+      );
+      const scoped = yield* sql<{
+        detail: string;
+      }>`EXPLAIN QUERY PLAN ${selectStatisticsTokenActivities(sql, '["thread"]')}`;
+      assert.ok(
+        scoped.some(
+          (row) =>
+            row.detail.startsWith("SEARCH orchestration_events") &&
+            row.detail.includes("idx_orch_events_statistics_usage (stream_id=?)"),
+        ),
+        JSON.stringify(scoped),
+      );
+    }),
+  );
+
+  it.effect("reads tool uses and projection-only token rows through the kind index", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const toolUses = yield* sql<{
+        detail: string;
+      }>`EXPLAIN QUERY PLAN ${selectStatisticsToolUses(sql, null)}`;
+      // Migration 085's kind-leading index: the tool-use count reads only its
+      // tool.completed entries instead of walking every activity row.
+      assert.ok(
+        toolUses.some(
+          (row) =>
+            row.detail.startsWith("SEARCH projection_thread_activities") &&
+            row.detail.includes(
+              "COVERING INDEX idx_projection_thread_activities_kind_order (kind=?)",
+            ),
+        ),
+        JSON.stringify(toolUses),
+      );
+      const tokens = yield* sql<{
+        detail: string;
+      }>`EXPLAIN QUERY PLAN ${selectStatisticsTokenActivities(sql, null)}`;
+      // ...and so does the outer scan of the projection-only fallback.
+      assert.ok(
+        tokens.some(
+          (row) =>
+            row.detail.startsWith("SEARCH a") &&
+            row.detail.includes("idx_projection_thread_activities_kind_order (kind=?)"),
+        ),
+        JSON.stringify(tokens),
+      );
+    }),
+  );
+
+  it.effect("refreshes only threads with new events and matches a full recompute", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const statistics = yield* StatisticsQuery;
+      yield* clean(sql);
+      yield* insertProject(sql, "inc-project", "Incremental");
+      yield* insertProject(sql, "inc-other", "Other");
+      yield* insertThread(
+        sql,
+        "inc-a",
+        "inc-project",
+        "codex",
+        "gpt-5.4",
+        "2026-06-10T00:00:00.000Z",
+      );
+      yield* insertThread(
+        sql,
+        "inc-b",
+        "inc-project",
+        "claudeAgent",
+        "claude-opus-5-5",
+        "2026-06-10T00:00:00.000Z",
+      );
+      const perTurn = (input: number, output: number) => ({
+        usedTokens: input + output,
+        lastInputTokens: input,
+        lastOutputTokens: output,
+        lastUsedTokens: input + output,
+      });
+      yield* insertContextEvent(
+        sql,
+        "inc-a-1",
+        "inc-a",
+        "turn-a1",
+        "2026-06-10T00:00:01.000Z",
+        perTurn(100, 10),
+      );
+      yield* insertContextEvent(
+        sql,
+        "inc-b-1",
+        "inc-b",
+        "turn-b1",
+        "2026-06-10T00:00:02.000Z",
+        perTurn(200, 20),
+      );
+      yield* insertTurn(
+        sql,
+        "inc-b",
+        "turn-b1",
+        1,
+        "2026-06-10T00:00:00.000Z",
+        "2026-06-10T00:00:30.000Z",
+        '[{"path":"b.ts","kind":"modified","additions":3,"deletions":1}]',
+      );
+      yield* markProjected(sql);
+      const first = yield* statistics.getStatistics();
+      assert.equal(first.totals.totalTokens, 330);
+
+      // New work on thread A (event + projection rows in one commit), and a
+      // meta change on thread B that re-buckets its existing usage.
+      yield* insertContextEvent(
+        sql,
+        "inc-a-2",
+        "inc-a",
+        "turn-a2",
+        "2026-06-11T00:00:01.000Z",
+        perTurn(1000, 100),
+      );
+      yield* insertActivity(
+        sql,
+        "inc-a-tool",
+        "inc-a",
+        "turn-a2",
+        "tool.completed",
+        "{}",
+        "2026-06-11T00:00:02.000Z",
+        5,
+      );
+      yield* insertTurn(
+        sql,
+        "inc-a",
+        "turn-a2",
+        2,
+        "2026-06-11T00:00:00.000Z",
+        "2026-06-11T00:01:00.000Z",
+        '[{"path":"a.ts","kind":"added","additions":7,"deletions":0}]',
+      );
+      yield* sql`UPDATE projection_threads SET project_id = 'inc-other' WHERE thread_id = 'inc-b'`;
+
+      yield* markProjected(sql);
+      const incremental = yield* statistics.getStatistics();
+      assert.notStrictEqual(incremental, first);
+      assert.equal(incremental.totals.totalTokens, 1430);
+      assert.equal(incremental.totals.toolUses, 1);
+      assert.equal(incremental.totals.additions, 10);
+      assert.equal(
+        incremental.dailyBuckets
+          .filter((bucket) => bucket.projectId === "inc-other")
+          .reduce((sum, bucket) => sum + bucket.totalTokens, 0),
+        220,
+      );
+      assert.deepEqual(
+        withoutGeneratedAt(incremental),
+        withoutGeneratedAt(yield* recompute(sql, statistics)),
+      );
+      assert.strictEqual(yield* statistics.getStatistics(), incremental);
+    }),
+  );
+
+  it.effect("re-reads only threads whose streams received events", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const statistics = yield* StatisticsQuery;
+      yield* clean(sql);
+      yield* insertProject(sql, "scope-project", "Scope");
+      for (const threadId of ["scope-a", "scope-b"]) {
+        yield* insertThread(
+          sql,
+          threadId,
+          "scope-project",
+          "codex",
+          "gpt-5.4",
+          "2026-06-10T00:00:00.000Z",
+        );
+        yield* insertContextEvent(
+          sql,
+          `${threadId}-1`,
+          threadId,
+          "turn-1",
+          "2026-06-10T00:00:01.000Z",
+          { lastInputTokens: 50, lastOutputTokens: 5, lastUsedTokens: 55 },
+        );
+      }
+      yield* insertTurn(
+        sql,
+        "scope-b",
+        "turn-1",
+        1,
+        "2026-06-10T00:00:00.000Z",
+        "2026-06-10T00:00:30.000Z",
+        '[{"path":"b.ts","kind":"modified","additions":3,"deletions":1}]',
+      );
+      yield* markProjected(sql);
+      assert.equal((yield* statistics.getStatistics()).totals.additions, 3);
+      // Production writes thread rows only together with a thread event. A
+      // write that bypasses that (only possible in tests) shows the cached
+      // partial of thread B was reused rather than re-read.
+      yield* sql`UPDATE projection_turns SET checkpoint_files_json = '[]' WHERE thread_id = 'scope-b'`;
+      yield* insertContextEvent(sql, "scope-a-2", "scope-a", "turn-2", "2026-06-10T00:00:02.000Z", {
+        lastInputTokens: 10,
+        lastOutputTokens: 1,
+        lastUsedTokens: 11,
+      });
+      yield* markProjected(sql);
+      const incremental = yield* statistics.getStatistics();
+      assert.equal(incremental.totals.totalTokens, 121);
+      assert.equal(incremental.totals.additions, 3);
+      assert.equal((yield* recompute(sql, statistics)).totals.additions, 0);
+    }),
+  );
+
+  it.effect("re-reads threads whose events were not projected yet", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const statistics = yield* StatisticsQuery;
+      yield* clean(sql);
+      yield* insertProject(sql, "lag-project", "Lag");
+      yield* insertThread(
+        sql,
+        "lag-a",
+        "lag-project",
+        "codex",
+        "gpt-5.4",
+        "2026-06-10T00:00:00.000Z",
+      );
+      yield* insertThread(
+        sql,
+        "lag-b",
+        "lag-project",
+        "codex",
+        "gpt-5.4",
+        "2026-06-10T00:00:00.000Z",
+      );
+      yield* insertContextEvent(sql, "lag-a-1", "lag-a", "turn-1", "2026-06-10T00:00:01.000Z", {
+        lastInputTokens: 50,
+        lastOutputTokens: 5,
+        lastUsedTokens: 55,
+      });
+      yield* markProjected(sql);
+      // Thread B's event is stored, but the turns projector has not applied it.
+      yield* insertContextEvent(sql, "lag-b-1", "lag-b", "turn-1", "2026-06-10T00:00:02.000Z", {
+        lastInputTokens: 10,
+        lastOutputTokens: 1,
+        lastUsedTokens: 11,
+      });
+      assert.equal((yield* statistics.getStatistics()).totals.additions, 0);
+      // The projector catches up later, in its own transaction.
+      yield* insertTurn(
+        sql,
+        "lag-b",
+        "turn-1",
+        1,
+        "2026-06-10T00:00:00.000Z",
+        "2026-06-10T00:00:30.000Z",
+        '[{"path":"b.ts","kind":"modified","additions":4,"deletions":0}]',
+      );
+      yield* markProjected(sql);
+      const caughtUp = yield* statistics.getStatistics();
+      assert.equal(caughtUp.totals.additions, 4);
+      assert.deepEqual(
+        withoutGeneratedAt(caughtUp),
+        withoutGeneratedAt(yield* recompute(sql, statistics)),
+      );
+    }),
+  );
+
+  it.effect("drops a deleted thread's usage while keeping the rest incremental", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const statistics = yield* StatisticsQuery;
+      yield* clean(sql);
+      yield* insertProject(sql, "del-project", "Deleted");
+      for (const threadId of ["del-a", "del-b"]) {
+        yield* insertThread(
+          sql,
+          threadId,
+          "del-project",
+          "codex",
+          "gpt-5.4",
+          "2026-06-10T00:00:00.000Z",
+        );
+        yield* insertContextEvent(
+          sql,
+          `${threadId}-1`,
+          threadId,
+          "turn-1",
+          "2026-06-10T00:00:01.000Z",
+          { lastInputTokens: 50, lastOutputTokens: 5, lastUsedTokens: 55 },
+        );
+      }
+      yield* markProjected(sql);
+      assert.equal((yield* statistics.getStatistics()).totals.totalTokens, 110);
+      yield* sql`DELETE FROM projection_threads WHERE thread_id = 'del-b'`;
+      yield* insertContextEvent(sql, "del-a-2", "del-a", "turn-2", "2026-06-10T00:00:02.000Z", {
+        lastInputTokens: 10,
+        lastOutputTokens: 1,
+        lastUsedTokens: 11,
+      });
+      yield* markProjected(sql);
+      const snapshot = yield* statistics.getStatistics();
+      assert.equal(snapshot.totals.totalTokens, 66);
+      assert.equal(snapshot.totals.threads, 1);
+      assert.deepEqual(
+        withoutGeneratedAt(snapshot),
+        withoutGeneratedAt(yield* recompute(sql, statistics)),
+      );
+    }),
+  );
+});
+
 statisticsLayer("forked threads", (it) => {
   it.effect("counts a fork's own work only, never the history it inherited", () =>
     Effect.gen(function* () {
@@ -964,7 +1341,10 @@ statisticsLayer("forked threads", (it) => {
       const capture: SqlStatement.Transformer = (statement) =>
         Effect.sync(() => {
           const compiled = statement.compile();
-          if (compiled[0].includes("FROM orchestration_events")) statements.push(compiled);
+          // The token-activity read: the only statement over activity events.
+          if (compiled[0].includes("event_type = 'thread.activity-appended'")) {
+            statements.push(compiled);
+          }
           return statement;
         });
       // Inside a transaction the snapshot cache is bypassed, so the queries run again.

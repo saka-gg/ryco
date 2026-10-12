@@ -6,7 +6,11 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vite-plus/test";
 
-import { readProjectFavicon, type ProjectFaviconExecFile } from "./readProjectFavicon.ts";
+import {
+  readProjectFavicon,
+  readProjectFavicons,
+  type ProjectFaviconExecFile,
+} from "./readProjectFavicon.ts";
 
 const directories: string[] = [];
 async function workspace() {
@@ -35,6 +39,38 @@ describe("optional project icon I/O", () => {
     const icon = await readProjectFavicon(dir);
     expect(icon?.path).toBe(path.join(dir, "favicon.svg"));
     expect(Buffer.from(icon!.bytes).toString()).toBe("<svg>icon</svg>");
+  });
+
+  it("resolves several workspaces in one child, each on its own", async () => {
+    const withIcon = await workspace();
+    const without = await workspace();
+    await writeFile(path.join(withIcon, "favicon.svg"), "<svg>one</svg>");
+    let spawns = 0;
+    const counting: ProjectFaviconExecFile = (file, args, options, callback) => {
+      spawns += 1;
+      return execFile(file, args, options, callback);
+    };
+    const results = await readProjectFavicons([withIcon, without, path.join(without, "gone")], {
+      execFile: counting,
+    });
+    expect(spawns).toBe(1);
+    expect(results[0]).toMatchObject({ status: "found" });
+    expect(results.slice(1)).toEqual([{ status: "absent" }, { status: "absent" }]);
+  });
+
+  it("keeps the roots a stalled child finished and reports the rest unavailable", async () => {
+    const stalled: ProjectFaviconExecFile = (file, _args, options, callback) =>
+      execFile(
+        file,
+        [
+          "--eval",
+          'process.stdout.write(JSON.stringify({ i: 0, icon: null }) + "\\n"); setTimeout(() => {}, 60_000)',
+        ],
+        options,
+        callback,
+      );
+    const results = await readProjectFavicons(["/a", "/b"], { execFile: stalled, timeoutMs: 500 });
+    expect(results).toEqual([{ status: "absent" }, { status: "unavailable" }]);
   });
 
   it("skips oversized icons and still discovers a small fallback", async () => {

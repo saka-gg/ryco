@@ -1,6 +1,6 @@
 import { useAtomValue } from "@effect/atom-react";
 import type { ProjectListEntriesResult, ProjectReadFileResult } from "@ryco/contracts";
-import { useCallback, useEffect, useMemo } from "react";
+import { useCallback, useEffect } from "react";
 
 import {
   type ProjectListEntriesInput,
@@ -17,8 +17,11 @@ export interface ProjectPreviewQueryResult<T> extends ProjectPreviewQueryState<T
 /**
  * Atom-backed replacement for PreviewPanel's `useQuery(listEntries)`.
  *
- * Preserves keep-previous-data while refetching, imperative `refetch`, and
- * sorted entry ordering from the former `select` transform.
+ * Preserves keep-previous-data while refetching and imperative `refetch`.
+ * Entries arrive in server order (shallowest first once the listing is capped)
+ * and are not re-sorted here: every consumer is order-independent, and the
+ * tree builders sort each directory's children themselves, so a full-list
+ * collation pass on every load and refetch was pure main-thread cost.
  */
 export function useProjectListEntries(
   input: ProjectListEntriesInput,
@@ -37,37 +40,14 @@ export function useProjectListEntries(
   );
 
   const state = useAtomValue(projectListEntriesQuery.getAtom(cacheKey));
-  const sortedData = useMemo(() => {
-    if (!state.data) {
-      return null;
-    }
-    return {
-      ...state.data,
-      entries: state.data.entries.toSorted((left, right) =>
-        left.path.localeCompare(right.path, undefined, { numeric: true, sensitivity: "base" }),
-      ),
-    };
-  }, [state.data]);
 
   const refetch = useCallback(async () => {
     const next = await projectListEntriesQuery.refreshAsync(cacheKey);
-    const data =
-      next.data === null
-        ? null
-        : {
-            ...next.data,
-            entries: next.data.entries.toSorted((left, right) =>
-              left.path.localeCompare(right.path, undefined, {
-                numeric: true,
-                sensitivity: "base",
-              }),
-            ),
-          };
-    return { data };
+    return { data: next.data };
   }, [cacheKey]);
 
   return {
-    data: sortedData,
+    data: state.data,
     isLoading: state.isLoading,
     isFetching: state.isFetching,
     error: state.error,

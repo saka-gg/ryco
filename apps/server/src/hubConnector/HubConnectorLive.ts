@@ -467,7 +467,7 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
           Effect.promise(async () => {
             const claim = await processLock.acquire();
             return claim === "unavailable" ? processLock.acquire() : claim;
-          }),
+          }).pipe(Effect.withSpan("server.startup.hub.process-lock")),
           () => Effect.promise(() => processLock.release()),
         )
       : undefined;
@@ -478,6 +478,9 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
         allowFileFallback: config.hubConnector?.allowFileSecretStore ?? false,
         makeIdentityRuntime: dependencies.makeIdentityRuntime,
       });
+    // Identity custody is built before the router serves, so its cost — the
+    // key-store probe in particular — is traced phase by phase.
+    const identityPhases: Record<string, number> = {};
     const custody = config.hubConnector?.enabled
       ? yield* Effect.tryPromise({
           try: () =>
@@ -495,9 +498,16 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
                 requireApprovedClientE2EE: config.hubE2eePolicy?.requireApprovedClientE2EE,
               },
               deferStartup: identityClaim === "held",
+              onStartupPhase: (phase, durationMs) => {
+                identityPhases[`hub.identity.${phase}Ms`] = Math.round(durationMs);
+              },
             }),
           catch: () => new HubIdentityRuntimeError("identity_unavailable"),
-        }).pipe(Effect.option)
+        }).pipe(
+          Effect.ensuring(Effect.suspend(() => Effect.annotateCurrentSpan(identityPhases))),
+          Effect.withSpan("server.startup.hub.identity-runtime"),
+          Effect.option,
+        )
       : Option.none();
     const hubConfig = config.hubConnector ?? DEFAULT_HUB_CONNECTOR_CONFIG;
     const quietStandby =

@@ -64,9 +64,20 @@ export interface HostedRuntimeConfiguration {
   readonly hasPendingRelayRequests: () => boolean;
   /** A live account subscription pushes directory changes independently of node channels. */
   readonly hasLiveHubSubscription?: () => boolean;
+  /**
+   * Ask the account subscription to prove it is alive now (a ping with a short
+   * bound) because something suggests it may not be: a relay request has gone
+   * unanswered unusually long. A dead connection then fails through the
+   * subscription's own loss path; nothing is published from here.
+   */
+  readonly probeHubSubscription?: () => void;
   readonly resetRelayAttemptFactory: () => void;
   readonly relayUrl: () => string;
-  /** Native-only public trust preparation before the atomic ticket/grant request. */
+  /**
+   * Preparation awaited before each relay ticket/grant request: native public
+   * trust preparation, or the web tier loading its handshake code. A rejection
+   * fails the attempt before any ticket is spent.
+   */
   readonly prepareRelaySocketContext?: () => Promise<unknown>;
   readonly issueRelayAttempt?: (input: {
     readonly nodeId: string;

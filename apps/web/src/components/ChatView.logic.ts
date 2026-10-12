@@ -419,12 +419,57 @@ export function shouldShowNewThreadSurface(input: {
   readonly optimisticMessageCount: number;
   readonly timelineEntryCount: number;
   readonly presentationTier: string;
+  /** {@link isServerThreadHistoryPending}: an existing thread is not a new one. */
+  readonly historyPending: boolean;
 }): boolean {
   return (
     input.hasThread &&
+    !input.historyPending &&
     input.messageCount === 0 &&
     input.optimisticMessageCount === 0 &&
     input.timelineEntryCount === 0 &&
     input.presentationTier !== "phone"
   );
+}
+
+/**
+ * Whether an existing server thread's history is still on its way. The shell
+ * lists a thread (with its latest turn and last user message time) before its
+ * message window arrives, so a thread that has started but shows no messages
+ * yet is loading, not new. Messages already at hand (a read cache) render.
+ */
+export function isServerThreadHistoryPending(input: {
+  readonly isServerThread: boolean;
+  readonly detailLoaded: boolean;
+  readonly messageCount: number;
+  readonly hasLatestTurn: boolean;
+  readonly latestUserMessageAt: string | null;
+}): boolean {
+  return (
+    input.isServerThread &&
+    !input.detailLoaded &&
+    input.messageCount === 0 &&
+    (input.hasLatestTurn || input.latestUserMessageAt !== null)
+  );
+}
+
+/**
+ * One composer submit in flight per thread. ChatView follows thread navigation
+ * instead of remounting, so a slow send in one thread (worktree setup, say)
+ * must not swallow a send in the thread the user moved on to, while a second
+ * submit of the same thread (a double Enter) is still dropped.
+ */
+export function createThreadSubmitGuard() {
+  const pendingThreadKeys = new Set<string>();
+  return {
+    /** Runs `submit` unless `threadKey` has one in flight; false when dropped. */
+    run(threadKey: string, submit: () => Promise<unknown>): boolean {
+      if (pendingThreadKeys.has(threadKey)) return false;
+      pendingThreadKeys.add(threadKey);
+      void submit().finally(() => {
+        pendingThreadKeys.delete(threadKey);
+      });
+      return true;
+    },
+  };
 }

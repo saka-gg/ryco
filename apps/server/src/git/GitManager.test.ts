@@ -26,8 +26,8 @@ import { applyServerSettingsPatch } from "@ryco/shared/serverSettings";
 import { type GitManagerShape } from "./GitManager.ts";
 import {
   GitHubCliError,
-  GITHUB_PULL_REQUEST_LIST_JSON_FIELDS,
   GITHUB_PULL_REQUEST_SUMMARY_JSON_FIELDS,
+  GITHUB_PULL_REQUEST_SUMMARY_LIST_JSON_FIELDS,
   type GitHubCliShape,
   type GitHubPullRequestSummary,
   GitHubCli,
@@ -569,6 +569,7 @@ function createGitHubCliWithFakeGh(scenario: FakeGhScenario = {}): {
       updatePullRequest: () => Effect.die("unused"),
       getPullRequestFileContents: () => Effect.die("unused"),
       execute,
+      listPullRequests: () => Effect.die("unused"),
       listOpenPullRequests: (input) =>
         execute({
           cwd: input.cwd,
@@ -1524,6 +1525,173 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
     }),
   );
 
+  const indexedPullRequest = (input: {
+    number: number;
+    headRefName: string;
+    state: "OPEN" | "MERGED" | "CLOSED";
+  }) => ({
+    number: input.number,
+    title: `PR ${input.number}`,
+    url: `https://github.com/acme/app/pull/${input.number}`,
+    baseRefName: "main",
+    headRefName: input.headRefName,
+    state: input.state,
+    updatedAt: `2026-03-${String(10 + (input.number % 10)).padStart(2, "0")}T07:00:00Z`,
+    isCrossRepository: false,
+  });
+
+  it.effect("answers every checkout of a repository from one lean change request listing", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("ryco-git-manager-");
+      yield* initRepo(repoDir);
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+      yield* runGit(repoDir, ["checkout", "-b", "feature/indexed"]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "feature/indexed"]);
+      const worktreeDir = path.join(yield* makeTempDir("ryco-git-manager-wt-"), "second");
+      yield* runGit(repoDir, ["worktree", "add", "-b", "feature/second", worktreeDir, "main"]);
+      yield* runGit(worktreeDir, ["push", "-u", "origin", "feature/second"]);
+      yield* runGit(repoDir, ["remote", "set-url", "origin", "https://github.com/acme/app.git"]);
+
+      const { manager, ghCalls } = yield* makeManager({
+        detectSourceControlFromRemotes: true,
+        ghScenario: {
+          prListSequence: [
+            JSON.stringify([
+              indexedPullRequest({ number: 12, headRefName: "feature/indexed", state: "OPEN" }),
+              indexedPullRequest({ number: 11, headRefName: "feature/second", state: "MERGED" }),
+            ]),
+          ],
+        },
+      });
+
+      const first = yield* manager.remoteStatus({ cwd: repoDir });
+      const second = yield* manager.remoteStatus({ cwd: worktreeDir });
+
+      expect(first?.pr).toMatchObject({ number: 12, state: "open" });
+      expect(second?.pr).toMatchObject({ number: 11, state: "merged" });
+      expect(ghCalls.filter((call) => call.startsWith("pr list "))).toEqual([
+        `pr list --state all --limit 100 --json ${formatGitHubJsonFields(GITHUB_PULL_REQUEST_SUMMARY_LIST_JSON_FIELDS)}`,
+      ]);
+    }),
+  );
+
+  it.effect("asks per branch only when the listings cannot rule out an older change request", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("ryco-git-manager-");
+      yield* initRepo(repoDir);
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "main"]);
+      yield* runGit(repoDir, ["checkout", "-b", "feature/old"]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "feature/old"]);
+      yield* runGit(repoDir, ["remote", "set-url", "origin", "https://github.com/acme/app.git"]);
+
+      // A full window of unrelated recent change requests, and no open ones.
+      const recent = Array.from({ length: 100 }, (_, index) =>
+        indexedPullRequest({ number: 200 + index, headRefName: `other/${index}`, state: "MERGED" }),
+      );
+      const { manager, ghCalls } = yield* makeManager({
+        detectSourceControlFromRemotes: true,
+        ghScenario: {
+          prListSequence: [JSON.stringify(recent), JSON.stringify([])],
+          prListByHeadSelector: {
+            "feature/old": JSON.stringify([
+              indexedPullRequest({ number: 3, headRefName: "feature/old", state: "MERGED" }),
+            ]),
+          },
+        },
+      });
+
+      const featureStatus = yield* manager.remoteStatus({ cwd: repoDir });
+      expect(featureStatus?.pr).toMatchObject({ number: 3, state: "merged" });
+      expect(ghCalls.filter((call) => call.startsWith("pr list "))).toEqual([
+        `pr list --state all --limit 100 --json ${formatGitHubJsonFields(GITHUB_PULL_REQUEST_SUMMARY_LIST_JSON_FIELDS)}`,
+        `pr list --state open --limit 100 --json ${formatGitHubJsonFields(GITHUB_PULL_REQUEST_SUMMARY_LIST_JSON_FIELDS)}`,
+        `pr list --head feature/old --state all --limit 20 --json ${formatGitHubJsonFields(GITHUB_PULL_REQUEST_SUMMARY_LIST_JSON_FIELDS)}`,
+      ]);
+
+      // On the default branch only open change requests count, and the open
+      // listing is complete: no per-branch question.
+      yield* runGit(repoDir, ["checkout", "main"]);
+      yield* manager.invalidateLocalStatus(repoDir);
+      const callsBefore = ghCalls.length;
+      const mainStatus = yield* manager.refSummary(repoDir);
+      expect(mainStatus).toMatchObject({ refName: "main", isDefaultRef: true, pr: null });
+      expect(ghCalls.slice(callsBefore).filter((call) => call.includes("--head"))).toEqual([]);
+    }),
+  );
+
+  it.effect("summarizes a checkout's badge from HEAD, config and the index", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("ryco-git-manager-");
+      yield* initRepo(repoDir);
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+      yield* runGit(repoDir, ["checkout", "-b", "feature/badge"]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "feature/badge"]);
+      yield* runGit(repoDir, ["remote", "set-url", "origin", "git@github.com:acme/app.git"]);
+
+      const { manager, ghCalls } = yield* makeManager({
+        detectSourceControlFromRemotes: true,
+        ghScenario: {
+          prListSequence: [
+            JSON.stringify([
+              indexedPullRequest({ number: 21, headRefName: "feature/badge", state: "OPEN" }),
+            ]),
+          ],
+        },
+      });
+
+      const summary = yield* manager.refSummary(repoDir);
+      expect(summary).toMatchObject({
+        isRepo: true,
+        refName: "feature/badge",
+        isDefaultRef: false,
+        hasPrimaryRemote: true,
+        hasUpstream: true,
+        sourceControlProvider: { kind: "github" },
+        pr: { number: 21, headRef: "feature/badge", state: "open" },
+      });
+      // Repeated reads (sidebar rows scrolling back into view) are cached.
+      yield* manager.refSummary(repoDir);
+      expect(ghCalls.filter((call) => call.startsWith("pr list "))).toHaveLength(1);
+
+      // A checkout switch is read from disk and misses the cache at once.
+      yield* runGit(repoDir, ["checkout", "-b", "feature/next"]);
+      expect((yield* manager.refSummary(repoDir)).refName).toBe("feature/next");
+    }),
+  );
+
+  it.effect("does not ask the forge about a branch that was never published", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("ryco-git-manager-");
+      yield* initRepo(repoDir);
+      yield* runGit(repoDir, ["remote", "add", "origin", "git@github.com:acme/app.git"]);
+      yield* runGit(repoDir, ["checkout", "-b", "feature/local-only"]);
+
+      const { manager, ghCalls } = yield* makeManager({
+        detectSourceControlFromRemotes: true,
+        ghScenario: {
+          prListSequence: [
+            JSON.stringify([
+              indexedPullRequest({ number: 31, headRefName: "feature/local-only", state: "OPEN" }),
+            ]),
+          ],
+        },
+      });
+
+      // Someone else's change request may share the name; this branch has none.
+      const summary = yield* manager.refSummary(repoDir);
+      expect(summary).toMatchObject({
+        refName: "feature/local-only",
+        hasUpstream: false,
+        pr: null,
+      });
+      expect(ghCalls.filter((call) => call.startsWith("pr "))).toEqual([]);
+    }),
+  );
+
   it.effect("still propagates provider failures for a repository on a recognized host", () =>
     Effect.gen(function* () {
       const repoDir = yield* makeTempDir("ryco-git-manager-");
@@ -1646,7 +1814,7 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
           state: "open",
         });
         expect(ghCalls).toContain(
-          `pr list --head jasonLaster:statemachine --state all --limit 20 --json ${formatGitHubJsonFields(GITHUB_PULL_REQUEST_LIST_JSON_FIELDS)}`,
+          `pr list --head jasonLaster:statemachine --state all --limit 20 --json ${formatGitHubJsonFields(GITHUB_PULL_REQUEST_SUMMARY_LIST_JSON_FIELDS)}`,
         );
       }),
     20_000,

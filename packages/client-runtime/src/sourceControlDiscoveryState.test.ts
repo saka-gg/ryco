@@ -105,3 +105,42 @@ it("keeps the previous snapshot when refresh fails", async () => {
     isPending: false,
   });
 });
+
+it("asks for the cached result on background revalidation and a fresh probe on explicit refresh", async () => {
+  const inputs: Array<{ readonly cached?: boolean } | undefined> = [];
+  const pending: Array<(result: SourceControlDiscoveryResult) => void> = [];
+  const manager = createSourceControlDiscoveryManager({
+    getRegistry: () => registry,
+    getClient: () => ({
+      discoverSourceControl: (input) => {
+        inputs.push(input);
+        return new Promise<SourceControlDiscoveryResult>((resolve) => {
+          pending.push(resolve);
+        });
+      },
+    }),
+  });
+
+  const background = manager.refresh({ key: "primary" }, undefined, { cached: true });
+  // The user's explicit refresh does not settle for the cached answer in flight.
+  const explicit = manager.refresh({ key: "primary" });
+  // Another background revalidation joins the fresh probe.
+  const laterBackground = manager.refresh({ key: "primary" }, undefined, { cached: true });
+
+  assert.deepStrictEqual(inputs, [{ cached: true }, undefined]);
+  assert.strictEqual(laterBackground, explicit);
+  assert.notStrictEqual(background, explicit);
+
+  // The fresh probe answers first; the older cached answer landing later must
+  // not replace it.
+  const fresh: SourceControlDiscoveryResult = {
+    versionControlSystems: [],
+    sourceControlProviders: [],
+  };
+  pending[1]!(fresh);
+  await explicit;
+  pending[0]!(EMPTY_RESULT);
+  await background;
+  assert.strictEqual(manager.getSnapshot({ key: "primary" }).data, fresh);
+  assert.strictEqual(manager.getSnapshot({ key: "primary" }).isPending, false);
+});

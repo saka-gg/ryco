@@ -7,6 +7,7 @@ import * as EffectAcpErrors from "effect-acp/errors";
 import { normalizeModelSlug } from "@ryco/shared/model";
 
 import {
+  type AcpStartupPhase,
   AcpSessionRuntime,
   type AcpSessionRuntimeOptions,
   type AcpSessionRuntimeShape,
@@ -48,6 +49,10 @@ export function buildGrokAcpSpawnInput(
   };
 }
 
+const GROK_PHASE_TIMEOUT_HINTS: Partial<Record<AcpStartupPhase, string>> = {
+  authenticate: `The Grok CLI did not confirm its login; sign in with the Grok CLI or set ${GROK_API_KEY_ENV}, then try again.`,
+};
+
 function resolveGrokAuthMethodId(environment: NodeJS.ProcessEnv | undefined): string {
   return environment?.[GROK_API_KEY_ENV]?.trim()
     ? GROK_AUTH_METHOD_API_KEY
@@ -63,6 +68,7 @@ export const makeGrokAcpRuntime = (
         ...input,
         spawn: buildGrokAcpSpawnInput(input.grokSettings, input.cwd, input.environment),
         authMethodId: resolveGrokAuthMethodId(input.environment),
+        phaseTimeoutHints: GROK_PHASE_TIMEOUT_HINTS,
       }).pipe(
         Layer.provide(
           Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, input.childProcessSpawner),

@@ -15,7 +15,7 @@ import { render } from "vitest-browser-react";
 
 /* One device with a live connection; every call is recorded. */
 const device = vi.hoisted(() => ({
-  client: { server: { getConfig: () => Promise.resolve({ providers: [] }) } },
+  client: { server: {} },
   streams: [] as Array<{
     readonly listener: (event: AgentControlProposalStreamEvent) => void;
     readonly onError: () => void;
@@ -23,10 +23,13 @@ const device = vi.hoisted(() => ({
   snapshotReads: 0,
   commands: [] as AutomationCentreCommand[],
   command: vi.fn(),
+  config: null as { readonly settings: { readonly agentControl: { enabled: boolean } } } | null,
 }));
 vi.mock("../../../environments/runtime", () => ({
   readEnvironmentConnection: () => ({ client: device.client }),
   subscribeEnvironmentConnections: () => () => {},
+  // Providers come from the environment's live config, never a getConfig read.
+  useSavedEnvironmentRuntimeStore: () => device.config,
 }));
 vi.mock("../../../environmentApi", () => {
   const api = {
@@ -95,6 +98,7 @@ const queueSnapshot = (
 });
 
 beforeEach(() => {
+  device.config = null;
   device.streams.length = 0;
   device.snapshotReads = 0;
   device.commands.length = 0;
@@ -107,6 +111,23 @@ afterEach(() => {
 });
 
 describe("useAutomationCentre", () => {
+  it("reads nothing while the device's own config says Agent Control is off", async () => {
+    device.config = { settings: { agentControl: { enabled: false } } };
+    const screen = await render(<Probe projectId={ALPHA} />);
+    await expect.element(screen.getByTestId("error-alpha")).toMatchTextContent(/turned off/);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(device.snapshotReads).toBe(0);
+    expect(device.streams).toHaveLength(0);
+
+    // Turning the feature on re-admits the device.
+    device.config = { settings: { agentControl: { enabled: true } } };
+    await screen.rerender(<Probe projectId={ALPHA} />);
+    await expect.poll(() => device.snapshotReads).toBe(1);
+    expect(device.streams).toHaveLength(1);
+    await expect.element(screen.getByTestId("error-alpha")).toHaveTextContent("ok");
+    screen.unmount();
+  });
+
   it("reads proposal changes from the device's one shared queue stream", async () => {
     const screen = await render(
       <>

@@ -66,6 +66,7 @@ import { __resetLocalApiForTests } from "../localApi";
 import { AppAtomRegistryProvider } from "../rpc/atomRegistry";
 import { resetGitAtomsForTests } from "../rpc/gitAtoms";
 import { resetProjectAtomsForTests } from "../rpc/projectAtoms";
+import { resetThreadDetailPrewarmsForTests } from "../lib/threadDetailPrewarm";
 import { resetProjectPreviewAtomsForTests } from "../rpc/projectPreviewAtoms";
 import { resetCheckpointDiffStateForTests } from "../rpc/providerAtoms";
 import { getServerConfig } from "../rpc/serverState";
@@ -192,6 +193,11 @@ interface TestFixture {
   welcome: ServerLifecycleWelcomePayload;
   /** Threads whose window reports older messages than it holds. */
   threadsWithOlderMessages?: ReadonlySet<ThreadId>;
+  /**
+   * Threads whose history window the server holds back: their subscription
+   * opens but sends no snapshot until a test emits one.
+   */
+  threadsWithHeldHistory?: ReadonlySet<ThreadId>;
 }
 
 let fixture: TestFixture;
@@ -2618,6 +2624,12 @@ export function setupChatViewBrowserSuite() {
         ) {
           const thread = fixture.snapshot.threads.find((entry) => entry.id === request.threadId);
           if (!thread) return [];
+          if (
+            request._tag === ORCHESTRATION_WS_METHODS.subscribeThreadWindow &&
+            fixture.threadsWithHeldHistory?.has(thread.id) === true
+          ) {
+            return [];
+          }
           return [
             {
               kind: "snapshot",
@@ -2649,6 +2661,9 @@ export function setupChatViewBrowserSuite() {
     wsRequests.length = 0;
     customWsRpcResolver = null;
     __resetEnvironmentApiOverridesForTests();
+    // A route's navigation retain outlives its test by up to 10 s; the next
+    // mount must not open on the previous fixture's thread detail.
+    resetThreadDetailPrewarmsForTests();
     resetGitAtomsForTests();
     resetProjectAtomsForTests();
     // The checkpoint-diff and project-preview caches are module-level; stale

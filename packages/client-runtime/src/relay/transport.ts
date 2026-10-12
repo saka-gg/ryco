@@ -196,7 +196,16 @@ export interface HostedRelayAttemptBinding {
   readonly markDeliveryUnknown: (generation: number) => void;
   readonly connectionClosed: (generation: number) => void;
   readonly connectionRecovered?: (generation: number) => void;
+  /** A unary request has waited {@link HOSTED_REQUEST_STALL_PROBE_MS} without a reply. */
+  readonly requestStalled?: () => void;
 }
+
+/**
+ * How long a unary relay request may wait for its first reply before the
+ * connection carrying it is asked to prove it is alive. Long-lived streams are
+ * not watched: they may legitimately stay silent.
+ */
+export const HOSTED_REQUEST_STALL_PROBE_MS = 5_000;
 
 function defaultBinding(): HostedRelayAttemptBinding {
   return {
@@ -238,6 +247,7 @@ function defaultBinding(): HostedRelayAttemptBinding {
     markDeliveryUnknown: (generation) => hostedHubController.markDeliveryUnknown(generation),
     connectionClosed: (generation) => hostedHubController.connectionClosed(generation),
     connectionRecovered: recoverHostedRelayConnection,
+    requestStalled: () => getHostedRuntimeConfiguration().probeHubSubscription?.(),
   };
 }
 
@@ -284,6 +294,9 @@ export class HostedRelayAttemptFactory {
   readonly #binding: HostedRelayAttemptBinding;
   readonly #reconnect = new HostedReconnectPolicy();
   readonly #pendingRequests = new Map<string, "first-chunk" | "exit">();
+  /** Unary requests awaiting their first reply, by id, with when they started. */
+  readonly #unansweredRequests = new Map<string, number>();
+  #stallTimer: ReturnType<typeof setTimeout> | null = null;
   #pendingTicket: PendingTicket | null = null;
   #lastRetryAfterMs: number | undefined;
   #activeGeneration: number | null = null;
@@ -473,6 +486,7 @@ export class HostedRelayAttemptFactory {
         this.#disposed = true;
         this.#invalidateAttempt();
         this.#pendingRequests.clear();
+        this.#clearStallWatch();
       },
       isTerminalUrlError: () => this.#disposed || !this.#retryable,
       shouldReconnect: () =>
@@ -500,6 +514,7 @@ export class HostedRelayAttemptFactory {
         this.#binding.connectionClosed(generation);
       },
       onRequestStart: (info) => {
+        if (!info.stream) this.#watchForStall(info.id);
         // Only a request that may have changed something can leave its
         // delivery uncertain. Reads — unary, or long-lived streams such as the
         // Agent Control queue — are harmless to lose. A receipted command is
@@ -513,13 +528,58 @@ export class HostedRelayAttemptFactory {
         this.#pendingRequests.set(info.id, info.stream ? "exit" : "first-chunk");
       },
       onRequestChunk: (info) => {
+        this.#unansweredRequests.delete(info.id);
         if (this.#pendingRequests.get(info.id) === "first-chunk") {
           this.#pendingRequests.delete(info.id);
         }
       },
-      onRequestExit: (info) => this.#pendingRequests.delete(info.id),
-      onRequestInterrupt: (info) => this.#pendingRequests.delete(info.id),
+      onRequestExit: (info) => {
+        this.#unansweredRequests.delete(info.id);
+        this.#pendingRequests.delete(info.id);
+      },
+      onRequestInterrupt: (info) => {
+        this.#unansweredRequests.delete(info.id);
+        this.#pendingRequests.delete(info.id);
+      },
     };
+  }
+
+  /**
+   * One timer for every unanswered unary request: when the oldest has waited
+   * {@link HOSTED_REQUEST_STALL_PROBE_MS}, the binding is told once, and the
+   * watch re-arms for whatever is still waiting after that.
+   */
+  #watchForStall(id: string): void {
+    this.#unansweredRequests.set(id, getHostedRuntimeConfiguration().timers.now());
+    this.#armStallWatch();
+  }
+
+  #armStallWatch(): void {
+    if (this.#stallTimer !== null || this.#unansweredRequests.size === 0) return;
+    const timers = getHostedRuntimeConfiguration().timers;
+    const oldest = Math.min(...this.#unansweredRequests.values());
+    const delay = Math.max(0, oldest + HOSTED_REQUEST_STALL_PROBE_MS - timers.now());
+    this.#stallTimer = timers.setTimeout(() => {
+      this.#stallTimer = null;
+      const now = timers.now();
+      let stalled = false;
+      for (const [id, startedAt] of this.#unansweredRequests) {
+        if (now - startedAt < HOSTED_REQUEST_STALL_PROBE_MS) continue;
+        stalled = true;
+        // Reported once per request; a probe answers for every request it covers.
+        this.#unansweredRequests.delete(id);
+      }
+      if (stalled && !this.#disposed) this.#binding.requestStalled?.();
+      this.#armStallWatch();
+    }, delay);
+  }
+
+  #clearStallWatch(): void {
+    this.#unansweredRequests.clear();
+    if (this.#stallTimer !== null) {
+      getHostedRuntimeConfiguration().timers.clearTimeout(this.#stallTimer);
+      this.#stallTimer = null;
+    }
   }
 
   hasPendingRequests(): boolean {
@@ -540,6 +600,7 @@ export class HostedRelayAttemptFactory {
     this.#disposed = false;
     this.#retryable = true;
     this.#pendingRequests.clear();
+    this.#clearStallWatch();
     this.#lastRetryAfterMs = undefined;
     this.#activeGeneration = null;
     this.#activeAttemptId = null;

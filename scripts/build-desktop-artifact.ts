@@ -762,6 +762,12 @@ export const DESKTOP_BUILD_FILES = [
   "**/*",
   "!apps/desktop/resources/ryco-desktop-security-helper",
   "!apps/desktop/prod-resources/ryco-desktop-security-helper",
+  // Shipped as extraResources and run from there; binaries inside app.asar
+  // cannot execute. prod-resources only needs to carry the icons.
+  "!apps/desktop/prod-resources/cua-driver/**",
+  "!apps/desktop/prod-resources/ryco-computer-use-helper",
+  "!apps/desktop/prod-resources/ryco-computer-use-helper.exe",
+  "!apps/desktop/prod-resources/ryco-computer-ui-helper",
   "!node_modules/@github/copilot/**",
   "!node_modules/@github/copilot-darwin-arm64/**",
   "!node_modules/@github/copilot-darwin-x64/**",

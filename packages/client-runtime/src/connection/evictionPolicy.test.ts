@@ -42,4 +42,18 @@ describe("planEvictionsToCapacity", () => {
       }),
     ).toEqual(["idle"]);
   });
+
+  it("can budget bytes over idle entries only, so a pinned entry cannot starve them", () => {
+    const entries = [entry("hot-pinned", 3, 20_000_000, false), entry("idle", 1, 200_000)];
+    expect(planEvictionsToCapacity(entries, { maxEntries: 32, maxBytes: 12_000_000 })).toEqual([
+      "idle",
+    ]);
+    expect(
+      planEvictionsToCapacity(entries, {
+        maxEntries: 32,
+        maxBytes: 12_000_000,
+        byteBudget: "evictable",
+      }),
+    ).toEqual([]);
+  });
 });

@@ -114,6 +114,26 @@ export function createDpopProofSigner(
   }
   const publicJwk = sanitizePublicJwk(key.publicJwk);
   const headerSegment = encodeSegment({ typ: "dpop+jwt", alg: key.algorithm, jwk: publicJwk });
+  // `ath` is a pure function of the access token, and every authenticated
+  // request presents the same token until it rotates. Remembering the one
+  // current pair spares a platform digest (a native bridge hop on mobile) per
+  // request; a different token replaces it, so a rotated or cleared session
+  // never reuses the previous hash. The per-proof signature is inherent to DPoP
+  // (fresh `iat`/`jti`/`htu`) and is not affected.
+  let athCache: { readonly token: string; readonly ath: Promise<string> } | null = null;
+  const accessTokenHash = (token: string): Promise<string> => {
+    if (athCache?.token === token) return athCache.ath;
+    const ath = context
+      .sha256(new TextEncoder().encode(token))
+      .then((digest) => encodeBase64Url(digest));
+    const entry = { token, ath };
+    athCache = entry;
+    // A failed digest must not be remembered for the token.
+    ath.catch(() => {
+      if (athCache === entry) athCache = null;
+    });
+    return ath;
+  };
   return {
     sign: async ({ method, url, token }: DpopProofInput): Promise<string> => {
       const payload: Record<string, unknown> = {
@@ -123,7 +143,7 @@ export function createDpopProofSigner(
         jti: context.randomJti(),
       };
       if (token !== undefined) {
-        payload.ath = encodeBase64Url(await context.sha256(new TextEncoder().encode(token)));
+        payload.ath = await accessTokenHash(token);
       }
       const signingInput = `${headerSegment}.${encodeSegment(payload)}`;
       const signature = await key.sign(new TextEncoder().encode(signingInput));

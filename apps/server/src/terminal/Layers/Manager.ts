@@ -69,6 +69,7 @@ import {
   emptyHistoryBufferState,
   historyBufferStateFrom,
 } from "../historyBuffer.ts";
+import { TerminalHistoryCursorIndex } from "../historyCursorIndex.ts";
 import {
   PtyAdapter,
   PtySpawnError,
@@ -79,8 +80,22 @@ import {
 
 const DEFAULT_HISTORY_LINE_LIMIT = 5_000;
 const DEFAULT_HISTORY_MAX_BYTES = 2 * 1024 * 1024;
-const DEFAULT_PERSIST_DEBOUNCE_MS = 40;
+/**
+ * Output persists at most once per window per session, writing the latest
+ * history when the window ends. Each write rewrites the whole history file
+ * (up to `DEFAULT_HISTORY_MAX_BYTES`), so a short window under continuous
+ * output costs a full rewrite every few chunks. Lifecycle changes (clear,
+ * restart, close, exit, shutdown) still write through immediately.
+ */
+const DEFAULT_PERSIST_DEBOUNCE_MS = 1_000;
 const DEFAULT_SUBPROCESS_POLL_INTERVAL_MS = 1_000;
+/**
+ * Process-table cadence once no terminal has had input or output for this
+ * long. Subprocesses start and stop around I/O (a command line, its output,
+ * the next prompt), so recent I/O keeps the fast cadence; idle shells still
+ * get a periodic check for silent changes such as background jobs ending.
+ */
+const DEFAULT_SUBPROCESS_IDLE_POLL_INTERVAL_MS = 5_000;
 const DEFAULT_PROCESS_KILL_GRACE_MS = 1_000;
 const DEFAULT_MAX_RETAINED_INACTIVE_SESSIONS = 128;
 const DEFAULT_MAX_PENDING_PROCESS_EVENTS = 2_048;
@@ -144,6 +159,8 @@ interface TerminalSessionState {
   pid: number | null;
   /** Retained scrollback, byte- and line-bounded. Trimmed from the head. */
   historyState: HistoryBufferState;
+  /** Positions of output cursors in `historyState`, for delta opens. */
+  historyIndex: TerminalHistoryCursorIndex;
   pendingHistoryControlSequence: string;
   pendingProcessEvents: Array<PendingProcessEvent>;
   pendingProcessEventIndex: number;
@@ -164,7 +181,10 @@ interface TerminalSessionState {
 
 interface PersistHistoryRequest {
   history: string;
-  immediate: boolean;
+}
+
+interface ScheduledHistoryPersist {
+  readonly session: TerminalSessionState;
 }
 
 type PendingProcessEvent =
@@ -178,7 +198,7 @@ type DrainProcessEventAction =
       threadId: string;
       terminalId: string;
       cursor: TerminalCursor;
-      history: string | null;
+      persistHistory: boolean;
       data: string;
     }
   | {
@@ -211,6 +231,34 @@ function snapshot(session: TerminalSessionState): TerminalSessionSnapshot {
     updatedAt: session.updatedAt,
     cursor: session.cursor,
   };
+}
+
+/**
+ * `terminal.open`'s answer: only the history after `sinceCursor` when the session's history
+ * still covers it exactly (same generation, no reset since, not trimmed away), otherwise the
+ * full snapshot.
+ */
+function openSnapshot(
+  session: TerminalSessionState,
+  sinceCursor: TerminalCursor | undefined,
+): TerminalSessionSnapshot {
+  const full = snapshot(session);
+  if (
+    !sinceCursor ||
+    sinceCursor.generation !== session.cursor.generation ||
+    sinceCursor.sequence > session.cursor.sequence
+  ) {
+    return full;
+  }
+  const delta = session.historyIndex.since(sinceCursor.sequence, session.historyState.history);
+  return delta === null ? full : { ...full, history: delta, historySince: sinceCursor };
+}
+
+/** Replaces the retained history; cursors from before no longer resolve to a delta. */
+function replaceHistory(session: TerminalSessionState, state: HistoryBufferState): void {
+  session.historyState = state;
+  session.pendingHistoryControlSequence = "";
+  session.historyIndex.reset(session.cursor.sequence + 1, state.history.length);
 }
 
 function diagnosticsSnapshot(session: TerminalSessionState): DiagnosticsTerminalProcess {
@@ -903,6 +951,10 @@ interface TerminalManagerOptions {
   env?: NodeJS.ProcessEnv;
   processTableSnapshotter?: TerminalProcessTableSnapshotter;
   subprocessPollIntervalMs?: number;
+  /** Process-table cadence while no terminal has recent I/O; see the default's note. */
+  subprocessIdlePollIntervalMs?: number;
+  /** Trailing window for persisting output history; see the default's note. */
+  historyPersistDebounceMs?: number;
   processKillGraceMs?: number;
   maxRetainedInactiveSessions?: number;
   maxPendingProcessEvents?: number;
@@ -949,6 +1001,17 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
         : () => snapshotPosixProcessTable(posixPsCommand ?? "ps"));
     const subprocessPollIntervalMs =
       options.subprocessPollIntervalMs ?? DEFAULT_SUBPROCESS_POLL_INTERVAL_MS;
+    const subprocessIdlePollTicks = Math.max(
+      1,
+      Math.round(
+        (options.subprocessIdlePollIntervalMs ?? DEFAULT_SUBPROCESS_IDLE_POLL_INTERVAL_MS) /
+          Math.max(1, subprocessPollIntervalMs),
+      ),
+    );
+    const historyPersistDebounceMs = Math.max(
+      0,
+      options.historyPersistDebounceMs ?? DEFAULT_PERSIST_DEBOUNCE_MS,
+    );
     const processKillGraceMs = options.processKillGraceMs ?? DEFAULT_PROCESS_KILL_GRACE_MS;
     const maxRetainedInactiveSessions =
       options.maxRetainedInactiveSessions ?? DEFAULT_MAX_RETAINED_INACTIVE_SESSIONS;
@@ -980,6 +1043,11 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
     const advanceCursor = (session: TerminalSessionState): TerminalCursor => {
       session.cursor = nextCursor();
       return session.cursor;
+    };
+    /** Bumped by PTY starts, input and output; drives the subprocess poll cadence. */
+    let terminalIoRevision = 0;
+    const noteTerminalIo = () => {
+      terminalIoRevision += 1;
     };
     const terminalEventListeners = new Set<(event: TerminalEvent) => Effect.Effect<void>>();
     const workerScope = yield* Scope.make("sequential");
@@ -1186,15 +1254,8 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
         component: "TerminalManager.persistHistory",
         capacity: 256,
       }),
-      merge: (current, next) => ({
-        history: next.history,
-        immediate: current.immediate || next.immediate,
-      }),
+      merge: (_current, next) => next,
       process: Effect.fn("terminal.persistHistoryWorker")(function* (sessionKey, request) {
-        if (!request.immediate) {
-          yield* Effect.sleep(DEFAULT_PERSIST_DEBOUNCE_MS);
-        }
-
         const [threadId, terminalId] = sessionKey.split("\u0000");
         if (!threadId || !terminalId) {
           return;
@@ -1212,22 +1273,51 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
       }),
     });
 
+    // The worker writes immediately; output batching happens here. One pending
+    // window per session reads the latest history when it ends, so the steady
+    // state is one full-file write per window rather than one per chunk.
+    const scheduledPersists = new Map<string, ScheduledHistoryPersist>();
+
     const queuePersist = Effect.fn("terminal.queuePersist")(function* (
-      threadId: string,
-      terminalId: string,
-      history: string,
+      session: TerminalSessionState,
     ) {
-      yield* persistWorker.enqueue(toSessionKey(threadId, terminalId), {
-        history,
-        immediate: false,
-      });
+      const sessionKey = toSessionKey(session.threadId, session.terminalId);
+      if (scheduledPersists.has(sessionKey)) return;
+      const scheduled: ScheduledHistoryPersist = { session };
+      scheduledPersists.set(sessionKey, scheduled);
+      yield* Effect.sleep(historyPersistDebounceMs).pipe(
+        Effect.andThen(
+          Effect.suspend(() => {
+            // Superseded by an immediate write (clear, restart, close, exit).
+            if (scheduledPersists.get(sessionKey) !== scheduled) return Effect.void;
+            scheduledPersists.delete(sessionKey);
+            return persistWorker.enqueue(sessionKey, {
+              history: scheduled.session.historyState.history,
+            });
+          }),
+        ),
+        Effect.forkIn(workerScope),
+      );
     });
+
+    /** Starts any pending output write now, without waiting for it. */
+    const flushScheduledPersist = (sessionKey: string) =>
+      Effect.suspend(() => {
+        const scheduled = scheduledPersists.get(sessionKey);
+        if (!scheduled) return Effect.void;
+        scheduledPersists.delete(sessionKey);
+        return persistWorker.enqueue(sessionKey, {
+          history: scheduled.session.historyState.history,
+        });
+      });
 
     const flushPersist = Effect.fn("terminal.flushPersist")(function* (
       threadId: string,
       terminalId: string,
     ) {
-      yield* persistWorker.drainKey(toSessionKey(threadId, terminalId));
+      const sessionKey = toSessionKey(threadId, terminalId);
+      yield* flushScheduledPersist(sessionKey);
+      yield* persistWorker.drainKey(sessionKey);
     });
 
     const persistHistory = Effect.fn("terminal.persistHistory")(function* (
@@ -1235,33 +1325,41 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
       terminalId: string,
       history: string,
     ) {
-      yield* persistWorker.enqueue(toSessionKey(threadId, terminalId), {
-        history,
-        immediate: true,
-      });
-      yield* flushPersist(threadId, terminalId);
+      const sessionKey = toSessionKey(threadId, terminalId);
+      scheduledPersists.delete(sessionKey);
+      yield* persistWorker.enqueue(sessionKey, { history });
+      yield* persistWorker.drainKey(sessionKey);
     });
+
+    // Runs before the persist worker is torn down: a pending window must not
+    // lose the last second of output when the server stops.
+    yield* Effect.addFinalizer(() =>
+      Effect.gen(function* () {
+        const sessionKeys = [...scheduledPersists.keys()];
+        yield* Effect.forEach(sessionKeys, flushScheduledPersist, { discard: true });
+        yield* Effect.forEach(sessionKeys, (sessionKey) => persistWorker.drainKey(sessionKey), {
+          discard: true,
+        });
+      }).pipe(Effect.timeoutOption(5_000), Effect.ignoreCause({ log: true })),
+    );
 
     const readHistory = Effect.fn("terminal.readHistory")(function* (
       threadId: string,
       terminalId: string,
     ) {
       const nextPath = historyPath(threadId, terminalId);
-      if (
-        yield* fileSystem
-          .exists(nextPath)
-          .pipe(Effect.mapError(toTerminalHistoryError("read", threadId, terminalId)))
-      ) {
-        const raw = yield* fileSystem
-          .readFileString(nextPath)
-          .pipe(Effect.mapError(toTerminalHistoryError("read", threadId, terminalId)));
-        const capped = capHistory(raw, historyLineLimit);
-        if (capped !== raw) {
-          yield* fileSystem
-            .writeFileString(nextPath, capped)
-            .pipe(Effect.mapError(toTerminalHistoryError("truncate", threadId, terminalId)));
-        }
-        return capped;
+      // One read instead of exists + read. An over-limit file is capped in
+      // memory only; the session's next persist rewrites it at the cap.
+      const stored = yield* fileSystem.readFileString(nextPath).pipe(
+        Effect.map(Option.some),
+        Effect.catchIf(
+          (error) => error.reason._tag === "NotFound",
+          () => Effect.succeed(Option.none<string>()),
+        ),
+        Effect.mapError(toTerminalHistoryError("read", threadId, terminalId)),
+      );
+      if (Option.isSome(stored)) {
+        return capHistory(stored.value, historyLineLimit);
       }
 
       if (terminalId !== DEFAULT_TERMINAL_ID) {
@@ -1402,6 +1500,42 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
       }
     });
 
+    /**
+     * Storage admission: the only part of an open, restart or guarded write that
+     * holds the node-wide lifecycle lock, which orchestration takes for every
+     * command. The path check and `commit` share one short critical section;
+     * spawning, history I/O and kill escalation run under the thread lock only.
+     */
+    const withStorageAdmission = <A, E, R>(cwd: string, commit: Effect.Effect<A, E, R>) =>
+      storageLifecycleLock.withPermit(assertValidCwd(cwd).pipe(Effect.andThen(commit)));
+
+    /**
+     * Admits a PTY start in `target.cwd` and, in the same critical section,
+     * publishes the session there as `starting` (registering a new one). A
+     * lifecycle owner that fences or vacates the path afterwards sees a live,
+     * busy terminal and refuses or waits for it; one that fenced it first makes
+     * this fail before anything changed. The session stays `starting` until
+     * its PTY runs or the start fails.
+     */
+    const admitPtyStart = (
+      session: TerminalSessionState,
+      target: { readonly cwd: string; readonly worktreePath: string | null },
+      register: boolean,
+    ) =>
+      withStorageAdmission(
+        target.cwd,
+        modifyManagerState((state) => {
+          session.status = "starting";
+          session.cwd = target.cwd;
+          session.worktreePath = target.worktreePath;
+          session.updatedAt = new Date().toISOString();
+          if (!register) return [undefined, state] as const;
+          const sessions = new Map(state.sessions);
+          sessions.set(toSessionKey(session.threadId, session.terminalId), session);
+          return [undefined, { ...state, sessions }] as const;
+        }),
+      );
+
     const getSession = Effect.fn("terminal.getSession")(function* (
       threadId: string,
       terminalId: string,
@@ -1514,13 +1648,22 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
             );
           }
           session.updatedAt = new Date().toISOString();
+          noteTerminalIo();
+          const cursor = advanceCursor(session);
+          if (sanitized.visibleText.length > 0) {
+            session.historyIndex.append(
+              cursor.sequence,
+              sanitized.visibleText.length,
+              session.historyState.history.length,
+            );
+          }
 
           return {
             type: "output",
             threadId: session.threadId,
             terminalId: session.terminalId,
-            cursor: advanceCursor(session),
-            history: sanitized.visibleText.length > 0 ? session.historyState.history : null,
+            cursor,
+            persistHistory: sanitized.visibleText.length > 0,
             data: nextEvent.data,
           } as const;
         }
@@ -1557,8 +1700,8 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
       }
 
       if (action.type === "output") {
-        if (action.history !== null) {
-          yield* queuePersist(action.threadId, action.terminalId, action.history);
+        if (action.persistHistory) {
+          yield* queuePersist(session);
         }
 
         yield* publishEvent({
@@ -1573,6 +1716,8 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
       }
 
       yield* clearKillFiber(action.process);
+      // The history is final now; do not leave its last output to the window.
+      yield* flushScheduledPersist(toSessionKey(action.threadId, action.terminalId));
       yield* publishEvent({
         type: "exited",
         threadId: action.threadId,
@@ -1597,8 +1742,13 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
       }
     });
 
+    /**
+     * `nextStatus: "starting"` is for a session whose relaunch storage admission already
+     * published it as starting: it must never look ended (and its path free) in between.
+     */
     const stopProcess = Effect.fn("terminal.stopProcess")(function* (
       session: TerminalSessionState,
+      nextStatus: "exited" | "starting" = "exited",
     ) {
       const process = session.process;
       if (!process) return;
@@ -1608,7 +1758,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
         session.process = null;
         session.pid = null;
         session.hasRunningSubprocess = false;
-        session.status = "exited";
+        session.status = nextStatus;
         session.pendingHistoryControlSequence = "";
         clearPendingProcessEvents(session);
         session.updatedAt = new Date().toISOString();
@@ -1677,12 +1827,13 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
       return yield* trySpawn(shellCandidates, spawnEnv, session, index + 1, spawnError);
     });
 
+    /** Caller owns the thread permit and has passed {@link admitPtyStart} for `input.cwd`. */
     const startSession = Effect.fn("terminal.startSession")(function* (
       session: TerminalSessionState,
       input: TerminalStartInput,
       eventType: "started" | "restarted",
     ) {
-      yield* stopProcess(session);
+      yield* stopProcess(session, "starting");
       yield* Effect.annotateCurrentSpan({
         "terminal.thread_id": session.threadId,
         "terminal.id": session.terminalId,
@@ -1761,6 +1912,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
                 session.unsubscribeExit = unsubscribeExit;
                 return [undefined, state] as const;
               });
+              noteTerminalIo();
 
               yield* signalRunningSession;
 
@@ -1858,6 +2010,8 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
       }
     });
 
+    let processTableSnapshotFailing = false;
+    /** Returns whether any terminal's subprocess activity changed. */
     const pollSubprocessActivity = Effect.fn("terminal.pollSubprocessActivity")(function* () {
       const state = yield* readManagerState;
       const runningSessions = [...state.sessions.values()].filter(
@@ -1866,7 +2020,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
       );
 
       if (runningSessions.length === 0) {
-        return;
+        return false;
       }
 
       // One process-table enumeration serves every running terminal in this
@@ -1874,18 +2028,24 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
       // create enough short-lived processes to exhaust host PID capacity.
       const processTable = yield* processTableSnapshotter().pipe(
         Effect.map(Option.some),
-        Effect.catch((reason) =>
-          Effect.logWarning("failed to snapshot processes for terminal subprocess polling", {
+        Effect.catch((reason) => {
+          // A persistent failure (e.g. a process table larger than the output
+          // cap) would otherwise log on every tick; log once per failure streak.
+          if (processTableSnapshotFailing) return Effect.succeed(Option.none());
+          processTableSnapshotFailing = true;
+          return Effect.logWarning("failed to snapshot processes for terminal subprocess polling", {
             reason,
-          }).pipe(Effect.as(Option.none<TerminalProcessTableSnapshot>())),
-        ),
+          }).pipe(Effect.as(Option.none<TerminalProcessTableSnapshot>()));
+        }),
       );
 
       // A failed or partial snapshot is not authoritative. Keep the last
       // known state rather than incorrectly marking every terminal idle.
       if (Option.isNone(processTable)) {
-        return;
+        return false;
       }
+      processTableSnapshotFailing = false;
+      let changed = false;
 
       const checkSubprocessActivity = Effect.fn("terminal.checkSubprocessActivity")(function* (
         session: TerminalSessionState & { pid: number },
@@ -1924,6 +2084,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
         });
 
         if (Option.isSome(event)) {
+          changed = true;
           yield* publishEvent(event.value);
         }
       });
@@ -1932,11 +2093,33 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
         concurrency: "unbounded",
         discard: true,
       });
+      return changed;
+    });
+
+    // Ticks every `subprocessPollIntervalMs`, but spawns the process-table
+    // snapshot only while a terminal had I/O (or an activity change) within the
+    // idle interval, and otherwise once per idle interval.
+    let observedIoRevision = -1;
+    let ticksSinceIo = 0;
+    let ticksSincePoll = 0;
+    const subprocessPollTick = Effect.gen(function* () {
+      if (terminalIoRevision !== observedIoRevision) {
+        observedIoRevision = terminalIoRevision;
+        ticksSinceIo = 0;
+      } else {
+        ticksSinceIo += 1;
+      }
+      ticksSincePoll += 1;
+      if (ticksSinceIo >= subprocessIdlePollTicks && ticksSincePoll < subprocessIdlePollTicks) {
+        return;
+      }
+      ticksSincePoll = 0;
+      if (yield* pollSubprocessActivity()) noteTerminalIo();
     });
 
     yield* Effect.forever(
       waitForRunningSession.pipe(
-        Effect.flatMap(() => pollSubprocessActivity()),
+        Effect.flatMap(() => subprocessPollTick),
         Effect.flatMap(() => Effect.sleep(subprocessPollIntervalMs)),
       ),
     ).pipe(Effect.forkIn(workerScope));
@@ -1975,15 +2158,14 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
         input.threadId,
         Effect.gen(function* () {
           const terminalId = input.terminalId ?? DEFAULT_TERMINAL_ID;
-          yield* assertValidCwd(input.cwd);
-
-          const sessionKey = toSessionKey(input.threadId, terminalId);
           const existing = yield* getSession(input.threadId, terminalId);
           if (Option.isNone(existing)) {
             yield* flushPersist(input.threadId, terminalId);
             const history = yield* readHistory(input.threadId, terminalId);
             const cols = input.cols ?? DEFAULT_OPEN_COLS;
             const rows = input.rows ?? DEFAULT_OPEN_ROWS;
+            const historyState = historyBufferStateFrom(history, historyLimits);
+            const cursor = nextCursor();
             const session: TerminalSessionState = {
               inputEpoch: randomUUID(),
               hasReceivedInput: false,
@@ -1993,7 +2175,11 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
               worktreePath: input.worktreePath ?? null,
               status: "starting",
               pid: null,
-              historyState: historyBufferStateFrom(history, historyLimits),
+              historyState,
+              historyIndex: new TerminalHistoryCursorIndex(
+                cursor.sequence + 1,
+                historyState.history.length,
+              ),
               pendingHistoryControlSequence: "",
               pendingProcessEvents: [],
               pendingProcessEventIndex: 0,
@@ -2002,7 +2188,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
               exitCode: null,
               exitSignal: null,
               updatedAt: new Date().toISOString(),
-              cursor: nextCursor(),
+              cursor,
               cols,
               rows,
               process: null,
@@ -2012,88 +2198,97 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
               runtimeEnv: normalizedRuntimeEnv(input.env),
             };
 
-            const createdSession = session;
-            yield* modifyManagerState((state) => {
-              const sessions = new Map(state.sessions);
-              sessions.set(sessionKey, createdSession);
-              return [undefined, { ...state, sessions }] as const;
-            });
-
-            yield* evictInactiveSessionsIfNeeded();
-            yield* startSession(
-              session,
-              {
-                threadId: input.threadId,
-                terminalId,
-                cwd: input.cwd,
-                ...(input.worktreePath !== undefined ? { worktreePath: input.worktreePath } : {}),
-                cols,
-                rows,
-                ...(input.env ? { env: input.env } : {}),
-              },
-              "started",
+            // Once admitted, the start runs to its end: an interrupted one would leave the
+            // session `starting` (busy to every lifecycle owner) or a spawned PTY unattached.
+            yield* Effect.uninterruptible(
+              Effect.gen(function* () {
+                yield* admitPtyStart(
+                  session,
+                  { cwd: input.cwd, worktreePath: input.worktreePath ?? null },
+                  true,
+                );
+                yield* evictInactiveSessionsIfNeeded();
+                yield* startSession(
+                  session,
+                  {
+                    threadId: input.threadId,
+                    terminalId,
+                    cwd: input.cwd,
+                    ...(input.worktreePath !== undefined
+                      ? { worktreePath: input.worktreePath }
+                      : {}),
+                    cols,
+                    rows,
+                    ...(input.env ? { env: input.env } : {}),
+                  },
+                  "started",
+                );
+              }),
             );
-            return snapshot(session);
+            return openSnapshot(session, input.sinceCursor);
           }
 
           const liveSession = existing.value;
           const nextRuntimeEnv = normalizedRuntimeEnv(input.env);
-          const currentRuntimeEnv = liveSession.runtimeEnv;
           const targetCols = input.cols ?? liveSession.cols;
           const targetRows = input.rows ?? liveSession.rows;
-          const runtimeEnvChanged = !Equal.equals(currentRuntimeEnv, nextRuntimeEnv);
+          // Another cwd or environment relaunches the shell; an ended one restarts. Both
+          // start over with empty history.
+          const relaunch =
+            liveSession.cwd !== input.cwd ||
+            !Equal.equals(liveSession.runtimeEnv, nextRuntimeEnv) ||
+            liveSession.status === "exited" ||
+            liveSession.status === "error";
 
-          if (liveSession.cwd !== input.cwd || runtimeEnvChanged) {
-            yield* stopProcess(liveSession);
-            liveSession.cwd = input.cwd;
-            liveSession.worktreePath = input.worktreePath ?? null;
-            liveSession.runtimeEnv = nextRuntimeEnv;
-            liveSession.historyState = emptyHistoryBufferState();
-            liveSession.pendingHistoryControlSequence = "";
-            clearPendingProcessEvents(liveSession);
-            yield* persistHistory(
-              liveSession.threadId,
-              liveSession.terminalId,
-              liveSession.historyState.history,
-            );
-          } else if (liveSession.status === "exited" || liveSession.status === "error") {
-            liveSession.runtimeEnv = nextRuntimeEnv;
-            liveSession.worktreePath = input.worktreePath ?? null;
-            liveSession.historyState = emptyHistoryBufferState();
-            liveSession.pendingHistoryControlSequence = "";
-            clearPendingProcessEvents(liveSession);
-            yield* persistHistory(
-              liveSession.threadId,
-              liveSession.terminalId,
-              liveSession.historyState.history,
-            );
+          if (!relaunch && liveSession.process) {
+            // Reattach: nothing starts, so admission only checks the path.
+            yield* withStorageAdmission(input.cwd, Effect.void);
+            if (liveSession.cols !== targetCols || liveSession.rows !== targetRows) {
+              liveSession.cols = targetCols;
+              liveSession.rows = targetRows;
+              liveSession.updatedAt = new Date().toISOString();
+              liveSession.process.resize(targetCols, targetRows);
+            }
+            return openSnapshot(liveSession, input.sinceCursor);
           }
 
-          if (!liveSession.process) {
-            yield* startSession(
-              liveSession,
-              {
-                threadId: input.threadId,
-                terminalId,
-                cwd: input.cwd,
-                worktreePath: liveSession.worktreePath,
-                cols: targetCols,
-                rows: targetRows,
-                ...(input.env ? { env: input.env } : {}),
-              },
-              "started",
-            );
-            return snapshot(liveSession);
-          }
-
-          if (liveSession.cols !== targetCols || liveSession.rows !== targetRows) {
-            liveSession.cols = targetCols;
-            liveSession.rows = targetRows;
-            liveSession.updatedAt = new Date().toISOString();
-            liveSession.process.resize(targetCols, targetRows);
-          }
-
-          return snapshot(liveSession);
+          yield* Effect.uninterruptible(
+            Effect.gen(function* () {
+              yield* admitPtyStart(
+                liveSession,
+                {
+                  cwd: input.cwd,
+                  worktreePath: relaunch ? (input.worktreePath ?? null) : liveSession.worktreePath,
+                },
+                false,
+              );
+              if (relaunch) {
+                yield* stopProcess(liveSession, "starting");
+                liveSession.runtimeEnv = nextRuntimeEnv;
+                replaceHistory(liveSession, emptyHistoryBufferState());
+                clearPendingProcessEvents(liveSession);
+                yield* persistHistory(
+                  liveSession.threadId,
+                  liveSession.terminalId,
+                  liveSession.historyState.history,
+                );
+              }
+              yield* startSession(
+                liveSession,
+                {
+                  threadId: input.threadId,
+                  terminalId,
+                  cwd: input.cwd,
+                  worktreePath: liveSession.worktreePath,
+                  cols: targetCols,
+                  rows: targetRows,
+                  ...(input.env ? { env: input.env } : {}),
+                },
+                "started",
+              );
+            }),
+          );
+          return openSnapshot(liveSession, input.sinceCursor);
         }),
       );
 
@@ -2133,11 +2328,11 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
               return yield* new TerminalInputRejectedError({
                 message: "Terminal changed. Insert the snippet again in the current workspace.",
               });
-            yield* assertValidCwd(input.guard.cwd);
           }
           // Admission may yield for filesystem IO. Recheck output/session/input
-          // evidence and write synchronously afterward, under the lifecycle lock.
-          yield* Effect.suspend(
+          // evidence and write synchronously afterward; a guarded write does both
+          // inside its storage admission, after the path check.
+          const commit = Effect.suspend(
             (): Effect.Effect<void, TerminalInputRejectedError | TerminalNotRunningError> => {
               if (!guardIsCurrent()) {
                 return Effect.fail(
@@ -2155,9 +2350,11 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
               }
               session.hasReceivedInput = true;
               process.write(input.data);
+              noteTerminalIo();
               return Effect.void;
             },
           );
+          yield* input.guard ? withStorageAdmission(input.guard.cwd, commit) : commit;
         }),
       ),
     );
@@ -2184,8 +2381,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
         Effect.gen(function* () {
           const terminalId = input.terminalId ?? DEFAULT_TERMINAL_ID;
           const session = yield* requireSession(input.threadId, terminalId);
-          session.historyState = emptyHistoryBufferState();
-          session.pendingHistoryControlSequence = "";
+          replaceHistory(session, emptyHistoryBufferState());
           clearPendingProcessEvents(session);
           session.updatedAt = new Date().toISOString();
           const cursor = advanceCursor(session);
@@ -2206,77 +2402,70 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
         Effect.gen(function* () {
           yield* increment(terminalRestartsTotal, { scope: "thread" });
           const terminalId = input.terminalId ?? DEFAULT_TERMINAL_ID;
-          yield* assertValidCwd(input.cwd);
-
-          const sessionKey = toSessionKey(input.threadId, terminalId);
+          const target = { cwd: input.cwd, worktreePath: input.worktreePath ?? null };
           const existingSession = yield* getSession(input.threadId, terminalId);
-          let session: TerminalSessionState;
-          if (Option.isNone(existingSession)) {
-            const cols = input.cols ?? DEFAULT_OPEN_COLS;
-            const rows = input.rows ?? DEFAULT_OPEN_ROWS;
-            session = {
-              inputEpoch: randomUUID(),
-              hasReceivedInput: false,
-              threadId: input.threadId,
-              terminalId,
-              cwd: input.cwd,
-              worktreePath: input.worktreePath ?? null,
-              status: "starting",
-              pid: null,
-              historyState: emptyHistoryBufferState(),
-              pendingHistoryControlSequence: "",
-              pendingProcessEvents: [],
-              pendingProcessEventIndex: 0,
-              pendingProcessOutputBytes: 0,
-              processEventDrainRunning: false,
-              exitCode: null,
-              exitSignal: null,
-              updatedAt: new Date().toISOString(),
-              cursor: nextCursor(),
-              cols,
-              rows,
-              process: null,
-              unsubscribeData: null,
-              unsubscribeExit: null,
-              hasRunningSubprocess: false,
-              runtimeEnv: normalizedRuntimeEnv(input.env),
-            };
-            const createdSession = session;
-            yield* modifyManagerState((state) => {
-              const sessions = new Map(state.sessions);
-              sessions.set(sessionKey, createdSession);
-              return [undefined, { ...state, sessions }] as const;
-            });
-            yield* evictInactiveSessionsIfNeeded();
-          } else {
-            session = existingSession.value;
-            yield* stopProcess(session);
-            session.cwd = input.cwd;
-            session.worktreePath = input.worktreePath ?? null;
-            session.runtimeEnv = normalizedRuntimeEnv(input.env);
-          }
+          // Once admitted, the restart runs to its end; see `open`.
+          return yield* Effect.uninterruptible(
+            Effect.gen(function* () {
+              let session: TerminalSessionState;
+              if (Option.isNone(existingSession)) {
+                const cursor = nextCursor();
+                session = {
+                  inputEpoch: randomUUID(),
+                  hasReceivedInput: false,
+                  threadId: input.threadId,
+                  terminalId,
+                  cwd: input.cwd,
+                  worktreePath: target.worktreePath,
+                  status: "starting",
+                  pid: null,
+                  historyState: emptyHistoryBufferState(),
+                  historyIndex: new TerminalHistoryCursorIndex(cursor.sequence + 1, 0),
+                  pendingHistoryControlSequence: "",
+                  pendingProcessEvents: [],
+                  pendingProcessEventIndex: 0,
+                  pendingProcessOutputBytes: 0,
+                  processEventDrainRunning: false,
+                  exitCode: null,
+                  exitSignal: null,
+                  updatedAt: new Date().toISOString(),
+                  cursor,
+                  cols: input.cols,
+                  rows: input.rows,
+                  process: null,
+                  unsubscribeData: null,
+                  unsubscribeExit: null,
+                  hasRunningSubprocess: false,
+                  runtimeEnv: normalizedRuntimeEnv(input.env),
+                };
+                yield* admitPtyStart(session, target, true);
+                yield* evictInactiveSessionsIfNeeded();
+              } else {
+                session = existingSession.value;
+                yield* admitPtyStart(session, target, false);
+                yield* stopProcess(session, "starting");
+                session.runtimeEnv = normalizedRuntimeEnv(input.env);
+              }
 
-          const cols = input.cols ?? session.cols;
-          const rows = input.rows ?? session.rows;
-
-          session.historyState = emptyHistoryBufferState();
-          session.pendingHistoryControlSequence = "";
-          clearPendingProcessEvents(session);
-          yield* persistHistory(input.threadId, terminalId, session.historyState.history);
-          yield* startSession(
-            session,
-            {
-              threadId: input.threadId,
-              terminalId,
-              cwd: input.cwd,
-              ...(input.worktreePath !== undefined ? { worktreePath: input.worktreePath } : {}),
-              cols,
-              rows,
-              ...(input.env ? { env: input.env } : {}),
-            },
-            "restarted",
+              replaceHistory(session, emptyHistoryBufferState());
+              clearPendingProcessEvents(session);
+              yield* persistHistory(input.threadId, terminalId, session.historyState.history);
+              yield* startSession(
+                session,
+                {
+                  threadId: input.threadId,
+                  terminalId,
+                  cwd: input.cwd,
+                  ...(input.worktreePath !== undefined ? { worktreePath: input.worktreePath } : {}),
+                  cols: input.cols,
+                  rows: input.rows,
+                  ...(input.env ? { env: input.env } : {}),
+                },
+                "restarted",
+              );
+              return snapshot(session);
+            }),
           );
-          return snapshot(session);
         }),
       );
 
@@ -2313,14 +2502,11 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
     );
 
     return {
-      open: (input) => storageLifecycleLock.withPermit(open(input)),
-      write: (input, canCommit) =>
-        input.guard
-          ? storageLifecycleLock.withPermit(write(input, canCommit))
-          : write(input, canCommit),
+      open,
+      write,
       resize,
       clear,
-      restart: (input) => storageLifecycleLock.withPermit(restart(input)),
+      restart,
       close,
       listDiagnostics: SynchronizedRef.get(managerStateRef).pipe(
         Effect.map((state) =>

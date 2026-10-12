@@ -1,4 +1,4 @@
-import { Schema } from "effect";
+import * as Schema from "effect/Schema";
 import { ModelFavorite } from "@ryco/contracts/settings";
 import { uniqueModelFavorites } from "@ryco/client-runtime/state/composer";
 import { useSyncExternalStore } from "react";

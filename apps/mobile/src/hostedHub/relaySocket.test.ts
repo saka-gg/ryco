@@ -1,10 +1,10 @@
 import { RELAY_INITIAL_LIMITS, type RelayChannelId, type RelayFrame } from "@ryco/contracts";
 import type { DpopSignerService } from "@ryco/client-runtime/platform";
 import {
-  encodeBase64Url,
   RELAY_E2EE_SEND_UNAVAILABLE_MESSAGE,
   type RelayE2eeChannel,
 } from "@ryco/client-runtime/relay";
+import { encodeBase64Url } from "@ryco/client-runtime/relay/base64url";
 import { encodeRelayFrame } from "@ryco/shared/relayCodec";
 import { describe, expect, it, vi } from "vite-plus/test";
 

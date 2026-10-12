@@ -1097,6 +1097,84 @@ describe("ChatView Conversation (full app)", () => {
     }
   });
 
+  it("shows the history skeleton, not the new-thread hero, while a started thread's history loads", async () => {
+    const snapshot = createSnapshotForTargetUser({
+      targetMessageId: "msg-user-history-pending" as MessageId,
+      targetText: "history pending target",
+    });
+    const thread = snapshot.threads.find((entry) => entry.id === THREAD_ID)!;
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot,
+      configureFixture: (fixture) => {
+        fixture.threadsWithHeldHistory = new Set([THREAD_ID]);
+      },
+    });
+
+    try {
+      // The shell already lists the thread with a user message, so it has
+      // started: until its window arrives it must not present as a new one.
+      await waitForElement(
+        () =>
+          document.querySelector<HTMLElement>('[role="status"][aria-label="Loading conversation"]'),
+        "Unable to find the history skeleton for a started thread.",
+      );
+      await waitForLayout();
+      expect(document.querySelector('[data-testid="new-thread-hero"]')).toBeNull();
+      expect(
+        wsRequests.some(
+          (request) =>
+            request._tag === ORCHESTRATION_WS_METHODS.subscribeThreadWindow &&
+            request.threadId === THREAD_ID,
+        ),
+      ).toBe(true);
+
+      windowSequence += 1;
+      rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeThreadWindow, {
+        kind: "snapshot",
+        snapshot: toThreadWindowSnapshot(windowSequence, thread),
+      });
+
+      // The list opens at the end of the transcript, so its last turn renders.
+      const lastMessage = thread.messages.at(-1)!;
+      await vi.waitFor(() => {
+        expect(document.body.textContent).toContain(lastMessage.text);
+      });
+      expect(document.querySelector('[aria-label="Loading conversation"]')).toBeNull();
+      expect(document.querySelector('[data-testid="new-thread-hero"]')).toBeNull();
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("shows the new-thread hero at once for a thread that never started, even before its history", async () => {
+    const newThreadId = ThreadId.make("thread-never-started");
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: addThreadToSnapshot(
+        createSnapshotForTargetUser({
+          targetMessageId: "msg-user-never-started" as MessageId,
+          targetText: "never started target",
+        }),
+        newThreadId,
+      ),
+      configureFixture: (fixture) => {
+        fixture.threadsWithHeldHistory = new Set([newThreadId]);
+      },
+      initialPath: `/${LOCAL_ENVIRONMENT_ID}/${newThreadId}`,
+    });
+
+    try {
+      await waitForElement(
+        () => document.querySelector<HTMLElement>('[data-testid="new-thread-hero"]'),
+        "Unable to find the new-thread hero for a never-started thread.",
+      );
+      expect(document.querySelector('[aria-label="Loading conversation"]')).toBeNull();
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
   it("does not render a thread archive action in the chat header", async () => {
     localStorage.setItem(
       "ryco:client-settings:v1",
@@ -1189,6 +1267,114 @@ describe("ChatView Conversation (full app)", () => {
       await vi.waitFor(() => {
         expect(findScrollToBottomButton()).toBeNull();
       });
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("opens a thread whose overview starts closed without collapsing the overview rail", async () => {
+    // The rail slot's inline width is its only style that changes. Any style
+    // mutation after the slot was inserted means the overview started open
+    // and collapsed: a transition that re-lays out the whole chat column
+    // every frame while the transcript is pinning itself to its end.
+    const slotStyleChanges: string[] = [];
+    const observer = new MutationObserver((records) => {
+      for (const record of records) {
+        if (
+          record.target instanceof HTMLElement &&
+          record.target.dataset.slot === "crown-rail-slot"
+        ) {
+          slotStyleChanges.push(`${record.oldValue} -> ${record.target.getAttribute("style")}`);
+        }
+      }
+    });
+    observer.observe(document.body, {
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["style"],
+      attributeOldValue: true,
+    });
+
+    try {
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: createSnapshotForTargetUser({
+          targetMessageId: "msg-user-closed-overview" as MessageId,
+          targetText: "closed overview target",
+        }),
+      });
+
+      try {
+        await waitForElement(
+          () => document.querySelector<HTMLElement>("[data-message-id]"),
+          "Unable to find a timeline message row.",
+        );
+        const slot = await waitForElement(
+          () => document.querySelector<HTMLElement>('[data-slot="crown-rail-slot"]'),
+          "Unable to find the Crown rail slot.",
+        );
+        await waitForLayout();
+        // The default viewport presents right-hand panels as sheets, so the
+        // overview starts closed.
+        expect(slot.style.width).toBe("0px");
+        expect(slotStyleChanges).toEqual([]);
+      } finally {
+        await mounted.cleanup();
+      }
+    } finally {
+      observer.disconnect();
+    }
+  });
+
+  it("keeps the transcript's end in view while the composer grows", async () => {
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createSnapshotForTargetUser({
+        targetMessageId: "msg-user-composer-growth" as MessageId,
+        targetText: "composer growth target",
+      }),
+    });
+
+    try {
+      const timelineRow = await waitForElement(
+        () => document.querySelector<HTMLElement>("[data-message-id]"),
+        "Unable to find a timeline message row.",
+      );
+      const scrollContainer = findScrollableAncestor(timelineRow);
+      expect(scrollContainer).not.toBeNull();
+      const distanceFromEnd = () =>
+        scrollContainer!.scrollHeight - scrollContainer!.clientHeight - scrollContainer!.scrollTop;
+      await vi.waitFor(() => {
+        expect(distanceFromEnd()).toBeLessThanOrEqual(1);
+      });
+
+      const composerForm = await waitForElement(
+        () => document.querySelector<HTMLElement>('[data-chat-composer-form="true"]'),
+        "Unable to find the composer form.",
+      );
+      const composerEditor = await waitForComposerEditor();
+      composerEditor.focus();
+      await waitForLayout();
+      const composerHeight = composerForm.getBoundingClientRect().height;
+
+      // The composer overlays the transcript, so its growth reaches the list
+      // as a taller footer clearance that the end has to be re-pinned past.
+      useComposerDraftStore
+        .getState()
+        .setPrompt(
+          THREAD_REF,
+          Array.from({ length: 6 }, (_, index) => `composer line ${index + 1}`).join("\n"),
+        );
+      await vi.waitFor(() => {
+        expect(composerForm.getBoundingClientRect().height).toBeGreaterThan(composerHeight + 60);
+      });
+      await vi.waitFor(() => {
+        expect(distanceFromEnd()).toBeLessThanOrEqual(1);
+      });
+      // A stale "not at end" would surface the pill behind its 150 ms debounce.
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(distanceFromEnd()).toBeLessThanOrEqual(1);
+      expect(findScrollToBottomButton()).toBeNull();
     } finally {
       await mounted.cleanup();
     }

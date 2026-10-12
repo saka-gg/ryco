@@ -55,6 +55,9 @@ export interface DiffSearchIndex {
   readonly records: readonly DiffSearchIndexRecord[];
 }
 
+/** Stand-in while no search is active, so large patches are indexed only on demand. */
+export const EMPTY_DIFF_SEARCH_INDEX: DiffSearchIndex = Object.freeze({ records: [] });
+
 export interface DiffRenderedLineIndexes {
   readonly stacked: number;
   readonly split: number;

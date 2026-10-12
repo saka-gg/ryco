@@ -26,6 +26,34 @@ When disabled, all mark helpers are no-ops and budget tests use mocked `Performa
 
 Helpers live in `tabSwitchInstrumentation.ts`. Soft budgets are defined in `budgets.ts`.
 
+## Startup marks
+
+Startup phases are always recorded (no flag) as `ryco:startup:<phase>` marks by
+`startupInstrumentation.ts`, in boot order:
+
+| Phase                             | Meaning                                                                      |
+| --------------------------------- | ---------------------------------------------------------------------------- |
+| `root-before-load-start`/`-ready` | Root route `beforeLoad` (auth gate) started / resolved                       |
+| `root-shell-module-ready`         | The shell chunk resolved inside `beforeLoad` (only when it was not loaded)   |
+| `primary-ws-open`                 | Primary WebSocket opened                                                     |
+| `primary-shell-frame-received`    | First shell-subscription frame off the wire, before JSON parse/Schema decode |
+| `primary-shell-snapshot-received` | Decoded shell snapshot reached the connection supervisor                     |
+| `primary-shell-usable`            | Snapshot written to the store (before React renders it)                      |
+| `primary-sidebar-committed`       | React committed the shell with the bootstrapped primary environment          |
+| `primary-shell-painted`           | The frame holding that commit was presented (rAF, then a task)               |
+
+Derived measures (`ryco:startup:<name>`) include `primary-shell-decode`,
+`primary-sidebar-commit`, `primary-shell-paint` and `primary-shell-painted`
+(navigation start to the painted shell). The external harness
+(`scripts/perf/browserProbe.ts`) records every `ryco:startup:*` measure per sample,
+reports `shellPaintedMs` and the total boot long-task time (`longTaskTotalMs`), and
+with `--cpu-profile <dir>` records a boot CPU profile per sample, summarized by
+self time per source file (see `docs/performance-testing.md`).
+
+`components/perf/RouteRevealThrottle.browser.tsx` guards the code-loading
+patterns that keep React's 300 ms Suspense reveal throttle off navigation paths
+(route-level `lazyRouteComponent`, `preloadableLazy` loaded in `beforeLoad`).
+
 ## Inspecting results in DevTools
 
 ```js

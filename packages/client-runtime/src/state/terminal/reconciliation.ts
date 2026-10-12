@@ -14,6 +14,22 @@ export function isTerminalEventAfterSnapshot(
   return event.createdAt > snapshot.updatedAt;
 }
 
+/**
+ * Whether a `terminal.open` answer is a delta for a surface that asked with `sinceCursor`: its
+ * `history` then holds only the output after that cursor and is appended, not written over the
+ * scrollback. Any other answer (an older server, a reset or trimmed history) is a full snapshot.
+ */
+export function isTerminalSnapshotDeltaFor(
+  snapshot: Pick<TerminalSessionSnapshot, "historySince">,
+  sinceCursor: TerminalCursor | undefined,
+): boolean {
+  return (
+    sinceCursor !== undefined &&
+    snapshot.historySince?.generation === sinceCursor.generation &&
+    snapshot.historySince.sequence === sinceCursor.sequence
+  );
+}
+
 export interface TerminalReconciliationState {
   readonly cursor?: TerminalCursor | undefined;
   readonly activityCursor?: TerminalCursor | undefined;
@@ -31,11 +47,42 @@ export function terminalReconciliationFromSnapshot(
   };
 }
 
+export type TerminalReplayEvent = Extract<TerminalEvent, { type: "started" }> & {
+  readonly replay: true;
+};
+
+/**
+ * Subscription catch-up for an already-running session. It carries no history, so it may
+ * advance metadata but must never replace a surface's scrollback or open/focus a terminal.
+ */
+export function isTerminalReplayEvent(event: TerminalEvent): event is TerminalReplayEvent {
+  return event.type === "started" && event.replay === true;
+}
+
+/** Highest cursor a surface has accounted for, output or activity alike, in one generation. */
+function latestAccountedSequence(
+  current: TerminalReconciliationState,
+  generation: string,
+): number | null {
+  if (current.cursor?.generation !== generation) return null;
+  const activity =
+    current.activityCursor?.generation === generation ? current.activityCursor.sequence : -1;
+  return Math.max(current.cursor.sequence, activity);
+}
+
 /** Shared by store projections and terminal surfaces. Activity never consumes output bytes. */
 export function reconcileTerminalEvent(
   current: TerminalReconciliationState,
   event: TerminalEvent,
 ): TerminalReconciliationState | null {
+  if (isTerminalReplayEvent(event)) {
+    // Accepted only when it proves the surface missed something (a later cursor or a new
+    // server generation); a surface that saw everything keeps its state and scrollback.
+    const next = event.snapshot.cursor;
+    const accounted = next ? latestAccountedSequence(current, next.generation) : null;
+    if (next && accounted !== null && next.sequence <= accounted) return null;
+    return terminalReconciliationFromSnapshot(event.snapshot);
+  }
   if (event.type === "started" || event.type === "restarted") {
     const next = event.snapshot.cursor;
     if (

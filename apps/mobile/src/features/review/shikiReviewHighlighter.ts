@@ -1,14 +1,4 @@
-import { createHighlighterCore, type GrammarState, type HighlighterCore } from "@shikijs/core";
-import { createJavaScriptRegexEngine } from "@shikijs/engine-javascript";
-import bashLanguage from "@shikijs/langs/bash";
-import javascriptLanguage from "@shikijs/langs/javascript";
-import jsonLanguage from "@shikijs/langs/json";
-import jsxLanguage from "@shikijs/langs/jsx";
-import tsxLanguage from "@shikijs/langs/tsx";
-import typescriptLanguage from "@shikijs/langs/typescript";
-import yamlLanguage from "@shikijs/langs/yaml";
-import githubDarkDefault from "@shikijs/themes/github-dark-default";
-import githubLightDefault from "@shikijs/themes/github-light-default";
+import type { GrammarState, HighlighterCore, LanguageInput, ThemeInput } from "@shikijs/core";
 import { getFiletypeFromFileName } from "@pierre/diffs/utils/getFiletypeFromFileName";
 import * as Schema from "effect/Schema";
 
@@ -62,17 +52,14 @@ function nextHighlightChunkSize(previous: number, elapsed: number): number {
   );
 }
 const REVIEW_TOKENIZE_MAX_LINE_LENGTH = 1_000;
-const REVIEW_INITIAL_LANGUAGE_MODULES = [
-  bashLanguage,
-  javascriptLanguage,
-  jsonLanguage,
-  jsxLanguage,
-  tsxLanguage,
-  typescriptLanguage,
-  yamlLanguage,
-] satisfies Parameters<typeof createHighlighterCore>[0]["langs"];
-const loadedLanguages = new Set<string>([
-  "text",
+/**
+ * Loaded with every highlighter. Shiki core, the regex engines, these grammars
+ * and both themes are all imported on first use rather than statically: each
+ * grammar module is a module-scope `JSON.parse` of ~0.2 MB, and the screens that
+ * highlight are not part of launch. `prewarmReviewHighlighter` warms the set in
+ * idle time after Home paints.
+ */
+const REVIEW_INITIAL_LANGUAGES = [
   "bash",
   "javascript",
   "json",
@@ -80,7 +67,8 @@ const loadedLanguages = new Set<string>([
   "tsx",
   "typescript",
   "yaml",
-]);
+] as const;
+const loadedLanguages = new Set<string>(["text", ...REVIEW_INITIAL_LANGUAGES]);
 const languageLoadingPromises = new Map<string, Promise<boolean>>();
 const languageImports: Partial<Record<string, () => Promise<unknown>>> = {
   javascript: () => import("@shikijs/langs/javascript"),
@@ -232,7 +220,13 @@ async function getHighlighter(): Promise<HighlighterCore> {
         preference: REVIEW_HIGHLIGHTER_ENGINE_PREFERENCE,
       });
 
-      const themes = [githubLightDefault, githubDarkDefault];
+      const { createHighlighterCore } = await import("@shikijs/core");
+      const themes: ThemeInput[] = [
+        import("@shikijs/themes/github-light-default"),
+        import("@shikijs/themes/github-dark-default"),
+      ];
+      const initialLanguages = (): LanguageInput[] =>
+        REVIEW_INITIAL_LANGUAGES.map((language) => languageImports[language]!() as LanguageInput);
 
       if (REVIEW_HIGHLIGHTER_ENGINE_PREFERENCE !== "javascript") {
         try {
@@ -246,7 +240,7 @@ async function getHighlighter(): Promise<HighlighterCore> {
             logReviewHighlighterDiagnostic("creating native regex engine");
             const highlighter = await createHighlighterCore({
               themes,
-              langs: REVIEW_INITIAL_LANGUAGE_MODULES,
+              langs: initialLanguages(),
               engine: nativeEngineModule.createNativeEngine(),
             });
             logReviewHighlighterDiagnostic("using native engine");
@@ -279,9 +273,10 @@ async function getHighlighter(): Promise<HighlighterCore> {
       );
       let highlighter: HighlighterCore;
       try {
+        const { createJavaScriptRegexEngine } = await import("@shikijs/engine-javascript");
         highlighter = await createHighlighterCore({
           themes,
-          langs: REVIEW_INITIAL_LANGUAGE_MODULES,
+          langs: initialLanguages(),
           engine: createJavaScriptRegexEngine(),
         });
       } catch (cause) {
@@ -319,6 +314,11 @@ async function getHighlighter(): Promise<HighlighterCore> {
   }
 
   return highlighterPromise;
+}
+
+/** Create the highlighter (and parse its initial grammars) ahead of first use. */
+export async function prewarmReviewHighlighter(): Promise<void> {
+  await getHighlighter();
 }
 
 function resolveLanguageAlias(language: string): string {

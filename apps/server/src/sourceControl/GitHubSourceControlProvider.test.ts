@@ -30,9 +30,6 @@ const processResult = (
 const prListJsonFields = GitHubCli.formatGitHubJsonFields(
   GitHubCli.GITHUB_PULL_REQUEST_LIST_JSON_FIELDS,
 );
-const prListJsonFieldsWithoutCheckRollup = GitHubCli.formatGitHubJsonFields(
-  GitHubCli.withoutStatusCheckRollupJsonField(GitHubCli.GITHUB_PULL_REQUEST_LIST_JSON_FIELDS),
-);
 
 function mutationMarker(clientMutationId: string): string {
   return `<!-- ryco-comment-id:${createHash("sha256").update(clientMutationId).digest("hex")} -->`;
@@ -301,28 +298,35 @@ it.effect("maps GitHub PR summaries into provider-neutral change requests", () =
   }),
 );
 
-it.effect("uses gh json listing for non-open change request state queries", () =>
+it.effect("lists rows through the GraphQL list with counts and inline stack summaries", () =>
   Effect.gen(function* () {
-    let executeArgs: ReadonlyArray<string> = [];
+    const requests: Array<Parameters<GitHubCli.GitHubCliShape["listPullRequests"]>[0]> = [];
+    let stackLookups = 0;
     const provider = yield* makeProvider({
-      execute: (input) => {
-        executeArgs = input.args;
-        return Effect.succeed(
-          processResult(
-            JSON.stringify([
-              {
+      listPullRequests: (input) =>
+        Effect.sync(() => {
+          requests.push(input);
+          return [
+            {
+              summary: {
                 number: 7,
                 title: "Merged work",
                 url: "https://github.com/pingdotgg/ryco/pull/7",
                 baseRefName: "main",
                 headRefName: "feature/merged",
-                state: "merged",
-                updatedAt: "2026-01-02T00:00:00.000Z",
+                state: "merged" as const,
+                updatedAt: Option.some(DateTime.makeUnsafe("2026-01-02T00:00:00.000Z")),
+                commentsCount: 3,
               },
-            ]),
-          ),
-        );
-      },
+              stackSummary: { number: 9, size: 2, position: 1, baseRefName: "main" },
+            },
+          ];
+        }),
+      getPullRequestStackSummaries: () =>
+        Effect.sync(() => {
+          stackLookups += 1;
+          return new Map();
+        }),
     });
 
     const changeRequests = yield* provider.listChangeRequests({
@@ -331,91 +335,119 @@ it.effect("uses gh json listing for non-open change request state queries", () =
       state: "all",
       limit: 10,
     });
+    const authored = yield* provider.listChangeRequests({
+      cwd: "/repo",
+      headSelector: "",
+      state: "open",
+      involvement: "authored",
+      limit: 100,
+    });
 
-    assert.deepStrictEqual(executeArgs, [
-      "pr",
-      "list",
-      "--head",
-      "feature/merged",
-      "--state",
-      "all",
-      "--limit",
-      "10",
-      "--json",
-      prListJsonFields,
+    assert.deepStrictEqual(requests, [
+      { cwd: "/repo", state: "all", headSelector: "feature/merged", limit: 10 },
+      { cwd: "/repo", state: "open", involvement: "authored", limit: 100 },
     ]);
+    // Stacks ride in the list request: no second stack-summary round trip.
+    assert.strictEqual(stackLookups, 0);
     assert.strictEqual(changeRequests[0]?.provider, "github");
     assert.strictEqual(changeRequests[0]?.state, "merged");
+    assert.strictEqual(changeRequests[0]?.commentsCount, 3);
+    assert.deepStrictEqual(changeRequests[0]?.stackSummary, {
+      number: 9,
+      size: 2,
+      position: 1,
+      baseRefName: "main",
+    });
     assert.deepStrictEqual(
       changeRequests[0]?.updatedAt,
       Option.some(DateTime.makeUnsafe("2026-01-02T00:00:00.000Z")),
     );
+    assert.strictEqual(authored.length, 1);
   }),
 );
 
-it.effect("retries non-open PR listings without check rollup when GitHub denies that field", () =>
+it.effect("lists only summary fields, without stack lookups, when asked for the summary view", () =>
   Effect.gen(function* () {
     const executeArgs: ReadonlyArray<string>[] = [];
+    let stackLookups = 0;
     const provider = yield* makeProvider({
       execute: (input) => {
         executeArgs.push(input.args);
-        if (executeArgs.length === 1) {
-          return Effect.fail(
-            new GitHubCli.GitHubCliError({
-              operation: "execute",
-              detail:
-                "GraphQL: Resource not accessible by integration (repository.pullRequest.statusCheckRollup)",
-            }),
-          );
-        }
-        return Effect.succeed(
-          processResult(
-            JSON.stringify([
-              {
-                number: 7,
-                title: "Merged work",
-                url: "https://github.com/pingdotgg/ryco/pull/7",
-                baseRefName: "main",
-                headRefName: "feature/merged",
-                state: "merged",
-                updatedAt: "2026-01-02T00:00:00.000Z",
-              },
-            ]),
-          ),
-        );
+        return Effect.succeed(processResult("[]"));
       },
+      getPullRequestStackSummaries: () =>
+        Effect.sync(() => {
+          stackLookups += 1;
+          return new Map();
+        }),
     });
 
-    const changeRequests = yield* provider.listChangeRequests({
+    yield* provider.listChangeRequests({
       cwd: "/repo",
-      headSelector: "feature/merged",
+      headSelector: "",
       state: "all",
-      limit: 10,
+      limit: 100,
+      includeStackSummary: false,
+      fields: "summary",
+    });
+    yield* provider.listChangeRequests({
+      cwd: "/repo",
+      headSelector: "feature/x",
+      state: "open",
+      limit: 1,
+      includeStackSummary: false,
+      fields: "summary",
     });
 
-    assert.deepStrictEqual(
-      executeArgs.map((args) => args.at(-1)),
-      [prListJsonFields, prListJsonFieldsWithoutCheckRollup],
+    const summaryFields = GitHubCli.formatGitHubJsonFields(
+      GitHubCli.GITHUB_PULL_REQUEST_SUMMARY_LIST_JSON_FIELDS,
     );
-    assert.strictEqual(changeRequests[0]?.number, 7);
-    assert.strictEqual(changeRequests[0]?.checkRollup, undefined);
+    assert.deepStrictEqual(executeArgs, [
+      ["pr", "list", "--state", "all", "--limit", "100", "--json", summaryFields],
+      [
+        "pr",
+        "list",
+        "--head",
+        "feature/x",
+        "--state",
+        "open",
+        "--limit",
+        "1",
+        "--json",
+        summaryFields,
+      ],
+    ]);
+    assert.strictEqual(stackLookups, 0);
+    for (const field of ["comments", "statusCheckRollup", "mergeable", "reviewDecision"]) {
+      assert.notInclude(summaryFields.split(","), field);
+    }
   }),
 );
 
-it.effect("treats empty non-open change request listing output as no results", () =>
+it.effect("reads pull request state with the summary field set", () =>
   Effect.gen(function* () {
+    let requestedFields: string | undefined;
     const provider = yield* makeProvider({
-      execute: () => Effect.succeed(processResult("")),
+      getPullRequest: (input) =>
+        Effect.sync(() => {
+          requestedFields = input.fields;
+          return {
+            number: 5,
+            title: "Done",
+            url: "https://github.com/owner/repo/pull/5",
+            baseRefName: "main",
+            headRefName: "feature/done",
+            state: "merged" as const,
+            updatedAt: Option.none(),
+            mergedAt: DateTime.makeUnsafe("2026-01-03T00:00:00.000Z"),
+          };
+        }),
     });
 
-    const changeRequests = yield* provider.listChangeRequests({
-      cwd: "/repo",
-      headSelector: "feature/empty",
-      state: "all",
-      limit: 10,
-    });
-
-    assert.deepStrictEqual(changeRequests, []);
+    const state = yield* provider.getPullRequestState({ cwd: "/repo", number: 5 });
+    assert.strictEqual(requestedFields, "summary");
+    assert.strictEqual(state.state, "merged");
+    assert.deepStrictEqual(state.terminalAt, DateTime.makeUnsafe("2026-01-03T00:00:00.000Z"));
   }),
 );
 
@@ -741,28 +773,84 @@ it.effect("enriches pull request lists with stack summaries", () =>
   }),
 );
 
+it.effect("asks for each pull request's stack once across overlapping searches", () =>
+  Effect.gen(function* () {
+    const requested: number[][] = [];
+    const row = (number: number) => ({
+      number,
+      title: `PR ${number}`,
+      url: `https://github.com/owner/repo/pull/${number}`,
+      baseRefName: "main",
+      headRefName: `feature/${number}`,
+      state: "open" as const,
+    });
+    let listed: number[] = [];
+    const provider = yield* makeProvider({
+      searchPullRequests: () => Effect.sync(() => listed.map(row)),
+      getPullRequestStackSummaries: (input) =>
+        Effect.sync(() => {
+          requested.push([...input.numbers]);
+          return new Map([[2, { number: 9, size: 2, position: 1, baseRefName: "main" }]]);
+        }),
+    });
+
+    listed = [1, 2, 3];
+    const first = yield* provider.searchChangeRequests({ cwd: "/repo", query: "one" });
+    listed = [2, 3, 4];
+    const second = yield* provider.searchChangeRequests({ cwd: "/repo", query: "two" });
+
+    assert.deepStrictEqual(requested, [[1, 2, 3], [4]]);
+    assert.strictEqual(first.find((item) => item.number === 2)?.stackSummary?.number, 9);
+    assert.strictEqual(second.find((item) => item.number === 2)?.stackSummary?.number, 9);
+  }),
+);
+
+it.effect("settles every stack summary it asked for, even ones the reuse map dropped", () =>
+  Effect.gen(function* () {
+    // More pull requests than the reuse map holds: its oldest entries are
+    // evicted while this very read is still in flight.
+    const numbers = Array.from({ length: 2_100 }, (_, index) => index + 1);
+    const provider = yield* makeProvider({
+      searchPullRequests: () =>
+        Effect.succeed(
+          numbers.map((number) => ({
+            number,
+            title: `PR ${number}`,
+            url: `https://github.com/owner/repo/pull/${number}`,
+            baseRefName: "main",
+            headRefName: `feature/${number}`,
+            state: "open" as const,
+          })),
+        ),
+      getPullRequestStackSummaries: (input) =>
+        Effect.succeed(
+          new Map([[input.numbers[0]!, { number: 1, size: 2, position: 1, baseRefName: "main" }]]),
+        ),
+    });
+
+    // Before, the evicted numbers' answers were never delivered and this hung.
+    const listed = yield* provider.searchChangeRequests({
+      cwd: "/repo",
+      query: "many",
+      limit: 2_100,
+    });
+    assert.strictEqual(listed.length, numbers.length);
+    assert.strictEqual(listed[0]?.stackSummary?.number, 1);
+  }),
+);
+
 for (const state of ["open", "all"] as const) {
   it.effect(`skips stack summary calls for lightweight ${state} branch lookups`, () =>
     Effect.gen(function* () {
       let summaryCalls = 0;
+      const listInputs: Array<Parameters<GitHubCli.GitHubCliShape["listPullRequests"]>[0]> = [];
       const provider = yield* makeProvider({
         listOpenPullRequests: () => Effect.succeed([githubPullRequestDetail]),
-        execute: () =>
-          Effect.succeed(
-            processResult(
-              JSON.stringify([
-                {
-                  number: 42,
-                  title: "Middle",
-                  url: "https://github.com/owner/repo/pull/42",
-                  baseRefName: "feature/41",
-                  headRefName: "feature/42",
-                  state: "open",
-                  updatedAt: "2026-01-02T00:00:00.000Z",
-                },
-              ]),
-            ),
-          ),
+        listPullRequests: (input) =>
+          Effect.sync(() => {
+            listInputs.push(input);
+            return [{ summary: githubPullRequestDetail, stackSummary: null }];
+          }),
         getPullRequestStackSummaries: () => {
           summaryCalls += 1;
           return Effect.succeed(new Map());
@@ -777,6 +865,8 @@ for (const state of ["open", "all"] as const) {
       assert.equal(items[0]?.number, 42);
       assert.equal(items[0]?.stackSummary, undefined);
       assert.equal(summaryCalls, 0);
+      // The GraphQL list is told not to select stack fields either.
+      for (const input of listInputs) assert.equal(input.includeStackSummary, false);
     }),
   );
 }

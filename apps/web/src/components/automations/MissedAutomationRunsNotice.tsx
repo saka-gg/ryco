@@ -30,6 +30,7 @@ import { useHostedRpcCapability } from "../../hostedHub/capabilities";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { openAutomationsDialog } from "./automationsDialogStore";
 import { useAutomationProposalSync } from "./data/useAutomationProposalSync";
+import { useAgentControlSyncEnvironmentIds } from "../agent-control/agentControlSyncGate";
 import { useConnectedEnvironmentIds } from "./data/useConnectedEnvironmentIds";
 import { missedRunsNoticeView, type MissedRunsNoticeView } from "./missedRunsNotice.logic";
 
@@ -238,7 +239,8 @@ export function MissedAutomationRunsNotice() {
 function MissedAutomationRunsNotices() {
   const decision = useHostedRpcCapability(AGENT_CONTROL_WS_METHODS.acceptProposal);
   const environmentIds = useConnectedEnvironmentIds();
-  useAutomationProposalSync(environmentIds);
+  // Skip nodes whose config already says Agent Control is off.
+  useAutomationProposalSync(useAgentControlSyncEnvironmentIds(environmentIds));
   return environmentIds.map((environmentId) => (
     <MissedAutomationRunsNoticeForEnvironment
       key={environmentId}

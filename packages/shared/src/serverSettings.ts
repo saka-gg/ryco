@@ -1,5 +1,6 @@
-import { ServerSettings, type ServerSettingsPatch } from "@ryco/contracts";
-import { Equal, Schema } from "effect";
+import { ServerSettings, type ServerSettingsPatch } from "@ryco/contracts/settings";
+import * as Equal from "effect/Equal";
+import * as Schema from "effect/Schema";
 import { deepMerge } from "./Struct.ts";
 import { fromLenientJson } from "./schemaJson.ts";
 import { createModelSelection } from "./model.ts";

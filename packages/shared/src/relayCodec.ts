@@ -13,7 +13,8 @@ import {
   type RelaySupportedVersionRange,
 } from "@ryco/contracts/relay";
 import { decode, encode, rfc8949EncodeOptions } from "cborg";
-import { Exit, Schema } from "effect";
+import * as Exit from "effect/Exit";
+import * as Schema from "effect/Schema";
 
 const MAP_KEY_PATTERN = /^[A-Za-z][A-Za-z0-9._-]{0,63}$/;
 const MAX_PROFILE_DEPTH = 64;

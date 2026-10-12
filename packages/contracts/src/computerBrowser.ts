@@ -1,5 +1,5 @@
 // Adapted from Synara v0.9.1; see docs/licenses/synara-computer-use.txt.
-import { Schema } from "effect";
+import * as Schema from "effect/Schema";
 
 /**
  * Contract surface for the cua-driver browser tool family — the CDP route

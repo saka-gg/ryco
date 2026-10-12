@@ -140,6 +140,7 @@ describe("resolveInitialServerAuthGateState", () => {
 
     expect(fetchMock).toHaveBeenCalledWith("https://remote.example.com/api/auth/session", {
       credentials: "include",
+      signal: expect.any(AbortSignal),
     });
   });
 
@@ -172,6 +173,7 @@ describe("resolveInitialServerAuthGateState", () => {
 
     expect(fetchMock).toHaveBeenCalledWith("http://localhost:5735/api/auth/session", {
       credentials: "include",
+      signal: expect.any(AbortSignal),
     });
   });
 
@@ -213,6 +215,7 @@ describe("resolveInitialServerAuthGateState", () => {
 
     expect(fetchMock).toHaveBeenCalledWith("http://127.0.0.1:5733/api/auth/session", {
       credentials: "include",
+      signal: expect.any(AbortSignal),
     });
   });
 
@@ -374,6 +377,7 @@ describe("resolveInitialServerAuthGateState", () => {
     expect(fetchMock).toHaveBeenCalledWith("http://localhost/api/auth/bootstrap", {
       body: JSON.stringify({ credential: "bad-token" }),
       credentials: "include",
+      signal: expect.any(AbortSignal),
       headers: {
         "content-type": "application/json",
       },

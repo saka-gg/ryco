@@ -14,7 +14,8 @@ import type {
   AuthSessionState,
   AuthWebSocketTokenResult,
 } from "@ryco/contracts";
-import { Data, Predicate } from "effect";
+import * as Data from "effect/Data";
+import * as Predicate from "effect/Predicate";
 
 import type {
   EndpointService,
@@ -22,6 +23,7 @@ import type {
   PairingCredentialSourceService,
   SessionCredentialsService,
 } from "../platform/index.ts";
+import { fetchWithDeadline, isAbortOrTimeoutError } from "./fetchWithDeadline.ts";
 import type {
   NodeE2eeAuthorizationChange,
   NodeE2eeAuthorizationRequest,
@@ -103,31 +105,41 @@ export function createPrimaryAuth(deps: PrimaryAuthDependencies) {
       }));
   const credentials =
     deps.sessionCredentials.mode === "cookie" ? { credentials: "include" as const } : {};
-  const retryTransientBootstrap = async <T>(operation: () => Promise<T>): Promise<T> => {
+  /**
+   * Retries a control-plane request that failed the way a restarting server
+   * fails it: refused, timed out by its deadline, or answered 502-504. A
+   * caller `signal` stops the retries, so an abandoned attempt sends nothing.
+   */
+  const retryTransientBootstrap = async <T>(
+    operation: () => Promise<T>,
+    options?: { readonly signal?: AbortSignal },
+  ): Promise<T> => {
     const startedAt = now();
+    const abandoned = () => options?.signal?.aborted === true;
     for (;;) {
       try {
         return await operation();
       } catch (error) {
         const transient = isBootstrapHttpError(error)
           ? TRANSIENT_BOOTSTRAP_STATUS_CODES.has(error.status)
-          : error instanceof TypeError ||
-            (error as { readonly name?: unknown } | null)?.name === "AbortError";
-        if (!transient || now() - startedAt >= BOOTSTRAP_RETRY_TIMEOUT_MS) throw error;
+          : error instanceof TypeError || isAbortOrTimeoutError(error);
+        if (!transient || abandoned() || now() - startedAt >= BOOTSTRAP_RETRY_TIMEOUT_MS) {
+          throw error;
+        }
         await sleep(BOOTSTRAP_RETRY_STEP_MS);
+        if (abandoned()) throw error;
       }
     }
   };
+  const fetchControlPlane = (pathname: string, init: Parameters<HttpClientService["fetch"]>[1]) =>
+    fetchWithDeadline(deps.httpClient, deps.endpoint.resolveHttpUrl(pathname), init);
   const readErrorMessage = async (
     response: Awaited<ReturnType<HttpClientService["fetch"]>>,
     fallbackMessage: string,
   ) => (await response.text()) || fallbackMessage;
   const fetchSessionState = async (): Promise<AuthSessionState> =>
     retryTransientBootstrap(async () => {
-      const response = await deps.httpClient.fetch(
-        deps.endpoint.resolveHttpUrl("/api/auth/session"),
-        credentials,
-      );
+      const response = await fetchControlPlane("/api/auth/session", credentials);
       if (!response.ok) {
         throw new BootstrapHttpError({
           message: `Failed to load server auth session state (${response.status}).`,
@@ -136,29 +148,37 @@ export function createPrimaryAuth(deps: PrimaryAuthDependencies) {
       }
       return (await response.json()) as AuthSessionState;
     });
-  const issuePrimaryWebSocketToken = async (): Promise<AuthWebSocketTokenResult> => {
-    const response = await deps.httpClient.fetch(
-      deps.endpoint.resolveHttpUrl("/api/auth/ws-token"),
-      { ...credentials, method: "POST" },
+  /**
+   * Every reconnect attempt resolves its socket URL through this request, so a
+   * hung one would stall reconnecting; `signal` lets the attempt abandon it.
+   */
+  const issuePrimaryWebSocketToken = async (
+    signal?: AbortSignal,
+  ): Promise<AuthWebSocketTokenResult> =>
+    retryTransientBootstrap(
+      async () => {
+        const response = await fetchControlPlane("/api/auth/ws-token", {
+          ...credentials,
+          method: "POST",
+          ...(signal === undefined ? {} : { signal }),
+        });
+        if (!response.ok)
+          throw new BootstrapHttpError({
+            message: `Failed to issue websocket token (${response.status}).`,
+            status: response.status,
+          });
+        return (await response.json()) as AuthWebSocketTokenResult;
+      },
+      signal === undefined ? undefined : { signal },
     );
-    if (!response.ok)
-      throw new BootstrapHttpError({
-        message: `Failed to issue websocket token (${response.status}).`,
-        status: response.status,
-      });
-    return (await response.json()) as AuthWebSocketTokenResult;
-  };
   const exchangeBootstrapCredential = async (credential: string): Promise<AuthBootstrapResult> =>
     retryTransientBootstrap(async () => {
-      const response = await deps.httpClient.fetch(
-        deps.endpoint.resolveHttpUrl("/api/auth/bootstrap"),
-        {
-          ...credentials,
-          body: JSON.stringify({ credential } satisfies AuthBootstrapInput),
-          headers: { "content-type": "application/json" },
-          method: "POST",
-        },
-      );
+      const response = await fetchControlPlane("/api/auth/bootstrap", {
+        ...credentials,
+        body: JSON.stringify({ credential } satisfies AuthBootstrapInput),
+        headers: { "content-type": "application/json" },
+        method: "POST",
+      });
       if (!response.ok) {
         const raw = await response.text();
         let message = raw.trim();

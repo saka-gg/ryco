@@ -6,6 +6,7 @@ export * from "./atomRpcClient.ts";
 export * from "./environmentStateSink.ts";
 export * from "./evictionPolicy.ts";
 export * from "./environmentApi.ts";
+export * from "./fetchWithDeadline.ts";
 export * from "./nodeE2eeOperator.ts";
 export * from "./primaryAuth.ts";
 export * from "./primaryContext.ts";

@@ -1,16 +1,33 @@
 import { EnvironmentId, ProjectId, ThreadId } from "@ryco/contracts";
 import { DEFAULT_UNIFIED_SETTINGS } from "@ryco/contracts/settings";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
+import { userEvent } from "vite-plus/test/browser";
 import { render } from "vitest-browser-react";
 
+import { DraftId } from "../../composerDraftStore";
 import { AppAtomRegistryProvider } from "../../rpc/atomRegistry";
 import { resetGitStatusStateForTests } from "../../lib/gitStatusState";
 import { DEFAULT_INTERACTION_MODE } from "../../types";
 import { SidebarThreadRow, type SidebarThreadRowProps } from "./SidebarThreadRow";
+import { SOURCE_CONTROL_VISIBILITY_HYSTERESIS } from "./hooks/useHasIntersectedViewport";
 
 const rpc = vi.hoisted(() => ({
   unsubscribe: vi.fn(),
   onStatus: vi.fn(),
+}));
+const intent = vi.hoisted(() => ({
+  hover: vi.fn(),
+  hoverEnd: vi.fn(),
+  press: vi.fn(),
+  draft: vi.fn(),
+}));
+
+vi.mock("./threadNavigationIntent", async () => ({
+  isNavigationPress: (await import("./threadNavigationIntent.logic")).isNavigationPress,
+  noteThreadHoverIntent: intent.hover,
+  noteThreadHoverEnd: intent.hoverEnd,
+  noteThreadPressIntent: intent.press,
+  preloadDraftRoute: intent.draft,
 }));
 
 vi.mock("../../environments/runtime/service", () => ({
@@ -50,6 +67,10 @@ class RowIntersectionObserver {
   observe(target: Element): void {
     this.target = target;
     RowIntersectionObserver.observers.set(target, this);
+  }
+
+  unobserve(target: Element): void {
+    RowIntersectionObserver.observers.delete(target);
   }
 
   disconnect(): void {
@@ -121,6 +142,23 @@ function rowProps(id: string, isActive = false): SidebarThreadRowProps {
   };
 }
 
+function IntentRows() {
+  const draftRow = rowProps("draft-row");
+  return (
+    <AppAtomRegistryProvider>
+      <ul>
+        <SidebarThreadRow {...rowProps("idle")} gitStatusTarget={null} />
+        <SidebarThreadRow {...rowProps("open", true)} gitStatusTarget={null} />
+        <SidebarThreadRow
+          {...draftRow}
+          thread={{ ...draftRow.thread, draftId: DraftId.make("draft-1") }}
+          gitStatusTarget={null}
+        />
+      </ul>
+    </AppAtomRegistryProvider>
+  );
+}
+
 function Rows({ secondActive = false }: { secondActive?: boolean }) {
   return (
     <AppAtomRegistryProvider>
@@ -140,6 +178,7 @@ async function flushVisibilityUpdates() {
 
 describe("SidebarThreadRow git status demand", () => {
   afterEach(() => {
+    vi.useRealTimers();
     resetGitStatusStateForTests();
     RowIntersectionObserver.observers.clear();
     vi.unstubAllGlobals();
@@ -147,6 +186,7 @@ describe("SidebarThreadRow git status demand", () => {
   });
 
   it("shares visible cwd demand and retains it for an active offscreen row until deactivation", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     vi.stubGlobal("IntersectionObserver", RowIntersectionObserver);
     rpc.onStatus.mockImplementation(() => rpc.unsubscribe);
     const mounted = await render(<Rows />);
@@ -155,18 +195,23 @@ describe("SidebarThreadRow git status demand", () => {
       expect(rpc.onStatus).not.toHaveBeenCalled();
 
       RowIntersectionObserver.emit("first", true);
+      vi.advanceTimersByTime(SOURCE_CONTROL_VISIBILITY_HYSTERESIS.enterDelayMs);
       await vi.waitFor(() => expect(rpc.onStatus).toHaveBeenCalledTimes(1));
-      expect(rpc.onStatus.mock.calls[0]?.[0]).toMatchObject({ cwd: "/repo" });
+      // Rows ask only for the badge summary, never full status.
+      expect(rpc.onStatus.mock.calls[0]?.[0]).toMatchObject({ cwd: "/repo", view: "summary" });
 
       RowIntersectionObserver.emit("second", true);
+      vi.advanceTimersByTime(SOURCE_CONTROL_VISIBILITY_HYSTERESIS.enterDelayMs);
       await flushVisibilityUpdates();
       expect(rpc.onStatus).toHaveBeenCalledTimes(1);
       RowIntersectionObserver.emit("first", false);
+      vi.advanceTimersByTime(SOURCE_CONTROL_VISIBILITY_HYSTERESIS.exitDelayMs);
       await flushVisibilityUpdates();
       expect(rpc.unsubscribe).not.toHaveBeenCalled();
 
       await mounted.rerender(<Rows secondActive />);
       RowIntersectionObserver.emit("second", false);
+      vi.advanceTimersByTime(SOURCE_CONTROL_VISIBILITY_HYSTERESIS.exitDelayMs);
       await flushVisibilityUpdates();
       expect(rpc.unsubscribe).not.toHaveBeenCalled();
 
@@ -174,10 +219,108 @@ describe("SidebarThreadRow git status demand", () => {
       await vi.waitFor(() => expect(rpc.unsubscribe).toHaveBeenCalledTimes(1));
 
       RowIntersectionObserver.emit("first", true);
+      vi.advanceTimersByTime(SOURCE_CONTROL_VISIBILITY_HYSTERESIS.enterDelayMs);
       await vi.waitFor(() => expect(rpc.onStatus).toHaveBeenCalledTimes(2));
     } finally {
       await mounted.unmount();
     }
     expect(rpc.unsubscribe).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps a row's stream through a brief scroll-out and never subscribes on a fling", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    vi.stubGlobal("IntersectionObserver", RowIntersectionObserver);
+    rpc.onStatus.mockImplementation(() => rpc.unsubscribe);
+    const mounted = await render(<Rows />);
+    try {
+      // Fling: in and out again before the enter delay elapses.
+      RowIntersectionObserver.emit("first", true);
+      vi.advanceTimersByTime(SOURCE_CONTROL_VISIBILITY_HYSTERESIS.enterDelayMs - 50);
+      RowIntersectionObserver.emit("first", false);
+      vi.advanceTimersByTime(SOURCE_CONTROL_VISIBILITY_HYSTERESIS.enterDelayMs);
+      await flushVisibilityUpdates();
+      expect(rpc.onStatus).not.toHaveBeenCalled();
+
+      RowIntersectionObserver.emit("first", true);
+      vi.advanceTimersByTime(SOURCE_CONTROL_VISIBILITY_HYSTERESIS.enterDelayMs);
+      await vi.waitFor(() => expect(rpc.onStatus).toHaveBeenCalledTimes(1));
+
+      // Scrolled out and back within the retention window: same stream.
+      RowIntersectionObserver.emit("first", false);
+      vi.advanceTimersByTime(SOURCE_CONTROL_VISIBILITY_HYSTERESIS.exitDelayMs / 2);
+      RowIntersectionObserver.emit("first", true);
+      vi.advanceTimersByTime(SOURCE_CONTROL_VISIBILITY_HYSTERESIS.exitDelayMs);
+      await flushVisibilityUpdates();
+      expect(rpc.unsubscribe).not.toHaveBeenCalled();
+      expect(rpc.onStatus).toHaveBeenCalledTimes(1);
+
+      // Out for the whole window: the stream is released.
+      RowIntersectionObserver.emit("first", false);
+      vi.advanceTimersByTime(SOURCE_CONTROL_VISIBILITY_HYSTERESIS.exitDelayMs);
+      await vi.waitFor(() => expect(rpc.unsubscribe).toHaveBeenCalledTimes(1));
+    } finally {
+      await mounted.unmount();
+    }
+  });
+});
+
+describe("SidebarThreadRow navigation intent", () => {
+  afterEach(() => {
+    vi.clearAllMocks();
+    document.body.innerHTML = "";
+  });
+
+  const rowButton = (id: string) => {
+    const element = document.querySelector<HTMLElement>(`[data-testid="thread-row-${id}"]`);
+    if (!element) throw new Error(`No row ${id}`);
+    return element;
+  };
+
+  it("warms an idle thread on hover and retains it on a navigating press", async () => {
+    const mounted = await render(<IntentRows />);
+    try {
+      await userEvent.hover(rowButton("idle"));
+      await vi.waitFor(() =>
+        expect(intent.hover).toHaveBeenCalledWith({ environmentId, threadId: "idle" }),
+      );
+      await userEvent.click(rowButton("idle"));
+      expect(intent.press).toHaveBeenCalledExactlyOnceWith({ environmentId, threadId: "idle" });
+      await userEvent.unhover(rowButton("idle"));
+      await vi.waitFor(() =>
+        expect(intent.hoverEnd).toHaveBeenCalledWith({ environmentId, threadId: "idle" }),
+      );
+    } finally {
+      await mounted.unmount();
+    }
+  });
+
+  it("ignores selection presses and the thread already open", async () => {
+    const mounted = await render(<IntentRows />);
+    try {
+      await userEvent.keyboard("{Shift>}");
+      await userEvent.click(rowButton("idle"));
+      await userEvent.keyboard("{/Shift}");
+      expect(intent.press).not.toHaveBeenCalled();
+
+      await userEvent.hover(rowButton("open"));
+      await userEvent.click(rowButton("open"));
+      expect(intent.hover).not.toHaveBeenCalledWith({ environmentId, threadId: "open" });
+      expect(intent.press).not.toHaveBeenCalled();
+    } finally {
+      await mounted.unmount();
+    }
+  });
+
+  it("warms only the draft route for a draft row", async () => {
+    const mounted = await render(<IntentRows />);
+    try {
+      await userEvent.hover(rowButton("draft-row"));
+      await vi.waitFor(() => expect(intent.draft).toHaveBeenCalled());
+      await userEvent.click(rowButton("draft-row"));
+      expect(intent.hover).not.toHaveBeenCalledWith({ environmentId, threadId: "draft-row" });
+      expect(intent.press).not.toHaveBeenCalled();
+    } finally {
+      await mounted.unmount();
+    }
   });
 });

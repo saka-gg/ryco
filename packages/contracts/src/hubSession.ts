@@ -1,4 +1,4 @@
-import { Schema } from "effect";
+import * as Schema from "effect/Schema";
 import { RELAY_MAX_DATA_FRAME_BYTES } from "./relay.ts";
 
 /** The outer session never changes the authenticated relay frames it carries. */

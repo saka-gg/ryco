@@ -5,6 +5,8 @@ import type { InboxThreadRow } from "./inboxModel";
 const rpc = vi.hoisted(() => ({ dispatch: vi.fn(), lookup: vi.fn(), alert: vi.fn() }));
 vi.mock("react", async (original) => ({
   ...(await original<typeof import("react")>()),
+  useCallback: <T,>(callback: T) => callback,
+  useMemo: <T,>(factory: () => T) => factory(),
   useState: <T,>(value: T) => [value, vi.fn()],
 }));
 vi.mock("react-native", () => ({
@@ -29,7 +31,12 @@ vi.mock("../home/WorkspaceConnectionStatus", () => ({
   WorkspaceConnectionStatus: "WorkspaceConnectionStatus",
 }));
 
-import { InboxScreen } from "./InboxScreen";
+import { InboxScreen, InboxThreadMenuRow } from "./InboxScreen";
+
+/** The function a `memo` wraps, called directly with the hooks above stubbed. */
+function render<P>(component: unknown, props: P): ReactElement {
+  return (component as { type: (props: P) => ReactElement }).type(props);
+}
 
 type MenuProps = {
   actions: { id: string; attributes: { disabled: boolean } }[];
@@ -46,13 +53,16 @@ function menu(overrides: Partial<InboxThreadRow> = {}): MenuProps {
     canSnooze: true,
     ...overrides,
   } as InboxThreadRow;
-  const list = InboxScreen({
+  const list = render(InboxScreen, {
     sections: [],
     emptyState: null,
+    nowMs: Date.UTC(2026, 9, 12, 9),
     onOpenThread: vi.fn(),
     onEmptyAction: vi.fn(),
-  }) as ReactElement<{ renderItem: (props: unknown) => ReactElement<MenuProps> }>;
-  return list.props.renderItem({ item: { kind: "thread", row } }).props;
+  }) as ReactElement<{ renderItem: (props: unknown) => ReactElement }>;
+  const menuRow = list.props.renderItem({ item: { kind: "thread", row } });
+  expect(menuRow.type).toBe(InboxThreadMenuRow);
+  return (render(InboxThreadMenuRow, menuRow.props) as ReactElement<MenuProps>).props;
 }
 
 beforeEach(() => {

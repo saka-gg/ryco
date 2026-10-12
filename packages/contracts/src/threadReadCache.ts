@@ -1,4 +1,4 @@
-import { Schema } from "effect";
+import * as Schema from "effect/Schema";
 
 import { IsoDateTime, MessageId, ThreadId, TurnId } from "./baseSchemas.ts";
 import { RelayNodeId } from "./relay.ts";

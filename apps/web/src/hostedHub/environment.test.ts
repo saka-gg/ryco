@@ -1,4 +1,9 @@
-import { EnvironmentId } from "@ryco/contracts";
+import {
+  peekProjectIconSource,
+  projectIconCacheBytes,
+  readProjectIconSource,
+} from "@ryco/client-runtime/connection";
+import { EnvironmentId, ProjectId, type EnvironmentApi } from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import { useCommandPaletteStore } from "../commandPaletteStore";
@@ -18,9 +23,19 @@ import { clearWebHostedAccountScopedState, clearWebHostedNodeScopedState } from 
  */
 
 const environmentId = EnvironmentId.make("env_aaaaaaaaaaaaaaaaaaaaaa");
+const iconProjectId = ProjectId.make("iconProject");
+const ICON_SOURCE = "data:image/png;base64,aWNvbg==";
+
+function cacheProjectIcon(): Promise<string | null> {
+  const api = {
+    projects: { readIcon: async () => ({ mimeType: "image/png", dataBase64: "aWNvbg==" }) },
+  } as unknown as EnvironmentApi;
+  return readProjectIconSource(api, environmentId, iconProjectId, null);
+}
 
 describe("clearWebHostedNodeScopedState", () => {
-  it("demotes only transport projections and preserves cross-node UI state", () => {
+  it("demotes only transport projections and preserves cross-node UI state", async () => {
+    await cacheProjectIcon();
     useStore.setState({ activeEnvironmentId: environmentId });
     useComposerDraftStore.getState().setPrompt(DraftId.make("sensitiveThread"), "sensitive prompt");
     useTerminalStateStore.setState({
@@ -52,9 +67,12 @@ describe("clearWebHostedNodeScopedState", () => {
     });
     expect(useCommandPaletteStore.getState().open).toBe(true);
     expect(useSettingsDialogStore.getState().open).toBe(true);
+    // Project artwork is keyed by node and survives a node switch.
+    expect(peekProjectIconSource(environmentId, iconProjectId, null)).toBe(ICON_SOURCE);
   });
 
-  it("clears preserved cross-node state at the account-session boundary", () => {
+  it("clears preserved cross-node state at the account-session boundary", async () => {
+    await cacheProjectIcon();
     useComposerDraftStore.getState().setPrompt(DraftId.make("accountDraft"), "private prompt");
     useUiStateStore.setState({ pinnedThreadKeys: { accountThread: true } });
     useCommandPaletteStore.getState().openAddProject();
@@ -83,5 +101,7 @@ describe("clearWebHostedNodeScopedState", () => {
       acknowledgedCauseKeysByThreadKey: {},
       epoch: epoch + 1,
     });
+    expect(peekProjectIconSource(environmentId, iconProjectId, null)).toBeUndefined();
+    expect(projectIconCacheBytes(environmentId)).toBe(0);
   });
 });

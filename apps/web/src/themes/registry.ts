@@ -183,22 +183,48 @@ export function deleteCustomTheme(id: string): void {
 
 export { isValidTheme };
 
+// Parsed custom themes keyed by the raw stored string: theme lookups run on
+// every theme application and snapshot read, and the stored JSON rarely
+// changes. Keying by the raw value keeps cross-tab writes correct.
+let customThemesCache: { readonly raw: string; readonly themes: ThemeDefinition[] } | null = null;
+
 export function getCustomThemes(): ThemeDefinition[] {
   if (typeof localStorage === "undefined") return [];
   const raw = localStorage.getItem(CUSTOM_THEMES_STORAGE_KEY);
   if (!raw) return [];
+  if (customThemesCache?.raw === raw) return [...customThemesCache.themes];
+  let themes: ThemeDefinition[];
   try {
     const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter(isValidTheme);
+    themes = Array.isArray(parsed) ? parsed.filter(isValidTheme) : [];
   } catch {
-    return [];
+    themes = [];
   }
+  customThemesCache = { raw, themes };
+  return [...themes];
 }
 
 export function setCustomThemes(themes: ThemeDefinition[]): void {
   if (typeof localStorage === "undefined") return;
   localStorage.setItem(CUSTOM_THEMES_STORAGE_KEY, JSON.stringify(themes));
+  notifyThemeRegistryChange();
+}
+
+const themeRegistryListeners = new Set<() => void>();
+
+/**
+ * Same-tab registry writes (custom themes, active theme id). The browser's
+ * `storage` event only reports other tabs, so cached readers subscribe here.
+ */
+export function subscribeThemeRegistry(listener: () => void): () => void {
+  themeRegistryListeners.add(listener);
+  return () => {
+    themeRegistryListeners.delete(listener);
+  };
+}
+
+function notifyThemeRegistryChange(): void {
+  for (const listener of themeRegistryListeners) listener();
 }
 
 export function getAllThemes(): ThemeDefinition[] {
@@ -224,6 +250,7 @@ function getStoredActiveThemeId(): string {
 export function setActiveThemeId(id: string): void {
   if (typeof localStorage === "undefined") return;
   localStorage.setItem(ACTIVE_THEME_STORAGE_KEY, id);
+  notifyThemeRegistryChange();
 }
 
 export function resolveTokens(theme: ThemeDefinition, variant: ThemeVariant): ThemeTokens {

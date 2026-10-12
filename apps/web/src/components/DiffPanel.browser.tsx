@@ -66,6 +66,11 @@ vi.mock("@pierre/diffs", () => ({
   parsePatchFiles: vi.fn(() => [{ files: [diffFile] }]),
 }));
 
+// The shared highlight pool spawns real workers; these tests render plain output.
+vi.mock("./DiffWorkerPoolProvider", () => ({
+  DiffWorkerPoolProvider: (props: { children?: ReactNode }) => <>{props.children}</>,
+}));
+
 vi.mock("@pierre/diffs/react", () => ({
   WorkerPoolContextProvider: (props: { children: ReactNode }) => <>{props.children}</>,
   useWorkerPool: () => null,

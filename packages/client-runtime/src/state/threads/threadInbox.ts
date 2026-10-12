@@ -409,7 +409,9 @@ export function buildThreadInbox(input: BuildThreadInboxInput): ThreadInboxModel
       environmentId: worktree.environmentId,
       projectId: worktree.projectId,
     });
-    worktreesByProjectKey.set(key, [...(worktreesByProjectKey.get(key) ?? []), worktree]);
+    const projectWorktrees = worktreesByProjectKey.get(key);
+    if (projectWorktrees) projectWorktrees.push(worktree);
+    else worktreesByProjectKey.set(key, [worktree]);
   }
   const serverThreadKeys = new Set(
     input.threads.map((thread) => scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id))),

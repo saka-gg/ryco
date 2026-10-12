@@ -13,7 +13,7 @@ import type {
   ProviderInteractionMode,
 } from "@ryco/contracts";
 import { Pressable, TextInput, View } from "react-native";
-import { IconGitBranch, IconGitFork } from "@tabler/icons-react-native";
+import { IconGitBranch, IconGitFork } from "../../components/icons";
 
 import { AppText as Text } from "../../components/AppText";
 import { SymbolView } from "../../components/AppSymbol";

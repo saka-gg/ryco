@@ -356,3 +356,19 @@ it("pushes a closed pane out and releases it once the exit ends", async () => {
   if (leaving) expect(leaving.hasAttribute("inert")).toBe(true);
   await expect.poll(() => document.querySelectorAll("[data-pane-leaving]").length).toBe(0);
 });
+
+it("reuses the lone pane's content across thread navigation and keeps splits per pane", async () => {
+  const router = await mount();
+  const firstPane = document.querySelector("[data-pane-thread] textarea");
+  await router.navigate({ to: "/$environmentId/$threadId", params: b });
+  await expect.element(page.getByRole("textbox", { name: "Draft b" })).toBeVisible();
+  // Same component instance: the navigation re-rendered it for the new thread.
+  expect(document.querySelector("[data-pane-thread] textarea")).toBe(firstPane);
+  expect(document.querySelectorAll("[data-pane-thread]")).toHaveLength(1);
+
+  // A split with the thread whose React key the lone pane carries stays two panes.
+  useChatPanesStore.getState().open(a, "right", b);
+  await expect.element(page.getByRole("textbox", { name: "Draft a" })).toBeVisible();
+  expect(document.querySelectorAll("[data-pane-thread]")).toHaveLength(2);
+  expect(page.getByRole("textbox", { name: "Draft b" }).element()).toBe(firstPane);
+});

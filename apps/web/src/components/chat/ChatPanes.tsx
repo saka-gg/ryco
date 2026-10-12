@@ -63,6 +63,7 @@ import {
   PaneCloseGuardContext,
   type PaneCloseGuard,
 } from "./PaneFocus";
+import { nextPaneReactKeys } from "./paneReactKeys.logic";
 
 const FULL_RECT: PaneRect = { left: 0, top: 0, width: 100, height: 100 };
 /**
@@ -108,6 +109,14 @@ interface PaneLayoutMotion {
   staged: ReadonlyMap<string, PaneRect> | null;
   /** Dividers of splits this change created; hidden until their panes land. */
   newDividers: ReadonlySet<string>;
+  /**
+   * React key of every rendered pane (current and leaving), by pane key. A
+   * pane keeps its React key for as long as it is shown, and a lone pane that
+   * navigates to another lone thread hands its key on, so its ChatView (with
+   * the composer, editor and their subscriptions) is reused instead of
+   * remounted on every thread switch. Real splits keep one instance per pane.
+   */
+  reactKeys: ReadonlyMap<string, string>;
 }
 const STILL_MOTION = {
   leaving: [],
@@ -150,7 +159,20 @@ function nextLayoutMotion(
   previous: PaneLayoutMotion,
   root: PaneNode,
   animate: boolean,
+  reuseLonePane: boolean,
 ): PaneLayoutMotion {
+  const motion = nextLayoutMotionWithoutKeys(previous, root, animate);
+  return {
+    ...motion,
+    reactKeys: nextPaneReactKeys(previous, motion, reuseLonePane),
+  };
+}
+
+function nextLayoutMotionWithoutKeys(
+  previous: PaneLayoutMotion,
+  root: PaneNode,
+  animate: boolean,
+): Omit<PaneLayoutMotion, "reactKeys"> {
   const leaves = paneGeometry(root).leaves;
   if (!animate || !sharesPaneLeaves(previous.root, root)) return { root, leaves, ...STILL_MOTION };
   const nextKeys = new Set(leaves.map((leaf) => paneKey(leaf.ref)));
@@ -320,17 +342,22 @@ export function ChatPanes({
   }, [root]);
   // Derived during render so a closing pane is never committed unmounted: its
   // ChatView instance is kept, faded, and released when the exit ends.
-  const [layoutMotion, setLayoutMotion] = useState<PaneLayoutMotion>(() => ({
-    root,
-    leaves: paneGeometry(root).leaves,
-    ...STILL_MOTION,
-  }));
+  const [layoutMotion, setLayoutMotion] = useState<PaneLayoutMotion>(() => {
+    const leaves = paneGeometry(root).leaves;
+    return {
+      root,
+      leaves,
+      ...STILL_MOTION,
+      reactKeys: new Map(leaves.map((leaf) => [paneKey(leaf.ref), paneKey(leaf.ref)])),
+    };
+  });
   if (layoutMotion.root !== root) {
     setLayoutMotion(
       nextLayoutMotion(
         layoutMotion,
         root,
         enabled && !narrow && readMotionDurationMs("--app-motion-duration-pane", 360) > 0,
+        enabled,
       ),
     );
   }
@@ -593,7 +620,7 @@ export function ChatPanes({
           : null;
     return (
       <section
-        key={key}
+        key={layoutMotion.reactKeys.get(key) ?? key}
         data-pane-thread={leaving ? undefined : key}
         data-pane-leaving={leaving ? key : undefined}
         data-pane-focused={focused}

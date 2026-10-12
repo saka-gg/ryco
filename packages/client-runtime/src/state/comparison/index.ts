@@ -4,7 +4,8 @@ import {
   type GitComparisonSource,
   type GitReadComparisonResult,
 } from "@ryco/contracts";
-import { Option, Schema } from "effect";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 import type { KVService } from "../../platform/index.ts";
 
 export function comparisonStorageKey(environmentId: string, repositoryPath: string): string {

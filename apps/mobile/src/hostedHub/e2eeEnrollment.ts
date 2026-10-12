@@ -1,4 +1,4 @@
-import type { NativeE2eeEnrollmentCoordinator } from "@ryco/client-runtime/authorization";
+import type { NativeE2eeEnrollmentCoordinator } from "@ryco/client-runtime/authorization/e2ee";
 
 let coordinator: NativeE2eeEnrollmentCoordinator | null = null;
 let unsubscribeCoordinator: (() => void) | undefined;

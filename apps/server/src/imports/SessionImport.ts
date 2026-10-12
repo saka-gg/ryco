@@ -25,7 +25,7 @@ import {
 } from "@ryco/contracts";
 import { Context, Effect, Layer, Option, Schema, Semaphore, FileSystem, Path } from "effect";
 import * as SqlClient from "effect/sql/SqlClient";
-import * as CodexClient from "effect-codex-app-server/client";
+import type * as CodexClient from "effect-codex-app-server/client";
 import { ChildProcessSpawner } from "effect/process";
 import { ServerSettingsService } from "../serverSettings.ts";
 import { deriveProviderInstanceConfigMap } from "../provider/Layers/ProviderInstanceRegistryHydration.ts";

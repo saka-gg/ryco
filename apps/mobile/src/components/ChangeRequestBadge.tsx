@@ -1,9 +1,4 @@
-import {
-  IconGitMerge,
-  IconGitPullRequest,
-  IconCircleDot,
-  IconTicket,
-} from "@tabler/icons-react-native";
+import { IconGitMerge, IconGitPullRequest, IconCircleDot, IconTicket } from "./icons";
 import { useThemeColor } from "../lib/useThemeColor";
 import { View } from "react-native";
 

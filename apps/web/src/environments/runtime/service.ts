@@ -10,6 +10,7 @@ import {
   type MessageId,
   type OrchestrationShellSnapshot,
   type OrchestrationShellStreamEvent,
+  type OrchestrationShellThreadPrioritiesItem,
   type ServerConfig,
   type ServerSettingsPatch,
   type TerminalEvent,
@@ -22,6 +23,7 @@ import {
   getKnownEnvironmentWsBaseUrl,
 } from "@ryco/client-runtime/knownEnvironment";
 import {
+  clearProjectIconCache,
   checkSavedEnvironmentSession,
   createEnvironmentConnectionSupervisor,
   createSavedSessionRenewal,
@@ -29,6 +31,8 @@ import {
   isSavedEnvironmentAwaitingRepair,
   isSavedEnvironmentCredentialRejection,
   type ReleaseThreadDetailSubscription,
+  type ThreadDetailSubscriptionRetainOptions,
+  awaitSavedEnvironmentConfig,
   SAVED_ENVIRONMENT_INITIAL_CONFIG_TIMEOUT_MS,
   SAVED_ENVIRONMENT_REQUIRES_AUTH_MESSAGE,
   SavedEnvironmentConnectionCancelledError,
@@ -45,7 +49,7 @@ export {
 import { markPromotedDraftThreadByRef, useComposerDraftStore } from "~/composerDraftStore";
 import { ensureLocalApi } from "~/localApi";
 import { deriveOrchestrationBatchEffects } from "~/orchestrationEventEffects";
-import { invalidateProjectSearchEntries } from "~/rpc/projectAtoms";
+import { createProjectSearchInvalidationQueue } from "~/rpc/projectSearchInvalidation";
 import { invalidateAllCheckpointDiffs } from "~/rpc/providerAtoms";
 import { getPrimaryKnownEnvironment } from "../primary";
 import { issuePrimaryWebSocketToken } from "../primary/auth";
@@ -74,9 +78,10 @@ import {
 } from "./catalog";
 import { createEnvironmentConnection, type EnvironmentConnection } from "./connection";
 import { useStore, selectSidebarThreadSummaryByRef, selectThreadByRef } from "~/store";
+import { createEnvironmentEventBatcher } from "@ryco/client-runtime/state/threads";
 import { useTerminalStateStore } from "~/terminalStateStore";
 import type { WsProtocolCloseContext } from "@ryco/client-runtime/rpc";
-import { createDeviceRpcClient } from "@ryco/client-runtime/rpc";
+import { createDeviceRpcClient, WS_URL_PROVIDER_TIMEOUT_MS } from "@ryco/client-runtime/rpc";
 import {
   environmentQueryRefresh,
   isHostedEnvironmentQueryRefreshReady,
@@ -85,7 +90,11 @@ import { applySettingsUpdated, getServerConfig } from "../../rpc/serverState";
 import { DeviceWsTransport, HostedWsTransport, WsTransport } from "../../rpc/wsTransport";
 import { createWsRpcClient, type WsRpcClient } from "../../rpc/wsRpcClient";
 import { appendVersionMismatchHint, resolveServerConfigVersionMismatch } from "../../versionSkew";
-import { markStartupPhase, measureStartupPhase } from "~/perf/startupInstrumentation";
+import {
+  createPrimaryShellFrameProbe,
+  markStartupPhase,
+  measureStartupPhase,
+} from "~/perf/startupInstrumentation";
 import { isHostedHubMode } from "~/env";
 import {
   hostedHubController,
@@ -100,7 +109,7 @@ import {
   hostedDispatchLineage,
 } from "~/hostedHub/transport";
 import { createWebEnvironmentStateSink } from "./environmentStateSink";
-import { webSocket } from "../../platform";
+import { webFrameScheduler, webSocket } from "../../platform";
 import { DesktopWorkspaceIpcSocketFactory } from "../../platform/desktopWorkspaceSocket";
 
 function isSavedEnvironmentConnectionCancelledError(
@@ -110,6 +119,8 @@ function isSavedEnvironmentConnectionCancelledError(
 }
 
 let needsProviderInvalidation = false;
+// `@` search caches are invalidated per changed checkout, not globally.
+const projectSearchInvalidations = createProjectSearchInvalidationQueue();
 const environmentStateSink = createWebEnvironmentStateSink({
   markProviderInvalidationNeeded: () => {
     needsProviderInvalidation = true;
@@ -118,11 +129,10 @@ const environmentStateSink = createWebEnvironmentStateSink({
   flushProviderInvalidation: () => {
     needsProviderInvalidation = false;
     invalidateAllCheckpointDiffs();
-    invalidateProjectSearchEntries();
+    projectSearchInvalidations.flush();
   },
   supervisor: getEnvironmentSupervisor,
 });
-const INITIAL_SERVER_CONFIG_SNAPSHOT_WAIT_MS = 150;
 const NOOP = () => undefined;
 const SSH_HTTP_STATUS_RE = /^\[ssh_http:(\d+)\]\s/u;
 let lastBrowserHiddenAt: number | null = null;
@@ -157,6 +167,7 @@ function getEnvironmentSupervisor() {
       ),
     resetProviderInvalidation: () => {
       needsProviderInvalidation = false;
+      projectSearchInvalidations.reset();
     },
     createPrimaryConnection: () =>
       getPrimaryKnownEnvironment()?.environmentId ? createPrimaryEnvironmentConnection() : null,
@@ -164,8 +175,8 @@ function getEnvironmentSupervisor() {
     hasSavedEnvironmentRegistryHydrated,
     waitForSavedEnvironmentRegistryHydration,
     subscribeSavedEnvironmentRegistry: useSavedEnvironmentRegistryStore.subscribe,
-    connectSavedEnvironment: (record, isCancelled) =>
-      connectSavedEnvironment(record, undefined, isCancelled),
+    connectSavedEnvironment: (record, isCancelled, signal) =>
+      connectSavedEnvironment(record, undefined, isCancelled, signal),
     isSavedEnvironmentAwaitingRepair: (environmentId) =>
       isSavedEnvironmentAwaitingRepair(
         useSavedEnvironmentRuntimeStore.getState().byId[environmentId],
@@ -195,9 +206,15 @@ function getEnvironmentSupervisor() {
     applyThreadDetailEvent: (environmentId, event) =>
       applyEnvironmentThreadDetailEvent(event as OrchestrationEvent, environmentId),
     stateSink: environmentStateSink,
+    scheduleShellFrame: scheduleStreamBatchFrame,
     onShellSnapshotReceived: (environmentId) => {
       if (environmentId === getPrimaryKnownEnvironment()?.environmentId) {
         markStartupPhase("primary-shell-snapshot-received");
+        measureStartupPhase(
+          "primary-shell-decode",
+          "primary-shell-frame-received",
+          "primary-shell-snapshot-received",
+        );
       }
     },
     onShellSnapshotCurrent: () => undefined,
@@ -220,15 +237,25 @@ function getEnvironmentSupervisor() {
 
 function createDeferredPromise<T>() {
   let resolve: ((value: T) => void) | null = null;
-  const promise = new Promise<T>((nextResolve) => {
+  let reject: ((error: unknown) => void) | null = null;
+  const promise = new Promise<T>((nextResolve, nextReject) => {
     resolve = nextResolve;
+    reject = nextReject;
   });
+  // Rejected before anyone waits (a credential rejected mid-connect): observed.
+  promise.catch(NOOP);
 
   return {
     promise,
     resolve: (value: T) => {
       resolve?.(value);
       resolve = null;
+      reject = null;
+    },
+    reject: (error: unknown) => {
+      reject?.(error);
+      resolve = null;
+      reject = null;
     },
   };
 }
@@ -253,25 +280,6 @@ async function waitForPrimaryShellSnapshotApplied(timeoutMs: number): Promise<vo
       globalThis.setTimeout(resolve, timeoutMs);
     }),
   ]);
-}
-
-async function waitForConfigSnapshot(
-  promise: Promise<ServerConfig>,
-  timeoutMs: number,
-): Promise<ServerConfig | null> {
-  return await new Promise<ServerConfig | null>((resolve) => {
-    const timeoutId = globalThis.setTimeout(() => resolve(null), timeoutMs);
-    promise.then(
-      (config) => {
-        clearTimeout(timeoutId);
-        resolve(config);
-      },
-      () => {
-        clearTimeout(timeoutId);
-        resolve(null);
-      },
-    );
-  });
 }
 
 function isNonIdleThreadDetailSubscription(input: {
@@ -329,8 +337,13 @@ function disposeThreadDetailSubscriptionsForEnvironment(environmentId: Environme
 export function retainThreadDetailSubscription(
   environmentId: EnvironmentId,
   threadId: ThreadId,
+  options?: ThreadDetailSubscriptionRetainOptions,
 ): ReleaseThreadDetailSubscription {
-  return getEnvironmentSupervisor().retainThreadDetailSubscription(environmentId, threadId);
+  return getEnvironmentSupervisor().retainThreadDetailSubscription(
+    environmentId,
+    threadId,
+    options,
+  );
 }
 
 export function loadOlderThreadHistory(input: {
@@ -722,6 +735,7 @@ function applyRecoveredEventBatch(
   );
 
   if (batchEffects.needsProviderInvalidation) {
+    projectSearchInvalidations.noteEvents(environmentId, events);
     environmentStateSink.markProviderInvalidationNeeded();
   }
 
@@ -761,11 +775,40 @@ function applyRecoveredEventBatch(
   getEnvironmentSupervisor().reconcileThreadDetailSubscriptionEvictionForEnvironment(environmentId);
 }
 
+/**
+ * Schedules a stream batch's commit (thread-detail events, shell items). A
+ * hidden document paints nothing and throttles frames and timers, so it only
+ * coalesces the current task's burst instead of waiting for a frame.
+ */
+function scheduleStreamBatchFrame(callback: () => void): void {
+  if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+    queueMicrotask(callback);
+    return;
+  }
+  webFrameScheduler.scheduleFrame(callback);
+}
+
+// Thread-detail events arrive one WebSocket message each (a streaming delta
+// every ~32 ms per active thread, bursts on replay). Batch them per animation
+// frame so N messages become one store commit and one round of derived UI
+// sync. The batcher is a store mutation barrier: any other store write applies
+// the buffered events first, so ordering against snapshots, shell events and
+// removals is unchanged.
+const threadDetailEventBatcher = createEnvironmentEventBatcher<OrchestrationEvent>({
+  apply: (environmentId, events) => applyRecoveredEventBatch(events, environmentId),
+  scheduleFrame: scheduleStreamBatchFrame,
+});
+
 export function applyEnvironmentThreadDetailEvent(
   event: OrchestrationEvent,
   environmentId: EnvironmentId,
 ) {
-  applyRecoveredEventBatch([event], environmentId);
+  threadDetailEventBatcher.enqueue(environmentId, event);
+}
+
+/** Applies buffered thread-detail events now (tests, teardown). */
+export function flushEnvironmentThreadDetailEvents(): void {
+  threadDetailEventBatcher.flush();
 }
 
 function createEnvironmentConnectionHandlers(
@@ -835,6 +878,13 @@ function createEnvironmentConnectionHandlers(
       if (!acceptsEvent()) return;
       getEnvironmentSupervisor().applyShellEvent(event, environmentId);
     },
+    applyThreadPriorities: (
+      item: OrchestrationShellThreadPrioritiesItem,
+      environmentId: EnvironmentId,
+    ) => {
+      if (!acceptsEvent()) return;
+      getEnvironmentSupervisor().applyThreadPriorities(item, environmentId);
+    },
     syncShellSnapshot: (snapshot: OrchestrationShellSnapshot, environmentId: EnvironmentId) => {
       if (!acceptsEvent()) return;
       getEnvironmentSupervisor().syncShellSnapshot(snapshot, environmentId, {
@@ -903,15 +953,21 @@ function createPrimaryEnvironmentClient(
     );
   }
 
-  const authenticatedSocketUrl = async (pathname: "/ws" | "/ws/device" | "/ws/device-frames") => {
-    const issued = await issuePrimaryWebSocketToken();
+  const authenticatedSocketUrl = async (
+    pathname: "/ws" | "/ws/device" | "/ws/device-frames",
+    signal?: AbortSignal,
+  ) => {
+    const issued = await issuePrimaryWebSocketToken(signal);
     const url = new URL(wsBaseUrl, window.location.origin);
     url.pathname = pathname;
     url.searchParams.set("wsToken", issued.token);
     return url.toString();
   };
+  const shellFrameProbe = createPrimaryShellFrameProbe(
+    (url, protocols) => webSocket.webSocketConstructor(url, protocols) as WebSocket,
+  );
   return createWsRpcClient(
-    new WsTransport(() => authenticatedSocketUrl("/ws"), {
+    new WsTransport((signal) => authenticatedSocketUrl("/ws", signal), {
       getConnectionLabel: () => connectionLabel,
       getEnvironmentId: () => knownEnvironment?.environmentId ?? null,
       getVersionMismatchHint: () =>
@@ -919,10 +975,14 @@ function createPrimaryEnvironmentClient(
       onOpen: () => {
         markStartupPhase("primary-ws-open");
       },
+      urlProviderTimeoutMs: WS_URL_PROVIDER_TIMEOUT_MS,
+      onRequestStart: shellFrameProbe.onRequestStart,
+      webSocketConstructor: shellFrameProbe.webSocketConstructor,
     }),
     createDeviceRpcClient(
-      new DeviceWsTransport(() => authenticatedSocketUrl("/ws/device"), {
+      new DeviceWsTransport((signal) => authenticatedSocketUrl("/ws/device", signal), {
         getConnectionLabel: () => connectionLabel,
+        urlProviderTimeoutMs: WS_URL_PROVIDER_TIMEOUT_MS,
       }),
       {
         openFrameSource: (udid, handlers) =>
@@ -941,6 +1001,7 @@ async function resolveSavedEnvironmentSocketUrl(
   environmentId: EnvironmentId,
   bearerToken: string,
   pathname: "/ws" | "/ws/device" | "/ws/device-frames",
+  signal?: AbortSignal,
 ): Promise<string> {
   const saved = getSavedEnvironmentRecord(environmentId);
   if (!saved) throw new Error(`Saved environment ${environmentId} not found.`);
@@ -961,6 +1022,7 @@ async function resolveSavedEnvironmentSocketUrl(
         wsBaseUrl: record.wsBaseUrl,
         httpBaseUrl: record.httpBaseUrl,
         bearerToken,
+        ...(signal === undefined ? {} : { signal }),
       });
   const url = new URL(rawUrl, window.location.origin);
   url.pathname = pathname;
@@ -1014,15 +1076,26 @@ function createSavedEnvironmentClient(
   },
 ): WsRpcClient {
   useSavedEnvironmentRuntimeStore.getState().ensure(environmentId);
-  const socketUrl = async (pathname: "/ws" | "/ws/device" | "/ws/device-frames") =>
+  const socketUrl = async (
+    pathname: "/ws" | "/ws/device" | "/ws/device-frames",
+    signal?: AbortSignal,
+  ) =>
     resolveSavedEnvironmentSocketUrl(
       environmentId,
       await savedSessionRenewal.readBearerToken(environmentId),
       pathname,
+      signal,
     );
+  // A direct pairing's URL is one token request, bounded so a hung one cannot
+  // stall reconnecting. An SSH environment's may rebuild its tunnel and
+  // relaunch the remote server, which takes as long as it takes.
+  const urlProviderDeadline = getSavedEnvironmentRecord(environmentId)?.desktopSsh
+    ? {}
+    : { urlProviderTimeoutMs: WS_URL_PROVIDER_TIMEOUT_MS };
 
   return createWsRpcClient(
-    new WsTransport(() => socketUrl("/ws"), {
+    new WsTransport((signal) => socketUrl("/ws", signal), {
+      ...urlProviderDeadline,
       getConnectionLabel: () => getSavedEnvironmentRecord(environmentId)?.label ?? null,
       getEnvironmentId: () => environmentId,
       // A remote machine can be asleep or offline for hours; keep trying on a
@@ -1073,7 +1146,8 @@ function createSavedEnvironmentClient(
       },
     }),
     createDeviceRpcClient(
-      new DeviceWsTransport(() => socketUrl("/ws/device"), {
+      new DeviceWsTransport((signal) => socketUrl("/ws/device", signal), {
+        ...urlProviderDeadline,
         getConnectionLabel: () => getSavedEnvironmentRecord(environmentId)?.label ?? null,
         isTerminalUrlError: isSavedEnvironmentCredentialRejection,
       }),
@@ -1099,6 +1173,7 @@ function createSavedEnvironmentClient(
 async function readSavedEnvironmentSession(
   record: SavedEnvironmentRecord,
   bearerToken: string,
+  signal?: AbortSignal,
 ): Promise<AuthSessionState | null> {
   try {
     const check = await checkSavedEnvironmentSession({
@@ -1108,6 +1183,7 @@ async function readSavedEnvironmentSession(
           : fetchRemoteSessionState({
               httpBaseUrl: record.httpBaseUrl,
               bearerToken,
+              ...(signal === undefined ? {} : { signal }),
             }),
     });
     return check.status === "authenticated" ? check.session : null;
@@ -1124,26 +1200,42 @@ async function refreshSavedEnvironmentMetadata(
   environmentId: EnvironmentId,
   bearerToken: string,
   client: WsRpcClient,
-  roleHint?: AuthSessionRole | null,
-  configHint?: ServerConfig | null,
-  sessionHint?: AuthSessionState,
+  options: {
+    readonly roleHint?: AuthSessionRole | null;
+    /** A config already in hand; nothing is read. */
+    readonly config?: ServerConfig | null;
+    /**
+     * The config subscription's snapshot. It is used when it arrives in time;
+     * otherwise the config is read once. Rejects on credential rejection.
+     */
+    readonly configSnapshot?: Promise<ServerConfig>;
+    readonly session?: AuthSessionState;
+  } = {},
 ): Promise<void> {
   const record = getSavedEnvironmentRecord(environmentId);
   if (!record) {
     throw new Error(`Saved environment ${environmentId} not found.`);
   }
 
-  const session = sessionHint ?? (await readSavedEnvironmentSession(record, bearerToken));
+  // The config wait runs alongside the session check; a rejected session still
+  // decides the outcome first.
+  const readConfig = () => client.server.getConfig();
+  const configPromise: Promise<ServerConfig> = options.config
+    ? Promise.resolve(options.config)
+    : options.configSnapshot
+      ? awaitSavedEnvironmentConfig({ snapshot: options.configSnapshot, readConfig })
+      : withSavedEnvironmentTimeout(
+          readConfig(),
+          SAVED_ENVIRONMENT_INITIAL_CONFIG_TIMEOUT_MS,
+          "The environment answered but did not finish connecting in time.",
+        );
+  configPromise.catch(NOOP);
+  const session = options.session ?? (await readSavedEnvironmentSession(record, bearerToken));
   if (session === null) {
     throw new SavedEnvironmentCredentialError(SAVED_ENVIRONMENT_REQUIRES_AUTH_MESSAGE);
   }
-  const serverConfig =
-    configHint ??
-    (await withSavedEnvironmentTimeout(
-      client.server.getConfig(),
-      SAVED_ENVIRONMENT_INITIAL_CONFIG_TIMEOUT_MS,
-      "The environment answered but did not finish connecting in time.",
-    ));
+  const serverConfig = await configPromise;
+  const roleHint = options.roleHint;
 
   useSavedEnvironmentRuntimeStore.getState().patch(record.environmentId, {
     authState: "authenticated",
@@ -1278,8 +1370,9 @@ async function ensureSavedEnvironmentConnection(
     readonly serverConfig?: ServerConfig | null;
   },
 ): Promise<EnvironmentConnection> {
-  return await getEnvironmentSupervisor().ensureSavedEnvironmentConnection(record, (isCancelled) =>
-    connectSavedEnvironment(record, options, isCancelled),
+  return await getEnvironmentSupervisor().ensureSavedEnvironmentConnection(
+    record,
+    (isCancelled, signal) => connectSavedEnvironment(record, options, isCancelled, signal),
   );
 }
 
@@ -1292,6 +1385,8 @@ async function connectSavedEnvironment(
     readonly serverConfig?: ServerConfig | null;
   },
   isCancelled: () => boolean = () => false,
+  /** Aborted when the supervisor gives the attempt up; abandons its requests. */
+  signal?: AbortSignal,
 ): Promise<EnvironmentConnection> {
   let activeRecord = record;
   let roleHint = options?.role ?? null;
@@ -1348,7 +1443,7 @@ async function connectSavedEnvironment(
     // no longer accepts never requests a ws-token or opens a socket.
     let session: AuthSessionState | null;
     try {
-      session = await readSavedEnvironmentSession(activeRecord, presentedBearerToken);
+      session = await readSavedEnvironmentSession(activeRecord, presentedBearerToken, signal);
     } catch (error) {
       if (attemptSpeaksForEnvironment()) setRuntimeError(activeRecord.environmentId, error);
       throw error;
@@ -1377,17 +1472,30 @@ async function connectSavedEnvironment(
           session,
           bearerToken: presentedBearerToken,
           fetchSessionState: (token) =>
-            fetchRemoteSessionState({ httpBaseUrl: renewalRecord.httpBaseUrl, bearerToken: token }),
+            fetchRemoteSessionState({
+              httpBaseUrl: renewalRecord.httpBaseUrl,
+              bearerToken: token,
+              ...(signal === undefined ? {} : { signal }),
+            }),
           rotate: (token) =>
             rotateRemoteBearerSession({
               httpBaseUrl: renewalRecord.httpBaseUrl,
               bearerToken: token,
+              ...(signal === undefined ? {} : { signal }),
             }),
         });
     const activeBearerToken = renewal.bearerToken;
 
     let credentialRejected = false;
     let registered = false;
+    // The config subscription's first item is a full snapshot; the connect
+    // and each reconnect use it and read the config themselves only when it is
+    // slow to arrive.
+    const initialConfigSnapshot = createDeferredPromise<ServerConfig>();
+    // The socket stopped for good: nothing will deliver a config any more.
+    const credentialRejection = createDeferredPromise<never>();
+    const configSnapshotUnlessRejected = (snapshot: Promise<ServerConfig>) =>
+      Promise.race([snapshot, credentialRejection.promise]);
     // Only the environment's live attempt, or the connection it registered,
     // reports the environment's state. An attempt a disconnect or a new pairing
     // cancelled, and a connection something else has since replaced, say
@@ -1403,6 +1511,9 @@ async function connectSavedEnvironment(
         speaksForEnvironment,
         onCredentialRejected: () => {
           credentialRejected = true;
+          credentialRejection.reject(
+            new SavedEnvironmentCredentialError(SAVED_ENVIRONMENT_REQUIRES_AUTH_MESSAGE),
+          );
           if (!activeRecord.desktopSsh && speaksForEnvironment()) {
             markSavedEnvironmentCredentialRejected(activeRecord.environmentId, connection);
           }
@@ -1411,7 +1522,6 @@ async function connectSavedEnvironment(
     // The pairing's renewal, kept while this connection is registered, stops
     // with it.
     let stopRenewal: () => void = NOOP;
-    const initialConfigSnapshot = createDeferredPromise<ServerConfig>();
     const knownEnvironment = createKnownEnvironment({
       id: activeRecord.environmentId,
       label: activeRecord.label,
@@ -1428,12 +1538,15 @@ async function connectSavedEnvironment(
         environmentId: activeRecord.environmentId,
       },
       client,
-      refreshMetadata: async () => {
+      refreshMetadata: async ({ configSnapshot }) => {
         try {
+          // The replacement config subscription sends a full snapshot; it
+          // stands in for a separate config read unless it is slow.
           await refreshSavedEnvironmentMetadata(
             activeRecord.environmentId,
             await savedSessionRenewal.readBearerToken(activeRecord.environmentId),
             client,
+            { configSnapshot: configSnapshotUnlessRejected(configSnapshot) },
           );
         } catch (error) {
           if (
@@ -1466,19 +1579,17 @@ async function connectSavedEnvironment(
 
     try {
       try {
-        const initialServerConfig =
-          options?.serverConfig ??
-          (await waitForConfigSnapshot(
-            initialConfigSnapshot.promise,
-            INITIAL_SERVER_CONFIG_SNAPSHOT_WAIT_MS,
-          ));
         await refreshSavedEnvironmentMetadata(
           activeRecord.environmentId,
           activeBearerToken,
           client,
-          roleHint,
-          initialServerConfig,
-          session,
+          {
+            roleHint,
+            session,
+            ...(options?.serverConfig
+              ? { config: options.serverConfig }
+              : { configSnapshot: configSnapshotUnlessRejected(initialConfigSnapshot.promise) }),
+          },
         );
       } catch (error) {
         const isAuthError =
@@ -1695,6 +1806,8 @@ export async function removeSavedEnvironment(environmentId: EnvironmentId): Prom
   useSavedEnvironmentRegistryStore.getState().remove(environmentId);
   useSavedEnvironmentRuntimeStore.getState().clear(environmentId);
   useStore.getState().removeEnvironmentState(environmentId);
+  // Project artwork is cached per node, past its connections: forget it too.
+  clearProjectIconCache(environmentId);
   await removeSavedEnvironmentBearerToken(environmentId);
 }
 

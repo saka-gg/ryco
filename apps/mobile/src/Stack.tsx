@@ -16,31 +16,33 @@ import { useResolveClassNames } from "uniwind";
 import { AppText as Text } from "./components/AppText";
 import { NavigationHeaderButton } from "./components/NavigationHeaderButton";
 import { HardwareKeyboardCommandProvider } from "./features/keyboard/HardwareKeyboardCommandProvider";
-import { ConnectionsRouteScreen } from "./features/connection/ConnectionsRouteScreen";
-import { ConnectionsNewRouteScreen } from "./features/connection/ConnectionsNewRouteScreen";
-import { E2eeNodeSecurityRouteScreen } from "./features/e2ee/E2eeNodeSecurityRouteScreen";
-import { E2eeNodeVerificationRouteScreen } from "./features/e2ee/E2eeNodeVerificationRouteScreen";
 import { FileWorkspaceLayout } from "./features/files/FileWorkspaceLayout";
-import { ThreadFileRouteScreen } from "./features/files/ThreadFileRouteScreen";
-import { ThreadFilesRouteScreen } from "./features/files/ThreadFilesRouteScreen";
 import { HomeRouteScreen } from "./features/home/HomeRouteScreen";
-import { HostedAccountRouteScreen } from "./features/hostedHub/HostedAccountRouteScreen";
-import { NativeIdentityScreen } from "./features/identity/NativeIdentityScreen";
-import { NewTaskRouteScreen } from "./features/newTask/NewTaskRouteScreen";
-import { AddProjectRouteScreen } from "./features/projects/AddProjectRouteScreen";
-import { ProjectRouteScreen } from "./features/projects/ProjectRouteScreen";
-import { ReviewCommentComposerSheet } from "./features/review/ReviewCommentComposerSheet";
-import { ReviewSheet } from "./features/review/ReviewSheet";
-import { SourceControlRouteScreen } from "./features/sourceControl/SourceControlRouteScreen";
-import { SettingsAppearanceRouteScreen } from "./features/settings/SettingsAppearanceRouteScreen";
-import { SettingsAboutRouteScreen } from "./features/settings/SettingsAboutRouteScreen";
-import { SettingsClientStorageRouteScreen } from "./features/settings/SettingsClientStorageRouteScreen";
-import { SettingsHubRouteScreen } from "./features/settings/SettingsHubRouteScreen";
-import { SettingsStatisticsRouteScreen } from "./features/settings/SettingsStatisticsRouteScreen";
-import { SettingsInboxRouteScreen } from "./features/settings/SettingsInboxRouteScreen";
-import { SettingsRouteScreen } from "./features/settings/SettingsRouteScreen";
-import { SettingsWorkspaceRouteScreen } from "./features/settings/SettingsWorkspaceRouteScreen";
-import { ThreadRouteScreen } from "./features/threads/ThreadRouteScreen";
+import {
+  AddProjectRouteScreen,
+  ConnectionsNewRouteScreen,
+  ConnectionsRouteScreen,
+  E2eeNodeSecurityRouteScreen,
+  E2eeNodeVerificationRouteScreen,
+  HostedAccountRouteScreen,
+  NativeIdentityScreen,
+  NewTaskRouteScreen,
+  ProjectRouteScreen,
+  ReviewCommentComposerSheet,
+  ReviewSheet,
+  SettingsAboutRouteScreen,
+  SettingsAppearanceRouteScreen,
+  SettingsClientStorageRouteScreen,
+  SettingsHubRouteScreen,
+  SettingsInboxRouteScreen,
+  SettingsRouteScreen,
+  SettingsStatisticsRouteScreen,
+  SettingsWorkspaceRouteScreen,
+  SourceControlRouteScreen,
+  ThreadFileRouteScreen,
+  ThreadFilesRouteScreen,
+  ThreadRouteScreen,
+} from "./navigation/lazyRouteScreens";
 import {
   MVP_ROOT_ROUTES,
   MVP_SETTINGS_SHEET_ROUTES,

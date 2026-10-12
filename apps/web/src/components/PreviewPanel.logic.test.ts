@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  decodeBase64Bytes,
   detectPreviewFileKind,
   filterPreviewProjectEntries,
   inferPreviewLanguage,
-  PREVIEW_FILE_SIZE_LIMIT_BYTES,
-  resolvePreviewSizeGuard,
+  isInertRasterImageMimeType,
+  previewSvgDataUrl,
+  resolvePreviewImageSource,
 } from "./PreviewPanel.logic";
 
 describe("detectPreviewFileKind", () => {
@@ -54,23 +56,48 @@ describe("inferPreviewLanguage", () => {
   });
 });
 
-describe("resolvePreviewSizeGuard", () => {
-  it("allows fetching files at or below the preview limit", () => {
-    expect(resolvePreviewSizeGuard(PREVIEW_FILE_SIZE_LIMIT_BYTES)).toEqual({
-      state: "within-limit",
-      shouldFetch: true,
-      sizeBytes: PREVIEW_FILE_SIZE_LIMIT_BYTES,
-      limitBytes: PREVIEW_FILE_SIZE_LIMIT_BYTES,
-    });
+describe("resolvePreviewImageSource", () => {
+  it("reads raster images through the binary read and SVG as text", () => {
+    for (const filePath of ["assets/logo.png", "a/photo.JPG", "b/anim.gif", "c/card.webp"]) {
+      expect(resolvePreviewImageSource(filePath)).toBe("raster");
+    }
+    expect(resolvePreviewImageSource("assets/icon.svg")).toBe("svg");
   });
 
-  it("blocks fetching and exposes warning state for files above the preview limit", () => {
-    expect(resolvePreviewSizeGuard(PREVIEW_FILE_SIZE_LIMIT_BYTES + 1)).toEqual({
-      state: "too-large",
-      shouldFetch: false,
-      sizeBytes: PREVIEW_FILE_SIZE_LIMIT_BYTES + 1,
-      limitBytes: PREVIEW_FILE_SIZE_LIMIT_BYTES,
-    });
+  it("returns null for non-image files", () => {
+    expect(resolvePreviewImageSource("src/app.ts")).toBeNull();
+    expect(resolvePreviewImageSource("LICENSE")).toBeNull();
+  });
+});
+
+describe("decodeBase64Bytes", () => {
+  it("decodes base64 into the original bytes", () => {
+    expect([...decodeBase64Bytes("AAEC/w==")]).toEqual([0, 1, 2, 255]);
+    expect(decodeBase64Bytes("").byteLength).toBe(0);
+  });
+});
+
+describe("isInertRasterImageMimeType", () => {
+  it("accepts the raster types the binary read reports", () => {
+    for (const mimeType of ["image/png", "image/jpeg", "image/gif", "image/webp", "IMAGE/AVIF"]) {
+      expect(isInertRasterImageMimeType(mimeType)).toBe(true);
+    }
+  });
+
+  it("refuses types that could run script from a same-origin blob URL", () => {
+    for (const mimeType of ["image/svg+xml", "image/svg+xml; charset=utf-8", "text/html", ""]) {
+      expect(isInertRasterImageMimeType(mimeType)).toBe(false);
+    }
+  });
+});
+
+describe("previewSvgDataUrl", () => {
+  it("encodes the markup into an opaque-origin data URL", () => {
+    const url = previewSvgDataUrl('<svg xmlns="http://www.w3.org/2000/svg"><text>#&</text></svg>');
+    expect(url.startsWith("data:image/svg+xml;charset=utf-8,")).toBe(true);
+    expect(decodeURIComponent(url.slice(url.indexOf(",") + 1))).toBe(
+      '<svg xmlns="http://www.w3.org/2000/svg"><text>#&</text></svg>',
+    );
   });
 });
 

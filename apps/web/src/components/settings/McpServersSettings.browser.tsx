@@ -135,6 +135,17 @@ describe("McpServersSettings provider capabilities", () => {
     await expect.element(page.getByText(/Claude doesn.t report live health/)).toBeVisible();
   });
 
+  it("loads workspaces and the selected workspace's servers once on open", async () => {
+    render(<McpServersSettings />);
+
+    await expect.element(page.getByRole("button", { name: "Add server" })).toBeVisible();
+    // Give a selection-driven second load the chance to happen, then check it did not.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(harness.listWorkspaces).toHaveBeenCalledTimes(1);
+    expect(harness.listServers).toHaveBeenCalledTimes(1);
+    expect(harness.listServers).toHaveBeenCalledWith({ workspaceId, detail: "full" });
+  });
+
   it("keeps stored secret values out of the form and sends an explicit clear mutation", async () => {
     render(<McpServersSettings />);
 

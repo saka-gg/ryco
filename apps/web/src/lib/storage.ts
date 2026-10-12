@@ -7,6 +7,11 @@ export interface StateStorage<R = unknown> {
 }
 
 export interface DebouncedStorage<R = unknown> extends StateStorage<R> {
+  /**
+   * Like `setItem`, but the value is serialized only when the debounced write
+   * actually runs: a burst of writes (one per keystroke) serializes once.
+   */
+  setItemDeferred: (name: string, serialize: () => string) => void;
   flush: () => void;
 }
 
@@ -45,8 +50,8 @@ export function createDebouncedStorage(
 ): DebouncedStorage {
   const resolvedStorage = resolveStorage(baseStorage);
   const debouncedSetItem = new Debouncer(
-    (name: string, value: string) => {
-      resolvedStorage.setItem(name, value);
+    (name: string, value: string | (() => string)) => {
+      resolvedStorage.setItem(name, typeof value === "function" ? value() : value);
     },
     { wait: debounceMs },
   );
@@ -55,6 +60,9 @@ export function createDebouncedStorage(
     getItem: (name) => resolvedStorage.getItem(name),
     setItem: (name, value) => {
       debouncedSetItem.maybeExecute(name, value);
+    },
+    setItemDeferred: (name, serialize) => {
+      debouncedSetItem.maybeExecute(name, serialize);
     },
     removeItem: (name) => {
       debouncedSetItem.cancel();

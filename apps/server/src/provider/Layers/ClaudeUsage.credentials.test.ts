@@ -99,25 +99,23 @@ describe("Claude usage credential isolation", () => {
     expect(mocks.execFile).not.toHaveBeenCalled();
     expect(mocks.fetch).not.toHaveBeenCalled();
   });
-  it("persists a separate-home refresh only to that home's file", async () => {
+  it("never refreshes an expired token or writes either credential store", async () => {
     mocks.readFile.mockResolvedValue(credentials("mock-separate", true));
-    mocks.fetch.mockResolvedValueOnce(
-      new Response(JSON.stringify({ access_token: "mock-renewed", expires_in: 3600 })),
-    );
-    await probe("/mock/separate");
-    expect(mocks.execFile).not.toHaveBeenCalled();
-    expect(mocks.writeFile.mock.calls[0]?.[0]).toBe("/mock/separate/.claude/.credentials.json");
-    expect(mocks.fetch.mock.calls[1]?.[1].headers.Authorization).toBe("Bearer mock-renewed");
-  });
-  it("does not copy a refreshed Keychain account into a file", async () => {
+    expect(await probe("/mock/separate")).toBeUndefined();
     mocks.execFile.mockImplementation((_file, args, _options, callback) =>
       callback(null, args[0] === "find-generic-password" ? credentials("mock-default", true) : ""),
     );
-    mocks.fetch.mockResolvedValueOnce(
-      new Response(JSON.stringify({ access_token: "mock-renewed", expires_in: 3600 })),
-    );
-    await probe("");
+    expect(await probe("")).toBeUndefined();
+    expect(mocks.fetch).not.toHaveBeenCalled();
     expect(mocks.writeFile).not.toHaveBeenCalled();
-    expect(mocks.execFile).toHaveBeenCalledTimes(3);
+    // Only the Keychain read ran; nothing was deleted or added.
+    expect(mocks.execFile).toHaveBeenCalledTimes(1);
+    expect(mocks.execFile.mock.calls[0]?.[1]?.[0]).toBe("find-generic-password");
+  });
+  it("does not refresh and retry when the usage API rejects the token", async () => {
+    mocks.fetch.mockResolvedValue(new Response("", { status: 429 }));
+    expect(await probe("/mock/separate")).toBeUndefined();
+    expect(mocks.fetch).toHaveBeenCalledTimes(1);
+    expect(mocks.writeFile).not.toHaveBeenCalled();
   });
 });

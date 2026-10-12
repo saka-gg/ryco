@@ -2,11 +2,22 @@ import type { Duplex } from "node:stream";
 import { app, powerMonitor } from "electron";
 import {
   createTelemetryLineReader,
+  type DesktopBackendLifecycleFrame,
   type DesktopResourceTelemetrySnapshot,
+  parseDesktopBackendLifecycleFrame,
 } from "@ryco/shared/desktopResourceTelemetry";
 
-/** Attached to one backend generation; closed pipes remove all listeners. */
-export function attachDesktopResourceTelemetry(pipe: Duplex): () => void {
+/**
+ * Attached to one backend generation; closed pipes remove all listeners.
+ * Besides answering `sample` requests, the pipe carries the backend's lifecycle
+ * frames (readiness, startup phases, fatal errors). They are validated with the
+ * shared protocol parser the backend writes against and handed to `onFrame`;
+ * anything else is ignored.
+ */
+export function attachDesktopResourceTelemetry(
+  pipe: Duplex,
+  onFrame?: (frame: DesktopBackendLifecycleFrame) => void,
+): () => void {
   let suspended = false;
   let locked: boolean | null = null;
   let speedLimitPercent: number | null = null;
@@ -92,13 +103,12 @@ export function attachDesktopResourceTelemetry(pipe: Duplex): () => void {
     "data",
     createTelemetryLineReader(
       (value) => {
-        if (
-          typeof value !== "object" ||
-          value === null ||
-          !("type" in value) ||
-          value.type !== "sample"
-        )
+        if (typeof value !== "object" || value === null || !("type" in value)) return;
+        if (value.type !== "sample") {
+          const frame = parseDesktopBackendLifecycleFrame(value);
+          if (frame !== null) onFrame?.(frame);
           return;
+        }
         if (Date.now() - lastSampleAt < 500) return;
         lastSampleAt = Date.now();
         send(true);

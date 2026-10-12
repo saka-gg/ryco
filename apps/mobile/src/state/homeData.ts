@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import { useShallow } from "zustand/react/shallow";
 
 import {
@@ -16,16 +17,39 @@ import { usePreferences } from "./preferencesStore";
 export { buildHomeThreadGroups, resolveHomeGroupingMode } from "./homeGrouping";
 export type { HomeThreadGroup } from "./homeGrouping";
 
+function filterEligible<T extends { readonly environmentId: string }>(
+  values: ReadonlyArray<T>,
+  eligibleEnvironmentIds: ReadonlySet<string> | undefined,
+): ReadonlyArray<T> {
+  if (!eligibleEnvironmentIds) return values;
+  return values.filter((value) => eligibleEnvironmentIds.has(value.environmentId));
+}
+
+/**
+ * Home's cross-environment slices, narrowed to the eligible environments.
+ *
+ * Each filtered array keeps its identity until its own slice or the eligible
+ * set changes: Home's inbox and project models are memoized on these arrays,
+ * and fresh `.filter()` results on every render rebuilt both models on every
+ * scroll frame and store tick.
+ */
 export function useHomeWorkspaceData(eligibleEnvironmentIds?: ReadonlySet<string>) {
-  const projects = useStore(useShallow(selectProjectsAcrossEnvironments));
-  const worktrees = useStore(useShallow(selectSidebarWorktreesAcrossEnvironments));
-  const threads = useStore(useShallow(selectSidebarThreadsAcrossEnvironments));
-  if (!eligibleEnvironmentIds) return { projects, worktrees, threads } as const;
-  return {
-    projects: projects.filter((project) => eligibleEnvironmentIds.has(project.environmentId)),
-    worktrees: worktrees.filter((worktree) => eligibleEnvironmentIds.has(worktree.environmentId)),
-    threads: threads.filter((thread) => eligibleEnvironmentIds.has(thread.environmentId)),
-  } as const;
+  const allProjects = useStore(useShallow(selectProjectsAcrossEnvironments));
+  const allWorktrees = useStore(useShallow(selectSidebarWorktreesAcrossEnvironments));
+  const allThreads = useStore(useShallow(selectSidebarThreadsAcrossEnvironments));
+  const projects = useMemo(
+    () => filterEligible(allProjects, eligibleEnvironmentIds),
+    [allProjects, eligibleEnvironmentIds],
+  );
+  const worktrees = useMemo(
+    () => filterEligible(allWorktrees, eligibleEnvironmentIds),
+    [allWorktrees, eligibleEnvironmentIds],
+  );
+  const threads = useMemo(
+    () => filterEligible(allThreads, eligibleEnvironmentIds),
+    [allThreads, eligibleEnvironmentIds],
+  );
+  return useMemo(() => ({ projects, worktrees, threads }) as const, [projects, threads, worktrees]);
 }
 
 export function useHomeThreadGroups(): ReadonlyArray<HomeThreadGroup> {

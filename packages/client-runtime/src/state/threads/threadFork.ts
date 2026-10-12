@@ -23,7 +23,7 @@ import {
 } from "@ryco/contracts";
 import { htmlRenderOfAttachment } from "@ryco/shared/htmlRender";
 import { selectFinalTurnReplies } from "@ryco/shared/turnReply";
-import { Schema } from "effect";
+import * as Schema from "effect/Schema";
 
 import { isAwaitingAdmission, RpcRequestRefusedError } from "../../rpc/protocol.ts";
 import { RpcTransportDisposedError } from "../../rpc/wsTransport.ts";

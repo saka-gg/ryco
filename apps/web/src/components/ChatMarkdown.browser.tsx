@@ -55,6 +55,7 @@ vi.mock("@pierre/diffs", () => ({
 }));
 
 import ChatMarkdown from "./ChatMarkdown";
+import { resetCodeHighlightQueueForTests } from "./chat/codeHighlightQueue";
 import { syncDocumentPresentationTier } from "../lib/presentationTier";
 
 describe("ChatMarkdown", () => {
@@ -64,6 +65,7 @@ describe("ChatMarkdown", () => {
     readFileBinaryMock.mockClear();
     getSharedHighlighterMock.mockClear();
     codeToHtmlMock.mockClear();
+    resetCodeHighlightQueueForTests();
     localStorage.clear();
     document.body.innerHTML = "";
   });
@@ -262,11 +264,43 @@ describe("ChatMarkdown", () => {
       await vi.waitFor(() => {
         expect(getSharedHighlighterMock).toHaveBeenCalledTimes(1);
       });
+      await vi.waitFor(() => {
+        expect(document.querySelector(".chat-markdown-shiki")).not.toBeNull();
+      });
       expect(codeToHtmlMock).toHaveBeenCalledWith(
         "const finalValue = 1;\n",
         expect.objectContaining({ lang: "ts" }),
       );
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("paints settled code blocks as plain text and highlights them after the commit", async () => {
+    const screen = await render(
+      <ChatMarkdown text={"```ts\nconst deferred = 1;\n```"} cwd="/repo/project" />,
+    );
+
+    try {
+      // The first commit carries the plain block; Shiki never runs in render.
+      expect(document.querySelector("pre code.language-ts")?.textContent).toBe(
+        "const deferred = 1;\n",
+      );
+      expect(document.querySelector(".chat-markdown-shiki")).toBeNull();
+      expect(codeToHtmlMock).not.toHaveBeenCalled();
+
+      await vi.waitFor(() => {
+        expect(document.querySelector(".chat-markdown-shiki")).not.toBeNull();
+      });
+      expect(document.querySelector("pre code.language-ts")).toBeNull();
+
+      // A remount of the same block reads the cached HTML in its first commit.
+      await screen.rerender(<div />);
+      await screen.rerender(
+        <ChatMarkdown text={"```ts\nconst deferred = 1;\n```"} cwd="/repo/project" />,
+      );
       expect(document.querySelector(".chat-markdown-shiki")).not.toBeNull();
+      expect(codeToHtmlMock).toHaveBeenCalledTimes(1);
     } finally {
       await screen.unmount();
     }

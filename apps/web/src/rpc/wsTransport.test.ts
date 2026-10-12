@@ -1767,6 +1767,8 @@ it("recovers desktop IPC with bounded retries and stops a terminal relay refusal
           reason: terminal ? "Update required" : "Unavailable",
           retryable: !terminal,
         });
+      // Main reports the refusal as a value after the classified close.
+      return { ok: false, reason: "unavailable" } as const;
     },
     closeDesktopWorkspaceTransport: () => undefined,
     onDesktopWorkspaceTransportEvent: (listener) => {

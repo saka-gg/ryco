@@ -9,6 +9,8 @@ import {
   type MobileEnvironmentDriver,
 } from "../connection/environmentDriver";
 import { createMobileRemoteEnvironmentApi } from "../connection/remoteApi";
+import { createSavedSessionHints } from "../connection/savedSessionHints";
+import { mobileKV } from "../platform/kv";
 import { initializeWsConnectionState } from "../rpc/wsConnectionState";
 import {
   configureMobileHostedConnectionCoordinator,
@@ -49,6 +51,7 @@ function getAppDriver(): MobileEnvironmentDriver {
   return (appDriver ??= createMobileEnvironmentDriver({
     catalog: getAppCatalog(),
     remoteApi: getAppRemoteApi(),
+    sessionHints: createSavedSessionHints(mobileKV),
   }));
 }
 
@@ -105,12 +108,18 @@ export function initializeMobileRuntime(): MobileConnectionRegistry {
     void mobileRuntimeStartupBarrier.beginHydration(
       async () => {
         const { mobileKV } = await import("../platform/kv");
+        const { mobileAppLifecycle } = await import("../platform/appLifecycle");
         const { initializeMobileSnapshotPersistence } =
           await import("../persistence/environmentSnapshotPersistence");
         await registry.catalog.waitForHydration();
         await initializeMobileSnapshotPersistence({
           kv: mobileKV,
           hasDirectEnvironment: (environmentId) => registry.catalog.get(environmentId) !== null,
+          // Debounced snapshot captures are flushed before iOS may suspend us.
+          subscribeBackground: (listener) =>
+            mobileAppLifecycle.subscribe((event) => {
+              if (event === "background") listener();
+            }),
         });
       },
       (error: unknown) => {

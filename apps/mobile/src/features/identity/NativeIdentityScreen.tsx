@@ -1,5 +1,5 @@
 import { getHostedHubApi } from "@ryco/client-runtime/authorization";
-import { encodeBase64Url } from "@ryco/client-runtime/relay";
+import { encodeBase64Url } from "@ryco/client-runtime/relay/base64url";
 import type * as HostedIdentity from "@ryco/contracts/hosted-identity";
 import { getMobileHostedUnavailableReason } from "../../hostedHub/runtimeAvailability";
 import { Image } from "expo-image";
@@ -341,6 +341,19 @@ export function NativeIdentityScreen() {
   const hostedAccessRetrying = useHostedHubStore((state) => state.accessRecoveryPending === true);
   const [signInRequested, setSignInRequested] = useState(false);
   const [retryingSavedSession, setRetryingSavedSession] = useState(false);
+  // The access gate stops waiting for the launch check at its deadline, so this
+  // screen can mount while the saved session is still being checked. The
+  // session setup is memoized; this only observes when it settles.
+  const [sessionCheckPending, setSessionCheckPending] = useState(true);
+  useEffect(() => {
+    let active = true;
+    void ensureMobileHostedSession().finally(() => {
+      if (active) setSessionCheckPending(false);
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
   // A launch that could not reach the Hub keeps the stored session; the shared
   // runtime retries it on its own (when the failure is transient) and on
   // foreground/online. Show that instead of a sign-in form the user does not
@@ -352,6 +365,7 @@ export function NativeIdentityScreen() {
     savedSession: (mobileSessionCredentials.readBearerToken?.() ?? null) !== null,
     entryScreen: screen.name === "entry",
     signInRequested,
+    checking: sessionCheckPending,
   });
   const retrySavedSession = () => {
     if (retryingSavedSession) return;

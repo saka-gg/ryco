@@ -1,4 +1,16 @@
-import { Context, DateTime, Effect, Layer, Option, Result, Schema, SchemaIssue } from "effect";
+import {
+  Cache,
+  Context,
+  DateTime,
+  Duration,
+  Effect,
+  Exit,
+  Layer,
+  Option,
+  Result,
+  Schema,
+  SchemaIssue,
+} from "effect";
 
 import {
   CHANGE_REQUEST_FILE_CONTENTS_MAX_BYTES,
@@ -8,6 +20,7 @@ import {
   type ChangeRequestDraftReviewComment,
   type ChangeRequestFileContents,
   type ChangeRequestFileContentsInput,
+  type ChangeRequestInvolvement,
   type ChangeRequestReviewEvent,
   type ChangeRequestReviewThread,
   type ChangeRequestSetThreadResolvedResult,
@@ -49,6 +62,7 @@ import * as GitHubPullRequestMutations from "./gitHubPullRequestMutations.ts";
 import * as GitHubPullRequests from "./gitHubPullRequests.ts";
 import * as GitHubPullRequestStacks from "./gitHubPullRequestStacks.ts";
 import * as GitHubRequiredChecks from "./gitHubRequiredChecks.ts";
+import * as GitHubRepositoryLists from "./gitHubRepositoryLists.ts";
 import {
   decodeGitHubReactionGroupsBySubjectJson,
   formatGitHubReactionGroupsDecodeError,
@@ -58,6 +72,10 @@ import {
 } from "./gitHubReactions.ts";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
+const LIST_REPOSITORY_CAPACITY = 256;
+const LIST_REPOSITORY_TTL = Duration.minutes(10);
+const LIST_REPOSITORY_FAILURE_TTL = Duration.seconds(5);
+const STACKLESS_HOST_TTL_MS = 10 * 60_000;
 /** Ceiling for a single-commit diff; larger diffs fail clearly instead of truncating mid-hunk. */
 const COMMIT_DIFF_MAX_BYTES = 8 * 1024 * 1024;
 const FILE_CONTENTS_TIMEOUT_MS = 60_000;
@@ -106,6 +124,29 @@ export const GITHUB_PULL_REQUEST_LIST_JSON_FIELDS = [
   "changedFiles",
   ...GITHUB_PULL_REQUEST_METADATA_JSON_FIELDS,
   STATUS_CHECK_ROLLUP_JSON_FIELD,
+] as const;
+
+/**
+ * What status lookups, the change request index and state refreshes read: identity, branches,
+ * state and timestamps. No comment bodies, checks, mergeability (which makes
+ * GitHub compute it) or review data — a fraction of the list's cost and bytes.
+ */
+export const GITHUB_PULL_REQUEST_SUMMARY_LIST_JSON_FIELDS = [
+  "number",
+  "title",
+  "url",
+  "baseRefName",
+  "headRefName",
+  "state",
+  "mergedAt",
+  "closedAt",
+  "updatedAt",
+  "createdAt",
+  "isDraft",
+  "isCrossRepository",
+  "author",
+  "headRepository",
+  "headRepositoryOwner",
 ] as const;
 
 export const GITHUB_PULL_REQUEST_DETAIL_JSON_FIELDS = [
@@ -184,6 +225,11 @@ export interface GitHubPullRequestSummary {
   readonly additions?: number;
   readonly deletions?: number;
   readonly changedFiles?: number;
+}
+
+export interface GitHubPullRequestListItem {
+  readonly summary: GitHubPullRequestSummary;
+  readonly stackSummary: SourceControlChangeRequestStackSummary | null;
 }
 
 /** Resolved identity of a pull request, used to address API calls precisely. */
@@ -389,9 +435,27 @@ export interface GitHubCliShape {
     readonly limit?: number;
   }) => Effect.Effect<ReadonlyArray<GitHubPullRequestSummary>, GitHubCliError>;
 
+  /**
+   * The repository's pull request list as list rows show it, in one GraphQL
+   * request per 100 rows: comment counts (not bodies), checks, review state,
+   * diff stats and each row's stack summary. `involvement` makes it the same
+   * GitHub search `gh pr list --search` runs.
+   */
+  readonly listPullRequests: (input: {
+    readonly cwd: string;
+    readonly state: GitHubRepositoryLists.GitHubPullRequestListState;
+    readonly headSelector?: string;
+    readonly involvement?: ChangeRequestInvolvement;
+    readonly limit?: number;
+    /** Ask for stack summaries in the same request (default `true`). */
+    readonly includeStackSummary?: boolean;
+  }) => Effect.Effect<ReadonlyArray<GitHubPullRequestListItem>, GitHubCliError>;
+
   readonly getPullRequest: (input: {
     readonly cwd: string;
     readonly reference: string;
+    /** `summary`: state, branches and timestamps only (state refreshes); default is the full summary. */
+    readonly fields?: "full" | "summary";
   }) => Effect.Effect<GitHubPullRequestSummary, GitHubCliError>;
 
   readonly getRepositoryCloneUrls: (input: {
@@ -424,6 +488,7 @@ export interface GitHubCliShape {
     readonly force?: boolean;
   }) => Effect.Effect<void, GitHubCliError>;
 
+  /** Issue list rows (comment counts, not bodies) in one GraphQL request per 100 rows. */
   readonly listIssues: (input: {
     readonly cwd: string;
     readonly state: "open" | "closed" | "all";
@@ -852,6 +917,16 @@ function decodeGitHubJson<S extends Schema.Top>(
   );
 }
 
+const RawListRepositorySchema = Schema.Struct({
+  nameWithOwner: TrimmedNonEmptyString,
+  url: TrimmedNonEmptyString,
+});
+
+function listLimit(limit: number | undefined, fallback: number): number {
+  const value = Math.trunc(limit ?? fallback);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
 function workflowRunLimit(limit: number | undefined): number {
   const value = Math.trunc(limit ?? 20);
   if (!Number.isFinite(value)) return 20;
@@ -1145,6 +1220,193 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
       }),
     );
   };
+
+  /**
+   * The repository `gh pr list` and `gh issue list` read in `cwd` (gh's own
+   * remote resolution, including `gh repo set-default`), so the GraphQL lists
+   * address exactly that repository. Remotes rarely change; a failed lookup
+   * is retried after a few seconds.
+   */
+  const listRepositories = yield* Cache.makeWith(
+    (cwd: string) =>
+      execute({ cwd, args: ["repo", "view", "--json", "nameWithOwner,url"] }).pipe(
+        Effect.flatMap((result) =>
+          decodeGitHubJson(
+            result.stdout.trim(),
+            RawListRepositorySchema,
+            "resolveRepository",
+            "GitHub CLI returned invalid repository JSON",
+          ),
+        ),
+        Effect.flatMap((raw) => {
+          // The same host / owner / name parsing every other GraphQL read uses.
+          const identity = parseGitHubRepositoryIdentityFromUrl(raw.url);
+          return identity &&
+            identity.nameWithOwner.toLowerCase() === raw.nameWithOwner.toLowerCase()
+            ? Effect.succeed<GitHubRepositoryLists.GitHubListRepository>({
+                host: identity.host,
+                owner: identity.owner,
+                name: identity.repository,
+              })
+            : Effect.fail(
+                new GitHubCliError({
+                  operation: "resolveRepository",
+                  detail: `GitHub CLI returned an unexpected repository: ${raw.nameWithOwner}`,
+                }),
+              );
+        }),
+      ),
+    {
+      capacity: LIST_REPOSITORY_CAPACITY,
+      timeToLive: (exit) =>
+        Exit.isSuccess(exit) ? LIST_REPOSITORY_TTL : LIST_REPOSITORY_FAILURE_TTL,
+    },
+  );
+
+  // Hosts whose GraphQL schema has no native stacks (older GHES): lists skip
+  // those fields there instead of failing first every time.
+  const stacklessHosts = new Map<string, number>();
+  const hostHasStacks = (host: string) => {
+    const until = stacklessHosts.get(host);
+    if (until === undefined) return true;
+    if (until > Date.now()) return false;
+    stacklessHosts.delete(host);
+    return true;
+  };
+
+  const readListPages = <T>(input: {
+    readonly cwd: string;
+    readonly host: string;
+    readonly operation: string;
+    readonly query: string;
+    readonly limit: number;
+    readonly acceptPartialData: boolean;
+    readonly variables: (page: {
+      readonly first: number;
+      readonly after: string | null;
+    }) => GitHubPullRequestMutations.GitHubGraphQlVariables;
+    readonly decode: (
+      raw: string,
+    ) => Result.Result<GitHubRepositoryLists.GitHubListPage<T>, string>;
+  }) =>
+    Effect.gen(function* () {
+      const items: T[] = [];
+      let after: string | null = null;
+      for (
+        let page = 0;
+        page < GitHubRepositoryLists.GITHUB_REPOSITORY_LIST_MAX_PAGES && items.length < input.limit;
+        page += 1
+      ) {
+        const first = Math.min(
+          GitHubRepositoryLists.GITHUB_REPOSITORY_LIST_PAGE_SIZE,
+          input.limit - items.length,
+        );
+        const raw: string = yield* graphqlDocument({
+          cwd: input.cwd,
+          host: input.host,
+          operation: input.operation,
+          query: input.query,
+          variables: input.variables({ first, after }),
+          acceptPartialData: input.acceptPartialData,
+        });
+        const decoded = input.decode(raw);
+        if (Result.isFailure(decoded)) {
+          return yield* new GitHubCliError({
+            operation: input.operation,
+            detail: decoded.failure,
+          });
+        }
+        items.push(...decoded.success.items);
+        if (!decoded.success.hasNextPage || decoded.success.endCursor === null) break;
+        after = decoded.success.endCursor;
+      }
+      return items.length > input.limit ? items.slice(0, input.limit) : items;
+    });
+
+  const listPullRequests: GitHubCliShape["listPullRequests"] = (input) =>
+    Effect.gen(function* () {
+      const repository = yield* Cache.get(listRepositories, input.cwd);
+      const limit = listLimit(input.limit, 20);
+      const search = input.involvement !== undefined;
+      const head = input.headSelector?.trim() ?? "";
+      const read = (fields: GitHubRepositoryLists.GitHubPullRequestListFields) =>
+        readListPages({
+          cwd: input.cwd,
+          host: repository.host,
+          operation: "listPullRequests",
+          query: GitHubRepositoryLists.buildGitHubPullRequestListQuery({ search, ...fields }),
+          limit,
+          // Rows may lack checks or a stack (permissions, unresolvable stack);
+          // the decoder decides which errors fail the list.
+          acceptPartialData: true,
+          variables: ({ first, after }) =>
+            input.involvement !== undefined
+              ? {
+                  q: GitHubRepositoryLists.buildGitHubPullRequestInvolvementSearch({
+                    repository,
+                    involvement: input.involvement,
+                    state: input.state,
+                    headSelector: head,
+                  }),
+                  first,
+                  after,
+                }
+              : {
+                  owner: repository.owner,
+                  name: repository.name,
+                  first,
+                  after,
+                  states: GitHubRepositoryLists.gitHubPullRequestListStates(input.state),
+                  head: head.length > 0 ? head : null,
+                },
+          decode: (raw) =>
+            GitHubRepositoryLists.decodeGitHubPullRequestListPageJson(raw, { search }),
+        });
+      const stack = input.includeStackSummary !== false && hostHasStacks(repository.host);
+      const withoutChecks = (fields: GitHubRepositoryLists.GitHubPullRequestListFields) =>
+        read(fields).pipe(
+          Effect.catchIf(isStatusCheckRollupAccessError, () => read({ ...fields, checks: false })),
+        );
+      const rows = yield* withoutChecks({ checks: true, stack }).pipe(
+        Effect.catchIf(
+          (error) =>
+            stack &&
+            GitHubRepositoryLists.isGitHubStackFieldUnsupportedDetail(
+              `${errorText(error)}\n${error.cause ? errorText(error.cause) : ""}`,
+            ),
+          () =>
+            Effect.suspend(() => {
+              stacklessHosts.set(repository.host, Date.now() + STACKLESS_HOST_TTL_MS);
+              return withoutChecks({ checks: true, stack: false });
+            }),
+        ),
+      );
+      return rows.map((row): GitHubPullRequestListItem => ({
+        summary: withPresentUpdatedAt(row.record),
+        stackSummary: row.stackSummary,
+      }));
+    });
+
+  const listIssues: GitHubCliShape["listIssues"] = (input) =>
+    Effect.gen(function* () {
+      const repository = yield* Cache.get(listRepositories, input.cwd);
+      return yield* readListPages({
+        cwd: input.cwd,
+        host: repository.host,
+        operation: "listIssues",
+        query: GitHubRepositoryLists.GITHUB_ISSUE_LIST_QUERY,
+        limit: listLimit(input.limit, 50),
+        acceptPartialData: false,
+        variables: ({ first, after }) => ({
+          owner: repository.owner,
+          name: repository.name,
+          first,
+          after,
+          states: GitHubRepositoryLists.gitHubIssueListStates(input.state),
+        }),
+        decode: (raw) => GitHubRepositoryLists.decodeGitHubIssueListPageJson(raw, repository),
+      });
+    });
 
   const viewedIdentitySchema = Schema.Struct({
     id: TrimmedNonEmptyString,
@@ -2468,6 +2730,7 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
     submitPullRequestReview,
     updatePullRequest,
     getPullRequestFileContents,
+    listPullRequests,
     listOpenPullRequests: (input) =>
       executePrJson({
         cwd: input.cwd,
@@ -2508,7 +2771,10 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
       executePrJson({
         cwd: input.cwd,
         argsBeforeJson: ["pr", "view", input.reference],
-        jsonFields: GITHUB_PULL_REQUEST_SUMMARY_JSON_FIELDS,
+        jsonFields:
+          input.fields === "summary"
+            ? GITHUB_PULL_REQUEST_SUMMARY_LIST_JSON_FIELDS
+            : GITHUB_PULL_REQUEST_SUMMARY_JSON_FIELDS,
       }).pipe(
         Effect.map((result) => result.stdout.trim()),
         Effect.flatMap((raw) =>
@@ -2586,39 +2852,7 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
         cwd: input.cwd,
         args: ["pr", "checkout", input.reference, ...(input.force ? ["--force"] : [])],
       }).pipe(Effect.asVoid),
-    listIssues: (input) =>
-      execute({
-        cwd: input.cwd,
-        args: [
-          "issue",
-          "list",
-          "--state",
-          input.state,
-          "--limit",
-          String(input.limit ?? 50),
-          "--json",
-          "number,title,url,state,updatedAt,author,labels,assignees,comments",
-        ],
-      }).pipe(
-        Effect.map((r) => r.stdout.trim()),
-        Effect.flatMap((raw) =>
-          raw.length === 0
-            ? Effect.succeed([])
-            : Effect.sync(() => GitHubIssues.decodeGitHubIssueListJson(raw)).pipe(
-                Effect.flatMap((decoded) =>
-                  Result.isSuccess(decoded)
-                    ? Effect.succeed(decoded.success)
-                    : Effect.fail(
-                        new GitHubCliError({
-                          operation: "listIssues",
-                          detail: `GitHub CLI returned invalid issue list JSON: ${GitHubIssues.formatGitHubIssueDecodeError(decoded.failure)}`,
-                          cause: decoded.failure,
-                        }),
-                      ),
-                ),
-              ),
-        ),
-      ),
+    listIssues,
     getIssue: (input) =>
       execute({
         cwd: input.cwd,

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useSyncExternalStore } from "react";
+import { useSyncExternalStore } from "react";
 
 import {
   ACTIVE_THEME_STORAGE_KEY,
@@ -8,6 +8,7 @@ import {
   findTheme,
   getActiveThemeId,
   setActiveThemeId,
+  subscribeThemeRegistry,
 } from "../themes/registry";
 import {
   APPEARANCE_PREFERENCES_STORAGE_KEY,
@@ -103,25 +104,38 @@ export function syncBrowserChromeTheme() {
   ensureThemeColorMetaTag().setAttribute("content", backgroundColor);
 }
 
+let transitionGuardFrame: number | null = null;
+
+/**
+ * Suppresses transitions while the theme swaps. Root class changes restyle the
+ * whole document (587 KiB sheet), so instead of forcing a synchronous reflow
+ * between adding and removing the guard, the next frame's style pass sees the
+ * guard and the new theme together and the guard lifts one frame later. The
+ * browser chrome colour is read in that first frame too, instead of forcing
+ * its own recalc now.
+ */
+function startThemeTransitionGuard(root: HTMLElement) {
+  root.classList.add("no-transitions");
+  if (transitionGuardFrame !== null) cancelAnimationFrame(transitionGuardFrame);
+  transitionGuardFrame = requestAnimationFrame(() => {
+    syncBrowserChromeTheme();
+    transitionGuardFrame = requestAnimationFrame(() => {
+      transitionGuardFrame = null;
+      root.classList.remove("no-transitions");
+    });
+  });
+}
+
 function applyTheme(theme: Theme, suppressTransitions = false) {
   if (typeof document === "undefined" || typeof window === "undefined") return;
-  if (suppressTransitions) {
-    document.documentElement.classList.add("no-transitions");
-  }
+  const root = document.documentElement;
+  if (suppressTransitions) startThemeTransitionGuard(root);
   const isDark = theme === "dark" || (theme === "system" && getSystemDark());
-  document.documentElement.classList.toggle("dark", isDark);
+  root.classList.toggle("dark", isDark);
   applyThemeToDocument(findTheme(getActiveThemeId()));
   applyAppearancePreferencesToDocument();
-  syncBrowserChromeTheme();
+  if (!suppressTransitions) syncBrowserChromeTheme();
   syncDesktopTheme(theme);
-  if (suppressTransitions) {
-    // Force a reflow so the no-transitions class takes effect before removal
-    // oxlint-disable-next-line no-unused-expressions
-    document.documentElement.offsetHeight;
-    requestAnimationFrame(() => {
-      document.documentElement.classList.remove("no-transitions");
-    });
-  }
 }
 
 function syncDesktopTheme(theme: Theme) {
@@ -139,12 +153,29 @@ function syncDesktopTheme(theme: Theme) {
   });
 }
 
-// Apply immediately on module load to prevent flash
-if (typeof document !== "undefined" && hasThemeStorage()) {
-  applyTheme(getStored());
+// ---------------------------------------------------------------------------
+// One theme controller per document
+//
+// The theme is applied exactly once per real change: on module load, by the
+// setters below, and by a single system color-scheme / cross-tab storage
+// listener. `useTheme` is read-only: it never applies the theme and never
+// installs listeners of its own, so the per-message ChatMarkdown consumers
+// cost a subscription, not a style rewrite plus a forced style recalc each.
+// ---------------------------------------------------------------------------
+
+let appliedTheme: Theme | null = null;
+
+function applyThemeChange(theme: Theme, suppressTransitions = false) {
+  appliedTheme = theme;
+  applyTheme(theme, suppressTransitions);
 }
 
-function getSnapshot(): ThemeSnapshot {
+// Apply immediately on module load to prevent flash
+if (typeof document !== "undefined" && hasThemeStorage()) {
+  applyThemeChange(getStored());
+}
+
+function readSnapshot(): ThemeSnapshot {
   if (!hasThemeStorage()) return DEFAULT_THEME_SNAPSHOT;
   const theme = getStored();
   const systemDark = theme === "system" ? getSystemDark() : false;
@@ -159,7 +190,21 @@ function getSnapshot(): ThemeSnapshot {
     return lastSnapshot;
   }
 
-  lastSnapshot = { theme, systemDark, activeThemeId };
+  return { theme, systemDark, activeThemeId };
+}
+
+/**
+ * Cached snapshot, invalidated by `emitChange` (setters and the shared
+ * listeners) instead of re-reading storage and media queries on every render.
+ */
+let snapshotStale = true;
+
+function getSnapshot(): ThemeSnapshot {
+  if (snapshotStale || lastSnapshot === null) {
+    lastSnapshot = readSnapshot();
+    // Without listeners nothing invalidates the cache; read through.
+    snapshotStale = listeners.length === 0;
+  }
   return lastSnapshot;
 }
 
@@ -167,37 +212,85 @@ function getServerSnapshot() {
   return DEFAULT_THEME_SNAPSHOT;
 }
 
+function handleSystemColorSchemeChange() {
+  if (getStored() === "system") applyThemeChange("system", true);
+  invalidateAndEmit();
+}
+
+function handleThemeStorage(event: StorageEvent) {
+  if (
+    event.key === STORAGE_KEY ||
+    event.key === ACTIVE_THEME_STORAGE_KEY ||
+    event.key === CUSTOM_THEMES_STORAGE_KEY ||
+    event.key === APPEARANCE_PREFERENCES_STORAGE_KEY
+  ) {
+    applyThemeChange(getStored(), true);
+    invalidateAndEmit();
+  }
+}
+
+let detachDocumentListeners: (() => void) | null = null;
+
+/**
+ * Installed by the first consumer and kept for the document's lifetime: the
+ * controller owns the applied theme even while no component reads it (pages
+ * without a themed consumer), so a system color-scheme flip or another tab's
+ * theme write is never missed. One listener set, however many consumers.
+ */
+function attachDocumentListeners() {
+  if (detachDocumentListeners !== null || typeof window === "undefined") return;
+  const mq = window.matchMedia(MEDIA_QUERY);
+  mq.addEventListener("change", handleSystemColorSchemeChange);
+  window.addEventListener("storage", handleThemeStorage);
+  // Same-tab registry writes (theme editor) change the snapshot without a
+  // storage event; they apply the theme themselves.
+  const unsubscribeRegistry = subscribeThemeRegistry(invalidateAndEmit);
+  detachDocumentListeners = () => {
+    mq.removeEventListener("change", handleSystemColorSchemeChange);
+    window.removeEventListener("storage", handleThemeStorage);
+    unsubscribeRegistry();
+  };
+  // Changes between the module-load apply and the first consumer.
+  const stored = getStored();
+  const expectedDark = stored === "dark" || (stored === "system" && getSystemDark());
+  if (
+    appliedTheme !== stored ||
+    document.documentElement.classList.contains("dark") !== expectedDark
+  ) {
+    applyThemeChange(stored);
+  }
+}
+
+function invalidateAndEmit() {
+  snapshotStale = true;
+  emitChange();
+}
+
 function subscribe(listener: () => void): () => void {
   if (typeof window === "undefined") return () => {};
   listeners.push(listener);
-
-  // Listen for system preference changes
-  const mq = window.matchMedia(MEDIA_QUERY);
-  const handleChange = () => {
-    if (getStored() === "system") applyTheme("system", true);
-    emitChange();
-  };
-  mq.addEventListener("change", handleChange);
-
-  // Listen for storage changes from other tabs
-  const handleStorage = (e: StorageEvent) => {
-    if (
-      e.key === STORAGE_KEY ||
-      e.key === ACTIVE_THEME_STORAGE_KEY ||
-      e.key === CUSTOM_THEMES_STORAGE_KEY ||
-      e.key === APPEARANCE_PREFERENCES_STORAGE_KEY
-    ) {
-      applyTheme(getStored(), true);
-      emitChange();
-    }
-  };
-  window.addEventListener("storage", handleStorage);
+  snapshotStale = true;
+  attachDocumentListeners();
 
   return () => {
     listeners = listeners.filter((l) => l !== listener);
-    mq.removeEventListener("change", handleChange);
-    window.removeEventListener("storage", handleStorage);
+    // Without consumers nothing reads the cached snapshot; read through.
+    if (listeners.length === 0) snapshotStale = true;
   };
+}
+
+function setTheme(next: Theme) {
+  if (!hasThemeStorage()) return;
+  localStorage.setItem(STORAGE_KEY, next);
+  applyThemeChange(next, true);
+  invalidateAndEmit();
+}
+
+function setActiveTheme(id: string) {
+  if (!hasThemeStorage()) return;
+  setActiveThemeId(id);
+  applyThemeChange(getStored(), true);
+  invalidateAndEmit();
 }
 
 export function useTheme() {
@@ -208,24 +301,17 @@ export function useTheme() {
   const resolvedTheme: "light" | "dark" =
     theme === "system" ? (snapshot.systemDark ? "dark" : "light") : theme;
 
-  const setTheme = useCallback((next: Theme) => {
-    if (!hasThemeStorage()) return;
-    localStorage.setItem(STORAGE_KEY, next);
-    applyTheme(next, true);
-    emitChange();
-  }, []);
-
-  const setActiveTheme = useCallback((id: string) => {
-    if (!hasThemeStorage()) return;
-    setActiveThemeId(id);
-    applyTheme(getStored(), true);
-    emitChange();
-  }, []);
-
-  // Keep DOM in sync on mount/change
-  useEffect(() => {
-    applyTheme(theme);
-  }, [theme]);
-
   return { theme, setTheme, resolvedTheme, activeThemeId, setActiveTheme } as const;
+}
+
+export function __resetThemeControllerForTests(): void {
+  if (transitionGuardFrame !== null) cancelAnimationFrame(transitionGuardFrame);
+  transitionGuardFrame = null;
+  detachDocumentListeners?.();
+  detachDocumentListeners = null;
+  listeners = [];
+  lastSnapshot = null;
+  snapshotStale = true;
+  appliedTheme = null;
+  lastDesktopTheme = null;
 }

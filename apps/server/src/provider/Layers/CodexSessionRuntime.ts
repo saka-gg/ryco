@@ -24,6 +24,7 @@ import {
 import { normalizeModelSlug } from "@ryco/shared/model";
 import {
   Deferred,
+  Duration,
   Effect,
   Exit,
   Layer,
@@ -50,11 +51,15 @@ import {
   CODEX_PLAN_MODE_DEVELOPER_INSTRUCTIONS,
 } from "../CodexDeveloperInstructions.ts";
 import { appendProjectCustomSystemPrompt } from "../ProjectCustomSystemPrompt.ts";
+import { ASSISTANT_ATTACHMENT_INSTRUCTIONS } from "../../assistantAttachments.ts";
+import { isSlashCommandInput } from "../attachmentInstructionDelivery.ts";
 import { isMissingConversationError } from "../resumeFailure.ts";
+import { providerStartupPhaseTimeoutDetail } from "../providerOperationPolicy.ts";
 import {
   createProcessDeviceToolBinding,
   type DeviceToolBinding,
 } from "../../providerTools/deviceToolGateway.ts";
+import { type CodexResumeCursor, CodexResumeCursorSchema } from "../codexResumeCursor.ts";
 
 const PROVIDER = ProviderDriverKind.make("codex");
 
@@ -66,9 +71,6 @@ const BENIGN_ERROR_LOG_SNIPPETS = [
   "state db missing rollout path for thread",
   "state db record_discrepancy: find_thread_path_by_id_str_in_subdir, falling_back",
 ];
-export const CodexResumeCursorSchema = Schema.Struct({
-  threadId: Schema.String,
-});
 const CodexUserInputAnswerObject = Schema.Struct({
   answers: Schema.Array(Schema.String),
 });
@@ -85,7 +87,7 @@ export type CodexTurnStartParamsWithCollaborationMode =
   typeof CodexTurnStartParamsWithCollaborationMode.Type;
 const formatSchemaIssue = SchemaIssue.makeFormatterDefault();
 
-export type CodexResumeCursor = typeof CodexResumeCursorSchema.Type;
+export { CodexResumeCursorSchema, type CodexResumeCursor };
 type CodexThreadItem =
   | EffectCodexSchema.V2ThreadReadResponse["thread"]["turns"][number]["items"][number]
   | EffectCodexSchema.V2ThreadRollbackResponse["thread"]["turns"][number]["items"][number];
@@ -148,7 +150,89 @@ export interface CodexSessionRuntimeOptions {
   readonly tokenReductionInstructions?: string | undefined;
   readonly agentControl?: CodexAgentControlInjection | undefined;
   readonly resumeCursor?: CodexResumeCursor;
+  /** Per-phase startup deadlines; unset phases use `DEFAULT_CODEX_STARTUP_PHASE_TIMEOUTS`. */
+  readonly startupPhaseTimeouts?: Partial<Record<CodexStartupPhase, Duration.Input>>;
 }
+
+/**
+ * Startup requests that get their own deadline, like the ACP runtime's. Without one, a hung
+ * `codex app-server` surfaces only through the 120 s session-start deadline with a generic
+ * message.
+ */
+export type CodexStartupPhase = "initialize" | "thread/start" | "thread/resume";
+
+export const DEFAULT_CODEX_STARTUP_PHASE_TIMEOUTS: Readonly<
+  Record<CodexStartupPhase, Duration.Input>
+> = {
+  initialize: Duration.seconds(15),
+  "thread/start": Duration.seconds(30),
+  // A resume reads the thread's rollout before it answers (its turns stay out of the reply).
+  "thread/resume": Duration.seconds(60),
+};
+
+/** `cause` of the transport error a startup phase fails with when its deadline passes. */
+export class CodexStartupPhaseTimeout extends Error {
+  readonly phase: CodexStartupPhase;
+  readonly timeoutMs: number;
+
+  constructor(phase: CodexStartupPhase, timeoutMs: number) {
+    super(`Codex ${phase} did not answer within ${timeoutMs} ms`);
+    this.name = "CodexStartupPhaseTimeout";
+    this.phase = phase;
+    this.timeoutMs = timeoutMs;
+  }
+}
+
+const isCodexTransportError = Schema.is(CodexErrors.CodexAppServerTransportError);
+
+export const isCodexStartupPhaseTimeout = (
+  error: unknown,
+): error is CodexErrors.CodexAppServerTransportError & {
+  readonly cause: CodexStartupPhaseTimeout;
+} => isCodexTransportError(error) && error.cause instanceof CodexStartupPhaseTimeout;
+
+function codexStartupPhaseHint(command: string, phase: CodexStartupPhase): string {
+  return phase === "initialize"
+    ? `Check that \`${command}\` is the Codex CLI and that it is up to date (\`${command} --version\`).`
+    : `Run \`${command}\` in a terminal to check that it is signed in (\`${command} login\`) and that its MCP servers start.`;
+}
+
+/**
+ * Fails `effect` with an actionable transport error when `codex app-server` does not answer the
+ * startup `phase` in time. The process is left to the runtime scope, which the failed start
+ * closes.
+ */
+export const withCodexStartupPhaseDeadline = <A, R>(
+  input: {
+    readonly command: string;
+    readonly phase: CodexStartupPhase;
+    readonly timeouts?: Partial<Record<CodexStartupPhase, Duration.Input>> | undefined;
+  },
+  effect: Effect.Effect<A, CodexErrors.CodexAppServerError, R>,
+): Effect.Effect<A, CodexErrors.CodexAppServerError, R> => {
+  const timeoutMs = Duration.toMillis(
+    Duration.fromInputUnsafe(
+      input.timeouts?.[input.phase] ?? DEFAULT_CODEX_STARTUP_PHASE_TIMEOUTS[input.phase],
+    ),
+  );
+  return effect.pipe(
+    Effect.timeoutOrElse({
+      duration: timeoutMs,
+      orElse: () =>
+        Effect.fail(
+          new CodexErrors.CodexAppServerTransportError({
+            detail: providerStartupPhaseTimeoutDetail({
+              command: input.command,
+              request: `Codex \`${input.phase}\``,
+              timeoutMs,
+              hint: codexStartupPhaseHint(input.command, input.phase),
+            }),
+            cause: new CodexStartupPhaseTimeout(input.phase, timeoutMs),
+          }),
+        ),
+    }),
+  );
+};
 
 export interface CodexSessionRuntimeSendTurnInput {
   readonly input?: string;
@@ -433,18 +517,23 @@ function buildCodexCollaborationMode(input: {
   readonly customSystemPrompt?: string;
   readonly tokenReductionInstructions?: string;
   readonly hostContextInstructions?: string;
+  readonly attachmentInstructions?: string;
 }): EffectCodexSchema.V2TurnStartParams__CollaborationMode | undefined {
   if (input.interactionMode === undefined) {
     return undefined;
   }
   const model = normalizeCodexModelSlug(input.model) ?? DEFAULT_MODEL;
+  const modeInstructions =
+    input.interactionMode === "plan"
+      ? CODEX_PLAN_MODE_DEVELOPER_INSTRUCTIONS
+      : input.interactionMode === "ask"
+        ? CODEX_ASK_MODE_DEVELOPER_INSTRUCTIONS
+        : CODEX_DEFAULT_MODE_DEVELOPER_INSTRUCTIONS;
   const baseInstructions = appendProjectCustomSystemPrompt(
     appendProjectCustomSystemPrompt(
-      input.interactionMode === "plan"
-        ? CODEX_PLAN_MODE_DEVELOPER_INSTRUCTIONS
-        : input.interactionMode === "ask"
-          ? CODEX_ASK_MODE_DEVELOPER_INSTRUCTIONS
-          : CODEX_DEFAULT_MODE_DEVELOPER_INSTRUCTIONS,
+      input.attachmentInstructions
+        ? `${modeInstructions}\n\n${input.attachmentInstructions}`
+        : modeInstructions,
       input.tokenReductionInstructions,
     ),
     input.customSystemPrompt,
@@ -480,21 +569,12 @@ export function buildTurnStartParams(input: {
   readonly customSystemPrompt?: string;
   readonly tokenReductionInstructions?: string;
   readonly hostContextInstructions?: string;
+  /** Session-wide instructions for the developer channel (attachment delivery). */
+  readonly attachmentInstructions?: string;
 }): Effect.Effect<
   CodexTurnStartParamsWithCollaborationMode,
   CodexErrors.CodexAppServerProtocolParseError
 > {
-  const turnInput: Array<EffectCodexSchema.V2TurnStartParams__UserInput> = [];
-  if (input.prompt) {
-    turnInput.push({
-      type: "text",
-      text: input.prompt,
-    });
-  }
-  for (const attachment of input.attachments ?? []) {
-    turnInput.push(attachment);
-  }
-
   const config = runtimeModeToThreadConfig(input.runtimeMode);
   const collaborationMode = buildCodexCollaborationMode({
     ...(input.interactionMode ? { interactionMode: input.interactionMode } : {}),
@@ -507,7 +587,30 @@ export function buildTurnStartParams(input: {
     ...(input.hostContextInstructions
       ? { hostContextInstructions: input.hostContextInstructions }
       : {}),
+    ...(input.attachmentInstructions
+      ? { attachmentInstructions: input.attachmentInstructions }
+      : {}),
   });
+
+  // Without a collaboration mode there is no developer channel: the
+  // instructions then lead the prompt, unless it is a native command.
+  const prompt =
+    collaborationMode === undefined &&
+    input.attachmentInstructions &&
+    input.prompt &&
+    !isSlashCommandInput(input.prompt)
+      ? `${input.attachmentInstructions}\n\n${input.prompt}`
+      : input.prompt;
+  const turnInput: Array<EffectCodexSchema.V2TurnStartParams__UserInput> = [];
+  if (prompt) {
+    turnInput.push({
+      type: "text",
+      text: prompt,
+    });
+  }
+  for (const attachment of input.attachments ?? []) {
+    turnInput.push(attachment);
+  }
 
   // Ask mode forces a read-only sandbox so the turn cannot edit files,
   // regardless of the thread's runtime mode.
@@ -2107,24 +2210,36 @@ export const makeCodexSessionRuntime = (
       Effect.forkIn(runtimeScope),
     );
 
+    const startupDeadline = (phase: CodexStartupPhase) => ({
+      command: options.binaryPath,
+      phase,
+      timeouts: options.startupPhaseTimeouts,
+    });
     const start = Effect.fn("CodexSessionRuntime.start")(function* () {
       yield* emitSessionEvent("session/connecting", "Starting Codex App Server session.");
-      yield* client.request("initialize", buildCodexInitializeParams());
+      yield* withCodexStartupPhaseDeadline(
+        startupDeadline("initialize"),
+        client.request("initialize", buildCodexInitializeParams()),
+      );
       yield* client.notify("initialized", undefined);
 
       const requestedModel = normalizeCodexModelSlug(options.model);
+      const resumeThreadId = readResumeCursorThreadId(options.resumeCursor);
 
-      const opened = yield* openCodexThread({
-        client,
-        threadId: options.threadId,
-        runtimeMode: options.runtimeMode,
-        cwd: options.cwd,
-        requestedModel,
-        serviceTier: options.serviceTier,
-        resumeThreadId: readResumeCursorThreadId(options.resumeCursor),
-        deviceToolBinding,
-        ...(options.agentControl ? { agentControl: options.agentControl } : {}),
-      });
+      const opened = yield* withCodexStartupPhaseDeadline(
+        startupDeadline(resumeThreadId === undefined ? "thread/start" : "thread/resume"),
+        openCodexThread({
+          client,
+          threadId: options.threadId,
+          runtimeMode: options.runtimeMode,
+          cwd: options.cwd,
+          requestedModel,
+          serviceTier: options.serviceTier,
+          resumeThreadId,
+          deviceToolBinding,
+          ...(options.agentControl ? { agentControl: options.agentControl } : {}),
+        }),
+      );
 
       const providerThreadId = opened.thread.id;
       const activeTurn = opened.thread.turns.findLast((turn) => turn.status === "inProgress");
@@ -2198,6 +2313,7 @@ export const makeCodexSessionRuntime = (
             ...(options.agentControl
               ? { hostContextInstructions: options.agentControl.instructions }
               : {}),
+            attachmentInstructions: ASSISTANT_ATTACHMENT_INSTRUCTIONS,
           });
           const rawResponse = yield* client.raw.request("turn/start", params);
           const response = yield* Schema.decodeUnknownEffect(EffectCodexSchema.V2TurnStartResponse)(

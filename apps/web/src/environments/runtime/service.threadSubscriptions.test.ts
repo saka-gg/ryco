@@ -203,6 +203,13 @@ describe("retainThreadDetailSubscription", () => {
     mockCreateEnvironmentConnection.mockImplementation((input) => {
       const reconnect = vi.fn(async () => undefined);
       mockConnectionReconnects.push(reconnect);
+      if (input.kind === "saved") {
+        // The config subscription's first item, as a real connection delivers it.
+        void Promise.resolve()
+          .then(() => input.client.server.getConfig())
+          .then((config: unknown) => input.onConfigUpdated?.(config, "snapshot"))
+          .catch(() => undefined);
+      }
       return {
         kind: input.kind,
         environmentId: input.knownEnvironment.environmentId,

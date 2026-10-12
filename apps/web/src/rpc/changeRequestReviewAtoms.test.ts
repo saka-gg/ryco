@@ -189,12 +189,13 @@ describe("change request query keys", () => {
     ];
     await flush();
 
+    // Lists are fetched at the shared superset size and sliced per caller.
     expect(client.listChangeRequests).toHaveBeenCalledTimes(2);
-    expect(client.listChangeRequests).toHaveBeenCalledWith({ cwd: CWD, state: "open", limit: 99 });
+    expect(client.listChangeRequests).toHaveBeenCalledWith({ cwd: CWD, state: "open", limit: 100 });
     expect(client.listChangeRequests).toHaveBeenCalledWith({
       cwd: CWD,
       state: "open",
-      limit: 99,
+      limit: 100,
       involvement: "review-requested",
     });
     for (const release of releases) release();

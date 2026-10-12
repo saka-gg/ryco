@@ -249,6 +249,39 @@ describe("HostedRelayAttemptFactory", () => {
     expect(factory.lifecycleHandlers().recordGlobalConnectionState).toBe(false);
   });
 
+  it("probes the account subscription once when a unary request goes unanswered", async () => {
+    vi.useFakeTimers();
+    const probe = vi.fn();
+    configureHostedRuntime({ ...fakeRuntime(), probeHubSubscription: probe }, hostedHubApi);
+    const factory = new HostedRelayAttemptFactory();
+    const lifecycle = factory.lifecycleHandlers();
+    const unary = { id: "1", tag: WS_METHODS.serverGetConfig, stream: false } as const;
+    const answered = { id: "2", tag: WS_METHODS.serverGetConfig, stream: false } as const;
+    const stream = { id: "3", tag: ORCHESTRATION_WS_METHODS.subscribeShell, stream: true } as const;
+    lifecycle.onRequestStart?.(unary);
+    lifecycle.onRequestStart?.(answered);
+    lifecycle.onRequestStart?.(stream);
+    await vi.advanceTimersByTimeAsync(1_000);
+    lifecycle.onRequestChunk?.({ ...answered, chunkCount: 1 });
+    await vi.advanceTimersByTimeAsync(3_999);
+    expect(probe).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(probe).toHaveBeenCalledOnce();
+    // Reported once; a silent stream never triggers a probe.
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(probe).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+
+    // A request answered in time, or interrupted, leaves nothing armed.
+    lifecycle.onRequestStart?.({ ...unary, id: "4" });
+    lifecycle.onRequestExit?.({ ...unary, id: "4" });
+    lifecycle.onRequestStart?.({ ...unary, id: "5" });
+    factory.reset();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(probe).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("exposes authoritative admission changes and releases their listener", () => {
     const factory = new HostedRelayAttemptFactory();
     const changed = vi.fn();

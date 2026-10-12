@@ -97,6 +97,7 @@ import {
 import { WorkspaceAccessPolicyLayer } from "./workspace/Layers/WorkspaceAccessPolicy.ts";
 import { OrchestrationReactor } from "./orchestration/Services/OrchestrationReactor.ts";
 import { ProviderSessionReaper } from "./provider/Services/ProviderSessionReaper.ts";
+import { ProviderInstanceBootGate } from "./provider/Services/ProviderInstanceBootGate.ts";
 import {
   RestartContinuation,
   type RestartContinuationShape,
@@ -194,6 +195,8 @@ const runOrphanedSessionReconciliation = (input: {
   readonly liveThreadIds?: ReadonlyArray<ThreadId>;
   readonly listSessionsFails?: boolean;
   readonly onReadModel?: () => void;
+  /** Serve the engine's in-memory read model instead of the SQL one. */
+  readonly engineReadModel?: boolean;
   readonly directory: Pick<ProviderSessionDirectoryShape, "getBinding" | "upsert">;
   readonly stopSessionBinding?: ProviderServiceShape["stopSessionBinding"];
   readonly dispatch: OrchestrationEngineShape["dispatch"];
@@ -271,9 +274,52 @@ const runOrphanedSessionReconciliation = (input: {
     } as unknown as ProviderServiceShape),
     Effect.provideService(OrchestrationEngineService, {
       dispatch: input.dispatch,
+      ...(input.engineReadModel
+        ? {
+            getReadModel: () =>
+              Effect.succeed({ threads: input.threads } as unknown as OrchestrationReadModel),
+          }
+        : {}),
     } as unknown as OrchestrationEngineShape),
     Effect.provideService(RestartContinuation, restartContinuationOff),
   );
+
+it.effect("repairs from the engine's in-memory read model instead of hydrating SQL again", () => {
+  const orphan = orphanedSessionThread({
+    id: "thread-engine-model-orphan",
+    status: "running",
+    activeTurnId: TurnId.make("turn-engine-model-orphan"),
+  });
+  const dispatches: OrchestrationCommand[] = [];
+  let sqlReads = 0;
+  return runOrphanedSessionReconciliation({
+    threads: [orphan],
+    engineReadModel: true,
+    onReadModel: () => {
+      sqlReads += 1;
+    },
+    directory: {
+      getBinding: () => Effect.succeed(Option.none()),
+      upsert: () => Effect.void,
+    },
+    dispatch: (command) =>
+      Effect.sync(() => {
+        dispatches.push(command);
+        return { sequence: dispatches.length };
+      }),
+  }).pipe(
+    Effect.tap(() =>
+      Effect.sync(() => {
+        assert.equal(sqlReads, 0);
+        assert.isTrue(
+          dispatches.some(
+            (command) => command.type === "thread.session.set" && command.threadId === orphan.id,
+          ),
+        );
+      }),
+    ),
+  );
+});
 
 it.effect("repairs orphaned provider sessions while preserving resumable binding state", () => {
   const orphan = orphanedSessionThread({
@@ -1391,7 +1437,7 @@ it.live(
           yield* Effect.sleep(Duration.millis(50));
           assert.deepStrictEqual(turnStarts(), []);
 
-          yield* startup.markHttpListening;
+          yield* startup.markHttpServing;
           yield* waitUntil(
             Effect.sync(() => turnStarts().length),
             (count) => count > 0,
@@ -1545,6 +1591,43 @@ it.live("records shutdown hints before the reactors stop", () => {
   );
 });
 
+it.live("opens the command gate without hydrating the SQL command read model", () => {
+  const order: string[] = [];
+  let engineReads = 0;
+  return Effect.gen(function* () {
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        const startup = yield* makeServerRuntimeStartup;
+        yield* startup.awaitCommandReady;
+      }),
+    );
+    // Unrestricted workspaces validate nothing; the orphan repair reads the engine's model.
+    assert.equal(engineReads, 1);
+  }).pipe(
+    Effect.provide(
+      Layer.mergeAll(
+        Layer.succeed(ProjectionSnapshotQuery, {
+          getCommandReadModel: () => Effect.die("the engine already holds this model"),
+          getCounts: () => Effect.succeed({ threadCount: 0, projectCount: 0 }),
+        } as unknown as ProjectionSnapshotQueryShape),
+        Layer.succeed(OrchestrationEngineService, {
+          getReadModel: () =>
+            Effect.sync(() => {
+              engineReads += 1;
+              return {
+                projects: [],
+                worktrees: [],
+                threads: [],
+              } as unknown as OrchestrationReadModel;
+            }),
+        } as unknown as OrchestrationEngineShape),
+      ).pipe(
+        Layer.provideMerge(shutdownOrderLayer({ order, recordShutdownHints: () => Effect.void })),
+      ),
+    ),
+  );
+});
+
 it.live(
   "cuts a hanging shutdown-hint write off after two seconds",
   () => {
@@ -1565,3 +1648,29 @@ it.live(
   },
   15_000,
 );
+
+it.live("releases deferred provider driver construction once the HTTP listener serves", () => {
+  const released: string[] = [];
+  return Effect.gen(function* () {
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        const startup = yield* makeServerRuntimeStartup;
+        yield* startup.awaitCommandReady;
+        assert.deepStrictEqual(released, []);
+        yield* startup.markHttpServing;
+        assert.deepStrictEqual(released, ["provider-instances"]);
+      }),
+    );
+  }).pipe(
+    Effect.provide(
+      shutdownOrderLayer({ order: [], recordShutdownHints: () => Effect.void }).pipe(
+        Layer.provideMerge(
+          Layer.succeed(ProviderInstanceBootGate, {
+            release: Effect.sync(() => void released.push("provider-instances")),
+            awaitInitialReconcile: Effect.void,
+          }),
+        ),
+      ),
+    ),
+  );
+});

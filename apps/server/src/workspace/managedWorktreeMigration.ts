@@ -20,6 +20,7 @@ import {
 import { resolveWorktreeCheckoutPath } from "../project/worktreeCheckoutPaths.ts";
 import { validateWorktreeRoot } from "../project/worktreeRoot.ts";
 import { assertWorktreeSetupComplete } from "../project/worktreeSetupState.ts";
+import { readWorkspacePlacement } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import type { WorkspaceLifecycleDeps } from "./WorkspaceLifecycle.ts";
 import { containsPath, samePath } from "./checkoutInspection.ts";
 
@@ -95,6 +96,7 @@ export function makeManagedWorktreeMigration(
   const idle = (worktree: OrchestrationWorktreeShell, candidate: string) =>
     Effect.gen(function* () {
       if (hasWorktreeCreationLease(candidate)) return false;
+      // The whole shell: pending work is judged from the live threads' summaries.
       const snapshot = yield* deps.snapshots.getShellSnapshot();
       if (
         snapshot.projects.some(
@@ -160,8 +162,8 @@ export function makeManagedWorktreeMigration(
   // Once fenced, all competing worktree metadata commands defer until commit.
   const refreshRevision = (row: Relocation) =>
     Effect.gen(function* () {
-      const snapshot = yield* deps.snapshots.getShellSnapshot();
-      const worktree = snapshot.worktrees?.find((item) => item.worktreeId === row.worktree_id);
+      const { worktrees } = yield* readWorkspacePlacement(deps.snapshots);
+      const worktree = worktrees.find((item) => item.worktreeId === row.worktree_id);
       if (
         !worktree ||
         worktree.projectId !== row.project_id ||
@@ -323,8 +325,8 @@ export function makeManagedWorktreeMigration(
           const journals =
             yield* sql<Relocation>`SELECT * FROM managed_worktree_relocations WHERE state IN ('moving', 'moved', 'deferred')`;
           for (const row of journals) yield* lockFor(row.worktree_id).withPermit(resume(row));
-          const snapshot = yield* deps.snapshots.getShellSnapshot();
-          for (const worktree of snapshot.worktrees ?? []) {
+          const placement = yield* readWorkspacePlacement(deps.snapshots);
+          for (const worktree of placement.worktrees) {
             if (
               worktree.origin === "main" ||
               worktree.origin === "manual" ||
@@ -332,7 +334,7 @@ export function makeManagedWorktreeMigration(
               worktree.checkoutRemovedAt != null
             )
               continue;
-            const project = snapshot.projects.find((item) => item.id === worktree.projectId);
+            const project = placement.projects.find((item) => item.id === worktree.projectId);
             // Only the old managed layout, in its original root. Imported/project-local paths stay put.
             if (!project || path.basename(path.dirname(worktree.worktreePath)) !== project.id)
               continue;

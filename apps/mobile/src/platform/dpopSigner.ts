@@ -1,5 +1,5 @@
 import type { DpopSignerService } from "@ryco/client-runtime/platform";
-import { createDpopProofSigner } from "@ryco/client-runtime/relay";
+import { createDpopProofSigner } from "@ryco/client-runtime/relay/dpop";
 
 import { getMobileDeviceSigningKey } from "./deviceKey";
 

@@ -55,7 +55,8 @@ const VCS_PROBES: ReadonlyArray<VcsProbe> = [
 ];
 
 const DISCOVERY_CACHE_KEY = "source-control-discovery" as const;
-export const SOURCE_CONTROL_DISCOVERY_CACHE_TTL = Duration.seconds(5);
+// Process-wide; serves `cached` discovery reads. Explicit refreshes bypass it.
+export const SOURCE_CONTROL_DISCOVERY_CACHE_TTL = Duration.minutes(2);
 
 export interface SourceControlDiscoveryShape {
   readonly discover: Effect.Effect<SourceControlDiscoveryResult>;

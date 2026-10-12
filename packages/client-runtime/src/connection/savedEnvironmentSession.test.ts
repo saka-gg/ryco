@@ -1,11 +1,14 @@
 import type { AuthSessionState } from "@ryco/contracts";
-import { describe, expect, it } from "vite-plus/test";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { RemoteEnvironmentAuthHttpError } from "./remoteApi.ts";
 import {
+  awaitSavedEnvironmentConfig,
   checkSavedEnvironmentSession,
   isSavedEnvironmentAwaitingRepair,
   isSavedEnvironmentCredentialRejection,
+  SAVED_ENVIRONMENT_CONFIG_SNAPSHOT_WAIT_MS,
+  SavedEnvironmentTimeoutError,
 } from "./savedEnvironmentSession.ts";
 
 const session = (authenticated: boolean) =>
@@ -66,5 +69,65 @@ describe("isSavedEnvironmentAwaitingRepair", () => {
     expect(isSavedEnvironmentAwaitingRepair({ authState: "authenticated" })).toBe(false);
     expect(isSavedEnvironmentAwaitingRepair({ authState: "unknown" })).toBe(false);
     expect(isSavedEnvironmentAwaitingRepair(undefined)).toBe(false);
+  });
+});
+
+describe("awaitSavedEnvironmentConfig", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const never = <T>() => new Promise<T>(() => undefined);
+
+  it("uses the subscription's snapshot and never reads the config when it arrives in time", async () => {
+    const readConfig = vi.fn(async () => "read");
+    await expect(
+      awaitSavedEnvironmentConfig({ snapshot: Promise.resolve("snapshot"), readConfig }),
+    ).resolves.toBe("snapshot");
+    expect(readConfig).not.toHaveBeenCalled();
+  });
+
+  it("reads the config once when no snapshot arrives within the wait, instead of failing", async () => {
+    vi.useFakeTimers();
+    const readConfig = vi.fn(async () => "read");
+    const result = awaitSavedEnvironmentConfig({ snapshot: never<string>(), readConfig });
+    await vi.advanceTimersByTimeAsync(SAVED_ENVIRONMENT_CONFIG_SNAPSHOT_WAIT_MS - 1);
+    expect(readConfig).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(result).resolves.toBe("read");
+    expect(readConfig).toHaveBeenCalledTimes(1);
+  });
+
+  it("takes a late snapshot that beats the fallback read", async () => {
+    vi.useFakeTimers();
+    let deliver: (value: string) => void = () => undefined;
+    const snapshot = new Promise<string>((resolve) => {
+      deliver = resolve;
+    });
+    const result = awaitSavedEnvironmentConfig({ snapshot, readConfig: () => never<string>() });
+    await vi.advanceTimersByTimeAsync(SAVED_ENVIRONMENT_CONFIG_SNAPSHOT_WAIT_MS + 10);
+    deliver("late snapshot");
+    await expect(result).resolves.toBe("late snapshot");
+  });
+
+  it("fails at once on a credential rejection, without reading the config", async () => {
+    vi.useFakeTimers();
+    const rejection = new Error("rejected");
+    const readConfig = vi.fn(async () => "read");
+    const result = awaitSavedEnvironmentConfig({ snapshot: Promise.reject(rejection), readConfig });
+    await expect(result).rejects.toBe(rejection);
+    expect(readConfig).not.toHaveBeenCalled();
+  });
+
+  it("stays bounded when neither the snapshot nor the read answers", async () => {
+    vi.useFakeTimers();
+    const result = awaitSavedEnvironmentConfig({
+      snapshot: never<string>(),
+      readConfig: () => never<string>(),
+      timeoutMs: 5_000,
+    });
+    const settled = expect(result).rejects.toBeInstanceOf(SavedEnvironmentTimeoutError);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await settled;
   });
 });

@@ -45,6 +45,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 import * as Layer from "effect/Layer";
 import * as Effect from "effect/Effect";
 
+import { trackStartupPhase } from "../startupStallMonitor.ts";
 import Migration0057 from "./Migrations/057_AutomationCentre.ts";
 
 // Import all migrations statically
@@ -116,6 +117,12 @@ import Migration0083, {
   ensureProjectionThreadLineageForkColumns,
 } from "./Migrations/083_ProjectionThreadLineageFork.ts";
 import Migration0084, { ensureThreadForksTable } from "./Migrations/084_ThreadForks.ts";
+import Migration0085, {
+  ensureProjectionThreadActivityKindIndex,
+} from "./Migrations/085_ProjectionThreadActivityKindIndex.ts";
+import Migration0086, {
+  ensureProjectionProjectRepositoryIdentityColumns,
+} from "./Migrations/086_ProjectionProjectRepositoryIdentity.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -211,6 +218,8 @@ export const migrationEntries = [
   [82, "WorktreePullRequestLinks", Migration0082],
   [83, "ProjectionThreadLineageFork", Migration0083],
   [84, "ThreadForks", Migration0084],
+  [85, "ProjectionThreadActivityKindIndex", Migration0085],
+  [86, "ProjectionProjectRepositoryIdentity", Migration0086],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>
@@ -484,6 +493,26 @@ export const repairProjectionThreadLineageForkColumns = Effect.fn(
   }
 });
 
+// Activity kind index: run 085 again as a repair when a later id was recorded first
+// (parallel branches claim the same next id).
+export const repairProjectionThreadActivityKindIndex = Effect.fn(
+  "repairProjectionThreadActivityKindIndex",
+)(function* () {
+  if (yield* ensureProjectionThreadActivityKindIndex) {
+    yield* Effect.log("Repaired projection_thread_activities kind index");
+  }
+});
+
+// Persisted repository identity: run 086 again as a repair when a later id was
+// recorded first (parallel branches claim the same next id).
+export const repairProjectionProjectRepositoryIdentityColumns = Effect.fn(
+  "repairProjectionProjectRepositoryIdentityColumns",
+)(function* () {
+  if (yield* ensureProjectionProjectRepositoryIdentityColumns) {
+    yield* Effect.log("Repaired projection_projects repository identity columns");
+  }
+});
+
 // Unlike schema checks, the summary backfill scans the entire activity history.
 // Track its successful compatibility repair separately from the divergent
 // numerical migration ledger, and commit the marker with the repaired data.
@@ -585,76 +614,90 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
       );
     }
   }
-  const executedMigrations = yield* run({
-    loader: makeMigrationLoader(toMigrationInclusive),
-  });
-  if (toMigrationInclusive === undefined || toMigrationInclusive >= 31) {
-    yield* repairProjectionWorktreeTitleColumn();
-  }
-  if (toMigrationInclusive === undefined || toMigrationInclusive >= 34) {
-    yield* repairProjectionProjectAvatarColumns();
-  }
-  if (toMigrationInclusive === undefined || toMigrationInclusive >= 35) {
-    yield* repairProjectionTokenModeColumns();
-  }
-  // 037 introduced pr_state, which the backfill reads.
-  if (toMigrationInclusive === undefined || toMigrationInclusive >= 37) {
-    yield* repairProjectionWorktreePrTerminalAtColumn();
-  }
-  if (toMigrationInclusive === undefined || toMigrationInclusive >= 41) {
-    yield* repairProjectionThreadSubagentNestingColumns();
-  }
-  if (toMigrationInclusive === undefined || toMigrationInclusive >= 42) {
-    yield* repairContextHandoffRuntimeSessions();
-  }
-  if (toMigrationInclusive === undefined || toMigrationInclusive >= 44) {
-    yield* repairProjectionThreadReadModelMigrations(toMigrationInclusive ?? 47);
-  }
-  // Repair: 072 is skipped by the migrator when a later number was recorded first.
-  if (toMigrationInclusive === undefined || toMigrationInclusive >= 72) {
-    yield* ensureProjectionThreadLineageColumns;
-  }
-  // Repair: 073 is skipped by the migrator when a later number was recorded first.
-  if (toMigrationInclusive === undefined || toMigrationInclusive >= 73) {
-    yield* ensureProviderEffectIntentsTable;
-  }
-  // Repair: 074 is skipped by the migrator when a later number was recorded first.
-  if (toMigrationInclusive === undefined || toMigrationInclusive >= 74) {
-    yield* ensureRestartContinuationTables;
-  }
-  if (toMigrationInclusive === undefined || toMigrationInclusive >= 75) {
-    yield* repairProjectionThreadUsageLimitColumn();
-  }
-  if (toMigrationInclusive === undefined || toMigrationInclusive >= 76) {
-    yield* repairAuthSessionRotationColumns();
-  }
-  if (toMigrationInclusive === undefined || toMigrationInclusive >= 77) {
-    yield* repairThreadWorkspaceLifecycleColumns();
-  }
-  if (toMigrationInclusive === undefined || toMigrationInclusive >= 78) {
-    yield* ensureManagedWorktreeNaming;
-  }
-  // Repair: 079 is skipped by the migrator when a later number was recorded first, including
-  // development databases that recorded projectless chats' schema as 079 before it moved to 080.
-  if (toMigrationInclusive === undefined || toMigrationInclusive >= 79) {
-    yield* ensureWorktreeNotesTable;
-  }
-  if (toMigrationInclusive === undefined || toMigrationInclusive >= 80) {
-    yield* repairProjectKindAndRelocations();
-  }
-  if (toMigrationInclusive === undefined || toMigrationInclusive >= 81) {
-    yield* ensureNotesDocumentsTable;
-  }
-  if (toMigrationInclusive === undefined || toMigrationInclusive >= 82) {
-    yield* repairWorktreePullRequestLinksColumn();
-  }
-  if (toMigrationInclusive === undefined || toMigrationInclusive >= 83) {
-    yield* repairProjectionThreadLineageForkColumns();
-  }
-  // Repair: 084 is skipped by the migrator when a later number was recorded first.
-  if (toMigrationInclusive === undefined || toMigrationInclusive >= 84) {
-    yield* ensureThreadForksTable;
-  }
+  // Named separately for the startup stall monitor: the ledger pass and the post-ledger repairs
+  // (some backfill whole tables once) are the two places a slow boot stalls in here.
+  const executedMigrations = yield* trackStartupPhase(
+    "persistence.migrations.ledger",
+    run({ loader: makeMigrationLoader(toMigrationInclusive) }),
+  );
+  yield* trackStartupPhase(
+    "persistence.migrations.repairs",
+    Effect.gen(function* () {
+      if (toMigrationInclusive === undefined || toMigrationInclusive >= 31) {
+        yield* repairProjectionWorktreeTitleColumn();
+      }
+      if (toMigrationInclusive === undefined || toMigrationInclusive >= 34) {
+        yield* repairProjectionProjectAvatarColumns();
+      }
+      if (toMigrationInclusive === undefined || toMigrationInclusive >= 35) {
+        yield* repairProjectionTokenModeColumns();
+      }
+      // 037 introduced pr_state, which the backfill reads.
+      if (toMigrationInclusive === undefined || toMigrationInclusive >= 37) {
+        yield* repairProjectionWorktreePrTerminalAtColumn();
+      }
+      if (toMigrationInclusive === undefined || toMigrationInclusive >= 41) {
+        yield* repairProjectionThreadSubagentNestingColumns();
+      }
+      if (toMigrationInclusive === undefined || toMigrationInclusive >= 42) {
+        yield* repairContextHandoffRuntimeSessions();
+      }
+      if (toMigrationInclusive === undefined || toMigrationInclusive >= 44) {
+        yield* repairProjectionThreadReadModelMigrations(toMigrationInclusive ?? 47);
+      }
+      // Repair: 072 is skipped by the migrator when a later number was recorded first.
+      if (toMigrationInclusive === undefined || toMigrationInclusive >= 72) {
+        yield* ensureProjectionThreadLineageColumns;
+      }
+      // Repair: 073 is skipped by the migrator when a later number was recorded first.
+      if (toMigrationInclusive === undefined || toMigrationInclusive >= 73) {
+        yield* ensureProviderEffectIntentsTable;
+      }
+      // Repair: 074 is skipped by the migrator when a later number was recorded first.
+      if (toMigrationInclusive === undefined || toMigrationInclusive >= 74) {
+        yield* ensureRestartContinuationTables;
+      }
+      if (toMigrationInclusive === undefined || toMigrationInclusive >= 75) {
+        yield* repairProjectionThreadUsageLimitColumn();
+      }
+      if (toMigrationInclusive === undefined || toMigrationInclusive >= 76) {
+        yield* repairAuthSessionRotationColumns();
+      }
+      if (toMigrationInclusive === undefined || toMigrationInclusive >= 77) {
+        yield* repairThreadWorkspaceLifecycleColumns();
+      }
+      if (toMigrationInclusive === undefined || toMigrationInclusive >= 78) {
+        yield* ensureManagedWorktreeNaming;
+      }
+      // Repair: 079 is skipped by the migrator when a later number was recorded first, including
+      // development databases that recorded projectless chats' schema as 079 before it moved to 080.
+      if (toMigrationInclusive === undefined || toMigrationInclusive >= 79) {
+        yield* ensureWorktreeNotesTable;
+      }
+      if (toMigrationInclusive === undefined || toMigrationInclusive >= 80) {
+        yield* repairProjectKindAndRelocations();
+      }
+      if (toMigrationInclusive === undefined || toMigrationInclusive >= 81) {
+        yield* ensureNotesDocumentsTable;
+      }
+      if (toMigrationInclusive === undefined || toMigrationInclusive >= 82) {
+        yield* repairWorktreePullRequestLinksColumn();
+      }
+      if (toMigrationInclusive === undefined || toMigrationInclusive >= 83) {
+        yield* repairProjectionThreadLineageForkColumns();
+      }
+      // Repair: 084 is skipped by the migrator when a later number was recorded first.
+      if (toMigrationInclusive === undefined || toMigrationInclusive >= 84) {
+        yield* ensureThreadForksTable;
+      }
+      if (toMigrationInclusive === undefined || toMigrationInclusive >= 85) {
+        yield* repairProjectionThreadActivityKindIndex();
+      }
+      if (toMigrationInclusive === undefined || toMigrationInclusive >= 86) {
+        yield* repairProjectionProjectRepositoryIdentityColumns();
+      }
+    }),
+  );
   yield* Effect.log("Migrations ran successfully").pipe(
     Effect.annotateLogs({
       migrations: executedMigrations.map(([id, name]) => `${id}_${name}`),

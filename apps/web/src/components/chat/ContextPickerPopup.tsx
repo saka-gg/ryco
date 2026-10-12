@@ -14,6 +14,9 @@ import { ContextPickerTabs } from "./ContextPickerTabs";
 
 type TabId = "issues" | "prs";
 
+/** Same rows as the composer `#` picker, sliced from the shared open-list superset. */
+const CONTEXT_PICKER_LIST_LIMIT = 50;
+
 export function ContextPickerPopup(props: {
   environmentId: EnvironmentId | null;
   cwd: string;
@@ -34,11 +37,13 @@ export function ContextPickerPopup(props: {
     environmentId: props.environmentId,
     cwd: props.cwd,
     state: "open",
+    limit: CONTEXT_PICKER_LIST_LIMIT,
   });
   const prListQuery = useSourceControlChangeRequestList({
     environmentId: props.environmentId,
     cwd: props.cwd,
     state: "open",
+    limit: CONTEXT_PICKER_LIST_LIMIT,
   });
 
   // Client-side filter
@@ -83,6 +88,9 @@ export function ContextPickerPopup(props: {
     issueListQuery.isLoading || (needsServerSearchIssues && serverIssueSearchQuery.isLoading);
   const isLoadingPrs =
     prListQuery.isLoading || (needsServerSearchPrs && serverPrSearchQuery.isLoading);
+  // A failed list read must not pass for an empty one.
+  const issuesUnavailable = issueListQuery.error !== null && issueListQuery.data === null;
+  const prsUnavailable = prListQuery.error !== null && prListQuery.data === null;
 
   function handleFileChange(e: ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
@@ -168,14 +176,26 @@ export function ContextPickerPopup(props: {
             <ContextPickerList
               items={displayIssues}
               isLoading={isLoadingIssues}
-              emptyText={query.length > 0 ? "No matching issues" : "No open issues"}
+              emptyText={
+                issuesUnavailable
+                  ? "Couldn't load issues"
+                  : query.length > 0
+                    ? "No matching issues"
+                    : "No open issues"
+              }
               onSelect={props.onSelectIssue}
             />
           ) : (
             <ContextPickerList
               items={displayPrs as unknown as ReadonlyArray<SourceControlIssueSummary>}
               isLoading={isLoadingPrs}
-              emptyText={query.length > 0 ? "No matching PRs" : "No open PRs"}
+              emptyText={
+                prsUnavailable
+                  ? "Couldn't load PRs"
+                  : query.length > 0
+                    ? "No matching PRs"
+                    : "No open PRs"
+              }
               onSelect={(item) => props.onSelectChangeRequest(item as unknown as ChangeRequest)}
             />
           )}

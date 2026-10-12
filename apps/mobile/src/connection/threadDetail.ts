@@ -1,3 +1,4 @@
+import type { ThreadDetailSubscriptionRetainOptions } from "@ryco/client-runtime/connection";
 import type {
   EnvironmentId,
   MessageId,
@@ -16,10 +17,12 @@ const registry = createMobileConnectionRegistry();
 export function retainThreadDetailSubscription(
   environmentId: EnvironmentId,
   threadId: ThreadId,
+  options?: ThreadDetailSubscriptionRetainOptions,
 ): () => void {
   const releaseDetail = registry.driver.supervisor.retainThreadDetailSubscription(
     environmentId,
     threadId,
+    options,
   );
   const releaseConnectionDetail = mobileHostedConnectionScopes.retain(environmentId, {
     type: "thread-detail",

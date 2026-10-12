@@ -30,6 +30,11 @@ export type UsageLimitBannerThread = Omit<UsageLimitResumeThread, "usageLimit"> 
 
 type PendingAction = "resume" | "configure" | "snooze";
 
+/** One run of an action; its identity tells runs apart across thread switches. */
+interface PendingRun {
+  readonly action: PendingAction;
+}
+
 export function usageLimitBannerDescription(model: UsageLimitBannerModel): string {
   const resets = model.resetAt ? `Resets ${formatUsageLimitReset(model.resetAt)}` : null;
   switch (model.description) {
@@ -43,6 +48,8 @@ export function usageLimitBannerDescription(model: UsageLimitBannerModel): strin
       return "Resume to continue this thread.";
   }
 }
+
+const readNowMs = () => Date.now();
 
 /**
  * The composer banner for a usage-limited thread: Resume now (through the shared send
@@ -58,11 +65,22 @@ export function useUsageLimitBannerItem(input: {
   readonly snoozeEligibility: { readonly canSnooze: boolean };
 }): ComposerBannerStackItem | null {
   const { thread, environmentId, serverConfig, dispatchAllowed, snoozeEligibility } = input;
-  const [nowMs, setNowMs] = useState(() => Date.now());
-  const [pending, setPending] = useState<PendingAction | null>(null);
+  const [nowMs, setNowMs] = useState(readNowMs);
+  const [pendingRun, setPendingRun] = useState<PendingRun | null>(null);
   const [error, setError] = useState<{ readonly limitId: string; readonly message: string } | null>(
     null,
   );
+  // ChatView keeps this hook across thread switches: a newly shown thread
+  // starts from the current time with no action in flight.
+  const threadKey = thread ? `${environmentId ?? ""}:${thread.id}` : null;
+  const [stateThreadKey, setStateThreadKey] = useState(threadKey);
+  if (stateThreadKey !== threadKey) {
+    setStateThreadKey(threadKey);
+    setNowMs(readNowMs);
+    setPendingRun(null);
+    setError(null);
+  }
+  const pending = pendingRun?.action ?? null;
 
   const model = useMemo(
     () =>
@@ -95,7 +113,8 @@ export function useUsageLimitBannerItem(input: {
   const limitId = model.limit.limitId;
 
   const run = async (action: PendingAction, task: () => Promise<unknown>) => {
-    setPending(action);
+    const started: PendingRun = { action };
+    setPendingRun(started);
     setError(null);
     try {
       await task();
@@ -105,7 +124,9 @@ export function useUsageLimitBannerItem(input: {
         message: cause instanceof Error ? cause.message : "The request failed.",
       });
     } finally {
-      setPending(null);
+      // An action still in flight from the thread shown before a switch must
+      // not clear the pending state of one started since.
+      setPendingRun((current) => (current === started ? null : current));
       setNowMs(Date.now());
     }
   };

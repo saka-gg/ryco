@@ -2,6 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { ASSISTANT_ATTACHMENT_INSTRUCTIONS } from "../../assistantAttachments.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import type {
   Options as ClaudeQueryOptions,
@@ -609,6 +610,28 @@ describe("ClaudeAdapterLive", () => {
       assert.deepEqual(createInput?.options.settingSources, ["user", "project", "local"]);
       assert.equal(createInput?.options.permissionMode, "bypassPermissions");
       assert.equal(createInput?.options.allowDangerouslySkipPermissions, true);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("carries the attachment instructions in the session's system prompt", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      assert.equal(adapter.capabilities.attachmentInstructions, "session");
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("test-claudeadapter-attachments"),
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      const options = harness.getLastCreateQueryInput()?.options as
+        | { readonly appendSystemPrompt?: string }
+        | undefined;
+      assert.include(options?.appendSystemPrompt ?? "", ASSISTANT_ATTACHMENT_INSTRUCTIONS);
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
@@ -4834,6 +4857,93 @@ describe("ClaudeAdapterLive", () => {
         releaseInit();
         yield* Fiber.join(rewinding);
         assert.equal(harness.inputs[1]?.options.resumeSessionAt, "p0");
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    });
+  });
+
+  describe("CLI startup deadline", () => {
+    const startStartupSession = (adapter: ClaudeAdapterShape) =>
+      adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("runtime-claude-startup"),
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+    const sendStartupTurn = (adapter: ClaudeAdapterShape, input: string) =>
+      adapter.sendTurn({
+        threadId: THREAD_ID,
+        input,
+        attachments: [],
+        interactionMode: "default",
+      });
+
+    it.effect("waits for the CLI's initialize on the first turn only", () => {
+      const harness = makeSequencedHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        yield* startStartupSession(adapter);
+        yield* sendStartupTurn(adapter, "one");
+        yield* sendStartupTurn(adapter, "two");
+
+        const query = harness.queries[0]!;
+        assert.equal(query.initCalls, 1);
+        assert.deepEqual(query.setPermissionModeCalls, ["bypassPermissions", "bypassPermissions"]);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    });
+
+    it.effect("stops a CLI that never answers initialize and names the next step", () => {
+      const harness = makeSequencedHarness();
+      harness.setOnCreate((query) => {
+        query.initGate = new Promise<void>(() => undefined);
+      });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const exited: Array<ProviderRuntimeEvent> = [];
+        yield* Stream.runForEach(adapter.streamEvents, (event) =>
+          Effect.sync(() => {
+            if (event.type === "session.exited" || event.type === "turn.started") {
+              exited.push(event);
+            }
+          }),
+        ).pipe(Effect.forkChild);
+        yield* startStartupSession(adapter);
+
+        const sending = yield* sendStartupTurn(adapter, "hello").pipe(
+          Effect.flip,
+          Effect.forkChild,
+        );
+        const query = harness.queries[0]!;
+        for (let attempt = 0; attempt < 500 && query.initCalls === 0; attempt++) {
+          yield* Effect.promise(() => new Promise<void>((resolve) => setTimeout(resolve, 1)));
+        }
+        assert.equal(query.initCalls, 1);
+        yield* TestClock.adjust("29 seconds");
+        assert.equal(sending.pollUnsafe(), undefined);
+        yield* TestClock.adjust("1 second");
+        const error = yield* Fiber.join(sending);
+
+        assert.equal(error._tag, "ProviderAdapterRequestError");
+        assert.equal("method" in error ? error.method : undefined, "initialize");
+        assert.equal(
+          "detail" in error ? error.detail : undefined,
+          "`claude` did not answer the Claude Code `initialize` request within 30 seconds. Run `claude` in a terminal to check that it is signed in and that its plugins and MCP servers load, then send the message again.",
+        );
+        // No control request or prompt reached the hung CLI, and it was stopped.
+        assert.deepEqual(query.setPermissionModeCalls, []);
+        assert.equal(query.closeCalls, 1);
+        assert.deepEqual(yield* adapter.listSessions(), []);
+        yield* Effect.yieldNow;
+        assert.deepEqual(
+          exited.map((event) => event.type),
+          ["session.exited"],
+        );
       }).pipe(
         Effect.provideService(Random.Random, makeDeterministicRandomService()),
         Effect.provide(harness.layer),

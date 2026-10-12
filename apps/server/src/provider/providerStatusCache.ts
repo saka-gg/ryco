@@ -7,18 +7,34 @@ import {
 import { Cause, Effect, FileSystem, Path, Schema } from "effect";
 
 import { writeFileStringAtomically } from "../atomicWrite.ts";
+import type { ConfiguredProviderIdentity } from "./Services/ProviderInstanceRegistry.ts";
+
+/**
+ * Freshness record persisted next to a probed snapshot. `fingerprint` names every probe input
+ * (binary identity, effective settings, server build); a restart that computes the same
+ * fingerprint may trust the snapshot until `checkedAt` plus the persisted-freshness window
+ * instead of re-running a cold probe.
+ */
+export const ProviderProbeFreshness = Schema.Struct({
+  fingerprint: Schema.String,
+  checkedAt: Schema.String,
+});
+export type ProviderProbeFreshness = typeof ProviderProbeFreshness.Type;
+
+// The snapshot fields stay at the top level so pre-freshness cache files decode unchanged.
+const ProviderStatusCacheFile = Schema.Struct({
+  ...ServerProviderSchema.fields,
+  probeFreshness: Schema.optionalKey(ProviderProbeFreshness),
+});
 
 const decodeProviderStatusCache = Schema.decodeUnknownEffect(
-  Schema.fromJsonString(ServerProviderSchema),
+  Schema.fromJsonString(ProviderStatusCacheFile),
 );
 
-const mergeProviderModels = (
-  fallbackModels: ReadonlyArray<ServerProvider["models"][number]>,
-  cachedModels: ReadonlyArray<ServerProvider["models"][number]>,
-): ReadonlyArray<ServerProvider["models"][number]> => {
-  const fallbackSlugs = new Set(fallbackModels.map((model) => model.slug));
-  return [...fallbackModels, ...cachedModels.filter((model) => !fallbackSlugs.has(model.slug))];
-};
+export interface ProviderStatusCacheEntry {
+  readonly provider: ServerProvider;
+  readonly probeFreshness: ProviderProbeFreshness | undefined;
+}
 
 export const orderProviderSnapshots = (
   providers: ReadonlyArray<ServerProvider>,
@@ -30,44 +46,33 @@ export const orderProviderSnapshots = (
       left.instanceId.localeCompare(right.instanceId),
   );
 
-export const isCachedProviderCorrelated = (input: {
+/**
+ * Seed a configured instance from its persisted snapshot before its driver exists. Identity
+ * must match and the enabled state must agree with settings (a toggle is only reflected once
+ * the driver reports it); presentation fields always follow current settings.
+ */
+export const hydrateCachedProviderFromConfig = (input: {
   readonly cachedProvider: ServerProvider;
-  readonly fallbackProvider: ServerProvider;
-}): boolean =>
-  input.cachedProvider.instanceId === input.fallbackProvider.instanceId &&
-  input.cachedProvider.driver === input.fallbackProvider.driver;
-
-export const hydrateCachedProvider = (input: {
-  readonly cachedProvider: ServerProvider;
-  readonly fallbackProvider: ServerProvider;
-}): ServerProvider => {
-  if (!isCachedProviderCorrelated(input)) {
-    return input.fallbackProvider;
-  }
-
+  readonly identity: ConfiguredProviderIdentity;
+}): ServerProvider | undefined => {
+  const { cachedProvider, identity } = input;
   if (
-    !input.fallbackProvider.enabled ||
-    input.cachedProvider.enabled !== input.fallbackProvider.enabled
+    cachedProvider.instanceId !== identity.instanceId ||
+    cachedProvider.driver !== identity.driverKind ||
+    cachedProvider.enabled !== identity.enabled
   ) {
-    return input.fallbackProvider;
+    return undefined;
   }
-
-  const { message: _fallbackMessage, ...fallbackWithoutMessage } = input.fallbackProvider;
-  const hydratedProvider: ServerProvider = {
-    ...fallbackWithoutMessage,
-    models: mergeProviderModels(input.fallbackProvider.models, input.cachedProvider.models),
-    installed: input.cachedProvider.installed,
-    version: input.cachedProvider.version,
-    status: input.cachedProvider.status,
-    auth: input.cachedProvider.auth,
-    checkedAt: input.cachedProvider.checkedAt,
-    slashCommands: input.cachedProvider.slashCommands,
-    skills: input.cachedProvider.skills,
+  const {
+    updateState: _updateState,
+    accentColor: _cachedAccentColor,
+    ...cachedWithoutVolatile
+  } = cachedProvider;
+  return {
+    ...cachedWithoutVolatile,
+    ...(identity.displayName ? { displayName: identity.displayName } : {}),
+    ...(identity.accentColor ? { accentColor: identity.accentColor } : {}),
   };
-
-  return input.cachedProvider.message
-    ? { ...hydratedProvider, message: input.cachedProvider.message }
-    : hydratedProvider;
 };
 
 /**
@@ -111,7 +116,7 @@ export const resolveLegacyProviderStatusCachePath = Effect.fn(
   return path.join(input.cacheDir, `${input.provider}.json`);
 });
 
-export const readProviderStatusCache = (filePath: string) =>
+export const readProviderStatusCacheEntry = (filePath: string) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const exists = yield* fs.exists(filePath).pipe(Effect.orElseSucceed(() => false));
@@ -132,18 +137,29 @@ export const readProviderStatusCache = (filePath: string) =>
             path: filePath,
             issues: Cause.pretty(cause),
           }).pipe(Effect.as(undefined)),
-        onSuccess: Effect.succeed,
+        onSuccess: ({ probeFreshness, ...provider }): Effect.Effect<ProviderStatusCacheEntry> =>
+          Effect.succeed({ provider, probeFreshness }),
       }),
     );
   });
 
+export const readProviderStatusCache = (filePath: string) =>
+  readProviderStatusCacheEntry(filePath).pipe(Effect.map((entry) => entry?.provider));
+
 export const writeProviderStatusCache = (input: {
   readonly filePath: string;
   readonly provider: ServerProvider;
+  readonly probeFreshness?: ProviderProbeFreshness | undefined;
 }) => {
   const { updateState: _updateState, ...cacheableProvider } = input.provider;
   return writeFileStringAtomically({
     filePath: input.filePath,
-    contents: `${JSON.stringify(cacheableProvider, null, 2)}\n`,
+    contents: `${JSON.stringify(
+      input.probeFreshness
+        ? { ...cacheableProvider, probeFreshness: input.probeFreshness }
+        : cacheableProvider,
+      null,
+      2,
+    )}\n`,
   });
 };

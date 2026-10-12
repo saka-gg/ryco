@@ -38,6 +38,58 @@ export interface ThreadReadCachePublisherDeps {
   ) => Promise<void>;
 }
 
+/**
+ * The shell upload for one batch: the whole shell when it fits the batch
+ * limit, otherwise the most recently updated threads that do, with every
+ * project and worktree. A node with more threads than one batch holds (about
+ * 1.6k) used to fail every upload — so its cloud history never published at
+ * all — rather than show its most recent work. Returns the encoded size of the
+ * one-item batch so it is not serialized a second time to be measured.
+ */
+export function boundThreadReadCacheShell(
+  shell: OrchestrationShellSnapshot,
+  maxBatchBytes: number = MAX_BATCH_BYTES,
+): { readonly snapshot: OrchestrationShellSnapshot; readonly batchBytes: number } {
+  const batchBytes = (snapshot: OrchestrationShellSnapshot) =>
+    Buffer.byteLength(
+      JSON.stringify([{ kind: "shell", revision: shell.snapshotSequence, snapshot }]),
+      "utf8",
+    );
+  const whole = batchBytes(shell);
+  if (whole <= maxBatchBytes) return { snapshot: shell, batchBytes: whole };
+  let bytes = batchBytes({ ...shell, threads: [] });
+  const kept = new Set<OrchestrationShellSnapshot["threads"][number]>();
+  for (const thread of shell.threads.toSorted((a, b) => b.updatedAt.localeCompare(a.updatedAt))) {
+    // One separating comma per thread over-counts the first by a byte, which
+    // keeps the estimate on the safe side of the limit.
+    const threadBytes = Buffer.byteLength(JSON.stringify(thread), "utf8") + 1;
+    if (bytes + threadBytes > maxBatchBytes) break;
+    bytes += threadBytes;
+    kept.add(thread);
+  }
+  return {
+    snapshot: { ...shell, threads: shell.threads.filter((thread) => kept.has(thread)) },
+    batchBytes: bytes,
+  };
+}
+
+/** The shell item for an empty batch, and that one-item batch's encoded size. */
+function shellUpload(shell: OrchestrationShellSnapshot): {
+  readonly item: ThreadReadCacheUpload;
+  readonly batchBytes: number;
+  readonly threadIds: ReadonlySet<string>;
+} {
+  const bounded = boundThreadReadCacheShell(shell);
+  if (bounded.batchBytes > MAX_BATCH_BYTES) {
+    throw new Error("Cloud thread index exceeds the upload limit.");
+  }
+  return {
+    item: { kind: "shell", revision: shell.snapshotSequence, snapshot: bounded.snapshot },
+    batchBytes: bounded.batchBytes,
+    threadIds: new Set(bounded.snapshot.threads.map((thread) => thread.id)),
+  };
+}
+
 /** Only message display fields leave the node; attachment URLs and tool output do not. */
 export function threadReadCacheContent(
   messages: ReadonlyArray<OrchestrationMessage>,
@@ -78,7 +130,17 @@ export function createThreadReadCachePublisher(deps: ThreadReadCachePublisherDep
     items: ThreadReadCacheUpload[];
     versions: Map<string, string>;
     shellSequence: number | null;
+    shellThreadIds: ReadonlySet<string> | null;
   } | null = null;
+  /** The threads the last uploaded index lists. */
+  let publishedThreadIds: ReadonlySet<string> = new Set();
+  /**
+   * The last batch re-uploaded the shell and left thread content out for lack
+   * of room. A shell that fills most of a batch (a node with about 1.6k threads
+   * or more) changes sequence on every tick while an agent streams, so without
+   * this the content behind it never fit until activity stopped.
+   */
+  let shellCrowdedOutContent = false;
   let stopped = false;
   let running: Promise<void> | null = null;
 
@@ -87,6 +149,8 @@ export function createThreadReadCachePublisher(deps: ThreadReadCachePublisherDep
     publishedSequence = -1;
     shell = null;
     pending = null;
+    shellCrowdedOutContent = false;
+    publishedThreadIds = new Set();
     uploadedVersions.clear();
   };
   const isCurrent = (expectedNode: string) => !stopped && deps.nodeId() === expectedNode;
@@ -119,12 +183,23 @@ export function createThreadReadCachePublisher(deps: ThreadReadCachePublisherDep
       const items: ThreadReadCacheUpload[] = [];
       const versions = new Map<string, string>();
       let shellSequence: number | null = null;
-      if (publishedSequence !== shell.snapshotSequence) {
-        items.push({ kind: "shell", revision: shell.snapshotSequence, snapshot: shell });
+      let shellThreadIds: ReadonlySet<string> | null = null;
+      let size = 2;
+      const shellOutdated = publishedSequence !== shell.snapshotSequence;
+      // An already published shell that crowded content out of the last batch
+      // waits one batch for that content; the first shell never waits, since
+      // the cloud index must exist before anything else is useful. Content in
+      // such a batch is limited to threads the published index already lists,
+      // so a body never reaches the Hub ahead of the index that names it.
+      const shellYields = shellOutdated && shellCrowdedOutContent && publishedSequence !== -1;
+      if (shellOutdated && !shellYields) {
+        const upload = shellUpload(shell);
+        items.push(upload.item);
         shellSequence = shell.snapshotSequence;
+        shellThreadIds = upload.threadIds;
+        size = upload.batchBytes;
       }
-      let size = Buffer.byteLength(JSON.stringify(items), "utf8");
-      if (size > MAX_BATCH_BYTES) throw new Error("Cloud thread index exceeds the upload limit.");
+      let contentLeftOut = false;
       const recentThreads = shell.threads
         .toSorted((a, b) => b.updatedAt.localeCompare(a.updatedAt))
         .slice(0, MAX_THREADS);
@@ -141,6 +216,7 @@ export function createThreadReadCachePublisher(deps: ThreadReadCachePublisherDep
             ? `${thread.updatedAt}:${shell.snapshotSequence}`
             : thread.updatedAt;
         if (uploadedVersions.get(thread.id) === version) continue;
+        if (shellYields && !publishedThreadIds.has(thread.id)) continue;
         const detail = await deps.readThread(thread.id);
         if (!isCurrent(currentNode)) return;
         if (detail === null) continue;
@@ -151,18 +227,30 @@ export function createThreadReadCachePublisher(deps: ThreadReadCachePublisherDep
           snapshot: threadReadCacheContent(detail.messages),
         };
         const itemSize = Buffer.byteLength(JSON.stringify(item), "utf8") + 1;
-        if (size + itemSize > MAX_BATCH_BYTES) break;
+        if (size + itemSize > MAX_BATCH_BYTES) {
+          contentLeftOut = true;
+          break;
+        }
         size += itemSize;
         items.push(item);
         versions.set(thread.id, version);
       }
+      if (shellYields && items.length === 0) {
+        // Nothing was waiting after all: the shell need not wait either.
+        const upload = shellUpload(shell);
+        items.push(upload.item);
+        shellSequence = shell.snapshotSequence;
+        shellThreadIds = upload.threadIds;
+      }
+      shellCrowdedOutContent = shellSequence !== null && contentLeftOut;
       if (items.length === 0) return;
-      pending = { items, versions, shellSequence };
+      pending = { items, versions, shellSequence, shellThreadIds };
     }
     const batch = pending;
     await deps.upload(generation, batch.items);
     if (!isCurrent(currentNode)) return;
     if (batch.shellSequence !== null) publishedSequence = batch.shellSequence;
+    if (batch.shellThreadIds !== null) publishedThreadIds = batch.shellThreadIds;
     for (const [id, version] of batch.versions) uploadedVersions.set(id, version);
     pending = null;
   };

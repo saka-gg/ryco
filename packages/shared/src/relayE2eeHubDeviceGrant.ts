@@ -6,7 +6,8 @@ import {
 } from "@ryco/contracts/native-e2ee";
 import type { RelayCapability, RelayEffectiveRole } from "@ryco/contracts/relay";
 import { sha256 } from "@noble/hashes/sha2.js";
-import { Exit, Schema } from "effect";
+import * as Exit from "effect/Exit";
+import * as Schema from "effect/Schema";
 
 import {
   E2EE_ACCOUNT_GRANT_CAPABILITIES_MAX,

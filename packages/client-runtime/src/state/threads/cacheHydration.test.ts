@@ -1,10 +1,12 @@
 import { EnvironmentId, type OrchestrationShellSnapshot } from "@ryco/contracts";
 import { scopeThreadRef } from "@ryco/client-runtime/scoped";
-import { describe, expect, it } from "vite-plus/test";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
+import { deepFreeze } from "../../../test/deepFreeze.ts";
 import {
   demoteEnvironmentStateToCachedSnapshot,
   hydrateEnvironmentStateFromCache,
+  hydrateEnvironmentStatesFromCache,
   projectThreadReadCacheShell,
   selectBootstrapCompleteForEnvironment,
   selectCacheHydratedEnvironmentIds,
@@ -16,6 +18,7 @@ import {
   syncServerShellSnapshot,
   type AppState,
   type CachedEnvironmentShellSnapshot,
+  useStore,
 } from "./store.ts";
 import type { Project, SidebarThreadSummary, ThreadSession, ThreadShell } from "./types.ts";
 
@@ -294,5 +297,83 @@ describe("cache hydration", () => {
 
   it("demote is a no-op for an unknown environment", () => {
     expect(demoteEnvironmentStateToCachedSnapshot(EMPTY_STATE, ENV_A, 1)).toBe(EMPTY_STATE);
+  });
+});
+
+describe("batched cache hydration", () => {
+  afterEach(() => {
+    useStore.setState({ activeEnvironmentId: null, environmentStateById: {} });
+  });
+
+  it("applies several environments in one transition, like applying them one by one", () => {
+    const sequential = hydrateEnvironmentStateFromCache(
+      hydrateEnvironmentStateFromCache(EMPTY_STATE, cachedSnapshot(ENV_A), ENV_A),
+      cachedSnapshot(ENV_B),
+      ENV_B,
+    );
+    const batched = hydrateEnvironmentStatesFromCache(EMPTY_STATE, [
+      { environmentId: ENV_A, cached: cachedSnapshot(ENV_A) },
+      { environmentId: ENV_B, cached: cachedSnapshot(ENV_B) },
+    ]);
+    expect(batched).toEqual(sequential);
+    expect(selectCacheHydratedEnvironmentIds(batched)).toEqual([ENV_A, ENV_B]);
+  });
+
+  it("keeps the live-wins guard per environment", () => {
+    const live = syncServerShellSnapshot(EMPTY_STATE, EMPTY_WIRE_SNAPSHOT, ENV_A);
+    const state = hydrateEnvironmentStatesFromCache(live, [
+      { environmentId: ENV_A, cached: cachedSnapshot(ENV_A) },
+      { environmentId: ENV_B, cached: cachedSnapshot(ENV_B) },
+    ]);
+    expect(state.environmentStateById[ENV_A]).toBe(live.environmentStateById[ENV_A]);
+    expect(selectBootstrapCompleteForEnvironment(state, ENV_A)).toBe(true);
+    expect(selectCacheHydratedEnvironmentIds(state)).toEqual([ENV_B]);
+    expect(hydrateEnvironmentStatesFromCache(live, [])).toBe(live);
+  });
+
+  it("skips and reports an entry that fails, and still applies the others", () => {
+    const onEntryError = vi.fn();
+    const broken = { ...cachedSnapshot(ENV_A), threads: null } as never;
+    const state = hydrateEnvironmentStatesFromCache(
+      EMPTY_STATE,
+      [
+        { environmentId: ENV_A, cached: broken },
+        { environmentId: ENV_B, cached: cachedSnapshot(ENV_B) },
+      ],
+      onEntryError,
+    );
+    expect(onEntryError).toHaveBeenCalledExactlyOnceWith(ENV_A, expect.any(Error));
+    expect(state.environmentStateById[ENV_A]).toBeUndefined();
+    expect(selectCacheHydratedEnvironmentIds(state)).toEqual([ENV_B]);
+  });
+
+  it("commits once for the whole batch and never mutates published state", () => {
+    useStore.getState().hydrateEnvironmentStateFromCache(cachedSnapshot(ENV_A), ENV_A);
+    const published = useStore.getState().environmentStateById;
+    deepFreeze(published);
+    const listener = vi.fn();
+    const unsubscribe = useStore.subscribe(listener);
+    try {
+      const [thread] = cachedSnapshot(ENV_A).threads;
+      const updated = {
+        ...cachedSnapshot(ENV_A),
+        capturedAt: 1_755_000_000_001,
+        threads: [{ ...thread!, shell: { ...thread!.shell, title: "Renamed" } }],
+      };
+      useStore.getState().hydrateEnvironmentStatesFromCache([
+        { environmentId: ENV_A, cached: updated, options: { replaceCached: true } },
+        { environmentId: ENV_B, cached: cachedSnapshot(ENV_B) },
+      ]);
+      expect(listener).toHaveBeenCalledOnce();
+      const next = useStore.getState().environmentStateById;
+      expect(next).not.toBe(published);
+      expect(next[ENV_A]?.threadShellById["thread-1" as never]?.title).toBe("Renamed");
+      expect(published[ENV_A]?.threadShellById["thread-1" as never]?.title).toBe("thread-1");
+      // A batch that changes nothing does not notify.
+      useStore.getState().hydrateEnvironmentStatesFromCache([]);
+      expect(listener).toHaveBeenCalledOnce();
+    } finally {
+      unsubscribe();
+    }
   });
 });

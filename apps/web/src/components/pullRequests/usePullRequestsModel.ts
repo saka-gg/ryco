@@ -15,6 +15,7 @@ import { usePullRequestsLayoutStore } from "./pullRequestsLayoutStore";
 import {
   assemblePullRequestSelection,
   derivePullRequestsCapabilities,
+  shouldReadInvolvementLists,
   describePullRequestsListError,
   derivePullRequestSelectionChecks,
   derivePullRequestSelectionNextAction,
@@ -75,7 +76,8 @@ export function usePullRequestsModel(input: {
   const environmentId = repository?.environmentId ?? null;
   const cwd = repository?.cwd ?? null;
   const refreshMode = useSettings((settings) => settings.sourceControlRefreshMode);
-  const gitStatus = useGitStatus({ environmentId, cwd });
+  // Only the hosting provider is read here: the summary view (no git status or fetch).
+  const gitStatus = useGitStatus({ environmentId, cwd }, { view: "summary" });
   // Every git status push is a new object; keep the provider's identity while
   // what it says is unchanged, so the page context does not churn with it.
   const rawProvider = gitStatus.data?.sourceControlProvider ?? null;
@@ -93,7 +95,7 @@ export function usePullRequestsModel(input: {
   const state = resolvePullRequestsStateFilter(search);
   const pollInterval = useMemo(() => listPollInterval(refreshMode), [refreshMode]);
   const listInput = { environmentId, cwd, state, limit: PULL_REQUESTS_LIST_LIMIT } as const;
-  const involvementEnabled = listEnabled && capabilities.involvementFilters;
+  const involvementEnabled = shouldReadInvolvementLists({ listEnabled, provider, capabilities });
   const foldedGroups = usePullRequestsLayoutStore((state) => state.foldedGroups);
 
   const stateList = useSourceControlChangeRequestList(

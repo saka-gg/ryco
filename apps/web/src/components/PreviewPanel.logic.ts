@@ -1,7 +1,5 @@
 export type PreviewFileKind = "image" | "text" | "binary";
 
-export const PREVIEW_FILE_SIZE_LIMIT_BYTES = 512 * 1024;
-
 const IMAGE_EXTENSIONS = new Set(["gif", "jpeg", "jpg", "png", "svg", "webp"]);
 const TEXT_EXTENSIONS = new Set([
   "bash",
@@ -110,28 +108,46 @@ export function detectPreviewFileKind(input: {
   return "binary";
 }
 
-export type PreviewSizeGuard =
-  | {
-      readonly state: "within-limit";
-      readonly shouldFetch: true;
-      readonly sizeBytes: number;
-      readonly limitBytes: number;
-    }
-  | {
-      readonly state: "too-large";
-      readonly shouldFetch: false;
-      readonly sizeBytes: number;
-      readonly limitBytes: number;
-    };
+/**
+ * How an image preview gets its bytes. Raster images go through the binary
+ * read (magic-byte sniffed, 4 MiB cap); SVG is text, so it renders from the
+ * regular text read.
+ */
+export type PreviewImageSource = "raster" | "svg";
 
-export function resolvePreviewSizeGuard(
-  sizeBytes: number,
-  limitBytes = PREVIEW_FILE_SIZE_LIMIT_BYTES,
-): PreviewSizeGuard {
-  if (sizeBytes > limitBytes) {
-    return { state: "too-large", shouldFetch: false, sizeBytes, limitBytes };
+export function resolvePreviewImageSource(filePath: string): PreviewImageSource | null {
+  const extension = getPreviewExtension(filePath);
+  if (!IMAGE_EXTENSIONS.has(extension)) return null;
+  return extension === "svg" ? "svg" : "raster";
+}
+
+export function decodeBase64Bytes(base64: string): Uint8Array<ArrayBuffer> {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
   }
-  return { state: "within-limit", shouldFetch: true, sizeBytes, limitBytes };
+  return bytes;
+}
+
+/**
+ * Whether bytes of this type may back a same-origin `blob:` URL. Opening such a
+ * URL in its own tab renders it as a document of the app's origin, so only
+ * inert raster types qualify: never SVG (it can run script) or anything that
+ * is not an image, whatever a remote node reports.
+ */
+export function isInertRasterImageMimeType(mimeType: string): boolean {
+  const normalized = mimeType.toLowerCase().split(";", 1)[0]?.trim() ?? "";
+  return normalized.startsWith("image/") && !normalized.startsWith("image/svg");
+}
+
+/**
+ * SVG markup renders from a `data:` URL: it has an opaque origin and browsers
+ * refuse to open it as a top-level document, so scripts inside the file can
+ * never run with the app's origin.
+ */
+export function previewSvgDataUrl(svg: string): string {
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
 }
 
 function normalizePreviewEntryPath(pathValue: string): string {

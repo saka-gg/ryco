@@ -17,6 +17,9 @@ export default defineConfig([
       main: "src/desktopEntry.ts",
       desktopMain: "src/main.ts",
       shellEnvironmentWorker: "src/shellEnvironmentWorker.ts",
+      // Required first by the main process and via `--require` by Node-mode
+      // children (backend, MCP bridge); see src/compileCache.ts.
+      compileCache: "src/compileCache.ts",
     },
     clean: true,
     deps: {

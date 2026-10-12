@@ -197,7 +197,20 @@ jobs:
           cache-scope: build
 
       - name: Build
+        env:
+          # Unreferenced sourcemaps let the bundle budget check below name the
+          # modules each closure carries; they are never served.
+          RYCO_WEB_SOURCEMAP: hidden
         run: bun run build ${{ inputs['affected-base'] != '' && '--affected' || '' }}
+
+      # Per-closure budgets and forbidden-module rules for the standard web
+      # build (scripts/perf/bundleBudget.ts). Runs whenever the web app was
+      # built, i.e. whenever web or one of its workspace dependencies changed.
+      - name: Web bundle budgets
+        if: ${{ hashFiles('apps/web/dist/index.html') != '' }}
+        # An explicit bash shell runs with pipefail, so `tee` keeps the exit code.
+        shell: bash
+        run: bun run perf:bundle-budget | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Save Turbo cache
         if: ${{ always() && steps.setup.outputs['turbo-cache-key'] != '' }}

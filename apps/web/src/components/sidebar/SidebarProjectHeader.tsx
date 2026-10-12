@@ -22,7 +22,9 @@ import type {
 } from "../../sidebarProjectGrouping";
 import { type SortableProjectHandleProps } from "./SidebarProjectList";
 import { ProjectSettingsMenu } from "./ProjectSettingsMenu";
+import { useHasIntersectedViewport } from "./hooks/useHasIntersectedViewport";
 import { SIDEBAR_PROJECT_MEMBERS_ATTRIBUTE } from "../chat/promoteChatDialogStore";
+import { preloadDraftRoute } from "./threadNavigationIntent";
 
 export function SidebarProjectHeader(props: {
   project: SidebarProjectSnapshot;
@@ -31,13 +33,19 @@ export function SidebarProjectHeader(props: {
   projectExpanded: boolean;
   projectStatus: ThreadStatusPill | null;
   jiraProjectOpenUrlByProjectKey: ReadonlyMap<string, string>;
-  setProjectHeaderVisibilityNode: (node: HTMLElement | null) => void;
+  /**
+   * The pointer entered or focus moved into the header: its menus may open
+   * soon, so data they need (Jira links) can start loading.
+   */
+  onMenuIntent: () => void;
   onPointerDownCapture: (event: React.PointerEvent<HTMLButtonElement>) => void;
   onClick: (event: React.MouseEvent<HTMLButtonElement>) => void;
   onKeyDown: (event: React.KeyboardEvent<HTMLButtonElement>) => void;
   onContextMenu: (event: React.MouseEvent<HTMLButtonElement>) => void;
   onOpenProjectOverviewClick: (event: React.MouseEvent<HTMLButtonElement>) => void;
   onOpenNewWorktreeClick: (event: React.MouseEvent<HTMLButtonElement>) => void;
+  /** The pointer entered or focus reached "New workspace": its dialog may load now. */
+  onOpenNewWorktreeIntent: () => void;
   onOpenNewThreadClick: (event: React.MouseEvent<HTMLButtonElement>) => void;
   onCopyPath: (member: SidebarProjectGroupMember) => void;
   onGrouping: (member: SidebarProjectGroupMember) => void;
@@ -56,13 +64,14 @@ export function SidebarProjectHeader(props: {
     projectExpanded,
     projectStatus,
     jiraProjectOpenUrlByProjectKey,
-    setProjectHeaderVisibilityNode,
+    onMenuIntent,
     onPointerDownCapture,
     onClick,
     onKeyDown,
     onContextMenu,
     onOpenProjectOverviewClick,
     onOpenNewWorktreeClick,
+    onOpenNewWorktreeIntent,
     onOpenNewThreadClick,
   } = props;
 
@@ -70,9 +79,18 @@ export function SidebarProjectHeader(props: {
     () => project.memberProjectRefs.map(scopedProjectKey).join(" "),
     [project.memberProjectRefs],
   );
+  // Icons of projects far below the fold wait until the header nears the
+  // viewport (once there, it keeps its icon): a long project list no longer
+  // asks every node for every project's artwork on first render.
+  const [viewportRef, nearViewport] = useHasIntersectedViewport();
 
   return (
-    <div ref={setProjectHeaderVisibilityNode} className="group/project-header relative">
+    <div
+      ref={viewportRef}
+      className="group/project-header relative"
+      onFocusCapture={onMenuIntent}
+      onPointerEnter={onMenuIntent}
+    >
       <SidebarMenuButton
         ref={dragHandleProps?.setActivatorNodeRef}
         size="sm"
@@ -108,6 +126,7 @@ export function SidebarProjectHeader(props: {
           projectId={project.id}
           customAvatarContentHash={project.customAvatarContentHash ?? null}
           className="size-[18px]"
+          deferred={!nearViewport}
         />
         <span className="flex min-w-0 flex-1 items-center gap-2">
           <span className="min-w-0 flex-1 truncate text-xs font-medium text-foreground/90">
@@ -157,6 +176,8 @@ export function SidebarProjectHeader(props: {
                 data-testid="new-thread-composer-button"
                 className={`inline-flex size-5 cursor-pointer items-center justify-center rounded-md text-muted-foreground/60 hover:bg-secondary hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring ${SIDEBAR_ROW_ACTION_COARSE_CLASS_NAME}`}
                 onClick={onOpenNewThreadClick}
+                onPointerEnter={preloadDraftRoute}
+                onFocus={preloadDraftRoute}
               >
                 <SquarePenIcon className="size-3.5" />
               </button>
@@ -193,6 +214,8 @@ export function SidebarProjectHeader(props: {
                 data-testid="new-thread-button"
                 className={`inline-flex size-5 cursor-pointer items-center justify-center rounded-md text-muted-foreground/60 hover:bg-secondary hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring ${SIDEBAR_ROW_ACTION_COARSE_CLASS_NAME}`}
                 onClick={onOpenNewWorktreeClick}
+                onPointerEnter={onOpenNewWorktreeIntent}
+                onFocus={onOpenNewWorktreeIntent}
               >
                 <PlusIcon className="size-3.5" />
               </button>

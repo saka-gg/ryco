@@ -25,6 +25,7 @@ import {
   getResolvePullRequestTargetKey,
   gitScopeKey,
   invalidateScopes,
+  prefetchBranches,
   projectScopeKey,
   resetGitAtomsForTests,
   subscribeInvalidationScope,
@@ -194,6 +195,137 @@ describe("branch search atoms", () => {
 
     expect(getBranchesSnapshot(key).pages).toHaveLength(0);
     expect(getBranchesSnapshot(key).isPending).toBe(true);
+  });
+
+  it("shares one listRefs between a prefetch and a watcher of the same key", async () => {
+    let resolveRequest!: (value: VcsListRefsResult) => void;
+    listRefsSpy.mockReturnValue(
+      new Promise<VcsListRefsResult>((resolve) => {
+        resolveRequest = resolve;
+      }),
+    );
+    const target = { environmentId: ENVIRONMENT_A, cwd: "/repo/shared", query: "" };
+    const key = getBranchesTargetKey(target);
+
+    prefetchBranches(target);
+    const release = watchBranches(target);
+    await flush();
+    expect(listRefsSpy).toHaveBeenCalledTimes(1);
+
+    resolveRequest(makeRefsPage(0));
+    await flush();
+    expect(listRefsSpy).toHaveBeenCalledTimes(1);
+    expect(getBranchesSnapshot(key).pages).toHaveLength(1);
+    expect(getBranchesSnapshot(key).isPending).toBe(false);
+    release();
+  });
+
+  it("adopts a fresh list when a watcher remounts instead of refetching it", async () => {
+    listRefsSpy.mockImplementation(async (input: { cursor?: number }) =>
+      makeRefsPage(input.cursor ?? 0),
+    );
+    const target = { environmentId: ENVIRONMENT_A, cwd: "/repo/remount", query: "" };
+    const key = getBranchesTargetKey(target);
+
+    const releaseFirst = watchBranches(target);
+    await flush();
+    expect(listRefsSpy).toHaveBeenCalledTimes(1);
+    releaseFirst();
+
+    const releaseSecond = watchBranches(target);
+    await flush();
+    expect(listRefsSpy).toHaveBeenCalledTimes(1);
+    expect(getBranchesSnapshot(key).pages).toHaveLength(1);
+    releaseSecond();
+  });
+
+  it("refetches on remount once the list is stale or its scope was invalidated", async () => {
+    listRefsSpy.mockImplementation(async (input: { cursor?: number }) =>
+      makeRefsPage(input.cursor ?? 0),
+    );
+    const target = { environmentId: ENVIRONMENT_A, cwd: "/repo/stale", query: "" };
+
+    const releaseFirst = watchBranches(target);
+    await flush();
+    releaseFirst();
+    invalidateScopes([gitScopeKey("/repo/stale")]);
+    const releaseSecond = watchBranches(target);
+    await flush();
+    expect(listRefsSpy).toHaveBeenCalledTimes(2);
+    releaseSecond();
+
+    const now = Date.now();
+    const dateNow = vi.spyOn(Date, "now").mockReturnValue(now + 60_000);
+    try {
+      const releaseThird = watchBranches(target);
+      await flush();
+      expect(listRefsSpy).toHaveBeenCalledTimes(3);
+      releaseThird();
+    } finally {
+      dateNow.mockRestore();
+    }
+  });
+
+  it("does not vouch for a first page whose watcher left before it arrived", async () => {
+    listRefsSpy.mockImplementation(async (input: { cursor?: number }) =>
+      makeRefsPage(input.cursor ?? 0),
+    );
+    const target = { environmentId: ENVIRONMENT_A, cwd: "/repo/dropped", query: "" };
+
+    const releaseFirst = watchBranches(target);
+    await flush();
+    releaseFirst();
+
+    const now = Date.now();
+    const dateNow = vi.spyOn(Date, "now").mockReturnValue(now + 60_000);
+    try {
+      // The list is stale now; this watcher's refetch is dropped with it.
+      let resolveRequest!: (value: VcsListRefsResult) => void;
+      listRefsSpy.mockReturnValueOnce(
+        new Promise<VcsListRefsResult>((resolve) => {
+          resolveRequest = resolve;
+        }),
+      );
+      const releaseSecond = watchBranches(target);
+      await flush();
+      expect(listRefsSpy).toHaveBeenCalledTimes(2);
+      releaseSecond();
+      resolveRequest(makeRefsPage(0));
+      await flush();
+
+      // The cached pages are still the stale ones, so a new watcher refetches.
+      const releaseThird = watchBranches(target);
+      await flush();
+      expect(listRefsSpy).toHaveBeenCalledTimes(3);
+      releaseThird();
+    } finally {
+      dateNow.mockRestore();
+    }
+  });
+
+  it("clears a next-page load the previous watcher left in flight when adopting the list", async () => {
+    listRefsSpy.mockImplementation(async (input: { cursor?: number }) =>
+      makeRefsPage(input.cursor ?? 0),
+    );
+    const target = { environmentId: ENVIRONMENT_A, cwd: "/repo/next-page", query: "" };
+    const key = getBranchesTargetKey(target);
+
+    const releaseFirst = watchBranches(target);
+    await flush();
+    listRefsSpy.mockReturnValueOnce(new Promise<VcsListRefsResult>(() => undefined));
+    fetchNextBranchesPage(key);
+    expect(getBranchesSnapshot(key).isFetchingNextPage).toBe(true);
+    releaseFirst();
+
+    const releaseSecond = watchBranches(target);
+    await flush();
+    expect(listRefsSpy).toHaveBeenCalledTimes(2);
+    expect(getBranchesSnapshot(key).isFetchingNextPage).toBe(false);
+    fetchNextBranchesPage(key);
+    await flush();
+    expect(listRefsSpy).toHaveBeenCalledTimes(3);
+    expect(getBranchesSnapshot(key).pages).toHaveLength(2);
+    releaseSecond();
   });
 
   it("ignores a branch response that settles after its watcher is cleared", async () => {

@@ -1,10 +1,31 @@
 import "../index.css";
 
+import { page } from "vite-plus/test/browser";
 import { render } from "vitest-browser-react";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import ThreadWorkspacePanel, { AgentThreadPanel } from "./ThreadWorkspacePanel";
 import type { ThreadSubagentView } from "../threadWorkspaceViewModel";
+import { LazySimulatorPanel, loadSimulatorPanel } from "../workspacePanelPreload";
+
+/** The pull request surface chunk, held until a test releases it. */
+const pullRequestChunk = vi.hoisted(() => {
+  let release = () => {};
+  const released = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return { released, release: () => release(), resolvedAt: null as number | null };
+});
+
+vi.mock("./pullRequests/workspace/WorkspacePullRequestPanel", async () => {
+  await pullRequestChunk.released;
+  pullRequestChunk.resolvedAt = performance.now();
+  return { default: () => <div data-testid="pull-request-surface" /> };
+});
+
+vi.mock("./device/SimulatorPanel", () => ({
+  default: () => <div data-testid="simulator-surface" />,
+}));
 
 const routerState = vi.hoisted(() => ({
   navigate: null as null | ((options: unknown) => void),
@@ -174,6 +195,77 @@ describe("ThreadWorkspacePanel", () => {
       expect(rect.right).toBeLessThanOrEqual(launcherRect.right + 0.5);
       expect(rect.bottom).toBeLessThanOrEqual(launcherRect.bottom + 0.5);
     }
+  });
+
+  // A surface's loading state is an ordinary render, not a Suspense fallback,
+  // whose reveal React holds until 300 ms after it, however soon the chunk lands.
+  it("shows a cold surface right after its chunk lands", async () => {
+    routerState.search = { workspaceOpen: "1", workspaceTab: "pullRequest" };
+    const host = document.createElement("div");
+    host.style.width = "720px";
+    host.style.height = "520px";
+    host.style.display = "flex";
+    document.body.append(host);
+
+    mounted = await render(
+      <ThreadWorkspacePanel
+        mode="sidebar"
+        panelMode="pullRequest"
+        openedPanelModes={["pullRequest"]}
+        openedAgentKeys={[]}
+        onClosePanelTab={vi.fn()}
+      />,
+      { container: host },
+    );
+    await expect
+      .element(page.getByRole("status", { name: "Loading pull request..." }))
+      .toBeInTheDocument();
+
+    const committed = new Promise<number>((resolve) => {
+      const observer = new MutationObserver(() => {
+        if (!document.querySelector('[data-testid="pull-request-surface"]')) return;
+        observer.disconnect();
+        resolve(performance.now());
+      });
+      observer.observe(document.body, { childList: true, subtree: true });
+    });
+    pullRequestChunk.release();
+    const committedAt = await committed;
+
+    expect(pullRequestChunk.resolvedAt).not.toBeNull();
+    expect(committedAt - pullRequestChunk.resolvedAt!).toBeLessThan(150);
+  });
+
+  it("mounts a surface warmed by a preload site in its first commit", async () => {
+    await loadSimulatorPanel();
+    expect(LazySimulatorPanel.isLoaded()).toBe(true);
+    routerState.search = { workspaceOpen: "1", workspaceTab: "simulator" };
+    const host = document.createElement("div");
+    host.style.width = "720px";
+    host.style.height = "520px";
+    host.style.display = "flex";
+    document.body.append(host);
+    let loadingStateShown = false;
+    const observer = new MutationObserver(() => {
+      loadingStateShown ||= document.querySelector('[role="tabpanel"] [role="status"]') !== null;
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+
+    mounted = await render(
+      <ThreadWorkspacePanel
+        mode="sidebar"
+        panelMode="simulator"
+        openedPanelModes={["simulator"]}
+        openedAgentKeys={[]}
+        onClosePanelTab={vi.fn()}
+      />,
+      { container: host },
+    );
+    await expect.element(page.getByTestId("simulator-surface")).toBeInTheDocument();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    observer.disconnect();
+
+    expect(loadingStateShown).toBe(false);
   });
 
   it("renders the phone surface bar with a back affordance and 44px tab targets", async () => {

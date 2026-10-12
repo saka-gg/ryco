@@ -68,7 +68,7 @@ import {
   ResourceTelemetryHistoryInput,
   ResourceTelemetryHistory,
 } from "./resourceTelemetry.ts";
-import { Schema } from "effect";
+import * as Schema from "effect/Schema";
 import * as Rpc from "effect/rpc/Rpc";
 import * as RpcGroup from "effect/rpc/RpcGroup";
 
@@ -265,6 +265,7 @@ import {
   TerminalResizeInput,
   TerminalRestartInput,
   TerminalSessionSnapshot,
+  TerminalSubscribeEventsInput,
   TerminalSubscriptionResyncError,
   TerminalWriteInput,
 } from "./terminal.ts";
@@ -989,7 +990,14 @@ export const WsServerGetUsageSummaryRpc = Rpc.make(WS_METHODS.serverGetUsageSumm
 });
 
 export const WsServerDiscoverSourceControlRpc = Rpc.make(WS_METHODS.serverDiscoverSourceControl, {
-  payload: Schema.Struct({}),
+  payload: Schema.Struct({
+    /**
+     * Accept the server's recent discovery result instead of re-probing the
+     * VCS/forge CLIs (including networked auth checks). Background revalidation
+     * should set it; an explicit user refresh omits it.
+     */
+    cached: Schema.optional(Schema.Boolean),
+  }),
   success: SourceControlDiscoveryResult,
   error: AuthRpcError,
 });
@@ -2002,6 +2010,14 @@ export const WsOrchestrationGetThreadHistoryPageRpc = Rpc.make(
   },
 );
 
+export const WsOrchestrationSetThreadHistoryRecoveryRpc = Rpc.make(
+  ORCHESTRATION_WS_METHODS.setThreadHistoryRecovery,
+  {
+    payload: OrchestrationRpcSchemas.setThreadHistoryRecovery.input,
+    success: OrchestrationRpcSchemas.setThreadHistoryRecovery.output,
+  },
+);
+
 export const WsOrchestrationReplayEventsRpc = Rpc.make(ORCHESTRATION_WS_METHODS.replayEvents, {
   payload: OrchestrationReplayEventsInput,
   success: OrchestrationRpcSchemas.replayEvents.output,
@@ -2081,7 +2097,7 @@ export const WsContextHandoffReadExportChunkRpc = Rpc.make(
 );
 
 export const WsSubscribeTerminalEventsRpc = Rpc.make(WS_METHODS.subscribeTerminalEvents, {
-  payload: Schema.Struct({}),
+  payload: TerminalSubscribeEventsInput,
   success: TerminalEvent,
   error: Schema.Union([AuthRpcError, TerminalSubscriptionResyncError]),
   stream: true,
@@ -2449,6 +2465,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsOrchestrationSearchThreadMessagesRpc
   | typeof WsOrchestrationGetThreadWindowRpc
   | typeof WsOrchestrationGetThreadHistoryPageRpc
+  | typeof WsOrchestrationSetThreadHistoryRecoveryRpc
   | typeof WsOrchestrationReplayEventsRpc
   | typeof WsOrchestrationReplayEventsPageRpc
   | typeof WsOrchestrationSubscribeShellRpc
@@ -2650,6 +2667,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsOrchestrationSearchThreadMessagesRpc,
   WsOrchestrationGetThreadWindowRpc,
   WsOrchestrationGetThreadHistoryPageRpc,
+  WsOrchestrationSetThreadHistoryRecoveryRpc,
   WsOrchestrationReplayEventsRpc,
   WsOrchestrationReplayEventsPageRpc,
   WsOrchestrationSubscribeShellRpc,

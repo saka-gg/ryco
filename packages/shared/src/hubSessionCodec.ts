@@ -74,8 +74,24 @@ export function encodeHubSessionFrame(frame: HubSessionFrame): Result<Uint8Array
   return { ok: true, value: bytes };
 }
 
-/** All returned payloads are owned copies; the caller may erase the input. */
-export function decodeHubSessionFrame(bytes: Uint8Array): Result<HubSessionFrame> {
+export interface HubSessionDecodeOptions {
+  /**
+   * Return a `data` frame's payload as a view into `bytes` instead of a copy.
+   * For a caller that hands the payload to a consumer taking ownership of it
+   * (the relay engine decodes and zeroes what it receives) and that neither
+   * reuses nor erases `bytes` itself: the copy only left an unzeroed duplicate.
+   */
+  readonly borrowDataPayload?: boolean;
+}
+
+/**
+ * All returned payloads are owned copies, and the caller may erase the input,
+ * except a `data` payload decoded with `borrowDataPayload`.
+ */
+export function decodeHubSessionFrame(
+  bytes: Uint8Array,
+  options?: HubSessionDecodeOptions,
+): Result<HubSessionFrame> {
   if (bytes.byteLength < HUB_SESSION_HEADER_BYTES || bytes.byteLength > HUB_SESSION_MAX_FRAME_BYTES)
     return invalid;
   const streamId = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(1);
@@ -90,7 +106,11 @@ export function decodeHubSessionFrame(bytes: Uint8Array): Result<HubSessionFrame
       break;
     case 2:
       if (payload.byteLength < 1) return invalid;
-      frame = { type: "data", streamId, payload: Uint8Array.from(payload) };
+      frame = {
+        type: "data",
+        streamId,
+        payload: options?.borrowDataPayload === true ? payload : Uint8Array.from(payload),
+      };
       break;
     case 3: {
       if (payload.byteLength < 2 || payload.byteLength > HUB_SESSION_CLOSE_REASON_BYTES + 2)

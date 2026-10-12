@@ -33,7 +33,7 @@ import {
   RustRoverIcon,
   WebStormIcon,
 } from "../JetBrainsIcons";
-import { isMacPlatform, isWindowsPlatform } from "../../lib/utils";
+import { getEditorLabel } from "./editorLabels.logic";
 
 export const EDITOR_ICONS = {
   cursor: CursorIcon,
@@ -66,15 +66,7 @@ export const EDITOR_ICONS = {
   "file-manager": FolderClosedIcon,
 } satisfies Record<EditorId, Icon>;
 
-export function getEditorLabel(editor: EditorId, platform: string): string {
-  if (editor === "terminal" && isWindowsPlatform(platform)) return "Windows Terminal";
-  if (editor === "file-manager") {
-    if (isMacPlatform(platform)) return "Finder";
-    if (isWindowsPlatform(platform)) return "Explorer";
-    return "Files";
-  }
-  return EDITORS.find((e) => e.id === editor)?.label ?? editor;
-}
+export { getEditorLabel };
 
 export function resolveEditorOptions(
   platform: string,

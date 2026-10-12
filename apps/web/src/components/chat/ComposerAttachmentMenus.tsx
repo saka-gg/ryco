@@ -14,16 +14,29 @@ import { DateTime } from "effect";
 import { useCallback, useMemo } from "react";
 
 import type { ComposerTrigger } from "../../composer-logic";
-import type { DraftId } from "../../composerDraftStore";
+import { useComposerDraftStore, type DraftId } from "../../composerDraftStore";
+import {
+  canResolveProjectSearchEntriesLocally,
+  retryProjectSearchEntries,
+} from "~/rpc/projectAtoms";
 import { useProjectSearchEntries } from "~/rpc/useProject";
+import { useEnvironmentServerConfigSelector } from "~/hooks/useChatsAvailability";
 import {
   fetchSourceControlChangeRequestDetail,
   fetchSourceControlIssueDetail,
   useSourceControlChangeRequestList,
   useSourceControlIssueList,
 } from "~/rpc/useSourceControl";
+import { normalizeWorkspaceEntryQuery } from "@ryco/shared/workspaceEntrySearch";
 import { buildScopedSourceControlComposerItems } from "./composerSourceControlItems";
 import { resolveComposerMenuActiveItemId } from "./composerMenuHighlight";
+import {
+  type ComposerMenuEmptyState,
+  isRelatedPathQuery,
+  resolveComposerPathMenuEmptyState,
+  selectServerListsEmptyPathQuery,
+  shouldRequestComposerPathSearch,
+} from "./composerPathMenu";
 import { searchSlashCommandItems } from "./composerSlashCommandSearch";
 import { formatProviderSkillDisplayName } from "../../providerSkillPresentation";
 import { searchProviderSkills } from "../../providerSkillSearch";
@@ -33,6 +46,9 @@ import { toastManager } from "../ui/toast";
 import { type ComposerCommandItem, ComposerCommandMenu } from "./ComposerCommandMenu";
 
 const COMPOSER_PATH_QUERY_DEBOUNCE_MS = 120;
+const COMPOSER_PATH_SEARCH_LIMIT = 80;
+/** The `#` picker shows open issues and PRs from the shared superset list, sliced to this. */
+const COMPOSER_SOURCE_CONTROL_LIST_LIMIT = 50;
 const EMPTY_PROJECT_ENTRIES: ProjectEntry[] = [];
 
 export interface UseComposerAttachmentMenusParams {
@@ -51,7 +67,7 @@ export interface ComposerAttachmentMenusState {
   composerMenuSearchKey: string | null;
   activeComposerMenuItem: ComposerCommandItem | null;
   isComposerMenuLoading: boolean;
-  composerMenuEmptyState: string;
+  composerMenuEmptyState: ComposerMenuEmptyState;
 }
 
 /**
@@ -80,34 +96,69 @@ export function useComposerAttachmentMenus(
   const composerTriggerKind = composerTrigger?.kind ?? null;
   const pathTriggerQuery = composerTrigger?.kind === "path" ? composerTrigger.query : "";
   const isPathTrigger = composerTriggerKind === "path";
+  // Older servers reject an empty search query; until the server's live config
+  // says it lists the workspace for one, a bare `@` waits for the first
+  // typed character. A narrow selection: config pushes must not re-render the
+  // composer.
+  const listsBarePathTrigger = useEnvironmentServerConfigSelector(
+    environmentId,
+    selectServerListsEmptyPathQuery,
+  );
   const [debouncedPathQuery, composerPathQueryDebouncer] = useDebouncedValue(
     pathTriggerQuery,
     { wait: COMPOSER_PATH_QUERY_DEBOUNCE_MS },
     (debouncerState) => ({ isPending: debouncerState.isPending }),
   );
-  const effectivePathQuery = pathTriggerQuery.length > 0 ? debouncedPathQuery : "";
+  // A bare `@` requests the top-level listing at once, which also warms the
+  // server's index while the user types. A query answerable from cached
+  // results (narrowing a complete prefix result) skips the debounce.
+  const resolvesPathQueryLocally =
+    isPathTrigger &&
+    pathTriggerQuery.length > 0 &&
+    canResolveProjectSearchEntriesLocally({
+      environmentId,
+      cwd: gitCwd,
+      query: pathTriggerQuery,
+      limit: COMPOSER_PATH_SEARCH_LIMIT,
+    });
+  const effectivePathQuery =
+    pathTriggerQuery.length === 0 || resolvesPathQueryLocally
+      ? pathTriggerQuery
+      : debouncedPathQuery;
+  const normalizedEffectivePathQuery = normalizeWorkspaceEntryQuery(effectivePathQuery);
+  const requestsPathSearch = shouldRequestComposerPathSearch({
+    isPathTrigger,
+    query: effectivePathQuery,
+    serverListsEmptyQuery: listsBarePathTrigger,
+  });
   const workspaceEntriesQuery = useProjectSearchEntries({
     environmentId,
     cwd: gitCwd,
     query: effectivePathQuery,
-    enabled: isPathTrigger,
-    limit: 80,
+    enabled: requestsPathSearch,
+    limit: COMPOSER_PATH_SEARCH_LIMIT,
   });
-  const workspaceEntries = workspaceEntriesQuery.data?.entries ?? EMPTY_PROJECT_ENTRIES;
+  const pathResults = isRelatedPathQuery(
+    workspaceEntriesQuery.dataQuery,
+    normalizedEffectivePathQuery,
+  )
+    ? workspaceEntriesQuery.data
+    : null;
+  const workspaceEntries = pathResults?.entries ?? EMPTY_PROJECT_ENTRIES;
 
   const isSourceControlTrigger = composerTriggerKind === "source-control";
   const issueListQuery = useSourceControlIssueList({
     environmentId,
     cwd: gitCwd,
     state: "open",
-    limit: 50,
+    limit: COMPOSER_SOURCE_CONTROL_LIST_LIMIT,
     enabled: isSourceControlTrigger,
   });
   const changeRequestListQuery = useSourceControlChangeRequestList({
     environmentId,
     cwd: gitCwd,
     state: "open",
-    limit: 50,
+    limit: COMPOSER_SOURCE_CONTROL_LIST_LIMIT,
     enabled: isSourceControlTrigger,
   });
 
@@ -248,23 +299,51 @@ export function useComposerAttachmentMenus(
 
   const isComposerMenuLoading =
     (composerTriggerKind === "path" &&
-      ((pathTriggerQuery.length > 0 && composerPathQueryDebouncer.state.isPending) ||
-        workspaceEntriesQuery.isLoading ||
-        workspaceEntriesQuery.isFetching)) ||
+      ((pathTriggerQuery.length > 0 &&
+        !resolvesPathQueryLocally &&
+        composerPathQueryDebouncer.state.isPending) ||
+        (requestsPathSearch &&
+          (workspaceEntriesQuery.isLoading || workspaceEntriesQuery.isFetching)))) ||
     (composerTriggerKind === "source-control" &&
       (issueListQuery.isLoading || changeRequestListQuery.isLoading));
 
-  const composerMenuEmptyState = useMemo(() => {
+  const pathSearchError = workspaceEntriesQuery.error;
+  const pathResultsArePartial = pathResults?.partial === true;
+  const hasPathResults = workspaceEntriesQuery.data !== null;
+  const retryPathSearch = useCallback(() => {
+    retryProjectSearchEntries({
+      environmentId,
+      cwd: gitCwd,
+      limit: COMPOSER_PATH_SEARCH_LIMIT,
+    });
+  }, [environmentId, gitCwd]);
+  const composerMenuEmptyState = useMemo<ComposerMenuEmptyState>(() => {
     if (composerTriggerKind === "skill") {
-      return "No skills found. Try / to browse provider commands.";
+      return { text: "No skills found. Try / to browse provider commands." };
     }
     if (composerTriggerKind === "source-control") {
-      return "No matching issues or pull requests.";
+      return { text: "No matching issues or pull requests." };
     }
-    return composerTriggerKind === "path"
-      ? "No matching files or folders."
-      : "No matching command.";
-  }, [composerTriggerKind]);
+    if (composerTriggerKind !== "path") {
+      return { text: "No matching command." };
+    }
+    return resolveComposerPathMenuEmptyState({
+      requestsSearch: requestsPathSearch,
+      triggerQuery: pathTriggerQuery,
+      hasResults: hasPathResults,
+      error: pathSearchError,
+      partial: pathResultsArePartial,
+      onRetry: retryPathSearch,
+    });
+  }, [
+    composerTriggerKind,
+    hasPathResults,
+    pathResultsArePartial,
+    pathSearchError,
+    pathTriggerQuery,
+    requestsPathSearch,
+    retryPathSearch,
+  ]);
 
   return {
     composerMenuItems,
@@ -291,43 +370,72 @@ export interface ComposerSourceControlContextSelection {
   handleSelectChangeRequest: (cr: ChangeRequest) => Promise<void>;
 }
 
+const SOURCE_CONTROL_CONTEXT_FRESH_MS = 5 * 60 * 1000;
+
 /**
- * Owns fetch-and-attach for the `#` source-control context picker. Resolves
- * issue / PR detail on selection and appends it to the composer draft, with
- * duplicate detection and error toasts. Behavior-preserving extraction from
- * `ChatComposer`.
+ * Detail stand-in built from the list summary, so the chip appears at once.
+ * Its `staleAfter` is already due: a send before the real detail arrives
+ * re-fetches it like any stale context.
+ */
+function summaryContextDetail(
+  summary: SourceControlIssueSummary | ChangeRequest,
+): ComposerSourceControlContext["detail"] {
+  return { ...summary, body: "", comments: [], truncated: false };
+}
+
+/**
+ * Owns fetch-and-attach for the `#` source-control context picker. The chip is
+ * attached immediately from the picked summary; the issue / PR detail loads in
+ * the background and replaces it (the detail cache keeps it warm for sends).
+ * Duplicates toast, and a failed detail fetch removes the chip with an error.
  */
 export function useComposerSourceControlContextSelection(
   params: UseComposerSourceControlContextSelectionParams,
 ): ComposerSourceControlContextSelection {
   const { environmentId, gitCwd, composerDraftTarget, addSourceControlContext } = params;
+  const updateSourceControlContext = useComposerDraftStore(
+    (store) => store.updateSourceControlContext,
+  );
+  const removeSourceControlContext = useComposerDraftStore(
+    (store) => store.removeSourceControlContext,
+  );
 
-  const handleSelectIssue = useCallback(
-    async (issue: SourceControlIssueSummary) => {
-      if (!environmentId || !gitCwd) return;
-      const reference = `${issue.provider}#${issue.number}`;
-      try {
-        const detail = await fetchSourceControlIssueDetail({
-          environmentId,
-          cwd: gitCwd,
-          reference: String(issue.number),
-        });
-        const now = DateTime.fromDateUnsafe(new Date());
-        const staleAfter = DateTime.fromDateUnsafe(new Date(Date.now() + 5 * 60 * 1000));
-        const context: ComposerSourceControlContext = {
-          id: randomUUID(),
-          kind: "issue",
-          provider: issue.provider,
-          reference,
-          detail,
-          fetchedAt: now,
-          staleAfter,
-        };
-        const result = addSourceControlContext(composerDraftTarget, context);
-        if (!result.added && result.reason === "duplicate") {
+  const attachSourceControlContext = useCallback(
+    async (input: {
+      readonly kind: ComposerSourceControlContext["kind"];
+      readonly summary: SourceControlIssueSummary | ChangeRequest;
+      readonly fetchDetail: () => Promise<ComposerSourceControlContext["detail"]>;
+    }) => {
+      const { kind, summary } = input;
+      const reference = `${summary.provider}#${summary.number}`;
+      const attachedAt = DateTime.fromDateUnsafe(new Date());
+      const id = randomUUID();
+      const result = addSourceControlContext(composerDraftTarget, {
+        id,
+        kind,
+        provider: summary.provider,
+        reference,
+        detail: summaryContextDetail(summary),
+        fetchedAt: attachedAt,
+        staleAfter: attachedAt,
+      });
+      if (!result.added) {
+        if (result.reason === "duplicate") {
           toastManager.add({ type: "info", title: "Already attached." });
         }
+        return;
+      }
+      try {
+        const detail = await input.fetchDetail();
+        updateSourceControlContext(composerDraftTarget, id, {
+          detail,
+          fetchedAt: DateTime.fromDateUnsafe(new Date()),
+          staleAfter: DateTime.fromDateUnsafe(
+            new Date(Date.now() + SOURCE_CONTROL_CONTEXT_FRESH_MS),
+          ),
+        });
       } catch (err) {
+        removeSourceControlContext(composerDraftTarget, id);
         const message = err instanceof Error ? err.message : "unknown error";
         toastManager.add({
           type: "error",
@@ -335,43 +443,46 @@ export function useComposerSourceControlContextSelection(
         });
       }
     },
-    [environmentId, gitCwd, composerDraftTarget, addSourceControlContext],
+    [
+      addSourceControlContext,
+      composerDraftTarget,
+      removeSourceControlContext,
+      updateSourceControlContext,
+    ],
+  );
+
+  const handleSelectIssue = useCallback(
+    async (issue: SourceControlIssueSummary) => {
+      if (!environmentId || !gitCwd) return;
+      await attachSourceControlContext({
+        kind: "issue",
+        summary: issue,
+        fetchDetail: () =>
+          fetchSourceControlIssueDetail({
+            environmentId,
+            cwd: gitCwd,
+            reference: String(issue.number),
+          }),
+      });
+    },
+    [attachSourceControlContext, environmentId, gitCwd],
   );
 
   const handleSelectChangeRequest = useCallback(
     async (cr: ChangeRequest) => {
       if (!environmentId || !gitCwd) return;
-      const reference = `${cr.provider}#${cr.number}`;
-      try {
-        const detail = await fetchSourceControlChangeRequestDetail({
-          environmentId,
-          cwd: gitCwd,
-          reference: String(cr.number),
-        });
-        const now = DateTime.fromDateUnsafe(new Date());
-        const staleAfter = DateTime.fromDateUnsafe(new Date(Date.now() + 5 * 60 * 1000));
-        const context: ComposerSourceControlContext = {
-          id: randomUUID(),
-          kind: "change-request",
-          provider: cr.provider,
-          reference,
-          detail,
-          fetchedAt: now,
-          staleAfter,
-        };
-        const result = addSourceControlContext(composerDraftTarget, context);
-        if (!result.added && result.reason === "duplicate") {
-          toastManager.add({ type: "info", title: "Already attached." });
-        }
-      } catch (err) {
-        const message = err instanceof Error ? err.message : "unknown error";
-        toastManager.add({
-          type: "error",
-          title: `Couldn't fetch ${reference}: ${message}`,
-        });
-      }
+      await attachSourceControlContext({
+        kind: "change-request",
+        summary: cr,
+        fetchDetail: () =>
+          fetchSourceControlChangeRequestDetail({
+            environmentId,
+            cwd: gitCwd,
+            reference: String(cr.number),
+          }),
+      });
     },
-    [environmentId, gitCwd, composerDraftTarget, addSourceControlContext],
+    [attachSourceControlContext, environmentId, gitCwd],
   );
 
   return { handleSelectIssue, handleSelectChangeRequest };
@@ -384,7 +495,7 @@ export interface ComposerCommandMenuOverlayProps {
   isLoading: boolean;
   triggerKind: ComposerTrigger["kind"] | null;
   groupSlashCommandSections: boolean;
-  emptyStateText: string;
+  emptyState: ComposerMenuEmptyState;
   activeItemId: string | null;
   onHighlightedItemChange: (itemId: string | null) => void;
   onSelect: (item: ComposerCommandItem) => void;
@@ -404,7 +515,11 @@ export function ComposerCommandMenuOverlay(props: ComposerCommandMenuOverlayProp
         isLoading={props.isLoading}
         triggerKind={props.triggerKind}
         groupSlashCommandSections={props.groupSlashCommandSections}
-        emptyStateText={props.emptyStateText}
+        emptyStateText={props.emptyState.text}
+        loadingText={props.emptyState.loadingText}
+        errorText={props.emptyState.errorText}
+        onRetry={props.emptyState.onRetry}
+        footnote={props.emptyState.footnote}
         activeItemId={props.activeItemId}
         onHighlightedItemChange={props.onHighlightedItemChange}
         onSelect={props.onSelect}

@@ -38,6 +38,7 @@ import { DraftId, useComposerDraftStore } from "../composerDraftStore";
 import type { TurnDiffSummary } from "../types";
 import { ChangedFilesTree } from "./chat/ChangedFilesTree";
 import { DiffPanelLoadingState, DiffPanelShell, type DiffPanelMode } from "./DiffPanelShell";
+import { DiffWorkerPoolProvider } from "./DiffWorkerPoolProvider";
 import { PreviewFileEditor } from "./PreviewFileEditor";
 import { PREVIEW_FILE_UNSAFE_CSS } from "./PreviewFileStyles";
 import { createPreviewFileDocument, isPreviewFileSessionDirty } from "./PreviewFileEditSession";
@@ -63,8 +64,9 @@ import {
   detectPreviewFileKind,
   filterPreviewProjectEntries,
   inferPreviewLanguage,
-  resolvePreviewSizeGuard,
+  resolvePreviewImageSource,
 } from "./PreviewPanel.logic";
+import { PreviewImage } from "./PreviewImage";
 
 const subscribeNoSession = () => () => {};
 const readNoSession = () => null;
@@ -101,21 +103,6 @@ const PREVIEW_CODE_CSS = `
   }
 }
 `;
-
-type PreviewProjectEntryMetadata = {
-  readonly sizeBytes?: number;
-  readonly mimeType?: string;
-};
-
-type RichPreviewFileData = {
-  readonly relativePath: string;
-  readonly contents?: string;
-  readonly base64?: string;
-  readonly mimeType?: string;
-  readonly version?: string;
-  readonly encoding?: "utf8" | "utf8-bom";
-  readonly lineEnding?: "lf" | "crlf" | "cr" | "mixed";
-};
 
 function clampTreeWidth(width: number, containerWidth: number): number {
   const maxWidth = Math.max(
@@ -414,16 +401,10 @@ export default function PreviewPanel({ mode = "inline" }: PreviewPanelProps) {
     previousPreviewOpenRef.current = previewOpen;
   }, [previewSearch.preview]);
 
-  const selectedProjectEntry = selectedFilePath
-    ? projectFiles?.entries.find((entry) => entry.path === selectedFilePath)
-    : undefined;
-  const selectedProjectEntryMetadata = selectedProjectEntry as
-    | (typeof selectedProjectEntry & PreviewProjectEntryMetadata)
-    | undefined;
-  const selectedFileSizeGuard =
-    typeof selectedProjectEntryMetadata?.sizeBytes === "number"
-      ? resolvePreviewSizeGuard(selectedProjectEntryMetadata.sizeBytes)
-      : null;
+  // Raster images read through the binary API; the text read would always be
+  // rejected for them. Oversized files are refused by the server with a
+  // message, since workspace entries carry no size metadata.
+  const selectedImageSource = selectedFilePath ? resolvePreviewImageSource(selectedFilePath) : null;
 
   const selectedFileQuery = useProjectReadFile({
     environmentId: activeThread?.environmentId ?? null,
@@ -434,19 +415,13 @@ export default function PreviewPanel({ mode = "inline" }: PreviewPanelProps) {
       activeCwd &&
       selectedFilePath &&
       previewSearch.preview === "1" &&
-      (selectedFileSizeGuard?.shouldFetch ?? true),
+      selectedImageSource !== "raster",
     ),
   });
   const selectedFileData =
     selectedFileQuery.data?.relativePath === selectedFilePath ? selectedFileQuery.data : null;
-  const richSelectedFileData = selectedFileData as RichPreviewFileData | null;
-  const selectedFileMimeType =
-    richSelectedFileData?.mimeType ?? selectedProjectEntryMetadata?.mimeType ?? null;
   const selectedFileKind = selectedFilePath
-    ? detectPreviewFileKind({
-        filePath: selectedFilePath,
-        mimeType: selectedFileMimeType,
-      })
+    ? detectPreviewFileKind({ filePath: selectedFilePath })
     : "text";
   const selectedFileError =
     selectedFileQuery.error instanceof Error
@@ -594,7 +569,7 @@ export default function PreviewPanel({ mode = "inline" }: PreviewPanelProps) {
   }, [canSaveSelectedFile, hasUnsavedChanges, isSelectedFileEditable, saveSelectedFile]);
 
   const previewTextFile = useMemo(() => {
-    const contents = currentEditSession?.contents ?? richSelectedFileData?.contents;
+    const contents = currentEditSession?.contents ?? selectedFileData?.contents;
     if (!selectedFilePath || selectedFileKind !== "text" || contents === undefined) {
       return null;
     }
@@ -607,7 +582,7 @@ export default function PreviewPanel({ mode = "inline" }: PreviewPanelProps) {
     };
   }, [
     currentEditSession?.contents,
-    richSelectedFileData?.contents,
+    selectedFileData?.contents,
     selectedFileKind,
     selectedFilePath,
   ]);
@@ -790,12 +765,7 @@ export default function PreviewPanel({ mode = "inline" }: PreviewPanelProps) {
   );
 
   const selectedFileView =
-    selectedFileSizeGuard?.state === "too-large" && !currentEditSession ? (
-      <div className="flex flex-1 items-center justify-center px-5 text-center text-xs text-muted-foreground/70">
-        File is too large to preview ({selectedFileSizeGuard.sizeBytes} bytes). Limit is{" "}
-        {selectedFileSizeGuard.limitBytes} bytes.
-      </div>
-    ) : selectedFileQuery.isLoading && !selectedFileData && !currentEditSession ? (
+    selectedFileQuery.isLoading && !selectedFileData && !currentEditSession ? (
       <DiffPanelLoadingState label="Loading file preview..." />
     ) : selectedFileError && !selectedFileData && !currentEditSession ? (
       <div className="flex flex-1 items-center justify-center px-5 text-center text-xs text-muted-foreground/70">
@@ -922,16 +892,15 @@ export default function PreviewPanel({ mode = "inline" }: PreviewPanelProps) {
               Refresh failed: {selectedFileError}
             </div>
           ) : null}
-          {selectedFileKind === "image" && richSelectedFileData?.base64 ? (
-            <div className="flex min-h-0 flex-1 justify-center overflow-auto bg-background/70 p-3">
-              <img
-                alt={selectedFilePath ?? undefined}
-                className="max-h-full max-w-full object-contain"
-                src={`data:${selectedFileMimeType ?? "image/png"};base64,${
-                  richSelectedFileData.base64
-                }`}
-              />
-            </div>
+          {selectedFileKind === "image" && selectedImageSource && selectedFilePath ? (
+            <PreviewImage
+              environmentId={activeThread?.environmentId ?? null}
+              cwd={activeCwd}
+              relativePath={selectedFilePath}
+              source={selectedImageSource}
+              svgContents={selectedFileData?.contents}
+              refreshKey={latestSelectedFileRefreshKey}
+            />
           ) : isSelectedFileEditable && currentEditSession ? (
             <PreviewFileEditor
               cacheKey={currentEditSession.key}
@@ -944,11 +913,15 @@ export default function PreviewPanel({ mode = "inline" }: PreviewPanelProps) {
             />
           ) : currentEditSession?.diskState === "unknown" ? null : previewTextFile ? (
             <div className="min-h-0 flex-1 overflow-auto">
-              <DiffsFile
-                file={previewTextFile}
-                className="preview-panel-diffs-file"
-                options={previewFileOptions}
-              />
+              {/* Only this read-only view highlights through the worker pool;
+                  the editor tokenizes on the main thread. */}
+              <DiffWorkerPoolProvider>
+                <DiffsFile
+                  file={previewTextFile}
+                  className="preview-panel-diffs-file"
+                  options={previewFileOptions}
+                />
+              </DiffWorkerPoolProvider>
             </div>
           ) : (
             <pre
@@ -959,7 +932,7 @@ export default function PreviewPanel({ mode = "inline" }: PreviewPanelProps) {
                   : "overflow-auto",
               )}
             >
-              {richSelectedFileData?.contents ?? ""}
+              {selectedFileData?.contents ?? ""}
             </pre>
           )}
         </div>

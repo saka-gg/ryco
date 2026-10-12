@@ -4,6 +4,7 @@ import {
   deactivateHostedNode,
   suspendHostedNode,
 } from "@ryco/client-runtime/authorization";
+import { clearAllProjectIconCaches } from "@ryco/client-runtime/connection";
 import type { EnvironmentId } from "@ryco/contracts";
 
 import { useComposerDraftStore } from "../composerDraftStore";
@@ -93,6 +94,8 @@ export function clearWebHostedAccountScopedState(): void {
   });
   defaultQueryClient.clear();
   clearServerState();
+  // Project artwork outlives a connection (it is keyed by node), not an account.
+  clearAllProjectIconCaches();
 }
 
 export {

@@ -1,23 +1,22 @@
-import type { EnvironmentId, ThreadId } from "@ryco/contracts";
+import type { EnvironmentId } from "@ryco/contracts";
 
 import type { DeviceRpcClient } from "../../rpc/deviceRpcClient.ts";
 import { useDeviceStateStore } from "./store.ts";
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error && error.message.trim() ? error.message : String(error);
-}
-
 export interface DeviceConnectionBinding {
-  readonly refreshInventory: () => Promise<void>;
-  readonly refreshThread: (threadId: ThreadId) => Promise<void>;
   readonly reconnecting: () => void;
   readonly dispose: () => void;
 }
 
 /**
- * Owns one environment's event generation. Async responses and stream events
- * carry the generation captured at request time, so a replaced connection can
+ * Owns one environment's device event stream and its generation. Stream events
+ * carry the generation current when they arrive, so a replaced connection can
  * never publish state into the new environment session.
+ *
+ * The event stream starts with the connection, because an agent can ask for
+ * the device pane at any time. The inventory is not read here: listing devices
+ * runs `xcrun simctl` / `adb` on the server, so the simulator pane lists on
+ * mount and again whenever the generation changes, never on every connect.
  */
 export function bindDeviceConnection(
   environmentId: EnvironmentId,
@@ -27,30 +26,6 @@ export function bindDeviceConnection(
   let generation = useDeviceStateStore.getState().beginConnection(environmentId);
   const store = () => useDeviceStateStore.getState();
 
-  const refreshInventory = async () => {
-    const requestGeneration = generation;
-    try {
-      const result = await client.list({ includeShutdown: true });
-      if (!active) return;
-      store().applyInventory(environmentId, requestGeneration, result.devices, result.availability);
-    } catch (error) {
-      if (!active) return;
-      store().markConnectionError(environmentId, requestGeneration, errorMessage(error));
-    }
-  };
-
-  const refreshThread = async (threadId: ThreadId) => {
-    const requestGeneration = generation;
-    try {
-      const snapshot = await client.getThreadState({ threadId });
-      if (!active) return;
-      store().applyThreadSnapshot(environmentId, requestGeneration, snapshot);
-    } catch (error) {
-      if (!active) return;
-      store().markConnectionError(environmentId, requestGeneration, errorMessage(error));
-    }
-  };
-
   const unsubscribe = client.onEvent(
     (event) => {
       if (active) store().applyEvent(environmentId, generation, event);
@@ -59,7 +34,6 @@ export function bindDeviceConnection(
       onResubscribe: () => {
         if (!active) return;
         generation = store().beginConnection(environmentId);
-        void refreshInventory();
       },
       onError: () => {
         if (active) {
@@ -72,11 +46,7 @@ export function bindDeviceConnection(
       },
     },
   );
-  void refreshInventory();
-
   return {
-    refreshInventory,
-    refreshThread,
     reconnecting: () => {
       if (!active) return;
       generation = store().beginConnection(environmentId);

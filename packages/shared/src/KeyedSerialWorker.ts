@@ -20,8 +20,11 @@
  *
  * @module KeyedSerialWorker
  */
-import type { Scope } from "effect";
-import { Cause, Effect, Option, TxRef } from "effect";
+import type * as Scope from "effect/Scope";
+import * as Cause from "effect/Cause";
+import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
+import * as TxRef from "effect/TxRef";
 
 import type { LosslessBackpressureQueuePolicy, QueuePolicyMetricsSnapshot } from "./QueuePolicy.ts";
 

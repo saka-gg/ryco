@@ -1,7 +1,7 @@
 /**
  * WorkspaceEntries - Effect service contract for cached workspace entry search.
  *
- * Owns indexed workspace entry search plus cache invalidation for workspace
+ * Owns indexed workspace entry search plus index revalidation for workspace
  * roots when the underlying filesystem changes.
  *
  * @module WorkspaceEntries
@@ -67,9 +67,18 @@ export interface WorkspaceEntriesShape {
   ) => Effect.Effect<ProjectSearchEntriesResult, WorkspaceEntriesError>;
 
   /**
-   * Drop any cached workspace entries for the given workspace root.
+   * Mark the workspace root's entries as changed. A root in recent use is
+   * re-indexed in the background (reads keep serving the previous index until
+   * then); an idle root drops its index.
    */
   readonly invalidate: (cwd: string) => Effect.Effect<void>;
+
+  /**
+   * Record a file written through Ryco: the path is added to the root's index
+   * right away (no rebuild for files it already lists), then reconciled by a
+   * background rebuild.
+   */
+  readonly recordFileWrite: (cwd: string, relativePath: string) => Effect.Effect<void>;
 }
 
 /**

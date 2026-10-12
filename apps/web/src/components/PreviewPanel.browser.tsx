@@ -11,7 +11,6 @@ import type { ReactNode } from "react";
 import { AppAtomRegistryProvider, resetAppAtomRegistryForTests } from "../rpc/atomRegistry";
 import { resetProjectPreviewAtomsForTests } from "../rpc/projectPreviewAtoms";
 import PreviewPanel from "./PreviewPanel";
-import { PREVIEW_FILE_SIZE_LIMIT_BYTES } from "./PreviewPanel.logic";
 
 type PreviewWriteFileInput = {
   readonly cwd: string;
@@ -32,8 +31,6 @@ const previewHarness = vi.hoisted(() => {
   type ReadFileResult = {
     readonly relativePath: string;
     readonly contents?: string;
-    readonly base64?: string;
-    readonly mimeType?: string;
     readonly version?: string;
     readonly encoding?: "utf8" | "utf8-bom";
     readonly lineEnding?: "lf" | "crlf" | "cr" | "mixed";
@@ -50,10 +47,20 @@ const previewHarness = vi.hoisted(() => {
     readonly draftId?: string;
   };
 
+  type BinaryFileResult = {
+    readonly relativePath: string;
+    readonly dataBase64: string;
+    readonly mimeType: string;
+    readonly sizeBytes: number;
+  };
+
   return {
     entries: [] as Entry[],
     readFiles: new Map<string, ReadFileResult>(),
+    binaryFiles: new Map<string, BinaryFileResult>(),
+    readFailures: new Map<string, string>(),
     readAttempts: [] as string[],
+    binaryReadAttempts: [] as string[],
     writeAttempts: [] as PreviewWriteFileInput[],
     writeFailure: null as { readonly reason: string; readonly message: string } | null,
     savedVersion: 0,
@@ -63,7 +70,10 @@ const previewHarness = vi.hoisted(() => {
     reset() {
       this.entries = [];
       this.readFiles = new Map();
+      this.binaryFiles = new Map();
+      this.readFailures = new Map();
       this.readAttempts = [];
+      this.binaryReadAttempts = [];
       this.writeAttempts = [];
       this.writeFailure = null;
       this.savedVersion = 0;
@@ -97,6 +107,11 @@ vi.mock("@pierre/diffs/react", () => ({
         <code>{props.file.contents}</code>
       </pre>
     ),
+}));
+
+// The shared highlight pool spawns real workers; these tests render plain output.
+vi.mock("./DiffWorkerPoolProvider", () => ({
+  DiffWorkerPoolProvider: (props: { children?: ReactNode }) => <>{props.children}</>,
 }));
 
 vi.mock("@tanstack/react-router", () => ({
@@ -133,6 +148,10 @@ vi.mock("../environmentApi", () => ({
       ),
       readFile: vi.fn().mockImplementation(({ relativePath }: { relativePath: string }) => {
         previewHarness.readAttempts.push(relativePath);
+        const failure = previewHarness.readFailures.get(relativePath);
+        if (failure) {
+          return Promise.reject(new Error(failure));
+        }
         const result = previewHarness.readFiles.get(relativePath);
         if (!result) {
           return Promise.reject(new Error("ENOENT: no such file"));
@@ -143,6 +162,13 @@ vi.mock("../environmentApi", () => ({
           lineEnding: "lf",
           ...result,
         });
+      }),
+      readFileBinary: vi.fn().mockImplementation(({ relativePath }: { relativePath: string }) => {
+        previewHarness.binaryReadAttempts.push(relativePath);
+        const result = previewHarness.binaryFiles.get(relativePath);
+        return result
+          ? Promise.resolve(result)
+          : Promise.reject(new Error("Not a supported image."));
       }),
       writeFile: vi.fn().mockImplementation((input: PreviewWriteFileInput) => {
         previewHarness.writeAttempts.push(input);
@@ -321,15 +347,14 @@ describe("PreviewPanel", () => {
     });
   });
 
-  it("renders image previews from base64 file content", async () => {
-    previewHarness.entries = [
-      { path: "assets/logo.png", kind: "file", mimeType: "image/png", sizeBytes: 128 },
-    ];
-    previewHarness.readFiles.set("assets/logo.png", {
+  it("renders raster image previews from the binary read without a text read", async () => {
+    previewHarness.entries = [{ path: "assets/logo.png", kind: "file" }];
+    previewHarness.binaryFiles.set("assets/logo.png", {
       relativePath: "assets/logo.png",
-      base64:
+      dataBase64:
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=",
       mimeType: "image/png",
+      sizeBytes: 70,
     });
 
     mounted = await renderPreviewPanel();
@@ -337,12 +362,52 @@ describe("PreviewPanel", () => {
 
     const image = page.getByRole("img", { name: "assets/logo.png" });
     await expect.element(image).toBeInTheDocument();
+    await expect.element(image).toHaveAttribute("src", expect.stringMatching(/^blob:/));
+    await vi.waitFor(() => {
+      expect((image.element() as HTMLImageElement).naturalWidth).toBe(1);
+    });
+    expect(previewHarness.binaryReadAttempts).toEqual(["assets/logo.png"]);
+    expect(previewHarness.readAttempts).not.toContain("assets/logo.png");
+  });
+
+  it("refuses binary reads that report a scriptable type", async () => {
+    previewHarness.entries = [{ path: "assets/logo.png", kind: "file" }];
+    previewHarness.binaryFiles.set("assets/logo.png", {
+      relativePath: "assets/logo.png",
+      dataBase64: btoa("<svg xmlns='http://www.w3.org/2000/svg'><script>alert(1)</script></svg>"),
+      mimeType: "image/svg+xml",
+      sizeBytes: 72,
+    });
+
+    mounted = await renderPreviewPanel();
+    await page.getByRole("button", { name: "assets/logo.png" }).click();
+
+    await expect.element(page.getByText("Not a supported image.")).toBeInTheDocument();
+    await expect
+      .element(page.getByRole("img", { name: "assets/logo.png" }))
+      .not.toBeInTheDocument();
+  });
+
+  it("renders SVG previews from the text read", async () => {
+    previewHarness.entries = [{ path: "assets/icon.svg", kind: "file" }];
+    previewHarness.readFiles.set("assets/icon.svg", {
+      relativePath: "assets/icon.svg",
+      contents:
+        '<svg xmlns="http://www.w3.org/2000/svg" width="2" height="3"><rect width="2" height="3"/></svg>',
+    });
+
+    mounted = await renderPreviewPanel();
+    await page.getByRole("button", { name: "assets/icon.svg" }).click();
+
+    const image = page.getByRole("img", { name: "assets/icon.svg" });
+    // A data: URL, never a same-origin blob: one that could run the SVG's scripts.
     await expect
       .element(image)
-      .toHaveAttribute(
-        "src",
-        "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=",
-      );
+      .toHaveAttribute("src", expect.stringMatching(/^data:image\/svg\+xml;/));
+    await vi.waitFor(() => {
+      expect((image.element() as HTMLImageElement).naturalHeight).toBe(3);
+    });
+    expect(previewHarness.binaryReadAttempts).toEqual([]);
   });
 
   it("renders text previews through syntax-highlighted output", async () => {
@@ -578,20 +643,18 @@ describe("PreviewPanel", () => {
       .not.toBeInTheDocument();
   });
 
-  it("shows a size warning and skips fetching oversized files", async () => {
-    previewHarness.entries = [
-      {
-        path: "logs/huge.log",
-        kind: "file",
-        sizeBytes: PREVIEW_FILE_SIZE_LIMIT_BYTES + 1,
-      },
-    ];
+  it("shows the server's refusal for files it will not preview", async () => {
+    previewHarness.entries = [{ path: "logs/huge.log", kind: "file" }];
+    previewHarness.readFailures.set(
+      "logs/huge.log",
+      "File is too large to preview (600000 bytes). Limit is 524288 bytes.",
+    );
 
     mounted = await renderPreviewPanel();
     await page.getByRole("button", { name: "logs/huge.log" }).click();
 
     await expect.element(page.getByText(/File is too large to preview/)).toBeInTheDocument();
-    expect(previewHarness.readAttempts).not.toContain("logs/huge.log");
+    expect(previewHarness.readAttempts).toContain("logs/huge.log");
   });
 
   it("pushes a full-width file view from the tree and returns with back on the phone surface", async () => {

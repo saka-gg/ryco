@@ -1,4 +1,4 @@
-import { decodeBase64Url, encodeBase64Url } from "@ryco/client-runtime/relay";
+import { decodeBase64Url, encodeBase64Url } from "@ryco/client-runtime/relay/base64url";
 import type { NodeE2eeCapabilityVerification } from "@ryco/shared/relayE2eeCapabilityVerify";
 import { e2eeKeyFingerprint, formatE2eeKeyFingerprint } from "@ryco/shared/relayE2eeKeys";
 import type { NodeE2eeCapabilityStatement } from "@ryco/shared/relayE2eeTranscripts";

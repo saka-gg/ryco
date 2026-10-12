@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { Effect, FileSystem, Layer, Path } from "effect";
-import sharp from "sharp";
+import { loadSharp } from "../../loadSharp.ts";
 
 import {
   ProjectAvatarStore,
@@ -27,8 +27,8 @@ export const makeProjectAvatarStore = (options: { readonly dataDir: string }) =>
             new ProjectAvatarStoreError(`unsupported content type ${input.contentType}`),
           );
         }
-        const resized = yield* Effect.promise(() =>
-          sharp(input.bytes)
+        const resized = yield* Effect.promise(async () =>
+          (await loadSharp())(input.bytes)
             .rotate()
             .resize(MAX_DIMENSION, MAX_DIMENSION, { fit: "inside", withoutEnlargement: true })
             .png({ quality: 90, compressionLevel: 9 })

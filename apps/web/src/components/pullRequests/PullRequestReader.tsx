@@ -1,11 +1,12 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 
+import { preloadableLazy, useLazyComponentReady } from "../../lib/preloadableLazy";
 import { cn } from "../../lib/utils";
 import { slidingTabId, slidingTabPanelId } from "../ui/sliding-tabs";
 import { ChecksTab } from "./checks/ChecksTab";
 import { CommitsTab } from "./commits/CommitsTab";
 import { ConversationTab } from "./conversation/ConversationTab";
-import { FilesTab } from "./files/FilesTab";
+import { PullRequestDiffSkeleton } from "./files/PullRequestDiffSkeleton";
 import { PullRequestBar } from "./PullRequestBar";
 import { usePullRequestsPage } from "./PullRequestsPageContext";
 import {
@@ -16,9 +17,33 @@ import {
 import { usePullRequestReaderStore } from "./pullRequestsLayoutStore";
 import { PULL_REQUESTS_TABS, type PullRequestsTab } from "./pullRequestsSearch";
 
+/**
+ * The Files tab carries the diff renderer and its syntax highlighter (about
+ * half of the page's JavaScript) while the reader opens on the conversation, so
+ * it is its own chunk. Selecting a change request mounts a reader, which starts
+ * loading it (the tab bar lives inside the reader, so this is earlier than any
+ * pointer intent on the Files tab could be). Once it has arrived the tab
+ * renders synchronously, so switching to it shows no fallback. Only a switch
+ * that beats the download sees the skeleton, never a Suspense fallback.
+ */
+const FilesTab = preloadableLazy(() =>
+  import("./files/FilesTab").then((module) => module.FilesTab),
+);
+
+function preloadPullRequestFilesTab(): void {
+  void FilesTab.preload();
+}
+
+function FilesTabBody() {
+  // The skeleton stands in only until the chunk lands; the tab itself mounts
+  // once, so its scroll position and expanded files are never reset.
+  const ready = useLazyComponentReady(FilesTab, true);
+  return ready ? <FilesTab /> : <PullRequestDiffSkeleton />;
+}
+
 const TAB_BODIES: Record<PullRequestsTab, () => React.ReactElement> = {
   conversation: ConversationTab,
-  files: FilesTab,
+  files: FilesTabBody,
   checks: ChecksTab,
   commits: CommitsTab,
 };
@@ -44,6 +69,10 @@ export function PullRequestReader() {
   useEffect(() => {
     if (readerKey) markTabVisited(readerKey, tab);
   }, [markTabVisited, readerKey, tab]);
+  // A selected change request is where the Files tab is one click away.
+  useEffect(() => {
+    preloadPullRequestFilesTab();
+  }, []);
 
   // Focus survives the remount: when the reader (or the full-page list) that
   // held focus was replaced by this one, continue on this reader's active tab.

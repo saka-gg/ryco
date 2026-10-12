@@ -1,4 +1,4 @@
-import { Schema } from "effect";
+import * as Schema from "effect/Schema";
 import {
   NonNegativeInt,
   PositiveInt,
@@ -107,9 +107,20 @@ export type GitResolvedPullRequest = typeof GitResolvedPullRequest.Type;
 
 // RPC Inputs
 
+/**
+ * `summary` streams only what a branch badge shows — `refName`,
+ * `sourceControlProvider`, `isDefaultRef`, `hasPrimaryRemote`, `hasUpstream`
+ * and `pr` — without git status, diffs or a fetch. Its working tree and
+ * ahead / behind counts are not computed and read as empty / zero. Servers
+ * without it answer with full status.
+ */
+export const VcsStatusView = Schema.Literals(["full", "summary"]);
+export type VcsStatusView = typeof VcsStatusView.Type;
+
 export const VcsStatusInput = Schema.Struct({
   cwd: TrimmedNonEmptyStringSchema,
   automaticRemoteRefreshIntervalMs: Schema.optional(NonNegativeInt),
+  view: Schema.optional(VcsStatusView),
 });
 export type VcsStatusInput = typeof VcsStatusInput.Type;
 

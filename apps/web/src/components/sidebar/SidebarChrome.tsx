@@ -10,7 +10,7 @@ import { Link, useLocation } from "@tanstack/react-router";
 import { WS_METHODS } from "@ryco/contracts";
 import { APP_BASE_NAME, APP_STAGE_LABEL, APP_VERSION } from "../../branding";
 import { useSettingsDialogStore } from "../../settingsDialogStore";
-import { SETTINGS_ROUTE_PATH } from "../../settingsRoute";
+import { preloadSettingsPage, SETTINGS_ROUTE_PATH } from "../../settingsRoute";
 import { SidebarFooter, SidebarHeader, useSidebar } from "../ui/sidebar";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { RycoLetterMark } from "../RycoLetterMark";
@@ -83,6 +83,10 @@ export const SidebarChromeHeader = memo(function SidebarChromeHeader({
               aria-label="Settings"
               aria-current={pathname === SETTINGS_ROUTE_PATH ? "page" : undefined}
               onClick={handleSettingsClick}
+              // Settings opens imperatively, so intent preloading is ours:
+              // the page chunk loads before the click instead of after it.
+              onPointerEnter={preloadSettingsPage}
+              onFocus={preloadSettingsPage}
               className={cn(
                 SIDEBAR_HEADER_ACTION_CLASS_NAME,
                 pathname === SETTINGS_ROUTE_PATH &&

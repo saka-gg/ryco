@@ -128,6 +128,24 @@ describe("buildBranchNamePrompt", () => {
 });
 
 describe("buildThreadTitlePrompt", () => {
+  it("asks for a title and a branch in one response when the branch is wanted", () => {
+    const combined = buildThreadTitlePrompt({
+      message: "Fix the reconnect spinner",
+      includeBranch: true,
+    });
+    expect(combined.prompt).toContain("Return a JSON object with keys: title, branch.");
+    expect(
+      Schema.decodeUnknownSync(combined.outputSchema)({ title: "Fix spinner", branch: "fix" }),
+    ).toEqual({ title: "Fix spinner", branch: "fix" });
+    expect(() =>
+      Schema.decodeUnknownSync(combined.outputSchema)({ title: "Fix spinner" }),
+    ).toThrow();
+
+    const titleOnly = buildThreadTitlePrompt({ message: "Fix the reconnect spinner" });
+    expect(titleOnly.prompt).toContain("Return a JSON object with key: title.");
+    expect(titleOnly.prompt).not.toContain("Branch should");
+  });
+
   it("includes the user message in the prompt", () => {
     const result = buildThreadTitlePrompt({
       message: "Investigate reconnect regressions after session restore",

@@ -51,10 +51,12 @@ import { useSettings } from "../hooks/useSettings";
 import { formatShortTimestamp } from "../timestampFormat";
 import { usePerfMark } from "../perf/tabSwitchInstrumentation";
 import { DiffPanelLoadingState, DiffPanelShell, type DiffPanelMode } from "./DiffPanelShell";
+import { DiffWorkerPoolProvider } from "./DiffWorkerPoolProvider";
 import { ToggleGroup, Toggle } from "./ui/toggle-group";
 import {
   buildDiffSearchIndex,
   deriveDiffSearchFileIndexes,
+  EMPTY_DIFF_SEARCH_INDEX,
   doesDiffSearchMatchRenderedLine,
   type DiffSearchMatch,
   findDiffSearchMatches,
@@ -130,6 +132,7 @@ interface ParsedDiffContent {
 // that scroll out / unmount are cancelled by @pierre/diffs on unmount, so the
 // queue does not stack as the selection changes.
 const renderablePatchCache = new DiffParseCache<ParsedDiffContent>();
+const DIFF_PANEL_PARSE_SCOPE = "diff-panel";
 
 function buildFileDiffRenderKey(fileDiff: FileDiffMetadata): string {
   return fileDiff.cacheKey ?? `${fileDiff.prevName ?? "none"}:${fileDiff.name}`;
@@ -351,7 +354,16 @@ interface DiffPanelProps {
 
 export { DiffWorkerPoolProvider } from "./DiffWorkerPoolProvider";
 
-export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
+/** Leases the shared highlight pool only while the review surface is mounted. */
+export default function DiffPanel(props: DiffPanelProps) {
+  return (
+    <DiffWorkerPoolProvider>
+      <DiffPanelContent {...props} />
+    </DiffWorkerPoolProvider>
+  );
+}
+
+function DiffPanelContent({ mode = "inline" }: DiffPanelProps) {
   usePerfMark("DiffPanel");
   const navigate = useNavigate();
   const { resolvedTheme } = useTheme();
@@ -516,6 +528,9 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
     toTurnCount: activeCheckpointRange?.toTurnCount ?? null,
     ignoreWhitespace: diffIgnoreWhitespace,
     cacheScope: selectedTurn ? `turn:${selectedTurn.turnId}` : conversationCacheScope,
+    // Each completed turn yields a new conversation key; the superseded
+    // full-range patch is dropped instead of being retained forever.
+    cacheSlot: selectedTurn ? null : "conversation",
     enabled: isGitRepo && !comparing && !reviewingLocal,
   });
   const selectedTurnCheckpointDiff = selectedTurn
@@ -568,7 +583,9 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
   const hasResolvedPatch = typeof selectedPatch === "string";
   const hasNoNetChanges = hasResolvedPatch && selectedPatch.trim().length === 0;
   const renderableContent = useMemo<ParsedDiffContent>(() => {
-    const parseScope = `diff-panel:${resolvedTheme}`;
+    // Parsing does not depend on the theme: the worker pool drops its highlight
+    // caches itself when the theme changes, so a theme toggle never re-parses.
+    const parseScope = DIFF_PANEL_PARSE_SCOPE;
     const normalizedPatch = typeof selectedPatch === "string" ? selectedPatch : "";
     if (normalizedPatch.length === 0) {
       activeDiffParser.parse("", parseScope);
@@ -583,7 +600,12 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
     const cacheKey = {
       turnId: turnScope,
       filePath: parseScope,
-      blobSha: buildPatchCacheKey(normalizedPatch),
+      // The local-changes revision is a server-side hash of both patches, so it
+      // already identifies the content without hashing megabytes again here.
+      blobSha:
+        reviewingLocal && localChanges.data && localScope
+          ? `revision:${localScope}`
+          : buildPatchCacheKey(normalizedPatch),
     };
     const cached = renderablePatchCache.get(cacheKey);
     if (cached) {
@@ -602,17 +624,23 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
     reviewingLocal,
     comparisonRevision,
     conversationCacheScope,
-    resolvedTheme,
+    localChanges.data,
+    localScope,
     selectedPatch,
     selectedTurn,
   ]);
   const renderablePatch = renderableContent.patch;
   const renderableFiles = renderableContent.files;
 
-  const diffSearchIndex = useMemo(() => buildDiffSearchIndex(renderableFiles), [renderableFiles]);
   const normalizedDiffSearchQuery = useMemo(
     () => normalizeDiffSearchQuery(effectiveDiffSearchQuery),
     [effectiveDiffSearchQuery],
+  );
+  // Indexing every line of a large patch is only worth it once someone searches.
+  const diffSearchActive = normalizedDiffSearchQuery.length > 0;
+  const diffSearchIndex = useMemo(
+    () => (diffSearchActive ? buildDiffSearchIndex(renderableFiles) : EMPTY_DIFF_SEARCH_INDEX),
+    [diffSearchActive, renderableFiles],
   );
   const diffSearchMatches = useMemo(
     () => findDiffSearchMatches(diffSearchIndex, effectiveDiffSearchQuery),

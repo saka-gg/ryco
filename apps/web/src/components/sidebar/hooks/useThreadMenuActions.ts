@@ -14,7 +14,7 @@ import {
   WorktreeId,
 } from "@ryco/contracts";
 import { openFolderWithFeedback } from "../../../lib/chatFolderActions";
-import { getEditorLabel } from "../../settings/SettingsPanels.editor";
+import { getEditorLabel } from "../../settings/editorLabels.logic";
 import {
   CHAT_EXTENSION_ACTION_PREFIX,
   type ChatRowMenuExtension,
@@ -173,15 +173,17 @@ export function useThreadMenuActions(params: {
 
   const attemptArchiveThread = useCallback(
     async (threadRef: ScopedThreadRef) => {
+      // Looked up outside the try: the React Compiler cannot lower value
+      // blocks inside try/catch and would skip this hook.
+      const thread = sidebarThreadByKeyRef.current.get(scopedThreadKey(threadRef));
+      if (thread !== undefined && !canArchiveSidebarThread(thread)) {
+        toastManager.add({
+          type: "warning",
+          title: "Send a message before archiving",
+        });
+        return;
+      }
       try {
-        const thread = sidebarThreadByKeyRef.current.get(scopedThreadKey(threadRef)) ?? null;
-        if (thread && !canArchiveSidebarThread(thread)) {
-          toastManager.add({
-            type: "warning",
-            title: "Send a message before archiving",
-          });
-          return;
-        }
         await archiveThread(threadRef);
       } catch (error) {
         toastManager.add(

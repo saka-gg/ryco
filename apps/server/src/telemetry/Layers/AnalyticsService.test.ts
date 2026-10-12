@@ -259,3 +259,49 @@ it.layer(NodeServices.layer)("AnalyticsService test", (it) => {
     }),
   );
 });
+
+// Live clock: the shutdown bound is a real timeout.
+it.live("bounds the shutdown flush when the telemetry host is slow", () =>
+  Effect.gen(function* () {
+    let requests = 0;
+    const serverConfigLayer = ServerConfig.layerTest(process.cwd(), {
+      prefix: "ryco-telemetry-shutdown-",
+    });
+    const configLayer = ConfigProvider.layer(
+      ConfigProvider.fromUnknown({
+        RYCO_TELEMETRY_ENABLED: true,
+        RYCO_POSTHOG_KEY: "phc_test_key",
+        RYCO_POSTHOG_HOST: "",
+        RYCO_TELEMETRY_FLUSH_BATCH_SIZE: 20,
+        RYCO_TELEMETRY_FLUSH_INTERVAL_MS: 60_000,
+      }),
+    );
+    // A host that takes far longer to answer than shutdown may wait.
+    yield* Layer.launch(
+      HttpServer.serve(
+        Effect.gen(function* () {
+          requests += 1;
+          yield* Effect.sleep("3 seconds");
+          return HttpServerResponse.jsonUnsafe({});
+        }),
+      ),
+    ).pipe(Effect.forkScoped);
+
+    const startedAt = Date.now();
+    yield* Effect.gen(function* () {
+      const analytics = yield* AnalyticsService;
+      yield* analytics.record("test.flush.shutdown", { index: 0 });
+    }).pipe(
+      Effect.provide(
+        AnalyticsServiceLayerLive.pipe(
+          Layer.provideMerge(serverConfigLayer),
+          Layer.provide(configLayer),
+        ),
+      ),
+    );
+    const shutdownMs = Date.now() - startedAt;
+
+    assert.equal(requests, 1);
+    assert.isBelow(shutdownMs, 2_000);
+  }).pipe(Effect.provide(Layer.merge(NodeHttpServer.layerTest, NodeServices.layer))),
+);

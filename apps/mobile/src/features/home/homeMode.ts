@@ -9,7 +9,6 @@ export interface HomeModeState {
   readonly mode: HomeMode;
   readonly queryByMode: Readonly<Record<HomeMode, string>>;
   readonly nodeScopeByMode: Readonly<Record<HomeMode, EnvironmentId | null>>;
-  readonly scrollOffsetByMode: Readonly<Record<HomeMode, number>>;
 }
 
 export type HomeModeAction =
@@ -19,15 +18,16 @@ export type HomeModeAction =
       readonly type: "set-node-scope";
       readonly mode: HomeMode;
       readonly environmentId: EnvironmentId | null;
-    }
-  | { readonly type: "set-scroll-offset"; readonly mode: HomeMode; readonly offset: number };
+    };
+
+// Scroll positions are not part of this state: they change on every scroll
+// frame and are kept outside React in `homeScrollMemory.ts`.
 
 export function createHomeModeState(initialMode: HomeMode = "inbox"): HomeModeState {
   return {
     mode: initialMode,
     queryByMode: { inbox: "", projects: "" },
     nodeScopeByMode: { inbox: null, projects: null },
-    scrollOffsetByMode: { inbox: 0, projects: 0 },
   };
 }
 
@@ -38,11 +38,7 @@ export function reduceHomeModeState(state: HomeModeState, action: HomeModeAction
     case "set-query": {
       const query = action.query;
       if (state.queryByMode[action.mode] === query) return state;
-      return {
-        ...state,
-        queryByMode: { ...state.queryByMode, [action.mode]: query },
-        scrollOffsetByMode: { ...state.scrollOffsetByMode, [action.mode]: 0 },
-      };
+      return { ...state, queryByMode: { ...state.queryByMode, [action.mode]: query } };
     }
     case "set-node-scope": {
       if (state.nodeScopeByMode[action.mode] === action.environmentId) return state;
@@ -52,15 +48,6 @@ export function reduceHomeModeState(state: HomeModeState, action: HomeModeAction
           ...state.nodeScopeByMode,
           [action.mode]: action.environmentId,
         },
-        scrollOffsetByMode: { ...state.scrollOffsetByMode, [action.mode]: 0 },
-      };
-    }
-    case "set-scroll-offset": {
-      const offset = Math.max(0, action.offset);
-      if (state.scrollOffsetByMode[action.mode] === offset) return state;
-      return {
-        ...state,
-        scrollOffsetByMode: { ...state.scrollOffsetByMode, [action.mode]: offset },
       };
     }
   }

@@ -55,6 +55,19 @@ describe("partitionReconcilableProjectRoots", () => {
     expect(result.available).toEqual([project]);
     expect(result.missing).toEqual([missingProject]);
   });
+
+  it("leaves chat projects out entirely: their folders are never repositories", () => {
+    const chat = { id: ProjectId.make("chat"), workspaceRoot: "/chats/a", kind: "chat" as const };
+    const missingChat = { ...chat, id: ProjectId.make("chat-missing"), workspaceRoot: "/gone" };
+    const promoted = { ...chat, id: ProjectId.make("promoted"), kind: "project" as const };
+    const result = partitionReconcilableProjectRoots(
+      [project, chat, missingChat, promoted],
+      (workspaceRoot) => workspaceRoot !== "/gone",
+    );
+
+    expect(result.available).toEqual([project, promoted]);
+    expect(result.missing).toEqual([]);
+  });
 });
 
 describe("planWorktreeReconciliation", () => {

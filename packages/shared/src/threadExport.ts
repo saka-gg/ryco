@@ -4,7 +4,7 @@ import {
   type OrchestrationThread,
   type ThreadForkedActivityPayload,
 } from "@ryco/contracts";
-import { Schema } from "effect";
+import * as Schema from "effect/Schema";
 
 import { modelSelectionRequiresContextHandoff } from "./model.ts";
 import { readThreadForkedActivity } from "./threadFork.ts";

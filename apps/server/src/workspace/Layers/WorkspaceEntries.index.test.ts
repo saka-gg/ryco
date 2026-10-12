@@ -1,0 +1,548 @@
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import { it, describe, expect } from "@effect/vitest";
+import { DateTime, Deferred, Effect, Fiber, FileSystem, Layer, Option, Path } from "effect";
+import { TestClock } from "effect/testing";
+import { ChildProcessSpawner } from "effect/process";
+
+import { VcsProcessExitError, type VcsListWorkspaceFilesResult } from "@ryco/contracts";
+
+import { ServerConfig } from "../../config.ts";
+import type { VcsDriverShape, VcsListWorkspaceFilesOptions } from "../../vcs/VcsDriver.ts";
+import * as VcsDriverRegistry from "../../vcs/VcsDriverRegistry.ts";
+import { WorkspaceEntries } from "../Services/WorkspaceEntries.ts";
+import { WorkspaceAccessPolicyLayer } from "./WorkspaceAccessPolicy.ts";
+import { WorkspaceEntriesLive } from "./WorkspaceEntries.ts";
+import { WorkspacePathsLive } from "./WorkspacePaths.ts";
+
+const EPOCH = DateTime.makeUnsafe(0);
+
+type ListWorkspaceFiles = (
+  cwd: string,
+  options?: VcsListWorkspaceFilesOptions,
+) => Effect.Effect<VcsListWorkspaceFilesResult, VcsProcessExitError>;
+
+function listing(paths: ReadonlyArray<string>, truncated = false): VcsListWorkspaceFilesResult {
+  return {
+    paths,
+    truncated,
+    freshness: { source: "live-local", observedAt: EPOCH, expiresAt: Option.none() },
+  } as VcsListWorkspaceFilesResult;
+}
+
+function makeDriver(listWorkspaceFiles: ListWorkspaceFiles): VcsDriverShape {
+  return {
+    capabilities: {
+      kind: "git",
+      supportsWorktrees: true,
+      supportsBookmarks: false,
+      supportsAtomicSnapshot: false,
+      supportsPushDefaultRemote: true,
+      ignoreClassifier: "native",
+    },
+    execute: () =>
+      Effect.succeed({
+        exitCode: ChildProcessSpawner.ExitCode(0),
+        stdout: "",
+        stderr: "",
+        stdoutTruncated: false,
+        stderrTruncated: false,
+      }),
+    detectRepository: () => Effect.succeed(null),
+    isInsideWorkTree: () => Effect.succeed(true),
+    listWorkspaceFiles,
+    listRemotes: () =>
+      Effect.succeed({
+        remotes: [],
+        freshness: { source: "live-local", observedAt: EPOCH, expiresAt: Option.none() },
+      }),
+    filterIgnoredPaths: (_cwd, relativePaths) => Effect.succeed(relativePaths),
+    initRepository: () => Effect.void,
+  };
+}
+
+/** WorkspaceEntries over a fake checkout whose listing is `listWorkspaceFiles`. */
+function makeLayer(listWorkspaceFiles: ListWorkspaceFiles) {
+  const driver = makeDriver(listWorkspaceFiles);
+  const registry = Layer.mock(VcsDriverRegistry.VcsDriverRegistry)({
+    get: () => Effect.succeed(driver),
+    detect: (input) =>
+      Effect.succeed({
+        kind: "git" as const,
+        driver,
+        repository: {
+          kind: "git" as const,
+          rootPath: input.cwd,
+          metadataPath: null,
+          freshness: { source: "live-local" as const, observedAt: EPOCH, expiresAt: Option.none() },
+        },
+      }),
+  });
+  return WorkspaceEntriesLive.pipe(
+    Layer.provide(WorkspacePathsLive),
+    Layer.provide(WorkspaceAccessPolicyLayer(undefined)),
+    Layer.provide(registry),
+    Layer.provideMerge(
+      ServerConfig.layerTest(process.cwd(), { prefix: "ryco-workspace-index-test-" }),
+    ),
+    Layer.provideMerge(NodeServices.layer),
+  );
+}
+
+const makeTempDir = Effect.fn(function* () {
+  const fileSystem = yield* FileSystem.FileSystem;
+  return yield* fileSystem.makeTempDirectoryScoped({ prefix: "ryco-workspace-index-" });
+});
+
+const search = (cwd: string, query: string, limit = 50) =>
+  Effect.gen(function* () {
+    const workspaceEntries = yield* WorkspaceEntries;
+    return yield* workspaceEntries.search({ cwd, query, limit });
+  });
+
+/** Lets background fibers (and real I/O they wait on) make progress. */
+const settle = Effect.promise(() => new Promise<void>((resolve) => setTimeout(resolve, 5)));
+
+describe("WorkspaceEntries index store", () => {
+  it.effect("searches every listed file, not an alphabetical prefix of the workspace", () => {
+    // 30k files: the previous index kept only the first 25k entries in path
+    // order, so everything under later top-level folders was unreachable.
+    const paths = Array.from(
+      { length: 30_000 },
+      (_, index) => `pkg${String(index % 30).padStart(2, "0")}/src/file-${index}.ts`,
+    );
+    return Effect.gen(function* () {
+      const cwd = yield* makeTempDir();
+      const result = yield* search(cwd, "pkg29/src/file-29999.ts");
+      expect(result.entries[0]?.path).toBe("pkg29/src/file-29999.ts");
+      expect(result.partial).toBeUndefined();
+
+      const workspaceEntries = yield* WorkspaceEntries;
+      const listed = yield* workspaceEntries.listEntries({ cwd });
+      // The tree payload stays capped, keeps the shallowest entries first and
+      // drops the derivable parent path.
+      expect(listed.entries).toHaveLength(25_000);
+      expect(listed.truncated).toBe(true);
+      expect(listed.entries.slice(0, 30).every((entry) => entry.kind === "directory")).toBe(true);
+      expect(listed.entries.some((entry) => "parentPath" in entry)).toBe(false);
+    }).pipe(Effect.provide(makeLayer(() => Effect.succeed(listing(paths)))));
+  });
+
+  it.effect("ranks the shallowest entries first for an empty query", () =>
+    Effect.gen(function* () {
+      const cwd = yield* makeTempDir();
+      const result = yield* search(cwd, "", 4);
+      expect(result.entries.map((entry) => entry.path)).toEqual([
+        "apps",
+        "packages",
+        "README.md",
+        "apps/web",
+      ]);
+      expect(result.entries[3]?.parentPath).toBe("apps");
+      expect(result.truncated).toBe(true);
+    }).pipe(
+      Effect.provide(
+        makeLayer(() =>
+          Effect.succeed(listing(["apps/web/src/index.ts", "packages/shared/a.ts", "README.md"])),
+        ),
+      ),
+    ),
+  );
+
+  it.effect("drops paths under ignored top-level directories and indexes each directory once", () =>
+    Effect.gen(function* () {
+      const cwd = yield* makeTempDir();
+      const result = yield* search(cwd, "", 50);
+      expect(result.entries.map((entry) => entry.path).toSorted()).toEqual([
+        "src",
+        "src/a",
+        "src/a/one.ts",
+        "src/a/two.ts",
+        "src/b.ts",
+      ]);
+    }).pipe(
+      Effect.provide(
+        makeLayer(() =>
+          Effect.succeed(
+            listing(["src/a/one.ts", "src/a/two.ts", "src/b.ts", "dist/out.js", "node_modules/x"]),
+          ),
+        ),
+      ),
+    ),
+  );
+
+  it.effect(
+    "serves the previous index while an invalidated root rebuilds in the background",
+    () => {
+      let paths = ["src/old.ts"];
+      let calls = 0;
+      return Effect.gen(function* () {
+        const cwd = yield* makeTempDir();
+        const workspaceEntries = yield* WorkspaceEntries;
+        expect((yield* search(cwd, "old")).entries.map((entry) => entry.path)).toContain(
+          "src/old.ts",
+        );
+        expect(calls).toBe(1);
+
+        paths = ["src/old.ts", "src/new.ts"];
+        yield* workspaceEntries.invalidate(cwd);
+
+        // The read does not wait for the rebuild it starts: it answers from the
+        // previous index.
+        expect((yield* search(cwd, "new")).entries).toEqual([]);
+        yield* settle;
+        expect(calls).toBe(2);
+        expect((yield* search(cwd, "new")).entries.map((entry) => entry.path)).toContain(
+          "src/new.ts",
+        );
+
+        // The debounced rebuild scheduled by the invalidation finds nothing left to do.
+        yield* TestClock.adjust(250);
+        yield* settle;
+        expect(calls).toBe(2);
+      }).pipe(
+        Effect.provide(
+          makeLayer(() =>
+            Effect.sync(() => {
+              calls += 1;
+              return listing(paths);
+            }),
+          ),
+        ),
+      );
+    },
+  );
+
+  it.effect(
+    "flags search results from an invalidated index and waits for the rebuild in listEntries",
+    () => {
+      let paths = ["src/old.ts"];
+      return Effect.gen(function* () {
+        const cwd = yield* makeTempDir();
+        const workspaceEntries = yield* WorkspaceEntries;
+        expect((yield* search(cwd, "old")).refreshing).toBeUndefined();
+
+        paths = ["src/old.ts", "src/new.ts"];
+        yield* workspaceEntries.invalidate(cwd);
+        expect((yield* search(cwd, "old")).refreshing).toBe(true);
+
+        // The files tree refetches right after a turn: it must see the turn's files.
+        const listed = yield* workspaceEntries.listEntries({ cwd });
+        expect(listed.entries.map((entry) => entry.path)).toContain("src/new.ts");
+        expect((yield* search(cwd, "new")).refreshing).toBeUndefined();
+      }).pipe(Effect.provide(makeLayer(() => Effect.sync(() => listing(paths)))));
+    },
+  );
+
+  it.effect("collapses a burst of invalidations into one background rebuild", () => {
+    let calls = 0;
+    return Effect.gen(function* () {
+      const cwd = yield* makeTempDir();
+      const workspaceEntries = yield* WorkspaceEntries;
+      yield* search(cwd, "a");
+
+      yield* workspaceEntries.invalidate(cwd);
+      yield* workspaceEntries.invalidate(cwd);
+      yield* workspaceEntries.invalidate(cwd);
+      yield* settle;
+      expect(calls).toBe(1);
+
+      yield* TestClock.adjust(250);
+      yield* settle;
+      expect(calls).toBe(2);
+      yield* search(cwd, "a");
+      yield* settle;
+      expect(calls).toBe(2);
+    }).pipe(
+      Effect.provide(
+        makeLayer(() =>
+          Effect.sync(() => {
+            calls += 1;
+            return listing(["a.ts"]);
+          }),
+        ),
+      ),
+    );
+  });
+
+  it.effect("revalidates an old index in the background instead of blocking the read", () => {
+    let paths = ["a.ts"];
+    let calls = 0;
+    return Effect.gen(function* () {
+      const cwd = yield* makeTempDir();
+      yield* search(cwd, "a");
+      paths = ["a.ts", "b.ts"];
+
+      yield* TestClock.adjust(15_000);
+      // Stale but immediate; the refresh it starts lands for the next read.
+      expect((yield* search(cwd, "b.ts")).entries).toEqual([]);
+      yield* settle;
+      expect(calls).toBe(2);
+      expect((yield* search(cwd, "b.ts")).entries.map((entry) => entry.path)).toEqual(["b.ts"]);
+    }).pipe(
+      Effect.provide(
+        makeLayer(() =>
+          Effect.sync(() => {
+            calls += 1;
+            return listing(paths);
+          }),
+        ),
+      ),
+    );
+  });
+
+  it.effect("adds files written through Ryco to the index before any rebuild", () =>
+    Effect.gen(function* () {
+      const cwd = yield* makeTempDir();
+      const workspaceEntries = yield* WorkspaceEntries;
+      yield* search(cwd, "x");
+
+      yield* workspaceEntries.recordFileWrite(cwd, "docs/plans/new-plan.md");
+      expect((yield* search(cwd, "new-plan")).entries.map((entry) => entry.path)).toEqual([
+        "docs/plans/new-plan.md",
+      ]);
+      expect((yield* search(cwd, "docs/plans")).entries.map((entry) => entry.path)).toContain(
+        "docs/plans",
+      );
+    }).pipe(
+      Effect.provide(
+        // Rebuilds never finish, so only the in-place patch can surface the file.
+        makeLayer(
+          (() => {
+            let calls = 0;
+            return () =>
+              calls++ === 0 ? Effect.succeed(listing(["src/existing.ts"])) : Effect.never;
+          })(),
+        ),
+      ),
+    ),
+  );
+
+  it.effect("adds only the ancestors of a written file that the index lacks", () =>
+    Effect.gen(function* () {
+      const cwd = yield* makeTempDir();
+      const workspaceEntries = yield* WorkspaceEntries;
+      yield* search(cwd, "x");
+
+      yield* workspaceEntries.recordFileWrite(cwd, "docs/plans/a.md");
+      const listed = (yield* search(cwd, "", 50)).entries.map((entry) => entry.path);
+      expect(listed.toSorted()).toEqual([
+        "docs",
+        "docs/plans",
+        "docs/plans/a.md",
+        "docs/readme.md",
+      ]);
+    }).pipe(
+      Effect.provide(
+        makeLayer(
+          (() => {
+            let calls = 0;
+            return () =>
+              calls++ === 0 ? Effect.succeed(listing(["docs/readme.md"])) : Effect.never;
+          })(),
+        ),
+      ),
+    ),
+  );
+
+  it.effect("runs one build for concurrent cold reads of a root", () => {
+    let calls = 0;
+    return Effect.gen(function* () {
+      const cwd = yield* makeTempDir();
+      const workspaceEntries = yield* WorkspaceEntries;
+      const [searched, listed] = yield* Effect.all(
+        [search(cwd, "a"), workspaceEntries.listEntries({ cwd })],
+        { concurrency: "unbounded" },
+      );
+      expect(searched.entries.map((entry) => entry.path)).toEqual(["a.ts"]);
+      expect(listed.entries.map((entry) => entry.path)).toEqual(["a.ts"]);
+      expect(calls).toBe(1);
+    }).pipe(
+      Effect.provide(
+        makeLayer(() =>
+          Effect.yieldNow.pipe(
+            Effect.andThen(
+              Effect.sync(() => {
+                calls += 1;
+                return listing(["a.ts"]);
+              }),
+            ),
+          ),
+        ),
+      ),
+    );
+  });
+
+  it.effect("does not rebuild after a save of a file the index already lists", () => {
+    let calls = 0;
+    return Effect.gen(function* () {
+      const cwd = yield* makeTempDir();
+      const workspaceEntries = yield* WorkspaceEntries;
+      yield* search(cwd, "x");
+
+      yield* workspaceEntries.recordFileWrite(cwd, "src/existing.ts");
+      yield* TestClock.adjust(250);
+      yield* settle;
+      yield* search(cwd, "x");
+      yield* settle;
+      expect(calls).toBe(1);
+    }).pipe(
+      Effect.provide(
+        makeLayer(() =>
+          Effect.sync(() => {
+            calls += 1;
+            return listing(["src/existing.ts"]);
+          }),
+        ),
+      ),
+    );
+  });
+
+  it.effect("serves tracked files when the full listing misses the cold-build deadline", () =>
+    Effect.gen(function* () {
+      const cwd = yield* makeTempDir();
+      const pending = yield* Effect.forkChild(search(cwd, "tracked"));
+      yield* settle;
+      yield* TestClock.adjust(4_000);
+      yield* settle;
+      const result = yield* Fiber.join(pending);
+      expect(result.entries.map((entry) => entry.path)).toEqual(["tracked.ts"]);
+      expect(result.partial).toBe(true);
+      expect(result.truncated).toBe(true);
+      // The full build still runs and will replace the stand-in: not final.
+      expect(result.refreshing).toBe(true);
+      const again = yield* search(cwd, "tracked");
+      expect(again.refreshing).toBe(true);
+    }).pipe(
+      Effect.provide(
+        makeLayer((_cwd, options) =>
+          options?.trackedOnly ? Effect.succeed(listing(["tracked.ts"])) : Effect.never,
+        ),
+      ),
+    ),
+  );
+
+  it.effect("stops flagging the stand-in once the full listing lands", () => {
+    const release = Deferred.makeUnsafe<void>();
+    return Effect.gen(function* () {
+      const cwd = yield* makeTempDir();
+      const pending = yield* Effect.forkChild(search(cwd, "ts"));
+      yield* settle;
+      yield* TestClock.adjust(4_000);
+      yield* settle;
+      expect((yield* Fiber.join(pending)).refreshing).toBe(true);
+
+      yield* Deferred.succeed(release, undefined);
+      yield* settle;
+      const settled = yield* search(cwd, "ts");
+      expect(settled.entries.map((entry) => entry.path).toSorted()).toEqual([
+        "tracked.ts",
+        "untracked.ts",
+      ]);
+      expect(settled.partial).toBeUndefined();
+      expect(settled.refreshing).toBeUndefined();
+    }).pipe(
+      Effect.provide(
+        makeLayer((_cwd, options) =>
+          options?.trackedOnly
+            ? Effect.succeed(listing(["tracked.ts"]))
+            : Deferred.await(release).pipe(Effect.as(listing(["tracked.ts", "untracked.ts"]))),
+        ),
+      ),
+    );
+  });
+
+  it.effect("falls back to tracked files when the full listing fails", () =>
+    Effect.gen(function* () {
+      const cwd = yield* makeTempDir();
+      const result = yield* search(cwd, "tracked");
+      expect(result.entries.map((entry) => entry.path)).toEqual(["tracked.ts"]);
+      expect(result.partial).toBe(true);
+      // The fallback is the build's final answer, so clients may cache it.
+      expect(result.refreshing).toBeUndefined();
+    }).pipe(
+      Effect.provide(
+        makeLayer((cwd, options) =>
+          options?.trackedOnly
+            ? Effect.succeed(listing(["tracked.ts"]))
+            : Effect.fail(
+                new VcsProcessExitError({
+                  operation: "test",
+                  command: "git ls-files",
+                  cwd,
+                  exitCode: 128,
+                  detail: "boom",
+                }),
+              ),
+        ),
+      ),
+    ),
+  );
+
+  it.effect("reports a failed build without retrying it on every keystroke", () => {
+    let calls = 0;
+    return Effect.gen(function* () {
+      const cwd = yield* makeTempDir();
+      const first = yield* search(cwd, "a").pipe(Effect.flip);
+      expect(first.detail).toContain("boom");
+      const callsAfterFirst = calls;
+
+      const second = yield* search(cwd, "ab").pipe(Effect.flip);
+      expect(second.detail).toContain("boom");
+      expect(calls).toBe(callsAfterFirst);
+
+      yield* TestClock.adjust(5_000);
+      yield* search(cwd, "abc").pipe(Effect.flip);
+      expect(calls).toBeGreaterThan(callsAfterFirst);
+    }).pipe(
+      Effect.provide(
+        makeLayer((cwd) =>
+          Effect.suspend(() => {
+            calls += 1;
+            return Effect.fail(
+              new VcsProcessExitError({
+                operation: "test",
+                command: "git ls-files",
+                cwd,
+                exitCode: 128,
+                detail: "boom",
+              }),
+            );
+          }),
+        ),
+      ),
+    );
+  });
+
+  it.effect("drops the least recently read roots past the entry budget", () => {
+    const calls = new Map<string, number>();
+    const bigListing = Array.from({ length: 120_000 }, (_, index) => `f${index}.ts`);
+    return Effect.gen(function* () {
+      const path = yield* Path.Path;
+      const base = yield* makeTempDir();
+      const fileSystem = yield* FileSystem.FileSystem;
+      const roots = ["one", "two", "three"].map((name) => path.join(base, name));
+      for (const root of roots) yield* fileSystem.makeDirectory(root);
+
+      for (const root of roots) {
+        yield* TestClock.adjust(1);
+        yield* search(root, "f1");
+      }
+      // 3 x 120k entries exceed the 300k budget: the first root was dropped
+      // and rebuilds on its next read, while the latest one stays warm.
+      yield* search(roots[2]!, "f2");
+      yield* search(roots[0]!, "f2");
+      expect(calls.get("three")).toBe(1);
+      expect(calls.get("one")).toBe(2);
+    }).pipe(
+      Effect.provide(
+        makeLayer((cwd) =>
+          Effect.sync(() => {
+            const name = cwd.slice(cwd.lastIndexOf("/") + 1);
+            calls.set(name, (calls.get(name) ?? 0) + 1);
+            return listing(bigListing);
+          }),
+        ),
+      ),
+    );
+  });
+});

@@ -1,4 +1,4 @@
-import { Effect, Metric, Ref, Scope } from "effect";
+import { Effect, Metric, Scope } from "effect";
 
 import { metricAttributes } from "./observability/Metrics.ts";
 
@@ -55,9 +55,11 @@ export const wsOrchestrationCoalescedFramesTotal = Metric.counter(
 );
 
 export interface WsReplayMetrics {
+  /** Records drained replay events; a batch passes its highest sequence. */
   readonly recordReplayEvent: (sequence: number) => Effect.Effect<void>;
   readonly recordLiveEnqueued: (sequence: number) => Effect.Effect<void>;
-  readonly recordLiveDequeued: (sequence: number) => Effect.Effect<void>;
+  /** Records `count` (default 1) drained live events ending at `sequence`. */
+  readonly recordLiveDequeued: (sequence: number, count?: number) => Effect.Effect<void>;
   readonly recordLiveOverflow: (sequence: number, capacity: number) => Effect.Effect<void>;
   /**
    * Counts a superseded progress frame without advancing the drain watermark.
@@ -67,18 +69,36 @@ export interface WsReplayMetrics {
   readonly reset: Effect.Effect<void>;
 }
 
+/**
+ * Plain mutable counters: every update runs on the subscription's own fiber,
+ * so publishing an aggregate reads numbers instead of running one effect per
+ * field per active subscription.
+ */
 interface ActiveReplayMetricState {
   readonly stream: WsReplayStreamKind;
-  readonly replayDepth: Ref.Ref<number>;
-  readonly latestLiveSequence: Ref.Ref<number>;
-  readonly lastDrainedSequence: Ref.Ref<number>;
-  readonly liveBufferDepth: Ref.Ref<number>;
-  readonly liveBufferHighWater: Ref.Ref<number>;
+  replayDepth: number;
+  latestLiveSequence: number;
+  lastDrainedSequence: number;
+  liveBufferDepth: number;
+  liveBufferHighWater: number;
+}
+
+interface PublishedAggregate {
+  replayDepth: number;
+  replayLag: number;
+  liveBufferDepth: number;
+  liveBufferHighWater: number;
 }
 
 // Only active subscriptions live here. Published metric labels are limited to
 // the two stream kinds, so reconnects cannot grow the global metric registry.
 const activeReplayMetricStates = new Map<string, ActiveReplayMetricState>();
+// The last values written per metric registry and stream kind, so an aggregate
+// that did not move costs no gauge write.
+const publishedAggregatesByRegistry = new WeakMap<
+  object,
+  Map<WsReplayStreamKind, PublishedAggregate>
+>();
 
 const normalizeSequence = (sequence: number): number =>
   Number.isFinite(sequence) ? Math.max(0, Math.floor(sequence)) : 0;
@@ -89,6 +109,60 @@ const updateGauge = (
   value: number,
 ) => Metric.update(Metric.withAttributes(metric, attributes), value);
 
+const computeAggregate = (stream: WsReplayStreamKind): PublishedAggregate => {
+  const aggregate: PublishedAggregate = {
+    replayDepth: 0,
+    replayLag: 0,
+    liveBufferDepth: 0,
+    liveBufferHighWater: 0,
+  };
+  for (const state of activeReplayMetricStates.values()) {
+    if (state.stream !== stream) continue;
+    aggregate.liveBufferDepth += state.liveBufferDepth;
+    aggregate.replayDepth = Math.max(aggregate.replayDepth, state.replayDepth);
+    aggregate.liveBufferHighWater = Math.max(
+      aggregate.liveBufferHighWater,
+      state.liveBufferHighWater,
+    );
+    aggregate.replayLag = Math.max(
+      aggregate.replayLag,
+      Math.max(0, state.latestLiveSequence - state.lastDrainedSequence),
+    );
+  }
+  return aggregate;
+};
+
+const publishAggregateFor = (
+  stream: WsReplayStreamKind,
+  attributes: ReadonlyArray<[string, string]>,
+) =>
+  Effect.flatMap(Metric.MetricRegistry, (registry) => {
+    let publishedAggregates = publishedAggregatesByRegistry.get(registry);
+    if (publishedAggregates === undefined) {
+      publishedAggregates = new Map();
+      publishedAggregatesByRegistry.set(registry, publishedAggregates);
+    }
+    const next = computeAggregate(stream);
+    const previous = publishedAggregates.get(stream);
+    publishedAggregates.set(stream, next);
+    const updates: Array<Effect.Effect<void>> = [];
+    if (previous?.replayDepth !== next.replayDepth) {
+      updates.push(updateGauge(wsOrchestrationReplayDepth, attributes, next.replayDepth));
+    }
+    if (previous?.replayLag !== next.replayLag) {
+      updates.push(updateGauge(wsOrchestrationReplayLag, attributes, next.replayLag));
+    }
+    if (previous?.liveBufferDepth !== next.liveBufferDepth) {
+      updates.push(updateGauge(wsOrchestrationLiveBufferDepth, attributes, next.liveBufferDepth));
+    }
+    if (previous?.liveBufferHighWater !== next.liveBufferHighWater) {
+      updates.push(
+        updateGauge(wsOrchestrationLiveBufferHighWater, attributes, next.liveBufferHighWater),
+      );
+    }
+    return updates.length === 0 ? Effect.void : Effect.all(updates, { discard: true });
+  });
+
 export const makeWsReplayMetrics = (input: {
   readonly stream: WsReplayStreamKind;
   readonly subscriptionId: string;
@@ -97,58 +171,15 @@ export const makeWsReplayMetrics = (input: {
   Effect.gen(function* () {
     const snapshotSequence = normalizeSequence(input.snapshotSequence);
     const attributes = metricAttributes({ stream: input.stream });
-    const replayDepth = yield* Ref.make(0);
-    const latestLiveSequence = yield* Ref.make(snapshotSequence);
-    const lastDrainedSequence = yield* Ref.make(snapshotSequence);
-    const liveBufferDepth = yield* Ref.make(0);
-    const liveBufferHighWater = yield* Ref.make(0);
-
-    const state = {
+    const state: ActiveReplayMetricState = {
       stream: input.stream,
-      replayDepth,
-      latestLiveSequence,
-      lastDrainedSequence,
-      liveBufferDepth,
-      liveBufferHighWater,
-    } satisfies ActiveReplayMetricState;
-    const publishAggregate = Effect.gen(function* () {
-      const activeStates = [...activeReplayMetricStates.values()].filter(
-        (candidate) => candidate.stream === input.stream,
-      );
-      const values = yield* Effect.forEach(activeStates, (candidate) =>
-        Effect.all({
-          replayDepth: Ref.get(candidate.replayDepth),
-          latestLiveSequence: Ref.get(candidate.latestLiveSequence),
-          lastDrainedSequence: Ref.get(candidate.lastDrainedSequence),
-          liveBufferDepth: Ref.get(candidate.liveBufferDepth),
-          liveBufferHighWater: Ref.get(candidate.liveBufferHighWater),
-        }),
-      );
-      const liveDepthTotal = values.reduce((total, value) => total + value.liveBufferDepth, 0);
-      const replayDepthMax = values.reduce(
-        (largest, value) => Math.max(largest, value.replayDepth),
-        0,
-      );
-      const liveHighWaterMax = values.reduce(
-        (largest, value) => Math.max(largest, value.liveBufferHighWater),
-        0,
-      );
-      const replayLagMax = values.reduce(
-        (largest, value) =>
-          Math.max(largest, Math.max(0, value.latestLiveSequence - value.lastDrainedSequence)),
-        0,
-      );
-
-      yield* Effect.all(
-        [
-          updateGauge(wsOrchestrationReplayDepth, attributes, replayDepthMax),
-          updateGauge(wsOrchestrationReplayLag, attributes, replayLagMax),
-          updateGauge(wsOrchestrationLiveBufferDepth, attributes, liveDepthTotal),
-          updateGauge(wsOrchestrationLiveBufferHighWater, attributes, liveHighWaterMax),
-        ],
-        { discard: true },
-      );
-    });
+      replayDepth: 0,
+      latestLiveSequence: snapshotSequence,
+      lastDrainedSequence: snapshotSequence,
+      liveBufferDepth: 0,
+      liveBufferHighWater: 0,
+    };
+    const publishAggregate = publishAggregateFor(input.stream, attributes);
 
     const reset = Effect.sync(() => {
       if (activeReplayMetricStates.get(input.subscriptionId) === state) {
@@ -164,49 +195,54 @@ export const makeWsReplayMetrics = (input: {
     );
     yield* publishAggregate;
 
-    const markDrained = (sequence: number) =>
-      Ref.update(lastDrainedSequence, (current) =>
-        Math.max(current, normalizeSequence(sequence)),
-      ).pipe(Effect.andThen(publishAggregate));
+    const markDrained = (sequence: number) => {
+      state.lastDrainedSequence = Math.max(state.lastDrainedSequence, normalizeSequence(sequence));
+    };
 
     return {
       recordReplayEvent: (sequence) =>
-        Ref.set(replayDepth, Math.max(0, normalizeSequence(sequence) - snapshotSequence)).pipe(
-          Effect.andThen(markDrained(sequence)),
-        ),
-      recordLiveEnqueued: (sequence) =>
-        Effect.gen(function* () {
-          yield* Ref.update(latestLiveSequence, (current) =>
-            Math.max(current, normalizeSequence(sequence)),
-          );
-          const depth = yield* Ref.updateAndGet(liveBufferDepth, (current) => current + 1);
-          yield* Ref.updateAndGet(liveBufferHighWater, (current) => Math.max(current, depth));
-          yield* publishAggregate;
+        Effect.suspend(() => {
+          state.replayDepth = Math.max(0, normalizeSequence(sequence) - snapshotSequence);
+          markDrained(sequence);
+          return publishAggregate;
         }),
-      recordLiveDequeued: (sequence) =>
-        Effect.gen(function* () {
-          yield* Ref.updateAndGet(liveBufferDepth, (current) => Math.max(0, current - 1));
-          yield* markDrained(sequence);
+      recordLiveEnqueued: (sequence) =>
+        Effect.suspend(() => {
+          state.latestLiveSequence = Math.max(
+            state.latestLiveSequence,
+            normalizeSequence(sequence),
+          );
+          state.liveBufferDepth += 1;
+          state.liveBufferHighWater = Math.max(state.liveBufferHighWater, state.liveBufferDepth);
+          return publishAggregate;
+        }),
+      recordLiveDequeued: (sequence, count = 1) =>
+        Effect.suspend(() => {
+          state.liveBufferDepth = Math.max(0, state.liveBufferDepth - Math.max(0, count));
+          markDrained(sequence);
+          return publishAggregate;
         }),
       recordLiveOverflow: (sequence, capacity) =>
-        Effect.gen(function* () {
-          const normalizedSequence = normalizeSequence(sequence);
+        Effect.suspend(() => {
           const normalizedCapacity = Math.max(0, Math.floor(capacity));
-          yield* Ref.update(latestLiveSequence, (current) => Math.max(current, normalizedSequence));
-          yield* Ref.set(liveBufferDepth, normalizedCapacity);
-          yield* Ref.updateAndGet(liveBufferHighWater, (current) =>
-            Math.max(current, normalizedCapacity),
+          state.latestLiveSequence = Math.max(
+            state.latestLiveSequence,
+            normalizeSequence(sequence),
           );
-          yield* Effect.all(
+          state.liveBufferDepth = normalizedCapacity;
+          state.liveBufferHighWater = Math.max(state.liveBufferHighWater, normalizedCapacity);
+          return Effect.all(
             [updateGauge(wsOrchestrationLiveBufferOverflowsTotal, attributes, 1), publishAggregate],
             { discard: true },
           );
         }),
       recordCoalesced: (sequence) =>
-        Effect.gen(function* () {
-          const normalizedSequence = normalizeSequence(sequence);
-          yield* Ref.update(latestLiveSequence, (current) => Math.max(current, normalizedSequence));
-          yield* Effect.all(
+        Effect.suspend(() => {
+          state.latestLiveSequence = Math.max(
+            state.latestLiveSequence,
+            normalizeSequence(sequence),
+          );
+          return Effect.all(
             [updateGauge(wsOrchestrationCoalescedFramesTotal, attributes, 1), publishAggregate],
             { discard: true },
           );

@@ -153,6 +153,82 @@ it.layer(testLayer)("side question provider isolation", (it) => {
     );
   }
 
+  for (const provider of ["codex", "claude"] as const) {
+    for (const lightweightFails of [false, true]) {
+      it.effect(
+        `${provider} names a thread lightweight first${lightweightFails ? ", then with full config" : ""}`,
+        () =>
+          Effect.scoped(
+            Effect.gen(function* () {
+              const fs = yield* FileSystem.FileSystem;
+              const root = yield* fs.makeTempDirectoryScoped({ prefix: "ryco-naming-cli-test-" });
+              const binary = `${root}/${provider}`;
+              const capture = `${root}/capture.jsonl`;
+              const lightweightFlag =
+                provider === "codex" ? "--ignore-user-config" : "--strict-mcp-config";
+              const output = JSON.stringify({ title: "Fix reconnect", branch: "Fix/Reconnect" });
+              yield* fs.writeFileString(
+                binary,
+                [
+                  `#!${process.execPath}`,
+                  'const fs = require("node:fs");',
+                  "const args = process.argv.slice(2);",
+                  `fs.appendFileSync(${JSON.stringify(capture)}, JSON.stringify({ args, cwd: process.cwd() }) + "\\n");`,
+                  `if (${lightweightFails} && args.includes(${JSON.stringify(lightweightFlag)})) { process.stderr.write("custom provider missing"); process.exit(1); }`,
+                  provider === "codex"
+                    ? `fs.writeFileSync(args[args.indexOf("--output-last-message") + 1], ${JSON.stringify(output)});`
+                    : `process.stdout.write(JSON.stringify({ structured_output: ${output} }));`,
+                ].join("\n"),
+              );
+              yield* fs.chmod(binary, 0o755);
+              const service =
+                provider === "codex"
+                  ? yield* makeCodexTextGeneration(
+                      Schema.decodeSync(CodexSettings)({ binaryPath: binary }),
+                    )
+                  : yield* makeClaudeTextGeneration(
+                      Schema.decodeSync(ClaudeSettings)({ binaryPath: binary }),
+                    );
+
+              const generated = yield* service.generateThreadTitle({
+                cwd: input.cwd,
+                message: "The reconnect spinner never stops.",
+                includeBranch: true,
+                modelSelection: input.modelSelection,
+              });
+
+              expect(generated).toEqual({ title: "Fix reconnect", branch: "fix/reconnect" });
+              const calls = (yield* fs.readFileString(capture))
+                .trim()
+                .split("\n")
+                .map((line) => JSON.parse(line) as { args: string[]; cwd: string });
+              expect(calls).toHaveLength(lightweightFails ? 2 : 1);
+              const [lightweight, full] = calls;
+              expect(lightweight!.args).toContain(lightweightFlag);
+              expect(lightweight!.cwd).not.toBe(input.cwd);
+              if (provider === "claude") {
+                expect(lightweight!.args[lightweight!.args.indexOf("--setting-sources") + 1]).toBe(
+                  "",
+                );
+              }
+              if (full) {
+                expect(full.args).not.toContain(lightweightFlag);
+                expect(full.cwd).toBe(input.cwd);
+              }
+              for (const call of calls) {
+                if (provider === "claude") {
+                  // A title never needs tools or a persisted Claude Code session.
+                  expect(call.args[call.args.indexOf("--tools") + 1]).toBe("");
+                  expect(call.args).toContain("--no-session-persistence");
+                  expect(call.args).not.toContain("--dangerously-skip-permissions");
+                }
+              }
+            }),
+          ),
+      );
+    }
+  }
+
   it.effect("Copilot cancellation aborts only its independent tool-free session", () =>
     Effect.gen(function* () {
       let config: SessionConfig | undefined;

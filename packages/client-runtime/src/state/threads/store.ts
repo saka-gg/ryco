@@ -11,6 +11,7 @@ import type {
   OrchestrationReleasedTurn,
   OrchestrationShellSnapshot,
   OrchestrationShellStreamEvent,
+  OrchestrationShellThreadPrioritiesItem,
   OrchestrationSession,
   OrchestrationSessionStatus,
   OrchestrationThread,
@@ -28,7 +29,7 @@ import type {
 } from "@ryco/contracts";
 import { isProviderDriverKind, ProviderDriverKind } from "@ryco/contracts";
 import type { ThreadId, TurnId } from "@ryco/contracts";
-import { Schema } from "effect";
+import * as Schema from "effect/Schema";
 import { resolveModelSlugForProvider } from "@ryco/shared/model";
 import { projectKindOf } from "@ryco/shared/projectKind";
 import { capThreadActivitiesPreservingMilestones } from "@ryco/shared/threadActivity";
@@ -186,6 +187,46 @@ export interface ThreadHistoryLoadState {
 
 function arraysEqual<T>(left: readonly T[], right: readonly T[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+/**
+ * Deep equality for decoded wire data (plain objects, arrays and primitives).
+ * Snapshot re-application uses it to keep the previous object when a mapped
+ * value is unchanged, so selectors over it short-circuit on identity.
+ */
+function plainDataEqual(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true;
+  if (typeof left !== "object" || typeof right !== "object" || left === null || right === null) {
+    return false;
+  }
+  if (Array.isArray(left)) {
+    return (
+      Array.isArray(right) &&
+      left.length === right.length &&
+      left.every((value, index) => plainDataEqual(value, right[index]))
+    );
+  }
+  if (Array.isArray(right)) return false;
+  const leftRecord = left as Record<string, unknown>;
+  const rightRecord = right as Record<string, unknown>;
+  const leftKeys = Object.keys(leftRecord);
+  if (leftKeys.length !== Object.keys(rightRecord).length) return false;
+  return leftKeys.every(
+    (key) => Object.hasOwn(rightRecord, key) && plainDataEqual(leftRecord[key], rightRecord[key]),
+  );
+}
+
+function modelSelectionsEqual(
+  left: ThreadShell["modelSelection"] | undefined,
+  right: ThreadShell["modelSelection"] | undefined,
+): boolean {
+  if (left === right) return true;
+  if (left === undefined || right === undefined) return false;
+  return (
+    left.instanceId === right.instanceId &&
+    left.model === right.model &&
+    plainDataEqual(left.options, right.options)
+  );
 }
 
 // Accepts the open `instanceId` string carried on `ModelSelection`; malformed
@@ -549,6 +590,7 @@ function latestTurnsEqual(
   if (left == null || right == null) return false;
   return (
     left.turnId === right.turnId &&
+    left.userMessageId === right.userMessageId &&
     left.state === right.state &&
     left.requestedAt === right.requestedAt &&
     left.startedAt === right.startedAt &&
@@ -566,6 +608,7 @@ function threadSessionsEqual(
   if (left == null || right == null) return false;
   return (
     left.provider === right.provider &&
+    left.providerInstanceId === right.providerInstanceId &&
     left.status === right.status &&
     left.orchestrationStatus === right.orchestrationStatus &&
     left.runtimeSessionId === right.runtimeSessionId &&
@@ -585,6 +628,8 @@ function sidebarThreadSummariesEqual(
     left.id === right.id &&
     left.projectId === right.projectId &&
     left.title === right.title &&
+    modelSelectionsEqual(left.modelSelection, right.modelSelection) &&
+    (left.providerDriver ?? null) === (right.providerDriver ?? null) &&
     left.interactionMode === right.interactionMode &&
     left.tokenMode === right.tokenMode &&
     threadSessionsEqual(left.session, right.session) &&
@@ -648,9 +693,7 @@ function threadPrioritiesEqual(
     left.reason === right.reason &&
     left.inputFingerprint === right.inputFingerprint &&
     left.batchId === right.batchId &&
-    left.modelSelection.instanceId === right.modelSelection.instanceId &&
-    left.modelSelection.model === right.modelSelection.model &&
-    JSON.stringify(left.modelSelection.options) === JSON.stringify(right.modelSelection.options) &&
+    modelSelectionsEqual(left.modelSelection, right.modelSelection) &&
     left.rankedAt === right.rankedAt &&
     left.usableUntil === right.usableUntil
   );
@@ -664,7 +707,7 @@ function threadShellsEqual(left: ThreadShell | undefined, right: ThreadShell): b
     left.codexThreadId === right.codexThreadId &&
     left.projectId === right.projectId &&
     left.title === right.title &&
-    left.modelSelection === right.modelSelection &&
+    modelSelectionsEqual(left.modelSelection, right.modelSelection) &&
     left.runtimeMode === right.runtimeMode &&
     left.interactionMode === right.interactionMode &&
     left.tokenMode === right.tokenMode &&
@@ -1977,20 +2020,89 @@ function commitEnvironmentState(
   };
 }
 
+/**
+ * Keeps the previous record container (and its id list) when a snapshot
+ * re-application produced exactly the same entries, so selectors over the
+ * container short-circuit on identity instead of seeing a fresh object.
+ */
+function reuseUnchangedRecord<K extends string, V>(
+  previous: Record<K, V> | undefined,
+  next: Record<K, V>,
+  nextKeys: readonly K[],
+): Record<K, V> {
+  if (previous === undefined) return next;
+  const previousKeyCount = Object.keys(previous).length;
+  if (previousKeyCount !== nextKeys.length) return next;
+  for (const key of nextKeys) {
+    if (!Object.hasOwn(previous, key) || previous[key] !== next[key]) return next;
+  }
+  return previous;
+}
+
+function ownValue<K extends string, V>(record: Record<K, V> | undefined, key: K): V | undefined {
+  return record !== undefined && Object.hasOwn(record, key) ? record[key] : undefined;
+}
+
+function reuseUnchangedIds<T>(previous: readonly T[] | undefined, next: T[]): T[] {
+  return previous !== undefined && arraysEqual(previous, next) ? (previous as T[]) : next;
+}
+
+function reuseUnchangedIdsByKey<K extends string, T>(
+  previous: Record<K, T[]> | undefined,
+  next: Record<K, T[]>,
+): Record<K, T[]> {
+  const nextKeys = Object.keys(next) as K[];
+  for (const key of nextKeys) {
+    // Own keys only: ids such as "constructor" must not hit Object.prototype.
+    next[key] = reuseUnchangedIds(ownValue(previous, key), next[key]);
+  }
+  return reuseUnchangedRecord(previous, next, nextKeys);
+}
+
 function syncEnvironmentShellSnapshot(
   state: EnvironmentState,
   snapshot: OrchestrationShellSnapshot,
   environmentId: EnvironmentId,
 ): EnvironmentState {
-  const nextProjects = snapshot.projects.map((project) => mapProject(project, environmentId));
-  const nextWorktrees = (snapshot.worktrees ?? []).map((worktree) =>
-    mapWorktree(worktree, environmentId),
-  );
+  // Structural sharing: a re-applied snapshot (reconnect, Hub node switch,
+  // cache-hydrated -> live, priority push) usually leaves most rows unchanged.
+  // Reusing the previous objects keeps every row selector and memo stable.
+  const nextProjects = snapshot.projects.map((project) => {
+    const mapped = mapProject(project, environmentId);
+    const previous = ownValue(state.projectById, mapped.id);
+    return previous !== undefined && plainDataEqual(previous, mapped) ? previous : mapped;
+  });
+  const nextWorktrees = (snapshot.worktrees ?? []).map((worktree) => {
+    const mapped = mapWorktree(worktree, environmentId);
+    const previous = ownValue(state.worktreeById, mapped.id);
+    return previous !== undefined &&
+      sidebarWorktreesEqual(previous, mapped) &&
+      Object.hasOwn(previous, "prTerminalAt") === Object.hasOwn(mapped, "prTerminalAt") &&
+      Object.hasOwn(previous, "pullRequests") === Object.hasOwn(mapped, "pullRequests")
+      ? previous
+      : mapped;
+  });
+  const projectState = buildProjectState(nextProjects);
+  const worktreeState = buildWorktreeState(nextWorktrees);
   const nextThreadIds = new Set(snapshot.threads.map((thread) => thread.id));
   const nextState: EnvironmentState = {
     ...state,
-    ...buildProjectState(nextProjects),
-    ...buildWorktreeState(nextWorktrees),
+    projectIds: reuseUnchangedIds(state.projectIds, projectState.projectIds),
+    projectById: reuseUnchangedRecord(
+      state.projectById,
+      projectState.projectById,
+      projectState.projectIds,
+    ),
+    worktreeIds: reuseUnchangedIds(state.worktreeIds, worktreeState.worktreeIds ?? []),
+    worktreeIdsByProjectId: reuseUnchangedIdsByKey(
+      state.worktreeIdsByProjectId,
+      worktreeState.worktreeIdsByProjectId ?? ({} as Record<ProjectId, WorktreeId[]>),
+    ),
+    worktreeById: reuseUnchangedRecord(
+      state.worktreeById,
+      worktreeState.worktreeById ?? ({} as Record<WorktreeId, SidebarWorktreeSummary>),
+      worktreeState.worktreeIds ?? [],
+    ),
     threadIds: [],
     threadIdsByProjectId: Object.create(null) as EnvironmentState["threadIdsByProjectId"],
     threadShellById: Object.create(null) as EnvironmentState["threadShellById"],
@@ -2041,15 +2153,60 @@ function syncEnvironmentShellSnapshot(
     if (!Object.hasOwn(nextState.threadShellById, thread.id)) {
       nextState.threadIds.push(thread.id);
     }
-    nextState.threadShellById[thread.id] = mapped.shell;
-    nextState.threadSessionById[thread.id] = mapped.session;
-    nextState.threadTurnStateById[thread.id] = mapped.turnState;
-    nextState.sidebarThreadSummaryById[thread.id] = mapped.summary;
+    const previousShell = ownValue(state.threadShellById, thread.id);
+    nextState.threadShellById[thread.id] = threadShellsEqual(previousShell, mapped.shell)
+      ? previousShell!
+      : mapped.shell;
+    const previousSession = ownValue(state.threadSessionById, thread.id);
+    nextState.threadSessionById[thread.id] =
+      previousSession !== undefined && threadSessionsEqual(previousSession, mapped.session)
+        ? previousSession
+        : mapped.session;
+    const previousTurnState = ownValue(state.threadTurnStateById, thread.id);
+    nextState.threadTurnStateById[thread.id] = threadTurnStatesEqual(
+      previousTurnState,
+      mapped.turnState,
+    )
+      ? previousTurnState!
+      : mapped.turnState;
+    const previousSummary = ownValue(state.sidebarThreadSummaryById, thread.id);
+    nextState.sidebarThreadSummaryById[thread.id] = sidebarThreadSummariesEqual(
+      previousSummary,
+      mapped.summary,
+    )
+      ? previousSummary!
+      : mapped.summary;
   }
   for (const threadId of nextState.threadIds) {
     const projectId = nextState.threadShellById[threadId]!.projectId;
     (nextState.threadIdsByProjectId[projectId] ??= []).push(threadId);
   }
+
+  nextState.threadIds = reuseUnchangedIds(state.threadIds, nextState.threadIds);
+  nextState.threadIdsByProjectId = reuseUnchangedIdsByKey(
+    state.threadIdsByProjectId,
+    nextState.threadIdsByProjectId,
+  );
+  nextState.threadShellById = reuseUnchangedRecord(
+    state.threadShellById,
+    nextState.threadShellById,
+    nextState.threadIds,
+  );
+  nextState.threadSessionById = reuseUnchangedRecord(
+    state.threadSessionById,
+    nextState.threadSessionById,
+    nextState.threadIds,
+  );
+  nextState.threadTurnStateById = reuseUnchangedRecord(
+    state.threadTurnStateById,
+    nextState.threadTurnStateById,
+    nextState.threadIds,
+  );
+  nextState.sidebarThreadSummaryById = reuseUnchangedRecord(
+    state.sidebarThreadSummaryById,
+    nextState.sidebarThreadSummaryById,
+    nextState.threadIds,
+  );
 
   return nextState;
 }
@@ -3073,6 +3230,34 @@ export function applyOrchestrationEvents(
   return nextState;
 }
 
+/**
+ * `applyOrchestrationEvents` for frame-batched stream events. The reducer is
+ * pure, so a batch that throws has changed nothing: re-fold it one event at a
+ * time and skip only the events that fail, as when every event was its own
+ * commit, instead of losing the whole batch. A lone failing event still
+ * throws to the caller; skipped ones in a batch are reported.
+ */
+function applyOrchestrationEventsIsolatingFailures(
+  state: AppState,
+  events: ReadonlyArray<OrchestrationEvent>,
+  environmentId: EnvironmentId,
+): AppState {
+  try {
+    return applyOrchestrationEvents(state, events, environmentId);
+  } catch (error) {
+    if (events.length < 2) throw error;
+  }
+  let nextState = state;
+  for (const event of events) {
+    try {
+      nextState = applyOrchestrationEvents(nextState, [event], environmentId);
+    } catch (error) {
+      console.error("[THREAD_EVENTS] skipped an orchestration event that failed to apply", error);
+    }
+  }
+  return nextState;
+}
+
 function getEnvironmentEntries(
   state: AppState,
 ): ReadonlyArray<readonly [EnvironmentId, EnvironmentState]> {
@@ -3102,11 +3287,109 @@ export function selectThreadsForEnvironment(
   return getThreads(selectEnvironmentState(state, environmentId));
 }
 
-export function selectProjectsAcrossEnvironments(state: AppState): Project[] {
-  return getEnvironmentEntries(state).flatMap(([, environmentState]) =>
-    getProjects(environmentState),
-  );
+// ---------------------------------------------------------------------------
+// Slice-memoized selectors
+//
+// Every zustand `set` runs every subscriber's selector. The cross-environment
+// and per-project row selectors below are memoized on the identity of the
+// underlying slices (id list + record), so a commit that did not touch them
+// (a streaming message delta, a history page) returns the previous array and
+// `useShallow` short-circuits on identity instead of allocating and comparing
+// O(threads) arrays. Results are shared between subscribers: treat them as
+// read-only.
+// ---------------------------------------------------------------------------
+
+/** Returns `previous` when `next` holds the same elements, else `next`. */
+function reuseIfSameElements<T>(previous: T[] | undefined, next: T[]): T[] {
+  return previous !== undefined && arraysEqual(previous, next) ? previous : next;
 }
+
+function createSliceRowsSelector<Id extends string, Row>(
+  readRow: (record: Record<Id, Row>, id: Id) => Row | undefined,
+): (ids: readonly Id[], record: Record<Id, Row> | undefined) => Row[] {
+  const cache = new WeakMap<readonly Id[], { record: Record<Id, Row> | undefined; rows: Row[] }>();
+  return (ids, record) => {
+    const cached = cache.get(ids);
+    if (cached !== undefined && cached.record === record) return cached.rows;
+    const next: Row[] = [];
+    if (record !== undefined) {
+      for (const id of ids) {
+        const row = readRow(record, id);
+        if (row !== undefined) next.push(row);
+      }
+    }
+    const rows = reuseIfSameElements(cached?.rows, next);
+    cache.set(ids, { record, rows });
+    return rows;
+  };
+}
+
+function createAcrossEnvironmentsSelector<Row>(
+  selectForEnvironment: (environmentId: EnvironmentId, environmentState: EnvironmentState) => Row[],
+): (state: AppState) => Row[] {
+  let lastParts: Row[][] = [];
+  let lastRows: Row[] = [];
+  return (state) => {
+    const parts = getEnvironmentEntries(state).map(([environmentId, environmentState]) =>
+      selectForEnvironment(environmentId, environmentState),
+    );
+    if (arraysEqual(parts, lastParts)) return lastRows;
+    lastParts = parts;
+    lastRows = reuseIfSameElements(lastRows, parts.flat());
+    return lastRows;
+  };
+}
+
+const selectProjectRows = createSliceRowsSelector<ProjectId, Project>((record, id) => record[id]);
+const selectThreadShellRows = createSliceRowsSelector<ThreadId, ThreadShell>(
+  (record, id) => record[id],
+);
+const environmentSidebarThreadRowSelectors = new Map<
+  EnvironmentId,
+  ReturnType<typeof createSliceRowsSelector<ThreadId, SidebarThreadSummary>>
+>();
+const environmentSidebarWorktreeRowSelectors = new Map<
+  EnvironmentId,
+  ReturnType<typeof createSliceRowsSelector<WorktreeId, SidebarWorktreeSummary>>
+>();
+
+/** Sidebar rows of one environment, ignoring rows that belong to another environment. */
+function selectEnvironmentSidebarThreadRows(
+  environmentId: EnvironmentId,
+  environmentState: EnvironmentState,
+): SidebarThreadSummary[] {
+  let select = environmentSidebarThreadRowSelectors.get(environmentId);
+  if (select === undefined) {
+    select = createSliceRowsSelector<ThreadId, SidebarThreadSummary>((record, id) => {
+      const thread = record[id];
+      return thread !== undefined && thread.environmentId === environmentId ? thread : undefined;
+    });
+    environmentSidebarThreadRowSelectors.set(environmentId, select);
+  }
+  return select(environmentState.threadIds, environmentState.sidebarThreadSummaryById);
+}
+
+function selectEnvironmentSidebarWorktreeRows(
+  environmentId: EnvironmentId,
+  environmentState: EnvironmentState,
+): SidebarWorktreeSummary[] {
+  let select = environmentSidebarWorktreeRowSelectors.get(environmentId);
+  if (select === undefined) {
+    select = createSliceRowsSelector<WorktreeId, SidebarWorktreeSummary>((record, id) => {
+      const worktree = record[id];
+      return worktree !== undefined && worktree.environmentId === environmentId
+        ? worktree
+        : undefined;
+    });
+    environmentSidebarWorktreeRowSelectors.set(environmentId, select);
+  }
+  return select(environmentState.worktreeIds ?? EMPTY_WORKTREE_IDS, environmentState.worktreeById);
+}
+
+export const selectProjectsAcrossEnvironments: (state: AppState) => Project[] =
+  createAcrossEnvironmentsSelector((_environmentId, environmentState) =>
+    selectProjectRows(environmentState.projectIds, environmentState.projectById),
+  );
 
 export function selectThreadsAcrossEnvironments(state: AppState): Thread[] {
   return getEnvironmentEntries(state).flatMap(([, environmentState]) =>
@@ -3115,34 +3398,19 @@ export function selectThreadsAcrossEnvironments(state: AppState): Thread[] {
 }
 
 /** Like `selectThreadsAcrossEnvironments` but returns stable `ThreadShell` references from the store (no derived data). */
-export function selectThreadShellsAcrossEnvironments(state: AppState): ThreadShell[] {
-  return getEnvironmentEntries(state).flatMap(([, environmentState]) =>
-    environmentState.threadIds.flatMap((threadId) => {
-      const shell = environmentState.threadShellById[threadId];
-      return shell ? [shell] : [];
-    }),
+export const selectThreadShellsAcrossEnvironments: (state: AppState) => ThreadShell[] =
+  createAcrossEnvironmentsSelector((_environmentId, environmentState) =>
+    selectThreadShellRows(environmentState.threadIds, environmentState.threadShellById),
   );
-}
 
-export function selectSidebarThreadsAcrossEnvironments(state: AppState): SidebarThreadSummary[] {
-  return getEnvironmentEntries(state).flatMap(([environmentId, environmentState]) =>
-    environmentState.threadIds.flatMap((threadId) => {
-      const thread = environmentState.sidebarThreadSummaryById[threadId];
-      return thread && thread.environmentId === environmentId ? [thread] : [];
-    }),
-  );
-}
+export const selectSidebarThreadsAcrossEnvironments: (state: AppState) => SidebarThreadSummary[] =
+  createAcrossEnvironmentsSelector(selectEnvironmentSidebarThreadRows);
 
-export function selectSidebarWorktreesAcrossEnvironments(
+export const selectSidebarWorktreesAcrossEnvironments: (
   state: AppState,
-): SidebarWorktreeSummary[] {
-  return getEnvironmentEntries(state).flatMap(([environmentId, environmentState]) =>
-    (environmentState.worktreeIds ?? EMPTY_WORKTREE_IDS).flatMap((worktreeId) => {
-      const worktree = environmentState.worktreeById?.[worktreeId];
-      return worktree && worktree.environmentId === environmentId ? [worktree] : [];
-    }),
-  );
-}
+) => SidebarWorktreeSummary[] = createAcrossEnvironmentsSelector(
+  selectEnvironmentSidebarWorktreeRows,
+);
 
 /**
  * Environments whose rows are cache-provenance (hydrated or demoted, no live
@@ -3163,6 +3431,13 @@ export function selectEnvironmentHydratedFromCacheAt(
   return selectEnvironmentState(state, environmentId).hydratedFromCacheAt ?? null;
 }
 
+const selectWorktreeRows = createSliceRowsSelector<WorktreeId, SidebarWorktreeSummary>(
+  (record, id) => record[id],
+);
+const selectSidebarThreadRows = createSliceRowsSelector<ThreadId, SidebarThreadSummary>(
+  (record, id) => record[id],
+);
+
 export function selectSidebarWorktreesForProjectRef(
   state: AppState,
   ref: ScopedProjectRef | null | undefined,
@@ -3172,20 +3447,34 @@ export function selectSidebarWorktreesForProjectRef(
   }
   const environmentState = selectEnvironmentState(state, ref.environmentId);
   const worktreeIds = environmentState.worktreeIdsByProjectId?.[ref.projectId] ?? [];
-  return worktreeIds.flatMap((worktreeId) => {
-    const worktree = environmentState.worktreeById?.[worktreeId];
-    return worktree ? [worktree] : [];
-  });
+  return selectWorktreeRows(worktreeIds, environmentState.worktreeById);
 }
 
-export function selectSidebarWorktreesForProjectRefs(
+/**
+ * Combines per-ref row arrays; memoized on the `refs` array identity (a
+ * project snapshot's member refs) so an unchanged combination is returned as
+ * the same array.
+ */
+function createProjectRefsRowsSelector<Row>(
+  selectForRef: (state: AppState, ref: ScopedProjectRef) => Row[],
+): (state: AppState, refs: readonly ScopedProjectRef[]) => Row[] {
+  const cache = new WeakMap<readonly ScopedProjectRef[], { parts: Row[][]; rows: Row[] }>();
+  return (state, refs) => {
+    if (refs.length === 0) return [];
+    if (refs.length === 1) return selectForRef(state, refs[0]!);
+    const parts = refs.map((ref) => selectForRef(state, ref));
+    const cached = cache.get(refs);
+    if (cached !== undefined && arraysEqual(cached.parts, parts)) return cached.rows;
+    const rows = reuseIfSameElements(cached?.rows, parts.flat());
+    cache.set(refs, { parts, rows });
+    return rows;
+  };
+}
+
+export const selectSidebarWorktreesForProjectRefs: (
   state: AppState,
   refs: readonly ScopedProjectRef[],
-): SidebarWorktreeSummary[] {
-  if (refs.length === 0) return [];
-  if (refs.length === 1) return selectSidebarWorktreesForProjectRef(state, refs[0]);
-  return refs.flatMap((ref) => selectSidebarWorktreesForProjectRef(state, ref));
-}
+) => SidebarWorktreeSummary[] = createProjectRefsRowsSelector(selectSidebarWorktreesForProjectRef);
 
 export function selectSidebarThreadsForProjectRef(
   state: AppState,
@@ -3197,10 +3486,7 @@ export function selectSidebarThreadsForProjectRef(
 
   const environmentState = selectEnvironmentState(state, ref.environmentId);
   const threadIds = environmentState.threadIdsByProjectId[ref.projectId] ?? EMPTY_THREAD_IDS;
-  return threadIds.flatMap((threadId) => {
-    const thread = environmentState.sidebarThreadSummaryById[threadId];
-    return thread ? [thread] : [];
-  });
+  return selectSidebarThreadRows(threadIds, environmentState.sidebarThreadSummaryById);
 }
 
 /**
@@ -3228,14 +3514,10 @@ export function selectDelegatedChildThreadsForThreadRef(
   return selectDelegatedChildThreads(candidates, ref);
 }
 
-export function selectSidebarThreadsForProjectRefs(
+export const selectSidebarThreadsForProjectRefs: (
   state: AppState,
   refs: readonly ScopedProjectRef[],
-): SidebarThreadSummary[] {
-  if (refs.length === 0) return [];
-  if (refs.length === 1) return selectSidebarThreadsForProjectRef(state, refs[0]);
-  return refs.flatMap((ref) => selectSidebarThreadsForProjectRef(state, ref));
-}
+) => SidebarThreadSummary[] = createProjectRefsRowsSelector(selectSidebarThreadsForProjectRef);
 
 export function selectBootstrapCompleteForActiveEnvironment(state: AppState): boolean {
   return selectBootstrapCompleteForEnvironment(state, state.activeEnvironmentId);
@@ -3383,6 +3665,53 @@ export function applyShellEvent(
     });
   }
   return nextState;
+}
+
+/**
+ * A `thread-priorities` item: every listed thread takes its ranking and every
+ * other thread loses the one it had. Summaries whose ranking did not change
+ * keep their identity, so an unchanged sidebar row does not re-render.
+ */
+export function applyThreadPriorities(
+  state: AppState,
+  item: OrchestrationShellThreadPrioritiesItem,
+  environmentId: EnvironmentId,
+): AppState {
+  const environmentState = getStoredEnvironmentState(state, environmentId);
+  const priorityByThread = new Map(
+    item.priorities.map((entry) => [entry.threadId, entry.priority]),
+  );
+  let sidebarThreadSummaryById: EnvironmentState["sidebarThreadSummaryById"] | null = null;
+  for (const threadId of environmentState.threadIds) {
+    const summary = ownValue(environmentState.sidebarThreadSummaryById, threadId);
+    if (summary === undefined) continue;
+    const priority = priorityByThread.get(threadId);
+    if (threadPrioritiesEqual(summary.priority, priority)) continue;
+    sidebarThreadSummaryById ??= { ...environmentState.sidebarThreadSummaryById };
+    const { priority: _previous, ...withoutPriority } = summary;
+    sidebarThreadSummaryById[threadId] =
+      priority === undefined ? withoutPriority : { ...withoutPriority, priority };
+  }
+  if (sidebarThreadSummaryById === null) return state;
+  return commitEnvironmentState(state, environmentId, {
+    ...environmentState,
+    sidebarThreadSummaryById,
+  });
+}
+
+/** What the shell stream changes in the store: a sequenced event or a priority ranking. */
+export type ShellStoreUpdate =
+  | OrchestrationShellStreamEvent
+  | OrchestrationShellThreadPrioritiesItem;
+
+function applyShellStoreUpdate(
+  state: AppState,
+  update: ShellStoreUpdate,
+  environmentId: EnvironmentId,
+): AppState {
+  return update.kind === "thread-priorities"
+    ? applyThreadPriorities(state, update, environmentId)
+    : applyShellEvent(state, update, environmentId);
 }
 
 export function setActiveEnvironmentId(state: AppState, environmentId: EnvironmentId): AppState {
@@ -3588,6 +3917,41 @@ export function hydrateEnvironmentStateFromCache(
   return commitEnvironmentState(state, environmentId, environmentState);
 }
 
+/** One environment's persisted snapshot for `hydrateEnvironmentStatesFromCache`. */
+export interface CachedEnvironmentHydration {
+  readonly environmentId: EnvironmentId;
+  readonly cached: CachedEnvironmentShellSnapshot;
+  readonly options?: { readonly replaceCached?: boolean } | undefined;
+}
+
+/**
+ * `hydrateEnvironmentStateFromCache` for several environments at once, as one
+ * state transition (one store commit, one render) instead of one per
+ * environment. Each entry keeps the same live-wins guard. An entry that fails
+ * to apply is skipped and reported; the others still land.
+ */
+export function hydrateEnvironmentStatesFromCache(
+  state: AppState,
+  entries: ReadonlyArray<CachedEnvironmentHydration>,
+  onEntryError: (environmentId: EnvironmentId, error: unknown) => void = (environmentId, error) =>
+    console.error("[THREAD_CACHE] could not hydrate environment", environmentId, error),
+): AppState {
+  let nextState = state;
+  for (const entry of entries) {
+    try {
+      nextState = hydrateEnvironmentStateFromCache(
+        nextState,
+        entry.cached,
+        entry.environmentId,
+        entry.options,
+      );
+    } catch (error) {
+      onEntryError(entry.environmentId, error);
+    }
+  }
+  return nextState;
+}
+
 /**
  * Demote a live environment to last-known state when its connection is
  * disposed without the environment being forgotten (e.g. switching the
@@ -3675,64 +4039,58 @@ export function setSidebarWorktreeTitle(
 // Shell push coalescing
 //
 // The shell stream (project / thread / worktree shell upserts) can burst at a
-// very high rate while an active turn emits many tool events.  Applying each
-// event synchronously triggers a `set` and a full sidebar re-render, which can
-// freeze the UI under load.  When the incoming rate exceeds
-// SHELL_COALESCE_THRESHOLD_EVENTS_PER_MS, shell events are buffered and flushed
-// once per animation frame, collapsing many renders into one.
+// very high rate while an active turn emits many tool events. The connection
+// supervisor batches shell items per environment and animation frame and
+// commits each batch at once through `applyShellEvents`. A shell event applied
+// on its own (`applyShellEvent`) joins the next frame's commit the same way, so
+// many events cost one `set` and one sidebar render.
 //
 // Turn *content* deltas (message / activity streaming) flow through the
 // orchestration and detail streams and are NEVER coalesced here — streaming
-// stays immediate.  Every other store mutator flushes buffered shell events
+// stays immediate. Every other store mutator flushes buffered shell events
 // first so cross-stream ordering and synchronous `getState()` reads stay
 // correct (e.g. a pending `thread-upserted` can never resurrect a thread that a
 // later `removeThread` deleted).
 // ---------------------------------------------------------------------------
 
-export const SHELL_COALESCE_THRESHOLD_EVENTS_PER_MS = 10;
-const SHELL_COALESCE_RATE_WINDOW_MS = 8;
+/**
+ * Upper bound on how long buffered shell events wait when no animation frame
+ * runs (a hidden document stops `requestAnimationFrame`).
+ */
+const SHELL_COALESCE_FALLBACK_DELAY_MS = 100;
 
 interface ShellEventCoalescerDeps {
   readonly getState: () => AppState;
   readonly commitState: (next: AppState) => void;
-  readonly now?: () => number;
   readonly schedule?: (callback: () => void) => void;
-  readonly thresholdEventsPerMs?: number;
-  readonly rateWindowMs?: number;
+  readonly scheduleFallback?: (callback: () => void, delayMs: number) => void;
 }
 
 export interface ShellEventCoalescer {
-  readonly enqueue: (event: OrchestrationShellStreamEvent, environmentId: EnvironmentId) => void;
+  readonly enqueue: (event: ShellStoreUpdate, environmentId: EnvironmentId) => void;
   readonly flush: () => void;
   readonly hasPending: () => boolean;
 }
 
+/** Buffers shell updates and commits them together on the next frame (or `flush`). */
 export function createShellEventCoalescer(deps: ShellEventCoalescerDeps): ShellEventCoalescer {
-  const now = deps.now ?? (() => getThreadsRuntimeConfiguration().clock.now());
   const schedule =
     deps.schedule ??
     ((callback) => getThreadsRuntimeConfiguration().frameScheduler.scheduleFrame(callback));
-  const thresholdEventsPerMs = deps.thresholdEventsPerMs ?? SHELL_COALESCE_THRESHOLD_EVENTS_PER_MS;
-  const rateWindowMs = deps.rateWindowMs ?? SHELL_COALESCE_RATE_WINDOW_MS;
+  const scheduleFallback =
+    deps.scheduleFallback ??
+    ((callback: () => void, delayMs: number) => void setTimeout(callback, delayMs));
 
   let queue: Array<{
-    event: OrchestrationShellStreamEvent;
+    event: ShellStoreUpdate;
     environmentId: EnvironmentId;
   }> = [];
-  let recentTimestamps: number[] = [];
-  let framePending = false;
-
-  function exceedsRateThreshold(): boolean {
-    if (recentTimestamps.length < 2) {
-      return false;
-    }
-    const span = recentTimestamps[recentTimestamps.length - 1]! - recentTimestamps[0]!;
-    const eventsPerMs = span <= 0 ? Number.POSITIVE_INFINITY : recentTimestamps.length / span;
-    return eventsPerMs > thresholdEventsPerMs;
-  }
+  let scheduledGeneration = 0;
+  let scheduled = false;
 
   function flush(): void {
-    framePending = false;
+    scheduled = false;
+    scheduledGeneration += 1;
     if (queue.length === 0) {
       return;
     }
@@ -3740,28 +4098,21 @@ export function createShellEventCoalescer(deps: ShellEventCoalescerDeps): ShellE
     queue = [];
     let nextState = deps.getState();
     for (const item of pending) {
-      nextState = applyShellEvent(nextState, item.event, item.environmentId);
+      nextState = applyShellStoreUpdate(nextState, item.event, item.environmentId);
     }
     deps.commitState(nextState);
   }
 
-  function enqueue(event: OrchestrationShellStreamEvent, environmentId: EnvironmentId): void {
-    const timestamp = now();
-    recentTimestamps.push(timestamp);
-    const windowStart = timestamp - rateWindowMs;
-    while (recentTimestamps.length > 0 && recentTimestamps[0]! < windowStart) {
-      recentTimestamps.shift();
-    }
+  function enqueue(event: ShellStoreUpdate, environmentId: EnvironmentId): void {
     queue.push({ event, environmentId });
-
-    if (exceedsRateThreshold()) {
-      if (!framePending) {
-        framePending = true;
-        schedule(flush);
-      }
-      return;
-    }
-    flush();
+    if (scheduled) return;
+    scheduled = true;
+    const generation = ++scheduledGeneration;
+    const run = () => {
+      if (generation === scheduledGeneration) flush();
+    };
+    schedule(run);
+    scheduleFallback(run, SHELL_COALESCE_FALLBACK_DELAY_MS);
   }
 
   return {
@@ -3771,6 +4122,32 @@ export function createShellEventCoalescer(deps: ShellEventCoalescerDeps): ShellE
   };
 }
 
+// ---------------------------------------------------------------------------
+// Mutation barriers
+//
+// Stream events may be buffered outside the store (e.g. thread-detail events
+// batched per animation frame by the app's connection service). A registered
+// barrier is flushed before every store mutation, so buffered events keep
+// their arrival order relative to snapshots, removals, shell events and
+// synchronous writers. Barriers must be re-entrant: flushing one applies its
+// events through store mutators, which run the barriers again.
+// ---------------------------------------------------------------------------
+
+const storeMutationBarriers = new Set<() => void>();
+
+export function registerThreadStoreMutationBarrier(flush: () => void): () => void {
+  storeMutationBarriers.add(flush);
+  return () => {
+    storeMutationBarriers.delete(flush);
+  };
+}
+
+function runStoreMutationBarriers(): void {
+  for (const flush of storeMutationBarriers) {
+    flush();
+  }
+}
+
 interface AppStore extends AppState {
   setActiveEnvironmentId: (environmentId: EnvironmentId) => void;
   removeEnvironmentState: (environmentId: EnvironmentId) => void;
@@ -3778,6 +4155,11 @@ interface AppStore extends AppState {
     cached: CachedEnvironmentShellSnapshot,
     environmentId: EnvironmentId,
     options?: { readonly replaceCached?: boolean },
+  ) => void;
+  /** Several cached environments in one commit; see `hydrateEnvironmentStatesFromCache`. */
+  hydrateEnvironmentStatesFromCache: (
+    entries: ReadonlyArray<CachedEnvironmentHydration>,
+    onEntryError?: (environmentId: EnvironmentId, error: unknown) => void,
   ) => void;
   demoteEnvironmentStateToCachedSnapshot: (environmentId: EnvironmentId, demotedAt: number) => void;
   syncServerShellSnapshot: (
@@ -3805,7 +4187,18 @@ interface AppStore extends AppState {
     events: ReadonlyArray<OrchestrationEvent>,
     environmentId: EnvironmentId,
   ) => void;
-  applyShellEvent: (event: OrchestrationShellStreamEvent, environmentId: EnvironmentId) => void;
+  /** Joins the next frame's shell commit. */
+  applyShellEvent: (event: ShellStoreUpdate, environmentId: EnvironmentId) => void;
+  /**
+   * Applies one environment's shell updates in order as a single commit, now.
+   * `prepare` sees the state each update applies to (after the ones before it)
+   * and its results are returned in order.
+   */
+  applyShellEvents: <Context>(
+    events: ReadonlyArray<ShellStoreUpdate>,
+    environmentId: EnvironmentId,
+    prepare?: (state: AppState, event: ShellStoreUpdate) => Context,
+  ) => ReadonlyArray<Context>;
   removeThread: (threadRef: ScopedThreadRef) => void;
   setThreadError: (threadRef: ScopedThreadRef, error: string | null) => void;
   setThreadBranch: (
@@ -3839,12 +4232,24 @@ export const useStore = create<AppStore>((set, get) => {
       }
     set(next);
   };
-  // Buffers high-frequency shell-stream events and flushes them once per frame
-  // under load.  All non-shell mutators flush it first to preserve ordering.
-  const shellCoalescer = createShellEventCoalescer({
+  // Buffers single shell-stream events into the next frame's commit. All
+  // non-shell mutators flush it first to preserve ordering.
+  const coalescer = createShellEventCoalescer({
     getState: get,
     commitState: commitWithRelocations,
   });
+  // Every mutator applies externally buffered events (barriers) and buffered
+  // shell events before its own write.
+  const shellCoalescer = {
+    flush: () => {
+      runStoreMutationBarriers();
+      coalescer.flush();
+    },
+    enqueue: (event: ShellStoreUpdate, environmentId: EnvironmentId) => {
+      runStoreMutationBarriers();
+      coalescer.enqueue(event, environmentId);
+    },
+  };
 
   return {
     ...initialState,
@@ -3859,6 +4264,11 @@ export const useStore = create<AppStore>((set, get) => {
     hydrateEnvironmentStateFromCache: (cached, environmentId, options) => {
       shellCoalescer.flush();
       set((state) => hydrateEnvironmentStateFromCache(state, cached, environmentId, options));
+    },
+    hydrateEnvironmentStatesFromCache: (entries, onEntryError) => {
+      if (entries.length === 0) return;
+      shellCoalescer.flush();
+      set((state) => hydrateEnvironmentStatesFromCache(state, entries, onEntryError));
     },
     demoteEnvironmentStateToCachedSnapshot: (environmentId, demotedAt) => {
       shellCoalescer.flush();
@@ -3890,9 +4300,26 @@ export const useStore = create<AppStore>((set, get) => {
     },
     applyOrchestrationEvents: (events, environmentId) => {
       shellCoalescer.flush();
-      commitWithRelocations(applyOrchestrationEvents(get(), events, environmentId));
+      commitWithRelocations(
+        applyOrchestrationEventsIsolatingFailures(get(), events, environmentId),
+      );
     },
     applyShellEvent: (event, environmentId) => shellCoalescer.enqueue(event, environmentId),
+    applyShellEvents: <Context>(
+      events: ReadonlyArray<ShellStoreUpdate>,
+      environmentId: EnvironmentId,
+      prepare?: (state: AppState, event: ShellStoreUpdate) => Context,
+    ): ReadonlyArray<Context> => {
+      shellCoalescer.flush();
+      const contexts: Context[] = [];
+      let nextState: AppState = get();
+      for (const event of events) {
+        if (prepare !== undefined) contexts.push(prepare(nextState, event));
+        nextState = applyShellStoreUpdate(nextState, event, environmentId);
+      }
+      commitWithRelocations(nextState);
+      return contexts;
+    },
     removeThread: (threadRef) => {
       shellCoalescer.flush();
       set((state) => removeThreadByRef(state, threadRef));

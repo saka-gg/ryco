@@ -1,5 +1,4 @@
 import { GrokSettings, ProviderDriverKind, type ServerProvider } from "@ryco/contracts";
-import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
@@ -27,21 +26,16 @@ import {
 } from "../ProviderDriver.ts";
 import type { ServerProviderDraft } from "../providerSnapshot.ts";
 import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
-import {
-  makeManualOnlyProviderMaintenanceCapabilities,
-  makeStaticProviderMaintenanceResolver,
-  resolveProviderMaintenanceCapabilitiesEffect,
-} from "../providerMaintenance.ts";
+import { makeManualOnlyProviderMaintenanceCapabilities } from "../providerMaintenance.ts";
+import { makeProviderProbeFingerprint } from "../providerProbeFingerprint.ts";
 const decodeGrokSettings = Schema.decodeSync(GrokSettings);
 
 const DRIVER_KIND = ProviderDriverKind.make("grok");
-const SNAPSHOT_REFRESH_INTERVAL = Duration.minutes(5);
-const UPDATE = makeStaticProviderMaintenanceResolver(
-  makeManualOnlyProviderMaintenanceCapabilities({
-    provider: DRIVER_KIND,
-    packageName: null,
-  }),
-);
+// Grok updates are manual, so capability resolution never needs PATH or realpath probing.
+const MAINTENANCE_CAPABILITIES = makeManualOnlyProviderMaintenanceCapabilities({
+  provider: DRIVER_KIND,
+  packageName: null,
+});
 
 export type GrokDriverEnv =
   | ChildProcessSpawner.ChildProcessSpawner
@@ -94,9 +88,11 @@ export const GrokDriver: ProviderDriver<GrokSettings, GrokDriverEnv> = {
         continuationGroupKey: continuationIdentity.continuationKey,
       });
       const effectiveConfig = { ...config, enabled } satisfies GrokSettings;
-      const maintenanceCapabilities = yield* resolveProviderMaintenanceCapabilitiesEffect(UPDATE, {
-        binaryPath: effectiveConfig.binaryPath,
+      const probeFingerprint = yield* makeProviderProbeFingerprint({
+        driverKind: DRIVER_KIND,
+        binaryPaths: [effectiveConfig.binaryPath],
         env: processEnv,
+        settings: { instanceId, displayName, accentColor, environment, config: effectiveConfig },
       });
 
       const adapter = yield* makeGrokAdapter(effectiveConfig, {
@@ -112,7 +108,8 @@ export const GrokDriver: ProviderDriver<GrokSettings, GrokDriverEnv> = {
       );
 
       const snapshot = yield* makeManagedServerProvider<GrokSettings>({
-        maintenanceCapabilities,
+        maintenanceCapabilities: Effect.succeed(MAINTENANCE_CAPABILITIES),
+        probeFingerprint,
         getSettings: Effect.succeed(effectiveConfig),
         streamSettings: Stream.never,
         haveSettingsChanged: () => false,
@@ -121,12 +118,14 @@ export const GrokDriver: ProviderDriver<GrokSettings, GrokDriverEnv> = {
         enrichSnapshot: ({ snapshot: currentSnapshot, publishSnapshot }) =>
           enrichGrokSnapshot({
             snapshot: currentSnapshot,
-            maintenanceCapabilities,
+            maintenanceCapabilities: MAINTENANCE_CAPABILITIES,
             publishSnapshot,
             httpClient,
             serverSettings,
           }),
-        refreshInterval: SNAPSHOT_REFRESH_INTERVAL,
+        // Like every other driver, probe on demand only (client revalidation of a stale
+        // snapshot, explicit refresh, settings change); no idle background polling.
+        refreshInterval: null,
       }).pipe(
         Effect.mapError(
           (cause) =>

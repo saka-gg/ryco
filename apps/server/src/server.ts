@@ -15,8 +15,8 @@ import { RestartContinuationLive } from "./orchestration/Layers/RestartContinuat
 import { CompletionReturnDeliveryLive } from "./agentControl/Layers/CompletionReturnDelivery.ts";
 import { AgentControlWorkspacesLive } from "./agentControl/workspaceLifecycle.ts";
 import { AutomationCentreLive } from "./agentControl/Layers/AutomationCentre.ts";
-import { Effect, Layer } from "effect";
-import { FetchHttpClient, HttpRouter, HttpServer } from "effect/http";
+import { Duration, Effect, Layer } from "effect";
+import { FetchHttpClient, HttpMiddleware, HttpRouter, HttpServer } from "effect/http";
 
 import { ServerConfig } from "./config.ts";
 import { ChatAttachmentUploadsLive } from "./attachmentUpload.ts";
@@ -31,10 +31,21 @@ import {
   legacyServerEnvironmentRouteLayer,
   staticAndDevRouteLayer,
   browserApiCorsLayer,
+  BROWSER_API_CORS_OPTIONS,
+  serveStaticRequest,
 } from "./http.ts";
+import { installHttpStartupGate, isEarlyStaticRequest } from "./httpStartupGate.ts";
+import { recordDesktopStartupPhase, writeDesktopLifecycleFrame } from "./desktopLifecycle.ts";
 import { ProjectAvatarStoreLive } from "./project/Layers/ProjectAvatarStore.ts";
 import { fixPath } from "./os-jank.ts";
 import { deviceWebsocketRpcRouteLayer, websocketRpcRouteLayer } from "./ws.ts";
+import {
+  skipWebSocketCompressionForLoopbackPeers,
+  WEBSOCKET_PER_MESSAGE_DEFLATE,
+} from "./webSocketCompression.ts";
+import * as ProviderMaintenanceRunner from "./provider/providerMaintenanceRunner.ts";
+import * as SourceControlDiscovery from "./sourceControl/SourceControlDiscovery.ts";
+import { ContextHandoffInspectionLive } from "./orchestration/Layers/ContextHandoffInspection.ts";
 import { DeviceServiceLive } from "./device/Layers/DeviceService.ts";
 import { deviceFrameRouteLayer } from "./device/deviceFrameRoute.ts";
 import { HubConnectorLive } from "./hubConnector/HubConnectorLive.ts";
@@ -102,6 +113,7 @@ import { ServerEnvironmentLive } from "./environment/Layers/ServerEnvironment.ts
 import { UsageServiceLive } from "./usage/UsageService.ts";
 import { AdvertisedEndpointRegistryLive } from "./remote/AdvertisedEndpointRegistry.ts";
 import { SleepInhibitorLive } from "./service/sleepInhibitor.ts";
+import { StartupStallMonitorLive } from "./startupStallMonitor.ts";
 import {
   authBearerBootstrapRouteLayer,
   authBearerRotateRouteLayer,
@@ -176,6 +188,40 @@ const PtyAdapterLive = Layer.unwrap(
   }),
 );
 
+/**
+ * How long HTTP shutdown waits for in-flight requests before it forces the
+ * remaining connections closed. Well inside the desktop's 2 s SIGTERM→SIGKILL
+ * grace, so the runtime finalizers sequenced after the HTTP stage (restart
+ * hints, provider shutdown, SQLite close) still run.
+ */
+const HTTP_GRACEFUL_SHUTDOWN_TIMEOUT = Duration.millis(750);
+
+/**
+ * Layers whose finalizers log shutdown progress. The first marker to run
+ * starts the clock; each later one reports the time since.
+ */
+const makeShutdownClock = () => {
+  let startedAt: number | undefined;
+  return {
+    marker: (phase: string) =>
+      Layer.effectDiscard(
+        Effect.addFinalizer(() =>
+          Effect.suspend(() => {
+            const now = performance.now();
+            startedAt ??= now;
+            return Effect.logInfo("shutdown phase", {
+              phase,
+              sinceShutdownMs: Math.round(now - startedAt),
+            });
+          }),
+        ),
+      ),
+  };
+};
+
+const boundTcpPort = (address: HttpServer.HttpServer["Service"]["address"]): number | null =>
+  typeof address === "string" || !("port" in address) ? null : address.port;
+
 const HttpServerLive = Layer.unwrap(
   Effect.gen(function* () {
     const config = yield* ServerConfig;
@@ -186,16 +232,59 @@ const HttpServerLive = Layer.unwrap(
       return BunHttpServer.layer({
         port: config.port,
         ...(config.host ? { hostname: config.host } : {}),
+        gracefulShutdownTimeout: HTTP_GRACEFUL_SHUTDOWN_TIMEOUT,
       });
     } else {
       const [NodeHttpServer, NodeHttp] = yield* Effect.all([
         Effect.promise(() => import("@effect/platform-node/NodeHttpServer")),
         Effect.promise(() => import("node:http")),
       ]);
-      return NodeHttpServer.layer(NodeHttp.createServer, {
-        host: config.host,
-        port: config.port,
-      });
+      // The platform binds the port here, long before `HttpRouter.serve`
+      // attaches the request handlers; the gate holds what arrives meanwhile.
+      let startupGate: ReturnType<typeof installHttpStartupGate> | undefined;
+      const serverLayer = NodeHttpServer.layer(
+        () => {
+          const server = NodeHttp.createServer();
+          // The desktop renderer talks over loopback, where compression is pure CPU.
+          if (config.mode === "desktop") skipWebSocketCompressionForLoopbackPeers(server);
+          startupGate = installHttpStartupGate(server);
+          return server;
+        },
+        {
+          host: config.host,
+          port: config.port,
+          gracefulShutdownTimeout: HTTP_GRACEFUL_SHUTDOWN_TIMEOUT,
+          websocket: { perMessageDeflate: WEBSOCKET_PER_MESSAGE_DEFLATE },
+        },
+      );
+      // While the runtime graph builds, a desktop backend's gate answers
+      // static-shell requests itself (same handler as the router's catch-all
+      // route), so the renderer can load from `http-bound` in parallel; API,
+      // auth and WebSocket requests stay held. Other modes keep `/` held too:
+      // readiness probes such as the SSH launcher's `wait_ready` poll it and
+      // must not report a server ready before its router serves.
+      const earlyStaticServingLayer = Layer.effectDiscard(
+        Effect.gen(function* () {
+          const server = yield* HttpServer.HttpServer;
+          const gate = startupGate;
+          if (config.mode === "desktop" && gate !== undefined && !gate.isOpen()) {
+            const handler = yield* NodeHttpServer.makeHandler(
+              HttpMiddleware.cors(BROWSER_API_CORS_OPTIONS)(serveStaticRequest),
+              { scope: yield* Effect.scope },
+            );
+            gate.setEarlyRequestHandler((request, response) => {
+              if (!isEarlyStaticRequest(request)) return false;
+              handler(request, response);
+              return true;
+            });
+            yield* Effect.addFinalizer(() => Effect.sync(() => gate.setEarlyRequestHandler(null)));
+          }
+          const port = boundTcpPort(server.address);
+          if (port !== null) writeDesktopLifecycleFrame({ type: "http-bound", port });
+          recordDesktopStartupPhase("http-bound");
+        }),
+      );
+      return earlyStaticServingLayer.pipe(Layer.provideMerge(serverLayer));
     }
   }),
 );
@@ -508,6 +597,11 @@ const RuntimeServicesLive = Layer.mergeAll(
     Layer.provideMerge(AgentControlWorkspacesLive),
   ),
   ServerRuntimeStartupLive,
+  // Process-wide, so every WebSocket and relay connection shares one instance
+  // (and one discovery cache) instead of building its own per connection.
+  SourceControlDiscovery.layer,
+  ProviderMaintenanceRunner.layer,
+  ContextHandoffInspectionLive,
   AgentControlMcpServerLive.pipe(
     // HTML render tools exist only on the private listener; the external
     // endpoint below never sees this service.
@@ -605,11 +699,17 @@ export const makeServerLayer = Layer.unwrap(
 
     fixPath({ inheritedFromDesktop: config.mode === "desktop" });
 
-    const httpListeningLayer = Layer.effectDiscard(
+    // Built after `HttpRouter.serve` (see below), so the startup fiber only
+    // logs readiness, publishes `ready` and opens the browser once request
+    // handlers are attached.
+    const httpServingLayer = Layer.effectDiscard(
       Effect.gen(function* () {
-        yield* HttpServer.HttpServer;
+        const server = yield* HttpServer.HttpServer;
         const startup = yield* ServerRuntimeStartup;
-        yield* startup.markHttpListening;
+        const port = boundTcpPort(server.address);
+        if (port !== null) writeDesktopLifecycleFrame({ type: "http-serving", port });
+        recordDesktopStartupPhase("http-serving");
+        yield* startup.markHttpServing;
       }),
     );
     const runtimeStateLayer = Layer.effectDiscard(
@@ -688,24 +788,41 @@ export const makeServerLayer = Layer.unwrap(
       : Layer.empty;
 
     const serverApplicationLayer = Layer.mergeAll(
-      HttpRouter.serve(makeRoutesLayer, {
-        disableLogger: !config.logWebSocketEvents,
-      }).pipe(Layer.provide(HubConnectorLive)),
-      httpListeningLayer,
+      httpServingLayer.pipe(
+        Layer.provide(
+          HttpRouter.serve(makeRoutesLayer, {
+            disableLogger: !config.logWebSocketEvents,
+          }).pipe(Layer.provide(HubConnectorLive)),
+        ),
+      ),
       runtimeStateLayer,
       tailscaleServeLayer,
       SleepInhibitorLive,
     );
 
-    return serverApplicationLayer.pipe(
-      Layer.provideMerge(RuntimeServicesLive),
-      Layer.provideMerge(WorkspaceAccessPolicyLive),
-      Layer.provideMerge(HttpServerLive),
-      Layer.provide(ObservabilityLive),
-      Layer.provideMerge(FetchHttpClient.layer),
-      Layer.provideMerge(VcsProcess.layer),
-      Layer.provideMerge(PlatformServicesLive),
-    );
+    // Shutdown runs these stages in reverse build order; the markers log how
+    // long each took so slow finalizers can be attributed. The startup stall
+    // monitor is built before the HTTP bind and the runtime graph (migrations,
+    // read model, provider hydration), so stalls in any of them are
+    // attributed, but after observability so its warnings reach the server
+    // log. The hydration layer provides the same value; memoization keeps it
+    // to one monitor, owned here.
+    const shutdownClock = makeShutdownClock();
+    return shutdownClock
+      .marker("started")
+      .pipe(
+        Layer.provideMerge(serverApplicationLayer),
+        Layer.provideMerge(shutdownClock.marker("http-drained")),
+        Layer.provideMerge(RuntimeServicesLive),
+        Layer.provideMerge(shutdownClock.marker("runtime-services-closed")),
+        Layer.provideMerge(WorkspaceAccessPolicyLive),
+        Layer.provideMerge(HttpServerLive),
+        Layer.provideMerge(StartupStallMonitorLive),
+        Layer.provide(ObservabilityLive),
+        Layer.provideMerge(FetchHttpClient.layer),
+        Layer.provideMerge(VcsProcess.layer),
+        Layer.provideMerge(PlatformServicesLive),
+      );
   }),
 );
 

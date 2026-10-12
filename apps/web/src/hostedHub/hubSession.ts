@@ -24,6 +24,15 @@ export function isWebHubSessionOnline(): boolean {
   return status === "online";
 }
 
+/**
+ * Ask the account socket to prove it is alive now. Called on signals that a
+ * network path may have changed under a socket that still looks open; a dead
+ * one fails through the session's own loss path and reconnects.
+ */
+export function probeWebHubSession(): void {
+  session?.probe();
+}
+
 function disposeSession(): void {
   const previous = session;
   session = null;

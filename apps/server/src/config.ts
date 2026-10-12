@@ -14,6 +14,7 @@ import {
 } from "@ryco/contracts/native-e2ee";
 
 import { Effect, FileSystem, Layer, LogLevel, Path, Schema, Context } from "effect";
+import { SERVER_LOG_FILE_NAME } from "@ryco/shared/logging";
 import { canonicalizeHubOrigin, normalizeHubNodeName } from "@ryco/shared/nodeIdentity";
 
 export const DEFAULT_PORT = 3773;
@@ -337,7 +338,8 @@ export const deriveServerPaths = Effect.fn(function* (
     chatsDir: join(baseDir, "chats"),
     attachmentsDir,
     logsDir,
-    serverLogPath: join(logsDir, "server.log"),
+    // Written by the server itself in desktop mode (see serverLogger.ts).
+    serverLogPath: join(logsDir, SERVER_LOG_FILE_NAME),
     serverTracePath: join(logsDir, "server.trace.ndjson"),
     providerLogsDir,
     providerEventLogPath: join(providerLogsDir, "events.log"),

@@ -6,15 +6,18 @@
  *
  * Its `CODEX_HOME` is the instance's effective home (the shadow home for an auth overlay), and
  * the job only runs after Codex confirms it opened exactly that home.
+ *
+ * The app-server client is loaded on the first job (`loadCodexAppServerModule`), so importing this
+ * module keeps the Codex protocol schema off the server's boot path.
  */
 import { realpath } from "node:fs/promises";
 
 import { Effect, Layer, Schema } from "effect";
-import * as CodexClient from "effect-codex-app-server/client";
+import type * as CodexClient from "effect-codex-app-server/client";
 import { ChildProcessSpawner } from "effect/process";
 
+import { loadCodexAppServerModule } from "./codexAppServerModule.ts";
 import type { CodexHomeLayout } from "./Drivers/CodexHomeLayout.ts";
-import { buildCodexInitializeParams } from "./Layers/CodexProvider.ts";
 
 /** Whole job, including process start and the handshake. */
 export const CODEX_ISOLATED_APP_SERVER_TIMEOUT = "45 seconds";
@@ -63,19 +66,22 @@ export const withIsolatedCodexAppServer = <A, E, R>(
   const home = input.layout.effectiveHomePath ?? input.layout.sharedHomePath;
   return Effect.scoped(
     Effect.gen(function* () {
+      const codexAppServer = yield* loadCodexAppServerModule.pipe(
+        Effect.mapError(unavailable("Codex could not start.")),
+      );
       const context = yield* Layer.build(
-        CodexClient.layerCommand({
+        codexAppServer.CodexClient.layerCommand({
           command: input.binaryPath,
           args: ["app-server"],
           cwd: input.cwd,
           env: { ...input.environment, CODEX_HOME: home },
         }),
       ).pipe(Effect.mapError(unavailable("Codex could not start.")));
-      const client = yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
+      const client = yield* Effect.service(codexAppServer.CodexClient.CodexAppServerClient).pipe(
         Effect.provide(context),
       );
       const initialized = yield* client
-        .request("initialize", buildCodexInitializeParams())
+        .request("initialize", codexAppServer.buildCodexInitializeParams())
         .pipe(Effect.mapError(unavailable("Codex did not complete its handshake.")));
       const actualHome = yield* Effect.tryPromise({
         try: () => realpath(initialized.codexHome),

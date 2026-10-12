@@ -2,6 +2,8 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
 import zlib from "node:zlib";
 
+import { isOnDemandWebAssetPath } from "../lib/onDemandWebAssets.ts";
+import { isPrecompressedSibling } from "../lib/precompressedSiblings.ts";
 import type { BundleMeasurement } from "./model.ts";
 
 // Node's Brotli default is quality 11, which is intended for maximum offline
@@ -14,17 +16,23 @@ const BROTLI_OPTIONS = {
   },
 } as const;
 
-function filesBelow(directory: string): string[] {
-  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+function filesBelow(root: string, directory: string): string[] {
+  const entries = readdirSync(directory, { withFileTypes: true });
+  const names = new Set(entries.map((entry) => entry.name));
+  return entries.flatMap((entry) => {
     const entryPath = path.join(directory, entry.name);
-    if (entry.isDirectory()) return filesBelow(entryPath);
-    return entry.isFile() ? [entryPath] : [];
+    if (entry.isDirectory()) {
+      return isOnDemandWebAssetPath(path.relative(root, entryPath))
+        ? []
+        : filesBelow(root, entryPath);
+    }
+    return entry.isFile() && !isPrecompressedSibling(entry.name, names) ? [entryPath] : [];
   });
 }
 
 export function measureWebBundle(distDir: string): BundleMeasurement {
   if (!statSync(distDir).isDirectory()) throw new Error(`Web dist is not a directory: ${distDir}`);
-  const files = filesBelow(distDir);
+  const files = filesBelow(distDir, distDir);
   let rawBytes = 0;
   let gzipBytes = 0;
   let brotliBytes = 0;

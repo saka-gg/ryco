@@ -33,7 +33,11 @@ import {
   ENVIRONMENT_SNAPSHOT_SCHEMA_VERSION,
   type StoredEnvironmentSnapshot,
 } from "./environmentSnapshotCodec";
-import { createSnapshotPersistenceRuntime } from "./environmentSnapshotPersistence";
+import {
+  createSnapshotPersistenceRuntime,
+  SNAPSHOT_WRITE_DEBOUNCE_MS,
+  SNAPSHOT_WRITE_MAX_WAIT_MS,
+} from "./environmentSnapshotPersistence";
 import { payloadByteLength, type SnapshotDb } from "./snapshotDb";
 
 function createFakeSnapshotDb() {
@@ -47,6 +51,15 @@ function createFakeSnapshotDb() {
       const row = snapshots.get(environmentId);
       return row ? { schemaVersion: row.schemaVersion, payload: row.payload } : null;
     },
+    loadEnvironmentSnapshots: async () =>
+      [...snapshots.entries()]
+        .map(([environmentId, row]) => ({
+          environmentId,
+          schemaVersion: row.schemaVersion,
+          payload: row.payload,
+          updatedAt: row.updatedAt,
+        }))
+        .toSorted((left, right) => right.updatedAt - left.updatedAt),
     saveEnvironmentSnapshot: async (input) => {
       snapshots.set(input.environmentId, {
         schemaVersion: input.schemaVersion,
@@ -192,7 +205,7 @@ describe("environment snapshot persistence", () => {
     useStore.getState().syncServerShellSnapshot(wireSnapshot("project-live"), environmentId);
 
     runtime.markDirty(environmentId);
-    await vi.advanceTimersByTimeAsync(499);
+    await vi.advanceTimersByTimeAsync(SNAPSHOT_WRITE_DEBOUNCE_MS - 1);
     expect(snapshots.size).toBe(0);
     await vi.advanceTimersByTimeAsync(2);
     expect(snapshots.size).toBe(1);
@@ -260,7 +273,7 @@ describe("environment snapshot persistence", () => {
 
     runtime.markDirty(hydratedId);
     runtime.markDirty(unknownId);
-    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(SNAPSHOT_WRITE_MAX_WAIT_MS);
     expect(snapshots.size).toBe(0);
     runtime.dispose();
   });
@@ -285,14 +298,20 @@ describe("environment snapshot persistence", () => {
       updatedAt: 2,
     });
 
+    const yields = vi.fn(async () => undefined);
     const runtime = createSnapshotPersistenceRuntime({
       db,
       store: useStore,
       now: () => 10,
       hasDirectEnvironment: () => true,
+      yieldToEventLoop: yields,
     });
+    const loadOne = vi.spyOn(db, "loadEnvironmentSnapshot");
     await runtime.hydrate();
 
+    // One read for every row, and a yield between the two decodes.
+    expect(loadOne).not.toHaveBeenCalled();
+    expect(yields).toHaveBeenCalledTimes(1);
     const state = useStore.getState();
     expect(state.environmentStateById[goodId]?.projectIds).toHaveLength(1);
     expect(state.environmentStateById[goodId]?.hydratedFromCacheAt).toBe(1_000);
@@ -456,9 +475,97 @@ describe("environment snapshot persistence", () => {
       const environmentId = env(`persist-evict-${suffix}`);
       useStore.getState().syncServerShellSnapshot(wireSnapshot(suffix), environmentId);
       runtime.markDirty(environmentId);
-      await vi.advanceTimersByTimeAsync(600);
+      await vi.advanceTimersByTimeAsync(SNAPSHOT_WRITE_DEBOUNCE_MS + 100);
     }
     expect([...snapshots.keys()]).toEqual(["persist-evict-two", "persist-evict-three"]);
+    runtime.dispose();
+  });
+
+  it("skips a capture when no persisted slice changed since the last write", async () => {
+    const { db } = createFakeSnapshotDb();
+    const save = vi.spyOn(db, "saveEnvironmentSnapshot");
+    const runtime = createSnapshotPersistenceRuntime({
+      db,
+      store: useStore,
+      now: () => 1,
+      hasDirectEnvironment: () => true,
+    });
+    const environmentId = env("persist-unchanged");
+    useStore.getState().syncServerShellSnapshot(wireSnapshot("same"), environmentId);
+
+    await runtime.capture(environmentId);
+    // A mark from an event that touched nothing the snapshot persists.
+    await runtime.capture(environmentId);
+    expect(save).toHaveBeenCalledTimes(1);
+
+    useStore.getState().syncServerShellSnapshot(wireSnapshot("changed"), environmentId);
+    await runtime.capture(environmentId);
+    expect(save).toHaveBeenCalledTimes(2);
+    runtime.dispose();
+  });
+
+  it("writes again after its stored row was removed, even with unchanged slices", async () => {
+    const { db, snapshots } = createFakeSnapshotDb();
+    const runtime = createSnapshotPersistenceRuntime({
+      db,
+      store: useStore,
+      now: () => 1,
+      hasDirectEnvironment: () => true,
+    });
+    const environmentId = env("persist-rewrite-after-purge");
+    useStore.getState().syncServerShellSnapshot(wireSnapshot("same"), environmentId);
+
+    await runtime.capture(environmentId);
+    await runtime.purgeEnvironment(environmentId);
+    expect(snapshots.has(environmentId)).toBe(false);
+    await runtime.capture(environmentId);
+    expect(snapshots.has(environmentId)).toBe(true);
+    runtime.dispose();
+  });
+
+  it("writes a continuously active environment by the maximum wait", async () => {
+    const { db, snapshots } = createFakeSnapshotDb();
+    const runtime = createSnapshotPersistenceRuntime({
+      db,
+      store: useStore,
+      now: () => 1,
+      hasDirectEnvironment: () => true,
+    });
+    const environmentId = env("persist-max-wait");
+    useStore.getState().syncServerShellSnapshot(wireSnapshot("busy"), environmentId);
+
+    // Marks arrive faster than the debounce window, so it never goes quiet.
+    for (let elapsed = 0; elapsed < SNAPSHOT_WRITE_MAX_WAIT_MS - 500; elapsed += 500) {
+      runtime.markDirty(environmentId);
+      await vi.advanceTimersByTimeAsync(500);
+    }
+    expect(snapshots.has(environmentId)).toBe(false);
+    runtime.markDirty(environmentId);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(snapshots.has(environmentId)).toBe(true);
+    runtime.dispose();
+  });
+
+  it("flushes pending captures when the app goes to the background", async () => {
+    const { db, snapshots } = createFakeSnapshotDb();
+    let background: () => void = () => undefined;
+    const runtime = createSnapshotPersistenceRuntime({
+      db,
+      store: useStore,
+      now: () => 1,
+      hasDirectEnvironment: () => true,
+      subscribeBackground: (listener) => {
+        background = listener;
+        return () => undefined;
+      },
+    });
+    const environmentId = env("persist-background");
+    useStore.getState().syncServerShellSnapshot(wireSnapshot("pending"), environmentId);
+
+    runtime.markDirty(environmentId);
+    background();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(snapshots.has(environmentId)).toBe(true);
     runtime.dispose();
   });
 });

@@ -14,7 +14,6 @@ import path from "node:path";
 
 import {
   CHAT_PROJECT_TITLE_MAX_CHARS,
-  type OrchestrationShellSnapshot,
   ProjectChatError,
   type ProjectId,
   type ProjectsDeleteChatFolderResult,
@@ -43,7 +42,11 @@ import {
 } from "effect";
 
 import { resolveManagedChatsRoot, ServerConfig, type ServerConfigShape } from "../config.ts";
-import type { ProjectionSnapshotQueryShape } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
+import {
+  type ProjectionSnapshotQueryShape,
+  type ProjectionWorkspacePlacement,
+  readWorkspacePlacement,
+} from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import type { ProjectionProjectRepositoryShape } from "../persistence/Services/ProjectionProjects.ts";
 import type { ProjectionThreadRepositoryShape } from "../persistence/Services/ProjectionThreads.ts";
 import { ServerSettingsService, type ServerSettingsShape } from "../serverSettings.ts";
@@ -584,7 +587,10 @@ export interface DeleteChatFolderDependencies {
   readonly threads: Pick<ProjectionThreadRepositoryShape, "listByProjectId">;
   readonly chatFolders: Pick<ChatFoldersShape, "isInsideChatsRoot">;
   /** The live projects, workspaces and threads, whose folders must survive the deletion. */
-  readonly workspaces: Pick<ProjectionSnapshotQueryShape, "getShellSnapshot">;
+  readonly workspaces: Pick<
+    ProjectionSnapshotQueryShape,
+    "getShellSnapshot" | "getWorkspacePlacement"
+  >;
   /** Let already-committed deletion cleanup (session stops) finish before sessions are checked. */
   readonly settleThreadCleanup: Effect.Effect<void>;
   readonly listSessions: () => Effect.Effect<
@@ -597,18 +603,18 @@ const chatError = (reason: ProjectChatError["reason"], message: string) =>
 
 /** The live folders other than `projectId`'s own: project roots, workspaces and thread checkouts. */
 const otherWorkspaceFolders = (
-  snapshot: OrchestrationShellSnapshot,
+  placement: ProjectionWorkspacePlacement,
   projectId: ProjectId,
 ): ReadonlyArray<string> => [
-  ...snapshot.projects.flatMap((project) =>
+  ...placement.projects.flatMap((project) =>
     project.id === projectId ? [] : [project.workspaceRoot],
   ),
-  ...(snapshot.worktrees ?? []).flatMap((worktree) =>
+  ...placement.worktrees.flatMap((worktree) =>
     worktree.projectId === projectId || worktree.worktreePath === null
       ? []
       : [worktree.worktreePath],
   ),
-  ...snapshot.threads.flatMap((thread) =>
+  ...placement.threads.flatMap((thread) =>
     thread.projectId === projectId || thread.worktreePath === null ? [] : [thread.worktreePath],
   ),
 ];
@@ -665,9 +671,11 @@ export const deleteChatFolder = Effect.fn("deleteChatFolder")(function* (
       "This chat's folder is not one Ryco created for it in the chats folder, so Ryco will not delete it.",
     );
   }
-  const snapshot = yield* deps.workspaces.getShellSnapshot().pipe(Effect.mapError(unreadable));
+  const placement = yield* readWorkspacePlacement(deps.workspaces).pipe(
+    Effect.mapError(unreadable),
+  );
   const nested = yield* Effect.promise(async () => {
-    for (const other of otherWorkspaceFolders(snapshot, projectId)) {
+    for (const other of otherWorkspaceFolders(placement, projectId)) {
       const canonical = await canonicalizeWorktreePath(other).catch(() => path.resolve(other));
       if (containsPath(canonicalFolder, canonical)) return other;
     }

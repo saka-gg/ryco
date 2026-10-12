@@ -1,4 +1,4 @@
-import { DateTime, Effect, FileSystem, Layer, Option, Result, Schema } from "effect";
+import { DateTime, Deferred, Effect, FileSystem, Layer, Option, Result, Schema } from "effect";
 import {
   SourceControlProviderError,
   SOURCE_CONTROL_WORKFLOW_LOG_MAX_BYTES,
@@ -345,6 +345,102 @@ export const make = Effect.fn("makeGitHubSourceControlProvider")(function* () {
         }),
     }).pipe(Effect.flatten);
 
+  /**
+   * Stack summaries by repository and number, shared for a minute, for the
+   * searches that still list through `gh` (lists read them in their own
+   * GraphQL request). Searches overlap as the query is typed, and each would
+   * otherwise ask GitHub again for the same pull requests; concurrent
+   * searches wait for the read already in flight. Failed reads are not kept.
+   */
+  const stackSummaries = new Map<
+    string,
+    {
+      readonly expiresAtMs: number;
+      readonly summary: Deferred.Deferred<SourceControlChangeRequestStackSummary | null>;
+    }
+  >();
+  const STACK_SUMMARY_REUSE_MS = 60_000;
+  const STACK_SUMMARY_CAPACITY = 2_048;
+
+  const readStackSummaries = (input: {
+    readonly cwd: string;
+    readonly key: string;
+    readonly host: string;
+    readonly repository: string;
+    readonly numbers: ReadonlyArray<number>;
+  }) =>
+    // Registration is uninterruptible and this read settles the deferreds it
+    // registered itself (not whatever the map holds by then: an entry may be
+    // evicted or replaced meanwhile), so lists waiting on them never hang.
+    Effect.uninterruptibleMask((restore) =>
+      Effect.gen(function* () {
+        const nowMs = Date.now();
+        const owned: Array<
+          readonly [
+            number,
+            string,
+            Deferred.Deferred<SourceControlChangeRequestStackSummary | null>,
+          ]
+        > = [];
+        const waits: Array<
+          readonly [number, Deferred.Deferred<SourceControlChangeRequestStackSummary | null>]
+        > = [];
+        for (const number of new Set(input.numbers)) {
+          const entryKey = `${input.key}\u0000${number}`;
+          const cached = stackSummaries.get(entryKey);
+          if (cached && cached.expiresAtMs > nowMs) {
+            waits.push([number, cached.summary]);
+            continue;
+          }
+          const summary = yield* Deferred.make<SourceControlChangeRequestStackSummary | null>();
+          stackSummaries.set(entryKey, { expiresAtMs: nowMs + STACK_SUMMARY_REUSE_MS, summary });
+          owned.push([number, entryKey, summary]);
+          waits.push([number, summary]);
+        }
+        for (const oldest of stackSummaries.keys()) {
+          if (stackSummaries.size <= STACK_SUMMARY_CAPACITY) break;
+          stackSummaries.delete(oldest);
+        }
+        if (owned.length > 0) {
+          // Settled however the read ends (failure, defect, interruption);
+          // only answers are kept.
+          const settle = (
+            fetched: ReadonlyMap<number, SourceControlChangeRequestStackSummary> | null,
+          ) =>
+            Effect.forEach(
+              owned,
+              ([number, entryKey, summary]) =>
+                Effect.suspend(() => {
+                  if (fetched === null && stackSummaries.get(entryKey)?.summary === summary) {
+                    stackSummaries.delete(entryKey);
+                  }
+                  return Deferred.succeed(summary, fetched?.get(number) ?? null);
+                }),
+              { discard: true },
+            );
+          yield* restore(
+            invokeGitHubEffect("getPullRequestStackSummaries", () =>
+              github.getPullRequestStackSummaries({
+                cwd: input.cwd,
+                host: input.host,
+                repository: input.repository,
+                numbers: owned.map(([number]) => number),
+              }),
+            ),
+          ).pipe(
+            Effect.onExit((exit) => settle(exit._tag === "Success" ? exit.value : null)),
+            Effect.exit,
+          );
+        }
+        const summaries = new Map<number, SourceControlChangeRequestStackSummary>();
+        for (const [number, deferred] of waits) {
+          const summary = yield* restore(Deferred.await(deferred));
+          if (summary) summaries.set(number, summary);
+        }
+        return summaries;
+      }),
+    );
+
   const enrichChangeRequestsWithStacks = (input: {
     readonly cwd: string;
     readonly items: ReadonlyArray<ChangeRequest>;
@@ -378,17 +474,13 @@ export const make = Effect.fn("makeGitHubSourceControlProvider")(function* () {
       const groupSummaries = yield* Effect.forEach(
         groups.entries(),
         ([key, group]) =>
-          invokeGitHubEffect("getPullRequestStackSummaries", () =>
-            github.getPullRequestStackSummaries({
-              cwd: input.cwd,
-              host: group.host,
-              repository: group.repository,
-              numbers: group.numbers,
-            }),
-          ).pipe(
-            Effect.catch(() => Effect.succeed(new Map())),
-            Effect.map((summaries) => ({ key, summaries })),
-          ),
+          readStackSummaries({
+            cwd: input.cwd,
+            key,
+            host: group.host,
+            repository: group.repository,
+            numbers: group.numbers,
+          }).pipe(Effect.map((summaries) => ({ key, summaries }))),
         { concurrency: 2 },
       );
       const summaries = new Map<string, SourceControlChangeRequestStackSummary>();
@@ -426,7 +518,12 @@ export const make = Effect.fn("makeGitHubSourceControlProvider")(function* () {
       const query = input.query?.trim() ?? "";
       // Involvement and free-text search are server-side GitHub search scopes.
       const searchScoped = input.involvement !== undefined || query.length > 0;
-      if (input.state === "open" && headSelector.length > 0 && !searchScoped) {
+      if (
+        input.state === "open" &&
+        headSelector.length > 0 &&
+        !searchScoped &&
+        input.fields !== "summary"
+      ) {
         return github
           .listOpenPullRequests({
             cwd: input.cwd,
@@ -436,6 +533,28 @@ export const make = Effect.fn("makeGitHubSourceControlProvider")(function* () {
           .pipe(
             Effect.map((items) => items.map((item) => toChangeRequest(item))),
             Effect.flatMap(enrich),
+            Effect.mapError((error) => providerError("listChangeRequests", error)),
+          );
+      }
+
+      // Rows for lists (the page, overview, explorer and pickers share one
+      // superset): one GraphQL request with comment counts, not bodies, and
+      // stack summaries in the same request instead of a second round trip.
+      // Free-text search keeps `gh`'s own search (its advanced-search syntax).
+      if (input.fields !== "summary" && query.length === 0) {
+        return github
+          .listPullRequests({
+            cwd: input.cwd,
+            state: input.state,
+            ...(headSelector.length > 0 ? { headSelector } : {}),
+            ...(input.involvement !== undefined ? { involvement: input.involvement } : {}),
+            ...(input.limit !== undefined ? { limit: input.limit } : {}),
+            ...(input.includeStackSummary === false ? { includeStackSummary: false } : {}),
+          })
+          .pipe(
+            Effect.map((items) =>
+              items.map((item) => toChangeRequest(item.summary, item.stackSummary ?? undefined)),
+            ),
             Effect.mapError((error) => providerError("listChangeRequests", error)),
           );
       }
@@ -466,14 +585,19 @@ export const make = Effect.fn("makeGitHubSourceControlProvider")(function* () {
               ],
         });
 
-      return executeListChangeRequests(GitHubCli.GITHUB_PULL_REQUEST_LIST_JSON_FIELDS).pipe(
-        Effect.catchIf(GitHubCli.isStatusCheckRollupAccessError, () =>
-          executeListChangeRequests(
-            GitHubCli.withoutStatusCheckRollupJsonField(
-              GitHubCli.GITHUB_PULL_REQUEST_LIST_JSON_FIELDS,
-            ),
-          ),
-        ),
+      const listed =
+        input.fields === "summary"
+          ? executeListChangeRequests(GitHubCli.GITHUB_PULL_REQUEST_SUMMARY_LIST_JSON_FIELDS)
+          : executeListChangeRequests(GitHubCli.GITHUB_PULL_REQUEST_LIST_JSON_FIELDS).pipe(
+              Effect.catchIf(GitHubCli.isStatusCheckRollupAccessError, () =>
+                executeListChangeRequests(
+                  GitHubCli.withoutStatusCheckRollupJsonField(
+                    GitHubCli.GITHUB_PULL_REQUEST_LIST_JSON_FIELDS,
+                  ),
+                ),
+              ),
+            );
+      return listed.pipe(
         Effect.flatMap((result) => {
           const raw = result.stdout.trim();
           if (raw.length === 0) {
@@ -1027,22 +1151,24 @@ export const make = Effect.fn("makeGitHubSourceControlProvider")(function* () {
         Effect.mapError((cause) => providerError("listAssignees", cause)),
       ),
     getPullRequestState: (input) =>
-      github.getPullRequest({ cwd: input.cwd, reference: String(input.number) }).pipe(
-        Effect.map((summary) => {
-          const state = summary.state ?? "open";
-          return {
-            state,
-            isDraft: summary.isDraft ?? false,
-            terminalAt:
-              state === "merged"
-                ? (summary.mergedAt ?? summary.closedAt ?? null)
-                : state === "closed"
-                  ? (summary.closedAt ?? null)
-                  : null,
-          };
-        }),
-        Effect.mapError((cause) => providerError("getPullRequestState", cause)),
-      ),
+      github
+        .getPullRequest({ cwd: input.cwd, reference: String(input.number), fields: "summary" })
+        .pipe(
+          Effect.map((summary) => {
+            const state = summary.state ?? "open";
+            return {
+              state,
+              isDraft: summary.isDraft ?? false,
+              terminalAt:
+                state === "merged"
+                  ? (summary.mergedAt ?? summary.closedAt ?? null)
+                  : state === "closed"
+                    ? (summary.closedAt ?? null)
+                    : null,
+            };
+          }),
+          Effect.mapError((cause) => providerError("getPullRequestState", cause)),
+        ),
     getIssueState: (input) =>
       github.getIssue({ cwd: input.cwd, reference: String(input.number) }).pipe(
         Effect.map((detail) => ({ state: detail.state })),

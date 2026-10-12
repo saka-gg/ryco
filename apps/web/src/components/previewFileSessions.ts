@@ -6,10 +6,12 @@ import { readHostedNodeMutationLease } from "~/hostedHub/hostedConnectionCoordin
 import { setProjectReadFileCacheData } from "~/rpc/projectPreviewAtoms";
 import { PreviewFileSessionOwner, type PreviewFileDocument } from "./PreviewFileEditSession";
 import {
+  matchingPreviewFileOwners,
   previewFileSessionRegistry as sessions,
   type PreviewFileScope,
 } from "./previewFileSessionRegistry";
 export type { PreviewFileScope } from "./previewFileSessionRegistry";
+export { flushPreviewFiles, hasUnsavedPreviewFiles } from "./previewFileSessionRegistry";
 
 /** Consult existing lifecycle authorities; this module never initiates reconnects. */
 export function previewFileAuthority(environmentId: EnvironmentId): string | object | null {
@@ -23,7 +25,7 @@ export function previewFileAuthority(environmentId: EnvironmentId): string | obj
 
 export function retainedPreviewFilePath(scope: PreviewFileScope) {
   return (
-    matchingSessions(scope)
+    matchingPreviewFileOwners(scope)
       .find((owner) => owner.unsaved)
       ?.getSnapshot().relativePath ?? null
   );
@@ -61,33 +63,6 @@ export function getPreviewFileSession(scope: PreviewFileScope, document: Preview
     sessions.set(document.key, entry);
   }
   return entry.owner;
-}
-
-export function hasUnsavedPreviewFiles(scope?: PreviewFileScope) {
-  return matchingSessions(scope).some((owner) => owner.unsaved);
-}
-
-function matchingSessions(scope?: PreviewFileScope) {
-  return [...sessions.values()]
-    .filter(
-      (entry) =>
-        !scope ||
-        (entry.scope.environmentId === scope.environmentId && entry.scope.cwd === scope.cwd),
-    )
-    .map((entry) => entry.owner);
-}
-
-/** A barrier also catches buffers added while an earlier save was pending. */
-export async function flushPreviewFiles(scope?: PreviewFileScope): Promise<boolean> {
-  while (hasUnsavedPreviewFiles(scope)) {
-    const results = await Promise.all(
-      matchingSessions(scope)
-        .filter((owner) => owner.unsaved)
-        .map((owner) => owner.flush()),
-    );
-    if (results.some((saved) => !saved)) return false;
-  }
-  return true;
 }
 
 export function resetPreviewFileSessionsForTests() {

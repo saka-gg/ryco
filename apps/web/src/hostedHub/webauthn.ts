@@ -1,11 +1,11 @@
+import { encodeBase64Url } from "@ryco/client-runtime/relay/base64url";
 import {
   AUTHENTICATOR_TRANSPORTS,
-  encodeBase64Url,
   validatePasskeyAuthenticationOptions,
   validatePasskeyRegistrationOptions,
   type AuthenticationResponseJson,
   type RegistrationResponseJson,
-} from "@ryco/client-runtime/relay";
+} from "@ryco/client-runtime/relay/webauthn";
 
 /**
  * Browser passkey ceremonies. The fail-closed option validation and response

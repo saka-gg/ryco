@@ -1,1 +1,6 @@
-export { readProjectIconSource } from "@ryco/client-runtime/connection";
+export {
+  clearProjectIconCache,
+  peekProjectIconSource,
+  projectIconRequestKey,
+  readProjectIconSource,
+} from "@ryco/client-runtime/connection";

@@ -67,6 +67,14 @@ export interface ProviderAdapterCapabilities {
    * over with a context handoff instead of resuming the old one there.
    */
   readonly resumeSurvivesCwdChange?: boolean;
+  /**
+   * Where Ryco's assistant-attachment instructions reach the provider. Missing
+   * is treated as `"first-turn"`: ProviderService prefixes them to the first
+   * turn of each runtime session. `"session"`: the adapter carries them in its
+   * session-level system or developer instructions, so turn input reaches the
+   * provider exactly as sent.
+   */
+  readonly attachmentInstructions?: "session" | "first-turn";
 }
 
 export type ProviderTurnSubmissionMode = "acceptance" | "completion";

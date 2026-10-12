@@ -368,7 +368,14 @@ export function applyAppearancePreferencesToDocument(): void {
   if (typeof document === "undefined" || typeof document.getElementById !== "function") return;
   const preferences = getEffectiveAppearancePreferences();
   const style = ensureAppearancePreferencesStyleElement();
-  style.textContent = `:root { --font-family-sans: ${preferences.fontFamilySans}; --font-family-mono: ${preferences.fontFamilyMono}; --font-size-base: ${preferences.fontSizeBase}; ${buildRadiusCssVariables(preferences.radius)} ${buildSurfaceTransparencyCssVariables(preferences.surfaceTransparency)} ${buildMotionCssVariables(isReducedMotionEffective())} ${buildDockDensityCssVariables(preferences.dockDensity)} }${buildPrimaryColorCssRule(preferences)}`;
+  const textContent = `:root { --font-family-sans: ${preferences.fontFamilySans}; --font-family-mono: ${preferences.fontFamilyMono}; --font-size-base: ${preferences.fontSizeBase}; ${buildRadiusCssVariables(preferences.radius)} ${buildSurfaceTransparencyCssVariables(preferences.surfaceTransparency)} ${buildMotionCssVariables(isReducedMotionEffective())} ${buildDockDensityCssVariables(preferences.dockDensity)} }${buildPrimaryColorCssRule(preferences)}`;
+  // Rewriting (or moving) the sheet invalidates :root and forces a
+  // full-document style recalc even when the text is identical.
+  if (style.textContent !== textContent) {
+    style.textContent = textContent;
+  }
+  // Subscribers still hear about environment changes that emit no CSS
+  // (e.g. prefers-reduced-transparency, which the settings UI reports).
   dispatchAppearancePreferencesChangeEvent();
 }
 
@@ -738,7 +745,11 @@ function formatPx(px: number): string {
 function ensureAppearancePreferencesStyleElement(): HTMLStyleElement {
   const existing = document.getElementById(APPEARANCE_PREFERENCES_STYLE_ELEMENT_ID);
   if (existing instanceof HTMLStyleElement) {
-    document.head.append(existing);
+    // Keep it last in <head> so it wins over sheets inserted later, but only
+    // move it when something was inserted after it: a move is a recalc.
+    if (document.head.lastElementChild !== existing) {
+      document.head.append(existing);
+    }
     return existing;
   }
   const style = document.createElement("style");

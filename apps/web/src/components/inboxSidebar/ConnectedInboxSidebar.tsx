@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef } from "react";
+import { useCallback, useLayoutEffect, useMemo, useRef } from "react";
 import { useRouter } from "@tanstack/react-router";
 import { scopedProjectKey, scopedThreadKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
 import { WS_METHODS, type ScopedProjectRef } from "@ryco/contracts";
@@ -54,8 +54,12 @@ export function ConnectedInboxSidebar(
       ),
     [props.threads],
   );
+  // Read by menu callbacks; synced after render so the React Compiler can
+  // optimize this component (render-time ref writes make it bail out).
   const sidebarThreadByKeyRef = useRef(threadByKey);
-  sidebarThreadByKeyRef.current = threadByKey;
+  useLayoutEffect(() => {
+    sidebarThreadByKeyRef.current = threadByKey;
+  }, [threadByKey]);
   const memberProjectByScopedKey = useMemo(
     () =>
       new Map(
@@ -86,7 +90,7 @@ export function ConnectedInboxSidebar(
     openProjectSettings,
   });
   const renaming = actions.renamingThreadKey
-    ? sidebarThreadByKeyRef.current.get(actions.renamingThreadKey)
+    ? threadByKey.get(actions.renamingThreadKey)
     : undefined;
   return (
     <>

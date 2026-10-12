@@ -6,6 +6,15 @@ export interface HostedBrowserLifecyclePorts {
   readonly suspend: (reason: "hidden" | "offline") => void;
   readonly recover: () => Promise<void>;
   readonly setBackgrounded: (backgrounded: boolean) => Promise<void>;
+  /**
+   * Check that the account connection is still alive. A foreground, `online`
+   * or network-change signal does not mean the old socket died — and a healthy
+   * one is deliberately not replaced — but a path change can leave it open and
+   * dead, which the heartbeat alone takes up to its liveness bound to notice.
+   */
+  readonly probe?: () => void;
+  /** NetworkInformation `change`, where the browser has it. */
+  readonly subscribeNetworkChange?: (listener: () => void) => () => void;
 }
 
 /** A hidden tab can still receive events; only a real suspension ends its lease. */
@@ -14,6 +23,7 @@ export function bindHostedBrowserLifecycle(ports: HostedBrowserLifecyclePorts): 
   let recoveryGeneration = 0;
   const resumeIfVisible = () => {
     if (disposed || !ports.isVisible() || !ports.isOnline()) return;
+    ports.probe?.();
     const generation = ++recoveryGeneration;
     void ports.recover().then(() => {
       if (!disposed && generation === recoveryGeneration && ports.isVisible() && ports.isOnline()) {
@@ -32,6 +42,9 @@ export function bindHostedBrowserLifecycle(ports: HostedBrowserLifecyclePorts): 
   };
   const onOffline = () => suspend("offline");
   const onFreeze = () => suspend("hidden");
+  const onNetworkChange = () => {
+    if (!disposed && ports.isOnline()) ports.probe?.();
+  };
   ports.document.addEventListener("visibilitychange", onVisibility);
   ports.document.addEventListener("freeze", onFreeze);
   ports.document.addEventListener("resume", resumeIfVisible);
@@ -39,9 +52,11 @@ export function bindHostedBrowserLifecycle(ports: HostedBrowserLifecyclePorts): 
   ports.window.addEventListener("online", resumeIfVisible);
   ports.window.addEventListener("pagehide", onFreeze);
   ports.window.addEventListener("pageshow", resumeIfVisible);
+  const unsubscribeNetworkChange = ports.subscribeNetworkChange?.(onNetworkChange);
   if (!ports.isOnline()) onOffline();
   return () => {
     disposed = true;
+    unsubscribeNetworkChange?.();
     recoveryGeneration++;
     ports.document.removeEventListener("visibilitychange", onVisibility);
     ports.document.removeEventListener("freeze", onFreeze);

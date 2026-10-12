@@ -8,6 +8,12 @@ import { activateHostedNode, deactivateHostedNode, suspendHostedNode } from "./e
 import { getHostedDispatchReplay } from "../relay/dispatchReplay.ts";
 import { NativeHandoffClientError } from "./nativeHandoff.ts";
 import { getHostedHubApi, getHostedRuntimeConfiguration } from "./runtime.ts";
+import {
+  createHostedStore,
+  INITIAL_HOSTED_ACCOUNT_STATE,
+  INITIAL_HOSTED_HUB_STATE,
+  INITIAL_HOSTED_RECOVERY_CODE_DISPLAY_STATE,
+} from "./hostedStores.ts";
 import type {
   HostedAccountOutcome,
   HostedAccountRefusalReason,
@@ -82,28 +88,7 @@ export interface HostedHubState {
   readonly generation: number;
 }
 
-const initialState: HostedHubState = {
-  bootstrapAvailable: false,
-  accountStatus: "signed-out",
-  account: null,
-  session: null,
-  directoryStatus: "idle",
-  nodes: [],
-  selectedNode: null,
-  selectionStatus: "none",
-  effectiveRole: null,
-  transportStatus: "idle",
-  sessionStatus: "closed",
-  sessionEstablished: false,
-  sessionRecoveredAfterUnknown: false,
-  browserStatus: "current",
-  recoveryCodes: [],
-  totpEnrollment: null,
-  errorMessage: null,
-  errorReason: null,
-  accessRecoveryPending: false,
-  generation: 0,
-};
+const initialState = INITIAL_HOSTED_HUB_STATE;
 
 export type HostedPasskeyDirectoryStatus = "idle" | "loading" | "ready" | "stale";
 export type HostedE2eeDeviceDirectoryStatus = "idle" | "loading" | "ready" | "stale";
@@ -174,20 +159,7 @@ export interface HostedAccountState {
   readonly errorCodeInferred?: boolean;
 }
 
-const initialAccountState: HostedAccountState = {
-  externalIdentityConfiguration: null,
-  externalIdentityConfigurationStatus: "idle",
-  passkeys: [],
-  passkeysStatus: "idle",
-  e2eeDevices: [],
-  e2eeDevicesStatus: "idle",
-  security: null,
-  securityStatus: "idle",
-  actionStatus: "idle",
-  errorMessage: null,
-  errorCode: null,
-  errorCodeInferred: false,
-};
+const initialAccountState = INITIAL_HOSTED_ACCOUNT_STATE;
 
 /**
  * What must still hold when an account action's result comes back, for that
@@ -207,27 +179,6 @@ const initialAccountState: HostedAccountState = {
  * still being the same account is the whole of what has to be true.
  */
 type HostedAccountCommitFence = "session" | "account";
-
-type HostedHubStoreListener = () => void;
-
-/** Neutral external store; React binding remains in the web adapter. */
-function createHostedStore<T extends object>(initial: T) {
-  let state = initial;
-  const listeners = new Set<HostedHubStoreListener>();
-  const publish = () => listeners.forEach((listener) => listener());
-  return {
-    getState: () => state,
-    getInitialState: () => initial,
-    setState: (patch: Partial<T> | T, replace = false) => {
-      state = replace ? (patch as T) : { ...state, ...patch };
-      publish();
-    },
-    subscribe: (listener: HostedHubStoreListener) => {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
-    },
-  };
-}
 
 export const hostedHubStore = createHostedStore(initialState);
 
@@ -250,9 +201,9 @@ export interface HostedRecoveryCodeDisplayState {
   readonly leased: boolean;
 }
 
-export const hostedRecoveryCodeDisplayStore = createHostedStore<HostedRecoveryCodeDisplayState>({
-  leased: false,
-});
+export const hostedRecoveryCodeDisplayStore = createHostedStore(
+  INITIAL_HOSTED_RECOVERY_CODE_DISPLAY_STATE,
+);
 
 function patchState(patch: Partial<HostedHubState>): void {
   const clearsReason =
@@ -435,6 +386,101 @@ function createFence(): {
   };
 }
 
+/** A one-shot completion signal: the first `settle` resolves it, later ones do nothing. */
+function settledSignal(): { readonly promise: Promise<void>; readonly settle: () => void } {
+  let settle: () => void = () => undefined;
+  const promise = new Promise<void>((resolve) => {
+    settle = resolve;
+  });
+  return { promise, settle };
+}
+
+/** Structural equality over the plain JSON-shaped values the Hub directory decodes to. */
+function sameDirectoryValue(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true;
+  if (typeof left !== "object" || typeof right !== "object" || left === null || right === null)
+    return false;
+  if (Array.isArray(left) !== Array.isArray(right)) return false;
+  const leftKeys = Object.keys(left);
+  const rightKeys = Object.keys(right);
+  if (leftKeys.length !== rightKeys.length) return false;
+  for (const key of leftKeys) {
+    if (!Object.prototype.hasOwnProperty.call(right, key)) return false;
+    if (
+      !sameDirectoryValue(
+        (left as Record<string, unknown>)[key],
+        (right as Record<string, unknown>)[key],
+      )
+    )
+      return false;
+  }
+  return true;
+}
+
+/**
+ * The directory read, with every node that did not change kept as the object
+ * already published — and the whole previous array when none did.
+ *
+ * A directory poll, a push invalidation and the reconnect re-read usually
+ * return what the store already holds. Publishing fresh objects for them fails
+ * every identity check downstream (selectors, the read cache, the workspace
+ * catalog) and re-renders each `nodes` consumer for no change.
+ */
+function reconcileDirectoryNodes(
+  previous: ReadonlyArray<HostedHubNode>,
+  next: ReadonlyArray<HostedHubNode>,
+): ReadonlyArray<HostedHubNode> {
+  let changed = previous.length !== next.length;
+  const reconciled = next.map((node, index) => {
+    const candidate =
+      previous[index]?.id === node.id
+        ? previous[index]
+        : previous.find((entry) => entry.id === node.id);
+    if (candidate !== undefined && sameDirectoryValue(candidate, node)) {
+      if (candidate !== previous[index]) changed = true;
+      return candidate;
+    }
+    changed = true;
+    return node;
+  });
+  return changed ? reconciled : previous;
+}
+
+/**
+ * A directory read sent beside a session restore, in cookie mode only.
+ *
+ * Both requests carry the same ambient cookie and the read needs nothing from
+ * the restore's answer, so overlapping them takes a Hub round trip off every
+ * cold start and resume. Its answer is held, never published by itself: only
+ * after the restore has validated the session does `#refreshDirectory` commit
+ * it, under the same session fence an ordinary read has. `null` — the read
+ * failed, was abandoned, or answered for a check that was replaced — is never
+ * authoritative (a `401` beside a restore that rotated the session says nothing
+ * about the new one), so the ordinary read runs instead.
+ */
+interface HostedDirectoryPrefetch {
+  readonly nodes: Promise<ReadonlyArray<HostedHubNode> | null>;
+  readonly abandon: () => void;
+}
+
+function prefetchHostedDirectory(signal: AbortSignal): HostedDirectoryPrefetch {
+  const read = new AbortController();
+  const abandon = () => read.abort();
+  if (signal.aborted) abandon();
+  else signal.addEventListener("abort", abandon, { once: true });
+  // The default request deadline, not the access check's short one: no gate
+  // waits on the directory (see `bootstrapAccess`), and a held read cut short
+  // would only be replaced by a second, full-length read of the same thing.
+  const nodes = getHostedHubApi()
+    .listNodes(read.signal)
+    .then(
+      (result) => (read.signal.aborted ? null : result),
+      () => null,
+    )
+    .finally(() => signal.removeEventListener("abort", abandon));
+  return { nodes, abandon };
+}
+
 const DIRECTORY_REFRESH_MS = 20_000;
 export const DIRECTORY_SUBSCRIBED_REFRESH_MS = 120_000;
 /** Directory cadence while a surface waits for an offline node to come back. */
@@ -447,6 +493,25 @@ export const DIRECTORY_PRESENCE_REFRESH_MS = 5_000;
 export const DIRECTORY_PRESENCE_WINDOW_MS = 5 * 60_000;
 const DIRECTORY_RETRY_MAX_MS = 60_000;
 const HOSTED_SESSION_SYNC_DEADLINE_MS = 30_000;
+/**
+ * The bound on a cookie-mode access check (the session restore) while
+ * nothing has timed out yet.
+ *
+ * A boot gate and a foreground resume both wait on that check, and on a
+ * black-holed network (dead Wi-Fi, a captive portal that never answers) the
+ * default 30-second request deadline held them on a loading surface for that
+ * long. A check that times out under it reaches the access-retry path in
+ * seconds; the retries that follow use the full deadline, so a slow but
+ * working link still gets through on the next attempt.
+ *
+ * Bearer mode bounds the *decision*, not the request: a restore there may
+ * rotate the only copy of the token, and abandoning its answer could strand
+ * the session. Its request keeps the full deadline, and a check still
+ * unanswered at this bound publishes the account `unavailable` with the access
+ * retry armed, exactly as a timeout would, while the answer is still adopted
+ * if it arrives; see `#armAccessDecisionDeadline`.
+ */
+export const HOSTED_ACCESS_CHECK_DEADLINE_MS = 8_000;
 export const HOSTED_SESSION_SYNC_FAILURE_MESSAGE = "Ryco state could not be synchronized.";
 export const HOSTED_ACCOUNT_BUSY_MESSAGE = "Another account change is still in progress.";
 export const HOSTED_ACCOUNT_SIGNED_OUT_MESSAGE = "Sign in to change your account settings.";
@@ -489,6 +554,13 @@ class HostedHubController {
   #directoryOperation: AbortController | null = null;
   #directoryPromise: Promise<void> | null = null;
   #bootstrapPromise: Promise<void> | null = null;
+  /** Settles once the access check behind `#bootstrapPromise` has published its answer. */
+  #bootstrapAccessPromise: Promise<void> | null = null;
+  /**
+   * An access check timed out under {@link HOSTED_ACCESS_CHECK_DEADLINE_MS};
+   * the next ones use the full request deadline until the Hub answers again.
+   */
+  #accessCheckTimedOut = false;
   #sessionSyncTimer: ReturnType<typeof setTimeout> | null = null;
   #retrySelectedNodeOperation: AbortController | null = null;
   #retrySelectedNodePromise: Promise<void> | null = null;
@@ -535,12 +607,31 @@ class HostedHubController {
   bootstrap(): Promise<void> {
     if (this.#bootstrapPromise) return this.#bootstrapPromise;
     const operation = this.#replaceOperation();
-    const promise = this.#restoreAccess(operation).finally(() => {
+    const access = settledSignal();
+    const promise = this.#restoreAccess(operation, access.settle).finally(() => {
+      access.settle();
       if (this.#operation === operation) this.#operation = null;
       if (this.#bootstrapPromise === promise) this.#bootstrapPromise = null;
+      if (this.#bootstrapAccessPromise === access.promise) this.#bootstrapAccessPromise = null;
     });
     this.#bootstrapPromise = promise;
+    this.#bootstrapAccessPromise = access.promise;
     return promise;
+  }
+
+  /**
+   * Start or join {@link bootstrap}, but settle as soon as its access check has
+   * published an answer — the account `authenticated`, signed out, or
+   * `unavailable` — rather than after the directory read that follows.
+   *
+   * For a boot gate: the directory has its own `loading` and `stale` states, so
+   * a gate that waited for it held the whole app on a loading surface for as
+   * long as `/api/nodes` took (or stalled). The read itself is unchanged and
+   * still owned here.
+   */
+  bootstrapAccess(): Promise<void> {
+    const settled = this.bootstrap();
+    return this.#bootstrapAccessPromise ?? settled;
   }
 
   /**
@@ -572,19 +663,24 @@ class HostedHubController {
     // A new credential starts its backoff over. The published pending flag is
     // left alone: a check is still coming, and its outcome replaces it.
     this.#accessRetryPolicy.reset();
+    this.#accessCheckTimedOut = false;
     let committed = false;
+    const access = settledSignal();
     const promise = commit()
       .catch(() => false)
       .then((result) => {
         committed = result;
         if (operation.signal.aborted) return undefined;
-        return this.#restoreAccess(operation);
+        return this.#restoreAccess(operation, access.settle);
       })
       .finally(() => {
+        access.settle();
         if (this.#operation === operation) this.#operation = null;
         if (this.#bootstrapPromise === promise) this.#bootstrapPromise = null;
+        if (this.#bootstrapAccessPromise === access.promise) this.#bootstrapAccessPromise = null;
       });
     this.#bootstrapPromise = promise;
+    this.#bootstrapAccessPromise = access.promise;
     return promise.then(() => committed);
   }
 
@@ -617,14 +713,28 @@ class HostedHubController {
     if (!signedIn) throw signInFailure;
   }
 
-  /** The access check behind {@link bootstrap} and {@link adoptSessionCredential}. */
-  #restoreAccess(operation: AbortController): Promise<void> {
-    return getHostedHubApi()
-      .restoreSession(operation.signal)
+  /**
+   * The access check behind {@link bootstrap} and {@link adoptSessionCredential}.
+   *
+   * `accessSettled` runs once the account answer is published, before the
+   * directory read that follows it; see {@link bootstrapAccess}.
+   */
+  #restoreAccess(operation: AbortController, accessSettled?: () => void): Promise<void> {
+    const options = this.#accessCheckOptions();
+    // The session request goes out first; the directory read rides beside it.
+    const restored = getHostedHubApi().restoreSession(operation.signal, options);
+    const check = { directory: this.#prefetchDirectory(operation.signal) };
+    const cancelDecisionDeadline = this.#armAccessDecisionDeadline(operation, accessSettled);
+    return restored
       .then(async (result) => {
+        cancelDecisionDeadline();
         // An answer for a check that a newer account operation replaced is
         // about the credential that check was sent with, not the current one.
-        if (operation.signal.aborted) return;
+        if (operation.signal.aborted) {
+          check.directory?.abandon();
+          return;
+        }
+        this.#accessCheckTimedOut = false;
         this.#resetAccessRetry();
         patchState({
           accountStatus: "authenticated",
@@ -632,10 +742,14 @@ class HostedHubController {
           session: result.session,
           errorMessage: null,
         });
-        await this.refreshDirectory();
+        accessSettled?.();
+        await this.#refreshDirectoryWith(check.directory);
       })
       .catch((error) => {
+        cancelDecisionDeadline();
+        check.directory?.abandon();
         if (operation.signal.aborted) return undefined;
+        this.#noteAccessCheckFailure(error);
         if (isSessionFailure(error)) {
           // Only the Hub's own answer that this session is gone ends it.
           getHostedHubApi().clearSessionMaterial();
@@ -652,15 +766,77 @@ class HostedHubController {
         // clearing it here turned every offline launch into a forced sign-in.
         // The material is kept and the access check retried instead; the
         // account stays `unavailable`, which grants nothing.
-        const retrying = this.#scheduleAccessRetry(error);
-        patchState({
-          ...initialState,
-          accountStatus: "unavailable",
-          ...hostedErrorPatch(error),
-          accessRecoveryPending: retrying,
-        });
+        this.#publishAccessUnavailable(error);
         return undefined;
       });
+  }
+
+  /** The account answer for a check that reached no session verdict; arms the access retry. */
+  #publishAccessUnavailable(error: unknown): void {
+    const retrying = this.#scheduleAccessRetry(error);
+    patchState({
+      ...initialState,
+      accountStatus: "unavailable",
+      ...hostedErrorPatch(error),
+      accessRecoveryPending: retrying,
+    });
+  }
+
+  /**
+   * Bearer mode's bound on how long an access check may leave the account
+   * undecided; returns the cancel for its timer.
+   *
+   * The restore request keeps the full deadline (see
+   * {@link HOSTED_ACCESS_CHECK_DEADLINE_MS}), so a launch on a stalled network
+   * would otherwise sit at "checking" for the whole of it before the account
+   * became `unavailable` and the retry backoff started. At this bound the
+   * account is published `unavailable` with the retry armed, as a timeout
+   * would publish it, and the boot gate waiting on the answer is released. The
+   * request is NOT abandoned: its answer is still the authority, a rotated
+   * token in it is still persisted by the API, a late session publishes
+   * `authenticated`, and a late `401` still signs out. A retry or lifecycle
+   * signal that fires meanwhile joins this check through {@link bootstrap}
+   * instead of sending a second restore with a token the first may be
+   * rotating. Like the cookie bound, it applies until a check has timed out.
+   */
+  #armAccessDecisionDeadline(operation: AbortController, accessSettled?: () => void): () => void {
+    if (getHostedHubApi().credentialMode !== "bearer" || this.#accessCheckTimedOut) {
+      return () => undefined;
+    }
+    const timers = getHostedRuntimeConfiguration().timers;
+    const timer = timers.setTimeout(() => {
+      if (operation.signal.aborted) return;
+      this.#accessCheckTimedOut = true;
+      this.#publishAccessUnavailable(
+        new HostedHubApiError("timeout", 0, undefined, undefined, undefined, "request-timeout"),
+      );
+      accessSettled?.();
+    }, HOSTED_ACCESS_CHECK_DEADLINE_MS);
+    return () => timers.clearTimeout(timer);
+  }
+
+  /**
+   * The request bound for one access check: in cookie mode the short
+   * {@link HOSTED_ACCESS_CHECK_DEADLINE_MS} until a check has timed out, and
+   * otherwise the default deadline.
+   */
+  #accessCheckOptions(): { readonly deadlineMs: number } | undefined {
+    if (getHostedHubApi().credentialMode !== "cookie" || this.#accessCheckTimedOut) {
+      return undefined;
+    }
+    return { deadlineMs: HOSTED_ACCESS_CHECK_DEADLINE_MS };
+  }
+
+  /** In cookie mode, the directory read sent beside an access check; see {@link HostedDirectoryPrefetch}. */
+  #prefetchDirectory(signal: AbortSignal): HostedDirectoryPrefetch | null {
+    if (getHostedHubApi().credentialMode !== "cookie") return null;
+    return prefetchHostedDirectory(signal);
+  }
+
+  #noteAccessCheckFailure(error: unknown): void {
+    if (error instanceof HostedHubApiError && error.code === "timeout") {
+      this.#accessCheckTimedOut = true;
+    }
   }
 
   /**
@@ -1743,6 +1919,8 @@ class HostedHubController {
     this.#directoryPromise = null;
     this.#directoryInvalidationFollowup = null;
     this.#bootstrapPromise = null;
+    this.#bootstrapAccessPromise = null;
+    this.#accessCheckTimedOut = false;
     this.#clearSessionSyncTimer();
     this.#retrySelectedNodeOperation?.abort();
     this.#retrySelectedNodeOperation = null;
@@ -1846,18 +2024,25 @@ class HostedHubController {
     this.#browserLifecycleGeneration = browserGeneration;
     const expectedAccountId = initial.account?.id ?? null;
     patchState({ browserStatus: "checking-access", errorMessage: null });
+    const options = this.#accessCheckOptions();
+    const restoring = getHostedHubApi().restoreSession(operation.signal, options);
+    const check = { directory: this.#prefetchDirectory(operation.signal) };
     try {
-      const restored = await getHostedHubApi().restoreSession(operation.signal);
-      if (operation.signal.aborted || this.#browserLifecycleGeneration !== browserGeneration)
+      const restored = await restoring;
+      if (operation.signal.aborted || this.#browserLifecycleGeneration !== browserGeneration) {
+        check.directory?.abandon();
         return;
+      }
       const active = hostedHubStore.getState();
       if (active.accountStatus !== "authenticated" || restored.account.id !== expectedAccountId) {
+        check.directory?.abandon();
         await this.expireSession();
         return;
       }
+      this.#accessCheckTimedOut = false;
       this.#resetAccessRetry();
       patchState({ account: restored.account, session: restored.session });
-      await this.refreshDirectory();
+      await this.#refreshDirectoryWith(check.directory);
       if (this.#browserLifecycleGeneration !== browserGeneration) return;
       const refreshed = hostedHubStore.getState();
       if (refreshed.accountStatus !== "authenticated") return;
@@ -1872,8 +2057,10 @@ class HostedHubController {
       patchState({ browserStatus: "synchronizing" });
       await this.#retrySelectedNode(operation.signal);
     } catch (error) {
+      check.directory?.abandon();
       if (operation.signal.aborted || this.#browserLifecycleGeneration !== browserGeneration)
         return;
+      this.#noteAccessCheckFailure(error);
       if (isSessionFailure(error)) {
         await this.expireSession(error);
         return;
@@ -1911,6 +2098,7 @@ class HostedHubController {
     // The access check that abort just ended can publish nothing, so the next
     // `bootstrap()` must start a fresh one rather than join it.
     this.#bootstrapPromise = null;
+    this.#bootstrapAccessPromise = null;
     this.#clearAccountSurface();
     // No orchestration command replays into whatever account signs in next.
     getHostedDispatchReplay().endAccountSession();
@@ -1926,10 +2114,19 @@ class HostedHubController {
   }
 
   refreshDirectory(): Promise<void> {
-    if (this.#directoryPromise) return this.#directoryPromise;
+    return this.#refreshDirectoryWith(null);
+  }
+
+  /** {@link refreshDirectory}, committing an access check's held read if it has one. */
+  #refreshDirectoryWith(prefetch: HostedDirectoryPrefetch | null): Promise<void> {
+    if (this.#directoryPromise) {
+      // A read already in flight answers for this one; the held read is dropped.
+      prefetch?.abandon();
+      return this.#directoryPromise;
+    }
     const operation = new AbortController();
     this.#directoryOperation = operation;
-    const promise = this.#refreshDirectory(operation).finally(() => {
+    const promise = this.#refreshDirectory(operation, prefetch).finally(() => {
       if (this.#directoryOperation === operation) this.#directoryOperation = null;
       if (this.#directoryPromise === promise) this.#directoryPromise = null;
     });
@@ -2012,14 +2209,26 @@ class HostedHubController {
     return false;
   }
 
-  async #refreshDirectory(operation: AbortController): Promise<void> {
+  async #refreshDirectory(
+    operation: AbortController,
+    prefetch: HostedDirectoryPrefetch | null,
+  ): Promise<void> {
     const state = hostedHubStore.getState();
-    if (state.accountStatus !== "authenticated") return;
+    if (state.accountStatus !== "authenticated") {
+      prefetch?.abandon();
+      return;
+    }
     const sessionId = state.session?.id ?? null;
     this.#clearDirectoryTimer();
-    patchState({ directoryStatus: state.nodes.length === 0 ? "loading" : state.directoryStatus });
+    if (state.nodes.length === 0 && state.directoryStatus !== "loading") {
+      patchState({ directoryStatus: "loading" });
+    }
+    const abandonPrefetch = () => prefetch?.abandon();
+    operation.signal.addEventListener("abort", abandonPrefetch, { once: true });
     try {
-      const nodes = await getHostedHubApi().listNodes(operation.signal);
+      const held = prefetch === null ? null : await prefetch.nodes;
+      if (held === null && operation.signal.aborted) return;
+      const nodes = held ?? (await getHostedHubApi().listNodes(operation.signal));
       const active = hostedHubStore.getState();
       if (
         operation.signal.aborted ||
@@ -2032,15 +2241,20 @@ class HostedHubController {
       const current = hostedHubStore.getState();
       const resumeStaleBrowser = current.browserStatus === "stale";
       const selected = current.selectedNode;
-      const refreshedSelection = selected
-        ? (nodes.find(
+      const nextNodes = reconcileDirectoryNodes(current.nodes, nodes);
+      const refreshedNode = selected
+        ? (nextNodes.find(
             (node) => node.id === selected.id && node.environmentId === selected.environmentId,
           ) ?? null)
         : null;
+      const refreshedSelection =
+        refreshedNode !== null && selected !== null && sameDirectoryValue(selected, refreshedNode)
+          ? selected
+          : refreshedNode;
       if (selected && (!refreshedSelection || refreshedSelection.revokedAt !== null)) {
         const generation = current.generation + 1;
         patchState({
-          nodes,
+          nodes: nextNodes,
           directoryStatus: "ready",
           selectionStatus:
             refreshedSelection && refreshedSelection.revokedAt !== null
@@ -2051,8 +2265,8 @@ class HostedHubController {
         });
         await this.#deactivateSelection(selected.environmentId, generation);
       } else {
-        patchState({
-          nodes,
+        const patch: Partial<HostedHubState> = {
+          nodes: nextNodes,
           directoryStatus: "ready",
           ...(refreshedSelection
             ? {
@@ -2061,7 +2275,17 @@ class HostedHubController {
                 effectiveRole: refreshedSelection.effectiveRole,
               }
             : {}),
-        });
+        };
+        // An unchanged directory publishes nothing: every hosted store
+        // subscriber (route orchestrator, coordinator, read cache, thread cache)
+        // would otherwise re-run for a read that changed nothing.
+        if (
+          (Object.keys(patch) as Array<keyof HostedHubState>).some(
+            (key) => !Object.is(current[key], patch[key]),
+          )
+        ) {
+          patchState(patch);
+        }
       }
       this.#scheduleDirectory(
         getHostedRuntimeConfiguration().hasLiveHubSubscription?.()
@@ -2099,6 +2323,8 @@ class HostedHubController {
         1_000 * 2 ** Math.min(this.#directoryRetry, 6),
       );
       this.#scheduleDirectory(delay);
+    } finally {
+      operation.signal.removeEventListener("abort", abandonPrefetch);
     }
   }
 

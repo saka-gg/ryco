@@ -13,18 +13,26 @@ const SUMMARY_PHASES = [
   ["windowCreated", "desktop.window.create"],
   ["firstReveal", "desktop.window.first-reveal"],
   ["backendSpawn", "desktop.backend.spawn"],
+  ["backendBound", "desktop.backend.http-bound"],
   ["backendListening", "desktop.backend.listening"],
   ["bootLoaded", "desktop.window.boot.did-finish-load"],
   ["appDomReady", "desktop.window.app.dom-ready"],
   ["appLoaded", "desktop.window.app.did-finish-load"],
+  ["shellUsable", "desktop.window.app.shell-usable"],
+  ["shellPainted", "desktop.window.app.shell-painted"],
 ];
 const REQUIRED_PHASES = new Set([
   "desktop.window.create",
   "desktop.window.first-reveal",
   "desktop.backend.listening",
   "desktop.window.app.did-finish-load",
+  // Reported by the renderer once the primary shell snapshot is applied: the
+  // point where the app is actually usable, not just loaded.
+  "desktop.window.app.shell-usable",
 ]);
-const TIMING_RE = /startup timing phase=(\S+) elapsedMs=(\d+) deltaMs=(\d+)(?:\s+(.*))?$/;
+// Phases recorded before the main bundle loaded (entry start, early backend
+// spawn) have negative elapsed times.
+const TIMING_RE = /startup timing phase=(\S+) elapsedMs=(-?\d+) deltaMs=(-?\d+)(?:\s+(.*))?$/;
 
 function usage() {
   return `Usage: node apps/desktop/scripts/startup-timing-smoke.mjs [options]
@@ -35,6 +43,7 @@ Options:
   --timeout-ms <ms>            Timeout before failing. Default: 20000.
   --max-app-loaded-ms <ms>     Fail if appLoaded exceeds this time.
   --max-first-reveal-ms <ms>   Fail if firstReveal exceeds this time.
+  --max-shell-usable-ms <ms>   Fail if shellUsable exceeds this time.
   --json                       Emit JSON summary.
   --keep-base-dir              Keep the temporary RYCO_HOME on success.
   --help                       Show this help.
@@ -49,6 +58,7 @@ function parseArgs(argv) {
     timeoutMs: 20_000,
     maxAppLoadedMs: undefined,
     maxFirstRevealMs: undefined,
+    maxShellUsableMs: undefined,
     json: false,
     keepBaseDir: false,
     help: false,
@@ -71,6 +81,8 @@ function parseArgs(argv) {
       parsed.maxAppLoadedMs = parsePositiveInt(arg, readValue());
     else if (arg === "--max-first-reveal-ms")
       parsed.maxFirstRevealMs = parsePositiveInt(arg, readValue());
+    else if (arg === "--max-shell-usable-ms")
+      parsed.maxShellUsableMs = parsePositiveInt(arg, readValue());
     else if (arg === "--json") parsed.json = true;
     else if (arg === "--keep-base-dir") parsed.keepBaseDir = true;
     else if (arg === "--help" || arg === "-h") parsed.help = true;
@@ -232,6 +244,13 @@ function thresholdFailures(summary, options) {
     summary.timings.firstReveal > options.maxFirstRevealMs
   ) {
     failures.push(`firstReveal ${summary.timings.firstReveal}ms > ${options.maxFirstRevealMs}ms`);
+  }
+  if (
+    options.maxShellUsableMs !== undefined &&
+    summary.timings.shellUsable !== null &&
+    summary.timings.shellUsable > options.maxShellUsableMs
+  ) {
+    failures.push(`shellUsable ${summary.timings.shellUsable}ms > ${options.maxShellUsableMs}ms`);
   }
   return failures;
 }

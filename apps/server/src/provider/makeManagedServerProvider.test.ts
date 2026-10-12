@@ -28,19 +28,21 @@ interface TestSettings {
   readonly enabled: boolean;
 }
 
-const maintenanceCapabilities = {
+const maintenanceCapabilities = Effect.succeed({
   provider: ProviderDriverKind.make("codex"),
   packageName: "@openai/codex",
   update: {
     command: "npm install -g @openai/codex@latest",
-
     executable: "npm",
-
     args: ["install", "-g", "@openai/codex@latest"],
-
     lockKey: "npm-global",
   },
-} as const;
+});
+
+// Construction never probes; tests that need a first probe start it explicitly, the way the
+// registry does on demand.
+const startFirstRefresh = (provider: { readonly refresh: Effect.Effect<ServerProvider> }) =>
+  provider.refresh.pipe(Effect.forkChild);
 
 const initialSnapshot: ServerProvider = {
   instanceId: ProviderInstanceId.make("codex"),
@@ -133,7 +135,7 @@ describe("makeManagedServerProvider", () => {
     );
   });
 
-  it.effect("coalesces an overlapping refresh with the background initial provider check", () =>
+  it.effect("does not probe at construction and coalesces overlapping refreshes", () =>
     Effect.scoped(
       Effect.gen(function* () {
         const checkCalls = yield* Ref.make(0);
@@ -153,17 +155,21 @@ describe("makeManagedServerProvider", () => {
 
         const initial = yield* provider.getSnapshot;
         assert.deepStrictEqual(initial, initialSnapshot);
+        yield* Effect.yieldNow;
+        assert.strictEqual(yield* Ref.get(checkCalls), 0);
 
         const updatesFiber = yield* Stream.take(provider.streamChanges, 1).pipe(
           Stream.runCollect,
           Effect.forkChild,
         );
+        const firstRefresh = yield* startFirstRefresh(provider);
         const overlappingRefresh = yield* provider.refresh.pipe(Effect.forkChild);
         yield* Effect.yieldNow;
 
         yield* Deferred.succeed(releaseCheck, undefined);
 
         const updates = Array.from(yield* Fiber.join(updatesFiber));
+        yield* Fiber.join(firstRefresh);
         const refreshResult = yield* Fiber.join(overlappingRefresh);
         const latest = yield* provider.getSnapshot;
 
@@ -180,7 +186,7 @@ describe("makeManagedServerProvider", () => {
       Effect.gen(function* () {
         const checkCalls = yield* Ref.make(0);
         const initialCheckComplete = yield* Deferred.make<void>();
-        yield* makeManagedServerProvider<TestSettings>({
+        const provider = yield* makeManagedServerProvider<TestSettings>({
           maintenanceCapabilities,
           getSettings: Effect.succeed({ enabled: true }),
           streamSettings: Stream.empty,
@@ -197,6 +203,7 @@ describe("makeManagedServerProvider", () => {
           refreshInterval: null,
         });
 
+        yield* startFirstRefresh(provider);
         yield* Deferred.await(initialCheckComplete);
         yield* TestClock.adjust(Duration.minutes(120));
         yield* Effect.yieldNow;
@@ -235,6 +242,7 @@ describe("makeManagedServerProvider", () => {
           refreshInterval: null,
         });
 
+        yield* startFirstRefresh(provider);
         yield* Deferred.await(initialCheckComplete);
         for (let attempt = 0; attempt < 20; attempt += 1) {
           if (Equal.equals(yield* provider.getSnapshot, refreshedSnapshot)) break;
@@ -289,6 +297,7 @@ describe("makeManagedServerProvider", () => {
           snapshotFreshness: Duration.zero,
         });
 
+        yield* startFirstRefresh(provider);
         yield* Deferred.await(initialCheckComplete);
         for (let attempt = 0; attempt < 20; attempt += 1) {
           if (Equal.equals(yield* provider.getSnapshot, refreshedSnapshot)) break;
@@ -340,8 +349,10 @@ describe("makeManagedServerProvider", () => {
           Effect.forkChild,
         );
         yield* Effect.yieldNow;
+        const firstRefresh = yield* startFirstRefresh(provider);
 
         yield* Deferred.succeed(releaseInitialCheck, undefined);
+        yield* Fiber.join(firstRefresh);
         yield* Ref.set(settingsRef, { enabled: false });
         yield* PubSub.publish(settingsChanges, { enabled: false });
         yield* Deferred.succeed(releaseSettingsCheck, undefined);
@@ -380,6 +391,7 @@ describe("makeManagedServerProvider", () => {
           Effect.forkChild,
         );
         yield* Effect.yieldNow;
+        yield* startFirstRefresh(provider);
 
         yield* Deferred.succeed(releaseCheck, undefined);
 
@@ -432,6 +444,7 @@ describe("makeManagedServerProvider", () => {
           Effect.forkChild,
         );
         yield* Effect.yieldNow;
+        yield* startFirstRefresh(provider);
 
         yield* Deferred.succeed(allowFirstRefresh, undefined);
         yield* Deferred.await(firstCallbackReady);
@@ -513,6 +526,7 @@ describe("makeManagedServerProvider", () => {
           }),
         ).pipe(Effect.forkChild);
         yield* Effect.yieldNow;
+        yield* startFirstRefresh(provider);
         yield* Deferred.succeed(firstCheck, undefined);
         yield* Deferred.await(callbackReady);
         const oldPublication = yield* callbacks[0]!(oldEnrichment).pipe(Effect.forkChild);
@@ -577,6 +591,7 @@ describe("makeManagedServerProvider", () => {
           refreshInterval: null,
         });
 
+        yield* startFirstRefresh(provider);
         yield* Deferred.await(firstCheckComplete);
         for (let attempt = 0; attempt < 20; attempt += 1) {
           if (Equal.equals(yield* provider.getSnapshot, availableSnapshot)) break;
@@ -592,6 +607,153 @@ describe("makeManagedServerProvider", () => {
         assert.strictEqual(recovered.status, "ready");
         assert.deepStrictEqual(recovered.skills, []);
         assert.deepStrictEqual(recovered.slashCommands, []);
+      }),
+    ),
+  );
+  it.effect("treats an adopted persisted snapshot as fresh until its persisted window ends", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const checkCalls = yield* Ref.make(0);
+        const provider = yield* makeManagedServerProvider<TestSettings>({
+          maintenanceCapabilities,
+          getSettings: Effect.succeed({ enabled: true }),
+          streamSettings: Stream.empty,
+          haveSettingsChanged: () => false,
+          initialSnapshot: () => initialSnapshot,
+          checkProvider: Ref.update(checkCalls, (count) => count + 1).pipe(
+            Effect.as(refreshedSnapshotSecond),
+          ),
+          refreshInterval: null,
+          persistedSnapshotFreshness: Duration.hours(1),
+        });
+
+        assert.strictEqual(yield* provider.isFresh!, false);
+        const adopted = yield* provider.adoptPersistedSnapshot!({
+          snapshot: refreshedSnapshot,
+          checkedAtMs: 0,
+        });
+        assert.strictEqual(adopted, true);
+        assert.deepStrictEqual(yield* provider.getSnapshot, refreshedSnapshot);
+        assert.strictEqual(yield* provider.isFresh!, true);
+        assert.deepStrictEqual(yield* provider.revalidate, refreshedSnapshot);
+        assert.strictEqual(yield* Ref.get(checkCalls), 0);
+
+        yield* TestClock.adjust(Duration.hours(1));
+        assert.strictEqual(yield* provider.isFresh!, false);
+        assert.deepStrictEqual(yield* provider.revalidate, refreshedSnapshotSecond);
+        assert.strictEqual(yield* Ref.get(checkCalls), 1);
+      }),
+    ).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("trusts persisted usage limits only for the regular freshness window", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const checkCalls = yield* Ref.make(0);
+        const provider = yield* makeManagedServerProvider<TestSettings>({
+          maintenanceCapabilities,
+          getSettings: Effect.succeed({ enabled: true }),
+          streamSettings: Stream.empty,
+          haveSettingsChanged: () => false,
+          initialSnapshot: () => initialSnapshot,
+          checkProvider: Ref.update(checkCalls, (count) => count + 1).pipe(
+            Effect.as(refreshedSnapshotSecond),
+          ),
+          refreshInterval: null,
+          snapshotFreshness: Duration.minutes(5),
+          persistedSnapshotFreshness: Duration.hours(6),
+        });
+
+        yield* TestClock.adjust(Duration.hours(1));
+        const withUsage: ServerProvider = {
+          ...refreshedSnapshot,
+          rateLimits: { primary: { usedPercent: 40 } },
+        };
+        // Probed one minute ago: without usage limits this would stay fresh for six hours.
+        const adopted = yield* provider.adoptPersistedSnapshot!({
+          snapshot: withUsage,
+          checkedAtMs: Duration.toMillis(Duration.minutes(59)),
+        });
+        assert.strictEqual(adopted, true);
+        assert.strictEqual(yield* provider.isFresh!, true);
+
+        yield* TestClock.adjust(Duration.minutes(4));
+        assert.strictEqual(yield* provider.isFresh!, false);
+        assert.deepStrictEqual(yield* provider.revalidate, refreshedSnapshotSecond);
+        assert.strictEqual(yield* Ref.get(checkCalls), 1);
+      }),
+    ).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("never extends an adopted window past now plus the freshness window", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const provider = yield* makeManagedServerProvider<TestSettings>({
+          maintenanceCapabilities,
+          getSettings: Effect.succeed({ enabled: true }),
+          streamSettings: Stream.empty,
+          haveSettingsChanged: () => false,
+          initialSnapshot: () => initialSnapshot,
+          checkProvider: Effect.succeed(refreshedSnapshotSecond),
+          refreshInterval: null,
+          persistedSnapshotFreshness: Duration.hours(1),
+        });
+
+        yield* provider.adoptPersistedSnapshot!({
+          snapshot: refreshedSnapshot,
+          checkedAtMs: Duration.toMillis(Duration.days(30)),
+        });
+        assert.strictEqual(yield* provider.isFresh!, true);
+        yield* TestClock.adjust(Duration.hours(1));
+        assert.strictEqual(yield* provider.isFresh!, false);
+      }),
+    ).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("refuses to adopt a persisted snapshot once the provider has probed", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const provider = yield* makeManagedServerProvider<TestSettings>({
+          maintenanceCapabilities,
+          getSettings: Effect.succeed({ enabled: true }),
+          streamSettings: Stream.empty,
+          haveSettingsChanged: () => false,
+          initialSnapshot: () => initialSnapshot,
+          checkProvider: Effect.succeed(refreshedSnapshotSecond),
+          refreshInterval: null,
+        });
+
+        yield* provider.refresh;
+        const adopted = yield* provider.adoptPersistedSnapshot!({
+          snapshot: refreshedSnapshot,
+          checkedAtMs: Date.now(),
+        });
+        assert.strictEqual(adopted, false);
+        assert.deepStrictEqual(yield* provider.getSnapshot, refreshedSnapshotSecond);
+      }),
+    ),
+  );
+
+  it.effect("an explicit refresh replaces an adopted snapshot and ends its persisted window", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const provider = yield* makeManagedServerProvider<TestSettings>({
+          maintenanceCapabilities,
+          getSettings: Effect.succeed({ enabled: true }),
+          streamSettings: Stream.empty,
+          haveSettingsChanged: () => false,
+          initialSnapshot: () => initialSnapshot,
+          checkProvider: Effect.succeed(refreshedSnapshotSecond),
+          refreshInterval: null,
+          snapshotFreshness: Duration.zero,
+        });
+
+        yield* provider.adoptPersistedSnapshot!({
+          snapshot: refreshedSnapshot,
+          checkedAtMs: Date.now(),
+        });
+        assert.deepStrictEqual(yield* provider.refresh, refreshedSnapshotSecond);
+        assert.strictEqual(yield* provider.isFresh!, false);
       }),
     ),
   );

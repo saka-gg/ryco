@@ -6,7 +6,12 @@ export interface PreviewFileScope {
   readonly cwd: string;
 }
 
-/** Keep retargeting independent of editor/RPC/router initialization. */
+/**
+ * Keep retargeting, the unsaved check, and flushing independent of
+ * editor/RPC/router initialization: the root navigation guard reads them on
+ * every route, so this module must stay free of the editor session, the
+ * environment API, and the hosted coordinator (`previewFileSessions.ts`).
+ */
 export const previewFileSessionRegistry = new Map<
   string,
   {
@@ -35,4 +40,32 @@ export function retargetPreviewFileSessions(input: {
     previewFileSessionRegistry.set(nextKey, entry);
     entry.owner.retarget(nextKey);
   }
+}
+
+export function hasUnsavedPreviewFiles(scope?: PreviewFileScope) {
+  return matchingPreviewFileOwners(scope).some((owner) => owner.unsaved);
+}
+
+/** The session owners of one scope, or of every scope. */
+export function matchingPreviewFileOwners(scope?: PreviewFileScope) {
+  return [...previewFileSessionRegistry.values()]
+    .filter(
+      (entry) =>
+        !scope ||
+        (entry.scope.environmentId === scope.environmentId && entry.scope.cwd === scope.cwd),
+    )
+    .map((entry) => entry.owner);
+}
+
+/** A barrier also catches buffers added while an earlier save was pending. */
+export async function flushPreviewFiles(scope?: PreviewFileScope): Promise<boolean> {
+  while (hasUnsavedPreviewFiles(scope)) {
+    const results = await Promise.all(
+      matchingPreviewFileOwners(scope)
+        .filter((owner) => owner.unsaved)
+        .map((owner) => owner.flush()),
+    );
+    if (results.some((saved) => !saved)) return false;
+  }
+  return true;
 }

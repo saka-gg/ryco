@@ -40,12 +40,21 @@ export interface EnvironmentSnapshotStat {
   readonly updatedAt: number;
 }
 
+export interface StoredEnvironmentSnapshotRow extends StoredSnapshotRow {
+  readonly environmentId: string;
+  readonly updatedAt: number;
+}
+
 export interface SnapshotDb {
   readonly loadEnvironmentSnapshot: (environmentId: string) => Promise<StoredSnapshotRow | null>;
+  /** Every stored environment snapshot in one read, most recently written first. */
+  readonly loadEnvironmentSnapshots: () => Promise<ReadonlyArray<StoredEnvironmentSnapshotRow>>;
   readonly saveEnvironmentSnapshot: (input: {
     readonly environmentId: string;
     readonly schemaVersion: number;
     readonly payload: string;
+    /** UTF-8 length of `payload` when the caller already measured it. */
+    readonly payloadBytes?: number;
     readonly updatedAt: number;
   }) => Promise<void>;
   readonly removeEnvironmentSnapshot: (environmentId: string) => Promise<void>;
@@ -64,9 +73,35 @@ async function openExpoSqliteHandle(): Promise<SnapshotDbHandle> {
   return SQLite.openDatabaseAsync(DATABASE_NAME);
 }
 
-/** Same measure the supervision byte budget uses: UTF-8 length of the payload. */
+/**
+ * Same measure the supervision byte budget uses: UTF-8 length of the payload.
+ *
+ * Counted from UTF-16 code units without encoding: Hermes has no native
+ * `TextEncoder`, and the polyfill allocates and walks a multi-megabyte buffer
+ * just to read its length. Lone surrogates count as U+FFFD (3 bytes), exactly
+ * as `TextEncoder` would encode them.
+ */
 export function payloadByteLength(payload: string): number {
-  return new TextEncoder().encode(payload).byteLength;
+  let bytes = 0;
+  for (let index = 0; index < payload.length; index += 1) {
+    const unit = payload.charCodeAt(index);
+    if (unit < 0x80) {
+      bytes += 1;
+    } else if (unit < 0x800) {
+      bytes += 2;
+    } else if (unit >= 0xd800 && unit <= 0xdbff && index + 1 < payload.length) {
+      const next = payload.charCodeAt(index + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        bytes += 4;
+        index += 1;
+      } else {
+        bytes += 3;
+      }
+    } else {
+      bytes += 3;
+    }
+  }
+  return bytes;
 }
 
 const DDL = `
@@ -113,6 +148,26 @@ export function createSnapshotDb(
       );
       return row ? { schemaVersion: row.schema_version, payload: row.payload } : null;
     },
+    loadEnvironmentSnapshots: async () => {
+      const handle = await acquire();
+      const rows = await handle.getAllAsync<{
+        environment_id: string;
+        schema_version: number;
+        payload: string;
+        updated_at: number;
+      }>(
+        `SELECT environment_id, schema_version, payload, updated_at
+           FROM environment_snapshots
+          ORDER BY updated_at DESC`,
+        [],
+      );
+      return rows.map((row) => ({
+        environmentId: row.environment_id,
+        schemaVersion: row.schema_version,
+        payload: row.payload,
+        updatedAt: row.updated_at,
+      }));
+    },
     saveEnvironmentSnapshot: async (input) => {
       const handle = await acquire();
       await handle.runAsync(
@@ -128,7 +183,7 @@ export function createSnapshotDb(
           input.environmentId,
           input.schemaVersion,
           input.payload,
-          payloadByteLength(input.payload),
+          input.payloadBytes ?? payloadByteLength(input.payload),
           input.updatedAt,
         ],
       );

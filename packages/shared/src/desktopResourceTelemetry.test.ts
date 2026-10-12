@@ -2,6 +2,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   createTelemetryLineReader,
   DESKTOP_TELEMETRY_MAX_BYTES,
+  parseDesktopBackendLifecycleFrame,
   parseDesktopResourceTelemetry,
 } from "./desktopResourceTelemetry.ts";
 
@@ -80,5 +81,41 @@ describe("private desktop telemetry protocol", () => {
     read('{"type":"sample"}\n');
     expect(invalid).toBe(1);
     expect(values).toHaveLength(1);
+  });
+
+  it("parses backend lifecycle frames and rejects malformed ones", () => {
+    expect(parseDesktopBackendLifecycleFrame({ type: "http-bound", port: 3773 })).toEqual({
+      type: "http-bound",
+      port: 3773,
+    });
+    expect(parseDesktopBackendLifecycleFrame({ type: "http-serving", port: 3773 })).toEqual({
+      type: "http-serving",
+      port: 3773,
+    });
+    expect(parseDesktopBackendLifecycleFrame({ type: "startup-ready" })).toEqual({
+      type: "startup-ready",
+    });
+    expect(
+      parseDesktopBackendLifecycleFrame({ type: "startup-phase", name: "runtime", ms: 12.5 }),
+    ).toEqual({ type: "startup-phase", name: "runtime", ms: 12.5 });
+    expect(
+      parseDesktopBackendLifecycleFrame({
+        type: "fatal",
+        code: "database-schema-newer",
+        message: "x".repeat(10_000),
+      }),
+    ).toEqual({ type: "fatal", code: "database-schema-newer", message: "x".repeat(4_096) });
+
+    expect(parseDesktopBackendLifecycleFrame({ type: "http-bound", port: 0 })).toBeNull();
+    expect(parseDesktopBackendLifecycleFrame({ type: "http-serving", port: "1" })).toBeNull();
+    expect(
+      parseDesktopBackendLifecycleFrame({ type: "startup-phase", name: "", ms: 1 }),
+    ).toBeNull();
+    expect(
+      parseDesktopBackendLifecycleFrame({ type: "startup-phase", name: "x", ms: -1 }),
+    ).toBeNull();
+    expect(parseDesktopBackendLifecycleFrame({ type: "fatal", message: "no code" })).toBeNull();
+    expect(parseDesktopBackendLifecycleFrame({ type: "sample" })).toBeNull();
+    expect(parseDesktopBackendLifecycleFrame(null)).toBeNull();
   });
 });

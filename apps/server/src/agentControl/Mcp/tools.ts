@@ -97,7 +97,10 @@ import {
 import { projectKindOf } from "@ryco/shared/projectKind";
 import { Effect, Option, Schema } from "effect";
 
-import type { ProjectionSnapshotQueryShape } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import {
+  type ProjectionSnapshotQueryShape,
+  readProjectShells,
+} from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import type { DeviceServiceShape } from "../../device/Services/DeviceService.ts";
 import type { WorkspaceAccessPolicyShape } from "../../workspace/Services/WorkspaceAccessPolicy.ts";
 import type { AgentControlPolicyShape } from "../Services/AgentControlPolicy.ts";
@@ -1489,10 +1492,10 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
     Effect.gen(function* () {
       const service = yield* requireDevice();
       const scope = yield* sessionScope(session);
-      const snapshot = yield* deps.projections
-        .getShellSnapshot()
-        .pipe(Effect.mapError(() => new ToolFailure("Device project scope is unavailable.")));
-      const project = snapshot.projects.find((candidate) => candidate.id === scope.projectId);
+      const projects = yield* readProjectShells(deps.projections).pipe(
+        Effect.mapError(() => new ToolFailure("Device project scope is unavailable.")),
+      );
+      const project = projects.find((candidate) => candidate.id === scope.projectId);
       if (!project) return yield* failTool("Device project scope is unavailable.");
       return { service, scope, project };
     });
@@ -1620,10 +1623,10 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
     Effect.gen(function* () {
       yield* requireDevice();
       const scope = yield* sessionScope(session);
-      const snapshot = yield* deps.projections
-        .getShellSnapshot()
-        .pipe(Effect.mapError(() => new ToolFailure("Device project scope is unavailable.")));
-      const project = snapshot.projects.find((candidate) => candidate.id === scope.projectId);
+      const projects = yield* readProjectShells(deps.projections).pipe(
+        Effect.mapError(() => new ToolFailure("Device project scope is unavailable.")),
+      );
+      const project = projects.find((candidate) => candidate.id === scope.projectId);
       if (!project) return yield* failTool("Device project scope is unavailable.");
       return {
         project,
@@ -2072,12 +2075,12 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
         AGENT_CONTROL_MCP_LIST_LIMIT_DEFAULT,
         AGENT_CONTROL_MCP_LIST_LIMIT_MAX,
       );
-      const snapshot = yield* deps.projections
-        .getShellSnapshot()
-        .pipe(Effect.mapError(() => new ToolFailure("Project list read failed.")));
+      const projects = yield* readProjectShells(deps.projections).pipe(
+        Effect.mapError(() => new ToolFailure("Project list read failed.")),
+      );
       const page = paginate({
         kind: "projects",
-        rows: snapshot.projects,
+        rows: projects,
         order: (project) => ({ createdAt: project.createdAt, id: project.id }),
         limit,
         cursor: input.cursor,

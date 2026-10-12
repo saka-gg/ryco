@@ -607,7 +607,11 @@ const makeOrchestrationEngine = Effect.gen(function* () {
     Queue.take(commandQueue).pipe(
       Effect.tap(() => commandQueueMetrics.recordDequeued()),
       Effect.flatMap((envelope) => {
-        const processing = storageLifecycleLock.withPermit(processEnvelope(envelope));
+        // Shared: commands are serialized by this worker already, and their storage admission
+        // only reads fences, so path leases taken meanwhile (turn starts) need not wait. The one
+        // fence a command writes, a relocation's commit, only lifts it: a racing lease is either
+        // refused (before the commit) or admitted (after), never admitted into a fenced path.
+        const processing = storageLifecycleLock.withShared(processEnvelope(envelope));
         // Settings writers take their semaphore before storage admission. Match
         // that order, before any import SQL transaction, to avoid lock inversion.
         return envelope.admission?.withCommitLease
@@ -630,6 +634,10 @@ const makeOrchestrationEngine = Effect.gen(function* () {
     limit,
   ) => eventStore.readPage(fromSequenceExclusive, limit);
 
+  const readStreamEventsPage: NonNullable<OrchestrationEngineShape["readStreamEventsPage"]> = (
+    input,
+  ) => eventStore.readStreamEventsPage(input);
+
   const readRecentEvents: OrchestrationEngineShape["readRecentEvents"] = (input) =>
     eventStore.readRecent === undefined ? Effect.succeed([]) : eventStore.readRecent(input);
 
@@ -650,6 +658,7 @@ const makeOrchestrationEngine = Effect.gen(function* () {
 
   return {
     bootSequence,
+    getReadModel: () => Effect.sync(() => commandReadModel),
     captureThreadWorkspace: (input) => {
       if (!workspaceAuthorityHealthy) return undefined;
       const captured = workspaceCommitFence.capture(input);
@@ -657,6 +666,7 @@ const makeOrchestrationEngine = Effect.gen(function* () {
     },
     readEvents,
     readEventsPage,
+    readStreamEventsPage,
     readRecentEvents,
     dispatch,
     // Each access creates a fresh PubSub subscription so that multiple

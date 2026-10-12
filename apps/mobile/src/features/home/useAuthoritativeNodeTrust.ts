@@ -1,7 +1,6 @@
 import type { WorkspaceNativeTrustState } from "@ryco/client-runtime/state/workspace";
 import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 
-import { getMobileE2eeSessionState, subscribeMobileE2eeSession } from "../../hostedHub/e2eeSession";
 import { useHostedHubStore } from "../../hostedHub/state";
 import {
   authoritativeNodeTrustSourceRevision,
@@ -26,11 +25,6 @@ export function useAuthoritativeNodeTrust(
     subscribeAuthoritativeNodeTrustSource,
     authoritativeNodeTrustSourceRevision,
     authoritativeNodeTrustSourceRevision,
-  );
-  const activeSession = useSyncExternalStore(
-    subscribeMobileE2eeSession,
-    getMobileE2eeSessionState,
-    getMobileE2eeSessionState,
   );
   const enrollment = useSyncExternalStore(
     subscribeMobileNativeE2eeEnrollment,
@@ -57,16 +51,14 @@ export function useAuthoritativeNodeTrust(
 
   useEffect(() => {
     let cancelled = false;
+    const source = readAuthoritativeNodeTrustSource();
+    // Before the hosted runtime loads there is no channel, so no identity change.
     const conflicts = new Set(
       stableTargets
-        .filter(
-          (target) =>
-            getMobileE2eeSessionState(target.environmentId).event?.kind === "identity-change",
-        )
+        .filter((target) => source?.identityChanged(target.environmentId) === true)
         .map((target) => target.environmentId),
     );
     void (async () => {
-      const source = readAuthoritativeNodeTrustSource();
       const hubOrigin = source?.hubOrigin() ?? null;
       const next = await resolveAuthoritativeNativeNodeTrust({
         scope:
@@ -88,7 +80,7 @@ export function useAuthoritativeNodeTrust(
     return () => {
       cancelled = true;
     };
-  }, [accountId, activeSession, enrollment, stableTargets, trustRevision]);
+  }, [accountId, enrollment, stableTargets, trustRevision]);
 
   return trust;
 }

@@ -1,4 +1,6 @@
-import { Context, Layer, Tracer } from "effect";
+import * as Context from "effect/Context";
+import * as Layer from "effect/Layer";
+import * as Tracer from "effect/Tracer";
 import type * as NativeE2eeContract from "@ryco/contracts/native-e2ee";
 
 import type { KnownEnvironmentConnectionTarget } from "../knownEnvironment.ts";

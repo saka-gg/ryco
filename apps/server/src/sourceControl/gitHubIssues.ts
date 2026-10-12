@@ -173,11 +173,16 @@ export function decodeGitHubIssueListJson(
   if (!Result.isSuccess(result)) return Result.fail(result.failure);
   const issues: NormalizedGitHubIssueRecord[] = [];
   for (const entry of result.success) {
-    const decoded = decodeIssueEntry(entry);
-    if (Exit.isFailure(decoded)) continue;
-    issues.push(normalizeGitHubIssueRecord(decoded.value));
+    const issue = decodeGitHubIssueEntryValue(entry);
+    if (issue) issues.push(issue);
   }
   return Result.succeed(issues);
+}
+
+/** One already-parsed list entry in `gh`'s JSON shape; `null` when it does not decode. */
+export function decodeGitHubIssueEntryValue(entry: unknown): NormalizedGitHubIssueRecord | null {
+  const decoded = decodeIssueEntry(entry);
+  return Exit.isSuccess(decoded) ? normalizeGitHubIssueRecord(decoded.value) : null;
 }
 
 export function decodeGitHubIssueDetailJson(

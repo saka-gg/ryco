@@ -8,6 +8,7 @@ import {
   type WorkspaceMetadataSnapshot,
 } from "@ryco/client-runtime/state/workspace";
 
+import { payloadByteLength } from "./snapshotDb";
 import type {
   CachedEnvironmentShellSnapshot,
   EnvironmentState,
@@ -97,7 +98,9 @@ export function captureEnvironmentSnapshotRecord(
  * Enforce the per-environment bounds by dropping threads — archived first,
  * then oldest — while preserving the survivors' original order. The byte cap
  * re-serializes after each trim round; projects and worktrees are never
- * dropped (they are small and the interface renders from them).
+ * dropped (they are small and the interface renders from them). The UTF-8
+ * length is measured once per round and returned, so the store does not measure
+ * the same payload again.
  */
 export function boundStoredEnvironmentSnapshot(
   record: StoredEnvironmentSnapshot,
@@ -105,7 +108,11 @@ export function boundStoredEnvironmentSnapshot(
     maxThreads: MAX_SNAPSHOT_THREADS_PER_ENVIRONMENT,
     maxPayloadBytes: MAX_SNAPSHOT_PAYLOAD_BYTES_PER_ENVIRONMENT,
   },
-): { readonly record: StoredEnvironmentSnapshot; readonly payload: string } {
+): {
+  readonly record: StoredEnvironmentSnapshot;
+  readonly payload: string;
+  readonly payloadBytes: number;
+} {
   const dropOrder = (threads: ReadonlyArray<StoredEnvironmentSnapshotThread>) =>
     threads.toSorted((left, right) => {
       const archivedDelta =
@@ -122,16 +129,15 @@ export function boundStoredEnvironmentSnapshot(
 
   let bounded: StoredEnvironmentSnapshot = { ...record, threads };
   let payload = JSON.stringify(bounded);
-  while (
-    new TextEncoder().encode(payload).byteLength > caps.maxPayloadBytes &&
-    bounded.threads.length > 0
-  ) {
+  let payloadBytes = payloadByteLength(payload);
+  while (payloadBytes > caps.maxPayloadBytes && bounded.threads.length > 0) {
     const dropCount = Math.max(1, Math.ceil(bounded.threads.length / 4));
     const dropped = new Set(dropOrder(bounded.threads).slice(0, dropCount));
     bounded = { ...bounded, threads: bounded.threads.filter((thread) => !dropped.has(thread)) };
     payload = JSON.stringify(bounded);
+    payloadBytes = payloadByteLength(payload);
   }
-  return { record: bounded, payload };
+  return { record: bounded, payload, payloadBytes };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

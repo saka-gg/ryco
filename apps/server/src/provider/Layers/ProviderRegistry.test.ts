@@ -2,6 +2,7 @@ import { applyServerSettingsPatch } from "@ryco/shared/serverSettings";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, it, assert, live } from "@effect/vitest";
 import {
+  Context,
   Deferred,
   Effect,
   Exit,
@@ -31,6 +32,7 @@ import * as PlatformError from "effect/PlatformError";
 import { HttpClient, HttpClientResponse } from "effect/http";
 import { ChildProcessSpawner } from "effect/process";
 import { deepMerge } from "@ryco/shared/Struct";
+import { TestClock } from "effect/testing";
 import { createModelCapabilities, createModelSelection } from "@ryco/shared/model";
 
 import { checkCodexProviderStatus, type CodexAppServerProviderSnapshot } from "./CodexProvider.ts";
@@ -51,8 +53,15 @@ import {
 } from "./ProviderRegistry.ts";
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService, type ServerSettingsShape } from "../../serverSettings.ts";
-import { readProviderStatusCache, resolveProviderStatusCachePath } from "../providerStatusCache.ts";
+import {
+  readProviderStatusCache,
+  readProviderStatusCacheEntry,
+  resolveProviderStatusCachePath,
+  writeProviderStatusCache,
+} from "../providerStatusCache.ts";
+import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
 import type { ProviderInstance } from "../ProviderDriver.ts";
+import { ProviderInstanceBootGate } from "../Services/ProviderInstanceBootGate.ts";
 import { ProviderInstanceRegistry } from "../Services/ProviderInstanceRegistry.ts";
 import { ProviderRegistry } from "../Services/ProviderRegistry.ts";
 import { makeManualOnlyProviderMaintenanceCapabilities } from "../providerMaintenance.ts";
@@ -92,10 +101,12 @@ const makeInventoryRegistry = Effect.fn("makeInventoryRegistry")(function* (
         displayName: undefined,
         enabled: true,
         snapshot: {
-          maintenanceCapabilities: makeManualOnlyProviderMaintenanceCapabilities({
-            provider: initial.driver,
-            packageName: null,
-          }),
+          maintenanceCapabilities: Effect.succeed(
+            makeManualOnlyProviderMaintenanceCapabilities({
+              provider: initial.driver,
+              packageName: null,
+            }),
+          ),
           getSnapshot: Effect.succeed(initial),
           revalidate: Ref.get(next),
           refresh: Ref.update(calls, (count) => count + 1).pipe(
@@ -131,10 +142,9 @@ const makeInventoryRegistry = Effect.fn("makeInventoryRegistry")(function* (
   return yield* Effect.gen(function* () {
     const registry = yield* ProviderRegistry;
     const config = yield* ServerConfig;
-    // Wait for background sources to run before changing their inventories.
-    yield* Effect.forEach(controls, (control) => Deferred.await(control.booted));
-    yield* Effect.yieldNow;
+    // Building the registry never probes; seed every source with one explicit refresh.
     yield* registry.refresh();
+    yield* Effect.forEach(controls, (control) => Deferred.await(control.booted));
     const cachePath = (instanceId: ProviderInstanceId) =>
       resolveProviderStatusCachePath({
         cacheDir: config.providerStatusCacheDir,
@@ -155,6 +165,23 @@ process.env.RYCO_CURSOR_ENABLED = "1";
 // ── Test helpers ────────────────────────────────────────────────────
 
 const encoder = new TextEncoder();
+
+// The hydration layer builds drivers only once the server listens and releases the boot gate.
+const openProviderBootGate = Effect.gen(function* () {
+  const gate = yield* ProviderInstanceBootGate;
+  yield* gate.awaitInitialReconcile;
+});
+
+const pollProviders = (predicate: (providers: ReadonlyArray<ServerProvider>) => boolean) =>
+  Effect.gen(function* () {
+    const registry = yield* ProviderRegistry;
+    let providers = yield* registry.getProviders;
+    for (let attempt = 0; attempt < 200 && !predicate(providers); attempt += 1) {
+      yield* Effect.yieldNow;
+      providers = yield* registry.getProviders;
+    }
+    return providers;
+  });
 
 const TestHttpClientLive = Layer.succeed(
   HttpClient.HttpClient,
@@ -923,10 +950,12 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             displayName: undefined,
             enabled: true,
             snapshot: {
-              maintenanceCapabilities: makeManualOnlyProviderMaintenanceCapabilities({
-                provider: cursorDriver,
-                packageName: null,
-              }),
+              maintenanceCapabilities: Effect.succeed(
+                makeManualOnlyProviderMaintenanceCapabilities({
+                  provider: cursorDriver,
+                  packageName: null,
+                }),
+              ),
               getSnapshot: Effect.succeed(initialProvider),
               revalidate: Effect.succeed(initialProvider),
               refresh: Effect.succeed(refreshedProvider),
@@ -970,6 +999,8 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             assert.deepStrictEqual((yield* registry.getProviders)[0]?.models, [
               ...initialProvider.models,
             ]);
+            // The per-instance change subscription starts in a forked fiber.
+            for (let attempt = 0; attempt < 5; attempt += 1) yield* Effect.yieldNow;
             yield* PubSub.publish(changes, refreshedProvider);
 
             let cachedProvider = yield* readProviderStatusCache(filePath);
@@ -1017,10 +1048,12 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             displayName: undefined,
             enabled: true,
             snapshot: {
-              maintenanceCapabilities: makeManualOnlyProviderMaintenanceCapabilities({
-                provider: codexDriver,
-                packageName: null,
-              }),
+              maintenanceCapabilities: Effect.succeed(
+                makeManualOnlyProviderMaintenanceCapabilities({
+                  provider: codexDriver,
+                  packageName: null,
+                }),
+              ),
               getSnapshot: Effect.succeed(cachedProvider),
               revalidate: Effect.succeed(cachedProvider),
               refresh: Effect.die(new Error("simulated refresh failure")),
@@ -1065,7 +1098,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
         }),
       );
 
-      it.effect("does not block registry startup on initial provider refresh", () =>
+      it.effect("never probes while building; a client revalidation probes in the background", () =>
         Effect.gen(function* () {
           const codexDriver = ProviderDriverKind.make("codex");
           const codexInstanceId = ProviderInstanceId.make("codex");
@@ -1089,6 +1122,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             checkedAt: "2026-04-29T10:01:00.000Z",
           } as const satisfies ServerProvider;
           const releaseRefresh = yield* Deferred.make<void>();
+          const probes = yield* Ref.make(0);
           const instance = {
             instanceId: codexInstanceId,
             driverKind: codexDriver,
@@ -1099,13 +1133,19 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             displayName: undefined,
             enabled: true,
             snapshot: {
-              maintenanceCapabilities: makeManualOnlyProviderMaintenanceCapabilities({
-                provider: codexDriver,
-                packageName: null,
-              }),
+              maintenanceCapabilities: Effect.succeed(
+                makeManualOnlyProviderMaintenanceCapabilities({
+                  provider: codexDriver,
+                  packageName: null,
+                }),
+              ),
               getSnapshot: Effect.succeed(initialProvider),
-              revalidate: Effect.succeed(initialProvider),
-              refresh: Deferred.await(releaseRefresh).pipe(Effect.as(refreshedProvider)),
+              isFresh: Effect.succeed(false),
+              revalidate: Ref.update(probes, (count) => count + 1).pipe(
+                Effect.andThen(Deferred.await(releaseRefresh)),
+                Effect.as(refreshedProvider),
+              ),
+              refresh: Effect.die(new Error("explicit refresh is not expected")),
               streamChanges: Stream.empty,
             },
             adapter: {} as ProviderInstance["adapter"],
@@ -1138,19 +1178,17 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
           yield* Effect.gen(function* () {
             const registry = yield* ProviderRegistry;
             assert.deepStrictEqual(yield* registry.getProviders, [initialProvider]);
+            for (let attempt = 0; attempt < 10; attempt += 1) yield* Effect.yieldNow;
+            assert.strictEqual(yield* Ref.get(probes), 0);
 
+            const revalidation = yield* registry.revalidateStale.pipe(Effect.forkChild);
+            // Background probes start staggered; the first waits one stagger interval.
+            yield* TestClock.adjust("1 second");
             yield* Deferred.succeed(releaseRefresh, undefined);
-            let providers = yield* registry.getProviders;
-            for (
-              let attempt = 0;
-              attempt < 50 && providers[0]?.checkedAt !== refreshedProvider.checkedAt;
-              attempt += 1
-            ) {
-              yield* Effect.yieldNow;
-              providers = yield* registry.getProviders;
-            }
+            const providers = yield* Fiber.join(revalidation);
 
             assert.deepStrictEqual(providers, [refreshedProvider]);
+            assert.strictEqual(yield* Ref.get(probes), 1);
           }).pipe(Effect.provide(runtimeServices));
         }),
       );
@@ -1197,10 +1235,12 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             displayName: undefined,
             enabled: true,
             snapshot: {
-              maintenanceCapabilities: makeManualOnlyProviderMaintenanceCapabilities({
-                provider: provider.driver,
-                packageName: null,
-              }),
+              maintenanceCapabilities: Effect.succeed(
+                makeManualOnlyProviderMaintenanceCapabilities({
+                  provider: provider.driver,
+                  packageName: null,
+                }),
+              ),
               getSnapshot: Effect.succeed(provider),
               revalidate: Effect.succeed(provider),
               refresh: Effect.succeed(provider),
@@ -1289,7 +1329,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
       // breaks — the `codex_personal`-never-probes bug we are guarding
       // against — that snapshot never lands in `getProviders` and the
       // assertions below fail.
-      it.effect("propagates real Codex probe failures to the aggregator at boot", () =>
+      it.effect("propagates real Codex probe failures to the aggregator once probed", () =>
         Effect.gen(function* () {
           const missingBinary = `ryco_codex_missing_${process.pid}_${Date.now()}`;
           const serverSettings = yield* makeMutableServerSettingsService(
@@ -1353,6 +1393,11 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
 
           yield* Effect.gen(function* () {
             const registry = yield* ProviderRegistry;
+            yield* openProviderBootGate;
+            yield* pollProviders((current) =>
+              current.some((provider) => provider.instanceId === "codex_personal"),
+            );
+            yield* registry.refreshInstance(ProviderInstanceId.make("codex_personal"));
             const providers = yield* Effect.gen(function* () {
               for (let attempts = 0; attempts < 100; attempts += 1) {
                 const current = yield* registry.getProviders;
@@ -1448,9 +1493,16 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
 
           yield* Effect.gen(function* () {
             const registry = yield* ProviderRegistry;
-            // Boot-time probe: the default codex instance is enabled with
+            yield* openProviderBootGate;
+            for (let attempts = 0; attempts < 60; attempts += 1) {
+              const providers = yield* registry.getProviders;
+              if (providers.some((provider) => provider.instanceId === "codex")) break;
+              yield* Effect.sleep("10 millis");
+            }
+            // First probe on demand: the default codex instance is enabled with
             // `firstMissing`, so the real spawner yields ENOENT and the
-            // background refresh eventually reports `status: "error"`.
+            // probe reports `status: "error"`.
+            yield* registry.refreshInstance(ProviderInstanceId.make("codex"));
             // What *distinguishes* the two probe runs is `checkedAt` —
             // each probe stamps a fresh DateTime, so we capture it and
             // assert it advances after the settings mutation.
@@ -1516,6 +1568,159 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
         }),
       );
 
+      it.effect("builds provider drivers only once the boot gate opens", () =>
+        Effect.gen(function* () {
+          const serverSettings = yield* makeMutableServerSettingsService(
+            Schema.decodeSync(ServerSettings)(
+              deepMerge(DEFAULT_SERVER_SETTINGS, {
+                providers: {
+                  codex: { enabled: false },
+                  claudeAgent: { enabled: false },
+                  cursor: { enabled: false },
+                  opencode: { enabled: false },
+                  copilot: { enabled: false },
+                  grok: { enabled: false },
+                },
+              }),
+            ),
+          );
+          const scope = yield* Scope.make();
+          yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
+          const runtimeServices = yield* Layer.build(
+            ProviderRegistryLive.pipe(
+              Layer.provideMerge(ProviderInstanceRegistryHydrationLive),
+              Layer.provideMerge(Layer.succeed(ServerSettingsService, serverSettings)),
+              Layer.provideMerge(
+                ServerConfig.layerTest(process.cwd(), { prefix: "ryco-provider-boot-gate-" }),
+              ),
+              Layer.provideMerge(TestHttpClientLive),
+              Layer.provideMerge(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
+              Layer.provideMerge(OpenCodeRuntimeLive),
+              Layer.provideMerge(NodeServices.layer),
+            ),
+          ).pipe(Scope.provide(scope));
+
+          yield* Effect.gen(function* () {
+            const instanceRegistry = yield* ProviderInstanceRegistry;
+            for (let attempt = 0; attempt < 20; attempt += 1) yield* Effect.yieldNow;
+            assert.deepStrictEqual(yield* instanceRegistry.listInstances, []);
+            const configured = yield* instanceRegistry.listConfigured!;
+            assert.deepStrictEqual(configured.map((identity) => identity.instanceId).toSorted(), [
+              "claudeAgent",
+              "codex",
+              "copilot",
+              "cursor",
+              "grok",
+              "opencode",
+            ]);
+            assert.isTrue(configured.every((identity) => identity.enabled === false));
+
+            yield* openProviderBootGate;
+            assert.deepStrictEqual(
+              (yield* instanceRegistry.listInstances)
+                .map((instance) => instance.instanceId)
+                .toSorted(),
+              ["claudeAgent", "codex", "copilot", "cursor", "grok", "opencode"],
+            );
+          }).pipe(Effect.provide(runtimeServices));
+        }),
+      );
+
+      it.effect("builds from the settings current when the gate opens and reports them", () =>
+        Effect.gen(function* () {
+          const serverSettings = yield* makeMutableServerSettingsService(
+            Schema.decodeSync(ServerSettings)(
+              deepMerge(DEFAULT_SERVER_SETTINGS, {
+                providers: {
+                  codex: { enabled: false },
+                  claudeAgent: { enabled: false },
+                  cursor: { enabled: false },
+                  opencode: { enabled: false },
+                  copilot: { enabled: false },
+                  grok: { enabled: false },
+                },
+              }),
+            ),
+          );
+          const scope = yield* Scope.make();
+          yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
+          const runtimeServices = yield* Layer.build(
+            ProviderInstanceRegistryHydrationLive.pipe(
+              Layer.provideMerge(Layer.succeed(ServerSettingsService, serverSettings)),
+              Layer.provideMerge(
+                ServerConfig.layerTest(process.cwd(), { prefix: "ryco-provider-boot-current-" }),
+              ),
+              Layer.provideMerge(TestHttpClientLive),
+              Layer.provideMerge(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
+              Layer.provideMerge(OpenCodeRuntimeLive),
+              Layer.provideMerge(NodeServices.layer),
+            ),
+          ).pipe(Scope.provide(scope));
+
+          yield* Effect.gen(function* () {
+            const instanceRegistry = yield* ProviderInstanceRegistry;
+            const codexIdentity = Effect.map(instanceRegistry.listConfigured!, (identities) =>
+              identities.find((identity) => identity.instanceId === "codex"),
+            );
+            // Construction never probes, so enabling a missing binary spawns nothing here.
+            yield* serverSettings.updateSettings({
+              providers: { codex: { enabled: true, binaryPath: "ryco-codex-not-installed" } },
+            });
+            // Until the build starts, the boot read is what is configured.
+            assert.strictEqual((yield* codexIdentity)?.enabled, false);
+
+            yield* openProviderBootGate;
+            assert.strictEqual((yield* codexIdentity)?.enabled, true);
+            const codex = yield* instanceRegistry.getInstance(ProviderInstanceId.make("codex"));
+            assert.strictEqual(codex?.enabled, true);
+          }).pipe(Effect.provide(runtimeServices));
+        }),
+      );
+
+      it.effect("builds a configured driver on demand before the boot gate opens", () =>
+        Effect.gen(function* () {
+          const serverSettings = yield* makeMutableServerSettingsService(
+            Schema.decodeSync(ServerSettings)(
+              deepMerge(DEFAULT_SERVER_SETTINGS, {
+                providers: {
+                  codex: { enabled: false },
+                  claudeAgent: { enabled: false },
+                  cursor: { enabled: false },
+                  opencode: { enabled: false },
+                  copilot: { enabled: false },
+                  grok: { enabled: false },
+                },
+              }),
+            ),
+          );
+          const scope = yield* Scope.make();
+          yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
+          const runtimeServices = yield* Layer.build(
+            ProviderInstanceRegistryHydrationLive.pipe(
+              Layer.provideMerge(Layer.succeed(ServerSettingsService, serverSettings)),
+              Layer.provideMerge(
+                ServerConfig.layerTest(process.cwd(), { prefix: "ryco-provider-boot-demand-" }),
+              ),
+              Layer.provideMerge(TestHttpClientLive),
+              Layer.provideMerge(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
+              Layer.provideMerge(OpenCodeRuntimeLive),
+              Layer.provideMerge(NodeServices.layer),
+            ),
+          ).pipe(Scope.provide(scope));
+
+          yield* Effect.gen(function* () {
+            const instanceRegistry = yield* ProviderInstanceRegistry;
+            const codex = yield* instanceRegistry.getInstance(ProviderInstanceId.make("codex"));
+            assert.strictEqual(codex?.instanceId, "codex");
+            // Unknown ids never wait for (or trigger) the deferred build.
+            assert.strictEqual(
+              yield* instanceRegistry.getInstance(ProviderInstanceId.make("ghost")),
+              undefined,
+            );
+          }).pipe(Effect.provide(runtimeServices));
+        }),
+      );
+
       it.effect("includes unavailable instance snapshots in getProviders", () =>
         Effect.gen(function* () {
           const serverSettings = yield* makeMutableServerSettingsService(
@@ -1558,8 +1763,12 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
           );
 
           yield* Effect.gen(function* () {
-            const registry = yield* ProviderRegistry;
-            const providers = yield* registry.getProviders;
+            yield* openProviderBootGate;
+            const providers = yield* pollProviders(
+              (current) =>
+                current.some((provider) => provider.instanceId === "ghost_main") &&
+                current.some((provider) => provider.instanceId === "cursor"),
+            );
             const ghost = providers.find((provider) => provider.instanceId === "ghost_main");
 
             assert.notStrictEqual(ghost, undefined);
@@ -1644,8 +1853,8 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             ).pipe(Scope.provide(scope));
 
             yield* Effect.gen(function* () {
-              const registry = yield* ProviderRegistry;
-              const providers = yield* registry.getProviders;
+              yield* openProviderBootGate;
+              const providers = yield* pollProviders((current) => current.length >= 6);
               const cursorProvider = providers.find(
                 (provider) => provider.instanceId === ProviderInstanceId.make("cursor"),
               );
@@ -2503,10 +2712,12 @@ const buildSingleInstanceRegistry = Effect.fn("buildSingleInstanceRegistry")(fun
     displayName: undefined,
     enabled: true,
     snapshot: {
-      maintenanceCapabilities: makeManualOnlyProviderMaintenanceCapabilities({
-        provider: provider.driver,
-        packageName: null,
-      }),
+      maintenanceCapabilities: Effect.succeed(
+        makeManualOnlyProviderMaintenanceCapabilities({
+          provider: provider.driver,
+          packageName: null,
+        }),
+      ),
       getSnapshot: Effect.succeed(provider),
       revalidate: Effect.succeed(provider),
       refresh: Ref.update(probes, (count) => count + 1).pipe(Effect.as(provider)),
@@ -2638,6 +2849,10 @@ describe("ProviderRegistry compatibility advisories", () => {
           },
         );
 
+        // The first probe is on demand; it schedules the TTL-gated manifest refresh.
+        yield* Effect.gen(function* () {
+          yield* (yield* ProviderRegistry).refresh();
+        }).pipe(Effect.provide(runtimeServices));
         const provider = yield* waitForProvider(
           instanceId,
           (candidate) => candidate?.compatibilityAdvisory?.latestVersionStatus === "broken",
@@ -2653,5 +2868,302 @@ describe("ProviderRegistry compatibility advisories", () => {
         // registry re-rating it, not from a new probe.
         assert.strictEqual(yield* Ref.get(probes), 1);
       }),
+  );
+});
+
+const CODEX_INSTANCE_ID = ProviderInstanceId.make("codex");
+const CODEX_DRIVER_KIND = ProviderDriverKind.make("codex");
+
+const codexSnapshot = (overrides?: Partial<ServerProvider>): ServerProvider => ({
+  instanceId: CODEX_INSTANCE_ID,
+  driver: CODEX_DRIVER_KIND,
+  enabled: true,
+  installed: true,
+  version: "0.199.0",
+  status: "ready",
+  auth: { status: "authenticated" },
+  checkedAt: "2026-10-01T00:00:00.000Z",
+  models: [],
+  slashCommands: [],
+  skills: [],
+  ...overrides,
+});
+
+/**
+ * A registry whose single configured codex instance arrives after the registry is built, like
+ * the deferred hydration layer. The instance is a real managed provider with a fixed fingerprint.
+ */
+const buildDeferredCodexRegistry = Effect.fn("buildDeferredCodexRegistry")(function* (input: {
+  readonly persisted?: {
+    readonly provider: ServerProvider;
+    readonly probeFreshness?: { readonly fingerprint: string; readonly checkedAt: string };
+  };
+  readonly fingerprint: string;
+  readonly probed: ServerProvider;
+}) {
+  const scope = yield* Scope.make();
+  yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
+  const base = yield* Layer.build(
+    ServerConfig.layerTest(process.cwd(), { prefix: "ryco-provider-freshness-" }).pipe(
+      Layer.provideMerge(NodeServices.layer),
+    ),
+  ).pipe(Scope.provide(scope));
+  const config = Context.get(base, ServerConfig);
+  const cachePath = yield* resolveProviderStatusCachePath({
+    cacheDir: config.providerStatusCacheDir,
+    instanceId: CODEX_INSTANCE_ID,
+  }).pipe(Effect.provide(base));
+  if (input.persisted) {
+    yield* writeProviderStatusCache({
+      filePath: cachePath,
+      provider: input.persisted.provider,
+      probeFreshness: input.persisted.probeFreshness,
+    }).pipe(Effect.provide(base));
+  }
+
+  const checks = yield* Ref.make(0);
+  const fingerprintReads = yield* Ref.make(0);
+  const snapshot = yield* makeManagedServerProvider<{ readonly enabled: boolean }>({
+    maintenanceCapabilities: Effect.succeed(
+      makeManualOnlyProviderMaintenanceCapabilities({
+        provider: CODEX_DRIVER_KIND,
+        packageName: null,
+      }),
+    ),
+    probeFingerprint: Ref.update(fingerprintReads, (count) => count + 1).pipe(
+      Effect.as(input.fingerprint),
+    ),
+    getSettings: Effect.succeed({ enabled: true }),
+    streamSettings: Stream.empty,
+    haveSettingsChanged: () => false,
+    initialSnapshot: () => codexSnapshot({ status: "warning", message: "Checking..." }),
+    checkProvider: Ref.update(checks, (count) => count + 1).pipe(Effect.as(input.probed)),
+    refreshInterval: null,
+  }).pipe(Scope.provide(scope));
+  const instance: ProviderInstance = {
+    instanceId: CODEX_INSTANCE_ID,
+    driverKind: CODEX_DRIVER_KIND,
+    continuationIdentity: { driverKind: CODEX_DRIVER_KIND, continuationKey: "codex" },
+    displayName: undefined,
+    enabled: true,
+    snapshot,
+    adapter: {} as ProviderInstance["adapter"],
+    textGeneration: {} as ProviderInstance["textGeneration"],
+  };
+  const instancesRef = yield* Ref.make<ReadonlyArray<ProviderInstance>>([]);
+  const changes = yield* PubSub.unbounded<void>();
+  const instanceRegistry = Layer.succeed(ProviderInstanceRegistry, {
+    getInstance: (instanceId) =>
+      Ref.get(instancesRef).pipe(
+        Effect.map((instances) => instances.find((entry) => entry.instanceId === instanceId)),
+      ),
+    listInstances: Ref.get(instancesRef),
+    listUnavailable: Effect.succeed([]),
+    listConfigured: Effect.succeed([
+      {
+        instanceId: CODEX_INSTANCE_ID,
+        driverKind: CODEX_DRIVER_KIND,
+        displayName: undefined,
+        accentColor: undefined,
+        enabled: true,
+      },
+    ]),
+    streamChanges: Stream.fromPubSub(changes),
+    subscribeChanges: PubSub.subscribe(changes),
+  });
+  const runtimeServices = yield* Layer.build(
+    ProviderRegistryLive.pipe(
+      Layer.provideMerge(instanceRegistry),
+      Layer.provideMerge(Layer.succeedContext(base)),
+    ),
+  ).pipe(Scope.provide(scope));
+  // Deliver the driver and wait until the registry has settled its arrival.
+  const arrive = Effect.gen(function* () {
+    yield* Ref.set(instancesRef, [instance]);
+    yield* PubSub.publish(changes, undefined);
+    for (let attempt = 0; attempt < 200 && (yield* Ref.get(fingerprintReads)) === 0; attempt++) {
+      yield* Effect.yieldNow;
+    }
+    for (let attempt = 0; attempt < 10; attempt++) yield* Effect.yieldNow;
+  });
+  const readPersisted = readProviderStatusCacheEntry(cachePath).pipe(Effect.provide(base));
+  return { runtimeServices, checks, arrive, readPersisted, snapshot };
+});
+
+const revalidateInBackground = Effect.gen(function* () {
+  const registry = yield* ProviderRegistry;
+  const fiber = yield* registry.revalidateStale.pipe(Effect.forkChild);
+  yield* TestClock.adjust("2 seconds");
+  return yield* Fiber.join(fiber);
+});
+
+describe("ProviderRegistry persisted probe freshness", () => {
+  it.effect(
+    "serves the persisted snapshot before the driver exists and adopts it when its fingerprint matches",
+    () =>
+      Effect.gen(function* () {
+        const persisted = codexSnapshot({ checkedAt: "2026-10-02T00:00:00.000Z" });
+        const { runtimeServices, checks, arrive, snapshot } = yield* buildDeferredCodexRegistry({
+          persisted: {
+            provider: persisted,
+            probeFreshness: { fingerprint: "fp-1", checkedAt: new Date().toISOString() },
+          },
+          fingerprint: "fp-1",
+          probed: codexSnapshot({ checkedAt: "2026-10-03T00:00:00.000Z" }),
+        });
+
+        yield* Effect.gen(function* () {
+          const registry = yield* ProviderRegistry;
+          const before = yield* registry.getProviders;
+          assert.strictEqual(before.length, 1);
+          assert.strictEqual(before[0]?.checkedAt, persisted.checkedAt);
+          assert.strictEqual(before[0]?.status, "ready");
+
+          yield* arrive;
+          assert.strictEqual((yield* snapshot.getSnapshot).checkedAt, persisted.checkedAt);
+          const after = yield* revalidateInBackground;
+          assert.strictEqual(after[0]?.checkedAt, persisted.checkedAt);
+          assert.strictEqual(yield* Ref.get(checks), 0);
+        }).pipe(Effect.provide(runtimeServices));
+      }),
+  );
+
+  it.effect("keeps a stale persisted snapshot until a demand probes and re-persists it", () =>
+    Effect.gen(function* () {
+      const persisted = codexSnapshot({ checkedAt: "2026-10-02T00:00:00.000Z" });
+      const probed = codexSnapshot({ checkedAt: "2026-10-03T00:00:00.000Z" });
+      const { runtimeServices, checks, arrive, readPersisted } = yield* buildDeferredCodexRegistry({
+        persisted: {
+          provider: persisted,
+          probeFreshness: { fingerprint: "fp-old-binary", checkedAt: new Date().toISOString() },
+        },
+        fingerprint: "fp-1",
+        probed,
+      });
+
+      yield* Effect.gen(function* () {
+        const registry = yield* ProviderRegistry;
+        yield* arrive;
+        assert.strictEqual((yield* registry.getProviders)[0]?.checkedAt, persisted.checkedAt);
+        assert.strictEqual(yield* Ref.get(checks), 0);
+
+        const after = yield* revalidateInBackground;
+        assert.strictEqual(after[0]?.checkedAt, probed.checkedAt);
+        assert.strictEqual(yield* Ref.get(checks), 1);
+        assert.strictEqual((yield* readPersisted)?.probeFreshness?.fingerprint, "fp-1");
+      }).pipe(Effect.provide(runtimeServices));
+    }),
+  );
+
+  it.effect("publishes the pending placeholder when nothing was persisted", () =>
+    Effect.gen(function* () {
+      const { runtimeServices, checks, arrive } = yield* buildDeferredCodexRegistry({
+        fingerprint: "fp-1",
+        probed: codexSnapshot(),
+      });
+
+      yield* Effect.gen(function* () {
+        const registry = yield* ProviderRegistry;
+        assert.deepStrictEqual(yield* registry.getProviders, []);
+        yield* arrive;
+        assert.strictEqual((yield* registry.getProviders)[0]?.message, "Checking...");
+        assert.strictEqual(yield* Ref.get(checks), 0);
+      }).pipe(Effect.provide(runtimeServices));
+    }),
+  );
+
+  it.effect("never persists probe freshness for warning outcomes", () =>
+    Effect.gen(function* () {
+      const { runtimeServices, arrive, readPersisted } = yield* buildDeferredCodexRegistry({
+        fingerprint: "fp-1",
+        probed: codexSnapshot({ status: "warning", message: "Could not verify auth." }),
+      });
+
+      yield* Effect.gen(function* () {
+        const registry = yield* ProviderRegistry;
+        yield* arrive;
+        yield* registry.refreshInstance(CODEX_INSTANCE_ID);
+        const persisted = yield* readPersisted;
+        assert.strictEqual(persisted?.provider.status, "warning");
+        assert.strictEqual(persisted?.probeFreshness, undefined);
+      }).pipe(Effect.provide(runtimeServices));
+    }),
+  );
+
+  it.effect("runs at most two background probes at once", () =>
+    Effect.gen(function* () {
+      const active = yield* Ref.make(0);
+      const maxActive = yield* Ref.make(0);
+      const started = yield* Ref.make(0);
+      const release = yield* Deferred.make<void>();
+      const instances = ["codex", "codex_a", "codex_b", "codex_c"].map((id): ProviderInstance => {
+        const provider = codexSnapshot({ instanceId: ProviderInstanceId.make(id) });
+        return {
+          instanceId: provider.instanceId,
+          driverKind: CODEX_DRIVER_KIND,
+          continuationIdentity: { driverKind: CODEX_DRIVER_KIND, continuationKey: id },
+          displayName: undefined,
+          enabled: true,
+          snapshot: {
+            maintenanceCapabilities: Effect.succeed(
+              makeManualOnlyProviderMaintenanceCapabilities({
+                provider: CODEX_DRIVER_KIND,
+                packageName: null,
+              }),
+            ),
+            getSnapshot: Effect.succeed(provider),
+            isFresh: Effect.succeed(false),
+            revalidate: Effect.gen(function* () {
+              yield* Ref.update(started, (count) => count + 1);
+              const now = yield* Ref.updateAndGet(active, (count) => count + 1);
+              yield* Ref.update(maxActive, (count) => Math.max(count, now));
+              yield* Deferred.await(release);
+              yield* Ref.update(active, (count) => count - 1);
+              return provider;
+            }),
+            refresh: Effect.succeed(provider),
+            streamChanges: Stream.empty,
+          },
+          adapter: {} as ProviderInstance["adapter"],
+          textGeneration: {} as ProviderInstance["textGeneration"],
+        };
+      });
+      const scope = yield* Scope.make();
+      yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
+      const runtimeServices = yield* Layer.build(
+        ProviderRegistryLive.pipe(
+          Layer.provideMerge(
+            Layer.succeed(ProviderInstanceRegistry, {
+              getInstance: (instanceId) =>
+                Effect.succeed(instances.find((instance) => instance.instanceId === instanceId)),
+              listInstances: Effect.succeed(instances),
+              listUnavailable: Effect.succeed([]),
+              streamChanges: Stream.empty,
+              subscribeChanges: Effect.flatMap(PubSub.unbounded<void>(), PubSub.subscribe),
+            }),
+          ),
+          Layer.provideMerge(
+            ServerConfig.layerTest(process.cwd(), { prefix: "ryco-provider-background-" }),
+          ),
+          Layer.provideMerge(NodeServices.layer),
+        ),
+      ).pipe(Scope.provide(scope));
+
+      yield* Effect.gen(function* () {
+        const registry = yield* ProviderRegistry;
+        const pass = yield* registry.revalidateStale.pipe(Effect.forkChild);
+        // A second client during the pass joins it instead of starting another.
+        const joined = yield* registry.revalidateStale.pipe(Effect.forkChild);
+        yield* TestClock.adjust("2 seconds");
+        for (let attempt = 0; attempt < 20; attempt++) yield* Effect.yieldNow;
+        assert.strictEqual(yield* Ref.get(active), 2);
+        assert.strictEqual(yield* Ref.get(started), 2);
+        yield* Deferred.succeed(release, undefined);
+        yield* Fiber.join(pass);
+        yield* Fiber.join(joined);
+        assert.strictEqual(yield* Ref.get(maxActive), 2);
+        assert.strictEqual(yield* Ref.get(started), 4);
+      }).pipe(Effect.provide(runtimeServices));
+    }),
   );
 });

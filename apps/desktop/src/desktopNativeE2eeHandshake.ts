@@ -4,12 +4,12 @@ import {
   type NativeE2eeEnrollmentState,
   type NativeE2eeTrustResolution,
   type ResolveNativeE2eeTrustInput,
-} from "@ryco/client-runtime/authorization";
-import {
-  type RelayE2eeInitiatorAttempt,
-  type RelayE2eeNativeHandshakeStartInput,
-  type RelayE2eeNativeHandshakeStartResult,
-} from "@ryco/client-runtime/relay";
+} from "@ryco/client-runtime/authorization/e2ee";
+import type {
+  RelayE2eeInitiatorAttempt,
+  RelayE2eeNativeHandshakeStartInput,
+  RelayE2eeNativeHandshakeStartResult,
+} from "@ryco/client-runtime/relay/e2ee";
 import {
   verifyNodeE2eeCapabilityStatement,
   type NodeE2eeVerifiedPin,

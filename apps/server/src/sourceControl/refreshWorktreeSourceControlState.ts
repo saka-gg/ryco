@@ -1,3 +1,6 @@
+import { stat } from "node:fs/promises";
+import path from "node:path";
+
 import { DateTime, Effect, Option } from "effect";
 import {
   CommandId,
@@ -12,6 +15,7 @@ import {
   selectCurrentPullRequestLink,
 } from "@ryco/shared/worktreePullRequests";
 
+import { logOnceEvery } from "../logOnceEvery.ts";
 import { resolvePullRequestTerminalAt } from "../orchestration/pullRequestTerminalAt.ts";
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionWorktreeRepository } from "../persistence/Services/ProjectionWorktrees.ts";
@@ -44,6 +48,26 @@ export interface RefreshWorktreeSourceControlStateInput {
    * close time.
    */
   readonly actedOnPullRequestNumber?: number | undefined;
+  /**
+   * How often links and the linked issue may be re-read from the forge for
+   * this workspace (default 0: every call). Project-wide sweeps pass their
+   * discovery interval so list polls do not re-read every link each time.
+   */
+  readonly linkRefreshIntervalMs?: number | undefined;
+  /**
+   * Pull request states the caller already holds for this repository (the
+   * list it just fetched, the repository's index). An open link they still
+   * report open with the same draft flag needs no forge call; anything else
+   * is re-read.
+   */
+  readonly knownPullRequestStates?:
+    | ((cwd: string) => Effect.Effect<ReadonlyMap<number, KnownPullRequestState>>)
+    | undefined;
+}
+
+export interface KnownPullRequestState {
+  readonly state: PullRequestState;
+  readonly isDraft: boolean | null;
 }
 
 /**
@@ -54,14 +78,28 @@ export interface RefreshWorktreeSourceControlStateInput {
 export const WORKTREE_PULL_REQUEST_DISCOVERY_INTERVAL_MS = 60_000;
 export const WORKTREE_PULL_REQUEST_SWEEP_DISCOVERY_INTERVAL_MS = 5 * 60_000;
 const lastDiscoveryAtByWorktree = new Map<string, number>();
+const lastLinkRefreshAtByWorktree = new Map<string, number>();
+/** Workspaces already recorded as missing on disk by this process. */
+const recordedMissingCheckouts = new Set<string>();
 
 export function resetWorktreePullRequestDiscoveryForTests(): void {
   lastDiscoveryAtByWorktree.clear();
+  lastLinkRefreshAtByWorktree.clear();
+  recordedMissingCheckouts.clear();
+}
+
+function intervalDue(
+  lastAtByWorktree: Map<string, number>,
+  worktreeId: string,
+  nowMs: number,
+  intervalMs: number,
+): boolean {
+  const lastMs = lastAtByWorktree.get(worktreeId);
+  return lastMs === undefined || nowMs - lastMs >= intervalMs;
 }
 
 function discoveryDue(worktreeId: string, nowMs: number, intervalMs: number): boolean {
-  const lastMs = lastDiscoveryAtByWorktree.get(worktreeId);
-  return lastMs === undefined || nowMs - lastMs >= intervalMs;
+  return intervalDue(lastDiscoveryAtByWorktree, worktreeId, nowMs, intervalMs);
 }
 
 function claimDiscovery(worktreeId: string, nowMs: number, intervalMs: number): boolean {
@@ -69,6 +107,24 @@ function claimDiscovery(worktreeId: string, nowMs: number, intervalMs: number): 
   lastDiscoveryAtByWorktree.set(worktreeId, nowMs);
   return true;
 }
+
+/**
+ * Whether a checkout directory is gone while its parent is there. A missing
+ * parent (an unmounted volume, a removed root) is left alone: that is an
+ * availability condition, not evidence the checkout was deleted.
+ */
+const checkoutMissingOnDisk = (checkoutPath: string) =>
+  Effect.promise(async () => {
+    const missing = await stat(checkoutPath).then(
+      () => false,
+      (cause: NodeJS.ErrnoException) => cause.code === "ENOENT",
+    );
+    if (!missing) return false;
+    return stat(path.dirname(checkoutPath)).then(
+      (parent) => parent.isDirectory(),
+      () => false,
+    );
+  });
 
 /**
  * Brings a workspace's pull request links and linked issue up to date: every
@@ -90,18 +146,65 @@ export const refreshWorktreeSourceControlState = Effect.fn("refreshWorktreeSourc
     const discoveryIntervalMs =
       input.discoveryIntervalMs ?? WORKTREE_PULL_REQUEST_DISCOVERY_INTERVAL_MS;
     const canDiscover = input.discoverPullRequest !== undefined && existing.origin !== "main";
-    // Nothing linked and no discovery due: no forge call at all.
+    const nowMs = Date.now();
+    const linkRefreshDue = intervalDue(
+      lastLinkRefreshAtByWorktree,
+      existing.worktreeId,
+      nowMs,
+      input.linkRefreshIntervalMs ?? 0,
+    );
+    const hasLinkedState = links.length > 0 || existing.issueNumber !== null;
+    // Nothing linked (or not due) and no discovery due: no forge call at all.
     if (
-      links.length === 0 &&
-      existing.issueNumber === null &&
-      !(canDiscover && discoveryDue(existing.worktreeId, Date.now(), discoveryIntervalMs))
+      !(hasLinkedState && linkRefreshDue) &&
+      !(canDiscover && discoveryDue(existing.worktreeId, nowMs, discoveryIntervalMs))
     ) {
       return;
     }
 
     const registry = yield* SourceControlProviderRegistry;
     const cwd = existing.worktreePath;
-    const provider = yield* registry.resolve({ cwd });
+    const engine = yield* OrchestrationEngineService;
+    const provider = yield* registry.resolve({ cwd }).pipe(
+      Effect.catch((error) =>
+        Effect.gen(function* () {
+          if (existing.origin === "main" || !(yield* checkoutMissingOnDisk(cwd))) {
+            return yield* Effect.fail(error);
+          }
+          // Deleted outside Ryco: record it once, so it is no longer shown as
+          // live or refreshed (and re-failing) on every source-control read.
+          if (!recordedMissingCheckouts.has(existing.worktreeId)) {
+            recordedMissingCheckouts.add(existing.worktreeId);
+            yield* engine
+              .dispatch({
+                type: "worktree.checkout.remove",
+                commandId: CommandId.make(`server:missing-checkout:${crypto.randomUUID()}`),
+                worktreeId: existing.worktreeId,
+                reason: "missing",
+                removedAt: new Date().toISOString(),
+              })
+              .pipe(
+                Effect.tap(() =>
+                  Effect.logInfo("Recorded a workspace checkout missing on disk", {
+                    worktreeId: existing.worktreeId,
+                    path: cwd,
+                  }),
+                ),
+                Effect.catchCause((cause) =>
+                  Effect.logDebug("Could not record a missing workspace checkout", { cause }),
+                ),
+              );
+          }
+          return null;
+        }),
+      ),
+    );
+    if (provider === null) return;
+    if (linkRefreshDue) lastLinkRefreshAtByWorktree.set(existing.worktreeId, nowMs);
+    const knownStates =
+      linkRefreshDue && input.knownPullRequestStates
+        ? yield* input.knownPullRequestStates(cwd)
+        : new Map<number, KnownPullRequestState>();
     // One timestamp for both the event time and the first-observation fallback.
     const observedAt = new Date().toISOString();
 
@@ -113,18 +216,33 @@ export const refreshWorktreeSourceControlState = Effect.fn("refreshWorktreeSourc
           reportedTerminalAt: pr.terminalAt ? DateTime.formatIso(pr.terminalAt) : null,
         })),
         Effect.catch((cause) =>
-          Effect.logWarning("Failed to refresh PR state", { cause, number }).pipe(Effect.as(null)),
+          logOnceEvery({
+            key: `sourceControl.pullRequestState:${cwd}#${number}`,
+            message: "Failed to refresh PR state",
+            fields: { number },
+            cause,
+          }).pipe(Effect.as(null)),
         ),
       );
 
     const upserts: WorktreePullRequestLinkUpsert[] = [];
     const current = selectCurrentPullRequestLink(links);
-    for (const link of links) {
+    for (const link of linkRefreshDue ? links : []) {
       if (link.dismissedAt) continue;
       // Earlier finished pull requests are history; the current one is always
       // re-read (it can reopen, and the forge's close time corrects ours).
       const finished = link.state === "merged" || link.state === "closed";
       if (finished && link.number !== current?.number) continue;
+      // Still open and unchanged in what the caller knows: nothing to re-read.
+      const known = knownStates.get(link.number);
+      if (
+        link.state === "open" &&
+        known?.state === "open" &&
+        known.isDraft !== null &&
+        known.isDraft === link.isDraft
+      ) {
+        continue;
+      }
       const pr = yield* readPullRequestState(link.number);
       if (pr === null) continue;
       const terminalAt = resolvePullRequestTerminalAt({
@@ -155,15 +273,15 @@ export const refreshWorktreeSourceControlState = Effect.fn("refreshWorktreeSourc
       input.discoverPullRequest &&
       claimDiscovery(existing.worktreeId, Date.now(), discoveryIntervalMs)
     ) {
-      const found = yield* input
-        .discoverPullRequest(cwd)
-        .pipe(
-          Effect.catch((cause) =>
-            Effect.logWarning("Failed to discover the checkout's pull request", { cause }).pipe(
-              Effect.as(null),
-            ),
-          ),
-        );
+      const found = yield* input.discoverPullRequest(cwd).pipe(
+        Effect.catch((cause) =>
+          logOnceEvery({
+            key: `sourceControl.discoverPullRequest:${cwd}`,
+            message: "Failed to discover the checkout's pull request",
+            cause,
+          }).pipe(Effect.as(null)),
+        ),
+      );
       // Known numbers (dismissed ones included) are never re-linked here.
       if (found && !links.some((link) => link.number === found.number)) {
         const pr = yield* readPullRequestState(found.number);
@@ -204,14 +322,16 @@ export const refreshWorktreeSourceControlState = Effect.fn("refreshWorktreeSourc
     }
 
     let nextIssueState: IssueState | null = existing.issueState ?? null;
-    if (existing.issueNumber !== null) {
-      const issue = yield* provider
-        .getIssueState({ number: existing.issueNumber, cwd })
-        .pipe(
-          Effect.catch((cause) =>
-            Effect.logWarning("Failed to refresh issue state", { cause }).pipe(Effect.as(null)),
-          ),
-        );
+    if (existing.issueNumber !== null && linkRefreshDue) {
+      const issue = yield* provider.getIssueState({ number: existing.issueNumber, cwd }).pipe(
+        Effect.catch((cause) =>
+          logOnceEvery({
+            key: `sourceControl.issueState:${cwd}#${existing.issueNumber}`,
+            message: "Failed to refresh issue state",
+            cause,
+          }).pipe(Effect.as(null)),
+        ),
+      );
       if (issue !== null) {
         nextIssueState = issue.state;
       }
@@ -219,7 +339,6 @@ export const refreshWorktreeSourceControlState = Effect.fn("refreshWorktreeSourc
     const issueChanged = nextIssueState !== (existing.issueState ?? null);
     if (upserts.length === 0 && !issueChanged) return;
 
-    const engine = yield* OrchestrationEngineService;
     yield* engine.dispatch({
       type: "worktree.pull-requests.update",
       commandId: CommandId.make(`server:refresh-sc-state:${crypto.randomUUID()}`),

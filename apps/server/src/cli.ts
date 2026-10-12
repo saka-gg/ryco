@@ -55,7 +55,11 @@ import {
   type ServerConfigShape,
   type StartupPresentation,
 } from "./config.ts";
-import { readBootstrapEnvelope } from "./bootstrap.ts";
+import {
+  applyBootstrapShellEnvironment,
+  BootstrapEnvelopeUnavailableError,
+  readBootstrapEnvelope,
+} from "./bootstrap.ts";
 import {
   E2eeAuthorizationChangeView,
   E2eeClientListingView,
@@ -104,22 +108,7 @@ import {
 } from "./cliSetup/setupFlow.ts";
 import { cliCommandPrefix, dim, isInteractiveTerminal } from "./cliSetup/ui.ts";
 import packageJson from "../package.json" with { type: "json" };
-import {
-  CliRemoteError,
-  cliRemotesPath,
-  connectCliRemote,
-  findCliRemote,
-  pairCliRemote,
-  readCliRemotes,
-  writeCliRemotes,
-} from "./cliRemote/remotes.ts";
-import { formatRemoteThreads, loadRemoteShell, sendToRemoteThread } from "./cliRemote/threads.ts";
-import {
-  approveOwnEnrollment,
-  createCliHubAccount,
-  describeAccountLinkFailure,
-  startPasswordSignIn,
-} from "./hubConnector/cliAccountLink.ts";
+import type { CliRemoteError } from "./cliRemote/remotes.ts";
 import { resolveStandbyHubConnectorConfig } from "./hubConnector/HubConnectorStandby.ts";
 import {
   nodeServiceLabel,
@@ -193,6 +182,13 @@ const BootstrapEnvelopeSchema = Schema.Struct({
   hubE2eePolicy: Schema.optional(Schema.String),
   otlpTracesUrl: Schema.optional(Schema.String),
   otlpMetricsUrl: Schema.optional(Schema.String),
+  /**
+   * Desktop only: the login-shell environment (PATH, SSH_AUTH_SOCK,
+   * HOMEBREW_*, XDG_*, FNM_*), so a backend spawned before the desktop had a
+   * shell-environment cache still finds the user's tools. Merged into
+   * `process.env` before any layer is built; unknown names are ignored.
+   */
+  shellEnvironment: Schema.optional(Schema.Record(Schema.String, Schema.String)),
 });
 
 const modeFlag = Flag.Literals("mode", RuntimeMode.literals).pipe(
@@ -502,7 +498,14 @@ export const resolveServerConfig = (
       bootstrapFd !== undefined
         ? yield* readBootstrapEnvelope(BootstrapEnvelopeSchema, bootstrapFd)
         : Option.none();
+    if (bootstrapFd !== undefined && Option.isNone(bootstrapEnvelope)) {
+      return yield* new BootstrapEnvelopeUnavailableError({
+        fd: bootstrapFd,
+        message: `No bootstrap envelope arrived on fd ${bootstrapFd}; the process that started this server is gone or stalled.`,
+      });
+    }
     const bootstrap = Option.getOrUndefined(bootstrapEnvelope);
+    applyBootstrapShellEnvironment(bootstrap?.shellEnvironment);
     if (bootstrap?.mode === "desktop" && bootstrap.desktopTelemetryFd === 4) {
       initializeDesktopResourceTelemetry(bootstrap.desktopTelemetryFd);
     }
@@ -1857,11 +1860,20 @@ class HubLoginError extends Data.TaggedError("HubLoginError")<{
   readonly cause?: unknown;
 }> {}
 
-const hubLoginStep = <A>(run: () => Promise<A>) =>
-  Effect.tryPromise({
-    try: run,
-    catch: (cause) => new HubLoginError({ message: describeAccountLinkFailure(cause), cause }),
-  });
+// The Hub account client (client-runtime authorization and relay) loads only
+// for `ryco hub login` and setup, never on the `serve` path.
+const loadCliAccountLink = Effect.promise(() => import("./hubConnector/cliAccountLink.ts"));
+
+const hubLoginStep = <A>(
+  run: (accountLink: typeof import("./hubConnector/cliAccountLink.ts")) => Promise<A>,
+) =>
+  Effect.flatMap(loadCliAccountLink, (accountLink) =>
+    Effect.tryPromise({
+      try: () => run(accountLink),
+      catch: (cause) =>
+        new HubLoginError({ message: accountLink.describeAccountLinkFailure(cause), cause }),
+    }),
+  );
 
 /** Poll the local connector until it reports `online`, for up to a minute. */
 const waitForHubOnline = (flags: CliAuthLocationFlags) =>
@@ -1912,8 +1924,10 @@ const runHubLoginFlow = (
       ? input.username.value
       : yield* Prompt.run(Prompt.String({ message: "Ryco username" }));
     const password = yield* Prompt.run(Prompt.Password({ message: "Password" }));
-    const account = yield* hubLoginStep(() => createCliHubAccount(hubOrigin));
-    const signIn = yield* hubLoginStep(() =>
+    const account = yield* hubLoginStep(({ createCliHubAccount }) =>
+      createCliHubAccount(hubOrigin),
+    );
+    const signIn = yield* hubLoginStep(({ startPasswordSignIn }) =>
       startPasswordSignIn(account, { username, password: Redacted.value(password) }),
     );
     const code = yield* Prompt.run(
@@ -1943,7 +1957,9 @@ const runHubLoginFlow = (
       yield* Console.log(
         `Approving "${ceremony.label}" (${ceremony.fingerprint}) on ${hubOrigin}…`,
       );
-      yield* hubLoginStep(() => approveOwnEnrollment(account.api, ceremony));
+      yield* hubLoginStep(({ approveOwnEnrollment }) =>
+        approveOwnEnrollment(account.api, ceremony),
+      );
     }).pipe(
       // The account session only ever exists to approve this node.
       Effect.ensuring(Effect.promise(() => account.api.signOut().catch(() => undefined))),
@@ -3563,27 +3579,40 @@ const serviceCommand = Command.make("service").pipe(
 
 const remoteLocationFlags = { baseDir: baseDirFlag } as const;
 
+// The remote client (client-runtime connection, RPC client and its stores)
+// loads only for `ryco remote`, never on the `serve` path.
+const loadCliRemote = Effect.promise(async () => {
+  const [remotes, threads] = await Promise.all([
+    import("./cliRemote/remotes.ts"),
+    import("./cliRemote/threads.ts"),
+  ]);
+  return { ...remotes, ...threads };
+});
+
 const remotesFilePath = (baseDir: Option.Option<string>) =>
   Effect.gen(function* () {
     const logLevel = yield* GlobalFlag.LogLevel;
     const config = yield* resolveCliAuthConfig({ baseDir }, logLevel);
+    const { cliRemotesPath } = yield* loadCliRemote;
     return cliRemotesPath(config.stateDir);
   });
 
-const remoteStep = <A>(run: () => Promise<A>) =>
-  Effect.tryPromise({
-    try: run,
-    catch: (cause) =>
-      cause instanceof CliRemoteError
-        ? cause
-        : new CliRemoteError({
-            message:
-              cause instanceof Error && cause.message.length > 0
-                ? cause.message
-                : "The remote could not be reached.",
-            cause,
-          }),
-  });
+const remoteStep = <A>(run: () => Promise<A>): Effect.Effect<A, CliRemoteError> =>
+  Effect.flatMap(loadCliRemote, (remoteModule) =>
+    Effect.tryPromise({
+      try: run,
+      catch: (cause) =>
+        cause instanceof remoteModule.CliRemoteError
+          ? cause
+          : new remoteModule.CliRemoteError({
+              message:
+                cause instanceof Error && cause.message.length > 0
+                  ? cause.message
+                  : "The remote could not be reached.",
+              cause,
+            }),
+    }),
+  );
 
 const remoteNameArgument = Argument.String("name").pipe(
   Argument.withDescription("The name you gave the remote with `ryco remote add`."),
@@ -3612,6 +3641,7 @@ const remoteAddCommand = Command.make("add", {
               return Buffer.concat(chunks).toString("utf8");
             })).trim()
           : flags.pairingUrl;
+      const { pairCliRemote, readCliRemotes, writeCliRemotes } = yield* loadCliRemote;
       const remote = yield* remoteStep(() => pairCliRemote({ name: flags.name, pairingUrl }));
       const existing = yield* remoteStep(() => readCliRemotes(filePath));
       yield* remoteStep(() =>
@@ -3632,6 +3662,7 @@ const remoteListCommand = Command.make("list", { ...remoteLocationFlags, json: j
   Command.withHandler((flags) =>
     Effect.gen(function* () {
       const filePath = yield* remotesFilePath(flags.baseDir);
+      const { readCliRemotes } = yield* loadCliRemote;
       const remotes = yield* remoteStep(() => readCliRemotes(filePath));
       if (flags.json) {
         yield* Console.log(JSON.stringify(remotes.map(({ token: _token, ...remote }) => remote)));
@@ -3661,6 +3692,7 @@ const remoteRemoveCommand = Command.make("remove", {
   Command.withHandler((flags) =>
     Effect.gen(function* () {
       const filePath = yield* remotesFilePath(flags.baseDir);
+      const { findCliRemote, readCliRemotes, writeCliRemotes } = yield* loadCliRemote;
       const remotes = yield* remoteStep(() => readCliRemotes(filePath));
       yield* Effect.try({
         try: () => findCliRemote(remotes, flags.name),
@@ -3680,6 +3712,7 @@ const remoteRemoveCommand = Command.make("remove", {
 const loadRemote = (baseDir: Option.Option<string>, name: string) =>
   Effect.gen(function* () {
     const filePath = yield* remotesFilePath(baseDir);
+    const { findCliRemote, readCliRemotes } = yield* loadCliRemote;
     const remotes = yield* remoteStep(() => readCliRemotes(filePath));
     return yield* Effect.try({
       try: () => findCliRemote(remotes, name),
@@ -3698,6 +3731,7 @@ const remoteThreadsCommand = Command.make("threads", {
     Effect.scoped(
       Effect.gen(function* () {
         const remote = yield* loadRemote(flags.baseDir, flags.name);
+        const { connectCliRemote, formatRemoteThreads, loadRemoteShell } = yield* loadCliRemote;
         const client = yield* connectCliRemote(remote);
         const snapshot = yield* loadRemoteShell(client);
         if (flags.json) {
@@ -3734,6 +3768,8 @@ const remoteSendCommand = Command.make("send", {
     Effect.scoped(
       Effect.gen(function* () {
         const remote = yield* loadRemote(flags.baseDir, flags.name);
+        const remoteModule = yield* loadCliRemote;
+        const { connectCliRemote, sendToRemoteThread } = remoteModule;
         const client = yield* connectCliRemote(remote);
         const wait = Option.getOrElse(flags.wait, () => true);
         const text = flags.message.join(" ");
@@ -3744,7 +3780,9 @@ const remoteSendCommand = Command.make("send", {
         });
         if (wait) process.stdout.write("\n");
         if (error) {
-          return yield* new CliRemoteError({ message: `The turn ended with an error: ${error}` });
+          return yield* new remoteModule.CliRemoteError({
+            message: `The turn ended with an error: ${error}`,
+          });
         }
         if (!wait) yield* Console.log("Sent.\n");
       }),

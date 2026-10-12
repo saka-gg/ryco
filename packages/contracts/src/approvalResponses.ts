@@ -1,4 +1,4 @@
-import { Schema } from "effect";
+import * as Schema from "effect/Schema";
 import { EventId, RuntimeSessionId } from "./baseSchemas.ts";
 
 /** Identifies the callback the user actually saw, rather than only its provider-local id. */

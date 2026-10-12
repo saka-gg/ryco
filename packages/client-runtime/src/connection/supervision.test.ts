@@ -2,6 +2,7 @@ import type { EnvironmentId, ThreadId } from "@ryco/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import type { ResumableSubscriptionOptions } from "../rpc/wsRpcClient.ts";
+import type { SubscriptionFailureKind } from "../rpc/wsTransport.ts";
 import type { EnvironmentConnection } from "./connection.ts";
 import {
   createEnvironmentConnectionSupervisor,
@@ -16,11 +17,21 @@ type Record = { readonly environmentId: EnvironmentId; readonly lastConnectedAt?
 const remote = "env-remote" as EnvironmentId;
 
 function makeSupervisor(
-  connect: (record: Record, isCancelled: () => boolean) => Promise<EnvironmentConnection>,
+  connect: (
+    record: Record,
+    isCancelled: () => boolean,
+    signal: AbortSignal,
+  ) => Promise<EnvironmentConnection>,
   overrides: {
     readonly isHostedMode?: boolean;
     readonly records?: ReadonlyArray<Record>;
     readonly isSavedEnvironmentAwaitingRepair?: (environmentId: EnvironmentId) => boolean;
+    readonly isThreadDetailSubscriptionNonIdle?: (
+      environmentId: EnvironmentId,
+      threadId: ThreadId,
+    ) => boolean;
+    readonly stateSink?: unknown;
+    readonly scheduleShellFrame?: (callback: () => void) => void;
   } = {},
 ) {
   let resume: ((reason: string) => void) | null = null;
@@ -30,7 +41,7 @@ function makeSupervisor(
     syncThreadDetailSnapshot: () => undefined,
     syncThreadWindowSnapshot: () => undefined,
     applyThreadDetailEvent: () => undefined,
-    isThreadDetailSubscriptionNonIdle: () => true,
+    isThreadDetailSubscriptionNonIdle: overrides.isThreadDetailSubscriptionNonIdle ?? (() => true),
     now: () => Date.now(),
     setTimeout: (callback: () => void, delayMs: number) => setTimeout(callback, delayMs),
     clearTimeout: (timeoutId: ReturnType<typeof setTimeout>) => clearTimeout(timeoutId),
@@ -46,8 +57,8 @@ function makeSupervisor(
         registryListener = null;
       };
     },
-    connectSavedEnvironment: (record: Record, isCancelled: () => boolean) =>
-      connect(record, isCancelled),
+    connectSavedEnvironment: (record: Record, isCancelled: () => boolean, signal: AbortSignal) =>
+      connect(record, isCancelled, signal),
     isSavedEnvironmentAwaitingRepair: overrides.isSavedEnvironmentAwaitingRepair,
     disconnectSavedEnvironment: () => Promise.resolve(),
     waitForPrimaryShellSnapshotApplied: () => Promise.resolve(),
@@ -57,13 +68,14 @@ function makeSupervisor(
         resume = null;
       };
     },
-    stateSink: {
-      prepareShellEvent: () => undefined,
-      applyShellEvent: () => undefined,
+    stateSink: overrides.stateSink ?? {
+      applyShellEvents: (_environmentId: EnvironmentId, events: ReadonlyArray<unknown>) =>
+        events.map(() => undefined),
       afterShellEventApplied: () => undefined,
       syncServerShellSnapshot: () => undefined,
       reconcileSnapshotDerivedState: () => undefined,
     },
+    ...(overrides.scheduleShellFrame ? { scheduleShellFrame: overrides.scheduleShellFrame } : {}),
     onShellSnapshotReceived: () => undefined,
     onShellSnapshotCurrent: () => undefined,
     onShellSnapshotApplied: () => undefined,
@@ -219,46 +231,98 @@ describe("saved environment retry", () => {
     await vi.advanceTimersByTimeAsync(SAVED_ENVIRONMENT_CONNECT_TIMEOUT_MS);
     expect(attempts.get(reachable)).toBe(1);
 
-    // The stalled environments stay on the retry schedule, and the retry joins
-    // the attempt still running rather than racing a second one beside it.
+    // The stalled attempts were given up: the retry starts a fresh one rather
+    // than joining the hung attempt forever.
     await vi.advanceTimersByTimeAsync(5_000);
-    expect(attempts.get(hungA)).toBe(1);
-    expect(attempts.get(hungB)).toBe(1);
+    expect(attempts.get(hungA)).toBe(2);
+    expect(attempts.get(hungB)).toBe(2);
 
     const connectionA = connectionFor({ environmentId: hungA });
     settle.get(hungA)?.(connectionA);
     await vi.advanceTimersByTimeAsync(0);
-    expect(attempts.get(hungA)).toBe(1);
+    expect(attempts.get(hungA)).toBe(2);
     stop();
   });
 
-  it("keeps a Connect that joined a slow attempt when the slot gives up on it", async () => {
-    let settle: ((connection: EnvironmentConnection) => void) | null = null;
-    let cancelledWhenSettled: boolean | null = null;
-    const { supervisor } = makeSupervisor(
-      (_record, isCancelled) =>
-        new Promise<EnvironmentConnection>((resolve) => {
-          settle = (connection) => {
-            cancelledWhenSettled = isCancelled();
-            resolve(connection);
-          };
-        }),
-    );
+  it("gives a slow attempt up for everyone that joined it and aborts its requests", async () => {
+    let attempts = 0;
+    let firstSignal: AbortSignal | null = null;
+    let firstIsCancelled: (() => boolean) | null = null;
+    const { supervisor } = makeSupervisor((_record, isCancelled, signal) => {
+      attempts += 1;
+      if (attempts === 1) {
+        firstSignal = signal;
+        firstIsCancelled = isCancelled;
+      }
+      return new Promise<EnvironmentConnection>(() => undefined);
+    });
     const stop = supervisor.start();
     await vi.advanceTimersByTimeAsync(0);
-    expect(settle).not.toBeNull();
+    expect(attempts).toBe(1);
 
     // The user presses Connect (or pairs again) while the supervisor's attempt
     // is still waiting; both share the one pending connect.
     const joined = supervisor.ensureSavedEnvironmentConnection({ environmentId: remote }, () =>
       Promise.reject(new Error("a joined Connect never starts its own attempt")),
     );
+    const joinedOutcome = expect(joined).rejects.toThrow("did not connect in time");
     await vi.advanceTimersByTimeAsync(SAVED_ENVIRONMENT_CONNECT_TIMEOUT_MS);
 
+    await joinedOutcome;
+    expect(firstSignal!.aborted).toBe(true);
+    expect(firstIsCancelled!()).toBe(true);
+
+    // The next Connect starts a fresh attempt instead of joining the hung one.
+    void supervisor
+      .ensureSavedEnvironmentConnection(
+        { environmentId: remote },
+        (isCancelled, signal) =>
+          new Promise<EnvironmentConnection>(() => {
+            expect(isCancelled()).toBe(false);
+            expect(signal.aborted).toBe(false);
+            attempts += 1;
+          }),
+      )
+      .catch(() => undefined);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(attempts).toBe(2);
+    stop();
+  });
+
+  it("never gives up an attempt that replaced the one its slot was waiting on", async () => {
+    let supervisorAttempts = 0;
+    const { supervisor } = makeSupervisor(() => {
+      supervisorAttempts += 1;
+      return new Promise<EnvironmentConnection>(() => undefined);
+    });
+    const stop = supervisor.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(supervisorAttempts).toBe(1);
+
+    // A disconnect cancels the slot's attempt, and pairing again starts another.
+    supervisor.cancelPendingSavedEnvironmentConnection(remote);
+    let pairingSignal: AbortSignal | null = null;
+    let pairingIsCancelled: (() => boolean) | null = null;
+    let finishPairing: (connection: EnvironmentConnection) => void = () => undefined;
+    const pairing = supervisor.ensureSavedEnvironmentConnection(
+      { environmentId: remote },
+      (isCancelled, signal) => {
+        pairingSignal = signal;
+        pairingIsCancelled = isCancelled;
+        return new Promise<EnvironmentConnection>((resolve) => {
+          finishPairing = resolve;
+        });
+      },
+    );
+    await vi.advanceTimersByTimeAsync(0);
+
+    // The old slot runs out; the pairing's attempt keeps going.
+    await vi.advanceTimersByTimeAsync(SAVED_ENVIRONMENT_CONNECT_TIMEOUT_MS);
+    expect(pairingSignal!.aborted).toBe(false);
+    expect(pairingIsCancelled!()).toBe(false);
     const connection = connectionFor({ environmentId: remote });
-    settle!(connection);
-    await expect(joined).resolves.toBe(connection);
-    expect(cancelledWhenSettled).toBe(false);
+    finishPairing(connection);
+    await expect(pairing).resolves.toBe(connection);
     stop();
   });
 
@@ -394,6 +458,7 @@ describe("thread subscription before the thread exists", () => {
       { kind: "thread-upserted", sequence: 3, thread: { id: "thread-draft" } } as never,
       remote,
     );
+    supervisor.flushShellEvents();
     expect(subscribed).toEqual(["thread-existing", "thread-draft"]);
   });
 
@@ -404,5 +469,354 @@ describe("thread subscription before the thread exists", () => {
 
     supervisor.retainThreadDetailSubscription(remote, "thread-1" as ThreadId);
     expect(subscribed).toEqual(["thread-1"]);
+  });
+});
+
+describe("thread window failures", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function windowConnection() {
+    const windows: Array<{
+      readonly limits: { readonly messages: number; readonly activities: number };
+      /** Fails the window the way the transport does: classified, never the raw error. */
+      readonly onError: ((error: unknown) => void) | undefined;
+    }> = [];
+    let legacySubscriptions = 0;
+    const connection = {
+      kind: "saved",
+      environmentId: remote,
+      knownEnvironment: { source: "manual" },
+      client: {
+        orchestration: {
+          subscribeThread: () => {
+            legacySubscriptions += 1;
+            return () => undefined;
+          },
+          subscribeThreadWindow: (
+            input: { readonly limits: { readonly messages: number; readonly activities: number } },
+            _next: unknown,
+            options?: {
+              readonly onError?: (kind?: SubscriptionFailureKind) => void;
+              readonly classifyFailure?: (error: unknown) => SubscriptionFailureKind;
+            },
+          ) => {
+            windows.push({
+              limits: input.limits,
+              onError: (error) => options?.onError?.(options.classifyFailure?.(error)),
+            });
+            return () => undefined;
+          },
+        },
+      },
+    } as unknown as EnvironmentConnection;
+    return { connection, windows, legacySubscriptions: () => legacySubscriptions };
+  }
+
+  const openThread = () => {
+    const { supervisor } = makeSupervisor(async (record) => connectionFor(record));
+    const thread = windowConnection();
+    supervisor.register(thread.connection);
+    supervisor.retainThreadDetailSubscription(remote, "thread-1" as ThreadId);
+    return thread;
+  };
+
+  it("falls back to the full legacy stream only for a server without bounded windows", () => {
+    const thread = openThread();
+    thread.windows[0]!.onError?.("Unknown request tag: orchestration.subscribeThreadWindow");
+    expect(thread.legacySubscriptions()).toBe(1);
+  });
+
+  it("asks for a smaller window when the response does not fit the connection", () => {
+    const thread = openThread();
+    thread.windows[0]!.onError?.(
+      new Error("The response exceeded the largest message this connection can carry."),
+    );
+
+    expect(thread.legacySubscriptions()).toBe(0);
+    expect(thread.windows).toHaveLength(2);
+    expect(thread.windows[1]!.limits).toMatchObject({ messages: 75, activities: 75 });
+  });
+
+  it("retries a window the server failed to load instead of loading the whole thread", async () => {
+    const thread = openThread();
+    thread.windows[0]!.onError?.(new Error("Failed to load bounded history for thread thread-1"));
+
+    expect(thread.legacySubscriptions()).toBe(0);
+    expect(thread.windows).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(thread.windows).toHaveLength(2);
+    expect(thread.windows[1]!.limits).toMatchObject({ messages: 150, activities: 150 });
+  });
+});
+
+describe("thread detail cache accounting", () => {
+  function streamingConnection() {
+    const listeners = new Map<string, (item: unknown) => void>();
+    const unsubscribed: string[] = [];
+    const connection = {
+      kind: "saved",
+      environmentId: remote,
+      knownEnvironment: { source: "manual" },
+      client: {
+        orchestration: {
+          subscribeThread: () => () => undefined,
+          subscribeThreadWindow: (
+            input: { readonly threadId: string },
+            next: (item: unknown) => void,
+          ) => {
+            listeners.set(input.threadId, next);
+            return () => {
+              unsubscribed.push(input.threadId);
+            };
+          },
+        },
+      },
+    } as unknown as EnvironmentConnection;
+    return { connection, listeners, unsubscribed };
+  }
+
+  const activityEvent = (sequence: number, activityId: string, bytes: number) => ({
+    kind: "event",
+    event: {
+      sequence,
+      type: "thread.activity-appended",
+      payload: { activity: { id: activityId, payload: { output: "x".repeat(bytes) } } },
+    },
+  });
+
+  it("keeps an idle cached thread while a pinned thread streams far past the byte budget", async () => {
+    const { supervisor } = makeSupervisor(async (record) => connectionFor(record), {
+      isThreadDetailSubscriptionNonIdle: (_environmentId, threadId) => threadId === "thread-hot",
+    });
+    const threads = streamingConnection();
+    supervisor.register(threads.connection);
+    supervisor.retainThreadDetailSubscription(remote, "thread-hot" as ThreadId);
+    const releaseIdle = supervisor.retainThreadDetailSubscription(
+      remote,
+      "thread-idle" as ThreadId,
+    );
+    threads.listeners.get("thread-idle")?.({
+      kind: "snapshot",
+      snapshot: { snapshotSequence: 1, thread: { padding: "x".repeat(200_000) }, history: {} },
+    });
+    releaseIdle();
+
+    // ~20 MiB of new tool output on the thread the user is watching.
+    for (let index = 0; index < 200; index += 1) {
+      threads.listeners.get("thread-hot")?.(activityEvent(index + 2, `tool-${index}`, 100_000));
+    }
+    await Promise.resolve();
+
+    expect(threads.unsubscribed).not.toContain("thread-idle");
+  });
+
+  it("counts an activity updated in place once, not once per update", async () => {
+    const { supervisor } = makeSupervisor(async (record) => connectionFor(record), {
+      isThreadDetailSubscriptionNonIdle: () => false,
+    });
+    const threads = streamingConnection();
+    supervisor.register(threads.connection);
+    // Two idle cached threads; the older is evicted only if the newer's
+    // estimate grows past the 12 MiB budget.
+    const releaseOlder = supervisor.retainThreadDetailSubscription(
+      remote,
+      "thread-older" as ThreadId,
+    );
+    threads.listeners.get("thread-older")?.({
+      kind: "snapshot",
+      snapshot: { snapshotSequence: 1, thread: { padding: "x".repeat(1_000_000) }, history: {} },
+    });
+    releaseOlder();
+    const releaseNewer = supervisor.retainThreadDetailSubscription(
+      remote,
+      "thread-newer" as ThreadId,
+    );
+    // A 100 KB progress row re-sent 200 times holds 100 KB, not 20 MB.
+    for (let index = 0; index < 200; index += 1) {
+      threads.listeners.get("thread-newer")?.(activityEvent(index + 2, "progress", 100_000));
+    }
+    await Promise.resolve();
+    releaseNewer();
+
+    expect(threads.unsubscribed).toEqual([]);
+  });
+});
+
+describe("shell frame batching", () => {
+  function recordingSink() {
+    const calls: string[] = [];
+    let applied = 0;
+    const sink = {
+      applyShellEvents: (_environmentId: EnvironmentId, events: ReadonlyArray<any>) => {
+        calls.push(
+          `commit:${events.map((event) => (event.kind === "thread-priorities" ? "priorities" : event.sequence)).join(",")}`,
+        );
+        return events.map((event) => {
+          applied += 1;
+          return `context:${event.kind === "thread-priorities" ? "priorities" : event.sequence}`;
+        });
+      },
+      afterShellEventApplied: (_environmentId: EnvironmentId, event: any, context: unknown) => {
+        // After-hooks run once the whole batch is committed.
+        calls.push(`after:${event.sequence}:${String(context)}:applied=${applied}`);
+      },
+      syncServerShellSnapshot: (_environmentId: EnvironmentId, snapshot: any) => {
+        calls.push(`snapshot:${snapshot.snapshotSequence}`);
+      },
+      reconcileSnapshotDerivedState: () => undefined,
+    };
+    return { sink, calls };
+  }
+
+  const upsert = (sequence: number, threadId = "thread-1") =>
+    ({ kind: "thread-upserted", sequence, thread: { id: threadId } }) as never;
+  const shellSnapshot = (snapshotSequence: number) =>
+    ({
+      snapshotSequence,
+      updatedAt: `2026-10-12T00:00:0${snapshotSequence % 10}.000Z`,
+      projects: [],
+      worktrees: [],
+      threads: [{ id: "thread-1" }],
+    }) as never;
+
+  it("commits a frame's shell items once, then runs the after-hooks against the applied state", () => {
+    const { sink, calls } = recordingSink();
+    const frames: Array<() => void> = [];
+    const { supervisor } = makeSupervisor(async (record) => connectionFor(record), {
+      stateSink: sink,
+      scheduleShellFrame: (callback) => frames.push(callback),
+    });
+
+    supervisor.applyShellEvent(upsert(1), remote);
+    supervisor.applyShellEvent(upsert(2), remote);
+    supervisor.applyThreadPriorities({ kind: "thread-priorities", priorities: [] }, remote);
+    supervisor.applyShellEvent(upsert(3), remote);
+    expect(calls).toEqual([]);
+
+    frames.splice(0).forEach((frame) => frame());
+    expect(calls).toEqual([
+      "commit:1,2,priorities,3",
+      "after:1:context:1:applied=4",
+      "after:2:context:2:applied=4",
+      "after:3:context:3:applied=4",
+    ]);
+  });
+
+  it("drops events the projection already holds but always applies a ranking", () => {
+    const { sink, calls } = recordingSink();
+    const { supervisor } = makeSupervisor(async (record) => connectionFor(record), {
+      stateSink: sink,
+      scheduleShellFrame: () => undefined,
+    });
+    supervisor.syncShellSnapshot(shellSnapshot(5), remote);
+    calls.length = 0;
+
+    supervisor.applyShellEvent(upsert(4), remote);
+    supervisor.applyThreadPriorities({ kind: "thread-priorities", priorities: [] }, remote);
+    supervisor.applyShellEvent(upsert(6), remote);
+    supervisor.flushShellEvents();
+
+    expect(calls).toEqual(["commit:priorities,6", "after:6:context:6:applied=2"]);
+  });
+
+  it("applies buffered items before a snapshot, a projection reset or a resume read", () => {
+    const { sink, calls } = recordingSink();
+    const { supervisor } = makeSupervisor(async (record) => connectionFor(record), {
+      stateSink: sink,
+      scheduleShellFrame: () => undefined,
+    });
+
+    supervisor.applyShellEvent(upsert(1), remote);
+    supervisor.syncShellSnapshot(shellSnapshot(2), remote);
+    expect(calls.slice(0, 3)).toEqual(["commit:1", "after:1:context:1:applied=1", "snapshot:2"]);
+
+    supervisor.applyShellEvent(upsert(3), remote);
+    expect(supervisor.readShellProjectionSequence(remote)).toBe(3);
+
+    calls.length = 0;
+    supervisor.applyShellEvent(upsert(4), remote);
+    supervisor.resetShellProjection(remote);
+    expect(calls[0]).toBe("commit:4");
+    expect(supervisor.readShellProjectionSequence(remote)).toBeNull();
+  });
+});
+
+describe("thread history recovery mode", () => {
+  function historyConnection() {
+    const subscriptions: Array<{
+      readonly mode: () => string | undefined;
+    }> = [];
+    const modeChanges: Array<{ readonly threadId: string; readonly mode: string }> = [];
+    const connection = {
+      kind: "saved",
+      environmentId: remote,
+      knownEnvironment: { source: "manual" },
+      client: {
+        orchestration: {
+          subscribeThread: () => () => undefined,
+          subscribeThreadWindow: (
+            _input: unknown,
+            _next: unknown,
+            options?: { readonly historyRecovery?: () => string },
+          ) => {
+            subscriptions.push({ mode: () => options?.historyRecovery?.() });
+            return () => undefined;
+          },
+          setThreadHistoryRecovery: async (input: { threadId: string; mode: string }) => {
+            modeChanges.push(input);
+            return {};
+          },
+        },
+      },
+    } as unknown as EnvironmentConnection;
+    return { connection, subscriptions, modeChanges };
+  }
+
+  it("opens a prewarm passive and a view active", () => {
+    const { supervisor } = makeSupervisor(async (record) => connectionFor(record));
+    const history = historyConnection();
+    supervisor.register(history.connection);
+
+    supervisor.retainThreadDetailSubscription(remote, "thread-prewarm" as ThreadId);
+    supervisor.retainThreadDetailSubscription(remote, "thread-view" as ThreadId, { view: true });
+
+    expect(history.subscriptions.map((subscription) => subscription.mode())).toEqual([
+      "passive",
+      "active",
+    ]);
+    expect(history.modeChanges).toEqual([]);
+  });
+
+  it("turns a running prewarm active while a view holds it, and passive once it leaves", () => {
+    const { supervisor } = makeSupervisor(async (record) => connectionFor(record));
+    const history = historyConnection();
+    supervisor.register(history.connection);
+    const thread = "thread-1" as ThreadId;
+
+    const releasePrewarm = supervisor.retainThreadDetailSubscription(remote, thread);
+    const releaseView = supervisor.retainThreadDetailSubscription(remote, thread, { view: true });
+    // A second view does not announce again.
+    const releaseSecondView = supervisor.retainThreadDetailSubscription(remote, thread, {
+      view: true,
+    });
+    expect(history.modeChanges).toEqual([{ threadId: thread, mode: "active" }]);
+    // A replacement subscription (a reconnect) asks with the current mode.
+    expect(history.subscriptions[0]!.mode()).toBe("active");
+
+    releaseView();
+    expect(history.modeChanges).toHaveLength(1);
+    releaseSecondView();
+    expect(history.modeChanges).toEqual([
+      { threadId: thread, mode: "active" },
+      { threadId: thread, mode: "passive" },
+    ]);
+    expect(history.subscriptions[0]!.mode()).toBe("passive");
+    releasePrewarm();
   });
 });

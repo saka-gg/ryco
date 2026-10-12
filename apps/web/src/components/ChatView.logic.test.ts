@@ -26,6 +26,8 @@ import {
   resolveSendEnvMode,
   resolveChatSendWorktreePlan,
   shouldShowNewThreadSurface,
+  isServerThreadHistoryPending,
+  createThreadSubmitGuard,
   buildChatSendTitleSeed,
   shouldWriteThreadErrorToCurrentServerThread,
   selectionAllowedAtSendBoundary,
@@ -1083,6 +1085,7 @@ describe("shouldShowNewThreadSurface", () => {
     optimisticMessageCount: 0,
     timelineEntryCount: 0,
     presentationTier: "desktop",
+    historyPending: false,
   };
 
   it("shows on an empty desktop thread", () => {
@@ -1109,5 +1112,66 @@ describe("shouldShowNewThreadSurface", () => {
 
   it("hides on the frozen web phone tier", () => {
     expect(shouldShowNewThreadSurface({ ...base, presentationTier: "phone" })).toBe(false);
+  });
+
+  it("hides while an existing thread's history is still loading", () => {
+    expect(shouldShowNewThreadSurface({ ...base, historyPending: true })).toBe(false);
+  });
+});
+
+describe("isServerThreadHistoryPending", () => {
+  const base = {
+    isServerThread: true,
+    detailLoaded: false,
+    messageCount: 0,
+    hasLatestTurn: true,
+    latestUserMessageAt: "2026-10-01T00:00:00.000Z",
+  };
+
+  it("is pending for a started thread whose history has not arrived", () => {
+    expect(isServerThreadHistoryPending(base)).toBe(true);
+    expect(isServerThreadHistoryPending({ ...base, hasLatestTurn: false })).toBe(true);
+    expect(isServerThreadHistoryPending({ ...base, latestUserMessageAt: null })).toBe(true);
+  });
+
+  it("is not pending for a thread that never started", () => {
+    expect(
+      isServerThreadHistoryPending({ ...base, hasLatestTurn: false, latestUserMessageAt: null }),
+    ).toBe(false);
+  });
+
+  it("is not pending once history is loaded or messages are at hand", () => {
+    expect(isServerThreadHistoryPending({ ...base, detailLoaded: true })).toBe(false);
+    expect(isServerThreadHistoryPending({ ...base, messageCount: 3 })).toBe(false);
+  });
+
+  it("never applies to drafts", () => {
+    expect(isServerThreadHistoryPending({ ...base, isServerThread: false })).toBe(false);
+  });
+});
+
+describe("createThreadSubmitGuard", () => {
+  it("drops a second submit of a thread while its first is in flight", async () => {
+    const guard = createThreadSubmitGuard();
+    let finish!: () => void;
+    const first = vi.fn(() => new Promise<void>((resolve) => (finish = resolve)));
+    const second = vi.fn(async () => undefined);
+
+    expect(guard.run("thread-a", first)).toBe(true);
+    expect(guard.run("thread-a", second)).toBe(false);
+    expect(second).not.toHaveBeenCalled();
+
+    finish();
+    await vi.waitFor(() => expect(guard.run("thread-a", second)).toBe(true));
+    expect(second).toHaveBeenCalledTimes(1);
+  });
+
+  it("lets another thread submit while one thread's send is in flight", () => {
+    const guard = createThreadSubmitGuard();
+    const other = vi.fn(async () => undefined);
+    guard.run("thread-a", () => new Promise<void>(() => undefined));
+
+    expect(guard.run("thread-b", other)).toBe(true);
+    expect(other).toHaveBeenCalledTimes(1);
   });
 });

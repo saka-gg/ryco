@@ -10,6 +10,7 @@ import { Effect, Ref } from "effect";
 import {
   makeOrchestrationEventCoalescer,
   orchestrationProgressFrameKey,
+  orchestrationShellFrameKey,
 } from "./orchestrationEventCoalescing.ts";
 
 const threadId = ThreadId.make("thread-coalesce");
@@ -256,4 +257,55 @@ describe("orchestrationEventCoalescing", () => {
     };
     assert.equal(orchestrationProgressFrameKey(streamingMessage), null);
   });
+  it.effect("collapses a thread's activity and message bursts for the shell, latest wins", () =>
+    Effect.gen(function* () {
+      const offered: OrchestrationEvent[] = [];
+      const coalescer = yield* makeOrchestrationEventCoalescer({
+        offer: (event) =>
+          Effect.sync(() => {
+            offered.push(event);
+          }),
+        windowMs: Number.MAX_SAFE_INTEGER,
+        keyOf: orchestrationShellFrameKey,
+      });
+      const toolActivity: OrchestrationEvent = {
+        ...makeEventBase(2, "event-tool-completed-2"),
+        type: "thread.activity-appended",
+        payload: {
+          threadId,
+          activity: {
+            id: EventId.make("tool-completed-1"),
+            tone: "info",
+            kind: "tool.completed",
+            summary: "Ran a command",
+            payload: {},
+            turnId: null,
+            createdAt: "2026-04-05T00:00:00.000Z",
+          },
+        },
+      };
+      yield* coalescer.push(makeTaskProgressEvent(1, "task", "a"));
+      yield* coalescer.push(toolActivity);
+      yield* coalescer.push(makeTaskProgressEvent(3, "task", "c"));
+      // A structural thread event flushes what is held first, in order.
+      yield* coalescer.push(makeThreadDeletedEvent(4));
+
+      assert.deepEqual(
+        offered.map((event) => event.sequence),
+        [3, 4],
+      );
+      assert.isNull(orchestrationShellFrameKey(makeThreadDeletedEvent(5)));
+      assert.isNotNull(orchestrationShellFrameKey(toolActivity));
+      // Plan upserts only change the re-read row too: one key per thread.
+      const planUpsert = {
+        ...makeEventBase(6, "event-plan-6"),
+        type: "thread.proposed-plan-upserted",
+        payload: { threadId, proposedPlan: { id: "plan-1" } },
+      } as unknown as OrchestrationEvent;
+      assert.equal(
+        orchestrationShellFrameKey(planUpsert),
+        orchestrationShellFrameKey(toolActivity),
+      );
+    }),
+  );
 });

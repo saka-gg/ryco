@@ -3,12 +3,14 @@ import os from "node:os";
 import path from "node:path";
 
 import { assert, describe, it } from "@effect/vitest";
-import { Effect, Schema } from "effect";
+import { Cause, Effect, Layer, Logger, References, Schema } from "effect";
 import { DiagnosticsSnapshot } from "@ryco/contracts";
 import { vi } from "vite-plus/test";
 
 import type { ServerConfigShape } from "../../config.ts";
 import type { EffectTraceRecord, TraceRecord } from "../../observability/TraceRecord.ts";
+import { formatProviderEventLogLine } from "../../provider/providerEventLogRecords.ts";
+import { makeServerLogFileLogger } from "../../serverLogger.ts";
 import { makeDiagnosticsService, redactDiagnosticValue } from "./Diagnostics.ts";
 
 const makeTraceRecord = (): EffectTraceRecord => ({
@@ -235,20 +237,151 @@ describe("Diagnostics", () => {
       try {
         const config = makeDiagnosticsConfig(tempDir);
         fs.unlinkSync(config.serverLogPath);
-        fs.unlinkSync(config.providerEventLogPath);
+        fs.rmSync(config.providerLogsDir, { recursive: true, force: true });
         const diagnostics = yield* makeDiagnosticsService(config);
         const snapshot = yield* diagnostics.getSnapshot({ providers: [], terminals: [] });
         assert.equal(
           snapshot.warnings.some((warning) => warning.code === "diagnostics.log-tail-unavailable"),
           false,
         );
-        fs.mkdirSync(config.providerEventLogPath);
+        fs.mkdirSync(config.serverLogPath);
         const unreadable = yield* makeDiagnosticsService(config);
         const partial = yield* unreadable.getSnapshot({ providers: [], terminals: [] });
         assert.equal(
           partial.warnings.some((warning) => warning.code === "diagnostics.log-tail-unavailable"),
           true,
         );
+      } finally {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  it.effect("reports provider failures from the newest canonical thread logs", () =>
+    Effect.gen(function* () {
+      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ryco-diag-"));
+      try {
+        const config = makeDiagnosticsConfig(tempDir);
+        const at = Date.parse("2026-10-12T08:00:00.000Z");
+        const canonical = (record: unknown, offsetMs = 0) =>
+          formatProviderEventLogLine("CANON", at + offsetMs, JSON.stringify(record));
+        fs.writeFileSync(
+          path.join(config.providerLogsDir, "thread-a.log"),
+          [
+            canonical({
+              type: "content.delta",
+              eventId: "evt-delta",
+              payload: { streamKind: "command_output", delta: "error: not a failure" },
+            }),
+            canonical(
+              {
+                type: "turn.completed",
+                eventId: "evt-turn",
+                provider: "codex",
+                threadId: "thread-a",
+                payload: { state: "failed", errorMessage: "model overloaded" },
+              },
+              1_000,
+            ),
+            canonical(
+              {
+                type: "runtime.error",
+                eventId: "evt-error",
+                provider: "claudeAgent",
+                payload: { message: "auth failed with Bearer private-value" },
+              },
+              2_000,
+            ),
+            canonical({ type: "turn.completed", payload: { state: "completed" } }, 3_000),
+          ].join(""),
+        );
+        fs.writeFileSync(
+          path.join(config.providerLogsDir, "thread-a.native.log"),
+          formatProviderEventLogLine("NTIVE", at, JSON.stringify({ method: "error" })),
+        );
+        fs.writeFileSync(
+          path.join(config.providerLogsDir, "thread-b.log.1"),
+          canonical({ type: "runtime.error", payload: { message: "rotated away" } }),
+        );
+
+        const diagnostics = yield* makeDiagnosticsService(config);
+        const snapshot = yield* diagnostics.getSnapshot({ providers: [], terminals: [] });
+        const providerFailures = snapshot.failures.latest.filter(
+          (failure) => failure.source === "provider-events",
+        );
+
+        assert.deepEqual(
+          providerFailures.map((failure) => [failure.id, failure.category, failure.occurredAt]),
+          [
+            ["provider:evt-error", "provider", "2026-10-12T08:00:02.000Z"],
+            ["provider:evt-turn", "provider", "2026-10-12T08:00:01.000Z"],
+          ],
+        );
+        assert.equal(providerFailures[1]?.message, "model overloaded");
+        assert.equal(JSON.stringify(snapshot).includes("private-value"), false);
+        assert.equal(JSON.stringify(snapshot).includes("rotated away"), false);
+        assert.equal(JSON.stringify(snapshot).includes("not a failure"), false);
+        Schema.decodeUnknownSync(DiagnosticsSnapshot)(snapshot);
+      } finally {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  it.live("reports server failures from the backend's own logfmt log", () =>
+    Effect.gen(function* () {
+      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ryco-diag-"));
+      try {
+        const config = makeDiagnosticsConfig(tempDir);
+        fs.rmSync(config.serverLogPath);
+        yield* Effect.gen(function* () {
+          yield* Effect.logInfo("Listening on http://127.0.0.1:3773");
+          yield* Effect.logWarning("Failed to refresh PR state", { number: 12 });
+          yield* Effect.sleep("20 millis");
+          yield* Effect.logWarning("Failed to refresh PR state", { number: 12 });
+          yield* Effect.logWarning(
+            "Failed to discover the checkout's pull request",
+            Cause.fail(new Error("gh: not logged in")),
+          );
+          yield* Effect.logError("relay failed", { authorization: "Bearer private-value" });
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(
+              Logger.layer([makeServerLogFileLogger({ filePath: config.serverLogPath })], {
+                mergeWithExisting: false,
+              }),
+              Layer.succeed(References.MinimumLogLevel, "Info"),
+            ),
+          ),
+        );
+
+        const diagnostics = yield* makeDiagnosticsService(config);
+        const snapshot = yield* diagnostics.getSnapshot({ providers: [], terminals: [] });
+        const serverFailures = snapshot.failures.latest.filter(
+          (failure) => failure.source === "server.log",
+        );
+
+        assert.equal(serverFailures.length, 4);
+        // The time and fiber are not part of a failure's identity: repeats
+        // group together and distinct failures stay apart.
+        assert.equal(new Set(serverFailures.map((failure) => failure.signature)).size, 3);
+        assert.equal(
+          snapshot.failures.common.find((group) => group.source === "server.log")?.count,
+          2,
+        );
+        const refresh = serverFailures.find((failure) =>
+          failure.message.startsWith('level=WARN message="Failed to refresh PR state"'),
+        );
+        assert.notEqual(refresh, undefined);
+        assert.include(
+          (refresh!.raw as { line: string }).line,
+          `timestamp=${refresh!.occurredAt} level=WARN`,
+        );
+        for (const failure of serverFailures) {
+          assert.notMatch(failure.message, /timestamp=|fiber=/);
+        }
+        assert.equal(JSON.stringify(snapshot).includes("private-value"), false);
+        Schema.decodeUnknownSync(DiagnosticsSnapshot)(snapshot);
       } finally {
         fs.rmSync(tempDir, { recursive: true, force: true });
       }

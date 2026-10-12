@@ -28,6 +28,8 @@ import {
   isErroredWorkEntry,
   isTimelineScrolledToEnd,
   normalizeCompactToolLabel,
+  pinTimelineToEnd,
+  TIMELINE_END_PIN_MAX_PASSES,
   resolveAssistantMessageCopyState,
   resolveTimelineMinimapHasPersistentGutter,
   resolveTimelineMinimapHeightStyle,
@@ -35,6 +37,8 @@ import {
   resolveTimelineMinimapIndexFromPointer,
   resolveTimelineMinimapInteractiveWidth,
   resolveTimelineMinimapTopPercent,
+  timelineRowItemType,
+  type MessagesTimelineRow,
   type TimelineStableState,
   type TimelineStreamingState,
 } from "./MessagesTimeline.logic";
@@ -211,6 +215,18 @@ describe("timeline minimap", () => {
   });
 });
 
+describe("timelineRowItemType", () => {
+  it("separates user and assistant messages from compact rows", () => {
+    const message = (role: "user" | "assistant") =>
+      ({ kind: "message", id: role, message: { role } }) as unknown as MessagesTimelineRow;
+    expect(timelineRowItemType(message("user"))).toBe("message:user");
+    expect(timelineRowItemType(message("assistant"))).toBe("message:assistant");
+    expect(timelineRowItemType({ kind: "working", id: "working", createdAt: null })).toBe(
+      "working",
+    );
+  });
+});
+
 describe("isTimelineScrolledToEnd", () => {
   it("counts a transcript that cannot scroll as being at the end", () => {
     expect(isTimelineScrolledToEnd({ scrollTop: 0, scrollHeight: 400, clientHeight: 800 })).toBe(
@@ -250,6 +266,69 @@ describe("isTimelineScrolledToEnd", () => {
     expect(
       isTimelineScrolledToEnd({ scrollTop: Number.NaN, scrollHeight: 2000, clientHeight: 800 }),
     ).toBe(true);
+  });
+});
+
+describe("pinTimelineToEnd", () => {
+  /**
+   * A scroller whose end moves while a scroll is in flight: each `scrollToEnd`
+   * lands on the end of the content laid out when it ran, then the content
+   * grows by the next queued amount before the list reports the scroll done.
+   */
+  function createGrowingList(growthPerScroll: ReadonlyArray<number>) {
+    const metrics = { scrollTop: 0, scrollHeight: 3200, clientHeight: 1100 };
+    const growth = [...growthPerScroll];
+    const scrollToEnd = vi.fn(async (_options: { readonly animated: boolean }) => {
+      metrics.scrollTop = metrics.scrollHeight - metrics.clientHeight;
+      metrics.scrollHeight += growth.shift() ?? 0;
+    });
+    return { metrics, scrollToEnd, target: { scrollToEnd, readScrollMetrics: () => metrics } };
+  }
+
+  it("scrolls again when content grew while the scroll was in flight", async () => {
+    // 119px of growth would leave the transcript past the pin threshold.
+    const list = createGrowingList([119, 0]);
+
+    await pinTimelineToEnd(list.target, { animated: false, shouldContinue: () => true });
+
+    expect(list.scrollToEnd).toHaveBeenCalledTimes(2);
+    expect(list.metrics.scrollHeight - list.metrics.clientHeight - list.metrics.scrollTop).toBe(0);
+  });
+
+  it("plays the requested animation once and jumps for corrections", async () => {
+    const list = createGrowingList([40, 0]);
+
+    await pinTimelineToEnd(list.target, { animated: true, shouldContinue: () => true });
+
+    expect(list.scrollToEnd.mock.calls.map(([options]) => options.animated)).toEqual([true, false]);
+  });
+
+  it("stops correcting once the pin no longer applies", async () => {
+    const list = createGrowingList([119, 119]);
+
+    // The user navigated away (or a newer pin took over) during the first scroll.
+    await pinTimelineToEnd(list.target, { animated: false, shouldContinue: () => false });
+
+    expect(list.scrollToEnd).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops once the list is gone", async () => {
+    const scrollToEnd = vi.fn();
+
+    await pinTimelineToEnd(
+      { scrollToEnd, readScrollMetrics: () => null },
+      { animated: false, shouldContinue: () => true },
+    );
+
+    expect(scrollToEnd).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves a transcript that never stops growing to the list's live follow", async () => {
+    const list = createGrowingList(Array.from({ length: 20 }, () => 200));
+
+    await pinTimelineToEnd(list.target, { animated: false, shouldContinue: () => true });
+
+    expect(list.scrollToEnd).toHaveBeenCalledTimes(TIMELINE_END_PIN_MAX_PASSES);
   });
 });
 

@@ -165,6 +165,20 @@ export function resolveBranchSelectionTarget(input: {
   };
 }
 
+/**
+ * The branch a ref switch left checked out: a remote ref checks out a local
+ * tracking branch, whose name the server reports (falling back to the derived
+ * local name); a local ref is the branch itself.
+ */
+export function resolveSwitchedRefName(input: {
+  refName: Pick<VcsRef, "isRemote">;
+  selectedBranchName: string;
+  checkedOutRefName: string | null | undefined;
+}): string {
+  if (!input.refName.isRemote) return input.selectedBranchName;
+  return input.checkedOutRefName ?? input.selectedBranchName;
+}
+
 export function shouldIncludeBranchPickerItem(input: {
   itemValue: string;
   normalizedQuery: string;

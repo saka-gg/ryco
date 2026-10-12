@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 import { useEffect } from "react";
 import { HostedHubRoot } from "../components/hostedHub/HostedHubRoot";
+import { preloadHostedRootAppShell } from "../components/hostedHub/hostedRootAppShell";
 import { installHostedNodeHistory, resetHostedNodeRoutesForTests } from "../hostedHub/nodeRoutes";
 
 const mountedShell = vi.hoisted(() => ({ count: 0 }));
@@ -64,6 +65,65 @@ describe("hosted conversation cold start", () => {
     await vi.waitFor(async () => expect(await vault.account(owner.id, false)).toBeNull());
     await vi.waitFor(() => expect(readHostedReadCache().accountId).toBe("new-account"));
     expect(await vault.read(owner, "old-environment")).toBeNull();
+    await setHostedReadCacheEnabled(false);
+    hostedHubController.resetForTests();
+  });
+  it("re-encrypts nothing when hosted store patches change nothing the cache holds", async () => {
+    hostedHubController.resetForTests();
+    await setHostedReadCacheEnabled(true);
+    const vault = getHostedReadVault();
+    const write = vi.spyOn(vault, "write");
+    const node = {
+      id: "node_bbbbbbbbbbbbbbbbbbbbbb",
+      environmentId: EnvironmentId.make("env_bbbbbbbbbbbbbbbbbbbbbb"),
+      label: "Quiet Mac",
+      platformOs: "darwin" as const,
+      platformArch: "arm64" as const,
+      clientVersion: "1",
+      createdAt: 1,
+      updatedAt: 1,
+      lastAuthenticatedAt: 1,
+      revokedAt: null,
+      revocationReasonCode: null,
+      grant: { id: "grant", role: "operator" as const },
+      effectiveRole: "operator" as const,
+      presence: { online: true, lastHeartbeatAt: 1 },
+    };
+    await bootstrapWithHostedReadCache(async () => {
+      hostedHubStore.setState({
+        accountStatus: "authenticated",
+        account: {
+          id: "quiet-account",
+          displayName: "Quiet account",
+          role: "operator",
+          createdAt: 1,
+          disabledAt: null,
+        },
+        nodes: [node],
+        directoryStatus: "ready",
+      });
+    });
+    await vi.waitFor(() =>
+      expect(write.mock.calls.filter((call) => call[1] === "catalog")).toHaveLength(1),
+    );
+    const published = readHostedReadCache();
+    // A connect's worth of lifecycle patches: nothing in the catalog changes.
+    for (const transportStatus of ["requesting-ticket", "connecting", "online"] as const) {
+      hostedHubStore.setState({ transportStatus });
+    }
+    hostedHubStore.setState({ nodes: [{ ...node }] });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(write.mock.calls.filter((call) => call[1] === "catalog")).toHaveLength(1);
+    expect(readHostedReadCache()).toBe(published);
+    // A renamed node is a real change: published and written once.
+    hostedHubStore.setState({ nodes: [{ ...node, label: "Renamed Mac" }] });
+    await vi.waitFor(() =>
+      expect(write.mock.calls.filter((call) => call[1] === "catalog")).toHaveLength(2),
+    );
+    expect(readHostedReadCache().nodes[0]?.label).toBe("Renamed Mac");
+    write.mockRestore();
+    hostedHubStore.setState({ accountStatus: "signing-out" });
+    await vi.waitFor(() => expect(readHostedReadCache().accountId).toBeNull());
     await setHostedReadCacheEnabled(false);
     hostedHubController.resetForTests();
   });
@@ -154,6 +214,9 @@ describe("hosted conversation cold start", () => {
       `/node/node_aaaaaaaaaaaaaaaaaaaaaa/${environmentId}/${threadId}`,
     );
     installHostedNodeHistory();
+    // The boot gate preloads the workspace shell whenever a preview can show,
+    // so the cached route renders on the root's first pass.
+    await preloadHostedRootAppShell();
     const view = await render(<HostedHubRoot />);
     expect(document.querySelector('[data-testid="read-shell"]')?.getAttribute("data-mode")).toBe(
       "hosted-cached",

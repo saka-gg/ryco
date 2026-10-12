@@ -2,7 +2,10 @@ import { reportPreviewNavigationBlocked } from "../previewNavigation";
 import { parsePreviewRouteSearch } from "../previewRouteSearch";
 import { useEffect } from "react";
 import { useBlocker } from "@tanstack/react-router";
-import { flushPreviewFiles, hasUnsavedPreviewFiles } from "./previewFileSessions";
+// The light registry, not ./previewFileSessions: this guard mounts on every
+// route, and the editor session, environment API and coordinator load with the
+// preview panel instead of the boot graph.
+import { flushPreviewFiles, hasUnsavedPreviewFiles } from "./previewFileSessionRegistry";
 import { toastManager } from "./ui/toast";
 
 /** Mounted above panels so a remount cannot remove draft protection. */

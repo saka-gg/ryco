@@ -30,15 +30,6 @@ function registerListener<T>(listeners: Set<(event: T) => void>, listener: (even
   };
 }
 
-function createDeferredPromise<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((nextResolve) => {
-    resolve = nextResolve;
-  });
-
-  return { promise, resolve };
-}
-
 const lifecycleListeners = new Set<(event: ServerLifecycleStreamEvent) => void>();
 const configListeners = new Set<(event: ServerConfigStreamEvent) => void>();
 
@@ -150,20 +141,21 @@ describe("serverState", () => {
     expect(getLegacyServerKeybindings()).toEqual(DEFAULT_RESOLVED_KEYBINDINGS);
   });
 
-  it("bootstraps the server config snapshot and replays it to late subscribers", async () => {
-    serverApi.getConfig.mockResolvedValueOnce(baseServerConfig);
-
+  it("takes the config snapshot from the subscription alone and replays it to late subscribers", async () => {
     const configListener = vi.fn();
     const stop = startServerStateSync(serverApi);
     const unsubscribe = onServerConfigUpdated(configListener);
 
+    emitServerConfigEvent({ version: 1, type: "snapshot", config: baseServerConfig });
     await waitFor(() => {
       expect(getServerConfig()).toEqual(baseServerConfig);
     });
 
     expect(serverApi.subscribeConfig).toHaveBeenCalledOnce();
     expect(serverApi.subscribeLifecycle).toHaveBeenCalledOnce();
-    expect(serverApi.getConfig).toHaveBeenCalledOnce();
+    // The subscription's first item is the snapshot; a parallel read would
+    // fetch the same config twice on every connect.
+    expect(serverApi.getConfig).not.toHaveBeenCalled();
     expect(configListener).toHaveBeenCalledWith(
       {
         issues: [],
@@ -189,35 +181,7 @@ describe("serverState", () => {
     stop();
   });
 
-  it("keeps the streamed snapshot when it arrives before the fallback fetch resolves", async () => {
-    const deferred = createDeferredPromise<ServerConfig>();
-    serverApi.getConfig.mockReturnValueOnce(deferred.promise);
-    const stop = startServerStateSync(serverApi);
-
-    const streamedConfig: ServerConfig = {
-      ...baseServerConfig,
-      cwd: "/tmp/from-stream",
-    };
-
-    emitServerConfigEvent({
-      version: 1,
-      type: "snapshot",
-      config: streamedConfig,
-    });
-
-    await waitFor(() => {
-      expect(getServerConfig()).toEqual(streamedConfig);
-    });
-
-    deferred.resolve(baseServerConfig);
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    expect(getServerConfig()).toEqual(streamedConfig);
-    stop();
-  });
-
   it("replays welcome events to late subscribers", async () => {
-    serverApi.getConfig.mockResolvedValueOnce(baseServerConfig);
     const stop = startServerStateSync(serverApi);
 
     const listener = vi.fn();
@@ -260,13 +224,13 @@ describe("serverState", () => {
   });
 
   it("merges provider, settings, and keybinding updates into the cached config", async () => {
-    serverApi.getConfig.mockResolvedValueOnce(baseServerConfig);
     const configListener = vi.fn();
     const providersListener = vi.fn();
     const stop = startServerStateSync(serverApi);
     const unsubscribeConfig = onServerConfigUpdated(configListener);
     const unsubscribeProviders = onProvidersUpdated(providersListener);
 
+    emitServerConfigEvent({ version: 1, type: "snapshot", config: baseServerConfig });
     await waitFor(() => {
       expect(getServerConfig()).toEqual(baseServerConfig);
     });

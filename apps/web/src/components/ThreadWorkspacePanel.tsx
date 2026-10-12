@@ -5,7 +5,7 @@ import { LazyBrowserPanel } from "../browser/LazyBrowserPanel";
 import { useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import { scopedThreadKey, scopeProjectRef, scopeThreadRef } from "@ryco/client-runtime/scoped";
 import { type ScopedThreadRef, type ThreadId } from "@ryco/contracts";
-import { projectScriptCwd, projectScriptRuntimeEnv } from "@ryco/shared/projectScripts";
+import { projectScriptCwd } from "@ryco/shared/projectScripts";
 import {
   readWorktreePullRequestLinks,
   workspaceDiscoversPullRequests,
@@ -31,7 +31,6 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import {
-  lazy,
   Suspense,
   useCallback,
   useEffect,
@@ -39,6 +38,7 @@ import {
   useRef,
   useState,
   type KeyboardEvent,
+  type ReactNode,
 } from "react";
 
 import {
@@ -74,6 +74,7 @@ import {
 } from "../threadWorkspaceViewModel";
 import { AgentsPanel } from "./AgentsPanel";
 import { HtmlRenderPanel } from "./chat/HtmlRenderPanel";
+import { usePaneFocus } from "./chat/PaneFocus";
 import { useWorkspaceHtmlRender } from "./chat/useWorkspaceHtmlRender";
 import { useThreadChangeRequest } from "./chat/useThreadChangeRequest";
 import { KeyHint } from "./pullRequests/primitives";
@@ -108,14 +109,39 @@ import { Button } from "./ui/button";
 import { ScrollArea } from "./ui/scroll-area";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 import ChatMarkdown from "./ChatMarkdown";
-import type { DiffPanelMode } from "./DiffPanelShell";
-const DiffPanel = lazy(() => import("./DiffPanel"));
-const PreviewPanel = lazy(() => import("./PreviewPanel"));
-const ThreadTerminalDrawer = lazy(() => import("./ThreadTerminalDrawer"));
-const SimulatorPanel = lazy(() => import("./device/SimulatorPanel"));
-const WorkspacePullRequestPanel = lazy(
-  () => import("./pullRequests/workspace/WorkspacePullRequestPanel"),
-);
+import { DiffPanelLoadingState, type DiffPanelMode } from "./DiffPanelShell";
+import { prepareThreadTerminal, resolveThreadTerminalLaunch } from "../terminalPrepare";
+import type { PreloadableModule } from "../lib/preloadableLazy";
+import {
+  LazyDiffPanel as DiffPanel,
+  LazyPreviewPanel as PreviewPanel,
+  LazySimulatorPanel as SimulatorPanel,
+  LazyThreadTerminalDrawer as ThreadTerminalDrawer,
+  LazyWorkspacePullRequestPanel as WorkspacePullRequestPanel,
+  preloadWorkspacePanel,
+  useWorkspacePanelChunkReady,
+  workspacePanelLoadingLabel,
+} from "../workspacePanelPreload";
+
+/**
+ * Mounts a code-split surface once its chunk has resolved and shows the
+ * panel's loading state until then. That state is an ordinary commit rather
+ * than a Suspense fallback, whose reveal React holds for 300 ms however soon
+ * the chunk lands; a preloaded surface renders in the first pass. Give each
+ * surface its own `key` so a gate never carries readiness across surfaces.
+ */
+function WorkspaceSurfaceGate(props: {
+  chunk: PreloadableModule;
+  mode: RightPanelMode;
+  children: ReactNode;
+}) {
+  const ready = useWorkspacePanelChunkReady(props.chunk, props.mode);
+  return ready ? (
+    props.children
+  ) : (
+    <DiffPanelLoadingState label={workspacePanelLoadingLabel(props.mode)} />
+  );
+}
 
 function statusBucket(status: ThreadSubagentStatus): "idle" | "in_progress" | "review" | "done" {
   if (status === "running") return "in_progress";
@@ -457,28 +483,34 @@ function WorkspaceTerminalPanel() {
   const composerHandleRef = useComposerHandleContext();
   const [focusRequestId, setFocusRequestId] = useState(0);
   const worktreePath = serverThread?.worktreePath ?? draftThread?.worktreePath ?? null;
-  const effectiveWorktreePath = terminalLaunchContext?.worktreePath ?? worktreePath;
-  const cwd = useMemo(
+  const projectCwd = project?.cwd ?? null;
+  // The same resolver as the chat drawer: both open the same PTYs, and a
+  // different cwd or environment would make the server restart the shell.
+  const launch = useMemo(
     () =>
-      terminalLaunchContext?.cwd ??
-      (project
-        ? projectScriptCwd({
-            project: { cwd: project.cwd },
-            worktreePath: effectiveWorktreePath,
-          })
-        : null),
-    [effectiveWorktreePath, project, terminalLaunchContext?.cwd],
+      resolveThreadTerminalLaunch({
+        projectCwd,
+        threadWorktreePath: worktreePath,
+        launchContext: terminalLaunchContext,
+      }),
+    [projectCwd, terminalLaunchContext, worktreePath],
   );
-  const runtimeEnv = useMemo(
-    () =>
-      project
-        ? projectScriptRuntimeEnv({
-            project: { cwd: project.cwd },
-            worktreePath: effectiveWorktreePath,
-          })
-        : {},
-    [effectiveWorktreePath, project],
-  );
+  const activeTerminalId = terminalState.activeTerminalId;
+  const paneFocused = usePaneFocus();
+
+  // Opening the terminal tab (click, shortcut, link) starts the PTY while the
+  // xterm chunk still loads, so shell startup overlaps it. Like the viewport's
+  // own open, this waits for the pane to own focus.
+  useEffect(() => {
+    if (!paneFocused || !threadRef || !launch || ThreadTerminalDrawer.isLoaded()) return;
+    prepareThreadTerminal({
+      environmentId: threadRef.environmentId,
+      threadId: threadRef.threadId as ThreadId,
+      terminalId: activeTerminalId,
+      launch,
+      layout: "panel",
+    });
+  }, [activeTerminalId, launch, paneFocused, threadRef]);
   const terminalShortcutLabelOptions = useMemo(
     () => ({
       context: {
@@ -582,7 +614,7 @@ function WorkspaceTerminalPanel() {
     );
   }
 
-  if (!project || !cwd) {
+  if (!project || !launch) {
     return (
       <TerminalUnavailableState
         title="Terminal unavailable"
@@ -592,32 +624,34 @@ function WorkspaceTerminalPanel() {
   }
 
   return (
-    <ThreadTerminalDrawer
-      threadRef={threadRef}
-      threadId={threadRef.threadId as ThreadId}
-      cwd={cwd}
-      worktreePath={effectiveWorktreePath}
-      runtimeEnv={runtimeEnv}
-      layout="panel"
-      visible
-      height={terminalState.terminalHeight}
-      terminalIds={terminalState.terminalIds}
-      runningTerminalIds={terminalState.runningTerminalIds}
-      activeTerminalId={terminalState.activeTerminalId}
-      terminalGroups={terminalState.terminalGroups}
-      activeTerminalGroupId={terminalState.activeTerminalGroupId}
-      focusRequestId={focusRequestId}
-      onSplitTerminal={splitTerminal}
-      onNewTerminal={createNewTerminal}
-      splitShortcutLabel={splitShortcutLabel ?? undefined}
-      newShortcutLabel={newShortcutLabel ?? undefined}
-      closeShortcutLabel={closeShortcutLabel ?? undefined}
-      keybindings={keybindings}
-      onActiveTerminalChange={activateTerminal}
-      onCloseTerminal={closeTerminal}
-      onHeightChange={setTerminalHeight}
-      onAddTerminalContext={addTerminalContext}
-    />
+    <WorkspaceSurfaceGate chunk={ThreadTerminalDrawer} mode="terminal">
+      <ThreadTerminalDrawer
+        threadRef={threadRef}
+        threadId={threadRef.threadId as ThreadId}
+        cwd={launch.cwd}
+        worktreePath={launch.worktreePath}
+        runtimeEnv={launch.runtimeEnv}
+        layout="panel"
+        visible
+        height={terminalState.terminalHeight}
+        terminalIds={terminalState.terminalIds}
+        runningTerminalIds={terminalState.runningTerminalIds}
+        activeTerminalId={terminalState.activeTerminalId}
+        terminalGroups={terminalState.terminalGroups}
+        activeTerminalGroupId={terminalState.activeTerminalGroupId}
+        focusRequestId={focusRequestId}
+        onSplitTerminal={splitTerminal}
+        onNewTerminal={createNewTerminal}
+        splitShortcutLabel={splitShortcutLabel ?? undefined}
+        newShortcutLabel={newShortcutLabel ?? undefined}
+        closeShortcutLabel={closeShortcutLabel ?? undefined}
+        keybindings={keybindings}
+        onActiveTerminalChange={activateTerminal}
+        onCloseTerminal={closeTerminal}
+        onHeightChange={setTerminalHeight}
+        onAddTerminalContext={addTerminalContext}
+      />
+    </WorkspaceSurfaceGate>
   );
 }
 
@@ -630,6 +664,8 @@ function LauncherCard(props: {
   compact?: boolean;
   badgeCount?: number;
   onClick?: () => void;
+  /** Pointer or focus intent: preloads the surface the card opens. */
+  onIntent?: () => void;
 }) {
   const Icon = props.icon;
   return (
@@ -637,6 +673,8 @@ function LauncherCard(props: {
       type="button"
       disabled={props.disabled}
       onClick={props.onClick}
+      onPointerEnter={props.onIntent}
+      onFocus={props.onIntent}
       data-slot="workspace-launcher-card"
       className={cn(
         "group flex w-full flex-col items-center justify-center rounded-lg border border-border/50 bg-card/35 text-center transition-colors",
@@ -746,6 +784,7 @@ function WorkspaceLauncher(props: {
         icon={FolderIcon}
         shortcutLabel={filesShortcutLabel}
         compact={compact}
+        onIntent={() => preloadWorkspacePanel("files", { intent: true })}
         onClick={() => props.onSelectTab(filesTab)}
       />
       <LauncherCard
@@ -770,6 +809,7 @@ function WorkspaceLauncher(props: {
         icon={GitCompareIcon}
         shortcutLabel={reviewShortcutLabel}
         compact={compact}
+        onIntent={() => preloadWorkspacePanel("review", { intent: true })}
         onClick={() => props.onSelectTab(reviewTab)}
       />
       <LauncherCard
@@ -778,6 +818,7 @@ function WorkspaceLauncher(props: {
         icon={TerminalIcon}
         shortcutLabel={terminalShortcutLabel}
         compact={compact}
+        onIntent={() => preloadWorkspacePanel("terminal", { intent: true })}
         onClick={() => props.onSelectTab(terminalTab)}
       />
       {props.pullRequestNumber !== null ? (
@@ -786,6 +827,7 @@ function WorkspaceLauncher(props: {
           description={`Review #${props.pullRequestNumber} here`}
           icon={GitPullRequestIcon}
           compact={compact}
+          onIntent={() => preloadWorkspacePanel("pullRequest", { intent: true })}
           onClick={() =>
             props.onSelectTab({ key: "pullRequest", label: "Pull request", mode: "pullRequest" })
           }
@@ -798,6 +840,7 @@ function WorkspaceLauncher(props: {
           icon={SmartphoneIcon}
           shortcutLabel={simulatorShortcutLabel}
           compact={compact}
+          onIntent={() => preloadWorkspacePanel("simulator", { intent: true })}
           onClick={() => props.onSelectTab(simulatorTab)}
         />
       ) : null}
@@ -1269,6 +1312,8 @@ export default function ThreadWorkspacePanel(props: {
                     isPhoneSurface ? "pl-3 pr-1.5" : "pl-2.5 pr-1",
                   )}
                   onClick={() => selectTab(tab)}
+                  onPointerEnter={() => preloadWorkspacePanel(tab.mode, { intent: true })}
+                  onFocus={() => preloadWorkspacePanel(tab.mode, { intent: true })}
                   onKeyDown={(event) => onTabKeyDown(tab, event)}
                 >
                   <TabIcon tab={tab} active={active} />
@@ -1445,46 +1490,56 @@ export default function ThreadWorkspacePanel(props: {
         role="tabpanel"
         aria-labelledby={activeTabKey ? workspaceTabId(activeTabKey) : undefined}
       >
+        {/* A safety net only: each code-split surface below mounts behind a
+            WorkspaceSurfaceGate, so this fallback never commits for them. */}
         <Suspense
-          fallback={
-            <div role="status" className="p-4 text-sm text-muted-foreground">
-              Loading workspace…
-            </div>
-          }
+          fallback={<DiffPanelLoadingState label={workspacePanelLoadingLabel(activeMode)} />}
         >
           {activeMode === "review" ? (
-            <DiffPanel mode={props.mode} />
+            <WorkspaceSurfaceGate key="review" chunk={DiffPanel} mode="review">
+              <DiffPanel mode={props.mode} />
+            </WorkspaceSurfaceGate>
           ) : activeMode === "files" ? (
-            <PreviewPanel mode={props.mode} />
+            <WorkspaceSurfaceGate key="files" chunk={PreviewPanel} mode="files">
+              <PreviewPanel mode={props.mode} />
+            </WorkspaceSurfaceGate>
           ) : activeMode === "terminal" ? (
             <WorkspaceTerminalPanel />
           ) : activeMode === "browser" && !isPhoneSurface ? (
             <WorkspaceBrowserPanel />
           ) : activeMode === "pullRequest" && !isPhoneSurface ? (
-            <WorkspacePullRequestPanel
-              environmentId={threadChangeRequest.environmentId}
-              project={threadChangeRequest.project}
-              number={pullRequestNumber}
-              resolving={threadChangeRequest.resolving}
-              onSelectNumber={(number) =>
-                navigateSearch((previous) => buildOpenPullRequestSearch(previous, number))
-              }
-              onTogglePullRequests={
-                pullRequestSwitcherEnabled ? togglePullRequestSwitcher : undefined
-              }
-              onLinkPullRequest={
-                pullRequestEditing.ready && threadChangeRequest.links.length === 0
-                  ? openPullRequestLinkPicker
-                  : undefined
-              }
-              reveal={pullRequestReveal}
-              onRevealHandled={clearReveal}
-            />
+            <WorkspaceSurfaceGate
+              key="pullRequest"
+              chunk={WorkspacePullRequestPanel}
+              mode="pullRequest"
+            >
+              <WorkspacePullRequestPanel
+                environmentId={threadChangeRequest.environmentId}
+                project={threadChangeRequest.project}
+                number={pullRequestNumber}
+                resolving={threadChangeRequest.resolving}
+                onSelectNumber={(number) =>
+                  navigateSearch((previous) => buildOpenPullRequestSearch(previous, number))
+                }
+                onTogglePullRequests={
+                  pullRequestSwitcherEnabled ? togglePullRequestSwitcher : undefined
+                }
+                onLinkPullRequest={
+                  pullRequestEditing.ready && threadChangeRequest.links.length === 0
+                    ? openPullRequestLinkPicker
+                    : undefined
+                }
+                reveal={pullRequestReveal}
+                onRevealHandled={clearReveal}
+              />
+            </WorkspaceSurfaceGate>
           ) : activeMode === "simulator" && !isPhoneSurface ? (
-            <SimulatorPanel
-              environmentId={workspaceThreadRef?.environmentId ?? null}
-              threadId={workspaceThreadRef?.threadId ?? null}
-            />
+            <WorkspaceSurfaceGate key="simulator" chunk={SimulatorPanel} mode="simulator">
+              <SimulatorPanel
+                environmentId={workspaceThreadRef?.environmentId ?? null}
+                threadId={workspaceThreadRef?.threadId ?? null}
+              />
+            </WorkspaceSurfaceGate>
           ) : activeMode === "agents" && !isPhoneSurface ? (
             // The Agents workspace stays off the frozen phone tier; a phone
             // route that lands here falls back to the launcher.

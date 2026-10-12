@@ -1,5 +1,5 @@
-import { IconGitFork } from "@tabler/icons-react-native";
-import { useRef } from "react";
+import { IconGitFork } from "../../components/icons";
+import { useRef, type ReactNode } from "react";
 import { Modal, Pressable, ScrollView, TextInput, View } from "react-native";
 
 import type { SidebarWorktreeSummary } from "@ryco/client-runtime/state/threads";

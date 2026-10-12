@@ -4,7 +4,7 @@ import type {
   ChangeRequestTimelineItem,
   SourceControlLabel,
 } from "@ryco/contracts";
-import type { DateTime } from "effect";
+import type * as DateTime from "effect/DateTime";
 
 import { epochMillis } from "./internal.ts";
 

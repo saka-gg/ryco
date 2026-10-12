@@ -45,10 +45,14 @@ export interface OrchestrationEventStoreShape {
     limit?: number,
   ) => Stream.Stream<OrchestrationEvent, OrchestrationEventStoreError>;
 
-  /** Replay a stable range without following events appended after the captured head. */
+  /**
+   * Replay a stable range without following events appended after the captured head.
+   * `eventTypes` restricts the replay in SQL, so skipped events are never decoded.
+   */
   readonly readThroughSequence: (
     sequenceExclusive: number,
     sequenceInclusive: number,
+    options?: { readonly eventTypes?: ReadonlyArray<OrchestrationEvent["type"]> },
   ) => Stream.Stream<OrchestrationEvent, OrchestrationEventStoreError>;
 
   /** Return the current durable event-stream head, or zero when the store is empty. */
@@ -69,6 +73,52 @@ export interface OrchestrationEventStoreShape {
       readonly events: ReadonlyArray<OrchestrationEvent>;
       readonly nextSequence: number;
       readonly hasMore: boolean;
+    },
+    OrchestrationEventStoreError
+  >;
+
+  /**
+   * Read one ordered page of a single aggregate stream after the provided sequence, through the
+   * `(aggregate_kind, stream_id, sequence)` index. Resuming a thread subscription replays its own
+   * events from here instead of scanning (and decoding) pages of the global log.
+   *
+   * @returns The page, the next exclusive cursor (the last event's sequence, or the input cursor
+   * when empty), and whether more events of this stream follow.
+   */
+  readonly readStreamEventsPage: (input: {
+    readonly aggregateKind: OrchestrationEvent["aggregateKind"];
+    readonly streamId: string;
+    readonly fromSequenceExclusive: number;
+    readonly limit: number;
+  }) => Effect.Effect<
+    {
+      readonly events: ReadonlyArray<OrchestrationEvent>;
+      readonly nextSequence: number;
+      readonly hasMore: boolean;
+    },
+    OrchestrationEventStoreError
+  >;
+
+  /**
+   * Payload-free resume probe for replayable subscriptions: whether the event
+   * at `sequence` is still held, and how many events follow it — in the whole
+   * log and, optionally, in one aggregate stream — each counted only up to one
+   * past its limit. Reads the sequence key and the stream index, never
+   * `payload_json`.
+   */
+  readonly probeResume?: (input: {
+    readonly sequence: number;
+    readonly limit: number;
+    readonly stream?: {
+      readonly aggregateKind: OrchestrationEvent["aggregateKind"];
+      readonly streamId: string;
+      readonly limit: number;
+    };
+  }) => Effect.Effect<
+    {
+      readonly anchored: boolean;
+      readonly eventsAfter: number;
+      readonly streamEventsAfter: number | null;
     },
     OrchestrationEventStoreError
   >;

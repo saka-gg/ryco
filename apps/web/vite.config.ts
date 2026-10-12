@@ -8,6 +8,11 @@ import { defineConfig, type UserConfig } from "vite-plus";
 import pkg from "./package.json" with { type: "json" };
 import { ciTestReporting } from "../../scripts/lib/vitestReporting.ts";
 import { createHostedPwaBuildPlugin } from "./src/pwa/buildArtifacts";
+import { createClientModeSeamPlugin } from "./src/clientModeSeams";
+import { createBootFontPreloadPlugin } from "./src/viteBuild/bootFontPreload";
+import { createWebCodeSplittingOptions, webChunkFileName } from "./src/viteBuild/codeSplitting";
+import { resolveWebModulePreloadDependencies } from "./src/viteBuild/modulePreload";
+import { createPrecompressedAssetsPlugin } from "./src/viteBuild/precompressAssets";
 
 const webRoot = fileURLToPath(new URL(".", import.meta.url));
 const port = Number(process.env.PORT ?? 5733);
@@ -89,6 +94,10 @@ export function createWebViteConfig(
 
   return {
     plugins: [
+      createClientModeSeamPlugin({
+        clientMode: resolvedClientMode,
+        srcRoot: fileURLToPath(new URL("./src", import.meta.url)),
+      }),
       tanstackRouter(),
       react(),
       babel({
@@ -109,6 +118,12 @@ export function createWebViteConfig(
       }),
       tailwindcss(),
       ...(resolvedClientMode === "hosted-hub" ? [createHostedPwaBuildPlugin()] : []),
+      // The Ryco server serves these siblings by Accept-Encoding, and the node
+      // app paints in DM Sans. Hosted builds deploy to a CDN that compresses on
+      // its own and the Hub surface has its own typography.
+      ...(resolvedClientMode === "standard"
+        ? [createBootFontPreloadPlugin(), createPrecompressedAssetsPlugin()]
+        : []),
     ],
     optimizeDeps: {
       include: [
@@ -126,7 +141,7 @@ export function createWebViteConfig(
       // In dev mode, tell the web app where the WebSocket server lives
       "import.meta.env.VITE_WS_URL": JSON.stringify(configuredWsUrl ?? ""),
       "import.meta.env.VITE_HOSTED_APP_URL": JSON.stringify(configuredHostedAppUrl ?? ""),
-      "import.meta.env.VITE_RYCO_CLIENT_MODE": JSON.stringify(clientMode),
+      "import.meta.env.VITE_RYCO_CLIENT_MODE": JSON.stringify(resolvedClientMode),
       "import.meta.env.VITE_RYCO_PHONE_APP_INTERSTITIAL": JSON.stringify(
         normalizedPhoneAppInterstitial,
       ),
@@ -185,8 +200,26 @@ export function createWebViteConfig(
     build: {
       outDir: "dist",
       emptyOutDir: true,
-      modulePreload: false,
+      // Each dynamic import preloads its own static closure in one round;
+      // index.html stays free of eager preloads (see the resolver).
+      modulePreload: {
+        polyfill: false,
+        resolveDependencies: resolveWebModulePreloadDependencies,
+      },
+      rolldownOptions: {
+        output: {
+          codeSplitting: createWebCodeSplittingOptions({
+            bootEntry: fileURLToPath(new URL("./src/main.tsx", import.meta.url)),
+          }),
+          chunkFileNames: webChunkFileName,
+        },
+      },
       sourcemap: buildSourcemap,
+    },
+    // ES workers code-split instead of inlining every dynamic import: the diff
+    // worker no longer embeds Shiki's unused 608 KiB Oniguruma WASM.
+    worker: {
+      format: "es",
     },
     test: {
       ...ciTestReporting(),

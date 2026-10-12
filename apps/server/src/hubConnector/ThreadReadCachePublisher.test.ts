@@ -2,13 +2,14 @@ import { MessageId, OrchestrationShellSnapshot, type OrchestrationMessage } from
 import { Schema } from "effect";
 import { describe, expect, it, vi } from "vite-plus/test";
 import {
+  boundThreadReadCacheShell,
   createThreadReadCachePublisher,
   threadReadCacheContent,
   type ThreadReadCacheUpload,
 } from "./ThreadReadCachePublisher.ts";
 
 const time = "2026-10-04T00:00:00.000Z";
-function shell(count = 1, sequence = 1) {
+function shell(count = 1, sequence = 1, updatedAt: (index: number) => string = () => time) {
   return Schema.decodeUnknownSync(OrchestrationShellSnapshot)({
     snapshotSequence: sequence,
     updatedAt: time,
@@ -23,7 +24,7 @@ function shell(count = 1, sequence = 1) {
       worktreePath: null,
       latestTurn: null,
       createdAt: time,
-      updatedAt: time,
+      updatedAt: updatedAt(index),
       session: null,
       latestUserMessageAt: null,
       hasPendingApprovals: false,
@@ -133,6 +134,104 @@ describe("cloud thread history publisher", () => {
     await h.publisher.synchronize();
     expect(h.begin).toHaveBeenCalledTimes(2);
     expect(h.upload).toHaveBeenCalledTimes(2);
+  });
+
+  it("bounds an oversized shell to its most recently updated threads instead of failing", () => {
+    const recentFirst = (index: number) =>
+      new Date(Date.parse(time) - index * 60_000).toISOString();
+    const full = shell(40, 7, recentFirst);
+    const whole = boundThreadReadCacheShell(full);
+    expect(whole.snapshot).toBe(full);
+    expect(whole.batchBytes).toBe(
+      Buffer.byteLength(JSON.stringify([{ kind: "shell", revision: 7, snapshot: full }]), "utf8"),
+    );
+
+    const limit = Math.floor(whole.batchBytes / 2);
+    const bounded = boundThreadReadCacheShell(full, limit);
+    expect(bounded.batchBytes).toBeLessThanOrEqual(limit);
+    expect(
+      Buffer.byteLength(
+        JSON.stringify([{ kind: "shell", revision: 7, snapshot: bounded.snapshot }]),
+        "utf8",
+      ),
+    ).toBeLessThanOrEqual(limit);
+    const kept = bounded.snapshot.threads.map((thread) => thread.id);
+    expect(kept.length).toBeGreaterThan(10);
+    expect(kept.length).toBeLessThan(40);
+    // The newest threads, in their original order.
+    expect(kept).toEqual(full.threads.slice(0, kept.length).map((thread) => thread.id));
+    // Still a valid read-cache shell.
+    expect(() =>
+      Schema.decodeUnknownSync(OrchestrationShellSnapshot)(bounded.snapshot),
+    ).not.toThrow();
+  });
+
+  it("publishes a node whose shell exceeds one batch", async () => {
+    const test = harness(1);
+    test.setShell(shell(6_000, 2));
+    await test.publisher.synchronize();
+    const items = test.upload.mock.calls[0]![1];
+    const uploaded = items.find((item) => item.kind === "shell");
+    expect(uploaded?.kind === "shell" && uploaded.snapshot.threads.length).toBeGreaterThan(0);
+    expect(uploaded?.kind === "shell" && uploaded.snapshot.threads.length).toBeLessThan(6_000);
+    expect(Buffer.byteLength(JSON.stringify(items), "utf8")).toBeLessThanOrEqual(
+      2 * 1024 * 1024 - 4096,
+    );
+  });
+
+  it("lets thread content through while a shell larger than one batch keeps changing", async () => {
+    const test = harness(1);
+    test.readThread.mockImplementation(async () => ({
+      revision: 1,
+      messages: [message(1, "x".repeat(20_000))],
+    }));
+    const kinds = (call: number) => test.upload.mock.calls[call]![1].map((item) => item.kind);
+    const threadIds = (call: number) =>
+      test.upload.mock.calls[call]![1].flatMap((item) =>
+        item.kind === "thread" ? [item.threadId] : [],
+      );
+    // Equal timestamps keep creation order, so the bounded index holds the
+    // first threads and the newest-first content order starts with them too.
+    const newest = (index: number) => (index === 6_000 ? "2026-10-05T00:00:00.000Z" : time);
+
+    test.setShell(shell(6_000, 2));
+    await test.publisher.synchronize();
+    // The first index never waits; it fills the batch.
+    expect(kinds(0)).toEqual(["shell"]);
+
+    // Activity changes the shell before every tick. The re-upload waits one
+    // batch for the content it crowded out, and that batch carries only
+    // threads the published index already names (not the new thread-6000).
+    test.setShell(shell(6_001, 3, newest));
+    await test.publisher.synchronize();
+    expect(kinds(1)).not.toContain("shell");
+    expect(threadIds(1).length).toBeGreaterThan(0);
+    expect(threadIds(1)).not.toContain("thread-6000");
+
+    test.setShell(shell(6_001, 4, newest));
+    await test.publisher.synchronize();
+    expect(kinds(2)[0]).toBe("shell");
+    const indexed = test.upload.mock.calls[2]![1][0];
+    expect(
+      indexed?.kind === "shell" && indexed.snapshot.threads.some((t) => t.id === "thread-6000"),
+    ).toBe(true);
+  });
+
+  it("does not hold the index back when no crowded-out content is left to send", async () => {
+    const test = harness(1);
+    test.readThread.mockImplementation(async () => ({
+      revision: 1,
+      messages: [message(1, "x".repeat(20_000))],
+    }));
+    test.setShell(shell(6_000, 2));
+    await test.publisher.synchronize();
+    // Every crowded-out thread is gone from the next index: nothing to send
+    // but the index itself.
+    test.setShell(shell(0, 3));
+    await test.publisher.synchronize();
+    expect(test.upload.mock.calls[1]![1]).toEqual([
+      { kind: "shell", revision: 3, snapshot: shell(0, 3) },
+    ]);
   });
 
   it("keeps readable history when the newest message exceeds the projection limit", () => {

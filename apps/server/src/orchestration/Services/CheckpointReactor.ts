@@ -6,6 +6,7 @@
  *
  * @module CheckpointReactor
  */
+import type { ThreadId } from "@ryco/contracts";
 import { Context } from "effect";
 import type { Effect, Scope } from "effect";
 
@@ -29,6 +30,15 @@ export interface CheckpointReactorShape {
    * Runs once at startup, before the reactors start; never fails.
    */
   readonly recover: () => Effect.Effect<void>;
+
+  /**
+   * Resolves once the thread's pre-turn baseline exists (captured now if it
+   * was missing), after every checkpoint item queued for the thread before it,
+   * such as the previous turn's completion capture. A turn start awaits this
+   * before the provider can touch files, so the baseline never contains the
+   * turn's own edits. Never fails: a capture failure is logged.
+   */
+  readonly ensurePreTurnBaseline: (threadId: ThreadId) => Effect.Effect<void>;
 
   /**
    * Resolves when the internal processing queue is empty and idle.

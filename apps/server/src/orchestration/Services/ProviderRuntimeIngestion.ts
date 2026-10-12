@@ -13,9 +13,22 @@ import type { ThreadId } from "@ryco/contracts";
 /**
  * ProviderRuntimeIngestionShape - Service API for runtime ingestion lifecycle.
  */
+/**
+ * Why a thread's provider history is read: a client opened the thread, or its
+ * session settled (a turn ended, the session stopped) while one watched it.
+ */
+export type HistoryRecoveryTrigger = "subscribe" | "session-settled";
+
 export interface ProviderRuntimeIngestionShape {
-  /** Coalesced, read-only provider history recovery; failures leave local history available. */
-  readonly reconcileThread?: (threadId: ThreadId) => Effect.Effect<void>;
+  /**
+   * Coalesced, read-only provider history recovery; failures leave local
+   * history available. Spaced per thread (longer after a failure), so callers
+   * may signal freely.
+   */
+  readonly reconcileThread?: (
+    threadId: ThreadId,
+    trigger?: HistoryRecoveryTrigger,
+  ) => Effect.Effect<void>;
   /**
    * Start ingesting provider runtime events into orchestration commands.
    *

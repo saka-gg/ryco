@@ -1,4 +1,5 @@
-import { Effect, Schema } from "effect";
+import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 
 /** Registry identities are data, never executable paths or package-manager arguments. */
 export const AcpRegistryAgentId = Schema.String.check(

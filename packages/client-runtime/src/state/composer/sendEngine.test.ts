@@ -184,6 +184,34 @@ describe("send engine — dispatch assembly", () => {
     ]);
   });
 
+  it("writes the first-message title and the next-turn settings in one round trip", async () => {
+    let releaseTitle!: () => void;
+    const titleHeld = new Promise<void>((resolve) => {
+      releaseTitle = resolve;
+    });
+    const calls: string[] = [];
+    const harness = makeDispatchHarness({
+      api: {
+        orchestration: {
+          dispatchCommand: async (command: { type: string }) => {
+            calls.push(`dispatch:${command.type}`);
+            if (command.type === "thread.meta.update") await titleHeld;
+            return { sequence: 1 };
+          },
+        },
+      } as unknown as EnvironmentApi,
+      persistThreadSettingsForNextTurn: async () => {
+        calls.push("persist");
+        // Settings persistence starts while the title write is still in flight.
+        releaseTitle();
+      },
+    });
+
+    await commitSendTurnDispatch(harness.input);
+
+    expect(calls).toEqual(["dispatch:thread.meta.update", "persist", "dispatch:thread.turn.start"]);
+  });
+
   it("skips the first-message title update when the message is not the first", async () => {
     const harness = makeDispatchHarness({ isFirstMessage: false });
     await commitSendTurnDispatch(harness.input);

@@ -68,4 +68,40 @@ describe("saved Hub session on the locked identity screen", () => {
       kind: "sign-in",
     });
   });
+
+  it("keeps waiting while the launch check of a saved session is still in flight", () => {
+    // The gate stops waiting at its launch deadline; the store still reads its
+    // initial signed-out because the Hub has not answered either way.
+    expect(
+      deriveSavedHubSessionView({
+        ...offlineLaunch,
+        accountStatus: "signed-out",
+        errorReason: null,
+        retrying: false,
+        checking: true,
+      }),
+    ).toEqual({
+      kind: "saved-session",
+      title: SAVED_HUB_SESSION_TITLE,
+      detail: "Ryco is still checking your saved sign-in with the Hub.",
+      note: SAVED_HUB_SESSION_NOTE,
+      waiting: true,
+    });
+  });
+
+  it.each([
+    ["no saved session", { savedSession: false }],
+    ["the user chose another sign-in", { signInRequested: true }],
+    ["a check that has answered", { checking: false }],
+    ["a rejected session", { accountStatus: "session-expired" as const }],
+  ])("does not hold the sign-in form for an in-flight check with %s", (_label, facts) => {
+    expect(
+      deriveSavedHubSessionView({
+        ...offlineLaunch,
+        accountStatus: "signed-out",
+        checking: true,
+        ...facts,
+      }),
+    ).toEqual({ kind: "sign-in" });
+  });
 });

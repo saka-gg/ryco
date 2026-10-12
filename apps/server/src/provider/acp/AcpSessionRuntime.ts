@@ -1,6 +1,7 @@
 import {
   Cause,
   Deferred,
+  Duration,
   Effect,
   Exit,
   Layer,
@@ -14,9 +15,11 @@ import {
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import * as EffectAcpClient from "effect-acp/client";
 import * as EffectAcpErrors from "effect-acp/errors";
+import * as Schema from "effect/Schema";
 import type * as EffectAcpSchema from "effect-acp/schema";
 import type * as EffectAcpProtocol from "effect-acp/protocol";
 
+import { providerStartupPhaseTimeoutDetail } from "../providerOperationPolicy.ts";
 import {
   collectSessionConfigOptionValues,
   extractModelConfigId,
@@ -28,6 +31,44 @@ import {
   type AcpSessionModeState,
   type AcpToolCallState,
 } from "./AcpRuntimeModel.ts";
+
+/**
+ * Startup requests that get their own deadline. Without one, a hung agent surfaces only through
+ * the provider-wide session-start timeout (120–300 s) with a generic message.
+ */
+export type AcpStartupPhase = "initialize" | "authenticate" | "session/new" | "session/load";
+
+export const DEFAULT_ACP_STARTUP_PHASE_TIMEOUTS: Readonly<Record<AcpStartupPhase, Duration.Input>> =
+  {
+    initialize: Duration.seconds(20),
+    authenticate: Duration.seconds(20),
+    "session/new": Duration.seconds(30),
+    // Loading replays the conversation as notifications before answering; allow long histories.
+    "session/load": Duration.seconds(60),
+  };
+
+/** `cause` of the transport error a startup phase fails with when its deadline passes. */
+export class AcpStartupPhaseTimeout extends Error {
+  readonly phase: AcpStartupPhase;
+  readonly timeoutMs: number;
+
+  constructor(phase: AcpStartupPhase, timeoutMs: number) {
+    super(`ACP ${phase} did not answer within ${timeoutMs} ms`);
+    this.name = "AcpStartupPhaseTimeout";
+    this.phase = phase;
+    this.timeoutMs = timeoutMs;
+  }
+}
+
+const isAcpTransportError = Schema.is(EffectAcpErrors.AcpTransportError);
+
+export const isAcpStartupPhaseTimeout = (error: unknown): boolean =>
+  isAcpTransportError(error) && error.cause instanceof AcpStartupPhaseTimeout;
+
+const failedWithStartupPhaseTimeout = (cause: Cause.Cause<EffectAcpErrors.AcpError>): boolean =>
+  cause.reasons.some(
+    (reason) => Cause.isFailReason(reason) && isAcpStartupPhaseTimeout(reason.error),
+  );
 
 export interface AcpSpawnInput {
   readonly command: string;
@@ -52,6 +93,10 @@ export interface AcpSessionRuntimeOptions {
   readonly strictResume?: boolean;
   readonly preferModelConfig?: boolean;
   readonly requireProtocolVersion?: number;
+  /** Per-phase startup deadlines; unset phases use `DEFAULT_ACP_STARTUP_PHASE_TIMEOUTS`. */
+  readonly phaseTimeouts?: Partial<Record<AcpStartupPhase, Duration.Input>>;
+  /** Provider-specific next step appended to a phase timeout message (e.g. how to log in). */
+  readonly phaseTimeoutHints?: Partial<Record<AcpStartupPhase, string>>;
   readonly mcpServers?: ReadonlyArray<EffectAcpSchema.McpServer>;
   /** Resolve runtime-scoped MCP servers only after the agent advertises capabilities. */
   readonly resolveMcpServers?: (
@@ -433,16 +478,48 @@ const makeAcpSessionRuntime = (
         ),
       );
 
+    /**
+     * Fail `effect` with an actionable transport error when the agent does not answer `phase`
+     * in time. The agent process is left to the runtime scope, which tears it down.
+     */
+    const withStartupPhaseDeadline = <A>(
+      phase: AcpStartupPhase,
+      effect: Effect.Effect<A, EffectAcpErrors.AcpError>,
+    ): Effect.Effect<A, EffectAcpErrors.AcpError> => {
+      const timeoutMs = Duration.toMillis(
+        Duration.fromInputUnsafe(
+          options.phaseTimeouts?.[phase] ?? DEFAULT_ACP_STARTUP_PHASE_TIMEOUTS[phase],
+        ),
+      );
+      const hint = options.phaseTimeoutHints?.[phase];
+      return effect.pipe(
+        Effect.timeoutOrElse({
+          duration: timeoutMs,
+          orElse: () =>
+            Effect.fail(
+              new EffectAcpErrors.AcpTransportError({
+                detail: providerStartupPhaseTimeoutDetail({
+                  command: options.spawn.command,
+                  request: `ACP \`${phase}\``,
+                  timeoutMs,
+                  hint,
+                }),
+                cause: new AcpStartupPhaseTimeout(phase, timeoutMs),
+              }),
+            ),
+        }),
+      );
+    };
+
     const initializePayload = {
       protocolVersion: 1,
       clientCapabilities: initializeClientCapabilities,
       clientInfo: options.clientInfo,
     } satisfies EffectAcpSchema.InitializeRequest;
     const initialize = yield* Effect.cached(
-      runLoggedRequest(
+      withStartupPhaseDeadline(
         "initialize",
-        initializePayload,
-        acp.agent.initialize(initializePayload),
+        runLoggedRequest("initialize", initializePayload, acp.agent.initialize(initializePayload)),
       ).pipe(
         Effect.flatMap((response) =>
           options.requireProtocolVersion !== undefined &&
@@ -480,13 +557,16 @@ const makeAcpSessionRuntime = (
     const startOnce = Effect.gen(function* () {
       const initializeResult = yield* initialize;
       if (options.authMethodId) {
-        if (options.negotiateAuth) yield* authenticate(options.authMethodId);
-        else
-          yield* runLoggedRequest(
-            "authenticate",
-            { methodId: options.authMethodId },
-            acp.agent.authenticate({ methodId: options.authMethodId }),
-          );
+        yield* withStartupPhaseDeadline(
+          "authenticate",
+          options.negotiateAuth
+            ? authenticate(options.authMethodId)
+            : runLoggedRequest(
+                "authenticate",
+                { methodId: options.authMethodId },
+                acp.agent.authenticate({ methodId: options.authMethodId }),
+              ),
+        );
       }
 
       const staticMcpServers = options.mcpServers ?? [];
@@ -505,16 +585,17 @@ const makeAcpSessionRuntime = (
           cwd: options.cwd,
           mcpServers: servers,
         } satisfies EffectAcpSchema.NewSessionRequest;
-        return runLoggedRequest(
+        return withStartupPhaseDeadline(
           "session/new",
-          createPayload,
-          acp.agent.createSession(createPayload),
+          runLoggedRequest("session/new", createPayload, acp.agent.createSession(createPayload)),
         );
       };
       const createSessionWithFallback = Effect.gen(function* () {
         const created = yield* Effect.exit(createSession(mcpServers));
         if (Exit.isSuccess(created)) return created.value;
-        if (resolvedMcpServers.length === 0) return yield* Effect.failCause(created.cause);
+        // An agent that stopped answering will not answer the retry either.
+        if (resolvedMcpServers.length === 0 || failedWithStartupPhaseTimeout(created.cause))
+          return yield* Effect.failCause(created.cause);
         if (options.onMcpSetupFailure) yield* options.onMcpSetupFailure();
         return yield* createSession(staticMcpServers);
       });
@@ -537,16 +618,20 @@ const makeAcpSessionRuntime = (
           cwd: options.cwd,
           mcpServers,
         } satisfies EffectAcpSchema.LoadSessionRequest;
-        const resumed = yield* runLoggedRequest(
-          useResume ? "session/resume" : "session/load",
-          loadPayload,
-          useResume ? acp.agent.resumeSession(loadPayload) : acp.agent.loadSession(loadPayload),
+        const resumed = yield* withStartupPhaseDeadline(
+          "session/load",
+          runLoggedRequest(
+            useResume ? "session/resume" : "session/load",
+            loadPayload,
+            useResume ? acp.agent.resumeSession(loadPayload) : acp.agent.loadSession(loadPayload),
+          ),
         ).pipe(Effect.exit);
         if (Exit.isSuccess(resumed)) {
           sessionId = options.resumeSessionId;
           sessionSetupResult = resumed.value;
         } else {
-          if (options.strictResume) return yield* Effect.failCause(resumed.cause);
+          if (options.strictResume || failedWithStartupPhaseTimeout(resumed.cause))
+            return yield* Effect.failCause(resumed.cause);
           const created = yield* createSessionWithFallback;
           sessionId = created.sessionId;
           sessionSetupResult = created;

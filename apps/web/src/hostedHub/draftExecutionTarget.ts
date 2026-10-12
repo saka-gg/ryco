@@ -1,7 +1,7 @@
 import {
   nodeMutationLeaseIsCurrent,
   type NodeMutationLease,
-} from "@ryco/client-runtime/authorization";
+} from "@ryco/client-runtime/authorization/nodeMutationLease";
 import type { Project } from "@ryco/client-runtime/state/threads";
 import type { EnvironmentId, ProjectId } from "@ryco/contracts";
 import type { DraftId } from "../composerDraftStore";

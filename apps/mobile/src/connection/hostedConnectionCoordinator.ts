@@ -5,7 +5,7 @@ import type {
   HostedRycoSessionStatus,
 } from "@ryco/client-runtime/authorization";
 import type { EnvironmentConnection } from "@ryco/client-runtime/connection";
-import { getHostedDispatchReplay } from "@ryco/client-runtime/relay";
+import { getHostedDispatchReplay } from "@ryco/client-runtime/relay/dispatchReplay";
 import { UNIFIED_WORKSPACE_MAX_CONNECTIONS } from "@ryco/client-runtime/state/workspace";
 import type { EnvironmentId, RelayEffectiveRole } from "@ryco/contracts";
 

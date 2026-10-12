@@ -82,7 +82,6 @@ import {
   useComposerAttachmentMenus,
   useComposerSourceControlContextSelection,
 } from "./ComposerAttachmentMenus";
-import { useSourceControlDiscovery } from "~/lib/sourceControlDiscoveryState";
 import {
   type TerminalContextDraft,
   type TerminalContextSelection,
@@ -417,6 +416,54 @@ export interface ChatComposerProps {
   onClearGoal: () => void;
 }
 
+/**
+ * The whole-prompt replacement the provider traits controls call (e.g. the
+ * ultrathink toggle). It writes `promptRef`, and the composer hands it to the
+ * traits renderers through plain function calls, which the React Compiler
+ * cannot prove only forward it to JSX event props; created inline it made the
+ * compiler skip the entire composer. As a hook result it is opaque to the
+ * render-time ref check, and it is still only invoked from event handlers.
+ */
+function useSetPromptFromTraits(input: {
+  readonly promptRef: React.MutableRefObject<string>;
+  readonly composerDraftTarget: ScopedThreadRef | DraftId;
+  readonly setComposerDraftPrompt: (target: ScopedThreadRef | DraftId, prompt: string) => void;
+  readonly setComposerCursor: (cursor: number) => void;
+  readonly setComposerTrigger: (trigger: ComposerTrigger | null) => void;
+  readonly scheduleComposerFocus: () => void;
+}): (nextPrompt: string) => void {
+  const {
+    promptRef,
+    composerDraftTarget,
+    setComposerDraftPrompt,
+    setComposerCursor,
+    setComposerTrigger,
+    scheduleComposerFocus,
+  } = input;
+  return useCallback(
+    (nextPrompt: string) => {
+      if (nextPrompt === promptRef.current) {
+        scheduleComposerFocus();
+        return;
+      }
+      promptRef.current = nextPrompt;
+      setComposerDraftPrompt(composerDraftTarget, nextPrompt);
+      const nextCursor = collapseExpandedComposerCursor(nextPrompt, nextPrompt.length);
+      setComposerCursor(nextCursor);
+      setComposerTrigger(detectComposerTrigger(nextPrompt, nextPrompt.length));
+      scheduleComposerFocus();
+    },
+    [
+      composerDraftTarget,
+      promptRef,
+      scheduleComposerFocus,
+      setComposerCursor,
+      setComposerDraftPrompt,
+      setComposerTrigger,
+    ],
+  );
+}
+
 // --------------------------------------------------------------------------
 // Component
 // --------------------------------------------------------------------------
@@ -509,17 +556,6 @@ export const ChatComposer = memo(
     const composerTerminalContexts = composerDraft.terminalContexts;
     const composerSourceControlContexts = composerDraft.sourceControlContexts;
     const nonPersistedComposerImageIds = composerDraft.nonPersistedImageIds;
-
-    const sourceControlDiscovery = useSourceControlDiscovery();
-    const hasSourceControlRemote = useMemo(
-      () =>
-        (sourceControlDiscovery.data?.sourceControlProviders ?? []).some(
-          (provider) =>
-            provider.status === "available" &&
-            (provider.auth.status === "authenticated" || provider.auth.status === "unknown"),
-        ),
-      [sourceControlDiscovery.data],
-    );
 
     const setComposerDraftPrompt = useComposerDraftStore((store) => store.setPrompt);
     const insertComposerDraftTerminalContext = useComposerDraftStore(
@@ -908,10 +944,13 @@ export const ChatComposer = memo(
     // ------------------------------------------------------------------
     const fileUploadRecords = useComposerFileUploadRecords();
     // Recomputed on every upload-record change: the engine subscription in
-    // useComposerFileUploadRecords re-renders the composer as uploads progress.
+    // useComposerFileUploadRecords re-renders the composer as uploads progress,
+    // and passing that snapshot makes it a visible input of the compiled
+    // memoization. Token expiry is re-checked with a fresh clock at send time.
     const composerFileUploadSendBlock = deriveComposerFileUploadSendBlock({
       attachments: composerImages,
       nowMs: Date.now(),
+      records: fileUploadRecords,
     });
     const composerSendBlockedReason = composerFileUploadSendBlock;
     const composerHasSendableContent =
@@ -978,9 +1017,14 @@ export const ChatComposer = memo(
       composerHighlightedSearchKey,
     });
 
-    composerMenuOpenRef.current = composerMenuOpen;
-    composerMenuItemsRef.current = composerMenuItems;
-    activeComposerMenuItemRef.current = activeComposerMenuItem;
+    // The editor's command-key handler reads the committed menu state. Syncing
+    // it after commit (not during render) keeps the React Compiler able to
+    // memoize this component; key events only arrive after the commit anyway.
+    useLayoutEffect(() => {
+      composerMenuOpenRef.current = composerMenuOpen;
+      composerMenuItemsRef.current = composerMenuItems;
+      activeComposerMenuItemRef.current = activeComposerMenuItem;
+    }, [activeComposerMenuItem, composerMenuItems, composerMenuOpen]);
 
     const nonPersistedComposerImageIdSet = useMemo(
       () => new Set(nonPersistedComposerImageIds),
@@ -1046,21 +1090,14 @@ export const ChatComposer = memo(
     // ------------------------------------------------------------------
     // Provider traits UI
     // ------------------------------------------------------------------
-    const setPromptFromTraits = useCallback(
-      (nextPrompt: string) => {
-        if (nextPrompt === promptRef.current) {
-          scheduleComposerFocus();
-          return;
-        }
-        promptRef.current = nextPrompt;
-        setComposerDraftPrompt(composerDraftTarget, nextPrompt);
-        const nextCursor = collapseExpandedComposerCursor(nextPrompt, nextPrompt.length);
-        setComposerCursor(nextCursor);
-        setComposerTrigger(detectComposerTrigger(nextPrompt, nextPrompt.length));
-        scheduleComposerFocus();
-      },
-      [composerDraftTarget, promptRef, scheduleComposerFocus, setComposerDraftPrompt],
-    );
+    const setPromptFromTraits = useSetPromptFromTraits({
+      promptRef,
+      composerDraftTarget,
+      setComposerDraftPrompt,
+      setComposerCursor,
+      setComposerTrigger,
+      scheduleComposerFocus,
+    });
 
     // The same read-only mutation capability the footer consumes. Traits are
     // draft-local, so an ungated chip is an inconsistent gate rather than a
@@ -1429,13 +1466,14 @@ export const ChatComposer = memo(
         cursorAdjacentToMention: boolean,
         terminalContextIds: string[],
       ) => {
-        if (activePendingProgress?.activeQuestion && pendingUserInputs.length > 0) {
+        const activePendingQuestion = activePendingProgress?.activeQuestion;
+        if (activePendingQuestion && pendingUserInputs.length > 0) {
           setComposerCursor(nextCursor);
           setComposerTrigger(
             cursorAdjacentToMention ? null : detectComposerTrigger(nextPrompt, expandedCursor),
           );
           onChangeActivePendingUserInputCustomAnswer(
-            activePendingProgress.activeQuestion.id,
+            activePendingQuestion.id,
             nextPrompt,
             nextCursor,
             expandedCursor,
@@ -1516,6 +1554,7 @@ export const ChatComposer = memo(
         activePendingProgress?.activeQuestion,
         activePendingUserInput,
         onChangeActivePendingUserInputCustomAnswer,
+        paneFocusedRef,
         promptRef,
         setPrompt,
       ],
@@ -2241,7 +2280,11 @@ export const ChatComposer = memo(
       stashEntry,
     ]);
 
-    stashCommandHandlerRef.current = stashCurrentPrompt;
+    // The window shortcut listener below stays registered across renders and
+    // calls the latest committed handler.
+    useLayoutEffect(() => {
+      stashCommandHandlerRef.current = stashCurrentPrompt;
+    }, [stashCurrentPrompt]);
 
     usePaneEffect(() => {
       const handler = (event: globalThis.KeyboardEvent) => {
@@ -2804,7 +2847,6 @@ export const ChatComposer = memo(
                 hideOnMobilePendingAnswers={showMobilePendingAnswerActions}
                 environmentId={environmentId}
                 gitCwd={gitCwd}
-                hasSourceControlRemote={hasSourceControlRemote}
                 onSelectIssue={handleSelectIssue}
                 onSelectChangeRequest={handleSelectChangeRequest}
                 onAttachFile={(file) => {

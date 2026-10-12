@@ -20,6 +20,11 @@ describe("withProviderGoalPrompt", () => {
     expect(result).toContain("\n\nContinue");
   });
 
+  it("keeps a slash command verbatim so the provider still runs it", () => {
+    expect(withProviderGoalPrompt({ message: "/review", goal })).toBe("/review");
+    expect(withProviderGoalPrompt({ message: "  /compact", goal })).toBe("  /compact");
+  });
+
   it("does not inject paused goals", () => {
     expect(
       withProviderGoalPrompt({ message: "Continue", goal: { ...goal, status: "paused" } }),

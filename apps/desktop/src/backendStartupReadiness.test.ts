@@ -5,23 +5,23 @@ import { waitForBackendStartupReady } from "./backendStartupReadiness.ts";
 
 describe("waitForBackendStartupReady", () => {
   it("accepts a living backend that becomes ready after the HTTP timeout", async () => {
-    const listening = Promise.withResolvers<void>();
+    const listening = Promise.withResolvers<"listening">();
     const ready = waitForBackendStartupReady({
-      listeningPromise: listening.promise,
+      readyPromise: listening.promise,
       waitForHttpReady: async () => {
         throw new BackendReadinessTimeoutError("http://localhost");
       },
       cancelHttpWait: vi.fn(),
     });
     await Promise.resolve();
-    listening.resolve();
+    listening.resolve("listening");
     await expect(ready).resolves.toBe("listening");
   });
 
   it("still reports a child exit after the HTTP probe times out", async () => {
-    const listening = Promise.withResolvers<void>();
+    const listening = Promise.withResolvers<"listening">();
     const ready = waitForBackendStartupReady({
-      listeningPromise: listening.promise,
+      readyPromise: listening.promise,
       waitForHttpReady: async () => {
         throw new BackendReadinessTimeoutError("http://localhost");
       },
@@ -61,7 +61,7 @@ describe("waitForBackendStartupReady", () => {
 
     await expect(
       waitForBackendStartupReady({
-        listeningPromise: Promise.resolve(),
+        readyPromise: Promise.resolve("listening" as const),
         waitForHttpReady,
         cancelHttpWait,
       }),
@@ -78,12 +78,55 @@ describe("waitForBackendStartupReady", () => {
 
     await expect(
       waitForBackendStartupReady({
-        listeningPromise: Promise.reject(error),
+        readyPromise: Promise.reject(error),
         waitForHttpReady,
         cancelHttpWait,
       }),
     ).rejects.toBe(error);
 
     expect(cancelHttpWait).toHaveBeenCalledTimes(1);
+  });
+
+  it("starts the HTTP probe only as a delayed last resort", async () => {
+    vi.useFakeTimers();
+    try {
+      const ready = Promise.withResolvers<"protocol">();
+      const waitForHttpReady = vi.fn(() => new Promise<void>(() => {}));
+      const cancelHttpWait = vi.fn();
+      const result = waitForBackendStartupReady({
+        readyPromise: ready.promise,
+        waitForHttpReady,
+        cancelHttpWait,
+        httpFallbackDelayMs: 3_000,
+      });
+
+      await vi.advanceTimersByTimeAsync(2_999);
+      expect(waitForHttpReady).not.toHaveBeenCalled();
+      ready.resolve("protocol");
+      await expect(result).resolves.toBe("protocol");
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(waitForHttpReady).not.toHaveBeenCalled();
+      expect(cancelHttpWait).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("uses the HTTP probe when no signal arrives within the fallback delay", async () => {
+    vi.useFakeTimers();
+    try {
+      const waitForHttpReady = vi.fn<() => Promise<void>>().mockResolvedValue(undefined);
+      const result = waitForBackendStartupReady({
+        readyPromise: new Promise<"protocol">(() => {}),
+        waitForHttpReady,
+        cancelHttpWait: vi.fn(),
+        httpFallbackDelayMs: 3_000,
+      });
+      await vi.advanceTimersByTimeAsync(3_000);
+      await expect(result).resolves.toBe("http");
+      expect(waitForHttpReady).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

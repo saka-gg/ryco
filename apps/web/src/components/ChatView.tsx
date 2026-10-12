@@ -5,7 +5,6 @@ import { OptionalQuestionCard } from "./chat/OptionalQuestionCard";
 import { readPrimaryEnvironmentTarget } from "../environments/primary/target";
 import { parseComputerInvocation } from "@ryco/shared/computerInvocation";
 import { BackgroundBrowserPreview } from "../browser/BackgroundBrowserPreview";
-import { ComputerBetaPreview } from "./chat/ComputerBetaPreview";
 import type { ProviderOptionSelection } from "@ryco/contracts";
 import {
   rejectRetiredProjectMemory,
@@ -25,7 +24,6 @@ import type { BackgroundTask } from "@ryco/shared/backgroundWork";
 import { deriveThreadBackgroundWork } from "@ryco/client-runtime/state/session";
 import { useWsConnectionStatusForEnvironment } from "../rpc/wsConnectionState";
 import { readEnvironmentConnection } from "../environments/runtime";
-import { SideChatPanel } from "./SideChatPanel";
 import { useSideChatStore } from "../sideChatStore";
 import { parseSideQuestionCommand } from "@ryco/client-runtime/state/side-chat";
 import { useDeviceName } from "../deviceName";
@@ -121,7 +119,7 @@ import {
   selectProjectsAcrossEnvironments,
   selectSidebarThreadSummaryByRef,
   selectSidebarThreadsForProjectRef,
-  selectThreadsAcrossEnvironments,
+  selectThreadExistsByRef,
   useStore,
 } from "../store";
 import {
@@ -152,6 +150,7 @@ import { useDelayedUnmount } from "../hooks/useDelayedUnmount";
 import { useMediaQuery } from "../hooks/useMediaQuery";
 import { useAppSidebarCollapsed } from "../hooks/useAppSidebarCollapsed";
 import { usePresentationTier } from "../hooks/usePresentationTier";
+import type { PresentationTier } from "../lib/presentationTier";
 import {
   APP_SIDEBAR_CHROME_INSET_TRANSITION_CLASS,
   COLLAPSED_APP_SIDEBAR_CHROME_INSET_CLASS,
@@ -207,22 +206,19 @@ import type { ModelPickMeta } from "./chat/modelPickerTuningBridge";
 import { ChatComposer, type ChatComposerHandle } from "./chat/ChatComposer";
 import { PersistentThreadTerminalDrawer } from "./chat/ChatTerminalShell";
 import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
-import { ContextHandoffInspectionPanel } from "./chat/ContextHandoffInspectionPanel";
-import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
-import { NewWorktreeDialog, type NewWorktreeDialogTab } from "./worktrees/NewWorktreeDialog";
-import {
-  LinkedWorktreeItemDialog,
-  type LinkedWorktreeItem,
-} from "./worktrees/LinkedWorktreeItemDialog";
+import type { NewWorktreeDialogTab } from "./worktrees/NewWorktreeDialog";
+import type { LinkedWorktreeItem } from "./worktrees/LinkedWorktreeItemDialog";
 import { MessagesTimeline } from "./chat/MessagesTimeline";
 import { openForkThreadDialog, useCanForkThread } from "./chat/forkThreadDialogStore";
 import {
   deriveRevertTurnCountByUserMessageId,
   deriveUndoTurnCountByTurnId,
   type TimelineForkRequest,
+  pinTimelineToEnd,
 } from "./chat/MessagesTimeline.logic";
 import { NewThreadContextBar } from "./chat/NewThreadContextBar";
 import { NewThreadHero } from "./chat/NewThreadHero";
+import { ThreadHistorySkeleton } from "./chat/ThreadHistorySkeleton";
 import { NewThreadWorkLocation } from "./chat/NewThreadWorkLocation";
 import { ThreadMessageSearchBar } from "./chat/ThreadMessageSearchBar";
 import {
@@ -262,12 +258,23 @@ import {
   deriveThreadSnoozeEligibility,
   isMaterializableCheckpointSummary,
   threadForkBoundaryQuote,
+  selectThreadDetailLoaded,
 } from "@ryco/client-runtime/state/threads";
+import type { OverviewPanelControlsInput } from "./chat/ChatOverviewPanel";
 import {
-  ChatOverviewPanel,
-  usePostPushWorkflowWatch,
-  useOverviewPanelControls,
-} from "./chat/ChatOverviewPanel";
+  LazyChatOverviewPanel,
+  LazyComputerBetaPreview,
+  LazyContextHandoffInspectionPanel,
+  LazyPullRequestThreadDialog,
+  LazySideChatPanel,
+  notifyChatSurfaceLoadFailure,
+} from "./chat/chatViewLazySurfaces";
+import {
+  LazyLinkedWorktreeItemDialog,
+  LazyNewWorktreeDialog,
+} from "./worktrees/lazyWorktreeDialogs";
+import { usePostPushWorkflowWatch } from "./chat/usePostPushWorkflowWatch";
+import { useLazyComponentReady, usePreloadWhenIdle } from "../lib/preloadableLazy";
 import {
   CROWN_EASE_OUT,
   CROWN_RAIL_EXIT_MS,
@@ -318,6 +325,8 @@ import {
   resolveSendEnvMode,
   resolveChatSendWorktreePlan,
   shouldShowNewThreadSurface,
+  isServerThreadHistoryPending,
+  createThreadSubmitGuard,
   selectionAllowedAtSendBoundary,
   threadHasStarted,
   revokeUserMessagePreviewUrls,
@@ -373,6 +382,19 @@ const PROVIDER_STATUS_KEY_SEPARATOR = "\0";
 // Stable identity so the message-queue selector doesn't churn on empty threads.
 const EMPTY_QUEUED_MESSAGES: readonly QueuedMessage[] = Object.freeze([]);
 const EMPTY_STEER_ATTEMPTS: QueuedMessageSteerAttempts = Object.freeze({});
+
+/**
+ * Whether a thread opens with the overview rail docked: only where the rail
+ * sits inline. Narrow viewports and split panes present right-hand panels as
+ * sheets, and the phone tier's overview is a full-screen surface that never
+ * opens on its own.
+ */
+function overviewOpensByDefault(
+  shouldUseRightPanelSheet: boolean,
+  presentationTier: PresentationTier,
+): boolean {
+  return !shouldUseRightPanelSheet && presentationTier !== "phone";
+}
 
 function providerStatusesContentKey(providers: ReadonlyArray<ServerProvider>): string {
   const parts: string[] = [`${providers.length}`];
@@ -654,10 +676,6 @@ export default function ChatView(props: ChatViewProps) {
     Record<string, string | null>
   >({});
   const [isConnecting, _setIsConnecting] = useState(false);
-  const [planSidebarOpen, setPlanSidebarOpen] = useState(true);
-  // Set once the user opens the overview from the new-thread surface, so the
-  // empty-thread suppression below yields to an explicit request.
-  const [overviewOpenedOnEmptyThread, setOverviewOpenedOnEmptyThread] = useState(false);
   // Narrow viewports and split panes present right-hand panels (the context
   // handoff inspector) as a sheet rather than an inline aside, and start every
   // thread with the overview rail closed.
@@ -666,6 +684,17 @@ export default function ChatView(props: ChatViewProps) {
   // Covers both the OS setting and the in-app Motion preference.
   const reducedMotion = useReducedMotionEffective();
   const presentationTier = usePresentationTier();
+  // Starts in the state the thread-switch reset below settles on. Starting
+  // open and letting that reset close it played the rail's exit transition on
+  // every mount where the overview starts closed: the chat column, and with it
+  // every transcript row, re-laid out each frame for the length of the
+  // transition while the transcript was pinning itself to its end.
+  const [planSidebarOpen, setPlanSidebarOpen] = useState(() =>
+    overviewOpensByDefault(shouldUseRightPanelSheet, presentationTier),
+  );
+  // Set once the user opens the overview from the new-thread surface, so the
+  // empty-thread suppression below yields to an explicit request.
+  const [overviewOpenedOnEmptyThread, setOverviewOpenedOnEmptyThread] = useState(false);
   // With the thread sidebar collapsed this header owns the workspace's
   // top-left corner, so it reserves the room the shell's floating
   // show-sidebar control (and the native window controls) need there.
@@ -728,6 +757,12 @@ export default function ChatView(props: ChatViewProps) {
   const legendListRef = useRef<LegendListRef | null>(null);
   const isAtEndRef = useRef(true);
   const [timelineLiveFollowEnabled, setTimelineLiveFollowEnabled] = useState(true);
+  // Mirrors the live follow the committed timeline was given, for end pins
+  // that outlive the render which started them.
+  const timelineLiveFollowEnabledRef = useRef(timelineLiveFollowEnabled);
+  useEffect(() => {
+    timelineLiveFollowEnabledRef.current = timelineLiveFollowEnabled;
+  }, [timelineLiveFollowEnabled]);
   const sendInFlightRef = useRef(false);
   const editorSendPreparationRef = useRef(false);
   const terminalOpenByThreadRef = useRef<Record<string, boolean>>({});
@@ -748,13 +783,6 @@ export default function ChatView(props: ChatViewProps) {
   const storeNewTerminal = useTerminalStateStore((s) => s.newTerminal);
   const storeSetActiveTerminal = useTerminalStateStore((s) => s.setActiveTerminal);
   const storeCloseTerminal = useTerminalStateStore((s) => s.closeTerminal);
-  const serverThreadKeys = useStore(
-    useShallow((state) =>
-      selectThreadsAcrossEnvironments(state).map((thread) =>
-        scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
-      ),
-    ),
-  );
   const storeServerTerminalLaunchContext = useTerminalStateStore(
     (s) => s.terminalLaunchContextByThreadKey[scopedThreadKey(routeThreadRef)] ?? null,
   );
@@ -764,10 +792,24 @@ export default function ChatView(props: ChatViewProps) {
   const draftThreadsByThreadKey = useComposerDraftStore((store) => store.draftThreadsByThreadKey);
   const draftThreadKeys = useMemo(
     () =>
-      Object.values(draftThreadsByThreadKey).map((draftThread) =>
-        scopedThreadKey(scopeThreadRef(draftThread.environmentId, draftThread.threadId)),
+      new Set(
+        Object.values(draftThreadsByThreadKey).map((draftThread) =>
+          scopedThreadKey(scopeThreadRef(draftThread.environmentId, draftThread.threadId)),
+        ),
       ),
     [draftThreadsByThreadKey],
+  );
+  // Open terminals whose thread still exists. Checks only the (usually 0-2)
+  // open terminal keys instead of deriving a key for every thread on each
+  // store commit, streaming events included.
+  const existingOpenTerminalThreadKeys = useStore(
+    useShallow((state) =>
+      openTerminalThreadKeys.filter((nextThreadKey) => {
+        if (draftThreadKeys.has(nextThreadKey)) return true;
+        const nextThreadRef = parseScopedThreadKey(nextThreadKey);
+        return nextThreadRef !== null && selectThreadExistsByRef(state, nextThreadRef);
+      }),
+    ),
   );
   const [mountedTerminalThreadKeys, setMountedTerminalThreadKeys] = useState<string[]>([]);
   const mountedTerminalThreadRefs = useMemo(
@@ -807,9 +849,11 @@ export default function ChatView(props: ChatViewProps) {
   // Defers heavy MessagesTimeline render to a transition. When threadId
   // changes, the urgent render paints with the placeholder branch (see
   // the JSX gate below); React then re-renders in a transition where
-  // the deferred id catches up and the real timeline mounts.
+  // the deferred id catches up and the real timeline mounts. The `null`
+  // initial value applies the same to a fresh mount: chrome and composer
+  // commit first, the timeline follows in the transition.
   const activeThreadIdRaw = activeThread?.id ?? null;
-  const deferredActiveThreadId = useDeferredValue(activeThreadIdRaw);
+  const deferredActiveThreadId = useDeferredValue(activeThreadIdRaw, null);
   const isActiveThreadIdFresh = deferredActiveThreadId === activeThreadIdRaw;
   const runtimeMode = composerRuntimeMode ?? activeThread?.runtimeMode ?? DEFAULT_RUNTIME_MODE;
   const interactionMode = enforceBuildMode
@@ -869,6 +913,11 @@ export default function ChatView(props: ChatViewProps) {
     [activeThread],
   );
   const activeThreadKey = activeThreadRef ? scopedThreadKey(activeThreadRef) : null;
+  // Whether the open server thread's history window has been applied; drafts
+  // have none to wait for.
+  const activeThreadDetailLoaded = useStore((store) =>
+    isServerThread && activeThreadRef ? selectThreadDetailLoaded(store, activeThreadRef) : true,
+  );
   const activeThreadMessageHistory = useStore((state) =>
     activeThreadRef
       ? state.environmentStateById[activeThreadRef.environmentId]?.threadHistoryByThreadId?.[
@@ -961,10 +1010,6 @@ export default function ChatView(props: ChatViewProps) {
     setThreadMessageSearchSelectedIndex(0);
     setThreadMessageSearchTarget(null);
   }, [activeThreadKey]);
-  const existingOpenTerminalThreadKeys = useMemo(() => {
-    const existingThreadKeys = new Set<string>([...serverThreadKeys, ...draftThreadKeys]);
-    return openTerminalThreadKeys.filter((nextThreadKey) => existingThreadKeys.has(nextThreadKey));
-  }, [draftThreadKeys, openTerminalThreadKeys, serverThreadKeys]);
   const activeLatestTurn = activeThread?.latestTurn ?? null;
   const threadPlanCatalog = useThreadPlanCatalog(
     useMemo(() => {
@@ -1099,6 +1144,7 @@ export default function ChatView(props: ChatViewProps) {
   useChatSessionTabsPrefetch({
     activeWorktreeSessionTabs,
     activeSessionTabKey,
+    activeDetailLoaded: activeThreadDetailLoaded,
   });
 
   // Compute the list of environments this logical project spans, used to
@@ -1582,8 +1628,26 @@ export default function ChatView(props: ChatViewProps) {
     versionMismatchDismissKey,
     versionMismatchServerLabel,
   ]);
+  // The history subscription goes out after this view mounts, while the shell
+  // already lists the thread: until its window arrives an existing thread must
+  // not present as a new one.
+  const activeThreadHasLatestTurn = (activeThread?.latestTurn ?? null) !== null;
+  const activeThreadMessageCount = activeThread?.messages.length ?? 0;
+  const threadHistoryPending = useStore((store) =>
+    activeThreadRef
+      ? isServerThreadHistoryPending({
+          isServerThread,
+          detailLoaded: activeThreadDetailLoaded,
+          messageCount: activeThreadMessageCount,
+          hasLatestTurn: activeThreadHasLatestTurn,
+          latestUserMessageAt:
+            selectSidebarThreadSummaryByRef(store, activeThreadRef)?.latestUserMessageAt ?? null,
+        })
+      : false,
+  );
   const showNewThreadComposerSpacer =
     activeThread !== undefined &&
+    !threadHistoryPending &&
     activeThread.messages.length === 0 &&
     optimisticUserMessages.length === 0;
   const providerStatuses = serverConfig?.providers ?? EMPTY_PROVIDERS;
@@ -1606,8 +1670,15 @@ export default function ChatView(props: ChatViewProps) {
   // pre-check just avoids a wasted IPC round-trip when we're clearly focused.
   const notifyOnTurnComplete = settings.notifyOnTurnCompleteWhenUnfocused;
   const turnCompletionTrackerRef = useRef(createTurnCompletionTracker());
+  const turnCompletionTrackerThreadKeyRef = useRef(activeThreadKey);
   useEffect(() => {
     const tracker = turnCompletionTrackerRef.current;
+    // ChatView follows thread navigation: only turns watched in this thread
+    // since it was opened count, as when every open mounted a fresh view.
+    if (turnCompletionTrackerThreadKeyRef.current !== activeThreadKey) {
+      turnCompletionTrackerThreadKeyRef.current = activeThreadKey;
+      tracker.reset();
+    }
     const observation = {
       turnId: activeLatestTurn?.turnId ?? null,
       running: phase === "running",
@@ -1648,6 +1719,7 @@ export default function ChatView(props: ChatViewProps) {
     serverThread?.id,
     serverThread?.environmentId,
     activeThread?.title,
+    activeThreadKey,
   ]);
 
   const threadActivities = activeThread?.activities ?? EMPTY_ACTIVITIES;
@@ -1990,6 +2062,7 @@ export default function ChatView(props: ChatViewProps) {
       optimisticMessageCount: optimisticUserMessages.length,
       timelineEntryCount: timelineEntries.length,
       presentationTier,
+      historyPending: threadHistoryPending,
     });
 
   const loadedThreadMessageSearchOccurrences = useMemo(
@@ -2384,6 +2457,16 @@ export default function ChatView(props: ChatViewProps) {
     setHeaderPullRequestsOpen(false);
     setHeaderPullRequestsView("list");
   }
+  // ChatView follows thread navigation instead of remounting, so per-thread
+  // popovers, dialogs and dismissals start over when the thread changes.
+  const [threadScopedStateKey, setThreadScopedStateKey] = useState(activeThreadKey);
+  if (threadScopedStateKey !== activeThreadKey) {
+    setThreadScopedStateKey(activeThreadKey);
+    setHeaderPullRequestsOpen(false);
+    setHeaderPullRequestsView("list");
+    setHeaderLinkedItem(null);
+    setDismissedProviderStatusKey(null);
+  }
   const toggleHeaderPullRequests = useCallback(() => {
     setHeaderPullRequestsView("list");
     setHeaderPullRequestsOpen((open) => !open);
@@ -2476,7 +2559,10 @@ export default function ChatView(props: ChatViewProps) {
       threadId,
     );
     if (routeKind !== "server") return releaseHostedDemand;
-    const releaseSubscription = retainThreadDetailSubscription(environmentId, threadId);
+    // The open view: provider history recovery follows it, never a prewarm.
+    const releaseSubscription = retainThreadDetailSubscription(environmentId, threadId, {
+      view: true,
+    });
     return () => {
       releaseHostedDemand();
       releaseSubscription();
@@ -2878,9 +2964,32 @@ export default function ChatView(props: ChatViewProps) {
   }, [dispatchCapability.allowed, environmentId, serverThread]);
 
   // Scroll helpers — LegendList handles auto-scroll via maintainScrollAtEnd.
+  // Explicit pins (the pill, the composer resizing) are verified against the
+  // live scroller: a composer that grows while a just-opened thread is still
+  // laying out would otherwise leave the transcript short of its end, behind
+  // the scroll-to-bottom pill (see `pinTimelineToEnd`).
+  const timelineEndPinRef = useRef(0);
   const scrollToEnd = useCallback((animated = false) => {
     setTimelineLiveFollowEnabled(true);
-    legendListRef.current?.scrollToEnd?.({ animated });
+    const list = legendListRef.current;
+    if (!list) return;
+    const pin = ++timelineEndPinRef.current;
+    void pinTimelineToEnd(
+      {
+        scrollToEnd: (options) => list.scrollToEnd?.(options),
+        readScrollMetrics: () => {
+          const node = list.getScrollableNode?.();
+          return node instanceof HTMLElement ? node : null;
+        },
+      },
+      {
+        animated,
+        shouldContinue: () =>
+          pin === timelineEndPinRef.current &&
+          legendListRef.current === list &&
+          timelineLiveFollowEnabledRef.current,
+      },
+    );
   }, []);
 
   const scrollToEndAfterOptimistic = useCallback(() => {
@@ -2929,13 +3038,11 @@ export default function ChatView(props: ChatViewProps) {
     // signal the request to surface the new thread's plan would be silently lost.
     const openOverviewForNextThread = planSidebarOpenOnNextThreadRef.current;
     planSidebarOpenOnNextThreadRef.current = false;
-    // The phone tier renders the overview as a full-screen surface, so it must
-    // never open by default on a thread switch regardless of viewport width.
-    // Read through the ref: a tier flip alone must not re-run this reset (it
+    // Read through the refs: a tier flip alone must not re-run this reset (it
     // would drop preserved panel state on rotation).
     setPlanSidebarOpen(
       openOverviewForNextThread ||
-        (!shouldUseRightPanelSheetRef.current && presentationTierRef.current !== "phone"),
+        overviewOpensByDefault(shouldUseRightPanelSheetRef.current, presentationTierRef.current),
     );
     planSidebarDismissedForTurnRef.current = null;
   }, [activeThread?.id]);
@@ -3054,12 +3161,9 @@ export default function ChatView(props: ChatViewProps) {
     canOverrideServerThreadBranch && pendingServerThreadBranch !== undefined
       ? pendingServerThreadBranch
       : (activeThread?.branch ?? null);
-  const {
-    sourceControlActions: overviewSourceControlActions,
-    sourceControlQuickActions: overviewSourceControlQuickActions,
-    branchControl: overviewBranchControl,
-    sourceControlSync: overviewSourceControlSync,
-  } = useOverviewPanelControls({
+  // The overview panel module builds the git controls from this; ChatView stays
+  // free of them (the panel is loaded on demand).
+  const overviewPanelControls: OverviewPanelControlsInput = {
     // No Git controls, and so no Git status polling, for a chat folder.
     gitCwd: sourceControlCwd,
     activeThreadRef,
@@ -3077,7 +3181,7 @@ export default function ChatView(props: ChatViewProps) {
     onComposerFocusRequest: scheduleComposerFocus,
     canCheckoutPullRequestIntoThread,
     onCheckoutPullRequestRequest: openPullRequestDialog,
-  });
+  };
   const sendEnvMode = resolveSendEnvMode({
     requestedEnvMode: envMode,
     isGitRepo,
@@ -4219,18 +4323,15 @@ export default function ChatView(props: ChatViewProps) {
 
     await dispatchComposerSnapshotRef.current(composerSnapshot, settingsSnapshot);
   };
-  const composerSubmitPendingRef = useRef(false);
-  const runSendRef = useRef(runSend);
-  runSendRef.current = runSend;
+  const [composerSubmitGuard] = useState(createThreadSubmitGuard);
+  const runSendRef = useRef({ send: runSend, threadKey: routeThreadKey });
+  runSendRef.current = { send: runSend, threadKey: routeThreadKey };
   const onSend = useCallback(
     (e?: { preventDefault: () => void }, options?: { readonly invertFollowUp?: boolean }) => {
-      if (composerSubmitPendingRef.current) return;
-      composerSubmitPendingRef.current = true;
-      void runSendRef.current(e, options).finally(() => {
-        composerSubmitPendingRef.current = false;
-      });
+      const { send, threadKey } = runSendRef.current;
+      composerSubmitGuard.run(threadKey, () => send(e, options));
     },
-    [],
+    [composerSubmitGuard],
   );
 
   // Queued messages drain through the shared coordinator (`messageQueueDrain`),
@@ -4758,6 +4859,106 @@ export default function ChatView(props: ChatViewProps) {
   const overviewControlOpen = isPhoneTier ? showPhoneOverviewSheet : overviewVisible;
   // Keeps the rail mounted through its exit transition.
   const renderCrownRail = useDelayedUnmount(showCrownRail, reducedMotion ? 0 : CROWN_RAIL_EXIT_MS);
+  // Conditional surfaces load the first time they are wanted (see
+  // `chatViewLazySurfaces`) and mount only once loaded, so none commits a
+  // Suspense fallback; an empty thread or a draft never loads the overview
+  // stack. A failed chunk says so with a Retry: the rail and the side chat
+  // stay wanted and retry in place, while dialogs and the handoff inspector
+  // close (so nothing sits open and empty) and the Retry reopens them.
+  const overviewPanelReady = useLazyComponentReady(
+    LazyChatOverviewPanel,
+    renderCrownRail || showPhoneOverviewSheet,
+    {
+      onLoadError: (error, retry) => notifyChatSurfaceLoadFailure("overview panel", error, retry),
+    },
+  );
+  const computerBetaPreviewReady = useLazyComponentReady(
+    LazyComputerBetaPreview,
+    renderCrownRail && activeThread?.environmentId === localComputerEnvironmentId,
+    {
+      onLoadError: (error, retry) => notifyChatSurfaceLoadFailure("computer preview", error, retry),
+    },
+  );
+  const contextHandoffPanelReady = useLazyComponentReady(
+    LazyContextHandoffInspectionPanel,
+    !isPhoneTier && inspectedContextHandoff !== null,
+    {
+      onLoadError: (error) => {
+        const inspected = inspectedContextHandoff;
+        closeContextHandoffInspection();
+        notifyChatSurfaceLoadFailure(
+          "handoff details",
+          error,
+          () => {
+            if (inspected) openContextHandoffInspection(inspected.marker, inspected.trigger);
+          },
+          activeThreadRef,
+        );
+      },
+    },
+  );
+  const pullRequestDialogReady = useLazyComponentReady(
+    LazyPullRequestThreadDialog,
+    pullRequestDialogState !== null,
+    {
+      onLoadError: (error) => {
+        const reference = pullRequestDialogState?.initialReference ?? undefined;
+        closePullRequestDialog();
+        notifyChatSurfaceLoadFailure(
+          "pull request dialog",
+          error,
+          () => openPullRequestDialog(reference),
+          activeThreadRef,
+        );
+      },
+    },
+  );
+  const newWorktreeDialogReady = useLazyComponentReady(
+    LazyNewWorktreeDialog,
+    paneFocused && projectExplorerOpen,
+    {
+      onLoadError: (error) => {
+        setProjectExplorerOpen(false);
+        notifyChatSurfaceLoadFailure(
+          "new worktree dialog",
+          error,
+          () => setProjectExplorerOpen(true),
+          activeThreadRef,
+        );
+      },
+    },
+  );
+  const linkedItemDialogReady = useLazyComponentReady(
+    LazyLinkedWorktreeItemDialog,
+    paneFocused && headerLinkedItem !== null,
+    {
+      onLoadError: (error) => {
+        const item = headerLinkedItem;
+        setHeaderLinkedItem(null);
+        notifyChatSurfaceLoadFailure(
+          "linked item",
+          error,
+          () => {
+            if (item) setHeaderLinkedItem(item);
+          },
+          activeThreadRef,
+        );
+      },
+    },
+  );
+  const sideChatThreadKey = !isPhoneTier ? activeThreadKey : null;
+  const hasSideChat = useSideChatStore((state) =>
+    sideChatThreadKey ? state.chatsByThreadKey[sideChatThreadKey] !== undefined : false,
+  );
+  const sideChatPanelReady = useLazyComponentReady(LazySideChatPanel, hasSideChat, {
+    onLoadError: (error, retry) => notifyChatSurfaceLoadFailure("side chat", error, retry),
+  });
+  // Opening a side chat focuses its field on the next frame, so the panel is
+  // warmed in idle time wherever a side chat can be started.
+  usePreloadWhenIdle(
+    LazySideChatPanel,
+    !isPhoneTier && isServerThread && sideChatCapability.allowed,
+  );
 
   // The thread dock renders inside the composer, beneath the approval and
   // pending-input panels (see `ChatComposer`), so an open panel cannot carry it
@@ -4865,7 +5066,9 @@ export default function ChatView(props: ChatViewProps) {
   const workspacePreview =
     !isPhoneTier && activeThread.environmentId === localComputerEnvironmentId ? (
       <>
-        <ComputerBetaPreview key={activeThread.id} threadId={activeThread.id} inline />
+        {computerBetaPreviewReady ? (
+          <LazyComputerBetaPreview key={activeThread.id} threadId={activeThread.id} inline />
+        ) : null}
         <BackgroundBrowserPreview
           environmentId={environmentId}
           cwd={activeWorkspaceRoot ?? null}
@@ -4961,8 +5164,11 @@ export default function ChatView(props: ChatViewProps) {
           }}
         />
       ) : null}
-      {!isPhoneTier && activeThreadRef ? (
-        <SideChatPanel
+      {!isPhoneTier && activeThreadRef && sideChatPanelReady ? (
+        // One instance per thread: the panel reads which entries were already
+        // there when it opened, and ChatView now follows thread navigation.
+        <LazySideChatPanel
+          key={activeThreadKey}
           threadRef={activeThreadRef}
           providers={providerStatuses}
           connected={
@@ -5064,14 +5270,17 @@ export default function ChatView(props: ChatViewProps) {
         )}
       </header>
       {headerPullRequestsPopover}
-      <LinkedWorktreeItemDialog
-        open={paneFocused && headerLinkedItem !== null}
-        item={headerLinkedItem}
-        environmentId={activeProject?.environmentId ?? activeThread.environmentId}
-        projectId={activeProject?.id ?? activeThread.projectId}
-        cwd={activeProject?.cwd ?? gitCwd}
-        onOpenChange={handleHeaderLinkedItemDialogOpenChange}
-      />
+      {/* Mounted from the first open on, so later closes still animate. */}
+      {linkedItemDialogReady ? (
+        <LazyLinkedWorktreeItemDialog
+          open={paneFocused && headerLinkedItem !== null}
+          item={headerLinkedItem}
+          environmentId={activeProject?.environmentId ?? activeThread.environmentId}
+          projectId={activeProject?.id ?? activeThread.projectId}
+          cwd={activeProject?.cwd ?? gitCwd}
+          onOpenChange={handleHeaderLinkedItemDialogOpenChange}
+        />
+      ) : null}
 
       {/* Provider status lives in the composer banner stack. Thread errors use
           the global notification surface instead of obscuring the
@@ -5093,7 +5302,11 @@ export default function ChatView(props: ChatViewProps) {
                 Gated on useDeferredValue: the urgent render after a tab switch
                 paints the placeholder, then React commits the heavy timeline in
                 a low-priority transition. */}
-            {showNewThreadSurface ? null : isActiveThreadIdFresh ? (
+            {showNewThreadSurface ? null : threadHistoryPending &&
+              timelineEntries.length === 0 &&
+              !isWorking ? (
+              <ThreadHistorySkeleton />
+            ) : isActiveThreadIdFresh ? (
               <MessagesTimeline
                 key={activeThread.id}
                 agentPanelModel={agentPanelModel}
@@ -5510,8 +5723,8 @@ export default function ChatView(props: ChatViewProps) {
               composer needs. */}
           {showNewThreadSurface ? <div aria-hidden className="min-h-0 flex-1" /> : null}
 
-          {pullRequestDialogState ? (
-            <PullRequestThreadDialog
+          {pullRequestDialogState && pullRequestDialogReady ? (
+            <LazyPullRequestThreadDialog
               key={pullRequestDialogState.key}
               open
               environmentId={activeThread.environmentId}
@@ -5527,23 +5740,25 @@ export default function ChatView(props: ChatViewProps) {
               onPrepared={handlePreparedPullRequestThread}
             />
           ) : null}
-          <NewWorktreeDialog
-            open={paneFocused && projectExplorerOpen}
-            environmentId={activeThread.environmentId}
-            projectId={activeProject?.id ?? null}
-            cwd={activeProject?.cwd ?? null}
-            initialTab={projectExplorerInitialTab}
-            onCreated={(result) => {
-              void navigate({
-                to: "/$environmentId/$threadId",
-                params: {
-                  environmentId: activeThread.environmentId,
-                  threadId: result.sessionId,
-                },
-              });
-            }}
-            onOpenChange={setProjectExplorerOpen}
-          />
+          {newWorktreeDialogReady ? (
+            <LazyNewWorktreeDialog
+              open={paneFocused && projectExplorerOpen}
+              environmentId={activeThread.environmentId}
+              projectId={activeProject?.id ?? null}
+              cwd={activeProject?.cwd ?? null}
+              initialTab={projectExplorerInitialTab}
+              onCreated={(result) => {
+                void navigate({
+                  to: "/$environmentId/$threadId",
+                  params: {
+                    environmentId: activeThread.environmentId,
+                    threadId: result.sessionId,
+                  },
+                });
+              }}
+              onOpenChange={setProjectExplorerOpen}
+            />
+          ) : null}
           {!isPhoneTier && expandedImage ? (
             <ExpandedImageDialog preview={expandedImage} onClose={closeExpandedImage} contained />
           ) : null}
@@ -5551,12 +5766,14 @@ export default function ChatView(props: ChatViewProps) {
         {/* end chat column */}
         {isPhoneTier ? null : inspectedContextHandoff && !shouldUseRightPanelSheet ? (
           <aside className="flex min-h-0 w-[25rem] shrink-0 border-l border-border pt-[var(--chat-header-clearance,0px)]">
-            <ContextHandoffInspectionPanel
-              environmentId={activeThread.environmentId}
-              threadId={activeThread.id}
-              marker={inspectedContextHandoff.marker}
-              onClose={closeContextHandoffInspection}
-            />
+            {contextHandoffPanelReady ? (
+              <LazyContextHandoffInspectionPanel
+                environmentId={activeThread.environmentId}
+                threadId={activeThread.id}
+                marker={inspectedContextHandoff.marker}
+                onClose={closeContextHandoffInspection}
+              />
+            ) : null}
           </aside>
         ) : (
           // Reserves the docked rail's column; the Crown positions itself
@@ -5574,8 +5791,8 @@ export default function ChatView(props: ChatViewProps) {
               transitionTimingFunction: CROWN_EASE_OUT,
             }}
           >
-            {renderCrownRail ? (
-              <ChatOverviewPanel
+            {renderCrownRail && overviewPanelReady ? (
+              <LazyChatOverviewPanel
                 environmentId={environmentId}
                 gitCwd={sourceControlCwd}
                 activeWorktreeBranch={activeWorktreeSummary?.branch ?? null}
@@ -5589,10 +5806,7 @@ export default function ChatView(props: ChatViewProps) {
                 sidebarProposedPlan={sidebarProposedPlan}
                 threadSubagents={threadSubagents}
                 changedFileSummaries={activeThread?.turnDiffSummaries}
-                sourceControlActions={overviewSourceControlActions}
-                sourceControlQuickActions={overviewSourceControlQuickActions}
-                branchControl={overviewBranchControl}
-                sourceControlSync={overviewSourceControlSync}
+                controls={overviewPanelControls}
                 markdownCwd={gitCwd ?? undefined}
                 workspaceRoot={activeWorkspaceRoot}
                 presentation="crown"
@@ -5658,12 +5872,14 @@ export default function ChatView(props: ChatViewProps) {
       ))}
       {paneFocused && !isPhoneTier && shouldUseRightPanelSheet && inspectedContextHandoff ? (
         <RightPanelSheet open onClose={closeContextHandoffInspection}>
-          <ContextHandoffInspectionPanel
-            environmentId={activeThread.environmentId}
-            threadId={activeThread.id}
-            marker={inspectedContextHandoff.marker}
-            onClose={closeContextHandoffInspection}
-          />
+          {contextHandoffPanelReady ? (
+            <LazyContextHandoffInspectionPanel
+              environmentId={activeThread.environmentId}
+              threadId={activeThread.id}
+              marker={inspectedContextHandoff.marker}
+              onClose={closeContextHandoffInspection}
+            />
+          ) : null}
         </RightPanelSheet>
       ) : null}
       {isPhoneTier ? (
@@ -5680,32 +5896,32 @@ export default function ChatView(props: ChatViewProps) {
             backLabel="Back to thread"
             onBack={closePlanSidebar}
           >
-            <ChatOverviewPanel
-              environmentId={environmentId}
-              gitCwd={sourceControlCwd}
-              activeWorktreeBranch={activeWorktreeSummary?.branch ?? null}
-              activeThreadBranch={activeThread?.branch ?? null}
-              activeWorktreePullRequests={activeWorktreePullRequests}
-              activeWorktreeDiscoversPullRequests={activeWorktreeDiscoversPullRequests}
-              activeWorktreeTitle={activeWorktreeSummary?.title}
-              postPushWorkflowWatch={postPushWorkflowWatch}
-              activeThreadKey={activeThreadKey}
-              activePlan={activePlan}
-              sidebarProposedPlan={sidebarProposedPlan}
-              threadSubagents={threadSubagents}
-              changedFileSummaries={activeThread?.turnDiffSummaries}
-              sourceControlActions={overviewSourceControlActions}
-              branchControl={overviewBranchControl}
-              sourceControlSync={overviewSourceControlSync}
-              markdownCwd={gitCwd ?? undefined}
-              workspaceRoot={activeWorkspaceRoot}
-              presentation="sheet"
-              onOpenFiles={onOpenFilesPanel}
-              onOpenReview={onOpenReviewPanel}
-              onOpenSubagent={onOpenSubagentPanel}
-              onOpenPullRequestInApp={openPullRequestInApp}
-              onPostPushDiscoveryComplete={clearPostPushWatch}
-            />
+            {overviewPanelReady ? (
+              <LazyChatOverviewPanel
+                environmentId={environmentId}
+                gitCwd={sourceControlCwd}
+                activeWorktreeBranch={activeWorktreeSummary?.branch ?? null}
+                activeThreadBranch={activeThread?.branch ?? null}
+                activeWorktreePullRequests={activeWorktreePullRequests}
+                activeWorktreeDiscoversPullRequests={activeWorktreeDiscoversPullRequests}
+                activeWorktreeTitle={activeWorktreeSummary?.title}
+                postPushWorkflowWatch={postPushWorkflowWatch}
+                activeThreadKey={activeThreadKey}
+                activePlan={activePlan}
+                sidebarProposedPlan={sidebarProposedPlan}
+                threadSubagents={threadSubagents}
+                changedFileSummaries={activeThread?.turnDiffSummaries}
+                controls={overviewPanelControls}
+                markdownCwd={gitCwd ?? undefined}
+                workspaceRoot={activeWorkspaceRoot}
+                presentation="sheet"
+                onOpenFiles={onOpenFilesPanel}
+                onOpenReview={onOpenReviewPanel}
+                onOpenSubagent={onOpenSubagentPanel}
+                onOpenPullRequestInApp={openPullRequestInApp}
+                onPostPushDiscoveryComplete={clearPostPushWatch}
+              />
+            ) : null}
           </PhoneSurfaceScaffold>
         </PhoneWorkSurfaceSheet>
       ) : null}

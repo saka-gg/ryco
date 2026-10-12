@@ -8,7 +8,7 @@ import {
   IconTool,
   IconFileDiff,
   IconGitPullRequest,
-} from "@tabler/icons-react-native";
+} from "../../../components/icons";
 import { StatisticsChart } from "./StatisticsCharts";
 import type { StatisticsSnapshot } from "@ryco/contracts";
 import {

@@ -1,4 +1,5 @@
-import { DateTime, Option } from "effect";
+import * as DateTime from "effect/DateTime";
+import * as Option from "effect/Option";
 
 /**
  * Epoch milliseconds for the timestamp shapes the source-control contracts use

@@ -10,7 +10,8 @@ import {
   type OrchestrationGetTurnDiffResult,
   type ThreadId,
 } from "@ryco/contracts";
-import { Option, Schema } from "effect";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 import { Atom } from "effect/reactivity";
 
 import { cachedPayloadBytes } from "../persistence/cacheSize";

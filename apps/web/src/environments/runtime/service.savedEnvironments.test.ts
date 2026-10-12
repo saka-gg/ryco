@@ -288,6 +288,46 @@ describe("saved environment startup", () => {
     await resetEnvironmentServiceForTests();
   });
 
+  it("waits for a slow config snapshot instead of racing it with a getConfig read", async () => {
+    // A link where ws-token, upgrade and the first config item take a second.
+    mockCreateEnvironmentConnection.mockImplementation((input) => {
+      if (input.kind === "saved") {
+        setTimeout(() => input.onConfigUpdated?.(configSnapshot, "snapshot"), 1_000);
+      }
+      return {
+        kind: input.kind,
+        environmentId: input.knownEnvironment.environmentId,
+        knownEnvironment: input.knownEnvironment,
+        client: input.client,
+        ensureBootstrapped: vi.fn(async () => undefined),
+        reconnect: vi.fn(async () => undefined),
+        dispose: vi.fn(async () => undefined),
+      };
+    });
+    const { startEnvironmentConnectionService, listEnvironmentConnections } =
+      await import("./service");
+
+    const stop = startEnvironmentConnectionService();
+    await vi.advanceTimersByTimeAsync(2_500 + 500);
+    expect(
+      listEnvironmentConnections().some(
+        (connection) => connection.environmentId === savedRecord.environmentId,
+      ),
+    ).toBe(false);
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    const savedClient = mockCreateEnvironmentConnection.mock.calls.find(
+      ([input]) => input.kind === "saved",
+    )?.[0]?.client;
+    expect(savedClient.server.getConfig).not.toHaveBeenCalled();
+    expect(
+      listEnvironmentConnections().some(
+        (connection) => connection.environmentId === savedRecord.environmentId,
+      ),
+    ).toBe(true);
+    stop();
+  });
+
   it("coalesces hydration and registry sync so the initial saved connection only starts once", async () => {
     let finishHydration!: () => void;
     let finishTokenRead!: (token: string) => void;

@@ -207,6 +207,22 @@ export const ORCHESTRATION_EVENT_PROJECTORS = {
   "worktree.manualPositionSet": [ORCHESTRATION_PROJECTOR_NAMES.worktrees],
 } as const satisfies Record<OrchestrationEventType, ReadonlyArray<ProjectorName>>;
 
+/** Events replayed per transaction when lagging projectors catch up at boot. */
+export const BOOTSTRAP_REPLAY_BATCH_SIZE = 500;
+const BOOTSTRAP_REPLAY_PROGRESS_LOG_INTERVAL_MS = 5_000;
+
+/** Every event type routed to at least one of the projectors. */
+export function projectorEventTypes(
+  projectorNames: ReadonlyArray<ProjectorName>,
+): ReadonlyArray<OrchestrationEventType> {
+  const wanted = new Set<ProjectorName>(projectorNames);
+  return (
+    Object.entries(ORCHESTRATION_EVENT_PROJECTORS) as Array<
+      [OrchestrationEventType, ReadonlyArray<ProjectorName>]
+    >
+  ).flatMap(([type, routed]) => (routed.some((name) => wanted.has(name)) ? [type] : []));
+}
+
 interface ProjectorDefinition {
   readonly name: ProjectorName;
   readonly apply: (
@@ -2494,6 +2510,10 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
     const applyProjectorsForEvent = Effect.fn("applyProjectorsForEvent")(function* (
       event: OrchestrationEvent,
       projectorsToAdvance: ReadonlyArray<ProjectorDefinition>,
+      options?: {
+        /** Boot replay writes cursors once per batch instead of once per event. */
+        readonly advanceCursors?: boolean;
+      },
     ) {
       const perfEnabled = isServerPerfProfileEnabled();
       const startedAtMs = perfEnabled ? Date.now() : 0;
@@ -2528,13 +2548,15 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         }
       }
 
-      yield* projectionStateRepository.upsertMany(
-        projectorsToAdvance.map((projector) => ({
-          projector: projector.name,
-          lastAppliedSequence: event.sequence,
-          updatedAt: event.occurredAt,
-        })),
-      );
+      if (options?.advanceCursors !== false) {
+        yield* projectionStateRepository.upsertMany(
+          projectorsToAdvance.map((projector) => ({
+            projector: projector.name,
+            lastAppliedSequence: event.sequence,
+            updatedAt: event.occurredAt,
+          })),
+        );
+      }
 
       if (perfEnabled) {
         yield* Effect.sync(() => {
@@ -2573,6 +2595,15 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
       return postCommit;
     });
 
+    /**
+     * Catch lagging projectors up with the event log before the engine hydrates.
+     *
+     * Only the event types a lagging projector consumes are read (and decoded), events are
+     * applied in batches of {@link BOOTSTRAP_REPLAY_BATCH_SIZE} per transaction, and each
+     * lagging projector's cursor is written once per batch. A projector added by an upgrade
+     * starts at sequence 0, so this used to replay (and decode, and commit) the whole log one
+     * event at a time.
+     */
     const bootstrapProjectors = Effect.gen(function* () {
       const stateRows = yield* projectionStateRepository.listAll();
       const lastAppliedByProjector = new Map<ProjectorName, number>(
@@ -2586,25 +2617,107 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
 
       const replayFromSequence = Math.min(...lastAppliedByProjector.values());
       const replayThroughSequence = yield* eventStore.latestSequence;
-      yield* Stream.runForEach(
-        eventStore.readThroughSequence(replayFromSequence, replayThroughSequence),
-        (event) =>
-          Effect.gen(function* () {
-            const projectorsToAdvance = projectors.filter(
-              (projector) => event.sequence > (lastAppliedByProjector.get(projector.name) ?? 0),
-            );
-            if (projectorsToAdvance.length === 0) {
-              return;
-            }
-            const postCommit = yield* sql.withTransaction(
-              applyProjectorsForEvent(event, projectorsToAdvance),
-            );
-            for (const projector of projectorsToAdvance) {
-              lastAppliedByProjector.set(projector.name, event.sequence);
-            }
-            yield* postCommit;
-          }),
+      if (replayThroughSequence <= replayFromSequence) {
+        return;
+      }
+      const laggingProjectors = projectors.filter(
+        (projector) => (lastAppliedByProjector.get(projector.name) ?? 0) < replayThroughSequence,
       );
+      const eventTypes = projectorEventTypes(laggingProjectors.map((projector) => projector.name));
+      const startedAtMs = Date.now();
+      yield* Effect.logInfo("replaying orchestration events into lagging projectors", {
+        projectors: laggingProjectors.map((projector) => projector.name),
+        fromSequence: replayFromSequence,
+        throughSequence: replayThroughSequence,
+        eventTypes: eventTypes.length,
+      });
+
+      /** Advance every lagging projector's cursor through `sequence`, in the open transaction. */
+      const advanceCursors = (sequence: number, occurredAt: string) =>
+        Effect.gen(function* () {
+          const advanced = laggingProjectors.filter(
+            (projector) => (lastAppliedByProjector.get(projector.name) ?? 0) < sequence,
+          );
+          if (advanced.length === 0) return advanced;
+          yield* projectionStateRepository.upsertMany(
+            advanced.map((projector) => ({
+              projector: projector.name,
+              lastAppliedSequence: sequence,
+              updatedAt: occurredAt,
+            })),
+          );
+          return advanced;
+        });
+
+      let applied = 0;
+      let lastProgressLogAtMs = startedAtMs;
+      yield* eventStore
+        .readThroughSequence(replayFromSequence, replayThroughSequence, { eventTypes })
+        .pipe(
+          Stream.grouped(BOOTSTRAP_REPLAY_BATCH_SIZE),
+          Stream.runForEach((batch) =>
+            Effect.gen(function* () {
+              const last = batch[batch.length - 1];
+              if (last === undefined) return;
+              const { postCommits, advanced } = yield* sql.withTransaction(
+                Effect.gen(function* () {
+                  const postCommits: Array<Effect.Effect<void>> = [];
+                  for (const event of batch) {
+                    const projectorsToAdvance = laggingProjectors.filter(
+                      (projector) =>
+                        event.sequence > (lastAppliedByProjector.get(projector.name) ?? 0),
+                    );
+                    if (projectorsToAdvance.length === 0) continue;
+                    postCommits.push(
+                      yield* applyProjectorsForEvent(event, projectorsToAdvance, {
+                        advanceCursors: false,
+                      }),
+                    );
+                  }
+                  const advanced = yield* advanceCursors(last.sequence, last.occurredAt);
+                  return { postCommits, advanced } as const;
+                }),
+              );
+              for (const projector of advanced) {
+                lastAppliedByProjector.set(projector.name, last.sequence);
+              }
+              for (const postCommit of postCommits) {
+                yield* postCommit;
+              }
+              applied += batch.length;
+              if (Date.now() - lastProgressLogAtMs >= BOOTSTRAP_REPLAY_PROGRESS_LOG_INTERVAL_MS) {
+                lastProgressLogAtMs = Date.now();
+                yield* Effect.logInfo("orchestration projector replay progress", {
+                  throughSequence: last.sequence,
+                  targetSequence: replayThroughSequence,
+                  appliedEvents: applied,
+                });
+              }
+            }),
+          ),
+        );
+
+      // Events no lagging projector consumes were never read; the cursors still pass them,
+      // stamped like a per-event replay would have been: with the head event's time.
+      if (
+        laggingProjectors.some(
+          (projector) => (lastAppliedByProjector.get(projector.name) ?? 0) < replayThroughSequence,
+        )
+      ) {
+        const head = yield* eventStore.readPage(replayThroughSequence - 1, 1);
+        const occurredAt = head.events[0]?.occurredAt ?? new Date().toISOString();
+        const advanced = yield* sql.withTransaction(
+          advanceCursors(replayThroughSequence, occurredAt),
+        );
+        for (const projector of advanced) {
+          lastAppliedByProjector.set(projector.name, replayThroughSequence);
+        }
+      }
+      yield* Effect.logInfo("orchestration projector replay complete", {
+        appliedEvents: applied,
+        throughSequence: replayThroughSequence,
+        durationMs: Date.now() - startedAtMs,
+      });
     });
 
     const projectEventInTransaction: OrchestrationProjectionPipelineShape["projectEventInTransaction"] =

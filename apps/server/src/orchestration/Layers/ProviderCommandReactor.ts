@@ -84,10 +84,13 @@ import {
   Effect,
   Equal,
   Exit,
+  Fiber,
   Layer,
   Option,
+  PubSub,
   Schedule,
   Schema,
+  Scope,
   Stream,
 } from "effect";
 import * as Semaphore from "effect/Semaphore";
@@ -101,14 +104,22 @@ import { ProviderAdapterRequestError } from "../../provider/Errors.ts";
 import type { ProviderServiceError } from "../../provider/Errors.ts";
 import { resolveProviderOperationTimeouts } from "../../provider/providerOperationPolicy.ts";
 import { isMissingConversationError } from "../../provider/resumeFailure.ts";
-import { TextGeneration } from "../../textGeneration/TextGeneration.ts";
+import {
+  TextGeneration,
+  type ThreadTitleGenerationResult,
+} from "../../textGeneration/TextGeneration.ts";
 import {
   ProviderService,
   type ProviderRuntimeActivity,
 } from "../../provider/Services/ProviderService.ts";
+import { findThreadSession } from "../../provider/threadSessionLookup.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
-import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
+import {
+  ProjectionSnapshotQuery,
+  readPendingGoalSyncThreads,
+} from "../Services/ProjectionSnapshotQuery.ts";
 import { ContextHandoffCoordinator } from "../Services/ContextHandoffCoordinator.ts";
+import { CheckpointReactor } from "../Services/CheckpointReactor.ts";
 import {
   cwdRelocationHandoffReference,
   makeCwdRelocationRequestedActivity,
@@ -212,10 +223,25 @@ export interface ProviderCommandReactorOptions {
   readonly maxConcurrentRecoveries?: number;
   /** Total outstanding lifecycle items across all threads. Default 1024. */
   readonly lifecycleCapacity?: number;
+  /** After a first turn started, how long title and branch generation wait for it to stream. Default 1 s. */
+  readonly firstTurnGenerationDelayMs?: number;
+  /** How long a turn start waits for its pre-turn checkpoint baseline. Default 5 s. */
+  readonly preTurnBaselineWaitMs?: number;
 }
 
 const DEFAULT_LIVENESS_SWEEP_INTERVAL_MS = 60_000;
 const DEFAULT_MAX_CONCURRENT_RECOVERIES = 4;
+const DEFAULT_FIRST_TURN_GENERATION_DELAY_MS = 1_000;
+const GOALLESS_RUNTIMES_MAX = 4_096;
+/** First-turn generation starts by then even when the turn never visibly starts. */
+const FIRST_TURN_GENERATION_MAX_WAIT = Duration.seconds(15);
+/** A generated branch name is dropped when the agent works longer than this. */
+const BRANCH_RENAME_MAX_IDLE_WAIT = Duration.hours(12);
+/**
+ * How long a turn start waits for its pre-turn checkpoint baseline. The
+ * capture runs alongside the session start, so the wait rarely shows.
+ */
+const DEFAULT_PRE_TURN_BASELINE_WAIT_MS = 5_000;
 /** setTimeout's ceiling; larger sweep intervals only ever matter to the classifier. */
 const MAX_TIMER_MS = 2_147_483_647;
 
@@ -410,6 +436,8 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
   const vcsStatusBroadcaster = yield* VcsStatusBroadcaster;
   const textGeneration = yield* TextGeneration;
   const serverSettingsService = yield* ServerSettingsService;
+  // Optional so reactor tests without checkpointing keep working.
+  const checkpointReactor = yield* Effect.serviceOption(CheckpointReactor);
   const handledTurnStartKeys = yield* Cache.make<string, true>({
     capacity: HANDLED_TURN_START_KEY_MAX,
     timeToLive: HANDLED_TURN_START_KEY_TTL,
@@ -424,6 +452,16 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     );
 
   const threadModelSelections = new Map<string, ModelSelection>();
+  /** `threadId:runtimeSessionId` of runtimes that reported no goal, and whether goals are native there. */
+  const goallessRuntimes = new Map<string, "native" | "unsupported">();
+  const rememberGoallessRuntime = (runtimeKey: string, kind: "native" | "unsupported") => {
+    goallessRuntimes.delete(runtimeKey);
+    goallessRuntimes.set(runtimeKey, kind);
+    for (const oldest of goallessRuntimes.keys()) {
+      if (goallessRuntimes.size <= GOALLESS_RUNTIMES_MAX) break;
+      goallessRuntimes.delete(oldest);
+    }
+  };
 
   const livenessSweepIntervalMs = Math.max(
     1,
@@ -432,6 +470,13 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
   const unresponsiveAfterMs =
     options?.unresponsiveAfterMs ??
     resolveProviderOperationTimeouts({ env: process.env }).unresponsiveAfterMs;
+  const firstTurnGenerationDelayMs = Math.max(
+    0,
+    options?.firstTurnGenerationDelayMs ?? DEFAULT_FIRST_TURN_GENERATION_DELAY_MS,
+  );
+  const preTurnBaselineWait = Duration.millis(
+    Math.max(0, options?.preTurnBaselineWaitMs ?? DEFAULT_PRE_TURN_BASELINE_WAIT_MS),
+  );
   const laneControl = yield* makeThreadLaneControl;
   // Serializes recreating one missing worktree across threads that record it.
   const worktreeLocks = yield* makeKeyedSerialExecutor<string>();
@@ -558,8 +603,12 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
   const ensureRecordedWorktreeAvailable = Effect.fn("ensureRecordedWorktreeAvailable")(function* (
     thread: OrchestrationThreadShell,
     project: OrchestrationProjectShell | undefined,
+    options?: {
+      /** The caller already holds the lease on this thread's path for this scope. */
+      readonly pathLeased?: boolean;
+    },
   ) {
-    yield* leaseThreadPath(thread, project);
+    if (options?.pathLeased !== true) yield* leaseThreadPath(thread, project);
     if (thread.worktreePath === null) {
       return;
     }
@@ -704,28 +753,32 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
       readonly kind: StartKind;
       readonly modelSelection?: ModelSelection;
       readonly computerCatalogChanged?: boolean;
+      /** Shells the caller read for this same lane item, to skip re-reading them. */
+      readonly prefetched?: {
+        readonly thread: OrchestrationThreadShell;
+        readonly project: OrchestrationProjectShell | undefined;
+      };
     },
   ) {
     const startFence = { threadId, fenceSequence: options.fenceSequence, kind: options.kind };
     yield* laneControl.failIfCancelled(startFence);
-    const thread = yield* resolveThread(threadId);
+    const thread = options.prefetched?.thread ?? (yield* resolveThread(threadId));
     if (!thread) {
       return yield* Effect.die(new Error(`Thread '${threadId}' was not found in read model.`));
     }
 
-    const project = yield* resolveProject(thread.projectId);
+    const project = options.prefetched
+      ? options.prefetched.project
+      : yield* resolveProject(thread.projectId);
+    // One lease for the whole start, including the worktree check.
     yield* leaseThreadPath(thread, project);
-    yield* ensureRecordedWorktreeAvailable(thread, project);
+    yield* ensureRecordedWorktreeAvailable(thread, project, { pathLeased: true });
 
     const desiredRuntimeMode = thread.runtimeMode;
     const desiredTokenMode = thread.tokenMode ?? DEFAULT_TOKEN_MODE;
     const requestedModelSelection = options.modelSelection;
-    const resolveActiveSession = (threadId: ThreadId) =>
-      providerService
-        .listSessions()
-        .pipe(Effect.map((sessions) => sessions.find((session) => session.threadId === threadId)));
 
-    const activeSession = yield* resolveActiveSession(threadId);
+    const activeSession = yield* findThreadSession(providerService, threadId);
     const activeThreadSession =
       thread.session !== null && thread.session.status !== "stopped" && activeSession
         ? thread.session
@@ -1042,6 +1095,16 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     const goal = thread?.goal ?? null;
     const request = goal?.synchronization;
     const now = new Date().toISOString();
+    // A runtime that reported no goal keeps reporting none until the thread
+    // gets one: provider goal changes are ingested into the thread, and a
+    // user's goal makes `goal` non-null. Skips a provider round trip per turn.
+    const runtimeKey = thread?.session?.runtimeSessionId
+      ? `${threadId}:${thread.session.runtimeSessionId}`
+      : undefined;
+    const knownGoalless = runtimeKey !== undefined ? goallessRuntimes.get(runtimeKey) : undefined;
+    if (goal === null && knownGoalless !== undefined) {
+      return { goal: null, native: knownGoalless === "native" };
+    }
     if (goal && request && request.state !== "unsupported") {
       const synchronize = Effect.gen(function* () {
         if (request.action === "clear") {
@@ -1109,6 +1172,13 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     const nativeGoal = yield* (
       providerService.getThreadGoal?.(threadId) ?? Effect.succeed(false as const)
     );
+    if (
+      goal === null &&
+      runtimeKey !== undefined &&
+      (nativeGoal === false || nativeGoal === null)
+    ) {
+      rememberGoallessRuntime(runtimeKey, nativeGoal === null ? "native" : "unsupported");
+    }
     if (nativeGoal === false) {
       if (goal && !goal.synchronization) {
         const reminder: ThreadGoal = {
@@ -1151,6 +1221,9 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
 
   const buildSendTurnRequestForThread = Effect.fnUntraced(function* (input: {
     readonly threadId: ThreadId;
+    /** The thread and project the turn start just read; nothing writes them in between. */
+    readonly thread: OrchestrationThreadShell;
+    readonly project: OrchestrationProjectShell | undefined;
     readonly fenceSequence: number;
     readonly messageText: string;
     readonly computerUse?: ComputerTurnIntent;
@@ -1160,12 +1233,7 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     readonly tokenMode?: AgentTokenMode;
     readonly createdAt: string;
   }) {
-    const thread = yield* resolveThread(input.threadId);
-    if (!thread) {
-      return yield* Effect.die(
-        new Error(`Thread '${input.threadId}' was not found in read model.`),
-      );
-    }
+    const { thread, project } = input;
     const previousComputerPlan = computerTurnPlan(input.threadId);
     const previousAssistantText =
       input.computerUse && previousComputerPlan?.createdAt
@@ -1207,6 +1275,7 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
       kind: "turn",
       ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
       computerCatalogChanged,
+      prefetched: { thread, project },
     });
     const { goal, native } = yield* reconcileThreadGoal(input.threadId);
     if (input.modelSelection !== undefined) {
@@ -1221,13 +1290,8 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
       goal: native ? null : goal,
     });
     const normalizedAttachments = input.attachments ?? [];
-    const project = yield* resolveProject(thread.projectId);
     const customSystemPrompt = project?.customSystemPrompt?.trim() || undefined;
-    const activeSession = yield* providerService
-      .listSessions()
-      .pipe(
-        Effect.map((sessions) => sessions.find((session) => session.threadId === input.threadId)),
-      );
+    const activeSession = yield* findThreadSession(providerService, input.threadId);
     const sessionModelSwitch =
       activeSession === undefined
         ? "in-session"
@@ -1273,122 +1337,231 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     };
   });
 
-  const maybeGenerateAndRenameWorktreeBranchForFirstTurn = Effect.fn(
-    "maybeGenerateAndRenameWorktreeBranchForFirstTurn",
-  )(function* (input: {
+  /** Whether the thread's agent may be working in its checkout now. */
+  const isThreadWorking = (thread: OrchestrationThreadShell) =>
+    thread.session?.status === "running" ||
+    thread.session?.status === "starting" ||
+    (thread.session?.activeTurnId ?? null) !== null ||
+    thread.latestTurn?.state === "running";
+
+  /**
+   * The thread once its agent is not working, re-checked on each of its
+   * session changes; undefined when the thread is gone.
+   */
+  const awaitThreadIdle = (threadId: ThreadId) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        // Subscribed before every check, so a release in between is not missed.
+        const subscription = yield* orchestrationEngine.subscribeDomainEvents;
+        while (true) {
+          const thread = yield* resolveThread(threadId);
+          if (!thread || !isThreadWorking(thread)) return thread;
+          while (true) {
+            const event = yield* PubSub.take(subscription);
+            if (
+              event.aggregateId === threadId &&
+              (event.type === "thread.session-set" || event.type === "thread.deleted")
+            ) {
+              break;
+            }
+          }
+        }
+      }),
+    );
+
+  /**
+   * Resolves once a first turn is visibly under way: its first assistant
+   * message is projected, or the turn started (the provider accepted it, or
+   * its session is projected running) and `firstTurnGenerationDelayMs`
+   * passed. Bounded, so a turn that never starts still gets its title.
+   */
+  const awaitFirstTurnUnderway = (input: {
     readonly threadId: ThreadId;
-    readonly branch: string | null;
-    readonly worktreePath: string | null;
-    readonly worktreeId: WorktreeId | null;
-    readonly messageText: string;
-    readonly computerUse?: ComputerTurnIntent;
-    readonly attachments?: ReadonlyArray<ChatAttachment>;
+    readonly subscription: PubSub.Subscription<OrchestrationEvent>;
+    readonly turnStarted: Deferred.Deferred<void>;
+  }) => {
+    const watch = Effect.gen(function* () {
+      while (true) {
+        const event = yield* PubSub.take(input.subscription);
+        if (event.aggregateId !== input.threadId) continue;
+        if (event.type === "thread.message-sent" && event.payload.role === "assistant") return;
+        if (event.type === "thread.session-set" && event.payload.session.activeTurnId !== null) {
+          yield* Deferred.succeed(input.turnStarted, undefined);
+        }
+      }
+    });
+    return Effect.raceFirst(
+      watch,
+      Deferred.await(input.turnStarted).pipe(
+        Effect.andThen(Effect.sleep(Duration.millis(firstTurnGenerationDelayMs))),
+      ),
+    ).pipe(Effect.timeoutOption(FIRST_TURN_GENERATION_MAX_WAIT), Effect.asVoid);
+  };
+
+  const applyGeneratedThreadTitle = Effect.fn("applyGeneratedThreadTitle")(function* (input: {
+    readonly threadId: ThreadId;
+    readonly title: string;
+    readonly titleSeed?: string;
   }) {
-    if (!input.branch || !input.worktreePath) {
+    const thread = yield* resolveThread(input.threadId);
+    if (!thread || !canReplaceThreadTitle(thread.title, input.titleSeed)) return;
+    yield* orchestrationEngine.dispatch({
+      type: "thread.meta.update",
+      commandId: serverCommandId("thread-title-rename"),
+      threadId: input.threadId,
+      title: input.title,
+    });
+  });
+
+  /**
+   * Renames a worktree's temporary branch once the agent stopped working, so a
+   * running turn never sees its branch move under its git commands.
+   */
+  const renameWorktreeBranchWhenIdle = Effect.fn("renameWorktreeBranchWhenIdle")(function* (input: {
+    readonly threadId: ThreadId;
+    readonly oldBranch: string;
+    readonly targetBranch: string;
+    readonly worktreePath: string;
+    readonly worktreeId: WorktreeId | null;
+  }) {
+    const idle = yield* awaitThreadIdle(input.threadId).pipe(
+      Effect.timeoutOption(BRANCH_RENAME_MAX_IDLE_WAIT),
+    );
+    const thread = Option.getOrUndefined(idle);
+    // Gone, still working after the wait, or moved to another branch meanwhile.
+    if (
+      !thread ||
+      isThreadWorking(thread) ||
+      thread.branch !== input.oldBranch ||
+      thread.worktreePath !== input.worktreePath
+    ) {
       return;
     }
-    const oldBranch = input.branch;
-    const cwd = input.worktreePath;
-    const attachments = input.attachments ?? [];
-    yield* Effect.gen(function* () {
-      const { textGenerationModelSelection: modelSelection, worktreeBranchPrefix } =
-        yield* serverSettingsService.getSettings;
-      const originalPrefix = extractTemporaryWorktreeBranchPrefix(oldBranch, worktreeBranchPrefix);
-      if (originalPrefix === null) return;
+    const renamed = yield* gitWorkflow.renameBranch({
+      cwd: input.worktreePath,
+      oldBranch: input.oldBranch,
+      newBranch: input.targetBranch,
+    });
+    yield* orchestrationEngine.dispatch({
+      type: "thread.meta.update",
+      commandId: serverCommandId("worktree-branch-rename"),
+      threadId: input.threadId,
+      branch: renamed.branch,
+      worktreePath: input.worktreePath,
+    });
+    if (input.worktreeId !== null) {
+      yield* orchestrationEngine.dispatch({
+        type: "worktree.meta.update",
+        commandId: serverCommandId("worktree-branch-rename-meta"),
+        worktreeId: input.worktreeId,
+        branch: renamed.branch,
+        changedAt: new Date().toISOString(),
+      });
+    }
+    yield* vcsStatusBroadcaster
+      .refreshStatus(input.worktreePath)
+      .pipe(Effect.ignoreCause({ log: true }));
+  });
 
-      const generated = yield* textGeneration.generateBranchName({
-        cwd,
+  /**
+   * Best-effort first-turn title and worktree branch name. Starts once the
+   * turn is under way, so the generation CLI does not compete with the
+   * provider's boot, and asks for both in one call when both are wanted.
+   * Never fails.
+   */
+  const generateFirstTurnTitleAndBranch = Effect.fn("generateFirstTurnTitleAndBranch")(
+    function* (input: {
+      readonly threadId: ThreadId;
+      readonly thread: OrchestrationThreadShell;
+      readonly cwd: string;
+      readonly messageText: string;
+      readonly attachments?: ReadonlyArray<ChatAttachment>;
+      readonly titleSeed?: string;
+      readonly underway: Effect.Effect<void>;
+    }) {
+      const { threadId, thread } = input;
+      const attachments = input.attachments ?? [];
+      const logFailure = (message: string) => (cause: Cause.Cause<unknown>) =>
+        Cause.hasInterruptsOnly(cause)
+          ? Effect.interrupt
+          : Effect.logWarning(message, {
+              threadId,
+              cwd: input.cwd,
+              cause: Cause.pretty(cause),
+            });
+
+      yield* input.underway;
+      // Detached: a failure here has no caller to reach, so it is logged.
+      const settings = yield* serverSettingsService.getSettings.pipe(
+        Effect.map(Option.some),
+        Effect.catchCause((cause) =>
+          logFailure("provider command reactor skipped first-turn generation")(cause).pipe(
+            Effect.as(Option.none()),
+          ),
+        ),
+      );
+      if (Option.isNone(settings)) return;
+      const { textGenerationModelSelection: modelSelection, worktreeBranchPrefix } = settings.value;
+      const wantsTitle = canReplaceThreadTitle(thread.title, input.titleSeed);
+      const oldBranch = thread.branch;
+      const worktreePath = thread.worktreePath;
+      const branchPrefix =
+        oldBranch !== null && worktreePath !== null
+          ? extractTemporaryWorktreeBranchPrefix(oldBranch, worktreeBranchPrefix)
+          : null;
+      const generationInput = {
+        cwd: input.cwd,
         message: input.messageText,
         ...(attachments.length > 0 ? { attachments } : {}),
         modelSelection,
-      });
-      if (!generated) return;
+      };
 
-      const targetBranch = buildGeneratedWorktreeBranchName(generated.branch, originalPrefix);
-      if (targetBranch === oldBranch) return;
-
-      const renamed = yield* gitWorkflow.renameBranch({
-        cwd,
-        oldBranch,
-        newBranch: targetBranch,
-      });
-      yield* orchestrationEngine.dispatch({
-        type: "thread.meta.update",
-        commandId: serverCommandId("worktree-branch-rename"),
-        threadId: input.threadId,
-        branch: renamed.branch,
-        worktreePath: cwd,
-      });
-      if (input.worktreeId !== null) {
-        yield* orchestrationEngine.dispatch({
-          type: "worktree.meta.update",
-          commandId: serverCommandId("worktree-branch-rename-meta"),
-          worktreeId: input.worktreeId,
-          branch: renamed.branch,
-          changedAt: new Date().toISOString(),
-        });
+      const titled = wantsTitle
+        ? yield* textGeneration
+            .generateThreadTitle({
+              ...generationInput,
+              ...(branchPrefix !== null ? { includeBranch: true } : {}),
+            })
+            .pipe(
+              Effect.retry({ times: 1, schedule: Schedule.exponential("2 seconds") }),
+              Effect.map(Option.some),
+              Effect.catchCause((cause) =>
+                logFailure("provider command reactor failed to generate or rename thread title")(
+                  cause,
+                ).pipe(Effect.as(Option.none<ThreadTitleGenerationResult>())),
+              ),
+            )
+        : Option.none<ThreadTitleGenerationResult>();
+      if (Option.isSome(titled)) {
+        yield* applyGeneratedThreadTitle({
+          threadId,
+          title: titled.value.title,
+          ...(input.titleSeed !== undefined ? { titleSeed: input.titleSeed } : {}),
+        }).pipe(
+          Effect.catchCause(
+            logFailure("provider command reactor failed to generate or rename thread title"),
+          ),
+        );
       }
-      yield* vcsStatusBroadcaster.refreshStatus(cwd).pipe(Effect.ignoreCause({ log: true }));
-    }).pipe(
-      Effect.catchCause((cause) =>
-        Effect.logWarning("provider command reactor failed to generate or rename worktree branch", {
-          threadId: input.threadId,
-          cwd,
-          oldBranch,
-          cause: Cause.pretty(cause),
-        }),
-      ),
-    );
-  });
 
-  const maybeGenerateThreadTitleForFirstTurn = Effect.fn("maybeGenerateThreadTitleForFirstTurn")(
-    function* (input: {
-      readonly threadId: ThreadId;
-      readonly cwd: string;
-      readonly messageText: string;
-      readonly computerUse?: ComputerTurnIntent;
-      readonly attachments?: ReadonlyArray<ChatAttachment>;
-      readonly titleSeed?: string;
-    }) {
-      const attachments = input.attachments ?? [];
+      if (branchPrefix === null || oldBranch === null || worktreePath === null) return;
       yield* Effect.gen(function* () {
-        const { textGenerationModelSelection: modelSelection } =
-          yield* serverSettingsService.getSettings;
-
-        const generated = yield* textGeneration
-          .generateThreadTitle({
-            cwd: input.cwd,
-            message: input.messageText,
-            ...(attachments.length > 0 ? { attachments } : {}),
-            modelSelection,
-          })
-          .pipe(
-            Effect.retry({
-              times: 2,
-              schedule: Schedule.exponential("2 seconds"),
-            }),
-          );
-        if (!generated) return;
-
-        const thread = yield* resolveThread(input.threadId);
-        if (!thread) return;
-        if (!canReplaceThreadTitle(thread.title, input.titleSeed)) {
-          return;
-        }
-
-        yield* orchestrationEngine.dispatch({
-          type: "thread.meta.update",
-          commandId: serverCommandId("thread-title-rename"),
-          threadId: input.threadId,
-          title: generated.title,
+        const generatedBranch =
+          Option.getOrUndefined(titled)?.branch ??
+          (yield* textGeneration.generateBranchName({ ...generationInput, cwd: worktreePath }))
+            .branch;
+        const targetBranch = buildGeneratedWorktreeBranchName(generatedBranch, branchPrefix);
+        if (targetBranch === oldBranch) return;
+        yield* renameWorktreeBranchWhenIdle({
+          threadId,
+          oldBranch,
+          targetBranch,
+          worktreePath,
+          worktreeId: thread.worktreeId ?? null,
         });
       }).pipe(
-        Effect.catchCause((cause) =>
-          Effect.logWarning("provider command reactor failed to generate or rename thread title", {
-            threadId: input.threadId,
-            cwd: input.cwd,
-            cause: Cause.pretty(cause),
-          }),
+        Effect.catchCause(
+          logFailure("provider command reactor failed to generate or rename worktree branch"),
         ),
       );
     },
@@ -1710,6 +1883,59 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     );
   });
 
+  /** True once the thread's pre-turn baseline landed; false when the wait ran out. */
+  const awaitPreTurnBaseline = (threadId: ThreadId): Effect.Effect<boolean> =>
+    Option.match(checkpointReactor, {
+      onNone: () => Effect.succeed(true),
+      onSome: (reactor) =>
+        reactor
+          .ensurePreTurnBaseline(threadId)
+          .pipe(Effect.timeoutOption(preTurnBaselineWait), Effect.map(Option.isSome)),
+    });
+
+  /** Joins the baseline before anything reaches the provider; a late one is said, not raced silently. */
+  const joinPreTurnBaseline = Effect.fnUntraced(function* (
+    baseline: Fiber.Fiber<boolean>,
+    event: TurnStartRequestedEvent,
+  ) {
+    if (yield* Fiber.join(baseline)) return;
+    const threadId = event.payload.threadId;
+    yield* Effect.logWarning("provider command reactor started a turn before its checkpoint", {
+      threadId,
+      messageId: event.payload.messageId,
+    });
+    const createdAt = new Date().toISOString();
+    yield* orchestrationEngine
+      .dispatch({
+        type: "thread.activity.append",
+        commandId: serverCommandId("checkpoint-baseline-unconfirmed"),
+        threadId,
+        activity: {
+          id: EventId.make(crypto.randomUUID()),
+          tone: "info",
+          kind: "checkpoint.baseline.unconfirmed",
+          summary: "Checkpoint was not ready before this turn",
+          payload: {
+            detail:
+              "The checkpoint taken before this turn was still being saved when the turn started, so this turn's changes may also show in the previous turn's diff and revert.",
+          },
+          turnId: null,
+          createdAt,
+        },
+        createdAt,
+      })
+      .pipe(
+        Effect.catchCause((cause) =>
+          Cause.hasInterruptsOnly(cause)
+            ? Effect.failCause(cause)
+            : Effect.logWarning("provider command reactor could not note a late checkpoint", {
+                threadId,
+                cause: Cause.pretty(cause),
+              }),
+        ),
+      );
+  });
+
   const prepareAndSubmitTurnStart = Effect.fn("prepareAndSubmitTurnStart")(function* (
     event: TurnStartRequestedEvent,
     fenceSequence: number,
@@ -1784,7 +2010,13 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
       return;
     }
 
+    // The pre-turn baseline (and the previous turn's capture, if it is still
+    // queued) lands alongside the session start and is joined before the
+    // provider can touch files.
+    const baseline = yield* Effect.forkScoped(awaitPreTurnBaseline(threadId));
+
     if (event.payload.contextHandoff !== undefined) {
+      yield* joinPreTurnBaseline(baseline, event);
       return yield* runContextHandoffTurnStart({
         event,
         fenceSequence,
@@ -1793,8 +2025,11 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
       });
     }
 
+    const project = yield* resolveProject(thread.projectId);
     const prepared = yield* buildSendTurnRequestForThread({
       threadId: event.payload.threadId,
+      thread,
+      project,
       fenceSequence,
       messageText: message.text,
       ...(event.payload.computerUse ? { computerUse: event.payload.computerUse } : {}),
@@ -1808,59 +2043,45 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     }).pipe(
       Effect.map(Option.some),
       Effect.catchTag("CwdRelocationResumeUnavailableError", (relocation) =>
-        continueAfterCwdRelocation({
-          event,
-          fenceSequence,
-          thread,
-          messageText: message.text,
-          relocation,
-        }).pipe(Effect.as(Option.none())),
+        joinPreTurnBaseline(baseline, event).pipe(
+          Effect.andThen(
+            continueAfterCwdRelocation({
+              event,
+              fenceSequence,
+              thread,
+              messageText: message.text,
+              relocation,
+            }),
+          ),
+          Effect.as(Option.none()),
+        ),
       ),
     );
     if (Option.isNone(prepared)) return;
     const sendTurnRequest = prepared.value;
 
+    // Settled by the send below; first-turn generation waits for it.
+    const turnStarted = yield* Deferred.make<void>();
     if (isFirstUserMessageTurn) {
-      // Title and branch generation are best-effort and must never fail a turn
-      // whose session is already started.
-      yield* Effect.gen(function* () {
-        const project = yield* resolveProject(thread.projectId);
-        const generationCwd =
-          resolveThreadWorkspaceCwd({
-            thread,
-            projects: project ? [project] : [],
-          }) ?? process.cwd();
-        const generationInput = {
-          messageText: message.text,
-          ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
-          ...(event.payload.titleSeed !== undefined ? { titleSeed: event.payload.titleSeed } : {}),
-        };
-
-        yield* maybeGenerateAndRenameWorktreeBranchForFirstTurn({
-          threadId: event.payload.threadId,
-          branch: thread.branch,
-          worktreePath: thread.worktreePath,
-          worktreeId: thread.worktreeId ?? null,
-          ...generationInput,
-        }).pipe(Effect.forkScoped);
-
-        if (canReplaceThreadTitle(thread.title, event.payload.titleSeed)) {
-          yield* maybeGenerateThreadTitleForFirstTurn({
-            threadId: event.payload.threadId,
-            cwd: generationCwd,
-            ...generationInput,
-          }).pipe(Effect.forkScoped);
-        }
-      }).pipe(
-        Effect.catchCause((cause) =>
-          Cause.hasInterruptsOnly(cause)
-            ? Effect.failCause(cause)
-            : Effect.logWarning("provider command reactor skipped first-turn generation", {
-                threadId: event.payload.threadId,
-                cause: Cause.pretty(cause),
-              }),
-        ),
+      // Best-effort and detached: it must never fail or delay a turn whose
+      // session is already started. Subscribed now, so the turn's start is seen.
+      const generationScope = yield* Scope.make();
+      const subscription = yield* orchestrationEngine.subscribeDomainEvents.pipe(
+        Scope.provide(generationScope),
       );
+      yield* generateFirstTurnTitleAndBranch({
+        threadId: event.payload.threadId,
+        thread,
+        cwd:
+          resolveThreadWorkspaceCwd({ thread, projects: project ? [project] : [] }) ??
+          process.cwd(),
+        messageText: message.text,
+        ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
+        ...(event.payload.titleSeed !== undefined ? { titleSeed: event.payload.titleSeed } : {}),
+        underway: awaitFirstTurnUnderway({ threadId, subscription, turnStarted }).pipe(
+          Effect.ensuring(Scope.close(generationScope, Exit.void)),
+        ),
+      }).pipe(Effect.ensuring(Scope.close(generationScope, Exit.void)), Effect.forkScoped);
     }
 
     const commitAcceptedModelSelection: Effect.Effect<unknown, OrchestrationDispatchError> =
@@ -1877,6 +2098,7 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     // A Stop that arrived while the session was prepared ends the turn here,
     // before anything is submitted.
     yield* laneControl.failIfCancelled(turnFence);
+    yield* joinPreTurnBaseline(baseline, event);
 
     // Submission failures may follow this request's own turn.started, so they
     // reset a running session (preserveActiveTurn: false), as before. A turn the
@@ -1884,6 +2106,7 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     // commit after it only logs. The thread's fence state is retained until the
     // send settles, so a failure after a Stop is still recognised as a cancel.
     const send = Effect.suspend(() => providerService.sendTurn(sendTurnRequest)).pipe(
+      Effect.ensuring(Deferred.succeed(turnStarted, undefined)),
       Effect.matchCauseEffect({
         onFailure: (cause) =>
           reportTurnStartFailure({ event, fenceSequence, cause, preserveActiveTurn: false }),
@@ -2205,9 +2428,7 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     if (event.payload.goal.synchronization?.startTurn && result.goal?.status === "active") {
       // A Stop noted while the goal was reconciled wins: no new agent turn after it.
       if (yield* laneControl.cancelsStart({ threadId, fenceSequence, kind: "restart" })) return;
-      const sessions = yield* providerService.listSessions();
-      if (sessions.some((session) => session.threadId === threadId && session.status === "running"))
-        return;
+      if ((yield* findThreadSession(providerService, threadId))?.status === "running") return;
       const current = yield* resolveThread(threadId);
       if (!current || current.goal?.synchronization?.state === "pending") return;
       yield* orchestrationEngine.dispatch({
@@ -3148,26 +3369,28 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
         Effect.delay(Duration.millis(Math.min(livenessSweepIntervalMs, MAX_TIMER_MS))),
       ),
     );
-    const snapshot = yield* projectionSnapshotQuery.getShellSnapshot().pipe(Effect.orDie);
-    for (const thread of snapshot.threads) {
-      if (thread.goal?.synchronization?.state !== "pending") continue;
+    // A narrow read of pending goal synchronizations, not a whole shell snapshot: this runs
+    // inside reactors.start, before the command gate opens.
+    const pending = yield* readPendingGoalSyncThreads(projectionSnapshotQuery).pipe(Effect.orDie);
+    for (const { threadId, goal } of pending.threads) {
+      if (goal.synchronization?.state !== "pending") continue;
       // Deferred first-turn work is recovered by the normal turn lifecycle. It
       // must not bind to the previous provider ahead of a context handoff.
-      if (thread.goal.synchronization.deferUntilTurn) continue;
+      if (goal.synchronization.deferUntilTurn) continue;
       // Fence 0: any stop or interrupt this process observes cancels it before it runs.
       yield* routeProviderIntentEvent(
         {
-          sequence: snapshot.snapshotSequence,
+          sequence: pending.snapshotSequence,
           eventId: EventId.make(crypto.randomUUID()),
           type: "thread.goal-updated",
           aggregateKind: "thread",
-          aggregateId: thread.id,
-          occurredAt: thread.goal.updatedAt,
-          commandId: CommandId.make(thread.goal.synchronization.requestId),
+          aggregateId: threadId,
+          occurredAt: goal.updatedAt,
+          commandId: CommandId.make(goal.synchronization.requestId),
           causationEventId: null,
           correlationId: null,
           metadata: {},
-          payload: { threadId: thread.id, goal: thread.goal, origin: "client" },
+          payload: { threadId, goal, origin: "client" },
         },
         { fenceSequence: 0, recovery: true },
       );

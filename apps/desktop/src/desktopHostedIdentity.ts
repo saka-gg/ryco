@@ -5,15 +5,17 @@ import type {
   DesktopHostedIdentityState,
 } from "@ryco/contracts";
 import {
-  createNativeE2eeEnrollmentCoordinator,
-  createNativeE2eeTrustResolver,
   HostedHubApi,
   HostedHubApiError,
   type HostedHubNode,
+} from "@ryco/client-runtime/authorization";
+import {
+  createNativeE2eeEnrollmentCoordinator,
+  createNativeE2eeTrustResolver,
   type NativeE2eeEnrollmentCoordinator,
   type NativeE2eeEnrollmentState,
   type ResolveNativeE2eeTrustInput,
-} from "@ryco/client-runtime/authorization";
+} from "@ryco/client-runtime/authorization/e2ee";
 import type {
   DpopSignerService,
   HttpClientService,
@@ -126,6 +128,16 @@ export function shouldEnableDesktopHubConnectorForAccountSetup(input: {
   return input.hubOrigin !== null && !input.connectorEnabled && input.hasSessionMaterial;
 }
 
+/** What one credential hydrate and session restore found; see `#restoreSession`. */
+type DesktopSessionRestore =
+  | { readonly kind: "unavailable" }
+  | { readonly kind: "no-session" }
+  | { readonly kind: "session-invalid" }
+  | {
+      readonly kind: "session";
+      readonly session: Awaited<ReturnType<HostedHubApi["restoreSession"]>>;
+    };
+
 export class DesktopHostedIdentityCoordinator {
   readonly #origin: string;
   readonly #installationId: string;
@@ -143,6 +155,8 @@ export class DesktopHostedIdentityCoordinator {
   readonly #resolveNativeE2eeTrust: ReturnType<typeof createNativeE2eeTrustResolver> | undefined;
   #operation: Promise<DesktopHostedIdentityStatus> | undefined;
   #operationInteractive = false;
+  /** A session restore started ahead of the backend; see {@link prepareResume}. */
+  #preparedRestore: Promise<DesktopSessionRestore> | undefined;
 
   constructor(input: {
     readonly origin: string;
@@ -264,6 +278,60 @@ export class DesktopHostedIdentityCoordinator {
     return this.#serialize(false);
   }
 
+  /**
+   * Start a background resume's credential hydrate and Hub session restore
+   * now, while the backend is still starting, so the resume that follows its
+   * readiness adopts the answer instead of paying that round trip after it.
+   * Only the node claim and local introduction need the backend, and they still
+   * run in the resume itself. Nothing is published here; a transient failure is
+   * simply restored again by the resume.
+   */
+  prepareResume(): void {
+    if (this.#operation !== undefined || this.#preparedRestore !== undefined) return;
+    this.#preparedRestore = this.#restoreSession();
+  }
+
+  /** Every in-flight account operation, including a prepared restore, has settled. */
+  async #idle(): Promise<void> {
+    await Promise.all([
+      this.#operation?.catch(() => undefined),
+      this.#preparedRestore?.catch(() => undefined),
+    ]);
+  }
+
+  /**
+   * Hydrate the stored credentials and restore the Hub session with them.
+   * Never rejects: every outcome is a value the resume decides on.
+   */
+  async #restoreSession(): Promise<DesktopSessionRestore> {
+    try {
+      await this.#credentials.hydrate();
+    } catch {
+      return { kind: "unavailable" };
+    }
+    if (!this.#api.hasSessionMaterial) return { kind: "no-session" };
+    try {
+      return { kind: "session", session: await this.#api.restoreSession() };
+    } catch (cause) {
+      return cause instanceof HostedHubApiError && cause.code === "session_invalid"
+        ? { kind: "session-invalid" }
+        : { kind: "unavailable" };
+    }
+  }
+
+  /**
+   * The prepared restore, if one was started, once it has settled — and only
+   * when its answer is definite. A transient failure (offline at launch, a
+   * busy Hub) is not carried into a resume that may run seconds later.
+   */
+  async #takePreparedRestore(): Promise<DesktopSessionRestore | undefined> {
+    const prepared = this.#preparedRestore;
+    if (prepared === undefined) return undefined;
+    const outcome = await prepared;
+    if (this.#preparedRestore === prepared) this.#preparedRestore = undefined;
+    return outcome.kind === "unavailable" ? undefined : outcome;
+  }
+
   connect(): Promise<DesktopHostedIdentityStatus> {
     return this.#serialize(true);
   }
@@ -274,7 +342,10 @@ export class DesktopHostedIdentityCoordinator {
   }
 
   async disconnect(): Promise<void> {
-    await this.#operation?.catch(() => undefined);
+    await this.#idle();
+    // A prepared restore answered for the credentials this clears; the next
+    // resume must not adopt it as the signed-out installation's session.
+    this.#preparedRestore = undefined;
     this.#api.clearSessionMaterial();
     await this.#credentials.clear();
     await this.#nativeE2eeEnrollment?.invalidate("signed-out");
@@ -297,20 +368,20 @@ export class DesktopHostedIdentityCoordinator {
 
   /** Directory projection for the native Desktop client; credentials stay in main. */
   async renameNode(nodeId: string, label: string): Promise<void> {
-    await this.#operation?.catch(() => undefined);
+    await this.#idle();
     if (!this.#api.hasSessionMaterial) throw new Error("Sign in to rename a device.");
     await this.#api.renameNode(nodeId, label);
   }
 
   async listNodes(): Promise<ReadonlyArray<HostedHubNode>> {
-    await this.#operation?.catch(() => undefined);
+    await this.#idle();
     if (!this.#api.hasSessionMaterial) return [];
     return this.#api.listNodes();
   }
 
   /** Main-process-only relay attempt material. Never return this through preload. */
   async issueRelayTicket(nodeId: string): Promise<HostedRelayTicket> {
-    await this.#operation?.catch(() => undefined);
+    await this.#idle();
     if (!this.#api.hasSessionMaterial) throw new Error("Desktop Hub session is unavailable.");
     return this.#api.issueRelayTicket(nodeId);
   }
@@ -334,7 +405,7 @@ export class DesktopHostedIdentityCoordinator {
   async connectGitHub(input?: {
     readonly totpCode?: string;
   }): Promise<DesktopHostedGitHubActionResult> {
-    await this.#operation?.catch(() => undefined);
+    await this.#idle();
     if (!this.#api.hasSessionMaterial) {
       return { outcome: "unavailable", signedOut: true };
     }
@@ -361,7 +432,7 @@ export class DesktopHostedIdentityCoordinator {
   async disconnectGitHub(input?: {
     readonly totpCode?: string;
   }): Promise<DesktopHostedGitHubActionResult> {
-    await this.#operation?.catch(() => undefined);
+    await this.#idle();
     if (!this.#api.hasSessionMaterial) {
       return { outcome: "unavailable", signedOut: true };
     }
@@ -417,36 +488,23 @@ export class DesktopHostedIdentityCoordinator {
   }
 
   async #run(interactive: boolean): Promise<DesktopHostedIdentityStatus> {
-    try {
-      await this.#credentials.hydrate();
-    } catch {
-      return { status: "unavailable" };
-    }
+    // A prepared restore always settles first, so two restores never run (and
+    // rotate a native token) concurrently.
+    const restored = (await this.#takePreparedRestore()) ?? (await this.#restoreSession());
     let session;
-    if (!this.#api.hasSessionMaterial) {
+    if (restored.kind === "unavailable") return { status: "unavailable" };
+    if (restored.kind === "session") {
+      session = restored.session;
+    } else {
+      if (restored.kind === "session-invalid") {
+        await this.#credentials.clear().catch(() => undefined);
+      }
       if (!interactive) return { status: "signed-out" };
       try {
         session = await this.#api.signIn();
         await this.#credentials.flush();
       } catch {
         return { status: "unavailable" };
-      }
-    } else {
-      try {
-        session = await this.#api.restoreSession();
-      } catch (cause) {
-        if (cause instanceof HostedHubApiError && cause.code === "session_invalid") {
-          await this.#credentials.clear().catch(() => undefined);
-          if (!interactive) return { status: "signed-out" };
-          try {
-            session = await this.#api.signIn();
-            await this.#credentials.flush();
-          } catch {
-            return { status: "unavailable" };
-          }
-        } else {
-          return { status: "unavailable" };
-        }
       }
     }
 
@@ -461,6 +519,9 @@ export class DesktopHostedIdentityCoordinator {
       // succeeded. Remote unpinned nodes therefore remain unverified and
       // mutation-blocked; this is a compatibility fallback, not an E2EE
       // downgrade.
+      // The GitHub link state needs only the account session, so it is read
+      // beside the setup and enrollment rather than after both.
+      const readingGitHub = this.#readGitHubState();
       const [setupResult, enrollmentResult] = await Promise.allSettled([
         this.#setup({ accountId: session.account.id, interactive }),
         this.#nativeE2eeEnrollment?.ensure(session.account.id),
@@ -471,7 +532,7 @@ export class DesktopHostedIdentityCoordinator {
       const setup = setupResult.status === "fulfilled" ? setupResult.value : null;
       const accountE2eeReady =
         this.#nativeE2eeEnrollment !== undefined && enrollmentResult.status === "fulfilled";
-      const github = await this.#readGitHubState();
+      const github = await readingGitHub;
       return {
         status: "ready",
         accountId: session.account.id,

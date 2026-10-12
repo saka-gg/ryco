@@ -5,7 +5,9 @@ import {
   normalizeGitRemoteUrl,
 } from "@ryco/shared/git";
 
-import { runProcess } from "../../processRunner.ts";
+import { gitCommandDuration, gitCommandsTotal, withMetrics } from "../../observability/Metrics.ts";
+import { READ_ONLY_GIT_ENV } from "../../vcs/GitVcsDriver.ts";
+import * as VcsProcess from "../../vcs/VcsProcess.ts";
 import {
   RepositoryIdentityResolver,
   type RepositoryIdentityResolverShape,
@@ -100,51 +102,63 @@ interface RepositoryIdentityResolverOptions {
   readonly negativeCacheTtl?: Duration.Input;
 }
 
-async function resolveRepositoryIdentityCacheKey(cwd: string): Promise<string | null> {
-  try {
-    const topLevelResult = await runProcess("git", ["-C", cwd, "rev-parse", "--show-toplevel"], {
-      allowNonZeroExit: true,
-      timeoutMs: GIT_IDENTITY_PROBE_TIMEOUT_MS,
-    });
-    if (topLevelResult.timedOut || topLevelResult.code !== 0) {
-      return null;
-    }
-
-    const candidate = topLevelResult.stdout.trim();
-    if (candidate.length > 0) {
-      return candidate;
-    }
-  } catch {
-    return null;
-  }
-
-  return null;
-}
-
-async function resolveRepositoryIdentityFromCacheKey(
-  cacheKey: string,
-): Promise<RepositoryIdentity | null> {
-  try {
-    const remoteResult = await runProcess("git", ["-C", cacheKey, "remote", "-v"], {
-      allowNonZeroExit: true,
-      timeoutMs: GIT_IDENTITY_PROBE_TIMEOUT_MS,
-    });
-    if (remoteResult.timedOut || remoteResult.code !== 0) {
-      return null;
-    }
-
-    const allRemotes = parseRemoteFetchUrls(remoteResult.stdout);
-    const remote = pickPrimaryRemote(allRemotes);
-    return remote ? buildRepositoryIdentity({ ...remote, rootPath: cacheKey, allRemotes }) : null;
-  } catch {
-    return null;
-  }
-}
+/**
+ * Identity probes run through `VcsProcess`: governed by the process-wide git pool in the caller's
+ * lane (the persisted identity sync runs them in the background lane), counted in the git command
+ * metrics, never through a shell. The root is the process cwd rather than a `-C <path>` argument:
+ * on Windows `shell: true` split unquoted roots with spaces (`C:\Users\Jane Doe`) into two
+ * arguments, so those projects never got an identity, and every probe paid an extra cmd.exe.
+ * A failed, timed-out or unspawnable probe reads as "no identity".
+ */
+const makeGitIdentityProbe =
+  (vcsProcess: VcsProcess.VcsProcessShape) =>
+  (operation: string, cwd: string, args: ReadonlyArray<string>): Effect.Effect<string | null> =>
+    vcsProcess
+      .run({
+        operation,
+        command: "git",
+        args,
+        cwd,
+        // Like the driver's read-only git: C locale, and no optional index lock that could race
+        // an agent's `git add` in the same checkout.
+        env: { LC_ALL: "C", LANG: "C", ...READ_ONLY_GIT_ENV },
+        allowNonZeroExit: true,
+        timeoutMs: GIT_IDENTITY_PROBE_TIMEOUT_MS,
+      })
+      .pipe(
+        Effect.map((result) => (result.exitCode === 0 ? result.stdout : null)),
+        withMetrics({
+          counter: gitCommandsTotal,
+          timer: gitCommandDuration,
+          attributes: { operation },
+        }),
+        Effect.catch(() => Effect.succeed(null)),
+      );
 
 export const makeRepositoryIdentityResolver = Effect.fn("makeRepositoryIdentityResolver")(
   function* (options: RepositoryIdentityResolverOptions = {}) {
+    const probe = makeGitIdentityProbe(yield* VcsProcess.VcsProcess);
+    const resolveRepositoryIdentityCacheKey = (cwd: string) =>
+      probe("RepositoryIdentityResolver.showToplevel", cwd, ["rev-parse", "--show-toplevel"]).pipe(
+        Effect.map((stdout) => {
+          const candidate = stdout?.trim() ?? "";
+          return candidate.length > 0 ? candidate : null;
+        }),
+      );
+    const resolveRepositoryIdentityFromCacheKey = (cacheKey: string) =>
+      probe("RepositoryIdentityResolver.listRemotes", cacheKey, ["remote", "-v"]).pipe(
+        Effect.map((stdout) => {
+          if (stdout === null) return null;
+          const allRemotes = parseRemoteFetchUrls(stdout);
+          const remote = pickPrimaryRemote(allRemotes);
+          return remote
+            ? buildRepositoryIdentity({ ...remote, rootPath: cacheKey, allRemotes })
+            : null;
+        }),
+      );
+
     const workspaceRootCache = yield* Cache.makeWith<string, string | null>(
-      (cwd) => Effect.promise(() => resolveRepositoryIdentityCacheKey(cwd)),
+      resolveRepositoryIdentityCacheKey,
       {
         capacity: options.cacheCapacity ?? DEFAULT_REPOSITORY_IDENTITY_CACHE_CAPACITY,
         timeToLive: Exit.match({
@@ -157,7 +171,7 @@ export const makeRepositoryIdentityResolver = Effect.fn("makeRepositoryIdentityR
       },
     );
     const repositoryIdentityCache = yield* Cache.makeWith<string, RepositoryIdentity | null>(
-      (cacheKey) => Effect.promise(() => resolveRepositoryIdentityFromCacheKey(cacheKey)),
+      resolveRepositoryIdentityFromCacheKey,
       {
         capacity: options.cacheCapacity ?? DEFAULT_REPOSITORY_IDENTITY_CACHE_CAPACITY,
         timeToLive: Exit.match({
@@ -178,13 +192,30 @@ export const makeRepositoryIdentityResolver = Effect.fn("makeRepositoryIdentityR
       return yield* Cache.get(repositoryIdentityCache, cacheKey);
     });
 
+    const refresh: NonNullable<RepositoryIdentityResolverShape["refresh"]> = Effect.fn(
+      "RepositoryIdentityResolver.refresh",
+    )(function* (cwd) {
+      // Probed outside the caches, then stored. The persisted sync refreshes in the background
+      // lane; a pending cache entry would make an interactive `resolve` of the same root (the
+      // `project.created` stream enrichment) wait behind background git.
+      const cacheKey = yield* resolveRepositoryIdentityCacheKey(cwd);
+      yield* Cache.set(workspaceRootCache, cwd, cacheKey);
+      if (cacheKey === null) return null;
+      const identity = yield* resolveRepositoryIdentityFromCacheKey(cacheKey);
+      yield* Cache.set(repositoryIdentityCache, cacheKey, identity);
+      return identity;
+    });
+
     return {
       resolve,
+      refresh,
     } satisfies RepositoryIdentityResolverShape;
   },
 );
 
+// `VcsProcess.layer` is stateless (the git pool is process-wide); layer memoization shares the
+// instance the server root already provides.
 export const RepositoryIdentityResolverLive = Layer.effect(
   RepositoryIdentityResolver,
   makeRepositoryIdentityResolver(),
-);
+).pipe(Layer.provide(VcsProcess.layer));

@@ -1,13 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import type { ServerProvider, StatisticsSnapshot } from "@ryco/contracts";
 import {
-  USAGE_CONTRACT_VERSION,
-  type ServerProvider,
-  type StatisticsSnapshot,
-} from "@ryco/contracts";
-import {
-  isUsageContractMismatch,
   mergeUsageEnvironmentResults,
-  usageRequestForRange,
+  USAGE_UPDATE_MESSAGE,
+  usageSummaryCache,
   type UsageEnvironmentResult,
   type StatRange,
 } from "@ryco/client-runtime/usage";
@@ -23,20 +19,23 @@ export interface NodeStatistics {
   readonly error?: string;
 }
 
+/** Why this device is not asked for statistics right now, or `null` when it is. */
+function statisticsUnavailableReason(environment: InboxEnvironment): string | null {
+  if (environment.connectionState !== "connected" && environment.connectionState !== "read-only")
+    return "Connect this device to load current data.";
+  if (environment.role === "viewer" || environment.role === "operator")
+    return "Statistics and provider limits require owner access on this device.";
+  return null;
+}
+
 export async function loadNodeStatistics(
   environment: InboxEnvironment,
   tab: StatisticsTab,
   range: StatRange,
 ): Promise<NodeStatistics> {
   try {
-    if (
-      environment.connectionState !== "connected" &&
-      environment.connectionState !== "read-only"
-    ) {
-      throw new Error("Connect this device to load current data.");
-    }
-    if (environment.role === "viewer" || environment.role === "operator")
-      throw new Error("Statistics and provider limits require owner access on this device.");
+    const unavailable = statisticsUnavailableReason(environment);
+    if (unavailable !== null) throw new Error(unavailable);
     const api = readRpcClient(environment.environmentId);
     if (!api) throw new Error("This device is reconnecting. Try again when it is connected.");
     if (tab === "activity") return { environment, activity: await api.server.getStatistics() };
@@ -44,23 +43,25 @@ export async function loadNodeStatistics(
       const refreshed = await api.server.refreshProviders();
       return { environment, providers: refreshed.providers };
     }
-    const summary = await api.server.getUsageSummary(
-      usageRequestForRange(range, Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"),
-    );
-    if (summary.contractVersion !== USAGE_CONTRACT_VERSION)
-      throw new Error("Update Ryco on this device to use the current usage format.");
-    return {
-      environment,
-      usage: {
+    // The shared cache classifies the answer, joins an identical request already
+    // in flight, and keeps the last usable summary for the next visit.
+    const usage = await usageSummaryCache.load(
+      {
         environmentId: environment.environmentId,
         label: environment.label,
-        summary,
-        status: summary.sources.some(
-          (source) => source.status === "partial" || source.status === "failed",
-        )
-          ? "partial"
-          : "complete",
+        getUsageSummary: (request) => api.server.getUsageSummary(request),
       },
+      range,
+      usageTimeZone(),
+    );
+    if (usage.status === "complete" || usage.status === "partial") return { environment, usage };
+    return {
+      environment,
+      usage,
+      error:
+        usage.status === "stale-contract"
+          ? USAGE_UPDATE_MESSAGE
+          : (usage.message ?? "Usage could not be loaded from this device."),
     };
   } catch (cause) {
     const error = cause instanceof Error ? cause.message : String(cause);
@@ -72,15 +73,36 @@ export async function loadNodeStatistics(
             usage: {
               environmentId: environment.environmentId,
               label: environment.label,
-              status: isUsageContractMismatch(cause)
-                ? ("stale-contract" as const)
-                : ("failed" as const),
+              status: "failed" as const,
               message: error,
             },
           }
         : {}),
     };
   }
+}
+
+const NO_NODES: readonly NodeStatistics[] = [];
+
+/**
+ * Each device's last usable usage summary for this range, under its current
+ * label. A device that will not be asked (offline, or without owner access)
+ * shows none: its answer is about to be that error, not the old summary.
+ */
+export function cachedNodeUsage(
+  environments: readonly InboxEnvironment[],
+  range: StatRange,
+  timeZone = usageTimeZone(),
+): UsageEnvironmentResult[] {
+  return environments.flatMap((environment) => {
+    if (statisticsUnavailableReason(environment) !== null) return [];
+    const cached = usageSummaryCache.peek(environment.environmentId, range, timeZone);
+    return cached === undefined ? [] : [{ ...cached, label: environment.label }];
+  });
+}
+
+function usageTimeZone(): string {
+  return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
 }
 
 export function useStatisticsData(
@@ -115,7 +137,20 @@ export function useStatisticsData(
     };
   }, [key, tab, range, requestKey]);
   const sameScope = result?.key.startsWith(`${tab}:${range}:${key}:`) === true;
-  const nodes = sameScope ? result.nodes : [];
+  const nodes = sameScope ? result.nodes : NO_NODES;
+  const usage = useMemo(() => {
+    if (tab !== "usage") return null;
+    if (sameScope) {
+      return mergeUsageEnvironmentResults(
+        nodes.flatMap((node) => (node.usage ? [node.usage] : [])),
+      );
+    }
+    // Until this range answers, show the last usable summaries for it (stale
+    // while revalidating) instead of an empty screen.
+    return mergeUsageEnvironmentResults(
+      cachedNodeUsage(JSON.parse(key) as InboxEnvironment[], range),
+    );
+  }, [key, nodes, range, sameScope, tab]);
   return {
     nodes,
     loading: result?.key !== requestKey,
@@ -124,6 +159,6 @@ export function useStatisticsData(
       result.key !== requestKey &&
       result.key.startsWith(`${tab}:${range}:${key}:`),
     refresh: () => setRevision((value) => value + 1),
-    usage: mergeUsageEnvironmentResults(nodes.flatMap((node) => (node.usage ? [node.usage] : []))),
+    usage,
   };
 }

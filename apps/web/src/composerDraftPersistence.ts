@@ -1,11 +1,10 @@
 import {
   COMPOSER_DRAFT_STORAGE_KEY,
   COMPOSER_DRAFT_STORAGE_VERSION,
-  PersistedComposerDraftStoreStorage,
-  type PersistedComposerImageAttachment,
+  PersistedComposerImageAttachment,
 } from "@ryco/client-runtime/state/composer";
+import { Option, Schema } from "effect";
 
-import { getLocalStorageItem } from "./hooks/useLocalStorage";
 import { isHostedHubMode } from "./env";
 import { createDebouncedStorage, createMemoryStorage } from "./lib/storage";
 import {
@@ -38,21 +37,44 @@ if (typeof window !== "undefined" && typeof window.addEventListener === "functio
   });
 }
 
+const decodePersistedAttachments = Schema.decodeUnknownOption(
+  Schema.Array(PersistedComposerImageAttachment),
+);
+
+function readRecordField(value: unknown, key: string): unknown {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)[key]
+    : undefined;
+}
+
+/**
+ * The attachment ids persisted for one thread. Decodes only that thread's
+ * attachments instead of Schema-decoding every draft (and every image data
+ * URL) in the persisted blob.
+ */
 export function readPersistedAttachmentIdsFromStorage(threadKey: string): string[] {
-  if (threadKey.length === 0) {
+  // Hosted mode keeps drafts in memory only: nothing is durably persisted.
+  if (threadKey.length === 0 || typeof window === "undefined" || isHostedHubMode()) {
     return [];
   }
   try {
-    const persisted = getLocalStorageItem(
-      COMPOSER_DRAFT_STORAGE_KEY,
-      PersistedComposerDraftStoreStorage,
-    );
-    if (!persisted || persisted.version !== COMPOSER_DRAFT_STORAGE_VERSION) {
+    const raw = window.localStorage.getItem(COMPOSER_DRAFT_STORAGE_KEY);
+    if (raw === null) return [];
+    const persisted: unknown = JSON.parse(raw);
+    if (readRecordField(persisted, "version") !== COMPOSER_DRAFT_STORAGE_VERSION) {
       return [];
     }
-    return (persisted.state.draftsByThreadKey[threadKey]?.attachments ?? []).map(
-      (attachment) => attachment.id,
+    const draftsByThreadKey = readRecordField(
+      readRecordField(persisted, "state"),
+      "draftsByThreadKey",
     );
+    const attachments = readRecordField(
+      readRecordField(draftsByThreadKey, threadKey),
+      "attachments",
+    );
+    if (attachments === undefined) return [];
+    const decoded = decodePersistedAttachments(attachments);
+    return Option.isSome(decoded) ? decoded.value.map((attachment) => attachment.id) : [];
   } catch {
     return [];
   }

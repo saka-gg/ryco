@@ -7,20 +7,24 @@ import type {
   ScopedThreadRef,
 } from "@ryco/contracts";
 
+import type { ShellStoreUpdate } from "../state/threads/store.ts";
+
 /**
  * App-owned presentation writes performed by the connection supervisor.
  * The hosted readiness handlers deliberately do not belong here: hosted lifecycle
  * ownership and its generation fencing remain a separate interface.
  */
 export interface EnvironmentStateSink {
-  readonly prepareShellEvent: (
+  /**
+   * Applies one environment's shell updates in arrival order as a single store
+   * commit. Returns one context per update, in order, each computed against
+   * the state that update applies to; the supervisor hands an event's context
+   * to `afterShellEventApplied` once the whole batch is applied.
+   */
+  readonly applyShellEvents: (
     environmentId: EnvironmentId,
-    event: OrchestrationShellStreamEvent,
-  ) => unknown;
-  readonly applyShellEvent: (
-    environmentId: EnvironmentId,
-    event: OrchestrationShellStreamEvent,
-  ) => void;
+    events: ReadonlyArray<ShellStoreUpdate>,
+  ) => ReadonlyArray<unknown>;
   readonly afterShellEventApplied: (
     environmentId: EnvironmentId,
     event: OrchestrationShellStreamEvent,

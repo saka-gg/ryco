@@ -27,6 +27,14 @@ import { directRpcPrincipal, type RpcPrincipal } from "./ws/RpcPrincipal.ts";
 import { ContextHandoffInspectionLive } from "./orchestration/Layers/ContextHandoffInspection.ts";
 import { ContextHandoffRepositoryLive } from "./persistence/Layers/ContextHandoffs.ts";
 
+/**
+ * Per-connection RPC layer. `SourceControlDiscovery`, `ProviderMaintenanceRunner`
+ * and `ContextHandoffInspection` are also built once in the server runtime
+ * graph. Connections (direct and relay) build this layer from the runtime's
+ * context, whose memo map they fork, so they reuse those process-wide
+ * instances and their caches instead of constructing new ones. The provisions
+ * below only take effect where no runtime graph exists (route tests).
+ */
 export const makeServerWsRpcLayer = (principal: RpcPrincipal) =>
   makeWsRpcLayer(principal).pipe(
     Layer.provide(

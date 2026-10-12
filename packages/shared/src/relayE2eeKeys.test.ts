@@ -17,12 +17,15 @@ import {
   formatE2eeKeyFingerprint,
   parseE2eeKeyFingerprint,
   generateE2eeAgreementKeyPair,
+  e2eeSignatureMemoSizeForTests,
+  resetE2eeSignatureMemoForTests,
   validateE2eeAgreementPublicKey,
   validateE2eeClientIdentityPublicKey,
   validateE2eeClientSignature,
   validateE2eeNodeIdentityPublicKey,
   validateE2eeNodeSignature,
   verifyE2eeSignature,
+  warmE2eePrimitives,
 } from "./relayE2eeKeys.ts";
 
 const bytes = (hex: string): Uint8Array => Uint8Array.from(Buffer.from(hex, "hex"));
@@ -276,6 +279,73 @@ describe("relay E2EE signature verification choke point (§14.3)", () => {
   it("verifies the deterministic Ed25519 and P-256 fixtures", () => {
     expect(verifyE2eeSignature(edVerification)).toBe(true);
     expect(verifyE2eeSignature(p256Verification)).toBe(true);
+  });
+
+  it("remembers only a successful verdict, for exactly the bytes it was given", () => {
+    resetE2eeSignatureMemoForTests();
+    try {
+      expect(verifyE2eeSignature(edVerification)).toBe(true);
+      expect(e2eeSignatureMemoSizeForTests()).toBe(1);
+      // Identical bytes in a different buffer are the same verdict.
+      expect(verifyE2eeSignature({ ...edVerification, message: Uint8Array.from(MESSAGE) })).toBe(
+        true,
+      );
+      expect(e2eeSignatureMemoSizeForTests()).toBe(1);
+
+      const mutated = Uint8Array.from(MESSAGE);
+      mutated[0] = (mutated[0]! ^ 0x01) & 0xff;
+      expect(verifyE2eeSignature({ ...edVerification, message: mutated })).toBe(false);
+      expect(verifyE2eeSignature({ ...edVerification, publicKey: NODE_PUBLIC_KEY })).toBe(false);
+      // A failure is never remembered.
+      expect(e2eeSignatureMemoSizeForTests()).toBe(1);
+      // Validation still runs before any lookup: a remembered triple cannot
+      // launder a malformed signature or a non-canonical key.
+      expect(
+        verifyE2eeSignature({ ...edVerification, signature: ED25519_TEST_SIGNATURE.subarray(1) }),
+      ).toBe(false);
+      expect(
+        verifyE2eeSignature({ ...edVerification, publicKey: ED25519_NON_CANONICAL_PUBLIC_KEY }),
+      ).toBe(false);
+      // The same bytes under the other algorithm are a different key.
+      expect(verifyE2eeSignature(p256Verification)).toBe(true);
+      expect(e2eeSignatureMemoSizeForTests()).toBe(2);
+    } finally {
+      resetE2eeSignatureMemoForTests();
+    }
+  });
+
+  it("bounds the remembered verdicts", () => {
+    resetE2eeSignatureMemoForTests();
+    try {
+      for (let index = 0; index < 140; index += 1) {
+        const secretKey = ed25519.utils.randomSecretKey();
+        const message = Uint8Array.of(index);
+        expect(
+          verifyE2eeSignature({
+            algorithm: E2EE_NODE_IDENTITY_ALGORITHM,
+            publicKey: ed25519.getPublicKey(secretKey),
+            message,
+            signature: ed25519.sign(message, secretKey),
+          }),
+        ).toBe(true);
+      }
+      expect(e2eeSignatureMemoSizeForTests()).toBe(128);
+    } finally {
+      resetE2eeSignatureMemoForTests();
+    }
+  });
+
+  it("warms the handshake primitives once without throwing", () => {
+    resetE2eeSignatureMemoForTests();
+    try {
+      warmE2eePrimitives();
+      // The fixed RFC 8032 vector verified through the choke point.
+      expect(e2eeSignatureMemoSizeForTests()).toBe(1);
+      warmE2eePrimitives();
+      expect(e2eeSignatureMemoSizeForTests()).toBe(1);
+    } finally {
+      resetE2eeSignatureMemoForTests();
+    }
   });
 
   it("accepts either P-256 `s` value", () => {

@@ -4,7 +4,7 @@ import {
   type OrchestrationThreadActivity,
   THREAD_FORKED_ACTIVITY_KIND,
 } from "@ryco/contracts";
-import { Schema } from "effect";
+import * as Schema from "effect/Schema";
 import { backgroundWorkCheckpoint, BACKGROUND_WORK_CHECKPOINT } from "./backgroundWork.ts";
 
 export const CONTEXT_COMPACTION_ACTIVITY_KIND = "context-compaction";

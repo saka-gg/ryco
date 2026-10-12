@@ -1,5 +1,7 @@
 import { type ChildProcess as ChildProcessHandle, spawn, spawnSync } from "node:child_process";
 
+import { governChildProcessPromise, type ProcessLane } from "./processGovernor.ts";
+
 export interface ProcessRunOptions {
   cwd?: string | undefined;
   timeoutMs?: number | undefined;
@@ -8,6 +10,14 @@ export interface ProcessRunOptions {
   allowNonZeroExit?: boolean | undefined;
   maxBufferBytes?: number | undefined;
   outputMode?: "error" | "truncate" | undefined;
+  /**
+   * Route the command through the platform shell. Defaults to Windows only, where `.cmd`
+   * shims (npm, npx, ...) need `cmd.exe`. Pass `false` for real executables such as `git`:
+   * no extra `cmd.exe` and no shell parsing of arguments.
+   */
+  shell?: boolean | undefined;
+  /** Governor lane for git / forge CLI children (default interactive); see processGovernor.ts. */
+  lane?: ProcessLane | undefined;
 }
 
 export interface ProcessRunResult {
@@ -18,6 +28,23 @@ export interface ProcessRunResult {
   timedOut: boolean;
   stdoutTruncated?: boolean | undefined;
   stderrTruncated?: boolean | undefined;
+}
+
+/**
+ * Quote one argument for `cmd.exe /d /s /c`, which Node uses with `shell: true` and which joins
+ * `[command, ...args]` with spaces. Without quoting, a path such as `C:\Users\Jane Doe\proj`
+ * reaches the program as two arguments.
+ *
+ * Only arguments with whitespace (or empty ones) are quoted, and only when they hold no double
+ * quote: cmd.exe does not understand `\"`, so escaping an embedded quote would expose the rest of
+ * the argument to cmd's own parsing (`|`, `&`). Those arguments keep their existing spelling.
+ * Trailing backslashes are doubled so they cannot escape the closing quote for the program's
+ * argument parser.
+ */
+export function quoteWindowsShellArgument(arg: string): string {
+  if (arg.includes('"') || (arg.length > 0 && !/\s/.test(arg))) return arg;
+  const trailingBackslashes = /\\*$/.exec(arg)?.[0].length ?? 0;
+  return `"${arg}${"\\".repeat(trailingBackslashes)}"`;
 }
 
 function commandLabel(command: string, args: readonly string[]): string {
@@ -138,22 +165,37 @@ function appendChunkWithinLimit(
   };
 }
 
-export async function runProcess(
+export function runProcess(
   command: string,
   args: readonly string[],
   options: ProcessRunOptions = {},
+): Promise<ProcessRunResult> {
+  return governChildProcessPromise(command, options.lane ?? "interactive", () =>
+    runUngovernedProcess(command, args, options),
+  );
+}
+
+function runUngovernedProcess(
+  command: string,
+  args: readonly string[],
+  options: ProcessRunOptions,
 ): Promise<ProcessRunResult> {
   const timeoutMs = options.timeoutMs ?? 60_000;
   const maxBufferBytes = options.maxBufferBytes ?? DEFAULT_MAX_BUFFER_BYTES;
   const outputMode = options.outputMode ?? "error";
 
+  const shell = options.shell ?? process.platform === "win32";
   return new Promise<ProcessRunResult>((resolve, reject) => {
-    const child = spawn(command, args, {
-      cwd: options.cwd,
-      env: options.env,
-      stdio: "pipe",
-      shell: process.platform === "win32",
-    });
+    const child = spawn(
+      command,
+      shell && process.platform === "win32" ? args.map(quoteWindowsShellArgument) : args,
+      {
+        cwd: options.cwd,
+        env: options.env,
+        stdio: "pipe",
+        shell,
+      },
+    );
 
     let stdout = "";
     let stderr = "";

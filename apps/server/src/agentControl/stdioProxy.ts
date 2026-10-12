@@ -5,7 +5,7 @@ import { AGENT_CONTROL_PRIVATE_MCP_MAX_BODY_BYTES } from "./Mcp/transportGuard.t
 import {
   AGENT_CONTROL_BOOTSTRAP_ENV,
   AGENT_CONTROL_BOOTSTRAP_URL_ENV,
-} from "./ProviderInjection.ts";
+} from "./stdioProxyProtocol.ts";
 
 interface BootstrapExchange {
   readonly endpointUrl: string;

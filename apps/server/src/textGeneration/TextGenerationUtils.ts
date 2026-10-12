@@ -1,6 +1,7 @@
 import { Schema } from "effect";
 
 import { TextGenerationError } from "@ryco/contracts";
+import { sanitizeBranchFragment } from "@ryco/shared/git";
 
 /** Convert an Effect Schema to a flat JSON Schema object, inlining `$defs` when present. */
 export function toJsonSchemaObject(schema: Schema.Top): unknown {
@@ -94,6 +95,22 @@ export function sanitizePrTitle(raw: string): string {
     return singleLine;
   }
   return "Update project changes";
+}
+
+/**
+ * A generated thread title, plus the sanitized branch name when the response
+ * was a combined title-and-branch one (`includeBranch`).
+ */
+export function sanitizeThreadTitleResult(generated: { readonly title: string }): {
+  readonly title: string;
+  readonly branch?: string;
+} {
+  return {
+    title: sanitizeThreadTitle(generated.title),
+    ...("branch" in generated && typeof generated.branch === "string"
+      ? { branch: sanitizeBranchFragment(generated.branch) }
+      : {}),
+  };
 }
 
 /** Normalise a raw thread title to a compact single-line sidebar-safe label. */

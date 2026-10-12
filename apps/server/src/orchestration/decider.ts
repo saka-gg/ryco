@@ -625,6 +625,21 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         });
       }
       const occurredAt = nowIso();
+      const changes = {
+        ...(kindChange !== undefined ? { kind: kindChange } : {}),
+        ...(command.title !== undefined ? { title: command.title } : {}),
+        ...(command.workspaceRoot !== undefined ? { workspaceRoot: command.workspaceRoot } : {}),
+        ...(command.projectMetadataDir !== undefined
+          ? { projectMetadataDir: command.projectMetadataDir }
+          : {}),
+        ...(command.customSystemPrompt !== undefined
+          ? { customSystemPrompt: command.customSystemPrompt }
+          : {}),
+        ...(command.scripts !== undefined ? { scripts: command.scripts } : {}),
+        ...(command.preferredRemoteName !== undefined
+          ? { preferredRemoteName: command.preferredRemoteName }
+          : {}),
+      };
       return {
         ...withEventBase({
           aggregateKind: "project",
@@ -635,20 +650,10 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         type: "project.meta-updated",
         payload: {
           projectId: command.projectId,
-          ...(kindChange !== undefined ? { kind: kindChange } : {}),
-          ...(command.title !== undefined ? { title: command.title } : {}),
-          ...(command.workspaceRoot !== undefined ? { workspaceRoot: command.workspaceRoot } : {}),
-          ...(command.projectMetadataDir !== undefined
-            ? { projectMetadataDir: command.projectMetadataDir }
-            : {}),
-          ...(command.customSystemPrompt !== undefined
-            ? { customSystemPrompt: command.customSystemPrompt }
-            : {}),
-          ...(command.scripts !== undefined ? { scripts: command.scripts } : {}),
-          ...(command.preferredRemoteName !== undefined
-            ? { preferredRemoteName: command.preferredRemoteName }
-            : {}),
-          updatedAt: occurredAt,
+          ...changes,
+          // An update that changes nothing (the repository identity sync re-sending a project to
+          // clients) keeps updatedAt: recency order and clients' expectedUpdatedAt stay valid.
+          updatedAt: Object.keys(changes).length === 0 ? project.updatedAt : occurredAt,
         },
       };
     }

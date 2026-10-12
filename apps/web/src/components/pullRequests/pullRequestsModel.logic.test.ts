@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { resolveSourceControlRefreshDelay } from "../../rpc/sourceControlRefreshPolicy";
 import {
   derivePullRequestsCapabilities,
+  shouldReadInvolvementLists,
   describePullRequestsListError,
   derivePullRequestSelectionThreads,
   derivePullRequestsLayoutMetrics,
@@ -166,6 +167,29 @@ describe("derivePullRequestsCapabilities", () => {
     const unknown = derivePullRequestsCapabilities({ kind: "unknown" });
     expect(unknown.activity).toBe(false);
     expect(unknown.checkout).toBe(false);
+  });
+});
+
+describe("shouldReadInvolvementLists", () => {
+  it("reads them with the state list before the host is known, and only where supported after", () => {
+    const read = (provider: { kind: "github" | "bitbucket" | "unknown" } | null) =>
+      shouldReadInvolvementLists({
+        listEnabled: true,
+        provider,
+        capabilities: derivePullRequestsCapabilities(provider),
+      });
+    expect(read(null)).toBe(true);
+    expect(read({ kind: "github" })).toBe(
+      derivePullRequestsCapabilities({ kind: "github" }).involvementFilters,
+    );
+    expect(read({ kind: "unknown" })).toBe(false);
+    expect(
+      shouldReadInvolvementLists({
+        listEnabled: false,
+        provider: null,
+        capabilities: derivePullRequestsCapabilities(null),
+      }),
+    ).toBe(false);
   });
 });
 

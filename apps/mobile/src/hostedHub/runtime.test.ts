@@ -13,12 +13,15 @@ const hoisted = vi.hoisted(() => ({
   hydrate: vi.fn(async () => {}),
   bootstrap: vi.fn(async () => {}),
   calls: [] as string[],
+  bearerToken: "token" as string | null,
   profileRaw: null as string | null,
   trustRevision: 0,
   trustListeners: new Set<() => void>(),
   prepareCalls: 0,
   disposeCalls: 0,
   resetSessionCalls: 0,
+  primaryConnection: { kind: "primary" },
+  createHostedPrimaryConnection: vi.fn(),
 }));
 
 vi.mock("react-native", () => ({
@@ -77,10 +80,17 @@ vi.mock("./e2eeAttempt", () => ({
   },
   resolveMobileRelayE2eeProvider: () => undefined,
 }));
+// The relay connection itself is covered in primaryConnection.test.ts; here only
+// its installation on the driver's seam matters.
+vi.mock("./primaryConnection", () => ({
+  createHostedPrimaryConnection: hoisted.createHostedPrimaryConnection,
+}));
 vi.mock("./e2eeSession", () => ({
+  getMobileE2eeSessionState: () => ({ event: null }),
   resetMobileE2eeSession: () => {
     hoisted.resetSessionCalls += 1;
   },
+  subscribeMobileE2eeSession: () => () => undefined,
 }));
 vi.mock("../platform/sessionCredentials", () => ({
   hydrateMobileHostedSessionToken: async () => {
@@ -91,7 +101,7 @@ vi.mock("../platform/sessionCredentials", () => ({
     mode: "bearer",
     readCsrfToken: () => null,
     writeCsrfToken: () => {},
-    readBearerToken: () => "token",
+    readBearerToken: () => hoisted.bearerToken,
     writeBearerToken: () => {},
   },
 }));
@@ -114,16 +124,28 @@ vi.mock("@ryco/client-runtime/authorization", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@ryco/client-runtime/authorization")>();
   return {
     ...actual,
+    // Installing the runtime (and with it the relay socket factory) is where a
+    // channel first becomes possible, so that is what the ordering marker records.
+    configureHostedRuntime: vi.fn((...args: Parameters<typeof actual.configureHostedRuntime>) => {
+      hoisted.calls.push("configure");
+      return actual.configureHostedRuntime(...args);
+    }),
+  };
+});
+vi.mock("@ryco/client-runtime/authorization/e2ee", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@ryco/client-runtime/authorization/e2ee")>();
+  return {
+    ...actual,
     createNativeE2eeEnrollmentCoordinator: vi.fn(actual.createNativeE2eeEnrollmentCoordinator),
   };
 });
 
 import {
-  createNativeE2eeEnrollmentCoordinator,
   getHostedRuntimeConfiguration,
   hostedHubController,
   hostedHubStore,
 } from "@ryco/client-runtime/authorization";
+import { createNativeE2eeEnrollmentCoordinator } from "@ryco/client-runtime/authorization/e2ee";
 
 import {
   configureMobileHostedRuntime,
@@ -139,6 +161,7 @@ import {
 } from "./hubProfile";
 import { resetMobileHostedRuntimeConfigForTests } from "./runtimeConfig";
 import { getMobileHostedUnavailableReason } from "./runtimeAvailability";
+import { createHostedPrimaryConnectionIfLoaded } from "./primaryConnectionFactory";
 
 const HOSTED_CONFIG = {
   hubOrigin: "https://hub.example.test",
@@ -148,11 +171,17 @@ const HOSTED_CONFIG = {
 
 const signer = { sign: async () => "proof" };
 
+/** The ordering markers, without the signer creation that overlaps them. */
+function orderedCalls(): string[] {
+  return hoisted.calls.filter((entry) => entry !== "signer");
+}
+
 beforeEach(() => {
   resetMobileHubProfileCacheForTests();
   resetMobileHostedRuntimeForTests();
   resetMobileHostedRuntimeConfigForTests();
   hoisted.calls.length = 0;
+  hoisted.bearerToken = "token";
   hoisted.profileRaw = null;
   hoisted.trustRevision = 0;
   hoisted.trustListeners.clear();
@@ -162,11 +191,10 @@ beforeEach(() => {
   vi.clearAllMocks();
   hoisted.hydrate.mockResolvedValue(undefined);
   hoisted.readMobileHostedConfig.mockReturnValue(HOSTED_CONFIG);
-  // The signer is resolved inside `configureMobileHostedRuntime`, which is what
-  // installs the relay socket factory, so this marker is where a channel first
-  // becomes possible.
+  // Signer creation overlaps the keychain reads, so it is recorded separately
+  // and left out of the ordering assertions below.
   hoisted.createMobileDpopSigner.mockImplementation(async () => {
-    hoisted.calls.push("configure");
+    hoisted.calls.push("signer");
     return signer;
   });
   vi.spyOn(hostedHubController, "bootstrap").mockImplementation(async () => {
@@ -212,6 +240,16 @@ describe("hosted runtime configuration", () => {
         recovery: expect.objectContaining({ timers, subscribeForeground }),
       }),
     );
+  });
+
+  it("installs the relay connection on the driver's seam as soon as it loads", () => {
+    // The driver is on the launch path and never imports the relay connection;
+    // this lazily loaded module installs it before any session can exist.
+    hoisted.createHostedPrimaryConnection.mockReturnValue(hoisted.primaryConnection);
+    const deps = {} as Parameters<typeof createHostedPrimaryConnectionIfLoaded>[0];
+
+    expect(createHostedPrimaryConnectionIfLoaded(deps)).toBe(hoisted.primaryConnection);
+    expect(hoisted.createHostedPrimaryConnection).toHaveBeenCalledWith(deps);
   });
 
   it("targets the Hub public origin, which is what the proof signs into htu", async () => {
@@ -397,7 +435,7 @@ describe("fail-closed configuration", () => {
 
     expect(isMobileHostedModeAvailable()).toBe(true);
     expect(hoisted.createMobileDpopSigner).toHaveBeenCalledTimes(1);
-    expect(hoisted.calls).toEqual(["hydrate", "trust-hydrate", "configure", "bootstrap"]);
+    expect(orderedCalls()).toEqual(["hydrate", "trust-hydrate", "configure", "bootstrap"]);
     expect(getHostedRuntimeConfiguration().endpoint.origin()).toBe("https://self-hosted.ryco.dev");
   });
 
@@ -422,7 +460,7 @@ describe("session bootstrap ordering", () => {
     // user to the bootstrap-availability probe.
     await ensureMobileHostedSession();
 
-    expect(hoisted.calls).toEqual(["hydrate", "trust-hydrate", "configure", "bootstrap"]);
+    expect(orderedCalls()).toEqual(["hydrate", "trust-hydrate", "configure", "bootstrap"]);
   });
 
   it("hydrates the §13 trust store before any channel can exist", async () => {
@@ -436,6 +474,38 @@ describe("session bootstrap ordering", () => {
     expect(hoisted.calls.indexOf("trust-hydrate")).toBeGreaterThanOrEqual(0);
     expect(hoisted.calls.indexOf("trust-hydrate")).toBeLessThan(hoisted.calls.indexOf("configure"));
     expect(hoisted.calls.indexOf("trust-hydrate")).toBeLessThan(hoisted.calls.indexOf("bootstrap"));
+  });
+
+  it("loads the hardware key alongside the keychain reads instead of after them", async () => {
+    let releaseToken: () => void = () => undefined;
+    hoisted.hydrate.mockImplementationOnce(
+      () => new Promise<void>((resolve) => (releaseToken = resolve)),
+    );
+    const session = ensureMobileHostedSession();
+    await vi.waitFor(() => expect(hoisted.calls).toContain("hydrate"));
+
+    // The token read is still pending, yet the signer is already being built.
+    expect(hoisted.createMobileDpopSigner).toHaveBeenCalledTimes(1);
+    expect(hoisted.calls).not.toContain("configure");
+
+    releaseToken();
+    await session;
+    expect(orderedCalls()).toEqual(["hydrate", "trust-hydrate", "configure", "bootstrap"]);
+    expect(hoisted.createMobileDpopSigner).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not run the Hub access check when no session is stored", async () => {
+    // Nothing to restore: the check would fail locally on the missing token and
+    // then spend a proof and a Hub round trip on the availability probe.
+    hoisted.bearerToken = null;
+    const bootstrap = vi.spyOn(hostedHubController, "bootstrap");
+
+    await ensureMobileHostedSession();
+
+    expect(isMobileHostedModeAvailable()).toBe(true);
+    expect(bootstrap).not.toHaveBeenCalled();
+    expect(orderedCalls()).toEqual(["hydrate", "trust-hydrate", "configure"]);
+    expect(hostedHubStore.getState().accountStatus).toBe("signed-out");
   });
 
   it("runs the session bootstrap once across repeated calls", async () => {

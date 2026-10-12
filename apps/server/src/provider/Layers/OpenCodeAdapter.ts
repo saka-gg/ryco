@@ -750,12 +750,15 @@ const stopOpenCodeContext = Effect.fn("stopOpenCodeContext")(function* (
   // Stop the root first so it cannot launch more work while we cancel the
   // child sessions already observed by the event stream or hydration pass.
   // A root abort does not consistently terminate independently-running
-  // children, so every tracked session gets its own best-effort abort.
-  yield* Effect.forEach(
-    [context.openCodeSessionId, ...context.childSessionIds],
-    (sessionID) => abortOpenCodeSession(context, sessionID).pipe(Effect.ignore({ log: true })),
-    { discard: true },
-  );
+  // children, so every tracked session gets its own best-effort abort; the
+  // children are independent, so their aborts (each bounded) run together.
+  const abortSession = (sessionID: string) =>
+    abortOpenCodeSession(context, sessionID).pipe(Effect.ignore({ log: true }));
+  yield* abortSession(context.openCodeSessionId);
+  yield* Effect.forEach([...context.childSessionIds], abortSession, {
+    concurrency: "unbounded",
+    discard: true,
+  });
 
   // Closing the session scope interrupts every fiber forked into it and
   // runs each finalizer we registered — the `AbortController.abort()` call,

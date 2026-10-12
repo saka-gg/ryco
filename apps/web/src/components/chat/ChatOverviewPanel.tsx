@@ -1,8 +1,7 @@
 import type { ChangeRequest, EnvironmentId, ScopedThreadRef, ThreadId } from "@ryco/contracts";
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useMemo, type ReactNode } from "react";
 import { useGitActionNotice } from "~/gitActionNotices";
 import { useGitActionActivity } from "~/rpc/useGit";
-import { invalidateSourceControl } from "~/rpc/useSourceControl";
 import PlanSidebar from "../PlanSidebar";
 import type { DraftId } from "../../composerDraftStore";
 import { BranchToolbarBranchSelector } from "../BranchToolbarBranchSelector";
@@ -15,10 +14,7 @@ import { CrownOverview } from "../overview/crown/CrownOverview";
 import type { CrownOverviewProps } from "../overview/crown/crownTypes";
 import { useWorktreeNotes, type WorktreeNotesTarget } from "../overview/notes/useWorktreeNotes";
 import { type ChatProjectTarget, usePromoteChatBinding } from "./ChatProjectActions";
-import {
-  createPostPushWorkflowDiscoveryWatch,
-  type PostPushWorkflowDiscoveryWatch,
-} from "../postPushWorkflowDiscovery.logic";
+import type { PostPushWorkflowDiscoveryWatch } from "../postPushWorkflowDiscovery.logic";
 import { type ChatOverviewModelInput, useChatOverviewModel } from "./useChatOverviewModel";
 
 /** Crown-only inputs; the classic phone sheet does not render them. */
@@ -55,41 +51,6 @@ export type ChatOverviewPanelProps = Omit<
         presentation: "crown";
       } & ChatOverviewCrownInput)
   );
-
-export function usePostPushWorkflowWatch() {
-  const [postPushWorkflowWatch, setPostPushWorkflowWatch] =
-    useState<PostPushWorkflowDiscoveryWatch | null>(null);
-
-  const handlePostPush = useCallback((event: GitActionPostPushEvent) => {
-    setPostPushWorkflowWatch(
-      createPostPushWorkflowDiscoveryWatch({
-        environmentId: event.environmentId,
-        threadKey: event.threadKey,
-        cwd: event.cwd,
-        pullRequestNumber: event.pullRequestNumber,
-        commitSha: event.commitSha,
-        nowMs: Date.now(),
-      }),
-    );
-    invalidateSourceControl({ environmentId: event.environmentId, cwd: event.cwd });
-  }, []);
-
-  useEffect(() => {
-    if (!postPushWorkflowWatch) return;
-    const timeoutId = window.setTimeout(
-      () =>
-        setPostPushWorkflowWatch((current) => (current === postPushWorkflowWatch ? null : current)),
-      Math.max(0, postPushWorkflowWatch.expiresAtMs - Date.now()),
-    );
-    return () => window.clearTimeout(timeoutId);
-  }, [postPushWorkflowWatch]);
-
-  const clearWatch = useCallback(() => {
-    setPostPushWorkflowWatch(null);
-  }, []);
-
-  return { postPushWorkflowWatch, handlePostPush, clearWatch } as const;
-}
 
 export interface OverviewPanelControlsInput {
   gitCwd: string | null;
@@ -211,16 +172,16 @@ export function useOverviewPanelControls(input: OverviewPanelControlsInput): Ove
   return { sourceControlActions, sourceControlQuickActions, branchControl, sourceControlSync };
 }
 
+type ChatOverviewPanelElementProps = ChatOverviewPanelProps & {
+  postPushWorkflowWatch: PostPushWorkflowDiscoveryWatch | null;
+  onPostPushDiscoveryComplete: () => void;
+};
+
 /**
  * Resolves the thread's overview model once and hands it to a presenter: the
  * Crown rail on desktop, or the classic panel inside the phone sheet.
  */
-export function ChatOverviewPanel(
-  props: ChatOverviewPanelProps & {
-    postPushWorkflowWatch: PostPushWorkflowDiscoveryWatch | null;
-    onPostPushDiscoveryComplete: () => void;
-  },
-) {
+export function ChatOverviewPanel(props: ChatOverviewPanelElementProps) {
   const { layoutProps, readiness } = useChatOverviewModel(props);
   const userGitActionActive = useGitActionActivity(props.environmentId, props.gitCwd);
   // The open crown reports this checkout's git actions in place of toasts.
@@ -261,6 +222,46 @@ export function ChatOverviewPanel(
         gitNotice={gitNotice}
       />
     </>
+  );
+}
+
+/** What ChatView hands the on-demand overview panel. */
+export type ChatOverviewPanelWithControlsProps = DistributiveOmit<
+  ChatOverviewPanelElementProps,
+  "sourceControlActions" | "sourceControlQuickActions" | "branchControl" | "sourceControlSync"
+> & {
+  /** The thread's git controls, built here so ChatView stays free of them. */
+  controls: OverviewPanelControlsInput;
+};
+
+type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
+
+/**
+ * The overview panel with its git controls. ChatView loads this module on
+ * demand (see `chatOverviewPanelModule`), so the overview, crown, plan sidebar
+ * and git action controls stay out of the chat route's first-frame graph.
+ */
+export function ChatOverviewPanelWithControls({
+  controls,
+  ...props
+}: ChatOverviewPanelWithControlsProps) {
+  const { sourceControlActions, sourceControlQuickActions, branchControl, sourceControlSync } =
+    useOverviewPanelControls(controls);
+  return props.presentation === "crown" ? (
+    <ChatOverviewPanel
+      {...props}
+      sourceControlActions={sourceControlActions}
+      sourceControlQuickActions={sourceControlQuickActions}
+      branchControl={branchControl}
+      sourceControlSync={sourceControlSync}
+    />
+  ) : (
+    <ChatOverviewPanel
+      {...props}
+      sourceControlActions={sourceControlActions}
+      branchControl={branchControl}
+      sourceControlSync={sourceControlSync}
+    />
   );
 }
 

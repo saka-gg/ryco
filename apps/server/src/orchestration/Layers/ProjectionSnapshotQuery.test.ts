@@ -12,17 +12,19 @@ import {
   WorktreeId,
 } from "@ryco/contracts";
 import { assert, it } from "@effect/vitest";
-import { Effect, Fiber, Layer, Option } from "effect";
-import { TestClock } from "effect/testing";
+import { Effect, Layer, Option } from "effect";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as SqlStatement from "effect/sql/Statement";
 
 import { makeCompletionReturnRepository } from "../../persistence/Layers/AgentControlCompletionReturns.ts";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
 import { RepositoryIdentityResolver } from "../../project/Services/RepositoryIdentityResolver.ts";
-import { RepositoryIdentityResolverLive } from "../../project/Layers/RepositoryIdentityResolver.ts";
 import { ORCHESTRATION_PROJECTOR_NAMES } from "./ProjectionPipeline.ts";
-import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
+import {
+  OrchestrationProjectionSnapshotQueryLive,
+  takeNewestRowsWithinByteBudget,
+  THREAD_WINDOW_ACTIVITY_MAX_PAYLOAD_BYTES,
+} from "./ProjectionSnapshotQuery.ts";
 import * as ThreadBackgroundLiveness from "../ThreadBackgroundLiveness.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 
@@ -35,28 +37,33 @@ const asCheckpointRef = (value: string): CheckpointRef => CheckpointRef.make(val
 const projectionSnapshotLayer = it.layer(
   OrchestrationProjectionSnapshotQueryLive.pipe(
     Layer.provide(ThreadBackgroundLiveness.layer),
-    Layer.provideMerge(RepositoryIdentityResolverLive),
     Layer.provideMerge(SqlitePersistenceMemory),
   ),
 );
 
-it.effect("loads every project and its history when optional Git identity probes stall", () => {
+const availableIdentity = {
+  canonicalKey: "github.com/acme/available",
+  locator: {
+    source: "git-remote" as const,
+    remoteName: "origin",
+    remoteUrl: "https://github.com/acme/available.git",
+  },
+  rootPath: "/tmp/available",
+  remotes: [],
+};
+
+it.effect("serves persisted repository identities without probing git on any read path", () => {
+  const resolveCalls: string[] = [];
   const layer = OrchestrationProjectionSnapshotQueryLive.pipe(
     Layer.provide(ThreadBackgroundLiveness.layer),
     Layer.provideMerge(
+      // A stalled probe used to cost the shell its 1 s budget; nothing may call it now.
       Layer.succeed(RepositoryIdentityResolver, {
         resolve: (cwd) =>
-          cwd === "/tmp/available"
-            ? Effect.succeed({
-                canonicalKey: "github.com/acme/available",
-                locator: {
-                  source: "git-remote" as const,
-                  remoteName: "origin",
-                  remoteUrl: "https://github.com/acme/available.git",
-                },
-                rootPath: cwd,
-              })
-            : Effect.never,
+          Effect.suspend(() => {
+            resolveCalls.push(cwd);
+            return Effect.never;
+          }),
       }),
     ),
     Layer.provideMerge(SqlitePersistenceMemory),
@@ -64,17 +71,17 @@ it.effect("loads every project and its history when optional Git identity probes
   return Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
     const query = yield* ProjectionSnapshotQuery;
-    // More roots than the probe concurrency: queued projects must also survive.
     for (let index = 0; index < 12; index++) {
       yield* sql`
         INSERT INTO projection_projects (
           project_id, title, workspace_root, default_model_selection_json,
-          scripts_json, created_at, updated_at
+          scripts_json, created_at, updated_at, repository_identity_json
         ) VALUES (
           ${`project-${index}`}, ${`Project ${index}`},
           ${index === 0 ? "/tmp/available" : `/tmp/unavailable-${index}`},
           '{"provider":"codex","model":"gpt-5-codex"}', '[]',
-          '2026-09-11T00:00:00.000Z', '2026-09-11T00:00:00.000Z'
+          '2026-09-11T00:00:00.000Z', '2026-09-11T00:00:00.000Z',
+          ${index === 0 ? JSON.stringify(availableIdentity) : index === 1 ? "{not json" : null}
         )
       `;
     }
@@ -89,23 +96,35 @@ it.effect("loads every project and its history when optional Git identity probes
       )
     `;
 
-    const queryFiber = yield* query
-      .getShellSnapshot()
-      .pipe(Effect.timeoutOption("2 seconds"), Effect.forkChild);
-    yield* TestClock.adjust("2 seconds");
-    const result = yield* Fiber.join(queryFiber);
-    assert.isTrue(Option.isSome(result), "Git metadata must not block the local catalog");
-    if (Option.isNone(result)) return;
-    assert.equal(result.value.projects.length, 12);
+    const shell = yield* query.getShellSnapshot();
+    assert.equal(shell.projects.length, 12);
+    assert.deepEqual(
+      shell.projects.find((project) => project.id === "project-0")?.repositoryIdentity,
+      availableIdentity,
+    );
+    // An unreadable cached value is treated as unknown, never as a failed snapshot.
+    assert.isNull(shell.projects.find((project) => project.id === "project-1")?.repositoryIdentity);
+    assert.isNull(
+      shell.projects.find((project) => project.id === "project-11")?.repositoryIdentity,
+    );
+    assert.equal(shell.threads[0]?.title, "Previous conversation");
+
+    const project = yield* query.getProjectShellById(ProjectId.make("project-0"));
     assert.equal(
-      result.value.projects.find((project) => project.id === "project-0")?.repositoryIdentity
-        ?.canonicalKey,
+      Option.getOrNull(project)?.repositoryIdentity?.canonicalKey,
       "github.com/acme/available",
     );
-    assert.isNull(
-      result.value.projects.find((project) => project.id === "project-11")?.repositoryIdentity,
+    const byRoot = yield* query.getActiveProjectByWorkspaceRoot("/tmp/available");
+    assert.equal(
+      Option.getOrNull(byRoot)?.repositoryIdentity?.canonicalKey,
+      "github.com/acme/available",
     );
-    assert.equal(result.value.threads[0]?.title, "Previous conversation");
+    const full = yield* query.getSnapshot();
+    assert.equal(
+      full.projects.find((entry) => entry.id === "project-0")?.repositoryIdentity?.canonicalKey,
+      "github.com/acme/available",
+    );
+    assert.deepEqual(resolveCalls, []);
   }).pipe(Effect.provide(layer));
 });
 
@@ -2432,6 +2451,164 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
     }),
   );
 
+  it.effect("bounds a window's activities by payload bytes and pages the rest", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+
+      yield* sql`DELETE FROM projection_projects`;
+      yield* sql`DELETE FROM projection_threads`;
+      yield* sql`DELETE FROM projection_thread_activities`;
+      yield* sql`
+        INSERT INTO projection_projects (
+          project_id, title, workspace_root, default_model_selection_json, scripts_json,
+          created_at, updated_at, deleted_at
+        )
+        VALUES (
+          'project-heavy', 'Heavy', '/tmp/heavy', NULL, '[]',
+          '2026-05-01T00:00:00.000Z', '2026-05-01T00:00:00.000Z', NULL
+        )
+      `;
+      yield* sql`
+        INSERT INTO projection_threads (
+          thread_id, project_id, title, model_selection_json, runtime_mode, interaction_mode,
+          branch, worktree_path, latest_turn_id, created_at, updated_at, deleted_at
+        )
+        VALUES
+          ('thread-heavy', 'project-heavy', 'Heavy', '{"provider":"codex","model":"gpt-5-codex"}',
+           'full-access', 'default', NULL, NULL, NULL,
+           '2026-05-01T00:00:01.000Z', '2026-05-01T00:00:01.000Z', NULL)
+      `;
+      // Eight tool outputs of ~400 KiB: three would already pass the budget.
+      const output = "x".repeat(400 * 1024);
+      for (let index = 1; index <= 8; index++) {
+        yield* sql`INSERT INTO projection_thread_activities (activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at)
+          VALUES (${`heavy-activity-${index}`}, 'thread-heavy', NULL, 'tool', 'tool.completed', 'Ran',
+            ${JSON.stringify({ output })}, ${index}, ${`2026-05-01T00:00:0${index}.000Z`})`;
+      }
+
+      const window = yield* snapshotQuery.getThreadWindow!({
+        threadId: ThreadId.make("thread-heavy"),
+        limits: { messages: 150, activities: 150, proposedPlans: 30, checkpoints: 30 },
+      });
+      assert.deepEqual(
+        window.thread.activities.map((activity) => activity.id),
+        ["heavy-activity-7", "heavy-activity-8"],
+      );
+      assert.equal(window.history.activities.hasMoreBefore, true);
+      assert.isAtMost(
+        window.thread.activities.reduce(
+          (total, activity) => total + JSON.stringify(activity.payload).length,
+          0,
+        ),
+        THREAD_WINDOW_ACTIVITY_MAX_PAYLOAD_BYTES,
+      );
+
+      // Older history pages are bounded the same way, and paging continues from each page's edge.
+      const pagedIds: Array<string> = [];
+      let cursor = window.history.activities.oldestCursor;
+      let pages = 0;
+      while (cursor !== null) {
+        const page = yield* snapshotQuery.getThreadHistoryPage!({
+          threadId: ThreadId.make("thread-heavy"),
+          collection: "activities",
+          mode: { kind: "before", cursor },
+          limit: 150,
+        });
+        assert.equal(page.collection, "activities");
+        if (page.collection !== "activities") break;
+        assert.isAtMost(page.items.length, 2);
+        assert.isAtMost(
+          page.items.reduce(
+            (total, activity) => total + JSON.stringify(activity.payload).length,
+            0,
+          ),
+          THREAD_WINDOW_ACTIVITY_MAX_PAYLOAD_BYTES,
+        );
+        pagedIds.unshift(...page.items.map((activity) => activity.id));
+        pages += 1;
+        cursor = page.page.hasMoreBefore ? page.page.oldestCursor : null;
+      }
+      assert.equal(pages, 3);
+      assert.deepEqual(
+        pagedIds,
+        [1, 2, 3, 4, 5, 6].map((index) => `heavy-activity-${index}`),
+      );
+
+      yield* sql`DELETE FROM projection_thread_activities`;
+      yield* sql`DELETE FROM projection_threads`;
+      yield* sql`DELETE FROM projection_projects`;
+    }),
+  );
+
+  it.effect("carries a thread's projected priority on its shell upsert", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+
+      yield* sql`DELETE FROM projection_projects`;
+      yield* sql`DELETE FROM projection_threads`;
+      yield* sql`
+        INSERT INTO projection_projects (
+          project_id, title, workspace_root, default_model_selection_json, scripts_json,
+          created_at, updated_at, deleted_at
+        )
+        VALUES (
+          'project-ranked', 'Ranked', '/tmp/ranked', NULL, '[]',
+          '2026-05-01T00:00:00.000Z', '2026-05-01T00:00:00.000Z', NULL
+        )
+      `;
+      yield* sql`
+        INSERT INTO projection_threads (
+          thread_id, project_id, title, model_selection_json, runtime_mode, interaction_mode,
+          branch, worktree_path, latest_turn_id, created_at, updated_at, deleted_at
+        )
+        VALUES
+          ('thread-ranked', 'project-ranked', 'Ranked', '{"provider":"codex","model":"gpt-5-codex"}',
+           'full-access', 'default', NULL, NULL, NULL,
+           '2026-05-01T00:00:01.000Z', '2026-05-01T00:00:01.000Z', NULL),
+          ('thread-unranked', 'project-ranked', 'Unranked', '{"provider":"codex","model":"gpt-5-codex"}',
+           'full-access', 'default', NULL, NULL, NULL,
+           '2026-05-01T00:00:01.000Z', '2026-05-01T00:00:01.000Z', NULL)
+      `;
+      const rankedAt = new Date(Date.now() - 1_000).toISOString();
+      const usableUntil = new Date(Date.now() + 60 * 60 * 1_000).toISOString();
+      yield* sql`
+        INSERT INTO thread_priority_batches (
+          slot, batch_id, input_fingerprint, model_selection_json, model_fingerprint,
+          prompt_version, ranked_at, usable_until, checked_at
+        ) VALUES (
+          1, 'batch-1', 'fingerprint', '{"provider":"codex","model":"gpt-5-codex"}', 'model',
+          'v1', ${rankedAt}, ${usableUntil}, ${rankedAt}
+        )
+      `;
+      yield* sql`
+        INSERT INTO thread_priority_rankings (
+          thread_id, batch_id, tier, confidence, reason, input_fingerprint
+        ) VALUES ('thread-ranked', 'batch-1', 'now', 'high', 'Waiting on you', 'thread-fp')
+      `;
+
+      const ranked = Option.getOrThrow(
+        yield* snapshotQuery.getThreadShellById(ThreadId.make("thread-ranked")),
+      );
+      assert.equal(ranked.priority?.tier, "now");
+      assert.equal(ranked.priority?.batchId, "batch-1");
+      const unranked = Option.getOrThrow(
+        yield* snapshotQuery.getThreadShellById(ThreadId.make("thread-unranked")),
+      );
+      assert.isUndefined(unranked.priority);
+      // The ranking is part of the snapshot's version: a re-rank must not read
+      // as "current" to a client holding the same event sequence.
+      const snapshot = yield* snapshotQuery.getShellSnapshot();
+      assert.equal(snapshot.updatedAt, rankedAt);
+
+      yield* sql`DELETE FROM thread_priority_rankings`;
+      yield* sql`DELETE FROM thread_priority_batches`;
+      yield* sql`DELETE FROM projection_threads`;
+      yield* sql`DELETE FROM projection_projects`;
+    }),
+  );
+
   it.effect("keeps deleted project and thread tombstones in the command read model", () =>
     Effect.gen(function* () {
       const snapshotQuery = yield* ProjectionSnapshotQuery;
@@ -2560,101 +2737,6 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
     }),
   );
 });
-
-it.effect(
-  "ProjectionSnapshotQuery dedupes repository identity resolution by workspace root and skips deleted projects for shell snapshots",
-  () => {
-    const resolveCalls: string[] = [];
-    const layer = OrchestrationProjectionSnapshotQueryLive.pipe(
-      Layer.provide(ThreadBackgroundLiveness.layer),
-      Layer.provideMerge(
-        Layer.succeed(RepositoryIdentityResolver, {
-          resolve: (cwd: string) =>
-            Effect.sync(() => {
-              resolveCalls.push(cwd);
-              return {
-                canonicalKey: `github.com/acme${cwd}`,
-                locator: {
-                  source: "git-remote" as const,
-                  remoteName: "origin",
-                  remoteUrl: `https://github.com/acme${cwd}.git`,
-                },
-                rootPath: cwd,
-              };
-            }),
-        }),
-      ),
-      Layer.provideMerge(SqlitePersistenceMemory),
-    );
-
-    return Effect.gen(function* () {
-      const snapshotQuery = yield* ProjectionSnapshotQuery;
-      const sql = yield* SqlClient.SqlClient;
-
-      yield* sql`DELETE FROM projection_projects`;
-      yield* sql`DELETE FROM projection_threads`;
-      yield* sql`DELETE FROM projection_turns`;
-      yield* sql`DELETE FROM projection_state`;
-
-      yield* sql`
-        INSERT INTO projection_projects (
-          project_id,
-          title,
-          workspace_root,
-          default_model_selection_json,
-          scripts_json,
-          created_at,
-          updated_at,
-          deleted_at
-        )
-        VALUES
-          (
-            'project-1',
-            'Shared Project 1',
-            '/tmp/shared-root',
-            '{"provider":"codex","model":"gpt-5-codex"}',
-            '[]',
-            '2026-04-04T00:00:00.000Z',
-            '2026-04-04T00:00:01.000Z',
-            NULL
-          ),
-          (
-            'project-2',
-            'Shared Project 2',
-            '/tmp/shared-root',
-            '{"provider":"codex","model":"gpt-5-codex"}',
-            '[]',
-            '2026-04-04T00:00:02.000Z',
-            '2026-04-04T00:00:03.000Z',
-            NULL
-          ),
-          (
-            'project-3',
-            'Deleted Project',
-            '/tmp/deleted-root',
-            '{"provider":"codex","model":"gpt-5-codex"}',
-            '[]',
-            '2026-04-04T00:00:04.000Z',
-            '2026-04-04T00:00:05.000Z',
-            '2026-04-04T00:00:06.000Z'
-          )
-      `;
-
-      const shellSnapshot = yield* snapshotQuery.getShellSnapshot();
-      assert.deepStrictEqual(resolveCalls.toSorted(), ["/tmp/shared-root"]);
-      assert.equal(shellSnapshot.projects.length, 2);
-      assert.equal(shellSnapshot.projects[0]?.repositoryIdentity?.rootPath, "/tmp/shared-root");
-      assert.equal(shellSnapshot.projects[1]?.repositoryIdentity?.rootPath, "/tmp/shared-root");
-
-      resolveCalls.length = 0;
-
-      const fullSnapshot = yield* snapshotQuery.getSnapshot();
-      assert.deepStrictEqual(resolveCalls.toSorted(), ["/tmp/deleted-root", "/tmp/shared-root"]);
-      assert.equal(fullSnapshot.projects.length, 3);
-      assert.equal(fullSnapshot.projects[2]?.repositoryIdentity?.rootPath, "/tmp/deleted-root");
-    }).pipe(Effect.provide(layer));
-  },
-);
 
 it.effect("ProjectionSnapshotQuery exposes worktree prTerminalAt on every read path", () => {
   const layer = OrchestrationProjectionSnapshotQueryLive.pipe(
@@ -2829,4 +2911,22 @@ it.effect("ProjectionSnapshotQuery exposes thread lineage on every read path", (
     });
     assert.deepEqual(window.thread.lineage, expectedFork, "getThreadWindow fork lineage");
   }).pipe(Effect.provide(layer));
+});
+
+it("keeps the newest rows within both the count and the byte budget", () => {
+  const rows = [400, 400, 400, 10].map((payloadBytes, index) => ({ id: index, payloadBytes }));
+  assert.deepEqual(takeNewestRowsWithinByteBudget(rows, 10, 1_000), {
+    rows: rows.slice(0, 2),
+    hasMoreBefore: true,
+  });
+  assert.deepEqual(takeNewestRowsWithinByteBudget(rows, 10, 10_000), {
+    rows,
+    hasMoreBefore: false,
+  });
+  // The newest row always opens, however large.
+  assert.deepEqual(takeNewestRowsWithinByteBudget([{ payloadBytes: 5_000 }], 10, 1_000), {
+    rows: [{ payloadBytes: 5_000 }],
+    hasMoreBefore: false,
+  });
+  assert.equal(takeNewestRowsWithinByteBudget(rows, 2, 10_000).hasMoreBefore, true);
 });

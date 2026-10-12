@@ -1,6 +1,5 @@
 import type { EnvironmentId } from "@ryco/contracts";
 import { clearProjectIconCache, projectIconCacheBytes } from "@ryco/client-runtime/connection";
-import { readEnvironmentApi } from "../connection/environmentApi";
 import { clearProjectFileCache, projectFilesCacheStats } from "../rpc/projectFilesAtoms";
 import {
   checkpointDiffCacheBytes,
@@ -33,8 +32,7 @@ export async function readDeviceCacheUsage(
     .map(([environmentId, label]) => {
       const snapshot = snapshots.find((item) => item.environmentId === environmentId);
       const previews = projectFilesCacheStats(environmentId);
-      const api = readEnvironmentApi(environmentId);
-      const imageBytes = previews.images + (api ? projectIconCacheBytes(api) : 0);
+      const imageBytes = previews.images + projectIconCacheBytes(environmentId);
       const fileBytes = previews.files + checkpointDiffCacheBytes(environmentId);
       const snapshotBytes = snapshot?.payloadBytes ?? 0;
       return {
@@ -55,6 +53,5 @@ export async function clearDeviceCache(environmentId: EnvironmentId): Promise<vo
   await clearEnvironmentSnapshotCache(environmentId);
   clearProjectFileCache(environmentId);
   clearCheckpointDiffCacheForEnvironment(environmentId);
-  const api = readEnvironmentApi(environmentId);
-  if (api) clearProjectIconCache(api);
+  clearProjectIconCache(environmentId);
 }

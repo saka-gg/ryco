@@ -1,3 +1,6 @@
+import { stat } from "node:fs/promises";
+import nodePath from "node:path";
+
 import { Cache, Context, Duration, Effect, Exit, Layer } from "effect";
 
 import type { VcsDriverKind, VcsError, VcsRepositoryIdentity } from "@ryco/contracts";
@@ -7,7 +10,14 @@ import * as VcsProjectConfig from "./VcsProjectConfig.ts";
 import * as VcsDriver from "./VcsDriver.ts";
 
 const DETECTION_CACHE_CAPACITY = 2_048;
-const DETECTION_CACHE_TTL = Duration.seconds(2);
+/** A folder that is not a repository may become one (`git init`); recheck soon. */
+const NEGATIVE_DETECTION_CACHE_TTL = Duration.seconds(2);
+/**
+ * A detected repository is kept much longer: every read revalidates it with a
+ * stat of the checkout's `.git` (file or directory), whose identity changes
+ * when the checkout is removed, re-cloned or re-initialized.
+ */
+const POSITIVE_DETECTION_CACHE_TTL = Duration.minutes(2);
 
 export interface VcsDriverResolveInput {
   readonly cwd: string;
@@ -38,6 +48,21 @@ const unsupported = (operation: string, kind: VcsDriverKind, detail: string) =>
     kind,
     detail,
   });
+
+interface CachedDetection {
+  readonly handle: VcsDriverHandle | null;
+  /** Identity of `<root>/.git` when detected; null when absent or not a repository. */
+  readonly gitPathIdentity: string | null;
+}
+
+/** Device, inode and kind of the checkout's `.git`, or null when it cannot be read. */
+const readGitPathIdentity = (rootPath: string) =>
+  Effect.promise(() =>
+    stat(nodePath.join(rootPath, ".git")).then(
+      (stats) => `${stats.dev}:${stats.ino}:${stats.isDirectory() ? "d" : "f"}`,
+      () => null,
+    ),
+  );
 
 function detectionCacheKey(input: {
   readonly cwd: string;
@@ -110,18 +135,52 @@ export const make = Effect.fn("makeVcsDriverRegistry")(function* () {
     return yield* detectWithDriver("git", git, input.cwd);
   });
 
-  const detectionCache = yield* Cache.makeWith<string, VcsDriverHandle | null, VcsError>(
-    (key) => detectResolvedKind(parseDetectionCacheKey(key)),
+  const detectionCache = yield* Cache.makeWith<string, CachedDetection, VcsError>(
+    (key) =>
+      detectResolvedKind(parseDetectionCacheKey(key)).pipe(
+        Effect.flatMap((handle): Effect.Effect<CachedDetection> =>
+          handle === null
+            ? Effect.succeed({ handle, gitPathIdentity: null })
+            : readGitPathIdentity(handle.repository.rootPath).pipe(
+                Effect.map((gitPathIdentity) => ({ handle, gitPathIdentity })),
+              ),
+        ),
+      ),
     {
       capacity: DETECTION_CACHE_CAPACITY,
-      timeToLive: (exit) => (Exit.isSuccess(exit) ? DETECTION_CACHE_TTL : Duration.zero),
+      timeToLive: (exit) =>
+        Exit.isSuccess(exit)
+          ? exit.value.handle !== null && exit.value.gitPathIdentity !== null
+            ? POSITIVE_DETECTION_CACHE_TTL
+            : NEGATIVE_DETECTION_CACHE_TTL
+          : Duration.zero,
     },
   );
 
   const detect: VcsDriverRegistryShape["detect"] = Effect.fn("VcsDriverRegistry.detect")(
     function* (input) {
       const requestedKind = yield* projectConfig.resolveKind(input);
-      return yield* Cache.get(detectionCache, detectionCacheKey({ cwd: input.cwd, requestedKind }));
+      const key = detectionCacheKey({ cwd: input.cwd, requestedKind });
+      const cached = yield* Cache.get(detectionCache, key);
+      if (cached.handle === null || cached.gitPathIdentity === null) {
+        return cached.handle;
+      }
+      const rootPath = cached.handle.repository.rootPath;
+      const currentIdentity = yield* readGitPathIdentity(rootPath);
+      // A folder below the root that gained its own `.git` (a nested `git init`)
+      // is a different repository now.
+      const nestedIdentity =
+        currentIdentity === cached.gitPathIdentity && nodePath.resolve(input.cwd) !== rootPath
+          ? yield* readGitPathIdentity(input.cwd)
+          : null;
+      if (
+        currentIdentity === cached.gitPathIdentity &&
+        (nestedIdentity === null || nestedIdentity === currentIdentity)
+      ) {
+        return cached.handle;
+      }
+      yield* Cache.invalidate(detectionCache, key);
+      return (yield* Cache.get(detectionCache, key)).handle;
     },
   );
 

@@ -34,24 +34,21 @@ import {
 } from "../ProviderDriver.ts";
 import type { ServerProviderDraft } from "../providerSnapshot.ts";
 import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
-import {
-  makeProviderMaintenanceCapabilities,
-  makeStaticProviderMaintenanceResolver,
-  resolveProviderMaintenanceCapabilitiesEffect,
-} from "../providerMaintenance.ts";
+import { makeProviderMaintenanceCapabilities } from "../providerMaintenance.ts";
+import { makeProviderProbeFingerprint } from "../providerProbeFingerprint.ts";
+import { cursorAgentCommandCandidates } from "../acp/CursorAgentCommand.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { AgentControlSessionRegistry } from "../../agentControl/Services/AgentControlSessionRegistry.ts";
 
 const DRIVER_KIND = ProviderDriverKind.make("cursor");
-const UPDATE = makeStaticProviderMaintenanceResolver(
-  makeProviderMaintenanceCapabilities({
-    provider: DRIVER_KIND,
-    packageName: null,
-    updateExecutable: "agent",
-    updateArgs: ["update"],
-    updateLockKey: "cursor-agent",
-  }),
-);
+// Cursor updates itself (`agent update`), so capability resolution never needs PATH probing.
+const MAINTENANCE_CAPABILITIES = makeProviderMaintenanceCapabilities({
+  provider: DRIVER_KIND,
+  packageName: null,
+  updateExecutable: "agent",
+  updateArgs: ["update"],
+  updateLockKey: "cursor-agent",
+});
 
 export type CursorDriverEnv =
   | ChildProcessSpawner.ChildProcessSpawner
@@ -108,9 +105,11 @@ export const CursorDriver: ProviderDriver<CursorSettings, CursorDriverEnv> = {
         continuationGroupKey: continuationIdentity.continuationKey,
       });
       const effectiveConfig = { ...config, enabled } satisfies CursorSettings;
-      const maintenanceCapabilities = yield* resolveProviderMaintenanceCapabilitiesEffect(UPDATE, {
-        binaryPath: effectiveConfig.binaryPath,
+      const probeFingerprint = yield* makeProviderProbeFingerprint({
+        driverKind: DRIVER_KIND,
+        binaryPaths: cursorAgentCommandCandidates(effectiveConfig.binaryPath),
         env: processEnv,
+        settings: { instanceId, displayName, accentColor, environment, config: effectiveConfig },
       });
 
       const adapter = yield* makeCursorAdapter(effectiveConfig, {
@@ -128,7 +127,8 @@ export const CursorDriver: ProviderDriver<CursorSettings, CursorDriverEnv> = {
       );
 
       const snapshot = yield* makeManagedServerProvider<CursorSettings>({
-        maintenanceCapabilities,
+        maintenanceCapabilities: Effect.succeed(MAINTENANCE_CAPABILITIES),
+        probeFingerprint,
         getSettings: Effect.succeed(effectiveConfig),
         streamSettings: Stream.never,
         haveSettingsChanged: () => false,
@@ -140,7 +140,7 @@ export const CursorDriver: ProviderDriver<CursorSettings, CursorDriverEnv> = {
           enrichCursorSnapshot({
             settings,
             snapshot: currentSnapshot,
-            maintenanceCapabilities,
+            maintenanceCapabilities: MAINTENANCE_CAPABILITIES,
             publishSnapshot,
             stampIdentity,
             httpClient,

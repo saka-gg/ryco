@@ -17,11 +17,20 @@
  *
  * @module provider/Services/ProviderInstanceRegistry
  */
-import type { ProviderInstanceId, ServerProvider } from "@ryco/contracts";
+import type { ProviderDriverKind, ProviderInstanceId, ServerProvider } from "@ryco/contracts";
 import { Context } from "effect";
 import type { Effect, PubSub, Scope, Stream } from "effect";
 
 import type { ProviderInstance } from "../ProviderDriver.ts";
+
+/** Settings-derived identity of a configured instance, available before its driver is built. */
+export interface ConfiguredProviderIdentity {
+  readonly instanceId: ProviderInstanceId;
+  readonly driverKind: ProviderDriverKind;
+  readonly displayName: string | undefined;
+  readonly accentColor: string | undefined;
+  readonly enabled: boolean;
+}
 
 export interface ProviderInstanceRegistryShape {
   /**
@@ -43,6 +52,13 @@ export interface ProviderInstanceRegistryShape {
    * directly into `ProviderRegistry` output.
    */
   readonly listUnavailable: Effect.Effect<ReadonlyArray<ServerProvider>>;
+  /**
+   * Every configured instance with a registered driver and a decodable config, including
+   * instances whose drivers have not been built yet (driver construction is deferred until the
+   * HTTP listener serves). Lets `ProviderRegistry` publish persisted snapshots without importing
+   * provider SDKs. Optional: registries without deferral expose `listInstances` only.
+   */
+  readonly listConfigured?: Effect.Effect<ReadonlyArray<ConfiguredProviderIdentity>>;
   /**
    * Push notification stream emitted whenever the registry's contents
    * change — instance added, removed, or rebuilt. The payload is `void`

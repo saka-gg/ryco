@@ -1,7 +1,7 @@
 import { Effect, Semaphore } from "effect";
 import { type OrchestrationEvent, OrchestrationGetSnapshotError } from "@ryco/contracts";
 
-import { approximateJsonBytes } from "../../observability/PerfInstrumentation.ts";
+import { orchestrationEventBytes } from "./orchestrationStreamBatching.ts";
 
 /**
  * Which live orchestration frames may be collapsed, and under what key.
@@ -50,6 +50,29 @@ export const orchestrationProgressFrameKey = (event: OrchestrationEvent): string
   return null;
 };
 
+/**
+ * Coalescing key for the shell stream. The shell turns every thread event into
+ * a re-read of that thread's row, so the high-frequency thread events (activity
+ * appends, including progress, streaming message deltas and plan upserts)
+ * collapse to the latest per thread. Structural thread events (creation,
+ * session and turn changes, deletion) and every project and worktree event
+ * return null and pass through immediately, flushing held frames first so
+ * sequence order holds.
+ */
+export const orchestrationShellFrameKey = (event: OrchestrationEvent): string | null => {
+  if (event.aggregateKind !== "thread") {
+    return null;
+  }
+  if (
+    event.type === "thread.activity-appended" ||
+    event.type === "thread.message-sent" ||
+    event.type === "thread.proposed-plan-upserted"
+  ) {
+    return JSON.stringify(["thread-shell", event.aggregateId]);
+  }
+  return null;
+};
+
 export interface OrchestrationEventCoalescer {
   /**
    * Feed one live event. Progress-grade frames are held as latest-per-key;
@@ -78,10 +101,16 @@ export const makeOrchestrationEventCoalescer = (input: {
   readonly maxKeys?: number;
   /** Byte ceiling on held frames; overflow flushes through, never drops. */
   readonly maxPendingBytes?: number;
+  /**
+   * Which frames may be held, and under what key; defaults to the
+   * progress-grade frames of `orchestrationProgressFrameKey`.
+   */
+  readonly keyOf?: (event: OrchestrationEvent) => string | null;
 }): Effect.Effect<OrchestrationEventCoalescer> =>
   Effect.gen(function* () {
     const maxKeys = Math.max(1, input.maxKeys ?? 128);
     const maxPendingBytes = Math.max(1, input.maxPendingBytes ?? 512 * 1024);
+    const keyOf = input.keyOf ?? orchestrationProgressFrameKey;
     const semaphore = yield* Semaphore.make(1);
     const pending = new Map<string, OrchestrationEvent>();
     let pendingBytes = 0;
@@ -100,7 +129,7 @@ export const makeOrchestrationEventCoalescer = (input: {
       yield* Effect.forEach(
         ordered,
         (event) =>
-          input.offer(event, approximateJsonBytes(event)).pipe(
+          input.offer(event, orchestrationEventBytes(event)).pipe(
             Effect.catch((error) =>
               // A failed offer means the subscription is already failing over
               // to resync; drop held state so nothing lingers behind it.
@@ -118,22 +147,22 @@ export const makeOrchestrationEventCoalescer = (input: {
     const push = (event: OrchestrationEvent) =>
       semaphore.withPermit(
         Effect.gen(function* () {
-          const key = orchestrationProgressFrameKey(event);
+          const key = keyOf(event);
           if (key === null) {
             yield* emitPending;
-            yield* input.offer(event, approximateJsonBytes(event));
+            yield* input.offer(event, orchestrationEventBytes(event));
             return;
           }
 
           const superseded = pending.get(key);
           if (superseded !== undefined) {
-            pendingBytes = Math.max(0, pendingBytes - approximateJsonBytes(superseded));
+            pendingBytes = Math.max(0, pendingBytes - orchestrationEventBytes(superseded));
             if (input.onCoalesced) {
               yield* input.onCoalesced(superseded.sequence);
             }
           }
           pending.set(key, event);
-          pendingBytes += approximateJsonBytes(event);
+          pendingBytes += orchestrationEventBytes(event);
           const now = Date.now();
           if (oldestPushedAtMs === 0) {
             oldestPushedAtMs = now;

@@ -1,7 +1,8 @@
-import { IconFolder, IconGitBranch, IconGitFork, IconMessage } from "@tabler/icons-react-native";
+import { IconFolder, IconGitBranch, IconGitFork, IconMessage } from "../../components/icons";
 import { ProjectFavicon } from "../../components/ProjectFavicon";
 import { useThemeColor } from "../../lib/useThemeColor";
 import { DeviceIcon } from "../../components/DeviceIcon";
+import { memo } from "react";
 import { Pressable, View } from "react-native";
 
 import { AppText as Text } from "../../components/AppText";
@@ -50,7 +51,8 @@ function statusTextClassName(state: InboxThreadState): string {
   }
 }
 
-export function InboxThreadRow(props: {
+/** Memoized: the inbox keeps a row object identical while its content is unchanged. */
+export const InboxThreadRow = memo(function InboxThreadRow(props: {
   readonly row: InboxThreadRowModel;
   readonly onPress: () => void;
   readonly onLongPress?: (() => void) | undefined;
@@ -175,4 +177,4 @@ export function InboxThreadRow(props: {
       ) : null}
     </Pressable>
   );
-}
+});

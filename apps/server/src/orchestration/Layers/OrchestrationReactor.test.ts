@@ -64,6 +64,7 @@ describe("OrchestrationReactor", () => {
               started.push("checkpoint-revert-recovery");
               return Effect.void;
             },
+            ensurePreTurnBaseline: () => Effect.void,
             drain: Effect.void,
           }),
         ),

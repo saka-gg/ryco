@@ -1,4 +1,4 @@
-import { decodeBase64Url, encodeBase64Url } from "@ryco/client-runtime/relay";
+import { decodeBase64Url, encodeBase64Url } from "@ryco/client-runtime/relay/base64url";
 import { E2EE_PIN_NODE_ID_HINTS_MAX } from "@ryco/shared/relayE2eeConstants";
 import {
   e2eeKeyFingerprint,

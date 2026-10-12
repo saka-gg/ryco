@@ -186,4 +186,32 @@ describe("wsReplayMetrics", () => {
       );
     }),
   );
+  it.effect("drains a batch of live events with one dequeue record", () =>
+    Effect.gen(function* () {
+      const attributes = { stream: "thread" };
+      const metrics = yield* makeWsReplayMetrics({
+        stream: "thread",
+        subscriptionId: "ws-replay-batch-dequeue",
+        snapshotSequence: 10,
+      });
+
+      yield* metrics.recordLiveEnqueued(11);
+      yield* metrics.recordLiveEnqueued(12);
+      yield* metrics.recordLiveEnqueued(13);
+      yield* metrics.recordLiveDequeued(13, 3);
+
+      const snapshots = yield* Metric.snapshot;
+      assert.equal(
+        findGaugeValue(snapshots, "t3_ws_orchestration_live_buffer_depth", attributes),
+        0,
+      );
+      assert.equal(findGaugeValue(snapshots, "t3_ws_orchestration_replay_lag", attributes), 0);
+      assert.equal(
+        findGaugeValue(snapshots, "t3_ws_orchestration_live_buffer_high_water", attributes),
+        3,
+      );
+
+      yield* metrics.reset;
+    }),
+  );
 });

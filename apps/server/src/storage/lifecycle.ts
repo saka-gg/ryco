@@ -1,13 +1,24 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { Effect, Semaphore } from "effect";
+import { Effect } from "effect";
 import { PROJECT_RELOCATION_PENDING_MESSAGE, StorageError } from "@ryco/contracts";
 import type * as SqlClient from "effect/sql/SqlClient";
 import { captureWorktreeIdentity } from "./filesystem.ts";
+import { makeReadWriteLockUnsafe } from "./readWriteLock.ts";
 
-// One process-wide admission lock: orchestration projection, terminal spawning and cleanup.
-// The node's existing single-owner database/runtime boundary remains authoritative.
-export const storageLifecycleLock = Semaphore.makeUnsafe(1);
+/**
+ * One process-wide admission lock: orchestration projection, terminal spawning and cleanup.
+ * The node's existing single-owner database/runtime boundary remains authoritative.
+ *
+ * `withPermit` is exclusive: everything that changes what a path admits (cleanup claims,
+ * relocations, chat promotion, settings updates) and terminal operations. `withShared` is for
+ * work that only reads admission state, or registers a lease that exclusive claims check: path
+ * use and creation leases and orchestration command processing. Those never conflict with each
+ * other, so a turn start's leases no longer queue behind every dispatched command (or each
+ * other); they still wait for, and hold off, every exclusive holder. Waiters are admitted in
+ * arrival order, so neither side can starve the other.
+ */
+export const storageLifecycleLock = makeReadWriteLockUnsafe();
 export {
   acquireStorageSettingsLease,
   acquireStorageSettingsUpdateLease,
@@ -78,7 +89,7 @@ export async function canonicalStoragePath(candidate: string): Promise<string> {
 
 /** Short admission lease; git add/hydration never holds the node-wide lock. */
 export function acquireWorktreeCreationLease(sql: SqlClient.SqlClient, candidate: string) {
-  return storageLifecycleLock.withPermit(
+  return storageLifecycleLock.withShared(
     Effect.gen(function* () {
       const canonical = yield* Effect.tryPromise(() => canonicalStoragePath(candidate));
       if (yield* isWorktreeRelocationBlocked(sql, canonical))
@@ -112,7 +123,7 @@ export function acquireWorktreeCreationLease(sql: SqlClient.SqlClient, candidate
 
 /** Path-specific use lease before recovery/provider callbacks. Never holds the global lock. */
 export function acquireStoragePathUseLease(sql: SqlClient.SqlClient, candidate: string) {
-  return storageLifecycleLock.withPermit(
+  return storageLifecycleLock.withShared(
     Effect.gen(function* () {
       const canonical = yield* Effect.tryPromise(() => canonicalStoragePath(candidate));
       const blocker = yield* storagePathBlocker(sql, canonical);
@@ -134,7 +145,7 @@ export function acquireStoragePathUseLease(sql: SqlClient.SqlClient, candidate: 
   );
 }
 
-/** Called only inside the admission lock when cleanup claims a path. */
+/** Called only inside the exclusive admission lock when cleanup claims a path. */
 export const hasWorktreeCreationLease = (candidate: string): boolean =>
   [...creations.keys()].some((root) => overlaps(root, candidate));
 

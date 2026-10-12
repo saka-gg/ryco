@@ -7,8 +7,10 @@
  *
  * @module KeyedCoalescingWorker
  */
-import type { Scope } from "effect";
-import { Effect, TxQueue, TxRef } from "effect";
+import type * as Scope from "effect/Scope";
+import * as Effect from "effect/Effect";
+import * as TxQueue from "effect/TxQueue";
+import * as TxRef from "effect/TxRef";
 
 import type { LatestStateQueuePolicy, QueuePolicyMetricsSnapshot } from "./QueuePolicy.ts";
 

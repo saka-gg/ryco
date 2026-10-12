@@ -75,6 +75,19 @@ import {
 } from "./helperSandbox.ts";
 
 const SIMCTL_TIMEOUT_MS = 30_000;
+/**
+ * How long one `simctl list devices` answer is reused. Every inventory read
+ * asks for availability and then the listing, which ran simctl twice back to
+ * back; boot and shutdown drop the cached answer.
+ */
+const DEVICE_LISTING_REUSE_MS = 2_000;
+/** `xcode-select -p` only changes when someone re-points the toolchain. */
+const XCODE_SELECT_CACHE_MS = 60_000;
+/**
+ * A successful `xcodebuild -version` (license accepted, helper cache key) holds
+ * for the toolchain it was read from; a re-pointed toolchain reads again.
+ */
+const XCODE_VERSION_CACHE_MS = 5 * 60_000;
 const BOOT_TIMEOUT_MS = 120_000;
 const RECORDING_START_TIMEOUT_MS = 10_000;
 const RECORDING_STOP_GRACE_MS = 15_000;
@@ -221,6 +234,11 @@ export function parseSimctlDevices(
   return devices;
 }
 
+/** Whether `xcode-select -p` points at a full Xcode, not the standalone command line tools. */
+function isXcodeDeveloperDir(developerDir: string | null): developerDir is string {
+  return developerDir !== null && !developerDir.includes("CommandLineTools");
+}
+
 export function hasBootableIosRuntime(devices: readonly DeviceDescriptor[]): boolean {
   return devices.length > 0;
 }
@@ -274,6 +292,22 @@ export class IosSimulatorBackend implements DeviceBackend {
    * every listing would spawn a hundred processes per picker open.
    */
   private deviceTypes: Promise<DeviceTypeCatalogue> | null = null;
+  /**
+   * Toolchain and listing answers shared by concurrent and back-to-back
+   * callers, timed on a monotonic clock (`now` is injectable for file names).
+   * Only answers that need no user action are kept: a missing Xcode or an
+   * unaccepted license is re-read so the setup checklist sees it change.
+   */
+  private deviceListing: {
+    readonly at: number;
+    readonly devices: Promise<readonly DeviceDescriptor[]>;
+  } | null = null;
+  private xcodeSelect: { readonly at: number; readonly path: Promise<string | null> } | null = null;
+  private xcodeVersion: {
+    readonly at: number;
+    readonly developerDir: string | null;
+    readonly result: Promise<ProcessRunResult | null>;
+  } | null = null;
   private helper: HelperClient | null = null;
   private helperBuildFailure: string | null = null;
   private helperCompilation: Promise<string> | null = null;
@@ -356,7 +390,7 @@ export class IosSimulatorBackend implements DeviceBackend {
 
     const steps: DeviceSetupStep[] = [];
     const developerDir = await this.xcodeSelectPath();
-    const xcodeInstalled = developerDir !== null && !developerDir.includes("CommandLineTools");
+    const xcodeInstalled = isXcodeDeveloperDir(developerDir);
     steps.push({
       id: "install-xcode",
       label: "Install Xcode",
@@ -481,7 +515,7 @@ export class IosSimulatorBackend implements DeviceBackend {
         throw this.simctlError("boot", result);
       }
       await this.simctl(["bootstatus", udid], { timeoutMs: BOOT_TIMEOUT_MS });
-      const devices = await this.listDevicesUnchecked();
+      const devices = await this.listDevicesUnchecked({ fresh: true });
       const device = devices.find((candidate) => candidate.udid === udid);
       if (!device) throw new DeviceBackendError(`Device ${udid} disappeared after boot`);
       return { ...device, state: "booted" };
@@ -500,6 +534,7 @@ export class IosSimulatorBackend implements DeviceBackend {
       // rebinds instead of reusing a descriptor whose framebuffer is gone.
       this.helper?.invalidateAttachment(udid);
       const result = await this.simctl(["shutdown", udid]);
+      this.deviceListing = null;
       if (result.code !== 0 && !/current state: Shutdown/iu.test(result.stderr)) {
         throw this.simctlError("shutdown", result);
       }
@@ -1017,8 +1052,22 @@ export class IosSimulatorBackend implements DeviceBackend {
     );
   }
 
-  private async listDevicesUnchecked(): Promise<readonly DeviceDescriptor[]> {
+  private async listDevicesUnchecked(
+    options: { readonly fresh?: boolean } = {},
+  ): Promise<readonly DeviceDescriptor[]> {
     if (this.osPlatform !== "darwin") return [];
+    const now = performance.now();
+    const cached = this.deviceListing;
+    if (options.fresh !== true && cached !== null && now - cached.at < DEVICE_LISTING_REUSE_MS) {
+      return await cached.devices;
+    }
+    const devices = this.readDeviceListing();
+    this.deviceListing = { at: now, devices };
+    return await devices;
+  }
+
+  /** Never rejects: a listing simctl cannot produce is an empty one. */
+  private async readDeviceListing(): Promise<readonly DeviceDescriptor[]> {
     const [result, catalogue] = await Promise.all([
       this.simctl(["list", "devices", "--json"]).catch(() => null),
       this.deviceTypeCatalogue(),
@@ -1070,6 +1119,21 @@ export class IosSimulatorBackend implements DeviceBackend {
   private async xcodeSelectPath(): Promise<string | null> {
     const override = this.developerDirOverride();
     if (override !== null) return override;
+    const now = performance.now();
+    const cached = this.xcodeSelect;
+    if (cached !== null && now - cached.at < XCODE_SELECT_CACHE_MS) return await cached.path;
+    const pending = this.readXcodeSelectPath();
+    this.xcodeSelect = { at: now, path: pending };
+    const resolved = await pending;
+    // A missing toolchain, or tools not yet pointed at Xcode, is a setup step
+    // the user is about to fix; only a usable Xcode answer is kept.
+    if (!isXcodeDeveloperDir(resolved) && this.xcodeSelect?.path === pending) {
+      this.xcodeSelect = null;
+    }
+    return resolved;
+  }
+
+  private async readXcodeSelectPath(): Promise<string | null> {
     const result = await this.run("xcode-select", ["-p"], {
       timeoutMs: 10_000,
       allowNonZeroExit: true,
@@ -1080,12 +1144,37 @@ export class IosSimulatorBackend implements DeviceBackend {
   }
 
   private async xcodeLicenseAccepted(): Promise<boolean> {
-    const result = await this.run("xcodebuild", ["-version"], {
+    const result = await this.readXcodeVersion();
+    return result !== null && result.code === 0;
+  }
+
+  /**
+   * `xcodebuild -version`, which fails until the license is accepted. One read
+   * answers the license step and the helper cache key; a failed read is not
+   * kept, so accepting the license shows up on the next check.
+   */
+  private async readXcodeVersion(): Promise<ProcessRunResult | null> {
+    const env = await this.toolchainEnv();
+    const developerDir = env?.DEVELOPER_DIR ?? null;
+    const cached = this.xcodeVersion;
+    if (
+      cached !== null &&
+      cached.developerDir === developerDir &&
+      performance.now() - cached.at < XCODE_VERSION_CACHE_MS
+    ) {
+      return await cached.result;
+    }
+    const result = this.run("xcodebuild", ["-version"], {
       timeoutMs: 20_000,
       allowNonZeroExit: true,
-      env: await this.toolchainEnv(),
+      env,
     }).catch(() => null);
-    return result !== null && result.code === 0;
+    this.xcodeVersion = { at: performance.now(), developerDir, result };
+    const resolved = await result;
+    if ((resolved === null || resolved.code !== 0) && this.xcodeVersion?.result === result) {
+      this.xcodeVersion = null;
+    }
+    return resolved;
   }
 
   private async readBundleIdentifier(appPath: string): Promise<string> {
@@ -1287,11 +1376,7 @@ export class IosSimulatorBackend implements DeviceBackend {
   }
 
   private async xcodeBuildKey(): Promise<string> {
-    const result = await this.run("xcodebuild", ["-version"], {
-      timeoutMs: 20_000,
-      allowNonZeroExit: true,
-      env: await this.toolchainEnv(),
-    }).catch(() => null);
+    const result = await this.readXcodeVersion();
     // Derived by the shared helper so the smoke CLI writes the directory the
     // server reads; deriving it here independently is what let them diverge.
     const key =

@@ -1,1 +1,1 @@
-export * from "@ryco/client-runtime/relay";
+export * from "@ryco/client-runtime/relay/base64url";

@@ -3,7 +3,7 @@ import { useEffect, useRef } from "react";
 
 import { usePresentationTier } from "../hooks/usePresentationTier";
 import { useSettingsDialogStore } from "../settingsDialogStore";
-import { preloadSettingsPage, SETTINGS_ROUTE_PATH } from "../settingsRoute";
+import { SETTINGS_ROUTE_PATH } from "../settingsRoute";
 import { resolveThreadRouteRef } from "../threadRoutes";
 
 /**
@@ -16,7 +16,9 @@ import { resolveThreadRouteRef } from "../threadRoutes";
  *   already navigating somewhere else in the same tick.
  *
  * The phone tier keeps its sheet and never routes, so the bridge stands down
- * there. Arriving by URL is handled by the route itself (`markOpen`).
+ * there. Arriving by URL is handled by the route itself (`markOpen`). The page
+ * chunk is warmed by the shell's post-paint idle preloads (`RootAppShell`) and
+ * awaited by the router before the route commits.
  *
  * The page has no thread in its URL, so the thread being viewed when settings
  * open is captured as the device target — the dialog used to read it from the
@@ -29,18 +31,6 @@ export function SettingsRouteBridge() {
   const onSettingsRoute = useLocation({
     select: (location) => location.pathname === SETTINGS_ROUTE_PATH,
   });
-
-  useEffect(() => {
-    if (!pageTier) return;
-    const handle =
-      typeof window.requestIdleCallback === "function"
-        ? window.requestIdleCallback(preloadSettingsPage, { timeout: 4_000 })
-        : window.setTimeout(preloadSettingsPage, 1_500);
-    return () => {
-      if (typeof window.cancelIdleCallback === "function") window.cancelIdleCallback(handle);
-      else window.clearTimeout(handle);
-    };
-  }, [pageTier]);
 
   const routedEnvironmentId = useParams({
     strict: false,

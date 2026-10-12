@@ -3,13 +3,57 @@ import os from "node:os";
 import path from "node:path";
 
 import { ThreadId } from "@ryco/contracts";
-import { assert, describe, it } from "@effect/vitest";
+import { AsyncRotatingFileSink } from "@ryco/shared/logging";
+import { assert, describe, it, vi } from "@effect/vitest";
 import { Effect, Metric } from "effect";
 
 import { getResourceAttribution } from "../../diagnostics/ResourceAttribution.ts";
 import { metricNames } from "../../observability/Metrics.ts";
 import { hasMetricSnapshot } from "../../observability/testMetricSnapshots.ts";
-import { makeEventNdjsonLogger, sweepStaleEventLogs } from "./EventNdjsonLogger.ts";
+import type { ProviderEventLogMode } from "@ryco/contracts";
+
+import { makeEventNdjsonLogger, sweepLogDirectory } from "./EventNdjsonLogger.ts";
+
+const sleep = (ms: number) =>
+  Effect.promise(() => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+
+const waitUntil = (condition: () => boolean) =>
+  Effect.gen(function* () {
+    for (let attempt = 0; attempt < 300 && !condition(); attempt += 1) {
+      yield* sleep(10);
+    }
+    assert.isTrue(condition(), "condition not met within 3 s");
+  });
+
+/**
+ * Holds the first `AsyncRotatingFileSink.close()` (an evicted writer's last
+ * step, which waits for backup compression) open until `release()`.
+ */
+const holdFirstSinkClose = () => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const original = AsyncRotatingFileSink.prototype.close;
+  const spy = vi.spyOn(AsyncRotatingFileSink.prototype, "close").mockImplementationOnce(function (
+    this: AsyncRotatingFileSink,
+  ) {
+    return gate.then(() => original.call(this));
+  });
+  return {
+    calls: () => spy.mock.calls.length,
+    release,
+    restore: () => spy.mockRestore(),
+  };
+};
+
+function readRecords(filePath: string): Array<Record<string, any>> {
+  return fs
+    .readFileSync(filePath, "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(parseLogLine(line).payload) as Record<string, any>);
+}
 
 function parseLogLine(line: string) {
   const match = /^\[([^\]]+)\] ([A-Z]+): (.+)$/.exec(line);
@@ -311,6 +355,340 @@ describe("EventNdjsonLogger", () => {
     }),
   );
 
+  it.effect("coalesces consecutive streaming deltas into one record per content stream", () =>
+    Effect.gen(function* () {
+      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ryco-provider-log-"));
+      const basePath = path.join(tempDir, "events.log");
+      const threadId = ThreadId.make("thread-deltas");
+      const claudeDelta = (index: number, type: string, field: string, text: string) => ({
+        observedAt: "2026-10-12T00:00:00.000Z",
+        event: {
+          id: `evt-${text}`,
+          kind: "notification",
+          provider: "claudeAgent",
+          method: `claude/stream_event/content_block_delta/${type}`,
+          turnId: "turn-1",
+          payload: {
+            type: "stream_event",
+            event: { type: "content_block_delta", index, delta: { type, [field]: text } },
+          },
+        },
+      });
+
+      try {
+        const native = yield* makeEventNdjsonLogger(basePath, { stream: "native" });
+        const canonical = yield* makeEventNdjsonLogger(basePath, { stream: "canonical" });
+        if (!native || !canonical) {
+          return assert.fail("expected loggers");
+        }
+
+        yield* native.write(claudeDelta(0, "text_delta", "text", "he"), threadId);
+        yield* native.write(claudeDelta(0, "text_delta", "text", "llo"), threadId);
+        yield* native.write(
+          {
+            observedAt: "2026-10-12T00:00:00.000Z",
+            event: { method: "claude/stream_event/content_block_stop", payload: { index: 0 } },
+          },
+          threadId,
+        );
+        yield* native.write(claudeDelta(1, "thinking_delta", "thinking", "a"), threadId);
+        yield* native.write(claudeDelta(1, "thinking_delta", "thinking", "b"), threadId);
+        for (const delta of ["x", "y", "z"]) {
+          yield* canonical.write(
+            {
+              type: "content.delta",
+              eventId: `evt-${delta}`,
+              threadId: "thread-deltas",
+              itemId: "item-1",
+              payload: { streamKind: "assistant_text", delta },
+              raw: { source: "codex.app-server.notification", payload: { delta } },
+            },
+            threadId,
+          );
+        }
+        yield* native.close();
+        yield* canonical.close();
+
+        const nativeRecords = readRecords(path.join(tempDir, "thread-deltas.native.log"));
+        assert.deepEqual(
+          nativeRecords.map((record) => [record.event.kind, record.event.text ?? null]),
+          [
+            ["delta-run", "hello"],
+            [undefined, null],
+            ["delta-run", "ab"],
+          ],
+        );
+        assert.equal(nativeRecords[0]?.event.count, 2);
+        assert.equal(nativeRecords[0]?.event.index, 0);
+
+        const canonicalRecords = readRecords(path.join(tempDir, "thread-deltas.log"));
+        assert.equal(canonicalRecords.length, 1);
+        assert.equal(canonicalRecords[0]?.type, "content.delta");
+        assert.equal(canonicalRecords[0]?.kind, "delta-run");
+        assert.equal(canonicalRecords[0]?.count, 3);
+        assert.deepEqual(canonicalRecords[0]?.payload, {
+          streamKind: "assistant_text",
+          delta: "xyz",
+        });
+      } finally {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  it.effect("applies the current detail level to every write", () =>
+    Effect.gen(function* () {
+      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ryco-provider-log-"));
+      const threadId = ThreadId.make("thread-mode");
+      let mode: ProviderEventLogMode = "lifecycle";
+
+      try {
+        const logger = yield* makeEventNdjsonLogger(path.join(tempDir, "events.log"), {
+          stream: "canonical",
+          mode: () => mode,
+        });
+        if (!logger) {
+          return assert.fail("expected logger");
+        }
+
+        yield* logger.write({ type: "content.delta", payload: { delta: "dropped" } }, threadId);
+        yield* logger.write({ type: "turn.completed", payload: { state: "completed" } }, threadId);
+        mode = "off";
+        yield* logger.write({ type: "runtime.error", payload: { message: "dropped" } }, threadId);
+        assert.equal(fs.existsSync(path.join(tempDir, "_global.log")), false);
+        mode = "full";
+        yield* logger.write({ type: "task.progress", payload: { taskId: "t" } }, threadId);
+        yield* logger.close();
+
+        assert.deepEqual(
+          readRecords(path.join(tempDir, "thread-mode.log")).map((record) => record.type),
+          ["turn.completed", "task.progress"],
+        );
+      } finally {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  it.effect("never fails the caller on a record the policy cannot inspect", () =>
+    Effect.gen(function* () {
+      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ryco-provider-log-"));
+      const threadId = ThreadId.make("thread-hostile");
+      try {
+        const logger = yield* makeEventNdjsonLogger(path.join(tempDir, "events.log"), {
+          stream: "canonical",
+          mode: () => "lifecycle",
+        });
+        const hostile = {
+          get type(): string {
+            throw new Error("getter exploded");
+          },
+        };
+        yield* logger!.write(hostile, threadId);
+        yield* logger!.write({ type: "turn.completed", id: "after" }, threadId);
+        yield* logger!.close();
+
+        assert.deepEqual(
+          readRecords(path.join(tempDir, "thread-hostile.log")).map((record) => record.id),
+          ["after"],
+        );
+      } finally {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  it.effect("writes nothing and creates no file while logging is off", () =>
+    Effect.gen(function* () {
+      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ryco-provider-log-"));
+      try {
+        const logger = yield* makeEventNdjsonLogger(path.join(tempDir, "events.log"), {
+          stream: "native",
+          mode: () => "off",
+        });
+        yield* logger!.write({ kind: "error", method: "error" }, ThreadId.make("thread-off"));
+        yield* logger!.close();
+        assert.deepEqual(fs.readdirSync(tempDir), []);
+      } finally {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  it.effect("bounds each thread's queue by size, not only by record count", () =>
+    Effect.gen(function* () {
+      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ryco-provider-log-"));
+      try {
+        const logger = yield* makeEventNdjsonLogger(path.join(tempDir, "events.log"), {
+          stream: "native",
+          batchWindowMs: 1_000,
+          maxQueueChars: 300,
+        });
+        for (let index = 0; index < 10; index += 1) {
+          yield* logger!.write({ id: `evt-size-${index}`, text: "x".repeat(150) }, null);
+        }
+        yield* logger!.close();
+
+        const snapshots = yield* Metric.snapshot;
+        assert.equal(
+          hasMetricSnapshot(snapshots, metricNames.providerEventLogRecordsDroppedTotal, {
+            stream: "native",
+            reason: "queue_full",
+          }),
+          true,
+        );
+        assert.equal(readRecords(path.join(tempDir, "_global.native.log")).length, 1);
+      } finally {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  it.effect("closes idle writers and reopens the file on the next record", () =>
+    Effect.gen(function* () {
+      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ryco-provider-log-"));
+      const filePath = path.join(tempDir, "thread-idle.native.log");
+      const threadId = ThreadId.make("thread-idle");
+      try {
+        const logger = yield* makeEventNdjsonLogger(path.join(tempDir, "events.log"), {
+          stream: "native",
+          batchWindowMs: 5,
+          idleWriterTtlMs: 1,
+        });
+        yield* logger!.write({ id: "before-eviction" }, threadId);
+        yield* sleep(600);
+        assert.deepEqual(readRecords(filePath), [{ id: "before-eviction" }]);
+
+        // A writer still holding its handle would keep appending to the
+        // unlinked file; an evicted one reopens the path.
+        fs.rmSync(filePath);
+        yield* logger!.write({ id: "after-eviction" }, threadId);
+        yield* logger!.close();
+        assert.deepEqual(readRecords(filePath), [{ id: "after-eviction" }]);
+      } finally {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  it.effect("starts a replacement writer only after its evicted predecessor has closed", () =>
+    Effect.gen(function* () {
+      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ryco-provider-log-"));
+      const filePath = path.join(tempDir, "thread-recreate.native.log");
+      const threadId = ThreadId.make("thread-recreate");
+      const held = holdFirstSinkClose();
+      try {
+        const logger = yield* makeEventNdjsonLogger(path.join(tempDir, "events.log"), {
+          stream: "native",
+          batchWindowMs: 5,
+          idleWriterTtlMs: 1,
+        });
+        yield* logger!.write({ id: "evt-0" }, threadId);
+        // Flushed, idle, evicted: its close (backup compression included) is held open.
+        yield* waitUntil(() => held.calls() === 1);
+
+        yield* logger!.write({ id: "evt-1" }, threadId);
+        yield* sleep(50);
+        // Rotating the same file now could race the old sink's compression.
+        assert.deepEqual(readRecords(filePath), [{ id: "evt-0" }]);
+
+        held.release();
+        yield* logger!.close();
+        assert.deepEqual(readRecords(filePath), [{ id: "evt-0" }, { id: "evt-1" }]);
+      } finally {
+        held.restore();
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  it.effect("close waits for evicted writers that are still closing", () =>
+    Effect.gen(function* () {
+      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ryco-provider-log-"));
+      const filePath = path.join(tempDir, "thread-closing.native.log");
+      const threadId = ThreadId.make("thread-closing");
+      const held = holdFirstSinkClose();
+      try {
+        const logger = yield* makeEventNdjsonLogger(path.join(tempDir, "events.log"), {
+          stream: "native",
+          batchWindowMs: 5,
+          idleWriterTtlMs: 1,
+        });
+        yield* logger!.write({ id: "evt-0" }, threadId);
+        yield* waitUntil(() => held.calls() === 1);
+        // A replacement that never writes a batch (its record serializes to
+        // nothing) is evicted while the first writer is still closing.
+        yield* logger!.write(undefined, threadId);
+        yield* sleep(600);
+
+        let closed = false;
+        const closing = Effect.runPromise(logger!.close()).then(() => {
+          closed = true;
+        });
+        yield* sleep(50);
+        assert.isFalse(closed);
+
+        held.release();
+        yield* Effect.promise(() => closing);
+        assert.deepEqual(readRecords(filePath), [{ id: "evt-0" }]);
+      } finally {
+        held.restore();
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  it.effect("drains pending records on close and drops records written afterwards", () =>
+    Effect.gen(function* () {
+      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ryco-provider-log-"));
+      try {
+        const logger = yield* makeEventNdjsonLogger(path.join(tempDir, "events.log"), {
+          stream: "canonical",
+          batchWindowMs: 60_000,
+        });
+        yield* logger!.write({ type: "turn.completed", id: "pending" }, null);
+        yield* logger!.close();
+        yield* logger!.write({ type: "turn.completed", id: "late" }, null);
+        yield* sleep(20);
+
+        assert.deepEqual(
+          readRecords(path.join(tempDir, "_global.log")).map((record) => record.id),
+          ["pending"],
+        );
+      } finally {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  it.effect("removes the oldest files until the directory fits its byte budget", () =>
+    Effect.gen(function* () {
+      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ryco-provider-log-"));
+      const now = Date.now();
+      try {
+        const files = ["oldest.log", "older.native.log.1.gz", "newer.log", "newest.log"];
+        files.forEach((name, index) => {
+          const filePath = path.join(tempDir, name);
+          fs.writeFileSync(filePath, "x".repeat(100));
+          const mtime = new Date(now - (files.length - index) * 60_000);
+          fs.utimesSync(filePath, mtime, mtime);
+        });
+        fs.writeFileSync(path.join(tempDir, "notes.txt"), "x".repeat(1_000));
+
+        const removed = yield* sweepLogDirectory(tempDir, { maxTotalBytes: 250, now });
+
+        assert.equal(removed, 2);
+        assert.deepEqual(fs.readdirSync(tempDir).toSorted(), [
+          "newer.log",
+          "newest.log",
+          "notes.txt",
+        ]);
+      } finally {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      }
+    }),
+  );
+
   it.effect("sweeps stale log files past the retention window", () =>
     Effect.gen(function* () {
       const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ryco-provider-log-"));
@@ -330,7 +708,7 @@ describe("EventNdjsonLogger", () => {
         fs.utimesSync(staleRotated, staleTime, staleTime);
         fs.utimesSync(unrelated, staleTime, staleTime);
 
-        const removed = yield* sweepStaleEventLogs(tempDir, { maxAgeMs: 30 * dayMs, now });
+        const removed = yield* sweepLogDirectory(tempDir, { maxAgeMs: 30 * dayMs, now });
 
         assert.equal(removed, 2);
         assert.equal(fs.existsSync(stale), false);
@@ -348,7 +726,7 @@ describe("EventNdjsonLogger", () => {
     Effect.gen(function* () {
       const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ryco-provider-log-"));
       fs.rmSync(tempDir, { recursive: true, force: true });
-      const removed = yield* sweepStaleEventLogs(tempDir);
+      const removed = yield* sweepLogDirectory(tempDir);
       assert.equal(removed, 0);
     }),
   );

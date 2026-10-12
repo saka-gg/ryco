@@ -35,6 +35,18 @@ export interface DiffCheckpointsInput {
   readonly ignoreWhitespace: boolean;
 }
 
+export interface ResolveCheckpointCommitsInput {
+  readonly cwd: string;
+  readonly checkpointRefs: ReadonlyArray<CheckpointRef>;
+}
+
+export interface DiffCheckpointCommitsInput {
+  readonly cwd: string;
+  readonly fromCommitOid: string;
+  readonly toCommitOid: string;
+  readonly ignoreWhitespace: boolean;
+}
+
 export interface DeleteCheckpointRefsInput {
   readonly cwd: string;
   readonly checkpointRefs: ReadonlyArray<CheckpointRef>;
@@ -94,12 +106,27 @@ export interface CheckpointStoreShape {
   ) => Effect.Effect<boolean, CheckpointStoreError>;
 
   /**
+   * Resolve checkpoint refs to their commit OIDs with one Git process, in input
+   * order; `null` marks a ref that does not resolve to a commit.
+   */
+  readonly resolveCheckpointCommits: (
+    input: ResolveCheckpointCommitsInput,
+  ) => Effect.Effect<ReadonlyArray<string | null>, CheckpointStoreError>;
+
+  /**
    * Compute patch diff between two checkpoint refs.
    *
    * Can optionally treat missing "from" ref as `HEAD`.
    */
   readonly diffCheckpoints: (
     input: DiffCheckpointsInput,
+  ) => Effect.Effect<string, CheckpointStoreError>;
+
+  /**
+   * Compute patch diff between two already-resolved checkpoint commits.
+   */
+  readonly diffCheckpointCommits: (
+    input: DiffCheckpointCommitsInput,
   ) => Effect.Effect<string, CheckpointStoreError>;
 
   /**

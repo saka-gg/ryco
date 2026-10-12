@@ -1,4 +1,4 @@
-import { Suspense, lazy, useCallback, type CSSProperties, type ReactNode } from "react";
+import { Suspense, useCallback, useEffect, type CSSProperties, type ReactNode } from "react";
 
 import {
   PREFERS_REDUCED_MOTION_QUERY,
@@ -13,15 +13,19 @@ import { Sidebar, SidebarProvider, SidebarRail } from "~/components/ui/sidebar";
 import { cn } from "~/lib/utils";
 import { useDelayedUnmount } from "~/hooks/useDelayedUnmount";
 import { useMediaQuery } from "~/hooks/useMediaQuery";
-import { DiffWorkerPoolProvider } from "./DiffWorkerPoolProvider";
+import {
+  LazyThreadWorkspacePanel,
+  scheduleIdleWorkspacePanelPreload,
+  setWorkspacePanelPreloadHint,
+  useWorkspacePanelChunkReady,
+  workspacePanelLoadingLabel,
+} from "../workspacePanelPreload";
 import {
   DiffPanelHeaderSkeleton,
   DiffPanelLoadingState,
   DiffPanelShell,
   type DiffPanelMode,
 } from "./DiffPanelShell";
-
-const ThreadWorkspacePanel = lazy(() => import("./ThreadWorkspacePanel"));
 
 const RIGHT_PANEL_INLINE_SIDEBAR_WIDTH_STORAGE_KEY = "chat_diff_sidebar_width";
 const RIGHT_PANEL_INLINE_DEFAULT_WIDTH = "clamp(24rem,34vw,36rem)";
@@ -79,47 +83,34 @@ export const LazyRightPanel = (props: {
   onToggleMaximized?: (() => void) | undefined;
   reserveChromeInset?: boolean;
 }) => {
+  // No diff worker pool here: only the review and pull request surfaces
+  // highlight through it, and they lease it themselves.
+  const ready = useWorkspacePanelChunkReady(LazyThreadWorkspacePanel, props.panelMode);
+  const fallback = (
+    <RightPanelLoadingFallback
+      mode={props.mode}
+      label={workspacePanelLoadingLabel(props.panelMode)}
+    />
+  );
+  // The loading state is an ordinary render, not a Suspense fallback, so the
+  // panel appears as soon as its chunk lands (or at once when preloaded).
+  if (!ready) {
+    return fallback;
+  }
   return (
-    <DiffWorkerPoolProvider>
-      <Suspense
-        fallback={
-          <RightPanelLoadingFallback
-            mode={props.mode}
-            label={
-              props.panelMode === "review"
-                ? "Loading diff viewer..."
-                : props.panelMode === "files"
-                  ? "Loading file preview..."
-                  : props.panelMode === "terminal"
-                    ? "Loading terminal..."
-                    : props.panelMode === "simulator"
-                      ? "Loading simulator..."
-                      : props.panelMode === "pullRequest"
-                        ? "Loading pull request..."
-                        : props.panelMode === "agents"
-                          ? "Loading agents..."
-                          : props.panelMode === "agent"
-                            ? "Loading subagent thread..."
-                            : props.panelMode === "render"
-                              ? "Loading page..."
-                              : "Loading workspace..."
-            }
-          />
-        }
-      >
-        <ThreadWorkspacePanel
-          mode={props.mode}
-          panelMode={props.panelMode}
-          openedPanelModes={props.openedPanelModes}
-          openedAgentKeys={props.openedAgentKeys}
-          openedRenderKey={props.openedRenderKey ?? null}
-          onClosePanelTab={props.onClosePanelTab}
-          maximized={props.maximized ?? false}
-          onToggleMaximized={props.onToggleMaximized}
-          reserveChromeInset={props.reserveChromeInset ?? false}
-        />
-      </Suspense>
-    </DiffWorkerPoolProvider>
+    <Suspense fallback={fallback}>
+      <LazyThreadWorkspacePanel
+        mode={props.mode}
+        panelMode={props.panelMode}
+        openedPanelModes={props.openedPanelModes}
+        openedAgentKeys={props.openedAgentKeys}
+        openedRenderKey={props.openedRenderKey ?? null}
+        onClosePanelTab={props.onClosePanelTab}
+        maximized={props.maximized ?? false}
+        onToggleMaximized={props.onToggleMaximized}
+        reserveChromeInset={props.reserveChromeInset ?? false}
+      />
+    </Suspense>
   );
 };
 
@@ -141,6 +132,17 @@ export const RightPanelInlineSidebar = (props: {
 }) => {
   const { maximized, open, onClose, onOpen, panelMode, renderContent } = props;
   const prefersReducedMotion = useMediaQuery(PREFERS_REDUCED_MOTION_QUERY);
+  // While closed, `panelMode` is the surface the panel reopens to: hover on
+  // the header toggle preloads it, and an idle preload fetches its code once
+  // per session so the first open skips the chunk waterfall.
+  useEffect(() => {
+    setWorkspacePanelPreloadHint(panelMode);
+  }, [panelMode]);
+  const idlePreloadMode = open ? null : panelMode;
+  useEffect(() => {
+    if (idlePreloadMode === null) return;
+    return scheduleIdleWorkspacePanelPreload(idlePreloadMode);
+  }, [idlePreloadMode]);
   const renderPanelSurface = useDelayedUnmount(
     open,
     prefersReducedMotion ? 0 : RIGHT_PANEL_INLINE_EXIT_DURATION_MS,

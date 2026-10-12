@@ -3,6 +3,11 @@
  * opening a cloud-backed file can block in the kernel even after an async read
  * is cancelled. A separate process keeps optional icons out of the node's shared
  * filesystem/DNS worker pool, and lets the parent terminate a stalled read.
+ *
+ * One child resolves every workspace root it is given, in order, writing one
+ * JSON line per root (`{"i":<index>,"icon":{path,base64}|null}`) as soon as
+ * that root is done, so a root that stalls costs only itself and the roots
+ * after it, which the parent retries.
  */
 export function projectFaviconWorkerMain(): void {
   const fs = process.getBuiltinModule("node:fs");
@@ -41,8 +46,8 @@ export function projectFaviconWorkerMain(): void {
     "src/root.tsx",
     "src/index.html",
   ];
-  try {
-    const root = fs.realpathSync(process.argv[1]!);
+  const resolveRoot = (requestedRoot: string): { path: string; bytes: Buffer } | null => {
+    const root = fs.realpathSync(requestedRoot);
     const read = (relative: string, limit: number): { path: string; bytes: Buffer } | null => {
       let fd: number | undefined;
       try {
@@ -67,17 +72,9 @@ export function projectFaviconWorkerMain(): void {
         if (fd !== undefined) fs.closeSync(fd);
       }
     };
-    const send = (icon: { path: string; bytes: Buffer }) => {
-      process.stdout.write(
-        JSON.stringify({ path: icon.path, base64: icon.bytes.toString("base64") }),
-      );
-    };
     for (const candidate of candidates) {
       const icon = read(candidate, iconLimit);
-      if (icon) {
-        send(icon);
-        return;
-      }
+      if (icon) return icon;
     }
     for (const source of sources) {
       const text = read(source, sourceLimit)?.bytes.toString("utf8");
@@ -93,14 +90,24 @@ export function projectFaviconWorkerMain(): void {
       const clean = href.replace(/^\//, "");
       for (const candidate of [path.join("public", clean), clean]) {
         const icon = read(candidate, iconLimit);
-        if (icon) {
-          send(icon);
-          return;
-        }
+        if (icon) return icon;
       }
     }
-  } catch {
-    // Missing, unreadable and unsupported project files all use the folder icon.
+    return null;
+  };
+  const roots = process.argv.slice(1);
+  for (let index = 0; index < roots.length; index++) {
+    let icon: { path: string; bytes: Buffer } | null = null;
+    try {
+      icon = resolveRoot(roots[index]!);
+    } catch {
+      // Missing, unreadable and unsupported project files all use the folder icon.
+    }
+    process.stdout.write(
+      `${JSON.stringify({
+        i: index,
+        icon: icon ? { path: icon.path, base64: icon.bytes.toString("base64") } : null,
+      })}\n`,
+    );
   }
-  process.stdout.write("null");
 }

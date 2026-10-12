@@ -1,11 +1,8 @@
-import { WorkerPoolContextProvider, useWorkerPool } from "@pierre/diffs/react";
-import DiffsWorker from "@pierre/diffs/worker/worker.js?worker";
-import { useEffect, useMemo, type ReactNode } from "react";
+import { WorkerPoolContext, useWorkerPool } from "@pierre/diffs/react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useTheme } from "../hooks/useTheme";
 import { resolveDiffThemeName, type DiffThemeName } from "../lib/diffRendering";
-
-const MAX_DIFF_WORKER_POOL_SIZE = 3;
-const DIFF_AST_CACHE_SIZE = 120;
+import { acquireDiffWorkerPool, getDiffWorkerPool } from "../lib/diffWorkerPool";
 
 function DiffWorkerThemeSync({ themeName }: { themeName: DiffThemeName }) {
   const workerPool = useWorkerPool();
@@ -31,32 +28,39 @@ function DiffWorkerThemeSync({ themeName }: { themeName: DiffThemeName }) {
   return null;
 }
 
+/**
+ * Provides the shared diff highlight pool to `@pierre/diffs` components.
+ *
+ * Mount it only around surfaces that actually highlight through the pool
+ * (review diffs, pull request files, read-only file previews): the pool and
+ * its workers start on first use and outlive this provider for an idle grace
+ * period, so reopening a diff reuses warm grammars and highlight caches.
+ */
 export function DiffWorkerPoolProvider({ children }: { children?: ReactNode }) {
   const { resolvedTheme } = useTheme();
   const diffThemeName = resolveDiffThemeName(resolvedTheme);
-  const workerPoolSize = useMemo(() => {
-    const cores =
-      typeof navigator === "undefined" ? 4 : Math.max(1, navigator.hardwareConcurrency || 4);
-    // The right panel mounts this provider lazily, but @pierre/diffs initializes
-    // the pool immediately after mount. Keep concurrency below core-count/2 so
-    // large diff syntax work does not starve chat rendering or navigation.
-    return Math.max(1, Math.min(MAX_DIFF_WORKER_POOL_SIZE, Math.floor(cores / 3)));
+  const initialThemeNameRef = useRef(diffThemeName);
+  // Components read the pool during their first render, so it is resolved
+  // here rather than in the lease effect. An uncommitted render leaves an
+  // unleased pool, which the owner retires after its idle grace.
+  const [pool, setPool] = useState(() =>
+    typeof window === "undefined" ? undefined : getDiffWorkerPool(diffThemeName),
+  );
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const lease = acquireDiffWorkerPool(initialThemeNameRef.current);
+    // The pool may have been retired between render and commit.
+    setPool((current) => (current === lease.pool ? current : lease.pool));
+    return lease.release;
   }, []);
 
   return (
-    <WorkerPoolContextProvider
-      poolOptions={{
-        workerFactory: () => new DiffsWorker(),
-        poolSize: workerPoolSize,
-        totalASTLRUCacheSize: DIFF_AST_CACHE_SIZE,
-      }}
-      highlighterOptions={{
-        theme: diffThemeName,
-        tokenizeMaxLineLength: 1_000,
-      }}
-    >
+    <WorkerPoolContext.Provider value={pool}>
       <DiffWorkerThemeSync themeName={diffThemeName} />
       {children}
-    </WorkerPoolContextProvider>
+    </WorkerPoolContext.Provider>
   );
 }

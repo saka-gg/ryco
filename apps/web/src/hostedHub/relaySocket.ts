@@ -50,14 +50,16 @@ type InboundMessage =
 
 /**
  * Classify a browser WebSocket message exactly as the original façade did.
- * ArrayBuffer / typed-array views are copied to relay bytes. A raw
- * SharedArrayBuffer carries a byte length but is not a readable view, so it
- * fails closed as an invalid frame; text, Blob, and anything else have no relay
- * byte length and fail closed as an oversized frame. Nothing is silently
- * dropped.
+ * An ArrayBuffer — what every message is with `binaryType = "arraybuffer"` —
+ * is fresh per message and this listener's alone, so it is handed over without
+ * a copy (the relay engine decodes and zeroes it; see `RelaySocket`). A
+ * typed-array view may share its buffer and is copied. A raw SharedArrayBuffer
+ * carries a byte length but is not a readable view, so it fails closed as an
+ * invalid frame; text, Blob, and anything else have no relay byte length and
+ * fail closed as an oversized frame. Nothing is silently dropped.
  */
 function classifyInboundMessage(data: unknown): InboundMessage {
-  if (data instanceof ArrayBuffer) return { bytes: new Uint8Array(data.slice(0)) };
+  if (data instanceof ArrayBuffer) return { bytes: new Uint8Array(data) };
   if (data instanceof Uint8Array) return { bytes: Uint8Array.from(data) };
   if (ArrayBuffer.isView(data))
     return {
@@ -82,7 +84,10 @@ export function createBrowserRelaySocket(
     get readyState() {
       return ws.readyState;
     },
-    send: (bytes) => ws.send(Uint8Array.from(bytes).buffer),
+    // `WebSocket.send` copies a view's bytes before it returns, so the caller
+    // may zero its buffer straight after; a second copy here would only leave
+    // an unzeroed duplicate behind. Relay buffers are never shared memory.
+    send: (bytes) => ws.send(bytes as Uint8Array<ArrayBuffer>),
     close: (code, reason) => ws.close(code, reason),
     onOpen: (listener) => ws.addEventListener("open", listener),
     onBinaryMessage: (listener) =>

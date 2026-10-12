@@ -7,8 +7,12 @@ import { toPersistenceSqlError } from "../Errors.ts";
 import {
   DeleteProjectionProjectInput,
   GetProjectionProjectInput,
+  ListOrphanChatProjectsInput,
+  ListProjectionProjectRepositoryIdentityStatesInput,
   ProjectionProject,
   ProjectionProjectRepository,
+  ProjectionProjectRepositoryIdentityState,
+  RecordProjectionProjectRepositoryIdentityInput,
   type ProjectionProjectRepositoryShape,
 } from "../Services/ProjectionProjects.ts";
 
@@ -70,7 +74,20 @@ const makeProjectionProjectRepository = Effect.gen(function* () {
           scripts_json = excluded.scripts_json,
           created_at = excluded.created_at,
           updated_at = excluded.updated_at,
-          deleted_at = excluded.deleted_at
+          deleted_at = excluded.deleted_at,
+          -- A persisted repository identity belongs to the root it was resolved for.
+          repository_identity_json = CASE
+            WHEN projection_projects.workspace_root = excluded.workspace_root
+              THEN projection_projects.repository_identity_json
+          END,
+          repository_identity_fingerprint = CASE
+            WHEN projection_projects.workspace_root = excluded.workspace_root
+              THEN projection_projects.repository_identity_fingerprint
+          END,
+          repository_identity_checked_at = CASE
+            WHEN projection_projects.workspace_root = excluded.workspace_root
+              THEN projection_projects.repository_identity_checked_at
+          END
       `,
   });
 
@@ -122,6 +139,82 @@ const makeProjectionProjectRepository = Effect.gen(function* () {
       `,
   });
 
+  const listRepositoryIdentityStateRows = SqlSchema.findAll({
+    Request: ListProjectionProjectRepositoryIdentityStatesInput,
+    Result: ProjectionProjectRepositoryIdentityState,
+    execute: ({ projectId }) =>
+      sql`
+        SELECT
+          project_id AS "projectId",
+          kind,
+          workspace_root AS "workspaceRoot",
+          repository_identity_json AS "repositoryIdentityJson",
+          repository_identity_fingerprint AS "fingerprint",
+          repository_identity_checked_at AS "checkedAt"
+        FROM projection_projects
+        WHERE deleted_at IS NULL
+          ${projectId === undefined ? sql`` : sql`AND project_id = ${projectId}`}
+        ORDER BY created_at ASC, project_id ASC
+      `,
+  });
+
+  const recordRepositoryIdentityRow = SqlSchema.findAll({
+    Request: RecordProjectionProjectRepositoryIdentityInput,
+    Result: Schema.Struct({ projectId: Schema.String }),
+    execute: (input) =>
+      sql`
+        UPDATE projection_projects
+        SET
+          repository_identity_json = ${input.repositoryIdentityJson},
+          repository_identity_fingerprint = ${input.fingerprint},
+          repository_identity_checked_at = ${input.checkedAt}
+        WHERE project_id = ${input.projectId}
+          AND workspace_root = ${input.workspaceRoot}
+        RETURNING project_id AS "projectId"
+      `,
+  });
+
+  // The NOT EXISTS predicate is `!isRolledBackThreadCreation(thread)` (ProjectionThreads.ts):
+  // live, archived, trashed and used-then-deleted threads all keep the chat.
+  const listOrphanChatProjectRows = SqlSchema.findAll({
+    Request: ListOrphanChatProjectsInput,
+    Result: ProjectionProjectDbRow,
+    execute: ({ createdBefore }) =>
+      sql`
+        SELECT
+          project_id AS "projectId",
+          kind,
+          title,
+          workspace_root AS "workspaceRoot",
+          project_metadata_dir AS "projectMetadataDir",
+          default_model_selection_json AS "defaultModelSelection",
+          custom_system_prompt AS "customSystemPrompt",
+          custom_avatar_content_hash AS "customAvatarContentHash",
+          preferred_remote_name AS "preferredRemoteName",
+          scripts_json AS "scripts",
+          created_at AS "createdAt",
+          updated_at AS "updatedAt",
+          deleted_at AS "deletedAt"
+        FROM projection_projects AS projects
+        WHERE projects.kind = 'chat'
+          AND projects.deleted_at IS NULL
+          AND projects.created_at < ${createdBefore}
+          AND NOT EXISTS (
+            SELECT 1 FROM projection_threads AS threads
+            WHERE threads.project_id = projects.project_id
+              AND NOT (
+                threads.deleted_at IS NOT NULL
+                AND threads.trashed_at IS NULL
+                AND threads.latest_turn_id IS NULL
+                AND threads.latest_user_message_at IS NULL
+                -- A fork is never unused: it inherited history (isNeverUsedThread).
+                AND threads.lineage_source_message_id IS NULL
+              )
+          )
+        ORDER BY projects.created_at ASC, projects.project_id ASC
+      `,
+  });
+
   const deleteProjectionProjectRow = SqlSchema.void({
     Request: DeleteProjectionProjectInput,
     execute: ({ projectId }) =>
@@ -151,11 +244,41 @@ const makeProjectionProjectRepository = Effect.gen(function* () {
       Effect.mapError(toPersistenceSqlError("ProjectionProjectRepository.deleteById:query")),
     );
 
+  const listRepositoryIdentityStates: ProjectionProjectRepositoryShape["listRepositoryIdentityStates"] =
+    (input = {}) =>
+      listRepositoryIdentityStateRows(input).pipe(
+        Effect.mapError(
+          toPersistenceSqlError("ProjectionProjectRepository.listRepositoryIdentityStates:query"),
+        ),
+      );
+
+  const recordRepositoryIdentity: ProjectionProjectRepositoryShape["recordRepositoryIdentity"] = (
+    input,
+  ) =>
+    recordRepositoryIdentityRow(input).pipe(
+      Effect.map((rows) => rows.length > 0),
+      Effect.mapError(
+        toPersistenceSqlError("ProjectionProjectRepository.recordRepositoryIdentity:query"),
+      ),
+    );
+
+  const listOrphanChatProjects: ProjectionProjectRepositoryShape["listOrphanChatProjects"] = (
+    input,
+  ) =>
+    listOrphanChatProjectRows(input).pipe(
+      Effect.mapError(
+        toPersistenceSqlError("ProjectionProjectRepository.listOrphanChatProjects:query"),
+      ),
+    );
+
   return {
     upsert,
     getById,
     listAll,
     deleteById,
+    listRepositoryIdentityStates,
+    recordRepositoryIdentity,
+    listOrphanChatProjects,
   } satisfies ProjectionProjectRepositoryShape;
 });
 

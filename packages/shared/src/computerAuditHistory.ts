@@ -8,7 +8,7 @@ import {
   type ComputerGetAuditHistoryInput,
   type ComputerGetAuditHistoryResult,
 } from "@ryco/contracts";
-import { Schema } from "effect";
+import * as Schema from "effect/Schema";
 import { computerAuditTailLines, readComputerAuditFileTail } from "./computerAuditFile.ts";
 
 /** One request never reads arbitrary paths or scans an unbounded legacy log. */

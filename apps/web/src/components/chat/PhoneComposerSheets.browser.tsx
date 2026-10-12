@@ -320,7 +320,6 @@ function footerProps(overrides: Partial<ComposerFooterProps> = {}): ComposerFoot
     hideOnMobilePendingAnswers: false,
     environmentId: EnvironmentId.make("environment-local"),
     gitCwd: null,
-    hasSourceControlRemote: false,
     onSelectIssue: () => {},
     onSelectChangeRequest: () => {},
     onAttachFile: () => {},

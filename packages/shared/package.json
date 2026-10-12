@@ -3,6 +3,7 @@
   "version": "0.0.0-alpha.1",
   "private": true,
   "type": "module",
+  "sideEffects": false,
   "exports": {
     "./hubSessionCodec": {
       "types": "./src/hubSessionCodec.ts",
@@ -70,6 +71,10 @@
     "./relayE2eeConstants": {
       "types": "./src/relayE2eeConstants.ts",
       "import": "./src/relayE2eeConstants.ts"
+    },
+    "./relayE2eeIds": {
+      "types": "./src/relayE2eeIds.ts",
+      "import": "./src/relayE2eeIds.ts"
     },
     "./relayE2eeWire": {
       "types": "./src/relayE2eeWire.ts",
@@ -139,9 +144,21 @@
       "types": "./src/logging.ts",
       "import": "./src/logging.ts"
     },
+    "./logOnceEvery": {
+      "types": "./src/logOnceEvery.ts",
+      "import": "./src/logOnceEvery.ts"
+    },
     "./shell": {
       "types": "./src/shell.ts",
       "import": "./src/shell.ts"
+    },
+    "./shellEnvironment": {
+      "types": "./src/shellEnvironment.ts",
+      "import": "./src/shellEnvironment.ts"
+    },
+    "./precompressedAssets": {
+      "types": "./src/precompressedAssets.ts",
+      "import": "./src/precompressedAssets.ts"
     },
     "./Net": {
       "types": "./src/Net.ts",
@@ -222,6 +239,10 @@
     "./searchRanking": {
       "types": "./src/searchRanking.ts",
       "import": "./src/searchRanking.ts"
+    },
+    "./workspaceEntrySearch": {
+      "types": "./src/workspaceEntrySearch.ts",
+      "import": "./src/workspaceEntrySearch.ts"
     },
     "./qrCode": {
       "types": "./src/qrCode.ts",

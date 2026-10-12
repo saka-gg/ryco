@@ -1,14 +1,10 @@
+import { getHostedHubApi, hostedHubStore } from "@ryco/client-runtime/authorization";
 import {
   createNativeE2eeTrustResolver,
-  getHostedHubApi,
-  hostedHubStore,
   type NativeE2eeReadyEnrollment,
-} from "@ryco/client-runtime/authorization";
-import {
-  type RelayE2eeInitiatorAttempt,
-  type RelayE2eeProvider,
-  HostedRelayPreparationError,
-} from "@ryco/client-runtime/relay";
+} from "@ryco/client-runtime/authorization/e2ee";
+import { type RelayE2eeProvider, HostedRelayPreparationError } from "@ryco/client-runtime/relay";
+import type { RelayE2eeInitiatorAttempt } from "@ryco/client-runtime/relay/e2ee";
 import { E2EE_SUITE_ACCOUNT_GRANT_25519_CHACHAPOLY_SHA256 } from "@ryco/shared/relayE2eeWire";
 
 import { mobileNativeE2eePlatform } from "../platform/nativeE2ee";

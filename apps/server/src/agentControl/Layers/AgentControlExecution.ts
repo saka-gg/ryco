@@ -33,7 +33,10 @@ import { GitWorkflowService, type GitWorkflowServiceShape } from "../../git/GitW
 import { OrchestrationCommandApplication } from "../../orchestration/Services/OrchestrationCommandApplication.ts";
 import { DeviceService } from "../../device/Services/DeviceService.ts";
 import { OrchestrationEngineService } from "../../orchestration/Services/OrchestrationEngine.ts";
-import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import {
+  ProjectionSnapshotQuery,
+  readProjectShells,
+} from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { resolveConfiguredWorktreeRoot } from "../../project/worktreeRoot.ts";
 import { resolveWorktreeCheckoutPath } from "../../project/worktreeCheckoutPaths.ts";
 import { ServerRuntimeStartup } from "../../serverRuntimeStartup.ts";
@@ -581,10 +584,8 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
                 await service.manager.detach(plan.threadId);
                 return;
               case "deviceInstall": {
-                const snapshot = await Effect.runPromise(projections.getShellSnapshot());
-                const project = snapshot.projects.find(
-                  (candidate) => candidate.id === plan.projectId,
-                );
+                const projects = await Effect.runPromise(readProjectShells(projections));
+                const project = projects.find((candidate) => candidate.id === plan.projectId);
                 if (!project) {
                   throw new AgentControlDeviceExecutionError(
                     AGENT_CONTROL_ERROR_CODES.deviceStaleState,
@@ -891,7 +892,7 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
               ? proposal.principal.threadId
               : null;
 
-          const snapshot = yield* projections.getShellSnapshot();
+          const projects = yield* readProjectShells(projections);
           for (const threadId of plannedThreadIds) {
             const existing = yield* projections.getThreadShellById(threadId);
             if (Option.isSome(existing)) {
@@ -900,7 +901,7 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
           }
           const prepared = [] as Array<{
             readonly index: number;
-            readonly project: (typeof snapshot.projects)[number];
+            readonly project: (typeof projects)[number];
             readonly threadId: ThreadId;
             readonly worktreeId: WorktreeId;
             readonly branch: string;
@@ -916,7 +917,7 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
           // Entire batch preflight completes before any thread command is dispatched.
           for (const [index, entry] of entries.entries()) {
             if (entry.envMode !== "worktree") continue;
-            const project = snapshot.projects.find((candidate) => candidate.id === entry.projectId);
+            const project = projects.find((candidate) => candidate.id === entry.projectId);
             if (!project) return yield* Effect.fail(new Error("Requested project is unavailable."));
             const effective = resolveProjectPreferences({ settings: worktreeSettings, project });
             if (
@@ -1033,7 +1034,7 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
           }
 
           for (const [index, entry] of entries.entries()) {
-            const project = snapshot.projects.find((candidate) => candidate.id === entry.projectId);
+            const project = projects.find((candidate) => candidate.id === entry.projectId);
             if (!project) return yield* Effect.fail(new Error("Requested project is unavailable."));
             const threadId = plannedThreadIds[index]!;
             const worktree = prepared.find((candidate) => candidate.index === index);

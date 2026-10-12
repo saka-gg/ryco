@@ -1,3 +1,5 @@
+import * as NodePath from "node:path";
+
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import { assertSuccess } from "@effect/vitest/utils";
@@ -726,6 +728,21 @@ it.layer(NodeServices.layer)("isCommandAvailable", (it) => {
 });
 
 it.layer(NodeServices.layer)("resolveAvailableEditors", (it) => {
+  it.effect("reuses the scan of the server's own environment until PATH changes", () =>
+    Effect.sync(() => {
+      const originalPath = process.env.PATH;
+      try {
+        const first = resolveAvailableEditors();
+        assert.strictEqual(resolveAvailableEditors(), first);
+        process.env.PATH = `${originalPath ?? ""}${NodePath.delimiter}/ryco-test-editors`;
+        assert.notStrictEqual(resolveAvailableEditors(), first);
+      } finally {
+        if (originalPath === undefined) delete process.env.PATH;
+        else process.env.PATH = originalPath;
+      }
+    }),
+  );
+
   it.effect("returns installed editors for command launches", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;

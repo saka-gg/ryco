@@ -15,6 +15,10 @@ import { CopilotClient, type SessionConfig } from "@github/copilot-sdk";
 import { Effect, Schema } from "effect";
 
 import { makeCopilotClientOptions } from "../provider/Layers/CopilotAdapter.ts";
+import {
+  COPILOT_CLIENT_STOP_TIMEOUT_MS,
+  stopCopilotClient,
+} from "../provider/Layers/CopilotAdapter.clientStop.ts";
 import { makeCodexTextGeneration } from "./CodexTextGeneration.ts";
 import { type TextGenerationShape, validateRankInboxThreadsResult } from "./TextGeneration.ts";
 import {
@@ -101,7 +105,7 @@ export const makeCopilotTextGeneration = Effect.fn("makeCopilotTextGeneration")(
             await session.disconnect();
             return response?.data.content ?? "";
           } finally {
-            await client.stop();
+            await stopCopilotClient({ client, timeoutMs: COPILOT_CLIENT_STOP_TIMEOUT_MS });
           }
         },
         catch: (cause) =>
@@ -137,7 +141,10 @@ export const makeCopilotTextGeneration = Effect.fn("makeCopilotTextGeneration")(
         const { prompt, outputSchema } = buildSideQuestionPrompt(input);
         const client = yield* Effect.acquireRelease(
           Effect.sync(() => clientFactory(cwd, true)),
-          (client) => Effect.promise(() => client.stop()).pipe(Effect.ignore),
+          (client) =>
+            Effect.promise(() =>
+              stopCopilotClient({ client, timeoutMs: COPILOT_CLIENT_STOP_TIMEOUT_MS }),
+            ),
         );
         const reasoningEffort = getModelSelectionStringOptionValue(
           input.modelSelection,
@@ -240,7 +247,7 @@ export const makeCopilotTextGeneration = Effect.fn("makeCopilotTextGeneration")(
             await session.disconnect();
             return response?.data.content ?? "";
           } finally {
-            await client.stop();
+            await stopCopilotClient({ client, timeoutMs: COPILOT_CLIENT_STOP_TIMEOUT_MS });
           }
         },
         catch: (cause) =>

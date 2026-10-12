@@ -18,10 +18,19 @@ import type {
 import { blockProcessDeviceToolsForAgentControl } from "../providerTools/deviceToolGateway.ts";
 import { AGENT_CONTROL_HTML_RENDER_INSTRUCTIONS } from "./htmlRenderInstructions.ts";
 
+import {
+  AGENT_CONTROL_BOOTSTRAP_ENV,
+  AGENT_CONTROL_BOOTSTRAP_URL_ENV,
+  AGENT_CONTROL_STDIO_PROXY_ARG,
+} from "./stdioProxyProtocol.ts";
+
+export {
+  AGENT_CONTROL_BOOTSTRAP_ENV,
+  AGENT_CONTROL_BOOTSTRAP_URL_ENV,
+  AGENT_CONTROL_STDIO_PROXY_ARG,
+} from "./stdioProxyProtocol.ts";
+
 export const AGENT_CONTROL_INTERNAL_SERVER_NAME = "ryco";
-export const AGENT_CONTROL_STDIO_PROXY_ARG = "__agent-control-stdio-proxy";
-export const AGENT_CONTROL_BOOTSTRAP_ENV = "RYCO_AGENT_CONTROL_BOOTSTRAP";
-export const AGENT_CONTROL_BOOTSTRAP_URL_ENV = "RYCO_AGENT_CONTROL_BOOTSTRAP_URL";
 
 const supported = (input: Omit<AgentControlProviderSupport, "supported" | "runtimeScoped">) => ({
   supported: true,
@@ -295,22 +304,5 @@ export const installAgentControlAcp = (
     );
 };
 
-const SECRET_PATTERN = /rycoacb?_[A-Za-z0-9_-]{43}/g;
-
 /** Defensive native-log redaction for provider configs that necessarily contain scoped secrets. */
-export const redactAgentControlSecrets = (value: unknown): unknown => {
-  if (typeof value === "string") return value.replaceAll(SECRET_PATTERN, "[REDACTED]");
-  if (Array.isArray(value)) return value.map(redactAgentControlSecrets);
-  if (value instanceof Error) {
-    return {
-      name: value.name,
-      message: redactAgentControlSecrets(value.message),
-    };
-  }
-  if (typeof value === "object" && value !== null) {
-    return Object.fromEntries(
-      Object.entries(value).map(([key, entry]) => [key, redactAgentControlSecrets(entry)]),
-    );
-  }
-  return value;
-};
+export { redactAgentControlSecrets } from "./secretRedaction.ts";

@@ -13,11 +13,15 @@ import { Atom } from "effect/reactivity";
 import { readPrimaryEnvironmentDescriptor } from "../environments/primary";
 import { readEnvironmentConnection } from "../environments/runtime";
 import { readLocalApi } from "../localApi";
+import { webAppLifecycle } from "../platform/appLifecycle";
 import { appAtomRegistry } from "@ryco/client-runtime/rpc";
 
 const SOURCE_CONTROL_DISCOVERY_TARGET = { key: "primary" } as const;
-const SOURCE_CONTROL_DISCOVERY_STALE_TIME_MS = 30_000;
-const SOURCE_CONTROL_DISCOVERY_IDLE_TTL_MS = 5 * 60_000;
+// Installed tools and their auth change rarely, and every discovery probes
+// several CLIs (including networked auth checks). Readers revalidate when the
+// app returns to the foreground or comes back online instead of on a timer.
+const SOURCE_CONTROL_DISCOVERY_STALE_TIME_MS = 5 * 60_000;
+const SOURCE_CONTROL_DISCOVERY_IDLE_TTL_MS = 10 * 60_000;
 
 interface SourceControlDiscoveryTargetInput {
   readonly environmentId?: EnvironmentId | null;
@@ -61,13 +65,31 @@ export const sourceControlDiscoveryManager = createSourceControlDiscoveryManager
   },
 });
 
+/** Ticks when the app returns to the foreground or the network comes back. */
+const sourceControlDiscoveryRevalidateSignal = Atom.readable((get) => {
+  let count = 0;
+  const unsubscribe = webAppLifecycle.subscribe((event) => {
+    if (event === "foreground" || event === "resume" || event === "online") {
+      get.setSelf(++count);
+    }
+  });
+  get.addFinalizer(unsubscribe);
+  return count;
+});
+
 const sourceControlDiscoveryAutoRefreshAtom = Atom.family((targetKey: string) =>
   Atom.make(() =>
-    Effect.promise(() => sourceControlDiscoveryManager.refresh({ key: targetKey })),
+    // Background revalidation takes the server's recent result; only an
+    // explicit refresh (Settings, command palette) re-probes every CLI.
+    Effect.promise(() =>
+      sourceControlDiscoveryManager.refresh({ key: targetKey }, undefined, { cached: true }),
+    ),
   ).pipe(
     Atom.swr({
       staleTime: SOURCE_CONTROL_DISCOVERY_STALE_TIME_MS,
       revalidateOnMount: true,
+      revalidateOnFocus: true,
+      focusSignal: sourceControlDiscoveryRevalidateSignal,
     }),
     Atom.setIdleTTL(SOURCE_CONTROL_DISCOVERY_IDLE_TTL_MS),
     Atom.withLabel(`source-control-discovery:auto-refresh:${targetKey}`),
@@ -90,14 +112,38 @@ export function resetSourceControlDiscoveryStateForTests(): void {
   sourceControlDiscoveryManager.reset();
 }
 
+const IDLE_SOURCE_CONTROL_DISCOVERY_REFRESH_ATOM = Atom.make(null).pipe(
+  Atom.keepAlive,
+  Atom.withLabel("source-control-discovery:auto-refresh:idle"),
+);
+
+/**
+ * Discovery state for a target. While `enabled` (the default) the reader keeps
+ * it fresh; a disabled reader only observes what another reader loaded, so a
+ * surface can mount before it actually needs auth state.
+ */
 export function useSourceControlDiscovery(
   input?: SourceControlDiscoveryTargetInput,
+  options?: { readonly enabled?: boolean },
 ): SourceControlDiscoveryState {
   const targetKey =
     getSourceControlDiscoveryTargetKey(sourceControlDiscoveryTarget(input)) ??
     SOURCE_CONTROL_DISCOVERY_TARGET.key;
 
-  useAtomValue(sourceControlDiscoveryAutoRefreshAtom(targetKey));
+  useAtomValue(
+    (options?.enabled ?? true)
+      ? sourceControlDiscoveryAutoRefreshAtom(targetKey)
+      : IDLE_SOURCE_CONTROL_DISCOVERY_REFRESH_ATOM,
+  );
 
   return useAtomValue(sourceControlDiscoveryStateAtom(targetKey));
+}
+
+/** Whether a discovered provider can serve issue / change request lookups. */
+export function hasUsableSourceControlRemote(data: SourceControlDiscoveryResult | null): boolean {
+  return (data?.sourceControlProviders ?? []).some(
+    (provider) =>
+      provider.status === "available" &&
+      (provider.auth.status === "authenticated" || provider.auth.status === "unknown"),
+  );
 }

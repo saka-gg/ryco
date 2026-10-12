@@ -34,7 +34,7 @@ vi.mock("react-native", () => ({
   TextInput: "TextInput",
   View: "View",
 }));
-vi.mock("@tabler/icons-react-native", () => ({ IconGitFork: "IconGitFork" }));
+vi.mock("../../components/icons", () => ({ IconGitFork: "IconGitFork" }));
 vi.mock("../../components/AppText", () => ({ AppText: "Text" }));
 vi.mock("../../components/AppSymbol", () => ({ SymbolView: "SymbolView" }));
 vi.mock("../../components/OptionRow", () => ({ OptionRow: "OptionRow" }));

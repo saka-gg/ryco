@@ -9,17 +9,24 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
-const VERSION = process.argv[2] ?? "12.17.0";
+const VERSION = process.argv[2] && !process.argv[2].startsWith("--") ? process.argv[2] : "12.17.0";
 const VERSION_TAG = `v${VERSION}`;
 const VSIX_URL = `https://open-vsx.org/api/vscode-icons-team/vscode-icons/${VERSION}/file/vscode-icons-team.vscode-icons-${VERSION}.vsix`;
 const LANGUAGES_URL = `https://raw.githubusercontent.com/vscode-icons/vscode-icons/${VERSION_TAG}/src/iconsManifest/languages.ts`;
 
 const REPO_ROOT = process.cwd();
-const MANIFEST_PATH = path.join(REPO_ROOT, "apps/web/src/vscode-icons-manifest.json");
-const ASSOCIATIONS_PATH = path.join(
-  REPO_ROOT,
-  "apps/web/src/vscode-icons-language-associations.json",
-);
+// The web resolver reads this slim lookup (icon file per name, extension,
+// folder and language) instead of the full theme manifest.
+const LOOKUP_PATH = path.join(REPO_ROOT, "apps/web/src/vscode-icons-lookup.json");
+// Icons are served by the app itself (never a third-party CDN), from a
+// version-pinned path so they can be cached as immutable.
+const ICONS_ROOT = path.join(REPO_ROOT, "apps/web/public/vscode-icons");
+const ICONS_DIR = path.join(ICONS_ROOT, VERSION_TAG);
+const DEFAULT_FILE_ICON = "default_file.svg";
+const DEFAULT_FOLDER_ICON = "default_folder.svg";
+// Sections the resolver reads; `*Expanded`, root folder and other variants
+// are never shown, so their icons are not shipped.
+const LOOKUP_SECTIONS = ["fileNames", "fileExtensions", "folderNames", "languageIds"];
 
 function normalizeExtension(value) {
   return value.trim().toLowerCase().replace(/^\./, "");
@@ -36,6 +43,11 @@ function putIfAbsent(target, key, value) {
 }
 
 async function downloadVsix(tmpDir) {
+  // `--vsix <path>` reuses an already downloaded package (offline resync).
+  const vsixArgIndex = process.argv.indexOf("--vsix");
+  if (vsixArgIndex !== -1 && process.argv[vsixArgIndex + 1]) {
+    return path.resolve(process.argv[vsixArgIndex + 1]);
+  }
   const vsixPath = path.join(tmpDir, `vscode-icons-${VERSION}.vsix`);
   const response = await fetch(VSIX_URL);
   if (!response.ok) {
@@ -79,6 +91,98 @@ async function loadLanguagesCollection() {
   return languages;
 }
 
+function iconFileName(manifest, definitionKey) {
+  const iconPath = definitionKey ? manifest.iconDefinitions[definitionKey]?.iconPath : undefined;
+  if (!iconPath) return null;
+  return iconPath.slice(iconPath.lastIndexOf("/") + 1);
+}
+
+/**
+ * Keeps the resolver's semantics (lowercased keys, later duplicates win, the
+ * light theme falls back to dark) but maps straight to icon indices, without
+ * the `.svg` suffix, and keeps only the light entries that differ from dark.
+ */
+function buildSlimLookup(manifest, associations) {
+  const icons = [];
+  const iconIndex = new Map();
+  const indexOf = (fileName) => {
+    let index = iconIndex.get(fileName);
+    if (index === undefined) {
+      index = icons.length;
+      icons.push(fileName);
+      iconIndex.set(fileName, index);
+    }
+    return index;
+  };
+  indexOf(DEFAULT_FILE_ICON);
+  indexOf(DEFAULT_FOLDER_ICON);
+
+  const buildSection = (section, fallback) => {
+    const result = {};
+    for (const name of LOOKUP_SECTIONS) {
+      const lookup = {};
+      for (const [key, definitionKey] of Object.entries(section[name] ?? {})) {
+        const fileName = iconFileName(manifest, definitionKey);
+        if (fileName) lookup[key.toLowerCase()] = indexOf(fileName);
+      }
+      if (fallback) {
+        for (const [key, index] of Object.entries(lookup)) {
+          if (fallback[name][key] === index) delete lookup[key];
+        }
+      }
+      result[name] = lookup;
+    }
+    for (const name of ["file", "folder"]) {
+      const fileName = iconFileName(manifest, section[name]);
+      if (fileName) result[name] = indexOf(fileName);
+    }
+    return result;
+  };
+
+  const lowercaseKeys = (source) => {
+    const result = {};
+    for (const [key, value] of Object.entries(source)) result[key.toLowerCase()] = value;
+    return result;
+  };
+
+  const dark = buildSection(manifest, null);
+  const light = buildSection(manifest.light ?? {}, dark);
+  return {
+    version: VERSION,
+    icons: icons.map((fileName) => fileName.replace(/\.svg$/u, "")),
+    dark,
+    light,
+    extensionToLanguageId: lowercaseKeys(associations.extensionToLanguageId),
+    fileNameToLanguageId: lowercaseKeys(associations.fileNameToLanguageId),
+  };
+}
+
+async function extractIcons(vsixPath, tmpDir, iconNames) {
+  const extractDir = path.join(tmpDir, "vsix");
+  await execFileAsync("unzip", [
+    "-q",
+    "-o",
+    vsixPath,
+    "extension/icons/*",
+    "extension/LICENSE.txt",
+    "-d",
+    extractDir,
+  ]);
+  await fs.rm(ICONS_ROOT, { recursive: true, force: true });
+  await fs.mkdir(ICONS_DIR, { recursive: true });
+  for (const fileName of iconNames.map((name) => `${name}.svg`)) {
+    await fs.copyFile(
+      path.join(extractDir, "extension/icons", fileName),
+      path.join(ICONS_DIR, fileName),
+    );
+  }
+  // The icons are redistributed with the app, so their MIT notice ships too.
+  await fs.copyFile(
+    path.join(extractDir, "extension/LICENSE.txt"),
+    path.join(ICONS_DIR, "LICENSE.txt"),
+  );
+}
+
 function buildLanguageAssociations(manifest, languages) {
   const availableLanguageIds = new Set(Object.keys(manifest.languageIds ?? {}));
   const extensionToLanguageId = {};
@@ -114,9 +218,6 @@ function buildLanguageAssociations(manifest, languages) {
   }
 
   return {
-    version: VERSION,
-    source: LANGUAGES_URL,
-    generatedAt: new Date().toISOString(),
     extensionToLanguageId,
     fileNameToLanguageId,
   };
@@ -129,17 +230,18 @@ async function main() {
     const manifest = await extractManifestFromVsix(vsixPath);
     const languages = await loadLanguagesCollection();
     const associations = buildLanguageAssociations(manifest, languages);
+    const lookup = buildSlimLookup(manifest, associations);
 
-    await fs.writeFile(MANIFEST_PATH, `${JSON.stringify(manifest)}\n`, "utf8");
-    await fs.writeFile(ASSOCIATIONS_PATH, `${JSON.stringify(associations)}\n`, "utf8");
+    await extractIcons(vsixPath, tmpDir, lookup.icons);
+    await fs.writeFile(LOOKUP_PATH, `${JSON.stringify(lookup)}\n`, "utf8");
 
     process.stdout.write(
       [
         `Synced vscode-icons ${VERSION}`,
-        `manifest: ${MANIFEST_PATH}`,
-        `language associations: ${ASSOCIATIONS_PATH}`,
-        `extension mappings: ${Object.keys(associations.extensionToLanguageId).length}`,
-        `filename mappings: ${Object.keys(associations.fileNameToLanguageId).length}`,
+        `lookup: ${LOOKUP_PATH}`,
+        `icons: ${lookup.icons.length} in ${ICONS_DIR}`,
+        `extension mappings: ${Object.keys(lookup.extensionToLanguageId).length}`,
+        `filename mappings: ${Object.keys(lookup.fileNameToLanguageId).length}`,
       ].join("\n") + "\n",
     );
   } finally {

@@ -23,6 +23,11 @@ function loadVscodeIconResolver(): Promise<VscodeIconResolver> {
   return resolverPromise;
 }
 
+/** Loads the icon lookup ahead of a tree render, so rows paint with icons. */
+export function preloadVscodeIconResolver(): void {
+  void loadVscodeIconResolver().catch(() => undefined);
+}
+
 export function useVscodeIconUrl(
   pathValue: string,
   kind: VscodeEntryKind,

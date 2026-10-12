@@ -1,10 +1,13 @@
 import type { EnvironmentId } from "@ryco/contracts";
-import type { SavedEnvironmentRecord } from "@ryco/client-runtime/connection";
+import {
+  clearProjectIconCache,
+  type SavedEnvironmentRecord,
+} from "@ryco/client-runtime/connection";
 
 import { useStore } from "../state/threadsRuntime";
 import { clearProjectFilesStateForEnvironment } from "../rpc/projectFilesAtoms";
 import { purgeEnvironmentSnapshot } from "../persistence/environmentSnapshotPersistence";
-import { mobileE2eeTrustStore, type MobileE2eeTrustStore } from "../platform/e2eeTrustStore";
+import type { MobileE2eeTrustStore } from "../platform/e2eeTrustStore";
 import type { MobileConnectionRegistry } from "../runtime/bootstrap";
 
 // §2.6 / §3-22..26: the saved-environment lifecycle actions, mirroring
@@ -42,10 +45,23 @@ export interface EnvironmentActionsDeps {
 
 const MISSING_CREDENTIAL_MESSAGE = "Unable to persist saved environment credentials.";
 
+/**
+ * The app's trust store, loaded when a node is forgotten. It carries the curve
+ * and hash primitives, and these actions are bound on the launch path (the
+ * connection controller Home mounts), where Metro would otherwise evaluate them
+ * before the first frame. It is the same singleton the hosted runtime hydrates.
+ */
+const lazyMobileTrustStore: Pick<MobileE2eeTrustStore, "forgetEnvironment"> = {
+  forgetEnvironment: async (environmentId) =>
+    (await import("../platform/e2eeTrustStore")).mobileE2eeTrustStore.forgetEnvironment(
+      environmentId,
+    ),
+};
+
 export function createEnvironmentActions(deps: EnvironmentActionsDeps) {
   const { registry } = deps;
   const isoNow = deps.now ?? (() => new Date().toISOString());
-  const trustStore = deps.trustStore ?? mobileE2eeTrustStore;
+  const trustStore = deps.trustStore ?? lazyMobileTrustStore;
 
   const connect = (record: SavedEnvironmentRecord) =>
     registry.driver.supervisor.ensureSavedEnvironmentConnection(record, (isCancelled) =>
@@ -74,6 +90,9 @@ export function createEnvironmentActions(deps: EnvironmentActionsDeps) {
       httpBaseUrl: target.httpBaseUrl,
       credential: target.credential,
     });
+    // The remembered session answer (role, expiry) belongs to the credential
+    // this pairing replaces; the connect below must not start from it.
+    registry.driver.forgetSessionHint(environmentId);
 
     const record: SavedEnvironmentRecord = {
       environmentId,
@@ -122,6 +141,8 @@ export function createEnvironmentActions(deps: EnvironmentActionsDeps) {
     registry.driver.supervisor.disposeThreadDetailSubscriptionsForEnvironment(environmentId);
     registry.catalog.registryStore.getState().remove(environmentId);
     registry.catalog.runtimeStore.getState().clear(environmentId);
+    // The remembered session answer (role, expiry) goes with the credential.
+    registry.driver.forgetSessionHint(environmentId);
     useStore.getState().removeEnvironmentState(environmentId);
     // Forgetting a node also forgets its persisted snapshot — cached content
     // must not outlive the environment it belongs to (wave 2, plan step 5).
@@ -131,6 +152,7 @@ export function createEnvironmentActions(deps: EnvironmentActionsDeps) {
     // to its environment id, so forgetting the node drops them here or not at
     // all.
     clearProjectFilesStateForEnvironment(environmentId);
+    clearProjectIconCache(environmentId);
     await registry.catalog.removeBearerToken(environmentId);
     // The owner forgetting a node also forgets its §13 trust state — the pin, the
     // latch, the approval, and any legacy consent — and drops the

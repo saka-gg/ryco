@@ -190,6 +190,49 @@ describe("buildTurnStartParams", () => {
     );
   });
 
+  it("carries attachment instructions in the developer instructions, not the prompt", () => {
+    const params = Effect.runSync(
+      buildTurnStartParams({
+        threadId: "provider-thread-1",
+        runtimeMode: "full-access",
+        prompt: "/review",
+        model: "gpt-5.3-codex",
+        interactionMode: "default",
+        attachmentInstructions: "Deliver files like this.",
+      }),
+    );
+
+    assert.equal(
+      params.collaborationMode?.settings?.developer_instructions,
+      `${CODEX_DEFAULT_MODE_DEVELOPER_INSTRUCTIONS}\n\nDeliver files like this.`,
+    );
+    assert.deepStrictEqual(params.input, [{ type: "text", text: "/review" }]);
+  });
+
+  it("leads the prompt with attachment instructions only without a developer channel", () => {
+    const prompted = Effect.runSync(
+      buildTurnStartParams({
+        threadId: "provider-thread-1",
+        runtimeMode: "full-access",
+        prompt: "Implement it",
+        attachmentInstructions: "Deliver files like this.",
+      }),
+    );
+    assert.deepStrictEqual(prompted.input, [
+      { type: "text", text: "Deliver files like this.\n\nImplement it" },
+    ]);
+
+    const command = Effect.runSync(
+      buildTurnStartParams({
+        threadId: "provider-thread-1",
+        runtimeMode: "full-access",
+        prompt: "/compact",
+        attachmentInstructions: "Deliver files like this.",
+      }),
+    );
+    assert.deepStrictEqual(command.input, [{ type: "text", text: "/compact" }]);
+  });
+
   it("routes approvals to the reviewer subagent in auto mode", () => {
     const params = Effect.runSync(
       buildTurnStartParams({

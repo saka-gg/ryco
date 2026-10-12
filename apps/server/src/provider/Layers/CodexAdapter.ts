@@ -92,6 +92,7 @@ import {
   CodexSessionRuntimeThreadIdMissingError,
   CodexSessionRuntimeInvalidUserInputAnswersError,
   CodexSessionRuntimePendingUserInputNotFoundError,
+  isCodexStartupPhaseTimeout,
   makeCodexSessionRuntime,
   readStoredCodexThread,
   type CodexAgentControlInjection,
@@ -2136,14 +2137,21 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         );
 
         const started = yield* runtime.start().pipe(
-          Effect.mapError(
-            (cause) =>
-              new ProviderAdapterProcessError({
-                provider: PROVIDER,
-                threadId: input.threadId,
-                detail: formatCodexRuntimeErrorDetail(cause),
-                cause,
-              }),
+          Effect.mapError((cause) =>
+            // A startup phase that never answered names its request and the next step.
+            isCodexStartupPhaseTimeout(cause)
+              ? new ProviderAdapterRequestError({
+                  provider: PROVIDER,
+                  method: cause.cause.phase,
+                  detail: cause.detail,
+                  cause,
+                })
+              : new ProviderAdapterProcessError({
+                  provider: PROVIDER,
+                  threadId: input.threadId,
+                  detail: formatCodexRuntimeErrorDetail(cause),
+                  cause,
+                }),
           ),
           Effect.onError(() =>
             runtime.close.pipe(
@@ -2745,12 +2753,9 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       ),
     );
 
-  const writeNativeEvent = Effect.fn("writeNativeEvent")(function* (event: ProviderEvent) {
-    if (!nativeEventLogger) {
-      return;
-    }
-    yield* nativeEventLogger.write(event, event.threadId);
-  });
+  // Per-event logging helper: a plain function so it adds no trace span.
+  const writeNativeEvent = (event: ProviderEvent): Effect.Effect<void> =>
+    nativeEventLogger ? nativeEventLogger.write(event, event.threadId) : Effect.void;
 
   const stopSession: CodexAdapterShape["stopSession"] = (threadId) =>
     Effect.gen(function* () {
@@ -2771,9 +2776,10 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
   const hasSession: CodexAdapterShape["hasSession"] = (threadId) =>
     Effect.succeed(Boolean(sessions.get(threadId) && !sessions.get(threadId)?.stopped));
 
+  // Sessions own independent app-server processes; stop them all at once.
   const stopAll: CodexAdapterShape["stopAll"] = () =>
     Effect.forEach(Array.from(sessions.values()), stopSessionInternal, {
-      concurrency: 1,
+      concurrency: "unbounded",
       discard: true,
     }).pipe(Effect.asVoid);
 
@@ -2794,6 +2800,8 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       conversationRollback: "native",
       // thread/resume addresses the rollout by thread id and takes the new cwd.
       resumeSurvivesCwdChange: true,
+      // Carried in the turn's collaboration-mode developer instructions.
+      attachmentInstructions: "session",
     },
     startSession,
     sendTurn,

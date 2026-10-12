@@ -120,6 +120,8 @@ describe("remote environment api", () => {
       body: JSON.stringify({
         credential: "pairing-token",
       }),
+      // Every control-plane request carries its deadline's abort signal.
+      signal: expect.any(AbortSignal),
     });
   });
 
@@ -207,6 +209,7 @@ describe("remote environment api", () => {
       {
         method: "GET",
         headers: {},
+        signal: expect.any(AbortSignal),
       },
     );
     expect(fetchMock).toHaveBeenNthCalledWith(2, "https://remote.example.com/api/auth/session", {
@@ -214,12 +217,14 @@ describe("remote environment api", () => {
       headers: {
         authorization: "Bearer bearer-token",
       },
+      signal: expect.any(AbortSignal),
     });
     expect(fetchMock).toHaveBeenNthCalledWith(3, "https://remote.example.com/api/auth/ws-token", {
       method: "POST",
       headers: {
         authorization: "Bearer bearer-token",
       },
+      signal: expect.any(AbortSignal),
     });
   });
 

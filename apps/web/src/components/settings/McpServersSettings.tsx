@@ -858,8 +858,28 @@ export function McpServersSettings() {
   const selectedCapabilities = selectedWorkspace?.capabilities;
   const selectedProviderName = workspaceProviderDisplayName(selectedWorkspace);
 
+  // The selection is read through a ref so loading does not depend on it:
+  // the initial load runs once per MCP API, and a selection change loads only
+  // that workspace's servers (each listing can start an agent's MCP runtime).
+  const selectedWorkspaceIdRef = useRef<string | null>(null);
+  const selectWorkspace = useCallback((workspaceId: string | null) => {
+    selectedWorkspaceIdRef.current = workspaceId;
+    setSelectedWorkspaceId(workspaceId);
+  }, []);
+  // Only the latest server listing (or mutation result) for the selected workspace applies.
+  const serversGenerationRef = useRef(0);
+  const applyServersResult = useCallback((workspaceId: string, result: McpListServersResult) => {
+    if (selectedWorkspaceIdRef.current !== workspaceId) return;
+    serversGenerationRef.current += 1;
+    setSnapshot(result);
+  }, []);
+
   const loadServers = useCallback(
     async (workspaceId: string, options?: { quiet?: boolean }) => {
+      const generation = ++serversGenerationRef.current;
+      const isCurrent = () =>
+        generation === serversGenerationRef.current &&
+        selectedWorkspaceIdRef.current === workspaceId;
       if (!options?.quiet) setRefreshing(true);
       setError(null);
       try {
@@ -867,12 +887,13 @@ export function McpServersSettings() {
           workspaceId: McpWorkspaceId.make(workspaceId),
           detail: "full",
         });
-        setSnapshot(result);
+        if (isCurrent()) setSnapshot(result);
       } catch (cause) {
+        if (!isCurrent()) return;
         setError(cause instanceof Error ? cause.message : "Failed to load MCP servers.");
         showErrorToast("Failed to load MCP servers", cause);
       } finally {
-        setRefreshing(false);
+        if (isCurrent()) setRefreshing(false);
       }
     },
     [mcpApi],
@@ -885,10 +906,11 @@ export function McpServersSettings() {
       const result = await requireMcpApi(mcpApi).listWorkspaces();
       setWorkspacesResult(result);
       const nextSelected =
-        result.workspaces.find((workspace) => workspace.id === selectedWorkspaceId)?.id ??
+        result.workspaces.find((workspace) => workspace.id === selectedWorkspaceIdRef.current)
+          ?.id ??
         result.workspaces[0]?.id ??
         null;
-      setSelectedWorkspaceId(nextSelected);
+      selectWorkspace(nextSelected);
       if (nextSelected) {
         await loadServers(nextSelected, { quiet: true });
       } else {
@@ -900,7 +922,7 @@ export function McpServersSettings() {
     } finally {
       setLoading(false);
     }
-  }, [loadServers, mcpApi, selectedWorkspaceId]);
+  }, [loadServers, mcpApi, selectWorkspace]);
 
   useEffect(() => {
     void loadWorkspaces();
@@ -921,7 +943,7 @@ export function McpServersSettings() {
       const result = await requireMcpApi(mcpApi).reloadServers({
         workspaceId: McpWorkspaceId.make(selectedWorkspaceId),
       });
-      setSnapshot(result);
+      applyServersResult(selectedWorkspaceId, result);
       toastManager.add(stackedThreadToast({ type: "success", title: "MCP servers reloaded" }));
     } catch (cause) {
       showErrorToast("Failed to reload MCP servers", cause);
@@ -938,7 +960,7 @@ export function McpServersSettings() {
       config: configFromMcpServerForm(form),
       secretMutations: secretMutationsFromMcpServerForm(form),
     });
-    setSnapshot(result);
+    applyServersResult(selectedWorkspaceId, result);
     toastManager.add(stackedThreadToast({ type: "success", title: "MCP server saved" }));
   };
 
@@ -951,7 +973,7 @@ export function McpServersSettings() {
         name: server.name,
         enabled,
       });
-      setSnapshot(result);
+      applyServersResult(selectedWorkspaceId, result);
     } catch (cause) {
       showErrorToast("Failed to update MCP server", cause);
     } finally {
@@ -969,7 +991,7 @@ export function McpServersSettings() {
         workspaceId: McpWorkspaceId.make(selectedWorkspaceId),
         name: server.name,
       });
-      setSnapshot(result);
+      applyServersResult(selectedWorkspaceId, result);
       toastManager.add(stackedThreadToast({ type: "success", title: "MCP server removed" }));
     } catch (cause) {
       showErrorToast("Failed to remove MCP server", cause);
@@ -1035,7 +1057,7 @@ export function McpServersSettings() {
               workspaces={workspaces}
               selectedWorkspaceId={selectedWorkspaceId}
               onChange={(workspaceId) => {
-                setSelectedWorkspaceId(workspaceId);
+                selectWorkspace(workspaceId);
                 void loadServers(workspaceId);
               }}
             />
@@ -1172,7 +1194,7 @@ export function McpServersSettings() {
         providers={providers}
         selectedWorkspaceId={selectedWorkspaceId}
         onSelectWorkspace={(workspaceId) => {
-          setSelectedWorkspaceId(workspaceId);
+          selectWorkspace(workspaceId);
           void loadServers(workspaceId);
         }}
       />

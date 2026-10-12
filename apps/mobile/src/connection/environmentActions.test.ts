@@ -1,5 +1,9 @@
 import type { EnvironmentId } from "@ryco/contracts";
-import type { SavedEnvironmentRecord } from "@ryco/client-runtime/connection";
+import {
+  peekProjectIconSource,
+  readProjectIconSource,
+  type SavedEnvironmentRecord,
+} from "@ryco/client-runtime/connection";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 vi.mock("react-native", () => ({
@@ -48,6 +52,7 @@ function fakeRegistry(
   const ensureSavedEnvironmentConnection = vi.fn(async () => ({}));
   const disposeForEnv = vi.fn();
   const connectSavedEnvironment = vi.fn(async () => ({}));
+  const forgetSessionHint = vi.fn();
 
   const registry = {
     catalog: {
@@ -70,6 +75,7 @@ function fakeRegistry(
         disposeThreadDetailSubscriptionsForEnvironment: disposeForEnv,
       },
       connectSavedEnvironment,
+      forgetSessionHint,
     },
   } as unknown as EnvironmentActionsDeps["registry"];
 
@@ -88,6 +94,7 @@ function fakeRegistry(
       ensureSavedEnvironmentConnection,
       disposeForEnv,
       connectSavedEnvironment,
+      forgetSessionHint,
     },
   };
 }
@@ -123,6 +130,12 @@ describe("environmentActions", () => {
       reg.spies.ensureSavedEnvironmentConnection.mock.invocationCallOrder[0] ??
         Number.POSITIVE_INFINITY,
     );
+    // The remembered session answer described the replaced credential, and is
+    // gone before the new one is stored or connected.
+    expect(reg.spies.forgetSessionHint).toHaveBeenCalledWith(ENV);
+    expect(reg.spies.forgetSessionHint.mock.invocationCallOrder[0]).toBeLessThan(
+      reg.spies.writeBearerToken.mock.invocationCallOrder[0] ?? 0,
+    );
     // Secret boundary: the returned record carries no bearer token.
     expect(record).not.toHaveProperty("bearerToken");
     expect(record.environmentId).toBe(ENV);
@@ -153,6 +166,16 @@ describe("environmentActions", () => {
     const removeEnvironmentState = vi
       .spyOn(useStore.getState(), "removeEnvironmentState")
       .mockImplementation(() => undefined);
+    const iconProject = "icon-project" as never;
+    await readProjectIconSource(
+      {
+        projects: { readIcon: async () => ({ mimeType: "image/png", dataBase64: "aWNvbg==" }) },
+      } as never,
+      ENV,
+      iconProject,
+      null,
+    );
+    expect(peekProjectIconSource(ENV, iconProject, null)).not.toBeUndefined();
 
     await actions(reg).removeSavedEnvironment(ENV);
 
@@ -160,8 +183,11 @@ describe("environmentActions", () => {
     expect(reg.spies.disposeForEnv).toHaveBeenCalledWith(ENV);
     expect(reg.spies.removeRecord).toHaveBeenCalledWith(ENV);
     expect(reg.spies.clearRuntime).toHaveBeenCalledWith(ENV);
+    expect(reg.spies.forgetSessionHint).toHaveBeenCalledWith(ENV);
     expect(removeEnvironmentState).toHaveBeenCalledWith(ENV);
     expect(reg.spies.removeBearerToken).toHaveBeenCalledWith(ENV);
+    // The node's project artwork is memory-only and keyed by node: forgotten too.
+    expect(peekProjectIconSource(ENV, iconProject, null)).toBeUndefined();
     // docs/relay-e2ee-protocol.md §13.1/§13.3: forgetting a node forgets its pin,
     // latch, approval and legacy consent too. There is no generic secret-wipe
     // path this rides on, so a missed registration would show up only here.

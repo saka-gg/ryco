@@ -962,6 +962,31 @@ export function syncThreads(
   };
 }
 
+/**
+ * O(1) counterpart of `syncThreads` for one known thread: seeds its
+ * last-visited time when it has none, like `syncThreads` does for new keys.
+ */
+export function seedThreadVisitedAt(
+  state: UiState,
+  threadKey: string,
+  seedVisitedAt: string | undefined,
+): UiState {
+  if (
+    seedVisitedAt === undefined ||
+    seedVisitedAt.length === 0 ||
+    state.threadLastVisitedAtById[threadKey] !== undefined
+  ) {
+    return state;
+  }
+  return {
+    ...state,
+    threadLastVisitedAtById: {
+      ...state.threadLastVisitedAtById,
+      [threadKey]: seedVisitedAt,
+    },
+  };
+}
+
 export function markThreadVisited(state: UiState, threadId: string, visitedAt?: string): UiState {
   const at = visitedAt ?? new Date().toISOString();
   const visitedAtMs = Date.parse(at);
@@ -1550,6 +1575,7 @@ interface UiStateStore extends UiState {
   setSidebarMode: (mode: SidebarMode) => void;
   syncProjects: (projects: readonly SyncProjectInput[], scope: UiSyncScope) => void;
   syncThreads: (threads: readonly SyncThreadInput[], scope: UiSyncScope) => void;
+  seedThreadVisitedAt: (threadKey: string, seedVisitedAt: string | undefined) => void;
   markThreadVisited: (threadId: string, visitedAt?: string) => void;
   markThreadUnread: (threadId: string, latestTurnCompletedAt: string | null | undefined) => void;
   setThreadPinned: (threadId: string, pinned: boolean) => void;
@@ -1595,6 +1621,8 @@ export const useUiStateStore = create<UiStateStore>((set) => ({
   setSidebarMode: (sidebarMode) => set({ sidebarMode }),
   syncProjects: (projects, scope) => set((state) => syncProjects(state, projects, scope)),
   syncThreads: (threads, scope) => set((state) => syncThreads(state, threads, scope)),
+  seedThreadVisitedAt: (threadKey, seedVisitedAt) =>
+    set((state) => seedThreadVisitedAt(state, threadKey, seedVisitedAt)),
   markThreadVisited: (threadId, visitedAt) =>
     set((state) => markThreadVisited(state, threadId, visitedAt)),
   markThreadUnread: (threadId, latestTurnCompletedAt) =>

@@ -4,15 +4,36 @@ import {
   type ServerProvider,
   type ServerProviderVersionAdvisory,
 } from "@ryco/contracts";
-import { resolveCommandPath } from "@ryco/shared/shell";
-import { DateTime, Effect, FileSystem, Option, Schema } from "effect";
+import { resolveCommandPath, resolveCommandPathAsync } from "@ryco/shared/shell";
+import {
+  DateTime,
+  Deferred,
+  Duration,
+  Effect,
+  FileSystem,
+  Option,
+  Path,
+  Ref,
+  Schema,
+  Scope,
+} from "effect";
 import { HttpClient, HttpClientRequest } from "effect/http";
+import * as Semaphore from "effect/Semaphore";
 
+import { writeFileStringAtomically } from "../atomicWrite.ts";
+import { ServerConfig } from "../config.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import { compareCliVersions } from "./cliVersion.ts";
 
 const LATEST_VERSION_CACHE_TTL_MS = 60 * 60 * 1_000;
 const LATEST_VERSION_TIMEOUT_MS = 4_000;
+/**
+ * Lives beside the per-instance status caches. Instance ids must start with a letter, so the
+ * leading underscore can never collide with `<instanceId>.json`.
+ */
+const LATEST_VERSION_CACHE_FILE_NAME = "_provider-latest-versions.json";
+/** PATH and realpath probing for update capabilities must never hold a caller longer than this. */
+const MAINTENANCE_CAPABILITIES_TIMEOUT = Duration.seconds(5);
 const PROVIDER_UPDATE_ACTION_TOAST_MESSAGE = "Install the update now or review provider settings.";
 
 export interface ProviderMaintenanceCapabilities {
@@ -32,6 +53,11 @@ export interface ProviderMaintenanceCapabilityResolutionOptions {
   readonly binaryPath?: string | null;
   readonly env?: NodeJS.ProcessEnv;
   readonly platform?: NodeJS.Platform;
+  /**
+   * PATH resolution already performed by the caller (`null` = not found). When absent the
+   * resolver walks PATH itself, synchronously.
+   */
+  readonly resolvedCommandPath?: string | null;
   readonly realCommandPath?: string | null;
 }
 
@@ -59,12 +85,32 @@ interface LatestVersionCacheEntry {
 }
 
 const latestVersionCache = new Map<string, LatestVersionCacheEntry>();
+// The disk copy is merged into memory once per cache file, so a restart within the TTL does not
+// re-contact the npm registry for every package-managed provider. Concurrent callers (provider
+// enrichments run in parallel) wait for the one load in flight instead of missing it.
+let latestVersionCacheLoad: {
+  readonly filePath: string;
+  readonly loaded: Deferred.Deferred<void>;
+} | null = null;
 const NpmLatestVersionResponse = Schema.Struct({
   version: Schema.optional(Schema.String),
 });
+const PersistedLatestVersionCache = Schema.Struct({
+  entries: Schema.Record(
+    Schema.String,
+    Schema.Struct({
+      expiresAt: Schema.Number,
+      version: Schema.NullOr(Schema.String),
+    }),
+  ),
+});
+const decodePersistedLatestVersionCache = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(PersistedLatestVersionCache),
+);
 
 export function clearLatestProviderVersionCacheForTests(): void {
   latestVersionCache.clear();
+  latestVersionCacheLoad = null;
 }
 
 function nonEmptyString(value: unknown): string | null {
@@ -249,10 +295,12 @@ export function resolvePackageManagedProviderMaintenance(
   }
 
   const resolvedCommandPath =
-    resolveCommandPath(binaryPath, {
-      ...(options?.platform ? { platform: options.platform } : {}),
-      ...(options?.env ? { env: options.env } : {}),
-    }) ?? (hasPathSeparator(binaryPath) ? binaryPath : null);
+    (options?.resolvedCommandPath !== undefined
+      ? options.resolvedCommandPath
+      : resolveCommandPath(binaryPath, {
+          ...(options?.platform ? { platform: options.platform } : {}),
+          ...(options?.env ? { env: options.env } : {}),
+        })) ?? (hasPathSeparator(binaryPath) ? binaryPath : null);
 
   if (resolvedCommandPath) {
     const commandPaths = [
@@ -322,34 +370,89 @@ function makeManualProviderMaintenanceCapabilities(
   });
 }
 
+type ProviderMaintenanceResolutionInput = Omit<
+  ProviderMaintenanceCapabilityResolutionOptions,
+  "realCommandPath" | "resolvedCommandPath"
+>;
+
 export const resolveProviderMaintenanceCapabilitiesEffect = Effect.fn(
   "resolveProviderMaintenanceCapabilitiesEffect",
 )(function* (
   resolver: ProviderMaintenanceCapabilitiesResolver,
-  options?: Omit<ProviderMaintenanceCapabilityResolutionOptions, "realCommandPath">,
+  options?: ProviderMaintenanceResolutionInput,
 ) {
   const binaryPath = nonEmptyString(options?.binaryPath);
   if (!binaryPath) {
     return resolver.resolve(options);
   }
 
+  // Async and bounded per PATH entry: a stalled mount must not block the event loop.
   const resolvedCommandPath =
-    resolveCommandPath(binaryPath, {
-      ...(options?.platform ? { platform: options.platform } : {}),
-      ...(options?.env ? { env: options.env } : {}),
-    }) ?? (hasPathSeparator(binaryPath) ? binaryPath : null);
+    (yield* Effect.promise(() =>
+      resolveCommandPathAsync(binaryPath, {
+        ...(options?.platform ? { platform: options.platform } : {}),
+        ...(options?.env ? { env: options.env } : {}),
+      }),
+    )) ?? (hasPathSeparator(binaryPath) ? binaryPath : null);
   if (!resolvedCommandPath) {
-    return resolver.resolve(options);
+    return resolver.resolve({ ...options, resolvedCommandPath: null });
   }
 
   const fileSystem = yield* FileSystem.FileSystem;
-  const realCommandPath = yield* fileSystem
-    .realPath(resolvedCommandPath)
-    .pipe(Effect.catch(() => Effect.succeed(resolvedCommandPath)));
+  const realCommandPath = yield* fileSystem.realPath(resolvedCommandPath).pipe(
+    Effect.timeoutOption(MAINTENANCE_CAPABILITIES_TIMEOUT),
+    Effect.map(Option.getOrElse(() => resolvedCommandPath)),
+    Effect.catch(() => Effect.succeed(resolvedCommandPath)),
+  );
   return resolver.resolve({
     ...options,
+    resolvedCommandPath,
     realCommandPath,
   });
+});
+
+/**
+ * Maintenance capabilities resolved on first use instead of during driver construction.
+ *
+ * Resolution walks PATH and realpaths the binary, which can stall behind a saturated libuv
+ * threadpool or a slow (network/File Provider) mount. It therefore runs once, in a fiber owned by
+ * the caller's scope, the first time version-advisory enrichment or an update action asks for it.
+ * A caller waits at most {@link MAINTENANCE_CAPABILITIES_TIMEOUT}; on timeout it gets the
+ * PATH-independent resolution, and later callers see the real result once it lands.
+ */
+export const makeLazyProviderMaintenanceCapabilities = Effect.fn(
+  "makeLazyProviderMaintenanceCapabilities",
+)(function* (
+  resolver: ProviderMaintenanceCapabilitiesResolver,
+  options?: ProviderMaintenanceResolutionInput,
+): Effect.fn.Return<
+  Effect.Effect<ProviderMaintenanceCapabilities>,
+  never,
+  FileSystem.FileSystem | Scope.Scope
+> {
+  const fileSystem = yield* FileSystem.FileSystem;
+  const scope = yield* Scope.Scope;
+  const fallback = resolver.resolve({ ...options, resolvedCommandPath: null });
+  const started = yield* Ref.make(false);
+  const resolved = yield* Deferred.make<ProviderMaintenanceCapabilities>();
+  const startResolution = Ref.getAndSet(started, true).pipe(
+    Effect.flatMap((alreadyStarted) =>
+      alreadyStarted
+        ? Effect.void
+        : resolveProviderMaintenanceCapabilitiesEffect(resolver, options).pipe(
+            Effect.provideService(FileSystem.FileSystem, fileSystem),
+            Effect.catchCause(() => Effect.succeed(fallback)),
+            Effect.flatMap((capabilities) => Deferred.succeed(resolved, capabilities)),
+            Effect.forkIn(scope),
+            Effect.asVoid,
+          ),
+    ),
+  );
+  return startResolution.pipe(
+    Effect.andThen(Deferred.await(resolved)),
+    Effect.timeoutOption(MAINTENANCE_CAPABILITIES_TIMEOUT),
+    Effect.map(Option.getOrElse(() => fallback)),
+  );
 });
 
 function deriveVersionAdvisory(input: {
@@ -423,10 +526,87 @@ const fetchNpmLatestVersion = Effect.fn("fetchNpmLatestVersion")(function* (pack
   return payload ? nonEmptyString(payload.version) : null;
 });
 
+interface LatestVersionCacheStore {
+  readonly filePath: string;
+  readonly fileSystem: FileSystem.FileSystem;
+  readonly path: Path.Path;
+}
+
+// Optional services: without a server config (unit tests, CLI tools) the cache stays in memory.
+const resolveLatestVersionCacheStore = Effect.gen(function* () {
+  const config = yield* Effect.serviceOption(ServerConfig);
+  const fileSystem = yield* Effect.serviceOption(FileSystem.FileSystem);
+  const path = yield* Effect.serviceOption(Path.Path);
+  if (Option.isNone(config) || Option.isNone(fileSystem) || Option.isNone(path)) {
+    return undefined;
+  }
+  return {
+    filePath: path.value.join(config.value.providerStatusCacheDir, LATEST_VERSION_CACHE_FILE_NAME),
+    fileSystem: fileSystem.value,
+    path: path.value,
+  } satisfies LatestVersionCacheStore;
+});
+
+const readPersistedLatestVersions = (store: LatestVersionCacheStore, nowMs: number) =>
+  Effect.gen(function* () {
+    const raw = yield* store.fileSystem
+      .readFileString(store.filePath)
+      .pipe(Effect.orElseSucceed(() => ""));
+    if (raw.trim().length === 0) {
+      return;
+    }
+    const persisted = yield* decodePersistedLatestVersionCache(raw).pipe(
+      Effect.orElseSucceed(() => undefined),
+    );
+    for (const [packageName, entry] of Object.entries(persisted?.entries ?? {})) {
+      const current = latestVersionCache.get(packageName);
+      if (entry.expiresAt > nowMs && (!current || current.expiresAt < entry.expiresAt)) {
+        latestVersionCache.set(packageName, entry);
+      }
+    }
+  });
+
+const loadPersistedLatestVersions = (store: LatestVersionCacheStore, nowMs: number) =>
+  Effect.suspend(() => {
+    // Check and claim synchronously, so exactly one caller reads the file.
+    if (latestVersionCacheLoad?.filePath === store.filePath) {
+      return Deferred.await(latestVersionCacheLoad.loaded);
+    }
+    const loaded = Deferred.makeUnsafe<void>();
+    latestVersionCacheLoad = { filePath: store.filePath, loaded };
+    return readPersistedLatestVersions(store, nowMs).pipe(
+      Effect.ensuring(Deferred.succeed(loaded, undefined)),
+    );
+  });
+
+// Writes are serialized and each one snapshots the memory cache under the permit, so the file
+// always ends with the newest state even when two lookups finish together.
+const latestVersionCachePersistSemaphore = Semaphore.makeUnsafe(1);
+
+const persistLatestVersions = (store: LatestVersionCacheStore, nowMs: number) =>
+  latestVersionCachePersistSemaphore.withPermits(1)(
+    Effect.suspend(() => {
+      const entries = Object.fromEntries(
+        [...latestVersionCache].filter(([, entry]) => entry.expiresAt > nowMs),
+      );
+      return writeFileStringAtomically({
+        filePath: store.filePath,
+        contents: `${JSON.stringify({ entries }, null, 2)}\n`,
+      });
+    }).pipe(
+      Effect.provideService(FileSystem.FileSystem, store.fileSystem),
+      Effect.provideService(Path.Path, store.path),
+      Effect.catchCause((cause) =>
+        Effect.logDebug("failed to persist provider latest-version cache", { cause }),
+      ),
+    ),
+  );
+
 /**
- * Latest published version of the provider's npm package, cached for an hour. `fresh` skips the
- * cache read (a click-time update check must rate what `<pkg>@latest` installs right now) but still
- * writes the cache, so the fetch also refreshes the hourly advisory data.
+ * Latest published version of the provider's npm package, cached for an hour in memory and on
+ * disk (so restarts within the hour skip the registry). `fresh` skips the cache read (a click-time
+ * update check must rate what `<pkg>@latest` installs right now) but still writes the cache, so the
+ * fetch also refreshes the hourly advisory data.
  */
 export const resolveLatestProviderVersion = Effect.fn("resolveLatestProviderVersion")(function* (
   maintenanceCapabilities: ProviderMaintenanceCapabilities,
@@ -437,8 +617,12 @@ export const resolveLatestProviderVersion = Effect.fn("resolveLatestProviderVers
     return null;
   }
 
-  const cached = latestVersionCache.get(packageName);
   const now = DateTime.toEpochMillis(yield* DateTime.now);
+  const store = yield* resolveLatestVersionCacheStore;
+  if (store) {
+    yield* loadPersistedLatestVersions(store, now);
+  }
+  const cached = latestVersionCache.get(packageName);
   if (options?.fresh !== true && cached && cached.expiresAt > now) {
     return cached.version;
   }
@@ -448,6 +632,9 @@ export const resolveLatestProviderVersion = Effect.fn("resolveLatestProviderVers
     expiresAt: now + LATEST_VERSION_CACHE_TTL_MS,
     version,
   });
+  if (store) {
+    yield* persistLatestVersions(store, now);
+  }
   return version;
 });
 

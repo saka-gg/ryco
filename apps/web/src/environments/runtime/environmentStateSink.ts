@@ -10,13 +10,14 @@ import {
   useComposerDraftStore,
 } from "~/composerDraftStore";
 import { getClientSettings } from "~/hooks/useSettings";
+import { evictCheckpointDiffsForThread } from "~/rpc/providerAtoms";
 import { collectActiveTerminalThreadIds } from "~/lib/terminalStateCleanup";
 import { deriveLogicalProjectKeyFromSettings, derivePhysicalProjectKey } from "~/logicalProject";
 import {
   useStore,
+  selectEnvironmentState,
   selectProjectsAcrossEnvironments,
-  selectThreadByRef,
-  selectThreadsAcrossEnvironments,
+  selectThreadShellsAcrossEnvironments,
 } from "~/store";
 import { useTerminalStateStore } from "~/terminalStateStore";
 import { useUiStateStore, type UiSyncScope } from "~/uiStateStore";
@@ -44,24 +45,27 @@ export function createWebEnvironmentStateSink(input: {
   >;
 }): EnvironmentStateSink {
   return {
-    prepareShellEvent: (environmentId, event) => {
-      const threadId =
-        event.kind === "thread-upserted"
-          ? event.thread.id
-          : event.kind === "thread-removed"
-            ? event.threadId
-            : null;
-      const threadRef = threadId ? scopeThreadRef(environmentId, threadId) : null;
-      return {
-        previousThread: threadRef ? selectThreadByRef(useStore.getState(), threadRef) : undefined,
-        threadRef,
-      };
-    },
-    applyShellEvent: (environmentId, event) =>
-      useStore.getState().applyShellEvent(event, environmentId),
+    applyShellEvents: (environmentId, events) =>
+      useStore.getState().applyShellEvents(events, environmentId, (state, event) => {
+        const threadId =
+          event.kind === "thread-upserted"
+            ? event.thread.id
+            : event.kind === "thread-removed"
+              ? event.threadId
+              : null;
+        const threadRef = threadId ? scopeThreadRef(environmentId, threadId) : null;
+        // The stored shell is enough to tell a new thread and an archive flip
+        // apart; deriving the full thread (messages, activities) is not needed.
+        return {
+          previousThread: threadId
+            ? selectEnvironmentState(state, environmentId).threadShellById[threadId]
+            : undefined,
+          threadRef,
+        };
+      }),
     afterShellEventApplied: (environmentId, event, context) => {
       const { previousThread, threadRef } = context as {
-        readonly previousThread: ReturnType<typeof selectThreadByRef> | undefined;
+        readonly previousThread: { readonly archivedAt: string | null } | undefined;
         readonly threadRef: ReturnType<typeof scopeThreadRef> | null;
       };
       switch (event.kind) {
@@ -73,7 +77,19 @@ export function createWebEnvironmentStateSink(input: {
         case "worktree-removed":
           return;
         case "thread-upserted":
-          syncThreadUiFromStore();
+          // Streaming bumps the same thread ~30x/s. Only a new thread changes
+          // the thread set; an update needs at most its own visited seed, so
+          // skip the O(threads x drafts) full UI sync for it.
+          if (!previousThread) {
+            syncThreadUiFromStore();
+          } else if (threadRef) {
+            useUiStateStore
+              .getState()
+              .seedThreadVisitedAt(
+                scopedThreadKey(threadRef),
+                event.thread.updatedAt ?? event.thread.createdAt,
+              );
+          }
           if (!previousThread && threadRef) markPromotedDraftThreadByRef(threadRef);
           if (
             previousThread?.archivedAt === null &&
@@ -81,6 +97,7 @@ export function createWebEnvironmentStateSink(input: {
             threadRef
           ) {
             useTerminalStateStore.getState().removeTerminalState(threadRef);
+            evictCheckpointDiffsForThread(event.thread.id);
           }
           input
             .supervisor?.()
@@ -93,6 +110,7 @@ export function createWebEnvironmentStateSink(input: {
             useComposerDraftStore.getState().clearDraftThread(threadRef);
             useUiStateStore.getState().clearThreadUi(scopedThreadKey(threadRef));
             useTerminalStateStore.getState().removeTerminalState(threadRef);
+            evictCheckpointDiffsForThread(event.threadId);
           }
           syncThreadUiFromStore();
       }
@@ -104,7 +122,7 @@ export function createWebEnvironmentStateSink(input: {
     reconcileSnapshotDerivedState: () => {
       syncProjectUiFromStore();
       syncThreadUiFromStore();
-      const threads = selectThreadsAcrossEnvironments(useStore.getState());
+      const threads = selectThreadShellsAcrossEnvironments(useStore.getState());
       const activeThreadKeys = collectActiveTerminalThreadIds({
         snapshotThreads: threads.map((thread) => ({
           key: scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
@@ -143,7 +161,8 @@ function syncProjectUiFromStore() {
 }
 
 function syncThreadUiFromStore() {
-  const threads = selectThreadsAcrossEnvironments(useStore.getState());
+  // Shells carry the key and timestamps; deriving full threads is not needed.
+  const threads = selectThreadShellsAcrossEnvironments(useStore.getState());
   useUiStateStore.getState().syncThreads(
     threads.map((thread) => ({
       key: scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),

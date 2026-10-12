@@ -47,6 +47,8 @@ const OPENCODE_SERVER_READY_PREFIX = "opencode server listening";
 const DEFAULT_OPENCODE_SERVER_TIMEOUT_MS = 5_000;
 const DEFAULT_HOSTNAME = "127.0.0.1";
 const OPENCODE_VERSION_PREFLIGHT_TIMEOUT_MS = 5_000;
+/** How long a stopping `opencode serve` group gets after SIGTERM before it is SIGKILLed. */
+const OPENCODE_SERVER_TERMINATE_GRACE = "1 second";
 export interface OpenCodeServerProcess {
   readonly url: string;
   readonly serverPassword?: string;
@@ -146,8 +148,9 @@ export const verifyOpenCodeServerVersion = (
  * Runs `<binary> --version` and fails unless it reports an OpenCode version this build can run.
  * Called before every `opencode serve` spawn: Ryco must never start a 2.x server (2.x converts the
  * shared OpenCode database in place and prints a generated password on stdout). Deliberately not
- * cached — a binary swapped on PATH is caught at the next cold start. Ignores the exit code, like
- * the provider probe.
+ * cached — a binary swapped on PATH is caught at the next cold start. The only reuse is within one
+ * provider probe, which runs this exact check on the same binary moments before it starts its
+ * server (`verifiedBinaryVersion`). Ignores the exit code, like the provider probe.
  */
 export const assertSupportedOpenCodeBinary = (
   runCommand: OpenCodeRuntimeShape["runOpenCodeCommand"],
@@ -235,6 +238,11 @@ export interface OpenCodeRuntimeShape {
    */
   readonly startOpenCodeServerProcess: (input: {
     readonly binaryPath: string;
+    /**
+     * Version the caller verified with `assertSupportedOpenCodeBinary`-equivalent checks for this
+     * same binary and environment immediately before; skips the duplicate `--version` spawn.
+     */
+    readonly verifiedBinaryVersion?: string;
     readonly serverPassword?: string;
     readonly environment?: NodeJS.ProcessEnv;
     readonly port?: number;
@@ -248,6 +256,7 @@ export interface OpenCodeRuntimeShape {
    */
   readonly connectToOpenCodeServer: (input: {
     readonly binaryPath: string;
+    readonly verifiedBinaryVersion?: string;
     readonly serverUrl?: string | null;
     readonly serverPassword?: string;
     readonly environment?: NodeJS.ProcessEnv;
@@ -479,10 +488,16 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
     Effect.gen(function* () {
       // Version gate before anything else: never spawn `serve` on an OpenCode this build cannot
       // run. This is the single spawn site, so the owner, the probe and the adapter all inherit it.
-      yield* assertSupportedOpenCodeBinary(runOpenCodeCommand, {
-        binaryPath: input.binaryPath,
-        ...(input.environment !== undefined ? { environment: input.environment } : {}),
-      });
+      // A caller that just ran the same gate on this binary passes its result instead.
+      if (
+        input.verifiedBinaryVersion === undefined ||
+        describeUnsupportedOpenCodeVersion(input.verifiedBinaryVersion, "binary") !== null
+      ) {
+        yield* assertSupportedOpenCodeBinary(runOpenCodeCommand, {
+          binaryPath: input.binaryPath,
+          ...(input.environment !== undefined ? { environment: input.environment } : {}),
+        });
+      }
 
       // Bind this server's lifetime to the caller's scope. When the caller's
       // scope closes, the spawned child is killed and all associated fibers
@@ -534,24 +549,18 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
           ),
         );
 
-      const killOpenCodeProcessGroup = (signal: NodeJS.Signals) =>
-        process.platform === "win32"
-          ? child.kill({ killSignal: signal, forceKillAfter: "1 second" }).pipe(Effect.asVoid)
-          : Effect.sync(() => {
-              try {
-                process.kill(-Number(child.pid), signal);
-              } catch {
-                // The direct child may already have exited after starting the
-                // server; the process group kill is best-effort cleanup for
-                // any serve process left in that group.
-              }
-            });
-      const terminateChild = killOpenCodeProcessGroup("SIGTERM").pipe(
-        Effect.andThen(Effect.sleep("1 second")),
-        Effect.andThen(killOpenCodeProcessGroup("SIGKILL")),
-        Effect.ignore,
+      // The direct child may already have exited after starting the server, so
+      // the whole process group is terminated: the spawner's kill signals the
+      // group (taskkill /T on Windows), polls until the leader and the group are
+      // gone and SIGKILLs only what outlives the grace. Teardown therefore costs
+      // the group's real exit time, not a fixed second: every OpenCode server
+      // shutdown sits on the server's exit path.
+      yield* Scope.addFinalizer(
+        runtimeScope,
+        Effect.ignore(
+          child.kill({ killSignal: "SIGTERM", forceKillAfter: OPENCODE_SERVER_TERMINATE_GRACE }),
+        ),
       );
-      yield* Scope.addFinalizer(runtimeScope, terminateChild);
 
       const stdoutRef = yield* Ref.make("");
       const stderrRef = yield* Ref.make("");
@@ -663,6 +672,9 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
 
     return startOpenCodeServerProcess({
       binaryPath: input.binaryPath,
+      ...(input.verifiedBinaryVersion !== undefined
+        ? { verifiedBinaryVersion: input.verifiedBinaryVersion }
+        : {}),
       ...(input.serverPassword !== undefined ? { serverPassword: input.serverPassword } : {}),
       ...(input.environment !== undefined ? { environment: input.environment } : {}),
       ...(input.port !== undefined ? { port: input.port } : {}),

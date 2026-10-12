@@ -4,6 +4,7 @@ import { useCommandPaletteStore } from "../../commandPaletteStore";
 import { isTerminalFocused } from "../../lib/terminalFocus";
 import { resolveShortcutCommand, shouldIgnoreGlobalNavigationShortcut } from "../../keybindings";
 import { projectScriptIdFromCommand } from "~/projectScripts";
+import { preloadWorkspacePanel } from "../../workspacePanelPreload";
 import type { ChatComposerHandle } from "./ChatComposer";
 
 export interface UseChatGlobalShortcutsInput {
@@ -29,7 +30,9 @@ export interface UseChatGlobalShortcutsInput {
 /**
  * Installs the global keydown listener that maps resolved keybinding commands
  * to terminal, workspace-panel, model-picker, and project-script actions for
- * the active thread.
+ * the active thread. A workspace-panel shortcut starts the panel's chunks
+ * before it navigates, so they load during the route commit rather than after
+ * the panel mounts.
  */
 export function useChatGlobalShortcuts(input: UseChatGlobalShortcutsInput): void {
   const {
@@ -120,6 +123,7 @@ export function useChatGlobalShortcuts(input: UseChatGlobalShortcutsInput): void
       if (command === "workspace.files") {
         event.preventDefault();
         event.stopPropagation();
+        preloadWorkspacePanel("files", { intent: true });
         onOpenFilesPanel();
         return;
       }
@@ -127,6 +131,7 @@ export function useChatGlobalShortcuts(input: UseChatGlobalShortcutsInput): void
       if (command === "workspace.review") {
         event.preventDefault();
         event.stopPropagation();
+        preloadWorkspacePanel("review", { intent: true });
         onOpenReviewPanel();
         return;
       }
@@ -134,6 +139,7 @@ export function useChatGlobalShortcuts(input: UseChatGlobalShortcutsInput): void
       if (command === "workspace.terminal") {
         event.preventDefault();
         event.stopPropagation();
+        preloadWorkspacePanel("terminal", { intent: true });
         onOpenTerminalPanel();
         return;
       }
@@ -141,6 +147,7 @@ export function useChatGlobalShortcuts(input: UseChatGlobalShortcutsInput): void
       if (command === "workspace.simulator") {
         event.preventDefault();
         event.stopPropagation();
+        preloadWorkspacePanel("simulator", { intent: true });
         onOpenSimulatorPanel();
         return;
       }

@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vite-plus/test";
 import type { TerminalEvent, TerminalSessionSnapshot } from "@ryco/contracts";
-import { createTerminalEventReconciler, isTerminalEventAfterSnapshot } from "./reconciliation.ts";
+import {
+  createTerminalEventReconciler,
+  isTerminalEventAfterSnapshot,
+  isTerminalSnapshotDeltaFor,
+} from "./reconciliation.ts";
 import {
   createTerminalStateStore,
   selectTerminalEventEntries,
@@ -117,11 +121,46 @@ describe("terminal cursor reconciliation", () => {
     expect(bytes).toBe("restoredtail");
   });
 
+  it("accepts a history-free replay only when the surface missed events", () => {
+    const replay = (sequence: number, generation = "server-a"): TerminalEvent => ({
+      ...output(sequence, "", generation),
+      type: "started",
+      snapshot: { ...snapshot(sequence, generation), history: "" },
+      replay: true,
+    });
+    const reconciler = createTerminalEventReconciler();
+    reconciler.reset(snapshot(1));
+    expect(reconciler.accept(output(2))).toBe(true);
+    expect(reconciler.accept({ ...output(3), type: "activity", hasRunningSubprocess: true })).toBe(
+      true,
+    );
+    // Reconnect after seeing everything, activity included: keep the scrollback.
+    expect(reconciler.accept(replay(3))).toBe(false);
+    // Output arrived while disconnected, or the server restarted: resynchronize.
+    expect(reconciler.accept(replay(5))).toBe(true);
+    expect(reconciler.accept(output(5, "already in the re-hydrated history"))).toBe(false);
+    expect(reconciler.accept(replay(1, "server-b"))).toBe(true);
+    // A surface that never hydrated always takes the replay.
+    expect(createTerminalEventReconciler().accept(replay(1))).toBe(true);
+  });
+
   it("delivers the exit paired with a recovered exited snapshot exactly once", () => {
     const reconciler = createTerminalEventReconciler();
     reconciler.reset({ ...snapshot(5), status: "exited", pid: null, exitCode: 0 });
     const exit: TerminalEvent = { ...output(5), type: "exited", exitCode: 0, exitSignal: null };
     expect(reconciler.accept(exit)).toBe(true);
     expect(reconciler.accept(exit)).toBe(false);
+  });
+
+  it("treats an open answer as a delta only when it echoes the cursor the surface sent", () => {
+    const since = { generation: "server-a", sequence: 4 };
+    const delta = { ...snapshot(6), history: "missed", historySince: since };
+    expect(isTerminalSnapshotDeltaFor(delta, since)).toBe(true);
+    expect(isTerminalSnapshotDeltaFor(delta, { ...since })).toBe(true);
+    // An older server, a reset or a trimmed history answers in full.
+    expect(isTerminalSnapshotDeltaFor(snapshot(6), since)).toBe(false);
+    expect(isTerminalSnapshotDeltaFor(delta, undefined)).toBe(false);
+    expect(isTerminalSnapshotDeltaFor(delta, { ...since, sequence: 5 })).toBe(false);
+    expect(isTerminalSnapshotDeltaFor(delta, { ...since, generation: "server-b" })).toBe(false);
   });
 });

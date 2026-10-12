@@ -619,13 +619,73 @@ describe("GitHubCli.layer", () => {
     );
   });
 
-  describe("listIssues", () => {
-    it.effect("invokes gh issue list with correct args and decodes output", () =>
+  describe("repository lists", () => {
+    const repositoryView = processOutput(
+      JSON.stringify({ nameWithOwner: "owner/repo", url: "https://github.com/owner/repo" }),
+    );
+    const graphQlCalls = () =>
+      mockRun.mock.calls
+        .map(([input]) => input)
+        .filter((input) => input.args[0] === "api" && input.args[1] === "graphql");
+    const variablesOf = (input: { readonly stdin?: string | undefined }) =>
+      (JSON.parse(input.stdin ?? "{}") as { variables: Record<string, unknown> }).variables;
+    const queryOf = (input: { readonly stdin?: string | undefined }) =>
+      (JSON.parse(input.stdin ?? "{}") as { query: string }).query;
+    const pullRequestPage = (
+      numbers: ReadonlyArray<number>,
+      pageInfo: { hasNextPage: boolean; endCursor: string | null } = {
+        hasNextPage: false,
+        endCursor: null,
+      },
+    ) =>
+      processOutput(
+        JSON.stringify({
+          data: {
+            repository: {
+              pullRequests: {
+                pageInfo,
+                nodes: numbers.map((number) => ({
+                  number,
+                  title: `PR ${number}`,
+                  url: `https://github.com/owner/repo/pull/${number}`,
+                  baseRefName: "main",
+                  headRefName: `feature/${number}`,
+                  state: "OPEN",
+                  comments: { totalCount: 2 },
+                })),
+              },
+            },
+          },
+        }),
+      );
+
+    it.effect("lists issues in one GraphQL request with comment counts, not bodies", () =>
       Effect.gen(function* () {
+        mockRun.mockReturnValueOnce(Effect.succeed(repositoryView));
         mockRun.mockReturnValueOnce(
           Effect.succeed(
             processOutput(
-              JSON.stringify([{ number: 42, title: "Bug", url: "https://x/42", state: "OPEN" }]),
+              JSON.stringify({
+                data: {
+                  repository: {
+                    hasIssuesEnabled: true,
+                    issues: {
+                      pageInfo: { hasNextPage: false, endCursor: null },
+                      nodes: [
+                        {
+                          number: 42,
+                          title: "Bug",
+                          url: "https://github.com/owner/repo/issues/42",
+                          state: "OPEN",
+                          labels: { nodes: [{ name: "bug", color: "d73a4a" }] },
+                          assignees: { nodes: [{ login: "octocat" }] },
+                          comments: { totalCount: 7 },
+                        },
+                      ],
+                    },
+                  },
+                },
+              }),
             ),
           ),
         );
@@ -634,36 +694,199 @@ describe("GitHubCli.layer", () => {
         const issues = yield* gh.listIssues({ cwd: "/tmp", state: "open", limit: 20 });
         assert.equal(issues.length, 1);
         assert.equal(issues[0]?.number, 42);
-        expect(mockRun).toHaveBeenCalledWith({
-          operation: "GitHubCli.execute",
-          command: "gh",
-          args: [
-            "issue",
-            "list",
-            "--state",
-            "open",
-            "--limit",
-            "20",
-            "--json",
-            "number,title,url,state,updatedAt,author,labels,assignees,comments",
-          ],
-          cwd: "/tmp",
-          timeoutMs: 30_000,
+        assert.equal(issues[0]?.commentsCount, 7);
+        assert.deepStrictEqual(issues[0]?.assignees, ["octocat"]);
+        expect(mockRun.mock.calls[0]?.[0].args).toEqual([
+          "repo",
+          "view",
+          "--json",
+          "nameWithOwner,url",
+        ]);
+        const [call] = graphQlCalls();
+        expect(call?.args).toEqual(["api", "graphql", "--hostname", "github.com", "--input", "-"]);
+        expect(variablesOf(call!)).toEqual({
+          owner: "owner",
+          name: "repo",
+          first: 20,
+          after: null,
+          states: ["OPEN"],
         });
+        expect(queryOf(call!)).toContain("comments { totalCount }");
+        expect(queryOf(call!)).not.toContain("body");
       }).pipe(Effect.provide(layer)),
     );
 
-    it.effect("uses default limit of 50 when not specified", () =>
+    it.effect("uses default limit of 50 and gh's wording for disabled issues", () =>
       Effect.gen(function* () {
-        mockRun.mockReturnValueOnce(Effect.succeed(processOutput("[]")));
+        mockRun.mockReturnValueOnce(Effect.succeed(repositoryView));
+        mockRun.mockReturnValueOnce(
+          Effect.succeed(
+            processOutput(
+              JSON.stringify({
+                data: {
+                  repository: {
+                    hasIssuesEnabled: false,
+                    issues: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] },
+                  },
+                },
+              }),
+            ),
+          ),
+        );
 
         const gh = yield* GitHubCli.GitHubCli;
-        yield* gh.listIssues({ cwd: "/tmp", state: "open" });
-        expect(mockRun).toHaveBeenCalledWith(
-          expect.objectContaining({
-            args: expect.arrayContaining(["--limit", "50"]),
+        const error = yield* gh.listIssues({ cwd: "/tmp", state: "open" }).pipe(Effect.flip);
+        expect(variablesOf(graphQlCalls()[0]!).first).toBe(50);
+        expect(error.message).toContain("the 'owner/repo' repository has disabled issues");
+      }).pipe(Effect.provide(layer)),
+    );
+
+    it.effect("resolves the repository once per checkout and pages past 100 rows", () =>
+      Effect.gen(function* () {
+        mockRun.mockReturnValueOnce(Effect.succeed(repositoryView));
+        mockRun.mockReturnValueOnce(
+          Effect.succeed(
+            pullRequestPage(
+              Array.from({ length: 100 }, (_, index) => index + 1),
+              { hasNextPage: true, endCursor: "cursor-1" },
+            ),
+          ),
+        );
+        mockRun.mockReturnValueOnce(Effect.succeed(pullRequestPage([101, 102])));
+        mockRun.mockReturnValueOnce(Effect.succeed(pullRequestPage([7])));
+
+        const gh = yield* GitHubCli.GitHubCli;
+        const many = yield* gh.listPullRequests({ cwd: "/repo", state: "closed", limit: 150 });
+        const again = yield* gh.listPullRequests({
+          cwd: "/repo",
+          state: "open",
+          headSelector: "feature/7",
+        });
+
+        assert.equal(many.length, 102);
+        assert.equal(many[0]?.summary.commentsCount, 2);
+        assert.equal(again[0]?.summary.number, 7);
+        // `gh repo view` ran once; every page and list after it is one GraphQL call.
+        expect(mockRun.mock.calls.filter(([input]) => input.args[0] === "repo")).toHaveLength(1);
+        const calls = graphQlCalls();
+        expect(calls.map(variablesOf)).toEqual([
+          {
+            owner: "owner",
+            name: "repo",
+            first: 100,
+            after: null,
+            states: ["CLOSED", "MERGED"],
+            head: null,
+          },
+          {
+            owner: "owner",
+            name: "repo",
+            first: 50,
+            after: "cursor-1",
+            states: ["CLOSED", "MERGED"],
+            head: null,
+          },
+          {
+            owner: "owner",
+            name: "repo",
+            first: 20,
+            after: null,
+            states: ["OPEN"],
+            head: "feature/7",
+          },
+        ]);
+        expect(queryOf(calls[0]!)).toContain("stack { number size baseRefName }");
+        expect(queryOf(calls[0]!)).toContain("comments { totalCount }");
+      }).pipe(Effect.provide(layer)),
+    );
+
+    it.effect("runs involvement lists as the search gh pr list --search would", () =>
+      Effect.gen(function* () {
+        mockRun.mockReturnValueOnce(Effect.succeed(repositoryView));
+        mockRun.mockReturnValueOnce(
+          Effect.succeed(
+            processOutput(
+              JSON.stringify({
+                data: {
+                  search: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [{}] },
+                },
+              }),
+            ),
+          ),
+        );
+
+        const gh = yield* GitHubCli.GitHubCli;
+        const rows = yield* gh.listPullRequests({
+          cwd: "/repo",
+          state: "merged",
+          involvement: "review-requested",
+          limit: 100,
+          includeStackSummary: false,
+        });
+
+        assert.deepStrictEqual(rows, []);
+        const [call] = graphQlCalls();
+        expect(variablesOf(call!)).toEqual({
+          q: "review-requested:@me is:merged repo:owner/repo type:pr",
+          first: 100,
+          after: null,
+        });
+        expect(queryOf(call!)).toContain("search(query: $q, type: ISSUE");
+        expect(queryOf(call!)).not.toContain("stackEntry");
+      }).pipe(Effect.provide(layer)),
+    );
+
+    it.effect("drops stack fields on hosts without native stacks and remembers it", () =>
+      Effect.gen(function* () {
+        mockRun.mockReturnValueOnce(Effect.succeed(repositoryView));
+        mockRun.mockReturnValueOnce(
+          Effect.succeed({
+            ...processOutput(
+              JSON.stringify({
+                errors: [{ message: "Field 'stack' doesn't exist on type 'PullRequest'" }],
+              }),
+            ),
+            exitCode: ChildProcessSpawner.ExitCode(1),
           }),
         );
+        mockRun.mockReturnValueOnce(Effect.succeed(pullRequestPage([1])));
+        mockRun.mockReturnValueOnce(Effect.succeed(pullRequestPage([2])));
+
+        const gh = yield* GitHubCli.GitHubCli;
+        const first = yield* gh.listPullRequests({ cwd: "/repo", state: "open" });
+        const second = yield* gh.listPullRequests({ cwd: "/repo", state: "open" });
+
+        assert.equal(first[0]?.summary.number, 1);
+        assert.equal(second[0]?.summary.number, 2);
+        const queries = graphQlCalls().map(queryOf);
+        expect(queries).toHaveLength(3);
+        expect(queries[0]).toContain("stackEntry");
+        expect(queries[1]).not.toContain("stackEntry");
+        expect(queries[2]).not.toContain("stackEntry");
+      }).pipe(Effect.provide(layer)),
+    );
+
+    it.effect("retries without checks when the token may not read the check rollup", () =>
+      Effect.gen(function* () {
+        mockRun.mockReturnValueOnce(Effect.succeed(repositoryView));
+        mockRun.mockReturnValueOnce(
+          Effect.succeed({
+            ...processOutput(""),
+            stderr:
+              "GraphQL: Resource not accessible by integration (repository.pullRequests.nodes.0.commits.nodes.0.commit.statusCheckRollup)",
+            exitCode: ChildProcessSpawner.ExitCode(1),
+          }),
+        );
+        mockRun.mockReturnValueOnce(Effect.succeed(pullRequestPage([1])));
+
+        const gh = yield* GitHubCli.GitHubCli;
+        const rows = yield* gh.listPullRequests({ cwd: "/repo", state: "open" });
+
+        assert.equal(rows[0]?.summary.number, 1);
+        assert.equal(rows[0]?.summary.checkRollup, undefined);
+        const queries = graphQlCalls().map(queryOf);
+        expect(queries[0]).toContain("statusCheckRollup");
+        expect(queries[1]).not.toContain("statusCheckRollup");
       }).pipe(Effect.provide(layer)),
     );
   });

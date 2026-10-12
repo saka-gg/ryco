@@ -12,6 +12,7 @@ import {
   type OrchestrationCommand,
   type OrchestrationDispatchCommandError,
   type OrchestrationProjectShell,
+  type OrchestrationWorktreeShell,
   type ProjectId,
   type WorktreeSubmoduleInitialization,
   ThreadId,
@@ -29,7 +30,12 @@ import {
   partitionReconcilableProjectRoots,
   planWorktreeReconciliation,
 } from "../../git/worktreeReconciliation.ts";
-import type { ProjectionSnapshotQueryShape } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import {
+  type ProjectionSnapshotQueryShape,
+  readProjectShells,
+  readWorkspacePlacement,
+} from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { inBackgroundProcessLane } from "../../processGovernor.ts";
 import { resolveProjectWorktreesDir } from "../../project/projectMetadataPaths.ts";
 import type { ProjectSetupScriptRunnerShape } from "../../project/Services/ProjectSetupScriptRunner.ts";
 import { selectConfiguredWorktreeRoot } from "../../project/worktreeRoot.ts";
@@ -60,6 +66,11 @@ import {
 } from "./managedCheckout.ts";
 
 const RECONCILIATION_THROTTLE_MS = 5 * 60 * 1000;
+/**
+ * The sweep is forked by `subscribeShell`, i.e. exactly when a client is loading its shell and
+ * first thread. Waiting keeps its SQL and `git` work off that critical path.
+ */
+export const RECONCILIATION_START_DELAY_MS = 15_000;
 /** Staging a large folder or a commit hook can be slow; a signing prompt must not hang forever. */
 const INITIAL_COMMIT_TIMEOUT_MS = 60_000;
 const INITIAL_COMMIT_PROBE_TIMEOUT_MS = 10_000;
@@ -231,16 +242,50 @@ export const makeWorktreeOperations = (deps: {
       Effect.asVoid,
     );
 
-  const ensureProjectMainWorktree = (project: OrchestrationProjectShell, operation: string) =>
-    Effect.gen(function* () {
-      const snapshot = yield* projectionSnapshotQuery
-        .getShellSnapshot()
-        .pipe(
-          Effect.mapError((cause) =>
-            toGitManagerError(operation, "Failed to load project workspaces.", cause),
+  /**
+   * One project's workspaces and live threads. Two indexed reads when the projection offers
+   * them; a whole shell snapshot only for narrow test doubles.
+   */
+  const loadProjectWorkspaceRows = (projectId: ProjectId, operation: string) =>
+    (
+      projectionSnapshotQuery.getProjectWorkspaceRows?.(projectId) ??
+      readWorkspacePlacement(projectionSnapshotQuery).pipe(
+        Effect.map((placement) => ({
+          worktrees: placement.worktrees.filter((worktree) => worktree.projectId === projectId),
+          threads: placement.threads.filter((thread) => thread.projectId === projectId),
+        })),
+      )
+    ).pipe(
+      Effect.mapError((cause) =>
+        toGitManagerError(operation, "Failed to load project workspaces.", cause),
+      ),
+    );
+
+  /** Whether any project's workspace already owns this id. */
+  const isWorktreeIdInUse = (worktreeId: WorktreeId, operation: string) =>
+    (projectionSnapshotQuery.getWorktreeShellById
+      ? projectionSnapshotQuery.getWorktreeShellById(worktreeId).pipe(Effect.map(Option.isSome))
+      : readWorkspacePlacement(projectionSnapshotQuery).pipe(
+          Effect.map((placement) =>
+            placement.worktrees.some((worktree) => worktree.worktreeId === worktreeId),
           ),
-        );
-      const existing = snapshot.worktrees?.find(
+        )
+    ).pipe(
+      Effect.mapError((cause) =>
+        toGitManagerError(operation, "Failed to load project workspaces.", cause),
+      ),
+    );
+
+  const ensureProjectMainWorktree = (
+    project: OrchestrationProjectShell,
+    operation: string,
+    /** The project's workspace rows when the caller already loaded them. */
+    projectWorktrees?: ReadonlyArray<OrchestrationWorktreeShell>,
+  ) =>
+    Effect.gen(function* () {
+      const worktrees =
+        projectWorktrees ?? (yield* loadProjectWorkspaceRows(project.id, operation)).worktrees;
+      const existing = worktrees.find(
         (worktree) =>
           worktree.projectId === project.id &&
           worktree.origin === "main" &&
@@ -252,7 +297,7 @@ export const makeWorktreeOperations = (deps: {
       const status = yield* gitWorkflow.localStatus({ cwd: project.workspaceRoot });
       if (!status.isRepo) return null;
       const worktreeId = WorktreeId.make(`worktree-${project.id}-main`);
-      if (snapshot.worktrees?.some((worktree) => worktree.worktreeId === worktreeId)) {
+      if (yield* isWorktreeIdInUse(worktreeId, operation)) {
         return yield* failGitWorkflow(operation, "The main workspace ID is already in use.");
       }
       yield* dispatchWorktreeCommand(
@@ -687,22 +732,19 @@ export const makeWorktreeOperations = (deps: {
             toGitManagerError(operation, "Failed to inspect git worktrees.", cause),
           ),
         );
+      // Read after git answered, so the plan sees rows as fresh as before. Only this project's
+      // rows: the plan never looks at another project's workspaces or threads.
+      const rows = yield* loadProjectWorkspaceRows(projectId, operation);
       // Projects linked before main workspace records existed need a destination
-      // for conversations preserved by governed workspace deletion.
-      yield* ensureProjectMainWorktree(project, operation);
-      const snapshot = yield* projectionSnapshotQuery
-        .getShellSnapshot()
-        .pipe(
-          Effect.mapError((cause) =>
-            toGitManagerError(operation, "Failed to load project sessions.", cause),
-          ),
-        );
+      // for conversations preserved by governed workspace deletion. A main workspace it
+      // creates has no path, so the plan below is unaffected by it.
+      yield* ensureProjectMainWorktree(project, operation, rows.worktrees);
       const { worktreeBranchPrefix } = yield* serverSettings.getSettings.pipe(
         Effect.mapError((cause) =>
           toGitManagerError(operation, "Failed to load server settings.", cause),
         ),
       );
-      for (const worktree of snapshot.worktrees ?? []) {
+      for (const worktree of rows.worktrees) {
         if (
           worktree.projectId !== projectId ||
           worktree.archivedAt !== null ||
@@ -728,8 +770,8 @@ export const makeWorktreeOperations = (deps: {
         caseSensitiveFileSystem: isCaseSensitiveFileSystem(),
         gitWorktreePaths,
         project: { id: project.id, workspaceRoot: project.workspaceRoot },
-        threads: snapshot.threads,
-        worktrees: snapshot.worktrees ?? [],
+        threads: rows.threads,
+        worktrees: rows.worktrees,
       });
       if (plan.adopt.length === 0 && plan.attach.length === 0 && plan.detach.length === 0) {
         return;
@@ -830,6 +872,10 @@ export const makeWorktreeOperations = (deps: {
   /**
    * Best-effort reconciliation across every active project, throttled per
    * process so a reconnect loop cannot turn into a `git worktree list` storm.
+   * Starts after {@link RECONCILIATION_START_DELAY_MS}, off the shell-load path of the
+   * subscription that forked it. Chat projects are skipped: their folders are not repositories.
+   * Nobody waits on the sweep, so its `git` runs in the background process lane and yields to
+   * interactive git.
    */
   const reconcileAllWorktrees = Effect.gen(function* () {
     const nowMs = Date.now();
@@ -837,10 +883,12 @@ export const makeWorktreeOperations = (deps: {
       return;
     }
     lastReconciliationAtMs = nowMs;
+    yield* Effect.sleep(RECONCILIATION_START_DELAY_MS);
 
-    const snapshot = yield* projectionSnapshotQuery.getShellSnapshot();
-    const roots = partitionReconcilableProjectRoots(snapshot.projects, existsSync);
-    const currentProjectIds = new Set(snapshot.projects.map((project) => project.id));
+    // The project list alone; each project then reads only its own rows.
+    const projects = yield* readProjectShells(projectionSnapshotQuery);
+    const roots = partitionReconcilableProjectRoots(projects, existsSync);
+    const currentProjectIds = new Set(projects.map((project) => project.id));
     const availableProjectIds = new Set(roots.available.map((project) => project.id));
     const resumedProjectIds: ProjectId[] = [];
     for (const trackedProjectId of missingProjectRoots) {
@@ -883,7 +931,7 @@ export const makeWorktreeOperations = (deps: {
         ),
       { concurrency: 4, discard: true },
     );
-  }).pipe(Effect.ignoreCause({ log: true }));
+  }).pipe(inBackgroundProcessLane, Effect.ignoreCause({ log: true }));
 
   // Legacy worktree RPCs route through the one workspace lifecycle service, so they
   // share its preflight, fencing and history-preserving semantics. Archiving only
@@ -1042,14 +1090,8 @@ export const makeWorktreeOperations = (deps: {
       if (worktreeId === null)
         return yield* failGitWorkflow(operation, "The initialized repository is unavailable.");
       const now = new Date().toISOString();
-      const snapshot = yield* projectionSnapshotQuery
-        .getShellSnapshot()
-        .pipe(
-          Effect.mapError((cause) =>
-            toGitManagerError(operation, "Failed to load project threads.", cause),
-          ),
-        );
-      for (const thread of snapshot.threads) {
+      const { threads } = yield* loadProjectWorkspaceRows(projectId, operation);
+      for (const thread of threads) {
         if (thread.projectId !== projectId) continue;
         yield* dispatchWorktreeCommand(
           {

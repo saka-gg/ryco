@@ -1,7 +1,8 @@
 import { createPrivateKey, createPublicKey, sign as signBytes, type KeyObject } from "node:crypto";
 
 import { hostedHubStore, type HostedRelayFailure } from "@ryco/client-runtime/authorization";
-import type { RelayE2eeHost, RelayE2eeInitiatorAttempt } from "@ryco/client-runtime/relay";
+import type { RelayE2eeHost } from "@ryco/client-runtime/relay";
+import type { RelayE2eeInitiatorAttempt } from "@ryco/client-runtime/relay/e2ee";
 import { RELAY_INITIAL_LIMITS } from "@ryco/contracts";
 import { decodeE2eeClientHello } from "@ryco/shared/relayE2eeHandshake";
 import { e2eeKeyFingerprint, formatE2eeKeyFingerprint } from "@ryco/shared/relayE2eeKeys";

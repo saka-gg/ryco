@@ -11,6 +11,7 @@ import { describe, expect } from "vite-plus/test";
 
 import {
   AcpSessionRuntime,
+  isAcpStartupPhaseTimeout,
   type AcpSessionRequestLogEvent,
   type AcpSessionRuntimeOptions,
 } from "./AcpSessionRuntime.ts";
@@ -639,4 +640,29 @@ describe("AcpSessionRuntime", () => {
       Effect.ensuring(Effect.sync(() => rmSync(tempDir, { recursive: true, force: true }))),
     );
   });
+  it.live("fails a startup phase that does not answer in time with an actionable message", () =>
+    Effect.gen(function* () {
+      const runtime = yield* AcpSessionRuntime;
+      const error = yield* runtime.start().pipe(Effect.flip);
+      expect(isAcpStartupPhaseTimeout(error)).toBe(true);
+      // Adapters surface `detail` as the session-start failure text.
+      const detail = error._tag === "AcpTransportError" ? error.detail : "";
+      expect(detail).toContain("did not answer the ACP `initialize` request");
+      expect(detail).toContain("Run the agent's login command.");
+    }).pipe(
+      Effect.provide(
+        AcpSessionRuntime.layer({
+          spawn: { command: bunExe, args: [mockAgentPath] },
+          cwd: process.cwd(),
+          clientInfo: { name: "ryco-test", version: "0.0.0" },
+          authMethodId: "test",
+          // No real agent answers within zero milliseconds.
+          phaseTimeouts: { initialize: 0 },
+          phaseTimeoutHints: { initialize: "Run the agent's login command." },
+        }),
+      ),
+      Effect.scoped,
+      Effect.provide(NodeServices.layer),
+    ),
+  );
 });

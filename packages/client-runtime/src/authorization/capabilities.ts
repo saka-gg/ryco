@@ -1,4 +1,4 @@
-import type { RelayEffectiveRole } from "@ryco/contracts";
+import type { RelayEffectiveRole } from "@ryco/contracts/relay";
 import { hostedRoleAllows, rpcDeliveryEffectFor } from "@ryco/shared/rpcAccessPolicy";
 
 import type { HostedRycoSessionStatus } from "./types.ts";

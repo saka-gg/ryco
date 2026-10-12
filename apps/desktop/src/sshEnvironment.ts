@@ -26,17 +26,19 @@ import {
 } from "@ryco/ssh/tunnel";
 import { Effect, Exit, Layer, ManagedRuntime, Scope } from "effect";
 
+import { DESKTOP_SSH_IPC } from "./sshEnvironmentChannels.ts";
+
 export { resolveRemoteRycoCliPackageSpec } from "@ryco/ssh/command";
 
-const DISCOVER_SSH_HOSTS_CHANNEL = "desktop:discover-ssh-hosts";
-const ENSURE_SSH_ENVIRONMENT_CHANNEL = "desktop:ensure-ssh-environment";
-const DISCONNECT_SSH_ENVIRONMENT_CHANNEL = "desktop:disconnect-ssh-environment";
-const FETCH_SSH_ENVIRONMENT_DESCRIPTOR_CHANNEL = "desktop:fetch-ssh-environment-descriptor";
-const BOOTSTRAP_SSH_BEARER_SESSION_CHANNEL = "desktop:bootstrap-ssh-bearer-session";
-const FETCH_SSH_SESSION_STATE_CHANNEL = "desktop:fetch-ssh-session-state";
-const ISSUE_SSH_WEBSOCKET_TOKEN_CHANNEL = "desktop:issue-ssh-websocket-token";
+const DISCOVER_SSH_HOSTS_CHANNEL = DESKTOP_SSH_IPC.discoverHosts;
+const ENSURE_SSH_ENVIRONMENT_CHANNEL = DESKTOP_SSH_IPC.ensureEnvironment;
+const DISCONNECT_SSH_ENVIRONMENT_CHANNEL = DESKTOP_SSH_IPC.disconnectEnvironment;
+const FETCH_SSH_ENVIRONMENT_DESCRIPTOR_CHANNEL = DESKTOP_SSH_IPC.fetchEnvironmentDescriptor;
+const BOOTSTRAP_SSH_BEARER_SESSION_CHANNEL = DESKTOP_SSH_IPC.bootstrapBearerSession;
+const FETCH_SSH_SESSION_STATE_CHANNEL = DESKTOP_SSH_IPC.fetchSessionState;
+const ISSUE_SSH_WEBSOCKET_TOKEN_CHANNEL = DESKTOP_SSH_IPC.issueWebSocketToken;
 const SSH_PASSWORD_PROMPT_CHANNEL = "desktop:ssh-password-prompt";
-const RESOLVE_SSH_PASSWORD_PROMPT_CHANNEL = "desktop:resolve-ssh-password-prompt";
+const RESOLVE_SSH_PASSWORD_PROMPT_CHANNEL = DESKTOP_SSH_IPC.resolvePasswordPrompt;
 const DEFAULT_SSH_PASSWORD_PROMPT_TIMEOUT_MS = 3 * 60 * 1000;
 const SSH_PASSWORD_PROMPT_CANCELLED_RESULT = "ssh-password-prompt-cancelled";
 

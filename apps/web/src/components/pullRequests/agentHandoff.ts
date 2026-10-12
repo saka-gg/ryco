@@ -124,11 +124,15 @@ function adoptHostedTarget(projectRef: ScopedProjectRef): void {
 function resolveLocation(target: HandoffTarget): HandoffWorkLocation {
   const worktrees = selectSidebarWorktreesForProjectRef(useStore.getState(), target.projectRef);
   const worktree = findPullRequestWorktree(worktrees, target.link);
+  const repository = {
+    environmentId: target.repository.environmentId,
+    cwd: target.repository.cwd,
+  };
+  // The pull requests page watches the summary view (its ref is the checkout's
+  // HEAD); full status stands in where another surface keeps that one live.
   const projectBranch =
-    getGitStatusSnapshot({
-      environmentId: target.repository.environmentId,
-      cwd: target.repository.cwd,
-    }).data?.refName ?? null;
+    (getGitStatusSnapshot(repository, "summary").data ?? getGitStatusSnapshot(repository).data)
+      ?.refName ?? null;
   return resolveHandoffWorkLocation({ worktree, projectBranch, link: target.link });
 }
 

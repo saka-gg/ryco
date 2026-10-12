@@ -7,10 +7,12 @@ import {
   NATIVE_E2EE_GRANT_KEYS_PATH,
 } from "@ryco/contracts/native-e2ee";
 
-import { renderHostedPwaOfflineDocument } from "./offlineDocument";
+import { renderHostedPwaBootDocument, renderHostedPwaOfflineDocument } from "./offlineDocument";
 
 export interface HostedPwaBundleEntry {
   readonly dynamicImports?: ReadonlyArray<string>;
+  /** The source module a chunk was built for, when it has one (Rollup's `facadeModuleId`). */
+  readonly facadeModuleId?: string | null;
   readonly fileName: string;
   readonly importedAssets?: ReadonlyArray<string>;
   readonly importedCss?: ReadonlyArray<string>;
@@ -21,8 +23,45 @@ export interface HostedPwaBundleEntry {
 
 export interface HostedPwaPrecache {
   readonly cacheName: string;
+  /**
+   * What the worker installs before it activates: the boot closure, the hosted
+   * root and the workspace and thread-route closures, plus the boot document —
+   * everything a remembered browser needs to start offline.
+   */
   readonly urls: ReadonlyArray<string>;
+  /**
+   * Every fingerprinted asset this build can load. The worker caches one of
+   * these the first time it is fetched, and carries an unchanged one over from
+   * the previous version's cache instead of downloading it again. Nothing
+   * outside this exact list is ever cached.
+   */
+  readonly cacheableUrls: ReadonlyArray<string>;
 }
+
+/**
+ * Source modules whose chunks are precached with their static imports. Every
+ * other lazily loaded chunk is cached on first use instead of downloading all
+ * of them — about 7 MiB — while a first visit is still loading.
+ *
+ * `main.tsx` is here because the built entry is `index.html`'s inline module
+ * script, which imports the app dynamically; the rest are what the hosted boot
+ * gate loads, what the workspace renders first, and the relay handshake every
+ * node connection loads (kept off the boot path, but not off the shell cache).
+ */
+export const HOSTED_PWA_PRECACHE_MODULES = [
+  "src/main.tsx",
+  "src/hostedHub/logging.ts",
+  "src/hostedHub/state.ts",
+  "src/hostedHub/readCache.ts",
+  "src/hostedHub/e2eeRuntime.ts",
+  "src/hostedHub/hostedWorkspaceOwners.ts",
+  "src/components/hostedHub/HostedHubRoot.tsx",
+  "src/components/hostedHub/hostedRootAppShell.tsx",
+  "src/components/RootAppShell.tsx",
+  "src/components/routeViews/ChatThreadRouteView.tsx",
+  "src/components/routeViews/DraftChatThreadRouteView.tsx",
+  "src/components/shell/phone/PhoneHome.tsx",
+] as const;
 
 const IMMUTABLE_ASSET_PATTERN =
   /(?:^|\/)[^/]+-[A-Za-z0-9_-]{8,}\.(?:css|gif|jpe?g|js|mjs|png|svg|ttf|webp|woff2?)$/i;
@@ -64,17 +103,26 @@ function stableDigest(value: string): string {
   return hash.toString(16).padStart(16, "0");
 }
 
-export function resolveHostedPwaPrecache(input: {
-  readonly base: string;
-  readonly entries: ReadonlyArray<HostedPwaBundleEntry>;
-  readonly offlineDocument: string;
-}): HostedPwaPrecache {
-  const entriesByFileName = new Map(input.entries.map((entry) => [entry.fileName, entry]));
-  const pendingFileNames = input.entries
-    .filter((entry) => entry.isEntry)
-    .map((entry) => entry.fileName);
-  const reachableFileNames = new Set<string>();
+function isPrecacheModule(
+  facadeModuleId: string | null | undefined,
+  modules: ReadonlyArray<string>,
+): boolean {
+  if (!facadeModuleId) return false;
+  const normalized = facadeModuleId.replaceAll("\\", "/");
+  return modules.some((module) => normalized === module || normalized.endsWith(`/${module}`));
+}
 
+/**
+ * Every file reachable from `roots`, following static imports and their
+ * assets always and dynamic imports only when `followDynamic` is set.
+ */
+function reachableFiles(
+  entriesByFileName: ReadonlyMap<string, HostedPwaBundleEntry>,
+  roots: ReadonlyArray<string>,
+  followDynamic: boolean,
+): ReadonlySet<string> {
+  const pendingFileNames = [...roots];
+  const reachableFileNames = new Set<string>();
   for (let index = 0; index < pendingFileNames.length; index += 1) {
     const fileName = pendingFileNames[index];
     if (!fileName || reachableFileNames.has(fileName)) continue;
@@ -82,28 +130,83 @@ export function resolveHostedPwaPrecache(input: {
     const entry = entriesByFileName.get(fileName);
     if (!entry) continue;
     pendingFileNames.push(
-      ...(entry.dynamicImports ?? []),
+      ...(followDynamic ? (entry.dynamicImports ?? []) : []),
       ...(entry.imports ?? []),
       ...(entry.importedCss ?? []),
       ...(entry.importedAssets ?? []),
       ...(entry.referencedFiles ?? []),
     );
   }
+  return reachableFileNames;
+}
 
-  const urls = [
+function immutableUrls(base: string, fileNames: Iterable<string>): string[] {
+  return [
     ...new Set(
-      [...reachableFileNames]
+      [...fileNames]
         .filter((fileName) => IMMUTABLE_ASSET_PATTERN.test(fileName))
-        .map((fileName) => pathAtBase(input.base, fileName)),
+        .map((fileName) => pathAtBase(base, fileName)),
     ),
-    pathAtBase(input.base, "offline.html"),
+  ];
+}
+
+/**
+ * The fingerprinted files the boot document should preload: the entry and the
+ * app module's static closure, JavaScript only. Without them a SW-served boot
+ * discovers its ~75-module graph one import level at a time.
+ */
+export function resolveHostedPwaBootModules(input: {
+  readonly base: string;
+  readonly entries: ReadonlyArray<HostedPwaBundleEntry>;
+}): ReadonlyArray<string> {
+  const entriesByFileName = new Map(input.entries.map((entry) => [entry.fileName, entry]));
+  const roots = input.entries
+    .filter((entry) => entry.isEntry || isPrecacheModule(entry.facadeModuleId, ["src/main.tsx"]))
+    .map((entry) => entry.fileName);
+  return immutableUrls(input.base, reachableFiles(entriesByFileName, roots, false))
+    .filter((url) => /\.m?js$/i.test(url))
+    .toSorted();
+}
+
+export function resolveHostedPwaPrecache(input: {
+  readonly base: string;
+  readonly entries: ReadonlyArray<HostedPwaBundleEntry>;
+  readonly offlineDocument: string;
+  /** Defaults to {@link HOSTED_PWA_PRECACHE_MODULES}. */
+  readonly precacheModules?: ReadonlyArray<string>;
+}): HostedPwaPrecache {
+  const entriesByFileName = new Map(input.entries.map((entry) => [entry.fileName, entry]));
+  const entryFileNames = input.entries
+    .filter((entry) => entry.isEntry)
+    .map((entry) => entry.fileName);
+  const precacheModules = input.precacheModules ?? HOSTED_PWA_PRECACHE_MODULES;
+  const precacheRoots = [
+    ...entryFileNames,
+    ...input.entries
+      .filter((entry) => isPrecacheModule(entry.facadeModuleId, precacheModules))
+      .map((entry) => entry.fileName),
+  ];
+  const offlineUrl = pathAtBase(input.base, "offline.html");
+  const cacheableUrls = immutableUrls(
+    input.base,
+    reachableFiles(entriesByFileName, entryFileNames, true),
+  ).toSorted();
+  const cacheable = new Set(cacheableUrls);
+  const urls = [
+    // Only what this build can load: a precache root outside the reachable
+    // graph is not an asset of this app.
+    ...immutableUrls(input.base, reachableFiles(entriesByFileName, precacheRoots, false)).filter(
+      (url) => cacheable.has(url),
+    ),
+    offlineUrl,
   ].toSorted();
 
   return {
     cacheName: `${CACHE_NAME_PREFIX}${stableDigest(
-      `${urls.join("\n")}\noffline:${stableDigest(input.offlineDocument)}`,
+      `${urls.join("\n")}\n${cacheableUrls.join("\n")}\noffline:${stableDigest(input.offlineDocument)}`,
     )}`,
     urls,
+    cacheableUrls,
   };
 }
 
@@ -114,12 +217,16 @@ export function renderHostedPwaServiceWorker(input: HostedPwaPrecache): string {
 const CACHE_NAME = ${JSON.stringify(input.cacheName)};
 const CACHE_PREFIX = ${JSON.stringify(CACHE_NAME_PREFIX)};
 const PRECACHE_URLS = ${JSON.stringify(input.urls)};
+const CACHEABLE_URLS = ${JSON.stringify(input.cacheableUrls)};
 const NETWORK_ONLY_PATH_PREFIXES = ${JSON.stringify(NETWORK_ONLY_PATH_PREFIXES)};
 const NETWORK_ONLY_PATHS = ${JSON.stringify(HOSTED_E2EE_NETWORK_ONLY_PATHS)};
 const NETWORK_ONLY_PATH_SUBTREES = ${JSON.stringify(NETWORK_ONLY_PATH_SUBTREES)};
 const ACTIVATION_MESSAGE = "ryco:pwa:activate:v1";
-const absolutePrecacheUrls = new Set(PRECACHE_URLS.map((url) => new URL(url, self.registration.scope).href));
-const offlineUrl = new URL(PRECACHE_URLS.find((url) => url.endsWith("/offline.html")), self.registration.scope).href;
+const absoluteUrl = (url) => new URL(url, self.registration.scope).href;
+const offlineUrl = absoluteUrl(PRECACHE_URLS.find((url) => url.endsWith("/offline.html")));
+// Fingerprinted build assets only: their bytes never change under a URL. The
+// boot document is not one of them, so it is never carried between versions.
+const absoluteCacheableUrls = new Set(CACHEABLE_URLS.map(absoluteUrl));
 
 function hasPathPrefix(pathname, prefix) {
   return pathname === prefix || pathname.startsWith(prefix + "/");
@@ -133,16 +240,101 @@ function isNetworkOnlyPath(pathname) {
   );
 }
 
+// Copying from an older version is an optimization: a cache that cannot be
+// read is treated as empty, so the asset is fetched instead.
+async function previousShellCaches() {
+  try {
+    const names = await caches.keys();
+    return await Promise.all(
+      names
+        .filter((name) => name.startsWith(CACHE_PREFIX) && name !== CACHE_NAME)
+        .map((name) => caches.open(name)),
+    );
+  } catch {
+    return [];
+  }
+}
+
+async function previousCopy(previous, url) {
+  for (const cache of previous) {
+    const response = await cache.match(url, { ignoreVary: true }).catch(() => undefined);
+    if (response) return response;
+  }
+  return undefined;
+}
+
+// A complete copy of PRECACHE_URLS or no activation: an unchanged fingerprinted
+// asset is copied from the previous version's cache, everything else (and the
+// boot document always) is fetched. Any failure rejects the install, as
+// cache.addAll would, and the previous worker stays in control.
+async function install() {
+  const cache = await caches.open(CACHE_NAME);
+  const previous = await previousShellCaches();
+  await Promise.all(
+    PRECACHE_URLS.map(async (url) => {
+      const href = absoluteUrl(url);
+      if (absoluteCacheableUrls.has(href)) {
+        if (await cache.match(href, { ignoreVary: true })) return;
+        const copy = await previousCopy(previous, href);
+        if (copy) return cache.put(href, copy);
+        // Held to the runtime cache's rule: an HTML fallback for a chunk the
+        // origin no longer serves fails the install rather than being kept.
+        const asset = await fetch(new Request(href));
+        if (!cacheableResponse(asset)) throw new TypeError("Precache request failed.");
+        return cache.put(href, asset);
+      }
+      const response = await fetch(new Request(href, { cache: "no-cache" }));
+      if (!response.ok) throw new TypeError("Precache request failed.");
+      return cache.put(href, response);
+    }),
+  );
+}
+
+// Carry every runtime-cached asset this version still loads into its cache,
+// then drop the previous versions. Fetches from controlled pages wait for
+// activation, so the copies run concurrently, and a failed carry-over only
+// costs a later network fetch: it never keeps old caches or skips the claim.
+async function activate() {
+  const names = (await caches.keys()).filter(
+    (name) => name.startsWith(CACHE_PREFIX) && name !== CACHE_NAME,
+  );
+  try {
+    const cache = await caches.open(CACHE_NAME);
+    const carried = new Set();
+    for (const name of names) {
+      const previous = await caches.open(name);
+      const requests = (await previous.keys()).filter(
+        (request) => absoluteCacheableUrls.has(request.url) && !carried.has(request.url),
+      );
+      for (const request of requests) carried.add(request.url);
+      await Promise.all(
+        requests.map(async (request) => {
+          if (await cache.match(request.url, { ignoreVary: true })) return;
+          const response = await previous.match(request, { ignoreVary: true });
+          if (response) await cache.put(request.url, response);
+        }).map((copy) => copy.catch(() => undefined)),
+      );
+    }
+  } catch {
+    // Carrying assets forward is an optimization only.
+  }
+  await Promise.all(names.map((name) => caches.delete(name)));
+  await self.clients.claim();
+}
+
+function cacheableResponse(response) {
+  if (!response || !response.ok || response.status !== 200 || response.type !== "basic") return false;
+  // A missing chunk answered with an HTML fallback must never be kept under a
+  // fingerprinted URL.
+  return !(response.headers.get("content-type") || "").toLowerCase().includes("text/html");
+}
+
 self.addEventListener("install", (event) => {
-  event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(PRECACHE_URLS)));
+  event.waitUntil(install());
 });
 
 self.addEventListener("activate", (event) => {
-  event.waitUntil(
-    caches.keys()
-      .then((names) => Promise.all(names.filter((name) => name.startsWith(CACHE_PREFIX) && name !== CACHE_NAME).map((name) => caches.delete(name))))
-      .then(() => self.clients.claim()),
-  );
+  event.waitUntil(activate());
 });
 
 self.addEventListener("message", (event) => {
@@ -166,10 +358,21 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  if (!absolutePrecacheUrls.has(url.href)) return;
+  if (!absoluteCacheableUrls.has(url.href)) return;
   // Only fingerprinted, same-origin build assets reach here. Their bytes do not
   // vary with request headers; module requests can add Origin unlike precaching.
-  event.respondWith(caches.open(CACHE_NAME).then(async (cache) => (await cache.match(request, { ignoreVary: true })) ?? fetch(request)));
+  event.respondWith(
+    caches.open(CACHE_NAME).then(async (cache) => {
+      const cached = await cache.match(request, { ignoreVary: true });
+      if (cached) return cached;
+      const response = await fetch(request);
+      if (cacheableResponse(response)) {
+        const stored = cache.put(url.href, response.clone()).catch(() => undefined);
+        if (typeof event.waitUntil === "function") event.waitUntil(stored);
+      }
+      return response;
+    }),
+  );
 });
 `;
 }
@@ -180,6 +383,7 @@ function entriesFromBundle(
   return Object.values(bundle).map((entry) => {
     const output = entry as typeof entry & {
       readonly dynamicImports?: ReadonlyArray<string>;
+      readonly facadeModuleId?: string | null;
       readonly imports?: ReadonlyArray<string>;
       readonly isEntry?: boolean;
       readonly referencedFiles?: ReadonlyArray<string>;
@@ -190,6 +394,7 @@ function entriesFromBundle(
     };
     return {
       dynamicImports: output.dynamicImports ?? [],
+      facadeModuleId: output.facadeModuleId ?? null,
       fileName: output.fileName,
       imports: output.imports ?? [],
       isEntry: output.isEntry ?? false,
@@ -208,36 +413,54 @@ export function createHostedPwaBuildPlugin(): Plugin {
     configResolved(config) {
       publicBase = config.base;
     },
-    generateBundle(_outputOptions, bundle) {
-      const entries = entriesFromBundle(bundle);
-      const offlineDocument = renderHostedPwaOfflineDocument({
-        startUrl: normalizeBase(publicBase),
-        scripts: entries
-          .filter((entry) => entry.isEntry && IMMUTABLE_ASSET_PATTERN.test(entry.fileName))
-          .map((entry) => pathAtBase(publicBase, entry.fileName)),
-        styles: [
-          ...new Set(
-            entries.filter((entry) => entry.isEntry).flatMap((entry) => entry.importedCss ?? []),
-          ),
-        ]
-          .filter((fileName) => IMMUTABLE_ASSET_PATTERN.test(fileName))
-          .map((fileName) => pathAtBase(publicBase, fileName)),
-      });
-      const precache = resolveHostedPwaPrecache({
-        base: publicBase,
-        entries,
-        offlineDocument,
-      });
-      this.emitFile({
-        type: "asset",
-        fileName: "offline.html",
-        source: offlineDocument,
-      });
-      this.emitFile({
-        type: "asset",
-        fileName: "service-worker.js",
-        source: renderHostedPwaServiceWorker(precache),
-      });
+    // After the HTML plugin, so the built `index.html` — its inline theme
+    // script and boot shell — is in the bundle to derive the boot document from.
+    generateBundle: {
+      order: "post",
+      handler(_outputOptions, bundle) {
+        const entries = entriesFromBundle(bundle);
+        const startUrl = normalizeBase(publicBase);
+        const indexHtml = bundle["index.html"];
+        const builtDocument =
+          indexHtml?.type === "asset" && typeof indexHtml.source === "string"
+            ? renderHostedPwaBootDocument({
+                indexHtml: indexHtml.source,
+                modulePreloads: resolveHostedPwaBootModules({ base: publicBase, entries }),
+              })
+            : null;
+        const offlineDocument =
+          builtDocument ??
+          renderHostedPwaOfflineDocument({
+            startUrl,
+            scripts: entries
+              .filter((entry) => entry.isEntry && IMMUTABLE_ASSET_PATTERN.test(entry.fileName))
+              .map((entry) => pathAtBase(publicBase, entry.fileName)),
+            styles: [
+              ...new Set(
+                entries
+                  .filter((entry) => entry.isEntry)
+                  .flatMap((entry) => entry.importedCss ?? []),
+              ),
+            ]
+              .filter((fileName) => IMMUTABLE_ASSET_PATTERN.test(fileName))
+              .map((fileName) => pathAtBase(publicBase, fileName)),
+          });
+        const precache = resolveHostedPwaPrecache({
+          base: publicBase,
+          entries,
+          offlineDocument,
+        });
+        this.emitFile({
+          type: "asset",
+          fileName: "offline.html",
+          source: offlineDocument,
+        });
+        this.emitFile({
+          type: "asset",
+          fileName: "service-worker.js",
+          source: renderHostedPwaServiceWorker(precache),
+        });
+      },
     },
   };
 }

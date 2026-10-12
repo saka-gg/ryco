@@ -149,6 +149,9 @@ import {
   claudeEntryBeforePrompt,
 } from "../claudeTranscriptCutoff.ts";
 import { formatProjectCustomSystemPrompt } from "../ProjectCustomSystemPrompt.ts";
+import { ASSISTANT_ATTACHMENT_INSTRUCTIONS } from "../../assistantAttachments.ts";
+import { isSlashCommandInput } from "../attachmentInstructionDelivery.ts";
+import { providerStartupPhaseTimeoutDetail } from "../providerOperationPolicy.ts";
 import {
   getClaudeModelCapabilities,
   isClaudeUltracodeEffort,
@@ -176,6 +179,7 @@ import {
   type AgentControlProviderBridge,
   type AgentControlRuntimeLease,
 } from "../../agentControl/ProviderInjection.ts";
+import { makeSharedPayloadSecretRedactor } from "../../agentControl/secretRedaction.ts";
 import {
   applyClaudeRateLimitInfo,
   classifyClaudeUsageLimitResult,
@@ -230,6 +234,12 @@ const CLAUDE_TURN_HEADS_CAP = 64;
 const CLAUDE_REWIND_PROBE_TIMEOUT = "30 seconds";
 const CLAUDE_REWIND_TRANSCRIPT_TIMEOUT = "10 seconds";
 const CLAUDE_REWIND_QUERY_EXIT_MS = 5_000;
+/**
+ * How long the CLI may take to answer its initialize control request on a runtime's first turn.
+ * It loads its settings, plugins and MCP servers first; a hang there would otherwise surface only
+ * through the 90 s turn-acceptance deadline, with no hint at the cause.
+ */
+const CLAUDE_STARTUP_INITIALIZE_TIMEOUT_MS = 30_000;
 
 /**
  * Who opened a turn. Anything but "prompt" is a provider turn: Claude started it without a
@@ -400,6 +410,10 @@ interface ClaudeSessionContext {
   probeFailure: Deferred.Deferred<string> | undefined;
   readonly promptQueue: Queue.Queue<PromptQueueItem>;
   readonly query: ClaudeQueryRuntime;
+  /** The configured CLI command, for startup error messages. */
+  readonly cliCommand: string;
+  /** The CLI answered its initialize control request; startup is no longer bounded. */
+  cliInitialized: boolean;
   readonly deviceToolBinding: DeviceToolBinding | null;
   readonly agentControl?: AgentControlRuntimeLease;
   readonly agentControlHostContext: string;
@@ -1934,6 +1948,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
   const sessions = new Map<ThreadId, ClaudeSessionContext>();
   let nextSessionGeneration = 0;
+  // One SDK message fans out into several runtime events that all carry it as
+  // `raw.payload` (and is logged natively first): redact it once, share it.
+  const secretRedactor = makeSharedPayloadSecretRedactor();
   const runtimeEventQueue = yield* Queue.bounded<ProviderRuntimeEvent>(
     options?.runtimeEventQueueCapacity ?? 2_048,
   );
@@ -1987,7 +2004,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         },
       } as ProviderRuntimeEvent;
     }
-    const safeEvent = redactAgentControlSecrets(event) as ProviderRuntimeEvent;
+    const safeEvent = secretRedactor.event(event);
     return Queue.offer(
       runtimeEventQueue,
       stampRuntimeEvent(safeEvent, {
@@ -2105,18 +2122,20 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     });
   });
 
-  const logNativeSdkMessage = Effect.fn("logNativeSdkMessage")(function* (
+  // Runs once per SDK message (every stream delta included): a plain
+  // function, not an `Effect.fn`, so it adds no span to the trace file.
+  const logNativeSdkMessage = (
     context: ClaudeSessionContext,
     message: SDKMessage,
-  ) {
+  ): Effect.Effect<void> => {
     if (!nativeEventLogger) {
-      return;
+      return Effect.void;
     }
 
     const observedAt = new Date().toISOString();
     const itemId = sdkNativeItemId(message);
 
-    yield* nativeEventLogger.write(
+    return nativeEventLogger.write(
       {
         observedAt,
         event: {
@@ -2126,7 +2145,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
               : crypto.randomUUID(),
           kind: "notification",
           provider: PROVIDER,
-          createdAt: observedAt,
           method: sdkNativeMethod(message),
           ...(typeof message.session_id === "string"
             ? { providerThreadId: message.session_id }
@@ -2137,12 +2155,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
               }
             : {}),
           ...(itemId ? { itemId: ProviderItemId.make(itemId) } : {}),
-          payload: redactAgentControlSecrets(message),
+          payload: secretRedactor.payload(message),
         },
       },
       context.session.threadId,
     );
-  });
+  };
 
   const snapshotThread = Effect.fn("snapshotThread")(function* (context: ClaudeSessionContext) {
     const threadId = context.session.threadId;
@@ -2162,9 +2180,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     };
   });
 
-  const updateResumeCursor = Effect.fn("updateResumeCursor")(function* (
-    context: ClaudeSessionContext,
-  ) {
+  const updateResumeCursor = Effect.fnUntraced(function* (context: ClaudeSessionContext) {
     if (!context.session.threadId) return;
     // Yield before reading the session: a spread taken across a yield would write back a
     // stale status/activeTurnId over a concurrent turn install.
@@ -2180,7 +2196,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     context.session = { ...context.session, resumeCursor, updatedAt };
   });
 
-  const ensureAssistantTextBlock = Effect.fn("ensureAssistantTextBlock")(function* (
+  const ensureAssistantTextBlock = Effect.fnUntraced(function* (
     context: ClaudeSessionContext,
     blockIndex: number,
     options?: {
@@ -2359,7 +2375,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
   });
 
-  const ensureThreadId = Effect.fn("ensureThreadId")(function* (
+  const ensureThreadId = Effect.fnUntraced(function* (
     context: ClaudeSessionContext,
     message: SDKMessage,
   ) {
@@ -2902,7 +2918,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     );
   });
 
-  const handleStreamEvent = Effect.fn("handleStreamEvent")(function* (
+  const handleStreamEvent = Effect.fnUntraced(function* (
     context: ClaudeSessionContext,
     message: SDKMessage,
   ) {
@@ -4768,7 +4784,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
    * `endDiscardedSteerCliTurn`). The open turn owns its own steers' segments; after Stop, one that
    * starts is interrupted again too, with the same API-error exception.
    */
-  const routeSteerFrame = Effect.fn("routeSteerFrame")(function* (
+  const routeSteerFrame = Effect.fnUntraced(function* (
     context: ClaudeSessionContext,
     message: SDKMessage,
   ) {
@@ -4859,7 +4875,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     return true;
   });
 
-  const handleSdkMessage = Effect.fn("handleSdkMessage")(function* (
+  // Untraced, like the other helpers that run once per SDK message (every stream delta
+  // included): a span each made them a large share of the server trace.
+  const handleSdkMessage = Effect.fnUntraced(function* (
     context: ClaudeSessionContext,
     message: SDKMessage,
   ) {
@@ -4893,7 +4911,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     if (open && rootContent) open.rootContentObserved = true;
   });
 
-  const routeSdkMessage = Effect.fn("routeSdkMessage")(function* (
+  const routeSdkMessage = Effect.fnUntraced(function* (
     context: ClaudeSessionContext,
     message: SDKMessage,
   ) {
@@ -5560,7 +5578,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     const tokenMode = input.tokenMode ?? DEFAULT_AGENT_TOKEN_MODE;
     const tokenReductionInstructions = yield* readTokenReductionInstructions(tokenMode);
     const customSystemPrompt = formatProjectCustomSystemPrompt(input.customSystemPrompt);
-    const appendSystemPrompt = [tokenReductionInstructions, customSystemPrompt]
+    const appendSystemPrompt = [
+      ASSISTANT_ATTACHMENT_INSTRUCTIONS,
+      tokenReductionInstructions,
+      customSystemPrompt,
+    ]
       .map((part) => part?.trim())
       .filter((part): part is string => part !== undefined && part.length > 0)
       .join("\n\n");
@@ -5736,6 +5758,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       probeFailure: openOptions.probe === true ? Deferred.makeUnsafe<string>() : undefined,
       promptQueue,
       query: queryRuntime,
+      cliCommand: claudeBinaryPath,
+      cliInitialized: false,
       deviceToolBinding,
       ...(agentControl ? { agentControl } : {}),
       agentControlHostContext:
@@ -5877,6 +5901,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         Deferred.await(probeFailure).pipe(Effect.flatMap((detail) => Effect.fail(detail))),
       ).pipe(Effect.timeoutOption(CLAUDE_REWIND_PROBE_TIMEOUT), Effect.result);
       context.probing = false;
+      if (probe._tag === "Success" && Option.isSome(probe.success)) context.cliInitialized = true;
       const failure =
         probe._tag === "Failure"
           ? probe.failure
@@ -5898,10 +5923,44 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     return context;
   });
 
+  /**
+   * Bounds the CLI's startup on a runtime's first turn. The control requests sendTurn makes
+   * (setModel, setPermissionMode) are answered only after it, so a CLI that hangs while loading
+   * would hold the send until the turn-acceptance deadline. One that misses the deadline is
+   * stopped, so the next send starts a fresh CLI.
+   */
+  const awaitCliInitialized = Effect.fnUntraced(function* (
+    context: ClaudeSessionContext,
+    threadId: ThreadId,
+  ) {
+    if (context.cliInitialized || context.query.initializationResult === undefined) return;
+    const initialized = yield* Effect.tryPromise({
+      // Invoke through the query object: SDK methods rely on `this`.
+      try: () => context.query.initializationResult!(),
+      catch: (cause) => toRequestError(threadId, "initialize", cause),
+    }).pipe(Effect.timeoutOption(Duration.millis(CLAUDE_STARTUP_INITIALIZE_TIMEOUT_MS)));
+    if (Option.isSome(initialized)) {
+      context.cliInitialized = true;
+      return;
+    }
+    yield* stopSessionInternal(context);
+    return yield* new ProviderAdapterRequestError({
+      provider: PROVIDER,
+      method: "initialize",
+      detail: providerStartupPhaseTimeoutDetail({
+        command: context.cliCommand,
+        request: "Claude Code `initialize`",
+        timeoutMs: CLAUDE_STARTUP_INITIALIZE_TIMEOUT_MS,
+        hint: `Run \`${context.cliCommand}\` in a terminal to check that it is signed in and that its plugins and MCP servers load, then send the message again.`,
+      }),
+    });
+  });
+
   const sendTurnOnContext = Effect.fn("sendTurnOnContext")(function* (
     context: ClaudeSessionContext,
     input: ProviderSendTurnInput,
   ) {
+    yield* awaitCliInitialized(context, input.threadId);
     const modelSelection =
       input.modelSelection !== undefined && input.modelSelection.instanceId === boundInstanceId
         ? input.modelSelection
@@ -5981,8 +6040,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       providerRefs: {},
     });
 
+    // A slash command must lead the prompt; the context waits for the next turn.
     const hostContextPrefix =
-      isClaudeNativeCompaction(input) ||
+      isSlashCommandInput(input.input) ||
       context.agentControlHostContextDelivered ||
       context.agentControlHostContext.length === 0
         ? undefined
@@ -6573,7 +6633,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         stopSessionInternal(context, {
           emitExitEvent: true,
         }),
-      { discard: true },
+      { concurrency: "unbounded", discard: true },
     );
 
   yield* Effect.addFinalizer(() =>
@@ -6583,7 +6643,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         stopSessionInternal(context, {
           emitExitEvent: false,
         }),
-      { discard: true },
+      { concurrency: "unbounded", discard: true },
     ).pipe(
       Effect.tap(() => runtimeEventQueueMetrics.reset),
       Effect.tap(() => Queue.shutdown(runtimeEventQueue)),
@@ -6598,6 +6658,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       turnSteering: "native",
       // Transcripts live under a per-cwd project key, so a moved resume finds nothing.
       resumeSurvivesCwdChange: false,
+      // Carried in appendSystemPrompt, so slash commands such as /compact stay commands.
+      attachmentInstructions: "session",
     },
     startSession,
     sendTurn,

@@ -1,4 +1,4 @@
-import { Effect, Layer, References, Tracer } from "effect";
+import { Config, Effect, Layer, References, Tracer } from "effect";
 import { OtlpExporter, OtlpMetrics, OtlpSerialization, OtlpTracer } from "effect/observability";
 
 import { ServerConfig } from "../../config.ts";
@@ -6,12 +6,23 @@ import { makeDiagnosticsService } from "../../diagnostics/Layers/Diagnostics.ts"
 import { Diagnostics } from "../../diagnostics/Services/Diagnostics.ts";
 import { ServerLoggerLive } from "../../serverLogger.ts";
 import { HttpSpanHeadersLive } from "../HttpHeaderRedaction.ts";
-import { makeLocalFileTracer } from "../LocalFileTracer.ts";
+import {
+  DEFAULT_LOCAL_TRACE_SQL_MIN_DURATION_MS,
+  makeLocalFileTracer,
+} from "../LocalFileTracer.ts";
 import { LocalDiagnosticsMetricsLive } from "../Services/LocalDiagnosticsMetrics.ts";
 import { BrowserTraceCollector } from "../Services/BrowserTraceCollector.ts";
 import { makeTraceSink, type TraceSink } from "../TraceSink.ts";
 
 const otlpSerializationLayer = OtlpSerialization.layerJson;
+
+/**
+ * Fast SQL statements are left out of the local trace file by default; set
+ * `RYCO_TRACE_SQL_MIN_DURATION_MS=0` to record every statement.
+ */
+const TraceSqlMinDurationConfig = Config.Int("RYCO_TRACE_SQL_MIN_DURATION_MS").pipe(
+  Config.withDefault(DEFAULT_LOCAL_TRACE_SQL_MIN_DURATION_MS),
+);
 
 export const ObservabilityLive = Layer.unwrap(
   Effect.gen(function* () {
@@ -64,6 +75,7 @@ export const ObservabilityLive = Layer.unwrap(
           maxBytes: config.traceMaxBytes,
           maxFiles: config.traceMaxFiles,
           batchWindowMs: config.traceBatchWindowMs,
+          sqlSpanMinDurationMs: yield* TraceSqlMinDurationConfig,
           sink: diagnosticsSink,
           ...(delegate ? { delegate } : {}),
         });

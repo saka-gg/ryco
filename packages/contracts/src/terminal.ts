@@ -1,4 +1,5 @@
-import { Effect, Schema } from "effect";
+import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 import { TrimmedNonEmptyString } from "./baseSchemas.ts";
 
 export const DEFAULT_TERMINAL_ID = "default";
@@ -53,6 +54,13 @@ export const TerminalOpenInput = Schema.Struct({
   rows: Schema.optional(TerminalRowsSchema),
   env: Schema.optional(TerminalEnvSchema),
   requireCurrentWorkspace: Schema.optional(Schema.Boolean),
+  /**
+   * The cursor up to which the caller's view already shows this terminal's output. When the
+   * live session still covers it, the answer carries only the history after it and echoes it as
+   * `historySince`; otherwise (another generation, a restart or clear since, trimmed scrollback)
+   * the full history. Older servers ignore it.
+   */
+  sinceCursor: Schema.optional(TerminalCursor),
 });
 export type TerminalOpenInput = Schema.Codec.Encoded<typeof TerminalOpenInput>;
 
@@ -114,6 +122,12 @@ export const TerminalSessionSnapshot = Schema.Struct({
   cursor: Schema.optional(TerminalCursor),
   /** Changes on every PTY start. Required for guarded input; absent on older servers. */
   inputEpoch: Schema.optional(TrimmedNonEmptyStringSchema),
+  /**
+   * Set only on a `terminal.open` answer to `sinceCursor`: `history` then holds just the output
+   * after this cursor, to append to a view that shows everything up to it. Absent means `history`
+   * is the full retained scrollback.
+   */
+  historySince: Schema.optional(TerminalCursor),
 });
 export type TerminalSessionSnapshot = typeof TerminalSessionSnapshot.Type;
 
@@ -128,6 +142,15 @@ const TerminalStartedEvent = Schema.Struct({
   ...TerminalEventBaseSchema.fields,
   type: Schema.Literal("started"),
   snapshot: TerminalSessionSnapshot,
+  /**
+   * Subscription catch-up for a session that was already running, not a fresh start. Its
+   * snapshot carries no history (`""`): a surface whose cursor is behind re-hydrates scrollback
+   * through `terminal.open`, and nothing opens or focuses the terminal for it. Sent only to
+   * subscribers that asked for `replay: "metadata"`; absent on live starts.
+   */
+  replay: Schema.optional(Schema.Literal(true)),
+  /** Subprocess activity when a replay was taken. Absent on live starts, which have none. */
+  hasRunningSubprocess: Schema.optional(Schema.Boolean),
 });
 
 const TerminalOutputEvent = Schema.Struct({
@@ -176,6 +199,16 @@ export const TerminalEvent = Schema.Union([
   TerminalActivityEvent,
 ]);
 export type TerminalEvent = typeof TerminalEvent.Type;
+
+/**
+ * `replay: "metadata"` asks for history-free catch-up events (`replay: true`) for running
+ * sessions; `terminal.open` stays the only source of retained history. Older servers ignore the
+ * field and replay full snapshots as ordinary `started` events.
+ */
+export const TerminalSubscribeEventsInput = Schema.Struct({
+  replay: Schema.optional(Schema.Literal("metadata")),
+});
+export type TerminalSubscribeEventsInput = typeof TerminalSubscribeEventsInput.Type;
 
 export class TerminalSubscriptionResyncError extends Schema.TaggedError<TerminalSubscriptionResyncError>()(
   "TerminalSubscriptionResyncError",

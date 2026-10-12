@@ -11,6 +11,7 @@ import type { TerminalContextDraft } from "../../lib/terminalContext";
 import type { SessionPhase, Thread } from "../../types";
 import { type ComposerPromptEditorHandle, ComposerPromptEditor } from "../ComposerPromptEditor";
 import { ComposerCommandMenuOverlay } from "./ComposerAttachmentMenus";
+import type { ComposerMenuEmptyState } from "./composerPathMenu";
 import { type ComposerCommandItem } from "./ComposerCommandMenu";
 import { ComposerPrimaryActions } from "./ComposerPrimaryActions";
 import { buildExpandedImagePreview, type ExpandedImagePreview } from "./ExpandedImagePreview";
@@ -45,7 +46,7 @@ export interface ComposerPromptShellProps {
   isComposerMenuLoading: boolean;
   composerTriggerKind: ComposerTrigger["kind"] | null;
   composerTrigger: ComposerTrigger | null;
-  composerMenuEmptyState: string;
+  composerMenuEmptyState: ComposerMenuEmptyState;
   activeComposerMenuItemId: string | null;
   onComposerMenuItemHighlighted: (itemId: string | null) => void;
   onSelectComposerItem: (item: ComposerCommandItem) => void;
@@ -193,7 +194,7 @@ export const ComposerPromptShell = memo(function ComposerPromptShell(
         groupSlashCommandSections={
           composerTrigger?.kind === "slash-command" && composerTrigger.query.trim().length === 0
         }
-        emptyStateText={composerMenuEmptyState}
+        emptyState={composerMenuEmptyState}
         activeItemId={activeComposerMenuItemId}
         onHighlightedItemChange={onComposerMenuItemHighlighted}
         onSelect={onSelectComposerItem}

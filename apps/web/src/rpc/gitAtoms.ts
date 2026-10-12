@@ -49,8 +49,10 @@ export function subscribeInvalidationScope(scope: string, listener: () => void):
 }
 
 export function invalidateScopes(scopes: Iterable<string>): void {
+  const scopeSet = new Set(scopes);
+  markBranchesStaleForScopes(scopeSet);
   const notified = new Set<() => void>();
-  for (const scope of scopes) {
+  for (const scope of scopeSet) {
     const listeners = invalidationListeners.get(scope);
     if (!listeners) {
       continue;
@@ -216,6 +218,101 @@ function nextCursorOf(pages: ReadonlyArray<VcsListRefsResult>): number | null {
   return lastPage ? lastPage.nextCursor : null;
 }
 
+// ---------------------------------------------------------------------------
+// Shared first-page reads and freshness
+//
+// The branch selector prefetches the unfiltered list while `useGitBranches`
+// subscribes to the same key in the same commit, and every ChatView remount
+// used to recreate the controller. Both paths now share one in-flight
+// first-page request per key, and a recreated controller adopts a list that
+// is still within the stale time instead of refetching it. Each listRefs runs
+// several git processes on the server.
+// ---------------------------------------------------------------------------
+
+const branchesFirstPageInFlight = new Map<string, Promise<FirstBranchesPageRead>>();
+const branchesFetchedAt = new Map<string, number>();
+let branchesFetchGeneration = 0;
+
+function isBranchesFetchFresh(fetchedAt: number | undefined, now: number): boolean {
+  return fetchedAt !== undefined && now - fetchedAt < GIT_BRANCHES_STALE_TIME_MS;
+}
+
+/**
+ * Records that the list published for `key` was read at `fetchedAt`. Called
+ * where a read is written to the branch state, so the ledger never vouches for
+ * a response that nobody published (its watcher left while it was in flight).
+ */
+function recordBranchesFetched(key: string, fetchedAt: number): void {
+  const now = Date.now();
+  // Only fresh entries are ever read; dropping stale ones keeps the ledger to
+  // the keys fetched within the last stale window.
+  for (const [entryKey, entryFetchedAt] of branchesFetchedAt) {
+    if (!isBranchesFetchFresh(entryFetchedAt, now)) branchesFetchedAt.delete(entryKey);
+  }
+  branchesFetchedAt.set(key, fetchedAt);
+}
+
+interface FirstBranchesPageRead {
+  readonly page: VcsListRefsResult;
+  /**
+   * When the read completed, or null when an invalidation or a reset detached
+   * it while in flight: it still answers its callers, but is not a fresh read.
+   */
+  readonly fetchedAt: number | null;
+}
+
+/** First page for a key, joining a request that is already in flight. */
+function fetchFirstBranchesPage(
+  key: string,
+  environmentId: EnvironmentId,
+  cwd: string,
+  query: string,
+): Promise<FirstBranchesPageRead> {
+  const pending = branchesFirstPageInFlight.get(key);
+  if (pending) return pending;
+  const promise: Promise<FirstBranchesPageRead> = fetchRefsPage(environmentId, cwd, query, 0).then(
+    (page) => {
+      const attached = branchesFirstPageInFlight.get(key) === promise;
+      if (attached) branchesFirstPageInFlight.delete(key);
+      return { page, fetchedAt: attached ? Date.now() : null };
+    },
+    (error: unknown) => {
+      if (branchesFirstPageInFlight.get(key) === promise) branchesFirstPageInFlight.delete(key);
+      throw error;
+    },
+  );
+  branchesFirstPageInFlight.set(key, promise);
+  return promise;
+}
+
+function parseBranchesKey(
+  key: string,
+): { environmentId: EnvironmentId; cwd: string; query: string } | null {
+  const separatorIndex = key.indexOf("\u0000");
+  const lastSeparatorIndex = key.lastIndexOf("\u0000");
+  if (separatorIndex === -1 || lastSeparatorIndex === separatorIndex) return null;
+  return {
+    environmentId: key.slice(0, separatorIndex) as EnvironmentId,
+    cwd: key.slice(separatorIndex + 1, lastSeparatorIndex),
+    query: key.slice(lastSeparatorIndex + 1),
+  };
+}
+
+/** An invalidated git scope makes every cached list for that cwd stale. */
+function markBranchesStaleForScopes(scopes: ReadonlySet<string>): void {
+  const affected = (key: string) => {
+    const target = parseBranchesKey(key);
+    return target !== null && scopes.has(gitScopeKey(target.cwd));
+  };
+  for (const key of branchesFetchedAt.keys()) {
+    if (affected(key)) branchesFetchedAt.delete(key);
+  }
+  // Later callers must not join a read that started before the change.
+  for (const key of branchesFirstPageInFlight.keys()) {
+    if (affected(key)) branchesFirstPageInFlight.delete(key);
+  }
+}
+
 function runBranchesFetch(controller: BranchesController, run: () => Promise<void>): Promise<void> {
   if (controller.inFlightPromise) {
     return controller.inFlightPromise;
@@ -240,13 +337,19 @@ async function loadInitialBranchesNow(controller: BranchesController): Promise<v
   });
 
   try {
-    const page = await fetchRefsPage(controller.environmentId, controller.cwd, controller.query, 0);
+    const { page, fetchedAt } = await fetchFirstBranchesPage(
+      controller.key,
+      controller.environmentId,
+      controller.cwd,
+      controller.query,
+    );
     if (token !== controller.fetchToken) {
       return;
     }
     controller.loadedPageCount = 1;
     controller.lastFetchedAt = Date.now();
     controller.hasLoadedOnce = true;
+    if (fetchedAt !== null) recordBranchesFetched(controller.key, fetchedAt);
     setBranchesState(controller.key, {
       pages: [page],
       isPending: false,
@@ -281,6 +384,7 @@ async function refetchBranchesNow(controller: BranchesController): Promise<void>
     error: null,
   });
 
+  const generation = branchesFetchGeneration;
   try {
     const pages: VcsListRefsResult[] = [];
     let cursor = 0;
@@ -303,6 +407,9 @@ async function refetchBranchesNow(controller: BranchesController): Promise<void>
     controller.loadedPageCount = pages.length;
     controller.lastFetchedAt = Date.now();
     controller.hasLoadedOnce = true;
+    if (generation === branchesFetchGeneration) {
+      recordBranchesFetched(controller.key, controller.lastFetchedAt);
+    }
     setBranchesState(controller.key, {
       pages,
       isPending: false,
@@ -421,16 +528,28 @@ export function watchBranches(target: BranchesTarget): () => void {
     return () => unwatchBranches(key);
   }
 
+  // A list loaded within the stale time (by a previous subscriber or a
+  // prefetch) is adopted as is; the poller then waits a full interval.
+  const cachedState = appAtomRegistry.get(branchesStateAtom(key));
+  const cachedPages = cachedState.pages;
+  const fetchedAt = branchesFetchedAt.get(key);
+  const adoptCached = cachedPages.length > 0 && isBranchesFetchFresh(fetchedAt, Date.now());
+  if (adoptCached && cachedState.isFetchingNextPage) {
+    // A next page the previous watcher had in flight was dropped with it;
+    // left set, the flag would block pagination until the next refetch.
+    setBranchesState(key, { ...cachedState, isFetchingNextPage: false });
+  }
+
   const controller: BranchesController = {
     key,
     environmentId,
     cwd,
     query: target.query,
     subscriberCount: 1,
-    loadedPageCount: 0,
-    lastFetchedAt: 0,
+    loadedPageCount: adoptCached ? cachedPages.length : 0,
+    lastFetchedAt: adoptCached ? (fetchedAt ?? 0) : 0,
     fetchToken: 0,
-    hasLoadedOnce: false,
+    hasLoadedOnce: adoptCached,
     inFlightPromise: null,
     invalidationUnsub: NOOP,
     focusListener: null,
@@ -453,9 +572,10 @@ export function watchBranches(target: BranchesTarget): () => void {
       lifecycle: webAppLifecycle,
       run: () => pollBranches(controller),
       resolveDelayMs: () => GIT_BRANCHES_REFETCH_INTERVAL_MS,
+      runImmediately: !adoptCached,
       jitterRatio: 0.05,
     });
-  } else {
+  } else if (!adoptCached) {
     void loadInitialBranches(controller);
   }
 
@@ -481,11 +601,8 @@ function unwatchBranches(key: string): void {
   branchesControllers.delete(key);
 }
 
-const branchesPrefetchInFlight = new Set<string>();
-let branchesPrefetchGeneration = 0;
-
 async function prefetchBranchesByKey(targetKey: string): Promise<void> {
-  if (branchesPrefetchInFlight.has(targetKey)) {
+  if (branchesFirstPageInFlight.has(targetKey)) {
     return;
   }
   const controller = branchesControllers.get(targetKey);
@@ -493,22 +610,25 @@ async function prefetchBranchesByKey(targetKey: string): Promise<void> {
     // An active subscriber owns the fetch lifecycle already.
     return;
   }
-  const separatorIndex = targetKey.indexOf("\u0000");
-  const lastSeparatorIndex = targetKey.lastIndexOf("\u0000");
-  if (separatorIndex === -1 || lastSeparatorIndex === separatorIndex) {
+  const target = parseBranchesKey(targetKey);
+  if (target === null) {
     return;
   }
-  const environmentId = targetKey.slice(0, separatorIndex) as EnvironmentId;
-  const cwd = targetKey.slice(separatorIndex + 1, lastSeparatorIndex);
-  const query = targetKey.slice(lastSeparatorIndex + 1);
 
-  branchesPrefetchInFlight.add(targetKey);
-  const generation = branchesPrefetchGeneration;
+  const generation = branchesFetchGeneration;
   try {
-    const page = await fetchRefsPage(environmentId, cwd, query, 0);
-    if (generation !== branchesPrefetchGeneration || branchesControllers.has(targetKey)) {
+    // A controller created while this is in flight joins the same request
+    // and publishes its result itself.
+    const { page, fetchedAt } = await fetchFirstBranchesPage(
+      targetKey,
+      target.environmentId,
+      target.cwd,
+      target.query,
+    );
+    if (generation !== branchesFetchGeneration || branchesControllers.has(targetKey)) {
       return;
     }
+    if (fetchedAt !== null) recordBranchesFetched(targetKey, fetchedAt);
     setBranchesState(targetKey, {
       pages: [page],
       isPending: false,
@@ -517,10 +637,6 @@ async function prefetchBranchesByKey(targetKey: string): Promise<void> {
     });
   } catch {
     // Prefetch failures are non-fatal; the next subscription will retry.
-  } finally {
-    if (generation === branchesPrefetchGeneration) {
-      branchesPrefetchInFlight.delete(targetKey);
-    }
   }
 }
 
@@ -740,8 +856,9 @@ export function clearGitAtomState(): void {
     controller.poller?.stop();
   }
   branchesControllers.clear();
-  branchesPrefetchGeneration += 1;
-  branchesPrefetchInFlight.clear();
+  branchesFetchGeneration += 1;
+  branchesFirstPageInFlight.clear();
+  branchesFetchedAt.clear();
   for (const controller of resolvePrControllers.values()) {
     controller.fetchToken += 1;
   }

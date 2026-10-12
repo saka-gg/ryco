@@ -1,4 +1,5 @@
-import { Effect, Schema } from "effect";
+import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 
 const boundedText = Schema.String.check(Schema.isMaxLength(512));
 export const ComputerAppAccess = Schema.Literals(["ask", "allow", "block"]);

@@ -2,7 +2,7 @@ import "../../index.css";
 
 import { EnvironmentId } from "@ryco/contracts";
 import { page } from "vite-plus/test/browser";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
 import { StrictMode, type ReactNode } from "react";
 
@@ -45,6 +45,7 @@ import {
 import { hostedHubApi, HostedHubApiError } from "../../hostedHub/api";
 import type { HostedHubNode } from "../../hostedHub/types";
 import { HostedHubRoot, HostedNodeMenu } from "./HostedHubRoot";
+import { preloadHostedRootAppShell } from "./hostedRootAppShell";
 import { hostedRelayTrustDisclosure } from "./HostedRelayTrustNotice.logic";
 import { RETIRED_HOSTED_RELAY_TRUST_SENTENCE } from "../../../test/hostedConnectionVocabulary";
 import { resetWebE2eeSession } from "../../hostedHub/e2eeSession";
@@ -103,6 +104,13 @@ function node(id: string, online: boolean, role: "viewer" | "operator" | "owner"
 }
 
 let mounted: Awaited<ReturnType<typeof render>> | null = null;
+
+// The boot gate preloads the workspace shell before the hosted root renders an
+// authenticated account; do the same, so a case asserting the workspace sees it
+// on the root's first pass rather than racing a cold chunk load.
+beforeAll(async () => {
+  await preloadHostedRootAppShell();
+});
 
 beforeEach(() => {
   localStorage.clear();

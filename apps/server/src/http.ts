@@ -34,6 +34,11 @@ import { BrowserTraceCollector } from "./observability/Services/BrowserTraceColl
 import { ProjectFaviconResolver } from "./project/Services/ProjectFaviconResolver.ts";
 import { ProjectAvatarStore } from "./project/Services/ProjectAvatarStore.ts";
 import type { ProjectId } from "@ryco/contracts";
+import {
+  hasPrecompressibleAssetExtension,
+  PRECOMPRESSED_ASSET_ENCODINGS,
+  type PrecompressedAssetEncoding,
+} from "@ryco/shared/precompressedAssets";
 import { ServerAuth } from "./auth/Services/ServerAuth.ts";
 import { respondToAuthError } from "./auth/http.ts";
 import { ServerEnvironment } from "./environment/Services/ServerEnvironment.ts";
@@ -81,11 +86,13 @@ const STATIC_CONTENT_TYPES: Readonly<Record<string, string>> = {
   ".webp": "image/webp",
 };
 
-export const browserApiCorsLayer = HttpRouter.cors({
+export const BROWSER_API_CORS_OPTIONS = {
   allowedMethods: ["GET", "POST", "OPTIONS"],
   allowedHeaders: ["authorization", "b3", "traceparent", "content-type"],
   maxAge: 600,
-});
+} as const;
+
+export const browserApiCorsLayer = HttpRouter.cors(BROWSER_API_CORS_OPTIONS);
 
 export function isLoopbackHostname(hostname: string): boolean {
   const normalizedHostname = hostname
@@ -119,10 +126,13 @@ export function resolveStaticCacheControl(staticRelativePath: string): string {
  * metadata-derived tags do not prove byte-for-byte identity; comparison is
  * opaque per RFC 9110 §8.8.3.
  */
-export function staticFileEtag(fileInfo: {
-  readonly size: bigint;
-  readonly mtime: Option.Option<Date>;
-}): string | null {
+export function staticFileEtag(
+  fileInfo: {
+    readonly size: bigint;
+    readonly mtime: Option.Option<Date>;
+  },
+  contentEncoding?: PrecompressedAssetEncoding,
+): string | null {
   const mtimeMs = Option.match(fileInfo.mtime, {
     onNone: () => null,
     onSome: (date) => (Number.isFinite(date.getTime()) ? date.getTime() : null),
@@ -130,7 +140,43 @@ export function staticFileEtag(fileInfo: {
   if (mtimeMs === null) {
     return null;
   }
-  return `W/"${fileInfo.size.toString(36)}-${Math.floor(mtimeMs).toString(36)}"`;
+  // Each encoded variant is its own representation and needs its own validator.
+  const variant = contentEncoding === undefined ? "" : `-${contentEncoding}`;
+  return `W/"${fileInfo.size.toString(36)}-${Math.floor(mtimeMs).toString(36)}${variant}"`;
+}
+
+/**
+ * The precompressed encodings an `Accept-Encoding` header admits (RFC 9110
+ * §12.5.3): listed codings with a non-zero quality, `*` for any coding not
+ * listed explicitly, and `x-gzip` as `gzip`.
+ */
+export function acceptedStaticContentEncodings(
+  header: string | undefined,
+): ReadonlySet<PrecompressedAssetEncoding> {
+  const accepted = new Set<PrecompressedAssetEncoding>();
+  if (header === undefined) return accepted;
+  const explicit = new Map<string, boolean>();
+  let wildcard: boolean | undefined;
+  for (const part of header.split(",")) {
+    const [rawCoding, ...parameters] = part.split(";");
+    const coding = rawCoding?.trim().toLowerCase();
+    if (!coding) continue;
+    let quality = 1;
+    for (const parameter of parameters) {
+      const [name, value] = parameter.split("=");
+      if (name?.trim().toLowerCase() === "q") {
+        const parsed = Number.parseFloat(value?.trim() ?? "");
+        quality = Number.isFinite(parsed) ? parsed : 0;
+      }
+    }
+    const allowed = quality > 0;
+    if (coding === "*") wildcard = allowed;
+    else explicit.set(coding === "x-gzip" ? "gzip" : coding, allowed);
+  }
+  for (const { encoding } of PRECOMPRESSED_ASSET_ENCODINGS) {
+    if (explicit.get(encoding) ?? wildcard ?? false) accepted.add(encoding);
+  }
+  return accepted;
 }
 
 /**
@@ -213,23 +259,62 @@ const staticFileResponse = (input: {
   readonly staticRelativePath: string;
   readonly fileInfo: FileSystem.File.Info;
   readonly ifNoneMatch?: string | undefined;
+  readonly acceptEncoding?: string | undefined;
+  /** Serve identity bytes even when a compressed sibling exists. */
+  readonly identityOnly?: boolean | undefined;
 }) =>
   Effect.gen(function* () {
     const path = yield* Path.Path;
+    const fileSystem = yield* FileSystem.FileSystem;
     const cacheControl = resolveStaticCacheControl(input.staticRelativePath);
-    const etag = staticFileEtag(input.fileInfo);
+    const precompressible = hasPrecompressibleAssetExtension(input.filePath);
     const headers: Record<string, string> = { "Cache-Control": cacheControl };
+    let servedPath = input.filePath;
+    let servedInfo = input.fileInfo;
+    let contentEncoding: PrecompressedAssetEncoding | undefined;
+    if (precompressible) {
+      // The representation depends on Accept-Encoding whenever a sibling may exist.
+      headers.Vary = "Accept-Encoding";
+      const accepted = input.identityOnly
+        ? new Set<PrecompressedAssetEncoding>()
+        : acceptedStaticContentEncodings(input.acceptEncoding);
+      // Siblings are probed together (one stat round trip, not one per
+      // coding: builds may write only `.gz`), then the preferred one wins.
+      const candidates = yield* Effect.forEach(
+        PRECOMPRESSED_ASSET_ENCODINGS.filter((variant) => accepted.has(variant.encoding)),
+        (variant) => {
+          const variantPath = `${input.filePath}${variant.suffix}`;
+          return fileSystem.stat(variantPath).pipe(
+            Effect.map((info) => (info.type === "File" ? { variant, variantPath, info } : null)),
+            Effect.catch(() => Effect.succeed(null)),
+          );
+        },
+        { concurrency: "unbounded" },
+      );
+      const sibling = candidates.find((candidate) => candidate !== null);
+      if (sibling) {
+        servedPath = sibling.variantPath;
+        servedInfo = sibling.info;
+        contentEncoding = sibling.variant.encoding;
+        headers["Content-Encoding"] = sibling.variant.encoding;
+      }
+    }
+    const etag = staticFileEtag(servedInfo, contentEncoding);
     if (etag) {
       // Revalidation hit: no body is produced and the platform never opens
       // the file, so a repeat visit to a hot asset costs one stat + one 304.
       if (ifNoneMatchSatisfies(input.ifNoneMatch, etag)) {
-        return HttpServerResponse.empty({ status: 304, headers: { ...headers, ETag: etag } });
+        const { "Content-Encoding": _encoding, ...notModifiedHeaders } = headers;
+        return HttpServerResponse.empty({
+          status: 304,
+          headers: { ...notModifiedHeaders, ETag: etag },
+        });
       }
       headers.ETag = etag;
     }
     // File bodies stream from the platform (`HttpServerResponse.file` is a
     // lazy platform file response) — never a whole-file memory buffer.
-    return yield* HttpServerResponse.file(input.filePath, {
+    return yield* HttpServerResponse.file(servedPath, {
       status: 200,
       contentType: resolveStaticContentType(input.filePath, path),
       headers,
@@ -270,8 +355,25 @@ export const legacyServerEnvironmentRouteLayer = HttpRouter.add(
 
 class DecodeOtlpTraceRecordsError extends Data.TaggedError("DecodeOtlpTraceRecordsError")<{
   readonly cause: unknown;
-  readonly bodyJson: OtlpTracer.TraceData;
+  readonly spanCount: number;
 }> {}
+
+/** Span count of a browser OTLP payload, for logging without the payload itself. */
+export function countOtlpSpans(bodyJson: unknown): number {
+  if (typeof bodyJson !== "object" || bodyJson === null) return 0;
+  const resourceSpans = (bodyJson as { readonly resourceSpans?: unknown }).resourceSpans;
+  if (!Array.isArray(resourceSpans)) return 0;
+  let count = 0;
+  for (const resourceSpan of resourceSpans) {
+    const scopeSpans = (resourceSpan as { readonly scopeSpans?: unknown } | null)?.scopeSpans;
+    if (!Array.isArray(scopeSpans)) continue;
+    for (const scopeSpan of scopeSpans) {
+      const spans = (scopeSpan as { readonly spans?: unknown } | null)?.spans;
+      if (Array.isArray(spans)) count += spans.length;
+    }
+  }
+  return count;
+}
 
 export const otlpTracesProxyRouteLayer = HttpRouter.add(
   "POST",
@@ -287,13 +389,15 @@ export const otlpTracesProxyRouteLayer = HttpRouter.add(
 
     yield* Effect.try({
       try: () => decodeOtlpTraceRecords(bodyJson),
-      catch: (cause) => new DecodeOtlpTraceRecordsError({ cause, bodyJson }),
+      catch: (cause) =>
+        new DecodeOtlpTraceRecordsError({ cause, spanCount: countOtlpSpans(bodyJson) }),
     }).pipe(
       Effect.flatMap((records) => browserTraceCollector.record(records)),
-      Effect.catch((cause) =>
+      // Never log the payload: browser batches can be large and carry span data.
+      Effect.catch((error) =>
         Effect.logWarning("Failed to decode browser OTLP traces", {
-          cause,
-          bodyJson,
+          cause: error.cause,
+          spanCount: error.spanCount,
         }),
       ),
     );
@@ -738,89 +842,99 @@ export const projectAvatarServeRouteLayer = HttpRouter.add(
   }).pipe(Effect.catchTag("AuthError", respondToAuthError)),
 );
 
-export const staticAndDevRouteLayer = HttpRouter.add(
-  "GET",
-  "*",
-  Effect.gen(function* () {
-    const request = yield* HttpServerRequest.HttpServerRequest;
-    const url = HttpServerRequest.toURL(request);
+/**
+ * Serves the web shell: the dev-server redirect, traversal-checked static
+ * files, and the SPA `index.html` fallback. Shared by the router's catch-all
+ * route and the startup gate's early static path, so both apply the same
+ * security checks and cache headers. Needs only the server config and
+ * platform services, which exist before the runtime graph is built.
+ */
+export const serveStaticRequest = Effect.gen(function* () {
+  const request = yield* HttpServerRequest.HttpServerRequest;
+  const url = HttpServerRequest.toURL(request);
 
-    if (Option.isNone(url)) {
-      return HttpServerResponse.text("Bad Request", { status: 400 });
-    }
+  if (Option.isNone(url)) {
+    return HttpServerResponse.text("Bad Request", { status: 400 });
+  }
 
-    const config = yield* ServerConfig;
-    if (config.devUrl && isLoopbackHostname(url.value.hostname)) {
-      return HttpServerResponse.redirect(resolveDevRedirectUrl(config.devUrl, url.value), {
-        status: 302,
-      });
-    }
+  const config = yield* ServerConfig;
+  if (config.devUrl && isLoopbackHostname(url.value.hostname)) {
+    return HttpServerResponse.redirect(resolveDevRedirectUrl(config.devUrl, url.value), {
+      status: 302,
+    });
+  }
 
-    const staticDir = config.staticDir ?? (config.devUrl ? yield* resolveStaticDir() : undefined);
-    if (!staticDir) {
-      return HttpServerResponse.text("No static directory configured and no dev URL set.", {
-        status: 503,
-      });
-    }
+  const staticDir = config.staticDir ?? (config.devUrl ? yield* resolveStaticDir() : undefined);
+  if (!staticDir) {
+    return HttpServerResponse.text("No static directory configured and no dev URL set.", {
+      status: 503,
+    });
+  }
 
-    const fileSystem = yield* FileSystem.FileSystem;
-    const path = yield* Path.Path;
-    const staticRoot = path.resolve(staticDir);
-    const staticRequestPath = url.value.pathname === "/" ? "/index.html" : url.value.pathname;
-    const rawStaticRelativePath = staticRequestPath.replace(/^[/\\]+/, "");
-    const hasRawLeadingParentSegment = rawStaticRelativePath.startsWith("..");
-    const staticRelativePath = path.normalize(rawStaticRelativePath).replace(/^[/\\]+/, "");
-    const hasPathTraversalSegment = staticRelativePath.startsWith("..");
-    if (
-      staticRelativePath.length === 0 ||
-      hasRawLeadingParentSegment ||
-      hasPathTraversalSegment ||
-      staticRelativePath.includes("\0")
-    ) {
-      return HttpServerResponse.text("Invalid static file path", { status: 400 });
-    }
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const staticRoot = path.resolve(staticDir);
+  const staticRequestPath = url.value.pathname === "/" ? "/index.html" : url.value.pathname;
+  const rawStaticRelativePath = staticRequestPath.replace(/^[/\\]+/, "");
+  const hasRawLeadingParentSegment = rawStaticRelativePath.startsWith("..");
+  const staticRelativePath = path.normalize(rawStaticRelativePath).replace(/^[/\\]+/, "");
+  const hasPathTraversalSegment = staticRelativePath.startsWith("..");
+  if (
+    staticRelativePath.length === 0 ||
+    hasRawLeadingParentSegment ||
+    hasPathTraversalSegment ||
+    staticRelativePath.includes("\0")
+  ) {
+    return HttpServerResponse.text("Invalid static file path", { status: 400 });
+  }
 
-    const isWithinStaticRoot = (candidate: string) =>
-      candidate === staticRoot ||
-      candidate.startsWith(staticRoot.endsWith(path.sep) ? staticRoot : `${staticRoot}${path.sep}`);
+  const isWithinStaticRoot = (candidate: string) =>
+    candidate === staticRoot ||
+    candidate.startsWith(staticRoot.endsWith(path.sep) ? staticRoot : `${staticRoot}${path.sep}`);
 
-    let filePath = path.resolve(staticRoot, staticRelativePath);
+  let filePath = path.resolve(staticRoot, staticRelativePath);
+  if (!isWithinStaticRoot(filePath)) {
+    return HttpServerResponse.text("Invalid static file path", { status: 400 });
+  }
+
+  const ext = path.extname(filePath);
+  if (!ext) {
+    filePath = path.resolve(filePath, "index.html");
     if (!isWithinStaticRoot(filePath)) {
       return HttpServerResponse.text("Invalid static file path", { status: 400 });
     }
+  }
 
-    const ext = path.extname(filePath);
-    if (!ext) {
-      filePath = path.resolve(filePath, "index.html");
-      if (!isWithinStaticRoot(filePath)) {
-        return HttpServerResponse.text("Invalid static file path", { status: 400 });
-      }
-    }
-
-    const fileInfo = yield* fileSystem
-      .stat(filePath)
+  // The desktop renderer loads the shell over loopback, where decoding a
+  // compressed body only costs CPU.
+  const identityOnly = config.mode === "desktop" && isLoopbackHostname(url.value.hostname);
+  const fileInfo = yield* fileSystem.stat(filePath).pipe(Effect.catch(() => Effect.succeed(null)));
+  if (!fileInfo || fileInfo.type !== "File") {
+    const indexPath = path.resolve(staticRoot, "index.html");
+    const indexInfo = yield* fileSystem
+      .stat(indexPath)
       .pipe(Effect.catch(() => Effect.succeed(null)));
-    if (!fileInfo || fileInfo.type !== "File") {
-      const indexPath = path.resolve(staticRoot, "index.html");
-      const indexInfo = yield* fileSystem
-        .stat(indexPath)
-        .pipe(Effect.catch(() => Effect.succeed(null)));
-      if (!indexInfo || indexInfo.type !== "File") {
-        return HttpServerResponse.text("Not Found", { status: 404 });
-      }
-      return yield* staticFileResponse({
-        filePath: indexPath,
-        staticRelativePath: "index.html",
-        fileInfo: indexInfo,
-        ifNoneMatch: request.headers["if-none-match"],
-      });
+    if (!indexInfo || indexInfo.type !== "File") {
+      return HttpServerResponse.text("Not Found", { status: 404 });
     }
-
     return yield* staticFileResponse({
-      filePath,
-      staticRelativePath,
-      fileInfo,
+      filePath: indexPath,
+      staticRelativePath: "index.html",
+      fileInfo: indexInfo,
       ifNoneMatch: request.headers["if-none-match"],
+      acceptEncoding: request.headers["accept-encoding"],
+      identityOnly,
     });
-  }),
-);
+  }
+
+  return yield* staticFileResponse({
+    filePath,
+    staticRelativePath,
+    fileInfo,
+    ifNoneMatch: request.headers["if-none-match"],
+    acceptEncoding: request.headers["accept-encoding"],
+    identityOnly,
+  });
+});
+
+export const staticAndDevRouteLayer = HttpRouter.add("GET", "*", serveStaticRequest);

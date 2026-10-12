@@ -1,6 +1,6 @@
 import os from "node:os";
 import { closeSync, openSync } from "node:fs";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 
 import { assert, expect, it } from "@effect/vitest";
 import { ConfigProvider, Effect, FileSystem, Layer, Option, Path } from "effect";
@@ -16,6 +16,7 @@ import {
   resolveNodeE2eePolicyConfig,
 } from "./config.ts";
 import { resolveServerConfig } from "./cli.ts";
+import { classifyFatalStartupError } from "./startupFailure.ts";
 import { hubIdentityHoldsKeyMaterial } from "./hubConnector/HubIdentityRuntime.ts";
 
 it("resolves bounded connector defaults and invalid enabled configuration without reflecting input", () => {
@@ -790,6 +791,76 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
       // An explicit operator statement is not refined by standby.
       const explicit = yield* resolveStandby({ RYCO_HUB_CONNECTOR_ENABLED: "true" });
       expect(explicit.hubConnector?.enabled).toBe(true);
+    }),
+  );
+
+  it.effect("exits with a fatal error when an explicit bootstrap fd delivers no envelope", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "ryco-cli-config-no-envelope-" });
+      // An empty pipe: the launcher closed it (or died) before writing.
+      const filePath = yield* fs.makeTempFileScoped({ prefix: "ryco-bootstrap-empty-" });
+      const fd = yield* Effect.acquireRelease(
+        Effect.sync(() => openSync(filePath, "r")),
+        (fd) => Effect.sync(() => closeSync(fd)),
+      );
+
+      const error = yield* resolveServerConfig(
+        makeServerFlags(baseDir, {
+          mode: Option.some("desktop"),
+          noBrowser: Option.some(true),
+          bootstrapFd: Option.some(fd),
+        }),
+        Option.none(),
+      ).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })),
+            NetService.layer,
+          ),
+        ),
+        Effect.flip,
+      );
+
+      expect(error._tag).toBe("BootstrapEnvelopeUnavailableError");
+      expect(classifyFatalStartupError(error)).toBe("bootstrap-envelope-missing");
+    }),
+  );
+
+  it.effect("applies the bootstrap envelope's shell environment before the server starts", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "ryco-cli-config-shell-env-" });
+      const shellBin = join(baseDir, "shell-bin");
+      const originalPath = process.env.PATH;
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          if (originalPath === undefined) delete process.env.PATH;
+          else process.env.PATH = originalPath;
+        }),
+      );
+      const fd = yield* openBootstrapFd({
+        mode: "desktop",
+        rycoHome: baseDir,
+        noBrowser: true,
+        shellEnvironment: { PATH: shellBin, UNRELATED: "ignored" },
+      });
+
+      const resolved = yield* resolveServerConfig(
+        makeServerFlags(baseDir, { baseDir: Option.none(), bootstrapFd: Option.some(fd) }),
+        Option.none(),
+      ).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })),
+            NetService.layer,
+          ),
+        ),
+      );
+
+      expect(resolved.mode).toBe("desktop");
+      expect(process.env.PATH?.split(delimiter)[0]).toBe(shellBin);
+      expect(process.env.UNRELATED).toBeUndefined();
     }),
   );
 

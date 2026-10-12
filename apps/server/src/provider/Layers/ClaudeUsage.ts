@@ -8,27 +8,28 @@ import { Effect, Path } from "effect";
 
 import { resolveClaudeHomePath } from "../Drivers/ClaudeHome.ts";
 
+/**
+ * Claude OAuth usage limits, read with Claude Code's own credentials.
+ *
+ * The credentials (Keychain entry or `.credentials.json`) belong to Claude Code. This probe only
+ * reads them: it never refreshes the token and never writes the store. Claude Code rotates its
+ * refresh token on every refresh, so a refresh from here could race the CLI (which refreshes the
+ * same token whenever it runs) and log the user out of Claude Code. An access token that has
+ * expired, or is rejected, simply means "no live limit data" until Claude Code refreshes it.
+ */
 const CLAUDE_USAGE_API = "https://api.anthropic.com/api/oauth/usage";
-const CLAUDE_TOKEN_REFRESH_URL = "https://platform.claude.com/v1/oauth/token";
-const CLAUDE_OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const KEYCHAIN_SERVICE_NAME = "Claude Code-credentials";
 const CLAUDE_USAGE_BETA_HEADER = "oauth-2025-04-20";
-const TOKEN_REFRESH_SKEW_MS = 60_000;
+const TOKEN_EXPIRY_SKEW_MS = 60_000;
+const USAGE_REQUEST_TIMEOUT_MS = 10_000;
 
 interface ClaudeCredentials {
   readonly claudeAiOauth?: {
     readonly accessToken?: string;
-    readonly refreshToken?: string;
     readonly expiresAt?: string | number;
     readonly subscriptionType?: string;
     readonly rateLimitTier?: string;
   };
-}
-
-interface TokenRefreshResult {
-  readonly access_token?: string;
-  readonly refresh_token?: string;
-  readonly expires_in?: number;
 }
 
 function keychainRead(): Promise<ClaudeCredentials | null> {
@@ -57,29 +58,6 @@ function keychainRead(): Promise<ClaudeCredentials | null> {
   });
 }
 
-function keychainWrite(credentials: ClaudeCredentials): Promise<void> {
-  if (process.platform !== "darwin") {
-    return Promise.resolve();
-  }
-
-  const payload = JSON.stringify(credentials);
-  return new Promise((resolve) => {
-    execFile(
-      "/usr/bin/security",
-      ["delete-generic-password", "-s", KEYCHAIN_SERVICE_NAME],
-      { timeout: 5_000 },
-      () => {
-        execFile(
-          "/usr/bin/security",
-          ["add-generic-password", "-s", KEYCHAIN_SERVICE_NAME, "-w", payload, "-U"],
-          { timeout: 5_000 },
-          () => resolve(),
-        );
-      },
-    );
-  });
-}
-
 async function readCredentialsFile(credentialsPath: string): Promise<ClaudeCredentials | null> {
   try {
     return JSON.parse(await NodeFS.readFile(credentialsPath, "utf8")) as ClaudeCredentials;
@@ -88,33 +66,17 @@ async function readCredentialsFile(credentialsPath: string): Promise<ClaudeCrede
   }
 }
 
-async function writeCredentialsFile(
-  credentialsPath: string,
-  credentials: ClaudeCredentials,
-): Promise<void> {
-  try {
-    await NodeFS.mkdir(NodePath.dirname(credentialsPath), { recursive: true });
-    await NodeFS.writeFile(credentialsPath, JSON.stringify(credentials, null, 2), "utf8");
-  } catch {
-    // Best effort only. A refreshed in-memory token can still serve this request.
-  }
-}
-
 async function readClaudeCredentials(
   credentialsPath: string,
   useKeychain: boolean,
-): Promise<{
-  readonly credentials: ClaudeCredentials;
-  readonly fromKeychain: boolean;
-} | null> {
+): Promise<ClaudeCredentials | null> {
   // The global Keychain entry belongs only to the default home. A separate
   // home must never fall back to another account, even when its file is absent.
   if (useKeychain) {
     const credentials = await keychainRead();
-    if (credentials?.claudeAiOauth?.accessToken) return { credentials, fromKeychain: true };
+    if (credentials?.claudeAiOauth?.accessToken) return credentials;
   }
-  const credentials = await readCredentialsFile(credentialsPath);
-  return credentials ? { credentials, fromKeychain: false } : null;
+  return readCredentialsFile(credentialsPath);
 }
 
 function parseExpiresAtMs(value: string | number | undefined): number | undefined {
@@ -140,56 +102,6 @@ function parseResetEpochSeconds(value: unknown): number | undefined {
   return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : undefined;
 }
 
-async function refreshAndPersistToken(input: {
-  readonly credentials: ClaudeCredentials;
-  readonly credentialsPath: string;
-  readonly fromKeychain: boolean;
-}): Promise<string | null> {
-  const refreshToken = input.credentials.claudeAiOauth?.refreshToken;
-  if (!refreshToken) {
-    return null;
-  }
-
-  try {
-    const response = await fetch(CLAUDE_TOKEN_REFRESH_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        grant_type: "refresh_token",
-        client_id: CLAUDE_OAUTH_CLIENT_ID,
-        refresh_token: refreshToken,
-      }),
-    });
-    if (!response.ok) {
-      return null;
-    }
-
-    const data = (await response.json()) as TokenRefreshResult;
-    if (!data.access_token) {
-      return null;
-    }
-
-    const updated: ClaudeCredentials = {
-      ...input.credentials,
-      claudeAiOauth: {
-        ...input.credentials.claudeAiOauth,
-        accessToken: data.access_token,
-        ...(data.refresh_token ? { refreshToken: data.refresh_token } : {}),
-        ...(typeof data.expires_in === "number" && Number.isFinite(data.expires_in)
-          ? { expiresAt: Date.now() + data.expires_in * 1000 }
-          : {}),
-      },
-    };
-
-    // Persist only to the store that supplied this account.
-    if (input.fromKeychain) await keychainWrite(updated);
-    else await writeCredentialsFile(input.credentialsPath, updated);
-    return data.access_token;
-  } catch {
-    return null;
-  }
-}
-
 function claudeUsageUserAgent(version: string | null | undefined): string {
   return version ? `claude-code/${version}` : "claude-code";
 }
@@ -199,6 +111,7 @@ async function callUsageApi(
   version: string | null | undefined,
 ): Promise<Response> {
   return fetch(CLAUDE_USAGE_API, {
+    signal: AbortSignal.timeout(USAGE_REQUEST_TIMEOUT_MS),
     headers: {
       Authorization: `Bearer ${accessToken}`,
       Accept: "application/json",
@@ -271,37 +184,18 @@ async function fetchClaudeUsageRateLimits(input: {
   readonly useKeychain: boolean;
   readonly version?: string | null;
 }): Promise<ServerProviderRateLimits | undefined> {
-  const selected = await readClaudeCredentials(input.credentialsPath, input.useKeychain);
-  if (!selected) return undefined;
-  const { credentials, fromKeychain } = selected;
-  const oauth = credentials.claudeAiOauth;
+  const credentials = await readClaudeCredentials(input.credentialsPath, input.useKeychain);
+  const oauth = credentials?.claudeAiOauth;
   if (!oauth?.accessToken) return undefined;
 
-  let accessToken = oauth.accessToken;
   const plan = oauth.subscriptionType ?? oauth.rateLimitTier ?? null;
   const expiresAt = parseExpiresAtMs(oauth.expiresAt);
-  if (expiresAt !== undefined && Date.now() > expiresAt - TOKEN_REFRESH_SKEW_MS) {
-    accessToken =
-      (await refreshAndPersistToken({
-        credentials,
-        credentialsPath: input.credentialsPath,
-        fromKeychain,
-      })) ?? accessToken;
+  if (expiresAt !== undefined && Date.now() > expiresAt - TOKEN_EXPIRY_SKEW_MS) {
+    // Expired: Claude Code refreshes it the next time it runs. Never refresh it from here.
+    return undefined;
   }
 
-  let response = await callUsageApi(accessToken, input.version);
-  if (response.status === 429 && oauth.refreshToken) {
-    const refreshedAccessToken = await refreshAndPersistToken({
-      credentials,
-      credentialsPath: input.credentialsPath,
-      fromKeychain,
-    });
-    if (refreshedAccessToken) {
-      accessToken = refreshedAccessToken;
-      response = await callUsageApi(accessToken, input.version);
-    }
-  }
-
+  const response = await callUsageApi(oauth.accessToken, input.version);
   if (!response.ok) {
     return undefined;
   }

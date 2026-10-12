@@ -7,7 +7,7 @@ import {
   NATIVE_HANDOFF_VERSION,
   NativeHandoffCapability,
 } from "@ryco/contracts/native-handoff";
-import { Schema } from "effect";
+import * as Schema from "effect/Schema";
 
 export const HUB_CAPABILITY_PATH = NATIVE_HANDOFF_CAPABILITY_PATH;
 export const SUPPORTED_HUB_PROTOCOL_VERSION = NATIVE_HANDOFF_PROTOCOL_VERSION;

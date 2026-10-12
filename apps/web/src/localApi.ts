@@ -200,8 +200,8 @@ function createBrowserLocalApi(
         ),
       getDiagnosticsSnapshot: () =>
         withRpcClient(readRpcClient, (rpcClient) => rpcClient.server.getDiagnosticsSnapshot()),
-      discoverSourceControl: () =>
-        withRpcClient(readRpcClient, (rpcClient) => rpcClient.server.discoverSourceControl()),
+      discoverSourceControl: (input) =>
+        withRpcClient(readRpcClient, (rpcClient) => rpcClient.server.discoverSourceControl(input)),
       listOpinionatedPlugins: () =>
         withRpcClient(readRpcClient, (rpcClient) => rpcClient.server.listOpinionatedPlugins()),
       checkOpinionatedPlugins: (input) =>

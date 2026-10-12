@@ -5,6 +5,9 @@ export function terminalRunningSubprocessFromEvent(event: TerminalEvent): boolea
     case "activity":
       return event.hasRunningSubprocess;
     case "started":
+      // A replayed session may already be running a subprocess; unknown leaves state as is.
+      if (event.replay) return event.hasRunningSubprocess ?? null;
+      return false;
     case "restarted":
     case "exited":
       return false;

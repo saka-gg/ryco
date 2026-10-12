@@ -24,10 +24,7 @@ export interface ServerConfigUpdatedNotification {
   readonly source: ServerConfigUpdateSource;
 }
 
-type ServerStateClient = Pick<
-  WsRpcClient["server"],
-  "getConfig" | "subscribeConfig" | "subscribeLifecycle"
->;
+type ServerStateClient = Pick<WsRpcClient["server"], "subscribeConfig" | "subscribeLifecycle">;
 
 function makeStateAtom<A>(label: string, initialValue: A) {
   return Atom.make(initialValue).pipe(Atom.keepAlive, Atom.withLabel(label));
@@ -152,8 +149,13 @@ export function onProvidersUpdated(
   return subscribeLatest(providersUpdatedAtom, listener);
 }
 
+/**
+ * Keeps the primary server state live. The config subscription's first item is
+ * always a full snapshot, so no separate `getConfig` read runs beside it: that
+ * fetched the same ~100 KB config a second time on every connect and queued
+ * the shell snapshot behind both on slow links.
+ */
 export function startServerStateSync(client: ServerStateClient): () => void {
-  let disposed = false;
   const cleanups = [
     client.subscribeLifecycle((event) => {
       if (event.type === "welcome") {
@@ -165,20 +167,7 @@ export function startServerStateSync(client: ServerStateClient): () => void {
     }),
   ];
 
-  if (getServerConfig() === null) {
-    void client
-      .getConfig()
-      .then((config) => {
-        if (disposed || getServerConfig() !== null) {
-          return;
-        }
-        setServerConfigSnapshot(config);
-      })
-      .catch(() => undefined);
-  }
-
   return () => {
-    disposed = true;
     for (const cleanup of cleanups) {
       cleanup();
     }

@@ -65,6 +65,7 @@ import {
   ProviderAdapterRegistry,
   type ProviderAdapterRegistryShape,
 } from "../Services/ProviderAdapterRegistry.ts";
+import { ASSISTANT_ATTACHMENT_INSTRUCTIONS } from "../../assistantAttachments.ts";
 import { ProviderService } from "../Services/ProviderService.ts";
 import { ProviderSessionDirectory } from "../Services/ProviderSessionDirectory.ts";
 import { makeProviderServiceLive, type ProviderServiceLiveOptions } from "./ProviderService.ts";
@@ -122,6 +123,7 @@ function makeFakeCodexAdapter(
     readonly turnSubmission?: "acceptance" | "completion";
     /** Defaults to true for Codex only, as the real adapters declare. */
     readonly resumeSurvivesCwdChange?: boolean;
+    readonly attachmentInstructions?: "session" | "first-turn";
   } = {},
 ) {
   const turnSteering =
@@ -280,6 +282,9 @@ function makeFakeCodexAdapter(
         : { conversationRollback: "native" as const }),
       ...(options.turnSubmission ? { turnSubmission: options.turnSubmission } : {}),
       resumeSurvivesCwdChange,
+      ...(options.attachmentInstructions
+        ? { attachmentInstructions: options.attachmentInstructions }
+        : {}),
     },
     startSession,
     sendTurn,
@@ -455,6 +460,56 @@ it.effect("ProviderServiceLive catches stopAll failures during shutdown", () =>
 
     assert.equal(Exit.isSuccess(closeExit), true);
     assert.equal(codex.stopAll.mock.calls.length, 1);
+  }),
+);
+
+it.live("ProviderServiceLive stops every provider in parallel during shutdown", () =>
+  Effect.gen(function* () {
+    const codex = makeFakeCodexAdapter();
+    const claude = makeFakeCodexAdapter(CLAUDE_AGENT_DRIVER);
+    // Each stopAll holds until both have started: sequential shutdown would
+    // sit out the first one's fallback timeout before starting the second.
+    const started: Array<string> = [];
+    const bothStarted = yield* Deferred.make<void>();
+    const latchedStopAll = (name: string) => () =>
+      Effect.gen(function* () {
+        started.push(name);
+        if (started.length === 2) yield* Deferred.succeed(bothStarted, undefined);
+        yield* Deferred.await(bothStarted).pipe(Effect.timeout("2 seconds"), Effect.ignore);
+      });
+    codex.stopAll.mockImplementation(latchedStopAll("codex"));
+    claude.stopAll.mockImplementation(latchedStopAll("claude"));
+    const registry = makeAdapterRegistryMock({
+      [CODEX_DRIVER]: codex.adapter,
+      [CLAUDE_AGENT_DRIVER]: claude.adapter,
+    });
+    const runtimeRepositoryLayer = ProviderSessionRuntimeRepositoryLive.pipe(
+      Layer.provide(SqlitePersistenceMemory),
+    );
+    const directoryLayer = ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer));
+    const providerLayer = Layer.mergeAll(
+      makeProviderServiceLive().pipe(
+        Layer.provide(Layer.succeed(ProviderAdapterRegistry, registry)),
+        Layer.provide(directoryLayer),
+        Layer.provide(defaultServerSettingsLayer),
+        Layer.provideMerge(AnalyticsService.layerTest),
+        Layer.provide(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
+      ),
+      directoryLayer,
+      runtimeRepositoryLayer,
+      NodeServices.layer,
+    );
+    const scope = yield* Scope.make();
+    const runtimeServices = yield* Layer.build(providerLayer).pipe(Scope.provide(scope));
+    yield* Effect.gen(function* () {
+      yield* ProviderService;
+    }).pipe(Effect.provide(runtimeServices));
+
+    const startedAt = Date.now();
+    yield* Scope.close(scope, Exit.void);
+
+    assert.deepStrictEqual([...started].toSorted(), ["claude", "codex"]);
+    assert.isBelow(Date.now() - startedAt, 1_000);
   }),
 );
 
@@ -3601,4 +3656,163 @@ describe("provider operation deadlines", () => {
       }),
     );
   });
+});
+
+describe("ProviderServiceLive turn input", () => {
+  const startThread = (
+    threadId: ThreadId,
+    driver: ProviderDriverKind,
+    instanceId: ProviderInstanceId,
+  ) =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      return yield* provider.startSession(threadId, {
+        provider: driver,
+        providerInstanceId: instanceId,
+        threadId,
+        runtimeMode: "full-access",
+      });
+    });
+
+  it.effect("delivers a Claude slash command to the adapter exactly as sent", () =>
+    Effect.gen(function* () {
+      const claude = makeFakeCodexAdapter(CLAUDE_AGENT_DRIVER, {
+        attachmentInstructions: "session",
+      });
+      yield* Effect.gen(function* () {
+        const provider = yield* ProviderService;
+        const threadId = asThreadId("thread-claude-compact");
+        yield* startThread(threadId, CLAUDE_AGENT_DRIVER, claudeAgentInstanceId);
+
+        yield* provider.sendTurn({ threadId, input: "/compact", attachments: [] });
+        yield* provider.sendTurn({ threadId, input: "hello", attachments: [] });
+
+        assert.deepEqual(
+          claude.sendTurn.mock.calls.map((call) => call[0].input),
+          ["/compact", "hello"],
+        );
+      }).pipe(Effect.provide(makeStandaloneProviderServiceLayer([claude])));
+    }),
+  );
+
+  it.effect("prefixes attachment instructions to a runtime's first prompt only", () =>
+    Effect.gen(function* () {
+      const cursor = makeFakeCodexAdapter(CURSOR_DRIVER, { conversationRollback: "none" });
+      yield* Effect.gen(function* () {
+        const provider = yield* ProviderService;
+        const threadId = asThreadId("thread-cursor-instructions");
+        yield* startThread(threadId, CURSOR_DRIVER, ProviderInstanceId.make("cursor"));
+
+        // A native command never carries them, so they wait for the first prompt.
+        yield* provider.sendTurn({ threadId, input: "/init", attachments: [] });
+        yield* provider.sendTurn({ threadId, input: "first", attachments: [] });
+        yield* provider.sendTurn({ threadId, input: "second", attachments: [] });
+
+        const inputs = cursor.sendTurn.mock.calls.map((call) => call[0].input ?? "");
+        assert.equal(inputs[0], "/init");
+        assert.equal(inputs[1], `${ASSISTANT_ATTACHMENT_INSTRUCTIONS}\n\nfirst`);
+        assert.equal(inputs[2], "second");
+      }).pipe(Effect.provide(makeStandaloneProviderServiceLayer([cursor])));
+    }),
+  );
+
+  it.effect("delivers the attachment instructions again after a rollback on the same runtime", () =>
+    Effect.gen(function* () {
+      // Like OpenCode: a first-turn adapter whose rollback keeps the runtime id
+      // but may drop the turn that carried the instructions.
+      const cursor = makeFakeCodexAdapter(CURSOR_DRIVER);
+      yield* Effect.gen(function* () {
+        const provider = yield* ProviderService;
+        const threadId = asThreadId("thread-cursor-rollback");
+        yield* startThread(threadId, CURSOR_DRIVER, ProviderInstanceId.make("cursor"));
+
+        yield* provider.sendTurn({ threadId, input: "first", attachments: [] });
+        yield* provider.rollbackConversation({
+          threadId,
+          numTurns: 1,
+          targetTurnId: null,
+          droppedTurnIds: [],
+        });
+        yield* provider.sendTurn({ threadId, input: "again", attachments: [] });
+        yield* provider.sendTurn({ threadId, input: "later", attachments: [] });
+
+        assert.equal(cursor.startSession.mock.calls.length, 1);
+        assert.equal(cursor.rollbackThread.mock.calls.length, 1);
+        assert.deepEqual(
+          cursor.sendTurn.mock.calls.map((call) => call[0].input),
+          [
+            `${ASSISTANT_ATTACHMENT_INSTRUCTIONS}\n\nfirst`,
+            `${ASSISTANT_ATTACHMENT_INSTRUCTIONS}\n\nagain`,
+            "later",
+          ],
+        );
+      }).pipe(Effect.provide(makeStandaloneProviderServiceLayer([cursor])));
+    }),
+  );
+
+  it.effect("reports one thread's session without reading other threads' bindings", () =>
+    Effect.gen(function* () {
+      const codex = makeFakeCodexAdapter();
+      const bindingReads: Array<ThreadId> = [];
+      const runtimeRepositoryLayer = ProviderSessionRuntimeRepositoryLive.pipe(
+        Layer.provide(SqlitePersistenceMemory),
+      );
+      const directoryLayer = Layer.effect(
+        ProviderSessionDirectory,
+        Effect.map(Effect.service(ProviderSessionDirectory), (directory) => ({
+          ...directory,
+          getBinding: (threadId: ThreadId) => {
+            bindingReads.push(threadId);
+            return directory.getBinding(threadId);
+          },
+        })),
+      ).pipe(Layer.provide(ProviderSessionDirectoryLive), Layer.provide(runtimeRepositoryLayer));
+      const layer = makeProviderServiceLive().pipe(
+        Layer.provide(
+          Layer.succeed(
+            ProviderAdapterRegistry,
+            makeAdapterRegistryMock({ [CODEX_DRIVER]: codex.adapter }),
+          ),
+        ),
+        Layer.provideMerge(directoryLayer),
+        Layer.provide(defaultServerSettingsLayer),
+        Layer.provide(AnalyticsService.layerTest),
+        Layer.provide(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
+      );
+
+      yield* Effect.gen(function* () {
+        const provider = yield* ProviderService;
+        const directory = yield* ProviderSessionDirectory;
+        // History: many stopped bindings that no adapter reports as live.
+        for (let index = 0; index < 20; index += 1) {
+          yield* directory.upsert({
+            threadId: asThreadId(`thread-history-${index}`),
+            provider: CODEX_DRIVER,
+            providerInstanceId: codexInstanceId,
+            runtimeSessionId: RuntimeSessionId.make(`runtime-history-${index}`),
+            status: "stopped",
+          });
+        }
+        const live = asThreadId("thread-live");
+        yield* startThread(live, CODEX_DRIVER, codexInstanceId);
+
+        bindingReads.length = 0;
+        const listed = yield* provider.listSessions();
+        assert.deepEqual(
+          listed.map((session) => session.threadId),
+          [live],
+        );
+        assert.deepEqual(bindingReads, [live]);
+
+        bindingReads.length = 0;
+        const single = yield* provider.getSessionForThread!(live);
+        assert.deepEqual(Option.getOrUndefined(single), listed[0]);
+        assert.deepEqual(bindingReads, [live]);
+        assert.equal(
+          Option.isNone(yield* provider.getSessionForThread!(asThreadId("thread-history-3"))),
+          true,
+        );
+      }).pipe(Effect.provide(layer));
+    }),
+  );
 });

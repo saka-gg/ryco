@@ -170,6 +170,57 @@ describe("hosted PWA lifecycle", () => {
     expect(JSON.stringify(lifecycle.getSnapshot())).not.toContain("sensitive registration detail");
   });
 
+  it("registers only after the app has booted and the page has gone idle", async () => {
+    const test = runtime();
+    let appReady: () => void = () => undefined;
+    let idle: (() => void) | null = null;
+    const idleOptions: Array<{ readonly timeout: number }> = [];
+    const lifecycle = createHostedPwaLifecycle({
+      ...test.runtime,
+      whenAppReady: () =>
+        new Promise<void>((resolve) => {
+          appReady = resolve;
+        }),
+      window: {
+        ...test.runtime.window,
+        requestIdleCallback: (callback, options) => {
+          idle = callback;
+          idleOptions.push(options);
+          return 1;
+        },
+      },
+    });
+    const starting = lifecycle.start({ enabled: true });
+    await Promise.resolve();
+    expect(idle).toBeNull();
+    expect(test.serviceWorker.register).not.toHaveBeenCalled();
+    appReady();
+    await vi.waitFor(() => expect(idle).not.toBeNull());
+    expect(idleOptions).toEqual([{ timeout: 5_000 }]);
+    expect(test.serviceWorker.register).not.toHaveBeenCalled();
+    idle!();
+    await starting;
+    expect(test.serviceWorker.register).toHaveBeenCalledOnce();
+    expect(lifecycle.getSnapshot().registrationState).toBe("ready");
+  });
+
+  it("does not register when stopped while waiting for boot", async () => {
+    const test = runtime();
+    let appReady: () => void = () => undefined;
+    const lifecycle = createHostedPwaLifecycle({
+      ...test.runtime,
+      whenAppReady: () =>
+        new Promise<void>((resolve) => {
+          appReady = resolve;
+        }),
+    });
+    const starting = lifecycle.start({ enabled: true });
+    lifecycle.stop();
+    appReady();
+    await starting;
+    expect(test.serviceWorker.register).not.toHaveBeenCalled();
+  });
+
   it("does not touch service workers when PWA behavior is disabled", async () => {
     const test = runtime();
     const lifecycle = createHostedPwaLifecycle(test.runtime);

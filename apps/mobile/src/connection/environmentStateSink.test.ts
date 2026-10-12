@@ -21,6 +21,8 @@ vi.mock("expo-sqlite/kv-store", () => ({
 vi.mock("expo-linking", () => ({ getInitialURL: async () => null }));
 vi.mock("expo-constants", () => ({ default: { expoConfig: { extra: {} } } }));
 
+import { scopeThreadRef } from "@ryco/client-runtime/scoped";
+
 import { createMobileEnvironmentStateSink } from "./environmentStateSink";
 import { useComposerDraftStore } from "../state/composerDraftStore";
 import { useTerminalStateStore } from "../state/terminalStateStore";
@@ -46,8 +48,10 @@ describe("createMobileEnvironmentStateSink.afterShellEventApplied", () => {
       thread: { id: THREAD_ID, archivedAt: null },
     } as unknown as Parameters<typeof sink.afterShellEventApplied>[1];
 
-    const context = sink.prepareShellEvent(ENV_ID, event);
-    sink.afterShellEventApplied(ENV_ID, event, context);
+    sink.afterShellEventApplied(ENV_ID, event, {
+      previousThread: undefined,
+      threadRef: scopeThreadRef(ENV_ID, THREAD_ID),
+    });
 
     expect(supervisor.reconcileThreadDetailSubscriptionEvictionForThread).toHaveBeenCalledWith(
       ENV_ID,
@@ -72,8 +76,10 @@ describe("createMobileEnvironmentStateSink.afterShellEventApplied", () => {
       threadId: THREAD_ID,
     } as unknown as Parameters<typeof sink.afterShellEventApplied>[1];
 
-    const context = sink.prepareShellEvent(ENV_ID, event);
-    sink.afterShellEventApplied(ENV_ID, event, context);
+    sink.afterShellEventApplied(ENV_ID, event, {
+      previousThread: undefined,
+      threadRef: scopeThreadRef(ENV_ID, THREAD_ID),
+    });
 
     expect(supervisor.disposeThreadDetailSubscription).toHaveBeenCalledWith(ENV_ID, THREAD_ID);
     expect(clearDraft).toHaveBeenCalledTimes(1);
@@ -99,7 +105,7 @@ describe("createMobileEnvironmentStateSink.onEnvironmentProjectionChanged", () =
       updatedAt: "2026-08-20T00:00:00.000Z",
     } as never);
     sink.applyOrchestrationEvents(ENV_ID, []);
-    sink.applyShellEvent(ENV_ID, { kind: "noop" } as never);
+    sink.applyShellEvents(ENV_ID, []);
 
     expect(projectionChanged).toHaveBeenCalledTimes(3);
     expect(projectionChanged).toHaveBeenCalledWith(ENV_ID);

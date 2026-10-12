@@ -26,9 +26,9 @@
  * and building new ones without disturbing unaffected instances.
  *
  * Every live instance runs inside its own child `Scope`. The registry's
- * own scope owns all child scopes via finalizers, so closing the registry
- * tears every instance down in reverse order; closing a single instance
- * (via `reconcile` removing it) leaves the rest untouched.
+ * own scope owns all child scopes through one parallel instances scope, so
+ * closing the registry tears every instance down concurrently; closing a
+ * single instance (via `reconcile` removing it) leaves the rest untouched.
  *
  * @module provider/Layers/ProviderInstanceRegistryLive
  */
@@ -43,8 +43,10 @@ import {
 import { Context, Effect, Equal, Exit, Layer, PubSub, Ref, Schema, Scope, Stream } from "effect";
 import * as Semaphore from "effect/Semaphore";
 
+import { trackStartupPhase } from "../../startupStallMonitor.ts";
 import { buildUnavailableProviderSnapshot } from "../unavailableProviderSnapshot.ts";
 import {
+  type ConfiguredProviderIdentity,
   ProviderInstanceRegistry,
   type ProviderInstanceRegistryShape,
 } from "../Services/ProviderInstanceRegistry.ts";
@@ -142,6 +144,54 @@ const decodedConfigEnabled = (config: unknown): boolean | undefined => {
   return typeof enabled === "boolean" ? enabled : undefined;
 };
 
+/** Decode an envelope's opaque config; the single decode path for builds and boot seeding. */
+const decodeInstanceConfig = <R>(driver: AnyProviderDriver<R>, entry: ProviderInstanceConfig) =>
+  Schema.decodeUnknownEffect(driver.configSchema)(entry.config ?? driver.defaultConfig()).pipe(
+    Effect.result,
+  );
+
+const resolveInstanceEnabled = (entry: ProviderInstanceConfig, typedConfig: unknown): boolean =>
+  entry.enabled ?? decodedConfigEnabled(typedConfig) ?? true;
+
+/** The configured identity of a built instance. */
+export const configuredIdentityOfInstance = (
+  instance: ProviderInstance,
+): ConfiguredProviderIdentity => ({
+  instanceId: instance.instanceId,
+  driverKind: instance.driverKind,
+  displayName: instance.displayName,
+  accentColor: instance.accentColor,
+  enabled: instance.enabled,
+});
+
+/**
+ * Identities of the configured instances `reconcile(configMap)` would build, without building
+ * them. Unknown drivers and undecodable configs are omitted; they surface as unavailable shadows
+ * once the registry reconciles.
+ */
+export const resolveConfiguredProviderIdentities = <R>(input: {
+  readonly drivers: ReadonlyArray<AnyProviderDriver<R>>;
+  readonly configMap: ProviderInstanceConfigMap;
+}): Effect.Effect<ReadonlyArray<ConfiguredProviderIdentity>> =>
+  Effect.gen(function* () {
+    const driversById = new Map(input.drivers.map((driver) => [driver.driverKind, driver]));
+    const identities: Array<ConfiguredProviderIdentity> = [];
+    for (const [rawInstanceId, entry] of Object.entries(input.configMap)) {
+      const driver = driversById.get(entry.driver);
+      if (!driver) continue;
+      const decoded = yield* decodeInstanceConfig(driver, entry);
+      if (decoded._tag === "Failure") continue;
+      identities.push({
+        instanceId: ProviderInstanceId.make(rawInstanceId),
+        driverKind: entry.driver,
+        displayName: entry.displayName,
+        accentColor: entry.accentColor,
+        enabled: resolveInstanceEnabled(entry, decoded.success),
+      });
+    }
+    return identities;
+  });
+
 /**
  * Build one live entry from a raw config envelope. Returns either a
  * `LiveEntry` plus undefined unavailable shadow, or a shadow snapshot and
@@ -178,8 +228,7 @@ const buildEntry = <R>(input: {
       };
     }
 
-    const decoder = Schema.decodeUnknownEffect(driver.configSchema);
-    const decodeResult = yield* decoder(entry.config ?? driver.defaultConfig()).pipe(Effect.result);
+    const decodeResult = yield* decodeInstanceConfig(driver, entry);
     if (decodeResult._tag === "Failure") {
       const issue = decodeResult.failure;
       const detail = issue.message ?? String(issue);
@@ -209,24 +258,24 @@ const buildEntry = <R>(input: {
     }
 
     const typedConfig = decodeResult.success;
-    const childScope = yield* Scope.make();
-    // Attach the child scope to the registry's parent scope: if the
-    // registry scope closes, each surviving instance's child scope is
-    // closed through this finalizer. `reconcile` manually closes the
-    // child scope on remove/replace; subsequent close via the parent's
-    // finalizer is a no-op because `Scope.close` is idempotent.
-    yield* Scope.addFinalizer(parentScope, Scope.close(childScope, Exit.void).pipe(Effect.ignore));
+    // A child of the registry's instances scope: closing the registry closes
+    // every surviving instance (in parallel, see `makeProviderInstanceRegistry`).
+    // `reconcile` closes it directly on remove/replace, which also detaches it
+    // from the parent, so replaced instances leave no finalizer behind.
+    const childScope = yield* Scope.fork(parentScope);
 
-    const createResult = yield* driver
-      .create({
+    const enabled = resolveInstanceEnabled(entry, typedConfig);
+    const createResult = yield* trackStartupPhase(
+      `provider.instance.create:${rawInstanceId}`,
+      driver.create({
         instanceId,
         displayName: entry.displayName,
         accentColor: entry.accentColor,
         environment: entry.environment ?? [],
-        enabled: entry.enabled ?? decodedConfigEnabled(typedConfig) ?? true,
+        enabled,
         config: typedConfig,
-      })
-      .pipe(Effect.provideService(Scope.Scope, childScope), Effect.result);
+      }),
+    ).pipe(Effect.provideService(Scope.Scope, childScope), Effect.result);
     if (createResult._tag === "Failure") {
       yield* Effect.logError("Failed to create provider instance", {
         instanceId: rawInstanceId,
@@ -258,7 +307,7 @@ const buildEntry = <R>(input: {
       instanceId: rawInstanceId,
       driver: entry.driver,
       outcome: "live",
-      enabled: entry.enabled ?? decodedConfigEnabled(typedConfig) ?? true,
+      enabled,
       durationMs: Date.now() - startedAt,
     });
 
@@ -307,12 +356,14 @@ const makeReconcile = <R>(input: {
           replacedIds.add(instanceId);
         }
       }
-      for (const id of [...removedIds, ...replacedIds]) {
-        const live = previousEntries.get(id);
-        if (live) {
-          yield* Scope.close(live.scope, Exit.void).pipe(Effect.ignore);
-        }
-      }
+      yield* Effect.forEach(
+        [...removedIds, ...replacedIds],
+        (id) => {
+          const live = previousEntries.get(id);
+          return live ? Scope.close(live.scope, Exit.void).pipe(Effect.ignore) : Effect.void;
+        },
+        { concurrency: "unbounded", discard: true },
+      );
 
       // 2. Build additions and replacements. Walk `nextRaw` so the final
       //    entry order follows settings-author order.
@@ -512,8 +563,14 @@ export const makeProviderInstanceRegistry = <R>(input: {
     const changes = yield* PubSub.sliding<void>(1);
     yield* Effect.addFinalizer(() => PubSub.shutdown(changes));
 
+    // Every instance scope hangs off this one, which finalizes its children in
+    // parallel: server shutdown pays for the slowest provider teardown (child
+    // process exits, SDK stops), not the sum of all of them. Forked after the
+    // PubSub finalizer so instances still close before `changes` shuts down.
+    const instancesScope = yield* Scope.fork(parentScope, "parallel");
+
     const state: RegistryState = { entries, unavailable, changes };
-    const reconcileWithR = makeReconcile({ state, driversById, parentScope });
+    const reconcileWithR = makeReconcile({ state, driversById, parentScope: instancesScope });
     const reconcileSemaphore = yield* Semaphore.make(1);
     const reconcile: ProviderInstanceRegistryMutatorShape["reconcile"] = (configMap) =>
       reconcileSemaphore

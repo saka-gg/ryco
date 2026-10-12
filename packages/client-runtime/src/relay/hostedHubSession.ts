@@ -45,6 +45,11 @@ interface QueuedFrame {
 const SEND_HIGH_WATER_BYTES = 256 * 1_024;
 const CONTROL_RESERVE_BYTES = 4 * 1_024;
 const READY_TIMEOUT_MS = 10_000;
+/**
+ * How long a suspicion probe waits for any frame before the connection counts
+ * as lost — the node connector's bound for the same question.
+ */
+export const HUB_SESSION_PROBE_TIMEOUT_MS = 5_000;
 
 /** One account-owned physical connection; logical relay tickets and E2EE remain per node. */
 export class HostedHubSession {
@@ -62,6 +67,7 @@ export class HostedHubSession {
   #deadline: unknown;
   #heartbeat: unknown;
   #drain: unknown;
+  #probeDeadline: unknown;
   #queue: QueuedFrame[] = [];
   #queueBytes = 0;
   #lastReceived = 0;
@@ -129,6 +135,38 @@ export class HostedHubSession {
     return socket;
   }
 
+  /**
+   * Check now, rather than on the next heartbeat, that the connection is alive.
+   *
+   * A network change — Wi-Fi to cellular, a NAT rebinding, a laptop waking —
+   * can leave this end of the socket open on a path that is already dead, and
+   * the heartbeat alone takes up to the 45-second liveness bound to notice.
+   * Meanwhile new logical streams are opened on the dead socket and no
+   * invalidation arrives. A probe sends a ping at once (or reuses the one
+   * already pending) and, if no frame at all arrives within `timeoutMs`,
+   * treats the connection as lost through the ordinary path: `onFailure`,
+   * then the bounded reconnect. A probe before `ready`, or while one is already
+   * armed, does nothing; the connect deadline and the armed probe cover those.
+   */
+  probe(timeoutMs = HUB_SESSION_PROBE_TIMEOUT_MS): void {
+    const socket = this.#socket;
+    if (this.#disposed || !this.#ready || !socket || this.#probeDeadline !== undefined) return;
+    const sentAt = this.#options.timers.now();
+    // Reuse a pending heartbeat probe: its pong is the answer either way, and a
+    // second nonce would make the first one's valid pong look forged.
+    if (!this.#probe) {
+      this.#probe = new Uint8Array(8);
+      new DataView(this.#probe.buffer).setUint32(4, ++this.#probeSequence);
+      this.#sendControl({ type: "ping", nonce: this.#probe });
+      if (this.#socket !== socket || !this.#ready) return;
+    }
+    this.#probeDeadline = this.#options.timers.setTimeout(() => {
+      this.#probeDeadline = undefined;
+      if (this.#socket !== socket || !this.#ready || this.#disposed) return;
+      if (this.#lastReceived < sentAt) this.#lost("network", true);
+    }, timeoutMs);
+  }
+
   dispose(): void {
     if (this.#disposed) return;
     this.#disposed = true;
@@ -182,7 +220,10 @@ export class HostedHubSession {
   }
 
   #receive(bytes: Uint8Array): void {
-    const decoded = decodeHubSessionFrame(bytes);
+    // The socket's buffer is this session's alone (see `RelaySocket`), and a
+    // data payload is handed to its stream's engine, which decodes and zeroes
+    // it in place: a copy would only leave the original behind, unzeroed.
+    const decoded = decodeHubSessionFrame(bytes, { borrowDataPayload: true });
     if (!decoded.ok) {
       this.#lost("protocol", false);
       return;
@@ -228,10 +269,12 @@ export class HostedHubSession {
         const stream = this.#streams.get(frame.streamId);
         // A close may cross already-sent data. Never route it into a newer stream.
         if (!stream) {
+          frame.payload.fill(0);
           if (frame.streamId > this.#nextStream) this.#lost("protocol", false);
           return;
         }
         if (stream.state !== 1) {
+          frame.payload.fill(0);
           this.#lost("protocol", false);
           return;
         }
@@ -422,7 +465,7 @@ export class HostedHubSession {
     this.#queue = [];
     this.#queueBytes = 0;
   }
-  #clearTimer(kind: "retry" | "deadline" | "heartbeat" | "drain"): void {
+  #clearTimer(kind: "retry" | "deadline" | "heartbeat" | "drain" | "probe"): void {
     const timer =
       kind === "retry"
         ? this.#retry
@@ -430,14 +473,18 @@ export class HostedHubSession {
           ? this.#deadline
           : kind === "heartbeat"
             ? this.#heartbeat
-            : this.#drain;
+            : kind === "probe"
+              ? this.#probeDeadline
+              : this.#drain;
     if (timer !== undefined) this.#options.timers.clearTimeout(timer);
     if (kind === "retry") this.#retry = undefined;
     else if (kind === "deadline") this.#deadline = undefined;
     else if (kind === "heartbeat") this.#heartbeat = undefined;
+    else if (kind === "probe") this.#probeDeadline = undefined;
     else this.#drain = undefined;
   }
   #clearTimers(): void {
-    for (const kind of ["retry", "deadline", "heartbeat", "drain"] as const) this.#clearTimer(kind);
+    for (const kind of ["retry", "deadline", "heartbeat", "drain", "probe"] as const)
+      this.#clearTimer(kind);
   }
 }

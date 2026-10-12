@@ -8,14 +8,14 @@ import * as Linking from "expo-linking";
 import { useEffect, useRef, useState } from "react";
 import { View } from "react-native";
 
-import { ConnectionsNewRouteScreen } from "../connection/ConnectionsNewRouteScreen";
-import { NativeIdentityScreen } from "../identity/NativeIdentityScreen";
+import { ConnectionsNewRouteScreen, NativeIdentityScreen } from "../../navigation/lazyRouteScreens";
 import { useHostedHubStore, ensureMobileHostedSession } from "../../hostedHub/state";
 import { useThemeColor } from "../../lib/useThemeColor";
 import { useConnectionRegistry } from "../../providers/ConnectionRegistryProvider";
 import { RootStack } from "../../Stack";
 import { ServerStateBootstrap } from "../../state/serverStateSync";
 import { deriveAppAccess, isWorkspaceDeepLink } from "./appAccessModel";
+import { HOSTED_LAUNCH_DECISION_DEADLINE_MS, markAppAccessDecided } from "./launchDecision";
 import { ThreadPriorityRefreshBridge } from "../../components/ThreadPriorityRefreshBridge";
 
 const logo = require("../../../../../assets/logo_letter_only.svg");
@@ -63,11 +63,21 @@ export function AppAccessGate(props: {
 
   useEffect(() => {
     let active = true;
+    // The hosted plane decides when its launch check settles, or at the launch
+    // deadline if the Hub is not answering: a stalled request would otherwise
+    // keep the launch surface up for its whole request deadline. The check
+    // keeps running, and a revalidated session still unlocks the moment it is
+    // published (`hostedAuthenticated` below).
+    const deadline = setTimeout(() => {
+      if (active) setHostedHydrated(true);
+    }, HOSTED_LAUNCH_DECISION_DEADLINE_MS);
     void ensureMobileHostedSession().finally(() => {
+      clearTimeout(deadline);
       if (active) setHostedHydrated(true);
     });
     return () => {
       active = false;
+      clearTimeout(deadline);
     };
   }, []);
 
@@ -108,6 +118,10 @@ export function AppAccessGate(props: {
     directHydrated,
     directCredentialReadable,
   });
+
+  useEffect(() => {
+    if (access.status !== "hydrating") markAppAccessDecided();
+  }, [access.status]);
 
   useEffect(() => {
     let active = true;

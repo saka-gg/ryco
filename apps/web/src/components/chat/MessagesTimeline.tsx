@@ -99,6 +99,7 @@ import {
   type TimelineStreamingState,
   type TimelineLatestTurn,
   TIMELINE_MINIMAP_MIN_ITEMS,
+  timelineRowItemType,
 } from "./MessagesTimeline.logic";
 import { MessageActionsSheet } from "./MessageActionsSheet";
 import { ContextHandoffMarkerRow } from "./ContextHandoffMarkerRow";
@@ -835,6 +836,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
               ref={listRef}
               data={rows}
               keyExtractor={keyExtractor}
+              getItemType={timelineRowItemType}
               renderItem={renderItem}
               estimatedItemSize={56}
               recycleItems={false}

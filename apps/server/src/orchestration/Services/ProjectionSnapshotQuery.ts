@@ -23,17 +23,18 @@ import type {
   OrchestrationThreadHistoryError,
   OrchestrationThreadHistoryPage,
   OrchestrationThreadActivity,
+  OrchestrationThreadPriorityEntry,
   OrchestrationThreadShell,
   OrchestrationThreadWindowSnapshot,
   OrchestrationWorktreeShell,
   ProjectId,
+  ThreadGoal,
   ThreadId,
   TurnId,
   WorktreeId,
 } from "@ryco/contracts";
-import { Context } from "effect";
+import { Context, Effect } from "effect";
 import type { Option } from "effect";
-import type { Effect } from "effect";
 
 import type { ProjectionRepositoryError } from "../../persistence/Errors.ts";
 
@@ -44,6 +45,62 @@ export interface ProjectionSnapshotCounts {
 
 export interface ProjectionSnapshotSequence {
   readonly snapshotSequence: number;
+}
+
+export interface ProjectionProjectWorkspaceRows {
+  readonly worktrees: ReadonlyArray<OrchestrationWorktreeShell>;
+  readonly threads: ReadonlyArray<
+    Pick<OrchestrationThreadShell, "id" | "projectId" | "branch" | "worktreePath" | "worktreeId">
+  >;
+}
+
+/**
+ * Where every live project, workspace and thread lives on disk: the shell snapshot's projects
+ * and workspaces, and a five-column placement of each live thread. For server code that checks
+ * paths or ids against current workspaces, it costs three plain reads instead of a whole shell
+ * snapshot (thread summaries, sessions, latest turns, priorities).
+ */
+export interface ProjectionWorkspacePlacement {
+  readonly projects: ReadonlyArray<OrchestrationProjectShell>;
+  /** Workspaces of live projects, archived ones included, as in the shell snapshot. */
+  readonly worktrees: ReadonlyArray<OrchestrationWorktreeShell>;
+  readonly threads: ProjectionProjectWorkspaceRows["threads"];
+}
+
+/** The same placement derived from a shell snapshot, for callers given a narrow test double. */
+export function workspacePlacementOf(
+  snapshot: OrchestrationShellSnapshot,
+): ProjectionWorkspacePlacement {
+  return {
+    projects: snapshot.projects,
+    worktrees: snapshot.worktrees ?? [],
+    threads: snapshot.threads.map((thread) => ({
+      id: thread.id,
+      projectId: thread.projectId,
+      branch: thread.branch,
+      worktreePath: thread.worktreePath,
+      worktreeId: thread.worktreeId ?? null,
+    })),
+  };
+}
+
+export interface ProjectionPendingGoalSyncThreads {
+  readonly snapshotSequence: number;
+  readonly threads: ReadonlyArray<{ readonly threadId: ThreadId; readonly goal: ThreadGoal }>;
+}
+
+/** The same answer derived from a shell snapshot, for callers given a narrow test double. */
+export function pendingGoalSyncThreadsOf(
+  snapshot: OrchestrationShellSnapshot,
+): ProjectionPendingGoalSyncThreads {
+  return {
+    snapshotSequence: snapshot.snapshotSequence,
+    threads: snapshot.threads.flatMap((thread) =>
+      thread.goal?.synchronization?.state === "pending"
+        ? [{ threadId: thread.id, goal: thread.goal }]
+        : [],
+    ),
+  };
 }
 
 export interface ProjectionThreadCheckpointContext {
@@ -83,6 +140,33 @@ export interface ProjectionSnapshotQueryShape {
    */
   readonly getShellSnapshot: () => Effect.Effect<
     OrchestrationShellSnapshot,
+    ProjectionRepositoryError
+  >;
+
+  /**
+   * Live projects, as the shell snapshot lists them, from the project table alone. Absent only
+   * in narrow test doubles: read through {@link readProjectShells}.
+   */
+  readonly listProjectShells?: () => Effect.Effect<
+    ReadonlyArray<OrchestrationProjectShell>,
+    ProjectionRepositoryError
+  >;
+
+  /**
+   * Live projects, their workspaces and where each live thread works, read in one transaction.
+   * Absent only in narrow test doubles: read through {@link readWorkspacePlacement}.
+   */
+  readonly getWorkspacePlacement?: () => Effect.Effect<
+    ProjectionWorkspacePlacement,
+    ProjectionRepositoryError
+  >;
+
+  /**
+   * Live threads whose goal synchronization still awaits its provider, with the projection
+   * sequence they were read at. A narrow boot-time read instead of a whole shell snapshot.
+   */
+  readonly listPendingGoalSyncThreads?: () => Effect.Effect<
+    ProjectionPendingGoalSyncThreads,
     ProjectionRepositoryError
   >;
 
@@ -136,11 +220,29 @@ export interface ProjectionSnapshotQueryShape {
   ) => Effect.Effect<Option.Option<OrchestrationThreadShell>, ProjectionRepositoryError>;
 
   /**
+   * Every thread's current projected priority ranking, for the shell stream's
+   * `thread-priorities` item (a ranking replaces them all at once).
+   */
+  readonly listThreadPriorities?: () => Effect.Effect<
+    ReadonlyArray<OrchestrationThreadPriorityEntry>,
+    ProjectionRepositoryError
+  >;
+
+  /**
    * Read a single worktree shell row by id.
    */
   readonly getWorktreeShellById?: (
     worktreeId: WorktreeId,
   ) => Effect.Effect<Option.Option<OrchestrationWorktreeShell>, ProjectionRepositoryError>;
+
+  /**
+   * One project's workspaces (archived included) and the workspace placement of its live
+   * threads: what worktree reconciliation needs, from two indexed reads instead of a whole
+   * shell snapshot per project.
+   */
+  readonly getProjectWorkspaceRows?: (
+    projectId: ProjectId,
+  ) => Effect.Effect<ProjectionProjectWorkspaceRows, ProjectionRepositoryError>;
 
   /**
    * Read a single active thread detail snapshot by id.
@@ -279,6 +381,34 @@ export interface ProjectionSnapshotQueryShape {
     ProjectionRepositoryError
   >;
 }
+
+type ShellSnapshotFallback<Narrow extends keyof ProjectionSnapshotQueryShape> = Pick<
+  ProjectionSnapshotQueryShape,
+  "getShellSnapshot" | Narrow
+>;
+
+/**
+ * Live projects. Server code that needs projects only must not build a whole shell snapshot;
+ * the architecture test in `ProjectionSnapshotQuery.callers.test.ts` keeps it that way.
+ */
+export const readProjectShells = (
+  query: ShellSnapshotFallback<"listProjectShells">,
+): Effect.Effect<ReadonlyArray<OrchestrationProjectShell>, ProjectionRepositoryError> =>
+  query.listProjectShells?.() ??
+  Effect.map(query.getShellSnapshot(), (snapshot) => snapshot.projects);
+
+/** Live projects, workspaces and thread placement; see {@link readProjectShells}. */
+export const readWorkspacePlacement = (
+  query: ShellSnapshotFallback<"getWorkspacePlacement">,
+): Effect.Effect<ProjectionWorkspacePlacement, ProjectionRepositoryError> =>
+  query.getWorkspacePlacement?.() ?? Effect.map(query.getShellSnapshot(), workspacePlacementOf);
+
+/** Threads whose goal synchronization is pending; see {@link readProjectShells}. */
+export const readPendingGoalSyncThreads = (
+  query: ShellSnapshotFallback<"listPendingGoalSyncThreads">,
+): Effect.Effect<ProjectionPendingGoalSyncThreads, ProjectionRepositoryError> =>
+  query.listPendingGoalSyncThreads?.() ??
+  Effect.map(query.getShellSnapshot(), pendingGoalSyncThreadsOf);
 
 /**
  * ProjectionSnapshotQuery - Service tag for projection snapshot queries.

@@ -197,8 +197,9 @@ describe("wsRpcClient", () => {
   });
 });
 
-it("negotiates usage capability before sending a literal version request to an old node", async () => {
-  const usage = vi.fn(() => Effect.die("v1 schema should never receive a v2 request"));
+it("turns an old node's request decoding defect into an update instruction, without a config round trip", async () => {
+  // A v1 node's literal payload schema rejects the v2 request before any handler runs.
+  const usage = vi.fn(() => Effect.die('Expected 1, got 2\n  at ["contractVersion"]'));
   const config = vi.fn(() => Effect.succeed({}));
   const transport = {
     request: (invoke: (client: unknown) => Effect.Effect<unknown>) =>
@@ -210,8 +211,8 @@ it("negotiates usage capability before sending a literal version request to an o
   await expect(
     client.server.getUsageSummary({ contractVersion: 2, endDate: "2026-08-10", timeZone: "UTC" }),
   ).rejects.toThrow("Update Ryco");
-  expect(config).toHaveBeenCalledOnce();
-  expect(usage).not.toHaveBeenCalled();
+  expect(config).not.toHaveBeenCalled();
+  expect(usage).toHaveBeenCalledOnce();
 });
 it("turns response version decoding failures into an update instruction without a schema dump", async () => {
   const transport = {

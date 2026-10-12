@@ -3,8 +3,8 @@ import { paneContains } from "../../chatPanes.logic";
 import { ChatPanes, PaneThreadAvailability } from "../chat/ChatPanes";
 import type { ScopedThreadRef } from "@ryco/contracts";
 import { useDeviceStateStore } from "@ryco/client-runtime/state/device";
-import { useNavigate } from "@tanstack/react-router";
-import { useCallback, useEffect, useMemo } from "react";
+import { getRouteApi, useNavigate } from "@tanstack/react-router";
+import { useCallback, useEffect, useMemo, type ReactElement } from "react";
 
 import { finalizePromotedDraftThreadByRef } from "../../composerDraftStore";
 import {
@@ -19,6 +19,7 @@ import { useRightPanelMaximized } from "../../hooks/useRightPanelMaximized";
 import { type RightPanelSearchUpdate, useRightPanelTabs } from "../../hooks/useRightPanelTabs";
 import { useThreadRightPanelRouteState } from "../../hooks/useThreadRightPanelRouteState";
 import { useSettings } from "../../hooks/useSettings";
+import { releaseThreadDetailPrewarm } from "../../lib/threadDetailPrewarm";
 import { usePerfMark } from "../../perf/tabSwitchInstrumentation";
 import { retainDesktopWorkspaceThreadScope } from "../../platform/desktopWorkspace";
 import { RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY } from "../../rightPanelLayout";
@@ -33,7 +34,7 @@ import {
   createEnvironmentFallbackThreadRefSelector,
   createThreadSelectorByRef,
 } from "../../storeSelectors";
-import { buildThreadRouteParams } from "../../threadRoutes";
+import { buildThreadRouteParams, resolveThreadRouteRef } from "../../threadRoutes";
 import { buildOpenSimulatorSearch } from "../../workspaceRouteSearch";
 import ChatView from "../ChatView";
 import { threadHasStarted } from "../ChatView.logic";
@@ -142,6 +143,14 @@ export function ChatThreadRouteView({
     if (!routeEnvironmentId || !routeThreadId) return;
     return retainDesktopWorkspaceThreadScope(routeEnvironmentId, routeThreadId);
   }, [routeEnvironmentId, routeThreadId]);
+  // The route loader retained this thread's detail subscription when the
+  // navigation started. Once the thread renders, ChatView — a descendant, so
+  // its mount effect ran first in this commit — holds its own retain, and the
+  // navigation bridge can go.
+  useEffect(() => {
+    if (!canRenderRouteThread || !routeEnvironmentId || !routeThreadId) return;
+    releaseThreadDetailPrewarm(routeEnvironmentId, routeThreadId);
+  }, [canRenderRouteThread, routeEnvironmentId, routeThreadId]);
   useEffect(() => {
     if (!threadRef || !pendingDeviceOpenRequest || presentationTier === "phone") return;
     consumeDeviceOpenRequest(threadRef.environmentId, threadRef.threadId);
@@ -358,4 +367,19 @@ export function ChatThreadRouteView({
       </RightPanelSheet>
     </>
   );
+}
+
+const threadRouteApi = getRouteApi("/_chat/$environmentId/$threadId");
+
+/**
+ * The `/$environmentId/$threadId` route body. The route file loads this module
+ * with `lazyRouteComponent`, so the router awaits the chunk before it commits
+ * the match and the view renders without a Suspense fallback.
+ */
+export function ChatThreadRoute(): ReactElement {
+  const threadRef = threadRouteApi.useParams({
+    select: (params) => resolveThreadRouteRef(params),
+  });
+  const search = threadRouteApi.useSearch();
+  return <ChatThreadRouteView threadRef={threadRef} search={search} />;
 }

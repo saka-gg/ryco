@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { EnvironmentId, USAGE_CONTRACT_VERSION } from "@ryco/contracts";
-import { loadNodeStatistics } from "./useStatisticsData";
+import { usageSummaryCache } from "@ryco/client-runtime/usage";
+import { cachedNodeUsage, loadNodeStatistics } from "./useStatisticsData";
 const rpc = vi.hoisted(() => ({
   server: { getStatistics: vi.fn(), getUsageSummary: vi.fn(), refreshProviders: vi.fn() },
 }));
@@ -11,7 +12,10 @@ const environment = {
   connectionState: "connected" as const,
   role: "owner" as const,
 };
-beforeEach(() => vi.resetAllMocks());
+beforeEach(() => {
+  vi.resetAllMocks();
+  usageSummaryCache.clear();
+});
 describe("mobile statistics loading", () => {
   it("does not query offline devices or nodes without owner access", async () => {
     const offline = await loadNodeStatistics(
@@ -43,6 +47,38 @@ describe("mobile statistics loading", () => {
   it("rejects incompatible summaries instead of showing zero totals", async () => {
     rpc.server.getUsageSummary.mockResolvedValue({ contractVersion: -1 });
     expect((await loadNodeStatistics(environment, "usage", "all")).error).toContain("Update Ryco");
+  });
+  it("joins an identical usage request already in flight", async () => {
+    let answer!: (summary: unknown) => void;
+    rpc.server.getUsageSummary.mockReturnValue(new Promise((resolve) => (answer = resolve)));
+    const first = loadNodeStatistics(environment, "usage", "7d");
+    const second = loadNodeStatistics(environment, "usage", "7d");
+    answer({ contractVersion: USAGE_CONTRACT_VERSION, sources: [] });
+
+    expect((await first).usage?.status).toBe("complete");
+    expect((await second).usage?.status).toBe("complete");
+    expect(rpc.server.getUsageSummary).toHaveBeenCalledTimes(1);
+  });
+  it("keeps the last usable summary per range to show while the next visit reloads", async () => {
+    rpc.server.getUsageSummary.mockResolvedValue({
+      contractVersion: USAGE_CONTRACT_VERSION,
+      sources: [],
+    });
+    await loadNodeStatistics(environment, "usage", "30d");
+
+    expect(cachedNodeUsage([{ ...environment, label: "Studio" }], "30d")).toEqual([
+      expect.objectContaining({ environmentId: environment.environmentId, label: "Studio" }),
+    ]);
+    expect(cachedNodeUsage([environment], "7d")).toEqual([]);
+    // A device that will not be asked shows its coming error, not the old summary.
+    expect(
+      cachedNodeUsage([{ ...environment, connectionState: "offline" as const }], "30d"),
+    ).toEqual([]);
+    expect(cachedNodeUsage([{ ...environment, role: "viewer" as const }], "30d")).toEqual([]);
+    // A failed answer never replaces the last usable one.
+    rpc.server.getUsageSummary.mockRejectedValue(new Error("Node restarted"));
+    expect((await loadNodeStatistics(environment, "usage", "30d")).error).toBe("Node restarted");
+    expect(cachedNodeUsage([environment], "30d")).toHaveLength(1);
   });
   it("loads the selected surface only and preserves absent provider limits", async () => {
     const providers = [{ instanceId: "custom", enabled: true }];

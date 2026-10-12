@@ -116,6 +116,32 @@ describe("persistent Hub session", () => {
     expect(sockets[0]!.frames().at(-1)).toEqual({ type: "open", streamId: 3 });
     session.dispose();
   });
+  it("hands a stream its data inside the socket's buffer, and zeroes data no stream takes", () => {
+    const { session, sockets } = harness();
+    const stream = session.createSocket();
+    let received: Uint8Array | undefined;
+    stream.onBinaryMessage((bytes) => {
+      received = bytes;
+      // What the relay engine does with every buffer it is handed.
+      bytes.fill(0);
+    });
+    sockets[0]!.ready();
+    const deliver = (frame: HubSessionFrame) => {
+      const encoded = encodeHubSessionFrame(frame);
+      if (!encoded.ok) throw new Error("frame");
+      for (const cb of sockets[0]!.messages) cb(encoded.value);
+      return encoded.value;
+    };
+    const delivered = deliver({ type: "data", streamId: 1, payload: Uint8Array.of(7, 8, 9) });
+    expect(received?.buffer).toBe(delivered.buffer);
+    // The consumer's zeroing reaches the socket's buffer: no unzeroed copy is left.
+    expect([...delivered]).toEqual([2, 0, 0, 0, 1, 0, 0, 0]);
+    stream.close();
+    const dropped = deliver({ type: "data", streamId: 1, payload: Uint8Array.of(4, 5) });
+    expect([...dropped.subarray(5)]).toEqual([0, 0]);
+    expect(sockets[0]!.closed).toBe(0);
+    session.dispose();
+  });
   it("keeps an idle directory session alive and forwards bounded invalidation notifications", async () => {
     const { session, sockets, onInvalidate } = harness();
     const subscriber = vi.fn();
@@ -252,6 +278,68 @@ describe("persistent Hub session", () => {
     expect(onInvalidate).toHaveBeenLastCalledWith({ directory: true, threadCache: true });
     session.dispose();
     expect(vi.getTimerCount()).toBe(0);
+  });
+  it("detects a silently dead connection within the probe bound instead of the liveness bound", async () => {
+    const { session, sockets, onFailure } = harness();
+    const channel = session.createSocket();
+    const closed = vi.fn();
+    channel.onClose(closed);
+    sockets[0]!.ready();
+    await vi.advanceTimersByTimeAsync(1_000);
+    session.probe();
+    expect(sockets[0]!.frames().at(-1)?.type).toBe("ping");
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(onFailure).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(onFailure).toHaveBeenCalledWith({ kind: "network", retryable: true });
+    expect(closed).toHaveBeenCalledOnce();
+    expect(sockets[0]!.closed).toBe(1);
+    // The ordinary bounded reconnect follows.
+    await vi.advanceTimersByTimeAsync(500);
+    expect(sockets).toHaveLength(2);
+    session.dispose();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+  it("keeps a live connection that answers a probe and reuses a pending heartbeat ping", async () => {
+    const { session, sockets, onFailure } = harness();
+    session.start();
+    sockets[0]!.ready();
+    session.probe();
+    const pings = () => sockets[0]!.frames().filter((frame) => frame.type === "ping");
+    expect(pings()).toHaveLength(1);
+    // A second signal while the probe is armed sends nothing more.
+    session.probe();
+    expect(pings()).toHaveLength(1);
+    const ping = pings()[0]!;
+    if (ping.type !== "ping") throw new Error("missing ping");
+    sockets[0]!.receive({ type: "pong", nonce: ping.nonce });
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(onFailure).not.toHaveBeenCalled();
+    // The heartbeat's own ping is pending: a probe waits on it instead of
+    // sending a second nonce its delayed pong would not match.
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(pings()).toHaveLength(2);
+    session.probe();
+    expect(pings()).toHaveLength(2);
+    const heartbeat = pings()[1]!;
+    if (heartbeat.type !== "ping") throw new Error("missing ping");
+    await vi.advanceTimersByTimeAsync(1_000);
+    sockets[0]!.receive({ type: "pong", nonce: heartbeat.nonce });
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(onFailure).not.toHaveBeenCalled();
+    expect(sockets).toHaveLength(1);
+    session.dispose();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+  it("ignores a probe before READY", async () => {
+    const { session, sockets, onFailure } = harness();
+    session.start();
+    session.probe();
+    expect(sockets[0]!.sent).toHaveLength(0);
+    sockets[0]!.ready();
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(onFailure).not.toHaveBeenCalled();
+    session.dispose();
   });
   it("rejects malformed or wrong-direction envelopes without fallback", () => {
     const { session, sockets, onFailure } = harness();

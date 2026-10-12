@@ -3,10 +3,13 @@ export * from "./dispatchReplay.ts";
 export * from "./dpop.ts";
 export * from "./ecdsa.ts";
 export * from "./reconnectPolicy.ts";
-export * from "./relayE2eeChannel.ts";
-export * from "./relayE2eeInitiator.ts";
 export * from "./transport.ts";
 export * from "./relayEngine.ts";
 export * from "./webauthn.ts";
 
 export * from "./hostedHubSession.ts";
+
+// The E2EE initiator and channel (curves, hashes, ciphers, handshake) are not
+// re-exported: import them from `@ryco/client-runtime/relay/e2ee`. Metro does
+// not tree-shake, so a re-export here would put that stack on the startup path
+// of every native client that imports any relay helper.

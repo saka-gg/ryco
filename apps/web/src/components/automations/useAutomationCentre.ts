@@ -16,12 +16,18 @@ import {
 import { isTagged } from "effect/Predicate";
 
 import { readEnvironmentApi, readEnvironmentApiForConnection } from "../../environmentApi";
+import { useEnvironmentServerConfig } from "../../hooks/useChatsAvailability";
 import {
   readEnvironmentConnection,
   subscribeEnvironmentConnections,
 } from "../../environments/runtime";
 import { useHostedRpcCapability } from "../../hostedHub/capabilities";
+import { readAgentControlEnabled } from "../agent-control/agentControlSyncGate";
 import { retainAgentControlProposalSync } from "./data/useAutomationProposalSync";
+
+const NO_PROVIDERS: ReadonlyArray<ServerProvider> = [];
+const AGENT_CONTROL_OFF_ERROR =
+  "Agent Control is turned off on this device. Turn it on in its settings to use automations.";
 
 type WithoutRequest<T> = T extends unknown ? Omit<T, "requestId"> : never;
 /**
@@ -62,7 +68,14 @@ export function useAutomationCentre(
 ): AutomationCentreState {
   const capability = useHostedRpcCapability(AGENT_CONTROL_WS_METHODS.automationCommand);
   const [snapshot, setSnapshot] = useState<AutomationCentreSnapshot | null>(null);
-  const [providers, setProviders] = useState<ReadonlyArray<ServerProvider>>([]);
+  // The environment's live config (its subscription keeps it current), not a
+  // full `getConfig` read per bind just for the provider list.
+  const environmentConfig = useEnvironmentServerConfig(environmentId);
+  const providers = environmentConfig?.providers ?? NO_PROVIDERS;
+  // The device's own config says Agent Control is off: read nothing and hold
+  // no queue subscription instead of letting the server refuse both. Unknown
+  // config still attempts; turning the feature on re-runs the binding.
+  const agentControlOff = readAgentControlEnabled(environmentConfig) === false;
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const pending = useRef(false);
@@ -72,6 +85,8 @@ export function useAutomationCentre(
   const unanswered = useRef(new Map<string, AgentControlRequestId>());
 
   useEffect(() => {
+    // Off: the returned state says so (below); nothing to bind.
+    if (agentControlOff) return;
     let client: unknown = undefined;
     let stop = () => {};
     let invalidate = () => {};
@@ -84,7 +99,6 @@ export function useAutomationCentre(
       pending.current = false;
       setBusy(false);
       setSnapshot(null);
-      setProviders([]);
       const api = next ? readEnvironmentApiForConnection(environmentId, next) : undefined;
       if (!api?.automationCentre) {
         setError("Connect to a server with the automation centre available.");
@@ -113,12 +127,6 @@ export function useAutomationCentre(
           setError("Automation access is unavailable.");
         }
       };
-      void next!.server
-        .getConfig()
-        .then((config) => {
-          if (generation.current === epoch) setProviders(config.providers);
-        })
-        .catch(() => {});
       void reader.refresh();
       stop = () => {
         reader.stop();
@@ -158,10 +166,10 @@ export function useAutomationCentre(
       releaseSync();
       window.removeEventListener("focus", onFocus);
     };
-  }, [environmentId, projectId]);
+  }, [agentControlOff, environmentId, projectId]);
 
   const command = async (input: AutomationCommandDraft): Promise<boolean> => {
-    if (!capability.allowed || pending.current) return false;
+    if (!capability.allowed || agentControlOff || pending.current) return false;
     const api = readEnvironmentApi(environmentId)?.automationCentre;
     if (!api) return false;
     const epoch = generation.current;
@@ -199,7 +207,7 @@ export function useAutomationCentre(
     }
   };
   const decide = async (proposalId: AgentControlProposalId, decision: "accept" | "reject") => {
-    if (!capability.allowed || pending.current) return;
+    if (!capability.allowed || agentControlOff || pending.current) return;
     const api = readEnvironmentApi(environmentId)?.agentControl;
     if (!api) return;
     const epoch = generation.current;
@@ -222,10 +230,10 @@ export function useAutomationCentre(
     }
   };
   return {
-    snapshot,
+    snapshot: agentControlOff ? null : snapshot,
     providers,
-    error,
-    busy,
+    error: agentControlOff ? AGENT_CONTROL_OFF_ERROR : error,
+    busy: agentControlOff ? false : busy,
     disabledReason: capability.allowed
       ? null
       : (capability.reason ?? "Automation changes are unavailable."),

@@ -51,6 +51,8 @@ vi.mock("~/environments/runtime", () => ({
 vi.mock("~/hooks/useSettings", () => ({
   useSettings: (select: (settings: unknown) => unknown) =>
     select({ sourceControlRefreshMode: "manual" }),
+  // Read outside React by modules the panel imports (editor preferences).
+  getClientSettings: () => ({ preferredEditor: null }),
 }));
 vi.mock("~/lib/gitStatusState", () => import("../../../test/gitStatusStateMock"));
 vi.mock("../GitActionsControl", () => ({ default: () => null, GitThreadSync: () => null }));

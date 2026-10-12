@@ -20,6 +20,7 @@ import {
 import type { ServerProviderDraft } from "../providerSnapshot.ts";
 import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
 import { makeManualOnlyProviderMaintenanceCapabilities } from "../providerMaintenance.ts";
+import { makeProviderProbeFingerprint } from "../providerProbeFingerprint.ts";
 import { AgentControlSessionRegistry } from "../../agentControl/Services/AgentControlSessionRegistry.ts";
 
 const DRIVER_KIND = ProviderDriverKind.make("copilot");
@@ -84,13 +85,22 @@ export const CopilotDriver: ProviderDriver<CopilotSettings, CopilotDriverEnv> = 
         Effect.map(stampIdentity),
       );
 
-      const maintenanceCapabilities = makeManualOnlyProviderMaintenanceCapabilities({
-        provider: DRIVER_KIND,
-        packageName: null,
+      const maintenanceCapabilities = Effect.succeed(
+        makeManualOnlyProviderMaintenanceCapabilities({
+          provider: DRIVER_KIND,
+          packageName: null,
+        }),
+      );
+      const probeFingerprint = yield* makeProviderProbeFingerprint({
+        driverKind: DRIVER_KIND,
+        binaryPaths: [effectiveConfig.binaryPath],
+        env: processEnv,
+        settings: { instanceId, displayName, accentColor, environment, config: effectiveConfig },
       });
 
       const snapshot = yield* makeManagedServerProvider<CopilotSettings>({
         maintenanceCapabilities,
+        probeFingerprint,
         getSettings: Effect.succeed(effectiveConfig),
         streamSettings: Stream.never,
         haveSettingsChanged: () => false,

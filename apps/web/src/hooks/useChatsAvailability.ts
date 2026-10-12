@@ -1,31 +1,73 @@
-import { useAtomValue } from "@effect/atom-react";
-import { serverConfigAtom } from "@ryco/client-runtime/rpc";
+import { RegistryContext } from "@effect/atom-react";
+import { getServerConfig, serverConfigAtom } from "@ryco/client-runtime/rpc";
 import {
   resolveChatsAvailability,
   type ChatsAvailability,
 } from "@ryco/client-runtime/state/composer";
 import type { EnvironmentId, ServerConfig } from "@ryco/contracts";
-import { useMemo } from "react";
+import { useCallback, useContext, useMemo } from "react";
 
-import { usePrimaryEnvironmentId } from "../environments/primary";
+import { readPrimaryEnvironmentDescriptor, usePrimaryEnvironmentId } from "../environments/primary";
 import { useSavedEnvironmentRuntimeStore } from "../environments/runtime";
 import type { PresentationTier } from "../lib/presentationTier";
 import { usePresentationTier } from "./usePresentationTier";
+import { useSyncExternalStoreSelector } from "./useSyncExternalStoreSelector";
+
+const selectWholeServerConfig = (config: ServerConfig | null): ServerConfig | null => config;
 
 /**
  * The live server config of one environment: the primary connection's atom,
- * or a saved environment's runtime snapshot. Null while unknown.
+ * or a saved environment's runtime snapshot. Null while unknown. Re-renders on
+ * every config push; hot components should use
+ * {@link useEnvironmentServerConfigSelector}.
  */
 export function useEnvironmentServerConfig(
   environmentId: EnvironmentId | null | undefined,
 ): ServerConfig | null {
+  return useEnvironmentServerConfigSelector(environmentId, selectWholeServerConfig);
+}
+
+/**
+ * Narrow subscription to one environment's live server config (null while
+ * unknown): re-renders only when `selector`'s result changes (Object.is), not
+ * on every config push, which includes each provider-status probe. Pass a
+ * stable (module-level) selector that returns the same value for an unchanged
+ * config.
+ */
+export function useEnvironmentServerConfigSelector<T>(
+  environmentId: EnvironmentId | null | undefined,
+  selector: (config: ServerConfig | null) => T,
+): T {
+  const registry = useContext(RegistryContext);
   const primaryEnvironmentId = usePrimaryEnvironmentId();
-  const primaryConfig = useAtomValue(serverConfigAtom);
-  const savedConfig = useSavedEnvironmentRuntimeStore((state) =>
-    environmentId ? (state.byId[environmentId]?.serverConfig ?? null) : null,
+  const isPrimary = Boolean(environmentId) && environmentId === primaryEnvironmentId;
+  const subscribePrimary = useCallback(
+    (listener: () => void) =>
+      isPrimary ? registry.subscribe(serverConfigAtom, () => listener()) : () => undefined,
+    [isPrimary, registry],
   );
+  const readPrimary = useCallback(
+    () => (isPrimary ? registry.get(serverConfigAtom) : null),
+    [isPrimary, registry],
+  );
+  const primarySelection = useSyncExternalStoreSelector(subscribePrimary, readPrimary, selector);
+  const savedSelection = useSavedEnvironmentRuntimeStore((state) =>
+    selector(
+      environmentId && !isPrimary ? (state.byId[environmentId]?.serverConfig ?? null) : null,
+    ),
+  );
+  return isPrimary ? primarySelection : savedSelection;
+}
+
+/** Non-reactive read of {@link useEnvironmentServerConfig}, for event handlers. */
+export function readEnvironmentServerConfig(
+  environmentId: EnvironmentId | null | undefined,
+): ServerConfig | null {
   if (!environmentId) return null;
-  return environmentId === primaryEnvironmentId ? primaryConfig : savedConfig;
+  if (environmentId === readPrimaryEnvironmentDescriptor()?.environmentId) {
+    return getServerConfig();
+  }
+  return useSavedEnvironmentRuntimeStore.getState().byId[environmentId]?.serverConfig ?? null;
 }
 
 const PHONE_TIER_CHATS_UNAVAILABLE: ChatsAvailability = {

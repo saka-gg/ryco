@@ -1,4 +1,4 @@
-import { Schema } from "effect";
+import * as Schema from "effect/Schema";
 import { IsoDateTime, NonNegativeInt, ProjectId, rejectExcessProperties } from "./baseSchemas.ts";
 import { WorktreeId } from "./worktree.ts";
 

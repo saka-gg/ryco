@@ -10,7 +10,11 @@
  *
  * @module OrchestrationEngineService
  */
-import type { OrchestrationCommand, OrchestrationEvent } from "@ryco/contracts";
+import type {
+  OrchestrationCommand,
+  OrchestrationEvent,
+  OrchestrationReadModel,
+} from "@ryco/contracts";
 import { Context } from "effect";
 import type { Effect, PubSub, Scope, Stream } from "effect";
 
@@ -27,6 +31,18 @@ export interface OrchestrationEngineShape {
    * command worker forks, so every later event belongs to this process.
    */
   readonly bootSequence: number;
+
+  /**
+   * The engine's in-memory command read model: the decider's source of truth, hydrated once at
+   * construction and advanced by every committed event. Startup repairs and restart continuations
+   * read it instead of hydrating the SQL command read model again.
+   *
+   * It is the command model, not a full snapshot: per thread it holds the user-message anchors
+   * and actionable activities loaded at boot plus the messages and activities committed since.
+   * Read only the fields the decider relies on. Absent only in narrow test doubles; use
+   * `currentCommandReadModel` to fall back to the SQL read model there.
+   */
+  readonly getReadModel?: () => Effect.Effect<OrchestrationReadModel>;
 
   /** Fail closed without synchronous authority; the returned fence must be checked in the PTY commit. */
   readonly captureThreadWorkspace?: (input: {
@@ -57,6 +73,26 @@ export interface OrchestrationEngineShape {
     fromSequenceExclusive: number,
     limit: number,
   ) => Effect.Effect<
+    {
+      readonly events: ReadonlyArray<OrchestrationEvent>;
+      readonly nextSequence: number;
+      readonly hasMore: boolean;
+    },
+    OrchestrationEventStoreError,
+    never
+  >;
+
+  /**
+   * Replay one persisted page of a single aggregate stream (one thread, project or worktree)
+   * after an exclusive sequence cursor, read through the stream index instead of the global log.
+   * Absent only in narrow test doubles; callers fall back to `readEventsPage` and filter.
+   */
+  readonly readStreamEventsPage?: (input: {
+    readonly aggregateKind: OrchestrationEvent["aggregateKind"];
+    readonly streamId: string;
+    readonly fromSequenceExclusive: number;
+    readonly limit: number;
+  }) => Effect.Effect<
     {
       readonly events: ReadonlyArray<OrchestrationEvent>;
       readonly nextSequence: number;

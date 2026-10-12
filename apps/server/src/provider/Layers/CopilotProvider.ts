@@ -14,6 +14,7 @@ import {
 } from "../providerSnapshot.ts";
 import { ProviderAdapterProcessError } from "../Errors.ts";
 import { makeCopilotClientOptions } from "./CopilotAdapter.ts";
+import { COPILOT_CLIENT_STOP_TIMEOUT_MS, stopCopilotClient } from "./CopilotAdapter.clientStop.ts";
 
 const PROVIDER = ProviderDriverKind.make("copilot");
 const COPILOT_PRESENTATION = {
@@ -150,7 +151,11 @@ const withClient = <A>(
             cause,
           }),
       }),
-    (client) => Effect.tryPromise(() => client.stop()).pipe(Effect.orDie),
+    // A probe owns no sessions, so a stuck stop is force-stopped quickly (also at shutdown).
+    (client) =>
+      Effect.promise(() =>
+        stopCopilotClient({ client, timeoutMs: COPILOT_CLIENT_STOP_TIMEOUT_MS }),
+      ),
   );
 
 export function makePendingCopilotProvider(settings: CopilotSettings): ServerProviderDraft {

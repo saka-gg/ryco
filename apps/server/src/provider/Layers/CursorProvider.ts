@@ -36,6 +36,10 @@ import {
 } from "../providerMaintenance.ts";
 import { ServerSettingsService, type ServerSettingsShape } from "../../serverSettings.ts";
 import { AcpSessionRuntime } from "../acp/AcpSessionRuntime.ts";
+import {
+  cursorAcpPhaseTimeoutHints,
+  resolveCursorAgentCommand,
+} from "../acp/CursorAgentCommand.ts";
 import { CursorListAvailableModelsResponse } from "../acp/CursorAcpExtension.ts";
 
 const PROVIDER = ProviderDriverKind.make("cursor");
@@ -401,6 +405,7 @@ const makeCursorAcpProbeRuntime = (
         clientInfo: { name: "ryco-provider-probe", version: "0.0.0" },
         authMethodId: "cursor_login",
         clientCapabilities: CURSOR_PARAMETERIZED_MODEL_PICKER_CAPABILITIES,
+        phaseTimeoutHints: cursorAcpPhaseTimeoutHints(cursorSettings.binaryPath),
       }).pipe(Layer.provide(Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner))),
     );
     return yield* Effect.service(AcpSessionRuntime).pipe(Effect.provide(acpContext));
@@ -718,6 +723,32 @@ function isCursorAboutJsonFormatUnsupported(result: CommandResult): boolean {
   );
 }
 
+function isCursorAboutCommandUnsupported(result: CommandResult): boolean {
+  const lowerOutput = `${result.stdout}\n${result.stderr}`.toLowerCase();
+  return (
+    lowerOutput.includes("unknown command") ||
+    lowerOutput.includes("unrecognized command") ||
+    lowerOutput.includes("unexpected argument")
+  );
+}
+
+/**
+ * Whether `about` output came from the Cursor Agent CLI. The default command `agent` is generic
+ * (other CLIs install one too), so the probe checks who answered before trusting the output.
+ * Cursor builds without `about` are recognized separately and keep their dedicated warning.
+ */
+export function isCursorAgentAboutOutput(result: CommandResult): boolean {
+  const jsonPayload = parseCursorAboutJsonPayload(result.stdout);
+  if (jsonPayload) {
+    return hasOwn(jsonPayload, "cliVersion") || hasOwn(jsonPayload, "userEmail");
+  }
+  if (isCursorAboutCommandUnsupported(result)) {
+    return true;
+  }
+  const plain = stripAnsi(`${result.stdout}\n${result.stderr}`);
+  return /\bcursor\b/i.test(plain) || extractAboutField(plain, "CLI Version") !== undefined;
+}
+
 const readCursorCliConfigChannel = Effect.fn("readCursorCliConfigChannel")(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -847,14 +878,9 @@ export function parseCursorAboutOutput(result: CommandResult): CursorAboutResult
   }
 
   const combined = `${result.stdout}\n${result.stderr}`;
-  const lowerOutput = combined.toLowerCase();
 
   // If the command itself isn't recognised, we're on an old CLI version.
-  if (
-    lowerOutput.includes("unknown command") ||
-    lowerOutput.includes("unrecognized command") ||
-    lowerOutput.includes("unexpected argument")
-  ) {
+  if (isCursorAboutCommandUnsupported(result)) {
     return {
       version: null,
       status: "warning",
@@ -945,7 +971,7 @@ const runCursorAboutCommand = (
   });
 
 export const checkCursorProviderStatus = Effect.fn("checkCursorProviderStatus")(function* (
-  cursorSettings: CursorSettings,
+  configuredCursorSettings: CursorSettings,
   environment: NodeJS.ProcessEnv = process.env,
 ): Effect.fn.Return<
   ServerProviderDraft,
@@ -953,9 +979,9 @@ export const checkCursorProviderStatus = Effect.fn("checkCursorProviderStatus")(
   ChildProcessSpawner.ChildProcessSpawner | FileSystem.FileSystem | Path.Path
 > {
   const checkedAt = new Date().toISOString();
-  const fallbackModels = getCursorFallbackModels(cursorSettings);
+  const fallbackModels = getCursorFallbackModels(configuredCursorSettings);
 
-  if (!cursorSettings.enabled) {
+  if (!configuredCursorSettings.enabled) {
     return buildServerProvider({
       presentation: CURSOR_PRESENTATION,
       enabled: false,
@@ -970,6 +996,20 @@ export const checkCursorProviderStatus = Effect.fn("checkCursorProviderStatus")(
       },
     });
   }
+
+  // Re-resolve here (not from the spawn cache) so installing `cursor-agent` is picked up.
+  const agentCommand = yield* resolveCursorAgentCommand(
+    configuredCursorSettings.binaryPath,
+    environment,
+    { fresh: true },
+  );
+  const cursorSettings: CursorSettings = {
+    ...configuredCursorSettings,
+    binaryPath: agentCommand.command,
+  };
+  const commandLabel = agentCommand.resolvedPath
+    ? `\`${agentCommand.command}\` (${agentCommand.resolvedPath})`
+    : `\`${agentCommand.command}\``;
 
   // Single `agent about` probe: returns version + auth status in one call.
   const aboutProbe = yield* runCursorAboutCommand(cursorSettings, environment).pipe(
@@ -1007,7 +1047,23 @@ export const checkCursorProviderStatus = Effect.fn("checkCursorProviderStatus")(
         version: null,
         status: "error",
         auth: { status: "unknown" },
-        message: "Cursor Agent CLI is installed but timed out while running `agent about`.",
+        message: `Cursor Agent CLI ${commandLabel} timed out while running \`about\`. If it is not the Cursor Agent CLI, set the Cursor binary path in provider settings.`,
+      },
+    });
+  }
+
+  if (!isCursorAgentAboutOutput(aboutProbe.success.value)) {
+    return buildServerProvider({
+      presentation: CURSOR_PRESENTATION,
+      enabled: cursorSettings.enabled,
+      checkedAt,
+      models: fallbackModels,
+      probe: {
+        installed: false,
+        version: null,
+        status: "error",
+        auth: { status: "unknown" },
+        message: `${commandLabel} did not identify as the Cursor Agent CLI. Install Cursor Agent (\`cursor-agent\`) or set the Cursor binary path in provider settings.`,
       },
     });
   }

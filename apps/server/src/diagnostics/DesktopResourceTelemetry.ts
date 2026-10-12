@@ -1,3 +1,4 @@
+import { attachDesktopLifecycleChannel } from "../desktopLifecycle.ts";
 import { nativeResourceMonitor } from "./NativeResourceMonitor.ts";
 import { Socket } from "node:net";
 import type { Duplex } from "node:stream";
@@ -88,6 +89,7 @@ export function initializeDesktopResourceTelemetry(fd: number): void {
     const connection = new Socket({ fd, readable: true, writable: true });
     connection.unref();
     receiver = makeDesktopResourceTelemetry(connection);
+    attachDesktopLifecycleChannel(connection);
   } catch {
     // Optional diagnostics must never prevent backend startup.
   }

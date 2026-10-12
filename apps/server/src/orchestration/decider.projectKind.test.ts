@@ -94,6 +94,35 @@ describe("decider project kind", () => {
     expect((await apply(readModel, unchanged, 2)).projects[0]?.kind).toBe("chat");
   });
 
+  it("keeps updatedAt for an update that changes nothing, such as an identity announcement", async () => {
+    const { readModel } = await createProject("project");
+    const before = readModel.projects[0]!.updatedAt;
+    const announcement = await decide(
+      {
+        type: "project.meta.update",
+        commandId: CommandId.make("announce-identity"),
+        projectId,
+      },
+      readModel,
+    );
+    expect(announcement.type).toBe("project.meta-updated");
+    expect(announcement.payload).toEqual({ projectId, updatedAt: before });
+    const next = await apply(readModel, announcement, 2);
+    expect(next.projects[0]?.updatedAt).toBe(before);
+    // Clients holding the project still pass the optimistic concurrency check afterwards.
+    const renamed = await decide(
+      {
+        type: "project.meta.update",
+        commandId: CommandId.make("rename-after-announcement"),
+        projectId,
+        expectedUpdatedAt: before,
+        title: "Renamed",
+      },
+      next,
+    );
+    expect((renamed.payload as { updatedAt: string }).updatedAt).not.toBe(before);
+  });
+
   it("never turns a project into a chat", async () => {
     const { readModel } = await createProject("project");
     await expect(updateKind(readModel, "chat")).rejects.toThrow(

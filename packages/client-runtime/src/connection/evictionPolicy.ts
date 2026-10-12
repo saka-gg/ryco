@@ -22,14 +22,22 @@ export interface EvictionCandidate<Key> {
 export interface EvictionCaps {
   readonly maxEntries: number;
   readonly maxBytes: number;
+  /**
+   * Which entries the byte budget covers. `"all"` (default) bounds the total,
+   * as a store of persisted snapshots needs. `"evictable"` bounds only the
+   * idle entries, so a pinned entry's growth cannot evict every idle one.
+   */
+  readonly byteBudget?: "all" | "evictable";
 }
 
 export function planEvictionsToCapacity<Key>(
   entries: ReadonlyArray<EvictionCandidate<Key>>,
   caps: EvictionCaps,
 ): Key[] {
+  const budgeted =
+    caps.byteBudget === "evictable" ? entries.filter((entry) => entry.evictable) : entries;
   let count = entries.length;
-  let bytes = entries.reduce((total, entry) => total + entry.retainedBytes, 0);
+  let bytes = budgeted.reduce((total, entry) => total + entry.retainedBytes, 0);
   const withinCaps = () => count <= caps.maxEntries && bytes <= caps.maxBytes;
   if (withinCaps()) return [];
 

@@ -1,9 +1,4 @@
-"use client";
-
-import * as React from "react";
-import { ResponsiveContainer, Tooltip } from "recharts";
-
-import { cn } from "~/lib/utils";
+import type * as React from "react";
 
 /**
  * Cohesive, restrained chart palette derived around the product's purple-blue
@@ -27,42 +22,6 @@ export function chartColor(index: number): string {
   ]!;
 }
 
-/**
- * Responsive wrapper around Recharts. The caller controls the size via
- * `className` (e.g. `h-[240px] w-full`); the chart fills it. Tick/grid/cursor
- * styling is normalised to the design tokens here so individual charts stay
- * declarative.
- */
-export function ChartContainer({
-  className,
-  children,
-  ...props
-}: React.HTMLAttributes<HTMLDivElement> & { children: React.ReactElement }) {
-  return (
-    <div
-      data-slot="chart"
-      className={cn(
-        "w-full text-xs",
-        "[&_.recharts-cartesian-axis-tick_text]:fill-muted-foreground",
-        "[&_.recharts-cartesian-axis-line]:stroke-border/70",
-        "[&_.recharts-cartesian-grid_line]:stroke-border/50",
-        "[&_.recharts-curve.recharts-tooltip-cursor]:stroke-border",
-        "[&_.recharts-rectangle.recharts-tooltip-cursor]:fill-muted/50",
-        "[&_.recharts-sector]:outline-none [&_.recharts-surface]:outline-none",
-        className,
-      )}
-      {...props}
-    >
-      <ResponsiveContainer width="100%" height="100%">
-        {children}
-      </ResponsiveContainer>
-    </div>
-  );
-}
-
-/** Re-export of Recharts' Tooltip for ergonomic imports alongside the content. */
-export const ChartTooltip = Tooltip;
-
 export interface ChartTooltipPayloadItem {
   readonly name?: React.ReactNode;
   readonly value?: number | string;
@@ -72,8 +31,9 @@ export interface ChartTooltipPayloadItem {
 }
 
 /**
- * Tooltip body styled to match popovers. Pass as `content` to a Recharts
- * `<Tooltip />`; Recharts injects `active` / `payload` / `label` at render.
+ * Tooltip body styled to match popovers. The Statistics page's SVG charts render
+ * it directly; Recharts charts pass it as `content` to `<Tooltip />`, which
+ * injects `active` / `payload` / `label` at render.
  */
 export function ChartTooltipContent({
   active,

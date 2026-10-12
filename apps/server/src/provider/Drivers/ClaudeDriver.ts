@@ -39,12 +39,17 @@ import type { ServerProviderDraft } from "../providerSnapshot.ts";
 import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
 import {
   enrichProviderSnapshotWithVersionAdvisory,
+  makeLazyProviderMaintenanceCapabilities,
   makePackageManagedProviderMaintenanceResolver,
   normalizeCommandPath,
-  resolveProviderMaintenanceCapabilitiesEffect,
 } from "../providerMaintenance.ts";
+import { makeProviderProbeFingerprint } from "../providerProbeFingerprint.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
-import { makeClaudeCapabilitiesCacheKey, makeClaudeContinuationGroupKey } from "./ClaudeHome.ts";
+import {
+  makeClaudeCapabilitiesCacheKey,
+  makeClaudeContinuationGroupKey,
+  resolveClaudeSourceRoot,
+} from "./ClaudeHome.ts";
 import { AgentControlSessionRegistry } from "../../agentControl/Services/AgentControlSessionRegistry.ts";
 
 const DRIVER_KIND = ProviderDriverKind.make("claudeAgent");
@@ -122,9 +127,23 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
         instanceId,
       });
       const effectiveConfig = { ...config, enabled } satisfies ClaudeSettings;
-      const maintenanceCapabilities = yield* resolveProviderMaintenanceCapabilitiesEffect(UPDATE, {
+      const maintenanceCapabilities = yield* makeLazyProviderMaintenanceCapabilities(UPDATE, {
         binaryPath: effectiveConfig.binaryPath,
         env: processEnv,
+      });
+      const probeFingerprint = yield* makeProviderProbeFingerprint({
+        driverKind: DRIVER_KIND,
+        binaryPaths: [effectiveConfig.binaryPath],
+        env: processEnv,
+        settings: { instanceId, displayName, accentColor, environment, config: effectiveConfig },
+        authFiles: [
+          path.join(
+            yield* resolveClaudeSourceRoot(effectiveConfig, processEnv),
+            ".credentials.json",
+          ),
+        ],
+        // The probed model list comes from the (remotely refreshable) model manifest.
+        ...(Option.isSome(modelManifest) ? { dynamicInputs: modelManifest.value.current } : {}),
       });
       const continuationGroupKey = yield* makeClaudeContinuationGroupKey(
         effectiveConfig,
@@ -183,13 +202,17 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
 
       const snapshot = yield* makeManagedServerProvider<ClaudeSettings>({
         maintenanceCapabilities,
+        probeFingerprint,
         getSettings: Effect.succeed(effectiveConfig),
         streamSettings: Stream.never,
         haveSettingsChanged: () => false,
         initialSnapshot: (settings) => stampIdentity(makePendingClaudeProvider(settings)),
         checkProvider,
         enrichSnapshot: ({ snapshot, publishSnapshot }) =>
-          enrichProviderSnapshotWithVersionAdvisory(snapshot, maintenanceCapabilities).pipe(
+          maintenanceCapabilities.pipe(
+            Effect.flatMap((capabilities) =>
+              enrichProviderSnapshotWithVersionAdvisory(snapshot, capabilities),
+            ),
             Effect.provideService(HttpClient.HttpClient, httpClient),
             Effect.provideService(ServerSettingsService, serverSettings),
             Effect.flatMap((enrichedSnapshot) => publishSnapshot(enrichedSnapshot)),

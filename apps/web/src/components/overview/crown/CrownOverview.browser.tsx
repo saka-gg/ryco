@@ -51,6 +51,7 @@ import {
 import { makeRuntimeAgent } from "../../agents/agentRosterTestFixtures";
 import type { CrownChatBinding, CrownOverviewProps, CrownProject } from "./crownTypes";
 import { CrownOverview } from "./CrownOverview";
+import { clearAllProjectIconCaches } from "@ryco/client-runtime/connection";
 
 const RUNNING_RUNS: ReadonlyArray<OverviewPullRequestCheckRun> = [
   { id: "fmt", name: "Format", statusLabel: "Succeeded", statusKind: "passed", tone: "success" },
@@ -751,6 +752,8 @@ describe("CrownOverview", () => {
         appAtomRegistry.set(serverConfigAtom, null);
         resetWsConnectionStateForTests();
         resetPrimaryEnvironmentDescriptorForTests();
+        // Icons are cached per environment and project, so every sample starts uncached.
+        clearAllProjectIconCaches();
       });
 
       async function mountWithArtwork(sample: ArtworkSample) {

@@ -230,28 +230,56 @@ export function buildBranchNamePrompt(input: BranchNamePromptInput) {
 export interface ThreadTitlePromptInput {
   message: string;
   attachments?: ReadonlyArray<ChatAttachment> | undefined;
+  /** Also ask for a git branch name for the same work, in the same response. */
+  includeBranch?: boolean | undefined;
   policy?: TextGenerationPolicy | undefined;
 }
 
 export function buildThreadTitlePrompt(input: ThreadTitlePromptInput) {
+  const wantsBranch = input.includeBranch === true;
   const prompt = buildPromptFromMessage({
-    instruction: "You write concise thread titles for coding conversations.",
-    responseShape: "Return a JSON object with key: title.",
+    instruction: wantsBranch
+      ? "You write concise thread titles and git branch names for coding conversations."
+      : "You write concise thread titles for coding conversations.",
+    responseShape: wantsBranch
+      ? "Return a JSON object with keys: title, branch."
+      : "Return a JSON object with key: title.",
     rules: [
       "Title should summarize the user's request, not restate it verbatim.",
       "Keep it short and specific (3-8 words).",
       "Avoid quotes, filler, prefixes, and trailing punctuation.",
+      ...(wantsBranch
+        ? [
+            "Branch should describe the requested work in 2-6 plain words, with no issue prefixes and no punctuation-heavy text.",
+          ]
+        : []),
       "If images are attached, use them as primary context for visual/UI issues.",
     ],
     message: input.message,
     attachments: input.attachments,
-    additionalInstructions: input.policy?.threadTitleInstructions,
-  });
-  const outputSchema = Schema.Struct({
-    title: Schema.String,
+    additionalInstructions: wantsBranch
+      ? [input.policy?.threadTitleInstructions, input.policy?.branchInstructions]
+          .filter((instruction) => instruction !== undefined && instruction.trim().length > 0)
+          .join("\n") || undefined
+      : input.policy?.threadTitleInstructions,
   });
 
-  return { prompt, outputSchema };
+  if (wantsBranch) {
+    return {
+      prompt,
+      outputSchema: Schema.Struct({
+        title: Schema.String,
+        branch: Schema.String,
+      }),
+    };
+  }
+
+  return {
+    prompt,
+    outputSchema: Schema.Struct({
+      title: Schema.String,
+    }),
+  };
 }
 
 // ---------------------------------------------------------------------------

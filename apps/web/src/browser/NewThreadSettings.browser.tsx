@@ -143,7 +143,9 @@ describe("draft settings for canonical environment identities", () => {
       await page.getByRole("button", { name: "New draft" }).click();
       await vi.waitFor(() => expect(navigate).toHaveBeenCalledOnce());
       expect(readPreferences).toHaveBeenCalledWith({ projectId });
-      expect(readConfig).toHaveBeenCalledOnce();
+      // A non-hosted target's live config (kept current by its config stream)
+      // stands in for a fresh `getConfig`; only the preferences read remains.
+      expect(readConfig).not.toHaveBeenCalled();
       const draft = useComposerDraftStore
         .getState()
         .getDraftSessionByLogicalProjectKey(

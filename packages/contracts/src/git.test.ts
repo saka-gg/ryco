@@ -7,6 +7,7 @@ import {
   GitRunStackedActionResult,
   GitRunStackedActionInput,
   GitResolvePullRequestResult,
+  VcsStatusInput,
 } from "./git.ts";
 
 const decodeCreateWorktreeInput = Schema.decodeUnknownSync(VcsCreateWorktreeInput);
@@ -16,6 +17,15 @@ const decodePreparePullRequestThreadInput = Schema.decodeUnknownSync(
 const decodeRunStackedActionInput = Schema.decodeUnknownSync(GitRunStackedActionInput);
 const decodeRunStackedActionResult = Schema.decodeUnknownSync(GitRunStackedActionResult);
 const decodeResolvePullRequestResult = Schema.decodeUnknownSync(GitResolvePullRequestResult);
+
+describe("VcsStatusInput", () => {
+  it("accepts the summary view and leaves the full view as the default", () => {
+    const decode = Schema.decodeUnknownSync(VcsStatusInput);
+    expect(decode({ cwd: "/repo", view: "summary" }).view).toBe("summary");
+    expect(decode({ cwd: "/repo" }).view).toBeUndefined();
+    expect(() => decode({ cwd: "/repo", view: "everything" })).toThrow();
+  });
+});
 
 describe("VcsCreateWorktreeInput", () => {
   it("accepts omitted newRefName for existing-refName worktrees", () => {

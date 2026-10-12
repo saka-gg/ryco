@@ -1,6 +1,10 @@
 import { WsDeviceRpcGroup, WsHostedRpcGroup, WsRpcGroup } from "@ryco/contracts";
 import type { EnvironmentId } from "@ryco/contracts";
-import { Data, Duration, Effect, Layer, Schedule } from "effect";
+import * as Data from "effect/Data";
+import * as Duration from "effect/Duration";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Schedule from "effect/Schedule";
 import { RpcClient, RpcSerialization } from "effect/rpc";
 import * as Socket from "effect/socket/Socket";
 
@@ -99,13 +103,25 @@ export interface WsProtocolLifecycleHandlers {
   readonly subscribeAdmissionChanges?: (listener: () => void) => () => void;
   /** Secondary feature channels must not replace the app's primary status. */
   readonly recordConnectionState?: boolean;
+  /**
+   * Fails a URL provider that has not answered within this many milliseconds,
+   * aborting its signal, so the reconnect schedule moves on to a fresh
+   * attempt. For direct connections whose provider is a plain token request;
+   * hosted providers own their own attempt lifecycle and leave it unset.
+   */
+  readonly urlProviderTimeoutMs?: number;
 }
 
 export const makeWsRpcProtocolClient = RpcClient.make(WsRpcGroup);
 type RpcClientFactory = typeof makeWsRpcProtocolClient;
 export type WsRpcProtocolClient =
   RpcClientFactory extends Effect.Effect<infer Client, any, any> ? Client : never;
-export type WsRpcProtocolSocketUrlProvider = string | (() => Promise<string>);
+/**
+ * The socket URL, or a provider resolving it per connect attempt (typically a
+ * token request). The provider receives the attempt's `AbortSignal`, aborted
+ * when the attempt is abandoned, so an unanswered request releases its socket.
+ */
+export type WsRpcProtocolSocketUrlProvider = string | ((signal?: AbortSignal) => Promise<string>);
 
 export const makeDeviceRpcProtocolClient = RpcClient.make(WsDeviceRpcGroup);
 type DeviceRpcClientFactory = typeof makeDeviceRpcProtocolClient;
@@ -118,6 +134,13 @@ export type HostedRpcProtocolClient =
   HostedRpcClientFactory extends Effect.Effect<infer Client, any, any> ? Client : never;
 
 const WS_URL_PROVIDER_ERROR_MESSAGE = "Unable to prepare the Ryco server WebSocket connection.";
+/**
+ * Bound on resolving one direct connect attempt's socket URL (its token
+ * request). Effect's socket open timeout starts only after the URL resolves,
+ * so a provider that never answers would otherwise stall the reconnect
+ * schedule until a resume or online event.
+ */
+export const WS_URL_PROVIDER_TIMEOUT_MS = 10_000;
 export const WS_CONNECTION_ERROR_MESSAGE = "Unable to connect to the Ryco server WebSocket.";
 
 class WsUrlProviderError extends Data.TaggedError("WsUrlProviderError")<{
@@ -125,6 +148,10 @@ class WsUrlProviderError extends Data.TaggedError("WsUrlProviderError")<{
 }> {}
 
 class WsUrlProviderInactiveError extends Data.TaggedError("WsUrlProviderInactiveError") {}
+
+class WsUrlProviderTimeoutError extends Data.TaggedError("WsUrlProviderTimeoutError")<{
+  readonly timeoutMs: number;
+}> {}
 
 /**
  * Whether a connection admits a request right now. Both `awaiting-` answers
@@ -263,6 +290,23 @@ function composeLifecycleHandlers(
   };
 }
 
+/** Interrupting the attempt aborts the provider's signal, releasing its request. */
+function withUrlProviderTimeout(
+  resolve: Effect.Effect<string, WsUrlProviderError>,
+  timeoutMs: number | undefined,
+): Effect.Effect<string, WsUrlProviderError> {
+  if (timeoutMs === undefined) return resolve;
+  return resolve.pipe(
+    Effect.timeoutOrElse({
+      duration: Duration.millis(timeoutMs),
+      orElse: () =>
+        Effect.fail(
+          new WsUrlProviderError({ cause: new WsUrlProviderTimeoutError({ timeoutMs }) }),
+        ),
+    }),
+  );
+}
+
 export function createWsRpcProtocolLayer(
   url: WsRpcProtocolSocketUrlProvider,
   socketService: SocketService,
@@ -291,12 +335,13 @@ export function createWsRpcProtocolLayer(
   const resolvedUrl =
     typeof url === "function"
       ? Effect.tryPromise({
-          try: () => {
+          try: (signal) => {
             if (!lifecycle.isActive()) throw new WsUrlProviderInactiveError();
-            return url();
+            return url(signal);
           },
           catch: (cause) => new WsUrlProviderError({ cause }),
         }).pipe(
+          (resolve) => withUrlProviderTimeout(resolve, handlers?.urlProviderTimeoutMs),
           Effect.map((rawUrl) => resolveWsRpcSocketUrl(rawUrl, handlers?.preserveSocketPath)),
           Effect.tapError(() =>
             Effect.sync(() => {

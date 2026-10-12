@@ -17,12 +17,14 @@ import {
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { readEnvironmentApi } from "../../environmentApi";
+import {
+  preloadableLazy,
+  useLazyComponentReady,
+  type LazyComponentReadyOptions,
+} from "../../lib/preloadableLazy";
 import { Switch } from "../ui/switch";
 import { Button } from "../ui/button";
 import { cn } from "~/lib/utils";
-import { IssuesTab } from "../projectExplorer/IssuesTab";
-import { PullRequestsTab } from "../projectExplorer/PullRequestsTab";
-import { WorkItemsTab } from "../projectExplorer/WorkItemsTab";
 import type {
   ChangeRequestStateFilter,
   IssueStateFilter,
@@ -31,6 +33,7 @@ import { AtlassianJiraIcon } from "../Icons";
 import { ContextPickerTabs } from "./ContextPickerTabs";
 import { Input } from "../ui/input";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
+import { notifyChatSurfaceLoadFailure } from "./chatViewLazySurfaces";
 
 export type NewThreadSourceTab = "branches" | "prs" | "issues" | "jira";
 
@@ -61,6 +64,31 @@ export interface NewThreadSourcePickerProps {
 }
 
 const BRANCH_LIMIT = 60;
+
+/*
+ * The pull request, issue and Jira lists (with their data hooks) load with the
+ * picker's first open instead of with the chat route: the picker sits in the
+ * new-thread hero, and most new worktrees branch off a branch.
+ */
+const LazyPullRequestsTab = preloadableLazy(() =>
+  import("../projectExplorer/PullRequestsTab").then((module) => module.PullRequestsTab),
+);
+const LazyIssuesTab = preloadableLazy(() =>
+  import("../projectExplorer/IssuesTab").then((module) => module.IssuesTab),
+);
+const LazyWorkItemsTab = preloadableLazy(() =>
+  import("../projectExplorer/WorkItemsTab").then((module) => module.WorkItemsTab),
+);
+
+function preloadSourceItemTabs(): void {
+  void LazyPullRequestsTab.preload();
+  void LazyIssuesTab.preload();
+  void LazyWorkItemsTab.preload();
+}
+
+const SOURCE_ITEM_TABS_LOAD: LazyComponentReadyOptions = {
+  onLoadError: (error, retry) => notifyChatSurfaceLoadFailure("source list", error, retry),
+};
 
 /**
  * The `from …` token of the work-location sentence, when the target is a new
@@ -106,9 +134,30 @@ export function NewThreadSourcePicker({
     },
     [onSelect],
   );
+  const handleOpenChange = useCallback((nextOpen: boolean) => {
+    // Opening the picker is the intent: by the time a segment is picked, its
+    // list has usually loaded.
+    if (nextOpen) preloadSourceItemTabs();
+    setOpen(nextOpen);
+  }, []);
+  const pullRequestsTabReady = useLazyComponentReady(
+    LazyPullRequestsTab,
+    open && tab === "prs",
+    SOURCE_ITEM_TABS_LOAD,
+  );
+  const issuesTabReady = useLazyComponentReady(
+    LazyIssuesTab,
+    open && tab === "issues",
+    SOURCE_ITEM_TABS_LOAD,
+  );
+  const workItemsTabReady = useLazyComponentReady(
+    LazyWorkItemsTab,
+    open && tab === "jira",
+    SOURCE_ITEM_TABS_LOAD,
+  );
 
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    <Popover open={open} onOpenChange={handleOpenChange}>
       <PopoverTrigger
         aria-label={`Change what this worktree branches from (currently ${label})`}
         className="inline-flex cursor-pointer items-center gap-1 rounded-md px-1 py-0.5 font-medium text-foreground/85 transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-60"
@@ -151,31 +200,35 @@ export function NewThreadSourcePicker({
               onSelect={(branchName) => choose({ kind: "branch", branchName })}
             />
           ) : tab === "prs" ? (
-            <PullRequestsTab
-              environmentId={environmentId}
-              cwd={cwd}
-              searchInputRef={prInputRef}
-              query={prQuery}
-              onQueryChange={setPrQuery}
-              density="compact"
-              stateFilter={prStateFilter}
-              onStateFilterChange={setPrStateFilter}
-              onSelect={(changeRequest) => choose({ kind: "pr", changeRequest })}
-            />
+            pullRequestsTabReady ? (
+              <LazyPullRequestsTab
+                environmentId={environmentId}
+                cwd={cwd}
+                searchInputRef={prInputRef}
+                query={prQuery}
+                onQueryChange={setPrQuery}
+                density="compact"
+                stateFilter={prStateFilter}
+                onStateFilterChange={setPrStateFilter}
+                onSelect={(changeRequest) => choose({ kind: "pr", changeRequest })}
+              />
+            ) : null
           ) : tab === "issues" ? (
-            <IssuesTab
-              environmentId={environmentId}
-              cwd={cwd}
-              searchInputRef={issueInputRef}
-              query={issueQuery}
-              onQueryChange={setIssueQuery}
-              density="compact"
-              stateFilter={issueStateFilter}
-              onStateFilterChange={setIssueStateFilter}
-              onSelect={(issue) => choose({ kind: "issue", issue })}
-            />
-          ) : (
-            <WorkItemsTab
+            issuesTabReady ? (
+              <LazyIssuesTab
+                environmentId={environmentId}
+                cwd={cwd}
+                searchInputRef={issueInputRef}
+                query={issueQuery}
+                onQueryChange={setIssueQuery}
+                density="compact"
+                stateFilter={issueStateFilter}
+                onStateFilterChange={setIssueStateFilter}
+                onSelect={(issue) => choose({ kind: "issue", issue })}
+              />
+            ) : null
+          ) : workItemsTabReady ? (
+            <LazyWorkItemsTab
               environmentId={environmentId}
               cwd={cwd}
               projectId={projectId}
@@ -186,7 +239,7 @@ export function NewThreadSourcePicker({
               onStateFilterChange={setWorkItemStateFilter}
               onSelect={(workItem) => choose({ kind: "workItem", workItem })}
             />
-          )}
+          ) : null}
         </div>
       </PopoverPopup>
     </Popover>

@@ -589,7 +589,7 @@ export const makeWorkspaceFileSystem = Effect.gen(function* () {
         .writeFile(realTargetPath, bytes)
         .pipe(Effect.mapError(toWorkspaceFileSystemError(input, "workspaceFileSystem.writeFile")));
     }
-    yield* workspaceEntries.invalidate(input.cwd);
+    yield* workspaceEntries.recordFileWrite(input.cwd, target.relativePath);
     return { relativePath: target.relativePath, version: fileVersion(bytes) };
   });
 
@@ -644,7 +644,7 @@ export const makeWorkspaceFileSystem = Effect.gen(function* () {
           ),
         ),
       );
-    yield* workspaceEntries.invalidate(input.cwd);
+    yield* workspaceEntries.recordFileWrite(input.cwd, target.relativePath);
 
     return { relativePath: target.relativePath, sizeBytes: bytes.byteLength };
   });

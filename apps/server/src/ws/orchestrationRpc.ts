@@ -23,6 +23,11 @@ import {
 
 import { normalizeDispatchCommand } from "../orchestration/Normalizer.ts";
 import {
+  makeThreadHistoryRecoveryRegistry,
+  type ThreadStreamItemLike,
+  withThreadHistoryRecovery,
+} from "../orchestration/historyRecoveryPolicy.ts";
+import {
   applyOrchestrationCommand,
   orchestrationCommandFlights,
 } from "../orchestration/Layers/OrchestrationCommandApplication.ts";
@@ -41,6 +46,7 @@ import {
   ORCHESTRATION_LEGACY_REPLAY_MAX_EVENTS,
   ORCHESTRATION_REPLAY_PAGE_MAX_LIMIT,
 } from "./context/constants.ts";
+import { observeArrays } from "./context/orchestrationStreamBatching.ts";
 
 export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
   const {
@@ -65,20 +71,29 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
     threadPriorityCoordinator,
   } = ctx;
 
-  const withHistoryRecovery = <A, E, R>(threadId: ThreadId, stream: Stream.Stream<A, E, R>) =>
-    Stream.unwrap(
-      Effect.gen(function* () {
-        const reconcile = Option.getOrUndefined(providerRuntimeIngestion)?.reconcileThread;
-        if (reconcile) {
-          // Lifetime follows the authorized thread subscription. Reading history
-          // never resumes Codex or grants mutation authority to this connection.
-          yield* Effect.forever(
-            reconcile(threadId).pipe(Effect.andThen(Effect.sleep("30 seconds"))),
-          ).pipe(Effect.forkScoped);
-        }
-        return stream;
-      }),
-    );
+  // This connection's thread subscriptions, so a view that attaches to a
+  // subscription a prewarm opened can turn its history recovery on (and off
+  // again once the view detaches).
+  const historyRecoveryRegistry = makeThreadHistoryRecoveryRegistry();
+
+  // Lifetime follows the authorized thread subscription. Reading history never
+  // resumes Codex or grants mutation authority to this connection. A passive
+  // subscription (prewarm, retained idle thread) never reads history. Called
+  // while the handler builds the stream, so `register` stamps the request's
+  // arrival before any mode change that came after it.
+  const withHistoryRecovery = <A extends ThreadStreamItemLike, E, R>(
+    threadId: ThreadId,
+    stream: Stream.Stream<A, E, R>,
+    mode: "active" | "passive" | undefined,
+  ) => {
+    const reconcile = Option.getOrUndefined(providerRuntimeIngestion)?.reconcileThread;
+    return reconcile
+      ? withThreadHistoryRecovery(threadId, stream, reconcile, {
+          mode: mode ?? "active",
+          register: historyRecoveryRegistry.register(threadId),
+        })
+      : stream;
+  };
 
   /**
    * The file paths a thread's persisted task activities actually reference
@@ -428,6 +443,12 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
         loadThreadHistoryPage(input),
         { "rpc.aggregate": "orchestration" },
       ),
+    [ORCHESTRATION_WS_METHODS.setThreadHistoryRecovery]: (input) =>
+      observeRpcEffect(
+        ORCHESTRATION_WS_METHODS.setThreadHistoryRecovery,
+        historyRecoveryRegistry.setMode(input.threadId, input.mode).pipe(Effect.as({})),
+        { "rpc.aggregate": "orchestration" },
+      ),
     [ORCHESTRATION_WS_METHODS.replayEvents]: (input) =>
       observeRpcEffect(
         ORCHESTRATION_WS_METHODS.replayEvents,
@@ -507,12 +528,13 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
                     }),
                 ),
               ),
-              { resumeFromSequence: input.resumeFromSequence },
+              {
+                resumeFromSequence: input.resumeFromSequence,
+                threadPriorities: input.threadPriorities,
+              },
             ).pipe(
-              Stream.tap((item) =>
-                Effect.sync(() =>
-                  recordServerPerfPayload("server.ws.orchestration.subscribeShell", item),
-                ),
+              observeArrays(isServerPerfProfileEnabled(), (items) =>
+                recordServerPerfPayload("server.ws.orchestration.subscribeShell", items),
               ),
             ),
           ),
@@ -576,11 +598,9 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
             input.threadId,
             { resumeFromSequence: input.resumeFromSequence },
           ).pipe(
-            (stream) => withHistoryRecovery(input.threadId, stream),
-            Stream.tap((item) =>
-              Effect.sync(() =>
-                recordServerPerfPayload("server.ws.orchestration.subscribeThread", item),
-              ),
+            (stream) => withHistoryRecovery(input.threadId, stream, input.historyRecovery),
+            observeArrays(isServerPerfProfileEnabled(), (items) =>
+              recordServerPerfPayload("server.ws.orchestration.subscribeThread", items),
             ),
           ),
         ),
@@ -611,11 +631,9 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
             input.threadId,
             { resumeFromSequence: input.resumeFromSequence },
           ).pipe(
-            (stream) => withHistoryRecovery(input.threadId, stream),
-            Stream.tap((item) =>
-              Effect.sync(() =>
-                recordServerPerfPayload("server.ws.orchestration.subscribeThreadWindow", item),
-              ),
+            (stream) => withHistoryRecovery(input.threadId, stream, input.historyRecovery),
+            observeArrays(isServerPerfProfileEnabled(), (items) =>
+              recordServerPerfPayload("server.ws.orchestration.subscribeThreadWindow", items),
             ),
           ),
         ),

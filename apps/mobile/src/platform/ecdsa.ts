@@ -3,4 +3,4 @@ export {
   derSignatureToRaw,
   ecPublicKeyJwk,
   uncompressedPointToJwk,
-} from "@ryco/client-runtime/relay";
+} from "@ryco/client-runtime/relay/ecdsa";

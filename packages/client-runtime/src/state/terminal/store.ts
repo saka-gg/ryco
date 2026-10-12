@@ -1,4 +1,8 @@
-import { reconcileTerminalEvent, type TerminalReconciliationState } from "./reconciliation.ts";
+import {
+  isTerminalReplayEvent,
+  reconcileTerminalEvent,
+  type TerminalReconciliationState,
+} from "./reconciliation.ts";
 /**
  * Single Zustand store for terminal UI state keyed by scoped thread identity.
  *
@@ -9,7 +13,7 @@ import { reconcileTerminalEvent, type TerminalReconciliationState } from "./reco
 import { type ScopedThreadRef, type TerminalEvent } from "@ryco/contracts";
 import { parseScopedThreadKey, scopedThreadKey } from "../../scoped.ts";
 import { create } from "zustand";
-import { createJSONStorage, persist } from "zustand/middleware";
+import { createJSONStorage, persist, type PersistStorage } from "zustand/middleware";
 import {
   DEFAULT_THREAD_TERMINAL_HEIGHT,
   DEFAULT_THREAD_TERMINAL_ID,
@@ -73,8 +77,35 @@ const TERMINAL_STATE_STORAGE_KEY = "ryco:terminal-state:v1";
 const EMPTY_TERMINAL_EVENT_ENTRIES: ReadonlyArray<TerminalEventEntry> = [];
 const MAX_TERMINAL_EVENT_BUFFER = 200;
 
-interface PersistedTerminalStateStoreState {
+export interface PersistedTerminalStateStoreState {
   terminalStateByThreadKey?: Record<string, ThreadTerminalState>;
+}
+
+/**
+ * Persist runs on every `set`, and most sets (output, activity, event buffers) leave the
+ * persisted slice untouched. Its reference only changes when it changes, so an identical
+ * reference skips the JSON serialization and the synchronous storage write.
+ */
+function skipUnchangedPersistedState(
+  storage: PersistStorage<PersistedTerminalStateStoreState> | undefined,
+): PersistStorage<PersistedTerminalStateStoreState> | undefined {
+  if (!storage) return storage;
+  let lastWritten: PersistedTerminalStateStoreState["terminalStateByThreadKey"] | null = null;
+  return {
+    getItem: (name) => storage.getItem(name),
+    setItem: (name, value) => {
+      const next = value.state.terminalStateByThreadKey;
+      if (next !== undefined && next === lastWritten) return;
+      // Recorded only once the write was accepted, so a failed write is retried.
+      const written = storage.setItem(name, value);
+      lastWritten = next ?? null;
+      return written;
+    },
+    removeItem: (name) => {
+      lastWritten = null;
+      return storage.removeItem(name);
+    },
+  };
 }
 
 export function migratePersistedTerminalStateStoreState(
@@ -448,6 +479,22 @@ function newThreadTerminal(state: ThreadTerminalState, terminalId: string): Thre
   return upsertTerminalIntoGroups(state, terminalId, "new");
 }
 
+/** Adds a terminal the server reports as running without opening or focusing it. */
+function registerThreadTerminal(
+  state: ThreadTerminalState,
+  terminalId: string,
+): ThreadTerminalState {
+  const normalized = normalizeThreadTerminalState(state);
+  if (normalized.terminalIds.includes(terminalId)) return normalized;
+  const added = newThreadTerminal(normalized, terminalId);
+  return normalizeThreadTerminalState({
+    ...added,
+    terminalOpen: normalized.terminalOpen,
+    activeTerminalId: normalized.activeTerminalId,
+    activeTerminalGroupId: normalized.activeTerminalGroupId,
+  });
+}
+
 function setThreadActiveTerminal(
   state: ThreadTerminalState,
   terminalId: string,
@@ -745,10 +792,14 @@ export function createTerminalStateStore(options?: {
               let nextTerminalLaunchContextByThreadKey = state.terminalLaunchContextByThreadKey;
 
               if (event.type === "started" || event.type === "restarted") {
+                const replay = isTerminalReplayEvent(event);
                 nextTerminalStateByThreadKey = updateTerminalStateByThreadKey(
                   nextTerminalStateByThreadKey,
                   threadRef,
                   (current) => {
+                    // Catch-up for a session that kept running (e.g. behind a closed
+                    // drawer) is not a start: it must not reopen or refocus anything.
+                    if (replay) return registerThreadTerminal(current, event.terminalId);
                     let nextState = current;
                     if (!current.terminalIds.includes(event.terminalId)) {
                       nextState = newThreadTerminal(nextState, event.terminalId);
@@ -911,7 +962,7 @@ export function createTerminalStateStore(options?: {
       {
         name: TERMINAL_STATE_STORAGE_KEY,
         version: 2,
-        storage: createJSONStorage(() => storage),
+        storage: skipUnchangedPersistedState(createJSONStorage(() => storage)),
         migrate: migratePersistedTerminalStateStoreState,
         partialize: (state) => ({
           terminalStateByThreadKey: state.terminalStateByThreadKey,
