@@ -872,7 +872,9 @@ function ensureThreadRegistered(
 ): EnvironmentState {
   let nextState = state;
 
-  if (!state.threadIds.includes(threadId)) {
+  // A thread with a shell is registered already (every write of a shell registers it), so the
+  // O(threads) membership scan only runs for threads seen for the first time.
+  if (previousProjectId === undefined && !state.threadIds.includes(threadId)) {
     nextState = {
       ...nextState,
       threadIds: [...nextState.threadIds, threadId],

@@ -241,6 +241,24 @@ describe("worktree reconciliation reads", () => {
     expect(calls).toEqual(["git:/project", "rows:project"]);
   });
 
+  it("skips git worktree list while a repository's registrations are unchanged", async () => {
+    const root = await realpath(await mkdtemp(path.join(tmpdir(), "ryco-reconcile-unchanged-")));
+    scratchDirectories.push(root);
+    execFileSync("git", ["init", "-q", root], { stdio: "ignore" });
+    const calls: string[] = [];
+    const project = projectAt("fingerprinted", root);
+    const operations = makeOperations({ projects: [project], calls });
+    await Effect.runPromise(operations.reconcileProjectWorktrees(project.id));
+    await Effect.runPromise(operations.reconcileProjectWorktrees(project.id));
+    // The rows are always re-read; git only the first time.
+    expect(calls).toEqual([`git:${root}`, "rows:fingerprinted", "rows:fingerprinted"]);
+    // A new registration (what `git worktree add` writes) asks git again.
+    await mkdir(path.join(root, ".git", "worktrees", "linked"), { recursive: true });
+    await writeFile(path.join(root, ".git", "worktrees", "linked", "gitdir"), "/elsewhere/.git\n");
+    await Effect.runPromise(operations.reconcileProjectWorktrees(project.id));
+    expect(calls.filter((call) => call.startsWith("git:"))).toHaveLength(2);
+  });
+
   it("waits before sweeping, then reconciles each available non-chat project once", async () => {
     const root = await realpath(await mkdtemp(path.join(tmpdir(), "ryco-reconcile-sweep-")));
     scratchDirectories.push(root);

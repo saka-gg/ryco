@@ -26,6 +26,7 @@ import {
   projectWorktreeSourceControlState,
 } from "./worktreePullRequestProjection.ts";
 import { withThreadLineage } from "./threadLineage.ts";
+import { findThreadInArray, updateThreadInArray } from "./threadIndex.ts";
 import { latestUserMessage } from "./userMessageOrder.ts";
 import {
   MessageSentPayloadSchema,
@@ -72,6 +73,30 @@ import {
 } from "./Schemas.ts";
 
 type ThreadPatch = Partial<Omit<OrchestrationThread, "id" | "projectId">>;
+
+/**
+ * The command read model holds what the decider and the command invariants read, and no more.
+ * Messages: only user messages, as anchors without text or attachments (the decider reads their
+ * id, role, creation time and order: thread started, the delegated-return fence and settlement
+ * recency). Plans: ids and timestamps; the decider only checks that a source plan exists. The
+ * hydrated model (ProjectionSnapshotQuery.getCommandReadModel) has the same shape, so a live
+ * model and one hydrated after a restart do not drift apart in size.
+ */
+export const COMMAND_MODEL_OMITTED_PLAN_MARKDOWN = "(not loaded in the command read model)";
+
+export function commandModelMessage(
+  message: Omit<OrchestrationMessage, "text" | "attachments">,
+): OrchestrationMessage {
+  return { ...message, text: "" };
+}
+
+export function commandModelProposedPlan(
+  plan: OrchestrationThread["proposedPlans"][number],
+): OrchestrationThread["proposedPlans"][number] {
+  return plan.planMarkdown === COMMAND_MODEL_OMITTED_PLAN_MARKDOWN
+    ? plan
+    : { ...plan, planMarkdown: COMMAND_MODEL_OMITTED_PLAN_MARKDOWN };
+}
 type WorktreePatch = Partial<Omit<OrchestrationWorktreeShell, "worktreeId" | "projectId">>;
 const MAX_THREAD_MESSAGES = 2_000;
 const MAX_THREAD_CHECKPOINTS = 500;
@@ -81,8 +106,8 @@ function updateThread(
   threads: ReadonlyArray<OrchestrationThread>,
   threadId: ThreadId,
   patch: ThreadPatch,
-): OrchestrationThread[] {
-  return threads.map((thread) => (thread.id === threadId ? { ...thread, ...patch } : thread));
+): ReadonlyArray<OrchestrationThread> {
+  return updateThreadInArray(threads, threadId, (thread) => ({ ...thread, ...patch }));
 }
 
 function updateWorktree(
@@ -736,7 +761,7 @@ export function projectEvent(
         "payload",
       ).pipe(
         Effect.map((payload) => {
-          const thread = nextBase.threads.find((entry) => entry.id === payload.threadId);
+          const thread = findThreadInArray(nextBase.threads, payload.threadId);
           // A clear for an older limit must not drop a newer one.
           if (thread?.usageLimit?.limitId !== payload.limitId) return nextBase;
           return {
@@ -833,51 +858,41 @@ export function projectEvent(
           event.type,
           "payload",
         );
-        const thread = nextBase.threads.find((entry) => entry.id === payload.threadId);
+        const thread = findThreadInArray(nextBase.threads, payload.threadId);
         if (!thread) {
           return nextBase;
         }
 
+        // The command model keeps user-message anchors only (see commandModelMessage): the
+        // decider and invariants read their id, role and order, never text, and assistant
+        // streaming would otherwise rewrite the thread's message list on every delta. Every
+        // message still advances the thread's updatedAt, as the threads projection does.
+        if (payload.role !== "user") {
+          return {
+            ...nextBase,
+            threads: updateThread(nextBase.threads, payload.threadId, {
+              updatedAt: event.occurredAt,
+            }),
+          };
+        }
         const message: OrchestrationMessage = yield* decodeForEvent(
           OrchestrationMessage,
-          {
+          commandModelMessage({
             id: payload.messageId,
             role: payload.role,
-            text: payload.text,
-            ...(payload.attachments !== undefined ? { attachments: payload.attachments } : {}),
-            ...(payload.dispatchMode !== undefined ? { dispatchMode: payload.dispatchMode } : {}),
             turnId: payload.turnId,
             streaming: payload.streaming,
             createdAt: payload.createdAt,
             updatedAt: payload.updatedAt,
-          },
+            ...(payload.dispatchMode !== undefined ? { dispatchMode: payload.dispatchMode } : {}),
+          }),
           event.type,
           "message",
         );
 
         const existingMessage = thread.messages.find((entry) => entry.id === message.id);
         const messages = existingMessage
-          ? thread.messages.map((entry) =>
-              entry.id === message.id
-                ? {
-                    ...entry,
-                    text: message.streaming
-                      ? `${entry.text}${message.text}`
-                      : message.text.length > 0
-                        ? message.text
-                        : entry.text,
-                    streaming: message.streaming,
-                    updatedAt: message.updatedAt,
-                    turnId: message.turnId,
-                    ...(message.dispatchMode !== undefined
-                      ? { dispatchMode: message.dispatchMode }
-                      : {}),
-                    ...(message.attachments !== undefined
-                      ? { attachments: message.attachments }
-                      : {}),
-                  }
-                : entry,
-            )
+          ? thread.messages.map((entry) => (entry.id === message.id ? message : entry))
           : [...thread.messages, message];
         const cappedMessages = capThreadMessagesPreservingUserAnchors(messages);
 
@@ -898,7 +913,7 @@ export function projectEvent(
           event.type,
           "payload",
         );
-        const thread = nextBase.threads.find((entry) => entry.id === payload.threadId);
+        const thread = findThreadInArray(nextBase.threads, payload.threadId);
         if (!thread) {
           return nextBase;
         }
@@ -962,7 +977,7 @@ export function projectEvent(
         if (payload.turnId === undefined) {
           return nextBase;
         }
-        const thread = nextBase.threads.find((entry) => entry.id === payload.threadId);
+        const thread = findThreadInArray(nextBase.threads, payload.threadId);
         if (thread?.latestTurn?.turnId !== payload.turnId) {
           return nextBase;
         }
@@ -989,14 +1004,14 @@ export function projectEvent(
           event.type,
           "payload",
         );
-        const thread = nextBase.threads.find((entry) => entry.id === payload.threadId);
+        const thread = findThreadInArray(nextBase.threads, payload.threadId);
         if (!thread) {
           return nextBase;
         }
 
         const proposedPlans = [
           ...thread.proposedPlans.filter((entry) => entry.id !== payload.proposedPlan.id),
-          payload.proposedPlan,
+          commandModelProposedPlan(payload.proposedPlan),
         ]
           .toSorted(
             (left, right) =>
@@ -1021,7 +1036,7 @@ export function projectEvent(
           event.type,
           "payload",
         );
-        const thread = nextBase.threads.find((entry) => entry.id === payload.threadId);
+        const thread = findThreadInArray(nextBase.threads, payload.threadId);
         if (!thread) {
           return nextBase;
         }
@@ -1098,7 +1113,7 @@ export function projectEvent(
     case "thread.reverted":
       return decodeForEvent(ThreadRevertedPayload, event.payload, event.type, "payload").pipe(
         Effect.map((payload) => {
-          const thread = nextBase.threads.find((entry) => entry.id === payload.threadId);
+          const thread = findThreadInArray(nextBase.threads, payload.threadId);
           if (!thread) {
             return nextBase;
           }
@@ -1178,7 +1193,7 @@ export function projectEvent(
         "payload",
       ).pipe(
         Effect.map((payload) => {
-          const thread = nextBase.threads.find((entry) => entry.id === payload.threadId);
+          const thread = findThreadInArray(nextBase.threads, payload.threadId);
           if (!thread) {
             return nextBase;
           }

@@ -32,6 +32,7 @@ import {
 } from "./constants.ts";
 import { isThreadDetailEvent } from "./orchestrationEvents.ts";
 import { randomShortId } from "./branchNaming.ts";
+import { readSharedThreadShell } from "./sharedThreadShellReads.ts";
 import {
   makeOrchestrationEventCoalescer,
   orchestrationProgressFrameKey,
@@ -340,7 +341,12 @@ export const toShellStreamEvent = (
       if (event.aggregateKind !== "thread") {
         return Effect.succeed(Option.none());
       }
-      return projectionSnapshotQuery.getThreadShellById(ThreadId.make(event.aggregateId)).pipe(
+      // Shared by every shell subscriber mapping this event (see sharedThreadShellReads.ts).
+      return readSharedThreadShell(
+        projectionSnapshotQuery,
+        ThreadId.make(event.aggregateId),
+        event.sequence,
+      ).pipe(
         Effect.map((thread) =>
           Option.map(thread, (nextThread) => ({
             kind: "thread-upserted" as const,

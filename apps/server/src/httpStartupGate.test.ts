@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it } from "vite-plus/test";
 
 import {
   installHttpStartupGate,
+  isEarlyStaticAssetRequest,
   isEarlyStaticPath,
   isEarlyStaticRequest,
   type HttpStartupGateOptions,
@@ -215,5 +216,23 @@ describe("startup gate with the Effect Node HTTP server", () => {
       status: 200,
       body: "pong",
     });
+  });
+});
+
+describe("isEarlyStaticAssetRequest", () => {
+  const request = (url: string, method = "GET", upgrade?: string) =>
+    ({ url, method, headers: upgrade === undefined ? {} : { upgrade } }) as unknown as Parameters<
+      typeof isEarlyStaticAssetRequest
+    >[0];
+
+  it("serves assets but never the document a readiness probe polls", () => {
+    expect(isEarlyStaticAssetRequest(request("/assets/main-BKvXLkrW.js"))).toBe(true);
+    expect(isEarlyStaticAssetRequest(request("/favicon.svg?v=2"))).toBe(true);
+    expect(isEarlyStaticAssetRequest(request("/"))).toBe(false);
+    expect(isEarlyStaticAssetRequest(request("/index.html"))).toBe(false);
+    expect(isEarlyStaticAssetRequest(request("/?probe=1"))).toBe(false);
+    expect(isEarlyStaticAssetRequest(request("/api/auth/session"))).toBe(false);
+    expect(isEarlyStaticAssetRequest(request("/assets/x.js", "POST"))).toBe(false);
+    expect(isEarlyStaticAssetRequest(request("/assets/x.js", "GET", "websocket"))).toBe(false);
   });
 });

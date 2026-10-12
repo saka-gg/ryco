@@ -3,6 +3,8 @@ import * as SqlClient from "effect/sql/SqlClient";
 import type { SqlError } from "effect/sql/SqlError";
 
 import { runMigrations } from "../Migrations.ts";
+import * as SqliteReadClientLayer from "../SqliteReadClient.ts";
+import { BLOCKING_BUSY_TIMEOUT_MS, MAIN_CONNECTION_BUSY_TIMEOUT_MS } from "../sqliteBusy.ts";
 import { ServerConfig } from "../../config.ts";
 import { trackStartupPhase } from "../../startupStallMonitor.ts";
 
@@ -33,7 +35,13 @@ const setup = Layer.effectDiscard(
     const startedAt = Date.now();
     const sql = yield* SqlClient.SqlClient;
     // CLI and server write from separate processes; wait rather than fail with SQLITE_BUSY.
-    yield* sql`PRAGMA busy_timeout = 5000;`;
+    // node:sqlite waits on the main thread, so the Node client waits briefly per attempt and
+    // retries asynchronously for the full budget (sqliteBusy.ts); Bun keeps the blocking wait.
+    const busyTimeoutMs =
+      process.versions.bun !== undefined
+        ? BLOCKING_BUSY_TIMEOUT_MS
+        : MAIN_CONNECTION_BUSY_TIMEOUT_MS;
+    yield* sql.unsafe(`PRAGMA busy_timeout = ${busyTimeoutMs};`);
     yield* sql`PRAGMA journal_mode = WAL;`;
     yield* sql`PRAGMA foreign_keys = ON;`;
     // Read-path tuning, adopted from a repeated A/B on a synthetic 5k-thread / 400k-activity
@@ -63,21 +71,24 @@ export const makeSqlitePersistenceLive = Effect.fn("makeSqlitePersistenceLive")(
   const path = yield* Path.Path;
   yield* fs.makeDirectory(path.dirname(dbPath), { recursive: true });
 
-  return Layer.provideMerge(
-    setup,
-    makeRuntimeSqliteLayer({
-      filename: dbPath,
-      spanAttributes: {
-        "db.name": path.basename(dbPath),
-        "service.name": "ryco-server",
-      },
-    }),
+  return SqliteReadClientLayer.layer(dbPath).pipe(
+    Layer.provideMerge(
+      Layer.provideMerge(
+        setup,
+        makeRuntimeSqliteLayer({
+          filename: dbPath,
+          spanAttributes: {
+            "db.name": path.basename(dbPath),
+            "service.name": "ryco-server",
+          },
+        }),
+      ),
+    ),
   );
 }, Layer.unwrap);
 
-export const SqlitePersistenceMemory = Layer.provideMerge(
-  setup,
-  makeRuntimeSqliteLayer({ filename: ":memory:" }),
+export const SqlitePersistenceMemory = SqliteReadClientLayer.layerMain.pipe(
+  Layer.provideMerge(Layer.provideMerge(setup, makeRuntimeSqliteLayer({ filename: ":memory:" }))),
 );
 
 export const layerConfig = Layer.unwrap(

@@ -68,7 +68,8 @@ Options:
   --hidden-idle-ms <ms>        Background idle window.
   --offline-ms <ms>            Offline duration before recovery.
   --reconnect-timeout-ms <ms>  Recovery deadline.
-  --fixture-home <path>        Stopped, sanitized Ryco home copied per iteration.
+  --fixture-home <path>        Stopped, sanitized Ryco home copied per iteration
+                               (generate one with: bun run perf:fixture-home --out <path>).
   --cpu-profile <directory>    Write a boot CPU profile per iteration (navigation
                                to primary-shell-painted + 5 s) and summarize
                                main-thread self time by source file.

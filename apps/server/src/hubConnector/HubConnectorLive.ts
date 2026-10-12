@@ -672,7 +672,7 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
         if (Option.isSome(engine)) {
           const changes = yield* engine.value.subscribeDomainEvents;
           yield* Stream.fromSubscription(changes).pipe(
-            Stream.runForEach(() => Effect.sync(sync.notifyChanged)),
+            Stream.runForEach((event) => Effect.sync(() => sync.notifyChanged(event))),
             Effect.forkScoped,
           );
         }

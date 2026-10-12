@@ -74,6 +74,7 @@
     "measure:desktop-stage": "node scripts/measure-desktop-stage.ts",
     "perf:smoke": "bun scripts/perf/cli.ts smoke",
     "perf:external": "bun scripts/perf/cli.ts run",
+    "perf:fixture-home": "node apps/server/scripts/generate-fixture-home.ts",
     "perf:source-control": "bun scripts/perf/cli.ts run --profile active-source-control --iterations 1",
     "perf:compare": "bun scripts/perf/cli.ts compare-refs",
     "perf:bundle-budget": "bun scripts/perf/cli.ts bundle-budget",

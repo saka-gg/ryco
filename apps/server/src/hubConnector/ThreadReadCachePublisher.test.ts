@@ -1,8 +1,10 @@
 import { MessageId, OrchestrationShellSnapshot, type OrchestrationMessage } from "@ryco/contracts";
 import { Schema } from "effect";
+import { ThreadReadCacheShell } from "@ryco/contracts/thread-read-cache";
 import { describe, expect, it, vi } from "vite-plus/test";
 import {
   boundThreadReadCacheShell,
+  checkThreadReadCacheShellLimits,
   createThreadReadCachePublisher,
   threadReadCacheContent,
   type ThreadReadCacheUpload,
@@ -254,5 +256,26 @@ describe("cloud thread history publisher", () => {
     ]);
     expect(large.messages.map((entry) => entry.id)).toEqual(["message-2"]);
     expect(Buffer.byteLength(JSON.stringify(large))).toBeLessThan(1024 * 1024);
+  });
+
+  it("publishes a shell the Hub decodes to the same value, without re-decoding it", async () => {
+    const { upload, publisher } = harness(3);
+    await publisher.synchronize();
+    const shellItem = upload.mock.calls[0]![1].find((item) => item.kind === "shell")!;
+    // The wire item keeps its shape: kind, revision and the shell snapshot.
+    expect(Object.keys(shellItem).toSorted()).toEqual(["kind", "revision", "snapshot"]);
+    const wire = JSON.parse(JSON.stringify(shellItem.snapshot)) as unknown;
+    const decoded = Schema.decodeUnknownSync(ThreadReadCacheShell)(wire);
+    expect(JSON.parse(JSON.stringify(decoded))).toEqual(wire);
+  });
+
+  it("refuses a shell over the cache's row limits like the schema did", () => {
+    const tooMany = {
+      ...shell(1),
+      threads: Array.from({ length: 10_001 }, () => shell(1).threads[0]!),
+    };
+    expect(() => checkThreadReadCacheShellLimits(tooMany)).toThrow(/row limits/);
+    expect(() => Schema.decodeUnknownSync(ThreadReadCacheShell)(tooMany)).toThrow();
+    expect(checkThreadReadCacheShellLimits(shell(2))).toEqual(shell(2));
   });
 });

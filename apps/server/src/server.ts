@@ -34,7 +34,11 @@ import {
   BROWSER_API_CORS_OPTIONS,
   serveStaticRequest,
 } from "./http.ts";
-import { installHttpStartupGate, isEarlyStaticRequest } from "./httpStartupGate.ts";
+import {
+  installHttpStartupGate,
+  isEarlyStaticAssetRequest,
+  isEarlyStaticRequest,
+} from "./httpStartupGate.ts";
 import { recordDesktopStartupPhase, writeDesktopLifecycleFrame } from "./desktopLifecycle.ts";
 import { ProjectAvatarStoreLive } from "./project/Layers/ProjectAvatarStore.ts";
 import { fixPath } from "./os-jank.ts";
@@ -257,23 +261,27 @@ const HttpServerLive = Layer.unwrap(
           websocket: { perMessageDeflate: WEBSOCKET_PER_MESSAGE_DEFLATE },
         },
       );
-      // While the runtime graph builds, a desktop backend's gate answers
-      // static-shell requests itself (same handler as the router's catch-all
-      // route), so the renderer can load from `http-bound` in parallel; API,
-      // auth and WebSocket requests stay held. Other modes keep `/` held too:
-      // readiness probes such as the SSH launcher's `wait_ready` poll it and
-      // must not report a server ready before its router serves.
+      // While the runtime graph builds (migrations, projector catch-up, read
+      // model), the gate answers static-shell requests itself (same handler as
+      // the router's catch-all route), so clients load the UI in parallel; API,
+      // auth and WebSocket requests stay held. A desktop backend serves the
+      // document too, so the renderer loads from `http-bound`. Other modes
+      // serve assets only and keep `/` held: readiness probes such as the SSH
+      // launcher's `wait_ready` poll it and must not report a server ready
+      // before its router serves.
       const earlyStaticServingLayer = Layer.effectDiscard(
         Effect.gen(function* () {
           const server = yield* HttpServer.HttpServer;
           const gate = startupGate;
-          if (config.mode === "desktop" && gate !== undefined && !gate.isOpen()) {
+          if (gate !== undefined && !gate.isOpen()) {
+            const servesEarly =
+              config.mode === "desktop" ? isEarlyStaticRequest : isEarlyStaticAssetRequest;
             const handler = yield* NodeHttpServer.makeHandler(
               HttpMiddleware.cors(BROWSER_API_CORS_OPTIONS)(serveStaticRequest),
               { scope: yield* Effect.scope },
             );
             gate.setEarlyRequestHandler((request, response) => {
-              if (!isEarlyStaticRequest(request)) return false;
+              if (!servesEarly(request)) return false;
               handler(request, response);
               return true;
             });

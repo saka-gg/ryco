@@ -2,6 +2,7 @@ import { Effect } from "effect";
 import { WS_METHODS } from "@ryco/contracts";
 
 import { observeRpcEffect } from "../observability/RpcInstrumentation.ts";
+import { STATISTICS_STALE_WHILE_REVALIDATE_WAIT_MS } from "../statistics/StatisticsQuery.ts";
 import { defineWsHandlers, type WsRpcContext } from "./context.ts";
 
 export const makeStatisticsHandlers = (ctx: WsRpcContext) => {
@@ -15,7 +16,11 @@ export const makeStatisticsHandlers = (ctx: WsRpcContext) => {
         WS_METHODS.serverGetStatistics,
         ownerEffect(
           WS_METHODS.serverGetStatistics,
-          statisticsQuery.getStatistics().pipe(Effect.orDie),
+          // A reopen gets the previous snapshot at once when the refresh is slow; the
+          // refresh keeps running, so the next request is current.
+          statisticsQuery
+            .getStatistics({ maxWaitMs: STATISTICS_STALE_WHILE_REVALIDATE_WAIT_MS })
+            .pipe(Effect.orDie),
         ),
         { "rpc.aggregate": "server" },
       ),

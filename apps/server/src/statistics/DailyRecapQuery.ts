@@ -9,6 +9,7 @@ import {
 } from "@ryco/contracts";
 
 import { inheritedTurnRowSql } from "../orchestration/forkInheritanceSql.ts";
+import { SqliteReadClient } from "../persistence/SqliteReadClient.ts";
 import { makeUsageDayFormatter } from "../usage/usageAggregation.ts";
 
 export interface DailyRecapQueryShape {
@@ -91,24 +92,28 @@ const section = <A extends { readonly totalThreads: number }>(rows: ReadonlyArra
 export const DailyRecapQueryLive = Layer.effect(
   DailyRecapQuery,
   Effect.gen(function* () {
-    const sql = yield* SqlClient.SqlClient;
-    // Non-streaming commentary may set a turn's projection to completed while
-    // its provider is still running. Match shell completion-recency semantics.
-    const terminalOutcome = sql`(turns.state <> 'completed' OR NOT EXISTS (
+    const main = yield* SqlClient.SqlClient;
+    const reader = Option.getOrElse(yield* Effect.serviceOption(SqliteReadClient), () => main);
+    // The same statements on the main connection (inside a caller's transaction) and on the
+    // read-only worker connection (everywhere else, see SqliteReadClient).
+    const queriesOn = (sql: SqlClient.SqlClient) => {
+      // Non-streaming commentary may set a turn's projection to completed while
+      // its provider is still running. Match shell completion-recency semantics.
+      const terminalOutcome = sql`(turns.state <> 'completed' OR NOT EXISTS (
       SELECT 1 FROM projection_thread_sessions sessions
       WHERE sessions.thread_id = turns.thread_id AND sessions.active_turn_id = turns.turn_id
     ))`;
-    // A fork's inherited turns are its source's work, already recapped on the source's
-    // day. A residual filter: the completed_at index still bounds the scan.
-    const ownTurn = sql`NOT ${inheritedTurnRowSql(sql, "turns")}`;
-    const counts = SqlSchema.findAll({
-      Request: Window,
-      Result: Schema.Struct({
-        completedTurns: Schema.Number,
-        failedTurns: Schema.Number,
-        interruptedTurns: Schema.Number,
-      }),
-      execute: ({ from, to }) => sql`
+      // A fork's inherited turns are its source's work, already recapped on the source's
+      // day. A residual filter: the completed_at index still bounds the scan.
+      const ownTurn = sql`NOT ${inheritedTurnRowSql(sql, "turns")}`;
+      const counts = SqlSchema.findAll({
+        Request: Window,
+        Result: Schema.Struct({
+          completedTurns: Schema.Number,
+          failedTurns: Schema.Number,
+          interruptedTurns: Schema.Number,
+        }),
+        execute: ({ from, to }) => sql`
         SELECT
           COALESCE(SUM(turns.state = 'completed'), 0) AS "completedTurns",
           COALESCE(SUM(turns.state = 'error'), 0) AS "failedTurns",
@@ -120,11 +125,11 @@ export const DailyRecapQueryLive = Layer.effect(
           AND threads.deleted_at IS NULL AND projects.deleted_at IS NULL
           AND ${terminalOutcome} AND ${ownTurn}
       `,
-    });
-    const outcomes = SqlSchema.findAll({
-      Request: OutcomeRequest,
-      Result: ThreadRow,
-      execute: ({ from, to, state, limit }) => sql`
+      });
+      const outcomes = SqlSchema.findAll({
+        Request: OutcomeRequest,
+        Result: ThreadRow,
+        execute: ({ from, to, state, limit }) => sql`
         SELECT threads.thread_id AS "threadId", threads.title AS "threadTitle",
           projects.project_id AS "projectId", projects.title AS "projectTitle",
           MAX(turns.completed_at) AS "lastActivityAt", COUNT(*) OVER () AS "totalThreads"
@@ -139,11 +144,11 @@ export const DailyRecapQueryLive = Layer.effect(
         ORDER BY "lastActivityAt" DESC, threads.thread_id ASC
         LIMIT ${limit}
       `,
-    });
-    const attention = SqlSchema.findAll({
-      Request: Schema.Number,
-      Result: AttentionRow,
-      execute: (limit) => sql`
+      });
+      const attention = SqlSchema.findAll({
+        Request: Schema.Number,
+        Result: AttentionRow,
+        execute: (limit) => sql`
         WITH candidates AS (
           SELECT thread_id FROM projection_threads
           WHERE deleted_at IS NULL AND archived_at IS NULL
@@ -169,13 +174,23 @@ export const DailyRecapQueryLive = Layer.effect(
         ORDER BY "lastActivityAt" DESC, threads.thread_id ASC
         LIMIT ${limit}
       `,
-    });
+      });
+
+      return { sql, counts, outcomes, attention };
+    };
+    const onMain = queriesOn(main);
+    const onReader = reader === main ? onMain : queriesOn(reader);
 
     return DailyRecapQuery.of({
       getDailyRecap: (input) =>
         Effect.gen(function* () {
           const window = yield* dailyRecapWindow(input);
           const limit = Math.min(50, Math.max(1, Math.trunc(input.limit ?? 20)));
+          const { sql, counts, outcomes, attention } = Option.isSome(
+            yield* Effect.serviceOption(main.transactionService),
+          )
+            ? onMain
+            : onReader;
           const result = yield* Effect.gen(function* () {
             const countRows = yield* counts(window);
             const completed = yield* outcomes({ ...window, state: "completed", limit });

@@ -23,6 +23,8 @@ import type { Connection } from "effect/sql/SqlConnection";
 import { SqlError, classifySqliteError } from "effect/sql/SqlError";
 import * as Statement from "effect/sql/Statement";
 
+import { BUSY_RETRY_BUDGET_MS, busyRetryDelayMs, isRetryableSqliteBusy } from "./sqliteBusy.ts";
+
 const ATTR_DB_SYSTEM_NAME = "db.system.name";
 
 export const TypeId: TypeId = "~local/sqlite-node/SqliteClient";
@@ -43,6 +45,8 @@ export interface SqliteClientConfig {
   readonly spanAttributes?: Record<string, unknown> | undefined;
   readonly transformResultNames?: ((str: string) => string) | undefined;
   readonly transformQueryNames?: ((str: string) => string) | undefined;
+  /** How long a busy statement keeps retrying asynchronously. Defaults to {@link BUSY_RETRY_BUDGET_MS}. */
+  readonly busyRetryBudgetMs?: number | undefined;
 }
 
 export interface SqliteMemoryClientConfig extends Omit<
@@ -72,6 +76,16 @@ const checkNodeSqliteCompat = () => {
   return Effect.void;
 };
 
+/**
+ * Waits on the real timer, not the fiber's Clock: another process's lock is
+ * released in wall-clock time, also under a test clock that never advances.
+ */
+const wallClockSleep = (ms: number): Effect.Effect<void> =>
+  Effect.callback<void>((resume) => {
+    const timer = setTimeout(() => resume(Effect.void), ms);
+    return Effect.sync(() => clearTimeout(timer));
+  });
+
 const makeWithDatabase = Effect.fn("makeWithDatabase")(function* (
   options: SqliteClientConfig,
   openDatabase: () => DatabaseSync,
@@ -82,6 +96,8 @@ const makeWithDatabase = Effect.fn("makeWithDatabase")(function* (
   const transformRows = options.transformResultNames
     ? Statement.defaultTransforms(options.transformResultNames).array
     : undefined;
+
+  const busyRetryBudgetMs = options.busyRetryBudgetMs ?? BUSY_RETRY_BUDGET_MS;
 
   const makeConnection = Effect.gen(function* () {
     const scope = yield* Effect.scope;
@@ -118,60 +134,67 @@ const makeWithDatabase = Effect.fn("makeWithDatabase")(function* (
         }),
     });
 
-    const runStatement = (statement: StatementSync, params: ReadonlyArray<unknown>, raw: boolean) =>
-      Effect.withFiber<ReadonlyArray<any>, SqlError>((fiber) => {
-        statement.setReadBigInts(Boolean(Context.get(fiber.context, Client.SafeIntegers)));
+    /**
+     * Runs one synchronous statement. A busy database is retried
+     * asynchronously (see sqliteBusy.ts) so the event loop keeps running while
+     * another process holds the write lock; a failed busy attempt changes no
+     * state, so re-running the statement is safe, also inside a transaction.
+     */
+    const execute = <A>(attempt: () => A, message: string): Effect.Effect<A, SqlError> => {
+      let startedAt: number | undefined;
+      let retries = 0;
+      const loop: Effect.Effect<A, SqlError> = Effect.suspend(() => {
         try {
-          if (hasRows(statement)) {
-            return Effect.succeed(statement.all(...(params as any)));
-          }
-          const result = statement.run(...(params as any));
-          return Effect.succeed(raw ? (result as unknown as ReadonlyArray<any>) : []);
+          return Effect.succeed(attempt());
         } catch (cause) {
+          startedAt ??= Date.now();
+          if (isRetryableSqliteBusy(cause) && Date.now() - startedAt < busyRetryBudgetMs) {
+            return Effect.flatMap(wallClockSleep(busyRetryDelayMs(retries++)), () => loop);
+          }
           return Effect.fail(
             new SqlError({
-              reason: classifySqliteError(cause, {
-                message: "Failed to execute statement",
-                operation: "execute",
-              }),
+              reason: classifySqliteError(cause, { message, operation: "execute" }),
             }),
           );
         }
+      });
+      return loop;
+    };
+
+    const runStatement = (statement: StatementSync, params: ReadonlyArray<unknown>, raw: boolean) =>
+      Effect.withFiber<ReadonlyArray<any>, SqlError>((fiber) => {
+        statement.setReadBigInts(Boolean(Context.get(fiber.context, Client.SafeIntegers)));
+        return execute(() => {
+          if (hasRows(statement)) {
+            return statement.all(...(params as any));
+          }
+          const result = statement.run(...(params as any));
+          return raw ? (result as unknown as ReadonlyArray<any>) : [];
+        }, "Failed to execute statement");
       });
 
     const run = (sql: string, params: ReadonlyArray<unknown>, raw = false) =>
       Effect.flatMap(Cache.get(prepareCache, sql), (s) => runStatement(s, params, raw));
 
+    const allValues = (statement: StatementSync, params: ReadonlyArray<unknown>) => {
+      if (!hasRows(statement)) {
+        statement.run(...(params as any));
+        return [];
+      }
+      statement.setReturnArrays(true);
+      try {
+        // Safe to cast to array after we've setReturnArrays(true)
+        return statement.all(...(params as any)) as unknown as ReadonlyArray<
+          ReadonlyArray<unknown>
+        >;
+      } finally {
+        statement.setReturnArrays(false);
+      }
+    };
+
     const runValues = (sql: string, params: ReadonlyArray<unknown>) =>
-      Effect.acquireUseRelease(
-        Cache.get(prepareCache, sql),
-        (statement) =>
-          Effect.try({
-            try: () => {
-              if (hasRows(statement)) {
-                statement.setReturnArrays(true);
-                // Safe to cast to array after we've setReturnArrays(true)
-                return statement.all(...(params as any)) as unknown as ReadonlyArray<
-                  ReadonlyArray<unknown>
-                >;
-              }
-              statement.run(...(params as any));
-              return [];
-            },
-            catch: (cause) =>
-              new SqlError({
-                reason: classifySqliteError(cause, {
-                  message: "Failed to execute statement",
-                  operation: "execute",
-                }),
-              }),
-          }),
-        (statement) =>
-          Effect.sync(() => {
-            if (hasRows(statement)) {
-              statement.setReturnArrays(false);
-            }
-          }),
+      Effect.flatMap(Cache.get(prepareCache, sql), (statement) =>
+        execute(() => allValues(statement, params), "Failed to execute statement"),
       );
 
     return identity<Connection>({
@@ -185,26 +208,10 @@ const makeWithDatabase = Effect.fn("makeWithDatabase")(function* (
         return runValues(sql, params);
       },
       executeValuesUnprepared(sql, params) {
-        return Effect.try({
-          try: () => {
-            const statement = db.prepare(sql);
-            if (hasRows(statement)) {
-              statement.setReturnArrays(true);
-              return statement.all(...(params as any)) as unknown as ReadonlyArray<
-                ReadonlyArray<unknown>
-              >;
-            }
-            statement.run(...(params as any));
-            return [];
-          },
-          catch: (cause) =>
-            new SqlError({
-              reason: classifySqliteError(cause, {
-                message: "Failed to execute unprepared values statement",
-                operation: "execute",
-              }),
-            }),
-        });
+        return execute(
+          () => allValues(db.prepare(sql), params),
+          "Failed to execute unprepared values statement",
+        );
       },
       executeUnprepared(sql, params, rowTransform) {
         const effect = runStatement(db.prepare(sql), params ?? [], false);

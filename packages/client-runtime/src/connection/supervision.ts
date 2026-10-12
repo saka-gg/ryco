@@ -21,6 +21,7 @@ import { scopedThreadKey, scopeThreadRef } from "../scoped.ts";
 import { createEnvironmentEventBatcher } from "../state/threads/eventBatching.ts";
 import type { ShellStoreUpdate } from "../state/threads/store.ts";
 import type { EnvironmentConnection } from "./connection.ts";
+import { approximateJsonSize } from "./approximateJsonSize.ts";
 import type { EnvironmentStateSink } from "./environmentStateSink.ts";
 import { planEvictionsToCapacity } from "./evictionPolicy.ts";
 import {
@@ -196,13 +197,8 @@ function classifyThreadWindowFailure(error: unknown): SubscriptionFailureKind {
   return "failed";
 }
 
-const estimateJsonLength = (value: unknown): number => {
-  try {
-    return JSON.stringify(value)?.length ?? 0;
-  } catch {
-    return 0;
-  }
-};
+// Retained-memory budgets need magnitudes only: walk instead of serializing every event.
+const estimateJsonLength = approximateJsonSize;
 
 /**
  * The row a live thread event writes in the client's thread state, and how
