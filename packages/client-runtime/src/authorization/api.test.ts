@@ -62,8 +62,10 @@ describe("Hub thread read cache API", () => {
       );
     globalThis.fetch = fetch;
     const api = createApi();
-    expect((await api.readThreadCacheShell(nodeId)).snapshot.threads).toEqual([]);
+    expect((await api.readThreadCacheShell(nodeId))?.snapshot.threads).toEqual([]);
     const detail = await api.readThreadCacheThread(nodeId, "thread-a");
+    expect(new Headers(fetch.mock.calls[0]?.[1]?.headers).get("if-none-match")).toBeNull();
+    if (!detail) throw new Error("expected a thread");
     expect(detail.snapshot.messages[0]).not.toHaveProperty("streaming");
     expect(detail.snapshot.messages[0]).not.toHaveProperty("attachments");
     expect(fetch.mock.calls[1]?.[0]).toBe(`/api/nodes/${nodeId}/thread-cache/threads/thread-a`);
@@ -71,6 +73,48 @@ describe("Hub thread read cache API", () => {
       credentials: "same-origin",
       cache: "no-store",
     });
+  });
+
+  it("reads conditionally against the held version and treats 304 as unchanged", async () => {
+    const nodeId = "node_aaaaaaaaaaaaaaaaaaaaaa";
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValueOnce(new Response(null, { status: 304 }))
+      .mockResolvedValueOnce(new Response(null, { status: 304 }));
+    globalThis.fetch = fetch;
+    const api = createApi();
+    await expect(
+      api.readThreadCacheShell(nodeId, undefined, { generation: 3, revision: 7 }),
+    ).resolves.toBeNull();
+    await expect(
+      api.readThreadCacheThread(nodeId, "thread-a", undefined, { generation: 3, revision: 9 }),
+    ).resolves.toBeNull();
+    expect(fetch.mock.calls[0]?.[1]).toMatchObject({ cache: "no-store" });
+    expect(new Headers(fetch.mock.calls[0]?.[1]?.headers).get("if-none-match")).toBe('"3:7"');
+    expect(new Headers(fetch.mock.calls[1]?.[1]?.headers).get("if-none-match")).toBe('"3:9"');
+  });
+
+  it("works unchanged against a Hub that answers a conditional read with the body", async () => {
+    const nodeId = "node_aaaaaaaaaaaaaaaaaaaaaa";
+    const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValueOnce(
+      response({
+        protocolVersion: 1,
+        generation: 3,
+        revision: 8,
+        storedAt: 3,
+        snapshot: {
+          snapshotSequence: 0,
+          updatedAt: "2026-10-04T12:00:00.000Z",
+          projects: [],
+          worktrees: [],
+          threads: [],
+        },
+      }),
+    );
+    globalThis.fetch = fetch;
+    const api = createApi();
+    const shell = await api.readThreadCacheShell(nodeId, undefined, { generation: 3, revision: 7 });
+    expect(shell?.revision).toBe(8);
   });
 
   it("rejects invalid path identifiers before sending and preserves missing cache status", async () => {

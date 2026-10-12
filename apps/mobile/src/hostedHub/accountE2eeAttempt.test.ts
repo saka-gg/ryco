@@ -78,6 +78,7 @@ import { hostedHubStore } from "@ryco/client-runtime/authorization";
 import {
   disposeMobileRelaySocketContext,
   issueMobileRelayAttempt,
+  MOBILE_ENROLLMENT_GATE_WAIT_MS,
   prepareMobileRelaySocketContext,
   providerForMobileRelaySocketContext,
   resetMobileAccountE2eeAttemptForTests,
@@ -241,15 +242,73 @@ describe("mobile account E2EE relay attempt", () => {
   });
 
   it("opens no data attempt before enrollment is ready", async () => {
+    vi.useFakeTimers();
+    try {
+      setMobileNativeE2eeEnrollmentCoordinator({
+        getState: () => ({ status: "securing", generation: 5, ready: null, errorCode: null }),
+        subscribe: () => () => undefined,
+      } as never);
+      const prepared = prepareMobileRelaySocketContext();
+      const rejected = expect(prepared).rejects.toThrow("Native E2EE enrollment is not ready.");
+      await vi.advanceTimersByTimeAsync(MOBILE_ENROLLMENT_GATE_WAIT_MS);
+      await rejected;
+      expect(hoisted.issueRelayTicket).not.toHaveBeenCalled();
+      expect(hoisted.resolveTrust).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("waits for an enrollment in progress instead of failing into the reconnect backoff", async () => {
+    let state: { status: string; generation: number; ready: unknown; errorCode: null } = {
+      status: "securing",
+      generation: 5,
+      ready: null,
+      errorCode: null,
+    };
+    const listeners = new Set<() => void>();
     setMobileNativeE2eeEnrollmentCoordinator({
-      getState: () => ({ status: "securing", generation: 5, ready: null, errorCode: null }),
-      subscribe: () => () => undefined,
+      getState: () => state,
+      subscribe: (listener: () => void) => {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+      invalidate: hoisted.invalidateEnrollment,
     } as never);
-    await expect(prepareMobileRelaySocketContext()).rejects.toThrow(
-      "Native E2EE enrollment is not ready.",
-    );
-    expect(hoisted.issueRelayTicket).not.toHaveBeenCalled();
+    const prepared = prepareMobileRelaySocketContext();
+    await Promise.resolve();
     expect(hoisted.resolveTrust).not.toHaveBeenCalled();
+    state = { status: "ready", generation: 6, ready: READY, errorCode: null };
+    for (const listener of listeners) listener();
+    await expect(prepared).resolves.toMatchObject({ kind: "account" });
+    // Only the module's own subscription remains: the wait released its listener.
+    expect(listeners.size).toBe(1);
+  });
+
+  it("fails at once when the enrollment settles unavailable", async () => {
+    let state = {
+      status: "retrying",
+      generation: 5,
+      ready: null,
+      errorCode: null as string | null,
+    };
+    const listeners = new Set<() => void>();
+    setMobileNativeE2eeEnrollmentCoordinator({
+      getState: () => state,
+      subscribe: (listener: () => void) => {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+    } as never);
+    const prepared = prepareMobileRelaySocketContext();
+    state = {
+      status: "unavailable",
+      generation: 6,
+      ready: null,
+      errorCode: "enrollment_unavailable",
+    };
+    for (const listener of listeners) listener();
+    await expect(prepared).rejects.toThrow("Native E2EE enrollment is not ready.");
   });
 
   it("surfaces an unsupported node as incompatible without native plaintext fallback", async () => {

@@ -66,6 +66,10 @@
       "types": "./src/advertisedEndpoint.ts",
       "import": "./src/advertisedEndpoint.ts"
     },
+    "./bytesEqual": {
+      "types": "./src/bytesEqual.ts",
+      "import": "./src/bytesEqual.ts"
+    },
     "./relayMessageChunks": {
       "types": "./src/relayMessageChunks.ts",
       "import": "./src/relayMessageChunks.ts"

@@ -135,8 +135,15 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.useRealTimers();
 });
-function start() {
+function start(
+  startReadCache?: Parameters<typeof startHostedWorkspaceCoordinator>[0] extends
+    | { readonly startReadCache?: infer T }
+    | undefined
+    ? T
+    : never,
+) {
   stop = startHostedWorkspaceCoordinator({
+    ...(startReadCache ? { startReadCache } : {}),
     hubOrigin: "https://hub.example.test",
     cache: {
       list,
@@ -333,6 +340,39 @@ describe("hosted home discovery", () => {
     expect(history.location.pathname).toBe("/");
     await vi.advanceTimersByTimeAsync(60_000);
     expect(select).toHaveBeenCalledTimes(2);
+  });
+
+  it("waits, bounded, for Hub cache shells in flight instead of waking those devices", async () => {
+    let reportShellReads: (nodeIds: ReadonlySet<string>) => void = () => {};
+    let deliver: (snapshot: WorkspaceMetadataSnapshot) => void = () => {};
+    start((onSnapshot, onShellReadsChanged) => {
+      deliver = onSnapshot;
+      reportShellReads = onShellReadsChanged ?? (() => {});
+      return () => {};
+    });
+    reportShellReads(new Set([nodes[0]!.id, nodes[1]!.id]));
+    await settle();
+    expect(select).not.toHaveBeenCalled();
+    // The first device's cached shell lands: it never needs a relay wake-up.
+    deliver(metadata(nodes[0]!.environmentId));
+    reportShellReads(new Set([nodes[1]!.id]));
+    await settle();
+    expect(select).not.toHaveBeenCalled();
+    // The second device's read is still pending at the bound: wake it anyway.
+    await vi.advanceTimersByTimeAsync(1_500);
+    await settle();
+    expect(select.mock.calls).toEqual([[nodes[1]!.id]]);
+  });
+
+  it("passes over a device whose Hub cache read is in flight and wakes the next", async () => {
+    let reportShellReads: (nodeIds: ReadonlySet<string>) => void = () => {};
+    start((_onSnapshot, onShellReadsChanged) => {
+      reportShellReads = onShellReadsChanged ?? (() => {});
+      return () => {};
+    });
+    reportShellReads(new Set([nodes[0]!.id]));
+    await settle();
+    expect(select.mock.calls).toEqual([[nodes[1]!.id]]);
   });
 
   it("treats an empty current shell as complete and skips cached, offline, revoked and native-only devices", async () => {

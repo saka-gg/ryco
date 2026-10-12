@@ -1,4 +1,6 @@
+import type { HostedEarlyRelaySocket } from "@ryco/client-runtime/authorization";
 import type { DpopSignerService } from "@ryco/client-runtime/platform";
+import { RELAY_AUTHENTICATION_DEADLINE_MS } from "@ryco/contracts";
 import {
   HostedRelayEngine,
   type HostedRelaySocketCallbacks,
@@ -91,6 +93,173 @@ export interface MobileHostedRelaySocketOptions {
   readonly e2ee?: RelayE2eeProvider | undefined;
   /** Erases the transient account grant when this one socket attempt ends. */
   readonly disposePreparedContext?: (() => void) | undefined;
+  /**
+   * The upgrade started beside this attempt's ticket request. Adopted when it
+   * is still usable; otherwise this socket opens its own, in the serial order.
+   */
+  readonly earlySocket?: HostedEarlyRelaySocket | undefined;
+}
+
+/**
+ * How long an opened early socket waits for its ticket. The Hub closes a socket
+ * that has not authenticated within {@link RELAY_AUTHENTICATION_DEADLINE_MS} of
+ * opening; this lets go of it well before, and the attempt continues in the
+ * serial order with a fresh socket.
+ */
+export const EARLY_RELAY_SOCKET_TICKET_WAIT_MS = RELAY_AUTHENTICATION_DEADLINE_MS - 1_500;
+
+interface EarlySocketSink {
+  readonly open: () => void;
+  readonly message: (data: unknown) => void;
+  readonly close: (reason?: string) => void;
+  readonly error: () => void;
+}
+
+export interface MobileEarlyRelaySocketOptions {
+  readonly url: string;
+  readonly createSocket?: NativeSocketFactory;
+  readonly dpopSigner?: () => Promise<DpopSignerService>;
+  readonly readBearerToken?: () => string | null;
+  readonly setTimeout?: (callback: () => void, delayMs: number) => unknown;
+  readonly clearTimeout?: (timer: unknown) => void;
+}
+
+/**
+ * The relay upgrade, started before the attempt has its ticket.
+ *
+ * The native upgrade is authorized by the session token and a DPoP proof
+ * alone; the ticket only travels in the first frame. Opening the socket beside
+ * the ticket request hides the ticket's round trip under the socket's TCP,
+ * TLS and upgrade, as the node connector does for its own proof. The socket
+ * carries no authority until the ticket-bearing auth frame, and is used by at
+ * most one attempt: the one {@link MobileHostedRelaySocket} that adopts it.
+ * One that opened and waited {@link EARLY_RELAY_SOCKET_TICKET_WAIT_MS} for its
+ * ticket, closed, or failed to mint its proof is not adopted, and the attempt
+ * opens a fresh socket after its ticket instead.
+ */
+export class MobileEarlyRelaySocket implements HostedEarlyRelaySocket {
+  readonly #options: MobileEarlyRelaySocketOptions;
+  readonly #ready: Promise<NativeSocketLike | null>;
+  #socket: NativeSocketLike | null = null;
+  #opened = false;
+  #unusable = false;
+  #adopted = false;
+  #timer: unknown = null;
+  #sink: EarlySocketSink | null = null;
+  readonly #held: Array<{ readonly type: "message"; readonly data: unknown }> = [];
+
+  constructor(options: MobileEarlyRelaySocketOptions) {
+    this.#options = options;
+    this.#ready = this.#start();
+  }
+
+  async #start(): Promise<NativeSocketLike | null> {
+    try {
+      // As in `MobileHostedRelaySocket`: nothing that can fail runs before the
+      // first await, so the constructor never throws.
+      await Promise.resolve();
+      const token = (
+        this.#options.readBearerToken ??
+        (() => mobileSessionCredentials.readBearerToken?.() ?? null)
+      )();
+      if (token === null || token.length === 0) throw new Error(UPGRADE_FAILED);
+      const signer = await (this.#options.dpopSigner ?? createMobileDpopSigner)();
+      const proof = await signer.sign({ method: "GET", url: this.#options.url, token });
+      if (this.#unusable) return null;
+      const socket = (this.#options.createSocket ?? defaultCreateSocket)(this.#options.url, {
+        Authorization: `DPoP ${token}`,
+        DPoP: proof,
+      });
+      socket.binaryType = "arraybuffer";
+      this.#socket = socket;
+      socket.addEventListener("open", () => {
+        if (this.#sink) return this.#sink.open();
+        this.#opened = true;
+        this.#timer = (this.#options.setTimeout ?? globalThis.setTimeout)(() => {
+          this.#timer = null;
+          if (!this.#adopted) this.discard();
+        }, EARLY_RELAY_SOCKET_TICKET_WAIT_MS);
+      });
+      socket.addEventListener("message", (event: never) => {
+        const data = (event as { data?: unknown }).data;
+        if (this.#sink) this.#sink.message(data);
+        else this.#held.push({ type: "message", data });
+      });
+      socket.addEventListener("close", (event: { readonly reason?: string }) => {
+        if (this.#sink) return this.#sink.close(event.reason);
+        this.#markUnusable();
+      });
+      socket.addEventListener("error", () => {
+        if (this.#sink) return this.#sink.error();
+        this.#markUnusable();
+      });
+      return socket;
+    } catch {
+      this.#markUnusable();
+      return null;
+    }
+  }
+
+  /**
+   * Hand the socket to the one attempt that holds its ticket, or `null` when it
+   * is no longer usable (then it is closed). `attach` replays what happened
+   * before adoption once the caller has stored the socket.
+   */
+  async adopt(): Promise<{
+    readonly socket: NativeSocketLike;
+    readonly attach: (sink: EarlySocketSink) => void;
+  } | null> {
+    const socket = await this.#ready;
+    if (socket === null || this.#unusable || this.#adopted) {
+      this.discard();
+      return null;
+    }
+    this.#adopted = true;
+    this.#clearTimer();
+    return {
+      socket,
+      attach: (sink) => {
+        this.#sink = sink;
+        const held = this.#held.splice(0);
+        if (this.#opened) sink.open();
+        for (const entry of held) sink.message(entry.data);
+      },
+    };
+  }
+
+  discard(): void {
+    if (this.#adopted) return;
+    this.#markUnusable();
+    this.#clearTimer();
+    this.#held.length = 0;
+    const socket = this.#socket;
+    if (socket && socket.readyState !== CLOSING && socket.readyState !== CLOSED) {
+      try {
+        socket.close(1000, "closed");
+      } catch {
+        // Already gone.
+      }
+    }
+  }
+
+  #markUnusable(): void {
+    this.#unusable = true;
+  }
+
+  #clearTimer(): void {
+    if (this.#timer === null) return;
+    (this.#options.clearTimeout ?? ((timer) => globalThis.clearTimeout(timer as never)))(
+      this.#timer,
+    );
+    this.#timer = null;
+  }
+}
+
+/** Start the relay upgrade for an attempt whose ticket is still being issued. */
+export function openMobileEarlyRelaySocket(
+  options?: Partial<MobileEarlyRelaySocketOptions>,
+): MobileEarlyRelaySocket {
+  return new MobileEarlyRelaySocket({ url: mobileHostedRelayUrl(), ...options });
 }
 
 const CONNECTING = 0;
@@ -189,6 +358,7 @@ export class MobileHostedRelaySocket {
     // socket is created at all.
     if (options.url !== resolveRelayUrl() || options.ticketExpiresAt <= now()) {
       this.#disposePreparedContext(options);
+      options.earlySocket?.discard();
       throw new Error(INVALID_ATTEMPT);
     }
 
@@ -258,6 +428,7 @@ export class MobileHostedRelaySocket {
     } catch (error) {
       this.#abandoned = true;
       this.#disposePreparedContext(options);
+      options.earlySocket?.discard();
       throw error;
     }
 
@@ -278,6 +449,31 @@ export class MobileHostedRelaySocket {
       // constructor, before the caller has registered any listener, and the
       // attempt would hang instead of failing closed.
       await Promise.resolve();
+      const early =
+        options.earlySocket instanceof MobileEarlyRelaySocket
+          ? await options.earlySocket.adopt()
+          : (options.earlySocket?.discard(), null);
+      if (early !== null) {
+        if (this.#abandoned) {
+          early.socket.close(1000, "closed");
+          return;
+        }
+        this.#socket = early.socket;
+        early.attach({
+          open: () => {
+            for (const listener of this.#pendingOpen) listener();
+          },
+          message: (data) => this.#deliver(data),
+          close: (reason) => {
+            for (const listener of this.#pendingClose) listener(reason);
+          },
+          error: () => {
+            for (const listener of this.#pendingError) listener();
+          },
+        });
+        return;
+      }
+      if (this.#abandoned) return;
       const readToken =
         options.readBearerToken ?? (() => mobileSessionCredentials.readBearerToken?.() ?? null);
       const token = readToken();
@@ -310,12 +506,7 @@ export class MobileHostedRelaySocket {
         for (const listener of this.#pendingOpen) listener();
       });
       socket.addEventListener("message", (event: never) => {
-        const message = classifyInboundMessage((event as { data?: unknown }).data);
-        if ("bytes" in message) {
-          for (const listener of this.#pendingMessage) listener(message.bytes);
-        } else {
-          this.#engine.reportUndecodableMessage(message.fail);
-        }
+        this.#deliver((event as { data?: unknown }).data);
       });
       socket.addEventListener("close", (event: { readonly reason?: string }) => {
         for (const listener of this.#pendingClose) listener(event.reason);
@@ -350,6 +541,15 @@ export class MobileHostedRelaySocket {
           wasClean: false,
         });
       }
+    }
+  }
+
+  #deliver(data: unknown): void {
+    const message = classifyInboundMessage(data);
+    if ("bytes" in message) {
+      for (const listener of this.#pendingMessage) listener(message.bytes);
+    } else {
+      this.#engine.reportUndecodableMessage(message.fail);
     }
   }
 

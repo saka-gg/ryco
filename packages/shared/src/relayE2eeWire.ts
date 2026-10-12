@@ -1,4 +1,5 @@
 import { encode, rfc8949EncodeOptions } from "cborg";
+import { bytesEqual } from "./bytesEqual.ts";
 
 import {
   E2EE_AAD_BYTES,
@@ -535,14 +536,6 @@ const HANDSHAKE_REJECT_BODY: Uint8Array = encode(
   new Uint8Array(E2EE_HANDSHAKE_REJECT_PAD_BYTES),
   rfc8949EncodeOptions,
 );
-
-function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
-  if (left.byteLength !== right.byteLength) return false;
-  for (let index = 0; index < left.byteLength; index += 1) {
-    if (left[index] !== right[index]) return false;
-  }
-  return true;
-}
 
 export interface E2eeNegotiationRecord {
   readonly recordType: E2eeNegotiationRecordType;

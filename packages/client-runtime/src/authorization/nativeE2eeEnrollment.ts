@@ -132,6 +132,44 @@ export interface NativeE2eeEnrollmentCoordinator {
   readonly applyRevocation: (revocation: HostedRelayEnrollmentRevocation) => boolean;
 }
 
+/** Statuses an enrollment leaves on its own: an ensure is running or about to. */
+function enrollmentInProgress(status: NativeE2eeEnrollmentStatus): boolean {
+  return status === "idle" || status === "securing" || status === "retrying";
+}
+
+/**
+ * Wait, bounded, for an enrollment in progress to reach its next settled state
+ * — `ready`, `unavailable` or `revoked` — and return that state; at the bound
+ * the current one. For a relay attempt that would otherwise fail on an
+ * enrollment that is about to be ready and wait out the reconnect backoff.
+ * Waiting grants nothing: the caller still requires `ready`.
+ */
+export function awaitNativeE2eeEnrollmentSettled(
+  coordinator: Pick<NativeE2eeEnrollmentCoordinator, "getState" | "subscribe">,
+  options: {
+    readonly timeoutMs: number;
+    readonly timers: Pick<HostedRuntimeTimers, "setTimeout" | "clearTimeout">;
+  },
+): Promise<NativeE2eeEnrollmentState> {
+  const initial = coordinator.getState();
+  if (!enrollmentInProgress(initial.status)) return Promise.resolve(initial);
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      unsubscribe();
+      options.timers.clearTimeout(timer);
+      resolve(coordinator.getState());
+    };
+    const unsubscribe = coordinator.subscribe(() => {
+      if (!enrollmentInProgress(coordinator.getState().status)) finish();
+    });
+    const timer = options.timers.setTimeout(finish, options.timeoutMs);
+    if (!enrollmentInProgress(coordinator.getState().status)) finish();
+  });
+}
+
 const decodeEnrollmentRequest = Schema.decodeUnknownSync(NativeE2eeEnrollmentUpsertRequest);
 
 function enrollmentError(code: NativeE2eeEnrollmentErrorCode): never {

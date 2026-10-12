@@ -4,7 +4,7 @@ import { useEffect } from "react";
 import { hostedHubController, hostedHubStore } from "./state";
 import { setHostedWorkspaceBackgrounded } from "./hostedConnectionCoordinator";
 import { bindHostedBrowserLifecycle } from "./browserLifecycle";
-import { probeWebHubSession } from "./hubSession";
+import { resumeWebHubSession } from "./hubSession";
 
 type NetworkInformationTarget = Pick<EventTarget, "addEventListener" | "removeEventListener">;
 
@@ -25,7 +25,7 @@ function bindBrowserLifecycle(): () => void {
     suspend: (reason) => hostedHubController.suspendBrowser(reason),
     recover: () => hostedHubController.recoverAfterConnectivity(),
     setBackgrounded: setHostedWorkspaceBackgrounded,
-    probe: probeWebHubSession,
+    probe: resumeWebHubSession,
     subscribeNetworkChange: subscribeBrowserNetworkChange,
   });
 }

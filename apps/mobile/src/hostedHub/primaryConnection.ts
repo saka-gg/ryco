@@ -36,7 +36,11 @@ import {
   providerForMobileRelaySocketContext,
 } from "./accountE2eeAttempt";
 import { readPrimaryEnvironmentDescriptor } from "./primaryEnvironment";
-import { MobileHostedRelaySocket, mobileHostedRelayUrl } from "./relaySocket";
+import {
+  MobileHostedRelaySocket,
+  mobileHostedRelayUrl,
+  openMobileEarlyRelaySocket,
+} from "./relaySocket";
 import { getMobileHostedConfig } from "./runtimeConfig";
 import { writeEnvironmentServerConfig } from "../state/environmentServerConfigs";
 import { getMobileNativeE2eeEnrollmentCoordinator } from "./e2eeEnrollment";
@@ -109,6 +113,7 @@ export function createHostedPrimaryConnection(
     },
     issueRelayAttempt: (input) => issueMobileRelayAttempt(input),
     disposeSocketContext: disposeMobileRelaySocketContext,
+    openEarlyRelaySocket: openMobileEarlyRelaySocket,
     relayUrl: mobileHostedRelayUrl,
     createRelaySocket: (input) =>
       new MobileHostedRelaySocket({

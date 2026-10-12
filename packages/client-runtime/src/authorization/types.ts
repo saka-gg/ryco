@@ -409,3 +409,15 @@ export interface HostedRelayFailure {
    */
   readonly enrollmentRevoked?: HostedRelayEnrollmentRevocation;
 }
+
+/**
+ * A relay socket a native platform started opening before the attempt's ticket
+ * existed: the upgrade authenticates with the session token and a DPoP proof
+ * alone, and the ticket travels in the first frame. The platform bounds how
+ * long an opened one waits for its ticket and falls back to opening a fresh
+ * socket after it; the factory only hands it to the one socket that consumes
+ * the attempt's ticket, or discards it.
+ */
+export interface HostedEarlyRelaySocket {
+  readonly discard: () => void;
+}
