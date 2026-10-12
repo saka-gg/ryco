@@ -381,14 +381,20 @@ it.effect("reads the recap on the read-only worker connection of a file database
       yield* clean(sql);
       yield* thread(sql, "worker-thread");
       yield* turn(sql, "worker-thread", "turn-1", "completed", "2026-10-02T10:00:00.000Z");
-      const stats = () =>
+      const readWorkerStats = () =>
         (
-          reader as unknown as { readWorkerStats: () => { workerStatements: number } }
-        ).readWorkerStats().workerStatements;
-      const before = stats();
+          reader as unknown as {
+            readWorkerStats: () => { workerStatements: number; fallbackAcquisitions: number };
+          }
+        ).readWorkerStats();
+      const before = readWorkerStats().workerStatements;
       const result = yield* (yield* DailyRecapQuery).getDailyRecap(request);
       assert.equal(result.counts.completedTurns, 1);
-      assert.isAtLeast(stats() - before, 4);
+      assert.isAtLeast(
+        readWorkerStats().workerStatements - before,
+        4,
+        JSON.stringify(readWorkerStats()),
+      );
     }).pipe(
       Effect.provide(
         DailyRecapQueryLive.pipe(

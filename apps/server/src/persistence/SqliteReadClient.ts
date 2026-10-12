@@ -186,6 +186,7 @@ const makeWorkerHost = (options: SqliteReadWorkerOptions) => {
   let nextId = 0;
   let workerStatements = 0;
   let workerFailures = 0;
+  let lastFailure: string | null = null;
   const pending = new Map<number, PendingRequest>();
 
   const failAll = (error: SqlError) => {
@@ -200,6 +201,7 @@ const makeWorkerHost = (options: SqliteReadWorkerOptions) => {
     ready = undefined;
     failures += 1;
     workerFailures += 1;
+    lastFailure = error.message;
     failAll(error);
     void current.terminate().catch(() => undefined);
   };
@@ -213,9 +215,10 @@ const makeWorkerHost = (options: SqliteReadWorkerOptions) => {
         eval: true,
         workerData: { filename: options.filename, busyTimeoutMs: BLOCKING_BUSY_TIMEOUT_MS },
       });
-    } catch {
+    } catch (cause) {
       failures += 1;
       workerFailures += 1;
+      lastFailure = String(cause);
       return Promise.resolve(false);
     }
     // The reader must never keep the process alive.
@@ -291,6 +294,7 @@ const makeWorkerHost = (options: SqliteReadWorkerOptions) => {
     request,
     close,
     stats: () => ({ workerStatements, workerFailures }),
+    lastFailure: () => lastFailure,
   };
 };
 
@@ -346,16 +350,23 @@ export const makeSqliteReadWorkerClient = Effect.fn("makeSqliteReadWorkerClient"
   const workerConnection = makeWorkerConnection(host);
   const semaphore = yield* Semaphore.make(1);
   let fallbackAcquisitions = 0;
+  let warnedFallback = false;
+  // Reads stay correct on the main connection; say once why they no longer run off-thread.
+  const fallback = Effect.suspend(() => {
+    fallbackAcquisitions += 1;
+    if (warnedFallback) return Effect.void;
+    warnedFallback = true;
+    return Effect.logWarning("SQLite read worker unavailable; reading on the main connection", {
+      detail: host.lastFailure(),
+    });
+  });
 
   // A transaction holds the connection it started on for its whole scope.
   const transactionAcquirer: Effect.Effect<Connection, SqlError, Scope.Scope> =
     Effect.uninterruptibleMask((restore) =>
       Effect.flatMap(Effect.scope, (scope) =>
         Effect.flatMap(restore(host.start), (started) => {
-          if (!started) {
-            fallbackAcquisitions += 1;
-            return restore(main.reserve);
-          }
+          if (!started) return Effect.andThen(fallback, restore(main.reserve));
           return restore(semaphore.take(1)).pipe(
             Effect.andThen(Scope.addFinalizer(scope, semaphore.release(1))),
             Effect.as(workerConnection),
