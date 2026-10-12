@@ -569,6 +569,8 @@ class HostedHubController {
    * ready: a snapshot can only belong to the lost channel.
    */
   #relayGapGeneration: number | null = null;
+  /** The plain bootstrap access check still waiting for its answer; see {@link accessCheckPending}. */
+  #accessCheckOperation: AbortController | null = null;
   #retrySelectedNodePromise: Promise<void> | null = null;
   #browserResumeOperation: AbortController | null = null;
   #browserResumePromise: Promise<void> | null = null;
@@ -614,8 +616,13 @@ class HostedHubController {
     if (this.#bootstrapPromise) return this.#bootstrapPromise;
     const operation = this.#replaceOperation();
     const access = settledSignal();
-    const promise = this.#restoreAccess(operation, access.settle).finally(() => {
+    this.#accessCheckOperation = operation;
+    const settle = () => {
+      if (this.#accessCheckOperation === operation) this.#accessCheckOperation = null;
       access.settle();
+    };
+    const promise = this.#restoreAccess(operation, settle).finally(() => {
+      settle();
       if (this.#operation === operation) this.#operation = null;
       if (this.#bootstrapPromise === promise) this.#bootstrapPromise = null;
       if (this.#bootstrapAccessPromise === access.promise) this.#bootstrapAccessPromise = null;
@@ -635,6 +642,16 @@ class HostedHubController {
    * long as `/api/nodes` took (or stalled). The read itself is unchanged and
    * still owned here.
    */
+  /**
+   * Whether a {@link bootstrap} access check is in flight and has not answered
+   * yet. Display-only readers use it to send a read beside the check and hold
+   * the answer until the session validates. A credential adoption is not such
+   * a check: reads sent during it could carry the credential being replaced.
+   */
+  accessCheckPending(): boolean {
+    return this.#accessCheckOperation !== null && !this.#accessCheckOperation.signal.aborted;
+  }
+
   bootstrapAccess(): Promise<void> {
     const settled = this.bootstrap();
     return this.#bootstrapAccessPromise ?? settled;

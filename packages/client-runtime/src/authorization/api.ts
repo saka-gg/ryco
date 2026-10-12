@@ -83,6 +83,20 @@ import { runNativeHandoff, runTypedNativeHandoff } from "./nativeHandoff.ts";
 
 const JSON_HEADERS = { accept: "application/json", "content-type": "application/json" } as const;
 
+/** The stored version of a Hub thread-cache entry, as its body reports it. */
+export interface HostedThreadCacheVersion {
+  readonly generation: number;
+  readonly revision: number;
+}
+
+/** The Hub's strong entity tag for a thread-cache entry: `"<generation>:<revision>"`. */
+export function threadCacheEntityTag(version: HostedThreadCacheVersion): string {
+  return `"${version.generation}:${version.revision}"`;
+}
+
+/** What {@link HostedHubApi}'s request answers for a conditional read's `304`. */
+const NOT_MODIFIED: Record<string, unknown> = Object.freeze({});
+
 const MAX_BEARER_TOKEN_LENGTH = 4096;
 const MAX_PASSKEY_LABEL_LENGTH = 256;
 const MAX_PASSKEYS = 256;
@@ -2419,33 +2433,41 @@ export class HostedHubApi {
     this.clearSessionMaterial();
   }
 
+  /**
+   * The node's cached shell. With `held`, the read is conditional: the Hub
+   * answers `304` when that is still the stored version, and this resolves
+   * `null` — the held copy is current. A Hub without conditional reads answers
+   * `200` with the body as before.
+   */
   async readThreadCacheShell(
     nodeId: string,
     signal?: AbortSignal,
-  ): Promise<typeof ThreadReadCacheShellResponse.Type> {
+    held?: HostedThreadCacheVersion,
+  ): Promise<typeof ThreadReadCacheShellResponse.Type | null> {
     if (!HUB_NODE_ID_PATTERN.test(nodeId)) throw new HostedHubApiError("invalid_request", 400);
-    return decodeContract(
-      ThreadReadCacheShellResponse,
-      await this.#request(`/api/nodes/${nodeId}/thread-cache/shell`, signal ? { signal } : {}),
-      "invalid_response",
-    );
+    const body = await this.#request(`/api/nodes/${nodeId}/thread-cache/shell`, {
+      ...(signal ? { signal } : {}),
+      ...(held ? { ifNoneMatch: threadCacheEntityTag(held) } : {}),
+    });
+    if (body === NOT_MODIFIED) return null;
+    return decodeContract(ThreadReadCacheShellResponse, body, "invalid_response");
   }
 
+  /** One cached thread; conditional like {@link readThreadCacheShell}. */
   async readThreadCacheThread(
     nodeId: string,
     threadId: string,
     signal?: AbortSignal,
-  ): Promise<typeof ThreadReadCacheThreadResponse.Type> {
+    held?: HostedThreadCacheVersion,
+  ): Promise<typeof ThreadReadCacheThreadResponse.Type | null> {
     if (!HUB_NODE_ID_PATTERN.test(nodeId) || !/^[A-Za-z0-9_-]{1,128}$/u.test(threadId))
       throw new HostedHubApiError("invalid_request", 400);
-    return decodeContract(
-      ThreadReadCacheThreadResponse,
-      await this.#request(
-        `/api/nodes/${nodeId}/thread-cache/threads/${threadId}`,
-        signal ? { signal } : {},
-      ),
-      "invalid_response",
-    );
+    const body = await this.#request(`/api/nodes/${nodeId}/thread-cache/threads/${threadId}`, {
+      ...(signal ? { signal } : {}),
+      ...(held ? { ifNoneMatch: threadCacheEntityTag(held) } : {}),
+    });
+    if (body === NOT_MODIFIED) return null;
+    return decodeContract(ThreadReadCacheThreadResponse, body, "invalid_response");
   }
 
   async listNodes(
@@ -2906,6 +2928,12 @@ export class HostedHubApi {
       readonly signal?: AbortSignal;
       /** A tighter bound than {@link REQUEST_DEADLINE_MS}; see {@link HostedHubReadOptions}. */
       readonly deadlineMs?: number;
+      /**
+       * Make a GET conditional. A `304` then resolves {@link NOT_MODIFIED}. The
+       * request already bypasses every cache (`no-store`), so a `304` can only
+       * be the Hub's own answer to this header.
+       */
+      readonly ifNoneMatch?: string;
     },
   ): Promise<Record<string, unknown>> {
     const url = new URL(pathname, this.#endpoint.origin());
@@ -2935,6 +2963,9 @@ export class HostedHubApi {
     }
     const method = options.method ?? "GET";
     const headers: Record<string, string> = { ...JSON_HEADERS };
+    if (options.ifNoneMatch !== undefined && method === "GET") {
+      headers["if-none-match"] = options.ifNoneMatch;
+    }
 
     let target: string;
     let credentials: "include" | "omit" | "same-origin";
@@ -3029,6 +3060,7 @@ export class HostedHubApi {
         ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
         signal: deadline.signal,
       });
+      if (headers["if-none-match"] !== undefined && response.status === 304) return NOT_MODIFIED;
       // Headers do not complete the request: keep the deadline and caller's
       // cancellation wired until the response body has also been consumed.
       return await responseJson(response, options.intent, options.narrowForbidden !== false);

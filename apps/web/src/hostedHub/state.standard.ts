@@ -62,6 +62,7 @@ const standardHostedHubController: {
   readonly [K in keyof HostedHubController]: HostedHubController[K];
 } = {
   bootstrap: settled,
+  accessCheckPending: () => false,
   bootstrapAccess: settled,
   adoptSessionCredential: () => Promise.resolve(false),
   signInWithRecoveryCode: settled,

@@ -59,6 +59,11 @@ import {
  */
 export const MAX_HOSTED_WEB_CONNECTIONS = 1;
 export const HOSTED_WEB_WAKE_STAGGER_MS = 750;
+/**
+ * How long home discovery passes over a node whose Hub cache shell is still
+ * being read before waking it over the relay anyway.
+ */
+export const HOME_DISCOVERY_CACHE_WAIT_MS = 1_500;
 
 export interface HostedConnectionCoordinatorDeps {
   readonly scopes: HostedWebScopeStore;
@@ -467,6 +472,14 @@ export function startHostedWorkspaceCoordinator(input?: {
   let releaseDiscoveryScope: (() => void) | null = null;
   let discoveryPending = false;
   const failedDiscoveryEnvironments = new Set<EnvironmentId>();
+  /**
+   * Nodes whose Hub cache shell read is in flight, with when discovery first
+   * saw it pending. A shell about to land makes a relay wake-up unnecessary, so
+   * discovery passes over such a node for at most
+   * {@link HOME_DISCOVERY_CACHE_WAIT_MS}.
+   */
+  const pendingCacheShells = new Map<string, number>();
+  let cacheWaitTimer: unknown = null;
 
   const coordinator = createHostedConnectionCoordinator({
     scopes: hostedWebConnectionScopes,
@@ -646,6 +659,10 @@ export function startHostedWorkspaceCoordinator(input?: {
       !coordinator.snapshot().demand.backgrounded &&
       !foregroundDemand;
     const eligible = state.nodes.filter(isHostedWebConnectableNode);
+    const awaitingCacheShell = (node: HostedHubNode) => {
+      const since = pendingCacheShells.get(node.id);
+      return since !== undefined && now() - since < HOME_DISCOVERY_CACHE_WAIT_MS;
+    };
     if (!canDiscover) {
       releaseDiscovery();
     } else {
@@ -665,7 +682,8 @@ export function startHostedWorkspaceCoordinator(input?: {
         const next = eligible.find(
           (node) =>
             !snapshots.has(node.environmentId) &&
-            !failedDiscoveryEnvironments.has(node.environmentId),
+            !failedDiscoveryEnvironments.has(node.environmentId) &&
+            !awaitingCacheShell(node),
         );
         if (next) {
           discoveryEnvironmentId = next.environmentId;
@@ -897,13 +915,37 @@ export function startHostedWorkspaceCoordinator(input?: {
     scheduleHomeDiscovery();
   });
   const resetRouteResolver = setHostedNodeRouteEnvironmentResolver(nodeIdForHostedEnvironment);
+  const onCacheShellReadsChanged = (nodeIds: ReadonlySet<string>) => {
+    if (disposed) return;
+    const at = now();
+    for (const nodeId of pendingCacheShells.keys()) {
+      if (!nodeIds.has(nodeId)) pendingCacheShells.delete(nodeId);
+    }
+    for (const nodeId of nodeIds) {
+      if (!pendingCacheShells.has(nodeId)) pendingCacheShells.set(nodeId, at);
+    }
+    if (cacheWaitTimer !== null) cancel(cacheWaitTimer);
+    cacheWaitTimer = null;
+    if (pendingCacheShells.size > 0) {
+      // Re-check at the bound, should a read still be pending then.
+      const oldest = Math.min(...pendingCacheShells.values());
+      cacheWaitTimer = schedule(
+        () => {
+          cacheWaitTimer = null;
+          scheduleHomeDiscovery();
+        },
+        Math.max(0, oldest + HOME_DISCOVERY_CACHE_WAIT_MS - at),
+      );
+    }
+    scheduleHomeDiscovery();
+  };
   const stopReadCache = (input?.startReadCache ?? startBrowserHostedThreadReadCache)((snapshot) => {
     const previous = snapshots.get(snapshot.environmentId);
     if (previous && previous.capturedAt > snapshot.capturedAt) return;
     snapshots.set(snapshot.environmentId, snapshot);
     publish(hostedWorkspaceSnapshot.machines);
     scheduleHomeDiscovery();
-  });
+  }, onCacheShellReadsChanged);
   void coordinator.reconcile();
   observeDemand();
   void synchronize();
@@ -911,6 +953,8 @@ export function startHostedWorkspaceCoordinator(input?: {
     disposed = true;
     syncGeneration += 1;
     if (publishTimer !== null) cancel(publishTimer);
+    if (cacheWaitTimer !== null) cancel(cacheWaitTimer);
+    cacheWaitTimer = null;
     unsubscribeHub();
     unsubscribeDemandScopes();
     releasePresenceWatch?.();

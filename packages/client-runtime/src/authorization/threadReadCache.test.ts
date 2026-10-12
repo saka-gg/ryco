@@ -279,4 +279,215 @@ describe("shared hosted thread read cache", () => {
       stop();
     }
   });
+
+  describe("conditional reads and the routed prefetch", () => {
+    const environmentId = EnvironmentId.make("environment-a");
+    const threadId = ThreadId.make("thread-a");
+    const node = {
+      id: "node-a",
+      environmentId,
+      effectiveRole: "owner",
+      revokedAt: null,
+    } as HostedHubNode;
+    const authenticated = {
+      ...hostedHubStore.getInitialState(),
+      accountStatus: "authenticated",
+      directoryStatus: "ready",
+      browserStatus: "current",
+      account: { id: "account-a" } as HostedHubAccount,
+      nodes: [node],
+    } as HostedHubState;
+    const shell = (revision: number) => ({
+      protocolVersion: 1 as const,
+      generation: 1,
+      revision,
+      storedAt: 1,
+      snapshot: {
+        snapshotSequence: revision,
+        updatedAt: "2026-10-05T00:00:00.000Z",
+        projects: [],
+        threads: [],
+      },
+    });
+    const detail = (revision: number): ThreadReadCacheThreadResponse => ({
+      protocolVersion: 1,
+      generation: 1,
+      revision,
+      storedAt: 1,
+      threadId,
+      snapshot: { messages: [] },
+    });
+    function start(input: {
+      readonly state: () => HostedHubState;
+      readonly accessPending?: () => boolean;
+      readonly readShell: ReturnType<typeof vi.fn>;
+      readonly readThread: ReturnType<typeof vi.fn>;
+      readonly route?: { nodeId: string; environmentId: string; threadId: string };
+    }) {
+      let stateChanged = () => {};
+      let invalidate = () => {};
+      const applySnapshot = vi.fn();
+      const stop = startHostedThreadReadCache({
+        readState: input.state,
+        subscribeState: (listener) => {
+          stateChanged = listener;
+          return () => {};
+        },
+        readRoute: () => input.route ?? { nodeId: node.id, environmentId, threadId },
+        subscribeRoute: () => () => {},
+        subscribeInvalidation: (listener) => {
+          invalidate = listener;
+          return () => {};
+        },
+        isSubscriptionOnline: () => true,
+        readShell: input.readShell as never,
+        readThread: input.readThread as never,
+        ...(input.accessPending ? { isAccessPending: input.accessPending } : {}),
+        applySnapshot,
+        isVisible: () => true,
+        now: () => 1,
+        setInterval: () => 1,
+        clearInterval: () => {},
+      });
+      return {
+        stop,
+        applySnapshot,
+        stateChanged: () => stateChanged(),
+        invalidate: () => invalidate(),
+      };
+    }
+
+    it("presents the held version and keeps it when the Hub answers unchanged", async () => {
+      const readShell = vi.fn(async (..._args: unknown[]) => shell(1));
+      const readThread = vi.fn(async (..._args: unknown[]) => detail(1));
+      const cache = start({ state: () => authenticated, readShell, readThread });
+      try {
+        await settle();
+        expect(readShell.mock.calls[0]?.[2]).toBeUndefined();
+        expect(cache.applySnapshot).toHaveBeenCalled();
+        const applied = cache.applySnapshot.mock.calls.length;
+        readShell.mockResolvedValueOnce(null as never);
+        readThread.mockResolvedValueOnce(null as never);
+        cache.invalidate();
+        await settle();
+        expect(readShell.mock.calls[1]?.[2]).toEqual(shell(1));
+        expect(readThread.mock.calls[1]?.[3]).toEqual(detail(1));
+        expect(cache.applySnapshot).toHaveBeenCalledTimes(applied);
+      } finally {
+        cache.stop();
+      }
+    });
+
+    it("reads the routed shell and thread beside the access check and adopts them without a second read", async () => {
+      let state = {
+        ...hostedHubStore.getInitialState(),
+        accountStatus: "signed-out",
+      } as HostedHubState;
+      let pending = true;
+      let finishShell = (_value: unknown) => {};
+      const readShell = vi.fn(
+        () =>
+          new Promise((resolve) => {
+            finishShell = resolve;
+          }),
+      );
+      const readThread = vi.fn(async () => detail(1));
+      const cache = start({
+        state: () => state,
+        accessPending: () => pending,
+        readShell,
+        readThread,
+      });
+      try {
+        await settle();
+        expect(readShell).toHaveBeenCalledOnce();
+        expect(readThread).toHaveBeenCalledOnce();
+        // Held: nothing is shown before the session and directory validate it.
+        expect(cache.applySnapshot).not.toHaveBeenCalled();
+        state = { ...authenticated, directoryStatus: "loading", nodes: [] };
+        pending = false;
+        cache.stateChanged();
+        await settle();
+        expect(cache.applySnapshot).not.toHaveBeenCalled();
+        state = authenticated;
+        cache.stateChanged();
+        finishShell(shell(1));
+        await settle();
+        expect(readShell).toHaveBeenCalledOnce();
+        expect(readThread).toHaveBeenCalledOnce();
+        expect(cache.applySnapshot.mock.calls.at(-1)?.[2].get(threadId)?.revision).toBe(1);
+        // A Hub invalidation still reads again.
+        cache.invalidate();
+        await settle();
+        expect(readShell).toHaveBeenCalledTimes(2);
+        expect(readThread).toHaveBeenCalledTimes(2);
+      } finally {
+        cache.stop();
+      }
+    });
+
+    it("drops a held prefetch when the check ends without a session", async () => {
+      let state = {
+        ...hostedHubStore.getInitialState(),
+        accountStatus: "signed-out",
+      } as HostedHubState;
+      let pending = true;
+      const signals: AbortSignal[] = [];
+      const readShell = vi.fn((_node: string, signal: AbortSignal) => {
+        signals.push(signal);
+        return new Promise(() => {});
+      });
+      const readThread = vi.fn((_node: string, _thread: string, signal: AbortSignal) => {
+        signals.push(signal);
+        return new Promise(() => {});
+      });
+      const cache = start({
+        state: () => state,
+        accessPending: () => pending,
+        readShell,
+        readThread,
+      });
+      try {
+        await settle();
+        expect(signals).toHaveLength(2);
+        pending = false;
+        state = { ...state, accountStatus: "unavailable" } as HostedHubState;
+        cache.stateChanged();
+        expect(signals.every((signal) => signal.aborted)).toBe(true);
+      } finally {
+        cache.stop();
+      }
+    });
+
+    it("never applies a prefetch for a node the directory lists with another environment", async () => {
+      let state = {
+        ...hostedHubStore.getInitialState(),
+        accountStatus: "signed-out",
+      } as HostedHubState;
+      let pending = true;
+      const readShell = vi.fn(async () => shell(1));
+      const readThread = vi.fn(async () => detail(1));
+      const cache = start({
+        state: () => state,
+        accessPending: () => pending,
+        readShell,
+        readThread,
+        route: { nodeId: node.id, environmentId: "environment-b", threadId },
+      });
+      try {
+        await settle();
+        expect(readShell).toHaveBeenCalledOnce();
+        pending = false;
+        state = authenticated;
+        cache.stateChanged();
+        await settle();
+        expect(cache.applySnapshot.mock.calls.every(([, , details]) => details.size === 0)).toBe(
+          true,
+        );
+        expect(readThread).toHaveBeenCalledOnce();
+      } finally {
+        cache.stop();
+      }
+    });
+  });
 });

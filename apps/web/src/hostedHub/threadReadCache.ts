@@ -15,7 +15,7 @@ import type { WorkspaceMetadataSnapshot } from "@ryco/client-runtime/state/works
 import { useStore } from "../store";
 import { readWorkspaceMetadataSnapshot } from "../workspaceMetadataProjection";
 import { hostedHubApi } from "./api";
-import { hostedHubStore } from "./state";
+import { hostedHubController, hostedHubStore } from "./state";
 import { isWebHubSessionOnline, subscribeWebHubInvalidation } from "./hubSession";
 import {
   getRoutedHostedNode,
@@ -148,6 +148,7 @@ export function startHostedThreadReadCache(ports: HostedThreadReadCachePorts): (
 
 export function startBrowserHostedThreadReadCache(
   onSnapshot: (snapshot: WorkspaceMetadataSnapshot) => void,
+  onShellReadsChanged?: (nodeIds: ReadonlySet<string>) => void,
 ): () => void {
   return startHostedThreadReadCache({
     readState: hostedHubStore.getState,
@@ -164,9 +165,11 @@ export function startBrowserHostedThreadReadCache(
       document.addEventListener("visibilitychange", listener);
       return () => document.removeEventListener("visibilitychange", listener);
     },
-    readShell: (nodeId, signal) => hostedHubApi.readThreadCacheShell(nodeId, signal),
-    readThread: (nodeId, threadId, signal) =>
-      hostedHubApi.readThreadCacheThread(nodeId, threadId, signal),
+    readShell: (nodeId, signal, held) => hostedHubApi.readThreadCacheShell(nodeId, signal, held),
+    readThread: (nodeId, threadId, signal, held) =>
+      hostedHubApi.readThreadCacheThread(nodeId, threadId, signal, held),
+    isAccessPending: () => hostedHubController.accessCheckPending(),
+    ...(onShellReadsChanged ? { onShellReadsChanged } : {}),
     isVisible: () => typeof document === "undefined" || document.visibilityState === "visible",
     now: Date.now,
     setInterval: (callback, delay) => globalThis.setInterval(callback, delay),
