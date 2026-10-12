@@ -10,8 +10,13 @@ import {
   readResourceTelemetryHistory,
   retryResourceTelemetry,
 } from "../diagnostics/ResourceTelemetry.ts";
-import { Duration, Effect, Option, Ref, Stream, Schema } from "effect";
-import { type AuthAccessStreamEvent, TextGenerationError, WS_METHODS } from "@ryco/contracts";
+import { Duration, Effect, Option, Ref, Result, Stream, Schema } from "effect";
+import {
+  type AuthAccessStreamEvent,
+  type ServerConfigStreamEvent,
+  TextGenerationError,
+  WS_METHODS,
+} from "@ryco/contracts";
 
 import { signalDiagnosticProcess } from "../diagnostics/ProcessDiagnostics.ts";
 import { observeRpcEffect, observeRpcStreamEffect } from "../observability/RpcInstrumentation.ts";
@@ -21,6 +26,7 @@ import {
   listOpinionatedPlugins,
 } from "../opinionatedPlugins.ts";
 import { redactServerSettingsForClient } from "../serverSettings.ts";
+import { makeProviderStatusDeltaTracker } from "./providerStatusDelta.ts";
 import type { BootstrapCredentialChange } from "../auth/Services/BootstrapCredentialService.ts";
 import type { SessionCredentialChange } from "../auth/Services/SessionCredentialService.ts";
 import {
@@ -670,7 +676,7 @@ export const makeProviderHandlers = (ctx: WsRpcContext) => {
         ownerEffect(WS_METHODS.workItemsTransition, workItems.transition(input)),
         { "rpc.aggregate": "work-items" },
       ),
-    [WS_METHODS.subscribeServerConfig]: (_input) =>
+    [WS_METHODS.subscribeServerConfig]: (input) =>
       observeRpcStreamEffect(
         WS_METHODS.subscribeServerConfig,
         Effect.gen(function* () {
@@ -684,12 +690,7 @@ export const makeProviderHandlers = (ctx: WsRpcContext) => {
               },
             })),
           );
-          const providerStatuses = providerRegistry.streamChanges.pipe(
-            Stream.map((providers) => ({
-              version: 1 as const,
-              type: "providerStatuses" as const,
-              payload: { providers },
-            })),
+          const debouncedProviders = providerRegistry.streamChanges.pipe(
             Stream.debounce(Duration.millis(PROVIDER_STATUS_DEBOUNCE_MS)),
           );
           const settingsUpdates = serverSettings.streamChanges.pipe(
@@ -702,6 +703,35 @@ export const makeProviderHandlers = (ctx: WsRpcContext) => {
           );
 
           const config = yield* loadServerConfig;
+          // A client that takes deltas gets only what changed since this
+          // stream's previous list (starting from the snapshot's), which spares
+          // it the whole catalog-heavy list on every status change.
+          const providerStatuses: Stream.Stream<ServerConfigStreamEvent> =
+            input.providerStatuses === "delta"
+              ? Stream.unwrap(
+                  Effect.sync(() => {
+                    const tracker = makeProviderStatusDeltaTracker(config.providers);
+                    return debouncedProviders.pipe(
+                      Stream.filterMap((providers) => {
+                        const payload = tracker.next(providers);
+                        return payload === null
+                          ? Result.failVoid
+                          : Result.succeed({
+                              version: 1 as const,
+                              type: "providerStatusesDelta" as const,
+                              payload,
+                            });
+                      }),
+                    );
+                  }),
+                )
+              : debouncedProviders.pipe(
+                  Stream.map((providers) => ({
+                    version: 1 as const,
+                    type: "providerStatuses" as const,
+                    payload: { providers },
+                  })),
+                );
           const liveUpdates = Stream.merge(
             keybindingsUpdates,
             Stream.merge(

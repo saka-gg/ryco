@@ -930,10 +930,12 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
       installOpinionatedPlugin: (input) =>
         transport.request((client) => client[WS_METHODS.serverInstallOpinionatedPlugin](input)),
       subscribeConfig: (listener, options) =>
-        transport.subscribe((client) => client[WS_METHODS.subscribeServerConfig]({}), listener, {
-          ...options,
-          tag: WS_METHODS.subscribeServerConfig,
-        }),
+        transport.subscribe(
+          // Provider changes as deltas; older servers ignore this and send the list.
+          (client) => client[WS_METHODS.subscribeServerConfig]({ providerStatuses: "delta" }),
+          listener,
+          { ...options, tag: WS_METHODS.subscribeServerConfig },
+        ),
       subscribeLifecycle: (listener, options) =>
         transport.subscribe((client) => client[WS_METHODS.subscribeServerLifecycle]({}), listener, {
           ...options,

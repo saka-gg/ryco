@@ -3470,6 +3470,71 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
+  it.effect(
+    "routes websocket rpc subscribeServerConfig sends only changed providers to a delta client",
+    () =>
+      Effect.gen(function* () {
+        const model = {
+          slug: "gpt-5",
+          name: "GPT-5",
+          isCustom: false,
+          capabilities: null,
+        } as const;
+        const provider = (instanceId: string, status: "ready" | "error") => ({
+          instanceId: ProviderInstanceId.make(instanceId),
+          driver: ProviderDriverKind.make("codex"),
+          enabled: true,
+          installed: true,
+          version: "1.0.0",
+          status,
+          auth: { status: "authenticated" as const },
+          checkedAt: "2026-04-11T00:00:00.000Z",
+          models: [model],
+          slashCommands: [],
+          skills: [],
+        });
+        const initial = [provider("codex", "ready"), provider("codex-work", "ready")];
+        // The second list changes one instance's status only; its catalogs are equal.
+        const changed = [provider("codex", "ready"), provider("codex-work", "error")];
+
+        yield* buildAppUnderTest({
+          layers: {
+            keybindings: {
+              loadConfigState: Effect.succeed({ keybindings: [], issues: [] }),
+              streamChanges: Stream.empty,
+            },
+            providerRegistry: {
+              getProviders: Effect.succeed(initial),
+              streamChanges: Stream.succeed(changed),
+            },
+          },
+        });
+
+        const wsUrl = yield* getWsServerUrl("/ws");
+        const events = yield* Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            client[WS_METHODS.subscribeServerConfig]({ providerStatuses: "delta" }).pipe(
+              Stream.take(2),
+              Stream.runCollect,
+            ),
+          ),
+        );
+
+        const [first, second] = Array.from(events);
+        assert.equal(first?.type, "snapshot");
+        assert.equal(second?.type, "providerStatusesDelta");
+        if (second?.type !== "providerStatusesDelta") return;
+        assert.deepEqual(second.payload.instanceIds.map(String), ["codex", "codex-work"]);
+        assert.equal(second.payload.providers.length, 1);
+        const update = second.payload.providers[0]!;
+        assert.equal(update.instanceId, "codex-work");
+        assert.equal(update.status, "error");
+        assert.isFalse("models" in update);
+        assert.isFalse("skills" in update);
+        assert.isFalse("slashCommands" in update);
+      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
   it.effect("routes websocket rpc subscribeServerConfig re-snapshots chats changes", () =>
     Effect.gen(function* () {
       const available = { available: true, root: "/chats" } as const;
