@@ -7,7 +7,7 @@ import {
 import { Effect } from "effect";
 import { HttpRouter, HttpServerResponse } from "effect/http";
 
-import { HubConnectorService } from "./HubConnectorLive.ts";
+import { awaitHubConnector } from "./HubConnectorService.ts";
 import {
   DESKTOP_LOCAL_NO_STORE_HEADERS,
   requireDesktopLocalControl,
@@ -43,7 +43,7 @@ export const desktopHubReachabilityRouteLayer = HttpRouter.add(
   DESKTOP_HUB_REACHABILITY_PATH,
   Effect.gen(function* () {
     yield* requireDesktopLocalControl;
-    const connector = yield* HubConnectorService;
+    const connector = yield* awaitHubConnector;
     const status = connector.status();
     // Probed every minute: answer from the state files and never open key
     // custody, which only the fingerprint would need.

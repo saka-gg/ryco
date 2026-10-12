@@ -27,7 +27,7 @@ import {
 } from "../environment/Services/ServerEnvironment.ts";
 import type { NodeNativeClaimService } from "../hubIdentity/NodeNativeClaimService.ts";
 import { desktopNativeNodeClaimRoutesLayer } from "./desktopNativeNodeClaimHttp.ts";
-import { HubConnectorService, type HubConnectorServiceShape } from "./HubConnectorLive.ts";
+import { hubConnectorReadyLayer, type HubConnectorServiceShape } from "./HubConnectorService.ts";
 import {
   stubE2eeOperator,
   stubLocalIntroductionService,
@@ -137,7 +137,7 @@ const withRoutes = <A, E, R>(
       disableListenLog: true,
       disableLogger: true,
     }).pipe(
-      Layer.provide(Layer.succeed(HubConnectorService, connector(nativeNodeClaim, onResume))),
+      Layer.provide(hubConnectorReadyLayer(connector(nativeNodeClaim, onResume))),
       Layer.provide(Layer.succeed(ServerEnvironment, environment)),
       Layer.provide(Layer.succeed(ServerConfig, config)),
       Layer.provideMerge(

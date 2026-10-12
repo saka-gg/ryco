@@ -18,7 +18,7 @@ import * as HttpServer from "effect/http/HttpServer";
 
 import { deriveServerPaths, ServerConfig, type ServerConfigShape } from "../config.ts";
 import { NodeLocalIntroductionError } from "../hubIdentity/NodeLocalIntroductionService.ts";
-import { HubConnectorService, type HubConnectorServiceShape } from "./HubConnectorLive.ts";
+import { hubConnectorReadyLayer, type HubConnectorServiceShape } from "./HubConnectorService.ts";
 import {
   desktopLocalControlIsAuthorized,
   desktopLocalIntroductionRoutesLayer,
@@ -96,7 +96,7 @@ const withRoutes = <A, E, R>(
       disableListenLog: true,
       disableLogger: true,
     }).pipe(
-      Layer.provide(Layer.succeed(HubConnectorService, service(localIntroduction))),
+      Layer.provide(hubConnectorReadyLayer(service(localIntroduction))),
       Layer.provide(Layer.succeed(ServerConfig, config)),
       Layer.provideMerge(
         NodeHttpServer.layer(NodeHttp.createServer, {
