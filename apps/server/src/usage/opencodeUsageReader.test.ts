@@ -6,13 +6,25 @@ import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { parseOpenCodeUsageMessage, readOpenCodeUsage } from "./opencodeUsageReader.ts";
-import { UsageAggregator } from "./usageAggregation.ts";
+import {
+  USAGE_KEY_VALUE_STRIDE,
+  type UsageFileAggregate,
+  UsageSlotAggregator,
+} from "./usageFileAggregate.ts";
 import { priceUsageRecord } from "./usagePricing.ts";
 import {
   encodeUsageScanCache,
   decodeUsageScanCache,
   type UsageScanCache,
 } from "./usageScanCache.ts";
+
+/** Total tokens of every response a store aggregate holds. */
+function totalTokens(aggregate: UsageFileAggregate): number {
+  let total = aggregate.slots.reduce((sum, slot) => sum + slot.totalTokens, 0);
+  for (let index = 0; index < aggregate.keys.length; index++)
+    total += aggregate.keyValues[index * USAGE_KEY_VALUE_STRIDE + 4]!;
+  return total;
+}
 
 const afterYield = vi.hoisted(() => ({ hook: undefined as (() => Promise<void>) | undefined }));
 vi.mock("node:timers/promises", async (original) => {
@@ -89,14 +101,16 @@ describe("OpenCode provider-native usage", () => {
     db.close();
     const scanned = await readOpenCodeUsage(input);
     const restored = decodeUsageScanCache(encodeUsageScanCache(input.cache));
-    expect([...restored.values()][0]?.records[0]?.totals.totalTokens).toBe(1001);
-    const aggregator = new UsageAggregator({
+    expect(totalTokens([...restored.values()][0]!.aggregate)).toBe(1001);
+    const aggregator = new UsageSlotAggregator({
       sourceId: "fixture",
+      provider: "opencode",
       timeZone: "UTC",
       endDate: "2026-09-30",
+      rates: new Map(),
     });
-    scanned.records.forEach((record) => aggregator.add(record));
-    scanned.records.forEach((record) => aggregator.add(record));
+    aggregator.addFile(scanned.aggregate);
+    aggregator.addFile(scanned.aggregate);
     expect(aggregator.finish()).toMatchObject({ acceptedRecords: 1, duplicatesDropped: 1 });
     expect(aggregator.finish().buckets[0]?.tokens.totalTokens).toBe(1001);
   });
@@ -112,11 +126,9 @@ describe("OpenCode provider-native usage", () => {
       parsedFileCount: 1,
       reusedCacheFileCount: 0,
     });
-    expect(first.records[0]).toMatchObject({
-      model: "claude-sonnet-4-5",
-      reportedCostUsd: 0.012,
-      totals: { totalTokens: 185 },
-    });
+    expect(first.aggregate.slots[0]).toMatchObject({ model: "claude-sonnet-4-5", reported: true });
+    expect(first.aggregate.keyValues[6]).toBe(0.012);
+    expect(totalTokens(first.aggregate)).toBe(185);
     expect(JSON.stringify(encodeUsageScanCache(input.cache))).not.toContain(
       "PRIVATE_FIXTURE_CONTENT",
     );
@@ -142,7 +154,7 @@ describe("OpenCode provider-native usage", () => {
       join(input.root, "storage/message/ses_fixture/msg_other.json"),
       JSON.stringify(await fixture("opencode-v1")),
     );
-    expect((await readOpenCodeUsage(input)).records).toHaveLength(1);
+    expect((await readOpenCodeUsage(input)).aggregate.recordCount).toBe(1);
   });
 
   it("invalidates WAL writes even before checkpoint and detects restored mtime edits", async () => {
@@ -151,13 +163,13 @@ describe("OpenCode provider-native usage", () => {
     db.exec("PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0");
     const message = await fixture("opencode-v2");
     insert(db, "session_message", "msg_v2", message);
-    expect((await readOpenCodeUsage(input)).records).toHaveLength(1);
+    expect((await readOpenCodeUsage(input)).aggregate.recordCount).toBe(1);
     insert(db, "session_message", "msg_new", message);
     expect(await readOpenCodeUsage(input)).toMatchObject({
       reusedCacheFileCount: 0,
-      records: expect.any(Array),
+      aggregate: expect.any(Object),
     });
-    expect((await readOpenCodeUsage(input)).records).toHaveLength(2);
+    expect((await readOpenCodeUsage(input)).aggregate.recordCount).toBe(2);
     db.close();
     const before = await stat(input.databasePath);
     const edited = new DatabaseSync(input.databasePath);
@@ -166,12 +178,7 @@ describe("OpenCode provider-native usage", () => {
       .run(JSON.stringify({ ...message, tokens: { ...message.tokens, output: 40 } }));
     edited.close();
     await utimes(input.databasePath, before.atime, before.mtime);
-    expect(
-      (await readOpenCodeUsage(input)).records.reduce(
-        (sum, record) => sum + record.totals.totalTokens,
-        0,
-      ),
-    ).toBe(390);
+    expect(totalTokens((await readOpenCodeUsage(input)).aggregate)).toBe(390);
   });
 
   it("reports corrupt, missing-telemetry, and oversized records without zeroes or cache suppression", async () => {
@@ -185,7 +192,7 @@ describe("OpenCode provider-native usage", () => {
     const options = { ...input, limits: { recordBytes: 1024 } };
     const read = await readOpenCodeUsage(options);
     expect(read).toMatchObject({ status: "partial", malformedCount: 2, skippedCount: 1 });
-    expect(read.records).toHaveLength(1);
+    expect(read.aggregate.recordCount).toBe(1);
     expect(input.cache.size).toBe(0);
     expect((await readOpenCodeUsage(options)).status).toBe("partial");
   });
@@ -198,10 +205,13 @@ describe("OpenCode provider-native usage", () => {
     expect(await readOpenCodeUsage(input)).toMatchObject({
       status: "unsupported",
       diagnosticCode: "history-format-unsupported",
-      records: [],
+      aggregate: { recordCount: 0 },
     });
     await writeFile(input.databasePath, "not sqlite");
-    expect(await readOpenCodeUsage(input)).toMatchObject({ status: "failed", records: [] });
+    expect(await readOpenCodeUsage(input)).toMatchObject({
+      status: "failed",
+      aggregate: { recordCount: 0 },
+    });
   });
 
   it("bounds database, record, row, time and traversal work and honors cancellation", async () => {
@@ -215,7 +225,7 @@ describe("OpenCode provider-native usage", () => {
     ).toMatchObject({
       status: "partial",
       diagnosticCode: "history-scan-limit",
-      records: expect.any(Array),
+      aggregate: expect.any(Object),
     });
     expect(await readOpenCodeUsage({ ...input, limits: { databaseBytes: 1 } })).toMatchObject({
       status: "failed",
@@ -239,11 +249,11 @@ describe("OpenCode provider-native usage", () => {
     await symlink(join(input.root, "auth.json"), join(directory, "msg_link.json"));
     const read = await readOpenCodeUsage(input);
     expect(read).toMatchObject({ status: "partial", malformedCount: 1 });
-    expect(read.records).toHaveLength(1);
+    expect(read.aggregate.recordCount).toBe(1);
     expect(JSON.stringify(read)).not.toContain("CREDENTIAL_SENTINEL");
     expect(await readOpenCodeUsage({ ...input, allowLegacy: false })).toMatchObject({
       status: "not-found",
-      records: [],
+      aggregate: { recordCount: 0 },
     });
   });
 
@@ -254,11 +264,17 @@ describe("OpenCode provider-native usage", () => {
     insert(db, "session_message", "msg_v2", await fixture("opencode-v2"));
     db.close();
     await symlink(other.databasePath, input.databasePath);
-    expect(await readOpenCodeUsage(input)).toMatchObject({ status: "failed", records: [] });
+    expect(await readOpenCodeUsage(input)).toMatchObject({
+      status: "failed",
+      aggregate: { recordCount: 0 },
+    });
     await rm(input.databasePath);
     await writeFile(input.databasePath, await readFile(other.databasePath));
     await symlink(other.databasePath, input.databasePath + "-wal");
-    expect(await readOpenCodeUsage(input)).toMatchObject({ status: "failed", records: [] });
+    expect(await readOpenCodeUsage(input)).toMatchObject({
+      status: "failed",
+      aggregate: { recordCount: 0 },
+    });
   });
 });
 
@@ -295,7 +311,7 @@ it.each(["delete", "symlink"] as const)(
     expect(changeDatabase).toHaveBeenCalledExactlyOnceWith();
     expect(result).toMatchObject({
       status: "failed",
-      records: [],
+      aggregate: { recordCount: 0 },
       diagnosticCode: "history-changed-during-scan",
       parsedFileCount: 1,
       reusedCacheFileCount: 0,

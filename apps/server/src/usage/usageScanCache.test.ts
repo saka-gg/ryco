@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 
+import { buildUsageFileAggregate } from "./usageFileAggregate.ts";
 import type { UsageRecord } from "./usageRecord.ts";
 import {
   anonymizeScanCachedUsageRecord,
@@ -9,6 +10,7 @@ import {
   deduplicateUsageRecordsWithinFile,
   encodeUsageScanCache,
   pruneUsageScanCache,
+  type CachedUsageFile,
   type UsageScanCache,
   usageCacheFileKey,
   usageCacheRootKey,
@@ -34,6 +36,64 @@ function record(overrides: Partial<UsageRecord> = {}): UsageRecord {
   };
 }
 
+/** A cache entry holding `records`, folded as a fresh parse would fold them. */
+function entryOf(
+  records: readonly UsageRecord[],
+  overrides: Partial<Omit<CachedUsageFile, "aggregate">> = {},
+): CachedUsageFile {
+  return {
+    rootKey: "root",
+    size: 1,
+    mtimeMs: 1,
+    provider: records[0]?.provider ?? "claude",
+    aggregate: buildUsageFileAggregate(records),
+    ...overrides,
+  };
+}
+
+/** A record-format (v2-v5) document, as earlier versions wrote it. */
+function legacyDocument(
+  version: number,
+  files: Record<string, { readonly provider: string; readonly records: readonly UsageRecord[] }>,
+) {
+  const models: string[] = [];
+  const sessions: string[] = [];
+  const intern = (values: string[], value: string) => {
+    const index = values.indexOf(value);
+    return index === -1 ? values.push(value) - 1 : index;
+  };
+  return {
+    version,
+    models,
+    sessions,
+    files: Object.fromEntries(
+      Object.entries(files).map(([key, file]) => [
+        key,
+        {
+          o: "root",
+          s: 1,
+          m: 1,
+          p: file.provider,
+          r: file.records.map((record) => [
+            record.timestampMs,
+            intern(models, record.model),
+            intern(sessions, record.sessionId),
+            record.totals.uncachedInputTokens,
+            record.totals.cachedInputTokens,
+            record.totals.cacheCreationInputTokens,
+            record.totals.outputTokens,
+            record.totals.reasoningTokens ?? null,
+            record.dedupeKey,
+            record.reportedCostUsd,
+            record.totals.totalTokens,
+            record.speed ?? null,
+          ]),
+        },
+      ]),
+    ),
+  };
+}
+
 describe("usage scan cache", () => {
   it("hashes provider identities before durable storage", () => {
     const anonymized = anonymizeUsageRecord(record());
@@ -43,29 +103,51 @@ describe("usage scan cache", () => {
     expect(anonymized.dedupeKey).toHaveLength(64);
   });
 
-  it("round-trips compact cached rows and preserves totals", () => {
+  it("round-trips file aggregates without paths", () => {
     const fileKey = usageCacheFileKey("claude", "/transcripts/a.jsonl");
     const rootKey = usageCacheRootKey("claude", "/transcripts");
+    const records = [
+      record(),
+      record({ dedupeKey: null, timestampMs: 2_000_000, reportedCostUsd: 0.25 }),
+      record({
+        dedupeKey: "other",
+        speed: "fast",
+        totals: { ...record().totals, reasoningTokens: undefined },
+      }),
+    ];
     const cache: UsageScanCache = new Map([
-      [fileKey, { rootKey, size: 42, mtimeMs: 1000, provider: "claude", records: [record()] }],
+      [fileKey, entryOf(records, { rootKey, size: 42, mtimeMs: 1000 })],
     ]);
     const encoded = JSON.stringify(encodeUsageScanCache(cache));
     expect(encoded).not.toContain("/transcripts");
     const decoded = decodeUsageScanCache(JSON.parse(encoded));
-    expect(decoded.get(fileKey)?.records).toEqual([record()]);
+    expect(decoded.get(fileKey)).toEqual(cache.get(fileKey));
   });
 
-  it("rejects an entire file entry when any row is corrupt", () => {
-    const document = encodeUsageScanCache(
-      new Map([
-        [
-          "file-a",
-          { rootKey: "root-a", size: 1, mtimeMs: 1, provider: "claude", records: [record()] },
-        ],
-      ]),
-    ) as unknown as { files: Record<string, { r: unknown[][] }> };
-    document.files["file-a"]?.r.push(["bad"]);
-    expect(decodeUsageScanCache(document).size).toBe(0);
+  it("rejects an entire file entry when any slot or keyed row is corrupt", () => {
+    for (const corrupt of [
+      (file: { a: unknown[][]; k: unknown[][] }) => file.a.push(["bad"]),
+      (file: { a: unknown[][]; k: unknown[][] }) => file.k.push(["bad"]),
+      (file: { a: unknown[][]; k: unknown[][] }) => (file.k[0]![1] = 99),
+      (file: { a: unknown[][]; k: unknown[][] }) => (file.a[0]![5] = -1),
+    ]) {
+      const document = encodeUsageScanCache(
+        new Map([["file-a", entryOf([record(), record({ dedupeKey: null })])]]),
+      ) as unknown as { files: Record<string, { a: unknown[][]; k: unknown[][] }> };
+      corrupt(document.files["file-a"]!);
+      expect(decodeUsageScanCache(document).size).toBe(0);
+    }
+    const legacy = legacyDocument(5, { "file-a": { provider: "claude", records: [record()] } });
+    legacy.files["file-a"]!.r.push(["bad"] as never);
+    expect(decodeUsageScanCache(legacy).size).toBe(0);
+  });
+
+  it("folds record caches written by earlier versions", () => {
+    const records = [record(), record({ dedupeKey: null, timestampMs: 5_000_000 })];
+    const decoded = decodeUsageScanCache(
+      legacyDocument(5, { file: { provider: "claude", records } }),
+    );
+    expect(decoded.get("file")?.aggregate).toEqual(buildUsageFileAggregate(records));
   });
 
   it("deduplicates repeated responses within one file", () => {
@@ -77,10 +159,10 @@ describe("usage scan cache", () => {
 
   it("prunes only aged entries and missing files under roots that were walked", () => {
     const cache: UsageScanCache = new Map([
-      ["live", { rootKey: "walked", size: 1, mtimeMs: 900, provider: "claude", records: [] }],
-      ["deleted", { rootKey: "walked", size: 1, mtimeMs: 900, provider: "claude", records: [] }],
-      ["keep", { rootKey: "unavailable", size: 1, mtimeMs: 900, provider: "codex", records: [] }],
-      ["old", { rootKey: "walked", size: 1, mtimeMs: 10, provider: "claude", records: [] }],
+      ["live", entryOf([], { rootKey: "walked", mtimeMs: 900 })],
+      ["deleted", entryOf([], { rootKey: "walked", mtimeMs: 900 })],
+      ["keep", entryOf([], { rootKey: "unavailable", mtimeMs: 900, provider: "codex" })],
+      ["old", entryOf([], { rootKey: "walked", mtimeMs: 10 })],
     ]);
     expect(
       pruneUsageScanCache(cache, {
@@ -94,7 +176,7 @@ describe("usage scan cache", () => {
   });
 });
 
-it("preserves authoritative totals and unavailable reasoning in new provider caches, while retaining legacy non-transcript caches", () => {
+it("preserves authoritative totals and unavailable reasoning, while retaining legacy non-transcript caches", () => {
   const cached = record({
     provider: "opencode",
     totals: {
@@ -105,84 +187,48 @@ it("preserves authoritative totals and unavailable reasoning in new provider cac
       totalTokens: 999,
     },
   });
-  const document = encodeUsageScanCache(
-    new Map([
-      [
-        "new",
-        {
-          rootKey: "root",
-          size: 1,
-          mtimeMs: 1,
-          fingerprint: "inode",
-          provider: "opencode",
-          records: [cached],
-        },
-      ],
-    ]),
-  );
-  expect(decodeUsageScanCache(document).get("new")?.records[0]?.totals).toEqual(cached.totals);
-  const old = encodeUsageScanCache(
-    new Map([
-      [
-        "old",
-        {
-          rootKey: "root",
-          size: 1,
-          mtimeMs: 1,
-          provider: "opencode",
-          records: [record({ provider: "opencode" })],
-        },
-      ],
-    ]),
-  ) as unknown as { version: number; files: Record<string, { r: unknown[][] }> };
-  old.version = 2;
+  const entry = entryOf([cached], { fingerprint: "inode" });
+  const decoded = decodeUsageScanCache(encodeUsageScanCache(new Map([["new", entry]])));
+  expect(decoded.get("new")).toEqual(entry);
+  // Reasoning stays unavailable (NaN), not zero.
+  expect(Number.isNaN(decoded.get("new")!.aggregate.keyValues[5])).toBe(true);
+  const old = legacyDocument(2, {
+    old: { provider: "opencode", records: [record({ provider: "opencode" })] },
+  });
   old.files.old!.r[0]!.splice(10);
-  expect(decodeUsageScanCache(old).get("old")?.records[0]?.totals.totalTokens).toBe(10);
+  expect(decodeUsageScanCache(old).get("old")?.aggregate.keyValues[4]).toBe(10);
 });
 
 it("invalidates transcript caches without speed and round-trips recorded tiers", () => {
-  const entry = {
-    rootKey: "root",
-    size: 1,
-    mtimeMs: 1,
-    provider: "codex" as const,
-    records: [record({ provider: "codex", speed: "fast" })],
-  };
-  const encoded = encodeUsageScanCache(new Map([["file", entry]]));
-  expect(decodeUsageScanCache(encoded).get("file")?.records[0]?.speed).toBe("fast");
-  for (const version of [2, 3]) expect(decodeUsageScanCache({ ...encoded, version }).size).toBe(0);
+  const records = [record({ provider: "codex", speed: "fast" })];
+  const encoded = encodeUsageScanCache(new Map([["file", entryOf(records)]]));
+  expect(decodeUsageScanCache(encoded).get("file")?.aggregate.slots[0]?.speed).toBe("fast");
+  const legacy = legacyDocument(5, { file: { provider: "codex", records } });
+  expect(decodeUsageScanCache(legacy).get("file")?.aggregate.slots[0]?.speed).toBe("fast");
+  for (const version of [2, 3]) expect(decodeUsageScanCache({ ...legacy, version }).size).toBe(0);
 });
 
 it("compacts identifiers of version 4 caches instead of rescanning them", () => {
   const full = anonymizeUsageRecord(record({ provider: "codex", speed: "standard" }));
-  const encoded = encodeUsageScanCache(
-    new Map([
-      ["file", { rootKey: "root", size: 1, mtimeMs: 1, provider: "codex", records: [full] }],
-    ]),
-  );
-  const decoded = decodeUsageScanCache({ ...encoded, version: 4 }).get("file")?.records[0];
+  const decoded = decodeUsageScanCache(
+    legacyDocument(4, { file: { provider: "codex", records: [full] } }),
+  ).get("file")?.aggregate;
   // The compact form is the prefix of the full digest, so fresh parses deduplicate against it.
-  expect(decoded?.dedupeKey).toBe(
+  expect(decoded?.keys[0]).toBe(
     anonymizeScanCachedUsageRecord(record({ provider: "codex" })).dedupeKey,
   );
-  expect(decoded?.sessionId).toBe(full.sessionId.slice(0, 16));
-  expect(decoded?.dedupeKey).toHaveLength(16);
+  expect(decoded?.slots[0]?.sessionId).toBe(full.sessionId.slice(0, 16));
+  expect(decoded?.keys[0]).toHaveLength(16);
 });
 
 it("decodes every file of a large cache and evicts the least recently modified first", () => {
+  // One quarter hour apart: one slot per record, the worst case for the decoder.
   const rows = (count: number) =>
-    Array.from({ length: count }, (_, index) => record({ timestampMs: index, dedupeKey: null }));
+    Array.from({ length: count }, (_, index) =>
+      record({ timestampMs: index * 15 * 60 * 1000, dedupeKey: null }),
+    );
   const cache: UsageScanCache = new Map(
-    [3, 1, 2].map((order) => [
-      `file-${order}`,
-      {
-        rootKey: "root",
-        size: 1,
-        mtimeMs: order * 1000,
-        provider: "claude",
-        records: rows(90_000),
-      },
-    ]),
+    [3, 1, 2].map((order) => [`file-${order}`, entryOf(rows(90_000), { mtimeMs: order * 1000 })]),
   );
   // 270k records: more than the old 250k cumulative decode cap, which silently
   // dropped the files inserted last.
