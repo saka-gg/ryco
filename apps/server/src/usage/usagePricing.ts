@@ -1,7 +1,7 @@
 import type { UsageTokenTotals } from "@ryco/contracts";
 
 import type { UsageRecordPrice } from "./usageAggregation.ts";
-import type { UsageRecord } from "./usageRecord.ts";
+import type { UsageRecord, UsageSpeed } from "./usageRecord.ts";
 
 interface UsageTokenRate {
   readonly inputCostPerToken: number;
@@ -147,7 +147,12 @@ export function lookupUsageModelRate(rates: UsageRateTable, model: string): Usag
   );
 }
 
-export function estimateUsageCost(rate: UsageTokenRate, totals: UsageTokenTotals): number {
+type UsageTokenCounts = Pick<
+  UsageTokenTotals,
+  "uncachedInputTokens" | "cachedInputTokens" | "cacheCreationInputTokens" | "outputTokens"
+>;
+
+export function estimateUsageCost(rate: UsageTokenRate, totals: UsageTokenCounts): number {
   return (
     totals.uncachedInputTokens * rate.inputCostPerToken +
     totals.cachedInputTokens * (rate.cacheReadCostPerToken ?? rate.inputCostPerToken) +
@@ -171,15 +176,7 @@ export function estimateUsageCacheSavings(
 }
 
 export function priceUsageRecord(rates: UsageRateTable, record: UsageRecord): UsageRecordPrice {
-  const standard = lookupUsageModelRate(rates, record.model);
-  const rate =
-    standard === null
-      ? null
-      : ((record.speed === "fast"
-          ? standard.fast
-          : record.speed === "ultrafast"
-            ? standard.ultrafast
-            : null) ?? standard);
+  const rate = resolveSpeedRate(lookupUsageModelRate(rates, record.model), record.speed);
   if (record.reportedCostUsd !== null) {
     return {
       estimatedCostUsd: record.reportedCostUsd,
@@ -203,6 +200,87 @@ export function priceUsageRecord(rates: UsageRateTable, record: UsageRecord): Us
     estimatedCostUsd: estimateUsageCost(rate, record.totals),
     estimatedCacheSavingsUsd: estimateUsageCacheSavings(rate, record.totals),
     pricedTokenCount: record.totals.totalTokens,
+    unpricedTokenCount: 0,
+    costSource: "litellm",
+  };
+}
+
+/** Summed usage of responses sharing a model, speed and cost kind (see `usageFileAggregate`). */
+export interface UsageSlotTotals {
+  readonly count: number;
+  readonly uncachedInputTokens: number;
+  readonly cachedInputTokens: number;
+  readonly cacheCreationInputTokens: number;
+  readonly outputTokens: number;
+  readonly totalTokens: number;
+  /** Sum over the responses that reported a reasoning count. */
+  readonly reasoningTokens: number;
+  readonly reasoningMissingCount: number;
+  /** Responses without cached input: their cache savings are known (zero) at any rate. */
+  readonly zeroCachedCount: number;
+  /** Sum of provider-reported costs (only for `reported` slots). */
+  readonly reportedCostUsd: number;
+}
+
+function resolveSpeedRate(
+  standard: UsageModelRate | null,
+  speed: UsageSpeed | undefined,
+): UsageTokenRate | null {
+  if (standard === null) return null;
+  return (
+    (speed === "fast" ? standard.fast : speed === "ultrafast" ? standard.ultrafast : null) ??
+    standard
+  );
+}
+
+/** {@link estimateUsageCacheSavings} summed over a slot's responses (it is linear per response). */
+function estimateSlotCacheSavings(rate: UsageTokenRate, totals: UsageSlotTotals): number | null {
+  if (rate.cacheReadCostPerToken === null) {
+    // Responses with cached input have unknown savings; the others save exactly nothing.
+    return totals.zeroCachedCount > 0 ? 0 : null;
+  }
+  return Math.max(
+    0,
+    totals.cachedInputTokens * (rate.inputCostPerToken - rate.cacheReadCostPerToken),
+  );
+}
+
+/**
+ * {@link priceUsageRecord} summed over the responses of one slot: every response of a slot has
+ * the same model, speed and cost kind, and per-response pricing is linear in its tokens.
+ */
+export function priceUsageSlot(
+  rates: UsageRateTable,
+  slot: {
+    readonly model: string;
+    readonly speed: UsageSpeed | undefined;
+    readonly reported: boolean;
+  },
+  totals: UsageSlotTotals,
+): UsageRecordPrice {
+  const rate = resolveSpeedRate(lookupUsageModelRate(rates, slot.model), slot.speed);
+  if (slot.reported) {
+    return {
+      estimatedCostUsd: totals.reportedCostUsd,
+      estimatedCacheSavingsUsd: rate === null ? null : estimateSlotCacheSavings(rate, totals),
+      pricedTokenCount: totals.totalTokens,
+      unpricedTokenCount: 0,
+      costSource: "provider-reported",
+    };
+  }
+  if (rate === null) {
+    return {
+      estimatedCostUsd: null,
+      estimatedCacheSavingsUsd: null,
+      pricedTokenCount: 0,
+      unpricedTokenCount: totals.totalTokens,
+      costSource: "unpriced",
+    };
+  }
+  return {
+    estimatedCostUsd: estimateUsageCost(rate, totals),
+    estimatedCacheSavingsUsd: estimateSlotCacheSavings(rate, totals),
+    pricedTokenCount: totals.totalTokens,
     unpricedTokenCount: 0,
     costSource: "litellm",
   };

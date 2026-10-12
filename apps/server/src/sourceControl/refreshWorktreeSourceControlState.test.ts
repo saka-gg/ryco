@@ -699,6 +699,48 @@ describe("link refreshes", () => {
     }),
   );
 
+  it.effect("takes a batched forge read as the link's state and close time", () =>
+    Effect.gen(function* () {
+      const dispatchRef = yield* Ref.make<ReadonlyArray<OrchestrationCommand>>([]);
+      const reads: number[] = [];
+      const provider = makeProvider({
+        getPullRequestState: (input) =>
+          Effect.sync(() => {
+            reads.push(input.number);
+            return { state: "open" as const, isDraft: false };
+          }),
+      });
+      yield* refreshWorktreeSourceControlState({
+        worktreeId,
+        knownPullRequestStates: () =>
+          Effect.succeed(
+            new Map([
+              [
+                10,
+                {
+                  state: "merged",
+                  isDraft: false,
+                  reported: { terminalAt: "2026-10-01T12:00:00.000Z" },
+                },
+              ],
+            ]),
+          ),
+      }).pipe(
+        Effect.provideService(ProjectionWorktreeRepository, makeWorktreeRepo(openLinkedWorktree)),
+        Effect.provideService(SourceControlProviderRegistry, makeRegistry(provider)),
+        Effect.provideService(OrchestrationEngineService, makeEngine(dispatchRef)),
+      );
+      assert.deepStrictEqual(reads, []);
+      const [command] = yield* Ref.get(dispatchRef);
+      assert.equal(command?.type, "worktree.pull-requests.update");
+      if (command?.type !== "worktree.pull-requests.update") return;
+      assert.deepStrictEqual(
+        command.upserts?.map((upsert) => [upsert.number, upsert.state, upsert.terminalAt]),
+        [[10, "merged", "2026-10-01T12:00:00.000Z"]],
+      );
+    }),
+  );
+
   it.effect("re-reads links at most once per interval for sweeps", () =>
     Effect.gen(function* () {
       const dispatchRef = yield* Ref.make<ReadonlyArray<OrchestrationCommand>>([]);

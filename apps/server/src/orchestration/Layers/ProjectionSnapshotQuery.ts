@@ -382,6 +382,23 @@ export const COMMAND_READ_MODEL_ACTIVITY_KINDS = [
   THREAD_FORKED_ACTIVITY_KIND,
 ] as const;
 
+/** The lifecycle kinds `derivePendingThreadRequests` reads (a subset of the kinds above). */
+const PENDING_REQUEST_ACTIVITY_KINDS = [
+  "approval.requested",
+  "approval.resolved",
+  "provider.approval.respond.failed",
+  "user-input.requested",
+  "user-input.resolved",
+  "provider.user-input.respond.failed",
+] as const;
+
+const ThreadHistoryActivityKeyDbRowSchema = Schema.Struct({
+  activityId: Schema.String,
+  turnId: Schema.NullOr(TurnId),
+  kind: Schema.String,
+  providerItemId: Schema.NullOr(Schema.String),
+});
+
 const REQUIRED_SNAPSHOT_PROJECTORS = [
   ORCHESTRATION_PROJECTOR_NAMES.projects,
   ORCHESTRATION_PROJECTOR_NAMES.threads,
@@ -1883,6 +1900,86 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         AND turn_id = ${turnId}
       ORDER BY created_at DESC, message_id DESC
       LIMIT ${limit}
+    `,
+  });
+
+  // History repair reads. Arrays travel as one JSON parameter each; the message and activity
+  // primary keys and the kind-leading activity index serve the id and kind branches.
+  const listThreadHistoryRepairMessageRows = SqlSchema.findAll({
+    Request: Schema.Struct({
+      threadId: ThreadId,
+      turnIdsJson: Schema.String,
+      messageIdsJson: Schema.String,
+    }),
+    Result: ProjectionThreadMessageDbRowSchema,
+    execute: ({ threadId, turnIdsJson, messageIdsJson }) => sql`
+      SELECT
+        message_id AS "messageId",
+        thread_id AS "threadId",
+        turn_id AS "turnId",
+        role,
+        ${messageTextColumns(sql)},
+        attachments_json AS "attachments",
+        dispatch_mode AS "dispatchMode",
+        is_streaming AS "isStreaming",
+        created_at AS "createdAt",
+        updated_at AS "updatedAt"
+      FROM projection_thread_messages
+      WHERE thread_id = ${threadId}
+        AND (
+          turn_id IN (SELECT value FROM json_each(${turnIdsJson}))
+          OR message_id IN (SELECT value FROM json_each(${messageIdsJson}))
+        )
+      ORDER BY created_at ASC, message_id ASC
+    `,
+  });
+
+  const listThreadHistoryRepairActivityKeyRows = SqlSchema.findAll({
+    Request: Schema.Struct({
+      threadId: ThreadId,
+      turnIdsJson: Schema.String,
+      activityIdsJson: Schema.String,
+      includeTurnless: Schema.Number,
+    }),
+    Result: ThreadHistoryActivityKeyDbRowSchema,
+    execute: ({ threadId, turnIdsJson, activityIdsJson, includeTurnless }) => sql`
+      SELECT
+        activity_id AS "activityId",
+        turn_id AS "turnId",
+        kind,
+        CASE
+          WHEN json_valid(payload_json) AND json_type(payload_json, '$.providerItemId') = 'text'
+            THEN json_extract(payload_json, '$.providerItemId')
+          ELSE NULL
+        END AS "providerItemId"
+      FROM projection_thread_activities
+      WHERE thread_id = ${threadId}
+        AND (
+          turn_id IN (SELECT value FROM json_each(${turnIdsJson}))
+          OR activity_id IN (SELECT value FROM json_each(${activityIdsJson}))
+          OR (${includeTurnless} = 1 AND turn_id IS NULL)
+        )
+    `,
+  });
+
+  const listThreadPendingRequestActivityRows = SqlSchema.findAll({
+    Request: ThreadIdLookupInput,
+    Result: ProjectionThreadActivityDbRowSchema,
+    execute: ({ threadId }) => sql`
+      SELECT
+        activity_id AS "activityId",
+        thread_id AS "threadId",
+        turn_id AS "turnId",
+        tone,
+        kind,
+        summary,
+        payload_json AS "payload",
+        sequence,
+        created_at AS "createdAt"
+      FROM projection_thread_activities
+      WHERE kind IN ${sql.in(PENDING_REQUEST_ACTIVITY_KINDS)}
+        AND thread_id = ${threadId}
+      ORDER BY sequence ASC, created_at ASC, activity_id ASC
     `,
   });
 
@@ -4309,6 +4406,45 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       Effect.map((rows) => rows.map(mapMessageRow)),
     );
 
+  const getThreadHistoryRepairContext: NonNullable<
+    ProjectionSnapshotQueryShape["getThreadHistoryRepairContext"]
+  > = (input) =>
+    sql
+      .withTransaction(
+        Effect.all([
+          listThreadHistoryRepairMessageRows({
+            threadId: input.threadId,
+            turnIdsJson: JSON.stringify(input.turnIds),
+            messageIdsJson: JSON.stringify(input.messageIds),
+          }),
+          listThreadHistoryRepairActivityKeyRows({
+            threadId: input.threadId,
+            turnIdsJson: JSON.stringify(input.turnIds),
+            activityIdsJson: JSON.stringify(input.activityIds),
+            includeTurnless: input.includeTurnlessActivities ? 1 : 0,
+          }),
+          listThreadPendingRequestActivityRows({ threadId: input.threadId }),
+        ]),
+      )
+      .pipe(
+        Effect.mapError(
+          toPersistenceSqlOrDecodeError(
+            "ProjectionSnapshotQuery.getThreadHistoryRepairContext:query",
+            "ProjectionSnapshotQuery.getThreadHistoryRepairContext:decodeRows",
+          ),
+        ),
+        Effect.map(([messageRows, activityKeyRows, requestRows]) => ({
+          messages: messageRows.map(mapMessageRow),
+          activityKeys: activityKeyRows.map((row) => ({
+            id: row.activityId,
+            turnId: row.turnId,
+            kind: row.kind,
+            providerItemId: row.providerItemId,
+          })),
+          requestActivities: requestRows.map(mapActivityRow),
+        })),
+      );
+
   const countThreadUserMessages: NonNullable<
     ProjectionSnapshotQueryShape["countThreadUserMessages"]
   > = (threadId) =>
@@ -4407,6 +4543,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     getThreadHistoryPage,
     getThreadMessageById,
     listThreadMessagesByTurn,
+    getThreadHistoryRepairContext,
     countThreadUserMessages,
     getThreadProposedPlanById,
     listThreadTaskPathRefs,

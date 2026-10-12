@@ -152,14 +152,24 @@ export function historyMessagesToRestore(
   return restored;
 }
 
+/** What history dedupe reads of an existing activity; a payload needs only `providerItemId`. */
+export type HistoryActivityIdentity = Pick<
+  OrchestrationThreadActivity,
+  "id" | "turnId" | "kind" | "payload"
+>;
+
 /** Recovered activities the thread lacks. Like messages, inherited turns are never restored. */
 export function missingHistoryActivities(
-  thread: Pick<OrchestrationThread, "id" | "messages" | "activities">,
+  thread: {
+    readonly id: OrchestrationThread["id"];
+    readonly messages: ReadonlyArray<Pick<OrchestrationMessage, "id" | "turnId">>;
+    readonly activities: ReadonlyArray<HistoryActivityIdentity>;
+  },
   recovered: readonly OrchestrationThreadActivity[],
 ): OrchestrationThreadActivity[] {
   const existing = thread.activities;
   const inheritedTurns = inheritedTurnIds(thread.id, [...thread.messages, ...existing]);
-  const key = (activity: OrchestrationThreadActivity) => {
+  const key = (activity: HistoryActivityIdentity) => {
     const payload = activity.payload as { providerItemId?: unknown } | null;
     return payload && typeof payload.providerItemId === "string"
       ? `${activity.turnId}:${activity.kind}:${payload.providerItemId}`
@@ -183,4 +193,46 @@ export function missingHistoryActivities(
     known.add(id);
     return true;
   });
+}
+
+/**
+ * The ids and turns a recovered transcript can match in the thread: everything
+ * `historyMessagesToRestore` and `missingHistoryActivities` look up, so a bounded read of just
+ * these gives them the same answer as the whole thread.
+ */
+export function historyRepairLookups(input: {
+  readonly threadId: OrchestrationThread["id"];
+  readonly history: ProviderThreadHistory;
+  readonly recovered: readonly OrchestrationThreadActivity[];
+  readonly userMessageIdsByTurn: ReadonlyMap<TurnId, MessageId>;
+}): {
+  readonly turnIds: string[];
+  readonly messageIds: string[];
+  readonly activityIds: string[];
+  readonly includeTurnlessActivities: boolean;
+} {
+  const inheritedPrefix = inheritedItemIdPrefix(input.threadId);
+  const turnIds = new Set<string>();
+  const messageIds = new Set<string>();
+  for (const message of input.history.messages) {
+    turnIds.add(message.turnId);
+    messageIds.add(message.id);
+    messageIds.add(`history:${input.threadId}:${message.id}`);
+    messageIds.add(`${inheritedPrefix}${message.id}`);
+    const pending = input.userMessageIdsByTurn.get(message.turnId);
+    if (pending !== undefined) messageIds.add(pending);
+  }
+  const activityIds = new Set<string>();
+  let includeTurnlessActivities = false;
+  for (const activity of input.recovered) {
+    activityIds.add(activity.id);
+    if (activity.turnId === null) includeTurnlessActivities = true;
+    else turnIds.add(activity.turnId);
+  }
+  return {
+    turnIds: [...turnIds],
+    messageIds: [...messageIds],
+    activityIds: [...activityIds],
+    includeTurnlessActivities,
+  };
 }

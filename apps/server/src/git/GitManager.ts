@@ -65,9 +65,11 @@ import {
   lookupIndexedChangeRequest,
   makePullRequestIndex,
   pullRequestIndexRepositoryKey,
+  type PullRequestIndexScope,
 } from "../sourceControl/pullRequestIndex.ts";
+import { makeRepositoryListCache } from "../sourceControl/repositoryListCache.ts";
 import { readCheckoutHead } from "../vcs/gitCheckoutHead.ts";
-import type { ChangeRequest, PullRequestState } from "@ryco/contracts";
+import type { ChangeRequest, PullRequestState, SourceControlProviderError } from "@ryco/contracts";
 
 export interface GitActionProgressReporter {
   readonly publish: (event: GitActionProgressEvent) => Effect.Effect<void, never>;
@@ -114,6 +116,27 @@ export interface GitManagerShape {
    * cached remote status so the next read sees the moved refs. Never fails.
    */
   readonly refreshRemoteTrackingRefs: (cwd: string) => Effect.Effect<boolean>;
+  /**
+   * The repository's lean change request listing (identity, branches, state, draft, author,
+   * timestamps; up to 100, newest first) from its index: shared with status and discovery
+   * reads, refreshed after a minute or on a remote refresh. Null without a known host.
+   */
+  readonly indexedChangeRequests: (input: {
+    readonly cwd: string;
+    readonly scope: PullRequestIndexScope;
+  }) => Effect.Effect<ReadonlyArray<ChangeRequest> | null, SourceControlProviderError>;
+  /**
+   * A forge list read for `cwd`'s repository through the short-lived repository list cache
+   * (see `repositoryListCache`), dropped with the repository's change request index. Without
+   * a known host the read runs uncached.
+   */
+  readonly cachedRepositoryList: <A, E, R>(input: {
+    readonly cwd: string;
+    readonly key: string;
+    readonly load: Effect.Effect<A, E, R>;
+  }) => Effect.Effect<A, E, R>;
+  /** Drops `cwd`'s repository's cached list reads (after a change request mutation). */
+  readonly invalidateRepositoryLists: (cwd: string) => Effect.Effect<void>;
   /** State and draft flag of the repository's indexed change requests; never asks the forge. */
   readonly indexedPullRequestStates: (
     cwd: string,
@@ -1142,10 +1165,56 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
       Effect.catch(() => Effect.succeed(null)),
     );
 
+  const repositoryListCache = makeRepositoryListCache();
+
   const invalidatePullRequestIndex = (cwd: string) =>
     resolvePullRequestIndexTarget(cwd).pipe(
       Effect.flatMap((target) =>
-        target === null ? Effect.void : pullRequestIndex.invalidate(target.repository),
+        target === null
+          ? Effect.void
+          : Effect.all(
+              [
+                pullRequestIndex.invalidate(target.repository),
+                repositoryListCache.invalidate(target.repository),
+              ],
+              { discard: true },
+            ),
+      ),
+    );
+
+  const indexedChangeRequests: GitManagerShape["indexedChangeRequests"] = (input) =>
+    resolvePullRequestIndexTarget(input.cwd).pipe(
+      Effect.flatMap((target) =>
+        target === null
+          ? Effect.succeed(null)
+          : pullRequestIndex
+              .read({
+                repository: target.repository,
+                scope: input.scope,
+                cwd: input.cwd,
+                provider: target.provider,
+              })
+              .pipe(Effect.map((listing) => listing.items)),
+      ),
+    );
+
+  const invalidateRepositoryLists: GitManagerShape["invalidateRepositoryLists"] = (cwd) =>
+    resolvePullRequestIndexTarget(cwd).pipe(
+      Effect.flatMap((target) =>
+        target === null ? Effect.void : repositoryListCache.invalidate(target.repository),
+      ),
+    );
+
+  const cachedRepositoryList: GitManagerShape["cachedRepositoryList"] = (input) =>
+    resolvePullRequestIndexTarget(input.cwd).pipe(
+      Effect.flatMap((target) =>
+        target === null
+          ? input.load
+          : repositoryListCache.get({
+              repository: target.repository,
+              key: input.key,
+              load: input.load,
+            }),
       ),
     );
 
@@ -2329,6 +2398,9 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
     refSummary,
     refreshRemoteTrackingRefs,
     indexedPullRequestStates,
+    indexedChangeRequests,
+    cachedRepositoryList,
+    invalidateRepositoryLists,
     invalidateStatus,
     resolvePullRequest,
     preparePullRequestThread,

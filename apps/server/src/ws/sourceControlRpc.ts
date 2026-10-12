@@ -4,6 +4,7 @@ import {
   WS_METHODS,
   type ChangeRequest,
   type ChangeRequestCreateInput,
+  type ChangeRequestState,
   type ChangeRequestUpdateAction,
   type OrchestrationCommand,
   type WorktreeId,
@@ -32,7 +33,11 @@ import {
   type SourceControlProviderShape,
 } from "../sourceControl/SourceControlProvider.ts";
 import { withSourceControlBodyFile } from "../sourceControl/sourceControlBodyFile.ts";
+import { PULL_REQUEST_INDEX_LIMIT } from "../sourceControl/pullRequestIndex.ts";
 import { defineWsHandlers, type WsRpcContext } from "./context.ts";
+
+/** What a list without a limit returns (the hosts' own list default). */
+const DEFAULT_CHANGE_REQUEST_LIST_LIMIT = 20;
 
 /** Actions that change the head branch, review gate, or open state, so linked worktrees must re-sync. */
 function isLifecycleChangingAction(action: ChangeRequestUpdateAction): boolean {
@@ -90,6 +95,7 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
     dispatchNormalizedCommand,
     serverCommandId,
     toGitManagerError,
+    gitWorkflow,
   } = ctx;
 
   const linkFailure = (operation: string, detail: string, cause?: unknown) =>
@@ -230,8 +236,15 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
       }),
     );
 
+  /** After a change request mutation: cached list rows of its repository are stale now. */
   const refreshLinkedChangeRequest = (cwd: string, reference: string) =>
-    refreshStateForLinkedReference({ cwd, kind: "pr", reference });
+    Effect.all(
+      [
+        gitWorkflow.invalidateRepositoryLists(cwd),
+        refreshStateForLinkedReference({ cwd, kind: "pr", reference }),
+      ],
+      { discard: true },
+    );
 
   // The workspace's link (discovered now if git status alone knew the pull
   // request) lands before git status reports the new state, so the surfaces
@@ -241,7 +254,7 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
     const pullRequestNumber = Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
     return Effect.all(
       [
-        refreshStateForLinkedReference({ cwd, kind: "pr", reference }),
+        refreshLinkedChangeRequest(cwd, reference),
         refreshLinkedWorktreeSourceControlStates({
           cwd,
           reason,
@@ -252,6 +265,41 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
       { concurrency: 2, discard: true },
     ).pipe(Effect.andThen(refreshGitStatus(cwd)));
   };
+
+  /**
+   * Picker rows: open and recent lists come from the repository's change request index (lean
+   * rows shared with status and discovery reads, usually warm); other states ask the host for
+   * the same lean fields. Falls back to the host when the index cannot answer.
+   */
+  const listPickerChangeRequests = (
+    provider: SourceControlProviderShape,
+    input: {
+      readonly cwd: string;
+      readonly state: ChangeRequestState | "all";
+      readonly limit: number;
+    },
+  ) =>
+    Effect.gen(function* () {
+      if (input.state === "open" || input.state === "all") {
+        const indexed = yield* gitWorkflow
+          .indexedChangeRequests({ cwd: input.cwd, scope: input.state })
+          .pipe(Effect.catch(() => Effect.succeed(null)));
+        if (
+          indexed !== null &&
+          (indexed.length >= input.limit || indexed.length < PULL_REQUEST_INDEX_LIMIT)
+        ) {
+          return indexed.slice(0, input.limit);
+        }
+      }
+      return yield* provider.listChangeRequests({
+        cwd: input.cwd,
+        headSelector: "",
+        state: input.state,
+        limit: input.limit,
+        includeStackSummary: false,
+        fields: "summary",
+      });
+    });
 
   return defineWsHandlers({
     [WS_METHODS.sourceControlLookupRepository]: (input) =>
@@ -418,8 +466,16 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
           "rpc.aggregate": "source-control",
         },
       ),
-    [WS_METHODS.sourceControlListChangeRequests]: ({ cwd, state, limit, query, involvement }) => {
+    [WS_METHODS.sourceControlListChangeRequests]: ({
+      cwd,
+      state,
+      limit,
+      query,
+      involvement,
+      view,
+    }) => {
       const trimmedQuery = query?.trim() ?? "";
+      const picker = view === "picker";
       // Involvement is a server-side filtered list; a bare query is the host's search.
       const request: ChangeRequestHostRequest =
         involvement !== undefined
@@ -436,29 +492,50 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
             empty: [],
             request,
             list: (provider) => {
-              if (involvement !== undefined) {
-                // Involvement is a server-side search: state and query combine with it.
+              const load = Effect.suspend(() => {
+                if (involvement !== undefined) {
+                  // Involvement is a server-side search: state and query combine with it.
+                  return provider.listChangeRequests({
+                    cwd,
+                    headSelector: "",
+                    state,
+                    involvement,
+                    ...(trimmedQuery.length > 0 ? { query: trimmedQuery } : {}),
+                    ...(limit !== undefined ? { limit } : {}),
+                  });
+                }
+                if (trimmedQuery.length > 0) {
+                  return provider.searchChangeRequests({
+                    cwd,
+                    query: trimmedQuery,
+                    ...(limit !== undefined ? { limit } : {}),
+                  });
+                }
+                if (picker) {
+                  return listPickerChangeRequests(provider, {
+                    cwd,
+                    state,
+                    limit: limit ?? DEFAULT_CHANGE_REQUEST_LIST_LIMIT,
+                  });
+                }
                 return provider.listChangeRequests({
                   cwd,
                   headSelector: "",
                   state,
-                  involvement,
-                  ...(trimmedQuery.length > 0 ? { query: trimmedQuery } : {}),
                   ...(limit !== undefined ? { limit } : {}),
                 });
-              }
-              if (trimmedQuery.length > 0) {
-                return provider.searchChangeRequests({
-                  cwd,
-                  query: trimmedQuery,
-                  ...(limit !== undefined ? { limit } : {}),
-                });
-              }
-              return provider.listChangeRequests({
+              });
+              return gitWorkflow.cachedRepositoryList({
                 cwd,
-                headSelector: "",
-                state,
-                ...(limit !== undefined ? { limit } : {}),
+                key: JSON.stringify([
+                  "changeRequests",
+                  state,
+                  involvement ?? null,
+                  trimmedQuery,
+                  limit ?? null,
+                  picker,
+                ]),
+                load,
               });
             },
           }).pipe(
@@ -545,7 +622,7 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
               }),
             ),
             Effect.map((detail) => ({ detail })),
-            Effect.tap(() => refreshStateForLinkedReference({ cwd, kind: "pr", reference })),
+            Effect.tap(() => refreshLinkedChangeRequest(cwd, reference)),
           ),
         ),
         {
@@ -572,7 +649,7 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
               }),
             ),
             Effect.map((detail) => ({ detail })),
-            Effect.tap(() => refreshStateForLinkedReference({ cwd, kind: "pr", reference })),
+            Effect.tap(() => refreshLinkedChangeRequest(cwd, reference)),
           ),
         ),
         {
@@ -838,6 +915,7 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
               });
             }
             yield* linkCreatedChangeRequest(input.cwd, created);
+            yield* gitWorkflow.invalidateRepositoryLists(input.cwd);
             return created;
           }).pipe(
             Effect.tap(() =>
@@ -1153,7 +1231,10 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
               const method = provider.rerunWorkflow;
               return method?.(input);
             },
-          }),
+          }).pipe(
+            // Check rows of the repository's cached lists change with the rerun.
+            Effect.tap(() => gitWorkflow.invalidateRepositoryLists(input.cwd)),
+          ),
         ),
         {
           "rpc.aggregate": "source-control",

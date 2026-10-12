@@ -6,6 +6,7 @@ import {
   EventId,
   IsoDateTime,
   MessageId,
+  ProjectId,
   ProviderItemId,
   RuntimeSessionId,
   ThreadId,
@@ -195,3 +196,43 @@ export const ProviderEvent = Schema.Struct({
   payload: Schema.optional(Schema.Unknown),
 });
 export type ProviderEvent = typeof ProviderEvent.Type;
+
+/**
+ * `provider.prewarmSession`: start the provider session a thread's next send would start, ahead
+ * of the send (on composer focus or first keystroke). A send adopts it when it asks for the
+ * same session; an unused one stops after a short idle period. Starting a session never starts
+ * a turn. Clients call it only when the server advertises `providerSessionPrewarm`.
+ */
+export const ProviderSessionPrewarmInput = Schema.Struct({
+  threadId: ThreadId,
+  /** The project of a draft that has no server thread yet. Ignored for existing threads. */
+  projectId: Schema.optional(ProjectId),
+  /** What the composer would send with; the thread's (or project's) settings when absent. */
+  modelSelection: Schema.optional(ModelSelection),
+  runtimeMode: Schema.optional(RuntimeMode),
+  tokenMode: Schema.optional(AgentTokenMode),
+});
+export type ProviderSessionPrewarmInput = typeof ProviderSessionPrewarmInput.Type;
+
+export const ProviderSessionPrewarmResult = Schema.Struct({
+  /**
+   * `started`: a session is starting for the thread. `pending`: one already is (or is warm).
+   * `already-running`: the thread's session is live. `skipped`: nothing to do, see `reason`.
+   */
+  status: Schema.Literals(["started", "pending", "already-running", "skipped"]),
+  reason: Schema.optional(Schema.String),
+});
+export type ProviderSessionPrewarmResult = typeof ProviderSessionPrewarmResult.Type;
+
+/**
+ * `provider.readProjectCommands`: the skills and slash commands a provider instance offers in
+ * one working directory (project and local ones included), which the instance's status
+ * snapshot cannot carry because it is probed once, outside any project. Clients ask on the
+ * first `/` or `$` in a directory and merge the result into the snapshot's lists. Clients call
+ * it only when the server advertises `providerProjectCommands`.
+ */
+export const ProviderProjectCommandsInput = Schema.Struct({
+  instanceId: ProviderInstanceId,
+  cwd: TrimmedNonEmptyString,
+});
+export type ProviderProjectCommandsInput = typeof ProviderProjectCommandsInput.Type;

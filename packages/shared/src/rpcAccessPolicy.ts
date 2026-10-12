@@ -218,6 +218,10 @@ export const RPC_ACCESS_POLICY = {
   [WS_METHODS.threadsSetManualPosition]: "operator",
   // Creates a thread (and possibly a worktree) without starting a turn, like dispatchCommand.
   [WS_METHODS.threadsFork]: "operator",
+  // Starts the provider process a send by the same operator would start.
+  [WS_METHODS.providerPrewarmSession]: "operator",
+  // Starts the provider's CLI in the directory (project settings and hooks apply), as a send does.
+  [WS_METHODS.providerReadProjectCommands]: "operator",
   [WS_METHODS.vcsCreateRef]: "operator",
   [WS_METHODS.vcsCreateWorktree]: "operator",
   [WS_METHODS.vcsInit]: "operator",
@@ -467,6 +471,9 @@ export const RPC_DELIVERY_EFFECT_POLICY = {
   [WS_METHODS.threadsSetManualPosition]: "mutation",
   // Idempotent by forkKey: a dropped request is retried with the same key after acknowledgement.
   [WS_METHODS.threadsFork]: "mutation",
+  // Idempotent per thread: a repeat finds the session it already started.
+  [WS_METHODS.providerPrewarmSession]: "read",
+  [WS_METHODS.providerReadProjectCommands]: "read",
   [WS_METHODS.vcsCreateRef]: "mutation",
   [WS_METHODS.vcsCreateWorktree]: "mutation",
   [WS_METHODS.vcsInit]: "mutation",

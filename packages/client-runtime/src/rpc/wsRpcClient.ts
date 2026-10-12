@@ -367,6 +367,10 @@ export interface WsRpcClient {
     readonly deleteLocalTask: RpcUnaryMethod<typeof WS_METHODS.serverDeleteLocalTask>;
     readonly delegateLocalTask: RpcUnaryMethod<typeof WS_METHODS.serverDelegateLocalTask>;
     readonly getDailyRecap: RpcUnaryMethod<typeof WS_METHODS.serverGetDailyRecap>;
+    readonly prewarmProviderSession: RpcUnaryMethod<typeof WS_METHODS.providerPrewarmSession>;
+    readonly readProjectProviderCommands: RpcUnaryMethod<
+      typeof WS_METHODS.providerReadProjectCommands
+    >;
     readonly refreshProviders: (
       input?: RpcInput<typeof WS_METHODS.serverRefreshProviders>,
     ) => ReturnType<RpcUnaryMethod<typeof WS_METHODS.serverRefreshProviders>>;
@@ -906,6 +910,10 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
         transport.request((client) => client[WS_METHODS.serverDelegateLocalTask](input)),
       getDailyRecap: (input) =>
         transport.request((client) => client[WS_METHODS.serverGetDailyRecap](input)),
+      prewarmProviderSession: (input) =>
+        transport.request((client) => client[WS_METHODS.providerPrewarmSession](input)),
+      readProjectProviderCommands: (input) =>
+        transport.request((client) => client[WS_METHODS.providerReadProjectCommands](input)),
       refreshProviders: (input) =>
         transport.request((client) => client[WS_METHODS.serverRefreshProviders](input ?? {})),
       searchAcpRegistry: (input) =>

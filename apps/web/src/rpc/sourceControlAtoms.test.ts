@@ -261,17 +261,23 @@ describe("sourceControlAtoms — superset lists", () => {
       changeRequestListBinding.watch({ ...base, limit: 20 }),
       changeRequestListBinding.watch({ ...base, involvement: "authored" }),
       changeRequestListBinding.watch({ ...base, involvement: "authored", limit: 10 }),
+      changeRequestListBinding.watch({ ...base, view: "picker", limit: 50 }),
+      changeRequestListBinding.watch({ ...base, view: "picker" }),
     ];
     await flush();
 
-    // One superset read per involvement; the default list shape is the only
-    // shape, so no view or field-set option splits the cache.
-    expect(listChangeRequests).toHaveBeenCalledTimes(2);
+    // One superset read per involvement and per view: picker rows are lean, so
+    // they never stand in for (or are served from) full rows.
+    expect(listChangeRequests).toHaveBeenCalledTimes(3);
     expect(listChangeRequests.mock.calls.map(([request]) => request)).toEqual([
       { cwd: CWD, state: "open", limit: 100 },
       { cwd: CWD, state: "open", limit: 100, involvement: "authored" },
+      { cwd: CWD, state: "open", limit: 100, view: "picker" },
     ]);
     expect(changeRequestListBinding.targetKey({ ...base, involvement: "authored" })).not.toBe(
+      changeRequestListBinding.targetKey(base),
+    );
+    expect(changeRequestListBinding.targetKey({ ...base, view: "picker" })).not.toBe(
       changeRequestListBinding.targetKey(base),
     );
     for (const release of releases) release();

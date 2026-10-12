@@ -3,11 +3,21 @@ import { createHash } from "node:crypto";
 
 import type { UsageProviderKind } from "@ryco/contracts";
 
-import type { UsageRecord } from "./usageRecord.ts";
+import {
+  buildUsageFileAggregate,
+  USAGE_KEY_VALUE_STRIDE,
+  USAGE_SLOT_MS,
+  type UsageFileAggregate,
+  type UsageSlot,
+} from "./usageFileAggregate.ts";
+import type { UsageRecord, UsageSpeed } from "./usageRecord.ts";
 import { withTokenTotal } from "./usageRecord.ts";
 
-/** v5: session/response hashes are truncated to {@link SCAN_CACHE_IDENTIFIER_LENGTH}. */
-export const USAGE_SCAN_CACHE_VERSION = 5 as const;
+/**
+ * v6: per-file aggregates (15-minute slots plus compact keyed responses) instead of records.
+ * v5: session/response hashes are truncated to {@link SCAN_CACHE_IDENTIFIER_LENGTH}.
+ */
+export const USAGE_SCAN_CACHE_VERSION = 6 as const;
 
 /**
  * Hex digits kept for anonymized session/response identifiers of scan-cached
@@ -25,7 +35,7 @@ export interface CachedUsageFile {
   readonly size: number;
   readonly mtimeMs: number;
   readonly provider: UsageProviderKind;
-  readonly records: readonly UsageRecord[];
+  readonly aggregate: UsageFileAggregate;
   readonly fingerprint?: string;
 }
 
@@ -66,8 +76,45 @@ interface SerializedFile {
   readonly s: number;
   readonly m: number;
   readonly p: UsageProviderKind;
-  readonly r: readonly SerializedRecord[];
+  /** Records (v2-v5). */
+  readonly r?: readonly SerializedRecord[];
+  /** Record count (v6). */
+  readonly n?: number;
+  /** Slots (v6). */
+  readonly a?: readonly SerializedSlot[];
+  /** Keyed responses (v6). */
+  readonly k?: readonly SerializedKeyed[];
 }
+
+type SerializedSlot = readonly [
+  slotIndex: number,
+  modelIndex: number,
+  sessionIndex: number,
+  speed: UsageSpeed | null,
+  reported: 0 | 1,
+  count: number,
+  uncachedInputTokens: number,
+  cachedInputTokens: number,
+  cacheCreationInputTokens: number,
+  outputTokens: number,
+  totalTokens: number,
+  reasoningTokens: number,
+  reasoningMissingCount: number,
+  zeroCachedCount: number,
+  reportedCostUsd: number,
+];
+
+type SerializedKeyed = readonly [
+  dedupeKey: string,
+  slot: number,
+  uncachedInputTokens: number,
+  cachedInputTokens: number,
+  cacheCreationInputTokens: number,
+  outputTokens: number,
+  totalTokens: number,
+  reasoningTokens: number | null,
+  reportedCostUsd: number | null,
+];
 
 interface SerializedCache {
   readonly version: number;
@@ -146,27 +193,50 @@ export function encodeUsageScanCache(cache: UsageScanCache): SerializedCache {
   };
 
   const files: Record<string, SerializedFile> = {};
+  const nullable = (value: number) => (Number.isNaN(value) ? null : value);
   for (const [fileKey, entry] of cache) {
+    const { aggregate } = entry;
+    const keyed: SerializedKeyed[] = [];
+    for (let index = 0; index < aggregate.keys.length; index++) {
+      const offset = index * USAGE_KEY_VALUE_STRIDE;
+      const values = aggregate.keyValues;
+      keyed.push([
+        aggregate.keys[index]!,
+        aggregate.keySlots[index]!,
+        values[offset]!,
+        values[offset + 1]!,
+        values[offset + 2]!,
+        values[offset + 3]!,
+        values[offset + 4]!,
+        nullable(values[offset + 5]!),
+        nullable(values[offset + 6]!),
+      ]);
+    }
     files[fileKey] = {
       o: entry.rootKey,
       ...(entry.fingerprint === undefined ? {} : { f: entry.fingerprint }),
       s: entry.size,
       m: entry.mtimeMs,
       p: entry.provider,
-      r: entry.records.map((record) => [
-        record.timestampMs,
-        intern(models, modelIndexes, record.model),
-        intern(sessions, sessionIndexes, record.sessionId),
-        record.totals.uncachedInputTokens,
-        record.totals.cachedInputTokens,
-        record.totals.cacheCreationInputTokens,
-        record.totals.outputTokens,
-        record.totals.reasoningTokens ?? null,
-        record.dedupeKey,
-        record.reportedCostUsd,
-        record.totals.totalTokens,
-        record.speed ?? null,
+      n: aggregate.recordCount,
+      a: aggregate.slots.map((slot) => [
+        slot.slotMs / USAGE_SLOT_MS,
+        intern(models, modelIndexes, slot.model),
+        intern(sessions, sessionIndexes, slot.sessionId),
+        slot.speed ?? null,
+        slot.reported ? 1 : 0,
+        slot.count,
+        slot.uncachedInputTokens,
+        slot.cachedInputTokens,
+        slot.cacheCreationInputTokens,
+        slot.outputTokens,
+        slot.totalTokens,
+        slot.reasoningTokens,
+        slot.reasoningMissingCount,
+        slot.zeroCachedCount,
+        slot.reportedCostUsd,
       ]),
+      k: keyed,
     };
   }
   return { version: USAGE_SCAN_CACHE_VERSION, models, sessions, files };
@@ -184,7 +254,8 @@ export function decodeUsageScanCache(document: unknown): UsageScanCache {
     (root.version !== USAGE_SCAN_CACHE_VERSION &&
       root.version !== 2 &&
       root.version !== 3 &&
-      root.version !== 4) ||
+      root.version !== 4 &&
+      root.version !== 5) ||
     !isArray(root.models) ||
     !root.models.every((value) => typeof value === "string") ||
     !isArray(root.sessions) ||
@@ -204,11 +275,11 @@ export function decodeUsageScanCache(document: unknown): UsageScanCache {
   const models = root.models as readonly string[];
   // Before v5 identifiers were full SHA-256 digests; their prefix is the compact form.
   const compact = (value: string) =>
-    root.version === USAGE_SCAN_CACHE_VERSION
+    root.version === USAGE_SCAN_CACHE_VERSION || root.version === 5
       ? value
       : value.slice(0, SCAN_CACHE_IDENTIFIER_LENGTH);
   const sessions = (root.sessions as readonly string[]).map(compact);
-  for (const [fileKey, rawEntry] of Object.entries(root.files)) {
+  for (const [fileKey, rawEntry] of Object.entries(root.files as Record<string, unknown>)) {
     if (typeof rawEntry !== "object" || rawEntry === null) continue;
     const entry = rawEntry as Partial<SerializedFile>;
     // Old transcript rows did not retain speed; rescan them rather than price as standard.
@@ -221,13 +292,23 @@ export function decodeUsageScanCache(document: unknown): UsageScanCache {
       !Number.isFinite(entry.s) ||
       typeof entry.m !== "number" ||
       !Number.isFinite(entry.m) ||
-      !["claude", "codex", "cursor", "opencode"].includes(entry.p ?? "") ||
-      !isArray(entry.r)
+      !["claude", "codex", "cursor", "opencode"].includes(entry.p ?? "")
     ) {
       continue;
     }
-
-    if (entry.r.length > MAX_RECORDS_PER_FILE) continue;
+    const header = {
+      rootKey: entry.o,
+      ...(typeof entry.f === "string" ? { fingerprint: entry.f } : {}),
+      size: entry.s,
+      mtimeMs: entry.m,
+      provider: entry.p as UsageProviderKind,
+    };
+    if (root.version === USAGE_SCAN_CACHE_VERSION) {
+      const aggregate = decodeSerializedAggregate(entry, models, sessions);
+      if (aggregate !== null) cache.set(fileKey, { ...header, aggregate });
+      continue;
+    }
+    if (!isArray(entry.r) || entry.r.length > MAX_RECORDS_PER_FILE) continue;
     const records: UsageRecord[] = [];
     let corrupt = false;
     for (const rawRow of entry.r) {
@@ -306,18 +387,118 @@ export function decodeUsageScanCache(document: unknown): UsageScanCache {
         reportedCostUsd,
       });
     }
-    if (!corrupt) {
-      cache.set(fileKey, {
-        rootKey: entry.o,
-        ...(typeof entry.f === "string" ? { fingerprint: entry.f } : {}),
-        size: entry.s,
-        mtimeMs: entry.m,
-        provider: entry.p as UsageProviderKind,
-        records,
-      });
-    }
+    if (!corrupt) cache.set(fileKey, { ...header, aggregate: buildUsageFileAggregate(records) });
   }
   return cache;
+}
+
+const nonNegative = (value: unknown): value is number =>
+  typeof value === "number" && Number.isFinite(value) && value >= 0;
+
+function decodeSerializedAggregate(
+  entry: Partial<SerializedFile>,
+  models: readonly string[],
+  sessions: readonly string[],
+): UsageFileAggregate | null {
+  const { n: recordCount, a: rawSlots, k: rawKeyed } = entry;
+  if (
+    !nonNegative(recordCount) ||
+    !Number.isInteger(recordCount) ||
+    recordCount > MAX_RECORDS_PER_FILE ||
+    !isArray(rawSlots) ||
+    !isArray(rawKeyed) ||
+    rawSlots.length > recordCount ||
+    rawKeyed.length > recordCount
+  )
+    return null;
+  const slots: UsageSlot[] = [];
+  let slotCount = 0;
+  for (const rawSlot of rawSlots) {
+    if (!isArray(rawSlot) || rawSlot.length !== 15) return null;
+    const [slotIndex, modelIndex, sessionIndex, speed, reported, ...numbers] =
+      rawSlot as SerializedSlot;
+    const model = typeof modelIndex === "number" ? models[modelIndex] : undefined;
+    const sessionId = typeof sessionIndex === "number" ? sessions[sessionIndex] : undefined;
+    if (
+      !nonNegative(slotIndex) ||
+      !Number.isInteger(slotIndex) ||
+      slotIndex * USAGE_SLOT_MS > 8.64e15 ||
+      model === undefined ||
+      sessionId === undefined ||
+      (speed !== null && speed !== "standard" && speed !== "fast" && speed !== "ultrafast") ||
+      (reported !== 0 && reported !== 1) ||
+      !numbers.every(nonNegative)
+    )
+      return null;
+    const [
+      count,
+      uncachedInputTokens,
+      cachedInputTokens,
+      cacheCreationInputTokens,
+      outputTokens,
+      totalTokens,
+      reasoningTokens,
+      reasoningMissingCount,
+      zeroCachedCount,
+      reportedCostUsd,
+    ] = numbers;
+    slotCount += count;
+    slots.push({
+      slotMs: slotIndex * USAGE_SLOT_MS,
+      model,
+      speed: speed ?? undefined,
+      sessionId,
+      reported: reported === 1,
+      count,
+      uncachedInputTokens,
+      cachedInputTokens,
+      cacheCreationInputTokens,
+      outputTokens,
+      totalTokens,
+      reasoningTokens,
+      reasoningMissingCount,
+      zeroCachedCount,
+      reportedCostUsd,
+    });
+  }
+  const keys: string[] = [];
+  const keySlots = new Uint32Array(rawKeyed.length);
+  const keyValues = new Float64Array(rawKeyed.length * USAGE_KEY_VALUE_STRIDE);
+  for (const [index, rawRow] of rawKeyed.entries()) {
+    if (!isArray(rawRow) || rawRow.length !== 9) return null;
+    const [key, slot, ...values] = rawRow as SerializedKeyed;
+    const [uncached, cached, creation, output, total, reasoning, reportedCost] = values;
+    if (
+      typeof key !== "string" ||
+      key.length === 0 ||
+      typeof slot !== "number" ||
+      !Number.isInteger(slot) ||
+      slot < 0 ||
+      slot >= slots.length ||
+      ![uncached, cached, creation, output, total].every(nonNegative) ||
+      (reasoning !== null && !nonNegative(reasoning)) ||
+      (reportedCost !== null && !nonNegative(reportedCost)) ||
+      // A keyed response's cost kind is part of its slot.
+      (reportedCost !== null) !== slots[slot]!.reported
+    )
+      return null;
+    keys.push(key);
+    keySlots[index] = slot;
+    keyValues.set(
+      [
+        uncached,
+        cached,
+        creation,
+        output,
+        total,
+        reasoning ?? Number.NaN,
+        reportedCost ?? Number.NaN,
+      ],
+      index * USAGE_KEY_VALUE_STRIDE,
+    );
+  }
+  if (slotCount + keys.length !== recordCount) return null;
+  return { recordCount, slots, keys, keySlots, keyValues };
 }
 
 /**
@@ -327,14 +508,14 @@ export function decodeUsageScanCache(document: unknown): UsageScanCache {
  */
 export function capUsageScanCache(cache: UsageScanCache, maxRecords: number): number {
   let total = 0;
-  for (const entry of cache.values()) total += entry.records.length;
+  for (const entry of cache.values()) total += entry.aggregate.recordCount;
   if (total <= maxRecords) return 0;
   const oldestFirst = [...cache].toSorted(([, left], [, right]) => left.mtimeMs - right.mtimeMs);
   let removed = 0;
   for (const [fileKey, entry] of oldestFirst) {
     if (total <= maxRecords) break;
     cache.delete(fileKey);
-    total -= entry.records.length;
+    total -= entry.aggregate.recordCount;
     removed += 1;
   }
   return removed;

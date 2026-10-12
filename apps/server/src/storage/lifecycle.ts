@@ -123,6 +123,19 @@ export function acquireWorktreeCreationLease(sql: SqlClient.SqlClient, candidate
 
 /** Path-specific use lease before recovery/provider callbacks. Never holds the global lock. */
 export function acquireStoragePathUseLease(sql: SqlClient.SqlClient, candidate: string) {
+  return acquireStoragePathUseLeaseHandle(sql, candidate).pipe(Effect.map((held) => held.release));
+}
+
+/** A path use lease its holder can hand to work it waits on (see `retainStoragePathUseLease`). */
+export interface HeldStoragePathUseLease {
+  /** The path as the holder asked for it. */
+  readonly path: string;
+  readonly canonical: string;
+  readonly release: Effect.Effect<void>;
+}
+
+/** `acquireStoragePathUseLease`, keeping the canonical path so the lease can be retained. */
+export function acquireStoragePathUseLeaseHandle(sql: SqlClient.SqlClient, candidate: string) {
   return storageLifecycleLock.withShared(
     Effect.gen(function* () {
       const canonical = yield* Effect.tryPromise(() => canonicalStoragePath(candidate));
@@ -134,16 +147,42 @@ export function acquireStoragePathUseLease(sql: SqlClient.SqlClient, candidate: 
               ? PROJECT_RELOCATION_PENDING_MESSAGE
               : "Checkout cleanup is pending or complete. Restore/recreate it before provider recovery.",
         });
-      creations.set(canonical, (creations.get(canonical) ?? 0) + 1);
-      return Effect.sync(() => {
-        const remaining = (creations.get(canonical) ?? 1) - 1;
-        if (remaining > 0) creations.set(canonical, remaining);
-        else creations.delete(canonical);
-        noteStorageActivity();
-      });
+      const held: HeldStoragePathUseLease = {
+        path: candidate,
+        canonical,
+        release: takePathUse(canonical),
+      };
+      return held;
     }),
   );
 }
+
+/**
+ * Another use of a path whose lease the caller holds, without repeating the realpath and the
+ * admission query: while one use is held no cleanup can claim the path, so counting one more
+ * is as safe as the first. When the holder's lease is already gone this is a full acquire.
+ */
+export function retainStoragePathUseLease(sql: SqlClient.SqlClient, held: HeldStoragePathUseLease) {
+  return Effect.suspend(() =>
+    (creations.get(held.canonical) ?? 0) > 0
+      ? Effect.succeed(takePathUse(held.canonical))
+      : acquireStoragePathUseLease(sql, held.path),
+  );
+}
+
+/** Counts one use of an admitted canonical path; the returned effect gives it back. */
+const takePathUse = (canonical: string): Effect.Effect<void> => {
+  creations.set(canonical, (creations.get(canonical) ?? 0) + 1);
+  let released = false;
+  return Effect.sync(() => {
+    if (released) return;
+    released = true;
+    const remaining = (creations.get(canonical) ?? 1) - 1;
+    if (remaining > 0) creations.set(canonical, remaining);
+    else creations.delete(canonical);
+    noteStorageActivity();
+  });
+};
 
 /** Called only inside the exclusive admission lock when cleanup claims a path. */
 export const hasWorktreeCreationLease = (candidate: string): boolean =>

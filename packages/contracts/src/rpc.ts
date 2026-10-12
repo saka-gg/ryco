@@ -58,6 +58,11 @@ import {
 } from "./automationCentre.ts";
 import { ModelSelection } from "./orchestration.ts";
 import {
+  ProviderProjectCommandsInput,
+  ProviderSessionPrewarmInput,
+  ProviderSessionPrewarmResult,
+} from "./provider.ts";
+import {
   AcpRegistrySearchInput,
   AcpRegistrySearchResult,
   AcpRegistryInstallInput,
@@ -291,6 +296,7 @@ import {
   ServerUpsertKeybindingResult,
   KeybindingsReplaceCustomInput,
   KeybindingsReplaceCustomResult,
+  ProviderProjectCommands,
 } from "./server.ts";
 import { ServerSettings, ServerSettingsError, ServerSettingsPatch } from "./settings.ts";
 import {
@@ -507,6 +513,8 @@ export const WS_METHODS = {
   notesCommand: "notes.command",
 
   serverRefreshProviders: "server.refreshProviders",
+  providerPrewarmSession: "provider.prewarmSession",
+  providerReadProjectCommands: "provider.readProjectCommands",
   serverUpdateProvider: "server.updateProvider",
   serverUpsertKeybinding: "server.upsertKeybinding",
   keybindingsReplaceCustom: "keybindings.replaceCustom",
@@ -933,6 +941,18 @@ export const WsServerGetDailyRecapRpc = Rpc.make(WS_METHODS.serverGetDailyRecap,
   error: Schema.Union([DailyRecapReadError, AuthRpcError]),
 });
 
+export const WsProviderPrewarmSessionRpc = Rpc.make(WS_METHODS.providerPrewarmSession, {
+  payload: ProviderSessionPrewarmInput,
+  success: ProviderSessionPrewarmResult,
+  error: AuthRpcError,
+});
+
+export const WsProviderReadProjectCommandsRpc = Rpc.make(WS_METHODS.providerReadProjectCommands, {
+  payload: ProviderProjectCommandsInput,
+  success: ProviderProjectCommands,
+  error: AuthRpcError,
+});
+
 export const WsServerRefreshProvidersRpc = Rpc.make(WS_METHODS.serverRefreshProviders, {
   payload: Schema.Struct({
     /**
@@ -1165,6 +1185,13 @@ export const WsSourceControlListChangeRequestsRpc = Rpc.make(
       query: Schema.optional(Schema.String),
       /** Narrow to change requests involving the authenticated viewer. */
       involvement: Schema.optional(ChangeRequestInvolvement),
+      /**
+       * `picker`: rows for a picker that shows number, title and state (the composer's `#`
+       * menu). Rows carry identity, branches, state, draft, author and timestamps only, no
+       * checks, labels, assignees, diff stats or stack summaries. Older servers ignore it and
+       * return full rows, which are a superset.
+       */
+      view: Schema.optional(Schema.Literals(["picker"])),
     }),
     success: Schema.Array(ChangeRequest),
     error: Schema.Union([SourceControlProviderError, AuthRpcError]),
@@ -2340,6 +2367,8 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsNotesCommandRpc
   | typeof WsServerGetDailyRecapRpc
   | typeof WsServerRefreshProvidersRpc
+  | typeof WsProviderPrewarmSessionRpc
+  | typeof WsProviderReadProjectCommandsRpc
   | typeof WsServerUpdateProviderRpc
   | typeof WsServerUpsertKeybindingRpc
   | typeof WsKeybindingsReplaceCustomRpc
@@ -2546,6 +2575,8 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsNotesCommandRpc,
   WsServerGetDailyRecapRpc,
   WsServerRefreshProvidersRpc,
+  WsProviderPrewarmSessionRpc,
+  WsProviderReadProjectCommandsRpc,
   WsServerUpdateProviderRpc,
   WsServerUpsertKeybindingRpc,
   WsKeybindingsReplaceCustomRpc,

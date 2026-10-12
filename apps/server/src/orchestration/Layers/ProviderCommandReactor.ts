@@ -1,5 +1,5 @@
 import * as SqlClient from "effect/sql/SqlClient";
-import { acquireStoragePathUseLease } from "../../storage/lifecycle.ts";
+import { acquireStoragePathUseLeaseHandle } from "../../storage/lifecycle.ts";
 import { isClaudeNativeCompaction } from "../../provider/claudeNativeCompaction.ts";
 import { computerToolInstructions } from "../../computer/tools/computerGuidance.ts";
 import type { ComputerTurnIntent } from "@ryco/contracts";
@@ -113,6 +113,12 @@ import {
   type ProviderRuntimeActivity,
 } from "../../provider/Services/ProviderService.ts";
 import { findThreadSession } from "../../provider/threadSessionLookup.ts";
+import { ProviderSessionPrewarm } from "../Services/ProviderSessionPrewarm.ts";
+import {
+  projectStartSystemPrompt,
+  type ThreadProviderStart,
+  threadProviderStartInput,
+} from "../threadProviderStart.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import {
   ProjectionSnapshotQuery,
@@ -411,8 +417,8 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
   ) =>
     Effect.gen(function* () {
       const candidate = thread.worktreePath ?? project?.workspaceRoot;
-      if (!candidate || Option.isNone(storageSql)) return;
-      const release = yield* acquireStoragePathUseLease(storageSql.value, candidate).pipe(
+      if (!candidate || Option.isNone(storageSql)) return undefined;
+      const held = yield* acquireStoragePathUseLeaseHandle(storageSql.value, candidate).pipe(
         Effect.mapError(
           (cause) =>
             new ProviderAdapterRequestError({
@@ -423,7 +429,8 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
             }),
         ),
       );
-      yield* Effect.addFinalizer(() => release);
+      yield* Effect.addFinalizer(() => held.release);
+      return held;
     });
   const approvals = yield* ProjectionPendingApprovalRepository;
   const questions = yield* ProjectionThreadUserInputRequestRepository;
@@ -438,6 +445,8 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
   const serverSettingsService = yield* ServerSettingsService;
   // Optional so reactor tests without checkpointing keep working.
   const checkpointReactor = yield* Effect.serviceOption(CheckpointReactor);
+  // Optional: without it every turn start starts its own session.
+  const sessionPrewarm = yield* Effect.serviceOption(ProviderSessionPrewarm);
   const handledTurnStartKeys = yield* Cache.make<string, true>({
     capacity: HANDLED_TURN_START_KEY_MAX,
     timeToLive: HANDLED_TURN_START_KEY_TTL,
@@ -770,8 +779,8 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     const project = options.prefetched
       ? options.prefetched.project
       : yield* resolveProject(thread.projectId);
-    // One lease for the whole start, including the worktree check.
-    yield* leaseThreadPath(thread, project);
+    // One lease for the whole start, including the worktree check and the provider start.
+    const heldPathLease = yield* leaseThreadPath(thread, project);
     yield* ensureRecordedWorktreeAvailable(thread, project, { pathLeased: true });
 
     const desiredRuntimeMode = thread.runtimeMode;
@@ -865,27 +874,27 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
       thread,
       projects: project ? [project] : [],
     });
-    const customSystemPrompt = project?.customSystemPrompt?.trim() || undefined;
+    const desiredStart: ThreadProviderStart = {
+      threadId,
+      provider: preferredProvider,
+      providerInstanceId: desiredInstanceId,
+      cwd: effectiveCwd,
+      modelSelection: desiredModelSelection,
+      runtimeMode: desiredRuntimeMode,
+      tokenMode: desiredTokenMode,
+      customSystemPrompt: projectStartSystemPrompt(project),
+    };
 
     // Fenced: a Stop cancels the start (pending or in flight). The start is
     // detached inside ProviderService, so cancelling it returns at once.
-    const startProviderSession = (input?: {
-      readonly resumeCursor?: unknown;
-      readonly provider?: ProviderDriverKind;
-    }) =>
+    const startProviderSession = (input?: { readonly resumeCursor?: unknown }) =>
       laneControl.guardStart(
         startFence,
-        providerService.startSession(threadId, {
+        providerService.startSession(
           threadId,
-          ...(preferredProvider ? { provider: preferredProvider } : {}),
-          providerInstanceId: desiredInstanceId,
-          ...(effectiveCwd ? { cwd: effectiveCwd } : {}),
-          modelSelection: desiredModelSelection,
-          ...(input?.resumeCursor !== undefined ? { resumeCursor: input.resumeCursor } : {}),
-          runtimeMode: desiredRuntimeMode,
-          tokenMode: desiredTokenMode,
-          ...(customSystemPrompt !== undefined ? { customSystemPrompt } : {}),
-        }),
+          threadProviderStartInput(desiredStart, input?.resumeCursor),
+          heldPathLease !== undefined ? { heldPathLease } : undefined,
+        ),
       );
 
     const bindSessionToThread = (session: ProviderSession) =>
@@ -1082,6 +1091,17 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     if (unresumableRelocation !== undefined) {
       // ProviderService would merge the persisted cursor with the new cwd.
       return yield* cwdRelocationError(unresumableRelocation, "provider-unsupported");
+    }
+    // A session prewarmed for exactly this start (composer focus, first keystroke) is used as is.
+    if (relocation === undefined && Option.isSome(sessionPrewarm)) {
+      const prewarmed = yield* laneControl.guardStart(
+        startFence,
+        sessionPrewarm.value.claim(desiredStart),
+      );
+      if (prewarmed !== undefined) {
+        yield* bindSessionToThread(prewarmed);
+        return prewarmed.threadId;
+      }
     }
     const startedSession = yield* startProviderSession(undefined).pipe(
       failMissingMovedConversation(relocation, options.kind),

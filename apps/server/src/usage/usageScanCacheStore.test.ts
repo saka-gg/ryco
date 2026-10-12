@@ -6,6 +6,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { Effect, FileSystem, Path } from "effect";
 import { afterEach, expect, it } from "vite-plus/test";
 
+import { buildUsageFileAggregate } from "./usageFileAggregate.ts";
 import type { UsageRecord } from "./usageRecord.ts";
 import { encodeUsageScanCache, usageCacheFileKey, type CachedUsageFile } from "./usageScanCache.ts";
 import { makeUsageScanCacheStore, usageScanCacheShardOf } from "./usageScanCacheStore.ts";
@@ -32,7 +33,13 @@ const record: UsageRecord = {
 };
 
 function entry(mtimeMs: number): CachedUsageFile {
-  return { rootKey: "root", size: 1, mtimeMs, provider: "claude", records: [record] };
+  return {
+    rootKey: "root",
+    size: 1,
+    mtimeMs,
+    provider: "claude",
+    aggregate: buildUsageFileAggregate([record]),
+  };
 }
 
 const NOW = Date.parse("2026-08-10T00:00:00Z");
