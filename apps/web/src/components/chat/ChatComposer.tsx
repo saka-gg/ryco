@@ -271,6 +271,8 @@ export interface ChatComposerHandle {
 // --------------------------------------------------------------------------
 
 export interface ChatComposerProps {
+  /** The user is about to write (focus, first keystroke): a cue to warm what the send needs. */
+  onComposerIntent?: () => void;
   composerDraftTarget: ScopedThreadRef | DraftId;
   environmentId: EnvironmentId;
   routeKind: "server" | "draft";
@@ -474,6 +476,7 @@ function useSetPromptFromTraits(input: {
 export const ChatComposer = memo(
   forwardRef<ChatComposerHandle, ChatComposerProps>(function ChatComposer(props, ref) {
     const {
+      onComposerIntent,
       composerDraftTarget,
       environmentId,
       routeKind,
@@ -1502,6 +1505,7 @@ export const ChatComposer = memo(
           );
           return;
         }
+        if (promptRef.current.length === 0 && nextPrompt.length > 0) onComposerIntent?.();
         promptRef.current = nextPrompt;
         setPrompt(nextPrompt);
         if (!terminalContextIdListsEqual(composerTerminalContexts, terminalContextIds)) {
@@ -1524,6 +1528,7 @@ export const ChatComposer = memo(
         composerDraftTarget,
         composerTerminalContexts,
         setComposerDraftTerminalContexts,
+        onComposerIntent,
       ],
     );
 
@@ -2663,6 +2668,7 @@ export const ChatComposer = memo(
               }
               setIsComposerFocused(true);
               setIsReadingChat(false);
+              onComposerIntent?.();
             }}
             onBlurCapture={() => {
               scheduleComposerCollapseCheck();

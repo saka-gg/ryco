@@ -5,7 +5,7 @@ import { OptionalQuestionCard } from "./chat/OptionalQuestionCard";
 import { readPrimaryEnvironmentTarget } from "../environments/primary/target";
 import { parseComputerInvocation } from "@ryco/shared/computerInvocation";
 import { BackgroundBrowserPreview } from "../browser/BackgroundBrowserPreview";
-import type { ProviderOptionSelection } from "@ryco/contracts";
+import type { ProviderOptionSelection, ServerConfig } from "@ryco/contracts";
 import {
   rejectRetiredProjectMemory,
   hasRetiredProjectMemory,
@@ -17,6 +17,7 @@ import { TranscriptSelectionActions } from "./chat/TranscriptSelectionActions";
 import {
   appendSelectionQuote,
   checkpointRevertUnsupportedMessage,
+  requestProviderSessionPrewarm,
 } from "@ryco/client-runtime/state/composer";
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { flushPreviewFiles, hasUnsavedPreviewFiles } from "./previewFileSessions";
@@ -175,7 +176,10 @@ import { newCommandId, newDraftId, newMessageId, newProjectId, newThreadId } fro
 import { isChatProject } from "@ryco/shared/projectKind";
 import { getProviderSupportsAskMode, resolveSelectableProvider } from "../providerModels";
 import { useSettings } from "../hooks/useSettings";
-import { useChatsAvailability } from "../hooks/useChatsAvailability";
+import {
+  useChatsAvailability,
+  useEnvironmentServerConfigSelector,
+} from "../hooks/useChatsAvailability";
 import { resolveAppModelSelectionForInstance } from "../modelSelection";
 import { deriveLogicalProjectKeyFromSettings } from "../logicalProject";
 import {
@@ -545,6 +549,9 @@ function shouldIgnoreThreadMessageSearchShortcut(
   }
   return false;
 }
+
+const selectProviderSessionPrewarmSupported = (config: ServerConfig | null): boolean =>
+  config?.environment.capabilities.providerSessionPrewarm === true;
 
 export default function ChatView(props: ChatViewProps) {
   // React Compiler cannot preserve this component's manual memoization, so it
@@ -4907,6 +4914,50 @@ export default function ChatView(props: ChatViewProps) {
   const onUndoTurn = useCallback((turnCount: number) => {
     void onRevertToTurnCountRef.current(turnCount);
   }, []);
+  // Composer focus or the first keystroke starts the provider session the next send
+  // would start (`provider.prewarmSession`), so the send does not wait for the provider
+  // to boot. Skipped where that send first creates a worktree or a chat folder: the
+  // session's directory does not exist yet. Ref indirection keeps the callback stable
+  // for the memoized composer.
+  const providerSessionPrewarmSupported = useEnvironmentServerConfigSelector(
+    environmentId,
+    selectProviderSessionPrewarmSupported,
+  );
+  const prewarmProviderSessionRef = useRef<() => void>(() => undefined);
+  prewarmProviderSessionRef.current = () => {
+    const thread = activeThread;
+    if (
+      !thread ||
+      isPendingChat ||
+      !dispatchCapability.allowed ||
+      hostedDraftTarget.pending !== null ||
+      (thread.session !== null && thread.session.orchestrationStatus !== "stopped")
+    )
+      return;
+    const isFirstMessage = !isServerThread || thread.messages.length === 0;
+    const plan = resolveChatSendWorktreePlan({
+      isServerThread,
+      isFirstMessage,
+      threadWorktreePath: thread.worktreePath,
+      activeThreadBranch,
+      currentGitRefName: gitStatusQuery.data?.refName ?? null,
+      sendEnvMode,
+    });
+    if (plan.shouldCreateWorktree || plan.shouldMaterializeLegacyBranchWorktree) return;
+    const modelSelection = readComposer()?.getSendContext().selectedModelSelection;
+    requestProviderSessionPrewarm({
+      api: readEnvironmentApi(environmentId),
+      supported: providerSessionPrewarmSupported,
+      request: {
+        threadId: thread.id,
+        ...(isServerThread ? {} : { projectId: thread.projectId }),
+        ...(modelSelection ? { modelSelection } : {}),
+        runtimeMode,
+        tokenMode,
+      },
+    });
+  };
+  const onComposerIntent = useCallback(() => prewarmProviderSessionRef.current(), []);
   // "Fork from here": desktop and tablet only (the frozen phone tier never
   // offers it), on server threads of machines that advertise `threadFork`.
   // Same ref indirection: the callback identity never changes.
@@ -5678,6 +5729,7 @@ export default function ChatView(props: ChatViewProps) {
               <div className="relative z-10">
                 <ChatComposer
                   ref={composerRef}
+                  onComposerIntent={onComposerIntent}
                   composerDraftTarget={composerDraftTarget}
                   environmentId={environmentId}
                   routeKind={routeKind}
