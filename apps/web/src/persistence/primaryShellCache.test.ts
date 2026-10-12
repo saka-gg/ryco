@@ -3,10 +3,17 @@ import {
   ProjectId,
   ProviderInstanceId,
   ThreadId,
+  TurnId,
   type OrchestrationShellSnapshot,
   type OrchestrationThreadShell,
 } from "@ryco/contracts";
-import { selectEnvironmentShellLive } from "@ryco/client-runtime/state/threads";
+import {
+  buildThreadInbox,
+  selectEnvironmentShellLive,
+  selectProjectsAcrossEnvironments,
+  selectSidebarThreadsAcrossEnvironments,
+  selectSidebarWorktreesAcrossEnvironments,
+} from "@ryco/client-runtime/state/threads";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { selectEnvironmentState, useStore } from "../store";
@@ -281,5 +288,55 @@ describe("primary shell cache persistence", () => {
     const snapshot = capturePrimaryShellSnapshot(environmentId, useStore.getState(), 1)!;
     expect(snapshot.threads.length).toBeLessThanOrEqual(400);
     expect(snapshot.threads.some((entry) => entry.id === "live")).toBe(true);
+  });
+});
+
+describe("primary shell cache and the inbox", () => {
+  it("settles cached rows the way the live shell does", () => {
+    const old = "2026-01-01T00:00:00.000Z";
+    const ended: OrchestrationThreadShell = {
+      ...thread("old"),
+      createdAt: old,
+      updatedAt: old,
+      latestUserMessageAt: old,
+      latestTurn: {
+        turnId: TurnId.make("turn-old"),
+        state: "completed",
+        requestedAt: old,
+        startedAt: old,
+        completedAt: old,
+        assistantMessageId: null,
+      },
+    };
+    const classify = () => {
+      const state = useStore.getState();
+      return buildThreadInbox({
+        projects: selectProjectsAcrossEnvironments(state),
+        worktrees: selectSidebarWorktreesAcrossEnvironments(state),
+        threads: selectSidebarThreadsAcrossEnvironments(state),
+        environments: [
+          {
+            environmentId,
+            label: "Primary",
+            threadSettlementSupported: true,
+            connected: true,
+            mutationReady: false,
+            shellCurrent: false,
+          },
+        ],
+        autoSettleAfterDays: 7,
+        nowMs: Date.parse("2026-10-12T00:00:00.000Z"),
+      });
+    };
+    const record = capturedRecord([ended]);
+    goLive([ended]);
+    const live = classify();
+    useStore.setState({ activeEnvironmentId: null, environmentStateById: {} });
+    hydratePrimaryShellFromCache({ value: record, environmentId, origin });
+    const cached = classify();
+
+    expect(live.settled).toHaveLength(1);
+    expect(cached.settled).toHaveLength(1);
+    expect(cached.active).toHaveLength(0);
   });
 });

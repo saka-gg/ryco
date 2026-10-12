@@ -4,6 +4,7 @@ import {
   ProjectId,
   ProviderInstanceId,
   ThreadId,
+  TurnId,
   type OrchestrationThreadShell,
 } from "@ryco/contracts";
 import {
@@ -244,5 +245,103 @@ describe("workspace metadata lineage", () => {
     const cached = workspaceMetadataToCachedShellSnapshot(snapshot);
     expect(cached.threads[0]?.shell.lineage).toBeNull();
     expect(cached.threads[0]?.summary.lineage).toBeNull();
+  });
+
+  it("caches an ended latest turn and the last message time, never a running turn", () => {
+    const turn = (state: "running" | "completed") => ({
+      turnId: TurnId.make(`turn-${state}`),
+      state,
+      requestedAt: "2026-01-01T00:00:00.000Z",
+      startedAt: "2026-01-01T00:00:01.000Z",
+      completedAt: state === "running" ? null : "2026-01-01T00:05:00.000Z",
+      assistantMessageId: null,
+    });
+    useStore.setState(
+      syncServerShellSnapshot(
+        { activeEnvironmentId: environmentId, environmentStateById: {} },
+        {
+          snapshotSequence: 1,
+          projects: [
+            {
+              id: projectId,
+              title: "Project",
+              workspaceRoot: "/repo",
+              projectMetadataDir: ".ryco",
+              defaultModelSelection: null,
+              customAvatarContentHash: null,
+              preferredRemoteName: null,
+              scripts: [],
+              createdAt: "2026-10-01T00:00:00.000Z",
+              updatedAt: "2026-10-01T00:00:00.000Z",
+            },
+          ],
+          threads: [
+            shell(parentId, {
+              latestTurn: turn("completed"),
+              latestUserMessageAt: "2026-01-01T00:00:00.000Z",
+            }),
+            shell(childId, { latestTurn: turn("running") }),
+          ],
+          updatedAt: "2026-10-01T00:00:00.000Z",
+        },
+        environmentId,
+      ),
+    );
+    const captured = readWorkspaceMetadataSnapshot(environmentId, 1)!;
+    const cached = workspaceMetadataToCachedShellSnapshot(captured);
+    const summaryOf = (id: ThreadId) =>
+      cached.threads.find((thread) => thread.shell.id === id)?.summary;
+    expect(summaryOf(parentId)?.latestUserMessageAt).toBe("2026-01-01T00:00:00.000Z");
+    expect(summaryOf(parentId)?.latestTurn).toEqual(turn("completed"));
+    // A running turn is live state: the cached row has none.
+    expect(summaryOf(childId)?.latestTurn).toBeNull();
+  });
+
+  it("ignores malformed cached activity fields", () => {
+    const snapshot: WorkspaceMetadataSnapshot = {
+      schemaVersion: 1,
+      environmentId,
+      capturedAt: 1,
+      projects: [
+        {
+          environmentId,
+          id: projectId,
+          name: "Project",
+          cwd: "/repo",
+          repositoryIdentity: null,
+          createdAt: null,
+          updatedAt: null,
+        },
+      ],
+      worktrees: [],
+      threads: [
+        {
+          environmentId,
+          id: childId,
+          projectId,
+          worktreeId: null,
+          title: "Worker",
+          createdAt: "2026-10-01T00:00:00.000Z",
+          updatedAt: null,
+          archivedAt: null,
+          modelSelection: null,
+          providerDriver: null,
+          branch: null,
+          hasPendingApprovals: false,
+          hasPendingUserInput: false,
+          hasActionableProposedPlan: false,
+          deliveryUnknown: false,
+          latestUserMessageAt: "not a time",
+          latestTurn: {
+            turnId: "t",
+            state: "running",
+            requestedAt: "2026-01-01T00:00:00.000Z",
+          } as never,
+        },
+      ],
+    };
+    const cached = workspaceMetadataToCachedShellSnapshot(snapshot);
+    expect(cached.threads[0]?.summary.latestUserMessageAt).toBeNull();
+    expect(cached.threads[0]?.summary.latestTurn).toBeNull();
   });
 });
