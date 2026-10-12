@@ -10,11 +10,7 @@ import { ServerSecretStoreLive } from "./auth/Layers/ServerSecretStore.ts";
 import { AtlassianConnectionRepositoryLive } from "./persistence/Layers/AtlassianConnections.ts";
 import { layerConfig as SqlitePersistenceLayerLive } from "./persistence/Layers/Sqlite.ts";
 import * as SourceControlDiscoveryLayer from "./sourceControl/SourceControlDiscovery.ts";
-import * as AzureDevOpsCli from "./sourceControl/AzureDevOpsCli.ts";
-import * as BitbucketApi from "./sourceControl/BitbucketApi.ts";
 import * as ForgejoApi from "./sourceControl/ForgejoApi.ts";
-import * as GitHubCli from "./sourceControl/GitHubCli.ts";
-import * as GitLabCli from "./sourceControl/GitLabCli.ts";
 import * as SourceControlProviderRegistry from "./sourceControl/SourceControlProviderRegistry.ts";
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
 import * as VcsDriverRegistry from "./vcs/VcsDriverRegistry.ts";
@@ -50,15 +46,7 @@ export const makeServerWsRpcLayer = (principal: RpcPrincipal) =>
       SourceControlDiscoveryLayer.layer.pipe(
         Layer.provide(
           SourceControlProviderRegistry.layer.pipe(
-            Layer.provide(
-              Layer.mergeAll(
-                AzureDevOpsCli.layer,
-                BitbucketApi.layer,
-                ForgejoApi.layer,
-                GitHubCli.layer,
-                GitLabCli.layer,
-              ),
-            ),
+            Layer.provide(ForgejoApi.layer),
             Layer.provideMerge(AtlassianConnectionRepositoryLive),
             Layer.provideMerge(SqlitePersistenceLayerLive),
             Layer.provide(ServerSecretStoreLive),

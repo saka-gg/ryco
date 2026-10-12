@@ -16,7 +16,7 @@ import { ServerEnvironment } from "../environment/Services/ServerEnvironment.ts"
 import {
   NodeNativeClaimError,
   type NodeNativeClaimErrorCode,
-} from "../hubIdentity/NodeNativeClaimService.ts";
+} from "../hubIdentity/NodeNativeClaimError.ts";
 import {
   DESKTOP_LOCAL_NO_STORE_HEADERS,
   DesktopLocalControlRefused,

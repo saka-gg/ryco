@@ -16,7 +16,7 @@ import { ServerConfig } from "../config.ts";
 import {
   NodeLocalIntroductionError,
   type NodeLocalIntroductionErrorCode,
-} from "../hubIdentity/NodeLocalIntroductionService.ts";
+} from "../hubIdentity/NodeLocalIntroductionError.ts";
 import { awaitHubConnector } from "./HubConnectorService.ts";
 
 const CONTROL_TOKEN = /^[A-Za-z0-9_-]{43}$/;

@@ -19,21 +19,8 @@ import {
   NodeLocalIntroductionLedgerError,
 } from "./NodeLocalIntroductionLedger.ts";
 
-export type NodeLocalIntroductionErrorCode =
-  | "local_introduction_unavailable"
-  | "local_introduction_rejected"
-  | "local_introduction_conflict"
-  | "local_introduction_expired";
-
-export class NodeLocalIntroductionError extends Error {
-  readonly code: NodeLocalIntroductionErrorCode;
-
-  constructor(code: NodeLocalIntroductionErrorCode) {
-    super("Local Trusted Introduction failed.");
-    this.name = "NodeLocalIntroductionError";
-    this.code = code;
-  }
-}
+export { type NodeLocalIntroductionErrorCode, NodeLocalIntroductionError } from "./NodeLocalIntroductionError.ts";
+import { type NodeLocalIntroductionErrorCode, NodeLocalIntroductionError } from "./NodeLocalIntroductionError.ts";
 
 function introductionError(code: NodeLocalIntroductionErrorCode): never {
   throw new NodeLocalIntroductionError(code);
