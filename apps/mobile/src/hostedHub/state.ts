@@ -42,6 +42,15 @@ export async function ensureMobileHostedSession(): Promise<void> {
   await (await import("./runtime")).ensureMobileHostedSession();
 }
 
+/**
+ * First hosted use: the session setup defers the hardware key when no session
+ * is stored, so hosted surfaces call this on mount to load it and settle
+ * availability. Resolves false when hosted mode is unavailable.
+ */
+export async function ensureMobileHostedDeviceKey(): Promise<boolean> {
+  return await (await import("./runtime")).ensureMobileHostedDeviceKey();
+}
+
 export { isMobileHostedModeAvailable, subscribeMobileHostedModeAvailability };
 
 export {
