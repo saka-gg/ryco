@@ -40,6 +40,8 @@ export default defineConfig({
   deps: {
     alwaysBundle: (id) =>
       id.startsWith("@ryco/") || id.startsWith("effect-acp") || isBundledRuntimePackage(id),
+    // Bun's own modules (the Bun-runtime SQLite client) exist only under Bun.
+    neverBundle: [/^bun:/],
     onlyBundle: false,
   },
   outputOptions: {
