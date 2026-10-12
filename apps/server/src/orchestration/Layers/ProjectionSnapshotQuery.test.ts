@@ -26,7 +26,10 @@ import {
   THREAD_WINDOW_ACTIVITY_MAX_PAYLOAD_BYTES,
 } from "./ProjectionSnapshotQuery.ts";
 import * as ThreadBackgroundLiveness from "../ThreadBackgroundLiveness.ts";
-import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
+import {
+  ProjectionSnapshotQuery,
+  scopeShellSnapshot,
+} from "../Services/ProjectionSnapshotQuery.ts";
 
 const asProjectId = (value: string): ProjectId => ProjectId.make(value);
 const asTurnId = (value: string): TurnId => TurnId.make(value);
@@ -2913,4 +2916,62 @@ it("keeps the newest rows within both the count and the byte budget", () => {
     hasMoreBefore: false,
   });
   assert.equal(takeNewestRowsWithinByteBudget(rows, 2, 10_000).hasMoreBefore, true);
+});
+
+projectionSnapshotLayer("scoped shell snapshots", (it) => {
+  it.effect("equals the whole shell filtered to the scope", () =>
+    Effect.gen(function* () {
+      const query = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`DELETE FROM projection_projects`;
+      yield* sql`DELETE FROM projection_threads`;
+      yield* sql`DELETE FROM projection_worktrees`;
+      yield* sql`DELETE FROM projection_thread_sessions`;
+      for (const projectId of ["scope-p1", "scope-p2"]) {
+        yield* sql`INSERT INTO projection_projects (
+          project_id, title, workspace_root, scripts_json, created_at, updated_at
+        ) VALUES (${projectId}, ${projectId}, ${`/tmp/${projectId}`}, '[]',
+          '2026-10-01T00:00:00.000Z', '2026-10-01T00:00:00.000Z')`;
+        yield* sql`INSERT INTO projection_worktrees (
+          worktree_id, project_id, branch, origin, created_at, updated_at
+        ) VALUES (${`${projectId}-wt`}, ${projectId}, 'main', 'main',
+          '2026-10-01T00:00:00.000Z', '2026-10-01T00:00:00.000Z')`;
+      }
+      const threads: ReadonlyArray<readonly [string, string, string | null]> = [
+        ["scope-t1", "scope-p1", null],
+        ["scope-t2", "scope-p1", null],
+        ["scope-t3", "scope-p2", null],
+        ["scope-deleted", "scope-p2", "2026-10-02T00:00:00.000Z"],
+      ];
+      for (const [threadId, projectId, deletedAt] of threads) {
+        yield* sql`INSERT INTO projection_threads (
+          thread_id, project_id, title, model_selection_json, runtime_mode,
+          interaction_mode, created_at, updated_at, deleted_at
+        ) VALUES (
+          ${threadId}, ${projectId}, ${threadId}, '{"provider":"codex","model":"gpt-5-codex"}',
+          'full-access', 'default', '2026-10-01T00:00:00.000Z', '2026-10-01T00:00:00.000Z',
+          ${deletedAt}
+        )`;
+        yield* sql`INSERT INTO projection_thread_sessions (thread_id, status, updated_at)
+          VALUES (${threadId}, 'idle', '2026-10-01T00:00:00.000Z')`;
+      }
+      const full = yield* query.getShellSnapshot();
+      const scopes = [
+        { projectIds: [ProjectId.make("scope-p1")] },
+        { threadIds: [ThreadId.make("scope-t3"), ThreadId.make("scope-deleted")] },
+        { projectIds: [ProjectId.make("scope-p1")], threadIds: [ThreadId.make("scope-t2")] },
+        { threadIds: [] },
+      ];
+      for (const scope of scopes) {
+        const scoped = yield* query.getScopedShellSnapshot!(scope);
+        assert.deepEqual(scoped, scopeShellSnapshot(full, scope), JSON.stringify(scope));
+      }
+      assert.deepEqual(
+        (yield* query.getScopedShellSnapshot!({
+          threadIds: [ThreadId.make("scope-t3")],
+        })).projects.map((project) => project.id),
+        ["scope-p2"],
+      );
+    }),
+  );
 });

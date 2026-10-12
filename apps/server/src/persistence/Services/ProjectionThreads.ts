@@ -207,9 +207,10 @@ export interface ProjectionThreadRepositoryShape {
     ProjectionRepositoryError
   >;
 
-  /** Threads in Trash, most recently trashed first. Bounded by `limit`. */
+  /** Threads in Trash, most recently trashed first. Bounded by `limit`; optionally one project's. */
   readonly listTrashed: (input: {
     readonly limit: number;
+    readonly projectId?: ProjectId;
   }) => Effect.Effect<ReadonlyArray<ProjectionTrashedThread>, ProjectionRepositoryError>;
 }
 

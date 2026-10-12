@@ -40,7 +40,10 @@ import { redactDiagnosticText } from "@ryco/shared/diagnosticRedaction";
 import { Effect, Option, Schema } from "effect";
 
 import type { CheckpointDiffQueryShape } from "../../checkpointing/Services/CheckpointDiffQuery.ts";
-import type { ProjectionSnapshotQueryShape } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import {
+  readScopedShellSnapshot,
+  type ProjectionSnapshotQueryShape,
+} from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import type { TerminalManagerShape } from "../../terminal/Services/Manager.ts";
 import type { WorkspaceAccessPolicyShape } from "../../workspace/Services/WorkspaceAccessPolicy.ts";
 import type { WorkspaceFileSystemShape } from "../../workspace/Services/WorkspaceFileSystem.ts";
@@ -261,9 +264,13 @@ export const listThreadsPage = (
       AGENT_CONTROL_MCP_LIST_LIMIT_DEFAULT,
       AGENT_CONTROL_MCP_LIST_LIMIT_MAX,
     );
-    const snapshot = yield* projections
-      .getShellSnapshot()
-      .pipe(Effect.mapError(() => new ToolFailure("Thread list read failed.")));
+    // A project-scoped listing reads that project's summaries only; an unscoped one pages
+    // over every live thread and needs them all.
+    const snapshot = yield* (
+      input.projectId === undefined
+        ? projections.getShellSnapshot()
+        : readScopedShellSnapshot(projections, { projectIds: [input.projectId] })
+    ).pipe(Effect.mapError(() => new ToolFailure("Thread list read failed.")));
     const rows = snapshot.threads.filter(
       (thread) =>
         visible(thread) &&

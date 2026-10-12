@@ -12,7 +12,6 @@ import {
   type OrchestrationCommand,
   OrchestrationDispatchCommandError,
   type OrchestrationProjectShell,
-  type OrchestrationShellSnapshot,
   type OrchestrationThreadShell,
   type OrchestrationWorktreeShell,
   type ProjectId,
@@ -49,7 +48,11 @@ import {
 } from "../orchestration/Services/OrchestrationEngine.ts";
 import {
   ProjectionSnapshotQuery,
+  readScopedShellSnapshot,
+  readWorkspacePlacement,
+  workspacePlacementOf,
   type ProjectionSnapshotQueryShape,
+  type ProjectionWorkspacePlacement,
 } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import {
   ProjectionThreadRepository,
@@ -130,7 +133,7 @@ export class WorkspaceLifecycle extends Context.Service<
 export interface WorkspaceLifecycleDeps {
   readonly snapshots: Pick<
     ProjectionSnapshotQueryShape,
-    "getShellSnapshot" | "getThreadShellById" | "getWorkspacePlacement"
+    "getShellSnapshot" | "getThreadShellById" | "getWorkspacePlacement" | "getScopedShellSnapshot"
   >;
   readonly threads: Pick<ProjectionThreadRepositoryShape, "listTrashed">;
   readonly engine: Pick<OrchestrationEngineShape, "dispatch">;
@@ -150,7 +153,10 @@ export interface WorkspaceLifecycleDeps {
 }
 
 interface LoadedContext {
-  readonly snapshot: OrchestrationShellSnapshot;
+  /** Every live project, workspace and thread placement: lookups and overlap checks. */
+  readonly placement: ProjectionWorkspacePlacement;
+  /** Thread summaries in the loaded scope (one project, or all for suggestions). */
+  readonly threads: ReadonlyArray<OrchestrationThreadShell>;
   readonly trashed: ReadonlyArray<{
     readonly threadId: ThreadId;
     readonly projectId: ProjectId;
@@ -371,12 +377,44 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
     return lock;
   };
 
-  const loadContext = Effect.gen(function* () {
-    const snapshot = yield* deps.snapshots.getShellSnapshot();
-    const trashed = yield* deps.threads.listTrashed({ limit: 10_000 });
-    const terminals = yield* deps.terminals.listDiagnostics;
-    return { snapshot, trashed, terminals, nowMs: now() } satisfies LoadedContext;
-  }).pipe(Effect.mapError(() => lifecycleError("Workspace state is unavailable.")));
+  /**
+   * What an inspection needs: placement of everything (cheap plain reads) plus thread summaries
+   * and trash of the one project in scope. Only suggestions, which plan across every project,
+   * load every thread summary.
+   */
+  const loadContext = (
+    scope: { readonly projectId: ProjectId } | { readonly worktreeId: WorktreeId } | "all",
+  ) =>
+    Effect.gen(function* () {
+      if (scope === "all") {
+        const snapshot = yield* deps.snapshots.getShellSnapshot();
+        const trashed = yield* deps.threads.listTrashed({ limit: 10_000 });
+        const terminals = yield* deps.terminals.listDiagnostics;
+        return {
+          placement: workspacePlacementOf(snapshot),
+          threads: snapshot.threads,
+          trashed,
+          terminals,
+          nowMs: now(),
+        } satisfies LoadedContext;
+      }
+      const placement = yield* readWorkspacePlacement(deps.snapshots);
+      const projectId =
+        "projectId" in scope
+          ? scope.projectId
+          : placement.worktrees.find((worktree) => worktree.worktreeId === scope.worktreeId)
+              ?.projectId;
+      const threads =
+        projectId === undefined
+          ? []
+          : (yield* readScopedShellSnapshot(deps.snapshots, { projectIds: [projectId] })).threads;
+      const trashed =
+        projectId === undefined
+          ? []
+          : yield* deps.threads.listTrashed({ limit: 10_000, projectId });
+      const terminals = yield* deps.terminals.listDiagnostics;
+      return { placement, threads, trashed, terminals, nowMs: now() } satisfies LoadedContext;
+    }).pipe(Effect.mapError(() => lifecycleError("Workspace state is unavailable.")));
 
   // Shared by list() and suggestions() (read-only listings): a reopened
   // Projects page or overlapping reads reuse each checkout's recent Git reads.
@@ -389,14 +427,14 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
     caches?: CheckoutInspectionCaches,
   ) =>
     Effect.gen(function* () {
-      const project = context.snapshot.projects.find((p) => p.id === worktree.projectId);
+      const project = context.placement.projects.find((p) => p.id === worktree.projectId);
       if (!project)
         return yield* Effect.fail(lifecycleError("The workspace's project is unavailable."));
       const main =
         worktree.origin === "main" ||
         worktree.worktreePath === null ||
         samePath(worktree.worktreePath, project.workspaceRoot);
-      const conversations = context.snapshot.threads.filter((thread) =>
+      const conversations = context.threads.filter((thread) =>
         threadBelongsToWorktree(thread, worktree, samePath),
       );
       const conversationIds = new Set<string>(conversations.map((thread) => thread.id));
@@ -442,7 +480,7 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
           : yield* inspectCheckout(
               { policy: deps.policy, git: deps.gitDriver },
               {
-                snapshot: context.snapshot,
+                snapshot: context.placement,
                 project,
                 directory: worktree.worktreePath,
                 rowWorktreeId: worktree.worktreeId,
@@ -500,7 +538,7 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
    */
   const projectFactsFor = (context: LoadedContext, projectId: ProjectId) =>
     Effect.suspend(() => {
-      const project = context.snapshot.projects.find((p) => p.id === projectId);
+      const project = context.placement.projects.find((p) => p.id === projectId);
       if (!project) return Effect.succeed(undefined);
       return inspectProjectGitFacts(
         { policy: deps.policy, git: deps.gitDriver },
@@ -781,8 +819,8 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
 
   const loadState = (worktreeId: WorktreeId) =>
     Effect.gen(function* () {
-      const context = yield* loadContext;
-      const worktree = (context.snapshot.worktrees ?? []).find(
+      const context = yield* loadContext({ worktreeId });
+      const worktree = context.placement.worktrees.find(
         (candidate) => candidate.worktreeId === worktreeId,
       );
       if (!worktree)
@@ -1187,8 +1225,8 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
       : {}),
     list: (projectId) =>
       Effect.gen(function* () {
-        const context = yield* loadContext;
-        const worktrees = (context.snapshot.worktrees ?? []).filter(
+        const context = yield* loadContext({ projectId });
+        const worktrees = context.placement.worktrees.filter(
           (worktree) => worktree.projectId === projectId,
         );
         const projectFacts = worktrees.some((worktree) => worktree.worktreePath !== null)
@@ -1212,15 +1250,15 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
         const settings = yield* deps.settings.getSettings.pipe(
           Effect.mapError(() => lifecycleError("Settings are unavailable.")),
         );
-        const context = yield* loadContext;
+        const context = yield* loadContext("all");
         const excluded = new Set(
           context.terminals.filter(isTerminalAlive).map((terminal) => terminal.threadId),
         );
         const plan = planLifecycleSuggestions({
-          threads: context.snapshot.threads,
-          worktrees: context.snapshot.worktrees ?? [],
+          threads: context.threads,
+          worktrees: context.placement.worktrees,
           projectRoots: new Map(
-            context.snapshot.projects.map((project) => [project.id, project.workspaceRoot]),
+            context.placement.projects.map((project) => [project.id, project.workspaceRoot]),
           ),
           policyFor: (projectId) => resolveLifecycleSuggestionPolicy(settings, projectId),
           excludedThreadIds: excluded,
@@ -1241,7 +1279,7 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
           candidates,
           (candidate) =>
             Effect.gen(function* () {
-              const worktree = (context.snapshot.worktrees ?? []).find(
+              const worktree = context.placement.worktrees.find(
                 (row) => row.worktreeId === candidate.worktreeId,
               );
               if (!worktree) return null;

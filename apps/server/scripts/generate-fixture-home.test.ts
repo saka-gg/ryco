@@ -13,7 +13,14 @@ afterAll(() => rmSync(directory, { recursive: true, force: true }));
 
 describe("generateFixtureHome", () => {
   it("writes a consistent, deterministic home through the real engine", async () => {
-    const options = { projects: 2, threads: 6, turns: 2, archivedShare: 0.5, seed: 7 };
+    const options = {
+      projects: 2,
+      threads: 6,
+      turns: 2,
+      archivedShare: 0.5,
+      usageReportsPerTurn: 2,
+      seed: 7,
+    };
     const first = await generateFixtureHome({ ...options, out: join(directory, "a") });
     const second = await generateFixtureHome({ ...options, out: join(directory, "b") });
     expect(first.threads).toBe(6);
@@ -49,7 +56,7 @@ describe("generateFixtureHome", () => {
         count(
           "SELECT COUNT(*) AS count FROM projection_thread_activities WHERE kind = 'context-window.updated'",
         ),
-      ).toBe(first.turns);
+      ).toBe(first.turns * 2);
     } finally {
       db.close();
     }

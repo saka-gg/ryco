@@ -25,6 +25,7 @@ import {
   checkpointRestoreConflictMessage,
   checkpointRestoreConflictReason,
   evaluateCheckpointRestoreSafety,
+  sharesWorkingTree,
   type CheckoutPathOps,
   type CheckpointRestoreSafety,
   type RestoreNeighbour,
@@ -55,7 +56,11 @@ import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { findThreadSession } from "../../provider/threadSessionLookup.ts";
 import { CheckpointReactor, type CheckpointReactorShape } from "../Services/CheckpointReactor.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
-import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
+import {
+  ProjectionSnapshotQuery,
+  readScopedShellSnapshot,
+  readWorkspacePlacement,
+} from "../Services/ProjectionSnapshotQuery.ts";
 import { RuntimeReceiptBus } from "../Services/RuntimeReceiptBus.ts";
 import type { CheckpointStoreError } from "../../checkpointing/Errors.ts";
 import type { OrchestrationDispatchError } from "../Errors.ts";
@@ -858,12 +863,15 @@ const make = Effect.gen(function* () {
     };
   };
 
-  // Every other live thread, with the paths it works in: its workspace and
-  // its live provider session cwd.
+  // Every other live thread whose workspace or live provider session cwd shares the restored
+  // working tree. Placement (five columns per thread) finds them; only those threads' summaries
+  // are read to judge busy state and recency, never the whole shell.
   const buildRestoreNeighbours = Effect.fn("buildRestoreNeighbours")(function* (
     threadId: ThreadId,
+    checkoutRoot: string,
+    ops: CheckoutPathOps,
   ) {
-    const snapshot = yield* projectionSnapshotQuery.getShellSnapshot();
+    const placement = yield* readWorkspacePlacement(projectionSnapshotQuery);
     const sessions = yield* providerService.listSessions();
     const nowIso = new Date().toISOString();
     const sessionCwdsByThread = new Map<string, Array<string>>();
@@ -873,23 +881,34 @@ const make = Effect.gen(function* () {
       cwds.push(session.cwd);
       sessionCwdsByThread.set(session.threadId, cwds);
     }
-    return snapshot.threads
-      .filter((thread) => thread.id !== threadId)
-      .map((thread): RestoreNeighbour => {
-        const workspace = resolveThreadWorkspaceCwd({ thread, projects: snapshot.projects });
-        const paths = new Set<string>([
+    const pathsByThread = new Map<ThreadId, ReadonlyArray<string>>();
+    for (const thread of placement.threads) {
+      if (thread.id === threadId) continue;
+      const workspace = resolveThreadWorkspaceCwd({ thread, projects: placement.projects });
+      const paths = Array.from(
+        new Set<string>([
           ...(workspace ? [workspace] : []),
           ...(sessionCwdsByThread.get(thread.id) ?? []),
-        ]);
-        const input = threadShellSettlementInput(thread, nowIso);
-        return {
-          threadId: thread.id,
-          title: thread.title,
-          paths: Array.from(paths),
-          busy: threadBusyReason(input) !== null || thread.backgroundLiveness === "working",
-          lastActivityAt: getThreadLastActivityTimestamp(input),
-        };
-      });
+        ]),
+      );
+      if (paths.some((candidate) => sharesWorkingTree(checkoutRoot, candidate, ops))) {
+        pathsByThread.set(thread.id, paths);
+      }
+    }
+    if (pathsByThread.size === 0) return [];
+    const scoped = yield* readScopedShellSnapshot(projectionSnapshotQuery, {
+      threadIds: [...pathsByThread.keys()],
+    });
+    return scoped.threads.map((thread): RestoreNeighbour => {
+      const input = threadShellSettlementInput(thread, nowIso);
+      return {
+        threadId: thread.id,
+        title: thread.title,
+        paths: pathsByThread.get(thread.id) ?? [],
+        busy: threadBusyReason(input) !== null || thread.backgroundLiveness === "working",
+        lastActivityAt: getThreadLastActivityTimestamp(input),
+      };
+    });
   });
 
   const evaluateRestoreSafety = Effect.fn("evaluateRestoreSafety")(function* (input: {
@@ -898,7 +917,8 @@ const make = Effect.gen(function* () {
     readonly cwd: string;
     readonly source: RestoreSource;
   }): Effect.fn.Return<CheckpointRestoreSafety, never> {
-    const neighbours = yield* buildRestoreNeighbours(input.thread.id).pipe(
+    const ops = sameCheckoutOps();
+    const neighbours = yield* buildRestoreNeighbours(input.thread.id, input.cwd, ops).pipe(
       Effect.catch((error) =>
         // Without the neighbour set the restore cannot be proven safe.
         Effect.logWarning("failed to list checkpoint restore neighbours", {
@@ -923,7 +943,7 @@ const make = Effect.gen(function* () {
       source: input.source,
       targetInstantMs,
       neighbours,
-      ops: sameCheckoutOps(),
+      ops,
     });
   });
 

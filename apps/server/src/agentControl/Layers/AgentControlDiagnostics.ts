@@ -20,7 +20,10 @@ import { Effect, Layer, Metric } from "effect";
 import { Diagnostics } from "../../diagnostics/Services/Diagnostics.ts";
 import { LocalDiagnosticsMetrics } from "../../observability/Services/LocalDiagnosticsMetrics.ts";
 import { OrchestrationEngineService } from "../../orchestration/Services/OrchestrationEngine.ts";
-import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import {
+  ProjectionSnapshotQuery,
+  readScopedShellSnapshot,
+} from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { AgentControlAutomationService } from "../Services/AgentControlAutomation.ts";
@@ -112,8 +115,10 @@ const makeAgentControlDiagnostics = Effect.gen(function* () {
   const diagnostics = yield* Diagnostics;
   const localMetrics = yield* LocalDiagnosticsMetrics;
 
+  // Only the scoped project's summaries: events of other projects' threads and workspaces
+  // resolve to no project below and are dropped either way.
   const loadScope = (scope: AgentControlDiagnosticsScope) =>
-    projections.getShellSnapshot().pipe(
+    readScopedShellSnapshot(projections, { projectIds: [scope.projectId] }).pipe(
       Effect.flatMap((snapshot) => {
         const project = snapshot.projects.find((candidate) => candidate.id === scope.projectId);
         if (!project) return Effect.fail(new Error("Project scope unavailable."));

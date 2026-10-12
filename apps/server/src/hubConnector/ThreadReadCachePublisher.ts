@@ -1,10 +1,12 @@
 import { Schema } from "effect";
 import type { OrchestrationShellSnapshot, OrchestrationMessage, ThreadId } from "@ryco/contracts";
-import { ThreadReadCacheContent, ThreadReadCacheShell } from "@ryco/contracts/thread-read-cache";
+import { ThreadReadCacheContent } from "@ryco/contracts/thread-read-cache";
 
 const MAX_BATCH_BYTES = 2 * 1024 * 1024 - 4096;
 const MAX_THREAD_BYTES = 1024 * 1024;
 const MAX_THREADS = 512;
+/** Mirrors the filter of `ThreadReadCacheShell` (packages/contracts thread-read-cache). */
+const THREAD_READ_CACHE_SHELL_LIMITS = { projects: 2_000, worktrees: 10_000, threads: 10_000 };
 const REFRESH_MS = 24 * 60 * 60 * 1000;
 export const THREAD_READ_CACHE_PUBLISH_INTERVAL_MS = 5_000;
 
@@ -90,6 +92,25 @@ function shellUpload(shell: OrchestrationShellSnapshot): {
   };
 }
 
+/**
+ * The row limits of `ThreadReadCacheShell`, without re-decoding the whole shell. The shell comes
+ * from the projection query, whose rows are already decoded field by field, so re-validating it
+ * cost a full schema walk (16 ms at 2,000 threads) per publish for no change in content; the
+ * publisher test pins that the uploaded shell still decodes to the same value.
+ */
+export function checkThreadReadCacheShellLimits(
+  shell: OrchestrationShellSnapshot,
+): OrchestrationShellSnapshot {
+  if (
+    shell.projects.length > THREAD_READ_CACHE_SHELL_LIMITS.projects ||
+    (shell.worktrees?.length ?? 0) > THREAD_READ_CACHE_SHELL_LIMITS.worktrees ||
+    shell.threads.length > THREAD_READ_CACHE_SHELL_LIMITS.threads
+  ) {
+    throw new Error("Thread read cache shell exceeds its row limits");
+  }
+  return shell;
+}
+
 /** Only message display fields leave the node; attachment URLs and tool output do not. */
 export function threadReadCacheContent(
   messages: ReadonlyArray<OrchestrationMessage>,
@@ -172,7 +193,7 @@ export function createThreadReadCachePublisher(deps: ThreadReadCachePublisherDep
       if (!isCurrent(currentNode)) return;
       const refresh = deps.now() - refreshedAt >= REFRESH_MS;
       if (shell === null || shell.snapshotSequence !== sequence || refresh) {
-        shell = Schema.decodeUnknownSync(ThreadReadCacheShell)(await deps.readShell());
+        shell = checkThreadReadCacheShellLimits(await deps.readShell());
         if (!isCurrent(currentNode)) return;
         if (refresh) {
           uploadedVersions.clear();

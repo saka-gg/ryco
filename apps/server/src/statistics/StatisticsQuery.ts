@@ -86,6 +86,8 @@ const THREAD_SCOPED_PROJECTORS = JSON.stringify([
 
 /** Above this many changed threads a full read is as cheap as a scoped one. */
 const INCREMENTAL_THREAD_LIMIT = 256;
+/** Partials written per transaction when persisting. */
+const PERSIST_CHUNK_THREADS = 200;
 /** Yield to other fibers between aggregation chunks of this many threads. */
 const AGGREGATION_CHUNK_THREADS = 256;
 
@@ -504,34 +506,59 @@ export const makeStatisticsQuery = Effect.gen(function* () {
 
   /**
    * Writes the recomputed partials, so the next process starts incremental.
+   * Rows go in short transactions so the writer's connection is never held for
+   * a whole rebuild; the header is removed first and written last, so an
+   * interrupted write leaves no header and the next process recomputes.
    * Returns how many rows this wrote on the main connection, so the cached
    * revision can account for its own writes.
    */
   const persistState = (state: StatisticsState, changed: ReadonlySet<string> | null) =>
-    sql
-      .withTransaction(
-        Effect.gen(function* () {
-          const [before] = yield* sql<{
-            readonly writes: number;
-          }>`SELECT total_changes() AS writes`;
-          if (changed === null) yield* sql`DELETE FROM statistics_thread_partials`;
-          const threadIds = changed ?? state.partials.keys();
-          for (const threadId of threadIds) {
-            const partial = state.partials.get(threadId);
-            if (partial === undefined) {
-              if (changed !== null) {
-                yield* sql`DELETE FROM statistics_thread_partials WHERE thread_id = ${threadId}`;
-              }
-              continue;
-            }
-            yield* sql`
-              INSERT INTO statistics_thread_partials (thread_id, partial_json)
-              VALUES (${threadId}, ${JSON.stringify(partial)})
-              ON CONFLICT (thread_id) DO UPDATE SET partial_json = excluded.partial_json
+    Effect.gen(function* () {
+      let ownWrites = 0;
+      const writeChunk = <A, E>(effect: Effect.Effect<A, E>) =>
+        sql.withTransaction(
+          Effect.gen(function* () {
+            const [before] = yield* sql<{ readonly writes: number }>`
+              SELECT total_changes() AS writes
             `;
-          }
+            const result = yield* effect;
+            const [after] = yield* sql<{ readonly writes: number }>`
+              SELECT total_changes() AS writes
+            `;
+            ownWrites += (after?.writes ?? 0) - (before?.writes ?? 0);
+            return result;
+          }),
+        );
+      yield* writeChunk(
+        Effect.gen(function* () {
+          yield* sql`DELETE FROM statistics_partials_state`;
+          if (changed === null) yield* sql`DELETE FROM statistics_thread_partials`;
+        }),
+      );
+      const threadIds = [...(changed ?? state.partials.keys())];
+      for (let offset = 0; offset < threadIds.length; offset += PERSIST_CHUNK_THREADS) {
+        yield* writeChunk(
+          Effect.forEach(
+            threadIds.slice(offset, offset + PERSIST_CHUNK_THREADS),
+            (threadId) => {
+              const partial = state.partials.get(threadId);
+              return partial === undefined
+                ? sql`DELETE FROM statistics_thread_partials WHERE thread_id = ${threadId}`
+                : sql`
+                    INSERT INTO statistics_thread_partials (thread_id, partial_json)
+                    VALUES (${threadId}, ${JSON.stringify(partial)})
+                    ON CONFLICT (thread_id) DO UPDATE SET partial_json = excluded.partial_json
+                  `;
+            },
+            { discard: true },
+          ),
+        );
+      }
+      yield* writeChunk(
+        Effect.gen(function* () {
           const [schema] = yield* sql<{ readonly version: string }>`
-            SELECT COALESCE(CAST(MAX(migration_id) AS TEXT), '0') AS version FROM effect_sql_migrations
+            SELECT COALESCE(CAST(MAX(migration_id) AS TEXT), '0') AS version
+            FROM effect_sql_migrations
           `;
           yield* sql`
             INSERT INTO statistics_partials_state (
@@ -540,23 +567,16 @@ export const makeStatisticsQuery = Effect.gen(function* () {
               1, ${STATISTICS_PARTIAL_FORMAT_VERSION}, ${schema?.version ?? "0"},
               ${state.coveredSequence}, ${state.eventSequence}, ${new Date().toISOString()}
             )
-            ON CONFLICT (id) DO UPDATE SET
-              format_version = excluded.format_version,
-              schema_version = excluded.schema_version,
-              covered_sequence = excluded.covered_sequence,
-              event_sequence = excluded.event_sequence,
-              updated_at = excluded.updated_at
           `;
-          const [after] = yield* sql<{ readonly writes: number }>`SELECT total_changes() AS writes`;
-          return (after?.writes ?? 0) - (before?.writes ?? 0);
         }),
-      )
-      .pipe(
-        // A cache write must never fail a read; the next process recomputes instead.
-        Effect.catchCause((cause) =>
-          Effect.logWarning("failed to persist statistics partials", { cause }).pipe(Effect.as(0)),
-        ),
       );
+      return ownWrites;
+    }).pipe(
+      // A cache write must never fail a read; the next process recomputes instead.
+      Effect.catchCause((cause) =>
+        Effect.logWarning("failed to persist statistics partials", { cause }).pipe(Effect.as(0)),
+      ),
+    );
 
   // Keep only one aggregation state and serialize misses, so simultaneous
   // requests share the work without retaining historical analytics copies.

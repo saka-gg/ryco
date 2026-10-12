@@ -293,9 +293,9 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
   });
 
   const listTrashedThreadRows = SqlSchema.findAll({
-    Request: Schema.Struct({ limit: Schema.Number }),
+    Request: Schema.Struct({ limit: Schema.Number, projectId: Schema.optional(Schema.String) }),
     Result: ProjectionTrashedThread,
-    execute: ({ limit }) =>
+    execute: ({ limit, projectId }) =>
       sql`
         SELECT
           threads.thread_id AS "threadId",
@@ -314,6 +314,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
         FROM projection_threads threads
         LEFT JOIN projection_projects projects ON projects.project_id = threads.project_id
         WHERE threads.trashed_at IS NOT NULL
+          ${projectId === undefined ? sql`` : sql`AND threads.project_id = ${projectId}`}
         ORDER BY threads.trashed_at DESC, threads.thread_id ASC
         LIMIT ${limit}
       `,

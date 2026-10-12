@@ -154,6 +154,16 @@ const PendingGoalSyncThreadRowSchema = Schema.Struct({
   threadId: ThreadId,
   goal: Schema.fromJsonString(ThreadGoal),
 });
+interface ShellScope {
+  readonly projectIds?: ReadonlyArray<string> | undefined;
+  readonly threadIds?: ReadonlyArray<string> | undefined;
+}
+const ShellScopeRequest = Schema.UndefinedOr(
+  Schema.Struct({
+    projectIds: Schema.optional(Schema.Array(Schema.String)),
+    threadIds: Schema.optional(Schema.Array(Schema.String)),
+  }),
+);
 const ShellUpdatedAtRowSchema = Schema.Struct({
   updatedAt: Schema.NullOr(IsoDateTime),
 });
@@ -769,26 +779,54 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
 
   // The shell only ships live rows; filtering in SQL also skips the per-row
   // latestCompletedTurnAt subquery and the decode of every deleted thread.
+  // A shell scope narrows the shell to some projects and/or threads (see getScopedShellSnapshot).
+  // Ids travel as one JSON array parameter each; an absent list does not filter.
+  const scopedThreadFilter = (scope: ShellScope | undefined, alias: string) =>
+    sql`
+      ${
+        scope?.projectIds === undefined
+          ? sql``
+          : sql`AND ${sql.literal(alias)}.project_id IN (SELECT value FROM json_each(${JSON.stringify(scope.projectIds)}))`
+      }
+      ${
+        scope?.threadIds === undefined
+          ? sql``
+          : sql`AND ${sql.literal(alias)}.thread_id IN (SELECT value FROM json_each(${JSON.stringify(scope.threadIds)}))`
+      }
+    `;
+  // Projects (and their workspaces) in scope: the listed ones, else the scoped threads' ones.
+  const scopedProjectFilter = (scope: ShellScope | undefined, column: string) =>
+    scope?.projectIds !== undefined
+      ? sql`AND ${sql.literal(column)} IN (SELECT value FROM json_each(${JSON.stringify(scope.projectIds)}))`
+      : scope?.threadIds !== undefined
+        ? sql`AND ${sql.literal(column)} IN (
+            SELECT scoped.project_id FROM projection_threads scoped
+            WHERE scoped.thread_id IN (SELECT value FROM json_each(${JSON.stringify(scope.threadIds)}))
+          )`
+        : sql``;
+
   const listActiveProjectShellRows = SqlSchema.findAll({
-    Request: Schema.Void,
+    Request: ShellScopeRequest,
     Result: ProjectionProjectShellDbRowSchema,
-    execute: () =>
+    execute: (scope) =>
       sql`
         SELECT ${projectColumns}
         FROM projection_projects
         WHERE deleted_at IS NULL
+          ${scopedProjectFilter(scope, "projection_projects.project_id")}
         ORDER BY created_at ASC, project_id ASC
       `,
   });
 
   const listActiveThreadShellRows = SqlSchema.findAll({
-    Request: Schema.Void,
+    Request: ShellScopeRequest,
     Result: ProjectionThreadShellDbRowSchema,
-    execute: () =>
+    execute: (scope) =>
       sql`
         SELECT ${threadColumns}
         FROM projection_threads
         WHERE deleted_at IS NULL
+          ${scopedThreadFilter(scope, "projection_threads")}
         ORDER BY created_at ASC, thread_id ASC
       `,
   });
@@ -891,13 +929,14 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   });
 
   const listActiveProjectWorktreeRows = SqlSchema.findAll({
-    Request: Schema.Void,
+    Request: ShellScopeRequest,
     Result: ProjectionWorktreeDbRowSchema,
-    execute: () =>
+    execute: (scope) =>
       sql`
         SELECT ${worktreeColumns}
         FROM projection_worktrees
         WHERE project_id IN (SELECT project_id FROM projection_projects WHERE deleted_at IS NULL)
+          ${scopedProjectFilter(scope, "projection_worktrees.project_id")}
         ORDER BY project_id ASC, manual_position ASC, created_at ASC, worktree_id ASC
       `,
   });
@@ -1200,13 +1239,16 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   });
 
   const listActiveThreadSessionShellRows = SqlSchema.findAll({
-    Request: Schema.Void,
+    Request: ShellScopeRequest,
     Result: ProjectionThreadSessionShellDbRowSchema,
-    execute: () =>
+    execute: (scope) =>
       sql`
         SELECT ${sessionColumns}
         FROM projection_thread_sessions
-        WHERE thread_id IN (SELECT thread_id FROM projection_threads WHERE deleted_at IS NULL)
+        WHERE thread_id IN (
+          SELECT threads.thread_id FROM projection_threads threads
+          WHERE threads.deleted_at IS NULL ${scopedThreadFilter(scope, "threads")}
+        )
         ORDER BY thread_id ASC
       `,
   });
@@ -1259,9 +1301,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   });
 
   const listActiveLatestTurnRows = SqlSchema.findAll({
-    Request: Schema.Void,
+    Request: ShellScopeRequest,
     Result: ProjectionLatestTurnDbRowSchema,
-    execute: () =>
+    execute: (scope) =>
       sql`
         SELECT
           turns.thread_id AS "threadId",
@@ -1280,6 +1322,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           AND turns.turn_id = threads.latest_turn_id
         WHERE threads.deleted_at IS NULL
           AND threads.latest_turn_id IS NOT NULL
+          ${scopedThreadFilter(scope, "threads")}
         ORDER BY threads.thread_id ASC
       `,
   });
@@ -2805,11 +2848,11 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   // Pure SQL: repository identities are persisted (see project/repositoryIdentitySync.ts), so a
   // snapshot never waits on git. Rows are decoded once, with the wire normalizations applied per
   // field, and the assembled snapshot is not decoded again.
-  const buildShellSnapshot: ProjectionSnapshotQueryShape["getShellSnapshot"] = () =>
+  const buildShell = (scope: ShellScope | undefined) =>
     sql
       .withTransaction(
         Effect.all([
-          listActiveProjectShellRows(undefined).pipe(
+          listActiveProjectShellRows(scope).pipe(
             Effect.mapError(
               toPersistenceSqlOrDecodeError(
                 "ProjectionSnapshotQuery.getShellSnapshot:listProjects:query",
@@ -2817,7 +2860,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
               ),
             ),
           ),
-          listActiveThreadShellRows(undefined).pipe(
+          listActiveThreadShellRows(scope).pipe(
             Effect.mapError(
               toPersistenceSqlOrDecodeError(
                 "ProjectionSnapshotQuery.getShellSnapshot:listThreads:query",
@@ -2825,7 +2868,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
               ),
             ),
           ),
-          listActiveProjectWorktreeRows(undefined).pipe(
+          listActiveProjectWorktreeRows(scope).pipe(
             Effect.mapError(
               toPersistenceSqlOrDecodeError(
                 "ProjectionSnapshotQuery.getShellSnapshot:listWorktrees:query",
@@ -2833,7 +2876,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
               ),
             ),
           ),
-          listActiveThreadSessionShellRows(undefined).pipe(
+          listActiveThreadSessionShellRows(scope).pipe(
             Effect.mapError(
               toPersistenceSqlOrDecodeError(
                 "ProjectionSnapshotQuery.getShellSnapshot:listThreadSessions:query",
@@ -2841,7 +2884,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
               ),
             ),
           ),
-          listActiveLatestTurnRows(undefined).pipe(
+          listActiveLatestTurnRows(scope).pipe(
             Effect.mapError(
               toPersistenceSqlOrDecodeError(
                 "ProjectionSnapshotQuery.getShellSnapshot:listLatestTurns:query",
@@ -2912,8 +2955,11 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             const sessionByThread = new Map(
               sessionRows.map((row) => [row.threadId, mapSessionRow(row)] as const),
             );
+            const scopedThreadIds = new Set<string>(threadRows.map((row) => row.threadId));
             const priorityByThread = new Map(
-              priorityRows.map((row) => [row.threadId, decodeThreadPriorityRow(row)]),
+              priorityRows
+                .filter((row) => scope === undefined || scopedThreadIds.has(row.threadId))
+                .map((row) => [row.threadId, decodeThreadPriorityRow(row)]),
             );
 
             return {
@@ -2976,14 +3022,26 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           return toPersistenceSqlError("ProjectionSnapshotQuery.getShellSnapshot:query")(error);
         }),
         Effect.tap((snapshot) =>
-          Effect.logDebug("startup shell snapshot query complete", {
-            projectCount: snapshot.projects.length,
-            worktreeCount: snapshot.worktrees?.length ?? 0,
-            threadCount: snapshot.threads.length,
-            snapshotSequence: snapshot.snapshotSequence,
-          }),
+          Effect.logDebug(
+            scope === undefined
+              ? "startup shell snapshot query complete"
+              : "scoped shell snapshot query complete",
+            {
+              projectCount: snapshot.projects.length,
+              worktreeCount: snapshot.worktrees?.length ?? 0,
+              threadCount: snapshot.threads.length,
+              snapshotSequence: snapshot.snapshotSequence,
+            },
+          ),
         ),
       );
+
+  const buildShellSnapshot: ProjectionSnapshotQueryShape["getShellSnapshot"] = () =>
+    buildShell(undefined);
+
+  const getScopedShellSnapshot: NonNullable<
+    ProjectionSnapshotQueryShape["getScopedShellSnapshot"]
+  > = (scope) => buildShell(scope);
 
   // Subscribers refreshing on the same thread-priority batch, reconnecting clients and server
   // callers often ask at once; they share builds instead of each building the whole shell.
@@ -4253,6 +4311,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     );
 
   return {
+    getScopedShellSnapshot,
     getCommandReadModel,
     getSnapshot,
     getShellSnapshot,

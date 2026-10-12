@@ -2,13 +2,13 @@
  * Generates a realistic, sanitized Ryco home for performance work; run with Node (server runtime).
  *
  *   node apps/server/scripts/generate-fixture-home.ts --out /tmp/ryco-fixture-home \
- *     [--projects 30] [--threads 2000] [--turns 4] [--archived 0.6] [--seed 1]
+ *     [--projects 30] [--threads 2000] [--turns 4] [--archived 0.6] [--usage-per-turn 6] [--seed 1]
  *
  * Every row is written the way a running server writes it: commands are dispatched through the
  * real orchestration engine, so events, projections and projector cursors are consistent and the
  * server boots on the result without repairs. The defaults model a heavy user: 30 projects,
  * 2,000 threads (60% archived), a few workspaces per project, and per turn a user prompt, tool
- * activity, a context-window token report, an assistant reply and a checkpoint with files.
+ * activity, context-window token reports, an assistant reply and a checkpoint with files.
  * Composer drafts live in the client, not in the home, so none are generated.
  *
  * The output works with `bun run perf:external --fixture-home <out>` (copied per iteration) and
@@ -54,6 +54,8 @@ export interface FixtureHomeOptions {
   /** Average turns per thread; each thread gets 1..2*turns-1. */
   readonly turns: number;
   readonly archivedShare: number;
+  /** Context-window token reports per turn (providers report once per model request). */
+  readonly usageReportsPerTurn: number;
   readonly seed: number;
 }
 
@@ -300,30 +302,32 @@ export async function generateFixtureHome(
           });
         }
       }
-      const input = random.int(2_000, 60_000);
-      const output = random.int(200, 6_000);
-      const usageAt = tick(100, 2_000);
-      await dispatch({
-        type: "thread.activity.append",
-        threadId,
-        activity: {
-          id: EventId.make(`fixture-usage-${index + 1}-${turn + 1}`),
-          tone: "info",
-          kind: "context-window.updated",
-          summary: "Context window updated",
-          payload: {
-            usedTokens: input + output,
-            maxTokens: 400_000,
-            lastInputTokens: input,
-            lastOutputTokens: output,
-            lastCachedInputTokens: Math.floor(input * 0.6),
-            lastUsedTokens: input + output,
+      for (let report = 0; report < options.usageReportsPerTurn; report += 1) {
+        const input = random.int(2_000, 60_000);
+        const output = random.int(200, 6_000);
+        const usageAt = tick(100, 2_000);
+        await dispatch({
+          type: "thread.activity.append",
+          threadId,
+          activity: {
+            id: EventId.make(`fixture-usage-${index + 1}-${turn + 1}-${report + 1}`),
+            tone: "info",
+            kind: "context-window.updated",
+            summary: "Context window updated",
+            payload: {
+              usedTokens: input + output,
+              maxTokens: 400_000,
+              lastInputTokens: input,
+              lastOutputTokens: output,
+              lastCachedInputTokens: Math.floor(input * 0.6),
+              lastUsedTokens: input + output,
+            },
+            turnId,
+            createdAt: usageAt,
           },
-          turnId,
           createdAt: usageAt,
-        },
-        createdAt: usageAt,
-      });
+        });
+      }
       const assistantMessageId = MessageId.make(`fixture-assistant-${index + 1}-${turn + 1}`);
       await dispatch({
         type: "thread.message.assistant.complete",
@@ -411,6 +415,7 @@ if (isMain) {
       threads: { type: "string", default: "2000" },
       turns: { type: "string", default: "4" },
       archived: { type: "string", default: "0.6" },
+      "usage-per-turn": { type: "string", default: "6" },
       seed: { type: "string", default: "1" },
     },
   });
@@ -424,6 +429,7 @@ if (isMain) {
     threads: Number(values.threads),
     turns: Number(values.turns),
     archivedShare: Number(values.archived),
+    usageReportsPerTurn: Number(values["usage-per-turn"]),
     seed: Number(values.seed),
   });
   console.log(JSON.stringify(summary, null, 2));
