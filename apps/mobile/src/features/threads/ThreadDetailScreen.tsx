@@ -49,6 +49,7 @@ import {
   collectQueuedMessageSteerOutcomes,
   getQueuedThreadKeys,
   indexTurnSteerRejections,
+  resolveQueuedMessageEditUnavailableReason,
   resolveQueuedMessageSteerEligibility,
   type QueuedMessageSteerAttempt,
 } from "@ryco/client-runtime/state/message-queue";
@@ -176,6 +177,7 @@ import {
   selectThreadDeliveryRecord,
 } from "./threadDeliveryNoticeModel";
 import { ThreadQueuedMessages } from "./ThreadQueuedMessages";
+import type { ThreadComposerHandle } from "./ThreadComposer";
 import { ThreadContextBar } from "./ThreadContextBar";
 import {
   buildThreadHeaderModel,
@@ -392,6 +394,7 @@ export function ThreadDetailScreen(props: {
   const preferences = usePreferences();
   const [settlementNowMs, setSettlementNowMs] = useState(() => Date.now());
   const [sendError, setSendError] = useState<string | null>(null);
+  const composerRef = useRef<ThreadComposerHandle>(null);
   const [actionsVisible, setActionsVisible] = useState(false);
   const [actionBusy, setActionBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -1229,6 +1232,27 @@ export function ThreadDetailScreen(props: {
     };
   }, []);
 
+  // Edit = take the message out of the outbox and put its text and attachments
+  // back into the composer. Sending it again re-queues it while the turn runs.
+  const editQueuedMessage = (messageId: string) => {
+    const message = queuedMessages.find((entry) => entry.messageId === messageId);
+    if (!message) return;
+    const unavailableReason = resolveQueuedMessageEditUnavailableReason({
+      deliveryStatus: undefined,
+      steering: steerAttemptsRef.current.has(messageId),
+      composerHasContent: attachments.length > 0 || composerRef.current?.hasText() === true,
+    });
+    if (unavailableReason !== null) {
+      setSendError(unavailableReason);
+      return;
+    }
+    removeThreadOutboxMessage(messageId);
+    setSendError(null);
+    setAttachments([...message.attachments]);
+    composerRef.current?.setText(message.text);
+    composerRef.current?.focus();
+  };
+
   const onSend = async (
     text: string,
     attachments: ReadonlyArray<DraftComposerAttachment>,
@@ -1675,6 +1699,15 @@ export function ThreadDetailScreen(props: {
           const attempt = steerAttempts.get(messageId);
           if (attempt) endSteerAttempt(messageId, attempt.commandId);
         }}
+        getEditUnavailableReason={(message) =>
+          resolveQueuedMessageEditUnavailableReason({
+            deliveryStatus: undefined,
+            steering: steeringMessageIds.has(message.messageId),
+            // The typed text is only known at press time (`editQueuedMessage`).
+            composerHasContent: attachments.length > 0,
+          })
+        }
+        onEdit={editQueuedMessage}
       />
 
       {sideChat ? (
@@ -1699,6 +1732,7 @@ export function ThreadDetailScreen(props: {
       ) : null}
 
       <ThreadComposer
+        ref={composerRef}
         onOpenSideChat={
           selectedModelSelection
             ? () => sideChatStore.getState().open(sideChatKey, selectedModelSelection)

@@ -62,6 +62,7 @@ import {
 import {
   buildQueuedMessageSteerCommand,
   resolveComposerFollowUpAction,
+  resolveQueuedMessageEditUnavailableReason,
   resolveQueuedMessageSteerEligibility,
   type QueuedMessageSteerAttempts,
 } from "@ryco/client-runtime/state/message-queue";
@@ -292,7 +293,9 @@ import { useChatSessionActions } from "../hooks/useChatSessionActions";
 import {
   buildOutgoingMessageText,
   buildOutgoingTurnAttachments,
+  composerRefsHaveContent,
   executeChatSendTurn,
+  restoreComposerContent,
   type SendTurnComposerSnapshot,
   type SendTurnSettings,
 } from "../hooks/executeChatSendTurn";
@@ -630,6 +633,22 @@ export default function ChatView(props: ChatViewProps) {
   const setComposerDraftTerminalContexts = useComposerDraftStore(
     (store) => store.setTerminalContexts,
   );
+  const addComposerDraftSourceControlContext = useComposerDraftStore(
+    (store) => store.addSourceControlContext,
+  );
+  // Editing a queued message replaces the composer's content, so it stays
+  // unavailable while anything is typed or attached.
+  const composerDraftHasContent = useComposerDraftStore((store) => {
+    const draft = store.getComposerDraft(composerDraftTarget);
+    return (
+      draft !== null &&
+      draft !== undefined &&
+      (draft.prompt.length > 0 ||
+        draft.images.length > 0 ||
+        draft.terminalContexts.length > 0 ||
+        draft.sourceControlContexts.length > 0)
+    );
+  });
   const setComposerDraftModelSelection = useComposerDraftStore((store) => store.setModelSelection);
   const setComposerDraftRuntimeMode = useComposerDraftStore((store) => store.setRuntimeMode);
   const setComposerDraftInteractionMode = useComposerDraftStore(
@@ -2640,6 +2659,65 @@ export default function ChatView(props: ChatViewProps) {
       focusComposer();
     });
   }, [focusComposer]);
+  const getQueuedEditUnavailableReason = useCallback(
+    (message: QueuedMessage) =>
+      resolveQueuedMessageEditUnavailableReason({
+        deliveryStatus: message.deliveryStatus,
+        steering: steeringQueuedMessageIds.includes(message.id),
+        composerHasContent: composerDraftHasContent,
+      }),
+    [composerDraftHasContent, steeringQueuedMessageIds],
+  );
+  // Edit = take the message out of the queue and put its content back into the
+  // composer. Sending it again re-queues it (at the end) while the turn runs.
+  // The queued image copies own their preview URLs, so they move over as-is.
+  const handleEditQueuedMessage = useCallback(
+    (id: string) => {
+      if (!activeThreadKey) return;
+      const queueState = useMessageQueueStore.getState();
+      const message = queueState.queuesByThreadKey[activeThreadKey]?.find(
+        (entry) => entry.id === id,
+      );
+      if (!message) return;
+      const refs = { promptRef, composerImagesRef, composerTerminalContextsRef };
+      const unavailableReason = resolveQueuedMessageEditUnavailableReason({
+        deliveryStatus: message.deliveryStatus,
+        steering: queueState.steerAttemptsByThreadKey[activeThreadKey]?.[id] !== undefined,
+        composerHasContent: composerRefsHaveContent(refs),
+      });
+      if (unavailableReason !== null) return;
+      removeMessageFromQueue(activeThreadKey, id);
+      restoreComposerContent({
+        refs,
+        composerHandle: { readComposer },
+        draft: {
+          composerDraftTarget,
+          setComposerDraftPrompt,
+          addComposerDraftImages,
+          setComposerDraftTerminalContexts,
+        },
+        prompt: message.composer.promptForRestore ?? message.composer.prompt,
+        images: message.composer.images,
+        terminalContexts: message.composer.sendableTerminalContexts,
+      });
+      for (const context of message.composer.sourceControlContexts) {
+        addComposerDraftSourceControlContext(composerDraftTarget, context);
+      }
+      scheduleComposerFocus();
+    },
+    [
+      activeThreadKey,
+      addComposerDraftImages,
+      addComposerDraftSourceControlContext,
+      composerDraftTarget,
+      readComposer,
+      removeMessageFromQueue,
+      scheduleComposerFocus,
+      setComposerDraftPrompt,
+      setComposerDraftTerminalContexts,
+    ],
+  );
+
   const moveDraftThreadToProject = useComposerDraftStore((store) => store.moveDraftThreadToProject);
   // Points a draft at a new "No project" chat in place, keeping its prompt,
   // attachments and model; returns the chat's (not yet created) project id.
@@ -5582,6 +5660,8 @@ export default function ChatView(props: ChatViewProps) {
                   if (activeThreadKey) resumeMessageQueue(activeThreadKey);
                 }}
                 onRemove={handleRemoveQueuedMessage}
+                onEdit={handleEditQueuedMessage}
+                getEditUnavailableReason={getQueuedEditUnavailableReason}
                 onMove={handleMoveQueuedMessage}
                 onRetry={
                   presentationTier !== "phone"

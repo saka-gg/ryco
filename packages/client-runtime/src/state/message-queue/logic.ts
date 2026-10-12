@@ -260,6 +260,28 @@ export function collectQueuedMessageSteerOutcomes(input: {
   return { accepted, rejected };
 }
 
+export interface QueuedMessageEditAvailabilityInput {
+  readonly deliveryStatus: QueuedMessage["deliveryStatus"];
+  /** The message has a live steer attempt. */
+  readonly steering: boolean;
+  /** The composer already holds a prompt, attachment or context. */
+  readonly composerHasContent: boolean;
+}
+
+/**
+ * Editing pulls a queued message back into the composer. Provider-neutral policy shared by
+ * web/desktop and native mobile: the reason it is unavailable, or null when it may be edited.
+ * The composer must be empty, or the edit would silently discard what the user is typing.
+ */
+export function resolveQueuedMessageEditUnavailableReason(
+  input: QueuedMessageEditAvailabilityInput,
+): string | null {
+  if (input.deliveryStatus === "sending") return "This message is being sent.";
+  if (input.steering) return "This message is being steered into the active turn.";
+  if (input.composerHasContent) return "Clear the composer to edit a queued message.";
+  return null;
+}
+
 export function removeQueuedMessage<Composer, Settings>(
   queue: readonly QueuedMessage<Composer, Settings>[],
   id: string,
