@@ -1169,6 +1169,13 @@ export const WsSourceControlListChangeRequestsRpc = Rpc.make(
       query: Schema.optional(Schema.String),
       /** Narrow to change requests involving the authenticated viewer. */
       involvement: Schema.optional(ChangeRequestInvolvement),
+      /**
+       * `picker`: rows for a picker that shows number, title and state (the composer's `#`
+       * menu). Rows carry identity, branches, state, draft, author and timestamps only, no
+       * checks, labels, assignees, diff stats or stack summaries. Older servers ignore it and
+       * return full rows, which are a superset.
+       */
+      view: Schema.optional(Schema.Literals(["picker"])),
     }),
     success: Schema.Array(ChangeRequest),
     error: Schema.Union([SourceControlProviderError, AuthRpcError]),

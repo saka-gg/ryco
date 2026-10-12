@@ -154,11 +154,13 @@ export function useComposerAttachmentMenus(
     limit: COMPOSER_SOURCE_CONTROL_LIST_LIMIT,
     enabled: isSourceControlTrigger,
   });
+  // The menu shows number, title and state: lean rows, not the full list's checks and labels.
   const changeRequestListQuery = useSourceControlChangeRequestList({
     environmentId,
     cwd: gitCwd,
     state: "open",
     limit: COMPOSER_SOURCE_CONTROL_LIST_LIMIT,
+    view: "picker",
     enabled: isSourceControlTrigger,
   });
 
