@@ -358,6 +358,26 @@ describe("hosted PWA stale-build recovery", () => {
     expect(page.reload).not.toHaveBeenCalled();
   });
 
+  it("reloads once onto the active build when this tab's activation already replaced the worker", async () => {
+    const page = await controlledPage();
+    const key = "ryco:pwa:stale-build-recovery:v1";
+    page.sessionStorage.setItem(key, JSON.stringify({ since: Date.now() - 5_000, count: 1 }));
+
+    page.preloadError();
+
+    await vi.waitFor(() => expect(page.reload).toHaveBeenCalledOnce());
+    expect(JSON.parse(page.sessionStorage.getItem(key)!)).toMatchObject({ count: 2 });
+
+    // The reloaded page fails again (the active build is itself missing the
+    // chunk): the budget is spent, so it stays put.
+    const next = await controlledPage();
+    next.sessionStorage.setItem(key, page.sessionStorage.getItem(key)!);
+    next.preloadError();
+    await vi.waitFor(() => expect(next.serviceWorker.registration.update).toHaveBeenCalledOnce());
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(next.reload).not.toHaveBeenCalled();
+  });
+
   it("tolerates a failed update check", async () => {
     const page = await controlledPage();
     page.serviceWorker.registration.update.mockRejectedValueOnce(new Error("offline"));

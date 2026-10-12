@@ -91,12 +91,11 @@ const PRELOAD_ERROR_EVENT = "vite:preloadError";
 const STALE_BUILD_UPDATE_TIMEOUT_MS = 20_000;
 const STALE_BUILD_UPDATE_POLL_MS = 250;
 /**
- * Automatic recovery activates at most this many updates per tab in this
- * window, so an origin that alternates between two builds (a rolling deploy)
- * cannot keep reloading the tab; the update control still offers the newer
- * build. Two, because the page that starts an activation can be unloaded by
- * the router's own reload before the activation lands (see
- * {@link ACTIVATION_RELOAD_FALLBACK_MS}); the reloaded page then retries once.
+ * Automatic recovery takes at most this many actions per tab in this window
+ * (activating a waiting update, or the one follow-up reload described in
+ * `recoverFromStaleBuild`), so an origin that alternates between two builds (a
+ * rolling deploy) or a build that is itself missing a chunk cannot keep
+ * reloading the tab; the update control still offers a newer build.
  */
 const STALE_BUILD_RECOVERY_WINDOW_MS = 60_000;
 const STALE_BUILD_RECOVERY_LIMIT = 2;
@@ -305,11 +304,24 @@ export function createHostedPwaLifecycle(runtime: HostedPwaRuntime) {
         await new Promise((resolve) => setTimeout(resolve, STALE_BUILD_UPDATE_POLL_MS));
       }
       const waiting = controlling.waiting;
-      if (!started || !waiting || snapshot.updateState === "activating") return;
+      if (!started || snapshot.updateState === "activating") return;
+      const guard = readRecoveryGuard(Date.now());
+      if (!waiting) {
+        // Nothing newer, yet this tab activated an update moments ago: this
+        // page booted the previous worker's cached document while that
+        // activation completed (the reload that releases a stalled activation
+        // is still answered by the old worker), and the new worker claimed it
+        // before this lifecycle started. One more reload loads the new build.
+        // Without an earlier activation this is the current build failing, and
+        // reloading would not help.
+        if (guard.count === 0 || guard.count >= STALE_BUILD_RECOVERY_LIMIT) return;
+        writeRecoveryGuard({ since: guard.since, count: guard.count + 1 });
+        reload();
+        return;
+      }
       // The update control offers it either way; only the automatic
       // activation is guarded.
       publish({ updateState: "ready" });
-      const guard = readRecoveryGuard(Date.now());
       if (guard.count >= STALE_BUILD_RECOVERY_LIMIT) return;
       writeRecoveryGuard({ since: guard.since, count: guard.count + 1 });
       activate(waiting);
