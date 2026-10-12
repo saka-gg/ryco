@@ -57,6 +57,14 @@ rl.on("line", (line) => {
     return;
   }
   if (method === "thread/read") {
+    // A stored thread the server does not know, and a server that dies mid-read.
+    if (script.readErrorFor === message.params.threadId) {
+      write({ id, error: { code: -32600, message: "thread not found" } });
+      return;
+    }
+    if (script.exitOnReadFor === message.params.threadId) {
+      process.exit(3);
+    }
     const child = script.childSnapshots?.[message.params.threadId];
     const snapshot = child
       ? {
