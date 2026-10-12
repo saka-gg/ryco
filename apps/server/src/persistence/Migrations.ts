@@ -520,14 +520,12 @@ export const repairProjectionProjectRepositoryIdentityColumns = Effect.fn(
 // Legacy tool activity payloads: run 088 again as a repair when a later id was recorded
 // first (parallel branches claim the same next id). Its completion marker keeps this to
 // one lookup per boot once it has run.
-export const repairLegacyActivityPayloads = Effect.fn("repairLegacyActivityPayloads")(
-  function* () {
-    const rewritten = yield* reprojectLegacyActivityPayloads;
-    if (rewritten > 0) {
-      yield* Effect.log(`Re-projected ${rewritten} legacy tool activity payloads`);
-    }
-  },
-);
+export const repairLegacyActivityPayloads = Effect.fn("repairLegacyActivityPayloads")(function* () {
+  const rewritten = yield* reprojectLegacyActivityPayloads;
+  if (rewritten > 0) {
+    yield* Effect.log(`Re-projected ${rewritten} legacy tool activity payloads`);
+  }
+});
 
 // Unlike schema checks, the summary backfill scans the entire activity history.
 // Track its successful compatibility repair separately from the divergent

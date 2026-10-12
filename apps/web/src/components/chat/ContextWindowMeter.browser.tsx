@@ -209,9 +209,7 @@ describe("ContextWindowMeter account details", () => {
     expect(commits).toBe(settled);
 
     // It re-renders once the label does.
-    await expect
-      .element(page.getByText("Last request 4m ago", { exact: false }))
-      .toBeVisible();
+    await expect.element(page.getByText("Last request 4m ago", { exact: false })).toBeVisible();
     expect(commits - settled).toBeLessThanOrEqual(2);
   });
 

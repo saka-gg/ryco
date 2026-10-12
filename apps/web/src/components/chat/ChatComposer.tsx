@@ -72,6 +72,7 @@ import type { ComposerExecutionTarget } from "./ExecutionTarget.logic";
 import {
   type ComposerImageAttachment,
   type DraftId,
+  ensureComposerDraftAttachmentsRestored,
   type PersistedComposerImageAttachment,
   useComposerDraftStore,
 } from "../../composerDraftStore";
@@ -129,7 +130,10 @@ import type { PendingUserInputDraftAnswer } from "../../pendingUserInput";
 import type { PendingApproval, PendingUserInput } from "../../session-logic";
 import { deriveContextWindowUsage } from "../../lib/contextWindow";
 import { usePresentationTier } from "../../hooks/usePresentationTier";
-import { hydrateImagesFromPersistedWithFailures } from "../../composerDraftPersistence";
+import {
+  hydrateImagesFromPersistedWithFailures,
+  persistComposerImageBytes,
+} from "../../composerDraftPersistence";
 import { usePromptStashStore } from "../../promptStashStore";
 import { useUiStateStore } from "../../uiStateStore";
 import { resolveShortcutCommand, shouldIgnoreGlobalNavigationShortcut } from "../../keybindings";
@@ -1376,6 +1380,13 @@ export const ChatComposer = memo(
       shouldAutoScrollRef,
     ]);
 
+    // Attachments restored from a saved draft load their bytes off the boot
+    // path; showing them is the moment they are needed.
+    const hasPendingComposerImageBytes = composerImages.some((image) => image.bytesPending);
+    useEffect(() => {
+      if (hasPendingComposerImageBytes) void ensureComposerDraftAttachmentsRestored();
+    }, [hasPendingComposerImageBytes]);
+
     // ------------------------------------------------------------------
     // Image persist effect
     // ------------------------------------------------------------------
@@ -1423,6 +1434,18 @@ export const ChatComposer = memo(
                   });
                   return;
                 }
+              }
+              // Still loading after a reload: its persisted record already stands.
+              if (image.file === null) {
+                const existingPersisted = existingPersistedById.get(image.id);
+                if (existingPersisted) stagedAttachmentById.set(image.id, existingPersisted);
+                return;
+              }
+              // Bytes go to IndexedDB, keeping the draft entry small.
+              const local = await persistComposerImageBytes({ ...image, file: image.file });
+              if (local) {
+                stagedAttachmentById.set(image.id, local);
+                return;
               }
               try {
                 // Encode from the neutral union via the AttachmentCodec so the
@@ -2111,6 +2134,20 @@ export const ChatComposer = memo(
       const promptForEntry = stashedPrompt.trim().length > 0 ? stashedPrompt : "";
       if (promptForEntry.length === 0 && images.length === 0) {
         setIsStashPickerOpen((open) => !open);
+        return;
+      }
+
+      if (images.some((image) => image.bytesPending)) {
+        // A saved draft's attachments are still loading; the stash needs their bytes.
+        void ensureComposerDraftAttachmentsRestored();
+        toastManager.add(
+          stackedThreadToast({
+            type: "warning",
+            title: "Attachments aren't ready",
+            description: "They are still loading. Try again in a moment.",
+            data: { hideCopyButton: true },
+          }),
+        );
         return;
       }
 

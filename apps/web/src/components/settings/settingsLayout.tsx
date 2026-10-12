@@ -58,12 +58,13 @@ export function useRelativeTimeTick(intervalMs = 1_000) {
  */
 export function useRelativeLabelTick(instantsMs: ReadonlyArray<number | undefined>) {
   const [nowMs, setNowMs] = useState(() => Date.now());
-  const instantsRef = useRef(instantsMs);
-  instantsRef.current = instantsMs;
   // By value: callers may rebuild the list on every render.
   const instantsKey = instantsMs.join(",");
   const startedRef = useRef(false);
   useEffect(() => {
+    const instants = instantsKey
+      .split(",")
+      .map((value) => (value === "" ? undefined : Number(value)));
     const restarted = startedRef.current;
     startedRef.current = true;
     const poller = createVisibilityAwarePoller({
@@ -72,7 +73,7 @@ export function useRelativeLabelTick(instantsMs: ReadonlyArray<number | undefine
         setNowMs(Date.now());
         return Promise.resolve();
       },
-      resolveDelayMs: () => relativeLabelRefreshDelayMs(instantsRef.current, Date.now()),
+      resolveDelayMs: () => relativeLabelRefreshDelayMs(instants, Date.now()),
       runImmediately: restarted,
     });
     return poller.stop;

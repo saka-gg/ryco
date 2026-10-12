@@ -36,7 +36,11 @@ const activityPayloadRegistry = createKeyedQueryRegistry<ActivityPayloadQuerySta
   initialState: INITIAL_QUERY_STATE,
   gcTime: ACTIVITY_PAYLOAD_GC_TIME_MS,
   maxEntries: ACTIVITY_PAYLOAD_MAX_ENTRIES,
-  buildFetchingState: (current) => ({ data: current.data, isLoading: current.data === null, error: null }),
+  buildFetchingState: (current) => ({
+    data: current.data,
+    isLoading: current.data === null,
+    error: null,
+  }),
   buildSuccessState: (data) => ({
     data: data as OrchestrationGetActivityPayloadResult,
     isLoading: false,

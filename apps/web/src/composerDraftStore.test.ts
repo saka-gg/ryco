@@ -61,6 +61,7 @@ import type { ComposerSourceControlContext } from "@ryco/contracts";
 
 import {
   COMPOSER_DRAFT_STORAGE_KEY,
+  partializeComposerThreadDraftState,
   finalizePromotedDraftThreadByRef,
   markPromotedDraftThread,
   markPromotedDraftThreadByRef,
@@ -76,7 +77,6 @@ import {
   insertInlineTerminalContextPlaceholder,
   type TerminalContextDraft,
 } from "./lib/terminalContext";
-import { createDebouncedStorage } from "./lib/storage";
 
 function makeImage(input: {
   id: string;
@@ -477,18 +477,14 @@ describe("composerDraftStore terminal contexts", () => {
       .getState()
       .addTerminalContext(threadRef, makeTerminalContext({ id: "ctx-persist" }));
 
-    const persistApi = useComposerDraftStore.persist as unknown as {
-      getOptions: () => {
-        partialize: (state: ReturnType<typeof useComposerDraftStore.getState>) => unknown;
-      };
-    };
-    const persistedState = persistApi.getOptions().partialize(useComposerDraftStore.getState()) as {
-      draftsByThreadKey?: Record<string, { terminalContexts?: Array<Record<string, unknown>> }>;
-    };
+    const draft =
+      useComposerDraftStore.getState().draftsByThreadKey[
+        threadKeyFor(threadId, TEST_ENVIRONMENT_ID)
+      ];
+    const persisted = draft ? partializeComposerThreadDraftState(draft) : null;
 
     expect(
-      persistedState.draftsByThreadKey?.[threadKeyFor(threadId, TEST_ENVIRONMENT_ID)]
-        ?.terminalContexts?.[0],
+      persisted?.terminalContexts?.[0],
       "Expected terminal context metadata to be persisted.",
     ).toMatchObject({
       id: "ctx-persist",
@@ -498,8 +494,7 @@ describe("composerDraftStore terminal contexts", () => {
       lineEnd: 5,
     });
     expect(
-      persistedState.draftsByThreadKey?.[threadKeyFor(threadId, TEST_ENVIRONMENT_ID)]
-        ?.terminalContexts?.[0]?.text,
+      (persisted?.terminalContexts?.[0] as Record<string, unknown> | undefined)?.text,
     ).toBeUndefined();
   });
 
@@ -1676,128 +1671,6 @@ describe("composerDraftStore runtime and interaction settings", () => {
     store.setInteractionMode(threadRef, null);
 
     expect(draftFor(threadId, TEST_ENVIRONMENT_ID)).toBeUndefined();
-  });
-});
-
-// ---------------------------------------------------------------------------
-// createDebouncedStorage
-// ---------------------------------------------------------------------------
-
-function createMockStorage() {
-  const store = new Map<string, string>();
-  return {
-    getItem: vi.fn((name: string) => store.get(name) ?? null),
-    setItem: vi.fn((name: string, value: string) => {
-      store.set(name, value);
-    }),
-    removeItem: vi.fn((name: string) => {
-      store.delete(name);
-    }),
-  };
-}
-
-describe("createDebouncedStorage", () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
-  });
-
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
-  it("delegates getItem immediately", () => {
-    const base = createMockStorage();
-    base.getItem.mockReturnValueOnce("value");
-    const storage = createDebouncedStorage(base);
-
-    expect(storage.getItem("key")).toBe("value");
-    expect(base.getItem).toHaveBeenCalledWith("key");
-  });
-
-  it("does not write to base storage until the debounce fires", () => {
-    const base = createMockStorage();
-    const storage = createDebouncedStorage(base);
-
-    storage.setItem("key", "v1");
-    expect(base.setItem).not.toHaveBeenCalled();
-
-    vi.advanceTimersByTime(299);
-    expect(base.setItem).not.toHaveBeenCalled();
-
-    vi.advanceTimersByTime(1);
-    expect(base.setItem).toHaveBeenCalledWith("key", "v1");
-  });
-
-  it("only writes the last value when setItem is called rapidly", () => {
-    const base = createMockStorage();
-    const storage = createDebouncedStorage(base);
-
-    storage.setItem("key", "v1");
-    storage.setItem("key", "v2");
-    storage.setItem("key", "v3");
-
-    vi.advanceTimersByTime(300);
-    expect(base.setItem).toHaveBeenCalledTimes(1);
-    expect(base.setItem).toHaveBeenCalledWith("key", "v3");
-  });
-
-  it("removeItem cancels a pending setItem write", () => {
-    const base = createMockStorage();
-    const storage = createDebouncedStorage(base);
-
-    storage.setItem("key", "v1");
-    storage.removeItem("key");
-
-    vi.advanceTimersByTime(300);
-    expect(base.setItem).not.toHaveBeenCalled();
-    expect(base.removeItem).toHaveBeenCalledWith("key");
-  });
-
-  it("flush writes the pending value immediately", () => {
-    const base = createMockStorage();
-    const storage = createDebouncedStorage(base);
-
-    storage.setItem("key", "v1");
-    expect(base.setItem).not.toHaveBeenCalled();
-
-    storage.flush();
-    expect(base.setItem).toHaveBeenCalledWith("key", "v1");
-
-    // Timer should be cancelled; no duplicate write.
-    vi.advanceTimersByTime(300);
-    expect(base.setItem).toHaveBeenCalledTimes(1);
-  });
-
-  it("flush is a no-op when nothing is pending", () => {
-    const base = createMockStorage();
-    const storage = createDebouncedStorage(base);
-
-    storage.flush();
-    expect(base.setItem).not.toHaveBeenCalled();
-  });
-
-  it("flush after removeItem is a no-op", () => {
-    const base = createMockStorage();
-    const storage = createDebouncedStorage(base);
-
-    storage.setItem("key", "v1");
-    storage.removeItem("key");
-    storage.flush();
-
-    expect(base.setItem).not.toHaveBeenCalled();
-  });
-
-  it("setItem works normally after removeItem cancels a pending write", () => {
-    const base = createMockStorage();
-    const storage = createDebouncedStorage(base);
-
-    storage.setItem("key", "v1");
-    storage.removeItem("key");
-    storage.setItem("key", "v2");
-
-    vi.advanceTimersByTime(300);
-    expect(base.setItem).toHaveBeenCalledTimes(1);
-    expect(base.setItem).toHaveBeenCalledWith("key", "v2");
   });
 });
 

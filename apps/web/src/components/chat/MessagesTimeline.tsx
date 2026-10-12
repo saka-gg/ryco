@@ -2898,11 +2898,7 @@ const WorkEntryExpandedPanel = memo(function WorkEntryExpandedPanel(props: {
 
       {inputLine || hasOutput ? (
         <ChatMarkdown
-          text={buildShellTranscriptFence(
-            inputLine,
-            cleanedOutput,
-            exitCode ?? workEntry.exitCode,
-          )}
+          text={buildShellTranscriptFence(inputLine, cleanedOutput, exitCode ?? workEntry.exitCode)}
           cwd={markdownCwd}
           environmentId={activeThreadEnvironmentId}
           isStreaming={false}

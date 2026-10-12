@@ -561,7 +561,7 @@ describe("thread window failures", () => {
 
 describe("thread window activity previews", () => {
   function recordingConnection() {
-    const windowInputs: Array<Record<string, unknown>> = [];
+    const windowInputs: Array<{ readonly [key: string]: unknown }> = [];
     const connection = {
       kind: "saved",
       environmentId: remote,
@@ -569,7 +569,7 @@ describe("thread window activity previews", () => {
       client: {
         orchestration: {
           subscribeThread: () => () => undefined,
-          subscribeThreadWindow: (input: Record<string, unknown>) => {
+          subscribeThreadWindow: (input: { readonly [key: string]: unknown }) => {
             windowInputs.push(input);
             return () => undefined;
           },
@@ -581,9 +581,10 @@ describe("thread window activity previews", () => {
 
   it("asks for previews only when the client fetches full payloads on demand", () => {
     for (const threadWindowActivityPayloads of ["preview", undefined] as const) {
-      const { supervisor } = makeSupervisor(async (record) => connectionFor(record), {
-        ...(threadWindowActivityPayloads ? { threadWindowActivityPayloads } : {}),
-      });
+      const { supervisor } = makeSupervisor(
+        async (record) => connectionFor(record),
+        threadWindowActivityPayloads ? { threadWindowActivityPayloads } : {},
+      );
       const thread = recordingConnection();
       supervisor.register(thread.connection);
       supervisor.retainThreadDetailSubscription(remote, "thread-1" as ThreadId);

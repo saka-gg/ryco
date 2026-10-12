@@ -3,6 +3,7 @@ export type { ComposerAttachment } from "../../platform/index.ts";
 export * from "./attachmentUpload.ts";
 export * from "./chatDrafts.ts";
 export * from "./draftPersistence.ts";
+export * from "./draftSplitStorage.ts";
 export * from "./draftStore.ts";
 export * from "./editorMentions.ts";
 export * from "./logic.ts";

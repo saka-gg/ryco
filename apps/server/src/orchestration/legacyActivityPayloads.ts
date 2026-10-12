@@ -1,10 +1,17 @@
 import type { OrchestrationThreadActivity } from "@ryco/contracts";
 
-import { projectActivityPayload, withoutHtmlRenderToolMarkup } from "./ActivityPayloadProjection.ts";
+import {
+  projectActivityPayload,
+  withoutHtmlRenderToolMarkup,
+} from "./ActivityPayloadProjection.ts";
 import { ACTIVITY_DATA_STRING_CAP, capActivityData } from "./activityDataCap.ts";
 
 /** The tool lifecycle kinds ingestion bounds before persisting. */
-export const BOUNDED_TOOL_ACTIVITY_KINDS = ["tool.started", "tool.updated", "tool.completed"] as const;
+export const BOUNDED_TOOL_ACTIVITY_KINDS = [
+  "tool.started",
+  "tool.updated",
+  "tool.completed",
+] as const;
 
 /**
  * Only a stored payload larger than this can hold a string over the data cap

@@ -2601,9 +2601,9 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
       // Every activity fits once previewed, the 5 MiB one included.
       assert.deepEqual(
         window.thread.activities.map((activity) => activity.id),
-        [1, 2, 3, 4, 5, 6, 7, 8].map((index) => `preview-activity-${index}`).concat([
-          "preview-activity-small",
-        ]),
+        [1, 2, 3, 4, 5, 6, 7, 8]
+          .map((index) => `preview-activity-${index}`)
+          .concat(["preview-activity-small"]),
       );
       assert.equal(window.history.activities.hasMoreBefore, false);
       const windowBytes = window.thread.activities.reduce(

@@ -348,9 +348,7 @@ function ContextWindowDetails(
           </div>
         ) : null}
       </div>
-      {props.claudeCache ? (
-        <PromptCacheSection observation={props.claudeCache} now={now} />
-      ) : null}
+      {props.claudeCache ? <PromptCacheSection observation={props.claudeCache} now={now} /> : null}
       {route && account ? (
         <CliProxyRouteSection
           hub={route}

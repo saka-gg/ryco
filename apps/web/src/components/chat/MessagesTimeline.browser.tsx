@@ -1207,26 +1207,26 @@ describe("MessagesTimeline", () => {
     } as never);
     const screen = await render(
       <AppAtomRegistryProvider>
-      <MessagesTimeline
-        {...buildProps()}
-        timelineEntries={[
-          {
-            id: "previewed-command-entry",
-            kind: "work",
-            createdAt: "2026-04-13T12:00:00.000Z",
-            entry: {
-              id: "previewed-command",
+        <MessagesTimeline
+          {...buildProps()}
+          timelineEntries={[
+            {
+              id: "previewed-command-entry",
+              kind: "work",
               createdAt: "2026-04-13T12:00:00.000Z",
-              label: "Command",
-              command: "cat big.log",
-              output: "line one…",
-              outputPreviewActivityId: "activity-big",
-              completed: true,
-              tone: "tool",
+              entry: {
+                id: "previewed-command",
+                createdAt: "2026-04-13T12:00:00.000Z",
+                label: "Command",
+                command: "cat big.log",
+                output: "line one…",
+                outputPreviewActivityId: "activity-big",
+                completed: true,
+                tone: "tool",
+              },
             },
-          },
-        ]}
-      />
+          ]}
+        />
       </AppAtomRegistryProvider>,
     );
 

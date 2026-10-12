@@ -62,7 +62,9 @@ function previewLevels(maxBytes: number): ReadonlyArray<PreviewLevel> {
 }
 
 export function activityPreviewMaxBytes(kind: string): number {
-  return TOOL_ACTIVITY_KINDS.has(kind) ? TOOL_ACTIVITY_PREVIEW_MAX_BYTES : ACTIVITY_PREVIEW_MAX_BYTES;
+  return TOOL_ACTIVITY_KINDS.has(kind)
+    ? TOOL_ACTIVITY_PREVIEW_MAX_BYTES
+    : ACTIVITY_PREVIEW_MAX_BYTES;
 }
 
 function truncateString(value: string, maxChars: number): string {

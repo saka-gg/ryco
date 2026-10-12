@@ -44,12 +44,12 @@ describe("previewActivityPayload", () => {
     expect(result.bytes).toBe(jsonByteLength(result.payload));
     const item = (result.payload as typeof payload).data.item;
     expect(item.exitCode).toBe(2);
-    expect(item.changes.map(({ path, additions, deletions }) => [path, additions, deletions])).toEqual(
-      [
-        ["a.ts", 10, 2],
-        ["b.ts", 1, 0],
-      ],
-    );
+    expect(
+      item.changes.map(({ path, additions, deletions }) => [path, additions, deletions]),
+    ).toEqual([
+      ["a.ts", 10, 2],
+      ["b.ts", 1, 0],
+    ]);
     expect(item.changes[0]!.diff.endsWith("…")).toBe(true);
   });
 
@@ -79,7 +79,11 @@ describe("previewActivityPayload", () => {
 
   it("never splits a surrogate pair", () => {
     const payload = { text: "😀".repeat(20_000) };
-    const result = boundPayload({ payload, payloadBytes: jsonByteLength(payload), maxBytes: 4_096 });
+    const result = boundPayload({
+      payload,
+      payloadBytes: jsonByteLength(payload),
+      maxBytes: 4_096,
+    });
     const text = (result.payload as typeof payload).text;
     expect(text.endsWith("…")).toBe(true);
     expect(/[\uD800-\uDBFF]…$/.test(text)).toBe(false);

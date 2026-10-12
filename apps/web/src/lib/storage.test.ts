@@ -1,47 +1,31 @@
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
-import { createDebouncedStorage, createMemoryStorage } from "./storage";
+import { createWriteScheduler } from "./storage";
 
-describe("createDebouncedStorage", () => {
+describe("createWriteScheduler", () => {
   afterEach(() => {
     vi.useRealTimers();
   });
 
-  it("serializes a burst of deferred writes once, with the latest value", () => {
+  it("runs only the latest write of a burst, once it settles", () => {
     vi.useFakeTimers();
-    const base = createMemoryStorage();
-    const storage = createDebouncedStorage(base, 300);
-    const serialize = vi.fn((value: string) => value);
-
-    for (const value of ["a", "ab", "abc"]) {
-      storage.setItemDeferred("key", () => serialize(value));
-    }
-    expect(serialize).not.toHaveBeenCalled();
-    expect(base.getItem("key")).toBeNull();
-
+    const scheduler = createWriteScheduler(300);
+    const writes: string[] = [];
+    for (const value of ["a", "ab", "abc"]) scheduler.schedule(() => writes.push(value));
+    expect(writes).toEqual([]);
     vi.advanceTimersByTime(300);
-    expect(serialize).toHaveBeenCalledTimes(1);
-    expect(base.getItem("key")).toBe("abc");
+    expect(writes).toEqual(["abc"]);
   });
 
-  it("serializes pending deferred writes on flush", () => {
+  it("runs the pending write on flush, and nothing when none is pending", () => {
     vi.useFakeTimers();
-    const base = createMemoryStorage();
-    const storage = createDebouncedStorage(base, 300);
-    storage.setItemDeferred("key", () => "flushed");
-    storage.flush();
-    expect(base.getItem("key")).toBe("flushed");
-  });
-
-  it("drops a pending deferred write when the item is removed", () => {
-    vi.useFakeTimers();
-    const base = createMemoryStorage();
-    const storage = createDebouncedStorage(base, 300);
-    const serialize = vi.fn(() => "stale");
-    storage.setItemDeferred("key", serialize);
-    storage.removeItem("key");
+    const scheduler = createWriteScheduler(300);
+    const write = vi.fn();
+    scheduler.flush();
+    scheduler.schedule(write);
+    scheduler.flush();
+    expect(write).toHaveBeenCalledTimes(1);
     vi.advanceTimersByTime(300);
-    expect(serialize).not.toHaveBeenCalled();
-    expect(base.getItem("key")).toBeNull();
+    expect(write).toHaveBeenCalledTimes(1);
   });
 });
