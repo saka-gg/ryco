@@ -21,6 +21,7 @@ import {
 import { useSettingsDialogStore } from "../settingsDialogStore";
 import { useHostedRpcCapability } from "../hostedHub/capabilities";
 import { SettingsRouteBridge } from "./SettingsRouteBridge";
+import { PrimaryShellPaintMarker } from "../perf/PrimaryShellPaintMarker";
 
 const THREAD_SIDEBAR_WIDTH_STORAGE_KEY = "chat_thread_sidebar_width";
 const THREAD_SIDEBAR_OPEN_STORAGE_KEY = "chat_thread_sidebar_open";
@@ -311,6 +312,8 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
       {children}
       {isDesktopTier ? <CollapsedAppSidebarChrome sidebarOpen={sidebarOpen} /> : null}
       <SettingsSurfaceMount />
+      {/* Commits with the sidebar's first bootstrapped render (startup marks). */}
+      <PrimaryShellPaintMarker />
     </SidebarProvider>
   );
 }

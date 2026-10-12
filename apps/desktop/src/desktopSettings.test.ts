@@ -69,6 +69,7 @@ describe("desktopSettings", () => {
       hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
       hubNodeName: null,
       hubAllowFileSecretStore: false,
+      backendPort: null,
     });
   });
 
@@ -88,6 +89,7 @@ describe("desktopSettings", () => {
       hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
       hubNodeName: null,
       hubAllowFileSecretStore: false,
+      backendPort: null,
     });
 
     expect(readDesktopSettings(settingsPath, "0.0.17")).toEqual({
@@ -103,6 +105,7 @@ describe("desktopSettings", () => {
       hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
       hubNodeName: null,
       hubAllowFileSecretStore: false,
+      backendPort: null,
     });
   });
 
@@ -122,6 +125,7 @@ describe("desktopSettings", () => {
           hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
           hubNodeName: null,
           hubAllowFileSecretStore: false,
+          backendPort: null,
         },
         "network-accessible",
       ),
@@ -138,6 +142,7 @@ describe("desktopSettings", () => {
       hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
       hubNodeName: null,
       hubAllowFileSecretStore: false,
+      backendPort: null,
     });
   });
 
@@ -157,6 +162,7 @@ describe("desktopSettings", () => {
           hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
           hubNodeName: null,
           hubAllowFileSecretStore: false,
+          backendPort: null,
         },
         { enabled: true, port: 8443 },
       ),
@@ -173,6 +179,7 @@ describe("desktopSettings", () => {
       hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
       hubNodeName: null,
       hubAllowFileSecretStore: false,
+      backendPort: null,
     });
   });
 
@@ -192,6 +199,7 @@ describe("desktopSettings", () => {
           hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
           hubNodeName: null,
           hubAllowFileSecretStore: false,
+          backendPort: null,
         },
         { enabled: true },
       ),
@@ -208,6 +216,7 @@ describe("desktopSettings", () => {
       hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
       hubNodeName: null,
       hubAllowFileSecretStore: false,
+      backendPort: null,
     });
   });
 
@@ -337,6 +346,7 @@ describe("desktopSettings", () => {
           hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
           hubNodeName: null,
           hubAllowFileSecretStore: false,
+          backendPort: null,
         },
         "nightly",
       ),
@@ -353,6 +363,7 @@ describe("desktopSettings", () => {
       hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
       hubNodeName: null,
       hubAllowFileSecretStore: false,
+      backendPort: null,
     });
   });
 
@@ -388,6 +399,7 @@ describe("desktopSettings", () => {
       hubOrigin: "https://hub.example.com",
       hubNodeName: "Build node",
       hubAllowFileSecretStore: true,
+      backendPort: null,
     });
     expect(readDesktopSettings(settingsPath, "0.0.17")).toMatchObject({
       hubConnectorEnabled: true,
@@ -643,6 +655,7 @@ describe("desktopSettings", () => {
       hubOrigin: "https://hub.example.com",
       hubNodeName: null,
       hubAllowFileSecretStore: false,
+      backendPort: null,
     });
   });
 
@@ -663,6 +676,7 @@ describe("desktopSettings", () => {
       hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
       hubNodeName: null,
       hubAllowFileSecretStore: false,
+      backendPort: null,
     });
   });
 
@@ -691,6 +705,7 @@ describe("desktopSettings", () => {
       hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
       hubNodeName: null,
       hubAllowFileSecretStore: false,
+      backendPort: null,
     });
   });
 
@@ -725,6 +740,7 @@ describe("desktopSettings", () => {
       hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
       hubNodeName: null,
       hubAllowFileSecretStore: false,
+      backendPort: null,
     });
   });
 
@@ -752,6 +768,7 @@ describe("desktopSettings", () => {
       hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
       hubNodeName: null,
       hubAllowFileSecretStore: false,
+      backendPort: null,
     });
   });
 });
@@ -771,4 +788,15 @@ it("defaults missing or invalid quit shortcut preferences to press twice", () =>
     fs.writeFileSync(settingsPath, JSON.stringify(value));
     expect(readDesktopSettings(settingsPath, "0.1.21").quitShortcutMode).toBe("press-twice");
   }
+});
+
+describe("desktop backend port persistence", () => {
+  it("remembers the last served port and drops an invalid one", () => {
+    const settingsPath = makeSettingsPath();
+    writeDesktopSettings(settingsPath, { ...DEFAULT_DESKTOP_SETTINGS, backendPort: 7927 });
+    expect(readDesktopSettings(settingsPath, "0.0.17").backendPort).toBe(7927);
+
+    fs.writeFileSync(settingsPath, JSON.stringify({ backendPort: "7927" }), "utf8");
+    expect(readDesktopSettings(settingsPath, "0.0.17").backendPort).toBeNull();
+  });
 });

@@ -79,7 +79,22 @@ const makeReader = Effect.fn("makeIndexReviewReader")(function* (
     run(["rev-parse", "--path-format=absolute", "--git-path", name]).pipe(
       Effect.map((result) => result.stdout.replace(/\r?\n$/, "")),
     );
-  const indexPath = yield* gitPath("index");
+  // Both paths from one process; a path containing a line break falls back to one each.
+  const [indexPath, headPath] = yield* run([
+    "rev-parse",
+    "--path-format=absolute",
+    "--git-path",
+    "index",
+    "--git-path",
+    "HEAD",
+  ]).pipe(
+    Effect.flatMap((result) => {
+      const paths = result.stdout.replace(/\r?\n$/, "").split(/\r?\n/);
+      return paths.length === 2 && paths.every((value) => path.isAbsolute(value))
+        ? Effect.succeed(paths as [string, string])
+        : Effect.all([gitPath("index"), gitPath("HEAD")]);
+    }),
+  );
   const readIndex = () =>
     io(root, async () => {
       try {
@@ -92,14 +107,36 @@ const makeReader = Effect.fn("makeIndexReviewReader")(function* (
         throw cause;
       }
     });
-  const readHead = () =>
+  /**
+   * The branch HEAD points at, read like Git's files backend reads it. `undefined`
+   * leaves the answer to `git symbolic-ref`: a symlinked HEAD, an unparseable file,
+   * or the reftable stub (`refs/heads/.invalid`) whose real HEAD lives in the table.
+   */
+  const readHeadFileBranch = () =>
+    io(root, async (): Promise<string | null | undefined> => {
+      const stat = await fs.lstat(headPath);
+      if (!stat.isFile() || stat.size > 4096) return undefined;
+      const text = (await fs.readFile(headPath, "utf8")).trimEnd();
+      if (!text.startsWith("ref:")) return /^[0-9a-f]{40,64}$/.test(text) ? null : undefined;
+      const target = text.slice(4).trim();
+      return target.length > 0 && target !== "refs/heads/.invalid" && !/\s/.test(target)
+        ? target
+        : undefined;
+    }).pipe(Effect.orElseSucceed(() => undefined));
+  const readBranch = () =>
     Effect.gen(function* () {
+      const fromFile = yield* readHeadFileBranch();
+      if (fromFile !== undefined) return fromFile;
       const branchResult = yield* run(["symbolic-ref", "--quiet", "HEAD"], {
         allowNonZeroExit: true,
       });
       if (branchResult.exitCode !== 0 && branchResult.exitCode !== 1)
         return yield* error(root, "Cannot verify the current branch.");
-      const branch = branchResult.exitCode === 0 ? branchResult.stdout.trim() : null;
+      return branchResult.exitCode === 0 ? branchResult.stdout.trim() : null;
+    });
+  const readHead = () =>
+    Effect.gen(function* () {
+      const branch = yield* readBranch();
       const headResult = yield* run(["rev-parse", "--verify", "HEAD"], { allowNonZeroExit: true });
       const headOid = headResult.exitCode === 0 ? headResult.stdout.trim() : null;
       if (!headOid && !branch) return yield* error(root, "Cannot verify HEAD.");
@@ -141,15 +178,20 @@ const makeReader = Effect.fn("makeIndexReviewReader")(function* (
         );
         const temporaryIndex = path.join(temp, "index");
         const bytes = yield* readIndex();
-        if (bytes) yield* io(root, () => fs.writeFile(temporaryIndex, bytes));
         const env = { GIT_INDEX_FILE: temporaryIndex };
-        if (!bytes) yield* run(["read-tree", "--empty"], { env });
+        const resetTemporaryIndex = () =>
+          bytes
+            ? io(root, () => fs.writeFile(temporaryIndex, bytes))
+            : run(["read-tree", "--empty"], { env }).pipe(Effect.asVoid);
+        yield* resetTemporaryIndex();
         const readRun = (args: readonly string[], allowNonZeroExit = false) =>
           run(args, { env, allowNonZeroExit });
         if ((yield* readRun(["ls-files", "--unmerged", "-z"])).stdout)
           return yield* error(root, "Resolve merge conflicts before staging from review.");
-        const staged = (yield* readRun([...diffArgs, "--cached", "--"])).stdout;
-        let unstaged = (yield* readRun([...diffArgs, "--"])).stdout;
+        const stagedResult = yield* readRun([...diffArgs, "--cached", "--"]);
+        if (stagedResult.stdoutTruncated)
+          return yield* error(root, "Local changes exceed the 2 MB review limit.");
+        const staged = stagedResult.stdout;
         const untracked = (yield* readRun([
           "ls-files",
           "--others",
@@ -158,13 +200,73 @@ const makeReader = Effect.fn("makeIndexReviewReader")(function* (
           "-z",
         ])).stdout
           .split("\0")
-          .filter(Boolean);
+          // A trailing slash marks an embedded repository, which has no file patch.
+          .filter((name) => name.length > 0 && !name.endsWith("/"));
         if (untracked.length > 200)
           return yield* error(
             root,
             "Too many untracked files for review. Narrow the working changes first.",
           );
-        for (const name of untracked) {
+        // Mark untracked files intent-to-add in the disposable index so the one
+        // working-tree diff reports them as new files, instead of one
+        // `diff --no-index` process per file. Records only the empty blob.
+        // Writing an index runs `post-index-change`; a read must not run hooks.
+        const intentToAdd =
+          untracked.length === 0
+            ? true
+            : (yield* run(
+                [
+                  "-c",
+                  "core.splitIndex=false",
+                  "-c",
+                  "core.hooksPath=/dev/null",
+                  "add",
+                  "--intent-to-add",
+                  "--pathspec-from-file=-",
+                  "--pathspec-file-nul",
+                ],
+                {
+                  env: { ...env, GIT_LITERAL_PATHSPECS: "1" },
+                  stdin: untracked.map((name) => `${name}\0`).join(""),
+                  allowNonZeroExit: true,
+                },
+              )).exitCode === 0;
+        // A refused batch can still record the paths Git accepted (e.g. it skips
+        // only those outside a sparse checkout); start the fallback from the
+        // original index so no untracked file is diffed twice.
+        if (!intentToAdd) yield* resetTemporaryIndex();
+        const unstagedResult = yield* readRun([...diffArgs, "--"], untracked.length > 0);
+        if (unstagedResult.exitCode !== 0)
+          return yield* error(
+            root,
+            "An untracked file changed or could not be read. Refresh the review.",
+          );
+        if (unstagedResult.stdoutTruncated)
+          return yield* error(root, "Local changes exceed the 2 MB review limit.");
+        // An intent-to-add path that vanished before the diff reads as a deleted
+        // empty file; refuse it like the per-file diff refuses a missing file.
+        if (
+          intentToAdd &&
+          untracked.length > 0 &&
+          (yield* io(root, () =>
+            Promise.all(
+              untracked.map((name) =>
+                fs.lstat(path.join(root, name)).then(
+                  () => false,
+                  () => true,
+                ),
+              ),
+            ),
+          )).some(Boolean)
+        )
+          return yield* error(
+            root,
+            "An untracked file changed or could not be read. Refresh the review.",
+          );
+        let unstaged = unstagedResult.stdout;
+        // Git refused the batch (e.g. a sparse-checkout path or an unwritable
+        // object store): diff each untracked file on its own instead.
+        for (const name of intentToAdd ? [] : untracked) {
           const result = yield* readRun([...diffArgs, "--no-index", "--", "/dev/null", name], true);
           if (result.exitCode !== 0 && result.exitCode !== 1)
             return yield* error(
@@ -193,7 +295,7 @@ const makeReader = Effect.fn("makeIndexReviewReader")(function* (
         };
       }),
     );
-  return { root, run, gitPath, indexPath, readIndex, identity, read };
+  return { root, run, gitPath, indexPath, headPath, readIndex, identity, read };
 });
 
 export const readGitLocalChanges = Effect.fn("readGitLocalChanges")(function* (
@@ -230,7 +332,7 @@ export const applyGitIndexPatch = Effect.fn("applyGitIndexPatch")(function* (
             }).pipe(Effect.orDie),
         );
       const indexLock = yield* lock(indexPath);
-      yield* lock(yield* gitPath("HEAD"));
+      yield* lock(reader.headPath);
       const captured = yield* reader.identity();
       if (captured.branch) yield* lock(yield* gitPath(captured.branch));
       const snapshot = yield* reader.read();

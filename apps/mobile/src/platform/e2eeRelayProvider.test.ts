@@ -1,10 +1,7 @@
 import type { AppLifecycleEvent, AppLifecycleService } from "@ryco/client-runtime/platform";
 import { E2EE_SUITE_25519_CHACHAPOLY_SHA256 } from "@ryco/shared/relayE2eeWire";
-import type {
-  RelayE2eeHost,
-  RelayE2eeInitiatorAttempt,
-  RelayE2eeReservation,
-} from "@ryco/client-runtime/relay";
+import type { RelayE2eeHost, RelayE2eeReservation } from "@ryco/client-runtime/relay";
+import type { RelayE2eeInitiatorAttempt } from "@ryco/client-runtime/relay/e2ee";
 import { RELAY_INITIAL_LIMITS } from "@ryco/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
 

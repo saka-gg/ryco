@@ -11,18 +11,24 @@ import {
   type OpinionatedPluginCheckInput,
   type OpinionatedPluginInstallInput,
   type OrchestrationShellStreamItem,
+  type OrchestrationThreadHistoryRecoveryMode,
   type OrchestrationThreadStreamItem,
   type OrchestrationThreadWindowStreamItem,
   type ServerSettingsPatch,
   WS_METHODS,
 } from "@ryco/contracts";
-import { assertUsageContractVersion, UsageContractMismatchError } from "../usage/compatibility.ts";
+import {
+  assertUsageContractVersion,
+  isUsageContractRejection,
+  UsageContractMismatchError,
+} from "../usage/compatibility.ts";
 import { applyGitStatusStreamEvent } from "@ryco/shared/git";
-import { Effect, Stream } from "effect";
+import * as Effect from "effect/Effect";
+import * as Stream from "effect/Stream";
 
 import { type WsRpcProtocolClient } from "./protocol.ts";
 import { resetWsReconnectBackoff } from "./wsConnectionState.ts";
-import { WsTransport } from "./wsTransport.ts";
+import { type SubscriptionFailureKind, WsTransport } from "./wsTransport.ts";
 import type { DeviceRpcClient } from "./deviceRpcClient.ts";
 
 type RpcTag = keyof WsRpcProtocolClient & string;
@@ -31,7 +37,9 @@ type RpcInput<TTag extends RpcTag> = Parameters<RpcMethod<TTag>>[0];
 
 interface StreamSubscriptionOptions {
   readonly onResubscribe?: () => void;
-  readonly onError?: () => void;
+  /** The subscription stopped for good; see the transport's `SubscribeOptions`. */
+  readonly onError?: (kind?: SubscriptionFailureKind) => void;
+  readonly classifyFailure?: (error: unknown) => SubscriptionFailureKind;
 }
 
 /**
@@ -42,7 +50,16 @@ interface StreamSubscriptionOptions {
 export interface ResumableSubscriptionOptions extends StreamSubscriptionOptions {
   readonly resumeFromSequence?: () => number | null;
 }
-export type ShellSubscriptionOptions = ResumableSubscriptionOptions;
+export interface ShellSubscriptionOptions extends ResumableSubscriptionOptions {
+  /** Ask for small `thread-priorities` items instead of a snapshot per ranking. */
+  readonly threadPriorities?: "delta";
+}
+
+/** Options for a thread subscription; see `OrchestrationThreadHistoryRecoveryMode`. */
+export interface ThreadSubscriptionOptions extends ResumableSubscriptionOptions {
+  /** Read at every (re)subscription: whether an open view needs the thread now. */
+  readonly historyRecovery?: () => OrchestrationThreadHistoryRecoveryMode;
+}
 
 /** What a reduced status snapshot does not say on its own. */
 export interface VcsStatusStreamMeta {
@@ -58,12 +75,21 @@ const resumeInput = (options: ResumableSubscriptionOptions | undefined) => {
   return resumeFromSequence !== null && resumeFromSequence > 0 ? { resumeFromSequence } : {};
 };
 
+const threadSubscriptionInput = (options: ThreadSubscriptionOptions | undefined) => {
+  const historyRecovery = options?.historyRecovery?.();
+  return {
+    ...resumeInput(options),
+    ...(historyRecovery === undefined ? {} : { historyRecovery }),
+  };
+};
+
 const transportSubscribeOptions = (
   options: StreamSubscriptionOptions | undefined,
   tag: string,
 ) => ({
   ...(options?.onResubscribe === undefined ? {} : { onResubscribe: options.onResubscribe }),
   ...(options?.onError === undefined ? {} : { onError: options.onError }),
+  ...(options?.classifyFailure === undefined ? {} : { classifyFailure: options.classifyFailure }),
   tag,
 });
 
@@ -310,7 +336,11 @@ export interface WsRpcClient {
       typeof WS_METHODS.serverGetDiagnosticsMetrics
     >;
     readonly getStatistics: RpcUnaryNoArgMethod<typeof WS_METHODS.serverGetStatistics>;
-    readonly getUsageSummary: RpcUnaryMethod<typeof WS_METHODS.serverGetUsageSummary>;
+    /** Aborting `signal` withdraws the request; the node stops a scan nobody else awaits. */
+    readonly getUsageSummary: (
+      input: RpcInput<typeof WS_METHODS.serverGetUsageSummary>,
+      options?: { readonly signal?: AbortSignal | undefined },
+    ) => ReturnType<RpcUnaryMethod<typeof WS_METHODS.serverGetUsageSummary>>;
     /**
      * Refresh provider snapshots. Pass `{ instanceId }` to refresh a single
      * configured instance; pass no argument (or `{}`) to refresh all.
@@ -356,9 +386,13 @@ export interface WsRpcClient {
     readonly getDiagnosticsSnapshot: RpcUnaryNoArgMethod<
       typeof WS_METHODS.serverGetDiagnosticsSnapshot
     >;
-    readonly discoverSourceControl: RpcUnaryNoArgMethod<
-      typeof WS_METHODS.serverDiscoverSourceControl
-    >;
+    /**
+     * Pass `{ cached: true }` for background revalidation to accept the
+     * server's recent result; an explicit user refresh passes nothing.
+     */
+    readonly discoverSourceControl: (
+      input?: RpcInput<typeof WS_METHODS.serverDiscoverSourceControl>,
+    ) => ReturnType<RpcUnaryMethod<typeof WS_METHODS.serverDiscoverSourceControl>>;
     readonly listOpinionatedPlugins: RpcUnaryNoArgMethod<
       typeof WS_METHODS.serverListOpinionatedPlugins
     >;
@@ -398,22 +432,29 @@ export interface WsRpcClient {
     readonly getThreadHistoryPage?: RpcUnaryMethod<
       typeof ORCHESTRATION_WS_METHODS.getThreadHistoryPage
     >;
+    /** Absent on clients built without it; older servers answer "Unknown request tag". */
+    readonly setThreadHistoryRecovery?: RpcUnaryMethod<
+      typeof ORCHESTRATION_WS_METHODS.setThreadHistoryRecovery
+    >;
     readonly subscribeShell: (
       listener: (event: OrchestrationShellStreamItem) => void,
       options?: ShellSubscriptionOptions,
     ) => () => void;
     readonly subscribeThread: (
-      input: Omit<RpcInput<typeof ORCHESTRATION_WS_METHODS.subscribeThread>, "resumeFromSequence">,
+      input: Omit<
+        RpcInput<typeof ORCHESTRATION_WS_METHODS.subscribeThread>,
+        "resumeFromSequence" | "historyRecovery"
+      >,
       listener: (event: OrchestrationThreadStreamItem) => void,
-      options?: ResumableSubscriptionOptions,
+      options?: ThreadSubscriptionOptions,
     ) => () => void;
     readonly subscribeThreadWindow?: (
       input: Omit<
         RpcInput<typeof ORCHESTRATION_WS_METHODS.subscribeThreadWindow>,
-        "resumeFromSequence"
+        "resumeFromSequence" | "historyRecovery"
       >,
       listener: (event: OrchestrationThreadWindowStreamItem) => void,
-      options?: ResumableSubscriptionOptions,
+      options?: ThreadSubscriptionOptions,
     ) => () => void;
   };
   readonly threadPriority: {
@@ -497,10 +538,12 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
       restart: (input) => transport.request((client) => client[WS_METHODS.terminalRestart](input)),
       close: (input) => transport.request((client) => client[WS_METHODS.terminalClose](input)),
       onEvent: (listener, options) =>
-        transport.subscribe((client) => client[WS_METHODS.subscribeTerminalEvents]({}), listener, {
-          ...options,
-          tag: WS_METHODS.subscribeTerminalEvents,
-        }),
+        transport.subscribe(
+          // History stays on `terminal.open`; catch-up events only carry session metadata.
+          (client) => client[WS_METHODS.subscribeTerminalEvents]({ replay: "metadata" }),
+          listener,
+          { ...options, tag: WS_METHODS.subscribeTerminalEvents },
+        ),
     },
     projects: {
       listEntries: (input) =>
@@ -804,19 +847,19 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
         transport.request((client) => client[WS_METHODS.serverGetDiagnosticsMetrics]({})),
       getStatistics: () =>
         transport.request((client) => client[WS_METHODS.serverGetStatistics]({})),
-      getUsageSummary: async (input) => {
-        const config = await transport.request((client) => client[WS_METHODS.serverGetConfig]({}));
-        assertUsageContractVersion(config.usageContractVersion);
+      getUsageSummary: async (input, options) => {
         assertUsageContractVersion(input.contractVersion);
+        const signal = options?.signal;
         try {
-          return await transport.request((client) =>
-            client[WS_METHODS.serverGetUsageSummary](input),
+          return await transport.request(
+            (client) => client[WS_METHODS.serverGetUsageSummary](input),
+            signal === undefined ? undefined : { signal },
           );
         } catch (error) {
-          // A node upgrade/reconnect between capability check and response can
-          // still produce a version decoding error. Hide its schema dump.
-          if (error instanceof Error && error.message.includes("contractVersion"))
-            throw new UsageContractMismatchError();
+          // There is no capability round trip first (it cost a full server
+          // config per summary): a node on another usage contract shows up as
+          // a version decoding error instead. Hide its schema dump.
+          if (isUsageContractRejection(error)) throw new UsageContractMismatchError();
           throw error;
         }
       },
@@ -865,8 +908,8 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
         transport.request((client) => client[WS_METHODS.serverSignalDiagnosticProcess](input)),
       getDiagnosticsSnapshot: () =>
         transport.request((client) => client[WS_METHODS.serverGetDiagnosticsSnapshot]({})),
-      discoverSourceControl: () =>
-        transport.request((client) => client[WS_METHODS.serverDiscoverSourceControl]({})),
+      discoverSourceControl: (input) =>
+        transport.request((client) => client[WS_METHODS.serverDiscoverSourceControl](input ?? {})),
       listOpinionatedPlugins: () =>
         transport.request((client) => client[WS_METHODS.serverListOpinionatedPlugins]({})),
       checkOpinionatedPlugins: (input) =>
@@ -929,9 +972,19 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
         transport.request((client) => client[ORCHESTRATION_WS_METHODS.getThreadWindow](input)),
       getThreadHistoryPage: (input) =>
         transport.request((client) => client[ORCHESTRATION_WS_METHODS.getThreadHistoryPage](input)),
+      setThreadHistoryRecovery: (input) =>
+        transport.request((client) =>
+          client[ORCHESTRATION_WS_METHODS.setThreadHistoryRecovery](input),
+        ),
       subscribeShell: (listener, options) =>
         transport.subscribe(
-          (client) => client[ORCHESTRATION_WS_METHODS.subscribeShell](resumeInput(options)),
+          (client) =>
+            client[ORCHESTRATION_WS_METHODS.subscribeShell]({
+              ...resumeInput(options),
+              ...(options?.threadPriorities === undefined
+                ? {}
+                : { threadPriorities: options.threadPriorities }),
+            }),
           listener,
           transportSubscribeOptions(options, ORCHESTRATION_WS_METHODS.subscribeShell),
         ),
@@ -940,7 +993,7 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
           (client) =>
             client[ORCHESTRATION_WS_METHODS.subscribeThread]({
               ...input,
-              ...resumeInput(options),
+              ...threadSubscriptionInput(options),
             }),
           listener,
           transportSubscribeOptions(options, ORCHESTRATION_WS_METHODS.subscribeThread),
@@ -950,7 +1003,7 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
           (client) =>
             client[ORCHESTRATION_WS_METHODS.subscribeThreadWindow]({
               ...input,
-              ...resumeInput(options),
+              ...threadSubscriptionInput(options),
             }),
           listener,
           transportSubscribeOptions(options, ORCHESTRATION_WS_METHODS.subscribeThreadWindow),

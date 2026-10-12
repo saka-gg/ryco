@@ -41,6 +41,7 @@ import {
   PtySpawnError,
 } from "../Services/PTY.ts";
 import { createWorkspaceCommitFence } from "../../orchestration/workspaceCommitFence.ts";
+import { storageLifecycleLock } from "../../storage/lifecycle.ts";
 import { createEmptyReadModel } from "../../orchestration/projector.ts";
 import { makeTerminalManagerWithOptions } from "./Manager.ts";
 import {
@@ -141,6 +142,24 @@ class FakePtyAdapter implements PtyAdapterShape {
   }
 }
 
+/** Holds each spawn until the test opens its gate, after signalling that it was reached. */
+class GatedPtyAdapter extends FakePtyAdapter {
+  entered = Deferred.makeUnsafe<void>();
+  gate = Deferred.makeUnsafe<void>();
+
+  override spawn(input: PtySpawnInput): Effect.Effect<PtyProcess, PtySpawnError> {
+    return Deferred.succeed(this.entered, undefined).pipe(
+      Effect.andThen(Deferred.await(this.gate)),
+      Effect.andThen(Effect.suspend(() => super.spawn(input))),
+    );
+  }
+
+  rearm(): void {
+    this.entered = Deferred.makeUnsafe<void>();
+    this.gate = Deferred.makeUnsafe<void>();
+  }
+}
+
 const waitFor = <E, R>(
   predicate: Effect.Effect<boolean, E, R>,
   timeout: Duration.Input = 800,
@@ -215,6 +234,8 @@ interface CreateManagerOptions {
     Error
   >;
   subprocessPollIntervalMs?: number;
+  subprocessIdlePollIntervalMs?: number;
+  historyPersistDebounceMs?: number;
   processKillGraceMs?: number;
   maxRetainedInactiveSessions?: number;
   maxPendingProcessEvents?: number;
@@ -262,6 +283,11 @@ const createManager = (
         ...(options.subprocessPollIntervalMs !== undefined
           ? { subprocessPollIntervalMs: options.subprocessPollIntervalMs }
           : {}),
+        ...(options.subprocessIdlePollIntervalMs !== undefined
+          ? { subprocessIdlePollIntervalMs: options.subprocessIdlePollIntervalMs }
+          : {}),
+        // Persistence cadence is covered by its own tests; fixtures keep writes prompt.
+        historyPersistDebounceMs: options.historyPersistDebounceMs ?? 40,
         // Fake PTYs have no OS process to reap. Keep ordinary fixture teardown
         // immediate; shutdown timing is covered separately with TestClock.
         processKillGraceMs: options.processKillGraceMs ?? 0,
@@ -349,6 +375,62 @@ it.layer(NodeServices.layer, { excludeTestServices: true })("TerminalManager", (
       yield* f.manager.open({ threadId: "chat-thread", cwd: chat, cols: 80, rows: 24 });
       assert.strictEqual(f.ptyAdapter.spawnInputs.length, 1);
     }).pipe(Effect.provide(SqlitePersistenceMemory)),
+  );
+  it.effect("refuses a relaunch into a fenced path before touching the running shell", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const f = yield* createManager();
+      const fileSystem = yield* FileSystem.FileSystem;
+      const current = path.join(f.baseDir, "current");
+      const fenced = path.join(f.baseDir, "fenced");
+      yield* fileSystem.makeDirectory(current, { recursive: true });
+      yield* fileSystem.makeDirectory(fenced, { recursive: true });
+      const canonical = yield* Effect.promise(() =>
+        import("node:fs/promises").then((fs) => fs.realpath(fenced)),
+      );
+      yield* f.manager.open(openInput({ cwd: current }));
+      yield* sql`INSERT INTO storage_owned_entries (id, path, category, identity_json, created_at, state) VALUES ('relaunch-guard', ${canonical}, 'worktree', '{}', ${new Date().toISOString()}, 'removing')`;
+
+      const opened = yield* f.manager.open(openInput({ cwd: fenced })).pipe(Effect.flip);
+      expect(opened).toMatchObject({ _tag: "TerminalCwdError", reason: "cleanupPending" });
+      const restarted = yield* f.manager.restart(restartInput({ cwd: fenced })).pipe(Effect.flip);
+      expect(restarted).toMatchObject({ _tag: "TerminalCwdError", reason: "cleanupPending" });
+
+      expect(f.ptyAdapter.processes).toHaveLength(1);
+      expect(f.ptyAdapter.processes[0]!.killed).toBe(false);
+      expect(yield* f.manager.listDiagnostics).toEqual([
+        expect.objectContaining({ status: "running", cwd: current }),
+      ]);
+    }).pipe(Effect.provide(SqlitePersistenceMemory)),
+  );
+  it.effect("holds the storage lifecycle lock for admission only, not across the PTY spawn", () =>
+    Effect.gen(function* () {
+      const ptyAdapter = new GatedPtyAdapter();
+      const { manager } = yield* createManager(5, { ptyAdapter });
+      const lockIsFree = storageLifecycleLock
+        .withPermit(Effect.void)
+        .pipe(Effect.timeoutOption("1 second"), Effect.map(Option.isSome));
+
+      for (const start of [
+        manager.open(openInput()),
+        manager.restart(restartInput()),
+        manager.open(openInput({ env: { RELAUNCH: "1" } })),
+      ]) {
+        ptyAdapter.rearm();
+        const starting = yield* start.pipe(Effect.forkScoped);
+        yield* Deferred.await(ptyAdapter.entered);
+        // Orchestration takes this lock for every command; a spawn must not stall it.
+        expect(yield* lockIsFree).toBe(true);
+        // Admission published the session as starting, so a lifecycle owner that
+        // fences the path now sees a busy terminal there.
+        expect((yield* manager.listDiagnostics).map((terminal) => terminal.status)).toEqual([
+          "starting",
+        ]);
+        yield* Deferred.succeed(ptyAdapter.gate, undefined);
+        expect((yield* Fiber.join(starting)).status).toBe("running");
+      }
+      expect(ptyAdapter.processes).toHaveLength(3);
+    }),
   );
   it.effect(
     "orders restart behind in-flight output and rejects old PTY callbacks through exit",
@@ -1257,6 +1339,128 @@ it.layer(NodeServices.layer, { excludeTestServices: true })("TerminalManager", (
     }),
   );
 
+  it.effect("caps an over-limit history file in memory without rewriting it on open", () =>
+    Effect.gen(function* () {
+      const { manager, logsDir } = yield* createManager(3);
+      const stored = "line1\nline2\nline3\nline4\nline5\n";
+      yield* makeDirectory(logsDir);
+      yield* writeFileString(historyLogPath(logsDir), stored);
+
+      const opened = yield* manager.open(openInput());
+      assert.equal(opened.history, "line3\nline4\nline5\n");
+      expect(yield* readFileString(historyLogPath(logsDir))).toBe(stored);
+    }),
+  );
+
+  it.effect("persists output once per window with the latest history", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter, logsDir } = yield* createManager(5, {
+        historyPersistDebounceMs: 400,
+      });
+      yield* manager.open(openInput());
+      const process = ptyAdapter.processes[0];
+      expect(process).toBeDefined();
+      if (!process) return;
+
+      process.emitData("first\n");
+      yield* waitFor(
+        Effect.map(manager.listSessions, (sessions) =>
+          sessions.some((session) => session.history === "first\n"),
+        ),
+      );
+      process.emitData("second\n");
+      yield* Effect.sleep("100 millis");
+      // Still inside the window: nothing has been rewritten yet.
+      expect(yield* pathExists(historyLogPath(logsDir))).toBe(false);
+      yield* waitFor(
+        Effect.map(readFileString(historyLogPath(logsDir)), (text) => text === "first\nsecond\n"),
+        "2 seconds",
+      );
+    }),
+  );
+
+  it.effect("writes pending output through when the terminal exits", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter, logsDir, getEvents } = yield* createManager(5, {
+        historyPersistDebounceMs: 60_000,
+      });
+      yield* manager.open(openInput());
+      const process = ptyAdapter.processes[0];
+      expect(process).toBeDefined();
+      if (!process) return;
+
+      process.emitData("last words\n");
+      process.emitExit({ exitCode: 0, signal: 0 });
+      yield* waitFor(
+        Effect.map(getEvents, (events) => events.some((event) => event.type === "exited")),
+      );
+      yield* waitFor(
+        Effect.map(readFileString(historyLogPath(logsDir)), (text) => text === "last words\n"),
+      );
+    }),
+  );
+
+  it.effect("writes pending output through when the manager shuts down", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "ryco-terminal-" });
+      const logsDir = path.join(baseDir, "logs");
+      const ptyAdapter = new FakePtyAdapter();
+      const managerScope = yield* Scope.make();
+      const manager = yield* makeTerminalManagerWithOptions({
+        logsDir,
+        historyLineLimit: 5,
+        ptyAdapter,
+        historyPersistDebounceMs: 60_000,
+        processKillGraceMs: 0,
+      }).pipe(Scope.provide(managerScope));
+      yield* manager.open(openInput());
+      ptyAdapter.processes[0]?.emitData("unsaved\n");
+      yield* waitFor(
+        Effect.map(manager.listSessions, (sessions) =>
+          sessions.some((session) => session.history === "unsaved\n"),
+        ),
+      );
+      expect(yield* pathExists(historyLogPath(logsDir))).toBe(false);
+
+      yield* Scope.close(managerScope, Exit.void);
+      expect(yield* readFileString(historyLogPath(logsDir))).toBe("unsaved\n");
+    }),
+  );
+
+  it.effect("polls the process table at the idle cadence once terminals go quiet", () =>
+    Effect.gen(function* () {
+      let snapshots = 0;
+      const { manager } = yield* createManager(5, {
+        processTableSnapshotter: () =>
+          Effect.sync(() => {
+            snapshots += 1;
+            return { childrenByParent: new Map<number, number[]>() };
+          }),
+        subprocessPollIntervalMs: 1_000,
+        subprocessIdlePollIntervalMs: 5_000,
+      });
+      yield* manager.open(openInput());
+      const tick = Effect.gen(function* () {
+        yield* TestClock.adjust("1000 millis");
+        yield* Effect.yieldNow;
+      });
+      // Let the start-up I/O window lapse.
+      for (let index = 0; index < 6; index += 1) yield* tick;
+
+      const idleStart = snapshots;
+      for (let index = 0; index < 10; index += 1) yield* tick;
+      expect(snapshots - idleStart).toBe(2);
+
+      const activeStart = snapshots;
+      for (let index = 0; index < 5; index += 1) {
+        yield* manager.write({ threadId: "thread-1", terminalId: DEFAULT_TERMINAL_ID, data: "x" });
+        yield* tick;
+      }
+      expect(snapshots - activeStart).toBe(5);
+    }).pipe(Effect.provide(TestClock.layer())),
+  );
+
   it.effect("bounds retained history by bytes, trimming from the head", () =>
     Effect.gen(function* () {
       const { manager, ptyAdapter, logsDir } = yield* createManager(5_000, {
@@ -1766,6 +1970,59 @@ it.layer(NodeServices.layer, { excludeTestServices: true })("TerminalManager", (
         ),
         "1200 millis",
       );
+    }),
+  );
+
+  it.effect("answers an open with a covered cursor with only the history after it", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter, getEvents } = yield* createManager(100);
+      const opened = yield* manager.open(openInput());
+      const process = ptyAdapter.processes[0]!;
+      const outputCursors = Effect.map(getEvents, (events) =>
+        events.filter((event) => event.type === "output").map((event) => event.cursor!),
+      );
+      process.emitData("one\n");
+      yield* waitFor(Effect.map(outputCursors, (cursors) => cursors.length === 1));
+      const [afterOne] = yield* outputCursors;
+      process.emitData("two\n");
+      yield* waitFor(Effect.map(outputCursors, (cursors) => cursors.length === 2));
+
+      const delta = yield* manager.open(openInput({ sinceCursor: afterOne! }));
+      expect(delta.history).toBe("two\n");
+      expect(delta.historySince).toEqual(afterOne);
+      const caughtUp = yield* manager.open(openInput({ sinceCursor: delta.cursor }));
+      expect(caughtUp).toMatchObject({ history: "", historySince: delta.cursor });
+      expect((yield* manager.open(openInput({ sinceCursor: opened.cursor }))).history).toBe(
+        "one\ntwo\n",
+      );
+
+      // Another server generation, or a cursor this session never issued: full history.
+      for (const sinceCursor of [
+        { generation: "another-server", sequence: afterOne!.sequence },
+        { ...delta.cursor!, sequence: delta.cursor!.sequence + 1_000 },
+      ]) {
+        const full = yield* manager.open(openInput({ sinceCursor }));
+        expect(full.history).toBe("one\ntwo\n");
+        expect(full.historySince).toBeUndefined();
+      }
+
+      // A clear replaces the history: a view from before it gets the full (new) history.
+      yield* manager.clear({ threadId: "thread-1" });
+      process.emitData("three\n");
+      yield* waitFor(Effect.map(outputCursors, (cursors) => cursors.length === 3));
+      const afterClear = yield* manager.open(openInput({ sinceCursor: delta.cursor }));
+      expect(afterClear.history).toBe("three\n");
+      expect(afterClear.historySince).toBeUndefined();
+
+      // An ended session restarts on open: a delta of the old shell would be wrong.
+      process.emitExit({ exitCode: 0, signal: 0 });
+      yield* waitFor(
+        Effect.map(getEvents, (events) => events.some((event) => event.type === "exited")),
+      );
+      const reopened = yield* manager.open(openInput({ sinceCursor: afterClear.cursor }));
+      expect(reopened.historySince).toBeUndefined();
+      expect(reopened.history).toBe("");
+      expect(ptyAdapter.spawnInputs).toHaveLength(2);
     }),
   );
 

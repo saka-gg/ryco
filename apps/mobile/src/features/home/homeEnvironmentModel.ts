@@ -111,6 +111,20 @@ export function cachedHubNodeStaleDetail(
   return `Offline · last seen ${relativeLastSeen(lastSeenAt, now)}`;
 }
 
+/**
+ * The clock a cached Hub node's "last seen" text is computed against: the
+ * screen's ticking clock at the minute precision the text shows, so the list
+ * re-derives at most once a minute. `undefined` (read the wall clock while
+ * building) when there is no ticking clock or no cached Hub node to describe.
+ */
+export function homeLastSeenClock(
+  nowMs: number | undefined,
+  cachedHubNodeCount: number,
+): number | undefined {
+  if (nowMs === undefined || cachedHubNodeCount === 0) return undefined;
+  return Math.floor(nowMs / 60_000) * 60_000;
+}
+
 export function buildHomeEnvironments(input: {
   /** Live node capabilities supersede the Hub directory descriptor. */
   readonly serverConfigs?: ReadonlyMap<EnvironmentId, ServerConfig>;
@@ -226,4 +240,23 @@ export function buildHomeEnvironments(input: {
     });
   }
   return [...environments.values()];
+}
+
+/**
+ * Whether each environment's shell is current — the one per-environment fact
+ * Home reads from the threads store. Selected as a flat map compared shallowly:
+ * `environmentStateById` itself gets a new identity on every shell and
+ * orchestration event, and subscribing to it rebuilt the whole Home model on
+ * each one.
+ */
+export function selectShellCurrentByEnvironmentId(state: {
+  readonly environmentStateById: Readonly<
+    Record<string, { readonly bootstrapComplete?: boolean } | undefined>
+  >;
+}): Readonly<Record<string, boolean>> {
+  const shellCurrent: Record<string, boolean> = {};
+  for (const [environmentId, environmentState] of Object.entries(state.environmentStateById)) {
+    shellCurrent[environmentId] = environmentState?.bootstrapComplete === true;
+  }
+  return shellCurrent;
 }

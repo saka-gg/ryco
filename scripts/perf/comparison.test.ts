@@ -48,6 +48,7 @@ function benchmark(input: {
       sourceControlHiddenMs: 1,
       sourceControlSettledMs: 1,
       sourceControlStatusRows: 1,
+      cpuProfileDir: null,
     },
     metadata: {
       generatedAt: "2026-08-15T00:00:00.000Z",

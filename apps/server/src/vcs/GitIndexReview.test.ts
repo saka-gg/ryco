@@ -6,6 +6,7 @@ import { WorkspaceAccessPolicy } from "../workspace/Services/WorkspaceAccessPoli
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import { Effect, FileSystem, Layer } from "effect";
+import { ChildProcessSpawner } from "effect/process";
 import { ServerConfig } from "../config.ts";
 import * as Driver from "./GitVcsDriver.ts";
 import { readGitLocalChanges, applyGitIndexPatch } from "./GitIndexReview.ts";
@@ -242,6 +243,144 @@ describe("Git index review", () => {
         expect(yield* fs.exists(`${f.cwd}/.git/index.lock`)).toBe(false);
         expect(yield* fs.exists(`${f.cwd}/.git/HEAD.lock`)).toBe(false);
       }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+  it.effect("reviews untracked files with a constant number of Git processes", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const fs = yield* FileSystem.FileSystem;
+      const commands: (readonly string[])[] = [];
+      const execute: Driver.GitVcsDriverShape["execute"] = (input) => {
+        commands.push(input.args);
+        return f.driver.execute(input);
+      };
+      const review = () => readGitLocalChanges(execute, { cwd: f.cwd });
+      yield* f.write("shared.txt", "tracked edit\n");
+      yield* f.write("[glob]*.txt", "literal pathspec\n");
+      yield* f.write("empty.txt", "");
+      yield* f.write("script.sh", "#!/bin/sh\necho hi\n");
+      yield* fs.chmod(`${f.cwd}/script.sh`, 0o755);
+      yield* fs.makeDirectory(`${f.cwd}/nested`);
+      yield* f.driver.execute({ operation: "test", cwd: `${f.cwd}/nested`, args: ["init"] });
+
+      const few = yield* review();
+      const fewCommands = commands.length;
+      expect(commands.some((args) => args.includes("--no-index"))).toBe(false);
+      expect(commands.some((args) => args[0] === "symbolic-ref")).toBe(false);
+      const patch = few.unstaged.patch;
+      expect(patch).toContain("diff --git a/[glob]*.txt b/[glob]*.txt\nnew file mode 100644");
+      expect(patch).toContain("diff --git a/empty.txt b/empty.txt\nnew file mode 100644");
+      expect(patch).toContain("diff --git a/script.sh b/script.sh\nnew file mode 100755");
+      expect(patch).toContain("+tracked edit");
+      // An embedded repository is listed as untracked but has no file patch.
+      expect(patch).not.toContain("nested");
+      expect(few.branch).toBe("refs/heads/feature");
+      // The live index never sees the intent-to-add entries.
+      expect((yield* f.git(["status", "--porcelain"])).stdout).toContain("?? empty.txt");
+
+      for (let index = 0; index < 40; index += 1) yield* f.write(`more-${index}.txt`, `${index}\n`);
+      commands.length = 0;
+      const many = yield* review();
+      expect(commands.length).toBe(fewCommands);
+      expect(many.unstaged.files).toHaveLength(few.unstaged.files.length + 40);
+
+      // Staging an untracked file from the batched review still applies cleanly.
+      const scriptIndex = many.unstaged.files.findIndex((_, index) =>
+        many.unstaged.patch.split(/(?=^diff --git )/m)[index]?.includes("script.sh"),
+      );
+      yield* f.apply(many, "unstaged", scriptIndex);
+      expect((yield* f.git(["ls-files", "-s", "script.sh"])).stdout).toMatch(/^100755 /);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+  it.effect("asks Git for the branch when HEAD lives in a reftable", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const driver = yield* Driver.GitVcsDriver;
+      const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "ryco-reftable-" });
+      yield* driver.execute({
+        operation: "test",
+        cwd,
+        args: ["init", "--ref-format=reftable", "-b", "trunk"],
+      });
+      yield* fs.writeFileString(`${cwd}/new.txt`, "new\n");
+      expect(yield* fs.readFileString(`${cwd}/.git/HEAD`)).toContain("refs/heads/.invalid");
+      const snapshot = yield* readGitLocalChanges(driver.execute, { cwd });
+      expect(snapshot.branch).toBe("refs/heads/trunk");
+      expect(snapshot.headOid).toBeNull();
+      expect(snapshot.unstaged.patch).toContain("+new");
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+  it.effect("falls back to per-file diffs when Git refuses the intent-to-add batch", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      yield* f.write("one.txt", "one\n");
+      yield* f.write("two.txt", "two\n");
+      const batched = yield* f.read();
+      const execute: Driver.GitVcsDriverShape["execute"] = (input) =>
+        input.args.includes("--intent-to-add")
+          ? Effect.succeed({
+              exitCode: ChildProcessSpawner.ExitCode(1),
+              stdout: "",
+              stderr: "refused",
+              stdoutTruncated: false,
+              stderrTruncated: false,
+            })
+          : f.driver.execute(input);
+      const fallback = yield* readGitLocalChanges(execute, { cwd: f.cwd });
+      expect(fallback.unstaged.patch).toBe(batched.unstaged.patch);
+      expect(fallback.revision).toBe(batched.revision);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+  it.effect("does not run repository hooks while marking untracked files", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const fs = yield* FileSystem.FileSystem;
+      const marker = `${f.cwd}/.git/post-index-change-ran`;
+      yield* f.write(".git/hooks/post-index-change", `#!/bin/sh\ntouch "${marker}"\n`);
+      yield* fs.chmod(`${f.cwd}/.git/hooks/post-index-change`, 0o755);
+      yield* f.write("new.txt", "new\n");
+      expect((yield* f.read()).unstaged.patch).toContain("+new");
+      expect(yield* fs.exists(marker)).toBe(false);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+  it.effect("refuses an untracked file that vanishes after it was marked intent-to-add", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const fs = yield* FileSystem.FileSystem;
+      yield* f.write("kept.txt", "kept\n");
+      yield* f.write("transient.txt", "transient\n");
+      const execute: Driver.GitVcsDriverShape["execute"] = (input) =>
+        input.args.includes("--intent-to-add")
+          ? f.driver
+              .execute(input)
+              .pipe(Effect.tap(() => fs.remove(`${f.cwd}/transient.txt`).pipe(Effect.orDie)))
+          : f.driver.execute(input);
+      const failure = yield* readGitLocalChanges(execute, { cwd: f.cwd }).pipe(Effect.flip);
+      expect(failure.detail).toContain("An untracked file changed or could not be read");
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+  it.effect("does not duplicate files Git accepted from a partially refused batch", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const fs = yield* FileSystem.FileSystem;
+      yield* fs.makeDirectory(`${f.cwd}/inside`);
+      yield* fs.makeDirectory(`${f.cwd}/outside`);
+      yield* f.write("inside/kept.txt", "kept\n");
+      yield* f.write("outside/hidden.txt", "hidden\n");
+      yield* f.commit("sparse layout");
+      yield* f.git(["sparse-checkout", "set", "inside"]);
+      // `git add` refuses the path outside the sparse checkout (exit 1) but still
+      // records the one inside it in the disposable index.
+      yield* fs.makeDirectory(`${f.cwd}/outside`, { recursive: true });
+      yield* f.write("outside/new.txt", "outside\n");
+      yield* f.write("inside/new.txt", "inside\n");
+      const snapshot = yield* f.read();
+      const headers = snapshot.unstaged.patch.match(/^diff --git .*$/gm) ?? [];
+      expect(headers.toSorted()).toEqual([
+        "diff --git a/inside/new.txt b/inside/new.txt",
+        "diff --git a/outside/new.txt b/outside/new.txt",
+      ]);
+      expect(snapshot.unstaged.files).toHaveLength(2);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
   it.effect("authorizes the resolved repository before reading refs or acquiring locks", () =>
     Effect.gen(function* () {

@@ -101,6 +101,21 @@ export function derivePullRequestsCapabilities(
   return getChangeRequestHostCapabilities(provider?.kind ?? "unknown");
 }
 
+/**
+ * Whether to read the "authored" and "review requested" lists. They start with
+ * the state list instead of one git status round trip later: until the host
+ * is known they are read anyway (the server answers a host without
+ * involvement filters with an error, and one without a host with nothing),
+ * and their rows count only once the host's capabilities allow them.
+ */
+export function shouldReadInvolvementLists(input: {
+  readonly listEnabled: boolean;
+  readonly provider: Pick<SourceControlProviderInfo, "kind"> | null;
+  readonly capabilities: Pick<ChangeRequestHostCapabilities, "involvementFilters">;
+}): boolean {
+  return input.listEnabled && (input.provider === null || input.capabilities.involvementFilters);
+}
+
 export function mergeChangeRequestLists(
   ...lists: ReadonlyArray<ReadonlyArray<ChangeRequest> | null | undefined>
 ): Map<number, ChangeRequest> {

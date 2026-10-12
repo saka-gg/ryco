@@ -3,18 +3,37 @@ import fsPromises from "node:fs/promises";
 import type { Dirent } from "node:fs";
 import { execFile } from "node:child_process";
 
-import { Cache, DateTime, Duration, Effect, Exit, Layer, Path } from "effect";
+import {
+  Cause,
+  Clock,
+  Deferred,
+  Effect,
+  Exit,
+  FiberSet,
+  Layer,
+  Option,
+  Path,
+  Result,
+} from "effect";
+import * as Semaphore from "effect/Semaphore";
 
-import { type FilesystemBrowseInput, type ProjectEntry } from "@ryco/contracts";
+import {
+  type FilesystemBrowseInput,
+  type ProjectEntry,
+  type ProjectListEntriesResult,
+} from "@ryco/contracts";
 import { isExplicitRelativePath, isWindowsAbsolutePath } from "@ryco/shared/path";
 import {
-  insertRankedSearchResult,
-  normalizeSearchQuery,
-  scoreQueryMatch,
-  type RankedSearchResult,
-} from "@ryco/shared/searchRanking";
+  normalizeWorkspaceEntryQuery,
+  rankWorkspaceEntries,
+  workspaceEntryDepth,
+  workspaceEntryParentPath,
+  type WorkspaceEntryKind,
+  type WorkspaceEntrySearchKey,
+} from "@ryco/shared/workspaceEntrySearch";
 
 import { VcsDriverRegistry } from "../../vcs/VcsDriverRegistry.ts";
+import type { VcsDriverShape } from "../../vcs/VcsDriver.ts";
 import {
   WorkspaceEntries,
   WorkspaceEntriesBrowseError,
@@ -24,9 +43,43 @@ import {
 import { WorkspacePaths } from "../Services/WorkspacePaths.ts";
 import { WorkspaceAccessPolicy } from "../Services/WorkspaceAccessPolicy.ts";
 
-const WORKSPACE_CACHE_TTL_MS = 15_000;
-const WORKSPACE_CACHE_MAX_KEYS = 4;
-const WORKSPACE_INDEX_MAX_ENTRIES = 25_000;
+/**
+ * The `@` file picker index is stale-while-revalidate: reads never wait for a
+ * rebuild once a root has an index. Reads of an index older than this
+ * revalidate it in the background.
+ */
+const WORKSPACE_INDEX_REVALIDATE_AFTER_MS = 15_000;
+/**
+ * An invalidated root read within this window rebuilds in the background so
+ * the next `@` is warm; colder roots just drop their index.
+ */
+const WORKSPACE_INDEX_HOT_WINDOW_MS = 10 * 60_000;
+/** Collapses bursts of invalidations (checkpoint capture, file writes) into one rebuild. */
+const WORKSPACE_INDEX_REBUILD_DEBOUNCE_MS = 250;
+/**
+ * A cold read waits this long for the full build, then gets a tracked-files
+ * index (one fast `ls-files -c`) while the full build finishes in the
+ * background.
+ */
+const WORKSPACE_INDEX_COLD_BUILD_DEADLINE_MS = 4_000;
+/** A failed build is reported to readers this long before it is retried. */
+const WORKSPACE_INDEX_FAILURE_RETRY_MS = 5_000;
+/** Index builds running at once across all roots (each spawns git or walks a tree). */
+const WORKSPACE_INDEX_BUILD_CONCURRENCY = 2;
+/** Entries held across every cached index; the least recently read roots go first. */
+const WORKSPACE_INDEX_ENTRY_BUDGET = 300_000;
+const WORKSPACE_INDEX_MAX_ROOTS = 32;
+/**
+ * Search corpus cap for one VCS root. Search scans every indexed path, so this
+ * is far above the listEntries payload cap; past it, shallower paths win.
+ */
+const WORKSPACE_INDEX_MAX_ENTRIES = 200_000;
+/** The non-VCS fallback walks the tree breadth-first and stops here. */
+const WORKSPACE_FILESYSTEM_INDEX_MAX_ENTRIES = 25_000;
+/** listEntries payload cap; the files tree opens collapsed, so it gets the shallowest entries. */
+const WORKSPACE_LIST_ENTRIES_MAX = 25_000;
+/** Index construction yields to the event loop between chunks of this many paths. */
+const WORKSPACE_INDEX_BUILD_CHUNK = 20_000;
 const WORKSPACE_SCAN_READDIR_CONCURRENCY = 32;
 const IGNORED_DIRECTORY_NAMES = new Set([
   ".git",
@@ -40,18 +93,35 @@ const IGNORED_DIRECTORY_NAMES = new Set([
   ".cache",
 ]);
 
+type IndexedWorkspaceEntry = WorkspaceEntrySearchKey;
+
 interface WorkspaceIndex {
-  scannedAt: number;
-  entries: SearchableWorkspaceEntry[];
-  truncated: boolean;
+  readonly builtAt: number;
+  /** Mutable: file writes patch new paths in place. */
+  readonly entries: IndexedWorkspaceEntry[];
+  /** Covers only part of the workspace: a size cap was hit, or a tracked-files fallback. */
+  readonly partial: boolean;
+  /** The listEntries payload, built on first request and dropped when `entries` change. */
+  listing: ProjectListEntriesResult | null;
 }
 
-interface SearchableWorkspaceEntry extends ProjectEntry {
-  normalizedPath: string;
-  normalizedName: string;
+interface WorkspaceIndexSlot {
+  readonly cwd: string;
+  index: WorkspaceIndex | null;
+  lastReadAt: number;
+  /** Invalidated since `index` was built. */
+  dirty: boolean;
+  /** Bumped on every invalidation, so a build that raced one leaves the slot dirty. */
+  generation: number;
+  refreshing: boolean;
+  /** Completes when the running refresh ends, however it ends. */
+  refreshDone: Deferred.Deferred<void> | null;
+  rebuildScheduled: boolean;
+  degradedBuildStarted: boolean;
+  /** Cold readers wait here for the first index (full or degraded) of a refresh. */
+  waiters: Deferred.Deferred<WorkspaceIndex, WorkspaceEntriesError> | null;
+  failure: { readonly error: WorkspaceEntriesError; readonly at: number } | null;
 }
-
-type RankedWorkspaceEntry = RankedSearchResult<SearchableWorkspaceEntry>;
 
 function toPosixPath(input: string): string {
   return input.replaceAll("\\", "/");
@@ -67,81 +137,115 @@ function expandHomePath(input: string, path: Path.Path): string {
   return input;
 }
 
-function parentPathOf(input: string): string | undefined {
-  const separatorIndex = input.lastIndexOf("/");
-  if (separatorIndex === -1) {
-    return undefined;
-  }
-  return input.slice(0, separatorIndex);
+function toIndexedEntry(path: string, kind: WorkspaceEntryKind): IndexedWorkspaceEntry {
+  return { path, kind, normalizedPath: path.toLowerCase() };
 }
 
-function basenameOf(input: string): string {
-  const separatorIndex = input.lastIndexOf("/");
-  if (separatorIndex === -1) {
-    return input;
-  }
-  return input.slice(separatorIndex + 1);
-}
-
-function toSearchableWorkspaceEntry(entry: ProjectEntry): SearchableWorkspaceEntry {
-  const normalizedPath = entry.path.toLowerCase();
-  return {
-    ...entry,
-    normalizedPath,
-    normalizedName: basenameOf(normalizedPath),
-  };
-}
-
-function scoreEntry(entry: SearchableWorkspaceEntry, query: string): number | null {
-  if (!query) {
-    return entry.kind === "directory" ? 0 : 1;
-  }
-
-  const { normalizedPath, normalizedName } = entry;
-
-  const scores = [
-    scoreQueryMatch({
-      value: normalizedName,
-      query,
-      exactBase: 0,
-      prefixBase: 2,
-      includesBase: 5,
-      fuzzyBase: 100,
-    }),
-    scoreQueryMatch({
-      value: normalizedPath,
-      query,
-      exactBase: 1,
-      prefixBase: 3,
-      boundaryBase: 4,
-      includesBase: 6,
-      fuzzyBase: 200,
-      boundaryMarkers: ["/"],
-    }),
-  ].filter((score): score is number => score !== null);
-
-  if (scores.length === 0) {
-    return null;
-  }
-
-  return Math.min(...scores);
+function toProjectEntry(entry: IndexedWorkspaceEntry): ProjectEntry {
+  const parentPath = workspaceEntryParentPath(entry.path);
+  return parentPath === undefined
+    ? { path: entry.path, kind: entry.kind }
+    : { path: entry.path, kind: entry.kind, parentPath };
 }
 
 function isPathInIgnoredDirectory(relativePath: string): boolean {
-  const firstSegment = relativePath.split("/")[0];
-  if (!firstSegment) return false;
+  const separatorIndex = relativePath.indexOf("/");
+  const firstSegment = separatorIndex === -1 ? relativePath : relativePath.slice(0, separatorIndex);
   return IGNORED_DIRECTORY_NAMES.has(firstSegment);
 }
 
-function directoryAncestorsOf(relativePath: string): string[] {
-  const segments = relativePath.split("/").filter((segment) => segment.length > 0);
-  if (segments.length <= 1) return [];
-
-  const directories: string[] = [];
-  for (let index = 1; index < segments.length; index += 1) {
-    directories.push(segments.slice(0, index).join("/"));
+/**
+ * Adds every ancestor directory of `filePath`, deepest first, stopping at the
+ * first one already present: its own ancestors were added with it.
+ */
+function addDirectoryAncestors(directories: Set<string>, filePath: string): void {
+  for (
+    let separatorIndex = filePath.lastIndexOf("/");
+    separatorIndex > 0;
+    separatorIndex = filePath.lastIndexOf("/", separatorIndex - 1)
+  ) {
+    const directoryPath = filePath.slice(0, separatorIndex);
+    if (directories.has(directoryPath)) return;
+    directories.add(directoryPath);
   }
-  return directories;
+}
+
+/**
+ * Keeps the shallowest files (listing order breaks ties, so tracked files
+ * precede untracked ones) until files plus their directories reach `budget`.
+ */
+function selectShallowestFiles(
+  filePaths: ReadonlyArray<string>,
+  budget: number,
+): { readonly files: string[]; readonly directories: Set<string> } {
+  const byDepth: string[][] = [];
+  for (const filePath of filePaths) {
+    const depth = workspaceEntryDepth(filePath);
+    (byDepth[depth] ??= []).push(filePath);
+  }
+  const files: string[] = [];
+  const directories = new Set<string>();
+  for (const bucket of byDepth) {
+    if (bucket === undefined) continue;
+    for (const filePath of bucket) {
+      if (files.length + directories.size >= budget) {
+        return { files, directories };
+      }
+      files.push(filePath);
+      addDirectoryAncestors(directories, filePath);
+    }
+  }
+  return { files, directories };
+}
+
+function selectShallowestEntries(
+  entries: ReadonlyArray<IndexedWorkspaceEntry>,
+  limit: number,
+): ReadonlyArray<IndexedWorkspaceEntry> {
+  if (entries.length <= limit) return entries;
+  const byDepth: IndexedWorkspaceEntry[][] = [];
+  for (const entry of entries) {
+    (byDepth[workspaceEntryDepth(entry.path)] ??= []).push(entry);
+  }
+  const kept: IndexedWorkspaceEntry[] = [];
+  for (const bucket of byDepth) {
+    if (bucket === undefined) continue;
+    for (const entry of bucket) {
+      if (kept.length >= limit) return kept;
+      kept.push(entry);
+    }
+  }
+  return kept;
+}
+
+/**
+ * The listEntries payload: the whole index, or its shallowest entries past
+ * the cap. Only `path` and `kind` travel (the parent derives from the path),
+ * and nothing is sorted: tree consumers order each directory themselves.
+ */
+function buildWorkspaceListing(index: WorkspaceIndex): ProjectListEntriesResult {
+  const selected = selectShallowestEntries(index.entries, WORKSPACE_LIST_ENTRIES_MAX);
+  return {
+    entries: selected.map((entry) => ({ path: entry.path, kind: entry.kind })),
+    truncated: index.partial || selected.length < index.entries.length,
+  };
+}
+
+/** The build failure to report, or null when the build was only interrupted. */
+function failureOf(
+  cause: Cause.Cause<WorkspaceEntriesError>,
+  cwd: string,
+): WorkspaceEntriesError | null {
+  if (Cause.hasInterruptsOnly(cause)) return null;
+  const error = Cause.findError(cause);
+  if (Result.isSuccess(error)) return error.success;
+  const squashed = Cause.squash(cause);
+  return new WorkspaceEntriesError({
+    cwd,
+    operation: "workspaceEntries.buildIndex",
+    detail: squashed instanceof Error ? squashed.message : String(squashed),
+    cause: squashed,
+  });
 }
 
 // Cap parallelism when probing directory entries for Finder-alias magic
@@ -226,6 +330,10 @@ export async function isMacOSBookmarkAlias(filePath: string): Promise<boolean> {
   } catch {
     return false;
   }
+  return readsMacOSBookmarkMagic(filePath);
+}
+
+async function readsMacOSBookmarkMagic(filePath: string): Promise<boolean> {
   let handle: fsPromises.FileHandle | undefined;
   try {
     handle = await fsPromises.open(filePath, "r");
@@ -238,6 +346,58 @@ export async function isMacOSBookmarkAlias(filePath: string): Promise<boolean> {
   } finally {
     await handle?.close().catch(() => undefined);
   }
+}
+
+// Directories with more regular-file candidates than this are not probed for
+// aliases at all: one open() per file would dominate the browse.
+const MACOS_ALIAS_PROBE_MAX_CANDIDATES = 500;
+const MACOS_ALIAS_PROBE_CACHE_MAX_ENTRIES = 2_048;
+// Finder aliases carry the original item's name (usually a folder) or end in
+// " alias"; files with these extensions are content, never worth opening.
+const MACOS_ALIAS_CONTENT_EXTENSIONS = new Set(
+  (
+    "7z avi bmp c cjs cpp css csv dmg doc docx gif go gz h heic htm html ico java " +
+    "jpeg jpg js json jsx key lock log m4a md mjs mov mp3 mp4 numbers pages pdf pkg " +
+    "png ppt pptx py rar rb rs scss sh sql svg swift tar tgz toml ts tsx txt wav " +
+    "webm webp xls xlsx xml yaml yml zip"
+  ).split(" "),
+);
+// Probe results keyed by path, size and mtime: re-browsing a folder (the
+// palette prefetches parent paths) never re-opens the same files.
+const macOSAliasProbeCache = new Map<string, boolean>();
+
+function hasContentExtension(fileName: string): boolean {
+  const dotIndex = fileName.lastIndexOf(".");
+  if (dotIndex <= 0) return false;
+  return MACOS_ALIAS_CONTENT_EXTENSIONS.has(fileName.slice(dotIndex + 1).toLowerCase());
+}
+
+/**
+ * Alias probe for one browse candidate. Unlike {@link isMacOSBookmarkAlias}
+ * it never reads a dataless file: in File Provider locations (iCloud Drive,
+ * Dropbox) reading an online-only file's bytes downloads it.
+ */
+async function probeBrowseAliasCandidate(filePath: string, fileName: string): Promise<boolean> {
+  if (hasContentExtension(fileName)) return false;
+  let cacheKey: string;
+  try {
+    const stats = await fsPromises.stat(filePath);
+    if (stats.size < 4 || stats.size > MACOS_ALIAS_MAX_PROBE_BYTES) return false;
+    // No allocated blocks but a non-zero size: an online-only placeholder.
+    if (stats.blocks === 0) return false;
+    cacheKey = `${filePath}\0${stats.size}\0${stats.mtimeMs}`;
+  } catch {
+    return false;
+  }
+  const cached = macOSAliasProbeCache.get(cacheKey);
+  if (cached !== undefined) return cached;
+  const isAlias = await readsMacOSBookmarkMagic(filePath);
+  if (macOSAliasProbeCache.size >= MACOS_ALIAS_PROBE_CACHE_MAX_ENTRIES) {
+    const oldestKey = macOSAliasProbeCache.keys().next().value;
+    if (oldestKey !== undefined) macOSAliasProbeCache.delete(oldestKey);
+  }
+  macOSAliasProbeCache.set(cacheKey, isAlias);
+  return isAlias;
 }
 
 async function resolveMacOSAliasTargets(
@@ -316,86 +476,81 @@ export const makeWorkspaceEntries = Effect.gen(function* () {
   const workspacePaths = yield* WorkspacePaths;
   const workspaceAccessPolicy = yield* WorkspaceAccessPolicy;
 
-  const isInsideVcsWorkTree = (cwd: string): Effect.Effect<boolean> =>
-    vcsRegistry.detect({ cwd }).pipe(
-      Effect.map((handle) => handle !== null),
-      Effect.catch(() => Effect.succeed(false)),
-    );
+  /**
+   * One pass over the listing: drops paths under ignored top-level
+   * directories and collects each file's ancestor directories. No sorting:
+   * search ranks by score and listEntries consumers order their own tree.
+   */
+  const indexListedFiles = Effect.fn("WorkspaceEntries.indexListedFiles")(function* (
+    listedPaths: ReadonlyArray<string>,
+    listingPartial: boolean,
+  ) {
+    let filePaths: string[] = [];
+    let directories = new Set<string>();
+    for (let start = 0; start < listedPaths.length; start += WORKSPACE_INDEX_BUILD_CHUNK) {
+      if (start > 0) {
+        // Keep other sessions' streams flowing while a huge listing is indexed.
+        yield* Effect.yieldNow;
+      }
+      const end = Math.min(listedPaths.length, start + WORKSPACE_INDEX_BUILD_CHUNK);
+      for (let index = start; index < end; index += 1) {
+        const filePath = toPosixPath(listedPaths[index] ?? "");
+        if (filePath.length === 0 || isPathInIgnoredDirectory(filePath)) continue;
+        filePaths.push(filePath);
+        addDirectoryAncestors(directories, filePath);
+      }
+    }
 
-  const filterVcsIgnoredPaths = (
+    let partial = listingPartial;
+    if (filePaths.length + directories.size > WORKSPACE_INDEX_MAX_ENTRIES) {
+      ({ files: filePaths, directories } = selectShallowestFiles(
+        filePaths,
+        WORKSPACE_INDEX_MAX_ENTRIES,
+      ));
+      partial = true;
+    }
+
+    const entries: IndexedWorkspaceEntry[] = [];
+    for (const directoryPath of directories) {
+      entries.push(toIndexedEntry(directoryPath, "directory"));
+    }
+    for (const filePath of filePaths) {
+      entries.push(toIndexedEntry(filePath, "file"));
+    }
+    return {
+      builtAt: yield* Clock.currentTimeMillis,
+      entries,
+      partial,
+      listing: null,
+    } satisfies WorkspaceIndex;
+  });
+
+  const listVcsIndex = Effect.fn("WorkspaceEntries.listVcsIndex")(function* (
     cwd: string,
-    relativePaths: string[],
-  ): Effect.Effect<string[], never> =>
-    vcsRegistry.detect({ cwd }).pipe(
-      Effect.flatMap((handle) =>
-        handle
-          ? handle.driver.filterIgnoredPaths(cwd, relativePaths).pipe(
-              Effect.map((paths) => [...paths]),
-              Effect.catch(() => Effect.succeed(relativePaths)),
-            )
-          : Effect.succeed(relativePaths),
-      ),
-      Effect.catch(() => Effect.succeed(relativePaths)),
-    );
-
-  const buildWorkspaceIndexFromVcs = Effect.fn("WorkspaceEntries.buildWorkspaceIndexFromVcs")(
-    function* (cwd: string) {
-      const vcs = yield* vcsRegistry.detect({ cwd }).pipe(Effect.catch(() => Effect.succeed(null)));
-      if (!vcs) {
-        return null;
-      }
-
-      const listedFiles = yield* vcs.driver
-        .listWorkspaceFiles(cwd)
-        .pipe(Effect.catch(() => Effect.succeed(null)));
-
-      if (!listedFiles) {
-        return null;
-      }
-
-      const listedPaths = [...listedFiles.paths]
-        .map((entry) => toPosixPath(entry))
-        .filter((entry) => entry.length > 0 && !isPathInIgnoredDirectory(entry));
-      const filePaths = yield* vcs.driver.filterIgnoredPaths(cwd, listedPaths).pipe(
-        Effect.map((paths) => [...paths]),
-        Effect.catch(() => filterVcsIgnoredPaths(cwd, listedPaths)),
+    driver: VcsDriverShape,
+    mode: "full" | "tracked",
+  ) {
+    const listed = yield* driver
+      .listWorkspaceFiles(cwd, mode === "tracked" ? { trackedOnly: true } : undefined)
+      .pipe(
+        Effect.mapError(
+          (cause) =>
+            new WorkspaceEntriesError({
+              cwd,
+              operation: "workspaceEntries.listWorkspaceFiles",
+              detail: cause.message,
+              cause,
+            }),
+        ),
       );
+    return yield* indexListedFiles(listed.paths, listed.truncated || mode === "tracked");
+  });
 
-      const directorySet = new Set<string>();
-      for (const filePath of filePaths) {
-        for (const directoryPath of directoryAncestorsOf(filePath)) {
-          if (!isPathInIgnoredDirectory(directoryPath)) {
-            directorySet.add(directoryPath);
-          }
-        }
-      }
-
-      const directoryEntries = [...directorySet]
-        .toSorted((left, right) => left.localeCompare(right))
-        .map((directoryPath): ProjectEntry => ({
-          path: directoryPath,
-          kind: "directory",
-          parentPath: parentPathOf(directoryPath),
-        }))
-        .map(toSearchableWorkspaceEntry);
-      const fileEntries = [...new Set(filePaths)]
-        .toSorted((left, right) => left.localeCompare(right))
-        .map((filePath): ProjectEntry => ({
-          path: filePath,
-          kind: "file",
-          parentPath: parentPathOf(filePath),
-        }))
-        .map(toSearchableWorkspaceEntry);
-
-      const now = yield* DateTime.now;
-      const entries = [...directoryEntries, ...fileEntries];
-      return {
-        scannedAt: now.epochMilliseconds,
-        entries: entries.slice(0, WORKSPACE_INDEX_MAX_ENTRIES),
-        truncated: listedFiles.truncated || entries.length > WORKSPACE_INDEX_MAX_ENTRIES,
-      };
-    },
-  );
+  const detectVcsDriver = (cwd: string) =>
+    vcsRegistry.detect({ cwd }).pipe(
+      Effect.map((handle) => handle?.driver ?? null),
+      Effect.catch(() => Effect.succeed(null)),
+    );
 
   const readDirectoryEntries = Effect.fn("WorkspaceEntries.readDirectoryEntries")(function* (
     cwd: string,
@@ -428,10 +583,10 @@ export const makeWorkspaceEntries = Effect.gen(function* () {
   const buildWorkspaceIndexFromFilesystem = Effect.fn(
     "WorkspaceEntries.buildWorkspaceIndexFromFilesystem",
   )(function* (cwd: string): Effect.fn.Return<WorkspaceIndex, WorkspaceEntriesError> {
-    const shouldFilterWithGitIgnore = yield* isInsideVcsWorkTree(cwd);
-
+    // Only reached for roots outside any VCS work tree, so there are no
+    // ignore rules to apply beyond IGNORED_DIRECTORY_NAMES.
     let pendingDirectories: string[] = [""];
-    const entries: SearchableWorkspaceEntry[] = [];
+    const entries: IndexedWorkspaceEntry[] = [];
     let truncated = false;
 
     while (pendingDirectories.length > 0 && !truncated) {
@@ -472,31 +627,20 @@ export const makeWorkspaceEntries = Effect.gen(function* () {
         return candidates;
       });
 
-      const candidatePaths = candidateEntriesByDirectory.flatMap((candidateEntries) =>
-        candidateEntries.map((entry) => entry.relativePath),
-      );
-      const allowedPathSet = shouldFilterWithGitIgnore
-        ? new Set(yield* filterVcsIgnoredPaths(cwd, candidatePaths))
-        : null;
-
       for (const candidateEntries of candidateEntriesByDirectory) {
         for (const candidate of candidateEntries) {
-          if (allowedPathSet && !allowedPathSet.has(candidate.relativePath)) {
-            continue;
-          }
-
-          const entry = toSearchableWorkspaceEntry({
-            path: candidate.relativePath,
-            kind: candidate.dirent.isDirectory() ? "directory" : "file",
-            parentPath: parentPathOf(candidate.relativePath),
-          });
-          entries.push(entry);
+          entries.push(
+            toIndexedEntry(
+              candidate.relativePath,
+              candidate.dirent.isDirectory() ? "directory" : "file",
+            ),
+          );
 
           if (candidate.dirent.isDirectory()) {
             pendingDirectories.push(candidate.relativePath);
           }
 
-          if (entries.length >= WORKSPACE_INDEX_MAX_ENTRIES) {
+          if (entries.length >= WORKSPACE_FILESYSTEM_INDEX_MAX_ENTRIES) {
             truncated = true;
             break;
           }
@@ -508,32 +652,322 @@ export const makeWorkspaceEntries = Effect.gen(function* () {
       }
     }
 
-    const now = yield* DateTime.now;
     return {
-      scannedAt: now.epochMilliseconds,
+      builtAt: yield* Clock.currentTimeMillis,
       entries,
-      truncated,
-    };
+      partial: truncated,
+      listing: null,
+    } satisfies WorkspaceIndex;
   });
 
+  /**
+   * Inside a work tree the index comes from the VCS listing only. A failed
+   * full listing falls back to tracked files, never to a readdir walk of a
+   * tree that is probably slow to walk; the walk serves non-VCS folders.
+   */
   const buildWorkspaceIndex = Effect.fn("WorkspaceEntries.buildWorkspaceIndex")(function* (
     cwd: string,
   ): Effect.fn.Return<WorkspaceIndex, WorkspaceEntriesError> {
-    const vcsIndexed = yield* buildWorkspaceIndexFromVcs(cwd);
-    if (vcsIndexed) {
-      return vcsIndexed;
+    const driver = yield* detectVcsDriver(cwd);
+    if (!driver) {
+      return yield* buildWorkspaceIndexFromFilesystem(cwd);
     }
-    return yield* buildWorkspaceIndexFromFilesystem(cwd);
+    return yield* listVcsIndex(cwd, driver, "full").pipe(
+      Effect.catch((error) =>
+        listVcsIndex(cwd, driver, "tracked").pipe(
+          Effect.tap(() =>
+            Effect.logWarning("workspace index: full listing failed; indexed tracked files only", {
+              cwd,
+              detail: error.detail,
+            }),
+          ),
+          Effect.catch(() => Effect.fail(error)),
+        ),
+      ),
+    );
   });
 
-  const workspaceIndexCache = yield* Cache.makeWith<string, WorkspaceIndex, WorkspaceEntriesError>(
-    buildWorkspaceIndex,
-    {
-      capacity: WORKSPACE_CACHE_MAX_KEYS,
-      timeToLive: (exit) =>
-        Exit.isSuccess(exit) ? Duration.millis(WORKSPACE_CACHE_TTL_MS) : Duration.zero,
-    },
-  );
+  // -------------------------------------------------------------------------
+  // Stale-while-revalidate index store
+  // -------------------------------------------------------------------------
+
+  const slots = new Map<string, WorkspaceIndexSlot>();
+  const backgroundFibers = yield* FiberSet.make<void, never>();
+  const buildPermits = yield* Semaphore.make(WORKSPACE_INDEX_BUILD_CONCURRENCY);
+
+  const runInBackground = (effect: Effect.Effect<void>) =>
+    FiberSet.run(backgroundFibers, effect).pipe(Effect.asVoid);
+
+  const isHot = (slot: WorkspaceIndexSlot, now: number) =>
+    now - slot.lastReadAt < WORKSPACE_INDEX_HOT_WINDOW_MS;
+
+  const isBackingOff = (slot: WorkspaceIndexSlot, now: number) =>
+    slot.failure !== null && now - slot.failure.at < WORKSPACE_INDEX_FAILURE_RETRY_MS;
+
+  const ensureSlot = (cwd: string): WorkspaceIndexSlot => {
+    const existing = slots.get(cwd);
+    if (existing) return existing;
+    const slot: WorkspaceIndexSlot = {
+      cwd,
+      index: null,
+      lastReadAt: 0,
+      dirty: false,
+      generation: 0,
+      refreshing: false,
+      refreshDone: null,
+      rebuildScheduled: false,
+      degradedBuildStarted: false,
+      waiters: null,
+      failure: null,
+    };
+    slots.set(cwd, slot);
+    return slot;
+  };
+
+  /** Drops the least recently read roots until the store fits its budgets. */
+  const enforceBudget = (keep: WorkspaceIndexSlot) => {
+    let totalEntries = 0;
+    for (const slot of slots.values()) totalEntries += slot.index?.entries.length ?? 0;
+    while (totalEntries > WORKSPACE_INDEX_ENTRY_BUDGET || slots.size > WORKSPACE_INDEX_MAX_ROOTS) {
+      let victim: WorkspaceIndexSlot | null = null;
+      for (const slot of slots.values()) {
+        if (slot === keep || slot.refreshing) continue;
+        if (victim === null || slot.lastReadAt < victim.lastReadAt) victim = slot;
+      }
+      if (victim === null) return;
+      slots.delete(victim.cwd);
+      totalEntries -= victim.index?.entries.length ?? 0;
+    }
+  };
+
+  const publishIndex = Effect.fn("WorkspaceEntries.publishIndex")(function* (
+    slot: WorkspaceIndexSlot,
+    index: WorkspaceIndex,
+    generation: number | null,
+  ) {
+    slot.index = index;
+    slot.failure = null;
+    if (generation !== null && generation === slot.generation) {
+      slot.dirty = false;
+    }
+    const waiters = slot.waiters;
+    slot.waiters = null;
+    if (waiters) yield* Deferred.succeed(waiters, index);
+    enforceBudget(slot);
+  });
+
+  const recordBuildFailure = Effect.fn("WorkspaceEntries.recordBuildFailure")(function* (
+    slot: WorkspaceIndexSlot,
+    error: WorkspaceEntriesError,
+  ) {
+    slot.failure = { error, at: yield* Clock.currentTimeMillis };
+    const waiters = slot.waiters;
+    slot.waiters = null;
+    if (waiters) yield* Deferred.fail(waiters, error);
+  });
+
+  const runRefresh = Effect.fn("WorkspaceEntries.refreshIndex")(function* (
+    slot: WorkspaceIndexSlot,
+  ) {
+    const generation = slot.generation;
+    const exit = yield* buildWorkspaceIndex(slot.cwd).pipe(
+      buildPermits.withPermits(1),
+      Effect.exit,
+    );
+    // `refreshing` clears only once the outcome is recorded: a reader arriving
+    // in between joins this refresh instead of starting a duplicate build (or,
+    // after a failure, reading neither an index nor the failure).
+    if (Exit.isSuccess(exit)) {
+      yield* publishIndex(slot, exit.value, generation);
+      slot.refreshing = false;
+      slot.degradedBuildStarted = false;
+      // Invalidated mid-build: the result may predate the change.
+      if (slot.dirty && isHot(slot, yield* Clock.currentTimeMillis)) {
+        yield* scheduleRebuild(slot);
+      }
+      return;
+    }
+    const error = failureOf(exit.cause, slot.cwd);
+    if (error === null) {
+      // Interrupted (shutdown): release cold readers instead of leaving them parked.
+      slot.refreshing = false;
+      slot.degradedBuildStarted = false;
+      const waiters = slot.waiters;
+      slot.waiters = null;
+      if (waiters) yield* Deferred.interrupt(waiters);
+      return;
+    }
+    yield* Effect.logWarning("workspace index build failed", {
+      cwd: slot.cwd,
+      detail: error.detail,
+    });
+    yield* recordBuildFailure(slot, error);
+    slot.refreshing = false;
+    slot.degradedBuildStarted = false;
+  });
+
+  /**
+   * Single-flight: at most one build per root, at most a few across roots.
+   * Returns what cold readers wait on, captured before the build can settle it.
+   */
+  const startRefresh = Effect.fn("WorkspaceEntries.startRefresh")(function* (
+    slot: WorkspaceIndexSlot,
+  ) {
+    if (slot.refreshing) return slot.waiters;
+    // Synchronous from the check to here: a concurrent reader never sees a
+    // refresh without the deferreds it waits on.
+    slot.refreshing = true;
+    if (slot.index === null && slot.waiters === null) {
+      slot.waiters = Deferred.makeUnsafe<WorkspaceIndex, WorkspaceEntriesError>();
+    }
+    const waiters = slot.waiters;
+    const done = Deferred.makeUnsafe<void>();
+    slot.refreshDone = done;
+    yield* runInBackground(
+      runRefresh(slot).pipe(
+        Effect.ensuring(
+          Effect.suspend(() => {
+            if (slot.refreshDone === done) {
+              slot.refreshDone = null;
+              // Backstop for a refresh that ended before recording an outcome.
+              slot.refreshing = false;
+            }
+            return Deferred.succeed(done, undefined);
+          }),
+        ),
+      ),
+    );
+    return waiters;
+  });
+
+  const scheduleRebuild = (slot: WorkspaceIndexSlot): Effect.Effect<void> =>
+    Effect.suspend(() => {
+      if (slot.rebuildScheduled) return Effect.void;
+      slot.rebuildScheduled = true;
+      return runInBackground(
+        Effect.sleep(WORKSPACE_INDEX_REBUILD_DEBOUNCE_MS).pipe(
+          Effect.andThen(
+            Effect.suspend(() => {
+              slot.rebuildScheduled = false;
+              return slots.get(slot.cwd) === slot && slot.dirty ? startRefresh(slot) : Effect.void;
+            }),
+          ),
+        ),
+      );
+    });
+
+  /**
+   * Past the cold-build deadline, readers get tracked files (one fast
+   * `ls-files -c`, no untracked walk) while the full build keeps running and
+   * replaces it when done.
+   */
+  const startDegradedBuild = Effect.fn("WorkspaceEntries.startDegradedBuild")(function* (
+    slot: WorkspaceIndexSlot,
+  ) {
+    if (slot.degradedBuildStarted || slot.index !== null) return;
+    slot.degradedBuildStarted = true;
+    yield* runInBackground(
+      Effect.gen(function* () {
+        const driver = yield* detectVcsDriver(slot.cwd);
+        // A non-VCS folder has no cheaper listing: its readers keep waiting.
+        if (!driver) return;
+        yield* Effect.logWarning(
+          "workspace index build exceeded its deadline; serving tracked files",
+          { cwd: slot.cwd, deadlineMs: WORKSPACE_INDEX_COLD_BUILD_DEADLINE_MS },
+        );
+        const degraded = yield* listVcsIndex(slot.cwd, driver, "tracked").pipe(Effect.option);
+        if (Option.isSome(degraded) && slot.index === null && slots.get(slot.cwd) === slot) {
+          // Never clears `dirty`: only the full build may settle the root.
+          yield* publishIndex(slot, degraded.value, null);
+        }
+      }),
+    );
+  });
+
+  const awaitColdIndex = Effect.fn("WorkspaceEntries.awaitColdIndex")(function* (
+    slot: WorkspaceIndexSlot,
+    waiters: Deferred.Deferred<WorkspaceIndex, WorkspaceEntriesError> | null,
+  ): Effect.fn.Return<WorkspaceIndex, WorkspaceEntriesError> {
+    if (waiters === null) {
+      if (slot.index) return slot.index;
+      if (slot.failure) return yield* slot.failure.error;
+      return yield* new WorkspaceEntriesError({
+        cwd: slot.cwd,
+        operation: "workspaceEntries.awaitIndex",
+        detail: "The workspace index is unavailable.",
+      });
+    }
+    const first = yield* Deferred.await(waiters).pipe(
+      Effect.timeoutOption(WORKSPACE_INDEX_COLD_BUILD_DEADLINE_MS),
+    );
+    if (Option.isSome(first)) return first.value;
+    yield* startDegradedBuild(slot);
+    return yield* Deferred.await(waiters);
+  });
+
+  /**
+   * Returns the root's index without waiting whenever one exists, starting a
+   * background revalidation when it is invalidated or old. Only the first
+   * read of a root waits, and then for at most the cold-build deadline when
+   * the root is a VCS checkout.
+   *
+   * `superseded` marks an index a rebuild will replace: invalidated since it
+   * was built, or the tracked-files stand-in served past the cold-build
+   * deadline while the full build still runs. Answers from it are not final.
+   */
+  const readIndex = Effect.fn("WorkspaceEntries.readIndex")(function* (
+    cwd: string,
+  ): Effect.fn.Return<
+    { readonly index: WorkspaceIndex; readonly superseded: boolean },
+    WorkspaceEntriesError
+  > {
+    const now = yield* Clock.currentTimeMillis;
+    const slot = ensureSlot(cwd);
+    slot.lastReadAt = now;
+    const index = slot.index;
+    if (index) {
+      // Captured before a refresh starts: it can finish before this returns.
+      const invalidated = slot.dirty;
+      const needsRevalidation =
+        invalidated || now - index.builtAt >= WORKSPACE_INDEX_REVALIDATE_AFTER_MS;
+      if (needsRevalidation && !slot.refreshing && !isBackingOff(slot, now)) {
+        yield* startRefresh(slot);
+      }
+      return { index, superseded: invalidated || slot.degradedBuildStarted };
+    }
+    if (!slot.refreshing && slot.failure !== null && isBackingOff(slot, now)) {
+      return yield* slot.failure.error;
+    }
+    const built = yield* awaitColdIndex(slot, yield* startRefresh(slot));
+    // Past the deadline `built` is the stand-in; the full build may have landed since.
+    return {
+      index: slot.index ?? built,
+      superseded: slot.dirty || slot.degradedBuildStarted,
+    };
+  });
+
+  /**
+   * For readers that must reflect an invalidation (the files tree refetches
+   * right after a turn): runs the pending rebuild now and waits for it, up to
+   * the cold-build deadline, instead of answering from the invalidated index.
+   */
+  const awaitPendingChanges = Effect.fn("WorkspaceEntries.awaitPendingChanges")(function* (
+    slot: WorkspaceIndexSlot,
+  ) {
+    // Twice at most: a rebuild already running may predate the invalidation.
+    for (let attempt = 0; attempt < 2 && slot.dirty; attempt += 1) {
+      if (!slot.refreshing) {
+        if (isBackingOff(slot, yield* Clock.currentTimeMillis)) return;
+        yield* startRefresh(slot);
+      }
+      const done = slot.refreshDone;
+      if (done === null) return;
+      const finished = yield* Deferred.await(done).pipe(
+        Effect.timeoutOption(WORKSPACE_INDEX_COLD_BUILD_DEADLINE_MS),
+      );
+      if (Option.isNone(finished)) return;
+    }
+  });
 
   const normalizeWorkspaceRoot = Effect.fn("WorkspaceEntries.normalizeWorkspaceRoot")(function* (
     cwd: string,
@@ -551,17 +985,77 @@ export const makeWorkspaceEntries = Effect.gen(function* () {
     );
   });
 
+  const slotsForRoot = Effect.fn("WorkspaceEntries.slotsForRoot")(function* (cwd: string) {
+    const normalizedCwd = yield* normalizeWorkspaceRoot(cwd).pipe(
+      Effect.catch(() => Effect.succeed(cwd)),
+    );
+    const matched: WorkspaceIndexSlot[] = [];
+    for (const key of normalizedCwd === cwd ? [cwd] : [cwd, normalizedCwd]) {
+      const slot = slots.get(key);
+      if (slot) matched.push(slot);
+    }
+    return matched;
+  });
+
+  /** Marks the root changed: rebuilt shortly in the background while in use, else dropped. */
+  const markRootChanged = Effect.fn("WorkspaceEntries.markRootChanged")(function* (
+    slot: WorkspaceIndexSlot,
+  ) {
+    slot.dirty = true;
+    slot.generation += 1;
+    if (slot.index === null) {
+      // A cold build is running; the generation bump keeps its result dirty.
+      return;
+    }
+    if (isHot(slot, yield* Clock.currentTimeMillis)) {
+      yield* scheduleRebuild(slot);
+    } else if (!slot.refreshing) {
+      slots.delete(slot.cwd);
+    }
+  });
+
   const invalidate: WorkspaceEntriesShape["invalidate"] = Effect.fn("WorkspaceEntries.invalidate")(
     function* (cwd) {
-      const normalizedCwd = yield* normalizeWorkspaceRoot(cwd).pipe(
-        Effect.catch(() => Effect.succeed(cwd)),
-      );
-      yield* Cache.invalidate(workspaceIndexCache, cwd);
-      if (normalizedCwd !== cwd) {
-        yield* Cache.invalidate(workspaceIndexCache, normalizedCwd);
+      for (const slot of yield* slotsForRoot(cwd)) {
+        yield* markRootChanged(slot);
       }
     },
   );
+
+  const recordFileWrite: WorkspaceEntriesShape["recordFileWrite"] = Effect.fn(
+    "WorkspaceEntries.recordFileWrite",
+  )(function* (cwd, relativePath) {
+    const filePath = toPosixPath(relativePath);
+    for (const slot of yield* slotsForRoot(cwd)) {
+      const index = slot.index;
+      if (index === null) {
+        yield* markRootChanged(slot);
+        continue;
+      }
+      if (isPathInIgnoredDirectory(filePath)) continue;
+      // One pass over the index: is the file listed, and which ancestors are not?
+      const missingDirectories = new Set<string>();
+      addDirectoryAncestors(missingDirectories, filePath);
+      let alreadyIndexed = false;
+      for (const entry of index.entries) {
+        if (entry.kind === "directory") {
+          missingDirectories.delete(entry.path);
+        } else if (entry.path === filePath) {
+          alreadyIndexed = true;
+          break;
+        }
+      }
+      // Saving an indexed file changes nothing the index holds.
+      if (alreadyIndexed) continue;
+      for (const directoryPath of missingDirectories) {
+        index.entries.push(toIndexedEntry(directoryPath, "directory"));
+      }
+      index.entries.push(toIndexedEntry(filePath, "file"));
+      index.listing = null;
+      // Visible immediately; a background rebuild settles its ignore status.
+      yield* markRootChanged(slot);
+    }
+  });
 
   const browse: WorkspaceEntriesShape["browse"] = Effect.fn("WorkspaceEntries.browse")(
     function* (input) {
@@ -665,6 +1159,11 @@ export const makeWorkspaceEntries = Effect.gen(function* () {
         if (isDarwin && dirent.isFile()) return true;
         return false;
       });
+      let fileCandidateCount = 0;
+      for (const dirent of candidates) {
+        if (dirent.isFile()) fileCandidateCount += 1;
+      }
+      const probeAliases = isDarwin && fileCandidateCount <= MACOS_ALIAS_PROBE_MAX_CANDIDATES;
 
       // Follow symlinks (e.g. ~/Dropbox -> ~/Library/CloudStorage/Dropbox) and
       // macOS Finder aliases so they show up in the picker alongside real
@@ -686,9 +1185,9 @@ export const makeWorkspaceEntries = Effect.gen(function* () {
                   return { dirent, pointsToDirectory: false, isAlias: false };
                 }
               }
-              if (isDarwin && dirent.isFile()) {
+              if (probeAliases && dirent.isFile()) {
                 const fullPath = path.join(parentPath, dirent.name);
-                if (await isMacOSBookmarkAlias(fullPath)) {
+                if (await probeBrowseAliasCandidate(fullPath, dirent.name)) {
                   return { dirent, pointsToDirectory: false, isAlias: true };
                 }
               }
@@ -764,56 +1263,41 @@ export const makeWorkspaceEntries = Effect.gen(function* () {
 
   const search: WorkspaceEntriesShape["search"] = Effect.fn("WorkspaceEntries.search")(
     function* (input) {
-      const normalizedCwd = yield* normalizeWorkspaceRoot(input.cwd);
-      return yield* Cache.get(workspaceIndexCache, normalizedCwd).pipe(
-        Effect.map((index) => {
-          const normalizedQuery = normalizeSearchQuery(input.query, {
-            trimLeadingPattern: /^[@./]+/,
-          });
-          const limit = Math.max(0, Math.floor(input.limit));
-          const rankedEntries: RankedWorkspaceEntry[] = [];
-          let matchedEntryCount = 0;
-
-          for (const entry of index.entries) {
-            const score = scoreEntry(entry, normalizedQuery);
-            if (score === null) {
-              continue;
-            }
-
-            matchedEntryCount += 1;
-            insertRankedSearchResult(
-              rankedEntries,
-              { item: entry, score, tieBreaker: entry.path },
-              limit,
-            );
-          }
-
-          return {
-            entries: rankedEntries.map((candidate) => candidate.item),
-            truncated: index.truncated || matchedEntryCount > limit,
-          };
-        }),
+      const { index, superseded } = yield* readIndex(yield* normalizeWorkspaceRoot(input.cwd));
+      const limit = Math.max(0, Math.floor(input.limit));
+      const ranked = rankWorkspaceEntries(
+        index.entries,
+        normalizeWorkspaceEntryQuery(input.query),
+        limit,
       );
+      return {
+        entries: ranked.entries.map(toProjectEntry),
+        truncated: index.partial || ranked.matchedCount > limit,
+        ...(index.partial ? { partial: true } : {}),
+        ...(superseded ? { refreshing: true } : {}),
+      };
     },
   );
 
   const listEntries: WorkspaceEntriesShape["listEntries"] = Effect.fn(
     "WorkspaceEntries.listEntries",
   )(function* (input) {
-    const normalizedCwd = yield* normalizeWorkspaceRoot(input.cwd);
-    return yield* Cache.get(workspaceIndexCache, normalizedCwd).pipe(
-      Effect.map((index) => ({
-        entries: index.entries.map(
-          ({ normalizedName: _normalizedName, normalizedPath: _normalizedPath, ...entry }) => entry,
-        ),
-        truncated: index.truncated,
-      })),
-    );
+    const cwd = yield* normalizeWorkspaceRoot(input.cwd);
+    const read = yield* readIndex(cwd);
+    const slot = slots.get(cwd);
+    if (slot?.dirty === true) {
+      yield* awaitPendingChanges(slot);
+    }
+    // The newest index: a rebuild may have landed while this read waited.
+    const index = slot?.index ?? read.index;
+    index.listing ??= buildWorkspaceListing(index);
+    return index.listing;
   });
 
   return {
     browse,
     invalidate,
+    recordFileWrite,
     listEntries,
     search,
   } satisfies WorkspaceEntriesShape;

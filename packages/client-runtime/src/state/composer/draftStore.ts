@@ -381,6 +381,12 @@ export interface ComposerDraftStoreState<TImage extends ComposerDraftImage = Com
     context: ComposerSourceControlContext,
   ) => { added: boolean; reason?: "duplicate" };
   removeSourceControlContext: (threadRef: ComposerThreadTarget, id: string) => void;
+  /** Replaces a context's detail in place (an attached summary whose detail arrived). */
+  updateSourceControlContext: (
+    threadRef: ComposerThreadTarget,
+    id: string,
+    update: Pick<ComposerSourceControlContext, "detail" | "fetchedAt" | "staleAfter">,
+  ) => void;
   clearSourceControlContexts: (threadRef: ComposerThreadTarget) => void;
   clearPersistedAttachments: (threadRef: ComposerThreadTarget) => void;
   syncPersistedAttachments: (
@@ -847,6 +853,30 @@ export interface ComposerDraftStorage {
   readonly getItem: (name: string) => string | null | Promise<string | null>;
   readonly setItem: (name: string, value: string) => unknown;
   readonly removeItem: (name: string) => unknown;
+  /**
+   * Optional deferred write: `serialize` runs only when the (debounced) write
+   * actually happens. Without it every store update serializes the whole
+   * persisted state (image data URLs included) synchronously, per keystroke.
+   */
+  readonly setItemDeferred?: ((name: string, serialize: () => string) => unknown) | undefined;
+}
+
+function createComposerDraftPersistStorage(
+  storage: ComposerDraftStorage,
+): PersistStorage<PersistedComposerDraftStoreState> {
+  const jsonStorage = createJSONStorage(
+    () => storage,
+  ) as PersistStorage<PersistedComposerDraftStoreState>;
+  const setItemDeferred = storage.setItemDeferred;
+  if (setItemDeferred === undefined) {
+    return jsonStorage;
+  }
+  return {
+    ...jsonStorage,
+    // The persisted value is built from immutable store state, so serializing
+    // the latest one at flush time writes exactly what an eager write would.
+    setItem: (name, value) => setItemDeferred(name, () => JSON.stringify(value)),
+  };
 }
 
 /**
@@ -2121,6 +2151,28 @@ export function createComposerDraftStore<TImage extends ComposerDraftImage>(
               return { draftsByThreadKey: nextDraftsByThreadKey };
             });
           },
+          updateSourceControlContext: (threadRef, id, update) => {
+            const threadKey = resolveComposerDraftKey(get(), threadRef) ?? "";
+            if (threadKey.length === 0) {
+              return;
+            }
+            set((state) => {
+              const current = state.draftsByThreadKey[threadKey];
+              const index = current?.sourceControlContexts.findIndex((ctx) => ctx.id === id) ?? -1;
+              const existing = current?.sourceControlContexts[index];
+              if (!current || !existing) {
+                return state;
+              }
+              const sourceControlContexts = [...current.sourceControlContexts];
+              sourceControlContexts[index] = { ...existing, ...update };
+              return {
+                draftsByThreadKey: {
+                  ...state.draftsByThreadKey,
+                  [threadKey]: { ...current, sourceControlContexts },
+                },
+              };
+            });
+          },
           clearSourceControlContexts: (threadRef) => {
             const threadKey = resolveComposerDraftKey(get(), threadRef) ?? "";
             if (threadKey.length === 0) {
@@ -2261,9 +2313,7 @@ export function createComposerDraftStore<TImage extends ComposerDraftImage>(
       {
         name: COMPOSER_DRAFT_STORAGE_KEY,
         version: COMPOSER_DRAFT_STORAGE_VERSION,
-        storage: createJSONStorage(
-          () => deps.storage,
-        ) as PersistStorage<PersistedComposerDraftStoreState>,
+        storage: createComposerDraftPersistStorage(deps.storage),
         migrate: (persistedState) => migratePersistedComposerDraftStoreState(persistedState),
         partialize: (state) => partializeComposerDraftStoreState(state),
         merge: (persistedState, currentState) => {
@@ -2339,8 +2389,26 @@ export function createComposerDraftStore<TImage extends ComposerDraftImage>(
   }
 
   function markPromotedDraftThreadsByRef(serverThreadRefs: Iterable<ScopedThreadRef>): void {
+    // One pass over the drafts instead of one per server thread: bootstrap and
+    // recovery hand in every thread, so per-ref scans were O(threads x drafts).
+    const draftStore = useComposerDraftStore.getState();
+    const draftEntries = Object.entries(draftStore.draftThreadsByThreadKey);
+    if (draftEntries.length === 0) return;
+    const draftIdsByThreadKey = new Map<string, string[]>();
+    for (const [draftId, draftThread] of draftEntries) {
+      const key = `${draftThread.environmentId}\u0000${draftThread.threadId}`;
+      const draftIds = draftIdsByThreadKey.get(key);
+      if (draftIds) draftIds.push(draftId);
+      else draftIdsByThreadKey.set(key, [draftId]);
+    }
     for (const threadRef of serverThreadRefs) {
-      markPromotedDraftThreadByRef(threadRef);
+      const draftIds = draftIdsByThreadKey.get(
+        `${threadRef.environmentId}\u0000${threadRef.threadId}`,
+      );
+      if (draftIds === undefined) continue;
+      for (const draftId of draftIds) {
+        useComposerDraftStore.getState().markDraftThreadPromoting(DraftId.make(draftId), threadRef);
+      }
     }
   }
 

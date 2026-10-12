@@ -4,7 +4,7 @@ import * as path from "node:path";
 
 import { assert, it } from "@effect/vitest";
 
-import { normalizeHtmlAssetRef, readInitialAssetRefs } from "./measure-web-bundle.ts";
+import { classifyFile, normalizeHtmlAssetRef, readInitialAssetRefs } from "./measure-web-bundle.ts";
 
 it("normalizes relative initial asset refs from index.html", () => {
   assert.equal(normalizeHtmlAssetRef("./assets/app.js?module"), "assets/app.js");
@@ -36,4 +36,11 @@ it("collects ./-prefixed initial assets from index.html", () => {
   } finally {
     rmSync(tempRoot, { recursive: true, force: true });
   }
+});
+
+it("reports the on-demand file icon set apart from bundle output", () => {
+  const none = new Set<string>();
+  assert.equal(classifyFile("vscode-icons/v12.17.0/file_type_ts.svg", none), "on-demand-assets");
+  assert.equal(classifyFile("favicon.svg", none), "images");
+  assert.equal(classifyFile("assets/vscode-icons-lookup-AAAA.js", none), "async-js");
 });

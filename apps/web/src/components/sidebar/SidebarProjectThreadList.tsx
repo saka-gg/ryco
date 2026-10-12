@@ -1,4 +1,4 @@
-import React, { memo, useEffect, useMemo, useRef } from "react";
+import React, { memo, useEffect, useMemo, useState } from "react";
 import { LegendList, type LegendListRenderItemProps } from "@legendapp/list/react";
 import type { ScopedThreadRef } from "@ryco/contracts";
 import { scopedThreadKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
@@ -79,17 +79,21 @@ function threadRowKey(thread: SidebarThreadSummary): string {
   return scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
 }
 
-/** Reuse the previous key-order array when the sequence is unchanged. */
+/**
+ * Reuse the previous key-order array when the sequence is unchanged. Kept in
+ * state rather than a ref written during render, so the React Compiler can
+ * compile it; a changed sequence costs one immediate re-render of this list.
+ */
 function useStableOrderedThreadKeys(keys: readonly string[]): readonly string[] {
-  const cacheRef = useRef<readonly string[]>(keys);
-  return useMemo(() => {
-    const previous = cacheRef.current;
-    if (previous.length === keys.length && keys.every((key, index) => previous[index] === key)) {
-      return previous;
-    }
-    cacheRef.current = keys;
+  const [stable, setStable] = useState(keys);
+  if (
+    stable !== keys &&
+    !(stable.length === keys.length && keys.every((key, index) => stable[index] === key))
+  ) {
+    setStable(keys);
     return keys;
-  }, [keys]);
+  }
+  return stable;
 }
 
 export const SidebarProjectThreadList = memo(function SidebarProjectThreadList(

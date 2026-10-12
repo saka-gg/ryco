@@ -234,7 +234,14 @@ export interface ThreadConnectionRetargetEngineDeps {
   readonly timers?: ThreadConnectionRetargetTimers;
 }
 
-export const THREAD_CONNECTION_RETARGET_DEBOUNCE_MS = 250;
+/**
+ * Every cross-node thread open waits this long before `selectNode` starts, so
+ * it is kept as short as still coalesces a programmatic or double-tap A→B into
+ * one relay ticket (and drops a back-swipe-before-dispatch to none). A leading
+ * dispatch for an idle engine was considered and rejected: it would spend a
+ * ticket on A in exactly the A→B case this window exists to collapse.
+ */
+export const THREAD_CONNECTION_RETARGET_DEBOUNCE_MS = 100;
 
 const defaultTimers: ThreadConnectionRetargetTimers = {
   setTimeout: (callback, delayMs) => globalThis.setTimeout(callback, delayMs),

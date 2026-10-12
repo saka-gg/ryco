@@ -32,7 +32,10 @@ import {
   type RefObject,
 } from "react";
 
-import { RootAppShell } from "../RootAppShell";
+import {
+  HostedRootAppShell as RootAppShell,
+  preloadHostedRootAppShell,
+} from "./hostedRootAppShell";
 import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
 import { Button } from "../ui/button";
 import {
@@ -70,19 +73,14 @@ import {
 } from "../../hostedHub/hubRoutes";
 import { hubPageTitle } from "../../hubBranding";
 import {
-  getHostedNodeRouteNotice,
   selectHostedNodeRoute,
   parseHostedScopedThreadPath,
   useHostedNodeRouteNotice,
-  useHostedNodeRouteOrchestrator,
   useRoutedHostedNode,
 } from "../../hostedHub/nodeRouteOrchestrator";
 import type { HostedHubNode } from "../../hostedHub/types";
-import { useHostedBrowserLifecycle } from "../../hostedHub/useHostedBrowserLifecycle";
-import {
-  hostedNodeRequiresNativeClient,
-  startHostedWorkspaceCoordinator,
-} from "../../hostedHub/hostedConnectionCoordinator";
+import { useHostedWorkspaceOwners } from "../../hostedHub/hostedWorkspaceOwners";
+import { hostedNodeRequiresNativeClient } from "../../hostedHub/hostedConnectionCoordinator";
 import { usePresentationTier } from "../../hooks/usePresentationTier";
 import { selectThreadExistsByRef, useStore } from "../../store";
 import { PHONE_ANCHORED_ACTIONS_CLASS_NAME } from "../mobile/phoneAnchoredActions";
@@ -209,19 +207,19 @@ export function HostedHubRoot() {
     useMemo(() => (state) => selectThreadExistsByRef(state, routedThreadRef), [routedThreadRef]),
   );
   const routeNotice = useHostedNodeRouteNotice();
-  useHostedNodeRouteOrchestrator();
-  useEffect(
-    () =>
-      startHostedWorkspaceCoordinator({
-        canDiscoverHome: () => getHostedNodeRouteNotice() === null,
-      }),
-    [],
-  );
-  // The single browser lifecycle owner, above the presentation-tier seam: the
-  // tier shells mount no lifecycle listeners of their own.
-  useHostedBrowserLifecycle();
+  // The routed-node orchestrator, the workspace coordinator and the single
+  // browser lifecycle owner, above the presentation-tier seam: the tier shells
+  // mount no lifecycle listeners of their own. The boot gate usually started
+  // them already; holding them here keeps them running while the root is.
+  useHostedWorkspaceOwners();
   useHubDocumentTitle();
   const hubRoute = useHubRoute();
+
+  useEffect(() => {
+    // The workspace shell is loaded on demand; fetch it as soon as this
+    // account can reach it rather than when the first workspace route renders.
+    if (accountStatus === "authenticated") void preloadHostedRootAppShell().catch(() => undefined);
+  }, [accountStatus]);
 
   useEffect(() => {
     // GitHub authentication returns to account completion so an unlinked

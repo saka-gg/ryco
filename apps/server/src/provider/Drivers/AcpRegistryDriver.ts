@@ -263,10 +263,12 @@ export const AcpRegistryDriver: ProviderDriver<AcpRegistrySettings, AcpRegistryD
         adapter,
         textGeneration,
         snapshot: {
-          maintenanceCapabilities: makeManualOnlyProviderMaintenanceCapabilities({
-            provider: DRIVER,
-            packageName: null,
-          }),
+          maintenanceCapabilities: Effect.succeed(
+            makeManualOnlyProviderMaintenanceCapabilities({
+              provider: DRIVER,
+              packageName: null,
+            }),
+          ),
           getSnapshot: Ref.get(state),
           refresh,
           revalidate: refresh,

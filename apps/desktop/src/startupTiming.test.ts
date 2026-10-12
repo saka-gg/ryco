@@ -35,4 +35,24 @@ describe("startupTiming", () => {
       }),
     ).toBe("startup timing phase=desktop.backend.spawn elapsedMs=12 deltaMs=9 port=3773");
   });
+
+  it("places phases recorded before the timing existed on the same scale", () => {
+    const values = [500, 520];
+    const timing = createStartupTiming({ now: () => values.shift() ?? 520 });
+
+    const spawn = timing.markAt("desktop.backend.spawn", 380, "early=1");
+    const ready = timing.mark("desktop.ready");
+
+    expect(timing.origin).toBe(500);
+    expect(spawn).toEqual({
+      phase: "desktop.backend.spawn",
+      elapsedMs: -120,
+      deltaMs: -120,
+      detail: "early=1",
+    });
+    expect(ready).toMatchObject({ elapsedMs: 20, deltaMs: 20 });
+    expect(formatStartupTimingEntry(spawn)).toBe(
+      "startup timing phase=desktop.backend.spawn elapsedMs=-120 deltaMs=-120 early=1",
+    );
+  });
 });

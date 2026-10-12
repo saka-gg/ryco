@@ -28,6 +28,13 @@ export interface SavedHubSessionFacts {
   readonly entryScreen: boolean;
   /** The user chose to sign in another way rather than wait for the Hub. */
   readonly signInRequested: boolean;
+  /**
+   * The launch-time access check for the saved session has not answered yet.
+   * The gate stops waiting for it at its launch deadline, so this screen can be
+   * shown while the store still reads its initial `signed-out`. Optional: only
+   * the launch path sets it.
+   */
+  readonly checking?: boolean;
 }
 
 export type SavedHubSessionView =
@@ -45,6 +52,7 @@ export const SAVED_HUB_SESSION_TITLE = "Reaching your Hub…";
 export const SAVED_HUB_SESSION_NOTE =
   "Your sign-in is saved on this device. Ryco keeps trying and opens your workspace as soon as the Hub answers.";
 const SAVED_HUB_SESSION_FALLBACK_DETAIL = "Ryco could not reach your Hub.";
+const SAVED_HUB_SESSION_CHECKING_DETAIL = "Ryco is still checking your saved sign-in with the Hub.";
 
 export const SAVED_HUB_SESSION_REFUSED_TITLE = "Your Hub did not restore your sign-in";
 export const SAVED_HUB_SESSION_REFUSED_NOTE =
@@ -53,6 +61,25 @@ const SAVED_HUB_SESSION_REFUSED_DETAIL =
   "The Hub answered, but did not accept this device's saved sign-in right now.";
 
 export function deriveSavedHubSessionView(facts: SavedHubSessionFacts): SavedHubSessionView {
+  // The launch check is still in flight (the gate gave up waiting for it, not
+  // the runtime): the stored session has neither been restored nor refused, so
+  // asking for a sign-in would be wrong. The store has not left its initial
+  // `signed-out` yet; any other status is an answer and is handled below.
+  if (
+    facts.checking === true &&
+    facts.accountStatus === "signed-out" &&
+    facts.savedSession &&
+    facts.entryScreen &&
+    !facts.signInRequested
+  ) {
+    return {
+      kind: "saved-session",
+      title: SAVED_HUB_SESSION_TITLE,
+      detail: SAVED_HUB_SESSION_CHECKING_DETAIL,
+      note: SAVED_HUB_SESSION_NOTE,
+      waiting: true,
+    };
+  }
   // `unavailable` is published only for a failure that said nothing about the
   // session; a rejected session lands in `signed-out` / `session-expired`
   // with its material already cleared, and gets the sign-in form.

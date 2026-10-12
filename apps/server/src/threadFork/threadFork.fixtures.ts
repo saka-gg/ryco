@@ -235,7 +235,7 @@ export async function createForkHarness(options: ForkHarnessOptions = {}) {
     options.startup === true
       ? Layer.succeed(ServerRuntimeStartup, {
           awaitCommandReady: Effect.void,
-          markHttpListening: Effect.void,
+          markHttpServing: Effect.void,
           enqueueCommand: (effect) => effect,
         })
       : Layer.empty,

@@ -31,9 +31,36 @@ function object(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
+/** A token activity with its payload parsed once (undefined when not a JSON object). */
+export interface ParsedTokenActivity<Row extends TokenActivity = TokenActivity> {
+  readonly row: Row;
+  readonly payload: Record<string, unknown> | undefined;
+}
+
+export function parseTokenActivityPayload(
+  payloadJson: string,
+): Record<string, unknown> | undefined {
+  try {
+    return object(JSON.parse(payloadJson));
+  } catch {
+    return undefined;
+  }
+}
+
 /** Read billing counters without mistaking the last request for a whole turn. */
 export function collectProcessedTokenUsage(
   rows: readonly TokenActivity[],
+  providerForThread: (threadId: string) => string | undefined,
+) {
+  return collectParsedProcessedTokenUsage(
+    rows.map((row) => ({ row, payload: parseTokenActivityPayload(row.payloadJson) })),
+    providerForThread,
+  );
+}
+
+/** {@link collectProcessedTokenUsage} over rows whose payloads were already parsed. */
+export function collectParsedProcessedTokenUsage(
+  parsed: readonly ParsedTokenActivity[],
   providerForThread: (threadId: string) => string | undefined,
 ) {
   const entries: ProcessedUsageEntry[] = [];
@@ -43,13 +70,6 @@ export function collectProcessedTokenUsage(
   const sessions = new Map<string, Counters & { exact: boolean }>();
   const finalRequests = new Map<string, ProcessedUsageEntry>();
   const finalTurns = new Map<string, ProcessedUsageEntry>();
-  const parsed = rows.map((row) => {
-    try {
-      return { row, payload: object(JSON.parse(row.payloadJson)) };
-    } catch {
-      return { row, payload: undefined };
-    }
-  });
   // Legacy Codex snapshots retained the session total but only the last request's split.
   for (const { row, payload } of parsed) {
     const provider = payload?.statisticsProvider ?? providerForThread(row.threadId);

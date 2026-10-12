@@ -143,8 +143,15 @@ export function createSidebarProjectDraftThreadsSelector(
   const logicalProjectId = project.projectKey as ProjectId;
   let previousMatches: ReadonlyArray<readonly [string, DraftThreadState]> = [];
   let previousRows: ReadonlyArray<SidebarTreeThread> = [];
+  let previousDraftThreads: Readonly<Record<string, DraftThreadState>> | null = null;
 
   return (state) => {
+    // Typing updates only the prompt drafts; the draft-thread record keeps its
+    // identity, so every project selector returns without scanning all drafts.
+    if (state.draftThreadsByThreadKey === previousDraftThreads) {
+      return previousRows;
+    }
+    previousDraftThreads = state.draftThreadsByThreadKey;
     const matches: Array<readonly [string, DraftThreadState]> = [];
     for (const [draftId, draftThread] of Object.entries(state.draftThreadsByThreadKey)) {
       if (draftThreadBelongsToSidebarProject(draftThread, memberProjectKeys)) {

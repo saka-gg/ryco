@@ -227,6 +227,15 @@ export class HubConnector {
    * throw, including one that finds the statement cannot be built yet.
    */
   #e2eeStatementFailures = 0;
+  /**
+   * The last attempt's proof was refused — the Hub declined the challenge
+   * (draining, rate limiting) or this node could not make it — so the next
+   * attempt proves before it opens a socket rather than beside it, and a
+   * refusing Hub is not also handed a relay upgrade per retry. A network
+   * failure does not set it (see `RelayConnectionSession.proofRefused`).
+   * Cleared once an attempt authenticates.
+   */
+  #proofFirst = false;
   #frameChain: Promise<void> = Promise.resolve();
   #e2eeRefreshChain: Promise<void> = Promise.resolve();
 
@@ -926,6 +935,7 @@ export class HubConnector {
       hubOrigin: origin,
       scheduler: this.#scheduler,
       now: this.#scheduler.now,
+      proofFirst: this.#proofFirst,
       onFrame: (frame) => {
         if (!this.#state.isCurrent(generation) || this.#stopping) return;
         const handleFailure = (error: unknown) =>
@@ -959,6 +969,7 @@ export class HubConnector {
         return;
       }
       const ready = await session.authenticate();
+      this.#proofFirst = false;
       if (!this.#state.isCurrent(generation) || this.#stopping) {
         session.close();
         return;
@@ -1033,6 +1044,7 @@ export class HubConnector {
       this.#scheduleStableReset(generation);
       this.#scheduleHeartbeatTimeout(generation, ready.limits.deadConnectionTimeoutMs);
     } catch (error: unknown) {
+      if (session.proofRefused) this.#proofFirst = true;
       if (!this.#state.isCurrent(generation) || this.#stopping) return;
       const failure =
         error instanceof RelayConnectionError ? error : new RelayConnectionError("internal_error");

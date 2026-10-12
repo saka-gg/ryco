@@ -35,8 +35,16 @@ import { createSnapshotDb, type SnapshotDb } from "./snapshotDb";
  * down with it.
  */
 
-/** Trailing debounce on projection writes; matches the upstream cache's coalescing. */
-const SNAPSHOT_WRITE_DEBOUNCE_MS = 500;
+/**
+ * Trailing debounce on projection writes, bounded by a maximum wait. Every
+ * capture re-serializes the whole environment (up to the per-environment byte
+ * cap), so a busy environment is written at most once per window rather than
+ * after every short gap in its event stream; the maximum wait keeps a
+ * continuously active one from never being written, and backgrounding flushes
+ * whatever is pending, so the longer window costs no durability.
+ */
+export const SNAPSHOT_WRITE_DEBOUNCE_MS = 2_000;
+export const SNAPSHOT_WRITE_MAX_WAIT_MS = 10_000;
 const ROSTER_WRITE_DEBOUNCE_MS = 1_000;
 /**
  * Total-across-environments bounds, enforced with the shared eviction policy
@@ -72,7 +80,15 @@ export interface SnapshotPersistenceDeps {
    * not purge its store rows or its snapshot.
    */
   readonly hasDirectEnvironment: (environmentId: EnvironmentId) => boolean;
+  /** App backgrounding; pending captures are flushed before the OS may suspend us. */
+  readonly subscribeBackground?: (listener: () => void) => () => void;
+  /**
+   * Yield to the event loop between environments during cold-start hydration,
+   * so decoding a large cache does not hold the JS thread in one long task.
+   */
+  readonly yieldToEventLoop?: () => Promise<void>;
   readonly debounceMs?: number;
+  readonly maxWaitMs?: number;
   readonly rosterDebounceMs?: number;
   readonly caps?: { readonly maxEntries: number; readonly maxBytes: number };
 }
@@ -81,10 +97,74 @@ const warn = (message: string) => (error: unknown) => {
   console.warn(`[snapshot-cache] ${message}`, error);
 };
 
+const yieldWithTimeout = (): Promise<void> =>
+  new Promise((resolve) => {
+    setTimeout(resolve, 0);
+  });
+
+/**
+ * The store slices a capture persists. The threads store updates immutably, so
+ * a capture whose slices are all identical to the last written ones would
+ * serialize exactly the same projection.
+ */
+interface PersistedSlices {
+  readonly projectIds: unknown;
+  readonly projectById: unknown;
+  readonly worktreeIds: unknown;
+  readonly worktreeById: unknown;
+  readonly threadIds: unknown;
+  readonly threadShellById: unknown;
+  readonly sidebarThreadSummaryById: unknown;
+}
+
+function persistedSlices(state: EnvironmentState): PersistedSlices {
+  return {
+    projectIds: state.projectIds,
+    projectById: state.projectById,
+    worktreeIds: state.worktreeIds,
+    worktreeById: state.worktreeById,
+    threadIds: state.threadIds,
+    threadShellById: state.threadShellById,
+    sidebarThreadSummaryById: state.sidebarThreadSummaryById,
+  };
+}
+
+function samePersistedSlices(left: PersistedSlices, right: PersistedSlices): boolean {
+  return (
+    left.projectIds === right.projectIds &&
+    left.projectById === right.projectById &&
+    left.worktreeIds === right.worktreeIds &&
+    left.worktreeById === right.worktreeById &&
+    left.threadIds === right.threadIds &&
+    left.threadShellById === right.threadShellById &&
+    left.sidebarThreadSummaryById === right.sidebarThreadSummaryById
+  );
+}
+
 export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) {
   const debounceMs = deps.debounceMs ?? SNAPSHOT_WRITE_DEBOUNCE_MS;
+  const maxWaitMs = Math.max(debounceMs, deps.maxWaitMs ?? SNAPSHOT_WRITE_MAX_WAIT_MS);
   const rosterDebounceMs = deps.rosterDebounceMs ?? ROSTER_WRITE_DEBOUNCE_MS;
+  const yieldToEventLoop = deps.yieldToEventLoop ?? yieldWithTimeout;
   const dirtyTimers = new Map<EnvironmentId, ReturnType<typeof setTimeout>>();
+  /** When each environment first became dirty since its last capture. */
+  const dirtySince = new Map<EnvironmentId, number>();
+  /**
+   * The slices each environment's stored snapshot was written from, and the
+   * removal epoch at the start of that capture. Any removal (purge, eviction,
+   * hydration discard) bumps the epoch once it has landed, so a row deleted
+   * after it was written can never be mistaken for current.
+   */
+  const written = new Map<EnvironmentId, { slices: PersistedSlices; epoch: number }>();
+  let removalEpoch = 0;
+  const removeStoredSnapshot = async (environmentId: EnvironmentId): Promise<void> => {
+    written.delete(environmentId);
+    try {
+      await deps.db.removeEnvironmentSnapshot(environmentId);
+    } finally {
+      removalEpoch += 1;
+    }
+  };
   let rosterTimer: ReturnType<typeof setTimeout> | null = null;
   let disposed = false;
   const uninstallers: Array<() => void> = [];
@@ -106,7 +186,7 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
       caps,
     );
     for (const environmentId of planned) {
-      await deps.db.removeEnvironmentSnapshot(environmentId);
+      await removeStoredSnapshot(environmentId as EnvironmentId);
     }
   };
 
@@ -134,32 +214,63 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
     ) {
       return;
     }
+    // Most marks come from events that never touch the persisted projection
+    // (message streaming, session and liveness changes): skip those in O(1)
+    // instead of re-serializing and re-writing an identical environment.
+    const slices = persistedSlices(environmentState);
+    const previous = written.get(environmentId);
+    if (
+      previous !== undefined &&
+      previous.epoch === removalEpoch &&
+      samePersistedSlices(previous.slices, slices)
+    ) {
+      return;
+    }
+    const epoch = removalEpoch;
     const record = captureEnvironmentSnapshotRecord(environmentState, environmentId, deps.now());
-    const { payload } = boundStoredEnvironmentSnapshot(record);
+    const { payload, payloadBytes } = boundStoredEnvironmentSnapshot(record);
     await deps.db.saveEnvironmentSnapshot({
       environmentId,
       schemaVersion: ENVIRONMENT_SNAPSHOT_SCHEMA_VERSION,
       payload,
+      payloadBytes,
       updatedAt: deps.now(),
     });
+    written.set(environmentId, { slices, epoch });
     await evictToCapacity(environmentId);
   };
 
   const capture = (environmentId: EnvironmentId): Promise<void> =>
     serialize(environmentId, () => captureNow(environmentId));
 
-  const markDirty = (environmentId: EnvironmentId): void => {
-    if (disposed) return;
+  const captureDirty = (environmentId: EnvironmentId): void => {
     const pending = dirtyTimers.get(environmentId);
     if (pending) clearTimeout(pending);
+    dirtyTimers.delete(environmentId);
+    dirtySince.delete(environmentId);
+    void capture(environmentId).catch(warn("could not persist environment snapshot"));
+  };
+
+  const markDirty = (environmentId: EnvironmentId): void => {
+    if (disposed) return;
+    const now = Date.now();
+    const since = dirtySince.get(environmentId) ?? now;
+    dirtySince.set(environmentId, since);
+    const pending = dirtyTimers.get(environmentId);
+    if (pending) clearTimeout(pending);
+    const delayMs = Math.max(0, Math.min(debounceMs, since + maxWaitMs - now));
     dirtyTimers.set(
       environmentId,
-      setTimeout(() => {
-        dirtyTimers.delete(environmentId);
-        void capture(environmentId).catch(warn("could not persist environment snapshot"));
-      }, debounceMs),
+      setTimeout(() => captureDirty(environmentId), delayMs),
     );
   };
+
+  /** Capture every pending environment now (the app is going to the background). */
+  const flushPending = (): void => {
+    if (disposed) return;
+    for (const environmentId of Array.from(dirtyTimers.keys())) captureDirty(environmentId);
+  };
+  if (deps.subscribeBackground) uninstallers.push(deps.subscribeBackground(flushPending));
 
   const purgeEnvironment = async (environmentId: EnvironmentId): Promise<void> => {
     const pending = dirtyTimers.get(environmentId);
@@ -167,7 +278,8 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
       clearTimeout(pending);
       dirtyTimers.delete(environmentId);
     }
-    await serialize(environmentId, () => deps.db.removeEnvironmentSnapshot(environmentId));
+    dirtySince.delete(environmentId);
+    await serialize(environmentId, () => removeStoredSnapshot(environmentId));
   };
 
   const persistRosterDebounced = (): void => {
@@ -262,15 +374,19 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
       roster.filter((record) => record.revokedAt === null).map((record) => record.environmentId),
     );
 
-    let stats: ReadonlyArray<{ environmentId: string }>;
+    // One read for every row (most recently written first) instead of a stats
+    // query plus one SELECT per environment, and a yield between environments
+    // so decoding a large cache never holds the JS thread in one long task.
+    let rows: Awaited<ReturnType<SnapshotDb["loadEnvironmentSnapshots"]>>;
     try {
-      stats = await deps.db.listEnvironmentSnapshotStats();
+      rows = await deps.db.loadEnvironmentSnapshots();
     } catch (error) {
-      warn("could not list environment snapshots")(error);
+      warn("could not load environment snapshots")(error);
       return;
     }
-    for (const stat of stats) {
-      const environmentId = stat.environmentId as EnvironmentId;
+    let decodedAny = false;
+    for (const row of rows) {
+      const environmentId = row.environmentId as EnvironmentId;
       try {
         // A revoked node's cached content must disappear; an environment no
         // roster entry or catalog record can name has nothing to render it.
@@ -278,15 +394,15 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
           revokedEnvironmentIds.has(environmentId) ||
           (!rosterEnvironmentIds.has(environmentId) && !deps.hasDirectEnvironment(environmentId))
         ) {
-          await deps.db.removeEnvironmentSnapshot(environmentId);
+          await removeStoredSnapshot(environmentId);
           continue;
         }
-        const row = await deps.db.loadEnvironmentSnapshot(environmentId);
-        if (!row) continue;
+        if (decodedAny) await yieldToEventLoop();
+        decodedAny = true;
         const record = decodeStoredEnvironmentSnapshot(row.payload, environmentId);
         if (!record) {
           // Version bump or corrupt payload: discard rather than mis-decode.
-          await deps.db.removeEnvironmentSnapshot(environmentId);
+          await removeStoredSnapshot(environmentId);
           continue;
         }
         deps.store
@@ -305,12 +421,21 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
     disposed = true;
     for (const timer of dirtyTimers.values()) clearTimeout(timer);
     dirtyTimers.clear();
+    dirtySince.clear();
     if (rosterTimer) clearTimeout(rosterTimer);
     rosterTimer = null;
     for (const uninstall of uninstallers.splice(0)) uninstall();
   };
 
-  return { markDirty, capture, purgeEnvironment, hydrate, installHostedRosterMirror, dispose };
+  return {
+    markDirty,
+    capture,
+    flushPending,
+    purgeEnvironment,
+    hydrate,
+    installHostedRosterMirror,
+    dispose,
+  };
 }
 
 export type SnapshotPersistenceRuntime = ReturnType<typeof createSnapshotPersistenceRuntime>;
@@ -354,21 +479,26 @@ export function purgeEnvironmentSnapshot(environmentId: EnvironmentId): void {
 export async function initializeMobileSnapshotPersistence(deps: {
   readonly kv: Pick<KVService, "getItem" | "setItem" | "removeItem">;
   readonly hasDirectEnvironment: (environmentId: EnvironmentId) => boolean;
+  readonly subscribeBackground?: (listener: () => void) => () => void;
 }): Promise<void> {
   if (activeRuntime) return;
+  // Selection persistence needs only its own KV record, not the snapshot cache:
+  // installed first, its read overlaps the SQLite open and decode, and the
+  // restore can act the moment the directory is authoritative.
+  uninstallSelectionPersistence = installHubSelectionPersistence({
+    kv: deps.kv,
+    store: hostedHubStore,
+  });
   const runtime = createSnapshotPersistenceRuntime({
     db: getSharedSnapshotDb(),
     store: useStore,
     now: () => Date.now(),
     hasDirectEnvironment: deps.hasDirectEnvironment,
+    ...(deps.subscribeBackground ? { subscribeBackground: deps.subscribeBackground } : {}),
   });
   activeRuntime = runtime;
   await runtime.hydrate();
   runtime.installHostedRosterMirror(hostedHubStore);
-  uninstallSelectionPersistence = installHubSelectionPersistence({
-    kv: deps.kv,
-    store: hostedHubStore,
-  });
 }
 
 export function resetMobileSnapshotPersistenceForTests(): void {

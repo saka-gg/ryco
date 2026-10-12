@@ -1,4 +1,4 @@
-import { encodeBase64Url } from "@ryco/client-runtime/relay";
+import { encodeBase64Url } from "@ryco/client-runtime/relay/base64url";
 import {
   E2EE_PREKEY_LIFETIME,
   E2EE_PREKEY_ROTATION_OVERLAP,

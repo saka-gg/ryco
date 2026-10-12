@@ -1,7 +1,7 @@
 import { BlurTargetView } from "expo-blur";
 import * as Linking from "expo-linking";
 import * as SplashScreen from "expo-splash-screen";
-import { useEffect } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import { StatusBar } from "react-native";
 import { DarkTheme, DefaultTheme } from "@react-navigation/native";
 
@@ -20,6 +20,12 @@ import { ConnectionRegistryProvider } from "./providers/ConnectionRegistryProvid
 import { AppProviders } from "./providers/AppProviders";
 import { useHostedAppLifecycle } from "./hostedHub/useHostedAppLifecycle";
 import { AppAccessGate } from "./features/access/AppAccessGate";
+import {
+  isAppAccessDecided,
+  shouldHideLaunchSplash,
+  SPLASH_ACCESS_DECISION_WAIT_MS,
+  subscribeAppAccessDecided,
+} from "./features/access/launchDecision";
 
 import "../global.css";
 
@@ -43,12 +49,31 @@ const appLinking = {
   filter: (url: string) => !url.includes("expo-development-client"),
 };
 
+/**
+ * Hands the native splash straight to the gate's first real surface. Once
+ * preferences are ready the splash waits (bounded) for the access gate to
+ * decide, so a launch that resolves quickly goes splash → workspace instead of
+ * splash → launch logo → workspace.
+ */
 function SplashScreenCoordinator() {
   const { isReady } = useAppearancePreferences();
+  const accessDecided = useSyncExternalStore(subscribeAppAccessDecided, isAppAccessDecided);
+  const [decisionWaitElapsed, setDecisionWaitElapsed] = useState(false);
 
   useEffect(() => {
-    if (isReady) void SplashScreen.hide();
-  }, [isReady]);
+    if (!isReady || accessDecided) return;
+    const timer = setTimeout(() => setDecisionWaitElapsed(true), SPLASH_ACCESS_DECISION_WAIT_MS);
+    return () => clearTimeout(timer);
+  }, [accessDecided, isReady]);
+
+  const hide = shouldHideLaunchSplash({
+    preferencesReady: isReady,
+    accessDecided,
+    decisionWaitElapsed,
+  });
+  useEffect(() => {
+    if (hide) void SplashScreen.hide();
+  }, [hide]);
 
   return null;
 }

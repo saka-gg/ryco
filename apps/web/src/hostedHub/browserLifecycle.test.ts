@@ -10,6 +10,8 @@ function harness() {
   const suspend = vi.fn();
   const recover = vi.fn(async (): Promise<void> => undefined);
   const setBackgrounded = vi.fn(async () => undefined);
+  const probe = vi.fn();
+  const network = new EventTarget();
   const stop = bindHostedBrowserLifecycle({
     document,
     window,
@@ -18,13 +20,20 @@ function harness() {
     suspend,
     recover,
     setBackgrounded,
+    probe,
+    subscribeNetworkChange: (listener) => {
+      network.addEventListener("change", listener);
+      return () => network.removeEventListener("change", listener);
+    },
   });
   return {
     document,
     window,
+    network,
     suspend,
     recover,
     setBackgrounded,
+    probe,
     stop,
     setVisible(value: boolean) {
       visible = value;
@@ -38,6 +47,29 @@ function harness() {
 }
 
 describe("hosted browser lifecycle", () => {
+  it("probes the account connection on every foreground, online and network-change signal", () => {
+    const h = harness();
+    try {
+      h.setVisible(false);
+      expect(h.probe).not.toHaveBeenCalled();
+      h.setVisible(true);
+      expect(h.probe).toHaveBeenCalledTimes(1);
+      h.window.dispatchEvent(new Event("pageshow"));
+      expect(h.probe).toHaveBeenCalledTimes(2);
+      h.network.dispatchEvent(new Event("change"));
+      expect(h.probe).toHaveBeenCalledTimes(3);
+      h.setOnline(false);
+      h.network.dispatchEvent(new Event("change"));
+      expect(h.probe).toHaveBeenCalledTimes(3);
+      h.setOnline(true);
+      expect(h.probe).toHaveBeenCalledTimes(4);
+    } finally {
+      h.stop();
+    }
+    h.network.dispatchEvent(new Event("change"));
+    expect(h.probe).toHaveBeenCalledTimes(4);
+  });
+
   it("keeps the transport and demand when switching to another tab", async () => {
     const h = harness();
     try {

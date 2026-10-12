@@ -20,6 +20,19 @@
  * instance. Identity-less legacy cache contents are ignored and replaced by
  * the first live refresh.
  *
+ * Probe policy
+ * ------------
+ * Building the registry never probes. The persisted snapshot of every
+ * configured instance is published at once, before any driver exists. Each
+ * probed snapshot is persisted with a fingerprint of its inputs (binary on
+ * disk, settings, server build); when an instance's driver arrives and the
+ * fingerprint still matches, the persisted snapshot is adopted as fresh and
+ * no probe runs. Stale instances are probed only on demand: a client
+ * subscribing to server config (`revalidateStale`) starts one background pass
+ * with low concurrency and staggered starts, and explicit refreshes probe
+ * immediately. Instances added or rebuilt by a later settings change are
+ * probed right away, as before.
+ *
  * @module ProviderRegistryLive
  */
 import {
@@ -29,17 +42,36 @@ import {
   type ServerProvider,
   type ServerProviderUpdateState,
 } from "@ryco/contracts";
-import { Cause, Effect, Equal, FileSystem, Layer, Option, Path, PubSub, Ref, Stream } from "effect";
+import {
+  Cause,
+  Clock,
+  Deferred,
+  Duration,
+  Effect,
+  Equal,
+  Exit,
+  FileSystem,
+  Layer,
+  Option,
+  Path,
+  PubSub,
+  Ref,
+  Stream,
+} from "effect";
 import * as Semaphore from "effect/Semaphore";
 
 import { ServerConfig } from "../../config.ts";
-import { ProviderInstanceRegistry } from "../Services/ProviderInstanceRegistry.ts";
+import { trackStartupPhase } from "../../startupStallMonitor.ts";
+import {
+  type ConfiguredProviderIdentity,
+  ProviderInstanceRegistry,
+} from "../Services/ProviderInstanceRegistry.ts";
 import { ProviderRegistry, type ProviderRegistryShape } from "../Services/ProviderRegistry.ts";
 import {
-  hydrateCachedProvider,
-  isCachedProviderCorrelated,
+  hydrateCachedProviderFromConfig,
   orderProviderSnapshots,
-  readProviderStatusCache,
+  type ProviderProbeFreshness,
+  readProviderStatusCacheEntry,
   resolveProviderStatusCachePath,
   writeProviderStatusCache,
 } from "../providerStatusCache.ts";
@@ -49,22 +81,34 @@ import type { ProviderSnapshotSource } from "../builtInProviderCatalog.ts";
 import { ignoreProviderBackgroundCause } from "../ignoreProviderBackgroundCause.ts";
 import { BUNDLED_MODEL_MANIFEST, ModelManifest } from "../ModelManifest.ts";
 import { applyProviderCompatibility } from "../providerCompatibility.ts";
+import { configuredIdentityOfInstance } from "./ProviderInstanceRegistryLive.ts";
 
+/** Explicit refreshes (refresh button, maintenance actions) probe this many instances at once. */
 const PROVIDER_REFRESH_CONCURRENCY = 4;
+/** Background revalidation never runs more probes (each a CLI process tree) at once. */
+const PROVIDER_BACKGROUND_REVALIDATION_CONCURRENCY = 2;
+/**
+ * Spacing between background probe starts. The first probe also waits one interval, so the
+ * client whose subscription requested the pass receives its config snapshot first.
+ */
+const PROVIDER_BACKGROUND_REVALIDATION_STAGGER = Duration.millis(250);
 
-const loadProviders = (
-  providerSources: ReadonlyArray<ProviderSnapshotSource>,
-): Effect.Effect<ReadonlyArray<ServerProvider>> =>
-  Effect.forEach(
-    providerSources,
-    (providerSource) =>
-      providerSource.getSnapshot.pipe(
-        Effect.flatMap((snapshot) => correlateSnapshotWithSource(providerSource, snapshot)),
-      ),
-    {
-      concurrency: "unbounded",
-    },
-  );
+/**
+ * Persisted freshness is only trusted for definitive probe outcomes. Warnings and errors (missing
+ * CLI, unverified auth) are re-probed after a restart, so a fix outside Ryco is picked up.
+ */
+const isPersistableProbeOutcome = (provider: ServerProvider): boolean =>
+  provider.status === "ready" || provider.status === "disabled";
+
+interface RevalidationPassState {
+  readonly running: Deferred.Deferred<void> | null;
+  readonly rerun: boolean;
+}
+
+interface PersistedProviderSnapshot {
+  readonly provider: ServerProvider;
+  readonly probeFreshness: ProviderProbeFreshness | undefined;
+}
 
 const makeManualProviderMaintenanceCapabilities = (provider: ProviderDriverKind) =>
   makeManualOnlyProviderMaintenanceCapabilities({
@@ -189,6 +233,13 @@ const buildSnapshotSource = (instance: ProviderInstance): ProviderSnapshotSource
   revalidate: instance.snapshot.revalidate,
   refresh: instance.snapshot.refresh,
   streamChanges: instance.snapshot.streamChanges,
+  ...(instance.snapshot.isFresh ? { isFresh: instance.snapshot.isFresh } : {}),
+  ...(instance.snapshot.probeFingerprint
+    ? { probeFingerprint: instance.snapshot.probeFingerprint }
+    : {}),
+  ...(instance.snapshot.adoptPersistedSnapshot
+    ? { adoptPersistedSnapshot: instance.snapshot.adoptPersistedSnapshot }
+    : {}),
 });
 
 export const ProviderRegistryLive = Layer.effect(
@@ -215,80 +266,80 @@ export const ProviderRegistryLive = Layer.effect(
       PubSub.shutdown,
     );
 
-    // Boot-only: hydrate `providersRef` from the on-disk per-instance
-    // cache so the UI has something to render during the first refresh.
-    // Instances added post-boot skip this path; their first entry in
-    // `providersRef` comes from the reactive `syncLiveSources` pass
-    // below.
-    const bootInstances = yield* instanceRegistry.listInstances;
-    const bootSources = bootInstances.map(buildSnapshotSource);
-    const fallbackProviders = yield* loadProviders(bootSources);
-    const fallbackByInstance = new Map<ProviderInstanceId, ServerProvider>();
-    for (let index = 0; index < fallbackProviders.length; index++) {
-      const provider = fallbackProviders[index];
-      const source = bootSources[index];
-      if (provider === undefined || source === undefined) {
-        continue;
-      }
-      fallbackByInstance.set(source.instanceId, provider);
-    }
-
-    const cachedProviders = yield* Effect.forEach(
-      bootSources,
-      (source) =>
-        Effect.gen(function* () {
-          // One cache file per configured instance. For the default
-          // instance of a built-in kind the path equals `<kind>.json` —
-          // identical to the legacy filename. We still require the cache
-          // payload to carry matching instance id + driver kind; old
-          // identity-less payloads are discarded and the awaited refresh
-          // below repopulates the cache.
-          const filePath = yield* resolveProviderStatusCachePath({
-            cacheDir: config.providerStatusCacheDir,
-            instanceId: source.instanceId,
-          }).pipe(Effect.provideService(Path.Path, path));
-          const fallbackProvider = fallbackByInstance.get(source.instanceId);
-          if (fallbackProvider === undefined) {
-            return undefined;
-          }
-          return yield* readProviderStatusCache(filePath).pipe(
-            Effect.provideService(FileSystem.FileSystem, fileSystem),
-            Effect.flatMap((cachedProvider) => {
-              if (cachedProvider === undefined) {
-                return Effect.void.pipe(Effect.as(undefined as ServerProvider | undefined));
-              }
-              const correlation = {
-                cachedProvider,
-                fallbackProvider,
-              } as const;
-              if (!isCachedProviderCorrelated(correlation)) {
-                return Effect.logWarning("provider status cache identity mismatch, ignoring", {
-                  path: filePath,
-                  instanceId: source.instanceId,
-                  cachedInstanceId: cachedProvider.instanceId ?? null,
-                  driver: source.driverKind,
-                  cachedDriver: cachedProvider.driver ?? null,
-                }).pipe(Effect.as(undefined as ServerProvider | undefined));
-              }
-              return Effect.succeed(hydrateCachedProvider(correlation));
-            }),
-          );
-        }),
-      { concurrency: "unbounded" },
-    ).pipe(
-      Effect.map((providers) =>
-        orderProviderSnapshots(
-          providers.filter((provider): provider is ServerProvider => provider !== undefined),
-        ),
-      ),
+    // Boot: read the persisted snapshot of every configured instance before any driver exists
+    // (the hydration layer builds drivers only after the HTTP listener serves). Registries
+    // without deferral report their live instances instead.
+    const configuredIdentities = yield* (
+      instanceRegistry.listConfigured ??
+        instanceRegistry.listInstances.pipe(
+          Effect.map((instances) => instances.map(configuredIdentityOfInstance)),
+        )
     );
-    const providersRef = yield* Ref.make<ReadonlyArray<ServerProvider>>(cachedProviders);
+    const readPersistedSnapshot = (identity: ConfiguredProviderIdentity) =>
+      Effect.gen(function* () {
+        // One cache file per configured instance. For the default instance of a built-in kind
+        // the path equals the legacy `<kind>.json`. The payload must still carry a matching
+        // instance id + driver kind; identity-less legacy payloads are discarded and replaced by
+        // the first probe.
+        const filePath = yield* resolveProviderStatusCachePath({
+          cacheDir: config.providerStatusCacheDir,
+          instanceId: identity.instanceId,
+        }).pipe(Effect.provideService(Path.Path, path));
+        const entry = yield* readProviderStatusCacheEntry(filePath).pipe(
+          Effect.provideService(FileSystem.FileSystem, fileSystem),
+        );
+        if (entry === undefined) {
+          return undefined;
+        }
+        const provider = hydrateCachedProviderFromConfig({
+          cachedProvider: entry.provider,
+          identity,
+        });
+        if (provider === undefined) {
+          if (
+            entry.provider.instanceId !== identity.instanceId ||
+            entry.provider.driver !== identity.driverKind
+          ) {
+            yield* Effect.logWarning("provider status cache identity mismatch, ignoring", {
+              path: filePath,
+              instanceId: identity.instanceId,
+              cachedInstanceId: entry.provider.instanceId ?? null,
+              driver: identity.driverKind,
+              cachedDriver: entry.provider.driver ?? null,
+            });
+          }
+          return undefined;
+        }
+        return {
+          provider,
+          probeFreshness: entry.probeFreshness,
+        } satisfies PersistedProviderSnapshot;
+      });
+    const persistedSnapshots = new Map<ProviderInstanceId, PersistedProviderSnapshot>();
+    for (const persisted of yield* trackStartupPhase(
+      "provider.status-cache.seed",
+      Effect.forEach(configuredIdentities, readPersistedSnapshot, { concurrency: "unbounded" }),
+    )) {
+      if (persisted !== undefined) {
+        persistedSnapshots.set(persisted.provider.instanceId, persisted);
+      }
+    }
+    // Configured instances whose driver has not arrived yet. The first arrival of each adopts
+    // or keeps its persisted snapshot instead of probing at boot.
+    const awaitingBootArrival = new Set<ProviderInstanceId>(
+      configuredIdentities.map((identity) => identity.instanceId),
+    );
+    const providersRef = yield* Ref.make<ReadonlyArray<ServerProvider>>([]);
+    // The freshness record persisted with each instance's snapshots: set before every probe (so
+    // publications that race the probe's return carry it) and on adoption.
+    const probeFreshnessRef = yield* Ref.make<
+      ReadonlyMap<ProviderInstanceId, ProviderProbeFreshness>
+    >(new Map());
     const maintenanceActionStatesRef = yield* Ref.make<
       ReadonlyMap<ProviderInstanceId, { readonly update?: ServerProviderUpdateState | undefined }>
     >(new Map());
 
-    // Live-source registry — the dynamic counterpart to the boot-time
-    // `bootSources`. Keyed by `instanceId`; the stored `ProviderInstance`
+    // Live-source registry. Keyed by `instanceId`; the stored `ProviderInstance`
     // reference is used for identity equality so "no-op" reconciles
     // (settings unchanged) skip re-subscribing + re-probing.
     const liveSubsRef = yield* Ref.make<ReadonlyMap<ProviderInstanceId, ProviderInstance>>(
@@ -318,7 +369,10 @@ export const ProviderRegistryLive = Layer.effect(
           cacheDir: config.providerStatusCacheDir,
           instanceId: key,
         }).pipe(Effect.provideService(Path.Path, path));
-        yield* writeProviderStatusCache({ filePath, provider }).pipe(
+        const probeFreshness = isPersistableProbeOutcome(provider)
+          ? (yield* Ref.get(probeFreshnessRef)).get(key)
+          : undefined;
+        yield* writeProviderStatusCache({ filePath, provider, probeFreshness }).pipe(
           Effect.provideService(FileSystem.FileSystem, fileSystem),
           Effect.provideService(Path.Path, path),
           Effect.tapError(Effect.logError),
@@ -475,10 +529,26 @@ export const ProviderRegistryLive = Layer.effect(
       },
     );
 
+    /**
+     * Run one probe of `providerSource`. The fingerprint is computed and recorded before the
+     * probe starts, so every snapshot this probe publishes is persisted with it.
+     */
+    const probeSource = <A>(providerSource: ProviderSnapshotSource, probe: Effect.Effect<A>) =>
+      Effect.gen(function* () {
+        if (providerSource.probeFingerprint) {
+          const fingerprint = yield* providerSource.probeFingerprint;
+          const checkedAt = new Date(yield* Clock.currentTimeMillis).toISOString();
+          yield* Ref.update(probeFreshnessRef, (previous) =>
+            new Map(previous).set(providerSource.instanceId, { fingerprint, checkedAt }),
+          );
+        }
+        return yield* trackStartupPhase(`provider.probe:${providerSource.instanceId}`, probe);
+      });
+
     const refreshOneSource = Effect.fn("refreshOneSource")(function* (
       providerSource: ProviderSnapshotSource,
     ) {
-      return yield* providerSource.refresh.pipe(
+      return yield* probeSource(providerSource, providerSource.refresh).pipe(
         Effect.flatMap((nextProvider) =>
           correlateSnapshotWithSource(providerSource, nextProvider).pipe(
             Effect.flatMap(syncProvider),
@@ -486,11 +556,17 @@ export const ProviderRegistryLive = Layer.effect(
         ),
       );
     });
+
+    const isSourceFresh = (providerSource: ProviderSnapshotSource) =>
+      providerSource.isFresh ?? Effect.succeed(false);
 
     const revalidateOneSource = Effect.fn("revalidateOneSource")(function* (
       providerSource: ProviderSnapshotSource,
     ) {
-      return yield* providerSource.revalidate.pipe(
+      const revalidated = (yield* isSourceFresh(providerSource))
+        ? providerSource.revalidate
+        : probeSource(providerSource, providerSource.revalidate);
+      return yield* revalidated.pipe(
         Effect.flatMap((nextProvider) =>
           correlateSnapshotWithSource(providerSource, nextProvider).pipe(
             Effect.flatMap(syncProvider),
@@ -499,15 +575,102 @@ export const ProviderRegistryLive = Layer.effect(
       );
     });
 
-    const revalidateStale = Effect.fn("revalidateStale")(function* () {
+    /**
+     * One background pass: probe every stale live source, at most
+     * `PROVIDER_BACKGROUND_REVALIDATION_CONCURRENCY` at a time, with starts spaced by
+     * `PROVIDER_BACKGROUND_REVALIDATION_STAGGER`. Fresh sources cost nothing.
+     */
+    const revalidateStaleSourcesInBackground = Effect.gen(function* () {
       const sources = yield* getLiveSources;
-      return yield* Effect.forEach(sources, revalidateOneSource, {
-        concurrency: PROVIDER_REFRESH_CONCURRENCY,
-        discard: true,
-      }).pipe(Effect.andThen(Ref.get(providersRef)));
+      const stale = yield* Effect.filter(sources, (source) =>
+        isSourceFresh(source).pipe(Effect.map((fresh) => !fresh)),
+      );
+      if (stale.length === 0) {
+        return;
+      }
+      const passStartedAtMs = yield* Clock.currentTimeMillis;
+      const staggerMs = Duration.toMillis(PROVIDER_BACKGROUND_REVALIDATION_STAGGER);
+      yield* Effect.forEach(
+        stale,
+        (source, index) =>
+          Clock.currentTimeMillis.pipe(
+            Effect.flatMap((nowMs) =>
+              Effect.sleep(Math.max(0, passStartedAtMs + (index + 1) * staggerMs - nowMs)),
+            ),
+            Effect.andThen(revalidateOneSource(source)),
+            ignoreProviderBackgroundCause(
+              "provider background revalidation failed; preserving cached provider",
+            ),
+          ),
+        { concurrency: PROVIDER_BACKGROUND_REVALIDATION_CONCURRENCY, discard: true },
+      );
+    });
+
+    // Single-flight background revalidation owned by the registry scope (a disconnecting client
+    // must not cancel probes other clients wait for). Clients that ask during a pass join it;
+    // drivers that arrive during a pass queue exactly one more pass, which covers them.
+    const revalidationDemandedRef = yield* Ref.make(false);
+    const revalidationPassRef = yield* Ref.make<RevalidationPassState>({
+      running: null,
+      rerun: false,
+    });
+
+    const runRevalidationPasses = (done: Deferred.Deferred<void>): Effect.Effect<void> =>
+      revalidateStaleSourcesInBackground.pipe(
+        Effect.andThen(
+          Ref.modify(revalidationPassRef, (state) =>
+            state.rerun
+              ? ([true, { running: done, rerun: false }] as const)
+              : ([false, { running: null, rerun: false }] as const),
+          ),
+        ),
+        Effect.flatMap((rerun) => (rerun ? runRevalidationPasses(done) : Effect.void)),
+      );
+
+    const requestBackgroundRevalidation = Effect.fn("requestBackgroundRevalidation")(
+      function* (options: { readonly rerunIfRunning: boolean }) {
+        yield* Ref.set(revalidationDemandedRef, true);
+        const candidate = yield* Deferred.make<void>();
+        const selection = yield* Ref.modify(
+          revalidationPassRef,
+          (
+            state,
+          ): readonly [
+            { readonly done: Deferred.Deferred<void>; readonly start: boolean },
+            RevalidationPassState,
+          ] =>
+            state.running !== null
+              ? [
+                  { done: state.running, start: false },
+                  { running: state.running, rerun: state.rerun || options.rerunIfRunning },
+                ]
+              : [
+                  { done: candidate, start: true },
+                  { running: candidate, rerun: false },
+                ],
+        );
+        if (selection.start) {
+          yield* runRevalidationPasses(candidate).pipe(
+            Effect.onExit((exit) =>
+              Ref.update(revalidationPassRef, (state) =>
+                state.running === candidate ? { running: null, rerun: false } : state,
+              ).pipe(Effect.andThen(Deferred.done(candidate, Exit.asVoid(exit)))),
+            ),
+            Effect.forkIn(registryScope),
+          );
+        }
+        return selection.done;
+      },
+    );
+
+    const revalidateStale = Effect.fn("revalidateStale")(function* () {
+      const done = yield* requestBackgroundRevalidation({ rerunIfRunning: false });
+      yield* Deferred.await(done);
+      return yield* Ref.get(providersRef);
     });
 
     const refreshAll = Effect.fn("refreshAll")(function* () {
+      yield* Ref.set(revalidationDemandedRef, true);
       const sources = yield* getLiveSources;
       return yield* Effect.forEach(sources, (source) => refreshOneSource(source), {
         concurrency: PROVIDER_REFRESH_CONCURRENCY,
@@ -548,10 +711,50 @@ export const ProviderRegistryLive = Layer.effect(
       const instance = Array.from((yield* Ref.get(liveSubsRef)).values()).find(
         (candidate) => candidate.instanceId === instanceId,
       );
-      return (
-        instance?.snapshot.maintenanceCapabilities ??
-        makeManualProviderMaintenanceCapabilities(provider)
+      return instance
+        ? yield* instance.snapshot.maintenanceCapabilities
+        : makeManualProviderMaintenanceCapabilities(provider);
+    });
+
+    /**
+     * First arrival of a configured instance's driver. Adopt the persisted snapshot when its
+     * probe fingerprint still matches, so the instance counts as fresh without probing.
+     * Otherwise keep the persisted snapshot as last-known state, or publish the driver's pending
+     * placeholder when nothing was persisted; a demand probes it later.
+     */
+    const settleBootArrival = Effect.fn("settleBootArrival")(function* (
+      source: ProviderSnapshotSource,
+    ) {
+      const persisted = persistedSnapshots.get(source.instanceId);
+      persistedSnapshots.delete(source.instanceId);
+      const persistedFreshness = persisted?.probeFreshness;
+      if (
+        persisted !== undefined &&
+        persistedFreshness !== undefined &&
+        source.probeFingerprint !== undefined &&
+        source.adoptPersistedSnapshot !== undefined
+      ) {
+        const checkedAtMs = Date.parse(persistedFreshness.checkedAt);
+        const fingerprint = yield* source.probeFingerprint;
+        const adopted =
+          Number.isFinite(checkedAtMs) &&
+          fingerprint === persistedFreshness.fingerprint &&
+          (yield* source.adoptPersistedSnapshot({ snapshot: persisted.provider, checkedAtMs }));
+        if (adopted) {
+          yield* Ref.update(probeFreshnessRef, (previous) =>
+            new Map(previous).set(source.instanceId, persistedFreshness),
+          );
+          return;
+        }
+      }
+      const current = yield* Ref.get(providersRef);
+      if (current.some((provider) => provider.instanceId === source.instanceId)) {
+        return;
+      }
+      const placeholder = yield* source.getSnapshot.pipe(
+        Effect.flatMap((snapshot) => correlateSnapshotWithSource(source, snapshot)),
       );
+      yield* upsertProviders([placeholder], { persist: false });
     });
 
     /**
@@ -560,24 +763,20 @@ export const ProviderRegistryLive = Layer.effect(
      *   - subscribe to each newly-added or rebuilt instance's
      *     `streamChanges` (so periodic + enrichment refreshes land in
      *     `providersRef`);
-     *   - force-refresh each newly-added/rebuilt instance and feed the
-     *     result directly into `providersRef`, bypassing the PubSub
-     *     attachment race that otherwise drops the initial probe;
+     *   - settle the first arrival of each configured instance without
+     *     probing (see `settleBootArrival`);
+     *   - probe instances added or rebuilt by a later settings change and
+     *     await the result, so callers observe the re-probed state after the
+     *     mutation pipeline settles;
      *   - prune `providersRef` of instances that no longer exist.
-     *
-     * Boot-time refreshes are forked so slow provider probes do not block
-     * server startup. Later refreshes, including settings-triggered instance
-     * rebuilds, are awaited so callers observe the re-probed state after the
-     * mutation pipeline settles.
      *
      * Per-instance subscription fibers are not tracked explicitly. When
      * a rebuilt instance's old child scope closes, its PubSub shuts
      * down and our `Stream.runForEach` fiber exits naturally.
      */
-    const syncLiveSources = (options?: { readonly refreshMode?: "await" | "background" }) =>
+    const syncLiveSources = () =>
       syncSemaphore.withPermits(1)(
         Effect.gen(function* () {
-          const refreshMode = options?.refreshMode ?? "await";
           const instances = yield* instanceRegistry.listInstances;
           const unavailableProviders = yield* instanceRegistry.listUnavailable;
           const nextByInstance = new Map<ProviderInstanceId, ProviderInstance>(
@@ -612,10 +811,8 @@ export const ProviderRegistryLive = Layer.effect(
           }
 
           // Fork long-lived subscriptions to each new/rebuilt instance's
-          // change stream BEFORE kicking off refreshes — if the driver's
-          // own initial probe (line 140 in `makeManagedServerProvider`)
-          // wins the refreshSemaphore race, its PubSub publish must land
-          // in an active subscriber or the result is dropped.
+          // change stream BEFORE any probe runs, so every publish lands in
+          // an active subscriber.
           for (const [, instance] of newlyAdded) {
             const source = buildSnapshotSource(instance);
             yield* Stream.runForEach(source.streamChanges, (provider) =>
@@ -629,27 +826,61 @@ export const ProviderRegistryLive = Layer.effect(
           }
           yield* Ref.set(liveSubsRef, nextSubs);
 
-          // Force-refresh every new/rebuilt instance in parallel. The
-          // refresh's result is piped directly into `syncProvider`, so
-          // `providersRef` is populated regardless of PubSub subscription
-          // timing. Failures are logged and swallowed so one bad driver
-          // cannot wedge the whole registry.
-          const refreshNewlyAdded = Effect.forEach(
-            newlyAdded,
+          if (newlyAdded.length > 0) {
+            // A new or rebuilt instance invalidates its predecessor's recorded probe freshness.
+            yield* Ref.update(probeFreshnessRef, (previous) => {
+              const next = new Map(previous);
+              for (const [instanceId] of newlyAdded) next.delete(instanceId);
+              return next;
+            });
+          }
+
+          const bootArrivals = newlyAdded.filter(([instanceId]) =>
+            awaitingBootArrival.has(instanceId),
+          );
+          for (const [instanceId] of bootArrivals) awaitingBootArrival.delete(instanceId);
+          // Configured instances whose drivers are still being built keep their persisted
+          // snapshots; ones a settings change removed before they arrived are dropped.
+          if (instanceRegistry.listConfigured !== undefined) {
+            const configuredIds = new Set(
+              (yield* instanceRegistry.listConfigured).map((identity) => identity.instanceId),
+            );
+            for (const instanceId of awaitingBootArrival) {
+              if (!configuredIds.has(instanceId)) awaitingBootArrival.delete(instanceId);
+            }
+          }
+          for (const instanceId of awaitingBootArrival) knownInstanceIds.add(instanceId);
+          const settingsArrivals = newlyAdded.filter((arrival) => !bootArrivals.includes(arrival));
+
+          yield* Effect.forEach(
+            bootArrivals,
+            ([, instance]) =>
+              settleBootArrival(buildSnapshotSource(instance)).pipe(
+                ignoreProviderBackgroundCause(
+                  "provider registry could not settle a booted instance; preserving cached provider",
+                ),
+              ),
+            { concurrency: "unbounded", discard: true },
+          );
+          // A client already asked for fresh providers before these drivers existed.
+          if (bootArrivals.length > 0 && (yield* Ref.get(revalidationDemandedRef))) {
+            yield* requestBackgroundRevalidation({ rerunIfRunning: true });
+          }
+
+          // Probe instances a settings change added or rebuilt. The result is
+          // piped straight into `syncProvider`, so `providersRef` is
+          // populated regardless of PubSub subscription timing. Failures are
+          // logged and swallowed so one bad driver cannot wedge the registry.
+          yield* Effect.forEach(
+            settingsArrivals,
             ([, instance]) =>
               refreshOneSource(buildSnapshotSource(instance)).pipe(
                 ignoreProviderBackgroundCause(
-                  "provider registry initial instance refresh failed; preserving cached provider",
+                  "provider registry instance refresh failed; preserving cached provider",
                 ),
               ),
             { concurrency: PROVIDER_REFRESH_CONCURRENCY, discard: true },
           );
-
-          if (refreshMode === "background") {
-            yield* Effect.forkScoped(refreshNewlyAdded);
-          } else {
-            yield* refreshNewlyAdded;
-          }
 
           yield* upsertProviders(unavailableProviders, {
             persist: false,
@@ -697,13 +928,12 @@ export const ProviderRegistryLive = Layer.effect(
       }),
     );
 
-    // Seed `providersRef` with the boot-time fallback snapshots so
-    // consumers calling `getProviders` immediately after layer build see
-    // a populated list — even before the first `syncLiveSources` refresh
-    // resolves. Cached snapshots (already in `providersRef`) merge with
-    // these via `upsertProviders` so on-disk state wins where present
-    // and pending fallbacks fill the gaps.
-    yield* upsertProviders(fallbackProviders, { publish: false });
+    // Publish the persisted snapshots read at boot, rated against the current manifest. Nothing
+    // is written back: these files are exactly what was just read.
+    yield* upsertProviders(
+      [...persistedSnapshots.values()].map((persisted) => persisted.provider),
+      { publish: false, persist: false },
+    );
     // Subscribe to registry mutations BEFORE running the initial sync.
     // `subscribeChanges` acquires the dequeue synchronously in this
     // fibre; the subscription is active the instant this `yield*`
@@ -733,10 +963,9 @@ export const ProviderRegistryLive = Layer.effect(
     // was dropped, which made any settings change that replaced an
     // instance never propagate to the aggregator's `providersRef`.)
     const instanceChanges = yield* instanceRegistry.subscribeChanges;
-    // Initial sync: subscribe and kick off refreshes for every instance
-    // present at boot. Provider probes can spawn subprocesses, so run them
-    // in the background and return cached/pending snapshots immediately.
-    yield* syncLiveSources({ refreshMode: "background" });
+    // Initial sync: subscribe to every instance already present (registries without boot
+    // deferral). These are boot arrivals too, so nothing probes here.
+    yield* syncLiveSources();
     // React to registry mutations — instance added / removed / rebuilt.
     // `Stream.fromSubscription` builds a stream over the pre-acquired
     // subscription rather than subscribing on stream start, which is

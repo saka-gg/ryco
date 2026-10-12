@@ -228,6 +228,17 @@ export interface ProviderServiceShape {
   readonly listSessions: () => Effect.Effect<ReadonlyArray<ProviderSession>>;
 
   /**
+   * The live session of one thread, exactly as `listSessions()` reports it, but
+   * reading only that thread's binding and its instance's sessions. Hot paths
+   * (turn start, ingestion, checkpoints) need one thread, never the whole list.
+   * Optional so existing test doubles stay valid; callers go through
+   * `findThreadSession`, which falls back to `listSessions`.
+   */
+  readonly getSessionForThread?: (
+    threadId: ThreadId,
+  ) => Effect.Effect<Option.Option<ProviderSession>>;
+
+  /**
    * Read capabilities for the adapter bound to a configured provider instance.
    */
   readonly getCapabilities: (

@@ -1,4 +1,4 @@
-import { RELAY_MAX_RETRY_AFTER_MS } from "@ryco/contracts";
+import { RELAY_MAX_RETRY_AFTER_MS } from "@ryco/contracts/relay";
 
 export interface HostedReconnectPolicyOptions {
   readonly baseDelayMs?: number;

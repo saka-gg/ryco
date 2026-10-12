@@ -12,7 +12,11 @@ import { acquireStoragePathUseLease } from "../../storage/lifecycle.ts";
  *
  * @module ProviderServiceLive
  */
-import { ASSISTANT_ATTACHMENT_INSTRUCTIONS } from "../../assistantAttachments.ts";
+import {
+  isSlashCommandInput,
+  makeAttachmentInstructionTracker,
+  withAttachmentInstructions,
+} from "../attachmentInstructionDelivery.ts";
 import {
   ModelSelection,
   NonNegativeInt,
@@ -890,6 +894,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const subscribedAdapters = yield* Ref.make(
     new Map<ProviderInstanceId, ProviderAdapterShape<ProviderAdapterError>>(),
   );
+  const attachmentInstructionTracker = makeAttachmentInstructionTracker();
 
   const getAdapterEntries = Ref.get(subscribedAdapters).pipe(
     Effect.map((map) => Array.from(map.entries())),
@@ -1700,10 +1705,20 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         "provider.kind": routed.adapter.provider,
         ...(input.modelSelection?.model ? { "provider.model": input.modelSelection.model } : {}),
       });
-      const turn = yield* submitTurn(routed, {
-        ...input,
-        input: `${ASSISTANT_ATTACHMENT_INSTRUCTIONS}\n\n${input.input ?? ""}`,
-      });
+      // Session-level adapters carry the attachment instructions themselves;
+      // others get them once per runtime. Native commands go out verbatim.
+      const runtimeSessionId = routed.session?.runtimeSessionId;
+      const prefixInstructions =
+        routed.adapter.capabilities.attachmentInstructions !== "session" &&
+        !isSlashCommandInput(input.input) &&
+        attachmentInstructionTracker.needs(input.threadId, runtimeSessionId);
+      const turn = yield* submitTurn(
+        routed,
+        prefixInstructions ? { ...input, input: withAttachmentInstructions(input.input) } : input,
+      );
+      if (prefixInstructions) {
+        attachmentInstructionTracker.markDelivered(input.threadId, runtimeSessionId);
+      }
       if (routed.session?.runtimeSessionId) {
         yield* recordRuntimeActivity(input.threadId, routed.session.runtimeSessionId);
       }
@@ -2157,36 +2172,72 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     },
   );
 
+  const listInstanceSessions = (
+    instanceId: ProviderInstanceId,
+    adapter: ProviderAdapterShape<ProviderAdapterError>,
+  ) =>
+    adapter.listSessions().pipe(
+      Effect.map((sessions) =>
+        sessions.map((session) => ({
+          ...session,
+          providerInstanceId: instanceId,
+        })),
+      ),
+    );
+
+  /** A thread's binding, or undefined when it has none or the read fails. */
+  const readBindingOrUndefined = (threadId: ThreadId) =>
+    directory.getBinding(threadId).pipe(
+      Effect.map(Option.getOrUndefined),
+      Effect.orElseSucceed(() => undefined),
+    );
+
+  /**
+   * A live adapter session as the service reports it: only the runtime the
+   * thread's authoritative binding names, with the binding's runtime id, resume
+   * cursor and runtime mode. Undefined for any other runtime of the thread.
+   */
+  const reportedSession = (
+    session: ProviderSession,
+    binding: ProviderRuntimeBinding,
+  ): ProviderSession | undefined => {
+    const overrides: {
+      resumeCursor?: ProviderSession["resumeCursor"];
+      runtimeMode?: ProviderSession["runtimeMode"];
+      providerInstanceId?: ProviderSession["providerInstanceId"];
+      runtimeSessionId?: ProviderSession["runtimeSessionId"];
+    } = {};
+    overrides.providerInstanceId = dieOnMissingBindingInstanceId(
+      "ProviderService.listSessions",
+      binding,
+    );
+    if (!sessionMatchesBinding(session, overrides.providerInstanceId, binding)) {
+      return undefined;
+    }
+    if (binding.runtimeSessionId !== undefined) {
+      overrides.runtimeSessionId = binding.runtimeSessionId;
+    }
+    if (session.resumeCursor === undefined && binding.resumeCursor !== undefined) {
+      overrides.resumeCursor = binding.resumeCursor;
+    }
+    if (binding.runtimeMode !== undefined) {
+      overrides.runtimeMode = binding.runtimeMode;
+    }
+    return Object.assign({}, session, overrides);
+  };
+
   const listSessions: ProviderServiceShape["listSessions"] = Effect.fn("listSessions")(
     function* () {
       const currentAdapters = yield* getAdapterEntries;
       const sessionsByProvider = yield* Effect.forEach(currentAdapters, ([instanceId, adapter]) =>
-        adapter.listSessions().pipe(
-          Effect.map((sessions) =>
-            sessions.map((session) => ({
-              ...session,
-              providerInstanceId: instanceId,
-            })),
-          ),
-        ),
+        listInstanceSessions(instanceId, adapter),
       );
       const activeSessions = sessionsByProvider.flatMap((sessions) => sessions);
-      const persistedBindings = yield* directory.listThreadIds().pipe(
-        Effect.flatMap((threadIds) =>
-          Effect.forEach(
-            threadIds,
-            (threadId) =>
-              directory
-                .getBinding(threadId)
-                .pipe(Effect.orElseSucceed(() => Option.none<ProviderRuntimeBinding>())),
-            { concurrency: "unbounded" },
-          ),
-        ),
-        Effect.orElseSucceed(() => [] as Array<Option.Option<ProviderRuntimeBinding>>),
-      );
+      // Only a thread with a live runtime can be reported, so read just those
+      // bindings: stopped bindings accumulate with history and never match.
       const bindingsByThreadId = new Map<ThreadId, ProviderRuntimeBinding>();
-      for (const bindingOption of persistedBindings) {
-        const binding = Option.getOrUndefined(bindingOption);
+      for (const threadId of new Set(activeSessions.map((session) => session.threadId))) {
+        const binding = yield* readBindingOrUndefined(threadId);
         if (binding) {
           bindingsByThreadId.set(binding.threadId, binding);
         }
@@ -2195,37 +2246,42 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       const sessions: ProviderSession[] = [];
       for (const session of activeSessions) {
         const binding = bindingsByThreadId.get(session.threadId);
-        if (!binding) {
-          continue;
+        const reported = binding ? reportedSession(session, binding) : undefined;
+        if (reported) {
+          sessions.push(reported);
         }
-
-        const overrides: {
-          resumeCursor?: ProviderSession["resumeCursor"];
-          runtimeMode?: ProviderSession["runtimeMode"];
-          providerInstanceId?: ProviderSession["providerInstanceId"];
-          runtimeSessionId?: ProviderSession["runtimeSessionId"];
-        } = {};
-        overrides.providerInstanceId = dieOnMissingBindingInstanceId(
-          "ProviderService.listSessions",
-          binding,
-        );
-        if (!sessionMatchesBinding(session, overrides.providerInstanceId, binding)) {
-          continue;
-        }
-        if (binding.runtimeSessionId !== undefined) {
-          overrides.runtimeSessionId = binding.runtimeSessionId;
-        }
-        if (session.resumeCursor === undefined && binding.resumeCursor !== undefined) {
-          overrides.resumeCursor = binding.resumeCursor;
-        }
-        if (binding.runtimeMode !== undefined) {
-          overrides.runtimeMode = binding.runtimeMode;
-        }
-        sessions.push(Object.assign({}, session, overrides));
       }
       return sessions;
     },
   );
+
+  const getSessionForThread: NonNullable<ProviderServiceShape["getSessionForThread"]> = Effect.fn(
+    "getSessionForThread",
+  )(function* (threadId) {
+    const binding = yield* readBindingOrUndefined(threadId);
+    if (!binding) {
+      return Option.none<ProviderSession>();
+    }
+    if (binding.providerInstanceId === undefined) {
+      // Keep listSessions' handling of a live runtime on an instance-less binding.
+      return Option.fromNullishOr(
+        (yield* listSessions()).find((session) => session.threadId === threadId),
+      );
+    }
+    const instanceId = binding.providerInstanceId;
+    const adapter = (yield* getAdapterEntries).find(([entryId]) => entryId === instanceId)?.[1];
+    if (!adapter) {
+      return Option.none<ProviderSession>();
+    }
+    for (const session of yield* listInstanceSessions(instanceId, adapter)) {
+      if (session.threadId !== threadId) continue;
+      const reported = reportedSession(session, binding);
+      if (reported) {
+        return Option.some(reported);
+      }
+    }
+    return Option.none<ProviderSession>();
+  });
 
   const getCapabilities: ProviderServiceShape["getCapabilities"] = (instanceId) =>
     registry.getByInstance(instanceId).pipe(Effect.map((adapter) => adapter.capabilities));
@@ -2299,6 +2355,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           "provider.rollback_turns": input.numTurns,
         });
         progress.phase = "conversation.rollback";
+        // The runtime keeps its id, but the turn that carried the first-turn
+        // attachment instructions may be dropped (even by a failed attempt).
+        attachmentInstructionTracker.forget(input.threadId);
         yield* routed.adapter.rollbackThread(routed.threadId, {
           numTurns: input.numTurns,
           targetTurnId: input.targetTurnId,
@@ -2378,7 +2437,11 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         lastRuntimeEventAt: new Date().toISOString(),
       }),
     ).pipe(Effect.asVoid);
-    yield* Effect.forEach(currentAdapters, ([, adapter]) => adapter.stopAll()).pipe(Effect.asVoid);
+    // Shutdown waits for the slowest provider, not the sum of all of them.
+    yield* Effect.forEach(currentAdapters, ([, adapter]) => adapter.stopAll(), {
+      concurrency: "unbounded",
+      discard: true,
+    });
     yield* Effect.sync(() => runtimeActivity.clear());
     const bindings = yield* directory.listBindings().pipe(Effect.orElseSucceed(() => []));
     yield* Effect.forEach(bindings, (binding) => {
@@ -2396,10 +2459,12 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         },
       });
     }).pipe(Effect.asVoid);
+    // No flush here: AnalyticsService's own finalizer runs after this one and
+    // flushes within ANALYTICS_SHUTDOWN_FLUSH_TIMEOUT, so a slow network cannot
+    // hold up provider shutdown.
     yield* analytics.record("provider.sessions.stopped_all", {
       sessionCount: threadIds.length,
     });
-    yield* analytics.flush;
   });
 
   yield* Effect.addFinalizer(() =>
@@ -2464,6 +2529,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     respondToUserInput,
     stopSession,
     listSessions,
+    getSessionForThread,
     getCapabilities,
     getInstanceInfo,
     rollbackConversation,

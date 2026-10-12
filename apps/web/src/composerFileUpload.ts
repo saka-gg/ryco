@@ -128,12 +128,21 @@ export function deriveComposerFileUploadSendBlock(input: {
     readonly expiresAt?: string | undefined;
   }>;
   readonly nowMs: number;
+  /**
+   * The upload records to judge against; defaults to the live engine. Render
+   * callers pass the snapshot they subscribed to (useComposerFileUploadRecords)
+   * so a memoized derivation recomputes when uploads progress.
+   */
+  readonly records?: ReadonlyMap<string, ChatFileUploadRecord>;
 }): string | null {
+  const records = input.records;
   for (const attachment of input.attachments) {
     if (attachment.type !== "file") {
       continue;
     }
-    const status = composerFileUploadEngine.get(attachment.id)?.status;
+    const status = (
+      records ? records.get(attachment.id) : composerFileUploadEngine.get(attachment.id)
+    )?.status;
     if (status) {
       if (status.kind === "pending" || status.kind === "uploading") {
         return `Uploading '${attachment.name}'…`;

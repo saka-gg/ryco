@@ -33,7 +33,7 @@ import {
   type ProviderInstanceConfigMap,
   ProviderInstanceId,
 } from "@ryco/contracts";
-import { Effect, Layer } from "effect";
+import { Deferred, Effect, Exit, Layer, Schema, Scope } from "effect";
 import { HttpClient, HttpClientResponse } from "effect/http";
 
 import { ServerConfig } from "../../config.ts";
@@ -45,6 +45,7 @@ import { OpenCodeDriver } from "../Drivers/OpenCodeDriver.ts";
 import { OpenCodeRuntimeLive } from "../opencodeRuntime.ts";
 import { NoOpProviderEventLoggers, ProviderEventLoggers } from "./ProviderEventLoggers.ts";
 import { makeProviderInstanceRegistry } from "./ProviderInstanceRegistryLive.ts";
+import type { AnyProviderDriver, ProviderInstance } from "../ProviderDriver.ts";
 
 const TestHttpClientLive = Layer.succeed(
   HttpClient.HttpClient,
@@ -366,5 +367,103 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
         `${openCodeDriverKind}:instance:${openCodeId}`,
       );
     }).pipe(Effect.provide(testLayer)),
+  );
+});
+
+describe("ProviderInstanceRegistryLive — teardown", () => {
+  const fakeDriverKind = ProviderDriverKind.make("fakeTeardown");
+
+  /**
+   * A driver whose instances hold their teardown until every instance's
+   * teardown has started. Sequential teardown can never get past the first
+   * finalizer; parallel teardown releases all of them.
+   */
+  const makeLatchedDriver = (input: {
+    readonly expected: number;
+    readonly started: Array<string>;
+    readonly finished: Array<string>;
+    readonly allStarted: Deferred.Deferred<void>;
+  }): AnyProviderDriver => ({
+    driverKind: fakeDriverKind,
+    metadata: { displayName: "Fake teardown" },
+    configSchema: Schema.Struct({}),
+    defaultConfig: () => ({}),
+    create: ({ instanceId, displayName, enabled }) =>
+      Effect.gen(function* () {
+        yield* Effect.addFinalizer(() =>
+          Effect.gen(function* () {
+            input.started.push(instanceId);
+            if (input.started.length === input.expected) {
+              yield* Deferred.succeed(input.allStarted, undefined);
+            }
+            yield* Deferred.await(input.allStarted).pipe(
+              Effect.timeout("2 seconds"),
+              Effect.ignore,
+            );
+            input.finished.push(instanceId);
+          }),
+        );
+        return {
+          instanceId,
+          driverKind: fakeDriverKind,
+          continuationIdentity: { driverKind: fakeDriverKind, continuationKey: instanceId },
+          displayName,
+          enabled,
+          snapshot: {} as never,
+          adapter: {} as never,
+          textGeneration: {} as never,
+        } satisfies ProviderInstance;
+      }),
+  });
+
+  const fakeConfigMap = (ids: ReadonlyArray<string>): ProviderInstanceConfigMap =>
+    Object.fromEntries(ids.map((id) => [id, { driver: fakeDriverKind, config: {} }]));
+
+  it.live("tears every instance down in parallel when the registry closes", () =>
+    Effect.gen(function* () {
+      const started: Array<string> = [];
+      const finished: Array<string> = [];
+      const allStarted = yield* Deferred.make<void>();
+      const driver = makeLatchedDriver({ expected: 3, started, finished, allStarted });
+      const registryScope = yield* Scope.make();
+      const { registry } = yield* makeProviderInstanceRegistry({
+        drivers: [driver],
+        configMap: fakeConfigMap(["fake_a", "fake_b", "fake_c"]),
+      }).pipe(Effect.provideService(Scope.Scope, registryScope));
+      expect((yield* registry.listInstances).length).toBe(3);
+
+      const startedAt = Date.now();
+      yield* Scope.close(registryScope, Exit.void);
+
+      expect(Deferred.isDoneUnsafe(allStarted)).toBe(true);
+      expect([...started].toSorted()).toEqual(["fake_a", "fake_b", "fake_c"]);
+      expect([...finished].toSorted()).toEqual(["fake_a", "fake_b", "fake_c"]);
+      // Released by the latch, not by the 2 s fallback timeout.
+      expect(Date.now() - startedAt).toBeLessThan(1_000);
+    }),
+  );
+
+  it.live("closing a removed instance does not touch the others", () =>
+    Effect.gen(function* () {
+      const started: Array<string> = [];
+      const finished: Array<string> = [];
+      const allStarted = yield* Deferred.make<void>();
+      // expected: 1 so a single removal releases its own latch at once.
+      const driver = makeLatchedDriver({ expected: 1, started, finished, allStarted });
+      const registryScope = yield* Scope.make();
+      const { registry, mutator } = yield* makeProviderInstanceRegistry({
+        drivers: [driver],
+        configMap: fakeConfigMap(["fake_a", "fake_b"]),
+      }).pipe(Effect.provideService(Scope.Scope, registryScope));
+
+      yield* mutator.reconcile(fakeConfigMap(["fake_b"]));
+      expect(started).toEqual(["fake_a"]);
+      expect((yield* registry.listInstances).map((instance) => instance.instanceId)).toEqual([
+        "fake_b",
+      ]);
+
+      yield* Scope.close(registryScope, Exit.void);
+      expect(started).toEqual(["fake_a", "fake_b"]);
+    }),
   );
 });

@@ -1,10 +1,11 @@
-import { nodeMutationLeaseIsCurrent } from "@ryco/client-runtime/authorization";
+import { nodeMutationLeaseIsCurrent } from "@ryco/client-runtime/authorization/nodeMutationLease";
 import { toastManager } from "../components/ui/toast";
-import {
-  initialDraftModelSelection,
-  readEffectiveProjectPreferences,
-} from "@ryco/client-runtime/state/settings";
+import { initialDraftModelSelection } from "@ryco/client-runtime/state/settings";
 import { ensureEnvironmentApi } from "../environmentApi";
+import { isHostedHubMode } from "../env";
+import { preloadRouteChunk } from "../lib/routeChunkPreload";
+import { readNewDraftDefaults } from "./newDraftDefaults";
+import { readEnvironmentServerConfig } from "./useChatsAvailability";
 import { useDeviceName } from "../deviceName";
 import { scopedProjectKey } from "@ryco/client-runtime/scoped";
 import {
@@ -134,19 +135,22 @@ function useNewThreadState() {
       readonly failureTitle: string;
     }): Promise<void> =>
       (async () => {
+        // The draft route's chunk downloads while the defaults are read.
+        void preloadRouteChunk("/_chat/draft/$draftId");
         const hosted = nodeIdForHostedEnvironment(input.environmentId) !== null;
         const leaseBefore = hosted ? readHostedNodeMutationLease(input.environmentId) : null;
         const api = ensureEnvironmentApi(input.environmentId);
-        if (!api.server?.getConfig)
-          throw new Error("Node settings are still loading. Try creating the draft again.");
-        // Read from the scoped connection: a hosted node's local descriptor may
-        // differ from its canonical identity, and the primary cache can still
-        // contain the previous node's settings while switching targets.
-        const config = await api.server.getConfig();
-        const effective = await readEffectiveProjectPreferences({
+        // Hosted targets read the config from the scoped connection: a hosted
+        // node's local descriptor may differ from its canonical identity, and
+        // the primary cache can still contain the previous node's settings
+        // while switching targets. Every other target's cached config is the
+        // live one its config stream keeps current, so only the preferences
+        // read stays on the path to the draft.
+        const { config, effective } = await readNewDraftDefaults({
           api,
-          config,
-          ...(input.preferencesProjectId ? { projectId: input.preferencesProjectId } : {}),
+          cachedConfig: readEnvironmentServerConfig(input.environmentId),
+          requireFreshConfig: hosted || isHostedHubMode(),
+          projectId: input.preferencesProjectId,
         });
         const leaseAfter = hosted ? readHostedNodeMutationLease(input.environmentId) : null;
         if (

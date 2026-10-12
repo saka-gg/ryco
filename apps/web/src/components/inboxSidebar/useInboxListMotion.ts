@@ -7,6 +7,7 @@ import {
   useEffect,
   useLayoutEffect,
   useRef,
+  useState,
   useSyncExternalStore,
 } from "react";
 
@@ -44,15 +45,25 @@ export function useInboxEnterAnimation<T extends Element>(
 ) {
   const gate = useContext(InboxMotionContext);
   const ref = useRef<T>(null);
+  // Mount-only by design: the element is keyed by the state it shows, so the
+  // animation captured at mount is the one to play.
+  const [mountAnimation] = useState(() => ({ keyframes, options }));
   useLayoutEffect(() => {
     const node = ref.current;
     if (!node || !gate?.current.ready || !gate.current.enabled) return;
     if (readInboxMotionDurationMs() === 0) return;
-    node.animate(keyframes, options);
-    // Mount-only by design: the element is keyed by the state it shows.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    node.animate(mountAnimation.keyframes, mountAnimation.options);
+  }, [gate, mountAnimation]);
   return ref;
+}
+
+/** Each row's layout offset (`offsetTop`: transforms never read as movement). */
+function readRowTops(list: HTMLElement): Map<string, number> {
+  const tops = new Map<string, number>();
+  for (const row of list.querySelectorAll<HTMLElement>(`[${INBOX_ROW_KEY_ATTRIBUTE}]`)) {
+    tops.set(row.getAttribute(INBOX_ROW_KEY_ATTRIBUTE)!, row.offsetTop);
+  }
+  return tops;
 }
 
 /**
@@ -117,11 +128,69 @@ export function useInboxListMotion(input: {
     return () => list.removeEventListener(INBOX_ROW_LEAVING_EVENT, release);
   }, [placeHighlight]);
 
-  // Runs after every commit: cheap (one layout read per row) and the only way
-  // to know where a row was before it moved to another section.
+  // Row positions are re-read only when the order changed or the list resized
+  // since the last read (a state line or badge changed a row's height). Most
+  // commits (a streaming thread's summary, a clock tick) move nothing, and
+  // reading every row's offset after each of them forced a layout per commit.
+  const positionsDirtyRef = useRef(true);
+  const resizeObserverRef = useRef<{ list: HTMLElement; observer: ResizeObserver } | null>(null);
+  const observeListResizes = useCallback(
+    (list: HTMLElement | null) => {
+      const current = resizeObserverRef.current;
+      if (current?.list === list) return;
+      current?.observer.disconnect();
+      resizeObserverRef.current = null;
+      positionsDirtyRef.current = true;
+      if (list === null || typeof ResizeObserver === "undefined") return;
+      const observer = new ResizeObserver(() => {
+        // Layout is already computed here. A row changed height without a
+        // reorder: refresh the resting positions now, so the next reorder
+        // glides from where rows actually are, and keep the highlight on its row.
+        if (signatureRef.current !== null && list.getClientRects().length > 0) {
+          topsRef.current = readRowTops(list);
+          positionsDirtyRef.current = false;
+        } else {
+          positionsDirtyRef.current = true;
+        }
+        placeHighlight();
+      });
+      observer.observe(list);
+      resizeObserverRef.current = { list, observer };
+    },
+    [placeHighlight],
+  );
+  // Unmounted or hidden (an inactive sidebar pane's effects are torn down):
+  // forget positions so the next visible reorder never glides from stale ones.
+  useLayoutEffect(
+    () => () => {
+      resizeObserverRef.current?.observer.disconnect();
+      resizeObserverRef.current = null;
+      topsRef.current = new Map();
+      signatureRef.current = null;
+      positionsDirtyRef.current = true;
+    },
+    [],
+  );
+
+  // Runs after every commit, but reads layout only when something may have
+  // moved; it is the only way to know where a row was before it moved to
+  // another section.
   useLayoutEffect(() => {
     const list = listRef.current;
+    observeListResizes(list);
     if (!list) return;
+    const reordered =
+      signatureRef.current !== null && signatureRef.current !== input.orderSignature;
+    if (
+      input.enabled &&
+      signatureRef.current !== null &&
+      !reordered &&
+      !positionsDirtyRef.current
+    ) {
+      gateRef.current.ready = true;
+      gateRef.current.enabled = input.enabled;
+      return;
+    }
     // Motion off, or the inbox is mounted but hidden (display: none reads every
     // offset as 0): skip the layout reads and forget positions, so the next
     // visible reorder never glides from stale coordinates.
@@ -132,8 +201,6 @@ export function useInboxListMotion(input: {
       gateRef.current.enabled = false;
       return;
     }
-    const reordered =
-      signatureRef.current !== null && signatureRef.current !== input.orderSignature;
     const duration = reordered ? readInboxMotionDurationMs() : 0;
     const previous = topsRef.current;
     const next = new Map<string, number>();
@@ -163,6 +230,7 @@ export function useInboxListMotion(input: {
     }
     topsRef.current = next;
     signatureRef.current = input.orderSignature;
+    positionsDirtyRef.current = false;
     // Child layout effects of this commit already ran with the gate closed.
     gateRef.current.ready = true;
     gateRef.current.enabled = input.enabled;

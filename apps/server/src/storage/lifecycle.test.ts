@@ -4,13 +4,14 @@ import path from "node:path";
 
 import { assert, it } from "@effect/vitest";
 import { PROJECT_RELOCATION_PENDING_MESSAGE } from "@ryco/contracts";
-import { Effect, Result } from "effect";
+import { Deferred, Effect, Fiber, Result } from "effect";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import {
   acquireStoragePathUseLease,
   isStoragePathBlocked,
+  storageLifecycleLock,
   storagePathBlocker,
 } from "./lifecycle.ts";
 
@@ -110,6 +111,60 @@ it.layer(SqlitePersistenceMemory)("storage admission for chat moves", (it) => {
       yield* sql`UPDATE project_relocations SET state = 'done'`;
       const release = yield* acquireStoragePathUseLease(sql, chat);
       yield* release;
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("admits a path use lease during command processing, not during a cleanup claim", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`DELETE FROM project_relocations`;
+      const root = yield* Effect.promise(async () =>
+        fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "ryco-use-lease-admission-"))),
+      );
+      yield* Effect.addFinalizer(() =>
+        Effect.promise(() => fs.rm(root, { recursive: true, force: true })),
+      );
+
+      // Command processing holds the lock shared: a turn start's lease does not queue behind it.
+      const processing = yield* Deferred.make<void>();
+      const processingEntered = yield* Deferred.make<void>();
+      const command = yield* storageLifecycleLock
+        .withShared(
+          Deferred.succeed(processingEntered, undefined).pipe(
+            Effect.andThen(Deferred.await(processing)),
+          ),
+        )
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(processingEntered);
+      const release = yield* acquireStoragePathUseLease(sql, root);
+      yield* release;
+      yield* Deferred.succeed(processing, undefined);
+      yield* Fiber.join(command);
+
+      // A cleanup claim holds it exclusively: the lease waits until the claim is decided.
+      const claiming = yield* Deferred.make<void>();
+      const claimEntered = yield* Deferred.make<void>();
+      const claim = yield* storageLifecycleLock
+        .withPermit(
+          Deferred.succeed(claimEntered, undefined).pipe(Effect.andThen(Deferred.await(claiming))),
+        )
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(claimEntered);
+      let leased = false;
+      const lease = yield* acquireStoragePathUseLease(sql, root).pipe(
+        Effect.tap(() =>
+          Effect.sync(() => {
+            leased = true;
+          }),
+        ),
+        Effect.forkChild,
+      );
+      for (let index = 0; index < 20; index++) yield* Effect.yieldNow;
+      assert.isFalse(leased);
+      yield* Deferred.succeed(claiming, undefined);
+      yield* Fiber.join(claim);
+      yield* yield* Fiber.join(lease);
+      assert.isTrue(leased);
     }).pipe(Effect.scoped),
   );
 });

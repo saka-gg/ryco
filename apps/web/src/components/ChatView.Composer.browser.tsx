@@ -7,6 +7,7 @@ import {
   ProviderInstanceId,
   type ServerConfig,
   type TurnId,
+  WS_METHODS,
 } from "@ryco/contracts";
 import { DEFAULT_CLIENT_SETTINGS } from "@ryco/contracts/settings";
 import {
@@ -1476,6 +1477,82 @@ describe("ChatView Composer (full app)", () => {
     } finally {
       await mounted.cleanup();
     }
+  });
+
+  describe("bare @ workspace listing", () => {
+    const searchQueries = () =>
+      wsRequests
+        .filter((request) => request._tag === WS_METHODS.projectsSearchEntries)
+        .map((request) => request.query);
+    const resolveSearch = (body: { readonly _tag: string }) =>
+      body._tag === WS_METHODS.projectsSearchEntries
+        ? { entries: [{ path: "src", kind: "directory" }], truncated: false }
+        : undefined;
+
+    it("waits for a typed character on servers that reject an empty query", async () => {
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: createSnapshotForTargetUser({
+          targetMessageId: "msg-user-bare-mention-legacy" as MessageId,
+          targetText: "bare mention legacy",
+        }),
+        resolveRpc: resolveSearch,
+      });
+
+      try {
+        await waitForServerConfigToApply();
+        await waitForComposerEditor();
+        await page.getByTestId("composer-editor").fill("@");
+        await waitForElement(
+          () =>
+            Array.from(document.querySelectorAll<HTMLElement>("p")).find(
+              (element) => element.textContent === "Type to search files and folders.",
+            ) ?? null,
+          "Unable to find the bare @ prompt.",
+        );
+        expect(searchQueries()).not.toContain("");
+
+        await page.getByTestId("composer-editor").fill("@sr");
+        await waitForComposerMenuItem("path:directory:src");
+        expect(searchQueries()).toContain("sr");
+        expect(searchQueries()).not.toContain("");
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+
+    it("lists the workspace for a bare @ on servers that advertise it", async () => {
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: createSnapshotForTargetUser({
+          targetMessageId: "msg-user-bare-mention-capable" as MessageId,
+          targetText: "bare mention capable",
+        }),
+        configureFixture: (nextFixture) => {
+          nextFixture.serverConfig = {
+            ...nextFixture.serverConfig,
+            environment: {
+              ...nextFixture.serverConfig.environment,
+              capabilities: {
+                ...nextFixture.serverConfig.environment.capabilities,
+                projectSearchEmptyQuery: true,
+              },
+            },
+          };
+        },
+        resolveRpc: resolveSearch,
+      });
+
+      try {
+        await waitForServerConfigToApply();
+        await waitForComposerEditor();
+        await page.getByTestId("composer-editor").fill("@");
+        await waitForComposerMenuItem("path:directory:src");
+        expect(searchQueries()).toContain("");
+      } finally {
+        await mounted.cleanup();
+      }
+    });
   });
 
   it("stages an idle provider target locally and sends it without an unsafe model meta update", async () => {

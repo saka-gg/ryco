@@ -1,4 +1,4 @@
-import { useAtomSubscribe, useAtomValue } from "@effect/atom-react";
+import { RegistryContext, useAtomSubscribe, useAtomValue } from "@effect/atom-react";
 import type { Atom } from "effect/reactivity";
 import {
   selectAvailableEditors,
@@ -18,8 +18,9 @@ import type {
   ServerProvider,
   ServerSettings,
 } from "@ryco/contracts";
-import { useCallback, useRef } from "react";
+import { useCallback, useContext, useRef } from "react";
 
+import { useSyncExternalStoreSelector } from "../hooks/useSyncExternalStoreSelector";
 import { useSettingsTarget } from "../settingsTarget";
 
 export * from "@ryco/client-runtime/rpc";
@@ -47,24 +48,47 @@ export function useServerConfig(): ServerConfig | null {
   return target ? target.serverConfig : primaryConfig;
 }
 
+/**
+ * Narrow subscription to the server config (the open settings surface's node
+ * when one is targeted): re-renders only when `selector`'s result changes
+ * (Object.is). Prefer it over `useServerConfig`, which re-renders on every
+ * config push, including each provider-status probe during boot.
+ */
+export function useServerConfigSelector<T>(selector: (config: ServerConfig | null) => T): T {
+  const registry = useContext(RegistryContext);
+  const target = useSettingsTarget();
+  const hasTarget = target !== null;
+  const targetServerConfig = target?.serverConfig ?? null;
+  const subscribe = useCallback(
+    (listener: () => void) =>
+      hasTarget ? () => undefined : registry.subscribe(serverConfigAtom, () => listener()),
+    [hasTarget, registry],
+  );
+  const getSnapshot = useCallback(
+    () => (hasTarget ? targetServerConfig : registry.get(serverConfigAtom)),
+    [hasTarget, registry, targetServerConfig],
+  );
+  return useSyncExternalStoreSelector(subscribe, getSnapshot, selector);
+}
+
 export function useServerSettings(): ServerSettings {
-  return selectSettings(useServerConfig());
+  return useServerConfigSelector(selectSettings);
 }
 
 export function useServerProviders(): ReadonlyArray<ServerProvider> {
-  return selectProviders(useServerConfig());
+  return useServerConfigSelector(selectProviders);
 }
 
 export function useServerAvailableEditors(): ReadonlyArray<EditorId> {
-  return selectAvailableEditors(useServerConfig());
+  return useServerConfigSelector(selectAvailableEditors);
 }
 
 export function useServerKeybindingsConfigPath(): string | null {
-  return selectKeybindingsConfigPath(useServerConfig());
+  return useServerConfigSelector(selectKeybindingsConfigPath);
 }
 
 export function useServerObservability(): ServerConfig["observability"] | null {
-  return selectObservability(useServerConfig());
+  return useServerConfigSelector(selectObservability);
 }
 
 export function useServerWelcomeSubscription(

@@ -1,4 +1,4 @@
-import type { DpopPublicJwk, DpopSigningKey } from "@ryco/client-runtime/relay";
+import type { DpopPublicJwk, DpopSigningKey } from "@ryco/client-runtime/relay/dpop";
 
 import { derSignatureToRaw, uncompressedPointToJwk } from "./ecdsa";
 

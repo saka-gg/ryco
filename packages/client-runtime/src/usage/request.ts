@@ -4,8 +4,8 @@ import {
   type UsageCalendarDate,
   type UsageSummaryRequest,
 } from "@ryco/contracts";
-type StatisticsRange = "7d" | "30d" | "90d" | "all";
-const RANGE_DAYS: Readonly<Record<StatisticsRange, number | null>> = {
+export type UsageSummaryRange = "7d" | "30d" | "90d" | "all";
+const RANGE_DAYS: Readonly<Record<UsageSummaryRange, number | null>> = {
   "7d": 7,
   "30d": 30,
   "90d": 90,
@@ -22,7 +22,7 @@ function calendarDateInZone(timestampMs: number, timeZone: string): UsageCalenda
 }
 
 export function usageRequestForRange(
-  range: StatisticsRange,
+  range: UsageSummaryRange,
   timeZone: string,
   nowMs = Date.now(),
 ): UsageSummaryRequest {

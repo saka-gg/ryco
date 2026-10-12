@@ -38,6 +38,7 @@ import {
   resolveBranchToolbarValue,
   resolveDraftEnvModeAfterBranchChange,
   resolveEffectiveEnvMode,
+  resolveSwitchedRefName,
   shouldIncludeBranchPickerItem,
 } from "./BranchToolbar.logic";
 import { GitIcon } from "./Icons";
@@ -434,9 +435,13 @@ export function BranchToolbarBranchSelector({
           cwd: selectionTarget.checkoutCwd,
           refName: refName.name,
         });
-        const nextBranchName = refName.isRemote
-          ? (checkoutResult.refName ?? selectedBranchName)
-          : selectedBranchName;
+        // A helper call, not an inline conditional: React Compiler cannot
+        // compile value blocks inside try/catch and would skip this component.
+        const nextBranchName = resolveSwitchedRefName({
+          refName,
+          selectedBranchName,
+          checkedOutRefName: checkoutResult.refName,
+        });
         setOptimisticBranch(nextBranchName);
         setThreadBranch(nextBranchName, selectionTarget.nextWorktreePath);
       } catch (error) {

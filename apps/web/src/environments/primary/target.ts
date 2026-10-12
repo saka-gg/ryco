@@ -9,6 +9,13 @@ export interface PrimaryEnvironmentTarget {
 
 const LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "::1", "localhost"]);
 
+type DesktopBridgeInstance = NonNullable<Window["desktopBridge"]>;
+
+// The desktop primary target is fixed for a page: the backend URL and token are
+// created once per app run (exposure changes relaunch the app). Memoized per
+// bridge so node HTTP URLs and renders never cross into the main process again.
+const desktopPrimaryTargetByBridge = new WeakMap<DesktopBridgeInstance, PrimaryEnvironmentTarget>();
+
 function getDesktopLocalEnvironmentBootstrap(): DesktopEnvironmentBootstrap | null {
   return window.desktopBridge?.getLocalEnvironmentBootstrap() ?? null;
 }
@@ -111,6 +118,16 @@ function resolveWindowOriginPrimaryTarget(): PrimaryEnvironmentTarget {
 }
 
 function resolveDesktopPrimaryTarget(): PrimaryEnvironmentTarget | null {
+  const bridge = window.desktopBridge;
+  if (!bridge) return null;
+  const memoized = desktopPrimaryTargetByBridge.get(bridge);
+  if (memoized) return memoized;
+  const target = readDesktopPrimaryTarget();
+  if (target) desktopPrimaryTargetByBridge.set(bridge, target);
+  return target;
+}
+
+function readDesktopPrimaryTarget(): PrimaryEnvironmentTarget | null {
   const desktopBootstrap = getDesktopLocalEnvironmentBootstrap();
   if (!desktopBootstrap) {
     return null;

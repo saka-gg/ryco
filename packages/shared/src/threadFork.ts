@@ -15,7 +15,7 @@ import {
   ThreadForkedActivityPayload,
   type ThreadId,
 } from "@ryco/contracts";
-import { Schema } from "effect";
+import * as Schema from "effect/Schema";
 
 // ── Inherited item identity ───────────────────────────────────────────
 

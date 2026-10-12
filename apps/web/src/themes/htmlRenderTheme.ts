@@ -169,9 +169,9 @@ let currentKey = "";
 let scheduledFrame: number | null = null;
 let stopWatching: (() => void) | null = null;
 
-// `useTheme()` re-applies the theme on every mount and the transition guard
-// flips a class per change, so most mutations change nothing; only a different
-// theme replaces the snapshot.
+// Appearance environment changes republish unchanged CSS and the transition
+// guard flips a class per theme change, so most mutations change nothing; only
+// a different theme replaces the snapshot.
 function refresh(): boolean {
   const next = readHtmlRenderTheme();
   const key = JSON.stringify(next);

@@ -1,6 +1,6 @@
 import * as OS from "node:os";
 import { execFileSync } from "node:child_process";
-import { accessSync, constants, statSync } from "node:fs";
+import { accessSync, constants, promises as fsPromises, statSync } from "node:fs";
 import { extname, join } from "node:path";
 
 const PATH_CAPTURE_START = "__RYCO_PATH_START__";
@@ -10,7 +10,7 @@ const WINDOWS_PATH_DELIMITER = ";";
 const POSIX_PATH_DELIMITER = ":";
 const WINDOWS_SHELL_CANDIDATES = ["pwsh.exe", "powershell.exe"] as const;
 
-type ExecFileSyncLike = (
+export type ExecFileSyncLike = (
   file: string,
   args: ReadonlyArray<string>,
   options: { encoding: "utf8"; timeout: number },
@@ -78,12 +78,22 @@ export function readPathFromLoginShell(
   return readEnvironmentFromLoginShell(shell, ["PATH"], execFile).PATH;
 }
 
+/** The macOS launchd PATH probe, shared by the sync and async readers. */
+export const LAUNCHCTL_PATH_COMMAND = {
+  file: "/bin/launchctl",
+  args: ["getenv", "PATH"],
+} as const;
+
+export function parseLaunchctlPathOutput(output: string): string | undefined {
+  return trimNonEmpty(output);
+}
+
 export function readPathFromLaunchctl(
   execFile: ExecFileSyncLike = execFileSync,
 ): string | undefined {
   try {
-    return trimNonEmpty(
-      execFile("/bin/launchctl", ["getenv", "PATH"], {
+    return parseLaunchctlPathOutput(
+      execFile(LAUNCHCTL_PATH_COMMAND.file, LAUNCHCTL_PATH_COMMAND.args, {
         encoding: "utf8",
         timeout: 2000,
       }),
@@ -183,20 +193,15 @@ export type ShellEnvironmentReader = (
   execFile?: ExecFileSyncLike,
 ) => Partial<Record<string, string>>;
 
-export const readEnvironmentFromLoginShell: ShellEnvironmentReader = (
-  shell,
-  names,
-  execFile = execFileSync,
-) => {
-  if (names.length === 0) {
-    return {};
-  }
+/** Arguments for an interactive login shell that prints the requested variables. */
+export function loginShellEnvironmentArgs(names: ReadonlyArray<string>): ReadonlyArray<string> {
+  return ["-ilc", buildEnvironmentCaptureCommand(names)];
+}
 
-  const output = execFile(shell, ["-ilc", buildEnvironmentCaptureCommand(names)], {
-    encoding: "utf8",
-    timeout: 5000,
-  });
-
+export function parseLoginShellEnvironmentOutput(
+  output: string,
+  names: ReadonlyArray<string>,
+): Partial<Record<string, string>> {
   const environment: Partial<Record<string, string>> = {};
   for (const name of names) {
     const value = extractEnvironmentValue(output, name);
@@ -206,6 +211,23 @@ export const readEnvironmentFromLoginShell: ShellEnvironmentReader = (
   }
 
   return environment;
+}
+
+export const readEnvironmentFromLoginShell: ShellEnvironmentReader = (
+  shell,
+  names,
+  execFile = execFileSync,
+) => {
+  if (names.length === 0) {
+    return {};
+  }
+
+  const output = execFile(shell, loginShellEnvironmentArgs(names), {
+    encoding: "utf8",
+    timeout: 5000,
+  });
+
+  return parseLoginShellEnvironmentOutput(output, names);
 };
 
 export type WindowsShellEnvironmentReader = (
@@ -356,6 +378,14 @@ function resolveCommandCandidates(
   return Array.from(new Set(candidates));
 }
 
+function hasWindowsExecutableExtension(
+  filePath: string,
+  windowsPathExtensions: ReadonlyArray<string>,
+): boolean {
+  const extension = extname(filePath);
+  return extension.length > 0 && windowsPathExtensions.includes(extension.toUpperCase());
+}
+
 function isExecutableFile(
   filePath: string,
   platform: NodeJS.Platform,
@@ -364,16 +394,74 @@ function isExecutableFile(
   try {
     const stat = statSync(filePath);
     if (!stat.isFile()) return false;
-    if (platform === "win32") {
-      const extension = extname(filePath);
-      if (extension.length === 0) return false;
-      return windowsPathExtensions.includes(extension.toUpperCase());
-    }
+    if (platform === "win32") return hasWindowsExecutableExtension(filePath, windowsPathExtensions);
     accessSync(filePath, constants.X_OK);
     return true;
   } catch {
     return false;
   }
+}
+
+async function isExecutableFileAsync(
+  filePath: string,
+  platform: NodeJS.Platform,
+  windowsPathExtensions: ReadonlyArray<string>,
+): Promise<boolean> {
+  try {
+    const stat = await fsPromises.stat(filePath);
+    if (!stat.isFile()) return false;
+    if (platform === "win32") return hasWindowsExecutableExtension(filePath, windowsPathExtensions);
+    await fsPromises.access(filePath, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+interface CommandSearchLocation {
+  /** The PATH entry, or the command itself when it is given as a path. */
+  readonly key: string;
+  /** Candidate files in lookup order. */
+  readonly files: ReadonlyArray<string>;
+}
+
+interface CommandSearchPlan {
+  readonly platform: NodeJS.Platform;
+  readonly windowsPathExtensions: ReadonlyArray<string>;
+  /** One location per PATH entry, or a single one for a command given as a path. */
+  readonly locations: ReadonlyArray<CommandSearchLocation>;
+}
+
+/** Where `command` is looked up, shared by the sync and async resolvers. */
+function planCommandSearch(
+  command: string,
+  options: CommandAvailabilityOptions,
+): CommandSearchPlan {
+  const platform = options.platform ?? process.platform;
+  const env = options.env ?? process.env;
+  const windowsPathExtensions = platform === "win32" ? resolveWindowsPathExtensions(env) : [];
+  const commandCandidates = resolveCommandCandidates(command, platform, windowsPathExtensions);
+
+  if (command.includes("/") || command.includes("\\")) {
+    return {
+      platform,
+      windowsPathExtensions,
+      locations: [{ key: command, files: commandCandidates }],
+    };
+  }
+
+  const pathEntries = resolvePathEnvironmentVariable(env)
+    .split(pathDelimiterForPlatform(platform))
+    .map((entry) => stripWrappingQuotes(entry.trim()))
+    .filter((entry) => entry.length > 0);
+  return {
+    platform,
+    windowsPathExtensions,
+    locations: pathEntries.map((pathEntry) => ({
+      key: pathEntry,
+      files: commandCandidates.map((candidate) => join(pathEntry, candidate)),
+    })),
+  };
 }
 
 export function isCommandAvailable(
@@ -387,33 +475,93 @@ export function resolveCommandPath(
   command: string,
   options: CommandAvailabilityOptions = {},
 ): string | null {
-  const platform = options.platform ?? process.platform;
-  const env = options.env ?? process.env;
-  const windowsPathExtensions = platform === "win32" ? resolveWindowsPathExtensions(env) : [];
-  const commandCandidates = resolveCommandCandidates(command, platform, windowsPathExtensions);
-
-  if (command.includes("/") || command.includes("\\")) {
-    return (
-      commandCandidates.find((candidate) =>
-        isExecutableFile(candidate, platform, windowsPathExtensions),
-      ) ?? null
-    );
-  }
-
-  const pathValue = resolvePathEnvironmentVariable(env);
-  if (pathValue.length === 0) return null;
-  const pathEntries = pathValue
-    .split(pathDelimiterForPlatform(platform))
-    .map((entry) => stripWrappingQuotes(entry.trim()))
-    .filter((entry) => entry.length > 0);
-
-  for (const pathEntry of pathEntries) {
-    for (const candidate of commandCandidates) {
-      const filePath = join(pathEntry, candidate);
-      if (isExecutableFile(filePath, platform, windowsPathExtensions)) {
+  const plan = planCommandSearch(command, options);
+  for (const location of plan.locations) {
+    for (const filePath of location.files) {
+      if (isExecutableFile(filePath, plan.platform, plan.windowsPathExtensions)) {
         return filePath;
       }
     }
+  }
+  return null;
+}
+
+/** Upper bound for checking one PATH entry in {@link resolveCommandPathAsync}. */
+export const COMMAND_PATH_ENTRY_TIMEOUT_MS = 1_000;
+
+export interface AsyncCommandResolutionOptions extends CommandAvailabilityOptions {
+  /**
+   * How long one search location (a PATH entry) may take. A stalled network or
+   * File Provider mount counts as "not found there" and the search moves on.
+   */
+  readonly entryTimeoutMs?: number;
+}
+
+function settleWithin<A>(work: Promise<A>, timeoutMs: number, fallback: A): Promise<A> {
+  return new Promise<A>((resolve) => {
+    const timer = setTimeout(() => resolve(fallback), timeoutMs);
+    timer.unref?.();
+    work.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      () => {
+        clearTimeout(timer);
+        resolve(fallback);
+      },
+    );
+  });
+}
+
+async function firstExecutableAsync(
+  location: CommandSearchLocation,
+  plan: CommandSearchPlan,
+): Promise<string | null> {
+  for (const filePath of location.files) {
+    if (await isExecutableFileAsync(filePath, plan.platform, plan.windowsPathExtensions)) {
+      return filePath;
+    }
+  }
+  return null;
+}
+
+/**
+ * Search locations whose check outlived its bound and has not settled yet. A
+ * stuck `stat` holds a libuv threadpool thread until the mount answers, so
+ * later lookups skip such a location instead of parking another thread on it
+ * (four stuck threads would stall every filesystem call in the process). The
+ * location is searched again once its stuck check settles.
+ */
+const stalledCommandSearchLocations = new Set<string>();
+const COMMAND_SEARCH_STALLED = Symbol("command-search-stalled");
+
+/**
+ * {@link resolveCommandPath} without blocking the event loop: the same lookup
+ * order and Windows PATHEXT handling, with `stat`/`access` on the promise API
+ * and each PATH entry bounded by `entryTimeoutMs`. Never rejects.
+ */
+export async function resolveCommandPathAsync(
+  command: string,
+  options: AsyncCommandResolutionOptions = {},
+): Promise<string | null> {
+  const plan = planCommandSearch(command, options);
+  const timeoutMs = options.entryTimeoutMs ?? COMMAND_PATH_ENTRY_TIMEOUT_MS;
+  for (const location of plan.locations) {
+    if (stalledCommandSearchLocations.has(location.key)) continue;
+    // Never rejects: each file check catches its own errors.
+    const check = firstExecutableAsync(location, plan);
+    const found = await settleWithin<string | null | typeof COMMAND_SEARCH_STALLED>(
+      check,
+      timeoutMs,
+      COMMAND_SEARCH_STALLED,
+    );
+    if (found === COMMAND_SEARCH_STALLED) {
+      stalledCommandSearchLocations.add(location.key);
+      void check.finally(() => stalledCommandSearchLocations.delete(location.key));
+      continue;
+    }
+    if (found !== null) return found;
   }
   return null;
 }

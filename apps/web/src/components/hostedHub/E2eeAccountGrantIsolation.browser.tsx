@@ -1,4 +1,5 @@
-import { makeRelayE2eeInitiator, type RelayE2eeHost } from "@ryco/client-runtime/relay";
+import type { RelayE2eeHost } from "@ryco/client-runtime/relay";
+import { makeRelayE2eeInitiator } from "@ryco/client-runtime/relay/e2ee";
 import {
   E2EE_SUITE_25519_CHACHAPOLY_SHA256,
   E2EE_SUITE_ACCOUNT_GRANT_25519_CHACHAPOLY_SHA256,

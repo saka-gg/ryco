@@ -1,7 +1,7 @@
 import { closeSync, fstatSync, lstatSync, openSync, readSync } from "node:fs";
 
 import { Effect, Option } from "effect";
-import sharp from "sharp";
+import { loadSharp } from "./loadSharp.ts";
 
 import { IMAGE_EXTENSION_BY_MIME_TYPE } from "./imageMime.ts";
 
@@ -281,7 +281,9 @@ export const probeAttachmentMediaDimensionsFromBytes = (
 ): Effect.Effect<AttachmentMediaDimensions | null> => {
   const normalizedMimeType = mimeType.toLowerCase();
   if (normalizedMimeType.startsWith("image/")) {
-    return probeImageDimensions(async () => (await sharp(bytes).metadata()).autoOrient);
+    return probeImageDimensions(
+      async () => (await (await loadSharp())(bytes).metadata()).autoOrient,
+    );
   }
   if (normalizedMimeType === "video/mp4" || normalizedMimeType === "video/quicktime") {
     return Effect.try(() => probeMp4DimensionsFromReader(makeBufferBoxReader(bytes))).pipe(
@@ -297,7 +299,9 @@ export const probeAttachmentMediaDimensions = (
 ): Effect.Effect<AttachmentMediaDimensions | null> => {
   const normalizedMimeType = mimeType.toLowerCase();
   if (normalizedMimeType.startsWith("image/")) {
-    return probeImageDimensions(async () => (await sharp(absPath).metadata()).autoOrient);
+    return probeImageDimensions(
+      async () => (await (await loadSharp())(absPath).metadata()).autoOrient,
+    );
   }
   if (normalizedMimeType === "video/mp4" || normalizedMimeType === "video/quicktime") {
     return Effect.try(() => withFileBoxReader(absPath, probeMp4DimensionsFromReader)).pipe(

@@ -17,6 +17,8 @@ export interface PerfScenarioConfig {
   readonly sourceControlHiddenMs: number;
   readonly sourceControlSettledMs: number;
   readonly sourceControlStatusRows: number;
+  /** Directory for one boot `.cpuprofile` per iteration, or null to skip profiling. */
+  readonly cpuProfileDir: string | null;
 }
 
 export interface PhaseNetworkMetrics {
@@ -47,6 +49,12 @@ export interface BrowserVitals {
   readonly usableMs: number | null;
   readonly longTasks: number;
   readonly maxLongTaskMs: number;
+  /** Total long-task time from navigation until the vitals are read. */
+  readonly longTaskTotalMs: number;
+  /** Navigation start to the app's `primary-shell-painted` mark (sidebar on screen). */
+  readonly shellPaintedMs: number | null;
+  /** Every `ryco:startup:*` measure the app recorded, by name without the prefix. */
+  readonly startupMeasures: Readonly<Record<string, number>>;
 }
 
 export interface SourceControlScenarioMetrics {
@@ -65,6 +73,16 @@ export interface SourceControlScenarioMetrics {
   readonly unavailableReason: string | null;
 }
 
+/** Main-thread self time of one boot CPU profile (`scripts/perf/cpuProfile.ts`). */
+export interface CpuProfileSummary {
+  /** Profiled window: navigation start to shortly after `primary-shell-painted`. */
+  readonly durationMs: number;
+  readonly busyMs: number;
+  readonly idleMs: number;
+  /** Source files (or chunks without a source map) by self time, largest first. */
+  readonly topSelfTime: ReadonlyArray<{ readonly source: string; readonly selfMs: number }>;
+}
+
 export interface PerfSample {
   readonly iteration: number;
   readonly serverReadyMs: number | null;
@@ -80,6 +98,7 @@ export interface PerfSample {
   readonly reconnectNetwork: PhaseNetworkMetrics;
   readonly processTree: ProcessTreeSummary;
   readonly sourceControl: SourceControlScenarioMetrics;
+  readonly cpuProfile: CpuProfileSummary | null;
   readonly errors: readonly string[];
 }
 
@@ -101,6 +120,8 @@ export type PerfMetricKey =
   | "usableMs"
   | "longTasks"
   | "maxLongTaskMs"
+  | "longTaskTotalMs"
+  | "shellPaintedMs"
   | "bootstrapRequests"
   | "bootstrapEncodedBytes"
   | "bootstrapWebSocketBytes"
@@ -143,6 +164,133 @@ export interface BundleMeasurement {
   readonly gzipBytes: number;
   readonly brotliBytes: number;
 }
+
+/**
+ * A module that must not be statically reachable from a closure, matched
+ * against repository-relative sourcemap sources (`apps/web/src/…`,
+ * `packages/…`, and `node_modules/<package>/…` for installed packages).
+ */
+export interface ForbiddenBundleSource {
+  readonly pattern: RegExp;
+  readonly reason: string;
+}
+
+/**
+ * One static-import closure of the standard web build and what it may carry.
+ * `chunk` is the hashed chunk's name prefix (`RootAppShell` for
+ * `RootAppShell-<hash>.js`); `main` is the boot entry. `beyondBoot` measures
+ * only the files the boot closure does not already load, which is what opening
+ * that surface costs once the app is running.
+ */
+export interface BundleClosureBudget {
+  readonly name: string;
+  readonly chunk: string;
+  readonly beyondBoot: boolean;
+  readonly maxGzipBytes: number | null;
+  readonly forbiddenSources: readonly ForbiddenBundleSource[];
+}
+
+export interface BundleBudgetPolicy {
+  readonly bootChunk: string;
+  readonly closures: readonly BundleClosureBudget[];
+}
+
+const KIB = 1024;
+
+/**
+ * The hosted-hub runtime, its Hub API client, and the relay E2EE stack. The
+ * standard build resolves every hosted seam to an inert sibling
+ * (`apps/web/src/clientModeSeams.ts`); a hit here means a new static edge
+ * bypassed a seam.
+ */
+const HOSTED_RUNTIME_SOURCES: readonly ForbiddenBundleSource[] = [
+  { pattern: /^node_modules\/@noble\//u, reason: "relay E2EE crypto (@noble)" },
+  { pattern: /^node_modules\/cborg\//u, reason: "relay CBOR codec (cborg)" },
+  { pattern: /^packages\/shared\/src\/relay(?:E2ee|Codec)/u, reason: "relay wire / E2EE protocol" },
+  {
+    pattern: /^packages\/client-runtime\/src\/relay\/(?!(?:reconnectPolicy|base64url)\.ts$)/u,
+    reason: "relay engine (only reconnectPolicy and base64url are light)",
+  },
+  {
+    pattern:
+      /^packages\/client-runtime\/src\/authorization\/(?!(?:nodeMutationLease|capabilities|deliveryNotice|hostedStores|types)\.ts$)/u,
+    reason: "hosted authorization runtime (import a light subpath instead of the barrel)",
+  },
+  {
+    pattern:
+      /^apps\/web\/src\/(?:hostedHub\/(?:state|transport|runtime|readCache|hostedConnectionCoordinator|nodeRouteOrchestrator|relaySocket|hubSession|e2ee\w*)|components\/hostedHub\/HostedConnectionControls|components\/NoActiveThreadHostedStatus|pwa\/lifecycle)\.tsx?$/u,
+    reason: "hosted-only module (standard builds use its *.standard sibling)",
+  },
+];
+
+/** The markdown renderer: comment threads and chat messages load it on demand. */
+const MARKDOWN_SOURCES: readonly ForbiddenBundleSource[] = [
+  { pattern: /^node_modules\/react-markdown\//u, reason: "markdown renderer" },
+  { pattern: /^node_modules\/micromark/u, reason: "markdown parser" },
+  { pattern: /^node_modules\/parse5\//u, reason: "HTML parser (rehype-raw)" },
+];
+
+/** The diff renderer and its syntax highlighter. */
+const DIFF_RENDERER_SOURCES: readonly ForbiddenBundleSource[] = [
+  { pattern: /^node_modules\/@pierre\/diffs\//u, reason: "diff renderer" },
+  { pattern: /^node_modules\/(?:shiki|@shikijs\/)/u, reason: "syntax highlighter" },
+];
+
+/** OTLP export loads when client tracing is configured, never at boot. */
+const TRACING_EXPORTER_SOURCES: readonly ForbiddenBundleSource[] = [
+  { pattern: /^node_modules\/effect\/dist\/observability\/Otlp/u, reason: "OTLP exporter" },
+];
+
+/**
+ * Budgets of the standard web build (gzip, summed per file). Measured
+ * 2026-10-11 after hosted code left the standard boot graph: boot 472 KiB
+ * (644 KiB before), RootAppShell beyond boot 367 KiB (538 KiB before),
+ * ChatThreadRouteView beyond boot 974 KiB. The thread route's target is
+ * 700 KiB; its budget sits just above today's size so it blocks growth until
+ * the thread route is split further.
+ */
+export const DEFAULT_BUNDLE_BUDGET_POLICY: BundleBudgetPolicy = {
+  bootChunk: "main",
+  closures: [
+    {
+      name: "boot",
+      chunk: "main",
+      beyondBoot: false,
+      maxGzipBytes: 520 * KIB,
+      forbiddenSources: [
+        ...HOSTED_RUNTIME_SOURCES,
+        ...MARKDOWN_SOURCES,
+        ...DIFF_RENDERER_SOURCES,
+        ...TRACING_EXPORTER_SOURCES,
+      ],
+    },
+    {
+      name: "RootAppShell",
+      chunk: "RootAppShell",
+      beyondBoot: true,
+      // The boot code-splitting group keeps shell-only @base-ui and lucide
+      // modules out of boot, so ~20 KiB gzip sits here instead (405 KiB).
+      maxGzipBytes: 420 * KIB,
+      forbiddenSources: [...HOSTED_RUNTIME_SOURCES, ...MARKDOWN_SOURCES, ...DIFF_RENDERER_SOURCES],
+    },
+    {
+      // 813 KiB on 2026-10-12, after route-level splitting (974 KiB before).
+      name: "ChatThreadRouteView",
+      chunk: "ChatThreadRouteView",
+      beyondBoot: true,
+      maxGzipBytes: 880 * KIB,
+      forbiddenSources: HOSTED_RUNTIME_SOURCES,
+    },
+    {
+      // Route-level splitting makes the route view the page's chunk entry.
+      name: "PullRequestsRouteView",
+      chunk: "PullRequestsRouteView",
+      beyondBoot: true,
+      maxGzipBytes: null,
+      forbiddenSources: [...HOSTED_RUNTIME_SOURCES, ...DIFF_RENDERER_SOURCES],
+    },
+  ],
+};
 
 export interface BenchmarkMetadata {
   readonly generatedAt: string;
@@ -237,6 +385,8 @@ export const DEFAULT_COMPARISON_POLICY: ComparisonPolicy = {
     peakTreeRssBytes: { relativePercent: 10, absolute: 20 * 1024 * 1024 },
     reconnectMs: { relativePercent: 20, absolute: 250 },
     maxLongTaskMs: { relativePercent: 20, absolute: 50 },
+    longTaskTotalMs: { relativePercent: 20, absolute: 50 },
+    shellPaintedMs: { relativePercent: 15, absolute: 100 },
     buildDurationMs: { relativePercent: 15, absolute: 5_000 },
     buildPeakRssBytes: { relativePercent: 10, absolute: 100 * 1024 * 1024 },
     bundleRawBytes: { relativePercent: 5, absolute: 50 * 1024 },
@@ -261,6 +411,8 @@ export const PERF_METRIC_KEYS: readonly PerfMetricKey[] = [
   "usableMs",
   "longTasks",
   "maxLongTaskMs",
+  "longTaskTotalMs",
+  "shellPaintedMs",
   "bootstrapRequests",
   "bootstrapEncodedBytes",
   "bootstrapWebSocketBytes",
@@ -296,6 +448,8 @@ export function sampleMetric(sample: PerfSample, metric: PerfMetricKey): number 
     case "usableMs":
     case "longTasks":
     case "maxLongTaskMs":
+    case "longTaskTotalMs":
+    case "shellPaintedMs":
       return sample.vitals[metric];
     case "bootstrapRequests":
       return sample.bootstrapNetwork.requests;

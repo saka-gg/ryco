@@ -3,6 +3,8 @@ import "@xterm/xterm/css/xterm.css";
 import {
   createTerminalEventReconciler,
   isTerminalEventAfterSnapshot,
+  isTerminalReplayEvent,
+  isTerminalSnapshotDeltaFor,
   bracketedTerminalSnippet,
 } from "@ryco/client-runtime/state/terminal";
 import { terminalSnippetBroker } from "../terminalSnippetInsertion";
@@ -66,7 +68,25 @@ import {
   readWebPerfNow,
   recordWebPerf,
 } from "~/perf/perfInstrumentation";
-import { selectTerminalEventEntries, useTerminalStateStore } from "../terminalStateStore";
+import {
+  selectTerminalEventEntries,
+  selectThreadTerminalState,
+  useTerminalStateStore,
+} from "../terminalStateStore";
+import {
+  rememberTerminalDimensions,
+  takePreparedTerminalOpen,
+  terminalLaunchKey,
+  type TerminalDimensions,
+  type TerminalSurfaceLayout,
+} from "../terminalPrepare";
+import {
+  createTerminalViewCache,
+  isTerminalEventIdSpaceReset,
+  isTerminalViewCurrent,
+  resolveTerminalViewCatchUp,
+  terminalViewCacheKey,
+} from "./terminalViewCache";
 
 const MIN_DRAWER_HEIGHT = 180;
 const MAX_DRAWER_HEIGHT_RATIO = 0.75;
@@ -104,6 +124,41 @@ export function writeTerminalSnapshot(terminal: Terminal, snapshot: TerminalSess
   if (snapshot.history.length > 0) {
     terminal.write(snapshot.history);
   }
+}
+
+interface CachedTerminalViewState {
+  readonly fitAddon: FitAddon;
+  readonly eventReconciler: ReturnType<typeof createTerminalEventReconciler>;
+  readonly hydratedSnapshot: TerminalSessionSnapshot | null;
+}
+
+const terminalViewCache = createTerminalViewCache<Terminal, CachedTerminalViewState>();
+
+let terminalStoreResetWatchInstalled = false;
+/**
+ * A reset of the terminal store (hosted account teardown) restarts its event
+ * ids and drops the session the kept views belong to: their output must not
+ * reappear, and their applied event ids no longer order new events.
+ */
+function watchTerminalStoreResets(): void {
+  if (terminalStoreResetWatchInstalled) return;
+  terminalStoreResetWatchInstalled = true;
+  useTerminalStateStore.subscribe((state, previousState) => {
+    if (isTerminalEventIdSpaceReset(previousState.nextTerminalEventId, state.nextTerminalEventId)) {
+      terminalViewCache.clear();
+    }
+  });
+}
+
+export function disposeCachedTerminalViewsForTests(): void {
+  terminalViewCache.clear();
+}
+
+function sameTerminalDimensions(
+  left: TerminalDimensions | null,
+  right: TerminalDimensions | null,
+): boolean {
+  return left !== null && right !== null && left.cols === right.cols && left.rows === right.rows;
 }
 
 interface TerminalOutputBatcher {
@@ -380,6 +435,8 @@ interface TerminalViewportProps {
   resizeEpoch: number;
   drawerHeight: number;
   keybindings: ResolvedKeybindingsConfig;
+  /** Which surface hosts the viewport; its last fitted size seeds early opens. */
+  layout?: TerminalSurfaceLayout;
 }
 
 export function TerminalViewport({
@@ -397,6 +454,7 @@ export function TerminalViewport({
   resizeEpoch,
   drawerHeight,
   keybindings,
+  layout = "drawer",
 }: TerminalViewportProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
@@ -411,6 +469,8 @@ export function TerminalViewport({
   const keybindingsRef = useRef(keybindings);
   const lastAppliedTerminalEventIdRef = useRef(0);
   const terminalHydratedRef = useRef(false);
+  /** Size the server last heard (open or resize); avoids redundant resize RPCs. */
+  const lastSentDimensionsRef = useRef<TerminalDimensions | null>(null);
   const handleSessionExited = useEffectEvent(() => {
     onSessionExited();
   });
@@ -428,29 +488,52 @@ export function TerminalViewport({
     if (!mount) return;
 
     let disposed = false;
-    const eventReconciler = createTerminalEventReconciler();
     const api = readEnvironmentApi(environmentId);
     const localApi = readLocalApi();
     if (!api || !localApi) return;
     const snippetRequest = terminalSnippetBroker.read({ threadRef, terminalId });
-    let hydratedSnapshot: TerminalSessionSnapshot | null = null;
+    const viewKey = terminalViewCacheKey(environmentId, threadId, terminalId);
+    const launchKey = terminalLaunchKey({ cwd, worktreePath, runtimeEnv });
+    // A snippet insertion tracks parse progress from a fresh hydration.
+    if (snippetRequest) terminalViewCache.discard(viewKey);
+    const cachedView = snippetRequest ? null : terminalViewCache.take(viewKey, launchKey);
+    const eventReconciler = cachedView?.state.eventReconciler ?? createTerminalEventReconciler();
+    let hydratedSnapshot: TerminalSessionSnapshot | null =
+      cachedView?.state.hydratedSnapshot ?? null;
+    let appliedCursor: TerminalSessionSnapshot["cursor"] = cachedView?.appliedCursor;
     let parsedCursor: TerminalSessionSnapshot["cursor"];
     const inputBlocked = () =>
       terminalSnippetBroker.inputBlocked({ threadRef, terminalId }, hydratedSnapshot?.inputEpoch);
 
-    const fitAddon = new FitAddon();
-    const terminal = new Terminal({
-      cursorBlink: true,
-      allowProposedApi: true,
-      lineHeight: 1.2,
-      fontSize: 12,
-      scrollback: 5_000,
-      fontFamily: readTerminalFontFamily(),
-      theme: terminalThemeFromApp(mount),
-    });
-    terminal.loadAddon(fitAddon);
-    terminal.open(mount);
-    fitAddon.fit();
+    let fitAddon: FitAddon;
+    let terminal: Terminal;
+    if (cachedView) {
+      // Reattach the kept view: its buffer, scroll position and parsed state
+      // survive, so it shows content immediately.
+      fitAddon = cachedView.state.fitAddon;
+      terminal = cachedView.terminal;
+      mount.append(cachedView.element);
+      // Appearance may have changed while it was detached.
+      terminal.options.theme = terminalThemeFromApp(mount);
+      const fontFamily = readTerminalFontFamily();
+      if (terminal.options.fontFamily !== fontFamily) terminal.options.fontFamily = fontFamily;
+      fitAddon.fit();
+      terminal.refresh(0, terminal.rows - 1);
+    } else {
+      fitAddon = new FitAddon();
+      terminal = new Terminal({
+        cursorBlink: true,
+        allowProposedApi: true,
+        lineHeight: 1.2,
+        fontSize: 12,
+        scrollback: 5_000,
+        fontFamily: readTerminalFontFamily(),
+        theme: terminalThemeFromApp(mount),
+      });
+      terminal.loadAddon(fitAddon);
+      terminal.open(mount);
+      fitAddon.fit();
+    }
 
     terminalRef.current = terminal;
     fitAddonRef.current = fitAddon;
@@ -737,6 +820,8 @@ export function TerminalViewport({
       }
 
       if (event.type === "activity") {
+        // Tracked so a reconnect replay can tell missed output from activity already seen.
+        eventReconciler.accept(event);
         recordTerminalApply();
         return;
       }
@@ -744,6 +829,15 @@ export function TerminalViewport({
       if (!eventReconciler.accept(event)) {
         recordTerminalApply();
         return;
+      }
+
+      // A replay carries no history: the view still shows output up to the old
+      // cursor, which the re-hydrating open asks the server to continue from.
+      if (!isTerminalReplayEvent(event)) {
+        appliedCursor =
+          event.type === "started" || event.type === "restarted"
+            ? event.snapshot.cursor
+            : (event.cursor ?? appliedCursor);
       }
 
       if (event.type === "output") {
@@ -775,6 +869,14 @@ export function TerminalViewport({
         }
         hasHandledExitRef.current = false;
         clearSelectionAction();
+        if (isTerminalReplayEvent(event)) {
+          // Output was missed while disconnected and the replay carries no history:
+          // re-hydrate from terminal.open instead of resetting to an empty snapshot.
+          terminalHydratedRef.current = false;
+          void openTerminal({ resync: true });
+          recordTerminalApply();
+          return;
+        }
         writeTerminalSnapshot(activeTerminal, event.snapshot);
         hydratedSnapshot = event.snapshot;
         if (snippetRequest)
@@ -822,6 +924,12 @@ export function TerminalViewport({
       }, 0);
       recordTerminalApply();
     };
+    const readTerminalEventEntries = () =>
+      selectTerminalEventEntries(
+        useTerminalStateStore.getState().terminalEventEntriesByKey,
+        threadRef,
+        terminalId,
+      );
     const applyPendingTerminalEvents = (
       terminalEventEntries: ReadonlyArray<{ id: number; event: TerminalEvent }>,
     ) => {
@@ -829,14 +937,13 @@ export function TerminalViewport({
         terminalEventEntries,
         lastAppliedTerminalEventIdRef.current,
       );
-      if (pendingEntries.length === 0) {
-        return;
-      }
       for (const entry of pendingEntries) {
         applyTerminalEvent(entry.event);
+        // A reconnect replay handed the view to a re-hydrating open, which applies
+        // the buffer after its answer; the view still stands before this entry.
+        if (!terminalHydratedRef.current) return;
+        lastAppliedTerminalEventIdRef.current = entry.id;
       }
-      lastAppliedTerminalEventIdRef.current =
-        pendingEntries.at(-1)?.id ?? lastAppliedTerminalEventIdRef.current;
     };
 
     const unsubscribeTerminalEvents = useTerminalStateStore.subscribe((state, previousState) => {
@@ -863,57 +970,120 @@ export function TerminalViewport({
       applyPendingTerminalEvents(nextEntries);
     });
 
-    const openTerminal = async () => {
+    const sendResizeIfChanged = (target: Terminal) => {
+      const next = { cols: target.cols, rows: target.rows };
+      rememberTerminalDimensions(layout, next);
+      if (sameTerminalDimensions(lastSentDimensionsRef.current, next)) return;
+      lastSentDimensionsRef.current = next;
+      void api.terminal.resize({ threadId, terminalId, ...next }).catch(() => undefined);
+    };
+
+    let openGeneration = 0;
+    /** An open asked for the history after `appliedCursor`; the view holds still until it answers. */
+    let awaitingHistoryDelta = false;
+    const openTerminal = async (options?: { readonly resync?: boolean }) => {
+      const generation = ++openGeneration;
       try {
         const activeTerminal = terminalRef.current;
         const activeFitAddon = fitAddonRef.current;
         if (!activeTerminal || !activeFitAddon) return;
         activeFitAddon.fit();
-        const snapshot = await api.terminal.open({
-          threadId,
-          terminalId,
-          cwd,
-          ...(worktreePath !== undefined ? { worktreePath } : {}),
+        // An explicit open (drawer toggle, shortcut, terminal tab) may already
+        // have started the PTY while this chunk loaded; take that response
+        // instead of opening a second time.
+        const prepared =
+          snippetRequest || options?.resync
+            ? null
+            : takePreparedTerminalOpen({ environmentId, threadId, terminalId, launchKey });
+        // A view that already shows output up to `appliedCursor` (a reattach or a
+        // reconnect resync) asks only for the history after it. Live events wait
+        // in the store meanwhile, so the answer appends exactly onto that output.
+        const sinceCursor = prepared || snippetRequest ? undefined : appliedCursor;
+        awaitingHistoryDelta = sinceCursor !== undefined;
+        if (awaitingHistoryDelta) terminalHydratedRef.current = false;
+        const openDimensions = prepared?.dimensions ?? {
           cols: activeTerminal.cols,
           rows: activeTerminal.rows,
-          ...(runtimeEnv ? { env: runtimeEnv } : {}),
-          ...(snippetRequest ? { requireCurrentWorkspace: true } : {}),
-        });
-        if (disposed) return;
+        };
+        lastSentDimensionsRef.current = openDimensions;
+        const snapshot = await (prepared?.promise ??
+          api.terminal.open({
+            threadId,
+            terminalId,
+            cwd,
+            ...(worktreePath !== undefined ? { worktreePath } : {}),
+            ...openDimensions,
+            ...(runtimeEnv ? { env: runtimeEnv } : {}),
+            ...(snippetRequest ? { requireCurrentWorkspace: true } : {}),
+            ...(sinceCursor ? { sinceCursor } : {}),
+          }));
+        if (disposed || generation !== openGeneration) return;
+        awaitingHistoryDelta = false;
         hydratedSnapshot = snapshot;
-        eventReconciler.reset(snapshot);
-        writeTerminalSnapshot(activeTerminal, snapshot);
-        if (snippetRequest)
-          activeTerminal.write("", () => {
-            parsedCursor = snapshot.cursor;
-          });
-        const bufferedEntries = selectTerminalEventEntries(
-          useTerminalStateStore.getState().terminalEventEntriesByKey,
-          threadRef,
-          terminalId,
-        );
-        const replayEntries = selectTerminalEventEntriesAfterSnapshot(
-          bufferedEntries,
-          snapshot.updatedAt,
-          snapshot.cursor,
-        );
-        for (const entry of replayEntries) {
-          applyTerminalEvent(entry.event);
-        }
-        lastAppliedTerminalEventIdRef.current = bufferedEntries.at(-1)?.id ?? 0;
+        const historyDelta = isTerminalSnapshotDeltaFor(snapshot, sinceCursor);
+        const viewShowsOutput = terminalHydratedRef.current || sinceCursor !== undefined;
         terminalHydratedRef.current = true;
+        if (
+          !historyDelta &&
+          viewShowsOutput &&
+          isTerminalViewCurrent(snapshot.cursor, appliedCursor)
+        ) {
+          // The view already shows everything the answer holds (an older server
+          // ignores `sinceCursor`): keep it and apply what arrived meanwhile.
+          applyPendingTerminalEvents(readTerminalEventEntries());
+          if (generation !== openGeneration) return;
+        } else {
+          eventReconciler.reset(snapshot);
+          // Output batched before the answer belongs before what it writes.
+          outputBatcher.flush();
+          if (historyDelta) {
+            if (snapshot.history.length > 0) activeTerminal.write(snapshot.history);
+          } else {
+            writeTerminalSnapshot(activeTerminal, snapshot);
+          }
+          appliedCursor = snapshot.cursor;
+          if (snippetRequest)
+            activeTerminal.write("", () => {
+              parsedCursor = snapshot.cursor;
+            });
+          const bufferedEntries = readTerminalEventEntries();
+          const replayEntries = selectTerminalEventEntriesAfterSnapshot(
+            bufferedEntries,
+            snapshot.updatedAt,
+            snapshot.cursor,
+          );
+          for (const entry of replayEntries) {
+            applyTerminalEvent(entry.event);
+            // A reconnect replay among them started its own re-hydration.
+            if (generation !== openGeneration) return;
+          }
+          lastAppliedTerminalEventIdRef.current = bufferedEntries.at(-1)?.id ?? 0;
+        }
+        // One resize at most: only when the fitted size differs from the size
+        // the PTY was opened (or prepared) with.
+        activeFitAddon.fit();
+        sendResizeIfChanged(activeTerminal);
         if (!snippetRequest && inputBlocked())
           writeBufferedSystemMessage(
             activeTerminal,
             "Snippet delivery is unconfirmed. Input is blocked; close this pane and open a new terminal to continue.",
           );
-        if (autoFocus) {
+        if (autoFocus && !options?.resync) {
           window.requestAnimationFrame(() => {
             activeTerminal.focus();
           });
         }
       } catch (err) {
-        if (disposed) return;
+        if (disposed || generation !== openGeneration) return;
+        // A failed resync or delta open keeps applying live events over the
+        // scrollback the view already shows, starting with those it held while
+        // the open was in flight (an idle shell may send nothing to flush them).
+        const resumeLiveEvents = options?.resync || awaitingHistoryDelta;
+        awaitingHistoryDelta = false;
+        if (resumeLiveEvents) {
+          terminalHydratedRef.current = true;
+          applyPendingTerminalEvents(readTerminalEventEntries());
+        }
         snippetRequest?.complete(
           err instanceof Error ? err : new Error("Failed to open the thread terminal."),
         );
@@ -924,6 +1094,26 @@ export function TerminalViewport({
       }
     };
 
+    // A reattached view first catches up from the client event buffer, so it
+    // is current before the open round trip returns. This runs after openTerminal
+    // exists: a buffered replay event re-hydrates through it.
+    if (cachedView) {
+      const catchUp = resolveTerminalViewCatchUp(
+        readTerminalEventEntries(),
+        cachedView.lastAppliedTerminalEventId,
+      );
+      if (catchUp !== null) {
+        for (const entry of catchUp) {
+          applyTerminalEvent(entry.event);
+        }
+        lastAppliedTerminalEventIdRef.current =
+          catchUp.at(-1)?.id ?? cachedView.lastAppliedTerminalEventId;
+        terminalHydratedRef.current = true;
+      }
+    }
+
+    // Layout can settle a moment after mount; refit then, and tell the
+    // server only if the size actually changed after it was hydrated.
     const fitTimer = window.setTimeout(() => {
       const activeTerminal = terminalRef.current;
       const activeFitAddon = fitAddonRef.current;
@@ -934,14 +1124,7 @@ export function TerminalViewport({
       if (wasAtBottom) {
         activeTerminal.scrollToBottom();
       }
-      void api.terminal
-        .resize({
-          threadId,
-          terminalId,
-          cols: activeTerminal.cols,
-          rows: activeTerminal.rows,
-        })
-        .catch(() => undefined);
+      if (terminalHydratedRef.current) sendResizeIfChanged(activeTerminal);
     }, 30);
     void openTerminal();
     const snippetTimer = snippetRequest
@@ -1022,8 +1205,24 @@ export function TerminalViewport({
       snippetRequest?.complete(
         new Error("Insertion cancelled because the terminal was closed or focus changed."),
       );
+      const keptElement = terminal.element;
+      // Keep a hydrated, still-open terminal's view for a quick reattach. A
+      // closed or exited terminal, or one used for snippet delivery, is gone.
+      // A view waiting for a delta still shows exactly the output up to its
+      // applied cursor and event id, so it is kept as well.
+      const keepView =
+        keptElement !== undefined &&
+        !snippetRequest &&
+        (terminalHydratedRef.current || awaitingHistoryDelta) &&
+        !hasHandledExitRef.current &&
+        selectThreadTerminalState(
+          useTerminalStateStore.getState().terminalStateByThreadKey,
+          threadRef,
+        ).terminalIds.includes(terminalId);
+      const lastAppliedTerminalEventId = lastAppliedTerminalEventIdRef.current;
       terminalHydratedRef.current = false;
       lastAppliedTerminalEventIdRef.current = 0;
+      lastSentDimensionsRef.current = null;
       unsubscribeTerminalEvents();
       window.clearTimeout(fitTimer);
       inputDisposable.dispose();
@@ -1038,7 +1237,19 @@ export function TerminalViewport({
       window.removeEventListener(APPEARANCE_PREFERENCES_CHANGE_EVENT, syncTerminalFontFamily);
       terminalRef.current = null;
       fitAddonRef.current = null;
-      terminal.dispose();
+      if (keepView) {
+        watchTerminalStoreResets();
+        terminalViewCache.stash(viewKey, {
+          launchKey,
+          terminal,
+          element: keptElement,
+          state: { fitAddon, eventReconciler, hydratedSnapshot },
+          lastAppliedTerminalEventId,
+          appliedCursor,
+        });
+      } else {
+        terminal.dispose();
+      }
     };
     // autoFocus is intentionally omitted;
     // it is only read at mount time and must not trigger terminal teardown/recreation.
@@ -1068,19 +1279,23 @@ export function TerminalViewport({
       if (wasAtBottom) {
         terminal.scrollToBottom();
       }
-      void api.terminal
-        .resize({
-          threadId,
-          terminalId,
-          cols: terminal.cols,
-          rows: terminal.rows,
-        })
-        .catch(() => undefined);
+      const next = { cols: terminal.cols, rows: terminal.rows };
+      rememberTerminalDimensions(layout, next);
+      // Before hydration the open itself carries the size; afterwards only a
+      // real change is worth a round trip.
+      if (
+        !terminalHydratedRef.current ||
+        sameTerminalDimensions(lastSentDimensionsRef.current, next)
+      ) {
+        return;
+      }
+      lastSentDimensionsRef.current = next;
+      void api.terminal.resize({ threadId, terminalId, ...next }).catch(() => undefined);
     });
     return () => {
       window.cancelAnimationFrame(frame);
     };
-  }, [drawerHeight, environmentId, resizeEpoch, terminalId, threadId]);
+  }, [drawerHeight, environmentId, layout, resizeEpoch, terminalId, threadId]);
   return (
     <div
       ref={containerRef}
@@ -1663,6 +1878,7 @@ export default function ThreadTerminalDrawer({
                     resizeEpoch={resizeEpoch}
                     drawerHeight={drawerHeight}
                     keybindings={keybindings}
+                    layout={layout}
                   />
                 </div>
               </div>
@@ -1686,6 +1902,7 @@ export default function ThreadTerminalDrawer({
               resizeEpoch={resizeEpoch}
               drawerHeight={drawerHeight}
               keybindings={keybindings}
+              layout={layout}
             />
           </div>
         )}

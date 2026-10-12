@@ -635,6 +635,117 @@ describe("CheckpointReactor", () => {
     ).toBe("v2\n");
   });
 
+  it("confirms a baseline only after the thread's queued completion capture", async () => {
+    let releaseCapture!: () => void;
+    const captureHeld = new Promise<void>((resolve) => {
+      releaseCapture = resolve;
+    });
+    const threadId = ThreadId.make("thread-1");
+    const heldRef = checkpointRefForThreadTurn(threadId, 1);
+    const harness = await createHarness({
+      seedFilesystemCheckpoints: false,
+      wrapCheckpointStore: (store) => ({
+        ...store,
+        captureCheckpoint: (input) =>
+          input.checkpointRef === heldRef
+            ? Effect.promise(() => captureHeld).pipe(Effect.andThen(store.captureCheckpoint(input)))
+            : store.captureCheckpoint(input),
+      }),
+    });
+
+    harness.provider.emit({
+      type: "turn.started",
+      eventId: EventId.make("evt-turn-started-queued"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: new Date().toISOString(),
+      threadId,
+      turnId: asTurnId("turn-queued"),
+    });
+    await waitForGitRefExists(harness.cwd, checkpointRefForThreadTurn(threadId, 0));
+    fs.writeFileSync(path.join(harness.cwd, "README.md"), "turn 1\n", "utf8");
+    harness.provider.emit({
+      type: "turn.completed",
+      eventId: EventId.make("evt-turn-completed-queued"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: new Date().toISOString(),
+      threadId,
+      turnId: asTurnId("turn-queued"),
+      payload: { state: "completed" },
+    });
+
+    let confirmed = false;
+    const baseline = Effect.runPromise(harness.reactor.ensurePreTurnBaseline(threadId)).then(() => {
+      confirmed = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    // The next turn's baseline is turn 1's capture, which has not landed yet.
+    expect(confirmed).toBe(false);
+
+    releaseCapture();
+    await baseline;
+    expect(gitShowFileAtRef(harness.cwd, heldRef, "README.md")).toBe("turn 1\n");
+  });
+
+  it("keeps other threads' checkpoint work moving while one thread captures", async () => {
+    const threadId = ThreadId.make("thread-1");
+    const otherThreadId = ThreadId.make("thread-2");
+    const harness = await createHarness({
+      seedFilesystemCheckpoints: false,
+      wrapCheckpointStore: (store) => ({
+        ...store,
+        captureCheckpoint: (input) =>
+          input.checkpointRef === checkpointRefForThreadTurn(threadId, 0)
+            ? Effect.never
+            : store.captureCheckpoint(input),
+      }),
+    });
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("cmd-thread-create-2"),
+        threadId: otherThreadId,
+        projectId: asProjectId("project-1"),
+        title: "Other thread",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5-codex",
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        branch: null,
+        worktreePath: harness.cwd,
+        createdAt: new Date().toISOString(),
+      }),
+    );
+
+    // thread-1's baseline capture never finishes...
+    void Effect.runPromise(harness.reactor.ensurePreTurnBaseline(threadId));
+    // ...and thread-2 still gets its own.
+    await Effect.runPromise(harness.reactor.ensurePreTurnBaseline(otherThreadId));
+    expect(gitRefExists(harness.cwd, checkpointRefForThreadTurn(otherThreadId, 0))).toBe(true);
+    expect(gitRefExists(harness.cwd, checkpointRefForThreadTurn(threadId, 0))).toBe(false);
+  });
+
+  it("remembers the newest checkpoint ref instead of probing git on every turn start", async () => {
+    const refProbes: Array<string> = [];
+    const harness = await createHarness({
+      seedFilesystemCheckpoints: false,
+      wrapCheckpointStore: (store) => ({
+        ...store,
+        hasCheckpointRef: (input) => {
+          refProbes.push(input.checkpointRef);
+          return store.hasCheckpointRef(input);
+        },
+      }),
+    });
+    const threadId = ThreadId.make("thread-1");
+
+    await Effect.runPromise(harness.reactor.ensurePreTurnBaseline(threadId));
+    expect(refProbes).toEqual([checkpointRefForThreadTurn(threadId, 0)]);
+    await Effect.runPromise(harness.reactor.ensurePreTurnBaseline(threadId));
+    expect(refProbes).toHaveLength(1);
+  });
+
   it("keys the turn's checkpoint on its reply, not on a page published after it", async () => {
     const harness = await createHarness({ seedFilesystemCheckpoints: false });
     const threadId = ThreadId.make("thread-1");

@@ -12,8 +12,9 @@ import {
   USAGE_CONTRACT_VERSION,
   type ServerSettings,
 } from "@ryco/contracts";
-import { Effect, Layer, Stream } from "effect";
+import { Duration, Effect, Fiber, Layer, Stream } from "effect";
 import { HttpClient, HttpClientResponse } from "effect/http";
+import { TestClock } from "effect/testing";
 import { afterEach, expect, it, vi } from "vite-plus/test";
 import { ServerConfig } from "../config.ts";
 import { ServerEnvironment } from "../environment/Services/ServerEnvironment.ts";
@@ -24,7 +25,15 @@ const roots: string[] = [];
 afterEach(async () => {
   for (const root of roots.splice(0)) await FS.rm(root, { recursive: true, force: true });
 });
-function testLayer(root: string, settings: ServerSettings, document: unknown = {}) {
+function testLayer(
+  root: string,
+  settings: ServerSettings,
+  document: unknown = {},
+  respond: (
+    request: Parameters<Parameters<typeof HttpClient.make>[0]>[0],
+  ) => ReturnType<Parameters<typeof HttpClient.make>[0]> = (request) =>
+    Effect.succeed(HttpClientResponse.fromWeb(request, Response.json(document))),
+) {
   return UsageServiceLive.pipe(
     Layer.provide(
       Layer.mergeAll(
@@ -42,12 +51,7 @@ function testLayer(root: string, settings: ServerSettings, document: unknown = {
           getEnvironmentId: Effect.succeed(EnvironmentId.make("fixture")),
           getDescriptor: Effect.die("unused"),
         }),
-        Layer.succeed(
-          HttpClient.HttpClient,
-          HttpClient.make((request) =>
-            Effect.succeed(HttpClientResponse.fromWeb(request, Response.json(document))),
-          ),
-        ),
+        Layer.succeed(HttpClient.HttpClient, HttpClient.make(respond)),
       ),
     ),
   );
@@ -208,7 +212,7 @@ it("scans large histories past the old byte/line limits, then reuses them with c
       codex: { ...DEFAULT_SERVER_SETTINGS.providers.codex, homePath: join(root, "codex") },
     },
   };
-  const state = join(root, "state", "usage");
+  const state = usageStateDir(root);
   await FS.mkdir(state, { recursive: true });
   // A fresh legacy cache is already collapsed/poisoned; it must be fetched again.
   await FS.writeFile(
@@ -308,9 +312,11 @@ it("continues past exhausted scan budgets and does not charge cached files again
           timeZone: "UTC",
         };
         const first = yield* service.readSummary(request);
-        expect(first.sources.find((source) => source.provider === "claude")?.status).toBe(
-          "partial",
-        );
+        expect(first.sources.find((source) => source.provider === "claude")).toMatchObject({
+          status: "partial",
+          // Distinct from read failures, so the page can say why.
+          diagnosticCode: "transcript-scan-budget",
+        });
         expect(first.buckets[0]?.responseCount).toBe(2);
         const next = yield* service.readSummary(request);
         expect(next.sources.find((source) => source.provider === "claude")?.status).toBe(
@@ -410,5 +416,279 @@ it("includes disabled accounts and follows the runtime's explicit history enviro
         summary.sources.some((source) => source.diagnosticCode === "history-config-invalid"),
       ).toBe(true);
     }).pipe(Effect.provide(testLayer(root, settings)), Effect.scoped),
+  );
+});
+
+/** ServerConfig.layerTest derives its state directory as `<base>/userdata`. */
+function usageStateDir(root: string) {
+  return join(root, "state", "userdata", "usage");
+}
+
+function claudeSettings(claudeHome: string, root: string): ServerSettings {
+  return {
+    ...DEFAULT_SERVER_SETTINGS,
+    providerInstances: {},
+    providers: {
+      ...DEFAULT_SERVER_SETTINGS.providers,
+      claudeAgent: { ...DEFAULT_SERVER_SETTINGS.providers.claudeAgent, homePath: claudeHome },
+      codex: { ...DEFAULT_SERVER_SETTINGS.providers.codex, homePath: join(root, "codex") },
+    },
+  };
+}
+
+function claudeLine(id: string, inputTokens = 2) {
+  return (
+    JSON.stringify({
+      type: "assistant",
+      timestamp: "2026-08-07T00:00:00Z",
+      sessionId: "session",
+      message: { id, model: "claude-test", usage: { input_tokens: inputTokens, output_tokens: 3 } },
+    }) + "\n"
+  );
+}
+
+const summaryRequest = {
+  contractVersion: USAGE_CONTRACT_VERSION,
+  startDate: "2026-08-01",
+  endDate: "2026-08-10",
+  timeZone: "UTC",
+} as const;
+
+const rateDocument = {
+  "claude-test": { input_cost_per_token: 1, output_cost_per_token: 2 },
+};
+
+it("prices with stale cached rates at once, refreshes them in the background, and backs off failures", async () => {
+  const root = await FS.mkdtemp(join(tmpdir(), "ryco-rates-summary-"));
+  roots.push(root);
+  const claudeHome = join(root, "claude");
+  await FS.mkdir(join(claudeHome, "projects"), { recursive: true });
+  await FS.writeFile(join(claudeHome, "projects", "a.jsonl"), claudeLine("a"));
+  const state = usageStateDir(root);
+  await FS.mkdir(state, { recursive: true });
+  const staleAtMs = Date.now() - 3 * 24 * 60 * 60 * 1000;
+  await FS.writeFile(
+    join(state, "pricing-cache.json"),
+    JSON.stringify({
+      version: 2,
+      fetchedAtMs: staleAtMs,
+      revision: "stale",
+      document: rateDocument,
+    }),
+  );
+  let fetches = 0;
+  // An unreachable rates host: the download never answers.
+  const hanging = () => {
+    fetches += 1;
+    return Effect.never;
+  };
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const service = yield* UsageService;
+      const startedAt = Date.now();
+      const first = yield* service.readSummary(summaryRequest);
+      const second = yield* service.readSummary(summaryRequest);
+      expect(Date.now() - startedAt).toBeLessThan(2_000);
+      for (const summary of [first, second]) {
+        expect(summary.pricing).toMatchObject({ state: "cached", sourceRevision: "stale" });
+        expect(summary.buckets[0]?.estimatedCostUsd).toBe(8);
+      }
+      // One background attempt, not one per summary.
+      expect(fetches).toBe(1);
+    }).pipe(
+      Effect.provide(testLayer(root, claudeSettings(claudeHome, root), {}, hanging)),
+      Effect.scoped,
+    ),
+  );
+
+  // Without any rates, a failed download is not retried on every summary either.
+  await FS.rm(join(state, "pricing-cache.json"));
+  fetches = 0;
+  const failing = () => {
+    fetches += 1;
+    return Effect.fail(new Error("offline") as never);
+  };
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const service = yield* UsageService;
+      for (let index = 0; index < 3; index++) {
+        const summary = yield* service.readSummary(summaryRequest);
+        expect(summary.pricing.state).toBe("unavailable");
+        expect(summary.buckets[0]?.tokens.totalTokens).toBe(5);
+      }
+      expect(fetches).toBe(1);
+    }).pipe(
+      Effect.provide(testLayer(root, claudeSettings(claudeHome, root), {}, failing)),
+      Effect.scoped,
+    ),
+  );
+});
+
+it("reuses an unchanged source's result, re-reads it after a change, and shares identical scans", async () => {
+  const root = await FS.mkdtemp(join(tmpdir(), "ryco-memo-summary-"));
+  roots.push(root);
+  const claudeHome = join(root, "claude");
+  const projects = join(claudeHome, "projects");
+  await FS.mkdir(projects, { recursive: true });
+  await FS.writeFile(join(projects, "a.jsonl"), claudeLine("a"));
+  await FS.writeFile(join(projects, "b.jsonl"), claudeLine("b"));
+  const listing = vi.spyOn(TranscriptReader, "listUsageTranscriptFiles");
+  try {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const service = yield* UsageService;
+        const [first, concurrent] = yield* Effect.all(
+          [service.readSummary(summaryRequest), service.readSummary(summaryRequest)],
+          { concurrency: "unbounded" },
+        );
+        // Both callers received the result of a single scan.
+        expect(concurrent).toBe(first);
+        expect(listing).toHaveBeenCalledTimes(1);
+        expect(first.buckets[0]?.responseCount).toBe(2);
+        const memoized = yield* service.readSummary(summaryRequest);
+        expect(memoized.buckets).toEqual(first.buckets);
+        expect(memoized.sources.find((source) => source.provider === "claude")).toMatchObject({
+          status: "complete",
+          parsedFileCount: 0,
+          reusedCacheFileCount: 2,
+        });
+        yield* Effect.promise(() => FS.appendFile(join(projects, "b.jsonl"), claudeLine("c", 10)));
+        const changed = yield* service.readSummary(summaryRequest);
+        expect(changed.buckets[0]?.responseCount).toBe(3);
+        expect(changed.buckets[0]?.tokens.totalTokens).toBe(23);
+        expect(changed.sources.find((source) => source.provider === "claude")).toMatchObject({
+          parsedFileCount: 1,
+          reusedCacheFileCount: 1,
+        });
+      }).pipe(Effect.provide(testLayer(root, claudeSettings(claudeHome, root))), Effect.scoped),
+    );
+  } finally {
+    listing.mockRestore();
+  }
+  // The scan cache was persisted as shards on shutdown and is reused by a new process.
+  const shards = await FS.readdir(join(usageStateDir(root), "scan-cache"));
+  expect(shards.some((name) => name.endsWith(".json"))).toBe(true);
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const summary = yield* (yield* UsageService).readSummary(summaryRequest);
+      expect(summary.sources.find((source) => source.provider === "claude")).toMatchObject({
+        parsedFileCount: 0,
+        reusedCacheFileCount: 2,
+      });
+      expect(summary.buckets[0]?.responseCount).toBe(3);
+    }).pipe(Effect.provide(testLayer(root, claudeSettings(claudeHome, root))), Effect.scoped),
+  );
+});
+
+it("drops a queued scan once every caller has gone away", async () => {
+  const root = await FS.mkdtemp(join(tmpdir(), "ryco-abandon-summary-"));
+  roots.push(root);
+  const claudeHome = join(root, "claude");
+  await FS.mkdir(join(claudeHome, "projects"), { recursive: true });
+  await FS.writeFile(join(claudeHome, "projects", "a.jsonl"), claudeLine("a"));
+  let release: (() => void) | undefined;
+  let entered: (() => void) | undefined;
+  const firstScanEntered = new Promise<void>((resolve) => (entered = resolve));
+  const original = TranscriptReader.listUsageTranscriptFiles;
+  const listing = vi
+    .spyOn(TranscriptReader, "listUsageTranscriptFiles")
+    .mockImplementation(async (...args) => {
+      // The first scan holds the scan lock until released.
+      if (release === undefined) {
+        const held = new Promise<void>((resolve) => (release = resolve));
+        entered?.();
+        await held;
+      }
+      return original(...args);
+    });
+  try {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const service = yield* UsageService;
+        const first = yield* Effect.forkChild(service.readSummary(summaryRequest));
+        yield* Effect.promise(() => firstScanEntered);
+        // A different window queues behind the running scan; its caller leaves.
+        const abandoned = yield* Effect.forkChild(
+          service.readSummary({ ...summaryRequest, startDate: "2026-08-05" }),
+        );
+        yield* Effect.sleep("20 millis");
+        yield* Fiber.interrupt(abandoned);
+        release?.();
+        const summary = yield* Fiber.join(first);
+        expect(summary.buckets[0]?.responseCount).toBe(1);
+        // Give a (wrongly) surviving queued scan the chance to run.
+        yield* Effect.sleep("50 millis");
+        expect(listing).toHaveBeenCalledTimes(1);
+      }).pipe(Effect.provide(testLayer(root, claudeSettings(claudeHome, root))), Effect.scoped),
+    );
+  } finally {
+    listing.mockRestore();
+  }
+});
+
+it("releases the in-memory scan cache only after usage has been idle", async () => {
+  const root = await FS.mkdtemp(join(tmpdir(), "ryco-idle-summary-"));
+  roots.push(root);
+  const claudeHome = join(root, "claude");
+  const projects = join(claudeHome, "projects");
+  await FS.mkdir(projects, { recursive: true });
+  await FS.writeFile(join(projects, "a.jsonl"), claudeLine("a"));
+  await FS.writeFile(join(projects, "b.jsonl"), claudeLine("b"));
+  const shardDirectory = join(usageStateDir(root), "scan-cache");
+  // Background fibers (debounced persist, idle release) do real file I/O after a clock jump.
+  const settle = Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 100)));
+  /** Drop the persisted shards, so only an in-memory cache can still reuse a file. */
+  const dropPersistedShards = Effect.gen(function* () {
+    for (let attempt = 0; attempt < 50; attempt++) {
+      const names = yield* Effect.promise(() => FS.readdir(shardDirectory).catch(() => []));
+      if (names.some((name) => name.endsWith(".json"))) break;
+      yield* settle;
+    }
+    yield* Effect.promise(() => FS.rm(shardDirectory, { recursive: true, force: true }));
+  });
+  const claudeCoverage = (summary: { readonly sources: ReadonlyArray<{ provider: string }> }) =>
+    summary.sources.find((source) => source.provider === "claude");
+  let index = 0;
+  const appendAndRead = Effect.gen(function* () {
+    // A changed listing bypasses the per-source memo, so the scan cache is consulted.
+    yield* Effect.promise(() =>
+      FS.appendFile(join(projects, "b.jsonl"), claudeLine(`b-${index++}`)),
+    );
+    return yield* (yield* UsageService).readSummary(summaryRequest);
+  });
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      yield* (yield* UsageService).readSummary(summaryRequest);
+      // Activity within the idle window keeps the cache resident.
+      yield* TestClock.adjust(Duration.minutes(9));
+      yield* settle;
+      yield* dropPersistedShards;
+      expect(claudeCoverage(yield* appendAndRead)).toMatchObject({
+        parsedFileCount: 1,
+        reusedCacheFileCount: 1,
+      });
+      yield* TestClock.adjust(Duration.minutes(2));
+      yield* settle;
+      yield* dropPersistedShards;
+      expect(claudeCoverage(yield* appendAndRead)).toMatchObject({
+        parsedFileCount: 1,
+        reusedCacheFileCount: 1,
+      });
+
+      // Ten idle minutes later the cache is persisted and released: with the
+      // shards gone, every file has to be read again.
+      yield* TestClock.adjust(Duration.minutes(11));
+      yield* settle;
+      yield* dropPersistedShards;
+      expect(claudeCoverage(yield* appendAndRead)).toMatchObject({
+        parsedFileCount: 2,
+        reusedCacheFileCount: 0,
+      });
+    }).pipe(
+      Effect.provide(
+        Layer.merge(TestClock.layer(), testLayer(root, claudeSettings(claudeHome, root))),
+      ),
+      Effect.scoped,
+    ),
   );
 });

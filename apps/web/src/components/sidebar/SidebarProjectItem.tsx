@@ -1,5 +1,5 @@
 import { ProjectBrowserPreview } from "../../browser/ProjectBrowserPreview";
-import React, { useCallback, memo, useMemo, useRef, useState } from "react";
+import React, { useCallback, memo, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { type ScopedProjectRef, type ThreadEnvMode } from "@ryco/contracts";
 import {
@@ -38,7 +38,6 @@ import { useSettings } from "~/hooks/useSettings";
 import type { SidebarThreadSummary } from "../../types";
 import type { SidebarProjectSnapshot } from "../../sidebarProjectGrouping";
 import { SidebarProjectHeader } from "./SidebarProjectHeader";
-import { useHasIntersectedViewport } from "./hooks/useHasIntersectedViewport";
 import { useSidebarProjectJiraLinks } from "./hooks/useSidebarProjectJiraLinks";
 import { useSidebarProjectThreadPresentation } from "./hooks/useSidebarProjectThreadPresentation";
 import { useThreadClipboardActions } from "./hooks/useThreadClipboardActions";
@@ -46,7 +45,7 @@ import { useSidebarProjectActions } from "./hooks/useSidebarProjectActions";
 import { useSidebarThreadActions } from "./hooks/useSidebarThreadActions";
 import { useSidebarWorktreeActions } from "./hooks/useSidebarWorktreeActions";
 import { useSidebarProjectContextMenu } from "./hooks/useSidebarProjectContextMenu";
-import { useSidebarProjectDialogs } from "./SidebarProjectDialogOwner";
+import { preloadNewWorktreeDialog, useSidebarProjectDialogs } from "./SidebarProjectDialogOwner";
 
 interface SidebarProjectItemProps {
   project: SidebarProjectSnapshot;
@@ -154,10 +153,13 @@ export const SidebarProjectItem = memo(function SidebarProjectItem(props: Sideba
   );
   // Keep a ref so callbacks can read the latest map without appearing in
   // dependency arrays (avoids invalidating every thread-row memo on each
-  // thread-list change).
+  // thread-list change). Synced in a layout effect, not during render, so the
+  // React Compiler can optimize this component.
   const sidebarThreadByKeyRef =
     useRef<ReadonlyMap<string, SidebarThreadSummary>>(sidebarThreadByKey);
-  sidebarThreadByKeyRef.current = sidebarThreadByKey;
+  useLayoutEffect(() => {
+    sidebarThreadByKeyRef.current = sidebarThreadByKey;
+  }, [sidebarThreadByKey]);
   const projectThreads = useMemo(
     () => mergeSidebarThreadsWithDrafts(sidebarThreads, projectDraftThreads),
     [projectDraftThreads, sidebarThreads],
@@ -187,7 +189,11 @@ export const SidebarProjectItem = memo(function SidebarProjectItem(props: Sideba
   );
   const [confirmingArchiveThreadKey, setConfirmingArchiveThreadKey] = useState<string | null>(null);
   const projectDialogs = useSidebarProjectDialogs();
-  const [setProjectHeaderVisibilityNode, projectHeaderHasIntersected] = useHasIntersectedViewport();
+  // The Jira project link only feeds this project's menus: resolve it when a
+  // menu may open (pointer or focus on the header), not for every visible
+  // project at boot (one RPC per project, each a relay hop on hosted nodes).
+  const [projectMenuIntent, setProjectMenuIntent] = useState(false);
+  const handleProjectMenuIntent = useCallback(() => setProjectMenuIntent(true), []);
   const confirmArchiveButtonRefs = useRef(new Map<string, HTMLButtonElement>());
   const memberProjectByScopedKey = useMemo(
     () =>
@@ -248,7 +254,7 @@ export const SidebarProjectItem = memo(function SidebarProjectItem(props: Sideba
   const jiraProjectOpenUrlByProjectKey = useSidebarProjectJiraLinks({
     project,
     explorerOpen: false,
-    projectVisible: projectHeaderHasIntersected,
+    projectVisible: projectMenuIntent,
   });
 
   const {
@@ -477,13 +483,14 @@ export const SidebarProjectItem = memo(function SidebarProjectItem(props: Sideba
         projectExpanded={projectExpanded}
         projectStatus={projectStatus}
         jiraProjectOpenUrlByProjectKey={jiraProjectOpenUrlByProjectKey}
-        setProjectHeaderVisibilityNode={setProjectHeaderVisibilityNode}
+        onMenuIntent={handleProjectMenuIntent}
         onPointerDownCapture={handleProjectButtonPointerDownCapture}
         onClick={handleProjectButtonClick}
         onKeyDown={handleProjectButtonKeyDown}
         onContextMenu={handleProjectButtonContextMenu}
         onOpenProjectOverviewClick={handleOpenProjectOverviewClick}
         onOpenNewWorktreeClick={handleOpenNewWorktreeClick}
+        onOpenNewWorktreeIntent={preloadNewWorktreeDialog}
         onOpenNewThreadClick={handleOpenNewThreadClick}
         onCopyPath={(member) => {
           copyPathToClipboard(member.cwd, { path: member.cwd });

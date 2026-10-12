@@ -15,6 +15,7 @@ vi.mock("electron", async () => {
     }),
   };
 });
+import type { DesktopBackendLifecycleFrame } from "@ryco/shared/desktopResourceTelemetry";
 import { powerMonitor } from "electron";
 import { attachDesktopResourceTelemetry } from "./desktopResourceTelemetry.ts";
 
@@ -58,6 +59,34 @@ describe("desktop resource telemetry", () => {
     expect((powerMonitor as unknown as EventEmitter).listenerCount("suspend")).toBe(1);
     stop();
     expect((powerMonitor as unknown as EventEmitter).listenerCount("suspend")).toBe(0);
+    pipe.destroy();
+  });
+
+  it("hands valid lifecycle frames to the owner without sampling and drops malformed ones", () => {
+    const pipe = new Duplex({
+      read() {},
+      write(_chunk, _encoding, callback) {
+        callback();
+      },
+    });
+    const frames: DesktopBackendLifecycleFrame[] = [];
+    const stop = attachDesktopResourceTelemetry(pipe, (frame) => frames.push(frame));
+    pipe.emit(
+      "data",
+      [
+        '{"type":"startup-phase","name":"migrations","ms":12}',
+        '{"type":"http-serving","port":0}',
+        '{"type":"unknown-frame"}',
+        '{"type":"http-serving","port":7926}',
+        "",
+      ].join("\n"),
+    );
+    expect(frames).toEqual([
+      { type: "startup-phase", name: "migrations", ms: 12 },
+      { type: "http-serving", port: 7926 },
+    ]);
+    expect(electron.getAppMetrics).not.toHaveBeenCalled();
+    stop();
     pipe.destroy();
   });
 });

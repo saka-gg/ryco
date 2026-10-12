@@ -26,18 +26,40 @@ import type {
 } from "@ryco/contracts";
 import { mergeGitStatusParts } from "@ryco/shared/git";
 
+import type { VcsRefSummary } from "../git/GitManager.ts";
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
+import { logOnceEvery } from "../logOnceEvery.ts";
+import { inBackgroundProcessLane } from "../processGovernor.ts";
+import { readCheckoutHead } from "./gitCheckoutHead.ts";
 
 const DEFAULT_VCS_STATUS_REFRESH_INTERVAL = Duration.seconds(30);
+/** Folders whose last status stays cached; older ones reload on the next read. */
+const STATUS_CACHE_MAX_FOLDERS = 256;
+/**
+ * Per-folder publication buffer. Events are snapshots or halves of one, so a
+ * subscriber that falls behind only skips states superseded by newer ones,
+ * and never because of other folders' traffic.
+ */
+const FOLDER_CHANNEL_CAPACITY = 16;
+/** How often a ref summary rechecks the checkout's HEAD (a file read, no process). */
+const REF_SUMMARY_HEAD_POLL_INTERVAL = Duration.seconds(5);
+/** A polled ref summary re-reads change requests no more often than the shared index refreshes. */
+const REF_SUMMARY_MIN_REMOTE_REFRESH_INTERVAL = Duration.seconds(60);
+const REF_SUMMARY_TRIGGER_DEBOUNCE = Duration.millis(250);
+const EMPTY_WORKING_TREE: VcsStatusLocalResult["workingTree"] = Object.freeze({
+  files: [],
+  insertions: 0,
+  deletions: 0,
+});
 const VCS_STATUS_REFRESH_FAILURE_BASE_DELAY = Duration.seconds(30);
 const VCS_STATUS_REFRESH_FAILURE_MAX_DELAY = Duration.minutes(15);
 const MAX_REMOTE_REFRESH_CONSECUTIVE_FAILURES = 64;
 const LOCAL_STATUS_CACHE_TTL_MS = Duration.toMillis(Duration.seconds(5));
 const REMOTE_STATUS_CACHE_TTL_MS = Duration.toMillis(Duration.seconds(30));
 
-interface VcsStatusChange {
-  readonly cwd: string;
-  readonly event: VcsStatusStreamEvent;
+interface FolderChannel {
+  readonly pubsub: PubSub.PubSub<VcsStatusStreamEvent>;
+  subscribers: number;
 }
 
 interface CachedValue<T> {
@@ -85,6 +107,12 @@ export interface VcsStatusBroadcasterShape {
     cwd: string,
   ) => Effect.Effect<VcsStatusLocalResult, GitManagerServiceError>;
   readonly refreshStatus: (cwd: string) => Effect.Effect<VcsStatusResult, GitManagerServiceError>;
+  /**
+   * Full status, or with `view: "summary"` only a folder's ref, hosting
+   * provider and change request as snapshots whose working tree and ahead /
+   * behind are not computed — no git status, diff or fetch, for badges of
+   * many folders at once.
+   */
   readonly streamStatus: (
     input: VcsStatusInput,
     options?: StreamStatusOptions,
@@ -112,6 +140,27 @@ function normalizeCwd(cwd: string): string {
   }
 }
 
+/** A ref summary as a status snapshot (the `summary` view of {@link VcsStatusBroadcasterShape.streamStatus}). */
+export function refSummaryToStatusEvent(summary: VcsRefSummary): VcsStatusStreamEvent {
+  return {
+    _tag: "snapshot",
+    local: {
+      isRepo: summary.isRepo,
+      ...(summary.sourceControlProvider
+        ? { sourceControlProvider: summary.sourceControlProvider }
+        : {}),
+      hasPrimaryRemote: summary.hasPrimaryRemote,
+      isDefaultRef: summary.isDefaultRef,
+      refName: summary.refName,
+      hasWorkingTreeChanges: false,
+      workingTree: EMPTY_WORKING_TREE,
+    },
+    remote: summary.isRepo
+      ? { hasUpstream: summary.hasUpstream, aheadCount: 0, behindCount: 0, pr: summary.pr }
+      : null,
+  };
+}
+
 export function remoteRefreshFailureDelay(
   consecutiveFailures: number,
   configuredInterval: Duration.Duration,
@@ -131,14 +180,69 @@ export const layer = Layer.effect(
   VcsStatusBroadcaster,
   Effect.gen(function* () {
     const workflow = yield* GitWorkflowService.GitWorkflowService;
-    const changesPubSub = yield* Effect.acquireRelease(
-      PubSub.sliding<VcsStatusChange>(64),
-      (pubsub) => PubSub.shutdown(pubsub),
+    // One channel per watched folder: a publication reaches only that
+    // folder's subscribers, and a burst elsewhere cannot push out its events.
+    const folderChannels = new Map<string, FolderChannel>();
+    yield* Effect.addFinalizer(() =>
+      Effect.forEach(folderChannels.values(), (channel) => PubSub.shutdown(channel.pubsub), {
+        discard: true,
+      }).pipe(Effect.andThen(Effect.sync(() => folderChannels.clear()))),
     );
     const broadcasterScope = yield* Effect.acquireRelease(Scope.make(), (scope) =>
       Scope.close(scope, Exit.void),
     );
     const cacheRef = yield* Ref.make(new Map<string, CachedVcsStatus>());
+
+    const subscribeFolder = (cwd: string) =>
+      Effect.acquireRelease(
+        Effect.gen(function* () {
+          let channel = folderChannels.get(cwd);
+          if (!channel) {
+            const pubsub = yield* PubSub.sliding<VcsStatusStreamEvent>(FOLDER_CHANNEL_CAPACITY);
+            const raced = folderChannels.get(cwd);
+            if (raced) {
+              yield* PubSub.shutdown(pubsub);
+              channel = raced;
+            } else {
+              channel = { pubsub, subscribers: 0 };
+              folderChannels.set(cwd, channel);
+            }
+          }
+          channel.subscribers += 1;
+          return channel;
+        }),
+        (channel) =>
+          Effect.suspend(() => {
+            channel.subscribers -= 1;
+            if (channel.subscribers > 0 || folderChannels.get(cwd) !== channel) {
+              return Effect.void;
+            }
+            folderChannels.delete(cwd);
+            return PubSub.shutdown(channel.pubsub);
+          }),
+      ).pipe(Effect.flatMap((channel) => PubSub.subscribe(channel.pubsub)));
+
+    const publishFolderEvent = (cwd: string, event: VcsStatusStreamEvent) =>
+      Effect.suspend(() => {
+        const channel = folderChannels.get(cwd);
+        return channel ? PubSub.publish(channel.pubsub, event).pipe(Effect.asVoid) : Effect.void;
+      });
+
+    /** Writes `next` as the most recently used entry and drops the least recent past the bound. */
+    const withCachedFolder = (
+      cache: Map<string, CachedVcsStatus>,
+      cwd: string,
+      next: CachedVcsStatus,
+    ) => {
+      const nextCache = new Map(cache);
+      nextCache.delete(cwd);
+      nextCache.set(cwd, next);
+      for (const oldest of nextCache.keys()) {
+        if (nextCache.size <= STATUS_CACHE_MAX_FOLDERS) break;
+        nextCache.delete(oldest);
+      }
+      return nextCache;
+    };
     const pollersRef = yield* SynchronizedRef.make(new Map<string, ActiveRemotePoller>());
 
     const makeStatusSingleFlight = <A>() =>
@@ -232,8 +336,7 @@ export const layer = Layer.effect(
             ...previous,
             local: nextLocal,
           };
-          const nextCache = new Map(cache);
-          nextCache.set(cwd, next);
+          const nextCache = withCachedFolder(cache, cwd, next);
           return [
             {
               changed: previous.local?.fingerprint !== nextLocal.fingerprint,
@@ -248,10 +351,7 @@ export const layer = Layer.effect(
         });
 
         if (options?.publish && publication.changed) {
-          yield* PubSub.publish(changesPubSub, {
-            cwd,
-            event: publication.event,
-          });
+          yield* publishFolderEvent(cwd, publication.event);
         }
 
         return local;
@@ -280,8 +380,7 @@ export const layer = Layer.effect(
             next.local && isCachedValueFresh(next.local, cachedAtMs, LOCAL_STATUS_CACHE_TTL_MS)
               ? next.local.value
               : null;
-          const nextCache = new Map(cache);
-          nextCache.set(cwd, next);
+          const nextCache = withCachedFolder(cache, cwd, next);
           return [
             {
               changed:
@@ -301,10 +400,7 @@ export const layer = Layer.effect(
         });
 
         if (options?.publish && publication.changed) {
-          yield* PubSub.publish(changesPubSub, {
-            cwd,
-            event: publication.event,
-          });
+          yield* publishFolderEvent(cwd, publication.event);
         }
 
         return remote;
@@ -397,11 +493,34 @@ export const layer = Layer.effect(
         "refresh",
         Effect.gen(function* () {
           yield* workflow.invalidateRemoteStatus(cwd);
-          const remote = yield* workflow.remoteStatus({ cwd });
+          // An explicit refresh or poll brings the remote-tracking refs up to date first.
+          const remote = yield* workflow.remoteStatus({ cwd }, { fetch: true });
           return yield* updateCachedRemoteStatus(cwd, remote, { publish: true });
         }),
       );
     });
+
+    /**
+     * After a stream's first remote status (read from the current tracking
+     * refs, no network), fetch in the background — at most once per
+     * repository and remote every few seconds — and publish if refs moved.
+     */
+    const refreshRemoteStatusAfterFetch = (cwd: string): Effect.Effect<void> => {
+      const republish = coalesceRemoteStatus(
+        cwd,
+        "refresh",
+        Effect.gen(function* () {
+          const remote = yield* workflow.remoteStatus({ cwd });
+          return yield* updateCachedRemoteStatus(cwd, remote, { publish: true });
+        }),
+      );
+      const refresh = Effect.gen(function* () {
+        if (yield* workflow.refreshRemoteTrackingRefs(cwd)) {
+          yield* republish;
+        }
+      }).pipe(Effect.catchCause(() => Effect.void));
+      return inBackgroundProcessLane(refresh).pipe(Effect.forkIn(broadcasterScope), Effect.asVoid);
+    };
 
     const refreshStatus: VcsStatusBroadcasterShape["refreshStatus"] = Effect.fn(
       "VcsStatusBroadcaster.refreshStatus",
@@ -436,11 +555,12 @@ export const layer = Layer.effect(
             Math.min(count + 1, MAX_REMOTE_REFRESH_CONSECUTIVE_FAILURES),
           );
           const nextDelay = remoteRefreshFailureDelay(consecutiveFailures, configuredInterval);
-          yield* Effect.logWarning("VCS remote status refresh failed", {
-            cwd,
-            detail: exit.cause.toString(),
-            consecutiveFailures,
-            nextDelayMs: Duration.toMillis(nextDelay),
+          // Offline or signed out, every backoff step fails the same way.
+          yield* logOnceEvery({
+            key: `vcs.remoteStatusRefresh:${cwd}`,
+            message: "VCS remote status refresh failed",
+            fields: { cwd, consecutiveFailures, nextDelayMs: Duration.toMillis(nextDelay) },
+            cause: exit.cause,
           });
           return nextDelay;
         });
@@ -514,11 +634,11 @@ export const layer = Layer.effect(
       }
     });
 
-    const streamStatus: VcsStatusBroadcasterShape["streamStatus"] = (input, options) =>
+    const streamFullStatus: VcsStatusBroadcasterShape["streamStatus"] = (input, options) =>
       Stream.unwrap(
         Effect.gen(function* () {
           const cwd = normalizeCwd(input.cwd);
-          const subscription = yield* PubSub.subscribe(changesPubSub);
+          const subscription = yield* subscribeFolder(cwd);
           const initialLocal = yield* getOrLoadLocalStatus(cwd);
           const cachedRemote = (yield* getCachedStatus(cwd))?.remote ?? null;
           const nowMs = yield* Clock.currentTimeMillis;
@@ -561,18 +681,69 @@ export const layer = Layer.effect(
               remote: initialRemote,
             }),
             Stream.merge(
+              // A fresh cached remote status needs nothing: whichever stream
+              // loaded it already started that load's background fetch.
               retainedRemotePoller || initialRemote !== null
                 ? Stream.empty
                 : Stream.fromEffect(getOrLoadRemoteStatus(cwd)).pipe(
+                    Stream.tap(() => refreshRemoteStatusAfterFetch(cwd)),
                     Stream.map((remote) => ({ _tag: "remoteUpdated" as const, remote })),
                     Stream.catchCause(() => Stream.empty),
                   ),
-              Stream.fromSubscription(subscription).pipe(
-                Stream.filter((event) => event.cwd === cwd),
-                Stream.map((event) => event.event),
-              ),
+              Stream.fromSubscription(subscription),
             ),
           ).pipe(Stream.filter(isChanged));
+        }),
+      );
+
+    const streamRefSummary = (
+      input: VcsStatusInput,
+    ): Stream.Stream<VcsStatusStreamEvent, GitManagerServiceError> =>
+      Stream.unwrap(
+        Effect.gen(function* () {
+          const cwd = normalizeCwd(input.cwd);
+          // Status work for many folders at once yields to interactive git.
+          const readSummary = inBackgroundProcessLane(workflow.refSummary(cwd));
+          const subscription = yield* subscribeFolder(cwd);
+          const initial = yield* readSummary;
+          const pollIntervalMs = input.automaticRemoteRefreshIntervalMs ?? 0;
+
+          // Recompute on: a publication for this folder (a refresh after a git
+          // action or agent turn), a checkout switch seen on disk, and — when
+          // polling is enabled — a slow periodic re-read of change requests.
+          const triggers = Stream.mergeAll(
+            [
+              Stream.fromSubscription(subscription).pipe(Stream.as("published")),
+              Stream.tick(REF_SUMMARY_HEAD_POLL_INTERVAL).pipe(
+                Stream.mapEffect(() => readCheckoutHead(cwd)),
+                Stream.map((head) => head?.branch ?? null),
+                Stream.changes,
+                Stream.drop(1),
+                Stream.as("head"),
+              ),
+              pollIntervalMs > 0
+                ? Stream.tick(
+                    Duration.max(
+                      Duration.millis(pollIntervalMs),
+                      REF_SUMMARY_MIN_REMOTE_REFRESH_INTERVAL,
+                    ),
+                  ).pipe(Stream.drop(1), Stream.as("poll"))
+                : Stream.empty,
+            ],
+            { concurrency: "unbounded" },
+          );
+          const updates = triggers.pipe(
+            Stream.debounce(REF_SUMMARY_TRIGGER_DEBOUNCE),
+            Stream.mapEffect(() => readSummary.pipe(Effect.catchCause(() => Effect.succeed(null)))),
+            Stream.filter((summary): summary is VcsRefSummary => summary !== null),
+          );
+
+          return Stream.concat(Stream.make(initial), updates).pipe(
+            Stream.map(refSummaryToStatusEvent),
+            Stream.changesWith(
+              (left, right) => fingerprintStatusPart(left) === fingerprintStatusPart(right),
+            ),
+          );
         }),
       );
 
@@ -580,7 +751,8 @@ export const layer = Layer.effect(
       getStatus,
       refreshLocalStatus,
       refreshStatus,
-      streamStatus,
+      streamStatus: (input, options) =>
+        input.view === "summary" ? streamRefSummary(input) : streamFullStatus(input, options),
     });
   }),
 );

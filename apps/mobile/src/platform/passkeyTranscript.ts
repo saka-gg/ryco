@@ -1,11 +1,11 @@
+import { encodeBase64Url } from "@ryco/client-runtime/relay/base64url";
 import {
   AUTHENTICATOR_TRANSPORTS,
-  encodeBase64Url,
   type AuthenticationResponseJson,
   type AuthenticatorAttachment,
   type AuthenticatorTransport,
   type RegistrationResponseJson,
-} from "@ryco/client-runtime/relay";
+} from "@ryco/client-runtime/relay/webauthn";
 
 /**
  * Pure encode/normalize layer between the runtime's WebAuthn option/response

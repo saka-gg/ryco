@@ -99,6 +99,7 @@ export const makeServerEnvironment = Effect.fn("makeServerEnvironment")(function
       usageLimitRecovery: true,
       worktreeNotes: true,
       threadFork: true,
+      projectSearchEmptyQuery: true,
       fileAttachments: { maxUploadBytes: PROVIDER_SEND_TURN_MAX_FILE_BYTES },
     },
   };

@@ -53,6 +53,17 @@ describe("terminalRunningSubprocessFromEvent", () => {
     }
   });
 
+  it("takes a replayed session's reported activity and leaves unknown activity alone", () => {
+    const replay = { ...eventBase(), type: "started" as const, snapshot, replay: true as const };
+    expect(terminalRunningSubprocessFromEvent({ ...replay, hasRunningSubprocess: true })).toBe(
+      true,
+    );
+    expect(terminalRunningSubprocessFromEvent({ ...replay, hasRunningSubprocess: false })).toBe(
+      false,
+    );
+    expect(terminalRunningSubprocessFromEvent(replay)).toBeNull();
+  });
+
   it("ignores non-activity terminal events", () => {
     expect(
       terminalRunningSubprocessFromEvent({

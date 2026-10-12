@@ -3,6 +3,8 @@ import {
   ThreadId,
   TerminalInputRejectedError,
   type TerminalEvent,
+  type TerminalSessionSnapshot,
+  type TerminalSubscribeEventsInput,
   TerminalSubscriptionResyncError,
   WS_METHODS,
 } from "@ryco/contracts";
@@ -16,14 +18,47 @@ import { defineWsHandlers, type WsRpcContext } from "./context.ts";
 
 const TERMINAL_SUBSCRIBER_CAPACITY = 256;
 /**
- * Byte ceiling on queued-but-undrained terminal events per subscriber. The
- * event count bound alone lets a stalled client accumulate arbitrarily large
- * output payloads; tripping this budget fails the subscription with the same
- * `slowConsumer` resync signal as count overflow, so the client resynchronizes
- * from the session snapshot (which carries the retained history) instead of
- * the server growing memory without bound.
+ * Byte ceiling on queued-but-undrained live terminal events per subscriber.
+ * The event count bound alone lets a stalled client accumulate arbitrarily
+ * large output payloads; tripping this budget fails the subscription with the
+ * same `slowConsumer` resync signal as count overflow, so the client
+ * resynchronizes instead of the server growing memory without bound.
+ *
+ * Bootstrap snapshots are not charged: they reference histories the manager
+ * already retains, and charging them made a few large running terminals trip
+ * the budget on every resubscribe, a deterministic resync loop.
  */
 const TERMINAL_SUBSCRIBER_MAX_BYTES = 4 * 1024 * 1024;
+
+const terminalSessionKey = (threadId: string, terminalId: string) =>
+  JSON.stringify([threadId, terminalId]);
+
+/**
+ * Catch-up event for a session that was already running when the subscription
+ * opened. `metadata` replays omit retained history (clients re-hydrate through
+ * `terminal.open`) and are marked so clients never treat them as fresh starts;
+ * full replays keep the legacy shape for clients that did not ask for metadata.
+ */
+export function terminalBootstrapEvent(
+  snapshot: TerminalSessionSnapshot,
+  replay: TerminalSubscribeEventsInput["replay"],
+  hasRunningSubprocess: boolean | undefined,
+): TerminalEvent {
+  const base = {
+    type: "started" as const,
+    threadId: snapshot.threadId,
+    terminalId: snapshot.terminalId,
+    createdAt: snapshot.updatedAt,
+    ...(snapshot.cursor ? { cursor: snapshot.cursor } : {}),
+  };
+  if (replay !== "metadata") return { ...base, snapshot };
+  return {
+    ...base,
+    snapshot: { ...snapshot, history: "" },
+    replay: true,
+    ...(hasRunningSubprocess === undefined ? {} : { hasRunningSubprocess }),
+  };
+}
 
 export interface TerminalSubscriberLedger {
   bytes: number;
@@ -189,7 +224,7 @@ export const makeTerminalHandlers = (ctx: WsRpcContext) => {
           "rpc.aggregate": "terminal",
         },
       ),
-    [WS_METHODS.subscribeTerminalEvents]: (_input) =>
+    [WS_METHODS.subscribeTerminalEvents]: (input) =>
       observeRpcStream(
         WS_METHODS.subscribeTerminalEvents,
         ownerStream(
@@ -214,43 +249,44 @@ export const makeTerminalHandlers = (ctx: WsRpcContext) => {
               const snapshots = (yield* terminalManager.listSessions).filter(
                 (snapshot) => snapshot.status === "running",
               );
+              const subprocessActivity =
+                input.replay === "metadata"
+                  ? new Map(
+                      (yield* terminalManager.listDiagnostics).map((process) => [
+                        terminalSessionKey(process.threadId, process.terminalId),
+                        process.hasRunningSubprocess,
+                      ]),
+                    )
+                  : null;
               const cursors = new Map(
                 snapshots.map((snapshot) => [
-                  JSON.stringify([snapshot.threadId, snapshot.terminalId]),
+                  terminalSessionKey(snapshot.threadId, snapshot.terminalId),
                   snapshot.cursor,
                 ]),
               );
-              const initial: TerminalEvent[] = snapshots.map((snapshot) => ({
-                type: "started",
-                threadId: snapshot.threadId,
-                terminalId: snapshot.terminalId,
-                createdAt: snapshot.updatedAt,
-                snapshot,
-                ...(snapshot.cursor ? { cursor: snapshot.cursor } : {}),
-              }));
-              // Bootstrap and live queues share both budgets. Separate queues
-              // enforce snapshot-first ordering without exempting retained history
-              // from the existing per-subscriber bounds.
-              const initialQueue = yield* Queue.dropping<
-                TerminalEvent,
-                TerminalSubscriptionResyncError | Cause.Done<void>
-              >(TERMINAL_SUBSCRIBER_CAPACITY);
-              yield* Effect.addFinalizer(() => Queue.shutdown(initialQueue));
-              const offerInitial = makeTerminalSubscriberOffer(
-                initialQueue,
-                TERMINAL_SUBSCRIBER_CAPACITY,
-                ledger,
+              const initial = snapshots.map((snapshot) =>
+                terminalBootstrapEvent(
+                  snapshot,
+                  input.replay,
+                  subprocessActivity?.get(
+                    terminalSessionKey(snapshot.threadId, snapshot.terminalId),
+                  ),
+                ),
               );
-              yield* Effect.forEach(initial, offerInitial, { discard: true });
+              // Snapshot-first ordering comes from the concat; only live events are
+              // queued, so only they are charged against the subscriber budgets.
               return Stream.concat(
-                Stream.fromQueue(initialQueue).pipe(
-                  Stream.take(initial.length),
-                  Stream.tap((event) => releaseTerminalSubscriberEvent(ledger, event)),
+                Stream.fromIterable(initial).pipe(
+                  Stream.tap((event) =>
+                    Effect.sync(() => recordServerPerfPayload("server.ws.terminal.events", event)),
+                  ),
                 ),
                 Stream.fromQueue(queue).pipe(
                   Stream.tap((event) => releaseTerminalSubscriberEvent(ledger, event)),
                   Stream.filter((event) => {
-                    const cursor = cursors.get(JSON.stringify([event.threadId, event.terminalId]));
+                    const cursor = cursors.get(
+                      terminalSessionKey(event.threadId, event.terminalId),
+                    );
                     return (
                       !cursor ||
                       !event.cursor ||

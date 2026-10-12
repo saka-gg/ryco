@@ -18,6 +18,13 @@ export interface CheckpointDiffInput {
   readonly toTurnCount: number | null;
   readonly ignoreWhitespace: boolean;
   readonly cacheScope?: string | null;
+  /**
+   * Keys in the same slot (per environment, thread and whitespace mode)
+   * supersede each other: once a newer key of the slot is watched, older keys
+   * are dropped as soon as nothing watches them. The conversation view uses
+   * this because every completed turn produces a new full-range key.
+   */
+  readonly cacheSlot?: string | null;
   readonly enabled?: boolean;
 }
 
@@ -188,14 +195,40 @@ interface CheckpointDiffEntry {
   readonly key: string;
   readonly input: CheckpointDiffInput;
   readonly threadId: ThreadId;
+  readonly slotKey: string | null;
   refCount: number;
   generation: number;
   hasResolved: boolean;
   fetching: boolean;
+  /** Drop the entry once its last watcher releases it (thread archived while viewed). */
+  evictOnRelease: boolean;
 }
+
+/**
+ * Unwatched entries stay cached so re-opening a recent diff is instant, but
+ * patches can reach 10 MB each, so the inactive set is bounded by count and by
+ * retained patch characters. Watched entries are never evicted.
+ */
+export const MAX_INACTIVE_CHECKPOINT_DIFF_ENTRIES = 8;
+export const MAX_INACTIVE_CHECKPOINT_DIFF_CHARS = 16 * 1024 * 1024;
 
 const checkpointDiffEntries = new Map<string, CheckpointDiffEntry>();
 const checkpointDiffKeysByThread = new Map<ThreadId, Set<string>>();
+/** Insertion-ordered: the first key is the least recently released. */
+const inactiveCheckpointDiffKeys = new Set<string>();
+const latestCheckpointDiffKeyBySlot = new Map<string, string>();
+
+function checkpointDiffSlotKey(input: CheckpointDiffInput): string | null {
+  if (!input.cacheSlot) {
+    return null;
+  }
+  return JSON.stringify([
+    input.environmentId ?? null,
+    input.threadId,
+    input.ignoreWhitespace,
+    input.cacheSlot,
+  ]);
+}
 
 const NOOP: () => void = () => undefined;
 
@@ -236,6 +269,11 @@ function startCheckpointDiffFetch(entry: CheckpointDiffEntry): void {
         entry.fetching = false;
         entry.hasResolved = true;
         setCheckpointDiffState(entry.key, { data: result, error: null, isLoading: false });
+        // A fetch can outlive its last watcher; the late patch counts against
+        // the inactive budget like any other unwatched entry.
+        if (entry.refCount === 0) {
+          enforceInactiveCheckpointDiffBudget();
+        }
         return;
       } catch (rawError) {
         const normalized = new Error(normalizeCheckpointErrorMessage(rawError), {
@@ -268,6 +306,97 @@ function registerCheckpointDiffKeyForThread(threadId: ThreadId, key: string): vo
   checkpointDiffKeysByThread.set(threadId, new Set([key]));
 }
 
+function retainedCheckpointDiffChars(key: string): number {
+  return getCheckpointDiffState(key).data?.diff.length ?? 0;
+}
+
+function evictCheckpointDiffEntry(entry: CheckpointDiffEntry): void {
+  // Cancel in-flight work so a late response cannot repopulate the atom.
+  entry.generation += 1;
+  entry.fetching = false;
+  checkpointDiffEntries.delete(entry.key);
+  inactiveCheckpointDiffKeys.delete(entry.key);
+  const threadKeys = checkpointDiffKeysByThread.get(entry.threadId);
+  threadKeys?.delete(entry.key);
+  if (threadKeys?.size === 0) {
+    checkpointDiffKeysByThread.delete(entry.threadId);
+  }
+  if (entry.slotKey !== null && latestCheckpointDiffKeyBySlot.get(entry.slotKey) === entry.key) {
+    latestCheckpointDiffKeyBySlot.delete(entry.slotKey);
+  }
+  // Releases the patch string. The atom reads exactly like a never-fetched key,
+  // so a later watch shows its loading state rather than an empty diff.
+  knownCheckpointDiffKeys.delete(entry.key);
+  setCheckpointDiffState(entry.key, LOADING_CHECKPOINT_DIFF_STATE);
+}
+
+function enforceInactiveCheckpointDiffBudget(): void {
+  let retainedChars = 0;
+  for (const key of inactiveCheckpointDiffKeys) {
+    retainedChars += retainedCheckpointDiffChars(key);
+  }
+  for (const key of inactiveCheckpointDiffKeys) {
+    if (
+      inactiveCheckpointDiffKeys.size <= MAX_INACTIVE_CHECKPOINT_DIFF_ENTRIES &&
+      retainedChars <= MAX_INACTIVE_CHECKPOINT_DIFF_CHARS
+    ) {
+      return;
+    }
+    const entry = checkpointDiffEntries.get(key);
+    retainedChars -= retainedCheckpointDiffChars(key);
+    if (entry) {
+      evictCheckpointDiffEntry(entry);
+    } else {
+      inactiveCheckpointDiffKeys.delete(key);
+    }
+  }
+}
+
+function isSupersededCheckpointDiffEntry(entry: CheckpointDiffEntry): boolean {
+  if (entry.slotKey === null) {
+    return false;
+  }
+  const latestKey = latestCheckpointDiffKeyBySlot.get(entry.slotKey);
+  return latestKey !== undefined && latestKey !== entry.key;
+}
+
+function releaseCheckpointDiffEntry(entry: CheckpointDiffEntry): void {
+  entry.refCount = Math.max(0, entry.refCount - 1);
+  if (entry.refCount > 0) {
+    return;
+  }
+  if (entry.evictOnRelease || isSupersededCheckpointDiffEntry(entry)) {
+    evictCheckpointDiffEntry(entry);
+    return;
+  }
+  inactiveCheckpointDiffKeys.delete(entry.key);
+  inactiveCheckpointDiffKeys.add(entry.key);
+  enforceInactiveCheckpointDiffBudget();
+}
+
+function supersedeCheckpointDiffSlot(entry: CheckpointDiffEntry): void {
+  if (entry.slotKey === null) {
+    return;
+  }
+  latestCheckpointDiffKeyBySlot.set(entry.slotKey, entry.key);
+  const threadKeys = checkpointDiffKeysByThread.get(entry.threadId);
+  if (!threadKeys) {
+    return;
+  }
+  // Deleting the visited key from a Set during iteration is safe.
+  for (const key of threadKeys) {
+    const candidate = checkpointDiffEntries.get(key);
+    if (
+      candidate &&
+      candidate !== entry &&
+      candidate.slotKey === entry.slotKey &&
+      candidate.refCount === 0
+    ) {
+      evictCheckpointDiffEntry(candidate);
+    }
+  }
+}
+
 export function watchCheckpointDiff(input: CheckpointDiffInput): () => void {
   if (!isCheckpointDiffEnabled(input) || input.threadId === null) {
     return NOOP;
@@ -280,27 +409,60 @@ export function watchCheckpointDiff(input: CheckpointDiffInput): () => void {
       key,
       input,
       threadId: input.threadId,
+      slotKey: checkpointDiffSlotKey(input),
       refCount: 0,
       generation: 0,
       hasResolved: false,
       fetching: false,
+      evictOnRelease: false,
     };
     checkpointDiffEntries.set(key, entry);
+    knownCheckpointDiffKeys.add(key);
     registerCheckpointDiffKeyForThread(input.threadId, key);
   }
 
   entry.refCount += 1;
+  inactiveCheckpointDiffKeys.delete(key);
+  supersedeCheckpointDiffSlot(entry);
   if (!entry.hasResolved && !entry.fetching) {
     startCheckpointDiffFetch(entry);
   }
 
+  const watchedEntry = entry;
+  let released = false;
   return () => {
-    const current = checkpointDiffEntries.get(key);
-    if (!current) {
+    if (released) {
       return;
     }
-    current.refCount = Math.max(0, current.refCount - 1);
+    released = true;
+    // An entry evicted meanwhile (environment reset) is no longer tracked.
+    if (checkpointDiffEntries.get(key) !== watchedEntry) {
+      return;
+    }
+    releaseCheckpointDiffEntry(watchedEntry);
   };
+}
+
+/**
+ * Drops every cached diff of a thread (archived or removed). Diffs still on
+ * screen are dropped when their last watcher releases them.
+ */
+export function evictCheckpointDiffsForThread(threadId: ThreadId): void {
+  const keys = checkpointDiffKeysByThread.get(threadId);
+  if (!keys) {
+    return;
+  }
+  for (const key of keys) {
+    const entry = checkpointDiffEntries.get(key);
+    if (!entry) {
+      continue;
+    }
+    if (entry.refCount > 0) {
+      entry.evictOnRelease = true;
+      continue;
+    }
+    evictCheckpointDiffEntry(entry);
+  }
 }
 
 function invalidateCheckpointDiffEntry(entry: CheckpointDiffEntry): void {
@@ -339,6 +501,8 @@ export function clearCheckpointDiffState(): void {
   }
   checkpointDiffEntries.clear();
   checkpointDiffKeysByThread.clear();
+  inactiveCheckpointDiffKeys.clear();
+  latestCheckpointDiffKeyBySlot.clear();
   for (const key of knownCheckpointDiffKeys) {
     setCheckpointDiffState(key, LOADING_CHECKPOINT_DIFF_STATE);
   }

@@ -13,6 +13,7 @@ vi.mock("react", async (importOriginal) => {
   const actual = await importOriginal<typeof import("react")>();
   return {
     ...actual,
+    useCallback: <T>(callback: T) => callback,
     useEffect: () => undefined,
     useLayoutEffect: (effect: () => void) => effect(),
     useMemo: <T>(factory: () => T) => factory(),
@@ -21,7 +22,8 @@ vi.mock("react", async (importOriginal) => {
       initial: T,
       initializer: ((input: T) => unknown) | undefined,
     ) => [initializer ? initializer(initial) : initial, dispatchMock] as const,
-    useState: <T>(initial: T) => [initial, vi.fn()] as const,
+    useState: <T>(initial: T | (() => T)) =>
+      [typeof initial === "function" ? (initial as () => T)() : initial, vi.fn()] as const,
     useSyncExternalStore: <T>(_subscribe: unknown, getSnapshot: () => T) => getSnapshot(),
   };
 });

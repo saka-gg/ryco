@@ -10,7 +10,10 @@ import { PROJECTS_ROUTE_PATH } from "../../projectsRoute";
 import { PULL_REQUESTS_ROUTE_PATH } from "../../pullRequestsRoute";
 import { type SidebarMode, useUiStateStore } from "../../uiStateStore";
 
-import { openAutomationsDialog } from "../automations/automationsDialogStore";
+import {
+  openAutomationsDialog,
+  preloadAutomationsDialog,
+} from "../automations/automationsDialogStore";
 import { useWaitingAutomationRuns } from "../automations/useWaitingAutomationRuns";
 import type { InboxSidebarEnvironment } from "../inboxSidebar/inboxSidebarModel";
 import { Kbd } from "../ui/kbd";
@@ -21,6 +24,7 @@ import {
   useSidebarFoldStore,
 } from "./sidebarFold";
 import { SidebarOmnifield } from "./SidebarOmnifield";
+import { preloadDraftRoute } from "./threadNavigationIntent";
 
 const DESTINATION_CLASS_NAME =
   "sidebar-fold-item sidebar-fold-destination flex cursor-pointer items-center rounded-lg text-left text-xs outline-hidden ring-ring hover:bg-sidebar-accent hover:text-foreground focus-visible:ring-2";
@@ -105,6 +109,8 @@ export const SidebarPrimaryActions = memo(function SidebarPrimaryActions(
               aria-label="New thread"
               disabled={props.newThreadDisabled}
               onClick={props.onNewThread}
+              onPointerEnter={preloadDraftRoute}
+              onFocus={preloadDraftRoute}
               data-testid="sidebar-new-thread-button"
               className="sidebar-fold-item sidebar-fold-new grid cursor-pointer place-items-center rounded-[10px] bg-primary text-primary-foreground outline-hidden ring-ring hover:shadow-[0_0_0_4px_color-mix(in_srgb,var(--primary)_10%,transparent)] focus-visible:ring-2 active:scale-90 disabled:pointer-events-none disabled:opacity-50"
             />
@@ -197,6 +203,8 @@ function AutomationsEntry(props: { readonly folded: boolean; readonly index: num
             data-testid="sidebar-automations-button"
             aria-label={`Automations${waiting ? `, ${waiting} ${waiting === 1 ? "run" : "runs"} waiting for approval` : ""}`}
             onClick={(event) => openAutomationsDialog({ origin: event.currentTarget })}
+            onPointerEnter={preloadAutomationsDialog}
+            onFocus={preloadAutomationsDialog}
             style={destinationStyle(props.index)}
             className={cn(DESTINATION_CLASS_NAME, "text-muted-foreground/70")}
           />

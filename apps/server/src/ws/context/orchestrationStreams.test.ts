@@ -4,6 +4,7 @@ import {
   MessageId,
   OrchestrationGetSnapshotError,
   type OrchestrationEvent,
+  type OrchestrationProjectShell,
   type OrchestrationWorktreeShell,
   ProjectId,
   ThreadId,
@@ -11,8 +12,11 @@ import {
 } from "@ryco/contracts";
 import { Cause, Effect, Metric, Option, Queue, Ref } from "effect";
 
+import type { OrchestrationEngineShape } from "../../orchestration/Services/OrchestrationEngine.ts";
+import type { ProjectionSnapshotQueryShape } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { makeWsReplayMetrics } from "../../wsReplayMetrics.ts";
 import {
+  makeOrchestrationStreamHelpers,
   releaseQueuedEventBytes,
   offerOrchestrationLiveEventOrFail,
   offerOrchestrationThreadLiveEventOrFail,
@@ -394,6 +398,138 @@ describe("toShellStreamEvent", () => {
         },
       });
       assert.isTrue(Option.isNone(result));
+    }),
+  );
+});
+
+describe("enrichOrchestrationEvents", () => {
+  it.effect("adds the persisted repository identity to project meta updates, without git", () =>
+    Effect.gen(function* () {
+      const projectId = ProjectId.make("project-enriched");
+      const repositoryIdentity = {
+        canonicalKey: "github.com/ryco/ryco",
+        locator: {
+          source: "git-remote" as const,
+          remoteName: "origin",
+          remoteUrl: "git@github.com:Ryco/ryco.git",
+        },
+        rootPath: "/repos/ryco",
+        remotes: [],
+      };
+      const helpers = makeOrchestrationStreamHelpers({
+        orchestrationEngine: {} as OrchestrationEngineShape,
+        projectionSnapshotQuery: {
+          getProjectShellById: (id: ProjectId) =>
+            Effect.succeed(
+              id === projectId
+                ? Option.some({ id, repositoryIdentity } as unknown as OrchestrationProjectShell)
+                : Option.none(),
+            ),
+        } as unknown as ProjectionSnapshotQueryShape,
+        repositoryIdentityResolver: {
+          resolve: () => Effect.die("project meta updates must not probe git"),
+        },
+      });
+      const metaUpdated = (id: ProjectId, sequence: number): OrchestrationEvent => ({
+        sequence,
+        eventId: EventId.make(`event-meta-${sequence}`),
+        aggregateKind: "project",
+        aggregateId: id,
+        occurredAt: "2026-10-12T00:00:00.000Z",
+        commandId: null,
+        causationEventId: null,
+        correlationId: null,
+        metadata: {},
+        type: "project.meta-updated",
+        payload: { projectId: id, updatedAt: "2026-10-12T00:00:00.000Z" },
+      });
+
+      const [enriched, unknown] = yield* helpers.enrichOrchestrationEvents([
+        metaUpdated(projectId, 1),
+        metaUpdated(ProjectId.make("project-gone"), 2),
+      ]);
+      assert.deepEqual(
+        enriched?.type === "project.meta-updated" ? enriched.payload.repositoryIdentity : undefined,
+        repositoryIdentity,
+      );
+      // A project that is gone keeps its event unchanged.
+      assert.isTrue(
+        unknown?.type === "project.meta-updated" && !("repositoryIdentity" in unknown.payload),
+      );
+    }),
+  );
+
+  it.effect("resolves a moved root inline until its identity is persisted again", () =>
+    Effect.gen(function* () {
+      const movedId = ProjectId.make("project-moved");
+      const plainId = ProjectId.make("project-plain");
+      const resolvedIdentity = {
+        canonicalKey: "github.com/ryco/moved",
+        locator: {
+          source: "git-remote" as const,
+          remoteName: "origin",
+          remoteUrl: "git@github.com:Ryco/moved.git",
+        },
+        rootPath: "/repos/moved",
+        remotes: [],
+      };
+      const resolved: Array<string> = [];
+      const helpers = makeOrchestrationStreamHelpers({
+        orchestrationEngine: {} as OrchestrationEngineShape,
+        projectionSnapshotQuery: {
+          // The move reset the persisted identity; the background sync has not recorded it yet.
+          getProjectShellById: (id: ProjectId) =>
+            Effect.succeed(
+              Option.some({
+                id,
+                workspaceRoot: id === movedId ? "/repos/moved" : "/repos/plain",
+                repositoryIdentity: null,
+              } as unknown as OrchestrationProjectShell),
+            ),
+        } as unknown as ProjectionSnapshotQueryShape,
+        repositoryIdentityResolver: {
+          resolve: (cwd: string) =>
+            Effect.sync(() => {
+              resolved.push(cwd);
+              return cwd === "/repos/moved" ? resolvedIdentity : null;
+            }),
+        },
+      });
+      const metaUpdated = (
+        id: ProjectId,
+        sequence: number,
+        workspaceRoot?: string,
+      ): OrchestrationEvent => ({
+        sequence,
+        eventId: EventId.make(`event-moved-${sequence}`),
+        aggregateKind: "project",
+        aggregateId: id,
+        occurredAt: "2026-10-12T00:00:00.000Z",
+        commandId: null,
+        causationEventId: null,
+        correlationId: null,
+        metadata: {},
+        type: "project.meta-updated",
+        payload: {
+          projectId: id,
+          ...(workspaceRoot === undefined ? {} : { workspaceRoot }),
+          updatedAt: "2026-10-12T00:00:00.000Z",
+        },
+      });
+
+      const [moved, renamed] = yield* helpers.enrichOrchestrationEvents([
+        metaUpdated(movedId, 1, "/repos/moved"),
+        metaUpdated(plainId, 2),
+      ]);
+      assert.deepEqual(
+        moved?.type === "project.meta-updated" ? moved.payload.repositoryIdentity : undefined,
+        resolvedIdentity,
+      );
+      // An update that does not move the root never probes, even without a persisted identity.
+      assert.isTrue(
+        renamed?.type === "project.meta-updated" && renamed.payload.repositoryIdentity === null,
+      );
+      assert.deepEqual(resolved, ["/repos/moved"]);
     }),
   );
 });

@@ -1,37 +1,8 @@
-import { createFileRoute, redirect } from "@tanstack/react-router";
-import { lazy, Suspense } from "react";
+import { createFileRoute, lazyRouteComponent, redirect } from "@tanstack/react-router";
 
-import { parseProjectsSearch, type ProjectsSearch } from "../components/projects/projectsSearch";
-import { SidebarInset } from "../components/ui/sidebar";
+import { parseProjectsSearch } from "../components/projects/projectsSearch";
+import { ROUTE_PAGE_PENDING_MS, RoutePagePending } from "../components/routeViews/RoutePagePending";
 import { getPresentationTier } from "../lib/presentationTier";
-
-const LazyProjectsPage = lazy(() =>
-  import("../components/projects/ProjectsPage").then((module) => ({
-    default: module.ProjectsPage,
-  })),
-);
-
-function ProjectsRouteView() {
-  // The generated file-route registration validates this shape at runtime.
-  // The assertion breaks the component/Route declaration inference cycle.
-  const search = Route.useSearch() as ProjectsSearch;
-  const navigate = Route.useNavigate();
-  return (
-    // A blank inset, not the boot logo: the page shell paints in one frame.
-    <Suspense
-      fallback={
-        <SidebarInset className="h-dvh min-h-0 overflow-hidden bg-background text-foreground" />
-      }
-    >
-      <LazyProjectsPage
-        search={search}
-        onSearchChange={(next, options) =>
-          void navigate({ search: next, replace: options?.replace ?? true })
-        }
-      />
-    </Suspense>
-  );
-}
 
 export const Route = createFileRoute("/projects")({
   beforeLoad: ({ context }) => {
@@ -48,5 +19,13 @@ export const Route = createFileRoute("/projects")({
     }
   },
   validateSearch: (search) => parseProjectsSearch(search),
-  component: ProjectsRouteView,
+  // Route-level splitting: the router awaits the page chunk before it commits,
+  // so the page renders without a Suspense fallback.
+  component: lazyRouteComponent(
+    () => import("../components/routeViews/ProjectsRouteView"),
+    "ProjectsRoute",
+  ),
+  pendingComponent: RoutePagePending,
+  pendingMs: ROUTE_PAGE_PENDING_MS,
+  pendingMinMs: 0,
 });

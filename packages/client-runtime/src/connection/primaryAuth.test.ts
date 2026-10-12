@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { createPrimaryAuth } from "./primaryAuth.ts";
 
@@ -121,5 +121,83 @@ describe("primary auth platform fakes", () => {
       "https://app.test/api/auth/bootstrap",
       expect.objectContaining({ body: JSON.stringify({ credential: "manual-pairing-token" }) }),
     );
+  });
+
+  describe("control-plane deadlines", () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    const authWith = (fetch: (url: string, init?: { signal?: AbortSignal }) => Promise<unknown>) =>
+      createPrimaryAuth({
+        endpoint: {
+          origin: () => "https://app.test",
+          readPrimaryTarget: () => null,
+          resolveHttpUrl: (path) => `https://app.test${path}`,
+          resolveWsUrl: (url) => url,
+        },
+        httpClient: { fetch: fetch as never },
+        pairingCredentialSource: { take: async () => null },
+        readBootstrapCredential: () => null,
+        sessionCredentials: {
+          mode: "cookie",
+          readCsrfToken: () => null,
+          writeCsrfToken: () => undefined,
+        },
+      });
+    /** Never answers until aborted, like a request that reached a server before it listened. */
+    const hang = (init?: { signal?: AbortSignal }) =>
+      new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => {
+          const error = new Error("aborted");
+          error.name = "AbortError";
+          reject(error);
+        });
+      });
+
+    it("retries a websocket token request that never answered", async () => {
+      vi.useFakeTimers();
+      let attempts = 0;
+      const auth = authWith(async (_url, init) => {
+        attempts += 1;
+        if (attempts === 1) return hang(init);
+        return response({ token: "ws-token", expiresAt: "2026-10-12T00:00:00.000Z" });
+      });
+
+      const issued = auth.issuePrimaryWebSocketToken();
+      await vi.advanceTimersByTimeAsync(5_000 + 500);
+      await expect(issued).resolves.toMatchObject({ token: "ws-token" });
+      expect(attempts).toBe(2);
+    });
+
+    it("stops retrying once the connect attempt abandons the token request", async () => {
+      vi.useFakeTimers();
+      let attempts = 0;
+      const auth = authWith(async () => {
+        attempts += 1;
+        return response("restarting", 503);
+      });
+      const attempt = new AbortController();
+
+      const issued = auth.issuePrimaryWebSocketToken(attempt.signal).catch((error) => error);
+      await vi.advanceTimersByTimeAsync(0);
+      attempt.abort();
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(await issued).toMatchObject({ status: 503 });
+      expect(attempts).toBe(1);
+    });
+
+    it("bounds the session read that gates boot", async () => {
+      vi.useFakeTimers();
+      let attempts = 0;
+      const auth = authWith(async (_url, init) => {
+        attempts += 1;
+        return attempts === 1 ? hang(init) : response({ ...session, authenticated: true });
+      });
+
+      const state = auth.fetchSessionState();
+      await vi.advanceTimersByTimeAsync(5_500);
+      await expect(state).resolves.toMatchObject({ authenticated: true });
+    });
   });
 });

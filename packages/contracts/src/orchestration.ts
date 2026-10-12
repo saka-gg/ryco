@@ -1,6 +1,10 @@
 import { ComputerTurnIntent } from "./computerBeta.ts";
 import { ApprovalResponseIdentity } from "./approvalResponses.ts";
-import { Effect, Schema, SchemaIssue, SchemaTransformation, Struct } from "effect";
+import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
+import * as SchemaIssue from "effect/SchemaIssue";
+import * as SchemaTransformation from "effect/SchemaTransformation";
+import * as Struct from "effect/Struct";
 import { ProviderOptionSelections } from "./model.ts";
 import { RepositoryIdentity } from "./environment.ts";
 import {
@@ -54,6 +58,7 @@ export const ORCHESTRATION_WS_METHODS = {
   searchThreadMessages: "orchestration.searchThreadMessages",
   getThreadWindow: "orchestration.getThreadWindow",
   getThreadHistoryPage: "orchestration.getThreadHistoryPage",
+  setThreadHistoryRecovery: "orchestration.setThreadHistoryRecovery",
   replayEvents: "orchestration.replayEvents",
   replayEventsPage: "orchestration.replayEventsPage",
   subscribeShell: "orchestration.subscribeShell",
@@ -1223,11 +1228,33 @@ export const OrchestrationShellStreamEvent = Schema.Union([
 ]);
 export type OrchestrationShellStreamEvent = typeof OrchestrationShellStreamEvent.Type;
 
+/** One thread's current projected ranking, as carried by a `thread-priorities` item. */
+export const OrchestrationThreadPriorityEntry = Schema.Struct({
+  threadId: ThreadId,
+  priority: ThreadPriorityProjectedRanking,
+});
+export type OrchestrationThreadPriorityEntry = typeof OrchestrationThreadPriorityEntry.Type;
+
+/**
+ * A thread-priority ranking replaced the projected rankings. `priorities` lists
+ * every thread's current ranking; a thread it does not list has none. It has
+ * no event sequence: a ranking is not an orchestration event, so it applies on
+ * top of whatever shell the client holds. Only sent to a client that asked for
+ * it (`threadPriorities: "delta"`); others receive a full snapshot instead.
+ */
+export const OrchestrationShellThreadPrioritiesItem = Schema.Struct({
+  kind: Schema.Literal("thread-priorities"),
+  priorities: Schema.Array(OrchestrationThreadPriorityEntry),
+});
+export type OrchestrationShellThreadPrioritiesItem =
+  typeof OrchestrationShellThreadPrioritiesItem.Type;
+
 export const OrchestrationShellStreamItem = Schema.Union([
   Schema.Struct({
     kind: Schema.Literal("snapshot"),
     snapshot: OrchestrationShellSnapshot,
   }),
+  OrchestrationShellThreadPrioritiesItem,
   /**
    * The server accepted `resumeFromSequence`: instead of a snapshot, the events
    * after `fromSequence` follow, and the client keeps the shell it already has.
@@ -1249,6 +1276,13 @@ export const OrchestrationSubscribeShellInput = Schema.Struct({
    * servers ignore the field.
    */
   resumeFromSequence: Schema.optional(NonNegativeInt),
+  /**
+   * How the client takes a thread-priority ranking: `"delta"` asks for a small
+   * `thread-priorities` item instead of a full shell snapshot. Absent, the
+   * server sends a snapshot, which every client understands; older servers
+   * ignore the field and keep sending snapshots.
+   */
+  threadPriorities: Schema.optional(Schema.Literal("delta")),
 });
 export type OrchestrationSubscribeShellInput = typeof OrchestrationSubscribeShellInput.Type;
 
@@ -1260,9 +1294,21 @@ export type OrchestrationSubscribeShellInput = typeof OrchestrationSubscribeShel
  */
 const ThreadResumeFromSequence = Schema.optional(NonNegativeInt);
 
+/**
+ * Whether the subscription serves a view the user has open (`"active"`) or
+ * only keeps the thread warm (`"passive"`: a sidebar prewarm, a retained idle
+ * thread). Provider history recovery runs only for active subscriptions; a
+ * passive one turns active through `orchestration.setThreadHistoryRecovery`.
+ * Absent means active, which is what older clients get.
+ */
+export const OrchestrationThreadHistoryRecoveryMode = Schema.Literals(["active", "passive"]);
+export type OrchestrationThreadHistoryRecoveryMode =
+  typeof OrchestrationThreadHistoryRecoveryMode.Type;
+
 export const OrchestrationSubscribeThreadInput = Schema.Struct({
   threadId: ThreadId,
   resumeFromSequence: ThreadResumeFromSequence,
+  historyRecovery: Schema.optional(OrchestrationThreadHistoryRecoveryMode),
 });
 export type OrchestrationSubscribeThreadInput = typeof OrchestrationSubscribeThreadInput.Type;
 
@@ -1314,10 +1360,23 @@ export const OrchestrationGetThreadWindowInput = Schema.Struct({
 });
 export type OrchestrationGetThreadWindowInput = typeof OrchestrationGetThreadWindowInput.Type;
 
+/**
+ * Moves this connection's subscriptions of one thread between serving an open
+ * view (`"active"`) and keeping the thread warm (`"passive"`). Turning active
+ * runs the history recovery a view's subscription runs when it opens.
+ */
+export const OrchestrationSetThreadHistoryRecoveryInput = Schema.Struct({
+  threadId: ThreadId,
+  mode: OrchestrationThreadHistoryRecoveryMode,
+});
+export type OrchestrationSetThreadHistoryRecoveryInput =
+  typeof OrchestrationSetThreadHistoryRecoveryInput.Type;
+
 export const OrchestrationSubscribeThreadWindowInput = Schema.Struct({
   threadId: ThreadId,
   limits: OrchestrationThreadHistoryLimits,
   resumeFromSequence: ThreadResumeFromSequence,
+  historyRecovery: Schema.optional(OrchestrationThreadHistoryRecoveryMode),
 });
 export type OrchestrationSubscribeThreadWindowInput =
   typeof OrchestrationSubscribeThreadWindowInput.Type;
@@ -3480,6 +3539,10 @@ export const OrchestrationRpcSchemas = {
   getThreadHistoryPage: {
     input: OrchestrationGetThreadHistoryPageInput,
     output: OrchestrationThreadHistoryPage,
+  },
+  setThreadHistoryRecovery: {
+    input: OrchestrationSetThreadHistoryRecoveryInput,
+    output: Schema.Struct({}),
   },
   replayEvents: {
     input: OrchestrationReplayEventsInput,

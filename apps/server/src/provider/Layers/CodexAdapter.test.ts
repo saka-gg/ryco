@@ -39,6 +39,7 @@ import { ProviderAdapterValidationError } from "../Errors.ts";
 import type { CodexAdapterShape } from "../Services/CodexAdapter.ts";
 import { ProviderSessionDirectory } from "../Services/ProviderSessionDirectory.ts";
 import {
+  CodexStartupPhaseTimeout,
   type CodexSessionRuntimeOptions,
   type CodexSessionRuntimeSendTurnInput,
   type CodexSessionRuntimeSteerTurnInput,
@@ -130,8 +131,11 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
     this.options = options;
   }
 
+  /** When set, start runs this instead of resolving `startImpl`. */
+  public startEffect: ReturnType<CodexSessionRuntimeShape["start"]> | null = null;
+
   start() {
-    return Effect.promise(() => this.startImpl());
+    return this.startEffect ?? Effect.promise(() => this.startImpl());
   }
 
   /** When set, the runtime reports this session instead of the started one. */
@@ -634,6 +638,52 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
         serviceTier: "fast",
       });
     }).pipe(Effect.provide(customLayer));
+  });
+
+  it.effect("reports a startup phase that never answered as a request error naming it", () => {
+    const runtimes: Array<FakeCodexRuntime> = [];
+    const detail =
+      "`codex` did not answer the Codex `thread/start` request within 30 seconds. Run `codex` in a terminal to check that it is signed in (`codex login`) and that its MCP servers start.";
+    const runtimeFactory = {
+      factory: vi.fn((options: CodexSessionRuntimeOptions) => {
+        const runtime = new FakeCodexRuntime(options);
+        runtime.startEffect = Effect.fail(
+          new CodexErrors.CodexAppServerTransportError({
+            detail,
+            cause: new CodexStartupPhaseTimeout("thread/start", 30_000),
+          }),
+        );
+        runtimes.push(runtime);
+        return Effect.succeed(runtime);
+      }),
+      get lastRuntime(): FakeCodexRuntime | undefined {
+        return runtimes.at(-1);
+      },
+    };
+    const layer = makeCodexAdapterTestLayer({
+      runtimeFactory,
+      prefix: "ryco-codex-startup-deadline-",
+    });
+
+    return Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const error = yield* Effect.flip(
+        adapter.startSession({
+          runtimeSessionId: RuntimeSessionId.make("test-codexadapter-startup-deadline"),
+          provider: ProviderDriverKind.make("codex"),
+          threadId: asThreadId("sess-startup-deadline"),
+          runtimeMode: "full-access",
+        }),
+      );
+
+      assert.equal(error._tag, "ProviderAdapterRequestError");
+      if (error._tag !== "ProviderAdapterRequestError") return;
+      assert.equal(error.method, "thread/start");
+      assert.equal(error.detail, detail);
+      // The failed start closed the hung runtime.
+      assert.equal(runtimeFactory.lastRuntime?.closeImpl.mock.calls.length, 1);
+      assert.deepStrictEqual(yield* adapter.listSessions(), []);
+    }).pipe(Effect.provide(layer));
   });
 
   it.effect("stats and embeds small image attachments before sending a turn", () => {

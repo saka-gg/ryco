@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 
 import { E2EE_PREKEY_ROTATION_OVERLAP } from "@ryco/shared/relayE2eeConstants";
 import { deriveE2eeAgreementPublicKey } from "@ryco/shared/relayE2eeKeys";
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 
 import { makeNodeContinuityAnchor } from "../hubIdentity/NodeContinuityAnchor.ts";
 import { NODE_E2EE_FAIL_CLOSED_POLICY } from "../hubIdentity/NodeE2eePolicyStore.ts";
@@ -478,6 +478,60 @@ describe("HubIdentityRuntime", () => {
     expect(state.activeNode).toBeNull();
     expect(state.pendingEnrollment).toBeNull();
     expect(touched).toEqual([]);
+  });
+
+  it("loads the E2EE records while the key store is selected and reports each phase", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ryco-hub-identity-phases-"));
+    const phases: string[] = [];
+    let releaseKeyStore!: () => void;
+    const keyStoreHeld = new Promise<void>((resolve) => {
+      releaseKeyStore = resolve;
+    });
+    const building = makeHubIdentityRuntime({
+      statePath: join(root, "state", "hub-identity.json"),
+      fileSecretRoot: join(root, "secrets"),
+      allowFileFallback: false,
+      makeOsSecretStore: async () => {
+        // A slow key store (a credential prompt, a cold keychain).
+        await keyStoreHeld;
+        return makeMemoryStore("keytar");
+      },
+      fetch: enrollmentFetch,
+      now: () => 100_000,
+      onStartupPhase: (phase, durationMs) => {
+        expect(durationMs).toBeGreaterThanOrEqual(0);
+        phases.push(phase);
+      },
+    });
+    // The records finish while the key store is still answering.
+    await vi.waitFor(() => expect(phases).toContain("e2ee-records"));
+    expect(phases).not.toContain("protected-store");
+    releaseKeyStore();
+    const runtime = await building;
+    expect(phases).toEqual(["state", "e2ee-records", "protected-store"]);
+    expect((await runtime.readState()).activeNode).toBeNull();
+  });
+
+  it("fails the build when key custody is unavailable, after the record loads settle", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ryco-hub-identity-phases-fail-"));
+    const statePath = join(root, "state", "hub-identity.json");
+    await writeLegacyActiveState(statePath);
+    const phases: string[] = [];
+    await expect(
+      makeHubIdentityRuntime({
+        statePath,
+        fileSecretRoot: join(root, "secrets"),
+        allowFileFallback: false,
+        makeOsSecretStore: async () => {
+          throw new ProtectedSecretStoreError("protected_store_unavailable");
+        },
+        fetch: enrollmentFetch,
+        now: () => 100_000,
+        onStartupPhase: (phase) => phases.push(phase),
+      }),
+    ).rejects.toBeInstanceOf(HubIdentityRuntimeError);
+    expect(phases).toContain("e2ee-records");
+    expect(phases).toContain("protected-store");
   });
 
   it("keeps a file-backed identity on files when the OS store later becomes available", async () => {

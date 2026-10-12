@@ -5,9 +5,11 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { checkBundleBudgets, formatBundleBudgetReport } from "./bundleBudget.ts";
 import { compareBenchmarks } from "./comparison.ts";
 import { compareGitRefs } from "./gitComparison.ts";
 import {
+  DEFAULT_BUNDLE_BUDGET_POLICY,
   DEFAULT_COMPARISON_POLICY,
   type ComparisonPolicy,
   type PerfScenarioConfig,
@@ -27,6 +29,7 @@ const KNOWN_OPTIONS = new Set([
   "offline-ms",
   "reconnect-timeout-ms",
   "fixture-home",
+  "cpu-profile",
   "target-path",
   "ready-selector",
   "source-control-discovery-timeout-ms",
@@ -36,11 +39,12 @@ const KNOWN_OPTIONS = new Set([
   "source-control-status-rows",
   "output",
   "policy",
+  "dist",
   "help",
 ]);
 
 interface ParsedArgs {
-  readonly command: "smoke" | "run" | "compare-refs";
+  readonly command: "smoke" | "run" | "compare-refs" | "bundle-budget";
   readonly values: ReadonlyMap<string, string>;
   readonly flags: ReadonlySet<string>;
 }
@@ -52,6 +56,7 @@ Usage:
   bun scripts/perf/cli.ts smoke [options]
   bun scripts/perf/cli.ts run [options]
   bun scripts/perf/cli.ts compare-refs [options]
+  bun scripts/perf/cli.ts bundle-budget [--dist <directory>]
 
 Options:
   --base <ref>                 Baseline ref. Default: origin/main
@@ -64,6 +69,9 @@ Options:
   --offline-ms <ms>            Offline duration before recovery.
   --reconnect-timeout-ms <ms>  Recovery deadline.
   --fixture-home <path>        Stopped, sanitized Ryco home copied per iteration.
+  --cpu-profile <directory>    Write a boot CPU profile per iteration (navigation
+                               to primary-shell-painted + 5 s) and summarize
+                               main-thread self time by source file.
   --target-path <path>         Route opened after pairing.
   --ready-selector <selector>  Visible readiness selector. Default: #root
   --source-control-discovery-timeout-ms <ms>
@@ -78,6 +86,8 @@ Options:
                                Continuously animated status rows. Default: 12.
   --output <directory>         Result directory. Default: .perf-results/<timestamp>
   --policy <json-file>         Comparison policy override.
+  --dist <directory>           bundle-budget: standard web dist built with
+                               RYCO_WEB_SOURCEMAP=hidden. Default: apps/web/dist
   --help                       Show this help.
 `;
 }
@@ -87,7 +97,12 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
   if (first === "--help" || first === "-h") {
     return { command: "run", values: new Map(), flags: new Set(["help"]) };
   }
-  if (first !== "smoke" && first !== "run" && first !== "compare-refs") {
+  if (
+    first !== "smoke" &&
+    first !== "run" &&
+    first !== "compare-refs" &&
+    first !== "bundle-budget"
+  ) {
     throw new Error(`Unknown command '${first}'.\n\n${usage()}`);
   }
   const values = new Map<string, string>();
@@ -126,6 +141,7 @@ function positiveInteger(
 export function scenarioFromArgs(parsed: ParsedArgs): PerfScenarioConfig {
   const defaults = defaultScenarioConfig(parsed.command === "smoke");
   const fixtureHome = parsed.values.get("fixture-home");
+  const cpuProfileDir = parsed.values.get("cpu-profile");
   const profile = parsed.values.get("profile") ?? defaults.profile;
   if (profile !== "shell" && profile !== "active-source-control") {
     throw new Error("--profile must be 'shell' or 'active-source-control'.");
@@ -144,6 +160,7 @@ export function scenarioFromArgs(parsed: ParsedArgs): PerfScenarioConfig {
     readySelector: parsed.values.get("ready-selector") ?? defaults.readySelector,
     targetPath: parsed.values.get("target-path") ?? defaults.targetPath,
     fixtureHome: fixtureHome ? path.resolve(fixtureHome) : defaults.fixtureHome,
+    cpuProfileDir: cpuProfileDir ? path.resolve(cpuProfileDir) : defaults.cpuProfileDir,
     sourceControlDiscoveryTimeoutMs: positiveInteger(
       parsed.values,
       "source-control-discovery-timeout-ms",
@@ -199,6 +216,13 @@ async function main(): Promise<void> {
   const parsed = parseArgs(process.argv.slice(2));
   if (parsed.flags.has("help")) {
     console.log(usage());
+    return;
+  }
+  if (parsed.command === "bundle-budget") {
+    const distDir = path.resolve(parsed.values.get("dist") ?? path.join(repoRoot, "apps/web/dist"));
+    const report = checkBundleBudgets(distDir, DEFAULT_BUNDLE_BUDGET_POLICY);
+    console.log(formatBundleBudgetReport(report));
+    if (report.violations.length > 0) process.exitCode = 1;
     return;
   }
   const scenario = scenarioFromArgs(parsed);

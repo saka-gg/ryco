@@ -76,6 +76,53 @@ describe("createDpopProofSigner", () => {
     expect(authenticated).not.toContain("native-token-canary");
   });
 
+  it("hashes each access token once and rehashes after the token changes", async () => {
+    const digested: string[] = [];
+    const counting: DpopProofContext = {
+      ...context,
+      sha256: async (bytes) => {
+        digested.push(new TextDecoder().decode(bytes));
+        return sha256(bytes);
+      },
+    };
+    const signer = createDpopProofSigner(fakeKey(), counting);
+    const athFor = async (token: string) =>
+      decodeSegment(
+        (
+          await signer.sign({ method: "GET", url: "https://hub.example.test/api/nodes", token })
+        ).split(".")[1]!,
+      ).ath;
+
+    const first = await athFor("token-a");
+    expect(await athFor("token-a")).toBe(first);
+    expect(digested).toEqual(["token-a"]);
+    const rotated = await athFor("token-b");
+    expect(rotated).toBe(encodeBase64Url(await sha256(new TextEncoder().encode("token-b"))));
+    expect(rotated).not.toBe(first);
+    // Returning to an earlier token is a fresh digest, not a stale cache hit.
+    expect(await athFor("token-a")).toBe(first);
+    expect(digested).toEqual(["token-a", "token-b", "token-a"]);
+  });
+
+  it("does not remember a failed token digest", async () => {
+    let fail = true;
+    const flaky: DpopProofContext = {
+      ...context,
+      sha256: async (bytes) => {
+        if (fail) throw new Error("digest unavailable");
+        return sha256(bytes);
+      },
+    };
+    const signer = createDpopProofSigner(fakeKey(), flaky);
+    const input = { method: "GET", url: "https://hub.example.test/api/nodes", token: "token-a" };
+    await expect(signer.sign(input)).rejects.toThrow("digest unavailable");
+    fail = false;
+    const proof = await signer.sign(input);
+    expect(decodeSegment(proof.split(".")[1]!).ath).toBe(
+      encodeBase64Url(await sha256(new TextEncoder().encode("token-a"))),
+    );
+  });
+
   it("rejects a non-asymmetric algorithm (alg:none / HS* JWS-confusion defense)", () => {
     for (const algorithm of ["none", "HS256", "HS512", "ES384", "PS256"]) {
       expect(() =>

@@ -22,7 +22,7 @@ import {
 import { cn } from "~/lib/utils";
 
 import { ActivityHeatmap } from "../../settings/statistics/ActivityHeatmap";
-import { CodeChangesChart, ProjectBars } from "../../settings/statistics/charts";
+import { CodeChangesChart, ProjectBars } from "../charts";
 import { Panel, StatePanel, StatCard, StatSkeleton } from "../../settings/statistics/parts";
 import { StatFilters } from "../../settings/statistics/StatFilters";
 import {

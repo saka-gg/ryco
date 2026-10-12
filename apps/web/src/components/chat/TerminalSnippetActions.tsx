@@ -1,7 +1,7 @@
 import type { ScopedThreadRef } from "@ryco/contracts";
 import { WS_METHODS } from "@ryco/contracts";
 import { scopeProjectRef } from "@ryco/client-runtime/scoped";
-import { resolveHostedRpcCapability } from "@ryco/client-runtime/authorization";
+import { resolveHostedRpcCapability } from "@ryco/client-runtime/authorization/capabilities";
 import { useCallback, useLayoutEffect, useRef, type ReactNode } from "react";
 import { isHostedHubMode } from "../../env";
 import { readEnvironmentConnection } from "../../environments/runtime";

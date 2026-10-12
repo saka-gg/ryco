@@ -3,6 +3,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import zlib from "node:zlib";
 
+import { isOnDemandWebAssetPath } from "./lib/onDemandWebAssets.ts";
+import { isPrecompressedSibling } from "./lib/precompressedSiblings.ts";
+
 interface BundleFileRow {
   readonly group: string;
   readonly file: string;
@@ -58,14 +61,15 @@ function assertDirectory(dir: string): void {
 }
 
 function walkFiles(root: string, dir = root): string[] {
-  return fs
-    .readdirSync(dir, { withFileTypes: true })
+  const entries = fs.readdirSync(dir, { withFileTypes: true });
+  const names = new Set(entries.map((entry) => entry.name));
+  return entries
     .flatMap((entry) => {
       const entryPath = path.join(dir, entry.name);
       if (entry.isDirectory()) {
         return walkFiles(root, entryPath);
       }
-      if (!entry.isFile()) {
+      if (!entry.isFile() || isPrecompressedSibling(entry.name, names)) {
         return [];
       }
       return [path.relative(root, entryPath).split(path.sep).join("/")];
@@ -97,9 +101,11 @@ export function readInitialAssetRefs(distDir: string): Set<string> {
   return refs;
 }
 
-function classifyFile(file: string, initialAssets: ReadonlySet<string>): string {
+export function classifyFile(file: string, initialAssets: ReadonlySet<string>): string {
   const isInitial = initialAssets.has(file);
   if (file === "index.html") return "html";
+  // Fetched one file at a time (the file icon set); reported apart from bundle output.
+  if (isOnDemandWebAssetPath(file)) return "on-demand-assets";
   if (file.endsWith(".map")) return "sourcemaps";
   if (isInitial && file.endsWith(".js")) return "initial-js";
   if (isInitial && file.endsWith(".css")) return "initial-css";

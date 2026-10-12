@@ -1,3 +1,5 @@
+import { makeStartupMarkName } from "../perf/startupInstrumentation";
+
 export type HostedPwaInstallState =
   | "hidden"
   | "installed"
@@ -37,9 +39,18 @@ interface HostedPwaWindow {
   removeEventListener(type: string, listener: EventListener): void;
   matchMedia(query: string): MediaQueryList;
   reload(): void;
+  /** Where available, registration waits for an idle period (bounded by `timeout`). */
+  requestIdleCallback?(callback: () => void, options: { readonly timeout: number }): unknown;
 }
 
 export interface HostedPwaRuntime {
+  /**
+   * Settles once the app's own boot has (the hosted access check and root
+   * route), so installing the worker — which downloads the precache — does
+   * not compete with the session, directory and route chunks a first visit is
+   * still loading. Absent: registration follows `load` directly.
+   */
+  readonly whenAppReady?: () => Promise<void>;
   readonly baseUrl: string;
   readonly document: { readonly readyState: DocumentReadyState };
   readonly navigator: {
@@ -57,6 +68,10 @@ interface InstallPromptEvent extends Event {
 }
 
 const ACTIVATION_MESSAGE = "ryco:pwa:activate:v1";
+/** The longest an idle period may hold registration back. */
+const REGISTRATION_IDLE_TIMEOUT_MS = 5_000;
+/** The longest the app's boot may hold registration back. */
+const HOSTED_PWA_READINESS_TIMEOUT_MS = 15_000;
 const REGISTRATION_ERROR = "Installation is temporarily unavailable.";
 const initialSnapshot: HostedPwaSnapshot = {
   errorMessage: null,
@@ -171,6 +186,18 @@ export function createHostedPwaLifecycle(runtime: HostedPwaRuntime) {
     }
   };
 
+  const registerWhenSettled = async () => {
+    await runtime.whenAppReady?.().catch(() => undefined);
+    const idle = runtime.window.requestIdleCallback?.bind(runtime.window);
+    if (idle) {
+      await new Promise<void>((resolve) => {
+        idle(() => resolve(), { timeout: REGISTRATION_IDLE_TIMEOUT_MS });
+      });
+    }
+    if (!started) return;
+    await register();
+  };
+
   return {
     activateUpdate(): void {
       const waiting = registration?.waiting;
@@ -215,9 +242,9 @@ export function createHostedPwaLifecycle(runtime: HostedPwaRuntime) {
       runtime.navigator.serviceWorker?.addEventListener("controllerchange", onControllerChange);
 
       if (runtime.document.readyState === "complete") {
-        await register();
+        await registerWhenSettled();
       } else {
-        runtime.window.addEventListener("load", () => void register(), { once: true });
+        runtime.window.addEventListener("load", () => void registerWhenSettled(), { once: true });
       }
     },
     stop(): void {
@@ -244,9 +271,40 @@ export function createHostedPwaLifecycle(runtime: HostedPwaRuntime) {
 
 export type HostedPwaLifecycle = ReturnType<typeof createHostedPwaLifecycle>;
 
+/**
+ * Resolves on the boot gate's `root-before-load-ready` startup mark (already
+ * recorded or still to come), or after {@link HOSTED_PWA_READINESS_TIMEOUT_MS}.
+ */
+function whenBrowserAppReady(): Promise<void> {
+  const markName = makeStartupMarkName("root-before-load-ready");
+  return new Promise<void>((resolve) => {
+    let observer: PerformanceObserver | null = null;
+    const done = () => {
+      observer?.disconnect();
+      observer = null;
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(done, HOSTED_PWA_READINESS_TIMEOUT_MS);
+    try {
+      if (performance.getEntriesByName(markName, "mark").length > 0) {
+        done();
+        return;
+      }
+      observer = new PerformanceObserver((list) => {
+        if (list.getEntriesByName(markName, "mark").length > 0) done();
+      });
+      observer.observe({ type: "mark", buffered: true });
+    } catch {
+      // No observable marks: the bounded timer still releases registration.
+    }
+  });
+}
+
 function createBrowserRuntime(): HostedPwaRuntime {
   const browserNavigator = navigator as Navigator & { readonly standalone?: boolean };
   return {
+    whenAppReady: whenBrowserAppReady,
     baseUrl: import.meta.env.BASE_URL,
     document,
     navigator: {
@@ -267,6 +325,12 @@ function createBrowserRuntime(): HostedPwaRuntime {
       removeEventListener: window.removeEventListener.bind(window),
       matchMedia: window.matchMedia.bind(window),
       reload: () => window.location.reload(),
+      ...(typeof window.requestIdleCallback === "function"
+        ? {
+            requestIdleCallback: (callback: () => void, options: { readonly timeout: number }) =>
+              window.requestIdleCallback(callback, options),
+          }
+        : {}),
     },
   };
 }

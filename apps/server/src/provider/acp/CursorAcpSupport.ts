@@ -14,6 +14,7 @@ import {
   type AcpSessionRuntimeShape,
   type AcpSpawnInput,
 } from "./AcpSessionRuntime.ts";
+import { cursorAcpPhaseTimeoutHints, resolveCursorAgentCommand } from "./CursorAgentCommand.ts";
 
 type CursorAcpRuntimeCursorSettings = Pick<CursorSettings, "apiEndpoint" | "binaryPath">;
 
@@ -52,12 +53,21 @@ export const makeCursorAcpRuntime = (
   input: CursorAcpRuntimeInput,
 ): Effect.Effect<AcpSessionRuntimeShape, EffectAcpErrors.AcpError, Scope.Scope> =>
   Effect.gen(function* () {
+    const { command } = yield* resolveCursorAgentCommand(
+      input.cursorSettings?.binaryPath,
+      input.environment ? { ...process.env, ...input.environment } : process.env,
+    );
     const acpContext = yield* Layer.build(
       AcpSessionRuntime.layer({
         ...input,
-        spawn: buildCursorAcpSpawnInput(input.cursorSettings, input.cwd, input.environment),
+        spawn: buildCursorAcpSpawnInput(
+          { apiEndpoint: input.cursorSettings?.apiEndpoint ?? "", binaryPath: command },
+          input.cwd,
+          input.environment,
+        ),
         authMethodId: "cursor_login",
         clientCapabilities: CURSOR_PARAMETERIZED_MODEL_PICKER_CAPABILITIES,
+        phaseTimeoutHints: cursorAcpPhaseTimeoutHints(command),
       }).pipe(
         Layer.provide(
           Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, input.childProcessSpawner),

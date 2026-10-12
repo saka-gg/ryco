@@ -33,7 +33,16 @@ import { useUiStateStore } from "../../uiStateStore";
 import { DeviceIcon } from "../DeviceIcon";
 import { isCompletionUnseen } from "../Sidebar.logic";
 import type { useThreadMenuActions } from "../sidebar/hooks/useThreadMenuActions";
-import { useIsIntersectingViewport } from "../sidebar/hooks/useHasIntersectedViewport";
+import {
+  SOURCE_CONTROL_VISIBILITY_HYSTERESIS,
+  useIsIntersectingViewport,
+} from "../sidebar/hooks/useHasIntersectedViewport";
+import {
+  isNavigationPress,
+  noteThreadHoverEnd,
+  noteThreadHoverIntent,
+  noteThreadPressIntent,
+} from "../sidebar/threadNavigationIntent";
 import {
   ContextMenu,
   ContextMenuPopup,
@@ -66,6 +75,7 @@ import {
 import type { InboxSidebarRow } from "./inboxSidebarModel";
 import { InboxStatusGlyph } from "./InboxStatusGlyph";
 import { InboxThreadMenuItems } from "./InboxThreadMenu";
+import { useInboxRowPreviewIntent } from "./useInboxRowPreviewIntent";
 import {
   INBOX_ROW_LEAVING_EVENT,
   readInboxMotionDurationMs,
@@ -118,6 +128,26 @@ function StateLine(props: { readonly line: InboxStateLine; readonly row: InboxSi
   );
 }
 
+/** Kept outside the row: the React Compiler cannot lower throw inside try. */
+async function dispatchThreadSnooze(
+  row: InboxSidebarRow,
+  snoozedUntil: string | null,
+): Promise<void> {
+  const api = readEnvironmentApi(row.environmentId);
+  if (!api) throw new Error("The owning machine is not connected.");
+  await sidebarUndo.dispatch(
+    { environmentId: row.environmentId, threadId: row.threadId },
+    snoozedUntil
+      ? {
+          type: "thread.snooze",
+          commandId: newCommandId(),
+          threadId: row.threadId,
+          snoozedUntil,
+        }
+      : { type: "thread.unsnooze", commandId: newCommandId(), threadId: row.threadId },
+  );
+}
+
 function RunningClock(props: { readonly since: string }) {
   const now = useInboxClock();
   return <>{formatElapsedClockLabel(props.since, now)}</>;
@@ -162,12 +192,28 @@ export function InboxThreadRow(props: {
   const [pending, setPending] = useState(false);
   const [settling, setSettling] = useState(false);
   const shellRef = useRef<HTMLDivElement>(null);
-  const [setVisibilityNode, isIntersecting] = useIsIntersectingViewport();
-  const sourceControlEnabled = row.sourceControlEnabled && (props.active || isIntersecting);
-  const gitStatus = useGitStatus(
-    { environmentId: row.environmentId, cwd: row.branchLabel ? row.gitCwd : null },
-    { enabled: sourceControlEnabled },
+  const [setVisibilityNode, isIntersecting] = useIsIntersectingViewport(
+    undefined,
+    SOURCE_CONTROL_VISIBILITY_HYSTERESIS,
   );
+  const sourceControlEnabled = row.sourceControlEnabled && (props.active || isIntersecting);
+  const gitStatusTarget = useMemo(
+    () => ({ environmentId: row.environmentId, cwd: row.branchLabel ? row.gitCwd : null }),
+    [row.environmentId, row.branchLabel, row.gitCwd],
+  );
+  // The row shows the branch's change request and provider: the summary view
+  // (no git status, diffs or fetch per visible folder).
+  const gitStatus = useGitStatus(gitStatusTarget, {
+    enabled: sourceControlEnabled,
+    view: "summary",
+  });
+  // Working-tree numbers appear only on the hover card, so full status is
+  // read only while the pointer or focus is on this row (and briefly after,
+  // while the card can still be read).
+  const workingTreeWanted = useInboxRowPreviewIntent();
+  const workingTreeStatus = useGitStatus(gitStatusTarget, {
+    enabled: sourceControlEnabled && workingTreeWanted.active,
+  });
   const currentPr = resolveInboxPullRequest(row, gitStatus.data);
   const refreshMode = useSettings((settings) => settings.sourceControlRefreshMode);
   const detail = useSourceControlChangeRequestDetail(
@@ -193,7 +239,7 @@ export function InboxThreadRow(props: {
   const changeStats = resolveInboxChangeStats({
     current: currentPr,
     detail: detail.data,
-    status: gitStatus.data ?? null,
+    status: workingTreeWanted.active ? (workingTreeStatus.data ?? null) : null,
     branchLabel: row.branchLabel,
   });
   const sourceControlProvider = gitStatus.data?.sourceControlProvider;
@@ -262,15 +308,13 @@ export function InboxThreadRow(props: {
       if (shell) shell.style.overflow = "";
       setSettling(false);
     };
-    try {
-      const ok = await props.onSetSettlement(row, !row.settled);
-      if (!ok) restore();
-      // A thread the server keeps in place must not stay collapsed.
-      else if (collapse) window.setTimeout(() => shell?.isConnected && restore(), 5_000);
-      else setSettling(false);
-    } finally {
-      setPending(false);
-    }
+    // Promise `.finally` instead of try/finally keeps the row compilable by
+    // the React Compiler (it cannot lower try without catch).
+    const ok = await props.onSetSettlement(row, !row.settled).finally(() => setPending(false));
+    if (!ok) restore();
+    // A thread the server keeps in place must not stay collapsed.
+    else if (collapse) window.setTimeout(() => shell?.isConnected && restore(), 5_000);
+    else setSettling(false);
   };
   const snoozePresets = useMemo(
     () => (menuOpen ? resolveSnoozePresets(new Date()) : []),
@@ -279,29 +323,15 @@ export function InboxThreadRow(props: {
   const handleSnooze = async (snoozedUntil: string | null) => {
     if (pending || !(snoozedUntil ? row.canSnooze : row.canUnsnooze)) return;
     setPending(true);
-    try {
-      const api = readEnvironmentApi(row.environmentId);
-      if (!api) throw new Error("The owning machine is not connected.");
-      await sidebarUndo.dispatch(
-        { environmentId: row.environmentId, threadId: row.threadId },
-        snoozedUntil
-          ? {
-              type: "thread.snooze",
-              commandId: newCommandId(),
-              threadId: row.threadId,
-              snoozedUntil,
-            }
-          : { type: "thread.unsnooze", commandId: newCommandId(), threadId: row.threadId },
-      );
-    } catch (error) {
-      toastManager.add({
-        type: "error",
-        title: "Could not update snooze",
-        description: error instanceof Error ? error.message : "The request failed.",
-      });
-    } finally {
-      setPending(false);
-    }
+    await dispatchThreadSnooze(row, snoozedUntil)
+      .catch((error: unknown) => {
+        toastManager.add({
+          type: "error",
+          title: "Could not update snooze",
+          description: error instanceof Error ? error.message : "The request failed.",
+        });
+      })
+      .finally(() => setPending(false));
   };
   const handleMenuOpenChange = (open: boolean) => {
     setMenuOpen(open);
@@ -342,6 +372,21 @@ export function InboxThreadRow(props: {
       data-testid="inbox-thread-row"
       draggable={!isPhone}
       onClick={props.onOpen}
+      onPointerEnter={() => {
+        workingTreeWanted.start();
+        // The row navigates imperatively: warm the route and the thread's
+        // detail on intent so the history request overlaps the navigation.
+        if (!props.active) noteThreadHoverIntent(threadRef);
+      }}
+      onPointerLeave={() => {
+        workingTreeWanted.end();
+        noteThreadHoverEnd(threadRef);
+      }}
+      onPointerDown={(event) => {
+        if (isNavigationPress(event) && !props.active) noteThreadPressIntent(threadRef);
+      }}
+      onFocus={workingTreeWanted.start}
+      onBlur={workingTreeWanted.end}
       onDragStart={(event) => {
         props.previewHandle.close();
         startPaneDrag(event.dataTransfer, threadRef, "copyMove");

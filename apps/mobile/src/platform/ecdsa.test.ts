@@ -1,4 +1,4 @@
-import { decodeBase64Url } from "@ryco/client-runtime/relay";
+import { decodeBase64Url } from "@ryco/client-runtime/relay/base64url";
 import { describe, expect, it } from "vite-plus/test";
 
 import { derSignatureToRaw, ecPublicKeyJwk, uncompressedPointToJwk } from "./ecdsa";

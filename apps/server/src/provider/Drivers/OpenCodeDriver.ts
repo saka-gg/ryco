@@ -39,10 +39,11 @@ import type { ServerProviderDraft } from "../providerSnapshot.ts";
 import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
 import {
   enrichProviderSnapshotWithVersionAdvisory,
+  makeLazyProviderMaintenanceCapabilities,
   makePackageManagedProviderMaintenanceResolver,
   normalizeCommandPath,
-  resolveProviderMaintenanceCapabilitiesEffect,
 } from "../providerMaintenance.ts";
+import { makeProviderProbeFingerprint } from "../providerProbeFingerprint.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 
 const DRIVER_KIND = ProviderDriverKind.make("opencode");
@@ -121,9 +122,15 @@ export const OpenCodeDriver: ProviderDriver<OpenCodeSettings, OpenCodeDriverEnv>
         continuationGroupKey: continuationIdentity.continuationKey,
       });
       const effectiveConfig = { ...config, enabled } satisfies OpenCodeSettings;
-      const maintenanceCapabilities = yield* resolveProviderMaintenanceCapabilitiesEffect(UPDATE, {
+      const maintenanceCapabilities = yield* makeLazyProviderMaintenanceCapabilities(UPDATE, {
         binaryPath: effectiveConfig.binaryPath,
         env: processEnv,
+      });
+      const probeFingerprint = yield* makeProviderProbeFingerprint({
+        driverKind: DRIVER_KIND,
+        binaryPaths: [effectiveConfig.binaryPath],
+        env: processEnv,
+        settings: { instanceId, displayName, accentColor, environment, config: effectiveConfig },
       });
       const serverOwner =
         effectiveConfig.serverUrl.trim().length === 0
@@ -151,13 +158,17 @@ export const OpenCodeDriver: ProviderDriver<OpenCodeSettings, OpenCodeDriverEnv>
 
       const snapshot = yield* makeManagedServerProvider<OpenCodeSettings>({
         maintenanceCapabilities,
+        probeFingerprint,
         getSettings: Effect.succeed(effectiveConfig),
         streamSettings: Stream.never,
         haveSettingsChanged: () => false,
         initialSnapshot: (settings) => stampIdentity(makePendingOpenCodeProvider(settings)),
         checkProvider,
         enrichSnapshot: ({ snapshot, publishSnapshot }) =>
-          enrichProviderSnapshotWithVersionAdvisory(snapshot, maintenanceCapabilities).pipe(
+          maintenanceCapabilities.pipe(
+            Effect.flatMap((capabilities) =>
+              enrichProviderSnapshotWithVersionAdvisory(snapshot, capabilities),
+            ),
             Effect.provideService(HttpClient.HttpClient, httpClient),
             Effect.provideService(ServerSettingsService, serverSettings),
             Effect.flatMap((enrichedSnapshot) => publishSnapshot(enrichedSnapshot)),

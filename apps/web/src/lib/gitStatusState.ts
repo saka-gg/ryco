@@ -3,6 +3,7 @@ import {
   type EnvironmentId,
   type GitManagerServiceError,
   type VcsStatusResult,
+  type VcsStatusView,
 } from "@ryco/contracts";
 import type { GitStatusPollIntervalMs } from "@ryco/contracts/settings";
 import { Cause } from "effect";
@@ -49,6 +50,13 @@ export interface GitStatusTarget {
 interface GitStatusWatchOptions {
   readonly automaticRemoteRefreshIntervalMs?: GitStatusPollIntervalMs | undefined;
   readonly enabled?: boolean | undefined;
+  /**
+   * `summary` watches only what a branch badge shows (`refName`, `pr`,
+   * `sourceControlProvider`): the server skips git status, diffs and fetches,
+   * so lists of many folders stay cheap. Its working tree and ahead / behind
+   * read as empty. Kept apart from the full status of the same folder.
+   */
+  readonly view?: VcsStatusView | undefined;
 }
 
 const EMPTY_GIT_STATUS_STATE = Object.freeze<GitStatusState>({
@@ -91,12 +99,17 @@ function getGitStatusTargetKey(target: GitStatusTarget): string | null {
   return `${target.environmentId}:${target.cwd}`;
 }
 
+/** The state key of a target's view; the full view keeps the bare target key. */
+function getGitStatusViewKey(targetKey: string, view: VcsStatusView | undefined): string {
+  return view === "summary" ? `${targetKey}#summary` : targetKey;
+}
+
 function getGitStatusWatchKeyPrefix(targetKey: string): string {
   return `${targetKey}:remote-poll=`;
 }
 
 function getGitStatusWatchKey(targetKey: string, options?: GitStatusWatchOptions): string {
-  return `${getGitStatusWatchKeyPrefix(targetKey)}${options?.automaticRemoteRefreshIntervalMs ?? 0}`;
+  return `${getGitStatusWatchKeyPrefix(getGitStatusViewKey(targetKey, options?.view))}${options?.automaticRemoteRefreshIntervalMs ?? 0}`;
 }
 
 function readResolvedGitStatusClient(target: GitStatusTarget): ResolvedGitStatusClient | null {
@@ -109,13 +122,16 @@ function readResolvedGitStatusClient(target: GitStatusTarget): ResolvedGitStatus
     : null;
 }
 
-export function getGitStatusSnapshot(target: GitStatusTarget): GitStatusState {
+export function getGitStatusSnapshot(
+  target: GitStatusTarget,
+  view?: VcsStatusView,
+): GitStatusState {
   const targetKey = getGitStatusTargetKey(target);
   if (targetKey === null) {
     return EMPTY_GIT_STATUS_STATE;
   }
 
-  return appAtomRegistry.get(gitStatusStateAtom(targetKey));
+  return appAtomRegistry.get(gitStatusStateAtom(getGitStatusViewKey(targetKey, view)));
 }
 
 export function watchGitStatus(
@@ -140,7 +156,12 @@ export function watchGitStatus(
 
   watchedGitStatuses.set(watchKey, {
     refCount: 1,
-    unsubscribe: subscribeToGitStatusTarget(targetKey, target, client, options),
+    unsubscribe: subscribeToGitStatusTarget(
+      getGitStatusViewKey(targetKey, options?.view),
+      target,
+      client,
+      options,
+    ),
   });
 
   return () => unwatchGitStatus(watchKey);
@@ -161,7 +182,7 @@ export function refreshGitStatus(
 
 /**
  * The ref checked out in `target.cwd`, read from local status only: the live
- * snapshot when the cwd is already watched, otherwise the first snapshot of a
+ * snapshot when the cwd is already watched (full or summary view), otherwise the first snapshot of a
  * short-lived status subscription, which the server answers from its local
  * `git status`. Never `vcs.refreshStatus`, which also refreshes the remote and
  * change-request state and fails offline or without provider auth. Resolves the
@@ -179,6 +200,14 @@ export function readLocalGitRefName(
   // A watched cwd's atom is streamed live, whatever its remote-poll interval.
   if (isGitStatusTargetWatched(targetKey) && !current.isPending && current.data !== null) {
     return Promise.resolve(current.data.refName ?? null);
+  }
+  // So is its summary view (sidebar rows, the pull request page), whose ref
+  // comes from the checkout's HEAD: reuse that stream instead of opening a
+  // full-status one (git status and diffs on the server) just for the ref.
+  const summaryKey = getGitStatusViewKey(targetKey, "summary");
+  const summary = appAtomRegistry.get(gitStatusStateAtom(summaryKey));
+  if (isGitStatusTargetWatched(summaryKey) && !summary.isPending && summary.data !== null) {
+    return Promise.resolve(summary.data.refName ?? null);
   }
   // A new subscription marks the atom pending until its first snapshot lands,
   // so stale data from an earlier watch never counts.
@@ -273,21 +302,25 @@ export function resetGitStatusStateForTests(): void {
 
 export function useGitStatus(
   target: GitStatusTarget,
-  options?: Pick<GitStatusWatchOptions, "enabled">,
+  options?: Pick<GitStatusWatchOptions, "enabled" | "view">,
 ): GitStatusState {
   const targetKey = getGitStatusTargetKey(target);
+  const view = options?.view;
   const automaticRemoteRefreshIntervalMs = useSettings((s) => s.gitStatusPollIntervalMs);
   useEffect(
     () =>
       watchGitStatus({ environmentId: target.environmentId, cwd: target.cwd }, undefined, {
         automaticRemoteRefreshIntervalMs,
         enabled: options?.enabled,
+        view,
       }),
-    [automaticRemoteRefreshIntervalMs, options?.enabled, target.environmentId, target.cwd],
+    [automaticRemoteRefreshIntervalMs, options?.enabled, target.environmentId, target.cwd, view],
   );
 
   const state = useAtomValue(
-    targetKey !== null ? gitStatusStateAtom(targetKey) : EMPTY_GIT_STATUS_ATOM,
+    targetKey !== null
+      ? gitStatusStateAtom(getGitStatusViewKey(targetKey, view))
+      : EMPTY_GIT_STATUS_ATOM,
   );
   return targetKey === null ? EMPTY_GIT_STATUS_STATE : state;
 }
@@ -371,6 +404,7 @@ function subscribeToGitStatus(
     {
       cwd,
       ...(automaticRemoteRefreshIntervalMs > 0 ? { automaticRemoteRefreshIntervalMs } : {}),
+      ...(options?.view === "summary" ? { view: "summary" as const } : {}),
     },
     // Without the meta (status-only doubles) the remote half counts as known.
     (status: VcsStatusResult, meta?: VcsStatusStreamMeta) => {

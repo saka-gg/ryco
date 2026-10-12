@@ -1,11 +1,18 @@
-import { AGENT_CONTROL_WS_METHODS } from "@ryco/contracts";
+import { AGENT_CONTROL_WS_METHODS, WS_METHODS } from "@ryco/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { fakeSocketPlatform, type FakeWebSocket } from "../../test/fakeWebSocket.ts";
-import type { RpcRequestAdmission, WsProtocolLifecycleHandlers } from "./protocol.ts";
+import { type RpcRequestAdmission, type WsProtocolLifecycleHandlers } from "./protocol.ts";
 import { resetRequestLatencyStateForTests } from "./requestLatencyState.ts";
 import { resetWsConnectionStateForTests } from "./wsConnectionState.ts";
-import { WsTransport } from "./wsTransport.ts";
+import {
+  isResponseTooLargeError,
+  isUnsupportedRpcError,
+  RESYNC_SUBSCRIPTION_MAX_DELAY_MS,
+  resyncSubscriptionRetryDelayMs,
+  RpcRequestAbortedError,
+  WsTransport,
+} from "./wsTransport.ts";
 
 const sockets: FakeWebSocket[] = [];
 const transports: WsTransport[] = [];
@@ -159,9 +166,241 @@ describe("WsTransport subscriptions refused before sending", () => {
 
     const stop = subscribeProposals(transport, onError);
     await vi.waitFor(() => expect(onError).toHaveBeenCalledOnce());
+    // The hook learns that the subscription ended, never the failure itself.
+    expect(onError).toHaveBeenCalledWith();
     await new Promise((resolve) => setTimeout(resolve, 30));
     expect(admit).toHaveBeenCalledOnce();
     expect(proposalRequests(sockets[0]!)).toHaveLength(0);
     stop();
+  });
+});
+
+describe("WsTransport resync failures", () => {
+  it("grows the retry delay for back-to-back resyncs up to a cap", () => {
+    expect(
+      [0, 1, 2, 3, 4, 5, 6, 40].map((count) => resyncSubscriptionRetryDelayMs(250, count)),
+    ).toEqual([250, 500, 1_000, 2_000, 4_000, 8_000, 8_000, RESYNC_SUBSCRIPTION_MAX_DELAY_MS]);
+  });
+
+  it("resubscribes after a server resync request with backoff and one warning", async () => {
+    const transport = connect(() => "allowed");
+    await vi.waitFor(() => expect(sockets).toHaveLength(1));
+    const socket = sockets[0]!;
+    socket.open();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const stop = transport.subscribe(
+      (client) => client[WS_METHODS.subscribeTerminalEvents]({ replay: "metadata" }),
+      () => undefined,
+      { retryDelay: 25, tag: WS_METHODS.subscribeTerminalEvents },
+    );
+    const requests = () =>
+      socket.requests().filter((request) => request.tag === WS_METHODS.subscribeTerminalEvents);
+    const arrivals: number[] = [];
+    for (let attempt = 1; attempt <= 4; attempt += 1) {
+      await vi.waitFor(() => expect(requests()).toHaveLength(attempt), { timeout: 2_000 });
+      arrivals.push(Date.now());
+      expect(requests().at(-1)?.payload).toEqual({ replay: "metadata" });
+      socket.reply({
+        _tag: "Exit",
+        requestId: requests().at(-1)!.id,
+        exit: {
+          _tag: "Failure",
+          cause: [
+            {
+              _tag: "Fail",
+              error: {
+                _tag: "TerminalSubscriptionResyncError",
+                reason: "slowConsumer",
+                capacity: 256,
+              },
+            },
+          ],
+        },
+      });
+    }
+    await vi.waitFor(() => expect(requests()).toHaveLength(5), { timeout: 2_000 });
+    arrivals.push(Date.now());
+    // Delays of 25, 50, 100 and 200 ms: each retry waits about twice as long as the last.
+    expect(arrivals[4]! - arrivals[3]!).toBeGreaterThanOrEqual(180);
+    expect(arrivals[4]! - arrivals[3]!).toBeGreaterThan(arrivals[1]! - arrivals[0]!);
+    expect(
+      warn.mock.calls.filter(
+        ([message]) => message === "WebSocket RPC subscription resynchronizing",
+      ),
+    ).toHaveLength(1);
+    stop();
+  });
+});
+
+describe("WsTransport stream chunks", () => {
+  it("delivers every value of one server chunk in a single pass", async () => {
+    const transport = connect(() => "allowed");
+    await vi.waitFor(() => expect(sockets).toHaveLength(1));
+    sockets[0]!.open();
+    const delivered: string[] = [];
+    const stop = transport.subscribe(
+      (client) => client[WS_METHODS.subscribeTerminalEvents]({}),
+      (event) => {
+        if (event.type !== "output") return;
+        if (delivered.length === 0) {
+          // Batching consumers (one store commit per chunk) run after the pass.
+          void Promise.resolve().then(() => delivered.push("after-chunk"));
+        }
+        delivered.push(event.data);
+      },
+      { tag: WS_METHODS.subscribeTerminalEvents },
+    );
+    await vi.waitFor(() =>
+      expect(
+        sockets[0]!
+          .requests()
+          .filter((request) => request.tag === WS_METHODS.subscribeTerminalEvents),
+      ).toHaveLength(1),
+    );
+    const request = sockets[0]!
+      .requests()
+      .find((candidate) => candidate.tag === WS_METHODS.subscribeTerminalEvents)!;
+    const output = (data: string) => ({
+      threadId: "thread-1",
+      terminalId: "default",
+      createdAt: "2026-10-01T00:00:00.000Z",
+      type: "output",
+      data,
+    });
+    sockets[0]!.reply({
+      _tag: "Chunk",
+      requestId: request.id,
+      values: [output("a"), output("b"), output("c")],
+    });
+
+    await vi.waitFor(() => expect(delivered).toEqual(["a", "b", "c", "after-chunk"]));
+    stop();
+  });
+
+  it("classifies the failures a subscription can fall back from", () => {
+    expect(isUnsupportedRpcError("Unknown request tag: orchestration.subscribeThreadWindow")).toBe(
+      true,
+    );
+    expect(
+      isResponseTooLargeError(
+        new Error("The response exceeded the largest message this connection can carry."),
+      ),
+    ).toBe(true);
+    expect(isUnsupportedRpcError(new Error("Failed to load bounded history"))).toBe(false);
+  });
+});
+
+describe("WsTransport unary requests", () => {
+  it("withdraws a request whose signal aborts and tells the server", async () => {
+    const transport = connect(() => "allowed");
+    await vi.waitFor(() => expect(sockets).toHaveLength(1));
+    sockets[0]!.open();
+    const controller = new AbortController();
+    const pending = transport.request(
+      (client) =>
+        client[WS_METHODS.serverGetUsageSummary]({
+          contractVersion: 2,
+          endDate: "2026-08-10",
+          timeZone: "UTC",
+        }),
+      { signal: controller.signal },
+    );
+    await vi.waitFor(() =>
+      expect(
+        sockets[0]!
+          .requests()
+          .filter((request) => request.tag === WS_METHODS.serverGetUsageSummary),
+      ).toHaveLength(1),
+    );
+    const request = sockets[0]!
+      .requests()
+      .find((candidate) => candidate.tag === WS_METHODS.serverGetUsageSummary)!;
+    controller.abort();
+    await expect(pending).rejects.toBeDefined();
+    await vi.waitFor(() =>
+      expect(
+        sockets[0]!.sent
+          .map(
+            (frame) => JSON.parse(frame) as { readonly _tag: string; readonly requestId?: string },
+          )
+          .some((message) => message._tag === "Interrupt" && message.requestId === request.id),
+      ).toBe(true),
+    );
+  });
+});
+
+describe("WsTransport socket URL providers", () => {
+  it("abandons a URL request that never answers and starts a fresh attempt", async () => {
+    const signals: AbortSignal[] = [];
+    const transport = new WsTransport(
+      (signal) => {
+        if (signal) signals.push(signal);
+        if (signals.length === 1) {
+          // The token request reached a server that never answers it.
+          return new Promise<string>(() => undefined);
+        }
+        return Promise.resolve("ws://node.test/ws");
+      },
+      fakeSocketPlatform(sockets),
+      {
+        recordConnectionState: false,
+        urlProviderTimeoutMs: 20,
+        getReconnectDelayMs: () => 0,
+      },
+    );
+    transports.push(transport);
+
+    await vi.waitFor(() => expect(sockets).toHaveLength(1));
+    expect(signals).toHaveLength(2);
+    expect(signals[0]!.aborted).toBe(true);
+    expect(signals[1]!.aborted).toBe(false);
+  });
+});
+
+describe("WsTransport request abort", () => {
+  const sentFrames = (socket: FakeWebSocket) =>
+    socket.sent.map(
+      (frame) => JSON.parse(frame) as { readonly _tag: string; readonly requestId?: unknown },
+    );
+
+  it("never sends a request whose signal is already aborted", async () => {
+    const transport = connect(() => "allowed");
+    await vi.waitFor(() => expect(sockets).toHaveLength(1));
+    sockets[0]!.open();
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      transport.request((client) => client[WS_METHODS.serverGetConfig]({}), {
+        signal: controller.signal,
+      }),
+    ).rejects.toBeInstanceOf(RpcRequestAbortedError);
+    expect(sockets[0]!.requests()).toHaveLength(0);
+  });
+
+  it("interrupts a running request on the server when its signal aborts", async () => {
+    const transport = connect(() => "allowed");
+    await vi.waitFor(() => expect(sockets).toHaveLength(1));
+    sockets[0]!.open();
+    const controller = new AbortController();
+
+    const pending = transport.request((client) => client[WS_METHODS.serverGetConfig]({}), {
+      signal: controller.signal,
+    });
+    const outcome = expect(pending).rejects.toBeInstanceOf(RpcRequestAbortedError);
+    await vi.waitFor(() => expect(sockets[0]!.requests()).toHaveLength(1));
+    const requestId = sockets[0]!.requests()[0]!.id;
+
+    controller.abort();
+
+    await outcome;
+    // The client tells the server to stop working on it.
+    await vi.waitFor(() =>
+      expect(
+        sentFrames(sockets[0]!).some(
+          (frame) => frame._tag === "Interrupt" && String(frame.requestId) === String(requestId),
+        ),
+      ).toBe(true),
+    );
   });
 });

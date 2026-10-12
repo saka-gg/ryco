@@ -1,4 +1,10 @@
-import { sideQuestionDirectory, sideQuestionEnvironment } from "./SideQuestionIsolation.ts";
+import {
+  isolatedTextGenerationDirectory,
+  type LightweightTextGenerationOperation,
+  sideQuestionDirectory,
+  sideQuestionEnvironment,
+  withFullConfigFallback,
+} from "./SideQuestionIsolation.ts";
 import { Effect, FileSystem, Option, Path, Schema, Scope, Stream } from "effect";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
@@ -29,7 +35,7 @@ import {
   normalizeCliError,
   sanitizeCommitSubject,
   sanitizePrTitle,
-  sanitizeThreadTitle,
+  sanitizeThreadTitleResult,
   toJsonSchemaObject,
 } from "./TextGenerationUtils.ts";
 import { getModelSelectionStringOptionValue } from "@ryco/shared/model";
@@ -37,6 +43,41 @@ import { codexServiceTierForSelection } from "../provider/CodexServiceTier.ts";
 
 const CODEX_GIT_TEXT_GENERATION_REASONING_EFFORT = "low";
 const CODEX_TIMEOUT_MS = 180_000;
+/** Titles and branch names are short; the user's own message is the fallback title. */
+const CODEX_NAMING_TIMEOUT_MS = 30_000;
+const CODEX_TIMEOUT_DETAIL = "Codex CLI request timed out.";
+
+/**
+ * `codex exec` without the user's config, rules, project docs, MCP servers,
+ * plugins, hooks or tools: a plain structured-output model call.
+ */
+const CODEX_LIGHTWEIGHT_ARGS: ReadonlyArray<string> = [
+  "--ignore-user-config",
+  "--ignore-rules",
+  ...[
+    'approval_policy="never"',
+    'web_search="disabled"',
+    "project_doc_max_bytes=0",
+    "mcp_servers={}",
+    "features.shell_tool=false",
+    "features.view_image=false",
+    "features.search_tool=false",
+    "features.tool_search=false",
+    "features.tool_suggest=false",
+    "features.external_agent_memory_import=false",
+    "features.unified_exec=false",
+    "features.apply_patch_freeform=false",
+    "features.apps=false",
+    "features.plugins=false",
+    "features.hooks=false",
+    "features.codex_hooks=false",
+    "features.plugin_hooks=false",
+    "features.memories=false",
+    "features.memory_tool=false",
+    "features.js_repl=false",
+    "features.multi_agent=false",
+  ].flatMap((config) => ["--config", config]),
+];
 /**
  * Build a Codex text-generation closure bound to a specific `CodexSettings`
  * payload. See `makeCodexAdapter` for the overall per-instance rationale.
@@ -141,6 +182,8 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
     imagePaths = [],
     cleanupPaths = [],
     modelSelection,
+    lightweight = operation === "answerSideQuestion",
+    timeoutMs = CODEX_TIMEOUT_MS,
   }: {
     operation:
       | "generateCommitMessage"
@@ -156,6 +199,9 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
     imagePaths?: ReadonlyArray<string>;
     cleanupPaths?: ReadonlyArray<string>;
     modelSelection: ModelSelection;
+    /** Run without the user's configuration (`CODEX_LIGHTWEIGHT_ARGS`), in an isolated environment. */
+    lightweight?: boolean;
+    timeoutMs?: number;
   }): Effect.fn.Return<S["Type"], TextGenerationError, S["DecodingServices"]> {
     const schemaPath = yield* writeTempFile(
       operation,
@@ -174,35 +220,7 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
         [
           "exec",
           "--ephemeral",
-          ...(operation === "answerSideQuestion"
-            ? [
-                "--ignore-user-config",
-                "--ignore-rules",
-                ...[
-                  'approval_policy="never"',
-                  'web_search="disabled"',
-                  "project_doc_max_bytes=0",
-                  "mcp_servers={}",
-                  "features.shell_tool=false",
-                  "features.view_image=false",
-                  "features.search_tool=false",
-                  "features.tool_search=false",
-                  "features.tool_suggest=false",
-                  "features.external_agent_memory_import=false",
-                  "features.unified_exec=false",
-                  "features.apply_patch_freeform=false",
-                  "features.apps=false",
-                  "features.plugins=false",
-                  "features.hooks=false",
-                  "features.codex_hooks=false",
-                  "features.plugin_hooks=false",
-                  "features.memories=false",
-                  "features.memory_tool=false",
-                  "features.js_repl=false",
-                  "features.multi_agent=false",
-                ].flatMap((config) => ["--config", config]),
-              ]
-            : []),
+          ...(lightweight ? CODEX_LIGHTWEIGHT_ARGS : []),
           "--skip-git-repo-check",
           "-s",
           "read-only",
@@ -220,9 +238,7 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
         ],
         {
           env: {
-            ...(operation === "answerSideQuestion"
-              ? sideQuestionEnvironment(environment)
-              : environment),
+            ...(lightweight ? sideQuestionEnvironment(environment) : environment),
             ...(codexConfig.homePath ? { CODEX_HOME: expandHomePath(codexConfig.homePath) } : {}),
           },
           cwd,
@@ -278,13 +294,11 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
     return yield* Effect.gen(function* () {
       yield* runCodexCommand().pipe(
         Effect.scoped,
-        Effect.timeoutOption(CODEX_TIMEOUT_MS),
+        Effect.timeoutOption(timeoutMs),
         Effect.flatMap(
           Option.match({
             onNone: () =>
-              Effect.fail(
-                new TextGenerationError({ operation, detail: "Codex CLI request timed out." }),
-              ),
+              Effect.fail(new TextGenerationError({ operation, detail: CODEX_TIMEOUT_DETAIL })),
             onSome: () => Effect.void,
           }),
         ),
@@ -312,6 +326,38 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
       );
     }).pipe(Effect.ensuring(cleanup));
   });
+
+  /**
+   * Titles and branch names: lightweight first, in an empty directory, then
+   * once with the user's full configuration when that may be what was missing.
+   */
+  const runCodexNamingJson = <S extends Schema.Top>(input: {
+    readonly operation: Extract<
+      LightweightTextGenerationOperation,
+      "generateThreadTitle" | "generateBranchName"
+    >;
+    readonly cwd: string;
+    readonly prompt: string;
+    readonly outputSchemaJson: S;
+    readonly imagePaths: ReadonlyArray<string>;
+    readonly modelSelection: ModelSelection;
+  }) =>
+    withFullConfigFallback({
+      operation: input.operation,
+      lightweight: Effect.scoped(
+        Effect.gen(function* () {
+          const cwd = yield* isolatedTextGenerationDirectory(input.operation);
+          return yield* runCodexJson({
+            ...input,
+            cwd,
+            lightweight: true,
+            timeoutMs: CODEX_NAMING_TIMEOUT_MS,
+          });
+        }),
+      ),
+      full: runCodexJson({ ...input, lightweight: false, timeoutMs: CODEX_NAMING_TIMEOUT_MS }),
+      isTimeout: (error) => error.detail === CODEX_TIMEOUT_DETAIL,
+    });
 
   const generateCommitMessage: TextGenerationShape["generateCommitMessage"] = Effect.fn(
     "CodexTextGeneration.generateCommitMessage",
@@ -377,7 +423,7 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
       attachments: input.attachments,
     });
 
-    const generated = yield* runCodexJson({
+    const generated = yield* runCodexNamingJson({
       operation: "generateBranchName",
       cwd: input.cwd,
       prompt,
@@ -401,9 +447,10 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
     const { prompt, outputSchema } = buildThreadTitlePrompt({
       message: input.message,
       attachments: input.attachments,
+      includeBranch: input.includeBranch,
     });
 
-    const generated = yield* runCodexJson({
+    const generated = yield* runCodexNamingJson({
       operation: "generateThreadTitle",
       cwd: input.cwd,
       prompt,
@@ -412,9 +459,7 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
       modelSelection: input.modelSelection,
     });
 
-    return {
-      title: sanitizeThreadTitle(generated.title),
-    } satisfies ThreadTitleGenerationResult;
+    return sanitizeThreadTitleResult(generated) satisfies ThreadTitleGenerationResult;
   });
 
   const generateIssueContent: TextGenerationShape["generateIssueContent"] = Effect.fn(

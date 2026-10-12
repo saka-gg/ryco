@@ -1,44 +1,12 @@
-import { createFileRoute, redirect, useNavigate } from "@tanstack/react-router";
-import { lazy, Suspense, useEffect } from "react";
+import { createFileRoute, redirect } from "@tanstack/react-router";
 
-import { SidebarInset } from "../components/ui/sidebar";
-import { usePresentationTier } from "../hooks/usePresentationTier";
+import { ROUTE_PAGE_PENDING_MS, RoutePagePending } from "../components/routeViews/RoutePagePending";
 import { getPresentationTier } from "../lib/presentationTier";
 import { useSettingsDialogStore } from "../settingsDialogStore";
-
-const LazySettingsPage = lazy(() =>
-  import("../components/settings/SettingsPage").then((module) => ({
-    default: module.SettingsPage,
-  })),
-);
-
-function SettingsRouteView() {
-  const navigate = useNavigate();
-  const phoneTier = usePresentationTier() === "phone";
-  // Reached by URL, Back, or Forward rather than through `openSettings`.
-  useEffect(() => {
-    const state = useSettingsDialogStore.getState();
-    if (!state.open) state.markOpen();
-  }, []);
-  // A rotation into the phone tier hands the open section to the phone sheet,
-  // which presents over the home stack rather than over this page.
-  useEffect(() => {
-    if (phoneTier) void navigate({ to: "/", replace: true });
-  }, [navigate, phoneTier]);
-  if (phoneTier) return null;
-  return (
-    <Suspense
-      fallback={
-        <SidebarInset className="h-dvh min-h-0 overflow-hidden bg-background text-foreground" />
-      }
-    >
-      <LazySettingsPage />
-    </Suspense>
-  );
-}
+import { preloadOpenSettingsSection, SettingsRouteComponent } from "../settingsRoute";
 
 export const Route = createFileRoute("/settings")({
-  beforeLoad: ({ context }) => {
+  beforeLoad: ({ context, preload }) => {
     if (
       context.authGateState.status !== "authenticated" &&
       context.authGateState.status !== "hosted-static" &&
@@ -47,11 +15,20 @@ export const Route = createFileRoute("/settings")({
       throw redirect({ to: "/pair", replace: true });
     }
     // The frozen phone tier presents settings as its own full-screen sheet over
-    // the home stack, so the page itself never renders there.
+    // the home stack, so the page itself never renders there. An intent
+    // preload (hovering a link) must not open the sheet.
     if (getPresentationTier() === "phone") {
-      useSettingsDialogStore.getState().markOpen();
+      if (!preload) useSettingsDialogStore.getState().markOpen();
       throw redirect({ to: "/", replace: true });
     }
   },
-  component: SettingsRouteView,
+  // Route-level splitting: the router awaits the page chunk before it commits,
+  // so a settings open never flashes an empty inset. `preloadSettingsPage`
+  // warms the same component, so an earlier preload is not wasted.
+  // The open section's body loads with the page, so it commits in one pass.
+  loader: () => preloadOpenSettingsSection(),
+  component: SettingsRouteComponent,
+  pendingComponent: RoutePagePending,
+  pendingMs: ROUTE_PAGE_PENDING_MS,
+  pendingMinMs: 0,
 });

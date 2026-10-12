@@ -66,7 +66,10 @@ import { projectKindOf } from "@ryco/shared/projectKind";
 import { Effect, Option, Schema } from "effect";
 
 import type { CheckpointDiffQueryShape } from "../../checkpointing/Services/CheckpointDiffQuery.ts";
-import type { ProjectionSnapshotQueryShape } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import {
+  type ProjectionSnapshotQueryShape,
+  readProjectShells,
+} from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import type { WorkspaceAccessPolicyShape } from "../../workspace/Services/WorkspaceAccessPolicy.ts";
 import type { WorkspaceFileSystemShape } from "../../workspace/Services/WorkspaceFileSystem.ts";
 import {
@@ -624,8 +627,8 @@ export const makeExternalMcpTools = (deps: {
           }
           // Selected scope without a narrower target: search each allowed
           // project, then merge newest-first like the unscoped query orders.
-          const snapshot = yield* deps.projections.getShellSnapshot();
-          const allowedProjects = snapshot.projects.filter((project) =>
+          const projects = yield* readProjectShells(deps.projections);
+          const allowedProjects = projects.filter((project) =>
             allowedProject(integration, project.id),
           );
           const pages = yield* Effect.forEach(
@@ -756,8 +759,7 @@ export const makeExternalMcpTools = (deps: {
   ) =>
     Effect.gen(function* () {
       if (deps.automations === undefined) return yield* Effect.fail(new Error("Unavailable"));
-      const snapshot = yield* deps.projections.getShellSnapshot();
-      for (const project of snapshot.projects) {
+      for (const project of yield* readProjectShells(deps.projections)) {
         if (!allowedProject(integration, project.id)) continue;
         const found = yield* Effect.option(
           deps.automations.get(automationId, { projectId: project.id }),
@@ -900,8 +902,8 @@ export const makeExternalMcpTools = (deps: {
             tool: name,
             requiredCapability: AGENT_CONTROL_CAPABILITIES.externalListProjects,
           });
-          const snapshot = yield* deps.projections.getShellSnapshot();
-          const allowed = snapshot.projects.filter(
+          const projects = yield* readProjectShells(deps.projections);
+          const allowed = projects.filter(
             (project) =>
               integration.projectScope.kind === "all" ||
               integration.projectScope.projectIds.includes(project.id),

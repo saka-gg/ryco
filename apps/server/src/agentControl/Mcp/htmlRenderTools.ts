@@ -40,7 +40,7 @@ import {
   normalizeHtmlRenderTitle,
 } from "@ryco/shared/htmlRender";
 import { Data, Effect, Exit, Option, Schema } from "effect";
-import sharp from "sharp";
+import { loadSharp } from "../../loadSharp.ts";
 
 import {
   persistGeneratedAssistantAttachment,
@@ -259,6 +259,7 @@ export async function fitHtmlPreviewScreenshot(
   pngBase64: string,
   maxBase64Chars: number,
 ): Promise<HtmlPreviewScreenshot> {
+  const sharp = await loadSharp();
   const png = Buffer.from(pngBase64, "base64");
   const { width = 0, height = 0 } = await sharp(png).metadata();
   if (pngBase64.length <= maxBase64Chars) {

@@ -5,11 +5,8 @@ import type {
   SecretKVService,
 } from "@ryco/client-runtime/platform";
 import { HostedHubApi, HostedHubApiError } from "@ryco/client-runtime/authorization";
-import {
-  createDpopProofSigner,
-  decodeBase64Url,
-  type DpopPublicJwk,
-} from "@ryco/client-runtime/relay";
+import { decodeBase64Url } from "@ryco/client-runtime/relay/base64url";
+import { createDpopProofSigner, type DpopPublicJwk } from "@ryco/client-runtime/relay/dpop";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import { createMobileSessionCredentials, HOSTED_SESSION_TOKEN_KEY } from "./sessionCredentials";

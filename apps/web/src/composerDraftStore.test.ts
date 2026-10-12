@@ -1878,6 +1878,31 @@ describe("composerDraftStore sourceControlContexts", () => {
     expect(draft?.sourceControlContexts[0]?.id).toBe("ctx-2");
   });
 
+  it("updateSourceControlContext replaces a context's detail in place", () => {
+    const ctx1 = makeSourceControlContext("ctx-1", "owner/repo#1");
+    const ctx2 = makeSourceControlContext("ctx-2", "owner/repo#2");
+    useComposerDraftStore.getState().addSourceControlContext(threadRef, ctx1);
+    useComposerDraftStore.getState().addSourceControlContext(threadRef, ctx2);
+
+    const detail = { ...ctx1.detail, body: "Loaded body" };
+    useComposerDraftStore.getState().updateSourceControlContext(threadRef, "ctx-1", {
+      detail,
+      fetchedAt: ctx2.fetchedAt,
+      staleAfter: ctx2.staleAfter,
+    });
+    // Unknown ids (a sent or removed chip) are ignored.
+    useComposerDraftStore.getState().updateSourceControlContext(threadRef, "gone", {
+      detail,
+      fetchedAt: ctx2.fetchedAt,
+      staleAfter: ctx2.staleAfter,
+    });
+
+    const draft = draftFor(threadId, TEST_ENVIRONMENT_ID);
+    expect(draft?.sourceControlContexts.map((ctx) => ctx.id)).toEqual(["ctx-1", "ctx-2"]);
+    expect(draft?.sourceControlContexts[0]?.detail).toBe(detail);
+    expect(draft?.sourceControlContexts[0]?.reference).toBe("owner/repo#1");
+  });
+
   it("clearComposerContent wipes sourceControlContexts", () => {
     const ctx = makeSourceControlContext("ctx-1", "owner/repo#1");
 

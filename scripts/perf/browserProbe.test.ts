@@ -1,6 +1,24 @@
 import { assert, describe, it } from "@effect/vitest";
 
-import { DeterministicSourceControlDriver, sanitizeDiagnostic } from "./browserProbe.ts";
+import {
+  collectStartupMeasures,
+  DeterministicSourceControlDriver,
+  sanitizeDiagnostic,
+} from "./browserProbe.ts";
+
+describe("app startup measures", () => {
+  it("keeps the latest ryco:startup measure per name, without the prefix", () => {
+    assert.deepStrictEqual(
+      collectStartupMeasures([
+        { name: "ryco:startup:root-before-load", duration: 12 },
+        { name: "ryco:tab-switch:thread", duration: 40 },
+        { name: "ryco:startup:primary-shell-painted", duration: 410 },
+        { name: "ryco:startup:root-before-load", duration: 3 },
+      ]),
+      { "root-before-load": 3, "primary-shell-painted": 410 },
+    );
+  });
+});
 
 describe("external browser diagnostics", () => {
   it("removes query, hash, and credential values from errors", () => {

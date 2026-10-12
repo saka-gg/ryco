@@ -469,7 +469,6 @@ export interface ComposerFooterProps {
   // Context picker
   environmentId: EnvironmentId;
   gitCwd: string | null;
-  hasSourceControlRemote: boolean;
   onSelectIssue: (issue: SourceControlIssueSummary) => void;
   onSelectChangeRequest: (cr: ChangeRequest) => void;
   onAttachFile: (file: File) => void;
@@ -578,7 +577,6 @@ export const ComposerFooter = memo(function ComposerFooter(props: ComposerFooter
         <ContextPickerButton
           environmentId={props.environmentId}
           cwd={props.gitCwd ?? ""}
-          hasSourceControlRemote={props.hasSourceControlRemote}
           onSelectIssue={props.onSelectIssue}
           onSelectChangeRequest={props.onSelectChangeRequest}
           onAttachFile={props.onAttachFile}

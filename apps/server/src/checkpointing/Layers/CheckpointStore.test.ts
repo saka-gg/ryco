@@ -2,7 +2,7 @@ import path from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
-import { Effect, FileSystem, Layer, PlatformError, Scope } from "effect";
+import { Deferred, Effect, Fiber, FileSystem, Layer, PlatformError, Scope } from "effect";
 import { describe, expect } from "vite-plus/test";
 
 import { checkpointRefForThreadTurn, forkPinRefs } from "../Utils.ts";
@@ -83,6 +83,77 @@ function initRepoWithCommit(
   });
 }
 
+/** The tree the original capture algorithm produced: `read-tree HEAD` + `add -A` in a fresh index. */
+function referenceCaptureTree(
+  cwd: string,
+): Effect.Effect<
+  string,
+  VcsError | PlatformError.PlatformError,
+  VcsProcess.VcsProcess | FileSystem.FileSystem | Scope.Scope
+> {
+  return Effect.gen(function* () {
+    const process = yield* VcsProcess.VcsProcess;
+    const indexDir = yield* makeTmpDir("checkpoint-store-reference-index-");
+    const env = { GIT_INDEX_FILE: path.join(indexDir, "index") };
+    const run = (args: ReadonlyArray<string>) =>
+      process.run({
+        operation: "CheckpointStore.test.referenceTree",
+        command: "git",
+        cwd,
+        args,
+        env,
+        timeoutMs: 10_000,
+      });
+    const head = yield* process.run({
+      operation: "CheckpointStore.test.referenceTree",
+      command: "git",
+      cwd,
+      args: ["rev-parse", "--verify", "HEAD"],
+      allowNonZeroExit: true,
+      timeoutMs: 10_000,
+    });
+    if (head.exitCode === 0) yield* run(["read-tree", "HEAD"]);
+    yield* run(["add", "-A", "--", "."]);
+    return (yield* run(["write-tree"])).stdout.trim();
+  });
+}
+
+function checkpointTree(
+  cwd: string,
+  checkpointRef: string,
+): Effect.Effect<string, VcsError, VcsProcess.VcsProcess> {
+  return git(cwd, ["rev-parse", `${checkpointRef}^{tree}`]);
+}
+
+/** A store whose git calls first pass `hold`, to pin operations in flight. */
+function checkpointStoreHoldingGit(hold: (args: ReadonlyArray<string>) => Effect.Effect<void>) {
+  const registry = Layer.effect(
+    VcsDriverRegistry.VcsDriverRegistry,
+    Effect.gen(function* () {
+      const live = yield* VcsDriverRegistry.VcsDriverRegistry;
+      return {
+        ...live,
+        resolve: (input: Parameters<typeof live.resolve>[0]) =>
+          live.resolve(input).pipe(
+            Effect.map((handle) => ({
+              ...handle,
+              driver: {
+                ...handle.driver,
+                execute: (execution: Parameters<typeof handle.driver.execute>[0]) =>
+                  hold(execution.args).pipe(Effect.andThen(handle.driver.execute(execution))),
+              },
+            })),
+          ),
+      };
+    }),
+  );
+  // Fresh: the suite's layer already built (and memoized) the plain store.
+  return Layer.fresh(CheckpointStoreLive).pipe(Layer.provide(registry));
+}
+
+const pause = (ms: number) =>
+  Effect.promise(() => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+
 function buildLargeText(lineCount = 5_000): string {
   return Array.from({ length: lineCount }, (_, index) => `line ${String(index).padStart(5, "0")}`)
     .join("\n")
@@ -101,6 +172,235 @@ it.layer(TestLayer)("CheckpointStoreLive", (it) => {
         const empty = yield* makeTmpDir();
         yield* git(empty, ["init"]);
         expect(yield* checkpointStore.hasHeadCommit(empty)).toBe(false);
+      }),
+    );
+  });
+
+  describe("captureCheckpoint", () => {
+    it.effect(
+      "captures the reference tree from the checkout index without touching that index",
+      () =>
+        Effect.gen(function* () {
+          const tmp = yield* makeTmpDir();
+          yield* initRepoWithCommit(tmp);
+          yield* writeTextFile(path.join(tmp, "tracked.txt"), "one\n");
+          yield* writeTextFile(path.join(tmp, "removed.txt"), "gone soon\n");
+          yield* git(tmp, ["add", "."]);
+          yield* git(tmp, ["commit", "-m", "more files"]);
+          // Staged, unstaged, untracked and deleted changes at once.
+          yield* writeTextFile(path.join(tmp, "tracked.txt"), "two\n");
+          yield* git(tmp, ["add", "tracked.txt"]);
+          yield* writeTextFile(path.join(tmp, "tracked.txt"), "three\n");
+          yield* writeTextFile(path.join(tmp, "README.md"), "# changed\n");
+          yield* writeTextFile(path.join(tmp, "untracked.txt"), "new\n");
+          const fileSystem = yield* FileSystem.FileSystem;
+          yield* fileSystem.remove(path.join(tmp, "removed.txt"));
+          const statusBefore = yield* git(tmp, ["status", "--porcelain=v1"]);
+          const stagedBefore = yield* git(tmp, ["diff", "--cached", "--name-status"]);
+
+          const checkpointStore = yield* CheckpointStore;
+          const checkpointRef = checkpointRefForThreadTurn(ThreadId.make("thread-seeded"), 1);
+          yield* checkpointStore.captureCheckpoint({ cwd: tmp, checkpointRef });
+
+          expect(yield* checkpointTree(tmp, checkpointRef)).toBe(yield* referenceCaptureTree(tmp));
+          expect(yield* git(tmp, ["show", `${checkpointRef}:tracked.txt`])).toBe("three");
+          expect(yield* git(tmp, ["status", "--porcelain=v1"])).toBe(statusBefore);
+          expect(yield* git(tmp, ["diff", "--cached", "--name-status"])).toBe(stagedBefore);
+        }),
+    );
+
+    it.effect(
+      "sees a same-size edit made in the second the index was written",
+      () =>
+        Effect.gen(function* () {
+          const tmp = yield* makeTmpDir();
+          yield* initRepoWithCommit(tmp);
+          // Index write and edit share a second; the capture then runs in a
+          // later one. Git compares whole seconds, so only the index's own
+          // timestamp ("racy git") can reveal the same-size edit.
+          yield* writeTextFile(path.join(tmp, "README.md"), "racy\n");
+          yield* git(tmp, ["add", "README.md"]);
+          yield* writeTextFile(path.join(tmp, "README.md"), "RACY\n");
+          yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 1_100)));
+
+          const checkpointStore = yield* CheckpointStore;
+          const checkpointRef = checkpointRefForThreadTurn(ThreadId.make("thread-racy"), 1);
+          yield* checkpointStore.captureCheckpoint({ cwd: tmp, checkpointRef });
+          expect(yield* git(tmp, ["show", `${checkpointRef}:README.md`])).toBe("RACY");
+        }),
+      10_000,
+    );
+
+    it.effect("records worktree content of entries marked assume-unchanged", () =>
+      Effect.gen(function* () {
+        const tmp = yield* makeTmpDir();
+        yield* initRepoWithCommit(tmp);
+        yield* git(tmp, ["update-index", "--assume-unchanged", "README.md"]);
+        yield* writeTextFile(path.join(tmp, "README.md"), "# edited behind git's back\n");
+
+        const checkpointStore = yield* CheckpointStore;
+        const checkpointRef = checkpointRefForThreadTurn(ThreadId.make("thread-assume"), 1);
+        yield* checkpointStore.captureCheckpoint({ cwd: tmp, checkpointRef });
+
+        expect(yield* git(tmp, ["show", `${checkpointRef}:README.md`])).toBe(
+          "# edited behind git's back",
+        );
+        expect(yield* checkpointTree(tmp, checkpointRef)).toBe(yield* referenceCaptureTree(tmp));
+        // The real index keeps the user's flag.
+        expect(yield* git(tmp, ["ls-files", "-v", "README.md"])).toBe("h README.md");
+      }),
+    );
+
+    it.effect("falls back to HEAD for checkouts with skip-worktree entries", () =>
+      Effect.gen(function* () {
+        const tmp = yield* makeTmpDir();
+        yield* initRepoWithCommit(tmp);
+        yield* writeTextFile(path.join(tmp, "README.md"), "# staged then hidden\n");
+        yield* git(tmp, ["add", "README.md"]);
+        yield* git(tmp, ["update-index", "--skip-worktree", "README.md"]);
+
+        const checkpointStore = yield* CheckpointStore;
+        const checkpointRef = checkpointRefForThreadTurn(ThreadId.make("thread-skip"), 1);
+        yield* checkpointStore.captureCheckpoint({ cwd: tmp, checkpointRef });
+
+        expect(yield* checkpointTree(tmp, checkpointRef)).toBe(yield* referenceCaptureTree(tmp));
+      }),
+    );
+
+    it.effect("captures inside a linked worktree and in a repository without commits", () =>
+      Effect.gen(function* () {
+        const repo = yield* makeTmpDir();
+        yield* initRepoWithCommit(repo);
+        const worktreeParent = yield* makeTmpDir("checkpoint-store-linked-");
+        const worktree = path.join(worktreeParent, "linked");
+        yield* git(repo, ["worktree", "add", "-b", "linked", worktree]);
+        yield* writeTextFile(path.join(worktree, "README.md"), "# linked edit\n");
+        yield* writeTextFile(path.join(worktree, "extra.txt"), "extra\n");
+
+        const checkpointStore = yield* CheckpointStore;
+        const linkedRef = checkpointRefForThreadTurn(ThreadId.make("thread-linked"), 1);
+        yield* checkpointStore.captureCheckpoint({ cwd: worktree, checkpointRef: linkedRef });
+        expect(yield* checkpointTree(worktree, linkedRef)).toBe(
+          yield* referenceCaptureTree(worktree),
+        );
+        expect(yield* git(worktree, ["show", `${linkedRef}:README.md`])).toBe("# linked edit");
+
+        const empty = yield* makeTmpDir();
+        yield* git(empty, ["init"]);
+        yield* configureTestGitCommitIdentity(empty, git);
+        yield* writeTextFile(path.join(empty, "first.txt"), "first\n");
+        const emptyRef = checkpointRefForThreadTurn(ThreadId.make("thread-empty"), 0);
+        yield* checkpointStore.captureCheckpoint({ cwd: empty, checkpointRef: emptyRef });
+        expect(yield* git(empty, ["show", `${emptyRef}:first.txt`])).toBe("first");
+      }),
+    );
+  });
+
+  describe("checkout access", () => {
+    it.effect(
+      "runs a waiting restore before captures that arrive after it",
+      () =>
+        Effect.gen(function* () {
+          const tmp = yield* makeTmpDir();
+          yield* initRepoWithCommit(tmp);
+          const firstAddReached = yield* Deferred.make<void>();
+          const releaseFirstAdd = yield* Deferred.make<void>();
+          let firstAddHeld = false;
+          const order: Array<string> = [];
+          const ref = (turn: number) =>
+            checkpointRefForThreadTurn(ThreadId.make("thread-turnstile"), turn);
+
+          yield* Effect.gen(function* () {
+            const store = yield* CheckpointStore;
+            const first = yield* store.captureCheckpoint({ cwd: tmp, checkpointRef: ref(1) }).pipe(
+              Effect.tap(() =>
+                Effect.sync(() => {
+                  order.push("capture-1");
+                }),
+              ),
+              Effect.forkChild,
+            );
+            yield* Deferred.await(firstAddReached);
+            // The restore waits for the capture in flight...
+            const restore = yield* store
+              .restoreCheckpoint({ cwd: tmp, checkpointRef: ref(9), fallbackToHead: true })
+              .pipe(
+                Effect.tap(() =>
+                  Effect.sync(() => {
+                    order.push("restore");
+                  }),
+                ),
+                Effect.forkChild,
+              );
+            yield* pause(50);
+            // ...and a capture that arrives now waits behind the restore.
+            const second = yield* store.captureCheckpoint({ cwd: tmp, checkpointRef: ref(2) }).pipe(
+              Effect.tap(() =>
+                Effect.sync(() => {
+                  order.push("capture-2");
+                }),
+              ),
+              Effect.forkChild,
+            );
+            yield* pause(200);
+            expect(order).toEqual([]);
+
+            yield* Deferred.succeed(releaseFirstAdd, undefined);
+            yield* Fiber.join(first);
+            yield* Fiber.join(restore);
+            yield* Fiber.join(second);
+            expect(order).toEqual(["capture-1", "restore", "capture-2"]);
+          }).pipe(
+            Effect.provide(
+              checkpointStoreHoldingGit((args) =>
+                args[0] === "add" && !firstAddHeld
+                  ? Effect.sync(() => {
+                      firstAddHeld = true;
+                    }).pipe(
+                      Effect.andThen(Deferred.succeed(firstAddReached, undefined)),
+                      Effect.andThen(Deferred.await(releaseFirstAdd)),
+                    )
+                  : Effect.void,
+              ),
+            ),
+          );
+        }),
+      10_000,
+    );
+  });
+
+  describe("resolveCheckpointCommits", () => {
+    it.effect("resolves present refs in input order and reports missing ones as null", () =>
+      Effect.gen(function* () {
+        const tmp = yield* makeTmpDir();
+        yield* initRepoWithCommit(tmp);
+        const checkpointStore = yield* CheckpointStore;
+        const threadId = ThreadId.make("thread-checkpoint-resolve");
+        const first = checkpointRefForThreadTurn(threadId, 0);
+        const missing = checkpointRefForThreadTurn(threadId, 7);
+        const second = checkpointRefForThreadTurn(threadId, 1);
+
+        yield* checkpointStore.captureCheckpoint({ cwd: tmp, checkpointRef: first });
+        yield* writeTextFile(path.join(tmp, "README.md"), "# changed\n");
+        yield* checkpointStore.captureCheckpoint({ cwd: tmp, checkpointRef: second });
+
+        const resolved = yield* checkpointStore.resolveCheckpointCommits({
+          cwd: tmp,
+          checkpointRefs: [second, missing, first],
+        });
+        expect(resolved).toEqual([
+          yield* git(tmp, ["rev-parse", second]),
+          null,
+          yield* git(tmp, ["rev-parse", first]),
+        ]);
+
+        const diff = yield* checkpointStore.diffCheckpointCommits({
+          cwd: tmp,
+          fromCommitOid: resolved[2]!,
+          toCommitOid: resolved[0]!,
+          ignoreWhitespace: false,
+        });
+        expect(diff).toContain("+# changed");
       }),
     );
   });

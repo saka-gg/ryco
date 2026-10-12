@@ -1,4 +1,4 @@
-import { IconGitFork, IconMessages } from "@tabler/icons-react-native";
+import { IconGitFork, IconMessages } from "../../components/icons";
 import { ProjectFavicon } from "../../components/ProjectFavicon";
 import { LegendList, type LegendListRenderItemProps } from "@legendapp/list/react-native";
 import { DeviceIcon } from "../../components/DeviceIcon";

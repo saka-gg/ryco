@@ -117,7 +117,17 @@ vi.mock("./catalog", () => ({
 }));
 
 vi.mock("./connection", () => ({
-  createEnvironmentConnection: mockCreateEnvironmentConnection,
+  // A real saved connection's config subscription delivers the node's config
+  // as its first item; `mockClientGetConfig` stands for that config here.
+  createEnvironmentConnection: (input: {
+    readonly onConfigUpdated?: (config: unknown, source: "snapshot") => void;
+  }) => {
+    void Promise.resolve()
+      .then(() => mockClientGetConfig())
+      .then((config) => input.onConfigUpdated?.(config, "snapshot"))
+      .catch(() => undefined);
+    return mockCreateEnvironmentConnection(input);
+  },
 }));
 
 vi.mock("../../rpc/wsRpcClient", () => ({
@@ -737,6 +747,8 @@ describe("addSavedEnvironment", () => {
     expect(mockRotateRemoteBearerSession).toHaveBeenCalledExactlyOnceWith({
       httpBaseUrl: "https://remote.example.com/",
       bearerToken: "bearer-1",
+      // The supervisor's attempt can abandon the rotation if its slot times out.
+      signal: expect.any(AbortSignal),
     });
     expect(storedBearer).toBe("bearer-2");
     // The socket asks for its ws-token with the bearer stored now.
@@ -1173,9 +1185,27 @@ describe("addSavedEnvironment", () => {
     ];
 
     const { removeSavedEnvironment, resetEnvironmentServiceForTests } = await import("./service");
+    const { peekProjectIconSource, readProjectIconSource } =
+      await import("@ryco/client-runtime/connection");
+    const iconProject = "icon-project" as never;
+    await readProjectIconSource(
+      {
+        projects: { readIcon: async () => ({ mimeType: "image/png", dataBase64: "aWNvbg==" }) },
+      } as never,
+      EnvironmentId.make("environment-1"),
+      iconProject,
+      null,
+    );
+    expect(
+      peekProjectIconSource(EnvironmentId.make("environment-1"), iconProject, null),
+    ).not.toBeUndefined();
 
     await removeSavedEnvironment(EnvironmentId.make("environment-1"));
 
+    // The node's project artwork is memory-only and keyed by node: forgotten too.
+    expect(
+      peekProjectIconSource(EnvironmentId.make("environment-1"), iconProject, null),
+    ).toBeUndefined();
     expect(mockDisconnectSshEnvironment).toHaveBeenCalledWith({
       alias: "devbox",
       hostname: "devbox.example.com",

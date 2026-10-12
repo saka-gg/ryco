@@ -1,4 +1,4 @@
-import { Schema } from "effect";
+import * as Schema from "effect/Schema";
 import { ProviderInstanceId } from "./providerInstance.ts";
 import { TrimmedNonEmptyString } from "./baseSchemas.ts";
 

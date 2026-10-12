@@ -25,6 +25,7 @@ import {
   applyOrchestrationEvent,
   applyOrchestrationEvents,
   applyShellEvent,
+  applyThreadPriorities,
   createShellEventCoalescer,
   demoteEnvironmentStateToCachedSnapshot,
   hydrateEnvironmentStateFromCache,
@@ -41,7 +42,6 @@ import {
   selectThreadsAcrossEnvironments,
   syncServerShellSnapshot,
   syncServerThreadDetail,
-  SHELL_COALESCE_THRESHOLD_EVENTS_PER_MS,
   type AppState,
   type EnvironmentState,
   useStore,
@@ -2594,7 +2594,7 @@ describe("shell push coalescing", () => {
     return events.reduce((state, event) => applyShellEvent(state, event, localEnvironmentId), base);
   }
 
-  it("produces the same final turn state when coalescing a high-frequency burst", () => {
+  it("produces the same final turn state when coalescing a burst into one frame", () => {
     const base = makeEmptyState();
     const events = recordedShellEventSequence();
 
@@ -2602,16 +2602,20 @@ describe("shell push coalescing", () => {
     const reference = foldShellEvents(base, events);
 
     let committed: AppState = base;
+    let commits = 0;
     const scheduled: Array<() => void> = [];
+    const fallbacks: Array<() => void> = [];
     const coalescer = createShellEventCoalescer({
       getState: () => committed,
       commitState: (next) => {
+        commits += 1;
         committed = next;
       },
-      // Constant clock => zero span => infinite events/ms => always over threshold.
-      now: () => 0,
       schedule: (callback) => {
         scheduled.push(callback);
+      },
+      scheduleFallback: (callback) => {
+        fallbacks.push(callback);
       },
     });
 
@@ -2619,14 +2623,20 @@ describe("shell push coalescing", () => {
       coalescer.enqueue(event, localEnvironmentId);
     }
 
-    // The burst must have been coalesced into a single deferred frame flush.
+    // Every event waits for one frame, however slowly they arrived.
     expect(scheduled).toHaveLength(1);
+    expect(commits).toBe(0);
     expect(coalescer.hasPending()).toBe(true);
 
     for (const flushFrame of scheduled) {
       flushFrame();
     }
+    // The fallback for a frame that already ran does nothing.
+    for (const fallback of fallbacks) {
+      fallback();
+    }
 
+    expect(commits).toBe(1);
     expect(coalescer.hasPending()).toBe(false);
     expect(committed).toEqual(reference);
 
@@ -2648,37 +2658,129 @@ describe("shell push coalescing", () => {
     );
   });
 
-  it("applies shell events immediately when the rate stays under the threshold", () => {
+  it("applies a thread-priorities item as a replacement, keeping unchanged rows", () => {
+    const threadA = ThreadId.make("thread-a");
+    const threadB = ThreadId.make("thread-b");
+    const ranking = (tier: "now" | "later", batchId: string) => ({
+      tier,
+      confidence: "high" as const,
+      reason: "Needs a reply",
+      inputFingerprint: "fp" as never,
+      batchId: batchId as never,
+      modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-codex" },
+      rankedAt: "2026-10-12T00:00:00.000Z",
+      usableUntil: "2026-10-12T01:00:00.000Z",
+    });
+    const base = foldShellEvents(makeEmptyState(), [
+      makeThreadShellUpsertEvent({
+        threadId: threadA,
+        sequence: 1,
+        title: "A",
+        updatedAt: "2026-10-12T00:00:00.000Z",
+        turnState: "completed",
+      }),
+      makeThreadShellUpsertEvent({
+        threadId: threadB,
+        sequence: 2,
+        title: "B",
+        updatedAt: "2026-10-12T00:00:00.000Z",
+        turnState: "completed",
+      }),
+    ]);
+    const ranked = applyThreadPriorities(
+      base,
+      {
+        kind: "thread-priorities",
+        priorities: [
+          { threadId: threadA, priority: ranking("now", "batch-1") },
+          { threadId: threadB, priority: ranking("later", "batch-1") },
+        ],
+      },
+      localEnvironmentId,
+    );
+    const rankedEnv = selectEnvironmentState(ranked, localEnvironmentId);
+    expect(rankedEnv.sidebarThreadSummaryById[threadA]?.priority?.tier).toBe("now");
+    expect(rankedEnv.sidebarThreadSummaryById[threadB]?.priority?.tier).toBe("later");
+
+    // A later ranking that leaves thread A out clears its priority; thread B's
+    // unchanged row keeps its identity.
+    const reranked = applyThreadPriorities(
+      ranked,
+      {
+        kind: "thread-priorities",
+        priorities: [{ threadId: threadB, priority: ranking("later", "batch-1") }],
+      },
+      localEnvironmentId,
+    );
+    const rerankedEnv = selectEnvironmentState(reranked, localEnvironmentId);
+    expect(rerankedEnv.sidebarThreadSummaryById[threadA]?.priority).toBeUndefined();
+    expect(rerankedEnv.sidebarThreadSummaryById[threadB]).toBe(
+      rankedEnv.sidebarThreadSummaryById[threadB],
+    );
+
+    // Nothing changed: the state itself is returned.
+    expect(
+      applyThreadPriorities(
+        reranked,
+        {
+          kind: "thread-priorities",
+          priorities: [{ threadId: threadB, priority: ranking("later", "batch-1") }],
+        },
+        localEnvironmentId,
+      ),
+    ).toBe(reranked);
+  });
+
+  it("commits a batch of shell updates at once, preparing each against the state before it", () => {
+    const events = recordedShellEventSequence().slice(0, 3);
+    useStore.setState(makeEmptyState());
+    let commits = 0;
+    const unsubscribe = useStore.subscribe(() => {
+      commits += 1;
+    });
+    const seenThreadCounts = useStore
+      .getState()
+      .applyShellEvents(
+        events,
+        localEnvironmentId,
+        (state) => selectEnvironmentState(state, localEnvironmentId).threadIds.length,
+      );
+    unsubscribe();
+
+    expect(commits).toBe(1);
+    // thread-a, then thread-b are new; the third event updates thread-a.
+    expect(seenThreadCounts).toEqual([0, 1, 2]);
+    expect(selectEnvironmentState(useStore.getState(), localEnvironmentId).threadIds).toHaveLength(
+      2,
+    );
+    useStore.setState(makeEmptyState());
+  });
+
+  it("commits buffered events on the fallback when no frame runs", () => {
     const base = makeEmptyState();
     const events = recordedShellEventSequence();
-    const reference = foldShellEvents(base, events);
-
     let committed: AppState = base;
-    const scheduled: Array<() => void> = [];
-    let clock = 0;
+    const fallbacks: Array<() => void> = [];
     const coalescer = createShellEventCoalescer({
       getState: () => committed,
       commitState: (next) => {
         committed = next;
       },
-      // Space events far enough apart to stay well under the threshold.
-      now: () => {
-        clock += 1000 / SHELL_COALESCE_THRESHOLD_EVENTS_PER_MS + 5;
-        return clock;
-      },
-      schedule: (callback) => {
-        scheduled.push(callback);
+      // A hidden document never runs the frame.
+      schedule: () => undefined,
+      scheduleFallback: (callback) => {
+        fallbacks.push(callback);
       },
     });
 
     for (const event of events) {
       coalescer.enqueue(event, localEnvironmentId);
     }
+    expect(fallbacks).toHaveLength(1);
+    fallbacks[0]!();
 
-    // No frame was scheduled; every event committed synchronously.
-    expect(scheduled).toHaveLength(0);
     expect(coalescer.hasPending()).toBe(false);
-    expect(committed).toEqual(reference);
+    expect(committed).toEqual(foldShellEvents(base, events));
   });
 });
 

@@ -35,7 +35,7 @@ import { canonicalizeWorktreePath } from "../project/worktreeRoot.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import { ServerConfig } from "../config.ts";
 import * as GitVcsDriver from "./GitVcsDriver.ts";
-import { makeGitVcsDriverCore } from "./GitVcsDriverCore.ts";
+import { makeGitVcsDriverCore, parseGitConfigList, parseListedRefs } from "./GitVcsDriverCore.ts";
 import { configureTestGitCommitIdentity } from "./testing/GitTestRepo.ts";
 
 // Observe actual destination-lock acquisition for deterministic pre-mkdir races.
@@ -357,6 +357,135 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
       }).pipe(Effect.provide(OverrideTestLayer)),
     );
 
+    it.effect("reads a feature branch's status with one base lookup and no optional locks", () =>
+      Effect.gen(function* () {
+        const calls: GitVcsDriver.ExecuteGitInput[] = [];
+        const ok = (stdout = "") =>
+          ({
+            exitCode: 0 as GitVcsDriver.ExecuteGitResult["exitCode"],
+            stdout,
+            stderr: "",
+            stdoutTruncated: false,
+            stderrTruncated: false,
+          }) satisfies GitVcsDriver.ExecuteGitResult;
+        const base = "a".repeat(40);
+        const head = "b".repeat(40);
+        const driver = yield* makeGitVcsDriverCore({
+          executeOverride: (input) =>
+            Effect.sync(() => {
+              calls.push(input);
+              const args = input.args.join(" ");
+              if (args === "status --porcelain=2 --branch")
+                return ok("# branch.oid abc\n# branch.head feature/x\n");
+              if (args === "diff HEAD --numstat") return ok("1\t0\tsrc/a.ts\n");
+              if (args === "symbolic-ref refs/remotes/origin/HEAD")
+                return ok("refs/remotes/origin/main\n");
+              if (args === "config -z --list")
+                return ok("remote.origin.url\ngit@example.com:o/r.git\0core.bare\nfalse\0");
+              if (input.args[0] === "for-each-ref") return ok("refs/remotes/origin/main\n");
+              if (input.args[0] === "rev-parse") return ok(`${base}\n${head}\n`);
+              if (input.args[0] === "rev-list") return ok("3\n");
+              if (args === `diff --numstat ${base}...${head}`) return ok("4\t1\tsrc/b.ts\n");
+              throw new Error(`Unexpected git command: ${args}`);
+            }),
+        });
+
+        const status = yield* driver.statusDetailsLocal("/repo");
+
+        assert.equal(status.branch, "feature/x");
+        assert.equal(status.hasOriginRemote, true);
+        assert.equal(status.aheadCount, 3);
+        assert.equal(status.aheadOfDefaultCount, 3);
+        assert.deepStrictEqual(status.committed?.files, [
+          { path: "src/b.ts", insertions: 4, deletions: 1 },
+        ]);
+        // The base is resolved once and shared by both counts and the diff.
+        assert.deepStrictEqual(calls.map((call) => call.args[0]).toSorted(), [
+          "config",
+          "diff",
+          "diff",
+          "for-each-ref",
+          "rev-list",
+          "rev-parse",
+          "status",
+          "symbolic-ref",
+        ]);
+        assert.deepStrictEqual(
+          calls.find((call) => call.args[0] === "for-each-ref")?.args.slice(2),
+          [
+            "refs/heads/main",
+            "refs/remotes/origin/main",
+            "refs/heads/master",
+            "refs/remotes/origin/master",
+          ],
+        );
+        // Background reads never take `index.lock`.
+        assert.isTrue(calls.every((call) => call.readOnly === true));
+
+        // The commit-pair results are reused while neither end moves.
+        calls.length = 0;
+        yield* driver.statusDetailsLocal("/repo");
+        assert.isFalse(calls.some((call) => call.args[0] === "rev-list"));
+        assert.isFalse(calls.some((call) => call.args.join(" ").includes("...")));
+      }).pipe(Effect.provide(OverrideTestLayer)),
+    );
+
+    it("parses git config listings and remote names", () => {
+      const snapshot = parseGitConfigList(
+        [
+          "remote.origin.url\ngit@example.com:o/r.git",
+          "remote.upstream.url\nhttps://example.com/u/r",
+          "branch.Feature/X.remote\norigin",
+          "branch.Feature/X.gh-merge-base\ndevelop",
+          "core.bare\nfalse",
+          "core.bare\ntrue",
+          "user.flag",
+          "",
+        ].join("\0"),
+      );
+      assert.deepStrictEqual(snapshot.remoteNames, ["origin", "upstream"]);
+      // Section and key names are case-insensitive; the branch subsection is not.
+      assert.equal(snapshot.get("Branch.Feature/X.Remote"), "origin");
+      assert.equal(snapshot.get("branch.feature/x.remote"), null);
+      assert.equal(snapshot.get("branch.Feature/X.gh-merge-base"), "develop");
+      assert.equal(snapshot.get("core.bare"), "true");
+      assert.equal(snapshot.get("user.flag"), null);
+    });
+
+    it("parses the listing for-each-ref returns for branch lists", () => {
+      const refs = parseListedRefs(
+        [
+          ["refs/heads/main", "1700000000", "*", "", "/repo"].join("\0"),
+          ["refs/heads/topic", "1700000500", " ", "", ""].join("\0"),
+          ["refs/remotes/origin/HEAD", "", " ", "refs/remotes/origin/main", ""].join("\0"),
+          "",
+        ].join("\n"),
+      );
+      assert.deepStrictEqual(refs, [
+        {
+          refname: "refs/heads/main",
+          lastCommit: 1700000000,
+          isHead: true,
+          symref: "",
+          worktreePath: "/repo",
+        },
+        {
+          refname: "refs/heads/topic",
+          lastCommit: 1700000500,
+          isHead: false,
+          symref: "",
+          worktreePath: "",
+        },
+        {
+          refname: "refs/remotes/origin/HEAD",
+          lastCommit: 0,
+          isHead: false,
+          symref: "refs/remotes/origin/main",
+          worktreePath: "",
+        },
+      ]);
+    });
+
     it.effect("falls back to staged and unstaged numstat for an unborn repository", () =>
       Effect.gen(function* () {
         const cwd = yield* makeTmpDir();
@@ -375,6 +504,72 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
           deletions: 0,
         });
       }),
+    );
+
+    it.effect("serves a branch picker's later pages from one listing until git writes", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        yield* initRepoWithCommit(cwd);
+        yield* git(cwd, ["branch", "alpha"]);
+        yield* git(cwd, ["branch", "beta"]);
+        const base = yield* GitVcsDriver.GitVcsDriver;
+        let listings = 0;
+        const driver = yield* makeGitVcsDriverCore({
+          executeOverride: (input) => {
+            if (input.operation === "GitVcsDriver.listRefs.forEachRef") listings += 1;
+            return base.execute(input);
+          },
+        });
+
+        const first = yield* driver.listRefs({ cwd, limit: 1 });
+        const second = yield* driver.listRefs({ cwd, limit: 1, cursor: 1 });
+        yield* driver.listRefs({ cwd, query: "alp" });
+        assert.equal(listings, 1);
+        assert.equal(first.totalCount, 3);
+        assert.notEqual(first.refs[0]?.name, second.refs[0]?.name);
+
+        // A ref this driver creates is listed at once.
+        yield* driver.createRef({ cwd, refName: "gamma" });
+        const after = yield* driver.listRefs({ cwd });
+        assert.equal(listings, 2);
+        assert.include(
+          after.refs.map((ref) => ref.name),
+          "gamma",
+        );
+      }).pipe(Effect.provide(ServerConfigLayer)),
+    );
+
+    it.effect("drops the branch listing when a status refresh reports refs may have moved", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        yield* initRepoWithCommit(cwd);
+        const base = yield* GitVcsDriver.GitVcsDriver;
+        let listings = 0;
+        const driver = yield* makeGitVcsDriverCore({
+          executeOverride: (input) => {
+            if (input.operation === "GitVcsDriver.listRefs.forEachRef") listings += 1;
+            return base.execute(input);
+          },
+        });
+
+        yield* driver.listRefs({ cwd });
+        // An agent's own git command is invisible to this driver's write hook.
+        yield* git(cwd, ["branch", "agent-branch"]);
+        const cached = yield* driver.listRefs({ cwd });
+        assert.equal(listings, 1);
+        assert.notInclude(
+          cached.refs.map((ref) => ref.name),
+          "agent-branch",
+        );
+
+        yield* driver.invalidateRefListing(cwd);
+        const fresh = yield* driver.listRefs({ cwd });
+        assert.equal(listings, 2);
+        assert.include(
+          fresh.refs.map((ref) => ref.name),
+          "agent-branch",
+        );
+      }).pipe(Effect.provide(ServerConfigLayer)),
     );
 
     it.effect("reports default-branch delta separately from upstream delta", () =>
@@ -784,6 +979,79 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
           const pruned = yield* driver.listRefs({ cwd, fetchOrigin: true, originOnly: true });
           assert.isFalse(pruned.refs.some((ref) => ref.name === "origin/remote-only"));
         }),
+    );
+    it.effect("fetches only the base branch for a new worktree and reads origin/HEAD locally", () =>
+      Effect.gen(function* () {
+        const remote = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(remote);
+        const cwd = yield* makeTmpDir();
+        yield* git(cwd, ["clone", remote, "."]);
+        yield* git(remote, ["branch", "unrelated"]);
+        yield* git(remote, ["commit", "--allow-empty", "-m", "new remote commit"]);
+        const remoteHead = yield* git(remote, ["rev-parse", "HEAD"]);
+        const base = yield* GitVcsDriver.GitVcsDriver;
+        const operations: string[] = [];
+        const fetchArgs: Array<ReadonlyArray<string>> = [];
+        const driver = yield* makeGitVcsDriverCore({
+          executeOverride: (input) => {
+            operations.push(input.operation);
+            if (input.args[0] === "fetch") fetchArgs.push(input.args);
+            return base.execute(input);
+          },
+        });
+        const pathService = yield* Path.Path;
+        const root = yield* makeTmpDir();
+        const created = yield* driver.createWorktree({
+          cwd,
+          path: pathService.join(root, "default"),
+          refName: "origin/HEAD",
+          newRefName: "feature/default",
+          fetchOrigin: true,
+        });
+
+        assert.equal(yield* git(created.worktree.path, ["rev-parse", "HEAD"]), remoteHead);
+        // The clone recorded origin/HEAD: no network round trip to ask origin.
+        assert.notInclude(operations, "GitVcsDriver.originHead");
+        assert.deepStrictEqual(fetchArgs, [
+          [
+            "fetch",
+            "--no-tags",
+            "origin",
+            `+refs/heads/${initialBranch}:refs/remotes/origin/${initialBranch}`,
+          ],
+        ]);
+        // Other heads of origin were not fetched.
+        assert.equal(
+          yield* git(cwd, ["for-each-ref", "--format=%(refname)", "refs/remotes/origin/unrelated"]),
+          "",
+        );
+      }).pipe(Effect.provide(ServerConfigLayer)),
+    );
+    it.effect("asks origin when the recorded origin/HEAD names a branch origin renamed", () =>
+      Effect.gen(function* () {
+        const remote = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(remote);
+        const cwd = yield* makeTmpDir();
+        yield* git(cwd, ["clone", remote, "."]);
+        // The default branch is renamed after the clone: the clone's recorded
+        // origin/HEAD still names the old branch, which origin no longer has.
+        yield* git(remote, ["branch", "-m", initialBranch, "trunk"]);
+        yield* git(remote, ["commit", "--allow-empty", "-m", "on trunk"]);
+        const remoteHead = yield* git(remote, ["rev-parse", "HEAD"]);
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const pathService = yield* Path.Path;
+        const root = yield* makeTmpDir();
+
+        const created = yield* driver.createWorktree({
+          cwd,
+          path: pathService.join(root, "renamed"),
+          refName: "origin/HEAD",
+          newRefName: "feature/renamed-default",
+          fetchOrigin: true,
+        });
+
+        assert.equal(yield* git(created.worktree.path, ["rev-parse", "HEAD"]), remoteHead);
+      }).pipe(Effect.provide(ServerConfigLayer)),
     );
     it.effect("does not create a worktree when fetching origin fails", () =>
       Effect.gen(function* () {

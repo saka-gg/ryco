@@ -3,6 +3,7 @@
   "version": "0.0.0-alpha.1",
   "private": true,
   "type": "module",
+  "sideEffects": false,
   "exports": {
     "./state/comparison/lineBlame": "./src/state/comparison/lineBlame.ts",
     "./state/comparison": {
@@ -41,6 +42,26 @@
       "types": "./src/authorization/index.ts",
       "import": "./src/authorization/index.ts"
     },
+    "./authorization/capabilities": {
+      "types": "./src/authorization/capabilities.ts",
+      "import": "./src/authorization/capabilities.ts"
+    },
+    "./authorization/deliveryNotice": {
+      "types": "./src/authorization/deliveryNotice.ts",
+      "import": "./src/authorization/deliveryNotice.ts"
+    },
+    "./authorization/e2ee": {
+      "types": "./src/authorization/e2ee.ts",
+      "import": "./src/authorization/e2ee.ts"
+    },
+    "./authorization/hostedStores": {
+      "types": "./src/authorization/hostedStores.ts",
+      "import": "./src/authorization/hostedStores.ts"
+    },
+    "./authorization/nodeMutationLease": {
+      "types": "./src/authorization/nodeMutationLease.ts",
+      "import": "./src/authorization/nodeMutationLease.ts"
+    },
     "./usage": {
       "types": "./src/usage/index.ts",
       "import": "./src/usage/index.ts"
@@ -48,6 +69,34 @@
     "./relay": {
       "types": "./src/relay/index.ts",
       "import": "./src/relay/index.ts"
+    },
+    "./relay/base64url": {
+      "types": "./src/relay/base64url.ts",
+      "import": "./src/relay/base64url.ts"
+    },
+    "./relay/dispatchReplay": {
+      "types": "./src/relay/dispatchReplay.ts",
+      "import": "./src/relay/dispatchReplay.ts"
+    },
+    "./relay/dpop": {
+      "types": "./src/relay/dpop.ts",
+      "import": "./src/relay/dpop.ts"
+    },
+    "./relay/ecdsa": {
+      "types": "./src/relay/ecdsa.ts",
+      "import": "./src/relay/ecdsa.ts"
+    },
+    "./relay/reconnectPolicy": {
+      "types": "./src/relay/reconnectPolicy.ts",
+      "import": "./src/relay/reconnectPolicy.ts"
+    },
+    "./relay/webauthn": {
+      "types": "./src/relay/webauthn.ts",
+      "import": "./src/relay/webauthn.ts"
+    },
+    "./relay/e2ee": {
+      "types": "./src/relay/e2ee.ts",
+      "import": "./src/relay/e2ee.ts"
     },
     "./state/agentControl": {
       "types": "./src/state/agentControl/index.ts",

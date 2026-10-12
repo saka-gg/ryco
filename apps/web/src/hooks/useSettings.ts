@@ -9,8 +9,10 @@
  * write. The hook transparently routes reads/writes to the correct backing
  * store.
  */
-import { useCallback, useMemo, useSyncExternalStore } from "react";
+import { useCallback, useContext, useSyncExternalStore } from "react";
+import { RegistryContext } from "@effect/atom-react";
 
+import type { ServerSettings } from "@ryco/contracts";
 import {
   type ClientSettings,
   DEFAULT_CLIENT_SETTINGS,
@@ -20,10 +22,16 @@ import {
 import { ensureLocalApi } from "~/localApi";
 import { splitUnifiedSettingsPatch } from "@ryco/shared/settingsOwnership";
 import { applyServerSettingsPatch } from "@ryco/shared/serverSettings";
-import { applySettingsUpdated, getServerConfig, useServerSettings } from "~/rpc/serverState";
+import {
+  applySettingsUpdated,
+  getServerConfig,
+  selectSettings,
+  serverConfigAtom,
+} from "~/rpc/serverState";
 import { updateEnvironmentServerSettings } from "~/environments/runtime";
 import { useSettingsEditingScope, useSettingsTarget } from "~/settingsTarget";
 import { toastManager } from "~/components/ui/toast";
+import { useSyncExternalStoreSelector } from "./useSyncExternalStoreSelector";
 import {
   __resetClientSettingsPersistenceForTests,
   addClientSettingsHydrationListener,
@@ -106,11 +114,6 @@ export function updateClientModelFavorites(
 }
 
 /**
- * Read merged settings. Selector narrows the subscription so components
- * only re-render when the slice they care about changes.
- */
-
-/**
  * Non-hook accessor for the current merged client settings snapshot.
  * Used by non-React code paths (e.g. runtime services) that need the latest
  * settings without subscribing.
@@ -127,23 +130,64 @@ export function useClientSettingsHydrated(): boolean {
   );
 }
 
+// Merged settings are cached per (server, client) snapshot pair so every
+// consumer of the same pair sees one object. Provider-status pushes replace
+// the server config but keep its `settings` object, so they hit the cache.
+const mergedSettingsCache = new WeakMap<ServerSettings, WeakMap<ClientSettings, UnifiedSettings>>();
+
+function mergeSettings(serverSettings: ServerSettings, clientSettings: ClientSettings) {
+  let byClient = mergedSettingsCache.get(serverSettings);
+  if (byClient === undefined) {
+    byClient = new WeakMap();
+    mergedSettingsCache.set(serverSettings, byClient);
+  }
+  let merged = byClient.get(clientSettings);
+  if (merged === undefined) {
+    merged = { ...serverSettings, ...clientSettings };
+    byClient.set(clientSettings, merged);
+  }
+  return merged;
+}
+
+function selectWholeSettings<T>(settings: UnifiedSettings): T {
+  return settings as T;
+}
+
+/**
+ * Read merged settings. The selector narrows the subscription: a component
+ * re-renders only when its selected value changes (Object.is), not on every
+ * server-config push (provider statuses churn during boot) or unrelated
+ * setting. Select primitives or stable sub-objects; an object built inside the
+ * selector is new on every change.
+ */
 export function useSettings<T = UnifiedSettings>(selector?: (s: UnifiedSettings) => T): T {
-  const serverSettings = useServerSettings();
-  const clientSettings = useSyncExternalStore(
-    subscribeClientSettings,
-    getClientSettingsSnapshot,
-    () => DEFAULT_CLIENT_SETTINGS,
+  const registry = useContext(RegistryContext);
+  const target = useSettingsTarget();
+  const hasTarget = target !== null;
+  const targetServerConfig = target?.serverConfig ?? null;
+  const subscribe = useCallback(
+    (listener: () => void) => {
+      const unsubscribeClient = subscribeClientSettings(listener);
+      // An open settings surface's node config arrives through context.
+      const unsubscribeServer = hasTarget
+        ? undefined
+        : registry.subscribe(serverConfigAtom, () => listener());
+      return () => {
+        unsubscribeClient();
+        unsubscribeServer?.();
+      };
+    },
+    [hasTarget, registry],
   );
-
-  const merged = useMemo<UnifiedSettings>(
-    () => ({
-      ...serverSettings,
-      ...clientSettings,
-    }),
-    [clientSettings, serverSettings],
+  const getSnapshot = useCallback(
+    () =>
+      mergeSettings(
+        selectSettings(hasTarget ? targetServerConfig : registry.get(serverConfigAtom)),
+        getClientSettingsSnapshot(),
+      ),
+    [hasTarget, registry, targetServerConfig],
   );
-
-  return useMemo(() => (selector ? selector(merged) : (merged as T)), [merged, selector]);
+  return useSyncExternalStoreSelector(subscribe, getSnapshot, selector ?? selectWholeSettings<T>);
 }
 
 /**

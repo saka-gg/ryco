@@ -1,4 +1,4 @@
-import { decodeBase64Url } from "@ryco/client-runtime/relay";
+import { decodeBase64Url } from "@ryco/client-runtime/relay/base64url";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 const { ensureKey, sign, hasKey, deleteKey } = vi.hoisted(() => ({

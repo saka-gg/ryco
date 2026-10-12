@@ -14,7 +14,7 @@ vi.mock("expo-constants", () => ({
   default: { expoConfig: { version: "1.2.3", extra: {} }, platform: { ios: {} } },
 }));
 
-import { encodeBase64Url } from "@ryco/client-runtime/relay";
+import { encodeBase64Url } from "@ryco/client-runtime/relay/base64url";
 import { e2eeKeyFingerprint, e2eeSha256 } from "@ryco/shared/relayE2eeKeys";
 import { encodeClientE2eePrekeyCertificateCarrier } from "@ryco/shared/relayE2eeTranscripts";
 

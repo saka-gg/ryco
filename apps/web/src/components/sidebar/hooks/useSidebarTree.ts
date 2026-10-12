@@ -139,38 +139,33 @@ export function composeSidebarTree(input: ComposeSidebarTreeInput): SidebarTree 
         worktrees: explicitWorktreesByProjectId.get(project.id) ?? [],
       });
       const mergedNodes = mergeEquivalentWorktrees(project, projectWorktrees);
-      const mergedProjectWorktrees = mergedNodes.worktrees;
+      const sortedWorktrees = sortWorktrees(mergedNodes.worktrees);
+      const threadsByNode = assignThreadsToWorktreeNodes(
+        materializedThreads,
+        sortedWorktrees,
+        project,
+        mergedNodes,
+      );
+      const composeNode = (worktree: SidebarWorktree) =>
+        composeWorktreeNode({
+          diffStats: getDiffStats(input, worktree.worktreeId),
+          nowMs: input.nowMs,
+          threads: threadsByNode.get(worktree) ?? [],
+          worktree,
+        });
 
       return {
         archivedSessions,
-        archivedWorktrees: sortWorktrees(mergedProjectWorktrees)
+        archivedWorktrees: sortedWorktrees
           .filter((worktree) => worktree.archivedAt != null)
-          .map((worktree) =>
-            composeWorktreeNode({
-              diffStats: getDiffStats(input, worktree.worktreeId),
-              nowMs: input.nowMs,
-              threads: materializedThreads.filter((thread) =>
-                belongsToWorktree(thread, worktree, project, mergedNodes),
-              ),
-              worktree,
-            }),
-          ),
+          .map(composeNode),
         flatSessions: [],
         draftSessions,
         isGitRepo,
         project,
-        worktrees: sortWorktrees(mergedProjectWorktrees)
+        worktrees: sortedWorktrees
           .filter((worktree) => worktree.archivedAt == null)
-          .map((worktree) =>
-            composeWorktreeNode({
-              diffStats: getDiffStats(input, worktree.worktreeId),
-              nowMs: input.nowMs,
-              threads: materializedThreads.filter((thread) =>
-                belongsToWorktree(thread, worktree, project, mergedNodes),
-              ),
-              worktree,
-            }),
-          ),
+          .map(composeNode),
       };
     }),
   };
@@ -181,7 +176,7 @@ function dedupeSidebarThreads(
 ): ReadonlyArray<SidebarTreeThread> {
   const seen = new Set<string>();
   return threads.filter((thread) => {
-    const key = JSON.stringify([thread.environmentId, thread.id]);
+    const key = `${thread.environmentId}\u0000${thread.id}`;
     if (seen.has(key)) {
       return false;
     }
@@ -274,13 +269,70 @@ function getThreadBucket(thread: SidebarTreeThread): SidebarStatusBucket {
   });
 }
 
+/**
+ * Buckets each session into the node(s) it belongs to in one pass:
+ * O(threads + nodes) instead of filtering every thread per node, with each
+ * directory key computed once. Mirrors the per-pair rules below exactly
+ * (including the rare duplicates where several nodes share a key or id).
+ */
+function assignThreadsToWorktreeNodes(
+  threads: ReadonlyArray<SidebarTreeThread>,
+  worktrees: ReadonlyArray<SidebarWorktree>,
+  project: Project,
+  nodes: MergedSidebarWorktrees,
+): Map<SidebarWorktree, SidebarTreeThread[]> {
+  const nodesByDirectoryKey = new Map<string, SidebarWorktree[]>();
+  const nodesById = new Map<string, SidebarWorktree[]>();
+  const nodesWithoutDirectory: SidebarWorktree[] = [];
+  for (const worktree of worktrees) {
+    const directoryKey = worktreeDirectoryGroupKey(worktree, project);
+    if (directoryKey === null) nodesWithoutDirectory.push(worktree);
+    else pushToGroup(nodesByDirectoryKey, directoryKey, worktree);
+    pushToGroup(nodesById, worktree.worktreeId, worktree);
+  }
+
+  const threadsByNode = new Map<SidebarWorktree, SidebarTreeThread[]>();
+  const assign = (thread: SidebarTreeThread, targets: ReadonlyArray<SidebarWorktree>) => {
+    for (const worktree of targets) pushToGroup(threadsByNode, worktree, thread);
+  };
+  for (const thread of threads) {
+    const threadDirectoryKey = threadDirectoryGroupKey(thread, project);
+    if (threadDirectoryKey !== null && nodes.directoryKeys.has(threadDirectoryKey)) {
+      assign(thread, nodesByDirectoryKey.get(threadDirectoryKey) ?? []);
+      continue;
+    }
+    const linkedNodeId =
+      thread.worktreeId == null ? undefined : nodes.nodeIdByWorktreeId.get(thread.worktreeId);
+    if (linkedNodeId !== undefined) {
+      assign(thread, nodesById.get(linkedNodeId) ?? []);
+      continue;
+    }
+    // A thread with a directory matches no node that has one (its directory
+    // is covered by none); only directory-less nodes remain candidates.
+    const candidates = threadDirectoryKey === null ? worktrees : nodesWithoutDirectory;
+    assign(
+      thread,
+      candidates.filter((worktree) =>
+        belongsToWorktree(thread, threadDirectoryKey, worktree, project, nodes),
+      ),
+    );
+  }
+  return threadsByNode;
+}
+
+function pushToGroup<K, V>(groups: Map<K, V[]>, key: K, value: V): void {
+  const group = groups.get(key);
+  if (group) group.push(value);
+  else groups.set(key, [value]);
+}
+
 function belongsToWorktree(
   thread: SidebarTreeThread,
+  threadDirectoryKey: string | null,
   worktree: SidebarWorktree,
   project: Project,
   nodes: MergedSidebarWorktrees,
 ): boolean {
-  const threadDirectoryKey = threadDirectoryGroupKey(thread, project);
   const worktreeDirectoryKey = worktreeDirectoryGroupKey(worktree, project);
   if (threadDirectoryKey !== null && nodes.directoryKeys.has(threadDirectoryKey)) {
     // The directory a session ran in outranks a worktree id it may have
@@ -363,8 +415,20 @@ function canonicalWorktreeGroupKey(project: Project, worktree: SidebarWorktree):
   );
 }
 
+// Paths repeat across every sidebar pass (one per thread and node); the
+// normalization is pure, so memoize it in a bounded map.
+const NORMALIZED_WORKTREE_PATH_CACHE_LIMIT = 4096;
+const normalizedWorktreePathCache = new Map<string, string>();
+
 export function normalizeWorktreePath(worktreePath: string): string {
-  return normalizeProjectPathForComparison(worktreePath);
+  const cached = normalizedWorktreePathCache.get(worktreePath);
+  if (cached !== undefined) return cached;
+  const normalized = normalizeProjectPathForComparison(worktreePath);
+  if (normalizedWorktreePathCache.size >= NORMALIZED_WORKTREE_PATH_CACHE_LIMIT) {
+    normalizedWorktreePathCache.clear();
+  }
+  normalizedWorktreePathCache.set(worktreePath, normalized);
+  return normalized;
 }
 
 function mergeWorktree(left: SidebarWorktree, right: SidebarWorktree): SidebarWorktree {

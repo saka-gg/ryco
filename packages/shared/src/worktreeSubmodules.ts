@@ -1,9 +1,9 @@
 import type {
   ServerSettings,
   ServerSettingsPatch,
-  WorktreeSubmoduleInitialization,
   WorktreeSubmodules,
-} from "@ryco/contracts";
+} from "@ryco/contracts/settings";
+import type { WorktreeSubmoduleInitialization } from "@ryco/contracts";
 
 export const WORKTREE_SUBMODULE_OPTIONS = [
   {

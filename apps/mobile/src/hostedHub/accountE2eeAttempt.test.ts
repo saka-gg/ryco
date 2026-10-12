@@ -35,9 +35,12 @@ vi.mock("@ryco/client-runtime/authorization", async (importOriginal) => {
   return {
     ...actual,
     getHostedHubApi: () => ({ issueRelayTicket: hoisted.issueRelayTicket }),
-    createNativeE2eeTrustResolver: () => hoisted.resolveTrust,
   };
 });
+vi.mock("@ryco/client-runtime/authorization/e2ee", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@ryco/client-runtime/authorization/e2ee")>()),
+  createNativeE2eeTrustResolver: () => hoisted.resolveTrust,
+}));
 vi.mock("../platform/nativeE2ee", () => ({
   mobileNativeE2eePlatform: {
     withAgreementSecret: async (use: (secret: Uint8Array) => unknown) =>

@@ -960,6 +960,64 @@ describe("worktree branch defaults", () => {
     );
   });
 
+  it("reads the config and the settings fallback in parallel", async () => {
+    const { input, dispatchCommand } = makeSendInput();
+    input.worktree.baseBranchForWorktree = "main";
+    input.worktree.shouldCreateWorktree = true;
+    const started: string[] = [];
+    let releaseConfig!: () => void;
+    const configHeld = new Promise<void>((resolve) => {
+      releaseConfig = resolve;
+    });
+    input.dispatch.api = {
+      orchestration: { dispatchCommand },
+      server: {
+        getConfig: async () => {
+          started.push("config");
+          await configHeld;
+          return { environment: { capabilities: {} } } as ServerConfig;
+        },
+        getSettings: async () => {
+          started.push("settings");
+          releaseConfig();
+          return { worktreeBranchPrefix: "team" };
+        },
+      },
+    } as never;
+    expect(await executeChatSendTurn(input)).toBe(true);
+    expect(started).toEqual(["config", "settings"]);
+  });
+
+  it("uses the project's prefix even when the settings fallback read fails", async () => {
+    const { input, dispatchCommand } = makeSendInput();
+    input.worktree.baseBranchForWorktree = "main";
+    input.worktree.shouldCreateWorktree = true;
+    input.dispatch.api = {
+      orchestration: { dispatchCommand },
+      server: {
+        getConfig: async () =>
+          ({ environment: { capabilities: { projectPreferences: true } } }) as ServerConfig,
+        getProjectPreferences: async () => ({
+          worktreeBranchPrefix: { value: "proj", source: "project" },
+          runSetupScript: { value: true, source: "builtin" },
+        }),
+        getSettings: async () => {
+          throw new Error("Settings are unavailable");
+        },
+      },
+    } as never;
+    expect(await executeChatSendTurn(input)).toBe(true);
+    expect(dispatchCommand).toHaveBeenCalledWith(
+      expect.objectContaining({
+        bootstrap: expect.objectContaining({
+          prepareWorktree: expect.objectContaining({
+            branch: expect.stringMatching(/^proj\/[0-9a-f]{8}$/),
+          }),
+        }),
+      }),
+    );
+  });
+
   it("does not guess a default if the node settings are unavailable", async () => {
     const { input, dispatchCommand } = makeSendInput();
     input.worktree.baseBranchForWorktree = "main";
@@ -972,7 +1030,7 @@ describe("worktree branch defaults", () => {
     const { input, dispatchCommand } = makeSendInput();
     input.refs.promptRef.current = input.composer.prompt;
     input.worktree.baseBranchForWorktree = "main";
-    const getSettings = vi.fn();
+    const getSettings = vi.fn(async () => ({ worktreeBranchPrefix: "team" }));
     input.dispatch.api = {
       orchestration: { dispatchCommand },
       server: {
@@ -983,7 +1041,8 @@ describe("worktree branch defaults", () => {
       },
     } as never;
     expect(await executeChatSendTurn(input)).toBe(false);
-    expect(getSettings).not.toHaveBeenCalled();
+    // The settings read runs alongside the config read; its value is never used.
+    expect(getSettings.mock.calls.length).toBeLessThanOrEqual(1);
     expect(dispatchCommand).not.toHaveBeenCalled();
     expect(input.refs.promptRef.current).toBe(input.composer.prompt);
     expect(input.draft.setComposerDraftPrompt).toHaveBeenLastCalledWith(

@@ -22,6 +22,7 @@ import {
 } from "@ryco/client-runtime/state/lifecycle";
 import { scopedThreadKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
 import { EnvironmentId, ProjectId, WorktreeId } from "@ryco/contracts";
+import { preloadableLazy, useLazyComponentReady } from "../../lib/preloadableLazy";
 import { cn } from "../../lib/utils";
 import type { GitStatusTarget } from "../../lib/gitStatusState";
 import {
@@ -48,10 +49,7 @@ import {
   resolveSidebarStatusTextClassName,
   resolveSidebarStatusTextStyle,
 } from "./sidebarStatusText";
-import {
-  LinkedWorktreeItemDialog,
-  type LinkedWorktreeItem,
-} from "../worktrees/LinkedWorktreeItemDialog";
+import type { LinkedWorktreeItem } from "../worktrees/LinkedWorktreeItemDialog";
 import { WorktreeSourceControlBadges } from "../worktrees/WorktreeSourceControlBadges";
 import {
   WorkspacePullRequestsPopover,
@@ -110,6 +108,9 @@ interface LinkedWorktreeItemContext {
 export const SidebarWorktreeList = memo(function SidebarWorktreeList(
   props: SidebarWorktreeListProps,
 ) {
+  // Read once here: a `ref={props.…}` read makes the React Compiler treat
+  // `props` as a ref and skip this component.
+  const { attachThreadListAutoAnimateRef } = props;
   const orderedProjectThreadKeys = useMemo(
     () => getOrderedThreadKeys(props.treeProject, props.visibleThreadKeys),
     [props.treeProject, props.visibleThreadKeys],
@@ -134,6 +135,14 @@ export const SidebarWorktreeList = memo(function SidebarWorktreeList(
   const [archivedOpen, setArchivedOpen] = useState(false);
   const [linkedItemContext, setLinkedItemContext] = useState<LinkedWorktreeItemContext | null>(
     null,
+  );
+  // Derived during render: the dialog is wanted from the first open on, and
+  // stays mounted after it closes so it can animate closed.
+  const [linkedItemDialogWanted, setLinkedItemDialogWanted] = useState(false);
+  if (linkedItemContext !== null && !linkedItemDialogWanted) setLinkedItemDialogWanted(true);
+  const linkedItemDialogReady = useLazyComponentReady(
+    LinkedWorktreeItemDialog,
+    linkedItemDialogWanted,
   );
 
   const handleOpenLinkedItem = useCallback(
@@ -164,7 +173,7 @@ export const SidebarWorktreeList = memo(function SidebarWorktreeList(
   return (
     <>
       <SidebarMenuSub
-        ref={props.attachThreadListAutoAnimateRef}
+        ref={attachThreadListAutoAnimateRef}
         className="mx-1 my-0 w-full translate-x-0 gap-0.5 overflow-hidden px-1.5 py-0"
       >
         {visibleDraftSessions.map((thread) => (
@@ -221,17 +230,35 @@ export const SidebarWorktreeList = memo(function SidebarWorktreeList(
           </>
         ) : null}
       </SidebarMenuSub>
-      <LinkedWorktreeItemDialog
-        open={linkedItemContext !== null}
-        item={linkedItemContext?.item ?? null}
-        environmentId={linkedItemContext?.environmentId ?? null}
-        projectId={linkedItemContext?.projectId ?? null}
-        cwd={linkedItemContext?.cwd ?? null}
-        onOpenChange={handleLinkedItemDialogOpenChange}
-      />
+      {/* Mounts once its chunk resolved, so the first open never commits a
+          Suspense fallback or waits on React's fallback-reveal throttle. */}
+      {linkedItemDialogWanted && linkedItemDialogReady ? (
+        <LinkedWorktreeItemDialog
+          open={linkedItemContext !== null}
+          item={linkedItemContext?.item ?? null}
+          environmentId={linkedItemContext?.environmentId ?? null}
+          projectId={linkedItemContext?.projectId ?? null}
+          cwd={linkedItemContext?.cwd ?? null}
+          onOpenChange={handleLinkedItemDialogOpenChange}
+        />
+      ) : null}
     </>
   );
 });
+
+/**
+ * The linked issue / pull request / work item dialog (item detail, comment
+ * threads with the markdown renderer, workflow runs) is its own chunk: nothing
+ * in it renders while the sidebar boots. Pointing at or focusing a badge that
+ * opens it starts the load, so a click usually finds it ready.
+ */
+const LinkedWorktreeItemDialog = preloadableLazy(() =>
+  import("../worktrees/LinkedWorktreeItemDialog").then((module) => module.LinkedWorktreeItemDialog),
+);
+
+function preloadLinkedWorktreeItemDialog(): void {
+  void LinkedWorktreeItemDialog.preload();
+}
 
 function resolveWorktreeEnvironmentId(
   worktree: SidebarTreeWorktree,
@@ -304,6 +331,7 @@ function ArchivedWorktreeRow(props: {
           workItemStateName={props.worktree.worktree.workItemStateName}
           displayMode="prefer-pr"
           onOpenLinkedItem={props.onOpenLinkedItem}
+          onOpenLinkedItemIntent={preloadLinkedWorktreeItemDialog}
           pullRequests={pullRequests.links}
           pullRequestsToggle={
             pullRequests.enabled
@@ -590,6 +618,7 @@ const SidebarWorktreeSection = memo(function SidebarWorktreeSection(props: {
                   workItemStateName={props.worktree.worktree.workItemStateName}
                   displayMode="prefer-pr"
                   onOpenLinkedItem={props.onOpenLinkedItem}
+                  onOpenLinkedItemIntent={preloadLinkedWorktreeItemDialog}
                   prUrl={
                     pullRequests.links.find(
                       (link) => link.number === props.worktree.worktree.prNumber,

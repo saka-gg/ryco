@@ -1,6 +1,6 @@
-import { useNavigate } from "@tanstack/react-router";
+import { getRouteApi, useNavigate } from "@tanstack/react-router";
 import { useDeviceStateStore } from "@ryco/client-runtime/state/device";
-import { useCallback, useEffect, useMemo } from "react";
+import { useCallback, useEffect, useMemo, type ReactElement } from "react";
 
 import { DraftId } from "../../composerDraftStore";
 import { useDraftSession } from "../../composerDraftSelectors";
@@ -297,4 +297,16 @@ export function DraftChatThreadRouteView({
       </RightPanelSheet>
     </>
   );
+}
+
+const draftRouteApi = getRouteApi("/_chat/draft/$draftId");
+
+/**
+ * The `/draft/$draftId` route body, loaded by the route file through
+ * `lazyRouteComponent` so the router awaits the chunk before committing.
+ */
+export function DraftChatThreadRoute(): ReactElement {
+  const draftId = draftRouteApi.useParams({ select: (params) => params.draftId });
+  const search = draftRouteApi.useSearch();
+  return <DraftChatThreadRouteView rawDraftId={draftId} search={search} />;
 }

@@ -5,11 +5,39 @@ import type { Readable } from "node:stream";
 
 import { Data, Effect, Option, Predicate, Result, Schema } from "effect";
 import { decodeJsonResult } from "@ryco/shared/schemaJson";
+import { applyShellEnvironment, pickShellEnvironment } from "@ryco/shared/shellEnvironment";
 
 class BootstrapError extends Data.TaggedError("BootstrapError")<{
   readonly message: string;
   readonly cause?: unknown;
 }> {}
+
+/**
+ * A bootstrap fd was passed explicitly but delivered no envelope: the pipe
+ * closed, the fd does not exist, or nothing arrived within the timeout. The
+ * process that started this server is gone or stalled, so booting on defaults
+ * would only leave an orphan on a default port. Startup exits with EX_CONFIG.
+ */
+export class BootstrapEnvelopeUnavailableError extends Data.TaggedError(
+  "BootstrapEnvelopeUnavailableError",
+)<{
+  readonly fd: number;
+  readonly message: string;
+}> {}
+
+/**
+ * Merge a login-shell environment delivered in the bootstrap envelope into
+ * `env` (PATH entries first, other variables only fill gaps). Unknown names
+ * and empty values are ignored. Must run before any layer spawns a process.
+ */
+export function applyBootstrapShellEnvironment(
+  shellEnvironment: Readonly<Record<string, string>> | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): void {
+  if (shellEnvironment === undefined) return;
+  applyShellEnvironment(env, pickShellEnvironment(shellEnvironment), platform);
+}
 
 export const readBootstrapEnvelope = Effect.fn("readBootstrapEnvelope")(function* <A, I>(
   schema: Schema.Codec<A, I>,
@@ -23,7 +51,10 @@ export const readBootstrapEnvelope = Effect.fn("readBootstrapEnvelope")(function
 
   const stream = yield* makeBootstrapInputStream(fd);
 
-  const timeoutMs = options?.timeoutMs ?? 1000;
+  // Only an explicit bootstrap fd gets here, and Ryco Desktop may start the
+  // backend before it can write the envelope (it needs Electron ready first).
+  // A closed pipe still ends the wait at once; this only bounds a stalled one.
+  const timeoutMs = options?.timeoutMs ?? 10_000;
 
   return yield* Effect.callback<Option.Option<A>, BootstrapError>((resume) => {
     const input = readline.createInterface({

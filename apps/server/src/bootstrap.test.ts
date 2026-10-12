@@ -10,7 +10,11 @@ import * as Fiber from "effect/Fiber";
 import { TestClock } from "effect/testing";
 import { vi } from "vite-plus/test";
 
-import { readBootstrapEnvelope, resolveFdPath } from "./bootstrap.ts";
+import {
+  applyBootstrapShellEnvironment,
+  readBootstrapEnvelope,
+  resolveFdPath,
+} from "./bootstrap.ts";
 import { assertNone, assertSome } from "@effect/vitest/utils";
 
 const openSyncInterceptor = vi.hoisted(() => ({ failPath: null as string | null }));
@@ -153,3 +157,35 @@ it.layer(NodeServices.layer)("readBootstrapEnvelope", (it) => {
     }).pipe(Effect.provide(TestClock.layer())),
   );
 });
+
+it.effect("merges a bootstrap shell environment without dropping inherited values", () =>
+  Effect.sync(() => {
+    const env: NodeJS.ProcessEnv = {
+      PATH: "/usr/bin:/bin",
+      SSH_AUTH_SOCK: "/inherited/agent.sock",
+    };
+    applyBootstrapShellEnvironment(
+      {
+        PATH: "/opt/homebrew/bin:/usr/bin",
+        SSH_AUTH_SOCK: "/shell/agent.sock",
+        HOMEBREW_PREFIX: "/opt/homebrew",
+        FNM_DIR: "",
+        NODE_OPTIONS: "--inspect",
+      },
+      env,
+      "darwin",
+    );
+    // Shell PATH entries first, inherited entries kept, no duplicates.
+    assert.equal(env.PATH, "/opt/homebrew/bin:/usr/bin:/bin");
+    // An explicitly inherited value wins; other known names fill gaps.
+    assert.equal(env.SSH_AUTH_SOCK, "/inherited/agent.sock");
+    assert.equal(env.HOMEBREW_PREFIX, "/opt/homebrew");
+    // Empty values and names outside the shell environment are ignored.
+    assert.isUndefined(env.FNM_DIR);
+    assert.isUndefined(env.NODE_OPTIONS);
+
+    const untouched: NodeJS.ProcessEnv = { PATH: "/usr/bin" };
+    applyBootstrapShellEnvironment(undefined, untouched, "darwin");
+    assert.deepEqual(untouched, { PATH: "/usr/bin" });
+  }),
+);

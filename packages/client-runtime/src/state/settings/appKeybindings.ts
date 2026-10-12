@@ -12,7 +12,7 @@ import {
   DEFAULT_KEYBINDINGS,
   mergeWithDefaultKeybindings,
 } from "@ryco/shared/keybindings";
-import { Schema } from "effect";
+import * as Schema from "effect/Schema";
 
 export const DEFAULT_APP_KEYBINDINGS: AppKeybindings = { rules: [], disabledCommands: [] };
 

@@ -1,4 +1,7 @@
 // @effect-diagnostics globalDate:off
+// @effect-diagnostics nodeBuiltinImport:off
+import { createHash } from "node:crypto";
+
 import {
   USAGE_CONTRACT_VERSION,
   UsageReadError,
@@ -8,10 +11,24 @@ import {
   type UsagePricingStatus,
   type UsageProviderKind,
   type UsageSourceCoverage,
+  type UsageSourceDeduplicationKind,
   type UsageSummary,
   type UsageSummaryRequest,
 } from "@ryco/contracts";
-import { Cause, Clock, Context, Effect, FileSystem, Layer, Path, Schema } from "effect";
+import {
+  Cause,
+  Clock,
+  Context,
+  Deferred,
+  Duration,
+  Effect,
+  Exit,
+  Fiber,
+  FileSystem,
+  Layer,
+  Path,
+  Schema,
+} from "effect";
 import * as Semaphore from "effect/Semaphore";
 import { HttpClient, HttpClientResponse } from "effect/http";
 
@@ -31,16 +48,15 @@ import {
   type UsageRateTable,
 } from "./usagePricing.ts";
 import {
-  anonymizeUsageRecord,
+  anonymizeScanCachedUsageRecord,
+  capUsageScanCache,
   matchesUsageFileCache,
-  decodeUsageScanCache,
   deduplicateUsageRecordsWithinFile,
-  encodeUsageScanCache,
   pruneUsageScanCache,
-  type UsageScanCache,
   usageCacheFileKey,
   usageCacheRootKey,
 } from "./usageScanCache.ts";
+import { makeUsageScanCacheStore, USAGE_SCAN_CACHE_RECORD_LIMIT } from "./usageScanCacheStore.ts";
 import {
   cursorExportSourceId,
   readCursorExportUsage,
@@ -53,6 +69,7 @@ import {
   listUsageTranscriptFiles,
   createUsageTranscriptReader,
   type UsageTranscriptFile,
+  type UsageTranscriptListing,
 } from "./usageTranscriptReader.ts";
 import { readBoundedUsageFile } from "./usageFileReader.ts";
 import type { UsageRecord } from "./usageRecord.ts";
@@ -61,14 +78,32 @@ export const LITELLM_USAGE_RATES_URL =
   "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
 
 const RATES_TTL_MS = 24 * 60 * 60 * 1000;
+/** After a fetch attempt, wait this long before trying again (also bounds failed retries). */
+const RATES_RETRY_MS = 60 * 60 * 1000;
+const RATES_FETCH_TIMEOUT_MS = 10_000;
+/** With no rates at all, a summary waits at most this long for the first download. */
+const RATES_FIRST_FETCH_WAIT_MS = 2_000;
+/** Refresh stale cached rates once shortly after boot, before a summary needs them. */
+const RATES_WARM_DELAY_MS = 30_000;
 const MTIME_WINDOW_SLACK_MS = 36 * 60 * 60 * 1000;
-const SOURCE_SCAN_BYTES = 4 * 1024 * 1024 * 1024;
 const PRICING_CACHE_VERSION = 2;
+/** Freshly parsed work per source and request. Cached records do not count against it. */
+const SOURCE_SCAN_BYTES = 4 * 1024 * 1024 * 1024;
 const SOURCE_SCAN_RECORDS = 100_000;
 const SOURCE_SCAN_DURATION_MS = 5_000;
+/** Aggregating a cached record costs about a microsecond; this only bounds pathological caches. */
+const SOURCE_CACHED_RECORDS = 2_000_000;
 const SUMMARY_SCAN_DURATION_MS = 30_000;
 const SUMMARY_SOURCE_LIMIT = 128;
+/** Independent sources are listed and read concurrently (mostly file I/O). */
+const SUMMARY_SOURCE_CONCURRENCY = 2;
 const SCAN_CACHE_RETENTION_MS = 120 * 24 * 60 * 60 * 1000;
+/** Coalesce the scan-cache writes of quick successive summaries, off the request path. */
+const SCAN_CACHE_PERSIST_DELAY_MS = 1_000;
+/** Release the scan cache and parser checkpoints after this long without a summary. */
+const SCAN_CACHE_IDLE_MS = 10 * 60 * 1000;
+/** Memoized per-source results (one per source and requested window). */
+const SOURCE_MEMO_LIMIT = 32;
 
 interface PersistedRates {
   readonly version: number;
@@ -93,6 +128,56 @@ interface CachedReadResult {
   readonly skippedLineCount: number;
   readonly malformedLineCount: number;
   readonly failed: boolean;
+}
+
+interface PlannedSource {
+  readonly source: ResolvedTranscriptSource;
+  readonly sourceId: string;
+  readonly deduplicationKind: UsageSourceDeduplicationKind;
+}
+
+/** Rates and pricing status captured once per summary, so every source prices alike. */
+interface PricingSnapshot {
+  readonly rates: UsageRateTable;
+  readonly generation: number;
+  readonly state: UsagePricingStatus["state"];
+  readonly revision: string | null;
+  readonly fetchedAtMs: number | null;
+}
+
+interface SummaryContext {
+  readonly input: UsageSummaryRequest;
+  readonly scanStartedAtMs: number;
+  readonly windowStartMs: number;
+  readonly pricing: PricingSnapshot;
+}
+
+/** One source's contribution to a summary. */
+interface SourceScan {
+  readonly coverage: UsageSourceCoverage;
+  readonly buckets: readonly UsageDailyBucket[];
+  readonly imports: readonly UsageImportedMetric[];
+  readonly recognizedModels: readonly string[];
+  readonly unrecognizedModels: readonly string[];
+  readonly liveFileKeys: readonly string[];
+  readonly walkedRootKeys: readonly string[];
+}
+
+interface SourceMemo {
+  readonly fingerprint: string;
+  readonly scan: SourceScan;
+}
+
+interface SourceTally {
+  transcriptFileCount: number;
+  reusedCacheFileCount: number;
+  parsedFileCount: number;
+  skippedLineCount: number;
+  malformedLineCount: number;
+  listingErrorCount: number;
+  failedFileCount: number;
+  budgetLimitedFileCount: number;
+  existingRootCount: number;
 }
 
 export interface UsageServiceShape {
@@ -146,14 +231,49 @@ function parseJson(raw: string): unknown | null {
   }
 }
 
-function ratesRevision(document: unknown): string {
-  const json = JSON.stringify(document);
-  let hash = 2166136261;
-  for (let index = 0; index < json.length; index += 1) {
-    hash ^= json.charCodeAt(index);
-    hash = Math.imul(hash, 16777619);
+/** Revision of the downloaded document, from its raw text (no re-serialization). */
+function ratesRevision(text: string): string {
+  return `litellm-${createHash("sha256").update(text).digest("hex").slice(0, 16)}`;
+}
+
+function summaryRequestKey(input: UsageSummaryRequest): string {
+  return `${input.contractVersion}\0${input.startDate ?? ""}\0${input.endDate}\0${input.timeZone}`;
+}
+
+/** Everything a transcript source's result depends on besides the request and rates. */
+function listingFingerprint(
+  existingRootCount: number,
+  listings: ReadonlyArray<{ readonly rootKey: string; readonly listing: UsageTranscriptListing }>,
+): string {
+  const hash = createHash("sha256").update(`${existingRootCount}`);
+  for (const { rootKey, listing } of listings) {
+    hash.update(`\u0002${rootKey}\0${listing.errorCount}\0${listing.skippedEntryCount}`);
+    for (const file of listing.files) {
+      hash.update(`\u0001${file.path}\0${file.size}\0${file.mtimeMs}\0${file.fingerprint ?? ""}`);
+    }
   }
-  return `litellm-${(hash >>> 0).toString(16).padStart(8, "0")}`;
+  return hash.digest("hex");
+}
+
+function coverageMessage(
+  source: ResolvedTranscriptSource,
+  status: UsageSourceCoverage["status"],
+  diagnosticCode: string | undefined,
+): string | undefined {
+  if (source.cursorExport !== undefined)
+    return status === "partial"
+      ? `Saved Cursor Admin API export: billed costs are separate from model costs. Exports may omit pages or token fields, and identical events cannot be distinguished without stable event IDs. Diagnostics: ${diagnosticCode ?? "unavailable"}.`
+      : "The configured Cursor JSON exports could not be imported. Check the path, account key, user filter, and format.";
+  if (status === "unsupported")
+    return source.provider === "cursor"
+      ? "Configure saved Cursor Admin API JSON exports in this instance’s provider settings. Automatic consumer CLI history is unavailable; Ryco never reads account credentials."
+      : "This OpenCode history source or format is unsupported. Usage is unavailable.";
+  if (status === "not-found") return "No transcript directory was found for this provider.";
+  if (status === "partial" || status === "failed")
+    return diagnosticCode === "transcript-scan-budget"
+      ? "Some provider history was not read within this scan's time and size budget. Refresh to continue reading it."
+      : "Some provider history could not be read or lacked trustworthy usage telemetry.";
+  return undefined;
 }
 
 const makeUsageService = Effect.gen(function* () {
@@ -163,52 +283,80 @@ const makeUsageService = Effect.gen(function* () {
   const settingsService = yield* ServerSettingsService;
   const serverEnvironment = yield* ServerEnvironment;
   const httpClient = yield* HttpClient.HttpClient;
+  const serviceScope = yield* Effect.scope;
   const scanSemaphore = yield* Semaphore.make(1);
+  const persistLock = yield* Semaphore.make(1);
 
   const usageStateDir = path.join(config.stateDir, "usage");
   yield* fileSystem
     .makeDirectory(usageStateDir, { recursive: true })
     .pipe(Effect.catchCause(() => Effect.void));
-  const scanCachePath = path.join(usageStateDir, "scan-cache.json");
   const ratesCachePath = path.join(usageStateDir, "pricing-cache.json");
-  const scanCache: UsageScanCache = new Map();
+  const store = yield* makeUsageScanCacheStore({
+    directory: path.join(usageStateDir, "scan-cache"),
+    legacyFilePath: path.join(usageStateDir, "scan-cache.json"),
+    retentionMs: SCAN_CACHE_RETENTION_MS,
+  });
+  const scanCache = store.cache;
   const readTranscript = createUsageTranscriptReader();
-  let scanCacheLoaded = false;
-  let scanCacheDirty = false;
+  const sourceMemos = new Map<string, SourceMemo>();
   let rates: UsageRateTable = new Map();
+  let ratesGeneration = 0;
   let ratesFetchedAtMs: number | null = null;
+  let ratesLastAttemptAtMs: number | null = null;
   let ratesRevisionValue: string | null = null;
   let ratesState: UsagePricingStatus["state"] = "unavailable";
+  let ratesRefresh: Deferred.Deferred<void> | null = null;
+
+  // Flush pending scan-cache writes on shutdown. Registered first, so it runs
+  // after the scope has interrupted any background persist below.
+  yield* Effect.addFinalizer(() => persistLock.withPermits(1)(store.persist()));
 
   const loadScanCache = Effect.fn("UsageService.loadScanCache")(function* () {
-    if (scanCacheLoaded) return;
-    scanCacheLoaded = true;
-    const raw = yield* Effect.promise((signal) =>
-      readBoundedUsageFile(scanCachePath, 64 * 1024 * 1024, signal),
-    ).pipe(
-      Effect.catchCause((cause) =>
-        Cause.hasInterrupts(cause) ? Effect.interrupt : Effect.succeed(null),
-      ),
-    );
-    if (raw === null) return;
-    const decoded = parseJson(raw);
-    if (decoded === null) return;
-    for (const [filePath, entry] of decodeUsageScanCache(decoded)) {
-      scanCache.set(filePath, entry);
-    }
+    yield* store.ensureLoaded(yield* Clock.currentTimeMillis);
   });
 
-  const persistScanCache = Effect.fn("UsageService.persistScanCache")(function* () {
-    if (!scanCacheDirty) return;
-    yield* writeFileStringAtomically({
-      filePath: scanCachePath,
-      contents: `${JSON.stringify(encodeUsageScanCache(scanCache))}\n`,
-    }).pipe(
-      Effect.provideService(FileSystem.FileSystem, fileSystem),
-      Effect.provideService(Path.Path, path),
-      Effect.tap(() => Effect.sync(() => (scanCacheDirty = false))),
-      Effect.catchCause(() => Effect.void),
+  let persistScheduled = false;
+  /** Write changed scan-cache shards shortly after the response, coalescing bursts. */
+  const schedulePersist = Effect.suspend(() => {
+    if (persistScheduled) return Effect.void;
+    persistScheduled = true;
+    return Effect.sleep(Duration.millis(SCAN_CACHE_PERSIST_DELAY_MS)).pipe(
+      Effect.andThen(Effect.sync(() => (persistScheduled = false))),
+      Effect.andThen(persistLock.withPermits(1)(store.persist())),
+      Effect.onInterrupt(() => Effect.sync(() => (persistScheduled = false))),
+      Effect.forkIn(serviceScope),
+      Effect.asVoid,
     );
+  });
+
+  let lastSummaryAtMs = 0;
+  let idleWatcherRunning = false;
+  /** Release the scan cache and parser checkpoints once usage has been idle for a while. */
+  const watchIdle: Effect.Effect<void> = Effect.gen(function* () {
+    while (true) {
+      const idleForMs = (yield* Clock.currentTimeMillis) - lastSummaryAtMs;
+      if (idleForMs < SCAN_CACHE_IDLE_MS) {
+        yield* Effect.sleep(Duration.millis(Math.max(1_000, SCAN_CACHE_IDLE_MS - idleForMs)));
+        continue;
+      }
+      // A summary that was running while we waited for the lock counts as activity.
+      const released = yield* scanSemaphore.withPermits(1)(
+        Effect.gen(function* () {
+          if ((yield* Clock.currentTimeMillis) - lastSummaryAtMs < SCAN_CACHE_IDLE_MS) return false;
+          yield* persistLock.withPermits(1)(store.unload());
+          readTranscript.clear();
+          return true;
+        }),
+      );
+      if (released) return;
+    }
+  }).pipe(Effect.ensuring(Effect.sync(() => (idleWatcherRunning = false))));
+  const noteSummaryActivity = Effect.gen(function* () {
+    lastSummaryAtMs = yield* Clock.currentTimeMillis;
+    if (idleWatcherRunning) return;
+    idleWatcherRunning = true;
+    yield* Effect.forkIn(watchIdle, serviceScope);
   });
 
   const loadRatesFromDisk = Effect.fn("UsageService.loadRatesFromDisk")(function* () {
@@ -233,35 +381,37 @@ const makeUsageService = Effect.gen(function* () {
       return;
     }
     const parsedRates = parseUsageRateTable(cache.document);
-    if (parsedRates.size === 0) return;
+    // A download may have finished while the disk copy was being read.
+    if (parsedRates.size === 0 || ratesFetchedAtMs !== null) return;
     rates = parsedRates;
+    ratesGeneration += 1;
     ratesFetchedAtMs = cache.fetchedAtMs;
     ratesRevisionValue = cache.revision;
     ratesState = "cached";
   });
 
-  const ensureRates = Effect.fn("UsageService.ensureRates")(function* () {
+  const fetchRates = Effect.fn("UsageService.fetchRates")(function* () {
     const now = yield* Clock.currentTimeMillis;
-    yield* loadRatesFromDisk();
-    if (ratesFetchedAtMs !== null && now - ratesFetchedAtMs < RATES_TTL_MS) return;
-
-    const document = yield* httpClient.get(LITELLM_USAGE_RATES_URL).pipe(
+    ratesLastAttemptAtMs = now;
+    const text = yield* httpClient.get(LITELLM_USAGE_RATES_URL).pipe(
       Effect.flatMap(HttpClientResponse.filterStatusOk),
-      Effect.flatMap((response) => response.json),
-      Effect.timeout(10_000),
+      Effect.flatMap((response) => response.text),
+      Effect.timeout(RATES_FETCH_TIMEOUT_MS),
       Effect.catchCause((cause) =>
         Cause.hasInterrupts(cause) ? Effect.interrupt : Effect.succeed(null),
       ),
     );
-    if (document === null) {
+    const parsedRates = text === null ? new Map() : parseUsageRateTable(parseJson(text));
+    if (text === null || parsedRates.size === 0) {
       ratesState = rates.size > 0 ? "cached" : "unavailable";
       return;
     }
-    const parsedRates = parseUsageRateTable(document);
-    if (parsedRates.size === 0) return;
-
-    const revision = ratesRevision(document);
-    rates = parsedRates;
+    const revision = ratesRevision(text);
+    // An unchanged document keeps memoized summaries valid.
+    if (revision !== ratesRevisionValue) {
+      rates = parsedRates;
+      ratesGeneration += 1;
+    }
     ratesFetchedAtMs = now;
     ratesRevisionValue = revision;
     ratesState = "live";
@@ -279,6 +429,42 @@ const makeUsageService = Effect.gen(function* () {
       Effect.catchCause(() => Effect.void),
     );
   });
+
+  /**
+   * Stale-while-revalidate: start one background download when the rates are
+   * stale and no attempt was made recently. Summaries never wait on it unless
+   * no rates exist at all. Returns the in-flight refresh, if any.
+   */
+  const startRatesRefresh = Effect.gen(function* () {
+    if (ratesRefresh !== null) return ratesRefresh;
+    yield* loadRatesFromDisk();
+    const now = yield* Clock.currentTimeMillis;
+    // A timestamp in the future means the wall clock moved backwards: treat it as expired.
+    const within = (sinceMs: number | null, windowMs: number) =>
+      sinceMs !== null && now >= sinceMs && now - sinceMs < windowMs;
+    if (ratesRefresh !== null) return ratesRefresh;
+    if (within(ratesFetchedAtMs, RATES_TTL_MS) || within(ratesLastAttemptAtMs, RATES_RETRY_MS))
+      return null;
+    const done = Deferred.makeUnsafe<void>();
+    ratesRefresh = done;
+    yield* fetchRates().pipe(
+      Effect.onExit(() =>
+        Effect.sync(() => {
+          ratesRefresh = null;
+        }).pipe(Effect.andThen(Deferred.succeed(done, undefined))),
+      ),
+      Effect.forkIn(serviceScope),
+    );
+    return done;
+  });
+
+  // Users who opened usage before get fresh rates before their next visit.
+  yield* Effect.sleep(Duration.millis(RATES_WARM_DELAY_MS)).pipe(
+    Effect.andThen(fileSystem.exists(ratesCachePath)),
+    Effect.flatMap((exists) => (exists ? startRatesRefresh : Effect.void)),
+    Effect.catchCause(() => Effect.void),
+    Effect.forkIn(serviceScope),
+  );
 
   const resolveTranscriptSources = Effect.fn("UsageService.resolveTranscriptSources")(function* () {
     const settings = yield* settingsService.getSettings.pipe(
@@ -369,12 +555,51 @@ const makeUsageService = Effect.gen(function* () {
     ];
   });
 
+  /** Resolve identities in order; a later source sharing an earlier one's identity is skipped. */
+  const planSources = Effect.fn("UsageService.planSources")(function* (
+    sources: readonly ResolvedTranscriptSource[],
+  ) {
+    const environmentId = yield* serverEnvironment.getEnvironmentId;
+    const claimedSourceIds = new Set<string>();
+    const planned: PlannedSource[] = [];
+    for (const source of sources) {
+      if (source.cursorExport !== undefined) {
+        const sourceId = cursorExportSourceId(source.cursorExport);
+        claimedSourceIds.add(sourceId);
+        planned.push({ source, sourceId, deduplicationKind: "declared" });
+        continue;
+      }
+      const identityRoot =
+        source.provider === "opencode" &&
+        source.allowLegacy === true &&
+        source.databasePath !== undefined &&
+        !(yield* fileSystem.exists(source.databasePath).pipe(Effect.orElseSucceed(() => false)))
+          ? path.join(source.scanRoots[0]!, "storage", "message")
+          : source.identityRoot;
+      const identity = yield* Effect.promise(() =>
+        resolveUsageSourceIdentity({
+          root: identityRoot,
+          provider: source.provider,
+          environmentId,
+        }),
+      );
+      if (claimedSourceIds.has(identity.sourceId)) continue;
+      claimedSourceIds.add(identity.sourceId);
+      planned.push({
+        source,
+        sourceId: identity.sourceId,
+        deduplicationKind: identity.deduplicationKind,
+      });
+    }
+    return planned;
+  });
+
   const readFileRecords = Effect.fn("UsageService.readFileRecords")(function* (
     file: UsageTranscriptFile,
+    fileKey: string,
     provider: UsageProviderKind,
     rootKey: string,
   ): Effect.fn.Return<CachedReadResult> {
-    const fileKey = usageCacheFileKey(provider, file.path);
     const cached = scanCache.get(fileKey);
     if (matchesUsageFileCache(cached, file, provider)) {
       return {
@@ -396,7 +621,9 @@ const makeUsageService = Effect.gen(function* () {
         failed: true,
       };
     }
-    const records = deduplicateUsageRecordsWithinFile(read.records).map(anonymizeUsageRecord);
+    const records = deduplicateUsageRecordsWithinFile(read.records).map(
+      anonymizeScanCachedUsageRecord,
+    );
     if (!read.limited && read.malformedLineCount === 0)
       scanCache.set(fileKey, {
         rootKey,
@@ -407,7 +634,6 @@ const makeUsageService = Effect.gen(function* () {
         records,
       });
     else scanCache.delete(fileKey);
-    scanCacheDirty = true;
     return {
       records,
       reused: false,
@@ -415,6 +641,266 @@ const makeUsageService = Effect.gen(function* () {
       malformedLineCount: read.malformedLineCount,
       failed: read.limited,
     };
+  });
+
+  const scanSource = Effect.fn("UsageService.scanSource")(function* (
+    plan: PlannedSource,
+    index: number,
+    context: SummaryContext,
+  ): Effect.fn.Return<SourceScan> {
+    const { source } = plan;
+    const { input, pricing } = context;
+    const sourceStartedAtMs = yield* Clock.currentTimeMillis;
+    const aggregator = new UsageAggregator({
+      sourceId: plan.sourceId,
+      retainExportIdentity: source.cursorExport !== undefined,
+      timeZone: input.timeZone,
+      ...(input.startDate === undefined ? {} : { startDate: input.startDate }),
+      endDate: input.endDate,
+      price: (record) => priceUsageRecord(pricing.rates, record),
+    });
+    const recognizedModels = new Set<string>();
+    const unrecognizedModels = new Set<string>();
+    const sessionIds = new Set<string>();
+    const imports: UsageImportedMetric[] = [];
+    const liveFileKeys: string[] = [];
+    const walkedRootKeys: string[] = [];
+    const tally: SourceTally = {
+      transcriptFileCount: 0,
+      reusedCacheFileCount: 0,
+      parsedFileCount: 0,
+      skippedLineCount: 0,
+      malformedLineCount: 0,
+      listingErrorCount: 0,
+      failedFileCount: 0,
+      budgetLimitedFileCount: 0,
+      existingRootCount: 0,
+    };
+    let nativeStatus: UsageSourceCoverage["status"] | undefined;
+    let nativeDiagnostic: string | undefined;
+    const addRecord = (record: UsageRecord) => {
+      if (aggregator.add(record)) {
+        const recognized =
+          record.reportedCostUsd !== null ||
+          lookupUsageModelRate(pricing.rates, record.model) !== null;
+        (recognized ? recognizedModels : unrecognizedModels).add(record.model);
+        if (record.sessionId.length > 0) sessionIds.add(record.sessionId);
+      }
+    };
+
+    // Transcript sources are memoized on their listing: an unchanged listing
+    // under the same window and rates yields the same result.
+    let memo: { readonly key: string; readonly fingerprint: string } | undefined;
+    if (
+      index >= SUMMARY_SOURCE_LIMIT ||
+      sourceStartedAtMs - context.scanStartedAtMs >= SUMMARY_SCAN_DURATION_MS
+    ) {
+      nativeStatus = "failed";
+      nativeDiagnostic = "usage-summary-scan-limit";
+    } else if (source.cursorExport !== undefined) {
+      const exportSource = source.cursorExport;
+      const read = yield* Effect.promise((signal) =>
+        readCursorExportUsage(exportSource, signal, input.timeZone),
+      );
+      nativeStatus = read.status;
+      nativeDiagnostic = read.diagnosticCode;
+      tally.transcriptFileCount = read.fileCount;
+      tally.parsedFileCount = read.parsedFileCount;
+      tally.malformedLineCount = read.malformedCount;
+      tally.skippedLineCount = read.skippedCount;
+      for (const record of read.records) addRecord(record);
+      for (const row of read.imports) {
+        if (
+          (input.startDate === undefined || row.date >= input.startDate) &&
+          row.date <= input.endDate
+        )
+          imports.push(row);
+      }
+    } else if (source.unsupportedCode !== undefined) {
+      nativeStatus = "unsupported";
+      nativeDiagnostic = source.unsupportedCode;
+    } else if (source.provider === "opencode" && source.databasePath !== undefined) {
+      yield* loadScanCache();
+      const root = source.scanRoots[0]!;
+      const read = yield* Effect.promise((signal) =>
+        readOpenCodeUsage({
+          root,
+          databasePath: source.databasePath!,
+          allowLegacy: source.allowLegacy ?? true,
+          cache: scanCache,
+          signal,
+        }),
+      );
+      nativeStatus = read.status;
+      nativeDiagnostic = read.diagnosticCode;
+      tally.transcriptFileCount = read.fileCount;
+      tally.parsedFileCount = read.parsedFileCount;
+      tally.reusedCacheFileCount = read.reusedCacheFileCount;
+      tally.skippedLineCount = read.skippedCount;
+      tally.malformedLineCount = read.malformedCount;
+      liveFileKeys.push(...read.liveFileKeys);
+      // An incomplete walk cannot prove that an unseen history file was deleted.
+      if (read.status === "complete") walkedRootKeys.push(usageCacheRootKey(source.provider, root));
+      for (const record of read.records) addRecord(record);
+    } else {
+      const listings: Array<{
+        readonly rootKey: string;
+        readonly listing: UsageTranscriptListing;
+      }> = [];
+      for (const root of source.scanRoots) {
+        const exists = yield* fileSystem
+          .exists(root)
+          .pipe(Effect.catchCause(() => Effect.succeed(false)));
+        if (!exists) continue;
+        tally.existingRootCount += 1;
+        const listing = yield* Effect.promise((signal) =>
+          listUsageTranscriptFiles(root, context.windowStartMs, signal),
+        );
+        const rootKey = usageCacheRootKey(source.provider, root);
+        listings.push({ rootKey, listing });
+        if (listing.errorCount === 0) walkedRootKeys.push(rootKey);
+        tally.transcriptFileCount += listing.files.length;
+        tally.skippedLineCount += listing.skippedEntryCount;
+        tally.listingErrorCount += listing.errorCount;
+      }
+      const files = listings.flatMap(({ rootKey, listing }) =>
+        listing.files.map((file) => ({
+          file,
+          rootKey,
+          fileKey: usageCacheFileKey(source.provider, file.path),
+        })),
+      );
+      for (const { fileKey } of files) liveFileKeys.push(fileKey);
+
+      const memoKey = `${plan.sourceId}\0${summaryRequestKey(input)}`;
+      const fingerprint = `${pricing.generation}\0${listingFingerprint(tally.existingRootCount, listings)}`;
+      const hit = sourceMemos.get(memoKey);
+      if (hit !== undefined && hit.fingerprint === fingerprint) {
+        sourceMemos.delete(memoKey);
+        sourceMemos.set(memoKey, hit);
+        const finishedAtMs = yield* Clock.currentTimeMillis;
+        return {
+          ...hit.scan,
+          coverage: {
+            ...hit.scan.coverage,
+            // Nothing was read: every file's result came from the memo.
+            reusedCacheFileCount: hit.scan.coverage.transcriptFileCount,
+            parsedFileCount: 0,
+            scanStartedAt: iso(sourceStartedAtMs),
+            scanFinishedAt: iso(finishedAtMs),
+            scanDurationMs: Math.max(0, Math.trunc(finishedAtMs - sourceStartedAtMs)),
+          },
+          liveFileKeys,
+          walkedRootKeys,
+        };
+      }
+      memo = { key: memoKey, fingerprint };
+
+      if (files.length > 0) yield* loadScanCache();
+      let parsedBytes = 0;
+      let parsedRecords = 0;
+      let cachedRecords = 0;
+      for (const { file, rootKey, fileKey } of files) {
+        const cached = scanCache.get(fileKey);
+        if (matchesUsageFileCache(cached, file, source.provider)) {
+          if (cachedRecords + cached.records.length > SOURCE_CACHED_RECORDS) {
+            tally.budgetLimitedFileCount++;
+            continue;
+          }
+          cachedRecords += cached.records.length;
+        } else {
+          // Only fresh parses spend the scan budget. Later files may already be
+          // cached or small enough to fit.
+          const now = yield* Clock.currentTimeMillis;
+          if (
+            parsedBytes + file.size > SOURCE_SCAN_BYTES ||
+            parsedRecords >= SOURCE_SCAN_RECORDS ||
+            now - sourceStartedAtMs >= SOURCE_SCAN_DURATION_MS
+          ) {
+            tally.budgetLimitedFileCount++;
+            continue;
+          }
+          parsedBytes += file.size;
+        }
+        const read = yield* readFileRecords(file, fileKey, source.provider, rootKey);
+        if (read.reused) tally.reusedCacheFileCount += 1;
+        else {
+          parsedRecords += read.records.length;
+          if (!read.failed) tally.parsedFileCount += 1;
+        }
+        if (read.failed) tally.failedFileCount += 1;
+        tally.skippedLineCount += read.skippedLineCount;
+        tally.malformedLineCount += read.malformedLineCount;
+        for (const record of read.records) addRecord(record);
+      }
+    }
+
+    const aggregated = aggregator.finish();
+    const sourceFinishedAtMs = yield* Clock.currentTimeMillis;
+    const incomplete = tally.failedFileCount + tally.budgetLimitedFileCount;
+    const status: UsageSourceCoverage["status"] =
+      nativeStatus ??
+      (tally.existingRootCount === 0
+        ? "not-found"
+        : incomplete > 0 || tally.listingErrorCount > 0 || tally.malformedLineCount > 0
+          ? aggregated.acceptedRecords > 0 || tally.reusedCacheFileCount > 0
+            ? "partial"
+            : "failed"
+          : "complete");
+    const diagnosticCode =
+      nativeDiagnostic ??
+      (status === "not-found"
+        ? "transcript-directory-not-found"
+        : tally.listingErrorCount > 0
+          ? "transcript-list-partial"
+          : tally.failedFileCount > 0
+            ? "transcript-read-partial"
+            : tally.budgetLimitedFileCount > 0
+              ? "transcript-scan-budget"
+              : tally.malformedLineCount > 0
+                ? "transcript-record-invalid"
+                : undefined);
+    const message = coverageMessage(source, status, diagnosticCode);
+    const scan: SourceScan = {
+      coverage: {
+        sourceId: plan.sourceId,
+        provider: source.provider,
+        deduplicationKind: plan.deduplicationKind,
+        status,
+        transcriptFileCount: tally.transcriptFileCount,
+        reusedCacheFileCount: tally.reusedCacheFileCount,
+        parsedFileCount: tally.parsedFileCount,
+        skippedLineCount: tally.skippedLineCount,
+        malformedLineCount: tally.malformedLineCount,
+        distinctSessionCount: sessionIds.size,
+        distinctResponseCount: aggregated.acceptedRecords,
+        scanStartedAt: iso(sourceStartedAtMs),
+        scanFinishedAt: iso(sourceFinishedAtMs),
+        scanDurationMs: Math.max(0, Math.trunc(sourceFinishedAtMs - sourceStartedAtMs)),
+        ...(diagnosticCode ? { diagnosticCode } : {}),
+        ...(message === undefined ? {} : { message }),
+      },
+      buckets: aggregated.buckets,
+      imports,
+      recognizedModels: [...recognizedModels],
+      unrecognizedModels: [...unrecognizedModels],
+      liveFileKeys,
+      walkedRootKeys,
+    };
+    // Only a complete result is reused; anything partial is retried next time.
+    if (memo !== undefined && status === "complete") {
+      sourceMemos.delete(memo.key);
+      sourceMemos.set(memo.key, {
+        fingerprint: memo.fingerprint,
+        scan: { ...scan, liveFileKeys: [], walkedRootKeys: [] },
+      });
+      while (sourceMemos.size > SOURCE_MEMO_LIMIT) {
+        const oldest = sourceMemos.keys().next().value;
+        if (oldest === undefined) break;
+        sourceMemos.delete(oldest);
+      }
+    }
+    return scan;
   });
 
   const readSummaryUnlocked = Effect.fn("UsageService.readSummaryUnlocked")(function* (
@@ -451,14 +937,34 @@ const makeUsageService = Effect.gen(function* () {
     }
 
     const scanStartedAtMs = yield* Clock.currentTimeMillis;
-    yield* loadScanCache();
-    yield* ensureRates();
-    const environmentId = yield* serverEnvironment.getEnvironmentId;
-    const sources = yield* resolveTranscriptSources();
-    const windowStartMs =
-      input.startDate === undefined
-        ? 0
-        : Math.max(0, startOfCalendarDateMs(input.startDate) - MTIME_WINDOW_SLACK_MS);
+    // Pricing is only needed by the aggregators: any download overlaps source discovery.
+    const refresh = yield* startRatesRefresh;
+    const plans = yield* planSources(yield* resolveTranscriptSources());
+    if (refresh !== null && rates.size === 0) {
+      const waitedMs = (yield* Clock.currentTimeMillis) - scanStartedAtMs;
+      yield* Deferred.await(refresh).pipe(
+        Effect.timeoutOption(Duration.millis(Math.max(0, RATES_FIRST_FETCH_WAIT_MS - waitedMs))),
+      );
+    }
+    const context: SummaryContext = {
+      input,
+      scanStartedAtMs,
+      windowStartMs:
+        input.startDate === undefined
+          ? 0
+          : Math.max(0, startOfCalendarDateMs(input.startDate) - MTIME_WINDOW_SLACK_MS),
+      pricing: {
+        rates,
+        generation: ratesGeneration,
+        state: ratesState,
+        revision: ratesRevisionValue,
+        fetchedAtMs: ratesFetchedAtMs,
+      },
+    };
+    const scans = yield* Effect.forEach(plans, (plan, index) => scanSource(plan, index, context), {
+      concurrency: SUMMARY_SOURCE_CONCURRENCY,
+    });
+
     const coverage: UsageSourceCoverage[] = [];
     const buckets: UsageDailyBucket[] = [];
     const importedMetrics = new Map<string, UsageImportedMetric>();
@@ -467,234 +973,17 @@ const makeUsageService = Effect.gen(function* () {
     const walkedRootKeys = new Set<string>();
     const recognizedModels = new Set<string>();
     const unrecognizedModels = new Set<string>();
-    const claimedSourceIds = new Set<string>();
-
-    let scannedSourceCount = 0;
-    for (const source of sources) {
-      const sourceStartedAtMs = yield* Clock.currentTimeMillis;
-      const identityRoot =
-        source.provider === "opencode" &&
-        source.allowLegacy === true &&
-        source.databasePath !== undefined &&
-        !(yield* fileSystem.exists(source.databasePath).pipe(Effect.orElseSucceed(() => false)))
-          ? path.join(source.scanRoots[0]!, "storage", "message")
-          : source.identityRoot;
-      const identity =
-        source.cursorExport === undefined
-          ? yield* Effect.promise(() =>
-              resolveUsageSourceIdentity({
-                root: identityRoot,
-                provider: source.provider,
-                environmentId,
-              }),
-            )
-          : {
-              sourceId: cursorExportSourceId(source.cursorExport),
-              deduplicationKind: "declared" as const,
-              canonicalRoot: source.identityRoot,
-            };
-      if (source.cursorExport === undefined && claimedSourceIds.has(identity.sourceId)) continue;
-      claimedSourceIds.add(identity.sourceId);
-      const aggregator = new UsageAggregator({
-        sourceId: identity.sourceId,
-        retainExportIdentity: source.cursorExport !== undefined,
-        timeZone: input.timeZone,
-        ...(input.startDate === undefined ? {} : { startDate: input.startDate }),
-        endDate: input.endDate,
-        price: (record) => priceUsageRecord(rates, record),
-      });
-      const sessionIds = new Set<string>();
-      let transcriptFileCount = 0;
-      let reusedCacheFileCount = 0;
-      let parsedFileCount = 0;
-      let skippedLineCount = 0;
-      let malformedLineCount = 0;
-      let listingErrorCount = 0;
-      let failedFileCount = 0;
-      let existingRootCount = 0;
-      let scannedBytes = 0;
-      let scannedRecords = 0;
-
-      let nativeStatus: UsageSourceCoverage["status"] | undefined;
-      let nativeDiagnostic: string | undefined;
-      const addRecord = (record: UsageRecord) => {
-        if (aggregator.add(record)) {
-          const recognized =
-            record.reportedCostUsd !== null || lookupUsageModelRate(rates, record.model) !== null;
-          (recognized ? recognizedModels : unrecognizedModels).add(record.model);
-          if (record.sessionId.length > 0) sessionIds.add(record.sessionId);
-        }
-      };
-      if (
-        ++scannedSourceCount > SUMMARY_SOURCE_LIMIT ||
-        sourceStartedAtMs - scanStartedAtMs >= SUMMARY_SCAN_DURATION_MS
-      ) {
-        nativeStatus = "failed";
-        nativeDiagnostic = "usage-summary-scan-limit";
-      } else if (source.cursorExport !== undefined) {
-        const exportSource = source.cursorExport;
-        const read = yield* Effect.promise((signal) =>
-          readCursorExportUsage(exportSource, signal, input.timeZone),
-        );
-        nativeStatus = read.status;
-        nativeDiagnostic = read.diagnosticCode;
-        transcriptFileCount = read.fileCount;
-        parsedFileCount = read.parsedFileCount;
-        malformedLineCount = read.malformedCount;
-        skippedLineCount = read.skippedCount;
-        for (const record of read.records) addRecord(record);
-        for (const row of read.imports) {
-          if (
-            (input.startDate === undefined || row.date >= input.startDate) &&
-            row.date <= input.endDate
-          )
-            importedMetrics.set(row.recordId, row);
-        }
-      } else if (source.unsupportedCode !== undefined) {
-        nativeStatus = "unsupported";
-        nativeDiagnostic = source.unsupportedCode;
-      } else if (source.provider === "opencode" && source.databasePath !== undefined) {
-        const root = source.scanRoots[0]!;
-        const read = yield* Effect.promise((signal) =>
-          readOpenCodeUsage({
-            root,
-            databasePath: source.databasePath!,
-            allowLegacy: source.allowLegacy ?? true,
-            cache: scanCache,
-            signal,
-          }),
-        );
-        nativeStatus = read.status;
-        nativeDiagnostic = read.diagnosticCode;
-        transcriptFileCount = read.fileCount;
-        parsedFileCount = read.parsedFileCount;
-        reusedCacheFileCount = read.reusedCacheFileCount;
-        skippedLineCount = read.skippedCount;
-        malformedLineCount = read.malformedCount;
-        for (const key of read.liveFileKeys) liveFileKeys.add(key);
-        // An incomplete walk cannot prove that an unseen history file was deleted.
-        if (read.status === "complete")
-          walkedRootKeys.add(usageCacheRootKey(source.provider, root));
-        if (read.cacheChanged) scanCacheDirty = true;
-        for (const record of read.records) addRecord(record);
-      }
-
-      for (const root of nativeStatus === undefined ? source.scanRoots : []) {
-        const exists = yield* fileSystem
-          .exists(root)
-          .pipe(Effect.catchCause(() => Effect.succeed(false)));
-        if (!exists) continue;
-        existingRootCount += 1;
-        const rootKey = usageCacheRootKey(source.provider, root);
-        const listing = yield* Effect.promise((signal) =>
-          listUsageTranscriptFiles(root, windowStartMs, signal),
-        );
-        if (listing.errorCount === 0) walkedRootKeys.add(rootKey);
-        transcriptFileCount += listing.files.length;
-        skippedLineCount += listing.skippedEntryCount;
-        listingErrorCount += listing.errorCount;
-
-        for (const file of listing.files)
-          liveFileKeys.add(usageCacheFileKey(source.provider, file.path));
-        for (const file of listing.files) {
-          const cached = scanCache.get(usageCacheFileKey(source.provider, file.path));
-          const reusable = matchesUsageFileCache(cached, file, source.provider);
-          const now = yield* Clock.currentTimeMillis;
-          if (
-            !reusable &&
-            (scannedBytes + file.size > SOURCE_SCAN_BYTES ||
-              now - sourceStartedAtMs >= SOURCE_SCAN_DURATION_MS)
-          ) {
-            failedFileCount++;
-            // Later files may already be cached or small enough to fit.
-            continue;
-          }
-          if (scannedRecords >= SOURCE_SCAN_RECORDS) {
-            failedFileCount++;
-            break;
-          }
-          if (!reusable) scannedBytes += file.size;
-          const read = yield* readFileRecords(file, source.provider, rootKey);
-          if (read.reused) reusedCacheFileCount += 1;
-          else if (!read.failed) parsedFileCount += 1;
-          if (read.failed) failedFileCount += 1;
-          skippedLineCount += read.skippedLineCount;
-          malformedLineCount += read.malformedLineCount;
-          for (const record of read.records) {
-            if (++scannedRecords > SOURCE_SCAN_RECORDS) {
-              failedFileCount++;
-              break;
-            }
-            addRecord(record);
-          }
-        }
-      }
-
-      const aggregated = aggregator.finish();
-      if (source.cursorExport === undefined) buckets.push(...aggregated.buckets);
+    for (const [index, scan] of scans.entries()) {
+      coverage.push(scan.coverage);
+      if (plans[index]!.source.cursorExport === undefined) buckets.push(...scan.buckets);
       else
-        for (const bucket of aggregated.buckets)
+        for (const bucket of scan.buckets)
           if (bucket.exportRecordId !== undefined) cursorBuckets.set(bucket.exportRecordId, bucket);
-      const sourceFinishedAtMs = yield* Clock.currentTimeMillis;
-      const status: UsageSourceCoverage["status"] =
-        nativeStatus ??
-        (existingRootCount === 0
-          ? "not-found"
-          : failedFileCount > 0 || listingErrorCount > 0 || malformedLineCount > 0
-            ? aggregated.acceptedRecords > 0 || reusedCacheFileCount > 0
-              ? "partial"
-              : "failed"
-            : "complete");
-      const diagnosticCode =
-        nativeDiagnostic ??
-        (status === "not-found"
-          ? "transcript-directory-not-found"
-          : listingErrorCount > 0
-            ? "transcript-list-partial"
-            : failedFileCount > 0
-              ? "transcript-read-partial"
-              : malformedLineCount > 0
-                ? "transcript-record-invalid"
-                : undefined);
-      coverage.push({
-        sourceId: identity.sourceId,
-        provider: source.provider,
-        deduplicationKind: identity.deduplicationKind,
-        status,
-        transcriptFileCount,
-        reusedCacheFileCount,
-        parsedFileCount,
-        skippedLineCount,
-        malformedLineCount,
-        distinctSessionCount: sessionIds.size,
-        distinctResponseCount: aggregated.acceptedRecords,
-        scanStartedAt: iso(sourceStartedAtMs),
-        scanFinishedAt: iso(sourceFinishedAtMs),
-        scanDurationMs: Math.max(0, Math.trunc(sourceFinishedAtMs - sourceStartedAtMs)),
-        ...(diagnosticCode ? { diagnosticCode } : {}),
-        ...(source.cursorExport !== undefined
-          ? {
-              message:
-                status === "partial"
-                  ? `Saved Cursor Admin API export: billed costs are separate from model costs. Exports may omit pages or token fields, and identical events cannot be distinguished without stable event IDs. Diagnostics: ${nativeDiagnostic ?? "unavailable"}.`
-                  : "The configured Cursor JSON exports could not be imported. Check the path, account key, user filter, and format.",
-            }
-          : status === "unsupported"
-            ? {
-                message:
-                  source.provider === "cursor"
-                    ? "Configure saved Cursor Admin API JSON exports in this instance’s provider settings. Automatic consumer CLI history is unavailable; Ryco never reads account credentials."
-                    : "This OpenCode history source or format is unsupported. Usage is unavailable.",
-              }
-            : status === "not-found"
-              ? { message: "No transcript directory was found for this provider." }
-              : status === "partial" || status === "failed"
-                ? {
-                    message:
-                      "Some provider history could not be read or lacked trustworthy usage telemetry.",
-                  }
-                : {}),
-      });
+      for (const row of scan.imports) importedMetrics.set(row.recordId, row);
+      for (const key of scan.liveFileKeys) liveFileKeys.add(key);
+      for (const key of scan.walkedRootKeys) walkedRootKeys.add(key);
+      for (const model of scan.recognizedModels) recognizedModels.add(model);
+      for (const model of scan.unrecognizedModels) unrecognizedModels.add(model);
     }
 
     // Several instances may explicitly import the same account. Keep one coverage
@@ -758,15 +1047,18 @@ const makeUsageService = Effect.gen(function* () {
       }),
     );
 
-    const removed = pruneUsageScanCache(scanCache, {
-      liveFileKeys,
-      walkedRootKeys,
-      windowStartMs,
-      retentionCutoffMs:
-        input.startDate === undefined ? 0 : scanStartedAtMs - SCAN_CACHE_RETENTION_MS,
-    });
-    if (removed > 0) scanCacheDirty = true;
-    yield* persistScanCache();
+    // Memoized sources never load the cache; there is nothing to prune then.
+    if (store.isLoaded()) {
+      pruneUsageScanCache(scanCache, {
+        liveFileKeys,
+        walkedRootKeys,
+        windowStartMs: context.windowStartMs,
+        retentionCutoffMs:
+          input.startDate === undefined ? 0 : scanStartedAtMs - SCAN_CACHE_RETENTION_MS,
+      });
+      capUsageScanCache(scanCache, USAGE_SCAN_CACHE_RECORD_LIMIT);
+      yield* schedulePersist;
+    }
 
     buckets.push(...cursorBuckets.values());
     buckets.sort(
@@ -777,16 +1069,17 @@ const makeUsageService = Effect.gen(function* () {
         left.sourceId.localeCompare(right.sourceId),
     );
     const finishedAtMs = yield* Clock.currentTimeMillis;
+    const { pricing: snapshot } = context;
     const pricing: UsagePricingStatus = {
-      state: ratesState,
+      state: snapshot.state,
       recognizedModelCount: recognizedModels.size,
       unrecognizedModelCount: unrecognizedModels.size,
-      ...(ratesRevisionValue === null ? {} : { sourceRevision: ratesRevisionValue }),
-      ...(ratesFetchedAtMs === null
+      ...(snapshot.revision === null ? {} : { sourceRevision: snapshot.revision }),
+      ...(snapshot.fetchedAtMs === null
         ? {}
         : {
-            fetchedAt: iso(ratesFetchedAtMs),
-            cacheAgeMs: Math.max(0, Math.trunc(finishedAtMs - ratesFetchedAtMs)),
+            fetchedAt: iso(snapshot.fetchedAtMs),
+            cacheAgeMs: Math.max(0, Math.trunc(finishedAtMs - snapshot.fetchedAtMs)),
           }),
     };
     return {
@@ -803,10 +1096,17 @@ const makeUsageService = Effect.gen(function* () {
     } satisfies UsageSummary;
   });
 
-  const readSummary = (input: UsageSummaryRequest) =>
+  const computeSummary = (input: UsageSummaryRequest) =>
     scanSemaphore
-      .withPermits(1)(readSummaryUnlocked(input))
+      .withPermits(1)(
+        // Mark activity under the lock too, so a waiting idle release sees it.
+        Clock.currentTimeMillis.pipe(
+          Effect.tap((nowMs) => Effect.sync(() => (lastSummaryAtMs = nowMs))),
+          Effect.andThen(readSummaryUnlocked(input)),
+        ),
+      )
       .pipe(
+        Effect.ensuring(noteSummaryActivity),
         Effect.catchCause((cause) => {
           if (Cause.hasInterrupts(cause)) return Effect.interrupt;
           const failure = Cause.findErrorOption(cause);
@@ -822,6 +1122,52 @@ const makeUsageService = Effect.gen(function* () {
           );
         }),
       );
+
+  // Identical requests (several tabs or clients) share one scan. It runs in the
+  // service scope and is interrupted only once every caller has gone away (a
+  // closed socket, an abandoned request), so a queued scan nobody waits for
+  // never runs.
+  interface Flight {
+    readonly done: Deferred.Deferred<UsageSummary, UsageReadError>;
+    fiber: Fiber.Fiber<unknown, unknown> | undefined;
+    waiters: number;
+  }
+  const inflight = new Map<string, Flight>();
+  const readSummary = (input: UsageSummaryRequest) =>
+    Effect.gen(function* () {
+      const key = summaryRequestKey(input);
+      let flight = inflight.get(key);
+      if (flight === undefined) {
+        const started: Flight = {
+          done: Deferred.makeUnsafe<UsageSummary, UsageReadError>(),
+          fiber: undefined,
+          waiters: 0,
+        };
+        flight = started;
+        inflight.set(key, started);
+        started.fiber = yield* computeSummary(input).pipe(
+          Effect.onExit((exit) =>
+            Effect.sync(() => {
+              if (inflight.get(key) === started) inflight.delete(key);
+            }).pipe(Effect.andThen(Deferred.done(started.done, exit))),
+          ),
+          Effect.forkIn(serviceScope),
+        );
+      }
+      const joined = flight;
+      joined.waiters += 1;
+      return yield* Deferred.await(joined.done).pipe(
+        Effect.onExit((exit) =>
+          Effect.suspend(() => {
+            joined.waiters -= 1;
+            if (!Exit.hasInterrupts(exit) || joined.waiters > 0 || joined.fiber === undefined)
+              return Effect.void;
+            if (inflight.get(key) === joined) inflight.delete(key);
+            return Effect.forkIn(Fiber.interrupt(joined.fiber), serviceScope).pipe(Effect.asVoid);
+          }),
+        ),
+      );
+    });
 
   return { readSummary } satisfies UsageServiceShape;
 });

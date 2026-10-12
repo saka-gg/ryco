@@ -5,9 +5,7 @@ import { ArrowLeftIcon } from "lucide-react";
 import { SidebarInset } from "./ui/sidebar";
 import { Button } from "./ui/button";
 import { HostedConnectionControl } from "./hostedHub/HostedConnectionControls";
-import { HostedRelayTrustNotice } from "./hostedHub/HostedRelayTrustNotice";
 import { isElectron, isHostedHubMode } from "../env";
-import { navigateHub } from "../hostedHub/hubRoutes";
 import {
   APP_SIDEBAR_CHROME_INSET_TRANSITION_CLASS,
   COLLAPSED_APP_SIDEBAR_CHROME_INSET_CLASS,
@@ -15,11 +13,7 @@ import {
 import { useAppSidebarCollapsed } from "../hooks/useAppSidebarCollapsed";
 import { cn } from "~/lib/utils";
 import { DesktopAccountConnect } from "./DesktopAccountConnect";
-import {
-  retryHostedHomeDiscovery,
-  useHostedWorkspaceState,
-} from "../hostedHub/hostedConnectionCoordinator";
-import { useRoutedHostedNode } from "../hostedHub/nodeRouteOrchestrator";
+import { NoActiveThreadHostedStatus } from "./NoActiveThreadHostedStatus";
 
 export function NoActiveThreadState() {
   const navigate = useNavigate();
@@ -76,48 +70,11 @@ export function NoActiveThreadState() {
                 Select an existing thread or create a new one to get started.
               </EmptyDescription>
               {isElectron ? <DesktopAccountConnect /> : null}
-              {isHostedHubMode() ? (
-                <div className="mt-5 space-y-3 text-left">
-                  <HostedHomeDiscoveryStatus />
-                  <Button variant="outline" onClick={() => navigateHub({ kind: "nodes" })}>
-                    Manage nodes
-                  </Button>
-                  <HostedRelayTrustNotice compact />
-                </div>
-              ) : null}
+              {isHostedHubMode() ? <NoActiveThreadHostedStatus /> : null}
             </EmptyHeader>
           </div>
         </Empty>
       </div>
     </SidebarInset>
-  );
-}
-
-function HostedHomeDiscoveryStatus() {
-  const route = useRoutedHostedNode();
-  const workspace = useHostedWorkspaceState();
-  if (route.nodeId !== null || route.logicalPathname !== "/") return null;
-  const discovery = workspace.homeDiscovery;
-  const machine = workspace.machines.find(
-    (entry) => entry.environmentId === discovery.environmentId,
-  );
-  return (
-    <>
-      {discovery.environmentId !== null ? (
-        <p role="status" className="text-sm text-muted-foreground">
-          Loading threads from {machine?.label ?? "your device"}…
-        </p>
-      ) : null}
-      {discovery.failedEnvironmentIds.length > 0 ? (
-        <div className="space-y-2">
-          <p className="text-sm text-muted-foreground">
-            Some devices could not load their thread lists. Your other threads remain available.
-          </p>
-          <Button variant="outline" onClick={retryHostedHomeDiscovery}>
-            Retry loading threads
-          </Button>
-        </div>
-      ) : null}
-    </>
   );
 }

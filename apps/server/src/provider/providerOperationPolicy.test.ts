@@ -7,6 +7,7 @@ import {
   DEFAULT_TURN_ACCEPTANCE_TIMEOUT_MS,
   DEFAULT_UNRESPONSIVE_AFTER_MS,
   providerOperationTimeoutDetail,
+  providerStartupPhaseTimeoutDetail,
   resolveProviderOperationTimeouts,
 } from "./providerOperationPolicy.ts";
 
@@ -119,5 +120,27 @@ describe("providerOperationTimeoutDetail", () => {
     expect(
       providerOperationTimeoutDetail({ operation: "turn.start", label: "x", timeoutMs: 1_500 }),
     ).toContain("within 1.5s");
+  });
+});
+
+describe("providerStartupPhaseTimeoutDetail", () => {
+  it("names the command, the unanswered request and the next step", () => {
+    expect(
+      providerStartupPhaseTimeoutDetail({
+        command: "codex",
+        request: "Codex `initialize`",
+        timeoutMs: 15_000,
+        hint: "Run `codex login`.",
+      }),
+    ).toBe(
+      "`codex` did not answer the Codex `initialize` request within 15 seconds. Run `codex login`.",
+    );
+    expect(
+      providerStartupPhaseTimeoutDetail({
+        command: "agent",
+        request: "ACP `session/new`",
+        timeoutMs: 2_500,
+      }),
+    ).toBe("`agent` did not answer the ACP `session/new` request within 2.5 seconds.");
   });
 });

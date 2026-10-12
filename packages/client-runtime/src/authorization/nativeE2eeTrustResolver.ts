@@ -1,9 +1,9 @@
-import { Schema } from "effect";
+import * as Schema from "effect/Schema";
 import {
   NativeAccountGrantRelayTicketRequest,
   type NativeAccountGrantRelayTicketResponse,
 } from "@ryco/contracts/native-e2ee";
-import type { RelayCapability } from "@ryco/contracts";
+import type { RelayCapability } from "@ryco/contracts/relay";
 import { verifyNodeE2eeCapabilityStatement } from "@ryco/shared/relayE2eeCapabilityVerify";
 import type { NodeE2eeCapabilityStatement } from "@ryco/shared/relayE2eeTranscripts";
 import { e2eeBytesEqual, e2eeKeyFingerprint, e2eeSha256 } from "@ryco/shared/relayE2eeKeys";

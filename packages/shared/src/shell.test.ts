@@ -1,4 +1,8 @@
-import { describe, expect, it, vi } from "vite-plus/test";
+import * as FS from "node:fs";
+import * as OS from "node:os";
+import * as Path from "node:path";
+
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import {
   extractPathFromShellOutput,
@@ -11,6 +15,7 @@ import {
   readPathFromLaunchctl,
   readPathFromLoginShell,
   resolveCommandPath,
+  resolveCommandPathAsync,
   resolveKnownWindowsCliDirs,
   resolveWindowsEnvironment,
 } from "./shell.ts";
@@ -346,6 +351,106 @@ describe("resolveCommandPath", () => {
   it("returns null when a command is not on PATH", () => {
     expect(resolveCommandPath("definitely-not-installed", { env: { PATH: "" } })).toBeNull();
   });
+});
+
+describe("resolveCommandPathAsync", () => {
+  const directories: string[] = [];
+  const makeDirectory = () => {
+    const directory = FS.mkdtempSync(Path.join(OS.tmpdir(), "ryco-shell-resolve-"));
+    directories.push(directory);
+    return directory;
+  };
+  const writeFile = (directory: string, name: string, mode: number) => {
+    const filePath = Path.join(directory, name);
+    FS.writeFileSync(filePath, "#!/bin/sh\n");
+    FS.chmodSync(filePath, mode);
+    return filePath;
+  };
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    for (const directory of directories.splice(0)) {
+      FS.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "walks PATH in order like the sync resolver, skipping directories and non-executables",
+    async () => {
+      const notExecutable = makeDirectory();
+      writeFile(notExecutable, "tool", 0o644);
+      const directoryNamedTool = makeDirectory();
+      FS.mkdirSync(Path.join(directoryNamedTool, "tool"));
+      const winner = makeDirectory();
+      const expected = writeFile(winner, "tool", 0o755);
+      const later = makeDirectory();
+      writeFile(later, "tool", 0o755);
+      const env = { PATH: [notExecutable, directoryNamedTool, winner, later].join(":") };
+
+      await expect(resolveCommandPathAsync("tool", { platform: "linux", env })).resolves.toBe(
+        expected,
+      );
+      expect(resolveCommandPath("tool", { platform: "linux", env })).toBe(expected);
+      await expect(
+        resolveCommandPathAsync("missing-tool", { platform: "linux", env }),
+      ).resolves.toBeNull();
+      await expect(resolveCommandPathAsync(expected, { platform: "linux", env: {} })).resolves.toBe(
+        expected,
+      );
+    },
+  );
+
+  it("applies PATHEXT on Windows", async () => {
+    const directory = makeDirectory();
+    const expected = writeFile(directory, "tool.CMD", 0o644);
+    const options = {
+      platform: "win32" as const,
+      env: { PATH: directory, PATHEXT: ".EXE;.CMD" },
+    };
+    await expect(resolveCommandPathAsync("tool", options)).resolves.toBe(expected);
+    expect(resolveCommandPath("tool", options)).toBe(expected);
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "treats a stalled PATH entry as a miss and keeps searching",
+    async () => {
+      const stalled = makeDirectory();
+      const stalledTool = writeFile(stalled, "tool", 0o755);
+      const winner = makeDirectory();
+      const expected = writeFile(winner, "tool", 0o755);
+      const stat = FS.promises.stat.bind(FS.promises);
+      let unstall: (() => void) | undefined;
+      let mountAnswers = false;
+      const statSpy = vi.spyOn(FS.promises, "stat").mockImplementation(((filePath: FS.PathLike) =>
+        String(filePath).startsWith(stalled) && !mountAnswers
+          ? new Promise<void>((resolve) => {
+              unstall = resolve;
+            }).then(() => stat(filePath))
+          : stat(filePath)) as typeof FS.promises.stat);
+      const stalledChecks = () =>
+        statSpy.mock.calls.filter(([filePath]) => String(filePath).startsWith(stalled)).length;
+      const options = {
+        platform: "linux" as const,
+        env: { PATH: `${stalled}:${winner}` },
+        entryTimeoutMs: 20,
+      };
+
+      await expect(resolveCommandPathAsync("tool", options)).resolves.toBe(expected);
+      expect(stalledChecks()).toBe(1);
+
+      // While its check is stuck, later lookups skip the entry instead of
+      // parking another threadpool thread on the same mount.
+      await expect(resolveCommandPathAsync("tool", options)).resolves.toBe(expected);
+      expect(stalledChecks()).toBe(1);
+
+      // Once the mount answers, the entry is searched (and wins) again.
+      mountAnswers = true;
+      unstall?.();
+      await vi.waitFor(async () => {
+        await expect(resolveCommandPathAsync("tool", options)).resolves.toBe(stalledTool);
+      });
+    },
+  );
 });
 
 describe("resolveWindowsEnvironment", () => {

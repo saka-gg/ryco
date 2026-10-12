@@ -9,7 +9,10 @@ import type { ProjectFavicon } from "./Services/ProjectFaviconResolver.ts";
 import { projectFaviconWorkerMain } from "./projectFaviconWorker.ts";
 
 export const PROJECT_FAVICON_READ_TIMEOUT_MS = 1_500;
-const MAX_OUTPUT_BYTES = 768 * 1024;
+/** Extra deadline per additional root in one child (probing a root takes well under this). */
+export const PROJECT_FAVICON_READ_TIMEOUT_PER_ROOT_MS = 250;
+const MAX_OUTPUT_BYTES_PER_ROOT = 768 * 1024;
+const MAX_ICON_BYTES = 512 * 1024;
 const WORKER_SCRIPT = `(${projectFaviconWorkerMain.toString()})()`;
 
 export type ProjectFaviconExecFile = (
@@ -19,17 +22,66 @@ export type ProjectFaviconExecFile = (
   callback: (error: ExecFileException | null, stdout: string, stderr: string) => void,
 ) => ChildProcess;
 
-export function readProjectFavicon(
-  cwd: string,
+/**
+ * One root's outcome. `absent` is a definite "no icon"; `unavailable` means the
+ * read did not finish (deadline, cancellation, a broken child) and says
+ * nothing about the project, so callers must not remember it as "no icon".
+ */
+export type ProjectFaviconReadResult =
+  | { readonly status: "found"; readonly icon: ProjectFavicon }
+  | { readonly status: "absent" }
+  | { readonly status: "unavailable" };
+
+const UNAVAILABLE: ProjectFaviconReadResult = Object.freeze({ status: "unavailable" });
+const ABSENT: ProjectFaviconReadResult = Object.freeze({ status: "absent" });
+
+function parseWorkerLine(line: string): {
+  readonly index: number;
+  result: ProjectFaviconReadResult;
+} {
+  const parsed: unknown = JSON.parse(line);
+  if (typeof parsed !== "object" || parsed === null || !("i" in parsed) || !("icon" in parsed))
+    throw new Error("Malformed project icon record.");
+  const index = parsed.i;
+  if (typeof index !== "number" || !Number.isInteger(index)) throw new Error("Malformed index.");
+  const icon = parsed.icon;
+  if (icon === null) return { index, result: ABSENT };
+  if (
+    typeof icon !== "object" ||
+    !("path" in icon) ||
+    !("base64" in icon) ||
+    typeof icon.path !== "string" ||
+    typeof icon.base64 !== "string"
+  )
+    return { index, result: ABSENT };
+  const bytes = Buffer.from(icon.base64, "base64");
+  return {
+    index,
+    result:
+      bytes.length <= MAX_ICON_BYTES
+        ? { status: "found", icon: { path: icon.path, bytes } }
+        : ABSENT,
+  };
+}
+
+/**
+ * Resolves the icons of several workspace roots in one isolated child (see
+ * `projectFaviconWorker.ts`). Results arrive per root, so roots finished
+ * before a deadline or a stalled read keep their answers; the rest are
+ * `unavailable`.
+ */
+export function readProjectFavicons(
+  roots: readonly string[],
   options: {
     readonly signal?: AbortSignal;
     readonly execFile?: ProjectFaviconExecFile;
     readonly timeoutMs?: number;
   } = {},
-): Promise<ProjectFavicon | null> {
+): Promise<ReadonlyArray<ProjectFaviconReadResult>> {
   return new Promise((resolve) => {
-    if (options.signal?.aborted) {
-      resolve(null);
+    const results: ProjectFaviconReadResult[] = roots.map(() => UNAVAILABLE);
+    if (roots.length === 0 || options.signal?.aborted) {
+      resolve(results);
       return;
     }
     let child: ChildProcess | undefined;
@@ -41,7 +93,7 @@ export function readProjectFavicon(
     try {
       child = (options.execFile ?? execFile)(
         process.execPath,
-        ["--eval", WORKER_SCRIPT, "--", cwd],
+        ["--eval", WORKER_SCRIPT, "--", ...roots],
         {
           env: {
             ...process.env,
@@ -50,41 +102,47 @@ export function readProjectFavicon(
             NODE_PATH: undefined,
           },
           encoding: "utf8",
-          timeout: options.timeoutMs ?? PROJECT_FAVICON_READ_TIMEOUT_MS,
+          timeout:
+            options.timeoutMs ??
+            PROJECT_FAVICON_READ_TIMEOUT_MS +
+              PROJECT_FAVICON_READ_TIMEOUT_PER_ROOT_MS * (roots.length - 1),
           killSignal: "SIGKILL",
-          maxBuffer: MAX_OUTPUT_BYTES,
+          maxBuffer: MAX_OUTPUT_BYTES_PER_ROOT * roots.length,
           windowsHide: true,
         },
-        (error, stdout) => {
+        // A deadline or kill still hands over what the child wrote until then.
+        (_error, stdout) => {
           cleanup();
-          if (error) {
-            resolve(null);
-            return;
-          }
-          try {
-            const result: unknown = JSON.parse(stdout);
-            if (
-              typeof result !== "object" ||
-              result === null ||
-              !("path" in result) ||
-              !("base64" in result) ||
-              typeof result.path !== "string" ||
-              typeof result.base64 !== "string"
-            ) {
-              resolve(null);
-              return;
+          for (const line of stdout.split("\n")) {
+            if (line.length === 0) continue;
+            try {
+              const { index, result } = parseWorkerLine(line);
+              if (index >= 0 && index < results.length) results[index] = result;
+            } catch {
+              // A torn last line (killed mid-write) leaves that root unavailable.
             }
-            const bytes = Buffer.from(result.base64, "base64");
-            resolve(bytes.length <= 512 * 1024 ? { path: result.path, bytes } : null);
-          } catch {
-            resolve(null);
           }
+          resolve(results);
         },
       );
       if (options.signal?.aborted) abort();
     } catch {
       cleanup();
-      resolve(null);
+      resolve(results);
     }
   });
+}
+
+/** One root's icon, or null when there is none or it could not be read in time. */
+export function readProjectFavicon(
+  cwd: string,
+  options: {
+    readonly signal?: AbortSignal;
+    readonly execFile?: ProjectFaviconExecFile;
+    readonly timeoutMs?: number;
+  } = {},
+): Promise<ProjectFavicon | null> {
+  return readProjectFavicons([cwd], options).then(([result]) =>
+    result?.status === "found" ? result.icon : null,
+  );
 }

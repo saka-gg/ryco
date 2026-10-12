@@ -6,7 +6,19 @@ import type { UsageProviderKind } from "@ryco/contracts";
 import type { UsageRecord } from "./usageRecord.ts";
 import { withTokenTotal } from "./usageRecord.ts";
 
-export const USAGE_SCAN_CACHE_VERSION = 4 as const;
+/** v5: session/response hashes are truncated to {@link SCAN_CACHE_IDENTIFIER_LENGTH}. */
+export const USAGE_SCAN_CACHE_VERSION = 5 as const;
+
+/**
+ * Hex digits kept for anonymized session/response identifiers of scan-cached
+ * records. 64 bits keep collisions negligible (~3e-8 at 10^6 records) and
+ * shrink the cache by about a quarter versus full SHA-256 digests.
+ */
+export const SCAN_CACHE_IDENTIFIER_LENGTH = 16;
+
+/** Upper bound on files and records decoded from one serialized cache document. */
+const MAX_DECODED_FILES = 10_000;
+const MAX_RECORDS_PER_FILE = 100_000;
 
 export interface CachedUsageFile {
   readonly rootKey: string;
@@ -64,8 +76,9 @@ interface SerializedCache {
   readonly files: Readonly<Record<string, SerializedFile>>;
 }
 
-function hashPrivateIdentifier(kind: string, value: string): string {
-  return createHash("sha256").update(`${kind}\0${value}`).digest("hex");
+function hashPrivateIdentifier(kind: string, value: string, length = 64): string {
+  const digest = createHash("sha256").update(`${kind}\0${value}`).digest("hex");
+  return length >= digest.length ? digest : digest.slice(0, length);
 }
 
 export function usageCacheFileKey(provider: UsageProviderKind, canonicalPath: string): string {
@@ -76,19 +89,31 @@ export function usageCacheRootKey(provider: UsageProviderKind, canonicalRoot: st
   return hashPrivateIdentifier(`${provider}:transcript-root`, canonicalRoot);
 }
 
-/** Remove provider session/message identifiers before a parsed row becomes durable. */
-export function anonymizeUsageRecord(record: UsageRecord): UsageRecord {
+function anonymize(record: UsageRecord, identifierLength: number): UsageRecord {
   return {
     ...record,
     sessionId:
       record.sessionId.length === 0
         ? ""
-        : hashPrivateIdentifier(`${record.provider}:session`, record.sessionId),
+        : hashPrivateIdentifier(`${record.provider}:session`, record.sessionId, identifierLength),
     dedupeKey:
       record.dedupeKey === null
         ? null
-        : hashPrivateIdentifier(`${record.provider}:response`, record.dedupeKey),
+        : hashPrivateIdentifier(`${record.provider}:response`, record.dedupeKey, identifierLength),
   };
+}
+
+/** Remove provider session/message identifiers before a parsed row becomes durable. */
+export function anonymizeUsageRecord(record: UsageRecord): UsageRecord {
+  return anonymize(record, 64);
+}
+
+/**
+ * {@link anonymizeUsageRecord} for records kept in the scan cache. Every record
+ * of one source must use the same form: deduplication compares these keys.
+ */
+export function anonymizeScanCachedUsageRecord(record: UsageRecord): UsageRecord {
+  return anonymize(record, SCAN_CACHE_IDENTIFIER_LENGTH);
 }
 
 export function deduplicateUsageRecordsWithinFile(
@@ -156,7 +181,10 @@ export function decodeUsageScanCache(document: unknown): UsageScanCache {
   if (typeof document !== "object" || document === null) return cache;
   const root = document as Partial<SerializedCache>;
   if (
-    (root.version !== USAGE_SCAN_CACHE_VERSION && root.version !== 2 && root.version !== 3) ||
+    (root.version !== USAGE_SCAN_CACHE_VERSION &&
+      root.version !== 2 &&
+      root.version !== 3 &&
+      root.version !== 4) ||
     !isArray(root.models) ||
     !root.models.every((value) => typeof value === "string") ||
     !isArray(root.sessions) ||
@@ -170,17 +198,21 @@ export function decodeUsageScanCache(document: unknown): UsageScanCache {
   if (
     root.models.length > 50_000 ||
     root.sessions.length > 250_000 ||
-    Object.keys(root.files).length > 10_000
+    Object.keys(root.files).length > MAX_DECODED_FILES
   )
     return cache;
-  let decodedRecordCount = 0;
   const models = root.models as readonly string[];
-  const sessions = root.sessions as readonly string[];
+  // Before v5 identifiers were full SHA-256 digests; their prefix is the compact form.
+  const compact = (value: string) =>
+    root.version === USAGE_SCAN_CACHE_VERSION
+      ? value
+      : value.slice(0, SCAN_CACHE_IDENTIFIER_LENGTH);
+  const sessions = (root.sessions as readonly string[]).map(compact);
   for (const [fileKey, rawEntry] of Object.entries(root.files)) {
     if (typeof rawEntry !== "object" || rawEntry === null) continue;
     const entry = rawEntry as Partial<SerializedFile>;
     // Old transcript rows did not retain speed; rescan them rather than price as standard.
-    if (root.version !== USAGE_SCAN_CACHE_VERSION && (entry.p === "codex" || entry.p === "claude"))
+    if ((root.version === 2 || root.version === 3) && (entry.p === "codex" || entry.p === "claude"))
       continue;
     if (
       typeof entry.o !== "string" ||
@@ -195,8 +227,7 @@ export function decodeUsageScanCache(document: unknown): UsageScanCache {
       continue;
     }
 
-    if (entry.r.length > 100_000 || decodedRecordCount + entry.r.length > 250_000) continue;
-    decodedRecordCount += entry.r.length;
+    if (entry.r.length > MAX_RECORDS_PER_FILE) continue;
     const records: UsageRecord[] = [];
     let corrupt = false;
     for (const rawRow of entry.r) {
@@ -271,7 +302,7 @@ export function decodeUsageScanCache(document: unknown): UsageScanCache {
           }),
           ...(authoritativeTotal === undefined ? {} : { totalTokens: authoritativeTotal }),
         },
-        dedupeKey,
+        dedupeKey: dedupeKey === null ? null : compact(dedupeKey),
         reportedCostUsd,
       });
     }
@@ -287,6 +318,26 @@ export function decodeUsageScanCache(document: unknown): UsageScanCache {
     }
   }
   return cache;
+}
+
+/**
+ * Bound the records held in memory. Evicts the least recently modified files
+ * first, so the files most likely to be requested (and to still change) stay.
+ * Returns the number of evicted files.
+ */
+export function capUsageScanCache(cache: UsageScanCache, maxRecords: number): number {
+  let total = 0;
+  for (const entry of cache.values()) total += entry.records.length;
+  if (total <= maxRecords) return 0;
+  const oldestFirst = [...cache].toSorted(([, left], [, right]) => left.mtimeMs - right.mtimeMs);
+  let removed = 0;
+  for (const [fileKey, entry] of oldestFirst) {
+    if (total <= maxRecords) break;
+    cache.delete(fileKey);
+    total -= entry.records.length;
+    removed += 1;
+  }
+  return removed;
 }
 
 export interface PruneUsageScanCacheOptions {

@@ -4,6 +4,7 @@ import {
   type OrchestrationGetFullThreadDiffResult,
   type OrchestrationGetTurnDiffResult as OrchestrationGetTurnDiffResultType,
 } from "@ryco/contracts";
+import { LRUCache } from "@ryco/shared/lruCache";
 import { Effect, Layer, Option, Schema } from "effect";
 
 import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
@@ -17,9 +18,34 @@ import {
 
 const isTurnDiffResult = Schema.is(OrchestrationGetTurnDiffResult);
 
+/**
+ * Patches keyed by resolved commit OIDs. Checkpoint commits are content
+ * addressed, so an entry's content can never go stale: a ref rewritten by a
+ * revert resolves to a different OID and misses. Serves second clients and the
+ * refetch after a provider invalidation without re-running `git diff`.
+ *
+ * Accepted trade-off: the patch's presentation also depends on working-tree
+ * `.gitattributes` (any directory) and diff config, which the key leaves out;
+ * keying on them would mean walking the tree per request. An edit to those
+ * shows under the old presentation until the entry is evicted (32 entries).
+ */
+const CHECKPOINT_DIFF_CACHE_MAX_ENTRIES = 32;
+const CHECKPOINT_DIFF_CACHE_MAX_BYTES = 32 * 1024 * 1024;
+
+const checkpointDiffCacheKey = (input: {
+  readonly cwd: string;
+  readonly fromCommitOid: string;
+  readonly toCommitOid: string;
+  readonly ignoreWhitespace: boolean;
+}) => JSON.stringify([input.cwd, input.fromCommitOid, input.toCommitOid, input.ignoreWhitespace]);
+
 const make = Effect.gen(function* () {
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const checkpointStore = yield* CheckpointStore;
+  const diffCache = new LRUCache<string>(
+    CHECKPOINT_DIFF_CACHE_MAX_ENTRIES,
+    CHECKPOINT_DIFF_CACHE_MAX_BYTES,
+  );
 
   const getTurnDiff: CheckpointDiffQueryShape["getTurnDiff"] = Effect.fn("getTurnDiff")(
     function* (input) {
@@ -97,21 +123,13 @@ const make = Effect.gen(function* () {
         });
       }
 
-      const [fromExists, toExists] = yield* Effect.all(
-        [
-          checkpointStore.hasCheckpointRef({
-            cwd: workspaceCwd,
-            checkpointRef: fromCheckpointRef,
-          }),
-          checkpointStore.hasCheckpointRef({
-            cwd: workspaceCwd,
-            checkpointRef: toCheckpointRef,
-          }),
-        ],
-        { concurrency: "unbounded" },
-      );
+      // One Git process answers both refs; the OIDs then feed the diff directly.
+      const [fromCommitOid, toCommitOid] = yield* checkpointStore.resolveCheckpointCommits({
+        cwd: workspaceCwd,
+        checkpointRefs: [fromCheckpointRef, toCheckpointRef],
+      });
 
-      if (!fromExists) {
+      if (!fromCommitOid) {
         return yield* new CheckpointUnavailableError({
           threadId: input.threadId,
           turnCount: input.fromTurnCount,
@@ -119,7 +137,7 @@ const make = Effect.gen(function* () {
         });
       }
 
-      if (!toExists) {
+      if (!toCommitOid) {
         return yield* new CheckpointUnavailableError({
           threadId: input.threadId,
           turnCount: input.toTurnCount,
@@ -127,13 +145,20 @@ const make = Effect.gen(function* () {
         });
       }
 
-      const diff = yield* checkpointStore.diffCheckpoints({
+      const diffInput = {
         cwd: workspaceCwd,
-        fromCheckpointRef,
-        toCheckpointRef,
-        fallbackFromToHead: false,
+        fromCommitOid,
+        toCommitOid,
         ignoreWhitespace,
-      });
+      };
+      const cacheKey = checkpointDiffCacheKey(diffInput);
+      let diff = diffCache.get(cacheKey);
+      if (diff === null) {
+        const computed = yield* checkpointStore.diffCheckpointCommits(diffInput);
+        // UTF-16 length approximates retained bytes closely enough for a bound.
+        diffCache.set(cacheKey, computed, computed.length * 2);
+        diff = computed;
+      }
 
       const turnDiff: OrchestrationGetTurnDiffResultType = {
         threadId: input.threadId,

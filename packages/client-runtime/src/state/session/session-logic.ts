@@ -1,5 +1,5 @@
 import { ApprovalResponseIdentity, ApprovalResponseState } from "@ryco/contracts";
-import { Schema } from "effect";
+import * as Schema from "effect/Schema";
 import { extractToolContentText, extractToolResultText } from "@ryco/shared/toolOutput";
 import { isContextCompactionActivity } from "@ryco/shared/threadActivity";
 import { readTurnSteerRejectionActivity } from "@ryco/shared/turnSteer";

@@ -16,7 +16,9 @@ export interface VisibleWorkspaceFileTreeRow {
 
 export type WorkspaceFileTreeEntry = Pick<ProjectEntry, "path" | "kind">;
 
-const SORT_LOCALE_OPTIONS: Intl.CollatorOptions = { numeric: true, sensitivity: "base" };
+// One collator for every comparison: `localeCompare` with options resolves a
+// collator per call, which dominates sorting large trees.
+const NAME_COLLATOR = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 
 interface MutableTreeNode {
   readonly path: string;
@@ -60,7 +62,7 @@ function toTreeNodes(children: Map<string, MutableTreeNode>): readonly Workspace
   }));
   return nodes.toSorted((left, right) => {
     if (left.kind !== right.kind) return left.kind === "directory" ? -1 : 1;
-    return left.name.localeCompare(right.name, undefined, SORT_LOCALE_OPTIONS);
+    return NAME_COLLATOR.compare(left.name, right.name);
   });
 }
 

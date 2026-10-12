@@ -158,6 +158,8 @@ describe("ssh tunnel scripts", () => {
     assert.include(buildRemoteLaunchScript(), "RUNNER_CHANGED=1");
     assert.include(buildRemoteLaunchScript(), 'kill "$REMOTE_PID" 2>/dev/null || true');
     assert.include(buildRemoteLaunchScript(), "wait_ready");
+    // Loopback readiness probes give up quickly so one landing in server startup stays cheap.
+    assert.include(buildRemoteLaunchScript(), 'node - "$REMOTE_PORT" "$1" "250"');
     assert.include(buildRemoteLaunchScript(), '"$RUNNER_FILE" serve --host 127.0.0.1');
     assert.include(buildRemoteLaunchScript(), '--base-dir "$DEFAULT_SERVER_HOME"');
     assert.notInclude(buildRemoteLaunchScript(), "server-home");

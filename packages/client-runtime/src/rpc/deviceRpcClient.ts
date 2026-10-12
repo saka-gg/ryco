@@ -34,7 +34,8 @@ import {
 } from "@ryco/contracts";
 
 import type { DeviceRpcProtocolClient } from "./protocol.ts";
-import type { Effect, Stream } from "effect";
+import type * as Effect from "effect/Effect";
+import type * as Stream from "effect/Stream";
 import type {
   DeviceFrameSource,
   DeviceFrameSourceHandlers,

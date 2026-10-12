@@ -915,19 +915,22 @@ describe("HubConnector", () => {
       failure: "server_draining",
     });
     expect(proofAttempts).toBe(1);
-    expect(sockets).toHaveLength(0);
+    // The socket opened beside the refused proof is released, unused.
+    expect(sockets).toHaveLength(1);
+    expect(sockets[0]!.sent).toHaveLength(0);
+    expect(sockets[0]!.closeCalls).toBe(1);
     expect(clock.timers.size).toBe(1);
 
     await clock.advance(1_000);
     await settle();
     expect(proofAttempts).toBe(2);
-    expect(sockets).toHaveLength(1);
-    sockets[0]!.emit("open", {} as Event);
-    const auth = decodeRelayFrame(sockets[0]!.sent[0]!);
+    expect(sockets).toHaveLength(2);
+    sockets[1]!.emit("open", {} as Event);
+    const auth = decodeRelayFrame(sockets[1]!.sent[0]!);
     expect(
       auth.ok && auth.value.type === "auth" && auth.value.peer === "node" && auth.value.nonce,
     ).toEqual(new Uint8Array(32).fill(2));
-    sockets[0]!.emit("message", {
+    sockets[1]!.emit("message", {
       data: encoded({
         type: "ready",
         protocolMajor: 1,
@@ -941,6 +944,114 @@ describe("HubConnector", () => {
     expect(clock.timers.size).toBe(2);
     await connector.stop();
     expect(clock.timers.size).toBe(0);
+  });
+
+  it("proves before opening a socket after a refused proof, and opens beside the proof again once authenticated", async () => {
+    const clock = scheduler();
+    const activeIdentity = identity();
+    const order: string[] = [];
+    const sockets: FakeSocket[] = [];
+    let proofAttempts = 0;
+    const connector = new HubConnector({
+      config: enabledConfig,
+      identity: {
+        ...activeIdentity,
+        createRelayAuthenticationFrame: async (...input) => {
+          proofAttempts += 1;
+          const attempt = proofAttempts;
+          order.push(`proof:${attempt}`);
+          await Promise.resolve();
+          if (attempt === 1) throw new HubRelayAuthenticationError("server_draining");
+          const frame = await activeIdentity.createRelayAuthenticationFrame(...input);
+          order.push(`proved:${attempt}`);
+          return frame;
+        },
+      },
+      transport: {
+        open: () => {
+          const socket = new FakeSocket();
+          sockets.push(socket);
+          order.push(`open:${proofAttempts}`);
+          return socket;
+        },
+      },
+      channels: { open: async () => Promise.reject(new Error("unused")) },
+      enrollmentMetadata,
+      livenessWatch: false,
+      scheduler: clock.value,
+    });
+    const ready = {
+      data: encoded({
+        type: "ready",
+        protocolMajor: 1,
+        protocolMinor: 2,
+        limits: RELAY_INITIAL_LIMITS,
+      }),
+    } as MessageEvent;
+
+    const starting = connector.start();
+    await settle(50);
+    // The first attempt opens beside its proof; the Hub refuses the proof.
+    expect(order).toEqual(["proof:1", "open:1"]);
+    await clock.advance(1_000);
+    await settle(50);
+    // The retry proves first: no socket until the proof is in hand.
+    expect(order).toEqual(["proof:1", "open:1", "proof:2", "proved:2", "open:2"]);
+    sockets[1]!.emit("open", {} as Event);
+    sockets[1]!.emit("message", ready);
+    await starting;
+    await settle(50);
+    expect(connector.status().state).toBe("online");
+
+    // Once authenticated, a later reconnect opens beside its proof again.
+    sockets[1]!.emit("close", { code: 1006, reason: "", wasClean: false } as CloseEvent);
+    await settle(50);
+    await clock.advance(30_000);
+    await settle(50);
+    expect(order.slice(5, 7)).toEqual(["proof:3", "open:3"]);
+    await connector.stop();
+  });
+
+  it("keeps opening beside the proof after a proof that failed on the network", async () => {
+    const clock = scheduler();
+    const activeIdentity = identity();
+    const order: string[] = [];
+    let proofAttempts = 0;
+    const connector = new HubConnector({
+      config: enabledConfig,
+      identity: {
+        ...activeIdentity,
+        createRelayAuthenticationFrame: async (...input) => {
+          proofAttempts += 1;
+          order.push(`proof:${proofAttempts}`);
+          await Promise.resolve();
+          const attempt = proofAttempts;
+          if (attempt === 1) throw new HubRelayAuthenticationError("network");
+          const frame = await activeIdentity.createRelayAuthenticationFrame(...input);
+          order.push(`proved:${attempt}`);
+          return frame;
+        },
+      },
+      transport: {
+        open: () => {
+          order.push(`open:${proofAttempts}`);
+          return new FakeSocket();
+        },
+      },
+      channels: { open: async () => Promise.reject(new Error("unused")) },
+      enrollmentMetadata,
+      livenessWatch: false,
+      scheduler: clock.value,
+    });
+
+    void connector.start();
+    await settle(50);
+    expect(order).toEqual(["proof:1", "open:1"]);
+    await clock.advance(1_000);
+    await settle(50);
+    // The outage reached no Hub: the reconnect that ends it stays concurrent.
+    expect(order).toEqual(["proof:1", "open:1", "proof:2", "open:2", "proved:2"]);
+    await connector.stop();
   });
 
   it.each(["ping", "pong"] as const)(

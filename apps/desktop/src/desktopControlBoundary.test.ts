@@ -8,16 +8,24 @@ const source = (name: string) => readFileSync(join(import.meta.dirname, name), "
 describe("Desktop-main local control credential boundary", () => {
   it("passes a fresh per-child credential only through the inherited bootstrap pipe", () => {
     const main = source("main.ts");
+    const launcher = source("backendLauncher.ts");
     const start = main.indexOf("function startBackend(): void");
     const stop = main.indexOf("async function stopBackendAndWaitForExit(", start);
     const startBackend = main.slice(start, stop);
+    const envelopeStart = main.indexOf("function writeBackendBootstrapEnvelope(");
+    const envelope = main.slice(envelopeStart, main.indexOf("\n}\n", envelopeStart));
 
     expect(startBackend).toContain('Crypto.randomBytes(32).toString("base64url")');
-    expect(startBackend).toContain("desktopControlToken: childControlToken");
-    expect(startBackend).toContain('stdio: ["ignore", "pipe", "pipe", "pipe", "pipe"]');
-    expect(startBackend).toContain("const bootstrapStream = child.stdio[3]");
-    expect(startBackend).toContain("desktopTelemetryFd: 4");
+    expect(startBackend).toContain("controlToken: childControlToken");
     expect(startBackend).not.toContain("process.env.desktopControlToken");
+    expect(envelope).toContain("desktopControlToken: input.controlToken");
+    expect(envelope).toContain("const bootstrapStream = child.stdio[DESKTOP_BACKEND_BOOTSTRAP_FD]");
+    expect(envelope).toContain("desktopTelemetryFd: DESKTOP_BACKEND_TELEMETRY_FD");
+    // The launcher owns the pipes and never sees the credential.
+    expect(launcher).toContain('["ignore", "pipe", "pipe", "pipe", "pipe"]');
+    expect(launcher).toContain("export const DESKTOP_BACKEND_BOOTSTRAP_FD = 3;");
+    expect(launcher).toContain("export const DESKTOP_BACKEND_TELEMETRY_FD = 4;");
+    expect(launcher).not.toContain("ControlToken");
   });
 
   it("never exposes the credential through preload or renderer bootstrap IPC", () => {

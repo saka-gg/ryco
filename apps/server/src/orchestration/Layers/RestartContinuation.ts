@@ -35,6 +35,7 @@ import { OrchestrationCommandReceiptRepository } from "../../persistence/Service
 import { ProviderEffectIntentRepository } from "../../persistence/Services/ProviderEffectIntents.ts";
 import { ProviderSessionDirectory } from "../../provider/Services/ProviderSessionDirectory.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
+import { currentCommandReadModel } from "../currentCommandReadModel.ts";
 import {
   NO_RESTART_SIGNALS,
   RESTART_BACKGROUND_WORK_STOPPED_KIND,
@@ -676,7 +677,9 @@ export const makeRestartContinuation = (options: RestartContinuationOptions = {}
         for (let page = 0; page < DISPATCH_MAX_PAGES; page += 1) {
           const rows = yield* repository.listPending(DISPATCH_PAGE_SIZE);
           if (rows.length === 0) return;
-          const model = yield* snapshots.getCommandReadModel();
+          // The engine's in-memory model is what the decider fences the dispatch against, and
+          // reading it costs nothing (the SQL command read model is a full hydration per page).
+          const model = yield* currentCommandReadModel(engine, snapshots);
           const threadById = new Map<string, OrchestrationThread>(
             model.threads.map((thread) => [thread.id, thread]),
           );

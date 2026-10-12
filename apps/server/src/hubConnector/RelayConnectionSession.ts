@@ -152,6 +152,15 @@ function detachRelayFrameBytes(frame: RelayFrame): RelayFrame {
 const MAX_PENDING_POST_READY_FRAMES = 16;
 
 /**
+ * How long a socket opened beside a still-pending proof waits for it. One
+ * second short of the Hub's own authentication deadline, so the socket is
+ * released before the Hub would time it out.
+ */
+const PROOF_AFTER_OPEN_DEADLINE_MS = RELAY_AUTHENTICATION_DEADLINE_MS - 1_000;
+/** The attempt released its socket because the proof was late; see `#authenticate`. */
+const PROOF_LATE = Symbol("proof-late");
+
+/**
  * A proof this old may have reached the Hub after its challenge expired.
  *
  * The Hub honours a challenge for 30 seconds and rejects an expired one with
@@ -204,6 +213,8 @@ export class RelayConnectionSession {
   readonly #onFrame: (frame: RelayFrame) => void;
   readonly #onTerminal: (error: RelayConnectionError) => void;
   readonly #now: () => number;
+  readonly #proofFirst: boolean;
+  #proofRefused = false;
   #proofRequestedAt: number | undefined;
   #proofSentAt: number | undefined;
   #socket: HubRelaySocket | undefined;
@@ -233,6 +244,13 @@ export class RelayConnectionSession {
     readonly scheduler?: RelaySessionScheduler;
     /** Wall clock for the proof's age; injectable for tests. */
     readonly now?: () => number;
+    /**
+     * Prepare the proof before opening the socket instead of beside it. For an
+     * attempt that follows a refused proof (see {@link proofRefused}): a Hub
+     * refusing the challenge (draining, rate limiting) would otherwise be
+     * handed a relay upgrade it does not want on every retry.
+     */
+    readonly proofFirst?: boolean;
     readonly onFrame: (frame: RelayFrame) => void;
     readonly onTerminal: (error: RelayConnectionError) => void;
   }) {
@@ -241,6 +259,7 @@ export class RelayConnectionSession {
     this.#hubOrigin = options.hubOrigin;
     this.#scheduler = options.scheduler ?? defaultRelayScheduler;
     this.#now = options.now ?? Date.now;
+    this.#proofFirst = options.proofFirst ?? false;
     this.#onFrame = options.onFrame;
     this.#onTerminal = options.onTerminal;
   }
@@ -251,6 +270,19 @@ export class RelayConnectionSession {
 
   get ready(): RelayReadyFrame | undefined {
     return this.#ready;
+  }
+
+  /**
+   * Whether this attempt's proof (the HTTPS challenge and the signature) failed
+   * for a reason other than the network: the Hub answered and refused it
+   * (draining, rate limiting, a malformed exchange), or this node could not
+   * make it (its key store, an incompatible version). A network failure is not
+   * a refusal: it reached no Hub, the socket beside it would not have either,
+   * and holding the next socket back would only make the reconnect that ends
+   * an outage pay the proof and the socket in sequence.
+   */
+  get proofRefused(): boolean {
+    return this.#proofRefused;
   }
 
   authenticate(): Promise<RelayReadyFrame> {
@@ -275,9 +307,14 @@ export class RelayConnectionSession {
     });
   }
 
-  async #authenticate(): Promise<RelayReadyFrame> {
+  /**
+   * The signed authentication frame, encoded: the HTTPS challenge, the
+   * signature, and the version and shutdown checks. Every rejection is a
+   * bounded {@link RelayConnectionError}, and the frame's key material is wiped
+   * whatever happens to it.
+   */
+  async #prepareAuthentication(): Promise<Uint8Array> {
     let auth: RelayNodeAuthHandshake;
-    this.#proofRequestedAt = this.#now();
     try {
       auth = await this.#identity.createRelayAuthenticationFrame(this.#hubOrigin, {
         protocolMajor: RELAY_PROTOCOL_MAJOR,
@@ -303,25 +340,70 @@ export class RelayConnectionSession {
       auth.signature.fill(0);
       throw new RelayConnectionError("network");
     }
-    let authBytes: Uint8Array;
     try {
-      authBytes = unwrapEncoded(auth);
+      return unwrapEncoded(auth);
     } finally {
       auth.nonce.fill(0);
       auth.signature.fill(0);
     }
+  }
 
-    return new Promise<RelayReadyFrame>((resolve, reject) => {
-      this.#pendingAuthBytes = authBytes;
-      let socket: HubRelaySocket;
-      try {
-        socket = this.#transport.open(relayWebSocketUrl(this.#hubOrigin));
-      } catch {
-        authBytes.fill(0);
-        reject(new RelayConnectionError("network"));
-        return;
-      }
-      this.#socket = socket;
+  /**
+   * Prove this node's identity and open the relay socket at the same time.
+   *
+   * The proof is an HTTPS challenge plus a signature, and the socket a fresh
+   * TCP, TLS and upgrade exchange; neither needs the other, so running them in
+   * sequence put two to three Hub round trips on every reconnect. The frame is
+   * sent once both are ready. Should the proof still be pending close to the
+   * Hub's authentication deadline after the socket opened (a slow key store,
+   * a credential prompt), that socket is let go before the Hub times it out and
+   * the attempt continues in the original order: proof first, then a fresh
+   * socket, so a slow key store can never make every attempt time out. A
+   * session built `proofFirst` uses that order from the start.
+   */
+  async #authenticate(): Promise<RelayReadyFrame> {
+    this.#proofRequestedAt = this.#now();
+    const proof = this.#prepareAuthentication();
+    // A proof that lands after shutdown is wiped; every other outcome is
+    // consumed by one of the attempts below.
+    proof.then(
+      (bytes) => {
+        if (this.#closed) bytes.fill(0);
+      },
+      (error: unknown) => {
+        this.#proofRefused = !(error instanceof RelayConnectionError && error.kind === "network");
+      },
+    );
+    if (!this.#proofFirst) {
+      const concurrent = await this.#connect(proof, PROOF_AFTER_OPEN_DEADLINE_MS);
+      if (concurrent !== PROOF_LATE) return concurrent;
+    }
+    const authBytes = await proof;
+    if (this.#closed) {
+      authBytes.fill(0);
+      throw new RelayConnectionError("network");
+    }
+    const serial = await this.#connect(Promise.resolve(authBytes), null);
+    if (serial === PROOF_LATE) throw new RelayConnectionError("internal_error");
+    return serial;
+  }
+
+  /**
+   * One socket attempt. `proofWaitMs` bounds how long an opened socket waits
+   * for a proof still being prepared before the attempt resolves
+   * {@link PROOF_LATE} with that socket released; `null` means the proof is
+   * already in hand.
+   */
+  #connect(
+    proof: Promise<Uint8Array>,
+    proofWaitMs: number | null,
+  ): Promise<RelayReadyFrame | typeof PROOF_LATE> {
+    return new Promise<RelayReadyFrame | typeof PROOF_LATE>((resolve, reject) => {
+      let authBytes: Uint8Array | undefined;
+      let proofFailure: RelayConnectionError | undefined;
+      let opened = false;
+      let released = false;
+      let socket: HubRelaySocket | undefined;
 
       const fail = (error: RelayConnectionError) => {
         this.#clearPendingAuthentication();
@@ -333,8 +415,45 @@ export class RelayConnectionSession {
         }
         this.close();
       };
-      const onOpen = () => {
-        if (this.#closed) return;
+      /** Let this attempt's socket go without ending the session. */
+      const releaseSocket = () => {
+        released = true;
+        if (this.#timer !== undefined) this.#scheduler.clearTimeout(this.#timer);
+        this.#timer = undefined;
+        this.#disposeListeners();
+        const current = this.#socket;
+        this.#socket = undefined;
+        try {
+          current?.close(1000);
+        } catch {
+          // A socket that is already closing requires no further cleanup.
+        }
+      };
+      /**
+       * A socket that fails before authenticating while the proof is still
+       * being prepared is released at once, and the attempt reports the proof's
+       * own failure if it has one: a refused or revoked node must not be
+       * reported as a network drop because its socket happened to fail first.
+       */
+      const failBeforeAuthentication = (error: RelayConnectionError) => {
+        if (authBytes !== undefined || proofFailure !== undefined || this.#closed) {
+          fail(proofFailure ?? error);
+          return;
+        }
+        releaseSocket();
+        proof.then(
+          (bytes) => {
+            bytes.fill(0);
+            fail(error);
+          },
+          (cause: unknown) =>
+            fail(
+              cause instanceof RelayConnectionError ? cause : new RelayConnectionError("network"),
+            ),
+        );
+      };
+      const sendAuthentication = () => {
+        if (this.#closed || released || socket === undefined || authBytes === undefined) return;
         if (this.#timer !== undefined) this.#scheduler.clearTimeout(this.#timer);
         try {
           socket.send(authBytes);
@@ -344,10 +463,52 @@ export class RelayConnectionSession {
         }
         this.#proofSentAt = this.#now();
         this.#clearPendingAuthentication();
+        authBytes = undefined;
         this.#timer = this.#scheduler.setTimeout(
           () => fail(new RelayConnectionError("authentication_timeout")),
           RELAY_AUTHENTICATION_DEADLINE_MS,
         );
+      };
+
+      proof.then(
+        (bytes) => {
+          if (released || this.#closed) return;
+          authBytes = bytes;
+          this.#pendingAuthBytes = bytes;
+          if (opened) sendAuthentication();
+        },
+        (cause: unknown) => {
+          if (released || this.#closed) return;
+          proofFailure =
+            cause instanceof RelayConnectionError ? cause : new RelayConnectionError("network");
+          fail(proofFailure);
+        },
+      );
+
+      try {
+        socket = this.#transport.open(relayWebSocketUrl(this.#hubOrigin));
+      } catch {
+        failBeforeAuthentication(new RelayConnectionError("network"));
+        return;
+      }
+      this.#socket = socket;
+      const openedSocket = socket;
+
+      const onOpen = () => {
+        if (this.#closed || released) return;
+        opened = true;
+        if (this.#timer !== undefined) this.#scheduler.clearTimeout(this.#timer);
+        this.#timer = undefined;
+        if (authBytes !== undefined) {
+          sendAuthentication();
+          return;
+        }
+        if (proofWaitMs === null) return;
+        this.#timer = this.#scheduler.setTimeout(() => {
+          if (this.#closed || released || authBytes !== undefined) return;
+          releaseSocket();
+          resolve(PROOF_LATE);
+        }, proofWaitMs);
       };
       const onMessage = (event: MessageEvent<unknown>) => {
         const bytes = binaryMessage(event.data);
@@ -388,13 +549,16 @@ export class RelayConnectionSession {
           }
           if (
             frame.type !== "ready" ||
+            this.#proofSentAt === undefined ||
             frame.protocolMajor !== RELAY_PROTOCOL_MAJOR ||
             frame.protocolMinor < RELAY_AUTHORIZED_CHANNEL_MINOR ||
             frame.protocolMinor > (this.#offeredProtocolMinor ?? -1)
           ) {
             fail(
               new RelayConnectionError(
-                frame.type === "ready" ? "version_incompatible" : "protocol_invalid",
+                frame.type === "ready" && this.#proofSentAt !== undefined
+                  ? "version_incompatible"
+                  : "protocol_invalid",
               ),
             );
             return;
@@ -417,11 +581,21 @@ export class RelayConnectionSession {
         }
         this.#onFrame(frame);
       };
-      const onError = () => fail(new RelayConnectionError("network"));
+      const onError = () => {
+        if (this.#ready === undefined && this.#proofSentAt === undefined) {
+          failBeforeAuthentication(new RelayConnectionError("network"));
+          return;
+        }
+        fail(new RelayConnectionError("network"));
+      };
       const onClose = (event: CloseEvent) => {
-        if (this.#closed) return;
+        if (this.#closed || released) return;
         const kind = closeEventKind(event);
         if (!this.#settled) {
+          if (this.#proofSentAt === undefined) {
+            failBeforeAuthentication(new RelayConnectionError(kind));
+            return;
+          }
           fail(new RelayConnectionError(kind));
         } else {
           this.#closed = true;
@@ -430,14 +604,14 @@ export class RelayConnectionSession {
         }
       };
       this.#listeners = { open: onOpen, message: onMessage, error: onError, close: onClose };
-      socket.addEventListener("open", onOpen);
-      socket.addEventListener("message", onMessage);
-      socket.addEventListener("error", onError);
-      socket.addEventListener("close", onClose);
+      openedSocket.addEventListener("open", onOpen);
+      openedSocket.addEventListener("message", onMessage);
+      openedSocket.addEventListener("error", onError);
+      openedSocket.addEventListener("close", onClose);
       // Opening can stall without an error/close event after network changes.
       // Give the handshake its own full deadline once the socket opens.
       this.#timer = this.#scheduler.setTimeout(
-        () => fail(new RelayConnectionError("network")),
+        () => failBeforeAuthentication(new RelayConnectionError("network")),
         RELAY_AUTHENTICATION_DEADLINE_MS,
       );
     });

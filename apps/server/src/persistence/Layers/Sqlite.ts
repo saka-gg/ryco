@@ -4,6 +4,7 @@ import type { SqlError } from "effect/sql/SqlError";
 
 import { runMigrations } from "../Migrations.ts";
 import { ServerConfig } from "../../config.ts";
+import { trackStartupPhase } from "../../startupStallMonitor.ts";
 
 type RuntimeSqliteLayerConfig = {
   readonly filename: string;
@@ -35,7 +36,20 @@ const setup = Layer.effectDiscard(
     yield* sql`PRAGMA busy_timeout = 5000;`;
     yield* sql`PRAGMA journal_mode = WAL;`;
     yield* sql`PRAGMA foreign_keys = ON;`;
-    yield* runMigrations();
+    // Read-path tuning, adopted from a repeated A/B on a synthetic 5k-thread / 400k-activity
+    // database (fresh-clone cold reads and warm re-reads, 5 runs per variant, twice):
+    // - mmap: cold boot hydration reads fell ~50-60% (threads 191 -> 100 ms, anchors 506 ->
+    //   187 ms, latest turns 160 -> 62 ms) and warm ones 10-25%.
+    // - 32 MiB page cache (default 2 MiB): warm re-reads, the steady state of repeated shell
+    //   snapshots, fell 20-35% (latest turns 10 -> 6.6 ms, tool-use stats 37 -> 26 ms).
+    // Not adopted: temp_store=MEMORY (no measurable gain) and PRAGMA optimize/ANALYZE (no gain
+    // on these plans, seconds of boot-time ANALYZE on large databases, and plan changes).
+    // `synchronous` stays at its default on purpose (docs/streaming-sqlite.md).
+    yield* sql`PRAGMA mmap_size = 268435456;`;
+    yield* sql`PRAGMA cache_size = -32768;`;
+    // Named for the startup stall monitor: a slow ledger pass or one-time repair (9.5 s and
+    // 27.4 s stalls were observed before the listener bound) is otherwise unattributed.
+    yield* trackStartupPhase("persistence.migrations", runMigrations());
     yield* Effect.logDebug("startup sqlite setup complete", {
       durationMs: Date.now() - startedAt,
     });

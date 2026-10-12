@@ -76,8 +76,8 @@ describe("TraceSink", () => {
         const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ryco-trace-sink-"));
         const tracePath = path.join(tempDir, "server.trace.ndjson");
         const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
-        const appendFileSpy = vi
-          .spyOn(fs.promises, "appendFile")
+        const openSpy = vi
+          .spyOn(fs.promises, "open")
           .mockRejectedValueOnce(new Error("forced trace sink write failure"));
 
         try {
@@ -96,7 +96,7 @@ describe("TraceSink", () => {
           assert.equal(sink.health().writeFailures, 1);
           assert.equal(sink.health().retryDelayMs, 10_000);
         } finally {
-          appendFileSpy.mockRestore();
+          openSpy.mockRestore();
           setTimeoutSpy.mockRestore();
           fs.rmSync(tempDir, { recursive: true, force: true });
         }
@@ -199,8 +199,8 @@ describe("TraceSink", () => {
       Effect.gen(function* () {
         const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ryco-trace-sink-"));
         const tracePath = path.join(tempDir, "server.trace.ndjson");
-        const appendFileSpy = vi
-          .spyOn(fs.promises, "appendFile")
+        const openSpy = vi
+          .spyOn(fs.promises, "open")
           .mockRejectedValueOnce(new Error("forced trace sink write failure"))
           .mockRejectedValueOnce(new Error("forced trace sink write failure"));
 
@@ -221,7 +221,7 @@ describe("TraceSink", () => {
           for (let index = 0; index < 40; index += 1) {
             sink.push(makeRecord("during-backoff", String(index)));
           }
-          assert.equal(appendFileSpy.mock.calls.length, 1);
+          assert.equal(openSpy.mock.calls.length, 1);
 
           yield* sink.flush;
           assert.equal(sink.health().retryDelayMs, 500);
@@ -233,7 +233,7 @@ describe("TraceSink", () => {
           assert.equal(sink.health().writeFailures, 2);
           assert.notEqual(sink.health().lastWriteFailureAt, null);
         } finally {
-          appendFileSpy.mockRestore();
+          openSpy.mockRestore();
           fs.rmSync(tempDir, { recursive: true, force: true });
         }
       }),
@@ -246,8 +246,8 @@ describe("TraceSink", () => {
         const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ryco-trace-sink-"));
         const tracePath = path.join(tempDir, "server.trace.ndjson");
         const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
-        const appendFileSpy = vi
-          .spyOn(fs.promises, "appendFile")
+        const openSpy = vi
+          .spyOn(fs.promises, "open")
           .mockRejectedValueOnce(new Error("forced trace sink write failure"));
 
         try {
@@ -265,7 +265,7 @@ describe("TraceSink", () => {
           assert.equal(sink.health().retryDelayMs, 250);
           assert.equal(setTimeoutSpy.mock.calls.at(-1)?.[1], 250);
         } finally {
-          appendFileSpy.mockRestore();
+          openSpy.mockRestore();
           setTimeoutSpy.mockRestore();
           fs.rmSync(tempDir, { recursive: true, force: true });
         }

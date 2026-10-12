@@ -295,8 +295,10 @@ describe("ChatView Navigation (full app)", () => {
         '[data-testid="sidebar-add-project-trigger"]',
       );
       expect(projectTrigger?.checkVisibility()).toBe(true);
+      // The inactive pane mounts on first use: absent until then.
       expect(
-        document.querySelector<HTMLElement>('[data-testid="inbox-sidebar"]')?.checkVisibility(),
+        document.querySelector<HTMLElement>('[data-testid="inbox-sidebar"]')?.checkVisibility() ??
+          false,
       ).toBe(false);
       await waitForWsRequestsToSettle();
       const stableRequestTags = [

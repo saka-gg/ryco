@@ -42,6 +42,18 @@ describe("external performance CLI", () => {
     assert.equal(scenario.sourceControlStatusRows, 8);
   });
 
+  it("parses the bundle budget command and its dist directory", () => {
+    const parsed = parseArgs(["bundle-budget", "--dist", "apps/web/dist"]);
+    assert.equal(parsed.command, "bundle-budget");
+    assert.equal(parsed.values.get("dist"), "apps/web/dist");
+  });
+
+  it("profiles boot CPU only when a profile directory is given", () => {
+    assert.equal(scenarioFromArgs(parseArgs(["run"])).cpuProfileDir, null);
+    const scenario = scenarioFromArgs(parseArgs(["smoke", "--cpu-profile", "out/profiles"]));
+    assert.match(scenario.cpuProfileDir ?? "", /out[\\/]profiles$/u);
+  });
+
   it("rejects unknown profiles", () => {
     assert.throws(
       () => scenarioFromArgs(parseArgs(["run", "--profile", "mystery"])),

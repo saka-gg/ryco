@@ -42,6 +42,9 @@ function installTestBrowser(url: string) {
   });
 }
 
+/** Every control-plane request carries its deadline's abort signal. */
+const DEADLINE = { signal: expect.any(AbortSignal) };
+
 describe("environmentBootstrap", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -101,7 +104,10 @@ describe("environmentBootstrap", () => {
     ]);
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock).toHaveBeenCalledWith("http://localhost/.well-known/ryco/environment");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://localhost/.well-known/ryco/environment",
+      DEADLINE,
+    );
   });
 
   it("uses https descriptor urls when the primary environment uses wss", async () => {
@@ -113,6 +119,7 @@ describe("environmentBootstrap", () => {
     await expect(resolveInitialPrimaryEnvironmentDescriptor()).resolves.toEqual(BASE_ENVIRONMENT);
     expect(fetchMock).toHaveBeenCalledWith(
       "https://remote.example.com/.well-known/ryco/environment",
+      DEADLINE,
     );
   });
 
@@ -124,6 +131,7 @@ describe("environmentBootstrap", () => {
     await expect(resolveInitialPrimaryEnvironmentDescriptor()).resolves.toEqual(BASE_ENVIRONMENT);
     expect(fetchMock).toHaveBeenCalledWith(
       "https://remote.example.com/.well-known/ryco/environment",
+      DEADLINE,
     );
     expect(getPrimaryKnownEnvironment()?.target).toEqual({
       httpBaseUrl: "https://remote.example.com/",
@@ -139,6 +147,7 @@ describe("environmentBootstrap", () => {
     await expect(resolveInitialPrimaryEnvironmentDescriptor()).resolves.toEqual(BASE_ENVIRONMENT);
     expect(fetchMock).toHaveBeenCalledWith(
       "https://remote.example.com/.well-known/ryco/environment",
+      DEADLINE,
     );
     expect(getPrimaryKnownEnvironment()?.target).toEqual({
       httpBaseUrl: "https://remote.example.com/",
@@ -152,7 +161,10 @@ describe("environmentBootstrap", () => {
     installTestBrowser("http://localhost:5735/");
 
     await expect(resolveInitialPrimaryEnvironmentDescriptor()).resolves.toEqual(BASE_ENVIRONMENT);
-    expect(fetchMock).toHaveBeenCalledWith("http://localhost:5735/.well-known/ryco/environment");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://localhost:5735/.well-known/ryco/environment",
+      DEADLINE,
+    );
   });
 
   it("uses the vite proxy for desktop-managed loopback descriptor requests during local dev", async () => {
@@ -175,6 +187,9 @@ describe("environmentBootstrap", () => {
     });
 
     await expect(resolveInitialPrimaryEnvironmentDescriptor()).resolves.toEqual(BASE_ENVIRONMENT);
-    expect(fetchMock).toHaveBeenCalledWith("http://127.0.0.1:5733/.well-known/ryco/environment");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:5733/.well-known/ryco/environment",
+      DEADLINE,
+    );
   });
 });

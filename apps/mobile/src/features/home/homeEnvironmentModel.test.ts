@@ -3,7 +3,11 @@ import { describe, expect, it } from "vite-plus/test";
 import type { EnvironmentId, ServerConfig } from "@ryco/contracts";
 
 import type { InboxEnvironment } from "../inbox/inboxModel";
-import { buildHomeEnvironments } from "./homeEnvironmentModel";
+import {
+  buildHomeEnvironments,
+  homeLastSeenClock,
+  selectShellCurrentByEnvironmentId,
+} from "./homeEnvironmentModel";
 import type { NodeTrust } from "./nodeTrustModel";
 
 describe("Home environments", () => {
@@ -161,6 +165,17 @@ describe("Home environments", () => {
         staleDetail: "Online · cached",
       },
     ]);
+  });
+
+  it("keys cached Hub nodes' last-seen text to the screen clock at minute precision", () => {
+    const minute = Date.parse("2026-08-20T12:07:00.000Z");
+    // A ticking clock moves the text along, but only once per minute it shows.
+    expect(homeLastSeenClock(minute + 59_000, 1)).toBe(minute);
+    expect(homeLastSeenClock(minute + 60_000, 1)).toBe(minute + 60_000);
+    // Nothing to describe, or no clock: the list keeps reading the wall clock
+    // while building and does not re-derive on the screen's ticks.
+    expect(homeLastSeenClock(minute, 0)).toBeUndefined();
+    expect(homeLastSeenClock(undefined, 3)).toBeUndefined();
   });
 
   it("marks an offline direct environment with cached rows as stale", () => {
@@ -424,5 +439,28 @@ it("uses live node capabilities over stale Hub directory defaults without granti
     threadSnoozeSupported: true,
     mutationReady: false,
     connectionState: "read-only",
+  });
+});
+
+describe("Home shell currency selection", () => {
+  it("reads only whether each environment's shell is current", () => {
+    const state = {
+      environmentStateById: {
+        live: { bootstrapComplete: true, threadIds: ["a"] },
+        cached: { bootstrapComplete: false, threadIds: [] },
+      },
+    };
+    expect(selectShellCurrentByEnvironmentId(state)).toEqual({ live: true, cached: false });
+    // A store tick that touched threads, not shell currency, selects an equal
+    // map, which the shallow comparison in the hook keeps as the same snapshot.
+    const ticked = {
+      environmentStateById: {
+        ...state.environmentStateById,
+        live: { bootstrapComplete: true, threadIds: ["a", "b"] },
+      },
+    };
+    expect(selectShellCurrentByEnvironmentId(ticked)).toEqual(
+      selectShellCurrentByEnvironmentId(state),
+    );
   });
 });

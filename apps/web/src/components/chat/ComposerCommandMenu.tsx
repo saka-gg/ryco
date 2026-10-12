@@ -126,6 +126,13 @@ export const ComposerCommandMenu = memo(function ComposerCommandMenu(props: {
   triggerKind: ComposerTriggerKind | null;
   groupSlashCommandSections?: boolean;
   emptyStateText?: string;
+  /** Replaces the default loading line while `isLoading` and nothing is listed. */
+  loadingText?: string | undefined;
+  /** The latest request failed: shown instead of the empty text, or under stale items. */
+  errorText?: string | undefined;
+  onRetry?: (() => void) | undefined;
+  /** A note under the items (for example, results from part of the workspace). */
+  footnote?: string | undefined;
   activeItemId: string | null;
   onHighlightedItemChange: (itemId: string | null) => void;
   onSelect: (item: ComposerCommandItem) => void;
@@ -208,27 +215,64 @@ export const ComposerCommandMenu = memo(function ComposerCommandMenu(props: {
                 </CommandGroupLabel>
                 <p className="text-muted-foreground/70 text-xs">
                   {props.isLoading
-                    ? "Searching workspace skills..."
+                    ? (props.loadingText ?? "Searching workspace skills...")
                     : (props.emptyStateText ??
                       "No skills found. Try / to browse provider commands.")}
                 </p>
               </CommandGroup>
+            ) : props.errorText !== undefined && !props.isLoading ? (
+              <ComposerCommandMenuError text={props.errorText} onRetry={props.onRetry} />
             ) : (
-              <p className="text-muted-foreground/70 text-xs">
-                {props.isLoading
-                  ? "Searching workspace files..."
-                  : (props.emptyStateText ??
-                    (props.triggerKind === "path"
-                      ? "No matching files or folders."
-                      : "No matching command."))}
-              </p>
+              <>
+                <p className="text-muted-foreground/70 text-xs">
+                  {props.isLoading
+                    ? (props.loadingText ?? "Searching workspace files...")
+                    : (props.emptyStateText ??
+                      (props.triggerKind === "path"
+                        ? "No matching files or folders."
+                        : "No matching command."))}
+                </p>
+                {/* "No matches" from part of the workspace must say so. */}
+                {props.footnote !== undefined && !props.isLoading ? (
+                  <p className="mt-1 text-[11px] text-muted-foreground/70">{props.footnote}</p>
+                ) : null}
+              </>
             )}
           </div>
+        ) : props.errorText !== undefined && !props.isLoading ? (
+          <div className="border-t px-3 py-1.5">
+            <ComposerCommandMenuError text={props.errorText} onRetry={props.onRetry} />
+          </div>
+        ) : props.footnote !== undefined ? (
+          <p className="border-t px-3 py-1.5 text-[11px] text-muted-foreground/70">
+            {props.footnote}
+          </p>
         ) : null}
       </div>
     </Command>
   );
 });
+
+function ComposerCommandMenuError(props: { text: string; onRetry: (() => void) | undefined }) {
+  return (
+    <div className="flex items-center justify-between gap-2">
+      <p role="alert" className="text-destructive text-xs">
+        {props.text}
+      </p>
+      {props.onRetry ? (
+        <button
+          type="button"
+          className="shrink-0 rounded-sm px-1 text-foreground text-xs underline-offset-2 hover:underline"
+          // Keep focus (and the open menu) in the prompt editor.
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={props.onRetry}
+        >
+          Retry
+        </button>
+      ) : null}
+    </div>
+  );
+}
 
 const ComposerCommandMenuItem = memo(function ComposerCommandMenuItem(props: {
   item: ComposerCommandItem;

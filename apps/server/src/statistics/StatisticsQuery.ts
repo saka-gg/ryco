@@ -11,41 +11,48 @@
  * turn and request counters retain their final snapshots. Context-window gauges
  * remain a best-effort fallback for older/provider-limited data.
  *
+ * The node:sqlite client is synchronous and owns one connection, so every row
+ * read here stalls the event loop and every other reader/writer. Reads are kept
+ * minimal: per-thread partial aggregates are cached in memory and only threads
+ * with new orchestration events are re-read (see {@link StatisticsState}). Rows
+ * are read in one transaction, then decoded and aggregated after it commits.
+ *
  * A fork's inherited turns and activities are display copies of its source's history: the work
  * is already counted once, on the source, so every reader here leaves them out.
  *
  * @module StatisticsQuery
  */
-import {
-  PullRequestState,
-  ProjectId,
-  type StatisticsDailyBucket,
-  type StatisticsModelRef,
-  type StatisticsProjectRef,
-  type StatisticsRecentPullRequest,
-  type StatisticsSnapshot,
-  type StatisticsTokenAttribution,
-  WorktreeId,
-  WorktreePullRequestLink,
-} from "@ryco/contracts";
-import { readWorktreePullRequestLinks } from "@ryco/shared/worktreePullRequests";
+import { type StatisticsSnapshot } from "@ryco/contracts";
 import { Context, Effect, Layer, Option, Schema, Semaphore } from "effect";
 import * as SqlClient from "effect/sql/SqlClient";
-import * as SqlSchema from "effect/sql/SqlSchema";
-
-import { collectProcessedTokenUsage } from "./processedTokenUsage.ts";
+import type { SqlError } from "effect/sql/SqlError";
 
 import {
   inheritedActivityRowSql,
   inheritedItemIdSql,
   inheritedTurnRowSql,
 } from "../orchestration/forkInheritanceSql.ts";
-
 import {
+  isPersistenceError,
   toPersistenceDecodeError,
   toPersistenceSqlError,
   type ProjectionRepositoryError,
 } from "../persistence/Errors.ts";
+import { ORCHESTRATION_PROJECTOR_NAMES } from "../orchestration/Layers/ProjectionPipeline.ts";
+import {
+  assembleStatisticsSnapshot,
+  buildStatisticsThreadMeta,
+  computeStatisticsThreadPartial,
+  groupStatisticsRowsByThread,
+  StatisticsProjectRow,
+  StatisticsThreadRow,
+  StatisticsTokenActivityRow,
+  StatisticsToolUseRow,
+  StatisticsTurnRow,
+  StatisticsWorktreeRow,
+  statisticsThreadMetaKey,
+  type StatisticsThreadPartial,
+} from "./statisticsAggregation.ts";
 
 /**
  * StatisticsQueryShape - service API.
@@ -61,749 +68,353 @@ export class StatisticsQuery extends Context.Service<StatisticsQuery, Statistics
   "ryco/statistics/StatisticsQuery",
 ) {}
 
-function toPersistenceSqlOrDecodeError(sqlOperation: string, decodeOperation: string) {
-  return (cause: unknown): ProjectionRepositoryError =>
-    Schema.isSchemaError(cause)
-      ? toPersistenceDecodeError(decodeOperation)(cause)
-      : toPersistenceSqlError(sqlOperation)(cause);
+/** Projectors that write the thread-scoped rows a partial is computed from. */
+const THREAD_SCOPED_PROJECTORS = JSON.stringify([
+  ORCHESTRATION_PROJECTOR_NAMES.threads,
+  ORCHESTRATION_PROJECTOR_NAMES.threadSessions,
+  ORCHESTRATION_PROJECTOR_NAMES.threadActivities,
+  ORCHESTRATION_PROJECTOR_NAMES.threadTurns,
+  ORCHESTRATION_PROJECTOR_NAMES.checkpoints,
+]);
+
+/** Above this many changed threads a full read is as cheap as a scoped one. */
+const INCREMENTAL_THREAD_LIMIT = 256;
+/** Yield to other fibers between aggregation chunks of this many threads. */
+const AGGREGATION_CHUNK_THREADS = 256;
+
+/**
+ * Context-window token activities: durable event history first, then projection
+ * rows that have no event (imported/projection-only). `scope` is a JSON array
+ * of thread ids, or `null` for every thread.
+ *
+ * In the NOT EXISTS lookup the `+` operators strip the TEXT column affinity of
+ * `a.activity_id`/`a.created_at`. Without them SQLite cannot use the expression
+ * columns of idx_orch_events_statistics_usage and rescans the thread's events,
+ * re-extracting JSON, once per projection row.
+ */
+export function selectStatisticsTokenActivities(sql: SqlClient.SqlClient, scope: string | null) {
+  return sql`
+    SELECT
+      stream_id AS "threadId",
+      json_extract(payload_json, '$.activity.turnId') AS "turnId",
+      COALESCE(json_extract(payload_json, '$.activity.sequence'), sequence) AS sequence,
+      json_extract(payload_json, '$.activity.createdAt') AS "createdAt",
+      json_extract(payload_json, '$.activity.payload') AS "payloadJson"
+    FROM orchestration_events
+    WHERE event_type = 'thread.activity-appended'
+      AND json_extract(payload_json, '$.activity.kind') = 'context-window.updated'
+      ${scope === null ? sql`` : sql`AND stream_id IN (SELECT value FROM json_each(${scope}))`}
+      AND NOT ${inheritedItemIdSql(
+        sql,
+        sql.literal("json_extract(payload_json, '$.activity.id')"),
+        sql.literal("stream_id"),
+      )}
+    UNION ALL
+    SELECT
+      thread_id AS "threadId", turn_id AS "turnId", sequence,
+      created_at AS "createdAt", payload_json AS "payloadJson"
+    FROM projection_thread_activities a
+    WHERE kind = 'context-window.updated'
+      ${scope === null ? sql`` : sql`AND a.thread_id IN (SELECT value FROM json_each(${scope}))`}
+      AND NOT ${inheritedActivityRowSql(sql, "a")}
+      AND NOT EXISTS (
+        SELECT 1 FROM orchestration_events e
+        WHERE e.event_type = 'thread.activity-appended'
+          AND json_extract(e.payload_json, '$.activity.kind') = 'context-window.updated'
+          AND e.stream_id = a.thread_id
+          AND json_extract(e.payload_json, '$.activity.id') = +a.activity_id
+          AND json_extract(e.payload_json, '$.activity.createdAt') = +a.created_at
+      )
+    ORDER BY "threadId", "createdAt", sequence
+  `;
 }
 
-const ThreadRow = Schema.Struct({
-  threadId: Schema.String,
-  projectId: ProjectId,
-  model: Schema.NullOr(Schema.String),
-  providerInstanceId: Schema.NullOr(Schema.String),
-  createdAt: Schema.String,
-  providerName: Schema.NullOr(Schema.String),
-});
-
-const ProjectRow = Schema.Struct({
-  projectId: ProjectId,
-  title: Schema.String,
-  deletedAt: Schema.NullOr(Schema.String),
-});
-
-const TokenActivityRow = Schema.Struct({
-  threadId: Schema.String,
-  turnId: Schema.NullOr(Schema.String),
-  sequence: Schema.NullOr(Schema.Number),
-  createdAt: Schema.String,
-  payloadJson: Schema.String,
-});
-
-const ToolUseRow = Schema.Struct({
-  threadId: Schema.String,
-  date: Schema.String,
-  count: Schema.Number,
-});
-
-const TurnRow = Schema.Struct({
-  threadId: Schema.String,
-  startedAt: Schema.NullOr(Schema.String),
-  completedAt: Schema.NullOr(Schema.String),
-  checkpointTurnCount: Schema.NullOr(Schema.Number),
-  filesJson: Schema.String,
-});
-
-const WorktreeRow = Schema.Struct({
-  worktreeId: WorktreeId,
-  projectId: ProjectId,
-  title: Schema.NullOr(Schema.String),
-  branch: Schema.String,
-  createdAt: Schema.String,
-  updatedAt: Schema.String,
-  archivedAt: Schema.NullOr(Schema.String),
-  prNumber: Schema.NullOr(Schema.Number),
-  prTitle: Schema.NullOr(Schema.String),
-  prState: Schema.NullOr(PullRequestState),
-  prIsDraft: Schema.NullOr(Schema.Number),
-  prTerminalAt: Schema.NullOr(Schema.String),
-  origin: Schema.String,
-  // NULL on rows written before links: derived from the flat `pr_*` columns.
-  pullRequests: Schema.NullOr(Schema.fromJsonString(Schema.Array(WorktreePullRequestLink))),
-});
-
-/** Every pull request a worktree row carried (dismissed ones left out). */
-function worktreeRowLinks(row: typeof WorktreeRow.Type) {
-  return (
-    row.pullRequests ??
-    readWorktreePullRequestLinks({
-      prNumber: row.prNumber,
-      prTitle: row.prTitle,
-      prState: row.prState,
-      prIsDraft: row.prIsDraft === null ? null : row.prIsDraft === 1,
-      prTerminalAt: row.prTerminalAt,
-      origin: row.origin,
-    })
-  ).filter((link) => !link.dismissedAt);
+/** Completed tool calls per (thread, UTC day). See {@link selectStatisticsTokenActivities} for `scope`. */
+export function selectStatisticsToolUses(sql: SqlClient.SqlClient, scope: string | null) {
+  return sql`
+    SELECT
+      thread_id AS "threadId",
+      substr(created_at, 1, 10) AS "date",
+      COUNT(*) AS "count"
+    FROM projection_thread_activities
+    WHERE kind = 'tool.completed'
+      ${scope === null ? sql`` : sql`AND thread_id IN (SELECT value FROM json_each(${scope}))`}
+      AND NOT ${inheritedActivityRowSql(sql, "projection_thread_activities")}
+    GROUP BY thread_id, substr(created_at, 1, 10)
+  `;
 }
 
-interface MutableBucket {
-  date: string;
-  projectId: ProjectId;
-  model: string;
-  provider: string | undefined;
-  inputTokens: number;
-  outputTokens: number;
-  cachedInputTokens: number;
-  reasoningTokens: number;
-  totalTokens: number;
-  turns: number;
-  activeMs: number;
-  toolUses: number;
-  filesChanged: number;
-  additions: number;
-  deletions: number;
-  commits: number;
-  pushes: number;
-  threadsCreated: number;
+function selectStatisticsTurns(sql: SqlClient.SqlClient, scope: string | null) {
+  return sql`
+    SELECT
+      thread_id AS "threadId",
+      started_at AS "startedAt",
+      completed_at AS "completedAt",
+      checkpoint_turn_count AS "checkpointTurnCount",
+      checkpoint_files_json AS "filesJson"
+    FROM projection_turns turns
+    WHERE NOT ${inheritedTurnRowSql(sql, "turns")}
+      ${scope === null ? sql`` : sql`AND thread_id IN (SELECT value FROM json_each(${scope}))`}
+  `;
 }
 
-function num(value: unknown): number {
-  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+interface StatisticsRevision {
+  /** Writes on this connection. Never reset by a rollback. */
+  readonly writes: number;
+  /** Commits from other connections. */
+  readonly externalVersion: number;
+  readonly eventSequence: number;
+  /** Lowest cursor of the thread-scoped projectors (0 while one has none). */
+  readonly projectedSequence: number;
 }
 
-function dayOf(iso: string): string | null {
-  return iso.length >= 10 ? iso.slice(0, 10) : null;
+/**
+ * Cached aggregation. Thread-scoped rows (context-window events, activities,
+ * turns) are written only by the projection pipeline, in the same transaction
+ * as the thread's orchestration event. So a thread whose partial is current
+ * stays current until an event with a higher sequence appears on its stream.
+ * Global rows (threads, sessions, projects, worktrees) are small and re-read on
+ * every miss, which also catches thread meta changes that re-bucket a partial.
+ */
+interface StatisticsState {
+  readonly writes: number;
+  readonly externalVersion: number;
+  readonly eventSequence: number;
+  /** Every thread event up to this sequence is reflected in `partials`. */
+  readonly coveredSequence: number;
+  readonly partials: ReadonlyMap<string, StatisticsThreadPartial>;
+  readonly snapshot: StatisticsSnapshot;
 }
 
-function bestPerTurnTotalTokenCount(payload: Record<string, unknown> | null): number {
-  const reportedTotal = num(payload?.lastUsedTokens);
-  if (reportedTotal > 0) {
-    return reportedTotal;
-  }
-  return num(payload?.lastInputTokens) + num(payload?.lastOutputTokens);
-}
+const decodeThreadRows = Schema.decodeUnknownEffect(Schema.Array(StatisticsThreadRow));
+const decodeProjectRows = Schema.decodeUnknownEffect(Schema.Array(StatisticsProjectRow));
+const decodeTokenRows = Schema.decodeUnknownEffect(Schema.Array(StatisticsTokenActivityRow));
+const decodeToolUseRows = Schema.decodeUnknownEffect(Schema.Array(StatisticsToolUseRow));
+const decodeTurnRows = Schema.decodeUnknownEffect(Schema.Array(StatisticsTurnRow));
+const decodeWorktreeRows = Schema.decodeUnknownEffect(Schema.Array(StatisticsWorktreeRow));
 
-function bestCumulativeTotalTokenCount(payload: Record<string, unknown> | null): number {
-  const reportedTotal = num(payload?.usedTokens);
-  if (reportedTotal > 0) {
-    return reportedTotal;
-  }
-  return num(payload?.inputTokens) + num(payload?.outputTokens);
-}
+const decodeError = (operation: string) =>
+  toPersistenceDecodeError(`StatisticsQuery.getStatistics:${operation}:decodeRows`);
 
-function hasExactPerTurnBreakdown(payload: Record<string, unknown> | null): boolean {
-  return (
-    num(payload?.lastInputTokens) +
-      num(payload?.lastOutputTokens) +
-      num(payload?.lastCachedInputTokens) +
-      num(payload?.lastReasoningOutputTokens) >
-    0
-  );
-}
-
-function addPerTurnUsage(bucket: MutableBucket, payload: Record<string, unknown> | null): void {
-  bucket.inputTokens += num(payload?.lastInputTokens);
-  bucket.outputTokens += num(payload?.lastOutputTokens);
-  bucket.cachedInputTokens += num(payload?.lastCachedInputTokens);
-  bucket.reasoningTokens += num(payload?.lastReasoningOutputTokens);
-  bucket.totalTokens += bestPerTurnTotalTokenCount(payload);
-}
-
-function addCumulativeUsage(bucket: MutableBucket, payload: Record<string, unknown> | null): void {
-  bucket.inputTokens += num(payload?.inputTokens);
-  bucket.outputTokens += num(payload?.outputTokens);
-  bucket.cachedInputTokens += num(payload?.cachedInputTokens);
-  bucket.reasoningTokens += num(payload?.reasoningOutputTokens);
-  bucket.totalTokens += bestCumulativeTotalTokenCount(payload);
-}
+/** Keep decode errors raised while reading; everything else is a SQL failure. */
+const readError = (operation: string) => (cause: SqlError | ProjectionRepositoryError) =>
+  isPersistenceError(cause)
+    ? (cause as ProjectionRepositoryError)
+    : toPersistenceSqlError(`StatisticsQuery.getStatistics:${operation}`)(cause);
 
 const makeStatisticsQuery = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
 
-  const listThreadRows = SqlSchema.findAll({
-    Request: Schema.Void,
-    Result: ThreadRow,
-    execute: () =>
-      sql`
-        SELECT
-          t.thread_id AS "threadId",
-          t.project_id AS "projectId",
-          json_extract(t.model_selection_json, '$.model') AS "model",
-          COALESCE(
-            json_extract(t.model_selection_json, '$.instanceId'),
-            json_extract(t.model_selection_json, '$.provider')
-          ) AS "providerInstanceId",
-          t.created_at AS "createdAt",
-          COALESCE(
-            s.provider_name,
-            json_extract(t.model_selection_json, '$.instanceId'),
-            json_extract(t.model_selection_json, '$.provider')
-          ) AS "providerName"
-        FROM projection_threads t
-        LEFT JOIN projection_thread_sessions s ON s.thread_id = t.thread_id
-      `,
-  });
+  const readRevision = sql<StatisticsRevision>`
+    SELECT
+      total_changes() AS writes,
+      (SELECT data_version FROM pragma_data_version) AS "externalVersion",
+      COALESCE((SELECT MAX(sequence) FROM orchestration_events), 0) AS "eventSequence",
+      (
+        -- A projector without a cursor has applied nothing yet.
+        SELECT CASE
+          WHEN COUNT(*) < json_array_length(${THREAD_SCOPED_PROJECTORS}) THEN 0
+          ELSE MIN(last_applied_sequence)
+        END
+        FROM projection_state
+        WHERE projector IN (SELECT value FROM json_each(${THREAD_SCOPED_PROJECTORS}))
+      ) AS "projectedSequence"
+  `.pipe(Effect.map((rows) => rows[0]!));
 
-  const listProjectRows = SqlSchema.findAll({
-    Request: Schema.Void,
-    Result: ProjectRow,
-    execute: () =>
-      sql`
-        SELECT
-          project_id AS "projectId",
-          title,
-          deleted_at AS "deletedAt"
-        FROM projection_projects
-      `,
-  });
+  const listThreadRows = sql`
+    SELECT
+      t.thread_id AS "threadId",
+      t.project_id AS "projectId",
+      json_extract(t.model_selection_json, '$.model') AS "model",
+      COALESCE(
+        json_extract(t.model_selection_json, '$.instanceId'),
+        json_extract(t.model_selection_json, '$.provider')
+      ) AS "providerInstanceId",
+      t.created_at AS "createdAt",
+      COALESCE(
+        s.provider_name,
+        json_extract(t.model_selection_json, '$.instanceId'),
+        json_extract(t.model_selection_json, '$.provider')
+      ) AS "providerName"
+    FROM projection_threads t
+    LEFT JOIN projection_thread_sessions s ON s.thread_id = t.thread_id
+  `.pipe(
+    Effect.flatMap(decodeThreadRows),
+    Effect.mapError((cause) =>
+      Schema.isSchemaError(cause)
+        ? decodeError("listThreads")(cause)
+        : toPersistenceSqlError("StatisticsQuery.getStatistics:listThreads:query")(cause),
+    ),
+  );
 
-  const listTokenActivityRows = SqlSchema.findAll({
-    Request: Schema.Void,
-    Result: TokenActivityRow,
-    execute: () =>
-      sql`
-        SELECT
-          stream_id AS "threadId",
-          json_extract(payload_json, '$.activity.turnId') AS "turnId",
-          COALESCE(json_extract(payload_json, '$.activity.sequence'), sequence) AS sequence,
-          json_extract(payload_json, '$.activity.createdAt') AS "createdAt",
-          json_extract(payload_json, '$.activity.payload') AS "payloadJson"
-        FROM orchestration_events
-        WHERE event_type = 'thread.activity-appended'
-          AND json_extract(payload_json, '$.activity.kind') = 'context-window.updated'
-          AND NOT ${inheritedItemIdSql(
-            sql,
-            sql.literal("json_extract(payload_json, '$.activity.id')"),
-            sql.literal("stream_id"),
-          )}
-        UNION ALL
-        SELECT
-          thread_id AS "threadId", turn_id AS "turnId", sequence,
-          created_at AS "createdAt", payload_json AS "payloadJson"
-        FROM projection_thread_activities a
-        WHERE kind = 'context-window.updated'
-          AND NOT ${inheritedActivityRowSql(sql, "a")}
-          AND NOT EXISTS (
-            SELECT 1 FROM orchestration_events e
-            WHERE e.event_type = 'thread.activity-appended'
-              AND json_extract(e.payload_json, '$.activity.kind') = 'context-window.updated'
-              AND e.stream_id = a.thread_id
-              AND json_extract(e.payload_json, '$.activity.id') = a.activity_id
-              AND json_extract(e.payload_json, '$.activity.createdAt') = a.created_at
-          )
-        ORDER BY "threadId", "createdAt", sequence
-      `,
-  });
+  const listProjectRows = sql`
+    SELECT
+      project_id AS "projectId",
+      title,
+      deleted_at AS "deletedAt"
+    FROM projection_projects
+  `;
 
-  const listToolUseRows = SqlSchema.findAll({
-    Request: Schema.Void,
-    Result: ToolUseRow,
-    execute: () =>
-      sql`
-        SELECT
-          thread_id AS "threadId",
-          substr(created_at, 1, 10) AS "date",
-          COUNT(*) AS "count"
-        FROM projection_thread_activities activities
-        WHERE kind = 'tool.completed'
-          AND NOT ${inheritedActivityRowSql(sql, "activities")}
-        GROUP BY thread_id, substr(created_at, 1, 10)
-      `,
-  });
+  const listWorktreeRows = sql`
+    SELECT
+      worktree_id AS "worktreeId",
+      project_id AS "projectId",
+      title,
+      branch,
+      created_at AS "createdAt",
+      updated_at AS "updatedAt",
+      archived_at AS "archivedAt",
+      pr_number AS "prNumber",
+      pr_title AS "prTitle",
+      pr_state AS "prState",
+      pr_is_draft AS "prIsDraft",
+      pr_terminal_at AS "prTerminalAt",
+      origin,
+      pull_requests_json AS "pullRequests"
+    FROM projection_worktrees
+  `;
 
-  const listTurnRows = SqlSchema.findAll({
-    Request: Schema.Void,
-    Result: TurnRow,
-    execute: () =>
-      sql`
-        SELECT
-          thread_id AS "threadId",
-          started_at AS "startedAt",
-          completed_at AS "completedAt",
-          checkpoint_turn_count AS "checkpointTurnCount",
-          checkpoint_files_json AS "filesJson"
-        FROM projection_turns turns
-        WHERE NOT ${inheritedTurnRowSql(sql, "turns")}
-      `,
-  });
+  const listThreadsWithEventsAfter = (sequence: number) =>
+    sql<{ readonly threadId: string }>`
+      SELECT DISTINCT stream_id AS "threadId"
+      FROM orchestration_events
+      WHERE sequence > ${sequence} AND aggregate_kind = 'thread'
+    `;
 
-  const listWorktreeRows = SqlSchema.findAll({
-    Request: Schema.Void,
-    Result: WorktreeRow,
-    execute: () =>
-      sql`
-        SELECT
-          worktree_id AS "worktreeId",
-          project_id AS "projectId",
-          title,
-          branch,
-          created_at AS "createdAt",
-          updated_at AS "updatedAt",
-          archived_at AS "archivedAt",
-          pr_number AS "prNumber",
-          pr_title AS "prTitle",
-          pr_state AS "prState",
-          pr_is_draft AS "prIsDraft",
-          pr_terminal_at AS "prTerminalAt",
-          origin,
-          pull_requests_json AS "pullRequests"
-        FROM projection_worktrees
-      `,
-  });
-
-  const computeStatistics: StatisticsQueryShape["getStatistics"] = () =>
+  /**
+   * Everything one aggregation needs, read under one transaction. Returns the
+   * cached snapshot instead when nothing was written since it was computed.
+   * `dirty` is null for a full rebuild.
+   */
+  const readRows = (state: StatisticsState | undefined) =>
     Effect.gen(function* () {
-      const [threadRows, projectRows, tokenRows, toolRows, turnRows, worktreeRows] =
-        yield* Effect.all(
-          [
-            listThreadRows(undefined).pipe(
-              Effect.mapError(
-                toPersistenceSqlOrDecodeError(
-                  "StatisticsQuery.getStatistics:listThreads:query",
-                  "StatisticsQuery.getStatistics:listThreads:decodeRows",
-                ),
-              ),
-            ),
-            listProjectRows(undefined).pipe(
-              Effect.mapError(
-                toPersistenceSqlOrDecodeError(
-                  "StatisticsQuery.getStatistics:listProjects:query",
-                  "StatisticsQuery.getStatistics:listProjects:decodeRows",
-                ),
-              ),
-            ),
-            listTokenActivityRows(undefined).pipe(
-              Effect.mapError(
-                toPersistenceSqlOrDecodeError(
-                  "StatisticsQuery.getStatistics:listTokenActivities:query",
-                  "StatisticsQuery.getStatistics:listTokenActivities:decodeRows",
-                ),
-              ),
-            ),
-            listToolUseRows(undefined).pipe(
-              Effect.mapError(
-                toPersistenceSqlOrDecodeError(
-                  "StatisticsQuery.getStatistics:listToolUses:query",
-                  "StatisticsQuery.getStatistics:listToolUses:decodeRows",
-                ),
-              ),
-            ),
-            listTurnRows(undefined).pipe(
-              Effect.mapError(
-                toPersistenceSqlOrDecodeError(
-                  "StatisticsQuery.getStatistics:listTurns:query",
-                  "StatisticsQuery.getStatistics:listTurns:decodeRows",
-                ),
-              ),
-            ),
-            listWorktreeRows(undefined).pipe(
-              Effect.mapError(
-                toPersistenceSqlOrDecodeError(
-                  "StatisticsQuery.getStatistics:listWorktrees:query",
-                  "StatisticsQuery.getStatistics:listWorktrees:decodeRows",
-                ),
-              ),
-            ),
-          ],
-          { concurrency: "unbounded" },
-        );
-
-      // ── Thread metadata + model→provider mapping ──────────────────────────
-      const threadMeta = new Map<
-        string,
-        { projectId: ProjectId; model: string; provider: string | undefined; createdAt: string }
-      >();
-      const modelRefs = new Map<string, StatisticsModelRef>();
-      for (const row of threadRows) {
-        // Coalesce blanks to safe display values: empty/whitespace strings would
-        // fail success-encoding downstream and crash the RPC.
-        const provider = row.providerName?.trim() || row.providerInstanceId?.trim() || undefined;
-        const model = (row.model ?? "").trim() || "unknown";
-        threadMeta.set(row.threadId, {
-          projectId: row.projectId,
-          model,
-          provider,
-          createdAt: row.createdAt,
-        });
-        const modelKey = `${provider ?? ""}\u0000${model}`;
-        modelRefs.set(modelKey, provider ? { model, provider } : { model });
+      const revision = yield* readRevision;
+      if (
+        state !== undefined &&
+        state.writes === revision.writes &&
+        state.externalVersion === revision.externalVersion
+      ) {
+        return { kind: "cached" as const, snapshot: state.snapshot };
       }
-
-      const buckets = new Map<string, MutableBucket>();
-      const getBucket = (
-        date: string,
-        projectId: ProjectId,
-        model: string,
-        provider: string | undefined,
-      ): MutableBucket => {
-        modelRefs.set(
-          `${provider ?? ""}\u0000${model}`,
-          provider ? { model, provider } : { model },
-        );
-        const key = `${date}\u0000${projectId}\u0000${provider ?? ""}\u0000${model}`;
-        let bucket = buckets.get(key);
-        if (!bucket) {
-          bucket = {
-            date,
-            projectId,
-            model,
-            provider,
-            inputTokens: 0,
-            outputTokens: 0,
-            cachedInputTokens: 0,
-            reasoningTokens: 0,
-            totalTokens: 0,
-            turns: 0,
-            activeMs: 0,
-            toolUses: 0,
-            filesChanged: 0,
-            additions: 0,
-            deletions: 0,
-            commits: 0,
-            pushes: 0,
-            threadsCreated: 0,
-          };
-          buckets.set(key, bucket);
+      const threadRows = yield* listThreadRows;
+      const threadMeta = buildStatisticsThreadMeta(threadRows);
+      // On this connection thread-scoped rows change only together with an
+      // event on the thread's stream, so new events (plus meta changes) name
+      // every thread to re-read. A commit from another connection, or events
+      // that disappeared, cannot be attributed: rebuild everything.
+      let dirty: Set<string> | null = null;
+      if (
+        state !== undefined &&
+        state.externalVersion === revision.externalVersion &&
+        revision.eventSequence >= state.eventSequence
+      ) {
+        dirty = new Set<string>();
+        for (const row of yield* listThreadsWithEventsAfter(state.coveredSequence)) {
+          dirty.add(row.threadId);
         }
-        return bucket;
-      };
-
-      let earliest: string | undefined;
-      const considerIso = (iso: string | null | undefined) => {
-        if (iso && (earliest === undefined || iso < earliest)) {
-          earliest = iso;
-        }
-      };
-
-      // ── Tokens: pick the final activity per (thread,turn) and per thread ───
-      // Within a turn, rows iterate in (sequence, created_at) order so the last
-      // write is the turn's final snapshot. Across turns we must NOT rely on
-      // iteration order (turn_id is opaque/non-chronological), so the per-thread
-      // pick uses an explicit latest-by-(createdAt, sequence) comparison.
-      const processed = collectProcessedTokenUsage(
-        tokenRows,
-        (threadId) => threadMeta.get(threadId)?.provider,
-      );
-      let usedExactPerTurn = false;
-      let usedCumulativeFallback = false;
-      for (const entry of processed.entries) {
-        const meta = threadMeta.get(entry.row.threadId);
-        const date = dayOf(entry.row.createdAt);
-        if (!meta || !date) continue;
-        considerIso(entry.row.createdAt);
-        const bucket = getBucket(
-          date,
-          meta.projectId,
-          entry.model ?? meta.model,
-          entry.provider ?? meta.provider,
-        );
-        bucket.inputTokens += entry.inputTokens;
-        bucket.cachedInputTokens += entry.cachedInputTokens;
-        bucket.outputTokens += entry.outputTokens;
-        bucket.reasoningTokens += entry.reasoningTokens;
-        bucket.totalTokens += entry.totalTokens;
-        if (entry.approximate) usedCumulativeFallback = true;
-        else usedExactPerTurn = true;
-      }
-
-      const lastPerTurn = new Map<string, (typeof tokenRows)[number]>();
-      const isLater = (a: (typeof tokenRows)[number], b: (typeof tokenRows)[number]): boolean => {
-        if (a.createdAt !== b.createdAt) {
-          return a.createdAt > b.createdAt;
-        }
-        return (a.sequence ?? -1) >= (b.sequence ?? -1);
-      };
-      for (const row of tokenRows) {
-        considerIso(row.createdAt);
-        const turnKey = `${row.threadId}\u0000${row.turnId ?? ""}`;
-        if (processed.sessionThreads.has(row.threadId) || processed.turns.has(turnKey)) continue;
-        const prevTurn = lastPerTurn.get(turnKey);
-        if (!prevTurn || isLater(row, prevTurn)) {
-          lastPerTurn.set(turnKey, row);
-        }
-      }
-
-      const firstExactPerThread = new Map<string, (typeof tokenRows)[number]>();
-      for (const row of lastPerTurn.values()) {
-        const payload = safeParse(row.payloadJson);
-        if (hasExactPerTurnBreakdown(payload)) {
-          const prev = firstExactPerThread.get(row.threadId);
-          if (!prev || isLater(prev, row)) {
-            firstExactPerThread.set(row.threadId, row);
+        for (const [threadId, meta] of threadMeta) {
+          if (state.partials.get(threadId)?.metaKey !== statisticsThreadMetaKey(meta)) {
+            dirty.add(threadId);
           }
         }
-      }
-      const cumulativeFallbackByThread = new Map<string, (typeof tokenRows)[number]>();
-      for (const row of lastPerTurn.values()) {
-        const payload = safeParse(row.payloadJson);
-        if (hasExactPerTurnBreakdown(payload)) continue;
-        const firstExact = firstExactPerThread.get(row.threadId);
-        if (firstExact && !isLater(firstExact, row)) {
-          continue;
-        }
-        const prev = cumulativeFallbackByThread.get(row.threadId);
-        if (!prev || isLater(row, prev)) {
-          cumulativeFallbackByThread.set(row.threadId, row);
-        }
-      }
-      for (const row of lastPerTurn.values()) {
-        const payload = safeParse(row.payloadJson);
-        if (!hasExactPerTurnBreakdown(payload)) continue;
-        const meta = threadMeta.get(row.threadId);
-        const date = dayOf(row.createdAt);
-        if (!meta || !date) continue;
-        addPerTurnUsage(getBucket(date, meta.projectId, meta.model, meta.provider), payload);
-        usedExactPerTurn = true;
-      }
-
-      for (const row of cumulativeFallbackByThread.values()) {
-        const meta = threadMeta.get(row.threadId);
-        const date = dayOf(row.createdAt);
-        if (!meta || !date) continue;
-        const payload = safeParse(row.payloadJson);
-        if (bestCumulativeTotalTokenCount(payload) <= 0) continue;
-        addCumulativeUsage(getBucket(date, meta.projectId, meta.model, meta.provider), payload);
-        usedCumulativeFallback = true;
-      }
-
-      const attribution: StatisticsTokenAttribution =
-        usedExactPerTurn && usedCumulativeFallback
-          ? "mixed"
-          : usedCumulativeFallback
-            ? "thread-cumulative"
-            : "per-turn-delta";
-
-      // ── Turns: counts, active time, and file/line changes ─────────────────
-      for (const row of turnRows) {
-        const meta = threadMeta.get(row.threadId);
-        if (!meta) continue;
-        considerIso(row.startedAt);
-        considerIso(row.completedAt);
-        const anchor = row.completedAt ?? row.startedAt;
-        const date = anchor ? dayOf(anchor) : null;
-        if (!date) continue;
-        const bucket = getBucket(date, meta.projectId, meta.model, meta.provider);
-        if (row.completedAt) {
-          bucket.turns += 1;
-          if (row.startedAt) {
-            const delta = Date.parse(row.completedAt) - Date.parse(row.startedAt);
-            if (Number.isFinite(delta) && delta > 0) {
-              bucket.activeMs += delta;
-            }
+        for (const [threadId, partial] of state.partials) {
+          if (!threadMeta.has(threadId) && partial.metaKey !== statisticsThreadMetaKey(undefined)) {
+            dirty.add(threadId);
           }
         }
-        const files = safeParseArray(row.filesJson);
-        if (files.length > 0) {
-          bucket.filesChanged += files.length;
-          for (const file of files) {
-            bucket.additions += num((file as Record<string, unknown> | null)?.additions);
-            bucket.deletions += num((file as Record<string, unknown> | null)?.deletions);
-          }
-        }
+        if (dirty.size > Math.max(INCREMENTAL_THREAD_LIMIT, threadMeta.size / 4)) dirty = null;
       }
-
-      // ── Tool uses (completed tool calls) ──────────────────────────────────
-      for (const row of toolRows) {
-        const meta = threadMeta.get(row.threadId);
-        if (!meta) continue;
-        const bucket = getBucket(row.date, meta.projectId, meta.model, meta.provider);
-        bucket.toolUses += num(row.count);
-      }
-
-      // ── Threads created ───────────────────────────────────────────────────
-      for (const meta of threadMeta.values()) {
-        considerIso(meta.createdAt);
-        const date = dayOf(meta.createdAt);
-        if (!date) continue;
-        getBucket(date, meta.projectId, meta.model, meta.provider).threadsCreated += 1;
-      }
-
-      // ── Worktree summary ──────────────────────────────────────────────────
-      let wtCreated = 0;
-      let wtArchived = 0;
-      let wtOpenPrs = 0;
-      for (const row of worktreeRows) {
-        considerIso(row.createdAt);
-        wtCreated += 1;
-        if (row.archivedAt) {
-          wtArchived += 1;
-        } else {
-          // Merged or closed pull requests don't count; one not yet refreshed does.
-          wtOpenPrs += worktreeRowLinks(row).filter(
-            (link) => link.state !== "merged" && link.state !== "closed",
-          ).length;
-        }
-      }
-
-      // ── Assemble output ───────────────────────────────────────────────────
-      const dailyBuckets: Array<StatisticsDailyBucket> = [];
-      const totals = {
-        inputTokens: 0,
-        outputTokens: 0,
-        cachedInputTokens: 0,
-        reasoningTokens: 0,
-        totalTokens: 0,
-        turns: 0,
-        activeMs: 0,
-        toolUses: 0,
-        filesChanged: 0,
-        additions: 0,
-        deletions: 0,
-        commits: 0,
-        pushes: 0,
-        threads: threadMeta.size,
-        projects: 0,
+      const scope = dirty === null ? null : JSON.stringify([...dirty]);
+      const readScoped = (
+        read: (scope: string | null) => Effect.Effect<ReadonlyArray<unknown>, SqlError>,
+      ) => (dirty !== null && dirty.size === 0 ? Effect.succeed([]) : read(scope));
+      return {
+        kind: "rows" as const,
+        revision,
+        threadMeta,
+        dirty,
+        projectRows: yield* listProjectRows,
+        worktreeRows: yield* listWorktreeRows,
+        tokenRows: yield* readScoped((scope) => selectStatisticsTokenActivities(sql, scope)),
+        toolRows: yield* readScoped((scope) => selectStatisticsToolUses(sql, scope)),
+        turnRows: yield* readScoped((scope) => selectStatisticsTurns(sql, scope)),
       };
-      for (const bucket of buckets.values()) {
-        const { provider, ...rest } = bucket;
-        dailyBuckets.push(provider ? { ...rest, provider } : rest);
-        totals.inputTokens += bucket.inputTokens;
-        totals.outputTokens += bucket.outputTokens;
-        totals.cachedInputTokens += bucket.cachedInputTokens;
-        totals.reasoningTokens += bucket.reasoningTokens;
-        totals.turns += bucket.turns;
-        totals.activeMs += bucket.activeMs;
-        totals.toolUses += bucket.toolUses;
-        totals.filesChanged += bucket.filesChanged;
-        totals.additions += bucket.additions;
-        totals.deletions += bucket.deletions;
-        totals.commits += bucket.commits;
-        totals.pushes += bucket.pushes;
-        totals.totalTokens += bucket.totalTokens;
-      }
-      dailyBuckets.sort((a, b) =>
-        a.date === b.date
-          ? a.projectId === b.projectId
-            ? (a.provider ?? "").localeCompare(b.provider ?? "") || a.model.localeCompare(b.model)
-            : a.projectId.localeCompare(b.projectId)
-          : a.date.localeCompare(b.date),
-      );
-
-      const projectTitle = new Map<ProjectId, string>();
-      for (const row of projectRows) {
-        projectTitle.set(row.projectId, row.title);
-      }
-      const projectIdsInData = new Set<ProjectId>();
-      for (const meta of threadMeta.values()) {
-        projectIdsInData.add(meta.projectId);
-      }
-      for (const bucket of buckets.values()) {
-        projectIdsInData.add(bucket.projectId);
-      }
-      totals.projects = projectIdsInData.size;
-
-      const projects: Array<StatisticsProjectRef> = [...projectIdsInData].map((id) => ({
-        id,
-        title: projectTitle.get(id)?.trim() || id,
-      }));
-      projects.sort((a, b) => a.title.localeCompare(b.title) || a.id.localeCompare(b.id));
-      const models: Array<StatisticsModelRef> = [...modelRefs.values()].toSorted(
-        (a, b) =>
-          (a.provider ?? "").localeCompare(b.provider ?? "") || a.model.localeCompare(b.model),
-      );
-      // One row per pull request a workspace carried, so a shipped one and its
-      // follow-up both stay listed.
-      const recentPullRequests: Array<StatisticsRecentPullRequest> = worktreeRows
-        .flatMap((row) =>
-          worktreeRowLinks(row).map((link) => {
-            const updatedAt = link.terminalAt ?? link.linkedAt ?? row.updatedAt;
-            return Object.assign(
-              {
-                worktreeId: row.worktreeId,
-                branch: link.headRefName ?? row.branch,
-                projectId: row.projectId,
-                projectTitle: projectTitle.get(row.projectId)?.trim() || row.projectId,
-                prNumber: link.number,
-                createdAt: link.linkedAt ?? row.createdAt,
-                updatedAt,
-                active: row.archivedAt === null,
-              },
-              row.title === null ? {} : { worktreeTitle: row.title },
-              link.title === null ? {} : { prTitle: link.title },
-              link.state === null ? {} : { prState: link.state },
-              link.isDraft === null ? {} : { prIsDraft: link.isDraft },
-              row.archivedAt === null ? {} : { archivedAt: row.archivedAt },
-            );
-          }),
-        )
-        .toSorted(
-          (left, right) =>
-            right.updatedAt.localeCompare(left.updatedAt) ||
-            left.worktreeId.localeCompare(right.worktreeId) ||
-            right.prNumber - left.prNumber,
-        )
-        .slice(0, 20);
-
-      const snapshot: StatisticsSnapshot = {
-        generatedAt: new Date().toISOString(),
-        ...(earliest ? { earliestActivityAt: earliest } : {}),
-        projects,
-        models,
-        dailyBuckets,
-        worktrees: {
-          created: wtCreated,
-          archived: wtArchived,
-          active: wtCreated - wtArchived,
-          openPrs: wtOpenPrs,
-        },
-        totals,
-        tokenAttribution: attribution,
-        recentPullRequests,
-      };
-      return snapshot;
     });
 
-  // This SQLite client owns one connection. total_changes observes writes on
-  // that connection (including direct repository writes), while data_version
-  // observes commits from other connections. Neither reads table contents.
-  // Keep only one snapshot and serialize misses, so simultaneous requests share
-  // the aggregation without retaining historical copies of analytics data.
+  type ReadRows = Extract<Effect.Success<ReturnType<typeof readRows>>, { kind: "rows" }>;
+
+  /** Decode and aggregate outside the transaction, yielding between thread chunks. */
+  const aggregate = (state: StatisticsState | undefined, read: ReadRows) =>
+    Effect.gen(function* () {
+      const [projectRows, worktreeRows, tokenRows, toolRows, turnRows] = yield* Effect.all([
+        decodeProjectRows(read.projectRows).pipe(Effect.mapError(decodeError("listProjects"))),
+        decodeWorktreeRows(read.worktreeRows).pipe(Effect.mapError(decodeError("listWorktrees"))),
+        decodeTokenRows(read.tokenRows).pipe(Effect.mapError(decodeError("listTokenActivities"))),
+        decodeToolUseRows(read.toolRows).pipe(Effect.mapError(decodeError("listToolUses"))),
+        decodeTurnRows(read.turnRows).pipe(Effect.mapError(decodeError("listTurns"))),
+      ]);
+      const groups = groupStatisticsRowsByThread({
+        threadIds: read.dirty ?? read.threadMeta.keys(),
+        tokens: tokenRows,
+        turns: turnRows,
+        tools: toolRows,
+      });
+      const partials = new Map(read.dirty === null || state === undefined ? [] : state.partials);
+      let processed = 0;
+      for (const [threadId, rows] of groups) {
+        const meta = read.threadMeta.get(threadId);
+        const partial = computeStatisticsThreadPartial(meta, rows);
+        // A thread without meta or rows contributes nothing and never turns dirty.
+        if (meta === undefined && partial.earliest === undefined) partials.delete(threadId);
+        else partials.set(threadId, partial);
+        if (++processed % AGGREGATION_CHUNK_THREADS === 0) yield* Effect.yieldNow;
+      }
+      const snapshot = assembleStatisticsSnapshot({
+        threadMeta: read.threadMeta,
+        partials: partials.values(),
+        projectRows,
+        worktreeRows,
+        generatedAt: new Date().toISOString(),
+      });
+      const { revision } = read;
+      return {
+        writes: revision.writes,
+        externalVersion: revision.externalVersion,
+        eventSequence: revision.eventSequence,
+        coveredSequence: Math.min(revision.eventSequence, revision.projectedSequence),
+        partials,
+        snapshot,
+      } satisfies StatisticsState;
+    });
+
+  // Keep only one aggregation state and serialize misses, so simultaneous
+  // requests share the work without retaining historical analytics copies.
   const cacheLock = yield* Semaphore.make(1);
-  let cached: { writes: number; externalVersion: number; snapshot: StatisticsSnapshot } | undefined;
+  let cached: StatisticsState | undefined;
   const getStatistics: StatisticsQueryShape["getStatistics"] = () =>
     Effect.gen(function* () {
       // A caller may inspect uncommitted data. Never publish that result into
       // the shared cache: a rollback does not reset SQLite's total_changes.
       if (Option.isSome(yield* Effect.serviceOption(sql.transactionService))) {
-        return yield* computeStatistics();
+        const read = yield* readRows(undefined).pipe(Effect.mapError(readError("query")));
+        if (read.kind === "cached") return read.snapshot;
+        return (yield* aggregate(undefined, read)).snapshot;
       }
       return yield* cacheLock.withPermit(
-        sql
-          .withTransaction(
-            Effect.gen(function* () {
-              const rows = yield* sql<{ writes: number; externalVersion: number }>`
-              SELECT total_changes() AS writes, data_version AS "externalVersion"
-              FROM pragma_data_version
-            `;
-              const revision = rows[0]!;
-              if (
-                cached?.writes === revision.writes &&
-                cached.externalVersion === revision.externalVersion
-              ) {
-                return cached.snapshot;
-              }
-              const snapshot = yield* computeStatistics();
-              cached = { ...revision, snapshot };
-              return snapshot;
-            }),
-          )
-          .pipe(
-            Effect.mapError(toPersistenceSqlError("StatisticsQuery.getStatistics:transaction")),
-          ),
+        Effect.gen(function* () {
+          const state = cached;
+          const read = yield* sql
+            .withTransaction(readRows(state))
+            .pipe(Effect.mapError(readError("transaction")));
+          if (read.kind === "cached") return read.snapshot;
+          const next = yield* aggregate(state, read);
+          cached = next;
+          return next.snapshot;
+        }),
       );
     });
 
   return { getStatistics } satisfies StatisticsQueryShape;
 });
-
-function safeParse(json: string): Record<string, unknown> | null {
-  try {
-    const parsed = JSON.parse(json);
-    return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null;
-  } catch {
-    return null;
-  }
-}
-
-function safeParseArray(json: string): ReadonlyArray<unknown> {
-  try {
-    const parsed = JSON.parse(json);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-}
 
 export const StatisticsQueryLive = Layer.effect(StatisticsQuery, makeStatisticsQuery);

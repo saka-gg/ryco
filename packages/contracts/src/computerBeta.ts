@@ -1,4 +1,4 @@
-import { Schema } from "effect";
+import * as Schema from "effect/Schema";
 import type { ComputerEvent } from "./computer.ts";
 import type { DesktopAppSnapState } from "./computerPermissions.ts";
 

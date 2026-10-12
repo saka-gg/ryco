@@ -35,6 +35,7 @@ import { CheckpointDiffQuery } from "../checkpointing/Services/CheckpointDiffQue
 import { ServerConfig } from "../config.ts";
 import { Diagnostics } from "../diagnostics/Services/Diagnostics.ts";
 import { Keybindings } from "../keybindings.ts";
+import { ignoreCauseLogOnceEvery } from "../logOnceEvery.ts";
 import { makeCodexMcpService } from "../mcp/CodexMcpService.ts";
 import { makeCodexMcpAdapter } from "../mcp/adapters/CodexMcpAdapter.ts";
 import { makeClaudeMcpAdapter } from "../mcp/adapters/ClaudeMcpAdapter.ts";
@@ -84,16 +85,19 @@ import {
 import { ServerEnvironment } from "../environment/Services/ServerEnvironment.ts";
 import { ServerAuth } from "../auth/Services/ServerAuth.ts";
 import { OrchestrationCommandReceiptRepository } from "../persistence/Services/OrchestrationCommandReceipts.ts";
+import { OrchestrationEventStore } from "../persistence/Services/OrchestrationEventStore.ts";
 import { ProjectionProjectRepository } from "../persistence/Services/ProjectionProjects.ts";
 import { ProjectionThreadRepository } from "../persistence/Services/ProjectionThreads.ts";
 import { ProjectRelocationRepository } from "../persistence/Services/ProjectRelocations.ts";
 import { GitVcsDriver } from "../vcs/GitVcsDriver.ts";
 import { ProjectionWorktreeRepository } from "../persistence/Services/ProjectionWorktrees.ts";
 import {
+  type KnownPullRequestState,
   refreshWorktreeSourceControlState,
   WORKTREE_PULL_REQUEST_DISCOVERY_INTERVAL_MS,
   WORKTREE_PULL_REQUEST_SWEEP_DISCOVERY_INTERVAL_MS,
 } from "../sourceControl/refreshWorktreeSourceControlState.ts";
+import { inBackgroundProcessLane } from "../processGovernor.ts";
 import { readWorktreePullRequestLinks } from "@ryco/shared/worktreePullRequests";
 import * as SourceControlDiscoveryLayer from "../sourceControl/SourceControlDiscovery.ts";
 import { SourceControlRepositoryService } from "../sourceControl/SourceControlRepositoryService.ts";
@@ -164,6 +168,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
     // construction; production provides it in `makeServerWsRpcLayer`.
     const contextHandoffInspection = yield* Effect.serviceOption(ContextHandoffInspection);
     const threadPriorityCoordinator = yield* Effect.serviceOption(ThreadPriorityCoordinator);
+    const orchestrationEventStore = yield* Effect.serviceOption(OrchestrationEventStore);
     // Optional for the same route-test reason; production provides it in the
     // runtime layer and `makeServerWsRpcLayer`.
     const chatAttachmentUploads = yield* Effect.serviceOption(ChatAttachmentUploads);
@@ -271,6 +276,18 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       serverCommandId,
     };
     const linkedSourceControlRefreshAtByProject = new Map<string, number>();
+    const LINKED_SOURCE_CONTROL_SWEEP_CONCURRENCY = 2;
+    // Refreshes rerun on every source-control read: one stack per workspace, then summaries.
+    const sourceControlRefreshFailureLog = (worktreeId: WorktreeId) => ({
+      key: `sourceControl.refresh:${worktreeId}`,
+      message: "Source control refresh failed",
+      fields: { worktreeId },
+    });
+    type KnownPullRequestRow = {
+      readonly number: number;
+      readonly state: KnownPullRequestState["state"];
+      readonly isDraft?: boolean | undefined;
+    };
 
     const authorize = (access: WsRpcAccess, method: string) =>
       authorizeRpcPrincipal(principal, access, method);
@@ -284,9 +301,13 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
     const ownerEffect = <A, E, R>(method: string, effect: Effect.Effect<A, E, R>) =>
       withAccess(guardedMethodAccess(method), method, effect);
 
-    /** Finds the pull request a checkout's branch has now, from the (cached) git status. */
+    /**
+     * Finds the pull request a checkout's branch has now: from its ref summary
+     * (HEAD, config and the repository's change request index, cached), not a
+     * full git status per swept workspace.
+     */
     const discoverPullRequest = (cwd: string) =>
-      gitWorkflow.remoteStatus({ cwd }).pipe(Effect.map((remote) => remote?.pr ?? null));
+      gitWorkflow.refSummary(cwd).pipe(Effect.map((summary) => summary.pr));
 
     /**
      * Which workspaces a source-control call's `cwd` speaks for: every one of a
@@ -308,6 +329,22 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
           : null;
       });
 
+    /**
+     * Pull request states already in hand for `cwd`'s repository: the rows a
+     * list just returned plus the repository's change request index.
+     */
+    const knownPullRequestStatesFor =
+      (rows: ReadonlyArray<KnownPullRequestRow> | undefined) => (cwd: string) =>
+        gitWorkflow.indexedPullRequestStates(cwd).pipe(
+          Effect.map((indexed) => {
+            const known = new Map<number, KnownPullRequestState>(indexed);
+            for (const row of rows ?? []) {
+              known.set(row.number, { state: row.state, isDraft: row.isDraft ?? null });
+            }
+            return known;
+          }),
+        );
+
     const refreshLinkedWorktreeSourceControlStates = (input: {
       readonly cwd: string;
       readonly reason: string;
@@ -318,6 +355,8 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
        * for the refresh so the link lands before git status reports the change.
        */
       readonly lifecycle?: { readonly pullRequestNumber: number | null } | undefined;
+      /** Change requests the triggering read just returned for this repository. */
+      readonly knownPullRequests?: ReadonlyArray<KnownPullRequestRow> | undefined;
     }) =>
       Effect.gen(function* () {
         const scope = yield* resolveSourceControlRefreshScope(input.cwd);
@@ -339,6 +378,8 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
         const refreshIds: WorktreeId[] = [];
         for (const worktree of worktrees) {
           if (worktree.archivedAt !== null || worktree.worktreePath === null) continue;
+          // Recorded as removed (by Ryco or found missing on disk): nothing to refresh.
+          if (worktree.checkoutRemovedAt) continue;
           // Nothing linked and nothing to discover (the main checkout shows the
           // project's default branch, not a workspace's pull request).
           if (
@@ -350,23 +391,33 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
           }
           refreshIds.push(worktree.worktreeId);
         }
+        // The checkout on screen refreshes promptly; a project-wide sweep over
+        // every other workspace less often; a lifecycle action now.
+        const intervalMs = input.lifecycle
+          ? 0
+          : scope.checkout
+            ? WORKTREE_PULL_REQUEST_DISCOVERY_INTERVAL_MS
+            : WORKTREE_PULL_REQUEST_SWEEP_DISCOVERY_INTERVAL_MS;
         const refresh = (worktreeId: WorktreeId) =>
           refreshWorktreeSourceControlState({
             worktreeId,
             discoverPullRequest,
-            // The checkout on screen discovers promptly; a project-wide sweep
-            // over every other workspace less often; a lifecycle action now.
-            discoveryIntervalMs: input.lifecycle
-              ? 0
-              : scope.checkout
-                ? WORKTREE_PULL_REQUEST_DISCOVERY_INTERVAL_MS
-                : WORKTREE_PULL_REQUEST_SWEEP_DISCOVERY_INTERVAL_MS,
+            discoveryIntervalMs: intervalMs,
+            linkRefreshIntervalMs: intervalMs,
+            // A lifecycle action reads live; otherwise states in hand spare forge calls.
+            ...(input.lifecycle
+              ? {}
+              : { knownPullRequestStates: knownPullRequestStatesFor(input.knownPullRequests) }),
             actedOnPullRequestNumber: input.lifecycle?.pullRequestNumber ?? undefined,
-          }).pipe(Effect.ignoreCause({ log: true }));
+          }).pipe(ignoreCauseLogOnceEvery(sourceControlRefreshFailureLog(worktreeId)));
         if (input.lifecycle && scope.checkout) {
           yield* Effect.forEach(refreshIds, refresh, { concurrency: "unbounded", discard: true });
-        } else {
-          for (const worktreeId of refreshIds) yield* Effect.forkDetach(refresh(worktreeId));
+        } else if (refreshIds.length > 0) {
+          // One bounded background sweep, never a fiber (and forge call) per workspace at once.
+          yield* Effect.forEach(refreshIds, refresh, {
+            concurrency: LINKED_SOURCE_CONTROL_SWEEP_CONCURRENCY,
+            discard: true,
+          }).pipe(inBackgroundProcessLane, Effect.forkDetach);
         }
       }).pipe(Effect.ignoreCause({ log: true }), Effect.asVoid);
 
@@ -385,12 +436,15 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
           kind: input.kind,
           number: parsed,
         });
-        for (const worktreeId of linked) {
-          yield* refreshWorktreeSourceControlState({ worktreeId, discoverPullRequest }).pipe(
-            Effect.ignoreCause({ log: true }),
-            Effect.forkDetach,
-          );
-        }
+        if (linked.length === 0) return;
+        yield* Effect.forEach(
+          linked,
+          (worktreeId) =>
+            refreshWorktreeSourceControlState({ worktreeId, discoverPullRequest }).pipe(
+              ignoreCauseLogOnceEvery(sourceControlRefreshFailureLog(worktreeId)),
+            ),
+          { concurrency: LINKED_SOURCE_CONTROL_SWEEP_CONCURRENCY, discard: true },
+        ).pipe(inBackgroundProcessLane, Effect.forkDetach);
       }).pipe(Effect.ignoreCause({ log: true }), Effect.asVoid);
 
     const attachLinkedIssuesToPrAction = (
@@ -958,6 +1012,13 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
         threadPriorityChanges: Option.match(threadPriorityCoordinator, {
           onNone: () => Stream.empty,
           onSome: (coordinator) => coordinator.changes,
+        }),
+        ...Option.match(orchestrationEventStore, {
+          onNone: () => ({}),
+          onSome: (eventStore) => ({
+            ...(eventStore.probeResume ? { probeResume: eventStore.probeResume } : {}),
+            readStreamEventsPage: eventStore.readStreamEventsPage,
+          }),
         }),
       });
 

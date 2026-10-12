@@ -15,6 +15,14 @@ export const SAVED_ENVIRONMENT_SESSION_CHECK_TIMEOUT_MS = 15_000;
  * never opens the WebSocket would hold its connect slot for the app's lifetime.
  */
 export const SAVED_ENVIRONMENT_INITIAL_CONFIG_TIMEOUT_MS = 20_000;
+/**
+ * How long a connect or reconnect waits for the config subscription's snapshot
+ * before it reads the config itself. The stream's first item is a full
+ * snapshot and normally arrives well within this; the read covers a server
+ * that is slow to deliver it, so the connect never fails for a missing stream
+ * item.
+ */
+export const SAVED_ENVIRONMENT_CONFIG_SNAPSHOT_WAIT_MS = 1_000;
 
 export const SAVED_ENVIRONMENT_REQUIRES_AUTH_MESSAGE =
   "This environment no longer accepts its saved pairing. Pair it again.";
@@ -47,6 +55,44 @@ export function withSavedEnvironmentTimeout<T>(
       },
     );
   });
+}
+
+const SAVED_ENVIRONMENT_CONFIG_TIMEOUT_MESSAGE =
+  "The environment answered but did not finish connecting in time.";
+
+/**
+ * The server config a saved environment's connect or reconnect uses: the
+ * snapshot the config subscription delivers, or, when none arrives within
+ * `waitMs`, one `readConfig` call — whichever answers first from then on, all
+ * bounded by `timeoutMs`. `snapshot` rejecting (the socket's credential was
+ * rejected) fails at once and never starts the read.
+ */
+export async function awaitSavedEnvironmentConfig<T>(input: {
+  readonly snapshot: Promise<T>;
+  readonly readConfig: () => Promise<T>;
+  readonly waitMs?: number;
+  readonly timeoutMs?: number;
+}): Promise<T> {
+  const waitMs = input.waitMs ?? SAVED_ENVIRONMENT_CONFIG_SNAPSHOT_WAIT_MS;
+  const early = await new Promise<{ readonly value: T } | null>((resolve, reject) => {
+    const timeoutId = globalThis.setTimeout(() => resolve(null), waitMs);
+    input.snapshot.then(
+      (value) => {
+        globalThis.clearTimeout(timeoutId);
+        resolve({ value });
+      },
+      (error: unknown) => {
+        globalThis.clearTimeout(timeoutId);
+        reject(error);
+      },
+    );
+  });
+  if (early !== null) return early.value;
+  return await withSavedEnvironmentTimeout(
+    Promise.race([input.snapshot, input.readConfig()]),
+    Math.max(0, (input.timeoutMs ?? SAVED_ENVIRONMENT_INITIAL_CONFIG_TIMEOUT_MS) - waitMs),
+    SAVED_ENVIRONMENT_CONFIG_TIMEOUT_MESSAGE,
+  );
 }
 
 /**

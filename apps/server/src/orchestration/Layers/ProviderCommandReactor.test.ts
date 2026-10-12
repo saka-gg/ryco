@@ -88,6 +88,7 @@ import {
   cwdRelocationHandoffReference,
 } from "../contextHandoff/ContextHandoffRelocation.ts";
 import { ContextHandoffCoordinatorLive } from "./ContextHandoffCoordinator.ts";
+import { CheckpointReactor, type CheckpointReactorShape } from "../Services/CheckpointReactor.ts";
 import { TextGeneration, type TextGenerationShape } from "../../textGeneration/TextGeneration.ts";
 import { ProjectAvatarStore } from "../../project/Services/ProjectAvatarStore.ts";
 import { RepositoryIdentityResolverLive } from "../../project/Layers/RepositoryIdentityResolver.ts";
@@ -250,6 +251,8 @@ describe("ProviderCommandReactor", () => {
     /** Additional threads created in project-1 next to thread-1. */
     readonly extraThreadIds?: ReadonlyArray<string>;
     readonly reactorOptions?: ProviderCommandReactorOptions;
+    /** Checkpointing as the reactor sees it; omitted, turn starts have no baseline to wait for. */
+    readonly ensurePreTurnBaseline?: CheckpointReactorShape["ensurePreTurnBaseline"];
     /** A file database, so sequential harnesses share state across a simulated restart. */
     readonly dbPath?: string;
     /** Wraps the engine dispatch the reactor sees (fault injection); the engine is shared. */
@@ -569,7 +572,10 @@ describe("ProviderCommandReactor", () => {
       : liveProjectionSnapshotLayer;
     const decorateIntents = input?.decorateIntents;
     const reactorWithIntents = decorateIntents
-      ? makeProviderCommandReactorLayer(input?.reactorOptions).pipe(
+      ? makeProviderCommandReactorLayer({
+          firstTurnGenerationDelayMs: 0,
+          ...input?.reactorOptions,
+        }).pipe(
           Layer.provide(
             Layer.effect(
               ProviderEffectIntentRepository,
@@ -577,7 +583,7 @@ describe("ProviderCommandReactor", () => {
             ).pipe(Layer.provide(ProviderEffectIntentRepositoryLive)),
           ),
         )
-      : makeProviderCommandReactorLive(input?.reactorOptions);
+      : makeProviderCommandReactorLive({ firstTurnGenerationDelayMs: 0, ...input?.reactorOptions });
     const decorateDispatch = input?.decorateDispatch;
     const reactorLayer = decorateDispatch
       ? reactorWithIntents.pipe(
@@ -613,7 +619,16 @@ describe("ProviderCommandReactor", () => {
           recover: () => Effect.void,
           abandonUnstartedTurnStart,
         });
+    const checkpointLayer = input?.ensurePreTurnBaseline
+      ? Layer.succeed(CheckpointReactor, {
+          start: () => Effect.void,
+          recover: () => Effect.void,
+          ensurePreTurnBaseline: input.ensurePreTurnBaseline,
+          drain: Effect.void,
+        })
+      : Layer.empty;
     const layer = reactorLayer.pipe(
+      Layer.provideMerge(checkpointLayer),
       Layer.provideMerge(contextHandoffLayer),
       Layer.provideMerge(
         ProjectionThreadUserInputRequestRepositoryLive.pipe(Layer.provide(persistence)),
@@ -1052,6 +1067,17 @@ describe("ProviderCommandReactor", () => {
     expect(harness.startSession.mock.calls[0]?.[1]).toMatchObject({ modelSelection: selection });
     expect(setThreadGoal).toHaveBeenCalledTimes(1);
     expect((await harness.readModel()).threads[0]?.goal).toEqual(native);
+  });
+
+  it("asks a goalless runtime for its goal once, not on every turn", async () => {
+    const getThreadGoal = vi.fn(() => Effect.succeed(null));
+    const harness = await createHarness({ getThreadGoal });
+    for (const [index, messageId] of ["goalless-1", "goalless-2"].entries()) {
+      await dispatchTurnStart(harness, messageId);
+      await waitFor(() => harness.sendTurn.mock.calls.length === index + 1);
+    }
+    expect(harness.startSession).toHaveBeenCalledTimes(1);
+    expect(getThreadGoal).toHaveBeenCalledTimes(1);
   });
 
   it("confirms goals from the native response and resumes with a provider turn", async () => {
@@ -3975,11 +4001,15 @@ describe("ProviderCommandReactor", () => {
 
     await dispatchTurnStart(harness, "generation-control");
     await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    // The combined title-and-branch request fails (after its one retry), so
+    // the branch is asked for on its own.
     await waitFor(
       () =>
         harness.generateThreadTitle.mock.calls.length === 1 &&
         harness.generateBranchName.mock.calls.length === 1,
+      8_000,
     );
+    expect(harness.generateThreadTitle.mock.calls[0]?.[0]).toMatchObject({ includeBranch: true });
     expect(await turnStartFailures(harness)).toHaveLength(0);
   });
 
@@ -4002,33 +4032,130 @@ describe("ProviderCommandReactor", () => {
     expect(harness.generateBranchName).not.toHaveBeenCalled();
   });
 
-  it("still sends a first turn when the project read for title and branch generation fails", async () => {
-    // Session start and the send request read the project first; the third
-    // read of the turn is the generation block's.
-    let countProjectReads = false;
-    let projectReads = 0;
-    const generationProjectRead = 3;
+  it("still sends a first turn when a read during title and branch generation fails", async () => {
+    // Generation is detached from the turn: once the provider has the turn,
+    // every thread read fails, and the turn is still not reported as failed.
+    let sendCalls = () => 0;
     const harness = await createHarness({
       worktreeBranchPrefix: "ryco",
       decorateSnapshotQuery: (live) => ({
         ...live,
-        getProjectShellById: (projectId) =>
-          countProjectReads && ++projectReads === generationProjectRead
-            ? Effect.fail(storageFailure())
-            : live.getProjectShellById(projectId),
+        getThreadShellById: (threadId) =>
+          sendCalls() > 0 ? Effect.fail(storageFailure()) : live.getThreadShellById(threadId),
       }),
     });
+    sendCalls = () => harness.sendTurn.mock.calls.length;
     await enableFirstTurnGeneration(harness);
+    harness.generateThreadTitle.mockReturnValue(
+      Effect.succeed({ title: "Generated title", branch: "generated-branch" }),
+    );
 
-    countProjectReads = true;
-    await dispatchTurnStart(harness, "generation-project-read");
-    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await dispatchTurnStart(harness, "generation-thread-read");
+    await waitFor(() => harness.generateThreadTitle.mock.calls.length === 1);
     await harness.drain();
 
-    expect(projectReads).toBeGreaterThanOrEqual(generationProjectRead);
     expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+    expect(harness.renameBranch).not.toHaveBeenCalled();
+    sendCalls = () => 0;
     expect(await turnStartFailures(harness)).toHaveLength(0);
-    expect(harness.generateThreadTitle).not.toHaveBeenCalled();
+    expect((await readThread(harness))?.title).toBe("New thread");
+  });
+
+  it("holds the provider turn until the pre-turn checkpoint baseline lands", async () => {
+    let releaseBaseline!: () => void;
+    const baselineHeld = new Promise<void>((resolve) => {
+      releaseBaseline = resolve;
+    });
+    const baselineRequests: Array<ThreadId> = [];
+    const harness = await createHarness({
+      ensurePreTurnBaseline: (threadId) =>
+        Effect.sync(() => baselineRequests.push(threadId)).pipe(
+          Effect.andThen(Effect.promise(() => baselineHeld)),
+        ),
+    });
+
+    await dispatchTurnStart(harness, "baseline-held");
+    await waitFor(() => harness.startSession.mock.calls.length === 1);
+    expect(baselineRequests).toEqual([ThreadId.make("thread-1")]);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(harness.sendTurn).not.toHaveBeenCalled();
+
+    releaseBaseline();
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    expect(
+      (await readThread(harness))?.activities.some(
+        (activity) => activity.kind === "checkpoint.baseline.unconfirmed",
+      ),
+    ).toBe(false);
+  });
+
+  it("starts the turn and says so when the checkpoint baseline is late", async () => {
+    const harness = await createHarness({
+      ensurePreTurnBaseline: () => Effect.never,
+      reactorOptions: { preTurnBaselineWaitMs: 20 },
+    });
+
+    await dispatchTurnStart(harness, "baseline-late");
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await waitFor(async () =>
+      Boolean(
+        (await readThread(harness))?.activities.some(
+          (activity) => activity.kind === "checkpoint.baseline.unconfirmed",
+        ),
+      ),
+    );
+    expect(await turnStartFailures(harness)).toHaveLength(0);
+  });
+
+  it("asks once for the title and branch and renames the branch only when the agent is idle", async () => {
+    const harness = await createHarness({ worktreeBranchPrefix: "ryco" });
+    await enableFirstTurnGeneration(harness);
+    let releaseName!: () => void;
+    const nameHeld = new Promise<void>((resolve) => {
+      releaseName = resolve;
+    });
+    harness.generateThreadTitle.mockReturnValue(
+      Effect.promise(() => nameHeld).pipe(
+        Effect.as({ title: "Reconnect backoff", branch: "reconnect-backoff" }),
+      ),
+    );
+    const setSession = (status: "running" | "ready", activeTurnId: TurnId | null) => {
+      const at = new Date().toISOString();
+      return Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make(`cmd-session-${status}`),
+          threadId: ThreadId.make("thread-1"),
+          session: {
+            threadId: ThreadId.make("thread-1"),
+            status,
+            providerName: "codex",
+            runtimeMode: "approval-required",
+            activeTurnId,
+            lastError: null,
+            updatedAt: at,
+          },
+          createdAt: at,
+        }),
+      );
+    };
+
+    await dispatchTurnStart(harness, "generation-merged");
+    await waitFor(() => harness.generateThreadTitle.mock.calls.length === 1);
+    expect(harness.generateThreadTitle.mock.calls[0]?.[0]).toMatchObject({ includeBranch: true });
+    // The agent is working when the name arrives.
+    await setSession("running", asTurnId("turn-running"));
+    releaseName();
+    await waitFor(async () => (await readThread(harness))?.title === "Reconnect backoff");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(harness.renameBranch).not.toHaveBeenCalled();
+
+    await setSession("ready", null);
+    await waitFor(() => harness.renameBranch.mock.calls.length === 1);
+    expect(harness.renameBranch.mock.calls[0]?.[0]).toMatchObject({
+      oldBranch: "ryco/1234abcd",
+      newBranch: "ryco/reconnect-backoff",
+    });
     expect(harness.generateBranchName).not.toHaveBeenCalled();
   });
 

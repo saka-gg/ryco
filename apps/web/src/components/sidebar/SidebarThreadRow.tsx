@@ -37,7 +37,17 @@ import {
   resolveSidebarStatusTextStyle,
   resolveThreadStatusTextClassName,
 } from "./sidebarStatusText";
-import { useIsIntersectingViewport } from "./hooks/useHasIntersectedViewport";
+import {
+  SOURCE_CONTROL_VISIBILITY_HYSTERESIS,
+  useIsIntersectingViewport,
+} from "./hooks/useHasIntersectedViewport";
+import {
+  isNavigationPress,
+  noteThreadHoverEnd,
+  noteThreadHoverIntent,
+  noteThreadPressIntent,
+  preloadDraftRoute,
+} from "./threadNavigationIntent";
 
 export interface SidebarThreadRowProps {
   thread: SidebarThreadSummary & { draftId?: DraftId | undefined };
@@ -120,12 +130,18 @@ export function SidebarThreadRowWithGitStatusFallback(props: SidebarThreadRowPro
 function SidebarThreadRowWithGitStatusTarget(
   props: SidebarThreadRowProps & { readonly target: GitStatusTarget | null },
 ) {
-  const [setVisibilityNode, isIntersecting] = useIsIntersectingViewport();
+  const [setVisibilityNode, isIntersecting] = useIsIntersectingViewport(
+    undefined,
+    SOURCE_CONTROL_VISIBILITY_HYSTERESIS,
+  );
+  // The row shows only the branch's change request badge: the summary view,
+  // not full status (no git status, diffs or fetch per visible folder).
   const gitStatus = useGitStatus(props.target ?? { environmentId: null, cwd: null }, {
     enabled: shouldEnableSidebarRowGitStatus({
       isActive: props.isActive,
       isIntersecting,
     }),
+    view: "summary",
   });
 
   return (
@@ -156,7 +172,9 @@ export const SidebarThreadRowContent = memo(function SidebarThreadRowContent(
     renamingCommittedRef,
     confirmingArchiveThreadKey,
     setConfirmingArchiveThreadKey,
-    confirmArchiveButtonRefs,
+    // A `…Ref` name tells the React Compiler this is a ref (read only in
+    // handlers), so the callbacks below keep their memoization.
+    confirmArchiveButtonRefs: confirmArchiveButtonsRef,
     handleThreadClick,
     navigateToThread,
     navigateToDraft,
@@ -169,6 +187,10 @@ export const SidebarThreadRowContent = memo(function SidebarThreadRowContent(
     attemptArchiveThread,
     openPrLink,
     thread,
+    // Read once here: a `ref={props.…}` read makes the React Compiler treat
+    // `props` as a ref and skip this component.
+    setVisibilityNode,
+    isTreeChild,
   } = props;
   const gitStatus = props.gitStatus;
   const threadRef = scopeThreadRef(thread.environmentId, thread.id);
@@ -210,7 +232,7 @@ export const SidebarThreadRowContent = memo(function SidebarThreadRowContent(
   const terminalStatus = terminalStatusFromRunningIds(runningTerminalIds);
   const isConfirmingArchive = confirmingArchiveThreadKey === threadKey && !isThreadRunning;
   const canArchiveThread = !draftId && canArchiveSidebarThread(thread);
-  const canCloseThread = (props.isTreeChild || draftId !== null) && !isThreadRunning;
+  const canCloseThread = (isTreeChild || draftId !== null) && !isThreadRunning;
   const threadMetaClassName = isConfirmingArchive
     ? "pointer-events-none opacity-0"
     : !isThreadRunning
@@ -378,12 +400,12 @@ export const SidebarThreadRowContent = memo(function SidebarThreadRowContent(
   const handleConfirmArchiveRef = useCallback(
     (element: HTMLButtonElement | null) => {
       if (element) {
-        confirmArchiveButtonRefs.current.set(threadKey, element);
+        confirmArchiveButtonsRef.current.set(threadKey, element);
       } else {
-        confirmArchiveButtonRefs.current.delete(threadKey);
+        confirmArchiveButtonsRef.current.delete(threadKey);
       }
     },
-    [confirmArchiveButtonRefs, threadKey],
+    [confirmArchiveButtonsRef, threadKey],
   );
   const stopPropagationOnPointerDown = useCallback(
     (event: React.PointerEvent<HTMLButtonElement>) => {
@@ -406,10 +428,10 @@ export const SidebarThreadRowContent = memo(function SidebarThreadRowContent(
       event.stopPropagation();
       setConfirmingArchiveThreadKey(threadKey);
       requestAnimationFrame(() => {
-        confirmArchiveButtonRefs.current.get(threadKey)?.focus();
+        confirmArchiveButtonsRef.current.get(threadKey)?.focus();
       });
     },
-    [confirmArchiveButtonRefs, setConfirmingArchiveThreadKey, threadKey],
+    [confirmArchiveButtonsRef, setConfirmingArchiveThreadKey, threadKey],
   );
   const handleArchiveImmediateClick = useCallback(
     (event: React.MouseEvent<HTMLButtonElement>) => {
@@ -427,14 +449,37 @@ export const SidebarThreadRowContent = memo(function SidebarThreadRowContent(
     },
     [requestTrashThread, thread],
   );
+  // Rows navigate imperatively, so the router's intent preloading never sees
+  // them: warm the route (and the thread's detail) on hover and press.
+  const handleRowPointerEnter = useCallback(() => {
+    if (draftId) {
+      preloadDraftRoute();
+      return;
+    }
+    if (!isActive) noteThreadHoverIntent(threadRef);
+  }, [draftId, isActive, threadRef]);
+  const handleRowPointerLeave = useCallback(() => {
+    if (!draftId) noteThreadHoverEnd(threadRef);
+  }, [draftId, threadRef]);
+  const handleRowPointerDown = useCallback(
+    (event: React.PointerEvent) => {
+      if (!isNavigationPress(event)) return;
+      if (draftId) {
+        preloadDraftRoute();
+        return;
+      }
+      if (!isActive) noteThreadPressIntent(threadRef);
+    },
+    [draftId, isActive, threadRef],
+  );
   const rowButtonRender = useMemo(() => <div role="button" tabIndex={0} />, []);
 
   return (
     <SidebarMenuSubItem
-      ref={props.setVisibilityNode}
+      ref={setVisibilityNode}
       className={cn(
         "w-full",
-        props.isTreeChild &&
+        isTreeChild &&
           "pl-5 before:absolute before:top-0 before:bottom-0 before:left-2 before:w-px before:bg-sidebar-border/70 after:absolute after:left-2 after:top-1/2 after:h-px after:w-3 after:bg-sidebar-border/70",
       )}
       data-thread-item
@@ -454,6 +499,9 @@ export const SidebarThreadRowContent = memo(function SidebarThreadRowContent(
         onDoubleClick={handleRowDoubleClick}
         onKeyDown={handleRowKeyDown}
         onContextMenu={handleRowContextMenu}
+        onPointerEnter={handleRowPointerEnter}
+        onPointerLeave={handleRowPointerLeave}
+        onPointerDown={handleRowPointerDown}
         draggable={!isMobile && !thread.draftId && renamingThreadKey !== threadKey}
         onDragStart={(event) => startPaneDrag(event.dataTransfer, threadRef, "copyMove")}
         onDragEnd={endPaneDrag}

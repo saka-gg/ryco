@@ -8,7 +8,7 @@ import {
   type WsConnectionStatus,
 } from "@ryco/client-runtime/rpc";
 
-import { webAppLifecycle } from "../platform";
+import { webAppLifecycle } from "../platform/appLifecycle";
 
 export * from "@ryco/client-runtime/rpc";
 

@@ -3,6 +3,8 @@ import { Schema } from "effect";
 
 import {
   ProjectReadFileResult,
+  ProjectSearchEntriesInput,
+  ProjectSearchEntriesResult,
   ProjectWriteFileError,
   ProjectWriteFileInput,
   ProjectWriteFileResult,
@@ -77,5 +79,29 @@ describe("workspace file editing contracts", () => {
 
     expect(error._tag).toBe("ProjectWriteFileError");
     expect(error.reason).toBe("conflict");
+  });
+});
+
+describe("workspace entry search contracts", () => {
+  const decodeSearchInput = Schema.decodeUnknownSync(ProjectSearchEntriesInput);
+  const decodeSearchResult = Schema.decodeUnknownSync(ProjectSearchEntriesResult);
+
+  it("accepts an empty query (top-level listing and index warm-up)", () => {
+    expect(decodeSearchInput({ cwd: "/repo", query: "", limit: 80 }).query).toBe("");
+    expect(decodeSearchInput({ cwd: "/repo", query: "  src  ", limit: 80 }).query).toBe("src");
+  });
+
+  it("still bounds the query length", () => {
+    expect(() => decodeSearchInput({ cwd: "/repo", query: "x".repeat(257), limit: 80 })).toThrow();
+  });
+
+  it("keeps the partial and refreshing flags optional", () => {
+    expect(decodeSearchResult({ entries: [], truncated: false })).toEqual({
+      entries: [],
+      truncated: false,
+    });
+    expect(
+      decodeSearchResult({ entries: [], truncated: true, partial: true, refreshing: true }),
+    ).toEqual({ entries: [], truncated: true, partial: true, refreshing: true });
   });
 });

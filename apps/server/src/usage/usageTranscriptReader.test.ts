@@ -242,3 +242,100 @@ it("marks a remaining tail partial when the usage-record limit is reached", asyn
   expect(result?.limited).toBe(true);
   expect(result?.records.length).toBeLessThanOrEqual(USAGE_TRANSCRIPT_LIMITS.records);
 });
+
+it("parses lines that span read chunks, including long usage lines, and resumes across them", async () => {
+  const root = await setup(),
+    path = join(root, "chunks.jsonl");
+  const filler = (size: number) => JSON.stringify({ type: "user", padding: "x".repeat(size) });
+  // A usage line of ~3 MiB crosses several 1 MiB reads; fillers shift every boundary.
+  const longUsage = JSON.stringify({
+    type: "assistant",
+    timestamp: "2026-08-07T04:05:13.944Z",
+    sessionId: "long",
+    message: {
+      role: "assistant",
+      id: "long-response",
+      model: "claude-sonnet-4-5",
+      content: "y".repeat(3 * 1024 * 1024),
+      usage: { input_tokens: 7, output_tokens: 11 },
+    },
+  });
+  const lines = [filler(700_000), claude, filler(900_000), longUsage, filler(10), claude];
+  await writeFile(path, lines.join("\n") + "\n");
+  const reader = createUsageTranscriptReader();
+  const first = await reader(path, "claude");
+  expect(first?.limited).toBe(false);
+  expect(first?.records.map((record) => record.totals.totalTokens)).toEqual([5, 18, 5]);
+  expect(first?.skippedLineCount).toBe(3);
+  await appendFile(
+    path,
+    filler(1_500_000) + "\n" + claude.replace("fixture-response", "tail") + "\n",
+  );
+  const resumed = await reader(path, "claude");
+  expect(resumed?.reusedLineCount).toBe(lines.length);
+  expect(resumed?.records).toEqual((await readUsageTranscript(path, "claude"))?.records);
+  expect(resumed?.records).toHaveLength(4);
+});
+
+it("lists many transcripts with batched stats and skips files outside the window", async () => {
+  const root = await setup();
+  await mkdir(join(root, "nested"));
+  for (let index = 0; index < 70; index++) {
+    const path = join(root, index % 2 ? "nested" : "", `${index}.jsonl`);
+    await writeFile(path, `${claude}\n`);
+    if (index % 10 === 0) await utimes(path, 1, 1);
+  }
+  await writeFile(join(root, "notes.txt"), "not a transcript");
+  const listing = await listUsageTranscriptFiles(root, 5_000);
+  expect(listing.files).toHaveLength(63);
+  expect(listing.skippedEntryCount).toBe(8);
+  expect(listing.errorCount).toBe(0);
+  expect(listing.files.map((file) => file.path)).toEqual(
+    listing.files.map((file) => file.path).toSorted((left, right) => left.localeCompare(right)),
+  );
+});
+
+it("skips large inert Codex lines by their envelope and still reads usage and context", async () => {
+  const root = await setup(),
+    path = join(root, "envelope.jsonl");
+  const timestamp = "2026-08-07T04:05:13.944Z";
+  const padding = "p".repeat(4096);
+  const lines = [
+    // Context without a payload type falls back to the marker search.
+    JSON.stringify({ timestamp, ordinal: 1, type: "turn_context", payload: { model: "gpt-5" } }),
+    // A large tool output that merely mentions markers is never parsed.
+    JSON.stringify({
+      timestamp,
+      ordinal: 2,
+      type: "response_item",
+      payload: { type: "function_call_output", output: `"token_count" "turn_context" ${padding}` },
+    }),
+    // A large, enveloped usage event is parsed.
+    JSON.stringify({
+      timestamp,
+      ordinal: 3,
+      type: "event_msg",
+      payload: {
+        type: "token_count",
+        info: { last_token_usage: { input_tokens: 40, output_tokens: 2 } },
+        padding,
+      },
+    }),
+    // Older rollouts have no ordinal.
+    JSON.stringify({
+      timestamp,
+      type: "event_msg",
+      payload: {
+        type: "token_count",
+        info: { last_token_usage: { input_tokens: 50, output_tokens: 2 } },
+      },
+    }),
+  ];
+  await writeFile(path, lines.join("\n") + "\n");
+  const read = await readUsageTranscript(path, "codex");
+  expect(read?.records.map((record) => [record.model, record.totals.totalTokens])).toEqual([
+    ["gpt-5", 42],
+    ["gpt-5", 52],
+  ]);
+  expect(read?.skippedLineCount).toBe(1);
+});

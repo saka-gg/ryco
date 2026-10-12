@@ -21,6 +21,7 @@ import {
   reorderProjectTreeItem,
   readPersistedState,
   resolveSidebarModeForDocument,
+  seedThreadVisitedAt,
   setAlwaysUseBuildMode,
   setDefaultAdvertisedEndpointKey,
   setProjectFolderExpanded,
@@ -98,6 +99,19 @@ describe("uiStateStore pure functions", () => {
     expect(resolveSidebarModeForDocument({ documentFound: true, persistedMode: "projects" })).toBe(
       "projects",
     );
+  });
+
+  it("seedThreadVisitedAt seeds a missing visit in O(1) and never overwrites one", () => {
+    const initialState = makeUiState({
+      threadLastVisitedAtById: { "env:visited": "2026-02-25T12:00:00.000Z" },
+    });
+
+    const seeded = seedThreadVisitedAt(initialState, "env:new", "2026-02-25T12:30:00.000Z");
+    expect(seeded.threadLastVisitedAtById["env:new"]).toBe("2026-02-25T12:30:00.000Z");
+
+    expect(seedThreadVisitedAt(seeded, "env:visited", "2026-02-25T13:00:00.000Z")).toBe(seeded);
+    expect(seedThreadVisitedAt(seeded, "env:other", undefined)).toBe(seeded);
+    expect(seedThreadVisitedAt(seeded, "env:other", "")).toBe(seeded);
   });
 
   it("markThreadVisited stores the provided server timestamp", () => {

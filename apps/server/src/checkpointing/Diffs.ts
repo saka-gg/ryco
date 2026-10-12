@@ -1,4 +1,6 @@
-import { parsePatchFiles } from "@pierre/diffs";
+// The subpath loads only the parser; the package root pulls in shiki and the
+// whole highlighting stack.
+import { parsePatchFiles } from "@pierre/diffs/utils/parsePatchFiles";
 
 export interface TurnDiffFileSummary {
   readonly path: string;

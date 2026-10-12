@@ -1,4 +1,5 @@
-import { makeRelayE2eeInitiator, type RelayE2eeHost } from "@ryco/client-runtime/relay";
+import type { RelayE2eeHost } from "@ryco/client-runtime/relay";
+import { makeRelayE2eeInitiator } from "@ryco/client-runtime/relay/e2ee";
 import { verifyNodeE2eeCapabilityStatement } from "@ryco/shared/relayE2eeCapabilityVerify";
 import {
   E2eeClientHandshake,

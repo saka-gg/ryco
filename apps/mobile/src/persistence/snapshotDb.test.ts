@@ -68,4 +68,47 @@ describe("snapshotDb", () => {
     expect(payloadByteLength("abc")).toBe(3);
     expect(payloadByteLength("ü")).toBe(2);
   });
+
+  it("counts exactly what TextEncoder would encode, without encoding", () => {
+    const samples = [
+      "",
+      "plain ascii",
+      "ü€",
+      "emoji 🚀 pair",
+      "lone \ud800 high",
+      "lone \udc00 low",
+      "trailing high \ud83d",
+      JSON.stringify({ title: "Ünïcödé 🧪", body: "x".repeat(300) }),
+    ];
+    for (const sample of samples) {
+      expect(payloadByteLength(sample), JSON.stringify(sample)).toBe(
+        new TextEncoder().encode(sample).byteLength,
+      );
+    }
+  });
+
+  it("reads every snapshot in one query, most recently written first", async () => {
+    const db = createSnapshotDb(openNodeSqliteHandle);
+    await db.saveEnvironmentSnapshot({
+      environmentId: "env-old",
+      schemaVersion: 1,
+      payload: "{}",
+      updatedAt: 1,
+    });
+    await db.saveEnvironmentSnapshot({
+      environmentId: "env-new",
+      schemaVersion: 2,
+      payload: '{"n":1}',
+      payloadBytes: 7,
+      updatedAt: 5,
+    });
+    expect(await db.loadEnvironmentSnapshots()).toEqual([
+      { environmentId: "env-new", schemaVersion: 2, payload: '{"n":1}', updatedAt: 5 },
+      { environmentId: "env-old", schemaVersion: 1, payload: "{}", updatedAt: 1 },
+    ]);
+    expect(
+      (await db.listEnvironmentSnapshotStats()).find((stat) => stat.environmentId === "env-new")
+        ?.payloadBytes,
+    ).toBe(7);
+  });
 });

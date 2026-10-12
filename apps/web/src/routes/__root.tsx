@@ -4,6 +4,7 @@ import {
   createRootRouteWithContext,
   type ErrorComponentProps,
   useLocation,
+  useRouter,
 } from "@tanstack/react-router";
 import { lazy, Suspense, useEffect, useState } from "react";
 import type { AuthSessionState } from "@ryco/contracts";
@@ -19,6 +20,8 @@ import {
   readMobileAppUrl,
 } from "../env";
 import { getPresentationTier } from "../lib/presentationTier";
+import { preloadableLazy, type PreloadableModule } from "../lib/preloadableLazy";
+import { preloadMatchedRouteChunks } from "../lib/routeChunkPreload";
 import {
   markInterstitialDismissed,
   readInterstitialDismissed,
@@ -26,13 +29,14 @@ import {
 } from "../components/shell/phone/phoneAppInterstitial";
 import { PhoneGetAppInterstitialBackdrop } from "../components/shell/phone/PhoneGetAppInterstitialBackdrop";
 
-const RootAppShell = lazy(() =>
-  import("../components/RootAppShell").then((module) => ({ default: module.RootAppShell })),
+// The shell surfaces load during the root `beforeLoad` and render directly once
+// resolved: a `React.lazy` boundary here committed its fallback on every boot
+// and React then held the reveal for up to 300 ms (the Suspense throttle).
+const RootAppShell = preloadableLazy(() =>
+  import("../components/RootAppShell").then((module) => module.RootAppShell),
 );
-const HostedHubRoot = lazy(() =>
-  import("../components/hostedHub/HostedHubRoot").then((module) => ({
-    default: module.HostedHubRoot,
-  })),
+const HostedHubRoot = preloadableLazy(() =>
+  import("../components/hostedHub/HostedHubRoot").then((module) => module.HostedHubRoot),
 );
 const PhoneGetAppInterstitial = lazy(() =>
   import("../components/shell/phone/PhoneGetAppInterstitial").then((module) => ({
@@ -59,7 +63,7 @@ let cachedReadyRootContext: RootBeforeLoadContext | null = null;
 let pendingReadyRootContext: Promise<RootBeforeLoadContext> | null = null;
 
 export const Route = createRootRouteWithContext<Record<string, never>>()({
-  beforeLoad: ({ location }) => resolveRootBeforeLoadContext(location.pathname),
+  beforeLoad: ({ location, preload }) => resolveRootBeforeLoadContext(location.pathname, preload),
   component: () => (
     <>
       <PreviewFileNavigationGuard />
@@ -75,19 +79,73 @@ export const Route = createRootRouteWithContext<Record<string, never>>()({
   pendingMs: 0,
 });
 
+function isNativeAuthorizationPath(pathname: string): boolean {
+  return pathname.startsWith("/native/authorize/");
+}
+
+/**
+ * The lazily loaded surface `RootRouteView` renders for a gate state, or null
+ * when it renders only the route outlet (pairing, native authorization, and
+ * every unauthenticated state).
+ */
+function rootSurfaceFor(
+  pathname: string,
+  authGateState: RootAuthGateState,
+): PreloadableModule | null {
+  if (pathname === "/pair" || isNativeAuthorizationPath(pathname)) return null;
+  switch (authGateState.status) {
+    case "authenticated":
+    case "hosted-static":
+      return RootAppShell;
+    case "hosted-hub":
+      return HostedHubRoot;
+    default:
+      return null;
+  }
+}
+
+/**
+ * Resolves once the surface for `context` renders synchronously, so the root
+ * match commits the shell itself rather than a Suspense fallback.
+ */
+function withRootSurfaceLoaded(
+  pathname: string,
+  context: RootBeforeLoadContext,
+): RootBeforeLoadContext | Promise<RootBeforeLoadContext> {
+  const surface = rootSurfaceFor(pathname, context.authGateState);
+  if (!surface || surface.isLoaded()) return context;
+  return surface.preload().then(() => {
+    markStartupPhase("root-shell-module-ready");
+    return context;
+  });
+}
+
 function resolveRootBeforeLoadContext(
   pathname: string,
+  preload: boolean,
 ): RootBeforeLoadContext | Promise<RootBeforeLoadContext> {
-  markStartupPhase("root-before-load-start");
+  // Intent preloads (hovering a link) run this too; the startup marks describe
+  // navigations only, and must not pile up one entry per hover.
+  if (!preload) markStartupPhase("root-before-load-start");
 
   if (pathname !== "/pair" && cachedReadyRootContext) {
-    markStartupPhase("root-before-load-ready");
-    measureStartupPhase("root-before-load", "root-before-load-start", "root-before-load-ready");
-    return cachedReadyRootContext;
+    if (!preload) {
+      markStartupPhase("root-before-load-ready");
+      measureStartupPhase("root-before-load", "root-before-load-start", "root-before-load-ready");
+    }
+    return withRootSurfaceLoaded(pathname, cachedReadyRootContext);
   }
 
   if (pathname !== "/pair" && pendingReadyRootContext) {
     return pendingReadyRootContext;
+  }
+
+  if (pathname !== "/pair" && !isNativeAuthorizationPath(pathname)) {
+    // Start the shell and the deep-linked page chunks alongside the auth round
+    // trips. Nothing here waits for them yet: an unauthenticated document is
+    // redirected to /pair without ever awaiting the shell graph.
+    void (isHostedHubMode() ? HostedHubRoot : RootAppShell).preload();
+    void preloadMatchedRouteChunks(pathname);
   }
 
   const pendingContext: Promise<RootBeforeLoadContext> = resolveRootBeforeLoadContextAsync(
@@ -100,7 +158,7 @@ function resolveRootBeforeLoadContext(
     ) {
       cachedReadyRootContext = context;
     }
-    return context;
+    return withRootSurfaceLoaded(pathname, context);
   });
 
   if (pathname !== "/pair") {
@@ -119,13 +177,53 @@ function resolveRootBeforeLoadContext(
 async function resolveRootBeforeLoadContextAsync(pathname: string): Promise<RootBeforeLoadContext> {
   const currentUrl = new URL(window.location.href);
   if (isHostedHubMode()) {
-    const { installHostedConsoleBoundary } = await import("../hostedHub/logging");
+    // Code-only prefetches: fetching a chunk starts no session, ticket, relay
+    // or store work, so the hosted root's graph and the workspace-owner module
+    // download while the access check is on the wire instead of after it.
+    // Each failure is settled here, so a chunk that fails to load while the
+    // gate is still waiting is left for the route's own lazy load to report.
+    // The same preloadable module `RootRouteView` renders, so the root match
+    // commits the hosted root directly instead of suspending on it once.
+    // `preload()` never rejects; a failed chunk surfaces from the render.
+    const hostedRoot = HostedHubRoot.preload();
+    const hostedRootAppShell = import("../components/hostedHub/hostedRootAppShell").catch(
+      () => undefined,
+    );
+    const workspaceOwners = import("../hostedHub/hostedWorkspaceOwners").catch(() => undefined);
+    const [
+      { installHostedConsoleBoundary },
+      { ensureWebHostedRuntimeConfigured, hostedHubController, hostedHubStore },
+      { bootstrapWithHostedReadCache, canShowHostedReadPreview },
+    ] = await Promise.all([
+      import("../hostedHub/logging"),
+      import("../hostedHub/state"),
+      import("../hostedHub/readCache"),
+    ]);
     installHostedConsoleBoundary();
-    const { ensureWebHostedRuntimeConfigured, hostedHubController } =
-      await import("../hostedHub/state");
     ensureWebHostedRuntimeConfigured();
-    const { bootstrapWithHostedReadCache } = await import("../hostedHub/readCache");
-    await bootstrapWithHostedReadCache(() => hostedHubController.bootstrap());
+    // Start the routed-node orchestrator, workspace coordinator and browser
+    // lifecycle now, so route-derived demand reaches `selectNode` as soon as
+    // the directory is ready rather than once the hosted root has mounted.
+    // They only call into the hosted controller, which stays the one owner;
+    // the root retains them as well, so a failed load here changes nothing.
+    void workspaceOwners.then((owners) => {
+      owners?.retainHostedWorkspaceOwners();
+      owners?.prefetchHostedRouteCode(pathname);
+    });
+    // The gate waits for the account answer only. The directory has its own
+    // loading and stale surfaces, and waiting for it held a stalled network on
+    // the boot surface for a second request deadline.
+    await bootstrapWithHostedReadCache(() => hostedHubController.bootstrapAccess());
+    const needsWorkspaceShell =
+      hostedHubStore.getState().accountStatus === "authenticated" || canShowHostedReadPreview();
+    await Promise.all([
+      hostedRoot,
+      needsWorkspaceShell
+        ? hostedRootAppShell.then((shell) =>
+            shell?.preloadHostedRootAppShell().catch(() => undefined),
+          )
+        : undefined,
+    ]);
     markStartupPhase("root-before-load-ready");
     return { authGateState: { status: "hosted-hub" } };
   }
@@ -159,9 +257,28 @@ async function resolveRootBeforeLoadContextAsync(pathname: string): Promise<Root
   ]);
   markStartupPhase("root-before-load-ready");
   measureStartupPhase("root-before-load", "root-before-load-start", "root-before-load-ready");
+  if (authGateState.status === "authenticated" && !isNativeAuthorizationPath(pathname)) {
+    startPrimaryConnectionEarly();
+  }
   return {
     authGateState,
   };
+}
+
+/**
+ * Opens the primary connection as soon as the session is known, so the
+ * ws-token round trip, the socket upgrade and the shell snapshot overlap the
+ * shell chunk download instead of waiting for its first commit. Standard mode
+ * only: hosted lifecycle recovery has a single owner and is never started from
+ * here. The shell's `startEnvironmentConnectionService` stays the owner; the
+ * supervisor's `connectPrimary` returns this same connection to it.
+ */
+function startPrimaryConnectionEarly(): void {
+  void import("../environments/runtime")
+    .then(({ connectPrimaryEnvironment }) => {
+      connectPrimaryEnvironment();
+    })
+    .catch(() => undefined);
 }
 
 function RootRoutePendingView() {
@@ -170,7 +287,7 @@ function RootRoutePendingView() {
 
 function RootRouteView() {
   const pathname = useLocation({ select: (location) => location.pathname });
-  const nativeAuthorizationRoute = pathname.startsWith("/native/authorize/");
+  const nativeAuthorizationRoute = isNativeAuthorizationPath(pathname);
   const { authGateState } = Route.useRouteContext();
   const canShowInterstitial =
     pathname !== "/pair" &&
@@ -241,6 +358,7 @@ function RootRouteView() {
   return (
     <>
       {interstitial}
+      {/* Loaded by `beforeLoad`; the boundary only covers a failed preload. */}
       <Suspense fallback={<AppBootLoadingSurface />}>
         <RootAppShell authGateState={authGateState} />
       </Suspense>
@@ -249,6 +367,7 @@ function RootRouteView() {
 }
 
 function RootRouteErrorView({ error, reset }: ErrorComponentProps) {
+  const router = useRouter();
   const hosted = isHostedHubMode();
   const message = hosted
     ? "The hosted client could not continue. Retry or reload the app."
@@ -272,7 +391,7 @@ function RootRouteErrorView({ error, reset }: ErrorComponentProps) {
         <p className="mt-2 text-sm leading-relaxed text-muted-foreground">{message}</p>
 
         <div className="mt-5 flex flex-wrap gap-2">
-          <Button size="sm" onClick={() => reset()}>
+          <Button size="sm" onClick={() => retryRootRoute(router, reset)}>
             Try again
           </Button>
           <Button size="sm" variant="outline" onClick={() => window.location.reload()}>
@@ -294,6 +413,19 @@ function RootRouteErrorView({ error, reset }: ErrorComponentProps) {
       </section>
     </div>
   );
+}
+
+/**
+ * "Try again" re-runs the root `beforeLoad`: the auth and environment reads
+ * (which now fail with a timeout after their transient-retry budget instead of
+ * hanging) and the shell chunk. Resetting the error boundary alone re-renders a
+ * match that is still in its error state, which only shows this view again.
+ * `invalidate` moves that match back to pending, and a shell chunk that failed
+ * to load is retried by the same `beforeLoad`, which is the one place that
+ * knows whether this session needs it.
+ */
+function retryRootRoute(router: ReturnType<typeof useRouter>, reset: () => void): void {
+  void router.invalidate().finally(reset);
 }
 
 function errorMessage(error: unknown): string {

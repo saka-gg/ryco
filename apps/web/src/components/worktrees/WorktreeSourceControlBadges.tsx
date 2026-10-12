@@ -30,6 +30,12 @@ export interface WorktreeSourceControlBadgesProps {
   workItemState?: "open" | "in_progress" | "done" | "closed" | "unknown" | null | undefined;
   workItemStateName?: string | null | undefined;
   onOpenLinkedItem?: ((item: LinkedWorktreeItem) => void) | undefined;
+  /**
+   * The pointer entered or focus reached a badge that opens a linked item (or
+   * the pull requests popover): a surface that loads that dialog on demand can
+   * start loading it now.
+   */
+  onOpenLinkedItemIntent?: (() => void) | undefined;
   className?: string | undefined;
   density?: "compact" | "header" | undefined;
   labelStyle?: "number" | "kind" | undefined;
@@ -84,6 +90,7 @@ export function WorktreeSourceControlBadges({
                   })
               : undefined
           }
+          onIntent={props.onOpenLinkedItemIntent}
         />
       ) : null}
       {issueNumber !== null ? (
@@ -102,6 +109,7 @@ export function WorktreeSourceControlBadges({
               ? () => props.onOpenLinkedItem?.({ kind: "issue", number: issueNumber })
               : undefined
           }
+          onIntent={props.onOpenLinkedItemIntent}
         />
       ) : null}
       {prNumber !== null &&
@@ -116,6 +124,7 @@ export function WorktreeSourceControlBadges({
           density={props.density ?? "compact"}
           toggle={props.pullRequestsToggle}
           badgeRef={pullRequestBadgeRef}
+          onIntent={props.onOpenLinkedItemIntent}
         />
       ) : prNumber !== null ? (
         <WorktreeSourceControlBadge
@@ -136,6 +145,7 @@ export function WorktreeSourceControlBadges({
               ? () => props.onOpenLinkedItem?.({ kind: "pr", number: prNumber })
               : undefined
           }
+          onIntent={props.onOpenLinkedItemIntent}
         />
       ) : null}
     </span>
@@ -171,6 +181,7 @@ function PullRequestsToggleBadge({
   labelStyle: "number" | "kind" | undefined;
   density: "compact" | "header";
   toggle: WorktreePullRequestsToggle;
+  onIntent: (() => void) | undefined;
 }) {
   const variant = resolveStateBadgeVariant({
     kind: "pr",
@@ -209,6 +220,8 @@ function PullRequestsToggleBadge({
         props.toggle.onToggle();
       }}
       onKeyDown={stopRowActivation}
+      onPointerEnter={props.onIntent}
+      onFocus={props.onIntent}
     >
       <Icon className={props.density === "header" ? "size-3" : "size-2.5"} />
       <span>{props.labelStyle === "kind" ? `PR #${props.prNumber}` : `#${props.prNumber}`}</span>
@@ -222,6 +235,7 @@ function WorktreeWorkItemBadge(props: {
   stateName: string | null;
   density: "compact" | "header";
   onClick?: (() => void) | undefined;
+  onIntent?: (() => void) | undefined;
 }) {
   const baseClass = badgeBaseClass(props.density);
   const iconClass = props.density === "header" ? "size-3" : "size-2.5";
@@ -250,6 +264,8 @@ function WorktreeWorkItemBadge(props: {
         data-linked-worktree-item="workItem"
         onClick={handleClick}
         onKeyDown={stopRowActivation}
+        onPointerEnter={props.onIntent}
+        onFocus={props.onIntent}
       >
         <AtlassianJiraIcon className={iconClass} />
         <span>{props.itemKey}</span>
@@ -283,6 +299,7 @@ function WorktreeSourceControlBadge({
   externalUrl?: string | null | undefined;
   buttonRef?: Ref<HTMLButtonElement> | undefined;
   onClick?: (() => void) | undefined;
+  onIntent?: (() => void) | undefined;
 }) {
   const Icon = props.variant.Icon;
   const title = props.variant.label
@@ -315,6 +332,8 @@ function WorktreeSourceControlBadge({
         data-linked-worktree-item={props.kind}
         onClick={handleClick}
         onKeyDown={stopRowActivation}
+        onPointerEnter={props.onIntent}
+        onFocus={props.onIntent}
       >
         <Icon className={iconClass} />
         <span>{props.displayLabel}</span>

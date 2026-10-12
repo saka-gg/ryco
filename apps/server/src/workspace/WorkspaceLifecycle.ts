@@ -73,6 +73,10 @@ import {
   type CheckoutFacts,
   containsPath,
   inspectCheckout,
+  inspectProjectGitFacts,
+  makeCheckoutInspectionCaches,
+  type CheckoutInspectionCaches,
+  type ProjectGitFacts,
   samePath,
 } from "./checkoutInspection.ts";
 import {
@@ -124,7 +128,10 @@ export class WorkspaceLifecycle extends Context.Service<
 >()("ryco/workspace/WorkspaceLifecycle") {}
 
 export interface WorkspaceLifecycleDeps {
-  readonly snapshots: Pick<ProjectionSnapshotQueryShape, "getShellSnapshot" | "getThreadShellById">;
+  readonly snapshots: Pick<
+    ProjectionSnapshotQueryShape,
+    "getShellSnapshot" | "getThreadShellById" | "getWorkspacePlacement"
+  >;
   readonly threads: Pick<ProjectionThreadRepositoryShape, "listTrashed">;
   readonly engine: Pick<OrchestrationEngineShape, "dispatch">;
   readonly providers: Pick<ProviderServiceShape, "stopSession"> | null;
@@ -371,7 +378,16 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
     return { snapshot, trashed, terminals, nowMs: now() } satisfies LoadedContext;
   }).pipe(Effect.mapError(() => lifecycleError("Workspace state is unavailable.")));
 
-  const inspectWorkspace = (context: LoadedContext, worktree: OrchestrationWorktreeShell) =>
+  // Shared by list() and suggestions() (read-only listings): a reopened
+  // Projects page or overlapping reads reuse each checkout's recent Git reads.
+  const listingCaches = makeCheckoutInspectionCaches();
+
+  const inspectWorkspace = (
+    context: LoadedContext,
+    worktree: OrchestrationWorktreeShell,
+    projectFacts?: ProjectGitFacts,
+    caches?: CheckoutInspectionCaches,
+  ) =>
     Effect.gen(function* () {
       const project = context.snapshot.projects.find((p) => p.id === worktree.projectId);
       if (!project)
@@ -432,6 +448,8 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
                 rowWorktreeId: worktree.worktreeId,
                 branch: worktree.branch,
                 operation: "workspace lifecycle inspection",
+                projectFacts,
+                caches,
               },
             ).pipe(
               Effect.match({
@@ -473,6 +491,21 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
         idleTerminalThreadIds: [...idleTerminalThreadIds],
         inspectedAt: new Date(context.nowMs).toISOString(),
       } satisfies WorkspaceState;
+    });
+
+  /**
+   * A project's repository facts for a read-only listing, shared by every
+   * workspace inspected in it. A failure leaves each inspection to read (and
+   * report) them itself. Preview and apply always inspect from scratch.
+   */
+  const projectFactsFor = (context: LoadedContext, projectId: ProjectId) =>
+    Effect.suspend(() => {
+      const project = context.snapshot.projects.find((p) => p.id === projectId);
+      if (!project) return Effect.succeed(undefined);
+      return inspectProjectGitFacts(
+        { policy: deps.policy, git: deps.gitDriver },
+        { project, operation: "workspace lifecycle inspection" },
+      ).pipe(Effect.orElseSucceed(() => undefined));
     });
 
   const summarize = (state: WorkspaceState): WorkspaceLifecycleSummary => {
@@ -1158,9 +1191,12 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
         const worktrees = (context.snapshot.worktrees ?? []).filter(
           (worktree) => worktree.projectId === projectId,
         );
+        const projectFacts = worktrees.some((worktree) => worktree.worktreePath !== null)
+          ? yield* projectFactsFor(context, projectId)
+          : undefined;
         const states = yield* Effect.forEach(
           worktrees,
-          (worktree) => inspectWorkspace(context, worktree),
+          (worktree) => inspectWorkspace(context, worktree, projectFacts, listingCaches),
           { concurrency: 4 },
         );
         return states.map(summarize);
@@ -1192,17 +1228,32 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
           nowMs: context.nowMs,
         });
         // Only checkouts whose removal would pass preflight right now are suggested.
+        const candidates = plan.checkouts.slice(0, 20);
+        // Read each project's repository facts once, on first use.
+        const factsByProject = new Map<string, Effect.Effect<ProjectGitFacts | undefined>>();
+        for (const projectId of new Set(candidates.map((candidate) => candidate.projectId))) {
+          factsByProject.set(
+            projectId,
+            yield* Effect.cached(projectFactsFor(context, projectId as ProjectId)),
+          );
+        }
         const verified = yield* Effect.forEach(
-          plan.checkouts.slice(0, 20),
+          candidates,
           (candidate) =>
             Effect.gen(function* () {
               const worktree = (context.snapshot.worktrees ?? []).find(
                 (row) => row.worktreeId === candidate.worktreeId,
               );
               if (!worktree) return null;
-              const state = yield* inspectWorkspace(context, worktree).pipe(
-                Effect.orElseSucceed(() => null),
+              const projectFacts = yield* (
+                factsByProject.get(worktree.projectId) ?? Effect.succeed(undefined)
               );
+              const state = yield* inspectWorkspace(
+                context,
+                worktree,
+                projectFacts,
+                listingCaches,
+              ).pipe(Effect.orElseSucceed(() => null));
               if (!state) return null;
               return workspaceActionBlockers(
                 state,

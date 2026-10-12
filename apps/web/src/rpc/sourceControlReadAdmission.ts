@@ -1,12 +1,12 @@
 import {
-  hostedHubStore,
   hostedSessionAdmits,
   resolveHostedRpcCapability,
-} from "@ryco/client-runtime/authorization";
+} from "@ryco/client-runtime/authorization/capabilities";
 import { hostedRoleAllows } from "@ryco/shared/rpcAccessPolicy";
 import type { KeyedQueryAdmission } from "@ryco/client-runtime/rpc";
 import { WS_METHODS, type EnvironmentId } from "@ryco/contracts";
 import { isHostedHubMode } from "~/env";
+import { hostedHubStore } from "~/hostedHub/state";
 
 /** Source-control queries share read authority from the canonical RPC policy. */
 export function sourceControlReadAdmission(environmentId: EnvironmentId): KeyedQueryAdmission {

@@ -166,6 +166,65 @@ export function isTimelineScrolledToEnd(metrics: TimelineScrollMetrics): boolean
   return distanceFromEnd < clientHeight * TIMELINE_AT_END_THRESHOLD_RATIO;
 }
 
+/** How far short of its end a pinned transcript may rest (sub-pixel offsets). */
+const TIMELINE_END_PIN_EPSILON_PX = 1;
+
+/**
+ * Corrective passes one end pin may take. Growth that outlasts them is left to
+ * the list's own live follow, so a transcript that never stops growing cannot
+ * keep a pin looping.
+ */
+export const TIMELINE_END_PIN_MAX_PASSES = 4;
+
+export interface TimelineEndPinTarget {
+  /** Scrolls the list to its end; settles once the list considers the scroll done. */
+  readonly scrollToEnd: (options: { readonly animated: boolean }) => Promise<void> | void;
+  /** The live scroller's metrics, or null once the list is gone. */
+  readonly readScrollMetrics: () => TimelineScrollMetrics | null;
+}
+
+/**
+ * Scrolls the transcript to its end, then re-checks the live scroller once the
+ * list settles and scrolls again until the end is really in view.
+ *
+ * LegendList can settle short of the end on web. Its scroll is clamped to the
+ * content height the browser had laid out when it ran, and growth that lands
+ * while the scroll is in flight (rows re-measuring, the composer clearance
+ * changing) is not followed: the list drops its own `maintainScrollAtEnd`
+ * re-pin while any scroll is in flight, and skips it entirely once the end is
+ * further away than its threshold. Each pass reads the scroller afresh, so the
+ * loop ends as soon as the end is in view, or once `shouldContinue` reports
+ * that the pin no longer applies (the user navigated away, a newer pin took
+ * over, the list was replaced).
+ */
+export async function pinTimelineToEnd(
+  target: TimelineEndPinTarget,
+  options: { readonly animated: boolean; readonly shouldContinue: () => boolean },
+): Promise<void> {
+  let animated = options.animated;
+  for (let pass = 0; pass < TIMELINE_END_PIN_MAX_PASSES; pass += 1) {
+    await target.scrollToEnd({ animated });
+    if (!options.shouldContinue()) return;
+    const metrics = target.readScrollMetrics();
+    if (metrics === null || isTimelineRestingAtEnd(metrics)) return;
+    // A correction jumps: the requested animation already played.
+    animated = false;
+  }
+}
+
+function isTimelineRestingAtEnd(metrics: TimelineScrollMetrics): boolean {
+  const { scrollTop, scrollHeight, clientHeight } = metrics;
+  if (
+    !Number.isFinite(scrollTop) ||
+    !Number.isFinite(scrollHeight) ||
+    !Number.isFinite(clientHeight) ||
+    clientHeight <= 0
+  ) {
+    return true;
+  }
+  return scrollHeight - clientHeight - scrollTop <= TIMELINE_END_PIN_EPSILON_PX;
+}
+
 export function resolveTimelineMinimapInteractiveWidth(
   collapsedWidth: number,
   expanded: boolean,
@@ -442,6 +501,16 @@ export type MessagesTimelineRow =
       standsInFor?: MessageId | undefined;
     }
   | { kind: "working"; id: string; createdAt: string | null };
+
+/**
+ * The size class of a timeline row for the virtualized list. Rows of one class
+ * share a measured-size average, so tall assistant replies do not inflate the
+ * estimate for compact work rows and markers (or the other way round) while
+ * rows are still unmeasured.
+ */
+export function timelineRowItemType(row: MessagesTimelineRow): string {
+  return row.kind === "message" ? `message:${row.message.role}` : row.kind;
+}
 
 export function chapterExpansionKey(chapterId: string): string {
   return chapterId;

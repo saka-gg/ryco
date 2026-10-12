@@ -33,7 +33,9 @@ interface MutableDirectoryNode {
   files: TurnDiffTreeFileNode[];
 }
 
-const SORT_LOCALE_OPTIONS: Intl.CollatorOptions = { numeric: true, sensitivity: "base" };
+// One collator for every comparison: `localeCompare` with options resolves a
+// collator per call, which dominates sorting large trees.
+const NAME_COLLATOR = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 
 function normalizePathSegments(pathValue: string): string[] {
   return pathValue
@@ -43,7 +45,7 @@ function normalizePathSegments(pathValue: string): string[] {
 }
 
 function compareByName(a: { name: string }, b: { name: string }): number {
-  return a.name.localeCompare(b.name, undefined, SORT_LOCALE_OPTIONS);
+  return NAME_COLLATOR.compare(a.name, b.name);
 }
 
 function readStat(file: TurnDiffTreeEntryInput): TurnDiffStat | null {

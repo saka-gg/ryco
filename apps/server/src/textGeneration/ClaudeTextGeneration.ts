@@ -1,4 +1,11 @@
-import { sideQuestionDirectory, sideQuestionEnvironment } from "./SideQuestionIsolation.ts";
+import {
+  isolatedTextGenerationDirectory,
+  type LightweightTextGenerationOperation,
+  lightweightSystemPrompt,
+  sideQuestionDirectory,
+  sideQuestionEnvironment,
+  withFullConfigFallback,
+} from "./SideQuestionIsolation.ts";
 /**
  * ClaudeTextGeneration – Text generation layer using the Claude CLI.
  *
@@ -30,7 +37,7 @@ import {
   normalizeCliError,
   sanitizeCommitSubject,
   sanitizePrTitle,
-  sanitizeThreadTitle,
+  sanitizeThreadTitleResult,
   toJsonSchemaObject,
 } from "./TextGenerationUtils.ts";
 import {
@@ -47,6 +54,9 @@ import {
 import { makeClaudeEnvironment } from "../provider/Drivers/ClaudeHome.ts";
 
 const CLAUDE_TIMEOUT_MS = 180_000;
+/** Titles and branch names are short; the user's own message is the fallback title. */
+const CLAUDE_NAMING_TIMEOUT_MS = 30_000;
+const CLAUDE_TIMEOUT_DETAIL = "Claude CLI request timed out.";
 
 /**
  * Schema for the wrapper JSON returned by `claude -p --output-format json`.
@@ -89,6 +99,9 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
     outputSchemaJson,
     modelSelection,
     toolsEnabled = true,
+    lightweight = operation === "answerSideQuestion",
+    persistSession = true,
+    timeoutMs = CLAUDE_TIMEOUT_MS,
   }: {
     operation:
       | "generateCommitMessage"
@@ -103,6 +116,14 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
     outputSchemaJson: S;
     modelSelection: ModelSelection;
     toolsEnabled?: boolean;
+    /**
+     * Run without the user's setting sources, MCP servers, hooks, memory and
+     * CLAUDE.md, with a short system prompt, in an isolated environment.
+     */
+    lightweight?: boolean;
+    /** False skips writing a Claude Code session for the call. */
+    persistSession?: boolean;
+    timeoutMs?: number;
   }): Effect.fn.Return<S["Type"], TextGenerationError, S["DecodingServices"]> {
     const jsonSchemaStr = JSON.stringify(toJsonSchemaObject(outputSchemaJson));
     const caps = getClaudeModelCapabilities(modelSelection.model);
@@ -122,7 +143,7 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
     const fastMode =
       fastModeDescriptor?.type === "boolean" ? fastModeDescriptor.currentValue : undefined;
     const settings = {
-      ...(operation === "answerSideQuestion"
+      ...(lightweight
         ? {
             disableAllHooks: true,
             autoMemoryEnabled: false,
@@ -139,16 +160,16 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
         claudeSettings.binaryPath || "claude",
         [
           "-p",
-          ...(operation === "answerSideQuestion"
+          ...(lightweight || !persistSession ? ["--no-session-persistence"] : []),
+          ...(lightweight
             ? [
-                "--no-session-persistence",
                 "--setting-sources",
                 "",
                 "--strict-mcp-config",
                 "--mcp-config",
                 '{"mcpServers":{}}',
                 "--system-prompt",
-                "Answer only from the supplied context. You have no tools or mutation authority.",
+                lightweightSystemPrompt(operation),
               ]
             : []),
           "--output-format",
@@ -162,10 +183,7 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
           ...(toolsEnabled ? ["--dangerously-skip-permissions"] : ["--tools", ""]),
         ],
         {
-          env:
-            operation === "answerSideQuestion"
-              ? sideQuestionEnvironment(claudeEnvironment)
-              : claudeEnvironment,
+          env: lightweight ? sideQuestionEnvironment(claudeEnvironment) : claudeEnvironment,
           cwd,
           shell: process.platform === "win32",
           stdin: {
@@ -213,13 +231,11 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
 
     const rawStdout = yield* runClaudeCommand().pipe(
       Effect.scoped,
-      Effect.timeoutOption(CLAUDE_TIMEOUT_MS),
+      Effect.timeoutOption(timeoutMs),
       Effect.flatMap(
         Option.match({
           onNone: () =>
-            Effect.fail(
-              new TextGenerationError({ operation, detail: "Claude CLI request timed out." }),
-            ),
+            Effect.fail(new TextGenerationError({ operation, detail: CLAUDE_TIMEOUT_DETAIL })),
           onSome: (value) => Effect.succeed(value),
         }),
       ),
@@ -255,6 +271,40 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
   // ---------------------------------------------------------------------------
   // TextGenerationShape methods
   // ---------------------------------------------------------------------------
+
+  /**
+   * Titles and branch names: lightweight first, in an empty directory, then
+   * once with the user's setting sources (env, apiKeyHelper) when that may be
+   * what was missing. Never with tools, never persisted as a session.
+   */
+  const runClaudeNamingJson = <S extends Schema.Top>(input: {
+    readonly operation: Extract<
+      LightweightTextGenerationOperation,
+      "generateThreadTitle" | "generateBranchName"
+    >;
+    readonly cwd: string;
+    readonly prompt: string;
+    readonly outputSchemaJson: S;
+    readonly modelSelection: ModelSelection;
+  }) => {
+    const shared = {
+      ...input,
+      toolsEnabled: false,
+      persistSession: false,
+      timeoutMs: CLAUDE_NAMING_TIMEOUT_MS,
+    };
+    return withFullConfigFallback({
+      operation: input.operation,
+      lightweight: Effect.scoped(
+        Effect.gen(function* () {
+          const cwd = yield* isolatedTextGenerationDirectory(input.operation);
+          return yield* runClaudeJson({ ...shared, cwd, lightweight: true });
+        }),
+      ),
+      full: runClaudeJson({ ...shared, lightweight: false }),
+      isTimeout: (error) => error.detail === CLAUDE_TIMEOUT_DETAIL,
+    });
+  };
 
   const generateCommitMessage: TextGenerationShape["generateCommitMessage"] = Effect.fn(
     "ClaudeTextGeneration.generateCommitMessage",
@@ -316,7 +366,7 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
       attachments: input.attachments,
     });
 
-    const generated = yield* runClaudeJson({
+    const generated = yield* runClaudeNamingJson({
       operation: "generateBranchName",
       cwd: input.cwd,
       prompt,
@@ -335,9 +385,10 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
     const { prompt, outputSchema } = buildThreadTitlePrompt({
       message: input.message,
       attachments: input.attachments,
+      includeBranch: input.includeBranch,
     });
 
-    const generated = yield* runClaudeJson({
+    const generated = yield* runClaudeNamingJson({
       operation: "generateThreadTitle",
       cwd: input.cwd,
       prompt,
@@ -345,9 +396,7 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
       modelSelection: input.modelSelection,
     });
 
-    return {
-      title: sanitizeThreadTitle(generated.title),
-    };
+    return sanitizeThreadTitleResult(generated);
   });
 
   const generateIssueContent: TextGenerationShape["generateIssueContent"] = Effect.fn(

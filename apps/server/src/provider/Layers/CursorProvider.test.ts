@@ -11,6 +11,7 @@ import {
   buildCursorProviderSnapshot,
   buildCursorCapabilitiesFromConfigOptions,
   checkCursorProviderStatus,
+  isCursorAgentAboutOutput,
   discoverCursorModelsViaAcp,
   getCursorFallbackModels,
   getCursorParameterizedModelPickerUnsupportedMessage,
@@ -434,6 +435,36 @@ describe("checkCursorProviderStatus", () => {
     const requestLog = await runNode(waitForFileContent(requestLogPath));
     expect(requestLog).toContain("initialize");
     expect(requestLog).toContain("cursor/list_available_models");
+  });
+});
+
+describe("isCursorAgentAboutOutput", () => {
+  it("recognizes Cursor about output and rejects another CLI's agent", () => {
+    expect(
+      isCursorAgentAboutOutput({
+        stdout: '{"cliVersion":"2026.04.08-abc","userEmail":"user@example.com"}',
+        stderr: "",
+        code: 0,
+      }),
+    ).toBe(true);
+    expect(
+      isCursorAgentAboutOutput({
+        stdout: "About Cursor CLI\n\nCLI Version         2026.03.20-44cb435\n",
+        stderr: "",
+        code: 0,
+      }),
+    ).toBe(true);
+    // Old Cursor builds without `about` keep their dedicated warning.
+    expect(
+      isCursorAgentAboutOutput({ stdout: "", stderr: "error: unknown command 'about'", code: 1 }),
+    ).toBe(true);
+    expect(
+      isCursorAgentAboutOutput({
+        stdout: "grok 0.4.2 — interactive coding agent\n",
+        stderr: "",
+        code: 0,
+      }),
+    ).toBe(false);
   });
 });
 

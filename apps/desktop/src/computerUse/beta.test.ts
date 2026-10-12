@@ -69,7 +69,7 @@ vi.mock("../cuaDriverHost.ts", () => ({
     resumeDesktop() {}
   },
 }));
-import { DesktopComputerBeta } from "./beta.ts";
+import { DesktopComputerBeta, readBundleIdentifier } from "./beta.ts";
 let directory: string | undefined;
 let beta: DesktopComputerBeta | undefined;
 afterEach(async () => {
@@ -207,3 +207,17 @@ it.skipIf(process.platform !== "darwin")(
     expect(JSON.stringify(history)).not.toContain("private content");
   },
 );
+
+it("reads the bundle identifier from an XML Info.plist without spawning PlistBuddy", () => {
+  const plist = Buffer.from(
+    '<?xml version="1.0"?><plist><dict><key>CFBundleIdentifier</key>\n  <string>com.laurinfrank.ryco</string></dict></plist>',
+  );
+  expect(readBundleIdentifier("/Ryco.app/Contents/Info.plist", () => plist)).toBe(
+    "com.laurinfrank.ryco",
+  );
+  expect(
+    readBundleIdentifier("/missing/Info.plist", () => {
+      throw new Error("ENOENT");
+    }),
+  ).toBeNull();
+});

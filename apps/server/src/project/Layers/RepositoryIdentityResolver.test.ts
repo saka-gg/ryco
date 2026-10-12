@@ -2,10 +2,18 @@ import { realpathSync } from "node:fs";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
-import { Duration, Effect, FileSystem, Layer } from "effect";
+import { Duration, Effect, Fiber, FileSystem, Layer } from "effect";
 import { TestClock } from "effect/testing";
 
 import { runProcess } from "../../processRunner.ts";
+import {
+  GIT_PROCESS_LIMIT,
+  governChildProcess,
+  inBackgroundProcessLane,
+  ProcessLaneRef,
+  processGovernorStats,
+} from "../../processGovernor.ts";
+import * as VcsProcess from "../../vcs/VcsProcess.ts";
 import { RepositoryIdentityResolver } from "../Services/RepositoryIdentityResolver.ts";
 import {
   makeRepositoryIdentityResolver,
@@ -29,7 +37,7 @@ const makeRepositoryIdentityResolverTestLayer = (options: {
       cacheCapacity: 16,
       ...options,
     }),
-  );
+  ).pipe(Layer.provide(VcsProcess.layer));
 
 it.layer(NodeServices.layer)("RepositoryIdentityResolverLive", (it) => {
   it.effect("normalizes equivalent GitHub remotes into a stable repository identity", () =>
@@ -247,6 +255,98 @@ it.layer(NodeServices.layer)("RepositoryIdentityResolverLive", (it) => {
       const origin = remotes.find((remote) => remote.name === "origin");
       expect(origin?.ownerRepo).toBe("sak0a/ryco");
       expect(origin?.provider).toBe("github");
+    }).pipe(Effect.provide(RepositoryIdentityResolverLive)),
+  );
+  it.effect("resolves roots whose path contains spaces", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const parent = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "ryco-repository-identity-spaces-",
+      });
+      // The probe runs with the root as its cwd, not as a `-C` argument a shell could split.
+      const cwd = `${parent}/Jane Doe/my project`;
+      yield* fileSystem.makeDirectory(cwd, { recursive: true });
+      yield* git(cwd, ["init"]);
+      yield* git(cwd, ["remote", "add", "origin", "git@github.com:Ryco/ryco.git"]);
+
+      const resolver = yield* RepositoryIdentityResolver;
+      const identity = yield* resolver.resolve(cwd);
+      expect(identity?.canonicalKey).toBe("github.com/ryco/ryco");
+      expect(normalizeResolvedPath(identity?.rootPath ?? "")).toBe(normalizeResolvedPath(cwd));
+    }).pipe(Effect.provide(RepositoryIdentityResolverLive)),
+  );
+
+  it.effect("refresh bypasses a cached identity", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const cwd = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "ryco-repository-identity-refresh-",
+      });
+      yield* git(cwd, ["init"]);
+      yield* git(cwd, ["remote", "add", "origin", "git@github.com:Ryco/before.git"]);
+
+      const resolver = yield* RepositoryIdentityResolver;
+      expect((yield* resolver.resolve(cwd))?.canonicalKey).toBe("github.com/ryco/before");
+      yield* git(cwd, ["remote", "set-url", "origin", "git@github.com:Ryco/after.git"]);
+      // Still cached for `resolve`; `refresh` probes again and updates the cache.
+      expect((yield* resolver.resolve(cwd))?.canonicalKey).toBe("github.com/ryco/before");
+      expect((yield* resolver.refresh!(cwd))?.canonicalKey).toBe("github.com/ryco/after");
+      expect((yield* resolver.resolve(cwd))?.canonicalKey).toBe("github.com/ryco/after");
+    }).pipe(Effect.provide(RepositoryIdentityResolverLive)),
+  );
+
+  it.effect("probes through the governed git pool, in the caller's lane", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const cwd = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "ryco-repository-identity-governed-",
+      });
+      yield* git(cwd, ["init"]);
+      yield* git(cwd, ["remote", "add", "origin", "git@github.com:Ryco/ryco.git"]);
+      const admittedBefore =
+        processGovernorStats().find((stats) => stats.pool === "git")?.admittedTotal ?? 0;
+
+      const resolver = yield* RepositoryIdentityResolver;
+      const identity = yield* resolver.refresh!(cwd).pipe(
+        Effect.provideService(ProcessLaneRef, "background"),
+      );
+      expect(identity?.canonicalKey).toBe("github.com/ryco/ryco");
+      const admittedAfter =
+        processGovernorStats().find((stats) => stats.pool === "git")?.admittedTotal ?? 0;
+      // `rev-parse --show-toplevel` and `remote -v`, both admitted by the git pool.
+      expect(admittedAfter - admittedBefore).toBe(2);
+    }).pipe(Effect.provide(RepositoryIdentityResolverLive)),
+  );
+
+  it.effect("an interactive resolve never waits behind a background refresh of the same root", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const cwd = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "ryco-repository-identity-lanes-",
+      });
+      yield* git(cwd, ["init"]);
+      yield* git(cwd, ["remote", "add", "origin", "git@github.com:Ryco/ryco.git"]);
+      const gitQueued = () =>
+        processGovernorStats().find((stats) => stats.pool === "git")?.queued ?? 0;
+
+      // Interactive children fill the git pool, so background work queues behind them.
+      const blockers = yield* Effect.forEach(Array.from({ length: GIT_PROCESS_LIMIT }), () =>
+        governChildProcess("git", Effect.never).pipe(Effect.forkChild),
+      );
+      const resolver = yield* RepositoryIdentityResolver;
+      const refreshing = yield* resolver.refresh!(cwd).pipe(
+        inBackgroundProcessLane,
+        Effect.forkChild,
+      );
+      for (let index = 0; index < 100 && gitQueued() === 0; index++) yield* Effect.yieldNow;
+      expect(gitQueued()).toBe(1);
+
+      // The stream's `project.created` enrichment resolves the same root meanwhile.
+      expect((yield* resolver.resolve(cwd))?.canonicalKey).toBe("github.com/ryco/ryco");
+      expect(refreshing.pollUnsafe()).toBeUndefined();
+
+      yield* Effect.forEach(blockers, Fiber.interrupt, { discard: true });
+      expect((yield* Fiber.join(refreshing))?.canonicalKey).toBe("github.com/ryco/ryco");
     }).pipe(Effect.provide(RepositoryIdentityResolverLive)),
   );
 });

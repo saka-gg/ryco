@@ -5,10 +5,10 @@ import {
 import { RelayCapability, RelayChannelId, RelayEffectiveRole } from "@ryco/contracts/relay";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { Tokenizer, Type, decode, encode, rfc8949EncodeOptions } from "cborg";
-import { Exit, Schema } from "effect";
+import * as Exit from "effect/Exit";
+import * as Schema from "effect/Schema";
 
 import {
-  E2EE_ACCOUNT_ID_MAX_BYTES,
   E2EE_AGREEMENT_PUBLIC_KEY_BYTES,
   E2EE_CAPABILITY_CARRIER_MAX_BYTES,
   E2EE_CAPABILITY_SIGNING_ENVELOPE_BYTES,
@@ -25,6 +25,7 @@ import {
   ED25519_PUBLIC_KEY_BYTES,
   ED25519_SIGNATURE_BYTES,
 } from "./relayE2eeConstants.ts";
+import { assertE2eeAccountId } from "./relayE2eeIds.ts";
 import {
   E2EE_CLIENT_IDENTITY_ALGORITHM,
   E2EE_NODE_IDENTITY_ALGORITHM,
@@ -362,21 +363,9 @@ export function canonicalizeE2eeHubOrigin(value: string): string {
   return url.origin;
 }
 
-/**
- * Account id (§7.1): nonempty UTF-8 text, at most `E2EE_ACCOUNT_ID_MAX_BYTES`
- * bytes, otherwise opaque. The empty string is not an identifier — it is
- * reserved for the §8.3 absence semantics of the web tier, which is why it can
- * never be validated as one here.
- *
- * The value is Hub-issued and never client-anchored (§12.1.1), so nothing
- * downstream may treat its presence as evidence of anything.
- */
-export function assertE2eeAccountId(value: string): string {
-  if (typeof value !== "string" || value.length === 0) invalidRelayE2eeInput();
-  const bytes = utf8.encode(value).byteLength;
-  if (bytes === 0 || bytes > E2EE_ACCOUNT_ID_MAX_BYTES) invalidRelayE2eeInput();
-  return value;
-}
+// Account id (§7.1) validation is dependency-free so Hub account calls can run
+// it without loading this module's hash and CBOR implementations.
+export { assertE2eeAccountId };
 
 /**
  * A relay capability literal, validated against the relay contract's closed

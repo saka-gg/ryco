@@ -1,8 +1,10 @@
 import { assert, describe, it } from "@effect/vitest";
 import { Cause, Effect, Exit, Fiber, Option, Queue, Stream } from "effect";
 import {
+  type DiagnosticsTerminalProcess,
   type TerminalEvent,
   type TerminalSessionSnapshot,
+  type TerminalSubscribeEventsInput,
   TerminalSubscriptionResyncError,
   WS_METHODS,
 } from "@ryco/contracts";
@@ -126,6 +128,10 @@ describe("terminal subscription bootstrap", () => {
     read: (
       emit: (event: TerminalEvent) => Effect.Effect<void>,
     ) => Effect.Effect<ReadonlyArray<TerminalSessionSnapshot>>,
+    input: TerminalSubscribeEventsInput = {},
+    diagnostics: ReadonlyArray<
+      Pick<DiagnosticsTerminalProcess, "threadId" | "terminalId" | "hasRunningSubprocess">
+    > = [],
   ) => {
     let listener: (event: TerminalEvent) => Effect.Effect<void> = () => Effect.void;
     let unsubscribed = false;
@@ -140,13 +146,51 @@ describe("terminal subscription bootstrap", () => {
             };
           }),
         listSessions: Effect.suspend(() => read(listener)),
+        listDiagnostics: Effect.succeed(diagnostics),
       },
     } as unknown as WsRpcContext);
     return {
-      stream: handlers[WS_METHODS.subscribeTerminalEvents]({}),
+      stream: handlers[WS_METHODS.subscribeTerminalEvents](input),
       unsubscribed: () => unsubscribed,
     };
   };
+
+  it.effect("replays running sessions without history when metadata replay is requested", () =>
+    Effect.gen(function* () {
+      const cursor = { generation: "server", sequence: 4 };
+      const { stream } = fixture(
+        () =>
+          Effect.succeed([
+            { ...snapshot, cursor, history: "x".repeat(4096) },
+            { ...snapshot, terminalId: "idle", cursor: { ...cursor, sequence: 2 } },
+          ]),
+        { replay: "metadata" },
+        [{ threadId: "thread-1", terminalId: "default", hasRunningSubprocess: true }],
+      );
+      const events = yield* stream.pipe(Stream.take(2), Stream.runCollect);
+      assert.deepEqual(
+        events.map((next) =>
+          next.type === "started"
+            ? [next.terminalId, next.replay, next.snapshot.history, next.hasRunningSubprocess]
+            : null,
+        ),
+        [
+          ["default", true, "", true],
+          ["idle", true, "", undefined],
+        ],
+      );
+      assert.deepEqual(events[0]?.cursor, cursor);
+    }),
+  );
+
+  it.effect("keeps full snapshots for subscribers that did not ask for metadata replay", () =>
+    Effect.gen(function* () {
+      const { stream } = fixture(() => Effect.succeed([snapshot]));
+      const [started] = yield* stream.pipe(Stream.take(1), Stream.runCollect);
+      assert.equal(started?.type === "started" && started.snapshot.history, "history");
+      assert.isFalse(started?.type === "started" && "replay" in started);
+    }),
+  );
 
   it.effect(
     "removes bytes already captured in a snapshot without dropping same-millisecond live bytes",
@@ -187,30 +231,36 @@ describe("terminal subscription bootstrap", () => {
       }),
   );
 
-  it.effect("applies the existing byte budget to multiple retained bootstrap histories", () =>
+  it.effect("completes the bootstrap when retained histories exceed the live byte budget", () =>
     Effect.gen(function* () {
-      const { stream, unsubscribed } = fixture(() =>
-        Effect.succeed(
-          Array.from({ length: 3 }, (_, i) => ({
+      // Escape-heavy output roughly sextuples on the wire; three such histories are
+      // far past the 4 MiB live budget. Bootstrap must neither fail nor loop.
+      const history = "\u001b[31mx\u001b[0m".repeat(128 * 1024);
+      const { stream, unsubscribed } = fixture((emit) =>
+        Effect.gen(function* () {
+          yield* emit({ ...event("live after bootstrap"), terminalId: "terminal-0" });
+          return Array.from({ length: 3 }, (_, i) => ({
             ...snapshot,
             terminalId: `terminal-${i}`,
-            history: "x".repeat(2 * 1024 * 1024),
-          })),
-        ),
+            history,
+          }));
+        }),
       );
-      const received: TerminalEvent[] = [];
-      const result = yield* stream.pipe(
-        Stream.runForEach((event) =>
-          Effect.sync(() => {
-            received.push(event);
-          }),
-        ),
-        Effect.exit,
+      const received = yield* stream.pipe(Stream.take(4), Stream.runCollect);
+      assert.deepEqual(
+        received.map((next) => [next.type, next.terminalId]),
+        [
+          ["started", "terminal-0"],
+          ["started", "terminal-1"],
+          ["started", "terminal-2"],
+          ["output", "terminal-0"],
+        ],
       );
-      assert.isTrue(Exit.isFailure(result));
-      if (Exit.isFailure(result)) assert.match(result.cause.toString(), /resynchronize/);
-      // Two 2 MiB histories plus their envelopes exceed the 4 MiB budget.
-      assert.equal(received.length, 1);
+      assert.isTrue(
+        received
+          .slice(0, 3)
+          .every((next) => next.type === "started" && next.snapshot.history === history),
+      );
       assert.isTrue(unsubscribed());
     }),
   );

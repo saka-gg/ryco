@@ -72,6 +72,7 @@ export function defaultScenarioConfig(smoke = false): PerfScenarioConfig {
     sourceControlHiddenMs: 5_000,
     sourceControlSettledMs: 32_000,
     sourceControlStatusRows: 12,
+    cpuProfileDir: null,
   };
 }
 
@@ -79,6 +80,7 @@ function reportScenario(scenario: PerfScenarioConfig): PerfScenarioConfig {
   return {
     ...scenario,
     fixtureHome: scenario.fixtureHome ? "[provided]" : null,
+    cpuProfileDir: scenario.cpuProfileDir ? "[provided]" : null,
   };
 }
 
@@ -144,6 +146,19 @@ export async function runCheckoutBenchmark(input: {
           entryUrl,
           scenario: input.scenario,
           sourceControlFixture,
+          cpuProfile: input.scenario.cpuProfileDir
+            ? {
+                file: path.join(
+                  input.scenario.cpuProfileDir,
+                  `${input.label}-iteration-${iteration}.cpuprofile`,
+                ),
+                // A harness-built checkout profiles its own dist; hidden source
+                // maps then name source files instead of chunks.
+                assetsDir: input.externalUrl
+                  ? null
+                  : path.join(input.repoRoot, "apps/web/dist/assets"),
+              }
+            : null,
         });
         iterationErrors.push(...browserResult.errors);
         if (launchedServer && launchedServer.child.exitCode !== null) {
@@ -167,6 +182,7 @@ export async function runCheckoutBenchmark(input: {
           reconnectNetwork: browserResult.reconnectNetwork,
           processTree,
           sourceControl: browserResult.sourceControl ?? UNSUPPORTED_SOURCE_CONTROL_METRICS,
+          cpuProfile: browserResult.cpuProfile,
           errors: iterationErrors,
         });
       } catch (error) {

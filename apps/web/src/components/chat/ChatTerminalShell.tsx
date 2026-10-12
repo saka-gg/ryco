@@ -1,8 +1,7 @@
 import { terminalSnippetBroker } from "../../terminalSnippetInsertion";
 import type { EnvironmentId, ResolvedKeybindingsConfig, ThreadId } from "@ryco/contracts";
 import { scopeProjectRef } from "@ryco/client-runtime/scoped";
-import { projectScriptCwd, projectScriptRuntimeEnv } from "@ryco/shared/projectScripts";
-import { lazy, memo, Suspense, useCallback, useMemo, useState } from "react";
+import { memo, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { randomUUID } from "~/lib/utils";
 import { readEnvironmentApi } from "../../environmentApi";
 import { useComposerDraftStore } from "../../composerDraftStore";
@@ -10,8 +9,9 @@ import { type TerminalContextSelection } from "../../lib/terminalContext";
 import { selectThreadTerminalState, useTerminalStateStore } from "../../terminalStateStore";
 import { useStore } from "../../store";
 import { createProjectSelectorByRef, createThreadSelectorByRef } from "../../storeSelectors";
-
-const ThreadTerminalDrawer = lazy(() => import("../ThreadTerminalDrawer"));
+import { prepareThreadTerminal, resolveThreadTerminalLaunch } from "../../terminalPrepare";
+import { useLazyComponentReady } from "../../lib/preloadableLazy";
+import { LazyThreadTerminalDrawer as ThreadTerminalDrawer } from "../../workspacePanelPreload";
 
 export type PersistentTerminalLaunchContext = {
   cwd: string;
@@ -61,33 +61,43 @@ export const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerm
   const storeCloseTerminal = useTerminalStateStore((state) => state.closeTerminal);
   const [localFocusRequestId, setLocalFocusRequestId] = useState(0);
   const worktreePath = serverThread?.worktreePath ?? draftThread?.worktreePath ?? null;
-  const effectiveWorktreePath = useMemo(() => {
-    if (launchContext !== null) {
-      return launchContext.worktreePath;
-    }
-    return worktreePath;
-  }, [launchContext, worktreePath]);
-  const cwd = useMemo(
+  const projectCwd = project?.cwd ?? null;
+  const hasLaunchContext = launchContext !== null;
+  const launchCwd = launchContext?.cwd ?? null;
+  const launchWorktreePath = launchContext?.worktreePath ?? null;
+  // Keyed by values: a new `runtimeEnv` identity would rebuild the terminal.
+  const launch = useMemo(
     () =>
-      launchContext?.cwd ??
-      (project
-        ? projectScriptCwd({
-            project: { cwd: project.cwd },
-            worktreePath: effectiveWorktreePath,
-          })
-        : null),
-    [effectiveWorktreePath, launchContext?.cwd, project],
+      resolveThreadTerminalLaunch({
+        projectCwd,
+        threadWorktreePath: worktreePath,
+        launchContext:
+          hasLaunchContext && launchCwd !== null
+            ? { cwd: launchCwd, worktreePath: launchWorktreePath }
+            : null,
+      }),
+    [hasLaunchContext, launchCwd, launchWorktreePath, projectCwd, worktreePath],
   );
-  const runtimeEnv = useMemo(
-    () =>
-      project
-        ? projectScriptRuntimeEnv({
-            project: { cwd: project.cwd },
-            worktreePath: effectiveWorktreePath,
-          })
-        : {},
-    [effectiveWorktreePath, project],
-  );
+  const drawerOpen = Boolean(project && terminalState.terminalOpen && launch);
+  const activeTerminalId = terminalState.activeTerminalId;
+  // The drawer mounts once its chunk resolved: its loading row is an ordinary
+  // render, so the terminal never waits on React's Suspense reveal throttle.
+  const drawerReady = useLazyComponentReady(ThreadTerminalDrawer, drawerOpen);
+
+  // The drawer was just opened (toggle, shortcut, server start) and its xterm
+  // chunk is still loading: start the PTY now so shell startup overlaps it.
+  // Only for the drawer the user sees: hidden drawers of other threads, an
+  // unfocused pane or a role without terminal access never open early.
+  useEffect(() => {
+    if (!visible || !drawerOpen || !launch || ThreadTerminalDrawer.isLoaded()) return;
+    prepareThreadTerminal({
+      environmentId: threadRef.environmentId,
+      threadId,
+      terminalId: activeTerminalId,
+      launch,
+      layout: "drawer",
+    });
+  }, [activeTerminalId, drawerOpen, launch, threadId, threadRef.environmentId, visible]);
 
   const bumpFocusRequestId = useCallback(() => {
     if (!visible) {
@@ -146,48 +156,52 @@ export const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerm
     [onAddTerminalContext, visible],
   );
 
-  if (!project || !terminalState.terminalOpen || !cwd) {
+  if (!drawerOpen || !launch) {
     return null;
   }
 
+  const loadingRow = (
+    <div
+      className="thread-terminal-drawer relative flex min-w-0 shrink-0 items-center border-border/80 border-t bg-background px-4 text-muted-foreground text-sm"
+      style={{ height: terminalState.terminalHeight }}
+    >
+      Loading terminal...
+    </div>
+  );
+
   return (
     <div className={visible ? undefined : "hidden"}>
-      <Suspense
-        fallback={
-          <div
-            className="thread-terminal-drawer relative flex min-w-0 shrink-0 items-center border-border/80 border-t bg-background px-4 text-muted-foreground text-sm"
-            style={{ height: terminalState.terminalHeight }}
-          >
-            Loading terminal...
-          </div>
-        }
-      >
-        <ThreadTerminalDrawer
-          threadRef={threadRef}
-          threadId={threadId}
-          cwd={cwd}
-          worktreePath={effectiveWorktreePath}
-          runtimeEnv={runtimeEnv}
-          visible={visible}
-          height={terminalState.terminalHeight}
-          terminalIds={terminalState.terminalIds}
-          runningTerminalIds={terminalState.runningTerminalIds}
-          activeTerminalId={terminalState.activeTerminalId}
-          terminalGroups={terminalState.terminalGroups}
-          activeTerminalGroupId={terminalState.activeTerminalGroupId}
-          focusRequestId={focusRequestId + localFocusRequestId + (visible ? 1 : 0)}
-          onSplitTerminal={splitTerminal}
-          onNewTerminal={createNewTerminal}
-          splitShortcutLabel={visible ? splitShortcutLabel : undefined}
-          newShortcutLabel={visible ? newShortcutLabel : undefined}
-          closeShortcutLabel={visible ? closeShortcutLabel : undefined}
-          keybindings={keybindings}
-          onActiveTerminalChange={activateTerminal}
-          onCloseTerminal={closeTerminal}
-          onHeightChange={setTerminalHeight}
-          onAddTerminalContext={handleAddTerminalContext}
-        />
-      </Suspense>
+      {drawerReady ? (
+        <Suspense fallback={loadingRow}>
+          <ThreadTerminalDrawer
+            threadRef={threadRef}
+            threadId={threadId}
+            cwd={launch.cwd}
+            worktreePath={launch.worktreePath}
+            runtimeEnv={launch.runtimeEnv}
+            visible={visible}
+            height={terminalState.terminalHeight}
+            terminalIds={terminalState.terminalIds}
+            runningTerminalIds={terminalState.runningTerminalIds}
+            activeTerminalId={terminalState.activeTerminalId}
+            terminalGroups={terminalState.terminalGroups}
+            activeTerminalGroupId={terminalState.activeTerminalGroupId}
+            focusRequestId={focusRequestId + localFocusRequestId + (visible ? 1 : 0)}
+            onSplitTerminal={splitTerminal}
+            onNewTerminal={createNewTerminal}
+            splitShortcutLabel={visible ? splitShortcutLabel : undefined}
+            newShortcutLabel={visible ? newShortcutLabel : undefined}
+            closeShortcutLabel={visible ? closeShortcutLabel : undefined}
+            keybindings={keybindings}
+            onActiveTerminalChange={activateTerminal}
+            onCloseTerminal={closeTerminal}
+            onHeightChange={setTerminalHeight}
+            onAddTerminalContext={handleAddTerminalContext}
+          />
+        </Suspense>
+      ) : (
+        loadingRow
+      )}
     </div>
   );
 });

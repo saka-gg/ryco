@@ -1,23 +1,13 @@
-import { createFileRoute } from "@tanstack/react-router";
-import { lazy, Suspense } from "react";
+import { createFileRoute, lazyRouteComponent } from "@tanstack/react-router";
 
 import { AppBootLoadingSurface } from "../components/AppBootLoadingSurface";
 
-const LazyHostedNativeAuthorizationRoute = lazy(() =>
-  import("../components/hostedHub/HostedNativeAuthorizationRoute").then((module) => ({
-    default: module.HostedNativeAuthorizationRoute,
-  })),
-);
-
 export const Route = createFileRoute("/native/authorize/$handoffId")({
-  component: NativeAuthorizationRouteView,
+  // Route-level splitting: the router awaits the consent chunk before it
+  // commits, so the handoff renders without a Suspense fallback.
+  component: lazyRouteComponent(
+    () => import("../components/routeViews/NativeAuthorizationRouteView"),
+    "NativeAuthorizationRoute",
+  ),
+  pendingComponent: AppBootLoadingSurface,
 });
-
-function NativeAuthorizationRouteView() {
-  const { handoffId } = Route.useParams();
-  return (
-    <Suspense fallback={<AppBootLoadingSurface />}>
-      <LazyHostedNativeAuthorizationRoute handoffId={handoffId} />
-    </Suspense>
-  );
-}

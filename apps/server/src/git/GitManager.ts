@@ -61,7 +61,13 @@ import {
   type GitWorktreeCreationContext,
 } from "../vcs/GitVcsDriver.ts";
 import { SourceControlProviderRegistry } from "../sourceControl/SourceControlProviderRegistry.ts";
-import type { ChangeRequest } from "@ryco/contracts";
+import {
+  lookupIndexedChangeRequest,
+  makePullRequestIndex,
+  pullRequestIndexRepositoryKey,
+} from "../sourceControl/pullRequestIndex.ts";
+import { readCheckoutHead } from "../vcs/gitCheckoutHead.ts";
+import type { ChangeRequest, PullRequestState } from "@ryco/contracts";
 
 export interface GitActionProgressReporter {
   readonly publish: (event: GitActionProgressEvent) => Effect.Effect<void, never>;
@@ -87,9 +93,31 @@ export interface GitManagerShape {
   readonly localStatus: (
     input: VcsStatusInput,
   ) => Effect.Effect<VcsStatusLocalResult, GitManagerServiceError>;
+  /**
+   * Upstream, ahead / behind and the branch's change request. Read from the
+   * current remote-tracking refs; `fetch` first refreshes them (at most once
+   * per repository and remote every few seconds, shared across checkouts).
+   */
   readonly remoteStatus: (
     input: VcsStatusInput,
+    options?: RemoteStatusOptions,
   ) => Effect.Effect<VcsStatusRemoteResult | null, GitManagerServiceError>;
+  /**
+   * What a branch badge needs (ref, hosting provider, change request) without
+   * git status, diffs or a fetch: HEAD is read from disk, remotes from the
+   * cached config, the change request from the repository's index.
+   */
+  readonly refSummary: (cwd: string) => Effect.Effect<VcsRefSummary, GitManagerServiceError>;
+  /**
+   * Fetches the checkout's upstream remote unless it was fetched recently
+   * (shared per repository and remote) and, when a fetch completed, drops the
+   * cached remote status so the next read sees the moved refs. Never fails.
+   */
+  readonly refreshRemoteTrackingRefs: (cwd: string) => Effect.Effect<boolean>;
+  /** State and draft flag of the repository's indexed change requests; never asks the forge. */
+  readonly indexedPullRequestStates: (
+    cwd: string,
+  ) => Effect.Effect<ReadonlyMap<number, IndexedPullRequestState>, never>;
   readonly invalidateLocalStatus: (cwd: string) => Effect.Effect<void, never>;
   readonly invalidateRemoteStatus: (cwd: string) => Effect.Effect<void, never>;
   readonly invalidateStatus: (cwd: string) => Effect.Effect<void, never>;
@@ -104,6 +132,25 @@ export interface GitManagerShape {
     input: GitRunStackedActionInput,
     options?: GitRunStackedActionOptions,
   ) => Effect.Effect<GitRunStackedActionResult, GitManagerServiceError>;
+}
+
+export interface RemoteStatusOptions {
+  readonly fetch?: boolean;
+}
+
+export interface VcsRefSummary {
+  readonly isRepo: boolean;
+  readonly refName: string | null;
+  readonly isDefaultRef: boolean;
+  readonly hasPrimaryRemote: boolean;
+  readonly hasUpstream: boolean;
+  readonly sourceControlProvider: VcsStatusLocalResult["sourceControlProvider"] | null;
+  readonly pr: VcsStatusRemoteResult["pr"];
+}
+
+export interface IndexedPullRequestState {
+  readonly state: PullRequestState;
+  readonly isDraft: boolean | null;
 }
 
 export class GitManager extends Context.Service<GitManager, GitManagerShape>()(
@@ -774,12 +821,25 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
     behindCount: 0,
     aheadOfDefaultCount: 0,
   };
+  // The details behind the latest local status per checkout, so the remote
+  // half that usually follows it does not run the whole local pipeline again.
+  const localStatusDetailsByCwd = new Map<
+    string,
+    { readonly atMs: number; details: GitStatusDetails }
+  >();
+  const LOCAL_STATUS_DETAILS_TTL_MS = Duration.toMillis(LOCAL_STATUS_RESULT_CACHE_TTL);
   const readLocalStatus = Effect.fn("readLocalStatus")(function* (cwd: string) {
     const details = yield* gitCore
       .statusDetailsLocal(cwd)
       .pipe(
         Effect.catchIf(isNotGitRepositoryError, () => Effect.succeed(nonRepositoryStatusDetails)),
       );
+    localStatusDetailsByCwd.delete(cwd);
+    localStatusDetailsByCwd.set(cwd, { atMs: Date.now(), details });
+    if (localStatusDetailsByCwd.size > STATUS_RESULT_CACHE_CAPACITY) {
+      const oldest = localStatusDetailsByCwd.keys().next().value;
+      if (oldest !== undefined) localStatusDetailsByCwd.delete(oldest);
+    }
     const hostingProvider = details.isRepo
       ? yield* resolveHostingProvider(cwd, details.branch)
       : null;
@@ -801,8 +861,23 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
   });
   const invalidateLocalStatusResultCache = (cwd: string) =>
     normalizeStatusCacheKey(cwd).pipe(
-      Effect.flatMap((cacheKey) => Cache.invalidate(localStatusResultCache, cacheKey)),
+      Effect.flatMap((cacheKey) =>
+        Effect.andThen(
+          Effect.sync(() => localStatusDetailsByCwd.delete(cacheKey)),
+          Cache.invalidate(localStatusResultCache, cacheKey),
+        ),
+      ),
     );
+  /** The details of a fresh local status read for this checkout, if any. */
+  const takeRecentLocalStatusDetails = (cwd: string): GitStatusDetails | null => {
+    const entry = localStatusDetailsByCwd.get(cwd);
+    if (!entry) return null;
+    if (Date.now() - entry.atMs >= LOCAL_STATUS_DETAILS_TTL_MS) {
+      localStatusDetailsByCwd.delete(cwd);
+      return null;
+    }
+    return entry.details;
+  };
   const probeBranchPublished = Effect.fn("probeBranchPublished")(function* (
     cwd: string,
     branch: string,
@@ -813,24 +888,22 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
     }
 
     return yield* Effect.gen(function* () {
-      const remotesResult = yield* gitCore.execute({
-        operation: "GitManager.probeBranchPublished.remotes",
-        cwd,
-        args: ["remote"],
-      });
-      const remotes = remotesResult.stdout
-        .split("\n")
-        .map((remote) => remote.trim())
-        .filter((remote) => remote.length > 0);
+      const remotes = (yield* gitCore.readConfigSnapshot(cwd)).remoteNames;
       if (remotes.length === 0) {
         // A provider may still infer repository context outside local remotes.
         return null;
       }
 
+      // Only the branch's own remote refs, not every remote ref of the repository.
       const refsResult = yield* gitCore.execute({
         operation: "GitManager.probeBranchPublished.remoteRefs",
         cwd,
-        args: ["for-each-ref", "--format=%(refname:short)", "refs/remotes"],
+        args: [
+          "for-each-ref",
+          "--format=%(refname)",
+          ...remotes.map((remote) => `refs/remotes/${remote}/${branch}`),
+        ],
+        readOnly: true,
       });
       const remoteRefs = new Set(
         refsResult.stdout
@@ -838,13 +911,17 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
           .map((ref) => ref.trim())
           .filter((ref) => ref.length > 0),
       );
-      return remotes.some((remote) => remoteRefs.has(`${remote}/${branch}`));
+      return remotes.some((remote) => remoteRefs.has(`refs/remotes/${remote}/${branch}`));
     }).pipe(Effect.catch(() => Effect.succeed(null)));
   });
+  // Reads the current remote-tracking refs; a fetch, when wanted, happens
+  // before (see `remoteStatus`) and drops the reused local details.
   const readRemoteStatus = Effect.fn("readRemoteStatus")(function* (cwd: string) {
-    const details = yield* gitCore
-      .statusDetails(cwd)
-      .pipe(Effect.catchIf(isNotGitRepositoryError, () => Effect.succeed(null)));
+    const details =
+      takeRecentLocalStatusDetails(cwd) ??
+      (yield* gitCore
+        .statusDetailsLocal(cwd)
+        .pipe(Effect.catchIf(isNotGitRepositoryError, () => Effect.succeed(null))));
     if (details === null || !details.isRepo) {
       return null;
     }
@@ -860,6 +937,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
         ? yield* findLatestPr(cwd, {
             branch: details.branch,
             upstreamRef: details.upstreamRef,
+            isDefaultBranch: details.isDefaultBranch,
           }).pipe(
             Effect.map((latest) => {
               if (!latest) return null;
@@ -883,31 +961,35 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
     capacity: STATUS_RESULT_CACHE_CAPACITY,
     timeToLive: (exit) => (Exit.isSuccess(exit) ? REMOTE_STATUS_RESULT_CACHE_TTL : Duration.zero),
   });
-  const invalidateRemoteStatusResultCache = (cwd: string) =>
-    normalizeStatusCacheKey(cwd).pipe(
-      Effect.flatMap((cacheKey) => Cache.invalidate(remoteStatusResultCache, cacheKey)),
-    );
 
   const readConfigValueNullable = (cwd: string, key: string) =>
     gitCore.readConfigValue(cwd, key).pipe(Effect.catch(() => Effect.succeed(null)));
+  /**
+   * Status-path config reads: one cached `git config --list` per checkout
+   * answers every key; falls back to single reads if it cannot be listed.
+   */
+  const readStatusConfigValues = (cwd: string) =>
+    gitCore.readConfigSnapshot(cwd).pipe(
+      Effect.map((snapshot) => (key: string) => Effect.succeed(snapshot.get(key))),
+      Effect.catch(() => Effect.succeed((key: string) => readConfigValueNullable(cwd, key))),
+    );
 
   const resolveHostingProvider = Effect.fn("resolveHostingProvider")(function* (
     cwd: string,
     branch: string | null,
   ) {
+    const readConfig = yield* readStatusConfigValues(cwd);
     const preferredRemoteName =
-      branch === null
-        ? "origin"
-        : ((yield* readConfigValueNullable(cwd, `branch.${branch}.remote`)) ?? "origin");
+      branch === null ? "origin" : ((yield* readConfig(`branch.${branch}.remote`)) ?? "origin");
     const remoteUrl =
-      (yield* readConfigValueNullable(cwd, `remote.${preferredRemoteName}.url`)) ??
-      (yield* readConfigValueNullable(cwd, "remote.origin.url"));
+      (yield* readConfig(`remote.${preferredRemoteName}.url`)) ??
+      (yield* readConfig("remote.origin.url"));
 
     return remoteUrl ? sourceControlProviders.detectProviderFromRemoteUrl(remoteUrl) : null;
   });
 
   const resolveRemoteRepositoryContext = Effect.fn("resolveRemoteRepositoryContext")(function* (
-    cwd: string,
+    readConfig: (key: string) => Effect.Effect<string | null>,
     remoteName: string | null,
   ) {
     if (!remoteName) {
@@ -917,7 +999,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
       };
     }
 
-    const remoteUrl = yield* readConfigValueNullable(cwd, `remote.${remoteName}.url`);
+    const remoteUrl = yield* readConfig(`remote.${remoteName}.url`);
     const repositoryNameWithOwner = parseGitHubRepositoryNameWithOwnerFromRemoteUrl(remoteUrl);
     return {
       repositoryNameWithOwner,
@@ -928,8 +1010,13 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
   const resolveBranchHeadContext = Effect.fn("resolveBranchHeadContext")(function* (
     cwd: string,
     details: { branch: string; upstreamRef: string | null },
+    options?: { readonly statusRead?: boolean },
   ) {
-    const remoteName = yield* readConfigValueNullable(cwd, `branch.${details.branch}.remote`);
+    // Status reads share the cached config snapshot; mutation flows read live.
+    const readConfig = options?.statusRead
+      ? yield* readStatusConfigValues(cwd)
+      : (key: string) => readConfigValueNullable(cwd, key);
+    const remoteName = yield* readConfig(`branch.${details.branch}.remote`);
     const headBranchFromUpstream = details.upstreamRef
       ? extractBranchNameFromRemoteRef(details.upstreamRef, { remoteName })
       : "";
@@ -939,8 +1026,8 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
 
     const [remoteRepository, originRepository] = yield* Effect.all(
       [
-        resolveRemoteRepositoryContext(cwd, remoteName),
-        resolveRemoteRepositoryContext(cwd, "origin"),
+        resolveRemoteRepositoryContext(readConfig, remoteName),
+        resolveRemoteRepositoryContext(readConfig, "origin"),
       ],
       { concurrency: "unbounded" },
     );
@@ -1036,11 +1123,68 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
     return null;
   });
 
+  const pullRequestIndex = yield* makePullRequestIndex;
+
+  /** The forge repository a checkout's change requests live in; null without a known host. */
+  const resolvePullRequestIndexTarget = (cwd: string) =>
+    sourceControlProviders.resolveHandle({ cwd }).pipe(
+      Effect.map((handle) =>
+        handle.context === null || handle.provider.kind === "unknown"
+          ? null
+          : {
+              repository: pullRequestIndexRepositoryKey({
+                providerKind: handle.provider.kind,
+                remoteUrl: handle.context.remoteUrl,
+              }),
+              provider: handle.provider,
+            },
+      ),
+      Effect.catch(() => Effect.succeed(null)),
+    );
+
+  const invalidatePullRequestIndex = (cwd: string) =>
+    resolvePullRequestIndexTarget(cwd).pipe(
+      Effect.flatMap((target) =>
+        target === null ? Effect.void : pullRequestIndex.invalidate(target.repository),
+      ),
+    );
+
+  const findLatestPrInIndex = Effect.fn("findLatestPrInIndex")(function* (
+    cwd: string,
+    headContext: BranchHeadContext,
+    openOnly: boolean,
+  ) {
+    const target = yield* resolvePullRequestIndexTarget(cwd);
+    if (target === null) return { resolved: false } as const;
+    return yield* lookupIndexedChangeRequest({
+      readListing: (scope) =>
+        pullRequestIndex
+          .read({ repository: target.repository, scope, cwd, provider: target.provider })
+          .pipe(Effect.catch(() => Effect.succeed(null))),
+      matches: (item) => {
+        const pr = toPullRequestInfo(item);
+        return matchesBranchHeadContext(pr, headContext) ? pr : null;
+      },
+      updatedAtMs: (pr) =>
+        Option.match(pr.updatedAt, {
+          onNone: () => null,
+          onSome: (updatedAt) => DateTime.toEpochMillis(updatedAt),
+        }),
+      openOnly,
+    });
+  });
+
   const findLatestPr = Effect.fn("findLatestPr")(function* (
     cwd: string,
-    details: { branch: string; upstreamRef: string | null },
+    details: { branch: string; upstreamRef: string | null; isDefaultBranch: boolean },
   ) {
-    const headContext = yield* resolveBranchHeadContext(cwd, details);
+    const headContext = yield* resolveBranchHeadContext(cwd, details, { statusRead: true });
+    // One listing per repository answers most branches; only a branch it
+    // cannot answer for (older than the recent window) asks per head selector.
+    const indexed = yield* findLatestPrInIndex(cwd, headContext, details.isDefaultBranch);
+    if (indexed.resolved) {
+      return indexed.match;
+    }
     const parsedByNumber = new Map<number, PullRequestInfo>();
 
     for (const headSelector of headContext.headSelectors) {
@@ -1050,6 +1194,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
         state: "all",
         limit: 20,
         includeStackSummary: false,
+        fields: "summary",
       });
 
       for (const pr of pullRequests.map(toPullRequestInfo)) {
@@ -1462,37 +1607,215 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
     const cacheKey = yield* normalizeStatusCacheKey(input.cwd);
     return yield* Cache.get(localStatusResultCache, cacheKey);
   });
+  const refreshRemoteTrackingRefsForKey = Effect.fn("refreshRemoteTrackingRefs")(function* (
+    cacheKey: string,
+  ) {
+    // Shared per repository and remote; only a completed fetch can move the
+    // tracking refs a cached remote status was computed from.
+    const fetched = yield* gitCore.refreshStatusUpstream(cacheKey);
+    if (fetched) {
+      localStatusDetailsByCwd.delete(cacheKey);
+      yield* Cache.invalidate(remoteStatusResultCache, cacheKey);
+    }
+    return fetched;
+  });
+  const refreshRemoteTrackingRefs: GitManagerShape["refreshRemoteTrackingRefs"] = (cwd) =>
+    normalizeStatusCacheKey(cwd).pipe(Effect.flatMap(refreshRemoteTrackingRefsForKey));
   const remoteStatus: GitManagerShape["remoteStatus"] = Effect.fn("remoteStatus")(
-    function* (input) {
+    function* (input, options) {
       const cacheKey = yield* normalizeStatusCacheKey(input.cwd);
+      if (options?.fetch) {
+        yield* refreshRemoteTrackingRefsForKey(cacheKey);
+      }
       return yield* Cache.get(remoteStatusResultCache, cacheKey);
     },
   );
   const status: GitManagerShape["status"] = Effect.fn("status")(function* (input) {
     const cacheKey = yield* normalizeStatusCacheKey(input.cwd);
-    const [local, remote] = yield* Effect.all([
-      Cache.get(localStatusResultCache, cacheKey),
-      Cache.get(remoteStatusResultCache, cacheKey),
-    ]);
+    const local = yield* Cache.get(localStatusResultCache, cacheKey);
+    const remote = yield* remoteStatus({ cwd: cacheKey }, { fetch: true });
     return mergeGitStatusParts(local, remote);
   });
+
+  const refSummaryCache = yield* Cache.makeWith(
+    (key: string) => readRefSummary(key.slice(0, key.indexOf("\u0000"))),
+    {
+      capacity: STATUS_RESULT_CACHE_CAPACITY,
+      timeToLive: (exit) => (Exit.isSuccess(exit) ? REMOTE_STATUS_RESULT_CACHE_TTL : Duration.zero),
+    },
+  );
+  const refSummaryKeysByCwd = new Map<string, string>();
+
+  const readRefSummary = Effect.fn("readRefSummary")(function* (cwd: string) {
+    const head = yield* readCheckoutHead(cwd);
+    const branch =
+      head !== null
+        ? head.branch
+        : yield* gitCore
+            .execute({
+              operation: "GitManager.refSummary.head",
+              cwd,
+              args: ["symbolic-ref", "--quiet", "--short", "HEAD"],
+              allowNonZeroExit: true,
+              readOnly: true,
+              timeoutMs: 5_000,
+            })
+            .pipe(
+              Effect.map((result) =>
+                result.exitCode === 0 && result.stdout.trim().length > 0
+                  ? result.stdout.trim()
+                  : null,
+              ),
+            );
+    const config = yield* gitCore.readConfigSnapshot(cwd).pipe(
+      Effect.map(Option.some),
+      Effect.catchIf(isNotGitRepositoryError, () => Effect.succeed(Option.none())),
+    );
+    if (Option.isNone(config)) {
+      return {
+        isRepo: false,
+        refName: null,
+        isDefaultRef: false,
+        hasPrimaryRemote: false,
+        hasUpstream: false,
+        sourceControlProvider: null,
+        pr: null,
+      } satisfies VcsRefSummary;
+    }
+    const readConfig = config.value.get;
+    const upstreamRemote = branch === null ? null : readConfig(`branch.${branch}.remote`);
+    const upstreamMerge = branch === null ? null : readConfig(`branch.${branch}.merge`);
+    const upstreamBranch = upstreamMerge?.replace(/^refs\/heads\//, "") ?? null;
+    const upstreamRef =
+      upstreamRemote && upstreamBranch
+        ? upstreamRemote === "."
+          ? upstreamBranch
+          : `${upstreamRemote}/${upstreamBranch}`
+        : null;
+    const originDefaultBranch =
+      head !== null
+        ? head.originDefaultBranch
+        : yield* gitCore
+            .execute({
+              operation: "GitManager.refSummary.defaultRef",
+              cwd,
+              args: ["symbolic-ref", "refs/remotes/origin/HEAD"],
+              allowNonZeroExit: true,
+              readOnly: true,
+              timeoutMs: 5_000,
+            })
+            .pipe(
+              Effect.map((result) =>
+                result.exitCode === 0
+                  ? result.stdout.trim().replace(/^refs\/remotes\/origin\//, "") || null
+                  : null,
+              ),
+            );
+    const isDefaultRef =
+      branch !== null &&
+      (branch === originDefaultBranch ||
+        (originDefaultBranch === null && (branch === "main" || branch === "master")));
+    const hostingProvider = yield* resolveHostingProvider(cwd, branch);
+
+    // Gated exactly as the full remote status's change request: a published
+    // branch (an unpublished one only shares a name with someone else's, and
+    // asking the forge about it is wasted) on a host the provider registry
+    // recognizes, which includes self-hosted forges the remote URL alone does not.
+    const pr =
+      branch === null
+        ? null
+        : yield* Effect.gen(function* () {
+            if ((yield* probeBranchPublished(cwd, branch, upstreamRef)) === false) return null;
+            if ((yield* sourceControlProvider(cwd)).kind === "unknown") return null;
+            const latest = yield* findLatestPr(cwd, {
+              branch,
+              upstreamRef,
+              isDefaultBranch: isDefaultRef,
+            });
+            if (!latest) return null;
+            // On the default branch, only surface open change requests.
+            if (isDefaultRef && latest.state !== "open") return null;
+            return toStatusPr(latest);
+          }).pipe(Effect.catch(() => Effect.succeed(null)));
+
+    return {
+      isRepo: true,
+      refName: branch,
+      isDefaultRef,
+      hasPrimaryRemote: config.value.remoteNames.includes("origin"),
+      hasUpstream: upstreamRef !== null,
+      sourceControlProvider: hostingProvider,
+      pr,
+    } satisfies VcsRefSummary;
+  });
+
+  const refSummary: GitManagerShape["refSummary"] = Effect.fn("refSummary")(function* (cwd) {
+    const cacheKey = yield* normalizeStatusCacheKey(cwd);
+    // Keyed by the branch read from disk, so a checkout switch misses at once.
+    const head = yield* readCheckoutHead(cacheKey);
+    const key = `${cacheKey}\u0000${head?.branch ?? ""}`;
+    refSummaryKeysByCwd.set(cacheKey, key);
+    return yield* Cache.get(refSummaryCache, key);
+  });
+
+  const indexedPullRequestStates: GitManagerShape["indexedPullRequestStates"] = (cwd) =>
+    resolvePullRequestIndexTarget(cwd).pipe(
+      Effect.flatMap((target) =>
+        target === null ? Effect.succeed([]) : pullRequestIndex.peek(target.repository),
+      ),
+      Effect.map((listings) => {
+        const states = new Map<number, IndexedPullRequestState>();
+        for (const listing of listings) {
+          for (const item of listing.items) {
+            states.set(item.number, { state: item.state, isDraft: item.isDraft ?? null });
+          }
+        }
+        return states;
+      }),
+    );
+
+  const invalidateRefSummary = (cacheKey: string) =>
+    Effect.suspend(() => {
+      const key = refSummaryKeysByCwd.get(cacheKey);
+      refSummaryKeysByCwd.delete(cacheKey);
+      return key === undefined ? Effect.void : Cache.invalidate(refSummaryCache, key);
+    });
   const invalidateLocalStatus: GitManagerShape["invalidateLocalStatus"] = Effect.fn(
     "invalidateLocalStatus",
   )(function* (cwd) {
     yield* invalidateLocalStatusResultCache(cwd);
+    // A refresh follows a git action or agent turn, which may have moved refs.
+    yield* gitCore.invalidateRefListing(cwd);
   });
+  // An explicit remote refresh (after a git action, agent turn or poll) must
+  // see change requests created meanwhile, so it also drops the repository's index.
   const invalidateRemoteStatus: GitManagerShape["invalidateRemoteStatus"] = Effect.fn(
     "invalidateRemoteStatus",
   )(function* (cwd) {
-    yield* invalidateRemoteStatusResultCache(cwd);
+    const cacheKey = yield* normalizeStatusCacheKey(cwd);
+    yield* Effect.all(
+      [
+        Cache.invalidate(remoteStatusResultCache, cacheKey),
+        invalidateRefSummary(cacheKey),
+        invalidatePullRequestIndex(cacheKey),
+      ],
+      { discard: true },
+    );
   });
   const invalidateStatus: GitManagerShape["invalidateStatus"] = Effect.fn("invalidateStatus")(
     function* (cwd) {
       const cacheKey = yield* normalizeStatusCacheKey(cwd);
-      yield* Effect.all([
-        Cache.invalidate(localStatusResultCache, cacheKey),
-        Cache.invalidate(remoteStatusResultCache, cacheKey),
-      ]);
+      localStatusDetailsByCwd.delete(cacheKey);
+      yield* Effect.all(
+        [
+          Cache.invalidate(localStatusResultCache, cacheKey),
+          Cache.invalidate(remoteStatusResultCache, cacheKey),
+          invalidateRefSummary(cacheKey),
+          invalidatePullRequestIndex(cacheKey),
+          gitCore.invalidateRefListing(cwd),
+        ],
+        { discard: true },
+      );
     },
   );
 
@@ -2003,6 +2326,9 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
     status,
     invalidateLocalStatus,
     invalidateRemoteStatus,
+    refSummary,
+    refreshRemoteTrackingRefs,
+    indexedPullRequestStates,
     invalidateStatus,
     resolvePullRequest,
     preparePullRequestThread,

@@ -211,4 +211,141 @@ layer("OrchestrationEventStore", (it) => {
       );
     }),
   );
+  it.effect("probes resumption from the sequence key and stream index alone", () =>
+    Effect.gen(function* () {
+      const eventStore = yield* OrchestrationEventStore;
+      const sql = yield* SqlClient.SqlClient;
+      const appendProject = (key: string) =>
+        eventStore.append({
+          type: "project.created",
+          eventId: EventId.make(`evt-probe-${key}`),
+          aggregateKind: "project",
+          aggregateId: ProjectId.make(`project-probe-${key}`),
+          occurredAt: "2026-10-01T00:00:00.000Z",
+          commandId: null,
+          causationEventId: null,
+          correlationId: null,
+          metadata: {},
+          payload: {
+            projectId: ProjectId.make(`project-probe-${key}`),
+            title: `Probe ${key}`,
+            workspaceRoot: `/tmp/probe-${key}`,
+            defaultModelSelection: null,
+            scripts: [],
+            createdAt: "2026-10-01T00:00:00.000Z",
+            updatedAt: "2026-10-01T00:00:00.000Z",
+          },
+        });
+      const anchor = yield* appendProject("anchor");
+      for (const key of ["a", "b", "c", "d"]) yield* appendProject(key);
+      const watched = yield* appendProject("watched");
+      // A payload the probe would fail to parse proves it never reads one.
+      yield* sql`UPDATE orchestration_events SET payload_json = 'not json' WHERE sequence > ${anchor.sequence}`;
+
+      const probe = eventStore.probeResume!;
+      assert.deepEqual(yield* probe({ sequence: anchor.sequence, limit: 10 }), {
+        anchored: true,
+        eventsAfter: 5,
+        streamEventsAfter: null,
+      });
+      // Counting stops one row past the limit.
+      assert.equal((yield* probe({ sequence: anchor.sequence, limit: 2 })).eventsAfter, 3);
+      assert.deepEqual(
+        yield* probe({
+          sequence: anchor.sequence,
+          limit: 10,
+          stream: { aggregateKind: "project", streamId: watched.aggregateId, limit: 10 },
+        }),
+        { anchored: true, eventsAfter: 5, streamEventsAfter: 1 },
+      );
+      assert.equal((yield* probe({ sequence: watched.sequence + 100, limit: 10 })).anchored, false);
+    }),
+  );
+
+  it.effect("pages one aggregate stream through the stream index", () =>
+    Effect.gen(function* () {
+      const eventStore = yield* OrchestrationEventStore;
+      const sql = yield* SqlClient.SqlClient;
+      const appendProject = (projectKey: string, key: string) =>
+        eventStore.append({
+          type: "project.created",
+          eventId: EventId.make(`evt-stream-page-${projectKey}-${key}`),
+          aggregateKind: "project",
+          aggregateId: ProjectId.make(`project-stream-${projectKey}`),
+          occurredAt: "2026-10-02T00:00:00.000Z",
+          commandId: null,
+          causationEventId: null,
+          correlationId: null,
+          metadata: {},
+          payload: {
+            projectId: ProjectId.make(`project-stream-${projectKey}`),
+            title: `Stream ${projectKey} ${key}`,
+            workspaceRoot: `/tmp/stream-${projectKey}`,
+            defaultModelSelection: null,
+            scripts: [],
+            createdAt: "2026-10-02T00:00:00.000Z",
+            updatedAt: "2026-10-02T00:00:00.000Z",
+          },
+        });
+      const watched: Array<number> = [];
+      const before = yield* eventStore.latestSequence;
+      for (const key of ["1", "2", "3"]) {
+        watched.push((yield* appendProject("watched", key)).sequence);
+        // Interleaved events of other streams are never read, decoded or counted.
+        yield* appendProject(`other-${key}`, key);
+      }
+      const streamId = ProjectId.make("project-stream-watched");
+
+      const first = yield* eventStore.readStreamEventsPage({
+        aggregateKind: "project",
+        streamId,
+        fromSequenceExclusive: before,
+        limit: 2,
+      });
+      assert.deepEqual(
+        first.events.map((event) => event.sequence),
+        watched.slice(0, 2),
+      );
+      assert.equal(first.nextSequence, watched[1]);
+      assert.equal(first.hasMore, true);
+
+      const second = yield* eventStore.readStreamEventsPage({
+        aggregateKind: "project",
+        streamId,
+        fromSequenceExclusive: first.nextSequence,
+        limit: 2,
+      });
+      assert.deepEqual(
+        second.events.map((event) => event.sequence),
+        watched.slice(2),
+      );
+      assert.equal(second.hasMore, false);
+
+      const empty = yield* eventStore.readStreamEventsPage({
+        aggregateKind: "thread",
+        streamId,
+        fromSequenceExclusive: before,
+        limit: 2,
+      });
+      assert.deepEqual(empty, { events: [], nextSequence: before, hasMore: false });
+
+      const plan = yield* sql<{ readonly detail: string }>`
+        EXPLAIN QUERY PLAN SELECT payload_json FROM orchestration_events
+        WHERE aggregate_kind = 'project' AND stream_id = 'p' AND sequence > 0
+        ORDER BY sequence ASC LIMIT 3
+      `;
+      assert.isTrue(
+        plan.some((row) =>
+          row.detail.includes(
+            "USING INDEX idx_orch_events_stream_sequence (aggregate_kind=? AND stream_id=? AND sequence>?)",
+          ),
+        ),
+        JSON.stringify(plan),
+      );
+      assert.isFalse(
+        plan.some((row) => row.detail.includes("TEMP B-TREE")),
+        JSON.stringify(plan),
+      );
+    }),
+  );
 });

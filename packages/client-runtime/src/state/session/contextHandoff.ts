@@ -12,7 +12,7 @@ import {
 } from "@ryco/contracts";
 import { modelSelectionRequiresContextHandoff } from "@ryco/shared/model";
 import { forkContextHandoffPending } from "@ryco/shared/threadFork";
-import { Schema } from "effect";
+import * as Schema from "effect/Schema";
 
 export type ContextHandoffTimelineStatus = "consumed" | "failed" | "delivery-uncertain";
 

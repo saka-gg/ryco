@@ -1,14 +1,12 @@
-import {
-  Cause,
-  Duration,
-  Effect,
-  Exit,
-  Layer,
-  ManagedRuntime,
-  Option,
-  Scope,
-  Stream,
-} from "effect";
+import * as Cause from "effect/Cause";
+import * as Duration from "effect/Duration";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Layer from "effect/Layer";
+import * as ManagedRuntime from "effect/ManagedRuntime";
+import * as Option from "effect/Option";
+import * as Scope from "effect/Scope";
+import * as Stream from "effect/Stream";
 import { RpcClient } from "effect/rpc";
 
 import type { ObservabilityService, SocketService } from "../platform/index.ts";
@@ -27,15 +25,42 @@ import {
 } from "./protocol.ts";
 import { isTransportConnectionErrorMessage } from "../errors/transportError.ts";
 
+/**
+ * Why a subscription stopped for good. Failure messages can carry user data, so
+ * an `onError` hook never sees the failure itself, only this classification.
+ */
+export type SubscriptionFailureKind = "unsupported" | "response-too-large" | "failed";
+
 interface SubscribeOptions {
   readonly retryDelay?: Duration.Input;
   readonly onResubscribe?: () => void;
-  readonly onError?: () => void;
+  /**
+   * The subscription stopped for good: a failure no retry can fix, or a
+   * listener that threw. Receives `classifyFailure`'s verdict for a stream
+   * failure when one is given, and nothing otherwise.
+   */
+  readonly onError?: (kind?: SubscriptionFailureKind) => void;
+  /** Classifies a stream failure for `onError` so callers can pick a fallback. */
+  readonly classifyFailure?: (error: unknown) => SubscriptionFailureKind;
   readonly tag?: string;
 }
 
-interface RequestOptions {
+export interface RequestOptions {
   readonly timeout?: Option.Option<Duration.Input>;
+  /**
+   * Abandons the request: before it is sent it never goes out; once running,
+   * its client fiber is interrupted, which tells the server to interrupt the
+   * handler. The promise rejects with an `AbortError`.
+   */
+  readonly signal?: AbortSignal | undefined;
+}
+
+/** What an aborted request rejects with (the neutral runtime has no `signal.reason`). */
+export class RpcRequestAbortedError extends Error {
+  constructor() {
+    super("The request was aborted.");
+    this.name = "AbortError";
+  }
 }
 
 const DEFAULT_SUBSCRIPTION_RETRY_DELAY_MS = Duration.millis(250);
@@ -46,6 +71,15 @@ const DEFAULT_SUBSCRIPTION_RETRY_DELAY_MS = Duration.millis(250);
  * admits it.
  */
 export const AWAITING_SESSION_SUBSCRIPTION_MAX_DELAY_MS = 4_000;
+/**
+ * Ceiling for resubscribing after the server failed the terminal event stream
+ * with a resync request (a slow-consumer overflow). An overflow the server
+ * reproduces on every bootstrap would otherwise loop at the base retry delay,
+ * re-sending the whole bootstrap each time; consecutive resyncs back off
+ * exponentially and a quiet period resets the backoff.
+ */
+export const RESYNC_SUBSCRIPTION_MAX_DELAY_MS = 8_000;
+const RESYNC_SUBSCRIPTION_BACKOFF_RESET_MS = 30_000;
 const NOOP: () => void = () => undefined;
 export const THREAD_NOT_FOUND_ERROR_RE = /^Thread\s.+\swas not found$/u;
 export const SUBSCRIPTION_STREAM_DONE_SCHEMA_ERROR_FRAGMENT = "SchemaError(Expected array";
@@ -82,6 +116,42 @@ function isRetryableSubscriptionError(message: string): boolean {
     isTransportConnectionErrorMessage(message) ||
     THREAD_NOT_FOUND_ERROR_RE.test(message.trim()) ||
     message.includes("reconnect to resynchronize")
+  );
+}
+
+/** The terminal event stream's server-side overflow, decoded from its tagged error. */
+function isTerminalResyncSubscriptionError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "_tag" in error &&
+    error._tag === "TerminalSubscriptionResyncError"
+  );
+}
+
+/** Delay before the next resubscribe after `consecutiveResyncs` back-to-back resync failures. */
+export function resyncSubscriptionRetryDelayMs(
+  baseDelayMs: number,
+  consecutiveResyncs: number,
+): number {
+  return Math.min(
+    Math.max(baseDelayMs, 1) * 2 ** Math.min(Math.max(consecutiveResyncs, 0), 16),
+    RESYNC_SUBSCRIPTION_MAX_DELAY_MS,
+  );
+}
+
+/**
+ * The server does not implement the requested RPC: an older server, or a
+ * handler that was never wired. A caller may fall back to an older method.
+ */
+export function isUnsupportedRpcError(error: unknown): boolean {
+  return formatErrorMessage(error).includes("Unknown request tag");
+}
+
+/** The response did not fit the largest message the connection carries (relay cap). */
+export function isResponseTooLargeError(error: unknown): boolean {
+  return formatErrorMessage(error).includes(
+    "The response exceeded the largest message this connection can carry",
   );
 }
 
@@ -126,15 +196,30 @@ class RpcTransport<Client> {
 
   async request<TSuccess>(
     execute: (client: Client) => Effect.Effect<TSuccess, Error, never>,
-    _options?: RequestOptions,
+    options?: RequestOptions,
   ): Promise<TSuccess> {
     if (this.disposed) {
       throw new RpcTransportDisposedError();
     }
 
+    const signal = options?.signal;
+    if (signal?.aborted) throw new RpcRequestAbortedError();
     const session = this.session;
     const client = await session.clientPromise;
-    return await session.runtime.runPromise(Effect.suspend(() => execute(client)));
+    if (signal === undefined) {
+      return await session.runtime.runPromise(Effect.suspend(() => execute(client)));
+    }
+    if (signal.aborted) throw new RpcRequestAbortedError();
+    try {
+      return await session.runtime.runPromise(
+        Effect.suspend(() => execute(client)),
+        { signal },
+      );
+    } catch (error) {
+      // The interruption's own failure says less than why the caller aborted.
+      if (signal.aborted) throw new RpcRequestAbortedError();
+      throw error;
+    }
   }
 
   async requestStream<TValue>(
@@ -148,12 +233,14 @@ class RpcTransport<Client> {
     const session = this.session;
     const client = await session.clientPromise;
     await session.runtime.runPromise(
-      Stream.runForEach(connect(client), (value) =>
+      Stream.runForEachArray(connect(client), (values) =>
         Effect.sync(() => {
-          try {
-            listener(value);
-          } catch {
-            // Swallow listener errors so the stream can finish cleanly.
+          for (const value of values) {
+            try {
+              listener(value);
+            } catch {
+              // Swallow listener errors so the stream can finish cleanly.
+            }
           }
         }),
       ),
@@ -172,6 +259,9 @@ class RpcTransport<Client> {
     let active = true;
     let hasReceivedValue = false;
     let awaitingSessionRetries = 0;
+    let consecutiveResyncs = 0;
+    let lastResyncAt = Number.NEGATIVE_INFINITY;
+    let resyncReportedSession: TransportSession<Client> | null = null;
     const retryDelayMs = Duration.toMillis(
       Duration.fromInputUnsafe(options?.retryDelay ?? DEFAULT_SUBSCRIPTION_RETRY_DELAY_MS),
     );
@@ -268,9 +358,32 @@ class RpcTransport<Client> {
           if (isSubscriptionStreamDoneError(formattedError)) {
             return;
           }
+          if (isTerminalResyncSubscriptionError(error)) {
+            // The stream delivered values before failing, so readiness alone cannot
+            // reset this backoff; only a quiet period between resyncs does.
+            const now = Date.now();
+            consecutiveResyncs =
+              now - lastResyncAt > RESYNC_SUBSCRIPTION_BACKOFF_RESET_MS
+                ? 0
+                : consecutiveResyncs + 1;
+            lastResyncAt = now;
+            if (resyncReportedSession !== session) {
+              resyncReportedSession = session;
+              console.warn("WebSocket RPC subscription resynchronizing", {
+                ...(options?.tag === undefined ? {} : { tag: options.tag }),
+                error: formattedError,
+              });
+            }
+            await waitForRetry(
+              resyncSubscriptionRetryDelayMs(retryDelayMs, consecutiveResyncs),
+              observedAdmissionRevision,
+            );
+            continue;
+          }
           if (!isRetryableSubscriptionError(formattedError)) {
             try {
-              options?.onError?.();
+              if (options?.classifyFailure) options.onError?.(options.classifyFailure(error));
+              else options?.onError?.();
             } catch {
               // Swallow failure-hook errors so diagnostics cannot mask the subscription failure.
             }
@@ -400,7 +513,7 @@ class RpcTransport<Client> {
     requestStart: {
       readonly tag?: string;
       readonly onStarted?: () => void;
-      readonly onError?: () => void;
+      readonly onError?: (kind?: SubscriptionFailureKind) => void;
     },
     isActive: () => boolean,
     markValueReceived: () => void,
@@ -431,28 +544,38 @@ class RpcTransport<Client> {
       };
       this.streamRequestStartListeners.add(requestStartListener);
     }
+    // One chunk from the server arrives as one array: deliver all of it in a
+    // single synchronous pass, so whatever the listener batches (a store
+    // commit per frame) sees the whole chunk, and only one effect runs per
+    // chunk rather than per value.
+    const deliver = (value: TValue) => {
+      if (requestStart.tag) {
+        this.observability.recordPerformance(`web.ws.stream.${requestStart.tag}`, value);
+      }
+      try {
+        listener(value);
+      } catch {
+        try {
+          requestStart.onError?.();
+        } catch {
+          // Swallow failure-hook errors so the stream stays live.
+        }
+        // Swallow listener errors so the stream stays live.
+      }
+    };
     const cancel = session.runtime.runCallback(
       Effect.promise(() => session.clientPromise).pipe(
         Effect.flatMap((client) =>
-          Stream.runForEach(connect(client), (value) =>
+          Stream.runForEachArray(connect(client), (values) =>
             Effect.sync(() => {
               if (!isActive()) {
                 return;
               }
 
               markValueReceived();
-              if (requestStart.tag) {
-                this.observability.recordPerformance(`web.ws.stream.${requestStart.tag}`, value);
-              }
-              try {
-                listener(value);
-              } catch {
-                try {
-                  requestStart.onError?.();
-                } catch {
-                  // Swallow failure-hook errors so the stream stays live.
-                }
-                // Swallow listener errors so the stream stays live.
+              for (const value of values) {
+                if (!isActive()) return;
+                deliver(value);
               }
             }),
           ),

@@ -76,6 +76,7 @@
     "perf:external": "bun scripts/perf/cli.ts run",
     "perf:source-control": "bun scripts/perf/cli.ts run --profile active-source-control --iterations 1",
     "perf:compare": "bun scripts/perf/cli.ts compare-refs",
+    "perf:bundle-budget": "bun scripts/perf/cli.ts bundle-budget",
     "clean": "rm -rf node_modules apps/*/node_modules packages/*/node_modules apps/*/dist apps/*/dist-electron packages/*/dist .turbo apps/*/.turbo packages/*/.turbo",
     "sync:vscode-icons": "node scripts/sync-vscode-icons.mjs"
   },
@@ -149,7 +150,8 @@
     "react-native-keyboard-controller@1.21.9": "patches/react-native-keyboard-controller@1.21.9.patch",
     "react-native-nitro-modules@0.36.5": "patches/react-native-nitro-modules@0.36.5.patch",
     "@effect/platform-node-shared@4.0.2": "patches/@effect%2Fplatform-node-shared@4.0.2.patch",
-    "effect@4.0.2": "patches/effect@4.0.2.patch"
+    "effect@4.0.2": "patches/effect@4.0.2.patch",
+    "@effect/platform-node@4.0.2": "patches/@effect%2Fplatform-node@4.0.2.patch"
   },
   "trustedDependencies": [
     "node-pty",

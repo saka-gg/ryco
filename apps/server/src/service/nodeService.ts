@@ -90,9 +90,26 @@ const escapeXml = (value: string): string =>
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&apos;");
 
+/**
+ * V8 flags for a Node service runtime. A 16 MiB semi-space stops the young
+ * generation from growing to 128 MiB during boot and staying there (about
+ * 50 MiB lower idle RSS). They are runtime arguments rather than NODE_OPTIONS
+ * so they never reach the provider CLIs and terminal shells the node starts.
+ * Bun takes none of them.
+ */
+export const NODE_SERVICE_V8_FLAGS: ReadonlyArray<string> = ["--max-semi-space-size=16"];
+
+export function nodeServiceRuntimeArgs(execPath: string): ReadonlyArray<string> {
+  return /^node(?:\d+)?(?:\.exe)?$/iu.test(path.basename(execPath)) ? NODE_SERVICE_V8_FLAGS : [];
+}
+
+function nodeServiceCommand(spec: NodeServiceSpec): ReadonlyArray<string> {
+  return [spec.execPath, ...nodeServiceRuntimeArgs(spec.execPath), spec.scriptPath, ...spec.args];
+}
+
 export function renderLaunchAgentPlist(spec: NodeServiceSpec): string {
   const string = (value: string) => `<string>${escapeXml(value)}</string>`;
-  const programArguments = [spec.execPath, spec.scriptPath, ...spec.args]
+  const programArguments = nodeServiceCommand(spec)
     .map((argument) => `    ${string(argument)}`)
     .join("\n");
   const environment = Object.entries(spec.environment)
@@ -135,7 +152,7 @@ const quoteSystemd = (value: string): string =>
   `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"').replaceAll("%", "%%")}"`;
 
 export function renderSystemdUserUnit(spec: NodeServiceSpec): string {
-  const execStart = [spec.execPath, spec.scriptPath, ...spec.args].map(quoteSystemd).join(" ");
+  const execStart = nodeServiceCommand(spec).map(quoteSystemd).join(" ");
   const environment = Object.entries(spec.environment)
     .toSorted(([left], [right]) => left.localeCompare(right))
     .map(([key, value]) => `Environment=${quoteSystemd(`${key}=${value}`)}`)

@@ -11,7 +11,7 @@ import {
   IconServer,
   IconTerminal2,
   IconBrandWindows,
-} from "@tabler/icons-react-native";
+} from "./icons";
 import { useEnvironmentServerConfigs } from "../state/environmentServerConfigs";
 import { useThemeColor } from "../lib/useThemeColor";
 

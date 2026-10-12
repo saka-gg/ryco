@@ -13,7 +13,7 @@ import {
   type NativeHandoffRedeemResponse as NativeHandoffRedeemResponseType,
   type NativeHandoffStartRequest as NativeHandoffStartRequestType,
 } from "@ryco/contracts/native-handoff";
-import { Schema } from "effect";
+import * as Schema from "effect/Schema";
 
 import type { NativeAuthorizationService } from "../platform/index.ts";
 import { encodeBase64Url } from "../relay/base64url.ts";

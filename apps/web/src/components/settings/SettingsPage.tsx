@@ -24,7 +24,6 @@ import {
   XIcon,
 } from "lucide-react";
 import {
-  lazy,
   Suspense,
   useCallback,
   useEffect,
@@ -47,6 +46,7 @@ import { useSavedEnvironmentRegistryStore } from "../../environments/runtime";
 import { useAppSidebarCollapsed } from "../../hooks/useAppSidebarCollapsed";
 import { useEnvironmentSettingsTarget } from "../../hooks/useEnvironmentSettingsTarget";
 import { navigateHub } from "../../hostedHub/hubRoutes";
+import { preloadableLazy, type PreloadableModule } from "../../lib/preloadableLazy";
 import { cn } from "../../lib/utils";
 import {
   retainDesktopWorkspaceInteractiveScope,
@@ -234,58 +234,66 @@ export {
   settingsScopeLabel,
 } from "./settingsSections.logic";
 
-const LazyAccountSettingsPanel = lazy(() =>
-  import("./AccountSettings").then((module) => ({ default: module.AccountSettingsPanel })),
+// Section bodies render synchronously once loaded: a `React.lazy` boundary
+// committed `PanelFallback` on every first visit and React then held the
+// section for up to 300 ms (its Suspense reveal throttle). Hovering or focusing
+// a nav item, and the settings route loader for the open section, preload them.
+const LazyAccountSettingsPanel = preloadableLazy(() =>
+  import("./AccountSettings").then((module) => module.AccountSettingsPanel),
 );
-const LazyProvidersSettingsPanel = lazy(() =>
-  import("./ProvidersSettingsPanel").then((module) => ({
-    default: module.ProvidersSettingsPanel,
-  })),
+const LazyProvidersSettingsPanel = preloadableLazy(() =>
+  import("./ProvidersSettingsPanel").then((module) => module.ProvidersSettingsPanel),
 );
-const LazyAiFocusSettings = lazy(() =>
-  import("./AiFocusSettings").then((module) => ({ default: module.AiFocusSettings })),
+const LazyAiFocusSettings = preloadableLazy(() =>
+  import("./AiFocusSettings").then((module) => module.AiFocusSettings),
 );
-const LazyOpinionatedPluginsSettingsPanel = lazy(() =>
-  import("./OpinionatedPluginsSettings").then((module) => ({
-    default: module.OpinionatedPluginsSettingsPanel,
-  })),
+const LazyOpinionatedPluginsSettingsPanel = preloadableLazy(() =>
+  import("./OpinionatedPluginsSettings").then((module) => module.OpinionatedPluginsSettingsPanel),
 );
-const LazyIntegrationsSettings = lazy(() =>
-  import("./IntegrationsSettingsPanel").then((module) => ({
-    default: module.IntegrationsSettingsPanel,
-  })),
+const LazyIntegrationsSettings = preloadableLazy(() =>
+  import("./IntegrationsSettingsPanel").then((module) => module.IntegrationsSettingsPanel),
 );
-const LazyMcpServersSettings = lazy(() =>
-  import("./McpServersSettings").then((module) => ({ default: module.McpServersSettings })),
+const LazyMcpServersSettings = preloadableLazy(() =>
+  import("./McpServersSettings").then((module) => module.McpServersSettings),
 );
-const LazyAppearanceSettingsPanel = lazy(() =>
-  import("./AppearanceSettings").then((module) => ({
-    default: module.AppearanceSettingsPanel,
-  })),
+const LazyAppearanceSettingsPanel = preloadableLazy(() =>
+  import("./AppearanceSettings").then((module) => module.AppearanceSettingsPanel),
 );
-const LazyKeybindingsSettingsPanel = lazy(() =>
-  import("./KeybindingsSettings").then((module) => ({
-    default: module.KeybindingsSettingsPanel,
-  })),
+const LazyKeybindingsSettingsPanel = preloadableLazy(() =>
+  import("./KeybindingsSettings").then((module) => module.KeybindingsSettingsPanel),
 );
-const LazySourceControlSettingsPanel = lazy(() =>
-  import("./SourceControlSettings").then((module) => ({
-    default: module.SourceControlSettingsPanel,
-  })),
+const LazySourceControlSettingsPanel = preloadableLazy(() =>
+  import("./SourceControlSettings").then((module) => module.SourceControlSettingsPanel),
 );
-const LazyConnectionsSettings = lazy(() =>
-  import("./ConnectionsSettings").then((module) => ({ default: module.ConnectionsSettings })),
+const LazyConnectionsSettings = preloadableLazy(() =>
+  import("./ConnectionsSettings").then((module) => module.ConnectionsSettings),
 );
-const LazyNodeSecuritySettings = lazy(() =>
-  import("./NodeSecuritySettings").then((module) => ({
-    default: module.NodeSecuritySettings,
-  })),
+const LazyNodeSecuritySettings = preloadableLazy(() =>
+  import("./NodeSecuritySettings").then((module) => module.NodeSecuritySettings),
 );
-const LazyDiagnosticsSettings = lazy(() =>
-  import("./DiagnosticsSettings").then((module) => ({
-    default: module.DiagnosticsSettings,
-  })),
+const LazyDiagnosticsSettings = preloadableLazy(() =>
+  import("./DiagnosticsSettings").then((module) => module.DiagnosticsSettings),
 );
+
+const LAZY_SECTION_PANELS: Partial<Record<SettingsSectionId, PreloadableModule>> = {
+  account: LazyAccountSettingsPanel,
+  inbox: LazyAiFocusSettings,
+  providers: LazyProvidersSettingsPanel,
+  "opinionated-plugins": LazyOpinionatedPluginsSettingsPanel,
+  "mcp-servers": LazyMcpServersSettings,
+  integrations: LazyIntegrationsSettings,
+  appearance: LazyAppearanceSettingsPanel,
+  keybindings: LazyKeybindingsSettingsPanel,
+  "source-control": LazySourceControlSettingsPanel,
+  connections: LazyConnectionsSettings,
+  security: LazyNodeSecuritySettings,
+  diagnostics: LazyDiagnosticsSettings,
+};
+
+/** Starts (or joins) the chunk load of a section's body. Never rejects. */
+export function preloadSettingsSection(section: SettingsSectionId): Promise<void> {
+  return LAZY_SECTION_PANELS[section]?.preload() ?? Promise.resolve();
+}
 
 function navDescription(item: NavItem, destination: SettingsDestination): string {
   return typeof item.description === "string" ? item.description : item.description[destination];
@@ -471,6 +479,8 @@ function SettingsNav({
                     type="button"
                     data-nav-key={key}
                     onClick={() => onSelect(group.destination, item)}
+                    onPointerEnter={() => void preloadSettingsSection(item.id)}
+                    onFocus={() => void preloadSettingsSection(item.id)}
                     aria-current={active ? "page" : undefined}
                     className={cn(
                       "group/nav flex h-8 w-full items-center gap-2.5 rounded-[min(var(--radius-md),0.5rem)] px-2.5 text-left text-[13px] outline-hidden transition-colors duration-150 focus-visible:ring-2 focus-visible:ring-ring",
@@ -575,6 +585,8 @@ function CompactSectionPicker({
                 key={item.id}
                 value={item.id}
                 onClick={() => onSelect(group.destination, item)}
+                onPointerEnter={() => void preloadSettingsSection(item.id)}
+                onFocus={() => void preloadSettingsSection(item.id)}
               >
                 {item.label}
               </MenuRadioItem>
@@ -619,6 +631,8 @@ function SearchResults({
           key={`${entry.owner}:${entry.section}:${entry.title}`}
           type="button"
           onClick={() => onPick(entry)}
+          onPointerEnter={() => void preloadSettingsSection(entry.section)}
+          onFocus={() => void preloadSettingsSection(entry.section)}
           style={{ "--i": Math.min(index, 12) } as CSSProperties}
           className="settings-search-result group/result flex min-w-0 items-start gap-4 rounded-[min(var(--radius-lg),0.625rem)] px-3 py-2.5 text-left outline-hidden ring-ring transition-colors hover:bg-accent/60 focus-visible:ring-2"
         >

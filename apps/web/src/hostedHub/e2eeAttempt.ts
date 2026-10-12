@@ -1,12 +1,13 @@
 import { hostedHubStore } from "@ryco/client-runtime/authorization";
 import {
-  makeRelayE2eeInitiator,
+  HostedRelayPreparationError,
   relayE2eeUnresolvedAttemptFailure,
   type RelayE2eeChannel,
   type RelayE2eeHost,
-  type RelayE2eeInitiatorAttempt,
   type RelayE2eeProvider,
 } from "@ryco/client-runtime/relay";
+// Type-only: the initiator's code is loaded through `./e2eeRuntime`, never here.
+import type { RelayE2eeInitiatorAttempt } from "@ryco/client-runtime/relay/e2ee";
 import { E2EE_SUITE_25519_CHACHAPOLY_SHA256 } from "@ryco/shared/relayE2eeWire";
 
 import {
@@ -97,6 +98,60 @@ function detectWebE2eeRandomness(): boolean {
 }
 
 let randomnessUsable = detectWebE2eeRandomness();
+
+type WebRelayE2ee = typeof import("./e2eeRuntime");
+
+/**
+ * The handshake code (`./e2eeRuntime`), once loaded.
+ *
+ * It is loaded rather than imported: the curves, hashes, cipher and CBOR
+ * transcripts are the heaviest part of the hosted client, and nothing needs
+ * them until a channel is accepted — at least the session, directory and ticket
+ * round trips after an account authenticates, which is when the load starts.
+ * The provider below is still resolved synchronously from local state; only
+ * where the initiator's code comes from changed.
+ */
+let loadedE2ee: WebRelayE2ee | null = null;
+let loadingE2ee: Promise<WebRelayE2ee> | null = null;
+
+/** Start (or join) the handshake code load. A failed load is retried by the next caller. */
+export function loadWebRelayE2ee(): Promise<WebRelayE2ee> {
+  if (loadedE2ee) return Promise.resolve(loadedE2ee);
+  if (loadingE2ee) return loadingE2ee;
+  const pending = import("./e2eeRuntime").then((module) => {
+    loadedE2ee = module;
+    return module;
+  });
+  loadingE2ee = pending;
+  pending.then(
+    () => {
+      if (loadingE2ee === pending) loadingE2ee = null;
+    },
+    () => {
+      if (loadingE2ee === pending) loadingE2ee = null;
+    },
+  );
+  return pending;
+}
+
+/**
+ * The hosted runtime's `prepareRelaySocketContext`: resolves once a channel
+ * this tier opens has the handshake code it may need, so
+ * {@link resolveWebRelayE2eeProvider} — which the transport calls after this,
+ * when the ticket it buys resolves — always finds it loaded. Nothing is
+ * prepared where §14.5 refused E2EE. A failed load fails the attempt as a
+ * retryable network failure, before any ticket is spent; it never yields a
+ * channel without the machine.
+ */
+export function prepareWebRelayE2ee(): Promise<undefined> {
+  if (!randomnessUsable) return Promise.resolve(undefined);
+  return loadWebRelayE2ee().then(
+    () => undefined,
+    () => {
+      throw new HostedRelayPreparationError({ kind: "network", retryable: true });
+    },
+  );
+}
 
 /**
  * The attempt this module last built, for the suite that asserts what it carries.
@@ -215,7 +270,10 @@ export function webRelayE2eeAttempt(selection: WebE2eeSelection): RelayE2eeIniti
  * Reached when the selection cannot be read at all — a sign-out or a node
  * deselect that lands between the ticket mint and this synchronous construction.
  * It is deliberately NOT a legacy channel: what is missing IS the latch key, and
- * §12.1.1 forbids treating unobtainable evidence as an unset latch.
+ * §12.1.1 forbids treating unobtainable evidence as an unset latch. Also
+ * reached, for the same reason, if the handshake code is not loaded yet, which
+ * the hosted transport rules out by awaiting {@link prepareWebRelayE2ee} before
+ * it buys a ticket: a channel this tier cannot negotiate is not a plaintext one.
  *
  * The close is the RETRYABLE one, so a store that moved under a reconnect costs
  * one channel rather than the whole hosted session.
@@ -251,6 +309,13 @@ export function resolveWebRelayE2eeProvider(): RelayE2eeProvider | undefined {
   }
   const selection = currentSelection();
   if (selection === null) return unresolvedAttemptChannel;
+  const e2ee = loadedE2ee;
+  if (e2ee === null) {
+    // The retry this close asks for finds the code loaded.
+    void loadWebRelayE2ee().catch(() => undefined);
+    return unresolvedAttemptChannel;
+  }
+  const { makeRelayE2eeInitiator } = e2ee;
   const attempt = webRelayE2eeAttempt(selection);
   lastAttempt = attempt;
   return (host) => {
@@ -307,6 +372,11 @@ export function readWebRelayE2eeAttemptForTests(): RelayE2eeInitiatorAttempt | n
   return lastAttempt;
 }
 
+/** Test seam: whether the handshake code has been loaded in this module instance. */
+export function isWebRelayE2eeLoadedForTests(): boolean {
+  return loadedE2ee !== null;
+}
+
 let sessionWatch: (() => void) | undefined;
 
 /**
@@ -326,9 +396,11 @@ let sessionWatch: (() => void) | undefined;
 export function watchWebHostedSessionForE2ee(): () => void {
   if (sessionWatch !== undefined) return sessionWatch;
   let applicationSessionActive = hostedHubStore.getState().accountStatus === "authenticated";
+  if (applicationSessionActive) scheduleWebE2eeWarmUp();
   const unsubscribe = hostedHubStore.subscribe(() => {
     const status = hostedHubStore.getState().accountStatus;
     if (status === "authenticated") {
+      if (!applicationSessionActive) scheduleWebE2eeWarmUp();
       applicationSessionActive = true;
       return;
     }
@@ -345,6 +417,30 @@ export function watchWebHostedSessionForE2ee(): () => void {
     unsubscribe();
   };
   return sessionWatch;
+}
+
+/**
+ * Load the handshake code once an account is authenticated, then warm its curve
+ * primitives in an idle period: at least the directory, ticket and channel
+ * round trips lie between that and the first `channel.accept`, and the first
+ * handshake would otherwise wait on the download, or pay the curve library's
+ * lazy setup on the main thread inside the connect. Skipped where §14.5 refused
+ * E2EE; nothing the warm-up computes is used.
+ */
+function scheduleWebE2eeWarmUp(): void {
+  if (!randomnessUsable) return;
+  loadWebRelayE2ee().then(
+    ({ warmE2eePrimitives }) => {
+      const run = () => warmE2eePrimitives();
+      if (typeof globalThis.requestIdleCallback === "function") {
+        globalThis.requestIdleCallback(run, { timeout: 2_000 });
+      } else {
+        globalThis.setTimeout(run, 0);
+      }
+    },
+    // The transport's preparation retries the load before a ticket is bought.
+    () => undefined,
+  );
 }
 
 /** Test seam: re-run the §14.5 startup check and drop the recorded attempt. */

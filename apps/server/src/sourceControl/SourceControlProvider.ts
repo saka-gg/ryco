@@ -158,6 +158,14 @@ export interface SourceControlProviderShape {
     /** Skip optional stack enrichment when only branch/status fields are consumed. */
     readonly includeStackSummary?: boolean;
     /**
+     * `summary` asks only for identity, branches, state, draft, author and
+     * timestamps — no comment counts, checks, review state or diff stats —
+     * where the host lets a list choose its fields (GitHub). Status lookups
+     * and the change request index use it; omitted means every field list
+     * rows show (comment counts, never comment bodies).
+     */
+    readonly fields?: "full" | "summary";
+    /**
      * Narrow to change requests involving the authenticated viewer. Providers
      * that cannot filter server-side must fail rather than return everything.
      */

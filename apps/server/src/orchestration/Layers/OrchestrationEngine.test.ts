@@ -162,7 +162,17 @@ describe("OrchestrationEngine", () => {
           createdAt,
         }),
       );
-      await system.run(storageLifecycleLock.take(1));
+      // A cleanup claim holds the lock exclusively while it fences the checkout.
+      const claimEntered = Effect.runSync(Deferred.make<void>());
+      const claimDecided = Effect.runSync(Deferred.make<void>());
+      const claim = system.run(
+        storageLifecycleLock.withPermit(
+          Deferred.succeed(claimEntered, undefined).pipe(
+            Effect.andThen(Deferred.await(claimDecided)),
+          ),
+        ),
+      );
+      await system.run(Deferred.await(claimEntered));
       const activated = system.run(
         system.engine.dispatch({
           type: "thread.turn.start",
@@ -184,7 +194,8 @@ describe("OrchestrationEngine", () => {
           system.sql`INSERT INTO storage_owned_entries (id, path, category, identity_json, created_at, state) VALUES ('fixture', ${checkout}, 'worktree', '{}', ${createdAt}, 'removing')`,
         );
       } finally {
-        await system.run(storageLifecycleLock.release(1));
+        await system.run(Deferred.succeed(claimDecided, undefined));
+        await claim;
       }
       await expect(activated).rejects.toThrow("Checkout cleanup is pending or complete");
       expect((await system.readShell()).threads[0]?.latestTurn).toBeNull();
@@ -379,7 +390,13 @@ describe("OrchestrationEngine", () => {
         } as ServerConfigShape,
         providerProtection: { resolve: () => [] },
         settings: { getSettings: Effect.succeed(DEFAULT_SERVER_SETTINGS) },
-        snapshots: { getShellSnapshot: () => Effect.tryPromise(() => system.readShell()) as never },
+        snapshots: {
+          getShellSnapshot: () => Effect.tryPromise(() => system.readShell()) as never,
+          getSnapshotSequence: () =>
+            Effect.tryPromise(async () => ({
+              snapshotSequence: (await system.readShell()).snapshotSequence,
+            })) as never,
+        },
         providers: { listBindings: () => Effect.succeed([]) },
         terminals: { listDiagnostics: Effect.succeed([]) },
         policy,
@@ -489,6 +506,35 @@ describe("OrchestrationEngine", () => {
       expect(await system.run(system.engine.dispatch(command, admission))).toEqual(accepted);
       expect(admissions).toBe(2);
       expect(await system.run(sql`SELECT * FROM synthetic_admission`)).toHaveLength(1);
+    } finally {
+      await system.dispose();
+    }
+  });
+
+  it("exposes its in-memory command read model, matching the SQL one at boot", async () => {
+    const system = await createOrchestrationSystem();
+    try {
+      const getReadModel = system.engine.getReadModel;
+      expect(getReadModel).toBeDefined();
+      if (getReadModel === undefined) return;
+      // Before any dispatch the engine holds exactly its SQL bootstrap model.
+      expect(await system.run(getReadModel())).toEqual(await system.commandReadModel());
+      const createdAt = now();
+      await system.run(
+        system.engine.dispatch({
+          type: "project.create",
+          commandId: CommandId.make("read-model-project-create"),
+          projectId: asProjectId("read-model-project"),
+          title: "Read model",
+          workspaceRoot: "/tmp/ryco-read-model",
+          defaultModelSelection: null,
+          createdAt,
+        }),
+      );
+      // Committed commands advance it synchronously; no SQL hydration involved.
+      const model = await system.run(getReadModel());
+      expect(model.projects.map((project) => project.id)).toContain("read-model-project");
+      expect(model.snapshotSequence).toBeGreaterThan(0);
     } finally {
       await system.dispose();
     }
@@ -837,6 +883,12 @@ describe("OrchestrationEngine", () => {
           }),
         ),
       hasEventAfter: () => Effect.succeed(false),
+      readStreamEventsPage: (input) =>
+        Effect.succeed({
+          events: [],
+          nextSequence: input.fromSequenceExclusive,
+          hasMore: false,
+        }),
     };
 
     const projectionSnapshot = {
@@ -1569,6 +1621,12 @@ describe("OrchestrationEngine", () => {
         return Stream.fromIterable(events);
       },
       hasEventAfter: () => Effect.succeed(false),
+      readStreamEventsPage: (input) =>
+        Effect.succeed({
+          events: [],
+          nextSequence: input.fromSequenceExclusive,
+          hasMore: false,
+        }),
     };
 
     const ServerConfigLayer = ServerConfig.layerTest(process.cwd(), {
@@ -1690,7 +1748,6 @@ describe("OrchestrationEngine", () => {
         Layer.provide(Layer.succeed(OrchestrationProjectionPipeline, flakyProjectionPipeline)),
         Layer.provide(OrchestrationEventStoreLive),
         Layer.provide(OrchestrationCommandReceiptRepositoryLive),
-        Layer.provide(RepositoryIdentityResolverLive),
         Layer.provideMerge(SqlitePersistenceMemory),
       ),
     );
@@ -1842,6 +1899,12 @@ describe("OrchestrationEngine", () => {
         return Stream.fromIterable(events);
       },
       hasEventAfter: () => Effect.succeed(false),
+      readStreamEventsPage: (input) =>
+        Effect.succeed({
+          events: [],
+          nextSequence: input.fromSequenceExclusive,
+          hasMore: false,
+        }),
     };
 
     let shouldFailProjection = true;
@@ -1872,7 +1935,6 @@ describe("OrchestrationEngine", () => {
         Layer.provide(Layer.succeed(OrchestrationProjectionPipeline, flakyProjectionPipeline)),
         Layer.provide(Layer.succeed(OrchestrationEventStore, nonTransactionalStore)),
         Layer.provide(OrchestrationCommandReceiptRepositoryLive),
-        Layer.provide(RepositoryIdentityResolverLive),
         Layer.provide(SqlitePersistenceMemory),
       ),
     );
@@ -3255,6 +3317,17 @@ describe("OrchestrationEngine provider effect intents", () => {
       );
       expect(head).toBe(2);
       expect(system.engine.bootSequence).toBe(2);
+      // The engine serves one stream's page from the stream index (thread resume replay).
+      const threadPage = await system.run(
+        system.engine.readStreamEventsPage!({
+          aggregateKind: "thread",
+          streamId: intentThreadId,
+          fromSequenceExclusive: 0,
+          limit: 100,
+        }),
+      );
+      expect(threadPage.events.map((event) => event.aggregateId)).toEqual([intentThreadId]);
+      expect(threadPage.hasMore).toBe(false);
       await system.run(
         system.engine.dispatch({
           type: "thread.session.stop",

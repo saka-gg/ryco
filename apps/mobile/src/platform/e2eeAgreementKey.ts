@@ -1,4 +1,4 @@
-import { decodeBase64Url, encodeBase64Url } from "@ryco/client-runtime/relay";
+import { decodeBase64Url, encodeBase64Url } from "@ryco/client-runtime/relay/base64url";
 import {
   deriveE2eeAgreementPublicKey,
   e2eeKeyFingerprint,

@@ -235,6 +235,46 @@ describe("gitStatusState", () => {
     expect(gitStatusListeners.size).toBe(0);
   });
 
+  it("watches the summary view apart from full status of the same folder", () => {
+    const summaryListeners = new Set<(event: VcsStatusResult) => void>();
+    const fullListeners = new Set<(event: VcsStatusResult) => void>();
+    const client = {
+      refreshStatus: gitClient.refreshStatus,
+      onStatus: vi.fn(
+        (
+          input: { readonly cwd: string; readonly view?: "full" | "summary" | undefined },
+          listener: (event: VcsStatusResult) => void,
+        ) =>
+          registerListener(input.view === "summary" ? summaryListeners : fullListeners, listener),
+      ),
+    };
+
+    const releaseSummaryA = watchGitStatus(TARGET, client, { view: "summary" });
+    const releaseSummaryB = watchGitStatus(TARGET, client, { view: "summary" });
+    expect(client.onStatus).toHaveBeenCalledOnce();
+    expect(client.onStatus.mock.calls[0]?.[0]).toEqual({ cwd: "/repo", view: "summary" });
+
+    const releaseFull = watchGitStatus(TARGET, client);
+    expect(client.onStatus).toHaveBeenCalledTimes(2);
+    expect(client.onStatus.mock.calls[1]?.[0]).toEqual({ cwd: "/repo" });
+
+    const summary = { ...BASE_STATUS, refName: "feature/badge" };
+    for (const listener of summaryListeners) listener(summary);
+    expect(getGitStatusSnapshot(TARGET, "summary").data).toEqual(summary);
+    // Full-status readers never see the summary's empty working tree.
+    expect(getGitStatusSnapshot(TARGET).data).toBeNull();
+
+    for (const listener of fullListeners) listener(BASE_STATUS);
+    expect(getGitStatusSnapshot(TARGET).data).toEqual(BASE_STATUS);
+    expect(getGitStatusSnapshot(TARGET, "summary").data).toEqual(summary);
+
+    releaseSummaryA();
+    releaseSummaryB();
+    releaseFull();
+    expect(summaryListeners.size).toBe(0);
+    expect(fullListeners.size).toBe(0);
+  });
+
   it("marks data whose remote half the stream has not delivered yet", () => {
     let emit: (status: VcsStatusResult, meta: { remoteKnown: boolean }) => void = () => {};
     const client = {
@@ -489,6 +529,30 @@ describe("readLocalGitRefName", () => {
     expect(gitClient.onStatus).toHaveBeenCalledOnce();
     expect(gitClient.refreshStatus).not.toHaveBeenCalled();
     expect(gitStatusListeners.size).toBe(1);
+    release();
+  });
+
+  it("reuses a live summary-view stream instead of opening a full-status one", async () => {
+    const summaryListeners = new Set<(event: VcsStatusResult) => void>();
+    const client = {
+      refreshStatus: gitClient.refreshStatus,
+      onStatus: vi.fn(
+        (
+          input: { readonly cwd: string; readonly view?: "full" | "summary" | undefined },
+          listener: (event: VcsStatusResult) => void,
+        ) =>
+          registerListener(
+            input.view === "summary" ? summaryListeners : gitStatusListeners,
+            listener,
+          ),
+      ),
+    };
+    const release = watchGitStatus(TARGET, client, { view: "summary" });
+    for (const listener of summaryListeners) listener({ ...BASE_STATUS, refName: "feature/badge" });
+
+    await expect(readLocalGitRefName(TARGET, { client })).resolves.toBe("feature/badge");
+    expect(client.onStatus).toHaveBeenCalledOnce();
+    expect(gitStatusListeners.size).toBe(0);
     release();
   });
 

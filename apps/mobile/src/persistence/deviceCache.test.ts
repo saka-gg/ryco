@@ -7,7 +7,6 @@ const mocks = vi.hoisted(() => ({
   clearFiles: vi.fn(),
   diffs: vi.fn(),
   clearDiffs: vi.fn(),
-  api: vi.fn(),
   icons: vi.fn(),
   clearIcons: vi.fn(),
 }));
@@ -23,7 +22,6 @@ vi.mock("../rpc/checkpointDiffAtoms", () => ({
   checkpointDiffCacheBytes: mocks.diffs,
   clearCheckpointDiffCacheForEnvironment: mocks.clearDiffs,
 }));
-vi.mock("../connection/environmentApi", () => ({ readEnvironmentApi: mocks.api }));
 vi.mock("@ryco/client-runtime/connection", () => ({
   projectIconCacheBytes: mocks.icons,
   clearProjectIconCache: mocks.clearIcons,
@@ -41,7 +39,6 @@ it("accounts for each category and includes snapshots from devices no longer in 
   mocks.snapshots.mockResolvedValue([
     { environmentId: device, payloadBytes: 100, threads: 2, projects: 1 },
   ]);
-  mocks.api.mockReturnValue({});
   expect(await readDeviceCacheUsage([])).toEqual([
     {
       environmentId: device,
@@ -56,13 +53,11 @@ it("accounts for each category and includes snapshots from devices no longer in 
   ]);
 });
 it("clears only the selected device and its own image source cache", async () => {
-  const api = {};
-  mocks.api.mockReturnValue(api);
+  // The artwork cache is keyed by device, so a disconnected device clears too.
   await clearDeviceCache(device);
-  for (const clear of [mocks.purge, mocks.clearFiles, mocks.clearDiffs]) {
+  for (const clear of [mocks.purge, mocks.clearFiles, mocks.clearDiffs, mocks.clearIcons]) {
     expect(clear).toHaveBeenCalledExactlyOnceWith(device);
   }
-  expect(mocks.clearIcons).toHaveBeenCalledExactlyOnceWith(api);
 });
 it("reports a disk failure without claiming the device was cleared", async () => {
   mocks.purge.mockRejectedValue(new Error("Storage unavailable"));

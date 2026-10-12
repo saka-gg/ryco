@@ -11,25 +11,24 @@ const FLIP_EASING = "cubic-bezier(0.22, 1, 0.36, 1)";
  * position to its new one and every new item rises in, so a re-flowed line
  * moves as one motion instead of jumping and then easing piecemeal.
  *
- * Resting positions are recorded after each commit and whenever an item or the
- * row resizes (a child that loads a label, a window resize), so the "before"
- * frame is current even when the change comes from outside this component. An
- * item caught mid-glide starts the next glide from where it is on screen.
+ * Resting positions are recorded when the row mounts and whenever its DOM
+ * changes or an item or the row resizes (a child that loads a label, a window
+ * resize), so the "before" frame is current even when the change comes from
+ * outside this component, while commits that leave the row untouched read no
+ * layout at all. An item caught mid-glide starts the next glide from where it
+ * is on screen.
  */
 export function useFlipLayout(ref: RefObject<HTMLElement | null>, trigger: unknown): void {
   const restingRef = useRef<Map<string, DOMRect>>(new Map());
   const triggerRef = useRef(trigger);
+  const observedRef = useRef<{ container: HTMLElement; dispose: () => void } | null>(null);
 
   useLayoutEffect(() => {
+    if (Object.is(triggerRef.current, trigger)) return;
+    triggerRef.current = trigger;
     const container = ref.current;
     if (!container) return;
     const items = flipItems(container);
-    const changed = !Object.is(triggerRef.current, trigger);
-    triggerRef.current = trigger;
-    if (!changed) {
-      recordResting(items, restingRef.current);
-      return;
-    }
 
     const before = new Map<string, DOMRect>();
     for (const item of items) {
@@ -67,19 +66,53 @@ export function useFlipLayout(ref: RefObject<HTMLElement | null>, trigger: unkno
         easing: FLIP_EASING,
       });
     }
-  });
+  }, [ref, trigger]);
 
-  // Keeps the resting positions current between commits.
-  useEffect(() => {
+  // Keeps the resting positions current between trigger changes. The row can
+  // mount after this component (it renders conditionally), so each commit
+  // only compares the element; observers are set up once per element.
+  useLayoutEffect(() => {
     const container = ref.current;
-    if (!container || typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(() => {
-      recordResting(flipItems(container), restingRef.current);
-    });
-    observer.observe(container);
-    for (const item of flipItems(container)) observer.observe(item);
-    return () => observer.disconnect();
+    if (observedRef.current?.container === container) return;
+    observedRef.current?.dispose();
+    observedRef.current = null;
+    if (!container) return;
+    observedRef.current = { container, dispose: observeResting(container, restingRef) };
   });
+  useEffect(
+    () => () => {
+      observedRef.current?.dispose();
+      observedRef.current = null;
+    },
+    [],
+  );
+}
+
+function observeResting(
+  container: HTMLElement,
+  restingRef: RefObject<Map<string, DOMRect>>,
+): () => void {
+  const record = () => recordResting(flipItems(container), restingRef.current);
+  record();
+  const resizeObserver = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(record);
+  const observeSizes = () => {
+    if (!resizeObserver) return;
+    resizeObserver.observe(container);
+    for (const item of flipItems(container)) resizeObserver.observe(item);
+  };
+  observeSizes();
+  const mutationObserver =
+    typeof MutationObserver === "undefined"
+      ? null
+      : new MutationObserver(() => {
+          observeSizes();
+          record();
+        });
+  mutationObserver?.observe(container, { childList: true, subtree: true, characterData: true });
+  return () => {
+    resizeObserver?.disconnect();
+    mutationObserver?.disconnect();
+  };
 }
 
 function flipItems(container: HTMLElement): HTMLElement[] {

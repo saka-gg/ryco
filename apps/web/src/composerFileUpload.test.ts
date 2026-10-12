@@ -95,6 +95,49 @@ describe("deriveComposerFileUploadSendBlock", () => {
       releaseSeeded(seeded);
     }
   });
+
+  it("judges against the records snapshot a render subscribed to", () => {
+    const seeded = ["snap"];
+    try {
+      seedComposerFileUploadFromPersisted({
+        attachmentId: "snap",
+        name: "snap.bin",
+        mimeType: "application/octet-stream",
+        sizeBytes: 1,
+        uploadToken: "tok",
+        expiresAt: new Date(NOW + 10 * 60_000).toISOString(),
+      });
+      const uploadedSnapshot = composerFileUploadEngine.snapshot();
+      const attachments = [{ id: "snap", type: "file", name: "snap.bin", file: null }];
+      expect(
+        deriveComposerFileUploadSendBlock({ attachments, nowMs: NOW, records: uploadedSnapshot }),
+      ).toBeNull();
+
+      composerFileUploadEngine.release("snap");
+      seedComposerFileNeedsReattach("snap");
+      // The passed snapshot wins over the live engine, so a memoized render
+      // only changes its answer when it receives a new snapshot.
+      expect(
+        deriveComposerFileUploadSendBlock({ attachments, nowMs: NOW, records: uploadedSnapshot }),
+      ).toBeNull();
+      expect(
+        deriveComposerFileUploadSendBlock({
+          attachments,
+          nowMs: NOW,
+          records: composerFileUploadEngine.snapshot(),
+        }),
+      ).toContain("Attach 'snap.bin' again");
+      expect(
+        deriveComposerFileUploadSendBlock({
+          attachments,
+          nowMs: NOW,
+          records: new Map(),
+        }),
+      ).toContain("Attach 'snap.bin' again");
+    } finally {
+      releaseSeeded(seeded);
+    }
+  });
 });
 
 describe("composer upload cleanup", () => {

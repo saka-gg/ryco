@@ -53,8 +53,8 @@ import {
   ThreadReadCacheShellResponse,
   ThreadReadCacheThreadResponse,
 } from "@ryco/contracts/thread-read-cache";
-import { Schema } from "effect";
-import { assertE2eeAccountId } from "@ryco/shared/relayE2eeTranscripts";
+import * as Schema from "effect/Schema";
+import { assertE2eeAccountId } from "@ryco/shared/relayE2eeIds";
 
 import type {
   DpopSignerService,
@@ -159,6 +159,16 @@ const TOTP_PROVISIONING_URI_SCHEME = "otpauth://";
  * is bounded by the platform sheet plus `cancelAccountAction`.
  */
 const REQUEST_DEADLINE_MS = 30_000;
+
+/** Per-call options for an idempotent Hub read. */
+export interface HostedHubReadOptions {
+  /**
+   * Give up sooner than the default 30-second request deadline. For a read a
+   * surface is blocked on, where a stalled network should reach the retry path
+   * in seconds; the timeout is the same `timeout` failure either way.
+   */
+  readonly deadlineMs?: number;
+}
 
 /**
  * Hub routes that only accept a browser transport: they require an `Origin` in
@@ -800,6 +810,12 @@ export class HostedHubApi {
   readonly #dpopSigner: DpopSignerService | undefined;
   readonly #nativeAuthorization: NativeAuthorizationService | undefined;
   #pendingNativeExternalIdentityConnection: PendingNativeExternalIdentityConnection | null = null;
+  /**
+   * The Hub refused a minor-3 relay ticket request for this session, so later
+   * tickets offer minor 2 directly. Cleared with the session material, so a
+   * new account or session re-negotiates.
+   */
+  #relayTicketMinorFallback = false;
 
   constructor(dependencies: HostedHubApiDependencies) {
     this.#endpoint = dependencies.endpoint;
@@ -839,6 +855,16 @@ export class HostedHubApi {
     return this.#sessionCredentials.mode === "bearer";
   }
 
+  /**
+   * How this client presents its session: an ambient browser cookie, or a
+   * DPoP-bound bearer token the restore may rotate. Callers that overlap a
+   * session restore with other authenticated reads may do so only for
+   * `"cookie"`, where neither request depends on the other's answer.
+   */
+  get credentialMode(): "cookie" | "bearer" {
+    return this.#isBearer ? "bearer" : "cookie";
+  }
+
   #readBearerToken(): string | null {
     return this.#sessionCredentials.readBearerToken?.() ?? null;
   }
@@ -855,6 +881,7 @@ export class HostedHubApi {
 
   clearSessionMaterial(): void {
     this.#pendingNativeExternalIdentityConnection = null;
+    this.#relayTicketMinorFallback = false;
     if (this.#isBearer) this.#writeBearerToken(null);
     else this.#sessionCredentials.writeCsrfToken(null);
   }
@@ -952,8 +979,14 @@ export class HostedHubApi {
     return result;
   }
 
-  async restoreSession(signal?: AbortSignal): Promise<HostedHubSessionResponse> {
-    const value = await this.#request("/api/auth/session", signal ? { signal } : {});
+  async restoreSession(
+    signal?: AbortSignal,
+    options?: HostedHubReadOptions,
+  ): Promise<HostedHubSessionResponse> {
+    const value = await this.#request("/api/auth/session", {
+      ...(signal ? { signal } : {}),
+      ...(options?.deadlineMs === undefined ? {} : { deadlineMs: options.deadlineMs }),
+    });
     if (this.#isBearer) return this.#restoreNativeSession(value);
     const result = this.#sessionResponse(value);
     this.#sessionCredentials.writeCsrfToken(result.csrfToken);
@@ -2415,8 +2448,14 @@ export class HostedHubApi {
     );
   }
 
-  async listNodes(signal?: AbortSignal): Promise<ReadonlyArray<HostedHubNode>> {
-    const result = await this.#request("/api/nodes", signal ? { signal } : {});
+  async listNodes(
+    signal?: AbortSignal,
+    options?: HostedHubReadOptions,
+  ): Promise<ReadonlyArray<HostedHubNode>> {
+    const result = await this.#request("/api/nodes", {
+      ...(signal ? { signal } : {}),
+      ...(options?.deadlineMs === undefined ? {} : { deadlineMs: options.deadlineMs }),
+    });
     if (!Array.isArray(result.nodes)) throw new HostedHubApiError("invalid_response", 502);
     return result.nodes.map((value) => {
       const node = objectValue(value);
@@ -2627,7 +2666,9 @@ export class HostedHubApi {
         csrf: true,
         ...(signal ? { signal } : {}),
       });
-    let offeredMinor: 2 | 3 = 3;
+    // A Hub that has already refused minor 3 for this session is offered
+    // minor 2 directly, so every later attempt costs one request, not two.
+    let offeredMinor: 2 | 3 = this.#relayTicketMinorFallback ? 2 : 3;
     let result: Record<string, unknown>;
     try {
       result = await request(offeredMinor);
@@ -2635,6 +2676,7 @@ export class HostedHubApi {
       // Older Hubs reject the newer request schema before issuing any ticket.
       // Retry only that explicit rejection, never a failed/uncertain issuance.
       if (
+        offeredMinor !== 3 ||
         !(error instanceof HostedHubApiError) ||
         error.status !== 400 ||
         error.code !== "invalid_request"
@@ -2643,6 +2685,7 @@ export class HostedHubApi {
       }
       offeredMinor = 2;
       result = await request(offeredMinor);
+      this.#relayTicketMinorFallback = true;
     }
     if (
       Object.keys(result).length !== 4 ||
@@ -2861,6 +2904,8 @@ export class HostedHubApi {
        */
       readonly narrowForbidden?: boolean;
       readonly signal?: AbortSignal;
+      /** A tighter bound than {@link REQUEST_DEADLINE_MS}; see {@link HostedHubReadOptions}. */
+      readonly deadlineMs?: number;
     },
   ): Promise<Record<string, unknown>> {
     const url = new URL(pathname, this.#endpoint.origin());
@@ -2962,10 +3007,13 @@ export class HostedHubApi {
     // compromised cannot. The deadline releases it.
     const deadline = new AbortController();
     let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      deadline.abort();
-    }, REQUEST_DEADLINE_MS);
+    const timer = setTimeout(
+      () => {
+        timedOut = true;
+        deadline.abort();
+      },
+      Math.min(REQUEST_DEADLINE_MS, options.deadlineMs ?? REQUEST_DEADLINE_MS),
+    );
     const callerSignal = options.signal;
     const forwardAbort = () => deadline.abort();
     if (callerSignal?.aborted) deadline.abort();

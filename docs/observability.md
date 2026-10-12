@@ -6,19 +6,25 @@ Ryco has one server-side observability model:
 - completed spans go to a local NDJSON trace file
 - traces and metrics can also be exported over OTLP to a real backend like Grafana LGTM
 
-The local trace file is the persisted source of truth. There is no separate persisted server log file anymore.
+The local trace file is the persisted source of truth. Only desktop mode also keeps a server log file (`logs/server.log`).
 
 ## Where To Find Things
 
 ### Logs
 
-Logs are human-facing only:
+Logs are human-facing:
 
 - destination: stdout
 - format: `Logger.consolePretty()`
-- persistence: none
+- persistence: in desktop mode the server also writes `logs/server.log` itself (logfmt, one line per
+  record with its cause, rotating at 10 MiB with 3 backups). The desktop shell's capture of stdout
+  goes to `logs/server-child.log`. Other modes persist nothing.
 
 If you want a log message to show up in the trace file, emit it inside an active span with `Effect.log...`. `Logger.tracerLogger` will attach it as a span event.
+
+Failures that repeat in retry or polling loops go through `logOnceEvery` / `ignoreCauseLogOnceEvery`
+(`apps/server/src/logOnceEvery.ts`): the first occurrence of a key is logged with its full cause, then
+at most one `(repeated N times since …)` summary per window (5 minutes by default) while it persists.
 
 ### Traces
 
@@ -48,7 +54,24 @@ If OTLP is not configured, metrics still exist in-process, but you will not have
 
 ### Related Artifacts
 
-Provider event NDJSON files still exist for provider runtime streams. Those are separate from the main server trace file.
+Provider event logs are separate from the main server trace file. They live in `logs/provider/`, one
+pair of files per thread: `<threadId>.native.log` (provider protocol messages) and `<threadId>.log`
+(normalized runtime events). Each line is `[<ISO time>] NTIVE|CANON: <json>`.
+
+- detail: `ServerSettings.providerEventLogs` (`off`, `lifecycle`, `full`), overridden by
+  `RYCO_PROVIDER_EVENT_LOGS`. Unset follows the build: `full` in development, `lifecycle` (session,
+  turn, request and error records only) in packaged builds. Setting changes apply immediately;
+  `RYCO_PROVIDER_EVENT_LOGS=off` disables the writers entirely.
+- size: strings over 8 KiB keep a head and tail, inline base64 is replaced by its size and digest,
+  consecutive streaming deltas become one `delta-run` record, and canonical records reference the
+  native message (`raw.nativeId`) instead of copying it.
+- retention: each file rotates at 10 MiB with 3 gzipped backups (`.1.gz` …); files untouched for 30
+  days are removed and the directory is kept under 512 MiB (oldest first), at boot and hourly.
+  Terminal histories in `logs/terminals/` get the same sweep (90 days, 256 MiB).
+
+The Diagnostics panel reads provider failures (`runtime.error`, failed turns, errored session exits)
+from the canonical logs of the most recently active threads, and server failures from
+`logs/server.log` (`serverLogPath`), which the desktop backend writes.
 
 ## Run The Server In Instrumented Mode
 
@@ -489,6 +512,9 @@ Local trace file:
 - `RYCO_TRACE_BATCH_WINDOW_MS`: flush window, default `200`
 - `RYCO_TRACE_MIN_LEVEL`: minimum trace level, default `Info`
 - `RYCO_TRACE_TIMING_ENABLED`: enable timing metadata, default `true`
+- `RYCO_TRACE_SQL_MIN_DURATION_MS`: SQL statement spans that succeed faster than this are left out
+  of the local trace file, default `50`; `0` records every statement. Failed statements are always
+  kept, and the OTLP exporter still receives every span
 
 OTLP export:
 
@@ -527,6 +553,6 @@ Soft budgets live in `apps/web/src/perf/budgets.ts`. See `apps/web/src/perf/READ
 
 ### Current Constraints
 
-- logs outside spans are not persisted
+- logs outside spans are not persisted, except in desktop mode (`logs/server.log`)
 - metrics are not snapshotted locally to disk; use the Diagnostics panel or OTLP export for inspection
-- the old `serverLogPath` still exists in config for compatibility, but the trace file is the persisted artifact that matters
+- `serverLogPath` is only written in desktop mode; the trace file is the persisted artifact that matters

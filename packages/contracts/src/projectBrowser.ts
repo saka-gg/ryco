@@ -1,4 +1,4 @@
-import { Schema } from "effect";
+import * as Schema from "effect/Schema";
 
 const text = Schema.String.check(Schema.isMaxLength(8192));
 export const ProjectBrowserTab = Schema.Struct({

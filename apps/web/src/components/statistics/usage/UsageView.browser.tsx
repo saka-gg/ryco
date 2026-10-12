@@ -7,14 +7,20 @@ import { page } from "vite-plus/test/browser";
 import { render } from "vitest-browser-react";
 import { parseStatisticsSearch } from "../statisticsSearch";
 import { UsageView } from "./UsageView";
-const state = vi.hoisted(() => ({ merged: null as MergedUsageSummary | null }));
+const state = vi.hoisted(() => ({
+  merged: null as MergedUsageSummary | null,
+  connecting: false,
+  pendingEnvironmentIds: [] as string[],
+}));
 vi.mock("../useUsageSummary", () => ({
   useUsageSummary: () => ({
     merged: state.merged,
     environments: [],
-    availableEnvironments: [],
-    loading: false,
-    refreshing: false,
+    availableEnvironments: [{ environmentId: "fixture", label: "Synthetic node" }],
+    pendingEnvironmentIds: state.pendingEnvironmentIds,
+    connecting: state.connecting,
+    loading: state.pendingEnvironmentIds.length > 0,
+    refreshing: state.pendingEnvironmentIds.length > 0 && state.merged !== null,
     refresh: () => {},
   }),
 }));
@@ -63,6 +69,24 @@ function Harness() {
   );
 }
 describe("usage provider history", () => {
+  it("shows loading, not the empty state, while this app's node is still connecting", async () => {
+    state.merged = null;
+    state.connecting = true;
+    state.pendingEnvironmentIds = [];
+    await render(<Harness />);
+    await expect
+      .element(page.getByText("No usage environments are connected"))
+      .not.toBeInTheDocument();
+    state.connecting = false;
+  });
+  it("keeps showing the last result while an environment refreshes", async () => {
+    state.merged = fixture();
+    state.pendingEnvironmentIds = ["fixture"];
+    await render(<Harness />);
+    await expect.element(page.getByText("Updating Synthetic node…")).toBeVisible();
+    await expect.element(page.getByRole("button", { name: "Refreshing" })).toBeDisabled();
+    state.pendingEnvironmentIds = [];
+  });
   it("keeps setup coverage visible when there are no token buckets", async () => {
     state.merged = fixture();
     await render(<Harness />);

@@ -10,11 +10,10 @@ describe("Home mode state", () => {
       mode: "inbox",
       queryByMode: { inbox: "", projects: "" },
       nodeScopeByMode: { inbox: null, projects: null },
-      scrollOffsetByMode: { inbox: 0, projects: 0 },
     });
   });
 
-  it("preserves query, node scope, and scroll position when modes change", () => {
+  it("preserves query and node scope when modes change", () => {
     const environmentId = "node-a" as EnvironmentId;
     let state = createHomeModeState();
 
@@ -28,50 +27,21 @@ describe("Home mode state", () => {
       mode: "inbox",
       environmentId,
     });
-    state = reduceHomeModeState(state, {
-      type: "set-scroll-offset",
-      mode: "inbox",
-      offset: 418,
-    });
     state = reduceHomeModeState(state, { type: "select-mode", mode: "projects" });
     state = reduceHomeModeState(state, { type: "select-mode", mode: "inbox" });
 
     expect(state.mode).toBe("inbox");
     expect(state.queryByMode.inbox).toBe("auth");
     expect(state.nodeScopeByMode.inbox).toBe(environmentId);
-    expect(state.scrollOffsetByMode.inbox).toBe(418);
     expect(state.queryByMode.projects).toBe("");
   });
 
-  it("normalizes negative scroll offsets and reuses unchanged state", () => {
+  it("reuses unchanged state", () => {
     const state = createHomeModeState();
-    const unchanged = reduceHomeModeState(state, { type: "select-mode", mode: "inbox" });
-    const normalized = reduceHomeModeState(state, {
-      type: "set-scroll-offset",
-      mode: "projects",
-      offset: -20,
-    });
-
-    expect(unchanged).toBe(state);
-    expect(normalized).toBe(state);
-  });
-
-  it("starts changed search results at the top without moving the other mode", () => {
-    const state = {
-      ...createHomeModeState(),
-      scrollOffsetByMode: { inbox: 418, projects: 230 },
-    };
-    const searched = reduceHomeModeState(state, {
-      type: "set-query",
-      mode: "projects",
-      query: "node",
-    });
-    expect(searched.scrollOffsetByMode).toEqual({ inbox: 418, projects: 0 });
-    const scoped = reduceHomeModeState(state, {
-      type: "set-node-scope",
-      mode: "inbox",
-      environmentId: "node-a" as EnvironmentId,
-    });
-    expect(scoped.scrollOffsetByMode).toEqual({ inbox: 0, projects: 230 });
+    expect(reduceHomeModeState(state, { type: "select-mode", mode: "inbox" })).toBe(state);
+    expect(reduceHomeModeState(state, { type: "set-query", mode: "inbox", query: "" })).toBe(state);
+    expect(
+      reduceHomeModeState(state, { type: "set-node-scope", mode: "projects", environmentId: null }),
+    ).toBe(state);
   });
 });

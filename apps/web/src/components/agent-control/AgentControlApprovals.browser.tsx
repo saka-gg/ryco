@@ -18,6 +18,8 @@ vi.mock("../../environmentApi", () => ({
 vi.mock("../../environments/runtime", () => ({
   readEnvironmentConnection: () => null,
   subscribeEnvironmentConnections: () => () => {},
+  useSavedEnvironmentRuntimeStore: (selector: (state: { byId: object }) => unknown) =>
+    selector({ byId: {} }),
 }));
 vi.mock("../../hostedHub/capabilities", () => ({
   useHostedRpcCapability: () => ({ allowed: true, reason: null }),

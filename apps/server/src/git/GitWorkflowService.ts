@@ -45,8 +45,11 @@ import {
 
 import {
   GitManager,
+  type GitManagerShape,
   type GitRunStackedActionOptions,
   type GitPreparePullRequestThreadOptions,
+  type RemoteStatusOptions,
+  type VcsRefSummary,
 } from "./GitManager.ts";
 import {
   GitVcsDriver,
@@ -79,7 +82,12 @@ export interface GitWorkflowServiceShape {
   ) => Effect.Effect<VcsStatusLocalResult, GitManagerServiceError>;
   readonly remoteStatus: (
     input: VcsStatusInput,
+    options?: RemoteStatusOptions,
   ) => Effect.Effect<VcsStatusRemoteResult | null, GitManagerServiceError>;
+  /** See {@link GitManagerShape.refSummary}; a non-repository folder summarizes as such. */
+  readonly refSummary: (cwd: string) => Effect.Effect<VcsRefSummary, GitManagerServiceError>;
+  readonly indexedPullRequestStates: GitManagerShape["indexedPullRequestStates"];
+  readonly refreshRemoteTrackingRefs: GitManagerShape["refreshRemoteTrackingRefs"];
   readonly invalidateLocalStatus: (cwd: string) => Effect.Effect<void, never>;
   readonly invalidateRemoteStatus: (cwd: string) => Effect.Effect<void, never>;
   readonly invalidateStatus: (cwd: string) => Effect.Effect<void, never>;
@@ -168,6 +176,16 @@ function nonRepositoryStatus(): VcsStatusResult {
     pr: null,
   };
 }
+
+const NON_REPOSITORY_REF_SUMMARY: VcsRefSummary = Object.freeze({
+  isRepo: false,
+  refName: null,
+  isDefaultRef: false,
+  hasPrimaryRemote: false,
+  hasUpstream: false,
+  sourceControlProvider: null,
+  pr: null,
+});
 
 function nonRepositoryListRefs(): VcsListRefsResult {
   return {
@@ -322,14 +340,28 @@ export const make = Effect.fn("makeGitWorkflowService")(function* () {
             : Effect.succeed(nonRepositoryLocalStatus()),
         ),
       ),
-    remoteStatus: (input) =>
+    remoteStatus: (input, options) =>
       detectGitRepositoryForStatus("GitWorkflowService.remoteStatus", input.cwd).pipe(
         Effect.flatMap((isGitRepository) =>
           isGitRepository
-            ? gitManager.remoteStatus(input).pipe(Effect.catch(recoverMissingCwd(input.cwd, null)))
+            ? gitManager
+                .remoteStatus(input, options)
+                .pipe(Effect.catch(recoverMissingCwd(input.cwd, null)))
             : Effect.succeed(null),
         ),
       ),
+    refSummary: (cwd) =>
+      detectGitRepositoryForStatus("GitWorkflowService.refSummary", cwd).pipe(
+        Effect.flatMap((isGitRepository) =>
+          isGitRepository
+            ? gitManager
+                .refSummary(cwd)
+                .pipe(Effect.catch(recoverMissingCwd(cwd, NON_REPOSITORY_REF_SUMMARY)))
+            : Effect.succeed(NON_REPOSITORY_REF_SUMMARY),
+        ),
+      ),
+    indexedPullRequestStates: gitManager.indexedPullRequestStates,
+    refreshRemoteTrackingRefs: gitManager.refreshRemoteTrackingRefs,
     invalidateLocalStatus: gitManager.invalidateLocalStatus,
     invalidateRemoteStatus: gitManager.invalidateRemoteStatus,
     invalidateStatus: gitManager.invalidateStatus,

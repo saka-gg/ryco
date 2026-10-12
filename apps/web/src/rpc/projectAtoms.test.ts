@@ -17,6 +17,7 @@ vi.mock("~/environmentApi", () => ({
 
 import { appAtomRegistry } from "@ryco/client-runtime/rpc";
 import {
+  canResolveProjectSearchEntriesLocally,
   getFilesystemBrowseStateAtom,
   getProjectSearchEntriesSnapshot,
   invalidateProjectSearchEntries,
@@ -26,16 +27,23 @@ import {
   resolveFilesystemBrowseKey,
   resetProjectAtomsForTests,
   retainProjectSearchEntriesScope,
+  retryProjectSearchEntries,
 } from "./projectAtoms";
 
 const ENVIRONMENT_ID = EnvironmentId.make("environment-local");
 const CWD = "/tmp/workspace";
 
+/** A server result that is cut by its limit, so it cannot be narrowed locally. */
 function result(...paths: ReadonlyArray<string>): ProjectSearchEntriesResult {
   return {
-    entries: paths.map((path) => ({ kind: "file", path, parentPath: null })),
-    truncated: false,
+    entries: paths.map((path) => ({ kind: "file", path })),
+    truncated: true,
   } as unknown as ProjectSearchEntriesResult;
+}
+
+/** A server result holding every match for its query. */
+function completeResult(...paths: ReadonlyArray<string>): ProjectSearchEntriesResult {
+  return { ...result(...paths), truncated: false };
 }
 
 function createDeferred<T>() {
@@ -63,7 +71,7 @@ function snapshot(query: string) {
 }
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   vi.useFakeTimers();
   resetProjectAtomsForTests();
 });
@@ -112,8 +120,7 @@ describe("projectAtoms", () => {
     });
   });
 
-  it("does not fetch when the query is empty, gating is disabled, or scope is incomplete", () => {
-    requestProjectSearchEntries({ environmentId: ENVIRONMENT_ID, cwd: CWD, query: "" });
+  it("does not fetch when gating is disabled or the scope is incomplete", () => {
     requestProjectSearchEntries({
       environmentId: ENVIRONMENT_ID,
       cwd: CWD,
@@ -126,6 +133,15 @@ describe("projectAtoms", () => {
     expect(searchEntries).not.toHaveBeenCalled();
   });
 
+  it("requests the top-level listing for an empty query", async () => {
+    searchEntries.mockResolvedValueOnce(result("src"));
+    requestProjectSearchEntries({ environmentId: ENVIRONMENT_ID, cwd: CWD, query: "" });
+    await flush();
+
+    expect(searchEntries).toHaveBeenCalledWith({ cwd: CWD, query: "", limit: 80 });
+    expect(snapshot("").dataQuery).toBe("");
+  });
+
   it("marks the first request as loading and commits the resolved result", async () => {
     const deferred = createDeferred<ProjectSearchEntriesResult>();
     searchEntries.mockReturnValueOnce(deferred.promise);
@@ -136,6 +152,7 @@ describe("projectAtoms", () => {
     expect(searchEntries).toHaveBeenCalledWith({ cwd: CWD, query: "src", limit: 80 });
     expect(snapshot("src")).toEqual({
       data: null,
+      dataQuery: null,
       isLoading: true,
       isFetching: true,
       error: null,
@@ -147,6 +164,7 @@ describe("projectAtoms", () => {
 
     expect(snapshot("src")).toEqual({
       data: entries,
+      dataQuery: "src",
       isLoading: false,
       isFetching: false,
       error: null,
@@ -169,6 +187,7 @@ describe("projectAtoms", () => {
 
     expect(snapshot("ab")).toEqual({
       data: firstResult,
+      dataQuery: "a",
       isLoading: false,
       isFetching: true,
       error: null,
@@ -313,5 +332,167 @@ describe("projectAtoms", () => {
 
     expect(searchEntries).toHaveBeenCalledTimes(3);
     expect(searchEntries).toHaveBeenLastCalledWith({ cwd: other, query: "b", limit: 80 });
+  });
+
+  it("narrows a complete prefix result locally instead of asking the server", async () => {
+    searchEntries.mockResolvedValueOnce(
+      completeResult("src/components/Composer.tsx", "src/compose.ts", "docs/notes.md"),
+    );
+    requestProjectSearchEntries({ environmentId: ENVIRONMENT_ID, cwd: CWD, query: "co" });
+    await flush();
+
+    const input = { environmentId: ENVIRONMENT_ID, cwd: CWD, query: "comp", limit: 80 };
+    expect(canResolveProjectSearchEntriesLocally(input)).toBe(true);
+    requestProjectSearchEntries(input);
+    await flush();
+
+    expect(searchEntries).toHaveBeenCalledTimes(1);
+    const state = snapshot("comp");
+    expect(state.dataQuery).toBe("comp");
+    expect(state.isFetching).toBe(false);
+    expect(state.data?.truncated).toBe(false);
+    expect(state.data?.entries.map((entry) => entry.path)).toEqual([
+      "src/compose.ts",
+      "src/components/Composer.tsx",
+    ]);
+  });
+
+  it("asks the server when the prefix result was cut by its limit or is partial", async () => {
+    searchEntries.mockResolvedValueOnce(result("src/a.ts"));
+    requestProjectSearchEntries({ environmentId: ENVIRONMENT_ID, cwd: CWD, query: "s" });
+    await flush();
+    expect(
+      canResolveProjectSearchEntriesLocally({
+        environmentId: ENVIRONMENT_ID,
+        cwd: CWD,
+        query: "sr",
+      }),
+    ).toBe(false);
+
+    searchEntries.mockResolvedValueOnce({ ...completeResult("src/a.ts"), partial: true });
+    requestProjectSearchEntries({ environmentId: ENVIRONMENT_ID, cwd: CWD, query: "x" });
+    await flush();
+    expect(
+      canResolveProjectSearchEntriesLocally({
+        environmentId: ENVIRONMENT_ID,
+        cwd: CWD,
+        query: "xy",
+      }),
+    ).toBe(false);
+  });
+
+  it("never reuses a result from an index that is being rebuilt", async () => {
+    searchEntries.mockResolvedValueOnce({ ...completeResult("src/old.ts"), refreshing: true });
+    requestProjectSearchEntries({ environmentId: ENVIRONMENT_ID, cwd: CWD, query: "src" });
+    await flush();
+    expect(snapshot("src").data?.entries.map((entry) => entry.path)).toEqual(["src/old.ts"]);
+
+    expect(
+      canResolveProjectSearchEntriesLocally({
+        environmentId: ENVIRONMENT_ID,
+        cwd: CWD,
+        query: "src/",
+      }),
+    ).toBe(false);
+    searchEntries.mockResolvedValueOnce(completeResult("src/old.ts", "src/new.ts"));
+    requestProjectSearchEntries({ environmentId: ENVIRONMENT_ID, cwd: CWD, query: "src" });
+    await flush();
+    expect(searchEntries).toHaveBeenCalledTimes(2);
+  });
+
+  it("asks again while an open menu shows a result from an index being rebuilt", async () => {
+    retainProjectSearchEntriesScope({ environmentId: ENVIRONMENT_ID, cwd: CWD, limit: 80 });
+    searchEntries.mockResolvedValueOnce({ ...result("src/old.ts"), refreshing: true });
+    requestProjectSearchEntries({ environmentId: ENVIRONMENT_ID, cwd: CWD, query: "src" });
+    await flush();
+    expect(snapshot("src").data?.entries.map((entry) => entry.path)).toEqual(["src/old.ts"]);
+
+    const rebuilt = result("src/old.ts", "src/new.ts");
+    searchEntries.mockResolvedValueOnce(rebuilt);
+    await vi.advanceTimersByTimeAsync(400);
+    await flush();
+    expect(searchEntries).toHaveBeenCalledTimes(2);
+    expect(searchEntries).toHaveBeenLastCalledWith({ cwd: CWD, query: "src", limit: 80 });
+    expect(snapshot("src").data).toBe(rebuilt);
+
+    // Settled: nothing further is scheduled.
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(searchEntries).toHaveBeenCalledTimes(2);
+
+    releaseProjectSearchEntriesScope({ environmentId: ENVIRONMENT_ID, cwd: CWD, limit: 80 });
+  });
+
+  it("does not re-ask for a rebuilding result once the menu closed or the query moved on", async () => {
+    retainProjectSearchEntriesScope({ environmentId: ENVIRONMENT_ID, cwd: CWD, limit: 80 });
+    searchEntries.mockResolvedValue({ ...result("src/old.ts"), refreshing: true });
+    requestProjectSearchEntries({ environmentId: ENVIRONMENT_ID, cwd: CWD, query: "src" });
+    await flush();
+    requestProjectSearchEntries({ environmentId: ENVIRONMENT_ID, cwd: CWD, query: "srv" });
+    await flush();
+    expect(searchEntries).toHaveBeenCalledTimes(2);
+
+    releaseProjectSearchEntriesScope({ environmentId: ENVIRONMENT_ID, cwd: CWD, limit: 80 });
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(searchEntries).toHaveBeenCalledTimes(2);
+  });
+
+  it("shares cached results between queries that normalize alike", async () => {
+    searchEntries.mockResolvedValueOnce(result("src/index.ts"));
+    requestProjectSearchEntries({ environmentId: ENVIRONMENT_ID, cwd: CWD, query: "src" });
+    await flush();
+
+    requestProjectSearchEntries({ environmentId: ENVIRONMENT_ID, cwd: CWD, query: "@./SRC" });
+    await flush();
+    expect(searchEntries).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not let an older in-flight response overwrite a cached answer", async () => {
+    const cached = result("a.ts");
+    searchEntries.mockResolvedValueOnce(cached);
+    requestProjectSearchEntries({ environmentId: ENVIRONMENT_ID, cwd: CWD, query: "a" });
+    await flush();
+
+    const slow = createDeferred<ProjectSearchEntriesResult>();
+    searchEntries.mockReturnValueOnce(slow.promise);
+    requestProjectSearchEntries({ environmentId: ENVIRONMENT_ID, cwd: CWD, query: "ab" });
+    await flush();
+    requestProjectSearchEntries({ environmentId: ENVIRONMENT_ID, cwd: CWD, query: "a" });
+    slow.resolve(result("ab.ts"));
+    await flush();
+
+    expect(snapshot("a").data).toBe(cached);
+    expect(snapshot("a").dataQuery).toBe("a");
+  });
+
+  it("bounds the cached queries per scope", async () => {
+    searchEntries.mockImplementation(async ({ query }: { query: string }) => result(`${query}.ts`));
+    for (let index = 0; index <= 64; index += 1) {
+      requestProjectSearchEntries({ environmentId: ENVIRONMENT_ID, cwd: CWD, query: `q${index}` });
+      await flush();
+    }
+    expect(searchEntries).toHaveBeenCalledTimes(65);
+
+    requestProjectSearchEntries({ environmentId: ENVIRONMENT_ID, cwd: CWD, query: "q64" });
+    await flush();
+    expect(searchEntries).toHaveBeenCalledTimes(65);
+    // The least recently used query was evicted.
+    requestProjectSearchEntries({ environmentId: ENVIRONMENT_ID, cwd: CWD, query: "q0" });
+    await flush();
+    expect(searchEntries).toHaveBeenCalledTimes(66);
+  });
+
+  it("retries the scope's last request past the cache", async () => {
+    searchEntries.mockRejectedValueOnce(new Error("offline"));
+    requestProjectSearchEntries({ environmentId: ENVIRONMENT_ID, cwd: CWD, query: "src" });
+    await flush();
+    expect(snapshot("src").error).toEqual(new Error("offline"));
+
+    const recovered = result("src/index.ts");
+    searchEntries.mockResolvedValueOnce(recovered);
+    retryProjectSearchEntries({ environmentId: ENVIRONMENT_ID, cwd: CWD, limit: 80 });
+    await flush();
+
+    expect(searchEntries).toHaveBeenCalledTimes(2);
+    expect(snapshot("src")).toMatchObject({ data: recovered, error: null });
   });
 });

@@ -1077,7 +1077,10 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
       });
 
     const stopAll: AcpAdapterShape["stopAll"] = () =>
-      Effect.forEach(Array.from(sessions.values()), stopSessionInternal, { discard: true });
+      Effect.forEach(Array.from(sessions.values()), stopSessionInternal, {
+        concurrency: "unbounded",
+        discard: true,
+      });
 
     yield* Effect.addFinalizer(() =>
       Effect.ignore(stopAll()).pipe(

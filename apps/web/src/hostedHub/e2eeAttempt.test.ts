@@ -9,7 +9,7 @@ import {
   E2EE_SUITE_25519_CHACHAPOLY_SHA256,
   E2EE_SUITE_ACCOUNT_GRANT_25519_CHACHAPOLY_SHA256,
 } from "@ryco/shared/relayE2eeWire";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import {
   authenticateRelay,
@@ -27,6 +27,7 @@ import {
   USABLE_STATEMENT_CASE,
 } from "../../test/maliciousRelay";
 import {
+  loadWebRelayE2ee,
   readWebRelayE2eeAttemptForTests,
   resetWebRelayE2eeForTests,
   resolveWebRelayE2eeProvider,
@@ -110,6 +111,12 @@ function signOut(): void {
     selectedNode: null,
   });
 }
+
+// The hosted transport loads the handshake code before it buys a ticket (see
+// `prepareWebRelayE2ee`); these suites drive the provider directly, after it.
+beforeAll(async () => {
+  await loadWebRelayE2ee();
+});
 
 beforeEach(() => {
   clearWebE2eeLatches();

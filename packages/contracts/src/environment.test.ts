@@ -76,6 +76,17 @@ describe("ExecutionEnvironmentCapabilities.worktreeSubmoduleSettings", () => {
   });
 });
 
+describe("ExecutionEnvironmentCapabilities.projectSearchEmptyQuery", () => {
+  it("stays absent for older nodes and decodes when advertised", () => {
+    expect(decodeDescriptor(descriptor({})).capabilities.projectSearchEmptyQuery).toBeUndefined();
+    expect(
+      decodeDescriptor(descriptor({ projectSearchEmptyQuery: true })).capabilities
+        .projectSearchEmptyQuery,
+    ).toBe(true);
+    expect(() => decodeDescriptor(descriptor({ projectSearchEmptyQuery: "true" }))).toThrow();
+  });
+});
+
 describe("ExecutionEnvironmentCapabilities.worktreeNotes", () => {
   it("stays absent for older nodes and decodes when advertised", () => {
     expect(decodeDescriptor(descriptor({})).capabilities.worktreeNotes).toBeUndefined();

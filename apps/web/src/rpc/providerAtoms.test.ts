@@ -9,10 +9,13 @@ import {
   checkpointDiffRetryDelay,
   checkpointDiffStateAtom,
   decodeCheckpointDiffRequest,
+  evictCheckpointDiffsForThread,
   executeCheckpointDiffRequest,
   invalidateAllCheckpointDiffs,
   invalidateCheckpointDiff,
   isCheckpointDiffEnabled,
+  MAX_INACTIVE_CHECKPOINT_DIFF_CHARS,
+  MAX_INACTIVE_CHECKPOINT_DIFF_ENTRIES,
   normalizeCheckpointErrorMessage,
   resetCheckpointDiffStateForTests,
   shouldRetryCheckpointDiff,
@@ -347,5 +350,134 @@ describe("watchCheckpointDiff", () => {
       expect(getTurnDiff).toHaveBeenCalledTimes(2);
     });
     unwatch();
+  });
+});
+
+describe("checkpoint diff cache bounds", () => {
+  function turnInput(turn: number, extra?: Partial<CheckpointDiffInput>): CheckpointDiffInput {
+    return {
+      environmentId,
+      threadId,
+      fromTurnCount: turn - 1,
+      toTurnCount: turn,
+      ignoreWhitespace: false,
+      cacheScope: `turn:${turn}`,
+      ...extra,
+    };
+  }
+
+  function mockDiffs(diffForInput: (input: { toTurnCount: number }) => string) {
+    const getTurnDiff = vi.fn((request: { fromTurnCount: number; toTurnCount: number }) =>
+      Promise.resolve({
+        diff: diffForInput(request),
+        threadId,
+        fromTurnCount: request.fromTurnCount,
+        toTurnCount: request.toTurnCount,
+      }),
+    );
+    const getFullThreadDiff = vi.fn((request: { toTurnCount: number }) =>
+      Promise.resolve({
+        diff: diffForInput(request),
+        threadId,
+        fromTurnCount: 0,
+        toTurnCount: request.toTurnCount,
+      }),
+    );
+    mockOrchestrationApi({ getTurnDiff, getFullThreadDiff });
+    return { getTurnDiff, getFullThreadDiff };
+  }
+
+  async function watchUntilResolved(input: CheckpointDiffInput) {
+    const unwatch = watchCheckpointDiff(input);
+    await vi.waitFor(() => {
+      expect(readState(input).data).not.toBeNull();
+    });
+    return unwatch;
+  }
+
+  it("keeps recently released diffs and evicts the oldest past the entry bound", async () => {
+    const { getTurnDiff } = mockDiffs((request) => `patch-${request.toTurnCount}`);
+    const total = MAX_INACTIVE_CHECKPOINT_DIFF_ENTRIES + 2;
+    for (let turn = 1; turn <= total; turn += 1) {
+      (await watchUntilResolved(turnInput(turn)))();
+    }
+
+    // The two least recently released entries were dropped and read as unfetched.
+    expect(readState(turnInput(1))).toEqual({ data: null, error: null, isLoading: true });
+    expect(readState(turnInput(2)).data).toBeNull();
+    expect(readState(turnInput(3)).data?.diff).toBe("patch-3");
+    expect(readState(turnInput(total)).data?.diff).toBe(`patch-${total}`);
+
+    // A retained entry re-opens without a request; an evicted one refetches.
+    const callsBefore = getTurnDiff.mock.calls.length;
+    const unwatchRetained = watchCheckpointDiff(turnInput(total));
+    expect(getTurnDiff.mock.calls.length).toBe(callsBefore);
+    unwatchRetained();
+    (await watchUntilResolved(turnInput(2)))();
+    expect(getTurnDiff.mock.calls.length).toBe(callsBefore + 1);
+  });
+
+  it("evicts released diffs once their retained characters exceed the budget", async () => {
+    const largeLength = Math.floor(MAX_INACTIVE_CHECKPOINT_DIFF_CHARS / 2) + 1;
+    mockDiffs((request) => `${request.toTurnCount}`.padEnd(largeLength, "x"));
+    (await watchUntilResolved(turnInput(1)))();
+    (await watchUntilResolved(turnInput(2)))();
+
+    expect(readState(turnInput(1)).data).toBeNull();
+    expect(readState(turnInput(2)).data?.diff.length).toBe(largeLength);
+  });
+
+  it("never evicts a diff that is still watched", async () => {
+    mockDiffs((request) => `patch-${request.toTurnCount}`);
+    const unwatchFirst = await watchUntilResolved(turnInput(1));
+    for (let turn = 2; turn <= MAX_INACTIVE_CHECKPOINT_DIFF_ENTRIES + 3; turn += 1) {
+      (await watchUntilResolved(turnInput(turn)))();
+    }
+    expect(readState(turnInput(1)).data?.diff).toBe("patch-1");
+    unwatchFirst();
+  });
+
+  it("drops a superseded conversation diff as soon as the newer one is watched", async () => {
+    mockDiffs((request) => `conversation-${request.toTurnCount}`);
+    const conversation = (turns: number): CheckpointDiffInput => ({
+      environmentId,
+      threadId,
+      fromTurnCount: 0,
+      toTurnCount: turns,
+      ignoreWhitespace: false,
+      cacheScope: `conversation:${Array.from({ length: turns }, (_, index) => index).join(",")}`,
+      cacheSlot: "conversation",
+    });
+
+    const unwatchFirst = await watchUntilResolved(conversation(1));
+    const unwatchSecond = await watchUntilResolved(conversation(2));
+    // Still on screen until its watcher releases it.
+    expect(readState(conversation(1)).data?.diff).toBe("conversation-1");
+    unwatchFirst();
+    expect(readState(conversation(1)).data).toBeNull();
+    expect(readState(conversation(2)).data?.diff).toBe("conversation-2");
+    unwatchSecond();
+    // The latest conversation diff stays cached for a quick reopen.
+    expect(readState(conversation(2)).data?.diff).toBe("conversation-2");
+
+    // A turn diff from the same thread is not part of the slot.
+    (await watchUntilResolved(turnInput(1)))();
+    const unwatchThird = await watchUntilResolved(conversation(3));
+    expect(readState(conversation(2)).data).toBeNull();
+    expect(readState(turnInput(1)).data?.diff).toBe("conversation-1");
+    unwatchThird();
+  });
+
+  it("evicts a thread's diffs on archive, deferring the ones still on screen", async () => {
+    mockDiffs((request) => `patch-${request.toTurnCount}`);
+    (await watchUntilResolved(turnInput(1)))();
+    const unwatchSecond = await watchUntilResolved(turnInput(2));
+
+    evictCheckpointDiffsForThread(threadId);
+    expect(readState(turnInput(1)).data).toBeNull();
+    expect(readState(turnInput(2)).data?.diff).toBe("patch-2");
+
+    unwatchSecond();
+    expect(readState(turnInput(2)).data).toBeNull();
   });
 });

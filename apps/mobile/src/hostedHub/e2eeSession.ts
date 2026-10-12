@@ -2,7 +2,7 @@ import type { HostedE2eeChannelStatus } from "@ryco/client-runtime/authorization
 import type {
   RelayE2eeInitiatorDiagnostic,
   RelayE2eeUnexpectedNodeEvidence,
-} from "@ryco/client-runtime/relay";
+} from "@ryco/client-runtime/relay/e2ee";
 import type { NodeE2eeCapabilityVerification } from "@ryco/shared/relayE2eeCapabilityVerify";
 import { e2eeKeyFingerprint, formatE2eeKeyFingerprint } from "@ryco/shared/relayE2eeKeys";
 import type { NodeE2eeCapabilityStatement } from "@ryco/shared/relayE2eeTranscripts";

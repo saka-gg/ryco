@@ -1,10 +1,14 @@
-import { readProjectIconSource } from "@ryco/client-runtime/connection";
+import {
+  peekProjectIconSource,
+  projectIconRequestKey,
+  readProjectIconSource,
+} from "@ryco/client-runtime/connection";
 import { readEnvironmentApi } from "../connection/environmentApi";
 import { useEnvironmentServerConfigs } from "../state/environmentServerConfigs";
 import { useWsConnectionStatusForEnvironment } from "../rpc/wsConnectionState";
 import { SymbolView } from "./AppSymbol";
 import { Image } from "expo-image";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { View } from "react-native";
 import type { EnvironmentId, ProjectId } from "@ryco/contracts";
 import { useThemeColor } from "../lib/useThemeColor";
@@ -20,45 +24,40 @@ export function ProjectFavicon(props: {
 }) {
   const size = props.size ?? 42;
   const configs = useEnvironmentServerConfigs();
-  const connection = useWsConnectionStatusForEnvironment(props.environmentId);
+  const connectionPhase = useWsConnectionStatusForEnvironment(props.environmentId).phase;
+  const config = configs.get(props.environmentId);
   const api =
-    connection.phase === "connected" &&
-    configs.get(props.environmentId)?.environment.capabilities.projectIcons
+    connectionPhase === "connected" && config?.environment.capabilities.projectIcons
       ? readEnvironmentApi(props.environmentId)
       : undefined;
   const projectId = props.projectId;
+  const environmentId = props.environmentId;
   const revision = props.customAvatarContentHash ?? null;
-  const requestKey = JSON.stringify([
-    props.environmentId,
-    projectId,
-    revision,
-    connection.connectedAt,
-  ]);
-  const [artwork, setArtwork] = useState<{
-    key: string;
-    api: typeof api;
-    connection: typeof connection;
-    source: string | null;
-  } | null>(null);
+  // Keyed by environment + project + avatar revision, not the connection:
+  // foreground reconnects and remounts reuse artwork already read.
+  const requestKey = useMemo(
+    () => projectIconRequestKey(environmentId, projectId, revision),
+    [environmentId, projectId, revision],
+  );
+  const [artwork, setArtwork] = useState<{ key: string; source: string | null } | null>(null);
+  const cached =
+    api && projectId ? peekProjectIconSource(environmentId, projectId, revision) : undefined;
   useEffect(() => {
+    if (!api || !projectId) return;
+    if (peekProjectIconSource(environmentId, projectId, revision) !== undefined) return;
     let current = true;
-    if (api && projectId) {
-      void readProjectIconSource(api, projectId, revision, connection)
-        .then((source) => {
-          if (current) setArtwork({ key: requestKey, api, connection, source });
-        })
-        .catch(() => {
-          if (current) setArtwork({ key: requestKey, api, connection, source: null });
-        });
-    }
+    void readProjectIconSource(api, environmentId, projectId, revision)
+      .then((source) => {
+        if (current) setArtwork({ key: requestKey, source });
+      })
+      .catch(() => {
+        if (current) setArtwork({ key: requestKey, source: null });
+      });
     return () => {
       current = false;
     };
-  }, [api, projectId, revision, requestKey, connection]);
-  const faviconUrl =
-    api && artwork?.key === requestKey && artwork.api === api && artwork.connection === connection
-      ? artwork.source
-      : null;
+  }, [api, environmentId, projectId, requestKey, revision]);
+  const faviconUrl = api ? (artwork?.key === requestKey ? artwork.source : (cached ?? null)) : null;
 
   return (
     <ProjectFaviconImage

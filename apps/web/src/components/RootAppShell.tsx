@@ -1,11 +1,11 @@
 import { type ServerLifecycleWelcomePayload, WS_METHODS } from "@ryco/contracts";
 import { scopedProjectKey, scopeProjectRef } from "@ryco/client-runtime/scoped";
 import { Outlet, useLocation, useNavigate } from "@tanstack/react-router";
-import { lazy, Suspense, useEffect, useEffectEvent, useRef, useState, type ReactNode } from "react";
+import { useEffect, useEffectEvent, useRef, useState } from "react";
 
 import { OnboardingCoordinator } from "./onboarding/OnboardingCoordinator";
 import { AppSidebarLayout } from "./AppSidebarLayout";
-import { CommandPalette } from "./CommandPalette";
+import { CommandPalette, preloadCommandPaletteDialog } from "./CommandPalette";
 import {
   resolveCanonicalPrimaryEnvironmentId,
   shouldApplyBootstrapThreadRedirect,
@@ -21,6 +21,11 @@ import { MissedAutomationRunsNotice } from "./automations/MissedAutomationRunsNo
 import { WebSocketConnectionCoordinator } from "./WebSocketConnectionSurface";
 import { AnchoredToastProvider, ToastProvider } from "./ui/toast";
 import { getPresentationTier } from "../lib/presentationTier";
+import { preloadableLazy, useLazyComponentReady } from "../lib/preloadableLazy";
+import { preloadRouteChunk } from "../lib/routeChunkPreload";
+import { scheduleShellIdlePreloads } from "../lib/shellIdlePreload";
+import { prewarmThreadDetailSubscription } from "../lib/threadDetailPrewarm";
+import { preloadSettingsPage } from "../settingsRoute";
 import { useSettings } from "../hooks/useSettings";
 import { useHostedRpcCapability } from "../hostedHub/capabilities";
 import {
@@ -98,66 +103,83 @@ export function RootAppShell({ authGateState }: RootAppShellProps) {
             recoveryOwner={authGateState.status === "hosted-hub" ? "hosted-lifecycle" : "generic"}
           />
         ) : null}
+        <ShellIdlePreloads />
         {appShell}
       </AnchoredToastProvider>
     </ToastProvider>
   );
 }
 
-const LazyAutomationsDialog = lazy(() =>
-  import("./automations/dialog/AutomationsDialog").then((module) => ({
-    default: module.AutomationsDialog,
-  })),
+const AutomationsDialog = preloadableLazy(() =>
+  import("./automations/dialog/AutomationsDialog").then((module) => module.AutomationsDialog),
 );
 
-/** An app-wide dialog's code loads the first time it opens; it then stays mounted. */
-function LazyDialogMount(props: { readonly open: boolean; readonly children: ReactNode }) {
-  const [hasOpened, setHasOpened] = useState(props.open);
-  if (props.open && !hasOpened) setHasOpened(true);
-  if (!hasOpened) return null;
-  return <Suspense fallback={null}>{props.children}</Suspense>;
-}
-
-/** The Automations dialog loads the first time something opens it, then stays mounted. */
+/**
+ * The Automations dialog loads the first time something opens it, then stays
+ * mounted. It mounts once its chunk resolved, so the open never commits a
+ * Suspense fallback (and never waits on React's fallback-reveal throttle).
+ */
 function AutomationsDialogMount() {
   const open = useAutomationsDialogStore((state) => state.open);
-  return (
-    <LazyDialogMount open={open}>
-      <LazyAutomationsDialog />
-    </LazyDialogMount>
-  );
+  const [hasOpened, setHasOpened] = useState(open);
+  if (open && !hasOpened) setHasOpened(true);
+  const ready = useLazyComponentReady(AutomationsDialog, hasOpened);
+  if (!hasOpened || !ready) return null;
+  return <AutomationsDialog />;
 }
 
-const LazyPromoteChatDialog = lazy(() =>
-  import("./chat/PromoteChatDialog").then((module) => ({
-    default: module.PromoteChatDialog,
-  })),
+const PromoteChatDialog = preloadableLazy(() =>
+  import("./chat/PromoteChatDialog").then((module) => module.PromoteChatDialog),
 );
 
 /** "Turn into project…" loads the first time a chat asks for it, then stays mounted. */
 function PromoteChatDialogMount() {
   const open = usePromoteChatDialogStore((state) => state.open);
-  return (
-    <LazyDialogMount open={open}>
-      <LazyPromoteChatDialog />
-    </LazyDialogMount>
-  );
+  const [hasOpened, setHasOpened] = useState(open);
+  if (open && !hasOpened) setHasOpened(true);
+  const ready = useLazyComponentReady(PromoteChatDialog, hasOpened);
+  if (!hasOpened || !ready) return null;
+  return <PromoteChatDialog />;
 }
 
-const LazyForkThreadDialog = lazy(() =>
-  import("./chat/ForkThreadDialog").then((module) => ({
-    default: module.ForkThreadDialog,
-  })),
+const ForkThreadDialog = preloadableLazy(() =>
+  import("./chat/ForkThreadDialog").then((module) => module.ForkThreadDialog),
 );
 
 /** "Fork from here" loads the first time a reply asks for it, then stays mounted. */
 function ForkThreadDialogMount() {
   const open = useForkThreadDialogStore((state) => state.open);
-  return (
-    <LazyDialogMount open={open}>
-      <LazyForkThreadDialog />
-    </LazyDialogMount>
-  );
+  const [hasOpened, setHasOpened] = useState(open);
+  if (open && !hasOpened) setHasOpened(true);
+  const ready = useLazyComponentReady(ForkThreadDialog, hasOpened);
+  if (!hasOpened || !ready) return null;
+  return <ForkThreadDialog />;
+}
+
+const THREAD_ROUTE_ID = "/_chat/$environmentId/$threadId";
+const DRAFT_ROUTE_ID = "/_chat/draft/$draftId";
+
+/**
+ * Warms the chunks of the most likely next interactions once the shell has
+ * painted, one idle period each, most likely first: the thread and draft
+ * routes, then the command palette, then the settings page. Route-level
+ * splitting makes these preloads count: a warmed route commits on the first
+ * pass instead of suspending. The frozen phone tier and constrained networks
+ * load them on demand instead.
+ */
+function ShellIdlePreloads() {
+  useEffect(() => {
+    if (getPresentationTier() === "phone") return;
+    return scheduleShellIdlePreloads([
+      () => {
+        void preloadRouteChunk(THREAD_ROUTE_ID);
+        void preloadRouteChunk(DRAFT_ROUTE_ID);
+      },
+      preloadCommandPaletteDialog,
+      preloadSettingsPage,
+    ]);
+  }, []);
+  return null;
 }
 
 function RoleAwareProviderUpdateLaunchNotification() {
@@ -241,6 +263,19 @@ function EventRouter({ hosted }: { readonly hosted: boolean }) {
       updatePrimaryEnvironmentDescriptor(payload.environment);
     }
     setActiveEnvironmentId(environmentId);
+    if (
+      payload.bootstrapThreadId &&
+      shouldApplyBootstrapThreadRedirect({
+        pathname: readPathname(),
+        tier: getPresentationTier(),
+        hostedHome: hosted && getRoutedHostedNode().nodeId === null,
+      })
+    ) {
+      // The redirect below waits for the shell snapshot; start the thread
+      // route chunk now so it downloads alongside instead of after it.
+      void preloadRouteChunk(THREAD_ROUTE_ID);
+      if (!hosted) prewarmThreadDetailSubscription(environmentId, payload.bootstrapThreadId);
+    }
     void (async () => {
       await ensureEnvironmentConnectionBootstrapped(environmentId);
       if (disposedRef.current) {

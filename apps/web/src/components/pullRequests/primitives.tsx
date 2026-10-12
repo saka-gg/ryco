@@ -5,7 +5,7 @@ import { memo, type ReactNode } from "react";
 import { cn } from "../../lib/utils";
 import { formatRelativeTime } from "../../timestampFormat";
 import { useInboxEnterAnimation } from "../inboxSidebar/useInboxListMotion";
-import { CommentAvatar } from "../projectExplorer/CommentThread";
+import { CommentAvatar } from "../projectExplorer/CommentAvatar";
 import { resolveChangeRequestStateBadgeVariant } from "../sourceControl/stateBadgeVariants";
 
 /**

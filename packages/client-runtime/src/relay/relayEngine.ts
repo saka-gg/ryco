@@ -15,7 +15,7 @@ import {
   type RelayEffectiveRole,
   type RelayFrame,
   type RelayLimits,
-} from "@ryco/contracts";
+} from "@ryco/contracts/relay";
 import { decodeRelayFrame, encodeRelayFrame } from "@ryco/shared/relayCodec";
 import {
   e2eeChannelSizeBudget,
@@ -72,6 +72,9 @@ function relayQueueCharge(payloadBytes: readonly number[]): number {
 /**
  * Platform socket seam. Implementations must not copy, retain, or re-send any
  * buffer passed to send: relay ticket and frame ownership remains with engine.
+ * Inbound ownership runs the other way: a buffer handed to an
+ * `onBinaryMessage` listener becomes the engine's, which decodes it in place
+ * and zeroes it, so an implementation must not read or reuse it afterwards.
  */
 export interface RelaySocket {
   readonly bufferedAmount: number;
@@ -753,14 +756,18 @@ export class HostedRelayEngine {
   }
 
   #receive(bytes: Uint8Array): void {
-    if (bytes.byteLength > RELAY_MAX_DATA_FRAME_BYTES)
+    if (bytes.byteLength > RELAY_MAX_DATA_FRAME_BYTES) {
+      bytes.fill(0);
       return this.#fail(failure("frame_too_large"));
-    const owned = Uint8Array.from(bytes);
+    }
+    // The socket hands its buffer over (see `RelaySocket`): it is decoded in
+    // place — the decoded frame owns copies of every byte field — and zeroed,
+    // rather than copied first and only the copy zeroed.
     const decoded = decodeRelayFrame(
-      owned,
+      bytes,
       this.#protocol === null ? {} : { expectedVersion: this.#protocol },
     );
-    owned.fill(0);
+    bytes.fill(0);
     if (!decoded.ok) return this.#fail(failure("protocol_invalid"));
     const frame = decoded.value;
     const negotiatedFrameLimit =
@@ -1144,7 +1151,9 @@ export class HostedRelayEngine {
     )
       return this.#fail(failure("channel_rejected"));
     this.#inboundSequence += 1;
-    const payload = Uint8Array.from(frame.payload);
+    // The decoded frame is the engine's own and is dropped here, so its payload
+    // is queued as is; it is zeroed on every path that does not deliver it.
+    const payload = frame.payload;
     if (this.#inboundOwnedBytes() + payload.byteLength > this.#limits.maxQueuedBytes) {
       payload.fill(0);
       return this.#fail(failure("slow_consumer"));
@@ -1184,13 +1193,14 @@ export class HostedRelayEngine {
       const payload = this.#inboundQueue.shift();
       if (payload) {
         this.#inboundQueuedBytes -= payload.byteLength;
-        const delivered = Uint8Array.from(payload);
-        payload.fill(0);
         // Reassemble before delivering. An unchunked payload passes straight
         // through, so an old peer is unaffected; a partial message is held
-        // until its final chunk arrives.
-        const assembled = this.#assembler.push(delivered);
+        // until its final chunk arrives. The queued buffer is handed on rather
+        // than copied: the assembler zeroes a chunk's body once it has retained
+        // it, and an unchunked payload is the delivered message itself.
+        const assembled = this.#assembler.push(payload);
         if (assembled.kind === "error") {
+          payload.fill(0);
           this.#fail(failure("transfer_limit"));
           return;
         }

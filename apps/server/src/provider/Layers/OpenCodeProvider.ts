@@ -455,6 +455,8 @@ export const checkOpenCodeProviderStatus = Effect.fn("checkOpenCodeProviderStatu
         const server = yield* openCodeRuntime
           .connectToOpenCodeServer({
             binaryPath: openCodeSettings.binaryPath,
+            // Checked a moment ago by the `--version` gate above; the server spawn reuses it.
+            ...(version !== null ? { verifiedBinaryVersion: version } : {}),
             serverUrl: openCodeSettings.serverUrl,
             ...(openCodeSettings.serverPassword
               ? { serverPassword: openCodeSettings.serverPassword }

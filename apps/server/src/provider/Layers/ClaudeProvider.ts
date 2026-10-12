@@ -318,6 +318,12 @@ function waitForAbortSignal(signal: AbortSignal): Promise<void> {
  *
  * This is used as a fallback when `claude auth status` does not include
  * subscription type information.
+ *
+ * MCP is disabled for the probe (`strictMcpConfig` with no servers): it reads
+ * account and slash-command metadata only, and must never start the user's MCP
+ * servers (each a Node process tree of 100+ MiB). Slash commands contributed by
+ * MCP prompts are therefore absent from the probed list; live sessions still
+ * load MCP normally.
  */
 const probeClaudeCapabilities = (
   claudeSettings: ClaudeSettings,
@@ -339,6 +345,8 @@ const probeClaudeCapabilities = (
           pathToClaudeCodeExecutable: claudeSettings.binaryPath,
           abortController: abort,
           settingSources: ["user", "project", "local"],
+          mcpServers: {},
+          strictMcpConfig: true,
           allowedTools: [],
           env: claudeEnvironment,
           stderr: () => {},

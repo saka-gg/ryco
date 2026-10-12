@@ -17,7 +17,7 @@ import {
   toHydratedDraftThreadState,
   type DraftThreadState,
 } from "@ryco/client-runtime/state/composer";
-import { useStore } from "../store";
+import { useStore, type EnvironmentState } from "../store";
 import { useComposerDraftStore } from "../composerDraftStore";
 import { useUiStateStore } from "../uiStateStore";
 import {
@@ -89,8 +89,43 @@ let invalidatedByAnotherTab = false;
 let lastAuthenticatedSession: string | null = null;
 let authorityPurge: Promise<void> | null = null;
 let pending: Promise<void> = Promise.resolve();
-let timer: ReturnType<typeof setTimeout> | null = null;
+/** A save is scheduled: waiting out the throttle, or for an idle period. */
+let savePending = false;
 const environments = new Map<EnvironmentId, CachedEnvironment>();
+/** Bumped by every scroll-position change, which mutates a shared map in place. */
+let scrollRevision = 0;
+/** The catalog last written for `owner`, so an unchanged catalog is not re-encrypted. */
+let writtenCatalog: { readonly owner: ReadVaultAccount; readonly key: string } | null = null;
+/**
+ * The inputs each environment's record was last written from. A save whose
+ * inputs are all the same objects has nothing new to encrypt and write; during
+ * streaming that is every environment but the one receiving tokens.
+ */
+interface SavedEnvironmentInputs {
+  readonly owner: ReadVaultAccount;
+  readonly environment: unknown;
+  readonly fallbackMetadata: unknown;
+  readonly draftThreads: unknown;
+  readonly drafts: unknown;
+  readonly visits: unknown;
+  readonly routedThreadId: string;
+  readonly scrollRevision: number;
+}
+const savedInputs = new Map<EnvironmentId, SavedEnvironmentInputs>();
+/**
+ * Captured display content per thread, kept while the thread's message list is
+ * the same object, with the UTF-8 length of its serialized record entry — so a
+ * streaming thread is re-captured and re-measured alone, not all 32.
+ */
+interface CapturedThread {
+  readonly messageIds: unknown;
+  readonly messages: unknown;
+  readonly content: CachedThreadContent;
+  readonly entryBytes: number;
+}
+const capturedThreads = new Map<EnvironmentId, Map<string, CapturedThread>>();
+const RECORD_BUDGET_BYTES = 1_900_000;
+const utf8Length = (value: string) => new TextEncoder().encode(value).byteLength;
 const queue = (operation: () => Promise<void>) => {
   pending = pending.then(operation).catch(() => undefined);
   return pending;
@@ -101,6 +136,9 @@ function forgetInMemory(clearUi: boolean) {
   rememberedAccountId = null;
   configureHostedReadViewState(null);
   environments.clear();
+  savedInputs.clear();
+  capturedThreads.clear();
+  writtenCatalog = null;
   scrollPositions.clear();
   publish({ accountId: null, nodes: [], snapshots: [] });
   if (clearUi) clearWebHostedAccountScopedState();
@@ -233,7 +271,7 @@ async function restore(): Promise<boolean> {
   )
     return false;
   account = savedAccount;
-  configureHostedReadViewState(scheduleSave);
+  configureHostedReadViewState(onScrollChanged);
   const eligible = nodes.filter(
     (node) =>
       state.directoryStatus !== "ready" ||
@@ -312,7 +350,7 @@ async function reconcile() {
     account = opened;
     if (!opened) return;
     rememberedAccountId = opened.id;
-    configureHostedReadViewState(scheduleSave);
+    configureHostedReadViewState(onScrollChanged);
     window.localStorage.setItem(
       ACCOUNT_KEY,
       JSON.stringify({ id: opened.id, epoch: opened.epoch }),
@@ -359,6 +397,8 @@ async function reconcile() {
       if (!isCurrent()) return;
       if (nodes.some((node) => node.environmentId === environmentId)) continue;
       environments.delete(environmentId);
+      savedInputs.delete(environmentId);
+      capturedThreads.delete(environmentId);
       useStore.getState().removeEnvironmentState(environmentId);
       const composer = useComposerDraftStore.getState();
       for (const [key, draft] of Object.entries(composer.draftThreadsByThreadKey)) {
@@ -373,11 +413,74 @@ async function reconcile() {
       await getHostedReadVault().remove(owner, environmentId);
     }
     if (!isCurrent()) return;
-    publish({ nodes, snapshots: [...environments.values()].map((record) => record.metadata) });
+    // A connect alone patches the hosted store a dozen times; only a change to
+    // what this cache shows is published (and re-renders its consumers).
+    const snapshots = [...environments.values()].map((record) => record.metadata);
+    if (!sameCatalog(snapshot.nodes, nodes) || !sameItems(snapshot.snapshots, snapshots)) {
+      publish({ nodes, snapshots });
+    }
     if (!isCurrent()) return;
-    await getHostedReadVault().write(owner, "catalog", { nodes });
+    const catalogKey = JSON.stringify(nodes);
+    if (writtenCatalog?.owner !== owner || writtenCatalog.key !== catalogKey) {
+      await getHostedReadVault().write(owner, "catalog", { nodes });
+      if (owner === account) writtenCatalog = { owner, key: catalogKey };
+    }
     scheduleSave();
   }
+}
+
+function sameCatalog(left: ReadonlyArray<CachedNode>, right: ReadonlyArray<CachedNode>): boolean {
+  return (
+    left.length === right.length &&
+    left.every(
+      (node, index) =>
+        node.nodeId === right[index]?.nodeId &&
+        node.environmentId === right[index]?.environmentId &&
+        node.label === right[index]?.label,
+    )
+  );
+}
+
+function sameItems<T>(left: ReadonlyArray<T>, right: ReadonlyArray<T>): boolean {
+  return left.length === right.length && left.every((item, index) => item === right[index]);
+}
+
+function onScrollChanged(): void {
+  scrollRevision++;
+  scheduleSave();
+}
+
+/**
+ * The record's display content, re-capturing only threads whose message list
+ * changed, and the UTF-8 length of each serialized `"id":content` entry.
+ */
+function captureContent(
+  environmentId: EnvironmentId,
+  state: EnvironmentState,
+  threadIds: ReadonlyArray<EnvironmentState["threadIds"][number]>,
+): Map<string, CapturedThread> {
+  const previous = capturedThreads.get(environmentId);
+  const next = new Map<string, CapturedThread>();
+  for (const id of threadIds) {
+    const messageIds = state.messageIdsByThreadId[id];
+    const messages = state.messageByThreadId[id];
+    const cached = previous?.get(id);
+    if (cached && cached.messageIds === messageIds && cached.messages === messages) {
+      next.set(id, cached);
+      continue;
+    }
+    const content = captureThreadReadContent(
+      (messageIds ?? []).flatMap((messageId) => messages?.[messageId] ?? []),
+    );
+    next.set(id, {
+      messageIds,
+      messages,
+      content,
+      entryBytes: utf8Length(JSON.stringify(id)) + 1 + utf8Length(JSON.stringify(content)),
+    });
+  }
+  capturedThreads.set(environmentId, next);
+  return next;
 }
 
 async function save() {
@@ -385,25 +488,43 @@ async function save() {
   if (!owner || !snapshot.enabled) return;
   const vault = getHostedReadVault();
   for (const node of snapshot.nodes) {
-    const state = useStore.getState().environmentStateById[node.environmentId];
+    const appState = useStore.getState();
+    const state = appState.environmentStateById[node.environmentId];
     if (!state) continue;
+    const composer = useComposerDraftStore.getState();
+    const visits = useUiStateStore.getState().threadLastVisitedAtById;
+    const routedThreadId = window.location.pathname.split("/").at(-1) ?? "";
+    const inputs: SavedEnvironmentInputs = {
+      owner,
+      environment: state,
+      fallbackMetadata: environments.get(node.environmentId)?.metadata,
+      draftThreads: composer.draftThreadsByThreadKey,
+      drafts: composer.draftsByThreadKey,
+      visits,
+      routedThreadId,
+      scrollRevision,
+    };
+    const saved = savedInputs.get(node.environmentId);
+    if (
+      saved &&
+      (Object.keys(inputs) as Array<keyof SavedEnvironmentInputs>).every(
+        (key) => saved[key] === inputs[key],
+      )
+    )
+      continue;
     const metadata =
-      readWorkspaceMetadataSnapshot(node.environmentId, Date.now(), false) ??
+      readWorkspaceMetadataSnapshot(node.environmentId, Date.now(), false, appState) ??
       environments.get(node.environmentId)?.metadata;
     if (!metadata) continue;
     const content: Record<string, CachedThreadContent> = {};
     const drafts: Record<string, string> = {};
     const scroll: Record<string, number> = {};
     const draftSessions: Record<string, DraftThreadState> = {};
-    for (const [key, draft] of Object.entries(
-      useComposerDraftStore.getState().draftThreadsByThreadKey,
-    ).slice(-32)) {
+    for (const [key, draft] of Object.entries(composer.draftThreadsByThreadKey).slice(-32)) {
       if (draft.environmentId === node.environmentId && !draft.promotedTo)
         draftSessions[key] = draft;
     }
-    const routedThreadId = window.location.pathname.split("/").at(-1) ?? "";
-    const visits = useUiStateStore.getState().threadLastVisitedAtById;
-    for (const id of state.threadIds
+    const threadIds = state.threadIds
       .filter((id) => state.messageIdsByThreadId[id]?.length)
       .toSorted(
         (left, right) =>
@@ -415,14 +536,9 @@ async function save() {
             visits[scopedThreadKey({ environmentId: node.environmentId, threadId: right })] ?? "",
           ),
       )
-      .slice(-32)) {
-      content[id] = captureThreadReadContent(
-        (state.messageIdsByThreadId[id] ?? []).flatMap(
-          (messageId) => state.messageByThreadId[id]?.[messageId] ?? [],
-        ),
-      );
-    }
-    for (const [key, draft] of Object.entries(useComposerDraftStore.getState().draftsByThreadKey)) {
+      .slice(-32);
+    const captured = captureContent(node.environmentId, state, threadIds);
+    for (const [key, draft] of Object.entries(composer.draftsByThreadKey)) {
       if (
         (parseScopedThreadKey(key)?.environmentId === node.environmentId ||
           Object.hasOwn(draftSessions, key)) &&
@@ -432,24 +548,56 @@ async function save() {
     }
     for (const [key, position] of scrollPositions)
       if (parseScopedThreadKey(key)?.environmentId === node.environmentId) scroll[key] = position;
+    // Trim display history before allowing a busy workspace to exceed the
+    // per-record budget, least recently visited first and the routed thread
+    // last. Measured from the cached entry lengths rather than by
+    // re-serializing the whole record once per dropped thread: the record's
+    // length is its body with an empty `content` plus that object's entries.
+    const bodyBytes =
+      utf8Length(JSON.stringify({ metadata, content: {}, drafts, draftSessions, scroll })) - 2;
+    const kept = threadIds.flatMap((id) => {
+      const thread = captured.get(id);
+      return thread ? [{ id, thread }] : [];
+    });
+    let contentBytes =
+      2 +
+      kept.reduce((total, entry) => total + entry.thread.entryBytes, 0) +
+      Math.max(0, kept.length - 1);
+    while (kept.length > 0 && bodyBytes + contentBytes > RECORD_BUDGET_BYTES) {
+      const dropped = kept.shift()!;
+      contentBytes -= dropped.thread.entryBytes + (kept.length > 0 ? 1 : 0);
+    }
+    for (const { id, thread } of kept) content[id] = thread.content;
     const record: CachedEnvironment = { metadata, content, drafts, draftSessions, scroll };
-    // Trim display history before allowing a busy workspace to exceed the per-record budget.
-    while (
-      new TextEncoder().encode(JSON.stringify(record)).byteLength > 1_900_000 &&
-      Object.keys(content).length > 0
-    )
-      delete content[Object.keys(content)[0]!];
     if (owner !== account) return;
     environments.set(node.environmentId, record);
     await vault.write(owner, node.environmentId, record);
+    if (owner !== account) return;
+    // Recorded after the write: a failed write is retried by the next save.
+    savedInputs.set(node.environmentId, { ...inputs, fallbackMetadata: record.metadata });
   }
 }
+
+/** Run `callback` in an idle period where the browser offers one, bounded by `timeoutMs`. */
+function whenIdle(callback: () => void, timeoutMs: number): void {
+  if (typeof window.requestIdleCallback === "function") {
+    window.requestIdleCallback(callback, { timeout: timeoutMs });
+  } else {
+    callback();
+  }
+}
+
 function scheduleSave() {
-  if (timer !== null || !account || !snapshot.enabled) return;
-  // Throttle, rather than debounce: continuous token output must still reach disk.
-  timer = setTimeout(() => {
-    timer = null;
-    void queue(save);
+  if (savePending || !account || !snapshot.enabled) return;
+  savePending = true;
+  // Throttle, rather than debounce: continuous token output must still reach
+  // disk. The encryption and write then wait for an idle period, so a busy
+  // stream is not interrupted for them; page hide still flushes at once.
+  setTimeout(() => {
+    whenIdle(() => {
+      savePending = false;
+      void queue(save);
+    }, 2_000);
   }, 750);
 }
 

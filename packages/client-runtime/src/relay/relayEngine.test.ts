@@ -98,10 +98,14 @@ class MockRelaySocket implements RelaySocket {
   emitError(): void {
     for (const listener of this.#error) listener();
   }
+  /** Every inbound buffer handed to the engine, kept to observe that it is zeroed. */
+  readonly receivedRefs: Uint8Array[] = [];
   frame(frame: RelayFrame): void {
     const encoded = encodeRelayFrame(frame);
     if (!encoded.ok) throw new Error("test frame encoding failed");
-    for (const listener of this.#message) listener(Uint8Array.from(encoded.value));
+    const bytes = Uint8Array.from(encoded.value);
+    this.receivedRefs.push(bytes);
+    for (const listener of this.#message) listener(bytes);
   }
 }
 
@@ -498,6 +502,27 @@ describe("HostedRelayEngine", () => {
     // …and the engine's own buffer holding the ticket is zeroed immediately after.
     expect(authRef.length).toBeGreaterThan(0);
     expect([...authRef].every((byte) => byte === 0)).toBe(true);
+  });
+
+  it("decodes each inbound frame in the socket's own buffer and zeroes it", async () => {
+    const { socket, events } = create();
+    authenticate(socket);
+    socket.frame({
+      type: "data",
+      ...VERSION,
+      channelId: CHANNEL_ID,
+      sequence: 0 as never,
+      payload: new TextEncoder().encode('{"inbound":2}'),
+    });
+    for (let hop = 0; hop < 6; hop += 1) await Promise.resolve();
+    // Every buffer the socket handed over — control frames and data alike —
+    // is zeroed once decoded; the application receives its own payload intact.
+    expect(socket.receivedRefs.length).toBeGreaterThan(3);
+    for (const bytes of socket.receivedRefs) {
+      expect(bytes.length).toBeGreaterThan(0);
+      expect([...bytes].every((byte) => byte === 0)).toBe(true);
+    }
+    expect(events.onData).toHaveBeenCalledWith(new TextEncoder().encode('{"inbound":2}'));
   });
 
   it("spends auth before a synchronous ready response and ignores duplicate open", () => {

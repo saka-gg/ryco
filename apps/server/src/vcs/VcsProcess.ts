@@ -8,6 +8,7 @@ import {
   VcsProcessSpawnError,
   VcsProcessTimeoutError,
 } from "@ryco/contracts";
+import { governChildProcess } from "../processGovernor.ts";
 import { collectUint8StreamText } from "../stream/collectUint8StreamText.ts";
 
 export interface VcsProcessInput {
@@ -210,9 +211,11 @@ export const make = Effect.fn("makeVcsProcess")(function* () {
       } satisfies VcsProcessOutput;
     });
 
-    return yield* runProcess.pipe(
-      Effect.scoped,
-      Effect.timeoutOption(Duration.millis(timeoutMs)),
+    // Governed per child (git / forge CLI pools); queue time is not part of the timeout.
+    return yield* governChildProcess(
+      input.command,
+      runProcess.pipe(Effect.scoped, Effect.timeoutOption(Duration.millis(timeoutMs))),
+    ).pipe(
       Effect.flatMap((result) =>
         Option.match(result, {
           onSome: Effect.succeed,

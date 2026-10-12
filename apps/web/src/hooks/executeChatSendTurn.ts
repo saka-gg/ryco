@@ -496,20 +496,36 @@ export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Prom
     );
 
     // Resolve the node-owned default at creation time, including for queued drafts.
-    const config = worktree.baseBranchForWorktree ? await api.server?.getConfig?.() : null;
+    const needsBranchPrefix =
+      Boolean(worktree.baseBranchForWorktree) &&
+      !worktree.shouldMaterializeLegacyBranchWorktree &&
+      !worktree.worktreeBranchName;
+    if (needsBranchPrefix && !api.server) {
+      throw new Error("Server settings are unavailable for worktree creation.");
+    }
+    // The settings fallback is read alongside the config, not after both
+    // preference reads: one round trip less before the worktree send. Its
+    // outcome, a failure included, only counts when the project names no prefix.
+    const configRead = worktree.baseBranchForWorktree ? api.server?.getConfig?.() : null;
+    const settingsFallback =
+      needsBranchPrefix && api.server
+        ? api.server.getSettings().then(
+            (settings) => ({ ok: true as const, settings }),
+            (error: unknown) => ({ ok: false as const, error }),
+          )
+        : undefined;
+    const config = await configRead;
     const effective = worktree.baseBranchForWorktree
       ? await readEffectiveProjectPreferences({ api, config, projectId: project.projectId })
       : null;
     let worktreeBranchPrefix: string | undefined;
-    if (
-      worktree.baseBranchForWorktree &&
-      !worktree.shouldMaterializeLegacyBranchWorktree &&
-      !worktree.worktreeBranchName
-    ) {
-      if (!api.server) throw new Error("Server settings are unavailable for worktree creation.");
-      worktreeBranchPrefix =
-        effective?.worktreeBranchPrefix.value ??
-        (await api.server.getSettings()).worktreeBranchPrefix;
+    if (settingsFallback) {
+      worktreeBranchPrefix = effective?.worktreeBranchPrefix.value;
+      if (worktreeBranchPrefix === undefined) {
+        const fallback = await settingsFallback;
+        if (!fallback.ok) throw fallback.error;
+        worktreeBranchPrefix = fallback.settings.worktreeBranchPrefix;
+      }
     }
     const bootstrap = buildSendTurnBootstrap({
       isLocalDraftThread: thread.isLocalDraftThread,

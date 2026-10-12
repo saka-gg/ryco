@@ -4,12 +4,13 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import os from "node:os";
 import path from "node:path";
 import { ProviderDriverKind, ProviderInstanceId, type ServerProvider } from "@ryco/contracts";
-import { Effect } from "effect";
+import { Effect, Layer } from "effect";
 import { HttpClient, HttpClientResponse } from "effect/http";
 import {
   clearLatestProviderVersionCacheForTests,
   createProviderVersionAdvisory,
   enrichProviderSnapshotWithVersionAdvisory,
+  makeLazyProviderMaintenanceCapabilities,
   makePackageManagedProviderMaintenanceResolver,
   makeProviderMaintenanceCapabilities,
   makeStaticProviderMaintenanceResolver,
@@ -17,6 +18,7 @@ import {
   resolveLatestProviderVersion,
   resolveProviderMaintenanceCapabilitiesEffect,
 } from "./providerMaintenance.ts";
+import { ServerConfig } from "../config.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 
 const driver = (value: string) => ProviderDriverKind.make(value);
@@ -566,5 +568,113 @@ describe("providerMaintenance", () => {
       expect(requests).toBe(2);
       clearLatestProviderVersionCacheForTests();
     }),
+  );
+  it.effect("persists latest versions with their TTL so a restart skips the registry", () =>
+    Effect.gen(function* () {
+      clearLatestProviderVersionCacheForTests();
+      const capabilities = makeProviderMaintenanceCapabilities({
+        provider: driver("packageTool"),
+        packageName: "@example/persisted-latest-tool",
+        updateExecutable: "npm",
+        updateArgs: ["install", "-g", "@example/persisted-latest-tool@latest"],
+        updateLockKey: "npm-global",
+      });
+      let requests = 0;
+      const httpClient = HttpClient.make((request) => {
+        requests += 1;
+        return Effect.succeed(
+          HttpClientResponse.fromWeb(request, Response.json({ version: "2.0.0" })),
+        );
+      });
+      const resolve = resolveLatestProviderVersion(capabilities).pipe(
+        Effect.provideService(HttpClient.HttpClient, httpClient),
+      );
+
+      yield* Effect.gen(function* () {
+        expect(yield* resolve).toBe("2.0.0");
+        expect(requests).toBe(1);
+        // A new process starts with an empty memory cache but reads the persisted entry.
+        clearLatestProviderVersionCacheForTests();
+        expect(yield* resolve).toBe("2.0.0");
+        expect(requests).toBe(1);
+      }).pipe(
+        Effect.provide(
+          ServerConfig.layerTest(process.cwd(), { prefix: "ryco-latest-version-cache-" }).pipe(
+            Layer.provideMerge(NodeServices.layer),
+          ),
+        ),
+      );
+      clearLatestProviderVersionCacheForTests();
+    }),
+  );
+
+  it.effect("concurrent lookups after a restart all wait for the one persisted-cache read", () =>
+    Effect.gen(function* () {
+      clearLatestProviderVersionCacheForTests();
+      const makeCapabilities = (packageName: string) =>
+        makeProviderMaintenanceCapabilities({
+          provider: driver("packageTool"),
+          packageName,
+          updateExecutable: "npm",
+          updateArgs: ["install", "-g", `${packageName}@latest`],
+          updateLockKey: "npm-global",
+        });
+      let requests = 0;
+      const httpClient = HttpClient.make((request) => {
+        requests += 1;
+        return Effect.succeed(
+          HttpClientResponse.fromWeb(request, Response.json({ version: "3.0.0" })),
+        );
+      });
+      const resolveBoth = Effect.all(
+        [
+          resolveLatestProviderVersion(makeCapabilities("@example/concurrent-a")),
+          resolveLatestProviderVersion(makeCapabilities("@example/concurrent-b")),
+        ],
+        { concurrency: "unbounded" },
+      ).pipe(Effect.provideService(HttpClient.HttpClient, httpClient));
+
+      yield* Effect.gen(function* () {
+        yield* resolveBoth;
+        expect(requests).toBe(2);
+        clearLatestProviderVersionCacheForTests();
+        expect(yield* resolveBoth).toEqual(["3.0.0", "3.0.0"]);
+        expect(requests).toBe(2);
+      }).pipe(
+        Effect.provide(
+          ServerConfig.layerTest(process.cwd(), { prefix: "ryco-latest-version-concurrent-" }).pipe(
+            Layer.provideMerge(NodeServices.layer),
+          ),
+        ),
+      );
+      clearLatestProviderVersionCacheForTests();
+    }),
+  );
+
+  it.effect("resolves maintenance capabilities lazily, once, without blocking construction", () =>
+    Effect.gen(function* () {
+      const tempDir = yield* makeTempDir("ryco-lazy-maintenance");
+      const binDir = path.join(tempDir, ".bun", "bin");
+      mkdirSync(binDir, { recursive: true });
+      const binaryPath = path.join(binDir, "package-tool");
+      writeFileSync(binaryPath, "#!/bin/sh\n");
+      chmodSync(binaryPath, 0o755);
+      let resolutions = 0;
+      const countingResolver = {
+        resolve: (options?: Parameters<typeof packageToolUpdate.resolve>[0]) => {
+          if (options?.realCommandPath !== undefined) resolutions += 1;
+          return packageToolUpdate.resolve(options);
+        },
+      };
+
+      const capabilities = yield* makeLazyProviderMaintenanceCapabilities(countingResolver, {
+        binaryPath: "package-tool",
+        env: { PATH: binDir },
+      });
+      expect(resolutions).toBe(0);
+      expect((yield* capabilities).update?.lockKey).toBe("bun-global");
+      expect((yield* capabilities).update?.lockKey).toBe("bun-global");
+      expect(resolutions).toBe(1);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 });

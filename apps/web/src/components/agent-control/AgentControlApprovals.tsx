@@ -16,6 +16,7 @@ import { readEnvironmentApi } from "../../environmentApi";
 import { useHostedRpcCapability } from "../../hostedHub/capabilities";
 import { useStore } from "../../store";
 import { useAutomationProposalSync } from "../automations/data/useAutomationProposalSync";
+import { useAgentControlSyncEnvironmentIds } from "./agentControlSyncGate";
 import { AgentControlThreadActivity } from "./AgentControlThreadActivity";
 
 export interface AgentControlApprovalsProps {
@@ -31,7 +32,8 @@ export interface AgentControlApprovalsProps {
  *
  * The queue itself comes from `useAutomationProposalSync`, which attempts the
  * subscription whenever a connection exists and leaves the Agent Control
- * policy to the TARGET environment's server.
+ * policy to the TARGET environment's server; it is skipped only when that
+ * environment's own config already reports the feature disabled.
  */
 export function AgentControlApprovals({
   environmentId,
@@ -43,7 +45,9 @@ export function AgentControlApprovals({
     {},
   );
 
-  useAutomationProposalSync([environmentId]);
+  const syncEnvironmentIds = useMemo(() => [environmentId], [environmentId]);
+  // Skipped while this node's own config says Agent Control is off.
+  useAutomationProposalSync(useAgentControlSyncEnvironmentIds(syncEnvironmentIds));
 
   const queueState = useAgentControlStore(
     (state) => state.queueByEnvironmentId[environmentId] ?? null,

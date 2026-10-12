@@ -14,7 +14,22 @@ export interface LocalFileTracerOptions {
   readonly batchWindowMs: number;
   readonly delegate?: Tracer.Tracer;
   readonly sink?: TraceSink;
+  /**
+   * SQL statement spans (spans carrying `db.query.text`) that succeed faster
+   * than this are left out of the local trace: they are most of its volume.
+   * Failed and slower statements are kept. `0` keeps every statement. The
+   * OTLP delegate always receives every span.
+   */
+  readonly sqlSpanMinDurationMs?: number;
 }
+
+/** Default for {@link LocalFileTracerOptions.sqlSpanMinDurationMs}. */
+export const DEFAULT_LOCAL_TRACE_SQL_MIN_DURATION_MS = 50;
+
+const DB_QUERY_TEXT_ATTRIBUTE = "db.query.text";
+
+/** One line per statement: layout whitespace only inflates every trace record. */
+export const normalizeSqlText = (sql: string): string => sql.replace(/\s+/gu, " ").trim();
 
 class LocalFileSpan implements Tracer.Span {
   readonly _tag = "Span";
@@ -33,16 +48,19 @@ class LocalFileSpan implements Tracer.Span {
   private readonly delegate: Tracer.Span;
   private readonly push: (record: EffectTraceRecord) => void;
   private readonly redactAttribute: (key: string, value: unknown) => unknown;
+  private readonly sqlSpanMinDurationNs: bigint;
 
   constructor(
     options: Parameters<Tracer.Tracer["span"]>[0],
     delegate: Tracer.Span,
     push: (record: EffectTraceRecord) => void,
     redactAttribute: (key: string, value: unknown) => unknown,
+    sqlSpanMinDurationMs: number,
   ) {
     this.delegate = delegate;
     this.push = push;
     this.redactAttribute = redactAttribute;
+    this.sqlSpanMinDurationNs = BigInt(Math.max(0, Math.round(sqlSpanMinDurationMs * 1_000_000)));
     this.name = delegate.name;
     this.spanId = delegate.spanId;
     this.traceId = delegate.traceId;
@@ -68,14 +86,28 @@ class LocalFileSpan implements Tracer.Span {
     };
     this.delegate.end(endTime, exit);
 
-    if (this.sampled) {
+    if (this.sampled && this.keepsLocalRecord(endTime, exit)) {
       this.push(spanToTraceRecord(this));
     }
   }
 
+  private keepsLocalRecord(endTime: bigint, exit: Exit.Exit<unknown, unknown>): boolean {
+    if (this.sqlSpanMinDurationNs === 0n || !this.attributes.has(DB_QUERY_TEXT_ATTRIBUTE)) {
+      return true;
+    }
+    if (exit._tag === "Failure") return true;
+    const startTime = this.status.startTime;
+    return endTime - startTime >= this.sqlSpanMinDurationNs;
+  }
+
   attribute(key: string, value: unknown): void {
     const redacted = this.redactAttribute(key, value);
-    this.attributes.set(key, redacted);
+    this.attributes.set(
+      key,
+      key === DB_QUERY_TEXT_ATTRIBUTE && typeof redacted === "string"
+        ? normalizeSqlText(redacted)
+        : redacted,
+    );
     this.delegate.attribute(key, redacted);
   }
 
@@ -112,9 +144,18 @@ export const makeLocalFileTracer = Effect.fn("makeLocalFileTracer")(function* (
       span: (spanOptions) => new Tracer.NativeSpan(spanOptions),
     });
 
+  const sqlSpanMinDurationMs =
+    options.sqlSpanMinDurationMs ?? DEFAULT_LOCAL_TRACE_SQL_MIN_DURATION_MS;
+
   return Tracer.make({
     span(spanOptions) {
-      return new LocalFileSpan(spanOptions, delegate.span(spanOptions), sink.push, redactAttribute);
+      return new LocalFileSpan(
+        spanOptions,
+        delegate.span(spanOptions),
+        sink.push,
+        redactAttribute,
+        sqlSpanMinDurationMs,
+      );
     },
     ...(delegate.context ? { context: delegate.context } : {}),
   });

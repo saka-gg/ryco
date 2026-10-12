@@ -10,9 +10,9 @@ import { assert, it } from "@effect/vitest";
 import { Effect, FileSystem } from "effect";
 
 import {
-  hydrateCachedProvider,
-  isCachedProviderCorrelated,
+  hydrateCachedProviderFromConfig,
   readProviderStatusCache,
+  readProviderStatusCacheEntry,
   resolveProviderStatusCachePath,
   writeProviderStatusCache,
 } from "./providerStatusCache.ts";
@@ -86,9 +86,44 @@ it.layer(NodeServices.layer)("providerStatusCache", (it) => {
     }),
   );
 
-  it("hydrates cached provider status while preserving current settings-derived models", () => {
+  it.effect("round-trips probe freshness and reads legacy files without it", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "ryco-provider-cache-" });
+      const filePath = yield* resolveProviderStatusCachePath({
+        cacheDir: tempDir,
+        instanceId: defaultInstanceIdForDriver(CODEX_DRIVER),
+      });
+      const provider = makeProvider(CODEX_DRIVER);
+      const probeFreshness = { fingerprint: "fp-1", checkedAt: "2026-04-11T00:00:00.000Z" };
+
+      yield* writeProviderStatusCache({ filePath, provider, probeFreshness });
+      assert.deepStrictEqual(yield* readProviderStatusCacheEntry(filePath), {
+        provider,
+        probeFreshness,
+      });
+      assert.deepStrictEqual(yield* readProviderStatusCache(filePath), provider);
+
+      yield* writeProviderStatusCache({ filePath, provider });
+      assert.deepStrictEqual(yield* readProviderStatusCacheEntry(filePath), {
+        provider,
+        probeFreshness: undefined,
+      });
+    }),
+  );
+
+  it("seeds a configured instance from its cached snapshot with current presentation", () => {
     const cachedCodex = makeProvider(CODEX_DRIVER, {
-      checkedAt: "2026-04-10T12:00:00.000Z",
+      displayName: "Old name",
+      accentColor: "#000000",
+      message: "Cached message",
+      updateState: {
+        status: "running",
+        startedAt: "2026-04-10T12:00:00.000Z",
+        finishedAt: null,
+        message: null,
+        output: null,
+      },
       models: [
         {
           slug: "gpt-5-mini",
@@ -97,140 +132,52 @@ it.layer(NodeServices.layer)("providerStatusCache", (it) => {
           capabilities: emptyCapabilities,
         },
       ],
-      message: "Cached message",
-      skills: [
-        {
-          name: "github:gh-fix-ci",
-          path: "/tmp/skills/gh-fix-ci/SKILL.md",
+    });
+    const { updateState: _updateState, accentColor: _accentColor, ...expected } = cachedCodex;
+
+    assert.deepStrictEqual(
+      hydrateCachedProviderFromConfig({
+        cachedProvider: cachedCodex,
+        identity: {
+          instanceId: cachedCodex.instanceId,
+          driverKind: CODEX_DRIVER,
+          displayName: "Work Codex",
+          accentColor: undefined,
           enabled: true,
-          displayName: "CI Debug",
         },
-      ],
-    });
-    const fallbackCodex = makeProvider(CODEX_DRIVER, {
-      models: [
-        {
-          slug: "gpt-5.4",
-          name: "GPT-5.4",
-          isCustom: false,
-          capabilities: emptyCapabilities,
-        },
-      ],
-      message: "Pending refresh",
-    });
-
-    assert.deepStrictEqual(
-      hydrateCachedProvider({
-        cachedProvider: cachedCodex,
-        fallbackProvider: fallbackCodex,
       }),
-      {
-        ...fallbackCodex,
-        models: [
-          ...fallbackCodex.models,
-          {
-            slug: "gpt-5-mini",
-            name: "GPT-5 Mini",
-            isCustom: false,
-            capabilities: emptyCapabilities,
-          },
-        ],
-        installed: cachedCodex.installed,
-        version: cachedCodex.version,
-        status: cachedCodex.status,
-        auth: cachedCodex.auth,
-        checkedAt: cachedCodex.checkedAt,
-        slashCommands: cachedCodex.slashCommands,
-        skills: cachedCodex.skills,
-        message: cachedCodex.message,
-      },
+      { ...expected, displayName: "Work Codex" },
     );
   });
 
-  it("ignores stale cached enabled state when the provider is now disabled", () => {
-    const cachedCodex = makeProvider(CODEX_DRIVER, {
-      checkedAt: "2026-04-10T12:00:00.000Z",
-      message: "Cached ready status",
-    });
-    const disabledFallback = makeProvider(CODEX_DRIVER, {
-      enabled: false,
-      installed: false,
-      version: null,
-      status: "disabled",
-      auth: { status: "unknown" },
-      message: "Codex is disabled in Ryco settings.",
-    });
-
-    assert.deepStrictEqual(
-      hydrateCachedProvider({
-        cachedProvider: cachedCodex,
-        fallbackProvider: disabledFallback,
-      }),
-      disabledFallback,
-    );
-  });
-
-  it("rejects cached snapshots that are not correlated to the fallback instance", () => {
-    const fallbackCodex = makeProvider(CODEX_DRIVER, {
-      models: [
-        {
-          slug: "gpt-5.4",
-          name: "GPT-5.4",
-          isCustom: false,
-          capabilities: emptyCapabilities,
-        },
-      ],
-    });
+  it("does not seed cached snapshots whose identity or enabled state no longer matches", () => {
+    const identity = {
+      instanceId: defaultInstanceIdForDriver(CODEX_DRIVER),
+      driverKind: CODEX_DRIVER,
+      displayName: undefined,
+      accentColor: undefined,
+      enabled: true,
+    };
     const legacyCachedCodex = {
-      provider: ProviderDriverKind.make("codex"),
+      provider: CODEX_DRIVER,
       enabled: true,
       installed: true,
       version: "1.0.0",
       status: "ready",
       auth: { status: "authenticated" },
       checkedAt: "2026-04-10T12:00:00.000Z",
-      models: [
-        {
-          slug: "cached-legacy-model",
-          name: "Cached Legacy Model",
-          isCustom: false,
-          capabilities: emptyCapabilities,
-        },
-      ],
+      models: [],
       slashCommands: [],
       skills: [],
     } as unknown as ServerProvider;
-    const mismatchedCachedCodex = makeProvider(CODEX_DRIVER, {
-      instanceId: ProviderInstanceId.make("codex_personal"),
-    });
 
-    assert.strictEqual(
-      isCachedProviderCorrelated({
-        cachedProvider: legacyCachedCodex,
-        fallbackProvider: fallbackCodex,
-      }),
-      false,
-    );
-    assert.deepStrictEqual(
-      hydrateCachedProvider({
-        cachedProvider: legacyCachedCodex,
-        fallbackProvider: fallbackCodex,
-      }),
-      fallbackCodex,
-    );
-    assert.strictEqual(
-      isCachedProviderCorrelated({
-        cachedProvider: mismatchedCachedCodex,
-        fallbackProvider: fallbackCodex,
-      }),
-      false,
-    );
-    assert.deepStrictEqual(
-      hydrateCachedProvider({
-        cachedProvider: mismatchedCachedCodex,
-        fallbackProvider: fallbackCodex,
-      }),
-      fallbackCodex,
-    );
+    for (const cachedProvider of [
+      legacyCachedCodex,
+      makeProvider(CODEX_DRIVER, { instanceId: ProviderInstanceId.make("codex_personal") }),
+      makeProvider(CLAUDE_AGENT_DRIVER, { instanceId: identity.instanceId }),
+      makeProvider(CODEX_DRIVER, { enabled: false, status: "disabled" }),
+    ]) {
+      assert.strictEqual(hydrateCachedProviderFromConfig({ cachedProvider, identity }), undefined);
+    }
   });
 });

@@ -2,7 +2,7 @@ import {
   E2EE_SAFETY_NUMBER_DIGITS,
   E2EE_SAFETY_NUMBER_MIN_DISPLAYED_BITS,
 } from "@ryco/shared/relayE2eeConstants";
-import { verifyNativeTrustApprovalQr } from "@ryco/client-runtime/authorization";
+import { verifyNativeTrustApprovalQr } from "@ryco/client-runtime/authorization/e2ee";
 
 import {
   attachMobileE2eeLocalNodeHandle,

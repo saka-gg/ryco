@@ -577,6 +577,17 @@ export type DesktopWorkspaceTransportEvent =
       readonly retryAfterMs?: number;
     };
 
+/**
+ * Outcome of activating a prepared workspace transport. A failed activation is
+ * an expected outcome (relay unavailable, handle expired) and is reported as a
+ * value: Electron logs every rejected IPC invocation with a stack, which turned
+ * reconnect storms into log storms. The transport's own `close` event carries
+ * the secret-free recovery policy.
+ */
+export type DesktopWorkspaceTransportActivation =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly reason: "invalid-transport" | "unavailable" };
+
 export type DesktopNativeE2eePreparation =
   | { readonly kind: "web-eligible" }
   | { readonly kind: "strict-unavailable" }
@@ -839,7 +850,9 @@ export interface DesktopBridge {
   prepareDesktopWorkspaceTransport?: (
     environmentId: EnvironmentId,
   ) => Promise<{ readonly transportId: string }>;
-  activateDesktopWorkspaceTransport?: (transportId: string) => Promise<void>;
+  activateDesktopWorkspaceTransport?: (
+    transportId: string,
+  ) => Promise<DesktopWorkspaceTransportActivation>;
   sendDesktopWorkspaceTransport?: (transportId: string, data: Uint8Array) => void;
   closeDesktopWorkspaceTransport?: (transportId: string) => void;
   reportDesktopWorkspaceConnection?: (input: {
@@ -1006,7 +1019,10 @@ export interface LocalApi {
     signalDiagnosticProcess?: (
       input: DiagnosticsSignalProcessInput,
     ) => Promise<DiagnosticsSignalProcessResult>;
-    discoverSourceControl: () => Promise<SourceControlDiscoveryResult>;
+    /** `cached` accepts the server's recent result; an explicit refresh omits it. */
+    discoverSourceControl: (input?: {
+      readonly cached?: boolean;
+    }) => Promise<SourceControlDiscoveryResult>;
     listOpinionatedPlugins: () => Promise<OpinionatedPluginListResult>;
     checkOpinionatedPlugins: (
       input?: OpinionatedPluginCheckInput,
@@ -1100,7 +1116,10 @@ export interface EnvironmentApi {
     signalDiagnosticProcess?: (
       input: DiagnosticsSignalProcessInput,
     ) => Promise<DiagnosticsSignalProcessResult>;
-    discoverSourceControl: () => Promise<SourceControlDiscoveryResult>;
+    /** `cached` accepts the server's recent result; an explicit refresh omits it. */
+    discoverSourceControl: (input?: {
+      readonly cached?: boolean;
+    }) => Promise<SourceControlDiscoveryResult>;
     listOpinionatedPlugins: () => Promise<OpinionatedPluginListResult>;
     checkOpinionatedPlugins: (
       input?: OpinionatedPluginCheckInput,

@@ -8,6 +8,7 @@ import type {
 } from "@ryco/contracts";
 import { normalizeHubNodeName } from "@ryco/shared/nodeIdentity";
 
+import { normalizeDesktopBackendPort } from "./backendPort.ts";
 import { resolveDefaultDesktopUpdateChannel } from "./updateChannels.ts";
 
 export interface DesktopSettings {
@@ -46,6 +47,12 @@ export interface DesktopSettings {
   readonly keepAwakeWhileReachable: boolean;
   readonly updateChannel: DesktopUpdateChannel;
   readonly updateChannelConfiguredByUser: boolean;
+  /**
+   * The port the backend last served on. The renderer's origin (and with it
+   * localStorage and the HTTP/V8 caches) follows the port, so the next launch
+   * tries it first. `null` until a launch has served.
+   */
+  readonly backendPort: number | null;
 }
 
 export const DEFAULT_TAILSCALE_SERVE_PORT = 443;
@@ -63,6 +70,7 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   keepAwakeWhileReachable: true,
   updateChannel: "latest",
   updateChannelConfiguredByUser: false,
+  backendPort: null,
 };
 
 export function resolveDefaultDesktopSettings(appVersion: string): DesktopSettings {
@@ -392,6 +400,7 @@ export function readDesktopSettings(
       readonly hubOrigin?: unknown;
       readonly hubNodeName?: unknown;
       readonly hubAllowFileSecretStore?: unknown;
+      readonly backendPort?: unknown;
     };
     const parsedUpdateChannel =
       parsed.updateChannel === "nightly" || parsed.updateChannel === "latest"
@@ -445,6 +454,7 @@ export function readDesktopSettings(
           : defaultSettings.hubOrigin,
       hubNodeName,
       hubAllowFileSecretStore: parsed.hubAllowFileSecretStore === true,
+      backendPort: normalizeDesktopBackendPort(parsed.backendPort),
     };
   } catch (error) {
     // A corrupt file must not silently revert to defaults: the next write would

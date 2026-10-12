@@ -16,7 +16,7 @@ import type { ProviderInstanceConfig, ProviderInstanceId } from "@ryco/contracts
 import { Schema } from "effect";
 
 import { readClaudeResumeState } from "../provider/Layers/ClaudeAdapter.ts";
-import { CodexResumeCursorSchema } from "../provider/Layers/CodexSessionRuntime.ts";
+import { CodexResumeCursorSchema } from "../provider/codexResumeCursor.ts";
 import { readPersistedCwd } from "../provider/runtimeCwd.ts";
 import type { ProviderRuntimeBinding } from "../provider/Services/ProviderSessionDirectory.ts";
 import type { ForkBoundary } from "./forkBoundary.ts";

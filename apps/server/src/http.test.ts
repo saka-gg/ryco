@@ -2,6 +2,8 @@ import { describe, expect, it } from "vite-plus/test";
 import { Option } from "effect";
 
 import {
+  acceptedStaticContentEncodings,
+  countOtlpSpans,
   downloadContentDisposition,
   ifNoneMatchSatisfies,
   inlineImageResponseHeaders,
@@ -136,6 +138,55 @@ describe("static asset caching", () => {
     expect(ifNoneMatchSatisfies(`"other", ${etag}`, etag)).toBe(true);
     expect(ifNoneMatchSatisfies("*", etag)).toBe(true);
     expect(ifNoneMatchSatisfies('"other"', etag)).toBe(false);
+  });
+});
+
+describe("precompressed static assets", () => {
+  it("prefers nothing without an Accept-Encoding header", () => {
+    expect([...acceptedStaticContentEncodings(undefined)]).toEqual([]);
+    expect([...acceptedStaticContentEncodings("")]).toEqual([]);
+    expect([...acceptedStaticContentEncodings("identity")]).toEqual([]);
+  });
+
+  it("accepts listed codings with a non-zero quality", () => {
+    expect([...acceptedStaticContentEncodings("gzip, deflate, br, zstd")]).toEqual(["br", "gzip"]);
+    expect([...acceptedStaticContentEncodings("gzip")]).toEqual(["gzip"]);
+    expect([...acceptedStaticContentEncodings("x-gzip")]).toEqual(["gzip"]);
+    expect([...acceptedStaticContentEncodings("BR;q=0.5")]).toEqual(["br"]);
+    expect([...acceptedStaticContentEncodings("br;q=0, gzip")]).toEqual(["gzip"]);
+    expect([...acceptedStaticContentEncodings("br;q=0, gzip;q=0")]).toEqual([]);
+  });
+
+  it("applies the wildcard only to codings not listed explicitly", () => {
+    expect([...acceptedStaticContentEncodings("*")]).toEqual(["br", "gzip"]);
+    expect([...acceptedStaticContentEncodings("*, br;q=0")]).toEqual(["gzip"]);
+    expect([...acceptedStaticContentEncodings("*;q=0, gzip")]).toEqual(["gzip"]);
+  });
+
+  it("gives each encoded variant its own validator", () => {
+    const info = { size: 1234n, mtime: Option.some(new Date(1_700_000_000_000)) };
+    const identity = staticFileEtag(info);
+    const brotli = staticFileEtag(info, "br");
+    const gzip = staticFileEtag(info, "gzip");
+    expect(new Set([identity, brotli, gzip]).size).toBe(3);
+    expect(brotli?.endsWith('-br"')).toBe(true);
+    expect(gzip?.endsWith('-gzip"')).toBe(true);
+  });
+});
+
+describe("browser OTLP logging", () => {
+  it("counts spans without reading their contents", () => {
+    expect(countOtlpSpans(null)).toBe(0);
+    expect(countOtlpSpans({ resourceSpans: "nope" })).toBe(0);
+    expect(
+      countOtlpSpans({
+        resourceSpans: [
+          { scopeSpans: [{ spans: [{}, {}] }, { spans: [{}] }, { spans: null }] },
+          { scopeSpans: null },
+          null,
+        ],
+      }),
+    ).toBe(3);
   });
 });
 

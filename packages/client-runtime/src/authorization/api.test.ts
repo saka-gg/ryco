@@ -361,6 +361,52 @@ describe("HostedHubApi", () => {
     ).toBe(true);
   });
 
+  it("offers minor 2 directly once the Hub has refused minor 3 for the session", async () => {
+    const api = createApi();
+    globalThis.fetch = vi.fn(async () => response(session));
+    await api.restoreSession();
+    const minor2 = () =>
+      response(
+        { ticket: "ticket", expiresAt: Date.now() + 60_000, protocolMajor: 1, protocolMinor: 2 },
+        201,
+      );
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(response({ error: "invalid_request" }, 400))
+      .mockResolvedValueOnce(minor2())
+      .mockResolvedValueOnce(minor2());
+    globalThis.fetch = fetch;
+    await api.issueRelayTicket("node_aaaaaaaaaaaaaaaaaaaaaa");
+    await expect(api.issueRelayTicket("node_aaaaaaaaaaaaaaaaaaaaaa")).resolves.toMatchObject({
+      protocolMinor: 2,
+    });
+    expect(fetch.mock.calls.map((call) => JSON.parse(String(call[1]?.body)).protocolMinor)).toEqual(
+      [3, 2, 2],
+    );
+
+    // A minor-2 request the Hub rejects is not retried with anything else.
+    const rejected = vi.fn().mockResolvedValueOnce(response({ error: "invalid_request" }, 400));
+    globalThis.fetch = rejected;
+    await expect(api.issueRelayTicket("node_aaaaaaaaaaaaaaaaaaaaaa")).rejects.toMatchObject({
+      code: "invalid_request",
+    });
+    expect(rejected).toHaveBeenCalledOnce();
+
+    // Ending the session forgets the fallback: the next session offers minor 3 again.
+    api.clearSessionMaterial();
+    globalThis.fetch = vi.fn(async () => response(session));
+    await api.restoreSession();
+    const fresh = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      response(
+        { ticket: "ticket", expiresAt: Date.now() + 60_000, protocolMajor: 1, protocolMinor: 3 },
+        201,
+      ),
+    );
+    globalThis.fetch = fresh;
+    await api.issueRelayTicket("node_aaaaaaaaaaaaaaaaaaaaaa");
+    expect(JSON.parse(String(fresh.mock.calls[0]?.[1]?.body)).protocolMinor).toBe(3);
+  });
+
   it.each([0, 1, 4, "3"])(
     "rejects an unsupported selected relay minor %s",
     async (protocolMinor) => {
@@ -881,6 +927,41 @@ describe("HostedHubApi", () => {
       });
       await vi.advanceTimersByTimeAsync(30_000);
       await rejection;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("bounds a gate-critical read by its shorter deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      const api = createApi();
+      globalThis.fetch = vi.fn(
+        async (_input: RequestInfo | URL, init?: RequestInit) =>
+          new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener("abort", () =>
+              reject(new DOMException("deadline", "AbortError")),
+            );
+          }),
+      );
+      let settled = false;
+      const pending = api.restoreSession(undefined, { deadlineMs: 8_000 }).finally(() => {
+        settled = true;
+      });
+      const rejection = expect(pending).rejects.toMatchObject({
+        code: "timeout",
+        reason: "request-timeout",
+      });
+      await vi.advanceTimersByTimeAsync(7_999);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await rejection;
+      // A deadline longer than the default never extends it.
+      const nodes = api.listNodes(undefined, { deadlineMs: 120_000 });
+      const nodesRejection = expect(nodes).rejects.toMatchObject({ code: "timeout" });
+      await vi.advanceTimersByTimeAsync(30_000);
+      await nodesRejection;
+      expect(vi.getTimerCount()).toBe(0);
     } finally {
       vi.useRealTimers();
     }

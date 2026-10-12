@@ -1,4 +1,4 @@
-import { IconGitBranch, IconGitFork } from "@tabler/icons-react-native";
+import { IconGitBranch, IconGitFork } from "../../components/icons";
 import { ChangeRequestBadge } from "../../components/ChangeRequestBadge";
 import { buildChangeRequestBadge } from "../../lib/changeRequestBadge";
 import { Pressable, View } from "react-native";

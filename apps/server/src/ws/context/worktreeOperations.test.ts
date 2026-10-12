@@ -3,7 +3,8 @@ import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promi
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { Effect, Option, Schema } from "effect";
+import { Effect, Fiber, Option, Schema } from "effect";
+import { TestClock } from "effect/testing";
 import { afterEach, describe, expect, it } from "vite-plus/test";
 import {
   CommandId,
@@ -13,11 +14,13 @@ import {
   type OrchestrationCommand,
   type OrchestrationShellSnapshot,
 } from "@ryco/contracts";
+import { type ProcessLane, ProcessLaneRef } from "../../processGovernor.ts";
 import {
   describeInitialCommitFailure,
   INITIAL_COMMIT_MESSAGE,
   makeWorktreeOperations,
   minimalGitignore,
+  RECONCILIATION_START_DELAY_MS,
 } from "./worktreeOperations.ts";
 
 const NOW = "2026-09-15T00:00:00.000Z";
@@ -140,6 +143,133 @@ describe("main workspace recovery", () => {
       Effect.runPromise(f.operations.reconcileProjectWorktrees(f.project.id)),
     ).rejects.toThrow("already in use");
     expect(f.commands).toEqual([]);
+  });
+});
+
+describe("worktree reconciliation reads", () => {
+  const shell = (
+    projects: ReadonlyArray<OrchestrationProjectShell>,
+  ): OrchestrationShellSnapshot => ({
+    snapshotSequence: 1,
+    projects,
+    threads: [],
+    worktrees: [],
+    updatedAt: NOW,
+  });
+  const projectAt = (id: string, workspaceRoot: string, kind: "project" | "chat" = "project") =>
+    Schema.decodeUnknownSync(OrchestrationProjectShell)({
+      id,
+      kind,
+      title: id,
+      workspaceRoot,
+      defaultModelSelection: null,
+      scripts: [],
+      createdAt: NOW,
+      updatedAt: NOW,
+    });
+
+  const makeOperations = (input: {
+    readonly projects: ReadonlyArray<OrchestrationProjectShell>;
+    readonly calls: string[];
+    /** The process lane each `git` call ran in. */
+    readonly lanes?: ProcessLane[];
+  }) =>
+    makeWorktreeOperations({
+      projectionSnapshotQuery: {
+        getProjectShellById: (projectId: ProjectId) =>
+          Effect.succeed(
+            Option.fromNullishOr(input.projects.find((project) => project.id === projectId)),
+          ),
+        getShellSnapshot: () =>
+          Effect.sync(() => {
+            input.calls.push("shell");
+            return shell(input.projects);
+          }),
+        listProjectShells: () =>
+          Effect.sync(() => {
+            input.calls.push("projects");
+            return input.projects;
+          }),
+        getProjectWorkspaceRows: (projectId: ProjectId) =>
+          Effect.sync(() => {
+            input.calls.push(`rows:${projectId}`);
+            return {
+              worktrees: [
+                Schema.decodeUnknownSync(OrchestrationWorktreeShell)({
+                  worktreeId: `worktree-${projectId}-main`,
+                  projectId,
+                  title: null,
+                  branch: "main",
+                  worktreePath: null,
+                  origin: "main",
+                  prNumber: null,
+                  issueNumber: null,
+                  prTitle: null,
+                  issueTitle: null,
+                  createdAt: NOW,
+                  updatedAt: NOW,
+                  archivedAt: null,
+                  manualPosition: 0,
+                }),
+              ],
+              threads: [],
+            };
+          }),
+        getWorktreeShellById: () => Effect.die("an existing main workspace needs no id check"),
+      },
+      gitWorkflow: {
+        localStatus: () => Effect.die("an existing main workspace needs no status"),
+        listWorktreePaths: (cwd: string) =>
+          Effect.flatMap(ProcessLaneRef, (lane) =>
+            Effect.sync(() => {
+              input.calls.push(`git:${cwd}`);
+              input.lanes?.push(lane);
+              return [cwd];
+            }),
+          ),
+      },
+      serverSettings: { getSettings: Effect.succeed({ worktreeBranchPrefix: "ryco" }) },
+      serverCommandId: (tag: string) => CommandId.make(tag),
+      dispatchNormalizedCommand: () => Effect.die("nothing to reconcile"),
+    } as unknown as Parameters<typeof makeWorktreeOperations>[0]);
+
+  it("reads one project's rows instead of whole shell snapshots", async () => {
+    const calls: string[] = [];
+    const project = projectAt("project", "/project");
+    const operations = makeOperations({ projects: [project], calls });
+    await Effect.runPromise(operations.reconcileProjectWorktrees(project.id));
+    expect(calls).toEqual(["git:/project", "rows:project"]);
+  });
+
+  it("waits before sweeping, then reconciles each available non-chat project once", async () => {
+    const root = await realpath(await mkdtemp(path.join(tmpdir(), "ryco-reconcile-sweep-")));
+    scratchDirectories.push(root);
+    await mkdir(path.join(root, "repo"));
+    await mkdir(path.join(root, "chat"));
+    const calls: string[] = [];
+    const lanes: ProcessLane[] = [];
+    const operations = makeOperations({
+      projects: [
+        projectAt("repo", path.join(root, "repo")),
+        projectAt("chat", path.join(root, "chat"), "chat"),
+        projectAt("missing", path.join(root, "missing")),
+      ],
+      calls,
+      lanes,
+    });
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const fiber = yield* Effect.forkChild(operations.reconcileAllWorktrees);
+        yield* TestClock.adjust(RECONCILIATION_START_DELAY_MS - 1);
+        // Still off the shell-load path of the subscription that forked it.
+        expect(calls).toEqual([]);
+        yield* TestClock.adjust(1);
+        yield* Fiber.join(fiber);
+      }).pipe(Effect.provide(TestClock.layer())),
+    );
+    // The project list alone, never a whole shell snapshot; git in the background lane.
+    expect(calls).toEqual(["projects", `git:${path.join(root, "repo")}`, "rows:repo"]);
+    expect(lanes).toEqual(["background"]);
   });
 });
 

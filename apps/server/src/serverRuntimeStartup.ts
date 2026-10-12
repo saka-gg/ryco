@@ -44,16 +44,20 @@ import {
 } from "effect";
 
 import { ServerConfig } from "./config.ts";
+import { flushCompileCacheBestEffort } from "./compileCache.ts";
+import { recordDesktopStartupPhase, writeDesktopLifecycleFrame } from "./desktopLifecycle.ts";
 import { ProjectionProjectRepository } from "./persistence/Services/ProjectionProjects.ts";
-import { ProjectionThreadRepository } from "./persistence/Services/ProjectionThreads.ts";
 import { ProjectRelocationRepository } from "./persistence/Services/ProjectRelocations.ts";
 import { ThreadForkRepository } from "./persistence/Services/ThreadForks.ts";
 import { ChatFolders } from "./project/chatFolders.ts";
 import { recoverProjectRelocations } from "./project/chatPromotion.ts";
 import { removeOrphanChatProjects } from "./project/orphanChatProjects.ts";
 import { resolveProjectPreferences } from "./project/projectPreferences.ts";
+import { runRepositoryIdentitySync } from "./project/repositoryIdentitySync.ts";
+import { RepositoryIdentityResolver } from "./project/Services/RepositoryIdentityResolver.ts";
 import { Keybindings } from "./keybindings.ts";
 import { Open } from "./open.ts";
+import { currentCommandReadModel } from "./orchestration/currentCommandReadModel.ts";
 import { OrchestrationEngineService } from "./orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "./orchestration/Services/ProjectionSnapshotQuery.ts";
 import { OrchestrationReactor } from "./orchestration/Services/OrchestrationReactor.ts";
@@ -68,6 +72,8 @@ import { WorkspaceAccessPolicy } from "./workspace/Services/WorkspaceAccessPolic
 import { ProviderSessionReaper } from "./provider/Services/ProviderSessionReaper.ts";
 import { ProviderService } from "./provider/Services/ProviderService.ts";
 import { ProviderSessionDirectory } from "./provider/Services/ProviderSessionDirectory.ts";
+import { ProviderInstanceBootGate } from "./provider/Services/ProviderInstanceBootGate.ts";
+import { trackStartupPhase } from "./startupStallMonitor.ts";
 import {
   increment,
   metricAttributes,
@@ -100,7 +106,8 @@ export class ServerRuntimeStartupError extends Data.TaggedError("ServerRuntimeSt
 
 export interface ServerRuntimeStartupShape {
   readonly awaitCommandReady: Effect.Effect<void, ServerRuntimeStartupError>;
-  readonly markHttpListening: Effect.Effect<void>;
+  /** Signalled once the router's request handlers are attached. */
+  readonly markHttpServing: Effect.Effect<void>;
   readonly enqueueCommand: <A, E>(
     effect: Effect.Effect<A, E>,
   ) => Effect.Effect<A, E | ServerRuntimeStartupError>;
@@ -500,9 +507,12 @@ const maybeOpenBrowser = (target: string) =>
   });
 
 const runStartupPhase = <A, E, R>(phase: string, effect: Effect.Effect<A, E, R>) =>
-  effect.pipe(
-    Effect.annotateSpans({ "startup.phase": phase }),
-    Effect.withSpan(`server.startup.${phase}`),
+  trackStartupPhase(
+    `server.startup.${phase}`,
+    effect.pipe(
+      Effect.annotateSpans({ "startup.phase": phase }),
+      Effect.withSpan(`server.startup.${phase}`),
+    ),
   );
 
 const incompatibleWorkspaceStateError = (cause: unknown) =>
@@ -635,8 +645,9 @@ export const reconcileOrphanedProviderSessions = Effect.gen(function* () {
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
 
   // One snapshot serves both repairs. Stale turns behind released sessions are
-  // settled even when the provider inventory below fails.
-  const snapshot = yield* projectionSnapshotQuery.getCommandReadModel();
+  // settled even when the provider inventory below fails. The engine already holds the
+  // command read model in memory; hydrating it from SQL again cost a full read per boot.
+  const snapshot = yield* currentCommandReadModel(orchestrationEngine, projectionSnapshotQuery);
   yield* settleStaleProjectedTurns(snapshot);
 
   const liveSessionsExit = yield* Effect.exit(providerService.listSessions());
@@ -830,12 +841,13 @@ export const makeServerRuntimeStartup = Effect.gen(function* () {
   const workspaceLifecycle = yield* Effect.serviceOption(WorkspaceLifecycle);
   const projectRelocations = yield* Effect.serviceOption(ProjectRelocationRepository);
   const projectionProjects = yield* Effect.serviceOption(ProjectionProjectRepository);
-  const projectionThreads = yield* Effect.serviceOption(ProjectionThreadRepository);
   const chatFolders = yield* Effect.serviceOption(ChatFolders);
   const threadForks = yield* Effect.serviceOption(ThreadForkRepository);
+  const repositoryIdentityResolver = yield* Effect.serviceOption(RepositoryIdentityResolver);
+  const providerInstanceBootGate = yield* Effect.serviceOption(ProviderInstanceBootGate);
 
   const commandGate = yield* makeCommandGate();
-  const httpListening = yield* Deferred.make<void>();
+  const httpServing = yield* Deferred.make<void>();
   const reactorScope = yield* Scope.make("sequential");
 
   yield* Effect.addFinalizer(() => Scope.close(reactorScope, Exit.void));
@@ -885,36 +897,18 @@ export const makeServerRuntimeStartup = Effect.gen(function* () {
         ),
       );
     }
-    if (
-      Option.isSome(projectionProjects) &&
-      Option.isSome(projectionThreads) &&
-      Option.isSome(chatFolders) &&
-      // Without the fork ledger a chat an unfinished fork still needs looks unused: no sweep.
-      Option.isSome(threadForks)
-    ) {
-      // After recovery settled every move. Housekeeping: startup does not wait for it, and a
-      // failure is logged and retried on the next start.
-      const orchestrationEngine = yield* OrchestrationEngineService;
-      yield* runStartupPhase(
-        "chat-projects.remove-orphans",
-        removeOrphanChatProjects({
-          projects: projectionProjects.value,
-          threads: projectionThreads.value,
-          chatFolders: chatFolders.value,
-          threadForks: threadForks.value,
-          dispatch: orchestrationEngine.dispatch,
-        }),
-      ).pipe(Effect.ignoreCause({ log: true }), Effect.forkScoped);
-    }
     yield* Effect.logDebug("startup phase: validating restricted workspace state");
     yield* runStartupPhase(
       "workspace.validate",
-      projectionSnapshotQuery
-        .getCommandReadModel()
-        .pipe(
+      Effect.gen(function* () {
+        // Unrestricted (the default): nothing to validate, so nothing to load.
+        if (!(yield* WorkspaceAccessPolicy).isRestricted) return;
+        const orchestrationEngine = yield* OrchestrationEngineService;
+        yield* currentCommandReadModel(orchestrationEngine, projectionSnapshotQuery).pipe(
           Effect.mapError(incompatibleWorkspaceStateError),
           Effect.flatMap(validateRestrictedWorkspaceSnapshot),
-        ),
+        );
+      }),
     );
 
     yield* Effect.logDebug("startup phase: starting keybindings runtime");
@@ -1032,8 +1026,10 @@ export const makeServerRuntimeStartup = Effect.gen(function* () {
         durationMs: Date.now() - runtimeStartedAt,
       });
       yield* commandGate.signalCommandReady;
+      writeDesktopLifecycleFrame({ type: "startup-ready" });
+      recordDesktopStartupPhase("command-gate-ready");
       yield* Effect.logDebug("startup phase: waiting for http listener");
-      yield* runStartupPhase("http.wait", Deferred.await(httpListening));
+      yield* runStartupPhase("http.wait", Deferred.await(httpServing));
       yield* Effect.logInfo("startup http listener ready", {
         durationMs: Date.now() - runtimeStartedAt,
       });
@@ -1049,6 +1045,42 @@ export const makeServerRuntimeStartup = Effect.gen(function* () {
           },
         }),
       );
+
+      if (
+        Option.isSome(projectionProjects) &&
+        Option.isSome(chatFolders) &&
+        // Without the fork ledger a chat an unfinished fork still needs looks unused: no sweep.
+        Option.isSome(threadForks)
+      ) {
+        // Housekeeping after the gate, so it never competes with startup for the connection.
+        // Project relocations were recovered before the gate, so every move is settled.
+        // A failure is logged and retried on the next start.
+        const orchestrationEngine = yield* OrchestrationEngineService;
+        yield* runStartupPhase(
+          "chat-projects.remove-orphans",
+          removeOrphanChatProjects({
+            projects: projectionProjects.value,
+            chatFolders: chatFolders.value,
+            threadForks: threadForks.value,
+            dispatch: orchestrationEngine.dispatch,
+          }),
+        ).pipe(Effect.ignoreCause({ log: true }), Effect.forkScoped);
+      }
+
+      if (Option.isSome(projectionProjects) && Option.isSome(repositoryIdentityResolver)) {
+        // Shell snapshots read persisted repository identities and never wait on git; this
+        // background task keeps them current (a few stats per project when nothing changed).
+        const orchestrationEngine = yield* OrchestrationEngineService;
+        yield* runStartupPhase(
+          "repository-identities.sync",
+          runRepositoryIdentitySync({
+            projects: projectionProjects.value,
+            resolver: repositoryIdentityResolver.value,
+            dispatch: orchestrationEngine.dispatch,
+            subscribe: orchestrationEngine.subscribeDomainEvents,
+          }),
+        );
+      }
 
       // Every runtime layer is built (http.wait) and provider intent recovery finished
       // before the gate opened, so continued sessions get the full tool surface.
@@ -1110,14 +1142,19 @@ export const makeServerRuntimeStartup = Effect.gen(function* () {
       yield* Effect.logInfo("startup phase complete", {
         durationMs: Date.now() - runtimeStartedAt,
       });
+      recordDesktopStartupPhase("complete");
+      // Persist the module compile cache now: a later shutdown may be killed.
+      flushCompileCacheBestEffort();
     }),
   );
 
   return {
     awaitCommandReady: commandGate.awaitCommandReady,
-    markHttpListening: Effect.gen(function* () {
+    markHttpServing: Effect.gen(function* () {
       yield* Effect.logDebug("startup http listener marked");
-      yield* Deferred.succeed(httpListening, undefined);
+      yield* Deferred.succeed(httpServing, undefined);
+      // Provider drivers are built only once the listener serves.
+      if (Option.isSome(providerInstanceBootGate)) yield* providerInstanceBootGate.value.release;
     }),
     enqueueCommand: commandGate.enqueueCommand,
   } satisfies ServerRuntimeStartupShape;

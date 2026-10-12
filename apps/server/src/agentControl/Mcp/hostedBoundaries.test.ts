@@ -49,6 +49,7 @@ describe("pre-auth server environment descriptor", () => {
       "fileAttachments",
       "projectIcons",
       "projectPreferences",
+      "projectSearchEmptyQuery",
       "repositoryIdentity",
       "requiredWorktreeBootstrap",
       "storageManagement",

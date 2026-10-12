@@ -1,5 +1,5 @@
 import { EnvironmentId, type OrchestrationShellStreamItem } from "@ryco/contracts";
-import { describe, expect, it, vi } from "vite-plus/test";
+import { describe, expect, it } from "vite-plus/test";
 
 import type { KnownEnvironment } from "../knownEnvironment.ts";
 import type { ShellSubscriptionOptions, WsRpcClient } from "../rpc/index.ts";
@@ -28,6 +28,7 @@ function shellHarness() {
   return {
     client,
     emit: (item: OrchestrationShellStreamItem) => listener?.(item),
+    options: () => options,
     resubscribe: () => {
       const resumeFrom = options?.resumeFromSequence?.() ?? null;
       options?.onResubscribe?.();
@@ -106,5 +107,96 @@ describe("shell resume", () => {
 
     expect(harness.resubscribe()).toBeNull();
     expect(calls).toEqual(["snapshot:40", "reset"]);
+  });
+});
+
+describe("reconnect metadata refresh", () => {
+  it("hands refreshMetadata the replacement subscription's config snapshot", async () => {
+    let configListener:
+      | ((event: { readonly type: "snapshot"; readonly config: unknown }) => void)
+      | undefined;
+    let shellListener: ((item: OrchestrationShellStreamItem) => void) | undefined;
+    const config = (label: string) => ({
+      environment: { environmentId, label },
+      providers: [],
+    });
+    const client = {
+      server: {
+        subscribeLifecycle: () => () => undefined,
+        subscribeConfig: (next: typeof configListener) => {
+          configListener = next;
+          return () => undefined;
+        },
+      },
+      orchestration: {
+        subscribeShell: (next: (item: OrchestrationShellStreamItem) => void) => {
+          shellListener = next;
+          return () => undefined;
+        },
+      },
+      terminal: { onEvent: () => () => undefined },
+      dispose: async () => undefined,
+      reconnect: async () => {
+        // The replacement subscriptions answer once the new socket is up.
+        queueMicrotask(() => {
+          configListener?.({ type: "snapshot", config: config("after reconnect") });
+          shellListener?.(snapshot(2));
+        });
+      },
+    } as unknown as WsRpcClient;
+    const refreshed: string[] = [];
+    const connection = createEnvironmentConnection({
+      kind: "saved",
+      knownEnvironment: { environmentId, label: "Remote Mac" } as unknown as KnownEnvironment,
+      client,
+      pushSequenceMonitor: { recordEvent: () => undefined, recordSnapshot: () => undefined },
+      resetShellProjection: () => undefined,
+      applyShellEvent: () => undefined,
+      syncShellSnapshot: () => undefined,
+      applyTerminalEvent: () => undefined,
+      refreshMetadata: async ({ configSnapshot }) => {
+        const next = (await configSnapshot) as unknown as ReturnType<typeof config>;
+        refreshed.push(next.environment.label);
+      },
+    });
+    configListener?.({ type: "snapshot", config: config("initial") });
+    shellListener?.(snapshot(1));
+    await connection.ensureBootstrapped();
+
+    await connection.reconnect();
+
+    // The snapshot from before the reconnect is not reused.
+    expect(refreshed).toEqual(["after reconnect"]);
+  });
+});
+
+describe("thread priority rankings", () => {
+  it("asks for priority deltas only when it can apply them, and routes them past the sequence monitor", () => {
+    const withHandler = shellHarness();
+    const recorded: number[] = [];
+    const priorities: unknown[] = [];
+    createEnvironmentConnection({
+      kind: "primary",
+      knownEnvironment: { environmentId, label: "Remote Mac" } as unknown as KnownEnvironment,
+      client: withHandler.client,
+      pushSequenceMonitor: {
+        recordEvent: (_environmentId, sequence) => recorded.push(sequence),
+        recordSnapshot: () => undefined,
+      },
+      resetShellProjection: () => undefined,
+      applyShellEvent: () => undefined,
+      syncShellSnapshot: () => undefined,
+      applyTerminalEvent: () => undefined,
+      applyThreadPriorities: (item) => priorities.push(item),
+    });
+    expect(withHandler.options()?.threadPriorities).toBe("delta");
+    const item = { kind: "thread-priorities", priorities: [] } as const;
+    withHandler.emit(item);
+    expect(priorities).toEqual([item]);
+    expect(recorded).toEqual([]);
+
+    const withoutHandler = shellHarness();
+    connect(withoutHandler, null);
+    expect(withoutHandler.options()?.threadPriorities).toBeUndefined();
   });
 });

@@ -1,13 +1,11 @@
-import {
-  Cause,
-  Effect,
-  Exit,
-  Result,
-  Schema,
-  SchemaGetter,
-  SchemaIssue,
-  SchemaTransformation,
-} from "effect";
+import * as Cause from "effect/Cause";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
+import * as SchemaGetter from "effect/SchemaGetter";
+import * as SchemaIssue from "effect/SchemaIssue";
+import * as SchemaTransformation from "effect/SchemaTransformation";
 
 export const decodeJsonResult = <S extends Schema.Codec<unknown, unknown, never, never>>(
   schema: S,

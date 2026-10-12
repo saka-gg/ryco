@@ -4,13 +4,14 @@ import { WS_METHODS } from "@ryco/contracts";
 import { useNavigate, useParams } from "@tanstack/react-router";
 
 import { useAppKeybindings } from "../appKeybindings";
-import { lazy, Suspense, useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import { useCommandPaletteStore } from "../commandPaletteStore";
 import { ComposerHandleContext } from "../composerHandleContext";
 import { useHostedRpcCapability } from "../hostedHub/capabilities";
 import { resolveShortcutCommand, shouldIgnoreGlobalNavigationShortcut } from "../keybindings";
 import { getPresentationTier } from "../lib/presentationTier";
+import { preloadableLazy, useLazyComponentReady } from "../lib/preloadableLazy";
 import { isTerminalFocused } from "../lib/terminalFocus";
 import { buildProjectsPageLocation } from "../projectsRoute";
 import { buildPullRequestsPageLocation } from "../pullRequestsRoute";
@@ -19,31 +20,29 @@ import { resolveThreadRouteTarget } from "../threadRoutes";
 import type { ChatComposerHandle } from "./chat/ChatComposer";
 import { CommandDialog } from "./ui/command";
 
-const LazyCommandPaletteDialog = lazy(() =>
-  import("./CommandPaletteDialog").then((module) => ({
-    default: module.CommandPaletteDialog,
-  })),
+const CommandPaletteDialog = preloadableLazy(() =>
+  import("./CommandPaletteDialog").then((module) => module.CommandPaletteDialog),
 );
+
+/** Warms the palette dialog chunk so the first open renders without a round trip. */
+export function preloadCommandPaletteDialog(): void {
+  void CommandPaletteDialog.preload();
+}
 
 function LazyCommandPaletteDialogMount() {
   const open = useCommandPaletteStore((store) => store.open);
   const [hasOpened, setHasOpened] = useState(open);
+  // Derived during render: an effect added a commit before the import started.
+  if (open && !hasOpened) setHasOpened(true);
+  // Mounting only once the chunk resolved keeps the first open free of a
+  // committed Suspense fallback and React's fallback-reveal throttle.
+  const ready = useLazyComponentReady(CommandPaletteDialog, hasOpened);
 
-  useEffect(() => {
-    if (open) {
-      setHasOpened(true);
-    }
-  }, [open]);
-
-  if (!hasOpened) {
+  if (!hasOpened || !ready) {
     return null;
   }
 
-  return (
-    <Suspense fallback={null}>
-      <LazyCommandPaletteDialog />
-    </Suspense>
-  );
+  return <CommandPaletteDialog />;
 }
 
 export function CommandPalette({ children }: { children: ReactNode }) {

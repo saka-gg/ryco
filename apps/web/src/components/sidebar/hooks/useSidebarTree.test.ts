@@ -254,6 +254,65 @@ describe("composeSidebarTree", () => {
     ).toEqual([ThreadId.make("thread-moved")]);
   });
 
+  it("assigns every session to its node in one pass across directory, link and branch rules", () => {
+    const tree = composeSidebarTree({
+      isGitRepoByProjectId: new Map([[ProjectId.make("project-1"), true]]),
+      nowMs: Date.parse("2026-05-08T00:00:00.000Z"),
+      projects: [makeProject()],
+      threads: [
+        makeThread({ id: ThreadId.make("on-main"), branch: "main" }),
+        makeThread({
+          id: ThreadId.make("by-directory"),
+          branch: "feature/a",
+          worktreePath: "/repo/worktrees/a/",
+        }),
+        makeThread({
+          id: ThreadId.make("by-link"),
+          branch: "feature/b",
+          worktreeId: "worktree-b",
+          worktreePath: "/elsewhere/b",
+        }),
+        makeThread({
+          id: ThreadId.make("archived"),
+          branch: "feature/a",
+          worktreePath: "/repo/worktrees/a",
+          archivedAt: "2026-05-02T00:00:00.000Z",
+        }),
+      ],
+      worktrees: [
+        makeWorktree({ worktreeId: "worktree-main", worktreePath: null }),
+        makeWorktree({
+          branch: "feature/a",
+          origin: "branch",
+          worktreeId: "worktree-a",
+          worktreePath: "/repo/worktrees/a",
+        }),
+        makeWorktree({
+          branch: "feature/b",
+          origin: "branch",
+          worktreeId: "worktree-b",
+          worktreePath: "/repo/worktrees/b",
+        }),
+      ],
+    });
+
+    const sessionsByNode = new Map(
+      (tree.projects[0]?.worktrees ?? []).map((entry) => [
+        entry.worktree.worktreeId,
+        {
+          sessions: entry.sessions.map((thread) => thread.id),
+          archived: entry.archivedSessions.map((thread) => thread.id),
+        },
+      ]),
+    );
+    expect(sessionsByNode.get("worktree-main")?.sessions).toEqual(["on-main"]);
+    expect(sessionsByNode.get("worktree-a")).toEqual({
+      sessions: ["by-directory"],
+      archived: ["archived"],
+    });
+    expect(sessionsByNode.get("worktree-b")?.sessions).toEqual(["by-link"]);
+  });
+
   it("keeps a session on its linked worktree when its directory is spelled differently", () => {
     const tree = composeSidebarTree({
       isGitRepoByProjectId: new Map([[ProjectId.make("project-1"), true]]),

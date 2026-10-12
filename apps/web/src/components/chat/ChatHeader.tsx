@@ -19,6 +19,7 @@ import { HEADER_CHROME_ICON_BUTTON_CLASS_NAME } from "./headerChrome";
 import type { LinkedWorktreeItem } from "../worktrees/LinkedWorktreeItemDialog";
 import { usePerfMark, useDevPropDiff } from "../../perf/tabSwitchInstrumentation";
 import { formatLiveAgentCount, LiveAgentCountBadge } from "../LiveAgentCountBadge";
+import { preloadWorkspacePanelForIntent } from "../../workspacePanelPreload";
 
 interface ChatHeaderProps {
   activeThreadEnvironmentId: EnvironmentId;
@@ -123,6 +124,8 @@ export const ChatHeader = memo(function ChatHeader({
             <Toggle
               pressed={props.workspacePanelOpen}
               onPressedChange={props.onToggleWorkspacePanel}
+              onPointerEnter={preloadWorkspacePanelForIntent}
+              onFocus={preloadWorkspacePanelForIntent}
               aria-label={
                 props.liveAgentCount > 0
                   ? `Toggle workspace panel, ${formatLiveAgentCount(props.liveAgentCount)}`

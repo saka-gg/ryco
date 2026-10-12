@@ -157,10 +157,9 @@ describe("assertSupportedOpenCodeBinary timeout", () => {
 });
 
 /**
- * The real runtime with a recording spawner. SAFETY: only `--version` gets a (mock) process
- * handle. Every other command — in particular `serve` — fails at spawn, because the real
- * `startOpenCodeServerProcess` finalizer runs `process.kill(-pid)` and a mock pid of 1 would
- * signal every process the user owns.
+ * The real runtime with a recording spawner. Only `--version` gets a (mock) process handle;
+ * every other command — in particular `serve` — fails at spawn, so these tests observe exactly
+ * which commands the version gate lets through.
  */
 function recordingRuntimeLayer(versionStdout: string) {
   const spawned: Array<ReadonlyArray<string>> = [];
@@ -224,4 +223,80 @@ describe("OpenCode pre-spawn version gate", () => {
       expect(spawned).toEqual([["--version"]]);
     }).pipe(Effect.provide(layer));
   });
+  effectIt.live(
+    "reuses a version the caller just verified instead of running --version again",
+    () => {
+      const { layer, spawned } = recordingRuntimeLayer("opencode v2.0.18\n");
+      return Effect.gen(function* () {
+        const runtime = yield* OpenCodeRuntime;
+        // The recording spawner refuses `serve`, so the attempt fails right after the gate.
+        yield* runtime
+          .connectToOpenCodeServer({
+            binaryPath: "opencode",
+            verifiedBinaryVersion: "1.18.34",
+            serverUrl: "",
+          })
+          .pipe(Effect.scoped, Effect.flip);
+        expect(spawned.some((args) => args.length === 1 && args[0] === "--version")).toBe(false);
+      }).pipe(Effect.provide(layer));
+    },
+  );
+
+  effectIt.live("still runs the gate when the claimed version is unsupported", () => {
+    const { layer, spawned } = recordingRuntimeLayer("opencode v2.0.18\n");
+    return Effect.gen(function* () {
+      const runtime = yield* OpenCodeRuntime;
+      const error = yield* runtime
+        .startOpenCodeServerProcess({ binaryPath: "opencode", verifiedBinaryVersion: "2.0.18" })
+        .pipe(Effect.scoped, Effect.flip);
+      expect(error.detail).toContain("not supported yet");
+      expect(spawned).toEqual([["--version"]]);
+    }).pipe(Effect.provide(layer));
+  });
+});
+
+describe("OpenCode serve teardown", () => {
+  effectIt.live(
+    "terminates the serve process group through the spawner handle, SIGKILLing after a 1 s grace",
+    () => {
+      const kills: Array<unknown> = [];
+      const encoder = new TextEncoder();
+      const spawner = ChildProcessSpawner.make(() =>
+        Effect.succeed(
+          ChildProcessSpawner.makeHandle({
+            // Never a live process group, should anything ever signal it directly.
+            pid: ChildProcessSpawner.ProcessId(2_147_483_000),
+            exitCode: Effect.never,
+            isRunning: Effect.succeed(true),
+            kill: (options) => Effect.sync(() => kills.push(options)),
+            unref: Effect.succeed(Effect.void),
+            stdin: Sink.drain,
+            stdout: Stream.make(
+              encoder.encode("opencode server listening on http://127.0.0.1:4096\n"),
+            ),
+            stderr: Stream.empty,
+            all: Stream.empty,
+            getInputFd: () => Sink.drain,
+            getOutputFd: () => Stream.empty,
+          }),
+        ),
+      );
+      const layer = OpenCodeRuntimeLive.pipe(
+        Layer.provide(Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner)),
+      );
+      return Effect.gen(function* () {
+        const runtime = yield* OpenCodeRuntime;
+        const server = yield* runtime
+          .startOpenCodeServerProcess({
+            binaryPath: "opencode",
+            verifiedBinaryVersion: "1.18.34",
+            port: 4096,
+          })
+          .pipe(Effect.scoped);
+        expect(server.url).toBe("http://127.0.0.1:4096");
+        // One group-aware kill: no fixed sleep, no raw `process.kill(-pid)`.
+        expect(kills).toEqual([{ killSignal: "SIGTERM", forceKillAfter: "1 second" }]);
+      }).pipe(Effect.provide(layer));
+    },
+  );
 });

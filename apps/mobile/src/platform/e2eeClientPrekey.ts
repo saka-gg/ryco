@@ -1,5 +1,5 @@
 import type { KVService } from "@ryco/client-runtime/platform";
-import { decodeBase64Url, encodeBase64Url } from "@ryco/client-runtime/relay";
+import { decodeBase64Url, encodeBase64Url } from "@ryco/client-runtime/relay/base64url";
 import {
   E2EE_MAX_CLOCK_SKEW,
   E2EE_PREKEY_LIFETIME,

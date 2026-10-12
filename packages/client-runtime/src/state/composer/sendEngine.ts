@@ -362,24 +362,26 @@ async function commitSendTurnDispatchOnce(sendInput: CommitSendTurnDispatchInput
   // restamped: the time spent in the dialog (and any compaction) is not work.
   const input = reviewed ? { ...sendInput, createdAt: new Date().toISOString() } : sendInput;
   // Server-side writes derived from this message must only run once the send
-  // commits; otherwise an undone first send leaves orphan title/settings.
-  if (input.isFirstMessage && input.isServerThread) {
-    await input.api.orchestration.dispatchCommand({
-      type: "thread.meta.update",
-      commandId: input.newCommandId(),
-      threadId: input.threadId,
-      title: input.title,
-    });
-  }
-
+  // commits; otherwise an undone first send leaves orphan title/settings. The
+  // title and the next-turn settings are independent: one round trip, not two.
   if (input.isServerThread) {
-    await input.persistThreadSettingsForNextTurn({
-      threadId: input.threadId,
-      createdAt: input.createdAt,
-      runtimeMode: input.runtimeMode,
-      interactionMode: input.interactionMode,
-      tokenMode: input.tokenMode,
-    });
+    await Promise.all([
+      input.isFirstMessage
+        ? input.api.orchestration.dispatchCommand({
+            type: "thread.meta.update",
+            commandId: input.newCommandId(),
+            threadId: input.threadId,
+            title: input.title,
+          })
+        : undefined,
+      input.persistThreadSettingsForNextTurn({
+        threadId: input.threadId,
+        createdAt: input.createdAt,
+        runtimeMode: input.runtimeMode,
+        interactionMode: input.interactionMode,
+        tokenMode: input.tokenMode,
+      }),
+    ]);
   }
 
   if (reviewed) {

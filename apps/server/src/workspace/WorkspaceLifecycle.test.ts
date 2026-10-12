@@ -153,6 +153,7 @@ function fixture() {
     failCommand: new Set<OrchestrationCommand["type"]>(),
     failStop: false,
     failRemoval: false,
+    gitCalls: [] as string[],
   };
 
   const updateWorktree = (id: WorktreeId, patch: Record<string, unknown>) => {
@@ -217,7 +218,10 @@ function fixture() {
       return Effect.succeed({ sequence: state.commands.length });
     });
 
-  const runGit = (cwd: string, args: readonly string[]) => git(cwd, ...args);
+  const runGit = (cwd: string, args: readonly string[]) => {
+    state.gitCalls.push(`${cwd}\u0000${args.join(" ")}`);
+    return git(cwd, ...args);
+  };
   const gitDriver = {
     execute: (input: Parameters<GitVcsDriverShape["execute"]>[0]) =>
       Effect.try({
@@ -502,6 +506,39 @@ describe("workspace lifecycle service", () => {
     expect(await blockers()).toContain("commits that the project HEAD does not contain");
     expect(existsSync(f.checkout)).toBe(true);
     expect(f.state.removals).toBe(0);
+  });
+
+  it("does not treat ignored directories holding only empty directories as protected content", async () => {
+    const f = fixture();
+    writeFileSync(
+      path.join(f.repo, ".git", "info", "exclude"),
+      "node_modules/\nscratch-cache/\nuserdata/\n",
+    );
+    mkdirSync(path.join(f.checkout, "node_modules", "dep"), { recursive: true });
+    writeFileSync(path.join(f.checkout, "node_modules", "dep", "index.js"), "cache");
+    // Matching mode lists these; nothing in them can be lost.
+    mkdirSync(path.join(f.checkout, "scratch-cache", "a", "b"), { recursive: true });
+    const emptyOnly = await f.run((s) =>
+      s.preview({ worktreeId: topicId, action: "remove-checkout" }),
+    );
+    expect(emptyOnly.blockers).toEqual([]);
+
+    // A file anywhere below keeps the directory protected.
+    mkdirSync(path.join(f.checkout, "userdata", "profiles"), { recursive: true });
+    writeFileSync(path.join(f.checkout, "userdata", "profiles", "state.json"), "{}");
+    const withContent = await f.run((s) =>
+      s.preview({ worktreeId: topicId, action: "remove-checkout" }),
+    );
+    expect(withContent.blockers.join(" ")).toContain("userdata/");
+    expect(withContent.blockers.join(" ")).not.toContain("scratch-cache/");
+
+    // Listing shares the project's repository facts and reports the same.
+    const summary = (await f.run((s) => s.list(projectId))).find(
+      (row) => row.worktreeId === topicId,
+    );
+    expect(
+      summary?.actions.find((action) => action.action === "remove-checkout")?.blockers.join(" "),
+    ).toContain("userdata/");
   });
 
   it("blocks active work and running terminal commands; idle shells are closed with history", async () => {
@@ -836,6 +873,49 @@ describe("workspace lifecycle service", () => {
     // Suggestions never act on their own.
     expect(f.state.commands).toEqual([]);
     expect(existsSync(f.checkout)).toBe(true);
+  });
+});
+
+describe("workspace listing reads", () => {
+  const statusCalls = (calls: ReadonlyArray<string>, checkout: string) =>
+    calls.filter((call) => call.startsWith(`${checkout}\u0000`) && call.includes(" status "));
+
+  it("reuses a checkout's Git reads across listings until the checkout changes", async () => {
+    const f = fixture();
+    await f.run((service) =>
+      Effect.gen(function* () {
+        const first = yield* service.list(projectId);
+        const afterFirst = statusCalls(f.state.gitCalls, f.checkout).length;
+        expect(afterFirst).toBe(1);
+        // Listing again (and the suggestions next to it) reuses the reads.
+        const second = yield* service.list(projectId);
+        yield* service.suggestions();
+        expect(statusCalls(f.state.gitCalls, f.checkout)).toHaveLength(afterFirst);
+        expect(second).toEqual(first);
+
+        // Staging a file rewrites the worktree's index: the next listing reads again.
+        writeFileSync(path.join(f.checkout, "staged.txt"), "work");
+        f.git(f.checkout, "add", "staged.txt");
+        const third = yield* service.list(projectId);
+        expect(statusCalls(f.state.gitCalls, f.checkout)).toHaveLength(afterFirst + 1);
+        const topic = third.find((summary) => summary.worktreeId === topicId);
+        expect(topic?.changes?.modified ?? 0).toBeGreaterThan(0);
+      }),
+    );
+  });
+
+  it("previews always inspect from scratch", async () => {
+    const f = fixture();
+    await f.run((service) =>
+      Effect.gen(function* () {
+        yield* service.list(projectId);
+        const before = statusCalls(f.state.gitCalls, f.checkout).length;
+        writeFileSync(path.join(f.checkout, "notes.txt"), "user work");
+        const preview = yield* service.preview({ worktreeId: topicId, action: "remove-checkout" });
+        expect(statusCalls(f.state.gitCalls, f.checkout)).toHaveLength(before + 1);
+        expect(preview.blockers.join(" ")).toContain("untracked file");
+      }),
+    );
   });
 });
 

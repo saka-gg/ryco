@@ -81,6 +81,7 @@ it.each([null, "/repo/worktrees/feature"])(
       },
     };
     let emit: (status: VcsStatusResult) => void = () => undefined;
+    // Rows read the branch badge summary, not full status.
     const unwatch = watchGitStatus(
       { environmentId, cwd },
       {
@@ -91,6 +92,7 @@ it.each([null, "/repo/worktrees/feature"])(
           return () => undefined;
         },
       },
+      { view: "summary" },
     );
     const props: InboxSidebarProps = {
       projects: [

@@ -59,6 +59,15 @@ class FakeSocket implements HubRelaySocket {
   }
 }
 
+/**
+ * Let the identity's proof finish before the test drives the socket. The
+ * session opens its socket beside the proof, so a test modelling "the proof
+ * was ready when the socket opened" must let the proof settle first.
+ */
+async function proofPrepared(): Promise<void> {
+  for (let turn = 0; turn < 5; turn += 1) await Promise.resolve();
+}
+
 function encoded(frame: RelayFrame): Uint8Array {
   const result = encodeRelayFrame(frame);
   if (!result.ok) throw new Error(result.error.code);
@@ -231,7 +240,7 @@ describe("RelayConnectionSession", () => {
       onTerminal: (error) => terminal.push(error),
     });
     const authenticating = session.authenticate();
-    await Promise.resolve();
+    await proofPrepared();
     socket.emit("open", {} as Event);
     expect(socket.sent).toHaveLength(1);
     const auth = decodeRelayFrame(socket.sent[0]!);
@@ -272,7 +281,7 @@ describe("RelayConnectionSession", () => {
       onTerminal: (error) => terminal.push(error),
     });
     const authenticating = session.authenticate();
-    await Promise.resolve();
+    await proofPrepared();
     socket.emit("open", {} as Event);
     socket.emit("message", {
       data: encoded({
@@ -312,7 +321,7 @@ describe("RelayConnectionSession", () => {
       onTerminal: () => undefined,
     });
     const authenticating = session.authenticate();
-    await Promise.resolve();
+    await proofPrepared();
     socket.emit("open", {} as Event);
     socket.emit("message", {
       data: encoded({
@@ -346,7 +355,7 @@ describe("RelayConnectionSession", () => {
       onTerminal: () => undefined,
     });
     const authenticating = session.authenticate();
-    await Promise.resolve();
+    await proofPrepared();
     socket.emit("open", {} as Event);
     socket.emit("message", {
       data: encoded({
@@ -370,7 +379,7 @@ describe("RelayConnectionSession", () => {
       onTerminal: () => undefined,
     });
     const authenticating = session.authenticate();
-    await Promise.resolve();
+    await proofPrepared();
     socket.emit("open", {} as Event);
     socket.emit("message", {
       data: encoded({
@@ -422,7 +431,7 @@ describe("RelayConnectionSession", () => {
       onTerminal: () => undefined,
     });
     const authenticating = session.authenticate();
-    await Promise.resolve();
+    await proofPrepared();
     socket.emit("open", {} as Event);
     [...callbacks.values()][0]?.();
     await expect(authenticating).rejects.toMatchObject({ kind: "authentication_timeout" });
@@ -503,7 +512,7 @@ describe("RelayConnectionSession", () => {
       onTerminal: () => undefined,
     });
     const authenticating = session.authenticate();
-    await Promise.resolve();
+    await proofPrepared();
     socket.emit("open", {} as Event);
     socket.emit("message", {
       data: encoded({
@@ -537,7 +546,7 @@ describe("RelayConnectionSession", () => {
         onTerminal: (error) => terminal.push(error),
       });
       const authenticating = session.authenticate();
-      await Promise.resolve();
+      await proofPrepared();
       socket.emit("open", {} as Event);
       socket.emit("message", {
         data: encoded({
@@ -582,7 +591,7 @@ describe("RelayConnectionSession", () => {
         onTerminal: () => undefined,
       });
       const authenticating = session.authenticate();
-      for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();
+      for (let turn = 0; turn < 10; turn += 1) await proofPrepared();
       socket.emit("open", {} as Event);
       socket.emit("message", {
         data: encoded({
@@ -604,7 +613,7 @@ describe("RelayConnectionSession", () => {
     await expect(rejection(100)).resolves.toBe("authentication_failed");
   });
 
-  it("does not open a socket when shutdown wins the proof-preflight race", async () => {
+  it("releases the early socket and wipes a late proof when shutdown wins the proof-preflight race", async () => {
     let releaseProof: ((frame: RelayNodeAuthHandshake) => void) | undefined;
     const proof = new Promise<RelayNodeAuthHandshake>((resolve) => {
       releaseProof = resolve;
@@ -618,13 +627,14 @@ describe("RelayConnectionSession", () => {
       nonce: new Uint8Array(32).fill(7),
       signature: new Uint8Array(64).fill(8),
     } as RelayNodeAuthHandshake;
-    let opens = 0;
+    const sockets: FakeSocket[] = [];
     const session = new RelayConnectionSession({
       identity: { ...identity(), createRelayAuthenticationFrame: async () => proof },
       transport: {
         open: () => {
-          opens += 1;
-          return new FakeSocket();
+          const socket = new FakeSocket();
+          sockets.push(socket);
+          return socket;
         },
       },
       hubOrigin: "https://relay.example",
@@ -636,15 +646,160 @@ describe("RelayConnectionSession", () => {
     void authenticating.catch(() => {
       cancelled = true;
     });
+    // The socket opens beside the proof rather than after it.
+    expect(sockets).toHaveLength(1);
     session.close();
     await Promise.resolve();
     await Promise.resolve();
     expect(cancelled).toBe(true);
+    expect(sockets[0]!.closeCalls).toBe(1);
+    expect([...sockets[0]!.listeners.values()].every((listeners) => listeners.size === 0)).toBe(
+      true,
+    );
     releaseProof?.(frame);
     await expect(authenticating).rejects.toMatchObject({ kind: "network" });
-    expect(opens).toBe(0);
+    await proofPrepared();
+    expect(sockets).toHaveLength(1);
+    expect(sockets[0]!.sent).toHaveLength(0);
     expect(frame.nonce.every((byte) => byte === 0)).toBe(true);
     expect(frame.signature.every((byte) => byte === 0)).toBe(true);
+  });
+
+  it("sends the proof as soon as it is ready on a socket that opened first", async () => {
+    let releaseProof: ((frame: RelayNodeAuthHandshake) => void) | undefined;
+    const base = identity();
+    const socket = new FakeSocket();
+    const session = new RelayConnectionSession({
+      identity: {
+        ...base,
+        createRelayAuthenticationFrame: (...input) =>
+          new Promise<RelayNodeAuthHandshake>((resolve) => {
+            releaseProof = (frame) => resolve(frame);
+            void base.createRelayAuthenticationFrame(...input).then((frame) => {
+              pending = frame;
+            });
+          }),
+      },
+      transport: { open: () => socket },
+      hubOrigin: "https://relay.example",
+      onFrame: () => undefined,
+      onTerminal: () => undefined,
+    });
+    let pending: RelayNodeAuthHandshake | undefined;
+    const authenticating = session.authenticate();
+    socket.emit("open", {} as Event);
+    expect(socket.sent).toHaveLength(0);
+    await proofPrepared();
+    releaseProof?.(pending!);
+    await proofPrepared();
+    expect(socket.sent).toHaveLength(1);
+    const auth = decodeRelayFrame(socket.sent[0]!);
+    expect(auth.ok && auth.value.type).toBe("auth");
+    socket.emit("message", {
+      data: encoded({
+        type: "ready",
+        protocolMajor: 1,
+        protocolMinor: 2,
+        limits: RELAY_INITIAL_LIMITS,
+      }),
+    } as MessageEvent);
+    await expect(authenticating).resolves.toMatchObject({ type: "ready" });
+    session.close();
+  });
+
+  it("falls back to proof-first order when the proof outlasts the early socket", async () => {
+    let releaseProof: ((frame: RelayNodeAuthHandshake) => void) | undefined;
+    const base = identity();
+    const sockets: FakeSocket[] = [];
+    const timers = new Map<number, { readonly callback: () => void; readonly ms: number }>();
+    let nextTimer = 0;
+    const session = new RelayConnectionSession({
+      identity: {
+        ...base,
+        createRelayAuthenticationFrame: (...input) =>
+          base.createRelayAuthenticationFrame(...input).then(
+            (frame) =>
+              new Promise<RelayNodeAuthHandshake>((resolve) => {
+                releaseProof = () => resolve(frame);
+              }),
+          ),
+      },
+      transport: {
+        open: () => {
+          const socket = new FakeSocket();
+          sockets.push(socket);
+          return socket;
+        },
+      },
+      hubOrigin: "https://relay.example",
+      scheduler: {
+        setTimeout: (callback, ms) => {
+          const handle = ++nextTimer;
+          timers.set(handle, { callback, ms });
+          return handle;
+        },
+        clearTimeout: (handle) => {
+          timers.delete(handle as number);
+        },
+      },
+      onFrame: () => undefined,
+      onTerminal: () => undefined,
+    });
+    const authenticating = session.authenticate();
+    sockets[0]!.emit("open", {} as Event);
+    // The early socket waits for the proof one second short of the Hub's deadline.
+    const wait = [...timers.values()].find((timer) => timer.ms === 4_000);
+    expect(wait).toBeDefined();
+    wait!.callback();
+    expect(sockets[0]!.closeCalls).toBe(1);
+    expect([...sockets[0]!.listeners.values()].every((listeners) => listeners.size === 0)).toBe(
+      true,
+    );
+    expect(sockets).toHaveLength(1);
+    // Proof first, then a fresh socket carries it.
+    await proofPrepared();
+    releaseProof?.(undefined as never);
+    await proofPrepared();
+    expect(sockets).toHaveLength(2);
+    sockets[1]!.emit("open", {} as Event);
+    expect(sockets[1]!.sent).toHaveLength(1);
+    expect(sockets[0]!.sent).toHaveLength(0);
+    sockets[1]!.emit("message", {
+      data: encoded({
+        type: "ready",
+        protocolMajor: 1,
+        protocolMinor: 2,
+        limits: RELAY_INITIAL_LIMITS,
+      }),
+    } as MessageEvent);
+    await expect(authenticating).resolves.toMatchObject({ type: "ready" });
+    expect(session.socket).toBe(sockets[1]);
+    session.close();
+  });
+
+  it("reports the proof's own failure when the early socket failed first", async () => {
+    let rejectProof: ((error: unknown) => void) | undefined;
+    const socket = new FakeSocket();
+    const session = new RelayConnectionSession({
+      identity: {
+        ...identity(),
+        createRelayAuthenticationFrame: () =>
+          new Promise<RelayNodeAuthHandshake>((_resolve, reject) => {
+            rejectProof = reject;
+          }),
+      },
+      transport: { open: () => socket },
+      hubOrigin: "https://relay.example",
+      onFrame: () => undefined,
+      onTerminal: () => undefined,
+    });
+    const authenticating = session.authenticate();
+    socket.emit("error", {} as Event);
+    expect(socket.closeCalls).toBe(1);
+    // A refused proof, not the socket's network drop, is what the connector sees.
+    rejectProof?.(new HubRelayAuthenticationError("authentication_failed"));
+    await expect(authenticating).rejects.toMatchObject({ kind: "authentication_failed" });
+    expect(socket.closeCalls).toBe(1);
   });
 
   it("bounds proof failures without reflecting sensitive causes", async () => {
@@ -675,8 +830,8 @@ describe("RelayConnectionSession", () => {
     expect(JSON.stringify(error)).not.toContain(canary);
   });
 
-  it("preserves a bounded transient proof-preflight reason without opening a socket", async () => {
-    let opens = 0;
+  it("preserves a bounded transient proof-preflight reason and releases the early socket", async () => {
+    const sockets: FakeSocket[] = [];
     const session = new RelayConnectionSession({
       identity: {
         ...identity(),
@@ -686,8 +841,9 @@ describe("RelayConnectionSession", () => {
       },
       transport: {
         open: () => {
-          opens += 1;
-          return new FakeSocket();
+          const socket = new FakeSocket();
+          sockets.push(socket);
+          return socket;
         },
       },
       hubOrigin: "https://relay.example",
@@ -695,6 +851,111 @@ describe("RelayConnectionSession", () => {
       onTerminal: () => undefined,
     });
     await expect(session.authenticate()).rejects.toMatchObject({ kind: "server_draining" });
-    expect(opens).toBe(0);
+    expect(sockets).toHaveLength(1);
+    expect(sockets[0]!.closeCalls).toBe(1);
+    expect(sockets[0]!.sent).toHaveLength(0);
+    expect([...sockets[0]!.listeners.values()].every((listeners) => listeners.size === 0)).toBe(
+      true,
+    );
+    expect(session.proofRefused).toBe(true);
+  });
+
+  it("does not count a proof that failed on the network as refused", async () => {
+    const sockets: FakeSocket[] = [];
+    const session = new RelayConnectionSession({
+      identity: {
+        ...identity(),
+        createRelayAuthenticationFrame: async () => {
+          throw new HubRelayAuthenticationError("network");
+        },
+      },
+      transport: {
+        open: () => {
+          const socket = new FakeSocket();
+          sockets.push(socket);
+          return socket;
+        },
+      },
+      hubOrigin: "https://relay.example",
+      onFrame: () => undefined,
+      onTerminal: () => undefined,
+    });
+    await expect(session.authenticate()).rejects.toMatchObject({ kind: "network" });
+    // It reached no Hub, so the next attempt keeps opening beside its proof.
+    expect(session.proofRefused).toBe(false);
+  });
+
+  it("opens no socket for a refused proof when built proof-first", async () => {
+    const sockets: FakeSocket[] = [];
+    const session = new RelayConnectionSession({
+      identity: {
+        ...identity(),
+        createRelayAuthenticationFrame: async () => {
+          throw new HubRelayAuthenticationError("server_draining");
+        },
+      },
+      transport: {
+        open: () => {
+          const socket = new FakeSocket();
+          sockets.push(socket);
+          return socket;
+        },
+      },
+      hubOrigin: "https://relay.example",
+      proofFirst: true,
+      onFrame: () => undefined,
+      onTerminal: () => undefined,
+    });
+    await expect(session.authenticate()).rejects.toMatchObject({ kind: "server_draining" });
+    expect(sockets).toHaveLength(0);
+    expect(session.proofRefused).toBe(true);
+  });
+
+  it("opens the socket only after the proof when built proof-first", async () => {
+    let releaseProof: (() => void) | undefined;
+    const base = identity();
+    const sockets: FakeSocket[] = [];
+    const session = new RelayConnectionSession({
+      identity: {
+        ...base,
+        createRelayAuthenticationFrame: (...input) =>
+          base.createRelayAuthenticationFrame(...input).then(
+            (frame) =>
+              new Promise<RelayNodeAuthHandshake>((resolve) => {
+                releaseProof = () => resolve(frame);
+              }),
+          ),
+      },
+      transport: {
+        open: () => {
+          const socket = new FakeSocket();
+          sockets.push(socket);
+          return socket;
+        },
+      },
+      hubOrigin: "https://relay.example",
+      proofFirst: true,
+      onFrame: () => undefined,
+      onTerminal: () => undefined,
+    });
+    const authenticating = session.authenticate();
+    await proofPrepared();
+    expect(sockets).toHaveLength(0);
+    releaseProof?.();
+    await proofPrepared();
+    expect(sockets).toHaveLength(1);
+    sockets[0]!.emit("open", {} as Event);
+    expect(sockets[0]!.sent).toHaveLength(1);
+    sockets[0]!.emit("message", {
+      data: encoded({
+        type: "ready",
+        protocolMajor: 1,
+        protocolMinor: 2,
+        limits: RELAY_INITIAL_LIMITS,
+      }),
+    } as MessageEvent);
+    await expect(authenticating).resolves.toMatchObject({ type: "ready" });
+    expect(session.proofRefused).toBe(false);
+    session.close();
   });
 });

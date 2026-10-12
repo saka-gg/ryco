@@ -105,6 +105,14 @@ function targetOf(input: OpenAutomationsDialogInput): AutomationsDialogProjectTa
 }
 
 /**
+ * Starts loading the dialog's code ahead of a likely open (its entry is
+ * hovered or focused), so the first open does not wait on the chunk.
+ */
+export function preloadAutomationsDialog(): void {
+  void import("./dialog/AutomationsDialog");
+}
+
+/**
  * Opens the Automations dialog. Opening it while it is open re-targets it
  * (the host decides whether a draft blocks that) and keeps the control it
  * grew out of.

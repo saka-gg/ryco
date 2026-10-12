@@ -6,6 +6,7 @@ import { memo, useCallback, useMemo } from "react";
 import { useComposerDraftStore, type DraftId } from "../composerDraftStore";
 import { useStore } from "../store";
 import { createProjectSelectorByRef, createThreadSelectorByRef } from "../storeSelectors";
+import { loadThreadTerminalDrawer } from "../workspacePanelPreload";
 import {
   resolveEffectiveEnvMode,
   type EnvMode,
@@ -17,6 +18,21 @@ import { BranchToolbarEnvModeSelector } from "./BranchToolbarEnvModeSelector";
 import { ProjectSwitcher } from "./ProjectSwitcher";
 import { Button } from "./ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
+import { LazyNewWorktreeDialog } from "./worktrees/lazyWorktreeDialogs";
+
+/**
+ * Hover or focus on the terminal toggle: fetch the drawer's xterm chunk so the
+ * click only waits on the PTY (which the drawer's open already starts early).
+ * Code only, never a terminal open.
+ */
+function preloadTerminalDrawerForIntent(): void {
+  void loadThreadTerminalDrawer().catch(() => undefined);
+}
+
+/** Hover or focus on "From PR / issue": the dialog mounts on its chunk. */
+function preloadNewWorktreeDialogForIntent(): void {
+  void LazyNewWorktreeDialog.preload();
+}
 
 interface BranchToolbarProps {
   environmentId: EnvironmentId;
@@ -161,6 +177,8 @@ export const BranchToolbar = memo(function BranchToolbar({
                 className="font-medium text-muted-foreground/70 hover:text-foreground/80"
                 disabled={!terminalAvailable}
                 onClick={onToggleTerminal}
+                onPointerEnter={terminalOpen ? undefined : preloadTerminalDrawerForIntent}
+                onFocus={terminalOpen ? undefined : preloadTerminalDrawerForIntent}
                 aria-label="Toggle terminal drawer"
                 aria-pressed={terminalOpen}
               >
@@ -198,6 +216,8 @@ export const BranchToolbar = memo(function BranchToolbar({
                     size="xs"
                     className="shrink-0 font-medium text-muted-foreground/70 hover:text-foreground/80 phone:hidden"
                     onClick={onOpenWorktreeSources}
+                    onPointerEnter={preloadNewWorktreeDialogForIntent}
+                    onFocus={preloadNewWorktreeDialogForIntent}
                     data-testid="branch-toolbar-worktree-sources"
                   >
                     <GitPullRequestIcon className="size-3 shrink-0" />

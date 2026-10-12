@@ -1,6 +1,6 @@
 import * as Crypto from "node:crypto";
 
-import { verifyNativeTrustApprovalQr } from "@ryco/client-runtime/authorization";
+import { verifyNativeTrustApprovalQr } from "@ryco/client-runtime/authorization/e2ee";
 import { decodeBase64Url, encodeBase64Url } from "@ryco/client-runtime/relay";
 import {
   e2eeBytesEqual,

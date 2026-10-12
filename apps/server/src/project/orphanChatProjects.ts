@@ -8,6 +8,9 @@
  * is old enough that no send can still be retrying it. Its folder goes too, but only when it is
  * empty and inside the chats root; files are never deleted here.
  *
+ * The candidates come from one SQL anti-join (`listOrphanChatProjects`), not a thread read per
+ * chat, and the sweep runs after the command gate opens.
+ *
  * A chat fork (`new-chat` destination) creates its chat project before it publishes the fork's
  * thread, and may wait longer than any age limit (a server that was down, a retry the client has
  * not sent yet). The fork ledger names those chats; the sweep never retires one of them.
@@ -15,15 +18,10 @@
  * @module OrphanChatProjects
  */
 import { CommandId, type OrchestrationCommand, type ProjectId } from "@ryco/contracts";
-import { isChatProject } from "@ryco/shared/projectKind";
 import { Duration, Effect } from "effect";
 
 import type { ThreadForkRepositoryError } from "../persistence/Errors.ts";
 import type { ProjectionProjectRepositoryShape } from "../persistence/Services/ProjectionProjects.ts";
-import {
-  isRolledBackThreadCreation,
-  type ProjectionThreadRepositoryShape,
-} from "../persistence/Services/ProjectionThreads.ts";
 import type { ThreadForkRepositoryShape } from "../persistence/Services/ThreadForks.ts";
 import type { ThreadForkLedgerRow } from "../threadFork/forkLedger.ts";
 import type { ChatFoldersShape } from "./chatFolders.ts";
@@ -32,9 +30,11 @@ import type { ChatFoldersShape } from "./chatFolders.ts";
 export const ORPHAN_CHAT_PROJECT_MIN_AGE = Duration.hours(1);
 
 export interface OrphanChatProjectDependencies {
-  readonly projects: Pick<ProjectionProjectRepositoryShape, "listAll">;
-  /** Every thread row: live, archived, in Trash, or deleted but retained. */
-  readonly threads: Pick<ProjectionThreadRepositoryShape, "listByProjectId">;
+  /**
+   * Active chat projects older than the cutoff whose thread rows (live, archived, in Trash, or
+   * deleted but retained) are all rolled-back creations, if they have any.
+   */
+  readonly projects: Pick<ProjectionProjectRepositoryShape, "listOrphanChatProjects">;
   /** Removes a folder only when it is empty and strictly inside the chats root. */
   readonly chatFolders: Pick<ChatFoldersShape, "removeEmptyChatFolder">;
   /** The chat fork ledger: forks still bound for a new chat keep it ({@link forkHeldChatProjectIds}). */
@@ -90,12 +90,10 @@ export const removeOrphanChatProjects = Effect.fn("removeOrphanChatProjects")(fu
 ) {
   const cutoffMs =
     (deps.now ?? (() => new Date()))().getTime() - Duration.toMillis(ORPHAN_CHAT_PROJECT_MIN_AGE);
-  const chats = (yield* deps.projects.listAll()).filter(
-    (project) =>
-      isChatProject(project) &&
-      project.deletedAt === null &&
-      Date.parse(project.createdAt) < cutoffMs,
-  );
+  // Live, archived, trashed and used-then-deleted threads all keep the chat.
+  const chats = yield* deps.projects.listOrphanChatProjects({
+    createdBefore: new Date(cutoffMs).toISOString(),
+  });
   // An unreadable ledger fails the sweep before anything is deleted; the next start retries.
   const heldByForks = chats.length > 0 ? yield* forkHeldChatProjectIds(deps.threadForks) : null;
   let orphans = 0;
@@ -104,9 +102,6 @@ export const removeOrphanChatProjects = Effect.fn("removeOrphanChatProjects")(fu
   let skipped = 0;
   for (const chat of chats) {
     if (heldByForks?.has(chat.projectId)) continue;
-    // Live, archived, trashed and used-then-deleted threads all keep the chat.
-    const threads = yield* deps.threads.listByProjectId({ projectId: chat.projectId });
-    if (!threads.every(isRolledBackThreadCreation)) continue;
     orphans += 1;
     const removed = yield* deps
       .dispatch({

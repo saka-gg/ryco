@@ -164,7 +164,11 @@ const fixture = Effect.gen(function* () {
       },
     },
     settings: { getSettings: Effect.suspend(() => Effect.succeed(currentSettings)) },
-    snapshots: { getShellSnapshot: () => Effect.suspend(() => Effect.succeed(snapshot)) },
+    snapshots: {
+      getShellSnapshot: () => Effect.suspend(() => Effect.succeed(snapshot)),
+      getSnapshotSequence: () =>
+        Effect.sync(() => ({ snapshotSequence: snapshot.snapshotSequence })),
+    },
     providers: {
       listBindings: () =>
         Effect.suspend(() =>

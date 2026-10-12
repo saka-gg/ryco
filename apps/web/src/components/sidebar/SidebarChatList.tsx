@@ -22,6 +22,7 @@ import { useSidebarThreadActions } from "./hooks/useSidebarThreadActions";
 import { useThreadClipboardActions } from "./hooks/useThreadClipboardActions";
 import type { SidebarChatRow } from "./sidebarChats.logic";
 import { SidebarThreadRow } from "./SidebarThreadRow";
+import { preloadDraftRoute } from "./threadNavigationIntent";
 
 const CHATS_EXPANDED_STORAGE_KEY = "ryco:sidebar-chats-expanded";
 const EMPTY_PROJECT_MEMBERS = new Map();
@@ -146,6 +147,8 @@ export const SidebarChatList = memo(function SidebarChatList(props: SidebarChatL
                   data-testid="sidebar-new-chat"
                   className={`inline-flex size-5 cursor-pointer items-center justify-center rounded-md text-muted-foreground/60 transition-colors hover:bg-accent hover:text-foreground ${SIDEBAR_ROW_ACTION_COARSE_CLASS_NAME}`}
                   onClick={onNewChat}
+                  onPointerEnter={preloadDraftRoute}
+                  onFocus={preloadDraftRoute}
                 />
               }
             >

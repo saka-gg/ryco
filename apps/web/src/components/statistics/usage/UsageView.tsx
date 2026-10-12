@@ -18,10 +18,8 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { useMemo, useState } from "react";
-import { Area, AreaChart, CartesianGrid, XAxis, YAxis } from "recharts";
 
 import { Button } from "~/components/ui/button";
-import { ChartContainer, ChartTooltip, ChartTooltipContent } from "~/components/ui/chart";
 import {
   Select,
   SelectItem,
@@ -40,6 +38,7 @@ import {
 } from "~/lib/statisticsFormat";
 
 import { Panel, StatePanel, StatSkeleton } from "../../settings/statistics/parts";
+import { SeriesAreaChart } from "../charts";
 import type { StatisticsSearch } from "../statisticsSearch";
 import { useUsageSummary } from "../useUsageSummary";
 import {
@@ -84,7 +83,9 @@ export function UsageView({
     };
   }, [merged, search.providers, search.usageBreakdown]);
 
-  if (result.loading && !merged) return <StatSkeleton />;
+  // While this app's own node is still connecting there is nothing to ask yet:
+  // that is a loading state, not "no environments".
+  if ((result.loading || result.connecting) && !merged) return <StatSkeleton />;
   if (!merged || !derived) {
     const failed = result.environments.filter(
       (environment) =>
@@ -125,6 +126,12 @@ export function UsageView({
     allSelectedEnvironments || search.environmentIds?.length !== 1
       ? "all"
       : search.environmentIds[0]!;
+  const pendingLabels = result.pendingEnvironmentIds.flatMap((environmentId) => {
+    const label = result.availableEnvironments.find(
+      (environment) => environment.environmentId === environmentId,
+    )?.label;
+    return label === undefined ? [] : [label];
+  });
   const foundTranscriptSource = merged.sources.some(
     (source) => source.included && (source.status === "complete" || source.status === "partial"),
   );
@@ -175,6 +182,11 @@ export function UsageView({
         Provider-recorded usage from supported local histories on the selected machines. This
         includes sessions run outside Ryco and is intentionally not attributed to projects.
       </p>
+      {pendingLabels.length > 0 ? (
+        <p className="-mt-5 text-xs text-muted-foreground" aria-live="polite">
+          Updating {pendingLabels.join(", ")}…
+        </p>
+      ) : null}
 
       {derived.imports.length > 0 ? <ImportedCursorUsage rows={derived.imports} /> : null}
       {derived.buckets.length === 0 ? (
@@ -428,55 +440,30 @@ function UsageAreaChart({
   readonly data: ReturnType<typeof buildUsageDaySeries>;
   readonly metric: "cost" | "tokens";
 }) {
-  const suffix = metric === "cost" ? "Cost" : "Tokens";
+  const dates = useMemo(() => data.map((point) => point.date), [data]);
+  const series = useMemo(
+    () =>
+      USAGE_PROVIDERS.map((provider) => ({
+        key: provider,
+        label: formatProviderLabel(provider),
+        color: USAGE_PROVIDER_COLORS[provider],
+        values: data.map((point) => point[`${provider}${metric === "cost" ? "Cost" : "Tokens"}`]),
+      })),
+    [data, metric],
+  );
   return (
-    <ChartContainer className="h-[300px]">
-      <AreaChart data={[...data]} margin={{ left: 4, right: 10, top: 18, bottom: 0 }}>
-        <CartesianGrid vertical={false} strokeDasharray="3 5" />
-        <XAxis
-          dataKey="date"
-          tickLine={false}
-          axisLine={false}
-          minTickGap={30}
-          tickFormatter={(value) => formatDayLabel(String(value))}
-        />
-        <YAxis
-          tickLine={false}
-          axisLine={false}
-          width={44}
-          tickFormatter={(value) =>
-            metric === "cost"
-              ? `$${Number(value).toFixed(Number(value) < 10 ? 1 : 0)}`
-              : formatTokens(Number(value))
-          }
-        />
-        <ChartTooltip
-          content={
-            <ChartTooltipContent
-              labelFormatter={(label) => formatDayLabel(String(label))}
-              formatter={(value) =>
-                metric === "cost"
-                  ? usd.format(Number(value) || 0)
-                  : formatInteger(Number(value) || 0)
-              }
-            />
-          }
-        />
-        {USAGE_PROVIDERS.map((provider) => (
-          <Area
-            key={provider}
-            dataKey={`${provider}${suffix}`}
-            name={formatProviderLabel(provider)}
-            type="monotone"
-            stroke={USAGE_PROVIDER_COLORS[provider]}
-            fill={USAGE_PROVIDER_COLORS[provider]}
-            fillOpacity={0.08}
-            strokeWidth={1.75}
-            connectNulls={false}
-          />
-        ))}
-      </AreaChart>
-    </ChartContainer>
+    <SeriesAreaChart
+      className="h-[300px]"
+      label="Usage over time"
+      dates={dates}
+      series={series}
+      yAxisWidth={44}
+      dashedGrid
+      formatYTick={(value) =>
+        metric === "cost" ? `$${value.toFixed(value < 10 ? 1 : 0)}` : formatTokens(value)
+      }
+      formatValue={(value) => (metric === "cost" ? usd.format(value) : formatInteger(value))}
+    />
   );
 }
 

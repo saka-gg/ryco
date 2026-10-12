@@ -5,6 +5,8 @@ import {
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeSocket from "@effect/platform-node/NodeSocket";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as NodeHttp from "node:http";
+import { brotliCompressSync, gzipSync } from "node:zlib";
 
 import {
   CommandId,
@@ -993,7 +995,7 @@ const buildAppUnderTest = (options?: {
       Layer.provide(
         Layer.mock(ServerRuntimeStartup)({
           awaitCommandReady: Effect.void,
-          markHttpListening: Effect.void,
+          markHttpServing: Effect.void,
           enqueueCommand: (effect) => effect,
           ...options?.layers?.serverRuntimeStartup,
         }),
@@ -1381,6 +1383,192 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(response.status, 200);
       assert.equal(response.headers["cache-control"], "public, max-age=31536000, immutable");
       assert.equal(yield* response.text, "ok");
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("serves precompressed static siblings by Accept-Encoding", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const staticDir = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "ryco-router-static-precompressed-",
+      });
+      const assetsDir = path.join(staticDir, "assets");
+      yield* fileSystem.makeDirectory(assetsDir);
+      const source = "export const shell = 'precompressed';\n".repeat(64);
+      const assetPath = path.join(assetsDir, "main-CkG8a2ff.js");
+      yield* fileSystem.writeFileString(path.join(staticDir, "index.html"), "<html></html>");
+      yield* fileSystem.writeFileString(assetPath, source);
+      yield* fileSystem.writeFile(`${assetPath}.br`, brotliCompressSync(source));
+      yield* fileSystem.writeFile(`${assetPath}.gz`, gzipSync(source));
+
+      // Desktop backends serve their loopback renderer identity bytes.
+      yield* buildAppUnderTest({ config: { staticDir, mode: "web" } });
+      const url = yield* getHttpServerUrl("/assets/main-CkG8a2ff.js");
+      // node:http never decodes, so the test sees exactly what was sent.
+      const request = (headers: Record<string, string>) =>
+        Effect.promise(
+          () =>
+            new Promise<{
+              readonly status: number;
+              readonly headers: NodeHttp.IncomingHttpHeaders;
+              readonly body: Buffer;
+            }>((resolve, reject) => {
+              NodeHttp.get(url, { headers, agent: false }, (response) => {
+                const chunks: Array<Buffer> = [];
+                response.on("data", (chunk: Buffer) => chunks.push(chunk));
+                response.on("end", () =>
+                  resolve({
+                    status: response.statusCode ?? 0,
+                    headers: response.headers,
+                    body: Buffer.concat(chunks),
+                  }),
+                );
+              }).on("error", reject);
+            }),
+        );
+
+      const brotli = yield* request({ "accept-encoding": "gzip, deflate, br" });
+      assert.equal(brotli.status, 200);
+      assert.equal(brotli.headers["content-encoding"], "br");
+      assert.equal(brotli.headers.vary, "Accept-Encoding");
+      assert.equal(brotli.headers["content-type"], "text/javascript; charset=utf-8");
+      assert.equal(brotli.headers["cache-control"], "public, max-age=31536000, immutable");
+      assert.deepEqual(brotli.body, brotliCompressSync(source));
+      assert.match(brotli.headers.etag ?? "", /-br"$/);
+
+      const gzip = yield* request({ "accept-encoding": "gzip" });
+      assert.equal(gzip.headers["content-encoding"], "gzip");
+      assert.deepEqual(gzip.body, gzipSync(source));
+      assert.notEqual(gzip.headers.etag, brotli.headers.etag);
+
+      const identity = yield* request({});
+      assert.isUndefined(identity.headers["content-encoding"]);
+      assert.equal(identity.headers.vary, "Accept-Encoding");
+      assert.equal(identity.body.toString("utf8"), source);
+
+      const revalidated = yield* request({
+        "accept-encoding": "br",
+        "if-none-match": brotli.headers.etag!,
+      });
+      assert.equal(revalidated.status, 304);
+      assert.isUndefined(revalidated.headers["content-encoding"]);
+      assert.equal(revalidated.headers.etag, brotli.headers.etag);
+
+      // A stale identity validator does not revalidate the encoded variant.
+      const mismatched = yield* request({
+        "accept-encoding": "br",
+        "if-none-match": identity.headers.etag!,
+      });
+      assert.equal(mismatched.status, 200);
+      assert.equal(mismatched.headers["content-encoding"], "br");
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("serves gzip-only build siblings to clients that also accept brotli", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const staticDir = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "ryco-router-static-gzip-only-",
+      });
+      const assetsDir = path.join(staticDir, "assets");
+      yield* fileSystem.makeDirectory(assetsDir);
+      yield* fileSystem.writeFileString(path.join(staticDir, "index.html"), "<html></html>");
+      // The web build writes only `.gz` siblings by default, for scripts and
+      // for pdf.js fonts and character maps alike.
+      const script = "export const shell = 'gzip-only';\n".repeat(64);
+      const font = Buffer.alloc(4096, 7);
+      const scriptPath = path.join(assetsDir, "main-Gz1pOnly.js");
+      const fontPath = path.join(assetsDir, "LiberationSans-Regular-cbskN6YR.ttf");
+      yield* fileSystem.writeFileString(scriptPath, script);
+      yield* fileSystem.writeFile(`${scriptPath}.gz`, gzipSync(script));
+      yield* fileSystem.writeFile(fontPath, font);
+      yield* fileSystem.writeFile(`${fontPath}.gz`, gzipSync(font));
+
+      yield* buildAppUnderTest({ config: { staticDir, mode: "web" } });
+      const request = (pathname: string, headers: Record<string, string>) =>
+        Effect.gen(function* () {
+          const url = yield* getHttpServerUrl(pathname);
+          return yield* Effect.promise(
+            () =>
+              new Promise<{
+                readonly status: number;
+                readonly headers: NodeHttp.IncomingHttpHeaders;
+                readonly body: Buffer;
+              }>((resolve, reject) => {
+                NodeHttp.get(url, { headers, agent: false }, (response) => {
+                  const chunks: Array<Buffer> = [];
+                  response.on("data", (chunk: Buffer) => chunks.push(chunk));
+                  response.on("end", () =>
+                    resolve({
+                      status: response.statusCode ?? 0,
+                      headers: response.headers,
+                      body: Buffer.concat(chunks),
+                    }),
+                  );
+                }).on("error", reject);
+              }),
+          );
+        });
+
+      const browser = { "accept-encoding": "gzip, deflate, br, zstd" };
+      const scriptResponse = yield* request("/assets/main-Gz1pOnly.js", browser);
+      assert.equal(scriptResponse.status, 200);
+      assert.equal(scriptResponse.headers["content-encoding"], "gzip");
+      assert.equal(scriptResponse.headers.vary, "Accept-Encoding");
+      assert.equal(scriptResponse.headers["content-type"], "text/javascript; charset=utf-8");
+      assert.match(scriptResponse.headers.etag ?? "", /-gzip"$/);
+      assert.deepEqual(scriptResponse.body, gzipSync(script));
+
+      const fontResponse = yield* request("/assets/LiberationSans-Regular-cbskN6YR.ttf", browser);
+      assert.equal(fontResponse.status, 200);
+      assert.equal(fontResponse.headers["content-encoding"], "gzip");
+      assert.equal(fontResponse.headers.vary, "Accept-Encoding");
+      assert.deepEqual(fontResponse.body, gzipSync(font));
+
+      const brotliOnly = yield* request("/assets/main-Gz1pOnly.js", { "accept-encoding": "br" });
+      assert.isUndefined(brotliOnly.headers["content-encoding"]);
+      assert.equal(brotliOnly.headers.vary, "Accept-Encoding");
+      assert.equal(brotliOnly.body.toString("utf8"), script);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("serves the desktop's loopback renderer uncompressed", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const staticDir = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "ryco-router-static-desktop-",
+      });
+      const indexPath = path.join(staticDir, "index.html");
+      yield* fileSystem.writeFileString(indexPath, "<html>desktop</html>");
+      yield* fileSystem.writeFile(`${indexPath}.br`, brotliCompressSync("<html>desktop</html>"));
+
+      yield* buildAppUnderTest({ config: { staticDir, mode: "desktop" } });
+
+      const response = yield* HttpClient.get("/", { headers: { "accept-encoding": "br" } });
+      assert.equal(response.status, 200);
+      assert.isUndefined(response.headers["content-encoding"]);
+      assert.equal(yield* response.text, "<html>desktop</html>");
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("falls back to identity when no compressed sibling exists", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const staticDir = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "ryco-router-static-identity-",
+      });
+      yield* fileSystem.writeFileString(path.join(staticDir, "index.html"), "<html>shell</html>");
+
+      yield* buildAppUnderTest({ config: { staticDir, mode: "web" } });
+
+      const response = yield* HttpClient.get("/", { headers: { "accept-encoding": "br, gzip" } });
+      assert.equal(response.status, 200);
+      assert.isUndefined(response.headers["content-encoding"]);
+      assert.equal(yield* response.text, "<html>shell</html>");
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
@@ -3177,6 +3365,55 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       }
       assert.equal(yield* Ref.get(revalidateCalls), 1);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect(
+    "routes websocket rpc subscribeServerConfig probes stale providers after the snapshot",
+    () =>
+      Effect.gen(function* () {
+        const configLoadStarted = yield* Deferred.make<void>();
+        const releaseConfigLoad = yield* Deferred.make<void>();
+        const revalidated = yield* Deferred.make<void>();
+        const revalidateCalls = yield* Ref.make(0);
+
+        yield* buildAppUnderTest({
+          layers: {
+            keybindings: {
+              loadConfigState: Deferred.succeed(configLoadStarted, undefined).pipe(
+                Effect.andThen(Deferred.await(releaseConfigLoad)),
+                Effect.as({ keybindings: [], issues: [] }),
+              ),
+              streamChanges: Stream.empty,
+            },
+            providerRegistry: {
+              getProviders: Effect.succeed([]),
+              revalidateStale: Ref.update(revalidateCalls, (count) => count + 1).pipe(
+                Effect.andThen(Deferred.succeed(revalidated, undefined)),
+                Effect.as([]),
+              ),
+            },
+          },
+        });
+
+        const wsUrl = yield* getWsServerUrl("/ws");
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const ws = yield* WsTestClient.connect(wsUrl);
+            const sequence = yield* ws.trackPushSequence(WS_METHODS.subscribeServerConfig);
+            yield* Deferred.await(configLoadStarted);
+            // The config the client waits for is still loading: no probe yet.
+            for (let attempt = 0; attempt < 20; attempt += 1) {
+              yield* Effect.yieldNow;
+            }
+            assert.equal(yield* Ref.get(revalidateCalls), 0);
+            yield* Deferred.succeed(releaseConfigLoad, undefined);
+            const [snapshot] = yield* sequence.waitForCount(1);
+            assert.equal(snapshot?.type, "snapshot");
+            yield* Deferred.await(revalidated).pipe(Effect.timeout("2 seconds"));
+          }),
+        );
+        assert.equal(yield* Ref.get(revalidateCalls), 1);
+      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
   it.effect("routes websocket rpc subscribeServerConfig emits provider status updates", () =>
@@ -5687,7 +5924,9 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
       assert.deepEqual(
         result.map((item) =>
-          item.kind === "snapshot" || item.kind === "resumed" ? item.kind : item.sequence,
+          item.kind === "snapshot" || item.kind === "resumed" || item.kind === "thread-priorities"
+            ? item.kind
+            : item.sequence,
         ),
         ["snapshot", 11, 12],
       );
@@ -5944,7 +6183,9 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.deepEqual(replayPageCursors, [10, 11]);
       assert.deepEqual(
         result.map((item) =>
-          item.kind === "snapshot" || item.kind === "resumed" ? item.kind : item.sequence,
+          item.kind === "snapshot" || item.kind === "resumed" || item.kind === "thread-priorities"
+            ? item.kind
+            : item.sequence,
         ),
         ["snapshot", 11, 12],
       );
@@ -6255,8 +6496,18 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
               });
             },
           },
+          // The identity comes from the projected row, which persists it;
+          // replaying project events never runs git.
+          projectionSnapshotQuery: {
+            getProjectShellById: (projectId) =>
+              Effect.succeed(
+                projectId === defaultProjectId
+                  ? Option.some({ repositoryIdentity } as unknown as OrchestrationProjectShell)
+                  : Option.none(),
+              ),
+          },
           repositoryIdentityResolver: {
-            resolve: () => Effect.succeed(repositoryIdentity),
+            resolve: () => Effect.die("replaying project events must not resolve with git"),
           },
         },
       });
@@ -6922,6 +7173,9 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
                 Effect.succeed(scenario === "retired" ? Option.some(retiredRecord) : Option.none()),
               listAll: () => Effect.succeed([]),
               deleteById: () => Effect.void,
+              listRepositoryIdentityStates: () => Effect.succeed([]),
+              recordRepositoryIdentity: () => Effect.succeed(false),
+              listOrphanChatProjects: () => Effect.succeed([]),
             },
             orchestrationEngine: {
               dispatch: (command) => {

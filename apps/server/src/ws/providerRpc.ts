@@ -2,18 +2,9 @@ import { ProjectId, ServerSettingsError, KeybindingsConfigError } from "@ryco/co
 import { resolveProjectPreferences } from "../project/projectPreferences.ts";
 import { CodexSettings, CodexResetCreditError } from "@ryco/contracts";
 import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
-import {
-  readResetAccount,
-  consumeResetCredit,
-  runtimeBinding,
-} from "../provider/Layers/CodexResetCredits.ts";
 import * as NodePath from "node:path";
 import { AcpRegistryOperationError, AcpRegistrySettings } from "@ryco/contracts";
 import { makeAcpRegistryCatalog } from "../provider/acp/AcpRegistryCatalog.ts";
-import {
-  getAcpRegistryAuthMethods,
-  authenticateAcpRegistry,
-} from "../provider/acp/AcpRegistrySupport.ts";
 import { mergeProviderInstanceEnvironment } from "../provider/ProviderInstanceEnvironment.ts";
 import {
   readResourceTelemetryHistory,
@@ -39,6 +30,16 @@ import {
   toOpinionatedPluginRpcError,
   type WsRpcContext,
 } from "./context.ts";
+
+// Codex reset credits and ACP registry auth pull in the Codex/ACP protocol
+// schemas; load them when one of these owner actions first runs instead of
+// at server boot.
+const loadCodexResetCredits = Effect.promise(
+  () => import("../provider/Layers/CodexResetCredits.ts"),
+);
+const loadAcpRegistrySupport = Effect.promise(
+  () => import("../provider/acp/AcpRegistrySupport.ts"),
+);
 
 export const makeProviderHandlers = (ctx: WsRpcContext) => {
   const {
@@ -126,6 +127,7 @@ export const makeProviderHandlers = (ctx: WsRpcContext) => {
       ownerEffect(
         WS_METHODS.serverReadCodexResetCredits,
         Effect.gen(function* () {
+          const { readResetAccount } = yield* loadCodexResetCredits;
           return yield* readResetAccount(yield* resetRuntime(input.instanceId));
         }),
       ),
@@ -133,6 +135,7 @@ export const makeProviderHandlers = (ctx: WsRpcContext) => {
       ownerEffect(
         WS_METHODS.serverConsumeCodexResetCredit,
         Effect.gen(function* () {
+          const { consumeResetCredit, runtimeBinding } = yield* loadCodexResetCredits;
           const runtime = yield* resetRuntime(input.instanceId);
           const verify = resetRuntime(input.instanceId).pipe(
             Effect.map((current) => runtimeBinding(current) === runtimeBinding(runtime)),
@@ -163,6 +166,7 @@ export const makeProviderHandlers = (ctx: WsRpcContext) => {
         WS_METHODS.serverGetAcpRegistryAuthMethods,
         Effect.gen(function* () {
           const instance = yield* registryInstance(input.instanceId);
+          const { getAcpRegistryAuthMethods } = yield* loadAcpRegistrySupport;
           const methods = yield* getAcpRegistryAuthMethods(
             instance.config,
             instance.environment,
@@ -175,6 +179,7 @@ export const makeProviderHandlers = (ctx: WsRpcContext) => {
         WS_METHODS.serverAuthenticateAcpRegistry,
         Effect.gen(function* () {
           const instance = yield* registryInstance(input.instanceId);
+          const { authenticateAcpRegistry } = yield* loadAcpRegistrySupport;
           yield* authenticateAcpRegistry(
             instance.config,
             input.methodId,
@@ -367,10 +372,13 @@ export const makeProviderHandlers = (ctx: WsRpcContext) => {
           "rpc.aggregate": "server",
         },
       ),
-    [WS_METHODS.serverDiscoverSourceControl]: (_input) =>
+    [WS_METHODS.serverDiscoverSourceControl]: (input) =>
       observeRpcEffect(
         WS_METHODS.serverDiscoverSourceControl,
-        ownerEffect(WS_METHODS.serverDiscoverSourceControl, sourceControlDiscovery.refresh),
+        ownerEffect(
+          WS_METHODS.serverDiscoverSourceControl,
+          input.cached === true ? sourceControlDiscovery.discover : sourceControlDiscovery.refresh,
+        ),
         {
           "rpc.aggregate": "server",
         },
@@ -693,11 +701,6 @@ export const makeProviderHandlers = (ctx: WsRpcContext) => {
             })),
           );
 
-          yield* providerRegistry.revalidateStale.pipe(
-            Effect.ignoreCause({ log: true }),
-            Effect.forkScoped,
-          );
-
           const config = yield* loadServerConfig;
           const liveUpdates = Stream.merge(
             keybindingsUpdates,
@@ -706,10 +709,22 @@ export const makeProviderHandlers = (ctx: WsRpcContext) => {
               streamChatsConfigSnapshots(config.chats),
             ),
           );
+          // Stale providers are probed only once the client has its snapshot
+          // (pulled past the first element), so probe work never competes with
+          // the config load the client is waiting for. The pass itself is owned
+          // by the registry; this fiber only waits on it and ends with the
+          // subscription.
+          const liveUpdatesAfterRevalidation = Stream.unwrap(
+            providerRegistry.revalidateStale.pipe(
+              Effect.ignoreCause({ log: true }),
+              Effect.forkScoped,
+              Effect.as(liveUpdates),
+            ),
+          );
 
           return Stream.concat(
             Stream.make({ version: 1 as const, type: "snapshot" as const, config }),
-            liveUpdates,
+            liveUpdatesAfterRevalidation,
           );
         }),
         { "rpc.aggregate": "server" },

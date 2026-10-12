@@ -27,7 +27,7 @@ import {
   ProviderInstanceId,
 } from "@ryco/contracts";
 import { Cause, Duration, Effect, Exit, FileSystem, Layer, Path, Schema } from "effect";
-import * as CodexClient from "effect-codex-app-server/client";
+import type * as CodexClient from "effect-codex-app-server/client";
 import type * as CodexErrors from "effect-codex-app-server/errors";
 import type * as CodexSchema from "effect-codex-app-server/schema";
 import { ChildProcessSpawner } from "effect/process";
@@ -41,7 +41,7 @@ import {
   type CodexHomeLayout,
 } from "../provider/Drivers/CodexHomeLayout.ts";
 import { deriveProviderInstanceConfigMap } from "../provider/Layers/ProviderInstanceRegistryHydration.ts";
-import { buildCodexInitializeParams } from "../provider/Layers/CodexProvider.ts";
+import { loadCodexAppServerModule } from "../provider/codexAppServerModule.ts";
 import { mergeProviderInstanceEnvironment } from "../provider/ProviderInstanceEnvironment.ts";
 import {
   applyProviderMcpSecretMutations,
@@ -54,6 +54,7 @@ const COPILOT_DRIVER = ProviderDriverKind.make("copilot");
 const CURSOR_DRIVER = ProviderDriverKind.make("cursor");
 const OPENCODE_DRIVER = ProviderDriverKind.make("opencode");
 const MCP_APP_SERVER_TIMEOUT = Duration.seconds(25);
+const MCP_SERVER_LIST_REUSE_MS = 5_000;
 const MCP_STATUS_PAGE_LIMIT = 100;
 const MCP_STATUS_MAX_PAGES = 10;
 const MCP_REMOVE_TIMEOUT_MS = 20_000;
@@ -672,18 +673,19 @@ export const makeCodexMcpService = Effect.gen(function* () {
   ): Effect.Effect<A, McpSettingsError, never> =>
     Effect.scoped(
       Effect.gen(function* () {
+        const codexAppServer = yield* loadCodexAppServerModule;
         const clientContext = yield* Layer.build(
-          CodexClient.layerCommand({
+          codexAppServer.CodexClient.layerCommand({
             command: workspace.codexSettings.binaryPath,
             args: ["app-server"],
             cwd: serverConfig.cwd,
             env: runtimeEnvFor(workspace),
           }),
         ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner));
-        const client = yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
+        const client = yield* Effect.service(codexAppServer.CodexClient.CodexAppServerClient).pipe(
           Effect.provide(clientContext),
         );
-        yield* client.request("initialize", buildCodexInitializeParams());
+        yield* client.request("initialize", codexAppServer.buildCodexInitializeParams());
         yield* client.notify("initialized", undefined);
         return yield* use(client);
       }),
@@ -725,40 +727,93 @@ export const makeCodexMcpService = Effect.gen(function* () {
       return statuses;
     });
 
+  /** One workspace's servers, read through an already-initialized app-server session. */
+  const readServerList = (
+    workspace: WorkspaceRuntime,
+    client: CodexClient.CodexAppServerClientShape,
+    detail: McpListServersInput["detail"],
+  ) =>
+    Effect.gen(function* () {
+      const [configResponse, statuses] = yield* Effect.all(
+        [
+          client.request("config/read", { cwd: serverConfig.cwd, includeLayers: true }),
+          readStatuses(client, detail),
+        ],
+        { concurrency: "unbounded" },
+      );
+      const configPath = extractConfigPath(configResponse.layers);
+      return Schema.decodeUnknownSync(McpListServersResult)({
+        workspace: workspace.workspace,
+        servers: buildServers({ configResponse, statuses }),
+        ...(configPath ? { configPath } : {}),
+        warnings: [],
+      });
+    });
+
+  // Each listing starts a `codex app-server` (and its MCP servers): reopening
+  // or re-rendering Settings within a few seconds reuses the last answer.
+  // Every mutation and reload replaces it.
+  const recentServerLists = new Map<
+    string,
+    { readonly expiresAtMs: number; readonly result: McpListServersResult }
+  >();
+  const serverListKey = (workspaceId: McpWorkspaceId, detail: McpListServersInput["detail"]) =>
+    `${workspaceId}\u0000${detail ?? "full"}`;
+  const forgetServerLists = (workspaceId: McpWorkspaceId) => {
+    for (const key of recentServerLists.keys()) {
+      if (key.startsWith(`${workspaceId}\u0000`)) recentServerLists.delete(key);
+    }
+  };
+  const rememberServerList = (
+    workspaceId: McpWorkspaceId,
+    detail: McpListServersInput["detail"],
+    result: McpListServersResult,
+  ) =>
+    Effect.sync(() => {
+      forgetServerLists(workspaceId);
+      recentServerLists.set(serverListKey(workspaceId, detail), {
+        expiresAtMs: Date.now() + MCP_SERVER_LIST_REUSE_MS,
+        result,
+      });
+      return result;
+    });
+
   const listServersForWorkspace = (input: McpListServersInput) =>
     Effect.gen(function* () {
+      const recent = recentServerLists.get(serverListKey(input.workspaceId, input.detail));
+      if (recent && recent.expiresAtMs > Date.now()) return recent.result;
       const workspace = yield* findWorkspace(input.workspaceId);
-      return yield* withClient(
-        workspace,
-        Effect.fn(function* (client) {
-          const [configResponse, statuses] = yield* Effect.all(
-            [
-              client.request("config/read", { cwd: serverConfig.cwd, includeLayers: true }),
-              readStatuses(client, input.detail),
-            ],
-            { concurrency: "unbounded" },
-          );
-          const configPath = extractConfigPath(configResponse.layers);
-          return Schema.decodeUnknownSync(McpListServersResult)({
-            workspace: workspace.workspace,
-            servers: buildServers({ configResponse, statuses }),
-            ...(configPath ? { configPath } : {}),
-            warnings: [],
-          });
-        }),
+      const result = yield* withClient(workspace, (client) =>
+        readServerList(workspace, client, input.detail),
       );
+      return yield* rememberServerList(input.workspaceId, input.detail, result);
     }).pipe(
       Effect.mapError((cause) => normalizeUnknownError(cause, "Failed to list MCP servers.")),
     );
 
-  const reloadServers = (input: McpServersReloadInput) =>
+  /** Mutates (optionally), reloads and re-lists in one app-server session. */
+  const reloadAndList = (
+    workspaceId: McpWorkspaceId,
+    mutate?: (
+      client: CodexClient.CodexAppServerClientShape,
+    ) => Effect.Effect<unknown, CodexMcpClientError, never>,
+  ) =>
     Effect.gen(function* () {
-      const workspace = yield* findWorkspace(input.workspaceId);
-      yield* withClient(workspace, (client) =>
-        client.request("config/mcpServer/reload", undefined),
+      const workspace = yield* findWorkspace(workspaceId);
+      // Whatever happens next, an earlier listing no longer describes the workspace.
+      yield* Effect.sync(() => forgetServerLists(workspaceId));
+      const result = yield* withClient(
+        workspace,
+        Effect.fn(function* (client) {
+          if (mutate) yield* mutate(client);
+          yield* client.request("config/mcpServer/reload", undefined);
+          return yield* readServerList(workspace, client, "full");
+        }),
       );
-      return yield* listServersForWorkspace({ workspaceId: input.workspaceId, detail: "full" });
+      return yield* rememberServerList(workspaceId, "full", result);
     });
+
+  const reloadServers = (input: McpServersReloadInput) => reloadAndList(input.workspaceId);
 
   const mutateWithAppServer = (
     workspaceId: McpWorkspaceId,
@@ -766,17 +821,7 @@ export const makeCodexMcpService = Effect.gen(function* () {
       client: CodexClient.CodexAppServerClientShape,
     ) => Effect.Effect<unknown, CodexMcpClientError, never>,
   ) =>
-    Effect.gen(function* () {
-      const workspace = yield* findWorkspace(workspaceId);
-      yield* withClient(
-        workspace,
-        Effect.fn(function* (client) {
-          yield* mutate(client);
-          yield* client.request("config/mcpServer/reload", undefined);
-        }),
-      );
-      return yield* listServersForWorkspace({ workspaceId, detail: "full" });
-    }).pipe(
+    reloadAndList(workspaceId, mutate).pipe(
       Effect.mapError((cause) => normalizeUnknownError(cause, "Failed to update MCP servers.")),
     );
 
@@ -842,6 +887,8 @@ export const makeCodexMcpService = Effect.gen(function* () {
     startOauthLogin: (input) =>
       Effect.gen(function* () {
         const workspace = yield* findWorkspace(input.workspaceId);
+        // The server's auth state is about to change; do not answer from before it.
+        yield* Effect.sync(() => forgetServerLists(input.workspaceId));
         return yield* withClient(
           workspace,
           Effect.fn(function* (client) {

@@ -106,6 +106,25 @@ function formatSeconds(ms: number): string {
   return Number.isInteger(seconds) ? String(seconds) : seconds.toFixed(1);
 }
 
+/**
+ * The message for one startup request of a provider process (initialize, thread/session open)
+ * that hit its own deadline. Shared by the ACP, Codex and Claude runtimes so a hung start names
+ * the command, the request and what the user can do next, instead of surfacing only through the
+ * generic session-start or turn-acceptance deadline.
+ */
+export function providerStartupPhaseTimeoutDetail(input: {
+  /** The command that was spawned, as configured. */
+  readonly command: string;
+  /** The request it did not answer, e.g. "ACP `initialize`". */
+  readonly request: string;
+  readonly timeoutMs: number;
+  /** The next step, e.g. how to sign in. */
+  readonly hint?: string | undefined;
+}): string {
+  const hint = input.hint ? ` ${input.hint}` : "";
+  return `\`${input.command}\` did not answer the ${input.request} request within ${formatSeconds(input.timeoutMs)} seconds.${hint}`;
+}
+
 /** One user-facing sentence for a provider operation that hit its deadline. */
 export function providerOperationTimeoutDetail(input: {
   readonly operation: ProviderTimedOperation;

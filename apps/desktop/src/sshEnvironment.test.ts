@@ -6,7 +6,12 @@ import { afterEach, describe, expect, it } from "vite-plus/test";
 
 import { SshPasswordPromptError } from "@ryco/ssh/errors";
 
-import { discoverDesktopSshHosts, isSshPasswordPromptCancellation } from "./sshEnvironment.ts";
+import {
+  DesktopSshEnvironmentBridge,
+  discoverDesktopSshHosts,
+  isSshPasswordPromptCancellation,
+} from "./sshEnvironment.ts";
+import { DESKTOP_SSH_INVOKE_CHANNELS } from "./sshEnvironmentChannels.ts";
 
 const tempDirectories: string[] = [];
 
@@ -23,6 +28,21 @@ function makeTempHomeDir(): string {
 }
 
 describe("sshEnvironment", () => {
+  it("registers exactly the channels main defers until the bridge loads", async () => {
+    // main.ts registers these channels before the bridge chunk is loaded; a
+    // channel missing from the list would never reach the bridge.
+    const registered: string[] = [];
+    const bridge = new DesktopSshEnvironmentBridge({ getMainWindow: () => null });
+    bridge.registerIpcHandlers({
+      removeHandler: () => undefined,
+      handle: (channel) => {
+        registered.push(channel);
+      },
+    });
+    expect(registered.toSorted()).toEqual([...DESKTOP_SSH_INVOKE_CHANNELS].toSorted());
+    await bridge.dispose();
+  });
+
   it("treats password prompt timeouts as cancellable authentication prompts", () => {
     expect(
       isSshPasswordPromptCancellation(

@@ -330,3 +330,79 @@ export function resolveInboxEmptyState(input: {
   if (input.threadCount === 0) return "new-task";
   return null;
 }
+
+/**
+ * Structural equality for row field values, bounded in depth. Row fields are
+ * primitives or small plain records (badge, focus metadata, the store's
+ * project record); anything deeper than `depth` compares by identity.
+ */
+function rowValueEqual(left: unknown, right: unknown, depth: number): boolean {
+  if (Object.is(left, right)) return true;
+  if (depth === 0 || typeof left !== "object" || typeof right !== "object") return false;
+  if (left === null || right === null) return false;
+  if (Array.isArray(left) !== Array.isArray(right)) return false;
+  const leftRecord = left as Record<string, unknown>;
+  const rightRecord = right as Record<string, unknown>;
+  const leftKeys = Object.keys(leftRecord);
+  if (leftKeys.length !== Object.keys(rightRecord).length) return false;
+  for (const key of leftKeys) {
+    if (!Object.prototype.hasOwnProperty.call(rightRecord, key)) return false;
+    if (!rowValueEqual(leftRecord[key], rightRecord[key], depth - 1)) return false;
+  }
+  return true;
+}
+
+const ROW_EQUALITY_DEPTH = 4;
+
+/**
+ * Reuse the previous build's row (and section, and section list) objects
+ * wherever the new build is structurally identical.
+ *
+ * `buildInboxSections` derives every row afresh, so a single live event used
+ * to hand every memoized row a new object and re-render the whole list. With
+ * identity preserved for unchanged rows, only the rows whose content moved
+ * re-render.
+ */
+export function stabilizeInboxSections(
+  previous: ReadonlyArray<InboxSection>,
+  next: ReadonlyArray<InboxSection>,
+): ReadonlyArray<InboxSection> {
+  if (previous.length === 0) return next;
+  const previousRows = new Map<string, InboxThreadRow>();
+  for (const section of previous) {
+    for (const row of section.rows) previousRows.set(row.key, row);
+  }
+  const previousSections = new Map(previous.map((section) => [section.key, section] as const));
+  let sectionsReused = previous.length === next.length;
+  const sections = next.map((section, sectionIndex) => {
+    const before = previousSections.get(section.key);
+    let rowsReused = before !== undefined && before.rows.length === section.rows.length;
+    const rows = section.rows.map((row, rowIndex) => {
+      const candidate = previousRows.get(row.key);
+      const stable =
+        candidate !== undefined && rowValueEqual(candidate, row, ROW_EQUALITY_DEPTH)
+          ? candidate
+          : row;
+      if (before?.rows[rowIndex] !== stable) rowsReused = false;
+      return stable;
+    });
+    const stableSection =
+      rowsReused && before !== undefined && before.title === section.title
+        ? before
+        : { ...section, rows };
+    if (previous[sectionIndex] !== stableSection) sectionsReused = false;
+    return stableSection;
+  });
+  return sectionsReused ? previous : sections;
+}
+
+/** A per-screen `stabilizeInboxSections` that remembers its previous result. */
+export function createInboxSectionStabilizer(): (
+  next: ReadonlyArray<InboxSection>,
+) => ReadonlyArray<InboxSection> {
+  let previous: ReadonlyArray<InboxSection> = [];
+  return (next) => {
+    previous = stabilizeInboxSections(previous, next);
+    return previous;
+  };
+}

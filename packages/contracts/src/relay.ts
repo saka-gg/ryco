@@ -1,4 +1,4 @@
-import { Schema } from "effect";
+import * as Schema from "effect/Schema";
 
 export const RELAY_PROTOCOL_MAJOR = 1 as const;
 export const RELAY_PROTOCOL_MINOR = 3 as const;

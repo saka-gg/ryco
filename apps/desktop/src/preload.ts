@@ -2,6 +2,7 @@ import { isQuitShortcutChord } from "./quitShortcut.ts";
 import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type { DesktopBridge } from "@ryco/contracts";
 import { DESKTOP_WORKSPACE_IPC } from "./desktopWorkspaceChannels.ts";
+import { DESKTOP_STARTUP_MARKS_CHANNEL, observeRendererStartupMarks } from "./startupMarks.ts";
 
 // Capture before app/terminal listeners, without suppressing Electron key releases.
 function suppressQuitShortcut(event: KeyboardEvent): void {
@@ -81,6 +82,22 @@ const NOTIFY_TURN_COMPLETE_CHANNEL = "desktop:notify-turn-complete";
 const TURN_COMPLETE_NOTIFICATION_ACTIVATED_CHANNEL = "desktop:turn-complete-notification-activated";
 const SSH_PASSWORD_PROMPT_CANCELLED_RESULT = "ssh-password-prompt-cancelled";
 
+// Fixed for the lifetime of a page: main creates the backend URL and token once
+// per app run, and changing the exposure mode relaunches the app. Asking main
+// synchronously on every call would block this renderer behind a busy main.
+let cachedAppBranding: ReturnType<DesktopBridge["getAppBranding"]> | null = null;
+let cachedLocalEnvironmentBootstrap: ReturnType<
+  DesktopBridge["getLocalEnvironmentBootstrap"]
+> | null = null;
+
+// Report startup marks once the primary shell is usable and again once it
+// painted, on every launch.
+observeRendererStartupMarks({
+  performance,
+  PerformanceObserver: typeof PerformanceObserver === "function" ? PerformanceObserver : undefined,
+  report: (report) => ipcRenderer.send(DESKTOP_STARTUP_MARKS_CHANNEL, report),
+});
+
 function unwrapEnsureSshEnvironmentResult(result: unknown) {
   if (
     typeof result === "object" &&
@@ -155,18 +172,26 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     },
   },
   getAppBranding: () => {
+    if (cachedAppBranding !== null) return cachedAppBranding;
     const result = ipcRenderer.sendSync(GET_APP_BRANDING_CHANNEL);
     if (typeof result !== "object" || result === null) {
       return null;
     }
-    return result as ReturnType<DesktopBridge["getAppBranding"]>;
+    cachedAppBranding = Object.freeze(result) as ReturnType<DesktopBridge["getAppBranding"]>;
+    return cachedAppBranding;
   },
   getLocalEnvironmentBootstrap: () => {
+    if (cachedLocalEnvironmentBootstrap !== null) return cachedLocalEnvironmentBootstrap;
     const result = ipcRenderer.sendSync(GET_LOCAL_ENVIRONMENT_BOOTSTRAP_CHANNEL);
     if (typeof result !== "object" || result === null) {
       return null;
     }
-    return result as ReturnType<DesktopBridge["getLocalEnvironmentBootstrap"]>;
+    const bootstrap = Object.freeze(result) as ReturnType<
+      DesktopBridge["getLocalEnvironmentBootstrap"]
+    >;
+    // Only a complete answer is final; before the backend is configured, ask again.
+    if (bootstrap?.httpBaseUrl) cachedLocalEnvironmentBootstrap = bootstrap;
+    return bootstrap;
   },
   quitShortcut: {
     getMode: () => ipcRenderer.invoke("desktop:quit-shortcut-get"),

@@ -7,13 +7,20 @@
  * @module AnalyticsServiceLive
  */
 
-import { Config, DateTime, Effect, Layer, Ref } from "effect";
+import { Config, DateTime, Duration, Effect, Layer, Ref } from "effect";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 
 import { ServerConfig } from "../../config.ts";
 import { AnalyticsService, type AnalyticsServiceShape } from "../Services/AnalyticsService.ts";
 import { getTelemetryIdentifier } from "../Identify.ts";
 import packageJson from "../../../package.json" with { type: "json" };
+
+/**
+ * Longest a shutdown waits for the final telemetry flush. Events still unsent
+ * then are dropped: a slow or captive network must not hold up the process
+ * exit (the desktop kills its backend 2 s after asking it to stop).
+ */
+export const ANALYTICS_SHUTDOWN_FLUSH_TIMEOUT = Duration.millis(300);
 
 interface BufferedAnalyticsEvent {
   readonly event: string;
@@ -209,7 +216,17 @@ const makeAnalyticsService = Effect.gen(function* () {
     },
   );
 
-  yield* Effect.addFinalizer(() => clearScheduledFlush.pipe(Effect.andThen(flush)));
+  yield* Effect.addFinalizer(() =>
+    clearScheduledFlush.pipe(
+      Effect.andThen(flush),
+      Effect.timeoutOption(ANALYTICS_SHUTDOWN_FLUSH_TIMEOUT),
+      Effect.tap((flushed) =>
+        flushed._tag === "None"
+          ? Effect.logDebug("telemetry shutdown flush timed out; dropping unsent events")
+          : Effect.void,
+      ),
+    ),
+  );
 
   return {
     record,

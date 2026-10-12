@@ -43,9 +43,10 @@ import {
 } from "../ProviderInstanceEnvironment.ts";
 import {
   enrichProviderSnapshotWithVersionAdvisory,
+  makeLazyProviderMaintenanceCapabilities,
   makePackageManagedProviderMaintenanceResolver,
-  resolveProviderMaintenanceCapabilitiesEffect,
 } from "../providerMaintenance.ts";
+import { makeProviderProbeFingerprint } from "../providerProbeFingerprint.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import {
   codexContinuationIdentity,
@@ -108,6 +109,7 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
   create: ({ instanceId, displayName, accentColor, environment, enabled, config }) =>
     Effect.gen(function* () {
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const path = yield* Path.Path;
       const httpClient = yield* HttpClient.HttpClient;
       const serverSettings = yield* ServerSettingsService;
       const eventLoggers = yield* ProviderEventLoggers;
@@ -138,9 +140,18 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
         enabled,
         homePath: homeLayout.effectiveHomePath ?? "",
       } satisfies CodexSettings;
-      const maintenanceCapabilities = yield* resolveProviderMaintenanceCapabilitiesEffect(UPDATE, {
+      const maintenanceCapabilities = yield* makeLazyProviderMaintenanceCapabilities(UPDATE, {
         binaryPath: effectiveConfig.binaryPath,
         env: processEnv,
+      });
+      const probeFingerprint = yield* makeProviderProbeFingerprint({
+        driverKind: DRIVER_KIND,
+        binaryPaths: [effectiveConfig.binaryPath],
+        env: processEnv,
+        settings: { instanceId, displayName, accentColor, environment, config: effectiveConfig },
+        authFiles: [
+          path.join(homeLayout.effectiveHomePath ?? homeLayout.sharedHomePath, "auth.json"),
+        ],
       });
 
       // Agent Control is optional at driver level: resolved from ambient
@@ -180,13 +191,17 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       );
       const snapshot = yield* makeManagedServerProvider<CodexSettings>({
         maintenanceCapabilities,
+        probeFingerprint,
         getSettings: Effect.succeed(effectiveConfig),
         streamSettings: Stream.never,
         haveSettingsChanged: () => false,
         initialSnapshot: (settings) => stampIdentity(makePendingCodexProvider(settings)),
         checkProvider,
         enrichSnapshot: ({ snapshot, publishSnapshot }) =>
-          enrichProviderSnapshotWithVersionAdvisory(snapshot, maintenanceCapabilities).pipe(
+          maintenanceCapabilities.pipe(
+            Effect.flatMap((capabilities) =>
+              enrichProviderSnapshotWithVersionAdvisory(snapshot, capabilities),
+            ),
             Effect.provideService(HttpClient.HttpClient, httpClient),
             Effect.provideService(ServerSettingsService, serverSettings),
             Effect.flatMap((enrichedSnapshot) => publishSnapshot(enrichedSnapshot)),

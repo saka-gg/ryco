@@ -6,6 +6,37 @@ function escapeHtmlAttribute(value: string): string {
     .replaceAll(">", "&gt;");
 }
 
+/**
+ * The boot document a SW-controlled navigation is answered with, derived from
+ * the built `index.html` so it paints the same themed boot shell on the first
+ * frame, plus `modulepreload` links for the app's boot modules so the worker
+ * can serve them in parallel instead of one import level at a time.
+ *
+ * Everything in it is build output: the static HTML shell and fingerprinted
+ * asset URLs. No live document, account, or API response is cached. Returns
+ * `null` for HTML that does not look like the app shell (no root element or no
+ * module entry), so the caller falls back to the minimal document.
+ */
+export function renderHostedPwaBootDocument(input: {
+  readonly indexHtml: string;
+  readonly modulePreloads: ReadonlyArray<string>;
+}): string | null {
+  const html = input.indexHtml;
+  const headClose = html.indexOf("</head>");
+  if (
+    headClose < 0 ||
+    !/<div id="root"/.test(html) ||
+    !/<script type="module"[^>]*\ssrc="/.test(html)
+  ) {
+    return null;
+  }
+  const preloads = [...new Set(input.modulePreloads)]
+    .filter((url) => !html.includes(`"${url}"`))
+    .map((url) => `<link rel="modulepreload" crossorigin href="${escapeHtmlAttribute(url)}">`)
+    .join("");
+  return `${html.slice(0, headClose)}${preloads}${html.slice(headClose)}`;
+}
+
 export function renderHostedPwaOfflineDocument(input: {
   readonly startUrl: string;
   readonly scripts?: ReadonlyArray<string>;

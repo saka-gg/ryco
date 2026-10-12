@@ -1,4 +1,5 @@
 import { hostedHubStore } from "@ryco/client-runtime/authorization";
+import { appAtomRegistry } from "@ryco/client-runtime/rpc";
 import { classifyOverviewError } from "~/components/overview/overviewErrors.logic";
 import { EnvironmentId } from "@ryco/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
@@ -144,7 +145,7 @@ describe("sourceControlAtoms — issue list", () => {
     const release = issueListBinding.watch(input);
     await flush();
 
-    expect(listIssues).toHaveBeenCalledWith({ cwd: CWD, state: "open" });
+    expect(listIssues).toHaveBeenCalledWith({ cwd: CWD, state: "open", limit: 100 });
     expect(issueListBinding.snapshotFor(input)).toEqual({
       data: null,
       isLoading: true,
@@ -206,6 +207,77 @@ describe("sourceControlAtoms — issue list", () => {
   });
 });
 
+describe("sourceControlAtoms — superset lists", () => {
+  it("serves every limit from one superset read, sliced per caller", async () => {
+    const data = Array.from({ length: 60 }, (_, index) => changeRequest(index + 1));
+    listChangeRequests.mockResolvedValue(data);
+    const base = { environmentId: ENVIRONMENT_ID, cwd: CWD, state: "open" as const };
+
+    const releases = [
+      changeRequestListBinding.watch({ ...base, limit: 20 }),
+      changeRequestListBinding.watch({ ...base, limit: 50 }),
+      changeRequestListBinding.watch({ ...base, limit: 100 }),
+      changeRequestListBinding.watch(base),
+    ];
+    await flush();
+
+    expect(listChangeRequests).toHaveBeenCalledTimes(1);
+    expect(listChangeRequests).toHaveBeenCalledWith({ cwd: CWD, state: "open", limit: 100 });
+    expect(changeRequestListBinding.targetKey({ ...base, limit: 20 })).toBe(
+      changeRequestListBinding.targetKey({ ...base, limit: 100 }),
+    );
+    expect(changeRequestListBinding.snapshotFor({ ...base, limit: 20 }).data).toEqual(
+      data.slice(0, 20),
+    );
+    expect(changeRequestListBinding.snapshotFor({ ...base, limit: 50 }).data).toEqual(
+      data.slice(0, 50),
+    );
+    expect(changeRequestListBinding.snapshotFor(base).data).toBe(data);
+
+    // A sliced view is a stable derived atom over the shared entry.
+    const slicedAtom = changeRequestListBinding.atomFor({ ...base, limit: 20 });
+    expect(changeRequestListBinding.atomFor({ ...base, limit: 20 })).toBe(slicedAtom);
+    expect(appAtomRegistry.get(slicedAtom).data).toEqual(data.slice(0, 20));
+
+    for (const release of releases) release();
+  });
+
+  it("keeps separate entries per state", async () => {
+    listIssues.mockResolvedValue([]);
+    const releases = [
+      issueListBinding.watch({ environmentId: ENVIRONMENT_ID, cwd: CWD, state: "open", limit: 20 }),
+      issueListBinding.watch({ environmentId: ENVIRONMENT_ID, cwd: CWD, state: "closed" }),
+    ];
+    await flush();
+
+    expect(listIssues).toHaveBeenCalledTimes(2);
+    for (const release of releases) release();
+  });
+
+  it("keys change request lists by every option the read sends", async () => {
+    listChangeRequests.mockResolvedValue([]);
+    const base = { environmentId: ENVIRONMENT_ID, cwd: CWD, state: "open" as const };
+    const releases = [
+      changeRequestListBinding.watch({ ...base, limit: 20 }),
+      changeRequestListBinding.watch({ ...base, involvement: "authored" }),
+      changeRequestListBinding.watch({ ...base, involvement: "authored", limit: 10 }),
+    ];
+    await flush();
+
+    // One superset read per involvement; the default list shape is the only
+    // shape, so no view or field-set option splits the cache.
+    expect(listChangeRequests).toHaveBeenCalledTimes(2);
+    expect(listChangeRequests.mock.calls.map(([request]) => request)).toEqual([
+      { cwd: CWD, state: "open", limit: 100 },
+      { cwd: CWD, state: "open", limit: 100, involvement: "authored" },
+    ]);
+    expect(changeRequestListBinding.targetKey({ ...base, involvement: "authored" })).not.toBe(
+      changeRequestListBinding.targetKey(base),
+    );
+    for (const release of releases) release();
+  });
+});
+
 describe("sourceControlAtoms — issue search gating", () => {
   it("only fetches when a non-empty query and enabled flag are present", async () => {
     issueSearchBinding.watch({ environmentId: ENVIRONMENT_ID, cwd: CWD, query: "" });
@@ -243,7 +315,7 @@ describe("sourceControlAtoms — change request list polling", () => {
     const release = changeRequestListBinding.watch(input, resolveIntervalMs);
     await flush();
 
-    expect(listChangeRequests).toHaveBeenCalledWith({ cwd: CWD, state: "open" });
+    expect(listChangeRequests).toHaveBeenCalledWith({ cwd: CWD, state: "open", limit: 100 });
     expect(resolveIntervalMs).toHaveBeenCalledWith(data);
     expect(changeRequestListBinding.snapshotFor(input).data).toBe(data);
 
@@ -274,7 +346,7 @@ describe("sourceControlAtoms — invalidation", () => {
     await flush();
 
     expect(listIssues).toHaveBeenCalledTimes(1);
-    expect(listIssues).toHaveBeenCalledWith({ cwd: CWD, state: "open" });
+    expect(listIssues).toHaveBeenCalledWith({ cwd: CWD, state: "open", limit: 100 });
 
     releaseTarget();
     releaseOther();
@@ -335,7 +407,7 @@ describe("sourceControlAtoms — merge mutation", () => {
       reference: "42",
       mergeMethod: "squash",
     });
-    expect(listChangeRequests).toHaveBeenCalledWith({ cwd: CWD, state: "open" });
+    expect(listChangeRequests).toHaveBeenCalledWith({ cwd: CWD, state: "open", limit: 100 });
     await fetchSourceControlChangeRequestDetail({
       environmentId: ENVIRONMENT_ID,
       cwd: CWD,

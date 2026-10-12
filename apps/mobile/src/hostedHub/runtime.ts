@@ -1,15 +1,19 @@
 import {
   configureHostedRuntime,
-  createNativeE2eeEnrollmentCoordinator,
   getHostedHubApi,
   hostedHubController,
   hostedHubStore,
-  type NativeE2eeEnrollmentCoordinator,
 } from "@ryco/client-runtime/authorization";
+import {
+  createNativeE2eeEnrollmentCoordinator,
+  type NativeE2eeEnrollmentCoordinator,
+} from "@ryco/client-runtime/authorization/e2ee";
 import {
   hasHostedRelayPendingRequests,
   resetHostedRelayAttemptFactory,
 } from "@ryco/client-runtime/relay";
+
+import type { DpopSignerService } from "@ryco/client-runtime/platform";
 
 import { mobileAppLifecycle } from "../platform/appLifecycle";
 import { createMobileDpopSigner } from "../platform/dpopSigner";
@@ -25,7 +29,11 @@ import {
   mobileSessionCredentials,
 } from "../platform/sessionCredentials";
 import { disposeMobileRelayE2eeAttempt, prepareMobileRelayE2eeAttempt } from "./e2eeAttempt";
-import { resetMobileE2eeSession } from "./e2eeSession";
+import {
+  getMobileE2eeSessionState,
+  resetMobileE2eeSession,
+  subscribeMobileE2eeSession,
+} from "./e2eeSession";
 import { setMobileNativeE2eeEnrollmentCoordinator } from "./e2eeEnrollment";
 import {
   disposeMobileRelaySocketContext,
@@ -35,6 +43,8 @@ import {
 } from "./accountE2eeAttempt";
 import { hydrateMobileHubProfile } from "./hubProfile";
 import { mobileHostedNodeLifecycle } from "./nodeLifecycle";
+import { createHostedPrimaryConnection } from "./primaryConnection";
+import { installHostedPrimaryConnectionFactory } from "./primaryConnectionFactory";
 import { configureAuthoritativeNodeTrustSource } from "../features/home/authoritativeNodeTrustSource";
 import { MobileHostedRelaySocket, mobileHostedRelayUrl } from "./relaySocket";
 import {
@@ -53,8 +63,23 @@ configureAuthoritativeNodeTrustSource({
   hubOrigin: () => getMobileHostedEndpoint()?.origin() ?? null,
   classify: (selection) => mobileE2eeTrustStore.classify(selection),
   pairing: (selection) => isE2eePairingRecord(mobileE2eeTrustStore.resolve(selection)),
-  subscribe: mobileE2eeTrustStore.subscribe,
+  identityChanged: (environmentId) =>
+    getMobileE2eeSessionState(environmentId).event?.kind === "identity-change",
+  subscribe: (listener) => {
+    const unsubscribeTrust = mobileE2eeTrustStore.subscribe(listener);
+    const unsubscribeSession = subscribeMobileE2eeSession(listener);
+    return () => {
+      unsubscribeTrust();
+      unsubscribeSession();
+    };
+  },
 });
+
+// The connection driver is on the launch path and reaches the relay connection
+// only through this seam. It is installed when this module loads, before the
+// Hub API is configured, so no session can be restored and no node selected
+// without it.
+installHostedPrimaryConnectionFactory(createHostedPrimaryConnection);
 
 /**
  * Hosted runtime wiring.
@@ -113,7 +138,10 @@ function subscribeForeground(listener: () => void): () => void {
  * Idempotent. Returns false when hosted mode cannot be configured, which is the
  * normal state for a direct-only build.
  */
-export async function configureMobileHostedRuntime(): Promise<boolean> {
+export async function configureMobileHostedRuntime(
+  /** A signer creation the caller already started; joined rather than repeated. */
+  signerAttempt?: Promise<DpopSignerService>,
+): Promise<boolean> {
   if (configured) return isMobileHostedModeAvailable();
   if (!isMobileHostedModeConfigured()) return false;
   const endpoint = getMobileHostedEndpoint();
@@ -124,7 +152,7 @@ export async function configureMobileHostedRuntime(): Promise<boolean> {
   try {
     // Hardware-backed key or no hosted session at all. There is deliberately no
     // software fallback: it would reduce DPoP to bare bearer assurance.
-    dpopSigner = await createMobileDpopSigner();
+    dpopSigner = await (signerAttempt ?? createMobileDpopSigner());
   } catch {
     setMobileHostedModeAvailable(false, "device-security");
     return false;
@@ -327,14 +355,31 @@ export function ensureMobileHostedSession(): Promise<void> {
     // becomes authoritative before any secret is read or request is sent.
     invalidateMobileHostedRuntimeConfig();
     if (!isMobileHostedModeConfigured()) return false;
-    try {
-      await hydrateMobileHostedSessionToken();
-    } catch {
+    // The three local steps are independent: the token is only needed before
+    // bootstrap and the trust store before configuration, and the hardware key
+    // load behind the signer needs neither. Overlapping them costs the slowest
+    // keychain/Secure Enclave round trip instead of their sum. The signer
+    // attempt is joined by `configureMobileHostedRuntime`, which still maps
+    // its failure to `device-security`.
+    const signerAttempt = configured ? undefined : createMobileDpopSigner();
+    signerAttempt?.catch(() => undefined);
+    const [token, trust] = await Promise.allSettled([
+      hydrateMobileHostedSessionToken(),
+      mobileE2eeTrustStore.hydrate(),
+    ]);
+    if (token.status === "rejected") {
       setMobileHostedModeAvailable(false, "credential-storage");
       return false;
     }
-    await mobileE2eeTrustStore.hydrate();
-    if (!(await configureMobileHostedRuntime())) return false;
+    if (trust.status === "rejected") throw trust.reason;
+    if (!(await configureMobileHostedRuntime(signerAttempt))) return false;
+    // No stored session means there is nothing to restore: the access check
+    // would only fail locally on the missing token, clear material that does
+    // not exist, and spend a proof plus a Hub round trip (up to the request
+    // deadline) on the bootstrap-availability probe, whose answer no mobile
+    // surface reads. The store already reads `signed-out`; a sign-in ceremony
+    // adopts its credential and checks access itself.
+    if ((mobileSessionCredentials.readBearerToken?.() ?? null) === null) return true;
     await hostedHubController.bootstrap();
     return true;
   })().then(

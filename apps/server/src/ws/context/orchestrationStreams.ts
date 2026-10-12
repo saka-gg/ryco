@@ -1,9 +1,10 @@
-import { Effect, Fiber, Option, PubSub, Queue, Ref, Stream } from "effect";
+import { Array as Arr, Deferred, Effect, Fiber, Option, PubSub, Queue, Ref, Stream } from "effect";
 import {
   type OrchestrationEvent,
   type OrchestrationShellSnapshot,
   type OrchestrationShellStreamEvent,
   type OrchestrationShellStreamItem,
+  type OrchestrationThreadPriorityEntry,
   OrchestrationGetSnapshotError,
   ThreadId,
   WorktreeId,
@@ -11,8 +12,9 @@ import {
 
 import type { OrchestrationEngineShape } from "../../orchestration/Services/OrchestrationEngine.ts";
 import type { ProjectionSnapshotQueryShape } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import type { OrchestrationEventStoreError } from "../../persistence/Errors.ts";
+import type { OrchestrationEventStoreShape } from "../../persistence/Services/OrchestrationEventStore.ts";
 import type { RepositoryIdentityResolverShape } from "../../project/Services/RepositoryIdentityResolver.ts";
-import { approximateJsonBytes } from "../../observability/PerfInstrumentation.ts";
 import {
   type WsReplayMetrics,
   type WsReplayStreamKind,
@@ -23,10 +25,77 @@ import {
   ORCHESTRATION_LIVE_QUEUE_MAX_EVENTS,
   ORCHESTRATION_PROGRESS_COALESCE_WINDOW_MS,
   ORCHESTRATION_REPLAY_PAGE_MAX_LIMIT,
+  ORCHESTRATION_SHELL_STREAM_CHUNK_MAX_ITEMS,
+  ORCHESTRATION_SHELL_THREAD_COALESCE_WINDOW_MS,
+  ORCHESTRATION_STREAM_CHUNK_MAX_BYTES,
+  ORCHESTRATION_THREAD_RESUME_MAX_SCAN_EVENTS,
 } from "./constants.ts";
 import { isThreadDetailEvent } from "./orchestrationEvents.ts";
 import { randomShortId } from "./branchNaming.ts";
-import { makeOrchestrationEventCoalescer } from "./orchestrationEventCoalescing.ts";
+import {
+  makeOrchestrationEventCoalescer,
+  orchestrationProgressFrameKey,
+  orchestrationShellFrameKey,
+} from "./orchestrationEventCoalescing.ts";
+import {
+  orchestrationEventBytes,
+  rechunkByBudget,
+  tapArray,
+} from "./orchestrationStreamBatching.ts";
+
+/**
+ * One shared load for the subscribers a thread-priority ranking woke together.
+ * It is joinable only until its read begins: every subscriber that joins heard
+ * of its ranking before the read, so the shared result includes that ranking.
+ * A ranking heard later starts a new load.
+ */
+interface PriorityLoadFlight<A> {
+  reading: boolean;
+  readonly result: Deferred.Deferred<A, OrchestrationGetSnapshotError>;
+}
+
+// Keyed by the projection query service, which every connection of a server
+// shares, so subscribers on different connections join the same load.
+const prioritySnapshotFlights = new WeakMap<
+  object,
+  PriorityLoadFlight<OrchestrationShellSnapshot>
+>();
+const priorityEntryFlights = new WeakMap<
+  object,
+  PriorityLoadFlight<ReadonlyArray<OrchestrationThreadPriorityEntry>>
+>();
+
+/** Joins the open load in `flights` for `key`, or starts one that later callers can join. */
+const joinPriorityLoad = <A>(
+  flights: WeakMap<object, PriorityLoadFlight<A>>,
+  key: object,
+  load: Effect.Effect<A, OrchestrationGetSnapshotError>,
+): Effect.Effect<A, OrchestrationGetSnapshotError> =>
+  Effect.gen(function* () {
+    const flight = flights.get(key);
+    if (flight !== undefined && !flight.reading) {
+      return yield* Deferred.await(flight.result);
+    }
+    const next: PriorityLoadFlight<A> = {
+      reading: false,
+      result: yield* Deferred.make<A, OrchestrationGetSnapshotError>(),
+    };
+    flights.set(key, next);
+    // Detached: a subscriber that disconnects must not strand the others.
+    // The yield lets the other subscribers the same ranking woke join first.
+    yield* Effect.yieldNow.pipe(
+      Effect.andThen(
+        Effect.sync(() => {
+          next.reading = true;
+        }),
+      ),
+      Effect.andThen(load),
+      Effect.exit,
+      Effect.flatMap((exit) => Deferred.done(next.result, exit)),
+      Effect.forkDetach,
+    );
+    return yield* Deferred.await(next.result);
+  });
 
 const makeLiveQueueOverflowError = (input: {
   readonly stream: WsReplayStreamKind;
@@ -59,7 +128,7 @@ export const offerOrchestrationLiveEventOrFail = (input: {
     const byteBudget = input.byteBudget ?? ORCHESTRATION_LIVE_QUEUE_MAX_BYTES;
     const eventBytes =
       input.eventBytes ??
-      (input.queuedBytesRef === undefined ? 0 : approximateJsonBytes(input.event));
+      (input.queuedBytesRef === undefined ? 0 : orchestrationEventBytes(input.event));
 
     if (input.queuedBytesRef !== undefined) {
       const queuedBytes = yield* Ref.get(input.queuedBytesRef);
@@ -119,7 +188,23 @@ const failLiveQueueWithOverflow = (
 export const releaseQueuedEventBytes = (
   queuedBytesRef: Ref.Ref<number>,
   event: OrchestrationEvent,
-) => Ref.update(queuedBytesRef, (bytes) => Math.max(0, bytes - approximateJsonBytes(event)));
+) => releaseQueuedEventsBytes(queuedBytesRef, [event]);
+
+/** Releases one drained batch's bytes from the live queue ledger in one update. */
+export const releaseQueuedEventsBytes = (
+  queuedBytesRef: Ref.Ref<number>,
+  events: ReadonlyArray<OrchestrationEvent>,
+) => {
+  let released = 0;
+  for (const event of events) released += orchestrationEventBytes(event);
+  return Ref.update(queuedBytesRef, (bytes) => Math.max(0, bytes - released));
+};
+
+const lastSequenceOf = (events: Arr.NonEmptyReadonlyArray<{ readonly sequence: number }>) => {
+  let sequence = events[0].sequence;
+  for (const event of events) sequence = Math.max(sequence, event.sequence);
+  return sequence;
+};
 
 /**
  * Raw, uncoalesced offer primitive for one thread-subscription live event:
@@ -268,11 +353,57 @@ export const toShellStreamEvent = (
   }
 };
 
+/**
+ * Thread events the shell turns into a `thread-upserted` re-read of the row
+ * (the default branch of `toShellStreamEvent`).
+ */
+const isThreadShellUpsertEvent = (event: OrchestrationEvent): boolean =>
+  event.aggregateKind === "thread" &&
+  event.type !== "thread.deleted" &&
+  event.type !== "thread.trashed";
+
+/**
+ * Maps one drained batch of domain events to shell stream items, in sequence
+ * order. Thread upserts re-read the row, so within a batch only the last
+ * upsert-class event per thread is read and sent, at that event's position:
+ * the row it reads already reflects every earlier event of the batch, and any
+ * later removal of the thread still follows it. Dropped items are `null`.
+ */
+export const toShellStreamEvents = (
+  projectionSnapshotQuery: Pick<
+    ProjectionSnapshotQueryShape,
+    "getProjectShellById" | "getThreadShellById" | "getWorktreeShellById"
+  >,
+  events: Arr.NonEmptyReadonlyArray<OrchestrationEvent>,
+): Effect.Effect<Arr.NonEmptyReadonlyArray<OrchestrationShellStreamEvent | null>> => {
+  const lastUpsertIndexByThread = new Map<string, number>();
+  for (let index = 0; index < events.length; index += 1) {
+    const event = events[index]!;
+    if (isThreadShellUpsertEvent(event)) lastUpsertIndexByThread.set(event.aggregateId, index);
+  }
+  const kept =
+    lastUpsertIndexByThread.size === 0
+      ? events
+      : events.filter(
+          (event, index) =>
+            !isThreadShellUpsertEvent(event) ||
+            lastUpsertIndexByThread.get(event.aggregateId) === index,
+        );
+  // The batch's last event is always kept, so `kept` is never empty.
+  return Effect.forEach(kept, (event) =>
+    toShellStreamEvent(projectionSnapshotQuery, event).pipe(Effect.map(Option.getOrNull)),
+  ) as Effect.Effect<Arr.NonEmptyReadonlyArray<OrchestrationShellStreamEvent | null>>;
+};
+
 export const makeOrchestrationStreamHelpers = (deps: {
   readonly orchestrationEngine: OrchestrationEngineShape;
   readonly projectionSnapshotQuery: ProjectionSnapshotQueryShape;
   readonly repositoryIdentityResolver: RepositoryIdentityResolverShape;
   readonly threadPriorityChanges?: Stream.Stream<void>;
+  /** Payload-free resume probe; without it resumption reads event pages. */
+  readonly probeResume?: OrchestrationEventStoreShape["probeResume"];
+  /** One thread's events through the stream index; without it thread replay scans global pages. */
+  readonly readStreamEventsPage?: OrchestrationEventStoreShape["readStreamEventsPage"];
 }) => {
   const { orchestrationEngine, projectionSnapshotQuery, repositoryIdentityResolver } = deps;
   const threadPriorityChanges = deps.threadPriorityChanges ?? Stream.empty;
@@ -282,32 +413,42 @@ export const makeOrchestrationStreamHelpers = (deps: {
   ): Effect.Effect<OrchestrationEvent, never, never> => {
     switch (event.type) {
       case "project.created":
-        return repositoryIdentityResolver.resolve(event.payload.workspaceRoot).pipe(
-          Effect.map((repositoryIdentity) => ({
+        // A replayed creation reads the identity the project row persisted; only a project the
+        // identity sync has not recorded yet resolves its root (through the cached resolver).
+        return Effect.gen(function* () {
+          const project = yield* projectionSnapshotQuery.getProjectShellById(
+            event.payload.projectId,
+          );
+          const persisted = Option.isSome(project)
+            ? (project.value.repositoryIdentity ?? null)
+            : null;
+          const repositoryIdentity =
+            persisted ?? (yield* repositoryIdentityResolver.resolve(event.payload.workspaceRoot));
+          return {
             ...event,
             payload: {
               ...event.payload,
               repositoryIdentity,
             },
-          })),
-        );
+          } satisfies OrchestrationEvent;
+        }).pipe(Effect.catch(() => Effect.succeed(event)));
       case "project.meta-updated":
+        // The persisted identity: no `git` on the event path for ordinary meta updates (titles,
+        // scripts, the identity sync's own announcements). A moved root resets it until the sync
+        // records and announces the new one, so the move itself resolves the root through the
+        // cached resolver, like `project.created`, instead of regrouping the project twice.
         return Effect.gen(function* () {
-          const workspaceRoot =
-            event.payload.workspaceRoot ??
-            Option.match(
-              yield* projectionSnapshotQuery.getProjectShellById(event.payload.projectId),
-              {
-                onNone: () => null,
-                onSome: (project) => project.workspaceRoot,
-              },
-            ) ??
-            null;
-          if (workspaceRoot === null) {
+          const project = yield* projectionSnapshotQuery.getProjectShellById(
+            event.payload.projectId,
+          );
+          if (Option.isNone(project)) {
             return event;
           }
-
-          const repositoryIdentity = yield* repositoryIdentityResolver.resolve(workspaceRoot);
+          const persisted = project.value.repositoryIdentity ?? null;
+          const repositoryIdentity =
+            persisted === null && event.payload.workspaceRoot !== undefined
+              ? yield* repositoryIdentityResolver.resolve(project.value.workspaceRoot)
+              : persisted;
           return {
             ...event,
             payload: {
@@ -324,20 +465,23 @@ export const makeOrchestrationStreamHelpers = (deps: {
   const enrichOrchestrationEvents = (events: ReadonlyArray<OrchestrationEvent>) =>
     Effect.forEach(events, enrichProjectEvent, { concurrency: 4 });
 
+  /**
+   * Drops items at or below the last sequence sent. The state lives in the
+   * closure: each subscription builds its own pipeline.
+   */
   const dedupeBySequence =
-    <A>(getSequence: (item: A) => number, sequenceRef: Ref.Ref<number>) =>
-    <E, R>(stream: Stream.Stream<A, E, R>): Stream.Stream<A, E, R> =>
-      stream.pipe(
-        Stream.filterEffect((item) =>
-          Ref.modify(sequenceRef, (lastSequence) => {
-            const nextSequence = getSequence(item);
-            if (nextSequence <= lastSequence) {
-              return [false, lastSequence] as const;
-            }
-            return [true, nextSequence] as const;
-          }),
-        ),
+    <A>(getSequence: (item: A) => number, initialSequence: number) =>
+    <E, R>(stream: Stream.Stream<A, E, R>): Stream.Stream<A, E, R> => {
+      let lastSequence = initialSequence;
+      return stream.pipe(
+        Stream.filter((item) => {
+          const nextSequence = getSequence(item);
+          if (nextSequence <= lastSequence) return false;
+          lastSequence = nextSequence;
+          return true;
+        }),
       );
+    };
 
   const makeReplayBoundaryTracker = (snapshotSequence: number) =>
     Effect.gen(function* () {
@@ -367,11 +511,27 @@ export const makeOrchestrationStreamHelpers = (deps: {
       };
     });
 
+  type ReplayPageReader = (
+    fromSequenceExclusive: number,
+    limit: number,
+  ) => Effect.Effect<
+    {
+      readonly events: ReadonlyArray<OrchestrationEvent>;
+      readonly nextSequence: number;
+      readonly hasMore: boolean;
+    },
+    OrchestrationEventStoreError
+  >;
+
   const makeBoundedReplayStream = (input: {
     readonly snapshotSequence: number;
     readonly captureReplayUpperBound: Effect.Effect<Option.Option<number>>;
     readonly errorMessage: string;
+    /** Pages to replay; the whole event log by default. */
+    readonly readPage?: ReplayPageReader;
   }): Stream.Stream<OrchestrationEvent, OrchestrationGetSnapshotError> => {
+    const readReplayPage: ReplayPageReader =
+      input.readPage ?? ((from, limit) => orchestrationEngine.readEventsPage(from, limit));
     const readPage = (
       fromSequenceExclusive: number,
     ): Stream.Stream<OrchestrationEvent, OrchestrationGetSnapshotError> =>
@@ -385,17 +545,18 @@ export const makeOrchestrationStreamHelpers = (deps: {
             return Stream.empty;
           }
 
-          const page = yield* orchestrationEngine
-            .readEventsPage(fromSequenceExclusive, ORCHESTRATION_REPLAY_PAGE_MAX_LIMIT)
-            .pipe(
-              Effect.mapError(
-                (cause) =>
-                  new OrchestrationGetSnapshotError({
-                    message: input.errorMessage,
-                    cause,
-                  }),
-              ),
-            );
+          const page = yield* readReplayPage(
+            fromSequenceExclusive,
+            ORCHESTRATION_REPLAY_PAGE_MAX_LIMIT,
+          ).pipe(
+            Effect.mapError(
+              (cause) =>
+                new OrchestrationGetSnapshotError({
+                  message: input.errorMessage,
+                  cause,
+                }),
+            ),
+          );
           const upperBound = Option.isSome(upperBoundBeforeRead)
             ? upperBoundBeforeRead
             : yield* input.captureReplayUpperBound;
@@ -424,14 +585,12 @@ export const makeOrchestrationStreamHelpers = (deps: {
     stream: Stream.Stream<OrchestrationEvent, E, R>,
   ): Stream.Stream<OrchestrationShellStreamEvent, E, R> =>
     stream.pipe(
-      Stream.mapEffect((event) => toShellStreamEvent(projectionSnapshotQuery, event)),
-      Stream.flatMap((event) =>
-        Option.isSome(event) ? Stream.succeed(event.value) : Stream.empty,
-      ),
+      Stream.mapArrayEffect((events) => toShellStreamEvents(projectionSnapshotQuery, events)),
+      Stream.filter((event): event is OrchestrationShellStreamEvent => event !== null),
     );
 
   /**
-   * Wires one subscription's live feed: coalesces progress-grade frames
+   * Wires one subscription's live feed: coalesces frames under `coalesceKey`
    * before enqueue, keeps a byte ledger over queued-but-undrained events, and
    * runs the coalescer's flush tick for the feed's lifetime.
    */
@@ -441,6 +600,8 @@ export const makeOrchestrationStreamHelpers = (deps: {
     readonly liveQueue: Queue.Queue<OrchestrationEvent, OrchestrationGetSnapshotError>;
     readonly overflowedRef: Ref.Ref<boolean>;
     readonly replayMetrics: WsReplayMetrics;
+    readonly coalesceKey: (event: OrchestrationEvent) => string | null;
+    readonly coalesceWindowMs: number;
     readonly onEvent: (
       event: OrchestrationEvent,
       push: (event: OrchestrationEvent) => Effect.Effect<void, OrchestrationGetSnapshotError>,
@@ -460,13 +621,12 @@ export const makeOrchestrationStreamHelpers = (deps: {
             eventBytes,
           }),
         onCoalesced: (sequence) => input.replayMetrics.recordCoalesced(sequence),
-        windowMs: ORCHESTRATION_PROGRESS_COALESCE_WINDOW_MS,
+        windowMs: input.coalesceWindowMs,
+        keyOf: input.coalesceKey,
       });
       const flushTickFiber = yield* Effect.forkScoped(
         Effect.forever(
-          Effect.sleep(ORCHESTRATION_PROGRESS_COALESCE_WINDOW_MS).pipe(
-            Effect.andThen(coalescer.flush),
-          ),
+          Effect.sleep(input.coalesceWindowMs).pipe(Effect.andThen(coalescer.flush)),
         ).pipe(Effect.ignoreCause({ log: true })),
       );
       yield* Stream.fromSubscription(input.liveSubscription).pipe(
@@ -485,15 +645,72 @@ export const makeOrchestrationStreamHelpers = (deps: {
     });
 
   /**
-   * Can a client that last applied `fromSequence` catch up from the event log
-   * rather than a snapshot — of the shell or of one thread? Only when that sequence names an event this log
-   * still holds — a reset or foreign log restarts below it — and no more than one
-   * replay page has happened since, beyond which a snapshot is the cheaper send.
-   * The log is never pruned today; pruning must keep this answer truthful.
+   * Drains the live queue in whole batches: everything queued while the
+   * previous chunk awaited its acknowledgement leaves as one chunk, and the
+   * byte ledger and metrics are settled once per batch.
    */
-  const canResumeAfter = (fromSequence: number) =>
+  const drainLiveQueue = (input: {
+    readonly liveQueue: Queue.Queue<OrchestrationEvent, OrchestrationGetSnapshotError>;
+    readonly queuedBytesRef: Ref.Ref<number>;
+    readonly replayMetrics: WsReplayMetrics;
+  }) =>
+    Stream.fromQueue(input.liveQueue).pipe(
+      tapArray((events) =>
+        releaseQueuedEventsBytes(input.queuedBytesRef, events).pipe(
+          Effect.andThen(
+            input.replayMetrics.recordLiveDequeued(lastSequenceOf(events), events.length),
+          ),
+        ),
+      ),
+    );
+
+  /**
+   * Can a client that last applied `fromSequence` catch up from the event log
+   * rather than a snapshot — of the shell or of one thread? Only when that
+   * sequence names an event this log still holds — a reset or foreign log
+   * restarts below it — and no more than one replay page of what the
+   * subscription delivers has happened since, beyond which a snapshot is the
+   * cheaper send. A thread is judged on its own backlog, so an idle retained
+   * thread still resumes while other threads stream. Its replay reads the
+   * thread's own stream when the store offers that; otherwise it scans global
+   * pages, so that scan is bounded as well. The log is never pruned today;
+   * pruning must keep this answer truthful.
+   */
+  const canResumeAfter = (fromSequence: number, scope?: { readonly threadId: ThreadId }) =>
     Effect.gen(function* () {
       if (!Number.isSafeInteger(fromSequence) || fromSequence <= 0) return false;
+      const probeResume = deps.probeResume;
+      if (probeResume !== undefined) {
+        // A thread replayed through its own stream never touches the rest of
+        // the log, so only the anchor matters globally (a limit of zero keeps
+        // that count from reading anything past the first row).
+        const scansGlobalLog = scope === undefined || deps.readStreamEventsPage === undefined;
+        const globalLimit =
+          scope === undefined
+            ? ORCHESTRATION_REPLAY_PAGE_MAX_LIMIT
+            : scansGlobalLog
+              ? ORCHESTRATION_THREAD_RESUME_MAX_SCAN_EVENTS
+              : 0;
+        const probe = yield* probeResume({
+          sequence: fromSequence,
+          limit: globalLimit,
+          ...(scope === undefined
+            ? {}
+            : {
+                stream: {
+                  aggregateKind: "thread" as const,
+                  streamId: scope.threadId,
+                  limit: ORCHESTRATION_REPLAY_PAGE_MAX_LIMIT,
+                },
+              }),
+        });
+        if (!probe.anchored || (scansGlobalLog && probe.eventsAfter > globalLimit)) return false;
+        return (
+          scope === undefined ||
+          (probe.streamEventsAfter !== null &&
+            probe.streamEventsAfter <= ORCHESTRATION_REPLAY_PAGE_MAX_LIMIT)
+        );
+      }
       const anchor = yield* orchestrationEngine.readEventsPage(fromSequence - 1, 1);
       if (anchor.events[0]?.sequence !== fromSequence) return false;
       const missed = yield* orchestrationEngine.readEventsPage(
@@ -503,9 +720,73 @@ export const makeOrchestrationStreamHelpers = (deps: {
       return !missed.hasMore;
     }).pipe(Effect.orElseSucceed(() => false));
 
+  /** Every thread's current ranking, when the projection can list them on their own. */
+  const loadThreadPriorityEntries =
+    projectionSnapshotQuery.listThreadPriorities === undefined
+      ? undefined
+      : projectionSnapshotQuery.listThreadPriorities().pipe(
+          Effect.mapError(
+            (cause) =>
+              new OrchestrationGetSnapshotError({
+                message: "Failed to load thread priorities",
+                cause,
+              }),
+          ),
+        );
+
+  /**
+   * The shell items a thread-priority ranking sends a subscriber. A client
+   * that takes deltas gets the rankings alone (dozens of rows); any other
+   * client gets a full snapshot, which every client understands. Every shell
+   * subscriber hears a ranking at the same moment, so they join one load.
+   */
+  const priorityStream = (
+    snapshot: Effect.Effect<OrchestrationShellSnapshot, OrchestrationGetSnapshotError>,
+    threadPriorities: "delta" | undefined,
+  ): Stream.Stream<OrchestrationShellStreamItem, OrchestrationGetSnapshotError> => {
+    const loadPriorities = loadThreadPriorityEntries;
+    if (threadPriorities === "delta" && loadPriorities !== undefined) {
+      return threadPriorityChanges.pipe(
+        Stream.mapEffect(() =>
+          joinPriorityLoad(priorityEntryFlights, projectionSnapshotQuery, loadPriorities),
+        ),
+        Stream.map((priorities) => ({ kind: "thread-priorities" as const, priorities })),
+      );
+    }
+    return threadPriorityChanges.pipe(
+      Stream.mapEffect(() =>
+        joinPriorityLoad(prioritySnapshotFlights, projectionSnapshotQuery, snapshot),
+      ),
+      Stream.map((nextSnapshot) => ({ kind: "snapshot" as const, snapshot: nextSnapshot })),
+    );
+  };
+
+  /**
+   * A resumed client keeps the shell it had, and a ranking made while it was
+   * away is no event it replays: a client that takes deltas gets the current
+   * rankings right after the resume marker. A failed read only skips it.
+   */
+  const resumedPriorityItems = (
+    threadPriorities: "delta" | undefined,
+  ): Stream.Stream<OrchestrationShellStreamItem> => {
+    const loadPriorities = loadThreadPriorityEntries;
+    if (threadPriorities !== "delta" || loadPriorities === undefined) return Stream.empty;
+    return Stream.unwrap(
+      loadPriorities.pipe(
+        Effect.map((priorities): Stream.Stream<OrchestrationShellStreamItem> =>
+          Stream.make({ kind: "thread-priorities" as const, priorities }),
+        ),
+        Effect.catch(() => Effect.succeed(Stream.empty)),
+      ),
+    );
+  };
+
   const makeReplayableShellStream = (
     snapshot: Effect.Effect<OrchestrationShellSnapshot, OrchestrationGetSnapshotError>,
-    options: { readonly resumeFromSequence?: number | undefined } = {},
+    options: {
+      readonly resumeFromSequence?: number | undefined;
+      readonly threadPriorities?: "delta" | undefined;
+    } = {},
   ) =>
     Stream.unwrap(
       Effect.gen(function* () {
@@ -519,7 +800,6 @@ export const makeOrchestrationStreamHelpers = (deps: {
         const liveQueue = yield* Queue.bounded<OrchestrationEvent, OrchestrationGetSnapshotError>(
           ORCHESTRATION_LIVE_QUEUE_MAX_EVENTS,
         );
-        const lastSequenceRef = yield* Ref.make(snapshotSequence);
         const overflowedRef = yield* Ref.make(false);
         const replayBoundary = yield* makeReplayBoundaryTracker(snapshotSequence);
         const replayMetrics = yield* makeWsReplayMetrics({
@@ -534,6 +814,8 @@ export const makeOrchestrationStreamHelpers = (deps: {
           liveQueue,
           overflowedRef,
           replayMetrics,
+          coalesceKey: orchestrationShellFrameKey,
+          coalesceWindowMs: ORCHESTRATION_SHELL_THREAD_COALESCE_WINDOW_MS,
           onEvent: (event, push) =>
             Effect.gen(function* () {
               yield* replayBoundary.recordLiveSequence(event.sequence);
@@ -545,32 +827,29 @@ export const makeOrchestrationStreamHelpers = (deps: {
           snapshotSequence,
           captureReplayUpperBound: replayBoundary.captureReplayUpperBound,
           errorMessage: "Failed to replay orchestration shell events",
-        }).pipe(Stream.tap((event) => replayMetrics.recordReplayEvent(event.sequence)));
-        const liveStream = Stream.fromQueue(liveQueue).pipe(
-          Stream.tap((event) => releaseQueuedEventBytes(queuedBytesRef, event)),
-          Stream.tap((event) => replayMetrics.recordLiveDequeued(event.sequence)),
-        );
+        }).pipe(tapArray((events) => replayMetrics.recordReplayEvent(lastSequenceOf(events))));
+        const liveStream = drainLiveQueue({ liveQueue, queuedBytesRef, replayMetrics });
 
         const eventStream = Stream.concat(
           shellEventsFromDomainEvents(replayStream),
           shellEventsFromDomainEvents(liveStream),
-        ).pipe(dedupeBySequence((event) => event.sequence, lastSequenceRef));
-        const prioritySnapshotStream = threadPriorityChanges.pipe(
-          Stream.mapEffect(() => snapshot),
-          Stream.map((nextSnapshot) => ({
-            kind: "snapshot" as const,
-            snapshot: nextSnapshot,
-          })),
+        ).pipe(
+          dedupeBySequence((event) => event.sequence, snapshotSequence),
+          rechunkByBudget({ maxItems: ORCHESTRATION_SHELL_STREAM_CHUNK_MAX_ITEMS }),
         );
+        const priorityItems = priorityStream(snapshot, options.threadPriorities);
 
         const head: OrchestrationShellStreamItem =
           loadedSnapshot === undefined
             ? { kind: "resumed", fromSequence: snapshotSequence }
             : { kind: "snapshot", snapshot: loadedSnapshot };
-        return Stream.concat(
-          Stream.make(head),
-          Stream.merge(eventStream, prioritySnapshotStream),
-        ).pipe(Stream.ensuring(replayMetrics.reset));
+        const headItems =
+          loadedSnapshot === undefined
+            ? Stream.concat(Stream.make(head), resumedPriorityItems(options.threadPriorities))
+            : Stream.make(head);
+        return Stream.concat(headItems, Stream.merge(eventStream, priorityItems)).pipe(
+          Stream.ensuring(replayMetrics.reset),
+        );
       }),
     );
 
@@ -586,7 +865,8 @@ export const makeOrchestrationStreamHelpers = (deps: {
       Effect.gen(function* () {
         const resumeFromSequence = options.resumeFromSequence;
         const resumed =
-          resumeFromSequence !== undefined && (yield* canResumeAfter(resumeFromSequence));
+          resumeFromSequence !== undefined &&
+          (yield* canResumeAfter(resumeFromSequence, { threadId }));
         const loadedSnapshot = resumed ? undefined : yield* snapshot;
         const snapshotSequence =
           loadedSnapshot?.snapshotSequence ?? (resumed ? resumeFromSequence : 0);
@@ -594,7 +874,6 @@ export const makeOrchestrationStreamHelpers = (deps: {
         const liveQueue = yield* Queue.bounded<OrchestrationEvent, OrchestrationGetSnapshotError>(
           ORCHESTRATION_LIVE_QUEUE_MAX_EVENTS,
         );
-        const lastSequenceRef = yield* Ref.make(snapshotSequence);
         const overflowedRef = yield* Ref.make(false);
         const replayBoundary = yield* makeReplayBoundaryTracker(snapshotSequence);
         const replayMetrics = yield* makeWsReplayMetrics({
@@ -623,6 +902,8 @@ export const makeOrchestrationStreamHelpers = (deps: {
           liveQueue,
           overflowedRef,
           replayMetrics,
+          coalesceKey: orchestrationProgressFrameKey,
+          coalesceWindowMs: ORCHESTRATION_PROGRESS_COALESCE_WINDOW_MS,
           onEvent: (event, push) =>
             Effect.gen(function* () {
               yield* replayBoundary.recordLiveSequence(event.sequence);
@@ -633,20 +914,36 @@ export const makeOrchestrationStreamHelpers = (deps: {
             }),
         });
 
+        const readStreamEventsPage = deps.readStreamEventsPage;
         const replayStream = makeBoundedReplayStream({
           snapshotSequence,
           captureReplayUpperBound: replayBoundary.captureReplayUpperBound,
           errorMessage: "Failed to replay orchestration thread events",
-        }).pipe(Stream.tap((event) => replayMetrics.recordReplayEvent(event.sequence)));
-        const liveStream = Stream.fromQueue(liveQueue).pipe(
-          Stream.tap((event) => releaseQueuedEventBytes(queuedBytesRef, event)),
-          Stream.tap((event) => replayMetrics.recordLiveDequeued(event.sequence)),
-        );
+          ...(readStreamEventsPage === undefined
+            ? {}
+            : {
+                readPage: (fromSequenceExclusive: number, limit: number) =>
+                  readStreamEventsPage({
+                    aggregateKind: "thread",
+                    streamId: threadId,
+                    fromSequenceExclusive,
+                    limit,
+                  }),
+              }),
+        }).pipe(tapArray((events) => replayMetrics.recordReplayEvent(lastSequenceOf(events))));
+        const liveStream = drainLiveQueue({ liveQueue, queuedBytesRef, replayMetrics });
 
         const eventStream = Stream.concat(
           threadEvents(replayStream),
           threadEvents(liveStream),
-        ).pipe(dedupeBySequence((item) => item.event.sequence, lastSequenceRef));
+        ).pipe(
+          dedupeBySequence((item) => item.event.sequence, snapshotSequence),
+          rechunkByBudget({
+            maxItems: ORCHESTRATION_REPLAY_PAGE_MAX_LIMIT,
+            maxBytes: ORCHESTRATION_STREAM_CHUNK_MAX_BYTES,
+            sizeOf: (item) => orchestrationEventBytes(item.event),
+          }),
+        );
 
         const head =
           loadedSnapshot === undefined

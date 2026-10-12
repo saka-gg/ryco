@@ -7,7 +7,7 @@ import {
   IconDatabase,
   IconSparkles,
   IconAlertCircle,
-} from "@tabler/icons-react-native";
+} from "../../../components/icons";
 import {
   filterUsageImports,
   sumUsageImports,

@@ -6,6 +6,7 @@ import {
   nodeServiceDefinitionPath,
   nodeServiceLabel,
   nodeServiceLingerCommand,
+  nodeServiceRuntimeArgs,
   nodeServiceUser,
   parseLaunchctlPrint,
   parseSystemctlShow,
@@ -62,10 +63,23 @@ describe("node service definitions", () => {
     expect(plist).not.toContain("Mac & <mini>");
   });
 
+  it("caps the V8 young generation for a Node runtime, but not through NODE_OPTIONS", () => {
+    const plist = renderLaunchAgentPlist(spec);
+    expect(plist).toContain(
+      "<string>/opt/homebrew/bin/node</string>\n    <string>--max-semi-space-size=16</string>\n    <string>/opt/homebrew/lib/node_modules/ryco-cli/dist/bin.mjs</string>",
+    );
+    expect(plist).not.toContain("NODE_OPTIONS");
+    expect(nodeServiceRuntimeArgs("/usr/local/bin/node22")).toEqual(["--max-semi-space-size=16"]);
+    expect(nodeServiceRuntimeArgs("/Users/me/.bun/bin/bun")).toEqual([]);
+    expect(renderSystemdUserUnit({ ...spec, execPath: "/usr/bin/bun" })).toContain(
+      'ExecStart="/usr/bin/bun" "/opt/homebrew/lib/node_modules/ryco-cli/dist/bin.mjs"',
+    );
+  });
+
   it("renders a systemd unit that restarts and quotes every argument", () => {
     const unit = renderSystemdUserUnit({ ...spec, args: [...spec.args, "100%"] });
     expect(unit).toContain(
-      'ExecStart="/opt/homebrew/bin/node" "/opt/homebrew/lib/node_modules/ryco-cli/dist/bin.mjs" "serve"',
+      'ExecStart="/opt/homebrew/bin/node" "--max-semi-space-size=16" "/opt/homebrew/lib/node_modules/ryco-cli/dist/bin.mjs" "serve"',
     );
     expect(unit).toContain('"Mac & <mini>"');
     expect(unit).toContain('"100%%"');

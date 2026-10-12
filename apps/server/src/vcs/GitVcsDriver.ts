@@ -49,7 +49,18 @@ export interface ExecuteGitInput {
    * blobs). Output over `maxOutputBytes` fails instead of truncating.
    */
   readonly stdoutBytes?: boolean;
+  /**
+   * A read that must never take optional locks (`GIT_OPTIONAL_LOCKS=0`): a
+   * background `git status` otherwise rewrites `.git/index` under
+   * `index.lock`, racing agents' `git add` / `commit` in the same checkout.
+   */
+  readonly readOnly?: boolean;
 }
+
+/** Environment for read-only git commands; see {@link ExecuteGitInput.readOnly}. */
+export const READ_ONLY_GIT_ENV = Object.freeze({
+  GIT_OPTIONAL_LOCKS: "0",
+} satisfies NodeJS.ProcessEnv);
 
 export interface ExecuteGitResult {
   readonly exitCode: ChildProcessSpawner.ExitCode;
@@ -59,6 +70,13 @@ export interface ExecuteGitResult {
   readonly stderrTruncated: boolean;
   /** Present only when the input requested `stdoutBytes`; `stdout` is then empty. */
   readonly stdoutBytes?: Uint8Array;
+}
+
+/** Parsed `git config --list`: keys as git prints them (section and name lowercased). */
+export interface GitConfigSnapshot {
+  readonly get: (key: string) => string | null;
+  /** Configured remote names, in config order. */
+  readonly remoteNames: ReadonlyArray<string>;
 }
 
 export interface GitStatusDetails {
@@ -174,9 +192,21 @@ export interface GitSetBranchUpstreamInput {
 
 export interface GitVcsDriverShape {
   readonly execute: (input: ExecuteGitInput) => Effect.Effect<ExecuteGitResult, GitCommandError>;
+  /**
+   * The effective git config (`git config -z --list`, every scope, last value
+   * wins), briefly cached per cwd. For status-path reads only; mutation flows
+   * read single keys with {@link readConfigValue}.
+   */
+  readonly readConfigSnapshot: (cwd: string) => Effect.Effect<GitConfigSnapshot, GitCommandError>;
   readonly status: (input: VcsStatusInput) => Effect.Effect<VcsStatusResult, GitCommandError>;
   readonly statusDetails: (cwd: string) => Effect.Effect<GitStatusDetails, GitCommandError>;
   readonly statusDetailsLocal: (cwd: string) => Effect.Effect<GitStatusDetails, GitCommandError>;
+  /**
+   * Fetches the current branch's upstream remote unless that remote was
+   * fetched recently (shared per repository and remote). Never fails; true
+   * when a fetch completed during the call, so remote-tracking refs may have moved.
+   */
+  readonly refreshStatusUpstream: (cwd: string) => Effect.Effect<boolean>;
   readonly prepareCommitContext: (
     cwd: string,
     filePaths?: readonly string[],
@@ -202,6 +232,12 @@ export interface GitVcsDriverShape {
     key: string,
   ) => Effect.Effect<string | null, GitCommandError>;
   readonly listRefs: (input: VcsListRefsInput) => Effect.Effect<VcsListRefsResult, GitCommandError>;
+  /**
+   * Drops the briefly cached branch listing for `cwd`, for refs that moved
+   * outside this driver (an agent's git command): the status broadcaster's
+   * refresh after a git action or agent turn calls it.
+   */
+  readonly invalidateRefListing: (cwd: string) => Effect.Effect<void>;
   readonly pullCurrentBranch: (cwd: string) => Effect.Effect<VcsPullResult, GitCommandError>;
   readonly assertWorktreeSetupComplete: (
     checkoutPath: string,
@@ -246,7 +282,10 @@ export class GitVcsDriver extends Context.Service<GitVcsDriver, GitVcsDriverShap
   "ryco/vcs/GitVcsDriver",
 ) {}
 
-const WORKSPACE_FILES_MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
+// Sized for the workspace index's 200k-file corpus (paths average well under
+// 100 bytes); larger listings are truncated and reported as such.
+const WORKSPACE_FILES_MAX_OUTPUT_BYTES = 32 * 1024 * 1024;
+const WORKSPACE_FILES_TIMEOUT_MS = 20_000;
 const GIT_CHECK_IGNORE_MAX_STDIN_BYTES = 256 * 1024;
 const WORKSPACE_GIT_HARDENED_CONFIG_ARGS = [
   "-c",
@@ -303,6 +342,19 @@ function chunkPathsForGitCheckIgnore(relativePaths: ReadonlyArray<string>): stri
   }
 
   return chunks;
+}
+
+/** Parses `git rev-parse --is-inside-work-tree --show-toplevel --git-common-dir`. */
+export function parseDetectRepositoryOutput(
+  exitCode: number,
+  stdout: string,
+): { readonly rootPath: string; readonly metadataPath: string | null } | null {
+  if (exitCode !== 0) return null;
+  const [insideWorkTree, rootPath, gitCommonDir] = stdout
+    .split(/\r?\n/g)
+    .map((line) => line.trim());
+  if (insideWorkTree !== "true" || !rootPath) return null;
+  return { rootPath, metadataPath: gitCommonDir || null };
 }
 
 function parseGitRemoteVerboseOutput(
@@ -389,6 +441,7 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
         allowNonZeroExit: true,
         timeoutMs: 5_000,
         maxOutputBytes: 4_096,
+        env: READ_ONLY_GIT_ENV,
       },
     ).pipe(Effect.map((result) => result.exitCode === 0 && result.stdout.trim() === "true"));
 
@@ -404,66 +457,59 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
         : {}),
     });
 
+  // One rev-parse prints all three answers (one line each); outside a work
+  // tree (no repository, a bare one, inside .git) it exits nonzero or says false.
   const detectRepository: VcsDriver.VcsDriverShape["detectRepository"] = Effect.fn(
     "detectRepository",
   )(function* (cwd) {
-    if (!(yield* isInsideWorkTree(cwd))) {
+    const result = yield* gitCommand(
+      process,
+      "GitVcsDriver.detectRepository",
+      cwd,
+      ["rev-parse", "--is-inside-work-tree", "--show-toplevel", "--git-common-dir"],
+      {
+        allowNonZeroExit: true,
+        timeoutMs: 5_000,
+        maxOutputBytes: 16_384,
+        env: READ_ONLY_GIT_ENV,
+      },
+    );
+    const detected = parseDetectRepositoryOutput(result.exitCode, result.stdout);
+    if (detected === null) {
       return null;
     }
 
-    const root = yield* gitCommand(process, "GitVcsDriver.detectRepository.root", cwd, [
-      "rev-parse",
-      "--show-toplevel",
-    ]);
-    const gitCommonDir = yield* gitCommand(
-      process,
-      "GitVcsDriver.detectRepository.commonDir",
-      cwd,
-      ["rev-parse", "--git-common-dir"],
-    ).pipe(Effect.catch(() => Effect.succeed(null)));
-
     return {
       kind: "git" as const,
-      rootPath: root.stdout.trim(),
-      metadataPath: gitCommonDir?.stdout.trim() || null,
+      rootPath: detected.rootPath,
+      metadataPath: detected.metadataPath,
       freshness: yield* nowFreshness(),
     };
   });
 
-  const listWorkspaceFiles: VcsDriver.VcsDriverShape["listWorkspaceFiles"] = (cwd) =>
+  const runLsFiles = (cwd: string, args: ReadonlyArray<string>) =>
     gitCommand(
       process,
       "GitVcsDriver.listWorkspaceFiles",
       cwd,
-      [
-        ...WORKSPACE_GIT_HARDENED_CONFIG_ARGS,
-        "ls-files",
-        "--cached",
-        "--others",
-        "--exclude-standard",
-        "-z",
-      ],
+      [...WORKSPACE_GIT_HARDENED_CONFIG_ARGS, "ls-files", "-z", ...args],
       {
         allowNonZeroExit: true,
-        timeoutMs: 20_000,
+        timeoutMs: WORKSPACE_FILES_TIMEOUT_MS,
         maxOutputBytes: WORKSPACE_FILES_MAX_OUTPUT_BYTES,
         truncateOutputAtMaxBytes: true,
       },
     ).pipe(
       Effect.flatMap((result) =>
         result.exitCode === 0
-          ? Effect.gen(function* () {
-              const freshness = yield* nowFreshness();
-              return {
-                paths: splitNullSeparatedPaths(result.stdout, result.stdoutTruncated),
-                truncated: result.stdoutTruncated,
-                freshness,
-              };
+          ? Effect.succeed({
+              paths: splitNullSeparatedPaths(result.stdout, result.stdoutTruncated),
+              truncated: result.stdoutTruncated,
             })
           : Effect.fail(
               new VcsProcessExitError({
                 operation: "GitVcsDriver.listWorkspaceFiles",
-                command: "git ls-files",
+                command: `git ls-files ${args.join(" ")}`,
                 cwd,
                 exitCode: result.exitCode,
                 detail: result.stderr.trim() || "git ls-files failed",
@@ -472,12 +518,51 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
       ),
     );
 
+  // Three concurrent listings instead of `ls-files -co` piped through chunked
+  // `check-ignore` runs: untracked files from `--others --exclude-standard`
+  // are never ignored, so the only paths ignore rules can still remove are
+  // tracked ones, which `--cached --ignored` lists directly (usually none).
+  // Tracked files come first so a size cap keeps them over untracked ones.
+  const listWorkspaceFiles: VcsDriver.VcsDriverShape["listWorkspaceFiles"] = Effect.fn(
+    "GitVcsDriver.listWorkspaceFiles",
+  )(function* (cwd, options) {
+    const [tracked, ignoredTracked, untracked] = yield* Effect.all(
+      [
+        runLsFiles(cwd, ["--cached"]),
+        runLsFiles(cwd, ["--cached", "--ignored", "--exclude-standard"]),
+        options?.trackedOnly
+          ? Effect.succeed({ paths: [] as string[], truncated: false })
+          : runLsFiles(cwd, ["--others", "--exclude-standard"]),
+      ],
+      { concurrency: "unbounded" },
+    );
+    const ignored = ignoredTracked.paths.length > 0 ? new Set(ignoredTracked.paths) : null;
+    const paths: string[] = [];
+    let previousTracked: string | undefined;
+    for (const trackedPath of tracked.paths) {
+      // Unmerged paths are listed once per conflict stage, adjacently.
+      if (trackedPath === previousTracked) continue;
+      previousTracked = trackedPath;
+      if (ignored?.has(trackedPath)) continue;
+      paths.push(trackedPath);
+    }
+    for (const untrackedPath of untracked.paths) {
+      paths.push(untrackedPath);
+    }
+    return {
+      paths,
+      truncated: tracked.truncated || ignoredTracked.truncated || untracked.truncated,
+      freshness: yield* nowFreshness(),
+    };
+  });
+
   const listRemotes: VcsDriver.VcsDriverShape["listRemotes"] = Effect.fn("listRemotes")(
     function* (cwd) {
       const result = yield* gitCommand(process, "GitVcsDriver.listRemotes", cwd, ["remote", "-v"], {
         allowNonZeroExit: true,
         timeoutMs: 5_000,
         maxOutputBytes: 64 * 1024,
+        env: READ_ONLY_GIT_ENV,
       });
 
       if (result.exitCode !== 0) {
@@ -531,7 +616,7 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
         {
           stdin: `${chunk.join("\0")}\0`,
           allowNonZeroExit: true,
-          timeoutMs: 20_000,
+          timeoutMs: WORKSPACE_FILES_TIMEOUT_MS,
           maxOutputBytes: WORKSPACE_FILES_MAX_OUTPUT_BYTES,
           truncateOutputAtMaxBytes: true,
         },

@@ -38,6 +38,11 @@ import {
 import type { CopilotAdapterShape } from "../Services/CopilotAdapter.ts";
 import { requireRuntimeSessionId } from "../runtimeSession.ts";
 import {
+  COPILOT_CLIENT_STOP_TIMEOUT_MS,
+  COPILOT_SESSION_STOP_TIMEOUT_MS,
+  stopCopilotClient,
+} from "./CopilotAdapter.clientStop.ts";
+import {
   COPILOT_DRIVER_KIND,
   type ActiveCopilotSession,
   type CopilotAdapterLiveOptions,
@@ -254,6 +259,16 @@ export const makeStartSession =
       let sessionConfig = buildConfig();
 
       const effectiveResumeCursor = input.resumePolicy === "fresh" ? undefined : input.resumeCursor;
+      // Until the session is registered nothing else can stop this client, and createSession
+      // may already have started its CLI: release it when the start fails or is interrupted
+      // (a start deadline, a Stop, server shutdown).
+      const releaseUnregisteredClient = Effect.sync(() => deviceToolBinding?.dispose()).pipe(
+        Effect.andThen(
+          Effect.promise(() =>
+            stopCopilotClient({ client, timeoutMs: COPILOT_CLIENT_STOP_TIMEOUT_MS }),
+          ),
+        ),
+      );
       const createSession = (config: SessionConfig) =>
         Effect.tryPromise({
           try: () => {
@@ -272,21 +287,22 @@ export const makeStartSession =
               cause: redactAgentControlSecrets(cause),
             }),
         });
-      let attempt = yield* Effect.exit(
-        createSession(sessionConfig).pipe(
-          Effect.onInterrupt(() =>
-            agentControl ? agentControl.revoke("runtime-teardown") : Effect.void,
+      const attempt = yield* Effect.gen(function* () {
+        const first = yield* Effect.exit(
+          createSession(sessionConfig).pipe(
+            Effect.onInterrupt(() =>
+              agentControl ? agentControl.revoke("runtime-teardown") : Effect.void,
+            ),
           ),
-        ),
-      );
-      if (attempt._tag === "Failure" && agentControl) {
+        );
+        if (first._tag === "Success" || !agentControl) return first;
         yield* agentControl.revoke("runtime-teardown");
         agentControl = undefined;
         sessionConfig = buildConfig();
-        attempt = yield* Effect.exit(createSession(sessionConfig));
-      }
+        return yield* Effect.exit(createSession(sessionConfig));
+      }).pipe(Effect.onInterrupt(() => releaseUnregisteredClient));
       if (attempt._tag === "Failure") {
-        deviceToolBinding?.dispose();
+        yield* releaseUnregisteredClient;
         return yield* Effect.failCause(attempt.cause);
       }
       const session = attempt.value;
@@ -572,45 +588,60 @@ export const makeInterruptTurn =
       });
     });
 
+/**
+ * Settle everything waiting on the session, then detach it and stop its client within
+ * `stopTimeoutMs` (force-stopping the CLI past that budget).
+ */
 export const stopSessionRecord = (
   record: ActiveCopilotSession,
+  stopTimeoutMs: number,
 ): Effect.Effect<void, ProviderAdapterRequestError> =>
   Effect.sync(() => record.deviceToolBinding?.dispose()).pipe(
     Effect.andThen(
       record.agentControl ? record.agentControl.revoke("runtime-teardown") : Effect.void,
     ),
     Effect.andThen(
-      Effect.tryPromise({
-        try: async () => {
-          record.stopped = true;
-          record.unsubscribe();
-          for (const pending of record.pendingApprovals.values()) {
-            pending.resolve({ kind: "reject" });
-          }
-          for (const pending of record.pendingUserInputs.values()) {
-            pending.resolve({ answer: "", wasFreeform: true });
-          }
-          for (const pending of record.pendingTurnStarts.values()) {
-            pending.reject(new Error("GitHub Copilot session stopped before turn start."));
-          }
-          record.pendingApprovals.clear();
-          record.pendingUserInputs.clear();
-          record.pendingTurnStarts.clear();
-          try {
-            await record.session.disconnect();
-          } finally {
-            await record.client.stop();
-          }
-        },
-        catch: (cause) =>
+      Effect.promise(() => {
+        record.stopped = true;
+        record.unsubscribe();
+        for (const pending of record.pendingApprovals.values()) {
+          pending.resolve({ kind: "reject" });
+        }
+        for (const pending of record.pendingUserInputs.values()) {
+          pending.resolve({ answer: "", wasFreeform: true });
+        }
+        for (const pending of record.pendingTurnStarts.values()) {
+          pending.reject(new Error("GitHub Copilot session stopped before turn start."));
+        }
+        record.pendingApprovals.clear();
+        record.pendingUserInputs.clear();
+        record.pendingTurnStarts.clear();
+        return stopCopilotClient({
+          client: record.client,
+          session: record.session,
+          timeoutMs: stopTimeoutMs,
+        });
+      }),
+    ),
+    Effect.flatMap((outcome) => {
+      if (outcome.forced) {
+        return Effect.logWarning("GitHub Copilot client did not stop in time; force-stopped it", {
+          threadId: record.threadId,
+          timeoutMs: stopTimeoutMs,
+        });
+      }
+      if (outcome.disconnectError !== undefined) {
+        return Effect.fail(
           new ProviderAdapterRequestError({
             provider: COPILOT_DRIVER_KIND,
             method: "session.stop",
-            detail: toMessage(cause, "Failed to stop GitHub Copilot session."),
-            cause,
+            detail: toMessage(outcome.disconnectError, "Failed to stop GitHub Copilot session."),
+            cause: outcome.disconnectError,
           }),
-      }),
-    ),
+        );
+      }
+      return Effect.void;
+    }),
   );
 
 export const makeStopSession =
@@ -619,19 +650,27 @@ export const makeStopSession =
     Effect.gen(function* () {
       const record = yield* deps.requireSession(threadId);
       deps.sessions.delete(threadId);
-      yield* stopSessionRecord(record);
+      yield* stopSessionRecord(record, COPILOT_SESSION_STOP_TIMEOUT_MS);
     });
 
+/**
+ * Server shutdown: every session stops at once, each inside the shutdown budget. One failed
+ * detach must not interrupt the sibling stops, so failures are logged per session.
+ */
 export const makeStopAll =
   (deps: SessionOpsDeps): CopilotAdapterShape["stopAll"] =>
   () =>
     Effect.gen(function* () {
       const records = Array.from(deps.sessions.values());
       deps.sessions.clear();
-      yield* Effect.forEach(records, stopSessionRecord, {
-        concurrency: "unbounded",
-        discard: true,
-      });
+      yield* Effect.forEach(
+        records,
+        (record) =>
+          stopSessionRecord(record, COPILOT_CLIENT_STOP_TIMEOUT_MS).pipe(
+            Effect.ignoreCause({ log: true }),
+          ),
+        { concurrency: "unbounded", discard: true },
+      );
     });
 
 export const makeListSessions =

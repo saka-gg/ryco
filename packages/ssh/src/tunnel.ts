@@ -52,6 +52,13 @@ export const DEFAULT_REMOTE_PORT = 3773;
 const REMOTE_PORT_SCAN_WINDOW = 200;
 const SSH_READY_TIMEOUT_MS = 20_000;
 const SSH_READY_PROBE_TIMEOUT_MS = 1_000;
+/**
+ * Per-probe timeout of the remote `wait_ready` loop. It probes the server over
+ * the remote host's own loopback, where a healthy answer takes about a
+ * millisecond, so a probe that lands during server startup costs at most this
+ * long rather than a full second before the next attempt.
+ */
+export const REMOTE_LOOPBACK_READY_PROBE_TIMEOUT_MS = 250;
 const TUNNEL_SHUTDOWN_TIMEOUT_MS = 2_000;
 const REMOTE_READY_TIMEOUT_MS = 15_000;
 const REMOTE_REUSE_READY_TIMEOUT_MS = 2_000;
@@ -540,7 +547,7 @@ export function buildRemoteLaunchScript(input?: RemoteRycoRunnerOptions): string
     RYCO_REMOTE_PORT_SCAN_WINDOW: String(REMOTE_PORT_SCAN_WINDOW),
     RYCO_READY_TIMEOUT_MS: String(REMOTE_READY_TIMEOUT_MS),
     RYCO_REUSE_READY_TIMEOUT_MS: String(REMOTE_REUSE_READY_TIMEOUT_MS),
-    RYCO_READY_PROBE_TIMEOUT_MS: String(SSH_READY_PROBE_TIMEOUT_MS),
+    RYCO_READY_PROBE_TIMEOUT_MS: String(REMOTE_LOOPBACK_READY_PROBE_TIMEOUT_MS),
   });
 }
 

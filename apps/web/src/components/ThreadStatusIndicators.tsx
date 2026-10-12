@@ -142,10 +142,13 @@ export function ThreadRowLeadingStatus({
     ),
   );
   const gitCwd = thread.worktreePath ?? threadProjectCwd;
-  const gitStatus = useGitStatus({
-    environmentId: thread.environmentId,
-    cwd: thread.branch != null ? gitCwd : null,
-  });
+  const gitStatus = useGitStatus(
+    {
+      environmentId: thread.environmentId,
+      cwd: thread.branch != null ? gitCwd : null,
+    },
+    { view: "summary" },
+  );
   const pr = resolveThreadPr(thread.branch, gitStatus.data);
   const prStatus = prStatusIndicator(pr, gitStatus.data?.sourceControlProvider);
   const PrStatusIcon = prStatus?.Icon;
@@ -200,10 +203,13 @@ export function ThreadStatusDetailLine({ thread }: { thread: SidebarThreadSummar
     ),
   );
   const gitCwd = thread.worktreePath ?? threadProjectCwd;
-  const gitStatus = useGitStatus({
-    environmentId: thread.environmentId,
-    cwd: thread.branch != null ? gitCwd : null,
-  });
+  const gitStatus = useGitStatus(
+    {
+      environmentId: thread.environmentId,
+      cwd: thread.branch != null ? gitCwd : null,
+    },
+    { view: "summary" },
+  );
   const pr = resolveThreadPr(thread.branch, gitStatus.data);
   const prStatus = prStatusIndicator(pr, gitStatus.data?.sourceControlProvider);
 

@@ -8,7 +8,7 @@ import { Effect, Layer, Logger, References, Tracer } from "effect";
 import type { EffectTraceRecord } from "./TraceRecord.ts";
 import { makeLocalFileTracer } from "./LocalFileTracer.ts";
 
-const makeTestLayer = (tracePath: string) =>
+const makeTestLayer = (tracePath: string, sqlSpanMinDurationMs?: number) =>
   Layer.mergeAll(
     Layer.effect(
       Tracer.Tracer,
@@ -17,6 +17,7 @@ const makeTestLayer = (tracePath: string) =>
         maxBytes: 1024 * 1024,
         maxFiles: 2,
         batchWindowMs: 10_000,
+        ...(sqlSpanMinDurationMs === undefined ? {} : { sqlSpanMinDurationMs }),
       }),
     ),
     Logger.layer([Logger.tracerLogger], { mergeWithExisting: false }),
@@ -109,6 +110,68 @@ describe("LocalFileTracer", () => {
         assert.equal(records.length, 1);
         assert.equal(records[0]?.name, "interrupt-span");
         assert.equal(records[0]?.exit._tag, "Interrupted");
+      } finally {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  const sqlStatement = (
+    name: string,
+    options: { readonly sleepMs?: number; readonly fail?: boolean },
+  ) =>
+    Effect.gen(function* () {
+      yield* Effect.annotateCurrentSpan({
+        "db.query.text": "SELECT *\n  FROM   projection_threads\n  WHERE id = ?",
+      });
+      if (options.sleepMs !== undefined) yield* Effect.sleep(`${options.sleepMs} millis`);
+      if (options.fail) return yield* Effect.fail("constraint failed");
+    }).pipe(Effect.withSpan(name), Effect.ignore);
+
+  it.live("keeps only slow or failed SQL statement spans in the local trace", () =>
+    Effect.gen(function* () {
+      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ryco-local-tracer-"));
+      const tracePath = path.join(tempDir, "server.trace.ndjson");
+
+      try {
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            yield* sqlStatement("fast-sql", {});
+            yield* sqlStatement("slow-sql", { sleepMs: 40 });
+            yield* sqlStatement("failed-sql", { fail: true });
+            yield* Effect.void.pipe(Effect.withSpan("plain-span"));
+          }).pipe(Effect.provide(makeTestLayer(tracePath, 25))),
+        );
+
+        const records = readTraceRecords(tracePath);
+        assert.deepEqual(records.map((record) => record.name).toSorted(), [
+          "failed-sql",
+          "plain-span",
+          "slow-sql",
+        ]);
+        assert.equal(
+          records.find((record) => record.name === "slow-sql")?.attributes["db.query.text"],
+          "SELECT * FROM projection_threads WHERE id = ?",
+        );
+      } finally {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  it.live("records every SQL statement when the threshold is zero", () =>
+    Effect.gen(function* () {
+      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ryco-local-tracer-"));
+      const tracePath = path.join(tempDir, "server.trace.ndjson");
+
+      try {
+        yield* Effect.scoped(
+          sqlStatement("fast-sql", {}).pipe(Effect.provide(makeTestLayer(tracePath, 0))),
+        );
+        assert.deepEqual(
+          readTraceRecords(tracePath).map((record) => record.name),
+          ["fast-sql"],
+        );
       } finally {
         fs.rmSync(tempDir, { recursive: true, force: true });
       }

@@ -18,10 +18,12 @@ import { createEnvironmentApiLookup } from "@ryco/client-runtime/connection";
 import type { ComponentProps } from "react";
 import { AppAtomRegistryProvider } from "../rpc/atomRegistry";
 import { ProjectFavicon } from "./ProjectFavicon";
+import { clearProjectIconCache } from "./projectIconSource";
 
+const envHarness = vi.hoisted(() => ({ hosted: true }));
 vi.mock("../env", async (original) => ({
   ...(await original<typeof import("../env")>()),
-  isHostedHubMode: () => true,
+  isHostedHubMode: () => envHarness.hosted,
 }));
 const connectionHarness = vi.hoisted(() => ({
   lookup: null as ReturnType<typeof createEnvironmentApiLookup> | null,
@@ -85,6 +87,9 @@ function connect(readIcon: unknown, supported = true) {
 
 describe("hosted project icons", () => {
   afterEach(() => {
+    vi.unstubAllGlobals();
+    clearProjectIconCache(env);
+    envHarness.hosted = true;
     connectionHarness.lookup = null;
     appAtomRegistry.set(serverConfigAtom, null);
     resetWsConnectionStateForTests();
@@ -139,7 +144,7 @@ describe("hosted project icons", () => {
       .poll(() => view.container.querySelector("img")?.src)
       .toBe(`data:image/svg+xml;base64,${icon.dataBase64}`);
   });
-  it("clears artwork while disconnected and reloads after reconnect", async () => {
+  it("clears artwork while disconnected and restores it after reconnect without a refetch", async () => {
     const read = vi.fn(async () => icon);
     connect(read);
     const view = await render(
@@ -149,8 +154,73 @@ describe("hosted project icons", () => {
     recordWsConnectionClosed({}, { environmentId: env });
     await expect.poll(() => view.container.querySelector("img")).toBeNull();
     recordWsConnectionOpened({ environmentId: env });
-    await expect.poll(() => read.mock.calls.length).toBe(2);
     await expect.poll(() => view.container.querySelector("img")?.naturalWidth).toBe(16);
+    // Same node, same server build: the cached artwork is reused.
+    expect(read).toHaveBeenCalledTimes(1);
+  });
+  it("reuses artwork after a reconnect through a new client, and on remount", async () => {
+    const read = vi.fn(async () => icon);
+    connect(read);
+    const view = await render(
+      <TestFavicon environmentId={env} cwd="/project" projectId={projectId} />,
+    );
+    await expect.poll(() => view.container.querySelector("img")?.naturalWidth).toBe(16);
+    recordWsConnectionClosed({}, { environmentId: env });
+    await expect.poll(() => view.container.querySelector("img")).toBeNull();
+    // A reconnect builds a new client (and API object) for the same node.
+    connect(read);
+    await expect.poll(() => view.container.querySelector("img")?.naturalWidth).toBe(16);
+    await view.unmount();
+    const remounted = await render(
+      <TestFavicon environmentId={env} cwd="/project" projectId={projectId} />,
+    );
+    // Cached artwork renders on the first pass.
+    expect(remounted.container.querySelector("img")?.src).toBe(
+      `data:image/svg+xml;base64,${icon.dataBase64}`,
+    );
+    expect(read).toHaveBeenCalledTimes(1);
+  });
+  it("reads artwork only once the icon is near the viewport", async () => {
+    const observed: Array<{ target: Element; callback: IntersectionObserverCallback }> = [];
+    vi.stubGlobal(
+      "IntersectionObserver",
+      class {
+        constructor(private readonly callback: IntersectionObserverCallback) {}
+        observe(target: Element) {
+          observed.push({ target, callback: this.callback });
+        }
+        unobserve() {}
+        disconnect() {}
+      },
+    );
+    const read = vi.fn(async () => icon);
+    connect(read);
+    const view = await render(
+      <TestFavicon environmentId={env} cwd="/project" projectId={projectId} />,
+    );
+    await expect.poll(() => observed.length).toBeGreaterThan(0);
+    expect(read).not.toHaveBeenCalled();
+    expect(view.container.querySelector("img")).toBeNull();
+    for (const { target, callback } of observed) {
+      callback(
+        [{ target, isIntersecting: true } as IntersectionObserverEntry],
+        {} as IntersectionObserver,
+      );
+    }
+    await expect.poll(() => view.container.querySelector("img")?.naturalWidth).toBe(16);
+    expect(read).toHaveBeenCalledTimes(1);
+  });
+  it("shows the placeholder instead of an HTTP favicon until the node config is known", async () => {
+    envHarness.hosted = false;
+    const read = vi.fn(async () => icon);
+    const view = await render(
+      <TestFavicon environmentId={env} cwd="/project" projectId={projectId} fallbackName="ryco" />,
+    );
+    await expect.poll(() => view.container.querySelector("svg text")?.textContent).toBe("R");
+    expect(view.container.querySelector("img")).toBeNull();
+    connect(read);
+    await expect.poll(() => view.container.querySelector("img")?.naturalWidth).toBe(16);
+    expect(read).toHaveBeenCalledTimes(1);
   });
   it("falls back without an HTTP request for unsupported hosted nodes", async () => {
     const read = vi.fn(async () => icon);
@@ -186,17 +256,18 @@ describe("hosted project icons", () => {
   });
   it("marks the image's load state for containers that style loaded artwork", async () => {
     let complete!: (value: typeof icon) => void;
-    connect(
-      vi.fn(
-        () =>
-          new Promise((resolve) => {
-            complete = resolve;
-          }),
-      ),
+    const read = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          complete = resolve;
+        }),
     );
+    connect(read);
     const view = await render(
       <TestFavicon environmentId={env} cwd="/project" projectId={projectId} fallbackName="ryco" />,
     );
+    // The read starts once the icon is observed on screen.
+    await expect.poll(() => read.mock.calls.length).toBe(1);
     expect(view.container.querySelector("img")).toBeNull();
     complete(icon);
     await expect

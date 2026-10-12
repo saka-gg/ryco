@@ -735,6 +735,9 @@ export async function hubIdentityHoldsKeyMaterial(options: {
   );
 }
 
+/** The construction phases {@link makeHubIdentityRuntime} reports for startup tracing. */
+export type HubIdentityStartupPhase = "state" | "protected-store" | "e2ee-records";
+
 export async function makeHubIdentityRuntime(options: {
   readonly statePath: string;
   /**
@@ -820,79 +823,143 @@ export async function makeHubIdentityRuntime(options: {
   readonly fetch?: FetchLike;
   readonly now?: () => number;
   readonly sleep?: (milliseconds: number) => Promise<void>;
+  /**
+   * Reports how long each construction phase took, for startup tracing: the
+   * identity state and retirement records, the protected-store selection
+   * (the key-store probe, which an OS credential prompt can stall), and the
+   * remaining E2EE records. Diagnostic only.
+   */
+  readonly onStartupPhase?: (phase: HubIdentityStartupPhase, durationMs: number) => void;
 }): Promise<HubIdentityRuntimeShape> {
-  const stateStore = await makeLocalHubIdentityStateStore(options.statePath);
+  const timed = async <A>(phase: HubIdentityStartupPhase, run: () => Promise<A>): Promise<A> => {
+    const startedAt = performance.now();
+    try {
+      return await run();
+    } finally {
+      options.onStartupPhase?.(phase, performance.now() - startedAt);
+    }
+  };
   const stateDirectory = dirname(options.statePath);
-  // Opened before the protected store is selected, because the names it holds
-  // are identity keys and belong to the affinity probe below.
-  const retirementStore = await makeNodeIdentityKeyRetirementStore({
-    path: options.retirementStatePath ?? join(stateDirectory, "hub-identity-retirement.json"),
+  // Independent owner-only files: opened together rather than one after another.
+  const [stateStore, retirementStore] = await timed("state", () =>
+    Promise.all([
+      makeLocalHubIdentityStateStore(options.statePath),
+      // Opened before the protected store is selected, because the names it
+      // holds are identity keys and belong to the affinity probe below.
+      makeNodeIdentityKeyRetirementStore({
+        path: options.retirementStatePath ?? join(stateDirectory, "hub-identity-retirement.json"),
+      }),
+    ]),
+  );
+  const now = options.now ?? (() => Date.now());
+  // The protected-store selection probes key custody, and the E2EE records are
+  // separate files that depend on neither it nor each other (beyond the §5.7
+  // anchor and the authorization store, opened in the second step), so they
+  // load while the key store answers instead of after it.
+  const selectingSecretStore = timed("protected-store", async () =>
+    selectProtectedSecretStore({
+      stateStore,
+      retiringSecretNames: await retirementStore.names(),
+      fileSecretRoot: options.fileSecretRoot,
+      allowFileFallback: options.allowFileFallback,
+      ...(options.secretStore === undefined ? {} : { secretStore: options.secretStore }),
+      ...(options.makeOsSecretStore === undefined
+        ? {}
+        : { makeOsStore: options.makeOsSecretStore }),
+      ...(options.makeFileSecretStore === undefined
+        ? {}
+        : { makeFileStore: options.makeFileSecretStore }),
+    }),
+  );
+  const loadingStores = timed("e2ee-records", async () => {
+    const [
+      prekeyStore,
+      continuityAnchor,
+      fallbackCounter,
+      clientAuthorizationStore,
+      localIntroductionLedger,
+    ] = await Promise.all([
+      makeNodeE2eePrekeyStore({
+        path: options.prekeyStatePath ?? join(stateDirectory, "hub-e2ee-prekey.json"),
+      }),
+      // Outside the state directory by default, because that is the whole
+      // requirement §5.7 places on it: a restore of the state directory must not
+      // be able to lower either mark it holds. A sibling directory is not immune
+      // to an operator who wipes everything — nothing durable is — but it is
+      // outside the set §5.7 names, which is the property the cross-checks
+      // depend on.
+      makeNodeContinuityAnchor({
+        path:
+          options.continuityAnchorPath ??
+          join(dirname(stateDirectory), "anchors", basename(stateDirectory), "hub-continuity.json"),
+      }),
+      makeNodeE2eeFallbackCounter({
+        path: options.e2eeFallbackStatePath ?? join(stateDirectory, "hub-e2ee-fallback.json"),
+        ...(options.now === undefined ? {} : { now: options.now }),
+      }),
+      // §13.6's Branch A record set. Hub-scoped, so a `leave` erases it, and read
+      // synchronously from the in-memory index at §8.6 step 6 — which is what
+      // makes that read atomic with respect to the withdrawal write.
+      makeNodeClientAuthorizationStore({
+        path:
+          options.clientAuthorizationStatePath ??
+          join(stateDirectory, "hub-e2ee-client-authorization.json"),
+      }),
+      makeNodeLocalIntroductionLedger({
+        path:
+          options.localIntroductionStatePath ??
+          join(stateDirectory, "hub-e2ee-local-introductions.json"),
+      }),
+    ]);
+    const [continuityStore, policyStore, authorizationClient] = await Promise.all([
+      makeNodeIdentityContinuityStore({
+        path: options.continuityStatePath ?? join(stateDirectory, "hub-continuity.json"),
+        anchor: continuityAnchor,
+      }),
+      // Shares the §5.7 anchor with the continuity store: the policy generation
+      // and the rotation generation are both high-water marks that an operator
+      // restore of the state directory must not be able to lower.
+      makeNodeE2eePolicyStore({
+        path: options.e2eePolicyStatePath ?? join(stateDirectory, "hub-e2ee-policy.json"),
+        anchor: continuityAnchor,
+      }),
+      makeNodeClientAuthorizationClient({
+        store: clientAuthorizationStore,
+        ...(options.now === undefined ? {} : { now: options.now }),
+      }),
+    ]);
+    return {
+      prekeyStore,
+      fallbackCounter,
+      clientAuthorizationStore,
+      localIntroductionLedger,
+      continuityStore,
+      policyStore,
+      authorizationClient,
+    };
   });
-  const secretStore = await selectProtectedSecretStore({
-    stateStore,
-    retiringSecretNames: await retirementStore.names(),
-    fileSecretRoot: options.fileSecretRoot,
-    allowFileFallback: options.allowFileFallback,
-    ...(options.secretStore === undefined ? {} : { secretStore: options.secretStore }),
-    ...(options.makeOsSecretStore === undefined ? {} : { makeOsStore: options.makeOsSecretStore }),
-    ...(options.makeFileSecretStore === undefined
-      ? {}
-      : { makeFileStore: options.makeFileSecretStore }),
-  });
+  // Both settle before either outcome is acted on, so a failed selection never
+  // leaves record loads running behind a runtime that was not built.
+  const [selected, loaded] = await Promise.allSettled([selectingSecretStore, loadingStores]);
+  if (selected.status === "rejected") throw selected.reason;
+  if (loaded.status === "rejected") throw loaded.reason;
+  const secretStore = selected.value;
+  const {
+    prekeyStore,
+    fallbackCounter,
+    clientAuthorizationStore,
+    localIntroductionLedger,
+    continuityStore,
+    policyStore,
+    authorizationClient,
+  } = loaded.value;
   const signingIdentity = makeNodeSigningIdentity(secretStore);
   const nativeNodeClaim = makeNodeNativeClaimService({
     stateStore,
     signingIdentity,
     ...(options.now === undefined ? {} : { now: options.now }),
   });
-  const now = options.now ?? (() => Date.now());
-  const prekeyStore = await makeNodeE2eePrekeyStore({
-    path: options.prekeyStatePath ?? join(stateDirectory, "hub-e2ee-prekey.json"),
-  });
-  // Outside the state directory by default, because that is the whole
-  // requirement §5.7 places on it: a restore of the state directory must not be
-  // able to lower either mark it holds. A sibling directory is not immune to an
-  // operator who wipes everything — nothing durable is — but it is outside the
-  // set §5.7 names, which is the property the cross-checks depend on.
-  const continuityAnchor = await makeNodeContinuityAnchor({
-    path:
-      options.continuityAnchorPath ??
-      join(dirname(stateDirectory), "anchors", basename(stateDirectory), "hub-continuity.json"),
-  });
-  const continuityStore = await makeNodeIdentityContinuityStore({
-    path: options.continuityStatePath ?? join(stateDirectory, "hub-continuity.json"),
-    anchor: continuityAnchor,
-  });
-  // Shares the §5.7 anchor with the continuity store: the policy generation and
-  // the rotation generation are both high-water marks that an operator restore
-  // of the state directory must not be able to lower.
-  const policyClient = makeNodeE2eePolicyClient({
-    store: await makeNodeE2eePolicyStore({
-      path: options.e2eePolicyStatePath ?? join(stateDirectory, "hub-e2ee-policy.json"),
-      anchor: continuityAnchor,
-    }),
-  });
-  const fallbackCounter = await makeNodeE2eeFallbackCounter({
-    path: options.e2eeFallbackStatePath ?? join(stateDirectory, "hub-e2ee-fallback.json"),
-    ...(options.now === undefined ? {} : { now: options.now }),
-  });
-  // §13.6's Branch A record set. Hub-scoped, so a `leave` erases it, and read
-  // synchronously from the in-memory index at §8.6 step 6 — which is what makes
-  // that read atomic with respect to the withdrawal write.
-  const clientAuthorizationStore = await makeNodeClientAuthorizationStore({
-    path:
-      options.clientAuthorizationStatePath ??
-      join(stateDirectory, "hub-e2ee-client-authorization.json"),
-  });
-  const authorizationClient = await makeNodeClientAuthorizationClient({
-    store: clientAuthorizationStore,
-    ...(options.now === undefined ? {} : { now: options.now }),
-  });
-  const localIntroductionLedger = await makeNodeLocalIntroductionLedger({
-    path:
-      options.localIntroductionStatePath ??
-      join(stateDirectory, "hub-e2ee-local-introductions.json"),
-  });
+  const policyClient = makeNodeE2eePolicyClient({ store: policyStore });
 
   /**
    * The §7.5 lineage id this node may advertise, or a hard refusal.

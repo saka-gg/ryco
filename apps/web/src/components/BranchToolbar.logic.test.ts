@@ -10,6 +10,7 @@ import {
   resolveDraftEnvModeAfterBranchChange,
   resolveEffectiveEnvMode,
   resolveBranchToolbarValue,
+  resolveSwitchedRefName,
   shouldIncludeBranchPickerItem,
 } from "./BranchToolbar.logic";
 
@@ -395,6 +396,38 @@ describe("resolveBranchSelectionTarget", () => {
       nextWorktreePath: "/repo/.ryco/worktrees/feature-a",
       reuseExistingWorktree: false,
     });
+  });
+});
+
+describe("resolveSwitchedRefName", () => {
+  it("keeps a local ref's own name whatever the server reports", () => {
+    expect(
+      resolveSwitchedRefName({
+        refName: { isRemote: false },
+        selectedBranchName: "feature/demo",
+        checkedOutRefName: "something-else",
+      }),
+    ).toBe("feature/demo");
+  });
+
+  it("uses the tracking branch the server checked out for a remote ref", () => {
+    expect(
+      resolveSwitchedRefName({
+        refName: { isRemote: true },
+        selectedBranchName: "feature/demo",
+        checkedOutRefName: "feature/demo-2",
+      }),
+    ).toBe("feature/demo-2");
+  });
+
+  it("falls back to the derived local name when the server reports none", () => {
+    expect(
+      resolveSwitchedRefName({
+        refName: { isRemote: true },
+        selectedBranchName: "feature/demo",
+        checkedOutRefName: null,
+      }),
+    ).toBe("feature/demo");
   });
 });
 

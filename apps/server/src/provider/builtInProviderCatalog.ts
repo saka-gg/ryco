@@ -21,4 +21,7 @@ export type ProviderSnapshotSource = {
   readonly revalidate: ServerProviderShape["revalidate"];
   readonly refresh: ServerProviderShape["refresh"];
   readonly streamChanges: Stream.Stream<ServerProvider>;
+  readonly isFresh?: ServerProviderShape["isFresh"];
+  readonly probeFingerprint?: ServerProviderShape["probeFingerprint"];
+  readonly adoptPersistedSnapshot?: ServerProviderShape["adoptPersistedSnapshot"];
 };

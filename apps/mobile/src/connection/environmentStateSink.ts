@@ -48,24 +48,26 @@ export function createMobileEnvironmentStateSink(
 ): EnvironmentStateSink {
   const projectionChanged = input.onEnvironmentProjectionChanged ?? (() => undefined);
   return {
-    // Snapshot the pre-apply thread so afterShellEventApplied can tell a freshly
-    // promoted draft (no previous thread) from an existing one.
-    prepareShellEvent: (environmentId, event): ShellEventContext => {
-      const threadId =
-        event.kind === "thread-upserted"
-          ? event.thread.id
-          : event.kind === "thread-removed"
-            ? event.threadId
-            : null;
-      const threadRef = threadId ? scopeThreadRef(environmentId, threadId) : null;
-      return {
-        previousThread: threadRef ? selectThreadByRef(useStore.getState(), threadRef) : undefined,
-        threadRef,
-      };
-    },
-    applyShellEvent: (environmentId, event) => {
-      useStore.getState().applyShellEvent(event, environmentId);
+    // Snapshot each event's pre-apply thread so afterShellEventApplied can tell
+    // a freshly promoted draft (no previous thread) from an existing one.
+    applyShellEvents: (environmentId, events) => {
+      const contexts = useStore
+        .getState()
+        .applyShellEvents(events, environmentId, (state, event): ShellEventContext => {
+          const threadId =
+            event.kind === "thread-upserted"
+              ? event.thread.id
+              : event.kind === "thread-removed"
+                ? event.threadId
+                : null;
+          const threadRef = threadId ? scopeThreadRef(environmentId, threadId) : null;
+          return {
+            previousThread: threadRef ? selectThreadByRef(state, threadRef) : undefined,
+            threadRef,
+          };
+        });
       projectionChanged(environmentId);
+      return contexts;
     },
     afterShellEventApplied: (environmentId, event, context) => {
       const { previousThread, threadRef } = context as ShellEventContext;

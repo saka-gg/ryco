@@ -14,7 +14,17 @@ export interface SourceControlDiscoveryTarget {
 }
 
 export interface SourceControlDiscoveryClient {
-  readonly discoverSourceControl: () => Promise<SourceControlDiscoveryResult>;
+  readonly discoverSourceControl: (input?: {
+    readonly cached?: boolean;
+  }) => Promise<SourceControlDiscoveryResult>;
+}
+
+export interface SourceControlDiscoveryRefreshOptions {
+  /**
+   * Background revalidation: accept the server's recent discovery result
+   * instead of re-probing every CLI. An explicit user refresh leaves it out.
+   */
+  readonly cached?: boolean;
 }
 
 /* --- Constants ------------------------------------------------------ */
@@ -74,7 +84,10 @@ export interface SourceControlDiscoveryManagerConfig {
 }
 
 export function createSourceControlDiscoveryManager(config: SourceControlDiscoveryManagerConfig) {
-  const refreshInFlight = new Map<string, Promise<SourceControlDiscoveryResult | null>>();
+  const refreshInFlight = new Map<
+    string,
+    { readonly cached: boolean; readonly promise: Promise<SourceControlDiscoveryResult | null> }
+  >();
 
   /* -- Atom helpers -------------------------------------------------- */
 
@@ -131,21 +144,26 @@ export function createSourceControlDiscoveryManager(config: SourceControlDiscove
    * and the error message is stored separately so UI can keep rendering stale
    * discovery results while showing the failure.
    *
+   * A cached (background) refresh joins any refresh in flight; an explicit
+   * one joins only another explicit one, so the user always gets a fresh probe.
+   *
    * @param target The logical runtime target to refresh.
    * @param client Optional pre-resolved client, useful in tests.
    */
   function refresh(
     target: SourceControlDiscoveryTarget,
     client?: SourceControlDiscoveryClient,
+    options?: SourceControlDiscoveryRefreshOptions,
   ): Promise<SourceControlDiscoveryResult | null> {
     const targetKey = getSourceControlDiscoveryTargetKey(target);
     if (targetKey === null) {
       return Promise.resolve(null);
     }
 
+    const cached = options?.cached === true;
     const existing = refreshInFlight.get(targetKey);
-    if (existing) {
-      return existing;
+    if (existing && (cached || !existing.cached)) {
+      return existing.promise;
     }
 
     const resolvedClient = client ?? config.getClient(targetKey);
@@ -156,18 +174,27 @@ export function createSourceControlDiscoveryManager(config: SourceControlDiscove
     }
 
     markPending(targetKey);
-    const promise = resolvedClient.discoverSourceControl().then(
-      (result) => {
-        setData(targetKey, result);
-        return result;
-      },
-      (error: unknown) => {
-        setError(targetKey, error);
-        return getSnapshot(target).data;
-      },
-    );
-    const tracked = promise.finally(() => refreshInFlight.delete(targetKey));
-    refreshInFlight.set(targetKey, tracked);
+    // An explicit refresh that started while this cached one was in flight
+    // owns the state: the cached answer may predate it and must not land last.
+    const isSuperseded = () => refreshInFlight.get(targetKey) !== entry;
+    const promise = resolvedClient
+      .discoverSourceControl(cached ? { cached: true } : undefined)
+      .then(
+        (result) => {
+          if (isSuperseded()) return getSnapshot(target).data;
+          setData(targetKey, result);
+          return result;
+        },
+        (error: unknown) => {
+          if (!isSuperseded()) setError(targetKey, error);
+          return getSnapshot(target).data;
+        },
+      );
+    const tracked = promise.finally(() => {
+      if (refreshInFlight.get(targetKey) === entry) refreshInFlight.delete(targetKey);
+    });
+    const entry = { cached, promise: tracked };
+    refreshInFlight.set(targetKey, entry);
     return tracked;
   }
 

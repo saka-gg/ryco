@@ -1,7 +1,8 @@
 import { realpathSync } from "node:fs";
 import path from "node:path";
 
-import type { ProjectId, ThreadId, WorktreeId } from "@ryco/contracts";
+import type { ProjectId, ProjectKind, ThreadId, WorktreeId } from "@ryco/contracts";
+import { isChatProject } from "@ryco/shared/projectKind";
 import {
   isManagedWorktreeBranch,
   isTemporaryWorktreeBranch,
@@ -25,27 +26,34 @@ import {
 export interface ReconcilableProject {
   readonly id: ProjectId;
   readonly workspaceRoot: string;
+  readonly kind?: ProjectKind | undefined;
 }
 
-export interface ReconcilableProjectRoots {
+export interface ReconcilableProjectRoots<
+  Project extends ReconcilableProject = ReconcilableProject,
+> {
   /** Projects whose roots can safely be inspected by git. */
-  readonly available: ReadonlyArray<ReconcilableProject>;
+  readonly available: ReadonlyArray<Project>;
   /** Projects retained in history whose roots are currently absent. */
-  readonly missing: ReadonlyArray<ReconcilableProject>;
+  readonly missing: ReadonlyArray<Project>;
 }
 
 /**
  * Missing roots are an availability condition, not permission to delete the
  * project or its thread history. Partition them before invoking git so a
  * removed managed worktree cannot turn every reconnect into a failed sweep.
+ *
+ * Chat projects are in neither list: a chat's folder is a Ryco-managed plain
+ * folder, never a repository, so there is nothing for git to reconcile.
  */
-export function partitionReconcilableProjectRoots(
-  projects: ReadonlyArray<ReconcilableProject>,
+export function partitionReconcilableProjectRoots<Project extends ReconcilableProject>(
+  projects: ReadonlyArray<Project>,
   pathExists: (workspaceRoot: string) => boolean,
-): ReconcilableProjectRoots {
-  const available: ReconcilableProject[] = [];
-  const missing: ReconcilableProject[] = [];
+): ReconcilableProjectRoots<Project> {
+  const available: Project[] = [];
+  const missing: Project[] = [];
   for (const project of projects) {
+    if (isChatProject(project)) continue;
     (pathExists(project.workspaceRoot) ? available : missing).push(project);
   }
   return { available, missing };

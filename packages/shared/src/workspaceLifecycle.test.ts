@@ -67,6 +67,36 @@ describe("ignored content classification", () => {
       regenerableIgnored: [],
     });
   });
+
+  it("classifies --ignored=traditional output (wholly ignored directories collapsed)", () => {
+    // `logs/` holds only `*.log` files: traditional mode reports the directory.
+    const output = ["!! node_modules/", "!! logs/", "!! build/", ""].join("\0");
+    expect(parseWorktreeStatus(output)).toEqual({
+      modified: 0,
+      untracked: 0,
+      protectedIgnored: ["logs/"],
+      regenerableIgnored: ["node_modules/", "build/"],
+    });
+  });
+
+  it("classifies --ignored=matching output (unmatched directories listed per file)", () => {
+    // Matching mode keeps pattern-matched directories collapsed but lists the
+    // files of a directory no pattern names; each is classified on its own.
+    const output = [
+      "!! node_modules/",
+      "!! logs/a.log",
+      "!! logs/b.log",
+      "!! tools/cache.pyc",
+      "!! build/",
+      "",
+    ].join("\0");
+    expect(parseWorktreeStatus(output)).toEqual({
+      modified: 0,
+      untracked: 0,
+      protectedIgnored: ["logs/a.log", "logs/b.log"],
+      regenerableIgnored: ["node_modules/", "tools/cache.pyc", "build/"],
+    });
+  });
 });
 
 describe("lifecycle suggestion policy", () => {

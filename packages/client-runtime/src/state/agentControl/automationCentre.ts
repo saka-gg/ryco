@@ -5,7 +5,7 @@ import type {
   AutomationCentreSnapshot,
   ProjectId,
 } from "@ryco/contracts";
-import { Record as Records } from "effect";
+import * as Records from "effect/Record";
 
 import { createSingleFlightReader, type SingleFlightReader } from "../singleFlightReader.ts";
 import { AUTOMATION_RUN_STATUS } from "./automationSchedules.ts";

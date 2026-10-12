@@ -1,5 +1,6 @@
 import { ClaudeCacheObservation } from "./claudeCache.ts";
-import { Effect, Schema } from "effect";
+import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 import { ApprovalResponseIdentity } from "./approvalResponses.ts";
 import {
   EventId,

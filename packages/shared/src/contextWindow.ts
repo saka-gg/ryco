@@ -5,7 +5,8 @@ import {
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
   type ModelSelection,
 } from "@ryco/contracts";
-import { Option, Schema } from "effect";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 
 export const DEFAULT_CONTEXT_HANDOFF_INPUT_BUDGET: ContextHandoffInputBudget = {
   maxInputChars: PROVIDER_SEND_TURN_MAX_INPUT_CHARS,

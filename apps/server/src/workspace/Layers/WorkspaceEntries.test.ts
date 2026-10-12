@@ -457,6 +457,63 @@ it.layer(TestLayer)("WorkspaceEntriesLive", (it) => {
     );
   });
 
+  describe("browse alias probing", () => {
+    const countOpensDuring = <A, E, R>(effect: Effect.Effect<A, E, R>, dir: string) =>
+      Effect.gen(function* () {
+        const opened: string[] = [];
+        const originalOpen = fsPromises.open.bind(fsPromises);
+        vi.spyOn(fsPromises, "open").mockImplementation((async (
+          ...args: Parameters<typeof fsPromises.open>
+        ) => {
+          if (typeof args[0] === "string" && args[0].startsWith(dir)) opened.push(args[0]);
+          return originalOpen(...args);
+        }) as typeof fsPromises.open);
+        yield* effect;
+        return opened;
+      });
+
+    it.effect.skipIf(process.platform !== "darwin")(
+      "only opens small files without a content extension",
+      () =>
+        Effect.gen(function* () {
+          const workspaceEntries = yield* WorkspaceEntries;
+          const path = yield* Path.Path;
+          const cwd = yield* makeTempDir({ prefix: "ryco-workspace-browse-alias-probe-" });
+          yield* writeTextFile(cwd, "index.ts", "export {};\n");
+          yield* writeTextFile(cwd, "package.json", "{}\n");
+          yield* writeTextFile(cwd, "Projects alias", "not a bookmark\n");
+
+          const opened = yield* countOpensDuring(
+            workspaceEntries.browse({ partialPath: appendSeparator(cwd) }),
+            cwd,
+          );
+
+          expect(opened).toEqual([path.join(cwd, "Projects alias")]);
+        }),
+    );
+
+    it.effect.skipIf(process.platform !== "darwin")(
+      "skips alias probing in directories with many files",
+      () =>
+        Effect.gen(function* () {
+          const workspaceEntries = yield* WorkspaceEntries;
+          const cwd = yield* makeTempDir({ prefix: "ryco-workspace-browse-alias-many-" });
+          yield* Effect.forEach(
+            Array.from({ length: 501 }, (_, index) => index),
+            (index) => writeTextFile(cwd, `item-${index}`, "not a bookmark\n"),
+            { discard: true },
+          );
+
+          const opened = yield* countOpensDuring(
+            workspaceEntries.browse({ partialPath: appendSeparator(cwd) }),
+            cwd,
+          );
+
+          expect(opened).toEqual([]);
+        }),
+    );
+  });
+
   describe("isMacOSBookmarkAlias", () => {
     it.effect("detects files starting with the bookmark magic", () =>
       Effect.gen(function* () {

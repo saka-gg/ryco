@@ -48,6 +48,7 @@ import {
 } from "./runtime.ts";
 import {
   DIRECTORY_PRESENCE_REFRESH_MS,
+  HOSTED_ACCESS_CHECK_DEADLINE_MS,
   DIRECTORY_PRESENCE_WINDOW_MS,
   DIRECTORY_SUBSCRIBED_REFRESH_MS,
   HOSTED_ACCOUNT_BUSY_MESSAGE,
@@ -3872,5 +3873,381 @@ describe("hosted account management state", () => {
       status: "committed",
       displayed: true,
     });
+  });
+});
+
+describe("cookie-mode access checks", () => {
+  function useCookieMode(): void {
+    Object.defineProperty(hostedHubApi, "credentialMode", {
+      configurable: true,
+      get: () => "cookie",
+    });
+  }
+
+  afterEach(() => {
+    Reflect.deleteProperty(hostedHubApi, "credentialMode");
+  });
+
+  function deferred<T>() {
+    let resolve: (value: T) => void = () => undefined;
+    let reject: (error: unknown) => void = () => undefined;
+    const promise = new Promise<T>((onResolve, onReject) => {
+      resolve = onResolve;
+      reject = onReject;
+    });
+    return { promise, resolve, reject };
+  }
+
+  it("reads the directory beside the session restore and commits it only once the session validates", async () => {
+    useCookieMode();
+    const session = deferred<HostedHubSessionResponse>();
+    const restoreSession = vi
+      .spyOn(hostedHubApi, "restoreSession")
+      .mockReturnValue(session.promise);
+    const listNodes = vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([node()]);
+
+    const bootstrapping = hostedHubController.bootstrap();
+    // Both requests are in flight before the session has answered.
+    expect(restoreSession).toHaveBeenCalledOnce();
+    expect(listNodes).toHaveBeenCalledOnce();
+    await Promise.resolve();
+    await Promise.resolve();
+    // The held directory is not published ahead of the session answer.
+    expect(hostedHubStore.getState()).toMatchObject({
+      accountStatus: "signed-out",
+      nodes: [],
+      directoryStatus: "idle",
+    });
+
+    session.resolve(sessionResponse);
+    await bootstrapping;
+    expect(listNodes).toHaveBeenCalledOnce();
+    expect(hostedHubStore.getState()).toMatchObject({
+      accountStatus: "authenticated",
+      directoryStatus: "ready",
+      nodes: [node()],
+    });
+  });
+
+  it("discards the held directory when the Hub answers that the session is gone", async () => {
+    useCookieMode();
+    const session = deferred<HostedHubSessionResponse>();
+    vi.spyOn(hostedHubApi, "restoreSession").mockReturnValue(session.promise);
+    vi.spyOn(hostedHubApi, "getBootstrapAvailability").mockResolvedValue(false);
+    let directorySignal: AbortSignal | undefined;
+    vi.spyOn(hostedHubApi, "listNodes").mockImplementation(async (signal) => {
+      directorySignal = signal;
+      return [node()];
+    });
+
+    const bootstrapping = hostedHubController.bootstrap();
+    session.reject(new HostedHubApiError("session_invalid", 401));
+    await bootstrapping;
+
+    expect(directorySignal?.aborted).toBe(true);
+    expect(hostedHubStore.getState()).toMatchObject({
+      accountStatus: "signed-out",
+      nodes: [],
+      directoryStatus: "idle",
+    });
+  });
+
+  it("does not treat a failed held directory read as the directory answer", async () => {
+    useCookieMode();
+    vi.spyOn(hostedHubApi, "restoreSession").mockResolvedValue(sessionResponse);
+    const listNodes = vi
+      .spyOn(hostedHubApi, "listNodes")
+      // Sent with the pre-rotation credential; says nothing about the restored session.
+      .mockRejectedValueOnce(new HostedHubApiError("session_invalid", 401))
+      .mockResolvedValueOnce([node()]);
+
+    await hostedHubController.bootstrap();
+
+    expect(listNodes).toHaveBeenCalledTimes(2);
+    expect(hostedHubApi.clearSessionMaterial).not.toHaveBeenCalled();
+    expect(hostedHubStore.getState()).toMatchObject({
+      accountStatus: "authenticated",
+      directoryStatus: "ready",
+      nodes: [node()],
+    });
+  });
+
+  it("lets a boot gate continue once access is answered, before the directory read settles", async () => {
+    useCookieMode();
+    vi.spyOn(hostedHubApi, "restoreSession").mockResolvedValue(sessionResponse);
+    const directory = deferred<ReadonlyArray<HostedHubNode>>();
+    vi.spyOn(hostedHubApi, "listNodes").mockReturnValue(directory.promise);
+
+    let bootstrapped = false;
+    const full = hostedHubController.bootstrap().then(() => {
+      bootstrapped = true;
+    });
+    await hostedHubController.bootstrapAccess();
+
+    expect(bootstrapped).toBe(false);
+    expect(hostedHubStore.getState()).toMatchObject({
+      accountStatus: "authenticated",
+      directoryStatus: "loading",
+    });
+    directory.resolve([node()]);
+    await full;
+    expect(hostedHubStore.getState().directoryStatus).toBe("ready");
+  });
+
+  it("settles a boot gate on an unavailable Hub without waiting for any directory read", async () => {
+    vi.useFakeTimers();
+    useCookieMode();
+    vi.spyOn(hostedHubApi, "restoreSession").mockRejectedValue(
+      new HostedHubApiError("timeout", 0, undefined, undefined, undefined, "request-timeout"),
+    );
+    vi.spyOn(hostedHubApi, "listNodes").mockReturnValue(new Promise(() => undefined));
+
+    await hostedHubController.bootstrapAccess();
+
+    expect(hostedHubStore.getState()).toMatchObject({
+      accountStatus: "unavailable",
+      accessRecoveryPending: true,
+    });
+  });
+
+  it("bounds the first access check, then gives a timed-out link the full deadline until the Hub answers", async () => {
+    vi.useFakeTimers();
+    useCookieMode();
+    const timeout = new HostedHubApiError(
+      "timeout",
+      0,
+      undefined,
+      undefined,
+      undefined,
+      "request-timeout",
+    );
+    const restoreSession = vi
+      .spyOn(hostedHubApi, "restoreSession")
+      .mockRejectedValueOnce(timeout)
+      .mockResolvedValue(sessionResponse);
+    const listNodes = vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([node()]);
+
+    await hostedHubController.bootstrap();
+    expect(restoreSession.mock.calls[0]?.[1]).toEqual({
+      deadlineMs: HOSTED_ACCESS_CHECK_DEADLINE_MS,
+    });
+    // The directory read beside it keeps the full deadline: no gate waits on it.
+    expect(listNodes.mock.calls[0]?.[1]).toBeUndefined();
+
+    await hostedHubController.bootstrap();
+    expect(restoreSession.mock.calls[1]?.[1]).toBeUndefined();
+    expect(listNodes.mock.calls[1]?.[1]).toBeUndefined();
+    expect(hostedHubStore.getState().accountStatus).toBe("authenticated");
+
+    // Once the Hub has answered, the next check is bounded again.
+    hostedHubStore.setState({ browserStatus: "suspended" });
+    await hostedHubController.resumeBrowser();
+    expect(restoreSession.mock.calls[2]?.[1]).toEqual({
+      deadlineMs: HOSTED_ACCESS_CHECK_DEADLINE_MS,
+    });
+  });
+
+  it("keeps bearer-mode access checks serial and on the full deadline", async () => {
+    Object.defineProperty(hostedHubApi, "credentialMode", {
+      configurable: true,
+      get: () => "bearer",
+    });
+    const order: string[] = [];
+    vi.spyOn(hostedHubApi, "restoreSession").mockImplementation(async (...args) => {
+      order.push(`session:${args.length > 1 ? JSON.stringify(args[1]) : "default"}`);
+      return sessionResponse;
+    });
+    vi.spyOn(hostedHubApi, "listNodes").mockImplementation(async () => {
+      order.push("directory");
+      return [node()];
+    });
+
+    await hostedHubController.bootstrap();
+
+    expect(order).toEqual(["session:undefined", "directory"]);
+  });
+
+  it("decides a stalled bearer access check at the short bound without abandoning its answer", async () => {
+    vi.useFakeTimers();
+    Object.defineProperty(hostedHubApi, "credentialMode", {
+      configurable: true,
+      get: () => "bearer",
+    });
+    const session = deferred<HostedHubSessionResponse>();
+    let restoreSignal: AbortSignal | undefined;
+    const restoreSession = vi
+      .spyOn(hostedHubApi, "restoreSession")
+      .mockImplementation(async (signal) => {
+        restoreSignal = signal;
+        return session.promise;
+      });
+    vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([node()]);
+
+    let accessAnswered = false;
+    void hostedHubController.bootstrapAccess().then(() => {
+      accessAnswered = true;
+    });
+    const full = hostedHubController.bootstrap();
+
+    await vi.advanceTimersByTimeAsync(HOSTED_ACCESS_CHECK_DEADLINE_MS - 1);
+    expect(accessAnswered).toBe(false);
+    expect(hostedHubStore.getState().accountStatus).toBe("signed-out");
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(accessAnswered).toBe(true);
+    expect(hostedHubStore.getState()).toMatchObject({
+      accountStatus: "unavailable",
+      accessRecoveryPending: true,
+      errorReason: "request-timeout",
+    });
+    // The request keeps its full deadline: a rotated token in its answer must
+    // still be adopted, so nothing aborts it.
+    expect(restoreSignal?.aborted).toBe(false);
+
+    // The armed retry (and any lifecycle signal) joins the check in flight
+    // rather than sending a second restore with a token it may be rotating.
+    await vi.advanceTimersByTimeAsync(60_000);
+    void hostedHubController.recoverAfterConnectivity();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(restoreSession).toHaveBeenCalledTimes(1);
+
+    session.resolve(sessionResponse);
+    await full;
+    expect(hostedHubStore.getState()).toMatchObject({
+      accountStatus: "authenticated",
+      account: sessionResponse.account,
+      accessRecoveryPending: false,
+      errorMessage: null,
+      errorReason: null,
+      directoryStatus: "ready",
+    });
+  });
+
+  it("still signs out on a bearer access check's late session failure", async () => {
+    vi.useFakeTimers();
+    Object.defineProperty(hostedHubApi, "credentialMode", {
+      configurable: true,
+      get: () => "bearer",
+    });
+    const session = deferred<HostedHubSessionResponse>();
+    vi.spyOn(hostedHubApi, "restoreSession").mockReturnValue(session.promise);
+    vi.spyOn(hostedHubApi, "getBootstrapAvailability").mockResolvedValue(false);
+
+    const full = hostedHubController.bootstrap();
+    await vi.advanceTimersByTimeAsync(HOSTED_ACCESS_CHECK_DEADLINE_MS);
+    expect(hostedHubStore.getState().accountStatus).toBe("unavailable");
+
+    session.reject(new HostedHubApiError("session_invalid", 401));
+    await full;
+    expect(hostedHubApi.clearSessionMaterial).toHaveBeenCalledTimes(1);
+    expect(hostedHubStore.getState()).toMatchObject({
+      accountStatus: "signed-out",
+      accessRecoveryPending: false,
+    });
+  });
+
+  it("does not publish an unavailable account for a bearer check answered within the bound", async () => {
+    vi.useFakeTimers();
+    Object.defineProperty(hostedHubApi, "credentialMode", {
+      configurable: true,
+      get: () => "bearer",
+    });
+    vi.spyOn(hostedHubApi, "restoreSession").mockResolvedValue(sessionResponse);
+    vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([node()]);
+    const statuses: string[] = [];
+    const unsubscribe = hostedHubStore.subscribe(() =>
+      statuses.push(hostedHubStore.getState().accountStatus),
+    );
+    try {
+      await hostedHubController.bootstrap();
+      await vi.advanceTimersByTimeAsync(HOSTED_ACCESS_CHECK_DEADLINE_MS * 2);
+    } finally {
+      unsubscribe();
+    }
+    expect(statuses).not.toContain("unavailable");
+    expect(hostedHubStore.getState().accountStatus).toBe("authenticated");
+  });
+
+  it("reads the directory beside a resume's restore and drops it for a different account", async () => {
+    useCookieMode();
+    const selected = node();
+    hostedHubStore.setState({
+      accountStatus: "authenticated",
+      account: sessionResponse.account,
+      session: sessionResponse.session,
+      directoryStatus: "ready",
+      nodes: [selected],
+      browserStatus: "suspended",
+    });
+    vi.spyOn(hostedHubApi, "restoreSession").mockResolvedValue({
+      ...sessionResponse,
+      account: { ...sessionResponse.account, id: "acct_bbbbbbbbbbbbbbbbbbbbbb" },
+    });
+    let directorySignal: AbortSignal | undefined;
+    vi.spyOn(hostedHubApi, "listNodes").mockImplementation(async (signal) => {
+      directorySignal = signal;
+      return [node("node_bbbbbbbbbbbbbbbbbbbbbb")];
+    });
+
+    await hostedHubController.resumeBrowser();
+
+    expect(directorySignal?.aborted).toBe(true);
+    expect(hostedHubStore.getState()).toMatchObject({
+      accountStatus: "session-expired",
+      nodes: [],
+    });
+  });
+});
+
+describe("directory publication", () => {
+  it("keeps the published nodes and publishes nothing when a read changes nothing", async () => {
+    const first = node();
+    const second = node("node_bbbbbbbbbbbbbbbbbbbbbb");
+    hostedHubStore.setState({
+      accountStatus: "authenticated",
+      account: sessionResponse.account,
+      session: sessionResponse.session,
+      directoryStatus: "ready",
+      nodes: [first, second],
+      selectedNode: first,
+      selectionStatus: "online",
+      effectiveRole: first.effectiveRole,
+    });
+    const published = hostedHubStore.getState().nodes;
+    vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([
+      node(),
+      node("node_bbbbbbbbbbbbbbbbbbbbbb"),
+    ]);
+    const listener = vi.fn();
+    const unsubscribe = hostedHubStore.subscribe(listener);
+    try {
+      await hostedHubController.refreshDirectory();
+    } finally {
+      unsubscribe();
+    }
+    expect(listener).not.toHaveBeenCalled();
+    expect(hostedHubStore.getState().nodes).toBe(published);
+    expect(hostedHubStore.getState().selectedNode).toBe(first);
+  });
+
+  it("publishes a changed node and keeps the identity of every unchanged one", async () => {
+    const first = node();
+    const second = node("node_bbbbbbbbbbbbbbbbbbbbbb");
+    hostedHubStore.setState({
+      accountStatus: "authenticated",
+      account: sessionResponse.account,
+      session: sessionResponse.session,
+      directoryStatus: "ready",
+      nodes: [first, second],
+    });
+    const renamed = { ...node("node_bbbbbbbbbbbbbbbbbbbbbb"), label: "Renamed" };
+    vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([node(), renamed]);
+
+    await hostedHubController.refreshDirectory();
+
+    const nodes = hostedHubStore.getState().nodes;
+    expect(nodes[0]).toBe(first);
+    expect(nodes[1]).toEqual(renamed);
+    expect(nodes[1]).not.toBe(second);
   });
 });

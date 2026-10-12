@@ -10,7 +10,11 @@ import { webEndpoint } from "../platform/endpoint";
 import { webHttpClient } from "../platform/httpClient";
 import { webPasskeyCeremony } from "../platform/passkeyCeremony";
 import { webSessionCredentials } from "../platform/sessionCredentials";
-import { resolveWebRelayE2eeProvider, watchWebHostedSessionForE2ee } from "./e2eeAttempt";
+import {
+  prepareWebRelayE2ee,
+  resolveWebRelayE2eeProvider,
+  watchWebHostedSessionForE2ee,
+} from "./e2eeAttempt";
 import { clearWebHostedNodeScopedState } from "./environment";
 import { hasHostedRelayPendingRequests, resetHostedRelayAttemptFactory } from "./transport";
 import { BrowserHostedRelaySocket, hostedRelayWebSocketUrl } from "./relaySocket";
@@ -18,6 +22,7 @@ import { BrowserHostedRelaySocket, hostedRelayWebSocketUrl } from "./relaySocket
 import {
   createWebHubRelaySocket,
   isWebHubSessionOnline,
+  probeWebHubSession,
   watchWebHostedHubSession,
 } from "./hubSession";
 import { subscribeWebForeground } from "./foreground";
@@ -57,8 +62,13 @@ export function configureWebHostedRuntime(api: HostedHubApi): void {
       subscribeForeground: subscribeWebForeground,
       hasPendingRelayRequests: hasHostedRelayPendingRequests,
       hasLiveHubSubscription: isWebHubSessionOnline,
+      probeHubSubscription: probeWebHubSession,
       resetRelayAttemptFactory: resetHostedRelayAttemptFactory,
       relayUrl: hostedRelayWebSocketUrl,
+      // The handshake code is loaded off the boot path (see `loadWebRelayE2ee`);
+      // the transport awaits this before buying a ticket, so the synchronous
+      // provider below always finds it.
+      prepareRelaySocketContext: prepareWebRelayE2ee,
       // docs/relay-e2ee-protocol.md §4: THIS IS WHERE THE WEB TIER'S NX CHANNEL
       // IS ON — and it is on with a bounded claim, not the native one.
       //

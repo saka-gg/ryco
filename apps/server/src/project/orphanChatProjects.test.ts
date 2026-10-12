@@ -1,8 +1,14 @@
-import { type OrchestrationCommand, ProjectId, ThreadId } from "@ryco/contracts";
-import { Effect } from "effect";
+import { MessageId, type OrchestrationCommand, ProjectId, ThreadId } from "@ryco/contracts";
+import { Effect, Layer } from "effect";
+import * as SqlClient from "effect/sql/SqlClient";
 import { describe, expect, it } from "vite-plus/test";
 
-import type { ProjectionProject } from "../persistence/Services/ProjectionProjects.ts";
+import { ProjectionProjectRepositoryLive } from "../persistence/Layers/ProjectionProjects.ts";
+import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import {
+  type ProjectionProject,
+  ProjectionProjectRepository,
+} from "../persistence/Services/ProjectionProjects.ts";
 import type { ProjectionThread } from "../persistence/Services/ProjectionThreads.ts";
 import { PersistenceSqlError } from "../persistence/Errors.ts";
 import type { ThreadForkLedgerRow } from "../threadFork/forkLedger.ts";
@@ -64,6 +70,10 @@ const newChatFork = (
         : null,
   }) as unknown as ThreadForkLedgerRow;
 
+/**
+ * Runs the sweep against real projection tables: the orphan selection is one SQL anti-join, so
+ * these cases pin its semantics (`isRolledBackThreadCreation`) rather than a test double's.
+ */
 const sweep = (input: {
   readonly projects: ReadonlyArray<ProjectionProject>;
   readonly threads?: ReadonlyArray<ProjectionThread>;
@@ -81,37 +91,57 @@ const sweep = (input: {
     operation: "ThreadForkRepository.listUnfinished:query",
     detail: "database is locked",
   });
-  const deps: OrphanChatProjectDependencies = {
-    projects: { listAll: () => Effect.succeed(input.projects) },
-    threads: {
-      listByProjectId: ({ projectId }) =>
-        Effect.succeed((input.threads ?? []).filter((entry) => entry.projectId === projectId)),
-    },
-    threadForks: {
-      listUnfinished: () =>
-        input.ledgerUnavailable
-          ? Effect.fail(ledgerError)
-          : Effect.succeed(input.unfinishedForks ?? []),
-      listRetryableFailed: () => Effect.succeed(input.retryableFailedForks ?? []),
-    },
-    chatFolders: {
-      removeEmptyChatFolder: (folder) =>
-        Effect.sync(() => {
-          if (input.keepFolders?.includes(folder)) return false;
-          removedFolders.push(folder);
-          return true;
+  const program = Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const projects = yield* ProjectionProjectRepository;
+    for (const row of input.projects) yield* projects.upsert(row);
+    for (const row of input.threads ?? []) {
+      yield* sql`
+        INSERT INTO projection_threads (
+          thread_id, project_id, title, model_selection_json, runtime_mode, interaction_mode,
+          created_at, updated_at, archived_at, deleted_at, trashed_at, latest_turn_id,
+          latest_user_message_at, lineage_source_message_id
+        ) VALUES (
+          ${row.threadId}, ${row.projectId}, 'Thread', '{"instanceId":"codex","model":"gpt-5"}',
+          'full-access', 'default', ${TWO_HOURS_AGO}, ${TWO_HOURS_AGO}, ${row.archivedAt},
+          ${row.deletedAt}, ${row.trashedAt}, ${row.latestTurnId}, ${row.latestUserMessageAt},
+          ${row.lineageSourceMessageId ?? null}
+        )
+      `;
+    }
+    const deps: OrphanChatProjectDependencies = {
+      projects,
+      threadForks: {
+        listUnfinished: () =>
+          input.ledgerUnavailable
+            ? Effect.fail(ledgerError)
+            : Effect.succeed(input.unfinishedForks ?? []),
+        listRetryableFailed: () => Effect.succeed(input.retryableFailedForks ?? []),
+      },
+      chatFolders: {
+        removeEmptyChatFolder: (folder) =>
+          Effect.sync(() => {
+            if (input.keepFolders?.includes(folder)) return false;
+            removedFolders.push(folder);
+            return true;
+          }),
+      },
+      dispatch: (command) =>
+        Effect.suspend(() => {
+          commands.push(command);
+          return command.type === "project.delete" && input.refuse?.includes(command.projectId)
+            ? Effect.fail({ message: "thread set changed after the command was authorized" })
+            : Effect.succeed({ sequence: commands.length });
         }),
-    },
-    dispatch: (command) =>
-      Effect.suspend(() => {
-        commands.push(command);
-        return command.type === "project.delete" && input.refuse?.includes(command.projectId)
-          ? Effect.fail({ message: "thread set changed after the command was authorized" })
-          : Effect.succeed({ sequence: commands.length });
-      }),
-    now: () => NOW,
-  };
-  return Effect.runPromise(removeOrphanChatProjects(deps)).then((result) => ({
+      now: () => NOW,
+    };
+    return yield* removeOrphanChatProjects(deps);
+  }).pipe(
+    Effect.provide(
+      ProjectionProjectRepositoryLive.pipe(Layer.provideMerge(SqlitePersistenceMemory)),
+    ),
+  );
+  return Effect.runPromise(program).then((result) => ({
     result,
     commands,
     removedFolders,
@@ -139,6 +169,15 @@ describe("removeOrphanChatProjects", () => {
     ["an archived thread", thread("chat-a", { archivedAt: TWO_HOURS_AGO })],
     ["a thread in Trash", thread("chat-a", { trashedAt: TWO_HOURS_AGO })],
     ["a deleted but retained thread", thread("chat-a", { deletedAt: TWO_HOURS_AGO })],
+    [
+      // A fork is created with the history it inherited, so it is never an unused creation.
+      "a deleted fork that never ran a turn",
+      thread("chat-a", {
+        deletedAt: TWO_HOURS_AGO,
+        latestUserMessageAt: null,
+        lineageSourceMessageId: MessageId.make("message-parent"),
+      }),
+    ],
     [
       "an unused thread in Trash",
       thread("chat-a", {
@@ -178,6 +217,21 @@ describe("removeOrphanChatProjects", () => {
     const { commands, removedFolders } = await sweep({ projects: [entry] });
     expect(commands).toEqual([]);
     expect(removedFolders).toEqual([]);
+  });
+
+  it("keeps a chat with a used thread even beside a rolled-back creation", async () => {
+    const { commands } = await sweep({
+      projects: [project("chat-a")],
+      threads: [
+        thread("chat-a", {
+          threadId: ThreadId.make("rolled-back"),
+          deletedAt: TWO_HOURS_AGO,
+          latestUserMessageAt: null,
+        }),
+        thread("chat-a", { threadId: ThreadId.make("live") }),
+      ],
+    });
+    expect(commands).toEqual([]);
   });
 
   it("keeps the folder of a chat whose deletion was refused", async () => {

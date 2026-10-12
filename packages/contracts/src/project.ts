@@ -1,4 +1,4 @@
-import { Schema } from "effect";
+import * as Schema from "effect/Schema";
 import {
   IsoDateTime,
   NonNegativeInt,
@@ -6,6 +6,7 @@ import {
   ProjectId,
   ThreadId,
   TrimmedNonEmptyString,
+  TrimmedString,
 } from "./baseSchemas.ts";
 import { CHAT_PROJECT_TITLE_MAX_CHARS } from "./orchestration.ts";
 
@@ -36,7 +37,8 @@ export type ProjectWriteFileFailureReason = typeof ProjectWriteFileFailureReason
 
 export const ProjectSearchEntriesInput = Schema.Struct({
   cwd: TrimmedNonEmptyString,
-  query: TrimmedNonEmptyString.check(Schema.isMaxLength(256)),
+  /** An empty query lists the shallowest entries first and warms the workspace index. */
+  query: TrimmedString.check(Schema.isMaxLength(256)),
   limit: PositiveInt.check(Schema.isLessThanOrEqualTo(PROJECT_SEARCH_ENTRIES_MAX_LIMIT)),
 });
 export type ProjectSearchEntriesInput = typeof ProjectSearchEntriesInput.Type;
@@ -52,7 +54,20 @@ export type ProjectEntry = typeof ProjectEntry.Type;
 
 export const ProjectSearchEntriesResult = Schema.Struct({
   entries: Schema.Array(ProjectEntry),
+  /** More entries matched than were returned, or the index behind the result is partial. */
   truncated: Schema.Boolean,
+  /**
+   * The index behind the result covers only part of the workspace (its size
+   * cap, or tracked files only while a slow full listing finishes).
+   */
+  partial: Schema.optional(Schema.Boolean),
+  /**
+   * A rebuild under way will replace the index behind the result (the
+   * workspace changed since it was built, or it is the tracked-files stand-in
+   * served while a slow first listing finishes): the result can miss files,
+   * so it must not be cached.
+   */
+  refreshing: Schema.optional(Schema.Boolean),
 });
 export type ProjectSearchEntriesResult = typeof ProjectSearchEntriesResult.Type;
 

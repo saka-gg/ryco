@@ -2,7 +2,9 @@ import { describe, expect, it } from "vite-plus/test";
 
 import type { UsageRecord } from "./usageRecord.ts";
 import {
+  anonymizeScanCachedUsageRecord,
   anonymizeUsageRecord,
+  capUsageScanCache,
   decodeUsageScanCache,
   deduplicateUsageRecordsWithinFile,
   encodeUsageScanCache,
@@ -149,4 +151,44 @@ it("invalidates transcript caches without speed and round-trips recorded tiers",
   const encoded = encodeUsageScanCache(new Map([["file", entry]]));
   expect(decodeUsageScanCache(encoded).get("file")?.records[0]?.speed).toBe("fast");
   for (const version of [2, 3]) expect(decodeUsageScanCache({ ...encoded, version }).size).toBe(0);
+});
+
+it("compacts identifiers of version 4 caches instead of rescanning them", () => {
+  const full = anonymizeUsageRecord(record({ provider: "codex", speed: "standard" }));
+  const encoded = encodeUsageScanCache(
+    new Map([
+      ["file", { rootKey: "root", size: 1, mtimeMs: 1, provider: "codex", records: [full] }],
+    ]),
+  );
+  const decoded = decodeUsageScanCache({ ...encoded, version: 4 }).get("file")?.records[0];
+  // The compact form is the prefix of the full digest, so fresh parses deduplicate against it.
+  expect(decoded?.dedupeKey).toBe(
+    anonymizeScanCachedUsageRecord(record({ provider: "codex" })).dedupeKey,
+  );
+  expect(decoded?.sessionId).toBe(full.sessionId.slice(0, 16));
+  expect(decoded?.dedupeKey).toHaveLength(16);
+});
+
+it("decodes every file of a large cache and evicts the least recently modified first", () => {
+  const rows = (count: number) =>
+    Array.from({ length: count }, (_, index) => record({ timestampMs: index, dedupeKey: null }));
+  const cache: UsageScanCache = new Map(
+    [3, 1, 2].map((order) => [
+      `file-${order}`,
+      {
+        rootKey: "root",
+        size: 1,
+        mtimeMs: order * 1000,
+        provider: "claude",
+        records: rows(90_000),
+      },
+    ]),
+  );
+  // 270k records: more than the old 250k cumulative decode cap, which silently
+  // dropped the files inserted last.
+  const decoded = decodeUsageScanCache(JSON.parse(JSON.stringify(encodeUsageScanCache(cache))));
+  expect(decoded.size).toBe(3);
+  expect(capUsageScanCache(decoded, 200_000)).toBe(1);
+  expect([...decoded.keys()].toSorted()).toEqual(["file-2", "file-3"]);
+  expect(capUsageScanCache(decoded, 200_000)).toBe(0);
 });

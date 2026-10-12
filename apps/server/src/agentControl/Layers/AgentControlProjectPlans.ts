@@ -9,7 +9,10 @@ import {
 } from "@ryco/contracts";
 import { Effect, Layer } from "effect";
 
-import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import {
+  ProjectionSnapshotQuery,
+  readWorkspacePlacement,
+} from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { RepositoryIdentityResolver } from "../../project/Services/RepositoryIdentityResolver.ts";
 import { WorkspaceAccessPolicy } from "../../workspace/Services/WorkspaceAccessPolicy.ts";
 import { WorkspacePaths } from "../../workspace/Services/WorkspacePaths.ts";
@@ -81,7 +84,7 @@ const makeAgentControlProjectPlans = Effect.gen(function* () {
   });
 
   const requireProject = (projectId: string) =>
-    projections.getShellSnapshot().pipe(
+    readWorkspacePlacement(projections).pipe(
       Effect.mapError(
         () =>
           new AgentControlPlanValidationError({
@@ -111,7 +114,7 @@ const makeAgentControlProjectPlans = Effect.gen(function* () {
 
   const prepareCreate: AgentControlProjectPlansShape["prepareCreate"] = (input) =>
     Effect.gen(function* () {
-      const snapshot = yield* projections.getShellSnapshot().pipe(
+      const snapshot = yield* readWorkspacePlacement(projections).pipe(
         Effect.mapError(
           () =>
             new AgentControlPlanValidationError({
@@ -221,7 +224,7 @@ const makeAgentControlProjectPlans = Effect.gen(function* () {
 
   const revalidate: AgentControlProjectPlansShape["revalidate"] = (plan: AgentControlProjectPlan) =>
     Effect.gen(function* () {
-      const snapshot = yield* projections.getShellSnapshot().pipe(
+      const snapshot = yield* readWorkspacePlacement(projections).pipe(
         Effect.mapError(
           () =>
             new AgentControlPlanValidationError({

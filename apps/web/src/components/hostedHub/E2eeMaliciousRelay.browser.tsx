@@ -1,4 +1,5 @@
-import { makeRelayE2eeInitiator, type RelayE2eeHost } from "@ryco/client-runtime/relay";
+import type { RelayE2eeHost } from "@ryco/client-runtime/relay";
+import { makeRelayE2eeInitiator } from "@ryco/client-runtime/relay/e2ee";
 import { E2EE_ENVELOPE_DISCRIMINATOR, T_ADV, T_HANDSHAKE } from "@ryco/shared/relayE2eeConstants";
 import { decodeE2eeClientHello, encodeE2eeClientHello } from "@ryco/shared/relayE2eeHandshake";
 import { encodeE2eeCapabilityCarrier, type E2eeSuiteId } from "@ryco/shared/relayE2eeWire";

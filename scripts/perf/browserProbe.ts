@@ -1,12 +1,21 @@
 import { Buffer } from "node:buffer";
+import { mkdirSync, writeFileSync } from "node:fs";
+import path from "node:path";
 import { performance } from "node:perf_hooks";
 
 import type { Browser, CDPSession, Page, WebSocketRoute } from "playwright";
 
 import {
+  CPU_PROFILE_SAMPLING_INTERVAL_US,
+  createDistSourceResolver,
+  summarizeCpuProfile,
+  type CdpCpuProfile,
+} from "./cpuProfile.ts";
+import {
   EMPTY_NETWORK_METRICS,
   UNSUPPORTED_SOURCE_CONTROL_METRICS,
   type BrowserVitals,
+  type CpuProfileSummary,
   type PerfScenarioConfig,
   type PhaseNetworkMetrics,
   type SourceControlScenarioMetrics,
@@ -36,8 +45,18 @@ interface BrowserProbeResult {
   readonly hiddenIdleNetwork: PhaseNetworkMetrics;
   readonly reconnectNetwork: PhaseNetworkMetrics;
   readonly sourceControl: SourceControlScenarioMetrics;
+  readonly cpuProfile: CpuProfileSummary | null;
   readonly errors: readonly string[];
 }
+
+/** Where the boot CPU profile goes and which dist resolves its frames to sources. */
+export interface BootCpuProfileTarget {
+  readonly file: string;
+  readonly assetsDir: string | null;
+}
+
+/** Main-thread work after the sidebar paints: deferred surfaces, idle preloads. */
+const CPU_PROFILE_TAIL_MS = 5_000;
 
 type SourceControlProbePhase =
   | "setup"
@@ -72,6 +91,24 @@ interface BrowserPerfState {
   cls: number;
   longTasks: number;
   maxLongTaskMs: number;
+  longTaskTotalMs: number;
+}
+
+/** The app's startup measures (`apps/web/src/perf/startupInstrumentation.ts`). */
+export const STARTUP_MEASURE_PREFIX = "ryco:startup:";
+export const SHELL_PAINTED_MEASURE = "primary-shell-painted";
+const SHELL_PAINTED_WAIT_MS = 10_000;
+
+/** Keeps the latest duration per startup measure, keyed without the prefix. */
+export function collectStartupMeasures(
+  entries: ReadonlyArray<{ readonly name: string; readonly duration: number }>,
+): Record<string, number> {
+  const measures: Record<string, number> = {};
+  for (const entry of entries) {
+    if (!entry.name.startsWith(STARTUP_MEASURE_PREFIX)) continue;
+    measures[entry.name.slice(STARTUP_MEASURE_PREFIX.length)] = entry.duration;
+  }
+  return measures;
 }
 
 interface NavigationTimingSnapshot {
@@ -789,6 +826,7 @@ async function installPerfObservers(page: Page): Promise<void> {
       cls: 0,
       longTasks: 0,
       maxLongTaskMs: 0,
+      longTaskTotalMs: 0,
     };
     Object.defineProperty(globalThis, "__rycoExternalPerf", {
       value: state,
@@ -839,8 +877,10 @@ async function installPerfObservers(page: Page): Promise<void> {
     });
     observe("longtask", (entries) => {
       state.longTasks += entries.length;
-      for (const entry of entries)
+      for (const entry of entries) {
         state.maxLongTaskMs = Math.max(state.maxLongTaskMs, entry.duration);
+        state.longTaskTotalMs += entry.duration;
+      }
     });
   });
 }
@@ -851,16 +891,24 @@ async function readBrowserVitals(page: Page, usableMs: number): Promise<BrowserV
       readonly responseStart: number;
       readonly domContentLoadedEventEnd: number;
     }
+    interface BrowserMeasure {
+      readonly name: string;
+      readonly duration: number;
+    }
     const browserGlobal = globalThis as unknown as {
       readonly __rycoExternalPerf?: BrowserPerfState;
       readonly performance: {
-        getEntriesByType: (type: string) => BrowserNavigationTiming[];
+        getEntriesByType: ((type: "navigation") => BrowserNavigationTiming[]) &
+          ((type: "measure") => BrowserMeasure[]);
       };
     };
     const state = browserGlobal.__rycoExternalPerf;
     const navigation = browserGlobal.performance.getEntriesByType("navigation")[0];
     return {
       state: state ?? null,
+      measures: browserGlobal.performance
+        .getEntriesByType("measure")
+        .map((entry) => ({ name: entry.name, duration: entry.duration })),
       navigation: navigation
         ? {
             ttfbMs: navigation.responseStart,
@@ -873,6 +921,7 @@ async function readBrowserVitals(page: Page, usableMs: number): Promise<BrowserV
     ttfbMs: null,
     domContentLoadedMs: null,
   };
+  const startupMeasures = collectStartupMeasures(observed.measures);
   return {
     ttfbMs: navigation.ttfbMs,
     domContentLoadedMs: navigation.domContentLoadedMs,
@@ -882,7 +931,30 @@ async function readBrowserVitals(page: Page, usableMs: number): Promise<BrowserV
     usableMs,
     longTasks: observed.state?.longTasks ?? 0,
     maxLongTaskMs: observed.state?.maxLongTaskMs ?? 0,
+    longTaskTotalMs: observed.state?.longTaskTotalMs ?? 0,
+    shellPaintedMs: startupMeasures[SHELL_PAINTED_MEASURE] ?? null,
+    startupMeasures,
   };
+}
+
+/**
+ * Waits (bounded) for the app's painted-shell measure. Paths that never paint
+ * a primary shell (pairing, hosted, an error) report no value instead of
+ * failing the sample.
+ */
+async function waitForShellPainted(page: Page): Promise<void> {
+  await page
+    .waitForFunction(
+      (name) =>
+        (
+          globalThis as unknown as {
+            readonly performance: { getEntriesByName: (name: string) => unknown[] };
+          }
+        ).performance.getEntriesByName(name).length > 0,
+      `${STARTUP_MEASURE_PREFIX}${SHELL_PAINTED_MEASURE}`,
+      { timeout: SHELL_PAINTED_WAIT_MS },
+    )
+    .catch(() => undefined);
 }
 
 export async function runBrowserProbe(input: {
@@ -890,6 +962,7 @@ export async function runBrowserProbe(input: {
   readonly entryUrl: string;
   readonly scenario: PerfScenarioConfig;
   readonly sourceControlFixture: ActiveSourceControlFixture | null;
+  readonly cpuProfile?: BootCpuProfileTarget | null;
 }): Promise<BrowserProbeResult> {
   const context = await input.browser.newContext({
     serviceWorkers: "block",
@@ -977,9 +1050,20 @@ export async function runBrowserProbe(input: {
     usableMs: null,
     longTasks: 0,
     maxLongTaskMs: 0,
+    longTaskTotalMs: 0,
+    shellPaintedMs: null,
+    startupMeasures: {},
   };
+  let cpuProfile: CpuProfileSummary | null = null;
 
   try {
+    if (input.cpuProfile) {
+      await session.send("Profiler.enable");
+      await session.send("Profiler.setSamplingInterval", {
+        interval: CPU_PROFILE_SAMPLING_INTERVAL_US,
+      });
+      await session.send("Profiler.start");
+    }
     const navigationStartedAt = performance.now();
     await page.goto(input.entryUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
     const entryPath = new URL(input.entryUrl).pathname;
@@ -1003,7 +1087,20 @@ export async function runBrowserProbe(input: {
     );
     const usableMs = performance.now() - navigationStartedAt;
     await page.waitForTimeout(750);
+    await waitForShellPainted(page);
     vitals = await readBrowserVitals(page, usableMs);
+    if (input.cpuProfile) {
+      await page.waitForTimeout(CPU_PROFILE_TAIL_MS);
+      const { profile } = (await session.send("Profiler.stop")) as { profile: CdpCpuProfile };
+      mkdirSync(path.dirname(input.cpuProfile.file), { recursive: true });
+      writeFileSync(input.cpuProfile.file, JSON.stringify(profile));
+      cpuProfile = summarizeCpuProfile(
+        profile,
+        input.cpuProfile.assetsDir
+          ? { resolveSource: createDistSourceResolver(input.cpuProfile.assetsDir) }
+          : {},
+      );
+    }
 
     if (input.scenario.profile === "active-source-control") {
       if (!sourceControlDriver || !input.sourceControlFixture) {
@@ -1153,6 +1250,7 @@ export async function runBrowserProbe(input: {
     hiddenIdleNetwork: snapshotNetworkMetrics(phases.hiddenIdle),
     reconnectNetwork: snapshotNetworkMetrics(phases.reconnect),
     sourceControl,
+    cpuProfile,
     errors,
   };
 }

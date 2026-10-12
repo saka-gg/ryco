@@ -1,35 +1,64 @@
+import type * as React from "react";
 import {
   Area,
   AreaChart,
-  Bar,
-  BarChart,
   CartesianGrid,
   Cell,
   Pie,
   PieChart,
+  ResponsiveContainer,
+  Tooltip,
   XAxis,
   YAxis,
 } from "recharts";
 
-import {
-  chartColor,
-  ChartContainer,
-  ChartTooltip,
-  ChartTooltipContent,
-} from "~/components/ui/chart";
-import {
-  formatDayLabel,
-  formatDuration,
-  formatInteger,
-  formatProviderLabel,
-  formatTokens,
-} from "~/lib/statisticsFormat";
+import { chartColor, ChartTooltipContent } from "~/components/ui/chart";
+import { cn } from "~/lib/utils";
+import { formatDayLabel, formatProviderLabel, formatTokens } from "~/lib/statisticsFormat";
 
-import type { DayPoint, ProjectAggregate, ProviderAggregate } from "./selectors";
+import type { DayPoint, ProviderAggregate } from "./selectors";
 
-function truncateLabel(value: string, max = 14): string {
-  return value.length > max ? `${value.slice(0, max - 1)}…` : value;
+/*
+ * Charts for the settings StatisticsPanel (the frozen phone tier). Its token
+ * area and provider donut still use Recharts; the bar charts are the Statistics
+ * page's plain SVG ones, which keep Recharts out of that page's bundle.
+ */
+export { CodeChangesChart, ProjectBars } from "../../statistics/charts";
+
+/**
+ * Responsive wrapper around Recharts. The caller controls the size via
+ * `className` (e.g. `h-[240px] w-full`); the chart fills it. Tick/grid/cursor
+ * styling is normalised to the design tokens here so individual charts stay
+ * declarative.
+ */
+function ChartContainer({
+  className,
+  children,
+  ...props
+}: React.HTMLAttributes<HTMLDivElement> & { children: React.ReactElement }) {
+  return (
+    <div
+      data-slot="chart"
+      className={cn(
+        "w-full text-xs",
+        "[&_.recharts-cartesian-axis-tick_text]:fill-muted-foreground",
+        "[&_.recharts-cartesian-axis-line]:stroke-border/70",
+        "[&_.recharts-cartesian-grid_line]:stroke-border/50",
+        "[&_.recharts-curve.recharts-tooltip-cursor]:stroke-border",
+        "[&_.recharts-rectangle.recharts-tooltip-cursor]:fill-muted/50",
+        "[&_.recharts-sector]:outline-none [&_.recharts-surface]:outline-none",
+        className,
+      )}
+      {...props}
+    >
+      <ResponsiveContainer width="100%" height="100%">
+        {children}
+      </ResponsiveContainer>
+    </div>
+  );
 }
+
+const ChartTooltip = Tooltip;
 
 export function TokensOverTimeChart({ data }: { data: ReadonlyArray<DayPoint> }) {
   const hasUncategorized = data.some((point) => point.uncategorizedTokens > 0);
@@ -167,132 +196,5 @@ export function ProviderDonut({ data }: { data: ReadonlyArray<ProviderAggregate>
         })}
       </ul>
     </div>
-  );
-}
-
-export function ProjectBars({
-  data,
-  metric = "tokens",
-}: {
-  data: ReadonlyArray<ProjectAggregate>;
-  metric?: "tokens" | "turns" | "activeMs" | "files";
-}) {
-  const valueOf = (entry: ProjectAggregate) =>
-    metric === "tokens"
-      ? entry.totalTokens
-      : metric === "turns"
-        ? entry.turns
-        : metric === "activeMs"
-          ? entry.activeMs
-          : entry.filesChanged;
-  const chartData = [...data]
-    .toSorted((left, right) => valueOf(right) - valueOf(left))
-    .slice(0, 6)
-    .map((entry, index) => ({
-      name: entry.title,
-      value: valueOf(entry),
-      fill: chartColor(index),
-    }));
-
-  if (chartData.length === 0) {
-    return (
-      <div className="py-10 text-center text-muted-foreground text-xs">
-        No project activity yet.
-      </div>
-    );
-  }
-
-  return (
-    <ChartContainer className="h-[220px]">
-      <BarChart
-        data={chartData}
-        layout="vertical"
-        margin={{ left: 4, right: 16, top: 4, bottom: 4 }}
-      >
-        <XAxis type="number" hide />
-        <YAxis
-          type="category"
-          dataKey="name"
-          width={96}
-          tickLine={false}
-          axisLine={false}
-          tickFormatter={(value) => truncateLabel(String(value))}
-        />
-        <ChartTooltip
-          content={
-            <ChartTooltipContent
-              hideLabel
-              formatter={(value) =>
-                metric === "tokens"
-                  ? formatTokens(Number(value) || 0)
-                  : metric === "activeMs"
-                    ? formatDuration(Number(value) || 0)
-                    : formatInteger(Number(value) || 0)
-              }
-            />
-          }
-        />
-        <Bar dataKey="value" radius={[0, 4, 4, 0]} maxBarSize={26}>
-          {chartData.map((entry) => (
-            <Cell key={entry.name} fill={entry.fill} />
-          ))}
-        </Bar>
-      </BarChart>
-    </ChartContainer>
-  );
-}
-
-export function CodeChangesChart({ data }: { data: ReadonlyArray<DayPoint> }) {
-  const chartData = data.map((point) => ({
-    date: point.date,
-    additions: point.additions,
-    deletionsSigned: -point.deletions,
-  }));
-  return (
-    <ChartContainer className="h-[200px]">
-      <BarChart
-        data={chartData}
-        margin={{ left: 4, right: 8, top: 8, bottom: 0 }}
-        stackOffset="sign"
-      >
-        <CartesianGrid vertical={false} />
-        <XAxis
-          dataKey="date"
-          tickLine={false}
-          axisLine={false}
-          tickMargin={8}
-          minTickGap={28}
-          tickFormatter={(value) => formatDayLabel(String(value))}
-        />
-        <YAxis
-          tickLine={false}
-          axisLine={false}
-          width={38}
-          tickFormatter={(value) => formatTokens(Math.abs(Number(value) || 0))}
-        />
-        <ChartTooltip
-          content={
-            <ChartTooltipContent
-              labelFormatter={(label) => formatDayLabel(String(label))}
-              formatter={(value) => formatInteger(Math.abs(Number(value) || 0))}
-            />
-          }
-        />
-        <Bar
-          dataKey="additions"
-          name="Added"
-          fill="var(--success)"
-          radius={[2, 2, 0, 0]}
-          maxBarSize={18}
-        />
-        <Bar
-          dataKey="deletionsSigned"
-          name="Removed"
-          fill="var(--destructive)"
-          radius={[0, 0, 2, 2]}
-          maxBarSize={18}
-        />
-      </BarChart>
-    </ChartContainer>
   );
 }

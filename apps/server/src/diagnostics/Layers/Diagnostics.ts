@@ -3,8 +3,9 @@ import {
   redactDiagnosticText,
 } from "@ryco/shared/diagnosticRedaction";
 import { constants } from "node:fs";
-import { lstat, open } from "node:fs/promises";
+import { lstat, open, readdir, stat } from "node:fs/promises";
 import os from "node:os";
+import path from "node:path";
 
 import {
   type DiagnosticsDurationBucket,
@@ -22,6 +23,10 @@ import { Effect, Layer } from "effect";
 
 import type { ServerConfigShape } from "../../config.ts";
 import { ServerConfig } from "../../config.ts";
+import {
+  isCurrentCanonicalProviderEventLog,
+  parseProviderEventLogLine,
+} from "../../provider/providerEventLogRecords.ts";
 import type { TraceSinkHealth } from "../../observability/TraceSink.ts";
 import type { TraceRecord } from "../../observability/TraceRecord.ts";
 import { nativeResourceMonitor } from "../NativeResourceMonitor.ts";
@@ -37,6 +42,14 @@ import {
 const TRACE_RECORD_LIMIT = 2_000;
 const RESOURCE_SAMPLE_LIMIT = 240;
 const FILE_TAIL_BYTES = 512 * 1024;
+/** Provider failures come from the canonical logs of the most recently active threads. */
+const PROVIDER_LOG_FILE_LIMIT = 8;
+const PROVIDER_LOG_TAIL_BYTES = 128 * 1024;
+const PROVIDER_FAILURE_SOURCE = "provider-events";
+const ISO_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/u;
+/** Cheap pre-filter so only candidate failure records are JSON-parsed. */
+const PROVIDER_FAILURE_TYPE_PATTERN =
+  /"type":"(?:runtime\.error|thread\.realtime\.error|turn\.completed|session\.exited)"/u;
 const FILE_TAIL_REFRESH_INTERVAL_MS = 30_000;
 const LIST_LIMIT = 50;
 const EVENT_LIMIT = 80;
@@ -445,6 +458,9 @@ function failureFromSpan(span: DiagnosticsSpan): DiagnosticsFailure | null {
   };
 }
 
+/** Leading fields of the server's own logfmt log (see serverLogger.ts). */
+const LOGFMT_LINE_PREFIX = /^timestamp=\S+ (level=[A-Z]+) fiber=#\d+ /u;
+
 function failureFromLogLine(input: {
   readonly line: string;
   readonly source: string;
@@ -455,7 +471,11 @@ function failureFromLogLine(input: {
     return null;
   }
   const timestamp = line.match(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z/u)?.[0];
-  const message = String(redactDiagnosticValue(line));
+  // The time is `occurredAt` and the fiber id is noise: left in, they would
+  // fill the id and signature and make distinct failures look alike.
+  const prefix = LOGFMT_LINE_PREFIX.exec(line);
+  const text = prefix ? `${prefix[1]} ${line.slice(prefix[0].length)}` : line;
+  const message = String(redactDiagnosticValue(text));
   return {
     id: `log:${input.source}:${normalizeSignature(message).slice(0, 80)}`,
     occurredAt: timestamp ?? input.fallbackTime,
@@ -463,7 +483,69 @@ function failureFromLogLine(input: {
     category: "log",
     signature: normalizeSignature(message),
     message,
-    raw: redactDiagnosticValue({ line: message, source: input.source }),
+    raw: redactDiagnosticValue({ line, source: input.source }),
+  };
+}
+
+/** Failure message of a canonical provider runtime event, or `undefined` for anything else. */
+function providerEventFailureMessage(record: Record<string, unknown>): string | undefined {
+  const payload =
+    typeof record.payload === "object" && record.payload !== null
+      ? (record.payload as Record<string, unknown>)
+      : {};
+  const text = (value: unknown) =>
+    typeof value === "string" && value.trim().length > 0 ? value : undefined;
+  switch (record.type) {
+    case "runtime.error":
+    case "thread.realtime.error":
+      return text(payload.message) ?? `${record.type}`;
+    case "turn.completed":
+      return payload.state === "failed" ? (text(payload.errorMessage) ?? "turn failed") : undefined;
+    case "session.exited":
+      return payload.exitKind === "error"
+        ? (text(payload.reason) ?? "session exited with an error")
+        : undefined;
+    default:
+      return undefined;
+  }
+}
+
+function failureFromProviderEventLine(input: {
+  readonly line: string;
+  readonly fallbackTime: string;
+}): DiagnosticsFailure | null {
+  if (!PROVIDER_FAILURE_TYPE_PATTERN.test(input.line)) return null;
+  const parsed = parseProviderEventLogLine(input.line);
+  if (parsed === null || parsed.label !== "CANON") return null;
+  const record =
+    typeof parsed.record === "object" && parsed.record !== null
+      ? (parsed.record as Record<string, unknown>)
+      : null;
+  if (record === null) return null;
+  const failureMessage = providerEventFailureMessage(record);
+  if (failureMessage === undefined) return null;
+  const type = String(record.type);
+  const message = String(redactDiagnosticValue(failureMessage));
+  const signature = normalizeSignature(`${type}:${message}`);
+  return {
+    id:
+      typeof record.eventId === "string" && record.eventId.length > 0
+        ? `provider:${record.eventId}`
+        : `provider:${signature.slice(0, 80)}`,
+    occurredAt: ISO_TIMESTAMP_PATTERN.test(parsed.observedAt)
+      ? parsed.observedAt
+      : input.fallbackTime,
+    source: PROVIDER_FAILURE_SOURCE,
+    category: "provider",
+    signature,
+    message,
+    raw: redactDiagnosticValue({
+      type,
+      provider: record.provider,
+      threadId: record.threadId,
+      turnId: record.turnId,
+      message: failureMessage,
+    }),
   };
 }
 
@@ -645,6 +727,75 @@ async function readFailureLogTail(input: {
     .slice(-LIST_LIMIT);
 }
 
+/**
+ * Provider runtime failures (`runtime.error`, failed turns, errored session
+ * exits) from the current canonical logs of the most recently written threads.
+ * A missing directory is a fresh install; other read errors become warnings.
+ */
+async function readProviderEventFailures(input: {
+  readonly directory: string;
+  readonly fallbackTime: string;
+  readonly warnings: DiagnosticsWarning[];
+}): Promise<ReadonlyArray<DiagnosticsFailure>> {
+  let recent: ReadonlyArray<string>;
+  try {
+    const entries = await readdir(input.directory, { withFileTypes: true });
+    const candidates = await Promise.all(
+      entries
+        .filter((entry) => entry.isFile() && isCurrentCanonicalProviderEventLog(entry.name))
+        .map(async (entry) => {
+          const filePath = path.join(input.directory, entry.name);
+          try {
+            return { filePath, mtimeMs: (await stat(filePath)).mtimeMs };
+          } catch {
+            // Rotated or swept between readdir and stat.
+            return null;
+          }
+        }),
+    );
+    recent = candidates
+      .flatMap((candidate) => (candidate === null ? [] : [candidate]))
+      .toSorted((left, right) => right.mtimeMs - left.mtimeMs)
+      .slice(0, PROVIDER_LOG_FILE_LIMIT)
+      .map((candidate) => candidate.filePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    input.warnings.push({
+      code: "diagnostics.log-tail-unavailable",
+      source: PROVIDER_FAILURE_SOURCE,
+      message: error instanceof Error ? error.message : "Unable to list provider event logs.",
+    });
+    return [];
+  }
+
+  const failures: DiagnosticsFailure[] = [];
+  for (const filePath of recent) {
+    let tail: string;
+    try {
+      tail = await readFileTail(filePath, PROVIDER_LOG_TAIL_BYTES);
+    } catch (error) {
+      // Rotation can move the file away between listing and reading.
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      input.warnings.push({
+        code: "diagnostics.log-tail-unavailable",
+        source: PROVIDER_FAILURE_SOURCE,
+        message: error instanceof Error ? error.message : "Unable to read provider event log.",
+      });
+      continue;
+    }
+    for (const line of tail.split(/\r?\n/gu)) {
+      const failure =
+        line.length > 0
+          ? failureFromProviderEventLine({ line, fallbackTime: input.fallbackTime })
+          : null;
+      if (failure !== null) failures.push(failure);
+    }
+  }
+  return failures
+    .toSorted((left, right) => left.occurredAt.localeCompare(right.occurredAt))
+    .slice(-LIST_LIMIT);
+}
+
 function dedupeTraceRecords(records: ReadonlyArray<TraceRecord>): ReadonlyArray<TraceRecord> {
   const byId = new Map<string, TraceRecord>();
   for (const record of records) {
@@ -739,13 +890,12 @@ export const makeDiagnosticsService = Effect.fn("makeDiagnosticsService")(
         const failures = [
           ...(await readFailureLogTail({
             filePath: config.serverLogPath,
-            source: "server.log",
+            source: path.basename(config.serverLogPath),
             fallbackTime,
             warnings,
           })),
-          ...(await readFailureLogTail({
-            filePath: config.providerEventLogPath,
-            source: "provider-events.log",
+          ...(await readProviderEventFailures({
+            directory: path.dirname(config.providerEventLogPath),
             fallbackTime,
             warnings,
           })),

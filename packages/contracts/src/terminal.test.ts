@@ -10,6 +10,7 @@ import {
   TerminalOpenInput,
   TerminalResizeInput,
   TerminalSessionSnapshot,
+  TerminalSubscribeEventsInput,
   TerminalThreadInput,
   TerminalWriteInput,
 } from "./terminal.ts";
@@ -159,6 +160,24 @@ describe("TerminalOpenInput", () => {
       }),
     ).toBe(false);
   });
+
+  it("accepts an optional delta cursor and rejects an invalid one", () => {
+    const input = {
+      threadId: "thread-1",
+      cwd: "/tmp/project",
+      sinceCursor: { generation: "server-1", sequence: 7 },
+    };
+    expect(decodeSync(TerminalOpenInput, input).sinceCursor).toEqual(input.sinceCursor);
+    expect(
+      decodes(TerminalOpenInput, { ...input, sinceCursor: { generation: "", sequence: 7 } }),
+    ).toBe(false);
+    expect(
+      decodes(TerminalOpenInput, {
+        ...input,
+        sinceCursor: { generation: "server-1", sequence: -1 },
+      }),
+    ).toBe(false);
+  });
 });
 
 describe("TerminalWriteInput", () => {
@@ -237,6 +256,29 @@ describe("TerminalSessionSnapshot", () => {
       }),
     ).toBe(true);
   });
+
+  it("keeps the delta marker of an open answer and leaves full snapshots unmarked", () => {
+    const full = {
+      threadId: "thread-1",
+      terminalId: DEFAULT_TERMINAL_ID,
+      cwd: "/tmp/project",
+      worktreePath: null,
+      status: "running",
+      pid: 1234,
+      history: "hello\n",
+      exitCode: null,
+      exitSignal: null,
+      updatedAt: "2026-10-12T00:00:00.000Z",
+      cursor: { generation: "server-1", sequence: 9 },
+    };
+    expect(decodeSync(TerminalSessionSnapshot, full).historySince).toBeUndefined();
+    const delta = {
+      ...full,
+      history: "lo\n",
+      historySince: { generation: "server-1", sequence: 7 },
+    };
+    expect(decodeSync(TerminalSessionSnapshot, delta)).toEqual(delta);
+  });
 });
 
 describe("TerminalEvent", () => {
@@ -298,5 +340,41 @@ describe("TerminalEvent", () => {
         },
       }),
     ).toBe(true);
+  });
+
+  it("marks history-free replays and keeps live starts unmarked", () => {
+    const started = {
+      type: "started",
+      threadId: "thread-1",
+      terminalId: DEFAULT_TERMINAL_ID,
+      createdAt: "2026-10-11T00:00:00.000Z",
+      snapshot: {
+        threadId: "thread-1",
+        terminalId: DEFAULT_TERMINAL_ID,
+        cwd: "/tmp/project",
+        worktreePath: null,
+        status: "running",
+        pid: 1234,
+        history: "",
+        exitCode: null,
+        exitSignal: null,
+        updatedAt: "2026-10-11T00:00:00.000Z",
+      },
+    };
+    expect(
+      decodeSync(TerminalEvent, { ...started, replay: true, hasRunningSubprocess: true }),
+    ).toMatchObject({ replay: true, hasRunningSubprocess: true });
+    expect(decodeSync(TerminalEvent, started)).not.toHaveProperty("replay");
+    expect(decodes(TerminalEvent, { ...started, replay: false })).toBe(false);
+  });
+});
+
+describe("TerminalSubscribeEventsInput", () => {
+  it("accepts the metadata replay mode and the legacy empty payload", () => {
+    expect(decodeSync(TerminalSubscribeEventsInput, { replay: "metadata" })).toEqual({
+      replay: "metadata",
+    });
+    expect(decodeSync(TerminalSubscribeEventsInput, {})).toEqual({});
+    expect(decodes(TerminalSubscribeEventsInput, { replay: "full" })).toBe(false);
   });
 });

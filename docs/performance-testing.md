@@ -153,6 +153,18 @@ shell and the default readiness selector is `#root`.
 Normal measurements force `RYCO_PERF_PROFILE=0` and `VITE_RYCO_PERF_PROFILE=0`. Run profiling
 separately when diagnosing a regression because observers and trace exporters change the workload.
 
+To see where boot spends main-thread time, add `--cpu-profile <directory>`. Each iteration then
+records a CDP CPU profile (100 µs sampling) from navigation until 5 s after `primary-shell-painted`,
+writes it as `<label>-iteration-<n>.cpuprofile` (open it in DevTools or speedscope), and stores a
+self-time summary in the sample's `cpuProfile` field. A checkout the harness builds itself is
+summarized by source file when the web build carries hidden source maps
+(`RYCO_WEB_SOURCEMAP=hidden`); `--url` runs are summarized by chunk. Profiling adds the 5 s tail
+and the sampler's overhead, so compare profiled runs only with other profiled runs.
+
+`bun run perf:bundle-budget` also checks import depth on the built dist: every `import()` must
+preload its target's whole static closure, so a route, shell, or dialog chunk graph loads in one
+parallel round.
+
 ## Regression policy
 
 Default gates require both an absolute and relative regression, which prevents millisecond noise

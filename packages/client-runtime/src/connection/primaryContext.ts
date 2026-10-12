@@ -5,6 +5,7 @@ import {
 } from "../knownEnvironment.ts";
 import type { EnvironmentId, ExecutionEnvironmentDescriptor } from "@ryco/contracts";
 import type { EndpointService, HttpClientService } from "../platform/index.ts";
+import { fetchWithDeadline } from "./fetchWithDeadline.ts";
 import type { BootstrapHttpError } from "./primaryAuth.ts";
 
 const SERVER_ENVIRONMENT_DESCRIPTOR_PATH = "/.well-known/ryco/environment";
@@ -76,7 +77,8 @@ export function createPrimaryEnvironmentContext(deps: PrimaryEnvironmentContextD
   };
   const fetchDescriptor = async (): Promise<ExecutionEnvironmentDescriptor> =>
     deps.retryTransientBootstrap(async () => {
-      const response = await deps.httpClient.fetch(
+      const response = await fetchWithDeadline(
+        deps.httpClient,
         deps.endpoint.resolveHttpUrl(SERVER_ENVIRONMENT_DESCRIPTOR_PATH),
       );
       if (!response.ok) {

@@ -3,7 +3,7 @@ import {
   DEFAULT_LIFECYCLE_SUGGESTION_POLICY,
   LifecycleSuggestionPolicy,
 } from "./workspaceLifecycle.ts";
-import { Effect } from "effect";
+import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
 import {
@@ -478,6 +478,15 @@ export const OpenCodeSettings = makeProviderSettingsSchema(
 );
 export type OpenCodeSettings = typeof OpenCodeSettings.Type;
 
+/**
+ * Detail written to the per-thread provider event logs (`logs/provider`):
+ * `off` writes nothing, `lifecycle` keeps session, turn, request and error
+ * records, `full` keeps every record (streaming deltas coalesced per content
+ * block). `RYCO_PROVIDER_EVENT_LOGS` overrides the setting.
+ */
+export const ProviderEventLogMode = Schema.Literals(["off", "lifecycle", "full"]);
+export type ProviderEventLogMode = typeof ProviderEventLogMode.Type;
+
 export const ObservabilitySettings = Schema.Struct({
   otlpTracesUrl: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
   otlpMetricsUrl: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
@@ -692,6 +701,10 @@ export const ServerSettings = Schema.Struct({
   providerInstances: Schema.Record(ProviderInstanceId, ProviderInstanceConfig).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
+  // Null follows the build: `full` in development, `lifecycle` in packaged builds.
+  providerEventLogs: Schema.NullOr(ProviderEventLogMode).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
   observability: ObservabilitySettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   agentControl: AgentControlSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
 });
@@ -822,6 +835,7 @@ export const ServerSettingsPatch = Schema.Struct({
   addProjectBaseDirectory: Schema.optionalKey(Schema.String),
   textGenerationModelSelection: Schema.optionalKey(ModelSelectionPatch),
   inboxPriorityModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelectionPatch)),
+  providerEventLogs: Schema.optionalKey(Schema.NullOr(ProviderEventLogMode)),
   observability: Schema.optionalKey(
     Schema.Struct({
       otlpTracesUrl: Schema.optionalKey(Schema.String),

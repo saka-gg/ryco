@@ -8,6 +8,7 @@ import { render } from "vitest-browser-react";
 const {
   terminalConstructorSpy,
   terminalDisposeSpy,
+  terminalWriteSpy,
   fitAddonFitSpy,
   fitAddonLoadSpy,
   environmentApiById,
@@ -16,9 +17,13 @@ const {
 } = vi.hoisted(() => ({
   terminalConstructorSpy: vi.fn(),
   terminalDisposeSpy: vi.fn(),
+  terminalWriteSpy: vi.fn(),
   fitAddonFitSpy: vi.fn(),
   fitAddonLoadSpy: vi.fn(),
-  environmentApiById: new Map<string, { terminal: { open: ReturnType<typeof vi.fn> } }>(),
+  environmentApiById: new Map<
+    string,
+    { terminal: { open: ReturnType<typeof vi.fn>; resize?: ReturnType<typeof vi.fn> } }
+  >(),
   readEnvironmentApiMock: vi.fn((environmentId: string) => environmentApiById.get(environmentId)),
   readLocalApiMock: vi.fn<
     () =>
@@ -52,6 +57,8 @@ vi.mock("@xterm/xterm", () => ({
       },
     };
 
+    element: HTMLElement | undefined;
+
     constructor(options: unknown) {
       terminalConstructorSpy(options);
     }
@@ -60,9 +67,15 @@ vi.mock("@xterm/xterm", () => ({
       fitAddonLoadSpy(addon);
     }
 
-    open() {}
+    open(parent: HTMLElement) {
+      this.element = document.createElement("div");
+      this.element.className = "xterm";
+      parent.append(this.element);
+    }
 
-    write() {}
+    write(data: string) {
+      terminalWriteSpy(data);
+    }
 
     clear() {}
 
@@ -124,11 +137,16 @@ vi.mock("~/localApi", () => ({
   readLocalApi: readLocalApiMock,
 }));
 
-import ThreadTerminalDrawer, { TerminalViewport } from "./ThreadTerminalDrawer";
+import { resetPreparedTerminalOpensForTests, prepareThreadTerminal } from "../terminalPrepare";
+import { useTerminalStateStore } from "../terminalStateStore";
+import ThreadTerminalDrawer, {
+  disposeCachedTerminalViewsForTests,
+  TerminalViewport,
+} from "./ThreadTerminalDrawer";
 
 const THREAD_ID = ThreadId.make("thread-terminal-browser");
 
-function createEnvironmentApi() {
+function createEnvironmentApi(history = "") {
   return {
     terminal: {
       open: vi.fn(async () => ({
@@ -138,10 +156,11 @@ function createEnvironmentApi() {
         worktreePath: null,
         status: "running" as const,
         pid: 123,
-        history: "",
+        history,
         exitCode: null,
         exitSignal: null,
         updatedAt: "2026-04-07T00:00:00.000Z",
+        cursor: { generation: "g1", sequence: 5 },
       })),
       write: vi.fn(async () => undefined),
       resize: vi.fn(async () => undefined),
@@ -188,6 +207,7 @@ async function mountTerminalViewport(props: {
   );
 
   return {
+    host,
     rerender: async (nextProps: { threadRef: ReturnType<typeof scopeThreadRef> }) => {
       await screen.rerender(
         <TerminalViewport
@@ -220,6 +240,9 @@ describe("TerminalViewport", () => {
     readLocalApiMock.mockClear();
     terminalConstructorSpy.mockClear();
     terminalDisposeSpy.mockClear();
+    terminalWriteSpy.mockClear();
+    disposeCachedTerminalViewsForTests();
+    resetPreparedTerminalOpensForTests();
     fitAddonFitSpy.mockClear();
     fitAddonLoadSpy.mockClear();
   });
@@ -263,7 +286,10 @@ describe("TerminalViewport", () => {
       await vi.waitFor(() => {
         expect(environmentB.terminal.open).toHaveBeenCalledTimes(1);
       });
-      expect(terminalDisposeSpy).toHaveBeenCalledTimes(1);
+      // The environment A view is detached and kept for a quick return.
+      expect(terminalConstructorSpy).toHaveBeenCalledTimes(2);
+      expect(terminalDisposeSpy).not.toHaveBeenCalled();
+      expect(mounted.host.querySelectorAll(".xterm")).toHaveLength(1);
     } finally {
       await mounted.cleanup();
     }
@@ -323,6 +349,279 @@ describe("TerminalViewport", () => {
     }
   });
 
+  it("reattaches a kept view on remount without rebuilding or re-parsing it", async () => {
+    const environment = createEnvironmentApi("prompt$ ");
+    environmentApiById.set("environment-a", environment);
+    const threadRef = scopeThreadRef("environment-a" as never, THREAD_ID);
+
+    const first = await mountTerminalViewport({ threadRef });
+    await vi.waitFor(() => {
+      expect(terminalWriteSpy).toHaveBeenCalledWith("prompt$ ");
+    });
+    const firstElement = first.host.querySelector(".xterm");
+    await first.cleanup();
+    expect(terminalDisposeSpy).not.toHaveBeenCalled();
+    terminalWriteSpy.mockClear();
+
+    const second = await mountTerminalViewport({ threadRef });
+    try {
+      await vi.waitFor(() => {
+        expect(environment.terminal.open).toHaveBeenCalledTimes(2);
+      });
+      // Same xterm instance and element; the open confirmed the view is
+      // current, so the history was not written again.
+      expect(terminalConstructorSpy).toHaveBeenCalledTimes(1);
+      expect(second.host.querySelector(".xterm")).toBe(firstElement);
+      // It asked only for the output after what it shows; this server answered in full.
+      expect(environment.terminal.open).toHaveBeenLastCalledWith(
+        expect.objectContaining({ sinceCursor: { generation: "g1", sequence: 5 } }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(terminalWriteSpy).not.toHaveBeenCalledWith("prompt$ ");
+    } finally {
+      await second.cleanup();
+    }
+  });
+
+  it("appends only the output a kept view missed while detached", async () => {
+    const environment = createEnvironmentApi("prompt$ ");
+    environmentApiById.set("environment-a", environment);
+    const threadRef = scopeThreadRef("environment-a" as never, THREAD_ID);
+
+    const first = await mountTerminalViewport({ threadRef });
+    await vi.waitFor(() => {
+      expect(terminalWriteSpy).toHaveBeenCalledWith("prompt$ ");
+    });
+    await first.cleanup();
+    terminalWriteSpy.mockClear();
+    environment.terminal.open.mockImplementation(async () => ({
+      threadId: THREAD_ID,
+      terminalId: "default",
+      cwd: "/repo/project",
+      worktreePath: null,
+      status: "running" as const,
+      pid: 123,
+      history: "ls\r\nREADME.md\r\nprompt$ ",
+      exitCode: null,
+      exitSignal: null,
+      updatedAt: "2026-04-07T00:01:00.000Z",
+      cursor: { generation: "g1", sequence: 9 },
+      historySince: { generation: "g1", sequence: 5 },
+    }));
+
+    const second = await mountTerminalViewport({ threadRef });
+    try {
+      await vi.waitFor(() => {
+        expect(terminalWriteSpy).toHaveBeenCalledWith("ls\r\nREADME.md\r\nprompt$ ");
+      });
+      expect(environment.terminal.open).toHaveBeenLastCalledWith(
+        expect.objectContaining({ sinceCursor: { generation: "g1", sequence: 5 } }),
+      );
+      expect(terminalConstructorSpy).toHaveBeenCalledTimes(1);
+      expect(terminalWriteSpy).not.toHaveBeenCalledWith("\u001bc");
+    } finally {
+      await second.cleanup();
+    }
+  });
+
+  it("applies the output a kept view held during a failed delta open", async () => {
+    const environment = createEnvironmentApi("prompt$ ");
+    environmentApiById.set("environment-a", environment);
+    const threadRef = scopeThreadRef("environment-a" as never, THREAD_ID);
+
+    const first = await mountTerminalViewport({ threadRef });
+    await vi.waitFor(() => {
+      expect(terminalWriteSpy).toHaveBeenCalledWith("prompt$ ");
+    });
+    await first.cleanup();
+    terminalWriteSpy.mockClear();
+    let fail!: (error: Error) => void;
+    environment.terminal.open.mockImplementationOnce(
+      () =>
+        new Promise<never>((_resolve, reject) => {
+          fail = reject;
+        }),
+    );
+
+    const second = await mountTerminalViewport({ threadRef });
+    try {
+      await vi.waitFor(() => expect(fail).toBeDefined());
+      // Arrives while the delta open is in flight: held, not applied yet.
+      useTerminalStateStore.getState().applyTerminalEvent(threadRef, {
+        type: "output",
+        threadId: THREAD_ID,
+        terminalId: "default",
+        createdAt: "2026-04-07T00:01:00.000Z",
+        cursor: { generation: "g1", sequence: 6 },
+        data: " held",
+      });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(terminalWriteSpy).not.toHaveBeenCalledWith(" held");
+
+      // The shell then stays idle: nothing else would flush what the view held.
+      fail(new Error("open failed"));
+      await vi.waitFor(() => {
+        expect(terminalWriteSpy).toHaveBeenCalledWith("\r\n[terminal] open failed\r\n");
+      });
+      const writes = terminalWriteSpy.mock.calls.map(([data]) => data);
+      expect(writes).toContain(" held");
+      expect(writes.indexOf(" held")).toBeLessThan(
+        writes.indexOf("\r\n[terminal] open failed\r\n"),
+      );
+    } finally {
+      await second.cleanup();
+      useTerminalStateStore.getState().removeTerminalState(threadRef);
+    }
+  });
+
+  it("re-hydrates a kept view from its own cursor when a reconnect replay arrived while detached", async () => {
+    const environment = createEnvironmentApi("prompt$ ");
+    environmentApiById.set("environment-a", environment);
+    const threadRef = scopeThreadRef("environment-a" as never, THREAD_ID);
+
+    const first = await mountTerminalViewport({ threadRef });
+    await vi.waitFor(() => {
+      expect(terminalWriteSpy).toHaveBeenCalledWith("prompt$ ");
+    });
+    await first.cleanup();
+    terminalWriteSpy.mockClear();
+    const caughtUp = {
+      threadId: THREAD_ID,
+      terminalId: "default",
+      cwd: "/repo/project",
+      worktreePath: null,
+      status: "running" as const,
+      pid: 123,
+      history: "",
+      exitCode: null,
+      exitSignal: null,
+      updatedAt: "2026-04-07T00:01:00.000Z",
+      cursor: { generation: "g1", sequence: 8 },
+    };
+    // A reconnect while detached: its replay carries no history for the output it stands for.
+    useTerminalStateStore.getState().applyTerminalEvent(threadRef, {
+      type: "started",
+      threadId: THREAD_ID,
+      terminalId: "default",
+      createdAt: caughtUp.updatedAt,
+      cursor: caughtUp.cursor,
+      snapshot: caughtUp,
+      replay: true,
+    });
+    environment.terminal.open.mockImplementation(async () => ({
+      ...caughtUp,
+      history: "missed\r\n",
+      historySince: { generation: "g1", sequence: 5 },
+    }));
+
+    const second = await mountTerminalViewport({ threadRef });
+    try {
+      await vi.waitFor(() => {
+        expect(terminalWriteSpy).toHaveBeenCalledWith("missed\r\n");
+      });
+      expect(environment.terminal.open).toHaveBeenLastCalledWith(
+        expect.objectContaining({ sinceCursor: { generation: "g1", sequence: 5 } }),
+      );
+      expect(terminalWriteSpy).not.toHaveBeenCalledWith("\u001bc");
+    } finally {
+      await second.cleanup();
+      useTerminalStateStore.getState().removeTerminalState(threadRef);
+    }
+  });
+
+  it("drops kept views when the terminal store is reset", async () => {
+    const environment = createEnvironmentApi("prompt$ ");
+    environmentApiById.set("environment-a", environment);
+    const threadRef = scopeThreadRef("environment-a" as never, THREAD_ID);
+    const initialNextEventId = useTerminalStateStore.getState().nextTerminalEventId;
+
+    const first = await mountTerminalViewport({ threadRef });
+    await vi.waitFor(() => {
+      expect(terminalWriteSpy).toHaveBeenCalledWith("prompt$ ");
+    });
+    await first.cleanup();
+    expect(terminalDisposeSpy).not.toHaveBeenCalled();
+
+    // Hosted account teardown wipes the store and restarts its event ids.
+    useTerminalStateStore.setState({ nextTerminalEventId: initialNextEventId + 10 });
+    useTerminalStateStore.setState({ terminalEventEntriesByKey: {}, nextTerminalEventId: 1 });
+    expect(terminalDisposeSpy).toHaveBeenCalledTimes(1);
+
+    const second = await mountTerminalViewport({ threadRef });
+    try {
+      await vi.waitFor(() => {
+        expect(environment.terminal.open).toHaveBeenCalledTimes(2);
+      });
+      expect(terminalConstructorSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      await second.cleanup();
+      useTerminalStateStore.setState({ nextTerminalEventId: initialNextEventId });
+    }
+  });
+
+  it("rehydrates a kept view when the session moved on while detached", async () => {
+    const environment = createEnvironmentApi("prompt$ ");
+    environmentApiById.set("environment-a", environment);
+    const threadRef = scopeThreadRef("environment-a" as never, THREAD_ID);
+
+    const first = await mountTerminalViewport({ threadRef });
+    await vi.waitFor(() => {
+      expect(terminalWriteSpy).toHaveBeenCalledWith("prompt$ ");
+    });
+    await first.cleanup();
+    terminalWriteSpy.mockClear();
+    environment.terminal.open.mockImplementation(async () => ({
+      threadId: THREAD_ID,
+      terminalId: "default",
+      cwd: "/repo/project",
+      worktreePath: null,
+      status: "running" as const,
+      pid: 456,
+      history: "restarted$ ",
+      exitCode: null,
+      exitSignal: null,
+      updatedAt: "2026-04-07T00:01:00.000Z",
+      cursor: { generation: "g2", sequence: 1 },
+    }));
+
+    const second = await mountTerminalViewport({ threadRef });
+    try {
+      await vi.waitFor(() => {
+        expect(terminalWriteSpy).toHaveBeenCalledWith("restarted$ ");
+      });
+      expect(terminalConstructorSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      await second.cleanup();
+    }
+  });
+
+  it("takes a prepared open instead of opening again, and resizes once if the fit differs", async () => {
+    const environment = createEnvironmentApi();
+    environmentApiById.set("environment-a", environment);
+    const threadRef = scopeThreadRef("environment-a" as never, THREAD_ID);
+    prepareThreadTerminal({
+      environmentId: threadRef.environmentId,
+      threadId: THREAD_ID,
+      terminalId: "default",
+      launch: { cwd: "/repo/project", worktreePath: null, runtimeEnv: {} },
+      layout: "drawer",
+    });
+    expect(environment.terminal.open).toHaveBeenCalledTimes(1);
+
+    const mounted = await mountTerminalViewport({ threadRef });
+    try {
+      await vi.waitFor(() => {
+        expect(terminalWriteSpy).toHaveBeenCalledWith("\u001bc");
+      });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(environment.terminal.open).toHaveBeenCalledTimes(1);
+      // The prepared open used the default 80x24, which the mock fit keeps.
+      expect(environment.terminal.resize).not.toHaveBeenCalled();
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
   it("hides the native xterm viewport scrollbar strip", () => {
     const drawer = document.createElement("div");
     drawer.className = "thread-terminal-drawer";
@@ -352,6 +651,9 @@ describe("ThreadTerminalDrawer", () => {
     readLocalApiMock.mockClear();
     terminalConstructorSpy.mockClear();
     terminalDisposeSpy.mockClear();
+    terminalWriteSpy.mockClear();
+    disposeCachedTerminalViewsForTests();
+    resetPreparedTerminalOpensForTests();
     fitAddonFitSpy.mockClear();
     fitAddonLoadSpy.mockClear();
   });

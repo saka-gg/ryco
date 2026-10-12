@@ -1,5 +1,9 @@
+import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
 import { assert, describe, it } from "vite-plus/test";
 
+import lookup from "./vscode-icons-lookup.json";
 import { getVscodeIconUrlForEntry } from "./vscode-icons";
 
 describe("getVscodeIconUrlForEntry", () => {
@@ -48,5 +52,21 @@ describe("getVscodeIconUrlForEntry", () => {
 
     assert.isTrue(fileUrl.endsWith("/default_file.svg"));
     assert.isTrue(folderUrl.endsWith("/default_folder.svg"));
+  });
+});
+
+describe("vscode icon assets", () => {
+  it("serves icons from the app under a version-pinned path", () => {
+    const url = getVscodeIconUrlForEntry("README.md", "file", "dark");
+    assert.isTrue(url.startsWith(`/vscode-icons/v${lookup.version}/`));
+    assert.notInclude(url, "://");
+  });
+
+  it("ships every icon the lookup can resolve to", () => {
+    const iconsDir = fileURLToPath(
+      new URL(`../public/vscode-icons/v${lookup.version}/`, import.meta.url),
+    );
+    const missing = lookup.icons.filter((name) => !existsSync(`${iconsDir}${name}.svg`));
+    assert.deepEqual(missing, []);
   });
 });

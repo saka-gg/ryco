@@ -23,6 +23,8 @@ import { ServerSettingsService, type ServerSettingsShape } from "../serverSettin
 import {
   ProjectionSnapshotQuery,
   type ProjectionSnapshotQueryShape,
+  readProjectShells,
+  readWorkspacePlacement,
 } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
 import {
@@ -86,7 +88,10 @@ export function makeStorageService(deps: {
   sql: SqlClient.SqlClient;
   config: ServerConfigShape;
   settings: Pick<ServerSettingsShape, "getSettings">;
-  snapshots: Pick<ProjectionSnapshotQueryShape, "getShellSnapshot">;
+  snapshots: Pick<
+    ProjectionSnapshotQueryShape,
+    "getShellSnapshot" | "getSnapshotSequence" | "listProjectShells"
+  >;
   providers: Pick<ProviderSessionDirectoryShape, "listBindings">;
   terminals: Pick<TerminalManagerShape, "listDiagnostics">;
   providerProtection: ProviderProtectedPathsShape;
@@ -728,7 +733,8 @@ export function makeStorageService(deps: {
             return "Checkout relocation is pending or complete; review the current workspace path.";
           if (hasWorktreeCreationLease(row.path))
             return "A worktree creation/hydration operation is still using this path.";
-          const current = yield* snapshots.getShellSnapshot();
+          // Only the sequence: no whole shell built while every command and lease waits.
+          const current = yield* snapshots.getSnapshotSequence();
           const bindings = (yield* providers.listBindings()).filter(
             (binding) => binding.status !== "stopped",
           );
@@ -1047,8 +1053,8 @@ export function makeStorageService(deps: {
   const createTemporaryDirectory = (projectId: ProjectId) =>
     storageLifecycleLock.withPermit(
       Effect.gen(function* () {
-        const snapshot = yield* snapshots.getShellSnapshot();
-        if (!snapshot.projects.some((project) => project.id === projectId))
+        const projects = yield* readProjectShells(snapshots);
+        if (!projects.some((project) => project.id === projectId))
           return yield* new StorageError({ detail: "Project not available." });
         const root = path.join(config.stateDir, "storage-temporary");
         yield* attempt(() => fs.mkdir(root, { recursive: true }));
@@ -1113,9 +1119,9 @@ export const StorageServiceLive = Layer.effect(
         onNone: () => Effect.void,
         onSome: (orchestration) =>
           Effect.gen(function* () {
-            const snapshot = yield* snapshots.getShellSnapshot();
+            const { worktrees } = yield* readWorkspacePlacement(snapshots);
             const canonicalRemoved = yield* attempt(() => canonical(checkoutPath));
-            for (const worktree of snapshot.worktrees ?? []) {
+            for (const worktree of worktrees) {
               if (worktree.worktreePath === null || worktree.checkoutRemovedAt != null) continue;
               const candidate = yield* attempt(() => canonical(worktree.worktreePath!)).pipe(
                 Effect.orElseSucceed(() => worktree.worktreePath!),

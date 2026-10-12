@@ -264,10 +264,51 @@ function supportsPlatform(editor: (typeof EDITORS)[number], platform: NodeJS.Pla
   return !("platforms" in editor) || (editor.platforms as readonly string[]).includes(platform);
 }
 
+/**
+ * How long the process's own editor scan is reused. `serverGetConfig` rebuilds
+ * the config on every call, and the scan stats every PATH entry for each editor
+ * plus macOS app bundles (several ms of synchronous I/O). A PATH change
+ * invalidates it immediately; newly installed apps show up within this window.
+ */
+const AVAILABLE_EDITORS_CACHE_TTL_MS = 5 * 60_000;
+
+let availableEditorsCache: {
+  readonly key: string;
+  readonly scannedAt: number;
+  readonly editors: ReadonlyArray<EditorId>;
+} | null = null;
+
 export function resolveAvailableEditors(
   platform: NodeJS.Platform = process.platform,
   env: NodeJS.ProcessEnv = process.env,
   options: ResolveOptions = {},
+): ReadonlyArray<EditorId> {
+  // Only the server's own environment is cached; explicit inputs always scan.
+  if (
+    env !== process.env ||
+    options.darwinAppRoots !== undefined ||
+    options.darwinTerminalAppPaths !== undefined
+  ) {
+    return scanAvailableEditors(platform, env, options);
+  }
+  const key = `${platform}:${env.PATH ?? ""}`;
+  const now = Date.now();
+  if (
+    availableEditorsCache !== null &&
+    availableEditorsCache.key === key &&
+    now - availableEditorsCache.scannedAt < AVAILABLE_EDITORS_CACHE_TTL_MS
+  ) {
+    return availableEditorsCache.editors;
+  }
+  const editors = scanAvailableEditors(platform, env, options);
+  availableEditorsCache = { key, scannedAt: now, editors };
+  return editors;
+}
+
+function scanAvailableEditors(
+  platform: NodeJS.Platform,
+  env: NodeJS.ProcessEnv,
+  options: ResolveOptions,
 ): ReadonlyArray<EditorId> {
   const available: EditorId[] = [];
 

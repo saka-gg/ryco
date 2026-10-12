@@ -52,6 +52,11 @@ export interface InboxSidebarProps {
   readonly onOpenThread: (threadRef: ScopedThreadRef) => void;
   /** Offered from the empty state when no project exists yet; omit when adding is unavailable. */
   readonly onAddProject?: (() => void) | undefined;
+  /**
+   * False while the lists populate at boot: the initial rows need no entrance
+   * or reorder motion, and measuring them forces layout. Defaults to true.
+   */
+  readonly motionReady?: boolean | undefined;
 }
 
 export function InboxSidebar(props: InboxSidebarProps) {
@@ -86,29 +91,30 @@ export function InboxSidebar(props: InboxSidebarProps) {
         });
         return false;
       }
+      // Built outside the try: the React Compiler cannot lower conditionals
+      // inside try/catch and would skip the whole component.
+      const command = settled
+        ? ({
+            type: "thread.settle",
+            commandId: newCommandId(),
+            threadId: row.threadId,
+          } as const)
+        : ({
+            type: "thread.unsettle",
+            commandId: newCommandId(),
+            threadId: row.threadId,
+            reason: "user",
+          } as const);
+      const failureTitle = settled ? "Could not settle thread" : "Could not move thread to Active";
       try {
         await sidebarUndo.dispatch(
           { environmentId: row.environmentId, threadId: row.threadId },
-          settled
-            ? {
-                type: "thread.settle",
-                commandId: newCommandId(),
-                threadId: row.threadId,
-              }
-            : {
-                type: "thread.unsettle",
-                commandId: newCommandId(),
-                threadId: row.threadId,
-                reason: "user",
-              },
+          command,
         );
         return true;
       } catch (error) {
-        toastManager.add({
-          type: "error",
-          title: settled ? "Could not settle thread" : "Could not move thread to Active",
-          description: error instanceof Error ? error.message : "The request failed.",
-        });
+        const description = error instanceof Error ? error.message : "The request failed.";
+        toastManager.add({ type: "error", title: failureTitle, description });
         return false;
       }
     },
@@ -207,10 +213,12 @@ export function InboxSidebar(props: InboxSidebarProps) {
     0,
   );
   const prefersReducedMotion = useMediaQuery(PREFERS_REDUCED_MOTION_QUERY);
-  const motionEnabled = shouldEnableAutoAnimate({
-    prefersReducedMotion,
-    withinThreshold: rowCount <= SIDEBAR_AUTO_ANIMATE_VISIBLE_THREAD_LIMIT,
-  });
+  const motionEnabled =
+    (props.motionReady ?? true) &&
+    shouldEnableAutoAnimate({
+      prefersReducedMotion,
+      withinThreshold: rowCount <= SIDEBAR_AUTO_ANIMATE_VISIBLE_THREAD_LIMIT,
+    });
   const { listRef, highlightRef, gateRef, onPointerMove, onPointerLeave } = useInboxListMotion({
     enabled: motionEnabled,
     orderSignature,

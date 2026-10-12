@@ -164,6 +164,11 @@ const config: ExpoConfig = {
   updates: {
     enabled: false,
   },
+  // Turns on babel-preset-expo's React Compiler pass. Which sources it compiles
+  // is scoped in babel.config.js, and widened only after on-device profiling.
+  experiments: {
+    reactCompiler: true,
+  },
   ios: {
     icon: "./assets/icon.png",
     supportsTablet: true,

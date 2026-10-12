@@ -1,4 +1,6 @@
-import { Effect, Option, Schema } from "effect";
+import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 
 import {
   EnvironmentId,
@@ -63,6 +65,11 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   worktreeNotes: Schema.optionalKey(Schema.Boolean),
   /** `threads.fork` (chat forking); absent on older servers. */
   threadFork: Schema.optionalKey(Schema.Boolean),
+  /**
+   * `projects.searchEntries` accepts an empty query (the shallowest entries,
+   * which also warms the workspace index); absent on older servers.
+   */
+  projectSearchEmptyQuery: Schema.optionalKey(Schema.Boolean),
   fileAttachments: Schema.optional(Schema.Struct({ maxUploadBytes: NonNegativeInt })),
 });
 export type ExecutionEnvironmentCapabilities = typeof ExecutionEnvironmentCapabilities.Type;

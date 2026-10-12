@@ -32,6 +32,10 @@ rl.on("line", (line) => {
   if (script.recordRequests) {
     NodeFS.appendFileSync(`${process.env.RYCO_CODEX_COLLAB_SCRIPT}.requests`, `${method}\n`);
   }
+  // A startup request the peer never answers (a hung CLI).
+  if (script.hangOn === method) {
+    return;
+  }
   if (method === "initialize") {
     write({
       id,

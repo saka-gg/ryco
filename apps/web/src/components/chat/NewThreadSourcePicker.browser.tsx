@@ -17,7 +17,9 @@ vi.mock("../../environmentApi", () => {
 });
 
 vi.mock("../projectExplorer/IssuesTab", () => ({ IssuesTab: () => null }));
-vi.mock("../projectExplorer/PullRequestsTab", () => ({ PullRequestsTab: () => null }));
+vi.mock("../projectExplorer/PullRequestsTab", () => ({
+  PullRequestsTab: () => <div data-testid="pull-requests-tab">Pull request list</div>,
+}));
 vi.mock("../projectExplorer/WorkItemsTab", () => ({ WorkItemsTab: () => null }));
 
 function Picker() {
@@ -104,4 +106,11 @@ it("shows fetch errors and lets the user turn fetching off", async () => {
   await expect
     .element(page.getByRole("button", { name: "main current", exact: true }))
     .toBeVisible();
+});
+
+it("loads the pull request list on demand when its segment is picked", async () => {
+  await render(<Picker />);
+  await page.getByRole("button", { name: /Change what this worktree/ }).click();
+  await page.getByRole("tab", { name: "Pull requests" }).click();
+  await expect.element(page.getByTestId("pull-requests-tab")).toBeVisible();
 });

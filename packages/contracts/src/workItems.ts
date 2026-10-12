@@ -1,4 +1,4 @@
-import { Schema } from "effect";
+import * as Schema from "effect/Schema";
 
 import { AtlassianConnectionId, ProjectId, TrimmedNonEmptyString } from "./baseSchemas.ts";
 import {

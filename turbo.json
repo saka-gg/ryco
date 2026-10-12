@@ -77,6 +77,9 @@
     },
     "@ryco/web#build": {
       "dependsOn": ["^build"],
+      // CI builds with hidden sourcemaps so the bundle budget check
+      // (`bun run perf:bundle-budget`) can attribute every chunk to its modules.
+      "env": ["RYCO_WEB_SOURCEMAP"],
       "outputs": ["dist/**"],
       // Tailwind scans test fixtures too. Keep them in this package's hash so
       // a utility added in a test cannot change CSS behind a stale cache hit.

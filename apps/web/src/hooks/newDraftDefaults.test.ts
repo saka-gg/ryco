@@ -1,0 +1,148 @@
+import type {
+  EffectiveProjectPreferences,
+  EnvironmentApi,
+  ProjectId,
+  ServerConfig,
+} from "@ryco/contracts";
+import { describe, expect, it, vi } from "vite-plus/test";
+
+import { readNewDraftDefaults } from "./newDraftDefaults";
+
+function config(projectPreferences: boolean, label = "node"): ServerConfig {
+  return {
+    environment: { label, capabilities: { projectPreferences } },
+  } as unknown as ServerConfig;
+}
+
+const EFFECTIVE = { marker: "effective" } as unknown as EffectiveProjectPreferences;
+const PROJECT_ID = "project-1" as ProjectId;
+
+function api(input: {
+  readonly getConfig?: () => Promise<ServerConfig>;
+  readonly getProjectPreferences?: () => Promise<EffectiveProjectPreferences>;
+}) {
+  const getConfig = vi.fn(input.getConfig ?? (() => Promise.resolve(config(true, "fresh"))));
+  const getProjectPreferences = vi.fn(
+    input.getProjectPreferences ?? (() => Promise.resolve(EFFECTIVE)),
+  );
+  return {
+    api: { server: { getConfig, getProjectPreferences } } as unknown as EnvironmentApi,
+    getConfig,
+    getProjectPreferences,
+  };
+}
+
+describe("readNewDraftDefaults", () => {
+  it("uses the cached config and reads only the preferences when no fresh read is required", async () => {
+    const cached = config(true, "cached");
+    const target = api({});
+
+    const defaults = await readNewDraftDefaults({
+      api: target.api,
+      cachedConfig: cached,
+      requireFreshConfig: false,
+      projectId: PROJECT_ID,
+    });
+
+    expect(defaults).toEqual({ config: cached, effective: EFFECTIVE });
+    expect(target.getConfig).not.toHaveBeenCalled();
+    expect(target.getProjectPreferences).toHaveBeenCalledWith({ projectId: PROJECT_ID });
+  });
+
+  it("skips every RPC when the cached node has no preferences capability", async () => {
+    const cached = config(false, "cached");
+    const target = api({});
+
+    await expect(
+      readNewDraftDefaults({ api: target.api, cachedConfig: cached, requireFreshConfig: false }),
+    ).resolves.toEqual({ config: cached, effective: null });
+    expect(target.getConfig).not.toHaveBeenCalled();
+    expect(target.getProjectPreferences).not.toHaveBeenCalled();
+  });
+
+  it("falls back to a fresh read when nothing is cached", async () => {
+    const target = api({});
+
+    const defaults = await readNewDraftDefaults({
+      api: target.api,
+      cachedConfig: null,
+      requireFreshConfig: false,
+    });
+
+    expect(defaults.config.environment.label).toBe("fresh");
+    expect(defaults.effective).toBe(EFFECTIVE);
+    expect(target.getConfig).toHaveBeenCalledOnce();
+    expect(target.getProjectPreferences).toHaveBeenCalledOnce();
+  });
+
+  it("reads the config and the preferences in parallel for hosted targets the cache shows capable", async () => {
+    let resolveConfig: (value: ServerConfig) => void = () => undefined;
+    const target = api({
+      getConfig: () =>
+        new Promise<ServerConfig>((resolve) => {
+          resolveConfig = resolve;
+        }),
+    });
+
+    const pending = readNewDraftDefaults({
+      api: target.api,
+      cachedConfig: config(true, "previous node"),
+      requireFreshConfig: true,
+    });
+    // Both requests are in flight before the config returns.
+    await Promise.resolve();
+    expect(target.getConfig).toHaveBeenCalledOnce();
+    expect(target.getProjectPreferences).toHaveBeenCalledOnce();
+
+    resolveConfig(config(true, "fresh"));
+    const defaults = await pending;
+    expect(defaults.config.environment.label).toBe("fresh");
+    expect(defaults.effective).toBe(EFFECTIVE);
+  });
+
+  it("lets only the fresh config decide whether preferences apply", async () => {
+    const target = api({
+      getConfig: () => Promise.resolve(config(false, "fresh")),
+      getProjectPreferences: () => Promise.reject(new Error("unsupported")),
+    });
+
+    await expect(
+      readNewDraftDefaults({
+        api: target.api,
+        cachedConfig: config(true, "previous node"),
+        requireFreshConfig: true,
+      }),
+    ).resolves.toEqual({ config: config(false, "fresh"), effective: null });
+  });
+
+  it("surfaces a preferences failure on a node the fresh config confirms capable", async () => {
+    const failure = new Error("preferences failed");
+    const target = api({ getProjectPreferences: () => Promise.reject(failure) });
+
+    await expect(
+      readNewDraftDefaults({
+        api: target.api,
+        cachedConfig: config(true),
+        requireFreshConfig: true,
+      }),
+    ).rejects.toBe(failure);
+  });
+
+  it("keeps hosted reads sequential when the cache does not show the capability", async () => {
+    const order: string[] = [];
+    const target = api({
+      getConfig: async () => {
+        order.push("config");
+        return config(true, "fresh");
+      },
+      getProjectPreferences: async () => {
+        order.push("preferences");
+        return EFFECTIVE;
+      },
+    });
+
+    await readNewDraftDefaults({ api: target.api, cachedConfig: null, requireFreshConfig: true });
+
+    expect(order).toEqual(["config", "preferences"]);
+  });
+});

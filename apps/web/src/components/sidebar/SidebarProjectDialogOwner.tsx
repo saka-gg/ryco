@@ -8,12 +8,27 @@ import type {
   SidebarProjectSnapshot,
 } from "../../sidebarProjectGrouping";
 import type { useUpdateSettings } from "~/hooks/useSettings";
+import { preloadableLazy, useLazyComponentReady } from "../../lib/preloadableLazy";
 import { buildProjectsPageLocation } from "../../projectsRoute";
-import { NewWorktreeDialog, type NewWorktreeDialogTab } from "../worktrees/NewWorktreeDialog";
+import type { NewWorktreeDialogTab } from "../worktrees/NewWorktreeDialog";
 import { SidebarProjectGroupingDialog } from "./SidebarProjectGroupingDialog";
 import { SidebarProjectRenameDialog } from "./SidebarProjectRenameDialog";
 import { useSidebarProjectGroupingDialog } from "./hooks/useSidebarProjectGroupingDialog";
 import { useSidebarProjectRenameDialog } from "./hooks/useSidebarProjectRenameDialog";
+
+/**
+ * The new-workspace dialog (branch, pull request, issue, and Jira pickers) is
+ * its own chunk; nothing in it renders while the sidebar boots. Pointing at or
+ * focusing a project's "New workspace" button starts the load
+ * (`preloadNewWorktreeDialog`), so a click usually finds it ready.
+ */
+const NewWorktreeDialog = preloadableLazy(() =>
+  import("../worktrees/NewWorktreeDialog").then((module) => module.NewWorktreeDialog),
+);
+
+export function preloadNewWorktreeDialog(): void {
+  void NewWorktreeDialog.preload();
+}
 
 /**
  * Project actions the desktop sidebar offers. Overview and settings live on
@@ -62,6 +77,12 @@ export function SidebarProjectDialogProvider(props: {
     readonly initialTab: NewWorktreeDialogTab;
   } | null>(null);
   const [newWorktreeOpen, setNewWorktreeOpen] = useState(false);
+  // Mounting only once the chunk resolved keeps the first open free of a
+  // committed Suspense fallback and React's fallback-reveal throttle.
+  const newWorktreeDialogReady = useLazyComponentReady(
+    NewWorktreeDialog,
+    newWorktreeTarget !== null,
+  );
   const navigate = useNavigate();
   const renameDialog = useSidebarProjectRenameDialog();
   const groupingDialog = useSidebarProjectGroupingDialog({
@@ -112,7 +133,7 @@ export function SidebarProjectDialogProvider(props: {
     <SidebarProjectDialogContext.Provider value={actions}>
       {props.children}
 
-      {newWorktreeTarget ? (
+      {newWorktreeTarget && newWorktreeDialogReady ? (
         <NewWorktreeDialog
           open={newWorktreeOpen}
           environmentId={newWorktreeTarget.project.environmentId}

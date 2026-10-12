@@ -1,58 +1,19 @@
-import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
-import * as NodeServices from "@effect/platform-node/NodeServices";
-import * as Cause from "effect/Cause";
-import * as Effect from "effect/Effect";
-import * as Layer from "effect/Layer";
-import * as Option from "effect/Option";
-import { CliError, Command } from "effect/cli";
+/**
+ * bin - Process entry point for `ryco` and the desktop backend.
+ *
+ * Deliberately free of heavy static imports. Node compiles an ES module's whole
+ * static import graph before running its body, so this module enables the V8
+ * compile cache first and only then loads the server graph. The helper modes
+ * spawned per provider session or MCP client (stdio proxy, external MCP
+ * bridge, device host) load just their own modules.
+ */
+import { AGENT_CONTROL_STDIO_PROXY_ARG } from "./agentControl/stdioProxyProtocol.ts";
+import { enableCompileCacheBestEffort } from "./compileCache.ts";
 
-import { NetService } from "@ryco/shared/Net";
-import { cli } from "./cli.ts";
-import packageJson from "../package.json" with { type: "json" };
-import { AGENT_CONTROL_STDIO_PROXY_ARG } from "./agentControl/ProviderInjection.ts";
-import { runAgentControlStdioProxyFromProcess } from "./agentControl/stdioProxy.ts";
-import {
-  promptAndPairExternalMcpBridge,
-  runExternalMcpBridge,
-} from "./agentControl/ExternalMcp/bridge.ts";
-
-const CliRuntimeLayer = Layer.mergeAll(NodeServices.layer, NetService.layer);
-
-/** Stack traces for expected command failures only when asked for. */
-const verboseErrors =
-  process.env.RYCO_DEBUG === "1" ||
-  process.argv.some((argument, index) =>
-    argument.startsWith("--log-level")
-      ? /^(?:--log-level=)?(?:all|trace|debug)$/u.test(
-          argument.includes("=") ? argument : (process.argv[index + 1] ?? ""),
-        )
-      : false,
-  );
-
-const program = Command.run(cli, { version: packageJson.version }).pipe(
-  Effect.scoped,
-  Effect.provide(CliRuntimeLayer),
-  // A command that fails for an expected reason — the server is not running,
-  // the Hub refused a sign-in — prints one line, not a stack trace. Defects and
-  // the CLI framework's own usage errors keep their normal reporting.
-  Effect.catchCause((cause) => {
-    const error = Cause.findErrorOption(cause);
-    if (
-      verboseErrors ||
-      Cause.hasDies(cause) ||
-      Option.isNone(error) ||
-      !(error.value instanceof Error) ||
-      CliError.isCliError(error.value)
-    ) {
-      return Effect.failCause(cause);
-    }
-    const message = error.value.message;
-    return Effect.sync(() => {
-      process.stderr.write(`Error: ${message}\n`);
-      process.exitCode = 1;
-    });
-  }),
-);
+const reportEntryFailure = (message: string) => () => {
+  process.stderr.write(message);
+  process.exitCode = 1;
+};
 
 const externalMcpArgs = (): {
   readonly action: "pair" | "serve";
@@ -70,41 +31,51 @@ const externalMcpArgs = (): {
   return { action: process.argv[3], integrationId, stateDir };
 };
 
+enableCompileCacheBestEffort();
+
 const external = externalMcpArgs();
 
 if (process.argv[2] === "device-host-stdio") {
   void import("./device/deviceHostWorker.ts")
     .then(({ runDeviceHostWorker }) => runDeviceHostWorker())
-    .catch(() => {
-      process.stderr.write(
+    .catch(
+      reportEntryFailure(
         "Ryco device host unavailable. Check macOS requirements and whether another coding node owns this host.\n",
-      );
+      ),
+    );
+} else if (process.argv[2] === AGENT_CONTROL_STDIO_PROXY_ARG) {
+  void import("./agentControl/stdioProxy.ts")
+    .then(({ runAgentControlStdioProxyFromProcess }) => runAgentControlStdioProxyFromProcess())
+    .catch(reportEntryFailure("Ryco Agent Control proxy failed to start.\n"));
+} else if (external !== null) {
+  void import("./agentControl/ExternalMcp/bridge.ts")
+    .then(async ({ promptAndPairExternalMcpBridge, runExternalMcpBridge }) => {
+      if (external.action === "pair") {
+        await promptAndPairExternalMcpBridge({
+          integrationId: external.integrationId,
+          stateDirs: [external.stateDir],
+          fetch: globalThis.fetch,
+          input: process.stdin,
+          output: process.stdout,
+        });
+        process.stdout.write("Ryco integration paired.\n");
+        return;
+      }
+      await runExternalMcpBridge({
+        integrationId: external.integrationId,
+        stateDirs: [external.stateDir],
+        input: process.stdin,
+        output: process.stdout,
+        errorOutput: process.stderr,
+        fetch: globalThis.fetch,
+      });
+    })
+    .catch(reportEntryFailure("External Ryco MCP bridge stopped.\n"));
+} else {
+  void import("./cliMain.ts")
+    .then(({ runCli }) => runCli())
+    .catch((cause: unknown) => {
+      process.stderr.write(`Ryco failed to start: ${String(cause)}\n`);
       process.exitCode = 1;
     });
-} else if (process.argv[2] === AGENT_CONTROL_STDIO_PROXY_ARG) {
-  runAgentControlStdioProxyFromProcess();
-} else if (external !== null) {
-  const operation =
-    external.action === "pair"
-      ? promptAndPairExternalMcpBridge({
-          integrationId: external.integrationId,
-          stateDirs: [external.stateDir],
-          fetch: globalThis.fetch,
-          input: process.stdin,
-          output: process.stdout,
-        }).then(() => process.stdout.write("Ryco integration paired.\n"))
-      : runExternalMcpBridge({
-          integrationId: external.integrationId,
-          stateDirs: [external.stateDir],
-          input: process.stdin,
-          output: process.stdout,
-          errorOutput: process.stderr,
-          fetch: globalThis.fetch,
-        });
-  void operation.catch(() => {
-    process.stderr.write("External Ryco MCP bridge stopped.\n");
-    process.exitCode = 1;
-  });
-} else {
-  NodeRuntime.runMain(program as Effect.Effect<void, never, never>);
 }

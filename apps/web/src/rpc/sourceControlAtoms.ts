@@ -36,6 +36,7 @@ import type {
   SourceControlWorkflowRunListResult,
   SourceControlMergeChangeRequestResult,
 } from "@ryco/contracts";
+import { Atom } from "effect/reactivity";
 import { requireEnvironmentConnection } from "~/environments/runtime";
 import {
   createKeyedQueryRegistry,
@@ -244,6 +245,65 @@ function sourceControlClient(environmentId: EnvironmentId) {
 }
 
 // ---------------------------------------------------------------------------
+// Superset lists
+//
+// Issue and change request lists are fetched once per (checkout, state,
+// involvement) at the superset size and sliced to each surface's `limit` on
+// the client. The composer `#` picker, the context picker, the overview, the
+// explorer tabs and the pull request page therefore share one cache entry,
+// one poll timer and one provider call instead of one per distinct limit.
+// Every list read uses the server's default row shape (no `view`). A request option
+// other than the fixed superset limit (a view or field set, a query) changes
+// the payload and must be part of `buildKey`, or callers would share rows of
+// different shapes.
+// ---------------------------------------------------------------------------
+
+/** Every list surface asks for at most this many rows (100 is also one provider page). */
+export const SOURCE_CONTROL_LIST_SUPERSET_LIMIT = 100;
+
+function sliceListState<TItem>(
+  state: SourceControlQueryState<ReadonlyArray<TItem>>,
+  limit: number,
+): SourceControlQueryState<ReadonlyArray<TItem>> {
+  return state.data !== null && state.data.length > limit
+    ? { ...state, data: state.data.slice(0, limit) }
+    : state;
+}
+
+/** Serves each caller's `limit` as a stable slice of the shared superset entry. */
+function sliceToRequestedLimit<TInput extends { readonly limit?: number | undefined }, TItem>(
+  binding: QueryBinding<TInput, ReadonlyArray<TItem>>,
+): QueryBinding<TInput, ReadonlyArray<TItem>> {
+  const slicedAtoms = Atom.family((sliceKey: string) => {
+    const separatorIndex = sliceKey.lastIndexOf(KEY_SEP);
+    const limit = Number(sliceKey.slice(separatorIndex + KEY_SEP.length));
+    return Atom.map(
+      sourceControlRegistry.queryStateAtom(sliceKey.slice(0, separatorIndex)),
+      (state) => sliceListState(state as SourceControlQueryState<ReadonlyArray<TItem>>, limit),
+    );
+  });
+  const sliceLimitOf = (input: TInput): number | null =>
+    input.limit !== undefined && input.limit < SOURCE_CONTROL_LIST_SUPERSET_LIMIT
+      ? input.limit
+      : null;
+  return {
+    ...binding,
+    atomFor: (input) => {
+      const limit = sliceLimitOf(input);
+      const compositeKey = binding.targetKey(input);
+      return limit === null || compositeKey === null
+        ? binding.atomFor(input)
+        : slicedAtoms(`${compositeKey}${KEY_SEP}${limit}`);
+    },
+    snapshotFor: (input) => {
+      const limit = sliceLimitOf(input);
+      const state = binding.snapshotFor(input);
+      return limit === null ? state : sliceListState(state, limit);
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Issue list
 // ---------------------------------------------------------------------------
 
@@ -251,29 +311,28 @@ export interface SourceControlIssueListInput {
   readonly environmentId: EnvironmentId | null;
   readonly cwd: string | null;
   readonly state: "open" | "closed" | "all";
+  /** Rows to show (at most the superset size); not part of the cache key. */
   readonly limit?: number;
   readonly enabled?: boolean;
 }
 
-export const issueListBinding = defineQuery<
-  SourceControlIssueListInput,
-  ReadonlyArray<SourceControlIssueSummary>
->({
-  label: ISSUE_LIST_FAMILY,
-  staleTime: ISSUE_LIST_STALE_TIME_MS,
-  isEnabled: (input) =>
-    (input.enabled ?? true) && input.environmentId !== null && input.cwd !== null,
-  buildKey: (input) =>
-    `${input.environmentId}${KEY_SEP}${input.cwd}${KEY_SEP}${input.state}${KEY_SEP}${input.limit ?? ""}`,
-  resolveEnvironmentId: (input) => input.environmentId as EnvironmentId,
-  resolveCwd: (input) => input.cwd as string,
-  run: (input) =>
-    sourceControlClient(input.environmentId as EnvironmentId).listIssues({
-      cwd: input.cwd as string,
-      state: input.state,
-      ...(input.limit !== undefined ? { limit: input.limit } : {}),
-    }),
-});
+export const issueListBinding = sliceToRequestedLimit(
+  defineQuery<SourceControlIssueListInput, ReadonlyArray<SourceControlIssueSummary>>({
+    label: ISSUE_LIST_FAMILY,
+    staleTime: ISSUE_LIST_STALE_TIME_MS,
+    isEnabled: (input) =>
+      (input.enabled ?? true) && input.environmentId !== null && input.cwd !== null,
+    buildKey: (input) => `${input.environmentId}${KEY_SEP}${input.cwd}${KEY_SEP}${input.state}`,
+    resolveEnvironmentId: (input) => input.environmentId as EnvironmentId,
+    resolveCwd: (input) => input.cwd as string,
+    run: (input) =>
+      sourceControlClient(input.environmentId as EnvironmentId).listIssues({
+        cwd: input.cwd as string,
+        state: input.state,
+        limit: SOURCE_CONTROL_LIST_SUPERSET_LIMIT,
+      }),
+  }),
+);
 
 // ---------------------------------------------------------------------------
 // Change request (PR) list
@@ -283,32 +342,32 @@ export interface SourceControlChangeRequestListInput {
   readonly environmentId: EnvironmentId | null;
   readonly cwd: string | null;
   readonly state: "open" | "closed" | "merged" | "all";
+  /** Rows to show (at most the superset size); not part of the cache key. */
   readonly limit?: number;
   /** Server-side filter relative to the authenticated viewer. Part of the cache key. */
   readonly involvement?: ChangeRequestInvolvement;
   readonly enabled?: boolean;
 }
 
-export const changeRequestListBinding = defineQuery<
-  SourceControlChangeRequestListInput,
-  ReadonlyArray<ChangeRequest>
->({
-  label: CHANGE_REQUEST_LIST_FAMILY,
-  staleTime: CHANGE_REQUEST_LIST_STALE_TIME_MS,
-  isEnabled: (input) =>
-    (input.enabled ?? true) && input.environmentId !== null && input.cwd !== null,
-  buildKey: (input) =>
-    `${input.environmentId}${KEY_SEP}${input.cwd}${KEY_SEP}${input.state}${KEY_SEP}${input.limit ?? ""}${KEY_SEP}${input.involvement ?? ""}`,
-  resolveEnvironmentId: (input) => input.environmentId as EnvironmentId,
-  resolveCwd: (input) => input.cwd as string,
-  run: (input) =>
-    sourceControlClient(input.environmentId as EnvironmentId).listChangeRequests({
-      cwd: input.cwd as string,
-      state: input.state,
-      ...(input.limit !== undefined ? { limit: input.limit } : {}),
-      ...(input.involvement !== undefined ? { involvement: input.involvement } : {}),
-    }),
-});
+export const changeRequestListBinding = sliceToRequestedLimit(
+  defineQuery<SourceControlChangeRequestListInput, ReadonlyArray<ChangeRequest>>({
+    label: CHANGE_REQUEST_LIST_FAMILY,
+    staleTime: CHANGE_REQUEST_LIST_STALE_TIME_MS,
+    isEnabled: (input) =>
+      (input.enabled ?? true) && input.environmentId !== null && input.cwd !== null,
+    buildKey: (input) =>
+      `${input.environmentId}${KEY_SEP}${input.cwd}${KEY_SEP}${input.state}${KEY_SEP}${input.involvement ?? ""}`,
+    resolveEnvironmentId: (input) => input.environmentId as EnvironmentId,
+    resolveCwd: (input) => input.cwd as string,
+    run: (input) =>
+      sourceControlClient(input.environmentId as EnvironmentId).listChangeRequests({
+        cwd: input.cwd as string,
+        state: input.state,
+        limit: SOURCE_CONTROL_LIST_SUPERSET_LIMIT,
+        ...(input.involvement !== undefined ? { involvement: input.involvement } : {}),
+      }),
+  }),
+);
 
 // ---------------------------------------------------------------------------
 // Issue search

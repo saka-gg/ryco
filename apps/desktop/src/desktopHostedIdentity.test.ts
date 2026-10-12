@@ -525,6 +525,113 @@ describe("Desktop hosted identity coordinator", () => {
     expect(clear).toHaveBeenCalledOnce();
   });
 
+  it("adopts a session restore prepared before the backend was ready", async () => {
+    const restoreSession = vi.fn().mockResolvedValue({ account: { id: "account-1" } });
+    const hydrate = vi.fn().mockResolvedValue(undefined);
+    const setup = vi.fn().mockResolvedValue({ nodeId: "node-1", localNodeHandle: "local-1" });
+    const identity = coordinator({
+      api: { hasSessionMaterial: true, restoreSession },
+      credentials: { hydrate },
+      setup,
+    });
+
+    identity.prepareResume();
+    identity.prepareResume();
+    // The restore runs without waiting for the backend; setup does not.
+    await vi.waitFor(() => expect(restoreSession).toHaveBeenCalledOnce());
+    expect(setup).not.toHaveBeenCalled();
+
+    await expect(identity.resume()).resolves.toMatchObject({
+      status: "ready",
+      accountId: "account-1",
+      nodeId: "node-1",
+    });
+    expect(restoreSession).toHaveBeenCalledOnce();
+    expect(setup).toHaveBeenCalledOnce();
+  });
+
+  it("restores again when the prepared restore could not reach the Hub", async () => {
+    const restoreSession = vi
+      .fn()
+      .mockRejectedValueOnce(new HostedHubApiError("unavailable", 0))
+      .mockResolvedValue({ account: { id: "account-1" } });
+    const identity = coordinator({
+      api: { hasSessionMaterial: true, restoreSession },
+      setup: vi.fn().mockResolvedValue({ nodeId: "node-1", localNodeHandle: "local-1" }),
+    });
+
+    identity.prepareResume();
+    await expect(identity.resume()).resolves.toMatchObject({ status: "ready" });
+    expect(restoreSession).toHaveBeenCalledTimes(2);
+  });
+
+  it("carries a prepared session-invalid answer into the resume", async () => {
+    const clear = vi.fn().mockResolvedValue(undefined);
+    const restoreSession = vi.fn().mockRejectedValue(new HostedHubApiError("session_invalid", 401));
+    const identity = coordinator({
+      api: { hasSessionMaterial: true, restoreSession },
+      credentials: { clear },
+    });
+
+    identity.prepareResume();
+    await expect(identity.resume()).resolves.toEqual({ status: "signed-out" });
+    expect(restoreSession).toHaveBeenCalledOnce();
+    expect(clear).toHaveBeenCalledOnce();
+  });
+
+  it("never adopts a prepared restore after the account was disconnected", async () => {
+    const api = {
+      hasSessionMaterial: true,
+      restoreSession: vi.fn().mockResolvedValue({ account: { id: "account-1" } }),
+      clearSessionMaterial: vi.fn(() => {
+        api.hasSessionMaterial = false;
+      }),
+    };
+    const setup = vi.fn().mockResolvedValue({ nodeId: "node-1", localNodeHandle: "local-1" });
+    const identity = coordinator({ api, setup });
+
+    identity.prepareResume();
+    await identity.disconnect();
+    // The prepared answer was about the session the disconnect cleared.
+    await expect(identity.resume()).resolves.toEqual({ status: "signed-out" });
+    expect(api.restoreSession).toHaveBeenCalledOnce();
+    expect(setup).not.toHaveBeenCalled();
+  });
+
+  it("reads GitHub link state beside node setup rather than after it", async () => {
+    let finishSetup!: (value: { nodeId: string; localNodeHandle: string }) => void;
+    const getAccountSecurity = vi.fn().mockResolvedValue({
+      passwordConfigured: true,
+      totpEnrolled: false,
+      emailDeliveryConfigured: false,
+      email: null,
+      externalIdentities: [],
+    });
+    const identity = coordinator({
+      api: {
+        hasSessionMaterial: true,
+        restoreSession: vi.fn().mockResolvedValue({ account: { id: "account-1" } }),
+        getExternalIdentityConfiguration: vi.fn().mockResolvedValue({
+          version: 1,
+          providers: [{ provider: "github", login: true, signup: true, link: true }],
+        }),
+        getAccountSecurity,
+      },
+      setup: () =>
+        new Promise((resolve) => {
+          finishSetup = resolve;
+        }),
+    });
+
+    const resuming = identity.resume();
+    await vi.waitFor(() => expect(getAccountSecurity).toHaveBeenCalledOnce());
+    finishSetup({ nodeId: "node-1", localNodeHandle: "local-1" });
+    await expect(resuming).resolves.toMatchObject({
+      status: "ready",
+      github: { linkAvailable: true, identity: null },
+    });
+  });
+
   it("projects only bounded GitHub policy and display metadata", async () => {
     const identity = coordinator({
       api: {

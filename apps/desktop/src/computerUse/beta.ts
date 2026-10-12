@@ -45,6 +45,33 @@ interface Task {
 const taskKey = (task: { threadId: string; turnId: string }) =>
   JSON.stringify([task.threadId, task.turnId]);
 
+const BUNDLE_IDENTIFIER_PATTERN = /<key>CFBundleIdentifier<\/key>\s*<string>([^<]+)<\/string>/;
+
+/**
+ * The app bundle's identifier, read from its Info.plist. Bundles are written
+ * as XML plists, so this is a file read rather than a PlistBuddy process on the
+ * startup path; a binary plist (rare, hand-edited bundles) still uses it.
+ */
+export function readBundleIdentifier(
+  infoPlistPath: string,
+  readFile: (path: string) => Buffer = (path) => readFileSync(path),
+): string | null {
+  try {
+    const contents = readFile(infoPlistPath);
+    if (contents.subarray(0, 6).toString("latin1") !== "bplist") {
+      return BUNDLE_IDENTIFIER_PATTERN.exec(contents.toString("utf8"))?.[1]?.trim() || null;
+    }
+    return (
+      execFileSync("/usr/libexec/PlistBuddy", ["-c", "Print:CFBundleIdentifier", infoPlistPath], {
+        encoding: "utf8",
+        timeout: 1000,
+      }).trim() || null
+    );
+  } catch {
+    return null;
+  }
+}
+
 /** Desktop ownership and presentation only. Tool authority remains server-owned. */
 export class DesktopComputerBeta {
   readonly host: CuaDriverHost;
@@ -95,16 +122,7 @@ export class DesktopComputerBeta {
     const bundlePath = appEnd >= 0 ? executable.slice(0, appEnd + 4) : undefined;
     let bundleId = "com.laurinfrank.ryco";
     if (bundlePath && process.platform === "darwin") {
-      try {
-        bundleId =
-          execFileSync(
-            "/usr/libexec/PlistBuddy",
-            ["-c", "Print:CFBundleIdentifier", join(bundlePath, "Contents", "Info.plist")],
-            { encoding: "utf8", timeout: 1000 },
-          ).trim() || bundleId;
-      } catch {
-        /* Packaged identity remains the fallback. */
-      }
+      bundleId = readBundleIdentifier(join(bundlePath, "Contents", "Info.plist")) ?? bundleId;
     }
     const helperPath = join(options.resourcesDir, "ryco-computer-ui-helper");
     this.permissions = new DesktopAppSnapManager({

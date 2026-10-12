@@ -13,7 +13,7 @@ import {
   parseCodexTranscriptLine,
   type CodexTranscriptState,
 } from "./codexTranscript.ts";
-import { mightCarryUsage, type UsageRecord } from "./usageRecord.ts";
+import { usageLineMarker, type UsageRecord } from "./usageRecord.ts";
 
 export const USAGE_TRANSCRIPT_LIMITS = {
   entries: 50_000,
@@ -22,6 +22,45 @@ export const USAGE_TRANSCRIPT_LIMITS = {
   fileBytes: 512 * 1024 * 1024,
   lineBytes: 16 * 1024 * 1024,
   records: 100_000,
+} as const;
+
+/** Read size for transcript scans: few syscalls, and one hash update per chunk. */
+const TRANSCRIPT_CHUNK_BYTES = 1024 * 1024;
+/** Concurrent lstat calls while listing one directory. */
+const LISTING_STAT_CONCURRENCY = 32;
+
+/** Codex lines that update parser state without carrying usage themselves. */
+const CODEX_CONTEXT_MARKERS = ['"turn_context"', '"session_meta"', '"thread_settings_applied"'].map(
+  (marker) => Buffer.from(marker),
+);
+/**
+ * Codex rollout lines open with `{"timestamp":"…",` (newer versions add scalar
+ * fields such as `"ordinal":12,`) then `"type":"<kind>","payload":{"type":"<kind>"`.
+ * Only top-level scalars may precede `type`, so both kinds are the real ones,
+ * and they alone decide whether the parser acts on the line: large tool-output
+ * lines are skipped without searching their whole body for markers. Anything
+ * else falls back to the marker search.
+ */
+const CODEX_ENVELOPE =
+  /^\{"timestamp":"[^"\\]{0,64}",(?:"[a-z_]{1,32}":(?:-?\d{1,20}|"[^"\\]{0,64}"|true|false|null),){0,4}"type":"([a-z_]{1,64})","payload":\{"type":"([a-z_]{1,64})"/;
+const CODEX_PARSED_TYPES = new Set(["session_meta", "turn_context"]);
+const CODEX_PARSED_PAYLOAD_TYPES = new Set(["thread_settings_applied", "token_count"]);
+/** Below this a full marker search costs less than reading the envelope. */
+const CODEX_ENVELOPE_MIN_LINE_BYTES = 1024;
+
+function codexEnvelopeIsInert(bytes: Buffer): boolean {
+  if (bytes.length < CODEX_ENVELOPE_MIN_LINE_BYTES) return false;
+  const match = CODEX_ENVELOPE.exec(bytes.toString("latin1", 0, 256));
+  return (
+    match !== null &&
+    !CODEX_PARSED_TYPES.has(match[1]!) &&
+    !CODEX_PARSED_PAYLOAD_TYPES.has(match[2]!)
+  );
+}
+
+const USAGE_MARKERS = {
+  claude: Buffer.from(usageLineMarker("claude")),
+  codex: Buffer.from(usageLineMarker("codex")),
 } as const;
 
 export interface UsageTranscriptFile {
@@ -46,6 +85,35 @@ export async function listUsageTranscriptFiles(
     errorCount = 0,
     count = 0;
   const directories = [{ path: root, depth: 0 }];
+  // Candidate files are stat'ed in concurrent batches instead of one by one.
+  const candidates: string[] = [];
+  const statCandidates = async () => {
+    if (candidates.length === 0) return;
+    const batch = candidates.splice(0);
+    const stats = await Promise.all(
+      batch.map((child) =>
+        NodeFSP.lstat(child).then(
+          (stat) => stat,
+          () => null,
+        ),
+      ),
+    );
+    signal?.throwIfAborted();
+    for (const [index, stat] of stats.entries()) {
+      if (stat === null || !stat.isFile() || stat.isSymbolicLink()) {
+        errorCount++;
+        continue;
+      }
+      if (stat.mtimeMs >= modifiedAfterMs)
+        files.push({
+          path: batch[index]!,
+          size: stat.size,
+          mtimeMs: stat.mtimeMs,
+          fingerprint: `${stat.dev}:${stat.ino}:${stat.ctimeMs}`,
+        });
+      else skippedEntryCount++;
+    }
+  };
   while (
     directories.length &&
     count < USAGE_TRANSCRIPT_LIMITS.entries &&
@@ -64,7 +132,7 @@ export async function listUsageTranscriptFiles(
         signal?.throwIfAborted();
         if (
           ++count >= USAGE_TRANSCRIPT_LIMITS.entries ||
-          files.length >= USAGE_TRANSCRIPT_LIMITS.files
+          files.length + candidates.length >= USAGE_TRANSCRIPT_LIMITS.files
         ) {
           errorCount++;
           break;
@@ -83,28 +151,14 @@ export async function listUsageTranscriptFiles(
           skippedEntryCount++;
           continue;
         }
-        try {
-          const stat = await NodeFSP.lstat(child);
-          if (!stat.isFile() || stat.isSymbolicLink()) {
-            errorCount++;
-            continue;
-          }
-          if (stat.mtimeMs >= modifiedAfterMs)
-            files.push({
-              path: child,
-              size: stat.size,
-              mtimeMs: stat.mtimeMs,
-              fingerprint: `${stat.dev}:${stat.ino}:${stat.ctimeMs}`,
-            });
-          else skippedEntryCount++;
-        } catch {
-          errorCount++;
-        }
+        candidates.push(child);
+        if (candidates.length >= LISTING_STAT_CONCURRENCY) await statCandidates();
       }
     } catch {
       signal?.throwIfAborted();
       errorCount++;
     }
+    await statCandidates();
   }
   if (directories.length) errorCount++;
   files.sort((left, right) => left.path.localeCompare(right.path));
@@ -142,12 +196,27 @@ interface TranscriptCheckpoint {
   readonly retainedBytes: number;
 }
 
+export interface UsageTranscriptReader {
+  (
+    filePath: string,
+    provider: UsageProviderKind,
+    signal?: AbortSignal,
+  ): Promise<UsageTranscriptReadResult | null>;
+  /** Drop every checkpoint, releasing the records they retain. */
+  readonly clear: () => void;
+}
+
 /** Keep parser checkpoints in memory only; never persist provider transcript state. */
-export function createUsageTranscriptReader() {
+export function createUsageTranscriptReader(): UsageTranscriptReader {
   const checkpoints = new Map<string, TranscriptCheckpoint>();
   let retainedRecords = 0;
   let retainedBytes = 0;
-  return async (filePath: string, provider: UsageProviderKind, signal?: AbortSignal) => {
+  const clear = () => {
+    checkpoints.clear();
+    retainedRecords = 0;
+    retainedBytes = 0;
+  };
+  const read = async (filePath: string, provider: UsageProviderKind, signal?: AbortSignal) => {
     const previous = checkpoints.get(filePath);
     const remove = (key: string) => {
       const entry = checkpoints.get(key);
@@ -177,6 +246,7 @@ export function createUsageTranscriptReader() {
     if (result === null || result.limited) remove(filePath);
     return result;
   };
+  return Object.assign(read, { clear });
 }
 
 /** Bounded lines: readline's unbounded accumulation is unsafe for partial files. */
@@ -211,26 +281,32 @@ async function readTranscript(
     recordBytes +=
       256 + 2 * (record.model.length + record.sessionId.length + (record.dedupeKey?.length ?? 0));
   };
-  const consume = (line: string) => {
-    const carriesUsage = mightCarryUsage(line, provider);
+  // Markers are ASCII, so a byte search matches exactly what a search of the
+  // decoded line would. Almost every line has none and is never decoded.
+  const usageMarker = USAGE_MARKERS[provider];
+  const consume = (bytes: Buffer) => {
+    if (provider === "codex" && codexEnvelopeIsInert(bytes)) {
+      skippedLineCount++;
+      return;
+    }
+    const carriesUsage = bytes.indexOf(usageMarker) !== -1;
     if (provider === "claude") {
       if (!carriesUsage) {
         skippedLineCount++;
         return;
       }
+      const line = bytes.toString("utf8");
       const record = parseClaudeTranscriptLine(line);
       if (record !== null) appendRecord(record);
       else if (isJson(line)) skippedLineCount++;
       else malformedLineCount++;
     } else {
-      const carriesContext =
-        line.includes('"turn_context"') ||
-        line.includes('"session_meta"') ||
-        line.includes('"thread_settings_applied"');
+      const carriesContext = CODEX_CONTEXT_MARKERS.some((marker) => bytes.indexOf(marker) !== -1);
       if (!carriesUsage && !carriesContext) {
         skippedLineCount++;
         return;
       }
+      const line = bytes.toString("utf8");
       const record = parseCodexTranscriptLine(line, codexState);
       if (record !== null) appendRecord(record);
       else if (!isJson(line)) malformedLineCount++;
@@ -259,7 +335,7 @@ async function readTranscript(
 
     let offset = 0;
     let prefixHash = createHash("sha256");
-    const buffer = Buffer.allocUnsafe(64 * 1024);
+    const buffer = Buffer.allocUnsafe(Math.max(1, Math.min(TRANSCRIPT_CHUNK_BYTES, before.size)));
     if (
       previous &&
       previous.provider === provider &&
@@ -300,8 +376,17 @@ async function readTranscript(
       }
     }
     let completeOffset = offset;
-    let pending = Buffer.alloc(0),
+    // An unfinished line: copied pieces of earlier chunks, joined once when it ends.
+    let pending: Buffer[] = [],
+      pendingLength = 0,
       discarding = false;
+    const takeLine = (tail: Buffer): Buffer => {
+      if (pendingLength === 0) return tail;
+      const line = Buffer.concat([...pending, tail], pendingLength + tail.length);
+      pending = [];
+      pendingLength = 0;
+      return line;
+    };
     while (offset < before.size) {
       signal?.throwIfAborted();
       if (Date.now() - started >= 2_000) {
@@ -315,40 +400,50 @@ async function readTranscript(
         offset,
       );
       if (bytesRead === 0) return null;
+      const chunk = buffer.subarray(0, bytesRead);
+      const lastNewline = chunk.lastIndexOf(10);
+      if (lastNewline !== -1) {
+        // The checkpoint digest covers raw bytes through the last complete line.
+        // Hashing whole chunks equals hashing line by line whenever a checkpoint
+        // is kept: a discarded line or a record cap marks the read limited.
+        for (const piece of pending) prefixHash.update(piece);
+        prefixHash.update(chunk.subarray(0, lastNewline + 1));
+      }
       let cursor = 0;
       while (cursor < bytesRead) {
-        const found = buffer.indexOf(10, cursor);
-        const newline = found >= 0 && found < bytesRead ? found : -1;
+        const newline = cursor <= lastNewline ? chunk.indexOf(10, cursor) : -1;
         const end = newline === -1 ? bytesRead : newline;
-        const segment = buffer.subarray(cursor, end);
-        if (!discarding && pending.length + segment.length > USAGE_TRANSCRIPT_LIMITS.lineBytes) {
+        const segment = chunk.subarray(cursor, end);
+        if (!discarding && pendingLength + segment.length > USAGE_TRANSCRIPT_LIMITS.lineBytes) {
           discarding = true;
-          pending = Buffer.alloc(0);
+          pending = [];
+          pendingLength = 0;
           limited = true;
           malformedLineCount++;
         }
-        if (!discarding) {
-          pending = pending.length === 0 ? Buffer.from(segment) : Buffer.concat([pending, segment]);
-        }
-        if (newline !== -1) {
-          lineCount++;
-          if (records.length >= USAGE_TRANSCRIPT_LIMITS.records) {
-            limited = true;
-            break;
-          }
+        if (newline === -1) {
           if (!discarding) {
-            prefixHash.update(pending).update("\n");
-            consume(pending.toString("utf8"));
+            // The read buffer is reused, so an unfinished line must be copied.
+            pending.push(Buffer.from(segment));
+            pendingLength += segment.length;
           }
-          completeOffset = offset + newline + 1;
-          pending = Buffer.alloc(0);
-          discarding = false;
+          break;
         }
-        cursor = end + (newline === -1 ? 0 : 1);
+        lineCount++;
+        if (records.length >= USAGE_TRANSCRIPT_LIMITS.records) {
+          limited = true;
+          break;
+        }
+        if (!discarding) consume(takeLine(segment));
+        completeOffset = offset + newline + 1;
+        pending = [];
+        pendingLength = 0;
+        discarding = false;
+        cursor = newline + 1;
       }
       offset += bytesRead;
       if (records.length >= USAGE_TRANSCRIPT_LIMITS.records) {
-        if (offset < before.size || pending.length > 0) limited = true;
+        if (offset < before.size || pendingLength > 0) limited = true;
         break;
       }
     }
@@ -363,7 +458,7 @@ async function readTranscript(
           offset: completeOffset,
           digest: prefixHash.digest("hex"),
           state: { ...codexState },
-          records: pending.length === 0 ? records : [...records],
+          records: pendingLength === 0 ? records : [...records],
           skippedLineCount,
           malformedLineCount,
           lineCount,
@@ -374,7 +469,7 @@ async function readTranscript(
                 codexState.sessionId.length +
                 (codexState.lastUsageSignature?.length ?? 0)),
         };
-    if (pending.length > 0 && !limited) consume(pending.toString("utf8"));
+    if (pendingLength > 0 && !limited) consume(takeLine(Buffer.alloc(0)));
     const after = await file.stat();
     const pathAfter = await NodeFSP.lstat(filePath);
     if (

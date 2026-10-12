@@ -27,7 +27,7 @@ import {
   extractJsonObject,
   sanitizeCommitSubject,
   sanitizePrTitle,
-  sanitizeThreadTitle,
+  sanitizeThreadTitleResult,
 } from "./TextGenerationUtils.ts";
 import {
   applyGrokAcpModelSelection,
@@ -259,6 +259,7 @@ export const makeGrokTextGeneration = Effect.fn("makeGrokTextGeneration")(functi
     const { prompt, outputSchema } = buildThreadTitlePrompt({
       message: input.message,
       attachments: input.attachments,
+      includeBranch: input.includeBranch,
     });
 
     const generated = yield* runGrokJson({
@@ -270,7 +271,7 @@ export const makeGrokTextGeneration = Effect.fn("makeGrokTextGeneration")(functi
     });
 
     return {
-      title: sanitizeThreadTitle(generated.title),
+      ...sanitizeThreadTitleResult(generated),
     } satisfies ThreadTitleGenerationResult;
   });
 

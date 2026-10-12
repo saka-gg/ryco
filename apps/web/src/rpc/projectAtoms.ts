@@ -5,12 +5,27 @@ import type {
   ProjectSearchEntriesResult,
 } from "@ryco/contracts";
 import { Atom } from "effect/reactivity";
+import { LRUCache } from "@ryco/shared/lruCache";
+import {
+  normalizeWorkspaceEntryQuery,
+  rankWorkspaceEntries,
+} from "@ryco/shared/workspaceEntrySearch";
 
 import { ensureEnvironmentApi, readEnvironmentApi } from "~/environmentApi";
 import { appAtomRegistry } from "@ryco/client-runtime/rpc";
 
 export const DEFAULT_PROJECT_SEARCH_ENTRIES_LIMIT = 80;
 export const DEFAULT_PROJECT_SEARCH_ENTRIES_STALE_TIME_MS = 15_000;
+/** Cached results kept per scope (environment + cwd + limit), least recently used first out. */
+const PROJECT_SEARCH_ENTRIES_CACHE_MAX_QUERIES = 64;
+const PROJECT_SEARCH_ENTRIES_CACHE_MAX_BYTES = 2 * 1024 * 1024;
+/**
+ * A result answered from an index the server is rebuilding is asked again
+ * after this long while its path menu stays open, so the menu settles on the
+ * rebuilt index (for example a turn's new files) without another keystroke.
+ */
+const PROJECT_SEARCH_ENTRIES_REFRESHING_REFETCH_MS = 400;
+const PROJECT_SEARCH_ENTRIES_REFRESHING_MAX_REFETCHES = 5;
 
 export const EMPTY_PROJECT_SEARCH_ENTRIES_RESULT: ProjectSearchEntriesResult = Object.freeze({
   entries: [],
@@ -27,6 +42,8 @@ export const EMPTY_PROJECT_SEARCH_ENTRIES_RESULT: ProjectSearchEntriesResult = O
  */
 export interface ProjectSearchEntriesState {
   readonly data: ProjectSearchEntriesResult | null;
+  /** The normalized query `data` answers (it can lag the latest request). */
+  readonly dataQuery: string | null;
   readonly isLoading: boolean;
   readonly isFetching: boolean;
   readonly error: Error | null;
@@ -66,14 +83,20 @@ interface ScopeRuntime {
   readonly cwd: string;
   readonly limit: number;
   token: number;
+  /** Normalized query of the request in flight. */
   inFlightQuery: string | null;
   lastInput: ResolvedProjectSearchEntriesInput | null;
+  /** Mounted observers with an open path menu; only they refetch on invalidation. */
   observerCount: number;
-  readonly cache: Map<string, CacheEntry>;
+  /** Keyed by normalized query: the server answers equal normalized queries identically. */
+  readonly cache: LRUCache<CacheEntry>;
+  /** Pending re-request of a result that came from an index being rebuilt. */
+  refreshingRefetchTimer: ReturnType<typeof setTimeout> | null;
 }
 
 const INITIAL_PROJECT_SEARCH_ENTRIES_STATE: ProjectSearchEntriesState = Object.freeze({
   data: null,
+  dataQuery: null,
   isLoading: false,
   isFetching: false,
   error: null,
@@ -120,12 +143,12 @@ export function getProjectSearchEntriesStateAtom(scopeKey: string | null) {
     : projectSearchEntriesStateAtom(scopeKey);
 }
 
+/**
+ * An empty query is a real request: it lists the workspace's top-level
+ * entries and warms the server's index while the user is still typing.
+ */
 function resolveInput(input: ProjectSearchEntriesInput): ResolvedProjectSearchEntriesInput | null {
-  const enabled =
-    (input.enabled ?? true) &&
-    input.environmentId !== null &&
-    input.cwd !== null &&
-    input.query.length > 0;
+  const enabled = (input.enabled ?? true) && input.environmentId !== null && input.cwd !== null;
   if (!enabled || input.environmentId === null || input.cwd === null) {
     return null;
   }
@@ -154,7 +177,11 @@ function ensureScopeRuntime(
       inFlightQuery: null,
       lastInput: null,
       observerCount: 0,
-      cache: new Map(),
+      cache: new LRUCache(
+        PROJECT_SEARCH_ENTRIES_CACHE_MAX_QUERIES,
+        PROJECT_SEARCH_ENTRIES_CACHE_MAX_BYTES,
+      ),
+      refreshingRefetchTimer: null,
     };
     scopeRuntimes.set(scopeKey, runtime);
   }
@@ -166,6 +193,7 @@ function setState(scopeKey: string, next: ProjectSearchEntriesState): void {
   const current = appAtomRegistry.get(atom);
   if (
     current.data === next.data &&
+    current.dataQuery === next.dataQuery &&
     current.isLoading === next.isLoading &&
     current.isFetching === next.isFetching &&
     current.error === next.error
@@ -179,15 +207,17 @@ function markFetching(scopeKey: string): void {
   const current = appAtomRegistry.get(projectSearchEntriesStateAtom(scopeKey));
   setState(scopeKey, {
     data: current.data,
+    dataQuery: current.dataQuery,
     isLoading: current.data === null,
     isFetching: true,
     error: null,
   });
 }
 
-function commitResult(scopeKey: string, result: ProjectSearchEntriesResult): void {
+function commitResult(scopeKey: string, result: ProjectSearchEntriesResult, query: string): void {
   setState(scopeKey, {
     data: result,
+    dataQuery: query,
     isLoading: false,
     isFetching: false,
     error: null,
@@ -198,19 +228,111 @@ function commitError(scopeKey: string, error: Error): void {
   const current = appAtomRegistry.get(projectSearchEntriesStateAtom(scopeKey));
   setState(scopeKey, {
     data: current.data,
+    dataQuery: current.dataQuery,
     isLoading: false,
     isFetching: false,
     error,
   });
 }
 
+function estimateResultBytes(result: ProjectSearchEntriesResult): number {
+  let bytes = 64;
+  for (const entry of result.entries) {
+    bytes += 48 + 2 * (entry.path.length + (entry.parentPath?.length ?? 0));
+  }
+  return bytes;
+}
+
+function readFreshCacheEntry(
+  runtime: ScopeRuntime,
+  query: string,
+  staleTime: number,
+): CacheEntry | null {
+  const cached = runtime.cache.get(query);
+  return cached !== null && Date.now() - cached.fetchedAt < staleTime ? cached : null;
+}
+
+/**
+ * Answers `query` from a fresh cached result for one of its prefixes when that
+ * result is complete (every match returned, from a full index). Every match
+ * tier implies a subsequence match of the path, and a query's subsequence
+ * matches are a subset of any prefix's, so ranking that result locally with
+ * the server's ranking gives exactly the server's answer, with no round trip.
+ */
+function narrowFromCache(
+  runtime: ScopeRuntime,
+  query: string,
+  staleTime: number,
+): CacheEntry | null {
+  for (let length = query.length - 1; length >= 0; length -= 1) {
+    const prefix = query.slice(0, length);
+    const cached = readFreshCacheEntry(runtime, prefix, staleTime);
+    if (cached === null) continue;
+    // A shorter prefix matches at least as much, so it cannot be complete either.
+    if (cached.result.truncated || cached.result.partial === true) return null;
+    const ranked = rankWorkspaceEntries(
+      cached.result.entries.map((entry) => ({
+        path: entry.path,
+        kind: entry.kind,
+        normalizedPath: entry.path.toLowerCase(),
+        entry,
+      })),
+      query,
+      runtime.limit,
+    );
+    return {
+      result: { entries: ranked.entries.map((candidate) => candidate.entry), truncated: false },
+      fetchedAt: cached.fetchedAt,
+    };
+  }
+  return null;
+}
+
+function clearRefreshingRefetch(runtime: ScopeRuntime): void {
+  if (runtime.refreshingRefetchTimer !== null) {
+    clearTimeout(runtime.refreshingRefetchTimer);
+    runtime.refreshingRefetchTimer = null;
+  }
+}
+
+/**
+ * Re-asks a query whose answer came from an index being rebuilt, while the
+ * request is still the scope's latest and a path menu shows it. A closed
+ * menu needs nothing: such results are never cached, so reopening refetches.
+ */
+function scheduleRefreshingRefetch(
+  scopeKey: string,
+  runtime: ScopeRuntime,
+  resolved: ResolvedProjectSearchEntriesInput,
+  token: number,
+  attempt: number,
+): void {
+  clearRefreshingRefetch(runtime);
+  if (attempt >= PROJECT_SEARCH_ENTRIES_REFRESHING_MAX_REFETCHES) {
+    return;
+  }
+  runtime.refreshingRefetchTimer = setTimeout(() => {
+    runtime.refreshingRefetchTimer = null;
+    if (
+      runtime.token !== token ||
+      runtime.observerCount === 0 ||
+      scopeRuntimes.get(scopeKey) !== runtime
+    ) {
+      return;
+    }
+    startFetch(scopeKey, runtime, resolved, attempt + 1);
+  }, PROJECT_SEARCH_ENTRIES_REFRESHING_REFETCH_MS);
+}
+
 function startFetch(
   scopeKey: string,
   runtime: ScopeRuntime,
   resolved: ResolvedProjectSearchEntriesInput,
+  refreshingAttempt = 0,
 ): void {
-  const query = resolved.query;
+  const query = normalizeWorkspaceEntryQuery(resolved.query);
   const token = ++runtime.token;
+  clearRefreshingRefetch(runtime);
   runtime.inFlightQuery = query;
   markFetching(scopeKey);
 
@@ -226,14 +348,20 @@ function startFetch(
   }
 
   api.projects
-    .searchEntries({ cwd: resolved.cwd, query, limit: resolved.limit })
+    .searchEntries({ cwd: resolved.cwd, query: resolved.query, limit: resolved.limit })
     .then((result) => {
-      runtime.cache.set(query, { result, fetchedAt: Date.now() });
+      // An answer from an index that is being rebuilt is shown, never reused.
+      if (result.refreshing !== true) {
+        runtime.cache.set(query, { result, fetchedAt: Date.now() }, estimateResultBytes(result));
+      }
       if (runtime.token !== token) {
         return;
       }
       runtime.inFlightQuery = null;
-      commitResult(scopeKey, result);
+      commitResult(scopeKey, result, query);
+      if (result.refreshing === true) {
+        scheduleRefreshingRefetch(scopeKey, runtime, resolved, token, refreshingAttempt);
+      }
     })
     .catch((error) => {
       if (runtime.token !== token) {
@@ -266,19 +394,62 @@ export function requestProjectSearchEntries(
   const scopeKey = getScopeKey(resolved.environmentId, resolved.cwd, resolved.limit);
   const runtime = ensureScopeRuntime(resolved.environmentId, resolved.cwd, resolved.limit);
   runtime.lastInput = resolved;
+  const query = normalizeWorkspaceEntryQuery(resolved.query);
 
   if (!options?.force) {
-    const cached = runtime.cache.get(resolved.query);
-    if (cached && Date.now() - cached.fetchedAt < resolved.staleTime) {
-      commitResult(scopeKey, cached.result);
+    let local = readFreshCacheEntry(runtime, query, resolved.staleTime);
+    if (local === null) {
+      local = narrowFromCache(runtime, query, resolved.staleTime);
+      if (local !== null) {
+        runtime.cache.set(query, local, estimateResultBytes(local.result));
+      }
+    }
+    if (local !== null) {
+      // Supersede any older request still in flight so it cannot overwrite this.
+      runtime.token += 1;
+      runtime.inFlightQuery = null;
+      clearRefreshingRefetch(runtime);
+      commitResult(scopeKey, local.result, query);
       return;
     }
-    if (runtime.inFlightQuery === resolved.query) {
+    if (runtime.inFlightQuery === query) {
       return;
     }
   }
 
   startFetch(scopeKey, runtime, resolved);
+}
+
+/**
+ * Whether `requestProjectSearchEntries` would answer this input from the
+ * scope's cache (directly or by narrowing a complete prefix result) without a
+ * request, so callers can skip their typing debounce.
+ */
+export function canResolveProjectSearchEntriesLocally(input: ProjectSearchEntriesInput): boolean {
+  const resolved = resolveInput(input);
+  if (resolved === null) {
+    return false;
+  }
+  const runtime = scopeRuntimes.get(
+    getScopeKey(resolved.environmentId, resolved.cwd, resolved.limit),
+  );
+  if (!runtime) {
+    return false;
+  }
+  const query = normalizeWorkspaceEntryQuery(resolved.query);
+  return (
+    readFreshCacheEntry(runtime, query, resolved.staleTime) !== null ||
+    narrowFromCache(runtime, query, resolved.staleTime) !== null
+  );
+}
+
+/** Re-sends the scope's last request, bypassing the cache (an explicit retry). */
+export function retryProjectSearchEntries(scope: ProjectSearchEntriesScope): void {
+  const scopeKey = resolveProjectSearchEntriesScopeKey(scope);
+  const lastInput = scopeKey === null ? null : (scopeRuntimes.get(scopeKey)?.lastInput ?? null);
+  if (lastInput !== null) {
+    requestProjectSearchEntries(lastInput, { force: true });
+  }
 }
 
 export function retainProjectSearchEntriesScope(scope: ProjectSearchEntriesScope): void {
@@ -306,9 +477,9 @@ export function releaseProjectSearchEntriesScope(scope: ProjectSearchEntriesScop
 
 /**
  * Invalidate cached project search results, optionally scoped to an
- * environment and/or working directory. Mounted scopes (those with active
- * observers) refetch their last requested query immediately; idle scopes only
- * drop their cache so the next request fetches fresh data. This mirrors React
+ * environment and/or working directory. Scopes with an open path menu refetch
+ * their last requested query immediately; the rest only drop their cache, so
+ * the next request (when the menu opens) fetches fresh data. This mirrors React
  * Query's "refetch active queries, mark the rest stale" invalidation.
  */
 export function invalidateProjectSearchEntries(input?: {
@@ -626,6 +797,9 @@ export function clearProjectAtomState(): void {
     appAtomRegistry.set(projectSearchEntriesStateAtom(key), INITIAL_PROJECT_SEARCH_ENTRIES_STATE);
   }
   knownScopeKeys.clear();
+  for (const runtime of scopeRuntimes.values()) {
+    clearRefreshingRefetch(runtime);
+  }
   scopeRuntimes.clear();
   for (const controller of browseControllers.values()) {
     controller.fetchToken += 1;

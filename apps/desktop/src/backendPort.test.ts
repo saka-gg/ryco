@@ -1,6 +1,19 @@
+import * as FS from "node:fs";
+import * as Net from "node:net";
+import * as OS from "node:os";
+import * as Path from "node:path";
+
 import { describe, expect, it, vi } from "vite-plus/test";
 
-import { resolveDesktopBackendPort } from "./backendPort.ts";
+import {
+  canListenOnHost,
+  DEFAULT_DESKTOP_BACKEND_PORT,
+  hasPriorDesktopRendererState,
+  LEGACY_DESKTOP_BACKEND_PORT,
+  resolveDesktopBackendPort,
+  resolveDesktopBackendStartPort,
+  shouldPersistDesktopBackendPort,
+} from "./backendPort.ts";
 
 describe("resolveDesktopBackendPort", () => {
   it("returns the starting port when it is available", async () => {
@@ -105,5 +118,105 @@ describe("resolveDesktopBackendPort", () => {
       [65534, "127.0.0.1"],
       [65535, "127.0.0.1"],
     ]);
+  });
+});
+
+describe("desktop backend port selection", () => {
+  it("probes the port the last launch served on before any default", () => {
+    expect(
+      resolveDesktopBackendStartPort({ persistedPort: 3775, hasPriorRendererState: true }),
+    ).toBe(3775);
+  });
+
+  it("keeps existing installations on the legacy port so their origin and drafts stay put", () => {
+    expect(
+      resolveDesktopBackendStartPort({ persistedPort: null, hasPriorRendererState: true }),
+    ).toBe(LEGACY_DESKTOP_BACKEND_PORT);
+  });
+
+  it("gives new installations a Ryco-specific port that T3 Code does not use", () => {
+    expect(DEFAULT_DESKTOP_BACKEND_PORT).not.toBe(LEGACY_DESKTOP_BACKEND_PORT);
+    expect(
+      resolveDesktopBackendStartPort({ persistedPort: null, hasPriorRendererState: false }),
+    ).toBe(DEFAULT_DESKTOP_BACKEND_PORT);
+  });
+
+  it("recognizes an installation that already has renderer state", () => {
+    const directory = FS.mkdtempSync(Path.join(OS.tmpdir(), "ryco-backend-port-test-"));
+    try {
+      expect(hasPriorDesktopRendererState(directory)).toBe(false);
+      FS.mkdirSync(Path.join(directory, "Local Storage"));
+      expect(hasPriorDesktopRendererState(directory)).toBe(true);
+    } finally {
+      FS.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("probes with a plain listen and reports a held port as busy", async () => {
+    const server = Net.createServer();
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    const port = typeof address === "object" && address ? address.port : 0;
+    try {
+      await expect(canListenOnHost(port, "127.0.0.1")).resolves.toBe(false);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+    await expect(canListenOnHost(port, "127.0.0.1")).resolves.toBe(true);
+  });
+});
+
+describe("shouldPersistDesktopBackendPort", () => {
+  it("persists the preferred port when it served", () => {
+    expect(
+      shouldPersistDesktopBackendPort({
+        servedPort: 3773,
+        preferredPort: 3773,
+        persistedPort: null,
+        hasPriorRendererState: true,
+      }),
+    ).toBe(true);
+    expect(
+      shouldPersistDesktopBackendPort({
+        servedPort: 7926,
+        preferredPort: 7926,
+        persistedPort: 7926,
+        hasPriorRendererState: true,
+      }),
+    ).toBe(true);
+  });
+
+  it("never lets a one-launch fallback replace the persisted port", () => {
+    // T3 Code (or an orphaned backend) held the persisted port this launch.
+    expect(
+      shouldPersistDesktopBackendPort({
+        servedPort: 7927,
+        preferredPort: 7926,
+        persistedPort: 7926,
+        hasPriorRendererState: true,
+      }),
+    ).toBe(false);
+  });
+
+  it("keeps an existing install on its legacy origin when that port is busy once", () => {
+    expect(
+      shouldPersistDesktopBackendPort({
+        servedPort: 3774,
+        preferredPort: LEGACY_DESKTOP_BACKEND_PORT,
+        persistedPort: null,
+        hasPriorRendererState: true,
+      }),
+    ).toBe(false);
+  });
+
+  it("remembers a fresh install's first port even when it is a fallback", () => {
+    expect(
+      shouldPersistDesktopBackendPort({
+        servedPort: DEFAULT_DESKTOP_BACKEND_PORT + 1,
+        preferredPort: DEFAULT_DESKTOP_BACKEND_PORT,
+        persistedPort: null,
+        hasPriorRendererState: false,
+      }),
+    ).toBe(true);
   });
 });

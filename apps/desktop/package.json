@@ -15,7 +15,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vp test run --passWithNoTests",
     "smoke-test": "node scripts/smoke-test.mjs",
-    "startup-timing-smoke": "node scripts/startup-timing-smoke.mjs"
+    "startup-timing-smoke": "node scripts/startup-timing-smoke.mjs",
+    "perf:boot-report": "node scripts/boot-report.mjs"
   },
   "dependencies": {
     "@effect/platform-node": "catalog:",

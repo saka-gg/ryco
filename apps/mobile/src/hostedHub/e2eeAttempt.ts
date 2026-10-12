@@ -3,10 +3,12 @@ import {
   relayE2eeUnresolvedAttemptFailure,
   type RelayE2eeChannel,
   type RelayE2eeHost,
-  type RelayE2eeInitiatorAttempt,
   type RelayE2eeProvider,
-  type RelayE2eeSelectionClass,
 } from "@ryco/client-runtime/relay";
+import type {
+  RelayE2eeInitiatorAttempt,
+  RelayE2eeSelectionClass,
+} from "@ryco/client-runtime/relay/e2ee";
 import { e2eeKeyFingerprint, formatE2eeKeyFingerprint } from "@ryco/shared/relayE2eeKeys";
 import { E2EE_SUITE_25519_CHACHAPOLY_SHA256 } from "@ryco/shared/relayE2eeWire";
 import type { EnvironmentId } from "@ryco/contracts";

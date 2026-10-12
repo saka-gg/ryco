@@ -1,11 +1,13 @@
+import type { HostedHubState } from "@ryco/client-runtime/authorization";
 import {
   hostedSessionAdmits,
-  resolveHostedDeliveryNotice,
   resolveHostedRpcCapability,
-  type HostedDeliveryNotice,
-  type HostedHubState,
   type HostedRpcCapability,
-} from "@ryco/client-runtime/authorization";
+} from "@ryco/client-runtime/authorization/capabilities";
+import {
+  resolveHostedDeliveryNotice,
+  type HostedDeliveryNotice,
+} from "@ryco/client-runtime/authorization/deliveryNotice";
 import type { EnvironmentId } from "@ryco/contracts";
 import { useMemo } from "react";
 

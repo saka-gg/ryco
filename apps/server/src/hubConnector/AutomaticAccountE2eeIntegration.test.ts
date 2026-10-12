@@ -1,18 +1,17 @@
 import { generateKeyPairSync, sign } from "node:crypto";
 
+import type { HostedHubApi } from "@ryco/client-runtime/authorization";
 import {
   createNativeE2eeTrustResolver,
-  type HostedHubApi,
   type NativeE2eeReadyEnrollment,
   type NativeE2eeTrustResolution,
-} from "@ryco/client-runtime/authorization";
+} from "@ryco/client-runtime/authorization/e2ee";
+import { encodeBase64Url, type RelayE2eeHost } from "@ryco/client-runtime/relay";
 import {
-  encodeBase64Url,
   makeRelayE2eeInitiator,
-  type RelayE2eeHost,
   type RelayE2eeInitiator,
   type RelayE2eeInitiatorAttempt,
-} from "@ryco/client-runtime/relay";
+} from "@ryco/client-runtime/relay/e2ee";
 import type { NativeE2eeAccountTrustedNode } from "@ryco/client-runtime/platform";
 import type {
   NativeAccountGrantRelayTicketResponse,

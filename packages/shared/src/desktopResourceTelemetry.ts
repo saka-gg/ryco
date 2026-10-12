@@ -105,6 +105,60 @@ export function parseDesktopResourceTelemetry(
   };
 }
 
+/**
+ * Backend → desktop lifecycle frames, written as newline-delimited JSON on the
+ * same inherited duplex pipe (fd 4). Only desktop-launched backends write them.
+ * - `http-bound`: the port is bound; the startup gate holds API/WS requests and
+ *   may already serve the static shell.
+ * - `http-serving`: the router's request handlers are attached.
+ * - `startup-ready`: the startup command gate opened.
+ * - `startup-phase`: a coarse startup phase finished after `ms` milliseconds.
+ * - `fatal`: a non-retryable startup error; the backend exits with
+ *   {@link DESKTOP_BACKEND_FATAL_EXIT_CODE} right after writing it.
+ */
+export type DesktopBackendLifecycleFrame =
+  | { readonly type: "http-bound"; readonly port: number }
+  | { readonly type: "http-serving"; readonly port: number }
+  | { readonly type: "startup-ready" }
+  | { readonly type: "startup-phase"; readonly name: string; readonly ms: number }
+  | { readonly type: "fatal"; readonly code: string; readonly message: string };
+
+/** EX_CONFIG: the backend failed deterministically; restarting cannot help. */
+export const DESKTOP_BACKEND_FATAL_EXIT_CODE = 78;
+
+const DESKTOP_BACKEND_FRAME_MAX_TEXT = 4_096;
+const boundedText = (value: unknown): value is string =>
+  typeof value === "string" && value.length > 0 && value.length <= DESKTOP_BACKEND_FRAME_MAX_TEXT;
+const tcpPort = (value: unknown): value is number =>
+  typeof value === "number" && Number.isSafeInteger(value) && value > 0 && value <= 65_535;
+
+export function parseDesktopBackendLifecycleFrame(
+  value: unknown,
+): DesktopBackendLifecycleFrame | null {
+  if (!record(value)) return null;
+  switch (value.type) {
+    case "http-bound":
+    case "http-serving":
+      return tcpPort(value.port) ? { type: value.type, port: value.port } : null;
+    case "startup-ready":
+      return { type: "startup-ready" };
+    case "startup-phase":
+      return boundedText(value.name) && counter(value.ms)
+        ? { type: "startup-phase", name: value.name, ms: value.ms }
+        : null;
+    case "fatal":
+      return boundedText(value.code) && typeof value.message === "string"
+        ? {
+            type: "fatal",
+            code: value.code,
+            message: value.message.slice(0, DESKTOP_BACKEND_FRAME_MAX_TEXT),
+          }
+        : null;
+    default:
+      return null;
+  }
+}
+
 /** Reject oversized frames before parsing and bound unterminated input. */
 export function createTelemetryLineReader(
   onValue: (value: unknown) => void,

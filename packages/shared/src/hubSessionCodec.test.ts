@@ -35,6 +35,29 @@ describe("Hub session envelope", () => {
       value: { type: "data", streamId: 0x01020304, payload: Uint8Array.of(77) },
     });
   });
+  it("borrows a data payload from the input only when asked to, and nothing else", () => {
+    const data = encodeHubSessionFrame({ type: "data", streamId: 9, payload: Uint8Array.of(5, 6) });
+    if (!data.ok) throw new Error("encode");
+    const borrowed = decodeHubSessionFrame(data.value, { borrowDataPayload: true });
+    if (!borrowed.ok || borrowed.value.type !== "data") throw new Error("decode");
+    expect([...borrowed.value.payload]).toEqual([5, 6]);
+    // A view over the input: the consumer that zeroes it zeroes the input too.
+    expect(borrowed.value.payload.buffer).toBe(data.value.buffer);
+    borrowed.value.payload.fill(0);
+    expect([...data.value.subarray(5)]).toEqual([0, 0]);
+
+    const ping = encodeHubSessionFrame({
+      type: "ping",
+      nonce: Uint8Array.of(1, 2, 3, 4, 5, 6, 7, 8),
+    });
+    if (!ping.ok) throw new Error("encode");
+    const nonce = decodeHubSessionFrame(ping.value, { borrowDataPayload: true });
+    ping.value.fill(0);
+    expect(nonce).toEqual({
+      ok: true,
+      value: { type: "ping", nonce: Uint8Array.of(1, 2, 3, 4, 5, 6, 7, 8) },
+    });
+  });
   it("enforces frame, UTF8 reason, nonce and channel bounds", () => {
     expect(
       encodeHubSessionFrame({

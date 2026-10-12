@@ -564,4 +564,37 @@ describe("BrowserHostedRelaySocket multiplexed carrier", () => {
     physical.dispatchEvent(Object.assign(new Event("close"), { code: 4401, reason: "expired" }));
     expect(close).toHaveBeenCalledExactlyOnceWith("expired", 4401);
   });
+
+  it("hands browser buffers across the adapter without copies a caller could not zero", () => {
+    class RecordingWebSocket extends MockWebSocket {
+      readonly sentViews: unknown[] = [];
+      override send(data: string | ArrayBufferLike | Blob | ArrayBufferView): void {
+        this.sentViews.push(data);
+        super.send(data);
+      }
+    }
+    const physical = new RecordingWebSocket();
+    const adapter = createBrowserRelaySocket(
+      hostedRelayWebSocketUrl(),
+      () => physical as unknown as WebSocket,
+    );
+    // Outbound: the caller's own view reaches `WebSocket.send` (which copies
+    // it), so zeroing it afterwards leaves no plaintext duplicate in the page.
+    const outbound = new Uint8Array([1, 2, 3, 4]);
+    adapter.send(outbound);
+    expect(physical.sentViews).toEqual([outbound]);
+    expect(physical.sentViews[0]).toBe(outbound);
+    outbound.fill(0);
+    expect([...new Uint8Array(physical.sent[0]!)]).toEqual([1, 2, 3, 4]);
+
+    // Inbound: the message's own ArrayBuffer is handed over, so the consumer
+    // that zeroes it zeroes the only copy.
+    const received: Uint8Array[] = [];
+    adapter.onBinaryMessage((bytes) => received.push(bytes));
+    const inbound = new Uint8Array([5, 6, 7]).buffer;
+    physical.deliver(inbound);
+    expect(received[0]!.buffer).toBe(inbound);
+    received[0]!.fill(0);
+    expect([...new Uint8Array(inbound)]).toEqual([0, 0, 0]);
+  });
 });

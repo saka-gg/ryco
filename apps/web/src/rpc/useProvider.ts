@@ -19,8 +19,15 @@ import {
  * retry/backoff semantics (implemented inside `providerAtoms`).
  */
 export function useCheckpointDiff(input: CheckpointDiffInput): CheckpointDiffState {
-  const { environmentId, threadId, fromTurnCount, toTurnCount, ignoreWhitespace, cacheScope } =
-    input;
+  const {
+    environmentId,
+    threadId,
+    fromTurnCount,
+    toTurnCount,
+    ignoreWhitespace,
+    cacheScope,
+    cacheSlot,
+  } = input;
   const enabled = input.enabled;
   const key = isCheckpointDiffEnabled(input) ? checkpointDiffCacheKey(input) : null;
 
@@ -35,6 +42,7 @@ export function useCheckpointDiff(input: CheckpointDiffInput): CheckpointDiffSta
       toTurnCount,
       ignoreWhitespace,
       ...(cacheScope !== undefined ? { cacheScope } : {}),
+      ...(cacheSlot !== undefined ? { cacheSlot } : {}),
       ...(enabled !== undefined ? { enabled } : {}),
     });
   }, [
@@ -45,6 +53,7 @@ export function useCheckpointDiff(input: CheckpointDiffInput): CheckpointDiffSta
     toTurnCount,
     ignoreWhitespace,
     cacheScope,
+    cacheSlot,
     enabled,
   ]);
 

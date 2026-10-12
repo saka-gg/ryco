@@ -3,14 +3,23 @@ import type {
   MessageId,
   OrchestrationShellSnapshot,
   OrchestrationShellStreamEvent,
+  OrchestrationShellThreadPrioritiesItem,
   OrchestrationThreadHistoryCollection,
+  OrchestrationThreadHistoryLimits,
   OrchestrationThreadHistoryPage,
   OrchestrationThreadHistoryPageInfo,
   OrchestrationThreadWindowSnapshot,
   ThreadId,
 } from "@ryco/contracts";
 
+import {
+  isResponseTooLargeError,
+  isUnsupportedRpcError,
+  type SubscriptionFailureKind,
+} from "../rpc/wsTransport.ts";
 import { scopedThreadKey, scopeThreadRef } from "../scoped.ts";
+import { createEnvironmentEventBatcher } from "../state/threads/eventBatching.ts";
+import type { ShellStoreUpdate } from "../state/threads/store.ts";
 import type { EnvironmentConnection } from "./connection.ts";
 import type { EnvironmentStateSink } from "./environmentStateSink.ts";
 import { planEvictionsToCapacity } from "./evictionPolicy.ts";
@@ -26,9 +35,26 @@ import {
 import { createThreadHistoryPaginationController } from "./threadHistoryPagination.ts";
 
 const NOOP = () => undefined;
+/** Runs after the current task's synchronous work, e.g. after a delivered chunk. */
+const afterCurrentChunk = (callback: () => void) => {
+  void Promise.resolve().then(callback);
+};
 const THREAD_DETAIL_SUBSCRIPTION_IDLE_EVICTION_MS = 5 * 60 * 1000;
 const MAX_CACHED_THREAD_DETAIL_SUBSCRIPTIONS = 32;
 const MAX_CACHED_THREAD_DETAIL_ESTIMATED_BYTES = 12 * 1024 * 1024;
+/** The window a thread subscription asks for; shrunk only when a response cannot fit. */
+const THREAD_WINDOW_LIMITS: OrchestrationThreadHistoryLimits = {
+  messages: 150,
+  proposedPlans: 30,
+  activities: 150,
+  checkpoints: 30,
+};
+const MIN_THREAD_WINDOW_ITEMS = 10;
+/** Backoff for re-requesting a window the server failed to load (not a size or support failure). */
+const THREAD_WINDOW_RETRY_BASE_MS = 1_000;
+const THREAD_WINDOW_RETRY_MAX_MS = 30_000;
+/** Fixed per-row overhead (ids, timestamps, envelope) in the retained-bytes estimate. */
+const RETAINED_ROW_OVERHEAD_BYTES = 256;
 const BROWSER_RESUME_RECONNECT_COOLDOWN_MS = 2_000;
 const SAVED_ENVIRONMENT_STARTUP_DELAY_MS = 2500;
 const SAVED_ENVIRONMENT_CONNECT_CONCURRENCY = 2;
@@ -67,6 +93,8 @@ export interface EnvironmentSupervisorInput<SavedEnvironmentRecord> {
   readonly connectSavedEnvironment: (
     record: SavedEnvironmentRecord,
     isCancelled: () => boolean,
+    /** Aborted when the attempt is given up (a cancel, or its slot timing out). */
+    signal: AbortSignal,
   ) => Promise<EnvironmentConnection>;
   /**
    * A saved environment whose credential the node rejected. Syncs skip it: they
@@ -102,6 +130,11 @@ export interface EnvironmentSupervisorInput<SavedEnvironmentRecord> {
   }) => void;
   readonly applyThreadDetailEvent: (environmentId: EnvironmentId, event: unknown) => void;
   readonly stateSink: EnvironmentStateSink;
+  /**
+   * Schedules the commit of the shell items buffered since the last one. The
+   * default is the threads runtime's animation-frame scheduler.
+   */
+  readonly scheduleShellFrame?: (callback: () => void) => void;
   readonly onShellSnapshotReceived: (environmentId: EnvironmentId) => void;
   readonly onShellSnapshotCurrent: (environmentId: EnvironmentId) => void;
   readonly onShellSnapshotApplied: (environmentId: EnvironmentId) => void;
@@ -132,25 +165,132 @@ export function savedEnvironmentRetryDelayMs(failedAttempts: number): number {
   return Math.min(SAVED_ENVIRONMENT_RETRY_BASE_MS * 2 ** exponent, SAVED_ENVIRONMENT_RETRY_MAX_MS);
 }
 
+/** Halves the message and activity limits, or null once they cannot shrink further. */
+function shrinkThreadWindowLimits(
+  limits: OrchestrationThreadHistoryLimits,
+): OrchestrationThreadHistoryLimits | null {
+  if (limits.messages <= MIN_THREAD_WINDOW_ITEMS && limits.activities <= MIN_THREAD_WINDOW_ITEMS) {
+    return null;
+  }
+  return {
+    ...limits,
+    messages: Math.max(MIN_THREAD_WINDOW_ITEMS, Math.floor(limits.messages / 2)),
+    activities: Math.max(MIN_THREAD_WINDOW_ITEMS, Math.floor(limits.activities / 2)),
+  };
+}
+
+/**
+ * Only a server without bounded windows gets the legacy full-detail stream,
+ * which has no limit at all: a window that failed for size or a server error
+ * would fail the same way, only larger.
+ */
+function isThreadWindowUnsupportedError(error: unknown): boolean {
+  if (isUnsupportedRpcError(error)) return true;
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes("Bounded thread history is unavailable");
+}
+
+function classifyThreadWindowFailure(error: unknown): SubscriptionFailureKind {
+  if (isThreadWindowUnsupportedError(error)) return "unsupported";
+  if (isResponseTooLargeError(error)) return "response-too-large";
+  return "failed";
+}
+
+const estimateJsonLength = (value: unknown): number => {
+  try {
+    return JSON.stringify(value)?.length ?? 0;
+  } catch {
+    return 0;
+  }
+};
+
+/**
+ * The row a live thread event writes in the client's thread state, and how
+ * its size combines with what that row already holds. Streaming message
+ * deltas append to their message; activity and plan upserts replace theirs.
+ * Other events update rows in place and do not grow retained state.
+ */
+function retainedRowWrite(
+  event: unknown,
+): { readonly key: string; readonly bytes: number; readonly append: boolean } | null {
+  const candidate = event as {
+    readonly type?: unknown;
+    readonly payload?: Record<string, unknown>;
+  } | null;
+  const payload = candidate?.payload;
+  if (payload === undefined || payload === null) return null;
+  switch (candidate?.type) {
+    case "thread.message-sent": {
+      const text = typeof payload.text === "string" ? payload.text : "";
+      return {
+        key: `message:${String(payload.messageId)}`,
+        bytes: text.length,
+        append: payload.streaming === true,
+      };
+    }
+    case "thread.activity-appended": {
+      const activity = payload.activity as { readonly id?: unknown } | undefined;
+      return {
+        key: `activity:${String(activity?.id)}`,
+        bytes: estimateJsonLength(activity),
+        append: false,
+      };
+    }
+    case "thread.proposed-plan-upserted": {
+      const plan = payload.proposedPlan as { readonly id?: unknown } | undefined;
+      return { key: `plan:${String(plan?.id)}`, bytes: estimateJsonLength(plan), append: false };
+    }
+    default:
+      return null;
+  }
+}
+
 type ThreadDetailSubscriptionEntry = {
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
   unsubscribe: () => void;
   unsubscribeConnectionListener: (() => void) | null;
   refCount: number;
+  /** Retains from views the user has open; the rest only keep the thread warm. */
+  viewCount: number;
   lastAccessedAt: number;
   evictionTimeoutId: ReturnType<typeof setTimeout> | null;
   protocol: "bounded" | "legacy";
+  /** The window this subscription asks for; shrunk after a response too large to carry. */
+  windowLimits: OrchestrationThreadHistoryLimits;
+  /**
+   * Approximate client memory this thread holds: its last snapshot plus the
+   * rows live events and history pages added since, never the traffic.
+   */
   estimatedRetainedBytes: number;
+  /** Estimated bytes per row written since the last snapshot. */
+  rowRetainedBytes: Map<string, number>;
 };
 
 export interface ThreadDetailSubscriptionReleaseOptions {
   readonly immediately?: boolean | undefined;
 }
 
+export interface ThreadDetailSubscriptionRetainOptions {
+  /**
+   * The retain serves a view the user has open, not a prewarm or a background
+   * owner. Provider history recovery runs only while a view retains the thread.
+   */
+  readonly view?: boolean | undefined;
+}
+
 export type ReleaseThreadDetailSubscription = (
   options?: ThreadDetailSubscriptionReleaseOptions,
 ) => void;
+
+interface PendingSavedEnvironmentConnection {
+  /**
+   * Cancels the attempt and aborts its requests. With `error`, everyone waiting
+   * on it receives that error at once.
+   */
+  readonly abandon: (error?: Error) => void;
+  readonly promise: Promise<EnvironmentConnection>;
+}
 
 export interface EnvironmentConnectionSupervisor {
   readonly subscribe: (listener: () => void) => () => void;
@@ -163,13 +303,21 @@ export interface EnvironmentConnectionSupervisor {
   readonly disconnectPrimary: (environmentId?: EnvironmentId) => Promise<void>;
   readonly ensureSavedEnvironmentConnection: (
     record: { readonly environmentId: EnvironmentId },
-    connect: (isCancelled: () => boolean) => Promise<EnvironmentConnection>,
+    connect: (isCancelled: () => boolean, signal: AbortSignal) => Promise<EnvironmentConnection>,
   ) => Promise<EnvironmentConnection>;
   readonly cancelPendingSavedEnvironmentConnection: (environmentId: EnvironmentId) => void;
+  /** Buffers a shell event; buffered items commit once per environment and frame. */
   readonly applyShellEvent: (
     event: OrchestrationShellStreamEvent,
     environmentId: EnvironmentId,
   ) => void;
+  /** Buffers a thread-priority ranking behind the shell events before it. */
+  readonly applyThreadPriorities: (
+    item: OrchestrationShellThreadPrioritiesItem,
+    environmentId: EnvironmentId,
+  ) => void;
+  /** Commits buffered shell items now (tests, teardown). */
+  readonly flushShellEvents: () => void;
   readonly resetShellProjection: (environmentId: EnvironmentId) => void;
   /** The last shell sequence applied for an environment, for resuming its subscription. */
   readonly readShellProjectionSequence: (environmentId: EnvironmentId) => number | null;
@@ -184,6 +332,7 @@ export interface EnvironmentConnectionSupervisor {
   readonly retainThreadDetailSubscription: (
     environmentId: EnvironmentId,
     threadId: ThreadId,
+    options?: ThreadDetailSubscriptionRetainOptions,
   ) => ReleaseThreadDetailSubscription;
   readonly disposeThreadDetailSubscriptionsForEnvironment: (environmentId: EnvironmentId) => void;
   readonly disposeThreadDetailSubscription: (
@@ -233,7 +382,7 @@ export function createEnvironmentConnectionSupervisor<
   const connections = new Map<EnvironmentId, EnvironmentConnection>();
   const pendingSavedEnvironmentConnections = new Map<
     EnvironmentId,
-    { cancelled: boolean; readonly promise: Promise<EnvironmentConnection> }
+    PendingSavedEnvironmentConnection
   >();
   const listeners = new Set<() => void>();
   const threadDetailSubscriptions = new Map<string, ThreadDetailSubscriptionEntry>();
@@ -277,21 +426,30 @@ export function createEnvironmentConnectionSupervisor<
   };
   const keyFor = (environmentId: EnvironmentId, threadId: ThreadId) =>
     scopedThreadKey(scopeThreadRef(environmentId, threadId));
-  const estimateRetainedBytes = (value: unknown): number => {
-    try {
-      return new TextEncoder().encode(JSON.stringify(value)).byteLength;
-    } catch {
-      return 0;
-    }
+  const setRetainedBytes = (entry: ThreadDetailSubscriptionEntry, bytes: number) => {
+    entry.estimatedRetainedBytes = Math.min(MAX_CACHED_THREAD_DETAIL_ESTIMATED_BYTES, bytes);
   };
   const recordRetainedSnapshot = (entry: ThreadDetailSubscriptionEntry, snapshot: unknown) => {
-    entry.estimatedRetainedBytes = estimateRetainedBytes(snapshot);
+    entry.rowRetainedBytes.clear();
+    setRetainedBytes(entry, estimateJsonLength(snapshot));
   };
   const recordRetainedEvent = (entry: ThreadDetailSubscriptionEntry, event: unknown) => {
-    entry.estimatedRetainedBytes = Math.min(
-      MAX_CACHED_THREAD_DETAIL_ESTIMATED_BYTES,
-      entry.estimatedRetainedBytes + estimateRetainedBytes(event),
-    );
+    const write = retainedRowWrite(event);
+    if (write === null) return;
+    const previous = entry.rowRetainedBytes.get(write.key);
+    const next =
+      previous === undefined
+        ? write.bytes + RETAINED_ROW_OVERHEAD_BYTES
+        : write.append
+          ? previous + write.bytes
+          : Math.max(previous, write.bytes + RETAINED_ROW_OVERHEAD_BYTES);
+    if (next === previous) return;
+    entry.rowRetainedBytes.set(write.key, next);
+    setRetainedBytes(entry, entry.estimatedRetainedBytes + next - (previous ?? 0));
+  };
+  const recordRetainedHistoryPage = (entry: ThreadDetailSubscriptionEntry, page: unknown) => {
+    const items = (page as { readonly items?: unknown } | null)?.items;
+    setRetainedBytes(entry, entry.estimatedRetainedBytes + estimateJsonLength(items ?? page));
   };
   const clearEviction = (entry: ThreadDetailSubscriptionEntry) => {
     if (entry.evictionTimeoutId !== null) {
@@ -326,17 +484,18 @@ export function createEnvironmentConnectionSupervisor<
       input.syncThreadHistoryPage?.(environmentId, threadId, page);
       const entry = threadDetailSubscriptions.get(keyFor(environmentId, threadId));
       if (entry) {
-        recordRetainedEvent(entry, page);
-        evictToCapacity();
+        recordRetainedHistoryPage(entry, page);
+        scheduleEvictToCapacity();
       }
     },
     setRequestState: (requestState) => input.setThreadHistoryRequestState?.(requestState),
     recoverStale: async (scope) => {
       const query = require(scope.environmentId).client.orchestration.getThreadWindow;
       if (!query) throw new Error("Bounded thread history is unavailable");
+      const current = threadDetailSubscriptions.get(keyFor(scope.environmentId, scope.threadId));
       const snapshot = await query({
         threadId: scope.threadId,
-        limits: { messages: 150, proposedPlans: 30, activities: 150, checkpoints: 30 },
+        limits: current?.windowLimits ?? THREAD_WINDOW_LIMITS,
       });
       if (input.syncThreadWindowSnapshot) {
         input.syncThreadWindowSnapshot(scope.environmentId, snapshot);
@@ -351,6 +510,20 @@ export function createEnvironmentConnectionSupervisor<
     },
   });
 
+  const historyRecoveryMode = (entry: ThreadDetailSubscriptionEntry) =>
+    entry.viewCount > 0 ? ("active" as const) : ("passive" as const);
+  /**
+   * A view attached to (or left) a subscription that is already running: the
+   * server learns it so history recovery follows the view. A subscription that
+   * starts later sends its mode with the request instead.
+   */
+  const announceHistoryRecoveryMode = (entry: ThreadDetailSubscriptionEntry) => {
+    if (entry.unsubscribe === NOOP) return;
+    const setMode = read(entry.environmentId)?.client.orchestration.setThreadHistoryRecovery;
+    if (setMode === undefined) return;
+    // An older server ignores the mode altogether; nothing to retry.
+    void setMode({ threadId: entry.threadId, mode: historyRecoveryMode(entry) }).catch(NOOP);
+  };
   const isMissingFromShell = (environmentId: EnvironmentId, threadId: ThreadId) => {
     const threadIds = shellThreadIdsByEnvironment.get(environmentId);
     return threadIds !== undefined && !threadIds.has(threadId);
@@ -378,7 +551,16 @@ export function createEnvironmentConnectionSupervisor<
     // and Hub-relayed connections always take a fresh snapshot.
     let appliedSequence: number | null = null;
     const resumable = !input.isHostedMode() && connection.knownEnvironment.source !== "hub-hosted";
-    const resumeOptions = resumable ? { resumeFromSequence: () => appliedSequence } : {};
+    const subscriptionOptions = {
+      ...(resumable ? { resumeFromSequence: () => appliedSequence } : {}),
+      historyRecovery: () => historyRecoveryMode(entry),
+    };
+    const applyEvent = (event: { readonly sequence: number }) => {
+      appliedSequence = Math.max(appliedSequence ?? 0, event.sequence);
+      recordRetainedEvent(entry, event);
+      scheduleEvictToCapacity();
+      input.applyThreadDetailEvent(entry.environmentId, event);
+    };
     const subscribeLegacy = () => {
       if (!active) return;
       entry.protocol = "legacy";
@@ -396,16 +578,21 @@ export function createEnvironmentConnectionSupervisor<
             input.syncThreadDetailSnapshot(entry.environmentId, item.snapshot);
             return;
           }
-          appliedSequence = Math.max(appliedSequence ?? 0, item.event.sequence);
-          recordRetainedEvent(entry, item.event);
-          evictToCapacity();
-          input.applyThreadDetailEvent(entry.environmentId, item.event);
+          applyEvent(item.event);
         },
-        resumeOptions,
+        subscriptionOptions,
       );
+    };
+    let retryTimeoutId: ReturnType<typeof setTimeout> | null = null;
+    let failedWindowAttempts = 0;
+    const clearRetry = () => {
+      if (retryTimeoutId === null) return;
+      input.clearTimeout(retryTimeoutId);
+      retryTimeoutId = null;
     };
     entry.unsubscribe = () => {
       active = false;
+      clearRetry();
       unsubscribeCurrent();
     };
     const subscribeWindow = connection.client.orchestration.subscribeThreadWindow;
@@ -413,43 +600,88 @@ export function createEnvironmentConnectionSupervisor<
       subscribeLegacy();
       return true;
     }
-    let fallbackRequested = false;
-    const requestLegacy = () => {
-      fallbackRequested = true;
-      if (unsubscribeCurrent !== NOOP) subscribeLegacy();
-    };
-    unsubscribeCurrent = subscribeWindow(
-      {
-        threadId: entry.threadId,
-        limits: {
-          messages: 150,
-          proposedPlans: 30,
-          activities: 150,
-          checkpoints: 30,
-        },
-      },
-      (item) => {
-        if (item.kind === "resumed") return;
-        if (item.kind === "snapshot") {
-          appliedSequence = item.snapshot.snapshotSequence;
-          historyPagination.beginSnapshot(scope);
-          recordRetainedSnapshot(entry, item.snapshot);
-          evictToCapacity();
-          if (input.syncThreadWindowSnapshot) {
-            input.syncThreadWindowSnapshot(entry.environmentId, item.snapshot);
-          } else {
-            input.syncThreadDetailSnapshot(entry.environmentId, item.snapshot);
-          }
+    // A failure can arrive synchronously, before the subscription below has
+    // returned its unsubscribe; it is handled once that has happened.
+    let pendingFailure: { readonly kind: SubscriptionFailureKind | undefined } | null = null;
+    let subscribing = false;
+    const handleWindowFailure = (kind: SubscriptionFailureKind | undefined) => {
+      if (!active) return;
+      if (kind === "unsupported") {
+        subscribeLegacy();
+        return;
+      }
+      unsubscribeCurrent();
+      unsubscribeCurrent = NOOP;
+      if (kind === "response-too-large") {
+        // The window did not fit the connection (the relay's message cap):
+        // ask again for fewer rows; history pagination reaches the rest.
+        const smaller = shrinkThreadWindowLimits(entry.windowLimits);
+        if (smaller === null) {
+          // Only a single row larger than the connection carries is left.
+          console.warn("Thread window does not fit this connection", {
+            threadId: entry.threadId,
+          });
           return;
         }
-        appliedSequence = Math.max(appliedSequence ?? 0, item.event.sequence);
-        recordRetainedEvent(entry, item.event);
-        evictToCapacity();
-        input.applyThreadDetailEvent(entry.environmentId, item.event);
-      },
-      { ...resumeOptions, onError: requestLegacy },
-    );
-    if (fallbackRequested) subscribeLegacy();
+        entry.windowLimits = smaller;
+        subscribeBoundedWindow();
+        return;
+      }
+      // A server-side load failure: retry the bounded window with backoff.
+      failedWindowAttempts += 1;
+      const delayMs = Math.min(
+        THREAD_WINDOW_RETRY_BASE_MS * 2 ** Math.min(failedWindowAttempts - 1, 8),
+        THREAD_WINDOW_RETRY_MAX_MS,
+      );
+      clearRetry();
+      retryTimeoutId = input.setTimeout(() => {
+        retryTimeoutId = null;
+        subscribeBoundedWindow();
+      }, delayMs);
+    };
+    const subscribeBoundedWindow = () => {
+      if (!active) return;
+      subscribing = true;
+      pendingFailure = null;
+      unsubscribeCurrent = subscribeWindow(
+        { threadId: entry.threadId, limits: entry.windowLimits },
+        (item) => {
+          // Any item, a resume included, means the server served this window.
+          failedWindowAttempts = 0;
+          if (item.kind === "resumed") return;
+          if (item.kind === "snapshot") {
+            appliedSequence = item.snapshot.snapshotSequence;
+            historyPagination.beginSnapshot(scope);
+            recordRetainedSnapshot(entry, item.snapshot);
+            evictToCapacity();
+            if (input.syncThreadWindowSnapshot) {
+              input.syncThreadWindowSnapshot(entry.environmentId, item.snapshot);
+            } else {
+              input.syncThreadDetailSnapshot(entry.environmentId, item.snapshot);
+            }
+            return;
+          }
+          applyEvent(item.event);
+        },
+        {
+          ...subscriptionOptions,
+          classifyFailure: classifyThreadWindowFailure,
+          onError: (kind) => {
+            if (subscribing) pendingFailure = { kind };
+            else handleWindowFailure(kind);
+          },
+        },
+      );
+      subscribing = false;
+      const failure = pendingFailure as {
+        readonly kind: SubscriptionFailureKind | undefined;
+      } | null;
+      if (failure !== null) {
+        pendingFailure = null;
+        handleWindowFailure(failure.kind);
+      }
+    };
+    subscribeBoundedWindow();
     return true;
   };
   const watch = (entry: ThreadDetailSubscriptionEntry) => {
@@ -491,9 +723,22 @@ export function createEnvironmentConnectionSupervisor<
       {
         maxEntries: MAX_CACHED_THREAD_DETAIL_SUBSCRIPTIONS,
         maxBytes: MAX_CACHED_THREAD_DETAIL_ESTIMATED_BYTES,
+        // A busy pinned thread must not starve the cache of idle ones.
+        byteBudget: "evictable",
       },
     );
     for (const key of planned) disposeByKey(key);
+  };
+  // Live events arrive a chunk at a time; the cache is re-planned once after
+  // the chunk rather than once per event.
+  let evictionScheduled = false;
+  const scheduleEvictToCapacity = () => {
+    if (evictionScheduled) return;
+    evictionScheduled = true;
+    afterCurrentChunk(() => {
+      evictionScheduled = false;
+      evictToCapacity();
+    });
   };
   const reconcileEntry = (entry: ThreadDetailSubscriptionEntry) => {
     clearEviction(entry);
@@ -510,6 +755,20 @@ export function createEnvironmentConnectionSupervisor<
       if (entry.environmentId === environmentId) reconcileEntry(entry);
     }
     evictToCapacity();
+  };
+  // Event application asks for this once per event; it runs once per chunk.
+  const pendingReconcileEnvironmentIds = new Set<EnvironmentId>();
+  const scheduleReconcileForEnvironment = (environmentId: EnvironmentId) => {
+    if (pendingReconcileEnvironmentIds.size === 0) {
+      afterCurrentChunk(() => {
+        const environmentIds = [...pendingReconcileEnvironmentIds];
+        pendingReconcileEnvironmentIds.clear();
+        for (const pendingEnvironmentId of environmentIds) {
+          reconcileForEnvironment(pendingEnvironmentId);
+        }
+      });
+    }
+    pendingReconcileEnvironmentIds.add(environmentId);
   };
   const reconcileForThread = (environmentId: EnvironmentId, threadId: ThreadId) => {
     const entry = threadDetailSubscriptions.get(keyFor(environmentId, threadId));
@@ -550,6 +809,7 @@ export function createEnvironmentConnectionSupervisor<
   const remove = async (environmentId: EnvironmentId): Promise<boolean> => {
     const connection = connections.get(environmentId);
     if (!connection) return false;
+    flushShellEvents();
     connections.delete(environmentId);
     projectionTracker.clearEnvironment(environmentId);
     shellThreadIdsByEnvironment.delete(environmentId);
@@ -564,7 +824,11 @@ export function createEnvironmentConnectionSupervisor<
     await connection.dispose();
     return true;
   };
-  const retain = (environmentId: EnvironmentId, threadId: ThreadId) => {
+  const retain = (
+    environmentId: EnvironmentId,
+    threadId: ThreadId,
+    options?: ThreadDetailSubscriptionRetainOptions,
+  ) => {
     const key = keyFor(environmentId, threadId);
     const existing = threadDetailSubscriptions.get(key);
     const entry = existing ?? {
@@ -573,14 +837,22 @@ export function createEnvironmentConnectionSupervisor<
       unsubscribe: NOOP,
       unsubscribeConnectionListener: null,
       refCount: 0,
+      viewCount: 0,
       lastAccessedAt: input.now(),
       evictionTimeoutId: null,
       protocol: "bounded" as const,
+      windowLimits: THREAD_WINDOW_LIMITS,
       estimatedRetainedBytes: 0,
+      rowRetainedBytes: new Map<string, number>(),
     };
     if (!existing) threadDetailSubscriptions.set(key, entry);
     clearEviction(entry);
     entry.refCount += 1;
+    const view = options?.view === true;
+    if (view) {
+      entry.viewCount += 1;
+      if (entry.viewCount === 1) announceHistoryRecoveryMode(entry);
+    }
     entry.lastAccessedAt = input.now();
     if (!attach(entry)) watch(entry);
     if (!existing) evictToCapacity();
@@ -589,6 +861,10 @@ export function createEnvironmentConnectionSupervisor<
       if (released) return;
       released = true;
       if (threadDetailSubscriptions.get(key) !== entry) return;
+      if (view) {
+        entry.viewCount = Math.max(0, entry.viewCount - 1);
+        if (entry.viewCount === 0) announceHistoryRecoveryMode(entry);
+      }
       entry.refCount = Math.max(0, entry.refCount - 1);
       entry.lastAccessedAt = input.now();
       if (entry.refCount === 0) {
@@ -628,42 +904,55 @@ export function createEnvironmentConnectionSupervisor<
   };
   const ensureSavedEnvironmentConnection = (
     record: { readonly environmentId: EnvironmentId },
-    connect: (isCancelled: () => boolean) => Promise<EnvironmentConnection>,
+    connect: (isCancelled: () => boolean, signal: AbortSignal) => Promise<EnvironmentConnection>,
   ) => {
     const existing = read(record.environmentId);
     if (existing) return Promise.resolve(existing);
     const pending = pendingSavedEnvironmentConnections.get(record.environmentId);
     if (pending) return pending.promise;
 
-    const pendingEntry: {
-      cancelled: boolean;
-      promise: Promise<EnvironmentConnection>;
-    } = {
-      cancelled: false,
-      promise: Promise.resolve().then(async () => {
-        let connection: EnvironmentConnection;
-        try {
-          connection = await connect(() => pendingEntry.cancelled);
-        } catch (error) {
-          // A cancelled attempt's failure is not the environment's: a disconnect
-          // or a new pairing replaced it, and that owner reports the outcome.
-          if (
-            pendingEntry.cancelled &&
-            !(error instanceof SavedEnvironmentConnectionCancelledError)
-          ) {
-            throw new SavedEnvironmentConnectionCancelledError(record.environmentId, {
-              cause: error,
-            });
-          }
-          throw error;
+    const controller = new AbortController();
+    let rejectWaiters: (error: Error) => void = NOOP;
+    const abandoned = new Promise<never>((_resolve, reject) => {
+      rejectWaiters = reject;
+    });
+    const state = { cancelled: false, abandonedWith: null as Error | null };
+    const attempt = Promise.resolve().then(async () => {
+      let connection: EnvironmentConnection;
+      try {
+        connection = await connect(() => state.cancelled, controller.signal);
+      } catch (error) {
+        if (state.abandonedWith !== null) throw state.abandonedWith;
+        // A cancelled attempt's failure is not the environment's: a disconnect
+        // or a new pairing replaced it, and that owner reports the outcome.
+        if (state.cancelled && !(error instanceof SavedEnvironmentConnectionCancelledError)) {
+          throw new SavedEnvironmentConnectionCancelledError(record.environmentId, {
+            cause: error,
+          });
         }
-        if (pendingEntry.cancelled) {
-          const removed = await remove(connection.environmentId).catch(() => false);
-          if (!removed) await connection.dispose().catch(NOOP);
-          throw new SavedEnvironmentConnectionCancelledError(record.environmentId);
+        throw error;
+      }
+      if (state.cancelled) {
+        const removed = await remove(connection.environmentId).catch(() => false);
+        if (!removed) await connection.dispose().catch(NOOP);
+        throw (
+          state.abandonedWith ?? new SavedEnvironmentConnectionCancelledError(record.environmentId)
+        );
+      }
+      return connection;
+    });
+    const pendingEntry: PendingSavedEnvironmentConnection = {
+      abandon: (error) => {
+        state.cancelled = true;
+        if (error !== undefined) {
+          state.abandonedWith = error;
+          rejectWaiters(error);
         }
-        return connection;
-      }),
+        controller.abort();
+      },
+      // An abandoned attempt rejects its waiters at once; the attempt itself
+      // winds down (and disposes what it built) whenever it notices.
+      promise: Promise.race([attempt, abandoned]),
     };
     pendingSavedEnvironmentConnections.set(record.environmentId, pendingEntry);
     return pendingEntry.promise.finally(() => {
@@ -672,22 +961,42 @@ export function createEnvironmentConnectionSupervisor<
       }
     });
   };
-  const cancelPendingSavedEnvironmentConnection = (environmentId: EnvironmentId) => {
+  /**
+   * Gives up the environment's pending attempt: it is cancelled, its in-flight
+   * requests are aborted, and the next connect starts fresh instead of joining
+   * it. With `error`, everyone waiting on the attempt receives that error.
+   */
+  const abandonPendingSavedEnvironmentConnection = (
+    environmentId: EnvironmentId,
+    error?: Error,
+    /** Only this attempt: one that has since replaced it is left alone. */
+    expected?: PendingSavedEnvironmentConnection,
+  ) => {
     const pending = pendingSavedEnvironmentConnections.get(environmentId);
-    if (!pending) return;
-    pending.cancelled = true;
+    if (!pending || (expected !== undefined && pending !== expected)) return;
     pendingSavedEnvironmentConnections.delete(environmentId);
+    pending.abandon(error);
   };
+  const cancelPendingSavedEnvironmentConnection = (environmentId: EnvironmentId) =>
+    abandonPendingSavedEnvironmentConnection(environmentId);
   const connectWithinSlot = (
     environmentId: EnvironmentId,
     connecting: Promise<EnvironmentConnection>,
   ): Promise<EnvironmentConnection> =>
     new Promise((resolve, reject) => {
+      // The attempt `connecting` started or joined. A disconnect or a new
+      // pairing may replace it meanwhile; the slot never gives up that one.
+      const attempt = pendingSavedEnvironmentConnections.get(environmentId);
       const timeoutId = input.setTimeout(() => {
-        // Only the slot gives up; the attempt keeps running. A Connect or a
-        // pairing may have joined it, and the retry joins it as well instead of
-        // racing a second connect for the same environment.
-        reject(new Error(`Saved environment ${environmentId} did not connect in time.`));
+        // A connect this late is hung (a half-open socket after sleep, an
+        // unanswered request): give the attempt up and abort what it has in
+        // flight, so the retry and the next Connect start fresh rather than
+        // joining it. Whoever joined it receives the same timeout.
+        const error = new Error(`Saved environment ${environmentId} did not connect in time.`);
+        if (attempt !== undefined) {
+          abandonPendingSavedEnvironmentConnection(environmentId, error, attempt);
+        }
+        reject(error);
       }, SAVED_ENVIRONMENT_CONNECT_TIMEOUT_MS);
       connecting.then(
         (connection) => {
@@ -700,29 +1009,63 @@ export function createEnvironmentConnectionSupervisor<
         },
       );
     });
-  const applyShellEvent = (event: OrchestrationShellStreamEvent, environmentId: EnvironmentId) => {
-    if (
-      !shouldApplyProjectionEvent({
-        current: projectionTracker.read(environmentId),
-        sequence: event.sequence,
-      })
-    ) {
-      return;
+  /**
+   * Applies one environment's buffered shell items: the events the projection
+   * does not hold yet, and every priority ranking, land in one store commit;
+   * the after-hooks then run per event against the applied state.
+   */
+  const applyShellBatch = (
+    environmentId: EnvironmentId,
+    updates: ReadonlyArray<ShellStoreUpdate>,
+  ) => {
+    const accepted: ShellStoreUpdate[] = [];
+    for (const update of updates) {
+      if (update.kind !== "thread-priorities") {
+        if (
+          !shouldApplyProjectionEvent({
+            current: projectionTracker.read(environmentId),
+            sequence: update.sequence,
+          })
+        ) {
+          continue;
+        }
+        projectionTracker.markEvent(environmentId, update.sequence);
+      }
+      accepted.push(update);
     }
-    const context = input.stateSink.prepareShellEvent(environmentId, event);
-    input.stateSink.applyShellEvent(environmentId, event);
-    projectionTracker.markEvent(environmentId, event.sequence);
-    input.stateSink.afterShellEventApplied(environmentId, event, context);
-    const shellThreadIds = shellThreadIdsByEnvironment.get(environmentId);
-    if (shellThreadIds === undefined) return;
-    if (event.kind === "thread-removed") {
-      shellThreadIds.delete(event.threadId);
-    } else if (event.kind === "thread-upserted" && !shellThreadIds.has(event.thread.id)) {
-      // A draft's first send created the thread: start what was retained for it.
-      shellThreadIds.add(event.thread.id);
-      attachListedThreads(environmentId);
+    if (accepted.length === 0) return;
+    const contexts = input.stateSink.applyShellEvents(environmentId, accepted);
+    for (let index = 0; index < accepted.length; index += 1) {
+      const event = accepted[index]!;
+      if (event.kind === "thread-priorities") continue;
+      input.stateSink.afterShellEventApplied(environmentId, event, contexts[index]);
+      const shellThreadIds = shellThreadIdsByEnvironment.get(environmentId);
+      if (shellThreadIds === undefined) continue;
+      if (event.kind === "thread-removed") {
+        shellThreadIds.delete(event.threadId);
+      } else if (event.kind === "thread-upserted" && !shellThreadIds.has(event.thread.id)) {
+        // A draft's first send created the thread: start what was retained for it.
+        shellThreadIds.add(event.thread.id);
+        attachListedThreads(environmentId);
+      }
     }
   };
+  // Shell items arrive one WebSocket chunk at a time (a thread upsert per
+  // streaming tick). They wait for the next frame and land as one store commit
+  // per environment. The batcher is a store mutation barrier, so any other
+  // store write applies them first; snapshots, resets and resume reads flush
+  // them explicitly, since those consult the projection tracker first.
+  const shellBatcher = createEnvironmentEventBatcher<ShellStoreUpdate>({
+    apply: applyShellBatch,
+    ...(input.scheduleShellFrame === undefined ? {} : { scheduleFrame: input.scheduleShellFrame }),
+  });
+  const flushShellEvents = () => shellBatcher.flush();
+  const applyShellEvent = (event: OrchestrationShellStreamEvent, environmentId: EnvironmentId) =>
+    shellBatcher.enqueue(environmentId, event);
+  const applyThreadPriorities = (
+    item: OrchestrationShellThreadPrioritiesItem,
+    environmentId: EnvironmentId,
+  ) => shellBatcher.enqueue(environmentId, item);
   const syncShellSnapshot = (
     snapshot: OrchestrationShellSnapshot,
     environmentId: EnvironmentId,
@@ -731,6 +1074,8 @@ export function createEnvironmentConnectionSupervisor<
       readonly onReady: () => void;
     },
   ) => {
+    // Items buffered before the snapshot apply first, against the old baseline.
+    flushShellEvents();
     input.onShellSnapshotReceived(environmentId);
     const snapshotClassification = classifyProjectionSnapshot({
       current: projectionTracker.read(environmentId),
@@ -780,8 +1125,8 @@ export function createEnvironmentConnectionSupervisor<
         try {
           await connectWithinSlot(
             record.environmentId,
-            ensureSavedEnvironmentConnection(record, (isCancelled) =>
-              input.connectSavedEnvironment(record, isCancelled),
+            ensureSavedEnvironmentConnection(record, (isCancelled, signal) =>
+              input.connectSavedEnvironment(record, isCancelled, signal),
             ),
           );
           clearSavedRetry(record.environmentId);
@@ -901,11 +1246,15 @@ export function createEnvironmentConnectionSupervisor<
     };
   };
   const resetForTests = async () => {
+    flushShellEvents();
     stopActive();
     lastBrowserResumeReconnectAt = Number.NEGATIVE_INFINITY;
     for (const key of threadDetailSubscriptions.keys()) disposeByKey(key);
     await Promise.all([...connections.keys()].map((environmentId) => remove(environmentId)));
-    pendingSavedEnvironmentConnections.clear();
+    // Deleting the visited entry while iterating a Map is well defined.
+    for (const environmentId of pendingSavedEnvironmentConnections.keys()) {
+      abandonPendingSavedEnvironmentConnection(environmentId);
+    }
     projectionTracker.clear();
     shellThreadIdsByEnvironment.clear();
   };
@@ -921,15 +1270,23 @@ export function createEnvironmentConnectionSupervisor<
     ensureSavedEnvironmentConnection,
     cancelPendingSavedEnvironmentConnection,
     applyShellEvent,
-    resetShellProjection: (environmentId) => projectionTracker.clearEnvironment(environmentId),
-    readShellProjectionSequence: (environmentId) =>
-      projectionTracker.read(environmentId)?.sequence ?? null,
+    applyThreadPriorities,
+    flushShellEvents,
+    resetShellProjection: (environmentId) => {
+      // What the old subscription delivered applies before its baseline goes.
+      flushShellEvents();
+      projectionTracker.clearEnvironment(environmentId);
+    },
+    readShellProjectionSequence: (environmentId) => {
+      flushShellEvents();
+      return projectionTracker.read(environmentId)?.sequence ?? null;
+    },
     syncShellSnapshot,
     retainThreadDetailSubscription: retain,
     disposeThreadDetailSubscriptionsForEnvironment: disposeForEnvironment,
     disposeThreadDetailSubscription: (environmentId, threadId) =>
       disposeByKey(keyFor(environmentId, threadId)),
-    reconcileThreadDetailSubscriptionEvictionForEnvironment: reconcileForEnvironment,
+    reconcileThreadDetailSubscriptionEvictionForEnvironment: scheduleReconcileForEnvironment,
     reconcileThreadDetailSubscriptionEvictionForThread: reconcileForThread,
     reconcileThreadDetailSubscriptionsForEnvironment: reconcileSubscriptionsForEnvironment,
     evictIdleThreadDetailSubscriptionsToCapacity: evictToCapacity,

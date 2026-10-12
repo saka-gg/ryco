@@ -264,6 +264,35 @@ describe("SidebarWorktreeList", () => {
     expect(document.body.textContent).not.toContain("#101");
   });
 
+  it("loads the linked item dialog the first time a badge opens it", async () => {
+    await page.viewport(1_280, 800);
+    await render(
+      <SidebarWorktreeList
+        attachThreadListAutoAnimateRef={() => undefined}
+        projectExpanded
+        resolveThreadGitStatusTarget={() => null}
+        renderThread={(thread) => <div>{thread.title}</div>}
+        treeProject={makeLinkedIssueAndPrTreeProject()}
+        visibleThreadKeys={null}
+        onCopyWorktreePath={vi.fn()}
+        onWorkspaceAction={vi.fn()}
+        onNewSession={vi.fn()}
+        onOpenInEditor={vi.fn()}
+        onOpenWorktree={vi.fn()}
+        onRenameWorktree={vi.fn()}
+      />,
+    );
+
+    // Nothing of the dialog is mounted while the sidebar renders.
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+
+    await page.getByLabelText("Pull request #202 — Open").click();
+
+    await expect
+      .element(page.getByRole("dialog", { name: "Pull request #202" }))
+      .toBeInTheDocument();
+  });
+
   it("keeps a badge's Enter and Space from toggling its workspace row", async () => {
     await render(
       <SidebarWorktreeList

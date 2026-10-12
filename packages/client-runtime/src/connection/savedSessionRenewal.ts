@@ -1,5 +1,5 @@
 import type { AuthBearerBootstrapResult, AuthSessionState, EnvironmentId } from "@ryco/contracts";
-import { DateTime } from "effect";
+import * as DateTime from "effect/DateTime";
 
 import { isRemoteEnvironmentAuthHttpError } from "./remoteApi.ts";
 import {

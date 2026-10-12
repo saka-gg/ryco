@@ -3,6 +3,7 @@ import type {
   ExecutionEnvironmentDescriptor,
   OrchestrationShellSnapshot,
   OrchestrationShellStreamEvent,
+  OrchestrationShellThreadPrioritiesItem,
   ServerConfig,
   ServerConfigStreamEvent,
   ServerLifecycleWelcomePayload,
@@ -55,6 +56,14 @@ export interface OrchestrationHandlers {
   ) => void;
   readonly applyTerminalEvent: (event: TerminalEvent, environmentId: EnvironmentId) => void;
   /**
+   * Applies a thread-priority ranking. When provided, the connection asks the
+   * server for these small items instead of a full shell snapshot per ranking.
+   */
+  readonly applyThreadPriorities?: (
+    item: OrchestrationShellThreadPrioritiesItem,
+    environmentId: EnvironmentId,
+  ) => void;
+  /**
    * The last shell sequence applied for this environment. When provided, a
    * replacement subscription asks the server to resume after it instead of
    * resending the whole shell, and the projection is reset only if a snapshot
@@ -66,12 +75,21 @@ export interface OrchestrationHandlers {
   readonly onShellResumed?: (environmentId: EnvironmentId) => void;
 }
 
+export interface RefreshMetadataContext {
+  /**
+   * The full config snapshot the replacement config subscription delivers
+   * after the reconnect began (or already delivered). Never rejects; it stays
+   * pending while no snapshot arrives, so callers bound their wait.
+   */
+  readonly configSnapshot: Promise<ServerConfig>;
+}
+
 export interface EnvironmentConnectionInput extends OrchestrationHandlers {
   readonly kind: "primary" | "saved";
   readonly knownEnvironment: KnownEnvironment;
   readonly client: WsRpcClient;
   readonly pushSequenceMonitor: PushSequenceMonitor;
-  readonly refreshMetadata?: () => Promise<void>;
+  readonly refreshMetadata?: (context: RefreshMetadataContext) => Promise<void>;
   readonly onConfigUpdated?: (
     config: ServerConfig,
     source: ServerConfigStreamEvent["type"],
@@ -81,6 +99,21 @@ export interface EnvironmentConnectionInput extends OrchestrationHandlers {
   readonly onShellError?: (environmentId: EnvironmentId) => void;
   /** Runs once the connection is disposed: what its owner keeps running for it stops with it. */
   readonly onDispose?: () => void;
+}
+
+/** The next config snapshot, for a reconnect's metadata refresh to reuse. */
+function createConfigSnapshotWaiter() {
+  let resolve: ((config: ServerConfig) => void) | null = null;
+  const promise = new Promise<ServerConfig>((nextResolve) => {
+    resolve = nextResolve;
+  });
+  return {
+    promise,
+    resolve: (config: ServerConfig) => {
+      resolve?.(config);
+      resolve = null;
+    },
+  };
 }
 
 function createBootstrapGate() {
@@ -145,6 +178,9 @@ export function createEnvironmentConnection(
   const shouldObserveLifecycle = input.kind === "saved" || input.onWelcome !== undefined;
   const shouldObserveConfig = input.kind === "saved" || input.onConfigUpdated !== undefined;
   let observedConfig: ServerConfig | null = null;
+  // Re-armed when a reconnect begins: the replacement subscription's first
+  // item is a full snapshot, which the metadata refresh reuses.
+  let configSnapshotWaiter = createConfigSnapshotWaiter();
   const observeEnvironmentIdentity = (nextEnvironmentId: EnvironmentId, source: string) => {
     if (environmentId !== nextEnvironmentId) {
       throw new Error(
@@ -203,6 +239,7 @@ export function createEnvironmentConnection(
           const nextConfig = projectServerConfigEvent(observedConfig, normalizedEvent);
           if (!nextConfig) return;
           observedConfig = nextConfig;
+          if (normalizedEvent.type === "snapshot") configSnapshotWaiter.resolve(nextConfig);
           input.onConfigUpdated?.(nextConfig, normalizedEvent.type);
         },
         {
@@ -246,10 +283,15 @@ export function createEnvironmentConnection(
         notifyShellReadiness();
         return;
       }
+      if (item.kind === "thread-priorities") {
+        input.applyThreadPriorities?.(item, environmentId);
+        return;
+      }
       input.pushSequenceMonitor.recordEvent(environmentId, item.sequence);
       input.applyShellEvent(item, environmentId);
     },
     {
+      ...(input.applyThreadPriorities === undefined ? {} : { threadPriorities: "delta" as const }),
       ...(readShellResumeSequence === undefined
         ? {}
         : {
@@ -318,10 +360,13 @@ export function createEnvironmentConnection(
       bootstrapGate.reset();
       invalidateShellReadiness();
       deviceBinding?.reconnecting();
+      const configSnapshot = createConfigSnapshotWaiter();
+      configSnapshotWaiter = configSnapshot;
       try {
+        // The simulator pane re-reads the inventory itself when the device
+        // generation changes; nothing here waits on simulator discovery.
         await input.client.reconnect();
-        await deviceBinding?.refreshInventory();
-        await input.refreshMetadata?.();
+        await input.refreshMetadata?.({ configSnapshot: configSnapshot.promise });
         await bootstrapGate.wait();
       } catch (error) {
         bootstrapGate.reject(error);

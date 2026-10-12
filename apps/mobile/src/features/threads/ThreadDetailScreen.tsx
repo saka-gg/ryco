@@ -432,7 +432,8 @@ export function ThreadDetailScreen(props: {
   // this node authoritative for the active task.
   useEffect(() => {
     useStore.getState().setActiveEnvironmentId(environmentId);
-    return retainThreadDetailSubscription(environmentId, threadId);
+    // The open view: provider history recovery follows it, never a prewarm.
+    return retainThreadDetailSubscription(environmentId, threadId, { view: true });
   }, [environmentId, threadId]);
 
   // Wave 3a: opening a thread is the ONLY thing in the app that re-targets the

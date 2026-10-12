@@ -1,4 +1,4 @@
-import { IconGitFork } from "@tabler/icons-react-native";
+import { IconGitFork } from "../../components/icons";
 import {
   defaultThreadForkBaseRef,
   THREAD_FORK_COPY,

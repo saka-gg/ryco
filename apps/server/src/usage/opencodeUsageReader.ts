@@ -11,7 +11,7 @@ import type { UsageSourceStatus } from "@ryco/contracts";
 import { readBoundedUsageFile } from "./usageFileReader.ts";
 import { withTokenTotal, type UsageRecord } from "./usageRecord.ts";
 import {
-  anonymizeUsageRecord,
+  anonymizeScanCachedUsageRecord,
   deduplicateUsageRecordsWithinFile,
   usageCacheFileKey,
   usageCacheRootKey,
@@ -179,7 +179,7 @@ export async function readOpenCodeUsage(input: {
   };
   const accept = (value: unknown, identity?: Parameters<typeof parseOpenCodeUsageMessage>[1]) => {
     const result = parseOpenCodeUsageMessage(value, identity);
-    if (result.kind === "record") records.push(anonymizeUsageRecord(result.record));
+    if (result.kind === "record") records.push(anonymizeScanCachedUsageRecord(result.record));
     else if (result.kind === "malformed") {
       malformed++;
       diagnostic ??= "history-record-invalid";

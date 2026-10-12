@@ -28,10 +28,11 @@ import {
 /**
  * Atom-backed replacement for the former `useQuery(projectSearchEntriesQueryOptions(...))`.
  *
- * Preserves the prior observable behavior: results for a given
- * environment/cwd scope are retained while a new query loads, requests are
- * gated until an environment, cwd, and non-empty query are present, and the
- * scope refetches when invalidated through `invalidateProjectSearchEntries`.
+ * Results for a given environment/cwd scope are retained while a new query
+ * loads, and requests are gated until an environment and cwd are present (an
+ * empty query lists top-level entries and warms the server index). Only an
+ * enabled observer (an open path menu) refetches when the scope is invalidated
+ * through `invalidateProjectSearchEntries`; closed ones refetch on next use.
  */
 export function useProjectSearchEntries(
   input: ProjectSearchEntriesInput,
@@ -40,7 +41,7 @@ export function useProjectSearchEntries(
   const { environmentId, cwd, query, enabled, limit, staleTime } = input;
 
   useEffect(() => {
-    if (environmentId === null || cwd === null) {
+    if (environmentId === null || cwd === null || enabled === false) {
       return;
     }
     const scope = {
@@ -50,7 +51,7 @@ export function useProjectSearchEntries(
     };
     retainProjectSearchEntriesScope(scope);
     return () => releaseProjectSearchEntriesScope(scope);
-  }, [environmentId, cwd, limit]);
+  }, [environmentId, cwd, limit, enabled]);
 
   useEffect(() => {
     requestProjectSearchEntries({

@@ -200,7 +200,7 @@ export const makeTraceSink = Effect.fn("makeTraceSink")(function* (options: Trac
     if (buffer.length > 0) {
       await flushOnce({ scheduleRetry: false });
     }
-    await sink.flush();
+    await sink.close();
   };
 
   const flushAll = async (): Promise<void> => {

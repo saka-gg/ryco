@@ -11,12 +11,23 @@ import { useMobileHostedConnectionsStore } from "../../hostedHub/state";
 import { readEnvironmentApi } from "../../connection/environmentApi";
 import { selectCacheHydratedEnvironmentIds, useStore } from "../../state/threadsRuntime";
 import { useSavedEnvironments } from "../connection/useConnectionController";
-import { buildHomeEnvironments } from "./homeEnvironmentModel";
+import {
+  buildHomeEnvironments,
+  homeLastSeenClock,
+  selectShellCurrentByEnvironmentId,
+} from "./homeEnvironmentModel";
 import { deriveNodeTrustByEnvironment } from "./nodeTrustModel";
 import { useAuthoritativeNodeTrust } from "./useAuthoritativeNodeTrust";
 import { buildMobileNativeWorkspaceCatalog } from "./nativeWorkspaceCatalogModel";
 
-export function useHomeEnvironments() {
+export function useHomeEnvironments(options?: {
+  /**
+   * A clock the calling screen keeps ticking. Without it a cached Hub node's
+   * "Offline · last seen …" text is computed once and only refreshes when the
+   * list itself changes.
+   */
+  readonly nowMs?: number;
+}) {
   const { rows: directRows } = useSavedEnvironments();
   const hosted = useMobileHostedConnectionsStore(
     useShallow((state) => ({
@@ -29,7 +40,7 @@ export function useHomeEnvironments() {
   // against; cache-provenance ids mark which environments are last-known state.
   const rosterNodes = useSyncExternalStore(subscribeCachedHubNodeRoster, getCachedHubNodeRoster);
   const cacheProvenanceEnvironmentIds = useStore(useShallow(selectCacheHydratedEnvironmentIds));
-  const environmentStateById = useStore((state) => state.environmentStateById);
+  const shellCurrentByEnvironmentId = useStore(useShallow(selectShellCurrentByEnvironmentId));
   const primaryDescriptor = usePrimaryEnvironmentDescriptor();
   const serverConfigs = useEnvironmentServerConfigs();
   // Wave 4: trust is keyed by the roster's Hub-minted node id, which is why the
@@ -51,6 +62,7 @@ export function useHomeEnvironments() {
       }),
     [authoritativeTrustByEnvironmentId, hosted, rosterNodes],
   );
+  const lastSeenNow = homeLastSeenClock(options?.nowMs, rosterNodes.length);
   const eligibleHostedEnvironmentIds = useMemo(
     () =>
       new Set(
@@ -72,7 +84,7 @@ export function useHomeEnvironments() {
           role: row.runtime.role,
           threadSnoozeSupported: row.runtime.descriptor?.capabilities.threadSnooze ?? false,
           threadSettlementSupported: row.runtime.descriptor?.capabilities.threadSettlement ?? false,
-          shellCurrent: environmentStateById[row.record.environmentId]?.bootstrapComplete === true,
+          shellCurrent: shellCurrentByEnvironmentId[row.record.environmentId] === true,
           apiAvailable: readEnvironmentApi(row.record.environmentId) !== undefined,
         })),
         hosted: hosted.selectedNodes
@@ -93,8 +105,7 @@ export function useHomeEnvironments() {
                 ? primaryDescriptor.capabilities.threadSettlement
                 : (readEnvironmentDescriptor(connection.environmentId)?.capabilities
                     .threadSettlement ?? false),
-            shellCurrent:
-              environmentStateById[connection.environmentId]?.bootstrapComplete === true,
+            shellCurrent: shellCurrentByEnvironmentId[connection.environmentId] === true,
             apiAvailable: readEnvironmentApi(connection.environmentId) !== undefined,
           })),
         cachedHubNodes: rosterNodes
@@ -111,16 +122,18 @@ export function useHomeEnvironments() {
         cacheProvenanceEnvironmentIds,
         deliveryUnknownEnvironmentIds: hosted.deliveryUnknownEnvironmentIds,
         trustByEnvironmentId,
+        ...(lastSeenNow === undefined ? {} : { now: lastSeenNow }),
       }),
     [
       cacheProvenanceEnvironmentIds,
       directRows,
       eligibleHostedEnvironmentIds,
-      environmentStateById,
       hosted,
+      lastSeenNow,
       primaryDescriptor,
       serverConfigs,
       rosterNodes,
+      shellCurrentByEnvironmentId,
       trustByEnvironmentId,
     ],
   );

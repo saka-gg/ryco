@@ -65,6 +65,7 @@ export function addUsageTokenTotals(
   };
 }
 
-export function mightCarryUsage(line: string, provider: UsageProviderKind): boolean {
-  return provider === "claude" ? line.includes('"usage"') : line.includes('"token_count"');
+/** A transcript line without this marker cannot carry a usage record. */
+export function usageLineMarker(provider: UsageProviderKind): string {
+  return provider === "claude" ? '"usage"' : '"token_count"';
 }

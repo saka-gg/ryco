@@ -1,0 +1,518 @@
+import {
+  EnvironmentId,
+  ProjectId,
+  ProviderInstanceId,
+  ThreadId,
+  WorktreeId,
+  type OrchestrationEvent,
+  type OrchestrationShellSnapshot,
+} from "@ryco/contracts";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
+
+import { deepFreeze } from "../../../test/deepFreeze.ts";
+import { createEnvironmentEventBatcher } from "./eventBatching.ts";
+import {
+  applyShellEvent,
+  registerThreadStoreMutationBarrier,
+  selectProjectsAcrossEnvironments,
+  selectSidebarThreadsAcrossEnvironments,
+  selectSidebarThreadsForProjectRefs,
+  selectSidebarWorktreesAcrossEnvironments,
+  selectThreadShellsAcrossEnvironments,
+  syncServerShellSnapshot,
+  useStore,
+  type AppState,
+} from "./store.ts";
+
+const environmentId = EnvironmentId.make("environment-sharing");
+const otherEnvironmentId = EnvironmentId.make("environment-other");
+const projectId = ProjectId.make("project-1");
+const otherProjectId = ProjectId.make("project-2");
+
+function makeThreadShell(id: string, overrides: Record<string, unknown> = {}) {
+  return {
+    id: ThreadId.make(id),
+    projectId,
+    title: `Thread ${id}`,
+    modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+    runtimeMode: "full-access" as const,
+    interactionMode: "default" as const,
+    branch: null,
+    worktreePath: null,
+    worktreeId: null,
+    manualStatusBucket: null,
+    manualPosition: 0,
+    latestTurn: null,
+    createdAt: "2026-10-01T00:00:00.000Z",
+    updatedAt: "2026-10-01T00:00:00.000Z",
+    archivedAt: null,
+    settledOverride: null,
+    settledAt: null,
+    session: null,
+    latestUserMessageAt: null,
+    hasPendingApprovals: false,
+    hasPendingUserInput: false,
+    hasActionableProposedPlan: false,
+    ...overrides,
+  };
+}
+
+function makeSnapshot(
+  threads: ReadonlyArray<ReturnType<typeof makeThreadShell>>,
+  sequence = 1,
+): OrchestrationShellSnapshot {
+  return {
+    snapshotSequence: sequence,
+    projects: [projectId, otherProjectId].map((id) => ({
+      id,
+      title: `Project ${id}`,
+      workspaceRoot: `/tmp/${id}`,
+      defaultModelSelection: null,
+      scripts: [],
+      createdAt: "2026-10-01T00:00:00.000Z",
+      updatedAt: "2026-10-01T00:00:00.000Z",
+    })),
+    worktrees: [
+      {
+        worktreeId: WorktreeId.make("worktree-1"),
+        projectId,
+        title: null,
+        branch: "feature",
+        worktreePath: "/tmp/project-1-feature",
+        origin: "branch",
+        prNumber: null,
+        issueNumber: null,
+        prTitle: null,
+        issueTitle: null,
+        createdAt: "2026-10-01T00:00:00.000Z",
+        updatedAt: "2026-10-01T00:00:00.000Z",
+        archivedAt: null,
+        manualPosition: 0,
+      },
+    ],
+    threads,
+    updatedAt: "2026-10-01T00:00:00.000Z",
+  } as unknown as OrchestrationShellSnapshot;
+}
+
+const emptyState: AppState = { activeEnvironmentId: null, environmentStateById: {} };
+
+function environmentOf(state: AppState) {
+  return state.environmentStateById[environmentId]!;
+}
+
+describe("shell snapshot structural sharing", () => {
+  it("keeps every row object and container when an identical snapshot is re-applied", () => {
+    const threads = [makeThreadShell("a"), makeThreadShell("b")];
+    const first = syncServerShellSnapshot(emptyState, makeSnapshot(threads), environmentId);
+    const second = syncServerShellSnapshot(first, makeSnapshot(threads, 2), environmentId);
+    const before = environmentOf(first);
+    const after = environmentOf(second);
+
+    expect(after.threadIds).toBe(before.threadIds);
+    expect(after.threadIdsByProjectId).toBe(before.threadIdsByProjectId);
+    expect(after.threadShellById).toBe(before.threadShellById);
+    expect(after.threadSessionById).toBe(before.threadSessionById);
+    expect(after.threadTurnStateById).toBe(before.threadTurnStateById);
+    expect(after.sidebarThreadSummaryById).toBe(before.sidebarThreadSummaryById);
+    expect(after.projectIds).toBe(before.projectIds);
+    expect(after.projectById).toBe(before.projectById);
+    expect(after.worktreeIds).toBe(before.worktreeIds);
+    expect(after.worktreeById).toBe(before.worktreeById);
+    expect(selectSidebarThreadsAcrossEnvironments(second)).toBe(
+      selectSidebarThreadsAcrossEnvironments(first),
+    );
+  });
+
+  it("replaces only the rows that changed", () => {
+    const first = syncServerShellSnapshot(
+      emptyState,
+      makeSnapshot([makeThreadShell("a"), makeThreadShell("b")]),
+      environmentId,
+    );
+    const second = syncServerShellSnapshot(
+      first,
+      makeSnapshot([makeThreadShell("a"), makeThreadShell("b", { title: "Renamed" })], 2),
+      environmentId,
+    );
+    const before = environmentOf(first);
+    const after = environmentOf(second);
+    const a = ThreadId.make("a");
+    const b = ThreadId.make("b");
+
+    expect(after.threadIds).toBe(before.threadIds);
+    expect(after.sidebarThreadSummaryById).not.toBe(before.sidebarThreadSummaryById);
+    expect(after.sidebarThreadSummaryById[a]).toBe(before.sidebarThreadSummaryById[a]);
+    expect(after.threadShellById[a]).toBe(before.threadShellById[a]);
+    expect(after.sidebarThreadSummaryById[b]).not.toBe(before.sidebarThreadSummaryById[b]);
+    expect(after.sidebarThreadSummaryById[b]?.title).toBe("Renamed");
+    // The unchanged session and turn records keep their containers.
+    expect(after.threadSessionById).toBe(before.threadSessionById);
+    expect(after.threadTurnStateById).toBe(before.threadTurnStateById);
+
+    const rows = selectSidebarThreadsAcrossEnvironments(second);
+    expect(rows).not.toBe(selectSidebarThreadsAcrossEnvironments(first));
+    expect(rows[0]).toBe(before.sidebarThreadSummaryById[a]);
+  });
+
+  it("drops rows that left the snapshot", () => {
+    const first = syncServerShellSnapshot(
+      emptyState,
+      makeSnapshot([makeThreadShell("a"), makeThreadShell("b")]),
+      environmentId,
+    );
+    const second = syncServerShellSnapshot(
+      first,
+      makeSnapshot([makeThreadShell("a")], 2),
+      environmentId,
+    );
+    const after = environmentOf(second);
+    expect(after.threadIds).toEqual([ThreadId.make("a")]);
+    expect(Object.keys(after.sidebarThreadSummaryById)).toEqual(["a"]);
+    expect(selectSidebarThreadsAcrossEnvironments(second).map((thread) => thread.id)).toEqual([
+      "a",
+    ]);
+  });
+});
+
+describe("published state immutability", () => {
+  // Snapshot capture (mobile) skips writes when the id lists and row records
+  // keep their identity; that is only sound if no transition mutates a
+  // container it has already published.
+  it("never mutates published containers on shell events or snapshot re-application", () => {
+    const first = deepFreeze(
+      syncServerShellSnapshot(
+        emptyState,
+        makeSnapshot([makeThreadShell("a"), makeThreadShell("b")]),
+        environmentId,
+      ),
+    );
+    const upserted = applyShellEvent(
+      first,
+      {
+        kind: "thread-upserted",
+        sequence: 2,
+        thread: makeThreadShell("a", { title: "Renamed", updatedAt: "2026-10-02T00:00:00.000Z" }),
+      } as never,
+      environmentId,
+    );
+    const added = deepFreeze(
+      applyShellEvent(
+        deepFreeze(upserted),
+        { kind: "thread-upserted", sequence: 3, thread: makeThreadShell("c") } as never,
+        environmentId,
+      ),
+    );
+    const removed = deepFreeze(
+      applyShellEvent(
+        added,
+        { kind: "thread-removed", sequence: 4, threadId: "b" } as never,
+        environmentId,
+      ),
+    );
+    const resynced = syncServerShellSnapshot(
+      removed,
+      makeSnapshot([makeThreadShell("a", { title: "Renamed again" }), makeThreadShell("d")], 5),
+      environmentId,
+    );
+
+    expect(environmentOf(first).threadShellById[ThreadId.make("a")]?.title).toBe("Thread a");
+    expect(environmentOf(upserted).threadShellById[ThreadId.make("a")]?.title).toBe("Renamed");
+    expect(environmentOf(removed).threadIds).toEqual([ThreadId.make("a"), ThreadId.make("c")]);
+    expect(environmentOf(resynced).threadIds).toEqual([ThreadId.make("a"), ThreadId.make("d")]);
+    // Untouched slices keep their identity across the upsert.
+    expect(environmentOf(upserted).projectById).toBe(environmentOf(first).projectById);
+    expect(environmentOf(upserted).worktreeById).toBe(environmentOf(first).worktreeById);
+  });
+});
+
+describe("slice-memoized selectors", () => {
+  it("return the previous array while the selected slices are unchanged", () => {
+    const state = syncServerShellSnapshot(
+      emptyState,
+      makeSnapshot([makeThreadShell("a"), makeThreadShell("b")]),
+      environmentId,
+    );
+    const threads = selectSidebarThreadsAcrossEnvironments(state);
+    const projects = selectProjectsAcrossEnvironments(state);
+    const worktrees = selectSidebarWorktreesAcrossEnvironments(state);
+    const shells = selectThreadShellsAcrossEnvironments(state);
+    const refs = [
+      { environmentId, projectId },
+      { environmentId, projectId: otherProjectId },
+    ];
+    const projectThreads = selectSidebarThreadsForProjectRefs(state, refs);
+
+    // A new environment record that only touches thread-detail content (the
+    // shape of every streaming delta commit).
+    const unrelated: AppState = {
+      ...state,
+      environmentStateById: {
+        ...state.environmentStateById,
+        [environmentId]: { ...environmentOf(state), messageIdsByThreadId: {} },
+      },
+    };
+    expect(selectSidebarThreadsAcrossEnvironments(unrelated)).toBe(threads);
+    expect(selectProjectsAcrossEnvironments(unrelated)).toBe(projects);
+    expect(selectSidebarWorktreesAcrossEnvironments(unrelated)).toBe(worktrees);
+    expect(selectThreadShellsAcrossEnvironments(unrelated)).toBe(shells);
+    expect(selectSidebarThreadsForProjectRefs(unrelated, refs)).toBe(projectThreads);
+    expect(threads.map((thread) => thread.id)).toEqual(["a", "b"]);
+    expect(projectThreads.map((thread) => thread.id)).toEqual(["a", "b"]);
+  });
+
+  it("combine environments and follow environment removal", () => {
+    const local = syncServerShellSnapshot(
+      emptyState,
+      makeSnapshot([makeThreadShell("a")]),
+      environmentId,
+    );
+    const both = syncServerShellSnapshot(
+      local,
+      makeSnapshot([makeThreadShell("remote")]),
+      otherEnvironmentId,
+    );
+    expect(selectSidebarThreadsAcrossEnvironments(both).map((thread) => thread.id)).toEqual([
+      "a",
+      "remote",
+    ]);
+    const { [otherEnvironmentId]: _removed, ...rest } = both.environmentStateById;
+    const removed: AppState = { ...both, environmentStateById: rest };
+    expect(selectSidebarThreadsAcrossEnvironments(removed).map((thread) => thread.id)).toEqual([
+      "a",
+    ]);
+  });
+});
+
+describe("environment event batcher", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function makeBatcher(options: { maxPendingEvents?: number } = {}) {
+    const frames: Array<() => void> = [];
+    const applied: Array<{ environmentId: EnvironmentId; events: string[] }> = [];
+    const batcher = createEnvironmentEventBatcher<string>({
+      apply: (id, events) => applied.push({ environmentId: id, events: [...events] }),
+      scheduleFrame: (callback) => frames.push(callback),
+      scheduleFallback: () => undefined,
+      registerStoreBarrier: false,
+      ...(options.maxPendingEvents !== undefined
+        ? { maxPendingEvents: options.maxPendingEvents }
+        : {}),
+    });
+    return { batcher, frames, applied };
+  }
+
+  it("applies one batch per environment run per frame, in arrival order", () => {
+    const { batcher, frames, applied } = makeBatcher();
+    batcher.enqueue(environmentId, "1");
+    batcher.enqueue(environmentId, "2");
+    batcher.enqueue(otherEnvironmentId, "3");
+    batcher.enqueue(environmentId, "4");
+    expect(applied).toEqual([]);
+    expect(frames).toHaveLength(1);
+    frames[0]!();
+    expect(applied).toEqual([
+      { environmentId, events: ["1", "2"] },
+      { environmentId: otherEnvironmentId, events: ["3"] },
+      { environmentId, events: ["4"] },
+    ]);
+    expect(batcher.hasPending()).toBe(false);
+  });
+
+  it("applies synchronously once the pending bound is reached", () => {
+    const { batcher, applied } = makeBatcher({ maxPendingEvents: 2 });
+    batcher.enqueue(environmentId, "1");
+    expect(applied).toEqual([]);
+    batcher.enqueue(environmentId, "2");
+    expect(applied).toEqual([{ environmentId, events: ["1", "2"] }]);
+  });
+
+  it("falls back to a timer when no frame runs", () => {
+    vi.useFakeTimers();
+    const applied: string[][] = [];
+    const batcher = createEnvironmentEventBatcher<string>({
+      apply: (_id, events) => applied.push([...events]),
+      scheduleFrame: () => undefined,
+      fallbackDelayMs: 50,
+      registerStoreBarrier: false,
+    });
+    batcher.enqueue(environmentId, "1");
+    vi.advanceTimersByTime(49);
+    expect(applied).toEqual([]);
+    vi.advanceTimersByTime(1);
+    expect(applied).toEqual([["1"]]);
+    batcher.dispose();
+  });
+
+  it("flushes buffered events before any other store mutation", () => {
+    const order: string[] = [];
+    const batcher = createEnvironmentEventBatcher<string>({
+      apply: (_id, events) => order.push(...events.map((event) => `event:${event}`)),
+      scheduleFrame: () => undefined,
+      scheduleFallback: () => undefined,
+    });
+    try {
+      batcher.enqueue(environmentId, "1");
+      batcher.enqueue(environmentId, "2");
+      useStore.getState().setActiveEnvironmentId(environmentId);
+      order.push("mutation");
+      expect(order).toEqual(["event:1", "event:2", "mutation"]);
+    } finally {
+      batcher.dispose();
+    }
+  });
+
+  it("keeps applying later batches when one batch throws", () => {
+    const applied: string[] = [];
+    const reportError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const batcher = createEnvironmentEventBatcher<string>({
+        apply: (id, events) => {
+          if (id === environmentId) throw new Error("bad batch");
+          applied.push(...events);
+        },
+        scheduleFrame: () => undefined,
+        scheduleFallback: () => undefined,
+        registerStoreBarrier: false,
+      });
+      batcher.enqueue(environmentId, "1");
+      batcher.enqueue(otherEnvironmentId, "2");
+      expect(() => batcher.flush()).not.toThrow();
+      expect(applied).toEqual(["2"]);
+      expect(reportError).toHaveBeenCalledTimes(1);
+    } finally {
+      reportError.mockRestore();
+    }
+  });
+
+  it("keeps scheduling frames after an event arrives while a batch applies", () => {
+    const frames: Array<() => void> = [];
+    const applied: string[][] = [];
+    let enqueueDuringApply: string | null = "late";
+    const batcher: ReturnType<typeof createEnvironmentEventBatcher<string>> =
+      createEnvironmentEventBatcher<string>({
+        apply: (_id, events) => {
+          applied.push([...events]);
+          if (enqueueDuringApply !== null) {
+            const event = enqueueDuringApply;
+            enqueueDuringApply = null;
+            batcher.enqueue(environmentId, event);
+          }
+        },
+        scheduleFrame: (callback) => frames.push(callback),
+        scheduleFallback: () => undefined,
+        registerStoreBarrier: false,
+      });
+    batcher.enqueue(environmentId, "1");
+    frames.shift()!();
+    // The late event was drained by the same flush; its scheduled run is stale.
+    expect(applied).toEqual([["1"], ["late"]]);
+    for (const frame of frames.splice(0)) frame();
+
+    batcher.enqueue(environmentId, "2");
+    expect(frames).toHaveLength(1);
+    frames.shift()!();
+    expect(applied).toEqual([["1"], ["late"], ["2"]]);
+  });
+
+  it("re-enters safely when applying a batch mutates the store", () => {
+    const applied: string[] = [];
+    const unregister = registerThreadStoreMutationBarrier(() => undefined);
+    const batcher = createEnvironmentEventBatcher<string>({
+      apply: (_id, events) => {
+        applied.push(...events);
+        useStore.getState().setActiveEnvironmentId(environmentId);
+      },
+      scheduleFrame: () => undefined,
+      scheduleFallback: () => undefined,
+    });
+    try {
+      batcher.enqueue(environmentId, "1");
+      batcher.enqueue(environmentId, "2");
+      batcher.flush();
+      expect(applied).toEqual(["1", "2"]);
+      expect(batcher.hasPending()).toBe(false);
+    } finally {
+      batcher.dispose();
+      unregister();
+    }
+  });
+});
+
+describe("frame-batched orchestration events", () => {
+  afterEach(() => {
+    useStore.setState({ activeEnvironmentId: null, environmentStateById: {} });
+  });
+
+  function messageSent(sequence: number, threadId: string) {
+    return {
+      sequence,
+      eventId: `event-${sequence}`,
+      aggregateKind: "thread",
+      aggregateId: threadId,
+      occurredAt: "2026-10-01T00:00:00.000Z",
+      commandId: null,
+      causationEventId: null,
+      correlationId: null,
+      metadata: {},
+      type: "thread.message-sent",
+      payload: {
+        threadId,
+        messageId: `message-${sequence}`,
+        role: "assistant",
+        text: `delta ${sequence}`,
+        turnId: "turn-1",
+        streaming: false,
+        createdAt: "2026-10-01T00:00:00.000Z",
+        updatedAt: "2026-10-01T00:00:00.000Z",
+      },
+    } as unknown as OrchestrationEvent;
+  }
+
+  it("loses only the failing event of a batch, not the whole batch", () => {
+    useStore
+      .getState()
+      .syncServerShellSnapshot(
+        makeSnapshot([makeThreadShell("a"), makeThreadShell("b")]),
+        environmentId,
+      );
+    // A malformed event makes the reducer throw.
+    const malformed = {
+      ...messageSent(3, "a"),
+      type: "project.created",
+      payload: null,
+    } as unknown as OrchestrationEvent;
+    const reportError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      useStore
+        .getState()
+        .applyOrchestrationEvents(
+          [messageSent(2, "a"), malformed, messageSent(4, "b")],
+          environmentId,
+        );
+      expect(reportError).toHaveBeenCalledTimes(1);
+    } finally {
+      reportError.mockRestore();
+    }
+
+    const environment = useStore.getState().environmentStateById[environmentId]!;
+    expect(environment.messageIdsByThreadId[ThreadId.make("a")]).toEqual(["message-2"]);
+    expect(environment.messageIdsByThreadId[ThreadId.make("b")]).toEqual(["message-4"]);
+  });
+
+  it("still throws a lone failing event to the caller", () => {
+    useStore
+      .getState()
+      .syncServerShellSnapshot(makeSnapshot([makeThreadShell("a")]), environmentId);
+    const malformed = {
+      ...messageSent(2, "a"),
+      type: "project.created",
+      payload: null,
+    } as unknown as OrchestrationEvent;
+    expect(() =>
+      useStore.getState().applyOrchestrationEvents([malformed], environmentId),
+    ).toThrow();
+  });
+});

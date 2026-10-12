@@ -1,10 +1,10 @@
 import type { AppLifecycleService } from "@ryco/client-runtime/platform";
+import type { RelayE2eeProvider } from "@ryco/client-runtime/relay";
 import {
   makeRelayE2eeInitiator,
   type RelayE2eeInitiator,
   type RelayE2eeInitiatorAttempt,
-  type RelayE2eeProvider,
-} from "@ryco/client-runtime/relay";
+} from "@ryco/client-runtime/relay/e2ee";
 
 import { mobileAppLifecycle } from "./appLifecycle";
 

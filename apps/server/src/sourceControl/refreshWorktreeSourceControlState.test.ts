@@ -1,3 +1,7 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
 import {
   ProjectId,
   SourceControlProviderError,
@@ -22,6 +26,7 @@ import {
   refreshWorktreeSourceControlState,
   resetWorktreePullRequestDiscoveryForTests,
   type DiscoveredPullRequest,
+  type KnownPullRequestState,
 } from "./refreshWorktreeSourceControlState.ts";
 
 type LinksCommand = Extract<OrchestrationCommand, { type: "worktree.pull-requests.update" }>;
@@ -583,6 +588,140 @@ describe("several pull requests per workspace", () => {
       );
       assert.equal(result.discoverCalls(), 0);
       assert.equal(result.commands.length, 0);
+    }),
+  );
+});
+
+describe("checkouts missing on disk", () => {
+  const failingRegistry = (provider: SourceControlProviderShape) => ({
+    ...makeRegistry(provider),
+    resolve: () =>
+      Effect.fail(
+        new SourceControlProviderError({
+          provider: "unknown",
+          operation: "detectProvider",
+          detail: "ENOENT: no such file or directory",
+        }),
+      ),
+  });
+
+  it.effect("records a deleted checkout once and stops asking the forge", () =>
+    Effect.gen(function* () {
+      const parent = mkdtempSync(path.join(os.tmpdir(), "ryco-missing-checkout-"));
+      const checkout = path.join(parent, "deleted-workspace");
+      const dispatchRef = yield* Ref.make<ReadonlyArray<OrchestrationCommand>>([]);
+      let forgeCalls = 0;
+      const provider = makeProvider({
+        getPullRequestState: () =>
+          Effect.sync(() => {
+            forgeCalls += 1;
+            return { state: "open" as const, isDraft: false };
+          }),
+      });
+      const run = refreshWorktreeSourceControlState({ worktreeId }).pipe(
+        Effect.provideService(
+          ProjectionWorktreeRepository,
+          makeWorktreeRepo({ ...baseWorktree, worktreePath: checkout }),
+        ),
+        Effect.provideService(SourceControlProviderRegistry, failingRegistry(provider)),
+        Effect.provideService(OrchestrationEngineService, makeEngine(dispatchRef)),
+      );
+
+      yield* run;
+      yield* run;
+
+      const removals = (yield* Ref.get(dispatchRef)).filter(
+        (command) => command.type === "worktree.checkout.remove",
+      );
+      assert.equal(removals.length, 1);
+      assert.deepInclude(removals[0], { worktreeId, reason: "missing" });
+      assert.equal(forgeCalls, 0);
+      rmSync(parent, { recursive: true, force: true });
+    }),
+  );
+
+  it.effect("leaves a checkout alone when its parent is missing too (an unmounted volume)", () =>
+    Effect.gen(function* () {
+      const dispatchRef = yield* Ref.make<ReadonlyArray<OrchestrationCommand>>([]);
+      const exit = yield* refreshWorktreeSourceControlState({ worktreeId }).pipe(
+        Effect.provideService(
+          ProjectionWorktreeRepository,
+          makeWorktreeRepo({
+            ...baseWorktree,
+            worktreePath: path.join(os.tmpdir(), "ryco-no-such-volume", "workspace"),
+          }),
+        ),
+        Effect.provideService(SourceControlProviderRegistry, failingRegistry(makeProvider({}))),
+        Effect.provideService(OrchestrationEngineService, makeEngine(dispatchRef)),
+        Effect.exit,
+      );
+
+      assert.isTrue(exit._tag === "Failure");
+      assert.equal((yield* Ref.get(dispatchRef)).length, 0);
+    }),
+  );
+});
+
+describe("link refreshes", () => {
+  const openLinkedWorktree: ProjectionWorktree = {
+    ...baseWorktree,
+    prState: "open",
+    prIsDraft: false,
+  };
+
+  it.effect("skips re-reading an open link the caller already knows is still open", () =>
+    Effect.gen(function* () {
+      const dispatchRef = yield* Ref.make<ReadonlyArray<OrchestrationCommand>>([]);
+      const reads: number[] = [];
+      const provider = makeProvider({
+        getPullRequestState: (input) =>
+          Effect.sync(() => {
+            reads.push(input.number);
+            return { state: "merged" as const, isDraft: false };
+          }),
+      });
+      const run = (known: ReadonlyMap<number, KnownPullRequestState>) =>
+        refreshWorktreeSourceControlState({
+          worktreeId,
+          knownPullRequestStates: () => Effect.succeed(known),
+        }).pipe(
+          Effect.provideService(ProjectionWorktreeRepository, makeWorktreeRepo(openLinkedWorktree)),
+          Effect.provideService(SourceControlProviderRegistry, makeRegistry(provider)),
+          Effect.provideService(OrchestrationEngineService, makeEngine(dispatchRef)),
+        );
+
+      yield* run(new Map([[10, { state: "open", isDraft: false }]]));
+      assert.deepStrictEqual(reads, []);
+
+      // Known to have changed: read live for the close time.
+      yield* run(new Map([[10, { state: "merged", isDraft: false }]]));
+      assert.deepStrictEqual(reads, [10]);
+    }),
+  );
+
+  it.effect("re-reads links at most once per interval for sweeps", () =>
+    Effect.gen(function* () {
+      const dispatchRef = yield* Ref.make<ReadonlyArray<OrchestrationCommand>>([]);
+      let reads = 0;
+      const provider = makeProvider({
+        getPullRequestState: () =>
+          Effect.sync(() => {
+            reads += 1;
+            return { state: "open" as const, isDraft: false };
+          }),
+      });
+      const run = refreshWorktreeSourceControlState({
+        worktreeId,
+        linkRefreshIntervalMs: 60_000,
+      }).pipe(
+        Effect.provideService(ProjectionWorktreeRepository, makeWorktreeRepo(openLinkedWorktree)),
+        Effect.provideService(SourceControlProviderRegistry, makeRegistry(provider)),
+        Effect.provideService(OrchestrationEngineService, makeEngine(dispatchRef)),
+      );
+
+      yield* run;
+      yield* run;
+      assert.equal(reads, 1);
     }),
   );
 });

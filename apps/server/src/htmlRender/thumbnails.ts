@@ -10,7 +10,7 @@ import {
   HTML_RENDER_THUMBNAIL_MAX_HEIGHT,
   HTML_RENDER_THUMBNAIL_WIDTH,
 } from "@ryco/shared/htmlRender";
-import sharp from "sharp";
+import { loadSharp } from "../loadSharp.ts";
 
 // Stored at twice the CSS size so the card stays sharp on high-density screens.
 const THUMBNAIL_PIXEL_WIDTH = 2 * HTML_RENDER_THUMBNAIL_WIDTH;
@@ -45,6 +45,7 @@ export async function encodeHtmlRenderThumbnail(
   pngBase64: string,
   maxChars: number = HTML_RENDER_MAX_THUMBNAIL_CHARS,
 ): Promise<string | undefined> {
+  const sharp = await loadSharp();
   const source = sharp(Buffer.from(pngBase64, "base64"));
   const { width = 0, height = 0 } = await source.metadata();
   if (width < 1 || height < 1) return undefined;

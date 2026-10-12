@@ -1,83 +1,85 @@
-import {
-  IconAdjustmentsHorizontal,
-  IconAlertCircle,
-  IconAlertTriangle,
-  IconAppWindow,
-  IconArchive,
-  IconArrowBackUp,
-  IconArrowDownCircle,
-  IconArrowRightCircle,
-  IconArrowUp,
-  IconArrowUpCircle,
-  IconArrowUpRight,
-  IconArrowUpRightCircle,
-  IconArrowsMaximize,
-  IconBellRinging,
-  IconBolt,
-  IconCamera,
-  IconCheck,
-  IconChevronDown,
-  IconCode,
-  IconChevronLeft,
-  IconChevronRight,
-  IconChevronUp,
-  IconCircleCheck,
-  IconCircleXFilled,
-  IconClipboardList,
-  IconCopy,
-  IconDeviceDesktop,
-  IconDots,
-  IconDotsCircleHorizontal,
-  IconEdit,
-  IconExternalLink,
-  IconEye,
-  IconFileText,
-  IconFilter,
-  IconFolder,
-  IconFolderOpen,
-  IconFolderPlus,
-  IconGitBranch,
-  IconHammer,
-  IconGitMerge,
-  IconGitPullRequest,
-  IconHelpCircle,
-  IconInfoCircle,
-  IconKeyboard,
-  IconKeyboardHide,
-  IconLayoutColumns,
-  IconLayoutSidebar,
-  IconLetterSpacing,
-  IconLink,
-  IconLock,
-  IconLockOpen,
-  IconMessage,
-  IconMinus,
-  IconNetwork,
-  IconPalette,
-  IconPlayerPlay,
-  IconPlayerStopFilled,
-  IconPlus,
-  IconQrcode,
-  IconRefresh,
-  IconSearch,
-  IconServer,
-  IconSettings,
-  IconShare,
-  IconShieldCheck,
-  IconSparkles,
-  IconLayoutSidebarRight,
-  IconTerminal2,
-  IconTextDecrease,
-  IconTextIncrease,
-  IconTool,
-  IconTrash,
-  IconTypography,
-  IconUserCircle,
-  IconWifiOff,
-  IconWorld,
-  IconX,
-  type Icon,
-} from "@tabler/icons-react-native";
+// Android (and any non-iOS) implementation. iOS resolves `AppSymbol.ios.tsx`,
+// which renders SF Symbols directly, so none of the Tabler fallback modules
+// below are part of the iOS bundle. Each icon is a deep import of one module:
+// the package root would evaluate the whole ~6,200-icon set (see ./icons.ts).
+import IconAdjustmentsHorizontal from "@tabler/icons-react-native/IconAdjustmentsHorizontal";
+import IconAlertCircle from "@tabler/icons-react-native/IconAlertCircle";
+import IconAlertTriangle from "@tabler/icons-react-native/IconAlertTriangle";
+import IconAppWindow from "@tabler/icons-react-native/IconAppWindow";
+import IconArchive from "@tabler/icons-react-native/IconArchive";
+import IconArrowBackUp from "@tabler/icons-react-native/IconArrowBackUp";
+import IconArrowDownCircle from "@tabler/icons-react-native/IconArrowDownCircle";
+import IconArrowRightCircle from "@tabler/icons-react-native/IconArrowRightCircle";
+import IconArrowUp from "@tabler/icons-react-native/IconArrowUp";
+import IconArrowUpCircle from "@tabler/icons-react-native/IconArrowUpCircle";
+import IconArrowUpRight from "@tabler/icons-react-native/IconArrowUpRight";
+import IconArrowUpRightCircle from "@tabler/icons-react-native/IconArrowUpRightCircle";
+import IconArrowsMaximize from "@tabler/icons-react-native/IconArrowsMaximize";
+import IconBellRinging from "@tabler/icons-react-native/IconBellRinging";
+import IconBolt from "@tabler/icons-react-native/IconBolt";
+import IconCamera from "@tabler/icons-react-native/IconCamera";
+import IconCheck from "@tabler/icons-react-native/IconCheck";
+import IconChevronDown from "@tabler/icons-react-native/IconChevronDown";
+import IconCode from "@tabler/icons-react-native/IconCode";
+import IconChevronLeft from "@tabler/icons-react-native/IconChevronLeft";
+import IconChevronRight from "@tabler/icons-react-native/IconChevronRight";
+import IconChevronUp from "@tabler/icons-react-native/IconChevronUp";
+import IconCircleCheck from "@tabler/icons-react-native/IconCircleCheck";
+import IconCircleXFilled from "@tabler/icons-react-native/IconCircleXFilled";
+import IconClipboardList from "@tabler/icons-react-native/IconClipboardList";
+import IconCopy from "@tabler/icons-react-native/IconCopy";
+import IconDeviceDesktop from "@tabler/icons-react-native/IconDeviceDesktop";
+import IconDots from "@tabler/icons-react-native/IconDots";
+import IconDotsCircleHorizontal from "@tabler/icons-react-native/IconDotsCircleHorizontal";
+import IconEdit from "@tabler/icons-react-native/IconEdit";
+import IconExternalLink from "@tabler/icons-react-native/IconExternalLink";
+import IconEye from "@tabler/icons-react-native/IconEye";
+import IconFileText from "@tabler/icons-react-native/IconFileText";
+import IconFilter from "@tabler/icons-react-native/IconFilter";
+import IconFolder from "@tabler/icons-react-native/IconFolder";
+import IconFolderOpen from "@tabler/icons-react-native/IconFolderOpen";
+import IconFolderPlus from "@tabler/icons-react-native/IconFolderPlus";
+import IconGitBranch from "@tabler/icons-react-native/IconGitBranch";
+import IconHammer from "@tabler/icons-react-native/IconHammer";
+import IconGitMerge from "@tabler/icons-react-native/IconGitMerge";
+import IconGitPullRequest from "@tabler/icons-react-native/IconGitPullRequest";
+import IconHelpCircle from "@tabler/icons-react-native/IconHelpCircle";
+import IconInfoCircle from "@tabler/icons-react-native/IconInfoCircle";
+import IconKeyboard from "@tabler/icons-react-native/IconKeyboard";
+import IconKeyboardHide from "@tabler/icons-react-native/IconKeyboardHide";
+import IconLayoutColumns from "@tabler/icons-react-native/IconLayoutColumns";
+import IconLayoutSidebar from "@tabler/icons-react-native/IconLayoutSidebar";
+import IconLetterSpacing from "@tabler/icons-react-native/IconLetterSpacing";
+import IconLink from "@tabler/icons-react-native/IconLink";
+import IconLock from "@tabler/icons-react-native/IconLock";
+import IconLockOpen from "@tabler/icons-react-native/IconLockOpen";
+import IconMessage from "@tabler/icons-react-native/IconMessage";
+import IconMinus from "@tabler/icons-react-native/IconMinus";
+import IconNetwork from "@tabler/icons-react-native/IconNetwork";
+import IconPalette from "@tabler/icons-react-native/IconPalette";
+import IconPlayerPlay from "@tabler/icons-react-native/IconPlayerPlay";
+import IconPlayerStopFilled from "@tabler/icons-react-native/IconPlayerStopFilled";
+import IconPlus from "@tabler/icons-react-native/IconPlus";
+import IconQrcode from "@tabler/icons-react-native/IconQrcode";
+import IconRefresh from "@tabler/icons-react-native/IconRefresh";
+import IconSearch from "@tabler/icons-react-native/IconSearch";
+import IconServer from "@tabler/icons-react-native/IconServer";
+import IconSettings from "@tabler/icons-react-native/IconSettings";
+import IconShare from "@tabler/icons-react-native/IconShare";
+import IconShieldCheck from "@tabler/icons-react-native/IconShieldCheck";
+import IconSparkles from "@tabler/icons-react-native/IconSparkles";
+import IconLayoutSidebarRight from "@tabler/icons-react-native/IconLayoutSidebarRight";
+import IconTerminal2 from "@tabler/icons-react-native/IconTerminal2";
+import IconTextDecrease from "@tabler/icons-react-native/IconTextDecrease";
+import IconTextIncrease from "@tabler/icons-react-native/IconTextIncrease";
+import IconTool from "@tabler/icons-react-native/IconTool";
+import IconTrash from "@tabler/icons-react-native/IconTrash";
+import IconTypography from "@tabler/icons-react-native/IconTypography";
+import IconUserCircle from "@tabler/icons-react-native/IconUserCircle";
+import IconWifiOff from "@tabler/icons-react-native/IconWifiOff";
+import IconWorld from "@tabler/icons-react-native/IconWorld";
+import IconX from "@tabler/icons-react-native/IconX";
+import type { Icon } from "./icons";
 import { Platform } from "react-native";
 import { SymbolView as ExpoSymbolView, type SFSymbol, type SymbolViewProps } from "expo-symbols";
 

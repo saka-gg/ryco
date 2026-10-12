@@ -28,6 +28,7 @@ import {
   Notification,
   protocol,
   safeStorage,
+  session,
   shell,
 } from "electron";
 import type { MenuItemConstructorOptions, OpenDialogOptions } from "electron";
@@ -46,16 +47,68 @@ import {
   type DesktopUpdateActionResult,
   type DesktopUpdateCheckResult,
   type DesktopUpdateState,
+  type DesktopWorkspaceTransportActivation,
 } from "@ryco/contracts";
-import { autoUpdater, type UpdateDownloadedEvent } from "electron-updater";
+import type { AppUpdater, UpdateDownloadedEvent } from "electron-updater";
 
 import type { ContextMenuItem } from "@ryco/contracts";
-import { RotatingFileSink } from "@ryco/shared/logging";
+import type { DesktopBackendLifecycleFrame } from "@ryco/shared/desktopResourceTelemetry";
+import { AsyncRotatingFileSink, DESKTOP_BACKEND_LOG_FILE_NAME } from "@ryco/shared/logging";
 import { normalizeHubNodeName } from "@ryco/shared/nodeIdentity";
-import { deleteEnv, readEnv } from "@ryco/shared/runtimeEnv";
+import { readEnv } from "@ryco/shared/runtimeEnv";
 import { parsePersistedServerObservabilitySettings } from "@ryco/shared/serverSettings";
+import {
+  applyShellEnvironment,
+  applyShellEnvironmentCache,
+  captureShellEnvironment,
+  createShellEnvironmentCacheRecord,
+  readShellEnvironmentCache,
+  type ShellEnvironment,
+  writeShellEnvironmentCache,
+} from "@ryco/shared/shellEnvironment";
 import type { RemoteRycoRunnerOptions } from "@ryco/ssh/tunnel";
-import { DEFAULT_DESKTOP_BACKEND_PORT, resolveDesktopBackendPort } from "./backendPort.ts";
+import {
+  hasPriorDesktopRendererState,
+  resolveDesktopBackendPort,
+  resolveDesktopBackendStartPort,
+  shouldPersistDesktopBackendPort,
+} from "./backendPort.ts";
+import {
+  type AppLoadRequest,
+  type BackendAppWindowMoment,
+  isAppLoadRequestCurrent,
+  resolveBackendAppWindowAction,
+} from "./backendAppWindowLoad.ts";
+import {
+  createDesktopBackendChildEnv,
+  DESKTOP_BACKEND_BOOTSTRAP_FD,
+  DESKTOP_BACKEND_TELEMETRY_FD,
+  desktopBackendSpawnArgs,
+  discardEarlyDesktopBackend,
+  type DesktopBackendChild,
+  isEarlyDesktopBackendStale,
+  readDesktopLaunchRecord,
+  resolveDesktopBackendEntry,
+  spawnDesktopBackend,
+  stopDesktopBackendChild,
+  takeEarlyDesktopBackend,
+  terminateDesktopBackendChild,
+} from "./backendLauncher.ts";
+import {
+  BackendOutputTail,
+  BackendPortMismatchError,
+  BackendReadinessTracker,
+  type BackendReadySource,
+  createBackendFailurePolicy,
+} from "./backendStartup.ts";
+import { pruneStaleDesktopCompileCaches } from "./compileCacheDirectory.ts";
+import { resolveDesktopPaths, resolveDesktopUserDataPath } from "./desktopPaths.ts";
+import { registerDeferredIpcHandlers } from "./deferredIpc.ts";
+import {
+  DESKTOP_STARTUP_MARKS_CHANNEL,
+  formatRendererStartupMarks,
+  parseRendererStartupReport,
+} from "./startupMarks.ts";
 import {
   type DesktopHubConnectorLaunch,
   type DesktopSettings,
@@ -102,19 +155,12 @@ import {
   resolveDesktopCoreAdvertisedEndpoints,
   resolveDesktopServerExposure,
 } from "./serverExposure.ts";
-import { DesktopSshEnvironmentBridge, resolveRemoteRycoCliPackageSpec } from "./sshEnvironment.ts";
-import { captureShellEnvironment } from "./captureShellEnvironment.ts";
-import {
-  applyShellEnvironmentCache,
-  createShellEnvironmentCacheRecord,
-  readShellEnvironmentCache,
-  writeShellEnvironmentCache,
-} from "./shellEnvironmentCache.ts";
+import type { DesktopSshEnvironmentBridge } from "./sshEnvironment.ts";
+import { DESKTOP_SSH_INVOKE_CHANNELS } from "./sshEnvironmentChannels.ts";
 import { createStartupTiming, formatStartupTimingEntry } from "./startupTiming.ts";
 import { waitForBackendStartupReady } from "./backendStartupReadiness.ts";
 import { getAutoUpdateDisabledReason, shouldBroadcastDownloadProgress } from "./updateState.ts";
 import { doesVersionMatchDesktopUpdateChannel } from "./updateChannels.ts";
-import { ServerListeningDetector } from "./serverListeningDetector.ts";
 import {
   createInitialDesktopUpdateState,
   reduceDesktopUpdateStateOnCheckFailure,
@@ -130,10 +176,7 @@ import {
 import { isArm64HostRunningIntelBuild, resolveDesktopRuntimeInfo } from "./runtimeArch.ts";
 import { resolveDesktopAppBranding } from "./appBranding.ts";
 import { bindFirstRevealTrigger, type RevealSubscription } from "./windowReveal.ts";
-import { resolveBundledRelayGuidePath } from "./bundledGuide.ts";
-import { resolveTailscaleAdvertisedEndpoints } from "./tailscaleEndpointProvider.ts";
 import { validateHubOrigin } from "./hubOrigin.ts";
-import { removeDesktopOwnedHubEnvironment } from "./hubLaunchEnvironment.ts";
 import {
   parseTurnCompleteNotification,
   shouldShowTurnCompleteNotification,
@@ -151,15 +194,6 @@ import {
   createDesktopProtectedRecordStore,
   desktopProtectedRecordExists,
 } from "./protectedRecordStore.ts";
-import { createDesktopNativeSecretStore } from "./nativeSecretStore.ts";
-import { resolveDesktopDataHomes } from "./desktopDataHomes.ts";
-import {
-  createNativeSecurityHelperRunner,
-  desktopNativeInstallationNamespace,
-  DesktopNativeSecurityHelper,
-  desktopNativeSecurityNamespace,
-  resolveDesktopNativeSecurityHelperPath,
-} from "./nativeSecurityHelper.ts";
 import {
   createDesktopNativeAuthorization,
   DesktopAuthorizationCallbackBroker,
@@ -168,41 +202,36 @@ import {
   resolveDesktopAuthorizationCallback,
   type DesktopAuthorizationVariant,
 } from "./nativeAuthorization.ts";
-import {
-  createDesktopHostedSessionCredentials,
-  getOrCreateDesktopInstallationId,
-} from "./hostedCredentials.ts";
 import { createDesktopHubControlClient } from "./desktopHubControl.ts";
-import {
-  createDesktopDpopSigner,
-  createDesktopHostedHubApi,
+import type {
+  DesktopHostedGitHubActionResult,
   DesktopHostedIdentityCoordinator,
-  shouldEnableDesktopHubConnectorForAccountSetup,
-  type DesktopHostedGitHubActionResult,
-  type DesktopHostedIdentityStatus,
+  DesktopHostedIdentityStatus,
 } from "./desktopHostedIdentity.ts";
-import { DesktopE2eeTrustStore } from "./desktopE2eeTrust.ts";
-import { DesktopE2eePrekeyIssuer } from "./desktopE2eePrekey.ts";
-import { createDesktopNativeE2eePlatform } from "./desktopNativeE2ee.ts";
-import { DesktopNativeE2eeHandshakeService } from "./desktopNativeE2eeHandshake.ts";
-import { createDesktopWorkspaceMetadataCache } from "./desktopWorkspaceCache.ts";
-import {
+import type * as DesktopHubStack from "./desktopHubStack.ts";
+import type { DesktopNativeE2eeHandshakeService } from "./desktopNativeE2eeHandshake.ts";
+import type {
   DesktopWorkspaceClient,
-  type DesktopWorkspaceClientSnapshot,
+  DesktopWorkspaceClientSnapshot,
 } from "./desktopWorkspaceClient.ts";
-import {
-  createDesktopWorkspaceIpcHandlers,
-  projectDesktopWorkspaceState,
-} from "./desktopWorkspaceIpc.ts";
 import { DESKTOP_WORKSPACE_IPC } from "./desktopWorkspaceChannels.ts";
-import {
-  DESKTOP_WORKSPACE_MAX_RPC_FRAME_BYTES,
-  DesktopWorkspaceRelayManager,
-} from "./desktopWorkspaceRelay.ts";
+import type { DesktopWorkspaceRelayManager } from "./desktopWorkspaceRelay.ts";
 import { createResilientStdIoWriter } from "./resilientStdIo.ts";
 
+const desktopLaunchRecord = readDesktopLaunchRecord();
 const desktopStartupTiming = createStartupTiming();
-desktopStartupTiming.mark("desktop.launch");
+// Electron's performance origin is process start: make the time spent before
+// this mark (Electron itself, then loading this bundle) visible in the log.
+desktopStartupTiming.mark(
+  "desktop.launch",
+  `processUptimeMs=${Math.round(desktopStartupTiming.origin)}${
+    desktopLaunchRecord === null
+      ? ""
+      : ` entryStartMs=${Math.round(desktopLaunchRecord.entryStartedAtMs)} mainModuleLoadMs=${Math.round(
+          desktopStartupTiming.origin - desktopLaunchRecord.entryStartedAtMs,
+        )} compileCache=${desktopLaunchRecord.compileCacheDir === null ? "off" : "on"}`
+  }`,
+);
 const STARTUP_TIMING_STDOUT = readEnv("RYCO_DESKTOP_STARTUP_TIMING_STDOUT")?.trim() === "1";
 const DESKTOP_OPEN_DEVTOOLS = readEnv("RYCO_DESKTOP_OPEN_DEVTOOLS")?.trim() === "1";
 const DESKTOP_DISABLE_GPU = readEnv("RYCO_DESKTOP_DISABLE_GPU")?.trim() === "1";
@@ -250,18 +279,16 @@ const TURN_COMPLETE_NOTIFICATION_ACTIVATED_CHANNEL = "desktop:turn-complete-noti
 const isDevelopment = Boolean(process.env.VITE_DEV_SERVER_URL);
 const isDesktopAuthorizationCallbackRelay =
   isDevelopment && process.env.RYCO_DESKTOP_CALLBACK_RELAY === "1";
-const DEFAULT_BASE_DIR = Path.join(OS.homedir(), ".ryco");
-const { backendBaseDir: BACKEND_BASE_DIR, desktopBaseDir: DESKTOP_BASE_DIR } =
-  resolveDesktopDataHomes({
-    configuredBaseDir: readEnv("RYCO_HOME"),
-    defaultBaseDir: DEFAULT_BASE_DIR,
-    isDevelopment,
-  });
-const STATE_DIR = Path.join(DESKTOP_BASE_DIR, "userdata");
-const DESKTOP_SETTINGS_PATH = Path.join(STATE_DIR, "desktop-settings.json");
+const DESKTOP_PATHS = resolveDesktopPaths({
+  configuredBaseDir: readEnv("RYCO_HOME"),
+  isDevelopment,
+});
+const BACKEND_BASE_DIR = DESKTOP_PATHS.backendBaseDir;
+const STATE_DIR = DESKTOP_PATHS.stateDir;
+const DESKTOP_SETTINGS_PATH = DESKTOP_PATHS.desktopSettingsPath;
 const CLIENT_SETTINGS_PATH = Path.join(STATE_DIR, "client-settings.json");
 const SAVED_ENVIRONMENT_REGISTRY_PATH = Path.join(STATE_DIR, "saved-environments.json");
-const SHELL_ENVIRONMENT_CACHE_PATH = Path.join(STATE_DIR, "shell-environment-cache.json");
+const SHELL_ENVIRONMENT_CACHE_PATH = DESKTOP_PATHS.shellEnvironmentCachePath;
 const DESKTOP_WORKSPACE_CACHE_PATH = Path.join(
   STATE_DIR,
   "desktop-workspace-client",
@@ -283,15 +310,26 @@ const APP_DISPLAY_NAME = desktopAppBranding.displayName;
 const APP_USER_MODEL_ID = isDevelopment ? "com.sak0a.ryco.dev" : "com.sak0a.ryco";
 const LINUX_DESKTOP_ENTRY_NAME = isDevelopment ? "ryco-dev.desktop" : "ryco.desktop";
 const LINUX_WM_CLASS = isDevelopment ? "ryco-dev" : "ryco";
-const USER_DATA_DIR_NAME = isDevelopment ? "ryco-dev" : "ryco";
 const COMMIT_HASH_PATTERN = /^[0-9a-f]{7,40}$/i;
 const COMMIT_HASH_DISPLAY_LENGTH = 12;
-const LOG_DIR = Path.join(STATE_DIR, "logs");
+const LOG_DIR = DESKTOP_PATHS.logDir;
 const LOG_FILE_MAX_BYTES = 10 * 1024 * 1024;
-const LOG_FILE_MAX_FILES = 10;
+// Parity with the provider logs: a crash-loop investigation needs the last few
+// files, not 200 MiB of history.
+const LOG_FILE_MAX_FILES = 3;
 const APP_RUN_ID = Crypto.randomBytes(6).toString("hex");
 const SERVER_SETTINGS_PATH = Path.join(STATE_DIR, "settings.json");
 const AUTO_UPDATE_STARTUP_DELAY_MS = 15_000;
+// electron-updater costs ~30 ms to load; nothing needs it while the app boots.
+const AUTO_UPDATE_CONFIGURE_DELAY_MS = 3_000;
+// The HTTP probe is only a last resort behind the backend's own readiness frame
+// and its "Listening on" line; probing earlier just lands in the bind window.
+const BACKEND_HTTP_READINESS_FALLBACK_DELAY_MS = 3_000;
+const SHELL_ENVIRONMENT_WORKER_PATH = Path.join(__dirname, "shellEnvironmentWorker.cjs");
+// A cached shell environment is refreshed this long after the backend is ready.
+const SHELL_ENVIRONMENT_REFRESH_DELAY_MS = 5_000;
+const COMPILE_CACHE_HOOK_PATH = Path.join(__dirname, "compileCache.cjs");
+const RENDERER_CACHE_VERSION_FILE = "renderer-cache-version";
 const AUTO_UPDATE_POLL_INTERVAL_MS = 4 * 60 * 60 * 1000;
 const UNSIGNED_MAC_UPDATE_INSTALLER_DIR = Path.join(STATE_DIR, "update-installers");
 const UNSIGNED_MAC_UPDATE_INSTALLER_LOG_PATH = Path.join(LOG_DIR, "unsigned-mac-update.log");
@@ -395,11 +433,12 @@ let desktopNativeIdentityContext: {
   readonly origin: string;
   readonly installationId: string;
   readonly records: ReturnType<typeof createDesktopProtectedRecordStore>;
-  readonly security: DesktopNativeSecurityHelper;
-  readonly trust: DesktopE2eeTrustStore;
-  readonly prekey: DesktopE2eePrekeyIssuer;
-  readonly nativeE2eePlatform: ReturnType<typeof createDesktopNativeE2eePlatform>;
+  readonly security: InstanceType<typeof DesktopHubStack.DesktopNativeSecurityHelper>;
+  readonly trust: InstanceType<typeof DesktopHubStack.DesktopE2eeTrustStore>;
+  readonly prekey: InstanceType<typeof DesktopHubStack.DesktopE2eePrekeyIssuer>;
+  readonly nativeE2eePlatform: ReturnType<typeof DesktopHubStack.createDesktopNativeE2eePlatform>;
 } | null = null;
+let loadedDesktopHubStack: typeof DesktopHubStack | null = null;
 let desktopNativeE2eeHandshakeService: DesktopNativeE2eeHandshakeService | null = null;
 let desktopWorkspaceClient: DesktopWorkspaceClient | null = null;
 let desktopWorkspaceRelayManager: DesktopWorkspaceRelayManager | null = null;
@@ -439,17 +478,40 @@ let backendAdvertisedHost: string | null = null;
 let backendReadinessAbortController: AbortController | null = null;
 let backendInitialWindowOpenInFlight: Promise<void> | null = null;
 let developmentInitialWindowOpenInFlight: Promise<void> | null = null;
-let backendListeningDetector: ServerListeningDetector | null = null;
+let backendReadiness: BackendReadinessTracker | null = null;
 const backendRestartBackoff = createBackendRestartBackoff({
   initialDelayMs: 500,
   maxDelayMs: 10_000,
 });
+const backendFailurePolicy = createBackendFailurePolicy();
+// Set while a deterministic start failure is shown; nothing restarts the backend.
+let backendStartupHalted = false;
+// Whether any backend of this app run reached readiness (once-per-run work).
+let backendEverReady = false;
+// Documents whose app shell became usable (reported by the preload). Only such
+// a renderer can reconnect in place after a backend crash restart; an error page
+// or a half-booted app still needs a fresh load.
+const appShellUsableContents = new WeakSet<Electron.WebContents>();
+// The backend child each window's app document was requested from, and when.
+// A load requested when the backend bound its port is not repeated at its
+// readiness (unless it failed or the backend took too long; see
+// EARLY_APP_LOAD_MAX_HOLD_MS).
+const appLoadRequestedFrom = new WeakMap<
+  Electron.WebContents,
+  AppLoadRequest<ChildProcess.ChildProcess>
+>();
+let shellEnvironmentRefreshScheduled = false;
+// Whether this launch's port may become the persisted one: never for a
+// RYCO_PORT override or a fallback taken because the preferred port was busy.
+let backendPortPersistable = false;
+// Clearing caches left by another version; the first app load waits for it.
+let rendererCacheMaintenance: Promise<void> = Promise.resolve();
 let restartTimer: ReturnType<typeof setTimeout> | null = null;
 let isQuitting = false;
 let desktopProtocolRegistered = false;
 let aboutCommitHashCache: string | null | undefined;
-let desktopLogSink: RotatingFileSink | null = null;
-let backendLogSink: RotatingFileSink | null = null;
+let desktopLogSink: AsyncRotatingFileSink | null = null;
+let backendLogSink: AsyncRotatingFileSink | null = null;
 let restoreStdIoCapture: (() => void) | null = null;
 let backendObservabilitySettings = readPersistedBackendObservabilitySettings();
 /**
@@ -600,82 +662,114 @@ function warnIfDesktopSettingsUnreadable(): void {
 }
 
 function backendChildEnv(): NodeJS.ProcessEnv {
-  const env = { ...process.env };
-  deleteEnv(env, "RYCO_PORT");
-  deleteEnv(env, "RYCO_MODE");
-  deleteEnv(env, "RYCO_NO_BROWSER");
-  deleteEnv(env, "RYCO_HOST");
-  deleteEnv(env, "RYCO_DESKTOP_WS_URL");
-  deleteEnv(env, "RYCO_DESKTOP_LAN_ACCESS");
-  deleteEnv(env, "RYCO_DESKTOP_LAN_HOST");
-  deleteEnv(env, "RYCO_DESKTOP_HTTPS_ENDPOINTS");
-  deleteEnv(env, "RYCO_TAILSCALE_SERVE");
-  deleteEnv(env, "RYCO_TAILSCALE_SERVE_PORT");
-  // The desktop is the single owner of these values: it persists them and passes
-  // them on the bootstrap channel. Leaving the environment able to override
-  // would give the settings panel a toggle that silently does nothing, guarded
-  // by a lock icon any same-user process could forge with `launchctl setenv`.
-  // `ryco serve` is unaffected and stays fully env-configurable.
-  removeDesktopOwnedHubEnvironment(env);
-  // VITE_DEV_SERVER_URL must never reach the packaged backend: if a developer's
-  // shell exports it, the server's Config.url parser throws and the backend
-  // exits before HTTP listen, causing the desktop to spin in a restart loop.
-  deleteEnv(env, "VITE_DEV_SERVER_URL");
-  if (app.isPackaged && process.platform === "darwin") {
-    env.RYCO_DEVICE_HELPER_SOURCE_DIR = Path.join(process.resourcesPath, "device-helper");
-  }
-  return env;
+  return createDesktopBackendChildEnv(process.env, {
+    isDevelopment,
+    isPackaged: app.isPackaged,
+    platform: process.platform,
+    resourcesPath: process.resourcesPath,
+  });
 }
 
 const shellEnvironmentAbortController = new AbortController();
+// The latest login-shell environment this module captured or read from the
+// cache. It travels in the bootstrap envelope: a backend started before it was
+// known (the launch entry starts one without waiting for a shell) applies it
+// before building anything. Merging is idempotent, so a backend that already
+// inherited it is unaffected.
+let desktopShellEnvironment: ShellEnvironment | null = null;
+// Captured before this module applies a cached environment (the launch entry
+// records its own when it applies one first).
+const desktopInheritedPath = process.env.PATH;
 
-async function synchronizeDesktopShellEnvironment(reason: string): Promise<void> {
+/**
+ * The environment shell probes start from: as inherited, before any cached
+ * shell values were applied, so a refreshed cache never carries forward
+ * entries that only ever came from an earlier cache.
+ */
+function inheritedShellProbeEnvironment(): NodeJS.ProcessEnv {
+  const inheritedPath = desktopLaunchRecord?.inheritedPath ?? desktopInheritedPath;
+  return { ...process.env, PATH: inheritedPath };
+}
+
+async function synchronizeDesktopShellEnvironment(reason: string): Promise<boolean> {
   markDesktopStartupPhase("desktop.shell-env.refresh.start", `reason=${reason}`);
   const captured = await captureShellEnvironment({
-    workerPath: Path.join(__dirname, "shellEnvironmentWorker.cjs"),
-    env: process.env,
+    workerPath: SHELL_ENVIRONMENT_WORKER_PATH,
+    env: inheritedShellProbeEnvironment(),
     signal: shellEnvironmentAbortController.signal,
   });
   if (!captured || shellEnvironmentAbortController.signal.aborted) {
+    // Whatever PATH is already in effect (a cached one included) stays.
     markDesktopStartupPhase("desktop.shell-env.refresh.skipped", `reason=${reason}`);
-    return;
+    return false;
   }
   for (const message of captured.warnings) {
     writeDesktopLogHeader(`shell environment warning message=${sanitizeLogValue(message)}`);
   }
-  applyShellEnvironmentCache(
-    process.env,
-    createShellEnvironmentCacheRecord({ env: captured.environment }),
-  );
-  try {
-    writeShellEnvironmentCache(
-      SHELL_ENVIRONMENT_CACHE_PATH,
-      createShellEnvironmentCacheRecord({ env: process.env }),
-    );
-  } catch (error) {
-    writeDesktopLogHeader(
-      `shell environment cache write failed message=${sanitizeLogValue(formatErrorMessage(error))}`,
-    );
+  const environment: ShellEnvironment = captured.environment;
+  applyShellEnvironment(process.env, environment);
+  if (Object.keys(environment).length > 0) {
+    desktopShellEnvironment = environment;
+    try {
+      writeShellEnvironmentCache(
+        SHELL_ENVIRONMENT_CACHE_PATH,
+        createShellEnvironmentCacheRecord({ environment, shell: process.env.SHELL }),
+      );
+    } catch (error) {
+      writeDesktopLogHeader(
+        `shell environment cache write failed message=${sanitizeLogValue(formatErrorMessage(error))}`,
+      );
+    }
   }
   markDesktopStartupPhase("desktop.shell-env.refresh.end", `reason=${reason}`);
+  return true;
 }
 
+/**
+ * Stale-while-revalidate: any readable cache is applied at once and refreshed
+ * after the backend is up (for the next launch, and for backends this run
+ * restarts, which inherit the desktop's environment). Only a launch with no
+ * cache at all waits for a shell, and on a packaged launch the backend is
+ * already loading meanwhile: the envelope written afterwards carries the
+ * captured environment.
+ */
 async function prepareDesktopShellEnvironmentForBackend(): Promise<void> {
   markDesktopStartupPhase("desktop.shell-env.prepare.start");
+  if (desktopLaunchRecord?.shellEnvironmentApplied === true) {
+    markDesktopStartupPhase("desktop.shell-env.cache.hit", "appliedBy=entry");
+    shellEnvironmentRefreshScheduled = true;
+    return;
+  }
   const cached = readShellEnvironmentCache(SHELL_ENVIRONMENT_CACHE_PATH, {
     currentShell: process.env.SHELL ?? null,
   });
   if (cached.kind === "hit") {
     applyShellEnvironmentCache(process.env, cached.record);
+    desktopShellEnvironment = cached.record.environment;
     markDesktopStartupPhase(
       "desktop.shell-env.cache.hit",
-      `capturedAt=${cached.record.capturedAt}`,
+      `capturedAt=${cached.record.capturedAt} ageMs=${Math.round(cached.ageMs)}`,
     );
+    shellEnvironmentRefreshScheduled = true;
     return;
   }
 
   markDesktopStartupPhase("desktop.shell-env.cache.miss", `reason=${cached.reason}`);
   await synchronizeDesktopShellEnvironment("cache-miss");
+}
+
+/**
+ * Refresh a cached shell environment after startup. Readiness is when the
+ * renderer boots and the backend serves its first snapshot, so the login shell
+ * (which can run nvm or conda for a second) waits a little longer.
+ */
+function refreshDesktopShellEnvironmentAfterStart(): void {
+  if (!shellEnvironmentRefreshScheduled) return;
+  shellEnvironmentRefreshScheduled = false;
+  setTimeout(() => {
+    if (isQuitting) return;
+    void synchronizeDesktopShellEnvironment("stale-while-revalidate");
+  }, SHELL_ENVIRONMENT_REFRESH_DELAY_MS).unref();
 }
 
 function runningTailscaleServe(): DesktopTailscaleServeLaunch {
@@ -716,6 +810,8 @@ async function getDesktopAdvertisedEndpoints() {
     return coreEndpoints;
   }
 
+  // Tailscale discovery pulls in the Effect platform HTTP client; load it only here.
+  const { resolveTailscaleAdvertisedEndpoints } = await import("./tailscaleEndpointProvider.ts");
   const tailscaleEndpoints = await resolveTailscaleAdvertisedEndpoints({
     port: backendPort,
     serveEnabled: tailscaleServe.enabled,
@@ -745,12 +841,31 @@ function desktopHostedDeviceLabel(): string {
   return hostname.length > 0 ? hostname : APP_DISPLAY_NAME;
 }
 
+/** The Hub/E2EE/workspace stack, loaded the first time anything needs it. */
+const loadDesktopHubStack = lazyAsyncResource(async () => {
+  const stack = await import("./desktopHubStack.ts");
+  loadedDesktopHubStack = stack;
+  return stack;
+});
+
 const ensureDesktopNativeIdentityContext = lazyAsyncResource(
   async (): Promise<NonNullable<typeof desktopNativeIdentityContext>> => {
     if (desktopNativeIdentityContext !== null) return desktopNativeIdentityContext;
     if (!isDesktopHostedIdentitySupported(process.platform) || desktopSettings.hubOrigin === null) {
       throw new Error("Desktop native Hub identity is unavailable.");
     }
+    const {
+      createDesktopNativeE2eePlatform,
+      createDesktopNativeSecretStore,
+      createNativeSecurityHelperRunner,
+      DesktopE2eePrekeyIssuer,
+      DesktopE2eeTrustStore,
+      desktopNativeInstallationNamespace,
+      DesktopNativeSecurityHelper,
+      desktopNativeSecurityNamespace,
+      getOrCreateDesktopInstallationId,
+      resolveDesktopNativeSecurityHelperPath,
+    } = await loadDesktopHubStack();
     const protection = getDesktopSecretStorage();
     const installationRecords = createDesktopProtectedRecordStore({
       directory: NATIVE_SECURITY_DIR,
@@ -812,6 +927,12 @@ const ensureDesktopHostedIdentityCoordinator = lazyAsyncResource(
   async (): Promise<DesktopHostedIdentityCoordinator> => {
     if (desktopHostedIdentityCoordinator !== null) return desktopHostedIdentityCoordinator;
     const context = await ensureDesktopNativeIdentityContext();
+    const {
+      createDesktopDpopSigner,
+      createDesktopHostedHubApi,
+      createDesktopHostedSessionCredentials,
+      DesktopHostedIdentityCoordinator,
+    } = await loadDesktopHubStack();
     const credentials = createDesktopHostedSessionCredentials(context.records);
     const nativeAuthorization = createDesktopNativeAuthorization({
       variant: desktopAuthorizationVariant(),
@@ -849,6 +970,7 @@ const ensureDesktopWorkspaceRelayManager = lazyAsyncResource(
     if (desktopWorkspaceRelayManager !== null) return desktopWorkspaceRelayManager;
     const context = await ensureDesktopNativeIdentityContext();
     const coordinator = await ensureDesktopHostedIdentityCoordinator();
+    const { DesktopWorkspaceRelayManager } = await loadDesktopHubStack();
     const manager = new DesktopWorkspaceRelayManager({
       authority: {
         resolveTarget: async (environmentId, pairingOnly) => {
@@ -909,10 +1031,11 @@ const ensureDesktopWorkspaceRelayManager = lazyAsyncResource(
 );
 
 function emitDesktopWorkspaceState(snapshot: DesktopWorkspaceClientSnapshot): void {
-  if (!mainWindow || mainWindow.isDestroyed()) return;
+  // A snapshot only exists once the stack that projects it has loaded.
+  if (!mainWindow || mainWindow.isDestroyed() || loadedDesktopHubStack === null) return;
   mainWindow.webContents.send(
     DESKTOP_WORKSPACE_IPC.stateChanged,
-    projectDesktopWorkspaceState(snapshot),
+    loadedDesktopHubStack.projectDesktopWorkspaceState(snapshot),
   );
 }
 
@@ -920,6 +1043,10 @@ async function ensureDesktopWorkspaceClient(): Promise<DesktopWorkspaceClient> {
   if (desktopWorkspaceClient !== null) return desktopWorkspaceClient;
   const origin = desktopSettings.hubOrigin;
   if (origin === null) throw new Error("Desktop Hub is unavailable.");
+  const { createDesktopWorkspaceMetadataCache, DesktopWorkspaceClient } =
+    await loadDesktopHubStack();
+  // Another caller may have finished while the stack loaded.
+  if (desktopWorkspaceClient !== null) return desktopWorkspaceClient;
   // Constructing the workspace (including getState IPC) must not create keys.
   // Native credentials are needed only for an existing session or user sign-in.
   const client = new DesktopWorkspaceClient({
@@ -993,6 +1120,7 @@ const ensureDesktopNativeE2eeHandshakeService = lazyAsyncResource(
   async (): Promise<DesktopNativeE2eeHandshakeService> => {
     if (desktopNativeE2eeHandshakeService !== null) return desktopNativeE2eeHandshakeService;
     const context = await ensureDesktopNativeIdentityContext();
+    const { DesktopNativeE2eeHandshakeService } = await loadDesktopHubStack();
     const service = new DesktopNativeE2eeHandshakeService({
       origin: context.origin,
       security: context.security,
@@ -1074,9 +1202,30 @@ function resumeDesktopHostedIdentityForBackend(): void {
   desktopNativeE2eeHandshakeService?.dispose();
   desktopWorkspaceRelayManager?.dispose();
   desktopHostedIdentityControlGeneration = backendControlToken;
+  markDesktopStartupPhase("desktop.hub.resume.start");
   void ensureDesktopWorkspaceClient()
     .then((client) => client.resume())
-    .catch(() => runDesktopHostedIdentity(false));
+    .catch(() => runDesktopHostedIdentity(false))
+    .finally(() => markDesktopStartupPhase("desktop.hub.resume.end"));
+}
+
+/**
+ * Restore the hosted Hub session while the backend starts. Only the node
+ * claim needs the backend; the credential hydrate and the session round trip
+ * do not, and the resume that follows backend readiness adopts this answer.
+ * A launch with no stored session does nothing, exactly as its resume would.
+ */
+function prepareDesktopHostedIdentityResume(): void {
+  if (
+    desktopSettings.hubOrigin === null ||
+    !isDesktopHostedIdentitySupported(process.platform) ||
+    !desktopProtectedRecordExists({ directory: NATIVE_SECURITY_DIR, name: "hub-session-token" })
+  ) {
+    return;
+  }
+  void ensureDesktopHostedIdentityCoordinator()
+    .then((coordinator) => coordinator.prepareResume())
+    .catch(() => undefined);
 }
 
 function resolveAdvertisedHostOverride(): string | undefined {
@@ -1259,7 +1408,8 @@ function relaunchDesktopApp(reason: string): void {
           `desktop relaunch backend shutdown warning message=${formatErrorMessage(error)}`,
         );
       })
-      .then(() => desktopSshEnvironmentBridge.dispose().catch(() => undefined))
+      .then(() => desktopSshEnvironmentBridge?.dispose().catch(() => undefined))
+      .then(() => closeDesktopLogs())
       .finally(() => {
         restoreStdIoCapture?.();
         if (isDevelopment) {
@@ -1277,7 +1427,23 @@ function relaunchDesktopApp(reason: string): void {
 
 function writeDesktopLogHeader(message: string): void {
   if (!desktopLogSink) return;
-  desktopLogSink.write(`[${logTimestamp()}] [${logScope("desktop")}] ${message}\n`);
+  void desktopLogSink.write(`[${logTimestamp()}] [${logScope("desktop")}] ${message}\n`);
+}
+
+/**
+ * Let queued log writes land and release the sinks' file handles before the
+ * process exits, but never let a stuck disk hold up quitting or relaunching.
+ * A line logged afterwards simply reopens its file.
+ */
+async function closeDesktopLogs(timeoutMs = 1_000): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    Promise.all([desktopLogSink?.close(), backendLogSink?.close()]).catch(() => undefined),
+    new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, timeoutMs);
+    }),
+  ]);
+  clearTimeout(timer);
 }
 
 function writeDesktopStartupTimingEntry(entry: ReturnType<typeof desktopStartupTiming.mark>): void {
@@ -1301,7 +1467,7 @@ function flushDesktopStartupTimingEntries(): void {
 function writeBackendSessionBoundary(phase: "START" | "END", details: string): void {
   if (!backendLogSink) return;
   const normalizedDetails = sanitizeLogValue(details);
-  backendLogSink.write(
+  void backendLogSink.write(
     `[${logTimestamp()}] ---- APP SESSION ${phase} run=${APP_RUN_ID} ${normalizedDetails} ----\n`,
   );
 }
@@ -1365,21 +1531,68 @@ function cancelBackendReadinessWait(): void {
   backendReadinessAbortController = null;
 }
 
-async function waitForBackendWindowReady(baseUrl: string): Promise<"listening" | "http"> {
+// The child whose readiness was last confirmed; a later exit of it is a crash
+// after readiness, which restarts instead of counting toward a start failure.
+let backendReadyChild: ChildProcess.ChildProcess | null = null;
+
+async function waitForBackendWindowReady(baseUrl: string): Promise<BackendReadySource | "http"> {
+  const child = backendProcess;
   const readySource = await waitForBackendStartupReady({
-    listeningPromise: backendListeningDetector?.promise ?? null,
+    readyPromise: backendReadiness?.promise ?? null,
     waitForHttpReady: () =>
       waitForBackendHttpReady(baseUrl, {
         timeoutMs: 60_000,
         path: "/.well-known/ryco/environment",
       }),
     cancelHttpWait: cancelBackendReadinessWait,
+    httpFallbackDelayMs: BACKEND_HTTP_READINESS_FALLBACK_DELAY_MS,
   });
   backendRestartBackoff.reset();
+  backendFailurePolicy.recordReady();
+  backendReadyChild = child;
   return readySource;
 }
 
-async function waitForDevelopmentWindowReady(): Promise<"listening" | "http"> {
+/** Work that only belongs after a backend is serving, off the startup path. */
+function handleBackendReady(): void {
+  persistDesktopBackendPort();
+  refreshDesktopShellEnvironmentAfterStart();
+  if (backendEverReady) return;
+  backendEverReady = true;
+  const compileCacheDir = desktopLaunchRecord?.compileCacheDir ?? null;
+  if (compileCacheDir !== null) {
+    void pruneStaleDesktopCompileCaches(compileCacheDir).then((removed) => {
+      if (removed > 0) writeDesktopLogHeader(`pruned stale compile caches count=${removed}`);
+    });
+  }
+}
+
+/**
+ * Remember the port this launch served on, so the renderer origin stays put.
+ * A transient fallback never replaces the persisted port (see
+ * {@link shouldPersistDesktopBackendPort}).
+ */
+function persistDesktopBackendPort(): void {
+  if (
+    isDevelopment ||
+    !backendPortPersistable ||
+    desktopSettingsUnreadable ||
+    desktopSettings.backendPort === backendPort
+  ) {
+    return;
+  }
+  const nextSettings: DesktopSettings = { ...desktopSettings, backendPort };
+  try {
+    writeDesktopSettings(DESKTOP_SETTINGS_PATH, nextSettings);
+    desktopSettings = nextSettings;
+  } catch (error) {
+    writeDesktopLogHeader(
+      `backend port persist failed message=${sanitizeLogValue(formatErrorMessage(error))}`,
+    );
+  }
+}
+
+async function waitForDevelopmentWindowReady(): Promise<BackendReadySource | "http"> {
   const [backendReadySource] = await Promise.all([
     waitForBackendWindowReady(backendHttpUrl),
     waitForHttpReady(resolveDesktopDevServerUrl(), {
@@ -1401,6 +1614,7 @@ function ensureDevelopmentInitialWindowOpen(): void {
       writeDesktopLogHeader(`bootstrap development resources ready backendSource=${source}`);
       resumeDesktopHostedIdentityForBackend();
       void refreshDesktopHubReachability();
+      handleBackendReady();
     })
     .catch((error) => {
       if (isBackendReadinessAborted(error)) {
@@ -1439,24 +1653,82 @@ function ensurePackagedBootstrapWindowOpen(reason: string): BrowserWindow | null
   return mainWindow;
 }
 
-function loadPackagedBackendAppWindow(window: BrowserWindow, reason: string): void {
+function loadPackagedBackendAppWindow(
+  window: BrowserWindow,
+  reason: string,
+  moment: BackendAppWindowMoment = "ready",
+): void {
   if (isDevelopment || window.isDestroyed() || backendHttpUrl.length === 0) {
     return;
   }
 
-  const currentUrl = window.webContents.getURL();
-  if (
-    currentUrl &&
-    currentUrl !== "about:blank" &&
-    !isDesktopBootUrl(currentUrl) &&
-    !currentUrl.startsWith(backendHttpUrl)
-  ) {
+  const contents = window.webContents;
+  const child = backendProcess;
+  const action = resolveBackendAppWindowAction({
+    currentUrl: contents.getURL(),
+    backendHttpUrl,
+    isBootUrl: isDesktopBootUrl,
+    shellUsable: appShellUsableContents.has(contents),
+    loadRequestedFromThisBackend: isAppLoadRequestCurrent({
+      request: appLoadRequestedFrom.get(contents),
+      backend: child,
+      nowMs: performance.now(),
+    }),
+    moment,
+  });
+  if (action === "ignore") return;
+  if (action === "reconnect") {
+    writeDesktopLogHeader(`backend restarted; renderer reconnects in place reason=${reason}`);
+    notifyRenderersToReconnect();
     return;
   }
 
+  const request: AppLoadRequest<ChildProcess.ChildProcess> | null =
+    child === null ? null : { backend: child, requestedAtMs: performance.now(), failed: false };
+  if (request !== null) appLoadRequestedFrom.set(contents, request);
   writeDesktopLogHeader(`bootstrap backend app load requested reason=${reason}`);
   markDesktopStartupPhase("desktop.window.app.load-request", `reason=${reason}`);
-  void window.loadURL(backendHttpUrl);
+  void rendererCacheMaintenance.then(() => {
+    if (window.isDestroyed()) return;
+    // Superseded while waiting: the backend failed before serving (its
+    // replacement loads) or a later request took over.
+    if (request !== null && appLoadRequestedFrom.get(contents) !== request) return;
+    void window.loadURL(backendHttpUrl);
+  });
+}
+
+/**
+ * The backend serves the app shell (/, /index.html, /assets/*) as soon as its
+ * port is bound and holds API and WebSocket requests until its router is
+ * attached, so the renderer downloads and parses the boot graph while the
+ * backend finishes starting instead of after it.
+ */
+function loadPackagedBackendAppWindowOnBind(): void {
+  if (isDevelopment) return;
+  const window = mainWindow ?? BrowserWindow.getAllWindows()[0] ?? null;
+  if (window) loadPackagedBackendAppWindow(window, "backend-bound", "bound");
+}
+
+/**
+ * A backend that dies before it serves leaves a window that loaded early on a
+ * dead document. Put such windows back on the boot page; the replacement
+ * backend (or the startup failure dialog) takes over from there.
+ */
+function returnEarlyLoadedWindowsToBootPage(child: ChildProcess.ChildProcess): void {
+  if (isDevelopment) return;
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (window.isDestroyed()) continue;
+    const contents = window.webContents;
+    if (
+      appLoadRequestedFrom.get(contents)?.backend !== child ||
+      appShellUsableContents.has(contents)
+    ) {
+      continue;
+    }
+    appLoadRequestedFrom.delete(contents);
+    writeDesktopLogHeader("backend stopped before serving; window returns to the boot page");
+    loadDesktopBootPage(window);
+  }
 }
 
 function ensureInitialBackendWindowOpen(): void {
@@ -1476,15 +1748,16 @@ function ensureInitialBackendWindowOpen(): void {
       if (window) {
         loadPackagedBackendAppWindow(window, "backend-ready");
       }
+      handleBackendReady();
     })
     .catch((error) => {
       if (isBackendReadinessAborted(error)) {
         return;
       }
+      // Captured stdio already lands in the desktop log; one line is enough.
       writeDesktopLogHeader(
         `bootstrap backend readiness warning message=${formatErrorMessage(error)}`,
       );
-      console.warn("[desktop] backend readiness check timed out during packaged bootstrap", error);
     })
     .finally(() => {
       if (backendInitialWindowOpenInFlight === nextOpen) {
@@ -1504,11 +1777,12 @@ function writeDesktopStreamChunk(
   const buffer = Buffer.isBuffer(chunk)
     ? chunk
     : Buffer.from(String(chunk), typeof chunk === "string" ? encoding : undefined);
-  desktopLogSink.write(`[${logTimestamp()}] [${logScope(streamName)}] `);
-  desktopLogSink.write(buffer);
+  // One batch per chunk: prefix, payload and line end land in a single writev.
+  const parts = [Buffer.from(`[${logTimestamp()}] [${logScope(streamName)}] `), buffer];
   if (buffer.length === 0 || buffer[buffer.length - 1] !== 0x0a) {
-    desktopLogSink.write("\n");
+    parts.push(Buffer.from("\n"));
   }
+  void desktopLogSink.writeBatch(parts);
 }
 
 function installStdIoCapture(): void {
@@ -1526,7 +1800,7 @@ function installStdIoCapture(): void {
       originalWrite: streamName === "stdout" ? originalStdoutWrite : originalStderrWrite,
       capture: (chunk, encoding) => writeDesktopStreamChunk(streamName, chunk, encoding),
       onUnavailable: (error) => {
-        desktopLogSink?.write(
+        void desktopLogSink?.write(
           `[${logTimestamp()}] [${logScope("desktop")}] ${streamName} unavailable; continuing with file logging message=${formatErrorMessage(error)}\n`,
         );
       },
@@ -1550,13 +1824,15 @@ function installStdIoCapture(): void {
 function initializePackagedLogging(): void {
   if (!app.isPackaged) return;
   try {
-    desktopLogSink = new RotatingFileSink({
+    // Asynchronous, serialized appends: backend log bursts and console output
+    // must never block Electron's main thread on disk I/O.
+    desktopLogSink = new AsyncRotatingFileSink({
       filePath: Path.join(LOG_DIR, "desktop-main.log"),
       maxBytes: LOG_FILE_MAX_BYTES,
       maxFiles: LOG_FILE_MAX_FILES,
     });
-    backendLogSink = new RotatingFileSink({
-      filePath: Path.join(LOG_DIR, "server-child.log"),
+    backendLogSink = new AsyncRotatingFileSink({
+      filePath: Path.join(LOG_DIR, DESKTOP_BACKEND_LOG_FILE_NAME),
       maxBytes: LOG_FILE_MAX_BYTES,
       maxFiles: LOG_FILE_MAX_FILES,
     });
@@ -1569,15 +1845,23 @@ function initializePackagedLogging(): void {
   }
 }
 
-function captureBackendOutput(child: ChildProcess.ChildProcess): void {
+function captureBackendOutput(
+  child: ChildProcess.ChildProcess,
+  readiness: BackendReadinessTracker,
+  outputTail: BackendOutputTail,
+): void {
   const attachStream = (
     stream: NodeJS.ReadableStream | null | undefined,
     streamName: "stdout" | "stderr",
   ): void => {
     stream?.on("data", (chunk: unknown) => {
       const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), "utf8");
-      backendLogSink?.write(buffer);
-      backendListeningDetector?.push(buffer);
+      void backendLogSink?.write(buffer);
+      // Until the backend serves, its output may explain a failed start.
+      if (!readiness.ready) {
+        readiness.pushOutput(buffer);
+        outputTail.push(buffer);
+      }
       if (isDevelopment || STARTUP_TIMING_STDOUT) {
         process[streamName].write(buffer);
       }
@@ -1627,25 +1911,52 @@ let updateCheckInFlight = false;
 let updateDownloadInFlight = false;
 let updateInstallInFlight = false;
 let updaterConfigured = false;
+let loadedAutoUpdater: AppUpdater | null = null;
+const ensureAutoUpdaterConfigured = lazyAsyncResource(configureAutoUpdater);
+
+/** The updater; only reachable once `updaterConfigured` is true. */
+function requireAutoUpdater(): AppUpdater {
+  if (loadedAutoUpdater === null) throw new Error("The desktop updater is not configured.");
+  return loadedAutoUpdater;
+}
+
+/**
+ * Load electron-updater on first use (~30 ms that startup does not need).
+ * A CommonJS require on purpose: `import()` would go through Node's ESM
+ * interop, whose namespace has no `autoUpdater` (the package defines it with
+ * a getter that the CommonJS export scanner does not detect).
+ */
+function loadElectronUpdater(): typeof import("electron-updater") {
+  return require("electron-updater") as typeof import("electron-updater");
+}
 let updateState: DesktopUpdateState = initialUpdateState();
 let downloadedUpdateFilePath: string | null = null;
 let macCodeSignatureKindCache: MacCodeSignatureKind | null = null;
 
-const desktopSshEnvironmentBridge = new DesktopSshEnvironmentBridge({
-  getMainWindow: () => mainWindow,
-  resolveCliRunner: (): RemoteRycoRunnerOptions => {
-    if (isDevelopment && DEV_REMOTE_SERVER_ENTRY_PATH.length > 0) {
-      return { nodeScriptPath: DEV_REMOTE_SERVER_ENTRY_PATH };
-    }
-    return {
-      packageSpec: resolveRemoteRycoCliPackageSpec({
-        appVersion: app.getVersion(),
-        updateChannel: desktopSettings.updateChannel,
-        isDevelopment,
-      }),
-    };
-  },
-});
+// The SSH bridge (Effect platform, undici, the SSH package) loads on the first
+// SSH request; its IPC channels are registered up front.
+let desktopSshEnvironmentBridge: DesktopSshEnvironmentBridge | null = null;
+
+async function loadDesktopSshEnvironmentBridge(): Promise<DesktopSshEnvironmentBridge> {
+  if (desktopSshEnvironmentBridge !== null) return desktopSshEnvironmentBridge;
+  const ssh = await import("./sshEnvironment.ts");
+  desktopSshEnvironmentBridge ??= new ssh.DesktopSshEnvironmentBridge({
+    getMainWindow: () => mainWindow,
+    resolveCliRunner: (): RemoteRycoRunnerOptions => {
+      if (isDevelopment && DEV_REMOTE_SERVER_ENTRY_PATH.length > 0) {
+        return { nodeScriptPath: DEV_REMOTE_SERVER_ENTRY_PATH };
+      }
+      return {
+        packageSpec: ssh.resolveRemoteRycoCliPackageSpec({
+          appVersion: app.getVersion(),
+          updateChannel: desktopSettings.updateChannel,
+          isDevelopment,
+        }),
+      };
+    },
+  });
+  return desktopSshEnvironmentBridge;
+}
 
 function resolveUpdaterErrorContext(): DesktopUpdateErrorContext {
   if (updateInstallInFlight) return "install";
@@ -1732,7 +2043,7 @@ function resolveAboutCommitHash(): string | null {
 }
 
 function resolveBackendEntry(): string {
-  return Path.join(resolveAppRoot(), "apps/server/dist/bin.mjs");
+  return resolveDesktopBackendEntry(resolveAppRoot());
 }
 
 function resolveBackendCwd(): string {
@@ -1800,6 +2111,7 @@ function handleFatalStartupError(stage: string, error: unknown): void {
     isQuitting = true;
     dialog.showErrorBox("Ryco failed to start", `Stage: ${stage}\n${message}${detail}`);
   }
+  discardEarlyDesktopBackend();
   restoreStdIoCapture?.();
   app.quit();
 }
@@ -1896,6 +2208,7 @@ function handleCheckForUpdatesMenuClick(): void {
 }
 
 async function checkForUpdatesFromMenu(): Promise<void> {
+  await ensureAutoUpdaterConfigured().catch(() => undefined);
   await checkForUpdates("menu");
 
   if (updateState.status === "up-to-date") {
@@ -2024,25 +2337,6 @@ function resolveIconPath(ext: "ico" | "icns" | "png"): string | null {
   return resolveResourcePath(`icon.${ext}`);
 }
 
-/**
- * Resolve the Electron userData directory path.
- *
- * Electron derives the default userData path from `productName` in
- * package.json. We override it to a clean lowercase `ryco` so the
- * directory is shell-friendly and isolated from any other installs
- * (including upstream Ryco) on the same machine.
- */
-function resolveUserDataPath(): string {
-  const appDataBase =
-    process.platform === "win32"
-      ? process.env.APPDATA || Path.join(OS.homedir(), "AppData", "Roaming")
-      : process.platform === "darwin"
-        ? Path.join(OS.homedir(), "Library", "Application Support")
-        : process.env.XDG_CONFIG_HOME || Path.join(OS.homedir(), ".config");
-
-  return Path.join(appDataBase, USER_DATA_DIR_NAME);
-}
-
 function configureAppIdentity(): void {
   app.setName(APP_DISPLAY_NAME);
   const commitHash = resolveAboutCommitHash();
@@ -2059,7 +2353,14 @@ function configureAppIdentity(): void {
   if (process.platform === "linux") {
     (app as LinuxDesktopNamedApp).setDesktopName?.(LINUX_DESKTOP_ENTRY_NAME);
   }
+}
 
+/**
+ * The parts of the app identity that need `ready`: the name again (the macOS
+ * menu bar picks it up only then) and the Dock icon, decoded once per launch.
+ */
+function configureAppIdentityAfterReady(): void {
+  app.setName(APP_DISPLAY_NAME);
   if (process.platform === "darwin" && app.dock) {
     const iconPath = resolveIconPath("png");
     if (iconPath) {
@@ -2071,6 +2372,9 @@ function configureAppIdentity(): void {
 function registerDesktopAuthorizationProtocol(): void {
   const callback = desktopAuthorizationCallbackUri(desktopAuthorizationVariant());
   const scheme = new URL(callback).protocol.slice(0, -1);
+  // Packaged builds declare the scheme in their bundle; only write the
+  // LaunchServices / registry entry when this build is not the handler yet.
+  if (app.isDefaultProtocolClient(scheme)) return;
   app.setAsDefaultProtocolClient(scheme);
 }
 
@@ -2257,6 +2561,7 @@ function createBaseUpdateState(
 }
 
 function applyAutoUpdaterChannel(channel: DesktopUpdateChannel): void {
+  const autoUpdater = requireAutoUpdater();
   autoUpdater.channel = channel;
   autoUpdater.allowPrerelease = channel === "nightly";
   autoUpdater.allowDowngrade = channel === "nightly";
@@ -2293,7 +2598,7 @@ async function checkForUpdates(reason: string): Promise<boolean> {
   console.info(`[desktop-updater] Checking for updates (${reason})...`);
 
   try {
-    await autoUpdater.checkForUpdates();
+    await requireAutoUpdater().checkForUpdates();
     return true;
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
@@ -2317,6 +2622,7 @@ async function downloadAvailableUpdate(): Promise<{
   downloadedUpdateFilePath = null;
   updateDownloadInFlight = true;
   setUpdateState(reduceDesktopUpdateStateOnDownloadStart(updateState));
+  const autoUpdater = requireAutoUpdater();
   autoUpdater.disableDifferentialDownload = isArm64HostRunningIntelBuild(desktopRuntimeInfo);
   console.info("[desktop-updater] Downloading update...");
 
@@ -2477,7 +2783,7 @@ async function installDownloadedUpdate(): Promise<{
     // `quitAndInstall()` only starts the handoff to the updater. The actual
     // install may still fail asynchronously, so keep the action incomplete
     // until we either quit or receive an updater error.
-    autoUpdater.quitAndInstall(true, true);
+    requireAutoUpdater().quitAndInstall(true, true);
     return { accepted: true, completed: false };
   } catch (error: unknown) {
     const message = formatErrorMessage(error);
@@ -2489,7 +2795,20 @@ async function installDownloadedUpdate(): Promise<{
   }
 }
 
-function configureAutoUpdater(): void {
+/**
+ * Load and configure electron-updater. Deferred until after startup (the first
+ * check runs 15 s later anyway); anything that needs it earlier awaits
+ * {@link ensureAutoUpdaterConfigured}.
+ */
+async function configureAutoUpdater(): Promise<void> {
+  const enabled = shouldEnableAutoUpdates();
+  setUpdateState(createBaseUpdateState(desktopSettings.updateChannel, enabled));
+  if (!enabled || isQuitting) {
+    return;
+  }
+  const autoUpdater = loadElectronUpdater().autoUpdater;
+  loadedAutoUpdater = autoUpdater;
+
   const githubToken =
     readEnv("RYCO_DESKTOP_UPDATE_GITHUB_TOKEN")?.trim() || process.env.GH_TOKEN?.trim() || "";
   if (githubToken) {
@@ -2514,11 +2833,6 @@ function configureAutoUpdater(): void {
     });
   }
 
-  const enabled = shouldEnableAutoUpdates();
-  setUpdateState(createBaseUpdateState(desktopSettings.updateChannel, enabled));
-  if (!enabled) {
-    return;
-  }
   updaterConfigured = true;
 
   autoUpdater.autoDownload = false;
@@ -2620,7 +2934,7 @@ function configureAutoUpdater(): void {
   updatePollTimer.unref();
 }
 function scheduleBackendRestart(reason: string): void {
-  if (isQuitting || restartTimer) return;
+  if (isQuitting || restartTimer || backendStartupHalted) return;
 
   const delayMs = backendRestartBackoff.nextDelayMs();
   console.error(`[desktop] backend exited unexpectedly (${reason}); restarting in ${delayMs}ms`);
@@ -2639,17 +2953,228 @@ function resolveDevelopmentBunExecutable(): string {
   return process.platform === "win32" ? "bun.exe" : "bun";
 }
 
+function sanitizeStartupPhaseName(name: string): string {
+  return name.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 64) || "unnamed";
+}
+
+/** Lifecycle frames from one backend child, on the telemetry pipe. */
+function handleBackendFrame(
+  readiness: BackendReadinessTracker,
+  frame: DesktopBackendLifecycleFrame,
+): void {
+  switch (frame.type) {
+    case "startup-phase":
+      markDesktopStartupPhase(
+        `backend.${sanitizeStartupPhaseName(frame.name)}`,
+        `serverMs=${Math.round(frame.ms)}`,
+      );
+      return;
+    case "http-bound":
+      markDesktopStartupPhase("desktop.backend.http-bound", `port=${frame.port}`);
+      if (backendReadiness === readiness && frame.port === backendPort) {
+        loadPackagedBackendAppWindowOnBind();
+      }
+      return;
+    case "startup-ready":
+      markDesktopStartupPhase("desktop.backend.startup-ready");
+      return;
+    case "http-serving":
+      markDesktopStartupPhase("desktop.backend.http-serving", `port=${frame.port}`);
+      readiness.handleFrame(frame);
+      return;
+    case "fatal":
+      writeDesktopLogHeader(
+        `backend fatal startup error code=${sanitizeLogValue(frame.code)} message=${sanitizeLogValue(frame.message)}`,
+      );
+      readiness.handleFrame(frame);
+      return;
+  }
+}
+
+/**
+ * A deterministic start failure: stop restarting and say so in the boot
+ * window instead of spinning the splash screen forever.
+ */
+function haltBackendStartup(child: ChildProcess.ChildProcess, describe: () => string): void {
+  if (isQuitting || backendStartupHalted) return;
+  backendStartupHalted = true;
+  cancelBackendReadinessWait();
+  if (restartTimer) {
+    clearTimeout(restartTimer);
+    restartTimer = null;
+  }
+  // Describe the failure once the child's last output (usually the error
+  // itself) has been read.
+  let shown = false;
+  const show = () => {
+    if (shown) return;
+    shown = true;
+    void showBackendStartupFailure(describe());
+  };
+  child.once("close", show);
+  setTimeout(show, 500).unref();
+}
+
+async function showBackendStartupFailure(detail: string): Promise<void> {
+  const window = mainWindow ?? BrowserWindow.getAllWindows()[0] ?? null;
+  if (window && !window.isDestroyed()) revealWindow(window);
+  for (;;) {
+    const options = {
+      type: "error" as const,
+      title: `${APP_DISPLAY_NAME} could not start`,
+      message: `${APP_DISPLAY_NAME} could not start its local server.`,
+      detail,
+      buttons: ["Retry", "Open Logs", "Quit"],
+      defaultId: 0,
+      cancelId: 2,
+      noLink: true,
+    };
+    const { response } =
+      window && !window.isDestroyed()
+        ? await dialog.showMessageBox(window, options)
+        : await dialog.showMessageBox(options);
+    if (isQuitting) return;
+    if (response === 1) {
+      await shell.openPath(LOG_DIR).catch(() => "");
+      continue;
+    }
+    if (response === 0) {
+      writeDesktopLogHeader("backend start retry requested");
+      backendStartupHalted = false;
+      backendFailurePolicy.reset();
+      backendRestartBackoff.reset();
+      startBackend();
+      return;
+    }
+    app.quit();
+    return;
+  }
+}
+
+function describeBackendStartupFailure(input: {
+  readonly reason: "fatal" | "crash-loop";
+  readonly consecutiveFailures: number;
+  readonly fatal: { readonly code: string; readonly message: string } | null;
+  readonly exitDetails: string;
+  readonly outputLines: ReadonlyArray<string>;
+}): string {
+  const summary =
+    input.fatal !== null
+      ? `${input.fatal.message} (${input.fatal.code})`
+      : input.reason === "fatal"
+        ? `The server stopped with a configuration error (${input.exitDetails}).`
+        : `The server stopped ${input.consecutiveFailures} times in a row before it was ready (${input.exitDetails}).`;
+  const output =
+    input.outputLines.length > 0 ? `\n\nLast output:\n${input.outputLines.join("\n")}` : "";
+  return `${summary}${output}`;
+}
+
+function writeBackendBootstrapEnvelope(
+  child: ChildProcess.ChildProcess,
+  input: {
+    readonly controlToken: string;
+    readonly hubLaunch: DesktopHubConnectorLaunch;
+    readonly tailscaleServe: DesktopTailscaleServeLaunch;
+  },
+): boolean {
+  const bootstrapStream = child.stdio[DESKTOP_BACKEND_BOOTSTRAP_FD];
+  if (
+    !bootstrapStream ||
+    !("write" in bootstrapStream) ||
+    bootstrapStream.destroyed ||
+    child.exitCode !== null ||
+    child.signalCode !== null
+  ) {
+    return false;
+  }
+  const { hubLaunch, tailscaleServe } = input;
+  bootstrapStream.write(
+    `${JSON.stringify({
+      mode: "desktop",
+      noBrowser: true,
+      port: backendPort,
+      rycoHome: BACKEND_BASE_DIR,
+      host: backendBindHost,
+      ...(isDevelopment ? { devUrl: resolveDesktopDevServerUrl() } : {}),
+      desktopBootstrapToken: backendBootstrapToken,
+      desktopTelemetryFd: DESKTOP_BACKEND_TELEMETRY_FD,
+      desktopControlToken: input.controlToken,
+      ...(desktopShellEnvironment === null ? {} : { shellEnvironment: desktopShellEnvironment }),
+      ...(computerUseRuntime ? { computerUseBridge: computerUseRuntime.backendBinding() } : {}),
+      tailscaleServeEnabled: tailscaleServe.enabled,
+      tailscaleServePort: tailscaleServe.port,
+      hubConnectorEnabled: hubLaunch.enabled,
+      ...(hubLaunch.standby ? { hubConnectorStandby: true } : {}),
+      ...(hubLaunch.origin === null ? {} : { hubOrigin: hubLaunch.origin }),
+      ...(hubLaunch.nodeName === null ? {} : { hubNodeName: hubLaunch.nodeName }),
+      hubAllowFileSecretStore: hubLaunch.allowFileSecretStore,
+      ...(backendObservabilitySettings.otlpTracesUrl
+        ? { otlpTracesUrl: backendObservabilitySettings.otlpTracesUrl }
+        : {}),
+      ...(backendObservabilitySettings.otlpMetricsUrl
+        ? { otlpMetricsUrl: backendObservabilitySettings.otlpMetricsUrl }
+        : {}),
+    })}\n`,
+  );
+  bootstrapStream.end();
+  return true;
+}
+
+function launchBackendChild(backendEntry: string): DesktopBackendChild {
+  const nodeRuntime = !isDevelopment;
+  return spawnDesktopBackend({
+    executable: isDevelopment ? resolveDevelopmentBunExecutable() : process.execPath,
+    args: desktopBackendSpawnArgs({
+      backendEntry,
+      nodeRuntime,
+      compileCacheHook:
+        desktopLaunchRecord?.compileCacheDir == null ? null : COMPILE_CACHE_HOOK_PATH,
+    }),
+    // Development intentionally uses the pinned Bun runtime. Besides matching
+    // the repository toolchain, this keeps Bun.secrets keychain custody stable
+    // instead of switching the same dev identity to Electron/keytar at startup.
+    cwd: resolveBackendCwd(),
+    env: backendChildEnv(),
+  });
+}
+
 function startBackend(): void {
-  if (isQuitting || backendProcess) return;
+  if (isQuitting || backendProcess || backendStartupHalted) return;
 
   backendObservabilitySettings = readPersistedBackendObservabilitySettings();
+  // The first backend of a packaged launch is usually already running: the
+  // launch entry started it before this bundle loaded.
+  let early = takeEarlyDesktopBackend();
+  if (early !== null && isEarlyDesktopBackendStale(early, performance.now())) {
+    // It would stop waiting for the envelope before it arrives and boot on
+    // defaults; start a fresh child instead.
+    writeDesktopLogHeader(
+      `early backend replaced; its envelope would arrive too late ageMs=${Math.round(performance.now() - early.spawnedAtMs)}`,
+    );
+    stopDesktopBackendChild(early);
+    early = null;
+  }
   const backendEntry = resolveBackendEntry();
-  if (!FS.existsSync(backendEntry)) {
+  if (early === null && !FS.existsSync(backendEntry)) {
     scheduleBackendRestart(`missing server entry at ${backendEntry}`);
     return;
   }
 
-  markDesktopStartupPhase("desktop.backend.spawn", `port=${backendPort}`);
+  let launched: DesktopBackendChild;
+  if (early !== null) {
+    writeDesktopStartupTimingEntry(
+      desktopStartupTiming.markAt(
+        "desktop.backend.spawn",
+        early.spawnedAtMs,
+        `port=${backendPort} early=1`,
+      ),
+    );
+    launched = early;
+  } else {
+    markDesktopStartupPhase("desktop.backend.spawn", `port=${backendPort}`);
+    launched = launchBackendChild(backendEntry);
+  }
+  const child = launched.child;
   const childControlToken = Crypto.randomBytes(32).toString("base64url");
   backendControlToken = childControlToken;
   const hubLaunch = resolveDesktopHubConnectorLaunch(desktopSettings);
@@ -2657,66 +3182,35 @@ function startBackend(): void {
   backendHubConnectorEnabled = null;
   const tailscaleServe = resolveDesktopTailscaleServeLaunch(desktopSettings);
   backendTailscaleServe = tailscaleServe;
-  const backendExecutable = isDevelopment ? resolveDevelopmentBunExecutable() : process.execPath;
-  const childEnvironment = backendChildEnv();
-  if (isDevelopment) {
-    delete childEnvironment.ELECTRON_RUN_AS_NODE;
-  } else {
-    // In Electron main, process.execPath points to the Electron binary. Run the
-    // packaged child in Node mode so it does not become a GUI app instance.
-    childEnvironment.ELECTRON_RUN_AS_NODE = "1";
-  }
-  const child = ChildProcess.spawn(backendExecutable, [backendEntry, "--bootstrap-fd", "3"], {
-    cwd: resolveBackendCwd(),
-    // Development intentionally uses the pinned Bun runtime. Besides matching
-    // the repository toolchain, this keeps Bun.secrets keychain custody stable
-    // instead of switching the same dev identity to Electron/keytar at startup.
-    env: childEnvironment,
-    stdio: ["ignore", "pipe", "pipe", "pipe", "pipe"],
-  });
-  const telemetryPipe = child.stdio[4];
+
+  const readiness = new BackendReadinessTracker(backendPort);
+  const outputTail = new BackendOutputTail();
+  const telemetryPipe = child.stdio[DESKTOP_BACKEND_TELEMETRY_FD];
   if (telemetryPipe instanceof Duplex) {
-    const stopTelemetry = attachDesktopResourceTelemetry(telemetryPipe);
+    const stopTelemetry = attachDesktopResourceTelemetry(telemetryPipe, (frame) =>
+      handleBackendFrame(readiness, frame),
+    );
     child.once("exit", stopTelemetry);
   }
-  const bootstrapStream = child.stdio[3];
-  if (bootstrapStream && "write" in bootstrapStream) {
-    bootstrapStream.write(
-      `${JSON.stringify({
-        mode: "desktop",
-        noBrowser: true,
-        port: backendPort,
-        rycoHome: BACKEND_BASE_DIR,
-        host: backendBindHost,
-        ...(isDevelopment ? { devUrl: resolveDesktopDevServerUrl() } : {}),
-        desktopBootstrapToken: backendBootstrapToken,
-        desktopTelemetryFd: 4,
-        desktopControlToken: childControlToken,
-        ...(computerUseRuntime ? { computerUseBridge: computerUseRuntime.backendBinding() } : {}),
-        tailscaleServeEnabled: tailscaleServe.enabled,
-        tailscaleServePort: tailscaleServe.port,
-        hubConnectorEnabled: hubLaunch.enabled,
-        ...(hubLaunch.standby ? { hubConnectorStandby: true } : {}),
-        ...(hubLaunch.origin === null ? {} : { hubOrigin: hubLaunch.origin }),
-        ...(hubLaunch.nodeName === null ? {} : { hubNodeName: hubLaunch.nodeName }),
-        hubAllowFileSecretStore: hubLaunch.allowFileSecretStore,
-        ...(backendObservabilitySettings.otlpTracesUrl
-          ? { otlpTracesUrl: backendObservabilitySettings.otlpTracesUrl }
-          : {}),
-        ...(backendObservabilitySettings.otlpMetricsUrl
-          ? { otlpMetricsUrl: backendObservabilitySettings.otlpMetricsUrl }
-          : {}),
-      })}\n`,
-    );
-    bootstrapStream.end();
-  } else {
+  // An early child can have failed before this bundle adopted it; that exit is
+  // handled (and counted) below like any other, not as a missing pipe.
+  const goneBeforeAdoption =
+    launched.spawnError() !== null || child.exitCode !== null || child.signalCode !== null;
+  if (
+    !goneBeforeAdoption &&
+    !writeBackendBootstrapEnvelope(child, {
+      controlToken: childControlToken,
+      hubLaunch,
+      tailscaleServe,
+    })
+  ) {
     if (backendControlToken === childControlToken) backendControlToken = "";
+    expectedBackendExitChildren.add(child);
     child.kill("SIGTERM");
     scheduleBackendRestart("missing desktop bootstrap pipe");
     return;
   }
-  const listeningDetector = new ServerListeningDetector();
-  backendListeningDetector = listeningDetector;
+  backendReadiness = readiness;
   backendProcess = child;
   let backendSessionClosed = false;
   const closeBackendSession = (details: string) => {
@@ -2728,57 +3222,91 @@ function startBackend(): void {
     "START",
     `pid=${child.pid ?? "unknown"} port=${backendPort} cwd=${resolveBackendCwd()}`,
   );
-  captureBackendOutput(child);
+  captureBackendOutput(child, readiness, outputTail);
 
-  child.once("spawn", () => {
-    markDesktopStartupPhase("desktop.backend.spawned", `pid=${child.pid ?? "unknown"}`);
-  });
+  if (early !== null) {
+    markDesktopStartupPhase("desktop.backend.spawned", `pid=${child.pid ?? "unknown"} early=1`);
+  } else {
+    child.once("spawn", () => {
+      markDesktopStartupPhase("desktop.backend.spawned", `pid=${child.pid ?? "unknown"}`);
+    });
+  }
 
-  child.on("error", (error) => {
-    if (backendListeningDetector === listeningDetector) {
-      listeningDetector.fail(error);
-      backendListeningDetector = null;
-    }
+  let childGone = false;
+  const handleChildGone = (exitCode: number | null, details: string) => {
+    if (childGone) return;
+    childGone = true;
+    readiness.fail(new Error(`backend exited before logging readiness (${details})`));
+    if (backendReadiness === readiness) backendReadiness = null;
     const wasExpected = expectedBackendExitChildren.has(child);
     if (backendProcess === child) {
       backendProcess = null;
     }
     if (backendControlToken === childControlToken) backendControlToken = "";
-    closeBackendSession(`pid=${child.pid ?? "unknown"} error=${error.message}`);
-    if (wasExpected) {
+    closeBackendSession(`pid=${child.pid ?? "unknown"} ${details}`);
+    if (isQuitting || wasExpected) return;
+    const reachedReady = backendReadyChild === child;
+    if (!reachedReady) returnEarlyLoadedWindowsToBootPage(child);
+    const decision = backendFailurePolicy.recordExit({
+      reachedReady,
+      exitCode,
+      fatal: readiness.fatal !== null,
+    });
+    if (decision.action === "restart") {
+      scheduleBackendRestart(details);
       return;
     }
-    scheduleBackendRestart(error.message);
-  });
-
-  child.on("exit", (code, signal) => {
-    if (backendListeningDetector === listeningDetector) {
-      listeningDetector.fail(
-        new Error(
-          `backend exited before logging readiness (code=${code ?? "null"} signal=${signal ?? "null"})`,
-        ),
-      );
-      backendListeningDetector = null;
-    }
-    const wasExpected = expectedBackendExitChildren.has(child);
-    if (backendProcess === child) {
-      backendProcess = null;
-    }
-    if (backendControlToken === childControlToken) backendControlToken = "";
-    closeBackendSession(
-      `pid=${child.pid ?? "unknown"} code=${code ?? "null"} signal=${signal ?? "null"}`,
+    writeDesktopLogHeader(
+      `backend start halted reason=${decision.reason} consecutiveFailures=${decision.consecutiveFailures} ${details}`,
     );
-    if (isQuitting || wasExpected) return;
-    const reason = `code=${code ?? "null"} signal=${signal ?? "null"}`;
-    scheduleBackendRestart(reason);
+    haltBackendStartup(child, () =>
+      describeBackendStartupFailure({
+        reason: decision.reason,
+        consecutiveFailures: decision.consecutiveFailures,
+        fatal: readiness.fatal,
+        exitDetails: details,
+        outputLines: outputTail.lines(),
+      }),
+    );
+  };
+
+  // A backend serving another port is unreachable for the renderer; replace it.
+  readiness.promise.catch((error: unknown) => {
+    if (error instanceof BackendPortMismatchError && !childGone) {
+      writeDesktopLogHeader(`backend port mismatch; restarting it message=${error.message}`);
+      child.kill("SIGTERM");
+    }
   });
+  child.on("error", (error) => {
+    handleChildGone(null, `error=${error.message}`);
+  });
+  child.on("exit", (code, signal) => {
+    handleChildGone(code, `code=${code ?? "null"} signal=${signal ?? "null"}`);
+  });
+  // An early child can have failed before this bundle was ready to listen.
+  const earlyError = launched.spawnError();
+  if (earlyError !== null) {
+    handleChildGone(null, `error=${earlyError.message}`);
+  } else if (child.exitCode !== null || child.signalCode !== null) {
+    handleChildGone(
+      child.exitCode,
+      `code=${child.exitCode ?? "null"} signal=${child.signalCode ?? "null"}`,
+    );
+  }
+  if (childGone) {
+    // Nothing to wait for: the restart (or the halt dialog) takes over. Keep
+    // the boot window up meanwhile instead of probing HTTP for a dead child.
+    ensurePackagedBootstrapWindowOpen("backend-bootstrap");
+    return;
+  }
 
   ensureInitialBackendWindowOpen();
 }
 
-async function stopBackendAndWaitForExit(timeoutMs = 5_000): Promise<void> {
+async function stopBackendAndWaitForExit(): Promise<void> {
   cancelBackendReadinessWait();
-  backendListeningDetector = null;
+  backendReadiness = null;
+  discardEarlyDesktopBackend();
   if (restartTimer) {
     clearTimeout(restartTimer);
     restartTimer = null;
@@ -2788,47 +3316,9 @@ async function stopBackendAndWaitForExit(timeoutMs = 5_000): Promise<void> {
   backendProcess = null;
   backendControlToken = "";
   if (!child) return;
-  const backendChild = child;
-  if (backendChild.exitCode !== null || backendChild.signalCode !== null) return;
-  expectedBackendExitChildren.add(backendChild);
-
-  await new Promise<void>((resolve) => {
-    let settled = false;
-    let forceKillTimer: ReturnType<typeof setTimeout> | null = null;
-    let exitTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
-
-    function settle(): void {
-      if (settled) return;
-      settled = true;
-      backendChild.off("exit", onExit);
-      if (forceKillTimer) {
-        clearTimeout(forceKillTimer);
-      }
-      if (exitTimeoutTimer) {
-        clearTimeout(exitTimeoutTimer);
-      }
-      resolve();
-    }
-
-    function onExit(): void {
-      settle();
-    }
-
-    backendChild.once("exit", onExit);
-    backendChild.kill("SIGTERM");
-
-    forceKillTimer = setTimeout(() => {
-      if (backendChild.exitCode === null && backendChild.signalCode === null) {
-        backendChild.kill("SIGKILL");
-      }
-    }, 2_000);
-    forceKillTimer.unref();
-
-    exitTimeoutTimer = setTimeout(() => {
-      settle();
-    }, timeoutMs);
-    exitTimeoutTimer.unref();
-  });
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  expectedBackendExitChildren.add(child);
+  await terminateDesktopBackendChild(child);
 }
 
 /**
@@ -2840,16 +3330,34 @@ let systemResumeForwardingRegistered = false;
 function forwardSystemResumeToRenderers(): void {
   if (systemResumeForwardingRegistered) return;
   systemResumeForwardingRegistered = true;
-  const notify = () => {
-    for (const window of BrowserWindow.getAllWindows()) {
-      if (!window.isDestroyed()) window.webContents.send(SYSTEM_RESUMED_CHANNEL);
-    }
-  };
-  powerMonitor.on("resume", notify);
-  powerMonitor.on("unlock-screen", notify);
+  powerMonitor.on("resume", notifyRenderersToReconnect);
+  powerMonitor.on("unlock-screen", notifyRenderersToReconnect);
+}
+
+/**
+ * Ask every window to re-check its connections now: after a wake, or after a
+ * backend crash restart, open sockets look alive but are dead.
+ */
+function notifyRenderersToReconnect(): void {
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (!window.isDestroyed()) window.webContents.send(SYSTEM_RESUMED_CHANNEL);
+  }
 }
 
 function registerIpcHandlers(): void {
+  ipcMain.removeAllListeners(DESKTOP_STARTUP_MARKS_CHANNEL);
+  ipcMain.on(DESKTOP_STARTUP_MARKS_CHANNEL, (event, raw: unknown) => {
+    if (event.senderFrame !== event.sender.mainFrame) return;
+    const report = parseRendererStartupReport(raw);
+    if (report === null) return;
+    // Every report follows the primary shell becoming usable.
+    appShellUsableContents.add(event.sender);
+    markDesktopStartupPhase(
+      `desktop.window.app.${report.phase}`,
+      formatRendererStartupMarks(report.marks),
+    );
+  });
+
   ipcMain.removeAllListeners(GET_APP_BRANDING_CHANNEL);
   ipcMain.on(GET_APP_BRANDING_CHANNEL, (event) => {
     event.returnValue = desktopAppBranding;
@@ -2997,7 +3505,9 @@ function registerIpcHandlers(): void {
     },
   );
 
-  desktopSshEnvironmentBridge.registerIpcHandlers(ipcMain);
+  registerDeferredIpcHandlers(ipcMain, DESKTOP_SSH_INVOKE_CHANNELS, async (registrar) => {
+    (await loadDesktopSshEnvironmentBridge()).registerIpcHandlers(registrar);
+  });
 
   ipcMain.removeHandler(GET_SERVER_EXPOSURE_STATE_CHANNEL);
   ipcMain.handle(GET_SERVER_EXPOSURE_STATE_CHANNEL, async () => getDesktopServerExposureState());
@@ -3122,6 +3632,7 @@ function registerIpcHandlers(): void {
     // renderer asks about (running turns would stop) via `restartRequired`. A
     // cancelled sign-in or failed credential write never enables or restarts
     // anything.
+    const { shouldEnableDesktopHubConnectorForAccountSetup } = await loadDesktopHubStack();
     if (
       shouldEnableDesktopHubConnectorForAccountSetup({
         hubOrigin: desktopSettings.hubOrigin,
@@ -3168,9 +3679,14 @@ function registerIpcHandlers(): void {
   });
 
   const withDesktopWorkspace = async <A>(
-    operation: (handlers: ReturnType<typeof createDesktopWorkspaceIpcHandlers>) => Promise<A>,
-  ): Promise<A> =>
-    operation(createDesktopWorkspaceIpcHandlers(await ensureDesktopWorkspaceClient()));
+    operation: (
+      handlers: ReturnType<typeof DesktopHubStack.createDesktopWorkspaceIpcHandlers>,
+    ) => Promise<A>,
+  ): Promise<A> => {
+    const client = await ensureDesktopWorkspaceClient();
+    const { createDesktopWorkspaceIpcHandlers } = await loadDesktopHubStack();
+    return operation(createDesktopWorkspaceIpcHandlers(client));
+  };
   for (const channel of [
     DESKTOP_WORKSPACE_IPC.getState,
     DESKTOP_WORKSPACE_IPC.refreshCatalog,
@@ -3248,18 +3764,46 @@ function registerIpcHandlers(): void {
     }
     return raw;
   };
+  let lastWorkspaceActivationFailure: string | null = null;
   ipcMain.handle(DESKTOP_WORKSPACE_IPC.prepareTransport, async (_event, raw: unknown) => ({
     transportId: (await ensureDesktopWorkspaceRelayManager()).prepare(workspaceEnvironmentId(raw)),
   }));
-  ipcMain.handle(DESKTOP_WORKSPACE_IPC.activateTransport, async (_event, raw: unknown) =>
-    (await ensureDesktopWorkspaceRelayManager()).activate(workspaceTransportId(raw)),
+  ipcMain.handle(
+    DESKTOP_WORKSPACE_IPC.activateTransport,
+    async (_event, raw: unknown): Promise<DesktopWorkspaceTransportActivation> => {
+      let transportId: string;
+      try {
+        transportId = workspaceTransportId(raw);
+      } catch {
+        return { ok: false, reason: "invalid-transport" };
+      }
+      try {
+        await (await ensureDesktopWorkspaceRelayManager()).activate(transportId);
+        lastWorkspaceActivationFailure = null;
+        return { ok: true };
+      } catch (error) {
+        // Expected while the relay is unreachable; the transport already
+        // emitted its classified close. Never surface relay details over IPC.
+        // The log keeps one line per distinct cause, not one per retry.
+        const message = sanitizeLogValue(formatErrorMessage(error));
+        if (message !== lastWorkspaceActivationFailure) {
+          lastWorkspaceActivationFailure = message;
+          writeDesktopLogHeader(
+            `desktop workspace transport activation refused message=${message}`,
+          );
+        }
+        return { ok: false, reason: "unavailable" };
+      }
+    },
   );
   ipcMain.on(
     DESKTOP_WORKSPACE_IPC.sendTransport,
     (_event, rawTransportId: unknown, rawData: unknown) => {
+      // A transport exists only once the relay stack has loaded.
       if (
+        loadedDesktopHubStack === null ||
         !(rawData instanceof Uint8Array) ||
-        rawData.byteLength > DESKTOP_WORKSPACE_MAX_RPC_FRAME_BYTES
+        rawData.byteLength > loadedDesktopHubStack.DESKTOP_WORKSPACE_MAX_RPC_FRAME_BYTES
       ) {
         return;
       }
@@ -3619,6 +4163,7 @@ function registerIpcHandlers(): void {
       }
     }
 
+    const { resolveBundledRelayGuidePath } = await import("./bundledGuide.ts");
     const guidePath = resolveBundledRelayGuidePath(rawUrl, event.sender.getURL());
     if (guidePath === null) return false;
     return (await shell.openPath(guidePath)) === "";
@@ -3654,6 +4199,7 @@ function registerIpcHandlers(): void {
     }
 
     applyAutoUpdaterChannel(nextChannel);
+    const autoUpdater = requireAutoUpdater();
     const allowDowngrade = autoUpdater.allowDowngrade;
     // An explicit channel switch should allow the immediate nightly->stable rollback path.
     autoUpdater.allowDowngrade = true;
@@ -3694,6 +4240,7 @@ function registerIpcHandlers(): void {
 
   ipcMain.removeHandler(UPDATE_CHECK_CHANNEL);
   ipcMain.handle(UPDATE_CHECK_CHANNEL, async () => {
+    await ensureAutoUpdaterConfigured().catch(() => undefined);
     if (!updaterConfigured) {
       return {
         checked: false,
@@ -3761,6 +4308,15 @@ nativeTheme.on("updated", syncAllWindowAppearance);
 
 const quitShortcutGuards = new Set<ReturnType<typeof createQuitShortcutGuard>>();
 
+function loadDesktopBootPage(window: BrowserWindow): void {
+  const bootFilePath = resolveDesktopBootFilePath();
+  if (bootFilePath) {
+    void window.loadFile(bootFilePath);
+  } else {
+    void window.loadURL(resolveDesktopBootUrl());
+  }
+}
+
 function createWindow(): BrowserWindow {
   markDesktopStartupPhase("desktop.window.create");
   const window = new BrowserWindow({
@@ -3780,6 +4336,9 @@ function createWindow(): BrowserWindow {
       nodeIntegration: false,
       sandbox: true,
       backgroundThrottling: true,
+      // Produce a code cache on a script's first run instead of its third, so
+      // the launch after an update (every chunk hash changes) is already warm.
+      v8CacheOptions: "bypassHeatCheck",
     },
   });
 
@@ -3800,6 +4359,12 @@ function createWindow(): BrowserWindow {
   });
   window.on("blur", quitGuard.reset);
   window.webContents.on("did-start-navigation", quitGuard.reset);
+  window.webContents.on("did-start-navigation", (details) => {
+    // A new document has to report a usable shell again.
+    if (details.isMainFrame && !details.isSameDocument) {
+      appShellUsableContents.delete(window.webContents);
+    }
+  });
   window.on("closed", () => {
     quitGuard.reset();
     quitShortcutGuards.delete(quitGuard);
@@ -3922,13 +4487,8 @@ function createWindow(): BrowserWindow {
       }, 1000);
     });
   } else {
-    const bootFilePath = resolveDesktopBootFilePath();
     markDesktopStartupPhase("desktop.window.boot.load-request");
-    if (bootFilePath) {
-      void window.loadFile(bootFilePath);
-    } else {
-      void window.loadURL(resolveDesktopBootUrl());
-    }
+    loadDesktopBootPage(window);
     schedulePackagedBootReveal(window);
     window.webContents.on(
       "did-fail-load",
@@ -3939,6 +4499,19 @@ function createWindow(): BrowserWindow {
         writeDesktopLogHeader(
           `packaged renderer load failed code=${errorCode} desc=${errorDescription} url=${validatedURL}`,
         );
+        const request = appLoadRequestedFrom.get(window.webContents);
+        if (
+          request !== undefined &&
+          isMainFrame &&
+          backendHttpUrl.length > 0 &&
+          validatedURL.startsWith(backendHttpUrl)
+        ) {
+          // Let the backend's readiness (or its replacement) load the app
+          // again. The record stays: a backend that dies before serving must
+          // still take this window back to the boot page, and the failed load
+          // usually lands before the child's exit does.
+          request.failed = true;
+        }
         if (
           isMainFrame &&
           backendHttpUrl.length > 0 &&
@@ -3951,10 +4524,16 @@ function createWindow(): BrowserWindow {
         }
       },
     );
+    window.webContents.on("render-process-gone", () => {
+      // A document loaded early is gone; readiness must load the app again
+      // instead of treating the earlier request as still in progress.
+      const request = appLoadRequestedFrom.get(window.webContents);
+      if (request !== undefined) request.failed = true;
+    });
   }
 
   window.on("closed", () => {
-    desktopSshEnvironmentBridge.cancelPendingPasswordPrompts(
+    desktopSshEnvironmentBridge?.cancelPendingPasswordPrompts(
       "SSH authentication was cancelled because the app window closed.",
     );
     if (mainWindow === window) {
@@ -3968,7 +4547,7 @@ function createWindow(): BrowserWindow {
 // Override Electron's userData path before the `ready` event so that
 // Chromium session data uses a filesystem-friendly directory name.
 // Must be called synchronously at the top level — before `app.whenReady()`.
-app.setPath("userData", resolveUserDataPath());
+app.setPath("userData", resolveDesktopUserDataPath({ isDevelopment }));
 
 configureAppIdentity();
 
@@ -3986,7 +4565,13 @@ configureAppIdentity();
  * callback is delivered to the running broker instead of turning the raw
  * callback Electron process into a second hidden primary instance.
  */
-if (!isDesktopAuthorizationCallbackRelay && !app.requestSingleInstanceLock()) {
+// A packaged launch already holds the lock: the launch entry takes it before
+// loading this bundle, so a refused second instance never gets this far.
+if (
+  !isDesktopAuthorizationCallbackRelay &&
+  !app.hasSingleInstanceLock() &&
+  !app.requestSingleInstanceLock()
+) {
   writeDesktopLogHeader("second instance refused; focusing the existing window");
   app.exit(0);
 }
@@ -4024,26 +4609,150 @@ app.on("second-instance", (_event, commandLine, _workingDirectory, additionalDat
   existing.focus();
 });
 
+async function selectDesktopBackendPort(
+  configuredBackendPort: number | undefined,
+): Promise<{ readonly port: number; readonly persistable: boolean }> {
+  if (configuredBackendPort !== undefined) {
+    writeDesktopLogHeader(`using configured backend port port=${configuredBackendPort}`);
+    return { port: configuredBackendPort, persistable: false };
+  }
+  const persistedPort = desktopSettings.backendPort;
+  const hasPriorRendererState = hasPriorDesktopRendererState(app.getPath("userData"));
+  const startPort = resolveDesktopBackendStartPort({ persistedPort, hasPriorRendererState });
+  const port = await resolveDesktopBackendPort({
+    host: DESKTOP_LOOPBACK_HOST,
+    startPort,
+    requiredHosts: DESKTOP_REQUIRED_PORT_PROBE_HOSTS,
+  });
+  writeDesktopLogHeader(
+    `selected backend port via sequential scan startPort=${startPort} port=${port}`,
+  );
+  const persistable = shouldPersistDesktopBackendPort({
+    servedPort: port,
+    preferredPort: startPort,
+    persistedPort,
+    hasPriorRendererState,
+  });
+  if (port !== startPort) {
+    // The renderer origin follows the port: localStorage and caches of the
+    // usual origin are not visible to this launch.
+    writeDesktopLogHeader(
+      persistable
+        ? `warning: default backend port ${startPort} is in use on a fresh install; remembering port ${port}`
+        : `warning: preferred backend port ${startPort} is in use; this launch serves on port ${port} and keeps ${startPort} as the preferred port`,
+    );
+  }
+  return { port, persistable };
+}
+
+async function startDesktopComputerUse(): Promise<void> {
+  try {
+    computerUseRuntime = new DesktopComputerUseRuntime({
+      stateDir: STATE_DIR,
+      auditLogPath: Path.join(
+        BACKEND_BASE_DIR,
+        isDevelopment ? "dev" : "userdata",
+        "computer-audit.jsonl",
+      ),
+      helperPath: Path.join(
+        app.isPackaged ? process.resourcesPath : Path.join(__dirname, "../resources"),
+        `ryco-computer-use-helper${process.platform === "win32" ? ".exe" : ""}`,
+      ),
+      extensionPath: app.isPackaged
+        ? Path.join(process.resourcesPath, "browser-extension")
+        : Path.join(__dirname, "../browser-extension"),
+      getWindow: () => mainWindow,
+      changed: (state) => {
+        if (mainWindow && !mainWindow.isDestroyed())
+          mainWindow.webContents.send("desktop:computer-use:changed", state);
+      },
+    });
+    await computerUseRuntime.start();
+  } catch {
+    computerUseRuntime?.dispose();
+    computerUseRuntime = null;
+    writeDesktopLogHeader("Computer-use bridge unavailable; continuing without desktop control.");
+  }
+}
+
+/**
+ * Drop the renderer's V8 code cache when the app version changed, so entries
+ * for chunks of earlier builds (and earlier origins) stop accumulating. With
+ * `bypassHeatCheck` the next run of each script refills it at once. The HTTP
+ * cache stays: unchanged content-hashed assets remain valid across versions,
+ * and Chromium bounds its size itself.
+ */
+async function pruneRendererCachesOnVersionChange(): Promise<void> {
+  const markerPath = Path.join(app.getPath("userData"), RENDERER_CACHE_VERSION_FILE);
+  const version = app.getVersion();
+  const previous = await FS.promises.readFile(markerPath, "utf8").catch(() => null);
+  if (previous?.trim() === version) return;
+  try {
+    await session.defaultSession.clearCodeCaches({});
+    await FS.promises.writeFile(markerPath, `${version}\n`, "utf8");
+    writeDesktopLogHeader(
+      `renderer code cache cleared for version change from=${sanitizeLogValue(previous?.trim() ?? "unknown")} to=${version}`,
+    );
+  } catch (error) {
+    writeDesktopLogHeader(
+      `renderer cache prune failed message=${sanitizeLogValue(formatErrorMessage(error))}`,
+    );
+  }
+}
+
+/** Never let cache maintenance hold up the first app load for long. */
+function boundedRendererCacheMaintenance(work: Promise<void>, timeoutMs = 1_500): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, timeoutMs);
+    void work.finally(() => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+}
+
+/** Integration that no part of startup waits for. */
+function configureDeferredDesktopIntegration(): void {
+  configureApplicationMenu();
+  try {
+    registerDesktopAuthorizationProtocol();
+  } catch (error) {
+    writeDesktopLogHeader(
+      `authorization protocol registration failed message=${sanitizeLogValue(formatErrorMessage(error))}`,
+    );
+  }
+  setUpdateState(createBaseUpdateState(desktopSettings.updateChannel, shouldEnableAutoUpdates()));
+  setTimeout(() => {
+    void ensureAutoUpdaterConfigured().catch((error: unknown) => {
+      writeDesktopLogHeader(
+        `auto-updater setup failed message=${sanitizeLogValue(formatErrorMessage(error))}`,
+      );
+    });
+  }, AUTO_UPDATE_CONFIGURE_DELAY_MS).unref();
+}
+
 async function bootstrap(): Promise<void> {
   markDesktopStartupPhase("desktop.bootstrap.start");
   warnIfDesktopSettingsUnreadable();
   const configuredBackendPort = resolveConfiguredDesktopBackendPort(readEnv("RYCO_PORT"));
   if (isDevelopment && configuredBackendPort === undefined) {
+    discardEarlyDesktopBackend();
     throw new Error("RYCO_PORT is required in desktop development.");
   }
+  if (app.isPackaged) {
+    rendererCacheMaintenance = boundedRendererCacheMaintenance(
+      pruneRendererCachesOnVersionChange(),
+    );
+  }
 
-  backendPort =
-    configuredBackendPort ??
-    (await resolveDesktopBackendPort({
-      host: DESKTOP_LOOPBACK_HOST,
-      startPort: DEFAULT_DESKTOP_BACKEND_PORT,
-      requiredHosts: DESKTOP_REQUIRED_PORT_PROBE_HOSTS,
-    }));
-  writeDesktopLogHeader(
-    configuredBackendPort === undefined
-      ? `selected backend port via sequential scan startPort=${DEFAULT_DESKTOP_BACKEND_PORT} port=${backendPort}`
-      : `using configured backend port port=${backendPort}`,
-  );
+  // The backend is the critical path. Everything its bootstrap envelope needs
+  // comes first, in parallel; windows, IPC and the rest follow its start.
+  const [selectedPort] = await Promise.all([
+    selectDesktopBackendPort(configuredBackendPort),
+    startDesktopComputerUse(),
+  ]);
+  backendPort = selectedPort.port;
+  backendPortPersistable = selectedPort.persistable;
   backendBootstrapToken = Crypto.randomBytes(24).toString("hex");
   if (desktopSettings.serverExposureMode !== DEFAULT_DESKTOP_SETTINGS.serverExposureMode) {
     writeDesktopLogHeader(
@@ -4067,45 +4776,27 @@ async function bootstrap(): Promise<void> {
     );
   }
 
-  registerIpcHandlers();
-  forwardSystemResumeToRenderers();
-  startDesktopKeepAwake();
-  try {
-    computerUseRuntime = new DesktopComputerUseRuntime({
-      stateDir: STATE_DIR,
-      auditLogPath: Path.join(
-        BACKEND_BASE_DIR,
-        isDevelopment ? "dev" : "userdata",
-        "computer-audit.jsonl",
-      ),
-      helperPath: Path.join(
-        app.isPackaged ? process.resourcesPath : Path.join(__dirname, "../resources"),
-        `ryco-computer-use-helper${process.platform === "win32" ? ".exe" : ""}`,
-      ),
-      extensionPath: app.isPackaged
-        ? Path.join(process.resourcesPath, "browser-extension")
-        : Path.join(__dirname, "../browser-extension"),
-      getWindow: () => mainWindow,
-      changed: (state) => {
-        if (mainWindow && !mainWindow.isDestroyed())
-          mainWindow.webContents.send("desktop:computer-use:changed", state);
-      },
-    });
-    await computerUseRuntime.start();
-    registerComputerUseIpc(computerUseRuntime, () => mainWindow);
-    registerProjectBrowserIpc(computerUseRuntime.embedded, () => mainWindow);
-  } catch {
-    computerUseRuntime?.dispose();
-    computerUseRuntime = null;
-    writeDesktopLogHeader("Computer-use bridge unavailable; continuing without desktop control.");
-  }
-  writeDesktopLogHeader("bootstrap ipc handlers registered");
-  if (!isDevelopment) {
+  const shellEnvironmentCapture = prepareDesktopShellEnvironmentForBackend();
+  if (!isDevelopment && desktopLaunchRecord?.shellEnvironmentApplied !== true) {
+    // A launch without a cached shell environment waits for one before the
+    // envelope (the early backend loads its modules meanwhile); show the boot
+    // window in the meantime.
     ensurePackagedBootstrapWindowOpen("pre-backend-bootstrap");
   }
-  await prepareDesktopShellEnvironmentForBackend();
+  await shellEnvironmentCapture;
   startBackend();
+  prepareDesktopHostedIdentityResume();
   writeDesktopLogHeader("bootstrap backend start requested");
+
+  registerIpcHandlers();
+  if (computerUseRuntime) {
+    registerComputerUseIpc(computerUseRuntime, () => mainWindow);
+    registerProjectBrowserIpc(computerUseRuntime.embedded, () => mainWindow);
+  }
+  forwardSystemResumeToRenderers();
+  startDesktopKeepAwake();
+  writeDesktopLogHeader("bootstrap ipc handlers registered");
+  configureDeferredDesktopIntegration();
 
   if (isDevelopment) {
     ensureDevelopmentInitialWindowOpen();
@@ -4120,6 +4811,7 @@ app.on(
   createQuitCleanupHandler({
     cleanup: () => {
       isQuitting = true;
+      discardEarlyDesktopBackend();
       shellEnvironmentAbortController.abort();
       computerUseRuntime?.dispose();
       desktopKeepAwake?.dispose();
@@ -4134,9 +4826,9 @@ app.on(
       desktopNativeE2eeHandshakeService?.dispose();
       disposeDesktopWorkspaceSubscription?.();
       disposeDesktopWorkspaceSubscription = null;
-      void desktopSshEnvironmentBridge.dispose().catch(() => undefined);
+      void desktopSshEnvironmentBridge?.dispose().catch(() => undefined);
       restoreStdIoCapture?.();
-      return pending;
+      return Promise.resolve(pending).then(() => closeDesktopLogs());
     },
     quit: () => app.quit(),
   }),
@@ -4150,11 +4842,9 @@ app
       return;
     }
     markDesktopStartupPhase("desktop.ready");
-    configureAppIdentity();
-    configureApplicationMenu();
+    configureAppIdentityAfterReady();
+    // Before any window: the boot page may load through the ryco:// scheme.
     registerDesktopProtocol();
-    registerDesktopAuthorizationProtocol();
-    configureAutoUpdater();
     void bootstrap().catch((error) => {
       if (isBackendReadinessAborted(error) && isQuitting) {
         return;
@@ -4192,7 +4882,7 @@ if (process.platform !== "win32") {
     writeDesktopLogHeader("SIGINT received");
     clearUpdatePollTimer();
     cancelBackendReadinessWait();
-    void desktopSshEnvironmentBridge.dispose().catch(() => undefined);
+    void desktopSshEnvironmentBridge?.dispose().catch(() => undefined);
     restoreStdIoCapture?.();
     app.quit();
   });
@@ -4202,7 +4892,7 @@ if (process.platform !== "win32") {
     isQuitting = true;
     writeDesktopLogHeader("SIGTERM received");
     clearUpdatePollTimer();
-    void desktopSshEnvironmentBridge.dispose().catch(() => undefined);
+    void desktopSshEnvironmentBridge?.dispose().catch(() => undefined);
     restoreStdIoCapture?.();
     app.quit();
   });
