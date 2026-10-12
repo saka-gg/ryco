@@ -7,6 +7,7 @@ import {
   indexTurnSteerRejections,
   moveQueuedMessage,
   resolveComposerFollowUpAction,
+  resolveQueuedMessageEditUnavailableReason,
   resolveQueuedMessageSteerEligibility,
   resolveQueuedMessageSteerOutcome,
   type QueuedMessageSteerAttempt,
@@ -189,5 +190,31 @@ describe("resolveQueuedMessageSteerOutcome", () => {
       error: "Not now.",
       deliveryUncertain: false,
     });
+  });
+});
+
+describe("resolveQueuedMessageEditUnavailableReason", () => {
+  const editable = { deliveryStatus: undefined, steering: false, composerHasContent: false };
+
+  it("allows editing an idle queued message, a failed send included", () => {
+    expect(resolveQueuedMessageEditUnavailableReason(editable)).toBeNull();
+    expect(
+      resolveQueuedMessageEditUnavailableReason({ ...editable, deliveryStatus: "failed" }),
+    ).toBeNull();
+  });
+
+  it("refuses while the message is being sent or steered", () => {
+    expect(
+      resolveQueuedMessageEditUnavailableReason({ ...editable, deliveryStatus: "sending" }),
+    ).toBe("This message is being sent.");
+    expect(resolveQueuedMessageEditUnavailableReason({ ...editable, steering: true })).toBe(
+      "This message is being steered into the active turn.",
+    );
+  });
+
+  it("refuses while the composer holds content, so nothing typed is discarded", () => {
+    expect(
+      resolveQueuedMessageEditUnavailableReason({ ...editable, composerHasContent: true }),
+    ).toBe("Clear the composer to edit a queued message.");
   });
 });

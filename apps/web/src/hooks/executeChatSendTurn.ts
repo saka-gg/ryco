@@ -245,6 +245,56 @@ export function removeOptimisticUserMessage(
   });
 }
 
+export type ComposerContentRefs = Pick<
+  SendTurnRollbackRefs,
+  "promptRef" | "composerImagesRef" | "composerTerminalContextsRef"
+>;
+
+export function composerRefsHaveContent(refs: ComposerContentRefs): boolean {
+  return (
+    refs.promptRef.current.length !== 0 ||
+    refs.composerImagesRef.current.length !== 0 ||
+    refs.composerTerminalContextsRef.current.length !== 0
+  );
+}
+
+/**
+ * Puts a prompt, its attachments and terminal contexts back into the composer
+ * and parks the cursor at the end. Shared by the send rollback and by editing a
+ * queued message. Callers check `composerRefsHaveContent` first: this replaces
+ * the composer's content, so it must only run into an empty composer.
+ */
+export function restoreComposerContent(input: {
+  refs: ComposerContentRefs;
+  composerHandle: SendTurnReadComposer;
+  draft: Pick<
+    SendTurnComposerDraftDeps,
+    | "composerDraftTarget"
+    | "setComposerDraftPrompt"
+    | "addComposerDraftImages"
+    | "setComposerDraftTerminalContexts"
+  >;
+  prompt: string;
+  images: ComposerImageAttachment[];
+  terminalContexts: TerminalContextDraft[];
+}): void {
+  const { refs, composerHandle, draft, prompt, images, terminalContexts } = input;
+
+  refs.promptRef.current = prompt;
+  refs.composerImagesRef.current = images;
+  refs.composerTerminalContextsRef.current = terminalContexts;
+
+  draft.setComposerDraftPrompt(draft.composerDraftTarget, prompt);
+  draft.addComposerDraftImages(draft.composerDraftTarget, images);
+  draft.setComposerDraftTerminalContexts(draft.composerDraftTarget, terminalContexts);
+
+  composerHandle.readComposer()?.resetCursorState({
+    cursor: collapseExpandedComposerCursor(prompt, prompt.length),
+    prompt,
+    detectTrigger: true,
+  });
+}
+
 export function rollbackSendTurn(input: {
   refs: SendTurnRollbackRefs;
   composerHandle: SendTurnReadComposer;
@@ -266,29 +316,20 @@ export function rollbackSendTurn(input: {
     terminalContextsSnapshot,
   } = input;
 
-  if (
-    refs.promptRef.current.length !== 0 ||
-    refs.composerImagesRef.current.length !== 0 ||
-    refs.composerTerminalContextsRef.current.length !== 0
-  ) {
+  if (composerRefsHaveContent(refs)) {
     return;
   }
 
   removeOptimisticUserMessage(dispatch.setOptimisticUserMessages, messageId);
 
-  refs.promptRef.current = promptSnapshot;
-  const retryImages = imagesSnapshot.map(cloneComposerImageForRetry);
-  refs.composerImagesRef.current = retryImages;
-  refs.composerTerminalContextsRef.current = terminalContextsSnapshot;
-
-  draft.setComposerDraftPrompt(draft.composerDraftTarget, promptSnapshot);
-  draft.addComposerDraftImages(draft.composerDraftTarget, retryImages);
-  draft.setComposerDraftTerminalContexts(draft.composerDraftTarget, terminalContextsSnapshot);
-
-  composerHandle.readComposer()?.resetCursorState({
-    cursor: collapseExpandedComposerCursor(promptSnapshot, promptSnapshot.length),
+  restoreComposerContent({
+    refs,
+    composerHandle,
+    draft,
     prompt: promptSnapshot,
-    detectTrigger: true,
+    // The send revoked the live previews; give the retry its own blob URLs.
+    images: imagesSnapshot.map(cloneComposerImageForRetry),
+    terminalContexts: terminalContextsSnapshot,
   });
 }
 

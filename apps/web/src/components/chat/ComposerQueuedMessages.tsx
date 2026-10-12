@@ -4,6 +4,7 @@ import {
   ChevronUpIcon,
   CornerDownLeftIcon,
   LoaderCircleIcon,
+  PencilIcon,
   XIcon,
 } from "lucide-react";
 
@@ -18,6 +19,9 @@ interface ComposerQueuedMessagesProps {
   hold?: QueueHold | null | undefined;
   onResume?: (() => void) | undefined;
   onRemove: (id: string) => void;
+  /** Pulls the message back into the composer for editing; it leaves the queue. */
+  onEdit: (id: string) => void;
+  getEditUnavailableReason: (message: QueuedMessage) => string | null;
   onRetry?: ((id: string) => void) | undefined;
   onMove: (id: string, direction: "up" | "down") => void;
   showSteerAction: boolean;
@@ -34,13 +38,15 @@ const iconButtonClass = cn(
 
 /**
  * Compact list of messages queued while a turn is running. Each row can be
- * reordered or removed before it auto-sends on quiescence.
+ * edited, reordered or removed before it auto-sends on quiescence.
  */
 export const ComposerQueuedMessages = memo(function ComposerQueuedMessages({
   messages,
   hold = null,
   onResume,
   onRemove,
+  onEdit,
+  getEditUnavailableReason,
   onMove,
   onRetry,
   showSteerAction,
@@ -90,6 +96,7 @@ export const ComposerQueuedMessages = memo(function ComposerQueuedMessages({
           // Include position + summary so screen readers can tell rows apart.
           const rowLabel = `queued message ${index + 1} of ${messages.length}: ${summary}`;
           const steerUnavailableReason = getSteerUnavailableReason(message);
+          const editUnavailableReason = getEditUnavailableReason(message);
           const isSteering = steeringIds.includes(message.id);
           const isSending = message.deliveryStatus === "sending";
           return (
@@ -128,6 +135,16 @@ export const ComposerQueuedMessages = memo(function ComposerQueuedMessages({
                   Steer
                 </button>
               ) : null}
+              <button
+                type="button"
+                className={iconButtonClass}
+                disabled={editUnavailableReason !== null}
+                onClick={() => onEdit(message.id)}
+                aria-label={`Edit ${rowLabel}`}
+                title={editUnavailableReason ?? "Edit this message in the composer"}
+              >
+                <PencilIcon className="size-3.5" />
+              </button>
               <button
                 type="button"
                 className={iconButtonClass}

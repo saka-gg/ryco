@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useImperativeHandle, useRef, useState, type Ref } from "react";
 import { useKeyboardState } from "react-native-keyboard-controller";
 import type { ModelSelection, RuntimeMode, ProviderInteractionMode } from "@ryco/contracts";
 import type { ModelPickerModel } from "./modelPickerModel";
@@ -26,7 +26,16 @@ import { PendingContextHandoffChip, PendingForkHandoffChip } from "./PendingCont
 // behave like the desktop composer while preserving a compact phone footprint.
 // Attachment state (images + streamed files) lives in the owning screen, which
 // knows the environment/thread context the upload engine needs.
+export interface ThreadComposerHandle {
+  /** The composer holds typed text (attachments live in the owning screen). */
+  readonly hasText: () => boolean;
+  /** Replaces the typed text, e.g. with a queued message pulled back for editing. */
+  readonly setText: (text: string) => void;
+  readonly focus: () => void;
+}
+
 export function ThreadComposer(props: {
+  readonly ref?: Ref<ThreadComposerHandle>;
   // Returns false when the send failed (offline/error) so the composer keeps the
   // user's text; enqueue/dispatch success returns true (or void) and clears it.
   readonly onSend: (
@@ -64,6 +73,16 @@ export function ThreadComposer(props: {
   const safeAreaInsets = useSafeAreaInsets();
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
+  const { ref } = props;
+  useImperativeHandle(
+    ref,
+    () => ({
+      hasText: () => text.trim().length > 0,
+      setText,
+      focus: () => editorRef.current?.focus(),
+    }),
+    [text],
+  );
   const primaryFg = useThemeColor("--color-primary-foreground");
   const iconSubtle = useThemeColor("--color-icon-subtle");
   const iconColor = useThemeColor("--color-icon");

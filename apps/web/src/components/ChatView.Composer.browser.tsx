@@ -2102,6 +2102,45 @@ describe("ChatView Composer (full app)", () => {
     const steerAttempt = () =>
       useMessageQueueStore.getState().steerAttemptsByThreadKey[THREAD_KEY]?.[queuedEntry().id];
 
+    it("edits a queued message back into the composer and takes it out of the queue", async () => {
+      const harness = await mountSteerableRunningThread("queue");
+      try {
+        await submitFollowUp("Fix the failing tests", { invert: false });
+        await waitForComposerText("");
+        const edit = page.getByRole("button", { name: /^Edit queued message/ });
+        await expect.element(edit).toBeEnabled();
+        await edit.click();
+        await vi.waitFor(() =>
+          expect(useMessageQueueStore.getState().queuesByThreadKey[THREAD_KEY] ?? []).toHaveLength(
+            0,
+          ),
+        );
+        await waitForComposerText("Fix the failing tests");
+        expect(harness.steers()).toHaveLength(0);
+      } finally {
+        await harness.cleanup();
+      }
+    });
+
+    it("keeps Edit unavailable while the composer already holds a draft", async () => {
+      const harness = await mountSteerableRunningThread("queue");
+      try {
+        await submitFollowUp("Queued first", { invert: false });
+        await waitForComposerText("");
+        await expect
+          .element(page.getByRole("button", { name: /^Edit queued message/ }))
+          .toBeEnabled();
+        useComposerDraftStore.getState().setPrompt(THREAD_REF, "Still typing");
+        await waitForComposerText("Still typing");
+        await expect
+          .element(page.getByRole("button", { name: /^Edit queued message/ }))
+          .toBeDisabled();
+        expect(useMessageQueueStore.getState().queuesByThreadKey[THREAD_KEY]).toHaveLength(1);
+      } finally {
+        await harness.cleanup();
+      }
+    });
+
     it("steers with Enter in steer mode and shows the row as steering", async () => {
       const harness = await mountSteerableRunningThread("steer");
       try {

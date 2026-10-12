@@ -30,6 +30,9 @@ export function ThreadQueuedMessages(props: {
   /** Retries a message held after a steer the provider may have received. */
   readonly onRetryHeld?: (messageId: string) => void;
   readonly onRemove: (messageId: string) => void;
+  /** Pulls the message back into the composer for editing; it leaves the queue. */
+  readonly onEdit: (messageId: string) => void;
+  readonly getEditUnavailableReason: (message: QueuedThreadMessage) => string | null;
 }) {
   const iconColor = String(useThemeColor("--color-icon"));
   const mutedColor = String(useThemeColor("--color-icon-subtle"));
@@ -64,6 +67,7 @@ export function ThreadQueuedMessages(props: {
       )}
       {props.messages.map((message) => {
         const unavailableReason = props.getSteerUnavailableReason(message);
+        const editUnavailableReason = props.getEditUnavailableReason(message);
         const steering = props.steeringIds.has(message.messageId);
         return (
           <View key={message.messageId} className="flex-row items-center gap-2 py-1">
@@ -113,6 +117,15 @@ export function ThreadQueuedMessages(props: {
               <Text className="text-xs font-ryco-bold text-foreground">
                 {steering ? "Steering…" : "Steer"}
               </Text>
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={editUnavailableReason ?? "Edit queued message"}
+              disabled={editUnavailableReason !== null}
+              onPress={() => props.onEdit(message.messageId)}
+              className="h-9 w-9 items-center justify-center rounded-full active:bg-subtle-strong disabled:opacity-40"
+            >
+              <SymbolView name="pencil" size={15} tintColor={mutedColor} type="monochrome" />
             </Pressable>
             <Pressable
               accessibilityRole="button"
