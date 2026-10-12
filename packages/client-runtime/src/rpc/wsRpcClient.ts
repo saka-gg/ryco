@@ -10,7 +10,7 @@ import {
   ORCHESTRATION_WS_METHODS,
   type OpinionatedPluginCheckInput,
   type OpinionatedPluginInstallInput,
-  type OrchestrationShellStreamItem,
+  type OrchestrationShellSubscriptionItem,
   type OrchestrationThreadHistoryRecoveryMode,
   type OrchestrationThreadStreamItem,
   type OrchestrationThreadWindowStreamItem,
@@ -30,6 +30,7 @@ import { type WsRpcProtocolClient } from "./protocol.ts";
 import { resetWsReconnectBackoff } from "./wsConnectionState.ts";
 import { type SubscriptionFailureKind, WsTransport } from "./wsTransport.ts";
 import type { DeviceRpcClient } from "./deviceRpcClient.ts";
+import { createShellSnapshotAssembler } from "./shellSnapshotAssembly.ts";
 
 type RpcTag = keyof WsRpcProtocolClient & string;
 type RpcMethod<TTag extends RpcTag> = WsRpcProtocolClient[TTag];
@@ -438,8 +439,12 @@ export interface WsRpcClient {
     readonly setThreadHistoryRecovery?: RpcUnaryMethod<
       typeof ORCHESTRATION_WS_METHODS.setThreadHistoryRecovery
     >;
+    /**
+     * Snapshots arrive paged where the server supports it and are delivered
+     * reassembled, as one `snapshot` item, either way.
+     */
     readonly subscribeShell: (
-      listener: (event: OrchestrationShellStreamItem) => void,
+      listener: (event: OrchestrationShellSubscriptionItem) => void,
       options?: ShellSubscriptionOptions,
     ) => () => void;
     readonly subscribeThread: (
@@ -982,18 +987,29 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
         transport.request((client) =>
           client[ORCHESTRATION_WS_METHODS.setThreadHistoryRecovery](input),
         ),
-      subscribeShell: (listener, options) =>
-        transport.subscribe(
-          (client) =>
-            client[ORCHESTRATION_WS_METHODS.subscribeShell]({
+      subscribeShell: (listener, options) => {
+        const assembler = createShellSnapshotAssembler();
+        return transport.subscribe(
+          (client) => {
+            // Every attempt starts a fresh stream; pages never span two.
+            assembler.reset();
+            return client[ORCHESTRATION_WS_METHODS.subscribeShell]({
               ...resumeInput(options),
               ...(options?.threadPriorities === undefined
                 ? {}
                 : { threadPriorities: options.threadPriorities }),
-            }),
-          listener,
+              // Bounded messages: a large shell stays under the relay's
+              // message cap. Older servers ignore this and send one item.
+              snapshotDelivery: "paged",
+            });
+          },
+          (item) => {
+            const delivered = assembler.accept(item);
+            if (delivered !== null) listener(delivered);
+          },
           transportSubscribeOptions(options, ORCHESTRATION_WS_METHODS.subscribeShell),
-        ),
+        );
+      },
       subscribeThread: (input, listener, options) =>
         transport.subscribe(
           (client) =>

@@ -223,7 +223,7 @@ import type {
   OrchestrationReplayEventsPageInput,
   OrchestrationReplayEventsPageResult,
   OrchestrationReplayEventsResult,
-  OrchestrationShellStreamItem,
+  OrchestrationShellSubscriptionItem,
   OrchestrationSubscribeThreadInput,
   OrchestrationThreadStreamItem,
 } from "./orchestration.ts";
@@ -1311,7 +1311,7 @@ export interface EnvironmentApi {
       input: OrchestrationReplayEventsPageInput,
     ) => Promise<OrchestrationReplayEventsPageResult>;
     subscribeShell: (
-      callback: (event: OrchestrationShellStreamItem) => void,
+      callback: (event: OrchestrationShellSubscriptionItem) => void,
       options?: {
         onResubscribe?: () => void;
       },

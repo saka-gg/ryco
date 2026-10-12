@@ -5923,12 +5923,110 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       );
 
       assert.deepEqual(
-        result.map((item) =>
-          item.kind === "snapshot" || item.kind === "resumed" || item.kind === "thread-priorities"
-            ? item.kind
-            : item.sequence,
-        ),
+        result.map((item) => ("sequence" in item ? item.sequence : item.kind)),
         ["snapshot", 11, 12],
+      );
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  const pagedShellThread = (id: string, archivedAt: string | null) => ({
+    id: ThreadId.make(id),
+    projectId: ProjectId.make("project-paged"),
+    title: `Thread ${id}`,
+    modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "fixture" },
+    runtimeMode: "approval-required" as const,
+    interactionMode: "default" as const,
+    branch: null,
+    worktreePath: null,
+    latestTurn: null,
+    goal: null,
+    createdAt: "2026-04-05T00:00:00.000Z",
+    updatedAt: "2026-04-05T00:00:00.000Z",
+    archivedAt,
+    settledOverride: null,
+    settledAt: null,
+    session: null,
+    latestUserMessageAt: null,
+    hasPendingApprovals: false,
+    hasPendingUserInput: false,
+    hasActionableProposedPlan: false,
+  });
+
+  const buildPagedShellApp = Effect.gen(function* () {
+    const livePubSub = yield* PubSub.unbounded<OrchestrationEvent>();
+    yield* buildAppUnderTest({
+      layers: {
+        orchestrationEngine: {
+          readEventsPage: (fromSequenceExclusive) =>
+            Effect.succeed({ events: [], nextSequence: fromSequenceExclusive, hasMore: false }),
+          subscribeDomainEvents: PubSub.subscribe(livePubSub),
+        },
+        projectionSnapshotQuery: {
+          getShellSnapshot: () =>
+            Effect.succeed({
+              snapshotSequence: 7,
+              projects: [],
+              threads: [
+                pagedShellThread("archived-1", "2026-04-04T00:00:00.000Z"),
+                pagedShellThread("live-1", null),
+                pagedShellThread("live-2", null),
+              ],
+              updatedAt: "2026-04-05T00:00:00.000Z",
+            }),
+        },
+      },
+    });
+  });
+
+  it.effect("pages the shell snapshot for a client that asks for it", () =>
+    Effect.gen(function* () {
+      yield* buildPagedShellApp;
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const items = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.subscribeShell]({ snapshotDelivery: "paged" }).pipe(
+            Stream.takeUntil((item) => item.kind === "snapshot-end"),
+            Stream.runCollect,
+            Effect.map((collected) => Array.from(collected)),
+          ),
+        ),
+      );
+
+      assert.equal(items[0]?.kind, "snapshot-begin");
+      const begin = items[0];
+      assertTrue(begin?.kind === "snapshot-begin");
+      assert.equal(begin.snapshotSequence, 7);
+      assert.equal(begin.threadCount, 3);
+      assert.equal(begin.archivedThreadCount, 1);
+      assert.deepEqual(
+        items.flatMap((item) =>
+          item.kind === "snapshot-threads" ? item.threads.map((thread) => thread.id) : [],
+        ),
+        ["live-1", "live-2", "archived-1"],
+      );
+      assert.equal(items.at(-1)?.kind, "snapshot-end");
+      assertTrue(items.every((item) => item.kind !== "snapshot"));
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("sends one snapshot item to a client that does not ask for pages", () =>
+    Effect.gen(function* () {
+      yield* buildPagedShellApp;
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const first = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.subscribeShell]({}).pipe(
+            Stream.take(1),
+            Stream.runCollect,
+            Effect.map((collected) => Array.from(collected)[0]),
+          ),
+        ),
+      );
+
+      assertTrue(first?.kind === "snapshot");
+      assert.deepEqual(
+        first.snapshot.threads.map((thread) => thread.id),
+        ["archived-1", "live-1", "live-2"],
       );
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
@@ -6182,11 +6280,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
       assert.deepEqual(replayPageCursors, [10, 11]);
       assert.deepEqual(
-        result.map((item) =>
-          item.kind === "snapshot" || item.kind === "resumed" || item.kind === "thread-priorities"
-            ? item.kind
-            : item.sequence,
-        ),
+        result.map((item) => ("sequence" in item ? item.sequence : item.kind)),
         ["snapshot", 11, 12],
       );
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
