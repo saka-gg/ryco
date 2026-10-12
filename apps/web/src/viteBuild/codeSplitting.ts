@@ -15,6 +15,12 @@
  *   `@ryco/contracts`) that boot imports only for code the bundler drops: it
  *   now evaluates at boot instead of with its first lazy importer, which those
  *   packages declare to be harmless.
+ * - `boot-vendor`: the installed packages the boot graph imports (React, the
+ *   router, Effect, Base UI; lucide icons keep their own group). They change
+ *   only with dependency upgrades, so an app-only deploy keeps this chunk and
+ *   every lazy chunk that imports nothing else from boot: a boot change used to
+ *   rename 169 of 198 precached files (1.6 MiB zstd per installed browser) and
+ *   now renames 142 (1.1 MiB).
  * - Vendor groups capture modules shared by two or more entries
  *   (`minShareCount: 2`, so no entry chunk loses its own modules) and only
  *   from side-effect-free packages, where loading a module a little early has
@@ -133,8 +139,14 @@ export function isReexportBarrel(code: string): boolean {
 
 /**
  * Whether `moduleId` belongs in the boot group: an application or workspace
- * module (not an installed package) that `bootEntry` reaches through static
- * imports, other than the entry itself (which keeps its `main-*` chunk).
+ * module (not an installed package) that `bootEntry` or one of `bootRoots`
+ * reaches through static imports, other than the entry itself (which keeps its
+ * `main-*` chunk).
+ *
+ * `bootRoots` are lazily imported modules a build always loads before its first
+ * commit anyway (see `HOSTED_BOOT_ROOT_MODULES`): in the boot chunk their
+ * import resolves without a request. Their modules then evaluate with boot
+ * instead of on first import.
  *
  * The walk does not enter installed packages or re-export barrels. Both are
  * tree-shaken per binding: a lazy surface that imports one lucide icon or one
@@ -145,8 +157,10 @@ export function isReexportBarrel(code: string): boolean {
  */
 export function createBootGraphMatcher(
   bootEntry: string,
+  bootRoots: ReadonlyArray<string> = [],
 ): (moduleId: string, context: ModuleGraphContext) => boolean {
   const entryId = normalizeModuleId(bootEntry);
+  const rootIds = bootRoots.map(normalizeModuleId);
   const isWalkable = (id: string) =>
     !id.startsWith("\0") && !id.includes("?") && !/[\\/]node_modules[\\/]/.test(id);
   // One closure per chunking pass: rolldown reuses the module info objects
@@ -159,7 +173,7 @@ export function createBootGraphMatcher(
     if (cached) return cached;
     const closure = new Set<string>();
     const visited = new Set<string>();
-    const queue = [entryId];
+    const queue = [entryId, ...rootIds];
     while (queue.length > 0) {
       const id = queue.pop()!;
       if (visited.has(id)) continue;
@@ -180,8 +194,68 @@ export function createBootGraphMatcher(
   };
 }
 
+/**
+ * Whether `moduleId` is an installed-package module the boot graph imports,
+ * directly or through other package modules: the boot's vendor code, which
+ * changes only with dependency upgrades. Package modules behind a barrel the
+ * boot graph imports are included even when only a lazy chunk uses them; that
+ * moves a little shared vendor code into boot (about 8 KiB compressed), but
+ * nothing evaluates early that the boot did not already evaluate: packages
+ * are side-effect free here and unused modules are tree-shaken.
+ */
+export function createBootVendorMatcher(
+  bootEntry: string,
+  bootRoots: ReadonlyArray<string> = [],
+): (moduleId: string, context: ModuleGraphContext) => boolean {
+  const isBootGraphModule = createBootGraphMatcher(bootEntry, bootRoots);
+  const entryId = normalizeModuleId(bootEntry);
+  const rootIds = new Set(bootRoots.map(normalizeModuleId));
+  const isPackageModule = (id: string) =>
+    !id.startsWith("\0") && !id.includes("?") && /[\\/]node_modules[\\/]/.test(id);
+  const closures = new WeakMap<object, ReadonlySet<string>>();
+  const closureFor = (context: ModuleGraphContext): ReadonlySet<string> => {
+    const entryInfo = context.getModuleInfo(entryId);
+    if (!entryInfo) return new Set();
+    const cached = closures.get(entryInfo);
+    if (cached) return cached;
+    // The package modules the boot group's own modules import…
+    const packageQueue: string[] = [];
+    const appQueue = [entryId, ...rootIds];
+    const visitedApp = new Set<string>();
+    while (appQueue.length > 0) {
+      const id = appQueue.pop()!;
+      if (visitedApp.has(id)) continue;
+      visitedApp.add(id);
+      if (id !== entryId && !rootIds.has(id) && !isBootGraphModule(id, context)) continue;
+      for (const imported of context.getModuleInfo(id)?.importedIds ?? []) {
+        const next = normalizeModuleId(imported);
+        (isPackageModule(next) ? packageQueue : appQueue).push(next);
+      }
+    }
+    // …and every package module those import.
+    const closure = new Set<string>();
+    while (packageQueue.length > 0) {
+      const id = packageQueue.pop()!;
+      if (closure.has(id)) continue;
+      closure.add(id);
+      for (const imported of context.getModuleInfo(id)?.importedIds ?? []) {
+        const next = normalizeModuleId(imported);
+        if (isPackageModule(next)) packageQueue.push(next);
+      }
+    }
+    closures.set(entryInfo, closure);
+    return closure;
+  };
+  return (moduleId, context) => {
+    const id = normalizeModuleId(moduleId);
+    if (!/\.[cm]?[jt]sx?$/.test(id) || isMergeableIconModule(id)) return false;
+    return closureFor(context).has(id);
+  };
+}
+
 /** Group name prefixes; `chunkFileNames` maps their entry-set names to short files. */
 export const MERGED_CHUNK_GROUP_NAMES = [
+  "boot-vendor",
   "boot",
   "icons",
   "vendor",
@@ -190,8 +264,28 @@ export const MERGED_CHUNK_GROUP_NAMES = [
   "shiki-engine",
 ] as const;
 
-export function createWebCodeSplittingOptions(input: { readonly bootEntry: string }) {
-  const isBootGraphModule = createBootGraphMatcher(input.bootEntry);
+/**
+ * Route bodies every app document loads before its first commit: the router
+ * awaits the `/_chat` layout (and, on `/`, the index) before it commits, even
+ * while the signed-out hosted root renders only the sign-in surface. They are
+ * split from the route files so their modules evaluate on first use rather than
+ * at boot, and grouped back into the boot chunk so the import costs no request.
+ * As separate chunks they cost a request round after boot: +0.35 s to the
+ * hosted sign-in at 150 ms / 1.6 Mbps, and about 30 ms (10%) to the standard
+ * shell paint on loopback.
+ */
+export const BOOT_ROOT_MODULES = [
+  "src/components/routeViews/ChatLayoutRouteView.tsx",
+  "src/components/routeViews/ChatIndexRouteView.tsx",
+] as const;
+
+export function createWebCodeSplittingOptions(input: {
+  readonly bootEntry: string;
+  /** Lazily imported modules that join the boot chunk (absolute paths). */
+  readonly bootRoots?: ReadonlyArray<string>;
+}) {
+  const isBootGraphModule = createBootGraphMatcher(input.bootEntry, input.bootRoots);
+  const isBootVendorModule = createBootVendorMatcher(input.bootEntry, input.bootRoots);
   const shared = {
     minShareCount: 2,
     entriesAware: true,
@@ -207,6 +301,14 @@ export function createWebCodeSplittingOptions(input: { readonly bootEntry: strin
         // run before a binding it reads from the other one was initialised.
         // Inside one chunk the bundler keeps module execution order.
         priority: 10,
+      },
+      {
+        // Ahead of `boot`, which would otherwise take these along as its
+        // dependencies. The chunk imports nothing from `boot`, so it runs to
+        // completion first and the ordering hazard above does not apply.
+        name: (moduleId: string, context: ModuleGraphContext) =>
+          isBootVendorModule(moduleId, context) ? "boot-vendor" : null,
+        priority: 11,
       },
       { name: "icons", test: isMergeableIconModule, priority: 5, ...shared },
       { name: "vendor", test: isMergeableVendorModule, priority: 4, ...shared },
